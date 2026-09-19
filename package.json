@@ -1,0 +1,45 @@
+{
+  "name": "bleeploop",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "BleepLoop — instant musical jamming: instrument host (VST + built-in synths) over an RC-505-style 5-track looper.",
+  "packageManager": "pnpm@10.33.0",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "dev": "vite",
+    "dev:asio": "tauri dev --features asio",
+    "dev:wasapi": "tauri dev",
+    "build": "tsc --noEmit && vite build",
+    "build:app": "tauri build --no-bundle --features asio",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "check:boundary": "node scripts/check-boundary.mjs",
+    "lint": "oxlint --deny-warnings src verify scripts",
+    "verify": "node verify/run-all.mjs",
+    "check": "pnpm typecheck && pnpm lint && pnpm check:boundary && pnpm verify",
+    "verify:jam": "node verify/golden-jam.mjs",
+    "prepare": "simple-git-hooks"
+  },
+  "simple-git-hooks": {
+    "pre-push": "pnpm check"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.11.1",
+    "ringbuf.js": "^0.4.0",
+    "solid-js": "^1.9.15",
+    "tone": "^15.1.22"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.11.4",
+    "@types/node": "^25.9.3",
+    "oxlint": "^1.82.0",
+    "playwright": "^1.63.0",
+    "simple-git-hooks": "^2.14.0",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.0",
+    "vite-plugin-solid": "^2.11.14"
+  }
+}

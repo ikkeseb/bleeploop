@@ -1,0 +1,133 @@
+[package]
+name = "app"
+version = "0.1.0"
+description = "BleepLoop — instrument host (native CLAP/VST3 + built-in synths) over an RC-505-style 5-track looper"
+authors = ["ikkeseb"]
+license = "MIT"
+repository = "https://github.com/ikkeseb/bleeploop"
+edition = "2021"
+# Bumped from 1.77.2: clack-host 0.1.0 requires rustc >= 1.85. Dev toolchain is 1.96.
+rust-version = "1.85"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+name = "app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[features]
+# P11.3 (native low-latency monitor): the cpal ASIO backend. OFF by default because it needs a build
+# toolchain the normal dev/build path doesn't: libclang (cpal's asio-sys runs bindgen) + the Steinberg
+# ASIO SDK via the CPAL_ASIO_DIR env var. Build with `--features asio` once that's set up. ASIO drivers
+# are per-device + user-installed (Focusrite/Scarlett ships one), so WASAPI stays the universal default
+# and ASIO is the opt-in low-latency tier — this flag keeps the normal build green without the SDK.
+asio = ["cpal/asio"]
+
+[build-dependencies]
+tauri-build = { version = "2.6.2", features = [] }
+
+[target.'cfg(windows)'.dev-dependencies]
+# Raw in-process CLAP fixture exercising the production host callbacks through the real ABI.
+clap-sys = "=0.5.0"
+
+[dependencies]
+serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+log = "0.4"
+tauri = { version = "2.11.2", features = [] }
+tauri-plugin-log = "2"
+
+# Windows-only deps. The native CLAP host (P9) is inherently Windows-gated: the cross-process
+# audio transport rides WebView2's CreateSharedBuffer/PostSharedBufferToScript, and the dev/build
+# target is Tauri/WebView2. So clack/cpal/rubato/rtrb/walkdir live here too — they're cross-platform
+# crates but we only ever compile + use them on Windows, alongside the WebView2 COM bindings.
+[target.'cfg(windows)'.dependencies]
+# auto-grant WebView2 permissions (Web MIDI) — already transitive via tauri; pinned to the resolved
+# versions so the ICoreWebView2 types unify with Tauri's. Also the P9 shared-buffer transport
+# (ICoreWebView2Environment12::CreateSharedBuffer + ICoreWebView2_17::PostSharedBufferToScript).
+webview2-com = "0.38.2"
+# P9.2 adds Win32_System_Com (CoInitializeEx/CoCreateInstance for the WASAPI device-period query),
+# Win32_Media_Audio (IMMDeviceEnumerator → GetDefaultAudioEndpoint → IAudioClient::GetDevicePeriod),
+# and Win32_System_Threading (AvSetMmThreadCharacteristicsW/AvRevertMmThreadCharacteristics — promote
+# the device-less producer to "Pro Audio" MMCSS ourselves, so cpal's `realtime` feature stays off).
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_Com",
+    # RUST4 scan isolation: put each foreign-plugin child in a kill-on-close Job Object.
+    "Win32_Security",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+    "Win32_Media_Audio",
+    # P10.0 plugin-editor host window: create + pump a top-level Win32 window the plugin embeds into.
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_LibraryLoader",
+] }
+# Pin windows-core to 0.61 to unify the graph. cpal 0.18.1 accepts windows + windows-core in the
+# range ">=0.61,<=0.62"; left alone, cargo greedily picks windows-core 0.62 for cpal's *direct* dep
+# while the windows umbrella unifies to 0.61 (Tauri/webview2-com), so cpal's WASAPI backend sees two
+# windows_core versions and its `implement(IMMNotificationClient)` macro fails to compile. Forcing
+# windows-core 0.61 lines cpal up with Tauri. Tauri can't move to 0.62, so we unify down.
+windows-core = "0.61"
+
+# --- P9: native CLAP host ---
+# clack 0.1.0 is brand-new (single maintainer). Pin EXACT + commit Cargo.lock; clap-sys 0.5 raw FFI
+# is the break-glass. clack-finder is unpublished — directory scanning is hand-rolled with walkdir.
+clack-host       = "=0.1.0"
+# note-ports pulled now (cheap) for P9.3/P9.4 note injection into the instrument input port.
+# "clack-host" is REQUIRED for the host-side audio_ports wrappers (PluginAudioPorts::count/get,
+# AudioPortInfoBuffer) — they live behind `#[cfg(feature = "clack-host")]` in clack-extensions, an
+# implicit feature from its *optional* clack-host dep. Our own clack-host dep does NOT flip it; this
+# feature does (verified against clack-extensions-0.1.0 source: audio_ports.rs gates host/ on it).
+# P10.0 adds "gui" (host-side CLAP gui ext for the floating editor). NOTE: `raw_window_handle_06` is
+# NOT needed for floating — `gui::Window::from_win32_hwnd` is safe + ungated (verified vs the 0.1.0
+# crate source); only embedded would want it. So: just "gui".
+clack-extensions = { version = "=0.1.0", features = ["params", "state", "audio-ports", "note-ports", "clack-host", "gui"] }
+# cpal is the WASAPI device-period query / slaved producer; it must NEVER drive the speakers
+# (single-clock invariant). Its `realtime` feature is just `dep:audio_thread_priority` under the
+# hood (confirmed in cpal 0.18.1's manifest) — not something to carry blindly. We
+# run a device-less RT thread and promote it ourselves via the windows crate
+# (AvSetMmThreadCharacteristicsW, "Pro Audio"), so we take cpal WITHOUT realtime — no extra
+# windows-version surface from audio_thread_priority.
+cpal             = { version = "0.18", default-features = false }
+rtrb             = "0.3.4"                  # wait-free SPSC ring, host side (backs the WebView2 buffer)
+rubato           = "3.0.0"                  # P9.4 producer-side fractional resampler (Async + FixedAsync::Input)
+walkdir          = "2"                      # CLAP-file + VST3-dir scan (no clack-finder)
+# --- P10.1: native VST3 host ---
+# `vst3` 0.3.0 (coupler-rs / Micah Johnston): raw unsafe Steinberg FUnknown bindings. Only runtime
+# dep is `com-scrape-types` (NO windows/windows-core), so it cannot reconflict the pinned 0.61 graph
+# (confirm with `cargo tree -d`). VST3 "COM" is Steinberg's FUnknown ABI, not MS-COM — no apartments.
+vst3             = "0.3"
+
+# --- RT-loop perf for a prod-realistic `tauri dev` by-ear ---
+# opt-level=3 on EVERY dependency so the DEBUG RT audio loop runs near release speed: rubato's
+# sinc-resampling + its num-*/realfft/rustfft math deps, cpal, the clack/vst3 host glue, and rtrb.
+# This deliberately does NOT optimize our own `app`/`app_lib` crate — it stays at the profile default
+# (opt-level=0) so editing app code keeps compiling fast. Cost is a longer ONE-TIME cold dependency
+# build; incremental app rebuilds (the real dev loop) are unaffected. Together with the native-rate
+# default (LF_FORCE_48K off, in plugin_host.rs) this is what makes a `tauri dev` by-ear trustworthy
+# vs a true release build — the 2026-06-17 ASIO "crackling" hunt showed dev-build by-ear was untrustworthy.
+[profile.dev.package."*"]
+opt-level = 3
+
+# --- cpal ASIO timestamp overflow workaround (P11.3 / ASIO-default) ---
+# cpal 0.18.1 (latest) extends ASIO's per-callback `system_time` into a monotonic 64-bit clock in
+# `host/asio/stream.rs::to_stream_instant`. Its wrap-detector assumes `system_time` is the same
+# `timeGetTime()` millisecond clock as `now()`. The Focusrite ASIO driver delivers a `system_time`
+# that is NOT monotonic on that clock, so `ns < prev` fires almost every callback → `epoch_ns`
+# accumulates a full 49.7-day span each time → u64 add overflows within ~25 s. In a debug build
+# (overflow-checks on) that PANICS and aborts the stream (STATUS_STACK_BUFFER_OVERRUN); in release it
+# wraps silently. We never use that absolute epoch as a clock. Output latency uses the SAME callback's
+# playback-minus-callback delta: cpal adds its reported delay AFTER epoch conversion, and StreamInstant
+# subtraction uses u128 arithmetic. The delta survives the u64 epoch wrap. Disable overflow-checks for
+# cpal ONLY (keeps them on for
+# our own sample/frame arithmetic) so `tauri dev --features asio` stops crashing; mirror it on release
+# so an env that turns release overflow-checks on can never reintroduce the abort. Upstream-report
+# candidate: `to_stream_instant` should only believe a wrap when `prev` is near the ms-counter max.
+[profile.dev.package.cpal]
+# opt-level restated here so cpal is optimized even if cargo treats a package-specific override as
+# fully replacing the "*" glob above (rather than merging per-field).
+opt-level = 3
+overflow-checks = false
+
+[profile.release.package.cpal]
+overflow-checks = false

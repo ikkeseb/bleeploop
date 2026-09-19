@@ -1,0 +1,171 @@
+/* Help / shortcuts popover — Orbit V2 (W7). Same floating dark-glass card as AudioSettings, anchored
+   top-right under the command-bar help cap (see .settings-popover in app.css). Keys render as flat
+   glass cap chips (sharps a shade darker, like black keys); the drum pads as a 4-column grid mirroring
+   the on-screen 4×4. Colour is rationed to state — chrome stays monochrome. */
+.help {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: 332px;
+  max-height: min(72vh, 560px);
+  overflow-y: auto;
+  padding: 15px;
+  border-radius: 14px;
+  /* near-opaque dark glass (the popover floats over the busy lanes — see audio-settings.css) */
+  background: var(--panel);
+  backdrop-filter: blur(16px) saturate(1.1);
+  border: 1px solid var(--glass-edge);
+  box-shadow: 0 20px 48px -14px rgba(0, 0, 0, 0.72), 0 4px 14px -8px rgba(0, 0, 0, 0.55);
+  scrollbar-width: thin;
+  scrollbar-color: var(--glass-edge) transparent;
+}
+.help::-webkit-scrollbar {
+  width: 8px;
+}
+.help::-webkit-scrollbar-thumb {
+  background: var(--glass-edge);
+  border-radius: 999px;
+}
+
+/* panel title — mono eyebrow */
+.help__title {
+  font-family: var(--mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.2em;
+  color: var(--dim);
+  font-weight: 600;
+}
+
+.help__sec {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.help__h {
+  margin: 0;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text);
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+}
+.help__tag {
+  font-family: var(--mono);
+  font-size: 8.5px;
+  font-weight: 400;
+  text-transform: uppercase;
+  letter-spacing: 0.16em;
+  color: var(--dim);
+}
+
+/* ---- a flat glass key cap ---- */
+.help__kbd {
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  color: var(--text);
+  min-width: 18px;
+  height: 20px;
+  padding: 0 6px;
+  display: inline-grid;
+  place-items: center;
+  border-radius: 6px;
+  background: var(--glass-2);
+  border: 1px solid var(--glass-edge);
+}
+
+/* ---- play-key rows: key cap + its note ---- */
+.help__keyrow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+.help__chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.help__chip--sharp .help__kbd {
+  /* sharps read a shade darker, like the black keys */
+  background: rgba(3, 4, 8, 0.6);
+  color: var(--dim);
+}
+.help__note {
+  font-family: var(--mono);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  color: var(--dim);
+}
+
+.help__inline {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.help__sub {
+  margin: 0;
+  font-size: 10px;
+  color: var(--dim);
+  line-height: 1.45;
+}
+
+/* ---- drum pad grid (4 columns, mirrors the on-screen 4×4) ---- */
+.help__pads {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 5px;
+}
+.help__pad {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  padding: 4px 5px;
+  border-radius: 7px;
+  background: var(--well);
+  border: 1px solid var(--glass-2);
+}
+.help__padname {
+  font-size: 9px;
+  color: var(--dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.help__list {
+  margin: 0;
+  padding-left: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.help__list li {
+  font-size: 10px;
+  color: var(--dim);
+  line-height: 1.45;
+}
+
+/* "About this build" (ASIO builds only). The logo is Steinberg artwork: sized, never restyled. */
+.help__about {
+  margin: 0 0 8px;
+  font-size: 10px;
+  color: var(--dim);
+  line-height: 1.45;
+}
+.help__asio {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 9px;
+  color: var(--dim);
+  line-height: 1.4;
+}
+.help__asio-logo {
+  width: 48px;
+  height: auto;
+  flex: none;
+}

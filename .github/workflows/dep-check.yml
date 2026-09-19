@@ -1,0 +1,62 @@
+name: dep-check
+
+# Weekly DRIFT VISIBILITY for a deliberately bleeding-edge stack (TS 6, Vite 8/rolldown, Node-25 types,
+# clack-host =0.1.0 single-maintainer, …). The goal is to SEE drift, not auto-bump it — so this is a
+# fail-never report: it lists outdated JS + Rust deps in the run summary and never blocks anything. No
+# renovate/dependabot (too noisy for a single-dev repo). Bumps stay a manual, by-ear call.
+
+on:
+  schedule:
+    - cron: '0 6 * * 1' # every Monday 06:00 UTC
+  workflow_dispatch: {} # allow a manual run from the Actions tab
+
+# Least privilege: nothing here writes to the repo.
+permissions:
+  contents: read
+
+jobs:
+  outdated:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # pnpm outdated exits non-zero when anything is outdated — that is the normal, expected state here, so
+      # `|| true` keeps the report green. The table lands in the job summary (Actions run → Summary).
+      - name: JS deps (pnpm outdated)
+        shell: bash
+        run: |
+          {
+            echo '## JS deps — pnpm outdated'
+            echo '```'
+            pnpm outdated || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: src-tauri
+
+      # cargo update --dry-run reports what WOULD change without touching Cargo.lock. Its progress lines go
+      # to stderr, so fold 2>&1 into the summary block.
+      - name: Rust deps (cargo update --dry-run)
+        shell: bash
+        working-directory: src-tauri
+        run: |
+          {
+            echo '## Rust deps — cargo update --dry-run'
+            echo '```'
+            cargo update --dry-run 2>&1 || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

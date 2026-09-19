@@ -1,0 +1,40 @@
+name: rust-test
+
+# The Rust unit tests (transport / clap / native_io / scan — pure logic, no device, no ASIO SDK).
+# Separate from `ci` because `cargo test` builds the full debug profile: ~15 min on the Windows runner
+# whether or not the cache is warm, against ~2 min for the two `cargo check`s. So it runs only when the
+# Rust tree changes (plus on demand), and never delays a TS-only push.
+
+on:
+  push:
+    branches: [main]
+    paths: ['src-tauri/**', '.github/workflows/rust-test.yml']
+  pull_request:
+    branches: [main]
+    paths: ['src-tauri/**', '.github/workflows/rust-test.yml']
+  workflow_dispatch: {}
+
+# Least privilege: nothing here writes to the repo.
+permissions:
+  contents: read
+
+concurrency:
+  group: rust-test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      # No `--features asio` here — build-exe.yml owns the ASIO build (see ci.yml).
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: src-tauri
+
+      - run: cargo test --no-default-features
+        working-directory: src-tauri

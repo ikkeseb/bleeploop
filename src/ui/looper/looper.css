@@ -1,0 +1,587 @@
+/* Looper UI — Orbit V2 · Lanes. Five full-width horizontal LANES stacked in the looper zone.
+   Aesthetic spec: docs/inspiration/revamp-2026-07/orbit-v2-lanes.html (approved). Dark glass
+   surfaces; colour is state — the per-lane `--sc` token drives the identity word, the core ring/glow
+   and a soft left-edge bleed. The waveform canvas is coloured independently by waveform.ts (global
+   --rec/--dub/--play tokens); the audio engine + state machine are UNCHANGED. Everything is scoped
+   under .lp. */
+
+.lp {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  position: relative;
+  padding: 1px 1px 0; /* hairline so the lanes' active glow/rings aren't clipped by the zone edge */
+  overflow: hidden; /* keep lane glows contained to the looper zone (the parent .zone also clips) */
+}
+
+/* zero-specificity reset (:where, 0,0,0) so every single-class lane button rule below wins over it.
+   A bare `.lp button` (0,1,1) would beat those and re-inherit the UA font/colour; and background:none
+   kills the UA dark-mode button face that otherwise bleeds through pills which only restyle the border. */
+:where(.lp button) {
+  appearance: none;
+  -webkit-appearance: none;
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+}
+
+/* ============ THE LANE STACK ============
+   A container context (size) so the core button can size to the lanes-area HEIGHT (cqh) — it shrinks
+   when the stage splitter makes the looper zone short, exactly like the old deck's ring did. */
+.lp__lanes {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: clamp(6px, 1vh, 10px);
+  container-type: size;
+  container-name: lp;
+  overflow-y: auto;
+  scrollbar-width: thin;
+}
+
+/* ============ ONE LANE ============ */
+.lp-lane {
+  flex: 1 1 0;
+  min-height: calc(55px + 2 * clamp(6px, 1vh, 9px));
+  display: flex;
+  align-items: stretch;
+  gap: clamp(9px, 1vw, 14px);
+  padding: clamp(6px, 1vh, 9px) clamp(10px, 1vw, 14px);
+  border-radius: 16px;
+  background: var(--glass);
+  border: 1px solid var(--glass-edge);
+  position: relative;
+  overflow: hidden;
+  --sc: var(--faint);
+  transition: border-color 0.2s, background 0.2s;
+}
+.lp-lane[data-state='play'] { --sc: var(--play); }
+.lp-lane[data-state='rec'] { --sc: var(--rec); }
+.lp-lane[data-state='dub'] { --sc: var(--dub); }
+.lp-lane[data-state='armed'] { --sc: var(--dub); }
+.lp-lane[data-state='listening'] { --sc: var(--cyan); }
+.lp-lane[data-state='stop'] { --sc: #6b7387; }
+/* MUTED take (playing or stopped): the lane goes grey — state colour, ring, left-edge bleed and the
+   waveform (waveform.ts dims it) all drop, so a silent lane is never mistaken for a sounding one from
+   across the room. A live capture (rec/dub) keeps its colour even while muted: the take is being made. */
+.lp-lane[data-muted][data-state='play'],
+.lp-lane[data-muted][data-state='stop'] {
+  --sc: #6b7387;
+}
+.lp-lane[data-muted][data-state='play']::before {
+  display: none;
+}
+.lp-lane[data-muted][data-state='play'] .lp-core::before {
+  opacity: 0.35;
+}
+.lp-lane[data-muted][data-state='play'] .lp-lane__num {
+  color: var(--dim);
+}
+.lp-lane.is-stopping .lp-lane__state,
+.lp-lane.is-stopping .lp-pb--play,
+.lp-lane.is-stopping .lp-lane__wellmsg {
+  color: var(--dub);
+}
+.lp-lane.is-stopping .lp-pb--play {
+  border-color: var(--dub);
+}
+.lp-lane.is-stopping .lp-lane__wellmsg {
+  inset: 50% auto auto 50%;
+  transform: translate(-50%, -50%);
+  width: max-content;
+  max-width: calc(100% - 16px);
+  padding: 6px 10px;
+  border: 1px solid var(--glass-edge);
+  border-radius: 6px;
+  background: var(--bg);
+  letter-spacing: 0.16em;
+}
+
+/* Keyboard/MIDI-selected lane — a quiet cyan edge so "which track will Space/Enter hit" is glanceable
+   without competing with the state colour (--sc). Taste-gated: tune weight / swap to a left rail. */
+.lp-lane.is-selected {
+  border-color: color-mix(in srgb, var(--cyan) 40%, var(--glass-edge));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--cyan) 22%, transparent);
+}
+
+/* a whisper of state colour bleeding in from the left edge — flair, not flood */
+.lp-lane::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 34%;
+  pointer-events: none;
+  background: radial-gradient(80% 120% at -10% 50%, color-mix(in srgb, var(--sc) 10%, transparent), transparent 70%);
+}
+.lp-lane[data-state='empty']::before,
+.lp-lane[data-state='stop']::before {
+  display: none;
+}
+.lp-lane[data-state='empty'] {
+  border-style: dashed;
+  background: var(--glass); /* was transparent (pure black bg, which read as a black void) — now the same grey glass card as the top panel + active lanes; the dashed border + EMPTY word keep the empty cue */
+  /* W8 legibility (grey-on-grey): the "EMPTY" state word rides --sc, so nudge it a step off pure
+     --faint toward --dim here — reads clearly while staying well below a live state word's bright colour. */
+  --sc: color-mix(in srgb, var(--dim) 45%, var(--faint));
+}
+
+/* ---- left cluster: identity + core + play-stop/clear pair ---- */
+.lp-lane__left {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: clamp(9px, 1vw, 13px);
+  width: clamp(196px, 19vw, 236px);
+  position: relative;
+  z-index: 1;
+}
+.lp-lane__idbox {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 66px;
+}
+.lp-lane__num {
+  font-family: var(--mono);
+  font-size: clamp(17px, 1.5vw, 21px);
+  font-weight: 800;
+  line-height: 1;
+  color: var(--dim);
+}
+.lp-lane[data-state='play'] .lp-lane__num,
+.lp-lane[data-state='rec'] .lp-lane__num,
+.lp-lane[data-state='dub'] .lp-lane__num,
+.lp-lane[data-state='armed'] .lp-lane__num,
+.lp-lane[data-state='listening'] .lp-lane__num {
+  color: var(--text);
+}
+.lp-lane__state {
+  font-family: var(--mono);
+  font-size: 8px;
+  letter-spacing: 0.22em;
+  font-weight: 700;
+  color: var(--sc);
+  white-space: nowrap;
+}
+.lp-lane[data-state='rec'] .lp-lane__state,
+.lp-lane[data-state='armed'] .lp-lane__state,
+.lp-lane[data-state='listening'] .lp-lane__state {
+  text-shadow: 0 0 9px var(--sc);
+}
+
+/* the CORE — the REC/DUB gesture, ringed + glowing by state */
+.lp-core {
+  flex: 0 0 auto;
+  width: clamp(38px, 8.5cqh, 52px);
+  height: clamp(38px, 8.5cqh, 52px);
+  border-radius: 999px;
+  display: grid;
+  place-items: center;
+  color: var(--text);
+  background: radial-gradient(circle at 50% 35%, #191d2b, #0a0c15);
+  border: 1px solid var(--glass-edge);
+  box-shadow: 0 4px 16px -6px rgba(0, 0, 0, 0.8), inset 0 1px 0 rgba(200, 215, 255, 0.1);
+  position: relative;
+  cursor: pointer;
+  transition: border-color 0.15s, box-shadow 0.2s, transform 0.12s;
+}
+.lp-core:hover:not(:disabled) {
+  border-color: var(--dim);
+  transform: scale(1.03);
+}
+.lp-core:active:not(:disabled) {
+  transform: translateY(1px) scale(0.99);
+}
+.lp-core:focus-visible {
+  outline-offset: 3px;
+}
+.lp-core:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.lp-core svg {
+  width: 38%;
+  height: 38%;
+  position: relative;
+}
+/* the state ring hugging the cap */
+.lp-core::before {
+  content: '';
+  position: absolute;
+  inset: -5px;
+  border-radius: 999px;
+  border: 1.5px solid var(--sc);
+  opacity: 0;
+  transition: opacity 0.2s;
+}
+.lp-lane[data-state='play'] .lp-core::before,
+.lp-lane[data-state='rec'] .lp-core::before,
+.lp-lane[data-state='dub'] .lp-core::before {
+  opacity: 0.8;
+}
+.lp-lane[data-state='rec'] .lp-core {
+  color: var(--rec);
+  border-color: color-mix(in srgb, var(--rec) 55%, transparent);
+  box-shadow: 0 0 22px -6px var(--rec), inset 0 0 12px -7px var(--rec);
+}
+.lp-lane[data-state='dub'] .lp-core {
+  color: var(--dub);
+  border-color: color-mix(in srgb, var(--dub) 55%, transparent);
+  box-shadow: 0 0 22px -6px var(--dub), inset 0 0 12px -7px var(--dub);
+}
+.lp-lane[data-state='empty'] .lp-core {
+  color: var(--rec); /* the bright ● invites the first take */
+}
+/* ARMED (waiting for the downbeat — my design; not in the mockup): an amber DASHED ring, pulsing,
+   + an amber ● glyph. Distinct from live REC (red, solid ring, ■) and OVERDUB (amber, solid ring, ■). */
+.lp-lane[data-state='armed'] .lp-core {
+  color: var(--dub);
+  border-color: color-mix(in srgb, var(--dub) 45%, transparent);
+  box-shadow: 0 0 16px -8px var(--dub), inset 0 0 10px -8px var(--dub);
+}
+.lp-lane[data-state='armed'] .lp-core::before {
+  opacity: 0.9;
+  border-style: dashed;
+  animation: lp-armed-ring 1.4s ease-in-out infinite;
+}
+.lp-lane[data-state='listening'] .lp-core {
+  color: var(--cyan);
+  border-color: color-mix(in srgb, var(--cyan) 45%, transparent);
+  box-shadow: 0 0 16px -8px var(--cyan), inset 0 0 10px -8px var(--cyan);
+}
+.lp-lane[data-state='listening'] .lp-core::before {
+  opacity: 0.9;
+  border-style: dashed;
+  animation: lp-armed-ring 1.4s ease-in-out infinite;
+}
+@keyframes lp-armed-ring {
+  0%,
+  100% {
+    opacity: 0.4;
+  }
+  50% {
+    opacity: 0.95;
+  }
+}
+
+/* play-stop + clear, stacked */
+.lp-lane__pair {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+/* ---- pill button (STOP/PLAY/CLR + FX/MUTE/undo/reverse) ---- */
+.lp-pb {
+  height: clamp(20px, 4.2cqh, 24px);
+  min-width: 58px;
+  padding: 0 10px;
+  border: 1px solid var(--glass-edge);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--dim);
+  font-family: var(--mono);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  display: grid;
+  place-items: center;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s, box-shadow 0.15s;
+}
+.lp-pb:hover:not(:disabled) {
+  color: var(--text);
+  border-color: var(--dim);
+}
+.lp-pb:disabled {
+  opacity: 0.32;
+  cursor: not-allowed;
+}
+/* W8 legibility: an EMPTY lane's disabled PLAY/CLR/FX/MUTE pills were grey-on-grey — lift them a step
+   so they still read as controls. Still clearly disabled (~half), empty still reads quieter than active.
+   ONE multiplier per element, deliberately: these values used to COMPOUND with an opacity on the right
+   cluster (.lp-lane__right 0.7 × 0.5 = 0.35 effective), so tuning either knob moved the other cluster's
+   result too and only one of the two was documented — which is why three rounds of tuning kept missing.
+   Every value below is now the FINAL rendered alpha. */
+.lp-lane[data-state='empty'] .lp-pb:disabled {
+  opacity: 0.5; /* left cluster: PLAY / CLR */
+}
+.lp-lane[data-state='empty'] .lp-lane__right .lp-pb:disabled {
+  opacity: 0.35; /* right cluster: FX / MUTE (was 0.7 × 0.5) */
+}
+/* engaged (FX / MUTE / reverse) reads cyan = engaged/selection (the Orbit idiom, per the mockup) */
+.lp-pb.is-on {
+  color: var(--cyan);
+  border-color: color-mix(in srgb, var(--cyan) 50%, transparent);
+  box-shadow: inset 0 0 10px -7px var(--cyan);
+}
+.lp-pb--play:not(:disabled):hover {
+  color: var(--play);
+  border-color: color-mix(in srgb, var(--play) 45%, transparent);
+}
+/* CLR armed → SURE?: amber warn (a take is irreversible) */
+.lp-pb--clr.is-armed,
+.lp-pb--clr.is-armed:hover {
+  color: var(--text);
+  border-color: var(--dub);
+  background: color-mix(in srgb, var(--dub) 22%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--dub) 55%, transparent);
+}
+
+/* ---- the WAVE WELL — recessed canvas surface (waveform + playhead drawn by waveform.ts) ---- */
+.lp-lane__well {
+  flex: 1 1 auto;
+  min-width: 0;
+  position: relative;
+  overflow: hidden;
+  border-radius: 10px;
+  background: var(--well);
+  border: 1px solid var(--glass-edge);
+  box-shadow: inset 0 2px 10px rgba(0, 0, 0, 0.55);
+  z-index: 1;
+}
+.lp-lane__well canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+/* EMPTY / ARMED message centred in the well (over the faint canvas centre line) */
+.lp-lane__wellmsg {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+  padding: 0 8px;
+  text-align: center;
+  font-family: var(--mono);
+  font-size: clamp(8px, 0.9vw, 10px);
+  letter-spacing: 0.3em;
+  color: var(--faint);
+}
+.lp-lane[data-state='armed'] .lp-lane__wellmsg {
+  color: color-mix(in srgb, var(--dub) 70%, var(--faint));
+}
+/* the count-in numeral (first take only): big enough to read from the guitar, in the rec colour it
+   is counting toward; the label under it stays the small mono word */
+.lp-lane__count {
+  display: block;
+  font-size: clamp(26px, 3vw, 40px);
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: 0;
+  margin-bottom: 4px;
+  color: var(--rec);
+  font-variant-numeric: tabular-nums;
+}
+.lp-lane[data-state='listening'] .lp-lane__wellmsg {
+  color: color-mix(in srgb, var(--cyan) 70%, var(--faint));
+}
+
+/* ---- right cluster: FX/MUTE/undo/reverse pills over the horizontal volume slider ---- */
+.lp-lane__right {
+  flex: 0 0 auto;
+  width: clamp(178px, 17vw, 208px);
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 7px;
+  position: relative;
+  z-index: 1;
+}
+/* Empty-lane dimming is applied per element, not on this container — see the .lp-pb:disabled block
+   above for why. The volume fader is the only child of the right cluster that is not a pill, so it
+   carries the cluster's old 0.7 directly. (W8 tuning history 0.35→0.5→0.7: still grey-on-grey at 0.5.) */
+.lp-lane[data-state='empty'] .lp-lane__vol {
+  opacity: 0.7;
+}
+.lp-lane__mods {
+  display: flex;
+  gap: 5px;
+}
+.lp-lane__mods .lp-pb {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 0;
+}
+
+/* horizontal volume slider — native range styled to match the command bar's .transport__volume */
+.lp-lane__vol {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+.lp-vbar-wrap {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+}
+.lp-vbar {
+  position: relative; /* over the absolute unity tick so the thumb reads on top of it */
+  width: 100%;
+  margin: 2px; /* pin the UA default — the unity tick's inset-travel calc below folds this in */
+  height: 16px; /* the drag/keyboard hit area; the visible 3px track is the `.lf-range` skin (app.css) */
+}
+/* unity (0 dB) tick — production volume runs 0..1.5, so unity (1.0) sits at 1/1.5 = 66.7% of travel */
+.lp-vbar__unity {
+  position: absolute;
+  /* the tick positions against .lp-vbar-wrap, but the thumb travels inside the input, which sits
+     2px inset (the pinned margin above). Thumb centre relative to the wrap at fraction f:
+     2px + thumbW/2 + f·(wrapW − 4px − thumbW); at f=2/3 with the 11px thumb (same on -webkit and
+     -moz) that's 66.667% − 2.5px, minus the 1px tick's half-width → −3px. */
+  left: calc(66.667% - 3px);
+  top: 50%;
+  transform: translateY(-50%);
+  width: 1px;
+  height: 11px;
+  background: var(--faint);
+  pointer-events: none;
+}
+.lp-vdb {
+  flex: 0 0 auto;
+  min-width: 52px;
+  text-align: right;
+  font-family: var(--mono);
+  font-size: 9.5px;
+  color: var(--dim);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---- SHORT regime: the splitter shrinks the lanes-area (the container), so these track it ---- */
+@container lp (max-height: 400px) {
+  .lp-lane {
+    min-height: 57px; /* two 20px transport buttons + 5px gap + padding + border */
+    gap: 10px;
+    padding: 5px 10px;
+  }
+}
+@container lp (max-height: 300px) {
+  .lp-lane__state {
+    font-size: 7px;
+  }
+  .lp-vdb {
+    display: none; /* drop the dB read-out when the lanes are very short */
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .lp-lane[data-state='armed'] .lp-core::before,
+  .lp-lane[data-state='listening'] .lp-core::before {
+    animation: none !important;
+  }
+}
+
+/* ---- looper-unavailable warning (crossOriginIsolated false) ---- */
+.lp__unavailable {
+  flex: 0 0 auto;
+  margin: 0 0 8px;
+  padding: 10px 14px;
+  border: 1px solid var(--dub);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--dub) 14%, transparent);
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.lp__unavailable code {
+  font-family: var(--mono);
+  color: var(--dub);
+}
+
+/* ---- the FX drawer: docked directly UNDER its owning lane (the lane's own drawer) ----
+   A glass panel inserted as a flex sibling right after the selected lane, so it reads as that lane's
+   drawer; the five lanes (flex 1 1 0) share the remaining height while it's open. It sizes to its
+   content up to a cap and scrolls internally. FxPanel internals are restyled in W7 — here it's only
+   repositioned + reframed. */
+.lp-drawer {
+  flex: 0 0 auto;
+  min-height: 0;
+  max-height: 46%;
+  display: flex;
+  flex-direction: column;
+  border-radius: 14px;
+  padding: 10px 14px;
+  background: var(--glass);
+  border: 1px solid var(--glass-edge);
+  backdrop-filter: blur(10px);
+  overflow: hidden;
+}
+.lp-drawer__head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-bottom: 8px;
+}
+.lp-drawer__title {
+  font-family: var(--mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  font-weight: 600;
+  color: var(--dim);
+}
+.lp-drawer__close {
+  width: 26px;
+  height: 26px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  border: 1px solid var(--glass-edge);
+  background: transparent;
+  color: var(--dim);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  transition: color 0.12s, border-color 0.12s;
+}
+.lp-drawer__close:hover {
+  color: var(--text);
+  border-color: var(--dim);
+}
+/* the FxPanel fills the drawer body + scrolls; drop its standalone frame (the drawer is the frame) */
+.lp-drawer .fxp {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  background: transparent;
+  box-shadow: none;
+  padding: 0;
+  align-content: flex-start;
+  scrollbar-width: thin;
+  scrollbar-color: var(--glass-edge) transparent;
+}
+.lp-drawer .fxp::-webkit-scrollbar {
+  width: 8px;
+}
+.lp-drawer .fxp::-webkit-scrollbar-thumb {
+  background: var(--glass-edge);
+  border-radius: 999px;
+}
+
+/* Visually-hidden screen-reader status line (see Looper.tsx live region). */
+.lp__sr-status {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+}

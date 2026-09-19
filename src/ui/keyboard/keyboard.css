@@ -1,0 +1,268 @@
+/* Keyboard — Orbit V2 KEY RIBBON. ONE horizontal glass bar (mockup: docs/inspiration/revamp-2026-07/
+   orbit-v2-lanes.html footer.ribbon): left meta (label + octave −/+ + current octave), the keys as slim
+   flat glass cells (white = translucent glass, black = near-black overlays, hover lift, pressed =
+   cyan-tinted fill), right meta (key-row hint + move/hide). The 4×4 GM drum kit restyles to a 16-wide
+   single row of the same glass cells so the ribbon height never jumps on a synth swap. The bar fills its
+   resizable SplitStack pane, so the keys/pads STRETCH vertically when the user drags it taller.
+   Geometry + handlers live in Keyboard.tsx (absolute leftPct/widthPct key layout is unchanged).
+
+   Legibility: meta text (label, octave readout, hint) sits at the --dim floor, never --faint —
+   grey-on-grey is a known weakness, so the ribbon chrome stays readable. */
+.kb {
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+  align-items: stretch;
+  border-radius: 14px;
+  overflow: hidden;
+  background: var(--glass);
+  border: 1px solid var(--glass-edge);
+}
+
+/* left/right meta clusters — flank the keys tray */
+.kb__meta {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 14px;
+}
+
+/* pane label (KEYBOARD / DRUMS) — mono, letterspaced, at the --dim floor */
+.kb__title {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--dim);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+/* key-row hint (right meta) — the real map, mono at the --dim floor */
+.kb__hint {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.18em;
+  color: var(--dim);
+  white-space: nowrap;
+}
+
+/* oct −/+ flat glass caps + a mono base-octave readout */
+.kb__oct {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+/* every styled button declares its own background (no UA dark-mode face bleed) + resets appearance
+   locally — there is no scoped :where() reset for .kb, so each cap is self-contained. */
+.kb__cap {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 24px;
+  height: 24px;
+  border-radius: 7px;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  font: inherit;
+  font-size: 14px;
+  line-height: 1;
+  color: var(--dim);
+  background: var(--glass);
+  border: 1px solid var(--glass-edge);
+  transition: color 0.15s, background 0.15s, border-color 0.15s, transform 0.08s;
+}
+.kb__cap:hover {
+  color: var(--text);
+  background: var(--glass-2);
+  border-color: color-mix(in srgb, var(--cyan) 30%, var(--glass-edge));
+}
+.kb__cap:active {
+  transform: translateY(1px);
+}
+.kb__base {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  color: var(--text);
+  min-width: 26px;
+  text-align: center;
+}
+
+/* move (top<->bottom) + hide controls — smaller caps at the right edge */
+.kb__actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.kb__cap--act {
+  width: 22px;
+  height: 22px;
+  font-size: 12px;
+}
+
+/* --- the KEYS tray — a recessed well the slim glass keys tile across --- */
+.kb__keys {
+  flex: 1 1 auto;
+  min-width: 0;
+  align-self: stretch;
+  position: relative;
+  background: var(--well);
+  border-left: 1px solid var(--glass-edge);
+  border-right: 1px solid var(--glass-edge);
+  overflow: hidden;
+  touch-action: none; /* let Pointer Events own gestures */
+}
+
+.kb__key {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  padding-bottom: 5px;
+  cursor: pointer;
+  user-select: none;
+  box-sizing: border-box;
+}
+
+/* WHITE keys — translucent glass cells, hairline seam on the right. Fill sits WELL above the
+   near-black well (2026-07-05 eye check: at .06 the "light" keys read fully dark) — whites must read
+   light at a glance, with a faint top-lit gradient so the piano geography survives the glass idiom. */
+.kb__key--white {
+  background: linear-gradient(rgba(196, 210, 235, 0.16), rgba(196, 210, 235, 0.22));
+  border-right: 1px solid rgba(10, 12, 20, 0.85);
+  border-radius: 0 0 3px 3px;
+  z-index: 1;
+  transition: background 0.05s, box-shadow 0.05s;
+}
+.kb__key--white:hover {
+  background: linear-gradient(rgba(196, 210, 235, 0.24), rgba(196, 210, 235, 0.3));
+}
+.kb__key--white.kb__key--down {
+  /* pressed = a soft cyan inner glow (matches the drum-pad hit idiom), NOT a hard bottom bar
+     (2026-07-06 eye check: the -2px cyan edge under white keys was rejected) */
+  background: color-mix(in srgb, var(--cyan) 24%, transparent);
+  box-shadow: inset 0 0 14px -6px var(--cyan);
+}
+
+/* BLACK keys — near-black overlay cells sitting proud over the whites */
+.kb__key--black {
+  top: 0;
+  bottom: auto;
+  height: 58%;
+  z-index: 2;
+  background: #04050a;
+  border: 1px solid rgba(0, 0, 0, 0.6);
+  border-top: 0;
+  border-radius: 0 0 3px 3px;
+  box-shadow: 0 2px 5px -1px rgba(0, 0, 0, 0.6);
+  transition: background 0.05s, box-shadow 0.05s;
+}
+.kb__key--black:hover {
+  background: #0b0f18;
+}
+.kb__key--black.kb__key--down {
+  background: color-mix(in srgb, var(--cyan) 30%, #04050a);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--cyan) 55%, transparent),
+    0 0 10px -4px var(--cyan);
+}
+
+/* octave markers (C keys only) — mono at the --dim floor, seated at the key's foot */
+.kb__label {
+  font-family: var(--mono);
+  font-size: 8px;
+  letter-spacing: 0.02em;
+  color: var(--dim);
+  pointer-events: none;
+}
+
+/* --- drum pads (active slot's synth = Drum) — the 4×4 GM kit as ONE 16-wide row of glass cells --- */
+.kb__pads {
+  flex: 1 1 auto;
+  min-width: 0;
+  align-self: stretch;
+  display: grid;
+  grid-template-columns: repeat(16, 1fr);
+  gap: 4px;
+  padding: 5px;
+  background: var(--well);
+  border-left: 1px solid var(--glass-edge);
+  border-right: 1px solid var(--glass-edge);
+  touch-action: none; /* let Pointer Events own gestures */
+}
+.kb__pad {
+  position: relative;
+  min-width: 0;
+  border-radius: 6px;
+  cursor: pointer;
+  overflow: hidden;
+  background: rgba(148, 168, 215, 0.06);
+  border: 1px solid rgba(148, 168, 215, 0.08);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  padding: 4px 2px;
+  user-select: none;
+  transition: background 0.05s, border-color 0.05s, box-shadow 0.05s;
+}
+.kb__pad:hover {
+  background: rgba(148, 168, 215, 0.13);
+}
+/* per-pad status lamp — a small dot that ignites cyan on hit */
+.kb__pad-lamp {
+  position: absolute;
+  top: 5px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 5px;
+  height: 5px;
+  border-radius: 999px;
+  background: rgba(148, 168, 215, 0.22);
+  transition: background 0.05s, box-shadow 0.05s;
+}
+.kb__pad-label {
+  font-family: var(--sans);
+  font-size: clamp(8px, 0.7vw, 10px);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  line-height: 1.1;
+  color: var(--dim);
+  text-align: center;
+  pointer-events: none;
+}
+.kb__pad-key {
+  font-family: var(--mono);
+  font-size: 8px;
+  letter-spacing: 0.04em;
+  color: var(--dim);
+  pointer-events: none;
+}
+/* HIT — cyan-tinted fill + rim + lit lamp (matches the key press idiom) */
+.kb__pad--down {
+  background: color-mix(in srgb, var(--cyan) 20%, transparent);
+  border-color: color-mix(in srgb, var(--cyan) 45%, transparent);
+  box-shadow: inset 0 0 12px -6px var(--cyan);
+}
+.kb__pad--down .kb__pad-lamp {
+  background: var(--cyan);
+  box-shadow: 0 0 8px -1px var(--cyan);
+}
+.kb__pad--down .kb__pad-label {
+  color: var(--text);
+}
+
+/* very short window — drop the octave markers + hint so the ribbon degrades cleanly (the pane's own
+   minPx keeps the splitter above this, but a tiny window can still get here) */
+@media (max-height: 360px) {
+  .kb__label,
+  .kb__hint {
+    display: none;
+  }
+}

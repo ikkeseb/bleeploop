@@ -1,0 +1,95 @@
+/* Resizable N-pane stack. The container is a grid whose track template (rows for vertical, columns for
+   horizontal) is driven inline from SplitStack.tsx; the divider tracks double as the gaps between panes.
+   Each pane hosts exactly one region and lets it fill both axes. */
+.splitstack {
+  flex: 1 1 auto;
+  display: grid;
+  min-height: 0;
+  min-width: 0;
+}
+/* the cross axis is a single full-size track (the inline style owns the main axis) */
+.splitstack--v {
+  grid-template-columns: 1fr;
+  overflow-y: auto;
+  scrollbar-width: thin;
+}
+.splitstack--h {
+  grid-template-rows: 1fr;
+}
+
+.splitstack__pane {
+  display: flex;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+}
+.splitstack__pane > * {
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+}
+
+/* a static, non-interactive gap — sits in the divider track next to an autoSize pane, which has nothing
+   to resize. It keeps the divider-track rhythm (same dpx as a real divider) with no grip/cursor/handle. */
+.splitstack__gap {
+  pointer-events: none;
+}
+
+/* the drag handle — occupies the divider track; a centred grip lights up on hover/drag */
+.splitstack__divider {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  touch-action: none;
+}
+.splitstack--v .splitstack__divider {
+  cursor: row-resize;
+}
+.splitstack--h .splitstack__divider {
+  cursor: col-resize;
+}
+/* focus/drag affordances follow the Orbit "engaged = cyan" idiom (red is reserved for record state) */
+.splitstack__divider:focus-visible {
+  outline: 2px solid var(--cyan);
+  outline-offset: -3px;
+  border-radius: 5px;
+}
+
+.splitstack__grip {
+  background: var(--glass-edge);
+  border-radius: 999px;
+  transition: background-color 0.12s, width 0.12s, height 0.12s;
+}
+.splitstack--v .splitstack__grip {
+  width: 40px;
+  height: 4px;
+}
+.splitstack--h .splitstack__grip {
+  width: 4px;
+  height: 40px;
+}
+.splitstack__divider:hover .splitstack__grip {
+  background: color-mix(in srgb, var(--cyan) 55%, var(--glass-edge));
+}
+.splitstack--dragging .splitstack__grip,
+.splitstack__divider:active .splitstack__grip {
+  background: var(--cyan);
+}
+.splitstack--v.splitstack--dragging .splitstack__grip {
+  width: 56px;
+}
+.splitstack--h.splitstack--dragging .splitstack__grip {
+  height: 56px;
+}
+
+/* while dragging, suppress selection flicker + keep the resize cursor across the whole stack */
+.splitstack--dragging {
+  user-select: none;
+}
+.splitstack--v.splitstack--dragging {
+  cursor: row-resize;
+}
+.splitstack--h.splitstack--dragging {
+  cursor: col-resize;
+}

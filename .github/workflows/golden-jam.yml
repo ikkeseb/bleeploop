@@ -1,0 +1,40 @@
+name: golden-jam
+
+# Shared-runner REVALIDATION of the golden jam (`pnpm verify:jam`), on demand only. The jam drives the
+# real app headless and asserts the recorded grid + dispatcher paths frame by frame. It was dropped
+# from CI twice as flaky on loaded runners (an off-grid overdub, the 128-frame later-track slip); the
+# 2026-09-07 capture fix (absolute render-frame timestamps) removed that mechanism locally, and
+# AGENTS.md asks for a clean-runner proof before the job can come back. This is that proof: no schedule,
+# no retry, never a push gate. Trigger it from the Actions tab or `gh workflow run golden-jam.yml`.
+# Two consecutive green runs on an unloaded runner say the mechanism is gone there; one red run is a
+# machine lead on the capture clock (`verify/capture-clock.mjs`), not a reason to retry until green.
+
+on:
+  workflow_dispatch: {}
+
+# Least privilege: nothing here writes to the repo.
+permissions:
+  contents: read
+
+jobs:
+  jam:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - run: pnpm exec playwright install --with-deps chromium
+
+      # Starts its own vite dev server on 1420 and tears it down; prints one line per check.
+      - run: pnpm verify:jam

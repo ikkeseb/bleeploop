@@ -1,0 +1,596 @@
+:root {
+  /* ===== Orbit V2 token system — dark glass surfaces, colour is state. Most values are copied verbatim
+     from the approved mockup docs/inspiration/revamp-2026-07/orbit-v2-lanes.html. EXCEPTION — three
+     tokens were DELIBERATELY lifted OFF the mockup for legibility (owner's call, 2026-07-05/06, eye-gated
+     over live HMR): --dim (#8e95a8→#bcc3d4) + --faint (#545b6e→#7c8498) for text contrast, and --well
+     (near-black→grey glass) so recessed lanes aren't black voids. Do NOT "restore" the mockup values for
+     those three — the divergence is the fix. The rest is the mockup set; don't re-derive. W8 removed the
+     v6 skeuomorphic material tokens (the --cap- / --strip- / --deck- / --well-bg families) and the
+     old-name migration aliases (--accent, --ok, --warn, --line, --text-dim, --text-faint) now that every
+     component is ported to these tokens. ===== */
+  --bg: #07080d;
+  --glass: rgba(148, 168, 215, 0.045); /* card fill */
+  --glass-2: rgba(148, 168, 215, 0.07); /* hover fill */
+  --panel: rgba(10, 12, 20, 0.9); /* near-opaque floating panel */
+  --glass-edge: rgba(148, 168, 215, 0.11); /* card border */
+  --well: rgba(148, 168, 215, 0.04); /* recessed wave lane — grey glass family (was near-black rgba(3,4,8,.55), which read as a black void); recess now reads via the inset shadow + border, not blackness */
+  --text: #eef1f8;
+  --dim: #bcc3d4; /* INVARIANT: --caret-svg bakes this hex (%23bcc3d4) inline — retune BOTH together */
+  --faint: #7c8498;
+  /* dropdown caret — data-URI can't use var(), so the --dim hex is baked in here. INVARIANT: %23bcc3d4
+     below IS --dim; if --dim is retuned this must be retuned in lockstep or the caret silently drifts. */
+  --caret-svg: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3e%3cpath fill='none' stroke='%23bcc3d4' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.6' d='M3 6l5 5 5-5'/%3e%3c/svg%3e");
+  --rec: #ff4757;
+  --dub: #ffb02e;
+  --play: #2be48a;
+  --cyan: #46d4e8;
+  --violet: #7f6bff;
+
+  --mono: ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo, Consolas, monospace;
+  --sans: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+
+  font-synthesis: none;
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  color: var(--text);
+  /* restrained system-sans (mono is reserved for numerals) — no dependency on Inter being installed. */
+  font-family: var(--sans);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  overflow: hidden;
+  user-select: none;
+  /* three static aurora radial-gradients over --bg (copied verbatim from the Orbit V2 mockup) — a
+     subtle, off-axis glow that shows in the stage padding so the whole app sits on one surface. */
+  background:
+    radial-gradient(80% 60% at 12% -15%, rgba(127, 107, 255, 0.13), transparent 55%),
+    radial-gradient(70% 50% at 90% -12%, rgba(70, 212, 232, 0.08), transparent 50%),
+    radial-gradient(100% 60% at 50% 125%, rgba(43, 228, 138, 0.04), transparent 55%),
+    var(--bg);
+}
+
+/* Keyboard-only focus ring. :focus-visible (not :focus) keeps mouse clicks ring-free while making
+   tab navigation visible — the controls had no focus affordance at all (a WCAG 2.4.7 gap). */
+button:focus-visible,
+input:focus-visible,
+select:focus-visible {
+  outline: 2px solid var(--cyan);
+  outline-offset: 2px;
+}
+
+/* Native <select> popups render with OS-default (often bright-white) chrome. color-scheme:dark makes the
+   open listbox render dark, and a dark option fill matches the dark-glass surface app-wide (the per-control
+   rules — .picker__select etc — layer a themed caret + checked tint on top). */
+select {
+  color-scheme: dark;
+}
+option {
+  background: var(--bg);
+  color: var(--text);
+}
+
+/* Text selection — themed to the new palette. (body is user-select:none, so this shows only in the few
+   selectable inputs; there are no global scrollbar rules to re-palette.) */
+::selection {
+  background: color-mix(in srgb, var(--cyan) 30%, transparent);
+  color: var(--text);
+}
+
+.app {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ---- command bar (Orbit V2) ----
+   ONE glass card holding brand · system lamp · the transport clusters (Transport.tsx) · tool icons.
+   Floats over the aurora background (margin, rounded, 1px --glass-edge). Horizontal margins match the
+   stage padding below so its edges align with the decks. */
+.cmd {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: clamp(10px, 1.2vw, 18px);
+  margin: clamp(10px, 1.3vh, 15px) clamp(16px, 2vw, 28px) 0;
+  padding: 9px 18px;
+  border-radius: 16px;
+  background: var(--glass);
+  border: 1px solid var(--glass-edge);
+  backdrop-filter: blur(10px);
+  min-width: 0;
+}
+/* Two-row arrangement when one row cannot fit — measured and flagged by app/cmd-fit.ts (a media query
+   cannot see the contextual sliders). Row 1 keeps brand · lamp · BPM · loop dial · ALL/MIC · master ·
+   tools; the modes cluster (transport.css) drops to row 2, left-aligned under BPM. The ::after element
+   is the forced line break between the two `order` bands (its own zero-height line, so the row gap
+   counts twice). The narrower rungs stay in transport.css ("Narrow-width ladder"). */
+.cmd--stack {
+  flex-wrap: wrap;
+  row-gap: 3px;
+}
+.cmd--stack::after {
+  content: '';
+  flex-basis: 100%;
+  height: 0;
+  order: 1;
+}
+/* Second rung (also measured by cmd-fit.ts): when row 1 cannot hold the rest even with the modes gone,
+   the tool icons join row 2 at its right edge instead of wrapping onto a third row of their own — the
+   bar never exceeds two rows, so the stage never jumps when the loop readout appears at 960 px. */
+.cmd--stack-tools .tools {
+  order: 3;
+  margin-left: auto;
+}
+@media (max-width: 1040px) {
+  .cmd {
+    gap: 8px;
+    padding-left: 12px;
+    padding-right: 12px;
+  }
+}
+/* zero-specificity reset (:where) so per-component pill rules (.transport__tgl etc., specificity
+   0,1,0) always win over it — a bare `.cmd button` (0,1,1) would beat them and re-inherit font/color.
+   background/border:0 kill the UA dark-mode button face bleeding through pills that only restyle
+   border-color. */
+:where(.cmd button) {
+  appearance: none;
+  -webkit-appearance: none;
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+}
+/* brand — mono letterspaced wordmark + the conic-gradient dot (the logo is approved; copied exact from
+   the mockup). "BLEEP" dim, "LOOP" bright. */
+.brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.24em;
+  white-space: nowrap;
+  color: var(--dim);
+}
+.brand b {
+  color: var(--text);
+  font-weight: 600;
+}
+.brand__dot {
+  width: 11px;
+  height: 11px;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: conic-gradient(
+    var(--rec),
+    var(--dub),
+    var(--play),
+    var(--cyan),
+    var(--violet),
+    var(--rec)
+  );
+  box-shadow: 0 0 10px -2px rgba(127, 107, 255, 0.8);
+}
+
+/* system lamp — the at-a-glance aggregate of host/isolated/plugin/midi (detail in its title + the
+   Audio Settings diagnostics block). Green ok, amber when crossOriginIsolated is false. */
+.cmd__lamp {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: var(--play);
+  box-shadow: 0 0 8px -1px var(--play);
+}
+.cmd__lamp--warn {
+  background: var(--dub);
+  box-shadow: 0 0 8px -1px var(--dub);
+}
+
+/* visually-hidden live region — preserves the plugin-scan role=status announcement now that the
+   topbar chips are gone. */
+.cmd__sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* tools — far right, flat glass icon buttons (mockup .tool) */
+.tools {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto; /* the far-right cluster never yields width — it holds the keyboard restore + help */
+}
+.tool {
+  width: 34px;
+  height: 34px;
+  border: 0;
+  border-radius: 10px;
+  display: grid;
+  place-items: center;
+  color: var(--faint);
+  cursor: pointer;
+  background: none;
+  transition: color 0.15s, transform 0.08s, background 0.15s, box-shadow 0.12s;
+}
+.tool svg {
+  width: 16px;
+  height: 16px;
+  transition: transform 0.35s;
+}
+.tool:hover {
+  color: var(--text);
+  background: var(--glass-2);
+}
+.tool:active {
+  transform: translateY(1px);
+}
+.tool:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+.tool--gear:hover svg {
+  transform: rotate(35deg);
+}
+/* tool engaged (e.g. the keyboard toggle while the keyboard is shown) = cyan + a faint glass fill */
+.tool--on {
+  color: var(--cyan);
+  background: var(--glass-2);
+}
+/* gear open — cyan with a contained inset glow instead of the fill */
+.tool--gear.tool--on {
+  color: var(--cyan);
+  background: none;
+  box-shadow: inset 0 0 12px -6px var(--cyan), 0 0 14px -8px var(--cyan);
+}
+.tool--rescan.scanning svg {
+  animation: lf-spin 0.9s linear infinite;
+}
+@keyframes lf-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .tool--rescan.scanning svg {
+    animation: none;
+  }
+}
+
+/* ---- settings popover ---- */
+/* Full-screen transparent click-catcher: closes the popover on any outside click. The panel itself
+   anchors top-right just below the 48px topbar; AudioSettings.tsx styles the panel body. */
+.settings-popover__backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+}
+.settings-popover {
+  position: absolute;
+  top: 60px;
+  right: clamp(16px, 2vw, 28px);
+}
+
+/* ---- stage + zones (Orbit V2) ----
+   The stage hosts the SplitStack that fills it; the divider tracks are the gaps between zones. Zones are
+   transparent flex columns holding the glass cards (the command bar sits above the stage), so the app
+   reads as one surface on the aurora background — no boxy per-zone frame. */
+.stage {
+  flex: 1 1 auto;
+  display: flex;
+  padding: clamp(8px, 1.2vh, 16px) clamp(16px, 2vw, 28px) clamp(10px, 1.6vh, 18px);
+  min-height: 0;
+  min-width: 0;
+}
+
+.zone {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+  gap: clamp(8px, 1vh, 14px);
+}
+
+.zone__body {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+/* ---- source row (Orbit V2 · W3) — two equal compact glass slot cards side by side (mockup .src).
+   The per-slot width SplitStack is gone; the plugin params drawer expands DOWN as an accordion. When
+   the drawer outgrows the (autoSize-clamped) instrument region, the drawer scrolls INSIDE the card —
+   the card shell (rounded lit top edge, header row) stays anchored, and the looper never moves.
+   (Was a scrolling 2-col grid: scrolling slid the card's decorative top edge under the clip boundary —
+   the "top-sheen drift" — and took the slot header with it. Flex instead of grid because a flex item's
+   max-height:100% resolves against the container's definite height; a grid item's resolves against its
+   auto row track, which is content-sized — circular, so the cap never bit.) ---- */
+.src {
+  display: flex;
+  gap: 14px;
+  align-items: flex-start; /* an expanded drawer doesn't stretch its sibling card */
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto; /* belt only — cards cap at 100%, so this should never engage */
+  scrollbar-width: thin;
+  padding: 1px; /* keep the active glow from clipping against the region edge */
+}
+.slot {
+  flex: 1 1 0; /* two equal columns (the old grid's 1fr 1fr) */
+  max-height: 100%; /* the shell never leaves the region — an overgrown drawer scrolls inside it */
+  min-width: 0;
+  border-radius: 14px;
+  background: var(--glass);
+  border: 1px solid var(--glass-edge);
+  display: flex;
+  flex-direction: column;
+  cursor: pointer;
+  --sc: var(--cyan); /* per-slot state colour — one token, precedence set in JS (live→play-green) */
+  transition: background 0.2s, box-shadow 0.2s, border-color 0.2s;
+}
+.slot:hover {
+  background: var(--glass-2);
+}
+/* ACTIVE = cyan rim + a contained cyan glow (colour = engaged/selection) */
+.slot--active {
+  border-color: color-mix(in srgb, var(--cyan) 40%, var(--glass-edge));
+  box-shadow: 0 0 24px -14px var(--cyan), inset 0 0 24px -20px var(--cyan);
+}
+/* the compact row: identity · source label + name · right cluster */
+.slot__row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 10px 18px;
+  min-width: 0;
+  flex-shrink: 0; /* the header never compresses — only the drawer below it scrolls */
+}
+/* A / B identity — mono, cyan glow when active; also the keyboard/SR activation control */
+.slot__id {
+  flex: 0 0 auto;
+  font-family: var(--mono);
+  font-size: 19px;
+  font-weight: 800;
+  line-height: 1;
+  color: var(--faint);
+  background: none;
+  border: 0;
+  padding: 0 2px;
+  cursor: pointer;
+  transition: color 0.2s, text-shadow 0.2s;
+}
+.slot__id:hover {
+  color: var(--dim);
+}
+.slot--active .slot__id {
+  color: var(--cyan);
+  text-shadow: 0 0 12px color-mix(in srgb, var(--cyan) 60%, transparent);
+}
+.slot__id:focus-visible {
+  outline-offset: 3px;
+  border-radius: 4px;
+}
+.slot__meta {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+.slot__k {
+  font-family: var(--mono);
+  font-size: 8.5px;
+  letter-spacing: 0.26em;
+  text-transform: uppercase;
+  color: var(--faint);
+  white-space: nowrap;
+}
+.slot__name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.slot__name small {
+  font-family: var(--mono);
+  color: var(--dim);
+  font-weight: 400;
+  font-size: 9px;
+  margin-left: 7px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+.slot__acts {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  min-width: 0;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+/* the six synth segment pills */
+.seg {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+/* flat outline toggle pill — the Orbit idiom (mockup .tgl). Engaged = coloured text + border + a faint
+   inset glow. Explicit background so the UA dark-mode button face never bleeds through. */
+.tgl {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.15em;
+  font-weight: 600;
+  padding: 7px 12px;
+  border: 1px solid var(--glass-edge);
+  border-radius: 9px;
+  background: transparent;
+  color: var(--dim);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color 0.15s, border-color 0.15s, box-shadow 0.15s;
+}
+.seg .tgl {
+  padding: 6px 10px;
+}
+.tgl:hover {
+  color: var(--text);
+  border-color: var(--dim);
+}
+.tgl:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.tgl.on {
+  color: var(--cyan);
+  border-color: color-mix(in srgb, var(--cyan) 55%, transparent);
+  box-shadow: 0 0 14px -6px var(--cyan), inset 0 0 10px -7px var(--cyan);
+}
+.tgl.on-green {
+  color: var(--play);
+  border-color: color-mix(in srgb, var(--play) 55%, transparent);
+  box-shadow: 0 0 14px -6px var(--play), inset 0 0 10px -7px var(--play);
+}
+
+/* ---- range sliders — ONE skin ----
+   Every <input type=range> (master / click / auto volume, the lane fader, FX + plugin params) wears
+   `.lf-range`: a 3px flat track with an optional --fill left portion + an 11px round --text cap.
+   Consumers set only width / hit-area height / margin (and drive --fill if they show a filled part).
+   `:where` = zero specificity, so a consumer's own `.x { height }` always wins regardless of CSS order
+   (app.css loads AFTER the component sheets). */
+:where(.lf-range) {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 12px;
+  background: transparent;
+  cursor: pointer;
+  --fill: 0%;
+}
+:where(.lf-range):focus-visible {
+  outline-offset: 3px;
+  border-radius: 4px;
+}
+:where(.lf-range):disabled {
+  cursor: not-allowed;
+}
+:where(.lf-range)::-webkit-slider-runnable-track {
+  height: 3px;
+  border-radius: 999px;
+  background: linear-gradient(to right, var(--dim) var(--fill), rgba(148, 168, 215, 0.15) var(--fill));
+}
+:where(.lf-range)::-moz-range-track {
+  height: 3px;
+  border-radius: 999px;
+  background: rgba(148, 168, 215, 0.15);
+}
+:where(.lf-range)::-moz-range-progress {
+  height: 3px;
+  border-radius: 999px;
+  background: var(--dim);
+}
+:where(.lf-range)::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 11px;
+  height: 11px;
+  margin-top: -4px;
+  border-radius: 999px;
+  background: var(--text);
+  box-shadow: 0 0 8px -2px rgba(238, 241, 248, 0.5);
+}
+:where(.lf-range)::-moz-range-thumb {
+  width: 11px;
+  height: 11px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--text);
+  box-shadow: 0 0 8px -2px rgba(238, 241, 248, 0.5);
+}
+
+/* plugin <select> — a flat glass control (Tauri only). ONE dropdown per slot scales to any plugin
+   count; "— none —" reverts the slot to its synth. Explicit background-color so no UA face shows. */
+.slot__select {
+  flex: 0 1 auto;
+  min-width: 96px;
+  max-width: 190px;
+  height: 30px;
+  appearance: none;
+  -webkit-appearance: none;
+  color-scheme: dark;
+  padding: 0 28px 0 11px;
+  border-radius: 9px;
+  border: 1px solid var(--glass-edge);
+  color: var(--dim);
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  cursor: pointer;
+  background-image: var(--caret-svg);
+  background-color: transparent;
+  background-repeat: no-repeat;
+  background-position: right 9px center;
+  background-size: 12px 12px;
+  transition: color 0.15s, border-color 0.15s, box-shadow 0.15s;
+}
+.slot__select:hover {
+  color: var(--text);
+  border-color: var(--dim);
+}
+.slot__select:focus-visible {
+  outline-offset: 1px;
+}
+.slot__select option {
+  background: #14171d;
+  color: var(--text);
+}
+.slot__select option:checked {
+  background: color-mix(in srgb, var(--cyan) 22%, #14171d);
+  color: #fff;
+}
+/* loaded = a thin cyan rim + a cyan caret, not a fill */
+.slot__select.is-loaded {
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--cyan) 40%, var(--glass-edge));
+  box-shadow: inset 0 0 10px -7px var(--cyan);
+  background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3e%3cpath fill='none' stroke='%2346d4e8' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.6' d='M3 6l5 5 5-5'/%3e%3c/svg%3e");
+}
+
+/* the params drawer (accordion) — a glass sub-panel that expands the slot card downward. Rendered
+   whenever a plugin is loaded (so its subscriptions stay live); open/close is CSS-only, no remount.
+   The drawer is the card's scroll region: when it outgrows the instrument region it scrolls under the
+   pinned header row, keeping the card's top edge anchored. */
+.slot__drawer {
+  display: none;
+}
+.slot__drawer--open {
+  display: block;
+  border-top: 1px solid var(--glass-edge);
+  padding: 12px 18px 14px;
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-width: thin;
+}

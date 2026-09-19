@@ -1,0 +1,4 @@
+# Toolchain pin for reproducible CI + fresh clones. This is the version we build with;
+# the MSRV floor (oldest version the code must still compile on) stays in Cargo.toml's rust-version.
+[toolchain]
+channel = "1.96.0"

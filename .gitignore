@@ -1,0 +1,42 @@
+node_modules
+dist
+dist-ssr
+*.local
+.DS_Store
+*.log
+.playwright-cli/
+.playwright-mcp/
+
+# never-commit: env files, key material, editor/harness dirs, session exports dropped at the root
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+.cursor/
+.vscode/
+.idea/
+/*.zip
+/*.wav
+/session.json
+
+# session verification scratch (playwright probes + screenshots at repo root)
+/probe-*.js
+/*.png
+
+# third-party UI reference images (not ours to redistribute; local only)
+docs/inspiration/archive/
+
+# harness-local agent config — shared guidance lives in AGENTS.md, never in a harness dir
+.claude/
+.codex/
+
+# runtime-gate logs (dev-asio, cargo-check, etc.)
+logs/
+
+# Tauri (src-tauri/ is added in P7)
+src-tauri/target
+src-tauri/gen
+
+# written by build-exe.yml at build time (the GPLv3 source pointer for that exact build)
+licenses/SOURCE.txt

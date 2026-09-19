@@ -1,0 +1,149 @@
+name: build-exe
+
+# The shippable Windows build, made on a clean runner: the NSIS installer plus the bare exe, kept as a
+# run artifact. On demand (Actions tab) and on a `v*` tag push; never on a plain main push (a release
+# build is ~15-20 min of Windows runner). A tag push, or a dispatch with `release_tag` set, also
+# stages a DRAFT GitHub Release - publishing it stays a manual click.
+#
+# Built with `--features asio`: ASIO is the low-latency tier, WASAPI stays selectable in the app. The
+# Steinberg ASIO SDK is dual-licensed (proprietary or GPLv3 - its own LICENSE.txt); this build takes
+# the GPLv3 arm, so the BINARY is GPLv3 while the repo stays MIT. The SDK is fetched from Steinberg at
+# build time and never committed or attached to a release. `tauri.release.conf.json` adds what a
+# GPLv3 binary must carry: the licence page in the installer and the licence texts, third-party
+# notices and a source pointer installed beside the exe. The installer downloads the WebView2
+# runtime when a machine lacks it (Tauri's default `downloadBootstrapper`).
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Stage a draft release under this tag (e.g. v0.1.0). Empty = build only.'
+        required: false
+        default: ''
+
+# Least privilege: only the `release` job below widens this.
+permissions:
+  contents: read
+
+concurrency:
+  group: build-exe-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.release_tag }}
+
+jobs:
+  exe:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      # A release tag that disagrees with the version baked into the exe and the installer name is a
+      # mislabelled download.
+      - name: Tag matches the app version
+        if: env.RELEASE_TAG != ''
+        shell: pwsh
+        run: |
+          $version = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          if ($env:RELEASE_TAG -ne "v$version") { throw "tag $($env:RELEASE_TAG) != tauri.conf.json version v$version" }
+
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # Release profile shares nothing with ci.yml's `cargo check` cache; its own key keeps a warm
+      # second run at a few minutes instead of the full ~15.
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: src-tauri
+          key: release-exe-asio
+
+      # Pinned by version + sha256: steinberg.net/asiosdk is a moving redirect, and a silent SDK bump
+      # must not change a release. asio-sys wants common/ and host/pc/ DIRECTLY under CPAL_ASIO_DIR;
+      # the zip nests them under ASIOSDK/. bindgen finds the runner's preinstalled LLVM via PATH.
+      - name: Fetch the ASIO SDK
+        shell: pwsh
+        run: |
+          $zip = Join-Path $env:RUNNER_TEMP 'asio-sdk.zip'
+          Invoke-WebRequest 'https://download.steinberg.net/sdk_downloads/ASIO-SDK_2.3.4_2025-10-15.zip' -OutFile $zip
+          $sha = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
+          if ($sha -ne 'd5ebf0c20dd2c5f43771fd0c1418f4b361bf52434ee670097cfa6b3a335e2eca') { throw "ASIO SDK sha256 mismatch: $sha" }
+          Expand-Archive $zip -DestinationPath (Join-Path $env:RUNNER_TEMP 'asio-sdk')
+          "CPAL_ASIO_DIR=$(Join-Path $env:RUNNER_TEMP 'asio-sdk\ASIOSDK')" | Out-File -Append $env:GITHUB_ENV
+
+      # GPLv3 asks for the corresponding source: the installed licences folder names the exact commit.
+      - name: Write the source pointer
+        shell: pwsh
+        run: |
+          "BleepLoop source for this build:`n$($env:GITHUB_SERVER_URL)/$($env:GITHUB_REPOSITORY)/tree/$($env:GITHUB_SHA)" |
+            Out-File licenses/SOURCE.txt -Encoding utf8
+
+      - run: pnpm exec tauri build --bundles nsis --features asio --config src-tauri/tauri.release.conf.json
+
+      - name: Stage + fingerprint the release files
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory release | Out-Null
+          Copy-Item src-tauri/target/release/bundle/nsis/*-setup.exe release/
+          Copy-Item licenses/GPL-3.0.txt, licenses/MPL-2.0.txt, licenses/SOURCE.txt, THIRD-PARTY-NOTICES.md release/
+          $setup = Get-Item release/*-setup.exe
+          $sha = (Get-FileHash $setup -Algorithm SHA256).Hash.ToLower()
+          "$sha  $($setup.Name)" | Out-File release/SHA256SUMS.txt -Encoding ascii
+          Copy-Item src-tauri/target/release/app.exe "BleepLoop-asio-$($env:GITHUB_SHA.Substring(0,7)).exe"
+          "## $($setup.Name)`n`n- size: $([math]::Round($setup.Length / 1MB, 1)) MB`n- sha256: ``$sha```n- ASIO + WASAPI; this binary is GPLv3 (links the Steinberg ASIO SDK); the installer fetches the WebView2 runtime if it is missing" |
+            Out-File -Append $env:GITHUB_STEP_SUMMARY
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: BleepLoop-asio-${{ github.sha }}
+          path: |
+            release/
+            BleepLoop-asio-*.exe
+          if-no-files-found: error
+          retention-days: 30
+
+  # The only job with write access, and it runs no repo code: it attaches the files built above to a
+  # draft release through the runner's preinstalled `gh`.
+  release:
+    needs: exe
+    if: github.event_name == 'push' || inputs.release_tag != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: BleepLoop-asio-${{ github.sha }}
+
+      - name: Stage the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          SOURCE_URL: ${{ github.server_url }}/${{ github.repository }}/tree/${{ github.sha }}
+          # Steinberg's Usage Guidelines want the logo on every page that says "ASIO"; renders once the repo is public.
+          LOGO_URL: ${{ github.server_url }}/${{ github.repository }}/raw/${{ github.sha }}/src/assets/third-party/ASIO-compatible-logo-Steinberg-TM-BW.jpg
+        run: |
+          setup=$(basename release/*-setup.exe)
+          cat > notes.md <<EOF
+          BleepLoop $RELEASE_TAG for Windows 10/11 (x64). Download \`$setup\`. The installer fetches the WebView2 runtime if the machine lacks it.
+
+          The build is not code-signed, so Windows SmartScreen warns on first run: choose "More info", then "Run anyway". Check the download against \`SHA256SUMS.txt\` first.
+
+          This binary links the Steinberg ASIO SDK and is licensed GPLv3 (\`GPL-3.0.txt\`). The source is MIT-licensed; this build was made from $SOURCE_URL. \`THIRD-PARTY-NOTICES.md\` lists every dependency, including ringbuf.js (MPL-2.0, unmodified, https://github.com/padenot/ringbuf.js).
+
+          <img src="$LOGO_URL" alt="ASIO Compatible" width="72" />
+
+          ASIO is a registered trademark of Steinberg Media Technologies GmbH.
+          EOF
+          gh release create "$RELEASE_TAG" release/* --draft --target "$GITHUB_SHA" --title "BleepLoop $RELEASE_TAG" --notes-file notes.md

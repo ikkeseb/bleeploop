@@ -1,0 +1,144 @@
+/* PluginControls (Orbit V2 · W3). The compact-row controls (live / editor / gain readout) reuse the
+   shared flat-pill `.tgl` rules in app.css; this file styles the bits specific to the plugin slot:
+   the bar container + gain-disclosure trimmings, and the accordion drawer body (PluginParams) — an
+   OUTPUT gain slider + a preview grid of the plugin's first params, all as slim Orbit groove sliders. */
+
+/* ---- PluginBar — the right-cluster controls on the compact slot row ---- */
+.slot__plug {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+/* live monitor "on" dot — the only steady colour in the row, and only while armed */
+.tgl__dot {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: var(--play);
+  box-shadow: 0 0 8px var(--play);
+}
+/* GO LIVE at rest: the row's primary action (hearing yourself through the effect), so it carries the
+   play colour before it is armed — armed adds the glow + dot via the shared `.on-green`. */
+.tgl.live:not(.on-green) {
+  color: color-mix(in srgb, var(--play) 80%, var(--dim));
+  border-color: color-mix(in srgb, var(--play) 35%, transparent);
+}
+.tgl.live:not(.on-green):hover:not(:disabled) {
+  color: var(--play);
+  border-color: color-mix(in srgb, var(--play) 60%, transparent);
+}
+/* the PARAMS drawer-disclosure pill — a dim gain readout (mono numerals) + a caret that flips when open */
+.slot__gain {
+  font-variant-numeric: tabular-nums;
+  gap: 5px;
+  display: inline-flex;
+  align-items: center;
+}
+.slot__gainval {
+  letter-spacing: 0.04em;
+  font-weight: 500;
+  opacity: 0.6;
+}
+.slot__caret {
+  display: inline-block;
+  font-size: 9px;
+  transition: transform 0.18s;
+}
+.slot__gain.on .slot__caret {
+  transform: rotate(180deg);
+}
+.pc__err {
+  font-size: 9.5px;
+  color: var(--dub);
+  font-family: var(--mono);
+  white-space: nowrap;
+}
+
+/* ---- PluginParams — the accordion drawer body ---- */
+.pc {
+  display: grid;
+  gap: 10px;
+}
+/* the param preview grid — 2 columns, collapses to 1 when the slot (not the window) is narrow */
+.pc__params {
+  container-type: inline-size;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 9px 18px;
+}
+/* the OUTPUT gain row spans the full drawer width (the primary control) */
+.param--gain {
+  grid-column: 1 / -1;
+}
+.param {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+.param__top {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+.param__name {
+  font-size: 9.5px;
+  color: var(--dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.param--gain .param__name {
+  font-family: var(--mono);
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  font-size: 8.5px;
+  color: var(--faint);
+}
+.param__val {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 9px;
+  color: var(--faint);
+}
+
+/* the param range wears the app-wide `.lf-range` skin (app.css); a taller hit area for dense lists */
+.param__range {
+  width: 100%;
+  height: 14px;
+}
+/* the gain cap earns cyan (engaged/selection) */
+.param--gain .param__range::-webkit-slider-thumb {
+  background: var(--cyan);
+  box-shadow: 0 0 8px -1px var(--cyan);
+}
+.param--gain .param__range::-moz-range-thumb {
+  background: var(--cyan);
+  box-shadow: 0 0 8px -1px var(--cyan);
+}
+
+.pc__lastedit {
+  font-size: 9.5px;
+  color: var(--play);
+  font-family: var(--mono);
+}
+.pc__empty {
+  font-size: 10px;
+  color: var(--faint);
+}
+.pc__more {
+  font-size: 9.5px;
+  color: var(--faint);
+}
+
+/* 1-col params when the SLOT (not the window) is narrow — tracks the container's inline size. */
+@container (max-width: 340px) {
+  .pc__params {
+    grid-template-columns: 1fr;
+  }
+}

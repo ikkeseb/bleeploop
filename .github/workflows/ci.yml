@@ -1,0 +1,80 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ['**.md', 'docs/**']
+  pull_request:
+    branches: [main]
+    paths-ignore: ['**.md', 'docs/**']
+
+# Least privilege: nothing here writes to the repo.
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.ref }}
+  cancel-in-progress: true
+
+# Two independent gates run in PARALLEL: the JS/TS half (typecheck + boundary + verify + vite build)
+# and the Rust half (cargo check, both feature sets). They share no artifact. `cargo check` does not
+# need the vite `dist/` output because Tauri embeds it only on a release build; this was verified
+# locally with dist absent and generate_context! re-expanded.
+jobs:
+  js:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      # no version input — pnpm/action-setup@v6 reads the packageManager pin in package.json,
+      # so the version lives in ONE place (corepack-compatible).
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+
+      # repo needs Node >=22.18 for verify/'s TS type stripping — Node 24 (current LTS) satisfies it.
+      # setup-node@v6 limits automatic caching to npm, so the explicit `cache: pnpm` below is still
+      # required — and pnpm/action-setup above must run first so the pnpm store path is resolvable.
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # typecheck + capability-boundary guard + the deterministic verify/ guards (pure Node, ~1s)
+      - run: pnpm check
+
+      # The vite bundle gate (the Tauri bundle input). `pnpm build` is `tsc --noEmit && vite build`,
+      # but the typecheck half already ran via `pnpm check` above — so run only `vite build` here to
+      # avoid a second full tsc pass. (cargo check, in the parallel `rust` job, does not consume this
+      # ../dist output — Tauri embeds it only on a release build.) The local `pnpm build` script keeps
+      # both halves for a standalone one-shot gate.
+      - run: pnpm exec vite build
+
+  rust:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      # No `--features asio` here: the asio feature set is compiled by build-exe.yml (which fetches the
+      # Steinberg SDK and owns the licence note) and heard only on the dev PC — see AGENTS.md.
+      #
+      # src-tauri/rust-toolchain.toml pins the toolchain to 1.96.0; rustup on the runner auto-installs it
+      # on the first cargo invocation below, so no explicit toolchain-setup action is needed here.
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: src-tauri
+
+      - run: cargo check
+        working-directory: src-tauri
+
+      - run: cargo check --no-default-features
+        working-directory: src-tauri
+
+      # `cargo test` is NOT here: it builds the full debug profile (~15 min on the Windows runner,
+      # cached or not, vs ~2 min for the two checks) — it runs in rust-test.yml on src-tauri/ changes.

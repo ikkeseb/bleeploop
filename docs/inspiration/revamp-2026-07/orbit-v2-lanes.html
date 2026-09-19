@@ -1,0 +1,587 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>BleepLoop — ORBIT V2 · LANES</title>
+<style>
+/* =====================================================================
+   ORBIT V2 — LANES.
+   The owner's synthesis call (2026-07-05): Orbit's dark glass surfaces, its
+   colour flair and logo — but CONVENTIONAL linear waveforms with a
+   subtle grid that matches the bar lengths. Dark mode is the product.
+   Composition move: tracks become five full-width LANES. A linear
+   waveform earns its length, the bar grid reads, and all five
+   playheads sweep in one vertical line — the loop grid made visible.
+   ===================================================================== */
+:root {
+  --bg: #07080d;
+  --glass: rgba(148, 168, 215, 0.045);
+  --glass-2: rgba(148, 168, 215, 0.07);
+  --glass-edge: rgba(148, 168, 215, 0.11);
+  --well: rgba(3, 4, 8, 0.55);
+  --text: #eef1f8;
+  --dim: #8e95a8;
+  --faint: #545b6e;
+  --rec: #ff4757;
+  --dub: #ffb02e;
+  --play: #2be48a;
+  --cyan: #46d4e8;
+  --violet: #7f6bff;
+  --mono: ui-monospace, 'Cascadia Mono', 'JetBrains Mono', Consolas, monospace;
+  --sans: system-ui, 'Segoe UI', Roboto, sans-serif;
+}
+* { box-sizing: border-box; margin: 0; }
+html, body { height: 100%; }
+body {
+  background:
+    radial-gradient(80% 60% at 12% -15%, rgba(127, 107, 255, 0.13), transparent 55%),
+    radial-gradient(70% 50% at 90% -12%, rgba(70, 212, 232, 0.08), transparent 50%),
+    radial-gradient(100% 60% at 50% 125%, rgba(43, 228, 138, 0.04), transparent 55%),
+    var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  overflow: hidden;
+  user-select: none;
+  display: flex;
+  flex-direction: column;
+  -webkit-font-smoothing: antialiased;
+}
+button { font: inherit; color: inherit; background: none; border: 0; cursor: pointer; padding: 0; }
+
+/* ---------- COMMAND BAR ---------- */
+.cmd {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  margin: 14px 22px 0;
+  padding: 10px 20px;
+  border-radius: 16px;
+  background: var(--glass);
+  border: 1px solid var(--glass-edge);
+  backdrop-filter: blur(10px);
+}
+.brand { font-family: var(--mono); font-size: 12px; letter-spacing: 0.24em; color: var(--dim); font-weight: 600; display: flex; align-items: center; gap: 10px; }
+.brand b { color: var(--text); }
+.brand i {
+  width: 11px; height: 11px; border-radius: 999px;
+  background: conic-gradient(var(--rec), var(--dub), var(--play), var(--cyan), var(--violet), var(--rec));
+  box-shadow: 0 0 10px -2px rgba(127,107,255,.8);
+}
+.bpm { display: flex; align-items: center; gap: 10px; }
+.bpm__num { font-family: var(--mono); font-size: 34px; font-weight: 700; line-height: 1; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
+.bpm__unit { font-family: var(--mono); font-size: 8.5px; letter-spacing: 0.3em; color: var(--faint); }
+.step { width: 22px; height: 22px; border: 1px solid var(--glass-edge); border-radius: 7px; color: var(--dim); font-family: var(--mono); font-size: 13px; }
+.step:hover { color: var(--text); border-color: var(--dim); }
+.beats { display: flex; gap: 5px; }
+.beat { width: 7px; height: 7px; border-radius: 999px; background: rgba(148,168,215,.15); }
+.beat.on { background: var(--text); box-shadow: 0 0 8px rgba(238,241,248,.8); }
+.tgl {
+  font-family: var(--mono); font-size: 10px; letter-spacing: 0.15em; font-weight: 600;
+  padding: 8px 13px;
+  border: 1px solid var(--glass-edge);
+  border-radius: 10px;
+  color: var(--dim);
+}
+.tgl:hover { color: var(--text); }
+.tgl.on { color: var(--cyan); border-color: color-mix(in srgb, var(--cyan) 55%, transparent); box-shadow: 0 0 14px -6px var(--cyan), inset 0 0 10px -7px var(--cyan); }
+.tgl.on-green { color: var(--play); border-color: color-mix(in srgb, var(--play) 55%, transparent); box-shadow: 0 0 14px -6px var(--play), inset 0 0 10px -7px var(--play); }
+.loop { display: flex; align-items: center; gap: 11px; }
+.loop__dial { width: 38px; height: 38px; }
+.loop__meta { display: flex; flex-direction: column; gap: 2px; }
+.loop__k { font-family: var(--mono); font-size: 8.5px; letter-spacing: 0.3em; color: var(--faint); }
+.loop__v { font-family: var(--mono); font-size: 14px; font-weight: 700; }
+.loop__v small { color: var(--dim); font-weight: 400; font-size: 11px; }
+.grow { flex: 1 1 auto; }
+.master { display: flex; align-items: center; gap: 10px; }
+.mvol { width: 100px; height: 3px; background: rgba(148,168,215,.15); border-radius: 2px; position: relative; }
+.mvol__fill { position: absolute; inset: 0 auto 0 0; width: 78%; background: var(--dim); border-radius: 2px; }
+.mvol__cap { position: absolute; top: 50%; left: 78%; width: 11px; height: 11px; border-radius: 999px; background: var(--text); transform: translate(-50%,-50%); box-shadow: 0 0 8px rgba(238,241,248,.5); }
+.mnum { font-family: var(--mono); font-size: 11px; color: var(--dim); }
+.tools { display: flex; gap: 4px; }
+.tool { width: 34px; height: 34px; display: grid; place-items: center; color: var(--faint); border-radius: 10px; }
+.tool:hover { color: var(--text); background: var(--glass-2); }
+.tool svg { width: 16px; height: 16px; }
+
+/* ---------- SOURCE ROW ---------- */
+.src {
+  flex: 0 0 auto;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+  margin: 12px 22px 0;
+}
+.slot {
+  display: flex; align-items: center; gap: 14px;
+  padding: 10px 18px;
+  border-radius: 14px;
+  background: var(--glass);
+  border: 1px solid var(--glass-edge);
+}
+.slot--active { border-color: color-mix(in srgb, var(--cyan) 40%, var(--glass-edge)); box-shadow: 0 0 24px -14px var(--cyan), inset 0 0 24px -20px var(--cyan); }
+.slot__id { font-family: var(--mono); font-size: 19px; font-weight: 800; color: var(--faint); }
+.slot--active .slot__id { color: var(--cyan); text-shadow: 0 0 12px color-mix(in srgb, var(--cyan) 60%, transparent); }
+.slot__meta { display: flex; flex-direction: column; gap: 1px; min-width: 150px; }
+.slot__k { font-family: var(--mono); font-size: 8.5px; letter-spacing: 0.26em; color: var(--faint); }
+.slot__name { font-size: 13px; font-weight: 600; white-space: nowrap; }
+.slot__name small { font-family: var(--mono); color: var(--dim); font-weight: 400; font-size: 9px; margin-left: 7px; letter-spacing: 0.12em; }
+.slot__acts { display: flex; gap: 6px; margin-left: auto; align-items: center; }
+.seg { display: flex; gap: 4px; }
+.seg .tgl { padding: 6px 10px; }
+.livechip { display: inline-flex; align-items: center; gap: 6px; font-family: var(--mono); font-size: 9px; letter-spacing: 0.2em; color: var(--play); }
+.livechip i { width: 7px; height: 7px; border-radius: 999px; background: var(--play); box-shadow: 0 0 8px var(--play); }
+
+/* ---------- THE LANES ---------- */
+.floor {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 22px;
+  min-height: 0;
+}
+.lane {
+  flex: 1 1 0;
+  min-height: 0;
+  display: flex;
+  align-items: stretch;
+  gap: 14px;
+  padding: 9px 14px;
+  border-radius: 16px;
+  background: var(--glass);
+  border: 1px solid var(--glass-edge);
+  position: relative;
+  overflow: hidden;
+  --sc: var(--faint);
+}
+.lane[data-state="play"] { --sc: var(--play); }
+.lane[data-state="rec"]  { --sc: var(--rec); }
+.lane[data-state="dub"]  { --sc: var(--dub); }
+.lane[data-state="stop"] { --sc: #6b7387; }
+/* a whisper of state colour bleeding in from the left edge — flair, not flood */
+.lane::before {
+  content: '';
+  position: absolute; left: 0; top: 0; bottom: 0; width: 34%;
+  background: radial-gradient(80% 120% at -10% 50%, color-mix(in srgb, var(--sc) 10%, transparent), transparent 70%);
+  pointer-events: none;
+}
+.lane[data-state="empty"]::before, .lane[data-state="stop"]::before { display: none; }
+.lane[data-state="empty"] { border-style: dashed; background: transparent; }
+
+/* left cluster: identity + primary gesture */
+.lane__left {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 13px;
+  width: 236px;
+  position: relative; z-index: 1;
+}
+.lane__idbox { display: flex; flex-direction: column; gap: 2px; width: 66px; }
+.lane__num { font-family: var(--mono); font-size: 21px; font-weight: 800; color: var(--dim); line-height: 1; }
+.lane__state { font-family: var(--mono); font-size: 8px; letter-spacing: 0.22em; font-weight: 700; color: var(--sc); }
+.lane[data-state="rec"] .lane__state { text-shadow: 0 0 9px var(--sc); }
+.lane[data-state="play"] .lane__num, .lane[data-state="rec"] .lane__num, .lane[data-state="dub"] .lane__num { color: var(--text); }
+
+/* the core — rec/dub, ringed by state */
+.core {
+  flex: 0 0 auto;
+  width: 52px; height: 52px;
+  border-radius: 999px;
+  display: grid; place-items: center;
+  color: var(--text);
+  background: radial-gradient(circle at 50% 35%, #191d2b, #0a0c15);
+  border: 1px solid var(--glass-edge);
+  box-shadow: 0 4px 16px -6px rgba(0,0,0,.8), inset 0 1px 0 rgba(200,215,255,.1);
+  position: relative;
+}
+.core::before {
+  content: '';
+  position: absolute; inset: -5px;
+  border-radius: 999px;
+  border: 1.5px solid var(--sc);
+  opacity: 0;
+}
+.lane[data-state="play"] .core::before,
+.lane[data-state="rec"] .core::before,
+.lane[data-state="dub"] .core::before { opacity: .8; }
+.core:hover { border-color: var(--dim); }
+.core svg { width: 19px; height: 19px; }
+.lane[data-state="rec"] .core { color: var(--rec); box-shadow: 0 0 22px -6px var(--rec), inset 0 0 12px -7px var(--rec); border-color: color-mix(in srgb, var(--rec) 55%, transparent); }
+.lane[data-state="dub"] .core { color: var(--dub); box-shadow: 0 0 22px -6px var(--dub), inset 0 0 12px -7px var(--dub); border-color: color-mix(in srgb, var(--dub) 55%, transparent); }
+.lane[data-state="empty"] .core { color: var(--rec); }
+.core:disabled { opacity: .4; }
+
+/* play/stop + clear, stacked */
+.lane__pair { display: flex; flex-direction: column; gap: 5px; }
+.pb {
+  height: 24px; min-width: 58px;
+  border: 1px solid var(--glass-edge);
+  border-radius: 8px;
+  font-family: var(--mono); font-size: 9px; font-weight: 600; letter-spacing: 0.12em;
+  color: var(--dim);
+  display: grid; place-items: center;
+  padding: 0 10px;
+}
+.pb:hover { color: var(--text); border-color: var(--dim); }
+.pb.on { color: var(--cyan); border-color: color-mix(in srgb, var(--cyan) 50%, transparent); box-shadow: inset 0 0 10px -7px var(--cyan); }
+.pb.warn { color: var(--dub); border-color: color-mix(in srgb, var(--dub) 50%, transparent); }
+.pb:disabled { opacity: .32; }
+
+/* the WAVE WELL — recessed lane with the bar grid */
+.lane__well {
+  flex: 1 1 auto;
+  min-width: 0;
+  border-radius: 10px;
+  background: var(--well);
+  border: 1px solid rgba(148,168,215,.07);
+  box-shadow: inset 0 2px 10px rgba(0,0,0,.55);
+  position: relative;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  z-index: 1;
+}
+/* grid: bars strong-ish, beats whisper (4 bars × 4 beats) */
+.grid { position: absolute; inset: 0; pointer-events: none; }
+.grid i { position: absolute; top: 0; bottom: 0; width: 1px; background: rgba(148,168,215,.055); }
+.grid i.bar { background: rgba(148,168,215,.13); }
+.grid b { position: absolute; top: 3px; font-family: var(--mono); font-size: 7.5px; font-weight: 400; letter-spacing: .08em; color: rgba(148,168,215,.28); }
+.wave { position: absolute; inset: 0; width: 100%; height: 100%; z-index: 1; }
+/* playhead — one vertical line, glow tip; the SAME x across every playing lane */
+.ph {
+  position: absolute; top: 0; bottom: 0; width: 2px; z-index: 2;
+  background: linear-gradient(180deg, rgba(238,241,248,1), rgba(238,241,248,.7));
+  box-shadow: 0 0 9px rgba(238,241,248,.55);
+}
+.ph::after { content: ''; position: absolute; top: -1px; left: 50%; transform: translateX(-50%); width: 6px; height: 6px; border-radius: 999px; background: var(--text); box-shadow: 0 0 8px rgba(238,241,248,.9); }
+.lane__emptymsg {
+  position: absolute; inset: 0; z-index: 1;
+  display: grid; place-items: center;
+  font-family: var(--mono); font-size: 10px; letter-spacing: 0.3em; color: var(--faint);
+}
+
+/* right cluster: fx/mute/transform + volume */
+.lane__right {
+  flex: 0 0 auto;
+  width: 205px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 7px;
+  position: relative; z-index: 1;
+}
+.lane__mods { display: flex; gap: 5px; }
+.lane__mods .pb { flex: 1 1 auto; min-width: 0; padding: 0; }
+.lane__vol { display: flex; align-items: center; gap: 9px; }
+.vbar { flex: 1 1 auto; height: 3px; background: rgba(148,168,215,.14); border-radius: 2px; position: relative; }
+.vbar__fill { position: absolute; inset: 0 auto 0 0; background: var(--dim); border-radius: 2px; }
+.vbar__unity { position: absolute; top: -3px; bottom: -3px; left: 66.7%; width: 1px; background: var(--faint); }
+.vbar__cap { position: absolute; top: 50%; width: 11px; height: 11px; border-radius: 999px; background: var(--text); transform: translate(-50%,-50%); }
+.vdb { font-family: var(--mono); font-size: 9.5px; color: var(--dim); min-width: 47px; text-align: right; font-variant-numeric: tabular-nums; }
+
+/* ---------- KEY RIBBON ---------- */
+.ribbon {
+  flex: 0 0 auto;
+  height: 52px;
+  display: flex; align-items: stretch;
+  margin: 0 22px 14px;
+  border-radius: 14px;
+  background: var(--glass);
+  border: 1px solid var(--glass-edge);
+  overflow: hidden;
+}
+.ribbon__meta { flex: 0 0 auto; display: flex; align-items: center; gap: 10px; padding: 0 16px; font-family: var(--mono); font-size: 10px; letter-spacing: 0.2em; color: var(--faint); }
+.ribbon__meta b { font-size: 12px; color: var(--text); }
+.keys { flex: 1 1 auto; display: flex; position: relative; }
+.kw { flex: 1 1 auto; border-right: 1px solid rgba(148,168,215,.08); position: relative; background: rgba(148,168,215,.06); }
+.kw:hover { background: rgba(148,168,215,.13); }
+.kb { position: absolute; top: 0; height: 56%; width: 62%; background: #04050a; z-index: 2; border-radius: 0 0 3px 3px; }
+.kw span { position: absolute; bottom: 3px; left: 50%; transform: translateX(-50%); font-family: var(--mono); font-size: 8px; color: var(--faint); }
+</style>
+</head>
+<body>
+
+<!-- COMMAND BAR -->
+<header class="cmd">
+  <span class="brand"><i></i>BLEEP<b>LOOP</b></span>
+
+  <div class="bpm">
+    <button class="step">−</button>
+    <span class="bpm__num">112</span>
+    <button class="step">+</button>
+    <div style="display:flex;flex-direction:column;gap:4px">
+      <span class="bpm__unit">BPM</span>
+      <div class="beats"><i class="beat on"></i><i class="beat"></i><i class="beat"></i><i class="beat"></i></div>
+    </div>
+  </div>
+
+  <div style="display:flex;gap:6px">
+    <button class="tgl on">CLICK</button>
+    <button class="tgl">FIXED 4</button>
+    <button class="tgl">TAP</button>
+  </div>
+
+  <div class="loop">
+    <svg class="loop__dial" viewBox="0 0 40 40">
+      <circle cx="20" cy="20" r="16" fill="none" stroke="rgba(148,168,215,.15)" stroke-width="3"/>
+      <circle cx="20" cy="20" r="16" fill="none" stroke="var(--play)" stroke-width="3" stroke-linecap="round"
+              stroke-dasharray="100.5" stroke-dashoffset="38" transform="rotate(-90 20 20)"/>
+    </svg>
+    <div class="loop__meta">
+      <span class="loop__k">LOOP</span>
+      <span class="loop__v">4 BARS <small>· 8.6 s</small></span>
+    </div>
+  </div>
+
+  <div style="display:flex;gap:6px">
+    <button class="tgl">■ ALL</button>
+    <button class="tgl">✕ ALL</button>
+    <button class="tgl on-green">MIC LIVE</button>
+  </div>
+
+  <div class="grow"></div>
+
+  <div class="master">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#8e95a8" stroke-width="1.8"><path d="M4 9v6h3.5L12 19V5L7.5 9H4z"/><path d="M16 8.5a5 5 0 0 1 0 7" stroke-linecap="round"/></svg>
+    <div class="mvol"><div class="mvol__fill"></div><div class="mvol__cap"></div></div>
+    <span class="mnum">78</span>
+  </div>
+
+  <div class="tools">
+    <button class="tool" title="keyboard"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="6" width="18" height="12" rx="1.5"/><path d="M8 6v8M12 6v8M16 6v8" stroke-linecap="round"/></svg></button>
+    <button class="tool" title="help"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M9.2 9.3a2.8 2.8 0 0 1 5.4 1c0 1.9-2.8 2.5-2.8 4" stroke-linecap="round"/><circle cx="12" cy="17.4" r="0.9" fill="currentColor" stroke="none"/></svg></button>
+    <button class="tool" title="settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3.2"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9L17 7M7 17l-2.1 2.1"/></svg></button>
+  </div>
+</header>
+
+<!-- SOURCES -->
+<section class="src">
+  <div class="slot slot--active">
+    <span class="slot__id">A</span>
+    <div class="slot__meta">
+      <span class="slot__k">SOURCE · PLUGIN</span>
+      <span class="slot__name">Archetype Petrucci<small>VST3</small></span>
+    </div>
+    <div class="slot__acts">
+      <span class="livechip"><i></i>INPUT LIVE</span>
+      <button class="tgl">EDITOR</button>
+      <button class="tgl">GAIN −6.0</button>
+    </div>
+  </div>
+  <div class="slot">
+    <span class="slot__id">B</span>
+    <div class="slot__meta">
+      <span class="slot__k">SOURCE · SYNTH</span>
+      <span class="slot__name">Bass</span>
+    </div>
+    <div class="slot__acts">
+      <div class="seg">
+        <button class="tgl">LEAD</button><button class="tgl on">BASS</button><button class="tgl">PAD</button><button class="tgl">PIANO</button><button class="tgl">ORGAN</button><button class="tgl">DRUM</button>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- LANES -->
+<main class="floor">
+
+  <div class="lane" data-state="play">
+    <div class="lane__left">
+      <div class="lane__idbox"><span class="lane__num">01</span><span class="lane__state">PLAYING</span></div>
+      <button class="core" title="overdub"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><circle cx="12" cy="12" r="7"/><path d="M12 8.4v7.2M8.4 12h7.2" stroke-linecap="round"/></svg></button>
+      <div class="lane__pair"><button class="pb">■ STOP</button><button class="pb">CLR</button></div>
+    </div>
+    <div class="lane__well">
+      <div class="grid" data-bars="4" data-beats="4"></div>
+      <canvas class="wave" data-seed="7"></canvas>
+      <div class="ph" style="left:62%"></div>
+    </div>
+    <div class="lane__right">
+      <div class="lane__mods"><button class="pb">FX</button><button class="pb">MUTE</button><button class="pb">↶ DUB</button><button class="pb">↺ REV</button></div>
+      <div class="lane__vol"><div class="vbar"><div class="vbar__fill" style="width:66%"></div><div class="vbar__unity"></div><div class="vbar__cap" style="left:66%"></div></div><span class="vdb">0.0 dB</span></div>
+    </div>
+  </div>
+
+  <div class="lane" data-state="dub">
+    <div class="lane__left">
+      <div class="lane__idbox"><span class="lane__num">02</span><span class="lane__state">OVERDUB</span></div>
+      <button class="core" title="end overdub"><svg viewBox="0 0 24 24" fill="currentColor"><rect x="7" y="7" width="10" height="10" rx="1.5"/></svg></button>
+      <div class="lane__pair"><button class="pb">■ STOP</button><button class="pb">CLR</button></div>
+    </div>
+    <div class="lane__well">
+      <div class="grid" data-bars="4" data-beats="4"></div>
+      <canvas class="wave" data-seed="13"></canvas>
+      <div class="ph" style="left:62%"></div>
+    </div>
+    <div class="lane__right">
+      <div class="lane__mods"><button class="pb on">FX</button><button class="pb">MUTE</button><button class="pb">↶ DUB</button><button class="pb">↺ REV</button></div>
+      <div class="lane__vol"><div class="vbar"><div class="vbar__fill" style="width:54%"></div><div class="vbar__unity"></div><div class="vbar__cap" style="left:54%"></div></div><span class="vdb">−3.7 dB</span></div>
+    </div>
+  </div>
+
+  <div class="lane" data-state="rec">
+    <div class="lane__left">
+      <div class="lane__idbox"><span class="lane__num">03</span><span class="lane__state">● REC</span></div>
+      <button class="core" title="end record"><svg viewBox="0 0 24 24" fill="currentColor"><rect x="7" y="7" width="10" height="10" rx="1.5"/></svg></button>
+      <div class="lane__pair"><button class="pb">■ STOP</button><button class="pb">CLR</button></div>
+    </div>
+    <div class="lane__well">
+      <div class="grid" data-bars="4" data-beats="4"></div>
+      <canvas class="wave" data-seed="29" data-partial="62"></canvas>
+      <div class="ph" style="left:62%"></div>
+    </div>
+    <div class="lane__right">
+      <div class="lane__mods"><button class="pb" disabled>FX</button><button class="pb" disabled>MUTE</button></div>
+      <div class="lane__vol"><div class="vbar"><div class="vbar__fill" style="width:66%"></div><div class="vbar__unity"></div><div class="vbar__cap" style="left:66%"></div></div><span class="vdb">0.0 dB</span></div>
+    </div>
+  </div>
+
+  <div class="lane" data-state="stop">
+    <div class="lane__left">
+      <div class="lane__idbox"><span class="lane__num">04</span><span class="lane__state">STOPPED</span></div>
+      <button class="core" title="overdub — play first" disabled><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><circle cx="12" cy="12" r="7"/><path d="M12 8.4v7.2M8.4 12h7.2" stroke-linecap="round"/></svg></button>
+      <div class="lane__pair"><button class="pb">▶ PLAY</button><button class="pb warn">SURE?</button></div>
+    </div>
+    <div class="lane__well">
+      <div class="grid" data-bars="4" data-beats="4"></div>
+      <canvas class="wave" data-seed="41"></canvas>
+    </div>
+    <div class="lane__right">
+      <div class="lane__mods"><button class="pb">FX</button><button class="pb on">MUTE</button><button class="pb">↺ REV</button></div>
+      <div class="lane__vol"><div class="vbar"><div class="vbar__fill" style="width:72%"></div><div class="vbar__unity"></div><div class="vbar__cap" style="left:72%"></div></div><span class="vdb">+1.2 dB</span></div>
+    </div>
+  </div>
+
+  <div class="lane" data-state="empty">
+    <div class="lane__left">
+      <div class="lane__idbox"><span class="lane__num">05</span><span class="lane__state">EMPTY</span></div>
+      <button class="core" title="record"><svg viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="6.5"/></svg></button>
+      <div class="lane__pair"><button class="pb" disabled>▶ PLAY</button><button class="pb" disabled>CLR</button></div>
+    </div>
+    <div class="lane__well">
+      <div class="grid" data-bars="4" data-beats="4"></div>
+      <div class="lane__emptymsg">PRESS ● TO RECORD</div>
+    </div>
+    <div class="lane__right" style="opacity:.35">
+      <div class="lane__mods"><button class="pb" disabled>FX</button><button class="pb" disabled>MUTE</button></div>
+      <div class="lane__vol"><div class="vbar"><div class="vbar__fill" style="width:66%"></div><div class="vbar__unity"></div><div class="vbar__cap" style="left:66%"></div></div><span class="vdb">0.0 dB</span></div>
+    </div>
+  </div>
+
+</main>
+
+<!-- KEY RIBBON -->
+<footer class="ribbon">
+  <div class="ribbon__meta"><b>C4</b><span>OCT − / +</span></div>
+  <div class="keys" id="keys"></div>
+  <div class="ribbon__meta"><span>Z–M · Q–P</span></div>
+</footer>
+
+<script>
+function rng(seed){ let s = seed; return () => (s = (s * 16807) % 2147483647) / 2147483647; }
+
+// bar/beat grid — bar lines readable, beat lines a whisper; bar numbers engraved top-left of each bar
+document.querySelectorAll('.grid').forEach(g => {
+  const bars = +g.dataset.bars, beats = +g.dataset.beats;
+  const total = bars * beats;
+  for (let i = 1; i < total; i++) {
+    const line = document.createElement('i');
+    if (i % beats === 0) line.className = 'bar';
+    line.style.left = (i / total * 100) + '%';
+    g.appendChild(line);
+  }
+  for (let b = 0; b < bars; b++) {
+    const label = document.createElement('b');
+    label.textContent = b + 1;
+    label.style.left = 'calc(' + (b / bars * 100) + '% + 5px)';
+    g.appendChild(label);
+  }
+});
+
+// Real DAW-style waveform: synthesize a pseudo signal, take per-pixel min/max peaks, then draw
+// TWO layers — a translucent outer PEAK envelope + a solid inner BODY (~55% of peak). This is the
+// exact look the production renderer (waveform.ts rasterise) should adopt: per-device-pixel
+// columns, no chunky bars.
+document.querySelectorAll('canvas.wave').forEach(cv => {
+  const seed = +cv.dataset.seed;
+  const partial = (+(cv.dataset.partial || 100)) / 100;
+  const dpr = window.devicePixelRatio || 1;
+  const W = Math.max(1, Math.round(cv.clientWidth * dpr));
+  const H = Math.max(1, Math.round(cv.clientHeight * dpr));
+  cv.width = W; cv.height = H;
+  const ctx = cv.getContext('2d');
+  const sc = getComputedStyle(cv.closest('.lane')).getPropertyValue('--sc').trim();
+  const mid = H / 2;
+  const A = mid * 0.86;                       // max amplitude in px
+
+  // pseudo audio: sines + transient bursts, deterministic per seed
+  const r = rng(seed);
+  const f1 = 3 + r() * 4, f2 = 11 + r() * 9, f3 = 29 + r() * 20;
+  const p1 = r() * 7, p2 = r() * 7, p3 = r() * 7;
+  const nBursts = 14 + Math.floor(r() * 8);
+  const bursts = [];
+  for (let b = 0; b < nBursts; b++) bursts.push({ at: r(), w: 0.004 + r() * 0.012, g: 0.5 + r() * 0.9 });
+  const noise = rng(seed * 7 + 3);
+  const sig = t => {
+    let v = 0.16 * Math.sin(t * f1 * 6.283 + p1) + 0.1 * Math.sin(t * f2 * 6.283 + p2) + 0.05 * Math.sin(t * f3 * 6.283 + p3);
+    for (const b of bursts) {
+      const d = t - b.at;
+      if (d > -0.002 && d < b.w * 3) v += b.g * Math.exp(-(d * d) / (2 * b.w * b.w)) * Math.sin(d * 900);
+    }
+    return v;
+  };
+
+  // per-pixel min/max + a smoothed body track
+  const spp = 24;                              // samples per pixel column
+  let body = 0;
+  ctx.fillStyle = sc;
+  for (let x = 0; x < W; x++) {
+    const t0 = x / W;
+    if (t0 > partial) break;
+    let mn = 1e9, mx = -1e9, acc = 0;
+    for (let s = 0; s < spp; s++) {
+      const v = sig(t0 + s / (W * spp)) + (noise() - 0.5) * 0.05;
+      if (v < mn) mn = v;
+      if (v > mx) mx = v;
+      acc += Math.abs(v);
+    }
+    body = body * 0.72 + (acc / spp) * 0.28;   // one-pole smooth = the RMS-ish core
+    // outer peak envelope — translucent
+    ctx.globalAlpha = 0.34;
+    const y1 = mid - Math.min(1, mx) * A, y2 = mid - Math.max(-1, mn) * A;
+    ctx.fillRect(x, y1, 1, Math.max(1, y2 - y1));
+    // inner body — solid
+    ctx.globalAlpha = 0.95;
+    const hb = Math.max(1, Math.min(1, body * 1.7) * A);
+    ctx.fillRect(x, mid - hb, 1, hb * 2);
+  }
+  // REC: dotted centre line over the not-yet-recorded remainder
+  if (partial < 1) {
+    ctx.globalAlpha = 0.5;
+    for (let x = Math.round(W * partial) + 6 * dpr; x < W; x += 7 * dpr) {
+      ctx.fillRect(x, mid - dpr / 2, 3 * dpr, dpr);
+    }
+  }
+  ctx.globalAlpha = 1;
+});
+
+const keys = document.getElementById('keys');
+const blackAfter = [0,1,3,4,5];
+for (let o = 0; o < 2; o++) {
+  ['C','D','E','F','G','A','B'].forEach((nn, i) => {
+    const k = document.createElement('div');
+    k.className = 'kw';
+    if (nn === 'C') k.innerHTML = `<span>C${4+o}</span>`;
+    if (blackAfter.includes(i)) {
+      const b = document.createElement('div');
+      b.className = 'kb';
+      b.style.left = '68%';
+      k.appendChild(b);
+    }
+    keys.appendChild(k);
+  });
+}
+</script>
+</body>
+</html>
