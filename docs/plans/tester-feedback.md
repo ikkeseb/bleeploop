@@ -74,24 +74,34 @@ Proven in the browser tier only (`pnpm check`, `pnpm build`, `pnpm verify:jam`, 
    user reads as a freeze. Cause unknown; which teardown step stalls is not yet logged. Next: time
    the owner-thread teardown steps in `host/vst3.rs`, then decide between a fix and a busy state on
    the slot. DecentSampler is not installed on the dev PC and was not tested.
-2. **F2 + F1 + F5 + F11 as ONE design conversation with the owner before any build.** Agent starting
-   point, not approved: a manually stopped take rounds to whole bars and loops at its own length
-   (RC-505 style), which never reads silence as a phrase boundary. Do not infer a trim rule from
-   the screenshot. Reader material for that conversation (static reading, RC-505 behaviour unknown):
-   - ~30 sites assume track length == master length: playback bounds, overdub sum/swap, undo,
-     reverse, RETAKE, END STOP/STOP ALL, export render + session schema + import, waveform, recovery.
-   - Smallest honest version: a PRE-CHOSEN length for the next take, limited to whole-bar divisors
-     of the master (1/2/4 over 8). It reuses `lengthFrames`, needs no per-track phase anchor, and
-     answers F1 by letting the bar meter pick the next take's length after the BPM lock.
-   - The free "stop decides" version also needs a per-track phase origin (3 over 8 realigns every 24
-     bars), a rounding rule for late/early stops, a RETAKE priority rule, and an export period that
-     can reach the LCM of the lengths.
-   - F5 is its own product call in either version: a global "from the top" when everything is
-     stopped is cheap; a per-track restart while others play needs a boundary or a phase anchor.
-   - **F11 is not a one-line gate change.** In AUTO LISTENING no grid exists yet, and the pulse
-     re-anchors to the detected onset (`machine.ts` `beginAutoRecording`), so a click during
-     listening would jump phase when the take starts; through a mic the click could trigger AUTO.
-     Ordinary ARMED already clicks.
+2. **F2 + F1 + F5 + F11: design approved by the owner, build open.** Reference read: the RC-505 MK II
+   Parameter Guide. Per-track MEASURE is AUTO (= the first-recorded track), FREE ("set
+   automatically, corresponding to the length of the recording") or a pre-set number; with LOOP
+   SYNC on a track "retriggers at the beginning of the first-recorded phrase", and a record stop is
+   quantized to the measure. The guide does not say what happens when the first track is shorter
+   than a later one: unknown, and out of scope here (a take is never longer than the master).
+   - **F2, short takes are TILED at commit.** A later take's length is a whole number of bars, at
+     most the master. At commit the take is repeated across the master-length region of `record`
+     and cut at the master boundary (3 over 8 sounds 3+3+2: the retrigger). `lengthFrames` stays
+     the master, so playback, overdub, undo, reverse, export, session and waveform keep their one
+     length. Known limits, accepted: an overdub on a tiled track spans the whole master (it does
+     not repeat per tile), and the take's own length is not kept after commit.
+   - **The length comes from either gesture.** Stopping early keeps the whole bars COMPLETED at the
+     press (`planFreeStop`'s wall-clock floor with its quarter-beat grace, measured from the take's
+     musical start, the boundary without C): a stop at 1.5 bars keeps one bar and commits at once.
+     A stop inside the first bar records on to the bar line. Silence is never read as a phrase
+     boundary. FIXED pre-selects the length: the capture ends by itself.
+   - **F1:** FIXED and its bar meter stay usable after the BPM lock and then mean "length of the
+     next take", clamped to the master's bar count. FIXED off = the stop decides.
+   - **RETAKE rolls at the master length once a master exists,** whatever FIXED says: its pass
+     edges and the lane handoff seam assume master boundaries. A stop that `planRetakeStop`
+     resolves as `stop-now` is an ordinary stop and follows the rule above.
+   - **F5:** when no track is PLAYING (a pending END STOP counts as playing; mute does not count) and
+     nothing records, PLAY (one track or ALL) starts from the top: ONE shared start time, the master
+     grid and pulse re-anchored to it. While anything plays, PLAY joins at the live phase as today.
+   - **F11: no code change.** Ordinary ARMED already clicks (`state.ts` `publish`). AUTO listening
+     stays silent: AUTO exists only for the first take, so no grid exists to click on, and through a
+     mic the click could trigger the take.
 3. **F8 waits** for an owner decision on a native monitor path for synth plugins; F12 stays with
    `docs/plans/release-prep.md`.
 
