@@ -9,12 +9,11 @@ matching item. When resolved, move enduring decisions to their owning briefings 
 The tester reports building a Windows `app.exe` with Rust, without ASIO, and running it with a
 physical MIDI keyboard. Exact commit, build command, audio device/driver configuration and plugin
 versions are unknown. Screenshots and the owner's account establish the observations below;
-this session has not reproduced them or inspected implementation. Screenshots are temporary,
-uncommitted attachments; their relevant contents are transcribed here.
+nothing has been reproduced at runtime. Screenshots are temporary, uncommitted attachments; their
+relevant contents are transcribed here.
 
-The current request authorizes documentation, commit and handoff only. Product changes need a
-subsequent work order. All items remain open; suggested investigation order is plugin freeze,
-loop behavior and export, then the remaining interaction issues. This order is not an owner decision.
+All items remain open. § Code reading records what the source does at `d17c777`; § Work order is
+the owner-approved sequence.
 
 ## Requests and reports
 
@@ -33,11 +32,39 @@ loop behavior and export, then the remaining interaction issues. This order is n
 | F11 | The owner wants the click audible whenever armed and CLICK is enabled. | Include the armed waiting state in audible-click behavior. This is a requested change to the current transport-mode policy described in STATUS Stop 3, not implemented behavior. Check recording arm/wait states, including AUTO; preserve a clear distinction from native input GO LIVE. |
 | F12 | The owner asks about downloadable releases, possibly ASIO and non-ASIO variants, after the tester built the app manually. | Supply ready-to-run Windows downloads. Existing distribution decision is an ASIO build with WASAPI fallback, owned by docs/plans/release-prep.md. Two separate downloads are a question, not an approved change. A reported successful manual build is not independent verification of the clean-machine README path. |
 
-## Continuation
+## Code reading at `d17c777`
 
-Start with a bounded reproduction of F7 on Windows using the native-host and runtime briefings.
-Obtain the tester's exact build revision, plugin/version sequence and log around the freeze when
-available. Distinguish a host hang from a stale scan indicator before changing either subsystem.
-For F2, reproduce the recording and stop sequence and measure captured length, silence and repeat
-period; do not infer a trim rule from the screenshot. Preserve the complete intake while fixing
-one issue at a time. The tester's machine remains the final confirmation for its reported failures.
+Static reading only: it says what the code does, not what happened on the tester's machine. Rows
+marked ✓ were re-read by the orchestrating session; the rest are reader findings with citations,
+to be re-checked before they steer a change.
+
+| ID | What the code does | Kind |
+|---|---|---|
+| F1 | The bar meter renders only in FIXED (`Transport.tsx:250`); FIXED and +/- disable once the first loop locks BPM (`:244,255,267`). FIXED governs the first take only (`machine.ts:280`). | Tied to F2 |
+| F2 ✓ | Every take after the first gets the full master window; a shorter take is zero-filled and its length set to the master (`machine.ts:221-223`). No per-track shorter loop exists. | Missing feature; needs a design |
+| F3 ✓ | Export builds ONE `.zip` (stems + master + `session.json`) and hands it to the WebView as an `<a download>` click (`export.ts:17-28`): no save dialog, no success message, no result. The button's aria-label says "WAV files". Capabilities grant no dialog/fs. | Small fix; a real save dialog is a separate decision |
+| F4 | MIDI reaches `inputRouter` (`midi.ts:48-63`), but nothing feeds the on-screen keyboard's local `downNotes` (`Keyboard.tsx:54,84`). Visible range C4–C7. | Missing feature, small |
+| F5 | PLAY on a STOPPED track computes its offset from the master phase (`machine.ts:809-810`); ALL PLAY does the same per track. No restart path exists. | Design: global vs per track |
+| F6 | The first 12 params show unfiltered (`PluginControls.tsx:31,256`); names come straight from the plugin's `info.title` with no fallback (`vst3.rs:1848-1879`). Empty names are plugin-reported, not UI placeholders. | Small fix |
+| F7 ✓ | No specific deadlock identified. The swap sequence has waits without a time limit: `owner_join.join()` (`clap.rs:1030`), editor teardown + message pump (`vst3.rs:893`, `editor_window.rs:244`), cpal WASAPI stream drop, a VST3 restart joining RT with the editor open (`vst3.rs:1184`), IPC with no frontend timeout. `scanning` clears only when the scan IPC returns (`instrument.ts:311`), so a long or hung scan explains an indicator that predates the freeze. | Needs runtime: log or repro |
+| F8 ✓ | A synth plugin can never reach the native monitor: `goLive` arms input first, which rejects a plugin without an input bus (`native-io.ts:85-87`). MIDI → plugin therefore always takes the WebView path: 5 ms drain, ~30 ms hop-2 setpoint (`transport.rs:401`), 128-frame worklet, Web Audio output. ASIO would not shorten that path. Native WASAPI is shared-mode, `BufferSize::Default` (`audio_output.rs:17`). | Architecture; owner roadmap call, measure first |
+| F9 ✓ | The toast is reachable without a GO LIVE click: a fresh pick auto-starts live input when the scan says `isEffect` (`PluginControls.tsx:160-166`), and the scan derives that from VST3 subCategories, not the actual input bus (`scan.rs:683`). Message site: `native_io.rs:201`. | Small fix |
+| F10 | The number is AUTO REC sensitivity, 1–100 → −12…−60 dBFS RMS (`auto-record.ts:8-19`); label built at `Transport.tsx:304`. | Wording only |
+| F11 ✓ | Ordinary ARMED already clicks with CLICK on; only AUTO LISTENING is excluded from the click gate (`state.ts:318`). | One-line gate change + `pnpm verify:jam` |
+
+## Work order (owner-approved)
+
+1. **F7.** Ask the tester for the release log (`%LOCALAPPDATA%\com.bleeploop.app\logs\bleeploop.log`)
+   and the plugin pair they switched between. Meanwhile run a bounded repro on the dev PC:
+   DecentSampler, tweak, switch plugin, editor open and closed. Distinguish a host hang from a
+   stale scan indicator before changing either subsystem.
+2. **Machine-provable small fixes:** F4, F10, F6, F9, F11, and F3's success feedback + label.
+3. **F2 + F1 + F5 as ONE design conversation with the owner before any build** — all three are
+   per-track length/position. Agent starting point, not approved: a manually stopped take rounds
+   to whole bars and loops at its own length (RC-505 style), which never reads silence as a
+   phrase boundary. Do not infer a trim rule from the screenshot.
+4. **F8 waits** for an owner decision on a native monitor path for synth plugins; F12 stays with
+   `docs/plans/release-prep.md`.
+
+Preserve the complete intake while fixing one issue at a time. The tester's machine remains the
+final confirmation for its reported failures.
