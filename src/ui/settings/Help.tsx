@@ -46,7 +46,8 @@ export function Help() {
           <li><span class="help__note">↶ DUB</span> undoes the last overdub layer (press again to redo)</li>
           <li><span class="help__note">FX</span> opens a track's effects &middot; <span class="help__note">MUTE</span> silences it &middot; the volume slider has a 0 dB detent at 1.0</li>
           <li><span class="help__note">↺ REV</span> reverses a track in place. Overdub is blocked while reversed</li>
-          <li>All tracks share one loop length, so they stay locked together and can't drift</li>
+          <li>All tracks share one loop, so they stay locked together and can't drift</li>
+          <li>A take shorter than the loop repeats across it — stop early, or set the bars with <span class="help__note">FIXED</span></li>
         </ul>
       </section>
 

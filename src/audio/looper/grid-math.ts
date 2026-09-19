@@ -164,6 +164,16 @@ export function tileTake(buf: Float32Array, takeFrames: number, master: number):
   for (let i = takeFrames; i < master; i++) buf[i] = buf[i % takeFrames];
 }
 
+/**
+ * Commit a later take: floor the captured window to whole bars (at least one, at most the master), blank
+ * whatever a window cut short of its first bar line left unwritten, and tile the result across the master.
+ */
+export function commitLaterTake(buf: Float32Array, rawFrames: number, fpb: number, master: number): void {
+  const takeBars = clampBars(Math.floor(rawFrames / fpb), maxWholeBars(master, fpb));
+  if (rawFrames < fpb) buf.fill(0, Math.max(0, rawFrames), fpb); // never tile stale frames
+  tileTake(buf, takeBars * fpb, master);
+}
+
 export type RetakeStop = 'finish-pass' | 'keep-last' | 'stop-now';
 
 /**

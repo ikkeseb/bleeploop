@@ -1,5 +1,5 @@
 // Short later takes import the production tiling and stop-plan rules directly.
-import { planLaterStop, tileTake } from '../src/audio/looper/grid-math.ts';
+import { commitLaterTake, planLaterStop, tileTake } from '../src/audio/looper/grid-math.ts';
 import { framesPerBar } from '../src/audio/quantize.ts';
 
 let failed = 0;
@@ -73,10 +73,22 @@ console.log('=== B. later stop chooses completed bars from musical time ===');
   ok('press at master chooses master bars', plan(masterBars).bars === masterBars);
   ok('press after master clamps to master bars', plan(masterBars + 3).bars === masterBars);
   ok('target is the selected whole-bar frame count', plan(3.4).target === 3 * fpb);
-  ok(
-    'musical elapsed is independent of compensation C',
-    plan(2 - 1 / 32, 0).bars === plan(2 - 1 / 32, 960).bars,
-  );
+  // 5 ms outside the grace: a C of 960 frames (20 ms @ 48k) leaking into the elapsed time would flip it to 2.
+  const justOutside = 2 - 1 / 16 - 0.005 / barSec;
+  ok('C = 0 just outside the grace keeps one bar', plan(justOutside, 0).bars === 1);
+  ok('C = 960 just outside the grace keeps one bar', plan(justOutside, 960).bars === 1);
+  ok('C = 960 inside the grace still chooses two bars', plan(2 - 1 / 32, 960).bars === 2);
+
+  // commitLaterTake: the floor and the short-window guard finishRecording relies on.
+  const FPB = 4;
+  const half = new Float32Array(16).fill(9); // stale frames everywhere
+  half.set([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], 0); // 2.5 bars captured
+  commitLaterTake(half, 10, FPB, 16);
+  ok('2.5 captured bars floor to two and tile', Array.from(half).join() === '1,2,3,4,5,6,7,8,1,2,3,4,5,6,7,8');
+  const cut = new Float32Array(16).fill(9);
+  cut.set([1, 2], 0); // a window cut short of its first bar line
+  commitLaterTake(cut, 2, FPB, 16);
+  ok('a sub-bar window blanks its stale tail before tiling', Array.from(cut).join() === '1,2,0,0,1,2,0,0,1,2,0,0,1,2,0,0');
 }
 
 console.log(`\n=== RESULT: ${checks - failed}/${checks} checks passed, ${failed} failed ===`);

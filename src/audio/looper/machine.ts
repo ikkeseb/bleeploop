@@ -19,6 +19,7 @@ import { defaultFxStates } from '../fx/fx';
 import { clampBars, framesPerBar, maxWholeBars } from '../quantize';
 import {
   commitAnchor,
+  commitLaterTake,
   countInArm,
   nextBoundaryTime,
   phaseOffset,
@@ -26,7 +27,6 @@ import {
   planFreeStop,
   planLaterStop,
   planRetakeStop,
-  tileTake,
   type RetakeStop,
 } from './grid-math';
 import { recordCompensationFrames } from '../record-latency';
@@ -226,10 +226,7 @@ function finishRecording(i: number): void {
       console.error(`[looper] cannot tile track ${i}: master ${master} is not a whole-bar multiple of ${fpb}`);
       if (raw < master) t.record.fill(0, raw, master);
     } else {
-      const masterBars = master / fpb;
-      const takeBars = clampBars(Math.floor(raw / fpb), masterBars);
-      if (raw < fpb) t.record.fill(0, raw, fpb); // a window cut short never tiles stale frames
-      tileTake(t.record, takeBars * fpb, master);
+      commitLaterTake(t.record, raw, fpb, master);
     }
   }
   if (firstTake && raw < master) t.record.fill(0, raw, master);
@@ -280,7 +277,7 @@ function setFixedLengthBars(n: number): void {
 /** Maximum fixed length available to the next take. */
 function nextTakeMaxBars(): number {
   const master = masterLengthFrames();
-  return master > 0 ? master / framesPerBar(clock.bpm(), sr()) : MAX_FIXED_BARS;
+  return master > 0 ? Math.min(MAX_FIXED_BARS, maxWholeBars(master, framesPerBar(clock.bpm(), sr()))) : MAX_FIXED_BARS;
 }
 
 /** Enable/disable first-track AUTO REC. Off by default; later-track arms never read this flag. */
@@ -300,7 +297,7 @@ function configureRecordingEnd(t: Track): void {
   let frames = master || t.record.length;
   if (fixedLengthEnabled() && (master === 0 || !retakeEnabled())) {
     const fpb = framesPerBar(clock.bpm(), sr());
-    const maxBars = master > 0 ? master / fpb : maxWholeBars(t.record.length, fpb);
+    const maxBars = maxWholeBars(master || t.record.length, fpb);
     frames = clampBars(fixedLengthBars(), maxBars) * fpb;
   }
   engineState.captureEndFrame = engineState.captureStartFrame! + frames;
@@ -833,7 +830,12 @@ function stop(i: number): void {
   publish(i);
 }
 
-/** Re-anchor an idle transport before any resumed track publishes PLAYING and activates the click. */
+/**
+ * Re-anchor an idle transport to one start time. The pulse restarts BEFORE the resumed tracks publish, so
+ * its first tick consumes beat 0 while the click gate is still closed; the publish that opens the gate
+ * re-schedules the live lookahead window on the NEW anchor (clock.ts `setTransportActive`), which is what
+ * sounds the downbeat. No click can land on the old grid: an idle transport had none queued.
+ */
 function restartTimeIfIdle(): number | null {
   const master = masterLengthFrames();
   if (master === 0 || engineState.activeRecordIndex >= 0 || engineState.tracks.some((t) => t.state === 'PLAYING')) {
@@ -848,12 +850,13 @@ function restartTimeIfIdle(): number | null {
 }
 
 /** Resume a STOPPED track at the top when transport is idle, otherwise at the live master phase. */
-function resume(i: number, sharedRestartTime?: number | null): void {
+function resume(i: number, sharedRestartTime?: number | null, prepared?: AudioBuffer): void {
   const t = engineState.tracks[i];
   if (t.lengthFrames === 0) return;
+  // Copy the PCM first: the start time is read only once the buffer is ready, so the lead is not spent here.
+  const audioBuf = prepared ?? makeLoopBuffer(t.record, t.lengthFrames);
   const restartTime = sharedRestartTime === undefined ? restartTimeIfIdle() : sharedRestartTime;
   t.stopAt = null;
-  const audioBuf = makeLoopBuffer(t.record, t.lengthFrames);
   t.state = 'PLAYING';
   // An active transport joins at its live phase. An idle one was re-anchored above, so it starts at frame 0.
   // In both cases the buffer wraps on the shared grid and stays phase-locked with every playing track.
@@ -883,10 +886,14 @@ function stopAll(): void {
 
 /** Resume every STOPPED track together, restarting from the top when transport is idle. */
 function playAll(): void {
-  const hasStoppedTrack = engineState.tracks.some((t) => t.state === 'STOPPED' && t.lengthFrames > 0);
-  const restartTime = hasStoppedTrack ? restartTimeIfIdle() : null;
+  // Every buffer is built before the shared start time is read (session.ts does the same on import).
+  const prepared = engineState.tracks.map((t) =>
+    t.state === 'STOPPED' && t.lengthFrames > 0 ? makeLoopBuffer(t.record, t.lengthFrames) : null,
+  );
+  const restartTime = prepared.some((b) => b !== null) ? restartTimeIfIdle() : null;
   for (let i = 0; i < TRACK_COUNT; i++) {
-    if (engineState.tracks[i]?.state === 'STOPPED') resume(i, restartTime);
+    const buf = prepared[i];
+    if (buf) resume(i, restartTime, buf);
   }
 }
 

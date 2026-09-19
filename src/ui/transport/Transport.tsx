@@ -90,6 +90,22 @@ export function Transport() {
   const anyLive = createMemo(() => anyTrackIn('PLAYING', 'OVERDUBBING', 'RECORDING'));
   const anyCapturing = createMemo(() => anyTrackIn('RECORDING', 'OVERDUBBING'));
 
+  // ----- FIXED length, shown clamped to what the next take can actually be -----
+  // `nextTakeMaxBars()` is the master's bar count once a master exists, else 32. The label and the
+  // stepper show the EFFECTIVE value so the UI never promises more bars than the master has; the
+  // signal itself is left alone, so widening the master restores the user's choice.
+  const maxTakeBars = createMemo(() => Math.max(1, Math.floor(looper.nextTakeMaxBars())));
+  const effectiveFixedBars = createMemo(() => Math.min(looper.fixedLengthBars(), maxTakeBars()));
+  // RETAKE passes roll at master length whatever FIXED says, so the group is meaningless there.
+  const fixedIgnored = createMemo(() => looper.retakeEnabled() && hasMaster());
+  const fixedDisabled = createMemo(() => anyCapturing() || fixedIgnored());
+  const fixedTitle = () =>
+    fixedIgnored()
+      ? 'RETAKE takes roll at the full loop length, so FIXED is ignored while it is on'
+      : hasMaster()
+        ? 'Length of the next take, in bars (at most the loop). A shorter take repeats across the loop'
+        : 'Length of the first take, in bars (count-in + auto-stop on the downbeat)';
+
   // Two-step clear-all — same latch as the per-track CLR; the guard keeps it from arming with nothing to clear.
   const clearAll = createTwoStepConfirm(() => looper.clearAll());
   const onClearAll = () => {
@@ -232,40 +248,43 @@ export function Transport() {
           </Show>
         </div>
 
-        {/* Fixed-length record — first-track record runs the count-in then captures exactly N bars and
-            auto-stops on the downbeat. The bar stepper slides in while it's on; disabled once a loop
-            fixes the tempo. */}
-        <div class="transport__fixed" role="group" aria-label="Fixed-length record">
+        {/* Fixed-length record — the length of the NEXT take in bars. Before a loop exists that is the
+            first take (count-in, then auto-stop on the downbeat); after it, the next take, capped at the
+            loop's bar count — a shorter take repeats across the loop. Read at arm, so the controls stay
+            usable after the BPM lock and are locked only while a capture is live, or while RETAKE (whose
+            passes are master-length) overrides them. */}
+        <div class="transport__fixed" role="group" aria-label="Take length in bars">
           <button
             class="transport__tgl"
             classList={{ 'is-on': looper.fixedLengthEnabled() }}
-            aria-label={looper.fixedLengthEnabled() ? 'Fixed-length record on' : 'Fixed-length record off'}
+            aria-label={looper.fixedLengthEnabled() ? 'Fixed take length on' : 'Fixed take length off'}
             aria-pressed={looper.fixedLengthEnabled()}
-            disabled={clock.bpmLocked()}
+            disabled={fixedDisabled()}
             onClick={() => looper.setFixedLengthEnabled(!looper.fixedLengthEnabled())}
-            title="Record a fixed number of bars (count-in + auto-stop on the downbeat)"
+            title={fixedTitle()}
           >
-            FIXED {looper.fixedLengthBars()}
+            FIXED {effectiveFixedBars()}
           </button>
           <Show when={looper.fixedLengthEnabled()}>
-            <div class="transport__bars" role="group" aria-label="Loop length in bars">
+            <div class="transport__bars" role="group" aria-label="Take length in bars">
               <button
                 class="transport__step"
                 aria-label="Fewer bars"
-                disabled={clock.bpmLocked()}
-                onClick={() => looper.setFixedLengthBars(looper.fixedLengthBars() - 1)}
+                disabled={fixedDisabled()}
+                onClick={() => looper.setFixedLengthBars(effectiveFixedBars() - 1)}
               >
                 −
               </button>
               <span class="transport__bars-val" aria-live="polite">
-                {looper.fixedLengthBars()}
-                <span class="transport__bars-unit">{looper.fixedLengthBars() === 1 ? 'bar' : 'bars'}</span>
+                {effectiveFixedBars()}
+                <span class="transport__bars-unit">{effectiveFixedBars() === 1 ? 'bar' : 'bars'}</span>
               </span>
               <button
                 class="transport__step"
                 aria-label="More bars"
-                disabled={clock.bpmLocked()}
-                onClick={() => looper.setFixedLengthBars(looper.fixedLengthBars() + 1)}
+                disabled={fixedDisabled() || effectiveFixedBars() >= maxTakeBars()}
+                onClick={() => looper.setFixedLengthBars(effectiveFixedBars() + 1)}
+                title={hasMaster() ? 'At most the loop length' : undefined}
               >
                 +
               </button>

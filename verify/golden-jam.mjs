@@ -765,10 +765,13 @@ async function main() {
       10000,
       'track 3 to cross its boundary arm',
     );
+    await page.evaluate(() => {
+      window.__lf.pluginBridge.injectRecordLossForTest({ underruns: 1 });
+      window.__lf.looper.playStop(2);
+    });
+    await waitFor(page, () => window.__lf.looper.trackInfo(2).state !== 'RECORDING', 10000, 'track 3 to reach its bar line');
     const rejectedLaterTake = await page.evaluate(() => {
       const lf = window.__lf;
-      lf.pluginBridge.injectRecordLossForTest({ underruns: 1 });
-      lf.looper.playStop(2);
       return {
         state: lf.looper.trackInfo(2).state,
         length: lf.looper.trackInfo(2).lengthFrames,
