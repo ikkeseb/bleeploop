@@ -52,6 +52,7 @@ try {
         };
         const clipped = [];
         for (const el of document.querySelectorAll('button, input, select, .slot__k, .slot__name, .kb__title, .kb__hint, .kb__key, .kb__pad')) {
+          if (getComputedStyle(el).visibility === 'hidden') continue;
           const r = el.getBoundingClientRect();
           if (!r.width || !r.height) continue;
           const visible = { left: Math.max(0, r.left), top: Math.max(0, r.top), right: Math.min(innerWidth, r.right), bottom: Math.min(innerHeight, r.bottom) };
@@ -73,6 +74,7 @@ try {
       const unreachable = await page.evaluate(() => {
         const failures = [];
         for (const el of document.querySelectorAll('button, input, select, .slot__k, .slot__name, .kb__title, .kb__hint, .kb__key, .kb__pad')) {
+          if (getComputedStyle(el).visibility === 'hidden') continue;
           if (!el.getBoundingClientRect().width) continue;
           el.scrollIntoView({ block: 'nearest', inline: 'nearest' });
           if (!el.disabled) el.focus();
@@ -108,7 +110,8 @@ try {
     const drums = await page.evaluate(() => {
       const bar = document.querySelector('.cmd');
       // Rows = distinct vertical centres of the bar's visible children (a row is ~34 px; clusters centre on it).
-      const rows = new Set([...bar.children].map(el => el.getBoundingClientRect())
+      // The absolute 1px screen-reader announcement is not a rendered row.
+      const rows = new Set([...bar.children].filter(el => !el.classList.contains('cmd__sr')).map(el => el.getBoundingClientRect())
         .filter(r => r.width > 0 && r.height > 0).map(r => Math.round((r.top + r.bottom) / 2 / 14))).size;
       const pads = [...document.querySelectorAll('.kb__pad')].map(el => el.getBoundingClientRect());
       const lane = document.querySelector('.lp-lane');

@@ -301,24 +301,24 @@ export function Transport() {
             onClick={() => looper.setAutoRecordEnabled(!looper.autoRecordEnabled())}
             title="Wait for input instead of counting in on the first track"
           >
-            AUTO {looper.autoRecordSensitivity()}
+            AUTO <span class="transport__auto-value">{looper.autoRecordSensitivity()}</span>
           </button>
-          <Show when={looper.autoRecordEnabled()}>
-            <input
-              class="lf-range transport__volume transport__volume--auto"
-              type="range"
-              min="1"
-              max="100"
-              step="1"
-              value={looper.autoRecordSensitivity()}
-              style={{ '--fill': `${looper.autoRecordSensitivity()}%` }}
-              disabled={clock.bpmLocked()}
-              aria-label="Auto record sensitivity"
-              aria-valuetext={`${looper.autoRecordSensitivity()} of 100`}
-              title="Higher starts recording from quieter input"
-              onInput={(e) => looper.setAutoRecordSensitivity(Number((e.target as HTMLInputElement).value))}
-            />
-          </Show>
+          <input
+            class="lf-range transport__volume transport__volume--auto"
+            classList={{ 'is-inactive': !looper.autoRecordEnabled() }}
+            type="range"
+            min="1"
+            max="100"
+            step="1"
+            value={looper.autoRecordSensitivity()}
+            style={{ '--fill': `${looper.autoRecordSensitivity()}%` }}
+            disabled={!looper.autoRecordEnabled() || clock.bpmLocked()}
+            aria-hidden={!looper.autoRecordEnabled()}
+            aria-label="Auto record sensitivity"
+            aria-valuetext={`${looper.autoRecordSensitivity()} of 100`}
+            title="Higher starts recording from quieter input"
+            onInput={(e) => looper.setAutoRecordSensitivity(Number((e.target as HTMLInputElement).value))}
+          />
         </div>
 
         {/* TAP — dead once a loop fixes the tempo (clock.tap -> setBpm no-ops while locked). */}

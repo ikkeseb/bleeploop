@@ -215,7 +215,7 @@
   box-shadow: 0 0 14px -6px var(--dub);
 }
 
-/* Mode groups pair a pill with the contextual control that slides in when enabled. */
+/* Mode groups pair a pill with its contextual control. AUTO reserves the control's width. */
 .transport__click,
 .transport__fixed,
 .transport__auto {
@@ -334,6 +334,16 @@
 .transport__volume--auto {
   width: 64px;
 }
+/* Reserve AUTO's full width so toggling it or crossing 9/10/100 cannot move the stage. */
+.transport__volume--auto.is-inactive {
+  visibility: hidden;
+}
+.transport__auto-value {
+  display: inline-block;
+  width: 3ch;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
 .transport__volume-val {
   font-family: var(--mono);
   font-size: 11px;
@@ -345,7 +355,7 @@
 
 /* Narrow-width ladder. The `.cmd` card (app.css) is `overflow: hidden` via body, so anything that does
    not fit is simply unreachable. First rung: when one row cannot fit (measured by app/cmd-fit.ts —
-   idle below ~1420px, busy with the CLICK / FIXED / AUTO sliders open below ~1900px) the bar carries
+   including the contextual CLICK / FIXED controls and reserved AUTO width) the bar carries
    `.cmd--stack` and the CLICK / FIXED / AUTO / TAP cluster takes a second row under BPM. `order` moves
    it visually only — DOM/tab order is unchanged. The width stays intrinsic (no flex-basis: 100%) so
    the measurement cannot see its own effect. */

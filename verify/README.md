@@ -27,6 +27,8 @@ production compensation sampler with paired queue/timestamp observations, invali
 `audio-settings-startup.mjs` exercises actual frontend orchestration with an instrumented host;
 `layout-reachability.mjs` measures rendered control access and canvas identity at desktop sizes, plus the
 drum-pad ribbon, the two-row command-bar cap and the muted-lane readout with a loop present.
+`transport-auto-layout.mjs` checks that AUTO toggling and sensitivity changes preserve command-bar
+height and lane position from 960 to 1920 px, with screenshots at 1730 px.
 Rust unit tests run through `cargo test`; `.github/workflows/rust-test.yml` runs them on native-code
 changes. Runtime verification and the Windows/WSL command lane are owned by `docs/VERIFY.md`.
 
