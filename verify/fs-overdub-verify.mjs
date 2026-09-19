@@ -3,8 +3,8 @@
 // regression contrast; the preceding generation guard already prevented duplicate PCM swaps.
 // Actual timeout registration/cancellation and dispatcher behavior: overdub-timers.mjs.
 // MIRRORS: src/audio/looper/playback.ts@113-118 sha256:c5276b8403aa7026  (cancelOverdubSwap: cancel and release the owned handle)
-// MIRRORS: src/audio/looper/machine.ts@658-660 sha256:9eff65c27c4a9766  (startOverdub: reset stop intent and schedule its timer)
-// MIRRORS: src/audio/looper/machine.ts@664-679 sha256:d8467ffdf994b309  (finishOverdub: successful REC/DUB completion; no STOP or loss in this model)
+// MIRRORS: src/audio/looper/machine.ts@699-701 sha256:9eff65c27c4a9766  (startOverdub: reset stop intent and schedule its timer)
+// MIRRORS: src/audio/looper/machine.ts@705-720 sha256:d8467ffdf994b309  (finishOverdub: successful REC/DUB completion; no STOP or loss in this model)
 // MIRRORS: src/audio/looper/playback.ts@136-177 sha256:0f9a28739937416f  (scheduleOverdubSwap: owned timeout and anchor-derived boundary swap)
 
 let fails = 0, checks = 0;

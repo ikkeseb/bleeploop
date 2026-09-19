@@ -1,4 +1,4 @@
-import { armSplitAt } from '../src/audio/looper/grid-math.ts';
+import { armSplitAt, tileTake } from '../src/audio/looper/grid-math.ts';
 // Reproduce the stop-during-arm bug and show the fix. Faithful port of the relevant looper state
 // transitions (looper.ts was split into src/audio/looper/{state,capture,peaks,playback,machine,
 // mixer}.ts + a facade on 2026-07-01): consume arm-split
@@ -10,7 +10,8 @@ function ok(name, cond, detail = '') { checks++; if (!cond) { fails++; console.l
 const allZero = (a) => a.every((x) => x === 0);
 const anyNonZero = (a) => a.some((x) => x !== 0);
 
-const MASTER = 96000; // one bar @ 120/48k
+const FPB = 96000; // one bar @ 120/48k
+const MASTER = 4 * FPB;
 function makeTrack(index = 2) {
   return { index, state: 'EMPTY', armed: false, writeHead: 0, fillFrames: 0, lengthFrames: 0,
            peakCount: 0, record: new Float32Array(MASTER), stopAt: null };
@@ -21,7 +22,7 @@ let activeRecordIndex = -1;
 let masterFrames = MASTER;
 let bpmLocked = true;
 
-// MIRRORS: src/audio/looper/machine.ts@843-861 sha256:bd08c5442c9537c8  (resetMaster + resetMasterIfBlank)
+// MIRRORS: src/audio/looper/machine.ts@898-916 sha256:bd08c5442c9537c8  (resetMaster + resetMasterIfBlank)
 function resetMasterIfBlank(tracks) {
   if (activeRecordIndex < 0 && tracks.every((t) => t.state === 'EMPTY')) {
     masterFrames = 0;
@@ -58,18 +59,19 @@ function consume(t, data) {
   t.writeHead += n; t.fillFrames = t.writeHead;
   if (t.captureEndFrame !== null && firstFrame + count >= t.captureEndFrame) finishRecording(t);
 }
-// finishRecording later-take subset: buffer commit, state transition and owner release.
-// MIRRORS: src/audio/looper/machine.ts@233-254 sha256:3dc46b2b25d96a01  (finishCapture: completion owns recorder release)
+// finishRecording later-take subset: tile its chosen whole-bar window, then commit master length.
+// MIRRORS: src/audio/looper/machine.ts@247-268 sha256:3dc46b2b25d96a01  (finishCapture: completion owns recorder release)
 // Models the clean later-recording completion and its shared dispatcher release.
 function finishRecording(t) {
   if (activeRecordIndex !== t.index) return;
-  if (t.writeHead < MASTER) t.record.fill(0, t.writeHead, MASTER);
+  const takeFrames = Math.min(t.writeHead, t.captureEndFrame - t.captureStartFrame);
+  tileTake(t.record, takeFrames, MASTER);
   t.writeHead = MASTER;
   t.lengthFrames = MASTER; t.fillFrames = MASTER; t.armed = false; t.state = 'PLAYING';
   releaseRecorderState(t);
 }
-// MIRRORS: src/audio/looper/machine.ts@583-588 sha256:f1ac00fd5fc132e0  (stopCapture: armed capture delegates to stop)
-// MIRRORS: src/audio/looper/machine.ts@762-793 sha256:63141d8ed4fdc7cc  (stop: capture abort and true-blank reset)
+// MIRRORS: src/audio/looper/machine.ts@605-610 sha256:f1ac00fd5fc132e0  (stopCapture: armed capture delegates to stop)
+// MIRRORS: src/audio/looper/machine.ts@803-834 sha256:63141d8ed4fdc7cc  (stop: capture abort and true-blank reset)
 // stopRecording — OLD (buggy): always pad+commit
 function stopRecording_OLD(t) {
   if (t.writeHead < MASTER) t.record.fill(0, t.writeHead, MASTER);
@@ -83,7 +85,7 @@ function stopRecording_NEW(t, tracks = [t]) {
   }
   throw new Error('This model only exercises stop during arm');
 }
-// MIRRORS: src/audio/looper/machine.ts@355-376 sha256:3be20034b52c094c  (releaseRecorderState: only the owner resets capture state)
+// MIRRORS: src/audio/looper/machine.ts@377-398 sha256:3be20034b52c094c  (releaseRecorderState: only the owner resets capture state)
 function releaseRecorderState(t) {
   if (activeRecordIndex !== t.index) return;
   activeRecordIndex = -1;
@@ -150,6 +152,18 @@ console.log('=== 3. Regression: the NORMAL later-track take still records real a
   ok('normal: take starts at frame 0 with content', t.record[0] > 0.6 && t.record[MASTER - 1] > 0.6);
   ok('normal: arm flag cleared', t.armed === false);
   console.log(`    normal: state=${t.state} length=${t.lengthFrames} hasAudio=${anyNonZero(t.record)}`);
+}
+
+console.log('=== 3b. A short later-track take tiles across the committed master region ===');
+{
+  pendingRecordStartFrame = 0; activeRecordIndex = -1;
+  const t = makeTrack();
+  armLater(t, 1, 5000);
+  t.captureEndFrame = t.captureStartFrame + FPB;
+  const batch = new Float32Array(5000 + FPB); batch.fill(0.4);
+  consume(t, batch);
+  ok('short take commits at master length', t.state === 'PLAYING' && t.lengthFrames === MASTER);
+  ok('short take audio repeats through the final master frame', t.record[0] > 0.3 && t.record[MASTER - 1] > 0.3);
 }
 
 console.log('=== 4. The ▶/■ stop() path also resets the shared arm-count ===');

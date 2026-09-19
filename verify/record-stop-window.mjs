@@ -1,5 +1,6 @@
 // Vite on :1420. A delayed frame counter models native wet arrival using production's frozen C.
-// Manual first/later-track stop retains every performed frame before the press, then pads the loop.
+// A manual first-take stop keeps its existing press/pad rule. A later stop chooses completed whole bars
+// and tiles that window across the master.
 // No native driver or physical latency is measured here.
 import { chromium } from 'playwright';
 import assert from 'node:assert/strict';
@@ -46,8 +47,8 @@ try {
       lf.looper.setFixedLengthEnabled(take === 'fixed' || take === 'autoFixed' || mode === 'automatic');
       lf.looper.setFixedLengthBars(mode === 'automatic' ? 1 : 4);
       const index = take === 'later' ? 1 : 0;
-      if (take === 'later') await lf.looper.loadSession({ bpm: 120, bars: 1, masterLengthFrames: sr * 2,
-        tracks: [{ index: 0, pcm: new Float32Array(sr * 2), volume: 1, muted: false, reversed: false, fx: defaultFxStates() }] });
+      if (take === 'later') await lf.looper.loadSession({ bpm: 120, bars: 2, masterLengthFrames: sr * 4,
+        tracks: [{ index: 0, pcm: new Float32Array(sr * 4), volume: 1, muted: false, reversed: false, fx: defaultFxStates() }] });
       lf.recordLatency.setEnabled(trim > 0);
       lf.recordLatency.setFloorEnabled(false);
       lf.recordLatency.setOffsetMs(trim);
@@ -94,7 +95,7 @@ try {
       const automaticEnd = engineState.captureEndFrame;
       const musicalStart = captureStart - compensation;
       const nearBar = mode === 'afterLoop' || mode === 'wholeBar' || mode === 'earlyBar';
-      await until(nearBar ? musicalStart / sr + (mode === 'earlyBar' ? 1.94 : 2.02) : captureStart / sr + 0.30);
+      await until(mode === 'afterLoop' ? musicalStart / sr + 4.02 : nearBar ? musicalStart / sr + (mode === 'earlyBar' ? 1.94 : 2.02) : captureStart / sr + 0.30);
       const createBuffer = ctx.createBuffer;
       if (mode === 'bufferFailure') ctx.createBuffer = () => { throw new Error('injected buffer allocation failure'); };
       if (mode === 'sourceFailure') ctx.createBufferSource = () => { throw new Error('injected source allocation failure'); };
@@ -124,12 +125,19 @@ try {
       ctx.createBufferSource = createSource;
       const finalState = lf.looper.stateOf(index);
       const pcm = lf.looper.exportSnapshot().tracks.find((track) => track.index === index)?.pcm;
-      const loopFrames = sr * (mode === 'capacity' ? 60 : 2);
-      const expectedFrames = mode === 'capacity' ? loopFrames : ['wholeBar', 'earlyBar', 'automatic'].includes(mode) ? sr * 2 : Math.min(sr * 2, stopFrame - musicalStart);
+      const loopFrames = sr * (mode === 'capacity' ? 60 : take === 'later' ? 4 : 2);
+      const expectedFrames = mode === 'capacity' ? loopFrames : take === 'later' ? (mode === 'afterLoop' ? loopFrames : sr * 2) : ['wholeBar', 'earlyBar', 'automatic'].includes(mode) ? sr * 2 : Math.min(sr * 2, stopFrame - musicalStart);
       let missing = 0, extra = 0;
       if (pcm) {
-        for (let k = 0; k < expectedFrames; k++) if (pcm[k] !== expectedSample(captureStart + k)) missing++;
-        for (let k = expectedFrames; k < pcm.length; k++) if (pcm[k] !== 0) extra++;
+        for (let k = 0; k < pcm.length; k++) {
+          const expected = take === 'later'
+            ? expectedSample(captureStart + k % expectedFrames)
+            : k < expectedFrames ? expectedSample(captureStart + k) : 0;
+          if (pcm[k] !== expected) {
+            if (k < expectedFrames || take === 'later') missing++;
+            else extra++;
+          }
+        }
       }
       let canRetryPlayback = true;
       if (mode === 'bufferFailure' || mode === 'sourceFailure') {
@@ -175,8 +183,8 @@ try {
     if (discarded) assert.equal(result.frames, 0, 'CLEAR or capture loss must discard the pending take');
     else {
       assert.equal(result.frames, result.loopFrames, 'committed length must follow the existing musical rule');
-      assert.equal(result.missing, 0, 'manual stop must keep every frame performed before the press');
-      assert.equal(result.extra, 0, 'manual stop must pad with silence after the press');
+      assert.equal(result.missing, 0, result.take === 'later' ? 'later stop must tile its whole-bar window across the master' : 'first stop must keep every frame performed before the press');
+      assert.equal(result.extra, 0, 'first-take padding must remain silent');
       assert.ok(result.softOnsetRetained, 'AUTO must retain the soft onset before its trigger');
     }
   }

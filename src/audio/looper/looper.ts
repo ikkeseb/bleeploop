@@ -15,8 +15,8 @@
  * length is quantized to a whole number of bars at the current clock.bpm() (>= 1 bar). The
  * displayed tempo stays FROZEN at the count-in press (BPM is locked there for every count-in),
  * and the loop period is taken purely from the integer frame count — never re-derived from bpm.
- * masterLengthFrames is stored as an INTEGER and every later track records EXACTLY that many
- * frames — so all tracks are frame-identical and cannot drift by construction.
+ * masterLengthFrames is stored as an INTEGER and every later track COMMITS exactly that many frames.
+ * A shorter whole-bar take tiles across that region, so tracks stay frame-identical without a silent tail.
  *
  * ── PLAYBACK ──────────────────────────────────────────────────────────────────────────
  * Per track: an AudioBufferSourceNode (loop=true, loopStart=0, loopEnd=loopPeriodSec) started
@@ -93,6 +93,7 @@ import {
   copy,
   playAll,
   playStop,
+  nextTakeMaxBars,
   recDub,
   reverse,
   setAutoRecordEnabled,
@@ -211,12 +212,14 @@ export const looper = {
   trackVolume,
   /** Reactive per-track mute state. */
   trackMuted,
-  /** Reactive: whether fixed-length record is on (first-track record captures exactly N bars). */
+  /** Reactive: whether the next take captures a fixed number of bars. */
   fixedLengthEnabled,
-  /** Enable/disable fixed-length record mode (read at the first-track record press). */
+  /** Enable/disable fixed-length record mode for the next take. */
   setFixedLengthEnabled,
   /** Reactive: the fixed-length bar count (>= 1). */
   fixedLengthBars,
+  /** Effective upper bar limit for the next take: master bars when set, otherwise 32. */
+  nextTakeMaxBars,
   /** Set the fixed-length bar count (clamped to [1, 32]). */
   setFixedLengthBars,
   /** Reactive: whether the first master-defining take waits for a level trigger instead of count-in. */

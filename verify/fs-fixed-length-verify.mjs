@@ -1,11 +1,11 @@
-// Deterministic FIXED recording model. Pure bar/arm/commit arithmetic is imported from production.
+// Deterministic FIXED next-take model. Pure bar/arm/commit arithmetic is imported from production.
 // The model covers the clean-stream timestamp append, manual shortening and recorder/BPM cleanup.
 // It does not execute AUTO detection, audio scheduling, loss rejection or public dispatchers.
 // Those are exercised by golden-jam.mjs and record-stop-window.mjs.
-// MIRRORS: src/audio/looper/machine.ts@277-284 sha256:6ea9bda3068d34ac  (configureRecordingEnd: fixed target fits whole bars)
+// MIRRORS: src/audio/looper/machine.ts@297-306 sha256:6e4955535e889e2c  (configureRecordingEnd: fixed target fits whole bars)
 // MIRRORS: src/audio/looper/capture.ts@331-375 sha256:72293488834b3bda  (consume: append and exclusive timestamp completion; overdub omitted)
-// MIRRORS: src/audio/looper/machine.ts@355-376 sha256:3be20034b52c094c  (releaseRecorderState: owner guard and BPM unlock)
-// MIRRORS: src/audio/looper/machine.ts@584-621 sha256:808f13bb29cd043f  (stopCapture: shorten the timestamp window and finish when drained)
+// MIRRORS: src/audio/looper/machine.ts@377-398 sha256:3be20034b52c094c  (releaseRecorderState: owner guard and BPM unlock)
+// MIRRORS: src/audio/looper/machine.ts@606-662 sha256:ff923f1ebff6aadb  (stopCapture: shorten the timestamp window and finish when drained)
 
 import { armSplitAt, countInArm, planCommit, planFreeStop } from '../src/audio/looper/grid-math.ts';
 import { framesPerBar } from '../src/audio/quantize.ts';
@@ -15,6 +15,16 @@ function ok(name, cond, detail = '') { checks++; if (!cond) { fails++; console.l
 const FLT = 1e-6;
 const MAX_FIXED_BARS = 32;
 function clampBars(n) { return Math.max(1, Math.min(MAX_FIXED_BARS, Math.round(n))); }
+
+function configuredFrames({ master, fixedOn, bars, retakeOn, bpm, sr, recordLength }) {
+  let frames = master || recordLength;
+  if (fixedOn && (master === 0 || !retakeOn)) {
+    const fpb = framesPerBar(bpm, sr);
+    const maxBars = master > 0 ? master / fpb : Math.max(1, Math.floor(recordLength / fpb));
+    frames = Math.min(clampBars(bars), maxBars) * fpb;
+  }
+  return frames;
+}
 
 function armFixed(now, bpm, sr, bars, bufferLen) {
   const { beatPeriod, recordStart, pendingFrames: pending } = countInArm(now, bpm, sr);
@@ -62,7 +72,7 @@ function consumeFirst(state, t, data) {
   t.writeHead += n; t.fillFrames = t.writeHead;
   if (firstFrame + count >= state.captureEndFrame) finishRecording(state, t, state.bpmAtCommit, state.srAtCommit);
 }
-// MIRRORS: src/audio/looper/machine.ts@233-254 sha256:3dc46b2b25d96a01  (finishCapture: completion owns recorder release)
+// MIRRORS: src/audio/looper/machine.ts@247-268 sha256:3dc46b2b25d96a01  (finishCapture: completion owns recorder release)
 // Models the clean recording completion, including its shared dispatcher release.
 function finishRecording(state, t, bpm, sr) {
   if (state.activeRecordIndex !== t.index) return;
@@ -321,6 +331,17 @@ console.log('=== I. Manual FIXED stop tightens its end once and waits for the mi
   ok('I tail completes exactly two bars', state.committed && t.lengthFrames === 2 * fpb);
   ok('I retained tail survives up to the last frame', approx(t.record[2 * fpb - 1], 0.7, FLT));
   ok('I no audio beyond the shortened end', t.record[2 * fpb] === 0);
+}
+
+console.log('=== J. FIXED selects a later take window; RETAKE keeps master-length passes ===');
+{
+  const bpm = 120, sr = 48000, fpb = framesPerBar(bpm, sr);
+  const master = 8 * fpb;
+  const args = { master, fixedOn: true, bars: 3, retakeOn: false, bpm, sr, recordLength: sr * 60 };
+  ok('J later FIXED uses its selected whole-bar window', configuredFrames(args) === 3 * fpb);
+  ok('J later FIXED clamps at master bars', configuredFrames({ ...args, bars: 12 }) === master);
+  ok('J FIXED off keeps the full master window', configuredFrames({ ...args, fixedOn: false }) === master);
+  ok('J RETAKE ignores later FIXED and keeps the master pass', configuredFrames({ ...args, retakeOn: true }) === master);
 }
 
 console.log(`\n=== RESULT: ${checks - fails}/${checks} checks passed, ${fails} failed ===`);

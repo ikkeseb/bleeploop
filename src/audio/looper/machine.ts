@@ -1,7 +1,8 @@
 /**
  * OWNS: the track state machine — every EMPTY → RECORDING → PLAYING ⇄ OVERDUBBING (+ STOPPED) transition,
  * the single-recorder slot, and the master-loop decisions: MASTER LENGTH is decided in `finishRecording`
- * (first take, via grid-math `planCommit`) and `stopCapture` (the wall-clock bar target, `planFreeStop`);
+ * (first take, via grid-math `planCommit`) and `stopCapture` (the wall-clock bar target, `planFreeStop` /
+ * `planLaterStop`); later takes choose a whole-bar window and tile it across the master in `finishRecording`;
  * BPM IS LOCKED at the count-in press in `startRecording` (`beginAutoRecording` for AUTO) and re-asserted at
  * commit, unlocked only by `releaseRecorderState` (abort) / `resetMaster`; record-latency compensation C is
  * APPLIED as absolute capture windows in `startRecording`, `beginAutoRecording` and `startOverdub`;
@@ -23,7 +24,9 @@ import {
   phaseOffset,
   planCommit,
   planFreeStop,
+  planLaterStop,
   planRetakeStop,
+  tileTake,
   type RetakeStop,
 } from './grid-math';
 import { recordCompensationFrames } from '../record-latency';
@@ -200,6 +203,7 @@ function finishRecording(i: number): void {
   // Keep the unpadded length: a short first take waits for the next counted downbeat.
   const raw = Math.min(t.writeHead, (engineState.captureEndFrame ?? Infinity) - (engineState.captureStartFrame ?? 0));
   let master = masterLengthFrames();
+  const firstTake = master === 0;
   let when = engine.ctx.currentTime + HEARTBEAT_INTERNAL_LATENCY;
   let offset = 0;
   let firstBeatPeriod = 0;
@@ -217,8 +221,18 @@ function finishRecording(i: number): void {
     firstBeatPeriod = plan.beatPeriod;
   } else {
     offset = phaseOffset(when, engineState.masterStartTime, master / sr());
+    const fpb = framesPerBar(clock.bpm(), sr());
+    if (master % fpb !== 0) {
+      console.error(`[looper] cannot tile track ${i}: master ${master} is not a whole-bar multiple of ${fpb}`);
+      if (raw < master) t.record.fill(0, raw, master);
+    } else {
+      const masterBars = master / fpb;
+      const takeBars = clampBars(Math.floor(raw / fpb), masterBars);
+      if (raw < fpb) t.record.fill(0, raw, fpb); // a window cut short never tiles stale frames
+      tileTake(t.record, takeBars * fpb, master);
+    }
   }
-  if (raw < master) t.record.fill(0, raw, master);
+  if (firstTake && raw < master) t.record.fill(0, raw, master);
   t.writeHead = master;
   t.lengthFrames = master;
   t.fillFrames = master;
@@ -253,7 +267,7 @@ export function finishCapture(i: number): void {
   }
 }
 
-/** Enable/disable fixed-length record mode (governs the first-track record only). */
+/** Enable/disable fixed-length record mode for the next take. */
 function setFixedLengthEnabled(on: boolean): void {
   setFixedLengthEnabledSignal(on);
 }
@@ -261,6 +275,12 @@ function setFixedLengthEnabled(on: boolean): void {
 /** Set the fixed-length bar count, clamped to [1, MAX_FIXED_BARS] and rounded to a whole number. */
 function setFixedLengthBars(n: number): void {
   setFixedLengthBarsSignal(Math.max(1, Math.min(MAX_FIXED_BARS, Math.round(n))));
+}
+
+/** Maximum fixed length available to the next take. */
+function nextTakeMaxBars(): number {
+  const master = masterLengthFrames();
+  return master > 0 ? master / framesPerBar(clock.bpm(), sr()) : MAX_FIXED_BARS;
 }
 
 /** Enable/disable first-track AUTO REC. Off by default; later-track arms never read this flag. */
@@ -276,14 +296,16 @@ function setAutoRecordSensitivity(n: number): void {
 
 /** Bound a take at its existing master, FIXED bar count, or the free-record capacity. */
 function configureRecordingEnd(t: Track): void {
-  let frames = masterLengthFrames() || t.record.length;
-  if (masterLengthFrames() === 0 && fixedLengthEnabled()) {
+  const master = masterLengthFrames();
+  let frames = master || t.record.length;
+  if (fixedLengthEnabled() && (master === 0 || !retakeEnabled())) {
     const fpb = framesPerBar(clock.bpm(), sr());
-    frames = clampBars(fixedLengthBars(), maxWholeBars(t.record.length, fpb)) * fpb;
+    const maxBars = master > 0 ? master / fpb : maxWholeBars(t.record.length, fpb);
+    frames = clampBars(fixedLengthBars(), maxBars) * fpb;
   }
   engineState.captureEndFrame = engineState.captureStartFrame! + frames;
   // RETAKE rolls any take whose length is decided here (a free first take is bounded only by capacity).
-  if (retakeEnabled() && (masterLengthFrames() > 0 || fixedLengthEnabled())) {
+  if (retakeEnabled() && (master > 0 || fixedLengthEnabled())) {
     engineState.retakeRolling = true;
     engineState.retakeBuf = new Float32Array(frames); // allocated at arm, never in the drain
     engineState.retakeKept = false;
@@ -589,6 +611,7 @@ function stopCapture(i: number): void {
   }
   const now = engine.ctx.currentTime;
   let end = Math.round(now * sr()) + engineState.captureCompensationFrames;
+  let useLaterStop = true;
   if (engineState.retakeRolling) {
     // The roll ends with this gesture, whichever way it resolves (grid-math `planRetakeStop`).
     engineState.retakeRolling = false;
@@ -604,7 +627,10 @@ function stopCapture(i: number): void {
       finishCapture(i);
       return;
     }
-    if (plan === 'finish-pass') end = passEnd; // runs to its own end, then commits as an ordinary take
+    if (plan === 'finish-pass') {
+      end = passEnd; // runs to its own end, then commits as an ordinary take
+      useLaterStop = false;
+    }
   }
   if (t.state === 'RECORDING' && masterLengthFrames() === 0 && end !== engineState.captureEndFrame) {
     // Whole bars come from musical time, including the quarter-beat grace. A shorter take
@@ -612,6 +638,21 @@ function stopCapture(i: number): void {
     const elapsed = firstTakeDownbeatCtx > 0 ? now - firstTakeDownbeatCtx : 0;
     const { bars, target } = planFreeStop(elapsed, clock.bpm(), sr(), t.record.length);
     if (bars >= 1) end = engineState.captureStartFrame! + target;
+  }
+  if (t.state === 'RECORDING' && masterLengthFrames() > 0 && useLaterStop) {
+    const master = masterLengthFrames();
+    const fpb = framesPerBar(clock.bpm(), sr());
+    if (master % fpb === 0) {
+      const plan = planLaterStop(
+        now,
+        engineState.captureStartFrame!,
+        engineState.captureCompensationFrames,
+        clock.bpm(),
+        sr(),
+        master / fpb,
+      );
+      end = engineState.captureStartFrame! + plan.target;
+    }
   }
   engineState.captureEndFrame = Math.min(engineState.captureEndFrame ?? Infinity, end);
   flushActiveCapture();
@@ -792,21 +833,33 @@ function stop(i: number): void {
   publish(i);
 }
 
-/** Resume a STOPPED track's playback, phase-locked to the master grid. */
-function resume(i: number): void {
+/** Re-anchor an idle transport before any resumed track publishes PLAYING and activates the click. */
+function restartTimeIfIdle(): number | null {
+  const master = masterLengthFrames();
+  if (master === 0 || engineState.activeRecordIndex >= 0 || engineState.tracks.some((t) => t.state === 'PLAYING')) {
+    return null;
+  }
+  const when = engine.ctx.currentTime + HEARTBEAT_INTERNAL_LATENCY;
+  const masterBars = master / framesPerBar(clock.bpm(), sr());
+  engineState.masterStartTime = when;
+  engineState.loopPhasePlain = 0;
+  clock.startMasterPulse(when, master / sr() / (4 * masterBars));
+  return when;
+}
+
+/** Resume a STOPPED track at the top when transport is idle, otherwise at the live master phase. */
+function resume(i: number, sharedRestartTime?: number | null): void {
   const t = engineState.tracks[i];
   if (t.lengthFrames === 0) return;
+  const restartTime = sharedRestartTime === undefined ? restartTimeIfIdle() : sharedRestartTime;
   t.stopAt = null;
   const audioBuf = makeLoopBuffer(t.record, t.lengthFrames);
   t.state = 'PLAYING';
-  // Come back in IMMEDIATELY at the CURRENT loop phase (audible at once, phase-locked to the running grid)
-  // rather than waiting up to a full loop of silence for nextBoundary(). The track is already mid-loop when
-  // you press play, so starting at the live phase is the natural resume — it slots straight into the grid
-  // and the other tracks. The buffer still wraps to frame 0 on a grid boundary (gridAnchor + k*period), so
-  // it stays phase-locked.
+  // An active transport joins at its live phase. An idle one was re-anchored above, so it starts at frame 0.
+  // In both cases the buffer wraps on the shared grid and stays phase-locked with every playing track.
   const period = t.lengthFrames / sr();
-  const when = engine.ctx.currentTime + HEARTBEAT_INTERNAL_LATENCY;
-  const offset = period > 0 ? phaseOffset(when, engineState.masterStartTime, period) : 0;
+  const when = restartTime ?? engine.ctx.currentTime + HEARTBEAT_INTERNAL_LATENCY;
+  const offset = restartTime === null && period > 0 ? phaseOffset(when, engineState.masterStartTime, period) : 0;
   startPlayback(i, audioBuf, when, offset);
   publish(i);
 }
@@ -828,10 +881,12 @@ function stopAll(): void {
   }
 }
 
-/** Resume every STOPPED track -> PLAYING (phase-locked to the master grid). */
+/** Resume every STOPPED track together, restarting from the top when transport is idle. */
 function playAll(): void {
+  const hasStoppedTrack = engineState.tracks.some((t) => t.state === 'STOPPED' && t.lengthFrames > 0);
+  const restartTime = hasStoppedTrack ? restartTimeIfIdle() : null;
   for (let i = 0; i < TRACK_COUNT; i++) {
-    if (engineState.tracks[i]?.state === 'STOPPED') resume(i);
+    if (engineState.tracks[i]?.state === 'STOPPED') resume(i, restartTime);
   }
 }
 
@@ -965,6 +1020,7 @@ export {
   clear,
   setFixedLengthEnabled,
   setFixedLengthBars,
+  nextTakeMaxBars,
   setAutoRecordEnabled,
   setAutoRecordSensitivity,
 };

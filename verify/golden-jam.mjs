@@ -757,7 +757,7 @@ async function main() {
     await page.evaluate(() => window.__lf.looper.undoLastOverdub(0)); // restore the dubbed loop
 
     // Later-track failure: wait through its boundary arm, then force one worklet underrun and stop.
-    // stopRecording's normal early-stop padding reaches the real commit path immediately.
+    // The later stop's whole-bar deadline reaches the real rejection path once its tail arrives.
     await page.evaluate(() => window.__lf.looper.recDub(2));
     await waitFor(
       page,

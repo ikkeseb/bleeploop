@@ -1,4 +1,5 @@
-// Later-track arm arithmetic with the production armSplitAt helper and a discrete batch fixture.
+// Full-length later-track arm arithmetic with the production armSplitAt helper and a discrete batch
+// fixture. Short manual/FIXED windows and their master-length tiling live in fs-short-take-verify.mjs.
 // Clean streams establish frame identity across rates, BPMs and batch sizes. The separate overrun
 // case preserves the legacy unframed transport as a counterexample; it does NOT model the shipped
 // timestamped packet ring or its take rejection. Those run in fs-capture-packets-verify.mjs and the
@@ -146,8 +147,8 @@ function run() {
       ok(`later phase-locked to track1 (k*master)  sr=${sr} bpm=${bpm} bars=${bars} k=${k}`,
         phaseErr <= 1,
         `delta=${delta} phaseOff=${phaseOff} phaseErr=${phaseErr} master=${master}`);
-      // (3) Length identity: exactly master frames written.
-      ok(`later wrote exactly master  sr=${sr} bpm=${bpm} bars=${bars} k=${k}`,
+      // (3) An unshortened later take still captures the full master window.
+      ok(`full-length later take wrote exactly master  sr=${sr} bpm=${bpm} bars=${bars} k=${k}`,
         t.framesWritten === master, `wrote=${t.framesWritten} master=${master}`);
       ok(`no overruns on clean drain  sr=${sr} bpm=${bpm} bars=${bars} k=${k}`,
         rig.overruns === 0, `overruns=${rig.overruns}`);

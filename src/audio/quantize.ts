@@ -20,8 +20,8 @@ export function framesPerBar(bpmValue: number, sampleRate: number, beatsPerBar =
 
 /**
  * Largest number of WHOLE bars that fit a record buffer (>= 1). The buffer-fit bound every
- * bar-count derivation must respect: a master length > record.length would zero-pad the loop
- * tail and RangeError a later track's consume() (it writes up to `master` frames into the
+ * bar-count derivation must respect: a master length > record.length would zero-pad the first loop's
+ * tail and RangeError a later track's consume() (its configured window cannot exceed `master` frames in the
  * same-sized buffer). One source of truth for the clamp machine.ts used to hand-copy at each
  * commit/arm site.
  */

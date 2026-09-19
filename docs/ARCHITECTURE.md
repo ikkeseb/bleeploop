@@ -93,8 +93,8 @@ gain staging upstream is the real headroom; the limiter is the net. Per-track lo
   started/stopped at quantized absolute `currentTime`. Overdub = double-buffer + sample-
   aligned source swap at the next `loopEnd`.
 - **Frame-identical tracks by construction:** looper master-loop length is stored in **integer
-  frames**; later tracks record exactly `masterLengthFrames`, so all tracks are frame-identical and
-  cannot drift relative to each other. State machine per track: EMPTY → RECORDING → PLAYING ⇄
+  frames**; later tracks commit exactly `masterLengthFrames` (a shorter whole-bar take is tiled across
+  the master), so all tracks are frame-identical and cannot drift relative to each other. State machine per track: EMPTY → RECORDING → PLAYING ⇄
   OVERDUBBING, plus STOPPED.
 - **Musical stop:** optional END STOP schedules playing sources at the next master-loop boundary;
   a second press stops immediately. The click shares the final activity deadline. Capture stop/commit

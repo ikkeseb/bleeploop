@@ -1,6 +1,7 @@
 /**
- * OWNS: the looper's pure grid arithmetic — the decisions that turn a raw take into a master loop, anchor
- * it to the count grid, and split a captured batch at an arm boundary.
+ * OWNS: the looper's pure grid arithmetic — the decisions that turn a raw take into a master loop, choose
+ * and tile a later take's whole-bar window, anchor it to the count grid, and split a captured batch at an
+ * arm boundary.
  *
  * PURE ON PURPOSE: no engine, clock, Tone or engineState import, so this module runs under Node and the
  * `verify/` guards IMPORT it instead of hand-mirroring it (each import here deletes a MIRRORS drift tag —
@@ -125,6 +126,42 @@ export function planFreeStop(
   const bars = barSec > 0 ? Math.floor((elapsedSec + grace) / barSec) : 0;
   const target = clampBars(bars, maxWholeBars(recordLength, fpb)) * fpb;
   return { fpb, bars, target };
+}
+
+export interface LaterStopPlan {
+  fpb: number;
+  bars: number;
+  target: number;
+}
+
+/**
+ * Later-take stop: choose the completed whole bars at the press, with the same quarter-beat grace as a
+ * free first take. `captureStartFrame` includes compensation C, so subtract C before measuring musical
+ * elapsed time. The result is always one through `masterBars`; a first-bar press therefore records on to
+ * that bar line, while a press after a completed bar may put the deadline in the past.
+ */
+export function planLaterStop(
+  pressTimeSec: number,
+  captureStartFrame: number,
+  compensationFrames: number,
+  bpm: number,
+  sr: number,
+  masterBars: number,
+): LaterStopPlan {
+  const fpb = framesPerBar(bpm, sr);
+  const barSec = fpb / sr;
+  const grace = barSec / 16;
+  const musicalStartSec = (captureStartFrame - compensationFrames) / sr;
+  const elapsedSec = pressTimeSec - musicalStartSec;
+  const elapsedBars = barSec > 0 ? Math.floor((elapsedSec + grace) / barSec) : 0;
+  const bars = clampBars(elapsedBars, masterBars);
+  return { fpb, bars, target: bars * fpb };
+}
+
+/** Repeat the chosen later-take window across the master region, cutting the final copy at the edge. */
+export function tileTake(buf: Float32Array, takeFrames: number, master: number): void {
+  if (takeFrames <= 0 || takeFrames >= master || master > buf.length) return;
+  for (let i = takeFrames; i < master; i++) buf[i] = buf[i % takeFrames];
 }
 
 export type RetakeStop = 'finish-pass' | 'keep-last' | 'stop-now';

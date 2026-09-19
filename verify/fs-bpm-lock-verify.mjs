@@ -67,7 +67,7 @@ function makeLooper(clock) {
       // LATER track (master>0): arm only, NO lock (BPM must stay frozen to the committed loop).
     },
 
-    // MIRRORS: src/audio/looper/machine.ts@355-376 sha256:3be20034b52c094c  (releaseRecorderState: owner guard, window reset, BPM unlock)
+    // MIRRORS: src/audio/looper/machine.ts@377-398 sha256:3be20034b52c094c  (releaseRecorderState: owner guard, window reset, BPM unlock)
     releaseRecorderState(i) {
       if (this.activeRecordIndex !== i) return;
       this.activeRecordIndex = -1;

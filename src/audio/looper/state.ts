@@ -128,17 +128,16 @@ export const fxVersion = Array.from({ length: TRACK_COUNT }, () => createSignal(
 export const volumeSignals = Array.from({ length: TRACK_COUNT }, () => createSignal(1));
 export const muteSignals = Array.from({ length: TRACK_COUNT }, () => createSignal(false));
 /**
- * Fixed-length record mode (opt-in follow-on to the count-in): when enabled, a first-track record runs
- * the count-in then captures EXACTLY `fixedLengthBars` bars and auto-stops on the downbeat (the mirror
- * of the count-in arm). Tempo + length are committed up front — BPM locks at the record press. Both are
- * signals so the Transport UI re-reads reactively.
+ * Fixed-length record mode: when enabled, the next take captures `fixedLengthBars` bars and auto-stops
+ * on the downbeat, clamped to the master for a later take. A first take still runs the count-in and locks
+ * tempo at the press. RETAKE ignores FIXED once a master exists because its passes keep master length.
  */
 export const [fixedLengthEnabled, setFixedLengthEnabledSignal] = createSignal(false);
 export const [fixedLengthBars, setFixedLengthBarsSignal] = createSignal(4);
 /**
- * RETAKE (session-only, off by default): a take whose length is known at arm — a FIXED first take or any
- * later take — keeps rolling pass after pass instead of committing at its end; the stop gesture keeps the
- * last COMPLETE pass. A free first take has no length to roll around, so the flag does nothing there.
+ * RETAKE (session-only, off by default): a take whose length is known at arm keeps rolling pass after pass
+ * instead of committing at its end; the stop gesture keeps the last COMPLETE pass. Later-take passes use
+ * the master length even with FIXED enabled. A free first take has no length to roll around.
  */
 export const [retakeEnabled, setRetakeEnabled] = createSignal(false);
 /** Optional first-track level trigger. Off by default, so the existing count-in remains the entry path. */
@@ -157,7 +156,7 @@ export interface Track {
   record: Float32Array;
   /** Write head into `record` (frames). Wraps mod masterLengthFrames while overdubbing. */
   writeHead: number;
-  /** Frames captured in the current pass (capped at masterLengthFrames for later tracks). */
+  /** Frames captured in the current pass; a committed later take is tiled and then reports master length. */
   fillFrames: number;
   /** The committed loop length (frames) — equals masterLengthFrames once playing. */
   lengthFrames: number;
