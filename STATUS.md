@@ -1,9 +1,13 @@
 # STATUS — the rig lap
 
-Everything here is code-green and machine-proven where a machine can prove it. What is owed is the
+The rig lap below is code-green and machine-proven where a machine can prove it. What is owed is the
 owner's ear, eye or decision on the PC. This file is ONE ordered lap plus the decisions that block work — not a
 backlog. Taste (feel, wording, placement; no functional risk) lives in `docs/backlog-taste.md` and is
 NOT a gate. Non-gate code/product threads: `AGENTS.md` § Open threads.
+
+**External tester intake:** `docs/plans/tester-feedback.md` holds the open reports and owner requests,
+including audible short-track silence, plugin-switch freeze, export uncertainty and armed-click
+behavior. These are not reproduced fixes or additional rig stops; prior machine proofs do not close them.
 
 **Machine verification completed on Windows, 2026-09-19:** folder rename repaired (pnpm links and
 Rust build caches); clean Git synced to origin. Check/build, Rust checks with/without ASIO, 25 Rust
