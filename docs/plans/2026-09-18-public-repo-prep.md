@@ -26,24 +26,21 @@ over several sessions; this file is the pickup.
 ## Before flipping to public
 
 1. **Product name: BleepLoop (owner's decision), renamed in the tree.** Checked free of same-name
-   software on the App Store, Google Play, GitHub repos, npm, crates.io and web search; EUIPO/USPTO
-   not checked. Still open: the GitHub repo takes the name at step 2. The app icon is the wordmark's
-   colour-wheel dot, a placeholder until a real logo exists. The `lf.*` storage keys stay; import still accepts the earlier session `app` tag.
-2. **ONE repo (owner's decision): bundle the history, delete this GitHub repo, create the public one
-   under the final name.** A force-push does not remove the old commits from GitHub (the merged PR's
-   refs, old Actions logs/artifacts and cached views still reach them); deleting the repo does.
-   Order: `git bundle create <name>-history.bundle --all` kept off GitHub (the bundle is the only
-   archive) → the owner deletes the repo (needs the `delete_repo` scope; GitHub can restore a
-   deleted repo for 90 days) → new repo after the rename. Lost with the old repo: one merged PR,
-   the Actions history, the test draft release; it has no issues, secrets or forks.
-   **The new repo starts from ONE squashed commit of the final tree, not from this history.** The
-   09-18 rewrite scrubbed addresses, a full name and paths, but the impersonal
-   pass came later and changed only the tree: the pre-pass wording still sits in the diffs of about
-   200 commits and in over 100 commit messages. Cost: no public `git blame`. No tracked doc may cite a
-   commit sha: none resolves in the new repo and the docs guard checks them (none is cited today).
-3. **On the new repo:** enable private vulnerability reporting (`SECURITY.md` points at it), protect
-   `main` against force-push/deletion, require approval for first-time contributors' workflow runs.
-   `ci.yml` skips docs-only PRs (`paths-ignore`), which matters if CI becomes a required check.
+   software on the App Store, Google Play, GitHub repos, npm, crates.io, web search and TMview (no
+   mark contains "bleeploop"; two ended US filings for "BLEEP BLOOP"). The app icon is the
+   wordmark's colour-wheel dot, a placeholder until a real logo exists. The `lf.*` storage keys
+   stay; import still accepts the earlier session `app` tag.
+2. **This repo is the new one: it starts from ONE parentless commit of the final tree** (owner's
+   decision), authored with the account's noreply address. The earlier history lives only in an
+   off-GitHub bundle; the owner deletes the old private repo (a force-push would not have removed
+   its commits from GitHub). Cost: no public `git blame`. No tracked doc may cite a commit sha from
+   before the squash: none resolves here and the docs guard checks them.
+3. **Settings.** Set while private: Issues on, Wiki/Discussions/Projects off, `GITHUB_TOKEN`
+   read-only, Actions cannot approve PRs, Dependabot alerts, topics and description. GitHub only
+   allows these on a public repo, so they follow the flip: a ruleset blocking force-push and
+   deletion on `main`, private vulnerability reporting (`SECURITY.md` points at it), secret
+   scanning with push protection, approval for first-time contributors' workflow runs. `ci.yml`
+   skips docs-only PRs (`paths-ignore`), which matters if CI becomes a required check.
 4. A build from the README on a clean Windows machine is unverified.
 
 Landed after the first pass: `CONTRIBUTING.md`, `SECURITY.md`, a current README screenshot + clone and
