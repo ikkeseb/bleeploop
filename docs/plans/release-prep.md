@@ -38,7 +38,8 @@ Built and machine-verified:
   driving `engine.start`, `capture.init`, `midi.start`): context running, capture worklet loaded,
   `crossOriginIsolated` true, MIDI access resolved, no violation. CSP violations now reach the release
   log as `[csp]` lines. Not probed: the plugin PCM worklet with a plugin loaded, plugin editors,
-  session export, a connected MIDI device.
+  a connected MIDI device. Session export reached Downloads in a separately identified release
+  profile on 2026-09-19; its downloaded stem was sample-exact (details in `STATUS.md` Stop 8).
 
 Still open:
 

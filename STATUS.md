@@ -67,12 +67,10 @@ Detail per stop is in § Stop detail below.
 7. **MIC path + AUTO REC.** With a real interface: Audio Settings Ch 1 hears/records only physical
    input 1, Ch 2 only input 2. AUTO REC: muted-guitar noise floor must not arm; a real attack must —
    sensitivity, onset and click feel.
-8. **Session lifecycle in the real app.** Record a loop → ⬇ EXPORT (icon, top-right tools) → the zip
-   lands in Downloads (WebView2 blob download is the unknown; fallback = tauri-plugin-fs behind the
-   platform seam). Clear → ⬆ IMPORT the zip via the native file picker → grid/feel identical. Click
-   the OS ✕ with a loop live → confirm dialog; Cancel keeps the jam, OK saves + closes; reopen → the
-   loops restore. CLEAR ALL then immediate ✕ must not resurrect the old jam; all lanes EMPTY → no
-   dialog. Open a stem + the master once in a DAW (master = wet render, honours master fader/mute).
+8. **Session files on the rig.** Remaining: import the exported zip through the native file picker
+   and hear the restored grid; open a stem + the master in a DAW (master = wet render, honours master
+   fader/mute). Native downloads and close/recovery are machine-verified below; dialog appearance
+   and the real file-picker interaction were not automated.
 9. **WASAPI A/B.** `pnpm dev:wasapi`, same jam: how much worse is the latency by ear? (Never A/B'd —
    ASIO has always been on.)
 10. **MIDI controller — only if one is plugged (skip otherwise).** Unplug mid-note →
@@ -196,3 +194,14 @@ tracks, stems include them; needs
 all-EMPTY; round-trip is byte-proven. Close guard: `lib.rs`, `app.tsx jamInProgress`,
 `audio/autosave.ts` — web tier shows the browser's generic leave-page dialog instead. Local recovery
 uses Float32 stems to preserve recorded samples exactly, including overdub headroom.
+
+**First-session verification completed on Windows, 2026-09-19:** `verify/first-session.mjs`
+recorded a real synth using UI controls in an empty browser profile, downloaded its zip, reopened
+from automatic recovery and imported the file into a second empty profile. Both PCM hashes matched;
+a malformed import was rejected and a later valid import succeeded; clear survived reload.
+An isolated, temporarily instrumented ASIO release also delivered its zip to Downloads under the
+production CSP; every sample of the downloaded stem matched the seeded loop. Real OS close events
+with scripted confirm answers kept the window alive on Cancel and saved/closed on acceptance;
+Reopening restored exact PCM. CLEAR ALL followed by an OS close before the normal two-second
+autosave delay did not resurrect the earlier saved loop on reopening, and the empty
+session did not request confirmation. Native input recording and perceived sound are outside this proof.

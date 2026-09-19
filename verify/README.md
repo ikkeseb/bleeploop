@@ -29,6 +29,10 @@ production compensation sampler with paired queue/timestamp observations, invali
 drum-pad ribbon, the two-row command-bar cap and the muted-lane readout with a loop present.
 `transport-auto-layout.mjs` checks that AUTO toggling and sensitivity changes preserve command-bar
 height and lane position from 960 to 1920 px, with screenshots at 1730 px.
+`first-session.mjs` drives real buttons, synth keys and file controls in fresh browser profiles:
+record, download the zip, reopen from automatic recovery, retry a malformed import, import the
+download into another profile and clear/reload. PCM hashes must match across both round trips.
+It polls completed recovery reads rather than treating an asynchronous predicate as a saved result.
 Rust unit tests run through `cargo test`; `.github/workflows/rust-test.yml` runs them on native-code
 changes. Runtime verification and the Windows/WSL command lane are owned by `docs/VERIFY.md`.
 
