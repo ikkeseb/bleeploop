@@ -67,7 +67,7 @@ Proven in the browser tier only (`pnpm check`, `pnpm build`, `pnpm verify:jam`, 
 
 ## Work order (owner-approved)
 
-1. **F7.** Ask the tester for the release log (`%LOCALAPPDATA%\com.bleeploop.app\logsleeploop.log`)
+1. **F7.** Ask the tester for the release log (`%LOCALAPPDATA%\com.bleeploop.app\logs\bleeploop.log`)
    and the plugin pair they switched between. Meanwhile run a bounded repro on the dev PC: tweak,
    switch plugin, editor open and closed. DecentSampler is NOT installed on the dev PC (VST3 folder:
    Archetype, FabFilter, Neural DSP, Surge); install it or accept a stand-in. Distinguish a host
