@@ -15,6 +15,7 @@ import { createSignal } from 'solid-js';
 
 export interface Toast {
   id: number;
+  kind: 'error' | 'info';
   message: string;
   detail?: string;
   /** Repeat count — a duplicate message increments this instead of stacking a second toast. */
@@ -103,9 +104,19 @@ function forget(id: number): void {
  * toast is pushed; past MAX_VISIBLE the oldest is dropped (its timer cleared).
  */
 export function notifyError(message: string, detail?: unknown): void {
+  push('error', message, detail);
+}
+
+/** A success/confirmation toast (e.g. "export saved") — same store, dedupe and lifetime as an error,
+ * rendered with the calm accent. NOT a logging surface: nothing here replaces a `console.error`. */
+export function notifyInfo(message: string, detail?: unknown): void {
+  push('info', message, detail);
+}
+
+function push(kind: Toast['kind'], message: string, detail: unknown): void {
   const text = serializeDetail(detail);
   const current = toasts();
-  const existing = current.find((t) => t.message === message);
+  const existing = current.find((t) => t.message === message && t.kind === kind);
   if (existing) {
     setToasts(
       current.map((t) =>
@@ -115,7 +126,7 @@ export function notifyError(message: string, detail?: unknown): void {
     arm(existing.id); // reset the linger window on repeat
     return;
   }
-  const toast: Toast = { id: nextId++, message, detail: text, count: 1 };
+  const toast: Toast = { id: nextId++, kind, message, detail: text, count: 1 };
   bornAt.set(toast.id, Date.now());
   let next = [...current, toast];
   while (next.length > MAX_VISIBLE) {

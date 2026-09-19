@@ -12,8 +12,8 @@ versions are unknown. Screenshots and the owner's account establish the observat
 nothing has been reproduced at runtime. Screenshots are temporary, uncommitted attachments; their
 relevant contents are transcribed here.
 
-All items remain open. § Code reading records what the source does at `d17c777`; § Work order is
-the owner-approved sequence.
+All items remain open until the tester confirms. § Code reading records what the source did at
+`d17c777`, before the fixes under § Landed; § Work order is the owner-approved sequence.
 
 ## Requests and reports
 
@@ -52,18 +52,45 @@ to be re-checked before they steer a change.
 | F10 | The number is AUTO REC sensitivity, 1–100 → −12…−60 dBFS RMS (`auto-record.ts:8-19`); label built at `Transport.tsx:304`. | Wording only |
 | F11 ✓ | Ordinary ARMED already clicks with CLICK on; only AUTO LISTENING is excluded from the click gate (`state.ts:318`). | One-line gate change + `pnpm verify:jam` |
 
+## Landed in code, awaiting the tester's machine
+
+Proven in the browser tier only (`pnpm check`, `pnpm build`, `pnpm verify:jam`, `first-session`,
+`midi-note-ownership`); nothing here was run in the Tauri app or on the tester's machine.
+
+- **F4:** the on-screen keys mirror the router's held set (`inputRouter.onHeldChange`), so MIDI lights
+  keys and GM pads. Computer keys now own their note per physical key.
+- **F3:** export shows a success toast naming the `.zip` and pointing at Downloads; the label says
+  zip. Where WebView2 actually puts the file is unverified. A real save dialog stays a separate call.
+- **F6:** the PARAMS preview takes the first 12 NAMED params; unnamed ones count toward "+N more".
+- **F9:** the auto go-live after a fresh pick is quiet (log line kept); a clicked GO LIVE still reports.
+- **F10:** the button reads `AUTO REC · SENS n` with an explanatory tooltip. Wording is the owner's eye.
+
 ## Work order (owner-approved)
 
-1. **F7.** Ask the tester for the release log (`%LOCALAPPDATA%\com.bleeploop.app\logs\bleeploop.log`)
-   and the plugin pair they switched between. Meanwhile run a bounded repro on the dev PC:
-   DecentSampler, tweak, switch plugin, editor open and closed. Distinguish a host hang from a
-   stale scan indicator before changing either subsystem.
-2. **Machine-provable small fixes:** F4, F10, F6, F9, F11, and F3's success feedback + label.
-3. **F2 + F1 + F5 as ONE design conversation with the owner before any build** — all three are
-   per-track length/position. Agent starting point, not approved: a manually stopped take rounds
-   to whole bars and loops at its own length (RC-505 style), which never reads silence as a
-   phrase boundary. Do not infer a trim rule from the screenshot.
-4. **F8 waits** for an owner decision on a native monitor path for synth plugins; F12 stays with
+1. **F7.** Ask the tester for the release log (`%LOCALAPPDATA%\com.bleeploop.app\logsleeploop.log`)
+   and the plugin pair they switched between. Meanwhile run a bounded repro on the dev PC: tweak,
+   switch plugin, editor open and closed. DecentSampler is NOT installed on the dev PC (VST3 folder:
+   Archetype, FabFilter, Neural DSP, Surge); install it or accept a stand-in. Distinguish a host
+   hang from a stale scan indicator before changing either subsystem.
+2. **F2 + F1 + F5 + F11 as ONE design conversation with the owner before any build.** Agent starting
+   point, not approved: a manually stopped take rounds to whole bars and loops at its own length
+   (RC-505 style), which never reads silence as a phrase boundary. Do not infer a trim rule from
+   the screenshot. Reader material for that conversation (static reading, RC-505 behaviour unknown):
+   - ~30 sites assume track length == master length: playback bounds, overdub sum/swap, undo,
+     reverse, RETAKE, END STOP/STOP ALL, export render + session schema + import, waveform, recovery.
+   - Smallest honest version: a PRE-CHOSEN length for the next take, limited to whole-bar divisors
+     of the master (1/2/4 over 8). It reuses `lengthFrames`, needs no per-track phase anchor, and
+     answers F1 by letting the bar meter pick the next take's length after the BPM lock.
+   - The free "stop decides" version also needs a per-track phase origin (3 over 8 realigns every 24
+     bars), a rounding rule for late/early stops, a RETAKE priority rule, and an export period that
+     can reach the LCM of the lengths.
+   - F5 is its own product call in either version: a global "from the top" when everything is
+     stopped is cheap; a per-track restart while others play needs a boundary or a phase anchor.
+   - **F11 is not a one-line gate change.** In AUTO LISTENING no grid exists yet, and the pulse
+     re-anchors to the detected onset (`machine.ts` `beginAutoRecording`), so a click during
+     listening would jump phase when the take starts; through a mic the click could trigger AUTO.
+     Ordinary ARMED already clicks.
+3. **F8 waits** for an owner decision on a native monitor path for synth plugins; F12 stays with
    `docs/plans/release-prep.md`.
 
 Preserve the complete intake while fixing one issue at a time. The tester's machine remains the

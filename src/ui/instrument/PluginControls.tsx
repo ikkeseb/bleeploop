@@ -121,7 +121,10 @@ export function PluginBar(props: {
     }
   }
 
-  async function toggleLive() {
+  // `quiet` = the auto-start after a dropdown pick (same rule as toggleEditor): the scan's effect flag
+  // comes from the plugin's category, not its actual input bus, so a refusal here is not an error the
+  // user caused — no toast, no error chip. GO LIVE stays available and reports when clicked.
+  async function toggleLive(quiet = false) {
     if (liveBusy()) return; // single-flight: ignore re-clicks while an arm/disarm is pending
     const wantLive = !live();
     setLiveBusy(true);
@@ -141,8 +144,9 @@ export function PluginBar(props: {
       // The worth-surfacing failure is going live on a plugin with no audio-input bus (a pure synth in
       // the slot) — goLive rejects at the input-arm step. A cpal monitor-open failure also lands here
       // (goLive rolled the input back). A stop failure is rare; report generically.
-      setLiveError(wantLive ? 'no input bus' : 'stop failed');
       console.error('[PluginControls] go-live toggle failed', e);
+      if (quiet) return;
+      setLiveError(wantLive ? 'no input bus' : 'stop failed');
       notifyError(
         wantLive
           ? "Couldn't start live input. This plugin may not accept audio input"
@@ -163,7 +167,7 @@ export function PluginBar(props: {
     let gone = false; // a swap while going live remounts this bar — the new one runs its own start
     onCleanup(() => (gone = true));
     void (async () => {
-      if (props.descriptor.isEffect === true && platform.pluginHost.available) await toggleLive();
+      if (props.descriptor.isEffect === true && platform.pluginHost.available) await toggleLive(true);
       if (!gone) await toggleEditor(true);
     })();
   });
@@ -256,7 +260,10 @@ export function PluginParams(props: { slot: 0 | 1 }) {
     setTotalParams(ps.length);
     nameById.clear();
     for (const p of ps) nameById.set(p.id, p.name);
-    const preview = ps.slice(0, PARAM_PREVIEW_COUNT);
+    // A plugin can report params with an EMPTY name (seen with DecentSampler VST3). A nameless slider
+    // says nothing, so the preview takes the first NAMED params; the rest stay reachable in the
+    // editor and count toward "+N more".
+    const preview = ps.filter((p) => p.name.trim() !== '').slice(0, PARAM_PREVIEW_COUNT);
     const init: Record<number, number> = {};
     renderedIds.clear();
     for (const p of preview) {
@@ -330,7 +337,11 @@ export function PluginParams(props: { slot: 0 | 1 }) {
 
         <Show
           when={params().length > 0}
-          fallback={<div class="pc__empty param--gain">no parameters exposed</div>}
+          fallback={
+            <div class="pc__empty param--gain">
+              {totalParams() > 0 ? 'no named parameters' : 'no parameters exposed'}
+            </div>
+          }
         >
           <For each={params()}>
             {(p) => {

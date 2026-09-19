@@ -20,7 +20,7 @@ export function Toasts() {
     <div class="toasts" role="log" aria-live="polite" aria-label="Notifications">
       <For each={toasts()}>
         {(t) => (
-          <div class="toast" onClick={() => dismissToast(t.id)} title="Dismiss">
+          <div class="toast" classList={{ 'toast--info': t.kind === 'info' }} onClick={() => dismissToast(t.id)} title="Dismiss">
             <span class="toast__accent" aria-hidden="true" />
             <div class="toast__body">
               <span class="toast__msg">

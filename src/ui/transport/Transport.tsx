@@ -299,9 +299,9 @@ export function Transport() {
             aria-pressed={looper.autoRecordEnabled()}
             disabled={clock.bpmLocked() || anyCapturing()}
             onClick={() => looper.setAutoRecordEnabled(!looper.autoRecordEnabled())}
-            title="Wait for input instead of counting in on the first track"
+            title="Start recording when you start playing, instead of counting in (first track). SENS is how quiet a sound may be and still start it: higher = more sensitive."
           >
-            AUTO <span class="transport__auto-value">{looper.autoRecordSensitivity()}</span>
+            AUTO REC · SENS <span class="transport__auto-value">{looper.autoRecordSensitivity()}</span>
           </button>
           <input
             class="lf-range transport__volume transport__volume--auto"

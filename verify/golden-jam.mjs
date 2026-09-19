@@ -719,7 +719,7 @@ async function main() {
         exportError = String(error);
       }
       const recoveryBuilt = (await lf.buildExportBundle({ bpm, bars }, { includeMaster: false })) !== null;
-      const exportDisabled = document.querySelector('[aria-label="Export loops as WAV files"]')?.disabled === true;
+      const exportDisabled = document.querySelector('[aria-label="Export loops as a zip of WAV files"]')?.disabled === true;
       lf.pluginBridge.injectRecordLossForTest({ droppedFrames: 128 });
       await lf.looper.recDub(0);
       const after = lf.looper.exportSnapshot().tracks.find((t) => t.index === 0).pcm;

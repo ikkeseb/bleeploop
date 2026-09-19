@@ -41,6 +41,7 @@ class InputRouter {
   private readonly sustained = new Map<number, Set<string>>();
   private readonly bends = new Map<string, number>();
   private readonly modulation = new Map<string, number>();
+  private readonly heldListeners = new Set<(held: ReadonlySet<number>) => void>();
 
   /** Current MIDI performance controllers, retained so a synth swap inherits the live wheel state. */
   private pitchBend = 0;
@@ -78,6 +79,23 @@ class InputRouter {
     return new Set(this.heldBySource.keys());
   }
 
+  /**
+   * Subscribe to changes in WHICH notes are physically held, from every source — the on-screen
+   * keyboard draws its down keys from this, so a MIDI controller lights the same keys as a pointer.
+   * Fires after the note has been dispatched to the sink, never before (the listener's work must not
+   * sit in front of the sound). Returns the unsubscribe.
+   */
+  onHeldChange(listener: (held: ReadonlySet<number>) => void): () => void {
+    this.heldListeners.add(listener);
+    return () => this.heldListeners.delete(listener);
+  }
+
+  private emitHeld(): void {
+    if (!this.heldListeners.size) return;
+    const held = this.held;
+    for (const listener of this.heldListeners) listener(held);
+  }
+
   handle(ev: NoteEvent): void {
     if (!Number.isInteger(ev.note) || ev.note < 0 || ev.note > 127) return;
     const owner = ev.owner ?? ev.source;
@@ -93,6 +111,7 @@ class InputRouter {
         const velocity = clampMidi(ev.velocity) / 127;
         if (this.activePlugin) this.activePlugin.noteOn(ev.note, velocity);
         else this.active?.noteOn(ev.note, velocity, engine.ctx.currentTime + SCHEDULE_AHEAD);
+        this.emitHeld();
       }
     } else {
       const sources = this.heldBySource.get(ev.note);
@@ -104,6 +123,7 @@ class InputRouter {
         owners.add(this.pedals.has(owner) ? owner : 'global');
       }
       this.releaseIfUnheld(ev.note);
+      if (!sources.size) this.emitHeld();
     }
   }
 
@@ -164,8 +184,10 @@ class InputRouter {
     if (this.activePlugin) {
       for (const note of this.heldBySource.keys()) this.activePlugin.noteOff(note);
     }
+    const hadHeld = this.heldBySource.size > 0;
     this.heldBySource.clear();
     this.sustained.clear();
+    if (hadHeld) this.emitHeld();
   }
 }
 

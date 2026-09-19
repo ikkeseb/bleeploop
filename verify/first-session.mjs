@@ -53,7 +53,7 @@ try {
   const context = await browser.newContext({ viewport: { width: 1280, height: 820 }, acceptDownloads: true });
   let page = await open(context);
   assert.equal((await snapshot(page)).tracks, 0);
-  assert.equal(await page.getByRole('button', { name: 'Export loops as WAV files' }).isDisabled(), true);
+  assert.equal(await page.getByRole('button', { name: 'Export loops as a zip of WAV files' }).isDisabled(), true);
   assert.equal(await page.getByRole('button', { name: 'Import a session zip' }).isEnabled(), true);
   await page.getByRole('button', { name: 'Keyboard & layout help' }).click();
   assert.match(await page.locator('#lf-help-popover').innerText(), /Session/);
@@ -72,7 +72,7 @@ try {
   assert.equal(await page.getByRole('button', { name: 'Import a session zip' }).isDisabled(), true);
   await page.screenshot({ path: 'logs/first-session/recorded.png' });
   const downloadPromise = page.waitForEvent('download');
-  await page.getByRole('button', { name: 'Export loops as WAV files' }).click();
+  await page.getByRole('button', { name: 'Export loops as a zip of WAV files' }).click();
   const download = await downloadPromise;
   assert.match(download.suggestedFilename(), /\.zip$/);
   const archivePath = 'logs/first-session/session.zip';

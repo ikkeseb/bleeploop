@@ -73,11 +73,17 @@ try {
     pointer('pointerup', 902); await pause(30);
     const lastPointerUp = { held: [...lf.inputRouter.held], highlighted: key.classList.contains('kb__key--down') };
     key.setPointerCapture = capture;
-    return { heldAfterFirstPortRelease, heldAfterFirstChannelRelease, releasedKeyboardRms, otherPortReleaseRms, otherPedalUpRms, ownPedalUpRms, heldAfterOtherCc123, heldAfterBothCc123, cc123UnderPedalRms, cc123PedalUpRms, heldAfterOtherDisconnect, firstPointerUp, lastPointerUp };
+    // A MIDI controller lights the same on-screen key as the pointer (the keys mirror the router).
+    send('b', [0x90, 60, 100]); await pause(30);
+    const midiDown = key.classList.contains('kb__key--down');
+    send('b', [0x80, 60, 0]); await pause(30);
+    const midiUp = key.classList.contains('kb__key--down');
+    return { heldAfterFirstPortRelease, heldAfterFirstChannelRelease, releasedKeyboardRms, otherPortReleaseRms, otherPedalUpRms, ownPedalUpRms, heldAfterOtherCc123, heldAfterBothCc123, cc123UnderPedalRms, cc123PedalUpRms, heldAfterOtherDisconnect, firstPointerUp, lastPointerUp, midiDown, midiUp };
   });
   console.log(JSON.stringify(result));
   assert.deepEqual(result.firstPointerUp, { held: [60], highlighted: true }, 'first pointer release preserves sound and key highlight');
   assert.deepEqual(result.lastPointerUp, { held: [], highlighted: false }, 'last pointer releases sound and key highlight');
+  assert.deepEqual([result.midiDown, result.midiUp], [true, false], 'a MIDI note highlights and clears its on-screen key');
   assert.deepEqual(result.heldAfterFirstPortRelease, [60], 'one MIDI port must not release another port\'s held note');
   assert.deepEqual(result.heldAfterFirstChannelRelease, [60], 'one MIDI channel must not release another channel\'s held note');
   assert.ok(result.otherPortReleaseRms < 1e-5, 'one port pedal must not sustain another port');

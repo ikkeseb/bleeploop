@@ -4,7 +4,7 @@ import { engine } from '../../audio/engine';
 import { exportLoops } from '../../audio/export/export';
 import { importSession, maxImportArchiveBytes } from '../../audio/export/import';
 import { looper } from '../../audio/looper/looper';
-import { notifyError } from '../../notify';
+import { notifyError, notifyInfo } from '../../notify';
 import { anyTrackIn, masterBars } from '../looper/Looper';
 
 /**
@@ -33,7 +33,8 @@ export function SessionTools() {
     if (exporting() || !anyCommitted() || anyCapturing()) return;
     setExporting(true);
     try {
-      await exportLoops({ bpm: clock.bpm(), bars: loopBars() });
+      const filename = await exportLoops({ bpm: clock.bpm(), bars: loopBars() });
+      if (filename) notifyInfo(`Exported ${filename}`, 'One .zip with every track + the master as WAV. Look in your Downloads folder.');
     } catch (err) {
       console.error('[transport] export failed', err);
       notifyError('Export failed', err);
@@ -73,8 +74,8 @@ export function SessionTools() {
         disabled={!anyCommitted() || anyCapturing() || exporting()}
         onClick={() => void onExport()}
         aria-busy={exporting()}
-        aria-label="Export loops as WAV files"
-        title="Export each track + a master mix as WAV, plus session.json"
+        aria-label="Export loops as a zip of WAV files"
+        title="Export one .zip: each track + a master mix as WAV, plus session.json"
       >
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
           <path d="M12 4v11M7.5 10.5 12 15l4.5-4.5" stroke-linecap="round" stroke-linejoin="round" />

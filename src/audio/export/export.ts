@@ -116,9 +116,13 @@ export async function buildExportBundle(
   return { zipBytes: makeZip(entries), base };
 }
 
-/** Export = build the bundle + drop it as ONE .zip download (one file, one gesture — see header). */
-export async function exportLoops(meta: { bpm: number; bars: number }): Promise<void> {
+/** Export = build the bundle + drop it as ONE .zip download (one file, one gesture — see header).
+ * Returns the archive's filename so the caller can name it to the user, or null when nothing was
+ * exported. The download is handed to the WebView; where it lands is the WebView's call. */
+export async function exportLoops(meta: { bpm: number; bars: number }): Promise<string | null> {
   const bundle = await buildExportBundle(meta);
-  if (!bundle) return; // nothing committed — button should already guard this
-  download(bundle.zipBytes, `${bundle.base}.zip`, 'application/zip');
+  if (!bundle) return null; // nothing committed — button should already guard this
+  const filename = `${bundle.base}.zip`;
+  download(bundle.zipBytes, filename, 'application/zip');
+  return filename;
 }

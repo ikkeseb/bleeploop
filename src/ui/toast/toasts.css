@@ -44,6 +44,12 @@
   box-shadow: 0 0 8px -1px var(--dub);
 }
 
+/* a confirmation (export saved) takes the play-green rule instead of the attention amber */
+.toast--info .toast__accent {
+  background: var(--play);
+  box-shadow: 0 0 8px -1px var(--play);
+}
+
 .toast__body {
   flex: 1 1 auto;
   min-width: 0;
