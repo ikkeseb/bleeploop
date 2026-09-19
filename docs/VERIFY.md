@@ -136,6 +136,12 @@ Tone transport handle). This is how you drive and inspect the app from Playwrigh
   `complete: N opened, M failed` line is the verdict. Windows open on the PC desktop; no gesture
   needed. Run it after any change to `editor_window.rs` or either host's editor open/close path. Baseline
   (2026-09-12, WASAPI, 44.1 kHz): `complete: 30 opened, 0 failed, of 30`, each closing in 110–150 ms.
+- Swap stress (does switching plugins IN PLACE complete after the loaded one was tweaked):
+  `VITE_LF_PROBE=swap-stress`, same launch and `VITE_LF_PROBE_FILTER` as the editor smoke.
+  `src/debug/swap-stress.ts` swaps every ordered pair in slot 0, editor closed then open, sweeping the
+  first params (`VITE_LF_PROBE_PARAMS`, default 8) before each swap; every step is timed and a step
+  past 30 s prints `TIMEOUT` naming it. Verdict line: `[swap] complete: N swapped, M failed`. Read the
+  per-step ms too: a swap that completes in 10 s is a freeze to the person waiting.
 
 
 ## Mac vs PC split

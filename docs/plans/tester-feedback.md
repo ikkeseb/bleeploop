@@ -67,11 +67,13 @@ Proven in the browser tier only (`pnpm check`, `pnpm build`, `pnpm verify:jam`, 
 
 ## Work order (owner-approved)
 
-1. **F7.** Ask the tester for the release log (`%LOCALAPPDATA%\com.bleeploop.app\logs\bleeploop.log`)
-   and the plugin pair they switched between. Meanwhile run a bounded repro on the dev PC: tweak,
-   switch plugin, editor open and closed. DecentSampler is NOT installed on the dev PC (VST3 folder:
-   Archetype, FabFilter, Neural DSP, Surge); install it or accept a stand-in. Distinguish a host
-   hang from a stale scan indicator before changing either subsystem.
+1. **F7.** No tester log is coming; a further report arrives as an issue. Dev-PC repro
+   (`swap-stress` probe, WASAPI, 6 plugins, 60 in-place swaps, editor closed and open): no hang,
+   60/60 completed, no fault lines. One lead: tearing down Archetype Plini (VST3) intermittently
+   stalls 4-14 s (5 of 20 teardowns; the rest ~0.3-1.3 s), with no busy indication in the UI, which a
+   user reads as a freeze. Cause unknown; which teardown step stalls is not yet logged. Next: time
+   the owner-thread teardown steps in `host/vst3.rs`, then decide between a fix and a busy state on
+   the slot. DecentSampler is not installed on the dev PC and was not tested.
 2. **F2 + F1 + F5 + F11 as ONE design conversation with the owner before any build.** Agent starting
    point, not approved: a manually stopped take rounds to whole bars and loops at its own length
    (RC-505 style), which never reads silence as a phrase boundary. Do not infer a trim rule from
