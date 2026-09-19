@@ -31,6 +31,10 @@
  *      and prior undo history, and a wet export cannot start while capture is active
  *   8. AUTO REC stays silent/blank while listening, cancels cleanly, then triggers from real graph PCM
  *      with its soft onset retained near frame 0
+ *   9. SHORT TAKES: a later take shorter than the master (stopped inside its first bar, or pre-selected by
+ *      FIXED) commits at master length and repeats sample-exactly across it, RETAKE keeps rolling at the
+ *      master whatever FIXED says, and PLAY on an idle transport re-anchors the master grid to frame 0
+ *      while PLAY beside a playing lane joins the running phase (`looper.phaseValue()`)
  *
  * KNOWN LIMITS — do not read a green run as more than it is:
  *   - Everything measured comes from RECORDED PCM plus dispatcher state. Loop PLAYBACK is not captured
@@ -44,6 +48,9 @@
  *   - Track 2's frame-identity (3) is asserted on impulse POSITIONS only. The same beat-periodicity blind
  *     spot therefore still covers the later-track arm: an arm off by a whole beat lands on the same
  *     positions and passes. The fingerprint amplitudes are recorded there but not compared.
+ *   - The FROM-THE-TOP checks read `looper.phaseValue()`, which is the master GRID (masterStartTime) as the
+ *     25 ms drain tick sees it — not the position of any playing AudioBufferSource. A re-anchored grid whose
+ *     sources started at the wrong offset would still read phase 0 here; the sources stay a by-ear gate.
  *   - Nothing native: the whole src-tauri half, the real record latency C on a rig, and the mic path are
  *     out of reach. Those stay by-ear/rig gates in STATUS.md.
  *
@@ -624,6 +631,164 @@ async function main() {
       );
     }
 
+    // ---- short takes: a later take shorter than the master TILES across it -----------------------
+    // F2/F1 (docs/plans/tester-feedback.md § Work order 2). A later take is a whole number of bars, at
+    // most the master, repeated across the master-length region at commit — "3 over 8 sounds 3+3+2".
+    // Driven through the REAL dispatchers (recDub/playStop + the FIXED auto-stop), never by calling
+    // grid-math: what is under test is that stopCapture/finishRecording CHOOSE this window. The master is
+    // BARS bars and the impulse train is still running, so a tiled lane is both sample-exactly periodic
+    // and audibly non-silent — the two halves of the claim. Lane 3 is left EMPTY again for the sections
+    // below, and FIXED is restored to the jam's BARS-bar arrangement.
+    console.log('\ngolden-jam: short takes\n');
+    const barFrames = framesPerBeat * BEATS_PER_BAR;
+    const shortBarSec = barFrames / sr;
+
+    /** One lane's tiling report: length, the first frame breaking pcm[k] === pcm[k % bar], bar-1 peak. */
+    const tiling = async (idx, bar) =>
+      page.evaluate(
+        ({ idx, bar }) => {
+          const lf = window.__lf;
+          const t = lf.looper.exportSnapshot().tracks.find((x) => x.index === idx);
+          if (!t) return null;
+          const pcm = t.pcm;
+          let mismatch = -1;
+          for (let k = bar; k < pcm.length; k++) {
+            if (pcm[k] !== pcm[k % bar]) {
+              mismatch = k;
+              break;
+            }
+          }
+          let peak = 0;
+          for (let k = 0; k < Math.min(bar, pcm.length); k++) {
+            const a = Math.abs(pcm[k]);
+            if (a > peak) peak = a;
+          }
+          return { length: pcm.length, mismatch, peak, state: lf.looper.stateOf(idx) };
+        },
+        { idx, bar },
+      );
+
+    // A. EARLY STOP. FIXED off, so the stop gesture alone decides the length: a press inside the FIRST
+    // bar records on to that bar line (planLaterStop clamps to one bar) and the one bar tiles the master.
+    await page.evaluate(() => window.__lf.looper.setFixedLengthEnabled(false));
+    await page.evaluate(() => window.__lf.looper.recDub(2));
+    await waitFor(
+      page,
+      () => {
+        const t = window.__lf.looper.trackInfo(2);
+        return t.state === 'RECORDING' && !t.armed;
+      },
+      15000,
+      'the short take to cross its boundary arm',
+    );
+    const earlyStop = await page.evaluate(() => {
+      const lf = window.__lf;
+      lf.looper.playStop(2); // well inside bar 1 of the take
+      return { stateAtPress: lf.looper.stateOf(2) };
+    });
+    await waitFor(page, () => window.__lf.looper.stateOf(2) !== 'RECORDING', 15000, 'the early stop to reach its bar line');
+    const earlyTake = await tiling(2, barFrames);
+    check(
+      'a stop inside the first bar keeps recording on to the bar line',
+      earlyStop.stateAtPress === 'RECORDING',
+      `state right after the press = ${earlyStop.stateAtPress}`,
+    );
+    check(
+      'the early-stopped take committed at MASTER length',
+      earlyTake.state === 'STOPPED' && earlyTake.length === expectedMaster,
+      `state=${earlyTake.state}, length=${earlyTake.length} (expected ${expectedMaster})`,
+    );
+    check(
+      'the early-stopped take tiles its one bar across the master, sample-exact',
+      earlyTake.mismatch === -1,
+      `first mismatch at ${earlyTake.mismatch} (bar = ${barFrames} frames)`,
+    );
+    check('the tiled bar carries the recorded audio, not silence', earlyTake.peak > FOUND, `peak ${earlyTake.peak.toFixed(3)}`);
+
+    // B. FIXED PRE-SELECTS. One bar, no stop press at all: the capture ends by itself and tiles.
+    await page.evaluate(() => {
+      const lf = window.__lf;
+      lf.looper.clear(2);
+      lf.looper.setFixedLengthBars(1);
+      lf.looper.setFixedLengthEnabled(true);
+    });
+    const maxBars = await page.evaluate(() => window.__lf.looper.nextTakeMaxBars());
+    check(`FIXED clamps the next take to the master's ${BARS} bars`, maxBars === BARS, `nextTakeMaxBars=${maxBars}`);
+    await page.evaluate(() => window.__lf.looper.recDub(2));
+    await waitFor(
+      page,
+      () => window.__lf.looper.stateOf(2) === 'PLAYING',
+      25000,
+      'the FIXED one-bar later take to commit by itself',
+    );
+    const fixedTake = await tiling(2, barFrames);
+    check(
+      'a FIXED one-bar later take committed at MASTER length with no stop press',
+      fixedTake.length === expectedMaster,
+      `length=${fixedTake.length} (expected ${expectedMaster})`,
+    );
+    check(
+      'the FIXED one-bar take tiles across the master, sample-exact',
+      fixedTake.mismatch === -1,
+      `first mismatch at ${fixedTake.mismatch} (bar = ${barFrames} frames)`,
+    );
+    check('the FIXED tiled bar carries the recorded audio', fixedTake.peak > FOUND, `peak ${fixedTake.peak.toFixed(3)}`);
+
+    // C. RETAKE OVERRIDES FIXED. FIXED stays at one bar; with a master present the rolling window must be
+    // the MASTER (configureRecordingEnd's `!retakeEnabled()` clause). engineState is not exposed, so the
+    // observable is the pass edge: pass 2 arrives after ~BARS bars, not after the FIXED single bar.
+    await page.evaluate(() => {
+      const lf = window.__lf;
+      lf.looper.clear(2);
+      lf.looper.setRetakeEnabled(true);
+    });
+    await page.evaluate(() => window.__lf.looper.recDub(3));
+    const rollStart = await waitFor(
+      page,
+      () => {
+        const t = window.__lf.looper.trackInfo(3);
+        return t.state === 'RECORDING' && !t.armed ? { at: window.__lf.engine.ctx.currentTime } : null;
+      },
+      15000,
+      'the RETAKE take to cross its boundary arm',
+    );
+    const passTwo = await waitFor(
+      page,
+      () =>
+        window.__lf.looper.trackInfo(3).retakePass === 2 ? { at: window.__lf.engine.ctx.currentTime } : null,
+      25000,
+      'the RETAKE roll to reach pass 2',
+    );
+    const passSec = passTwo.at - rollStart.at;
+    check(
+      'RETAKE rolls at the MASTER length whatever FIXED says',
+      passSec > 1.5 * shortBarSec && passSec < 3 * shortBarSec,
+      `pass 1 lasted ${passSec.toFixed(2)} s (one FIXED bar = ${shortBarSec.toFixed(2)} s, master = ${(BARS * shortBarSec).toFixed(2)} s)`,
+    );
+    const shortRestore = await page.evaluate(
+      ({ bars }) => {
+        const lf = window.__lf;
+        lf.looper.stop(3); // drop the rolling take; nothing was committed
+        lf.looper.clear(3);
+        lf.looper.setRetakeEnabled(false);
+        lf.looper.setFixedLengthBars(bars);
+        lf.looper.setFixedLengthEnabled(true);
+        return {
+          master: lf.looper.masterLengthFrames(),
+          states: Array.from({ length: 5 }, (_, i) => lf.looper.stateOf(i)),
+        };
+      },
+      { bars: BARS },
+    );
+    check(
+      'the short-take section left the master and the free lanes as it found them',
+      shortRestore.master === expectedMaster &&
+        shortRestore.states[0] === 'PLAYING' &&
+        shortRestore.states[1] === 'PLAYING' &&
+        shortRestore.states.slice(2).every((s) => s === 'EMPTY'),
+      `master=${shortRestore.master}, states=${shortRestore.states.join('/')}`,
+    );
+
     // ---- dispatchers: the layer with literally zero verify/ contact -----------------------------
     // Everything above went through recDub + the auto-commit cap. These are the presses a player makes
     // that no guard has ever executed: overdub, undo/redo, stop, resume, clear, and a stop that lands
@@ -790,6 +955,91 @@ async function main() {
     check('playStop halted the track', (await page.evaluate(() => window.__lf.looper.trackInfo(0).state)) === 'STOPPED');
     await page.evaluate(() => window.__lf.looper.playStop(0));
     check('playStop resumed the track', (await page.evaluate(() => window.__lf.looper.trackInfo(0).state)) === 'PLAYING');
+
+    // ---- FROM THE TOP: an idle transport re-anchors, a live one is joined -----------------------
+    // F5 (docs/plans/tester-feedback.md § Work order 2): with nothing playing and nothing recording, PLAY
+    // starts from the top — ONE shared start time, the master grid re-anchored to it. While anything
+    // plays, PLAY joins the live phase as before. The observable is `looper.phaseValue()`: capture.ts's
+    // 25 ms drain tick recomputes it from `masterStartTime` whether or not anything records, so it reports
+    // the GRID itself, not a playing source. Both presses are made from INSIDE the page at a deliberate
+    // non-multiple of the loop (phase 0.30..0.45), so "near 0" and "kept running" are far apart.
+    console.log('\ngolden-jam: play from the top\n');
+    const PHASE_WINDOW = { lo: 0.3, hi: 0.45 };
+    const phaseNow = () =>
+      page.evaluate(() => ({ phase: window.__lf.looper.phaseValue(), now: window.__lf.engine.ctx.currentTime }));
+
+    await page.evaluate(() => window.__lf.looper.stopAll());
+    await waitFor(
+      page,
+      () => [0, 1].every((i) => window.__lf.looper.stateOf(i) === 'STOPPED'),
+      10000,
+      'every committed lane to reach STOPPED',
+    );
+    const fromTop = await page.evaluate(
+      ({ lo, hi }) =>
+        new Promise((resolve, reject) => {
+          const lf = window.__lf;
+          const deadline = performance.now() + 20000;
+          const tick = () => {
+            const phase = lf.looper.phaseValue();
+            if (phase < lo || phase > hi) {
+              if (performance.now() > deadline) return void reject(new Error(`never caught phase ${lo}..${hi}`));
+              return void setTimeout(tick, 5);
+            }
+            const at = lf.engine.ctx.currentTime;
+            lf.looper.playAll();
+            resolve({ at, phase, states: [lf.looper.stateOf(0), lf.looper.stateOf(1)] });
+          };
+          tick();
+        }),
+      PHASE_WINDOW,
+    );
+    await page.waitForTimeout(120); // a few 25 ms drain ticks, so phaseValue has been recomputed
+    const afterTop = await phaseNow();
+    const sinceTop = afterTop.now - fromTop.at;
+    check(
+      'PLAY ALL from an idle transport resumed every stopped lane',
+      fromTop.states.every((s) => s === 'PLAYING'),
+      `states=${fromTop.states.join('/')}`,
+    );
+    check(
+      'PLAY ALL from an idle transport restarted the master grid from the top',
+      Math.abs(afterTop.phase * loopSeconds - sinceTop) < 0.09,
+      `phase ${afterTop.phase.toFixed(3)} = ${(afterTop.phase * loopSeconds).toFixed(3)} s, ${sinceTop.toFixed(3)} s after a press made at phase ${fromTop.phase.toFixed(3)}`,
+    );
+
+    // The contrast: one lane keeps playing, so stopping and resuming the OTHER must join the running
+    // phase — the grid keeps its anchor and no re-anchor happens behind the playing lane.
+    const joined = await page.evaluate(
+      ({ lo, hi }) =>
+        new Promise((resolve, reject) => {
+          const lf = window.__lf;
+          const deadline = performance.now() + 20000;
+          const tick = () => {
+            const phase = lf.looper.phaseValue();
+            if (phase < lo || phase > hi) {
+              if (performance.now() > deadline) return void reject(new Error(`never caught phase ${lo}..${hi}`));
+              return void setTimeout(tick, 5);
+            }
+            const at = lf.engine.ctx.currentTime;
+            lf.looper.playStop(1); // STOP lane 2 …
+            const stopped = lf.looper.stateOf(1);
+            lf.looper.playStop(1); // … and resume it while lane 1 still plays
+            resolve({ at, phase, stopped, resumed: lf.looper.stateOf(1), other: lf.looper.stateOf(0) });
+          };
+          tick();
+        }),
+      PHASE_WINDOW,
+    );
+    await page.waitForTimeout(120);
+    const afterJoin = await phaseNow();
+    const wantPhase = (joined.phase + (afterJoin.now - joined.at) / loopSeconds) % 1;
+    const phaseDrift = Math.abs((((afterJoin.phase - wantPhase) % 1) + 1.5) % 1 - 0.5);
+    check(
+      'a stop+resume with another lane playing kept the running phase (no re-anchor)',
+      joined.stopped === 'STOPPED' && joined.resumed === 'PLAYING' && joined.other === 'PLAYING' && phaseDrift < 0.02,
+      `stopped=${joined.stopped}, resumed=${joined.resumed}, phase ${afterJoin.phase.toFixed(3)} vs the running ${wantPhase.toFixed(3)}`,
+    );
 
     // COPY duplicates the WHOLE lane into the first EMPTY lane (track 3 here: 1 + 2 hold loops). The
     // source is dirtied first so "everything follows" is a real comparison, then the copy is reversed

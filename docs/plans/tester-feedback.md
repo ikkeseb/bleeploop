@@ -50,7 +50,7 @@ to be re-checked before they steer a change.
 | F8 ✓ | A synth plugin can never reach the native monitor: `goLive` arms input first, which rejects a plugin without an input bus (`native-io.ts:85-87`). MIDI → plugin therefore always takes the WebView path: 5 ms drain, ~30 ms hop-2 setpoint (`transport.rs:401`), 128-frame worklet, Web Audio output. ASIO would not shorten that path. Native WASAPI is shared-mode, `BufferSize::Default` (`audio_output.rs:17`). | Architecture; owner roadmap call, measure first |
 | F9 ✓ | The toast is reachable without a GO LIVE click: a fresh pick auto-starts live input when the scan says `isEffect` (`PluginControls.tsx:160-166`), and the scan derives that from VST3 subCategories, not the actual input bus (`scan.rs:683`). Message site: `native_io.rs:201`. | Small fix |
 | F10 | The number is AUTO REC sensitivity, 1–100 → −12…−60 dBFS RMS (`auto-record.ts:8-19`); label built at `Transport.tsx:304`. | Wording only |
-| F11 ✓ | Ordinary ARMED already clicks with CLICK on; only AUTO LISTENING is excluded from the click gate (`state.ts:318`). | One-line gate change + `pnpm verify:jam` |
+| F11 ✓ | Ordinary ARMED already clicks with CLICK on; only AUTO LISTENING is excluded from the click gate (`state.ts:318`). AUTO exists for the first take only (`machine.ts` `beginAutoRecording`), so no grid exists while it listens. | No change: see § Work order |
 
 ## Landed in code, awaiting the tester's machine
 
@@ -63,6 +63,10 @@ Proven in the browser tier only (`pnpm check`, `pnpm build`, `pnpm verify:jam`, 
   zip. Where WebView2 actually puts the file is unverified. A real save dialog stays a separate call.
 - **F6:** the PARAMS preview takes the first 12 NAMED params; unnamed ones count toward "+N more".
 - **F9:** the auto go-live after a fresh pick is quiet (log line kept); a clicked GO LIVE still reports.
+- **F2 + F1 + F5:** short later takes tile across the master (early stop or FIXED), FIXED stays usable
+  after the BPM lock, and PLAY on an idle transport starts from the top. `pnpm verify:jam` drives it
+  through the real dispatchers. By ear, unheard: the tile seams, a 3-over-8 cut, reverse on a tiled
+  track, and the downbeat click on a from-the-top start.
 - **F10:** the button reads `AUTO REC · SENS n` with an explanatory tooltip. Wording is the owner's eye.
 
 ## Work order (owner-approved)
@@ -74,7 +78,7 @@ Proven in the browser tier only (`pnpm check`, `pnpm build`, `pnpm verify:jam`, 
    user reads as a freeze. Cause unknown; which teardown step stalls is not yet logged. Next: time
    the owner-thread teardown steps in `host/vst3.rs`, then decide between a fix and a busy state on
    the slot. DecentSampler is not installed on the dev PC and was not tested.
-2. **F2 + F1 + F5 + F11: design approved by the owner, build open.** Reference read: the RC-505 MK II
+2. **F2 + F1 + F5 + F11: design approved by the owner and built.** Reference read: the RC-505 MK II
    Parameter Guide. Per-track MEASURE is AUTO (= the first-recorded track), FREE ("set
    automatically, corresponding to the length of the recording") or a pre-set number; with LOOP
    SYNC on a track "retriggers at the beginning of the first-recorded phrase", and a record stop is

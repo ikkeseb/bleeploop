@@ -81,3 +81,6 @@ not here.
   plugin is loaded.
 - Pedal mode: most USB footswitches send keystrokes, so 1–5/Space/Enter already work — a Help section
   + a one-key UNDO binding; MIDI-CC foot control next.
+- Input FX (owner request): delay/stutter/reverb BEFORE the record tap, printed into the take, beside
+  today's per-track post FX. Open design: the native monitor bypasses Web Audio, so the player would
+  not hear what is recorded; C and grid-synced stutter need their own answer.
