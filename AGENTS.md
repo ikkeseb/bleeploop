@@ -21,7 +21,7 @@ Harness auto-load of nested files is not reliable: open the briefing yourself.
 | Any runtime verification (browser probe, `__lf`, `tauri dev`, Mac-vs-PC) | `docs/VERIFY.md` |
 | Any non-trivial work; `engine.ts`, bus wiring | `docs/ARCHITECTURE.md` |
 | Planning or performing a by-ear/eye/rig session; gate-adjacent code; latency | `STATUS.md` |
-| Going public, releases, licences | `docs/plans/2026-09-18-public-repo-prep.md` |
+| Releases, licences, workflow hardening | `docs/plans/release-prep.md` |
 | The looper-UI spec (the approved mockup) | `docs/inspiration/revamp-2026-07/README.md` |
 
 ## Standing rules
