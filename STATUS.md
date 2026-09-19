@@ -5,6 +5,17 @@ owner's ear, eye or decision on the PC. This file is ONE ordered lap plus the de
 backlog. Taste (feel, wording, placement; no functional risk) lives in `docs/backlog-taste.md` and is
 NOT a gate. Non-gate code/product threads: `AGENTS.md` § Open threads.
 
+**Machine verification completed on Windows, 2026-09-19:** folder rename repaired (pnpm links and
+Rust build caches); clean Git synced to origin. Check/build, Rust checks with/without ASIO, 25 Rust
+tests and golden jam 78/78 passed; ASIO release built, started and closed normally. Browser probes
+passed: export-context, recovery-transactions, recovery-close, recovery-playback, capture-clock,
+overdub-window, render-cursor, capture-loss, master-latency and loop-end-stop (`verify/`). Five
+60-second tracks saved without measured playback gaps. Silent native output probes at 44.1 kHz:
+Focusrite ASIO 128/256 reported 8.55/14.44 ms; WASAPI median 12.00 ms; no stream faults or invalid
+timestamps. These are output-driver reports, not physical guitar latency. This work is complete;
+repeat affected checks after relevant changes or a new failure, rather than requesting this lap again.
+The human checks below remain open; resume them when the owner chooses a rig session.
+
 **Last play: 2026-09-18** (`pnpm dev:asio`, a free jam on two tracks; buffer and plugin: unknown).
 Verdict: worked well; latency possibly a hair off — Stop 1 stays open, no stop
 was walked as a yes/no. Previous rig lap: 2026-08-29 (ASIO, INPUT LIVE, guitar — produced the MIC
