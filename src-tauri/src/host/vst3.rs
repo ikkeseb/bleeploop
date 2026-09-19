@@ -1723,6 +1723,8 @@ pub fn vst3_owner_main(
                 OwnerRequest::DisarmMonitor(_, reply) => {
                     let _ = reply.send(native_io.disarm_monitor());
                 }
+                // An unload's wake-up: nothing to do, the loop condition sees `running=false`.
+                OwnerRequest::Wake => {}
                 #[cfg(debug_assertions)]
                 other => reply_unsupported(other), // DEV state save/load is not wired for VST3
             }
@@ -1741,21 +1743,30 @@ pub fn vst3_owner_main(
     // attached view through terminate → crash/leak). Then the RT thread saw running=false →
     // setProcessing(false) + exited; join it, deactivate + terminate on this (owner) thread,
     // release all module COM objects, unload last.
+    // Every step is timed into ONE log line: a plugin that stalls here reads as a frozen app, and
+    // the line says which step to blame.
+    let t_teardown = Instant::now();
     if !matches!(editor, Vst3Editor::Closed) {
         vst3_editor_close(&mut editor);
     }
     let _ = editor;
+    let editor_ms = t_teardown.elapsed().as_millis();
     // Stop native capture + monitor before the RT thread (ring ends) goes away. The joined
     // producer hands back its processor handle, released here (owner thread, module still mapped).
+    let t = Instant::now();
     drop(native_io);
+    let native_io_ms = t.elapsed().as_millis();
+    let t = Instant::now();
     if let Some(guard) = rt_guard.take() {
         let _ = guard.stop_and_join();
     }
+    let rt_join_ms = t.elapsed().as_millis();
     report_new_rt_faults(&diag, slot, &mut reported_rt_faults);
     // Release the edit controller BEFORE teardown's FreeLibrary — its Release (and terminate)
     // vtbl code lives in the DLL, so it must drop while the module is still mapped. A separated
     // controller is a distinct object needing its own terminate(); a single-component one shares
     // the IComponent object (teardown's terminate covers it — terminating here would double it).
+    let t = Instant::now();
     if let Some(ctl) = controller {
         if controller_separated {
             // SAFETY: owner thread; the only view was closed above. Disconnect the connection
@@ -1773,12 +1784,19 @@ pub fn vst3_owner_main(
             }
         }
     }
-    teardown(component, host_ctx, hostapp, factory, module);
+    let controller_ms = t.elapsed().as_millis();
+    let [deactivate_ms, terminate_ms, release_ms, module_ms] =
+        teardown(component, host_ctx, hostapp, factory, module);
+    log::info!(
+        "[plugin_host] slot {slot} VST3 teardown {} ms: editor={editor_ms} native_io={native_io_ms} rt_join={rt_join_ms} controller={controller_ms} setActive(0)={deactivate_ms} terminate={terminate_ms} release={release_ms} module={module_ms}",
+        t_teardown.elapsed().as_millis()
+    );
     diag.alive.store(false, Relaxed);
 }
 
 /// Deactivate + terminate the component, release every module COM object in order, then
 /// drop the module LAST (after all vtbl-bearing objects are dropped, so we never unmap live code).
+/// Returns the ms spent in `setActive(0)`, `terminate`, the COM releases and the module drop.
 /// ASSUMES the plugin tears down its own threads/timers in `terminate()` (Surge does). A
 /// plugin that leaves a worker thread or OS timer running past `terminate` could fire into
 /// unmapped code after FreeLibrary — if a future plugin proves flaky here, skip/defer the
@@ -1789,17 +1807,27 @@ fn teardown(
     hostapp: ComWrapper<LfHostApp>,
     factory: ComPtr<IPluginFactory>,
     module: Vst3Module,
-) {
+) -> [u128; 4] {
     // SAFETY: the RT producer has stopped (joined); deactivate + terminate on the owner thread.
+    let t = Instant::now();
     unsafe {
         let _ = component.setActive(0);
+    }
+    let deactivate_ms = t.elapsed().as_millis();
+    let t = Instant::now();
+    unsafe {
         let _ = component.terminate();
     }
+    let terminate_ms = t.elapsed().as_millis();
+    let t = Instant::now();
     drop(component);
     drop(host_ctx);
     drop(hostapp);
     drop(factory);
+    let release_ms = t.elapsed().as_millis();
+    let t = Instant::now();
     drop(module);
+    [deactivate_ms, terminate_ms, release_ms, t.elapsed().as_millis()]
 }
 
 /// Reply to a DEV control request the VST3 host doesn't service (state save/load).
@@ -1818,7 +1846,7 @@ fn reply_unsupported(req: OwnerRequest) {
         OwnerRequest::ListParams(r) => {
             let _ = r.send(Ok(Vec::new()));
         }
-        OwnerRequest::SetParamNormalized(..) => {}
+        OwnerRequest::SetParamNormalized(..) | OwnerRequest::Wake => {}
         OwnerRequest::OpenEditor(_, r) => {
             let _ = r.send(Err(msg()));
         }

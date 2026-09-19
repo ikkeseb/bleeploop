@@ -73,11 +73,14 @@ Proven in the browser tier only (`pnpm check`, `pnpm build`, `pnpm verify:jam`, 
 
 1. **F7.** No tester log is coming; a further report arrives as an issue. Dev-PC repro
    (`swap-stress` probe, WASAPI, 6 plugins, 60 in-place swaps, editor closed and open): no hang,
-   60/60 completed, no fault lines. One lead: tearing down Archetype Plini (VST3) intermittently
-   stalls 4-14 s (5 of 20 teardowns; the rest ~0.3-1.3 s), with no busy indication in the UI, which a
-   user reads as a freeze. Cause unknown; which teardown step stalls is not yet logged. Next: time
-   the owner-thread teardown steps in `host/vst3.rs`, then decide between a fix and a busy state on
-   the slot. DecentSampler is not installed on the dev PC and was not tested.
+   60/60 completed, no fault lines. Found and fixed: every VST3 unload waited out the owner's idle
+   `recv_timeout` (~1.2 s per unload or swap, no busy indication); unload now wakes the owner
+   (17-90 ms measured). Still open: Archetype Plini (VST3) stalled 4-14 s in 5 of 20 unloads in the
+   first run, all with the editor closed, and in 0 of 44 in three later runs the same evening;
+   cause unknown, not reproduced since. The VST3 teardown and the unload now log per-step timing
+   (release log included), so the next occurrence names its step. Next: when it recurs, read that
+   line, then decide between a fix and a busy state on the slot. DecentSampler is not installed
+   on the dev PC and was not tested.
 2. **F2 + F1 + F5 + F11: design approved by the owner and built.** Reference read: the RC-505 MK II
    Parameter Guide. Per-track MEASURE is AUTO (= the first-recorded track), FREE ("set
    automatically, corresponding to the length of the recording") or a pre-set number; with LOOP

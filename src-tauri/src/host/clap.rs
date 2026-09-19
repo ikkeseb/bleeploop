@@ -122,6 +122,10 @@ pub enum OwnerRequest {
     /// controller-side `restartComponent` (a FabFilter latency-mode change is decided there). Never
     /// sent for CLAP (one object, the param event is enough); no reply, never cancelled.
     SetParamNormalized(u32, f64),
+    /// Sent by `SlotHandle::teardown` right after `running=false`: a VST3 owner with no editor
+    /// open blocks in `recv_timeout` for up to its 2 s gate period, and a store to `running` does
+    /// not wake it. Carries nothing; the loop re-checks `running` on its next turn.
+    Wake,
     /// P10.0: open the floating editor (gui ext is a main-thread call). Reply Ok=opened.
     OpenEditor(
         Arc<AtomicBool>,
@@ -490,6 +494,7 @@ fn handle_owner_request(req: OwnerRequest, instance: &mut PluginInstance<LfHost>
         // VST3-only mirror (`set_param` sends it only to a VST3 slot); a CLAP plugin has no
         // separate controller to keep in sync.
         OwnerRequest::SetParamNormalized(..) => {}
+        OwnerRequest::Wake => {}
     }
 }
 
@@ -1026,9 +1031,13 @@ impl SlotHandle {
             ..
         } = self;
         let slot = info.slot;
+        let t = Instant::now();
         running.store(false, Relaxed);
+        let _ = request_tx.send(OwnerRequest::Wake);
         let _ = owner_join.join();
+        let join_ms = t.elapsed().as_millis();
         drop(request_tx);
+        log::info!("[plugin_host] slot {slot} owner joined in {join_ms} ms");
         shared_buf.close(window, slot);
     }
 }

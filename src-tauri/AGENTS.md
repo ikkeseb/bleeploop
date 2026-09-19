@@ -31,8 +31,11 @@ rest is the map.
   a plugin call.
 - **Only the UI thread makes WebView2 COM calls** (`with_webview`); a non-UI caller recovers the
   result over a channel.
-- **Unload order is load-bearing:** `running=false` → join the owner (which joins the RT thread) →
+- **Unload order is load-bearing:** `running=false` → `OwnerRequest::Wake` (a VST3 owner idles in a
+  2 s `recv_timeout` that a store does not wake) → join the owner (which joins the RT thread) →
   `Close()` the SharedBuffer on the UI thread. Nothing may still write the mapping when it closes.
+  Both halves log their timing (`VST3 teardown … ms: editor=… module=…`, `owner joined in … ms`),
+  in release too: a slow unload names its step in the log.
 - **The RT thread never logs, locks or allocates in steady state.** Failures latch `RtFault` bits;
   the one allowed allocation is a pipe rebuild on a generation bump, outside the rt_alloc guard.
 - **Native cpal/ASIO ownership lives in the concrete `host::native_io::NativeIo`** — keep it
