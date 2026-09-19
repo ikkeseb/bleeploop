@@ -12,7 +12,10 @@ not here.
   below ~1420 px and with the CLICK/FIXED/AUTO sliders open below ~1900 (CLICK/FIXED/AUTO/TAP on row 2
   at the Tauri default 1280); the ⬇/⬆ EXPORT/IMPORT icons in the tool cluster; the 4 px record-level
   meter left of MIC (−60..0 dBFS, green, red within 1 dB of full, a cyan tick at the AUTO trigger
-  level while AUTO is on) — big enough? right place?
+  level while AUTO is on) — big enough? right place? **Seen by the owner (2026-09-19, release exe,
+  ~1730 px window):** turning AUTO on slides its sensitivity slider in, the bar drops to two rows
+  and the whole stage jumps ~40 px — read as the design moving. A contextual slider should not
+  change the bar's height: open it as a popover, or reserve its width.
 - **Count-in numeral (2026-09-02):** the big red 4-3-2-1 in the armed lane's well over "COUNT-IN" —
   size, colour, and whether a later take's "WAITING FOR DOWNBEAT" should count beats to the boundary too.
 - **Error toasts:** bottom-right stack — placement, copy, feel; may overlap the bottom lane's right
