@@ -31,9 +31,9 @@ over several sessions; this file is the pickup.
    wordmark's colour-wheel dot, a placeholder until a real logo exists. The `lf.*` storage keys
    stay; import still accepts the earlier session `app` tag.
 2. **This repo is the new one: it starts from ONE parentless commit of the final tree** (owner's
-   decision), authored with the account's noreply address. The earlier history lives only in an
-   off-GitHub bundle; the owner deletes the old private repo (a force-push would not have removed
-   its commits from GitHub). Cost: no public `git blame`. No tracked doc may cite a commit sha from
+   decision), authored with the account's noreply address. The earlier history stays in the old repo, which the owner
+   archives and keeps private for good (its diffs and messages predate the impersonal pass), and
+   in an off-GitHub bundle. Cost: no public `git blame`. No tracked doc may cite a commit sha from
    before the squash: none resolves here and the docs guard checks them.
 3. **Settings.** Set while private: Issues on, Wiki/Discussions/Projects off, `GITHUB_TOKEN`
    read-only, Actions cannot approve PRs, Dependabot alerts, topics and description. GitHub only
