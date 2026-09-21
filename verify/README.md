@@ -21,7 +21,11 @@ simultaneous lane starts and live-phase joins beside a muted lane pending END ST
 cover recovery fidelity, failure paths and main-thread load.
 `recovery-transactions.mjs` injects actual IndexedDB transaction failures; `recovery-close.mjs` checks
 close approval after a failed recovery deletion, with native close capabilities substituted.
+`recovery-import-failure.mjs` checks archive preservation after failed restore reads, buffer allocation
+and playback startup, rollback, retry, explicit clear and a live jam winning the restore race.
 `monitor-generation.mjs` controls delayed host replies through the actual frontend monitor lifecycle.
+`plugin-load-buffer-generation.mjs` checks late/failed plugin buffers and worklet-module retry through
+the production frontend with an instrumented host; it does not exercise native COM cleanup.
 `marker-probe.mjs` checks DEV marker correlation and clock arithmetic; it does not run native audio.
 `render-clock.mjs` checks the DEV worklet observer preserves PCM; `render-cursor.mjs` exercises the
 production compensation sampler with paired queue/timestamp observations, invalid clocks and freeze.

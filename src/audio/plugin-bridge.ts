@@ -51,6 +51,7 @@ export interface PluginBufferMeta {
   headerBytes: number;
   sampleRate: number;
   inChannels: number; // plugin audio-input channel count; >0 ⇒ FX/amp-sim, 0 ⇒ synth
+  loadToken: number; // frontend request identity; rejects late buffers from failed/superseded loads
 }
 
 // hop-1 header indices (u32 view) — must match the 7-field layout in host/transport.rs.
@@ -94,6 +95,7 @@ interface BridgeSlot {
   flushed: boolean; // discarded the suspended-context backlog on the first running drain
   jsDropped: number; // cumulative lag-cap + flush discards — mirrored into header[6]
   accountedUnderruns: number; // last worklet total folded into the process-wide record-loss counter
+  loadToken: number; // the frontend load request that owns this wiring
 }
 
 let ctx: AudioContext | null = null;
@@ -119,23 +121,13 @@ function setGainValue(slot: number, value: number | null): void {
   });
 }
 /** Per-slot plugin kind for the output-gain default: true = audio effect (FX), false = instrument
- * (synth). Set by `setSlotKind` BEFORE the slot's plugin loads (from the scan descriptor's category),
+ * (synth). Set by `beginPluginLoad` BEFORE the slot's plugin loads (from the scan descriptor's category),
  * so `acceptPluginBuffer` reads it self-sufficiently. Absent ⇒ fall back to the meta input-bus count. */
 const slotKinds = new Map<number, boolean>();
-/**
- * Per-slot teardown generation, bumped by every `teardownPluginSlot`. A load records the current value
- * at its pre-load hook (`setSlotKind` → `slotLoadGen`); `acceptPluginBuffer` re-checks after its await
- * and BAILS if the counter has since advanced — i.e. a clear/swap tore the slot down (and the native
- * producer was unloaded + the hop-1 buffer Close()'d) while this buffer was in flight. Without this, the
- * fire-and-forget accept (off the instrument `serializeSlot` chain) could wire a drain timer + worklet
- * over a released buffer with nothing left to tear it down — the same generation-token pattern as the
- * overdub swap timer + the Rust load_gen/block_gen guards.
- */
-const slotTeardownGen = new Map<number, number>();
-const slotLoadGen = new Map<number, number>();
-function bumpTeardownGen(slot: number): void {
-  slotTeardownGen.set(slot, (slotTeardownGen.get(slot) ?? 0) + 1);
-}
+// Request identity starts in the frontend before IPC and returns in SharedBuffer metadata. Slot-only
+// generations minted when a buffer arrives cannot distinguish a late buffer A from retry B.
+let nextLoadToken = 0;
+const pendingLoadTokens = new Map<number, number>();
 /** Best-effort release of a hop-1 SharedBuffer's JS view (the injected platform `releaseBuffer`). */
 function releaseBuffer(ab: ArrayBuffer): void {
   if (release) {
@@ -158,7 +150,13 @@ export async function initPluginBridge(
   ctx = audioCtx;
   if (opts?.release) release = opts.release;
   if (!moduleReady) moduleReady = ctx.audioWorklet.addModule(pluginPcmUrl);
-  await moduleReady;
+  const ready = moduleReady;
+  try {
+    await ready;
+  } catch (err) {
+    if (moduleReady === ready) moduleReady = null;
+    throw err;
+  }
 }
 
 /**
@@ -174,20 +172,30 @@ export async function acceptPluginBuffer(ab: ArrayBuffer, meta: PluginBufferMeta
     releaseBuffer(ab); // don't leak the hop-1 buffer on the (defensive) no-ctx path
     return;
   }
-  // Capture the teardown generation BEFORE the await (and before this fn's own replace-teardown below).
-  // The accept is fire-and-forget off the serializeSlot chain, so a clear/swap can run between the load
-  // that posted this buffer and our wiring it — that teardown bumps the counter (and unloads the native
-  // producer + Close()s the buffer).
-  const loadGen = slotLoadGen.get(meta.slot) ?? 0;
-  if (!moduleReady) moduleReady = ctx.audioWorklet.addModule(pluginPcmUrl);
-  await moduleReady;
-  if ((slotTeardownGen.get(meta.slot) ?? 0) !== loadGen) {
-    // The slot was torn down since this buffer's load was requested → it's orphaned. Wiring a drain over
-    // it would leak a timer/worklet reading a released buffer every 5 ms with no owner to tear it down.
+  if (!Number.isInteger(meta.loadToken) || meta.loadToken <= 0 || meta.loadToken > 0xffff_ffff) {
     releaseBuffer(ab);
     return;
   }
-  teardownPluginSlot(meta.slot); // replace any existing wiring for this slot
+  const ownsLoad = () => pendingLoadTokens.get(meta.slot) === meta.loadToken;
+  if (!ownsLoad()) {
+    releaseBuffer(ab);
+    return;
+  }
+  if (!moduleReady) moduleReady = ctx.audioWorklet.addModule(pluginPcmUrl);
+  const ready = moduleReady;
+  try {
+    await ready;
+  } catch (err) {
+    if (moduleReady === ready) moduleReady = null;
+    releaseBuffer(ab);
+    throw err;
+  }
+  if (!ownsLoad()) {
+    // The load failed, was cleared, or was superseded while the worklet module awaited.
+    releaseBuffer(ab);
+    return;
+  }
+  teardownSlotWiring(meta.slot); // replace any existing wiring without cancelling this load token
 
   // Everything below adopts `ab` (the hop-1 cross-process SharedBuffer). If any of it throws AFTER the
   // await — most realistically `new AudioWorkletNode` on a closed/interrupted context during a swap —
@@ -247,6 +255,7 @@ export async function acceptPluginBuffer(ab: ArrayBuffer, meta: PluginBufferMeta
       flushed: false,
       jsDropped: 0,
       accountedUnderruns: 0,
+      loadToken: meta.loadToken,
     };
     slot.timer = setInterval(() => drain(slot), DRAIN_INTERVAL_MS);
     slotMap.set(meta.slot, slot);
@@ -337,9 +346,8 @@ function drain(s: BridgeSlot): void {
   mirror(s); // refresh PV + counters every tick, regardless of whether audio moved
 }
 
-/** Tear down a slot's bridge: stop the drain, disconnect the worklet, release the hop-1 buffer. */
-export function teardownPluginSlot(slot: number): void {
-  bumpTeardownGen(slot); // mark the slot torn down so an in-flight acceptPluginBuffer for an earlier load bails
+/** Stop and release the current wiring without changing which load request may still supply a buffer. */
+function teardownSlotWiring(slot: number): void {
   setGainValue(slot, null);
   const s = slotMap.get(slot);
   if (!s) return;
@@ -354,6 +362,29 @@ export function teardownPluginSlot(slot: number): void {
   }
   releaseBuffer(s.ab);
   slotMap.delete(slot);
+}
+
+/** Begin one native load and return the identity that must round-trip with its SharedBuffer. */
+function beginPluginLoad(slot: number, isEffect: boolean | null): number {
+  if (isEffect == null) slotKinds.delete(slot);
+  else slotKinds.set(slot, isEffect);
+  nextLoadToken = (nextLoadToken + 1) >>> 0;
+  if (nextLoadToken === 0) nextLoadToken = 1;
+  pendingLoadTokens.set(slot, nextLoadToken);
+  return nextLoadToken;
+}
+
+/** Cancel only the named failed request; a newer retry may already own the slot. */
+function cancelPluginLoad(slot: number, loadToken: number): void {
+  if (pendingLoadTokens.get(slot) !== loadToken) return;
+  pendingLoadTokens.delete(slot);
+  if (slotMap.get(slot)?.loadToken === loadToken) teardownSlotWiring(slot);
+}
+
+/** Tear down a slot's bridge and invalidate every in-flight buffer for its current load. */
+export function teardownPluginSlot(slot: number): void {
+  pendingLoadTokens.delete(slot);
+  teardownSlotWiring(slot);
 }
 
 export interface PluginRecordLossSnapshot {
@@ -412,27 +443,14 @@ function setWebMonitorMuted(slot: number, muted: boolean): void {
   s.webMonitorGain.gain.setTargetAtTime(muted ? 0 : 1, ctx.currentTime, 0.01);
 }
 
-/**
- * Record slot `slot`'s plugin kind for the output-gain default, BEFORE its plugin loads. `true` =
- * effect (FX), `false` = instrument (synth), `null` = unclassified (cleared → `acceptPluginBuffer`
- * falls back to the input-bus count). Caller: instrument.ts's plugin select, from the scan descriptor's
- * `isEffect`. Must run before the load that triggers `acceptPluginBuffer` so the default is right.
- */
-function setSlotKind(slot: number, isEffect: boolean | null): void {
-  if (isEffect == null) slotKinds.delete(slot);
-  else slotKinds.set(slot, isEffect);
-  // setSlotKind is the per-load pre-hook (instrument.ts calls it right before loadPlugin), so it's where
-  // each load records the teardown generation it was requested at — acceptPluginBuffer compares against
-  // this to detect an intervening clear/swap.
-  slotLoadGen.set(slot, slotTeardownGen.get(slot) ?? 0);
-}
-
 export const pluginBridge = {
   init: initPluginBridge,
   acceptPluginBuffer,
   teardownPluginSlot,
-  /** Record a slot's plugin kind (effect/instrument/unclassified) for the gain default, pre-load. */
-  setSlotKind,
+  /** Mint the identity and record the kind for a pending native load. */
+  beginPluginLoad,
+  /** Invalidate a failed load without cancelling a newer retry. */
+  cancelPluginLoad,
   /** Set per-plugin output gain (gain staging). */
   setGain,
   /** Reactive per-slot intended output gain (null if no plugin is wired). */

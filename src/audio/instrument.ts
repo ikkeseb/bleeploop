@@ -205,10 +205,11 @@ async function doSelectPlugin(slot: 0 | 1, desc: PluginDescriptor): Promise<void
   }
   // Tell the bridge this slot's plugin kind BEFORE the load, so acceptPluginBuffer picks the right
   // output-gain default (FX ~unity / synth conservative) from the scan category, not the input bus.
-  pluginBridge.setSlotKind(slot, desc.isEffect);
+  const loadToken = pluginBridge.beginPluginLoad(slot, desc.isEffect);
   try {
-    await platform.pluginHost.loadPlugin(slot, desc.path, desc.id);
+    await platform.pluginHost.loadPlugin(slot, desc.path, desc.id, loadToken);
   } catch (e) {
+    pluginBridge.cancelPluginLoad(slot, loadToken);
     console.error('[instrument] plugin load failed', e);
     notifyError('Plugin load failed', e);
     if (activeSlot() === slot) applyActiveRouting(); // ensure we're back on the synth

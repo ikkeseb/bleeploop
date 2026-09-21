@@ -78,7 +78,12 @@ export function startPlayback(i: number, audioBuf: AudioBuffer, when: number, of
   src.loopStart = 0;
   src.loopEnd = audioBuf.duration;
   src.connect(t.gain);
-  src.start(startAt, startOffset);
+  try {
+    src.start(startAt, startOffset);
+  } catch (error) {
+    src.disconnect();
+    throw error;
+  }
   t.source = src;
   // Hand the OLD source off seamlessly: let it keep playing until exactly `startAt` (always a
   // loop boundary), then stop + free it. Stopping it immediately would leave a silent gap from

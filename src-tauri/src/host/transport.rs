@@ -9,6 +9,7 @@ use std::sync::atomic::{
     AtomicBool, AtomicU32, AtomicU64, AtomicUsize,
     Ordering::{Acquire, Relaxed, Release},
 };
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use rtrb::{Consumer, Producer};
@@ -500,22 +501,27 @@ pub(super) struct SharedBufferHandle(usize);
 unsafe impl Send for SharedBufferHandle {}
 unsafe impl Sync for SharedBufferHandle {}
 impl SharedBufferHandle {
+    /// Close a handle while already executing on the WebView UI thread. Used when the owner waiting
+    /// for `create_shared_ring` has timed out and the callback can no longer hand the handle back.
+    fn close_on_ui_thread(self, slot: u8) {
+        let raw = self.0;
+        // SAFETY: callers are inside `with_webview`; `raw` is the owning reference kept by into_raw.
+        unsafe {
+            let buf = ICoreWebView2SharedBuffer::from_raw(raw as *mut std::ffi::c_void);
+            match buf.Close() {
+                Ok(()) => log::info!("[plugin_host] slot {slot} shared buffer closed"),
+                Err(e) => log::warn!("[plugin_host] slot {slot} shared buffer Close() failed: {e}"),
+            }
+        }
+    }
+
     /// `Close()` + release the buffer on the UI thread. Fire-and-forget (`with_webview` hops); if
     /// the window is already gone (app exit) the reference leaks with the process. Caller
     /// guarantees nothing still writes the mapping (the RT producer is joined) and JS has released
     /// its `ArrayBuffer` (`releasePluginBuffer`) — `Close()` unmaps for both sides.
     pub(super) fn close(self, window: &tauri::WebviewWindow, slot: u8) {
-        let raw = self.0;
         let _ = window.with_webview(move |_| {
-            // SAFETY: UI thread (with_webview); `raw` is the owning reference `into_raw` kept.
-            unsafe {
-                let buf = ICoreWebView2SharedBuffer::from_raw(raw as *mut std::ffi::c_void);
-                match buf.Close() {
-                    Ok(()) => log::info!("[plugin_host] slot {slot} shared buffer closed"),
-                    Err(e) => log::warn!("[plugin_host] slot {slot} shared buffer Close() failed: {e}"),
-                }
-                // `buf` drops here → Release() on the creating thread.
-            }
+            self.close_on_ui_thread(slot);
         });
     }
 }
@@ -529,6 +535,8 @@ pub(super) fn create_shared_ring(
     cap_frames: u32,
     slot: u8,
     frontend_epoch: u32,
+    load_token: u32,
+    load_running: &Arc<AtomicBool>,
     sample_rate: f64,
     in_channels: u32,
 ) -> Result<(usize, SharedBufferHandle), String> {
@@ -537,15 +545,22 @@ pub(super) fn create_shared_ring(
     // pick the per-slot output-gain default — >0 ⇒ FX/amp-sim (input-driven, near-unity), 0 ⇒
     // synth (MIDI-driven, conservative). Same `in_channels` the arm-input gate already uses.
     let json = format!(
-        r#"{{"kind":"plugin-audio","slot":{slot},"frontendEpoch":{frontend_epoch},"capacityFrames":{cap_frames},"headerBytes":{},"sampleRate":{},"inChannels":{in_channels}}}"#,
+        r#"{{"kind":"plugin-audio","slot":{slot},"frontendEpoch":{frontend_epoch},"loadToken":{load_token},"capacityFrames":{cap_frames},"headerBytes":{},"sampleRate":{},"inChannels":{in_channels}}}"#,
         HOP1_HEADER_BYTES, sample_rate
     );
     let json_w: Vec<u16> = json.encode_utf16().chain(std::iter::once(0)).collect();
 
     let (tx, rx) = std::sync::mpsc::sync_channel::<LoadRing>(1);
+    let callback_live = Arc::new(AtomicBool::new(true));
+    let callback_live_ui = callback_live.clone();
+    let load_running_ui = load_running.clone();
 
     window
         .with_webview(move |webview| {
+            if !callback_live_ui.load(Acquire) || !load_running_ui.load(Acquire) {
+                let _ = tx.send(Err("shared ring provisioning cancelled".to_string()));
+                return;
+            }
             let result: LoadRing = (|| {
                 // SAFETY: every WebView2 COM call must run on the UI thread; with_webview
                 // dispatches this closure there (same contract as register_permission_autogrant).
@@ -588,12 +603,24 @@ pub(super) fn create_shared_ring(
                     Ok((ptr as usize, SharedBufferHandle(buf.into_raw() as usize)))
                 }
             })();
-            let _ = tx.send(result);
+            if let Err(std::sync::mpsc::SendError(result)) = tx.send(result) {
+                if let Ok((_, shared_buf)) = result {
+                    // The receiver timed out. The buffer was already posted, so close the native
+                    // mapping here and let the frontend reject/release it by load token.
+                    log::warn!("[plugin_host] slot {slot} late shared buffer lost its receiver; closing it on the UI thread");
+                    shared_buf.close_on_ui_thread(slot);
+                }
+            }
         })
         .map_err(|e| format!("with_webview: {e}"))?;
 
-    rx.recv_timeout(Duration::from_secs(5))
-        .map_err(|e| format!("shared ring provisioning timed out: {e}"))?
+    match rx.recv_timeout(Duration::from_secs(5)) {
+        Ok(result) => result,
+        Err(e) => {
+            callback_live.store(false, Release);
+            Err(format!("shared ring provisioning timed out: {e}"))
+        }
+    }
 }
 
 /// The `Ok`/`Err` payload `create_shared_ring` ships back over its channel.

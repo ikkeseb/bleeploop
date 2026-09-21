@@ -83,6 +83,7 @@ pub async fn plugin_load(
     path: String,
     id: String,
     frontend_epoch: u32,
+    load_token: u32,
     window: tauri::WebviewWindow,
     state: tauri::State<'_, PluginHostState>,
 ) -> Result<PluginInfo, String> {
@@ -93,14 +94,14 @@ pub async fn plugin_load(
         // else (`.clap`) → the CLAP host. The control plane downstream (event ring, shared buffer,
         // gate) is identical; only the upstream render differs.
         if path.to_ascii_lowercase().ends_with(".vst3") {
-            super::clap::vst3_load(&state, &window, slot, path, id, frontend_epoch)
+            super::clap::vst3_load(&state, &window, slot, path, id, frontend_epoch, load_token)
         } else {
-            super::clap::load(&state, &window, slot, path, id, frontend_epoch)
+            super::clap::load(&state, &window, slot, path, id, frontend_epoch, load_token)
         }
     }
     #[cfg(not(windows))]
     {
-        let _ = (&state, &window, &path, &id, frontend_epoch);
+        let _ = (&state, &window, &path, &id, frontend_epoch, load_token);
         Err(format!("plugin_load is Windows-only (slot={slot})"))
     }
 }

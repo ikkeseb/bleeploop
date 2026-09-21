@@ -1608,6 +1608,7 @@ fn owner_main(
     id: String,
     sample_rate: f64,
     frontend_epoch: u32,
+    load_token: u32,
     load_gen: u32,
     running: Arc<AtomicBool>,
     diag: Arc<ProducerDiag>,
@@ -1741,6 +1742,8 @@ fn owner_main(
                 cap_frames,
                 slot,
                 frontend_epoch,
+                load_token,
+                &running,
                 c,
                 in_channels,
             ) {
@@ -2378,6 +2381,7 @@ pub fn load(
     path: String,
     id: String,
     frontend_epoch: u32,
+    load_token: u32,
 ) -> Result<PluginInfo, String> {
     let sr_bits = state.sample_rate.load(Relaxed);
     let sample_rate = if sr_bits != 0 {
@@ -2413,6 +2417,7 @@ pub fn load(
                 id,
                 sample_rate,
                 frontend_epoch,
+                load_token,
                 load_gen,
                 owner_running,
                 owner_diag,
@@ -2515,6 +2520,7 @@ pub fn vst3_load(
     path: String,
     id: String,
     frontend_epoch: u32,
+    load_token: u32,
 ) -> Result<PluginInfo, String> {
     let sr_bits = state.sample_rate.load(Relaxed);
     let sample_rate = if sr_bits != 0 { f64::from_bits(sr_bits) } else { 48_000.0 };
@@ -2559,6 +2565,7 @@ pub fn vst3_load(
                 id,
                 sample_rate,
                 frontend_epoch,
+                load_token,
                 load_gen,
                 owner_running,
                 owner_diag,

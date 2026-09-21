@@ -58,7 +58,7 @@ try {
   await page.getByRole('button', { name: 'Keyboard & layout help' }).click();
   assert.match(await page.locator('#lf-help-popover').innerText(), /Session/);
   await page.keyboard.press('Escape');
-  await page.getByRole('button', { name: 'Fixed-length record off', exact: true }).click();
+  await page.getByRole('button', { name: 'Fixed take length off', exact: true }).click();
   for (let i = 0; i < 3; i++) await page.getByRole('button', { name: 'Fewer bars', exact: true }).click();
   await page.getByRole('button', { name: 'Track 1 record', exact: true }).click();
   await page.waitForFunction(() => window.__lf.looper.stateOf(0) === 'RECORDING' && !window.__lf.looper.track(0)().armed);

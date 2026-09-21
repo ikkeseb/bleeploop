@@ -18,7 +18,12 @@ Built and machine-verified:
   SmartScreen warning). Publishing the draft is a manual click. The tag must equal
   `v<tauri.conf.json version>`. Only the `release` job has `contents: write`, and it runs no repo code.
   `src-tauri/tauri.release.conf.json` is the overlay that puts the GPLv3 licence page in the installer
-  and the licence files beside the exe; a local trial build carried all of them (7z listing).
+  and the licence files beside the exe. The downloaded CI artifact at `ef95230` was checked on
+  Windows on 2026-09-21: installer checksum matched; extracted licences, notices and exact-commit
+  source pointer matched the staged files. Its exe differs from the bare exe only in Tauri's
+  three-byte NSIS bundle-type marker. The extracted exe enumerated ASIO/WASAPI and the Focusrite
+  device, and scanned Surge XT CLAP and Archetype Petrucci VST3 successfully. This did not run the
+  installer, the full app or an audio stream.
 - **Licence route** (owner's decision): repo MIT, release exe built with `--features asio` and
   licensed GPLv3, WASAPI the in-app fallback. Basis, read from the SDK (2.3.4): quoted in
   `THIRD-PARTY-NOTICES.md`. Nothing in the SDK speaks to an MIT repo + GPLv3 binary; that rests on
@@ -43,6 +48,6 @@ Built and machine-verified:
 
 Still open:
 
-- **Hear the first CI-built exe on the rig before offering it.** The runner proves compile + link
-  only; the rig has only ever heard SDK 2.3.3.
+- **Hear the first CI-built exe on the rig before offering it.** The artifact checks above do not
+  establish playback or input behavior; the rig has only ever heard SDK 2.3.3.
 - Unsigned builds trigger SmartScreen (said in the release notes); code signing is not planned.

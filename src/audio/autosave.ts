@@ -37,6 +37,8 @@ let database: Promise<IDBDatabase> | null = null;
 let operation: Promise<void> = Promise.resolve();
 let readyPromise: Promise<void> = Promise.resolve();
 let stopActive: (() => void) | null = null;
+/** Preserve the last valid archive while live state still matches a failed restore's rollback. */
+let failedRestoreFingerprint = '';
 
 function openDatabase(): Promise<IDBDatabase> {
   if (database) return database;
@@ -135,8 +137,10 @@ function inspectJam(): JamFingerprint {
 }
 
 async function persistCurrent(snapshot = inspectJam()): Promise<void> {
+  if (failedRestoreFingerprint && snapshot.value === failedRestoreFingerprint) return;
   if (snapshot.blank) {
     await writeLatest(null);
+    failedRestoreFingerprint = '';
     return;
   }
   const bpm = clock.bpm();
@@ -149,6 +153,7 @@ async function persistCurrent(snapshot = inspectJam()): Promise<void> {
   const committed = looper.exportSnapshot();
   if (committed.tracks.length === 0) {
     await writeLatest(null);
+    failedRestoreFingerprint = '';
     return;
   }
   // Capture metadata beside the PCM copies before yielding to the worker. The serialized save
@@ -162,14 +167,27 @@ async function persistCurrent(snapshot = inspectJam()): Promise<void> {
     base: exportBase(),
   });
   await writeLatest(bytes);
+  failedRestoreFingerprint = '';
 }
 
 async function restoreLatestImpl(): Promise<boolean> {
-  const saved = await readLatest();
-  if (!saved || !inspectJam().blank) return false;
-  await importSession(saved.bytes);
-  console.info(`[autosave] restored local recovery from ${new Date(saved.savedAt).toISOString()}`);
-  return true;
+  try {
+    const saved = await readLatest();
+    if (!saved || !inspectJam().blank) {
+      failedRestoreFingerprint = '';
+      return false;
+    }
+    await importSession(saved.bytes);
+    failedRestoreFingerprint = '';
+    console.info(`[autosave] restored local recovery from ${new Date(saved.savedAt).toISOString()}`);
+    return true;
+  } catch (error) {
+    const current = inspectJam();
+    // Protect the previous archive only while the failed restore left the looper blank. If live
+    // user work won a startup race, that jam must replace the old recovery on the next save.
+    failedRestoreFingerprint = current.blank ? current.value : '';
+    throw error;
+  }
 }
 
 function reportFailure(message: string, error: unknown): void {
@@ -261,6 +279,9 @@ export const autosave = {
   ready: () => readyPromise,
   flush,
   restoreLatest: () => serialized(restoreLatestImpl),
-  clearSaved: () => serialized(() => writeLatest(null)),
+  clearSaved: () => serialized(async () => {
+    await writeLatest(null);
+    failedRestoreFingerprint = '';
+  }),
   hasSaved: async () => (await readLatest()) !== null,
 } as const;

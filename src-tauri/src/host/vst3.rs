@@ -1243,6 +1243,7 @@ pub fn vst3_owner_main(
     id: String,
     sample_rate: f64,
     frontend_epoch: u32,
+    load_token: u32,
     load_gen: u32,
     running: Arc<AtomicBool>,
     diag: Arc<ProducerDiag>,
@@ -1386,6 +1387,8 @@ pub fn vst3_owner_main(
                     HOP1_CAPACITY_FRAMES,
                     slot,
                     frontend_epoch,
+                    load_token,
+                    &running,
                     c,
                     activation.in_channels,
                 )?;

@@ -11,7 +11,7 @@ import {
   sr,
   TRACK_COUNT,
 } from './state';
-import { recomputePeaks } from './peaks';
+import { recomputePeaks, resetPeaks } from './peaks';
 import { makeLoopBuffer, startPlayback } from './playback';
 import { setMute, setVolume } from './mixer';
 
@@ -106,70 +106,125 @@ export async function loadSession(payload: LoadSessionPayload): Promise<void> {
     validatedTracks.push({ ...s, fx });
   }
 
-  // Same transport bring-up every record gesture gets from the UI (idempotent): resume the shared
-  // AudioContext + start the free-run pulse, so ctx.currentTime advances and the pulse exists for
-  // startMasterPulse to re-anchor. It runs only after the complete public-payload validation above.
-  clock.ensureRunning();
-
-  // ── Tempo: adopt the session bpm, then freeze it (finishRecording's lock discipline) ──
-  // The all-EMPTY precondition means no committed loop holds a lock, and no count-in is in flight
-  // (that track would be RECORDING) — the unlock is belt-and-braces so setBpm below always applies.
-  clock.setBpmLocked(false);
-  clock.setBpm(bpm);
-  clock.setBpmLocked(true);
-
-  // ── Master state — exactly finishRecording's writes ──
-  setMasterLengthFrames(master);
-  engineState.masterFramesPlain = master;
-
-  // beatPeriod exactly as finishRecording derives it, using the already-validated exported bar count
-  // directly. The period itself stays integer-frame-derived and cannot disagree with the locked bpm.
-  const beatPeriod = master / sr() / (4 * bars);
-
-  // ── Heavy per-track preparation: complete every O(master) operation before reading the anchor ──
-  const prepared: { index: number; audioBuf: AudioBuffer }[] = [];
-  for (const s of validatedTracks) {
+  // Allocate and fill every AudioBuffer before touching the live grid. A later allocation failure
+  // must leave the all-EMPTY precondition intact so recovery can retry the same archive.
+  const prepared = validatedTracks.map((s) => ({
+    index: s.index,
+    audioBuf: makeLoopBuffer(s.pcm, master),
+  }));
+  const previousBpm = clock.bpm();
+  const previousTracks = validatedTracks.map((s) => {
     const t = engineState.tracks[s.index];
-    t.record.set(s.pcm, 0); // pcm.length === master, validated above
-    t.writeHead = master; // where a finished take leaves it (finishRecording parity)
-    t.lengthFrames = master;
-    t.fillFrames = master;
-    t.reversed = s.reversed;
-    // Replace the FX state with a DEEP COPY of the imported one BEFORE startPlayback — FxChain
-    // builds lazily from t.fxState on first playback. If a chain already exists (this track played
-    // earlier this session and was cleared; clear() keeps gain + fx alive), push the imported state
-    // into the live nodes too, and bump fxVersion so the FX UI re-reads either way.
-    t.fxState = s.fx.map((f) => ({ bypassed: f.bypassed, params: { ...f.params } }));
-    t.fx?.setState(t.fxState);
-    fxVersion[s.index][1]((v) => v + 1);
-    recomputePeaks(t, master);
-    // Volume/mute through the mixer's own paths (clamping, click-free live ramp, signals) — never
-    // hand-rolled gain math. Applied before startPlayback so a lazily-created gain node is born at
-    // the right level (startPlayback reads t.muted/t.volume on creation).
-    setVolume(s.index, s.volume);
-    setMute(s.index, s.muted);
-    const audioBuf = makeLoopBuffer(t.record, master);
-    prepared.push({ index: s.index, audioBuf });
+    return {
+      index: s.index,
+      volume: t.volume,
+      muted: t.muted,
+      reversed: t.reversed,
+      fxState: t.fxState.map((f) => ({ bypassed: f.bypassed, params: { ...f.params } })),
+    };
+  });
+
+  try {
+    // Same transport bring-up every record gesture gets from the UI (idempotent): resume the shared
+    // AudioContext + start the free-run pulse, so ctx.currentTime advances and the pulse exists for
+    // startMasterPulse to re-anchor. It runs only after the complete public-payload validation above.
+    clock.ensureRunning();
+
+    // ── Tempo: adopt the session bpm, then freeze it (finishRecording's lock discipline) ──
+    // The all-EMPTY precondition means no committed loop holds a lock, and no count-in is in flight
+    // (that track would be RECORDING) — the unlock is belt-and-braces so setBpm below always applies.
+    clock.setBpmLocked(false);
+    clock.setBpm(bpm);
+    clock.setBpmLocked(true);
+
+    // ── Master state — exactly finishRecording's writes ──
+    setMasterLengthFrames(master);
+    engineState.masterFramesPlain = master;
+
+    // beatPeriod exactly as finishRecording derives it, using the already-validated exported bar count
+    // directly. The period itself stays integer-frame-derived and cannot disagree with the locked bpm.
+    const beatPeriod = master / sr() / (4 * bars);
+
+    // ── Heavy per-track preparation: complete every O(master) operation before reading the anchor ──
+    for (const s of validatedTracks) {
+      const t = engineState.tracks[s.index];
+      t.record.set(s.pcm, 0); // pcm.length === master, validated above
+      t.writeHead = master; // where a finished take leaves it (finishRecording parity)
+      t.lengthFrames = master;
+      t.fillFrames = master;
+      t.reversed = s.reversed;
+      // Replace the FX state with a DEEP COPY of the imported one BEFORE startPlayback — FxChain
+      // builds lazily from t.fxState on first playback. If a chain already exists (this track played
+      // earlier this session and was cleared; clear() keeps gain + fx alive), push the imported state
+      // into the live nodes too, and bump fxVersion so the FX UI re-reads either way.
+      t.fxState = s.fx.map((f) => ({ bypassed: f.bypassed, params: { ...f.params } }));
+      t.fx?.setState(t.fxState);
+      fxVersion[s.index][1]((v) => v + 1);
+      recomputePeaks(t, master);
+      // Volume/mute through the mixer's own paths (clamping, click-free live ramp, signals) — never
+      // hand-rolled gain math. Applied before startPlayback so a lazily-created gain node is born at
+      // the right level (startPlayback reads t.muted/t.volume on creation).
+      setVolume(s.index, s.volume);
+      setMute(s.index, s.muted);
+    }
+
+    // ONE shared grid anchor, read only after preparation so the 80ms lead cannot expire during PCM
+    // copies/peak scans/AudioBuffer construction. All boundaries/click/LED extrapolate from this time.
+    const gridAnchor = engine.ctx.currentTime + IMPORT_START_LEAD;
+    engineState.masterStartTime = gridAnchor;
+
+    // ── Lightweight scheduling pass: every prepared track starts at frame 0 on the same anchor ──
+    for (const p of prepared) {
+      const t = engineState.tracks[p.index];
+      t.state = 'PLAYING';
+      startPlayback(p.index, p.audioBuf, gridAnchor);
+      publish(p.index);
+    }
+
+    // Pulse starts AFTER the track loop: publish() above is what flips clock.setTransportActive(true),
+    // and pulseTick gates the click on it — started before the loop (with the anchor inside the 0.1 s
+    // lookahead), beat 0 would schedule while the transport still read inactive and the imported
+    // session's first downbeat click would be silently dropped. The anchor is an absolute ctx time, so
+    // starting the pulse here changes nothing about the grid. (finishRecording doesn't need this
+    // ordering only because its track is already RECORDING, so transportActive is already true.)
+    clock.startMasterPulse(gridAnchor, beatPeriod);
+  } catch (error) {
+    // The import commit is one transaction. A graph/source failure after state writes must restore
+    // the original all-EMPTY lanes so a valid recovery archive remains retryable.
+    for (const before of previousTracks) {
+      const t = engineState.tracks[before.index];
+      for (const source of t.retiringSources) {
+        try { source.stop(); } catch { /* already stopped */ }
+        try { source.disconnect(); } catch { /* already disconnected */ }
+      }
+      t.retiringSources.clear();
+      if (t.source) {
+        try { t.source.stop(); } catch { /* already stopped */ }
+        try { t.source.disconnect(); } catch { /* already disconnected */ }
+        t.source = null;
+      }
+      t.record.fill(0, 0, master);
+      t.stopAt = null;
+      t.writeHead = 0;
+      t.fillFrames = 0;
+      t.lengthFrames = 0;
+      t.reversed = before.reversed;
+      t.state = 'EMPTY';
+      t.fxState = before.fxState;
+      t.fx?.setState(t.fxState);
+      fxVersion[before.index][1]((v) => v + 1);
+      setVolume(before.index, before.volume);
+      setMute(before.index, before.muted);
+      resetPeaks(t);
+    }
+    setMasterLengthFrames(0);
+    engineState.masterFramesPlain = 0;
+    engineState.masterStartTime = 0;
+    engineState.loopPhasePlain = 0;
+    clock.setBpmLocked(false);
+    clock.setBpm(previousBpm);
+    clock.stopMasterPulse();
+    for (const before of previousTracks) publish(before.index);
+    throw error;
   }
-
-  // ONE shared grid anchor, read only after preparation so the 80ms lead cannot expire during PCM
-  // copies/peak scans/AudioBuffer construction. All boundaries/click/LED extrapolate from this time.
-  const gridAnchor = engine.ctx.currentTime + IMPORT_START_LEAD;
-  engineState.masterStartTime = gridAnchor;
-
-  // ── Lightweight scheduling pass: every prepared track starts at frame 0 on the same anchor ──
-  for (const p of prepared) {
-    const t = engineState.tracks[p.index];
-    t.state = 'PLAYING';
-    startPlayback(p.index, p.audioBuf, gridAnchor);
-    publish(p.index);
-  }
-
-  // Pulse starts AFTER the track loop: publish() above is what flips clock.setTransportActive(true),
-  // and pulseTick gates the click on it — started before the loop (with the anchor inside the 0.1 s
-  // lookahead), beat 0 would schedule while the transport still read inactive and the imported
-  // session's first downbeat click would be silently dropped. The anchor is an absolute ctx time, so
-  // starting the pulse here changes nothing about the grid. (finishRecording doesn't need this
-  // ordering only because its track is already RECORDING, so transportActive is already true.)
-  clock.startMasterPulse(gridAnchor, beatPeriod);
 }

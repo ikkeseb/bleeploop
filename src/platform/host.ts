@@ -84,7 +84,7 @@ export interface PluginHost {
    * descriptors, so `(slot, path)` alone would silently load `descriptor[0]`. Pass the
    * `PluginDescriptor.id` from `scanPlugins()` to pick the exact one.
    */
-  loadPlugin(slot: PluginSlot, path: string, id: string): Promise<PluginInfo>;
+  loadPlugin(slot: PluginSlot, path: string, id: string, loadToken: number): Promise<PluginInfo>;
   unloadPlugin(slot: PluginSlot): Promise<void>;
   /**
    * List the plugins currently loaded in the native slots (frontend-reload wedge resync). A WebView
