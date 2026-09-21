@@ -1,16 +1,16 @@
 # First external tester feedback (OPEN)
 
-Owner-requested behavior and tester reports collected on 2026-09-19. This is an intake plan,
-not a diagnosis or a record of verified fixes. Testing is ongoing; fold new feedback into the
+Owner-requested behavior and tester reports collected on 2026-09-19, with local fixes and
+verification recorded below. Testing is ongoing; fold new feedback into the
 matching item. When resolved, move enduring decisions to their owning briefings and delete this plan.
 
 ## Evidence and scope
 
 The tester reports building a Windows `app.exe` with Rust, without ASIO, and running it with a
 physical MIDI keyboard. Exact commit, build command, audio device/driver configuration and plugin
-versions are unknown. Screenshots and the owner's account establish the observations below;
-nothing has been reproduced at runtime. Screenshots are temporary, uncommitted attachments; their
-relevant contents are transcribed here.
+versions are unknown. Screenshots and the owner's account establish the original observations below;
+local verification does not confirm the tester's machine. Screenshots are temporary, uncommitted
+attachments; their relevant contents are transcribed here.
 
 All items remain open until the tester confirms. § Code reading records what the source did at
 `d17c777`, before the fixes under § Landed; § Work order is the owner-approved sequence.
@@ -65,8 +65,12 @@ Proven in the browser tier only (`pnpm check`, `pnpm build`, `pnpm verify:jam`, 
 - **F9:** the auto go-live after a fresh pick is quiet (log line kept); a clicked GO LIVE still reports.
 - **F2 + F1 + F5:** short later takes tile across the master (early stop or FIXED), FIXED stays usable
   after the BPM lock, and PLAY on an idle transport starts from the top. `pnpm verify:jam` drives it
-  through the real dispatchers. By ear, unheard: the tile seams, a 3-over-8 cut, reverse on a tiled
-  track, and the downbeat click on a from-the-top start.
+  through the real dispatchers (Windows browser run, 2026-09-21: 91/91).
+  `verify/playback-restart.mjs` separately captures rendered lane PCM: single/ALL idle restarts
+  begin at source frame zero, ALL lanes share a start frame, and live joins keep phase beside a
+  muted lane pending END STOP. A deliberately wrong 100 ms source offset fails all three cases.
+  By ear, unheard: the tile seams, a 3-over-8 cut, reverse on a tiled track, and the downbeat click
+  on a from-the-top start.
 - **F10:** the button reads `AUTO REC · SENS n` with an explanatory tooltip. Wording is the owner's eye.
 
 ## Work order (owner-approved)

@@ -39,7 +39,7 @@
  * KNOWN LIMITS — do not read a green run as more than it is:
  *   - Everything measured comes from RECORDED PCM plus dispatcher state. Loop PLAYBACK is not captured
  *     (it routes past the record tap by design), so a phase error in resume()/startPlayback is INVISIBLE
- *     here. That remains a by-ear gate.
+ *     here. `playback-restart.mjs` separately measures restart/join PCM; perceived sound remains a by-ear gate.
  *   - A uniform slip applied to every take alike (e.g. one frame added to every arm split) keeps all the
  *     relative assertions green. The harness proves takes agree with each other, not that they agree with
  *     an absolute reference the browser does not expose.
@@ -50,7 +50,8 @@
  *     positions and passes. The fingerprint amplitudes are recorded there but not compared.
  *   - The FROM-THE-TOP checks read `looper.phaseValue()`, which is the master GRID (masterStartTime) as the
  *     25 ms drain tick sees it — not the position of any playing AudioBufferSource. A re-anchored grid whose
- *     sources started at the wrong offset would still read phase 0 here; the sources stay a by-ear gate.
+ *     sources started at the wrong offset would still read phase 0 here. `playback-restart.mjs` covers that
+ *     gap with seeded ramps captured at the actual lane gains, including the first audible sample.
  *   - Nothing native: the whole src-tauri half, the real record latency C on a rig, and the mic path are
  *     out of reach. Those stay by-ear/rig gates in STATUS.md.
  *
