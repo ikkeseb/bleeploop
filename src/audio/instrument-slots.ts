@@ -24,6 +24,11 @@ export const [slotPlugins, setSlotPlugins] = createSignal<
 >([null, null]);
 export const [activeSlot, setActiveSlotSignal] = createSignal<0 | 1>(0);
 
+// Number of source operations either running or queued for each slot. Incrementing when an operation
+// is enqueued (rather than when it starts) keeps the UI continuously pending between chained swaps.
+const [slotPendingCounts, setSlotPendingCounts] = createSignal<[number, number]>([0, 0]);
+export { slotPendingCounts };
+
 /** Copy a 2-tuple with index `i` replaced by `v` (signals hold tuples immutably). */
 export function withAt<T>(arr: readonly [T, T], i: 0 | 1, v: T): [T, T] {
   const next = [...arr] as [T, T];
@@ -42,7 +47,10 @@ export function withAt<T>(arr: readonly [T, T], i: 0 | 1, v: T): [T, T] {
  */
 const slotOpChain: [Promise<unknown>, Promise<unknown>] = [Promise.resolve(), Promise.resolve()];
 export function serializeSlot<T>(slot: 0 | 1, op: () => Promise<T>): Promise<T> {
-  const run = slotOpChain[slot].then(op, op);
+  setSlotPendingCounts((prev) => withAt(prev, slot, prev[slot] + 1));
+  const run = slotOpChain[slot].then(op, op).finally(() => {
+    setSlotPendingCounts((prev) => withAt(prev, slot, Math.max(0, prev[slot] - 1)));
+  });
   slotOpChain[slot] = run.then(
     () => {},
     () => {},

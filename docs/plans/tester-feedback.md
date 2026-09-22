@@ -82,9 +82,13 @@ Proven in the browser tier only (`pnpm check`, `pnpm build`, `pnpm verify:jam`, 
    (17-90 ms measured). Still open: Archetype Plini (VST3) stalled 4-14 s in 5 of 20 unloads in the
    first run, all with the editor closed, and in 0 of 44 in three later runs the same evening;
    cause unknown, not reproduced since. The VST3 teardown and the unload now log per-step timing
-   (release log included), so the next occurrence names its step. Next: when it recurs, read that
-   line, then decide between a fix and a busy state on the slot. DecentSampler is not installed
-   on the dev PC and was not tested.
+   (release log included), so the next occurrence names its step. The slot now shows "Updating…"
+   and disables its source/plugin controls while operations run or wait in the queue;
+   the other slot stays usable. Deferred-operation browser checks cover errors, queued work and
+   automatic GO LIVE. A Windows native probe verified pending/unlock through CLAP load, VST3 swap,
+   unload, failed load and retry, with PCM consumed after successful loads. This does not resolve
+   the intermittent Plini stall; when it recurs, read the teardown line. DecentSampler is not
+   installed on the dev PC and was not tested.
 2. **F2 + F1 + F5 + F11: design approved by the owner and built.** Reference read: the RC-505 MK II
    Parameter Guide. Per-track MEASURE is AUTO (= the first-recorded track), FREE ("set
    automatically, corresponding to the length of the recording") or a pre-set number; with LOOP

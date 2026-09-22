@@ -396,6 +396,9 @@ option {
   gap: 1px;
   min-width: 0;
 }
+.slot[aria-busy="true"] .slot__meta {
+  flex-shrink: 0;
+}
 .slot__k {
   font-family: var(--mono);
   font-size: 8.5px;

@@ -6,6 +6,7 @@ import {
   noteEditorOpened,
   pluginGain,
   setPluginGain,
+  slotPendingCounts,
 } from '../../audio/instrument';
 import { goLive, inputArmed, setMonitorGain, stopLive } from '../../audio/native-io';
 import { readAudioDeviceSettings } from '../../audio/audio-settings';
@@ -65,6 +66,7 @@ export function PluginBar(props: {
   const live = createMemo(() => inputArmed()[props.slot]);
   // Gain readout only; the actual control lives in the drawer (PluginParams).
   const gain = () => pluginGain()[props.slot] ?? 0.9;
+  const sourcePending = () => slotPendingCounts()[props.slot] > 0;
 
   const offClosed = platform.pluginHost.onEditorClosed((s) => {
     if (s === props.slot) setEditorOpen(false);
@@ -185,7 +187,7 @@ export function PluginBar(props: {
           classList={{ 'on-green': live() }}
           aria-pressed={live()}
           aria-label={live() ? `Stop live input for slot ${props.slot + 1}` : `Go live for slot ${props.slot + 1}`}
-          disabled={liveBusy()}
+          disabled={sourcePending() || liveBusy()}
           onClick={() => void toggleLive()}
         >
           <Show when={live()}>
@@ -201,7 +203,7 @@ export function PluginBar(props: {
         classList={{ on: editorOpen() }}
         aria-pressed={editorOpen()}
         aria-label={editorOpen() ? `Close editor for slot ${props.slot + 1}` : `Open editor for slot ${props.slot + 1}`}
-        disabled={editorBusy()}
+        disabled={sourcePending() || editorBusy()}
         onClick={() => void toggleEditor()}
       >
         EDITOR
@@ -215,6 +217,7 @@ export function PluginBar(props: {
         aria-expanded={props.paramsOpen}
         aria-controls={props.drawerId}
         aria-label={`Plugin parameters for slot ${props.slot + 1}, output gain ${gainDb(gain())}`}
+        disabled={sourcePending()}
         onClick={props.onToggleParams}
       >
         PARAMS <span class="slot__gainval">{gainDb(gain())}</span>{' '}
@@ -244,6 +247,7 @@ export function PluginParams(props: { slot: 0 | 1 }) {
   const [lastEdit, setLastEdit] = createSignal<{ name: string; value: number } | null>(null);
   // Plugin output gain: the per-slot wet level, with a type-aware default from the bridge.
   const gain = () => pluginGain()[props.slot] ?? 0.9;
+  const sourcePending = () => slotPendingCounts()[props.slot] > 0;
   const nameById = new Map<number, string>();
   const renderedIds = new Set<number>();
 
@@ -332,6 +336,7 @@ export function PluginParams(props: { slot: 0 | 1 }) {
             onDblClick={() => applyGain(1.0)}
             aria-label={`Plugin output gain for slot ${props.slot + 1}`}
             aria-valuetext={gainDb(gain())}
+            disabled={sourcePending()}
           />
         </label>
 
@@ -364,6 +369,7 @@ export function PluginParams(props: { slot: 0 | 1 }) {
                     value={values[p.id] ?? p.value}
                     onInput={(ev) => onSlider(p, ev.currentTarget.value)}
                     aria-label={p.name}
+                    disabled={sourcePending()}
                   />
                 </label>
               );

@@ -26,6 +26,8 @@ and playback startup, rollback, retry, explicit clear and a live jam winning the
 `monitor-generation.mjs` controls delayed host replies through the actual frontend monitor lifecycle.
 `plugin-load-buffer-generation.mjs` checks late/failed plugin buffers and worklet-module retry through
 the production frontend with an instrumented host; it does not exercise native COM cleanup.
+`plugin-slot-pending.mjs` drives deferred plugin operations through the rendered picker and checks
+pending controls, queue completion, failure recovery and independence of the other slot.
 `marker-probe.mjs` checks DEV marker correlation and clock arithmetic; it does not run native audio.
 `render-clock.mjs` checks the DEV worklet observer preserves PCM; `render-cursor.mjs` exercises the
 production compensation sampler with paired queue/timestamp observations, invalid clocks and freeze.

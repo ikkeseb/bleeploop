@@ -19,6 +19,7 @@ import {
   setSlotIds,
   setSlotPlugins,
   slotIds,
+  slotPendingCounts,
   slotPlugins,
   withAt,
 } from './instrument-slots';
@@ -346,7 +347,7 @@ export const pluginGain = pluginBridge.gains;
 
 /** Read-only reactive accessors: the synth id per slot, the loaded plugin per slot (null = synth
  * mode), the active slot index. (Owned by `instrument-slots.ts`; re-exported as the UI's one path.) */
-export { slotIds, slotPlugins, activeSlot };
+export { slotIds, slotPendingCounts, slotPlugins, activeSlot };
 
 /**
  * Derived predicate: is the ACTIVE slot playing the built-in GM drum kit (synth id 'drum' AND not

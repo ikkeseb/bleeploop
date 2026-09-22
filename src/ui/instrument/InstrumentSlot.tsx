@@ -7,6 +7,7 @@ import {
   selectSynth,
   setActiveSlot,
   slotIds,
+  slotPendingCounts,
   slotPlugins,
 } from '../../audio/instrument';
 import { inputArmed } from '../../audio/native-io';
@@ -26,6 +27,7 @@ export function InstrumentSlot(props: { slot: 0 | 1 }) {
   const slotIdx = props.slot;
   const isActive = () => activeSlot() === slotIdx;
   const plugin = () => slotPlugins()[slotIdx];
+  const pending = () => slotPendingCounts()[slotIdx] > 0;
   const synthName = () => SYNTHS.find((s) => s.id === slotIds()[slotIdx])?.name ?? '';
   const letter = String.fromCharCode(65 + slotIdx); // A / B
   const drawerId = `slot-${slotIdx}-params`;
@@ -46,6 +48,7 @@ export function InstrumentSlot(props: { slot: 0 | 1 }) {
       classList={{ 'slot--active': isActive() }}
       role="group"
       aria-label={`Slot ${slotIdx + 1}${isActive() ? ', active' : ''}`}
+      aria-busy={pending()}
       style={{ '--sc': sc() }}
       onClick={() => setActiveSlot(slotIdx)}
     >
@@ -62,10 +65,10 @@ export function InstrumentSlot(props: { slot: 0 | 1 }) {
           {letter}
         </button>
         <div class="slot__meta">
-          <span class="slot__k">Source · {plugin() ? 'Plugin' : 'Synth'}</span>
+          <span class="slot__k">Source{pending() ? '' : ` · ${plugin() ? 'Plugin' : 'Synth'}`}</span>
           <span class="slot__name">
-            {plugin() ? plugin()!.name : synthName()}
-            <Show when={plugin()}>
+            {pending() ? 'Updating…' : plugin() ? plugin()!.name : synthName()}
+            <Show when={plugin() && !pending()}>
               <small>{plugin()!.format}</small>
             </Show>
           </span>
@@ -83,9 +86,10 @@ export function InstrumentSlot(props: { slot: 0 | 1 }) {
                     <button
                       type="button"
                       class="tgl"
-                      classList={{ on: !plugin() && slotIds()[slotIdx] === s.id }}
-                      aria-pressed={!plugin() && slotIds()[slotIdx] === s.id}
+                      classList={{ on: !pending() && !plugin() && slotIds()[slotIdx] === s.id }}
+                      aria-pressed={!pending() && !plugin() && slotIds()[slotIdx] === s.id}
                       aria-label={`${s.name} for slot ${slotIdx + 1}`}
+                      disabled={pending()}
                       onClick={(e) => {
                         e.stopPropagation(); // don't re-trigger slot activation
                         selectSynth(slotIdx, s.id);
@@ -120,7 +124,9 @@ export function InstrumentSlot(props: { slot: 0 | 1 }) {
               class="slot__select"
               classList={{ 'is-loaded': !!plugin() }}
               aria-label={`Native plugin for slot ${slotIdx + 1}`}
-              value={plugin()?.id ?? ''}
+              aria-busy={pending()}
+              disabled={pending()}
+              value={pending() ? '' : plugin()?.id ?? ''}
               onClick={(e) => e.stopPropagation()}
               onChange={(e) => {
                 e.stopPropagation();
@@ -139,7 +145,7 @@ export function InstrumentSlot(props: { slot: 0 | 1 }) {
                 });
               }}
             >
-              <option value="">— none —</option>
+              <option value="">{pending() ? 'Updating…' : '— none —'}</option>
               <For each={availablePlugins()}>
                 {(p) => (
                   <option value={p.id}>
