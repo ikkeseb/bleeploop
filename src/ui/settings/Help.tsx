@@ -1,5 +1,5 @@
 import { For, Show } from 'solid-js';
-import { asioAvailable } from '../../audio/audio-devices';
+import { asioStatus } from '../../audio/audio-devices';
 import asioLogo from '../../assets/third-party/ASIO-compatible-logo-Steinberg-R-white-transparent-RGB.svg';
 import { DRUM_KIT } from '../../audio/synths/drum';
 import { COMPUTER_MAP } from '../keyboard/Keyboard';
@@ -144,8 +144,9 @@ export function Help() {
 
       {/* The app's "About box equivalent" for Steinberg's ASIO Usage Guidelines (1e/1f: ASIO is on by
           default, so the unaltered logo must sit here, and only here). Section 14 allows the trademark
-          line as plain text beside the logo. Present only in a build that can offer ASIO. */}
-      <Show when={asioAvailable()}>
+          line as plain text beside the logo. Present in every build that links the SDK (the licence
+          statement is about the binary), whether or not the driver was started or disabled at launch. */}
+      <Show when={asioStatus().status !== 'not-compiled'}>
         <section class="help__sec">
           <h3 class="help__h">About this build</h3>
           <p class="help__about">This build links the Steinberg ASIO® SDK and is licensed GPLv3. The BleepLoop source is MIT.</p>

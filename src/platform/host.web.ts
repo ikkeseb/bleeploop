@@ -104,6 +104,12 @@ const webPluginHost: PluginHost = {
   async asioAvailable() {
     return false; // no native ASIO host in the browser build
   },
+  async asioStatus() {
+    return { status: 'not-compiled' as const, detail: '' };
+  },
+  async asioProbe() {
+    return { status: 'not-compiled' as const, detail: '' };
+  },
   async asioDeviceInfo() {
     return null;
   },

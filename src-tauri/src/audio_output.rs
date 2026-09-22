@@ -155,7 +155,8 @@ pub fn list_output_devices() -> Result<Vec<OutputDeviceInfo>, String> {
 /// device object obtained earlier (proven: cpal runs ASIO input+output duplex on one driver; and
 /// `cpal::Device` is Send+Sync, so it lives in a static). So both `open_input_stream` and
 /// `open_output_stream` build from this one cached device + config rather than re-resolving. WASAPI is
-/// unaffected (it resolves fresh each time). Populated by `cache_asio()` at startup, before any arm.
+/// unaffected (it resolves fresh each time). Populated by the one-per-process probe (`probe_asio_startup`),
+/// requested by the frontend after the UI is up and before any arm.
 #[cfg(feature = "asio")]
 pub struct AsioCache {
     pub name: String,
@@ -165,13 +166,47 @@ pub struct AsioCache {
     pub out_cfg: StreamConfig,
     pub out_fmt: SampleFormat,
 }
+/// The ONE startup coordinator: owns the probe state machine (`asio_startup.rs`) and publishes the
+/// cache. Present in every build so status/probe commands answer uniformly; `compiled` tells the
+/// frontend whether ASIO can exist at all.
 #[cfg(feature = "asio")]
-static ASIO_CACHE: std::sync::OnceLock<AsioCache> = std::sync::OnceLock::new();
+static ASIO_PROBE: crate::asio_startup::Coordinator<AsioCache> = crate::asio_startup::Coordinator::new(true);
+#[cfg(not(feature = "asio"))]
+static ASIO_PROBE: crate::asio_startup::Coordinator<()> = crate::asio_startup::Coordinator::new(false);
 
-/// Read the cached ASIO device + configs (None until `cache_asio()` succeeds, or on a non-ASIO rig).
+/// Read the cached ASIO device + configs (None until a probe succeeded, or on a non-ASIO rig).
 #[cfg(feature = "asio")]
 pub fn asio_cache() -> Option<&'static AsioCache> {
-    ASIO_CACHE.get()
+    ASIO_PROBE.payload()
+}
+
+/// `--disable-asio` launch policy: recorded once in `run()`, before any command can arrive.
+pub fn set_asio_disabled_by_flag() {
+    ASIO_PROBE.set_disabled_by_flag();
+}
+
+/// Current probe status; never touches the driver.
+pub fn asio_startup_status() -> crate::asio_startup::AsioStatusReport {
+    ASIO_PROBE.status()
+}
+
+/// Deadline for one probe. The device query normally completes well inside a second; a driver that
+/// takes longer is treated as hung for this process (see `asio_startup.rs` for why no retry follows).
+const ASIO_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Run (or refuse) the one-per-process ASIO probe. Called from the `plugin_asio_probe` command, which
+/// the frontend issues AFTER the window is up and only when the saved preference is on (`explicit`
+/// false) or the user asks (`explicit` true). `sentinel` lives in the app's local data dir.
+pub fn probe_asio_startup(sentinel: &std::path::Path, explicit: bool) -> crate::asio_startup::AsioStatusReport {
+    #[cfg(feature = "asio")]
+    {
+        ASIO_PROBE.probe(sentinel, explicit, resolve_asio_cache, ASIO_PROBE_TIMEOUT)
+    }
+    #[cfg(not(feature = "asio"))]
+    {
+        let _ = (sentinel, explicit);
+        ASIO_PROBE.status()
+    }
 }
 
 /// P11.3 ASIO-default: the runtime preference for the ASIO low-latency tier. Default ON — ASIO is the
@@ -236,8 +271,8 @@ pub fn release_asio_holder(slot: u8) {
     let _ = ASIO_DUPLEX_HOLDER.compare_exchange(slot as i8, -1, Relaxed, Relaxed);
 }
 
-/// Whether an ASIO low-latency device is AVAILABLE to select (the `asio` feature is compiled AND a
-/// device was cached at startup). Drives the Audio Settings toggle's enabled state. Always false in a
+/// Whether an ASIO low-latency device is AVAILABLE to select (the `asio` feature is compiled AND the
+/// probe published a device). Drives the Audio Settings toggle's enabled state. Always false in a
 /// build without the feature, so the toggle reads disabled there.
 pub fn asio_available() -> bool {
     #[cfg(feature = "asio")]
@@ -267,31 +302,29 @@ pub fn use_asio() -> bool {
     }
 }
 
-/// Resolve + cache the ASIO duplex device and its in/out configs while the driver is FREE. Idempotent;
-/// call ONCE at startup before any arm (and after the logger is up, so the result is visible). On a
-/// non-ASIO rig / failure it logs and leaves the cache empty → the audio paths stay on WASAPI.
+/// Resolve the ASIO duplex device and its in/out configs while the driver is FREE. This is the ONLY
+/// function that contacts an ASIO driver outside a stream build: `default_output_device()` loads and
+/// initialises the driver DLL in-process (asio-sys → `CoCreateInstance` + `ASIOInit`), which is where
+/// a broken driver hangs or crashes. Runs on the coordinator's probe thread, never from `run()`.
+/// A `None` from cpal cannot distinguish "no driver installed" from "every driver failed to load"
+/// (cpal skips drivers that fail), so the message says "no usable driver".
 #[cfg(feature = "asio")]
-pub fn cache_asio() {
-    if ASIO_CACHE.get().is_some() {
-        return;
-    }
-    let host = match cpal::host_from_id(cpal::HostId::Asio) {
-        Ok(h) => h,
-        Err(e) => {
-            log::warn!("[audio_output] cache_asio: ASIO host unavailable ({e}) — staying on WASAPI");
-            return;
-        }
-    };
+fn resolve_asio_cache() -> Result<AsioCache, String> {
+    log::info!("[audio_output] ASIO probe: contacting the driver (host, device, configs)");
+    let host = cpal::host_from_id(cpal::HostId::Asio)
+        .map_err(|e| format!("ASIO host unavailable ({e})"))?;
     let dev = host
         .default_output_device()
         .or_else(|| host.default_input_device())
         .or_else(|| host.devices().ok().and_then(|mut it| it.next()));
     let Some(d) = dev else {
-        log::warn!("[audio_output] cache_asio: no ASIO device — staying on WASAPI");
-        return;
+        return Err("no usable ASIO driver found".to_string());
     };
     match (d.default_input_config(), d.default_output_config()) {
         (Ok(ic), Ok(oc)) => {
+            if ic.sample_rate() == 0 || oc.sample_rate() == 0 {
+                return Err("ASIO driver reported a zero sample rate".to_string());
+            }
             let name = d
                 .description()
                 .map(|x| x.to_string())
@@ -319,13 +352,13 @@ pub fn cache_asio() {
                 cache.out_cfg,
                 cache.out_fmt
             );
-            let _ = ASIO_CACHE.set(cache);
+            Ok(cache)
         }
-        (ic, oc) => log::warn!(
-            "[audio_output] cache_asio: config query failed (in ok={}, out ok={}) — staying on WASAPI",
+        (ic, oc) => Err(format!(
+            "ASIO config query failed (input ok={}, output ok={})",
             ic.is_ok(),
             oc.is_ok()
-        ),
+        )),
     }
 }
 

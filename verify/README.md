@@ -34,7 +34,7 @@ of separate plugin files that share a class id.
 `input-controls.mjs` checks BPM cancellation, pointer release across octave changes, independent MIDI
 ownership and the playable upper note range. `session-state-roundtrip.mjs` checks STOPPED recovery,
 state-only autosave and subsequent PLAY ALL. These probes, `recovery-import-failure.mjs`,
-`monitor-generation.mjs` and `plugin-load-buffer-generation.mjs` run in
+`monitor-generation.mjs`, `plugin-load-buffer-generation.mjs` and `asio-startup.mjs` run in
 `.github/workflows/browser-lifecycle.yml` on frontend and verification changes. They do not gate the
 physical rig or replace the separately dispatched golden jam.
 `marker-probe.mjs` checks DEV marker correlation and clock arithmetic; it does not run native audio.
@@ -43,6 +43,9 @@ production compensation sampler with paired queue/timestamp observations, invali
 `export-context.mjs` covers live/export isolation, lossless editable downloads and bounded ZIP work;
 `synth-note-ownership.mjs` and `midi-note-ownership.mjs` measure note release, voice reuse and input owners;
 `audio-settings-startup.mjs` exercises actual frontend orchestration with an instrumented host;
+`asio-startup.mjs` drives the ASIO startup coordinator's frontend half (saved-off never probes, saved-on
+probes before the scan, blocked/failed offer RETRY, timed-out does not, not-compiled/flag hide the
+toggle) — the native state machine itself is `cargo test` in `src-tauri/src/asio_startup.rs`;
 `layout-reachability.mjs` measures rendered control access and canvas identity at desktop sizes, plus the
 drum-pad ribbon, the two-row command-bar cap and the muted-lane readout with a loop present.
 `transport-auto-layout.mjs` checks that AUTO toggling and sensitivity changes preserve command-bar

@@ -1,5 +1,10 @@
 import { createSignal } from 'solid-js';
-import { platform, type AudioInputDevice, type AudioOutputDevice } from '../platform';
+import {
+  platform,
+  type AsioStatusReport,
+  type AudioInputDevice,
+  type AudioOutputDevice,
+} from '../platform';
 import { readAudioDeviceSettings, writeAudioDeviceSettings, type BufferFrames } from './audio-settings';
 import { notifyError } from '../notify';
 import { monitorArmed, refreshMonitorLatency } from './native-io';
@@ -25,8 +30,11 @@ const [bufferFrames, setBufferFramesSig] = createSignal<BufferFrames>(
 
 // ASIO low-latency tier: whether the native build offers an ASIO device (drives the Audio Settings
 // toggle's enabled state) and whether the tier is preferred (init from persisted; pushed to the host
-// at startup so a saved "off" is honored).
+// at startup so a saved "off" is honored). The driver is contacted ONLY through `probeAsio` — at boot
+// when the saved preference is on, or from an explicit user action — never by the native startup
+// path (`src-tauri/src/asio_startup.rs` owns the one-per-process rules; `asioStatus` mirrors them).
 const [asioAvailable, setAsioAvailableSig] = createSignal(false);
+const [asioStatus, setAsioStatus] = createSignal<AsioStatusReport>({ status: 'not-compiled', detail: '' });
 const [asioDeviceInfo, setAsioDeviceInfo] = createSignal<Awaited<ReturnType<typeof platform.pluginHost.asioDeviceInfo>>>(null);
 const [asioEnabled, setAsioEnabledSig] = createSignal<boolean>(readAudioDeviceSettings().asioEnabled);
 export const usingAsio = () => asioAvailable() && asioEnabled();
@@ -136,9 +144,51 @@ async function refreshBufferLatency(): Promise<void> {
 // ASIO low-latency tier — runtime host preference
 // ---------------------------------------------------------------------------
 
+/** Publish a probe/status report: availability + device metadata follow `ready` together. */
+async function applyAsioReport(report: AsioStatusReport): Promise<void> {
+  setAsioStatus(report);
+  const ready = report.status === 'ready';
+  setAsioAvailableSig(ready);
+  setAsioDeviceInfo(ready ? await platform.pluginHost.asioDeviceInfo() : null);
+}
+
+/**
+ * Ask the native host for the ASIO driver probe (see `asioProbe` in `host.ts`). `explicit` marks a
+ * user action (toggle / Retry), which may proceed past a blocked or failed earlier attempt; boot passes
+ * false. Serialized with the other host writes so it can never interleave with a driver flip.
+ */
+export async function probeAsio(explicit: boolean): Promise<AsioStatusReport> {
+  let report = asioStatus();
+  try {
+    await configure(async () => {
+      setAsioStatus({ status: 'probing', detail: '' });
+      report = await platform.pluginHost.asioProbe(explicit);
+      await applyAsioReport(report);
+    });
+  } catch (e) {
+    console.error('[instrument] ASIO probe failed', e);
+    notifyError('Could not start the ASIO driver', e);
+    report = { status: 'failed', detail: e instanceof Error ? e.message : String(e) };
+    setAsioStatus(report);
+  }
+  return report;
+}
+
+/** Whether the ASIO row should offer a control at all (the binary can do ASIO and it was not disabled at launch). */
+export const asioOffered = () =>
+  asioStatus().status !== 'not-compiled' && asioStatus().status !== 'disabled-by-flag';
+
+/** Whether an explicit user retry can do anything (see `AsioStartupStatus`). */
+export const asioRetryable = () => {
+  const s = asioStatus().status;
+  return s === 'unprobed' || s === 'failed' || s === 'blocked';
+};
+
 /**
  * Set the ASIO-tier preference after host acknowledgement. Existing streams retain their driver.
  * Uses the same process-wide queue as buffer writes; the web host accepts without opening a device.
+ * Turning it ON when the driver has not been probed yet (or the last attempt failed / was blocked) is
+ * the explicit user action that runs the probe; turning it OFF never touches the driver.
  */
 export async function setAsioEnabled(enabled: boolean): Promise<void> {
   try {
@@ -150,12 +200,17 @@ export async function setAsioEnabled(enabled: boolean): Promise<void> {
   } catch (e) {
     console.error('[instrument] setAsioEnabled failed', e);
     notifyError("Couldn't switch audio driver (ASIO/WASAPI)", e);
+    return;
   }
+  if (enabled && asioRetryable()) await probeAsio(true);
 }
 
 /**
  * Apply saved buffer and driver settings before publishing plugins. Configuration failure rejects
- * boot so a selectable plugin cannot silently use different settings. Availability is informational.
+ * boot so a selectable plugin cannot silently use different settings. The ASIO driver is probed here
+ * — after the window is up — and only when the saved preference is on; a saved "off" never contacts
+ * the driver. The probe is awaited (bounded by the native deadline) so `asioAvailable()` is fixed
+ * before any plugin can load (the load-time block cap keys on it).
  */
 export async function initAudioDeviceSettings(): Promise<void> {
   if (!platform.pluginHost.available) return;
@@ -167,10 +222,12 @@ export async function initAudioDeviceSettings(): Promise<void> {
     setAsioEnabledSig(saved.asioEnabled);
   });
   try {
-    setAsioAvailableSig(await platform.pluginHost.asioAvailable());
-    setAsioDeviceInfo(await platform.pluginHost.asioDeviceInfo());
+    const status = await platform.pluginHost.asioStatus();
+    await applyAsioReport(status);
+    const saved = readAudioDeviceSettings();
+    if (saved.asioEnabled && status.status === 'unprobed') await probeAsio(false);
   } catch (e) {
-    console.error('[instrument] ASIO availability query failed', e);
+    console.error('[instrument] ASIO status query failed', e);
     notifyError('Could not check ASIO availability', e);
   }
 }
@@ -181,5 +238,5 @@ export { inputDevices, outputDevices };
 /** Read-only reactive accessor: the global RT buffer size (frames) for the settings readout. */
 export { bufferFrames };
 
-/** Read-only reactive accessors: ASIO tier availability + preference (the settings toggle). */
-export { asioAvailable, asioEnabled, asioDeviceInfo };
+/** Read-only reactive accessors: ASIO tier availability, startup status + preference (the settings toggle). */
+export { asioAvailable, asioEnabled, asioDeviceInfo, asioStatus };

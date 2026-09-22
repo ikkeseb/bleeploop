@@ -5,6 +5,10 @@ import {
   asioAvailable,
   asioDeviceInfo,
   asioEnabled,
+  asioOffered,
+  asioRetryable,
+  asioStatus,
+  probeAsio,
   usingAsio,
   bufferFrames,
   inputDevices,
@@ -220,20 +224,27 @@ export function AudioSettings() {
         <span class="audio-settings__readout">ms</span>
       </div>
 
+      {/* The ASIO row shows the toggle whenever the binary can do ASIO; the driver itself is contacted
+          only by the startup probe (saved preference on) or by turning the toggle on / Retry. The
+          status line under it says why ASIO is not in use (`AsioStartupStatus` in host.ts). */}
       <div
         class="audio-settings__row"
-        classList={{ 'audio-settings__row--disabled': !asioAvailable() }}
+        classList={{ 'audio-settings__row--disabled': !asioOffered() }}
       >
         <span class="audio-settings__label">ASIO®</span>
         <Show
-          when={asioAvailable()}
-          fallback={<span class="audio-settings__soon">unavailable</span>}
+          when={asioOffered()}
+          fallback={
+            <span class="audio-settings__soon">
+              {asioStatus().status === 'disabled-by-flag' ? 'off for this launch (--disable-asio)' : 'unavailable'}
+            </span>
+          }
         >
           <label class="audio-settings__toggle">
             <input
               type="checkbox"
               checked={asioEnabled()}
-              disabled={anyInputArmed() || anyMonitorArmed()}
+              disabled={anyInputArmed() || anyMonitorArmed() || asioStatus().status === 'probing'}
               onChange={(e) => {
                 const checkbox = e.currentTarget;
                 void setAsioEnabled(checkbox.checked).then(() => { checkbox.checked = asioEnabled(); });
@@ -241,15 +252,44 @@ export function AudioSettings() {
               aria-label="Use ASIO low-latency audio"
             />
             <span class="audio-settings__toggle-text">
-              {asioEnabled() ? 'low-latency' : 'WASAPI'}
+              {!asioEnabled()
+                ? 'WASAPI'
+                : asioAvailable()
+                  ? 'low-latency'
+                  : asioStatus().status === 'probing'
+                    ? 'starting driver…'
+                    : 'WASAPI until the driver starts'}
             </span>
           </label>
         </Show>
       </div>
+      <Show when={asioOffered() && asioEnabled() && !asioAvailable() && asioStatus().status !== 'probing'}>
+        <div class="audio-settings__hint audio-settings__hint--asio" role="status">
+          <span>
+            {asioStatus().status === 'blocked'
+              ? 'The previous ASIO start did not complete, so it was skipped this time.'
+              : asioStatus().status === 'timed-out'
+                ? asioStatus().detail
+                : asioStatus().status === 'failed'
+                  ? `ASIO could not start: ${asioStatus().detail}.`
+                  : 'ASIO has not been started yet.'}
+          </span>
+          <Show when={asioRetryable()}>
+            <button
+              type="button"
+              class="audio-settings__retry"
+              onClick={() => void probeAsio(true)}
+              aria-label="Retry starting the ASIO driver"
+            >
+              RETRY ASIO
+            </button>
+          </Show>
+        </div>
+      </Show>
       {/* Switching backend re-opens the cpal stream (an arm operation) and input/output arm separately,
           so the host is locked while anything is armed — preventing an input-ASIO / output-WASAPI split
           (or vice versa, which on a seizing driver would fail the second arm). Disarm to change it. */}
-      <Show when={asioAvailable() && (anyInputArmed() || anyMonitorArmed())}>
+      <Show when={asioOffered() && (anyInputArmed() || anyMonitorArmed())}>
         <div class="audio-settings__hint" role="note">disarm to switch audio backend</div>
       </Show>
 

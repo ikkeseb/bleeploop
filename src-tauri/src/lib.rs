@@ -1,4 +1,6 @@
 mod host;
+// ASIO startup coordinator (one probe per process, requested by the frontend after the UI is up).
+mod asio_startup;
 // P11.0: native audio-input capture (cpal, WASAPI-shared). Windows-only; the wet signal returns to
 // Web Audio via the unchanged P9 hop-1 path, so no boundary change.
 #[cfg(windows)]
@@ -133,12 +135,15 @@ pub fn run() {
             audio_input::probe_asio_duplex();
             std::process::exit(0);
         }
-        // P11.3 ASIO tier: resolve + cache the ASIO duplex device + configs NOW, while the single ASIO
-        // driver is free. Once a stream (input OR output) seizes the driver, cpal can't re-resolve the
-        // device or re-query configs — but both capture + monitor streams still build from this cache
-        // (cpal supports ASIO duplex). No-op without the asio feature / on a non-ASIO rig.
-        #[cfg(feature = "asio")]
-        audio_output::cache_asio();
+        // P11.3 ASIO tier: the duplex device + configs are resolved ONCE per process while the driver
+        // is free (once a stream holds it, cpal can't re-resolve or re-query), but NOT here: resolving
+        // loads the third-party driver DLL in-process, and a broken driver would hang or crash the app
+        // before any window exists. The frontend requests the probe (`plugin_asio_probe`) after the UI
+        // is up and only if the saved preference is on — `asio_startup.rs` owns the rules.
+        // `--disable-asio` is the escape hatch: no probe this launch, whatever the preference says.
+        if args.iter().any(|a| a == "--disable-asio") {
+            audio_output::set_asio_disabled_by_flag();
+        }
     }
 
     tauri::Builder::default()
@@ -258,6 +263,8 @@ pub fn run() {
             host::plugin_set_asio_enabled,
             host::plugin_asio_available,
             host::plugin_asio_device_info,
+            host::plugin_asio_status,
+            host::plugin_asio_probe,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

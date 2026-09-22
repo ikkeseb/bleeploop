@@ -179,8 +179,10 @@ existing P9 ring → looper record tap (lag-tolerant, records wet "for free").
   rt_alloc guard (a one-shot non-perf-moment alloc, absorbed by the ~30ms hop-2 buffer).
 - **ASIO tier** (`--features asio`): routes BOTH capture + monitor through ONE full-duplex driver, ONE clock.
   cpal ASIO = ONE driver per device: once a stream holds it, cpal can't re-resolve the device or re-query
-  configs → `audio_output::cache_asio()` resolves the duplex Device + configs ONCE at startup (in a static;
-  `cpal::Device` is Send+Sync). Both streams build from the cache. **ASIO `Stream::drop` only removes
+  configs → the duplex Device + configs are resolved ONCE per process (`audio_output::resolve_asio_cache`
+  behind the `asio_startup.rs` coordinator; `cpal::Device` is Send+Sync, so the cache is a static).
+  Both streams build from the cache. **Never call the resolver from `run()`:** it loads the driver DLL
+  in-process; the frontend requests it after the UI is up (`docs/ARCHITECTURE.md` § ASIO startup). **ASIO `Stream::drop` only removes
   callbacks** (never `driver.stop`, never tears down `asio_streams`) → `host::native_io::NativeIo` keeps
   both streams alive across disarm (output plays silence → no drone; re-arm makes ZERO cpal calls → no
   BadMode). Each retained stream stores its actual backend. A backend transition is allowed only while both
@@ -198,9 +200,13 @@ existing P9 ring → looper record tap (lag-tolerant, records wet "for free").
   time, so the two observations never described the same tail. A median or a seqlock does not repair
   that. A future native estimator must carry a common source position AND its timestamp across both
   observations, then prove the relationship on the marker path (`docs/VERIFY.md`).
-- **Test-rig gotcha:** `cache_asio()` runs before logger initialization. Read `plugin_asio_device_info`
-  for cached metadata and confirm the opened backend through the goLive log. Boot applies saved buffer
-  and ASIO preferences before enabling plugin selection or scanning.
+- **Test-rig gotcha:** the ASIO probe is a frontend-requested command, so a `tauri dev` log shows
+  `[asio] probe starting` → `cached ASIO "…"` → `[asio] probe result … Ready` AFTER `host_init`, and
+  nothing ASIO-related before it; `pnpm dev:asio -- -- --disable-asio` shows `DisabledByFlag` and no
+  probe. Read `plugin_asio_device_info` for cached metadata and confirm the opened backend through the
+  goLive log. Boot applies saved buffer and ASIO preferences, then awaits the probe, before enabling
+  plugin selection or scanning (the load-time block cap keys on `asio_available()`). The DEV
+  `--probe-asio` CLI DOES load every driver (cpal enumeration initialises them): not a harmless check.
 - **Audio Settings + buffer size:** a global Audio Settings popover (topbar gear) holds the input/channel/
   output device pickers (arm toggles stay per-slot) + a live buffer-size dropdown (64/128/256/512/1024). The
   CLAP+VST3 RT loops watch process-global `BLOCK_CONFIG_GEN` and re-pace to the new D-block with NO plugin

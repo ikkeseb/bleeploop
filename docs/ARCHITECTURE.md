@@ -88,9 +88,20 @@ the archive. Legacy missing state and OVERDUBBING restore as PLAYING. Autosave p
 waits two seconds for stable state; an abrupt crash inside that window can lose the latest change.
 Orderly native close flushes before exit. Recovery is not a synchronous durability guarantee.
 
-**ASIO startup limit:** ASIO builds query the default driver before Tauri logging and before the
-frontend reads the saved ASIO preference. Disabling ASIO in Audio Settings does not bypass that query
-on the next launch. A hanging driver can prevent reaching settings; there is no startup bypass yet.
+**ASIO startup:** resolving the ASIO device loads and initialises the third-party driver DLL
+in-process (asio-sys → `CoCreateInstance` + `ASIOInit`), and a broken driver hangs or crashes there
+with no in-process remedy (a timeout bounds only the waiter; the driver keeps asio-sys' global lock
+and possibly the loader lock). So `run()` never contacts the driver. `src-tauri/src/asio_startup.rs`
+owns ONE probe per process, requested by the frontend after the window is up
+(`initAudioDeviceSettings` → `plugin_asio_probe`) and only when the saved preference is on; a saved
+"off" never asks. A sentinel file in the app's local data dir marks an attempt in progress; found at
+the next launch it blocks the automatic probe until the user presses RETRY ASIO in Audio Settings. A
+timed-out probe is never retried in the same process (restart). `app.exe --disable-asio` skips it for
+that launch whatever the preference says. What this does NOT promise: that the app survives a driver
+that crashes when the user later starts it, and the same in-process load happens again at the first
+ASIO stream build. Upstream note: asio-sys 0.3 passes an uninitialised `ASIODriverInfo.sysRef`
+(the SDK's application window handle) to the driver's `init`; a driver that uses it sees an
+indeterminate value.
 
 - **Looper capture:** getUserMedia (EC/NS/AGC off) → selected input channel → centred mono →
   `capture` AudioWorkletNode whose `process()` publishes each 128-frame quantum WITH its absolute

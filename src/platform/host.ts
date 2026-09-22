@@ -209,11 +209,20 @@ export interface PluginHost {
 
   // ── ASIO low-latency tier ───────────────────────────────────────────────────────────────────────
   /**
-   * Whether an ASIO low-latency device is available (the native build compiled the ASIO host AND a
-   * device was found at startup). The Audio Settings toggle enables itself on this. Always false in the
-   * web build.
+   * Whether an ASIO low-latency device is available (the native build compiled the ASIO host AND the
+   * startup probe published a device). Always false in the web build.
    */
   asioAvailable(): Promise<boolean>;
+  /** The startup coordinator's status (`src-tauri/src/asio_startup.rs`). Never touches the driver. */
+  asioStatus(): Promise<AsioStatusReport>;
+  /**
+   * Request the one-per-process ASIO driver probe. The frontend calls this AFTER the window is up, at
+   * boot only when the saved preference is on (`explicit=false`), and from the Audio Settings
+   * toggle / Retry (`explicit=true`, which may proceed past a blocked or failed earlier attempt).
+   * Resolves with the resulting status; `ready` means `asioAvailable()` is now true. Bounded by the
+   * native probe deadline (a hung driver yields `timed-out`, never a hang here).
+   */
+  asioProbe(explicit: boolean): Promise<AsioStatusReport>;
   /** Cached default ASIO driver and its actual channel counts; null without an ASIO device. */
   asioDeviceInfo(): Promise<{ name: string; inputChannels: number; outputChannels: number } | null>;
   /**
@@ -223,6 +232,28 @@ export interface PluginHost {
    * in the web build.
    */
   setAsioEnabled(enabled: boolean): Promise<void>;
+}
+
+/**
+ * ASIO startup status (mirrors `AsioStartupStatus` in `src-tauri/src/asio_startup.rs`). `not-compiled`
+ * = no ASIO in this binary (and the web build); `disabled-by-flag` = launched with `--disable-asio`;
+ * `unprobed` = nothing asked yet (saved preference off); `probing`; `ready`; `failed` (explicitly
+ * retryable); `blocked` (an earlier launch's probe never completed, explicit retry needed);
+ * `timed-out` (restart required).
+ */
+export type AsioStartupStatus =
+  | 'not-compiled'
+  | 'disabled-by-flag'
+  | 'unprobed'
+  | 'probing'
+  | 'ready'
+  | 'failed'
+  | 'blocked'
+  | 'timed-out';
+export interface AsioStatusReport {
+  status: AsioStartupStatus;
+  /** Human-readable reason for `failed` / `blocked` / `timed-out`; empty otherwise. */
+  detail: string;
 }
 
 /** A live audio input, delivered as an AudioNode on the caller's shared AudioContext. */

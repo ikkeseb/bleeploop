@@ -68,7 +68,10 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
         .map_err(|e| format!("invalid duration: {e}"))?.unwrap_or(4).clamp(1, 45);
     #[cfg(feature = "asio")]
     if backend.is_asio() {
-        audio_output::cache_asio();
+        // Standalone DEV process: probe explicitly with a throwaway sentinel (no app data dir here).
+        let sentinel = std::env::temp_dir().join("bleeploop-output-latency-probe-asio");
+        let report = audio_output::probe_asio_startup(&sentinel, true);
+        println!("[output-latency-probe] asioProbe={}", serde_json::to_string(&report).unwrap());
         println!("[output-latency-probe] asioDeviceInfo={}", serde_json::to_string(&crate::host::plugin_asio_device_info()).unwrap());
     }
     BLOCK.store(block, Relaxed);

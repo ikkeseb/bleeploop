@@ -1,6 +1,6 @@
 import { getTransport } from 'tone';
 import * as audioDeviceSettings from '../audio/audio-settings';
-import { setAsioEnabled, setBufferSize } from '../audio/audio-devices';
+import { asioStatus, probeAsio, setAsioEnabled, setBufferSize } from '../audio/audio-devices';
 import { autosave } from '../audio/autosave';
 import { clock } from '../audio/clock';
 import { engine } from '../audio/engine';
@@ -52,6 +52,9 @@ export interface LfDebug {
   audioDeviceSettings: typeof audioDeviceSettings;
   setBufferSize: typeof setBufferSize;
   setAsioEnabled: typeof setAsioEnabled;
+  /** ASIO startup coordinator readout + explicit probe (the Audio Settings RETRY path). */
+  asioStatus: typeof asioStatus;
+  probeAsio: typeof probeAsio;
   midi: typeof midi;
   /** Raw Tone transport handle for timing diagnostics (engine.ctx is already touched by the time
    * audio is running, so getTransport() is safe here). */
@@ -126,6 +129,8 @@ export function installLfDebug(ui: LfDebug['ui']): void {
     audioDeviceSettings,
     setBufferSize,
     setAsioEnabled,
+    asioStatus,
+    probeAsio,
     midi,
     transport: () => getTransport(),
     pluginBridge: { ...pluginBridge, injectRecordLossForTest },

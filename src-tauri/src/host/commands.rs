@@ -538,6 +538,61 @@ pub fn plugin_asio_available() -> bool {
     }
 }
 
+/// ASIO startup status; never touches the driver. Mirrors `AsioStatusReport` in `host.ts`.
+#[tauri::command]
+pub fn plugin_asio_status() -> crate::asio_startup::AsioStatusReport {
+    #[cfg(windows)]
+    {
+        let report = crate::audio_output::asio_startup_status();
+        // Logged so a `tauri dev` grep can see a launch that never probes (DisabledByFlag, saved off).
+        log::info!("[asio] status read: {:?} {}", report.status, report.detail);
+        report
+    }
+    #[cfg(not(windows))]
+    {
+        crate::asio_startup::AsioStatusReport {
+            status: crate::asio_startup::AsioStartupStatus::NotCompiled,
+            detail: String::new(),
+        }
+    }
+}
+
+/// The one-per-process ASIO probe (`asio_startup.rs`). The frontend calls this AFTER the window is up:
+/// at boot with `explicit=false` only when the saved preference is on, and from the Audio Settings
+/// toggle/Retry with `explicit=true`. Runs on a blocking runtime thread for at most the probe deadline;
+/// the returned report is also logged so a `tauri dev` grep sees the decision.
+#[tauri::command]
+pub async fn plugin_asio_probe(
+    app: tauri::AppHandle,
+    explicit: bool,
+) -> Result<crate::asio_startup::AsioStatusReport, String> {
+    #[cfg(windows)]
+    {
+        use tauri::Manager;
+        let dir = app
+            .path()
+            .app_local_data_dir()
+            .map_err(|e| format!("app_local_data_dir: {e}"))?;
+        let sentinel = dir.join("asio-probe-in-progress");
+        let report = tauri::async_runtime::spawn_blocking(move || {
+            crate::audio_output::probe_asio_startup(&sentinel, explicit)
+        })
+        .await
+        .map_err(|e| format!("asio probe task: {e}"))?;
+        log::info!(
+            "[asio] probe result (explicit={explicit}): {:?} {}",
+            report.status,
+            report.detail
+        );
+        Ok(report)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (app, explicit);
+        Ok(plugin_asio_status())
+    }
+}
+
 /// Read cached metadata only; never enumerate or reopen an ASIO driver held by a live stream.
 #[tauri::command]
 pub fn plugin_asio_device_info() -> Option<super::state::AsioDeviceInfo> {

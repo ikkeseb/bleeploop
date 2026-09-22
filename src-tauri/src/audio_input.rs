@@ -348,8 +348,9 @@ fn build_input_on(
 /// P11.3 de-risk probe (DEV, `app.exe --probe-asio`). Enumerates the ASIO host's device list to prove
 /// two things before any real ASIO work: (1) the cpal `asio` feature actually COMPILED (libclang/bindgen
 /// + Steinberg SDK wired up), and (2) the machine's installed ASIO drivers (e.g. Focusrite/Scarlett)
-/// are VISIBLE to cpal. Only lists names — it does NOT open/instantiate a driver (that loads the
-/// driver DLL and can fail/panic if Focusrite Control holds the device), which keeps the probe robust.
+/// are VISIBLE to cpal. NOTE: cpal's device enumeration DOES load and initialise each driver DLL
+/// (`Devices::next` → `load_driver` → `CoCreateInstance` + `ASIOInit`), so this probe can hang or
+/// crash on a broken driver exactly like the in-app probe; it is a DEV tool, not a harmless check.
 #[cfg(feature = "asio")]
 pub fn probe_asio() {
     println!("[asio-probe] available hosts: {:?}", cpal::available_hosts());

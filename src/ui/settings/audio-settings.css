@@ -128,6 +128,30 @@
   color: color-mix(in srgb, var(--dub) 55%, var(--dim));
 }
 
+/* ASIO startup status line: the reason ASIO is not in use + the explicit RETRY action. Same amber
+   note as the deferred-change hint, laid out as a row so the button sits beside the sentence. */
+.audio-settings__hint--asio {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.audio-settings__retry {
+  flex: 0 0 auto;
+  padding: 3px 8px;
+  border: 1px solid color-mix(in srgb, var(--cyan) 55%, transparent);
+  border-radius: 6px;
+  background: var(--glass);
+  color: var(--cyan);
+  font-family: var(--mono);
+  font-size: 9.5px;
+  letter-spacing: 0.08em;
+  cursor: pointer;
+}
+.audio-settings__retry:hover {
+  background: var(--glass-2);
+}
+
 .audio-settings__row--disabled {
   opacity: 0.5;
 }
