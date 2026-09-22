@@ -177,7 +177,8 @@ session is still unverified.
 ### Stop 6 — fault paths
 
 The stream-fault fallback: the three log
-layers, the toast and the web-path continuation were runtime-probed on the web tier only.
+layers, the toast, the web-path continuation and the slot's "INPUT LIVE · WEB MONITOR" label were
+runtime-probed on the web tier only.
 
 ### Stop 7 — MIC path
 

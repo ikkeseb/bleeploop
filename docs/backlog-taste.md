@@ -56,6 +56,23 @@ not here.
   live context rate read-only until the C2 selector lands?
 
 - **Minimum window:** at 960 × 600 with the keyboard visible, lane controls are vertically clipped. Improve minimum-height layout while keeping the normal five-lane proportions.
+- **Non-hue state cues (2026-09-22, built, unseen):** toast severity glyph (⚠ error / ✓ done) in a
+  16 px accent column beside the stripe; the system lamp's warn ring; the record meter's 1 px ring at
+  clipping and the 3 px AUTO notch. Right size, right weight?
+- **"On" pills carry state by colour only (2026-09-22):** CLICK / FIXED / AUTO REC / RETAKE / END STOP
+  engaged-cyan vs dim measures ΔE 7.2 under protanopia — a glyph or word carrier (`● CLICK`)?
+- **Hit targets under 24 px (2026-09-22):** `transport__step` 22 px, `toast__close` 20 px, the `lf-range`
+  12 px band.
+- **Lane colours under deuteranopia (2026-09-22):** REC red and PLAYING green land on nearly the same
+  yellow; in greyscale only the 8 px state word and the core glyph separate the lanes (the 7 px word
+  at low height even less). A shape carrier (glyph in the left rail, larger word) or a palette move?
+- **Audio Settings popover (2026-09-22):** no max-height/scroll (Help has one); non-modal for the
+  keyboard yet modal for the pointer.
+- **Empty plugin scan note (2026-09-22, built):** one muted mono line per slot, "No plugins found ·
+  CLAP in … · rescan ⟳ in the command bar", hidden below 640 px window height so the drum pads stay
+  reachable. Wording, and should it live in the picker's place instead of its own row?
+- **Fallback copy (2026-09-22, built):** "INPUT LIVE · WEB MONITOR" after a native monitor fault; the
+  STOPPED lane core's "play first to overdub"; slots read A/B on screen but "slot 1/2" in ARIA labels.
 
 ## By ear, when convenient
 
