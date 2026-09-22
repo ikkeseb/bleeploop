@@ -60,6 +60,10 @@ toggle) — the native state machine itself is `cargo test` in `src-tauri/src/as
 drum-pad ribbon, the two-row command-bar cap and the muted-lane readout with a loop present.
 `transport-auto-layout.mjs` checks that AUTO toggling and sensitivity changes preserve command-bar
 height and lane position from 960 to 1920 px, with screenshots at 1730 px.
+`contact-sheet.mjs` screenshots fixed looper scenes (empty, count-in, first take, armed later take,
+FX with five lanes, Help, Audio Settings) at 1280×820, 1920×1080 and 1000×700 with the keyboard bottom
+and hidden into `logs/contact-sheet/` plus a tiling `index.html`, and fails on a clipped lane clear
+button with FX open, rec-red in an armed lane's canvas, or any console error.
 `first-session.mjs` drives real buttons, synth keys and file controls in fresh browser profiles:
 record, download the zip, reopen from automatic recovery, retry a malformed import, import the
 download into another profile and clear/reload. PCM hashes must match across both round trips.
