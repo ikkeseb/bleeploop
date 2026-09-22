@@ -8,7 +8,7 @@ import {
   setPluginGain,
   slotPendingCounts,
 } from '../../audio/instrument';
-import { goLive, inputArmed, setMonitorGain, stopLive } from '../../audio/native-io';
+import { goLive, inputArmed, monitorArmed, setMonitorGain, stopLive } from '../../audio/native-io';
 import { readAudioDeviceSettings } from '../../audio/audio-settings';
 import { usingAsio } from '../../audio/audio-devices';
 import { notifyError } from '../../notify';
@@ -61,9 +61,10 @@ export function PluginBar(props: {
   const [editorError, setEditorError] = createSignal<string | null>(null);
   const [liveBusy, setLiveBusy] = createSignal(false);
   const [liveError, setLiveError] = createSignal<string | null>(null);
-  // input-armed is the "fully live" proxy (goLive arms input THEN the native monitor as one unit and
-  // rolls input back if the monitor fails).
+  // Input stays armed after an output-stream fault so the web path can take over. Keep that degraded
+  // state visible after the fault toast disappears.
   const live = createMemo(() => inputArmed()[props.slot]);
+  const webMonitor = createMemo(() => live() && !monitorArmed()[props.slot]);
   // Gain readout only; the actual control lives in the drawer (PluginParams).
   const gain = () => pluginGain()[props.slot] ?? 0.9;
   const sourcePending = () => slotPendingCounts()[props.slot] > 0;
@@ -186,14 +187,21 @@ export function PluginBar(props: {
           class="tgl live"
           classList={{ 'on-green': live() }}
           aria-pressed={live()}
-          aria-label={live() ? `Stop live input for slot ${props.slot + 1}` : `Go live for slot ${props.slot + 1}`}
+          aria-label={
+            webMonitor()
+              ? 'Input live, monitoring through the web path; click to stop'
+              : live()
+                ? `Stop live input for slot ${props.slot + 1}`
+                : `Go live for slot ${props.slot + 1}`
+          }
+          title={webMonitor() ? 'native monitor lost; go live again to restore low-latency monitoring' : undefined}
           disabled={sourcePending() || liveBusy()}
           onClick={() => void toggleLive()}
         >
           <Show when={live()}>
             <i class="tgl__dot" aria-hidden="true" />
           </Show>
-          {live() ? 'INPUT LIVE' : 'GO LIVE'}
+          {webMonitor() ? 'INPUT LIVE · WEB MONITOR' : live() ? 'INPUT LIVE' : 'GO LIVE'}
         </button>
       </Show>
       {/* editor toggle (open = cyan) */}
@@ -306,7 +314,9 @@ export function PluginParams(props: { slot: 0 | 1 }) {
   }
   function onGainInput(input: HTMLInputElement) {
     let v = Number(input.value);
-    if (Math.abs(v - 1.0) < 0.03) v = 1.0; // soft unity detent
+    const detentLimit = 0.03 + Number.EPSILON;
+    const inUnityDetent = (value: number) => Math.abs(value - 1.0) <= detentLimit;
+    if (!inUnityDetent(gain()) && inUnityDetent(v)) v = 1.0; // snap only while approaching unity
     applyGain(v);
     // Solid does not update the native range when the snapped value equals the existing signal.
     // Keep the thumb aligned with the stored value inside the unity detent.

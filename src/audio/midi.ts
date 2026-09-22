@@ -11,18 +11,19 @@ import { notifyError } from '../notify';
  * absent or unsupported must NOT affect the on-screen keyboard or computer keyboard input.
  */
 
-export type MidiStatus = 'idle' | 'unsupported' | 'no-devices' | 'connected';
+export type MidiStatus = 'idle' | 'unsupported' | 'denied' | 'error' | 'no-devices' | 'connected';
 
 const [midiStatus, setMidiStatus] = createSignal<MidiStatus>('idle');
 const [midiDevices, setMidiDevices] = createSignal<string[]>([]);
 
-/** Reactive MIDI status ('idle' | 'unsupported' | 'no-devices' | 'connected'). */
+/** Reactive MIDI status, including unsupported, permission-denied and request-error states. */
 export { midiStatus };
 
 /** Reactive list of connected MIDI input device names. */
 export { midiDevices };
 
 let _access: MIDIAccess | null = null;
+let startInFlight: Promise<void> | null = null;
 
 /** Standard pitch-bend range: the wheel's full throw = ±2 semitones. */
 const PITCH_BEND_RANGE_SEMITONES = 2;
@@ -130,8 +131,7 @@ function attachInputs(access: MIDIAccess): void {
  * Request Web MIDI access and start listening. Safe to call multiple times (idempotent).
  * Errors and lack of hardware are handled gracefully.
  */
-export async function start(): Promise<void> {
-  if (_access) return; // already started
+async function requestAccess(): Promise<void> {
   try {
     const access = await platform.midi.requestAccess();
     if (!access) {
@@ -143,7 +143,30 @@ export async function start(): Promise<void> {
 
     // Hot-plug: re-enumerate whenever a device connects/disconnects.
     access.onstatechange = () => attachInputs(access);
-  } catch {
-    setMidiStatus('unsupported');
+  } catch (e) {
+    const name = e instanceof DOMException ? e.name : '';
+    const denied = name === 'SecurityError' || name === 'NotAllowedError';
+    // A permission denial is the environment's answer (a headless rig, a locked-down WebView), not a
+    // fault: it warns. Anything else is an error and reaches the release log.
+    if (denied) console.warn('[midi] requestMIDIAccess denied', e);
+    else console.error('[midi] requestMIDIAccess failed', e);
+    setMidiStatus(denied ? 'denied' : 'error');
   }
+}
+
+export function start(): Promise<void> {
+  if (_access) return Promise.resolve(); // already started
+  if (startInFlight) return startInFlight;
+  startInFlight = requestAccess();
+  const pending = startInFlight;
+  void pending.finally(() => {
+    if (startInFlight === pending) startInFlight = null;
+  });
+  return pending;
+}
+
+/** Retry a failed permission/request attempt. Concurrent retries share the same request. */
+export function retry(): Promise<void> {
+  const status = midiStatus();
+  return status === 'denied' || status === 'error' ? start() : Promise.resolve();
 }

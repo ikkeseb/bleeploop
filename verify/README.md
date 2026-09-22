@@ -34,6 +34,7 @@ it does not exercise native COM cleanup.
 `plugin-slot-pending.mjs` drives deferred plugin operations through the rendered picker and checks
 pending controls, queue completion, failure recovery, independence of the other slot, and selection
 of separate plugin files that share a class id.
+`instrument-controls.mjs` checks keyboard-octave remounts, plugin gain/live fallbacks, empty scans and MIDI request failures.
 `input-controls.mjs` checks BPM cancellation, pointer release across octave changes, independent MIDI
 ownership and the playable upper note range. `ui-state-carriers.mjs` checks transport, meter, lamp,
 looper-announcement and toast state carriers. `session-state-roundtrip.mjs` checks STOPPED recovery,

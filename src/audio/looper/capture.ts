@@ -122,7 +122,7 @@ export async function init(): Promise<void> {
  */
 export function warm(): void {
   if (engineState.initialized || initPromise) return;
-  build().catch(() => {});
+  build().catch((e) => console.error('[capture] warm-up failed', e));
 }
 
 async function buildEngine(): Promise<void> {

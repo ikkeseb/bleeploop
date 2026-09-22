@@ -5,6 +5,7 @@ import {
   clearPlugin,
   selectPlugin,
   selectSynth,
+  scanning,
   setActiveSlot,
   slotIds,
   slotPendingCounts,
@@ -162,6 +163,13 @@ export function InstrumentSlot(props: { slot: 0 | 1 }) {
           </Show>
         </div>
       </div>
+      <Show when={platform.pluginHost.available && availablePlugins().length === 0}>
+        <span class="slot__plugin-note" role="note">
+          {scanning()
+            ? 'scanning plugins…'
+            : 'No plugins found · CLAP in %COMMONPROGRAMFILES%\\CLAP, VST3 in %COMMONPROGRAMFILES%\\VST3 · rescan ⟳ in the command bar'}
+        </span>
+      </Show>
       {/* Params drawer (accordion). Mounted whenever a plugin is loaded (so onParamChanged tracks live
           positions even while collapsed); open/close is CSS-only, so it never remounts on toggle. */}
       <Show keyed when={slotPlugins()[slotIdx]}>

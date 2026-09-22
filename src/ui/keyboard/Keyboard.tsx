@@ -17,6 +17,9 @@ interface KeyboardProps {
 
 const KEY_COUNT = 37; // three octaves + the top C
 
+// Session-only so hiding (which unmounts this component) does not reset the play octave.
+export const [keyboardOctave, setKeyboardOctave] = createSignal(4); // C4 = MIDI 60
+
 // Computer-keyboard layout (one+ octave of offsets from the base C). z/x shift octave.
 export const COMPUTER_MAP: Readonly<Record<string, number>> = {
   a: 0, w: 1, s: 2, e: 3, d: 4, f: 5, t: 6, g: 7, y: 8, h: 9, u: 10, j: 11,
@@ -51,7 +54,6 @@ interface Hold {
 }
 
 export function Keyboard(props: KeyboardProps = {}) {
-  const [baseOctave, setBaseOctave] = createSignal(4); // C4 = MIDI 60
   const [downNotes, setDownNotes] = createSignal<ReadonlySet<number>>(inputRouter.held);
 
   // The active slot's synth — drum gets the pad layout, everything else the piano. A slot in plugin
@@ -62,7 +64,7 @@ export function Keyboard(props: KeyboardProps = {}) {
   const drumActive = createMemo(() => activeIsDrum());
 
   const layout = createMemo<KeyLayout[]>(() => {
-    const base = octaveBase(baseOctave());
+    const base = octaveBase(keyboardOctave());
     const notes = Array.from({ length: Math.min(KEY_COUNT, 128 - base) }, (_, i) => base + i);
     const whiteCount = notes.filter((n) => !isBlackKey(n)).length;
     const whiteW = 100 / whiteCount;
@@ -136,9 +138,9 @@ export function Keyboard(props: KeyboardProps = {}) {
 
   // Octave changes replace the key elements. Release their holds before a removed capture target
   // can strand a note; computer-key and MIDI owners keep their own release paths.
-  let pointerOctave = baseOctave();
+  let pointerOctave = keyboardOctave();
   createEffect(() => {
-    const octave = baseOctave();
+    const octave = keyboardOctave();
     if (octave !== pointerOctave) {
       for (const hold of pointerNotes.values()) endHold(hold);
       pointerNotes.clear();
@@ -171,17 +173,17 @@ export function Keyboard(props: KeyboardProps = {}) {
       return;
     }
     if (k === 'z') {
-      setBaseOctave((o) => Math.max(0, o - 1));
+      setKeyboardOctave((o) => Math.max(0, o - 1));
       return;
     }
     if (k === 'x') {
-      setBaseOctave((o) => Math.min(8, o + 1));
+      setKeyboardOctave((o) => Math.min(8, o + 1));
       return;
     }
     const offset = COMPUTER_MAP[k];
     if (offset === undefined || heldKeyNote.has(k)) return;
     e.preventDefault();
-    const note = octaveBase(baseOctave()) + offset;
+    const note = octaveBase(keyboardOctave()) + offset;
     // Owner per physical key: after an octave shift two held keys can land on the SAME note, and the
     // router must keep it sounding (and lit) until the last of them lifts.
     const hold: Hold = { note, source: 'computer', owner: `key:${k}`, active: true, sounding: false };
@@ -260,16 +262,16 @@ export function Keyboard(props: KeyboardProps = {}) {
               type="button"
               class="kb__cap"
               aria-label="Octave down"
-              onClick={() => setBaseOctave((o) => Math.max(0, o - 1))}
+              onClick={() => setKeyboardOctave((o) => Math.max(0, o - 1))}
             >
               −
             </button>
-            <span class="kb__base">C{baseOctave()}</span>
+            <span class="kb__base">C{keyboardOctave()}</span>
             <button
               type="button"
               class="kb__cap"
               aria-label="Octave up"
-              onClick={() => setBaseOctave((o) => Math.min(8, o + 1))}
+              onClick={() => setKeyboardOctave((o) => Math.min(8, o + 1))}
             >
               +
             </button>

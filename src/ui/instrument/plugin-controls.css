@@ -58,6 +58,25 @@
   white-space: nowrap;
 }
 
+/* Empty native scan: keep the installation hint in the slot without turning it into another control. */
+.slot__plugin-note {
+  display: block;
+  padding: 0 18px 9px;
+  overflow: hidden;
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: clamp(6.5px, 0.55vw, 8.5px);
+  line-height: 1.2;
+  white-space: nowrap;
+}
+/* The note is a whole extra row per slot. Below the 600 px window floor that row pushes the drum pads
+ * off screen (`verify/layout-reachability.mjs --plugin-source`), so the hint yields to reachability. */
+@media (max-height: 640px) {
+  .slot__plugin-note {
+    display: none;
+  }
+}
+
 /* ---- PluginParams — the accordion drawer body ---- */
 .pc {
   display: grid;
