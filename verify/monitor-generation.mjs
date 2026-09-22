@@ -12,7 +12,10 @@ try {
     const slots = await import('/src/audio/instrument-slots.ts');
     const { recordLatency: latency } = await import('/src/audio/record-latency.ts');
     await window.__lf.engine.start();
-    slots.setSlotPlugins([{ id: 'probe', name: 'Probe', path: 'probe', format: 'vst3', isEffect: true }, null]);
+    slots.setSlotPlugins([
+      { id: 'probe-0', name: 'Probe 0', path: 'probe-0', format: 'vst3', isEffect: true },
+      { id: 'probe-1', name: 'Probe 1', path: 'probe-1', format: 'vst3', isEffect: true },
+    ]);
     const host = platform.pluginHost;
     const timers = [];
     const originalTimeout = window.setTimeout;
@@ -67,8 +70,45 @@ try {
     await pendingArm;
     const armVersusBuffer = { seconds: latency.cpalOutSeconds(), frozen: latency.snapshot().frozen };
     await io.disarmMonitor(0);
+
+    // Both slots may monitor under WASAPI. When the most recently armed slot disappears, the other
+    // remains native-monitored and must become a fresh compensation generation rather than falling
+    // back to the zero-compensation synth/mic baseline.
+    host.monitorLatencySeconds = async (slot) => slot === 0 ? 0.011 : 0.022;
+    await io.armMonitor(0);
+    await io.armMonitor(1);
+    latency.recordCompensationFrames(); // freeze slot 1's generation
+    let resolveSurvivor;
+    host.monitorLatencySeconds = (slot) => slot === 0
+      ? new Promise(resolve => { resolveSurvivor = resolve; })
+      : Promise.resolve(0.022);
+    await io.disarmMonitor(1);
+    const survivorBeforeTake = {
+      monitors: io.monitorArmed(),
+      slot: latency.armedSlot(),
+      seconds: latency.cpalOutSeconds(),
+      frozen: latency.snapshot().frozen,
+    };
+    latency.recordCompensationFrames();
+    const survivorAfterTake = {
+      slot: latency.armedSlot(),
+      seconds: latency.cpalOutSeconds(),
+      frozen: latency.snapshot().frozen,
+    };
+    resolveSurvivor(0.099);
+    await Promise.resolve();
+    await Promise.resolve();
+    const survivorAfterLateReply = {
+      slot: latency.armedSlot(),
+      seconds: latency.cpalOutSeconds(),
+      frozen: latency.snapshot().frozen,
+    };
+    await io.disarmMonitor(0);
     window.setTimeout = originalTimeout;
-    return { afterRearm, afterNewerTake, staleTimerReads, afterFastTake, armVersusBuffer };
+    return {
+      afterRearm, afterNewerTake, staleTimerReads, afterFastTake, armVersusBuffer,
+      survivorBeforeTake, survivorAfterTake, survivorAfterLateReply,
+    };
   });
   console.log(JSON.stringify(result));
   assert.equal(result.afterRearm, 0.03, 'an old monitor reply must not overwrite a rearmed monitor');
@@ -76,4 +116,19 @@ try {
   assert.equal(result.staleTimerReads, 0, 'an old configuration timer must not start a new monitor query');
   assert.deepEqual(result.afterFastTake, { seconds: 0.04, frozen: true }, 'a reply within the current generation must respect its first-use freeze');
   assert.deepEqual(result.armVersusBuffer, { seconds: 0.05, frozen: true }, 'an in-flight monitor arm must not overwrite a newer buffer configuration');
+  assert.deepEqual(
+    result.survivorBeforeTake,
+    { monitors: [true, false], slot: 0, seconds: 0.011, frozen: false },
+    'disarming the registered slot must reopen compensation for a surviving native monitor',
+  );
+  assert.deepEqual(
+    result.survivorAfterTake,
+    { slot: 0, seconds: 0.011, frozen: true },
+    'an immediate first take must freeze the survivor\'s last accepted latency, not zero',
+  );
+  assert.deepEqual(
+    result.survivorAfterLateReply,
+    { slot: 0, seconds: 0.011, frozen: true },
+    'the promoted monitor\'s late latency reply must not overwrite its frozen first take',
+  );
 } finally { await browser.close(); }

@@ -148,10 +148,10 @@ export function PluginBar(props: {
       // (goLive rolled the input back). A stop failure is rare; report generically.
       console.error('[PluginControls] go-live toggle failed', e);
       if (quiet) return;
-      setLiveError(wantLive ? 'no input bus' : 'stop failed');
+      setLiveError(wantLive ? 'input failed' : 'stop failed');
       notifyError(
         wantLive
-          ? "Couldn't start live input. This plugin may not accept audio input"
+          ? "Couldn't start live input"
           : 'Live input stop failed',
         e,
       );

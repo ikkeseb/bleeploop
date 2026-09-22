@@ -63,7 +63,7 @@ export function Keyboard(props: KeyboardProps = {}) {
 
   const layout = createMemo<KeyLayout[]>(() => {
     const base = octaveBase(baseOctave());
-    const notes = Array.from({ length: KEY_COUNT }, (_, i) => base + i);
+    const notes = Array.from({ length: Math.min(KEY_COUNT, 128 - base) }, (_, i) => base + i);
     const whiteCount = notes.filter((n) => !isBlackKey(n)).length;
     const whiteW = 100 / whiteCount;
     const blackW = whiteW * 0.62;
@@ -133,6 +133,18 @@ export function Keyboard(props: KeyboardProps = {}) {
       endHold(hold);
     }
   }
+
+  // Octave changes replace the key elements. Release their holds before a removed capture target
+  // can strand a note; computer-key and MIDI owners keep their own release paths.
+  let pointerOctave = baseOctave();
+  createEffect(() => {
+    const octave = baseOctave();
+    if (octave !== pointerOctave) {
+      for (const hold of pointerNotes.values()) endHold(hold);
+      pointerNotes.clear();
+      pointerOctave = octave;
+    }
+  });
 
   // --- computer keyboard ---
   const heldKeyNote = new Map<string, Hold>();
@@ -283,6 +295,7 @@ export function Keyboard(props: KeyboardProps = {}) {
                   onPointerDown={(e) => onPointerDown(e, k.note)}
                   onPointerUp={onPointerUp}
                   onPointerCancel={onPointerUp}
+                  onLostPointerCapture={onPointerUp}
                 >
                   {/* Octave markers only (C keys) — a slim ribbon can't carry a legible label on every
                       key, and per-key names just add grey-on-grey clutter. */}
@@ -306,6 +319,7 @@ export function Keyboard(props: KeyboardProps = {}) {
                 onPointerDown={(e) => onPadPointerDown(e, pad.note)}
                 onPointerUp={onPointerUp}
                 onPointerCancel={onPointerUp}
+                onLostPointerCapture={onPointerUp}
               >
                 <span class="kb__pad-lamp" aria-hidden="true" />
                 <span class="kb__pad-label">{pad.label}</span>

@@ -101,6 +101,7 @@ interface BridgeSlot {
 let ctx: AudioContext | null = null;
 let moduleReady: Promise<void> | null = null;
 let release: ((ab: ArrayBuffer) => void) | null = null;
+let onPluginConnected: (() => void) | null = null;
 const slotMap = new Map<number, BridgeSlot>();
 /**
  * Process-lifetime loss totals for the plugin PCM path into recordTap. They deliberately outlive a
@@ -145,10 +146,11 @@ function releaseBuffer(ab: ArrayBuffer): void {
  */
 export async function initPluginBridge(
   audioCtx: AudioContext,
-  opts?: { release?: (ab: ArrayBuffer) => void },
+  opts?: { release?: (ab: ArrayBuffer) => void; onPluginConnected?: () => void },
 ): Promise<void> {
   ctx = audioCtx;
   if (opts?.release) release = opts.release;
+  if (opts?.onPluginConnected) onPluginConnected = opts.onPluginConnected;
   if (!moduleReady) moduleReady = ctx.audioWorklet.addModule(pluginPcmUrl);
   const ready = moduleReady;
   try {
@@ -260,6 +262,11 @@ export async function acceptPluginBuffer(ab: ArrayBuffer, meta: PluginBufferMeta
     slot.timer = setInterval(() => drain(slot), DRAIN_INTERVAL_MS);
     slotMap.set(meta.slot, slot);
     setGainValue(meta.slot, gainValue);
+    // The bridge is the earliest common success point for both native instruments and effects.
+    // Let the composition root warm the capture tap here, before a note, GO LIVE, or REC gesture,
+    // so the record-level meter observes the first plugin signal. The callback keeps this module
+    // independent of looper/capture.ts (machine.ts already imports this bridge).
+    onPluginConnected?.();
     console.log(
       `[plugin-bridge] slot ${meta.slot} wired: cap=${cap} sr=${meta.sampleRate} maxLag=${slot.maxLagFrames}`,
     );

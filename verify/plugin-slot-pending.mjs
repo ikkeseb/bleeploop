@@ -23,6 +23,7 @@ try {
     const { platform } = await import('/src/platform/index.ts');
     const instrument = await import('/src/audio/instrument.ts');
     const slots = await import('/src/audio/instrument-slots.ts');
+    const descriptorIdentity = await import('/src/audio/plugin-descriptor.ts');
     const descriptors = ['a', 'b', 'c', 'fx'].map((id) => ({
       id,
       name: `Probe ${id.toUpperCase()}`,
@@ -30,10 +31,18 @@ try {
       format: 'vst3',
       isEffect: id === 'fx',
     }));
+    descriptors.push({
+      ...descriptors[0],
+      path: 'C:\\probe\\vendor\\a.vst3',
+    });
 
     platform.pluginHost.available = true;
     platform.pluginHost.scanPlugins = async () => descriptors;
-    platform.pluginHost.loadPlugin = async (slot, _path, id) => ({ slot, descriptor: descriptors.find((d) => d.id === id) });
+    const loadCalls = [];
+    platform.pluginHost.loadPlugin = async (slot, path, id) => {
+      loadCalls.push({ slot, path, id });
+      return { slot, descriptor: descriptors.find((d) => d.path === path && d.id === id) };
+    };
     platform.pluginHost.unloadPlugin = async () => {};
     platform.pluginHost.openEditor = async () => {};
     platform.pluginHost.closeEditor = async () => {};
@@ -42,11 +51,46 @@ try {
     await instrument.scanForPlugins();
     await instrument.selectPlugin(0, descriptors[0]);
 
-    window.__slotPendingProbe = { platform, instrument, slots, descriptors, releases: [] };
-    return { slot0: instrument.slotPlugins()[0]?.id, pending: [...slots.slotPendingCounts()] };
+    window.__slotPendingProbe = {
+      platform,
+      instrument,
+      slots,
+      descriptors,
+      descriptorKey: descriptorIdentity.pluginDescriptorKey,
+      loadCalls,
+      releases: [],
+    };
+    return {
+      slot0: instrument.slotPlugins()[0]?.id,
+      pending: [...slots.slotPendingCounts()],
+      keys: descriptors.map(descriptorIdentity.pluginDescriptorKey),
+    };
   });
-  assert.deepEqual(setup, { slot0: 'a', pending: [0, 0] });
+  const { keys } = setup;
+  assert.deepEqual({ slot0: setup.slot0, pending: setup.pending }, { slot0: 'a', pending: [0, 0] });
   await page.waitForSelector('.slot__select');
+
+  // The host identity is (format, path, id), not id alone. Both installed copies must render as
+  // distinct choices, and choosing the second copy must perform a real swap to its path.
+  const duplicateOptions = await page.locator('.slot__select').first().locator('option').evaluateAll(
+    (options) => options
+      .filter((option) => option.textContent?.includes('Probe A'))
+      .map((option) => ({ value: option.value, text: option.textContent, title: option.title })),
+  );
+  assert.deepEqual(duplicateOptions.map((option) => option.value), [keys[0], keys[4]]);
+  assert.deepEqual(duplicateOptions.map((option) => option.text), [
+    'Probe A (vst3) · probe',
+    'Probe A (vst3) · vendor',
+  ]);
+  await page.locator('.slot__select').first().selectOption(keys[4]);
+  await page.waitForFunction(() => window.__slotPendingProbe.slots.slotPendingCounts()[0] === 0);
+  assert.equal(await page.locator('.slot__select').first().inputValue(), keys[4]);
+  assert.equal(
+    await page.evaluate(() => window.__slotPendingProbe.loadCalls.at(-1)?.path),
+    'C:\\probe\\vendor\\a.vst3',
+  );
+  await page.locator('.slot__select').first().selectOption(keys[0]);
+  await page.waitForFunction(() => window.__slotPendingProbe.slots.slotPendingCounts()[0] === 0);
 
   const deferNext = async (kind) => page.evaluate((operation) => {
     const probe = window.__slotPendingProbe;
@@ -69,7 +113,7 @@ try {
   // Deferred swap: the outgoing descriptor disappears before native unload resolves, but the slot
   // stays honestly labelled and none of its source controls can enqueue another user action.
   await deferNext('unloadPlugin');
-  await page.locator('.slot__select').first().selectOption('b', { noWaitAfter: true });
+  await page.locator('.slot__select').first().selectOption(keys[1], { noWaitAfter: true });
   await page.waitForFunction(() => window.__slotPendingProbe.slots.slotPendingCounts()[0] === 1);
   assert.deepEqual(await slotUi(0), {
     busy: 'true', source: 'Source', name: 'Updating…',
@@ -82,7 +126,7 @@ try {
   await release('resolve');
   await page.waitForFunction(() => window.__slotPendingProbe.slots.slotPendingCounts()[0] === 0);
   assert.equal((await slotUi(0)).pickerDisabled, false);
-  assert.equal(await page.locator('.slot__select').first().inputValue(), 'b');
+  assert.equal(await page.locator('.slot__select').first().inputValue(), keys[1]);
 
   // Deferred unload to synth uses the same pending surface and unlocks after completion.
   await deferNext('unloadPlugin');
@@ -95,7 +139,7 @@ try {
 
   // A rejected operation must decrement in finally and restore interaction.
   await deferNext('loadPlugin');
-  await page.locator('.slot__select').first().selectOption('a', { noWaitAfter: true });
+  await page.locator('.slot__select').first().selectOption(keys[0], { noWaitAfter: true });
   await page.waitForFunction(() => window.__slotPendingProbe.slots.slotPendingCounts()[0] === 1);
   await release('reject', 'injected load failure');
   await page.waitForFunction(() => window.__slotPendingProbe.slots.slotPendingCounts()[0] === 0);
@@ -146,7 +190,7 @@ try {
     probe.platform.pluginHost.setMonitorGain = async () => {};
     probe.platform.pluginHost.openEditor = async () => { probe.autoEditorOpened = true; };
   });
-  await page.locator('.slot__select').first().selectOption('fx', { noWaitAfter: true });
+  await page.locator('.slot__select').first().selectOption(keys[3], { noWaitAfter: true });
   await page.waitForFunction(() => !!window.__slotPendingProbe.loadRelease);
   assert.equal((await slotUi(0)).pickerDisabled, true);
   await page.evaluate(() => window.__slotPendingProbe.loadRelease());

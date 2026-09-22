@@ -6,7 +6,9 @@
 import { validateFxStates, type FxState } from '../fx/metadata.ts';
 import { framesPerBar } from '../quantize.ts';
 
-/** One validated session track (normalized: volume clamped, legacy muted normalized, fx deep-copied). */
+export type ParsedSessionTrackState = 'PLAYING' | 'STOPPED';
+
+/** One validated session track (normalized: legacy fields normalized, fx deep-copied). */
 export interface ParsedSessionTrack {
   /** 1-based track number (the session.json `track` field; engine index = track - 1). */
   track: number;
@@ -17,6 +19,8 @@ export interface ParsedSessionTrack {
   muted: boolean;
   /** Serialized orientation; missing legacy field normalizes to false. */
   reversed: boolean;
+  /** Restored playback state. Missing/OVERDUBBING legacy values normalize to PLAYING. */
+  state: ParsedSessionTrackState;
   /** Always === masterLengthFrames (validated). */
   frames: number;
   /** Exactly 5 entries, chain order filter,pitch,stutter,delay,reverb. */
@@ -38,11 +42,11 @@ export interface ParsedSession {
  * frames that differs from masterLengthFrames, a repeated stem file, or an fx array that doesn't
  * exactly match the five-effect key/range contract. Two fields normalize instead of rejecting: volume
  * clamps into [0, 1.5]; muted accepts legacy 0/1 and missing-as-false; reversed is optional and
- * missing-as-false for legacy format-v1 exports.
- * Returns a fresh normalized object (never the input aliased). Unknown keys are ignored — notably the
- * per-track `state` export.ts writes (PLAYING/OVERDUBBING/STOPPED) is ADVISORY only (it records which
- * stems fed the master) and is deliberately NOT required, so pre-`state` exports still import; loadSession
- * brings every imported track to PLAYING regardless.
+ * missing-as-false for legacy format-v1 exports. Per-track state preserves STOPPED; PLAYING stays
+ * PLAYING; missing state and OVERDUBBING normalize to PLAYING because legacy archives omitted state
+ * and an export taken during overdub contains only the last committed loop, not the unfinished layer.
+ * Other states are rejected rather than reviving an impossible capture state.
+ * Returns a fresh normalized object (never the input aliased). Unknown keys are ignored.
  */
 export function validateSession(json: unknown): ParsedSession {
   if (typeof json !== 'object' || json === null || Array.isArray(json)) {
@@ -135,8 +139,16 @@ export function validateSession(json: unknown): ParsedSession {
     else if (t.reversed !== undefined) {
       throw new Error(`session.json: track ${trackNo} reversed must be a boolean, got ${JSON.stringify(t.reversed)}`);
     }
+    let state: ParsedSessionTrackState;
+    if (t.state === undefined || t.state === 'PLAYING' || t.state === 'OVERDUBBING') state = 'PLAYING';
+    else if (t.state === 'STOPPED') state = 'STOPPED';
+    else {
+      throw new Error(
+        `session.json: track ${trackNo} state must be PLAYING, OVERDUBBING or STOPPED, got ${JSON.stringify(t.state)}`,
+      );
+    }
     const fx: FxState[] = validateFxStates(t.fx, `session.json: track ${trackNo}`);
-    return { track: trackNo, file: t.file, volume, muted, reversed, frames: master, fx };
+    return { track: trackNo, file: t.file, volume, muted, reversed, state, frames: master, fx };
   });
   return { bpm, bars, masterLengthFrames: master, sampleRate, tracks };
 }

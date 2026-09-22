@@ -72,14 +72,25 @@ plugin worklet ─ gain ─┬─ recordTap                         (record; alw
 Three details the old version of this diagram got wrong, all load-bearing: `recordTap` is a
 **separate silent branch** off `looperInputBus` (not an annotation on the audible edge) and is where
 the looper captures; a hard-knee `DynamicsCompressor` **limiter** sits between `masterGain` and
-`destination`, so loops are captured pre-limiter (clean) while playback stays protected; and plugin
+`destination`, so loops are captured pre-compressor while playback receives gain reduction; and plugin
 wet does **not** join `instrumentBus` — it connects straight to `recordTap` for record plus a
 separately-muteable `webMonitorGain → masterGain` for audible, which is how arming the native monitor
 silences the web path without touching the record tap. (Corrected 2026-07-25.)
 
-**Limiter discipline:** loops are captured pre-limiter (clean), playback is protected. Per-synth
-gain staging upstream is the real headroom; the limiter is the net. Per-track looper volume
-(`looper.setVolume`, mute via `looper.setMute`) sits upstream of it too.
+**Output headroom:** `makeMasterLimiter` is a finite-ratio compressor, not a guaranteed 0 dBFS ceiling.
+An offline 48 kHz render of a 440 Hz sine at amplitude 5 peaked at 1.116 after compression.
+Summed tracks can therefore clip at the sink. Gain staging remains necessary; a true ceiling needs
+an explicit distortion/latency choice and another latency measurement. Capture and per-track volume
+(`looper.setVolume`, mute via `looper.setMute`) sit upstream of the compressor.
+
+**Session recovery:** committed track audio, mix settings and PLAYING/STOPPED state round-trip through
+the archive. Legacy missing state and OVERDUBBING restore as PLAYING. Autosave polls every 500 ms and
+waits two seconds for stable state; an abrupt crash inside that window can lose the latest change.
+Orderly native close flushes before exit. Recovery is not a synchronous durability guarantee.
+
+**ASIO startup limit:** ASIO builds query the default driver before Tauri logging and before the
+frontend reads the saved ASIO preference. Disabling ASIO in Audio Settings does not bypass that query
+on the next launch. A hanging driver can prevent reaching settings; there is no startup bypass yet.
 
 - **Looper capture:** getUserMedia (EC/NS/AGC off) → selected input channel → centred mono →
   `capture` AudioWorkletNode whose `process()` publishes each 128-frame quantum WITH its absolute

@@ -2,10 +2,10 @@
 // active track and no callbacks after completion. The old state-only scheduler remains as a
 // regression contrast; the preceding generation guard already prevented duplicate PCM swaps.
 // Actual timeout registration/cancellation and dispatcher behavior: overdub-timers.mjs.
-// MIRRORS: src/audio/looper/playback.ts@118-123 sha256:c5276b8403aa7026  (cancelOverdubSwap: cancel and release the owned handle)
+// MIRRORS: src/audio/looper/playback.ts@132-137 sha256:c5276b8403aa7026  (cancelOverdubSwap: cancel and release the owned handle)
 // MIRRORS: src/audio/looper/machine.ts@696-698 sha256:9eff65c27c4a9766  (startOverdub: reset stop intent and schedule its timer)
 // MIRRORS: src/audio/looper/machine.ts@702-717 sha256:d8467ffdf994b309  (finishOverdub: successful REC/DUB completion; no STOP or loss in this model)
-// MIRRORS: src/audio/looper/playback.ts@141-182 sha256:0f9a28739937416f  (scheduleOverdubSwap: owned timeout and anchor-derived boundary swap)
+// MIRRORS: src/audio/looper/playback.ts@155-196 sha256:0f9a28739937416f  (scheduleOverdubSwap: owned timeout and anchor-derived boundary swap)
 
 let fails = 0, checks = 0;
 function ok(name, cond, detail = '') {

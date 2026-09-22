@@ -11,6 +11,11 @@ import {
   slotPlugins,
 } from '../../audio/instrument';
 import { inputArmed } from '../../audio/native-io';
+import {
+  pluginDescriptorKey,
+  pluginPickerLabel,
+  samePluginDescriptor,
+} from '../../audio/plugin-descriptor';
 import { SYNTHS } from '../../audio/synths';
 import { platform } from '../../platform';
 import { PluginBar, PluginParams } from './PluginControls';
@@ -34,10 +39,10 @@ export function InstrumentSlot(props: { slot: 0 | 1 }) {
   // Per-slot accordion disclosure for the plugin params drawer. Created once (the component mounts once
   // per slot); a sibling of the looper region, so opening it never remounts the looper.
   const [paramsOpen, setParamsOpen] = createSignal(false);
-  // One-shot: the id the user just picked in the dropdown. The PluginBar that mounts for it auto-starts
+  // One-shot: the descriptor key the user just picked in the dropdown. The PluginBar that mounts for it auto-starts
   // (live + editor) and clears this; a reload resync never sets it, so it never reopens windows. Plain
   // variable — it is read once at PluginBar mount, nothing renders from it.
-  let freshPick: string | null = null;
+  let freshPickKey: string | null = null;
   // Active state colour: cyan = engaged/selection; a live plugin lifts it to play-green.
   const sc = () => (inputArmed()[slotIdx] ? 'var(--play)' : 'var(--cyan)');
   return (
@@ -110,8 +115,8 @@ export function InstrumentSlot(props: { slot: 0 | 1 }) {
                   paramsOpen={paramsOpen()}
                   onToggleParams={() => setParamsOpen((v) => !v)}
                   drawerId={drawerId}
-                  autoStart={freshPick === desc.id}
-                  onAutoStartDone={() => (freshPick = null)}
+                  autoStart={freshPickKey === pluginDescriptorKey(desc)}
+                  onAutoStartDone={() => (freshPickKey = null)}
                 />
               )}
             </Show>
@@ -126,30 +131,30 @@ export function InstrumentSlot(props: { slot: 0 | 1 }) {
               aria-label={`Native plugin for slot ${slotIdx + 1}`}
               aria-busy={pending()}
               disabled={pending()}
-              value={pending() ? '' : plugin()?.id ?? ''}
+              value={pending() || !plugin() ? '' : pluginDescriptorKey(plugin()!)}
               onClick={(e) => e.stopPropagation()}
               onChange={(e) => {
                 e.stopPropagation();
-                const id = e.currentTarget.value;
-                if (!id) {
-                  freshPick = null;
+                const key = e.currentTarget.value;
+                if (!key) {
+                  freshPickKey = null;
                   void clearPlugin(slotIdx); // "— none —" → back to the slot's synth
                   return;
                 }
-                const desc = availablePlugins().find((p) => p.id === id);
+                const desc = availablePlugins().find((p) => pluginDescriptorKey(p) === key);
                 if (!desc) return;
-                freshPick = id;
+                freshPickKey = key;
                 // A failed load mounts no PluginBar — drop the flag so a later resync can't inherit it.
                 void selectPlugin(slotIdx, desc).then(() => {
-                  if (slotPlugins()[slotIdx]?.id !== id) freshPick = null;
+                  if (!samePluginDescriptor(slotPlugins()[slotIdx], desc)) freshPickKey = null;
                 });
               }}
             >
               <option value="">{pending() ? 'Updating…' : '— none —'}</option>
               <For each={availablePlugins()}>
                 {(p) => (
-                  <option value={p.id}>
-                    {p.name} ({p.format})
+                  <option value={pluginDescriptorKey(p)} title={p.path}>
+                    {pluginPickerLabel(p, availablePlugins())}
                   </option>
                 )}
               </For>

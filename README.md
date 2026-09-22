@@ -106,8 +106,9 @@ There is no unit-test runner. Two layers cover the audio core:
   range each one copies, so a copy that falls behind fails the run.
 - `pnpm verify:jam` (~40 s, outside `pnpm check`) is the golden jam. It drives the real app in a
   headless browser, records impulses on the beat grid and checks the committed loop frame by frame.
-  It is the only automated cover for record, overdub, undo, stop, resume and clear. The pure-logic
-  guards never reach them.
+  Focused browser probes also cover input ownership, session round trips, recovery failures and
+  plugin lifecycle transitions; see [`verify/README.md`](verify/README.md). The pure-logic guards
+  never reach the running audio graph.
 
 Feel, the native half and real rig latency are verified by running the app and measuring it, not by
 reading code or trusting a typecheck. [`docs/VERIFY.md`](docs/VERIFY.md) explains how: the browser

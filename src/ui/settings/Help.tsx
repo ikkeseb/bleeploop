@@ -32,8 +32,10 @@ export function Help() {
         <h3 class="help__h">Playing</h3>
         <ul class="help__list">
           <li>A MIDI controller or guitar is the main way to play. Controller status shows in Audio Settings → diagnostics</li>
-          <li>Click a slot to make it active; it plays the slot's plugin or built-in synth</li>
-          <li><span class="help__note">MIC</span> arms the mic / line input so it is heard and recorded. Synths and plugins are always recorded; the bar beside it is the record level (red = clipping)</li>
+          <li>Click a slot to send MIDI and keyboard notes to its plugin or built-in synth</li>
+          <li>For guitar, load an amp plugin and use <span class="help__note">GO LIVE</span>. <span class="help__note">INPUT LIVE</span> means that slot receives the selected input and monitors it natively. Choose the input channel in Audio Settings</li>
+          <li>ASIO supports one live slot. To use another amp slot, <span class="help__note">UNLOAD</span> the first plugin. Turning INPUT LIVE off keeps its driver reserved</li>
+          <li><span class="help__note">MIC</span> is a separate mic / line path. Leave it off when playing guitar through a live plugin. Synths and plugins feed the looper directly; the bar beside MIC shows record level</li>
           <li>The computer keys below are a fallback when no controller is connected</li>
         </ul>
       </section>
@@ -46,6 +48,7 @@ export function Help() {
           <li><span class="help__note">↶ DUB</span> undoes the last overdub layer (press again to redo)</li>
           <li><span class="help__note">FX</span> opens a track's effects &middot; <span class="help__note">MUTE</span> silences it &middot; the volume slider has a 0 dB detent at 1.0</li>
           <li><span class="help__note">↺ REV</span> reverses a track in place. Overdub is blocked while reversed</li>
+          <li><span class="help__note">⧉ COPY</span> copies a take to the first empty track</li>
           <li>All tracks share one loop, so they stay locked together and can't drift</li>
           <li>A take shorter than the loop repeats across it — stop early, or set the bars with <span class="help__note">FIXED</span></li>
         </ul>
@@ -57,7 +60,7 @@ export function Help() {
           <li>A 1-bar count-in (four clicks) leads the first recording. You come in on the counted "1", not the button press</li>
           <li><span class="help__note">CLICK</span> toggles the metronome (its own volume, never recorded, silent while nothing runs)</li>
           <li><span class="help__note">FIXED N</span> records exactly N bars and auto-stops on the downbeat</li>
-          <li><span class="help__note">AUTO N</span> replaces the first count-in: arm the track, then playing starts the take; N is the sensitivity. Raise it for quieter input; the cyan tick on the record level is the trigger</li>
+          <li><span class="help__note">AUTO REC · SENS</span> replaces the first count-in: arm the track, then playing starts the take. Raise sensitivity for quieter input; the cyan tick on the record level is the trigger</li>
           <li>Click the <span class="help__note">BPM</span> to type it, or <span class="help__note">TAP</span> a tempo. Tempo locks to the first loop (clear all to change)</li>
         </ul>
       </section>

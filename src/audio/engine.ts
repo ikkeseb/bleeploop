@@ -33,8 +33,8 @@ function polyfillSpatialListener(ctx: AudioContext): void {
 }
 
 /**
- * Master safety limiter: a brick-wall-ish DynamicsCompressor catching the SUMMED output so nothing
- * past ~0 dBFS reaches the sink. ONE configuration, shared by the live chain below and the offline
+ * Master compressor for the SUMMED output. Its finite ratio and attack do not enforce a 0 dBFS
+ * ceiling: high summed levels can still clip at the sink. ONE configuration, shared by live and offline
  * WAV-export master render (export/render.ts mirrors the audible chain) — keep them identical.
  */
 export function makeMasterLimiter(ctx: BaseAudioContext): DynamicsCompressorNode {

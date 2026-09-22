@@ -25,6 +25,7 @@ import {
 } from './instrument-slots';
 import { disarmInputInternal, disarmMonitorInternal } from './native-io';
 import { warm as warmCapture } from './looper/capture';
+import { reconcilePluginDescriptors, samePluginDescriptor } from './plugin-descriptor';
 
 /**
  * Two-slot instrument host. Each slot holds EITHER a built-in synth (a selectable id + a lazily-built
@@ -184,7 +185,7 @@ export function selectPlugin(slot: 0 | 1, desc: PluginDescriptor): Promise<void>
 }
 
 async function doSelectPlugin(slot: 0 | 1, desc: PluginDescriptor): Promise<void> {
-  if (slotPlugins()[slot]?.id === desc.id) return; // already loaded
+  if (samePluginDescriptor(slotPlugins()[slot], desc)) return; // already loaded
   const outgoingPath = slotPlugins()[slot]?.path;
   // Swap: tear down + unload any existing plugin in this slot before loading the new one.
   if (slotPlugins()[slot]) {
@@ -313,15 +314,7 @@ export async function scanForPlugins(opts: { force?: boolean } = {}): Promise<vo
   setScanning(true);
   try {
     const scanned = await platform.pluginHost.scanPlugins(opts.force ?? false);
-    const seen = new Set(scanned.map((d) => d.id));
-    const orphans: PluginDescriptor[] = [];
-    for (const d of slotPlugins()) {
-      if (d && !seen.has(d.id)) {
-        seen.add(d.id); // dedupe if the same plugin is loaded in both slots
-        orphans.push(d);
-      }
-    }
-    setAvailablePlugins(orphans.length ? [...scanned, ...orphans] : scanned);
+    setAvailablePlugins(reconcilePluginDescriptors(scanned, slotPlugins()));
   } catch (e) {
     console.error('[instrument] plugin scan failed', e);
     notifyError('Plugin scan failed', e);

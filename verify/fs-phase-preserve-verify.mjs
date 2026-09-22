@@ -43,7 +43,7 @@ function commitAnchor(firstTakeDownbeatCtx, master, sr, commitNow, raw = master)
   return { playAt, ...realCommitAnchor(firstTakeDownbeatCtx, master, sr, playAt, raw) };
 }
 
-// MIRRORS: src/audio/looper/playback.ts@55-59 sha256:95a7581734ce461a  (startPlayback — startAt clamp + startOffset)
+// MIRRORS: src/audio/looper/playback.ts@75-79 sha256:95a7581734ce461a  (startPlayback — startAt clamp + startOffset)
 // ---- startPlayback offset re-derivation (startAt clamp + startOffset) ----
 function playbackStartOffset(when, offset, dur, currentTime) {
   const startAt = Math.max(when, currentTime);             // startPlayback: startAt

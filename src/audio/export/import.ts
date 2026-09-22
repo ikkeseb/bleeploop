@@ -36,9 +36,10 @@ export function maxImportArchiveBytes(sampleRate: number): number {
 /**
  * Import a BleepLoop export archive into an all-EMPTY looper: parse the zip, validate its single
  * session.json, decode each stem WAV it references (found BY NAME via the per-track `file` field),
- * and hand the payload to looper.loadSession — which starts every track PLAYING on one shared grid
- * anchor. Throws a descriptive Error on any problem (the UI catches + notifies; nothing is mutated
- * unless every stem validated). Browser-only: this is the path that touches engine/looper.
+ * and hand the payload to looper.loadSession — which restores PLAYING tracks on one shared grid anchor
+ * while preserving STOPPED tracks without starting sources. Throws a descriptive Error on any problem
+ * (the UI catches + notifies; nothing is mutated unless every stem validated). Browser-only: this is
+ * the path that touches engine/looper.
  */
 export async function importSession(bytes: Uint8Array | ArrayBuffer): Promise<void> {
   const u8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
@@ -99,6 +100,7 @@ export async function importSession(bytes: Uint8Array | ArrayBuffer): Promise<vo
       volume: st.volume,
       muted: st.muted,
       reversed: st.reversed,
+      state: st.state,
       fx: st.fx,
     };
   });

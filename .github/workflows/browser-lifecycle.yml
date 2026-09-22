@@ -1,0 +1,45 @@
+name: browser-lifecycle
+
+# User-facing state transitions, without audio hardware or frame-timing assertions.
+# The separately dispatched golden jam keeps its existing policy.
+on:
+  push:
+    branches: [main]
+    paths: ['src/**', 'verify/**', 'package.json', 'pnpm-lock.yaml', 'vite.config.ts', '.github/workflows/browser-lifecycle.yml']
+  pull_request:
+    branches: [main]
+    paths: ['src/**', 'verify/**', 'package.json', 'pnpm-lock.yaml', 'vite.config.ts', '.github/workflows/browser-lifecycle.yml']
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: browser-lifecycle-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lifecycle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec playwright install --with-deps chromium
+      - name: Exercise input, plugin selection and recovery
+        shell: bash
+        run: |
+          pnpm exec vite --host 127.0.0.1 --port 1420 > /tmp/bleeploop-vite.log 2>&1 &
+          vite_pid=$!
+          trap 'kill "$vite_pid"; cat /tmp/bleeploop-vite.log' EXIT
+          node --input-type=module -e 'for (let i = 0; ; i++) { try { if ((await fetch("http://127.0.0.1:1420")).ok) break; } catch {} if (i === 100) process.exit(1); await new Promise(r => setTimeout(r, 100)); }'
+          for probe in input-controls plugin-slot-pending plugin-load-buffer-generation monitor-generation session-state-roundtrip recovery-import-failure; do
+            pnpm exec node "verify/$probe.mjs" --url=http://127.0.0.1:1420
+          done

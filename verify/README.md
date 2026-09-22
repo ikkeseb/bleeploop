@@ -23,11 +23,20 @@ cover recovery fidelity, failure paths and main-thread load.
 close approval after a failed recovery deletion, with native close capabilities substituted.
 `recovery-import-failure.mjs` checks archive preservation after failed restore reads, buffer allocation
 and playback startup, rollback, retry, explicit clear and a live jam winning the restore race.
-`monitor-generation.mjs` controls delayed host replies through the actual frontend monitor lifecycle.
+`monitor-generation.mjs` controls delayed host replies through the actual frontend monitor lifecycle,
+including survivor promotion and a first take before its refreshed latency reply arrives.
 `plugin-load-buffer-generation.mjs` checks late/failed plugin buffers and worklet-module retry through
-the production frontend with an instrumented host; it does not exercise native COM cleanup.
+the production frontend with an instrumented host, including capture warmup before the first note;
+it does not exercise native COM cleanup.
 `plugin-slot-pending.mjs` drives deferred plugin operations through the rendered picker and checks
-pending controls, queue completion, failure recovery and independence of the other slot.
+pending controls, queue completion, failure recovery, independence of the other slot, and selection
+of separate plugin files that share a class id.
+`input-controls.mjs` checks BPM cancellation, pointer release across octave changes, independent MIDI
+ownership and the playable upper note range. `session-state-roundtrip.mjs` checks STOPPED recovery,
+state-only autosave and subsequent PLAY ALL. These probes, `recovery-import-failure.mjs`,
+`monitor-generation.mjs` and `plugin-load-buffer-generation.mjs` run in
+`.github/workflows/browser-lifecycle.yml` on frontend and verification changes. They do not gate the
+physical rig or replace the separately dispatched golden jam.
 `marker-probe.mjs` checks DEV marker correlation and clock arithmetic; it does not run native audio.
 `render-clock.mjs` checks the DEV worklet observer preserves PCM; `render-cursor.mjs` exercises the
 production compensation sampler with paired queue/timestamp observations, invalid clocks and freeze.

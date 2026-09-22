@@ -34,9 +34,11 @@ export function Transport() {
   }
 
   function commitEdit() {
+    // Removing the focused field can fire blur again, including after Escape cancels it.
+    if (!editing()) return;
     const n = parseFloat(editValue());
-    if (!Number.isNaN(n)) clock.setBpm(n);
     setEditing(false);
+    if (!Number.isNaN(n)) clock.setBpm(n);
   }
 
   function onBpmKeyDown(e: KeyboardEvent) {

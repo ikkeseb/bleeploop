@@ -43,6 +43,26 @@ export function makeLoopBuffer(src: Float32Array, frames: number): AudioBuffer {
 }
 
 /**
+ * Idempotently build a track's playback gain + FX graph without creating or starting a playback
+ * source. Session import calls this for every prepared lane before reading its shared grid anchor:
+ * otherwise an all-STOPPED import pays the lazy graph cost inside PLAY ALL after its 20 ms anchor was
+ * chosen, and startPlayback's safety clamp can give later lanes a different start time.
+ */
+export function preparePlaybackGraph(i: number): void {
+  const ctx = engine.ctx;
+  const t = engineState.tracks[i];
+  if (!t.gain) {
+    t.gain = ctx.createGain();
+    t.gain.gain.value = t.muted ? 0 : t.volume;
+  }
+  if (!t.fx) {
+    // Graph only: rhythmic source scheduling remains in startPlayback once the real anchor exists.
+    t.fx = new FxChain(t.fxState);
+    toneConnect(t.gain, t.fx.input);
+  }
+}
+
+/**
  * Start (or restart) a track's looping playback at absolute time `when`.
  * `offset` (seconds into the loop, default 0) lets the FIRST wrap begin part-way through the buffer so
  * the loop is phase-aligned to the count-in grid even though playback starts at an arbitrary `when`
@@ -58,17 +78,11 @@ export function startPlayback(i: number, audioBuf: AudioBuffer, when: number, of
   const dur = audioBuf.duration;
   const startOffset = dur > 0 ? (offset + (startAt - when)) % dur : 0;
   const prev = t.source;
-  if (!t.gain) {
-    t.gain = ctx.createGain();
-    t.gain.gain.value = t.muted ? 0 : t.volume; // apply mixer state set before first playback
-  }
-  if (!t.fx) {
-    // Lazily build the FX chain on first playback (avoids spinning up idle Tone nodes for
-    // never-used tracks). gain -> FX -> masterGain; the chain wires its own dry + reverb send.
-    t.fx = new FxChain(t.fxState);
-    toneConnect(t.gain, t.fx.input);
-  }
-  t.fx.setTiming({
+  preparePlaybackGraph(i);
+  const gain = t.gain;
+  const fx = t.fx;
+  if (!gain || !fx) throw new Error(`Track ${i + 1} playback graph was not prepared`);
+  fx.setTiming({
     anchor: engineState.masterStartTime,
     beatPeriod: framesPerBar(clock.bpm(), ctx.sampleRate) / ctx.sampleRate / 4,
   });
@@ -77,7 +91,7 @@ export function startPlayback(i: number, audioBuf: AudioBuffer, when: number, of
   src.loop = true;
   src.loopStart = 0;
   src.loopEnd = audioBuf.duration;
-  src.connect(t.gain);
+  src.connect(gain);
   try {
     src.start(startAt, startOffset);
   } catch (error) {

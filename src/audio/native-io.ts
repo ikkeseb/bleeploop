@@ -4,6 +4,7 @@ import { recordLatency } from './record-latency';
 import { platform, type PluginSlot } from '../platform';
 import { notifyError } from '../notify';
 import { serializeSlot, slotPlugins, withAt } from './instrument-slots';
+import { warm as warmCapture } from './looper/capture';
 
 /**
  * OWNS: native audio I/O per slot — feed a hardware input into the slot's loaded plugin, hear its wet
@@ -24,6 +25,10 @@ const [monitorArmed, setMonitorArmed] = createSignal<[boolean, boolean]>([false,
 export const MONITOR_LATENCY_SETTLE_MS = 3000;
 const latencyGeneration = [0, 0];
 const latencyRequest = [0, 0];
+// Last accepted cpal_out for each slot's CURRENT armed monitor. A non-registered slot can remain
+// live while the other owns compensation; keep its value so promotion does not open at zero during
+// the replacement IPC query. Cleared when that slot's monitor actually goes away.
+const lastMonitorLatencySeconds = [0, 0];
 const latencySettleTimers: [ReturnType<typeof setTimeout> | null, ReturnType<typeof setTimeout> | null] = [null, null];
 
 function invalidateLatency(slot: 0 | 1): number {
@@ -92,6 +97,9 @@ async function doGoLive(
     const g = pluginBridge.gains()[slot];
     if (g != null) await setMonitorGain(slot, g);
     await doArmMonitor(slot, outputDeviceId);
+    // The plugin-buffer hook normally warmed capture at load. Keep GO LIVE independently correct if
+    // the host connected before that hook was registered (for example during frontend recovery).
+    warmCapture();
   } catch (e) {
     await disarmInputInternal(slot);
     throw e;
@@ -181,15 +189,17 @@ export async function refreshMonitorLatency(slot: 0 | 1, kind: 'generation' | 's
   const request = ++latencyRequest[slot];
   if (kind === 'generation') {
     // Open the generation BEFORE awaiting IPC. A take begun while the query is pending must still
-    // freeze this generation once. Until the reply arrives, retain the current monitor's estimate.
-    const previous = recordLatency.armedSlot() === slot ? recordLatency.cpalOutSeconds() : 0;
-    recordLatency.beginMonitorGeneration(slot, previous);
+    // freeze this generation once. Until the reply arrives, retain this slot's last accepted estimate
+    // (including when it is being promoted after the other of two monitors disappeared).
+    recordLatency.beginMonitorGeneration(slot, lastMonitorLatencySeconds[slot]);
   }
   const current = () => monitorArmed()[slot] && latencyGeneration[slot] === generation;
   try {
     const sec = await platform.pluginHost.monitorLatencySeconds(slot);
     if (!current() || latencyRequest[slot] !== request) return;
-    recordLatency.updateMonitorLatency(slot, sec);
+    const accepted = Number.isFinite(sec) ? Math.max(0, sec) : 0;
+    lastMonitorLatencySeconds[slot] = accepted;
+    recordLatency.updateMonitorLatency(slot, accepted);
   } catch (e) {
     if (!current() || latencyRequest[slot] !== request) return;
     console.error('[instrument] monitor latency fetch failed', e);
@@ -222,9 +232,20 @@ export function disarmMonitor(slot: 0 | 1): Promise<void> {
  */
 function reconcileMonitorGone(slot: 0 | 1): void {
   invalidateLatency(slot);
+  lastMonitorLatencySeconds[slot] = 0;
   pluginBridge.setWebMonitorMuted(slot, false);
-  setMonitorArmed((prev) => withAt(prev, slot, false));
-  recordLatency.clearMonitor(slot); // no native monitor ⇒ no record-latency compensation (back to baseline)
+  const remaining = withAt(monitorArmed(), slot, false);
+  setMonitorArmed(remaining);
+  const survivor: 0 | 1 | null = remaining[0] ? 0 : remaining[1] ? 1 : null;
+  const registered = recordLatency.armedSlot();
+  if (survivor !== null && (registered === slot || registered === null)) {
+    // Compensation owns one native source at a time. If that source disappears while the other
+    // slot is still monitored, make the survivor a fresh generation: clear its old settle timer,
+    // resample its own queue/cpal terms, and let the next take freeze them normally.
+    void refreshMonitorLatency(survivor, 'generation');
+  } else {
+    recordLatency.clearMonitor(slot); // no survivor/current change ⇒ clear only this registration
+  }
 }
 
 /**

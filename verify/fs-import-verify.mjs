@@ -3,7 +3,7 @@
 // itself statically imports engine/looper and is browser-only) so it cannot drift from the source.
 // Asserts the export.ts session.json schema gate: a golden session round-trips, the formatVersion gate
 // (missing = legacy v1, ===1 accepted, newer rejected), every malformed shape throws descriptively, and
-// volume clamp + legacy muted values normalize, while invalid muted shapes reject. This is what
+// volume clamp + legacy muted/state values normalize, while invalid shapes reject. This is what
 // SESSION IMPORT relies on to never hand looper.loadSession a payload that could corrupt the master grid.
 // Run: node verify/fs-import-verify.mjs
 import { validateSession } from '../src/audio/export/session-schema.ts';
@@ -92,17 +92,27 @@ function setGrid(session, { bpm = session.bpm, bars = session.bars, sampleRate =
   ok('A.export shape with master.level validates', out.tracks.length === 2);
 }
 
-// ---- A2. the advisory per-track `state` (export.ts writes it) is TOLERATED, not required ----
-// export.ts records PLAYING/OVERDUBBING/STOPPED per track so the file is self-describing about which
-// stems fed the master; validateSession must ignore it (loadSession plays every track) AND still accept
-// a pre-`state` export. The golden above (no `state`) already proves not-required; this proves tolerated.
+// ---- A2. per-track playback state is preserved and legacy capture state normalizes safely ----
+// Missing state is a pre-state archive and therefore PLAYING. OVERDUBBING archives contain only the
+// last committed loop, so they resume as PLAYING rather than reviving an impossible capture state.
 {
   const s = golden();
   s.tracks[0].state = 'PLAYING';
   s.tracks[1].state = 'STOPPED';
   const out = validateSession(s);
-  ok('A2.session with per-track state still validates', out.tracks.length === 2, String(out.tracks.length));
-  ok('A2.state is ignored (not surfaced on the parsed track)', out.tracks[0].state === undefined, JSON.stringify(out.tracks[0].state));
+  ok('A2.PLAYING state round-trips', out.tracks[0].state === 'PLAYING', out.tracks[0].state);
+  ok('A2.STOPPED state round-trips', out.tracks[1].state === 'STOPPED', out.tracks[1].state);
+  ok('A2.missing legacy state defaults PLAYING', validateSession(golden()).tracks.every((track) => track.state === 'PLAYING'));
+  const overdubbing = golden();
+  overdubbing.tracks[0].state = 'OVERDUBBING';
+  ok('A2.OVERDUBBING normalizes PLAYING', validateSession(overdubbing).tracks[0].state === 'PLAYING');
+}
+for (const state of ['RECORDING', 'EMPTY', 'paused', 1, null]) {
+  throws(`A2.invalid state ${JSON.stringify(state)} rejects`, () => {
+    const s = golden();
+    s.tracks[0].state = state;
+    validateSession(s);
+  }, 'state must be PLAYING, OVERDUBBING or STOPPED');
 }
 
 // ---- A3. formatVersion gate: missing = legacy v1, ===1 accepted, integer > 1 rejected, garbage rejected ----

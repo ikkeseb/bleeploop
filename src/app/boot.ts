@@ -3,6 +3,7 @@ import { initAudioDeviceSettings, refreshAndPruneDevices } from '../audio/audio-
 import { resyncNativeSlots, scanForPlugins } from '../audio/instrument';
 import { setNativeHostReady } from '../audio/instrument-slots';
 import { pluginBridge, type PluginBufferMeta } from '../audio/plugin-bridge';
+import { warm as warmCapture } from '../audio/looper/capture';
 import { notifyError } from '../notify';
 import { platform, registerPluginBufferSink, releasePluginBuffer } from '../platform';
 
@@ -20,7 +21,10 @@ export function bootPluginHost(): () => void {
   setNativeHostReady(false);
   void (async () => {
     try {
-      await pluginBridge.init(engine.ctx, { release: releasePluginBuffer });
+      await pluginBridge.init(engine.ctx, {
+        release: releasePluginBuffer,
+        onPluginConnected: warmCapture,
+      });
       registerPluginBufferSink(
         (ab, meta) =>
           void pluginBridge

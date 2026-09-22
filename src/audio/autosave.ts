@@ -128,7 +128,7 @@ function inspectJam(): JamFingerprint {
     if (state !== 'EMPTY') blank = false;
     if (state === 'RECORDING' || state === 'OVERDUBBING') stable = false;
     parts.push(
-      `${i}:${info.lengthFrames}:${peaks.version}:${looper.trackVolume(i)}:${Number(looper.trackMuted(i))}:` +
+      `${i}:${state}:${info.lengthFrames}:${peaks.version}:${looper.trackVolume(i)}:${Number(looper.trackMuted(i))}:` +
         JSON.stringify(looper.fxState(i)),
     );
   }

@@ -14,9 +14,13 @@ try {
     const instrument = await import('/src/audio/instrument.ts');
     const slots = await import('/src/audio/instrument-slots.ts');
     const { pluginBridge } = await import('/src/audio/plugin-bridge.ts');
+    const { warm: warmCapture } = await import('/src/audio/looper/capture.ts');
 
     const released = [];
-    await pluginBridge.init(window.__lf.engine.ctx, { release: (ab) => released.push(ab) });
+    await pluginBridge.init(window.__lf.engine.ctx, {
+      release: (ab) => released.push(ab),
+      onPluginConnected: warmCapture,
+    });
     platform.pluginHost.available = true;
     slots.setNativeHostReady(true);
     platform.pluginHost.unloadPlugin = async () => {};
@@ -95,11 +99,17 @@ try {
     await pluginBridge.acceptPluginBuffer(validB, meta(tokenB));
     resolveB({ slot: 0, descriptor: desc('retry-b') });
     await pickB;
+    for (let i = 0; i < 100 && window.__lf.looper.captureQuanta() === 0; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
     const afterRetry = {
-      marker: pluginBridge.stats(0)?.hop1Lag ?? null,
+      // Capture warmup resumes the context, so the live drain may consume the header marker before
+      // this snapshot. Buffer ownership is proved by the release identities plus live slot wiring.
+      wired: pluginBridge.stats(0) !== null,
       staleReleased: released.includes(staleA),
       validReleased: released.includes(validB),
       slotPlugin: instrument.slotPlugins()[0]?.id ?? null,
+      captureWarm: window.__lf.looper.captureQuanta() > 0,
     };
 
     await instrument.clearPlugin(0);
@@ -111,7 +121,13 @@ try {
     result,
     {
       afterFailedLoad: { marker: null, orphanReleased: true, slotPlugin: null },
-      afterRetry: { marker: 222, staleReleased: true, validReleased: false, slotPlugin: 'retry-b' },
+      afterRetry: {
+        wired: true,
+        staleReleased: true,
+        validReleased: false,
+        slotPlugin: 'retry-b',
+        captureWarm: true,
+      },
     },
     'failed-load buffers must be released, and a retry must keep the buffer from its own source load',
   );

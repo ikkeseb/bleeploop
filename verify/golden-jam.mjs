@@ -1362,9 +1362,9 @@ async function main() {
       volume: window.__lf.looper.trackVolume(0),
     }));
     check(
-      'startup restored the committed loop',
+      'startup restored the committed loop without resuming the stopped track',
       restored.master === expectedMaster &&
-        restored.state === 'PLAYING' &&
+        restored.state === 'STOPPED' &&
         restored.length === expectedMaster &&
         restored.peak > FOUND &&
         restored.volume === 0.93,

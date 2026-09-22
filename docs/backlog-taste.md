@@ -20,8 +20,8 @@ not here.
   "Guitar/line input device lost", "Input device lost — mic disarmed", "MIDI device disconnected —
   <name>", "Track N: the take failed to start", "Track N: playback failed to restart", the dual-slot
   editor refusal, import-of-a-bad-file.
-- **Help popover:** wording + section order (REV row, CLICK/FIXED naming, volume-detent line, the new
-  MIC line + Session section, "FIXED N" / "AUTO N"). Overdub is "OVERDUB" (lane word) / "overdubs"
+- **Help popover:** wording + section order (guitar GO LIVE, ASIO slot swap, separate MIC path,
+  COPY, REV, CLICK/FIXED/AUTO REC, volume-detent line and Session section). Overdub is "OVERDUB" (lane word) / "overdubs"
   (Help) / "Overdubbing" (screen reader) across three surfaces — one word?
 - **Audio Settings:** the "rec align" trim row after the buffer row — placement + wording; status chips
   moved into the diagnostics block (unratified).
@@ -43,7 +43,7 @@ not here.
 - **COPY pill (2026-09-18):** "⧉ COPY" after REV in the lane's pill row, hidden while no lane is
   EMPTY, always targets the first EMPTY lane — right place and word? Floated: a right-click
   context menu (none exists in the app yet) for picking the target lane. The pill row with DUB + REV
-  + COPY all showing at 1280 px is unseen. Help popover does not mention COPY yet.
+  + COPY all showing at 1280 px is unseen. Help now explains the first-empty target.
 - **Muted lane (2026-09-10):** grey state colour, MUTED word, ring off, waveform at 30 % in its state
   hue — does it carry from 1.5 m, and should the wave go grey instead of dim green?
 - **Lane pills at the default window (2026-09-10):** 20 px tall / 9 px text at 1280×820 (24 px at
@@ -68,8 +68,8 @@ not here.
   survives a slot/synth swap; export master excludes STOPPED tracks; vibrato bypass at depth 0.
 - Open polish: SR spoken output; mic-arm flow; the ~530 ms beat-LED resync at commit; the free-run
   metronome "1" anchored to an arbitrary wall moment + the REC accent-jump (a "stable downbeat" job).
-- **ASIO slot swap (D6 answered (b)):** "new track, new amp" needs UNLOAD of the live slot first —
-  teach that in UI/copy; wording and placement open.
+- **ASIO slot swap (D6 answered (b)):** Help now explains that another amp slot needs UNLOAD of the
+  first plugin, even after INPUT LIVE is turned off. Check whether that is discoverable enough.
 - **Click default (2026-09-18 jam):** should the click be ON by default while recording?
 - Fixed auto-commit enters playback ~C+drain (~137 ms) late on pass 1 only.
 

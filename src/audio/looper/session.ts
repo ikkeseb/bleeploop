@@ -12,7 +12,7 @@ import {
   TRACK_COUNT,
 } from './state';
 import { recomputePeaks, resetPeaks } from './peaks';
-import { makeLoopBuffer, startPlayback } from './playback';
+import { makeLoopBuffer, preparePlaybackGraph, startPlayback } from './playback';
 import { setMute, setVolume } from './mixer';
 
 // ── Session import (SESSION IMPORT v0) ───────────────────────────────────────────────────
@@ -28,6 +28,8 @@ export interface LoadSessionTrack {
   volume: number;
   muted: boolean;
   reversed: boolean;
+  /** Missing stays compatible with older direct fixtures and normalizes to PLAYING. */
+  state?: 'PLAYING' | 'STOPPED';
   fx: FxState[];
 }
 export interface LoadSessionPayload {
@@ -44,13 +46,14 @@ const IMPORT_START_LEAD = 0.08;
 
 /**
  * Load a previously-exported session into an ALL-EMPTY looper: establish the master grid from the
- * imported INTEGER frame count and start every imported track PLAYING on ONE shared grid anchor —
- * all tracks share the same anchor and the same integer frame count, so they are frame-identical by
- * construction (the same invariant recording enforces). This is finishRecording's commit recipe
- * re-applied to pre-decoded PCM: same master-state writes, same masterStartTime anchoring, same
- * integer-frame-derived beat period into clock.startMasterPulse — no parallel grid math. There is no
- * counted downbeat to phase-preserve (nothing was recorded), so the anchor is simply now + a small
- * lead and every track starts at buffer offset 0 ON that anchor.
+ * imported INTEGER frame count and start every imported PLAYING track on ONE shared grid anchor;
+ * STOPPED tracks restore without a source. All tracks share the same integer frame count, so they are
+ * frame-identical by construction (the same invariant recording enforces). This is finishRecording's
+ * commit recipe re-applied to pre-decoded PCM: same master-state writes, same masterStartTime anchoring,
+ * same integer-frame-derived beat period into clock.startMasterPulse — no parallel grid math. There is
+ * no counted downbeat to phase-preserve (nothing was recorded), so the anchor is simply now + a small
+ * lead and every PLAYING track starts at buffer offset 0 ON that anchor. An all-STOPPED import remains
+ * transport-idle; PLAY ALL later re-anchors the group from frame 0 through machine.ts.
  *
  * The core does not trust the UI: it re-validates every precondition and THROWS (descriptive Error)
  * before touching any state — import never overwrites a session in progress.
@@ -89,7 +92,7 @@ export async function loadSession(payload: LoadSessionPayload): Promise<void> {
     throw new Error(`loadSession: masterLengthFrames ${master} exceeds the record buffer (${capacity} frames at this sample rate)`);
   }
   const seen = new Set<number>();
-  const validatedTracks: LoadSessionTrack[] = [];
+  const validatedTracks: (LoadSessionTrack & { state: 'PLAYING' | 'STOPPED' })[] = [];
   for (const s of tracks) {
     if (!Number.isInteger(s.index) || s.index < 0 || s.index >= TRACK_COUNT) {
       throw new Error(`loadSession: track index ${s.index} out of range 0..${TRACK_COUNT - 1}`);
@@ -102,14 +105,19 @@ export async function loadSession(payload: LoadSessionPayload): Promise<void> {
     if (typeof s.reversed !== 'boolean') {
       throw new Error(`loadSession: track ${s.index + 1} reversed must be a boolean, got ${String(s.reversed)}`);
     }
+    const state = s.state ?? 'PLAYING';
+    if (state !== 'PLAYING' && state !== 'STOPPED') {
+      throw new Error(`loadSession: track ${s.index + 1} state must be PLAYING or STOPPED, got ${String(s.state)}`);
+    }
     const fx = validateFxStates(s.fx, `loadSession: track ${s.index + 1}`);
-    validatedTracks.push({ ...s, fx });
+    validatedTracks.push({ ...s, state, fx });
   }
 
   // Allocate and fill every AudioBuffer before touching the live grid. A later allocation failure
   // must leave the all-EMPTY precondition intact so recovery can retry the same archive.
   const prepared = validatedTracks.map((s) => ({
     index: s.index,
+    state: s.state,
     audioBuf: makeLoopBuffer(s.pcm, master),
   }));
   const previousBpm = clock.bpm();
@@ -166,6 +174,10 @@ export async function loadSession(payload: LoadSessionPayload): Promise<void> {
       // the right level (startPlayback reads t.muted/t.volume on creation).
       setVolume(s.index, s.volume);
       setMute(s.index, s.muted);
+      // Pay the lazy graph construction cost before reading the one shared anchor. This is required
+      // even for STOPPED imports: their later PLAY ALL must not consume its 20 ms lead building five
+      // cold FX chains and then clamp lanes to different ctx.currentTime values.
+      preparePlaybackGraph(s.index);
     }
 
     // ONE shared grid anchor, read only after preparation so the 80ms lead cannot expire during PCM
@@ -173,20 +185,19 @@ export async function loadSession(payload: LoadSessionPayload): Promise<void> {
     const gridAnchor = engine.ctx.currentTime + IMPORT_START_LEAD;
     engineState.masterStartTime = gridAnchor;
 
-    // ── Lightweight scheduling pass: every prepared track starts at frame 0 on the same anchor ──
+    // ── Lightweight scheduling pass: PLAYING tracks start at frame 0 on the same anchor; STOPPED
+    //    tracks publish their restored state without ever creating or starting a source. ──
     for (const p of prepared) {
       const t = engineState.tracks[p.index];
-      t.state = 'PLAYING';
-      startPlayback(p.index, p.audioBuf, gridAnchor);
+      t.state = p.state;
+      if (p.state === 'PLAYING') startPlayback(p.index, p.audioBuf, gridAnchor);
       publish(p.index);
     }
 
-    // Pulse starts AFTER the track loop: publish() above is what flips clock.setTransportActive(true),
-    // and pulseTick gates the click on it — started before the loop (with the anchor inside the 0.1 s
-    // lookahead), beat 0 would schedule while the transport still read inactive and the imported
-    // session's first downbeat click would be silently dropped. The anchor is an absolute ctx time, so
-    // starting the pulse here changes nothing about the grid. (finishRecording doesn't need this
-    // ordering only because its track is already RECORDING, so transportActive is already true.)
+    // Pulse starts AFTER the track loop: a PLAYING publish above flips transportActive before pulseTick
+    // gates the click. Starting it before the loop (with the anchor inside the lookahead) would silently
+    // drop the imported session's first downbeat. All-STOPPED imports leave transportActive false; PLAY
+    // ALL later re-anchors and opens the gate through the normal idle-restart path.
     clock.startMasterPulse(gridAnchor, beatPeriod);
   } catch (error) {
     // The import commit is one transaction. A graph/source failure after state writes must restore
