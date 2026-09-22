@@ -213,6 +213,7 @@ export function App() {
         <span
           class="cmd__lamp"
           classList={{ 'cmd__lamp--warn': systemWarn() }}
+          role="img"
           title={systemStatusTitle()}
           aria-label={`System status, ${systemStatusTitle().replace(/\n/g, ', ')}`}
         />

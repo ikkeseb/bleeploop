@@ -20,9 +20,16 @@ export function Toasts() {
     <div class="toasts" role="log" aria-live="polite" aria-label="Notifications">
       <For each={toasts()}>
         {(t) => (
-          <div class="toast" classList={{ 'toast--info': t.kind === 'info' }} onClick={() => dismissToast(t.id)} title="Dismiss">
+          <div
+            class="toast"
+            classList={{ 'toast--info': t.kind === 'info' }}
+            data-toast-id={t.id}
+            onClick={() => dismissToast(t.id)}
+            title="Dismiss"
+          >
             <span class="toast__accent" aria-hidden="true" />
             <div class="toast__body">
+              <span class="lf-visually-hidden">{t.kind === 'info' ? 'Done' : 'Error'}</span>
               <span class="toast__msg">
                 {t.message}
                 <Show when={t.count > 1}>
@@ -43,7 +50,10 @@ export function Toasts() {
                 // close — same bar): hand it to a neighbouring toast's close button when one remains.
                 const closes = [...document.querySelectorAll<HTMLButtonElement>('.toast__close')];
                 const i = closes.indexOf(e.currentTarget);
-                const next = closes[i + 1] ?? closes[i - 1];
+                const next =
+                  closes[i + 1] ??
+                  closes[i - 1] ??
+                  document.querySelector<HTMLButtonElement>('.cmd button:not(:disabled)');
                 const restoreKeyboardFocus = e.detail === 0;
                 dismissToast(t.id);
                 if (restoreKeyboardFocus) queueMicrotask(() => next?.focus());

@@ -88,6 +88,19 @@ option {
   color: var(--text);
 }
 
+.lf-visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+  pointer-events: none;
+}
+
 .app {
   height: 100%;
   display: flex;
@@ -197,7 +210,7 @@ option {
 }
 .cmd__lamp--warn {
   background: var(--dub);
-  box-shadow: 0 0 8px -1px var(--dub);
+  box-shadow: 0 0 0 2px var(--bg), 0 0 0 3px var(--dub);
 }
 
 /* visually-hidden live region — preserves the plugin-scan role=status announcement now that the

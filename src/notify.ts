@@ -24,9 +24,10 @@ export interface Toast {
 
 /** How long a toast lingers before auto-dismiss (ms). A repeat resets its timer. */
 const AUTO_DISMISS_MS = 8000;
-/** Hard ceiling on a toast's TOTAL lifetime (ms). The dedupe timer-reset must not let a repeating
- * failure (e.g. a spammy per-frame error) camp over the bottom-right looper strip forever during
- * live play — past this age the toast dies no matter how often its message repeats. */
+const FOCUS_DEFER_MS = 2000;
+/** Hard ceiling on an unfocused toast's TOTAL lifetime (ms). The dedupe timer-reset must not let a
+ * repeating failure (e.g. a spammy per-frame error) camp over the bottom-right looper strip forever
+ * during live play. Keyboard focus defers removal past this ceiling until it leaves the toast stack. */
 const HARD_MAX_MS = 30000;
 /** Cap on visible toasts — the oldest is dropped past this so a burst of failures can't wall the app. */
 const MAX_VISIBLE = 4;
@@ -40,6 +41,7 @@ const timers = new Map<number, ReturnType<typeof setTimeout>>();
 /** Per-toast birth timestamp (ms), for the HARD_MAX_MS lifetime ceiling. Cleaned with the timer. */
 const bornAt = new Map<number, number>();
 let nextId = 1;
+let autoDismissMs = AUTO_DISMISS_MS;
 
 /** Read-only signal getter: the currently-visible toasts (oldest → newest). */
 export { toasts };
@@ -66,6 +68,16 @@ function serializeDetail(detail: unknown): string | undefined {
   }
 }
 
+function autoDismissToast(id: number): void {
+  const stack = document.querySelector<HTMLElement>('.toasts');
+  if (stack?.contains(document.activeElement)) {
+    clearTimer(id);
+    timers.set(id, setTimeout(() => autoDismissToast(id), FOCUS_DEFER_MS));
+    return;
+  }
+  dismissToast(id, true);
+}
+
 function arm(id: number): void {
   clearTimer(id);
   // The linger window, but never past the toast's hard lifetime ceiling — a dedupe reset extends
@@ -74,8 +86,13 @@ function arm(id: number): void {
   const remaining = Math.max(0, born + HARD_MAX_MS - Date.now());
   timers.set(
     id,
-    setTimeout(() => dismissToast(id), Math.min(AUTO_DISMISS_MS, remaining)),
+    setTimeout(() => autoDismissToast(id), Math.min(autoDismissMs, remaining)),
   );
+}
+
+/** @public Runtime-probe control for the toast linger window. New toasts use this value. */
+export function setAutoDismissMsForProbe(ms: number): void {
+  autoDismissMs = Number.isFinite(ms) ? Math.max(0, ms) : AUTO_DISMISS_MS;
 }
 
 /** Clears ONLY the timer (arm() re-arms through here, so the birth timestamp must survive it —
@@ -140,7 +157,21 @@ function push(kind: Toast['kind'], message: string, detail: unknown): void {
 
 /** Dismiss a toast by id (user click / keyboard, or the auto-dismiss timer). Clears its timer too, so
  * no handle leaks and the id can't be re-dismissed. */
-export function dismissToast(id: number): void {
+export function dismissToast(id: number, restoreTimerFocus = false): void {
+  let focusTarget: HTMLButtonElement | null = null;
+  if (restoreTimerFocus) {
+    const toast = document.querySelector<HTMLElement>(`[data-toast-id="${id}"]`);
+    if (toast?.contains(document.activeElement)) {
+      const closes = [...document.querySelectorAll<HTMLButtonElement>('.toast__close')];
+      const ownClose = toast.querySelector<HTMLButtonElement>('.toast__close');
+      const index = ownClose ? closes.indexOf(ownClose) : -1;
+      focusTarget =
+        closes[index + 1] ??
+        closes[index - 1] ??
+        document.querySelector<HTMLButtonElement>('.cmd button:not(:disabled)');
+    }
+  }
   forget(id);
   setToasts((prev) => prev.filter((t) => t.id !== id));
+  if (focusTarget) queueMicrotask(() => focusTarget?.focus());
 }

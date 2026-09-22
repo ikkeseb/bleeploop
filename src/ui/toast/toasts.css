@@ -34,20 +34,32 @@
   opacity: 0.92;
 }
 
-/* thin left rule in the dub-amber hue — the "attention" cue without shouting */
+/* left rule + glyph: severity stays legible without relying on hue alone */
 .toast__accent {
   flex: 0 0 auto;
   align-self: stretch;
-  width: 2px;
-  border-radius: 2px;
-  background: var(--dub);
-  box-shadow: 0 0 8px -1px var(--dub);
+  width: 16px;
+  display: grid;
+  place-items: center;
+  border-left: 2px solid currentColor;
+  border-radius: 2px 0 0 2px;
+  color: var(--dub);
+  font-family: var(--sans);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  text-shadow: 0 0 8px currentColor;
+}
+.toast__accent::after {
+  content: '⚠';
 }
 
 /* a confirmation (export saved) takes the play-green rule instead of the attention amber */
 .toast--info .toast__accent {
-  background: var(--play);
-  box-shadow: 0 0 8px -1px var(--play);
+  color: var(--play);
+}
+.toast--info .toast__accent::after {
+  content: '✓';
 }
 
 .toast__body {

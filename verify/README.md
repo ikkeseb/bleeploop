@@ -35,7 +35,8 @@ it does not exercise native COM cleanup.
 pending controls, queue completion, failure recovery, independence of the other slot, and selection
 of separate plugin files that share a class id.
 `input-controls.mjs` checks BPM cancellation, pointer release across octave changes, independent MIDI
-ownership and the playable upper note range. `session-state-roundtrip.mjs` checks STOPPED recovery,
+ownership and the playable upper note range. `ui-state-carriers.mjs` checks transport, meter, lamp,
+looper-announcement and toast state carriers. `session-state-roundtrip.mjs` checks STOPPED recovery,
 state-only autosave and subsequent PLAY ALL. `mic-arm-race.mjs` substitutes the platform input open
 with a deferred promise and checks that a disarm cancels a pending open (stream closed, tracks
 stopped) and that a burst of toggles ends in the state of the last gesture. These probes,

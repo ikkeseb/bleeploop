@@ -95,8 +95,8 @@ function drawDial(): void {
 /**
  * The command-bar record-level meter rides the loop too: `--lvl` (0..1 over −60..0 dBFS, so a quiet
  * guitar and the AUTO threshold both land somewhere readable) on one element, `is-hot` above −1 dB,
- * aria-valuenow refreshed ~6×/s. Transport.tsx puts the AUTO threshold on the same scale via
- * `meterFrac` (a low-frequency effect, not this loop).
+ * aria-valuenow/aria-valuetext refreshed ~6×/s. Transport.tsx puts the AUTO threshold on the same
+ * scale via `meterFrac` (a low-frequency effect, not this loop).
  */
 let meter: { el: HTMLElement; last: number; hot: boolean; ariaTick: number } | null = null;
 
@@ -125,6 +125,8 @@ function drawMeter(): void {
   if (++meter.ariaTick >= 10) {
     meter.ariaTick = 0;
     meter.el.setAttribute('aria-valuenow', lvl.toFixed(2));
+    const db = Math.round(METER_FLOOR_DB + -METER_FLOOR_DB * lvl);
+    meter.el.setAttribute('aria-valuetext', `${db} dBFS${hot ? ', clipping' : ''}`);
   }
 }
 

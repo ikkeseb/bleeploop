@@ -223,7 +223,7 @@ function TrackLane(props: {
       case 'OVERDUBBING':
         return 'stop overdub';
       case 'STOPPED':
-        return 'overdub';
+        return 'play first to overdub';
     }
   };
   // REC/DUB disabled: in STOPPED (decision a — play it first), and on OTHER tracks while one records —
@@ -276,6 +276,7 @@ function TrackLane(props: {
           disabled={recDubDisabled()}
           onClick={() => void looper.recDub(props.index)}
           aria-label={`Track ${props.index + 1} ${recDubAria()}`}
+          title={recDubAria()}
           aria-pressed={state() === 'RECORDING' || state() === 'OVERDUBBING'}
         >
           {coreGlyph()}
@@ -518,6 +519,8 @@ export function Looper() {
       else if (isArmed && !wasArmed) msg = `Track ${i + 1} armed, waiting for the downbeat`;
       else if (isLiveRec && !wasLiveRec) msg = `Recording track ${i + 1}`;
       else if (c.state === 'OVERDUBBING' && p.state !== 'OVERDUBBING') msg = `Overdubbing track ${i + 1}`;
+      else if (c.state === 'PLAYING' && p.state === 'RECORDING') msg = `Track ${i + 1} take recorded`;
+      else if (c.state === 'PLAYING' && p.state === 'OVERDUBBING') msg = `Track ${i + 1} overdub committed`;
     }
     if (masterNow && !prevHasMaster) msg = `Loop length set: ${masterLabel()}`;
     prevSnap = cur;

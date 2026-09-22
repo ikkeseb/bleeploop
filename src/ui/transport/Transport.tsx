@@ -129,6 +129,7 @@ export function Transport() {
         if (!wasArmed && !armed && looper.inputArmRequested()) notifyError('No audio input available to arm');
       },
       (err) => {
+        console.error('[transport] mic arm failed', err);
         notifyError("Couldn't arm the mic/line input", err);
       },
     );
@@ -404,7 +405,7 @@ export function Transport() {
         <button
           class="transport__tgl"
           classList={{ 'is-on': anyLive() }}
-          disabled={!hasMaster()}
+          disabled={!hasMaster() && !anyLive()}
           onClick={() => (anyLive() ? looper.stopAll() : looper.playAll())}
           aria-label={anyStopping() ? 'Stop all tracks now' : anyLive() ? 'Stop all tracks' : 'Play all tracks'}
           title={anyStopping() ? 'Stop all now' : anyLive() ? 'Stop all' : 'Play all'}
