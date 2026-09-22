@@ -13,7 +13,7 @@
 #![cfg(windows)]
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering::Relaxed};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, TryLockError};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{BufferSize, Sample, SampleFormat, StreamConfig};
@@ -53,17 +53,22 @@ fn capture_channel<T: Sample>(
     data: &[T], channels: usize, selection: &InputChannelControl,
     producer: &Mutex<Producer<f32>>, overruns: &AtomicU64,
 ) where f32: cpal::FromSample<T> {
-    if let Ok(mut producer) = producer.try_lock() {
-        // Read INSIDE the lock: an old callback cannot retain its pick across an owner rearm.
-        let channel = selection.selected.load(Relaxed) as usize;
-        let mut dropped = 0u64;
-        for frame in data.chunks_exact(channels) {
-            if producer.push(f32::from_sample(frame[channel])).is_err() {
-                dropped += 1;
+    match producer.try_lock() {
+        Ok(mut producer) => {
+            // Read INSIDE the lock: an old callback cannot retain its pick across an owner rearm.
+            let channel = selection.selected.load(Relaxed) as usize;
+            let mut dropped = 0u64;
+            for frame in data.chunks_exact(channels) {
+                if producer.push(f32::from_sample(frame[channel])).is_err() {
+                    dropped += 1;
+                }
+            }
+            if dropped > 0 {
+                overruns.fetch_add(dropped, Relaxed);
             }
         }
-        if dropped > 0 {
-            overruns.fetch_add(dropped, Relaxed);
+        Err(TryLockError::WouldBlock | TryLockError::Poisoned(_)) => {
+            overruns.fetch_add((data.len() / channels) as u64, Relaxed);
         }
     }
 }
@@ -135,6 +140,29 @@ mod channel_tests {
         capture_channel(&[0.75f32, -0.5], 2, &channel, &producer, &overruns);
         assert_eq!(consumer.pop().unwrap(), -0.5);
         assert!(consumer.pop().is_err());
+    }
+
+    #[test]
+    fn contended_capture_lock_counts_every_dropped_frame() {
+        let (producer, mut consumer) = rtrb::RingBuffer::new(16);
+        let producer = Arc::new(Mutex::new(producer));
+        let channel = InputChannelControl::new(2, Some(0)).unwrap();
+        let overruns = AtomicU64::new(0);
+        let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let worker_producer = producer.clone();
+        let holder = std::thread::spawn(move || {
+            let _guard = worker_producer.lock().unwrap();
+            locked_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        });
+
+        locked_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        capture_channel(&[0.75f32, -0.5, 0.25, -0.125], 2, &channel, &producer, &overruns);
+        assert_eq!(overruns.load(Relaxed), 2);
+        assert!(consumer.pop().is_err());
+        release_tx.send(()).unwrap();
+        holder.join().unwrap();
     }
 }
 
@@ -212,9 +240,10 @@ fn pick_input_device(device_id: Option<&str>) -> Result<cpal::Device, String> {
 /// Returns the stream, native capture rate (`R_in`, in Hz), and retained channel control. The
 /// RT producer needs `R_in` to build the input resampler (`R_in`→`D`) — see `host::transport`'s `InPipe`.
 ///
-/// `overruns` counts capture frames the FULL ring dropped (owner-local; mirrored into
-/// `ProducerDiag::input_overruns` at each gate emit). It is the ONLY visibility into that loss — a
-/// full ring means the RT consumer is behind, which never produces a consumer-side starve.
+/// `overruns` counts capture frames dropped by a full ring or an unavailable producer lock
+/// (owner-local; mirrored into `ProducerDiag::input_overruns` at each gate emit). It is the only
+/// visibility into capture loss. A full ring means the RT consumer is behind, which never produces
+/// a consumer-side starve.
 ///
 /// `fault` is latched true by cpal's ERROR callback — which is TERMINAL by contract: the stream is
 /// dead and never resumes (interface unplugged, ASIO driver reset). The owner loop polls it and tears

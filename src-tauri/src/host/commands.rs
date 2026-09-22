@@ -18,6 +18,37 @@ fn validate_slot(slot: u8) -> Result<(), String> {
         _ => Err(format!("invalid plugin slot {slot} (expected 0 or 1)")),
     }
 }
+
+fn validate_note_event(note: u16, velocity: Option<f64>) -> Result<(), String> {
+    if note > 127 {
+        return Err(format!("invalid MIDI note {note} (expected 0..=127)"));
+    }
+    if let Some(velocity) = velocity {
+        if !velocity.is_finite() || !(0.0..=1.0).contains(&velocity) {
+            return Err(format!(
+                "invalid MIDI note-on velocity {velocity} (expected finite 0.0..=1.0)"
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod note_validation_tests {
+    use super::validate_note_event;
+
+    #[test]
+    fn midi_note_and_note_on_velocity_stay_inside_the_protocol_domain() {
+        assert!(validate_note_event(0, Some(0.0)).is_ok());
+        assert!(validate_note_event(127, None).is_ok());
+        assert!(validate_note_event(128, None).is_err());
+        assert!(validate_note_event(127, Some(f64::INFINITY)).is_err());
+        assert!(validate_note_event(127, Some(f64::NAN)).is_err());
+        assert!(validate_note_event(127, Some(-0.1)).is_err());
+        assert!(validate_note_event(127, Some(1.0)).is_ok());
+        assert!(validate_note_event(127, Some(1.1)).is_err());
+    }
+}
 /// JS owns the `AudioContext`; it hands Rust the sample rate at startup so a later `loadPlugin`
 /// can `activate()` the plugin at the right rate (P9.2). Persists it into shared state.
 #[tauri::command]
@@ -157,6 +188,7 @@ pub async fn plugin_note_on(
     state: tauri::State<'_, PluginHostState>,
 ) -> Result<(), String> {
     validate_slot(slot)?;
+    validate_note_event(note, Some(velocity))?;
     #[cfg(windows)]
     {
         super::clap::enqueue_event(&state, slot, super::clap::PluginEvent::NoteOn { key: note, velocity });
@@ -177,6 +209,7 @@ pub async fn plugin_note_off(
     state: tauri::State<'_, PluginHostState>,
 ) -> Result<(), String> {
     validate_slot(slot)?;
+    validate_note_event(note, None)?;
     #[cfg(windows)]
     {
         super::clap::enqueue_event(&state, slot, super::clap::PluginEvent::NoteOff { key: note });

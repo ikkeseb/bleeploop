@@ -1105,10 +1105,10 @@ struct Vst3RtConfig {
     device_rate: f64, // D (render rate)
 }
 
-/// What the VST3 RT producer returns on exit (it has already called `setProcessing(0)`): the
-/// processor handle (the owner deactivates, re-activates and hands it to the next spawn), the
-/// rings, and the state a respawn continues from — the block it last reconciled to and the hop-1
-/// drift it learned.
+/// What the VST3 RT producer returns on exit: the processor handle (the owner deactivates,
+/// re-activates and hands it to the next spawn), the rings, and the state a respawn continues from
+/// — the block it last reconciled to and the hop-1 drift it learned. A started processor has already
+/// received `setProcessing(0)`; a processor whose `setProcessing(1)` failed is returned untouched.
 struct Vst3RtExit {
     processor: ComPtr<IAudioProcessor>,
     rings: RtRings,
@@ -1159,12 +1159,12 @@ fn spawn_vst3_rt(
 }
 
 /// Plugin-requested restart (`restartComponent` with a cycle flag), on the owner thread: stop +
-/// join the RT producer (it calls `setProcessing(0)` on its way out and hands back the processor
-/// and the rings), `setActive(0)`, re-run the load-time `activate_component` (buses renegotiated,
-/// `setupProcessing` at the same D / max block, `setActive(1)`), respawn at the block and drift the
-/// joined producer reached. `activation` is updated to what the plugin now reports, so an
-/// `kIoChanged` that changed a channel count resizes the next producer's buffers instead of
-/// feeding the plugin a stale `numChannels`. The editor and the native cpal streams stay up.
+/// join the RT producer (it calls `setProcessing(0)` on its way out if processing started and hands
+/// back the processor and the rings), `setActive(0)`, re-run the load-time `activate_component`
+/// (buses renegotiated, `setupProcessing` at the same D / max block, `setActive(1)`), then respawn
+/// at the block and drift the joined producer reached. `activation` is updated to what the plugin
+/// now reports, so a `kIoChanged` that changed a channel count resizes the next producer's buffers
+/// instead of feeding the plugin a stale `numChannels`. The editor and native cpal streams stay up.
 /// Flags the plugin raises DURING the cycle (a `kLatencyChanged` from inside `setActive(1)` is
 /// common) describe the state just activated and are consumed, so a plugin cannot keep the host
 /// cycling. A failed re-activation leaves the slot SILENT but still serviced by the owner loop,
@@ -1744,7 +1744,8 @@ pub fn vst3_owner_main(
 
     // Teardown: close a still-open editor BEFORE deactivate/terminate/FreeLibrary (a live
     // attached view through terminate → crash/leak). Then the RT thread saw running=false →
-    // setProcessing(false) + exited; join it, deactivate + terminate on this (owner) thread,
+    // setProcessing(false), if it started, + exited; join it, deactivate + terminate on this
+    // (owner) thread,
     // release all module COM objects, unload last.
     // Every step is timed into ONE log line: a plugin that stalls here reads as a frozen app, and
     // the line says which step to blame.
@@ -1923,9 +1924,10 @@ fn list_vst3_params(
 /// The device-less VST3 RT producer. Renders the plugin at D into per-channel f32 buffers via
 /// `IAudioProcessor::process`, sums to mono, and hands each D-rate block to the shared
 /// `Hop1Pipe` (resample D→C + hop-1 ring write + pacing). ZERO heap allocation per block after
-/// warmup (host COM objects + the resampler are built pre-loop). Calls `setProcessing(1)` on entry
-/// and `setProcessing(0)` on the way out, then returns the processor + rings (`Vst3RtExit`) when
-/// its run flag drops — at unload, or mid-load for a plugin-requested restart.
+/// warmup (host COM objects + the resampler are built pre-loop). Calls `setProcessing(1)` on entry.
+/// A successful start is paired with `setProcessing(0)` on the way out; a rejected start returns
+/// immediately without `process()` or `setProcessing(0)`. It returns the processor + rings
+/// (`Vst3RtExit`) when its run flag drops — at unload, or mid-load for a plugin-requested restart.
 #[allow(clippy::too_many_arguments)]
 fn vst3_producer_loop(
     processor: ComPtr<IAudioProcessor>,
@@ -1993,7 +1995,8 @@ fn vst3_producer_loop(
     let event_list = ComWrapper::new(RtEventList {
         inner: ev_inner.clone(),
     });
-    // A pre-loop build failure hands everything back un-started (no setProcessing happened).
+    // A pre-loop build or processing-start failure hands everything back without calling
+    // setProcessing(0): either setProcessing(1) never ran or it did not succeed.
     macro_rules! bail_before_start {
         ($fault:expr) => {{
             diag.latch_rt_fault($fault);
@@ -2047,7 +2050,7 @@ fn vst3_producer_loop(
     // SAFETY: setProcessing on the RT thread per the VST3 call sequence.
     unsafe {
         if processor.setProcessing(1) != kResultOk {
-            diag.latch_rt_fault(RtFault::Vst3Process);
+            bail_before_start!(RtFault::Vst3Process);
         }
     }
 

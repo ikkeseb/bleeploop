@@ -271,9 +271,10 @@ pub struct ProducerDiag {
     // --- P11.0 audio-input diag (only meaningful when the slot has an input bus + is armed) ---
     pub(super) input_fill: AtomicU32,     // cpal→RT input-ring unread mono frames, snapshot each RT block
     pub(super) input_starves: AtomicU64,  // RT blocks the input ring couldn't fully feed (cumulative; windowed)
-    pub(super) input_overruns: AtomicU64, // capture frames the FULL input ring dropped (owner mirrors from the
-    // cpal capture stream's counter). The opposite failure to a starve: the RT consumer is BEHIND, which
-    // produces no starve at all, so this counter is the only thing that can see the loss.
+    pub(super) input_overruns: AtomicU64, // capture frames dropped by a FULL input ring or a capture
+    // callback that found the producer lock held by an owner rearm (owner mirrors from the cpal capture
+    // stream's counter). The opposite failure to a starve: the RT consumer is BEHIND, which produces no
+    // starve at all, so this counter is the only thing that can see the loss.
     // --- P11 input-SRC: cpal capture rate + input drift loop state (owner writes rate; RT reads) ---
     pub(super) input_rate: AtomicU32, // R_in (cpal native capture rate, Hz); 0 = disarmed
     pub(super) input_is_asio: AtomicBool, // actual backend paired with input_rate by input_gen

@@ -37,11 +37,12 @@ struct FixtureComponent {
     /// A plugin that reports a restart from inside `setActive(1)` (a `kLatencyChanged` once its
     /// buffers exist is common). The cycle must consume it, not schedule another cycle.
     raise_on_activate: Option<Arc<RestartFlags>>,
+    reject_processing_start: bool,
     main_thread_calls: Mutex<Vec<ThreadId>>,
 }
 
 impl FixtureComponent {
-    fn new(raise_on_activate: Option<Arc<RestartFlags>>) -> Self {
+    fn new(raise_on_activate: Option<Arc<RestartFlags>>, reject_processing_start: bool) -> Self {
         Self {
             owner: std::thread::current().id(),
             active: AtomicBool::new(false),
@@ -56,6 +57,7 @@ impl FixtureComponent {
             out_channels: AtomicI32::new(2),
             latency: AtomicU32::new(0),
             raise_on_activate,
+            reject_processing_start,
             main_thread_calls: Mutex::new(Vec::new()),
         }
     }
@@ -186,8 +188,11 @@ impl IAudioProcessorTrait for FixtureComponent {
     unsafe fn setProcessing(&self, state: TBool) -> tresult {
         self.violate_if(self.on_owner() || !self.active.load(Relaxed));
         if state != 0 {
-            self.violate_if(self.processing.swap(true, Relaxed));
             self.starts.fetch_add(1, Relaxed);
+            if self.reject_processing_start {
+                return kResultFalse;
+            }
+            self.violate_if(self.processing.swap(true, Relaxed));
         } else {
             self.violate_if(!self.processing.swap(false, Relaxed));
             self.stops.fetch_add(1, Relaxed);
@@ -225,7 +230,7 @@ fn plugin_requested_restart_cycles_activation_on_the_owner_without_reload() {
     const RATE: f64 = 48_000.0;
 
     let restart = Arc::new(RestartFlags::default());
-    let fixture = ComWrapper::new(FixtureComponent::new(Some(restart.clone())));
+    let fixture = ComWrapper::new(FixtureComponent::new(Some(restart.clone()), false));
     let s: &FixtureComponent = &fixture;
     let component = fixture.to_com_ptr::<IComponent>().unwrap();
     // The production host reaches the processor the same way: a cast on the component.
@@ -420,7 +425,7 @@ fn a_failed_reactivation_leaves_the_slot_silent_but_serviceable() {
     const RATE: f64 = 48_000.0;
 
     let restart = Arc::new(RestartFlags::default());
-    let fixture = ComWrapper::new(FixtureComponent::new(None));
+    let fixture = ComWrapper::new(FixtureComponent::new(None, false));
     let s: &FixtureComponent = &fixture;
     let component = fixture.to_com_ptr::<IComponent>().unwrap();
     let processor = component.cast::<IAudioProcessor>().unwrap();
@@ -490,6 +495,80 @@ fn a_failed_reactivation_leaves_the_slot_silent_but_serviceable() {
     )
     .unwrap_err();
     assert!(err.contains("no RT producer"), "{err}");
+    assert!(!s.contract_violation.load(Relaxed));
+    drop(component);
+    drop(ring);
+}
+
+#[test]
+fn rejected_processing_start_never_enters_process_and_latches_the_fault() {
+    const CAP_FRAMES: u32 = 1024;
+    const MAX_FRAMES: u32 = 512;
+    const RATE: f64 = 48_000.0;
+
+    let fixture = ComWrapper::new(FixtureComponent::new(None, true));
+    let s: &FixtureComponent = &fixture;
+    let component = fixture.to_com_ptr::<IComponent>().unwrap();
+    let processor = component.cast::<IAudioProcessor>().unwrap();
+    let mut ring = vec![0u32; HOP1_HEADER_BYTES / 4 + CAP_FRAMES as usize];
+    let cfg = Vst3RtConfig {
+        slot: 0,
+        shared_ptr: ring.as_mut_ptr() as usize,
+        cap_frames: CAP_FRAMES,
+        max_frames: MAX_FRAMES,
+        sample_rate: RATE,
+        device_rate: RATE,
+    };
+    let diag = Arc::new(ProducerDiag::new());
+    diag.init(RATE, RATE, MAX_FRAMES, 2, CAP_FRAMES as usize, 256, 1);
+    let activation =
+        unsafe { activate_component(&component, &processor, RATE, MAX_FRAMES) }.unwrap();
+    let (_event_tx, event_rx) = RingBuffer::<PluginEvent>::new(16);
+    let (_in_tx, in_rx) = RingBuffer::<f32>::new(16);
+    let (mon_tx, _mon_rx) = RingBuffer::<f32>::new(16);
+    let guard = spawn_vst3_rt(
+        &cfg,
+        processor,
+        RtRings {
+            event_rx,
+            in_rx,
+            mon_tx,
+        },
+        activation,
+        128,
+        super::super::BLOCK_CONFIG_GEN.load(Acquire),
+        0.0,
+        diag.clone(),
+    )
+    .unwrap();
+
+    // The RT thread returns before its loop, so the join alone is deterministic here.
+    let exit = guard.stop_and_join().unwrap();
+    assert_eq!(
+        s.starts.load(Relaxed),
+        1,
+        "setProcessing(1) was attempted once"
+    );
+    assert_eq!(
+        s.processes.load(Relaxed),
+        0,
+        "process must not run after setProcessing(1) failed"
+    );
+    assert_eq!(
+        s.stops.load(Relaxed),
+        0,
+        "a processor that never started must not be stopped"
+    );
+    assert_ne!(
+        diag.rt_faults.load(Relaxed) & RtFault::Vst3Process as u32,
+        0,
+        "the rejected start must latch the VST3 process fault"
+    );
+    unsafe {
+        assert_eq!(component.setActive(0), kResultOk);
+    }
+    drop(exit);
+    assert_eq!(s.deactivations.load(Relaxed), 1);
     assert!(!s.contract_violation.load(Relaxed));
     drop(component);
     drop(ring);
