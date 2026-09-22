@@ -4,10 +4,19 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Platform: Windows](https://img.shields.io/badge/platform-Windows-0078D6.svg)](#getting-started)
 
-BleepLoop is a Windows desktop instrument. It hosts two native CLAP/VST3 plugins and six
-built-in Web Audio synths, and records them into a 5-track looper modelled on the RC-505 MK II.
-You play a MIDI controller or a guitar through a plugin or synth, then loop and overdub at low
-latency. The computer keyboard works as a fallback.
+BleepLoop is a Windows looper you play with a guitar. Load your own amp-sim plugin (CLAP or VST3),
+hear it through native ASIO monitoring, and loop and overdub on five RC-505 MK II–style tracks, with
+every take compensated onto the grid. Six built-in Web Audio synths and a MIDI keyboard fill the
+other layers; the computer keyboard is the fallback.
+
+**What BleepLoop is not**
+
+- Not a DAW: no timeline or arrangement. The mix is per-track volume, mute and FX.
+- Not an amp sim: bring your own plugin.
+- Not a low-latency synth host: MIDI-played synths and plugins run on the WebView audio path, above
+  the native monitor's latency.
+- Not a web app: the browser build is a verification rig.
+- Not cross-platform: Windows only, and built from source for now.
 
 > Pre-release and Windows-only. There are no binary releases yet, so you build it from source
 > (see below). The low-latency ASIO® tier is an opt-in build feature that needs Steinberg's SDK,

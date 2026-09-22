@@ -1,0 +1,52 @@
+# Next milestone: the hands-free looper (Pedalboard mode)
+
+Decided 2026-09-23 from the product lens over that day's audit. The promise heads `README.md`: a
+guitarist's hands are on the guitar, and today every looper action needs the PC keyboard or the
+mouse. MIDI handles only CC64/1/123 and bend (`src/audio/midi.ts`); the keys bind only
+Esc/Space/Enter/1–5 (`src/app/transport-keys.ts`). `src/audio/looper/looper.ts` already exposes every
+action, so the milestone is adapters: capture, compensation and the MIRRORS-guarded algorithms stay
+untouched, and nothing here needs the rig to prove correctness. This file is deleted when the
+milestone lands; what still binds moves to the briefings.
+
+## Pieces, in build order
+
+| # | Piece | Size | Seam | Proof |
+|---|---|---|---|---|
+| 1 | Refusal cue (audit F1): a refused REC/DUB or PLAY/STOP flashes the target lane and puts the reason in `title`/ARIA, from one `recDubGate`/`playStopGate` in the looper store | M | `src/ui/looper/` | `pnpm verify:jam` asserts the cue flag and the ARIA text on a refused Space |
+| 2 | Action layer + keys: one named-action table (REC/DUB, PLAY/STOP, UNDO, CLEAR with a hold or double-press guard, next/prev track, ALL PLAY, STOP ALL, GO LIVE) dispatching to the looper API; new bindings for UNDO, next/prev, CLEAR | S | `src/app/transport-keys.ts` | `pnpm verify:jam` presses the keys through the real dispatchers: UNDO restores the previous layer, next/prev wraps, CLEAR refuses without its guard |
+| 3 | MIDI learn: CC/note → action per port and channel, persisted in localStorage; a learned message is consumed before the CC64/1/123 branch, unmapped traffic behaves as today; a learn row in Audio Settings | M | `src/audio/midi.ts`, new `src/audio/midi-actions.ts` (not yet built), `src/ui/settings/` | browser probe feeds raw bytes to an `@public` handler: learn a CC, reload, the CC fires the action; unmapped CC64/1/123 still reach the router; a CC mapped onto 64 does not also sustain |
+| 4 | Rig recall, frontend only: restore each slot's plugin path and input channel at launch through the existing load path; GO LIVE stays one press. Plugin tone state excluded | M | `src/audio/instrument.ts`, `src/audio/native-io.ts` | native probe under `tauri dev` (a plugin, no guitar): restart, both slots reload the same path and channel; arming stays with STATUS Stops 5/6 |
+| 5 | Help: a "Pedals" section (keystroke footswitches, MIDI learn); first screen ordered by the promise | S | `src/ui/settings/Help.tsx` | eye lap |
+
+The only ear or foot moment is one pedal press during the next "Play first" jam; it rides that
+session instead of adding a stop. Deferred inside the milestone: the stage view (eye-gated, needs the
+actions first) and VST3 tone-state recall (L Rust; VST3 save/load is "not wired" and LoadState
+cancellation needs a design).
+
+## Explicitly not built
+
+- **D12 full controller IPC to CLAP/VST3.** MIDI into a plugin stays on the WebView latency path
+  whatever the IPC carries; the S sustain alternative is under STATUS D12.
+- **Native monitor path for synth plugins (tester F8).** Changes native buffering: needs the L1+L2
+  measurements first (`docs/ARCHITECTURE.md`), and the promise ranks synth layers second.
+- **Native looper core.** Falsified unless the L1/L2 gates say otherwise; it would end Mac development.
+- **VST3 plugin tone-state recall.** See above.
+- **Multiply (a later take k× master).** Adds unheard seams on top of the tile seams already owed to
+  the ear (`docs/plans/tester-feedback.md`). Revisit once those are heard.
+- **FREE tempo-setting first take, 3/4 and 6/8.** `beatsPerBar = 4` runs through grid math, click and
+  count-in; no owner or tester ask; gate-adjacent timing code.
+- **Scenes and songs; panel drag; Day/Night; more built-in synths.** Taste or capacity with no effect
+  on playing; each adds its own eye lap. Built-ins fill layers, they do not compete with plugins.
+- **Input FX.** Owner request, but the design is open: the native monitor bypasses Web Audio, so the
+  player would not hear what gets recorded. Design first.
+- **Hosted browser demo.** Contradicts the rig-not-product rule and would showcase the fallback path.
+- **Built-in dry INPUT source; a second input channel.** Rust effort unknown; the promise assumes an
+  amp-sim plugin. "Maybe later" (STATUS D2/D7).
+
+## Open questions that would change this plan
+
+- Whether the owner plays with a footswitch or MIDI foot controller, and what it sends. None → the
+  pick moves to the first downloadable release (`docs/plans/release-prep.md`).
+- Whether a MIDI-keyboard player without ASIO or guitar (the tester's setup) is someone BleepLoop is
+  for. Yes → F8 becomes a roadmap item.
+- Whether the first downloadable release comes before any new feature.

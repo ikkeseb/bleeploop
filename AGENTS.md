@@ -22,6 +22,7 @@ Harness auto-load of nested files is not reliable: open the briefing yourself.
 | Any non-trivial work; `engine.ts`, bus wiring | `docs/ARCHITECTURE.md` |
 | Planning or performing a by-ear/eye/rig session; gate-adjacent code; latency | `STATUS.md` |
 | Releases, licences, workflow hardening | `docs/plans/release-prep.md` |
+| The next milestone (hands-free looper) and what is explicitly not built | `docs/plans/pedalboard.md` |
 | The looper-UI spec (the approved mockup) | `docs/inspiration/revamp-2026-07/README.md` |
 
 ## Standing rules
@@ -41,9 +42,11 @@ Harness auto-load of nested files is not reliable: open the briefing yourself.
 - **Ear-gated work drains slowly — design around it.** Prefer work a machine gate or a probe can
   settle. Rank unbuilt work by provenance: the owner's ear > the owner's stated roadmap > an agent's
   tier list.
-- **The play path is MIDI controller + guitar → plugin/synth → play/loop/dub at low latency.** The
-  looper is the instrument; PC-keyboard→MIDI is a *fallback*. Guitar and MIDI/keys are equal play
-  paths: by-ear sessions happen on guitar only, and the on-screen keyboard stays a first-class view.
+- **The play path is guitar → amp-sim plugin (native monitor) → play/loop/dub at low latency.** The
+  looper is the instrument. MIDI controller → synth/plugin is the second path, for the other layers,
+  and runs on the WebView latency path; PC-keyboard→MIDI is its fallback. By-ear sessions happen on
+  guitar. The on-screen keyboard stays available, but it is not the first-screen hero. The promise
+  heads `README.md`; the milestone and the not-built list live in `docs/plans/pedalboard.md`.
 - **The browser tier is a VERIFICATION RIG, not a product.** BleepLoop ships as a standalone
   Windows app with native drivers and zero-latency monitoring.
 - **Measure latency changes on the path they change,** with signal/timestamp probes before and
