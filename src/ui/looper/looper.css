@@ -468,6 +468,17 @@
     padding: 5px 10px;
   }
 }
+/* FX drawer open: the drawer (~100px, flex 0 0 auto) is a sibling INSIDE this container, so the lanes
+   get container − drawer. The full floor (5 × (55px + 2 × 1vh pad) + 6 gaps + drawer) outgrows a
+   ~490px container (1280×820, keyboard shown) and lane 5 scrolls out; drop to the 57px rung here.
+   Above 540px the full floor fits, so large windows keep their normal padding. */
+@container lp (max-height: 540px) {
+  .lp__lanes:has(.lp-drawer) .lp-lane {
+    min-height: 57px;
+    gap: 10px;
+    padding: 5px 10px;
+  }
+}
 @container lp (max-height: 300px) {
   .lp-lane__state {
     font-size: 7px;
