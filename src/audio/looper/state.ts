@@ -445,6 +445,16 @@ export function mutedOf(i: number): boolean {
   return engineState.tracks[i]?.muted ?? false;
 }
 
+/**
+ * Plain "RECORDING but not laying down a take yet" flag of track `i` (no signal read): armed for the
+ * downbeat / count-in, or AUTO LISTEN waiting for an onset. The draw loop keeps the well free of
+ * rec-red while this is true, matching the ARMED/LISTENING chrome.
+ */
+export function waitingOf(i: number): boolean {
+  const t = engineState.tracks[i];
+  return !!t && (t.armed || t.autoArmed);
+}
+
 /** Plain number of frames captured so far, or 0 before the track exists. */
 export function fillFramesOf(i: number): number {
   return engineState.tracks[i]?.fillFrames ?? 0;

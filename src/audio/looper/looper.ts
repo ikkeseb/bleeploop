@@ -86,6 +86,7 @@ import {
   trackInfo,
   trackPeak,
   trackSignals,
+  waitingOf,
 } from './state';
 import {
   clear,
@@ -193,6 +194,8 @@ export const looper = {
   stateOf,
   /** Plain track mute flag (non-reactive) for the draw loop. */
   mutedOf,
+  /** Plain armed/count-in/listening flag of a RECORDING track (non-reactive) for the draw loop. */
+  waitingOf,
   /** Plain captured-frame count (non-reactive) for probes and the draw loop. */
   fillFramesOf,
   /** Later-track record-head fraction 0..1, or -1 if no master yet (non-reactive). */

@@ -58,6 +58,7 @@ interface Lane {
   dpr: number;
   /** Dirty trackers — re-rasterise the bitmap when any of these change. */
   lastVersion: number;
+  lastWaiting: boolean;
   lastState: TrackState | '';
   /** Mute at the last rasterise — a muted take is drawn dimmed so silence reads from the stage. */
   lastMuted: boolean;
@@ -253,6 +254,7 @@ function rasterise(
   state: TrackState,
   masterFrames: number,
   muted: boolean,
+  waiting: boolean,
 ): void {
   const { wctx, dw, dh, dpr } = lane;
   wctx.clearRect(0, 0, dw, dh);
@@ -272,7 +274,8 @@ function rasterise(
   // Centre line vs "tape to fill": while a later track is laying down a take, the mid line becomes a
   // dotted rec-red guide over the not-yet-recorded remainder (right of the record head); otherwise it
   // is a plain faint centre line. (First-track grow-from-left has no known length → plain line, no tape.)
-  const recording = state === 'RECORDING';
+  // Armed / count-in / listening is not a take yet: plain line, no tape (the chrome says ARMED).
+  const recording = state === 'RECORDING' && !waiting;
   const headFrac = recording ? looper.recHeadFrac(lane.index) : -1;
   const hasTape = recording && headFrac >= 0;
   const waveCols = hasTape ? Math.min(dw, Math.max(0, Math.round(headFrac * dw))) : dw;
@@ -340,12 +343,19 @@ function rasterise(
 }
 
 /** Draw the moving playhead for a track over the (already-blitted) waveform. */
-function drawPlayhead(lane: Lane, state: TrackState): void {
+function drawPlayhead(lane: Lane, state: TrackState, waiting: boolean): void {
   const { ctx, dw, dh } = lane;
   let x = -1;
   let color = lane.colors.playhead;
 
-  if (state === 'RECORDING') {
+  if (state === 'RECORDING' && waiting) {
+    // Armed for the downbeat: an amber (--dub, the lane's ARMED --sc) head rides the master phase in
+    // sync with the other lanes. Count-in / AUTO LISTEN have no master yet → no head at all.
+    if (looper.masterFramesValue() > 0) {
+      x = looper.phaseValue() * dw;
+      color = lane.colors.overdubbing;
+    }
+  } else if (state === 'RECORDING') {
     const frac = looper.recHeadFrac(lane.index);
     // -1 => first track, master not yet defined: head rides the right edge of the grown data.
     x = frac < 0 ? dw - lane.dpr : frac * dw;
@@ -375,17 +385,21 @@ function frame(): void {
     const state = looper.stateOf(lane.index);
     const muted = looper.mutedOf(lane.index);
     const master = looper.masterFramesValue();
+    // Armed / count-in / AUTO LISTEN: the chrome says ARMED/LISTENING, so the well draws no rec-red.
+    const waiting = state === 'RECORDING' && looper.waitingOf(lane.index);
     looper.peaksInto(lane.index, peakScratch);
 
     const dirty =
       sizeChanged ||
       peakScratch.version !== lane.lastVersion ||
       state !== lane.lastState ||
+      waiting !== lane.lastWaiting ||
       muted !== lane.lastMuted ||
       master !== lane.lastMasterFrames;
     if (dirty) {
-      rasterise(lane, peakScratch.count, peakScratch.min, peakScratch.max, state, master, muted);
+      rasterise(lane, peakScratch.count, peakScratch.min, peakScratch.max, state, master, muted, waiting);
       lane.lastVersion = peakScratch.version;
+      lane.lastWaiting = waiting;
       lane.lastState = state;
       lane.lastMuted = muted;
       lane.lastMasterFrames = master;
@@ -402,7 +416,7 @@ function frame(): void {
       const { ctx, dw, dh } = lane;
       ctx.clearRect(0, 0, dw, dh);
       ctx.drawImage(lane.wave, 0, 0);
-      drawPlayhead(lane, state);
+      drawPlayhead(lane, state, waiting);
     }
   }
   drawDial();
@@ -435,6 +449,7 @@ export function registerLane(index: number, canvas: HTMLCanvasElement): void {
     cssH: -1,
     dpr: 0,
     lastVersion: -2,
+    lastWaiting: false,
     lastState: '',
     lastMuted: false,
     lastMasterFrames: -1,
