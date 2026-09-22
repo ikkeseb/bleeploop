@@ -87,6 +87,10 @@ Blocked on an owner decision, not on testing. The default column is what happens
 | # | Question | Default if silent |
 |---|---|---|
 | D1 | The BPM value ALREADY survives clearing every lane (only the lock and the loop LENGTH reset — `resetMaster` in `machine.ts`). Should the LENGTH survive too? It would force the next first take to the old bar count until CLEAR ALL. | stays as built |
+| D12 | Native plugins receive note on/off only: sustain (CC64), pitch bend and mod wheel stop at the built-in synths (`midi.ts` → `inputRouter`; the plugin note IPC carries no controller events). Build the controller path to CLAP/VST3 (an L-size change on the play path)? | not built |
+| D13 | Choosing a sound in slot B does not move MIDI routing: notes keep going to the active slot. Should picking a sound also make that slot active for MIDI, or stay a separate gesture? | stays as built |
+| D14 | Lane state carries by hue: under deuteranopia REC red and PLAYING green read as the same yellow, in greyscale only the 8 px word and the core glyph separate them (shots and ΔE table in the 2026-09-22 audit; eye lines in `docs/backlog-taste.md`). Shape carrier (glyph in the left rail, larger word) or palette move? | stays as built |
+| D15 | An error at an overdub boundary swap leaves the lane OVERDUBBING with no further swaps (`playback.ts` boundary timer). The fix changes the mirrored algorithm, so `fs-overdub-verify.mjs` needs a CHANGED reseed of its MIRRORS tag (`verify/README.md`), which the docs reserve for the owner. Approve the reseed and build it? | not built |
 
 **Answered 2026-09-18:**
 
