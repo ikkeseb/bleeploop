@@ -22,7 +22,7 @@ let activeRecordIndex = -1;
 let masterFrames = MASTER;
 let bpmLocked = true;
 
-// MIRRORS: src/audio/looper/machine.ts@905-923 sha256:bd08c5442c9537c8  (resetMaster + resetMasterIfBlank)
+// MIRRORS: src/audio/looper/machine.ts@951-969 sha256:bd08c5442c9537c8  (resetMaster + resetMasterIfBlank)
 function resetMasterIfBlank(tracks) {
   if (activeRecordIndex < 0 && tracks.every((t) => t.state === 'EMPTY')) {
     masterFrames = 0;
@@ -38,7 +38,7 @@ function armLater(t, i, framesToBoundary) {
   pendingRecordStartFrame = framesToBoundary;
   activeRecordIndex = i;
 }
-// MIRRORS: src/audio/looper/capture.ts@331-375 sha256:72293488834b3bda  (consume: recording append and timestamp completion; overdub not modelled)
+// MIRRORS: src/audio/looper/capture.ts@339-383 sha256:72293488834b3bda  (consume: recording append and timestamp completion; overdub not modelled)
 // consume() arm-split + later-track write — returns frames written this batch
 function consume(t, data) {
   const count = data.length;
@@ -60,7 +60,7 @@ function consume(t, data) {
   if (t.captureEndFrame !== null && firstFrame + count >= t.captureEndFrame) finishRecording(t);
 }
 // finishRecording later-take subset: tile its chosen whole-bar window, then commit master length.
-// MIRRORS: src/audio/looper/machine.ts@244-265 sha256:3dc46b2b25d96a01  (finishCapture: completion owns recorder release)
+// MIRRORS: src/audio/looper/machine.ts@250-271 sha256:3dc46b2b25d96a01  (finishCapture: completion owns recorder release)
 // Models the clean later-recording completion and its shared dispatcher release.
 function finishRecording(t) {
   if (activeRecordIndex !== t.index) return;
@@ -70,8 +70,8 @@ function finishRecording(t) {
   t.lengthFrames = MASTER; t.fillFrames = MASTER; t.armed = false; t.state = 'PLAYING';
   releaseRecorderState(t);
 }
-// MIRRORS: src/audio/looper/machine.ts@602-607 sha256:f1ac00fd5fc132e0  (stopCapture: armed capture delegates to stop)
-// MIRRORS: src/audio/looper/machine.ts@800-831 sha256:63141d8ed4fdc7cc  (stop: capture abort and true-blank reset)
+// MIRRORS: src/audio/looper/machine.ts@608-613 sha256:f1ac00fd5fc132e0  (stopCapture: armed capture delegates to stop)
+// MIRRORS: src/audio/looper/machine.ts@806-837 sha256:63141d8ed4fdc7cc  (stop: capture abort and true-blank reset)
 // stopRecording — OLD (buggy): always pad+commit
 function stopRecording_OLD(t) {
   if (t.writeHead < MASTER) t.record.fill(0, t.writeHead, MASTER);
@@ -85,7 +85,7 @@ function stopRecording_NEW(t, tracks = [t]) {
   }
   throw new Error('This model only exercises stop during arm');
 }
-// MIRRORS: src/audio/looper/machine.ts@374-395 sha256:3be20034b52c094c  (releaseRecorderState: only the owner resets capture state)
+// MIRRORS: src/audio/looper/machine.ts@380-401 sha256:3be20034b52c094c  (releaseRecorderState: only the owner resets capture state)
 function releaseRecorderState(t) {
   if (activeRecordIndex !== t.index) return;
   activeRecordIndex = -1;

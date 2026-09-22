@@ -10,7 +10,9 @@
  * `completeRetakePass` slides a rolling take one pass forward, `stopCapture` decides which pass is kept
  * (grid-math `planRetakeStop`), and `finishCapture` hands the recorder to the lane whose REC approved. Capture
  * maps timestamped overdub samples back onto the uncompensated master grid.
- * The pure grid arithmetic lives in `grid-math.ts`; capture-side frame handling in `capture.ts`.
+ * PLAY ALL is BEST-EFFORT PER LANE — a lane that fails to start rolls back to STOPPED and the fan-out
+ * continues; see `playAll`. The pure grid arithmetic lives in `grid-math.ts`; capture-side frame
+ * handling in `capture.ts`.
  */
 import { notifyError } from '../../notify';
 import { engine } from '../engine';
@@ -63,6 +65,7 @@ import {
   cancelOverdubSwap,
   makeLoopBuffer,
   nextBoundary,
+  preparePlaybackGraph,
   scheduleOverdubSwap,
   schedulePlaybackStop,
   startPlayback,
@@ -204,6 +207,9 @@ function finishRecording(i: number): void {
   const raw = Math.min(t.writeHead, (engineState.captureEndFrame ?? Infinity) - (engineState.captureStartFrame ?? 0));
   let master = masterLengthFrames();
   const firstTake = master === 0;
+  // A committing take has never played, so its gain → FX graph is still cold. Build it before the
+  // start anchor is read: the lead below must not be spent constructing Tone nodes.
+  preparePlaybackGraph(i);
   let when = engine.ctx.currentTime + HEARTBEAT_INTERNAL_LATENCY;
   let offset = 0;
   let firstBeatPeriod = 0;
@@ -849,13 +855,23 @@ function restartTimeIfIdle(): number | null {
   return when;
 }
 
-/** Resume a STOPPED track at the top when transport is idle, otherwise at the live master phase. */
-function resume(i: number, sharedRestartTime?: number | null, prepared?: AudioBuffer): void {
+/**
+ * Resume a STOPPED track at the top when transport is idle, otherwise at the live master phase.
+ * Returns whether the lane became audible: a `startPlayback` throw (source creation/start failure) rolls
+ * the lane back to STOPPED and publishes, so it never reads PLAYING with no source behind it and a second
+ * press can retry. `reportFailure` is false for the PLAY ALL fan-out, which reports once for all lanes.
+ */
+function resume(i: number, sharedRestartTime?: number | null, prepared?: AudioBuffer, reportFailure = true): boolean {
   const t = engineState.tracks[i];
-  if (t.lengthFrames === 0) return;
+  if (t.lengthFrames === 0) return false;
   // Copy the PCM first: the start time is read only once the buffer is ready, so the lead is not spent here.
   const audioBuf = prepared ?? makeLoopBuffer(t.record, t.lengthFrames);
+  // A cold lane (first PLAY of an imported/copied loop) builds its whole gain → FX graph on its first
+  // start. Build it before the start time is chosen, so the graph cost is not taken out of the lead.
+  preparePlaybackGraph(i);
   const restartTime = sharedRestartTime === undefined ? restartTimeIfIdle() : sharedRestartTime;
+  const previousStopAt = t.stopAt;
+  const previousSource = t.source;
   t.stopAt = null;
   t.state = 'PLAYING';
   // An active transport joins at its live phase. An idle one was re-anchored above, so it starts at frame 0.
@@ -863,8 +879,21 @@ function resume(i: number, sharedRestartTime?: number | null, prepared?: AudioBu
   const period = t.lengthFrames / sr();
   const when = restartTime ?? engine.ctx.currentTime + HEARTBEAT_INTERNAL_LATENCY;
   const offset = restartTime === null && period > 0 ? phaseOffset(when, engineState.masterStartTime, period) : 0;
-  startPlayback(i, audioBuf, when, offset);
+  try {
+    startPlayback(i, audioBuf, when, offset);
+  } catch (e) {
+    // Nothing became audible: put the lane back exactly where PLAY found it. The transport re-anchor
+    // above is left alone — an idle grid with no lane on it is harmless and the next PLAY re-anchors.
+    t.state = 'STOPPED';
+    t.stopAt = previousStopAt;
+    t.source = previousSource;
+    console.error(`[looper] play failed on track ${i + 1}`, e);
+    if (reportFailure) notifyError(`Track ${i + 1}: playback failed to start`, e);
+    publish(i);
+    return false;
+  }
   publish(i);
+  return true;
 }
 
 // ── Global fan-out ───────────────────────────────────────────────────────────────────────
@@ -884,16 +913,33 @@ function stopAll(): void {
   }
 }
 
-/** Resume every STOPPED track together, restarting from the top when transport is idle. */
+/**
+ * Resume every STOPPED track together, restarting from the top when transport is idle.
+ *
+ * PLAY ALL is BEST-EFFORT PER LANE: a lane whose playback fails to start is rolled back to STOPPED by
+ * `resume` and the fan-out continues with the rest, so one dead source cannot silence the whole jam.
+ * Every failure still reaches the release log (`resume` logs per lane); the user-visible report is
+ * deduped into ONE toast naming the lanes that did not start.
+ */
 function playAll(): void {
   // Every buffer is built before the shared start time is read (session.ts does the same on import).
   const prepared = engineState.tracks.map((t) =>
     t.state === 'STOPPED' && t.lengthFrames > 0 ? makeLoopBuffer(t.record, t.lengthFrames) : null,
   );
+  // A STOPPED copy of a STOPPED lane has never played: its gain → FX graph is still cold. Build every
+  // graph before the shared anchor is read, or the build of one cold lane eats the lead of them all.
+  prepared.forEach((buf, i) => { if (buf) preparePlaybackGraph(i); });
   const restartTime = prepared.some((b) => b !== null) ? restartTimeIfIdle() : null;
+  const failed: number[] = [];
   for (let i = 0; i < TRACK_COUNT; i++) {
     const buf = prepared[i];
-    if (buf) resume(i, restartTime, buf);
+    if (buf && !resume(i, restartTime, buf, false)) failed.push(i + 1);
+  }
+  if (failed.length > 0) {
+    notifyError(
+      `Playback failed to start on ${failed.length > 1 ? 'tracks' : 'track'} ${failed.join(', ')}`,
+      'The other tracks are playing. Press play on the listed tracks to retry.',
+    );
   }
 }
 

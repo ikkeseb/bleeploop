@@ -145,16 +145,20 @@ async function persistCurrent(snapshot = inspectJam()): Promise<void> {
   }
   const bpm = clock.bpm();
   const masterFrames = looper.masterFramesValue();
-  const perBar = framesPerBar(bpm, engine.ctx.sampleRate);
-  const bars = masterFrames / perBar;
-  if (!Number.isInteger(bars) || bars < 1) {
-    throw new Error(`Current loop grid is not whole bars (${masterFrames} frames at ${bpm} BPM)`);
-  }
+  // "Nothing committed" is decided BEFORE the grid is validated. A first take in flight is RECORDING, so
+  // the fingerprint is not blank, yet no loop is committed and the master grid is still 0 frames — the
+  // whole-bar check below would reject that as a save failure and the close guard would warn about losing
+  // loops that never existed. No committed audio means there is nothing to save and no grid to validate.
   const committed = looper.exportSnapshot();
   if (committed.tracks.length === 0) {
     await writeLatest(null);
     failedRestoreFingerprint = '';
     return;
+  }
+  const perBar = framesPerBar(bpm, engine.ctx.sampleRate);
+  const bars = masterFrames / perBar;
+  if (!Number.isInteger(bars) || bars < 1) {
+    throw new Error(`Current loop grid is not whole bars (${masterFrames} frames at ${bpm} BPM)`);
   }
   // Capture metadata beside the PCM copies before yielding to the worker. The serialized save
   // queue keeps a slow encode/write from overtaking a newer save or CLEAR ALL.

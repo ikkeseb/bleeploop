@@ -115,16 +115,18 @@ export function Transport() {
     clearAll.trigger();
   };
 
-  // Toggle mic/line input. toggleInput() resolves false in two cases — a successful DISARM, and a
-  // failed ARM (no device: armInput returns false with only a console.warn) — so we branch on the armed
-  // state captured BEFORE the toggle: a false result while arming means "no input available". A rejected
-  // promise is getUserMedia denying/failing. Both were previously swallowed (console-only, invisible in a
-  // release build); surface each as a toast. The underlying console.warn/error still feed the release log.
+  // Toggle mic/line input. toggleInput() resolves false in three cases — a successful DISARM, an ARM
+  // cancelled by a later disarm while the device was still opening, and a failed ARM (no device:
+  // armInput returns false with only a console.warn) — so we branch on the armed state captured BEFORE
+  // the toggle AND on whether the user still wants the input on: a false result while arming, with the
+  // request still standing, means "no input available". A rejected promise is getUserMedia
+  // denying/failing. Both were previously swallowed (console-only, invisible in a release build);
+  // surface each as a toast. The underlying console.warn/error still feed the release log.
   const onToggleMic = () => {
     const wasArmed = looper.inputArmed();
     looper.toggleInput().then(
       (armed) => {
-        if (!wasArmed && !armed) notifyError('No audio input available to arm');
+        if (!wasArmed && !armed && looper.inputArmRequested()) notifyError('No audio input available to arm');
       },
       (err) => {
         notifyError("Couldn't arm the mic/line input", err);

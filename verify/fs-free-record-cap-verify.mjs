@@ -11,8 +11,8 @@ const approx = (a, b, eps = 1e-6) => Math.abs(a - b) <= eps;
 const MAX_LOOP_SECONDS = 60;        // looper/state.ts
 function framesPerBar(bpm, sr) { return Math.round((60 / bpm) * 4 * sr); }
 
-// MIRRORS: src/audio/looper/machine.ts@294-303 sha256:ecbe5ba1d48777d5  (configureRecordingEnd: free-record capacity or fixed bar end)
-// MIRRORS: src/audio/looper/capture.ts@334-375 sha256:c1bc32e9ca3a9e9d  (consume: recording timestamp append/completion; overdub omitted)
+// MIRRORS: src/audio/looper/machine.ts@300-309 sha256:ecbe5ba1d48777d5  (configureRecordingEnd: free-record capacity or fixed bar end)
+// MIRRORS: src/audio/looper/capture.ts@342-383 sha256:c1bc32e9ca3a9e9d  (consume: recording timestamp append/completion; overdub omitted)
 function consumeFirst(state, t, data) {
   const count = data.length;
   const firstFrame = state.frame;

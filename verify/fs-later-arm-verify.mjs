@@ -60,7 +60,7 @@ class Rig {
 function makeLaterTake(master) {
   return { capacity: master * 2, armed: true, writeHead: 0, started: false, startStreamPos: -1, framesWritten: 0 };
 }
-// MIRRORS: src/audio/looper/capture.ts@331-341 sha256:c3a0b6e09d727c00  (consume: append the absolute recording window; completion is outside this fixture)
+// MIRRORS: src/audio/looper/capture.ts@339-349 sha256:c3a0b6e09d727c00  (consume: append the absolute recording window; completion is outside this fixture)
 // (nextBoundary / framesToBoundary / the arm split are the REAL grid-math.ts functions — no port.)
 // Faithful port of consume() later-track WRITE for a `got`-frame batch whose
 // FIRST frame is at absolute capture-stream position `batchStreamStart`.

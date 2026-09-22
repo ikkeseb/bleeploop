@@ -2,10 +2,10 @@
 // The model covers the clean-stream timestamp append, manual shortening and recorder/BPM cleanup.
 // It does not execute AUTO detection, audio scheduling, loss rejection or public dispatchers.
 // Those are exercised by golden-jam.mjs and record-stop-window.mjs.
-// MIRRORS: src/audio/looper/machine.ts@294-303 sha256:ecbe5ba1d48777d5  (configureRecordingEnd: fixed target fits whole bars)
-// MIRRORS: src/audio/looper/capture.ts@331-375 sha256:72293488834b3bda  (consume: append and exclusive timestamp completion; overdub omitted)
-// MIRRORS: src/audio/looper/machine.ts@374-395 sha256:3be20034b52c094c  (releaseRecorderState: owner guard and BPM unlock)
-// MIRRORS: src/audio/looper/machine.ts@603-659 sha256:ff923f1ebff6aadb  (stopCapture: shorten the timestamp window and finish when drained)
+// MIRRORS: src/audio/looper/machine.ts@300-309 sha256:ecbe5ba1d48777d5  (configureRecordingEnd: fixed target fits whole bars)
+// MIRRORS: src/audio/looper/capture.ts@339-383 sha256:72293488834b3bda  (consume: append and exclusive timestamp completion; overdub omitted)
+// MIRRORS: src/audio/looper/machine.ts@380-401 sha256:3be20034b52c094c  (releaseRecorderState: owner guard and BPM unlock)
+// MIRRORS: src/audio/looper/machine.ts@609-665 sha256:ff923f1ebff6aadb  (stopCapture: shorten the timestamp window and finish when drained)
 
 import { armSplitAt, countInArm, planCommit, planFreeStop } from '../src/audio/looper/grid-math.ts';
 import { framesPerBar } from '../src/audio/quantize.ts';
@@ -72,7 +72,7 @@ function consumeFirst(state, t, data) {
   t.writeHead += n; t.fillFrames = t.writeHead;
   if (firstFrame + count >= state.captureEndFrame) finishRecording(state, t, state.bpmAtCommit, state.srAtCommit);
 }
-// MIRRORS: src/audio/looper/machine.ts@244-265 sha256:3dc46b2b25d96a01  (finishCapture: completion owns recorder release)
+// MIRRORS: src/audio/looper/machine.ts@250-271 sha256:3dc46b2b25d96a01  (finishCapture: completion owns recorder release)
 // Models the clean recording completion, including its shared dispatcher release.
 function finishRecording(state, t, bpm, sr) {
   if (state.activeRecordIndex !== t.index) return;

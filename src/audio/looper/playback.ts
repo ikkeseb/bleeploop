@@ -72,13 +72,18 @@ export function preparePlaybackGraph(i: number): void {
 export function startPlayback(i: number, audioBuf: AudioBuffer, when: number, offset = 0): void {
   const ctx = engine.ctx;
   const t = engineState.tracks[i];
+  // Build the graph BEFORE the clamp anchor is read. A cold lane constructs its whole FxChain here
+  // (Tone nodes, allocation), so a `ctx.currentTime` sampled before that work is already stale by the
+  // time `src.start` runs: the clamp would pass `when` through unchanged, the source would start late
+  // and the correction below would be skipped — a phase hop. Reading `now` after the expensive work
+  // keeps the clamp honest, so a late start is compensated in `startOffset` instead.
+  preparePlaybackGraph(i);
   const startAt = Math.max(when, ctx.currentTime);
   // If `when` had to be clamped up to now, advance the offset by the same amount so the buffer position
   // that sounds at startAt stays phase-correct. Wrap into [0, duration) (offset is 0 on the boundary paths).
   const dur = audioBuf.duration;
   const startOffset = dur > 0 ? (offset + (startAt - when)) % dur : 0;
   const prev = t.source;
-  preparePlaybackGraph(i);
   const gain = t.gain;
   const fx = t.fx;
   if (!gain || !fx) throw new Error(`Track ${i + 1} playback graph was not prepared`);

@@ -9,7 +9,7 @@ import { framesPerBar } from '../src/audio/quantize.ts';
 import { planCommit, planFreeStop } from '../src/audio/looper/grid-math.ts';
 const MAX_LOOP_SECONDS = 60; // looper/state.ts
 
-// MIRRORS: src/audio/looper/machine.ts@603-659 sha256:ff923f1ebff6aadb  (stopCapture: first-take end, minimum deadline and completion check)
+// MIRRORS: src/audio/looper/machine.ts@609-665 sha256:ff923f1ebff6aadb  (stopCapture: first-take end, minimum deadline and completion check)
 function stopDecision({ now, downbeat, bpm, sr, writeHead, recordLen, compensation = 0, previousEnd }) {
   // Missing musical anchor is a defensive fixture. Its capture start is still known independently.
   const start = downbeat > 0 ? Math.round(downbeat * sr) + compensation : Math.round(now * sr) - writeHead;
@@ -30,7 +30,7 @@ function stopOld({ bpm, sr, writeHead, recordLen }) {
   return Math.min(maxBars, Math.max(1, Math.floor(writeHead / fpb)));
 }
 
-// MIRRORS: src/audio/looper/capture.ts@334-375 sha256:c1bc32e9ca3a9e9d  (consume: timestamp end clips the append and triggers completion; overdub omitted)
+// MIRRORS: src/audio/looper/capture.ts@342-383 sha256:c1bc32e9ca3a9e9d  (consume: timestamp end clips the append and triggers completion; overdub omitted)
 function drainToCap(startWriteHead, target, batchSizes, recordLen) {
   const startFrame = 76543;
   const endFrame = startFrame + target;

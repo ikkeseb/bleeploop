@@ -40,8 +40,8 @@ function armCountIn(now, bpm, sr) {
   return { beatPeriod: a.beatPeriod, anchor: a.anchor, recordStart: a.recordStart, pending: a.pendingFrames };
 }
 
-// MIRRORS: src/audio/looper/capture.ts@282-297 sha256:644d6403f64574d2  (armSplitOffset: retain the batch suffix after the absolute start)
-// MIRRORS: src/audio/looper/capture.ts@331-341 sha256:c3a0b6e09d727c00  (consume: recording append, below the completion end in these fixtures)
+// MIRRORS: src/audio/looper/capture.ts@290-305 sha256:644d6403f64574d2  (armSplitOffset: retain the batch suffix after the absolute start)
+// MIRRORS: src/audio/looper/capture.ts@339-349 sha256:c3a0b6e09d727c00  (consume: recording append, below the completion end in these fixtures)
 // (the split itself is the REAL grid-math.ts armSplitAt; the write is the port)
 // ── consume() first-track armed branch — the count-in arm split ──
 // Models the recording prefix before the completion deadline: discard exactly `pending` frames, then linear-append the

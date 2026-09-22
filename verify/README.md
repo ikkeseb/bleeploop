@@ -14,13 +14,16 @@ recorder release, playback-failure retry and the 60-second cap;
 compensated STOP, CLEAR and normal boundary rearming;
 `loop-end-stop.mjs` measures playback deadlines and UI;
 `playback-restart.mjs` measures rendered lane PCM for single/ALL idle restarts from frame zero,
-simultaneous lane starts and live-phase joins beside a muted lane pending END STOP;
+simultaneous lane starts, live-phase joins beside a muted lane pending END STOP, cold-graph starts
+(first PLAY and COPY into a lane that never played, under an injected FX-build cost) and a PLAY ALL
+whose middle lane fails to start;
 `fx-grid.mjs` measures rhythmic effects;
 `fx-pitch-cost.mjs` checks unused pitch allocation, offline DSP cost, and live enable/reset continuity;
 `recovery-capacity.mjs`, `recovery-failure.mjs`, `recovery-worker.mjs` and `recovery-playback.mjs`
 cover recovery fidelity, failure paths and main-thread load.
 `recovery-transactions.mjs` injects actual IndexedDB transaction failures; `recovery-close.mjs` checks
-close approval after a failed recovery deletion, with native close capabilities substituted.
+close approval after a failed recovery deletion and a silent close during the first take (RECORDING,
+nothing committed), with native close capabilities substituted.
 `recovery-import-failure.mjs` checks archive preservation after failed restore reads, buffer allocation
 and playback startup, rollback, retry, explicit clear and a live jam winning the restore race.
 `monitor-generation.mjs` controls delayed host replies through the actual frontend monitor lifecycle,
@@ -33,7 +36,10 @@ pending controls, queue completion, failure recovery, independence of the other 
 of separate plugin files that share a class id.
 `input-controls.mjs` checks BPM cancellation, pointer release across octave changes, independent MIDI
 ownership and the playable upper note range. `session-state-roundtrip.mjs` checks STOPPED recovery,
-state-only autosave and subsequent PLAY ALL. These probes, `recovery-import-failure.mjs`,
+state-only autosave and subsequent PLAY ALL. `mic-arm-race.mjs` substitutes the platform input open
+with a deferred promise and checks that a disarm cancels a pending open (stream closed, tracks
+stopped) and that a burst of toggles ends in the state of the last gesture. These probes,
+`recovery-import-failure.mjs`,
 `monitor-generation.mjs`, `plugin-load-buffer-generation.mjs` and `asio-startup.mjs` run in
 `.github/workflows/browser-lifecycle.yml` on frontend and verification changes. They do not gate the
 physical rig or replace the separately dispatched golden jam.

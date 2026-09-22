@@ -84,6 +84,14 @@ let micMonoSum: GainNode | null = null;
  * doubling the recorded + monitored input level.
  */
 let armingInFlight: Promise<boolean> | null = null;
+/**
+ * What the LAST arm/disarm gesture asked for, held separately from the adopted `openedInput`. A disarm
+ * that lands while `open()` is still pending has no stream to close yet, so it clears this flag instead;
+ * the open then resolves into a cancelled arm and closes its own stream rather than wiring a mic the user
+ * already turned off. A re-arm during the same pending open sets it back, so a burst of toggles ends in
+ * the state of the last gesture whatever order the promises settle in.
+ */
+let inputArmDesired = false;
 
 // ── Initialization ───────────────────────────────────────────────────────────────────────
 /** The shared build (worklet + ring + tracks + drain), memoized while in flight and after success. */
@@ -416,6 +424,7 @@ function loseInput(): void {
 
 /** Arm the platform audio input (mic/line) into looperInputBus so it gets recorded + heard. */
 export function armInput(): Promise<boolean> {
+  inputArmDesired = true; // the latest gesture wants the mic on — a shared pending open adopts again
   if (openedInput) return Promise.resolve(true);
   if (armingInFlight) return armingInFlight; // a concurrent arm (double-tap) is already opening — share it
   armingInFlight = (async () => {
@@ -452,6 +461,13 @@ export function armInput(): Promise<boolean> {
       console.warn('[looper] no audio input available to arm');
       return false;
     }
+    if (!inputArmDesired) {
+      // Disarmed while getUserMedia was still open. disarmInput() had no stream to close, so close this
+      // one here instead of wiring a mic the user already turned off; inputArmed stays false.
+      opened.close();
+      console.info('[looper] audio input open completed after disarm — stream closed');
+      return false;
+    }
     if (openedInput) {
       // A concurrent arm won the race while we awaited open() — close this redundant stream rather than
       // leaking it + double-connecting to looperInputBus. (Defensive; the latch already serializes.)
@@ -476,8 +492,9 @@ export function armInput(): Promise<boolean> {
   });
 }
 
-/** Disarm the audio input. */
+/** Disarm the audio input. A disarm during a pending open cancels that open (see `inputArmDesired`). */
 export function disarmInput(): void {
+  inputArmDesired = false;
   if (!openedInput) return;
   openedInput.close(); // stops the MediaStream tracks + disconnects opened.node
   if (micMonoSum) {
@@ -489,9 +506,21 @@ export function disarmInput(): void {
 }
 
 export async function toggleInput(): Promise<boolean> {
-  if (inputArmed()) {
+  // A pending open counts as ON for the gesture: the second tap of a double-tap is a DISARM that cancels
+  // the open (see `inputArmDesired`), not a second arm sharing it. `inputArmed()` alone stays false until
+  // the open is adopted, which would turn every tap during the open into another arm.
+  if (inputArmed() || (armingInFlight !== null && inputArmDesired)) {
     disarmInput();
     return false;
   }
   return armInput();
+}
+
+/**
+ * What the last arm/disarm gesture asked for, independent of whether a stream is open yet. A false
+ * `armInput()` result while this still reads true means the arm FAILED (no device); while it reads
+ * false the arm was cancelled by a later disarm and needs no failure report.
+ */
+export function inputArmRequested(): boolean {
+  return inputArmDesired;
 }

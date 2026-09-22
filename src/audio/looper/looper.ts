@@ -59,7 +59,7 @@
  * bodies at runtime, never at module-evaluation time — but keep it the only one.
  */
 
-import { armInput, disarmInput, init, toggleInput } from './capture';
+import { armInput, disarmInput, init, inputArmRequested, toggleInput } from './capture';
 import {
   autoRecordEnabled,
   autoRecordSensitivity,
@@ -176,6 +176,7 @@ export const looper = {
   armInput,
   /** Disarm the mic/line input. */
   disarmInput,
+  inputArmRequested,
   /** Toggle the mic/line input; returns the new armed state. */
   toggleInput,
   /** Worklet heartbeat: process() quantum count (proves capture is running). */

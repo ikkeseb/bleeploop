@@ -17,7 +17,11 @@ const browser = await chromium.launch({ headless: true, args: ['--autoplay-polic
 try {
   const page = await browser.newPage();
   const browserErrors = [];
+  const consoleErrors = [];
   page.on('pageerror', (error) => browserErrors.push(String(error)));
+  page.on('console', (message) => {
+    if (message.type() === 'error') consoleErrors.push(message.text());
+  });
   await page.goto(url);
   await page.waitForFunction(() => !!window.__lf);
 
@@ -25,6 +29,7 @@ try {
     const lf = window.__lf;
     const { engineState } = await import('/src/audio/looper/state.ts');
     const { defaultFxStates } = await import('/src/audio/fx/fx.ts');
+    const { toasts, dismissToast } = await import('/src/notify.ts');
     await lf.looper.init();
     const ctx = lf.engine.ctx;
     await ctx.resume();
@@ -127,7 +132,15 @@ try {
         if (data.kind === 'armed') armedResolve(data);
         if (data.kind === 'done') doneResolve(data);
       };
-      laneIndexes.forEach((lane, channel) => engineState.tracks[lane].gain.connect(merger, 0, channel));
+      // A `null` entry reserves a channel for a lane whose gain node does not exist yet: a COLD lane
+      // builds it on its first start. `attach` wires that lane the instant it appears — still ahead of
+      // the scheduled start time — so the capture base frame stays valid for the absolute-frame math.
+      const attached = [];
+      const attach = (channel, lane) => {
+        engineState.tracks[lane].gain.connect(merger, 0, channel);
+        attached.push(lane);
+      };
+      laneIndexes.forEach((lane, channel) => { if (lane !== null) attach(channel, lane); });
       merger.connect(node);
       node.connect(ctx.destination);
       await timeout(ready, 1500, 'capture ready handshake');
@@ -135,9 +148,10 @@ try {
       const armedAt = await timeout(armed, 1500, 'capture arm handshake');
       return {
         armedAt: armedAt.frame,
+        attach,
         done: timeout(done, (seconds + 2) * 1000, 'PCM capture'),
         cleanup() {
-          for (const lane of laneIndexes) engineState.tracks[lane].gain.disconnect(merger);
+          for (const lane of attached) engineState.tracks[lane].gain?.disconnect(merger);
           merger.disconnect();
           node.disconnect();
           node.port.close();
@@ -223,6 +237,231 @@ try {
     };
 
     const rows = [];
+
+    // ── Cold-graph starts (run FIRST: `clear()` keeps a lane's gain/FX alive, so a lane is only ever
+    // cold before its first session) ───────────────────────────────────────────────────────────────
+    // A lane that has never played owns no gain/FX nodes, and its first start constructs the whole
+    // FxChain. Inject that cost ONCE, into the first createGain a cold lane asks for (the first act of
+    // preparePlaybackGraph). 60 ms is three times the 20 ms start lead, so an anchor read before the
+    // build is measurably stale. Every loop source start is recorded too, so the LEAD (scheduled time
+    // minus the clock at the call) is observable: a negative lead means the graph build ate it.
+    const nativeCreateGain = AudioContext.prototype.createGain;
+    const nativeStart = AudioBufferSourceNode.prototype.start;
+    let coldGraphCostMs = 0;
+    let starts = [];
+    AudioContext.prototype.createGain = function (...args) {
+      if (coldGraphCostMs > 0) {
+        const until = performance.now() + coldGraphCostMs;
+        coldGraphCostMs = 0;
+        while (performance.now() < until) { /* injected cold-graph build cost */ }
+      }
+      return nativeCreateGain.apply(this, args);
+    };
+    AudioBufferSourceNode.prototype.start = function (...args) {
+      // Every looping source is recorded; `laneStarts` keeps the master-length loop buffers, which is
+      // what separates a lane from the click pulse's own looping source.
+      if (this.loop) starts.push({ when: args[0], now: ctx.currentTime, offset: args[1], length: this.buffer?.length });
+      return nativeStart.apply(this, args);
+    };
+    const laneStarts = (observed) => observed.filter((entry) => entry.length === masterFrames);
+    try {
+      // A STOPPED copy of a STOPPED lane has never played: nothing of its graph exists yet.
+      await load(1);
+      await waitForOldPlaybackPhase();
+      lf.looper.stopAll();
+      const coldLane = lf.looper.copy(0);
+      const wasCold = coldLane > 0 && !engineState.tracks[coldLane].gain && !engineState.tracks[coldLane].fx;
+      const oldColdAnchor = engineState.masterStartTime;
+      const coldCapture = await startCapture([null]);
+      let coldData;
+      try {
+        starts = [];
+        coldGraphCostMs = 60;
+        lf.looper.playStop(coldLane);
+        coldCapture.attach(0, coldLane);
+        const anchor = engineState.masterStartTime;
+        const observed = laneStarts(starts);
+        const lead = observed.length === 1 ? observed[0].when - observed[0].now : null;
+        coldData = await coldCapture.done;
+        const measurement = topMeasurement(coldData, 0, anchor);
+        rows.push({
+          name: 'cold first PLAY restarts the idle transport at its anchor and at source frame zero',
+          pass: wasCold
+            && anchor > oldColdAnchor
+            && lead !== null && lead > 0.01
+            && measurement.compared === 1024
+            && Math.abs(measurement.frameError) <= 1
+            && Math.abs(measurement.firstSampleError) < 0.00002
+            && measurement.maxRampError < 0.00002,
+          coldLane,
+          wasCold,
+          lead,
+          observed,
+          oldAnchor: oldColdAnchor,
+          anchor,
+          captureBaseFrame: coldData.base,
+          armedFrame: coldCapture.armedAt,
+          ...measurement,
+        });
+      } finally {
+        coldGraphCostMs = 0;
+        coldCapture.cleanup();
+      }
+
+      // COPY of a PLAYING lane goes through resume() with a cold graph and must join at the live phase.
+      // Two lanes are loaded so the free lane COPY picks (lane 3) is still one that never played.
+      await load(2);
+      await waitForOldPlaybackPhase();
+      const copyAnchor = engineState.masterStartTime;
+      const copyCapture = await startCapture([null]);
+      let copyData;
+      try {
+        starts = [];
+        coldGraphCostMs = 60;
+        // COPY lands in the first free lane; read its coldness BEFORE the copy builds the graph.
+        const freeLane = engineState.tracks.findIndex((track) => track.state === 'EMPTY');
+        const copyWasCold = freeLane > 1 && !engineState.tracks[freeLane].gain && !engineState.tracks[freeLane].fx;
+        const copyLane = lf.looper.copy(0);
+        copyCapture.attach(0, copyLane);
+        const anchorAfterCopy = engineState.masterStartTime;
+        const observed = laneStarts(starts);
+        const lead = observed.length === 1 ? observed[0].when - observed[0].now : null;
+        copyData = await copyCapture.done;
+        const measurement = phaseMeasurement(copyData, 0, copyAnchor);
+        rows.push({
+          name: 'COPY into a cold lane joins the live phase with its start lead intact',
+          pass: copyWasCold
+            && copyLane === freeLane
+            && anchorAfterCopy === copyAnchor
+            && lead !== null && lead > 0.01
+            && measurement.compared === 1024
+            && measurement.firstPhaseFrame > masterFrames * 0.1
+            && measurement.maxRampError < 0.00003,
+          copyLane,
+          freeLane,
+          copyWasCold,
+          lead,
+          observed,
+          anchor: copyAnchor,
+          anchorAfterCopy,
+          captureBaseFrame: copyData.base,
+          armedFrame: copyCapture.armedAt,
+          ...measurement,
+        });
+      } finally {
+        coldGraphCostMs = 0;
+        copyCapture.cleanup();
+      }
+
+      // ── Cold PLAY ALL: a STOPPED copy of a STOPPED lane has never played. Its graph must be built
+      // before the SHARED anchor is read, or the build eats the lead of every lane in the fan-out.
+      // Lane 4 (index 3) is the first free lane after load(3) and has never played in this session.
+      // Lane 2 is copied so capture channel 1 compares against lane 2's seeded ramp (`sampleAt(1, …)`).
+      await load(3);
+      await waitForOldPlaybackPhase();
+      lf.looper.stopAll();
+      const allColdLane = lf.looper.copy(1);
+      const allWasCold = allColdLane === 3 && !engineState.tracks[allColdLane].gain && !engineState.tracks[allColdLane].fx;
+      const oldAllAnchor = engineState.masterStartTime;
+      const allCapture = await startCapture([0, null]);
+      let allData;
+      try {
+        starts = [];
+        coldGraphCostMs = 60;
+        lf.looper.playAll();
+        allCapture.attach(1, allColdLane);
+        const anchor = engineState.masterStartTime;
+        const observed = laneStarts(starts);
+        const leads = observed.map((entry) => entry.when - entry.now);
+        allData = await allCapture.done;
+        const measurements = [0, 1].map((channel) => topMeasurement(allData, channel, anchor));
+        rows.push({
+          name: 'cold PLAY ALL builds the never-played lane before the shared anchor is read',
+          pass: allWasCold
+            && anchor > oldAllAnchor
+            && observed.length === 4
+            && leads.every((lead) => lead > 0.01)
+            && measurements.every((measurement) => measurement.compared === 1024
+              && Math.abs(measurement.frameError) <= 1
+              && measurement.maxRampError < 0.00002)
+            && new Set(measurements.map((measurement) => measurement.firstFrame)).size === 1,
+          allColdLane,
+          allWasCold,
+          leads,
+          observed,
+          oldAnchor: oldAllAnchor,
+          anchor,
+          measurements,
+          captureBaseFrame: allData.base,
+          armedFrame: allCapture.armedAt,
+        });
+      } finally {
+        coldGraphCostMs = 0;
+        allCapture.cleanup();
+      }
+
+      // ── PLAY ALL is best-effort per lane ───────────────────────────────────────────────
+      // Lane 2's source start is failed on purpose (its seeded first sample identifies the buffer).
+      // Lanes 1 and 3 must still start together from frame zero, lane 2 must read STOPPED, and the
+      // fan-out must report ONE toast rather than one per lane or an aborted gesture.
+      await load(3);
+      await waitForOldPlaybackPhase();
+      lf.looper.stopAll();
+      for (const toast of toasts()) dismissToast(toast.id);
+      const oldFailAnchor = engineState.masterStartTime;
+      const failCapture = await startCapture([0, 1, 2]);
+      let failData;
+      let injectedStarts = 0;
+      AudioBufferSourceNode.prototype.start = function (...args) {
+        if (this.loop && Math.abs((this.buffer?.getChannelData(0)[0] ?? 0) - amplitudes[1]) < 0.001) {
+          injectedStarts++;
+          throw new Error('injected source start failure');
+        }
+        return nativeStart.apply(this, args);
+      };
+      try {
+        lf.looper.playAll();
+        const anchor = engineState.masterStartTime;
+        const states = [0, 1, 2].map((lane) => lf.looper.stateOf(lane));
+        const reported = toasts().map((toast) => ({ message: toast.message, kind: toast.kind, count: toast.count }));
+        const failedLaneSource = engineState.tracks[1].source === null;
+        failData = await failCapture.done;
+        const measurements = [0, 2].map((lane) => topMeasurement(failData, lane, anchor));
+        const failedLane = topMeasurement(failData, 1, anchor);
+        rows.push({
+          name: 'PLAY ALL keeps the surviving lanes and reports the failed lane once',
+          pass: injectedStarts === 1
+            && anchor > oldFailAnchor
+            && states[0] === 'PLAYING' && states[1] === 'STOPPED' && states[2] === 'PLAYING'
+            && failedLaneSource
+            && measurements.every((measurement) => measurement.compared === 1024
+              && Math.abs(measurement.frameError) <= 1
+              && Math.abs(measurement.firstSampleError) < 0.00002
+              && measurement.maxRampError < 0.00002)
+            && new Set(measurements.map((measurement) => measurement.firstFrame)).size === 1
+            && failedLane.firstFrame === null
+            && reported.length === 1 && reported[0].count === 1 && reported[0].kind === 'error'
+            && reported[0].message.includes('2'),
+          injectedStarts,
+          oldAnchor: oldFailAnchor,
+          anchor,
+          states,
+          failedLaneSource,
+          reported,
+          measurements,
+          failedLane,
+          captureBaseFrame: failData.base,
+          armedFrame: failCapture.armedAt,
+        });
+      } finally {
+        AudioBufferSourceNode.prototype.start = nativeStart;
+        failCapture.cleanup();
+        for (const toast of toasts()) dismissToast(toast.id);
+      }
+    } finally {
+      AudioContext.prototype.createGain = nativeCreateGain;
+      AudioBufferSourceNode.prototype.start = nativeStart;
+    }
 
     await load(1);
     await waitForOldPlaybackPhase();
@@ -347,11 +586,13 @@ try {
     passed: results.rows.filter((row) => row.pass).length,
     total: results.rows.length,
     browserErrors,
+    playFailureLogs: consoleErrors.filter((text) => text.includes('[looper] play failed')),
     results: results.rows,
   };
   console.log(JSON.stringify(summary, null, 2));
   assert.equal(browserErrors.length, 0, `uncaught browser errors: ${browserErrors.join('\n')}`);
   assert.ok(results.rows.length > 0, 'probe produced no measurements');
+  assert.equal(summary.playFailureLogs.length, 1, 'the failed PLAY ALL lane must reach the release log exactly once');
   for (const result of results.rows) assert.ok(result.pass, `${result.name}: ${JSON.stringify(result)}`);
 } finally {
   await browser.close();
