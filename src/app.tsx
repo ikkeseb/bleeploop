@@ -38,7 +38,9 @@ export function App() {
   // A11y: manage focus for the two topbar popovers. On open, focus moves into the panel (so a
   // keyboard/SR user lands on the content, not stranded on the trigger); on a KEYBOARD close, focus
   // returns to the trigger that opened it (no lost focus after Escape). These are non-modal popovers
-  // — the play path stays live behind them — so role="dialog" + focus return, not a trap.
+  // — the play path stays live behind them — so role="dialog" + focus return, not a trap. The return
+  // goes through transportKeys.returnFocus so Space/Enter on the returned trigger still drive the
+  // looper (the transport yield rule lives at the handler in transport-keys.ts).
   let helpBtn: HTMLButtonElement | undefined;
   let gearBtn: HTMLButtonElement | undefined;
   // Pointer-vs-keyboard provenance of the last input lives in the transport-keys handler (installed
@@ -49,12 +51,12 @@ export function App() {
   const focusPanel = (el: HTMLDivElement) => queueMicrotask(() => el.focus());
   createEffect<boolean>((prevOpen) => {
     const open = helpOpen();
-    if (prevOpen && !open && !lastInputWasPointer()) helpBtn?.focus();
+    if (prevOpen && !open && !lastInputWasPointer()) transportKeys?.returnFocus(helpBtn);
     return open;
   }, false);
   createEffect<boolean>((prevOpen) => {
     const open = settingsOpen();
-    if (prevOpen && !open && !lastInputWasPointer()) gearBtn?.focus();
+    if (prevOpen && !open && !lastInputWasPointer()) transportKeys?.returnFocus(gearBtn);
     return open;
   }, false);
 

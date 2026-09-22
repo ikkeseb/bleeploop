@@ -37,8 +37,10 @@ of separate plugin files that share a class id.
 `instrument-controls.mjs` checks keyboard-octave remounts, plugin gain/live fallbacks, empty scans and MIDI request failures.
 `input-controls.mjs` checks BPM cancellation, pointer release across octave changes, independent MIDI
 ownership and the playable upper note range. `ui-state-carriers.mjs` checks transport, meter, lamp,
-looper-announcement and toast state carriers. `session-state-roundtrip.mjs` checks STOPPED recovery,
-state-only autosave and subsequent PLAY ALL. `mic-arm-race.mjs` substitutes the platform input open
+looper-announcement and toast state carriers. `transport-focus.mjs` checks that Space/Enter/1–5
+drive the looper behind an open popover and after an Escape close, yet still yield to the BPM field
+and Tab-focused buttons. `session-state-roundtrip.mjs` checks STOPPED recovery, state-only autosave
+and subsequent PLAY ALL. `mic-arm-race.mjs` substitutes the platform input open
 with a deferred promise and checks that a disarm cancels a pending open (stream closed, tracks
 stopped) and that a burst of toggles ends in the state of the last gesture. These probes,
 `recovery-import-failure.mjs`,

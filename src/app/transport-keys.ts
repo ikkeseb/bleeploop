@@ -12,11 +12,17 @@ export interface TransportKeys {
   dispose: () => void;
   /**
    * Was the last user input a POINTER? A pointer-driven popover close (trigger click or click-away)
-   * must not leave the trigger focused: the transport keydown yields to a focused BUTTON, so a focus
-   * return would make Space re-open the popover instead of arming REC. Keyboard closes KEEP the
-   * return, so a keyboard user never loses their place. Read by app.tsx's popover focus effects.
+   * must not leave the trigger focused (a focused button reads as "operated" to nothing, and a pointer
+   * user expects focus to stay where they clicked). Keyboard closes KEEP the return, through
+   * `returnFocus` so the transport still owns Space/Enter there. Read by app.tsx's popover focus effects.
    */
   lastInputWasPointer: () => boolean;
+  /**
+   * Focus `el` on the APP's behalf (the popover trigger after a keyboard close). The transport keys
+   * do not yield to it: the user did not reach it to operate it, so Space after Escape arms REC
+   * instead of re-opening the popover. Any later focus move (Tab, click) ends the exemption.
+   */
+  returnFocus: (el: HTMLElement | undefined) => void;
 }
 
 /**
@@ -28,6 +34,8 @@ export interface TransportKeys {
  */
 export function installTransportKeys(opts: TransportKeysOptions): TransportKeys {
   let lastInputWasPointer = false;
+  // The element the app itself last focused via returnFocus(); cleared by any other focus move.
+  let appFocused: Element | null = null;
 
   const onKeyDown = (e: KeyboardEvent) => {
     lastInputWasPointer = false;
@@ -38,16 +46,18 @@ export function installTransportKeys(opts: TransportKeysOptions): TransportKeys 
 
     if (e.repeat || e.metaKey || e.ctrlKey || e.altKey) return;
 
-    // Yield when a control owns the key: text entry, native buttons, and any explicitly-focusable
-    // custom widget (SplitStack divider = tabindex=0 role=separator, which itself binds
-    // Enter/Arrows/Home).
+    // Yield rule — the transport gives the key up only to a control the USER is operating:
+    // - editable fields (input/select/textarea/contenteditable) always keep their keys;
+    // - buttons and tabindex>=0 widgets (SplitStack divider = role=separator, which binds
+    //   Enter/Arrows/Home) keep them, unless the app put focus there itself (returnFocus: the
+    //   popover trigger after Escape), so Space after Escape arms REC instead of re-opening;
+    // - tabindex=-1 elements (the Help/Settings panels, focused on open for screen readers) are
+    //   focus targets, not controls, so the play path stays live behind an open popover.
     const el = document.activeElement as HTMLElement | null;
     if (el && el !== document.body) {
       const tag = el.tagName;
-      if (
-        tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA' || tag === 'BUTTON' ||
-        el.isContentEditable || el.getAttribute('tabindex') !== null
-      ) {
+      if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA' || el.isContentEditable) return;
+      if (el !== appFocused && (tag === 'BUTTON' || (el.hasAttribute('tabindex') && el.tabIndex >= 0))) {
         return;
       }
     }
@@ -110,11 +120,22 @@ export function installTransportKeys(opts: TransportKeysOptions): TransportKeys 
   };
   window.addEventListener('click', onClick, { capture: true });
 
+  const onFocusIn = (e: FocusEvent) => {
+    if (e.target !== appFocused) appFocused = null;
+  };
+  window.addEventListener('focusin', onFocusIn, { capture: true });
+
   return {
     dispose: () => {
       window.removeEventListener('keydown', onKeyDown);
       window.removeEventListener('click', onClick, { capture: true });
+      window.removeEventListener('focusin', onFocusIn, { capture: true });
     },
     lastInputWasPointer: () => lastInputWasPointer,
+    returnFocus: (el) => {
+      if (!el) return;
+      appFocused = el; // before focus(): focusin fires synchronously and must see it
+      el.focus();
+    },
   };
 }
