@@ -287,15 +287,18 @@ mod tests {
 
     const FIXTURE_CHILD_ENV: &str = "LF_SCAN_FIXTURE_CHILD";
 
-    /// The child half of `a_scan_childs_grandchild_dies_with_the_job`: this test exe re-invoked
-    /// through the production gate. A no-op in a normal (or `--ignored`) run.
+    /// The child half of the two scan-gate tests: this test exe re-invoked through the production
+    /// gate. A no-op in a normal (or `--ignored`) run.
     #[test]
-    #[ignore = "child half of a_scan_childs_grandchild_dies_with_the_job"]
+    #[ignore = "child half of the scan-gate tests"]
     fn scan_gate_fixture_child() {
         if std::env::var_os(FIXTURE_CHILD_ENV).is_none() {
             return;
         }
-        await_scan_gate().expect("the parent releases the gate");
+        if let Err(e) = await_scan_gate() {
+            println!("gate refused: {e}");
+            return;
+        }
         // Stand-in for plugin code that starts a helper process and leaves it running. It
         // inherits this process's stdout, i.e. the parent's pipe, for ~30 s.
         let grandchild = Command::new("ping")
@@ -320,12 +323,7 @@ mod tests {
         }
     }
 
-    /// Audit B9: the scan child waits at the gate until it sits in the kill-on-close Job, so a
-    /// process it starts is in the Job too. Closing the Job after the child exits kills the
-    /// grandchild, which releases the stdout pipe it inherited — the scan returns at once instead of
-    /// waiting ~30 s for the grandchild (or 20 s for the timeout).
-    #[test]
-    fn a_scan_childs_grandchild_dies_with_the_job() {
+    fn fixture_child() -> Command {
         let mut cmd = Command::new(std::env::current_exe().unwrap());
         cmd.args([
             "--exact",
@@ -335,9 +333,24 @@ mod tests {
             "--test-threads=1",
         ])
         .env(FIXTURE_CHILD_ENV, "1");
+        cmd
+    }
+
+    /// Audit B9: the scan child waits at the gate until it sits in the kill-on-close Job, so a
+    /// process it starts is in the Job too. Closing the Job after the child exits kills the
+    /// grandchild, which releases the stdout pipe it inherited — the scan returns at once instead of
+    /// waiting ~30 s for the grandchild (or 20 s for the timeout). The parent holds the child
+    /// between spawn and Job assignment for 2 s: a child that does not wait at the gate has
+    /// started the grandchild and exited by then, and the late assignment fails.
+    #[test]
+    fn a_scan_childs_grandchild_dies_with_the_job() {
         let started = Instant::now();
-        let out = run_gated_child(cmd, Duration::from_secs(20))
-            .unwrap_or_else(|e| panic!("the fixture child must exit cleanly: {e}"));
+        let out = run_gated_child(fixture_child(), Duration::from_secs(20), || {
+            std::thread::sleep(Duration::from_secs(2))
+        })
+        .unwrap_or_else(|e| {
+            panic!("the child must wait at the gate for the Job, then exit cleanly: {e}")
+        });
         let elapsed = started.elapsed();
         let text = String::from_utf8_lossy(&out);
         let pid: u32 = text
@@ -354,6 +367,27 @@ mod tests {
             process_exits_within(pid, 5_000),
             "the grandchild {pid} outlived the Job"
         );
+    }
+
+    /// Audit B9, the parent that gives up: the gate pipe closes without the release byte (a failed
+    /// Job assignment), and the child must start nothing.
+    #[test]
+    fn a_scan_child_whose_gate_closes_unreleased_starts_nothing() {
+        let mut child = fixture_child()
+            .env(SCAN_GATE_ENV, "1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn the fixture child");
+        drop(child.stdin.take()); // EOF before any release byte
+        let out = child.wait_with_output().expect("the fixture child exits");
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            text.contains("gate refused: scan gate closed before release"),
+            "the child must refuse at the gate: {text}"
+        );
+        assert!(!text.contains("grandchild="), "nothing may start past a closed gate: {text}");
     }
 
     #[test]
@@ -847,13 +881,18 @@ pub fn await_scan_gate() -> Result<(), String> {
 fn scan_one_child(exe: &Path, path: &Path, timeout: Duration) -> Result<Vec<u8>, ScanError> {
     let mut cmd = Command::new(exe);
     cmd.arg("--scan-one").arg(path);
-    run_gated_child(cmd, timeout)
+    run_gated_child(cmd, timeout, || {})
 }
 
 /// Spawn `cmd` gated (`SCAN_GATE_ENV`), put it in a fresh kill-on-close Job, THEN release it, and
 /// collect its stdout under `timeout`. The child is our own exe, so it waits at the gate before any
 /// foreign code runs: there is no window in which a plugin can start a process outside the Job.
-fn run_gated_child(mut cmd: Command, timeout: Duration) -> Result<Vec<u8>, ScanError> {
+/// `before_assign` runs between the spawn and the Job assignment; a test widens that window with it.
+fn run_gated_child(
+    mut cmd: Command,
+    timeout: Duration,
+    before_assign: impl FnOnce(),
+) -> Result<Vec<u8>, ScanError> {
     let job = KillOnCloseJob::new().map_err(ScanError::Host)?;
     let mut child = cmd
         .env(SCAN_GATE_ENV, "1")
@@ -862,6 +901,7 @@ fn run_gated_child(mut cmd: Command, timeout: Duration) -> Result<Vec<u8>, ScanE
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| ScanError::Host(format!("spawn: {e}")))?;
+    before_assign();
     let released = job.assign(&child).and_then(|()| {
         // Dropping stdin after the byte closes it; the child reads exactly one byte.
         let mut stdin = child.stdin.take().ok_or("scan child has no stdin pipe")?;
