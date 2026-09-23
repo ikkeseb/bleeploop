@@ -16,6 +16,25 @@ write per field. The rig guards, `pnpm verify:jam` and `pnpm probe --ci` are gre
 next "Play first" jam in `STATUS.md` runs on this code before anything else lands in
 `src/audio/looper/`.
 
+## After the jam: queued behind the looper freeze
+
+- **A late lane start drops its head.** PLAY ALL (and any idle restart) reads one anchor, now + 20 ms
+  (`machine.ts`), then starts the lanes one by one; `startPlayback` (`src/audio/looper/playback.ts`)
+  clamps a start that arrives after its `when` to `ctx.currentTime` and shifts the offset, so the lane
+  stays in phase but loses its first 0.3–15 ms on the first pass. The budget is ~10 ms of main-thread
+  stall inside the gesture (render bursts of 384/512 frames eat the rest); no late lane in ~200
+  unloaded or churned gestures, so a GC pause or preemption is needed. Rarer: a start that takes effect
+  1–3 quanta after the clamp plays 128–384 frames behind the grid until restarted (13 of 247 late
+  starts), and under heavy churn deferred graph changes gave 40–137 ms late starts (production
+  relevance unknown). Proposed: clamp to `ctx.currentTime + 256 / sampleRate`, the lead `fx.ts`
+  already uses (out-of-phase late starts fell from 13/247 to 1/203 under the same planted stalls), and
+  make `verify/probes/playback-restart.mjs` assert each surviving lane's first sound at its own start
+  time, in phase. Owner call: phase over head is the designed fallback (the comment at the clamp).
+- `src/audio/looper/transport-actions.ts`'s header still calls itself the single action-routing layer
+  with MIDI "future"; `src/app/actions.ts` and `src/app/midi-actions.ts` now sit above it.
+- knip reports `framesToBoundary` in `src/audio/looper/grid-math.ts` unused; deleting it is the owner's
+  call.
+
 ## 6. L2 loopback probe (owner decision)
 
 `docs/ARCHITECTURE.md` names L2, a physical loopback measurement, as the latency gate; no tool exists.

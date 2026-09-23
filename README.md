@@ -41,7 +41,8 @@ other layers; the computer keyboard is the fallback.
 - Per-track FX: filter, pitch shift, tempo-synced stutter, feedback delay and a shared reverb send.
   Each one bypasses without a click.
 - Six built-in Web Audio synths, one of them a 16-voice GM drum kit.
-- Two native CLAP/VST3 plugin slots with floating plugin editors.
+- Two native CLAP/VST3 plugin slots with floating plugin editors; each slot reloads its last plugin at
+  launch, never armed.
 - Guitar or line input with native low-latency monitoring over WASAPI or ASIO. Record-latency
   compensation puts the take on the grid.
 - MIDI controllers work through WebView2's native Web MIDI, and a MIDI footswitch, key or CC can be
@@ -110,7 +111,7 @@ pnpm dev:asio     # full app, ASIO + native sample rate
 | `pnpm probe <name>` | One browser probe against the real app on its own Vite server; `--ci` runs every CI probe, `--list` names them |
 | `pnpm verify:jam` | The golden jam. Drives the real app in a headless browser and checks the recorded grid frame by frame (~95 s, not part of `pnpm check`) |
 | `pnpm rust:check` | `cargo check` without and with ASIO, then `cargo test` (Windows; the ASIO step needs the SDK) |
-| `pnpm native:smoke` · `native:survey` · `native:swap` | Launch the full app with a DEV plugin probe, print its verdict and stop (Windows, installed plugins) |
+| `pnpm native:smoke` · `native:survey` · `native:swap` · `native:recall` | Launch the full app with a DEV plugin probe, print its verdict and stop (Windows, installed plugins) |
 
 The `build-exe` workflow builds the ASIO installer and exe on a clean Windows runner and keeps them
 as a run artifact for 30 days. Run it from the Actions tab. A `v*` tag also stages a draft GitHub
