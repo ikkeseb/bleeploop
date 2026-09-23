@@ -213,3 +213,17 @@ existing P9 ring → looper record tap (lag-tolerant, records wet "for free").
   reload (`Hop1Pipe::rebuild_for_block` preserves `write_frames`; `DriftController::set_block` keeps the
   learned `integ`). Frontend buffer/driver writes serialize and persist only after acknowledgement;
   global device `<select>`s aren't disabled while a slot is armed (change applies next arm — an owner design call).
+
+## Open threads (no gate)
+
+- `plugin_note_off` / `plugin_set_param` now answer `Err` on a full event ring or an unlisted param id
+  (audit B2–B4); the frontend still `void`s them, so a rejection only reaches the release log. A UI
+  reaction (slider snaps back to the plugin's value, a stuck-note cue) is unbuilt.
+- Not built, [reader] claims from the 2026-09-23 audit: `Vec::with_capacity(plugin-reported count)`
+  without a cap (`clap.rs`, `vst3.rs`; channel metadata has one); a load completing after the 15 s
+  timeout drops its `SharedBufferHandle` without `Close()` (DEV-only path); an editor open swaps the
+  controller's component handler and close drops it without restoring the load-time one. CLAP and
+  VST3 duplicate the load choreography: one shared owner would keep B1/B11 from returning.
+- Test tightening owed: B5's test raises the flags directly, not through `restartComponent`; B9's
+  test does not force the spawn→assign window or an EOF before release.
+

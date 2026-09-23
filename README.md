@@ -29,6 +29,15 @@ other layers; the computer keyboard is the fallback.
 - 5-track looper with overdub and one-level undo, per-track reverse, mute and volume, a one-bar
   record count-in and fixed-length record. The metronome is phase-locked to the loop grid, so the
   click and the loops cannot drift apart.
+- AUTO REC arms a track and starts the take when you start playing, instead of the count-in.
+- RETAKE keeps recording round the loop until you stop and keeps the last complete pass (the first
+  track needs FIXED).
+- END STOP stops playing loops at the loop end; a second press stops them at once.
+- COPY duplicates a track, with its FX, volume and mute, into the first empty track.
+- A later take shorter than the loop repeats (tiles) across it, so every track has the loop's exact
+  length.
+- Local recovery: committed loops are saved as you play and restored when you reopen, and closing
+  the app with a jam in progress asks first.
 - Per-track FX: filter, pitch shift, tempo-synced stutter, feedback delay and a shared reverb send.
   Each one bypasses without a click.
 - Six built-in Web Audio synths, one of them a 16-voice GM drum kit.
@@ -39,6 +48,15 @@ other layers; the computer keyboard is the fallback.
   plays notes and runs the transport (1-5 to arm or select tracks, Space or Enter to play and stop).
 - Session export and import as one `.zip`: a WAV stem per track, a wet stereo master render and a
   `session.json`.
+
+## Play it
+
+1. Plug the guitar into your audio interface and start the app (`pnpm dev:asio`, or the built exe).
+2. Load your amp-sim plugin (CLAP or VST3) into a slot and press GO LIVE. Pick the input channel in
+   Audio Settings.
+3. Select a track with 1–5 and press Space to record. The first take gets a one-bar count-in; come in on "1".
+4. Space again closes the take; after that, Space overdubs the selected track and Enter plays or stops it.
+5. Help (the ? in the command bar) lists the rest.
 
 ## Getting started
 

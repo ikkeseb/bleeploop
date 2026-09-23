@@ -101,3 +101,32 @@ not here.
 - Input FX (owner request): delay/stutter/reverb BEFORE the record tap, printed into the take, beside
   today's per-track post FX. Open design: the native monitor bypasses Web Audio, so the player would
   not hear what is recorded; C and grid-synced stutter need their own answer.
+
+## Craft — `pnpm check` + screenshots, no ear
+
+- **Help and vocabulary:** `Help.tsx` never mentions RETAKE, END STOP, ▶/■ ALL or ✕ ALL, and its
+  trigger in `app.tsx` is named "Keyboard & layout help" though it is the only product guide; one
+  feature, several words: END STOP / ENDING / STOPPING AT LOOP END / ■ NOW, AUTO REC / LISTEN /
+  WAITING FOR INPUT, track vs lane vs take in COPY's aria/title/Help (`Looper.tsx`, `Transport.tsx`);
+  the tempo numeral's `aria-label="BPM"` hides the value and its locked title says "loop length"
+  (`Transport.tsx`). [verified: Help, trigger; reader: words, tempo]
+- **Accessibility:** toggles flip their label AND set `aria-pressed` ("Click off, pressed") in
+  `Transport.tsx` and `Looper.tsx`, where END STOP has the right pattern; 30 tab stops reach lane 1,
+  14 of them synth pills (a roving-tabindex `radiogroup` per slot removes 10); the `transport__beats`
+  div carries an `aria-label` with no role. [reader]
+- **CSS discipline:** four pill implementations disagree on padding, radius and engaged alpha
+  (`.tgl`, `.transport__tgl`, `.lp-pb`, `.fxp-mod__toggle`), plus two steppers (22 vs 24 px), three
+  button resets and three visually-hidden copies; colour literals bypass tokens in `src/app.css` (the
+  baked `%2346d4e8` caret without the other caret's INVARIANT note, `#14171d` ×4,
+  `rgba(148,168,215,.15)` ×5, `#6b7387` ×2, the popover shadow ×3); 18 font sizes and no type tokens,
+  the empty-plugin-scan note computing to 6.5–7 px at ≤1280 (`plugin-controls.css`); synth pills
+  render mixed case through the spec's uppercase `.tgl`, not a listed delta in `src/ui/AGENTS.md`.
+  [reader]
+- **Popover anchor:** the popover sits at a fixed `top: 60px` (`src/app.css`) under a command bar
+  that is 94–104 px tall when stacked, so the panel covers row 2. [verified, screenshot]
+- **Component seams:** `Looper.tsx` exports `masterBars`, `anyTrackIn` and `createTwoStepConfirm`,
+  and `waveform.ts` imports it while it imports `waveform.ts` (circular, works by hoisting);
+  `hasMaster`/`loopBars`/`anyTrackIn` are re-derived in three components; `Transport.tsx` rebuilds
+  `toggleInput()`'s three false-cases from booleans [verified]; two effects write signals where a
+  memo or JSX binding would do (`Looper.tsx`, `Transport.tsx`), and COPY's visibility rides
+  `canReverse()` while a refused copy is silent (`Looper.tsx`). [reader]

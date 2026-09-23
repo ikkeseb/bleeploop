@@ -12,7 +12,7 @@ milestone lands; what still binds moves to the briefings.
 
 | # | Piece | Size | Seam | Proof |
 |---|---|---|---|---|
-| 1 | Refusal cue (audit F1): `recDubGate`/`playStopGate` titles, ARIA and the screen-reader announcement landed in `src/ui/looper/gates.ts`; only the sighted lane cue remains | M | `src/ui/looper/` | `pnpm verify:jam` asserts the sighted lane cue on a refused Space |
+| 1 | Refusal cue: `recDubGate`/`playStopGate` titles, ARIA and the screen-reader announcement landed in `src/ui/looper/gates.ts`; only the sighted lane cue remains | M | `src/ui/looper/` | `pnpm verify:jam` asserts the sighted lane cue on a refused Space |
 | 2 | Action layer + keys: one named-action table (REC/DUB, PLAY/STOP, UNDO, CLEAR with a hold or double-press guard, next/prev track, ALL PLAY, STOP ALL, GO LIVE) dispatching to the looper API; new bindings for UNDO, next/prev, CLEAR | S | `src/app/transport-keys.ts` | `pnpm verify:jam` presses the keys through the real dispatchers: UNDO restores the previous layer, next/prev wraps, CLEAR refuses without its guard |
 | 3 | MIDI learn: CC/note → action per port and channel, persisted in localStorage; a learned message is consumed before the CC64/1/123 branch, unmapped traffic behaves as today; a learn row in Audio Settings | M | `src/audio/midi.ts`, new `src/audio/midi-actions.ts` (not yet built), `src/ui/settings/` | browser probe feeds raw bytes to an `@public` handler: learn a CC, reload, the CC fires the action; unmapped CC64/1/123 still reach the router; a CC mapped onto 64 does not also sustain |
 | 4 | Rig recall, frontend only: restore each slot's plugin path and input channel at launch through the existing load path; GO LIVE stays one press. Plugin tone state excluded | M | `src/audio/instrument.ts`, `src/audio/native-io.ts` | native probe under `tauri dev` (a plugin, no guitar): restart, both slots reload the same path and channel; arming stays with STATUS Stops 5/6 |
@@ -26,7 +26,7 @@ cancellation needs a design).
 ## Explicitly not built
 
 - **D12 full controller IPC to CLAP/VST3.** MIDI into a plugin stays on the WebView latency path
-  whatever the IPC carries; the S sustain alternative is under STATUS D12.
+  whatever the IPC carries; the S sustain alternative is built (STATUS D12-S).
 - **Native monitor path for synth plugins (tester F8).** Changes native buffering: needs the L1+L2
   measurements first (`docs/ARCHITECTURE.md`), and the promise ranks synth layers second.
 - **Native looper core.** Falsified unless the L1/L2 gates say otherwise; it would end Mac development.
@@ -39,9 +39,16 @@ cancellation needs a design).
   on playing; each adds its own eye lap. Built-ins fill layers, they do not compete with plugins.
 - **Input FX.** Owner request, but the design is open: the native monitor bypasses Web Audio, so the
   player would not hear what gets recorded. Design first.
-- **Hosted browser demo.** Contradicts the rig-not-product rule and would showcase the fallback path.
 - **Built-in dry INPUT source; a second input channel.** Rust effort unknown; the promise assumes an
   amp-sim plugin. "Maybe later" (STATUS D2/D7).
+- **Diagnostics copy:** a copy-diagnostics button, the version in Help, open-log-folder and an issue
+  template, so a tester report carries commit and driver (S).
+- **Recent-jams shelf:** keep the last N recovery archives on ✕ ALL and close, offered in IMPORT (M).
+- **Per-lane pan; resample on import/recovery** (S each). No pan exists today.
+- **One `.pill` primitive + type tokens; a first-run cue on the selected empty lane** (M, S). The
+  findings behind them: `docs/backlog-taste.md` § Craft.
+- **Rhythm guide:** three GM-kit grooves on the master pulse as an alternative to the click (M,
+  ear-gated).
 
 ## Open questions that would change this plan
 
