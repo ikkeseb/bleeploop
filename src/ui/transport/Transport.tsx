@@ -223,13 +223,15 @@ export function Transport() {
         </div>
       </div>
 
-      {/* Playback/record modes share the wrapping row, leaving global transport beside the loop dial. */}
+      {/* Playback/record modes share the wrapping row, leaving global transport beside the loop dial.
+          Every toggle here, MIC and master mute keep ONE aria-label and say on/off through aria-pressed
+          alone; a label that flips as well reads "Click off, pressed". */}
       <div class="transport__modes">
         <div class="transport__click" role="group" aria-label="Metronome">
           <button
             class="transport__tgl"
             classList={{ 'is-on': clock.metronomeOn() }}
-            aria-label={clock.metronomeOn() ? 'Click off' : 'Click on'}
+            aria-label="Metronome click"
             aria-pressed={clock.metronomeOn()}
             onClick={() => clock.setMetronome(!clock.metronomeOn())}
             title="Metronome click"
@@ -262,7 +264,7 @@ export function Transport() {
           <button
             class="transport__tgl"
             classList={{ 'is-on': looper.fixedLengthEnabled() }}
-            aria-label={looper.fixedLengthEnabled() ? 'Fixed take length on' : 'Fixed take length off'}
+            aria-label="Fixed take length"
             aria-pressed={looper.fixedLengthEnabled()}
             disabled={fixedDisabled()}
             onClick={() => looper.setFixedLengthEnabled(!looper.fixedLengthEnabled())}
@@ -302,7 +304,7 @@ export function Transport() {
         <button
           class="transport__tgl"
           classList={{ 'is-on': looper.retakeEnabled() }}
-          aria-label={looper.retakeEnabled() ? 'Retake on' : 'Retake off'}
+          aria-label="Retake"
           aria-pressed={looper.retakeEnabled()}
           disabled={anyCapturing()}
           onClick={() => looper.setRetakeEnabled(!looper.retakeEnabled())}
@@ -319,7 +321,7 @@ export function Transport() {
           <button
             class="transport__tgl"
             classList={{ 'is-on': looper.autoRecordEnabled() }}
-            aria-label={looper.autoRecordEnabled() ? 'Auto record on' : 'Auto record off'}
+            aria-label="Auto record"
             aria-pressed={looper.autoRecordEnabled()}
             disabled={clock.bpmLocked() || anyCapturing()}
             onClick={() => looper.setAutoRecordEnabled(!looper.autoRecordEnabled())}
@@ -447,7 +449,7 @@ export function Transport() {
           class="transport__tgl"
           classList={{ 'is-on-green': looper.inputArmed() }}
           onClick={onToggleMic}
-          aria-label={looper.inputArmed() ? 'Mic live, disarm input' : 'Arm mic / line input'}
+          aria-label="Mic / line input"
           aria-pressed={looper.inputArmed()}
           title="Synths are always recorded; this arms mic / line input"
         >
@@ -464,10 +466,10 @@ export function Transport() {
         <button
           class="transport__master-mute"
           classList={{ 'is-muted': master.muted() }}
-          aria-label={master.muted() ? 'Unmute master' : 'Mute master'}
+          aria-label="Mute master"
           aria-pressed={master.muted()}
           onClick={() => master.setMuted(!master.muted())}
-          title={master.muted() ? 'Unmute' : 'Mute master output'}
+          title="Mute master output"
         >
           <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
             <path d="M4 9v6h3.5L12 19V5L7.5 9H4z" stroke-linejoin="round" />

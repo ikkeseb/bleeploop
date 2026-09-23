@@ -23,7 +23,9 @@ await probe(async ({ open }) => {
     }));
     const before = await bounds();
     if (width === 1730) await page.screenshot({ path: 'logs/layout/auto-off.png' });
-    await page.getByRole('button', { name: 'Auto record off', exact: true }).click();
+    const auto = page.getByRole('button', { name: 'Auto record', exact: true });
+    assert.equal(await auto.getAttribute('aria-pressed'), 'false');
+    await auto.click();
     const slider = page.getByRole('slider', { name: 'Auto record sensitivity', exact: true });
     await slider.waitFor({ state: 'visible' });
     await slider.focus();
@@ -36,7 +38,8 @@ await probe(async ({ open }) => {
     assert.equal(await slider.inputValue(), '1');
     await page.waitForTimeout(150);
     const adjusted = await bounds();
-    await page.getByRole('button', { name: 'Auto record on', exact: true }).click();
+    assert.equal(await auto.getAttribute('aria-pressed'), 'true');
+    await auto.click();
     await page.waitForTimeout(150);
     assert.equal(await slider.isVisible(), false);
     const disabled = await bounds();

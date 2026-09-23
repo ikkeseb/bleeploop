@@ -112,10 +112,10 @@ not here.
   WAITING FOR INPUT, track vs lane vs take in COPY's aria/title/Help (`Looper.tsx`, `Transport.tsx`);
   the tempo numeral's `aria-label="BPM"` hides the value and its locked title says "loop length"
   (`Transport.tsx`). [verified: Help, trigger; reader: words, tempo]
-- **Accessibility:** toggles flip their label AND set `aria-pressed` ("Click off, pressed") in
-  `Transport.tsx` and `Looper.tsx`, where END STOP has the right pattern; 30 tab stops reach lane 1,
-  14 of them synth pills (a roving-tabindex `radiogroup` per slot removes 10); the `transport__beats`
-  div carries an `aria-label` with no role. [reader]
+- **Accessibility:** the keyboard show/hide cap (`app.tsx`) and GO LIVE / EDITOR
+  (`PluginControls.tsx`) still flip their label AND set `aria-pressed` ("Hide keyboard, pressed"); 30
+  tab stops reach lane 1, 14 of them synth pills (a roving-tabindex `radiogroup` per slot removes 10);
+  the `transport__beats` div carries an `aria-label` with no role. [reader]
 - **CSS discipline:** four pill implementations disagree on padding, radius and engaged alpha
   (`.tgl`, `.transport__tgl`, `.lp-pb`, `.fxp-mod__toggle`), plus two steppers (22 vs 24 px), three
   button resets and three visually-hidden copies; colour literals bypass tokens in `src/app.css` (the

@@ -190,7 +190,9 @@ function TrackLane(props: {
   // The core IS the REC/DUB capture gesture. Its glyph reflects the ACTION reached by pressing it now
   // (● start-record on empty/armed, ⊕ start-overdub on a playing/stopped take, ■ end the live capture);
   // the data-state colour reflects the STATE. The spoken aria carries the exact action (glyphs read
-  // unpredictably across screen readers, so words not glyphs).
+  // unpredictably across screen readers, so words not glyphs), so the core is an action button, not a
+  // toggle: no aria-pressed ("stop recording, pressed" contradicts itself). MUTE and REV below are
+  // toggles: one label each, the state in aria-pressed.
   // Memoized on top of the memoized displayState: the JSX it returns is a fresh DOM node every call, so
   // it must only be called when the display state actually changes (see displayState above).
   const coreGlyph = createMemo(() => {
@@ -278,7 +280,6 @@ function TrackLane(props: {
           onClick={() => void looper.recDub(props.index)}
           aria-label={`Track ${props.index + 1} ${recDubLabel()}`}
           title={recDubLabel()}
-          aria-pressed={state() === 'RECORDING' || state() === 'OVERDUBBING'}
         >
           {coreGlyph()}
         </button>
@@ -342,7 +343,7 @@ function TrackLane(props: {
             classList={{ 'is-on': looper.trackMuted(props.index) }}
             disabled={isEmpty()}
             onClick={() => looper.setMute(props.index, !looper.trackMuted(props.index))}
-            aria-label={`Track ${props.index + 1} ${looper.trackMuted(props.index) ? 'unmute' : 'mute'}`}
+            aria-label={`Track ${props.index + 1} mute`}
             aria-pressed={looper.trackMuted(props.index)}
           >
             MUTE
@@ -370,7 +371,7 @@ function TrackLane(props: {
               disabled={stopping()}
               classList={{ 'is-on': reversed() }}
               onClick={() => looper.reverse(props.index)}
-              aria-label={`Track ${props.index + 1} ${reversed() ? 'play forward' : 'reverse'}`}
+              aria-label={`Track ${props.index + 1} reverse`}
               aria-pressed={reversed()}
               title="Reverse / forward (toggle)"
             >

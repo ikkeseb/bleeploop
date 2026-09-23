@@ -1,10 +1,39 @@
 /** Accessibility and non-colour state carriers against the rendered app: transport, meter, lamp,
  * looper-announcement and toast state carriers, plus the looper refusal gates (a refused lane
  * core's title/label reason, and a refused Space/Enter announcing that reason with no state change).
+ * Toggles: every command-bar and lane toggle keeps ONE accessible name in both states and carries its
+ * state in aria-pressed alone; the lane core, whose name says the action, carries no aria-pressed. The
+ * mic toggle arms through a substituted device open, so it says nothing about a real input device.
  * Run: pnpm probe ui-state-carriers
  */
 import assert from 'node:assert/strict';
 import { probe } from '../harness/probe.ts';
+
+/**
+ * Presses the toggle named `name` twice with real clicks and returns each step: how many buttons carry
+ * that exact name, the state it drives (`state`, an expression read through __lf, never the DOM) and
+ * its aria-pressed. A stable toggle shows one button in every step, aria-pressed equal to the state,
+ * and a state that flips and flips back.
+ */
+async function pressToggle(page, name, state) {
+  const button = page.getByRole('button', { name, exact: true });
+  const steps = [];
+  for (let press = 0; press <= 2; press++) {
+    if (press > 0) {
+      if ((await button.count()) !== 1) break;
+      const before = await page.evaluate(state);
+      const clicked = await button.click({ timeout: 3000 }).then(() => true, () => false);
+      if (!clicked) break;
+      await page.waitForFunction(`(${state}) !== ${before}`, undefined, { timeout: 3000 }).catch(() => {});
+    }
+    const count = await button.count();
+    steps.push({ count, state: await page.evaluate(state), pressed: count === 1 ? await button.getAttribute('aria-pressed') : null });
+  }
+  const ok = steps.length === 3 && steps.every((s) => s.count === 1 && s.pressed === String(s.state))
+    && steps[1].state !== steps[0].state && steps[2].state === steps[0].state;
+  console.log(JSON.stringify({ toggle: name, ok, steps }));
+  return ok;
+}
 
 await probe(async ({ open }) => {
   const { page } = await open({ viewport: { width: 1280, height: 820 } });
@@ -115,6 +144,43 @@ await probe(async ({ open }) => {
   assert.equal(await otherCore.isDisabled(), true);
   assert.equal(await otherCore.getAttribute('title'), 'another track is recording, stop it first');
   assert.equal(await otherCore.getAttribute('aria-label'), 'Track 2 another track is recording, stop it first');
+  // The core's name says the action ("Track 1 stop recording"), so a pressed state would contradict it.
+  const recordingCorePressed = await page.locator('.lp-lane[aria-label="Track 1"] .lp-core').getAttribute('aria-pressed');
+  console.log(JSON.stringify({ recordingCorePressed }));
   await page.evaluate(() => window.__lf.looper.stop(0));
   await page.waitForFunction(() => window.__lf.looper.stateOf(0) === 'EMPTY');
+
+  // Toggles: one stable name, state in aria-pressed (the END STOP pattern). No loop yet, so the tempo
+  // is unlocked and AUTO REC is enabled.
+  assert.equal(await page.evaluate(() => window.__lf.clock.bpmLocked()), false);
+  await page.evaluate(() => {
+    const lf = window.__lf;
+    window.__realInputOpen = lf.platform.audioInput.open;
+    lf.platform.audioInput.open = async () => ({ node: lf.engine.ctx.createGain(), sampleRate: lf.engine.ctx.sampleRate, close() {} });
+  });
+  const unstable = [];
+  for (const [name, state] of [
+    ['Metronome click', 'window.__lf.clock.metronomeOn()'],
+    ['Fixed take length', 'window.__lf.looper.fixedLengthEnabled()'],
+    ['Retake', 'window.__lf.looper.retakeEnabled()'],
+    ['Auto record', 'window.__lf.looper.autoRecordEnabled()'],
+    ['Mic / line input', 'window.__lf.looper.inputArmed()'],
+    ['Mute master', 'window.__lf.master.muted()'],
+  ]) if (!(await pressToggle(page, name, state))) unstable.push(name);
+  await page.evaluate(() => { window.__lf.platform.audioInput.open = window.__realInputOpen; });
+
+  await page.evaluate(async () => {
+    const lf = window.__lf;
+    const { defaultFxStates } = await import('/src/audio/fx/fx.ts');
+    const frames = Math.round(lf.engine.ctx.sampleRate * 0.8);
+    await lf.looper.loadSession({ bpm: 300, bars: 1, masterLengthFrames: frames, tracks: [{ index: 0,
+      pcm: new Float32Array(frames).fill(0.05), volume: 1, muted: false, reversed: false, state: 'STOPPED', fx: defaultFxStates() }] });
+  });
+  await page.waitForFunction(() => window.__lf.looper.stateOf(0) === 'STOPPED');
+  for (const [name, state] of [
+    ['Track 1 mute', 'window.__lf.looper.trackMuted(0)'],
+    ['Track 1 reverse', 'window.__lf.looper.trackInfo(0).reversed'],
+  ]) if (!(await pressToggle(page, name, state))) unstable.push(name);
+  assert.deepEqual(unstable, [], 'these toggles change their name with their state or lose aria-pressed');
+  assert.equal(recordingCorePressed, null, 'the lane core names its action; it must not also claim a pressed state');
 });
