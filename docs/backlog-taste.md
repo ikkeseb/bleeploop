@@ -38,8 +38,8 @@ not here.
   surface-on-surface (`--well` α .04 vs `--glass` α .045, same hue) + the lane state word. A LIVE
   `src/app.css` token session over HMR; agent recommendation from the four `--well` variant shots:
   dark-step.
-- **Keyboard transport feel:** 1–5 / Space / Enter (drum mode: pads own 1–4, only 5 selects); silent
-  no-op on a refused Space (toast or cue?).
+- **Keyboard transport feel:** 1–5 / Space / Enter (drum mode: pads own 1–4, only 5 selects); a refused
+  Space/Enter is announced to screen readers only, still no sighted cue (`docs/plans/pedalboard.md` piece 1).
 - **COPY pill (2026-09-18):** "⧉ COPY" after REV in the lane's pill row, hidden while no lane is
   EMPTY, always targets the first EMPTY lane — right place and word? Floated: a right-click
   context menu (none exists in the app yet) for picking the target lane. The pill row with DUB + REV

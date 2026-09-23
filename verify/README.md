@@ -41,10 +41,11 @@ toast, retry completes), that picking a synth or instrument plugin moves the MID
 does not, and host-side sustain on a plugin sink (deferred note-off, re-strike order).
 `input-controls.mjs` checks BPM cancellation, pointer release across octave changes, independent MIDI
 ownership and the playable upper note range. `ui-state-carriers.mjs` checks transport, meter, lamp,
-looper-announcement and toast state carriers. `transport-focus.mjs` checks that Space/Enter/1–5
-drive the looper behind an open popover and after an Escape close, yet still yield to the BPM field
-and Tab-focused buttons. `session-state-roundtrip.mjs` checks STOPPED recovery, state-only autosave
-and subsequent PLAY ALL. `mic-arm-race.mjs` substitutes the platform input open
+looper-announcement and toast state carriers, plus the looper refusal gates (a refused lane core's
+title/label reason, and a refused Space announcing that reason with no state change).
+`transport-focus.mjs` checks that Space/Enter/1–5 drive the looper behind an open popover and after
+an Escape close, yet still yield to the BPM field and Tab-focused buttons. `session-state-roundtrip.mjs`
+checks STOPPED recovery, state-only autosave and subsequent PLAY ALL. `mic-arm-race.mjs` substitutes the platform input open
 with a deferred promise and checks that a disarm cancels a pending open (stream closed, tracks
 stopped), that a burst of toggles ends in the state of the last gesture, and that a real browser-tier
 open whose splitter wiring throws stops its tracks and disconnects its source. `transport-start.mjs`

@@ -2,6 +2,7 @@ import { activeIsDrum } from '../audio/instrument';
 import { looper } from '../audio/looper/looper';
 import { DRUM_KIT } from '../audio/synths/drum';
 import * as layoutStore from '../ui/layout/layout-store';
+import { announceLooper, playStopGate, recDubGate } from '../ui/looper/gates';
 
 export interface TransportKeysOptions {
   /** Escape was pressed — the app closes whichever popover is open. Never a play key. */
@@ -63,14 +64,20 @@ export function installTransportKeys(opts: TransportKeysOptions): TransportKeys 
     }
 
     // Space = REC/DUB, Enter = PLAY/STOP on the selected track. preventDefault stops Space page-scroll.
+    // A refused press says why on the looper's status line (the same reason the lane button carries)
+    // instead of doing nothing.
     if (e.key === ' ' || e.code === 'Space') {
       e.preventDefault();
-      looper.recDubSelected();
+      const gate = recDubGate(looper.selectedTrack());
+      if (gate.ok) looper.recDubSelected();
+      else announceLooper(`Track ${looper.selectedTrack() + 1}: ${gate.reason}`);
       return;
     }
     if (e.key === 'Enter') {
       e.preventDefault();
-      looper.playStopSelected();
+      const gate = playStopGate(looper.selectedTrack());
+      if (gate.ok) looper.playStopSelected();
+      else announceLooper(`Track ${looper.selectedTrack() + 1}: ${gate.reason}`);
       return;
     }
 

@@ -89,6 +89,38 @@ try {
   assert.match(await stoppedCore.getAttribute('aria-label'), /play first to overdub/);
   assert.equal(await stoppedCore.getAttribute('title'), 'play first to overdub');
 
+  // Refusal gate (src/ui/looper/gates.ts): a refused Space says the lane button's reason on the
+  // looper status line instead of a silent no-op, and changes no state.
+  const live = page.locator('.lp__sr-status');
+  await page.evaluate(() => {
+    window.__lf.looper.selectTrack(0);
+    document.activeElement?.blur?.();
+  });
+  await page.keyboard.press('Space');
+  await page.waitForTimeout(200);
+  assert.equal(await page.evaluate(() => window.__lf.looper.stateOf(0)), 'STOPPED', 'refused Space must not change state');
+  assert.equal((await live.textContent())?.trim(), 'Track 1: play first to overdub');
+
+  // A refused Enter on an EMPTY lane (nothing to play) says so, and changes no state.
+  await page.evaluate(() => window.__lf.looper.clearAll());
+  await page.waitForFunction(() => [0, 1, 2, 3, 4].every((i) => window.__lf.looper.stateOf(i) === 'EMPTY'));
+  await page.keyboard.press('Enter');
+  await page.waitForTimeout(200);
+  assert.equal(await page.evaluate(() => window.__lf.looper.stateOf(0)), 'EMPTY', 'refused Enter must not change state');
+  assert.equal((await live.textContent())?.trim(), 'Track 1: nothing to play, record first');
+
+  // Gate ok: an EMPTY selected lane still arms on Space.
+  await page.keyboard.press('Space');
+  await page.waitForFunction(() => window.__lf.looper.stateOf(0) === 'RECORDING', undefined, { timeout: 3000 });
+
+  // While lane 1 records, lane 2's core is refused, and its hover and label say why.
+  const otherCore = page.locator('.lp-lane[aria-label="Track 2"] .lp-core');
+  assert.equal(await otherCore.isDisabled(), true);
+  assert.equal(await otherCore.getAttribute('title'), 'another track is recording, stop it first');
+  assert.equal(await otherCore.getAttribute('aria-label'), 'Track 2 another track is recording, stop it first');
+  await page.evaluate(() => window.__lf.looper.stop(0));
+  await page.waitForFunction(() => window.__lf.looper.stateOf(0) === 'EMPTY');
+
   console.log('=== RESULT: ui-state-carriers passed ===');
 } finally {
   await browser.close();

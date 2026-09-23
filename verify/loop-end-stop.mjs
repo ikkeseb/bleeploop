@@ -170,10 +170,15 @@ try {
   await page.screenshot({ path: 'logs/loop-end-stop.png' });
   await page.setViewportSize({ width: 1280, height: 720 });
   await page.screenshot({ path: 'logs/loop-end-stop-1280.png' });
+  // The refused core names its reason (src/ui/looper/gates.ts) in both the aria-label and the title.
+  const pendingCore = page.getByRole('button', { name: 'Track 1 stopping at loop end, wait or stop now', exact: true });
+  const pendingCoreTitle = await pendingCore.getAttribute('title');
   check('Pending lane exposes force stop and disables transforms', {
     pass: await page.getByRole('button', { name: 'Track 1 stop now', exact: true }).isVisible()
-      && await page.getByRole('button', { name: 'Track 1 overdub', exact: true }).isDisabled()
+      && await pendingCore.isDisabled()
+      && pendingCoreTitle === 'stopping at loop end, wait or stop now'
       && await page.getByRole('button', { name: 'Track 1 reverse', exact: true }).isDisabled(),
+    pendingCoreTitle,
   });
   await page.getByRole('button', { name: 'Track 1 stop now', exact: true }).click();
   check('Pointer force stop completes', { pass: await page.evaluate(() => window.__lf.looper.trackInfo(0).state === 'STOPPED') });

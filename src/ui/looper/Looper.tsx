@@ -4,6 +4,7 @@ import { clock } from '../../audio/clock';
 import { framesPerBar } from '../../audio/quantize';
 import { engine } from '../../audio/engine';
 import { registerLane, unregisterLane } from './waveform';
+import { announceLooper, liveMsg, playStopGate, recDubGate } from './gates';
 import { FxPanel } from './FxPanel';
 import './looper.css';
 
@@ -140,8 +141,6 @@ function TrackLane(props: {
   index: number;
   fxTrack: number | null;
   onToggleFx: (i: number) => void;
-  anyRecording: boolean;
-  retakeRolling: boolean;
 }) {
   const track = looper.track(props.index);
   const state = () => track().state;
@@ -218,26 +217,29 @@ function TrackLane(props: {
         return 'cancel auto record';
       case 'RECORDING':
         return 'stop recording';
+      // STOPPED never speaks from here: recDubGate always refuses it, so recDubLabel says the reason.
       case 'PLAYING':
-        return reversed() ? 'overdub unavailable while reversed, switch to forward first' : 'overdub';
+      case 'STOPPED':
+        return 'overdub';
       case 'OVERDUBBING':
         return 'stop overdub';
-      case 'STOPPED':
-        return 'play first to overdub';
     }
   };
-  // REC/DUB disabled: in STOPPED (decision a — play it first), and on OTHER tracks while one records —
-  // except an EMPTY lane during a rolling RETAKE, where REC approves that take and records here next.
-  const recDubDisabled = () =>
-    stopping() ||
-    state() === 'STOPPED' ||
-    (reversed() && state() === 'PLAYING') || // reverse blocks overdub (M-4) — flip forward to dub
-    (props.anyRecording &&
-      state() !== 'RECORDING' &&
-      state() !== 'OVERDUBBING' &&
-      !(props.retakeRolling && state() === 'EMPTY'));
+  // The refusal gates (gates.ts) own every "why not": STOPPED (decision a — play it first), reverse
+  // (M-4), a pending loop-end stop, and another lane capturing (except an EMPTY lane during a rolling
+  // RETAKE). Memoized per lane so the five-lane scans run once per state change.
+  const recGate = createMemo(() => recDubGate(props.index));
+  const recDubLabel = () => {
+    const g = recGate();
+    return g.ok ? recDubAria() : g.reason;
+  };
+  const playGate = createMemo(() => playStopGate(props.index));
   const playStopGlyph = () => (state() === 'STOPPED' || state() === 'EMPTY' ? '▶' : '■');
-  const playStopDisabled = () => state() === 'EMPTY';
+  const playStopAction = () => (stopping() ? 'stop now' : playStopGlyph() === '▶' ? 'play' : 'stop');
+  const playStopLabel = () => {
+    const g = playGate();
+    return g.ok ? playStopAction() : g.reason;
+  };
 
   // Two-step clear: a take is irreversible, so the first press only ARMS ("SURE?") for a short window;
   // a second press within it actually clears. No blocking window.confirm — keeps the workflow fast.
@@ -273,10 +275,10 @@ function TrackLane(props: {
 
         <button
           class="lp-core"
-          disabled={recDubDisabled()}
+          disabled={!recGate().ok}
           onClick={() => void looper.recDub(props.index)}
-          aria-label={`Track ${props.index + 1} ${recDubAria()}`}
-          title={recDubAria()}
+          aria-label={`Track ${props.index + 1} ${recDubLabel()}`}
+          title={recDubLabel()}
           aria-pressed={state() === 'RECORDING' || state() === 'OVERDUBBING'}
         >
           {coreGlyph()}
@@ -285,10 +287,10 @@ function TrackLane(props: {
         <div class="lp-lane__pair">
           <button
             class="lp-pb lp-pb--play"
-            disabled={playStopDisabled()}
+            disabled={!playGate().ok}
             onClick={() => looper.playStop(props.index)}
-            aria-label={`Track ${props.index + 1} ${stopping() ? 'stop now' : playStopGlyph() === '▶' ? 'play' : 'stop'}`}
-            title={stopping() ? 'Stopping at loop end. Press again to stop now.' : undefined}
+            aria-label={`Track ${props.index + 1} ${playStopLabel()}`}
+            title={stopping() ? 'Stopping at loop end. Press again to stop now.' : playGate().ok ? undefined : playStopLabel()}
           >
             {playStopGlyph()} {stopping() ? 'NOW' : playStopGlyph() === '▶' ? 'PLAY' : 'STOP'}
           </button>
@@ -447,15 +449,6 @@ export function Looper() {
   const master = () => looper.masterLengthFrames();
   const hasMaster = () => master() > 0;
 
-  // Any track currently capturing → disable other tracks' REC/DUB (single-recorder v1). Memoized so the
-  // five-lane scan runs once per state change, not once per subscribed lane per render.
-  const anyRecording = createMemo(() => anyTrackIn('RECORDING', 'OVERDUBBING'));
-  // A rolling RETAKE opens the EMPTY lanes' REC as its approve-and-record-next gesture.
-  const retakeRolling = createMemo(() => {
-    for (let j = 0; j < looper.trackCount; j++) if (looper.track(j)().retakePass > 0) return true;
-    return false;
-  });
-
   // Master length as a musician-readable "N bar · S.S s" — used only by the SR live announcement now
   // (the visible loop readout lives in the command bar's ring-dial).
   const masterLabel = () => {
@@ -483,7 +476,6 @@ export function Looper() {
 
   // Screen-reader status line: operational transitions are otherwise silent to AT. A polite live region
   // announces record/arm/overdub starts + the master-loop resolution, diffed so it fires on transitions.
-  const [liveMsg, setLiveMsg] = createSignal('');
   let prevSnap = Array.from({ length: looper.trackCount }, () => ({
     state: 'EMPTY' as TrackState,
     armed: false,
@@ -525,7 +517,7 @@ export function Looper() {
     if (masterNow && !prevHasMaster) msg = `Loop length set: ${masterLabel()}`;
     prevSnap = cur;
     prevHasMaster = masterNow;
-    if (msg) setLiveMsg(msg);
+    if (msg) announceLooper(msg);
   });
 
   return (
@@ -550,7 +542,7 @@ export function Looper() {
         <For each={Array.from({ length: looper.trackCount }, (_, i) => i)}>
           {(i) => (
             <>
-              <TrackLane index={i} fxTrack={fxTrack()} onToggleFx={toggleFx} anyRecording={anyRecording()} retakeRolling={retakeRolling()} />
+              <TrackLane index={i} fxTrack={fxTrack()} onToggleFx={toggleFx} />
               <Show when={fxTrack() === i}>
                 <div class="lp-drawer" role="group" aria-label={`FX, Track ${i + 1}`}>
                   <div class="lp-drawer__head">
