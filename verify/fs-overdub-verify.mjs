@@ -1,13 +1,21 @@
-// Overdub timer ownership and boundary progression. The model checks one pending timeout per
-// active track and no callbacks after completion. The old state-only scheduler remains as a
-// regression contrast; the preceding generation guard already prevented duplicate PCM swaps.
-// Actual timeout registration/cancellation and dispatcher behavior: overdub-timers.mjs.
-// MIRRORS: src/audio/looper/playback.ts@137-142 sha256:c5276b8403aa7026  (cancelOverdubSwap: cancel and release the owned handle)
-// MIRRORS: src/audio/looper/machine.ts@702-704 sha256:bc2c1a5185785f45  (startOverdub: reset stop intent and schedule its timer)
-// MIRRORS: src/audio/looper/machine.ts@708-723 sha256:d8467ffdf994b309  (finishOverdub: successful REC/DUB completion; no STOP or loss in this model)
-// MIRRORS: src/audio/looper/playback.ts@164-211 sha256:7cfc74fa6f8c9793  (scheduleOverdubSwap: owned timeout, anchor-derived boundary swap, a throw anywhere from the commit on hands off without re-arm)
-// MIRRORS: src/audio/looper/machine.ts@730-737 sha256:32a61f195d95f1d1  (endOverdubAfterFailedSwap: a failed swap ends the session like STOP)
-// MIRRORS: src/audio/looper/machine.ts@490-499 sha256:97c4d32d9220dcaa  (playStop: STOP during overdub commits, cancels the timer and lands STOPPED)
+// Overdub timer ownership and boundary progression: the REAL looper (src/audio/looper/machine.ts
+// startOverdub / finishOverdub / endOverdubAfterFailedSwap / playStop, playback.ts scheduleOverdubSwap /
+// cancelOverdubSwap) under the verify rig. A swap is a playback source the boundary timer starts "now";
+// finishOverdub's restart is scheduled ahead for the next boundary and is not counted as one.
+//
+// What this PROVES:
+//   - one pending swap timer per overdubbing lane, none otherwise; DUB end->start cycles inside one loop
+//     period never leave a parallel chain: exactly one swap per boundary                   [A, B]
+//   - an overdub that ends without a restart swaps no more                                    [C]
+//   - a timer that fires while ctx still reads a hair BEFORE its boundary re-arms for the NEXT one (no
+//     duplicate swap into the live buffer); after a main-thread stall the re-arm jumps to the first
+//     future boundary instead of replaying the missed ones                                    [D]
+//   - STOP during an overdub cancels the swap, commits the layer and lands STOPPED            [E]
+//   - a swap that throws at any step (commit, peaks, buffer fill, source start) is logged once and
+//     ends the session: STOPPED, the layer kept, no successor timer, no later swap           [F]
+// Real timeout registration in the browser: overdub-timers.mjs. Punch-out tail frames: overdub-window.mjs.
+
+import { bootLooper } from './harness/rig.ts';
 
 let fails = 0, checks = 0;
 function ok(name, cond, detail = '') {
@@ -15,196 +23,234 @@ function ok(name, cond, detail = '') {
   if (!cond) { fails++; console.log(`  FAIL  ${name}  ${detail}`); }
 }
 
-// Events run before the next boundary. Timer ids model the browser's owned/cancelled handles.
-// `failAt` (fixed scheduler only): the boundary index whose swap throws; `failStep`: the swap step
-// that throws (all of them sit inside the one try in scheduleOverdubSwap). Layers are counted: each
-// boundary's overdubBuf holds one more layer, and `record` holds whichever layer was last committed.
-const SWAP_STEPS = ['commit', 'peaks', 'fill', 'start'];
-function simulate({ useCancellation, taps, boundaries, failAt = -1, failStep = 'start' }) {
-  const track = { state: 'PLAYING', overdubBuf: false, overdubTimer: null, captureStopPlayback: false,
-    layer: 0, record: 0 };
-  const log = { errors: 0, committed: 0, failedLayer: -1 };
-  let pending = [], nextId = 0;
-  const cancel = () => {
-    if (!useCancellation) return;
-    pending = pending.filter((id) => id !== track.overdubTimer);
-    track.overdubTimer = null;
-  };
-  const schedule = () => {
-    cancel();
-    track.overdubTimer = ++nextId;
-    pending.push(track.overdubTimer);
-  };
-  const startOverdub = () => {
-    if (track.state !== 'PLAYING') return;
-    track.state = 'OVERDUBBING';
-    track.overdubBuf = true;
-    track.captureStopPlayback = false;
-    schedule();
-  };
-  const endOverdub = () => {
-    if (track.state !== 'OVERDUBBING') return;
-    track.record = track.layer; // finishOverdub commits overdubBuf before dropping it
-    track.overdubBuf = false;
-    track.state = track.captureStopPlayback ? 'STOPPED' : 'PLAYING';
-    cancel(); // finishCapture releases the recorder and its timer.
-  };
-  // endOverdubAfterFailedSwap -> playStop(OVERDUBBING): stop intent, cancel, then the capture tail commits.
-  const stopDuringOverdub = () => {
-    if (track.state !== 'OVERDUBBING') return;
-    track.captureStopPlayback = true;
-    cancel();
-    endOverdub();
-  };
-  for (const event of taps) {
-    (event === 'start' ? startOverdub : endOverdub)();
-    if (useCancellation) ok(`pending timer matches capture state after ${event}`,
-      pending.length === (track.state === 'OVERDUBBING' ? 1 : 0));
-  }
-  const swapsPerBoundary = [];
-  for (let b = 0; b < boundaries; b++) {
-    const firing = pending;
-    pending = [];
-    let swaps = 0;
-    for (const id of firing) {
-      if (useCancellation && track.overdubTimer !== id) continue;
-      track.overdubTimer = null;
-      if (track.state !== 'OVERDUBBING' || !track.overdubBuf) continue;
-      track.layer++; // this boundary's captured layer, summed into overdubBuf
-      const throwsAt = b === failAt ? SWAP_STEPS.indexOf(failStep) : SWAP_STEPS.length;
-      if (throwsAt > 0) { track.record = track.layer; log.committed++; } // record.set(overdubBuf)
-      if (throwsAt < SWAP_STEPS.length) {
-        log.errors++; // console.error once, then hand off; the callback returns before any re-arm
-        log.failedLayer = track.layer;
-        stopDuringOverdub();
-        continue;
-      }
-      swaps++;
-      if (track.state === 'OVERDUBBING') schedule();
-    }
-    swapsPerBoundary.push(swaps);
-  }
-  if (failAt >= 0) return { swapsPerBoundary, track, pending: pending.length, ...log };
-  return swapsPerBoundary;
+const SWAP_TIMER = /scheduleOverdubSwap/;
+const DUB = 1 / 64; // overdub input: exact in Float32, so summed layers compare exactly
+
+/** A committed one-bar loop on lane 0, playing. Boundaries are masterStart + n * period. */
+async function playingLoop(bpm = 200) {
+  const rig = await bootLooper({ sampleRate: 48000, startTime: 20 });
+  rig.clock.setBpm(bpm);
+  const master = await rig.recordFirstTake({ bars: 1, level: 0.5 });
+  const masterStart = rig.state.engineState.masterStartTime;
+  const period = master / rig.sr;
+  const boundary = (n) => masterStart + n * period;
+  /** The first boundary index strictly after now. */
+  const nextIndex = () => Math.floor((rig.now() - masterStart) / period) + 1;
+  rig.setInput(DUB);
+  return { rig, master, period, boundary, nextIndex };
 }
 
-// ---- A. The exact live repro: PLAYING -> DUB -> DUB -> DUB (one end->start cycle in a period) ----
-{
-  const taps = ['start', 'end', 'start'];
-  const fixed = simulate({ useCancellation: true, taps, boundaries: 8 });
-  const buggy = simulate({ useCancellation: false, taps, boundaries: 8 });
-  ok('A.fixed settles to exactly 1 swap/boundary', fixed.every((n) => n === 1), JSON.stringify(fixed));
-  ok('A.buggy runs >1 swap/boundary (parallel chains)', buggy.every((n) => n >= 2), JSON.stringify(buggy));
-  ok('A.buggy steady == 2 chains for 1 cycle', buggy[buggy.length - 1] === 2, JSON.stringify(buggy));
+/** Swap sources started from `mark` on, counted per boundary index. */
+function swapsByBoundary(rig, mark, loop) {
+  const counts = new Map();
+  for (const src of rig.sources().slice(mark)) {
+    if (src.startTime === null || src.startTime - src.createdAt > 0.01) continue; // scheduled ahead: not a swap
+    const n = Math.round((src.startTime - src.offset - loop.boundary(0)) / loop.period);
+    counts.set(n, (counts.get(n) ?? 0) + 1);
+  }
+  return counts;
 }
+/** Distance, in periods, from `time` to the nearest boundary. */
+const phase = (time, loop) => { const x = (time - loop.boundary(0)) / loop.period; return x - Math.round(x); };
+const pendingSwaps = (rig) => rig.timers.pending(SWAP_TIMER);
+const layerSum = (t, master) => { let s = 0; for (let k = 0; k < master; k++) s += t.record[k]; return s; };
 
-// ---- B. N within-period end->start cycles: fixed stays 1, buggy grows linearly with N ----
-for (let cycles = 1; cycles <= 6; cycles++) {
+console.log('=== A/B. DUB end->start cycles inside one period: one timer, one swap per boundary ===');
+for (const cycles of [0, 1, 2, 4]) {
+  const loop = await playingLoop();
+  const { rig } = loop;
+  const first = loop.nextIndex();
+  await rig.advanceTo(loop.boundary(first - 1) + 0.05);
+  const mark = rig.sources().length;
   const taps = ['start'];
-  for (let c = 0; c < cycles; c++) { taps.push('end', 'start'); } // start,(end,start)*cycles
-  const fixed = simulate({ useCancellation: true, taps, boundaries: 10 });
-  const buggy = simulate({ useCancellation: false, taps, boundaries: 10 });
-  ok(`B.cycles=${cycles} fixed == 1/boundary (no leak)`, fixed.every((n) => n === 1), JSON.stringify(fixed));
-  // buggy: every start-tap leaves a live chain -> (cycles+1) swaps/boundary, unbounded with cycles.
-  ok(`B.cycles=${cycles} buggy == ${cycles + 1}/boundary (leak grows)`,
-    buggy.every((n) => n === cycles + 1), JSON.stringify(buggy));
-}
-
-// ---- C. A plain single overdub (no cycle) is unaffected by the fix: exactly 1/boundary either way ----
-{
-  const fixed = simulate({ useCancellation: true, taps: ['start'], boundaries: 8 });
-  const buggy = simulate({ useCancellation: false, taps: ['start'], boundaries: 8 });
-  ok('C.single overdub fixed == 1/boundary', fixed.every((n) => n === 1), JSON.stringify(fixed));
-  ok('C.single overdub buggy == 1/boundary (no regression risk)', buggy.every((n) => n === 1), JSON.stringify(buggy));
-}
-
-// ---- D. End without restart: no further PCM swaps in either scheduler ----
-{
-  // start -> end, then NO third start: at the boundary state is PLAYING, so the lone timer bails.
-  const fixed = simulate({ useCancellation: true, taps: ['start', 'end'], boundaries: 5 });
-  const buggy = simulate({ useCancellation: false, taps: ['start', 'end'], boundaries: 5 });
-  ok('D.start+end fixed -> 0 swaps (state guard)', fixed.every((n) => n === 0), JSON.stringify(fixed));
-  ok('D.start+end buggy -> 0 swaps (state guard already covers non-reentry)', buggy.every((n) => n === 0), JSON.stringify(buggy));
-}
-
-// ---- E. Same-boundary duplicate (early timer fire): the re-arm must target the NEXT boundary ----
-// Pins the anchor-derived re-arm in scheduleOverdubSwap: the wall-clock setTimeout can fire while
-// ctx.currentTime (render-quantum granularity) still reads a hair BEFORE the boundary `when` this
-// firing commits at. The OLD re-arm recomputed nextBoundary() from ctx time — ceil returns the SAME
-// boundary → a duplicate swap whose double-buffer pick writes into the AudioBuffer the outgoing source
-// is still reading. The NEW re-arm takes the later of the anchor-derived scheduled successor and the
-// first anchor-derived future boundary, so it strictly advances without replaying missed boundaries.
-{
-  const masterStart = 10.0;
-  for (const period of [0.5, 2.0, 60 / 137]) {
-    for (const k of [1, 5, 1000]) {
-      const when = masterStart + k * period; // the boundary this firing commits at
-      for (const skewMs of [-4, -0.1, 0, +4]) { // ctx clock vs the timer: early, hair-early, exact, late
-        const ctxNow = when + skewMs / 1000;
-        // OLD: nextBoundary() recompute at re-arm time (playback.ts nextBoundary: ceil from elapsed)
-        const nOld = Math.ceil((ctxNow - masterStart) / period);
-        const oldTarget = masterStart + nOld * period;
-        // NEW: scheduled successor in the normal case, first future boundary after a real stall.
-        const scheduledNext = Math.round((when - masterStart) / period) + 1;
-        const firstFuture = Math.floor((ctxNow - masterStart) / period) + 1;
-        const n = Math.max(scheduledNext, firstFuture);
-        const newTarget = masterStart + n * period;
-        ok(`E.new re-arm strictly advances one period (p=${period.toFixed(3)} k=${k} skew=${skewMs}ms)`,
-           Math.abs(newTarget - (when + period)) < 1e-9, `got ${newTarget} want ${when + period}`);
-        if (skewMs < 0) {
-          ok(`E.old recompute duplicates the SAME boundary when ctx lags (p=${period.toFixed(3)} k=${k} skew=${skewMs}ms)`,
-             Math.abs(oldTarget - when) < 1e-9, `old target ${oldTarget} vs when ${when}`);
-        }
-      }
-      // No float accumulation: chaining the NEW re-arm 200 boundaries out stays exact vs the anchor.
-      let w = when;
-      for (let i = 0; i < 200; i++) {
-        const scheduledNext = Math.round((w - masterStart) / period) + 1;
-        const firstFuture = Math.floor((w - masterStart) / period) + 1;
-        const ni = Math.max(scheduledNext, firstFuture);
-        w = masterStart + ni * period;
-      }
-      ok(`E.200 chained re-arms stay anchor-exact (p=${period.toFixed(3)} k=${k})`,
-         Math.abs(w - (masterStart + (k + 200) * period)) < 1e-9, `err=${Math.abs(w - (masterStart + (k + 200) * period))}`);
-    }
+  for (let c = 0; c < cycles; c++) taps.push('end', 'start');
+  for (const tap of taps) {
+    await rig.looper.recDub(0);
+    await rig.advance(0.02);
+    const state = rig.looper.trackInfo(0).state;
+    ok(`A cycles=${cycles} after ${tap}: lane ${tap === 'start' ? 'OVERDUBBING' : 'PLAYING'}`,
+      state === (tap === 'start' ? 'OVERDUBBING' : 'PLAYING'), state);
+    ok(`A cycles=${cycles} after ${tap}: pending swap timers match the capture state`,
+      pendingSwaps(rig) === (state === 'OVERDUBBING' ? 1 : 0), `pending=${pendingSwaps(rig)}`);
   }
+  await rig.advanceTo(loop.boundary(first + 5) + 0.05);
+  const swaps = swapsByBoundary(rig, mark, loop);
+  const perBoundary = [0, 1, 2, 3, 4, 5].map((k) => swaps.get(first + k) ?? 0);
+  ok(`B cycles=${cycles}: exactly one swap per boundary`, perBoundary.every((n) => n === 1), JSON.stringify(perBoundary));
+  ok(`B cycles=${cycles}: still one pending swap timer`, pendingSwaps(rig) === 1, `pending=${pendingSwaps(rig)}`);
+  const swapSources = rig.sources().slice(mark).filter((x) => x.startTime - x.createdAt <= 0.01);
+  ok(`B cycles=${cycles}: a swap never writes into the buffer the outgoing source plays`,
+    swapSources.every((x, k) => k === 0 || x.buffer !== swapSources[k - 1].buffer));
+  const src = rig.tracks[0].source;
+  ok(`B cycles=${cycles}: the live source sits on the grid`,
+    Math.abs(src.startTime - src.offset - loop.boundary(first + 5)) < 1e-9, `start=${src.startTime} offset=${src.offset}`);
+}
 
-  for (const stalledPeriods of [1.2, 2.0, 4.7, 20.25]) {
-    const period = 0.5;
-    const when = masterStart + 3 * period;
-    const ctxNow = when + stalledPeriods * period;
-    const scheduledNext = Math.round((when - masterStart) / period) + 1;
-    const firstFuture = Math.floor((ctxNow - masterStart) / period) + 1;
-    const n = Math.max(scheduledNext, firstFuture);
-    const next = masterStart + n * period;
-    ok(`E.stall ${stalledPeriods}p jumps directly to first future boundary`,
-      n === firstFuture && next > ctxNow && next - ctxNow <= period,
-      `scheduledNext=${scheduledNext} firstFuture=${firstFuture} next=${next} now=${ctxNow}`);
+console.log('=== C. an overdub that ends without a restart swaps no more ===');
+{
+  const loop = await playingLoop();
+  const { rig } = loop;
+  await rig.advanceTo(loop.boundary(loop.nextIndex() - 1) + 0.05);
+  await rig.looper.recDub(0);
+  await rig.advanceTo(loop.boundary(loop.nextIndex()) + 0.05); // one swap
+  const mark = rig.sources().length;
+  await rig.looper.recDub(0);
+  await rig.advance(0.01);
+  ok('C the layer commits: PLAYING, no pending swap timer', rig.looper.trackInfo(0).state === 'PLAYING' && pendingSwaps(rig) === 0,
+    `state=${rig.looper.trackInfo(0).state} pending=${pendingSwaps(rig)}`);
+  await rig.advance(5 * loop.period);
+  ok('C no swap after the end', swapsByBoundary(rig, mark, loop).size === 0);
+  ok('C only the scheduled final restart plays', rig.sources().length - mark === 1, `sources=${rig.sources().length - mark}`);
+}
+
+console.log('=== D. early fire re-arms for the NEXT boundary; a stall jumps to the first future one ===');
+for (const bpm of [200, 137, 120]) {
+  for (const hairQuanta of [1, 3]) {
+    const loop = await playingLoop(bpm);
+    const { rig } = loop;
+    await rig.advanceTo(loop.boundary(loop.nextIndex() - 1) + 0.05);
+    await rig.looper.recDub(0);
+    const n = loop.nextIndex();
+    const when = loop.boundary(n);
+    // The wall-clock timer fires while ctx still reads up to a few quanta BEFORE the boundary.
+    await rig.advanceTo(when - (hairQuanta * 128) / rig.sr - 1e-6);
+    ok(`D bpm=${bpm} ctx is before the boundary`, rig.now() < when);
+    const mark = rig.sources().length;
+    rig.timers.fire(rig.timers.nextDue(SWAP_TIMER));
+    await rig.flush();
+    const swap = rig.sources()[mark];
+    ok(`D bpm=${bpm} hair=${hairQuanta}q the early swap starts exactly on its boundary`,
+      rig.sources().length === mark + 1 && swap.startTime === when && swap.offset === 0,
+      `sources=${rig.sources().length - mark} start=${swap?.startTime} when=${when}`);
+    // Its delay is measured from the early ctx reading, so it fires up to that skew after the boundary.
+    ok(`D bpm=${bpm} hair=${hairQuanta}q the re-arm targets the next boundary`,
+      Math.abs(rig.timers.nextDue(SWAP_TIMER) / 1000 - loop.boundary(n + 1)) < ((hairQuanta + 1) * 128) / rig.sr,
+      `due=${rig.timers.nextDue(SWAP_TIMER) / 1000} next=${loop.boundary(n + 1)}`);
+    await rig.advanceTo(loop.boundary(n + 2) + 0.05);
+    const per = [n, n + 1, n + 2].map((k) => swapsByBoundary(rig, mark, loop).get(k) ?? 0);
+    ok(`D bpm=${bpm} hair=${hairQuanta}q no duplicate swap at any boundary`, per.every((c) => c === 1), JSON.stringify(per));
   }
 }
-
-// ---- F. A swap that throws at any step ends the session: STOPPED, layer kept, no successor timer ----
-// Before D15 the throw escaped the timer, so the re-arm never ran and the lane stayed OVERDUBBING with
-// no swap left: later layers accumulated into a buffer that never played. The try covers the whole
-// swap body from the commit on, so a throw before the commit is handed off too; STOP then commits.
-for (const failStep of SWAP_STEPS) for (const failAt of [0, 1, 3]) {
-  const r = simulate({ useCancellation: true, taps: ['start'], boundaries: 6, failAt, failStep });
-  ok(`F.${failStep}@${failAt} lane leaves OVERDUBBING into STOPPED`, r.track.state === 'STOPPED', r.track.state);
-  ok(`F.${failStep}@${failAt} failure logged once`, r.errors === 1, `errors=${r.errors}`);
-  ok(`F.${failStep}@${failAt} no timer pending after the failure`, r.pending === 0 && r.track.overdubTimer === null,
-    `pending=${r.pending}`);
-  ok(`F.${failStep}@${failAt} swaps stop at the failed boundary`,
-    r.swapsPerBoundary.every((n, b) => n === (b < failAt ? 1 : 0)), JSON.stringify(r.swapsPerBoundary));
-  ok(`F.${failStep}@${failAt} the failed boundary's layer is kept`, r.track.record === r.failedLayer &&
-    r.failedLayer === failAt + 1, `record=${r.track.record} failedLayer=${r.failedLayer}`);
-  ok(`F.${failStep}@${failAt} swap commits match the throw point`,
-    r.committed === failAt + (failStep === 'commit' ? 0 : 1), `committed=${r.committed}`);
-  ok(`F.${failStep}@${failAt} capture released (overdub buffer dropped)`, r.track.overdubBuf === false);
+for (const stalledPeriods of [1.2, 2.0, 4.7]) {
+  const loop = await playingLoop();
+  const { rig } = loop;
+  await rig.advanceTo(loop.boundary(loop.nextIndex() - 1) + 0.05);
+  await rig.looper.recDub(0);
+  const n = loop.nextIndex();
+  await rig.advanceTo(loop.boundary(n) - 0.01);
+  const mark = rig.sources().length;
+  await rig.stall(stalledPeriods * loop.period);
+  const future = loop.nextIndex();
+  ok(`D stall ${stalledPeriods}p: one late swap, not one per missed boundary`, rig.sources().length - mark === 1,
+    `swaps=${rig.sources().length - mark}`);
+  const due = rig.timers.nextDue(SWAP_TIMER) / 1000;
+  ok(`D stall ${stalledPeriods}p: the re-arm targets the first future boundary`,
+    Math.abs(due - loop.boundary(future)) < 0.003 && due > rig.now() && due - rig.now() <= loop.period,
+    `due=${due} first future=${loop.boundary(future)} now=${rig.now()}`);
+  const late = rig.sources()[mark];
+  ok(`D stall ${stalledPeriods}p: the late swap stays on the grid`,
+    Math.abs(phase(late.startTime - late.offset, loop)) < 1e-6,
+    `start=${late.startTime} offset=${late.offset}`);
 }
 
-// The old Float32-ring mock here no longer represents the timestamped transport. Actual packet
-// publication is executed by fs-capture-packets-verify.mjs; overdub-window.mjs drives real punch-out
-// and proves its in-flight tail reaches the correct absolute frames, including delayed STOP.
+console.log('=== E. STOP during an overdub commits, cancels the swap and lands STOPPED ===');
+for (const trimMs of [null, 100]) {
+  // With C in flight the capture tail crosses the next boundary: the swap must not restart sound there.
+  const loop = await playingLoop();
+  const { rig, master } = loop;
+  if (trimMs !== null) {
+    const latency = await rig.import('audio/record-latency.ts');
+    latency.beginMonitorGeneration(0, 0);
+    latency.setOffsetMs(trimMs);
+  }
+  const tag = trimMs === null ? 'C=0' : `C=${trimMs}ms+`;
+  await rig.advanceTo(loop.boundary(loop.nextIndex() - 1) + 0.05);
+  const pre = layerSum(rig.tracks[0], master);
+  await rig.looper.recDub(0);
+  const punchIn = rig.frame();
+  await rig.advanceTo(loop.boundary(loop.nextIndex()) - 0.03);
+  rig.looper.playStop(0);
+  const stopFrame = rig.frame();
+  ok(`E ${tag} no swap timer survives STOP`, pendingSwaps(rig) === 0, `pending=${pendingSwaps(rig)}`);
+  const mark = rig.sources().length;
+  await rig.advance(3 * loop.period);
+  const t = rig.tracks[0];
+  ok(`E ${tag} the lane is STOPPED with no live source`, rig.looper.trackInfo(0).state === 'STOPPED' && t.source === null);
+  ok(`E ${tag} no playback starts after STOP`, rig.sources().length === mark, `sources=${rig.sources().length - mark}`);
+  ok(`E ${tag} the layer through the press is committed`, layerSum(t, master) - pre === (stopFrame - punchIn) * DUB,
+    `added=${(layerSum(t, master) - pre) / DUB} frames, window=${stopFrame - punchIn}`);
+}
+
+console.log('=== F. a swap that throws at any step ends the session: STOPPED, layer kept, no successor ===');
+/** Make the swap step `step` throw once on the next boundary firing. */
+function inject(rig, step) {
+  const t = rig.tracks[0];
+  const fault = new Error(`injected ${step} failure`);
+  if (step === 'commit') {
+    t.record.set = function () { delete t.record.set; throw fault; };
+  } else if (step === 'peaks') {
+    const peakMin = t.peakMin;
+    Object.defineProperty(t, 'peakMin', {
+      configurable: true,
+      get() { Object.defineProperty(t, 'peakMin', { value: peakMin, writable: true, configurable: true }); throw fault; },
+    });
+  } else if (step === 'fill') {
+    const buf = t.overdubSwapBufs[t.overdubSwapIdx];
+    buf.getChannelData = function () { delete buf.getChannelData; throw fault; };
+  } else rig.failNextSourceStart(fault);
+}
+const failures = [];
+for (const step of ['commit', 'peaks', 'fill', 'start']) {
+  for (const failAt of [0, 1, 3]) failures.push({ step, failAt, trimMs: null });
+  failures.push({ step, failAt: 1, trimMs: 100 }); // the STOP's capture tail is still in flight after the failure
+}
+for (const { step, failAt, trimMs } of failures) {
+  const loop = await playingLoop();
+  const { rig, master } = loop;
+  if (trimMs !== null) {
+    const latency = await rig.import('audio/record-latency.ts');
+    latency.beginMonitorGeneration(0, 0);
+    latency.setOffsetMs(trimMs);
+  }
+  const tag = `${step}@${failAt}${trimMs === null ? '' : ` C=${trimMs}ms+`}`;
+  await rig.advanceTo(loop.boundary(loop.nextIndex() - 1) + 0.05);
+  const pre = layerSum(rig.tracks[0], master);
+  await rig.looper.recDub(0);
+  const punchIn = rig.frame();
+  const first = loop.nextIndex();
+  const mark = rig.sources().length;
+  const errorsBefore = rig.logs.filter((l) => l.level === 'error').length;
+  await rig.advanceTo(loop.boundary(first + failAt) - 0.01);
+  inject(rig, step);
+  await rig.advanceTo(loop.boundary(first + failAt) + 0.005);
+  ok(`F ${tag} no swap timer is re-armed after the failure`, pendingSwaps(rig) === 0, `pending=${pendingSwaps(rig)}`);
+  await rig.advanceTo(loop.boundary(first + failAt) + 0.2);
+  const t = rig.tracks[0];
+  const errors = rig.logs.filter((l) => l.level === 'error').slice(errorsBefore);
+  ok(`F ${tag} the failure is logged once`, errors.length === 1 && /overdub boundary swap failed/.test(String(errors[0]?.args[0])),
+    JSON.stringify(errors.map((e) => String(e.args[0]))));
+  ok(`F ${tag} the lane leaves OVERDUBBING into STOPPED`, rig.looper.trackInfo(0).state === 'STOPPED', rig.looper.trackInfo(0).state);
+  ok(`F ${tag} no swap timer is pending`, pendingSwaps(rig) === 0 && t.overdubTimer === null, `pending=${pendingSwaps(rig)}`);
+  ok(`F ${tag} the capture is released`, t.overdubBuf === null && rig.state.engineState.activeRecordIndex === -1);
+  ok(`F ${tag} the owner is told`, rig.notify.toasts().some((n) => /overdub stopped/.test(n.message)));
+  const swaps = swapsByBoundary(rig, mark, loop);
+  ok(`F ${tag} swaps stop at the failed boundary`,
+    [...swaps.keys()].every((n) => n < first + failAt) && swaps.size === failAt, JSON.stringify([...swaps]));
+  // The failed boundary's layer: everything summed from the punch-in to the failing boundary (+ the
+  // quantum the timer fired in), committed by the STOP the failure hands off to.
+  const added = (layerSum(t, master) - pre) / DUB;
+  const toBoundary = Math.round(loop.boundary(first + failAt) * rig.sr) - punchIn;
+  ok(`F ${tag} the failed boundary's layer is kept`, added >= toBoundary && added <= toBoundary + 128,
+    `added=${added} frames, to boundary=${toBoundary}`);
+  const mark2 = rig.sources().length;
+  await rig.advance(3 * loop.period);
+  ok(`F ${tag} nothing restarts on its own`, rig.sources().length === mark2 && t.source === null);
+  rig.looper.playStop(0);
+  await rig.advance(0.05);
+  const replay = rig.tracks[0].source;
+  ok(`F ${tag} PLAY restarts the committed loop`, rig.looper.trackInfo(0).state === 'PLAYING' && replay !== null &&
+    replay.buffer.getChannelData(0).every((v, k) => v === t.record[k]));
+}
 
 console.log(`\n=== RESULT: ${checks - fails}/${checks} checks passed, ${fails} failed ===`);
-if (fails) process.exit(1);
+process.exit(fails === 0 ? 0 : 1);

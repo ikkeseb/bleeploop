@@ -72,9 +72,14 @@ export class VirtualTimers {
     if (typeof id === 'number' && this.live.delete(id)) this.cleared++;
   }
 
-  /** Fire every timer due at or before `untilMs`, earliest first. Returns how many fired. */
+  /**
+   * Fire every timer due at or before `untilMs`, earliest first. Returns how many fired. Callbacks run
+   * AT `untilMs` (the moment the rendered audio and the main thread meet), so a timer a callback
+   * registers counts its delay from there, never from the overdue timer's own deadline.
+   */
   fire(untilMs: number): number {
     let fired = 0;
+    this.nowMs = Math.max(this.nowMs, untilMs);
     for (;;) {
       let next: VirtualTimer | undefined;
       for (const t of this.live.values()) {
@@ -82,7 +87,6 @@ export class VirtualTimers {
         if (!next || t.due < next.due || (t.due === next.due && t.seq < next.seq)) next = t;
       }
       if (!next) break;
-      this.nowMs = Math.max(this.nowMs, next.due);
       if (next.interval === null) this.live.delete(next.id);
       else {
         const cadence = next.due + next.interval;
@@ -92,7 +96,6 @@ export class VirtualTimers {
       next.fn();
       fired++;
     }
-    this.nowMs = Math.max(this.nowMs, untilMs);
     return fired;
   }
 

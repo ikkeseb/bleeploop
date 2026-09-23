@@ -220,7 +220,8 @@ for (const t of tags) {
 // would notice. Assert each *-verify.mjs (except this meta-guard) is covered by (a) a real '../src/…' import
 // (imports can't drift), (b) ≥1 MIRRORS tag, or (c) an explicit `// MIRRORS-EXEMPT: <reason>` for guards that
 // genuinely port nothing (pure spec constants / self-contained format checks).
-const SRC_IMPORT_RE = /['"]\.\.\/src\//;               // matches the importing guards' convention (from/await import '../src/…')
+// './harness/rig.ts' loads the real src/ modules, so a rig guard counts as an import.
+const SRC_IMPORT_RE = /['"](?:\.\.\/src\/|\.\/harness\/rig\.ts['"])/;
 const EXEMPT_RE = /MIRRORS-EXEMPT:/;
 const tagFiles = new Set(tags.map((t) => t.file));
 console.log(`\nfs-mirror-drift: coverage over ${guards.length} guard(s)`);
