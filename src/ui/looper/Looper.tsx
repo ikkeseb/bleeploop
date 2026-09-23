@@ -136,15 +136,24 @@ function Fader(props: { index: number; disabled: boolean }) {
   );
 }
 
+/** Stop a smooth scroll still running in the lane stack where it is: an instant scroll to the current
+ * offset cancels it. */
+function haltScroll(stack: HTMLElement | null | undefined): void {
+  stack?.scrollTo({ top: stack.scrollTop, behavior: 'instant' });
+}
+
 /**
  * Scroll the lane stack just enough to show `lane` whole, from the nearer edge, and not at all when it
  * already shows; instantly under reduced motion. Only the stack scrolls: `scrollIntoView` would walk
  * every scroll container above it too, the overflow-hidden zones included. Whole pixels, rounded past
- * the edge, so a fractional lane edge never stays under the fold.
+ * the edge, so a fractional lane edge never stays under the fold. A reveal still running stops first:
+ * it is headed for the lane selected before, and a lane measured as in view before it lands would ride
+ * out of view with it (a double press inside its first frames).
  */
 function revealLane(lane: HTMLElement): void {
   const stack = lane.parentElement;
   if (!stack) return;
+  haltScroll(stack);
   const view = stack.getBoundingClientRect();
   const r = lane.getBoundingClientRect();
   const dy =
@@ -284,8 +293,9 @@ function TrackLane(props: {
   // A lane a key or a footswitch selects comes into view: at small windows the stack scrolls, and a
   // selected lane below its fold hid its refusal cue too. Not on this lane's own pointer press: it is on
   // screen already, and a scroll between pointerdown and pointerup would move the pressed button out
-  // from under the pointer and lose the click. A press on the lane already selected changes nothing, so
-  // its `pressed` waits for the next change, which moves the selection away and clears it here.
+  // from under the pointer and lose the click; for the same reason the press stops a reveal still
+  // running. A press on the lane already selected changes nothing, so its `pressed` waits for the next
+  // change, which moves the selection away and clears it here.
   let laneEl: HTMLDivElement | undefined;
   let pressed = false;
   createEffect((was: boolean) => {
@@ -311,6 +321,7 @@ function TrackLane(props: {
       aria-current={looper.selectedTrack() === props.index ? 'true' : undefined}
       onPointerDown={() => {
         pressed = true;
+        haltScroll(laneEl?.parentElement);
         looper.selectTrack(props.index);
       }}
     >

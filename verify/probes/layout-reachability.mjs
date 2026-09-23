@@ -9,7 +9,8 @@
  * At 960x600 (reduced motion) and 1000x700 with lane 1's FX drawer open, so the lane stack scrolls,
  * each ArrowDown and digit must bring the selected lane wholly into the stack's view from the nearer
  * edge and leave a lane already in view unscrolled; a pointer press on a half-hidden lane must land
- * and scroll nothing.
+ * and scroll nothing. At 1000x700 (smooth) a second select inside a reveal's first frames must end in
+ * view, and a pointer press on a lane must stop a reveal still running where the press found it.
  * "Unreachable" means clipped below 98% visible OR the element under its own centre
  * point is not itself (something else intercepts the click). `--plugin-source` substitutes
  * `src/platform/host.web.ts` to simulate a live native plugin slot instead of the browser-tier
@@ -217,6 +218,11 @@ await probe(async ({ open }) => {
       };
       // Registered after the app's transport handler, so it samples the lane right after that handler ran.
       window.addEventListener('keydown', () => { window.__atKey = window.__laneView(window.__lf.looper.selectedTrack()); });
+      // Capture phase, so it samples the stack before the lane's own handler runs.
+      window.addEventListener('pointerdown', (e) => {
+        const lane = e.target.closest?.('.lp-lane');
+        window.__atPointer = { lane: [...document.querySelectorAll('.lp-lane')].indexOf(lane), scrollTop: stack.scrollTop };
+      }, true);
     });
     // Smooth scrolling ends when scrollTop holds still for 8 frames.
     const settle = () => page.evaluate(() => new Promise(resolve => {
@@ -256,6 +262,39 @@ await probe(async ({ open }) => {
       steps.push({ key, target: target + 1, stepOk, before, after, at });
     }
     ok &&= scrolled >= 3;
+    // A reveal still running stops at the next select. Two digit keydowns in one task (a footswitch or
+    // MIDI double-send): lane 1 still shows when the second is measured, and the reveal of lane 5 must
+    // not carry it off. Then '5' and a real press on lane 1's waveform (no handler of its own: the press
+    // only selects) while that reveal runs: the stack must stop where the press found it, before the
+    // reveal landed at the bottom.
+    let rapid = null;
+    if (motion !== 'reduce') {
+      // Each case starts from the top, lane 1 selected (the steps above ended on '1').
+      const toTop = async () => {
+        await page.evaluate(() => { document.querySelector('.lp__lanes').scrollTop = 0; });
+        await settle();
+      };
+      await toTop();
+      await page.evaluate(() => {
+        for (const key of ['5', '1']) window.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true }));
+      });
+      await settle();
+      const doubled = await page.evaluate(() => window.__laneView(0));
+      await toTop();
+      const aim = await page.evaluate(() => {
+        const r = document.querySelectorAll('.lp-lane')[0].querySelector('canvas').getBoundingClientRect();
+        return { x: (r.left + r.right) / 2, y: (r.top + r.bottom) / 2 };
+      });
+      await page.keyboard.press('5');
+      await page.mouse.click(aim.x, aim.y);
+      await settle();
+      const held = await page.evaluate(() => ({ at: window.__atPointer, after: window.__laneView(0) }));
+      const rapidOk = doubled.selected === 0 && inside(doubled, 1)
+        && held.at.lane === 0 && held.at.scrollTop < held.after.overflow
+        && held.after.selected === 0 && held.after.scrollTop === held.at.scrollTop;
+      ok &&= rapidOk;
+      rapid = { rapidOk, doubled, aim, held };
+    }
     // Half of lane 5 below the fold, then a real pointer click on its PLAY (page.mouse: a locator click
     // would scroll the button into view itself).
     const press = await page.evaluate(() => {
@@ -274,9 +313,9 @@ await probe(async ({ open }) => {
       && pressed.state === 'PLAYING' && pressed.view.scrollTop === press.scrollTop;
     ok &&= pointerOk;
     await page.screenshot({ path: `logs/layout/${name}.png` });
-    console.log(JSON.stringify({ name, ok, scrolled, pointerOk, press, pressed, steps }));
+    console.log(JSON.stringify({ name, ok, scrolled, rapid, pointerOk, press, pressed, steps }));
     if (!ok) failures.push(name);
-    results.push({ name, ok, scrolled, pointerOk, press, pressed, steps });
+    results.push({ name, ok, scrolled, rapid, pointerOk, press, pressed, steps });
     await page.close();
   }
   await writeFile(`logs/layout/${label}.json`, JSON.stringify(results, null, 2));
