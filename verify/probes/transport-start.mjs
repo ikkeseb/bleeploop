@@ -1,7 +1,6 @@
 /**
  * Transport bring-up after a REJECTED engine.start, on the real clock module with only
- * `engine.start` substituted for one call:
- *   node verify/probes/transport-start.mjs --url=http://localhost:1420
+ * `engine.start` substituted for one call. Run: pnpm probe transport-start
  *
  * Proves that `clock.ensureRunning()` does not stay marked running when `engine.start` rejects
  * (Tone adoption, toneStart, the master-limiter latency measurement): the error is logged once,
@@ -10,19 +9,10 @@
  * rejection, so it says nothing about which real failures occur on which machines.
  */
 import assert from 'node:assert/strict';
-import { chromium } from 'playwright';
+import { probe } from '../harness/probe.ts';
 
-const url = process.argv.find((arg) => arg.startsWith('--url='))?.slice(6) ?? 'http://localhost:1420';
-const browser = await chromium.launch({ headless: true, args: ['--autoplay-policy=no-user-gesture-required'] });
-
-try {
-  const page = await browser.newPage();
-  const pageErrors = [];
-  const consoleErrors = [];
-  page.on('pageerror', (error) => pageErrors.push(String(error)));
-  page.on('console', (msg) => { if (msg.type() === 'error') consoleErrors.push(msg.text()); });
-  await page.goto(url);
-  await page.waitForFunction(() => !!window.__lf);
+await probe(async ({ open, url }) => {
+  const { page, consoleErrors } = await open();
 
   const result = await page.evaluate(async () => {
     const lf = window.__lf;
@@ -99,8 +89,4 @@ try {
   assert.equal(second.transportStarts, 1, 'the Tone transport must start exactly once');
   assert.equal(second.pulseStarts, 1, 'the free-run pulse must start exactly once');
   assert.deepEqual(third, { startCalls: 2, transportStarts: 1, pulseStarts: 1 }, 'ensureRunning is idempotent once running');
-  assert.deepEqual(pageErrors, [], 'unexpected browser errors');
-  console.log('=== RESULT: transport-start passed ===');
-} finally {
-  await browser.close();
-}
+});

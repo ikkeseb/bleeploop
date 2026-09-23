@@ -21,6 +21,7 @@
     "verify": "node verify/run-guards.mjs",
     "check": "pnpm typecheck && pnpm lint && pnpm check:boundary && pnpm verify",
     "verify:jam": "node verify/probes/golden-jam.mjs",
+    "probe": "node verify/run-probes.mjs",
     "prepare": "simple-git-hooks"
   },
   "simple-git-hooks": {
