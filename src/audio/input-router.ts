@@ -105,8 +105,10 @@ class InputRouter {
       if (!sources) this.heldBySource.set(ev.note, sources = new Set());
       sources.add(owner);
       if (firstHold) {
-        if (this.sustained.has(ev.note) && !this.activePlugin) {
-          this.active?.noteOff(ev.note, engine.ctx.currentTime + SCHEDULE_AHEAD);
+        // Re-strike under the pedal: end the sustained voice before the new one (plugin sinks too).
+        if (this.sustained.has(ev.note)) {
+          if (this.activePlugin) this.activePlugin.noteOff(ev.note);
+          else this.active?.noteOff(ev.note, engine.ctx.currentTime + SCHEDULE_AHEAD);
         }
         const velocity = clampMidi(ev.velocity) / 127;
         if (this.activePlugin) this.activePlugin.noteOn(ev.note, velocity);
@@ -117,7 +119,8 @@ class InputRouter {
       const sources = this.heldBySource.get(ev.note);
       if (!sources?.delete(owner)) return;
       if (!sources.size) this.heldBySource.delete(ev.note);
-      if (!this.activePlugin && (this.pedals.has(owner) || this.pedals.has('global'))) {
+      // Host-side sustain: the deferral applies to plugin sinks too (bend/mod stay built-in only).
+      if (this.pedals.has(owner) || this.pedals.has('global')) {
         let owners = this.sustained.get(ev.note);
         if (!owners) this.sustained.set(ev.note, owners = new Set());
         owners.add(this.pedals.has(owner) ? owner : 'global');
@@ -181,8 +184,12 @@ class InputRouter {
   allNotesOff(): void {
     this.active?.allNotesOff();
     // Release every plugin-held note individually (CLAP has no standard all-notes-off event).
+    // Sustained-but-released notes still sound on the plugin, so they are released too.
     if (this.activePlugin) {
       for (const note of this.heldBySource.keys()) this.activePlugin.noteOff(note);
+      for (const note of this.sustained.keys()) {
+        if (!this.heldBySource.has(note)) this.activePlugin.noteOff(note);
+      }
     }
     const hadHeld = this.heldBySource.size > 0;
     this.heldBySource.clear();

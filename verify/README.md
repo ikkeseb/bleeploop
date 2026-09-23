@@ -36,6 +36,9 @@ it does not exercise native COM cleanup.
 pending controls, queue completion, failure recovery, independence of the other slot, and selection
 of separate plugin files that share a class id.
 `instrument-controls.mjs` checks keyboard-octave remounts, plugin gain/live fallbacks, empty scans and MIDI request failures.
+`instrument-routing.mjs` checks that a failed unload aborts a plugin swap (old plugin kept, no load,
+toast, retry completes), that picking a synth or instrument plugin moves the MIDI slot while an effect
+does not, and host-side sustain on a plugin sink (deferred note-off, re-strike order).
 `input-controls.mjs` checks BPM cancellation, pointer release across octave changes, independent MIDI
 ownership and the playable upper note range. `ui-state-carriers.mjs` checks transport, meter, lamp,
 looper-announcement and toast state carriers. `transport-focus.mjs` checks that Space/Enter/1–5

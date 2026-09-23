@@ -115,9 +115,10 @@ export function setActiveSlot(i: 0 | 1): void {
 }
 
 /**
- * Assign synth `id` to slot `slotIndex`. If the slot was in plugin mode, the plugin is unloaded and
- * the slot reverts to this synth. If the synth engine was already live it is disposed and rebuilt. If
- * the affected slot is active, the router is updated.
+ * Assign synth `id` to slot `slotIndex` and make that slot the active (MIDI/keys) slot — picking a
+ * source is picking what you play. If the slot was in plugin mode, the plugin is unloaded and the slot
+ * reverts to this synth; a failed unload keeps the plugin and leaves the active slot where it was. If
+ * the synth engine was already live it is disposed and rebuilt.
  */
 export function selectSynth(slotIndex: 0 | 1, id: string): void {
   setSlotIds((prev) => withAt(prev, slotIndex, id)); // immediate UI highlight
@@ -127,9 +128,9 @@ export function selectSynth(slotIndex: 0 | 1, id: string): void {
   void serializeSlot(slotIndex, async () => {
     if (slotPlugins()[slotIndex]) {
       await doClearPlugin(slotIndex); // plugin → synth: unload + revert to the now-selected synth id
-      return;
-    }
-    if (engines[slotIndex]) {
+      // A failed unload restores the (now silent) plugin: leave MIDI where it is rather than move it there.
+      if (slotPlugins()[slotIndex]) return;
+    } else if (engines[slotIndex]) {
       // Route the OLD engine away (flushing it while it's still live) BEFORE buildSlot disposes it, so
       // the router never holds a reference to a disposed SynthEngine — the same route-away-then-dispose
       // order doSelectPlugin uses. Without this, applyActiveRouting()→setActiveEngine(E_new) below sees
@@ -137,8 +138,8 @@ export function selectSynth(slotIndex: 0 | 1, id: string): void {
       // synths, but a latent throw for any future synth whose allNotesOff touches a live node post-dispose).
       if (activeSlot() === slotIndex) inputRouter.setActiveEngine(null);
       buildSlot(slotIndex);
-      if (activeSlot() === slotIndex) applyActiveRouting();
     }
+    setActiveSlot(slotIndex);
   });
 }
 
@@ -185,26 +186,12 @@ export function selectPlugin(slot: 0 | 1, desc: PluginDescriptor): Promise<void>
 }
 
 async function doSelectPlugin(slot: 0 | 1, desc: PluginDescriptor): Promise<void> {
-  if (samePluginDescriptor(slotPlugins()[slot], desc)) return; // already loaded
-  const outgoingPath = slotPlugins()[slot]?.path;
-  // Swap: tear down + unload any existing plugin in this slot before loading the new one.
-  if (slotPlugins()[slot]) {
-    await disarmMonitorInternal(slot); // stop the native monitor before its plugin goes away
-    await disarmInputInternal(slot); // the outgoing plugin's input feed must stop before its unload
-    pluginBridge.teardownPluginSlot(slot);
-    // The old plugin's note-sink is the SAME stable PLUGIN_SINKS ref the new one will use, so the
-    // applyActiveRouting below would early-return without flushing. Drop the override now so any
-    // note held across the swap is released from the router's held-set (no live voice survives it).
-    if (activeSlot() === slot) inputRouter.setActivePlugin(null);
-    setSlotPlugins((prev) => withAt(prev, slot, null));
-    try {
-      await platform.pluginHost.unloadPlugin(slot);
-    } catch (e) {
-      console.error('[instrument] plugin unload (swap) failed', e);
-      notifyError('Plugin unload failed', e);
-    }
-    releaseEditorAffinity(outgoingPath);
-  }
+  const outgoing = slotPlugins()[slot];
+  if (samePluginDescriptor(outgoing, desc)) return; // already loaded
+  // Swap: tear down + unload any existing plugin in this slot before loading the new one. A failed
+  // unload aborts the swap — the native host may still hold the old plugin, so a load would only fail
+  // on "slot already loaded" while the UI showed the new one.
+  if (outgoing && !(await unloadSlotPlugin(slot, outgoing, 'swap'))) return;
   // Tell the bridge this slot's plugin kind BEFORE the load, so acceptPluginBuffer picks the right
   // output-gain default (FX ~unity / synth conservative) from the scan category, not the input bus.
   const loadToken = pluginBridge.beginPluginLoad(slot, desc.isEffect);
@@ -220,8 +207,10 @@ async function doSelectPlugin(slot: 0 | 1, desc: PluginDescriptor): Promise<void
   setSlotPlugins((prev) => withAt(prev, slot, desc));
   // Route to the plugin FIRST (drops the live synth-engine ref), THEN dispose the engine — so the
   // router never holds a reference to a disposed SynthEngine. If the slot isn't active the router
-  // doesn't reference this engine anyway, so disposing it is safe regardless.
-  if (activeSlot() === slot) applyActiveRouting();
+  // doesn't reference this engine anyway, so disposing it is safe regardless. An instrument plugin
+  // makes its slot the MIDI/keys slot; an effect (amp sim on the guitar) leaves routing where it is.
+  if (desc.isEffect !== true) setActiveSlot(slot);
+  else if (activeSlot() === slot) applyActiveRouting();
   if (engines[slot]) {
     engines[slot]!.dispose();
     engines[slot] = null;
@@ -229,29 +218,56 @@ async function doSelectPlugin(slot: 0 | 1, desc: PluginDescriptor): Promise<void
 }
 
 /**
+ * Tear down + natively unload the plugin in `slot`. The slot reads empty while the unload is in
+ * flight: a clear routes an active slot to its synth at once, a swap leaves it silent (no synth is
+ * built only to be disposed when the next plugin lands). On failure the OLD descriptor is restored
+ * and routing follows it: the host may still hold that plugin, so the slot keeps saying so and a
+ * later swap/clear retries the unload. Its audio bridge stays torn down (silent) until then. Returns
+ * whether it unloaded.
+ */
+async function unloadSlotPlugin(slot: 0 | 1, outgoing: PluginDescriptor, path: 'swap' | 'clear'): Promise<boolean> {
+  await disarmMonitorInternal(slot); // stop the native monitor before its plugin goes away
+  await disarmInputInternal(slot); // the outgoing plugin's input feed must stop before its unload
+  pluginBridge.teardownPluginSlot(slot); // stop the audio drain + release the hop-1 buffer (sync)
+  setSlotPlugins((prev) => withAt(prev, slot, null));
+  // Both calls flush held notes: the next plugin reuses the SAME stable PLUGIN_SINKS ref, so a later
+  // applyActiveRouting would early-return without releasing a note held across the swap.
+  if (activeSlot() === slot) {
+    if (path === 'swap') inputRouter.setActivePlugin(null);
+    else applyActiveRouting(); // back to the slot's synth immediately
+  }
+  try {
+    await platform.pluginHost.unloadPlugin(slot); // Rust joins the producer + deactivates
+  } catch (e) {
+    console.error(`[instrument] plugin unload${path === 'swap' ? ' (swap)' : ''} failed`, e);
+    notifyError('Plugin unload failed', 'The plugin stays in the slot but is silent. Choose none or another plugin to retry.');
+    setSlotPlugins((prev) => withAt(prev, slot, outgoing));
+    // Route to the restored plugin FIRST (drops any synth-engine ref), THEN dispose the engine built
+    // while the slot read empty, so no idle SynthEngine lives beside the plugin.
+    if (activeSlot() === slot) applyActiveRouting();
+    if (engines[slot]) {
+      engines[slot]!.dispose();
+      engines[slot] = null;
+    }
+    return false;
+  }
+  releaseEditorAffinity(outgoing.path);
+  return true;
+}
+
+/**
  * Unload the plugin in `slot` and revert it to its synth. Tears down the audio bridge synchronously
  * + reverts routing optimistically (so the slot is silent immediately), then awaits the native
- * unload. No-op if the slot holds no plugin. Serialized per slot (see `serializeSlot`).
+ * unload; a failed unload restores the plugin (see `unloadSlotPlugin`). No-op if the slot holds no
+ * plugin. Serialized per slot (see `serializeSlot`).
  */
 export function clearPlugin(slot: 0 | 1): Promise<void> {
   return serializeSlot(slot, () => doClearPlugin(slot));
 }
 
 async function doClearPlugin(slot: 0 | 1): Promise<void> {
-  if (!slotPlugins()[slot]) return;
-  const outgoingPath = slotPlugins()[slot]?.path;
-  await disarmMonitorInternal(slot); // stop the native monitor before the plugin goes away
-  await disarmInputInternal(slot); // stop feeding input before the plugin goes away
-  pluginBridge.teardownPluginSlot(slot); // stop the audio drain + release the hop-1 buffer (sync)
-  setSlotPlugins((prev) => withAt(prev, slot, null));
-  if (activeSlot() === slot) applyActiveRouting(); // back to the slot's synth immediately
-  try {
-    await platform.pluginHost.unloadPlugin(slot); // Rust joins the producer + deactivates
-  } catch (e) {
-    console.error('[instrument] plugin unload failed', e);
-    notifyError('Plugin unload failed', e);
-  }
-  releaseEditorAffinity(outgoingPath);
+  const outgoing = slotPlugins()[slot];
+  if (outgoing) await unloadSlotPlugin(slot, outgoing, 'clear');
 }
 
 /**

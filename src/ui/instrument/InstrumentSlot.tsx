@@ -97,7 +97,9 @@ export function InstrumentSlot(props: { slot: 0 | 1 }) {
                       aria-label={`${s.name} for slot ${slotIdx + 1}`}
                       disabled={pending()}
                       onClick={(e) => {
-                        e.stopPropagation(); // don't re-trigger slot activation
+                        // selectSynth activates the slot itself once its queued work lands (not when a
+                        // failed unload keeps the plugin), so the card click must not activate it first.
+                        e.stopPropagation();
                         selectSynth(slotIdx, s.id);
                       }}
                     >

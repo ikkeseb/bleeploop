@@ -40,6 +40,6 @@ jobs:
           vite_pid=$!
           trap 'kill "$vite_pid"; cat /tmp/bleeploop-vite.log' EXIT
           node --input-type=module -e 'for (let i = 0; ; i++) { try { if ((await fetch("http://127.0.0.1:1420")).ok) break; } catch {} if (i === 100) process.exit(1); await new Promise(r => setTimeout(r, 100)); }'
-          for probe in input-controls instrument-controls ui-state-carriers transport-focus mic-arm-race transport-start plugin-slot-pending plugin-load-buffer-generation monitor-generation session-state-roundtrip recovery-import-failure asio-startup; do
+          for probe in input-controls instrument-controls instrument-routing ui-state-carriers transport-focus mic-arm-race transport-start plugin-slot-pending plugin-load-buffer-generation monitor-generation session-state-roundtrip recovery-import-failure asio-startup; do
             pnpm exec node "verify/$probe.mjs" --url=http://127.0.0.1:1420
           done
