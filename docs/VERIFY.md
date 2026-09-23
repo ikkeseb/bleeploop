@@ -89,6 +89,9 @@ Tone transport handle). This is how you drive and inspect the app from Playwrigh
 - `tauri dev` does NOT self-terminate — kill with `Get-Process app,cargo | Stop-Process -Force` +
   the vite node on port 1420 (`(Get-NetTCPConnection -LocalPort 1420 -State Listen).OwningProcess`);
   **NEVER kill all node — the Claude Code session may be a node process.**
+- Screenshot the native window by its handle: `PrintWindow(hwnd, 3)` (client only + full content)
+  from a DPI-aware process captures it without focus. Never grab the screen (`CopyFromScreen`
+  after `SetForegroundWindow`): it captures whatever window is on top, including the owner's.
 - Runtime-gate logs go under gitignored `logs/` (e.g. `logs/dev-asio.log`), not the repo root.
 - `tauri dev` watches ALL of `src-tauri/` — a doc edit there (`AGENTS.md` included) rebuilds and
   relaunches the app mid-probe. Write docs after the run, or outside `src-tauri/`.

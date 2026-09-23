@@ -125,8 +125,9 @@ export function InstrumentSlot(props: { slot: 0 | 1 }) {
             </Show>
           </Show>
           {/* Native plugins (Tauri only) collapse into ONE dropdown per slot — scales to any plugin
-              count. "— none —" reverts the slot to its synth. Present whether or not a plugin is loaded
-              (it's how you load one), so it sits after the synth pills / plugin controls. */}
+              count. The empty option reads "Load amp / plugin…" while the slot plays its synth and
+              "— none —" (back to the synth) once a plugin is loaded. Present whether or not a plugin
+              is loaded (it's how you load one), so it sits after the synth pills / plugin controls. */}
           <Show when={platform.pluginHost.available && availablePlugins().length > 0}>
             <select
               class="slot__select"
@@ -153,7 +154,7 @@ export function InstrumentSlot(props: { slot: 0 | 1 }) {
                 });
               }}
             >
-              <option value="">{pending() ? 'Updating…' : '— none —'}</option>
+              <option value="">{pending() ? 'Updating…' : plugin() ? '— none —' : 'Load amp / plugin…'}</option>
               <For each={availablePlugins()}>
                 {(p) => (
                   <option value={pluginDescriptorKey(p)} title={p.path}>

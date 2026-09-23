@@ -23,9 +23,6 @@ not here.
 - **Help popover:** wording + section order (guitar GO LIVE, ASIO slot swap, separate MIC path,
   COPY, REV, CLICK/FIXED/AUTO REC, volume-detent line and Session section). Overdub is "OVERDUB" (lane word) / "overdubs"
   (Help) / "Overdubbing" (screen reader) across three surfaces — one word?
-- **First screen reads synth, not guitar (2026-09-23):** both slots say SOURCE · SYNTH over six synth
-  pills; the amp-sim picker is an unlabelled "— none —" (`InstrumentSlot.tsx`); Help's first bullet
-  leads with MIDI. "Load amp / plugin…" in the picker and the guitar bullet first?
 - **Play-path signals from 1.5 m (2026-09-23):** nothing in the looper zone says the amp-sim is live
   (only the slot's pill); the 4×22 px record meter is the only clipping cue; the BPM lock pulse fires
   mid-count-in beside the big "4", which is rec-red inside an amber ARMED lane.

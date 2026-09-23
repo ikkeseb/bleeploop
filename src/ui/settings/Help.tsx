@@ -6,10 +6,11 @@ import { COMPUTER_MAP } from '../keyboard/Keyboard';
 import './help.css';
 
 /**
- * Help / quick-reference popover: how to play (MIDI/guitar primary, computer keys as a fallback), the
- * looper + transport controls, the play map, and the layout move/hide/resize affordances. Same popover
- * pattern as AudioSettings (a topbar `.tool` cap → a `<Show>`-mounted v6 panel). It LEADS with the
- * instrument (the looper) — the keyboard is the fallback play path, so its sections come last. The
+ * Help / quick-reference popover: how to play (guitar first, a MIDI controller for the other layers,
+ * computer keys as a fallback), the looper + transport controls, the play map, and the layout
+ * move/hide/resize affordances. Same popover pattern as AudioSettings (a topbar `.tool` cap → a
+ * `<Show>`-mounted v6 panel). It LEADS with the instrument (the looper) — the keyboard is the fallback
+ * play path, so its sections come last. The
  * drum-pad rows read from DRUM_KIT, and the piano legend reads from COMPUTER_MAP, so neither can drift
  * from the real controls. The looper/transport copy mirrors the controls in Looper.tsx + Transport.tsx.
  */
@@ -31,9 +32,9 @@ export function Help() {
       <section class="help__sec">
         <h3 class="help__h">Playing</h3>
         <ul class="help__list">
-          <li>A MIDI controller or guitar is the main way to play. Controller status shows in Audio Settings → diagnostics</li>
+          <li>Guitar is the main way to play: load an amp plugin and use <span class="help__note">GO LIVE</span>. <span class="help__note">INPUT LIVE</span> means that slot receives the selected input and monitors it natively. Choose the input channel in Audio Settings</li>
+          <li>A MIDI controller plays the synths and the other layers. Controller status shows in Audio Settings → diagnostics</li>
           <li>Click a slot to send MIDI and keyboard notes to its plugin or built-in synth</li>
-          <li>For guitar, load an amp plugin and use <span class="help__note">GO LIVE</span>. <span class="help__note">INPUT LIVE</span> means that slot receives the selected input and monitors it natively. Choose the input channel in Audio Settings</li>
           <li>ASIO supports one live slot. To use another amp slot, <span class="help__note">UNLOAD</span> the first plugin. Turning INPUT LIVE off keeps its driver reserved</li>
           <li><span class="help__note">MIC</span> is a separate mic / line path. Leave it off when playing guitar through a live plugin. Synths and plugins feed the looper directly; the bar beside MIC shows record level</li>
           <li>The computer keys below are a fallback when no controller is connected</li>

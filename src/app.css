@@ -582,7 +582,7 @@ option {
 }
 
 /* plugin <select> — a flat glass control (Tauri only). ONE dropdown per slot scales to any plugin
-   count; "— none —" reverts the slot to its synth. Explicit background-color so no UA face shows. */
+   count; its empty option reverts the slot to its synth. Explicit background-color so no UA face shows. */
 .slot__select {
   flex: 0 1 auto;
   min-width: 96px;
