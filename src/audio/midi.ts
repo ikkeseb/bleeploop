@@ -47,13 +47,14 @@ export function setMidiConsumer(fn: MidiConsumer | null): void {
 
 /**
  * The consume-first hook takes `controller` on this port and channel over, so its next values never
- * reach the branch below: let go of what it last set there. A pedal held down while it was learned
- * would otherwise sustain that channel for good, and a learned mod wheel would leave its vibrato on.
+ * reach the branch below: let go of what it last set there, as an unplug does. A pedal held down while it
+ * was learned would otherwise sustain that channel for good, and a learned mod wheel would keep its
+ * vibrato on (a wheel set to 0 instead would override another port's wheel as the last one moved).
  */
 export function releaseController(port: string, channel: number, controller: number): void {
   const owner = midiOwner(port, channel);
   if (controller === 64) inputRouter.setSustain(false, owner);
-  else if (controller === 1) inputRouter.setModulation(0, owner);
+  else if (controller === 1) inputRouter.dropModulation(owner);
 }
 
 function parseMidiMessage(ev: Event, port: string, portName: string): void {

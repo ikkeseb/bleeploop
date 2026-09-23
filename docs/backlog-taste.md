@@ -21,8 +21,9 @@ not here.
   <name>", "Track N: the take failed to start", "Track N: playback failed to restart", the dual-slot
   editor refusal, import-of-a-bad-file.
 - **Help popover:** wording + section order (guitar GO LIVE, ASIO slot swap, separate MIC path,
-  COPY, REV, CLICK/FIXED/AUTO REC, volume-detent line, Session and Pedals sections). Overdub is "OVERDUB" (lane word) / "overdubs"
-  (Help) / "Overdubbing" (screen reader) across three surfaces — one word?
+  COPY, REV, CLICK/FIXED/AUTO REC, volume-detent line, Session and Pedals sections, the Looper keys
+  as a chip row). Overdub is "OVERDUB" (lane word) / "overdubs" (Help) / "Overdubbing" (screen
+  reader) across three surfaces — one word?
 - **Play-path signals from 1.5 m (2026-09-23):** nothing in the looper zone says the amp-sim is live
   (only the slot's pill); the 4×22 px record meter is the only clipping cue; the BPM lock pulse fires
   mid-count-in beside the big "4", which is rec-red inside an amber ARMED lane.

@@ -30,7 +30,7 @@ export interface TransportKeys {
  * Transport key → named action (`actions.ts`), on the selected track. The arrows and PageUp/PageDown
  * are what page-turner footswitches send; Backspace/Delete are a keyboard's take-back keys (CLEAR
  * wants a second press, see actions.ts). None is a note-play key, a drum pad, Esc or a digit. Help's
- * Pedals section lists this table.
+ * Looper keys section lists this table.
  */
 export const KEY_ACTIONS: Readonly<Record<string, ActionId>> = {
   ' ': 'recDub',

@@ -171,6 +171,12 @@ class InputRouter {
     this.applyControllers();
   }
 
+  /** This owner's wheel stops counting (MIDI learn took its CC1 over), as an unplug does: the surviving
+   * owner's setting applies. */
+  dropModulation(owner: string): void {
+    if (this.modulation.delete(owner)) this.applyControllers();
+  }
+
   private applyControllers(): void {
     this.pitchBend = [...this.bends.values()].at(-1) ?? 0;
     this.modDepth = [...this.modulation.values()].at(-1) ?? 0;

@@ -2,13 +2,15 @@
  * MIDI learn (`src/app/midi-actions.ts`) through the real Audio Settings learn row and the real MIDI
  * parser, with two virtual Web MIDI ports fed raw bytes (the midi-note-ownership pattern): a CC learned
  * onto REC/DUB survives a reload and records the selected track; the learning press and its release run
- * nothing; a momentary, a latching and a reversed-polarity footswitch each fire once per press; Esc and a
- * second LEARN click cancel a learn; unlearned CC64/1/123 still reach the input router, while CC64 learned
- * on another port with its pedal down lets that pedal go and never sustains, and a learned CC1 returns its
- * vibrato to rest; a learned note does not sound and neither its note-on nor its
- * note-off reaches the router; forgetting a binding hands its CC back to the play path. It cannot see a
- * real controller, whether WebView2 keeps a port's id across a restart or replug, or a real foot against
- * the learn window (`STATUS.md` § Play first). Run: pnpm probe midi-learn
+ * nothing; a momentary, a latching and a reversed-polarity footswitch each fire once per press, on the
+ * press (the selected track is read after every message); Esc, a second LEARN click and closing the panel
+ * cancel a learn; a channel-mode CC (120–127) or a note-off never becomes a learn; unlearned CC64/1/123
+ * still reach the input router, while CC64 learned on another port with its pedal down lets that pedal go
+ * and never sustains, and a learned CC1 hands the vibrato back to the wheel moved before it; a learned note
+ * does not sound and neither its note-on nor its note-off reaches the router; forgetting a binding hands
+ * its CC back to the play path. It cannot see a real controller, whether WebView2 keeps a port's id across
+ * a restart or replug, or a real foot against the learn window (`STATUS.md` § Play first).
+ * Run: pnpm probe midi-learn
  */
 import assert from 'node:assert/strict';
 import { probe } from '../harness/probe.ts';
@@ -35,6 +37,16 @@ await probe(async ({ open }) => {
   const send = (port, ...messages) => page.evaluate(([p, m]) => window.__send(p, m), [port, messages]);
   const pause = (ms) => page.waitForTimeout(ms);
   const selected = () => page.evaluate(() => window.__lf.looper.selectedTrack());
+  /** Send each message on its own and read the selected track after each, so a press and a release that
+   * fire the same number of times still tell apart. */
+  const stepThrough = async (port, ...messages) => {
+    const seen = [];
+    for (const message of messages) {
+      await send(port, message);
+      seen.push(await selected());
+    }
+    return seen;
+  };
   const selectTrack = (i) => page.evaluate((t) => window.__lf.looper.selectTrack(t), i);
   const learning = () => page.evaluate((s) => document.querySelector(s)?.getAttribute('aria-pressed') ?? null, LEARN);
   const openSettings = async () => {
@@ -104,26 +116,33 @@ await probe(async ({ open }) => {
   out.secondClick = { armed: clickArmed, after: await learning() };
   await send('a', [0xb0, 30, 127], [0xb0, 30, 0]);
   out.afterCancel = { before: beforeCancel, after: await bindingLines() };
+  // Closing the panel while LEARN listens cancels it, so a later press cannot bind out of sight.
+  await page.click(LEARN);
+  const closeArmed = await learning();
+  await page.evaluate(() => window.__lf.ui.closeSettings());
+  await page.waitForSelector(LEARN, { state: 'detached' });
+  await send('a', [0xb0, 31, 127], [0xb0, 31, 0]);
+  await openSettings();
+  out.closeCancels = { armed: closeArmed, after: await learning(), lines: await bindingLines() };
 
-  // ---- footswitches: every press fires once, counted on NEXT TRACK from track 1 ----------------------
+  // ---- footswitches: every press fires once, on the press, counted on NEXT TRACK from track 1 ----------
   // Momentary: 127 on press, 0 on release. The learning tap sends both.
   await selectTrack(0);
   await learnVia('nextTrack', 'a', [0xb0, 21, 127], [0xb0, 21, 0]);
   const momentaryLearn = await selected();
-  await send('a', [0xb0, 21, 127], [0xb0, 21, 0], [0xb0, 21, 127], [0xb0, 21, 0], [0xb0, 21, 127], [0xb0, 21, 0]);
-  out.momentary = { learn: momentaryLearn, after3: await selected() };
+  const momentarySteps = await stepThrough('a', [0xb0, 21, 127], [0xb0, 21, 0], [0xb0, 21, 127], [0xb0, 21, 0], [0xb0, 21, 127], [0xb0, 21, 0]);
+  out.momentary = { learn: momentaryLearn, steps: momentarySteps };
   // Latching: 127 on one press, 0 on the next. The learning press sends 127 and nothing follows it.
   await selectTrack(0);
   await learnVia('nextTrack', 'a', [0xb0, 22, 127]);
   await pause(1300); // past the learn window, so no release was seen
   const latchingLearn = await selected();
-  await send('a', [0xb0, 22, 0], [0xb0, 22, 127], [0xb0, 22, 0], [0xb0, 22, 127]);
-  out.latching = { learn: latchingLearn, after4: await selected() };
+  const latchingSteps = await stepThrough('a', [0xb0, 22, 0], [0xb0, 22, 127], [0xb0, 22, 0], [0xb0, 22, 127]);
+  out.latching = { learn: latchingLearn, steps: latchingSteps };
   // Reversed polarity (0 on press, 127 on release), on port b, channel 3.
   await selectTrack(0);
   await learnVia('nextTrack', 'b', [0xb2, 23, 0], [0xb2, 23, 127]);
-  await send('b', [0xb2, 23, 0], [0xb2, 23, 127], [0xb2, 23, 0], [0xb2, 23, 127]);
-  out.reversed = { after2: await selected() };
+  out.reversed = { steps: await stepThrough('b', [0xb2, 23, 0], [0xb2, 23, 127], [0xb2, 23, 0], [0xb2, 23, 127]) };
 
   // ---- the play path: router calls and sound -------------------------------------------------------
   await page.evaluate(async () => {
@@ -154,12 +173,27 @@ await probe(async ({ open }) => {
   const takeCalls = () => page.evaluate(() => window.__calls.splice(0));
   const A0 = JSON.stringify(['a', 0]);
   const B0 = JSON.stringify(['b', 0]);
-  const A5 = JSON.stringify(['a', 5]);
 
   // Unlearned CC64/1/123 on port a reach the router, scoped to their port and channel.
   await takeCalls();
   await send('a', [0xb0, 64, 127], [0xb0, 1, 64], [0xb0, 123, 0], [0xb0, 64, 0]);
   out.unmapped = await takeCalls();
+
+  // While LEARN listens, a channel-mode CC (120 all sound off, 123 all notes off) and a note-off (as 0x80
+  // and as a velocity-0 note-on) are not learned: each reaches the router as unlearned traffic, and the
+  // learn keeps listening. The second click on LEARN cancels it.
+  const linesBeforeRefusals = await bindingLines();
+  await page.selectOption(PICK, 'stopAll');
+  await page.click(LEARN);
+  await takeCalls();
+  await send('a', [0xb0, 123, 0], [0xb0, 120, 0]);
+  out.modeCcWhileLearning = { calls: await takeCalls(), learning: await learning(), lines: await bindingLines() };
+  await page.click(LEARN);
+  await page.click(LEARN);
+  await takeCalls();
+  await send('a', [0x80, 61, 0], [0x90, 61, 0]);
+  out.noteOffWhileLearning = { calls: await takeCalls(), learning: await learning(), lines: await bindingLines() };
+  await page.click(LEARN);
 
   // CC64 learned on port b while its pedal is down: the learn lets that held pedal go, and from then on the
   // pedal runs NEXT TRACK and never sustains port b's note. The learning tap is the pedal coming up and
@@ -172,37 +206,43 @@ await probe(async ({ open }) => {
   await send('b', [0x90, 67, 100]); await pause(120);
   await send('b', [0x80, 67, 0]); await pause(300);
   const mappedRms = await rms();
-  await send('b', [0xb0, 64, 0], [0xb0, 64, 127]);
+  const mappedSteps = await stepThrough('b', [0xb0, 64, 0], [0xb0, 64, 127]);
   out.mapped64 = {
     rms: mappedRms,
     sustainCalls: (await takeCalls()).filter(([name]) => name === 'setSustain'),
-    selected: await selected(),
+    steps: mappedSteps,
   };
   // Control: the same note under port a's unlearned CC64 is held by the pedal.
   await send('a', [0xb0, 64, 127], [0x90, 67, 100]); await pause(120);
   await send('a', [0x80, 67, 0]); await pause(300);
   out.unmapped64Rms = await rms();
   await send('a', [0xb0, 64, 0]); await pause(300);
-  // A mod wheel learned on port a, channel 6, lets its vibrato go the same way.
+  // A mod wheel learned on port a, channel 6, lets its vibrato go the way an unplug does: the depth falls
+  // back to the wheel moved before it (port b, channel 1), not to 0 over it. The depth read is the router's
+  // last-moved-wheel result, the value it hands the active synth (a TS-private field, read for the probe).
+  const modDepth = () => page.evaluate(() => window.__lf.inputRouter.modDepth);
+  await send('b', [0xb0, 1, 50]);
   await send('a', [0xb5, 1, 100]);
-  await takeCalls();
+  const wheelBefore = await modDepth();
   await learnVia('stopAll', 'a', [0xb5, 1, 90]);
-  out.wheelLetsGo = await takeCalls();
+  out.wheelLetsGo = { before: wheelBefore, after: await modDepth() };
+  await send('b', [0xb0, 1, 0]); // housekeeping: the vibrato at rest for the notes below
 
-  // A learned note (port b, channel 2) runs PREVIOUS TRACK: silent, never held, no router event either way
-  // (a note-off as 0x80 and as a velocity-0 note-on).
+  // A learned note (port b, channel 2) runs PREVIOUS TRACK on its note-on: silent, never held, no router
+  // event either way (a note-off as 0x80 and as a velocity-0 note-on).
   await selectTrack(4);
   await learnVia('prevTrack', 'b', [0x91, 60, 100], [0x81, 60, 0]);
   await takeCalls();
   await send('b', [0x91, 60, 100]); await pause(150);
   const noteRms = await rms();
   const heldDuring = await page.evaluate(() => [...window.__lf.inputRouter.held]);
+  const selectedOnPress = await selected();
   await send('b', [0x81, 60, 0], [0x91, 60, 100], [0x91, 60, 0]);
   out.learnedNote = {
     rms: noteRms,
     held: heldDuring,
     routerEvents: (await takeCalls()).filter(([name, ev]) => name === 'handle' && ev.note === 60),
-    selected: await selected(),
+    selected: [selectedOnPress, await selected()],
   };
   // Control: an unlearned note on the same port and channel sounds.
   await send('b', [0x91, 62, 100]); await pause(150);
@@ -242,25 +282,35 @@ await probe(async ({ open }) => {
   check(() => assert.deepEqual(out.esc, { armed: 'true', after: 'false', panelOpen: true }, 'Esc cancels a learn and leaves the panel open'));
   check(() => assert.deepEqual(out.secondClick, { armed: 'true', after: 'false' }, 'a second click on LEARN cancels it'));
   check(() => assert.deepEqual(out.afterCancel.after, out.afterCancel.before, 'a CC after a cancelled learn binds nothing'));
-  check(() => assert.deepEqual(out.momentary, { learn: 0, after3: 3 }, 'three momentary presses fire three times, the learning tap none'));
-  check(() => assert.deepEqual(out.latching, { learn: 0, after4: 4 }, 'four latching presses fire four times, the learning press none'));
-  check(() => assert.deepEqual(out.reversed, { after2: 2 }, 'two reversed-polarity presses fire twice'));
+  check(() => assert.deepEqual(out.closeCancels, { armed: 'true', after: 'false', lines: out.afterCancel.before },
+    'closing the panel cancels a learn, and a CC after it binds nothing'));
+  // One entry per message: the selected track after it. A press steps once; its release steps nothing.
+  check(() => assert.deepEqual(out.momentary, { learn: 0, steps: [1, 1, 2, 2, 3, 3] },
+    'each momentary press fires once, on the press; the learning tap none'));
+  check(() => assert.deepEqual(out.latching, { learn: 0, steps: [1, 2, 3, 4] }, 'each latching press fires once, the learning press none'));
+  check(() => assert.deepEqual(out.reversed, { steps: [1, 1, 2, 2] }, 'a reversed-polarity pedal fires once per press, on the press (0)'));
   check(() => assert.deepEqual(out.unmapped, [
     ['setSustain', true, A0],
     ['setModulation', 64 / 127, A0],
     ['releaseSource', A0],
     ['setSustain', false, A0],
   ], 'unlearned CC64/1/123 reach the router as before'));
+  check(() => assert.deepEqual(out.modeCcWhileLearning, { calls: [['releaseSource', A0]], learning: 'true', lines: linesBeforeRefusals },
+    'CC 120/123 are never learned: they reach the router and the learn keeps listening'));
+  const noteOff61 = ['handle', { type: 'off', note: 61, velocity: 0, source: 'midi', owner: A0 }];
+  check(() => assert.deepEqual(out.noteOffWhileLearning, { calls: [noteOff61, noteOff61], learning: 'true', lines: linesBeforeRefusals },
+    'a note-off (0x80 or velocity 0) is never learned: it reaches the router and the learn keeps listening'));
   check(() => assert.deepEqual(out.learnLetsGo, [['setSustain', false, B0]], 'learning CC64 lets go of the pedal held down on its port'));
   check(() => assert.ok(out.mapped64.rms < 1e-5, `a CC learned onto 64 must not sustain (rms ${out.mapped64.rms})`));
   check(() => assert.deepEqual(out.mapped64.sustainCalls, [], 'a CC learned onto 64 never reaches setSustain'));
-  check(() => assert.equal(out.mapped64.selected, 1, 'the learned CC64 press ran its action once'));
+  check(() => assert.deepEqual(out.mapped64.steps, [1, 1], 'the learned CC64 press ran its action once, on the press (0)'));
   check(() => assert.ok(out.unmapped64Rms > 0.01, `the other port's unlearned CC64 still sustains (rms ${out.unmapped64Rms})`));
-  check(() => assert.deepEqual(out.wheelLetsGo, [['setModulation', 0, A5]], 'learning CC1 returns its vibrato to rest'));
+  check(() => assert.deepEqual(out.wheelLetsGo, { before: 100 / 127, after: 50 / 127 },
+    'learning CC1 hands the vibrato back to the wheel moved before it'));
   check(() => assert.ok(out.learnedNote.rms < 1e-5, `a learned note must not sound (rms ${out.learnedNote.rms})`));
   check(() => assert.deepEqual(out.learnedNote.held, [], 'a learned note is never held'));
   check(() => assert.deepEqual(out.learnedNote.routerEvents, [], 'neither the learned note-on nor its note-off reaches the router'));
-  check(() => assert.equal(out.learnedNote.selected, 2, 'two presses of the learned note stepped back twice'));
+  check(() => assert.deepEqual(out.learnedNote.selected, [3, 2], 'two presses of the learned note stepped back twice, each on its note-on'));
   check(() => assert.ok(out.unlearnedNoteRms > 0.01, `an unlearned note on the same channel sounds (rms ${out.unlearnedNoteRms})`));
   check(() => assert.deepEqual(out.lines, [
     'Record / overdub | CC 20 · ch 1 · momentary',
