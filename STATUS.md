@@ -35,8 +35,8 @@ A stop dies when it passes; past 10 stops, consolidate or flag it (AGENTS.md). D
    is locked mid-count-in; a free record past 60 s auto-closes on a bar (is that UX fine?).
 5. **Reload + editors.** Load → GO LIVE → reload the WebView → re-load + re-arm OK. Editor in front;
    close → reopen → disarm, no hang. Second editor on the same plugin FILE
-   from the other slot: refused with a toast. FabFilter editor open: a drawer slider moves its knob;
-   Pro-Q 3 Processing Mode → Linear Phase from the drawer restarts it without a fault. The editor's own
+   from the other slot: refused with a toast. FabFilter editor open: a drawer slider moves its knob,
+   and turning the knob moves the slider, also after a close → reopen; Pro-Q 3 Processing Mode → Linear Phase from the drawer restarts it without a fault. The editor's own
    size/zoom menu → the host window follows, nothing clipped or floating.
 6. **Fault injection.** Yank the armed interface while LIVE → within ~2 s three log layers
    (`cpal stream error` → `FAULTED (device lost)` → `fell back to the web monitor path`), a toast, the
