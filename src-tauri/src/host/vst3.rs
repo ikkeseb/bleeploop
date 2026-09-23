@@ -355,12 +355,11 @@ struct ParamChanged {
     value: f64,
 }
 
-/// The plugin's pending `restartComponent` reports. OR-ed across calls and across BOTH handler
-/// instances (the load-time one and an open editor's), drained by the owner loop once per turn:
-/// the cycle flags into ONE `service_vst3_restart`, everything else into the log line and, for
-/// `RELIST`, the re-list emit. A flag store only: `raise` never runs foreign code, logs, emits,
-/// allocates or locks, so a plugin that (against the spec) reports from its own worker thread is
-/// still safe.
+/// The plugin's pending `restartComponent` reports. OR-ed across calls, drained by the owner loop
+/// once per turn: the cycle flags into ONE `service_vst3_restart`, everything else into the log
+/// line and, for `RELIST`, the re-list emit. A flag store only: `raise` never runs foreign code,
+/// logs, emits, allocates or locks, so a plugin that (against the spec) reports from its own
+/// worker thread is still safe.
 #[derive(Default)]
 struct RestartFlags {
     /// Pending `CYCLE` flags.
@@ -402,12 +401,15 @@ impl RestartFlags {
 /// controller alone never reaches the processor), and (b) the web UI via `plugin:param-changed`.
 /// Runs on the OWNER/UI-pump thread (NEVER the RT thread), so the `Mutex` lock + `emit` are off
 /// the hot path. The id is the controller's OWN id → valid by construction (no hash-id segfault
-/// risk; that only applies to host-originated `setParameter`). The owning `ComWrapper` is kept
-/// alive in `Vst3Editor::Open` (the plugin holds a raw ptr to it for the editor session).
+/// risk; that only applies to host-originated `setParameter`). ONE handler per load: the owner
+/// sets it on the controller at load and keeps its `ComWrapper` alive until the owner exits; an
+/// editor session uses it too and never sets its own, so closing an editor has nothing to restore
+/// and a plugin that keeps a raw pointer never holds a dropped one.
 struct LfComponentHandler {
     event_tx: Arc<Mutex<Producer<PluginEvent>>>,
-    slot: u8,
-    window: tauri::WebviewWindow,
+    /// Tells the web UI a knob moved (`plugin:param-changed`, `id`, `value`). A closure rather
+    /// than the window, like `NativeIo`'s fault sink, so the handler is testable without one.
+    param_changed: Box<dyn Fn(u32, f64) + Send + Sync>,
     restart: Arc<RestartFlags>,
 }
 impl Class for LfComponentHandler {
@@ -427,14 +429,7 @@ impl IComponentHandlerTrait for LfComponentHandler {
                 value: value_normalized,
             });
         }
-        let _ = self.window.emit(
-            "plugin:param-changed",
-            ParamChanged {
-                slot: self.slot,
-                id: id as u32,
-                value: value_normalized,
-            },
-        );
+        (self.param_changed)(id as u32, value_normalized);
         kResultOk
     }
     unsafe fn endEdit(&self, _id: ParamID) -> tresult {
@@ -790,16 +785,15 @@ struct Vst3Setup {
 }
 
 /// Owner-local VST3 editor state. `Open` carries everything that must outlive the attached
-/// view: the `IPlugView` (released LAST, after `removed()`), our `IPlugFrame` +
-/// `IComponentHandler` `ComWrapper`s (the plugin holds raw ptrs to them, so they must not drop
-/// while the editor is open), and the host window (RAII `DestroyWindow` on drop). Field order
-/// is load-bearing: drop runs view → frame → handler → win, and `removed()` is called first.
+/// view: the `IPlugView` (released LAST, after `removed()`), our `IPlugFrame` `ComWrapper` (the
+/// plugin holds a raw ptr to it, so it must not drop while the editor is open), and the host
+/// window (RAII `DestroyWindow` on drop). Field order is load-bearing: drop runs view → frame →
+/// win, and `removed()` is called first. The component handler is the load's, not the editor's.
 enum Vst3Editor {
     Closed,
     Open {
         view: ComPtr<IPlugView>,
         _frame: ComWrapper<LfPlugFrame>,
-        _handler: ComWrapper<LfComponentHandler>,
         win: HostWindow,
     },
 }
@@ -807,15 +801,13 @@ enum Vst3Editor {
 /// Open the VST3 editor on the owner thread. `host_hwnd` (0 = unknown) is the main window, used
 /// as the host editor window's owner. Requires a single-component controller (Surge); None →
 /// clear Err (separated-component editor is deferred to P10.3). Mirrors the CLAP `editor_open`
-/// embedded path: createView → isPlatformTypeSupported(HWND) → setComponentHandler → setFrame →
-/// getSize → host window → attached → onSize → show. `kResultTrue == 0`, so compare with `==`.
+/// embedded path: createView → isPlatformTypeSupported(HWND) → setFrame → getSize → host window →
+/// attached → onSize → show. The controller keeps the load-time component handler
+/// (`LfComponentHandler`); an editor never replaces it. `kResultTrue == 0`, so compare with `==`.
 fn vst3_editor_open(
     controller: &Option<ComPtr<IEditController>>,
     host_hwnd: usize,
-    event_tx: Arc<Mutex<Producer<PluginEvent>>>,
     slot: u8,
-    window: tauri::WebviewWindow,
-    restart: Arc<RestartFlags>,
 ) -> Result<Vst3Editor, String> {
     let ctl = controller.as_ref().ok_or_else(|| {
         "VST3 plugin exposes no IEditController (separated-component → P10.3)".to_string()
@@ -823,17 +815,7 @@ fn vst3_editor_open(
     // SAFETY: every call runs on the owner thread; `ctl` is a live IEditController for the
     // loaded plugin, and all raw pointers handed across the FFI are valid for their call.
     unsafe {
-        // 1. Minimal host handler, set BEFORE createView (kept alive in Vst3Editor::Open so the
-        //    plugin's raw ptr stays valid for the editor session — JUCE edits go inert without it).
-        let handler = ComWrapper::new(LfComponentHandler {
-            event_tx,
-            slot,
-            window,
-            restart,
-        });
-        if let Some(hp) = handler.to_com_ptr::<IComponentHandler>() {
-            ctl.setComponentHandler(hp.as_ptr());
-        }
+        // 1. No component handler here: the controller keeps the load's (`LfComponentHandler`).
         // 2. Create the view. createView returns a RAW *mut IPlugView, already add_ref'd → own it
         //    once with from_raw (no extra add_ref). Null = the plugin has no editor.
         log::info!("[plugin_host] vst3 editor_open slot {slot}: createView…");
@@ -891,14 +873,13 @@ fn vst3_editor_open(
         Ok(Vst3Editor::Open {
             view,
             _frame: frame,
-            _handler: handler,
             win,
         })
     }
 }
 
 /// Close the VST3 editor: `removed()` detaches the plugin's child from our window FIRST (while
-/// the view is still live), THEN the drop runs view-release → frame/handler-release →
+/// the view is still live), THEN the drop runs view-release → frame-release →
 /// `HostWindow::drop` (DestroyWindow). Mirrors the CLAP `gui.destroy` → DestroyWindow order.
 fn vst3_editor_close(ed: &mut Vst3Editor) {
     if let Vst3Editor::Open { view, .. } = ed {
@@ -907,7 +888,7 @@ fn vst3_editor_close(ed: &mut Vst3Editor) {
             let _ = view.removed();
         }
     }
-    *ed = Vst3Editor::Closed; // drops view/frame/handler then HostWindow::drop → DestroyWindow
+    *ed = Vst3Editor::Closed; // drops view/frame then HostWindow::drop → DestroyWindow
     // Pump the WM_DESTROY/NCDESTROY + JUCE-posted teardown messages on THIS owner thread before
     // the loop falls back to its blocking recv_timeout (which stops pumping). See the helper doc.
     drain_after_editor_teardown();
@@ -1262,8 +1243,8 @@ pub fn vst3_owner_main(
     event_rx: Consumer<PluginEvent>,
     request_rx: std::sync::mpsc::Receiver<OwnerRequest>,
     // P10.3: the SAME producer the command threads push notes/params to (Arc<Mutex<>> serialises
-    // them into the one SPSC ring). The owner thread needs it so a hosted editor's
-    // IComponentHandler::performEdit can forward knob moves to the RT param relay.
+    // them into the one SPSC ring). The owner thread needs it so the component handler's
+    // performEdit (an editor knob move) can forward it to the RT param relay.
     event_tx: Arc<Mutex<Producer<PluginEvent>>>,
     // P11.0: cpal→RT audio-input ring. `in_rx` (Consumer) crosses to the RT producer; the
     // owner-local `input_producer` (Producer behind Arc<Mutex>) feeds successive cpal streams.
@@ -1572,13 +1553,15 @@ pub fn vst3_owner_main(
 
     // Give the controller its host handler for the WHOLE load, not only while an editor is open:
     // a plugin loads presets and reports `restartComponent`/`performEdit` from its own state path
-    // too (before any editor exists). Kept alive here; the controller add-refs it (SDK + JUCE), so
-    // an editor session re-setting its own handler is a normal replace, not a dangling pointer.
+    // too (before any editor exists). The one handler of this load (editors use it as well), kept
+    // alive here until the owner exits.
     let restart = Arc::new(RestartFlags::default());
+    let emit_window = window.clone();
     let _load_handler = ComWrapper::new(LfComponentHandler {
-        event_tx: event_tx.clone(),
-        slot,
-        window: window.clone(),
+        event_tx,
+        param_changed: Box::new(move |id, value| {
+            let _ = emit_window.emit("plugin:param-changed", ParamChanged { slot, id, value });
+        }),
         restart: restart.clone(),
     });
     if let (Some(ctl), Some(hp)) = (
@@ -1687,14 +1670,7 @@ pub fn vst3_owner_main(
                 OwnerRequest::OpenEditor(cancelled, reply) => {
                     let was_closed = matches!(editor, Vst3Editor::Closed);
                     let res = if was_closed {
-                        match vst3_editor_open(
-                            &controller,
-                            host_hwnd,
-                            event_tx.clone(),
-                            slot,
-                            window.clone(),
-                            restart.clone(),
-                        ) {
+                        match vst3_editor_open(&controller, host_hwnd, slot) {
                             Ok(ed) => {
                                 editor = ed;
                                 Ok(())
@@ -2336,13 +2312,17 @@ mod restart_tests;
 #[cfg(test)]
 #[path = "vst3_resize_fixture.rs"]
 mod resize_tests;
+#[cfg(test)]
+#[path = "vst3_controller_fixture.rs"]
+mod controller_tests;
 
 /// Audit B5: `restartComponent`'s whole body is `RestartFlags::raise`, so a plugin calling it from
-/// its own worker thread must touch nothing but atomics there — no log (a lock + allocation) and no
-/// emit (the flags hold no window). The owner's drain then sees every flag, split by kind.
+/// its own worker thread must touch nothing but atomics there — no log (a lock + allocation), no
+/// emit and no event-ring push. The owner's drain then sees every flag, split by kind.
 #[cfg(test)]
 mod restart_flag_tests {
     use super::*;
+    use rtrb::RingBuffer;
     use std::sync::atomic::AtomicUsize;
     use std::thread::ThreadId;
 
@@ -2394,16 +2374,40 @@ mod restart_flag_tests {
             "the counting logger must be installed for this test to mean anything"
         );
 
+        // The production handler, reached the way a plugin reaches it: through its vtable.
         let restart = Arc::new(RestartFlags::default());
-        let raiser = restart.clone();
+        let (event_tx, mut event_rx) = RingBuffer::<PluginEvent>::new(4);
+        let emitted = Arc::new(AtomicUsize::new(0));
+        let emits = emitted.clone();
+        let handler = ComWrapper::new(LfComponentHandler {
+            event_tx: Arc::new(Mutex::new(event_tx)),
+            param_changed: Box::new(move |_, _| {
+                emits.fetch_add(1, Relaxed);
+            }),
+            restart: restart.clone(),
+        });
+        let hp = handler.to_com_ptr::<IComponentHandler>().expect("IComponentHandler");
+        // The sink and the ring are live: an edit reaches both (so "none" below means something).
+        // SAFETY: `hp` is a live pointer to `handler`, held for every call in this test.
+        assert_eq!(unsafe { hp.performEdit(7, 0.5) }, kResultOk);
+        assert_eq!(emitted.load(Relaxed), 1);
+        assert!(event_rx.pop().is_ok());
+
+        let plugin_thread_hp = hp.clone();
         let logged = logs_on_a_foreign_thread(move || {
-            raiser.raise(
-                RestartFlags_::kParamValuesChanged
-                    | RestartFlags_::kLatencyChanged
-                    | RestartFlags_::kMidiCCAssignmentChanged,
-            );
+            // SAFETY: as above; the clone keeps the handler alive on the plugin's thread.
+            let r = unsafe {
+                plugin_thread_hp.restartComponent(
+                    RestartFlags_::kParamValuesChanged
+                        | RestartFlags_::kLatencyChanged
+                        | RestartFlags_::kMidiCCAssignmentChanged,
+                )
+            };
+            assert_eq!(r, kResultOk);
         });
         assert_eq!(logged, 0, "restartComponent must not log on the plugin's thread");
+        assert_eq!(emitted.load(Relaxed), 1, "restartComponent must not emit");
+        assert!(event_rx.pop().is_err(), "restartComponent must not push to the event ring");
 
         // The owner turn: the cycle flag for service_vst3_restart, the rest for the log + re-list.
         assert_eq!(restart.take(), RestartFlags_::kLatencyChanged);
