@@ -136,6 +136,7 @@ option {
   border: 1px solid var(--edge);
   box-shadow: inset 0 1px 0 var(--hair);
   min-width: 0;
+  anchor-name: --cmd; /* the popovers hang from its bottom edge (.settings-popover) */
 }
 /* Two-row arrangement when one row cannot fit — measured and flagged by app/cmd-fit.ts (a media query
    cannot see the contextual sliders). Row 1 keeps brand · lamp · BPM · loop dial · ALL/MIC · master ·
@@ -307,16 +308,20 @@ option {
 
 /* ---- settings popover ---- */
 /* Full-screen transparent click-catcher: closes the popover on any outside click. The panel itself
-   anchors top-right just below the 48px command bar; AudioSettings.tsx styles the panel body. */
+   hangs under the command bar's right edge through CSS anchor positioning, so it follows the bar's
+   real bottom edge in the one-row and the two-row arrangement alike (a fixed offset covered row 2).
+   Needs Chromium 125+ (WebView2 is evergreen). The panel bodies style themselves (AudioSettings.tsx,
+   Help.tsx). */
 .settings-popover__backdrop {
   position: fixed;
   inset: 0;
   z-index: 40;
 }
 .settings-popover {
-  position: absolute;
-  top: 60px;
-  right: clamp(16px, 2vw, 28px);
+  position: fixed;
+  position-anchor: --cmd;
+  top: calc(anchor(bottom) + 8px);
+  right: anchor(right);
 }
 
 /* ---- stage + zones ----

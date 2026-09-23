@@ -124,8 +124,6 @@ not here.
   the empty-plugin-scan note computing to 6.5–7 px at ≤1280 (`plugin-controls.css`); synth pills
   render mixed case through the spec's uppercase `.tgl`, not a listed delta in `src/ui/AGENTS.md`.
   [reader]
-- **Popover anchor:** the popover sits at a fixed `top: 60px` (`src/app.css`) under a command bar
-  that is 94–104 px tall when stacked, so the panel covers row 2. [verified, screenshot]
 - **Component seams:** `Looper.tsx` exports `masterBars`, `anyTrackIn` and `createTwoStepConfirm`,
   and `waveform.ts` imports it while it imports `waveform.ts` (circular, works by hoisting);
   `hasMaster`/`loopBars`/`anyTrackIn` are re-derived in three components; `Transport.tsx` rebuilds

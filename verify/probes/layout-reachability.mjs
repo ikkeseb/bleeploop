@@ -2,7 +2,9 @@
  * (1400x900): measures rendered control access and canvas identity (a lane's canvas must survive a
  * keyboard-placement/FX-drawer change, not remount) across five keyboard placement/FX-drawer
  * combinations, plus the drum-pad ribbon, the two-row command-bar cap and the muted-lane readout with
- * a loop present. "Unreachable" means clipped below 98% visible OR the element under its own centre
+ * a loop present. At 1000x700 and 1280x820 (the Tauri default, where the bar stacks into two rows) the
+ * open Help and Audio Settings popovers must not overlap the command bar's rendered box.
+ * "Unreachable" means clipped below 98% visible OR the element under its own centre
  * point is not itself (something else intercepts the click). `--plugin-source` substitutes
  * `src/platform/host.web.ts` to simulate a live native plugin slot instead of the browser-tier
  * fallback. `--label=<name>` tags screenshots and `logs/layout/<name>.json`, for comparing two runs
@@ -134,6 +136,29 @@ await probe(async ({ open }) => {
     if (!drumOk) failures.push(drumName);
     results.push({ name: drumName, ...drums });
     console.log(JSON.stringify({ name: drumName, ...drums, ok: drumOk }));
+    await page.close();
+  }
+  // Popovers hang under the command bar's real bottom edge: a fixed offset once covered the bar's
+  // second row whenever it stacked.
+  for (const [width, height] of [[1000, 700], [1280, 820]]) {
+    const { page } = await open({ viewport: { width, height }, init });
+    for (const [id, show, hide] of [['lf-help-popover', 'openHelp', 'closeHelp'], ['lf-audio-popover', 'openSettings', 'closeSettings']]) {
+      await page.evaluate(fn => window.__lf.ui[fn](), show);
+      await page.locator(`#${id}`).waitFor();
+      await page.waitForTimeout(150);
+      const m = await page.evaluate(id => {
+        const bar = document.querySelector('.cmd');
+        const b = bar.getBoundingClientRect(), p = document.getElementById(id).getBoundingClientRect();
+        return { stacked: bar.classList.contains('cmd--stack'), bar: { top: b.top, bottom: b.bottom, left: b.left, right: b.right },
+          panel: { top: p.top, bottom: p.bottom, left: p.left, right: p.right } };
+      }, id);
+      const overlaps = m.panel.top < m.bar.bottom && m.panel.bottom > m.bar.top && m.panel.left < m.bar.right && m.panel.right > m.bar.left;
+      const name = `${label}-${width}x${height}-${id}-over-command-bar`;
+      console.log(JSON.stringify({ name, ...m, gap: m.panel.top - m.bar.bottom, overlaps }));
+      if (overlaps) failures.push(name);
+      results.push({ name, ...m, overlaps });
+      await page.evaluate(fn => window.__lf.ui[fn](), hide);
+    }
     await page.close();
   }
   await writeFile(`logs/layout/${label}.json`, JSON.stringify(results, null, 2));
