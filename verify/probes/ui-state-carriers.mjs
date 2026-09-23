@@ -1,6 +1,7 @@
 /** Accessibility and non-colour state carriers against the rendered app: transport, meter, lamp,
  * looper-announcement and toast state carriers, plus the looper refusal gates (a refused lane
- * core's title/label reason, and a refused Space/Enter announcing that reason with no state change).
+ * core's title/label reason, and a refused Space/Enter announcing that reason without reaching its
+ * action, counted by a stub on the selected-lane entry).
  * Toggles: each toggle it presses (the Transport toggles except END STOP, lane 1's MUTE and REV) keeps
  * ONE accessible name in both states and carries its state in aria-pressed alone; the lane core, whose
  * name says the action, carries no aria-pressed. Not pressed here: END STOP, lane FX and the keyboard
@@ -117,25 +118,39 @@ await probe(async ({ open }) => {
   assert.match(await stoppedCore.getAttribute('aria-label'), /play first to overdub/);
   assert.equal(await stoppedCore.getAttribute('title'), 'play first to overdub');
 
-  // Refusal gate (src/ui/looper/gates.ts): a refused Space says the lane button's reason on the
-  // looper status line instead of a silent no-op, and changes no state.
+  // Refusal gate (src/ui/looper/gates.ts): a refused Space/Enter says the lane button's reason on the
+  // looper status line instead of a silent no-op, and never reaches the action. The engine also ignores
+  // REC/DUB on a STOPPED lane and PLAY/STOP on an EMPTY one, so the lane's state cannot tell a refusal
+  // from a press that got through: stubs that only count stand in for the selected-lane REC/DUB and
+  // PLAY/STOP entries instead. An accepted Space and Enter on PLAYING track 2 first prove the stubs sit
+  // on the keys' path.
   const live = page.locator('.lp__sr-status');
   await page.evaluate(() => {
-    window.__lf.looper.selectTrack(0);
+    const looper = window.__lf.looper;
+    const real = { recDub: looper.recDubSelected, playStop: looper.playStopSelected };
+    window.__presses = { recDub: 0, playStop: 0 };
+    looper.recDubSelected = () => void window.__presses.recDub++;
+    looper.playStopSelected = () => void window.__presses.playStop++;
+    window.__restorePresses = () => Object.assign(looper, { recDubSelected: real.recDub, playStopSelected: real.playStop });
     document.activeElement?.blur?.();
   });
+  const presses = () => page.evaluate(() => ({ ...window.__presses }));
+  await page.keyboard.press('2');
   await page.keyboard.press('Space');
-  await page.waitForTimeout(200);
-  assert.equal(await page.evaluate(() => window.__lf.looper.stateOf(0)), 'STOPPED', 'refused Space must not change state');
+  await page.keyboard.press('Enter');
+  assert.deepEqual(await presses(), { recDub: 1, playStop: 1 }, 'accepted Space/Enter on track 2 must reach the stubs');
+  await page.keyboard.press('1');
+  await page.keyboard.press('Space');
+  assert.deepEqual(await presses(), { recDub: 1, playStop: 1 }, 'refused Space must not reach REC/DUB');
   assert.equal((await live.textContent())?.trim(), 'Track 1: play first to overdub');
 
-  // A refused Enter on an EMPTY lane (nothing to play) says so, and changes no state.
+  // A refused Enter on an EMPTY lane (nothing to play) says so, and never reaches PLAY/STOP.
   await page.evaluate(() => window.__lf.looper.clearAll());
   await page.waitForFunction(() => [0, 1, 2, 3, 4].every((i) => window.__lf.looper.stateOf(i) === 'EMPTY'));
   await page.keyboard.press('Enter');
-  await page.waitForTimeout(200);
-  assert.equal(await page.evaluate(() => window.__lf.looper.stateOf(0)), 'EMPTY', 'refused Enter must not change state');
+  assert.deepEqual(await presses(), { recDub: 1, playStop: 1 }, 'refused Enter must not reach PLAY/STOP');
   assert.equal((await live.textContent())?.trim(), 'Track 1: nothing to play, record first');
+  await page.evaluate(() => window.__restorePresses());
 
   // Gate ok: an EMPTY selected lane still arms on Space.
   await page.keyboard.press('Space');
