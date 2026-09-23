@@ -85,20 +85,27 @@ changes. Runtime verification and the Windows/WSL command lane are owned by `doc
 lap has ≤ 10 stops. A dead path a doc keeps on purpose says so on the same line — "(now `…`)",
 "not yet built", "upstream" — and the guard skips it.
 
-Each `*-verify.mjs` runs in plain Node with **no browser, no `AudioContext`, no audio hardware**. It either:
+Each `*-verify.mjs` runs in plain Node with **no browser, no `AudioContext`, no audio hardware**, and runs
+the real source; none carries a hand-ported copy of it. There are three kinds:
 
-- **imports the real source** via Node's TS type-stripping (e.g. `fs-quantize-verify.mjs` imports
-  `../src/audio/quantize.ts` directly — it cannot drift from the source), or
-- **drives the real looper on the rig** (`verify/harness/rig.ts`, typechecked): `bootLooper()` loads a fresh
+- **Pure imports.** Modules with no Web Audio, Tone or timer dependency load directly via Node's TS
+  type-stripping (`fs-quantize-verify.mjs` imports `../src/audio/quantize.ts`). The looper's grid
+  arithmetic (`src/audio/looper/grid-math.ts`) and the compensation formula
+  (`src/audio/record-latency-math.ts`) are kept pure for this.
+- **Rig guards.** `verify/harness/rig.ts` (typechecked) drives the real looper: `bootLooper()` loads a fresh
   module graph of `src/audio` per scenario over a fake Web Audio + Tone layer, renders 128-frame quanta
   through the real capture worklet and fires the app's timers on the same audio clock. A guard presses
   `rig.looper.recDub(0)` and reads track state, PCM, started sources, clicks and LED beats. `rig.stall(s)`
-  models a blocked main thread. `RIG_LOGS=1` echoes the app's console. It cannot show real render timing,
-  browser jitter, WebView2 or anything audible, or
-- **ports** the pure logic into the script (the guards not yet on the rig). A ported guard mirrors a specific
-  source path; if you change that path, update the port in lockstep.
+  models a blocked main thread, `rig.renderAhead(n)` a producer ahead of the clock the main thread reads,
+  `rig.import(path)` loads any other `src/` module of the same generation. `RIG_LOGS=1` echoes the app's
+  console. It cannot show real render timing, browser jitter, WebView2 or anything audible.
+- **Modules under the hooks.** A guard that imports `verify/harness/hooks.ts` can load any `src/` module
+  (Solid, `import.meta.env`, extensionless imports) and gets a fresh copy per `?g=N` query, so module-load
+  state re-runs (`fs-layout-store-verify.mjs`). Worklet processors load with a `registerProcessor` shim
+  (`fs-capture-packets-verify.mjs`, `fs-worklet-pop-verify.mjs`).
 
-A rig guard counts only once it went red on a deliberately planted bug in the code it claims to cover.
+A guard counts only once it went red on a deliberately planted bug in the code it claims to cover. A
+bug no public path can reveal is an equivalent mutant; name it in the commit message.
 
 Every deterministic guard prints a final line `=== RESULT: N/N checks passed, 0 failed ===` and exits non-zero on any
 failure.
@@ -106,7 +113,7 @@ failure.
 ## Run
 
 ```bash
-pnpm verify        # run all guards, summarized (≈1s)
+pnpm verify        # run all guards, summarized (a few seconds)
 pnpm check         # typecheck + lint + boundary + verify (the full static gate)
 pnpm exec node verify/fs-grid-verify.mjs   # run one directly
 ```
@@ -123,71 +130,18 @@ with a different identity from the app's modules. `pnpm verify:jam` starts or re
 
 `golden-jam.mjs` also accepts `--url` for an already-running separate server.
 
-## Mirrored ports and the drift canary
-
-A ported (non-importing) guard mirrors a specific source function by hand, so it can go **silently stale**:
-the source is refactored, the port keeps asserting the old math, and the guard stays green while proving
-nothing. `fs-mirror-drift-verify.mjs` is a meta-guard that catches this. Each ported guard carries, next to
-its ported math, a tag naming the source range it mirrors:
-
-```js
-// MIRRORS: src/audio/clock.ts@307-341 sha256:e39b945d6b36e271  (pulseTick — forced-clamp)
-```
-
-The meta-guard re-hashes that source range and fails if it no longer matches. The hash is over the
-**normalized code** of the range (each line trimmed; blank lines and full-line comments dropped), so
-churning a comment block never trips it — only a code change does. On failure it says whether the code
-**MOVED** (same code, new line range — a benign shift) or **CHANGED** (genuinely different — re-verify the
-port). Either way the fix is one command after you've confirmed the port:
-
-```bash
-node verify/fs-mirror-drift-verify.mjs --update   # re-baseline: reseed hashes + auto-repoint MOVED ranges
-```
-
-⚠ **A range that both MOVED and CHANGED cannot be auto-repointed** — the old code exists nowhere, so
-`--update` refuses the tag and FAILs (writing a fresh hash at the old lines would baseline unrelated
-code). Re-read the port, re-point the tag by hand at the correct new range with `sha256:PENDING`,
-then run `--update` again to seed the hash.
-
-**Block-comment-aware normalize.** Dropping "full-line comments" is block-comment-aware, not a naive
-prefix test. A line is dropped when, after trimming, it is blank, starts with `//`, starts with `/*`, or
-starts with `*`/`*/` **while beginning inside an open `/* … */` block**. The last clause is the important
-one: a genuine CODE line that happens to start with `*` (e.g. a wrapped multiplication continued onto its
-own line as `* b`) is **kept**, so a real code change can't hide behind a leading `*`. The script scans each
-source file once to know which lines begin inside a block comment (a pragmatic scanner: it skips `//` line
-comments and string literals, and assumes strings don't span lines — fine for a canary). All other
-normalize rules are byte-identical to before, so hashes are unchanged wherever this blind spot was never
-exercised.
-
-**Coverage assertion.** The meta-guard also asserts that **every** `*-verify.mjs` (except itself) is
-drift-protected by one of three mechanisms, and FAILs naming the options if a guard is left unprotected:
-
-- **(a)** it imports the real source via a `../src/…` path (an import can't drift), OR
-- **(b)** it carries ≥1 `// MIRRORS:` tag beside its hand-ported math, OR
-- **(c)** it declares `// MIRRORS-EXEMPT: <reason>` — for a guard that genuinely ports nothing (pure spec
-  constants, self-contained format checks, or a real import of non-`src/` logic such as
-  `fs-boundary-guard-verify.mjs`, which imports `scripts/check-boundary.mjs` directly and so cannot drift).
-
-This closes the hole where an untagged, non-importing guard would silently get zero protection.
-
-When you **add** a ported guard: add a `// MIRRORS: <src>@<start>-<end> sha256:PENDING` tag next to the
-ported block, then run `--update` to seed the real hash. When you **refactor source** a tag points at,
-re-read it, confirm the port still mirrors it (fix the port if not), then `--update`. Prefer converting a
-port to a real `../src` import wherever the module runs under Node — an import can't drift, so it needs no
-tag. The looper's grid arithmetic (`src/audio/looper/grid-math.ts`) and the compensation formula
-(`src/audio/record-latency-math.ts`) are kept PURE for exactly this: when the logic you want to guard reads
-`engine.ctx` / `clock.bpm()` / `engineState` inline, extract the math into one of those modules (the source
-calls it with the live values) and import it — the tag count `run-all.mjs` prints is the trend. If a new
-guard truly ports nothing, give it `// MIRRORS-EXEMPT: <reason>` instead of a tag.
-
 ## Add a guard
 
 1. Create `verify/<name>-verify.mjs` (the `-verify.mjs` suffix is how `run-all.mjs` discovers it).
-2. Prefer importing the real `../src/...` module if it runs under Node (pure TS, no Web Audio/Tone deps);
-   otherwise port the exact logic and note which source path it mirrors.
+2. Run the real code: import a pure module directly; drive anything that touches Web Audio, Tone, timers
+   or the looper through the rig or the hooks. When the logic you want reads `engine.ctx`, `clock.bpm()`
+   or `engineState` inline and a rig scenario cannot reach it, extract the math into `grid-math.ts` or
+   `record-latency-math.ts` (the source calls it with the live values) and import it. Never copy source
+   logic into a guard.
 3. Track checks with a `passed`/`failed` counter, print the `=== RESULT: N/N checks passed, M failed ===`
    line, and `process.exit(failed === 0 ? 0 : 1)`.
-4. Run `pnpm verify` to confirm it's picked up and green.
+4. Plant realistic bugs in the covered code; each must turn the guard red. Revert them.
+5. Run `pnpm verify` to confirm it's picked up and green.
 
 ## Why these are tracked
 

@@ -4,7 +4,7 @@ Decided 2026-09-23 from the product lens over that day's audit. The promise head
 guitarist's hands are on the guitar, and today every looper action needs the PC keyboard or the
 mouse. MIDI handles only CC64/1/123 and bend (`src/audio/midi.ts`); the keys bind only
 Esc/Space/Enter/1–5 (`src/app/transport-keys.ts`). `src/audio/looper/looper.ts` already exposes every
-action, so the milestone is adapters: capture, compensation and the MIRRORS-guarded algorithms stay
+action, so the milestone is adapters: capture, compensation and the rig-guarded algorithms stay
 untouched, and nothing here needs the rig to prove correctness. This file is deleted when the
 milestone lands; what still binds moves to the briefings.
 

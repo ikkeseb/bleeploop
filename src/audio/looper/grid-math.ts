@@ -4,8 +4,8 @@
  * arm boundary.
  *
  * PURE ON PURPOSE: no engine, clock, Tone or engineState import, so this module runs under Node and the
- * `verify/` guards IMPORT it instead of hand-mirroring it (each import here deletes a MIRRORS drift tag —
- * see verify/README.md). Keep it that way: every function takes its clock/state as arguments.
+ * `verify/` guards import it directly (verify/README.md). Keep it that way: every function takes its
+ * clock/state as arguments.
  */
 import { clampBars, framesPerBar, maxWholeBars } from '../quantize.ts'; // explicit .ts: Node runs this file
 

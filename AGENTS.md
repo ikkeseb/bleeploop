@@ -17,7 +17,7 @@ Harness auto-load of nested files is not reliable: open the briefing yourself.
 | `src/audio/` — engine, clock, metronome/click, timing, looper, capture, latency, MIDI/live notes | `src/audio/AGENTS.md` |
 | Any frontend or looper-UI work: `src/ui/`, `src/app.css`, `src/app.tsx` | `src/ui/AGENTS.md` |
 | `src-tauri/` — anything Rust/native, ASIO, plugin hosting, Cargo dependency/lockfile updates | `src-tauri/AGENTS.md` |
-| Verification code, interpreting a gate result, the MIRRORS drift canary, a docs-guard failure | `verify/README.md` |
+| Verification code, the verify rig, interpreting a gate result, a docs-guard failure | `verify/README.md` |
 | Any runtime verification (browser probe, `__lf`, `tauri dev`, Mac-vs-PC) | `docs/VERIFY.md` |
 | Any non-trivial work; `engine.ts`, bus wiring | `docs/ARCHITECTURE.md` |
 | Planning or performing a by-ear/eye/rig session; gate-adjacent code; latency | `STATUS.md` |

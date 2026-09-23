@@ -14,7 +14,7 @@
 // Raising RIG_LAP_STOP_CAP is the owner's call.
 // Run: node verify/fs-docs-verify.mjs
 //
-// MIRRORS-EXEMPT: ports no source logic — it reads the tracked docs + git and asserts against the tree.
+// Reads the tracked docs + git and asserts against the tree.
 
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';

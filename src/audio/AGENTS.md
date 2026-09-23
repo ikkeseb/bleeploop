@@ -14,10 +14,10 @@ limiter placement): `docs/ARCHITECTURE.md` § Audio architecture — read it bef
 - **Read the `OWNS:` line.** Every `looper/*.ts` and audio owner file opens with one, naming the
   decisions it owns (where master length is decided, where BPM locks, where C is applied). Pure grid
   + compensation arithmetic lives in `looper/grid-math.ts` and `record-latency-math.ts`, which
-  `verify/` imports directly — extend those rather than porting math into a verifier.
-- **After looper/capture/state-machine changes run `pnpm verify:jam`.** A green `pnpm verify` says
-  nothing about the dispatchers. A comment edited inside a `MIRRORS`-tagged range trips the drift
-  canary: `verify/README.md` has the reseed procedure.
+  `verify/` imports directly — extend those rather than copying math into a verifier.
+- **After looper/capture/state-machine changes run `pnpm verify:jam`.** `pnpm verify` drives the
+  real looper on a fake audio layer (`verify/README.md`); it cannot see real render timing, the
+  browser or WebView2.
 
 ## One grid
 

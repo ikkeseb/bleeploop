@@ -2,7 +2,6 @@
 // window + phase anchor slide by whole passes still commits ON the counted grid (commitAnchor) however
 // many passes rolled. The dispatchers (completeRetakePass, stopCapture, the lane handoff) are exercised
 // by golden-jam.mjs — a green run here says nothing about them.
-// MIRRORS-EXEMPT: imports the real grid-math; the slide itself is two additions, modelled inline.
 let fails = 0, checks = 0;
 function ok(name, cond, detail = '') { checks++; if (!cond) { fails++; console.log(`  FAIL  ${name}  ${detail}`); } }
 

@@ -127,15 +127,15 @@ Live project state and open threads: [`STATUS.md`](STATUS.md).
 
 There is no unit-test runner. Two layers cover the audio core:
 
-- `pnpm verify` (~1 s, part of `pnpm check`) checks the pure logic: looper frame math, latency
-  compensation and clock math, with no browser, `AudioContext` or hardware. Some guards import the
-  real source. Most are hand-ported copies, and `fs-mirror-drift-verify.mjs` re-hashes the source
-  range each one copies, so a copy that falls behind fails the run.
+- `pnpm verify` (a few seconds, part of `pnpm check`) runs the real source with no browser,
+  `AudioContext` or hardware: pure modules (looper frame math, latency compensation) are imported
+  directly, and the looper, capture window and clock run on a fake Web Audio layer that renders
+  quanta and fires the app's timers on the audio clock.
 - `pnpm verify:jam` (~40 s, outside `pnpm check`) is the golden jam. It drives the real app in a
   headless browser, records impulses on the beat grid and checks the committed loop frame by frame.
   Focused browser probes also cover input ownership, session round trips, recovery failures and
-  plugin lifecycle transitions; see [`verify/README.md`](verify/README.md). The pure-logic guards
-  never reach the running audio graph.
+  plugin lifecycle transitions; see [`verify/README.md`](verify/README.md). The `pnpm verify` guards
+  never reach a real audio graph, browser or WebView2.
 
 Feel, the native half and real rig latency are verified by running the app and measuring it, not by
 reading code or trusting a typecheck. [`docs/VERIFY.md`](docs/VERIFY.md) explains how: the browser

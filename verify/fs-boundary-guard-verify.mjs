@@ -10,8 +10,6 @@
 // and clean files pass. Real import (plain .mjs), so it cannot drift from the guard. Run: node fs-boundary-guard-verify.mjs
 
 import assert from 'node:assert';
-// MIRRORS-EXEMPT: imports the real classify()/isInPlatform() from ../scripts/check-boundary.mjs — a real
-// import (not under ../src/), ports no math by hand, so it cannot drift and needs no MIRRORS hash.
 import { classify, isInPlatform } from '../scripts/check-boundary.mjs';
 
 let passed = 0;

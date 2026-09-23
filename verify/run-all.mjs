@@ -6,7 +6,7 @@
 // Run: pnpm verify   (or: node verify/run-all.mjs)
 // Exit code is 0 only if every verifier passed; non-zero (and a FAIL list) otherwise.
 
-import { readFileSync, readdirSync } from 'node:fs';
+import { readdirSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -49,20 +49,13 @@ for (const f of files) {
   }
 }
 
-// Drift-exposure trend: how many guards still hand-port source logic (each MIRRORS tag is a range the
-// canary must re-hash). The way down is importing the pure modules (grid-math.ts, record-latency-math.ts).
-const mirrorTags = files.reduce(
-  (n, f) => n + (readFileSync(join(here, f), 'utf8').match(/^\s*\/\/\s*MIRRORS:\s*\S+@\d+-\d+/gm) || []).length,
-  0,
-);
-
 const pad = Math.max(...rows.map((r) => r.f.length));
 console.log('\nBleepLoop verifiers');
 for (const r of rows) {
   console.log(`  ${r.ok ? 'PASS' : 'FAIL'}  ${r.f.padEnd(pad)}  ${r.summary}`);
 }
 console.log(
-  `\n=== ${files.length - failedFiles}/${files.length} verifiers passed, ${totalChecks} total checks, ${failedFiles} file(s) failed ===  (${mirrorTags} MIRRORS tags still hand-ported)`,
+  `\n=== ${files.length - failedFiles}/${files.length} verifiers passed, ${totalChecks} total checks, ${failedFiles} file(s) failed ===`,
 );
 
 process.exit(failedFiles === 0 ? 0 : 1);

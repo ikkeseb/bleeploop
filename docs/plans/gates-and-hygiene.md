@@ -1,45 +1,12 @@
 # Work order: real-code gates and agent hygiene (OPEN)
 
-Six pieces from the 2026-09-23 fresh-eyes pass over code, gates, docs and agent workflow. Build them in
-this order, one piece per commit series, gates green before each push. Piece 6 waits on an owner
-decision. Taste findings from that day live in `docs/backlog-taste.md` and the hands-free milestone in
+Pieces 2-6 of the 2026-09-23 fresh-eyes pass over code, gates, docs and agent workflow (piece 1, guards
+that drive the real looper, landed; `verify/README.md` owns the rig). Build them in this order, one
+piece per commit series, gates green before each push. Piece 6 waits on an owner decision. Taste findings from that day live in `docs/backlog-taste.md` and the hands-free milestone in
 `docs/plans/pedalboard.md`; neither is repeated here. Delete this file when the last piece lands, after
 folding what still binds into `verify/README.md`, the briefings or a call-site comment.
 
-Pieces 1, 3 and 5 may edit `src/audio/`: the dev-app rule in `AGENTS.md` applies.
-
-## 1. Guards drive the real looper
-
-**Why.** 42 `MIRRORS` tags in 18 guards are hand-ported copies of `machine.ts`, `capture.ts` and
-`clock.ts`, the code that matters most. `verify/fs-mirror-drift-verify.mjs` re-hashes the source ranges
-so a port that goes stale fails. The guards prove the copy, not the app, and every refactor of those
-files trips the canary.
-
-**Recipe** (a 115-line spike, not committed, ran the real modules under plain Node in about 1 s):
-
-- `module.registerHooks` loaded with `node --import`. Resolve: `tone` to a fake; `*?worker&url` to a
-  data-URL module exporting a string; `*?worker` to an empty class; extensionless relative imports
-  under `src/` to `.ts`; `solid-js` with the `browser` condition; bare specifiers from outside the repo
-  against the repo's `package.json`. Load: replace `import.meta.env` with `({ DEV: false })` in
-  `src/**/*.ts`.
-- Globals: a fake `AudioContext` with a settable `currentTime`, `sampleRate`, the `create*` methods the
-  looper calls and `audioWorklet.addModule`; an `OfflineAudioContext` whose `startRendering` returns an
-  impulse at frame 512 (the limiter-latency measurement in `engine.start`); an `AudioWorkletNode` that
-  keeps its `processorOptions`; `self.crossOriginIsolated = true`; a no-op `localStorage`.
-- Tone fake: one chainable Proxy for every node class. Its `context` must return
-  `{ rawContext, isOffline: false, immediate(), now() }`; the FX chain reads all four.
-- Driving: wrap `processorOptions.ringSab` in a `RingBuffer`, push packets in the
-  `src/audio/capture-packet.ts` format with absolute frame timestamps while advancing `currentTime`,
-  and yield to the event loop so the 25 ms drain timer runs.
-- Spike result: REC, count-in, two bars of input, REC again. Master = exactly 2 bars at 120 BPM, BPM
-  locked, lane PLAYING.
-
-**Do.** Build the harness in TypeScript under `verify/` and add it to the typecheck. Convert the
-ported guards one at a time to drive the real modules, deleting each port and its tag.
-
-**Done when** `pnpm verify` prints 0 MIRRORS tags, every converted guard went red on a deliberately
-planted bug before it was kept (bug reverted), `verify/fs-mirror-drift-verify.mjs` and its section in
-`verify/README.md` are deleted, and `pnpm verify:jam` is green.
+Pieces 3 and 5 may edit `src/audio/`: the dev-app rule in `AGENTS.md` applies.
 
 ## 2. One probe harness, every probe automated
 
@@ -73,8 +40,7 @@ has deliberately left, read together with a delta list in `src/ui/AGENTS.md`.
 
 **Do.**
 - Sweep the comments so each states what the code does now and why. A cheaper agent may run the sweep;
-  the orchestrating session reviews every hunk. Before piece 1 lands, a comment edit inside a MIRRORS
-  range is safe (the hash drops full-line comments) and a code edit is not.
+  the orchestrating session reviews every hunk.
 - Move the formula into the header of `src/audio/record-latency-math.ts`; `STATUS.md` and
   `src/audio/AGENTS.md` point there.
 - Strip the dated correction notes from `docs/ARCHITECTURE.md`.
@@ -102,7 +68,7 @@ plus the gotchas no script can carry.
 **Done when** each command has run once on the PC and printed its verdict, and the prose it replaces
 is gone from `docs/VERIFY.md` and `src-tauri/AGENTS.md`.
 
-## 5. One recorder-session object (after piece 1)
+## 5. One recorder-session object
 
 **Why.** One capture's state spans about 10 `engineState` fields, 5 module-level `let`s in
 `src/audio/looper/machine.ts` and 6 overdub fields per track. Five sites reset it by hand:
@@ -112,7 +78,7 @@ is gone from `docs/VERIFY.md` and `src-tauri/AGENTS.md`.
 **Do.** A pure refactor, with no behaviour change: `recording: RecordSession | null` in the looper
 state, `overdub: OverdubSession | null` on `Track`. Releasing a capture sets the field to `null`.
 
-**Done when** the piece-1 guards and `pnpm verify:jam` are green, and the next "Play first" jam in
+**Done when** the rig guards (`pnpm verify`) and `pnpm verify:jam` are green, and the next "Play first" jam in
 `STATUS.md` runs on this code before anything else lands in `src/audio/looper/`.
 
 ## 6. L2 loopback probe (owner decision)
