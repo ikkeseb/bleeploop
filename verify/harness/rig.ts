@@ -160,6 +160,18 @@ export class LooperRig {
     await flushMicrotasks();
   }
 
+  /**
+   * The audio thread renders `quanta` more quanta (the worklets publish them) while ctx.currentTime
+   * still reads the old time, as when one device callback renders several quanta before the clock the
+   * main thread reads moves. No timer fires; the next advance catches the clock up.
+   */
+  renderAhead(quanta: number): void {
+    const ctx = this.ctx;
+    const shown = ctx.currentTime;
+    for (let q = 0; q < quanta; q++) this.renderQuantum(ctx);
+    ctx.currentTime = shown;
+  }
+
   /** Render up to the next capture drain tick and let it run: the ring is empty right after. */
   async untilDrained(): Promise<void> {
     const due = timers.nextDue(/buildEngine/);
