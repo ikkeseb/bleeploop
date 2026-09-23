@@ -2,7 +2,7 @@
  * Capture AudioWorkletProcessor — the record tap of the looper.
  *
  * Lives on the audio render thread. On every 128-frame quantum it pushes the mono
- * input (channel 0) plus its absolute currentFrame into a lock-free SharedArrayBuffer ring,
+ * input (channel 0) plus its absolute start frame into a lock-free SharedArrayBuffer ring,
  * which the main thread drains into the active track's record buffer.
  *
  * HARD RULE: zero allocation inside process(). Everything (the RingBuffer view, the timestamped
@@ -39,6 +39,13 @@ class CaptureProcessor extends AudioWorkletProcessor {
   private readonly heartbeat: Int32Array;
   /** One pre-allocated timestamp + PCM packet. Disconnected input fills its PCM region with silence. */
   private readonly packet = new Float64Array(CAPTURE_PACKET_SIZE);
+  /**
+   * The frame the next quantum starts at. Chromium publishes `currentFrame` to the worklet scope under
+   * a try-lock on the audio graph, so while the main thread holds that lock a quantum can see the
+   * previous quantum's value (then a +256 jump). A rendered quantum never repeats, so a stamp never
+   * goes below this.
+   */
+  private nextFrame = -1;
 
   constructor(options?: AudioWorkletNodeOptions) {
     super(options);
@@ -49,6 +56,8 @@ class CaptureProcessor extends AudioWorkletProcessor {
   }
 
   process(inputs: Float32Array[][]): boolean {
+    const frame = Math.max(currentFrame, this.nextFrame);
+    this.nextFrame = frame + CAPTURE_QUANTUM_FRAMES;
     const input = inputs[0];
     // input may be [] when nothing is connected upstream this quantum; push silence so the
     // write head still advances at the real-time rate (keeps track lengths frame-exact).
@@ -56,7 +65,7 @@ class CaptureProcessor extends AudioWorkletProcessor {
     // Single producer: only the consumer can increase available space after this check. Never
     // publish a partial packet, which could pair one quantum's timestamp with another one's PCM.
     if (this.ring.available_write() >= CAPTURE_PACKET_SIZE) {
-      this.packet[0] = currentFrame;
+      this.packet[0] = frame;
       this.packet[1] = CAPTURE_QUANTUM_FRAMES;
       for (let k = 0; k < CAPTURE_QUANTUM_FRAMES; k++) this.packet[CAPTURE_PACKET_HEADER + k] = channel?.[k] ?? 0;
       this.ring.push(this.packet, CAPTURE_PACKET_SIZE);

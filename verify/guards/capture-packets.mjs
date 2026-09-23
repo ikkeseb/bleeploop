@@ -80,5 +80,18 @@ check('packet capacity preserves at least the original audio-frame budget', () =
     assert.ok(capacity / CAPTURE_PACKET_SIZE * 128 >= frames);
   }
 });
+// Chromium can hand a quantum the previous quantum's `currentFrame` (then jump +256) while the main
+// thread holds the graph lock; a suspended context jumps forward for real.
+check('a stale currentFrame never stamps a quantum twice; a real forward jump is kept', () => {
+  const stale = fixture(8);
+  const seen = [0, 128, 128, 384, 384, 640, 2048].map((d) => origin + d);
+  for (const f of seen) {
+    globalThis.currentFrame = f;
+    stale.processor.process([[input]]);
+  }
+  const stamps = [];
+  while (stale.ring.pop(packet) === CAPTURE_PACKET_SIZE) stamps.push(packet[0] - origin);
+  assert.deepEqual(stamps, [0, 128, 256, 384, 512, 640, 2048]);
+});
 console.log(`=== RESULT: ${passed}/${passed + failed} checks passed, ${failed} failed ===`);
 process.exitCode = failed ? 1 : 0;
