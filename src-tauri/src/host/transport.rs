@@ -671,7 +671,10 @@ type LoadRing = Result<(usize, SharedBufferHandle), String>;
 /// (`load_ready_channel`): a send that succeeds was received, so a buffer that lands between the
 /// 5 s timeout and the channel's drop goes back to the UI callback, which `Close()`s it; a buffer
 /// slot would hold it and let it leave with the channel. The UI thread's send waits only for the
-/// caller to reach its `recv_timeout`, which it enters right after `with_webview` returns.
+/// caller to reach its `recv_timeout`, which it enters right after `with_webview` returns. So
+/// `create_shared_ring` must never run ON the UI thread: there `with_webview` runs the callback
+/// inline and its send would wait forever for a receiver on its own thread (the callers are the
+/// owner threads).
 fn shared_ring_channel() -> (
     std::sync::mpsc::SyncSender<LoadRing>,
     std::sync::mpsc::Receiver<LoadRing>,

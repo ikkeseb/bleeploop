@@ -71,11 +71,10 @@ rest is the map.
   `host/editor_window.rs`: owner-LESS window + `drain_after_editor_teardown()` +
   `show_host_window_front()` one-shot `HWND_TOP` (no `WS_EX_TOPMOST`).
 - **Timed Win32 waits round up to the timer tick Windows grants the process**, and that tick can be
-  15.6 ms while the global resolution reads 1 ms, even after the app's own `timeBeginPeriod(1)`
-  (measured 2026-09-23 in `tauri dev`: a 2 ms wait took 15.4 ms). Bound a wait loop by a deadline,
-  never a round count (`drain_after_editor_teardown`: fifty 2 ms waits took ~770 ms); pace RT work
-  with the high-res waitable timer (`PaceTimer`). A plugin's own waits stretch the same way
-  (Archetype Gojira's teardown: ~600 ms at that tick, ~200 ms at 1 ms).
+  15.6 ms while the global resolution reads 1 ms, even after the app's own `timeBeginPeriod(1)`.
+  Bound a wait loop by a deadline, never a round count (`drain_after_editor_teardown`); pace RT work
+  with the high-res waitable timer (`PaceTimer`). A plugin's own waits stretch the same way; the
+  measured numbers sit with the native baselines in `docs/VERIFY.md`.
 - **Release logging:** `tauri-plugin-log` registers UNCONDITIONALLY → Stdout (the dev grep
   convention) + a rotated file at `%LOCALAPPDATA%\com.bleeploop.app\logs\bleeploop.log` (2 MB,
   KeepAll). The Rust panic hook chains the default hook and logs location+payload.
