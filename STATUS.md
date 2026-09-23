@@ -91,18 +91,13 @@ Blocked on an owner decision, not on testing. The default column is what happens
 
 **Answered 2026-09-23** (product lens over the 2026-09-23 audit; the promise now heads `README.md`):
 
-- **D12 — not built** (the L controller IPC): MIDI into a plugin stays on the WebView latency path
-  whatever the IPC carries (`native-io.ts` GO LIVE rejects a synth slot). Build instead: host-side
-  sustain for native slots by dropping the `!activePlugin` guard on note-off deferral in
-  `input-router.ts` (S). Limit: the plugin's own pedal behaviour never fires; bend and mod wheel stay
-  built-in only.
-- **D13 — build:** picking a synth or an instrument plugin in a slot makes it the MIDI slot; loading
-  an effect plugin does not (`isEffect` comes from VST3 subCategories, tester F9). Today notes go into
-  the amp sim when a synth is picked in B while A is active: silence with no explanation.
-- **D15 — build, CHANGED MIRRORS reseed approved:** `startPlayback` rethrows a `src.start` failure
-  inside the boundary `setTimeout` in `playback.ts`, so the re-arm never runs and the lane reads
-  OVERDUBBING while later layers go into a buffer that never plays. A failed swap logs and returns
-  the lane to a consistent state.
+- **D12-S — built:** host-side sustain and release of pedal-held notes on plugin sinks, verified by
+  `verify/instrument-routing.mjs`; the plugin's own pedal behaviour never fires; bend and mod wheel
+  stay built-in only.
+- **D13 — built:** picking a synth or instrument plugin makes its slot the MIDI slot; an effect plugin
+  does not, verified by `verify/instrument-routing.mjs`.
+- **D15 — built:** a failed overdub boundary swap keeps the layer and stops the lane, verified by
+  `verify/overdub-timers.mjs --case=swapFail` and `fs-overdub-verify.mjs`.
 
 **Answered 2026-09-18:**
 
@@ -189,6 +184,9 @@ session is still unverified.
   when the last slot holding the path unloads; `__lf` bypasses it (accepted).
 - **Editor-to-front:** springs up in front at open, may drop behind when you click back into BleepLoop
   (intended, non-pinned).
+- With sustain down, re-striking a note on a VST/CLAP instrument sends note-off then note-on in one
+  tick as two Tauri invokes from `input-router.ts`; their order is not guaranteed. Does the re-struck
+  note sound?
 
 ### Stop 6 — fault paths
 

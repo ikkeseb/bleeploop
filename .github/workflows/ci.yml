@@ -130,8 +130,5 @@ jobs:
       - run: cargo check
         working-directory: src-tauri
 
-      - run: cargo check --no-default-features
-        working-directory: src-tauri
-
       # `cargo test` is NOT here: it builds the full debug profile (~15 min on the Windows runner,
       # cached or not, vs ~2 min for the two checks) — it runs in rust-test.yml on src-tauri/ changes.

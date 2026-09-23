@@ -74,8 +74,8 @@ Harness auto-load of nested files is not reliable: open the briefing yourself.
   `pnpm dev:asio` is the by-ear dev command; `pnpm dev:wasapi` iterates faster without the ASIO SDK,
   at higher latency; `pnpm build:app` makes the prod-realistic standalone exe. `app.exe --disable-asio`
   (dev: `pnpm dev:asio -- -- --disable-asio`) starts without touching any ASIO driver.
-- ASIO is a cargo OPT-IN feature carried by the npm scripts: a plain `cargo build` must work
-  without the LLVM/ASIO SDK, because the repo ships to others.
+- ASIO is a cargo opt-in feature (owner: `src-tauri/AGENTS.md`); a plain `cargo build` must work
+  without the SDK.
 - Known intermittent red on the Mac: if the pre-push hook goes red with no FAIL line, re-run once
   before digging.
 - `pnpm dlx knip` finds unused files/exports/deps; an export kept only for a browser probe carries
