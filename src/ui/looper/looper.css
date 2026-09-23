@@ -87,7 +87,8 @@
 .lp-lane.is-stopping .lp-pb--play {
   border-color: var(--dub);
 }
-.lp-lane.is-stopping .lp-lane__wellmsg {
+.lp-lane.is-stopping .lp-lane__wellmsg,
+.lp-lane .lp-lane__wellmsg.is-cue {
   inset: 50% auto auto 50%;
   transform: translate(-50%, -50%);
   width: max-content;
@@ -429,6 +430,23 @@
 .lp-lane[data-state='listening'] .lp-lane__wellmsg {
   color: color-mix(in srgb, var(--cyan) 70%, var(--faint));
 }
+/* A refused transport key (gates.ts refuseOnLane): its reason sits in the well in the ENDING note's
+   box, amber like the armed CLR, and the lane edge turns amber until the cue times out. The sighted
+   twin of the screen-reader announcement; after the state rules above so it wins on any lane. */
+.lp-lane .lp-lane__wellmsg.is-cue {
+  border-color: var(--dub);
+  color: var(--dub);
+  text-transform: uppercase;
+  animation: lp-cue-in 0.16s ease-out;
+}
+.lp-lane.is-cued.is-cued {
+  border-color: var(--dub);
+}
+@keyframes lp-cue-in {
+  from {
+    opacity: 0;
+  }
+}
 
 /* ---- right cluster: FX/MUTE/undo/reverse pills over the horizontal volume slider ---- */
 .lp-lane__right {
@@ -533,7 +551,8 @@
   .lp-lane[data-state='armed'] .lp-core::before,
   .lp-lane[data-state='listening'] .lp-core::before,
   .lp-lane[data-state='armed'] .lp-lane__state::before,
-  .lp-lane[data-state='listening'] .lp-lane__state::before {
+  .lp-lane[data-state='listening'] .lp-lane__state::before,
+  .lp-lane .lp-lane__wellmsg.is-cue {
     animation: none !important;
   }
 }

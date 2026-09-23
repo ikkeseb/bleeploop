@@ -2,10 +2,11 @@ import { createSignal } from 'solid-js';
 import { looper } from '../../audio/looper/looper';
 
 /**
- * OWNS: the looper UI's refusal gates and its screen-reader announcement line. One predicate per lane
- * gesture, returning WHY a press is refused, so the lane button's disabled state, its title, its ARIA
- * label and the keyboard transport's refusal all speak one vocabulary. The engine keeps its own
- * self-protection (machine.ts recDub/playStop); these mirror it for the UI, they do not replace it.
+ * OWNS: the looper UI's refusal gates, its screen-reader announcement line and the sighted lane cue.
+ * One predicate per lane gesture, returning WHY a press is refused, so the lane button's disabled state,
+ * its title, its ARIA label and the keyboard transport's refusal all speak one vocabulary. The engine
+ * keeps its own self-protection (machine.ts recDub/playStop); these mirror it for the UI, they do not
+ * replace it.
  *
  * Reactive: the gates read the looper's public track signals, so call them from JSX, memos or an event
  * handler — never from the 60 fps draw loop (invariant 6).
@@ -68,4 +69,30 @@ export { liveMsg };
 /** Put `msg` on the looper's screen-reader status line. */
 export function announceLooper(msg: string): void {
   setLiveMsg(msg);
+}
+
+/** The lane a keyboard press was refused on, and why. Looper.tsx shows `text` in that lane's well. */
+type LaneCue = { track: number; text: string };
+
+// The sighted twin of the announcement. One cue at a time: a newer one replaces it. Written by the key
+// press and by this UI timer only, never by an audio-path timer (invariant 6).
+const [laneCue, setLaneCue] = createSignal<LaneCue | null>(null);
+export { laneCue };
+let cueTimer: ReturnType<typeof setTimeout> | undefined;
+
+/** How long a refusal stays on the lane. */
+const CUE_MS = 1600;
+
+/** Refuse a transport press on lane `i`: say why on the lane for `ms` and on the screen-reader line. */
+export function refuseOnLane(i: number, reason: string, ms = CUE_MS): void {
+  announceLooper(`Track ${i + 1}: ${reason}`);
+  clearTimeout(cueTimer);
+  setLaneCue({ track: i, text: reason });
+  cueTimer = setTimeout(() => setLaneCue(null), ms);
+}
+
+/** Take the lane cue down early: an accepted press makes the old reason stale. */
+export function dismissLaneCue(): void {
+  clearTimeout(cueTimer);
+  setLaneCue(null);
 }

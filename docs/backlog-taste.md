@@ -47,7 +47,8 @@ not here.
 - **Plugin drawer:** one by-eye lap with a real plugin drawer (params scroll INSIDE the card, header
   pinned); slot vertical-expand.
 - **Keyboard transport feel:** 1–5 / Space / Enter (drum mode: pads own 1–4, only 5 selects); a refused
-  Space/Enter is announced to screen readers only, still no sighted cue (`docs/plans/pedalboard.md` piece 1).
+  Space/Enter shows its reason for 1.6 s as an amber boxed note in the selected lane's well, with an
+  amber lane edge (2026-09-23, built, unseen) — readable from the guitar? right colour and length?
 - **COPY pill (2026-09-18):** "⧉ COPY" after REV in the lane's pill row, hidden while no lane is
   EMPTY, always targets the first EMPTY lane — right place and word? Floated: a right-click
   context menu (none exists in the app yet) for picking the target lane. The pill row with DUB + REV

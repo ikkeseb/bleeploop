@@ -35,6 +35,8 @@
  *      FIXED) commits at master length and repeats sample-exactly across it, RETAKE keeps rolling at the
  *      master whatever FIXED says, and PLAY on an idle transport re-anchors the master grid to frame 0
  *      while PLAY beside a playing lane joins the running phase (`looper.phaseValue()`)
+ *  10. KEYS: real key presses through the window handler — a refused Space shows its reason on the
+ *      selected lane only, changes nothing, and the cue leaves by itself
  *
  * KNOWN LIMITS — do not read a green run as more than it is:
  *   - Everything measured comes from RECORDED PCM plus dispatcher state. Loop PLAYBACK is not captured
@@ -906,6 +908,41 @@ await probe(async ({ open }) => {
     // the resumed PHASE is not observable from recorded PCM (see KNOWN LIMITS at the top).
     await page.evaluate(() => window.__lf.looper.playStop(0));
     check('playStop halted the track', (await page.evaluate(() => window.__lf.looper.trackInfo(0).state)) === 'STOPPED');
+
+    // ---- keys: the real window key handler on a STOPPED lane that holds an overdub --------------
+    // Real key presses (page.keyboard), never __lf calls, so the handler's own dispatch is what runs.
+    // A refused press used to reach screen readers only: Space on the selected STOPPED lane is refused
+    // ("play first"), so its reason must appear in THAT lane's well, change nothing, and leave by itself.
+    console.log('\ngolden-jam: keys\n');
+    const cueTexts = () =>
+      page.evaluate(() =>
+        [...document.querySelectorAll('.lp-lane')].map(
+          (lane) => lane.querySelector('.lp-lane__wellmsg.is-cue')?.textContent?.trim() ?? '',
+        ),
+      );
+    await page.keyboard.press('1');
+    const cueFrom = await page.evaluate(() => performance.now());
+    await page.keyboard.press('Space');
+    const cueShown = await cueTexts();
+    const afterRefusal = await page.evaluate(() => window.__lf.looper.stateOf(0));
+    check(
+      'a refused Space shows its reason on the selected lane, and only there',
+      cueShown[0] === 'play first to overdub' && cueShown.slice(1).every((c) => c === ''),
+      `cues=${JSON.stringify(cueShown)}`,
+    );
+    check('the refused Space changed nothing', afterRefusal === 'STOPPED', `state=${afterRefusal}`);
+    const cueGoneAt = await waitFor(
+      page,
+      () => (document.querySelector('.lp-lane__wellmsg.is-cue') === null ? performance.now() : null),
+      5000,
+      'the refusal cue to go away',
+    );
+    check(
+      'the refusal cue went away by itself after a moment',
+      cueGoneAt - cueFrom > 800 && cueGoneAt - cueFrom < 3000,
+      `${(cueGoneAt - cueFrom).toFixed(0)} ms`,
+    );
+
     await page.evaluate(() => window.__lf.looper.playStop(0));
     check('playStop resumed the track', (await page.evaluate(() => window.__lf.looper.trackInfo(0).state)) === 'PLAYING');
 

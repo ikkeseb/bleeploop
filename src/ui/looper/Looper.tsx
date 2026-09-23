@@ -4,7 +4,7 @@ import { clock } from '../../audio/clock';
 import { engine } from '../../audio/engine';
 import { registerLane, unregisterLane } from './waveform';
 import { createTwoStepConfirm, masterBars } from './shared';
-import { announceLooper, liveMsg, playStopGate, recDubGate } from './gates';
+import { announceLooper, laneCue, liveMsg, playStopGate, recDubGate } from './gates';
 import { FxPanel } from './FxPanel';
 import './looper.css';
 
@@ -174,18 +174,25 @@ function TrackLane(props: {
         : track().retakePass > 0
           ? `TAKE ${track().retakePass}` // a rolling RETAKE counts its passes
           : STATE_WORD[displayState()];
+  // A transport key refused on this lane (gates.ts refuseOnLane): its reason, while the cue lasts.
+  const cue = createMemo(() => {
+    const c = laneCue();
+    return c !== null && c.track === props.index ? c.text : '';
+  });
   // Only ARMED shows a well message (waiting for the downbeat before the take begins). EMPTY shows nothing
   // — the bright ● core already says "press to record". The spoken 'record' action lives on the core
-  // button's aria-label, untouched.
+  // button's aria-label, untouched. A refusal cue outranks every message while it lasts.
   // A FIRST take (no master yet) is armed behind the forced count-in → the well counts it down big
   // (4-3-2-1, the numeral is clock.countLeft); a LATER take waits for the loop boundary → plain text.
   const wellMsg = () => {
+    if (cue()) return cue();
     if (stopping()) return 'STOPPING AT LOOP END';
     if (displayState() === 'ARMED') return looper.masterLengthFrames() > 0 ? 'WAITING FOR DOWNBEAT' : 'COUNT-IN';
     if (displayState() === 'LISTENING') return 'WAITING FOR INPUT';
     return '';
   };
-  const wellCount = () => (displayState() === 'ARMED' && looper.masterLengthFrames() === 0 ? clock.countLeft() : 0);
+  const wellCount = () =>
+    !cue() && displayState() === 'ARMED' && looper.masterLengthFrames() === 0 ? clock.countLeft() : 0;
 
   // The core IS the REC/DUB capture gesture. Its glyph reflects the ACTION reached by pressing it now
   // (● start-record on empty/armed, ⊕ start-overdub on a playing/stopped take, ■ end the live capture);
@@ -259,7 +266,11 @@ function TrackLane(props: {
   return (
     <div
       class="lp-lane"
-      classList={{ 'is-selected': looper.selectedTrack() === props.index, 'is-stopping': stopping() }}
+      classList={{
+        'is-selected': looper.selectedTrack() === props.index,
+        'is-stopping': stopping(),
+        'is-cued': cue() !== '',
+      }}
       data-state={DATA_STATE[displayState()]}
       data-muted={muted() ? 'true' : undefined}
       role="group"
@@ -314,7 +325,7 @@ function TrackLane(props: {
       <div class="lp-lane__well">
         <canvas ref={canvasEl} />
         <Show when={wellMsg()}>
-          <div class="lp-lane__wellmsg">
+          <div class="lp-lane__wellmsg" classList={{ 'is-cue': cue() !== '' }}>
             <Show when={wellCount() > 0}>
               <span class="lp-lane__count" aria-hidden="true">
                 {wellCount()}
