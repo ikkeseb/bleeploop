@@ -190,7 +190,7 @@ export function SplitStack(props: {
   // keyboard/reset paths use it so a stored weight never implies a px below a pane's floor; otherwise the
   // grid clamps the render to minPx while the persisted fr stays smaller, desyncing the aria %, and the
   // next drag's beginDrag (which rebuilds geometry from the stored weights) grabs with a visible jump.
-  // Returns null when geometry is unavailable → callers fall back to the old fractional clamp. (#B)
+  // Returns null when geometry is unavailable → callers fall back to the plain fraction-only clamp. (#B)
   const pairFloors = (k: number) => {
     const panels = props.panels;
     // Same weighted geometry the drag path uses (autoSize panes subtracted), so a floor computed here in

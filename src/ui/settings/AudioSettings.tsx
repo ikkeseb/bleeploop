@@ -33,8 +33,7 @@ import './audio-settings.css';
 /**
  * Global Audio Settings popover: consolidates the native input device + channel, the monitor
  * (cpal-out) output device, the live RT buffer-size control, and the ASIO low-latency tier toggle (when
- * an ASIO device is available) — all GLOBAL last-used preferences
- * (previously rendered duplicated per-slot in PluginControls). The per-slot Arm toggles stay in
+ * an ASIO device is available) — all GLOBAL last-used preferences. The per-slot Arm toggles stay in
  * PluginControls and read the device choice persisted here. Mounted inside a `<Show>` in app.tsx, so it
  * re-reads persisted state each time it opens (persisted localStorage is the source of truth; these
  * local signals mirror it). The sample-rate row is a disabled placeholder for increment C2.
@@ -59,8 +58,7 @@ export function AudioSettings() {
 
   // Channel count of the selected NAMED device (0 for "default input" — its id is '' so the channel
   // count is unknown). When ≥2 the channel selector appears; by design the explicit channel pick is
-  // offered only for a named device (the default-device shortcut auto-picks Rust-side). Verbatim from
-  // the old per-slot PluginControls memo.
+  // offered only for a named device (the default-device shortcut auto-picks Rust-side).
   const deviceChannels = createMemo(() => {
     if (usingAsio()) return asioDeviceInfo()?.inputChannels ?? 0;
     const id = selectedDevice();
@@ -190,12 +188,12 @@ export function AudioSettings() {
       </div>
       <div class="audio-settings__hint audio-settings__hint--info" role="note">The block plugins process in. The audio driver sets its own device buffer.</div>
 
-      {/* Record-alignment trim — the RELEASE-BUILD surface for the by-ear record-latency offset, which was
-          previously reachable only from the DEV `__lf.recordLatency.setOffsetMs` debug hook (so a shipped
-          build could not be trimmed). It nudges the compensation C (record-latency.ts): POSITIVE ms shifts
-          the recorded take EARLIER on the grid, negative later. Only affects natively-monitored recording
-          (guitar through a native plugin monitor); synth/mic loops are untouched. This is a stopgap to be
-          superseded by the L3 loopback calibration wizard. PLACEMENT IS PROVISIONAL — eye-gated. */}
+      {/* Record-alignment trim — the RELEASE-BUILD surface for the by-ear record-latency offset; a shipped
+          build has no other way to trim it (the DEV-only hook is `__lf.recordLatency.setOffsetMs`). It
+          nudges the compensation C (record-latency.ts): POSITIVE ms shifts the recorded take EARLIER on
+          the grid, negative later. Only affects natively-monitored recording (guitar through a native
+          plugin monitor); synth/mic loops are untouched. This is a stopgap to be superseded by the L3
+          loopback calibration wizard. PLACEMENT IS PROVISIONAL — eye-gated. */}
       <div
         class="audio-settings__row"
         title="Nudges recorded guitar alignment (native monitor only): positive ms lands the take earlier on the grid, negative later."
@@ -300,10 +298,9 @@ export function AudioSettings() {
         <span class="audio-settings__soon">set by the audio device</span>
       </div>
 
-      {/* Diagnostics (relocated from the command bar in W2): the read-only host/isolated/plugin/midi
-          status that used to render as topbar chips. The command-bar system lamp is their aggregate;
-          this is the full read-out. The plugin-scan live region stays in the command bar (single
-          announcer), so these rows are plain text — no role=status here. */}
+      {/* Diagnostics: the read-only host/isolated/plugin/midi status. The command-bar system lamp is
+          their aggregate; this is the full read-out. The plugin-scan live region stays in the command
+          bar (single announcer), so these rows are plain text — no role=status here. */}
       <div class="audio-settings__diag" role="group" aria-label="Diagnostics">
         <div class="audio-settings__diag-title">diagnostics</div>
         <div class="audio-settings__diag-row">

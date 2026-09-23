@@ -1,7 +1,7 @@
 /**
  * Runtime platform selection. `@tauri-apps/api` is pure JS, so importing it in a browser is safe
  * — `isTauri()` returns false and we hand back the web implementation. Under the Tauri shell
- * (P7) it returns true and we hand back `tauriPlatform`; nothing else in the app changes.
+ * it returns true and we hand back `tauriPlatform`; nothing else in the app changes.
  */
 import { isTauri } from '@tauri-apps/api/core';
 import type { Platform } from './host';

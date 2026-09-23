@@ -26,7 +26,7 @@ export { FX_META, FX_PARAM_DEFS } from './metadata';
 export type { FxKind, FxParamDef, FxState } from './metadata';
 
 /**
- * P6 per-track FX chain.
+ * Per-track FX chain.
  *
  * Fixed order, each individually bypassable click-free:
  *   Filter -> PitchShift -> Stutter -> Delay  (inline, in series)

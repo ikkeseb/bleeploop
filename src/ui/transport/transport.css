@@ -1,7 +1,6 @@
-/* Command-bar transport clusters (Orbit V2 — dark glass, colour is state). These render as direct
+/* Command-bar transport clusters — colour is state. These render as direct
    flex items of the `.cmd` header (Transport returns a Fragment); the `.cmd` card + brand/lamp/tools
-   live in app.css. Recipes copied from the approved mockup
-   docs/inspiration/revamp-2026-07/orbit-v2-lanes.html, restyled to the "Instrument" tokens (src/app.css):
+   live in app.css. Styled to the "Instrument" tokens (src/app.css):
    matte key faces, sans labels, a sunk display window for BPM + loop; colour rationed to state
    (--engaged on, --play mic-live/loop, --dub two-step confirm). */
 
@@ -21,7 +20,7 @@
   gap: 8px;
 }
 
-/* the ± steppers (mockup .step) */
+/* the ± steppers */
 .transport__step {
   width: 22px;
   height: 22px;
@@ -143,7 +142,7 @@
   }
 }
 
-/* ---- toggle pills (mockup .tgl) — CLICK / FIXED / AUTO / TAP / ALL / CLEAR / MIC ---- */
+/* ---- toggle pills — CLICK / FIXED / AUTO / TAP / ALL / CLEAR / MIC ---- */
 .transport__modes,
 .transport__global {
   display: flex;
@@ -274,7 +273,7 @@
   color: var(--faint);
 }
 
-/* ---- loop ring-dial readout (mockup .loop) ---- */
+/* ---- loop ring-dial readout ---- */
 .transport__loop {
   display: flex;
   align-items: center;
@@ -340,7 +339,7 @@
 }
 .transport__master-mute:hover {
   color: var(--text);
-  background: var(--glass-2);
+  background: var(--surf-3);
 }
 .transport__master-mute.is-muted {
   color: var(--rec);

@@ -22,7 +22,7 @@ import { platform } from '../../platform';
 import { PluginBar, PluginParams } from './PluginControls';
 
 /**
- * One instrument slot (A / B) — a compact glass card (mockup .src): the A/B identity button, the
+ * One instrument slot (A / B) — a compact card: the A/B identity button, the
  * source label, the six synth segment pills OR the native plugin controls, the native-plugin picker,
  * and the params drawer. app.tsx's renderInstrument mounts two of these
  * (slot 0 / slot 1). The per-slot `paramsOpen` disclosure is state LOCAL to each instance (created once

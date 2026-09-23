@@ -1,5 +1,4 @@
-/* Looper UI — Orbit V2 · Lanes. Five full-width horizontal LANES stacked in the looper zone.
-   Layout spec: docs/inspiration/revamp-2026-07/orbit-v2-lanes.html (approved); the surface language is
+/* Looper UI. Five full-width horizontal LANES stacked in the looper zone. The surface language is
    the "Instrument" token set in src/app.css (matte tone steps, no blur). Colour is state — the per-lane `--sc` token drives the identity word, the core ring/glow
    and a soft left-edge bleed. The waveform canvas is coloured independently by waveform.ts (global
    --rec/--dub/--play tokens); the audio engine + state machine are UNCHANGED. Everything is scoped
@@ -29,7 +28,7 @@
 
 /* ============ THE LANE STACK ============
    A container context (size) so the core button can size to the lanes-area HEIGHT (cqh) — it shrinks
-   when the stage splitter makes the looper zone short, exactly like the old deck's ring did. */
+   when the stage splitter makes the looper zone short. */
 .lp__lanes {
   flex: 1 1 auto;
   min-height: 0;
@@ -52,7 +51,7 @@
   padding: clamp(6px, 1vh, 9px) clamp(10px, 1vw, 14px);
   border-radius: 16px;
   background: var(--card);
-  border: 1px solid var(--glass-edge);
+  border: 1px solid var(--edge);
   box-shadow: inset 0 1px 0 var(--hair);
   position: relative;
   overflow: hidden;
@@ -94,7 +93,7 @@
   width: max-content;
   max-width: calc(100% - 16px);
   padding: 6px 10px;
-  border: 1px solid var(--glass-edge);
+  border: 1px solid var(--edge);
   border-radius: 6px;
   background: var(--bg);
   letter-spacing: 0.16em;
@@ -229,7 +228,7 @@
   color: var(--text);
   background: radial-gradient(circle at 50% 30%, #23262e, #15171c 70%);
   border: 1px solid rgba(0, 0, 0, 0.6);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 0 0 3px var(--sunk), 0 0 0 4px var(--glass-edge);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 0 0 3px var(--sunk), 0 0 0 4px var(--edge);
   position: relative;
   cursor: pointer;
   transition: border-color 0.15s, box-shadow 0.2s, transform 0.12s;
@@ -277,13 +276,13 @@
 .lp-lane[data-state='dub'] .lp-core {
   color: #fff;
   background: radial-gradient(circle at 50% 35%, color-mix(in srgb, var(--sc) 80%, #fff), var(--sc) 50%, color-mix(in srgb, var(--sc) 55%, #000));
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.3), 0 0 16px -3px var(--sc), 0 0 0 3px var(--sunk), 0 0 0 4px var(--glass-edge);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.3), 0 0 16px -3px var(--sc), 0 0 0 3px var(--sunk), 0 0 0 4px var(--edge);
 }
 .lp-lane[data-state='empty'] .lp-core {
   color: var(--rec); /* the bright ● invites the first take */
 }
-/* ARMED (waiting for the downbeat — my design; not in the mockup): an amber DASHED ring, pulsing,
-   + an amber ● glyph. Distinct from live REC (red, solid ring, ■) and OVERDUB (amber, solid ring, ■). */
+/* ARMED (waiting for the downbeat): an amber DASHED ring, pulsing, + an amber ● glyph. Distinct
+   from live REC (red, solid ring, ■) and OVERDUB (amber, solid ring, ■). */
 .lp-lane[data-state='armed'] .lp-core {
   color: var(--dub);
 }
@@ -346,7 +345,8 @@
   box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.6);
 }
 /* disabled = no face, a hairline edge, a legible --faint legend: tone, never an opacity fade, so an
-   EMPTY lane's PLAY / CLR / FX / MUTE still read as controls (W8 grey-on-grey, owner 2026-09-23). */
+   EMPTY lane's PLAY / CLR / FX / MUTE still read as controls (owner eye check 2026-09-23: an opacity
+   fade read grey-on-grey). */
 .lp-pb:disabled {
   cursor: not-allowed;
   background: transparent;
@@ -443,7 +443,7 @@
 }
 /* Empty-lane dimming is applied per element, not on this container — see the .lp-pb:disabled block
    above for why. The volume fader is the only child of the right cluster that is not a pill, so it
-   carries the cluster's old 0.7 directly. (W8 tuning history 0.35→0.5→0.7: still grey-on-grey at 0.5.) */
+   carries the cluster's 0.7 directly (0.5 and below read grey-on-grey). */
 .lp-lane[data-state='empty'] .lp-lane__vol {
   opacity: 0.55;
 }
@@ -556,10 +556,10 @@
 }
 
 /* ---- the FX drawer: docked directly UNDER its owning lane (the lane's own drawer) ----
-   A glass panel inserted as a flex sibling right after the selected lane, so it reads as that lane's
+   A panel inserted as a flex sibling right after the selected lane, so it reads as that lane's
    drawer; the five lanes (flex 1 1 0) share the remaining height while it's open. It sizes to its
-   content up to a cap and scrolls internally. FxPanel internals are restyled in W7 — here it's only
-   repositioned + reframed. */
+   content up to a cap and scrolls internally. FxPanel internals are styled in fxpanel.css — here it's
+   only positioned + framed. */
 .lp-drawer {
   flex: 0 0 auto;
   min-height: 0;
@@ -569,7 +569,7 @@
   border-radius: 14px;
   padding: 10px 14px;
   background: var(--card);
-  border: 1px solid var(--glass-edge);
+  border: 1px solid var(--edge);
   box-shadow: inset 0 1px 0 var(--hair);
   overflow: hidden;
 }
@@ -616,13 +616,13 @@
   padding: 0;
   align-content: flex-start;
   scrollbar-width: thin;
-  scrollbar-color: var(--glass-edge) transparent;
+  scrollbar-color: var(--edge) transparent;
 }
 .lp-drawer .fxp::-webkit-scrollbar {
   width: 8px;
 }
 .lp-drawer .fxp::-webkit-scrollbar-thumb {
-  background: var(--glass-edge);
+  background: var(--edge);
   border-radius: 999px;
 }
 

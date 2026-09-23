@@ -246,7 +246,7 @@ export function Keyboard(props: KeyboardProps = {}) {
   });
 
   return (
-    // Orbit V2 key ribbon — ONE horizontal glass bar: left meta (drum-aware label + octave −/+ + the
+    // Key ribbon — ONE horizontal bar: left meta (drum-aware label + octave −/+ + the
     // current octave) · the keys/pads tray (flex-fills, stretches vertically when the pane is dragged
     // taller) · right meta (accurate key-row hint + move/hide). Keys/pads stay POINTER-ONLY (no tab
     // stops — the tab-trap decision); the octave/move/hide buttons stay focusable.
@@ -310,7 +310,7 @@ export function Keyboard(props: KeyboardProps = {}) {
           </div>
         }
       >
-        {/* Drum variant: the 4×4 GM kit as ONE 16-wide row of the same glass cells, so the ribbon height
+        {/* Drum variant: the 4×4 GM kit as ONE 16-wide row of the same key cells, so the ribbon height
             never jumps on a synth swap and each pad stays comfortably clickable (grows with the pane). */}
         <div class="kb__pads">
           <For each={DRUM_KIT}>
@@ -333,9 +333,9 @@ export function Keyboard(props: KeyboardProps = {}) {
       </Show>
 
       <div class="kb__meta kb__meta--right">
-        {/* Compact key-row hint — the ACTUAL BleepLoop map (home row = naturals, top row = sharps), not
-            the mockup's placeholder "Z–M · Q–P" (which would mislead: z/x shift octave here). Drum mode
-            hides it — every pad self-labels its own key. */}
+        {/* Compact key-row hint — the ACTUAL BleepLoop map (home row = naturals, top row = sharps): z/x
+            shift octave here, so a generic "Z–M · Q–P" placeholder would mislead. Drum mode hides it —
+            every pad self-labels its own key. */}
         <Show when={!drumActive()}>
           <span class="kb__hint">A–L · W–P</span>
         </Show>

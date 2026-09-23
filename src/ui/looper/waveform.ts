@@ -4,7 +4,7 @@ import { engine } from '../../audio/engine';
 import { masterBars } from './Looper';
 
 /**
- * Orbit V2 waveform + bar-grid + playhead renderer.
+ * Waveform + bar-grid + playhead renderer.
  *
  * A SINGLE requestAnimationFrame loop drives every registered track canvas. It reads the looper's
  * pre-computed peak arrays through non-reactive getters (`looper.peaksInto` / `phaseValue` / `stateOf`
@@ -25,7 +25,7 @@ import { masterBars } from './Looper';
  * `registerLane` / `unregisterLane`; all drawing lives here in plain TS.
  */
 
-// Bar-grid tints (from the Orbit V2 mockup — constant, not theme-dependent: the --glass base tint).
+// Bar-grid tints — constant, not theme-dependent (based on the --surf-1 base tint).
 const GRID_BEAT = 'rgba(148,168,215,.085)'; // beat lines — a whisper (bumped from .055: the --well lift to .04 same-hue was swallowing them)
 const GRID_BAR = 'rgba(148,168,215,.13)'; //   bar lines — readable
 const GRID_NUM = 'rgba(148,168,215,.28)'; //   engraved bar numbers, top-left of each bar
@@ -261,7 +261,7 @@ function rasterise(
   wctx.globalAlpha = 1;
 
   const midY = dh / 2;
-  const A = midY * 0.86; // peak amplitude in px — mockup headroom (14%) so loud transients don't kiss the edge
+  const A = midY * 0.86; // peak amplitude in px — 14% headroom so loud transients don't kiss the edge
 
   // Bar grid, UNDER the wave. Bar count comes from the shared Looper.tsx helper; it (and the one
   // bpm signal read) is cached and only recomputed when the master loop length changes.

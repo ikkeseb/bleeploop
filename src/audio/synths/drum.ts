@@ -55,7 +55,7 @@ type MetalOpts = ConstructorParameters<typeof MetalSynth>[0];
  * in DRUM_KIT are silently ignored. Per-voice gain staging trims each element so a full pattern
  * sits under the master sum (the master limiter is only a net); the kick stays the reference.
  *
- * TRIGGER-SIGNATURE TRAP (this once hid both hi-hats for two phases): pitched voices —
+ * TRIGGER-SIGNATURE TRAP: pitched voices —
  * MembraneSynth and MetalSynth — take `(note, duration, time, velocity)`; NoiseSynth is NOT
  * pitched and takes `(duration, time, velocity)` — duration first, no note. Conflating them reads
  * the duration as a (bogus) note and the voice goes silent. Every call below respects this.

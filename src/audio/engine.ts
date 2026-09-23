@@ -129,7 +129,7 @@ class AudioEngine {
 
     instrumentBus.connect(looperInputBus);
     looperInputBus.connect(masterGain);
-    looperInputBus.connect(recordTap); // record-only mirror of the audible bus (P11.3)
+    looperInputBus.connect(recordTap); // record-only mirror of the audible bus
     masterGain.connect(limiter);
     limiter.connect(ctx.destination);
 

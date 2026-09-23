@@ -44,7 +44,7 @@ export function trackMuted(i: number): boolean {
   return muteSignals[i]?.[0]() ?? false;
 }
 
-// ── Per-track FX control (P6) ────────────────────────────────────────────────────────────
+// ── Per-track FX control ──────────────────────────────────────────────────────────────────
 /** Reactive per-track FX state array (five entries, chain order). Empty before init. */
 export function fxState(i: number): FxState[] {
   fxVersion[i]?.[0](); // subscribe to FX edits

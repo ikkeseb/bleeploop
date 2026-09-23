@@ -1,5 +1,5 @@
 // src/audio/export/render.ts
-// WAV-export v1: render the master mix WET — through each track's real P6 FX chain (filter →
+// WAV-export v1: render the master mix WET — through each track's real FX chain (filter →
 // pitch → stutter → delay + the shared reverb send) and the master limiter — inside an
 // explicitly owned OfflineAudioContext. The graph mirrors live playback wiring EXACTLY
 // (playback.ts: source → track gain (volume/mute) → FxChain; engine.ts: master → limiter → out),

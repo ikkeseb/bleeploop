@@ -2,7 +2,7 @@
  * OWNS: the command bar's one-row / two-row decision.
  *
  * The bar's controls are all min-content (nowrap pills, fixed sliders) and body is overflow:hidden, so
- * a window narrower than their sum used to push master + the tools off-screen. A media query cannot
+ * a window narrower than their sum would push master + the tools off-screen. A media query cannot
  * decide this: the row's width changes with the contextual CLICK / FIXED controls,
  * so a bar that fits idle at 1440 clips busy. Measure the ONE-ROW requirement instead — the sum of
  * the children's intrinsic widths + gaps + padding (the spacer counts as its min-width) — against the

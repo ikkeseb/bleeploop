@@ -151,7 +151,7 @@ const tauriPluginHost: PluginHost = {
 };
 
 /**
- * Tauri platform (P7+). Reuses the web getUserMedia/Web-MIDI capabilities (both work inside
+ * Tauri platform. Reuses the web getUserMedia/Web-MIDI capabilities (both work inside
  * WebView2 v149) and swaps in the native CLAP/VST3 `pluginHost`. Only `kind` + `pluginHost` differ.
  */
 export const tauriPlatform: Platform = {
@@ -223,7 +223,7 @@ export function releasePluginBuffer(ab: ArrayBuffer): void {
  * One-shot DEV startup diagnostic: report WebView2-internal facts to the Rust side (printed to
  * `tauri dev` stdout) so headless verification can read them — there is no Playwright into
  * WebView2. Best-effort; never throws into app startup. Informational only — it does NOT load any
- * plugin (the plugin-picker UI drives load/editor/param now).
+ * plugin (the plugin-picker UI drives load/editor/param).
  */
 export async function reportTauriDiagnostics(): Promise<void> {
   const report: Record<string, unknown> = {

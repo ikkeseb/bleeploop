@@ -15,13 +15,13 @@ import { notifyError } from '../../notify';
 import './plugin-controls.css';
 
 /**
- * Orbit V2 source-row plugin controls, split across the compact slot row and its params drawer:
+ * Source-row plugin controls, split across the compact slot row and its params drawer:
  *
  *  - `PluginBar`    — the right-cluster controls that ride the compact slot row: a native LIVE monitor
  *                     toggle, the plugin EDITOR toggle (pop-out window), and the PARAMS drawer
  *                     disclosure carrying the gain readout. Everything that must stay one row tall.
  *  - `PluginParams` — the accordion drawer body: the OUTPUT gain slider + a preview grid of the plugin's
- *                     first params, all as slim Orbit groove sliders. Mounts when a plugin is loaded
+ *                     first params, all as slim groove sliders. Mounts when a plugin is loaded
  *                     (so `onParamChanged` tracks live positions even while collapsed); the drawer's open
  *                     state is CSS-toggled by the owning slot, so it never remounts on open/close.
  *
@@ -177,7 +177,7 @@ export function PluginBar(props: {
 
   return (
     <div class="slot__plug" onClick={(e) => e.stopPropagation()}>
-      {/* Native LIVE monitor (P11.3 direction A): feeds the hardware capture into this plugin AND plays its
+      {/* Native LIVE monitor: feeds the hardware capture into this plugin AND plays its
           wet through a cpal OUTPUT stream on the same device (low-latency, bypassing the WebView2
           round-trip), muting the web monitor so the wet isn't heard twice (the looper record tap is
           untouched). Only meaningful for a plugin with an audio-input bus (amp-sim/FX). Tauri-only. */}

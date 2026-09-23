@@ -8,8 +8,8 @@ import './help.css';
 /**
  * Help / quick-reference popover: how to play (guitar first, a MIDI controller for the other layers,
  * computer keys as a fallback), the looper + transport controls, the play map, and the layout
- * move/hide/resize affordances. Same popover pattern as AudioSettings (a topbar `.tool` cap → a
- * `<Show>`-mounted v6 panel). It LEADS with the instrument (the looper) — the keyboard is the fallback
+ * move/hide/resize affordances. Same popover pattern as AudioSettings (a command-bar `.tool` cap → a
+ * `<Show>`-mounted panel). It LEADS with the instrument (the looper) — the keyboard is the fallback
  * play path, so its sections come last. The
  * drum-pad rows read from DRUM_KIT, and the piano legend reads from COMPUTER_MAP, so neither can drift
  * from the real controls. The looper/transport copy mirrors the controls in Looper.tsx + Transport.tsx.

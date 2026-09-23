@@ -42,13 +42,13 @@ export interface BuildExportOptions {
  * bpm/bars are passed in from the UI (the clock authority lives there). Per-track WAVs are the RAW
  * capture (unity, pre-volume/pre-mute/pre-limiter/pre-FX) — EVERY committed track (incl. STOPPED)
  * exports its stem, so no audio is ever lost. When included, the master (v1) is a WET stereo render:
- * each track through its real P6 FX chain + the shared reverb + the master limiter in an
+ * each track through its real FX chain + the shared reverb + the master limiter in an
  * OfflineAudioContext (render.ts), i.e. what you hear. STOPPED tracks are therefore EXCLUDED from the
  * master (mute honoured in the mix as before). If that render fails, the export still completes with
  * the v0 DRY volume/mute
  * dual-mono mixdown (flagged in session.json as master.kind = 'dry-fallback') — a degraded master
- * beats a lost take. Returns null when nothing is committed (the old early-return, kept behavior-
- * identical); a normal all-STOPPED export still includes a silent master alongside real stems.
+ * beats a lost take. Returns null when nothing is committed; a normal all-STOPPED export still
+ * includes a silent master alongside real stems.
  * A wet export requires a finished take so its snapshot cannot contain an unfinished layer.
  * Recovery snapshots pass `includeMaster:false` and remain available during capture.
  */

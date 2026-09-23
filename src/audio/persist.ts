@@ -1,6 +1,6 @@
 /**
  * Best-effort localStorage number persistence — ONE home for the read-validate-default /
- * write-and-swallow pattern master.ts and clock.ts each hand-rolled. localStorage can throw
+ * write-and-swallow pattern master.ts and clock.ts both rely on. localStorage can throw
  * (private mode / disabled storage), so both directions swallow and fall back; a stored value
  * outside [min, max] (or non-numeric garbage) falls back to the default rather than poisoning
  * the audio path with an out-of-range gain.

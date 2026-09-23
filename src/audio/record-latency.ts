@@ -7,7 +7,7 @@
  * Queue depletion and cursor advance cancel at callback boundaries. Freeze the median of these
  * PAIRED observations, not separate medians whose timing relationship has been discarded.
  *
- * Missing, stale or inconsistent timestamps use the old base/output report, queue medians and
+ * Missing, stale or inconsistent timestamps use the reported base/output latency, queue medians and
  * 128-frame allowance. Its optional floor is a fallback heuristic. Driver/browser timestamp accuracy
  * still needs the physical rig; this mapping does not independently validate the DAC.
  *
@@ -179,7 +179,7 @@ export function updateMonitorLatency(slot: number, cpalOut: number): void {
  * refreshes the working snapshot from whatever samples exist. The actual FREEZE happens lazily at first record
  * use (`recordCompensationFrames`), so the C the first take sees is the warmed-window median — see the snap*
  * state note.
- * `pluginBridge.stats` is null when no plugin is wired in the slot ⇒ both hops 0 (as the old live read gave).
+ * `pluginBridge.stats` is null when no plugin is wired in the slot ⇒ both hops 0.
  */
 function snapshotTerms(slot: number, clearWindow = false): void {
   snapFrozen = false; // arm / buffer-change / manual resnapshot re-opens; first record will re-freeze it

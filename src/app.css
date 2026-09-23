@@ -12,12 +12,11 @@
 }
 
 :root {
-  /* ===== Token system — "Instrument" (owner-approved 2026-09-23 over the Orbit V2 mockup). Matte,
-     flat, anodised: surfaces separate by TONE plus one hairline of top light, never by bevels, drop
-     shadows or backdrop blur. Colour is spent only on sound (lane state: --rec/--dub/--play); chrome
-     "engaged" is a lit warm-white legend (--engaged), not cyan. The wave well is a sunk floor darker
-     than its card (it replaces the 2026-07 grey-glass --well; the recess reads through tone + a lit
-     bottom lip, so it is not the old black void). --cyan survives for LISTEN, focus and key-down. ===== */
+  /* ===== Token system — "Instrument" (owner-approved 2026-09-23). Matte, flat, anodised: surfaces
+     separate by TONE plus one hairline of top light, never by bevels, drop shadows or backdrop blur.
+     Colour is spent only on sound (lane state: --rec/--dub/--play); chrome "engaged" is a lit
+     warm-white legend (--engaged), not cyan. The wave well is a sunk floor darker than its card: the
+     recess reads through tone + a lit bottom lip. --cyan survives for LISTEN, focus and key-down. ===== */
   --bg: #0a0b0e;
   --surf-1: #121419; /* card */
   --surf-2: #171a20; /* control face */
@@ -25,10 +24,8 @@
   --sunk: #0c0d11; /* the well floor and the display window */
   --card: linear-gradient(180deg, #14161b, #111317 70%); /* card fill: a faint top-lit tone ramp */
   --hair: rgba(255, 255, 255, 0.055); /* the top edge light */
-  --glass: var(--surf-1); /* legacy name: card fill */
-  --glass-2: var(--surf-3); /* legacy name: hover fill */
   --panel: rgba(16, 18, 22, 0.97); /* floating panel (popovers, toasts) */
-  --glass-edge: rgba(255, 255, 255, 0.07); /* card + control border */
+  --edge: rgba(255, 255, 255, 0.07); /* card + control border */
   --line-2: rgba(255, 255, 255, 0.12); /* hover border */
   --well: var(--sunk);
   --text: #eef1f8;
@@ -87,7 +84,7 @@ select:focus-visible {
 }
 
 /* Native <select> popups render with OS-default (often bright-white) chrome. color-scheme:dark makes the
-   open listbox render dark, and a dark option fill matches the dark-glass surface app-wide (the per-control
+   open listbox render dark, and a dark option fill matches the app's dark surface (the per-control
    rules — .picker__select etc — layer a themed caret + checked tint on top). */
 select {
   color-scheme: dark;
@@ -123,9 +120,9 @@ option {
   flex-direction: column;
 }
 
-/* ---- command bar (Orbit V2) ----
-   ONE glass card holding brand · system lamp · the transport clusters (Transport.tsx) · tool icons.
-   Floats over the aurora background (margin, rounded, 1px --glass-edge). Horizontal margins match the
+/* ---- command bar ----
+   ONE card holding brand · system lamp · the transport clusters (Transport.tsx) · tool icons.
+   Floats over the app background (margin, rounded, 1px --edge). Horizontal margins match the
    stage padding below so its edges align with the decks. */
 .cmd {
   flex: 0 0 auto;
@@ -136,7 +133,7 @@ option {
   padding: 9px 18px;
   border-radius: 16px;
   background: #101216;
-  border: 1px solid var(--glass-edge);
+  border: 1px solid var(--edge);
   box-shadow: inset 0 1px 0 var(--hair);
   min-width: 0;
 }
@@ -181,8 +178,8 @@ option {
   background: none;
   border: 0;
 }
-/* brand — letterspaced sans wordmark + the conic-gradient dot (the logo is approved; copied exact from
-   the mockup). "BLEEP" dim, "LOOP" bright. */
+/* brand — letterspaced sans wordmark + the conic-gradient dot (the logo is owner-approved). "BLEEP" dim,
+   "LOOP" bright. */
 .brand {
   display: inline-flex;
   align-items: center;
@@ -228,8 +225,8 @@ option {
   box-shadow: 0 0 0 2px var(--bg), 0 0 0 3px var(--dub);
 }
 
-/* visually-hidden live region — preserves the plugin-scan role=status announcement now that the
-   topbar chips are gone. */
+/* visually-hidden live region — carries the plugin-scan role=status announcement; no visible chip
+   renders it. */
 .cmd__sr {
   position: absolute;
   width: 1px;
@@ -242,7 +239,7 @@ option {
   border: 0;
 }
 
-/* tools — far right, flat glass icon buttons (mockup .tool) */
+/* tools — far right, flat icon buttons */
 .tools {
   display: inline-flex;
   align-items: center;
@@ -268,7 +265,7 @@ option {
 }
 .tool:hover {
   color: var(--text);
-  background: var(--glass-2);
+  background: var(--surf-3);
 }
 .tool:active {
   transform: translateY(1px);
@@ -283,7 +280,7 @@ option {
 /* tool engaged (e.g. the keyboard toggle while the keyboard is shown) = lit legend + a face */
 .tool--on {
   color: var(--engaged);
-  background: var(--glass-2);
+  background: var(--surf-3);
 }
 /* gear open — the same lit legend */
 .tool--gear.tool--on {
@@ -310,7 +307,7 @@ option {
 
 /* ---- settings popover ---- */
 /* Full-screen transparent click-catcher: closes the popover on any outside click. The panel itself
-   anchors top-right just below the 48px topbar; AudioSettings.tsx styles the panel body. */
+   anchors top-right just below the 48px command bar; AudioSettings.tsx styles the panel body. */
 .settings-popover__backdrop {
   position: fixed;
   inset: 0;
@@ -322,10 +319,10 @@ option {
   right: clamp(16px, 2vw, 28px);
 }
 
-/* ---- stage + zones (Orbit V2) ----
+/* ---- stage + zones ----
    The stage hosts the SplitStack that fills it; the divider tracks are the gaps between zones. Zones are
-   transparent flex columns holding the glass cards (the command bar sits above the stage), so the app
-   reads as one surface on the aurora background — no boxy per-zone frame. */
+   transparent flex columns holding the cards (the command bar sits above the stage), so the app
+   reads as one surface — no boxy per-zone frame. */
 .stage {
   flex: 1 1 auto;
   display: flex;
@@ -348,14 +345,13 @@ option {
   min-height: 0;
 }
 
-/* ---- source row (Orbit V2 · W3) — two equal compact glass slot cards side by side (mockup .src).
-   The per-slot width SplitStack is gone; the plugin params drawer expands DOWN as an accordion. When
-   the drawer outgrows the (autoSize-clamped) instrument region, the drawer scrolls INSIDE the card —
-   the card shell (rounded lit top edge, header row) stays anchored, and the looper never moves.
-   (Was a scrolling 2-col grid: scrolling slid the card's decorative top edge under the clip boundary —
-   the "top-sheen drift" — and took the slot header with it. Flex instead of grid because a flex item's
-   max-height:100% resolves against the container's definite height; a grid item's resolves against its
-   auto row track, which is content-sized — circular, so the cap never bit.) ---- */
+/* ---- source row — two equal compact slot cards side by side. The plugin params drawer expands DOWN
+   as an accordion. When the drawer outgrows the (autoSize-clamped) instrument region, the drawer scrolls
+   INSIDE the card — the card shell (rounded lit top edge, header row) stays anchored, and the looper
+   never moves. Flex, not grid: a flex item's max-height:100% resolves against the container's definite
+   height, but a grid item's resolves against its auto row track (content-sized — circular, so the cap
+   never bites). Grid also lets the card's decorative top edge scroll under the clip boundary (the
+   "top-sheen drift"), taking the slot header along. ---- */
 .src {
   display: flex;
   gap: 14px;
@@ -367,12 +363,12 @@ option {
   padding: 1px; /* keep the active glow from clipping against the region edge */
 }
 .slot {
-  flex: 1 1 0; /* two equal columns (the old grid's 1fr 1fr) */
+  flex: 1 1 0; /* two equal columns */
   max-height: 100%; /* the shell never leaves the region — an overgrown drawer scrolls inside it */
   min-width: 0;
   border-radius: 14px;
   background: var(--card);
-  border: 1px solid var(--glass-edge);
+  border: 1px solid var(--edge);
   box-shadow: inset 0 1px 0 var(--hair);
   display: flex;
   flex-direction: column;
@@ -581,7 +577,7 @@ option {
   box-shadow: 0 0 8px -2px rgba(238, 241, 248, 0.5);
 }
 
-/* plugin <select> — a flat glass control (Tauri only). ONE dropdown per slot scales to any plugin
+/* plugin <select> — a flat control (Tauri only). ONE dropdown per slot scales to any plugin
    count; its empty option reverts the slot to its synth. Explicit background-color so no UA face shows. */
 .slot__select {
   flex: 0 1 auto;
@@ -627,7 +623,7 @@ option {
   border-color: rgba(244, 239, 230, 0.28);
 }
 
-/* the params drawer (accordion) — a glass sub-panel that expands the slot card downward. Rendered
+/* the params drawer (accordion) — a sub-panel that expands the slot card downward. Rendered
    whenever a plugin is loaded (so its subscriptions stay live); open/close is CSS-only, no remount.
    The drawer is the card's scroll region: when it outgrows the instrument region it scrolls under the
    pinned header row, keeping the card's top edge anchored. */
@@ -636,7 +632,7 @@ option {
 }
 .slot__drawer--open {
   display: block;
-  border-top: 1px solid var(--glass-edge);
+  border-top: 1px solid var(--edge);
   padding: 12px 18px 14px;
   min-height: 0;
   overflow-y: auto;

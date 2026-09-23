@@ -1,7 +1,7 @@
 /* Global Audio Settings popover — "Instrument". A floating near-opaque panel anchored top-right under
    the command-bar gear (see .settings-popover in app.css). Device/channel/output selects + live
    buffer-size + the ASIO toggle render as matte key faces; the rec-align trim is a sunk numeric well;
-   the read-only host/isolated/plugin/midi DIAGNOSTICS (relocated from the topbar in W2) sit in a sunk
+   the read-only host/isolated/plugin/midi DIAGNOSTICS sit in a sunk
    readout well at the foot. Chrome stays monochrome — engaged = the warm-white --engaged, --dub = a
    deferred-change / warning note. */
 .audio-settings {
@@ -14,7 +14,7 @@
   /* near-opaque panel: the popover floats over the busy lanes, so it needs a solid backdrop to stay
      legible without a blur. */
   background: var(--panel);
-  border: 1px solid var(--glass-edge);
+  border: 1px solid var(--edge);
   box-shadow: inset 0 1px 0 var(--hair), 0 20px 48px -14px rgba(0, 0, 0, 0.72);
 }
 
@@ -207,7 +207,7 @@
   color: var(--dim);
 }
 
-/* Diagnostics (relocated from the command-bar chips in W2) — a sunk readout well at the foot: the
+/* Diagnostics — a sunk readout well at the foot: the
    read-only host/isolated/plugin/midi/bridge state. Reads as a status display, distinct from the
    interactive controls above. The aggregate of these is the command-bar system lamp. */
 .audio-settings__diag {

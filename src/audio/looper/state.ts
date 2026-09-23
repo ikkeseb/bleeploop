@@ -84,7 +84,7 @@ export interface PeakView {
  * (~40/s while recording/overdubbing) and always writes a FRESH object, so Solid's default identity
  * check propagates a "change" even when nothing changed — during OVERDUBBING the payload is provably
  * constant (consume()'s overdub branch touches only `writeHead`, which is not published), yet every
- * subscriber re-ran and the DOM was rewritten 40×/s on the same thread as the capture drain and the
+ * subscriber would re-run and rewrite the DOM 40×/s on the same thread as the capture drain and the
  * overdub boundary swap (hundreds of full-document layouts per 5 s of capture). All fields are
  * primitives, so this compare is exact — a real transition still propagates.
  */
@@ -341,7 +341,7 @@ export function trackInfo(i: number): TrackPublic {
   return trackSignals[i][0]();
 }
 
-// ── WAV-export snapshot (read-only; WAV-export v0, FX state added for the v1 wet master) ──
+// ── WAV-export snapshot (read-only; PCM + the FX state the v1 wet master renders) ──────────
 export interface ExportTrack {
   /** 0-based engine track index. */
   index: number;

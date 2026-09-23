@@ -291,7 +291,7 @@ function triggerClick(time: number, isAccent: boolean, clamped = false, forced =
 //   - MASTER (startMasterPulse): anchored at masterStartTime with the exact integer-frame-derived
 //     period, so click + LED extrapolate from the SAME ctx anchor and the SAME exact period the loop
 //     plays on — they cannot drift, they re-align on every transport op for free, and the accent lands
-//     on every loop/bar downbeat by construction. (See the looper-click-sync plan.)
+//     on every loop/bar downbeat by construction.
 // ---------------------------------------------------------------------------
 
 /**

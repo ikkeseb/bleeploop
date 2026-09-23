@@ -177,8 +177,8 @@ function rejectRecordLoss(i: number): boolean {
 /**
  * Report graph construction or source-scheduling failures at commit and buffer-swap sites. The
  * callers still release the recorder and publish state in their cleanup paths, so a failed playback
- * transition cannot leave the recording slot claimed. Export owns a separate context and no longer
- * redirects live node construction into its offline graph.
+ * transition cannot leave the recording slot claimed. Export owns a separate context; it does not
+ * redirect live node construction into its offline graph.
  *
  * `console.error`, not `console.warn`: logging.ts pipes only console.error into the release log file.
  */
@@ -432,7 +432,7 @@ function stopAndFreeSource(t: Track): void {
  *   RECORDING    -> commit, KEEP the take -> PLAYING (track 1 also defines master length)
  *   PLAYING      -> start overdub on the next boundary
  *   OVERDUBBING  -> commit the layer -> PLAYING
- *   STOPPED      -> no-op (the UI disables this button in STOPPED; resume via the play button — a)
+ *   STOPPED      -> no-op (the UI disables this button in STOPPED; resume via the play button)
  */
 async function recDub(i: number): Promise<void> {
   await init();
@@ -523,7 +523,7 @@ function requestLoopEndStop(i: number, when = nextBoundary()): void {
 
 /** `seamFrame`: a RETAKE handoff — begin exactly where the approved take's pass ended (a later take). */
 function startRecording(i: number, seamFrame: number | null = null): void {
-  if (engineState.activeRecordIndex >= 0) return; // single-recorder v1: ignore if another is recording
+  if (engineState.activeRecordIndex >= 0) return; // single-recorder: ignore if another is recording
   const t = engineState.tracks[i];
   t.writeHead = 0;
   t.fillFrames = 0;
@@ -676,7 +676,7 @@ function startOverdub(i: number): void {
   const punchInFrame = Math.round(engine.ctx.currentTime * sr());
   const compensation = recordCompensationFrames();
   // Work on a summed copy of the current loop. Kept for the whole session (each boundary swap commits
-  // it into `record` and keeps accumulating into the same copy), so the per-period allocation is gone.
+  // it into `record` and keeps accumulating into the same copy), so nothing is allocated per period.
   t.overdubBuf = t.record.slice(0, master);
   // Pre-allocate the two playback AudioBuffers the boundary swap alternates between (double-buffer), so
   // scheduleOverdubSwap writes into an existing buffer instead of minting a fresh one every loop period.

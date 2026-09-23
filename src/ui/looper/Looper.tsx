@@ -9,9 +9,8 @@ import { FxPanel } from './FxPanel';
 import './looper.css';
 
 /**
- * The looper UI (Orbit V2 · Lanes): five full-width horizontal LANES stacked in the looper zone —
- * spec `docs/inspiration/revamp-2026-07/orbit-v2-lanes.html`, production deltas in
- * `src/ui/AGENTS.md`. Each lane, left→right: an identity box
+ * The looper UI: five full-width horizontal LANES stacked in the looper zone (composition binding:
+ * `src/ui/AGENTS.md`). Each lane, left→right: an identity box
  * (mono track number + state word), the round core REC/DUB gesture, a stacked PLAY-STOP/CLR pair,
  * the recessed wave well (holding the waveform canvas + its playhead), and a right cluster of
  * FX/MUTE/undo/reverse pills over a horizontal volume slider.
@@ -27,8 +26,8 @@ import './looper.css';
  * Display states add 'ARMED' — a later track that pressed REC but is still waiting for the master
  * loop boundary before its take begins. The engine reports this as RECORDING + `armed`; surfacing it
  * as its own state stops the lane from reading "recording" (red) for up to a full loop while nothing
- * is actually being kept (UX: the single most-bitten gap on every overdub). The mockup has no visual
- * for it, so it gets its own amber dashed-ring-pulse treatment (data-state="armed") here.
+ * is actually being kept (UX: the single most-bitten gap on every overdub), so it gets its own amber
+ * dashed-ring-pulse treatment (data-state="armed") here.
  * LISTENING is the AUTO REC sibling: first-track REC is waiting for input rather than a known grid edge.
  */
 type DisplayState = TrackState | 'ARMED' | 'LISTENING';
@@ -55,7 +54,7 @@ const STATE_WORD: Record<DisplayState, string> = {
   STOPPED: 'STOPPED',
 };
 
-// ---- core glyphs (from the Orbit V2 mockup). currentColor → the core's state colour.
+// ---- core glyphs. currentColor → the core's state colour.
 //   ● record  (EMPTY / ARMED — pressing starts a take)
 //   ⊕ overdub (PLAYING / STOPPED — pressing starts an overdub)
 //   ■ end     (RECORDING / OVERDUBBING — pressing ends the live capture)
@@ -77,7 +76,7 @@ const IconEnd = (): JSX.Element => (
 );
 
 function Fader(props: { index: number; disabled: boolean }) {
-  // Production volume runs 0..1.5 (NOT the mockup's 0..1); preserve the 1.5 ceiling + 0 dB detent at 1.0.
+  // Production volume runs 0..1.5; preserve the 1.5 ceiling + 0 dB detent at 1.0.
   // A styled native <input type=range> (same idiom as the command bar's master/click sliders) over a
   // 0..150 integer domain (= vol × 100); the unity tick + dB read-out are the per-track additions.
   const vol = () => looper.trackVolume(props.index);
@@ -176,8 +175,8 @@ function TrackLane(props: {
           ? `TAKE ${track().retakePass}` // a rolling RETAKE counts its passes
           : STATE_WORD[displayState()];
   // Only ARMED shows a well message (waiting for the downbeat before the take begins). EMPTY shows nothing
-  // — the bright ● core already says "press to record" (a 'PRESS ● TO RECORD' text was self-evident).
-  // The spoken 'record' action lives on the core button's aria-label, untouched.
+  // — the bright ● core already says "press to record". The spoken 'record' action lives on the core
+  // button's aria-label, untouched.
   // A FIRST take (no master yet) is armed behind the forced count-in → the well counts it down big
   // (4-3-2-1, the numeral is clock.countLeft); a LATER take waits for the loop boundary → plain text.
   const wellMsg = () => {
@@ -535,7 +534,7 @@ export function Looper() {
         {liveMsg()}
       </div>
 
-      {/* The five lanes. Each item renders its lane plus — when its FX is selected — a glass FX drawer
+      {/* The five lanes. Each item renders its lane plus — when its FX is selected — an FX drawer
           docked directly under it (the lane's own drawer). The drawer is a SIBLING of the lane, so
           opening it never remounts the lane's waveform canvas. */}
       <div class="lp__lanes">

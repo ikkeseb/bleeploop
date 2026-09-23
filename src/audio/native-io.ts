@@ -63,7 +63,7 @@ async function doArmInput(
 }
 
 /**
- * Go LIVE on `slot` (direction A): arm the native capture AND the native low-latency monitor as ONE
+ * Go LIVE on `slot`: arm the native capture AND the native low-latency monitor as ONE
  * unit, and mute the web monitor — a guitar → amp-sim plugin is then heard live at low latency, with no
  * delayed WebView2-path doubling. ONE serialized op (input THEN monitor — the cpal full-duplex-friendly
  * order, and what the ASIO duplex lifecycle expects) so the two can't interleave with each other or with
@@ -107,7 +107,7 @@ async function doGoLive(
 }
 
 /**
- * Stop LIVE on `slot` (direction A): disarm the native monitor THEN the native input, and unmute the web
+ * Stop LIVE on `slot`: disarm the native monitor THEN the native input, and unmute the web
  * monitor (done inside disarmMonitorInternal). ONE serialized op so the pair can't interleave. Idempotent
  * (each internal disarm early-returns when its flag is already false).
  */

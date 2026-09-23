@@ -4,7 +4,7 @@
  */
 import { PEAK_FRAMES, engineState, type Track } from './state';
 
-// ── Waveform peaks (for the P5 60fps renderer) ───────────────────────────────────────────
+// ── Waveform peaks (for the 60fps renderer) ──────────────────────────────────────────────
 /** Compute the min/max of `record[from..to)` into peak bin `binIdx`. Assumes to > from. */
 function computeBin(t: Track, binIdx: number, from: number, to: number): void {
   const buf = t.record;

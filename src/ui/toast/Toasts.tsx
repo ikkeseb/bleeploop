@@ -4,7 +4,7 @@ import './toasts.css';
 
 /**
  * The single error-toast surface. Renders `notify.ts`'s toast signal as a fixed
- * bottom-right stack above all app chrome, so a failure that previously reached only `console.error`
+ * bottom-right stack above all app chrome, so a failure that would otherwise reach only `console.error`
  * (invisible in a release WebView2 build) is actually seen. Mounted once in `App` next to the popovers.
  *
  * Non-modal + pointer-transparent container (the play path stays live behind it). Each toast is an

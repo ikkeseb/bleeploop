@@ -1,8 +1,7 @@
-/* Keyboard — Orbit V2 KEY RIBBON. ONE horizontal glass bar (mockup: docs/inspiration/revamp-2026-07/
-   orbit-v2-lanes.html footer.ribbon): left meta (label + octave −/+ + current octave), the keys as slim
-   flat glass cells (white = translucent glass, black = near-black overlays, hover lift, pressed =
+/* Keyboard — KEY RIBBON. ONE horizontal bar: left meta (label + octave −/+ + current octave), the keys
+   as slim flat cells (white = matte light-tone fill, black = near-black overlays, hover lift, pressed =
    cyan-tinted fill), right meta (key-row hint + move/hide). The 4×4 GM drum kit restyles to a 16-wide
-   single row of the same glass cells so the ribbon height never jumps on a synth swap. The bar fills its
+   single row of the same cells so the ribbon height never jumps on a synth swap. The bar fills its
    resizable SplitStack pane, so the keys/pads STRETCH vertically when the user drags it taller.
    Geometry + handlers live in Keyboard.tsx (absolute leftPct/widthPct key layout is unchanged).
 
@@ -17,7 +16,7 @@
   border-radius: 14px;
   overflow: hidden;
   background: var(--card);
-  border: 1px solid var(--glass-edge);
+  border: 1px solid var(--edge);
   box-shadow: inset 0 1px 0 var(--hair);
 }
 
@@ -49,7 +48,7 @@
   white-space: nowrap;
 }
 
-/* oct −/+ flat glass caps + a mono base-octave readout */
+/* oct −/+ flat caps + a mono base-octave readout */
 .kb__oct {
   display: inline-flex;
   align-items: center;
@@ -104,15 +103,15 @@
   font-size: 12px;
 }
 
-/* --- the KEYS tray — a recessed well the slim glass keys tile across --- */
+/* --- the KEYS tray — a recessed well the slim keys tile across --- */
 .kb__keys {
   flex: 1 1 auto;
   min-width: 0;
   align-self: stretch;
   position: relative;
   background: var(--well);
-  border-left: 1px solid var(--glass-edge);
-  border-right: 1px solid var(--glass-edge);
+  border-left: 1px solid var(--edge);
+  border-right: 1px solid var(--edge);
   overflow: hidden;
   touch-action: none; /* let Pointer Events own gestures */
 }
@@ -130,9 +129,9 @@
   box-sizing: border-box;
 }
 
-/* WHITE keys — translucent glass cells, hairline seam on the right. Fill sits WELL above the
-   near-black well (2026-07-05 eye check: at .06 the "light" keys read fully dark) — whites must read
-   light at a glance, with a faint top-lit gradient so the piano geography survives the glass idiom. */
+/* WHITE keys — cells with a hairline seam on the right. Fill sits WELL above the near-black well
+   (2026-07-05 eye check: at .06 the "light" keys read fully dark) — whites must read light at a
+   glance, with a faint top-lit gradient so the piano geography stays legible on the flat matte fill. */
 .kb__key--white {
   background: linear-gradient(#262a32, #2f333c 94%, #22252c);
   border-right: 1px solid var(--bg);
@@ -181,7 +180,7 @@
   pointer-events: none;
 }
 
-/* --- drum pads (active slot's synth = Drum) — the 4×4 GM kit as ONE 16-wide row of glass cells --- */
+/* --- drum pads (active slot's synth = Drum) — the 4×4 GM kit as ONE 16-wide row of key cells --- */
 .kb__pads {
   flex: 1 1 auto;
   min-width: 0;
@@ -191,8 +190,8 @@
   gap: 4px;
   padding: 5px;
   background: var(--well);
-  border-left: 1px solid var(--glass-edge);
-  border-right: 1px solid var(--glass-edge);
+  border-left: 1px solid var(--edge);
+  border-right: 1px solid var(--edge);
   touch-action: none; /* let Pointer Events own gestures */
 }
 .kb__pad {

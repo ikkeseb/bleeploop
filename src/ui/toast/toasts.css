@@ -24,7 +24,7 @@
   border-radius: 12px;
   /* near-opaque panel (no blur) — a toast floats over any content, so it must stay solidly legible */
   background: var(--panel);
-  border: 1px solid var(--glass-edge);
+  border: 1px solid var(--edge);
   box-shadow: inset 0 1px 0 var(--hair), 0 16px 36px -14px rgba(0, 0, 0, 0.72);
   cursor: pointer;
   transition: border-color 0.15s;

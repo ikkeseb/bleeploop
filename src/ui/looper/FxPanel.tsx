@@ -4,7 +4,7 @@ import { FX_META, FX_PARAM_DEFS, type FxParamDef } from '../../audio/fx/fx';
 import './fxpanel.css';
 
 /**
- * P6 per-track FX panel. Renders the five FX (fixed chain order) for one track: each is a bypass
+ * Per-track FX panel. Renders the five FX (fixed chain order) for one track: each is a bypass
  * toggle plus its params (sliders for continuous params, a select for tempo-synced divisions).
  * All edits go through the looper's imperative setFx* API, which applies them click-free to the
  * live chain and bumps a reactive version so this panel re-reads state. No audio runs here.

@@ -1,6 +1,6 @@
 /**
  * Pure timing helpers — no Tone or browser deps, fully unit-testable.
- * Used by the P4 looper for master-loop frame math and quantized start/stop.
+ * Used by the looper for master-loop frame math and quantized start/stop.
  */
 
 /** Seconds per beat given BPM. */
@@ -22,8 +22,8 @@ export function framesPerBar(bpmValue: number, sampleRate: number, beatsPerBar =
  * Largest number of WHOLE bars that fit a record buffer (>= 1). The buffer-fit bound every
  * bar-count derivation must respect: a master length > record.length would zero-pad the first loop's
  * tail and RangeError a later track's consume() (its configured window cannot exceed `master` frames in the
- * same-sized buffer). One source of truth for the clamp machine.ts used to hand-copy at each
- * commit/arm site.
+ * same-sized buffer). The single source of truth for this clamp — do not hand-copy it at commit/arm
+ * sites.
  */
 export function maxWholeBars(bufferFrames: number, fpb: number): number {
   return Math.max(1, Math.floor(bufferFrames / fpb));

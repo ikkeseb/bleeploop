@@ -48,7 +48,7 @@ import { AutoRecordDetector, autoRecordThreshold } from './auto-record';
  * quantum with its absolute render-frame timestamp into ONE lock-free ringbuf.js RingBuffer. A
  * main-thread drain (setInterval ~25ms) decodes complete packets and writes the selected window into the
  * track's pre-allocated Float32Array at its write head. Only ONE track records at a time
- * (v1 limitation — the single shared ring belongs to whichever track is RECORDING/OVERDUBBING).
+ * (the single shared ring belongs to whichever track is RECORDING/OVERDUBBING).
  *
  * KEEP-ALIVE: an AudioWorkletNode whose output is unconnected may not have process() pulled.
  * We connect captureNode -> a muted GainNode (gain 0) -> ctx.destination so the graph always
@@ -353,7 +353,7 @@ function consume(i: number, data: Float32Array, count: number, firstFrame: numbe
     // Sum incoming PCM into the working copy, wrapping mod master. Split into contiguous runs at each
     // wrap so the hot inner loop carries no per-sample `%` (the write region is contiguous within a run).
     // The outer step handles a batch that spans the wrap — or, after a stall, multiple loop periods —
-    // identically to the old modulo (each overlapping pass sums onto the same positions).
+    // with each overlapping pass summing onto the same positions.
     const buf = t.overdubBuf;
     let k = Math.max(0, (engineState.captureStartFrame ?? firstFrame) - firstFrame);
     const end = Math.min(count, (engineState.captureEndFrame ?? Infinity) - firstFrame);
@@ -399,9 +399,9 @@ export function cancelAutoRecord(): void {
  * With an explicit Audio Settings channel, host.web has already isolated one ChannelSplitter output;
  * this node keeps that lane mono and reconnecting it to the stereo looperInputBus centres it in BOTH
  * speakers. With `auto`, an interface may still return multiple channels despite the advisory mono
- * request; speakers interpretation then sums them to mono (0.5·(L+R)), preserving the old one-eared
- * fix. A genuinely stereo line source is summed to mono in auto mode too — accepted for now (standard
- * looper behaviour).
+ * request; speakers interpretation then sums them to mono (0.5·(L+R)), avoiding one-eared playback. A
+ * genuinely stereo line source is summed to mono in auto mode too — accepted for now (standard looper
+ * behaviour).
  */
 function makeMicMonoSum(ctx: BaseAudioContext): GainNode {
   const node = ctx.createGain();

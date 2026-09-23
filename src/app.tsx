@@ -24,7 +24,7 @@ export function App() {
   const [crossOriginIsolated, setCrossOriginIsolated] = createSignal(false);
   const [settingsOpen, setSettingsOpen] = createSignal(false);
   const [helpOpen, setHelpOpen] = createSignal(false);
-  // The two topbar popovers share one anchor (top-right), so opening one closes the other — they can
+  // The two command-bar popovers share one anchor (top-right), so opening one closes the other — they can
   // never overlap, and the open caps stay mutually exclusive.
   const openSettings = () => {
     setHelpOpen(false);
@@ -35,7 +35,7 @@ export function App() {
     setHelpOpen((v) => !v);
   };
 
-  // A11y: manage focus for the two topbar popovers. On open, focus moves into the panel (so a
+  // A11y: manage focus for the two command-bar popovers. On open, focus moves into the panel (so a
   // keyboard/SR user lands on the content, not stranded on the trigger); on a KEYBOARD close, focus
   // returns to the trigger that opened it (no lost focus after Escape). These are non-modal popovers
   // — the play path stays live behind them — so role="dialog" + focus return, not a trap. The return
@@ -119,11 +119,11 @@ export function App() {
   // canvas loop + capture state survive every layout change. `render` is a function so a region that's
   // removed (keyboard hidden) tears down cleanly (releases its key listeners), and re-mounts fresh.
 
-  // W3: the two instrument slots are compact glass cards side by side (mockup .src) — the per-slot
-  // width SplitStack is gone (compact rows don't need width resize; params expand DOWN as an accordion).
-  // A drawer that outgrows the instrument region scrolls INSIDE its card (under the pinned header row),
-  // so the card's decorative top edge stays anchored and the looper never moves (see .src in app.css).
-  // Each InstrumentSlot owns its per-slot `paramsOpen` disclosure (state local to the instance).
+  // The two instrument slots are compact cards side by side; compact rows don't need width resize, so
+  // params expand DOWN as an accordion instead. A drawer that outgrows the instrument region scrolls
+  // INSIDE its card (under the pinned header row), so the card's decorative top edge stays anchored and
+  // the looper never moves (see .src in app.css). Each InstrumentSlot owns its per-slot `paramsOpen`
+  // disclosure (state local to the instance).
   const renderInstrument = () => (
     <section class="zone zone--instrument" aria-label="Instrument">
       <div class="src">
@@ -144,9 +144,9 @@ export function App() {
   );
 
   const renderLooper = () => (
-    // W2: the looper zone header (title + Transport) is gone — the command bar owns transport now, and
-    // the lanes ARE the zone (W4). The section keeps its accessible name via aria-label (no dangling
-    // labelledby). Only header chrome is removed; the pane/SplitStack structure is untouched, so the
+    // The looper zone has no header (title + Transport) — the command bar owns transport, and the
+    // lanes ARE the zone. The section keeps its accessible name via aria-label (no dangling
+    // labelledby). Only header chrome is absent; the pane/SplitStack structure is untouched, so the
     // looper's RAF canvases + capture state do NOT remount.
     <section class="zone zone--looper" aria-label="Looper">
       <div class="zone__body">
@@ -155,14 +155,14 @@ export function App() {
     </section>
   );
 
-  // W4.5: the instrument source row is a compact ~56px band, so it hugs its content instead of holding an
+  // The instrument source row is a compact ~56px band, so it hugs its content instead of holding an
   // fr weight — `autoSize` makes its stage track `auto` (content height) and drops it out of the weight
   // math entirely, killing the dead band that a fixed fr weight left between the source row and lane 1. It
   // has no draggable divider (nothing to resize); the keyboard↔looper pair below owns the resizable area.
   // defaultWeight (the looper-hero baseline) still drives the keyboard/looper first-run seed + divider reset.
   const instrumentPanel: StackPanel = { id: 'instrument', label: 'instrument', render: renderInstrument, autoSize: true };
-  // The keyboard is one horizontal ribbon. Its former stacked-layout floor squeezed the lane buttons.
-  // Five compact lanes need 5 × 57px + four 6px gaps + the looper's 1px top padding.
+  // The keyboard is one horizontal ribbon. Five compact lanes need 5 × 57px + four 6px gaps + the
+  // looper's 1px top padding.
   const keyboardPanel: StackPanel = { id: 'keyboard', label: 'keyboard', render: renderKeyboard, min: 0.1, minPx: 56, defaultWeight: layoutStore.DEFAULT_STAGE_WEIGHTS.keyboard };
   const looperPanel: StackPanel = { id: 'looper', label: 'looper', render: renderLooper, min: 0.18, minPx: 310, defaultWeight: layoutStore.DEFAULT_STAGE_WEIGHTS.looper };
 
@@ -178,8 +178,8 @@ export function App() {
     }
   };
 
-  // System-status aggregate for the command-bar lamp. The old topbar chips (host/isolated/plugin/midi)
-  // moved into the Audio Settings diagnostics block; this lamp is the at-a-glance rollup. Amber when
+  // System-status aggregate for the command-bar lamp. Per-item detail (host/isolated/plugin/midi) lives
+  // in the Audio Settings diagnostics block; this lamp is the at-a-glance rollup. Amber when
   // crossOriginIsolated is false — the one condition that actually breaks the looper (no SharedArrayBuffer
   // capture ring); the title lists all four states so the detail is a hover away in every build.
   const systemWarn = () => !crossOriginIsolated();
@@ -200,11 +200,11 @@ export function App() {
 
   return (
     <div class="app">
-      {/* Orbit V2 command bar — ONE glass card merging the old topbar + the transport strip. Left→right:
+      {/* Command bar — ONE card combining brand, system lamp, transport, and tool icons. Left→right:
           brand · system lamp · (Transport fragment: BPM · CLICK/FIXED/TAP · loop ring-dial · ■/✕ ALL ·
-          MIC · spacer · master) · tool icons. The old status chips (host/isolated/plugin/midi) moved
-          into the Audio Settings diagnostics block; the lamp is their at-a-glance aggregate and its
-          title lists all four. */}
+          MIC · spacer · master) · tool icons. Host/isolated/plugin/midi detail lives in the Audio
+          Settings diagnostics block; the lamp is their at-a-glance aggregate and its title lists all
+          four. */}
       <header class="cmd" ref={(el) => onCleanup(installCmdFit(el))}>
         <span class="brand">
           <i class="brand__dot" aria-hidden="true" />
@@ -219,9 +219,9 @@ export function App() {
           title={systemStatusTitle()}
           aria-label={`System status, ${systemStatusTitle().replace(/\n/g, ', ')}`}
         />
-        {/* Preserve the plugin-scan live region (was the topbar plugin chip's role=status). Kept always
-            mounted in the native build so a rescan completion is still announced with the settings
-            popover closed; the visible read-out lives in the Audio Settings diagnostics block. */}
+        {/* Preserve the plugin-scan live region. Kept always mounted in the native build so a rescan
+            completion is still announced with the settings popover closed; the visible read-out lives
+            in the Audio Settings diagnostics block. */}
         <Show when={platform.pluginHost.available}>
           <span class="cmd__sr" role="status" aria-live="polite">
             {scanning() ? 'Scanning plugins' : `${availablePlugins().length} plugins found`}
@@ -287,7 +287,7 @@ export function App() {
               <circle cx="12" cy="17.4" r="0.9" fill="currentColor" stroke="none" />
             </svg>
           </button>
-          {/* Audio settings gear (P11.3): opens the global device/buffer-size popover. Native-only. */}
+          {/* Audio settings gear: opens the global device/buffer-size popover. Native-only. */}
           <Show when={platform.pluginHost.available}>
             <button
               type="button"
@@ -309,9 +309,9 @@ export function App() {
         </div>
       </header>
 
-      {/* Audio settings popover (P11.3): a full-screen transparent backdrop click-catcher (closes on
+      {/* Audio settings popover: a full-screen transparent backdrop click-catcher (closes on
           outside click; Escape handled at the window level above) anchoring the panel top-right under
-          the topbar gear. The keyboard/MIDI play path still works behind it (keydown isn't blocked). */}
+          the command-bar gear. The keyboard/MIDI play path still works behind it (keydown isn't blocked). */}
       <Show when={settingsOpen()}>
         <div class="settings-popover__backdrop" onClick={() => setSettingsOpen(false)}>
           <div
@@ -351,7 +351,7 @@ export function App() {
       <Toasts />
 
       {/* The stage is a vertical SplitStack of resizable regions; the keyboard slots in above the looper,
-          below it, or is hidden (restore from the topbar piano cap). Each region resizes by dragging the
+          below it, or is hidden (restore from the command-bar piano cap). Each region resizes by dragging the
           divider between it and its neighbour. */}
       <main class="stage">
         <SplitStack

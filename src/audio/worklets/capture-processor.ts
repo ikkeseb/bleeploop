@@ -1,5 +1,5 @@
 /**
- * Capture AudioWorkletProcessor — the record tap of the looper (P4).
+ * Capture AudioWorkletProcessor — the record tap of the looper.
  *
  * Lives on the audio render thread. On every 128-frame quantum it pushes the mono
  * input (channel 0) plus its absolute currentFrame into a lock-free SharedArrayBuffer ring,
@@ -10,7 +10,7 @@
  * reads from `inputs`, pushes into the ring, and bumps Atomics counters.
  *
  * The ring + heartbeat SharedArrayBuffers are handed in via processorOptions at construction
- * (see looper.ts). This module is loaded with `?worker&url`, so it runs in the AudioWorklet
+ * (see capture.ts). This module is loaded with `?worker&url`, so it runs in the AudioWorklet
  * global scope, NOT the bundle — keep its imports to things that work there (ringbuf.js is
  * pure JS + SharedArrayBuffer, fine in a worklet).
  */

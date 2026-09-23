@@ -226,8 +226,8 @@ export async function acceptPluginBuffer(ab: ArrayBuffer, meta: PluginBufferMeta
     // authoritative; fall back to the input-bus count only when the plugin was unclassifiable.
     // Self-sufficient (no UI-mount timing). Splitting record from audible lets the native
     // cpal-out monitor mute the audible web path (webMonitorGain → 0) without losing the record tap —
-    // gain → recordTap stays full. With webMonitorGain at unity the level is identical to the old
-    // single looperInputBus edge (looperInputBus is always unity; master volume lives on masterGain).
+    // gain → recordTap stays full. With webMonitorGain at unity the level matches a direct
+    // looperInputBus edge (looperInputBus is always unity; master volume lives on masterGain).
     const gain = ctx.createGain();
     const kind = slotKinds.get(meta.slot); // true=effect, false=instrument, undefined=unclassified
     const isEffect = kind ?? meta.inChannels > 0;

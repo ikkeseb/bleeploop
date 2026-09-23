@@ -10,7 +10,7 @@ import { autoRecordThreshold } from '../../audio/looper/auto-record';
 import './transport.css';
 
 /**
- * Command-bar transport cluster (Orbit V2). Renders as a Fragment so its children become direct
+ * Command-bar transport cluster. Renders as a Fragment so its children become direct
  * flex items of the `.cmd` header in app.tsx — the internal `.grow` spacer then pushes master + the
  * app.tsx tool icons to the far right. Left→right: BPM group (34px numeral + steppers + beat dots) ·
  * CLICK / FIXED-N / AUTO / TAP / END STOP toggles · loop ring-dial readout · ■/▶ ALL + ✕ ALL (two-step) + MIC LIVE ·
@@ -120,8 +120,8 @@ export function Transport() {
   // armInput returns false with only a console.warn) — so we branch on the armed state captured BEFORE
   // the toggle AND on whether the user still wants the input on: a false result while arming, with the
   // request still standing, means "no input available". A rejected promise is getUserMedia
-  // denying/failing. Both were previously swallowed (console-only, invisible in a release build);
-  // surface each as a toast. The underlying console.warn/error still feed the release log.
+  // denying/failing. Both must surface as a toast — console-only would stay invisible in a release
+  // build. The underlying console.warn/error still feed the release log.
   const onToggleMic = () => {
     const wasArmed = looper.inputArmed();
     looper.toggleInput().then(

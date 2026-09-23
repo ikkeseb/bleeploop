@@ -106,7 +106,7 @@ const initial = read();
 const [stageSizes, setStageSizesSig] = createSignal<Record<string, number>>(initial.stageSizes);
 const [keyboardPlacement, setKeyboardPlacementSig] = createSignal<KeyboardPlacement>(initial.keyboardPlacement);
 
-// Where the keyboard goes back to when un-hidden (so the topbar toggle restores its last visible spot).
+// Where the keyboard goes back to when un-hidden (so the command-bar toggle restores its last visible spot).
 let lastVisiblePlacement: 'top' | 'bottom' = initial.lastVisiblePlacement;
 
 function persist(): void {
@@ -140,7 +140,7 @@ export function setKeyboardPlacement(p: KeyboardPlacement): void {
 /** True when the keyboard occupies a stage region (top or bottom). */
 export const keyboardVisible = (): boolean => keyboardPlacement() !== 'hidden';
 
-/** Topbar toggle: hide the keyboard, or restore it to its last visible placement. */
+/** Command-bar toggle: hide the keyboard, or restore it to its last visible placement. */
 export function toggleKeyboardHidden(): void {
   setKeyboardPlacement(keyboardPlacement() === 'hidden' ? lastVisiblePlacement : 'hidden');
 }
