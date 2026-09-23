@@ -110,7 +110,7 @@ indeterminate value.
   advisory-mono/sum path. Main thread drains the ring for the record buffer + incremental min/max
   waveform peaks. Recording windows use those timestamps, including compensated overdub punch-in/out;
   main-thread drain timing cannot move a take. Dropped capture packets reject the affected take or layer.
-  Timing probe: `verify/capture-clock.mjs`.
+  Timing probe: `verify/probes/capture-clock.mjs`.
 - **Playback/overdub:** per-track AudioBuffer via AudioBufferSourceNode (`loop=true`),
   started/stopped at quantized absolute `currentTime`. Overdub = double-buffer + sample-
   aligned source swap at the next `loopEnd`.

@@ -18,9 +18,9 @@
     "typecheck": "tsc --noEmit",
     "check:boundary": "node scripts/check-boundary.mjs",
     "lint": "oxlint --deny-warnings src verify scripts",
-    "verify": "node verify/run-all.mjs",
+    "verify": "node verify/run-guards.mjs",
     "check": "pnpm typecheck && pnpm lint && pnpm check:boundary && pnpm verify",
-    "verify:jam": "node verify/golden-jam.mjs",
+    "verify:jam": "node verify/probes/golden-jam.mjs",
     "prepare": "simple-git-hooks"
   },
   "simple-git-hooks": {

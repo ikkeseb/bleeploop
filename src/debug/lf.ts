@@ -29,7 +29,7 @@ import * as layoutStore from '../ui/layout/layout-store';
 
 /**
  * The DEV debug surface (`window.__lf`) for automated (Playwright) verification + by-ear/by-eye
- * gates — `verify/golden-jam.mjs` and every probe in `docs/VERIFY.md` drive the app through it, so
+ * gates — `verify/probes/golden-jam.mjs` and every probe in `docs/VERIFY.md` drive the app through it, so
  * its shape is a CONTRACT: add keys freely, never rename or drop one without updating those.
  * Installed only under `import.meta.env.DEV` (app.tsx); a release build never carries it.
  */

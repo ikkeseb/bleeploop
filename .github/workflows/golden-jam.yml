@@ -7,7 +7,7 @@ name: golden-jam
 # AGENTS.md asks for a clean-runner proof before the job can come back. This is that proof: no schedule,
 # no retry, never a push gate. Trigger it from the Actions tab or `gh workflow run golden-jam.yml`.
 # Two consecutive green runs on an unloaded runner say the mechanism is gone there; one red run is a
-# machine lead on the capture clock (`verify/capture-clock.mjs`), not a reason to retry until green.
+# machine lead on the capture clock (`verify/probes/capture-clock.mjs`), not a reason to retry until green.
 
 on:
   workflow_dispatch: {}

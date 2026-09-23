@@ -1,6 +1,6 @@
 // src/audio/export/zip.ts
 // Minimal store-only (no compression) ZIP container writer. PURE — no Web Audio / DOM / Tauri imports,
-// so a Node verify guard can import it directly (verify/fs-zip-verify.mjs) and it builds/verifies on the
+// so a Node verify guard can import it directly (verify/guards/zip.mjs) and it builds/verifies on the
 // Mac half. Exists to bundle the WAV-export deliverable into ONE file: browsers (and WebView2) gate more
 // than one programmatic download per user gesture, so firing N+2 separate <a download> clicks silently
 // drops every file after the first. Packing the stems + master + session.json into a single .zip is one

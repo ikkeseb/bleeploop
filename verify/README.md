@@ -1,6 +1,6 @@
 # `verify/` — deterministic regression guards
 
-`pnpm verify` runs the deterministic `*-verify.mjs` guards in this directory. They check audio math,
+`pnpm verify` runs the deterministic guards in `verify/guards/`. They check audio math,
 file formats and repository contracts without a browser or audio hardware. They do not establish
 that the running looper dispatches correctly or that the native app sounds right.
 
@@ -57,7 +57,7 @@ and the next gesture retries with the pulse and Tone transport started exactly o
 `monitor-generation.mjs`, `plugin-load-buffer-generation.mjs` and `asio-startup.mjs` run in
 `.github/workflows/browser-lifecycle.yml` on frontend and verification changes. They do not gate the
 physical rig or replace the separately dispatched golden jam.
-`marker-probe.mjs` checks DEV marker correlation and clock arithmetic; it does not run native audio.
+`guards/marker.mjs` checks DEV marker correlation and clock arithmetic; it does not run native audio.
 `render-clock.mjs` checks the DEV worklet observer preserves PCM; `render-cursor.mjs` exercises the
 production compensation sampler with paired queue/timestamp observations, invalid clocks and freeze.
 `export-context.mjs` covers live/export isolation, lossless editable downloads and bounded ZIP work;
@@ -81,15 +81,15 @@ It polls completed recovery reads rather than treating an asynchronous predicate
 Rust unit tests run through `cargo test`; `.github/workflows/rust-test.yml` runs them on native-code
 changes. Runtime verification and the Windows/WSL command lane are owned by `docs/VERIFY.md`.
 
-`fs-docs-verify.mjs` is the docs guard: cited paths exist, cited shas resolve, the `STATUS.md` rig
+`verify/guards/docs.mjs` is the docs guard: cited paths exist, cited shas resolve, the `STATUS.md` rig
 lap has ≤ 10 stops. A dead path a doc keeps on purpose says so on the same line — "(now `…`)",
 "not yet built", "upstream" — and the guard skips it.
 
-Each `*-verify.mjs` runs in plain Node with **no browser, no `AudioContext`, no audio hardware**, and runs
+Each guard runs in plain Node with **no browser, no `AudioContext`, no audio hardware**, and runs
 the real source; none carries a hand-ported copy of it. There are three kinds:
 
 - **Pure imports.** Modules with no Web Audio, Tone or timer dependency load directly via Node's TS
-  type-stripping (`fs-quantize-verify.mjs` imports `../src/audio/quantize.ts`). The looper's grid
+  type-stripping (`verify/guards/quantize.mjs` imports `../src/audio/quantize.ts`). The looper's grid
   arithmetic (`src/audio/looper/grid-math.ts`) and the compensation formula
   (`src/audio/record-latency-math.ts`) are kept pure for this.
 - **Rig guards.** `verify/harness/rig.ts` (typechecked) drives the real looper: `bootLooper()` loads a fresh
@@ -101,8 +101,8 @@ the real source; none carries a hand-ported copy of it. There are three kinds:
   console. It cannot show real render timing, browser jitter, WebView2 or anything audible.
 - **Modules under the hooks.** A guard that imports `verify/harness/hooks.ts` can load any `src/` module
   (Solid, `import.meta.env`, extensionless imports) and gets a fresh copy per `?g=N` query, so module-load
-  state re-runs (`fs-layout-store-verify.mjs`). Worklet processors load with a `registerProcessor` shim
-  (`fs-capture-packets-verify.mjs`, `fs-worklet-pop-verify.mjs`).
+  state re-runs (`verify/guards/layout-store.mjs`). Worklet processors load with a `registerProcessor` shim
+  (`verify/guards/capture-packets.mjs`, `verify/guards/worklet-pop.mjs`).
 
 A guard counts only once it went red on a deliberately planted bug in the code it claims to cover. A
 bug no public path can reveal is an equivalent mutant; name it in the commit message.
@@ -115,14 +115,14 @@ failure.
 ```bash
 pnpm verify        # run all guards, summarized (a few seconds)
 pnpm check         # typecheck + lint + boundary + verify (the full static gate)
-pnpm exec node verify/fs-grid-verify.mjs   # run one directly
+pnpm exec node verify/guards/grid.mjs   # run one directly
 ```
 
 `pnpm verify` is part of `pnpm check`, so a regression in any guard fails the standard gate.
 
 ## Browser probes
 
-With Vite running, use `pnpm exec node verify/loop-end-stop.mjs`, and substitute the other probe
+With Vite running, use `pnpm exec node verify/probes/loop-end-stop.mjs`, and substitute the other probe
 filenames above as needed. These browser probes accept
 `--url=http://localhost:1421` for a separate verification server started with
 `pnpm exec vite --port 1421`. Use a fresh server if HMR has left dynamically imported probe modules
@@ -132,7 +132,7 @@ with a different identity from the app's modules. `pnpm verify:jam` starts or re
 
 ## Add a guard
 
-1. Create `verify/<name>-verify.mjs` (the `-verify.mjs` suffix is how `run-all.mjs` discovers it).
+1. Create `verify/guards/<name>.mjs` (`run-guards.mjs` runs every `.mjs` in that directory).
 2. Run the real code: import a pure module directly; drive anything that touches Web Audio, Tone, timers
    or the looper through the rig or the hooks. When the logic you want reads `engine.ctx`, `clock.bpm()`
    or `engineState` inline and a rig scenario cannot reach it, extract the math into `grid-math.ts` or

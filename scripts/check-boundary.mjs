@@ -12,7 +12,7 @@
  * Run via `pnpm check:boundary`.
  *
  * The classification (`classify` / `isInPlatform` / the two regexes) is exported as a PURE helper so
- * `verify/fs-boundary-guard-verify.mjs` can self-test it against planted-violation fixtures — the guard's
+ * `verify/guards/boundary-guard.mjs` can self-test it against planted-violation fixtures — the guard's
  * own coverage must not be able to rot silently (its history below records a past regex miss). The
  * filesystem walk + reporting + exit run ONLY when this file is executed directly (see the isMain guard
  * at the bottom); importing it for the self-test does not touch the FS or exit.

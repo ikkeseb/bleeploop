@@ -11,7 +11,7 @@
 // context (or vice versa) would silently detune + shift tempo AND break the integer-frame grid math.
 //
 // The session.json schema + validateSession live in the PURE session-schema.ts (no engine/looper/Web
-// Audio) so verify/fs-import-verify.mjs can import the validator under Node. This coordinator is the
+// Audio) so verify/guards/import.mjs can import the validator under Node. This coordinator is the
 // browser-only half, so it imports engine/looper STATICALLY (they're statically imported app-wide
 // anyway — a lazy import() here bought nothing but two INEFFECTIVE_DYNAMIC_IMPORT build warnings).
 import { engine } from '../engine';

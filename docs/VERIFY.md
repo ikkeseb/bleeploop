@@ -19,7 +19,7 @@ package's prepare script installed hooks in this checkout.
   whichever driver the session has: **playwright-cli** when present (proven 2026-07-10; async work =
   `eval "(async () => {…})()"`), else the **Playwright MCP** (`browser_evaluate` takes a `() => {…}`
   function — wrap async in an IIFE; screenshot: OMIT `filename` so it lands in `.playwright-mcp/`,
-  or read the inline image), else a plain `node` Playwright script (what `verify/golden-jam.mjs`
+  or read the inline image), else a plain `node` Playwright script (what `verify/probes/golden-jam.mjs`
   does).
 - Any click is a user gesture that unlocks the AudioContext (the `BleepLoop` header title is a safe
   one).
@@ -117,8 +117,8 @@ Tone transport handle). This is how you drive and inspect the app from Playwrigh
   isolate this version. A separate origin isolates localStorage/IndexedDB; it is not a separate profile.
   Keep the regular app mounted and exercise production startup/load functions. Run on an empty jam
   with web mic disarmed. Do not automate WebView2 through Playwright. The native `diag` log contains the complete
-  report; frontend console forwarding truncates long JSON. `verify/render-cursor.mjs` exercises the
-  production sampler with controlled timing inputs; `verify/render-clock.mjs` proves that the DEV
+  report; frontend console forwarding truncates long JSON. `verify/probes/render-cursor.mjs` exercises the
+  production sampler with controlled timing inputs; `verify/probes/render-clock.mjs` proves that the DEV
   clock observer preserves PCM. Both accept the browser probes' `--url` option.
 - Plugin restart survey (which installed plugins raise a restart/rescan request, and on which
   parameter): `WSLENV=VITE_LF_PROBE VITE_LF_PROBE=restart-survey pnpm dev:wasapi > logs/<name>.log 2>&1 &`

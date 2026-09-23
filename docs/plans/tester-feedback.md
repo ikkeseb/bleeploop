@@ -66,7 +66,7 @@ Proven in the browser tier only (`pnpm check`, `pnpm build`, `pnpm verify:jam`, 
 - **F2 + F1 + F5:** short later takes tile across the master (early stop or FIXED), FIXED stays usable
   after the BPM lock, and PLAY on an idle transport starts from the top. `pnpm verify:jam` drives it
   through the real dispatchers (Windows browser run, 2026-09-21: 91/91).
-  `verify/playback-restart.mjs` separately captures rendered lane PCM: single/ALL idle restarts
+  `verify/probes/playback-restart.mjs` separately captures rendered lane PCM: single/ALL idle restarts
   begin at source frame zero, ALL lanes share a start frame, and live joins keep phase beside a
   muted lane pending END STOP. A deliberately wrong 100 ms source offset fails all three cases.
   By ear, unheard: the tile seams, a 3-over-8 cut, reverse on a tiled track, and the downbeat click

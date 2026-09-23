@@ -12,9 +12,9 @@ Pieces 3 and 5 may edit `src/audio/`: the dev-app rule in `AGENTS.md` applies.
 
 **Why.** 26 of 40 browser probes run in no automation. All 26 passed on the PC on 2026-09-23
 (`record-stop-window.mjs` is the slowest at 166 s), but a red one would go unnoticed.
-`verify/recovery-capacity.mjs` and `verify/recovery-failure.mjs` ignore `--url` and always hit port
+`verify/probes/recovery-capacity.mjs` and `verify/probes/recovery-failure.mjs` ignore `--url` and always hit port
 1420. The `--url` parser is copied 38 times and `chromium.launch` 40 times; no shared module exists.
-`verify/marker-probe.mjs` is pure Node but lacks the `-verify.mjs` suffix, so `pnpm verify` never runs
+`verify/guards/marker.mjs` is pure Node but lacks the `-verify.mjs` suffix, so `pnpm verify` never runs
 it. Nothing explains the `fs-` prefix.
 
 **Do.** Split `verify/` into guards (plain Node, `pnpm verify`) and probes (browser). Write one shared
@@ -46,7 +46,7 @@ has deliberately left, read together with a delta list in `src/ui/AGENTS.md`.
 - Strip the dated correction notes from `docs/ARCHITECTURE.md`.
 - Propose retiring the mockup as the spec, with the contact sheet and the `src/app.css` tokens as the
   visual reference. The owner confirms before the mockup file goes.
-- Extend `verify/fs-docs-verify.mjs` to fail when the invariant titles in `AGENTS.md` and
+- Extend `verify/guards/docs.mjs` to fail when the invariant titles in `AGENTS.md` and
   `docs/ARCHITECTURE.md` diverge.
 
 **Done when** every remaining wave/phase label and glass/aurora mention in `src/` states a current
@@ -94,11 +94,11 @@ built.
 
 ## Small fixes, any time
 
-- `retry` in `src/audio/midi.ts` lacks `@public`; only `verify/instrument-controls.mjs` calls it, so
+- `retry` in `src/audio/midi.ts` lacks `@public`; only `verify/probes/instrument-controls.mjs` calls it, so
   knip reports it as unused.
-- `verify/contact-sheet.mjs` shows only the web tier (synth pills), never the guitar-first screen.
+- `verify/probes/contact-sheet.mjs` shows only the web tier (synth pills), never the guitar-first screen.
   Add scenes with `pluginHost.available` on and a fake amp-sim loaded, using the pattern in
-  `verify/plugin-slot-pending.mjs`.
+  `verify/probes/plugin-slot-pending.mjs`.
 - `README.md` points at `rust-toolchain.toml` as if it sat at the root; it lives in `src-tauri/`.
 - `src-tauri/AGENTS.md` cites "§ WSL lane" in `docs/VERIFY.md` and "§ ASIO startup" in
   `docs/ARCHITECTURE.md`; neither is a heading.

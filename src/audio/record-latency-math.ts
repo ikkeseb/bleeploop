@@ -1,7 +1,7 @@
 /**
  * OWNS: the record-latency compensation formula `C` and the window-median that stabilises its terms.
  *
- * PURE ON PURPOSE: no engine / bridge import, so `verify/fs-record-compensation-verify.mjs` IMPORTS this
+ * PURE ON PURPOSE: no engine / bridge import, so `verify/guards/record-compensation.mjs` IMPORTS this
  * instead of mirroring it (see verify/README.md). `record-latency.ts` owns the live terms (sampler, freeze,
  * arm state) and calls in here.
  */

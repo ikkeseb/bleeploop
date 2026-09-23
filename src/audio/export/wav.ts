@@ -1,6 +1,6 @@
 // src/audio/export/wav.ts
 // Pure WAV (PCM16 / Float32) encoder + master-mix helpers. NO Web Audio / DOM / Tauri imports so a Node
-// verify guard can import it directly (verify/fs-wav-export-verify.mjs). All functions are pure.
+// verify guard can import it directly (verify/guards/wav-export.mjs). All functions are pure.
 
 /** Clamp a float sample to [-1,1] and quantize to signed 16-bit. -1→-32767, 1→32767, |x|>1 clamps. */
 export function floatToPcm16(sample: number): number {

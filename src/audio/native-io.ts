@@ -157,7 +157,7 @@ export async function disarmInputInternal(slot: 0 | 1): Promise<void> {
  * SAME per-slot chain as load/unload/input so it can't interleave with them. Rejects (slot left
  * disarmed, web still audible) if the stream can't open — the caller surfaces that.
  * Production arms through `goLive`; this monitor-only entry is the browser probe's
- * (`verify/monitor-generation.mjs`), hence `@public` for knip.
+ * (`verify/probes/monitor-generation.mjs`), hence `@public` for knip.
  * @public
  */
 export function armMonitor(slot: 0 | 1, deviceId?: string | null): Promise<void> {
@@ -216,7 +216,7 @@ export async function refreshMonitorLatency(slot: 0 | 1, kind: 'generation' | 's
 }
 
 /** Disarm the slot's native monitor (idempotent). Serialized on the slot's op chain. Probe entry
- * (`verify/monitor-generation.mjs`); production goes through `stopLive`/`disarmMonitorInternal`.
+ * (`verify/probes/monitor-generation.mjs`); production goes through `stopLive`/`disarmMonitorInternal`.
  * @public */
 export function disarmMonitor(slot: 0 | 1): Promise<void> {
   return serializeSlot(slot, () => disarmMonitorInternal(slot));

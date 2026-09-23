@@ -1,7 +1,7 @@
 // src/audio/export/unzip.ts
 // Minimal store-only (no compression) ZIP container reader — the exact inverse of makeZip in ./zip.ts.
 // PURE — no Web Audio / DOM / Tauri imports, so a Node verify guard can import it directly
-// (verify/fs-unzip-verify.mjs) and it builds/verifies on the Mac half. Exists as the round-trip mate to the
+// (verify/guards/unzip.mjs) and it builds/verifies on the Mac half. Exists as the round-trip mate to the
 // writer: it lets a guard prove makeZip → parseZip is lossless, and gives any consumer a dependency-free way
 // to read the export archives back.
 //

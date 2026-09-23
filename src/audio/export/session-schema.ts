@@ -1,6 +1,6 @@
 // src/audio/export/session-schema.ts
 // PURE session.json schema: validateSession + its parsed-shape types, with NO engine/looper/Web-Audio
-// dependency. Split out of import.ts so verify/fs-import-verify.mjs can import the REAL validator under
+// dependency. Split out of import.ts so verify/guards/import.mjs can import the REAL validator under
 // Node (TS type-stripping) while import.ts is free to pull in engine/looper STATICALLY. Runtime imports
 // here must stay PURE + Node-importable — no engine/looper/Tone/Tauri/Web Audio.
 import { validateFxStates, type FxState } from '../fx/metadata.ts';

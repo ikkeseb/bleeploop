@@ -405,7 +405,7 @@
 }
 
 /* Narrow bar: the display windows give back their side padding so row 1 keeps its measured width and
-   the tool icons stay on it (verify/layout-reachability.mjs at 960 × 600). */
+   the tool icons stay on it (verify/probes/layout-reachability.mjs at 960 × 600). */
 @media (max-width: 1040px) {
   .transport__bpm-group,
   .transport__loop {

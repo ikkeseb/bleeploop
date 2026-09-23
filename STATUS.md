@@ -65,12 +65,12 @@ Blocked on an owner decision, not on testing. The default column is what happens
 **Answered 2026-09-23** (product lens over the 2026-09-23 audit; the promise now heads `README.md`):
 
 - **D12-S — built:** host-side sustain and release of pedal-held notes on plugin sinks, verified by
-  `verify/instrument-routing.mjs`; the plugin's own pedal behaviour never fires; bend and mod wheel
+  `verify/probes/instrument-routing.mjs`; the plugin's own pedal behaviour never fires; bend and mod wheel
   stay built-in only.
 - **D13 — built:** picking a synth or instrument plugin makes its slot the MIDI slot; an effect plugin
-  does not, verified by `verify/instrument-routing.mjs`.
+  does not, verified by `verify/probes/instrument-routing.mjs`.
 - **D15 — built:** a failed overdub boundary swap keeps the layer and stops the lane, verified by
-  `verify/overdub-timers.mjs --case=swapFail` and `fs-overdub-verify.mjs`.
+  `verify/probes/overdub-timers.mjs --case=swapFail` and `verify/guards/overdub.mjs`.
 
 **Answered 2026-09-18:**
 
@@ -116,7 +116,7 @@ Owns the formula and debug levers; why native monitoring cancels input+plugin la
 ### Stop 4 — sync
 
 The capture-clock slip and its fix: `docs/ARCHITECTURE.md` § Audio architecture (Looper capture),
-probe `verify/capture-clock.mjs`. The golden jam is green locally and in `golden-jam.yml`; a long
+probe `verify/probes/capture-clock.mjs`. The golden jam is green locally and in `golden-jam.yml`; a long
 native guitar session is unverified.
 
 ### Stop 5 — reload + editors
@@ -136,7 +136,7 @@ Probed on the web tier only. After the fault the slot reads "INPUT LIVE · WEB M
 ### Stop 7 — MIC path
 
 Channel routing: `docs/ARCHITECTURE.md` § Audio architecture (Looper capture), proof
-`fs-mic-input-channel-verify.mjs`. `MIC LIVE` opens the WebView default input, not the Audio Settings
+`verify/guards/mic-input-channel.mjs`. `MIC LIVE` opens the WebView default input, not the Audio Settings
 device (native-only; browser `deviceId`s are origin-specific) — a separate design. Uncompensated by
 choice (D2, D7).
 
@@ -145,5 +145,5 @@ choice (D2, D7).
 Formats: `docs/ARCHITECTURE.md` § Audio architecture. The master excludes STOPPED tracks, stems
 include them; import works only while every lane is EMPTY.
 
-**Machine-verified, Windows, 2026-09-19:** `verify/first-session.mjs` round-tripped a take through download, recovery and import (PCM hashes matched); an ASIO release's downloaded stem was sample-exact.
+**Machine-verified, Windows, 2026-09-19:** `verify/probes/first-session.mjs` round-tripped a take through download, recovery and import (PCM hashes matched); an ASIO release's downloaded stem was sample-exact.
 OS close events kept the window on Cancel, saved on accept, never resurrected a cleared jam. Dialogs and the file picker were not automated.
