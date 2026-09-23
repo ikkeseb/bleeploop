@@ -1,223 +1,209 @@
-// Executable verification of the FREE-RUN beat pulse (the beat pulse is ONE
-// ctx-time lookahead mechanism — startFreeRunPulse / startCountIn / startMasterPulse are three anchors
-// of the SAME pulseTick scheduler). Node port of startFreeRunPulse + the pulseTick loop from
-// src/audio/clock.ts (Tone/Web Audio deps — can't import; mirrored by line, same idiom as the other
-// fs-*-verify.mjs).
-//
-// HISTORY: this file used to guard the OLD free-run mechanism — a Tone scheduleRepeat('4n') grid whose
-// accent label was derived from getTicksAtTime(time)/PPQ (bug-hunt 2026-06-20: a JS beat counter reset
-// on every (re)schedule mislabelled the accent after a count abort / master reset). That mechanism was
-// DELETED 2026-07-07 (§3.1) and the bug class died with it: the unified pulse labels every beat
-// beatInBar = N % 4 with N derived from the anchor (pulseNextN), so a counter/grid phase mismatch is
-// structurally impossible. The old sections proving the tick-derivation are gone WITH the code they
-// verified; what replaces them is the new mechanism's own contract:
+// The FREE-RUN beat pulse: the REAL clock (src/audio/clock.ts) under the verify rig. The pulse is ONE
+// ctx-time lookahead scheduler with three anchors (free-run / count-in / master); this file covers the
+// free-run anchor and the hand-offs into and out of it. Every beat is labelled beatInBar = N % 4 with N
+// derived from the anchor, so an accent can only land off the bar if the anchor arithmetic breaks.
 //
 // What this PROVES:
-//   - fresh start: anchor = now, beat 0 fires immediately, cadence = 60/bpm exact, accent iff N%4==0 [startFreeRunPulse]
-//   - a bpm change mid-free-run re-anchors PHASE-CARRYING: the next beat keeps the OUTGOING grid's
-//     time AND bar index; subsequent beats space at the NEW period; no beat fires twice, none in the
-//     past — so the LED cadence bends with no hop and no double-fire                        [startFreeRunPulse]
-//   - master reset / count abort falls back to free-run carrying the outgoing grid's phase (the LED
-//     keeps beating; the gap at the seam is <= one period; a count's forcedUntilN never leaks)
-//   - setBpm re-anchors ONLY a live free-run pulse — a count-in / master pulse keeps its frozen
-//     period (the committed grid never re-derives from the bpm signal)                      [setBpm gate]
-//   - the anchor arithmetic round-trips: at a large beat index (hours-long session) the carried
-//     next-beat time is preserved to sub-nanosecond error
+//   - fresh start: beat 0 at now, cadence exactly 60/bpm, accent iff N % 4 == 0           [ensureRunning]
+//   - a bpm change mid-free-run is PHASE-CARRYING: the next beat keeps the outgoing grid's time AND
+//     bar index, later beats space at the new period, none twice, none in the past           [setBpm]
+//   - a master reset (clearAll) falls back to free-run carrying the loop grid's phase: the LED keeps
+//     beating, the seam gap is <= one period and the bar index is continuous                [resetMaster]
+//   - a count-in abort falls back clean: no forced click and no count numeral after it       [stopCountIn]
+//   - setBpm re-anchors ONLY a live free-run pulse; a value-identical set is a full no-op    [setBpm]
+//   - the carried next-beat time survives a re-anchor at a large beat index (hours in)       [startFreeRunPulse]
+
+import { bootLooper } from './harness/rig.ts';
+import { HEARTBEAT_INTERNAL_LATENCY as HBL } from '../src/audio/looper/grid-math.ts';
 
 let fails = 0, checks = 0;
 const approx = (a, b, eps = 1e-9) => Math.abs(a - b) <= eps;
 function ok(name, cond, detail = '') { checks++; if (!cond) { fails++; console.log(`  FAIL  ${name}  ${detail}`); } }
 
-const PULSE_LOOKAHEAD = 0.1; // clock.ts
-const PULSE_INTERVAL = 0.025; // clock.ts PULSE_INTERVAL_MS
+const since = (list, mark) => list.slice(mark);
+/** The beat index of a free-run draw, given the grid it was scheduled on. */
+const indexOn = (time, anchor, period) => Math.round((time - anchor) / period);
 
-// MIRRORS: src/audio/clock.ts@398-410 sha256:beba6e9edef75c27  (startFreeRunPulse — phase-carrying re-anchor)
-// state: { anchor, beatPeriod, nextN, forcedUntilN, freeRun, timerLive }. Mutates like the source.
-// The source reads bpm() (already clamped+rounded) and engine.ctx.currentTime; passed in here.
-function startFreeRunPulse(st, bpmNow, now) {
-  const period = 60 / bpmNow;
-  const nextBeatTime = st.beatPeriod > 0 ? st.anchor + st.nextN * st.beatPeriod : now;
-  st.timerLive = true; // teardownBeatPulse(false): waker restarts, queued LED writes stay valid (phase-carrying)
-  st.reanchors = (st.reanchors ?? 0) + 1; // model-only invocation counter (for the E no-op check)
-  st.freeRun = true;
-  st.forcedUntilN = 0;
-  st.beatPeriod = period;
-  st.anchor = nextBeatTime - st.nextN * period; // beat nextN fires where the old grid had it
-}
-
-// MIRRORS: src/audio/clock.ts@347-385 sha256:2eb1ec34ed38d50d  (pulseTick — the one lookahead scheduler)
-// Same port as fs-grid-verify.mjs / fs-pulse-forced-clamp-verify.mjs: schedules every beat inside the
-// horizon at its exact ctx time; past beats DROP unless forced (forced clamp to now, #8).
-// Returns grid/LED beats regardless of the click's transport cutoff. Audio gating is covered by
-// fs-pulse-forced-clamp-verify and the real-browser loop-end-stop probe.
-function pulseTick(st, now) {
-  const out = [];
-  if (st.beatPeriod <= 0) return out;
-  const horizon = now + PULSE_LOOKAHEAD;
-  let t = st.anchor + st.nextN * st.beatPeriod;
-  while (t < horizon) {
-    const forced = st.nextN < st.forcedUntilN;
-    const fireAt = t >= now ? t : forced ? now : -1;
-    if (fireAt >= 0) out.push({ n: st.nextN, beatInBar: st.nextN % 4, fireAt, forced });
-    st.nextN++;
-    t = st.anchor + st.nextN * st.beatPeriod;
-  }
-  return out;
-}
-
-// MIRRORS: src/audio/clock.ts@41-53 sha256:8a06763d68be9472  (setBpm — lock guard + free-run-only re-anchor)
-function setBpm(clockState, st, n, now) {
-  if (clockState.locked) return;
-  const clamped = Math.max(40, Math.min(300, Math.round(n)));
-  if (clamped === clockState.bpm) return; // value-identical set = full no-op (no re-anchor churn)
-  clockState.bpm = clamped;
-  if (st.freeRun && st.timerLive) startFreeRunPulse(st, clockState.bpm, now);
-}
-
-const freshState = () => ({ anchor: 0, beatPeriod: 0, nextN: 0, forcedUntilN: 0, freeRun: false, timerLive: false });
-// Drive the 25ms waker from `now` until `endNow`, collecting fired beats.
-function runWaker(st, now, endNow) {
-  const fired = [];
-  while (now < endNow) {
-    fired.push(...pulseTick(st, now));
-    now += PULSE_INTERVAL;
-  }
-  return { fired, now };
-}
-
-// ════════════════════════════════════════════════════════════════════════════════════════════
-console.log('=== A. Fresh start: anchor = now, beat 0 immediate, exact cadence, accent iff N%4==0 ===');
+console.log('=== A. Fresh start: beat 0 at now, exact cadence, accent iff N%4==0 ===');
 for (const bpm of [40, 90, 120, 137, 200, 300]) {
-  const st = freshState();
-  const now0 = 100.0;
-  startFreeRunPulse(st, bpm, now0);
+  const rig = await bootLooper({ init: false, startTime: 100 });
+  rig.clock.setBpm(bpm); // no pulse yet: only the value changes
+  const now0 = rig.now();
   const period = 60 / bpm;
-  ok(`A anchor==now bpm=${bpm}`, st.anchor === now0, `anchor=${st.anchor}`);
-  ok(`A period==60/bpm bpm=${bpm}`, st.beatPeriod === period);
-  const { fired } = runWaker(st, now0, now0 + 8 * period + 0.05);
-  ok(`A beat 0 fires at now bpm=${bpm}`, fired.length > 0 && fired[0].n === 0 && fired[0].fireAt === now0);
-  ok(`A every beat at anchor+n*period bpm=${bpm}`, fired.every((f) => approx(f.fireAt, now0 + f.n * period, 0)));
-  ok(`A accent iff n%4==0 bpm=${bpm}`, fired.every((f) => (f.beatInBar === 0) === (f.n % 4 === 0)));
-  ok(`A no beat scheduled twice bpm=${bpm}`, fired.every((f, i) => i === 0 || f.n === fired[i - 1].n + 1));
+  rig.clock.ensureRunning();
+  await rig.advance(8 * period + 0.05);
+  const beats = rig.draws();
+  ok(`A beat 0 fires at now bpm=${bpm}`, beats[0]?.time === now0 && beats[0]?.at === now0, JSON.stringify(beats[0]));
+  ok(`A every beat at now + n*period bpm=${bpm}`, beats.every((b, n) => b.time === now0 + n * period));
+  ok(`A accent iff n%4==0 bpm=${bpm}`, beats.every((b, n) => b.beat === n % 4));
+  ok(`A no beat scheduled twice bpm=${bpm}`, beats.every((b, n) => n === 0 || b.time > beats[n - 1].time));
 }
 
 console.log('=== B. bpm change mid-free-run: phase-carrying re-anchor (no hop, no double-fire) ===');
 for (const [bpmA, bpmB] of [[120, 90], [90, 200], [200, 40], [120, 121]]) {
-  const st = freshState();
-  const now0 = 50.0;
-  startFreeRunPulse(st, bpmA, now0);
+  const rig = await bootLooper({ init: false, startTime: 50 });
+  rig.clock.setBpm(bpmA);
+  const now0 = rig.now();
   const pA = 60 / bpmA, pB = 60 / bpmB;
-  // run a while on grid A, then change tempo at an arbitrary wake moment
-  const { fired: before, now: nowChange } = runWaker(st, now0, now0 + 5 * pA + 0.013);
-  const expectedNextT = st.anchor + st.nextN * st.beatPeriod; // where grid A would put the next beat
-  const nAtChange = st.nextN;
-  setBpm({ bpm: bpmA, locked: false }, st, bpmB, nowChange);
-  ok(`B period switched ${bpmA}->${bpmB}`, st.beatPeriod === pB);
-  const { fired: after } = runWaker(st, nowChange, nowChange + 6 * pB + 0.05);
+  rig.clock.ensureRunning();
+  await rig.advance(5 * pA + 0.013);
+  const before = rig.draws();
+  const nextN = before.length; // beats 0..nextN-1 are already queued on grid A
+  const expectedNextT = now0 + nextN * pA;
+  const nowChange = rig.now();
+  rig.clock.setBpm(bpmB);
+  await rig.advance(6 * pB + 0.05);
+  const after = since(rig.draws(), before.length);
   ok(`B next beat keeps the OUTGOING grid's time ${bpmA}->${bpmB}`,
-     after.length > 0 && after[0].n === nAtChange && approx(after[0].fireAt, expectedNextT),
-     `got ${after[0]?.fireAt} want ${expectedNextT}`);
+    after.length > 0 && approx(after[0].time, expectedNextT), `got ${after[0]?.time} want ${expectedNextT}`);
   ok(`B bar index continuous across the re-anchor ${bpmA}->${bpmB}`,
-     after[0].beatInBar === nAtChange % 4 && before.every((f) => f.beatInBar === f.n % 4));
-  // subsequent spacing = the NEW period exactly
-  let spacingOk = true;
-  for (let i = 1; i < after.length; i++) if (!approx(after[i].fireAt - after[i - 1].fireAt, pB)) spacingOk = false;
-  ok(`B post-change spacing == new period ${bpmA}->${bpmB}`, spacingOk);
-  // no double-fire: indices strictly increasing across the whole run, none fired twice
+    after[0]?.beat === nextN % 4 && before.every((b, n) => b.beat === n % 4));
+  ok(`B post-change spacing == new period ${bpmA}->${bpmB}`,
+    after.every((b, i) => i === 0 || approx(b.time - after[i - 1].time, pB)));
+  ok(`B later beats keep counting the bar ${bpmA}->${bpmB}`, after.every((b, i) => b.beat === (nextN + i) % 4));
   const all = [...before, ...after];
-  ok(`B no beat index fired twice ${bpmA}->${bpmB}`, all.every((f, i) => i === 0 || f.n > all[i - 1].n));
-  ok(`B no beat fired in the past ${bpmA}->${bpmB}`, after.every((f) => f.fireAt >= nowChange));
+  ok(`B no beat fired twice ${bpmA}->${bpmB}`, all.every((b, i) => i === 0 || b.time > all[i - 1].time));
+  ok(`B no beat fired in the past ${bpmA}->${bpmB}`, after.every((b) => b.time >= b.at && b.time >= nowChange));
 }
 
-console.log('=== C. Master reset falls back to free-run CARRYING the master grid phase ===');
+console.log('=== C. Master reset (clearAll) falls back to free-run CARRYING the loop grid phase ===');
 {
-  // A committed master grid: exact integer-frame period (slightly off the nominal 60/bpm), long-lived.
-  const sr = 48000, bpm = 137, bars = 2;
-  const fpb = Math.round((sr * 60 / bpm) * 4);
-  const masterPeriod = (bars * fpb) / sr / (4 * bars); // the exact committed beat period
-  const st = freshState();
-  st.anchor = 10.0; st.beatPeriod = masterPeriod; st.freeRun = false; st.timerLive = true;
-  // run the master pulse ~20 minutes in (large nextN), then reset at an arbitrary moment
-  const { fired: masterFired, now: nowReset } = runWaker(st, 10.0, 10.0 + 20 * 60);
-  const lastMaster = masterFired[masterFired.length - 1];
-  const expectedNextT = st.anchor + st.nextN * st.beatPeriod;
-  const nAtReset = st.nextN;
-  startFreeRunPulse(st, bpm, nowReset); // stopMasterPulse() delegates to exactly this
-  ok('C free-run flag set on fallback', st.freeRun === true && st.forcedUntilN === 0);
-  const { fired: after } = runWaker(st, nowReset, nowReset + 3);
+  // A committed 2-bar loop at 137 bpm: the master beat period is the integer-frame one, slightly off 60/137.
+  const rig = await bootLooper({ startTime: 10 });
+  const { looper, clock, state } = rig;
+  clock.setBpm(137);
+  rig.setInput(0.5);
+  await looper.recDub(0);
+  await rig.advance(4 * 60 / 137 + 0.1 + 2 * 4 * 60 / 137 + 0.03); // count-in + two bars
+  await looper.recDub(0);
+  await rig.advance(0.5);
+  const master = looper.masterLengthFrames();
+  const masterPeriod = master / rig.sr / 8;
+  ok('C precondition: a 2-bar master is playing', master > 0 && looper.trackInfo(0).state === 'PLAYING', `master=${master}`);
+  await rig.advance(60); // a minute of loop playback
+  const anchor = state.engineState.masterStartTime;
+  const beforeReset = rig.draws();
+  const last = beforeReset[beforeReset.length - 1];
+  const lastN = indexOn(last.time, anchor, masterPeriod);
+  ok('C the loop grid is the master grid', approx(last.time, anchor + lastN * masterPeriod, 1e-9));
+  const expectedNextT = anchor + (lastN + 1) * masterPeriod;
+  looper.clearAll(); // resetMaster -> stopMasterPulse -> free-run
+  await rig.advance(3);
+  const after = since(rig.draws(), beforeReset.length);
   ok('C first free-run beat lands where the master grid had it (sub-ns)',
-     after.length > 0 && after[0].n === nAtReset && approx(after[0].fireAt, expectedNextT, 1e-9),
-     `got ${after[0]?.fireAt} want ${expectedNextT} (err ${Math.abs(after[0]?.fireAt - expectedNextT)})`);
+    after.length > 0 && approx(after[0].time, expectedNextT, 1e-9),
+    `got ${after[0]?.time} want ${expectedNextT} (err ${Math.abs(after[0]?.time - expectedNextT)})`);
   ok('C seam gap <= one period (no LED hop at reset)',
-     after[0].fireAt - lastMaster.fireAt <= Math.max(masterPeriod, 60 / bpm) + 1e-9,
-     `gap=${after[0].fireAt - lastMaster.fireAt}`);
-  ok('C bar index continuous across the reset', after[0].beatInBar === nAtReset % 4);
+    after[0]?.time - last.time <= Math.max(masterPeriod, 60 / clock.bpm()) + 1e-9, `gap=${after[0]?.time - last.time}`);
+  ok('C bar index continuous across the reset', after[0]?.beat === (lastN + 1) % 4);
+  ok('C free-run cadence after the reset is 60/bpm', after.every((b, i) => i === 0 || approx(b.time - after[i - 1].time, 60 / clock.bpm())));
+  ok('C BPM unlocked by the reset', clock.bpmLocked() === false);
 }
 
-console.log('=== D. Count abort falls back clean: forcedUntilN cleared, no forced click leaks ===');
+console.log('=== D. Count abort falls back clean: no forced click, no count numeral after it ===');
 {
-  const st = freshState();
-  // a count-in pulse: anchored, 4 forced beats, aborted after 2 of them fired
-  st.anchor = 100.02; st.beatPeriod = 0.5; st.forcedUntilN = 4; st.freeRun = false; st.timerLive = true;
-  runWaker(st, 100.0, 101.1); // beats 0,1,2 scheduled (some forced)
-  startFreeRunPulse(st, 120, 101.1); // stopCountIn -> stopMasterPulse -> free-run
-  ok('D forcedUntilN cleared on fallback', st.forcedUntilN === 0);
-  const { fired } = runWaker(st, 101.1, 103.0);
-  ok('D no post-abort beat is forced', fired.every((f) => !f.forced));
+  const rig = await bootLooper({ startTime: 100 });
+  const { looper, clock } = rig;
+  ok('D metronome is off', clock.metronomeOn() === false);
+  await looper.recDub(0); // first take: one-bar count-in, forced audible
+  await rig.advance(1.1); // beats 0, 1 and 2 of the count queued
+  const countClicks = rig.clicks().length;
+  ok('D the count clicked with the metronome off', countClicks >= 2, `clicks=${countClicks}`);
+  await looper.recDub(0); // abort during the count
+  ok('D abort returns the lane to EMPTY', looper.trackInfo(0).state === 'EMPTY');
+  const mark = rig.draws().length;
+  // A count click already dispatched into the lookahead may still sound; nothing may be scheduled later.
+  const cutoff = rig.now() + 0.1;
+  await rig.advance(3);
+  ok('D no click scheduled after the abort', rig.clicks().every((c) => c.time < cutoff),
+    JSON.stringify(rig.clicks().map((c) => c.time)));
+  ok('D no count numeral after the abort', since(rig.draws(), mark).every((b) => b.countLeft === 0));
+  ok('D the LED keeps beating on free-run', since(rig.draws(), mark).length >= 5);
 }
 
 console.log('=== E. setBpm re-anchors ONLY a live free-run pulse (count/master periods stay frozen) ===');
 {
-  // count-in live (freeRun=false): setBpm must not touch the pulse (the count grid is frozen at press;
-  // see fs-bpm-lock-verify.mjs for the R4 lock that usually prevents even the bpm write).
-  const st = freshState();
-  st.anchor = 100.02; st.beatPeriod = 0.5; st.forcedUntilN = 4; st.freeRun = false; st.timerLive = true;
-  const c = { bpm: 120, locked: false };
-  setBpm(c, st, 90, 100.3);
-  ok('E count pulse NOT re-anchored by setBpm', st.beatPeriod === 0.5 && st.anchor === 100.02 && st.forcedUntilN === 4);
-  ok('E bpm value itself did change (unlocked)', c.bpm === 90);
-  // master pulse live (freeRun=false, locked=true): neither bpm nor the pulse moves.
-  const st2 = freshState();
-  st2.anchor = 5.0; st2.beatPeriod = 0.4999; st2.freeRun = false; st2.timerLive = true;
-  const c2 = { bpm: 120, locked: true };
-  setBpm(c2, st2, 90, 40.0);
-  ok('E master pulse untouched + bpm frozen while locked', st2.beatPeriod === 0.4999 && c2.bpm === 120);
-  // free-run live: setBpm DOES re-anchor.
-  const st3 = freshState();
-  startFreeRunPulse(st3, 120, 10.0);
-  setBpm({ bpm: 120, locked: false }, st3, 90, 10.3);
-  ok('E free-run pulse re-anchored to the new period', st3.beatPeriod === 60 / 90);
-  // pulse not started yet (timerLive=false): setBpm must not fabricate a grid.
-  const st4 = freshState();
-  setBpm({ bpm: 120, locked: false }, st4, 90, 0.0);
-  ok('E no pulse started when none was live', st4.timerLive === false && st4.beatPeriod === 0);
-  // value-identical setBpm is a FULL no-op: no re-anchor (streaming callers — MIDI clock ~24 ticks/beat,
-  // tap tempo — would otherwise churn teardown/setInterval and re-anchor for nothing; a re-anchor also
-  // tears down + restarts the waker, which the source pays as clearInterval/setInterval churn).
-  const st5 = freshState();
-  startFreeRunPulse(st5, 120, 10.0);
-  runWaker(st5, 10.0, 10.4);
-  const reanchorsBefore = st5.reanchors;
-  setBpm({ bpm: 120, locked: false }, st5, 120, 10.4); // same value (after clamp/round) — must not re-anchor
-  setBpm({ bpm: 120, locked: false }, st5, 120.3, 10.42); // rounds to 120 — still identical, still a no-op
-  ok('E value-identical setBpm does not re-anchor', st5.reanchors === reanchorsBefore,
-     `reanchors ${reanchorsBefore} -> ${st5.reanchors}`);
-  setBpm({ bpm: 120, locked: false }, st5, 121, 10.44); // a REAL change still re-anchors
-  ok('E changed setBpm still re-anchors', st5.reanchors === reanchorsBefore + 1 && st5.beatPeriod === 60 / 121);
+  // A count-in pulse (unlocked here, to reach the pulse gate itself): setBpm must not touch its grid.
+  const rig = await bootLooper({ init: false, startTime: 100 });
+  const { clock } = rig;
+  const anchor = rig.now() + HBL;
+  clock.startCountIn(anchor, 0.5, 4);
+  await rig.advance(0.3);
+  clock.setBpm(90);
+  await rig.advance(3);
+  const beats = rig.draws();
+  ok('E count pulse NOT re-anchored by setBpm', beats.length >= 6 && beats.every((b, n) => b.time === anchor + n * 0.5),
+    JSON.stringify(beats.map((b) => b.time)));
+  ok('E count numerals 4..1 intact', [4, 3, 2, 1].every((left, n) => beats[n]?.countLeft === left));
+  ok('E bpm value itself did change (unlocked)', clock.bpm() === 90);
+}
+{
+  // A master pulse while BPM is locked: neither the bpm nor the pulse moves.
+  const rig = await bootLooper({ init: false, startTime: 5 });
+  const { clock } = rig;
+  const anchor = rig.now() + HBL;
+  clock.startMasterPulse(anchor, 0.4999);
+  clock.setBpmLocked(true);
+  await rig.advance(1);
+  clock.setBpm(90);
+  await rig.advance(2);
+  ok('E master pulse untouched + bpm frozen while locked',
+    clock.bpm() === 120 && rig.draws().every((b, n) => b.time === anchor + n * 0.4999));
+}
+{
+  // A live free-run pulse DOES re-anchor.
+  const rig = await bootLooper({ init: false, startTime: 10 });
+  const { clock } = rig;
+  clock.ensureRunning();
+  await rig.advance(0.3);
+  clock.setBpm(90);
+  const mark = rig.draws().length;
+  await rig.advance(3);
+  const after = since(rig.draws(), mark);
+  ok('E free-run pulse re-anchored to the new period', after.length > 2 && after.every((b, i) => i === 0 || approx(b.time - after[i - 1].time, 60 / 90)));
+}
+{
+  // No pulse running yet: setBpm must not fabricate a grid.
+  const rig = await bootLooper({ init: false });
+  rig.clock.setBpm(90);
+  await rig.advance(1);
+  ok('E no pulse started when none was live', rig.draws().length === 0 && rig.timers.pending() === 0);
+}
+{
+  // A value-identical setBpm is a FULL no-op: streaming callers (MIDI clock, tap tempo) would otherwise
+  // tear down and restart the waker for nothing.
+  const rig = await bootLooper({ init: false, startTime: 10 });
+  const { clock, timers } = rig;
+  clock.ensureRunning();
+  await rig.advance(0.4);
+  const created = timers.created, cleared = timers.cleared;
+  clock.setBpm(120);
+  clock.setBpm(120.3); // rounds to 120
+  ok('E value-identical setBpm does not re-anchor', timers.created === created && timers.cleared === cleared,
+    `created ${created}->${timers.created} cleared ${cleared}->${timers.cleared}`);
+  const mark = rig.draws().length;
+  clock.setBpm(121);
+  await rig.advance(2);
+  const after = since(rig.draws(), mark);
+  ok('E changed setBpm still re-anchors', timers.created === created + 1 &&
+    after.length > 2 && after.every((b, i) => i === 0 || approx(b.time - after[i - 1].time, 60 / 121)));
 }
 
-console.log('=== F. Anchor arithmetic round-trips at a large beat index (hours-long session) ===');
-{
-  // anchor = nextBeatTime - N*period, then pulseTick recomputes anchor + N*period: the float error of
-  // that round-trip must stay sub-nanosecond even at N ~ 40000 (a ~5.5h free-run at 120bpm).
-  for (const N of [1, 999, 40000, 123457]) {
-    const st = freshState();
-    st.anchor = 3.0; st.beatPeriod = 0.5; st.nextN = N; st.freeRun = true; st.timerLive = true;
-    const want = st.anchor + N * st.beatPeriod;
-    startFreeRunPulse(st, 137, want - 0.05); // re-anchor just before the carried beat
-    const got = st.anchor + st.nextN * st.beatPeriod;
-    ok(`F round-trip error < 1ns at N=${N}`, approx(got, want, 1e-9), `err=${Math.abs(got - want)}`);
-  }
+console.log('=== F. The carried beat survives a re-anchor at a large beat index (hours-long session) ===');
+for (const N of [1, 999, 40000, 123457]) {
+  const rig = await bootLooper({ init: false, startTime: 3 });
+  const { clock } = rig;
+  const period = 0.5;
+  // A grid whose next beat index is ~N: anchored N periods before the next beat just past the horizon.
+  const want = rig.now() + 0.3;
+  const anchor = want - N * period;
+  clock.startMasterPulse(anchor, period);
+  clock.stopMasterPulse(); // -> startFreeRunPulse carries beat N onto the free-run grid
+  const mark = rig.draws().length;
+  await rig.advance(0.4);
+  const got = rig.draws()[mark];
+  ok(`F round-trip error < 1ns at N=${N}`, got && approx(got.time, want, 1e-9), `err=${Math.abs(got?.time - want)}`);
+  ok(`F bar index carried at N=${N}`, got?.beat === N % 4, `beat=${got?.beat}`);
 }
 
 console.log(`\n=== RESULT: ${checks - fails}/${checks} checks passed, ${fails} failed ===`);

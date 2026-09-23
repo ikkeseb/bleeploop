@@ -1,172 +1,131 @@
-// Executable verification of the count-in BPM-lock lifecycle (bug-hunt 2026-06-23, R4) — a faithful
-// model of src/audio/looper/machine.ts's lock/unlock state flow + the clock.setBpm lock gate (looper.ts
-// was split into src/audio/looper/{state,capture,peaks,playback,machine,mixer}.ts + a facade on
-// 2026-07-01). Same idiom as the other fs-*-verify.mjs (the TS
-// can't be imported in Node — Tone/Web Audio deps — so this mirrors the exact transitions by line).
+// The count-in BPM-lock lifecycle: the REAL looper state machine (src/audio/looper/machine.ts) and the
+// clock's lock gate (src/audio/clock.ts) under the verify rig.
 //
-// THE BUG (R4): for a FREE-record-with-count-in (the default first-track path), BPM was NOT locked at the
-// press — the lock lived only inside `if (fixedLengthEnabled())`. The Transport BPM controls gate solely on
-// clock.bpmLocked(), so the user could retune tempo mid-take. clock.startCountIn captured the count pulse's
-// period from bpm_press and never re-anchors on setBpm, while finishRecording recomputes the loop/master
-// period from clock.bpm() = bpm_commit — so the count the player heard and the committed loop disagree (a
-// tempo seam at the count→loop boundary; the one-grid promise breaks).
-//
-// THE FIX: lock BPM for EVERY first-track count-in (free or fixed) at the press; any abort unlocks it
-// (releaseRecorderState, now keyed on master===0). A committed loop keeps the lock (master>0).
-//
-// What this PROVES: (1) press locks BPM (free + fixed); (2) a mid-take retune is a no-op while locked, so
-// count grid == commit grid; (3) every abort path (stopCapture/stop/clear) unlocks a first-track
-// count-in; (4) a committed loop stays locked; (5) a LATER-track arm abort does NOT unlock (master>0).
+// The contract: BPM locks at EVERY first-track count-in press (free or fixed), so the count the player
+// hears and the committed loop share one tempo; every abort of a first take unlocks it; a committed
+// loop keeps it locked; a later-track arm never touches it; and only the recording lane can release
+// the capture window or the lock.
+
+import { bootLooper } from './harness/rig.ts';
+import { framesPerBar } from '../src/audio/quantize.ts';
 
 let fails = 0, checks = 0;
 const approx = (a, b, eps = 1e-9) => Math.abs(a - b) <= eps;
 function ok(name, cond, detail = '') { checks++; if (!cond) { fails++; console.log(`  FAIL  ${name}  ${detail}`); } }
 
-// ── Minimal clock model (src/audio/clock.ts) ───────────────────────────────────────────────
-function makeClock(bpm = 120) {
-  return {
-    bpm,
-    locked: false,
-    // MIRRORS: src/audio/clock.ts@41-53 sha256:8a06763d68be9472  (setBpm — lock guard + clamp + identical-value no-op)
-    // (The source additionally re-anchors a live FREE-RUN pulse on a REAL change — count/master
-    // pulses are untouched. That side effect is out of scope for this lock-lifecycle model and is
-    // guarded in fs-accent-grid-verify.mjs section E.)
-    setBpm(n) {
-      if (this.locked) return;
-      const clamped = Math.max(40, Math.min(300, Math.round(n)));
-      if (clamped === this.bpm) return; // value-identical set = full no-op
-      this.bpm = clamped;
-    },
-    // MIRRORS: src/audio/clock.ts@106-108 sha256:a57cdfc98fae3f23  (setBpmLocked)
-    setBpmLocked(on) { this.locked = on; },
-  };
+/** The recorder window and lock, as the machine holds them. */
+function recorder(rig) {
+  const es = rig.state.engineState;
+  return { active: es.activeRecordIndex, start: es.captureStartFrame, end: es.captureEndFrame, locked: rig.clock.bpmLocked() };
+}
+async function pressRec(rig, lane, { fixed = false, bars = 2 } = {}) {
+  rig.looper.setFixedLengthEnabled(fixed);
+  rig.looper.setFixedLengthBars(bars);
+  await rig.looper.recDub(lane);
 }
 
-// ── Minimal looper model: the lock/unlock transitions that matter (src/audio/looper/machine.ts) ──
-function makeLooper(clock) {
-  return {
-    clock,
-    master: 0, // masterLengthFrames()
-    captureStartFrame: null,
-    captureEndFrame: null,
-    activeRecordIndex: -1,
-    countPressBpm: 0, // = startCountIn's captured bpm (the count grid tempo)
-
-    // startRecording (NEW: lock for EVERY first-track count-in)
-    startRecording(i, { fixed = false, fixedBars = 2 } = {}) {
-      if (this.activeRecordIndex >= 0) return;
-      this.activeRecordIndex = i;
-      if (this.master === 0) {
-        // FIRST track: count-in. Capture the count grid tempo, then lock (R4: was fixed-only).
-        this.countPressBpm = this.clock.bpm; // clock.startCountIn(anchor, 60/bpm, ...)
-        this.clock.setBpmLocked(true); // R4 — moved OUT of the fixedLength block
-
-      }
-      this.captureStartFrame = 10000; // fixed fixture origin; timing arithmetic is tested separately
-      this.captureEndFrame = this.captureStartFrame + (this.master || (fixed ? fixedBars * 1000 : 60000));
-      // LATER track (master>0): arm only, NO lock (BPM must stay frozen to the committed loop).
-    },
-
-    // MIRRORS: src/audio/looper/machine.ts@380-401 sha256:3be20034b52c094c  (releaseRecorderState: owner guard, window reset, BPM unlock)
-    releaseRecorderState(i) {
-      if (this.activeRecordIndex !== i) return;
-      this.activeRecordIndex = -1;
-      this.captureStartFrame = null;
-      this.captureEndFrame = null;
-      if (this.master === 0) this.clock.setBpmLocked(false);
-    },
-
-    // abort paths all converge on releaseRecorderState (stopCapture arm branch / stop / clear)
-    abortDuringArm() {
-      this.releaseRecorderState(this.activeRecordIndex);
-    },
-
-    // finishRecording establishes the master before release, so the BPM lock survives.
-    commit(bars = 2) {
-      const master = bars * 1000;
-      // derivedBpm consistent with the integer frame count == the (locked) press tempo
-      this.master = master;
-      this.clock.setBpmLocked(true);
-      this.releaseRecorderState(this.activeRecordIndex);
-      // The commit grid period basis = clock.bpm (frozen at press since the lock held).
-      return this.clock.bpm;
-    },
-  };
-}
-
-// ════════════════════════════════════════════════════════════════════════════════════════════
-console.log('=== A. Free-record count-in: press LOCKS BPM (the R4 fix) ===');
+console.log('=== A. Free-record count-in: the press LOCKS BPM ===');
 {
-  const c = makeClock(120); const lp = makeLooper(c);
-  lp.startRecording(0, { fixed: false });
-  ok('A free-record count-in press locks BPM', c.locked === true);
-  ok('A count grid tempo captured at press', lp.countPressBpm === 120);
+  const rig = await bootLooper();
+  const mark = rig.draws().length;
+  await pressRec(rig, 0);
+  await rig.advance(1.2);
+  ok('A free-record count-in press locks BPM', rig.clock.bpmLocked() === true);
+  const count = rig.draws().slice(mark).filter((b) => b.countLeft > 0);
+  ok('A count grid runs at the press tempo', count.length >= 3 && count.every((b, n) => n === 0 || approx(b.time - count[n - 1].time, 0.5)));
 }
 
-console.log('=== B. Mid-take retune is a NO-OP while locked → count grid == commit grid ===');
+console.log('=== B. A mid-take retune is a NO-OP while locked: count grid == commit grid ===');
 {
-  const c = makeClock(120); const lp = makeLooper(c);
-  lp.startRecording(0, { fixed: false });   // locks @120, count grid = 120
-  c.setBpm(100);                            // user drags tempo mid-take — gated by locked → no-op
-  ok('B setBpm is a no-op while locked', c.bpm === 120);
-  const commitBpm = lp.commit(2);
-  ok('B commit grid tempo == count grid tempo (one grid)', approx(60 / commitBpm, 60 / lp.countPressBpm),
-     `count=${60 / lp.countPressBpm} commit=${60 / commitBpm}`);
-
-  // Contrast: the OLD code (no lock on free-record) — setBpm would succeed and the grids diverge.
-  const c2 = makeClock(120);
-  const countGridOld = 60 / c2.bpm; // 0.5
-  c2.setBpm(100); // OLD free-record: unlocked → succeeds
-  const commitGridOld = 60 / c2.bpm; // 0.6
-  ok('B OLD (unlocked) grids DIVERGE — the bug', !approx(countGridOld, commitGridOld),
-     `count=${countGridOld} commit=${commitGridOld}`);
+  const rig = await bootLooper();
+  rig.setInput(0.5);
+  await pressRec(rig, 0);
+  await rig.advance(3); // through the count, into the take
+  rig.clock.setBpm(100); // the user drags the tempo mid-take
+  ok('B setBpm is a no-op while locked', rig.clock.bpm() === 120);
+  await rig.advance(3.05);
+  await rig.looper.recDub(0);
+  await rig.advance(0.3);
+  const master = rig.looper.masterLengthFrames();
+  ok('B commit uses the count tempo: master = 2 bars at 120 bpm', master === 2 * framesPerBar(120, rig.sr), `master=${master}`);
+  ok('B committed beat period == count beat period', approx(master / rig.sr / 8, 0.5));
 }
 
 console.log('=== C. Every abort path UNLOCKS a first-track count-in (free + fixed) ===');
-{
-  for (const fixed of [false, true]) {
-    const c = makeClock(120); const lp = makeLooper(c);
-    lp.startRecording(0, { fixed });
-    ok(`C [${fixed ? 'fixed' : 'free'}] locked after press`, c.locked === true);
-    lp.abortDuringArm(); // stopCapture arm branch / stop / clear all reach releaseRecorderState
-    ok(`C [${fixed ? 'fixed' : 'free'}] abort UNLOCKS BPM`, c.locked === false);
-    ok(`C [${fixed ? 'fixed' : 'free'}] abort clears the fixed-length arm`, lp.captureStartFrame === null && lp.captureEndFrame === null);
+const aborts = {
+  'REC again during the count': (rig) => rig.looper.recDub(0),
+  'PLAY/STOP during the count': (rig) => rig.looper.playStop(0),
+  'STOP': (rig) => rig.looper.stop(0),
+  'CLEAR': (rig) => rig.looper.clear(0),
+  'STOP ALL': (rig) => rig.looper.stopAll(),
+};
+for (const fixed of [false, true]) {
+  for (const [label, abort] of Object.entries(aborts)) {
+    const rig = await bootLooper();
+    await pressRec(rig, 0, { fixed });
+    await rig.advance(0.8);
+    const tag = `[${fixed ? 'fixed' : 'free'}, ${label}]`;
+    ok(`C ${tag} locked after the press`, rig.clock.bpmLocked() === true);
+    await abort(rig);
+    await rig.advance(0.1);
+    const r = recorder(rig);
+    ok(`C ${tag} abort UNLOCKS BPM`, r.locked === false);
+    ok(`C ${tag} abort clears the capture window and the recorder`, r.active === -1 && r.start === null && r.end === null, JSON.stringify(r));
+    ok(`C ${tag} the lane is EMPTY`, rig.looper.trackInfo(0).state === 'EMPTY');
+    rig.clock.setBpm(90);
+    ok(`C ${tag} tempo is editable again`, rig.clock.bpm() === 90);
   }
 }
-
-console.log('=== D. A committed loop STAYS locked (commit does not unlock) ===');
-{
-  const c = makeClock(120); const lp = makeLooper(c);
-  lp.startRecording(0, { fixed: false });
-  lp.commit(2);
-  ok('D committed loop keeps BPM locked', c.locked === true);
-  ok('D master defined', lp.master > 0);
-  c.setBpm(140);
-  ok('D BPM still frozen after commit', c.bpm === 120);
+for (const [label, abort] of [['STOP', (rig) => rig.looper.stop(0)], ['CLEAR', (rig) => rig.looper.clear(0)]]) {
+  // Past the come-in, mid-take: stop()/clear() discard an uncommitted first take and unlock too.
+  const rig = await bootLooper();
+  rig.setInput(0.5);
+  await pressRec(rig, 0, { fixed: true, bars: 4 });
+  await rig.advance(3.5);
+  ok(`C [mid-take, ${label}] recording past the come-in`, rig.looper.trackInfo(0).state === 'RECORDING' && !rig.looper.trackInfo(0).armed);
+  abort(rig);
+  const r = recorder(rig);
+  ok(`C [mid-take, ${label}] unlocks and releases`, !r.locked && r.active === -1 && r.start === null && r.end === null, JSON.stringify(r));
 }
 
-console.log('=== E. A LATER-track arm abort must NOT unlock (master>0, the loop owns the tempo) ===');
+console.log('=== D. A committed loop STAYS locked ===');
 {
-  const c = makeClock(120); const lp = makeLooper(c);
-  lp.startRecording(0, { fixed: false });
-  lp.commit(2);                 // master>0, locked
-  ok('E pre: master>0 and locked', lp.master > 0 && c.locked === true);
-  lp.startRecording(1);         // LATER track arm — no lock change
-  lp.abortDuringArm();          // abort the later-track arm → releaseRecorderState with master>0
-  ok('E later-track arm abort leaves BPM LOCKED (master>0)', c.locked === true);
+  const rig = await bootLooper();
+  const master = await rig.recordFirstTake({ bars: 2 });
+  ok('D master defined', master > 0);
+  ok('D committed loop keeps BPM locked', rig.clock.bpmLocked() === true);
+  rig.clock.setBpm(140);
+  ok('D BPM still frozen after commit', rig.clock.bpm() === 120);
 }
 
-console.log('=== F. Only the recording lane can release its capture window or BPM lock ===');
+console.log('=== E. A LATER-track arm abort must NOT unlock (the loop owns the tempo) ===');
+for (const [label, abort] of [['REC again', (rig) => rig.looper.recDub(1)], ['STOP', (rig) => rig.looper.stop(1)], ['CLEAR', (rig) => rig.looper.clear(1)]]) {
+  const rig = await bootLooper();
+  await rig.recordFirstTake({ bars: 2 });
+  await rig.looper.recDub(1); // later-track arm: waits for the next master boundary
+  ok(`E [${label}] later lane armed`, rig.looper.trackInfo(1).armed === true);
+  await abort(rig);
+  ok(`E [${label}] later-track arm abort leaves BPM LOCKED`, rig.clock.bpmLocked() === true);
+  ok(`E [${label}] the loop keeps playing`, rig.looper.trackInfo(0).state === 'PLAYING' && rig.looper.trackInfo(1).state === 'EMPTY');
+}
+
+console.log('=== F. Only the recording lane can release its capture window or the BPM lock ===');
 {
-  const c = makeClock(120), lp = makeLooper(c);
-  lp.startRecording(2, { fixed: true });
-  const start = lp.captureStartFrame, end = lp.captureEndFrame;
-  lp.releaseRecorderState(1);
-  ok('F another lane cannot release the recorder', lp.activeRecordIndex === 2);
-  ok('F another lane preserves both window edges', lp.captureStartFrame === start && lp.captureEndFrame === end);
-  ok('F another lane cannot unlock BPM', c.locked === true);
-  lp.abortDuringArm();
-  ok('F owner releases both edges and unlocks', lp.activeRecordIndex === -1 && lp.captureStartFrame === null && lp.captureEndFrame === null && !c.locked);
+  const rig = await bootLooper();
+  await pressRec(rig, 2, { fixed: true, bars: 2 });
+  await rig.advance(0.5);
+  const before = recorder(rig);
+  rig.looper.clear(1);
+  rig.looper.stop(3);
+  rig.looper.playStop(4);
+  const after = recorder(rig);
+  ok('F other lanes cannot release the recorder', after.active === 2);
+  ok('F other lanes preserve both window edges', after.start === before.start && after.end === before.end && before.start !== null);
+  ok('F other lanes cannot unlock BPM', after.locked === true);
+  rig.looper.stop(2);
+  const released = recorder(rig);
+  ok('F the owner releases both edges and unlocks',
+    released.active === -1 && released.start === null && released.end === null && !released.locked, JSON.stringify(released));
 }
 
 console.log(`\n=== RESULT: ${checks - fails}/${checks} checks passed, ${fails} failed ===`);

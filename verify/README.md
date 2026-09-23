@@ -89,9 +89,16 @@ Each `*-verify.mjs` runs in plain Node with **no browser, no `AudioContext`, no 
 
 - **imports the real source** via Node's TS type-stripping (e.g. `fs-quantize-verify.mjs` imports
   `../src/audio/quantize.ts` directly — it cannot drift from the source), or
-- **ports** the pure logic into the script when the source can't run under Node (e.g. the worklet/looper
-  guards, which depend on `AudioWorkletProcessor` / `ringbuf.js` / Tone). A ported guard mirrors a specific
+- **drives the real looper on the rig** (`verify/harness/rig.ts`, typechecked): `bootLooper()` loads a fresh
+  module graph of `src/audio` per scenario over a fake Web Audio + Tone layer, renders 128-frame quanta
+  through the real capture worklet and fires the app's timers on the same audio clock. A guard presses
+  `rig.looper.recDub(0)` and reads track state, PCM, started sources, clicks and LED beats. `rig.stall(s)`
+  models a blocked main thread. `RIG_LOGS=1` echoes the app's console. It cannot show real render timing,
+  browser jitter, WebView2 or anything audible, or
+- **ports** the pure logic into the script (the guards not yet on the rig). A ported guard mirrors a specific
   source path; if you change that path, update the port in lockstep.
+
+A rig guard counts only once it went red on a deliberately planted bug in the code it claims to cover.
 
 Every deterministic guard prints a final line `=== RESULT: N/N checks passed, 0 failed ===` and exits non-zero on any
 failure.
