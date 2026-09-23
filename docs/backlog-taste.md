@@ -26,8 +26,15 @@ not here.
 - **Play-path signals from 1.5 m (2026-09-23):** nothing in the looper zone says the amp-sim is live
   (only the slot's pill); the 4×22 px record meter is the only clipping cue; the BPM lock pulse fires
   mid-count-in beside the big "4", which is rec-red inside an amber ARMED lane.
-- **Plugin row at 1000 px (2026-09-23):** GO LIVE / EDITOR / PARAMS wrap and the slot grows ~67→101 px,
-  taken from the lanes on the play path.
+- **Plugin name at 1280 px (2026-09-23):** at the default window the slot header reads "Probe Amp Sim…"
+  (the VST3 tag gives way to the ellipsis) while ~100 px stand empty before INPUT LIVE; at 1000 px it is
+  "Probe Amp …". The picker beside it still reads "Probe Amp Sim (vst3)". Give the name that width, or
+  is the picker enough?
+- **Plugin row at 1000 px (2026-09-23):** with a plugin loaded, idle or INPUT LIVE alike, slot A stacks
+  three rows (GO LIVE / EDITOR, PARAMS, the picker) and grows ~84→122 px over a synth slot; each lane on
+  the play path gives up ~6 px. A tighter plugin row, or accept three rows at this width?
+- **Synth pills at 1000 px (2026-09-23):** the Lead pill sits on the tail of "SOURCE · SYNT…" in both
+  slots and covers its ellipsis. Pills off the label's row, a shorter label, or none in synth mode?
 - **Audio Settings:** the "rec align" trim row after the buffer row — placement + wording; status chips
   moved into the diagnostics block (unratified).
 - **Lanes:** the selected-lane warm-white edge (no rail, owner 2026-09-23) — strong enough under
