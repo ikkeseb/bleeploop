@@ -45,7 +45,8 @@ other layers; the computer keyboard is the fallback.
 - Guitar or line input with native low-latency monitoring over WASAPI or ASIO. Record-latency
   compensation puts the take on the grid.
 - MIDI controllers work through WebView2's native Web MIDI. Without one, the computer keyboard
-  plays notes and runs the transport (1-5 to arm or select tracks, Space or Enter to play and stop).
+  plays notes and runs the transport (1-5 or the arrow keys to select a track, Space to record,
+  Enter to play and stop, Backspace to undo; Help lists every key).
 - Session export and import as one `.zip`: a WAV stem per track, a wet stereo master render and a
   `session.json`.
 
@@ -106,7 +107,7 @@ pnpm dev:asio     # full app, ASIO + native sample rate
 | `pnpm check` | Typecheck, oxlint, the capability-boundary check and the `verify/` guards. Also the pre-push hook |
 | `pnpm verify` | Deterministic guards for the audio core's pure logic, no browser or hardware |
 | `pnpm probe <name>` | One browser probe against the real app on its own Vite server; `--ci` runs every CI probe, `--list` names them |
-| `pnpm verify:jam` | The golden jam. Drives the real app in a headless browser and checks the recorded grid frame by frame (~40 s, not part of `pnpm check`) |
+| `pnpm verify:jam` | The golden jam. Drives the real app in a headless browser and checks the recorded grid frame by frame (~95 s, not part of `pnpm check`) |
 | `pnpm rust:check` | `cargo check` without and with ASIO, then `cargo test` (Windows; the ASIO step needs the SDK) |
 | `pnpm native:smoke` · `native:survey` · `native:swap` | Launch the full app with a DEV plugin probe, print its verdict and stop (Windows, installed plugins) |
 
@@ -134,7 +135,7 @@ There is no unit-test runner. Two layers cover the audio core:
   `AudioContext` or hardware: pure modules (looper frame math, latency compensation) are imported
   directly, and the looper, capture window and clock run on a fake Web Audio layer that renders
   quanta and fires the app's timers on the audio clock.
-- `pnpm verify:jam` (~40 s, outside `pnpm check`) is the golden jam. It drives the real app in a
+- `pnpm verify:jam` (~95 s, outside `pnpm check`) is the golden jam. It drives the real app in a
   headless browser, records impulses on the beat grid and checks the committed loop frame by frame.
   Focused browser probes (`pnpm probe`, in CI) also cover input ownership, session round trips,
   recovery failures and plugin lifecycle transitions; see [`verify/README.md`](verify/README.md). The `pnpm verify` guards
