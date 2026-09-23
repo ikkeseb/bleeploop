@@ -47,6 +47,13 @@ const [scanning, setScanning] = createSignal(false);
 // The live synth engine instances (not reactive — managed imperatively).
 const engines: [SynthEngine | null, SynthEngine | null] = [null, null];
 
+// What the player chose this launch: a source per slot (a synth, a plugin or none) and the active
+// slot. The rig recall (`restorePlugin`) leaves a chosen slot alone and moves the MIDI slot only while
+// nothing is chosen, so a restore that lands mid-play overrides nothing the player set.
+const chosenSource: [boolean, boolean] = [false, false];
+let chosenActive = false;
+const nothingChosen = () => !chosenSource[0] && !chosenSource[1] && !chosenActive;
+
 /**
  * Stable per-slot note sinks routing to the native plugin in that slot. STABLE refs (built once) so
  * `inputRouter.setActivePlugin` early-returns when the routing is unchanged — a fresh closure per
@@ -107,10 +114,15 @@ export function ensureActive(): void {
 }
 
 /**
- * Make slot `i` the active slot and route input to it. Builds the synth engine on demand. Panics the
- * previous active slot's notes (via the router's sink-swap flush).
+ * Make slot `i` the active slot and route input to it (the player's choice: the slot card). Builds the
+ * synth engine on demand. Panics the previous active slot's notes (via the router's sink-swap flush).
  */
 export function setActiveSlot(i: 0 | 1): void {
+  chosenActive = true;
+  activateSlot(i);
+}
+
+function activateSlot(i: 0 | 1): void {
   setActiveSlotSignal(i);
   applyActiveRouting();
 }
@@ -122,6 +134,7 @@ export function setActiveSlot(i: 0 | 1): void {
  * the synth engine was already live it is disposed and rebuilt.
  */
 export function selectSynth(slotIndex: 0 | 1, id: string): void {
+  chosenSource[slotIndex] = true;
   setSlotIds((prev) => withAt(prev, slotIndex, id)); // immediate UI highlight
   // Serialize the routing work on the SAME per-slot chain as selectPlugin/clearPlugin, so a synth
   // pick made while a plugin load is in flight isn't clobbered by that load's continuation: the load
@@ -131,16 +144,22 @@ export function selectSynth(slotIndex: 0 | 1, id: string): void {
       await doClearPlugin(slotIndex); // plugin → synth: unload + revert to the now-selected synth id
       // A failed unload restores the (now silent) plugin: leave MIDI where it is rather than move it there.
       if (slotPlugins()[slotIndex]) return;
-    } else if (engines[slotIndex]) {
-      // Route the OLD engine away (flushing it while it's still live) BEFORE buildSlot disposes it, so
-      // the router never holds a reference to a disposed SynthEngine — the same route-away-then-dispose
-      // order doSelectPlugin uses. Without this, applyActiveRouting()→setActiveEngine(E_new) below sees
-      // router.active === the just-disposed E_old and calls allNotesOff() on it (benign for today's
-      // synths, but a latent throw for any future synth whose allNotesOff touches a live node post-dispose).
-      if (activeSlot() === slotIndex) inputRouter.setActiveEngine(null);
-      buildSlot(slotIndex);
+    } else {
+      // No plugin to unload, but the rig recall may still remember one for this slot (picked before
+      // the recall reached it): the synth is the slot's source now.
+      forgetSlotPlugin(slotIndex);
+      if (engines[slotIndex]) {
+        // Route the OLD engine away (flushing it while it's still live) BEFORE buildSlot disposes it,
+        // so the router never holds a reference to a disposed SynthEngine — the same
+        // route-away-then-dispose order doSelectPlugin uses. Without this,
+        // applyActiveRouting()→setActiveEngine(E_new) below sees router.active === the just-disposed
+        // E_old and calls allNotesOff() on it (benign for today's synths, but a latent throw for any
+        // future synth whose allNotesOff touches a live node post-dispose).
+        if (activeSlot() === slotIndex) inputRouter.setActiveEngine(null);
+        buildSlot(slotIndex);
+      }
     }
-    setActiveSlot(slotIndex);
+    activateSlot(slotIndex);
   });
 }
 
@@ -183,10 +202,22 @@ function releaseEditorAffinity(outgoingPath: string | undefined): void {
  */
 export function selectPlugin(slot: 0 | 1, desc: PluginDescriptor): Promise<void> {
   if (!nativeHostReady()) return Promise.resolve();
-  return serializeSlot(slot, () => doSelectPlugin(slot, desc));
+  chosenSource[slot] = true;
+  return serializeSlot(slot, () => doSelectPlugin(slot, desc, () => true));
 }
 
-async function doSelectPlugin(slot: 0 | 1, desc: PluginDescriptor): Promise<void> {
+/**
+ * The rig recall's load (`rig-recall.ts`): `selectPlugin` into a slot the player has not chosen a
+ * source for this launch, else nothing. Checked and enqueued in one synchronous step, so a pick made
+ * while the other slot restores wins its slot. A restored instrument takes the MIDI slot only if the
+ * player has chosen nothing by the time its load lands.
+ */
+export function restorePlugin(slot: 0 | 1, desc: PluginDescriptor): Promise<void> {
+  if (!nativeHostReady() || chosenSource[slot]) return Promise.resolve();
+  return serializeSlot(slot, () => doSelectPlugin(slot, desc, nothingChosen));
+}
+
+async function doSelectPlugin(slot: 0 | 1, desc: PluginDescriptor, claimMidi: () => boolean): Promise<void> {
   const outgoing = slotPlugins()[slot];
   if (samePluginDescriptor(outgoing, desc)) return; // already loaded
   // Swap: tear down + unload any existing plugin in this slot before loading the new one. A failed
@@ -212,8 +243,9 @@ async function doSelectPlugin(slot: 0 | 1, desc: PluginDescriptor): Promise<void
   // Route to the plugin FIRST (drops the live synth-engine ref), THEN dispose the engine — so the
   // router never holds a reference to a disposed SynthEngine. If the slot isn't active the router
   // doesn't reference this engine anyway, so disposing it is safe regardless. An instrument plugin
-  // makes its slot the MIDI/keys slot; an effect (amp sim on the guitar) leaves routing where it is.
-  if (desc.isEffect !== true) setActiveSlot(slot);
+  // makes its slot the MIDI/keys slot (a restored one only while `claimMidi` says so); an effect (amp
+  // sim on the guitar) leaves routing where it is.
+  if (desc.isEffect !== true && claimMidi()) activateSlot(slot);
   else if (activeSlot() === slot) applyActiveRouting();
   if (engines[slot]) {
     engines[slot]!.dispose();
@@ -267,6 +299,7 @@ async function unloadSlotPlugin(slot: 0 | 1, outgoing: PluginDescriptor, path: '
  * plugin. Serialized per slot (see `serializeSlot`).
  */
 export function clearPlugin(slot: 0 | 1): Promise<void> {
+  chosenSource[slot] = true;
   return serializeSlot(slot, () => doClearPlugin(slot));
 }
 

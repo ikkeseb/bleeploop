@@ -11,15 +11,16 @@
 // prints nothing for that long. Refuses to start while an app or the port-1420 server runs
 // (`pnpm native:kill`). Launches, waits for the probe's verdict line, stops the whole run and exits 0
 // only on a clean verdict. A phased probe launches once per phase with `VITE_LF_PROBE_PHASE` set; a
-// phase ends the way its probe says: the app closes itself (`close`), or the runner kills app.exe
-// alone on the verdict line, as a crashing plugin would (`crash`). The full log lands in
-// logs/native-<probe>.log. Windows node only: the app windows open on the PC desktop.
+// phase ends the way its probe says: the app closes itself (`close`), the runner sends its window the
+// OS close on the verdict line, as the close button does (`os-close`: Rust hands it to the app's close
+// guard), or the runner kills app.exe alone on that line, as a crashing plugin would (`crash`). The
+// full log lands in logs/native-<probe>.log. Windows node only: the app windows open on the PC desktop.
 
 import { execFileSync, spawn } from 'node:child_process';
 import { createWriteStream, mkdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { appRunning, assertWindows, killNative, nativeRunning } from './native-kill.mjs';
+import { appRunning, assertWindows, closeAppWindow, killNative, nativeRunning } from './native-kill.mjs';
 
 const PROBES = {
   'editor-smoke': { tag: 'smoke', end: /^(complete: .*|no plugins.*)$/, pass: /^complete: \d+ opened, 0 failed/ },
@@ -29,8 +30,8 @@ const PROBES = {
   'recall-restart': {
     tag: 'recall',
     phases: [
-      { name: 'save', end: /^(saved: .*|FAIL.*)$/, pass: /^saved: /, exit: 'close' },
-      { name: 'check', end: /^(restored: .*|FAIL.*)$/, pass: /^restored: /, exit: 'close', recallLines: 0 },
+      { name: 'save', end: /^(saved: .*|FAIL.*)$/, pass: /^saved: /, exit: 'close', recallLines: 0 },
+      { name: 'check', end: /^(restored: .*|FAIL.*)$/, pass: /^restored: /, exit: 'os-close', recallLines: 0 },
       { name: 'crash', end: /^(in flight: .*|FAIL.*)$/, pass: /^in flight: /, exit: 'crash' },
       { name: 'skip', end: /^(skipped: .*|FAIL.*)$/, pass: /^skipped: /, exit: 'close', recallLines: 1 },
       { name: 'after', end: /^(clean: .*|FAIL.*)$/, pass: /^clean: /, exit: 'close', recallLines: 0 },
@@ -106,10 +107,16 @@ function launch(phase, phaseEnv) {
       clearInterval(watchdog);
       resolve({ line, reason, recallLines, stopped: stopRun(child) });
     };
-    // After the verdict line: `close` waits for the app to quit by itself, `crash` kills app.exe alone
-    // at once (no tree kill: the WebView2 processes are left to notice, as after a real crash).
+    // After the verdict line: `close` waits for the app to quit by itself, `os-close` closes its window
+    // first, `crash` kills app.exe alone at once (no tree kill: the WebView2 processes are left to
+    // notice, as after a real crash).
     const afterVerdict = async (line) => {
       verdict = line;
+      if (phase.exit === 'os-close') {
+        const t0 = Date.now();
+        if (!closeAppWindow()) return done(null, `no app window to close after: ${line}`);
+        console.log(`  sent the app window its close ${Date.now() - t0} ms after the verdict line`);
+      }
       if (phase.exit === 'crash') {
         const t0 = Date.now();
         try {
@@ -119,7 +126,7 @@ function launch(phase, phaseEnv) {
         }
         console.log(`  killed app.exe ${Date.now() - t0} ms after the in-flight line`);
       }
-      if (phase.exit === 'close' || phase.exit === 'crash') {
+      if (phase.exit !== 'kill') {
         const deadline = Date.now() + EXIT_WAIT_MS;
         while (appRunning()) {
           if (Date.now() > deadline) return done(null, `app.exe did not quit within ${EXIT_WAIT_MS / 1000} s after: ${line}`);

@@ -1,5 +1,6 @@
 import { autosave } from '../audio/autosave';
 import { looper } from '../audio/looper/looper';
+import { rigRecallOnClose } from '../audio/rig-recall';
 import { notifyError } from '../notify';
 import { confirmNativeClose, onNativeCloseRequested, platform } from '../platform';
 
@@ -47,6 +48,8 @@ export function installCloseGuard(): () => void {
           return;
         }
       }
+      // A clean close: a rig restored this launch comes back at the next one (`rig-recall.ts`).
+      rigRecallOnClose();
       try {
         await confirmNativeClose();
       } catch (error) {

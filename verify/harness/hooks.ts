@@ -5,7 +5,8 @@
  *   worklet's file URL (the fake `audioWorklet.addModule` imports it); `*?worker` to an empty class.
  * - Extensionless relative imports under `src/` get `.ts` (or `/index.ts`), as Vite resolves them.
  * - `solid-js` resolves with the `browser` condition: the server build never runs effects.
- * - `import.meta.env` in `src/` reads as `{ DEV: false }`, the production build.
+ * - `import.meta.env` in `src/` reads as `{ DEV: false }`, the production build, unless a guard sets
+ *   `globalThis.__importMetaEnv` (read when a fresh generation evaluates).
  * - A `?g=N` query on an imported `src/` URL propagates to every `src/` module it imports, so each
  *   generation is a fresh module graph with fresh module-level state. Resolution and stripped
  *   source are cached, which keeps a fresh graph at a few milliseconds.
@@ -76,7 +77,7 @@ registerHooks({
     if (!base.startsWith(srcRoot) || !base.endsWith('.ts')) return next(url, context);
     let source = stripped.get(base);
     if (source === undefined) {
-      const raw = String(next(base, context).source).replaceAll('import.meta.env', '({ DEV: false })');
+      const raw = String(next(base, context).source).replaceAll('import.meta.env', '(globalThis.__importMetaEnv ?? { DEV: false })');
       source = stripTypeScriptTypes(raw);
       stripped.set(base, source);
     }

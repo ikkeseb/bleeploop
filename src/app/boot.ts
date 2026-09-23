@@ -1,6 +1,6 @@
 import { engine } from '../audio/engine';
 import { initAudioDeviceSettings, refreshAndPruneDevices } from '../audio/audio-devices';
-import { availablePlugins, resyncNativeSlots, scanForPlugins, selectPlugin } from '../audio/instrument';
+import { availablePlugins, restorePlugin, resyncNativeSlots, scanForPlugins } from '../audio/instrument';
 import { recallRig } from '../audio/rig-recall';
 import { setNativeHostReady } from '../audio/instrument-slots';
 import { pluginBridge, type PluginBufferMeta } from '../audio/plugin-bridge';
@@ -50,7 +50,7 @@ export function bootPluginHost(): () => void {
       setNativeHostReady(true);
       await scanForPlugins();
       // Rig recall: each slot's last plugin comes back through the normal load path, never armed.
-      await recallRig(availablePlugins(), selectPlugin);
+      await recallRig(availablePlugins(), restorePlugin);
     } catch (e) {
       // Never let a host-init failure become an unhandled rejection on startup; the picker just
       // stays empty (chip reads "0 found"). The built-in synths remain fully playable.

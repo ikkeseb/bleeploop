@@ -3,8 +3,8 @@
 //
 //   pnpm native:kill
 //
-// Windows node only (from WSL the pnpm wrapper runs it there). `native-probe.mjs` imports `killNative`
-// and `appRunning`.
+// Windows node only (from WSL the pnpm wrapper runs it there). `native-probe.mjs` imports `killNative`,
+// `appRunning` and `closeAppWindow`.
 
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -40,6 +40,12 @@ export function nativeRunning() {
 /** Whether an `app` process runs (a phased native probe waits for the app to quit by itself). */
 export function appRunning() {
   const count = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', '@(Get-Process app -ErrorAction SilentlyContinue).Count'], { encoding: 'utf8' });
+  return Number(count.trim()) > 0;
+}
+
+/** Sends the app's main window WM_CLOSE, as its close button does; returns whether one was sent. */
+export function closeAppWindow() {
+  const count = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', '@(Get-Process app -ErrorAction SilentlyContinue | Where-Object { $_.CloseMainWindow() }).Count'], { encoding: 'utf8' });
   return Number(count.trim()) > 0;
 }
 
