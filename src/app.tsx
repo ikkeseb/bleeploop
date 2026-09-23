@@ -102,13 +102,15 @@ export function App() {
         closeHelp: () => setHelpOpen(false),
       });
       // Env-triggered native probes (DEV, PC only): `src/debug/restart-survey.ts`,
-      // `src/debug/editor-smoke.ts`, `src/debug/swap-stress.ts`.
+      // `src/debug/editor-smoke.ts`, `src/debug/swap-stress.ts`, `src/debug/recall-restart.ts`.
       if (import.meta.env.VITE_LF_PROBE === 'restart-survey') {
         void import('./debug/restart-survey').then((m) => m.runRestartSurvey());
       } else if (import.meta.env.VITE_LF_PROBE === 'editor-smoke') {
         void import('./debug/editor-smoke').then((m) => m.runEditorSmoke());
       } else if (import.meta.env.VITE_LF_PROBE === 'swap-stress') {
         void import('./debug/swap-stress').then((m) => m.runSwapStress());
+      } else if (import.meta.env.VITE_LF_PROBE === 'recall-restart') {
+        void import('./debug/recall-restart').then((m) => m.runRecallRestart());
       }
     }
   });

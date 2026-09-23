@@ -82,12 +82,15 @@ These commands run on Windows node, and from WSL through the `pnpm` wrapper:
 | `pnpm native:smoke` | Editor smoke (`src/debug/editor-smoke.ts`): every installed plugin loads into slot 0, and its editor opens into the host window and closes. |
 | `pnpm native:survey` | Restart survey (`src/debug/restart-survey.ts`): which plugins raise a restart or rescan request, and on which parameter. Also prints a `value-check` line per plugin (controller value vs what the host set). |
 | `pnpm native:swap` | Swap stress (`src/debug/swap-stress.ts`): every ordered pair is swapped in place in slot 0, first with the editor closed, then open, after tweaking the loaded plugin. A step that takes longer than 30 s prints `TIMEOUT`. |
+| `pnpm native:recall` | Rig recall (`src/debug/recall-restart.ts`), five launches: two plugins loaded and an input channel set come back after a restart and after a WebView reload, unarmed; a launch whose app.exe is killed while restoring makes the next one skip the recall with one log line and one toast; the launch after that is clean. |
 | `pnpm native:kill` | Stops `app`, `cargo` and whatever owns port 1420. |
 
 A `native:*` probe launches `tauri dev` (WASAPI; `--asio` for ASIO) with the probe's
 `VITE_LF_PROBE`, waits for its verdict line, stops the run and prints
-`=== <probe>: PASS|FAIL: … ===`. Windows open on the PC desktop and no gesture is needed. It refuses
-to start while an app is running. `--<knob>=<value>` sets `VITE_LF_PROBE_<KNOB>` (`--filter=Pro-Q,Saturn`;
+`=== <probe>: PASS|FAIL: … ===`. `native:recall` launches once per phase (`VITE_LF_PROBE_PHASE`) and
+lets the app close itself between phases, except in the crash phase, where the runner kills app.exe
+alone. A probe keeps its own rig-recall record, never the owner's. Windows open on the PC desktop and
+no gesture is needed. It refuses to start while an app is running. `--<knob>=<value>` sets `VITE_LF_PROBE_<KNOB>` (`--filter=Pro-Q,Saturn`;
 each probe's header lists its knobs), and the full log lands in `logs/native-<probe>.log`. It
 blocks until the verdict, so an agent harness should run it in the background.
 
@@ -141,6 +144,10 @@ blocks until the verdict, so an agent harness should run it in the background.
     a swap that completes in 10 s is a freeze to the person waiting. Baseline (2026-09-23,
     `--filter="Surge XT Effects,Pro-Q,Gojira"`, CLAP and VST3): `complete: 24 swapped, 0 failed`, each
     swap 40–410 ms.
+  - `native:recall` after a change to the boot chain, load or unload, or `src/audio/rig-recall.ts`.
+    Baseline (2026-09-23, WASAPI, the default Surge XT Effects CLAP + Surge XT VST3): `PASS: 5 phases`
+    in 1–1.5 min, twice; the crash phase killed app.exe about 100–150 ms after the runner saw the
+    marker's line, and the next launch still found the marker.
 
 
 ## Mac vs PC split

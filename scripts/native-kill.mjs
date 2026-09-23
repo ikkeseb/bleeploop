@@ -3,7 +3,8 @@
 //
 //   pnpm native:kill
 //
-// Windows node only (from WSL the pnpm wrapper runs it there). `native-probe.mjs` imports `killNative`.
+// Windows node only (from WSL the pnpm wrapper runs it there). `native-probe.mjs` imports `killNative`
+// and `appRunning`.
 
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -34,6 +35,12 @@ export function nativeRunning() {
   const probe = PS.replace(/Stop-Process[^\n]*\n/, '');
   const out = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', probe], { encoding: 'utf8' });
   return out.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+}
+
+/** Whether an `app` process runs (a phased native probe waits for the app to quit by itself). */
+export function appRunning() {
+  const count = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', '@(Get-Process app -ErrorAction SilentlyContinue).Count'], { encoding: 'utf8' });
+  return Number(count.trim()) > 0;
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
