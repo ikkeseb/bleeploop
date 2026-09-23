@@ -136,7 +136,11 @@ blocks until the verdict, so an agent harness should run it in the background.
   clock observer preserves PCM. Both run through `pnpm probe`.
 - **When to run the plugin probes, and their baselines** (the verdict alone doesn't say this):
   - `native:smoke` after any change to `editor_window.rs` or either host's editor open/close path.
-    Baseline (2026-09-23, WASAPI): `complete: 30 opened, 0 failed, of 30`, each close 110–200 ms.
+    Baseline (2026-09-23, WASAPI, the app mostly on the default ~15 ms timer tick): `complete: 30
+    opened, 0 failed, of 30`, each close 110–250 ms. Windows grants the app a 1 ms tick only some of
+    the time, whatever the global resolution reads, so a close near 800 ms points at a Win32 wait loop
+    that counts rounds instead of keeping a deadline (`src-tauri/AGENTS.md`, timed waits) or at the
+    plugin's own teardown, which stretches with the tick too.
   - `native:survey` when a plugin is installed. Restart flags arrive asynchronously, a line or two
     after their cause: `--settle=150` waits per parameter so a flag can be pinned on one. Baseline
     (2026-09-23, 30 plugins): 32 `restartComponent`, all `latency`, all FabFilter; no CLAP
@@ -144,8 +148,9 @@ blocks until the verdict, so an agent harness should run it in the background.
   - `native:swap` after a change to load, unload or swap. The full matrix is every ordered pair twice
     (1740 swaps for 30 plugins, hours): narrow it with `--filter`. Read the per-step ms in the log too:
     a swap that completes in 10 s is a freeze to the person waiting. Baseline (2026-09-23,
-    `--filter="Surge XT Effects,Pro-Q,Gojira"`, CLAP and VST3): `complete: 24 swapped, 0 failed`, each
-    swap 40–410 ms.
+    `--filter="Surge XT Effects,Pro-Q,Gojira"`, CLAP and VST3, mostly the same tick): `complete: 24
+    swapped, 0 failed`, each swap 40–380 ms; a swap away from Archetype Gojira 500–920 ms, ~600 ms of it the
+    plugin's own teardown (`release=` in the `VST3 teardown` line; ~200 ms at a 1 ms tick).
   - `native:recall` after a change to the boot chain, load or unload, the close guard, or
     `src/audio/rig-recall.ts`. Baseline (2026-09-23, WASAPI, the default Surge XT Effects CLAP + Surge
     XT VST3): `PASS: 5 phases` in about 1 min, twice; the check phase's close reached the page

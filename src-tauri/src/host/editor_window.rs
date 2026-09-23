@@ -6,6 +6,7 @@
 //! the WebView2 surface — so no airspace z-fight.
 
 use std::sync::atomic::{AtomicBool, Ordering::Acquire, Ordering::Release};
+use std::time::{Duration, Instant};
 
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
@@ -261,26 +262,38 @@ pub(super) fn wait_for_input(ms: u32) {
     }
 }
 
+/// How long `drain_after_editor_teardown` keeps pumping.
+const TEARDOWN_DRAIN: Duration = Duration::from_millis(100);
+
 /// Keep pumping owner-thread Win32 messages for a short BOUNDED window right after an editor window
 /// is torn down, so its `WM_DESTROY`/`WM_NCDESTROY` and any messages the plugin POSTED during its
 /// own teardown are dispatched HERE (the owner thread) — instead of being left unanswered after the
 /// owner loop falls back into its blocking `recv_timeout` branch (it only pumps while an editor is
 /// open). Leaving them unserviced is what wedged the close→reopen→disarm path into an app freeze:
 /// a JUCE plugin (e.g. Neural DSP) issues synchronous teardown traffic that, unpumped, never
-/// completes. Bounded: 50 pump rounds, each waiting at most 2 ms for new input (an idle queue
-/// costs the full ~100 ms; a busy one is pumped faster, never longer), so a misbehaving plugin
-/// can't spin the owner forever. Pairs with the editor window no longer being cross-thread
-/// OWNED (create_host_window passes no Win32 owner), which removes the activation SendMessage edge.
+/// completes. Bounded by a deadline (`TEARDOWN_DRAIN`), not a count of waits: a timed wait rounds
+/// up to the timer tick Windows grants the process, which the app cannot count on being 1 ms
+/// (measured 15.4 ms on the dev PC, where fifty 2 ms waits took ~770 ms). Each wait is for the time
+/// left and returns early on new input, so the window is ~100 ms at any tick, overrun by at most
+/// one tick, and a misbehaving plugin can't spin the owner forever. Pairs with the editor window
+/// no longer being cross-thread OWNED (create_host_window passes no Win32 owner), which removes
+/// the activation SendMessage edge.
 pub(super) fn drain_after_editor_teardown() {
-    for _ in 0..50 {
+    let deadline = Instant::now() + TEARDOWN_DRAIN;
+    loop {
         pump_thread_messages();
-        wait_for_input(2);
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return;
+        }
+        wait_for_input(left.as_micros().div_ceil(1000) as u32);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
 
     /// The plugin asks for a client area and must get exactly that, at creation and on a later
     /// resize, whatever the non-client frame measures at this DPI.
@@ -293,6 +306,27 @@ mod tests {
         assert_eq!(set_client_size(win.hwnd, 300, 200), Some((300, 200)), "shrink");
         assert_eq!(client_size(win.hwnd), (300, 200), "client area after shrink");
         assert!(!win.close_requested());
+    }
+
+    /// The drain pumps for its whole window, dispatching what the plugin posts late in it, and the
+    /// window does not stretch with the timer tick Windows grants the test process.
+    #[test]
+    fn teardown_drain_lasts_its_window_and_dispatches_late_posts() {
+        let win = create_host_window(200, 100, None).expect("create host window");
+        let hwnd = win.hwnd.0 as isize;
+        let poster = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(40));
+            // SAFETY: the window belongs to the test thread and outlives this join.
+            unsafe { PostMessageW(Some(HWND(hwnd as *mut _)), WM_CLOSE, WPARAM(0), LPARAM(0)) }
+                .expect("post WM_CLOSE");
+        });
+        let started = Instant::now();
+        drain_after_editor_teardown();
+        let took = started.elapsed();
+        poster.join().unwrap();
+        assert!(win.close_requested(), "a message posted 40 ms in was not dispatched");
+        assert!(took >= TEARDOWN_DRAIN, "the drain ended after {took:?}, inside its window");
+        assert!(took < TEARDOWN_DRAIN * 4, "the drain took {took:?}");
     }
 
     /// A dead handle fails cleanly instead of resizing something else or panicking.
