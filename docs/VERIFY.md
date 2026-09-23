@@ -24,18 +24,11 @@ package's prepare script installed hooks in this checkout.
 - Any click is a user gesture that unlocks the AudioContext (the `BleepLoop` header title is a safe
   one).
 - **From WSL on the PC:** the `pnpm` wrapper hands a `/mnt/c` checkout to Windows `pnpm.exe`, so
-  `pnpm dev`, `pnpm check` and `pnpm verify:jam` all run on Windows node with the Windows Playwright
-  browsers — that is the working lane. Vite then listens on Windows localhost only: `curl` from WSL
-  hangs, so drive probes with `pnpm probe` or `node.exe script.mjs` (Windows Playwright), never Linux node. A
-  `pnpm install` that wants to rebuild `node_modules` aborts without a TTY — pass
-  `--config.confirmModulesPurge=false`. The Rust gate runs from WSL too: there is no Linux `cargo`, but
-  Windows `cargo.exe` (`%USERPROFILE%\.cargo\bin`, on the interop PATH) builds the `/mnt/c` checkout,
-  honours `rust-toolchain.toml` and inherits the User-scope ASIO SDK env — `cargo.exe check
-  --no-default-features [--features asio]` and `cargo.exe test --no-default-features` from `src-tauri/`
-  are the commands. `tauri dev` runs from WSL too (`pnpm dev:wasapi > logs/<name>.log 2>&1` in the
-  background; the window opens on the PC desktop; pass env to the Windows side through `WSLENV=A:B`);
-  stop it with `powershell.exe -NoProfile -c "Get-Process app,cargo | Stop-Process -Force"` plus the
-  port-1420 owner PID. Only the by-ear gates need a person at the PC.
+  every `pnpm` command, including the native ones below, runs on Windows node, Windows `cargo` and
+  the Windows Playwright browsers. That is the working lane. Vite then listens on Windows localhost
+  only: `curl` from WSL hangs, and Linux node cannot drive it. A `pnpm install` that wants to rebuild
+  `node_modules` aborts without a TTY — pass `--config.confirmModulesPurge=false`. An ad-hoc
+  `tauri dev` from WSL takes env through `WSLENV=A:B`. Only the by-ear gates need a person at the PC.
 - You can drive reactive UI state directly (e.g. `__lf.clock.setBpmLocked(true)`) instead of
   reproducing the full looper flow, then assert via DOM reads + screenshot. The web build hides
   Tauri-only chrome (settings gear) — drive the reactive state directly instead. If a probe needs a
@@ -81,14 +74,30 @@ Tone transport handle). This is how you drive and inspect the app from Playwrigh
 
 ## Native / Tauri verification (PC only)
 
+These commands run on Windows node, and from WSL through the `pnpm` wrapper:
+
+| Command | What it does |
+|---|---|
+| `pnpm rust:check` | `cargo check` without and with `asio`, then `cargo test`, all `--no-default-features`, from `src-tauri/`. It fails the asio step when `CPAL_ASIO_DIR` lacks the SDK. |
+| `pnpm native:smoke` | Editor smoke (`src/debug/editor-smoke.ts`): every installed plugin loads into slot 0, and its editor opens into the host window and closes. |
+| `pnpm native:survey` | Restart survey (`src/debug/restart-survey.ts`): which plugins raise a restart or rescan request, and on which parameter. Also prints a `value-check` line per plugin (controller value vs what the host set). |
+| `pnpm native:swap` | Swap stress (`src/debug/swap-stress.ts`): every ordered pair is swapped in place in slot 0, first with the editor closed, then open, after tweaking the loaded plugin. A step that takes longer than 30 s prints `TIMEOUT`. |
+| `pnpm native:kill` | Stops `app`, `cargo` and whatever owns port 1420. |
+
+A `native:*` probe launches `tauri dev` (WASAPI; `--asio` for ASIO) with the probe's
+`VITE_LF_PROBE`, waits for its verdict line, stops the run and prints
+`=== <probe>: PASS|FAIL: … ===`. Windows open on the PC desktop and no gesture is needed. It refuses
+to start while an app is running. `--<knob>=<value>` sets `VITE_LF_PROBE_<KNOB>` (`--filter=Pro-Q,Saturn`;
+each probe's header lists its knobs), and the full log lands in `logs/native-<probe>.log`. It
+blocks until the verdict, so an agent harness should run it in the background.
+
 - **No Playwright into WebView2.** For Tauri/native verification: grep `tauri dev` stdout for
   `[diag]`. **What reaches that stdout: only Rust `invoke('diag')`/`log::info!` lines +
   vite-forwarded `[console.error]`; plain `console.log` from WebView2 does NOT.**
 - Since P10.3 there are no DEV auto-load probes — to runtime-gate a native path, temp-wire a probe
   that drives the PRODUCTION fns, grep, then revert.
-- `tauri dev` does NOT self-terminate — kill with `Get-Process app,cargo | Stop-Process -Force` +
-  the vite node on port 1420 (`(Get-NetTCPConnection -LocalPort 1420 -State Listen).OwningProcess`);
-  **NEVER kill all node — the Claude Code session may be a node process.**
+- `tauri dev` does NOT self-terminate — stop it with `pnpm native:kill`. **Never kill all node: the
+  agent session may be a node process.**
 - Screenshot the native window by its handle: `PrintWindow(hwnd, 3)` (client only + full content)
   from a DPI-aware process captures it without focus. Never grab the screen (`CopyFromScreen`
   after `SetForegroundWindow`): it captures whatever window is on top, including the owner's.
@@ -120,31 +129,18 @@ Tone transport handle). This is how you drive and inspect the app from Playwrigh
   report; frontend console forwarding truncates long JSON. `verify/probes/render-cursor.mjs` exercises the
   production sampler with controlled timing inputs; `verify/probes/render-clock.mjs` proves that the DEV
   clock observer preserves PCM. Both run through `pnpm probe`.
-- Plugin restart survey (which installed plugins raise a restart/rescan request, and on which
-  parameter): `WSLENV=VITE_LF_PROBE VITE_LF_PROBE=restart-survey pnpm dev:wasapi > logs/<name>.log 2>&1 &`
-  from WSL. `src/debug/restart-survey.ts` loads every scanned plugin into slot 0, sweeps each
-  parameter min → max → default, re-reads `listParams` (a `value-check` line: controller value vs
-  what the host set) and unloads; `[survey]` lines sit next to the host's
-  `restartComponent(...)` / `request_restart` lines in the log (~6 min for 30 plugins, no gesture
-  needed). `VITE_LF_PROBE_FILTER=Pro-Q,Saturn` narrows it, `VITE_LF_PROBE_SETTLE=150` adds a
-  per-parameter wait when a flag needs attributing to one parameter (they arrive asynchronously, a
-  line or two after the cause). Rerun it when a plugin is installed. Baseline
-  (2026-09-10, 30 plugins): 32 `restartComponent` calls, all `kLatencyChanged`, all FabFilter; no
-  `kReloadComponent` or `kIoChanged`; no CLAP `request_restart`.
-- Editor smoke (does every installed plugin's editor open into the host window and close without a
-  hang): `WSLENV=VITE_LF_PROBE VITE_LF_PROBE=editor-smoke pnpm dev:wasapi > logs/<name>.log 2>&1 &`
-  from WSL. `src/debug/editor-smoke.ts` loads each plugin into slot 0, opens the editor, holds it
-  (`VITE_LF_PROBE_HOLD`, default 1500 ms), closes, unloads; `[smoke] opened/closed … in N ms` lines sit
-  next to the host's `editor embedded into host window (WxH)` / `editor closed` lines, and the final
-  `complete: N opened, M failed` line is the verdict. Windows open on the PC desktop; no gesture
-  needed. Run it after any change to `editor_window.rs` or either host's editor open/close path. Baseline
-  (2026-09-12, WASAPI, 44.1 kHz): `complete: 30 opened, 0 failed, of 30`, each closing in 110–150 ms.
-- Swap stress (does switching plugins IN PLACE complete after the loaded one was tweaked):
-  `VITE_LF_PROBE=swap-stress`, same launch and `VITE_LF_PROBE_FILTER` as the editor smoke.
-  `src/debug/swap-stress.ts` swaps every ordered pair in slot 0, editor closed then open, sweeping the
-  first params (`VITE_LF_PROBE_PARAMS`, default 8) before each swap; every step is timed and a step
-  past 30 s prints `TIMEOUT` naming it. Verdict line: `[swap] complete: N swapped, M failed`. Read the
-  per-step ms too: a swap that completes in 10 s is a freeze to the person waiting.
+- **When to run the plugin probes, and their baselines** (the verdict alone doesn't say this):
+  - `native:smoke` after any change to `editor_window.rs` or either host's editor open/close path.
+    Baseline (2026-09-23, WASAPI): `complete: 30 opened, 0 failed, of 30`, each close 110–200 ms.
+  - `native:survey` when a plugin is installed. Restart flags arrive asynchronously, a line or two
+    after their cause: `--settle=150` waits per parameter so a flag can be pinned on one. Baseline
+    (2026-09-23, 30 plugins): 32 `restartComponent`, all `latency`, all FabFilter; no CLAP
+    `request_restart`.
+  - `native:swap` after a change to load, unload or swap. The full matrix is every ordered pair twice
+    (1740 swaps for 30 plugins, hours): narrow it with `--filter`. Read the per-step ms in the log too:
+    a swap that completes in 10 s is a freeze to the person waiting. Baseline (2026-09-23,
+    `--filter="Surge XT Effects,Pro-Q,Gojira"`, CLAP and VST3): `complete: 24 swapped, 0 failed`, each
+    swap 40–410 ms.
 
 
 ## Mac vs PC split

@@ -22,6 +22,11 @@
     "check": "pnpm typecheck && pnpm lint && pnpm check:boundary && pnpm verify",
     "verify:jam": "node verify/run-probes.mjs golden-jam",
     "probe": "node verify/run-probes.mjs",
+    "native:smoke": "node scripts/native-probe.mjs editor-smoke",
+    "native:survey": "node scripts/native-probe.mjs restart-survey",
+    "native:swap": "node scripts/native-probe.mjs swap-stress",
+    "native:kill": "node scripts/native-kill.mjs",
+    "rust:check": "node scripts/rust-check.mjs",
     "prepare": "simple-git-hooks"
   },
   "simple-git-hooks": {

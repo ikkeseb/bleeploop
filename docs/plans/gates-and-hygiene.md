@@ -1,29 +1,14 @@
 # Work order: real-code gates and agent hygiene (OPEN)
 
-Pieces 4-6 of the 2026-09-23 fresh-eyes pass over code, gates, docs and agent workflow (pieces 1-3
-landed: guards that drive the real looper and one probe harness, both owned by `verify/README.md`, and
-comments/docs that state current intent). Build them in this order, one
+Pieces 5-6 of the 2026-09-23 fresh-eyes pass over code, gates, docs and agent workflow (pieces 1-4
+landed: guards that drive the real looper and one probe harness, both owned by `verify/README.md`,
+comments/docs that state current intent, and the native playbooks as `pnpm native:*`/`rust:check`,
+owned by `docs/VERIFY.md`). Build them in this order, one
 piece per commit series, gates green before each push. Piece 6 waits on an owner decision. Taste findings from that day live in `docs/backlog-taste.md` and the hands-free milestone in
 `docs/plans/pedalboard.md`; neither is repeated here. Delete this file when the last piece lands, after
 folding what still binds into `verify/README.md`, the briefings or a call-site comment.
 
 Piece 5 edits `src/audio/`: the dev-app rule in `AGENTS.md` applies.
-
-## 4. Playbooks become commands
-
-**Why.** `docs/VERIFY.md` and `src-tauri/AGENTS.md` describe procedures every agent re-reads and runs
-by hand: `WSLENV` plus `VITE_LF_PROBE` plus a log plus a grep for the verdict line, the kill
-discipline, `cargo.exe` from WSL for both feature sets, a separate Vite port. A script runs the same
-way every time and works the same for Claude Code and Codex.
-
-**Do.** Node scripts under `scripts/` (the WSL `pnpm` wrapper runs them on Windows node):
-`pnpm native:smoke|survey|swap` (launch, wait for the verdict line, stop), `pnpm native:kill` (`app`,
-`cargo` and the port-1420 owner, never every node process), and `pnpm rust:check` (`cargo.exe check`
-with and without `asio`, then `cargo.exe test --no-default-features`). The docs keep a command table
-plus the gotchas no script can carry.
-
-**Done when** each command has run once on the PC and printed its verdict, and the prose it replaces
-is gone from `docs/VERIFY.md` and `src-tauri/AGENTS.md`.
 
 ## 5. One recorder-session object
 
@@ -53,11 +38,3 @@ built.
 
 - Diagnose the intermittent that keeps `verify/probes/record-stop-window.mjs` out of CI (its `@no-ci`
   line has the numbers), then drop the `@no-ci`.
-- `retry` in `src/audio/midi.ts` lacks `@public`; only `verify/probes/instrument-controls.mjs` calls it, so
-  knip reports it as unused.
-- `verify/probes/contact-sheet.mjs` shows only the web tier (synth pills), never the guitar-first screen.
-  Add scenes with `pluginHost.available` on and a fake amp-sim loaded, using the pattern in
-  `verify/probes/plugin-slot-pending.mjs`.
-- `README.md` points at `rust-toolchain.toml` as if it sat at the root; it lives in `src-tauri/`.
-- `src-tauri/AGENTS.md` cites "§ WSL lane" in `docs/VERIFY.md` and "§ ASIO startup" in
-  `docs/ARCHITECTURE.md`; neither is a heading.

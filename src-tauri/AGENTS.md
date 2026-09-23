@@ -5,10 +5,11 @@ editor windows. The root `AGENTS.md` routes here — read this before any work i
 harnesses also auto-load it once a session touches `src-tauri/`; `CLAUDE.md` beside it is a one-line
 adapter). It holds the load-bearing gotchas and operational bits for **P9–P11 (all DONE + LIVE on
 PC)**. **The Mac has NO Rust toolchain:** `cargo check` + every
-runtime gate are PC-only; on Mac, adversarial-review Rust by reading. On the PC the gate also runs
-from WSL via Windows `cargo.exe`, and so does `tauri dev` (commands + kill discipline:
-`docs/VERIFY.md` § WSL lane); only the by-ear gates need a person at the PC. Both `cargo check --features asio` and no-asio must stay green (CI runs
-the no-asio half).
+runtime gate are PC-only; on Mac, adversarial-review Rust by reading. On the PC the gate is
+`pnpm rust:check`, which also runs from WSL; `tauri dev`, the `native:*` plugin probes and
+`native:kill` are in `docs/VERIFY.md` § Native / Tauri verification. Only the by-ear gates need a
+person at the PC. Both `cargo check --features asio` and no-asio must stay green (CI runs the no-asio
+half).
 
 ## Thread & ownership map
 
@@ -54,8 +55,8 @@ rest is the map.
   the dev PC — a fresh shell inherits it, no inline setting needed (`pnpm dev:asio` just works).
   `CPAL_ASIO_DIR` must hold an EXTRACTED SDK with `common/` and `host/pc/` directly under it; `asio-sys`
   only rebuilds when its fingerprint changes (a `cargo update`, a crate bump), so a green
-  `cargo check --features asio` can be a stale `target/` cache over a missing SDK — confirm with
-  `ls "$CPAL_ASIO_DIR/common"` before trusting it after a lockfile change. `cpal` 0.18.2 moved to
+  `cargo check --features asio` can be a stale `target/` cache over a missing SDK — `pnpm rust:check`
+  confirms the SDK directory before its asio step. `cpal` 0.18.2 moved to
   `asio-sys` 0.4; cpal stays pinned at 0.18.1 until that pair is built and heard on the rig.
 - **PROD-EXE recipe:** raw `cargo build --release` = a DEV-mode binary (wants devUrl). The real exe
   = `pnpm build:app`; launch DIRECTLY (`Start-Process app.exe`), never via stdout-redirect.
@@ -93,7 +94,7 @@ nothing; a remembered failure is retried only by the picker's rescan button = `p
 child process tree sits in a kill-on-close Job Object. DEV CLI tools also exist: `--probe-asio` /
 `--probe-asio-duplex`.
 Stale `<old-path>\rc500\…` build path on dev start → `rm -rf src-tauri/target/debug/build`.
-(How to drive/grep a running `tauri dev` — incl. the kill discipline — lives in `docs/VERIFY.md`.)
+(Driving and grepping a running `tauri dev`, and stopping it: `docs/VERIFY.md`.)
 
 ## CLAP host + the audio transport (P9)
 
@@ -182,7 +183,7 @@ existing P9 ring → looper record tap (lag-tolerant, records wet "for free").
   configs → the duplex Device + configs are resolved ONCE per process (`audio_output::resolve_asio_cache`
   behind the `asio_startup.rs` coordinator; `cpal::Device` is Send+Sync, so the cache is a static).
   Both streams build from the cache. **Never call the resolver from `run()`:** it loads the driver DLL
-  in-process; the frontend requests it after the UI is up (`docs/ARCHITECTURE.md` § ASIO startup). **ASIO `Stream::drop` only removes
+  in-process; the frontend requests it after the UI is up (the **ASIO startup** paragraph in `docs/ARCHITECTURE.md` § Audio architecture). **ASIO `Stream::drop` only removes
   callbacks** (never `driver.stop`, never tears down `asio_streams`) → `host::native_io::NativeIo` keeps
   both streams alive across disarm (output plays silence → no drone; re-arm makes ZERO cpal calls → no
   BadMode). Each retained stream stores its actual backend. A backend transition is allowed only while both
