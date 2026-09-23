@@ -23,6 +23,7 @@ Harness auto-load of nested files is not reliable: open the briefing yourself.
 | Planning or performing a by-ear/eye/rig session; gate-adjacent code; latency | `STATUS.md` |
 | Releases, licences, workflow hardening | `docs/plans/release-prep.md` |
 | The next milestone (hands-free looper) and what is explicitly not built | `docs/plans/pedalboard.md` |
+| The open work order: real-code guards, probe automation, comment/doc sweeps, agent commands | `docs/plans/gates-and-hygiene.md` |
 | The looper-UI spec (the approved mockup) | `docs/inspiration/revamp-2026-07/README.md` |
 
 ## Standing rules
