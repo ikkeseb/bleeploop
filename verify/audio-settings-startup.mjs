@@ -25,7 +25,9 @@ try {
     host.listOutputDevices = async () => [];
     host.setBufferSize = async (frames) => { calls.push(`buffer:${frames}`); };
     host.setAsioEnabled = async (enabled) => { calls.push(`asio:${enabled}`); };
-    host.asioAvailable = async () => true;
+    // Availability follows the startup status report (`applyAsioReport`), not `host.asioAvailable`.
+    host.asioStatus = async () => ({ status: 'ready', detail: '' });
+    host.asioProbe = async () => ({ status: 'ready', detail: '' });
     host.asioDeviceInfo = async () => ({ name: 'Probe ASIO', inputChannels: 4, outputChannels: 2 });
     host.scanPlugins = async () => { calls.push('scan'); return []; };
     const dispose = bootPluginHost();

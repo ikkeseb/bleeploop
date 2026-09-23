@@ -111,6 +111,4 @@ together.
 Everything owed an ear/eye/rig check or an owner decision lives in `STATUS.md`. Besides that:
 **08-11 residuals** — the LoadState timeout (documented at its command fn; needs a design, not a
 token) and the check-then-set race note in the R1 commit message. **Native host residuals** (from
-the 2026-09-23 audit; no gate): `src-tauri/AGENTS.md` § Open threads. **`verify/audio-settings-startup.mjs`
-is red** (off the push gate): `Input channel` select is null when the probe reads it; identical at
-`3555921`, so it predates the 2026-09-23 restyle. Cause unknown.
+the 2026-09-23 audit; no gate): `src-tauri/AGENTS.md` § Open threads.
