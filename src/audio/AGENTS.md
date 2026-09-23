@@ -29,9 +29,9 @@ default), fixed-length record, undo and reverse all ride `masterStartTime` + the
 
 BUILT: timestamped capture windows, measured output terms and C frozen at first record use.
 BleepLoop monitors natively, so input+plugin latency CANCELS; C compensates the record path only and
-is 0 unless a native monitor is armed. Formula, guardrails, rig protocol and debug levers:
-**`STATUS.md` § Stop 1** — read it before ANY latency/rig work. The pure formula is
-`record-latency-math.ts`; it is APPLIED in `looper/machine.ts` (see its `OWNS:` line).
+is 0 unless a native monitor is armed. The formula and its freeze: the header of
+`record-latency-math.ts`; it is APPLIED in `looper/machine.ts` (see its `OWNS:` line). Guardrails, rig
+protocol and debug levers: **`STATUS.md` § Stop 1** — read it before ANY latency/rig work.
 
 ## Gotchas — do not relearn
 

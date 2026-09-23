@@ -1,5 +1,6 @@
 // verify/guards/docs.mjs — docs drift guard: every backtick path in a tracked .md exists, every cited
-// 7-hex commit sha resolves, and the STATUS gate index has not grown past its cap.
+// 7-hex commit sha resolves, the invariant titles in AGENTS.md and docs/ARCHITECTURE.md match by number,
+// and the STATUS gate index has not grown past its cap.
 //
 // Until 2026-09 doc drift was measured by hand, once per audit (28 dangling refs found on 09-01, 20 of
 // them the pre-split `plugin_host.rs`). This makes it a `pnpm check` gate. Paths are checked against the
@@ -160,7 +161,36 @@ if (shallow) {
   }
 }
 
-// ── 3. STATUS rig-lap stop cap ─────────────────────────────────────────────────────────────
+// ── 3. invariant titles: AGENTS.md and docs/ARCHITECTURE.md share one numbering ─────────────────────
+// Source comments cite invariants by number. Titles may differ in detail, so the rule is: same count, and
+// at each number one normalised title (backticks, bold, a trailing parenthetical and period dropped) is a
+// prefix of the other. A reorder, an insertion or a reworded title fails.
+/** The numbered items of the first `## ` section whose heading matches `heading`. */
+function numbered(file, heading) {
+  const text = readFileSync(resolve(ROOT, file), 'utf8');
+  const at = text.search(heading);
+  if (at === -1) return null;
+  const next = text.indexOf('\n## ', at + 1);
+  return text.slice(at, next === -1 ? undefined : next).split('\n').filter((l) => /^\d+\. /.test(l))
+    .map((l) => l.replace(/^\d+\. /, ''));
+}
+const norm = (s) => s.replace(/[`*]/g, '').replace(/\s*\([^)]*\)\s*\.?$/, '').replace(/\.$/, '').trim().toLowerCase();
+const agentsTitles = numbered('AGENTS.md', /^## Invariants/m);
+const archTitles = numbered('docs/ARCHITECTURE.md', /^## Cross-cutting invariants/m)
+  ?.map((l) => l.match(/^\*\*(.+?)\*\*/)?.[1] ?? l);
+check(!!agentsTitles && !!archTitles, 'invariant lists not found (AGENTS.md "## Invariants", ARCHITECTURE "## Cross-cutting invariants")');
+if (agentsTitles && archTitles) {
+  check(agentsTitles.length === archTitles.length,
+    `invariant count differs: AGENTS.md ${agentsTitles.length}, docs/ARCHITECTURE.md ${archTitles.length}`);
+  for (let i = 0; i < Math.min(agentsTitles.length, archTitles.length); i++) {
+    const a = norm(agentsTitles[i]);
+    const b = norm(archTitles[i]);
+    check(a.startsWith(b) || b.startsWith(a),
+      `invariant ${i + 1} differs: AGENTS.md "${agentsTitles[i]}" vs docs/ARCHITECTURE.md "${archTitles[i]}"`);
+  }
+}
+
+// ── 4. STATUS rig-lap stop cap ─────────────────────────────────────────────────────────────
 const status = readFileSync(resolve(ROOT, 'STATUS.md'), 'utf8');
 const start = status.indexOf('\n## The rig lap');
 check(start !== -1, 'STATUS.md has no "## The rig lap" section');

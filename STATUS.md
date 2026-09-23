@@ -86,15 +86,9 @@ Blocked on an owner decision, not on testing. The default column is what happens
 
 ### Stop 1 — record-latency compensation (the rig gate)
 
-Owns the formula and debug levers; why native monitoring cancels input+plugin latency: `src/audio/AGENTS.md`.
+The formula C, its freeze and why native monitoring cancels input+plugin latency: the header of
+`src/audio/record-latency-math.ts`. A saved trim stays live but predates the current formula.
 
-- **Formula:** with valid output timestamps, C = median paired browser queue-tail presentation delay
-  − nativeOut + measured graph delay (limiter) + trim, clamped at zero; sampling keeps queue occupancy
-  and render-cursor time together. Fallback without timestamps: `(hop1+hop2+128)/sr - nativeOut + clickOut`
-  + graph delay + trim. nativeOut = monitor-ring residency + the median valid callback-to-playback
-  report (callback period at startup or when unsupported).
-- **Freeze:** first record use freezes the median per monitor generation; re-arm, buffer change and
-  resnapshot reopen it. A saved trim stays live but predates this formula.
 - **Capture:** timestamped windows (`docs/ARCHITECTURE.md` § Audio architecture); overdub collects
   through punch-out+C (STOP silences playback meanwhile, CLEAR cancels).
 - **Unverified:** physical guitar alignment, converter latency, browser output reports, the fallback

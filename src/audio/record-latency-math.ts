@@ -1,6 +1,17 @@
 /**
  * OWNS: the record-latency compensation formula `C` and the window-median that stabilises its terms.
  *
+ * C (frames) is how much later a natively monitored performance reaches the looper's record tap than the
+ * player heard it; capture windows shift by C. With valid output timestamps:
+ *   C = median paired browser queue-tail presentation delay − nativeOut + measured graph delay (limiter)
+ *       + trim, clamped at zero,
+ * where sampling keeps queue occupancy and render-cursor time together. Without timestamps:
+ *   C = (hop1 + hop2 + 128) / sr − nativeOut + clickOut + graph delay + trim.
+ * nativeOut = monitor-ring residency + the median valid callback-to-playback report (the callback period
+ * at startup or when unsupported). C is 0 unless a native monitor is armed: native monitoring cancels
+ * input + plugin latency, so C compensates the record path only. The first record use freezes the median
+ * per monitor generation; re-arm, a buffer change and resnapshot reopen it (`record-latency.ts`).
+ *
  * PURE ON PURPOSE: no engine / bridge import, so `verify/guards/record-compensation.mjs` IMPORTS this
  * instead of mirroring it (see verify/README.md). `record-latency.ts` owns the live terms (sampler, freeze,
  * arm state) and calls in here.
@@ -64,7 +75,7 @@ export interface CompensationTerms {
   outputLatency: number; // ctx.outputLatency (device), s
   outputGraphLatencySeconds?: number; // measured master-limiter DSP delay; 0 for graphless formula probes
   trimMs: number; // the by-ear trim
-  floorEnabled: boolean; // floor the click-path latency at cpalOut (the 2026-06-29 heuristic; A/B lever)
+  floorEnabled: boolean; // floor the click-path latency at cpalOut (a heuristic; A/B lever)
 }
 
 export interface Compensation {

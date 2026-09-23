@@ -25,9 +25,7 @@ that `audio/` and `ui/` depend on — never the reverse:
 Three interfaces are declared; in practice only **`PluginHost`** differs. `tauriPlatform` is literally
 `{ ...webPlatform, kind: 'tauri', pluginHost: tauriPluginHost }` — WebView2 v149 has native Web MIDI
 (`lib.rs` auto-grants the MIDI/microphone permission kinds to the app's own origin) and `getUserMedia` works inside it, so neither needed a native
-path. An earlier version of this table promised a `tauri-plugin-midi` shim over `midir`; it was never
-built and neither crate is in `Cargo.toml`. (Corrected 2026-07-25 — the claim had also been copied
-into code comments in `src/platform/host.ts`.)
+path. There is no native MIDI shim: neither `tauri-plugin-midi` nor `midir` is in `Cargo.toml`.
 
 Runtime selection: `isTauri() ? tauriPlatform : webPlatform`. `@tauri-apps/api` is pure JS,
 so installing it now is safe — `isTauri()` simply returns false in a browser.
@@ -69,13 +67,13 @@ plugin worklet ─ gain ─┬─ recordTap                         (record; alw
                         └─ webMonitorGain ─ masterGain       (audible; muted for native monitor)
 ```
 
-Three details the old version of this diagram got wrong, all load-bearing: `recordTap` is a
+Three load-bearing details: `recordTap` is a
 **separate silent branch** off `looperInputBus` (not an annotation on the audible edge) and is where
 the looper captures; a hard-knee `DynamicsCompressor` **limiter** sits between `masterGain` and
 `destination`, so loops are captured pre-compressor while playback receives gain reduction; and plugin
 wet does **not** join `instrumentBus` — it connects straight to `recordTap` for record plus a
 separately-muteable `webMonitorGain → masterGain` for audible, which is how arming the native monitor
-silences the web path without touching the record tap. (Corrected 2026-07-25.)
+silences the web path without touching the record tap.
 
 **Output headroom:** `makeMasterLimiter` is a finite-ratio compressor, not a guaranteed 0 dBFS ceiling.
 An offline 48 kHz render of a 440 Hz sine at amplitude 5 peaked at 1.116 after compression.
@@ -133,9 +131,8 @@ indeterminate value.
 ## Cross-cutting invariants (do not violate)
 
 **This numbered list is THE numbering.** Source comments cite these by number ("invariant 6"), and
-`AGENTS.md` carries the same list in the same order — if the two ever diverge again, every in-code
-citation silently points at the wrong rule. (They did diverge: the rAF rule was 5 here and 6 there,
-and two source files cited different numbers for it. Unified 2026-07-25.)
+`AGENTS.md` carries the same titles in the same order — if the two diverge, every in-code citation
+silently points at the wrong rule. `verify/guards/docs.mjs` fails when they do.
 
 1. **The Web Audio `AudioContext` is the single tempo/quantization authority.** Every grid-timed
    event is scheduled on ctx time. The native P11 cpal monitor is a second audible path by design,
@@ -159,9 +156,8 @@ and two source files cited different numbers for it. Unified 2026-07-25.)
    `new Worker()`. Prebuilt JS worklets load via `?url`/`/public`.
 5. **No allocation in `AudioWorkletProcessor.process()`** — pre-allocate in the constructor.
 6. **No Solid signal WRITES from audio-path timers, and no signal READS in the 60 fps draw loop** —
-   rAF + a plain mutable object only. Widened from the draw-loop-only wording 2026-07-25: the capture
-   drain was writing a fresh object into a track signal 40×/s, which cost ~200 full-document layout
-   events per 5 s of recording. Both halves are the same mistake, and `engineState.loopPhasePlain`
+   rAF + a plain mutable object only. A capture drain writing a fresh object into a track signal 40×/s
+   cost ~200 full-document layout events per 5 s of recording. Both halves are the same mistake, and `engineState.loopPhasePlain`
    is the pattern to copy; the write-half fix (measured 200 → 1 layouts per 5 s) is `state.ts`'s
    `sameTrack` equality + the `displayState`/`coreGlyph` memos in `Looper.tsx`.
 7. **All `@tauri-apps/*` confined to `src/platform/`** — CI-guarded.

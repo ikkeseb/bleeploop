@@ -105,7 +105,7 @@ together.
 3. COOP `same-origin` + COEP `require-corp` → `crossOriginIsolated` → SharedArrayBuffer.
 4. `?worker&url` for first-party TS AudioWorklets.
 5. No allocation in `AudioWorkletProcessor.process()`.
-6. No Solid signal WRITES from audio-path timers, no signal READS in the 60 fps draw loop.
+6. No Solid signal WRITES from audio-path timers, and no signal READS in the 60 fps draw loop.
 7. All `@tauri-apps/*` confined to `src/platform/` (CI-guarded).
 
 ## Open threads (non-gate)
