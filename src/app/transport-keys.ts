@@ -1,8 +1,7 @@
 import { activeIsDrum } from '../audio/instrument';
-import { looper } from '../audio/looper/looper';
 import { DRUM_KIT } from '../audio/synths/drum';
 import * as layoutStore from '../ui/layout/layout-store';
-import { runAction, type ActionId } from './actions';
+import { runAction, selectTrack, type ActionId } from './actions';
 
 export interface TransportKeysOptions {
   /** Escape was pressed — the app closes whichever popover is open. Never a play key. */
@@ -92,7 +91,8 @@ export function installTransportKeys(opts: TransportKeysOptions): TransportKeys 
       return;
     }
 
-    // Digits 1–5 select a track. Collision precedence: in drum mode the pad grid owns 1–4
+    // Digits 1–5 select a track, through actions.ts so a digit is a looper press there too (it breaks a
+    // pending CLEAR and takes the lane cue down, as an arrow does). Collision precedence: in drum mode the pad grid owns 1–4
     // (Crash/Ride/Cowbell/Tamb, DRUM_KIT) — note-play wins — so digit-select yields those; '5' is
     // never a pad key and always selects. In piano mode all of 1–5 select. (activeIsDrum() is the
     // shared predicate from audio/instrument.ts, the same one Keyboard.tsx's drumActive reads.) The
@@ -103,7 +103,7 @@ export function installTransportKeys(opts: TransportKeysOptions): TransportKeys 
       const idx = Number(e.key) - 1;
       if (activeIsDrum() && layoutStore.keyboardVisible() && DRUM_KIT.some((pad) => pad.key === e.key)) return;
       e.preventDefault();
-      looper.selectTrack(idx);
+      selectTrack(idx);
     }
   };
   window.addEventListener('keydown', onKeyDown);

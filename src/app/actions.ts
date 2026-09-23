@@ -41,8 +41,9 @@ const onSelected =
   };
 
 // CLEAR's guard. A take is irreversible, so the first press only arms and says so on the lane; the
-// confirming press must be the very next action, on the same track, inside the window the lane's CLR
-// latch uses. A double press, not a hold: the keys drop e.repeat, and a footswitch may send no repeat.
+// confirming press must be the very next looper press (a named action or a digit select, see `onPress`),
+// on the same track, inside the window the lane's CLR latch uses. A double press, not a hold: the keys
+// drop e.repeat, and a footswitch may send no repeat.
 let clearArmed: { track: number; at: number } | null = null;
 
 function clearTrack(i: number): void {
@@ -80,10 +81,22 @@ const ACTIONS: Readonly<Record<ActionId, () => void>> = {
   goLive: () => void pressGoLive(goLiveSlot()),
 };
 
-/** Run action `id`. Any other action disarms a pending CLEAR, and every press takes the last lane cue
- * down (a newer press makes its reason stale). */
-export function runAction(id: ActionId): void {
+/** Every looper press passes here first: any press but CLEAR disarms a pending CLEAR, and every press
+ * takes the last lane cue down (a newer press makes its reason stale). */
+function onPress(id?: ActionId): void {
   if (id !== 'clear') clearArmed = null;
   dismissLaneCue();
+}
+
+/** Run action `id`. */
+export function runAction(id: ActionId): void {
+  onPress(id);
   ACTIONS[id]();
+}
+
+/** Select track `i` outright (the digit keys). Not a table row, since it names its track, but a looper
+ * press all the same. */
+export function selectTrack(i: number): void {
+  onPress();
+  looper.selectTrack(i);
 }

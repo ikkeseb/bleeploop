@@ -36,9 +36,10 @@
  *      master whatever FIXED says, and PLAY on an idle transport re-anchors the master grid to frame 0
  *      while PLAY beside a playing lane joins the running phase (`looper.phaseValue()`)
  *  10. KEYS: real key presses through the window handler and the named actions — a refused Space shows
- *      its reason on the selected lane only, changes nothing, and the cue leaves by itself; UNDO
+ *      its reason on the selected lane only, never reaches REC/DUB, and the cue leaves by itself; UNDO
  *      (Backspace) restores the exact pre-dub PCM and redoes; next/prev wrap at both ends; CLEAR (Delete)
- *      refuses a single press, a press after another key or after the window, and clears on a double press
+ *      refuses a single press, a press after another looper key (arrow or digit) or after the window, and
+ *      clears on a double press
  *
  * KNOWN LIMITS — do not read a green run as more than it is:
  *   - Everything measured comes from RECORDED PCM plus dispatcher state. Loop PLAYBACK is not captured
@@ -914,7 +915,10 @@ await probe(async ({ open }) => {
     // ---- keys: the real window key handler on a STOPPED lane that holds an overdub --------------
     // Real key presses (page.keyboard), never __lf calls, so the handler's own dispatch is what runs.
     // A refused press used to reach screen readers only: Space on the selected STOPPED lane is refused
-    // ("play first"), so its reason must appear in THAT lane's well, change nothing, and leave by itself.
+    // ("play first"), so its reason must appear in THAT lane's well, never reach REC/DUB, and leave by
+    // itself. The engine also ignores REC/DUB on a STOPPED lane, so the lane's state cannot tell a refusal
+    // from a press that got through: a stub that only counts stands in for the selected-lane REC/DUB entry
+    // instead. An accepted Space on PLAYING track 2 first proves the stub sits on the key's path.
     console.log('\ngolden-jam: keys\n');
     const cueTexts = () =>
       page.evaluate(() =>
@@ -922,17 +926,31 @@ await probe(async ({ open }) => {
           (lane) => lane.querySelector('.lp-lane__wellmsg.is-cue')?.textContent?.trim() ?? '',
         ),
       );
+    await page.evaluate(() => {
+      const looper = window.__lf.looper;
+      const real = looper.recDubSelected;
+      window.__recDubPresses = 0;
+      looper.recDubSelected = () => void window.__recDubPresses++;
+      window.__restoreRecDub = () => ((looper.recDubSelected = real), window.__recDubPresses);
+    });
+    await page.keyboard.press('2');
+    await page.keyboard.press('Space');
+    const acceptedPresses = await page.evaluate(() => window.__recDubPresses);
     await page.keyboard.press('1');
     const cueFrom = await page.evaluate(() => performance.now());
     await page.keyboard.press('Space');
     const cueShown = await cueTexts();
-    const afterRefusal = await page.evaluate(() => window.__lf.looper.stateOf(0));
+    const refusedPresses = (await page.evaluate(() => window.__restoreRecDub())) - acceptedPresses;
     check(
       'a refused Space shows its reason on the selected lane, and only there',
       cueShown[0] === 'play first to overdub' && cueShown.slice(1).every((c) => c === ''),
       `cues=${JSON.stringify(cueShown)}`,
     );
-    check('the refused Space changed nothing', afterRefusal === 'STOPPED', `state=${afterRefusal}`);
+    check(
+      'the refused Space never reached REC/DUB (the accepted one on track 2 did)',
+      acceptedPresses === 1 && refusedPresses === 0,
+      `accepted=${acceptedPresses}, refused=${refusedPresses}`,
+    );
     const cueGoneAt = await waitFor(
       page,
       () => (document.querySelector('.lp-lane__wellmsg.is-cue') === null ? performance.now() : null),
@@ -968,9 +986,10 @@ await probe(async ({ open }) => {
     check('the arrow and page keys step the selected track and wrap at both ends',
       navSeen.join(',') === '5,1,5,1,2,1,2,3', `tracks ${navSeen.join(',')} (want 5,1,5,1,2,1,2,3)`);
 
-    // CLEAR = Delete, guarded: a single press only arms and says so on the lane, another key between the
-    // two presses breaks the guard, so does a press after the confirm window; two in a row clear. On a
-    // COPY of track 1 in the first free lane, so the jam's own lanes stay as they were.
+    // CLEAR = Delete, guarded: a single press only arms and says so on the lane; another looper key between
+    // the two presses (an arrow or a digit, away and back) breaks the guard, so does a press after the
+    // confirm window; two in a row clear. On a COPY of track 1 in the first free lane, so the jam's own
+    // lanes stay as they were.
     const clearLane = await page.evaluate(() => window.__lf.looper.copy(0));
     const laneNow = () =>
       page.evaluate(
@@ -990,8 +1009,14 @@ await probe(async ({ open }) => {
     await page.keyboard.press('ArrowUp');
     await page.keyboard.press('Delete');
     const brokenDelete = await laneNow();
-    check('another key between the two Deletes breaks the guard',
+    check('an arrow key between the two Deletes breaks the guard',
       brokenDelete.state !== 'EMPTY' && brokenDelete.cue === 'press again to clear', `state=${brokenDelete.state}`);
+    await page.keyboard.press('1');
+    await page.keyboard.press(String(clearLane + 1));
+    await page.keyboard.press('Delete');
+    const digitBroken = await laneNow();
+    check('a digit key between the two Deletes breaks the guard',
+      digitBroken.state !== 'EMPTY' && digitBroken.cue === 'press again to clear', `state=${digitBroken.state}`);
     await page.waitForTimeout(3000); // past the 2.5 s confirm window
     await page.keyboard.press('Delete');
     const lateDelete = await laneNow();
