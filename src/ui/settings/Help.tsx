@@ -2,17 +2,19 @@ import { For, Show } from 'solid-js';
 import { asioStatus } from '../../audio/audio-devices';
 import asioLogo from '../../assets/third-party/ASIO-compatible-logo-Steinberg-R-white-transparent-RGB.svg';
 import { DRUM_KIT } from '../../audio/synths/drum';
+import { ACTION_LABELS, type ActionId } from '../../app/actions';
+import { KEY_ACTIONS } from '../../app/transport-keys';
 import { COMPUTER_MAP } from '../keyboard/Keyboard';
 import './help.css';
 
 /**
  * Help / quick-reference popover: how to play (guitar first, a MIDI controller for the other layers,
- * computer keys as a fallback), the looper + transport controls, the play map, and the layout
- * move/hide/resize affordances. Same popover pattern as AudioSettings (a command-bar `.tool` cap → a
- * `<Show>`-mounted panel). It LEADS with the instrument (the looper) — the keyboard is the fallback
- * play path, so its sections come last. The
- * drum-pad rows read from DRUM_KIT, and the piano legend reads from COMPUTER_MAP, so neither can drift
- * from the real controls. The looper/transport copy mirrors the controls in Looper.tsx + Transport.tsx.
+ * computer keys as a fallback), the looper + transport controls, the pedals, the play map, and the
+ * layout move/hide/resize affordances. Same popover pattern as AudioSettings (a command-bar `.tool` cap
+ * → a `<Show>`-mounted panel). It LEADS with the instrument (the looper) — the keyboard is the fallback
+ * play path, so its sections come last. The drum-pad rows read from DRUM_KIT, the piano legend from
+ * COMPUTER_MAP and the pedal keys from KEY_ACTIONS, so none can drift from the real controls. The
+ * looper/transport copy mirrors the controls in Looper.tsx + Transport.tsx.
  */
 
 const PITCH_NAMES = ['C', 'C♯', 'D', 'D♯', 'E', 'F', 'F♯', 'G', 'G♯', 'A', 'A♯', 'B'] as const;
@@ -23,6 +25,26 @@ const COMPUTER_KEYS = Object.entries(COMPUTER_MAP).map(([key, offset]) => ({
 }));
 const NATURALS = COMPUTER_KEYS.filter((entry) => !entry.sharp);
 const SHARPS = COMPUTER_KEYS.filter((entry) => entry.sharp);
+
+/** A KEY_ACTIONS key as its cap reads; any other key shows its own name. */
+const KEY_CAPS: Readonly<Record<string, string>> = {
+  ' ': 'Space',
+  ArrowUp: '↑',
+  ArrowDown: '↓',
+  ArrowLeft: '←',
+  ArrowRight: '→',
+  PageUp: 'PgUp',
+  PageDown: 'PgDn',
+};
+/** The looper keys grouped by the action they run, in the action table's order. */
+const PEDAL_KEYS = (Object.keys(ACTION_LABELS) as ActionId[])
+  .map((id) => ({
+    label: ACTION_LABELS[id],
+    keys: Object.keys(KEY_ACTIONS)
+      .filter((key) => KEY_ACTIONS[key] === id)
+      .map((key) => KEY_CAPS[key] ?? key),
+  }))
+  .filter((entry) => entry.keys.length > 0);
 
 export function Help() {
   return (
@@ -73,6 +95,25 @@ export function Help() {
           <li><kbd class="help__kbd">Space</kbd> records / overdubs the selected track &middot; <kbd class="help__kbd">Enter</kbd> plays / stops it</li>
           <li><kbd class="help__kbd">Backspace</kbd> undoes its last overdub (again to redo) &middot; <kbd class="help__kbd">Delete</kbd> twice clears it</li>
           <li>In drum mode the pads take <kbd class="help__kbd">1</kbd>–<kbd class="help__kbd">4</kbd>, so only <kbd class="help__kbd">5</kbd> selects a track there</li>
+        </ul>
+      </section>
+
+      <section class="help__sec">
+        <h3 class="help__h">Pedals <span class="help__tag">hands stay on the guitar</span></h3>
+        <p class="help__sub">A keystroke footswitch or page turner sends keys. Set each pedal to one of these:</p>
+        <div class="help__keyrow">
+          <For each={PEDAL_KEYS}>
+            {(entry) => (
+              <span class="help__chip">
+                <For each={entry.keys}>{(key) => <kbd class="help__kbd">{key}</kbd>}</For>
+                <span class="help__note">{entry.label}</span>
+              </span>
+            )}
+          </For>
+        </div>
+        <ul class="help__list">
+          <li>A MIDI footswitch or controller: Audio Settings → <span class="help__note">MIDI LEARN</span>. Pick an action, press <span class="help__note">LEARN</span>, then tap the pedal once. Momentary and latching pedals both run it once per press</li>
+          <li>A learned pedal or key only runs its action: it plays no note and holds no sustain. <span class="help__note">✕</span> in the list forgets it</li>
         </ul>
       </section>
 

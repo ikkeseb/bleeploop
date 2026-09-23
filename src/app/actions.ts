@@ -30,7 +30,7 @@ export type ActionId =
   | 'stopAll'
   | 'goLive';
 
-/** Each action's name on screen, in the MIDI learn picker's order. */
+/** Each action's name on screen, in the MIDI learn picker's order; Help's pedal keys read it too. */
 export const ACTION_LABELS: Readonly<Record<ActionId, string>> = {
   recDub: 'Record / overdub',
   playStop: 'Play / stop',
