@@ -5,7 +5,8 @@
  *
  * Proves that a disarm landing while getUserMedia is still open cancels that open (the late stream is
  * closed, its tracks stopped, inputArmed stays false) and that a burst of toggles ends in the state of
- * the LAST gesture. It substitutes the device open, so it says nothing about real microphone hardware,
+ * the LAST gesture. A last case runs the real browser-tier open with the context's splitter wiring made to
+ * throw: the rejected open must stop the stream's tracks and disconnect its source. It substitutes the device open, so it says nothing about real microphone hardware,
  * permission prompts or native ASIO input.
  */
 import assert from 'node:assert/strict';
@@ -145,7 +146,68 @@ try {
     }
   });
 
+  // ── Case 5: wiring throws AFTER getUserMedia resolved (real platform open, browser tier) ──────
+  // A real MediaStream (from a MediaStreamDestination, so no device or permission) stands in for the
+  // microphone; the context's splitter creation or connect fails. The rejected open must stop every
+  // track and leave no source node connected, since no close handle ever reaches capture.ts.
+  const wiringFailure = await page.evaluate(async () => {
+    const lf = window.__lf;
+    const ctx = lf.engine.ctx;
+    const realGum = navigator.mediaDevices.getUserMedia;
+    const run = async (failure) => {
+      const stream = ctx.createMediaStreamDestination().stream;
+      navigator.mediaDevices.getUserMedia = async () => stream;
+      const sources = [];
+      ctx.createMediaStreamSource = (s) => {
+        const node = AudioContext.prototype.createMediaStreamSource.call(ctx, s);
+        const tracked = { connected: 0, disconnects: 0 };
+        const realConnect = node.connect.bind(node);
+        const realDisconnect = node.disconnect.bind(node);
+        node.connect = (...args) => { const out = realConnect(...args); tracked.connected++; return out; };
+        node.disconnect = (...args) => { realDisconnect(...args); tracked.connected = 0; tracked.disconnects++; };
+        sources.push(tracked);
+        return node;
+      };
+      ctx.createChannelSplitter = (n) => {
+        if (failure === 'splitter') throw new Error('Injected splitter failure');
+        const splitter = AudioContext.prototype.createChannelSplitter.call(ctx, n);
+        splitter.connect = () => { throw new Error('Injected connect failure'); };
+        return splitter;
+      };
+      let error = null;
+      try {
+        await lf.platform.audioInput.open(ctx, { channel: 1 });
+      } catch (err) {
+        error = String(err);
+      } finally {
+        delete ctx.createMediaStreamSource;
+        delete ctx.createChannelSplitter;
+        navigator.mediaDevices.getUserMedia = realGum;
+      }
+      return {
+        error,
+        trackStates: stream.getTracks().map((track) => track.readyState),
+        sourcesCreated: sources.length,
+        connectedSources: sources.filter((s) => s.connected > 0).length,
+        disconnectedSources: sources.filter((s) => s.disconnects > 0).length,
+      };
+    };
+    return { splitter: await run('splitter'), connect: await run('connect') };
+  });
+  result.wiringFailure = wiringFailure;
+
   console.log(JSON.stringify({ url, ...result }, null, 2));
+
+  for (const [label, c] of Object.entries(wiringFailure)) {
+    assert.match(String(c.error), /Injected/, `${label}: the wiring failure must reject the open`);
+    assert.ok(c.trackStates.length > 0, `${label}: the stand-in stream must carry a track`);
+    assert.ok(c.trackStates.every((state) => state === 'ended'), `${label}: every track must be stopped`);
+    assert.equal(c.sourcesCreated, 1, `${label}: one source node was created`);
+    // The splitter throws before the source is ever connected, so "none connected" is vacuous there:
+    // prove the release path ran by its disconnect() call instead.
+    if (label === 'splitter') assert.equal(c.disconnectedSources, 1, `${label}: the release must disconnect the source`);
+    else assert.equal(c.connectedSources, 0, `${label}: no source node may stay connected`);
+  }
 
   const { cancelledCase, rearmCase, finalState, toggleOffCase, burstOnCase, burstFinal } = result;
   assert.equal(cancelledCase.armedDuringPending, false, 'a pending open must not report ARMED');

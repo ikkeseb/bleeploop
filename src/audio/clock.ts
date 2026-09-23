@@ -107,20 +107,32 @@ function setBpmLocked(on: boolean): void {
   setBpmLockedSignal(on);
 }
 
+/** True from a gesture's engine.start until it rejects: also the in-flight guard (no double start). */
 let _running = false;
+/** The free-run pulse + Tone transport are started once; a retried engine.start does not restart them. */
+let transportStarted = false;
 
 /**
  * Start the transport ONCE and leave it running, so the beat LED + metronome are live whenever the
  * audio clock is — not gated on a global play button. Idempotent; safe to call on every
  * looper/transport gesture. Must run on a user gesture (engine.start resumes the AudioContext).
+ * Synchronous for callers: the pulse + transport start now (callers such as session restore re-anchor
+ * it right after). A REJECTED engine.start (Tone adoption, toneStart, the master-limiter latency
+ * measurement) clears the running flag, so the next gesture retries instead of keeping a dead clock.
  */
 function ensureRunning(): void {
   if (_running) return;
-  void engine.start();
-  startFreeRunPulse();
-  tp().start();
   _running = true;
   setRunning(true);
+  const retryNextGesture = (): void => { _running = false; setRunning(false); };
+  engine.start().catch((err: unknown) => {
+    retryNextGesture();
+    console.error('[clock] audio engine failed to start; the next gesture retries', err);
+  });
+  if (transportStarted) return;
+  try { startFreeRunPulse(); tp().start(); } // startFreeRunPulse tears down first, so a retry is safe
+  catch (err) { retryNextGesture(); throw err; } // a synchronous throw must not block the next gesture
+  transportStarted = true; // latched last: only once the pulse and the transport both started
 }
 
 // ---------------------------------------------------------------------------

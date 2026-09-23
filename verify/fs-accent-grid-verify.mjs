@@ -31,7 +31,7 @@ function ok(name, cond, detail = '') { checks++; if (!cond) { fails++; console.l
 const PULSE_LOOKAHEAD = 0.1; // clock.ts
 const PULSE_INTERVAL = 0.025; // clock.ts PULSE_INTERVAL_MS
 
-// MIRRORS: src/audio/clock.ts@386-398 sha256:beba6e9edef75c27  (startFreeRunPulse — phase-carrying re-anchor)
+// MIRRORS: src/audio/clock.ts@398-410 sha256:beba6e9edef75c27  (startFreeRunPulse — phase-carrying re-anchor)
 // state: { anchor, beatPeriod, nextN, forcedUntilN, freeRun, timerLive }. Mutates like the source.
 // The source reads bpm() (already clamped+rounded) and engine.ctx.currentTime; passed in here.
 function startFreeRunPulse(st, bpmNow, now) {
@@ -45,7 +45,7 @@ function startFreeRunPulse(st, bpmNow, now) {
   st.anchor = nextBeatTime - st.nextN * period; // beat nextN fires where the old grid had it
 }
 
-// MIRRORS: src/audio/clock.ts@335-373 sha256:2eb1ec34ed38d50d  (pulseTick — the one lookahead scheduler)
+// MIRRORS: src/audio/clock.ts@347-385 sha256:2eb1ec34ed38d50d  (pulseTick — the one lookahead scheduler)
 // Same port as fs-grid-verify.mjs / fs-pulse-forced-clamp-verify.mjs: schedules every beat inside the
 // horizon at its exact ctx time; past beats DROP unless forced (forced clamp to now, #8).
 // Returns grid/LED beats regardless of the click's transport cutoff. Audio gating is covered by

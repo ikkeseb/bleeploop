@@ -42,7 +42,10 @@ drive the looper behind an open popover and after an Escape close, yet still yie
 and Tab-focused buttons. `session-state-roundtrip.mjs` checks STOPPED recovery, state-only autosave
 and subsequent PLAY ALL. `mic-arm-race.mjs` substitutes the platform input open
 with a deferred promise and checks that a disarm cancels a pending open (stream closed, tracks
-stopped) and that a burst of toggles ends in the state of the last gesture. These probes,
+stopped), that a burst of toggles ends in the state of the last gesture, and that a real browser-tier
+open whose splitter wiring throws stops its tracks and disconnects its source. `transport-start.mjs`
+injects one rejected `engine.start` and checks that the clock falls back to not running, logs once,
+and the next gesture retries with the pulse and Tone transport started exactly once. These probes,
 `recovery-import-failure.mjs`,
 `monitor-generation.mjs`, `plugin-load-buffer-generation.mjs` and `asio-startup.mjs` run in
 `.github/workflows/browser-lifecycle.yml` on frontend and verification changes. They do not gate the

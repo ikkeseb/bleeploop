@@ -140,25 +140,41 @@ const webAudioInput: AudioInputSource = {
         channelCount: channel === null ? 1 : { min: Math.max(2, channel + 1) },
       },
     });
-    const source = ctx.createMediaStreamSource(stream);
-    let node: AudioNode = source;
+    const tracks = stream.getTracks();
+    let source: MediaStreamAudioSourceNode | null = null;
     let splitter: ChannelSplitterNode | null = null;
     let selectedMono: GainNode | null = null;
-    if (channel !== null) {
-      splitter = ctx.createChannelSplitter(channel + 1);
-      selectedMono = ctx.createGain();
-      selectedMono.channelCount = 1;
-      selectedMono.channelCountMode = 'explicit';
-      selectedMono.channelInterpretation = 'discrete';
-      source.connect(splitter);
-      splitter.connect(selectedMono, channel);
-      node = selectedMono;
+    const release = (): void => {
+      for (const track of tracks) track.stop();
+      source?.disconnect();
+      splitter?.disconnect();
+      selectedMono?.disconnect();
+    };
+    let node: AudioNode;
+    // Wiring can throw after getUserMedia resolved (e.g. a channel the context cannot split). No close
+    // handle exists yet, so release the live tracks + created nodes here and rethrow: the MIC arm
+    // toast surfaces the error.
+    try {
+      source = ctx.createMediaStreamSource(stream);
+      node = source;
+      if (channel !== null) {
+        splitter = ctx.createChannelSplitter(channel + 1);
+        selectedMono = ctx.createGain();
+        selectedMono.channelCount = 1;
+        selectedMono.channelCountMode = 'explicit';
+        selectedMono.channelInterpretation = 'discrete';
+        source.connect(splitter);
+        splitter.connect(selectedMono, channel);
+        node = selectedMono;
+      }
+    } catch (err) {
+      release();
+      throw err;
     }
     // A yanked interface ENDS its tracks; the MediaStreamAudioSourceNode stays in the graph and just
     // produces silence, so 'ended' is the only signal the caller can act on. Latched + unsubscribed on
     // the first report, so a multi-track stream reports once and `close()`'s own `track.stop()` (which
     // must not fire it at all) can't turn a user disarm into a loss.
-    const tracks = stream.getTracks();
     let dead = false;
     const onEnded = (): void => {
       if (dead) return;
@@ -172,13 +188,8 @@ const webAudioInput: AudioInputSource = {
       sampleRate: ctx.sampleRate,
       close() {
         dead = true;
-        for (const track of tracks) {
-          track.removeEventListener('ended', onEnded);
-          track.stop();
-        }
-        source.disconnect();
-        splitter?.disconnect();
-        selectedMono?.disconnect();
+        for (const track of tracks) track.removeEventListener('ended', onEnded);
+        release();
       },
     };
   },

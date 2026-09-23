@@ -23,7 +23,7 @@ function ok(name, cond, detail = '') { checks++; if (!cond) { fails++; console.l
 const PULSE_LOOKAHEAD = 0.1; // clock.ts
 const MIN_CLICK_SPACING = 0.12; // clock.ts
 
-// MIRRORS: src/audio/clock.ts@335-373 sha256:2eb1ec34ed38d50d  (pulseTick — forced-clamp + transportActive gate)
+// MIRRORS: src/audio/clock.ts@347-385 sha256:2eb1ec34ed38d50d  (pulseTick — forced-clamp + transportActive gate)
 // ── NEW pulseTick loop body (clock.ts after #8 + the 2026-07-04 transportActive click gate). ──────
 // state: { anchor, beatPeriod, nextN, forcedUntilN, metronomeOn, transportActive, transportActiveUntil }.
 // An omitted transportActiveUntil is Infinity, matching the clock setter's default. Mutates state.nextN
@@ -69,7 +69,7 @@ function pulseTickOld(state, now) {
   return out;
 }
 
-// MIRRORS: src/audio/clock.ts@243-247 sha256:6335225ab6e43e70  (triggerClick — anti-flam / lastClickWasClamped)
+// MIRRORS: src/audio/clock.ts@255-259 sha256:6335225ab6e43e70  (triggerClick — anti-flam / lastClickWasClamped)
 // anti-flam gate (clock.ts triggerClick, after R1 bug-hunt 2026-06-23): a blip within MIN_CLICK_SPACING
 // of the last is suppressed — EXCEPT a genuine on-time beat (clamped=false) is never eaten by a CLAMPED
 // catch-up (lastWasClamped=true): the clamp is an artificial `now` instant, not a real sounding beat, so

@@ -34,7 +34,7 @@ function commitGrid(bpmReq, sr, barsReq) {
   return { fpb: plan.fpb, bars: plan.bars, master: plan.master, beatPeriod: plan.beatPeriod, loopPeriod: plan.period };
 }
 
-// MIRRORS: src/audio/clock.ts@335-373 sha256:2eb1ec34ed38d50d  (pulseTick — master-anchored lookahead pulse)
+// MIRRORS: src/audio/clock.ts@347-385 sha256:2eb1ec34ed38d50d  (pulseTick — master-anchored lookahead pulse)
 // ---- the master-anchored lookahead pulse, faithfully ported ----
 const PULSE_LOOKAHEAD = 0.1; // clock.ts:238
 function makePulse(anchor, period, now0) {
