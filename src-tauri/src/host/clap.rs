@@ -1189,9 +1189,9 @@ fn spawn_rt(
 /// command answers `Err` instead of parking a slot that never makes a sound. A load command that
 /// already gave up (its 15 s timeout) cannot park or tear down what arrives late, so a refused
 /// send stops the producer (dropping `G` stops and joins it: `RtJoinGuard`) BEFORE `release`, and
-/// nothing writes the mapping when it closes. `ready_tx` is a rendezvous channel, so a send that
-/// succeeds was received. The caller still owns the rest of the undo (deactivate, module teardown)
-/// on `None`. Shared by the CLAP and VST3 owners.
+/// nothing writes the mapping when it closes. `ready_tx` is a rendezvous channel
+/// (`load_ready_channel`), so a send that succeeds was received. The caller still owns the rest of
+/// the undo (deactivate, module teardown) on `None`. Shared by the CLAP and VST3 owners.
 pub(super) fn spawn_rt_then_ready<G, P>(
     ready_tx: &std::sync::mpsc::SyncSender<Result<P, String>>,
     payload: P,
@@ -1217,6 +1217,15 @@ pub(super) fn spawn_rt_then_ready<G, P>(
             None
         }
     }
+}
+
+/// The owner → load command channel of `load` and `vst3_load`. Rendezvous (capacity 0): a send
+/// that succeeds was received, so no result can sit unread in the channel when the command's 15 s
+/// timeout drops the receiver; a late one goes back to the owner, which undoes it
+/// (`spawn_rt_then_ready`). With a buffer, a result sent between that timeout and the drop would
+/// sit in it and leave with the channel, its SharedBuffer never `Close()`d.
+fn load_ready_channel<T>() -> (std::sync::mpsc::SyncSender<T>, std::sync::mpsc::Receiver<T>) {
+    std::sync::mpsc::sync_channel(0)
 }
 
 /// Plugin-requested restart (CLAP `host.request_restart`), on the owner thread: stop + join the RT
@@ -1464,7 +1473,7 @@ mod host_lifecycle_tests {
             }
         }
         let stopped = AtomicBool::new(false);
-        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<Result<&str, String>>(0);
+        let (ready_tx, ready_rx) = load_ready_channel::<Result<&str, String>>();
         drop(ready_rx);
         let mut released = None;
         let guard = spawn_rt_then_ready(
@@ -1481,6 +1490,22 @@ mod host_lifecycle_tests {
         );
         assert!(guard.is_none(), "the owner must take its undo path");
         assert_eq!(released, Some("shared buffer"), "the posted buffer is released");
+    }
+
+    /// The window the rendezvous closes: the load command's receiver still exists but no longer
+    /// receives (between its 15 s timeout and its drop). The load channel must refuse a result
+    /// then, so it goes back to the owner instead of leaving with the channel.
+    #[test]
+    fn the_load_channel_holds_no_result_its_command_is_not_receiving() {
+        let (ready_tx, ready_rx) = load_ready_channel::<Result<&str, String>>();
+        assert!(
+            matches!(
+                ready_tx.try_send(Ok("shared buffer")),
+                Err(std::sync::mpsc::TrySendError::Full(Ok("shared buffer")))
+            ),
+            "a result the command is not receiving must be refused, not buffered"
+        );
+        assert!(ready_rx.try_recv().is_err(), "nothing sits unread in the channel");
     }
 
     #[test]
@@ -2673,10 +2698,7 @@ pub fn load(
     let monitor_gain = Arc::new(AtomicU32::new(1.0f32.to_bits()));
     // The known param ids, filled by the owner thread before it reports the load (`ParamIds`).
     let param_ids = ParamIds::default();
-    // Rendezvous (capacity 0): a send that succeeds was received, so no result can sit unread in
-    // the channel when a timeout drops `ready_rx`; a late one goes back to the owner, which undoes
-    // it (`spawn_rt_then_ready`).
-    let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<LoadReady>(0);
+    let (ready_tx, ready_rx) = load_ready_channel::<LoadReady>();
 
     // P9.5 control plane: the main→audio event ring (Producer kept here for the SlotHandle,
     // Consumer handed to the RT producer) + the main→owner state-request channel.
@@ -2818,8 +2840,7 @@ pub fn vst3_load(
     let monitor_gain = Arc::new(AtomicU32::new(1.0f32.to_bits()));
     // The known param ids, filled by the owner thread before it reports the load (`ParamIds`).
     let param_ids = ParamIds::default();
-    // Rendezvous, like the CLAP `load`: a late result goes back to the owner (`spawn_rt_then_ready`).
-    let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<LoadReady>(0);
+    let (ready_tx, ready_rx) = load_ready_channel::<LoadReady>();
     let (event_tx, event_rx) = RingBuffer::<PluginEvent>::new(EVENT_RING_CAP);
     let event_tx = Arc::new(std::sync::Mutex::new(event_tx));
     let (request_tx, request_rx) = std::sync::mpsc::channel::<OwnerRequest>();
