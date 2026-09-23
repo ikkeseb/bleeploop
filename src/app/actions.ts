@@ -13,8 +13,8 @@ import {
 } from '../ui/looper/gates';
 
 /**
- * OWNS: the named actions a hands-free press can reach, in one table. The transport keys dispatch
- * through it (`transport-keys.ts`), and MIDI learn will (`docs/plans/pedalboard.md` piece 3). Each row
+ * OWNS: the named actions a hands-free press can reach, in one table. The transport keys
+ * (`transport-keys.ts`) and MIDI learn (`midi-actions.ts`) dispatch through it. Each row
  * runs the path its on-screen control runs: the lane core, ▶/■, ↶ DUB, CLR, the command bar's ▶/■ ALL
  * and the slot's GO LIVE. The lane actions act on the SELECTED track, and a refused one says why on that
  * lane (gates.ts `refuseOnLane`) instead of doing nothing.
@@ -29,6 +29,19 @@ export type ActionId =
   | 'playAll'
   | 'stopAll'
   | 'goLive';
+
+/** Each action's name on screen, in the MIDI learn picker's order. */
+export const ACTION_LABELS: Readonly<Record<ActionId, string>> = {
+  recDub: 'Record / overdub',
+  playStop: 'Play / stop',
+  undo: 'Undo overdub',
+  clear: 'Clear (press twice)',
+  nextTrack: 'Next track',
+  prevTrack: 'Previous track',
+  playAll: 'Play all',
+  stopAll: 'Stop all',
+  goLive: 'Go live',
+};
 
 /** Act on the selected lane when `gate` lets the press through, else show why on that lane. */
 const onSelected =

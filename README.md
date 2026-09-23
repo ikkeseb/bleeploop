@@ -44,9 +44,10 @@ other layers; the computer keyboard is the fallback.
 - Two native CLAP/VST3 plugin slots with floating plugin editors.
 - Guitar or line input with native low-latency monitoring over WASAPI or ASIO. Record-latency
   compensation puts the take on the grid.
-- MIDI controllers work through WebView2's native Web MIDI. Without one, the computer keyboard
-  plays notes and runs the transport (1-5 or the arrow keys to select a track, Space to record,
-  Enter to play and stop, Backspace to undo; Help lists every key).
+- MIDI controllers work through WebView2's native Web MIDI, and a MIDI footswitch, key or CC can be
+  learned onto a looper action in Audio Settings. Without one, the computer keyboard plays notes and
+  runs the transport (1-5 or the arrow keys to select a track, Space to record, Enter to play and
+  stop, Backspace to undo; Help lists every key).
 - Session export and import as one `.zip`: a WAV stem per track, a wet stereo master render and a
   `session.json`.
 

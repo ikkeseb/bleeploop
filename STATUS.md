@@ -13,6 +13,8 @@ Driver latency reports are not guitar latency; after a relevant change, rerun on
 
 `pnpm dev:asio`, load the amp-sim, play a real jam **before reading further**, write the opinion down.
 If it feels off, that outranks every green check: say what felt wrong and re-scope.
+With a MIDI footswitch plugged: learn REC/DUB onto it (Audio Settings → midi learn, one tap) and take
+the jam's records with the foot. One press, one action? Still learned after the next restart?
 
 ## The rig lap — in plug order, each stop a yes/no
 

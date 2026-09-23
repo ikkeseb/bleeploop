@@ -1,12 +1,12 @@
 # Next milestone: the hands-free looper (Pedalboard mode)
 
 Decided 2026-09-23 from the product lens over that day's audit. The promise heads `README.md`: a
-guitarist's hands are on the guitar, and today every looper action needs the PC keyboard or the
-mouse. MIDI handles only CC64/1/123 and bend (`src/audio/midi.ts`); the keys reach the named actions
-of `src/app/actions.ts` through `src/app/transport-keys.ts`. `src/audio/looper/looper.ts` already
-exposes every action, so the milestone is adapters: capture, compensation and the rig-guarded
-algorithms stay untouched, and nothing here needs the rig to prove correctness. This file is
-deleted when the milestone lands; what still binds moves to the briefings.
+guitarist's hands are on the guitar, so every looper action must be reachable by foot. The keys (a
+keystroke footswitch sends them) and learned MIDI messages reach the named actions of
+`src/app/actions.ts` through `src/app/transport-keys.ts` and `src/app/midi-actions.ts`.
+`src/audio/looper/looper.ts` already exposes every action, so the milestone is adapters: capture,
+compensation and the rig-guarded algorithms stay untouched, and nothing here needs the rig to prove
+correctness. This file is deleted when the milestone lands; what still binds moves to the briefings.
 
 ## Pieces, in build order
 
@@ -14,14 +14,14 @@ deleted when the milestone lands; what still binds moves to the briefings.
 |---|---|---|---|---|
 | 1 | Refusal cue — **landed**: `refuseOnLane` in `src/ui/looper/gates.ts`, drawn in the lane's well by `Looper.tsx` | M | `src/ui/looper/` | `pnpm verify:jam` § keys: a refused Space shows its reason on the selected lane only, and the cue leaves by itself |
 | 2 | Action layer + keys — **landed**: the named-action table in `src/app/actions.ts`; ↑↓ / PgUp PgDn / ←→ next/prev, Backspace UNDO, Delete twice CLEAR in `src/app/transport-keys.ts` | S | `src/app/` | `pnpm verify:jam` § keys: UNDO restores the exact pre-dub PCM and redoes, next/prev wrap, CLEAR refuses a single press, one after another looper key (arrow or digit) or after the window, and clears on a double press |
-| 3 | MIDI learn: CC/note → action (`runAction`) per port and channel, persisted in localStorage; a learned message is consumed before the CC64/1/123 branch, unmapped traffic behaves as today; a learn row in Audio Settings | M | `src/audio/midi.ts`, new `src/audio/midi-actions.ts` (not yet built), `src/ui/settings/` | browser probe feeds raw bytes to an `@public` handler: learn a CC, reload, the CC fires the action; unmapped CC64/1/123 still reach the router; a CC mapped onto 64 does not also sustain |
+| 3 | MIDI learn — **landed**: a learned CC/note runs its action per port and channel, in `src/app/midi-actions.ts` behind the consume-first hook of `src/audio/midi.ts`; the learn row in Audio Settings | M | `src/app/`, `src/audio/midi.ts`, `src/ui/settings/` | `pnpm probe midi-learn`: a learned CC survives a reload and records; momentary, latching and reversed pedals fire once per press; unlearned CC64/1/123 reach the router; a learned CC64 does not sustain, a learned note does not sound |
 | 4 | Rig recall, frontend only: restore each slot's plugin path and input channel at launch through the existing load path; GO LIVE stays one press. Plugin tone state excluded | M | `src/audio/instrument.ts`, `src/audio/native-io.ts` | native probe under `tauri dev` (a plugin, no guitar): restart, both slots reload the same path and channel; arming stays with STATUS Stops 5/6 |
 | 5 | Help: a "Pedals" section (keystroke footswitches, MIDI learn); first screen ordered by the promise | S | `src/ui/settings/Help.tsx` | eye lap |
 
 The only ear or foot moment is one pedal press during the next "Play first" jam; it rides that
-session instead of adding a stop. Deferred inside the milestone: the stage view (eye-gated, needs the
-actions first) and VST3 tone-state recall (L Rust; VST3 save/load is "not wired" and LoadState
-cancellation needs a design).
+session (`STATUS.md` § Play first) instead of adding a stop. Deferred inside the milestone: the stage
+view (eye-gated, needs the actions first) and VST3 tone-state recall (L Rust; VST3 save/load is "not
+wired" and LoadState cancellation needs a design).
 
 ## Explicitly not built
 

@@ -17,6 +17,7 @@ import { installFrontendLogPipe, platform } from './platform';
 import { bootPluginHost } from './app/boot';
 import { installCloseGuard } from './app/close-guard';
 import { installCmdFit } from './app/cmd-fit';
+import { cancelLearn, installMidiActions } from './app/midi-actions';
 import { installTransportKeys, type TransportKeys } from './app/transport-keys';
 import { installLfDebug } from './debug/lf';
 
@@ -72,6 +73,8 @@ export function App() {
     // depends on what is focused or mounted.
     transportKeys = installTransportKeys({
       onEscape: () => {
+        // A pending MIDI learn takes the Escape first; the panel it was started from stays open.
+        if (cancelLearn()) return;
         if (settingsOpen()) setSettingsOpen(false);
         if (helpOpen()) setHelpOpen(false);
       },
@@ -82,7 +85,9 @@ export function App() {
     // Sync masterGain to the persisted master volume (no-op at unity default; restores a saved level
     // on reload). Creates the AudioContext suspended — matches the engine's lazy pattern.
     master.init();
-    // Attempt MIDI on mount — graceful if unavailable.
+    // MIDI learn claims learned messages before the play path: `src/app/midi-actions.ts`. Then attempt
+    // MIDI on mount — graceful if unavailable.
+    onCleanup(installMidiActions());
     void midi.start();
     // Native plugin host boot chain (no-op in the browser build): `src/app/boot.ts`.
     onCleanup(bootPluginHost());

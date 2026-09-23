@@ -19,6 +19,8 @@ import {
 } from '../../audio/audio-devices';
 import { inputArmed, monitorArmed } from '../../audio/native-io';
 import { midiDevices, midiStatus } from '../../audio/midi';
+import { ACTION_LABELS, type ActionId } from '../../app/actions';
+import { bindings, cancelLearn, forget, learn, learning, type MidiBinding } from '../../app/midi-actions';
 import { platform } from '../../platform';
 import {
   BUFFER_FRAMES_OPTIONS,
@@ -32,9 +34,9 @@ import './audio-settings.css';
 
 /**
  * Global Audio Settings popover: consolidates the native input device + channel, the monitor
- * (cpal-out) output device, the live RT buffer-size control, and the ASIO low-latency tier toggle (when
- * an ASIO device is available) — all GLOBAL last-used preferences. The per-slot Arm toggles stay in
- * PluginControls and read the device choice persisted here. Mounted inside a `<Show>` in app.tsx, so it
+ * (cpal-out) output device, the live RT buffer-size control, the ASIO low-latency tier toggle (when
+ * an ASIO device is available) and the MIDI learn row — all GLOBAL last-used preferences. The per-slot
+ * Arm toggles stay in PluginControls and read the device choice persisted here. Mounted inside a `<Show>` in app.tsx, so it
  * re-reads persisted state each time it opens (persisted localStorage is the source of truth; these
  * local signals mirror it). The sample-rate row is a disabled placeholder for increment C2.
  */
@@ -42,6 +44,13 @@ import './audio-settings.css';
 /** Processing-block duration, not an input-to-output latency estimate. */
 function bufferMs(frames: number): string {
   return `~${((frames / engine.ctx.sampleRate) * 1000).toFixed(1)} ms/block`;
+}
+
+const ACTION_IDS = Object.keys(ACTION_LABELS) as ActionId[];
+
+/** A learned message as the bindings list shows it: "CC 64 · ch 1". */
+function midiSource(b: MidiBinding): string {
+  return `${b.kind === 'cc' ? 'CC' : 'note'} ${b.number} · ch ${b.channel + 1}`;
 }
 
 export function AudioSettings() {
@@ -55,6 +64,10 @@ export function AudioSettings() {
   // record-latency.ts, but this popover remounts on every open, so a local signal seeded from the live
   // value is enough to mirror it (same pattern as the persisted device settings above).
   const [recAlign, setRecAlign] = createSignal(offsetMs());
+  // The action the MIDI learn row binds to. A learn still listening when the panel closes is cancelled,
+  // so a later pedal press cannot bind out of sight.
+  const [learnPick, setLearnPick] = createSignal<ActionId>(ACTION_IDS[0]);
+  onCleanup(cancelLearn);
 
   // Channel count of the selected NAMED device (0 for "default input" — its id is '' so the channel
   // count is unknown). When ≥2 the channel selector appears; by design the explicit channel pick is
@@ -275,7 +288,7 @@ export function AudioSettings() {
           <Show when={asioRetryable()}>
             <button
               type="button"
-              class="audio-settings__retry"
+              class="audio-settings__btn"
               onClick={() => void probeAsio(true)}
               aria-label="Retry starting the ASIO driver"
             >
@@ -297,6 +310,58 @@ export function AudioSettings() {
         <span class="audio-settings__readout">{(engine.ctx.sampleRate / 1000).toFixed(1)} kHz</span>
         <span class="audio-settings__soon">set by the audio device</span>
       </div>
+
+      {/* MIDI learn: pick an action, LEARN, and the next CC or note-on from any port runs it from then on
+          (a second click or Esc cancels). A learned message never reaches the play path. The bindings,
+          their persistence and the momentary/latching read live in `src/app/midi-actions.ts`. */}
+      <div class="audio-settings__row" title="A MIDI footswitch or key runs this action; the track actions act on the selected track.">
+        <span class="audio-settings__label">midi learn</span>
+        <select
+          class="audio-settings__select"
+          value={learnPick()}
+          disabled={learning() !== null}
+          onChange={(e) => setLearnPick(e.currentTarget.value as ActionId)}
+          aria-label="Action to learn"
+        >
+          <For each={ACTION_IDS}>{(id) => <option value={id}>{ACTION_LABELS[id]}</option>}</For>
+        </select>
+        <button
+          type="button"
+          class="audio-settings__btn"
+          classList={{ 'audio-settings__btn--listening': learning() !== null }}
+          aria-pressed={learning() !== null}
+          disabled={learning() === null && midiStatus() !== 'connected'}
+          onClick={() => (learning() === null ? learn(learnPick()) : cancelLearn())}
+          aria-label="Learn a MIDI control for this action"
+        >
+          {learning() === null ? 'LEARN' : 'LISTENING'}
+        </button>
+      </div>
+      <Show when={learning() !== null}>
+        <div class="audio-settings__hint audio-settings__hint--info" role="status">Tap a pedal or key on a MIDI device. Esc cancels.</div>
+      </Show>
+      <Show when={bindings().length > 0}>
+        <ul class="audio-settings__bindings" aria-label="MIDI bindings">
+          <For each={bindings()}>
+            {(b) => (
+              <li class="audio-settings__binding" title={b.portName}>
+                <span class="audio-settings__binding-action">{ACTION_LABELS[b.action]}</span>
+                <span class="audio-settings__binding-src">
+                  {midiSource(b)} · {b.momentary ? 'momentary' : 'latching'}
+                </span>
+                <button
+                  type="button"
+                  class="audio-settings__binding-clear"
+                  onClick={() => forget(b)}
+                  aria-label={`Forget ${ACTION_LABELS[b.action]} on ${midiSource(b)}, ${b.portName}`}
+                >
+                  ✕
+                </button>
+              </li>
+            )}
+          </For>
+        </ul>
+      </Show>
 
       {/* Diagnostics: the read-only host/isolated/plugin/midi status. The command-bar system lamp is
           their aggregate; this is the full read-out. The plugin-scan live region stays in the command

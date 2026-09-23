@@ -30,7 +30,33 @@ const PITCH_BEND_RANGE_SEMITONES = 2;
 
 function midiOwner(port: string, channel: number): string { return JSON.stringify([port, channel]); }
 
-function parseMidiMessage(ev: Event, port: string): void {
+/**
+ * Sees every 3-byte channel message before the play path and returns true to claim it; a claimed message
+ * reaches nothing below (no note, no CC64/1/123 branch, no bend). `port` is the input's id, `portName` its
+ * display name. MIDI learn installs it from the app layer (`src/app/midi-actions.ts`): `src/audio/` never
+ * imports `src/app/`, so the action table stays out of this file.
+ */
+type MidiConsumer = (port: string, portName: string, status: number, data1: number, data2: number) => boolean;
+
+let consumer: MidiConsumer | null = null;
+
+/** Install the consume-first hook (`null` removes it). One at a time: MIDI learn is its only user. */
+export function setMidiConsumer(fn: MidiConsumer | null): void {
+  consumer = fn;
+}
+
+/**
+ * The consume-first hook takes `controller` on this port and channel over, so its next values never
+ * reach the branch below: let go of what it last set there. A pedal held down while it was learned
+ * would otherwise sustain that channel for good, and a learned mod wheel would leave its vibrato on.
+ */
+export function releaseController(port: string, channel: number, controller: number): void {
+  const owner = midiOwner(port, channel);
+  if (controller === 64) inputRouter.setSustain(false, owner);
+  else if (controller === 1) inputRouter.setModulation(0, owner);
+}
+
+function parseMidiMessage(ev: Event, port: string, portName: string): void {
   const msg = ev as MIDIMessageEvent;
   const data = msg.data;
   if (!data || data.length === 0) return;
@@ -38,6 +64,8 @@ function parseMidiMessage(ev: Event, port: string): void {
   // Single-byte realtime messages (0xF8 timing clock, start/stop/sensing) fall out here: the
   // AudioContext is the only tempo authority (invariant 1), so external MIDI clock is not tracked.
   if (data.length < 3) return;
+
+  if (consumer?.(port, portName, data[0], data[1], data[2])) return;
 
   const status = data[0];
   const note   = data[1];
@@ -99,11 +127,11 @@ function attachInputs(access: MIDIAccess): void {
   const present = new Set<string>();
   access.inputs.forEach((input) => {
     if (input.state === 'disconnected') return;
+    const name = input.name ?? '(unknown)';
     input.onmidimessage = (event) => {
-      if (input.state !== 'disconnected') parseMidiMessage(event, input.id);
+      if (input.state !== 'disconnected') parseMidiMessage(event, input.id, name);
     };
     present.add(input.id);
-    const name = input.name ?? '(unknown)';
     attachedInputs.set(input.id, name);
     names.push(name);
   });

@@ -37,6 +37,9 @@ not here.
   slots and covers its ellipsis. Pills off the label's row, a shorter label, or none in synth mode?
 - **Audio Settings:** the "rec align" trim row after the buffer row — placement + wording; status chips
   moved into the diagnostics block (unratified).
+- **MIDI learn row (2026-09-23, built, unseen):** above diagnostics — action picker + LEARN (a cyan
+  LISTENING while it waits), then one line per binding (action · CC/note · channel · momentary or
+  latching, the port on hover, ✕ forgets). Right place and words? Is "latching" clear to a guitarist?
 - **Lanes:** the selected-lane warm-white edge (no rail, owner 2026-09-23) — strong enough under
   PLAYING? the ARMED amber dashed-ring pulse; the 10 px state word with its LED; from 1.5 m little
   carries (state word, REC core, four 5 px beat dots) — the "stage view" idea; undo/reverse cap placement (a per-track

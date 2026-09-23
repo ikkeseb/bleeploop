@@ -149,8 +149,8 @@
   gap: 10px;
   flex-wrap: wrap;
 }
-/* RETRY = a small matte key face (an action, not a state — so no colour) */
-.audio-settings__retry {
+/* RETRY ASIO and LEARN = a small matte key face (an action, not a state — so no colour) */
+.audio-settings__btn {
   flex: 0 0 auto;
   padding: 4px 9px;
   border: 1px solid transparent;
@@ -165,12 +165,73 @@
   cursor: pointer;
   transition: background-color 0.15s;
 }
-.audio-settings__retry:hover {
+.audio-settings__btn:hover:not(:disabled) {
   background: var(--surf-3);
 }
-.audio-settings__retry:active {
+.audio-settings__btn:active:not(:disabled) {
   background: var(--sunk);
   box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.6);
+}
+/* LEARN with no MIDI device: no face, --faint legend (as a disabled select) */
+.audio-settings__btn:disabled {
+  cursor: default;
+  background: transparent;
+  box-shadow: none;
+  border-color: rgba(255, 255, 255, 0.06);
+  color: var(--faint);
+}
+/* LEARN while it waits for a message: the --cyan legend AUTO REC's LISTEN uses */
+.audio-settings__btn--listening {
+  color: var(--cyan);
+  background: var(--surf-3);
+}
+
+/* The learned MIDI bindings: one line each in the value column (action · message · pedal kind), with a
+   ✕ that forgets it. The port name is the line's title. */
+.audio-settings__bindings {
+  margin: -4px 0 0;
+  padding: 0 0 0 83px;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.audio-settings__binding {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  font-size: 10.5px;
+}
+.audio-settings__binding-action {
+  flex: 0 0 auto;
+  color: var(--text);
+}
+.audio-settings__binding-src {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dim);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+.audio-settings__binding-clear {
+  flex: 0 0 auto;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dim);
+  font-size: 10px;
+  cursor: pointer;
+}
+.audio-settings__binding-clear:hover {
+  color: var(--text);
+  background: var(--surf-2);
 }
 
 /* a row that cannot act (ASIO unavailable) drops to the --faint legend: tone,

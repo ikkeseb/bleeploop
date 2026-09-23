@@ -4,7 +4,8 @@ import * as layoutStore from '../ui/layout/layout-store';
 import { runAction, selectTrack, type ActionId } from './actions';
 
 export interface TransportKeysOptions {
-  /** Escape was pressed — the app closes whichever popover is open. Never a play key. */
+  /** Escape was pressed — the app cancels a pending MIDI learn, else closes whichever popover is open.
+   * Never a play key. */
   onEscape: () => void;
 }
 
