@@ -56,9 +56,9 @@ export function preparePlaybackGraph(i: number): void {
     t.gain.gain.value = t.muted ? 0 : t.volume;
   }
   if (!t.fx) {
-    // Graph only: rhythmic source scheduling remains in startPlayback once the real anchor exists.
-    t.fx = new FxChain(t.fxState);
-    toneConnect(t.gain, t.fx.input);
+    const fx = new FxChain(t.fxState); // graph only: source scheduling stays in startPlayback
+    toneConnect(t.gain, fx.input);
+    t.fx = fx; // only once wired: a retry that finds t.fx set skips the connect, the lane stays silent
   }
 }
 
@@ -156,8 +156,12 @@ export function cancelOverdubSwap(i: number): void {
  * in render quanta) still reads a hair BEFORE the boundary, and a recompute would then return the SAME
  * boundary — a duplicate swap whose double-buffer pick would write into the AudioBuffer the outgoing
  * source is still reading (the alias-safety argument below assumes one firing per boundary).
+ *
+ * A swap that throws from the commit onward (record copy, peaks, buffer fill, source start) is logged here
+ * and handed to `onSwapFailed` (machine.ts decides the transition); it never re-arms, so a failed boundary
+ * cannot leave the lane OVERDUBBING with no swap left. The layer stays in `overdubBuf`, so STOP commits it.
  */
-export function scheduleOverdubSwap(i: number, boundary?: number): void {
+export function scheduleOverdubSwap(i: number, onSwapFailed: (error: unknown) => void, boundary?: number): void {
   cancelOverdubSwap(i);
   const t = engineState.tracks[i];
   const master = masterLengthFrames();
@@ -167,22 +171,28 @@ export function scheduleOverdubSwap(i: number, boundary?: number): void {
     if (t.overdubTimer !== timer) return;
     t.overdubTimer = null;
     if (t.state !== 'OVERDUBBING' || !t.overdubBuf) return;
-    // Commit summed layer into the record buffer.
-    t.record.set(t.overdubBuf.subarray(0, master), 0);
-    recomputePeaks(t, master);
-    // Double-buffer the playback AudioBuffer: write the summed loop into whichever of the two buffers is
-    // NOT live. The buffer picked here was last handed to a source two boundaries ago, and that source was
-    // stopped one boundary ago (startPlayback's prev.stop(when)) — a full loop period before now — so no
-    // active source is reading it. This avoids a fresh ~master-length AudioBuffer every loop period.
-    let audioBuf: AudioBuffer;
-    if (t.overdubSwapBufs) {
-      audioBuf = t.overdubSwapBufs[t.overdubSwapIdx];
-      audioBuf.getChannelData(0).set(t.record.subarray(0, master));
-      t.overdubSwapIdx ^= 1;
-    } else {
-      audioBuf = makeLoopBuffer(t.record, master);
+    try {
+      // Commit summed layer into the record buffer.
+      t.record.set(t.overdubBuf.subarray(0, master), 0);
+      recomputePeaks(t, master);
+      // Double-buffer the playback AudioBuffer: write the summed loop into whichever of the two buffers is
+      // NOT live. The buffer picked here was last handed to a source two boundaries ago, and that source was
+      // stopped one boundary ago (startPlayback's prev.stop(when)) — a full loop period before now — so no
+      // active source is reading it. This avoids a fresh ~master-length AudioBuffer every loop period.
+      let audioBuf: AudioBuffer;
+      if (t.overdubSwapBufs) {
+        audioBuf = t.overdubSwapBufs[t.overdubSwapIdx];
+        audioBuf.getChannelData(0).set(t.record.subarray(0, master));
+        t.overdubSwapIdx ^= 1;
+      } else {
+        audioBuf = makeLoopBuffer(t.record, master);
+      }
+      startPlayback(i, audioBuf, when);
+    } catch (error) {
+      console.error(`[looper] track ${i + 1}: overdub boundary swap failed`, error);
+      onSwapFailed(error);
+      return;
     }
-    startPlayback(i, audioBuf, when);
     // No refill needed: line "t.record.set(t.overdubBuf…)" above made record and overdubBuf
     // byte-identical, and nothing in between mutates either — the working copy already holds exactly
     // the committed content, so the layer keeps accumulating into it correctly.
@@ -194,7 +204,7 @@ export function scheduleOverdubSwap(i: number, boundary?: number): void {
       const scheduledNext = Math.round((when - engineState.masterStartTime) / period) + 1;
       const firstFuture = Math.floor((engine.ctx.currentTime - engineState.masterStartTime) / period) + 1;
       const n = Math.max(scheduledNext, firstFuture);
-      scheduleOverdubSwap(i, engineState.masterStartTime + n * period);
+      scheduleOverdubSwap(i, onSwapFailed, engineState.masterStartTime + n * period);
     }
   }, delayMs);
   t.overdubTimer = timer;

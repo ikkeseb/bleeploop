@@ -161,7 +161,7 @@ try {
 
     const loopSeconds = 0.8;
     const rampSpan = 0.08;
-    const amplitudes = [0.11, 0.23, 0.35];
+    const amplitudes = [0.11, 0.23, 0.35, 0.47, 0.59];
     let masterFrames = 0;
     const sampleAt = (lane, frame) => Math.fround(amplitudes[lane] + rampSpan * frame / masterFrames);
     const load = async (count) => {
@@ -423,7 +423,7 @@ try {
         lf.looper.playAll();
         const anchor = engineState.masterStartTime;
         const states = [0, 1, 2].map((lane) => lf.looper.stateOf(lane));
-        const reported = toasts().map((toast) => ({ message: toast.message, kind: toast.kind, count: toast.count }));
+        const reported = toasts().map((toast) => ({ message: toast.message, detail: toast.detail, kind: toast.kind, count: toast.count }));
         const failedLaneSource = engineState.tracks[1].source === null;
         failData = await failCapture.done;
         const measurements = [0, 2].map((lane) => topMeasurement(failData, lane, anchor));
@@ -441,7 +441,8 @@ try {
             && new Set(measurements.map((measurement) => measurement.firstFrame)).size === 1
             && failedLane.firstFrame === null
             && reported.length === 1 && reported[0].count === 1 && reported[0].kind === 'error'
-            && reported[0].message.includes('2'),
+            && reported[0].message.includes('2')
+            && reported[0].detail?.startsWith('The other tracks are playing.'),
           injectedStarts,
           oldAnchor: oldFailAnchor,
           anchor,
@@ -456,6 +457,104 @@ try {
       } finally {
         AudioBufferSourceNode.prototype.start = nativeStart;
         failCapture.cleanup();
+        for (const toast of toasts()) dismissToast(toast.id);
+      }
+
+      // ── PLAY ALL survives a lane whose PREP fails ──────────────────────────────────────
+      // Five lanes; the middle one (track 3) fails in makeLoopBuffer: its createBuffer call is the third
+      // master-length buffer PLAY ALL builds (lanes are prepared in order). The other four must start
+      // together from frame zero, track 3 must stay STOPPED, and one toast must name track 3.
+      await load(5);
+      await waitForOldPlaybackPhase();
+      lf.looper.stopAll();
+      for (const toast of toasts()) dismissToast(toast.id);
+      const oldPrepAnchor = engineState.masterStartTime;
+      const prepCapture = await startCapture([0, 1, 2, 3, 4]);
+      const nativeCreateBuffer = AudioContext.prototype.createBuffer;
+      let loopBuffers = 0;
+      let injectedPreps = 0;
+      AudioContext.prototype.createBuffer = function (...args) {
+        if (this === ctx && args[1] === masterFrames && ++loopBuffers === 3) {
+          injectedPreps++;
+          throw new Error('injected loop buffer prep failure');
+        }
+        return nativeCreateBuffer.apply(this, args);
+      };
+      try {
+        lf.looper.playAll();
+        AudioContext.prototype.createBuffer = nativeCreateBuffer;
+        const anchor = engineState.masterStartTime;
+        const states = [0, 1, 2, 3, 4].map((lane) => lf.looper.stateOf(lane));
+        const reported = toasts().map((toast) => ({ message: toast.message, detail: toast.detail, kind: toast.kind, count: toast.count }));
+        const failedLaneSource = engineState.tracks[2].source === null;
+        const prepData = await prepCapture.done;
+        const survivors = [0, 1, 3, 4];
+        const measurements = survivors.map((lane) => topMeasurement(prepData, lane, anchor));
+        const failedLane = topMeasurement(prepData, 2, anchor);
+        rows.push({
+          name: 'PLAY ALL keeps the surviving lanes when the middle lane fails to prepare',
+          pass: injectedPreps === 1
+            && anchor > oldPrepAnchor
+            && survivors.every((lane) => states[lane] === 'PLAYING') && states[2] === 'STOPPED'
+            && failedLaneSource
+            && measurements.every((measurement) => measurement.compared === 1024
+              && Math.abs(measurement.frameError) <= 1
+              && Math.abs(measurement.firstSampleError) < 0.00002
+              && measurement.maxRampError < 0.00002)
+            && new Set(measurements.map((measurement) => measurement.firstFrame)).size === 1
+            && failedLane.firstFrame === null
+            && reported.length === 1 && reported[0].count === 1 && reported[0].kind === 'error'
+            && reported[0].message.endsWith('track 3'),
+          injectedPreps,
+          oldAnchor: oldPrepAnchor,
+          anchor,
+          states,
+          failedLaneSource,
+          reported,
+          measurements,
+          failedLane,
+          captureBaseFrame: prepData.base,
+          armedFrame: prepCapture.armedAt,
+        });
+      } finally {
+        AudioContext.prototype.createBuffer = nativeCreateBuffer;
+        prepCapture.cleanup();
+        for (const toast of toasts()) dismissToast(toast.id);
+      }
+
+      // ── PLAY ALL where every lane fails ────────────────────────────────────────────────
+      // The toast must not claim that other tracks are playing when none started.
+      await load(2);
+      await waitForOldPlaybackPhase();
+      lf.looper.stopAll();
+      for (const toast of toasts()) dismissToast(toast.id);
+      let injectedAll = 0;
+      AudioBufferSourceNode.prototype.start = function (...args) {
+        if (this.loop && this.buffer?.length === masterFrames) {
+          injectedAll++;
+          throw new Error('injected source start failure');
+        }
+        return nativeStart.apply(this, args);
+      };
+      try {
+        lf.looper.playAll();
+        AudioBufferSourceNode.prototype.start = nativeStart;
+        const states = [0, 1].map((lane) => lf.looper.stateOf(lane));
+        const reported = toasts().map((toast) => ({ message: toast.message, detail: toast.detail, kind: toast.kind, count: toast.count }));
+        rows.push({
+          name: 'PLAY ALL with every lane failing reports that no track started',
+          pass: injectedAll === 2
+            && states.every((state) => state === 'STOPPED')
+            && [0, 1].every((lane) => engineState.tracks[lane].source === null)
+            && reported.length === 1 && reported[0].count === 1 && reported[0].kind === 'error'
+            && reported[0].message.endsWith('tracks 1, 2')
+            && reported[0].detail === 'No track started. Press play on a track to retry.',
+          injectedAll,
+          states,
+          reported,
+        });
+      } finally {
+        AudioBufferSourceNode.prototype.start = nativeStart;
         for (const toast of toasts()) dismissToast(toast.id);
       }
     } finally {
@@ -501,7 +600,7 @@ try {
       lf.looper.playAll();
       const anchor = engineState.masterStartTime;
       allData = await allCapture.done;
-      const measurements = amplitudes.map((_, lane) => topMeasurement(allData, lane, anchor));
+      const measurements = [0, 1, 2].map((lane) => topMeasurement(allData, lane, anchor));
       const firstFrames = measurements.map((measurement) => measurement.firstFrame);
       rows.push({
         name: 'PLAY ALL restarts every lane at one frame and source frame zero',
@@ -592,7 +691,7 @@ try {
   console.log(JSON.stringify(summary, null, 2));
   assert.equal(browserErrors.length, 0, `uncaught browser errors: ${browserErrors.join('\n')}`);
   assert.ok(results.rows.length > 0, 'probe produced no measurements');
-  assert.equal(summary.playFailureLogs.length, 1, 'the failed PLAY ALL lane must reach the release log exactly once');
+  assert.equal(summary.playFailureLogs.length, 4, 'each failed PLAY ALL lane (start 1 + prep 1 + all-fail 2) must reach the release log exactly once');
   for (const result of results.rows) assert.ok(result.pass, `${result.name}: ${JSON.stringify(result)}`);
 } finally {
   await browser.close();

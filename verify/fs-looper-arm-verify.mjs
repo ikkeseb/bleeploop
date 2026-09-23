@@ -22,7 +22,7 @@ let activeRecordIndex = -1;
 let masterFrames = MASTER;
 let bpmLocked = true;
 
-// MIRRORS: src/audio/looper/machine.ts@951-969 sha256:bd08c5442c9537c8  (resetMaster + resetMasterIfBlank)
+// MIRRORS: src/audio/looper/machine.ts@981-999 sha256:bd08c5442c9537c8  (resetMaster + resetMasterIfBlank)
 function resetMasterIfBlank(tracks) {
   if (activeRecordIndex < 0 && tracks.every((t) => t.state === 'EMPTY')) {
     masterFrames = 0;
@@ -71,7 +71,7 @@ function finishRecording(t) {
   releaseRecorderState(t);
 }
 // MIRRORS: src/audio/looper/machine.ts@608-613 sha256:f1ac00fd5fc132e0  (stopCapture: armed capture delegates to stop)
-// MIRRORS: src/audio/looper/machine.ts@806-837 sha256:63141d8ed4fdc7cc  (stop: capture abort and true-blank reset)
+// MIRRORS: src/audio/looper/machine.ts@820-851 sha256:63141d8ed4fdc7cc  (stop: capture abort and true-blank reset)
 // stopRecording — OLD (buggy): always pad+commit
 function stopRecording_OLD(t) {
   if (t.writeHead < MASTER) t.record.fill(0, t.writeHead, MASTER);

@@ -700,7 +700,7 @@ function startOverdub(i: number): void {
   engineState.captureEndFrame = null;
   engineState.captureCompensationFrames = compensation;
   engineState.captureStopPlayback = false;
-  scheduleOverdubSwap(i);
+  scheduleOverdubSwap(i, () => endOverdubAfterFailedSwap(i));
   publish(i);
 }
 
@@ -720,6 +720,20 @@ function finishOverdub(i: number): void {
   t.state = stopAfter ? 'STOPPED' : 'PLAYING';
   // The final summed loop becomes audible on the next boundary.
   if (!stopAfter) startPlayback(i, makeLoopBuffer(t.record, master), nextBoundary());
+}
+
+/**
+ * A boundary swap that threw (playback.ts logs it). The layer is still in `overdubBuf`, so end the
+ * session exactly as STOP during an overdub does: finishOverdub commits what was captured, the stale
+ * source stops and the lane lands in STOPPED. PLAY then restarts the committed loop.
+ */
+function endOverdubAfterFailedSwap(i: number): void {
+  if (engineState.tracks[i].state !== 'OVERDUBBING' || engineState.activeRecordIndex !== i) return;
+  notifyError(
+    `Track ${i + 1}: overdub stopped`,
+    'Playback could not switch to the new layer. The layer was kept and the track is stopped. Press play to hear it.',
+  );
+  playStop(i);
 }
 
 /**
@@ -916,29 +930,45 @@ function stopAll(): void {
 /**
  * Resume every STOPPED track together, restarting from the top when transport is idle.
  *
- * PLAY ALL is BEST-EFFORT PER LANE: a lane whose playback fails to start is rolled back to STOPPED by
- * `resume` and the fan-out continues with the rest, so one dead source cannot silence the whole jam.
- * Every failure still reaches the release log (`resume` logs per lane); the user-visible report is
+ * PLAY ALL is BEST-EFFORT PER LANE: a lane whose buffer/graph prep or playback start fails stays (or is
+ * rolled back by `resume` to) STOPPED and the fan-out continues with the rest, so one dead lane cannot
+ * silence the whole jam. Every failure still reaches the release log (prep failures are logged here,
+ * start failures by `resume`, once per lane); the user-visible report is
  * deduped into ONE toast naming the lanes that did not start.
  */
 function playAll(): void {
   // Every buffer is built before the shared start time is read (session.ts does the same on import).
-  const prepared = engineState.tracks.map((t) =>
-    t.state === 'STOPPED' && t.lengthFrames > 0 ? makeLoopBuffer(t.record, t.lengthFrames) : null,
-  );
   // A STOPPED copy of a STOPPED lane has never played: its gain → FX graph is still cold. Build every
   // graph before the shared anchor is read, or the build of one cold lane eats the lead of them all.
-  prepared.forEach((buf, i) => { if (buf) preparePlaybackGraph(i); });
-  const restartTime = prepared.some((b) => b !== null) ? restartTimeIfIdle() : null;
+  // Prep is per lane too: a lane whose buffer or graph cannot be built stays STOPPED and is reported.
   const failed: number[] = [];
+  const prepared = engineState.tracks.map((t, i) => {
+    if (t.state !== 'STOPPED' || t.lengthFrames === 0) return null;
+    try {
+      const buf = makeLoopBuffer(t.record, t.lengthFrames);
+      preparePlaybackGraph(i);
+      return buf;
+    } catch (e) {
+      console.error(`[looper] play failed on track ${i + 1}`, e);
+      failed.push(i + 1);
+      return null;
+    }
+  });
+  const restartTime = prepared.some((b) => b !== null) ? restartTimeIfIdle() : null;
+  let started = 0;
   for (let i = 0; i < TRACK_COUNT; i++) {
     const buf = prepared[i];
-    if (buf && !resume(i, restartTime, buf, false)) failed.push(i + 1);
+    if (!buf) continue;
+    if (resume(i, restartTime, buf, false)) started++;
+    else failed.push(i + 1);
   }
+  failed.sort((a, b) => a - b);
   if (failed.length > 0) {
     notifyError(
       `Playback failed to start on ${failed.length > 1 ? 'tracks' : 'track'} ${failed.join(', ')}`,
-      'The other tracks are playing. Press play on the listed tracks to retry.',
+      started > 0
+        ? 'The other tracks are playing. Press play on the listed tracks to retry.'
+        : 'No track started. Press play on a track to retry.',
     );
   }
 }

@@ -32,7 +32,7 @@ function check(name, fn) {
 }
 const region = (t) => Array.from(t.record.subarray(0, t.master));
 
-// MIRRORS: src/audio/looper/machine.ts@768-803 sha256:edeb9df821b211cd  (reverse — in-place two-pointer swap + swapLiveSource boundary swap)
+// MIRRORS: src/audio/looper/machine.ts@782-817 sha256:edeb9df821b211cd  (reverse — in-place two-pointer swap + swapLiveSource boundary swap)
 // ===== BEGIN PORT of looper/machine.ts reverse logic =====
 function mkTrack(record, master = record.length) {
   return {

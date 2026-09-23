@@ -11,12 +11,13 @@ packets; `master-latency.mjs` checks measured limiter delay;
 `record-stop-window.mjs` checks first/later/AUTO/FIXED capture windows, padding, cancellation,
 recorder release, playback-failure retry and the 60-second cap;
 `overdub-timers.mjs` counts actual callback registration/cancellation through rapid stop/reuse,
-compensated STOP, CLEAR and normal boundary rearming;
+compensated STOP, CLEAR, normal boundary rearming and a boundary swap whose source start fails (lane
+lands STOPPED, logged once, no successor timer, PLAY restarts the committed loop);
 `loop-end-stop.mjs` measures playback deadlines and UI;
 `playback-restart.mjs` measures rendered lane PCM for single/ALL idle restarts from frame zero,
 simultaneous lane starts, live-phase joins beside a muted lane pending END STOP, cold-graph starts
-(first PLAY and COPY into a lane that never played, under an injected FX-build cost) and a PLAY ALL
-whose middle lane fails to start;
+(first PLAY and COPY into a lane that never played, under an injected FX-build cost) and PLAY ALL
+with one lane failing at source start or at buffer prep (the others still start, one toast);
 `fx-grid.mjs` measures rhythmic effects;
 `fx-pitch-cost.mjs` checks unused pitch allocation, offline DSP cost, and live enable/reset continuity;
 `recovery-capacity.mjs`, `recovery-failure.mjs`, `recovery-worker.mjs` and `recovery-playback.mjs`

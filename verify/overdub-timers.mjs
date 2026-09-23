@@ -1,11 +1,14 @@
-// Vite on :1420. Count actual playback-owned timer registrations, callbacks and cancellations.
+// Vite on :1420 (or --url=). Count actual playback-owned timer registrations, callbacks and cancellations.
 // Exercises the real looper with silent output. This measures retained callbacks, not CPU or memory.
 // Restart Vite before running after source edits; the state identity guard rejects stale HMR modules.
 import { chromium } from 'playwright';
 import assert from 'node:assert/strict';
 
+// Every imported loop sample carries this level. Headless capture has no input signal, so an overdub
+// layer adds silence and a kept loop still reads LOAD_AMP per sample.
+const LOAD_AMP = 0.025;
 const selected = process.argv.find((arg) => arg.startsWith('--case='))?.slice(7);
-const cases = ['rapid', 'stopTail', 'clearReuse', 'rearm'];
+const cases = ['rapid', 'stopTail', 'clearReuse', 'rearm', 'swapFail'];
 assert.ok(!selected || cases.includes(selected), `Unknown case: ${selected}`);
 const browser = await chromium.launch({ headless: true, args: ['--autoplay-policy=no-user-gesture-required'] });
 try {
@@ -17,7 +20,7 @@ try {
   await page.evaluate(() => window.__lf.autosave.ready());
   const results = [];
   for (const name of cases.filter((value) => !selected || value === selected)) {
-    const result = await page.evaluate(async (name) => {
+    const result = await page.evaluate(async ({ name, loadAmp }) => {
       const lf = window.__lf;
       await lf.looper.init();
       const { engineState } = await import('/src/audio/looper/state.ts');
@@ -70,7 +73,7 @@ try {
         lf.looper.clearAll();
         await lf.looper.loadSession({ bpm: seconds === 1 ? 240 : 120, bars: seconds === 1 ? 1 : 4,
           masterLengthFrames: sr * seconds,
-          tracks: [{ index: 0, pcm: new Float32Array(sr * seconds).fill(0.025), volume: 1,
+          tracks: [{ index: 0, pcm: new Float32Array(sr * seconds).fill(loadAmp), volume: 1,
             muted: false, reversed: false, fx: defaultFxStates() }] });
         if (engineState.tracks[0].state !== lf.looper.stateOf(0)) throw new Error('Restart Vite: looper state identities disagree');
         // Pass the imported loop's first start, so the next timer targets its full-period boundary.
@@ -79,7 +82,7 @@ try {
       const snapshot = () => ({ pending: pending.size, scheduled: scheduled.length, fired, cancelled,
         cancelledFromPlayback, peakPending, state: lf.looper.stateOf(0), active: engineState.activeRecordIndex });
       try {
-        await load(name === 'rearm' ? 1 : 8);
+        await load(name === 'rearm' || name === 'swapFail' ? 1 : 8);
         const overrunsBefore = lf.looper.captureOverruns();
         const observations = {};
         if (name === 'rapid') {
@@ -118,6 +121,60 @@ try {
           await lf.looper.recDub(0);
           observations.reused = snapshot();
           lf.looper.clear(0);
+        } else if (name === 'swapFail') {
+          // D15: the first boundary swap's source start throws. The lane must leave OVERDUBBING into
+          // STOPPED with the committed loop kept, log once, register no successor timer, and PLAY again.
+          const { toasts, dismissToast } = await import('/src/notify.ts');
+          for (const toast of toasts()) dismissToast(toast.id);
+          const master = engineState.masterFramesPlain || sr;
+          const nativeStart = AudioBufferSourceNode.prototype.start;
+          const nativeError = console.error;
+          let injected = 0, swapLogs = 0, recordAtFailure = null;
+          console.error = function (...args) {
+            if (String(args[0]).includes('overdub boundary swap failed')) swapLogs++;
+            return nativeError.apply(this, args);
+          };
+          AudioBufferSourceNode.prototype.start = function (...args) {
+            if (injected === 0 && this.loop && this.buffer?.length === engineState.tracks[0].lengthFrames) {
+              injected++;
+              recordAtFailure = engineState.tracks[0].record.slice(0, engineState.tracks[0].lengthFrames);
+              throw new Error('injected overdub swap start failure');
+            }
+            return nativeStart.apply(this, args);
+          };
+          try {
+            await lf.looper.recDub(0);
+            observations.beforeSwap = snapshot();
+            await waitFor(() => fired >= 1, 'first boundary callback');
+            await waitFor(() => lf.looper.stateOf(0) === 'STOPPED', 'failed swap lands STOPPED');
+          } finally {
+            AudioBufferSourceNode.prototype.start = nativeStart;
+            console.error = nativeError;
+          }
+          observations.afterFailure = snapshot();
+          observations.injected = injected;
+          observations.swapLogs = swapLogs;
+          observations.toasts = toasts().map((toast) => toast.message);
+          observations.sourceAfterFailure = engineState.tracks[0].source !== null;
+          // Nothing re-arms: wait past the next boundary and count registrations again.
+          const period = engineState.tracks[0].lengthFrames / sr;
+          await pause(period * 1000 + 100);
+          observations.afterNextBoundary = snapshot();
+          const t = engineState.tracks[0];
+          let recordDrift = 0;
+          for (let k = 0; k < t.lengthFrames; k++) recordDrift = Math.max(recordDrift, Math.abs(t.record[k] - recordAtFailure[k]));
+          observations.recordDrift = recordDrift;
+          observations.recordMin = recordAtFailure.reduce((min, v) => Math.min(min, v), Infinity);
+          observations.recordMax = recordAtFailure.reduce((max, v) => Math.max(max, v), -Infinity);
+          lf.looper.playStop(0);
+          observations.playState = lf.looper.stateOf(0);
+          const played = t.source?.buffer?.getChannelData(0);
+          let playedDrift = played ? 0 : Infinity;
+          if (played) for (let k = 0; k < t.lengthFrames; k++) playedDrift = Math.max(playedDrift, Math.abs(played[k] - t.record[k]));
+          observations.playedDrift = playedDrift;
+          observations.master = master;
+          for (const toast of toasts()) dismissToast(toast.id);
+          lf.looper.stop(0);
         } else {
           await lf.looper.recDub(0);
           await waitFor(() => fired >= 2, 'two normal boundary callbacks');
@@ -140,7 +197,7 @@ try {
         lf.recordLatency.setEnabled(false);
         if (probeCancelled > 0) console.info(`[overdub-timers] probe teardown removed ${probeCancelled} retained callbacks`);
       }
-    }, name);
+    }, { name, loadAmp: LOAD_AMP });
     console.log(JSON.stringify(result));
     results.push(result);
   }
@@ -173,6 +230,23 @@ try {
       assert.equal(result.cleared.pending, 0);
       assert.equal(result.reused.pending, 1, 'reused track owns only its new timer');
       assert.equal(result.final.cancelled, 2);
+    } else if (result.name === 'swapFail') {
+      assert.equal(result.injected, 1, 'exactly one swap start was failed');
+      assert.equal(result.beforeSwap.state, 'OVERDUBBING');
+      assert.equal(result.afterFailure.state, 'STOPPED', 'a failed swap must leave OVERDUBBING');
+      assert.equal(result.afterFailure.active, -1, 'the recorder must be released');
+      assert.equal(result.afterFailure.pending, 0, 'no successor timer after a failed swap');
+      assert.equal(result.afterNextBoundary.scheduled, 1, 'no timer registered after the failed swap');
+      assert.equal(result.afterNextBoundary.fired, 1);
+      assert.equal(result.swapLogs, 1, 'the failed swap is logged exactly once');
+      assert.equal(result.toasts.length, 1, 'one toast reports the stopped overdub');
+      assert.equal(result.sourceAfterFailure, false, 'the stale source is freed');
+      // Half the seeded level either way: a lost loop (0) or a doubled commit (2x) both land outside.
+      assert.ok(Math.abs(result.recordMin - LOAD_AMP) < LOAD_AMP / 2 && Math.abs(result.recordMax - LOAD_AMP) < LOAD_AMP / 2,
+        `the committed loop is kept: samples ${result.recordMin}..${result.recordMax}, seeded ${LOAD_AMP}`);
+      assert.ok(result.recordDrift < 1e-6, `committed content changed after the failure: ${result.recordDrift}`);
+      assert.equal(result.playState, 'PLAYING', 'PLAY restarts the lane');
+      assert.equal(result.playedDrift, 0, 'PLAY starts the committed content');
     } else {
       assert.equal(result.running.fired, 2);
       assert.equal(result.running.pending, 1, 'normal callbacks rearm one successor');

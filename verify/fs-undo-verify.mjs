@@ -29,7 +29,7 @@ const arr = (t) => Array.from(t.record);
 const eq = (t, expected) => assert.deepStrictEqual(arr(t), expected);
 
 // MIRRORS: src/audio/looper/machine.ts@680-692 sha256:3f15be4ec4d701d7  (startOverdub — undoBuf snapshot)
-// MIRRORS: src/audio/looper/machine.ts@735-753 sha256:acb253ec85a4c162  (undoLastOverdub — record<->undoBuf swap)
+// MIRRORS: src/audio/looper/machine.ts@749-767 sha256:acb253ec85a4c162  (undoLastOverdub — record<->undoBuf swap)
 // ===== BEGIN PORT of looper/machine.ts undo logic =====
 function mkTrack(record) {
   return { record: Float32Array.from(record), undoBuf: null, overdubBuf: null, state: 'PLAYING', master: record.length, stopAt: null };

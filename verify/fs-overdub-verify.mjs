@@ -3,9 +3,11 @@
 // regression contrast; the preceding generation guard already prevented duplicate PCM swaps.
 // Actual timeout registration/cancellation and dispatcher behavior: overdub-timers.mjs.
 // MIRRORS: src/audio/looper/playback.ts@137-142 sha256:c5276b8403aa7026  (cancelOverdubSwap: cancel and release the owned handle)
-// MIRRORS: src/audio/looper/machine.ts@702-704 sha256:9eff65c27c4a9766  (startOverdub: reset stop intent and schedule its timer)
+// MIRRORS: src/audio/looper/machine.ts@702-704 sha256:bc2c1a5185785f45  (startOverdub: reset stop intent and schedule its timer)
 // MIRRORS: src/audio/looper/machine.ts@708-723 sha256:d8467ffdf994b309  (finishOverdub: successful REC/DUB completion; no STOP or loss in this model)
-// MIRRORS: src/audio/looper/playback.ts@160-201 sha256:0f9a28739937416f  (scheduleOverdubSwap: owned timeout and anchor-derived boundary swap)
+// MIRRORS: src/audio/looper/playback.ts@164-211 sha256:7cfc74fa6f8c9793  (scheduleOverdubSwap: owned timeout, anchor-derived boundary swap, a throw anywhere from the commit on hands off without re-arm)
+// MIRRORS: src/audio/looper/machine.ts@730-737 sha256:32a61f195d95f1d1  (endOverdubAfterFailedSwap: a failed swap ends the session like STOP)
+// MIRRORS: src/audio/looper/machine.ts@490-499 sha256:97c4d32d9220dcaa  (playStop: STOP during overdub commits, cancels the timer and lands STOPPED)
 
 let fails = 0, checks = 0;
 function ok(name, cond, detail = '') {
@@ -14,8 +16,14 @@ function ok(name, cond, detail = '') {
 }
 
 // Events run before the next boundary. Timer ids model the browser's owned/cancelled handles.
-function simulate({ useCancellation, taps, boundaries }) {
-  const track = { state: 'PLAYING', overdubBuf: false, overdubTimer: null, captureStopPlayback: false };
+// `failAt` (fixed scheduler only): the boundary index whose swap throws; `failStep`: the swap step
+// that throws (all of them sit inside the one try in scheduleOverdubSwap). Layers are counted: each
+// boundary's overdubBuf holds one more layer, and `record` holds whichever layer was last committed.
+const SWAP_STEPS = ['commit', 'peaks', 'fill', 'start'];
+function simulate({ useCancellation, taps, boundaries, failAt = -1, failStep = 'start' }) {
+  const track = { state: 'PLAYING', overdubBuf: false, overdubTimer: null, captureStopPlayback: false,
+    layer: 0, record: 0 };
+  const log = { errors: 0, committed: 0, failedLayer: -1 };
   let pending = [], nextId = 0;
   const cancel = () => {
     if (!useCancellation) return;
@@ -36,9 +44,17 @@ function simulate({ useCancellation, taps, boundaries }) {
   };
   const endOverdub = () => {
     if (track.state !== 'OVERDUBBING') return;
+    track.record = track.layer; // finishOverdub commits overdubBuf before dropping it
     track.overdubBuf = false;
     track.state = track.captureStopPlayback ? 'STOPPED' : 'PLAYING';
     cancel(); // finishCapture releases the recorder and its timer.
+  };
+  // endOverdubAfterFailedSwap -> playStop(OVERDUBBING): stop intent, cancel, then the capture tail commits.
+  const stopDuringOverdub = () => {
+    if (track.state !== 'OVERDUBBING') return;
+    track.captureStopPlayback = true;
+    cancel();
+    endOverdub();
   };
   for (const event of taps) {
     (event === 'start' ? startOverdub : endOverdub)();
@@ -54,11 +70,21 @@ function simulate({ useCancellation, taps, boundaries }) {
       if (useCancellation && track.overdubTimer !== id) continue;
       track.overdubTimer = null;
       if (track.state !== 'OVERDUBBING' || !track.overdubBuf) continue;
+      track.layer++; // this boundary's captured layer, summed into overdubBuf
+      const throwsAt = b === failAt ? SWAP_STEPS.indexOf(failStep) : SWAP_STEPS.length;
+      if (throwsAt > 0) { track.record = track.layer; log.committed++; } // record.set(overdubBuf)
+      if (throwsAt < SWAP_STEPS.length) {
+        log.errors++; // console.error once, then hand off; the callback returns before any re-arm
+        log.failedLayer = track.layer;
+        stopDuringOverdub();
+        continue;
+      }
       swaps++;
       if (track.state === 'OVERDUBBING') schedule();
     }
     swapsPerBoundary.push(swaps);
   }
+  if (failAt >= 0) return { swapsPerBoundary, track, pending: pending.length, ...log };
   return swapsPerBoundary;
 }
 
@@ -155,6 +181,25 @@ for (let cycles = 1; cycles <= 6; cycles++) {
       n === firstFuture && next > ctxNow && next - ctxNow <= period,
       `scheduledNext=${scheduledNext} firstFuture=${firstFuture} next=${next} now=${ctxNow}`);
   }
+}
+
+// ---- F. A swap that throws at any step ends the session: STOPPED, layer kept, no successor timer ----
+// Before D15 the throw escaped the timer, so the re-arm never ran and the lane stayed OVERDUBBING with
+// no swap left: later layers accumulated into a buffer that never played. The try covers the whole
+// swap body from the commit on, so a throw before the commit is handed off too; STOP then commits.
+for (const failStep of SWAP_STEPS) for (const failAt of [0, 1, 3]) {
+  const r = simulate({ useCancellation: true, taps: ['start'], boundaries: 6, failAt, failStep });
+  ok(`F.${failStep}@${failAt} lane leaves OVERDUBBING into STOPPED`, r.track.state === 'STOPPED', r.track.state);
+  ok(`F.${failStep}@${failAt} failure logged once`, r.errors === 1, `errors=${r.errors}`);
+  ok(`F.${failStep}@${failAt} no timer pending after the failure`, r.pending === 0 && r.track.overdubTimer === null,
+    `pending=${r.pending}`);
+  ok(`F.${failStep}@${failAt} swaps stop at the failed boundary`,
+    r.swapsPerBoundary.every((n, b) => n === (b < failAt ? 1 : 0)), JSON.stringify(r.swapsPerBoundary));
+  ok(`F.${failStep}@${failAt} the failed boundary's layer is kept`, r.track.record === r.failedLayer &&
+    r.failedLayer === failAt + 1, `record=${r.track.record} failedLayer=${r.failedLayer}`);
+  ok(`F.${failStep}@${failAt} swap commits match the throw point`,
+    r.committed === failAt + (failStep === 'commit' ? 0 : 1), `committed=${r.committed}`);
+  ok(`F.${failStep}@${failAt} capture released (overdub buffer dropped)`, r.track.overdubBuf === false);
 }
 
 // The old Float32-ring mock here no longer represents the timestamped transport. Actual packet
