@@ -13,7 +13,6 @@ const outDir = 'logs/contact-sheet';
 const viewports = [[1280, 820], [1920, 1080], [1000, 700]];
 const placements = ['bottom', 'hidden'];
 const scenes = ['1-empty', '2-first-take-recording', '3-armed-waiting', '4-count-in', '5-fx-five-lanes', '6-help', '7-audio-settings'];
-const REC = [255, 71, 87]; // --rec in src/app.css
 const REC_PIXEL_LIMIT = 20; // anti-aliasing slack; a red playhead or tape is hundreds of pixels
 
 await mkdir(outDir, { recursive: true });
@@ -89,7 +88,13 @@ try {
       await page.waitForFunction(() => window.__lf.looper.trackInfo(1).armed);
       await page.waitForTimeout(700);
       await shoot(scene);
-      const red = await page.evaluate(([REC]) => {
+      const red = await page.evaluate(() => {
+        // --rec read from the live stylesheet, so a palette retune never turns this check vacuous
+        const probe = document.createElement('i');
+        probe.style.color = 'var(--rec)';
+        document.body.append(probe);
+        const REC = getComputedStyle(probe).color.match(/\d+/g).slice(0, 3).map(Number);
+        probe.remove();
         const near = (canvas) => {
           const c = document.createElement('canvas');
           c.width = canvas.width; c.height = canvas.height;
@@ -103,8 +108,8 @@ try {
           return n;
         };
         const canvases = document.querySelectorAll('.lp-lane canvas');
-        return { armed: window.__lf.looper.trackInfo(1).armed, lane2RecPixels: near(canvases[1]), lane3RecPixels: near(canvases[2]) };
-      }, [REC]);
+        return { armed: window.__lf.looper.trackInfo(1).armed, rec: REC.join(','), lane2RecPixels: near(canvases[1]), lane3RecPixels: near(canvases[2]) };
+      });
       console.log(JSON.stringify({ tag, scene, ...red }));
       if (!red.armed) fail(`${tag} ${scene}: lane 2 was no longer armed at measurement`);
       else if (red.lane2RecPixels > REC_PIXEL_LIMIT) fail(`${tag} ${scene}: A3 armed lane 2 canvas has ${red.lane2RecPixels} rec-red pixels while waiting (limit ${REC_PIXEL_LIMIT}; empty lane 3 has ${red.lane3RecPixels})`);

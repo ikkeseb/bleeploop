@@ -25,19 +25,15 @@ not here.
   (Help) / "Overdubbing" (screen reader) across three surfaces — one word?
 - **Audio Settings:** the "rec align" trim row after the buffer row — placement + wording; status chips
   moved into the diagnostics block (unratified).
-- **Lanes:** the selected-lane cyan edge (subtle under green PLAYING — tune, or a left rail); the
-  ARMED amber dashed-ring pulse; the 8 px lane state word; from 1.5 m nothing carries (state word,
-  12 px REC core, four 5 px beat dots) — the "stage view" idea; undo/reverse cap placement (a per-track
+- **Lanes:** the selected-lane warm-white edge (no rail, owner 2026-09-23) — strong enough under
+  PLAYING? the ARMED amber dashed-ring pulse; the 10 px state word with its LED; from 1.5 m little
+  carries (state word, REC core, four 5 px beat dots) — the "stage view" idea; undo/reverse cap placement (a per-track
   properties surface?); the empty well says nothing at all (no first-run guidance in the looper).
 - **Looper prominence:** does the first-run stage read looper-as-hero? `DEFAULT_STAGE_WEIGHTS` in
   `layout-store.ts` (keyboard 0.55 / looper 2.0, instrument = autoSize, keyboard BOTTOM). Keyboard
   de-emphasis is open — rebalance, don't remove (default-hidden / slimmer strip).
 - **Plugin drawer:** one by-eye lap with a real plugin drawer (params scroll INSIDE the card, header
   pinned); slot vertical-expand.
-- **Grey on grey:** the TEXT tokens measure AA-clean — do NOT re-tune them; the residual is
-  surface-on-surface (`--well` α .04 vs `--glass` α .045, same hue) + the lane state word. A LIVE
-  `src/app.css` token session over HMR; agent recommendation from the four `--well` variant shots:
-  dark-step.
 - **Keyboard transport feel:** 1–5 / Space / Enter (drum mode: pads own 1–4, only 5 selects); a refused
   Space/Enter is announced to screen readers only, still no sighted cue (`docs/plans/pedalboard.md` piece 1).
 - **COPY pill (2026-09-18):** "⧉ COPY" after REV in the lane's pill row, hidden while no lane is
@@ -59,13 +55,10 @@ not here.
 - **Non-hue state cues (2026-09-22, built, unseen):** toast severity glyph (⚠ error / ✓ done) in a
   16 px accent column beside the stripe; the system lamp's warn ring; the record meter's 1 px ring at
   clipping and the 3 px AUTO notch. Right size, right weight?
-- **"On" pills carry state by colour only (2026-09-22):** CLICK / FIXED / AUTO REC / RETAKE / END STOP
-  engaged-cyan vs dim measures ΔE 7.2 under protanopia — a glyph or word carrier (`● CLICK`)?
+- **"On" pills (2026-09-23 restyle):** engaged CLICK / FIXED / AUTO REC / RETAKE / END STOP is a
+  warm-white legend on a lifted face with an edge, no hue — reads as ON at a glance, or add `● CLICK`?
 - **Hit targets under 24 px (2026-09-22):** `transport__step` 22 px, `toast__close` 20 px, the `lf-range`
   12 px band.
-- **Lane colours under deuteranopia (2026-09-22):** REC red and PLAYING green land on nearly the same
-  yellow; in greyscale only the 8 px state word and the core glyph separate the lanes (the 7 px word
-  at low height even less). A shape carrier (glyph in the left rail, larger word) or a palette move?
 - **Audio Settings popover (2026-09-22):** no max-height/scroll (Help has one); non-modal for the
   keyboard yet modal for the pointer.
 - **Empty plugin scan note (2026-09-22, built):** one muted mono line per slot, "No plugins found ·

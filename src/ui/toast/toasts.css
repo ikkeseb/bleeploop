@@ -1,4 +1,4 @@
-/* Error-toast surface — Orbit V2. A quiet dark-glass stack bottom-right (placement
+/* Error-toast surface — "Instrument". A quiet near-opaque panel stack bottom-right (placement
    is its own open eye-gate — kept, not moved). z-index 200 sits ABOVE the settings/help popover backdrop (z 40)
    so a failure toast is never occluded by an open popover. The container is pointer-transparent (the
    play path stays live behind it); each toast opts back in. */
@@ -22,16 +22,16 @@
   gap: 9px;
   padding: 10px 9px 10px 13px;
   border-radius: 12px;
-  /* near-opaque dark glass — a toast floats over any content, so it must stay solidly legible */
-  background: color-mix(in srgb, var(--bg) 86%, rgba(148, 168, 215, 0.08));
-  backdrop-filter: blur(14px) saturate(1.1);
+  /* near-opaque panel (no blur) — a toast floats over any content, so it must stay solidly legible */
+  background: var(--panel);
   border: 1px solid var(--glass-edge);
-  box-shadow: 0 16px 36px -14px rgba(0, 0, 0, 0.72), 0 3px 10px -6px rgba(0, 0, 0, 0.55);
+  box-shadow: inset 0 1px 0 var(--hair), 0 16px 36px -14px rgba(0, 0, 0, 0.72);
   cursor: pointer;
-  transition: opacity 0.15s, border-color 0.15s;
+  transition: border-color 0.15s;
 }
+/* hover = a brighter edge (the whole toast is a dismiss target), never an opacity fade */
 .toast:hover {
-  opacity: 0.92;
+  border-color: var(--line-2);
 }
 
 /* left rule + glyph: severity stays legible without relying on hue alone */
@@ -48,7 +48,6 @@
   font-size: 11px;
   font-weight: 700;
   line-height: 1;
-  text-shadow: 0 0 8px currentColor;
 }
 .toast__accent::after {
   content: '⚠';
@@ -94,7 +93,7 @@
   word-break: break-word;
 }
 
-/* close affordance — a flat glass outline cap; the whole toast body is also a pointer dismiss shortcut */
+/* close affordance — a matte key face; the whole toast body is also a pointer dismiss shortcut */
 .toast__close {
   flex: 0 0 auto;
   display: grid;
@@ -102,16 +101,21 @@
   width: 20px;
   height: 20px;
   padding: 0;
-  border: 1px solid var(--glass-edge);
+  border: 1px solid transparent;
   border-radius: 7px;
-  background: transparent;
+  background: var(--surf-2);
+  box-shadow: inset 0 1px 0 var(--hair);
   color: var(--dim);
   cursor: pointer;
-  transition: color 0.15s, border-color 0.15s;
+  transition: color 0.15s, background-color 0.15s;
 }
 .toast__close:hover {
   color: var(--text);
-  border-color: var(--dim);
+  background: var(--surf-3);
+}
+.toast__close:active {
+  background: var(--sunk);
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.6);
 }
 .toast__close:focus-visible {
   outline-offset: 1px;

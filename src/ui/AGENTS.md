@@ -4,13 +4,15 @@ The root `AGENTS.md` routes here — read this before any work in this subtree (
 is a one-line adapter). UI-only edits are safe while the dev app runs.
 
 - **Stay fresh-eyes:** keep proposing ideas and viewpoints, render + screenshot; the owner's eye is
-  the gate. Restrained type: system-sans +
-  mono numerals, no display/retro font. Theme colors are CSS custom properties in `src/app.css` —
-  use the tokens.
+  the gate. Type: Geist for words, Geist Mono only for changing numeric read-outs (both vendored,
+  `src/assets/fonts/`); no display/retro font. The surface language ("Instrument": matte tone steps,
+  colour only for sound, warm-white = engaged) and its tokens live in the `src/app.css` header — use
+  the tokens.
 - **Looper UI = "Orbit V2 · Lanes".** Read the spec
   (`docs/inspiration/revamp-2026-07/orbit-v2-lanes.html`) before ANY looper-UI work. These
   production deltas win over the mockup: REC/DUB-only round core with a separate PLAY/STOP + CLR
-  pair, **MUTE** as the 2nd right-cluster cap, volume **0..1.5** with a 0 dB detent at 1.0.
+  pair, **MUTE** as the 2nd right-cluster cap, volume **0..1.5** with a 0 dB detent at 1.0, and the
+  Instrument surfaces/type replace the mockup's glass, aurora and cyan-engaged idiom (layout stays).
 - **Empty-lane right cluster is disabled by design** (`disabled={isEmpty()}` in `Looper.tsx`) — ask
   before changing it; decision D4: volume on an EMPTY track stays non-settable.
 - **Layout:** `layout/SplitStack.tsx` is the N-pane seam and panes never remount on

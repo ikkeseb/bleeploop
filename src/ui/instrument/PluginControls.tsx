@@ -185,7 +185,7 @@ export function PluginBar(props: {
         <button
           type="button"
           class="tgl live"
-          classList={{ 'on-green': live() }}
+          classList={{ 'on-green': live() && !webMonitor(), 'is-degraded': webMonitor() }}
           aria-pressed={live()}
           aria-label={
             webMonitor()
@@ -204,7 +204,7 @@ export function PluginBar(props: {
           {webMonitor() ? 'INPUT LIVE · WEB MONITOR' : live() ? 'INPUT LIVE' : 'GO LIVE'}
         </button>
       </Show>
-      {/* editor toggle (open = cyan) */}
+      {/* editor toggle (open = the lit warm-white `.on` legend) */}
       <button
         type="button"
         class="tgl"

@@ -1,33 +1,53 @@
+@font-face {
+  font-family: 'Geist';
+  src: url('./assets/fonts/Geist-Variable.woff2') format('woff2');
+  font-weight: 100 900;
+  font-display: block;
+}
+@font-face {
+  font-family: 'Geist Mono';
+  src: url('./assets/fonts/GeistMono-Variable.woff2') format('woff2');
+  font-weight: 100 900;
+  font-display: block;
+}
+
 :root {
-  /* ===== Orbit V2 token system — dark glass surfaces, colour is state. Most values are copied verbatim
-     from the approved mockup docs/inspiration/revamp-2026-07/orbit-v2-lanes.html. EXCEPTION — three
-     tokens were DELIBERATELY lifted OFF the mockup for legibility (owner's call, 2026-07-05/06, eye-gated
-     over live HMR): --dim (#8e95a8→#bcc3d4) + --faint (#545b6e→#7c8498) for text contrast, and --well
-     (near-black→grey glass) so recessed lanes aren't black voids. Do NOT "restore" the mockup values for
-     those three — the divergence is the fix. The rest is the mockup set; don't re-derive. W8 removed the
-     v6 skeuomorphic material tokens (the --cap- / --strip- / --deck- / --well-bg families) and the
-     old-name migration aliases (--accent, --ok, --warn, --line, --text-dim, --text-faint) now that every
-     component is ported to these tokens. ===== */
-  --bg: #07080d;
-  --glass: rgba(148, 168, 215, 0.045); /* card fill */
-  --glass-2: rgba(148, 168, 215, 0.07); /* hover fill */
-  --panel: rgba(10, 12, 20, 0.9); /* near-opaque floating panel */
-  --glass-edge: rgba(148, 168, 215, 0.11); /* card border */
-  --well: rgba(148, 168, 215, 0.04); /* recessed wave lane — grey glass family (was near-black rgba(3,4,8,.55), which read as a black void); recess now reads via the inset shadow + border, not blackness */
+  /* ===== Token system — "Instrument" (owner-approved 2026-09-23 over the Orbit V2 mockup). Matte,
+     flat, anodised: surfaces separate by TONE plus one hairline of top light, never by bevels, drop
+     shadows or backdrop blur. Colour is spent only on sound (lane state: --rec/--dub/--play); chrome
+     "engaged" is a lit warm-white legend (--engaged), not cyan. The wave well is a sunk floor darker
+     than its card (it replaces the 2026-07 grey-glass --well; the recess reads through tone + a lit
+     bottom lip, so it is not the old black void). --cyan survives for LISTEN, focus and key-down. ===== */
+  --bg: #0a0b0e;
+  --surf-1: #121419; /* card */
+  --surf-2: #171a20; /* control face */
+  --surf-3: #1d2028; /* hover / engaged face */
+  --sunk: #0c0d11; /* the well floor and the display window */
+  --card: linear-gradient(180deg, #14161b, #111317 70%); /* card fill: a faint top-lit tone ramp */
+  --hair: rgba(255, 255, 255, 0.055); /* the top edge light */
+  --glass: var(--surf-1); /* legacy name: card fill */
+  --glass-2: var(--surf-3); /* legacy name: hover fill */
+  --panel: rgba(16, 18, 22, 0.97); /* floating panel (popovers, toasts) */
+  --glass-edge: rgba(255, 255, 255, 0.07); /* card + control border */
+  --line-2: rgba(255, 255, 255, 0.12); /* hover border */
+  --well: var(--sunk);
   --text: #eef1f8;
-  --dim: #bcc3d4; /* INVARIANT: --caret-svg bakes this hex (%23bcc3d4) inline — retune BOTH together */
-  --faint: #7c8498;
-  /* dropdown caret — data-URI can't use var(), so the --dim hex is baked in here. INVARIANT: %23bcc3d4
+  --dim: #b9bcc6; /* INVARIANT: --caret-svg bakes this hex (%23b9bcc6) inline — retune BOTH together */
+  --faint: #7d818d;
+  --engaged: #f4efe6; /* warm white: engaged / selected chrome */
+  /* dropdown caret — data-URI can't use var(), so the --dim hex is baked in here. INVARIANT: %23b9bcc6
      below IS --dim; if --dim is retuned this must be retuned in lockstep or the caret silently drifts. */
-  --caret-svg: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3e%3cpath fill='none' stroke='%23bcc3d4' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.6' d='M3 6l5 5 5-5'/%3e%3c/svg%3e");
-  --rec: #ff4757;
-  --dub: #ffb02e;
-  --play: #2be48a;
+  --caret-svg: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3e%3cpath fill='none' stroke='%23b9bcc6' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.6' d='M3 6l5 5 5-5'/%3e%3c/svg%3e");
+  --rec: #ff3b52;
+  --dub: #ffae2a;
+  --play: #36e39a;
   --cyan: #46d4e8;
   --violet: #7f6bff;
 
-  --mono: ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo, Consolas, monospace;
-  --sans: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  /* Geist + Geist Mono (OFL-1.1, vendored in src/assets/fonts; licence in licenses/). Sans for words,
+     mono only for changing numeric read-outs (dB, gain, meters). */
+  --mono: 'Geist Mono', ui-monospace, Consolas, monospace;
+  --sans: 'Geist', system-ui, 'Segoe UI', sans-serif;
 
   font-synthesis: none;
   color-scheme: dark;
@@ -46,18 +66,14 @@ body,
 
 body {
   color: var(--text);
-  /* restrained system-sans (mono is reserved for numerals) — no dependency on Inter being installed. */
   font-family: var(--sans);
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
   overflow: hidden;
   user-select: none;
-  /* three static aurora radial-gradients over --bg (copied verbatim from the Orbit V2 mockup) — a
-     subtle, off-axis glow that shows in the stage padding so the whole app sits on one surface. */
+  /* one warm, faint top light over --bg — the whole app sits on one surface. */
   background:
-    radial-gradient(80% 60% at 12% -15%, rgba(127, 107, 255, 0.13), transparent 55%),
-    radial-gradient(70% 50% at 90% -12%, rgba(70, 212, 232, 0.08), transparent 50%),
-    radial-gradient(100% 60% at 50% 125%, rgba(43, 228, 138, 0.04), transparent 55%),
+    radial-gradient(120% 70% at 50% -30%, rgba(255, 244, 228, 0.035), transparent 60%),
     var(--bg);
 }
 
@@ -119,9 +135,9 @@ option {
   margin: clamp(10px, 1.3vh, 15px) clamp(16px, 2vw, 28px) 0;
   padding: 9px 18px;
   border-radius: 16px;
-  background: var(--glass);
+  background: #101216;
   border: 1px solid var(--glass-edge);
-  backdrop-filter: blur(10px);
+  box-shadow: inset 0 1px 0 var(--hair);
   min-width: 0;
 }
 /* Two-row arrangement when one row cannot fit — measured and flagged by app/cmd-fit.ts (a media query
@@ -165,22 +181,21 @@ option {
   background: none;
   border: 0;
 }
-/* brand — mono letterspaced wordmark + the conic-gradient dot (the logo is approved; copied exact from
+/* brand — letterspaced sans wordmark + the conic-gradient dot (the logo is approved; copied exact from
    the mockup). "BLEEP" dim, "LOOP" bright. */
 .brand {
   display: inline-flex;
   align-items: center;
   gap: 10px;
-  font-family: var(--mono);
   font-size: 12px;
-  font-weight: 600;
-  letter-spacing: 0.24em;
+  font-weight: 700;
+  letter-spacing: 0.16em;
   white-space: nowrap;
   color: var(--dim);
 }
 .brand b {
   color: var(--text);
-  font-weight: 600;
+  font-weight: 700;
 }
 .brand__dot {
   width: 11px;
@@ -265,16 +280,14 @@ option {
 .tool--gear:hover svg {
   transform: rotate(35deg);
 }
-/* tool engaged (e.g. the keyboard toggle while the keyboard is shown) = cyan + a faint glass fill */
+/* tool engaged (e.g. the keyboard toggle while the keyboard is shown) = lit legend + a face */
 .tool--on {
-  color: var(--cyan);
+  color: var(--engaged);
   background: var(--glass-2);
 }
-/* gear open — cyan with a contained inset glow instead of the fill */
+/* gear open — the same lit legend */
 .tool--gear.tool--on {
-  color: var(--cyan);
-  background: none;
-  box-shadow: inset 0 0 12px -6px var(--cyan), 0 0 14px -8px var(--cyan);
+  color: var(--engaged);
 }
 .tool--rescan.scanning svg {
   animation: lf-spin 0.9s linear infinite;
@@ -287,6 +300,11 @@ option {
 @media (prefers-reduced-motion: reduce) {
   .tool--rescan.scanning svg {
     animation: none;
+  }
+  .tool svg,
+  .tool--gear:hover svg {
+    transition: none;
+    transform: none;
   }
 }
 
@@ -353,8 +371,9 @@ option {
   max-height: 100%; /* the shell never leaves the region — an overgrown drawer scrolls inside it */
   min-width: 0;
   border-radius: 14px;
-  background: var(--glass);
+  background: var(--card);
   border: 1px solid var(--glass-edge);
+  box-shadow: inset 0 1px 0 var(--hair);
   display: flex;
   flex-direction: column;
   cursor: pointer;
@@ -362,12 +381,11 @@ option {
   transition: background 0.2s, box-shadow 0.2s, border-color 0.2s;
 }
 .slot:hover {
-  background: var(--glass-2);
+  background: #14161c;
 }
-/* ACTIVE = cyan rim + a contained cyan glow (colour = engaged/selection) */
+/* ACTIVE = a lit warm-white rim (selection is chrome, not sound, so it carries no hue) */
 .slot--active {
-  border-color: color-mix(in srgb, var(--cyan) 40%, var(--glass-edge));
-  box-shadow: 0 0 24px -14px var(--cyan), inset 0 0 24px -20px var(--cyan);
+  border-color: rgba(244, 239, 230, 0.2);
 }
 /* the compact row: identity · source label + name · right cluster */
 .slot__row {
@@ -378,12 +396,11 @@ option {
   min-width: 0;
   flex-shrink: 0; /* the header never compresses — only the drawer below it scrolls */
 }
-/* A / B identity — mono, cyan glow when active; also the keyboard/SR activation control */
+/* A / B identity — lit warm-white when active; also the keyboard/SR activation control */
 .slot__id {
   flex: 0 0 auto;
-  font-family: var(--mono);
-  font-size: 19px;
-  font-weight: 800;
+  font-size: 20px;
+  font-weight: 700;
   line-height: 1;
   color: var(--faint);
   background: none;
@@ -396,8 +413,7 @@ option {
   color: var(--dim);
 }
 .slot--active .slot__id {
-  color: var(--cyan);
-  text-shadow: 0 0 12px color-mix(in srgb, var(--cyan) 60%, transparent);
+  color: var(--engaged);
 }
 .slot__id:focus-visible {
   outline-offset: 3px;
@@ -413,28 +429,30 @@ option {
   flex-shrink: 0;
 }
 .slot__k {
-  font-family: var(--mono);
-  font-size: 8.5px;
-  letter-spacing: 0.26em;
+  font-size: 9.5px;
+  line-height: 11px;
+  font-weight: 500;
+  letter-spacing: 0.1em;
   text-transform: uppercase;
   color: var(--faint);
   white-space: nowrap;
 }
 .slot__name {
-  font-size: 13px;
+  font-size: 14px;
+  line-height: 16px;
   font-weight: 600;
+  letter-spacing: -0.01em;
   color: var(--text);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 .slot__name small {
-  font-family: var(--mono);
   color: var(--dim);
-  font-weight: 400;
-  font-size: 9px;
+  font-weight: 500;
+  font-size: 9.5px;
   margin-left: 7px;
-  letter-spacing: 0.12em;
+  letter-spacing: 0.06em;
   text-transform: uppercase;
 }
 .slot__acts {
@@ -454,42 +472,58 @@ option {
   justify-content: flex-end;
 }
 
-/* flat outline toggle pill — the Orbit idiom (mockup .tgl). Engaged = coloured text + border + a faint
-   inset glow. Explicit background so the UA dark-mode button face never bleeds through. */
+/* toggle pill — a matte key face without an outline; engaged = the legend lights warm-white and the
+   face lifts one tone. Pressed = the face sinks. Disabled = no face, a hairline edge and a legible
+   --faint legend (tone, never an opacity fade). Explicit background so no UA face bleeds through. */
 .tgl {
-  font-family: var(--mono);
-  font-size: 10px;
-  letter-spacing: 0.15em;
+  font-size: 11px;
+  line-height: 13px; /* pinned: the slot row keeps its measured height */
+  letter-spacing: 0.06em;
   font-weight: 600;
   padding: 7px 12px;
-  border: 1px solid var(--glass-edge);
-  border-radius: 9px;
-  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: var(--surf-2);
+  box-shadow: inset 0 1px 0 var(--hair);
   color: var(--dim);
   cursor: pointer;
   white-space: nowrap;
-  transition: color 0.15s, border-color 0.15s, box-shadow 0.15s;
+  transition: color 0.15s, background-color 0.15s, border-color 0.15s;
 }
 .seg .tgl {
   padding: 6px 10px;
+  font-size: 12px;
+  line-height: 12px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
 }
-.tgl:hover {
+.tgl:hover:not(:disabled) {
   color: var(--text);
-  border-color: var(--dim);
+  background: var(--surf-3);
+}
+.tgl:active:not(:disabled) {
+  background: var(--sunk);
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.6);
 }
 .tgl:disabled {
-  opacity: 0.4;
   cursor: default;
+  background: transparent;
+  box-shadow: none;
+  border-color: rgba(255, 255, 255, 0.06);
+  color: var(--faint);
 }
 .tgl.on {
-  color: var(--cyan);
-  border-color: color-mix(in srgb, var(--cyan) 55%, transparent);
-  box-shadow: 0 0 14px -6px var(--cyan), inset 0 0 10px -7px var(--cyan);
+  color: var(--engaged);
+  background: var(--surf-3);
+  border-color: rgba(244, 239, 230, 0.28);
+  text-shadow: 0 0 10px rgba(244, 239, 230, 0.35);
 }
+/* live input stays a sound colour (it IS sound) */
 .tgl.on-green {
   color: var(--play);
-  border-color: color-mix(in srgb, var(--play) 55%, transparent);
-  box-shadow: 0 0 14px -6px var(--play), inset 0 0 10px -7px var(--play);
+  background: color-mix(in srgb, var(--play) 8%, var(--surf-2));
+  border-color: color-mix(in srgb, var(--play) 40%, transparent);
+  text-shadow: 0 0 10px color-mix(in srgb, var(--play) 45%, transparent);
 }
 
 /* ---- range sliders — ONE skin ----
@@ -516,12 +550,12 @@ option {
 :where(.lf-range)::-webkit-slider-runnable-track {
   height: 3px;
   border-radius: 999px;
-  background: linear-gradient(to right, var(--dim) var(--fill), rgba(148, 168, 215, 0.15) var(--fill));
+  background: linear-gradient(to right, var(--dim) var(--fill), rgba(255, 255, 255, 0.12) var(--fill));
 }
 :where(.lf-range)::-moz-range-track {
   height: 3px;
   border-radius: 999px;
-  background: rgba(148, 168, 215, 0.15);
+  background: rgba(255, 255, 255, 0.12);
 }
 :where(.lf-range)::-moz-range-progress {
   height: 3px;
@@ -558,15 +592,15 @@ option {
   -webkit-appearance: none;
   color-scheme: dark;
   padding: 0 28px 0 11px;
-  border-radius: 9px;
-  border: 1px solid var(--glass-edge);
+  border-radius: 8px;
+  border: 1px solid transparent;
+  box-shadow: inset 0 1px 0 var(--hair);
   color: var(--dim);
-  font-family: var(--mono);
-  font-size: 10px;
-  letter-spacing: 0.06em;
+  font-size: 11px;
+  font-weight: 500;
   cursor: pointer;
   background-image: var(--caret-svg);
-  background-color: transparent;
+  background-color: var(--surf-2);
   background-repeat: no-repeat;
   background-position: right 9px center;
   background-size: 12px 12px;
@@ -574,7 +608,7 @@ option {
 }
 .slot__select:hover {
   color: var(--text);
-  border-color: var(--dim);
+  background-color: var(--surf-3);
 }
 .slot__select:focus-visible {
   outline-offset: 1px;
@@ -584,15 +618,13 @@ option {
   color: var(--text);
 }
 .slot__select option:checked {
-  background: color-mix(in srgb, var(--cyan) 22%, #14171d);
+  background: #2a2d35;
   color: #fff;
 }
-/* loaded = a thin cyan rim + a cyan caret, not a fill */
+/* loaded = the lit warm-white rim of an engaged control */
 .slot__select.is-loaded {
   color: var(--text);
-  border-color: color-mix(in srgb, var(--cyan) 40%, var(--glass-edge));
-  box-shadow: inset 0 0 10px -7px var(--cyan);
-  background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3e%3cpath fill='none' stroke='%2346d4e8' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.6' d='M3 6l5 5 5-5'/%3e%3c/svg%3e");
+  border-color: rgba(244, 239, 230, 0.28);
 }
 
 /* the params drawer (accordion) — a glass sub-panel that expands the slot card downward. Rendered

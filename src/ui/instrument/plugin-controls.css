@@ -1,7 +1,7 @@
-/* PluginControls (Orbit V2 · W3). The compact-row controls (live / editor / gain readout) reuse the
-   shared flat-pill `.tgl` rules in app.css; this file styles the bits specific to the plugin slot:
+/* PluginControls ("Instrument"). The compact-row controls (live / editor / gain readout) reuse the
+   shared matte key-face `.tgl` rules in app.css; this file styles the bits specific to the plugin slot:
    the bar container + gain-disclosure trimmings, and the accordion drawer body (PluginParams) — an
-   OUTPUT gain slider + a preview grid of the plugin's first params, all as slim Orbit groove sliders. */
+   OUTPUT gain slider + a preview grid of the plugin's first params, all on the one `.lf-range` skin. */
 
 /* ---- PluginBar — the right-cluster controls on the compact slot row ---- */
 .slot__plug {
@@ -19,29 +19,49 @@
   flex: 0 0 auto;
   border-radius: 999px;
   background: var(--play);
-  box-shadow: 0 0 8px var(--play);
+  box-shadow: 0 0 6px var(--play);
 }
 /* GO LIVE at rest: the row's primary action (hearing yourself through the effect), so it carries the
-   play colour before it is armed — armed adds the glow + dot via the shared `.on-green`. */
-.tgl.live:not(.on-green) {
+   play colour before it is armed — armed lights the face + dot via the shared `.on-green`. */
+.tgl.live:not(.on-green, .is-degraded) {
   color: color-mix(in srgb, var(--play) 80%, var(--dim));
   border-color: color-mix(in srgb, var(--play) 35%, transparent);
 }
-.tgl.live:not(.on-green):hover:not(:disabled) {
+.tgl.live:not(.on-green, .is-degraded):hover:not(:disabled) {
   color: var(--play);
   border-color: color-mix(in srgb, var(--play) 60%, transparent);
 }
+/* WEB MONITOR fallback: still live, but the native low-latency monitor was lost — so it must NOT wear
+   the healthy `.on-green`. It takes the --dub warning legend, and the live dot turns amber with it. */
+.tgl.live.is-degraded {
+  color: var(--dub);
+  border-color: color-mix(in srgb, var(--dub) 45%, transparent);
+}
+.tgl.live.is-degraded .tgl__dot {
+  background: var(--dub);
+  box-shadow: 0 0 6px var(--dub);
+}
 /* the PARAMS drawer-disclosure pill — a dim gain readout (mono numerals) + a caret that flips when open */
 .slot__gain {
-  font-variant-numeric: tabular-nums;
   gap: 5px;
   display: inline-flex;
   align-items: center;
 }
+/* fixed-width, right-aligned tabular readout: the pill never changes width as the gain moves
+   ("−40.0 dB" is the longest string gainDb makes). Tone, never an opacity fade. */
 .slot__gainval {
-  letter-spacing: 0.04em;
+  display: inline-block;
+  min-width: 8ch;
+  text-align: right;
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 10.5px;
   font-weight: 500;
-  opacity: 0.6;
+  color: var(--faint);
+}
+.slot__gain:hover:not(:disabled) .slot__gainval,
+.slot__gain.on .slot__gainval {
+  color: var(--dim);
 }
 .slot__caret {
   display: inline-block;
@@ -52,9 +72,8 @@
   transform: rotate(180deg);
 }
 .pc__err {
-  font-size: 9.5px;
+  font-size: 10px;
   color: var(--dub);
-  font-family: var(--mono);
   white-space: nowrap;
 }
 
@@ -106,24 +125,24 @@
   min-width: 0;
 }
 .param__name {
-  font-size: 9.5px;
+  font-size: 10px;
   color: var(--dim);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .param--gain .param__name {
-  font-family: var(--mono);
-  letter-spacing: 0.18em;
+  letter-spacing: 0.08em;
   text-transform: uppercase;
-  font-size: 8.5px;
-  color: var(--faint);
+  font-size: 9.5px;
+  font-weight: 600;
+  color: var(--dim);
 }
 .param__val {
   font-family: var(--mono);
   font-variant-numeric: tabular-nums;
-  font-size: 9px;
-  color: var(--faint);
+  font-size: 9.5px;
+  color: var(--dim);
 }
 
 /* the param range wears the app-wide `.lf-range` skin (app.css); a taller hit area for dense lists */
@@ -131,20 +150,15 @@
   width: 100%;
   height: 14px;
 }
-/* the gain cap earns cyan (engaged/selection) */
-.param--gain .param__range::-webkit-slider-thumb {
-  background: var(--cyan);
-  box-shadow: 0 0 8px -1px var(--cyan);
-}
-.param--gain .param__range::-moz-range-thumb {
-  background: var(--cyan);
-  box-shadow: 0 0 8px -1px var(--cyan);
-}
+/* the OUTPUT gain cap wears the plain `.lf-range` --text cap like every other fader (cyan is kept for
+   focus / LISTEN / key-down only) */
 
+/* a readout of the plugin's last edited param (name + value) — a quiet mono read-out, not a sound state */
 .pc__lastedit {
   font-size: 9.5px;
-  color: var(--play);
+  color: var(--dim);
   font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
 }
 .pc__empty {
   font-size: 10px;

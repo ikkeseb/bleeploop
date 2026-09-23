@@ -16,6 +16,14 @@ memory or upstream docs. Versions are the ones actually resolved in this repo
 | [ringbuf.js](https://github.com/padenot/ringbuf.js) | 0.4.0 | **MPL-2.0** | see below |
 | [@tauri-apps/api](https://github.com/tauri-apps/tauri) | 2.11.0 | Apache-2.0 OR MIT | Tauri JS bindings |
 
+### Geist and Geist Mono — SIL Open Font License 1.1
+
+The UI typefaces, Geist and Geist Mono (Copyright (c) 2023 Vercel, in collaboration with
+basement.studio), are vendored unmodified as variable WOFF2 files from the `geist` npm package 1.7.2
+in `src/assets/fonts/` and bundled into the app. They are licensed under the SIL Open Font License
+1.1, not the repository's MIT licence. The licence text is `licenses/OFL-1.1-Geist.txt`; the installer
+puts it beside the exe. Upstream: <https://github.com/vercel/geist-font>.
+
 ### ringbuf.js — MPL-2.0 (file-level copyleft)
 
 `ringbuf.js` is licensed under the Mozilla Public License 2.0. MPL-2.0 is a *file-level*

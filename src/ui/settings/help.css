@@ -1,7 +1,7 @@
-/* Help / shortcuts popover — Orbit V2 (W7). Same floating dark-glass card as AudioSettings, anchored
-   top-right under the command-bar help cap (see .settings-popover in app.css). Keys render as flat
-   glass cap chips (sharps a shade darker, like black keys); the drum pads as a 4-column grid mirroring
-   the on-screen 4×4. Colour is rationed to state — chrome stays monochrome. */
+/* Help / shortcuts popover — "Instrument". Same floating panel as AudioSettings, anchored top-right
+   under the command-bar help cap (see .settings-popover in app.css). Keys render as matte key-face
+   chips (sharps sunk a tone, like black keys); the drum pads as a 4-column grid of sunk wells mirroring
+   the on-screen 4×4. Colour is spent only on sound — chrome stays monochrome. */
 .help {
   display: flex;
   flex-direction: column;
@@ -11,11 +11,10 @@
   overflow-y: auto;
   padding: 15px;
   border-radius: 14px;
-  /* near-opaque dark glass (the popover floats over the busy lanes — see audio-settings.css) */
+  /* near-opaque panel (the popover floats over the busy lanes — see audio-settings.css) */
   background: var(--panel);
-  backdrop-filter: blur(16px) saturate(1.1);
   border: 1px solid var(--glass-edge);
-  box-shadow: 0 20px 48px -14px rgba(0, 0, 0, 0.72), 0 4px 14px -8px rgba(0, 0, 0, 0.55);
+  box-shadow: inset 0 1px 0 var(--hair), 0 20px 48px -14px rgba(0, 0, 0, 0.72);
   scrollbar-width: thin;
   scrollbar-color: var(--glass-edge) transparent;
 }
@@ -27,12 +26,11 @@
   border-radius: 999px;
 }
 
-/* panel title — mono eyebrow */
+/* panel title — caps eyebrow */
 .help__title {
-  font-family: var(--mono);
-  font-size: 10px;
+  font-size: 10.5px;
   text-transform: uppercase;
-  letter-spacing: 0.2em;
+  letter-spacing: 0.08em;
   color: var(--dim);
   font-weight: 600;
 }
@@ -44,7 +42,7 @@
 }
 .help__h {
   margin: 0;
-  font-size: 11px;
+  font-size: 11.5px;
   font-weight: 600;
   color: var(--text);
   display: flex;
@@ -52,17 +50,15 @@
   gap: 7px;
 }
 .help__tag {
-  font-family: var(--mono);
-  font-size: 8.5px;
-  font-weight: 400;
+  font-size: 9.5px;
+  font-weight: 500;
   text-transform: uppercase;
-  letter-spacing: 0.16em;
+  letter-spacing: 0.06em;
   color: var(--dim);
 }
 
-/* ---- a flat glass key cap ---- */
+/* ---- a matte key-face cap (the legend is a key name, so Geist, not mono) ---- */
 .help__kbd {
-  font-family: var(--mono);
   font-size: 11px;
   font-weight: 600;
   text-transform: uppercase;
@@ -73,8 +69,9 @@
   display: inline-grid;
   place-items: center;
   border-radius: 6px;
-  background: var(--glass-2);
-  border: 1px solid var(--glass-edge);
+  background: var(--surf-3);
+  border: 1px solid transparent;
+  box-shadow: inset 0 1px 0 var(--hair);
 }
 
 /* ---- play-key rows: key cap + its note ---- */
@@ -89,12 +86,12 @@
   gap: 4px;
 }
 .help__chip--sharp .help__kbd {
-  /* sharps read a shade darker, like the black keys */
-  background: rgba(3, 4, 8, 0.6);
+  /* sharps sink a tone, like the black keys */
+  background: var(--sunk);
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.6);
   color: var(--dim);
 }
 .help__note {
-  font-family: var(--mono);
   font-size: 10px;
   font-variant-numeric: tabular-nums;
   color: var(--dim);
@@ -107,7 +104,7 @@
 }
 .help__sub {
   margin: 0;
-  font-size: 10px;
+  font-size: 10.5px;
   color: var(--dim);
   line-height: 1.45;
 }
@@ -125,11 +122,11 @@
   min-width: 0;
   padding: 4px 5px;
   border-radius: 7px;
-  background: var(--well);
-  border: 1px solid var(--glass-2);
+  background: var(--sunk);
+  box-shadow: inset 0 2px 5px rgba(0, 0, 0, 0.55);
 }
 .help__padname {
-  font-size: 9px;
+  font-size: 9.5px;
   color: var(--dim);
   white-space: nowrap;
   overflow: hidden;
@@ -144,7 +141,7 @@
   gap: 4px;
 }
 .help__list li {
-  font-size: 10px;
+  font-size: 10.5px;
   color: var(--dim);
   line-height: 1.45;
 }
@@ -152,7 +149,7 @@
 /* "About this build" (ASIO builds only). The logo is Steinberg artwork: sized, never restyled. */
 .help__about {
   margin: 0 0 8px;
-  font-size: 10px;
+  font-size: 10.5px;
   color: var(--dim);
   line-height: 1.45;
 }
@@ -160,7 +157,7 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 9px;
+  font-size: 9.5px;
   color: var(--dim);
   line-height: 1.4;
 }

@@ -1,6 +1,6 @@
 /* Looper UI — Orbit V2 · Lanes. Five full-width horizontal LANES stacked in the looper zone.
-   Aesthetic spec: docs/inspiration/revamp-2026-07/orbit-v2-lanes.html (approved). Dark glass
-   surfaces; colour is state — the per-lane `--sc` token drives the identity word, the core ring/glow
+   Layout spec: docs/inspiration/revamp-2026-07/orbit-v2-lanes.html (approved); the surface language is
+   the "Instrument" token set in src/app.css (matte tone steps, no blur). Colour is state — the per-lane `--sc` token drives the identity word, the core ring/glow
    and a soft left-edge bleed. The waveform canvas is coloured independently by waveform.ts (global
    --rec/--dub/--play tokens); the audio engine + state machine are UNCHANGED. Everything is scoped
    under .lp. */
@@ -51,8 +51,9 @@
   gap: clamp(9px, 1vw, 14px);
   padding: clamp(6px, 1vh, 9px) clamp(10px, 1vw, 14px);
   border-radius: 16px;
-  background: var(--glass);
+  background: var(--card);
   border: 1px solid var(--glass-edge);
+  box-shadow: inset 0 1px 0 var(--hair);
   position: relative;
   overflow: hidden;
   --sc: var(--faint);
@@ -63,13 +64,12 @@
 .lp-lane[data-state='dub'] { --sc: var(--dub); }
 .lp-lane[data-state='armed'] { --sc: var(--dub); }
 .lp-lane[data-state='listening'] { --sc: var(--cyan); }
-.lp-lane[data-state='stop'] { --sc: #6b7387; }
+.lp-lane[data-state='stop'] { --sc: #a4a8b3; } /* between EMPTY and PLAYING in luminance */
 /* MUTED take (playing or stopped): the lane goes grey — state colour, ring, left-edge bleed and the
    waveform (waveform.ts dims it) all drop, so a silent lane is never mistaken for a sounding one from
    across the room. A live capture (rec/dub) keeps its colour even while muted: the take is being made. */
-.lp-lane[data-muted][data-state='play'],
-.lp-lane[data-muted][data-state='stop'] {
-  --sc: #6b7387;
+.lp-lane[data-muted][data-state='play'] {
+  --sc: #8a8e99;
 }
 .lp-lane[data-muted][data-state='play']::before {
   display: none;
@@ -100,11 +100,15 @@
   letter-spacing: 0.16em;
 }
 
-/* Keyboard/MIDI-selected lane — a quiet cyan edge so "which track will Space/Enter hit" is glanceable
-   without competing with the state colour (--sc). Taste-gated: tune weight / swap to a left rail. */
-.lp-lane.is-selected {
-  border-color: color-mix(in srgb, var(--cyan) 40%, var(--glass-edge));
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--cyan) 22%, transparent);
+/* Keyboard/MIDI-selected lane — the edge lights warm-white so "which track will Space/Enter hit" is
+   glanceable without competing with the state colour (--sc). No rail (owner, 2026-09-23). The doubled
+   class outranks the live-capture border below, so the selection never disappears. */
+.lp-lane.is-selected.is-selected {
+  border-color: rgba(244, 239, 230, 0.3);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+.lp-lane.is-selected[data-state='empty'] {
+  background: #13151a;
 }
 
 /* a whisper of state colour bleeding in from the left edge — flair, not flood */
@@ -114,20 +118,25 @@
   left: 0;
   top: 0;
   bottom: 0;
-  width: 34%;
+  width: 22%;
   pointer-events: none;
-  background: radial-gradient(80% 120% at -10% 50%, color-mix(in srgb, var(--sc) 10%, transparent), transparent 70%);
+  background: linear-gradient(90deg, color-mix(in srgb, var(--sc) 9%, transparent), transparent);
 }
 .lp-lane[data-state='empty']::before,
 .lp-lane[data-state='stop']::before {
   display: none;
 }
 .lp-lane[data-state='empty'] {
-  border-style: dashed;
-  background: var(--glass); /* was transparent (pure black bg, which read as a black void) — now the same grey glass card as the top panel + active lanes; the dashed border + EMPTY word keep the empty cue */
-  /* W8 legibility (grey-on-grey): the "EMPTY" state word rides --sc, so nudge it a step off pure
-     --faint toward --dim here — reads clearly while staying well below a live state word's bright colour. */
-  --sc: color-mix(in srgb, var(--dim) 45%, var(--faint));
+  background: #0f1115; /* one tone below a lane holding a take; the EMPTY word + unlit LED carry the cue */
+  border-color: rgba(255, 255, 255, 0.05);
+  box-shadow: none;
+  --sc: #8a8e99;
+}
+/* a live capture: the edge takes the state colour and the face warms from the left */
+.lp-lane[data-state='rec'],
+.lp-lane[data-state='dub'] {
+  border-color: color-mix(in srgb, var(--sc) 55%, transparent);
+  background: linear-gradient(90deg, color-mix(in srgb, var(--sc) 7%, var(--surf-1)), var(--surf-1) 40%);
 }
 
 /* ---- left cluster: identity + core + play-stop/clear pair ---- */
@@ -144,13 +153,14 @@
   flex: 0 0 auto;
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  width: 66px;
+  gap: 6px;
+  width: 74px;
 }
 .lp-lane__num {
-  font-family: var(--mono);
-  font-size: clamp(17px, 1.5vw, 21px);
-  font-weight: 800;
+  font-size: clamp(19px, 1.7vw, 24px);
+  font-weight: 600;
+  letter-spacing: -0.03em;
+  font-variant-numeric: tabular-nums;
   line-height: 1;
   color: var(--dim);
 }
@@ -161,21 +171,54 @@
 .lp-lane[data-state='listening'] .lp-lane__num {
   color: var(--text);
 }
+/* the state word with an LED: lit for PLAYING / ARMED / LISTEN, dark otherwise. A live capture
+   (REC / OVERDUB) becomes a FILLED badge, a carrier that survives greyscale and every colour-vision type
+   (STATUS D14). The REC word brings its own ●, so the badge drops the LED. */
 .lp-lane__state {
-  font-family: var(--mono);
-  font-size: 8px;
-  letter-spacing: 0.22em;
-  font-weight: 700;
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  font-weight: 650;
+  line-height: 1;
+  padding: 3px 6px 3px 0;
+  border-radius: 4px;
   color: var(--sc);
   white-space: nowrap;
 }
+.lp-lane__state::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: #23262e;
+  box-shadow: inset 0 1px 1px rgba(0, 0, 0, 0.8);
+}
+.lp-lane[data-state='play']:not([data-muted]) .lp-lane__state::before,
+.lp-lane[data-state='armed'] .lp-lane__state::before,
+.lp-lane[data-state='listening'] .lp-lane__state::before {
+  background: var(--sc);
+  box-shadow: 0 0 6px var(--sc);
+}
+.lp-lane[data-state='armed'] .lp-lane__state::before,
+.lp-lane[data-state='listening'] .lp-lane__state::before {
+  animation: lp-armed-ring 1.4s ease-in-out infinite;
+}
 .lp-lane[data-state='rec'] .lp-lane__state,
-.lp-lane[data-state='armed'] .lp-lane__state,
-.lp-lane[data-state='listening'] .lp-lane__state {
-  text-shadow: 0 0 9px var(--sc);
+.lp-lane[data-state='dub'] .lp-lane__state {
+  background: var(--sc);
+  color: #0b0b0d;
+  padding: 3px 7px;
+}
+.lp-lane[data-state='rec'] .lp-lane__state::before,
+.lp-lane[data-state='dub'] .lp-lane__state::before {
+  display: none;
 }
 
-/* the CORE — the REC/DUB gesture, ringed + glowing by state */
+/* the CORE — the REC/DUB gesture: a matte knob in a bezel, ringed by state; REC/DUB light the face */
 .lp-core {
   flex: 0 0 auto;
   width: clamp(38px, 8.5cqh, 52px);
@@ -184,9 +227,9 @@
   display: grid;
   place-items: center;
   color: var(--text);
-  background: radial-gradient(circle at 50% 35%, #191d2b, #0a0c15);
-  border: 1px solid var(--glass-edge);
-  box-shadow: 0 4px 16px -6px rgba(0, 0, 0, 0.8), inset 0 1px 0 rgba(200, 215, 255, 0.1);
+  background: radial-gradient(circle at 50% 30%, #23262e, #15171c 70%);
+  border: 1px solid rgba(0, 0, 0, 0.6);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 0 0 3px var(--sunk), 0 0 0 4px var(--glass-edge);
   position: relative;
   cursor: pointer;
   transition: border-color 0.15s, box-shadow 0.2s, transform 0.12s;
@@ -194,6 +237,11 @@
 .lp-core:hover:not(:disabled) {
   border-color: var(--dim);
   transform: scale(1.03);
+}
+@media (prefers-reduced-motion: reduce) {
+  .lp-core:hover:not(:disabled) {
+    transform: none;
+  }
 }
 .lp-core:active:not(:disabled) {
   transform: translateY(1px) scale(0.99);
@@ -216,24 +264,20 @@
   position: absolute;
   inset: -5px;
   border-radius: 999px;
-  border: 1.5px solid var(--sc);
+  border: 2px solid var(--sc);
   opacity: 0;
   transition: opacity 0.2s;
 }
-.lp-lane[data-state='play'] .lp-core::before,
-.lp-lane[data-state='rec'] .lp-core::before,
-.lp-lane[data-state='dub'] .lp-core::before {
-  opacity: 0.8;
+.lp-lane[data-state='play'] .lp-core::before {
+  opacity: 0.9;
+  box-shadow: 0 0 8px -2px var(--sc);
 }
-.lp-lane[data-state='rec'] .lp-core {
-  color: var(--rec);
-  border-color: color-mix(in srgb, var(--rec) 55%, transparent);
-  box-shadow: 0 0 22px -6px var(--rec), inset 0 0 12px -7px var(--rec);
-}
+/* REC / OVERDUB: the whole face lights, like the hardware REC button */
+.lp-lane[data-state='rec'] .lp-core,
 .lp-lane[data-state='dub'] .lp-core {
-  color: var(--dub);
-  border-color: color-mix(in srgb, var(--dub) 55%, transparent);
-  box-shadow: 0 0 22px -6px var(--dub), inset 0 0 12px -7px var(--dub);
+  color: #fff;
+  background: radial-gradient(circle at 50% 35%, color-mix(in srgb, var(--sc) 80%, #fff), var(--sc) 50%, color-mix(in srgb, var(--sc) 55%, #000));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.3), 0 0 16px -3px var(--sc), 0 0 0 3px var(--sunk), 0 0 0 4px var(--glass-edge);
 }
 .lp-lane[data-state='empty'] .lp-core {
   color: var(--rec); /* the bright ● invites the first take */
@@ -242,8 +286,6 @@
    + an amber ● glyph. Distinct from live REC (red, solid ring, ■) and OVERDUB (amber, solid ring, ■). */
 .lp-lane[data-state='armed'] .lp-core {
   color: var(--dub);
-  border-color: color-mix(in srgb, var(--dub) 45%, transparent);
-  box-shadow: 0 0 16px -8px var(--dub), inset 0 0 10px -8px var(--dub);
 }
 .lp-lane[data-state='armed'] .lp-core::before {
   opacity: 0.9;
@@ -252,8 +294,6 @@
 }
 .lp-lane[data-state='listening'] .lp-core {
   color: var(--cyan);
-  border-color: color-mix(in srgb, var(--cyan) 45%, transparent);
-  box-shadow: 0 0 16px -8px var(--cyan), inset 0 0 10px -8px var(--cyan);
 }
 .lp-lane[data-state='listening'] .lp-core::before {
   opacity: 0.9;
@@ -283,45 +323,43 @@
   height: clamp(20px, 4.2cqh, 24px);
   min-width: 58px;
   padding: 0 10px;
-  border: 1px solid var(--glass-edge);
-  border-radius: 8px;
-  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: var(--surf-2);
+  box-shadow: inset 0 1px 0 var(--hair);
   color: var(--dim);
-  font-family: var(--mono);
-  font-size: 9px;
+  font-size: 10px;
   font-weight: 600;
-  letter-spacing: 0.12em;
+  letter-spacing: 0.06em;
   display: grid;
   place-items: center;
   white-space: nowrap;
   cursor: pointer;
-  transition: color 0.15s, border-color 0.15s, box-shadow 0.15s;
+  transition: color 0.15s, background-color 0.15s, border-color 0.15s;
 }
 .lp-pb:hover:not(:disabled) {
   color: var(--text);
-  border-color: var(--dim);
+  background: var(--surf-3);
 }
+.lp-pb:active:not(:disabled) {
+  background: var(--sunk);
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.6);
+}
+/* disabled = no face, a hairline edge, a legible --faint legend: tone, never an opacity fade, so an
+   EMPTY lane's PLAY / CLR / FX / MUTE still read as controls (W8 grey-on-grey, owner 2026-09-23). */
 .lp-pb:disabled {
-  opacity: 0.32;
   cursor: not-allowed;
+  background: transparent;
+  box-shadow: none;
+  border-color: rgba(255, 255, 255, 0.06);
+  color: var(--faint);
 }
-/* W8 legibility: an EMPTY lane's disabled PLAY/CLR/FX/MUTE pills were grey-on-grey — lift them a step
-   so they still read as controls. Still clearly disabled (~half), empty still reads quieter than active.
-   ONE multiplier per element, deliberately: these values used to COMPOUND with an opacity on the right
-   cluster (.lp-lane__right 0.7 × 0.5 = 0.35 effective), so tuning either knob moved the other cluster's
-   result too and only one of the two was documented — which is why three rounds of tuning kept missing.
-   Every value below is now the FINAL rendered alpha. */
-.lp-lane[data-state='empty'] .lp-pb:disabled {
-  opacity: 0.5; /* left cluster: PLAY / CLR */
-}
-.lp-lane[data-state='empty'] .lp-lane__right .lp-pb:disabled {
-  opacity: 0.35; /* right cluster: FX / MUTE (was 0.7 × 0.5) */
-}
-/* engaged (FX / MUTE / reverse) reads cyan = engaged/selection (the Orbit idiom, per the mockup) */
+/* engaged (FX / MUTE / reverse) = the lit warm-white legend of every engaged control */
 .lp-pb.is-on {
-  color: var(--cyan);
-  border-color: color-mix(in srgb, var(--cyan) 50%, transparent);
-  box-shadow: inset 0 0 10px -7px var(--cyan);
+  color: var(--engaged);
+  background: var(--surf-3);
+  border-color: rgba(244, 239, 230, 0.28);
+  text-shadow: 0 0 10px rgba(244, 239, 230, 0.35);
 }
 .lp-pb--play:not(:disabled):hover {
   color: var(--play);
@@ -343,10 +381,13 @@
   position: relative;
   overflow: hidden;
   border-radius: 10px;
-  background: var(--well);
-  border: 1px solid var(--glass-edge);
-  box-shadow: inset 0 2px 10px rgba(0, 0, 0, 0.55);
+  background: var(--well); /* sunk: darker floor, shadowed top lip, a lit bottom lip */
+  border: 1px solid rgba(0, 0, 0, 0.55);
+  box-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.55), 0 1px 0 var(--hair);
   z-index: 1;
+}
+.lp-lane[data-state='empty'] .lp-lane__well {
+  background: #0d0e12;
 }
 .lp-lane__well canvas {
   position: absolute;
@@ -365,9 +406,9 @@
   pointer-events: none;
   padding: 0 8px;
   text-align: center;
-  font-family: var(--mono);
-  font-size: clamp(8px, 0.9vw, 10px);
-  letter-spacing: 0.3em;
+  font-size: clamp(10px, 0.9vw, 11px);
+  font-weight: 500;
+  letter-spacing: 0.14em;
   color: var(--faint);
 }
 .lp-lane[data-state='armed'] .lp-lane__wellmsg {
@@ -378,9 +419,9 @@
 .lp-lane__count {
   display: block;
   font-size: clamp(26px, 3vw, 40px);
-  font-weight: 700;
+  font-weight: 600;
   line-height: 1;
-  letter-spacing: 0;
+  letter-spacing: -0.04em;
   margin-bottom: 4px;
   color: var(--rec);
   font-variant-numeric: tabular-nums;
@@ -404,7 +445,7 @@
    above for why. The volume fader is the only child of the right cluster that is not a pill, so it
    carries the cluster's old 0.7 directly. (W8 tuning history 0.35→0.5→0.7: still grey-on-grey at 0.5.) */
 .lp-lane[data-state='empty'] .lp-lane__vol {
-  opacity: 0.7;
+  opacity: 0.55;
 }
 .lp-lane__mods {
   display: flex;
@@ -455,7 +496,7 @@
   min-width: 52px;
   text-align: right;
   font-family: var(--mono);
-  font-size: 9.5px;
+  font-size: 10px;
   color: var(--dim);
   font-variant-numeric: tabular-nums;
 }
@@ -481,7 +522,7 @@
 }
 @container lp (max-height: 300px) {
   .lp-lane__state {
-    font-size: 7px;
+    font-size: 8.5px;
   }
   .lp-vdb {
     display: none; /* drop the dB read-out when the lanes are very short */
@@ -490,7 +531,9 @@
 
 @media (prefers-reduced-motion: reduce) {
   .lp-lane[data-state='armed'] .lp-core::before,
-  .lp-lane[data-state='listening'] .lp-core::before {
+  .lp-lane[data-state='listening'] .lp-core::before,
+  .lp-lane[data-state='armed'] .lp-lane__state::before,
+  .lp-lane[data-state='listening'] .lp-lane__state::before {
     animation: none !important;
   }
 }
@@ -525,9 +568,9 @@
   flex-direction: column;
   border-radius: 14px;
   padding: 10px 14px;
-  background: var(--glass);
+  background: var(--card);
   border: 1px solid var(--glass-edge);
-  backdrop-filter: blur(10px);
+  box-shadow: inset 0 1px 0 var(--hair);
   overflow: hidden;
 }
 .lp-drawer__head {
@@ -538,10 +581,9 @@
   padding-bottom: 8px;
 }
 .lp-drawer__title {
-  font-family: var(--mono);
-  font-size: 10px;
+  font-size: 10.5px;
   text-transform: uppercase;
-  letter-spacing: 0.14em;
+  letter-spacing: 0.08em;
   font-weight: 600;
   color: var(--dim);
 }
@@ -551,17 +593,18 @@
   display: grid;
   place-items: center;
   border-radius: 8px;
-  border: 1px solid var(--glass-edge);
-  background: transparent;
+  border: 0;
+  background: var(--surf-2);
+  box-shadow: inset 0 1px 0 var(--hair);
   color: var(--dim);
   font-size: 12px;
   line-height: 1;
   cursor: pointer;
-  transition: color 0.12s, border-color 0.12s;
+  transition: color 0.12s, background-color 0.12s;
 }
 .lp-drawer__close:hover {
   color: var(--text);
-  border-color: var(--dim);
+  background: var(--surf-3);
 }
 /* the FxPanel fills the drawer body + scrolls; drop its standalone frame (the drawer is the frame) */
 .lp-drawer .fxp {

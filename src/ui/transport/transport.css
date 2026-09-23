@@ -1,14 +1,24 @@
 /* Command-bar transport clusters (Orbit V2 — dark glass, colour is state). These render as direct
    flex items of the `.cmd` header (Transport returns a Fragment); the `.cmd` card + brand/lamp/tools
    live in app.css. Recipes copied from the approved mockup
-   docs/inspiration/revamp-2026-07/orbit-v2-lanes.html — flat rounded outline pills, mono labels,
-   colour rationed to state (--cyan engaged, --play mic-live/loop, --dub two-step confirm). */
+   docs/inspiration/revamp-2026-07/orbit-v2-lanes.html, restyled to the "Instrument" tokens (src/app.css):
+   matte key faces, sans labels, a sunk display window for BPM + loop; colour rationed to state
+   (--engaged on, --play mic-live/loop, --dub two-step confirm). */
 
-/* ---- BPM group — big mono numeral, ± steppers, unit + beat dots ---- */
+/* ---- BPM group — big numeral, ± steppers, unit + beat dots. It and the loop readout sit in a sunk
+   display window: the one "screen" on the panel. ---- */
+.transport__bpm-group,
+.transport__loop {
+  background: var(--sunk);
+  /* edge + recess as shadows only: the window adds no height to the command bar (layout probes) */
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.55), inset 0 2px 5px rgba(0, 0, 0, 0.55), 0 1px 0 var(--hair);
+  border-radius: 10px;
+  padding: 0 6px;
+}
 .transport__bpm-group {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
 }
 
 /* the ± steppers (mockup .step) */
@@ -18,10 +28,9 @@
   flex: 0 0 auto;
   display: grid;
   place-items: center;
-  border: 1px solid var(--glass-edge);
   border-radius: 7px;
+  background: var(--surf-2);
   color: var(--dim);
-  font-family: var(--mono);
   font-size: 13px;
   line-height: 1;
   cursor: pointer;
@@ -29,22 +38,22 @@
 }
 .transport__step:hover {
   color: var(--text);
-  border-color: var(--dim);
+  background: var(--surf-3);
 }
 .transport__step:disabled {
   opacity: 0.4;
   cursor: not-allowed;
 }
 
-/* the 34px numeral (mockup .bpm__num) — a click-to-edit button */
+/* the 34px numeral — a click-to-edit button, lit like a display readout */
 .transport__bpm-num {
-  font-family: var(--mono);
   font-size: 34px;
-  font-weight: 700;
+  font-weight: 600;
   line-height: 1;
-  letter-spacing: -0.02em;
+  letter-spacing: -0.04em;
   font-variant-numeric: tabular-nums;
-  color: var(--text);
+  color: #f6f1e7;
+  text-shadow: 0 0 14px rgba(246, 241, 231, 0.18);
   background: none;
   border: 0;
   padding: 0 2px;
@@ -53,7 +62,7 @@
   text-align: center;
 }
 .transport__bpm-num:hover:not(:disabled) {
-  color: var(--cyan);
+  color: var(--engaged);
 }
 .transport__bpm-num:disabled {
   cursor: default;
@@ -61,13 +70,13 @@
 
 /* the inline editor — matches the numeral so there's no layout jump on edit */
 .transport__bpm-input {
-  font-family: var(--mono);
+  font-family: inherit;
   font-size: 34px;
-  font-weight: 700;
+  font-weight: 600;
   line-height: 1;
-  letter-spacing: -0.02em;
+  letter-spacing: -0.04em;
   font-variant-numeric: tabular-nums;
-  color: var(--cyan);
+  color: var(--engaged);
   background: none;
   border: 0;
   padding: 0 2px;
@@ -87,9 +96,9 @@
   gap: 4px;
 }
 .transport__bpm-unit {
-  font-family: var(--mono);
-  font-size: 8.5px;
-  letter-spacing: 0.3em;
+  font-size: 9.5px;
+  font-weight: 500;
+  letter-spacing: 0.1em;
   color: var(--faint);
 }
 .transport__beats {
@@ -100,7 +109,7 @@
   width: 7px;
   height: 7px;
   border-radius: 999px;
-  background: rgba(148, 168, 215, 0.15);
+  background: rgba(255, 255, 255, 0.12);
   transition: background 0.06s, box-shadow 0.06s;
 }
 .transport__beat.on {
@@ -115,13 +124,13 @@
   color: var(--dim);
 }
 
-/* one-shot pulse on the first loop commit so the freeze is noticeable (a cyan ring blooming out) */
+/* one-shot pulse on the first loop commit so the freeze is noticeable (a warm-white ring blooming out) */
 @keyframes transport-bpm-locked-pulse {
   0% {
-    box-shadow: 0 0 0 0 color-mix(in srgb, var(--cyan) 55%, transparent);
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--engaged) 45%, transparent);
   }
   100% {
-    box-shadow: 0 0 0 10px color-mix(in srgb, var(--cyan) 0%, transparent);
+    box-shadow: 0 0 0 10px color-mix(in srgb, var(--engaged) 0%, transparent);
   }
 }
 .transport__bpm-group--just-locked {
@@ -157,7 +166,7 @@
   background: linear-gradient(
     to top,
     var(--meter-c) calc(var(--lvl) * 100%),
-    rgba(148, 168, 215, 0.15) calc(var(--lvl) * 100%)
+    rgba(255, 255, 255, 0.12) calc(var(--lvl) * 100%)
   );
 }
 .transport__inmeter.is-hot {
@@ -181,41 +190,53 @@
   align-items: center;
   gap: 6px;
   white-space: nowrap;
-  font-family: var(--mono);
-  font-size: 10px;
+  font-size: 11px;
+  line-height: 12px; /* pinned: the pill keeps the command bar's measured row height */
   font-weight: 600;
-  letter-spacing: 0.15em;
+  letter-spacing: 0.06em;
   padding: 8px 13px;
-  border: 1px solid var(--glass-edge);
-  border-radius: 10px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: var(--surf-2);
+  box-shadow: inset 0 1px 0 var(--hair);
   color: var(--dim);
   cursor: pointer;
-  transition: color 0.12s, border-color 0.12s, box-shadow 0.12s;
+  transition: color 0.12s, background-color 0.12s, border-color 0.12s;
 }
 .transport__tgl:hover:not(:disabled) {
   color: var(--text);
+  background: var(--surf-3);
+}
+.transport__tgl:active:not(:disabled) {
+  background: var(--sunk);
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.6);
 }
 .transport__tgl:disabled {
-  opacity: 0.4;
   cursor: not-allowed;
+  background: transparent;
+  box-shadow: none;
+  border-color: rgba(255, 255, 255, 0.06);
+  color: var(--faint);
 }
-/* engaged = cyan (selection/mode on); rationed glow */
+/* engaged = the lit warm-white legend (selection/mode on) */
 .transport__tgl.is-on {
-  color: var(--cyan);
-  border-color: color-mix(in srgb, var(--cyan) 55%, transparent);
-  box-shadow: 0 0 14px -6px var(--cyan), inset 0 0 10px -7px var(--cyan);
+  color: var(--engaged);
+  background: var(--surf-3);
+  border-color: rgba(244, 239, 230, 0.28);
+  text-shadow: 0 0 10px rgba(244, 239, 230, 0.35);
 }
 /* live/on-green (mic live) */
 .transport__tgl.is-on-green {
   color: var(--play);
-  border-color: color-mix(in srgb, var(--play) 55%, transparent);
-  box-shadow: 0 0 14px -6px var(--play), inset 0 0 10px -7px var(--play);
+  background: color-mix(in srgb, var(--play) 8%, var(--surf-2));
+  border-color: color-mix(in srgb, var(--play) 40%, transparent);
+  text-shadow: 0 0 10px color-mix(in srgb, var(--play) 45%, transparent);
 }
 /* two-step confirm (✕ SURE?) = dub-amber warn */
 .transport__tgl.is-armed {
   color: var(--dub);
+  background: color-mix(in srgb, var(--dub) 10%, var(--surf-2));
   border-color: color-mix(in srgb, var(--dub) 55%, transparent);
-  box-shadow: 0 0 14px -6px var(--dub);
 }
 
 /* Mode groups pair a pill with its contextual control. AUTO reserves the control's width. */
@@ -240,16 +261,14 @@
   gap: 3px;
   min-width: 44px;
   text-align: center;
-  font-family: var(--mono);
   font-size: 13px;
-  font-weight: 700;
+  font-weight: 600;
   font-variant-numeric: tabular-nums;
   color: var(--text);
   line-height: 1;
 }
 .transport__bars-unit {
-  font-family: var(--mono);
-  font-size: 8px;
+  font-size: 9px;
   letter-spacing: 0.1em;
   text-transform: uppercase;
   color: var(--faint);
@@ -272,15 +291,15 @@
   gap: 2px;
 }
 .transport__loop-k {
-  font-family: var(--mono);
-  font-size: 8.5px;
-  letter-spacing: 0.3em;
+  font-size: 9.5px;
+  font-weight: 500;
+  letter-spacing: 0.1em;
   color: var(--faint);
 }
 .transport__loop-v {
-  font-family: var(--mono);
-  font-size: 14px;
-  font-weight: 700;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
   white-space: nowrap;
 }
 .transport__loop-v small {
@@ -382,5 +401,20 @@
   }
   .transport__master {
     gap: 6px;
+  }
+}
+
+/* Narrow bar: the display windows give back their side padding so row 1 keeps its measured width and
+   the tool icons stay on it (verify/layout-reachability.mjs at 960 × 600). */
+@media (max-width: 1040px) {
+  .transport__bpm-group,
+  .transport__loop {
+    padding: 0 3px;
+  }
+  .transport__bpm-group {
+    gap: 5px;
+  }
+  .transport__loop {
+    gap: 8px;
   }
 }

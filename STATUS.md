@@ -58,7 +58,7 @@ Blocked on an owner decision, not on testing. The default column is what happens
 | # | Question | Default if silent |
 |---|---|---|
 | D1 | The BPM value ALREADY survives clearing every lane (only the lock and the loop LENGTH reset — `resetMaster` in `machine.ts`). Should the LENGTH survive too? It would force the next first take to the old bar count until CLEAR ALL. | stays as built |
-| D14 | Lane state carries by hue: under deuteranopia REC red and PLAYING green read as the same yellow, in greyscale only the 8 px word and the core glyph separate them (shots and ΔE table in the 2026-09-22 audit; eye lines in `docs/backlog-taste.md`). Shape carrier (glyph in the left rail, larger word) or palette move? | stays as built |
+| D14 | Under deuteranopia REC red and PLAYING green still read as nearly the same yellow. Since the 2026-09-23 restyle a live capture is also a FILLED badge and a lit core face, and PLAYING a lit LED, so greyscale separates them by shape. Enough, or a palette move as well? | stays as built |
 | D16 | Host a browser demo on Cloudflare Pages? It contradicts "the browser tier is a verification rig". | no |
 | D17 | `LICENSE` and `authors` in `src-tauri/Cargo.toml` carry the GitHub handle (the no-names rule targets prose). Keep, or use a role? | stays as built |
 

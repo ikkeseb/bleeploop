@@ -1,8 +1,9 @@
-/* Global Audio Settings popover — Orbit V2 (W7). A floating dark-glass card anchored top-right under
+/* Global Audio Settings popover — "Instrument". A floating near-opaque panel anchored top-right under
    the command-bar gear (see .settings-popover in app.css). Device/channel/output selects + live
-   buffer-size + the rec-align trim + the ASIO toggle render as flat glass controls; the read-only
-   host/isolated/plugin/midi DIAGNOSTICS (relocated from the topbar in W2) sit in a recessed readout
-   well at the foot. Colour is rationed to state — --cyan = engaged, --dub = a deferred-change note. */
+   buffer-size + the ASIO toggle render as matte key faces; the rec-align trim is a sunk numeric well;
+   the read-only host/isolated/plugin/midi DIAGNOSTICS (relocated from the topbar in W2) sit in a sunk
+   readout well at the foot. Chrome stays monochrome — engaged = the warm-white --engaged, --dub = a
+   deferred-change / warning note. */
 .audio-settings {
   display: flex;
   flex-direction: column;
@@ -10,20 +11,18 @@
   min-width: 276px;
   padding: 15px;
   border-radius: 14px;
-  /* near-opaque dark glass: the popover floats over the busy lanes, so it needs a solid backdrop to
-     stay legible (the command bar can be translucent because it sits over empty aurora padding). */
+  /* near-opaque panel: the popover floats over the busy lanes, so it needs a solid backdrop to stay
+     legible without a blur. */
   background: var(--panel);
-  backdrop-filter: blur(16px) saturate(1.1);
   border: 1px solid var(--glass-edge);
-  box-shadow: 0 20px 48px -14px rgba(0, 0, 0, 0.72), 0 4px 14px -8px rgba(0, 0, 0, 0.55);
+  box-shadow: inset 0 1px 0 var(--hair), 0 20px 48px -14px rgba(0, 0, 0, 0.72);
 }
 
-/* panel title — mono eyebrow */
+/* panel title — caps eyebrow */
 .audio-settings__title {
-  font-family: var(--mono);
-  font-size: 10px;
+  font-size: 10.5px;
   text-transform: uppercase;
-  letter-spacing: 0.2em;
+  letter-spacing: 0.08em;
   color: var(--dim);
   font-weight: 600;
   margin-bottom: 3px;
@@ -35,18 +34,18 @@
   gap: 9px;
 }
 
-/* control label — mono, --dim (readable functional label, never the sub-legible --faint) */
+/* control label — caps, --dim (readable functional label, never the sub-legible --faint) */
 .audio-settings__label {
   width: 74px;
   flex: 0 0 auto;
   color: var(--dim);
-  font-family: var(--mono);
-  font-size: 9px;
+  font-size: 9.5px;
+  font-weight: 500;
   text-transform: uppercase;
-  letter-spacing: 0.16em;
+  letter-spacing: 0.06em;
 }
 
-/* flat glass <select> — themed caret, explicit background so no UA face bleeds through */
+/* matte key-face <select> — themed caret, explicit background so no UA face bleeds through */
 .audio-settings__select {
   flex: 1 1 auto;
   min-width: 0;
@@ -54,10 +53,11 @@
   appearance: none;
   -webkit-appearance: none;
   color-scheme: dark;
-  border-radius: 9px;
-  border: 1px solid var(--glass-edge);
+  border-radius: 8px;
+  border: 1px solid transparent;
+  box-shadow: inset 0 1px 0 var(--hair);
   color: var(--dim);
-  background-color: transparent;
+  background-color: var(--surf-2);
   background-image: var(--caret-svg);
   background-repeat: no-repeat;
   background-position: right 9px center;
@@ -65,12 +65,21 @@
   padding: 0 28px 0 11px;
   font: inherit;
   font-size: 11px;
+  font-weight: 500;
   cursor: pointer;
-  transition: color 0.15s, border-color 0.15s;
+  transition: color 0.15s, background-color 0.15s;
 }
-.audio-settings__select:hover {
+.audio-settings__select:hover:not(:disabled) {
   color: var(--text);
-  border-color: var(--dim);
+  background-color: var(--surf-3);
+}
+/* disabled (the output select while ASIO owns the driver) = no face, a hairline edge, --faint legend */
+.audio-settings__select:disabled {
+  cursor: default;
+  background-color: transparent;
+  box-shadow: none;
+  border-color: rgba(255, 255, 255, 0.06);
+  color: var(--faint);
 }
 .audio-settings__select:focus-visible {
   outline-offset: 1px;
@@ -83,26 +92,26 @@
   flex: 0 0 auto;
 }
 
-/* rec-align trim input — a narrow glass numeric field (matches the select's frame/height/type). The
-   by-ear record-latency offset surface (an open eye-gate) — restyled, function verbatim. */
+/* rec-align trim input — a narrow sunk numeric well (same height as the selects). The by-ear
+   record-latency offset surface (an open eye-gate) — restyled, function verbatim. */
 .audio-settings__number {
   flex: 0 0 auto;
   width: 5.5em;
   height: 30px;
-  border-radius: 9px;
-  border: 1px solid var(--glass-edge);
-  color: var(--dim);
-  background: transparent;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  color: var(--text);
+  background: var(--sunk);
+  box-shadow: inset 0 2px 5px rgba(0, 0, 0, 0.55);
   padding: 0 10px;
   font: inherit;
   font-family: var(--mono);
   font-size: 11px;
   font-variant-numeric: tabular-nums;
-  transition: color 0.15s, border-color 0.15s;
+  transition: border-color 0.15s;
 }
 .audio-settings__number:hover {
-  color: var(--text);
-  border-color: var(--dim);
+  border-color: var(--line-2);
 }
 .audio-settings__number:focus-visible {
   outline-offset: 1px;
@@ -122,9 +131,8 @@
 .audio-settings__hint {
   margin-top: -4px;
   padding-left: 83px;
-  font-family: var(--mono);
-  font-size: 9.5px;
-  letter-spacing: 0.04em;
+  font-size: 10px;
+  line-height: 1.4;
   color: color-mix(in srgb, var(--dub) 55%, var(--dim));
 }
 
@@ -136,34 +144,44 @@
   gap: 10px;
   flex-wrap: wrap;
 }
+/* RETRY = a small matte key face (an action, not a state — so no colour) */
 .audio-settings__retry {
   flex: 0 0 auto;
-  padding: 3px 8px;
-  border: 1px solid color-mix(in srgb, var(--cyan) 55%, transparent);
-  border-radius: 6px;
-  background: var(--glass);
-  color: var(--cyan);
-  font-family: var(--mono);
+  padding: 4px 9px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: var(--surf-2);
+  box-shadow: inset 0 1px 0 var(--hair);
+  color: var(--text);
   font-size: 9.5px;
-  letter-spacing: 0.08em;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
   cursor: pointer;
+  transition: background-color 0.15s;
 }
 .audio-settings__retry:hover {
-  background: var(--glass-2);
+  background: var(--surf-3);
+}
+.audio-settings__retry:active {
+  background: var(--sunk);
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.6);
 }
 
-.audio-settings__row--disabled {
-  opacity: 0.5;
+/* a row that cannot act (sample rate "soon", ASIO unavailable) drops to the --faint legend: tone,
+   never an opacity fade */
+.audio-settings__row--disabled .audio-settings__label,
+.audio-settings__row--disabled .audio-settings__soon {
+  color: var(--faint);
 }
 
 .audio-settings__soon {
   color: var(--dim);
-  font-family: var(--mono);
   font-size: 11px;
 }
 
 /* ASIO low-latency tier toggle — a checkbox + a state word, left-aligned in the value column. Engaged
-   accent = --cyan (the Orbit "engaged" hue), not the record-red default. */
+   accent = the warm-white --engaged (the app-wide chrome "engaged"), not the record-red default. */
 .audio-settings__toggle {
   flex: 1 1 auto;
   display: flex;
@@ -174,7 +192,7 @@
   cursor: pointer;
 }
 .audio-settings__toggle input {
-  accent-color: var(--cyan);
+  accent-color: var(--engaged);
   cursor: pointer;
 }
 .audio-settings__toggle input:focus-visible {
@@ -182,29 +200,26 @@
 }
 .audio-settings__toggle-text {
   color: var(--dim);
-  font-family: var(--mono);
-  font-variant-numeric: tabular-nums;
 }
 
-/* Diagnostics (relocated from the command-bar chips in W2) — a recessed readout well at the foot: the
-   read-only host/isolated/plugin/midi state. Reads as a status LCD, distinct from the interactive
-   controls above. The aggregate of these four is the command-bar system lamp. */
+/* Diagnostics (relocated from the command-bar chips in W2) — a sunk readout well at the foot: the
+   read-only host/isolated/plugin/midi/bridge state. Reads as a status display, distinct from the
+   interactive controls above. The aggregate of these is the command-bar system lamp. */
 .audio-settings__diag {
   margin-top: 5px;
   padding: 11px 12px;
   border-radius: 10px;
-  background: var(--well);
-  border: 1px solid var(--glass-2);
-  box-shadow: inset 0 2px 8px rgba(0, 0, 0, 0.5);
+  background: var(--sunk);
+  border: 1px solid transparent;
+  box-shadow: inset 0 2px 5px rgba(0, 0, 0, 0.55);
   display: flex;
   flex-direction: column;
   gap: 6px;
 }
 .audio-settings__diag-title {
-  font-family: var(--mono);
-  font-size: 8.5px;
+  font-size: 9.5px;
   text-transform: uppercase;
-  letter-spacing: 0.24em;
+  letter-spacing: 0.08em;
   color: var(--dim);
   font-weight: 600;
   margin-bottom: 1px;
@@ -215,17 +230,17 @@
   justify-content: space-between;
   gap: 12px;
 }
-/* key = --dim (secondary but legible); value = --text (the actual state, primary) */
+/* key = --dim caps label (secondary but legible); value = --text mono read-out (the live state, primary) */
 .audio-settings__diag-row span {
   color: var(--dim);
-  font-family: var(--mono);
+  font-weight: 500;
   text-transform: uppercase;
-  letter-spacing: 0.14em;
-  font-size: 9px;
+  letter-spacing: 0.06em;
+  font-size: 9.5px;
 }
 .audio-settings__diag-row b {
   font-family: var(--mono);
-  font-weight: 600;
+  font-weight: 500;
   font-size: 10.5px;
   font-variant-numeric: tabular-nums;
   color: var(--text);

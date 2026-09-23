@@ -1,7 +1,8 @@
-/* P6 per-track FX panel — Orbit V2 (W7). It docks inside the lane's glass FX drawer (.lp-drawer, see
-   looper.css, which flattens .fxp's own frame to transparent). Each FX module is a flat glass card with
-   a mono outline toggle (engaged = --cyan, the Orbit "engaged/toggled" hue) + thin flat sliders. Colour
-   is rationed to the toggled state; chrome stays monochrome. No audio runs here. */
+/* P6 per-track FX panel — "Instrument". It docks inside the lane's FX drawer (.lp-drawer, see
+   looper.css, which flattens .fxp's own frame to transparent). Each FX module is a flat pane one tone
+   off the drawer card with a hairline of top light; its toggle is a matte key face (engaged = the lit
+   warm-white legend, the app-wide chrome "engaged", never cyan) + thin flat sliders. Colour is spent
+   only on sound, so the chrome here stays monochrome. No audio runs here. */
 
 .fxp {
   display: flex;
@@ -10,8 +11,9 @@
   border-radius: 12px;
   flex-wrap: wrap;
   /* base look for standalone use; when docked, .lp-drawer .fxp (looper.css) overrides to transparent. */
-  background: var(--glass);
+  background: var(--card);
   border: 1px solid var(--glass-edge);
+  box-shadow: inset 0 1px 0 var(--hair);
 }
 
 .fxp-mod {
@@ -22,42 +24,47 @@
   border-radius: 11px;
   min-width: 96px;
   flex: 1 1 0;
-  background: var(--glass);
-  border: 1px solid var(--glass-edge);
-  transition: background 0.2s, border-color 0.2s, box-shadow 0.2s;
+  /* a bypassed module is just its key (no pane — avoids a box inside a box) */
+  background: transparent;
+  border: 1px solid transparent;
+  transition: background-color 0.2s, border-color 0.2s;
 }
-/* an enabled module lifts to the engaged glass fill + a whisper of cyan rim/inset glow */
+/* an enabled module opens as a pane one tone up with a hairline of top light (tone, not a tinted rim) */
 .fxp-mod--on {
-  background: var(--glass-2);
-  border-color: color-mix(in srgb, var(--cyan) 28%, var(--glass-edge));
-  box-shadow: inset 0 0 18px -13px var(--cyan);
+  background: rgba(255, 255, 255, 0.03);
+  border-color: rgba(255, 255, 255, 0.05);
+  box-shadow: inset 0 1px 0 var(--hair);
 }
 
-/* toggle = a flat outline pill; engaged = cyan text + border + a rationed inset glow (never a fill).
-   Explicit background on BOTH states so no UA dark-mode button face bleeds through. */
+/* toggle = a matte key face (see `.tgl` in app.css); engaged = warm-white legend + lifted face + a lit
+   rim. Explicit background on BOTH states so no UA dark-mode button face bleeds through. */
 .fxp-mod__toggle {
-  background: transparent;
-  border: 1px solid var(--glass-edge);
+  background: var(--surf-2);
+  border: 1px solid transparent;
+  box-shadow: inset 0 1px 0 var(--hair);
   color: var(--dim);
   border-radius: 8px;
   padding: 6px 7px;
-  font-family: var(--mono);
-  font-size: 9.5px;
+  font-family: var(--sans);
+  font-size: 10px;
   font-weight: 600;
-  letter-spacing: 0.14em;
+  letter-spacing: 0.08em;
   text-transform: uppercase;
   cursor: pointer;
-  transition: color 0.12s, border-color 0.12s, box-shadow 0.12s;
+  transition: color 0.12s, background-color 0.12s, border-color 0.12s;
 }
 .fxp-mod__toggle:hover {
   color: var(--text);
-  border-color: var(--dim);
+  background: var(--surf-3);
+}
+.fxp-mod__toggle:active {
+  background: var(--sunk);
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.6);
 }
 .fxp-mod__toggle--on {
-  background: transparent;
-  color: var(--cyan);
-  border-color: color-mix(in srgb, var(--cyan) 50%, transparent);
-  box-shadow: inset 0 0 10px -7px var(--cyan);
+  background: var(--surf-3);
+  color: var(--engaged);
+  border-color: rgba(244, 239, 230, 0.28);
 }
 
 .fxp-mod__params {
@@ -68,19 +75,20 @@
 
 .fxp-param {
   display: grid;
-  grid-template-columns: 36px 1fr auto;
+  grid-template-columns: 38px 1fr auto;
   align-items: center;
   gap: 8px;
 }
 
 .fxp-param__label {
-  font-family: var(--mono);
-  font-size: 8.5px;
+  font-size: 9.5px;
+  font-weight: 500;
   color: var(--dim);
   text-transform: uppercase;
-  letter-spacing: 0.14em;
+  letter-spacing: 0.06em;
 }
 
+/* the changing value is the only mono text here (tabular so it never jitters while dragging) */
 .fxp-param__val {
   font-family: var(--mono);
   font-size: 9.5px;
@@ -95,29 +103,30 @@
   width: 100%;
 }
 
-/* select = a flat glass control with a themed caret (tempo-synced division picker) */
+/* select = a matte key face with a themed caret (tempo-synced division picker) */
 .fxp-param__select {
   grid-column: 2 / 4;
   appearance: none;
   -webkit-appearance: none;
   color-scheme: dark;
-  background-color: transparent;
+  background-color: var(--surf-2);
   background-image: var(--caret-svg);
   background-repeat: no-repeat;
   background-position: right 8px center;
   background-size: 12px 12px;
+  box-shadow: inset 0 1px 0 var(--hair);
   color: var(--dim);
-  border: 1px solid var(--glass-edge);
+  border: 1px solid transparent;
   border-radius: 8px;
   font-family: var(--mono);
   font-size: 11px;
   padding: 4px 24px 4px 9px;
   cursor: pointer;
-  transition: color 0.15s, border-color 0.15s;
+  transition: color 0.15s, background-color 0.15s;
 }
 .fxp-param__select:hover {
   color: var(--text);
-  border-color: var(--dim);
+  background-color: var(--surf-3);
 }
 .fxp-param__select:focus-visible {
   outline-offset: 1px;

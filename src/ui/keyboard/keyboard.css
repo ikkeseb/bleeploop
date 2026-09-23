@@ -16,8 +16,9 @@
   align-items: stretch;
   border-radius: 14px;
   overflow: hidden;
-  background: var(--glass);
+  background: var(--card);
   border: 1px solid var(--glass-edge);
+  box-shadow: inset 0 1px 0 var(--hair);
 }
 
 /* left/right meta clusters — flank the keys tray */
@@ -29,22 +30,21 @@
   padding: 0 14px;
 }
 
-/* pane label (KEYBOARD / DRUMS) — mono, letterspaced, at the --dim floor */
+/* pane label (KEYBOARD / DRUMS) — sans caps at the --dim floor */
 .kb__title {
-  font-family: var(--mono);
-  font-size: 10px;
-  letter-spacing: 0.2em;
+  font-size: 10.5px;
+  letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--dim);
   font-weight: 600;
   white-space: nowrap;
 }
 
-/* key-row hint (right meta) — the real map, mono at the --dim floor */
+/* key-row hint (right meta) — the real map, at the --dim floor */
 .kb__hint {
-  font-family: var(--mono);
-  font-size: 10px;
-  letter-spacing: 0.18em;
+  font-size: 10.5px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
   color: var(--dim);
   white-space: nowrap;
 }
@@ -70,14 +70,14 @@
   font-size: 14px;
   line-height: 1;
   color: var(--dim);
-  background: var(--glass);
-  border: 1px solid var(--glass-edge);
+  background: var(--surf-2);
+  border: 1px solid transparent;
+  box-shadow: inset 0 1px 0 var(--hair);
   transition: color 0.15s, background 0.15s, border-color 0.15s, transform 0.08s;
 }
 .kb__cap:hover {
   color: var(--text);
-  background: var(--glass-2);
-  border-color: color-mix(in srgb, var(--cyan) 30%, var(--glass-edge));
+  background: var(--surf-3);
 }
 .kb__cap:active {
   transform: translateY(1px);
@@ -134,14 +134,14 @@
    near-black well (2026-07-05 eye check: at .06 the "light" keys read fully dark) — whites must read
    light at a glance, with a faint top-lit gradient so the piano geography survives the glass idiom. */
 .kb__key--white {
-  background: linear-gradient(rgba(196, 210, 235, 0.16), rgba(196, 210, 235, 0.22));
-  border-right: 1px solid rgba(10, 12, 20, 0.85);
+  background: linear-gradient(#262a32, #2f333c 94%, #22252c);
+  border-right: 1px solid var(--bg);
   border-radius: 0 0 3px 3px;
   z-index: 1;
   transition: background 0.05s, box-shadow 0.05s;
 }
 .kb__key--white:hover {
-  background: linear-gradient(rgba(196, 210, 235, 0.24), rgba(196, 210, 235, 0.3));
+  background: linear-gradient(#2e323b, #373b45 94%, #2a2d35);
 }
 .kb__key--white.kb__key--down {
   /* pressed = a soft cyan inner glow (matches the drum-pad hit idiom), NOT a hard bottom bar
@@ -156,11 +156,11 @@
   bottom: auto;
   height: 58%;
   z-index: 2;
-  background: #04050a;
+  background: linear-gradient(#08090b, #050608 82%, #1a1c22);
   border: 1px solid rgba(0, 0, 0, 0.6);
   border-top: 0;
   border-radius: 0 0 3px 3px;
-  box-shadow: 0 2px 5px -1px rgba(0, 0, 0, 0.6);
+  box-shadow: 0 2px 4px -1px rgba(0, 0, 0, 0.7);
   transition: background 0.05s, box-shadow 0.05s;
 }
 .kb__key--black:hover {
@@ -201,8 +201,8 @@
   border-radius: 6px;
   cursor: pointer;
   overflow: hidden;
-  background: rgba(148, 168, 215, 0.06);
-  border: 1px solid rgba(148, 168, 215, 0.08);
+  background: rgba(255, 255, 255, 0.048);
+  border: 1px solid rgba(255, 255, 255, 0.064);
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -213,7 +213,7 @@
   transition: background 0.05s, border-color 0.05s, box-shadow 0.05s;
 }
 .kb__pad:hover {
-  background: rgba(148, 168, 215, 0.13);
+  background: rgba(255, 255, 255, 0.104);
 }
 /* per-pad status lamp — a small dot that ignites cyan on hit */
 .kb__pad-lamp {
@@ -224,7 +224,7 @@
   width: 5px;
   height: 5px;
   border-radius: 999px;
-  background: rgba(148, 168, 215, 0.22);
+  background: rgba(255, 255, 255, 0.176);
   transition: background 0.05s, box-shadow 0.05s;
 }
 .kb__pad-label {

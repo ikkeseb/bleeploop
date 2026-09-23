@@ -49,7 +49,8 @@
 .splitstack--h .splitstack__divider {
   cursor: col-resize;
 }
-/* focus/drag affordances follow the Orbit "engaged = cyan" idiom (red is reserved for record state) */
+/* keyboard focus = the app-wide cyan ring; hover/drag light the grip warm-white (the chrome "engaged"
+   legend, --engaged) — colour stays reserved for sound, red for record state */
 .splitstack__divider:focus-visible {
   outline: 2px solid var(--cyan);
   outline-offset: -3px;
@@ -57,7 +58,7 @@
 }
 
 .splitstack__grip {
-  background: var(--glass-edge);
+  background: var(--line-2);
   border-radius: 999px;
   transition: background-color 0.12s, width 0.12s, height 0.12s;
 }
@@ -70,11 +71,11 @@
   height: 40px;
 }
 .splitstack__divider:hover .splitstack__grip {
-  background: color-mix(in srgb, var(--cyan) 55%, var(--glass-edge));
+  background: rgba(244, 239, 230, 0.32);
 }
 .splitstack--dragging .splitstack__grip,
 .splitstack__divider:active .splitstack__grip {
-  background: var(--cyan);
+  background: var(--engaged);
 }
 .splitstack--v.splitstack--dragging .splitstack__grip {
   width: 56px;
