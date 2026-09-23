@@ -165,7 +165,11 @@ export function start(): Promise<void> {
   return pending;
 }
 
-/** Retry a failed permission/request attempt. Concurrent retries share the same request. */
+/**
+ * Retry a failed permission/request attempt. Concurrent retries share the same request. Only
+ * `verify/probes/instrument-controls.mjs` calls it, hence `@public` for knip.
+ * @public
+ */
 export function retry(): Promise<void> {
   const status = midiStatus();
   return status === 'denied' || status === 'error' ? start() : Promise.resolve();
