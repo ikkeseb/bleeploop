@@ -4,7 +4,7 @@ import { engine } from '../../audio/engine';
 import { notifyError } from '../../notify';
 import { looper } from '../../audio/looper/looper';
 import { master } from '../../audio/master';
-import { anyTrackIn, createTwoStepConfirm, masterBars } from '../looper/Looper';
+import { anyTrackIn, createTwoStepConfirm, masterBars } from '../looper/shared';
 import { meterFrac, registerInputMeter, registerPhaseDial, unregisterInputMeter, unregisterPhaseDial } from '../looper/waveform';
 import { autoRecordThreshold } from '../../audio/looper/auto-record';
 import './transport.css';

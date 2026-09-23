@@ -1,9 +1,9 @@
 import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount, type JSX } from 'solid-js';
 import { looper, type TrackState } from '../../audio/looper/looper';
 import { clock } from '../../audio/clock';
-import { framesPerBar } from '../../audio/quantize';
 import { engine } from '../../audio/engine';
 import { registerLane, unregisterLane } from './waveform';
+import { createTwoStepConfirm, masterBars } from './shared';
 import { announceLooper, liveMsg, playStopGate, recDubGate } from './gates';
 import { FxPanel } from './FxPanel';
 import './looper.css';
@@ -397,52 +397,6 @@ function TrackLane(props: {
       </div>
     </div>
   );
-}
-
-/**
- * Bar count of a committed master loop from its length in frames. This is the shared bar-math: the SR
- * loop-length label below AND the waveform bar grid (`waveform.ts`) both derive their bar count from
- * this ONE function, so the spoken length and the drawn grid can never disagree. Returns 0 when no
- * master is defined yet (loop length still unknown → no grid). BPM is locked once a master commits, so
- * the caller can safely pass a snapshot of `clock.bpm()`.
- */
-export function masterBars(masterFrames: number, bpm: number, sampleRate: number): number {
-  if (masterFrames <= 0) return 0;
-  return Math.max(1, Math.round(masterFrames / framesPerBar(bpm, sampleRate)));
-}
-
-/**
- * True when any track is currently in one of the given states — the shared "scan all lanes" idiom
- * behind the command bar's ▶/■ ALL (`live` = play/overdub/record) and the single-recorder REC/DUB gate
- * (`capturing` = record/overdub).
- */
-export function anyTrackIn(...states: TrackState[]): boolean {
-  return Array.from({ length: looper.trackCount }, (_, i) => looper.track(i)().state).some((s) =>
-    states.includes(s),
-  );
-}
-
-/**
- * Two-step confirm latch. The first `trigger()` only ARMS (opens a `windowMs` window and returns); a
- * second within it runs `action` and disarms. The window auto-closes. Shared by the per-track CLR and
- * the command bar's ✕ ALL so "press twice to destroy a take" behaves identically — no blocking confirm.
- * Registers its own `onCleanup`, so call it during component setup.
- */
-export function createTwoStepConfirm(action: () => void, windowMs = 2500) {
-  const [armed, setArmed] = createSignal(false);
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const trigger = () => {
-    if (armed()) {
-      clearTimeout(timer);
-      setArmed(false);
-      action();
-    } else {
-      setArmed(true);
-      timer = setTimeout(() => setArmed(false), windowMs);
-    }
-  };
-  onCleanup(() => clearTimeout(timer));
-  return { armed, trigger };
 }
 
 export function Looper() {

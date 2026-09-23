@@ -1,7 +1,7 @@
 import { looper, type PeakView, type TrackState } from '../../audio/looper/looper';
 import { clock } from '../../audio/clock';
 import { engine } from '../../audio/engine';
-import { masterBars } from './Looper';
+import { masterBars } from './shared';
 
 /**
  * Waveform + bar-grid + playhead renderer.
@@ -16,7 +16,7 @@ import { masterBars } from './Looper';
  * steady-state per-frame cost is a `drawImage` + a few `fillRect`s per track, holding 60fps with flat
  * GC even with all five tracks live.
  *
- * The bar grid is derived from `masterBars()` (the shared bar-math exported from Looper.tsx) so it can
+ * The bar grid is derived from `masterBars()` (the shared bar-math in `shared.ts`) so it can
  * never disagree with the spoken loop length. That is the ONLY place a Solid signal (`clock.bpm()`) is
  * read, and it is gated to a master-length change (a rare structural event; BPM is locked for the life
  * of a committed master) inside the cached-bitmap path — never in the per-frame steady state.

@@ -124,9 +124,7 @@ not here.
   the empty-plugin-scan note computing to 6.5–7 px at ≤1280 (`plugin-controls.css`); synth pills
   render mixed case through the spec's uppercase `.tgl`, not a listed delta in `src/ui/AGENTS.md`.
   [reader]
-- **Component seams:** `Looper.tsx` exports `masterBars`, `anyTrackIn` and `createTwoStepConfirm`,
-  and `waveform.ts` imports it while it imports `waveform.ts` (circular, works by hoisting);
-  `hasMaster`/`loopBars`/`anyTrackIn` are re-derived in three components; `Transport.tsx` rebuilds
-  `toggleInput()`'s three false-cases from booleans [verified]; two effects write signals where a
-  memo or JSX binding would do (`Looper.tsx`, `Transport.tsx`), and COPY's visibility rides
-  `canReverse()` while a refused copy is silent (`Looper.tsx`). [reader]
+- **Component seams:** `hasMaster`/`loopBars`/`anyTrackIn` are re-derived in three components;
+  `Transport.tsx` rebuilds `toggleInput()`'s three false-cases from booleans [verified]; two effects
+  write signals where a memo or JSX binding would do (`Looper.tsx`, `Transport.tsx`), and COPY's
+  visibility rides `canReverse()` while a refused copy is silent (`Looper.tsx`). [reader]

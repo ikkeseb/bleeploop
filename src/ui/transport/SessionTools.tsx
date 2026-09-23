@@ -5,7 +5,7 @@ import { exportLoops } from '../../audio/export/export';
 import { importSession, maxImportArchiveBytes } from '../../audio/export/import';
 import { looper } from '../../audio/looper/looper';
 import { notifyError, notifyInfo } from '../../notify';
-import { anyTrackIn, masterBars } from '../looper/Looper';
+import { anyTrackIn, masterBars } from '../looper/shared';
 
 /**
  * EXPORT / IMPORT as two icon tools in the command bar's far-right tool cluster (app.tsx `.tools`).
