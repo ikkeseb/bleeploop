@@ -7,7 +7,8 @@ is a one-line adapter). UI-only edits are safe while the dev app runs.
   the gate. Type: Geist for words, Geist Mono only for changing numeric read-outs (both vendored,
   `src/assets/fonts/`); no display/retro font. The surface language ("Instrument": matte tone steps,
   colour only for sound, warm-white = engaged) and its tokens live in the `src/app.css` header — use
-  the tokens.
+  the tokens. `looper/waveform.ts` reads the colour tokens once per lane mount: a token edit over
+  HMR shows stale canvas colours until a page reload.
 - **Looper UI = "Orbit V2 · Lanes".** Read the spec
   (`docs/inspiration/revamp-2026-07/orbit-v2-lanes.html`) before ANY looper-UI work. These
   production deltas win over the mockup: REC/DUB-only round core with a separate PLAY/STOP + CLR
