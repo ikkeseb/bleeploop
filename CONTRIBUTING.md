@@ -8,8 +8,9 @@ interface X at buffer Y") and pull requests are welcome.
 1. Fork, branch from `main`, open the PR against `main`.
 2. `pnpm install`, then make `pnpm check` pass (typecheck, lint, the capability-boundary guard and the
    deterministic `verify/` guards, about a minute). It is also the pre-push hook.
-3. If you touched looper timing, capture or the track state machine, run `pnpm verify:jam` too (needs
-   `pnpm exec playwright install chromium` once).
+3. If you touched looper timing, capture or the track state machine, run `pnpm verify:jam` too. CI
+   runs the other browser probes (`pnpm probe --ci`); `pnpm probe <name>` runs one locally. Both need
+   `pnpm exec playwright install chromium` once.
 4. If you touched `src-tauri/`, run `cargo check` in `src-tauri/` (Windows). The ASIO feature is
    optional and needs your own copy of the Steinberg SDK, see `THIRD-PARTY-NOTICES.md`.
 

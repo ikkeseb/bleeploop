@@ -1,13 +1,20 @@
-// Real startup/settings orchestration with an instrumented platform host, no hardware claims.
-import { chromium } from 'playwright';
+/**
+ * Real startup/settings orchestration with an instrumented platform host: a saved buffer size and
+ * ASIO preference reach the host before plugins become selectable; a manual rescan does not bypass
+ * startup; a rejected buffer/driver write leaves the shown and saved settings unchanged; concurrent
+ * buffer writes serialize to the host one at a time; pruning an unplugged Windows endpoint leaves an
+ * unrelated ASIO channel alone; a failed startup blocks the native host and a following manual scan.
+ * No hardware claims. Run: pnpm probe audio-settings-startup
+ */
+import { probe } from '../harness/probe.ts';
 import assert from 'node:assert/strict';
 import { mkdir } from 'node:fs/promises';
-const browser = await chromium.launch();
-try {
-  const page = await browser.newPage({ viewport: { width: 960, height: 600 } });
-  await page.addInitScript(() => localStorage.setItem('lf.audioDevices', JSON.stringify({ bufferFrames: 128, asioEnabled: false })));
-  await page.goto(process.argv.find((arg) => arg.startsWith('--url='))?.slice(6) ?? 'http://localhost:1420');
-  await page.waitForFunction(() => !!window.__lf);
+
+await probe(async ({ open }) => {
+  const { page } = await open({
+    viewport: { width: 960, height: 600 },
+    init: (p) => p.addInitScript(() => localStorage.setItem('lf.audioDevices', JSON.stringify({ bufferFrames: 128, asioEnabled: false }))),
+  });
   const result = await page.evaluate(async () => {
     const { platform } = await import('/src/platform/index.ts');
     const { pluginBridge } = await import('/src/audio/plugin-bridge.ts');
@@ -99,4 +106,4 @@ try {
   });
   await mkdir('logs/layout', { recursive: true });
   await page.screenshot({ path: 'logs/layout/audio-settings.png' });
-} finally { await browser.close(); }
+}, { launch: {} });

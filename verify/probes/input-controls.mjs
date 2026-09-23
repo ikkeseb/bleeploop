@@ -1,15 +1,14 @@
-// Real pointer/key gestures against the rendered app, including independent MIDI ownership.
+/**
+ * Real pointer/key gestures against the rendered app: BPM field Escape/Enter/blur commit rules,
+ * pointer capture across octave changes, independent MIDI ownership (another owner's held pitch
+ * survives a pointer's own release), and the playable upper note range. No hardware/native claims.
+ * Run: pnpm probe input-controls
+ */
 import assert from 'node:assert/strict';
-import { chromium } from 'playwright';
+import { probe } from '../harness/probe.ts';
 
-const url = process.argv.find(arg => arg.startsWith('--url='))?.slice(6) ?? 'http://localhost:1420';
-const browser = await chromium.launch({ args: ['--autoplay-policy=no-user-gesture-required'] });
-try {
-  const page = await browser.newPage({ viewport: { width: 1280, height: 820 } });
-  const errors = [];
-  page.on('pageerror', error => errors.push(String(error)));
-  await page.goto(url);
-  await page.waitForFunction(() => !!window.__lf);
+await probe(async ({ open }) => {
+  const { page } = await open({ viewport: { width: 1280, height: 820 } });
   const initialBpm = await page.evaluate(() => window.__lf.clock.bpm());
   const edit = async value => {
     await page.getByRole('button', { name: 'BPM', exact: true }).click();
@@ -59,8 +58,4 @@ try {
   await pointerDown(127);
   await page.mouse.up();
   await page.waitForFunction(() => window.__lf.inputRouter.held.size === 0);
-  assert.deepEqual(errors, []);
-  console.log('PASS: BPM cancel/commit, pointer capture across octave changes, MIDI ownership, and playable upper range');
-} finally {
-  await browser.close();
-}
+});

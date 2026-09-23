@@ -1,17 +1,24 @@
-// Actual MIDI parser/router with two virtual Web MIDI ports. No hardware/native claims.
-import { chromium } from 'playwright';
+/**
+ * Actual MIDI parser/router with two virtual Web MIDI ports: per-port and per-channel note-release
+ * independence, one port's sustain pedal never holding another port's note, CC123 (all-notes-off)
+ * scoped to its own owner and honoring the physical pedal, held notes surviving another port's
+ * disconnect, computer-keyboard notes releasing after a controller disconnects, pointer-capture
+ * ownership across multiple simultaneous pointers, and MIDI notes mirroring the on-screen keys. No
+ * hardware/native claims. Run: pnpm probe midi-note-ownership
+ */
 import assert from 'node:assert/strict';
-const browser = await chromium.launch({ headless: true, args: ['--autoplay-policy=no-user-gesture-required'] });
-try {
-  const page = await browser.newPage();
-  await page.addInitScript(() => {
-    const inputs = new Map(['a', 'b'].map((id) => [id, { id, name: `Probe ${id}`, state: 'connected', onmidimessage: null }]));
-    const access = { inputs, onstatechange: null };
-    window.__probeMidi = access;
-    Object.defineProperty(navigator, 'requestMIDIAccess', { configurable: true, value: async () => access });
+import { probe } from '../harness/probe.ts';
+
+await probe(async ({ open }) => {
+  const { page } = await open({
+    init: (p) => p.addInitScript(() => {
+      const inputs = new Map(['a', 'b'].map((id) => [id, { id, name: `Probe ${id}`, state: 'connected', onmidimessage: null }]));
+      const access = { inputs, onstatechange: null };
+      window.__probeMidi = access;
+      Object.defineProperty(navigator, 'requestMIDIAccess', { configurable: true, value: async () => access });
+    }),
   });
-  await page.goto(process.argv.find((arg) => arg.startsWith('--url='))?.slice(6) ?? 'http://localhost:1420');
-  await page.waitForFunction(() => !!window.__lf && !!window.__probeMidi.inputs.get('a').onmidimessage);
+  await page.waitForFunction(() => !!window.__probeMidi.inputs.get('a').onmidimessage);
   const result = await page.evaluate(async () => {
     const lf = window.__lf; await lf.engine.start();
     lf.selectSynth(0, 'organ'); lf.setActiveSlot(0);
@@ -95,4 +102,4 @@ try {
   assert.ok(result.cc123PedalUpRms < 1e-5, 'pedal-up completes a deferred CC123 release');
   assert.deepEqual(result.heldAfterOtherDisconnect, [60], 'unplugging one port must preserve the other port');
   assert.ok(result.releasedKeyboardRms < 1e-5, 'disconnecting a pedal controller must not leave future keyboard notes sustained forever');
-} finally { await browser.close(); }
+});

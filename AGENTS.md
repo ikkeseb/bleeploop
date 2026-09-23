@@ -80,9 +80,10 @@ Harness auto-load of nested files is not reliable: open the briefing yourself.
 - Known intermittent red on the Mac: if the pre-push hook goes red with no FAIL line, re-run once
   before digging.
 - `pnpm dlx knip` finds unused files/exports/deps; an export kept only for a browser probe carries
-  `@public` in its JSDoc. `pnpm verify:jam` needs `pnpm exec playwright install chromium` once.
-- There is no JS unit-test runner. `pnpm verify` = pure logic + the docs guard; `pnpm verify:jam` =
-  the real app headless, frame-by-frame. What each can and cannot see: `verify/README.md`.
+  `@public` in its JSDoc. The browser probes need `pnpm exec playwright install chromium` once.
+- There is no JS unit-test runner. `pnpm verify` = the guards (real source in plain Node + the docs
+  guard); `pnpm probe <name>|--ci` = the browser probes, each on its own Vite; `pnpm verify:jam` = the
+  golden jam, the real app headless, frame by frame. What each can and cannot see: `verify/README.md`.
 
 ## Architecture in one paragraph
 

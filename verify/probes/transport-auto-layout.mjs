@@ -1,17 +1,20 @@
-/** AUTO must not move the stage when toggled or adjusted. Requires the browser rig. */
+/**
+ * Drives the rendered command bar and lane through AUTO REC's toggle and sensitivity slider at
+ * seven desktop widths (960..1920 px) and asserts the command-bar height and lane top never move:
+ * AUTO must not reflow the stage when switched on/off or dragged end-to-end. Screenshots the 1730 px
+ * case before and after enabling. Proves layout stability only; it says nothing about auto-record
+ * detection itself (that is the AUTO REC section of golden-jam) or anything below the DOM.
+ * Run: pnpm probe transport-auto-layout
+ */
 import assert from 'node:assert/strict';
-import { chromium } from 'playwright';
 import { mkdir } from 'node:fs/promises';
+import { probe } from '../harness/probe.ts';
 
-const url = process.argv.find(arg => arg.startsWith('--url='))?.slice(6) ?? 'http://localhost:1420';
-const browser = await chromium.launch();
-await mkdir('logs/layout', { recursive: true });
-const failures = [];
-try {
+await probe(async ({ open }) => {
+  await mkdir('logs/layout', { recursive: true });
+  const failures = [];
   for (const width of [960, 1280, 1400, 1500, 1600, 1730, 1920]) {
-    const page = await browser.newPage({ viewport: { width, height: 900 } });
-    await page.goto(url);
-    await page.waitForFunction(() => !!window.__lf);
+    const { page } = await open({ viewport: { width, height: 900 } });
     await page.evaluate(() => window.__lf.looper.setAutoRecordEnabled(false));
     await page.waitForTimeout(150);
     const bounds = () => page.evaluate(() => ({
@@ -44,4 +47,4 @@ try {
     await page.close();
   }
   assert.deepEqual(failures, [], 'AUTO moved the stage at these viewport widths');
-} finally { await browser.close(); }
+}, { launch: {} });

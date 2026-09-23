@@ -1,15 +1,17 @@
-/** Real IndexedDB recovery writes and rollback, with failures at transaction/request boundaries.
- * node verify/probes/recovery-transactions.mjs --url=http://localhost:1420
- * The quota case injects QuotaExceededError at put(), not actual disk exhaustion.
- * No worker replacement: every save encodes its production recovery archive.
+/**
+ * Real IndexedDB recovery writes and rollback, with failures injected at transaction/request
+ * boundaries: an aborted put after apparent success, a QuotaExceededError at put, an aborted delete
+ * after apparent success, an aborted read transaction, and an automatic retry once a later state
+ * change gives the failed save a fresh fingerprint. The quota case injects the error at put(), not
+ * actual disk exhaustion; no worker replacement, so every save encodes its production recovery
+ * archive.
+ * Run: pnpm probe recovery-transactions
  */
-import { chromium } from 'playwright';
+import assert from 'node:assert/strict';
+import { probe } from '../harness/probe.ts';
 
-const browser = await chromium.launch({ args: ['--autoplay-policy=no-user-gesture-required'] });
-try {
-  const page = await browser.newPage();
-  await page.goto(process.argv.find((arg) => arg.startsWith('--url='))?.slice(6) ?? 'http://localhost:1420');
-  await page.waitForFunction(() => !!window.__lf);
+await probe(async ({ open }) => {
+  const { page } = await open();
   const result = await page.evaluate(async () => {
     const lf = window.__lf;
     await lf.autosave.ready();
@@ -133,7 +135,5 @@ try {
     return cases;
   });
   console.log(JSON.stringify(result, null, 2));
-  if (result.some((entry) => !entry.pass)) process.exitCode = 1;
-} finally {
-  await browser.close();
-}
+  assert.ok(result.every((entry) => entry.pass), JSON.stringify(result));
+});

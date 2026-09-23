@@ -1,12 +1,17 @@
-// pnpm exec node verify/probes/recovery-worker.mjs (Vite on 1420).
-// Exercises real worker encoding, transfer ownership, encoding failure, startup failure and retry.
-import { chromium } from 'playwright';
+/**
+ * Recovery encoding through the real worker: transfer ownership of the copied PCM, non-finite sample
+ * rejection, a worker startup failure followed by a successful retry, and a malformed reply from the
+ * worker. Then the same failure behaviour through the production autosave path: a failed flush leaves
+ * the previous archive restorable, a live edit made while an encode is pending cannot mutate the
+ * snapshot the worker already copied, and two overlapping flushes leave recovery cleared rather than
+ * resurrecting an older save. Cannot see native storage limits or WebView2.
+ * Run: pnpm probe recovery-worker
+ */
 import assert from 'node:assert/strict';
+import { probe } from '../harness/probe.ts';
 
-const browser = await chromium.launch({ headless: true, args: ['--autoplay-policy=no-user-gesture-required'] });
-try {
-  const page = await browser.newPage();
-  await page.goto((process.argv.find(arg => arg.startsWith('--url='))?.slice(6) ?? 'http://localhost:1420'));
+await probe(async ({ open }) => {
+  const { page } = await open({ noLf: true });
   const result = await page.evaluate(async () => {
     const { encodeRecovery } = await import('/src/audio/export/recovery-encode.ts');
     const { parseZip } = await import('/src/audio/export/unzip.ts');
@@ -60,6 +65,7 @@ try {
   assert.equal(result.made, 4);
   assert.equal(result.terminated, 4);
   console.log(JSON.stringify(result));
+
   await page.waitForFunction(() => !!window.__lf);
   const recovery = await page.evaluate(async () => {
     const lf = window.__lf;
@@ -125,6 +131,4 @@ try {
   assert.deepEqual(recovery, { rejected: true, restoredPrevious: true, previousExact: true,
     restoredSnapshot: true, snapshotExact: true, clearedAfterSave: true });
   console.log(JSON.stringify(recovery));
-} finally {
-  await browser.close();
-}
+});

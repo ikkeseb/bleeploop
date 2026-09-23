@@ -1,20 +1,19 @@
 /**
- * Playback proof for opt-in loop-end stop. Run against pnpm dev with:
- *   node verify/probes/loop-end-stop.mjs
- * Uses an isolated Chromium profile and real AudioWorklet PCM at the lane gain/master output.
- * Proves the audio deadline under main-thread blocking, force-stop, clear/reuse, source retirement,
- * phase-correct resume and click cancellation/restoration. Does not establish native ASIO feel.
+ * Playback proof for opt-in loop-end stop, measuring lane deadlines and the rendered UI. Uses real
+ * AudioWorklet PCM captured at the lane gain/master output to prove: audio stops exactly on the loop
+ * edge while the main thread is blocked, resume keeps master phase, a second STOP is immediate and
+ * CLEAR prevents stale completion, a retiring reversed source stays audible to the edge, two playing
+ * lanes stop on the same frame, Stop All commits a pending overdub immediately while playback waits
+ * for loop end, a queued boundary click cancels (and restores on new playback), and the pending core
+ * button disables transforms and exposes force stop.
+ * Run: pnpm probe loop-end-stop [--url=<server>]
+ * Does not establish native ASIO feel; the audio path is Chromium's Web Audio renderer.
  */
-import { chromium } from 'playwright';
+import { probe } from '../harness/probe.ts';
 import { mkdir } from 'node:fs/promises';
 
-const browser = await chromium.launch({ args: ['--autoplay-policy=no-user-gesture-required'] });
-try {
-  const page = await browser.newPage({ viewport: { width: 1600, height: 900 } });
-  const errors = [];
-  page.on('pageerror', (error) => errors.push(String(error)));
-  await page.goto(process.env.LF_URL ?? (process.argv.find(arg => arg.startsWith('--url='))?.slice(6) ?? 'http://localhost:1420'));
-  await page.waitForFunction(() => !!window.__lf);
+await probe(async ({ open }) => {
+  const { page } = await open({ viewport: { width: 1600, height: 900 } });
   await page.evaluate(async () => {
     const { engineState } = await import('/src/audio/looper/state.ts');
     const { defaultFxStates } = await import('/src/audio/fx/fx.ts');
@@ -182,8 +181,5 @@ try {
   });
   await page.getByRole('button', { name: 'Track 1 stop now', exact: true }).click();
   check('Pointer force stop completes', { pass: await page.evaluate(() => window.__lf.looper.trackInfo(0).state === 'STOPPED') });
-  check('No uncaught browser errors', { pass: errors.length === 0, errors });
   console.log(JSON.stringify(results, null, 2));
-} finally {
-  await browser.close();
-}
+});

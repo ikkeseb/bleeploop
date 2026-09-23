@@ -1,11 +1,18 @@
-// Production compensation under paired queue/render-cursor movement, invalid timestamps and freeze.
+/**
+ * Exercises the production compensation sampler (`recordLatency`) with paired queue/render-cursor
+ * observations, invalid timestamps and freeze: checks that a paired change in plugin queue fill and
+ * `getOutputTimestamp()` cancels in the measured compensation, that an invalid timestamp freezes the
+ * last good measurement, that a trim offset shifts compensation by exactly its frame equivalent, and
+ * that a fresh monitor generation falls back to the reported (non-timestamp) source.
+ * Run: pnpm probe render-cursor [--url=<server>]
+ * Drives the real compensation math against a substituted `pluginBridge.stats` and `ctx.getOutputTimestamp`
+ * in Chromium; it does not establish native plugin queue behaviour or device output latency.
+ */
 import assert from 'node:assert/strict';
-import { chromium } from 'playwright';
-const browser = await chromium.launch({ args: ['--autoplay-policy=no-user-gesture-required'] });
-try {
-  const page = await browser.newPage();
-  await page.goto(process.argv.find(arg => arg.startsWith('--url='))?.slice(6) ?? 'http://localhost:1420');
-  await page.waitForFunction(() => !!window.__lf);
+import { probe } from '../harness/probe.ts';
+
+await probe(async ({ open }) => {
+  const { page } = await open();
   const result = await page.evaluate(async () => {
     const { engine, recordLatency: latency } = window.__lf;
     const { pluginBridge } = await import('/src/audio/plugin-bridge.ts');
@@ -47,4 +54,4 @@ try {
   assert.equal(result.fallbackSource, 'reported');
   assert.equal(result.fallbackFinite, true);
   assert.equal(result.unarmed, 0);
-} finally { await browser.close(); }
+});

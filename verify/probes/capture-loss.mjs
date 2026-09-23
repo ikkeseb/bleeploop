@@ -1,13 +1,17 @@
-// Drops one actual capture packet during a take/layer and reports the matching producer loss.
-// verify/guards/capture-packets.mjs separately executes a true full-ring producer drop.
+/**
+ * Drops one actual capture packet during a take/layer and reports the matching producer loss:
+ * an overdub rolls back to the pre-dub PCM and undo buffer, and a FIXED-length take is discarded
+ * (EMPTY, no active recorder). `verify/guards/capture-packets.mjs` separately executes a true
+ * full-ring producer drop.
+ * Run: pnpm probe capture-loss [--url=<server>]
+ * Drives the real looper and capture ring in Chromium; it does not establish native ring-buffer
+ * behaviour under a real device xrun.
+ */
 import assert from 'node:assert/strict';
-import { chromium } from 'playwright';
+import { probe } from '../harness/probe.ts';
 
-const browser = await chromium.launch({ args: ['--autoplay-policy=no-user-gesture-required'] });
-try {
-  const page = await browser.newPage();
-  await page.goto(process.argv.find((arg) => arg.startsWith('--url='))?.slice(6) ?? 'http://localhost:1420');
-  await page.waitForFunction(() => !!window.__lf);
+await probe(async ({ open }) => {
+  const { page } = await open();
   const result = await page.evaluate(async () => {
     const lf = window.__lf;
     await lf.looper.init();
@@ -72,4 +76,4 @@ try {
   assert.deepEqual(result.dub, { state: 'STOPPED', exact: true, undoExact: true, silent: true });
   assert.deepEqual(result.take, { state: 'EMPTY', frames: 0, active: -1 });
   assert.equal(result.dropped, 256);
-} finally { await browser.close(); }
+});

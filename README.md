@@ -105,6 +105,7 @@ pnpm dev:asio     # full app, ASIO + native sample rate
 | `pnpm build:app` | Standalone release exe with ASIO (`tauri build --no-bundle --features asio`) |
 | `pnpm check` | Typecheck, oxlint, the capability-boundary check and the `verify/` guards. Also the pre-push hook |
 | `pnpm verify` | Deterministic guards for the audio core's pure logic, no browser or hardware |
+| `pnpm probe <name>` | One browser probe against the real app on its own Vite server; `--ci` runs every CI probe, `--list` names them |
 | `pnpm verify:jam` | The golden jam. Drives the real app in a headless browser and checks the recorded grid frame by frame (~40 s, not part of `pnpm check`) |
 
 The `build-exe` workflow builds the ASIO installer and exe on a clean Windows runner and keeps them
@@ -133,8 +134,8 @@ There is no unit-test runner. Two layers cover the audio core:
   quanta and fires the app's timers on the audio clock.
 - `pnpm verify:jam` (~40 s, outside `pnpm check`) is the golden jam. It drives the real app in a
   headless browser, records impulses on the beat grid and checks the committed loop frame by frame.
-  Focused browser probes also cover input ownership, session round trips, recovery failures and
-  plugin lifecycle transitions; see [`verify/README.md`](verify/README.md). The `pnpm verify` guards
+  Focused browser probes (`pnpm probe`, in CI) also cover input ownership, session round trips,
+  recovery failures and plugin lifecycle transitions; see [`verify/README.md`](verify/README.md). The `pnpm verify` guards
   never reach a real audio graph, browser or WebView2.
 
 Feel, the native half and real rig latency are verified by running the app and measuring it, not by

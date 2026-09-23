@@ -1,38 +1,39 @@
-/** Actual close-guard + IndexedDB deletion rollback, with only native close capabilities substituted.
- * node verify/probes/recovery-close.mjs --url=http://localhost:1420
- * Browser proof of frontend close approval; does not exercise Rust/WebView2 window events.
- * Two cases: a failed recovery deletion must not approve the close, and closing DURING the very first
- * take (RECORDING, nothing committed, no master grid yet) must approve with no failure notice at all.
+/**
+ * Actual close-guard + IndexedDB deletion rollback, with only native close capabilities substituted.
+ * Browser proof of frontend close approval; does not exercise Rust/WebView2 window events. Two cases:
+ * a failed recovery deletion must not approve the close, then a retry once the deletion works must
+ * approve and clear the stale jam; and closing DURING the very first take (RECORDING, nothing
+ * committed, no master grid yet) must approve with no failure notice at all.
+ * Run: pnpm probe recovery-close
  */
-import { chromium } from 'playwright';
+import assert from 'node:assert/strict';
+import { probe } from '../harness/probe.ts';
 
-const url = process.argv.find((arg) => arg.startsWith('--url='))?.slice(6) ?? 'http://localhost:1420';
-const browser = await chromium.launch({ args: ['--autoplay-policy=no-user-gesture-required'] });
-/** A page with the native close capabilities substituted. Each case gets its own page (an approved
- * close latches the guard's `closePending`, so a second close request on the same page is swallowed)
- * and its own console-error sink, so one case's injected failure cannot be read as another's. */
-const openGuardedPage = async (consoleErrors) => {
-  const guarded = await browser.newPage();
-  guarded.on('console', (message) => {
-    if (message.type() === 'error') consoleErrors.push(message.text());
-  });
-  await guarded.route('**/src/app/close-guard.ts*', async (route) => {
-    const response = await route.fetch();
-    const source = await response.text();
-    const capabilities = /import\s*\{[^}]*confirmNativeClose[^}]*\}\s*from\s*["'][^"']+["'];?/;
-    if (!capabilities.test(source)) throw new Error('Cannot locate close-guard platform import');
-    await route.fulfill({ response, body: source.replace(capabilities, `
-      const platform = { kind: 'tauri' };
-      const onNativeCloseRequested = (callback) => { window.__closeRequest = callback; };
-      const confirmNativeClose = async () => { window.__closeApprovals = (window.__closeApprovals ?? 0) + 1; };
-    `) });
-  });
-  await guarded.goto(url);
-  await guarded.waitForFunction(() => !!window.__lf && !!window.__closeRequest);
-  return guarded;
-};
-try {
-  const page = await openGuardedPage([]);
+await probe(async ({ open }) => {
+  /** A page with the native close capabilities substituted. Each case gets its own page (an approved
+   * close latches the guard's `closePending`, so a second close request on the same page is swallowed)
+   * and its own console-error sink, so one case's injected failure cannot be read as another's. */
+  const openGuardedPage = async () => {
+    const app = await open({
+      init: async (page) => {
+        await page.route('**/src/app/close-guard.ts*', async (route) => {
+          const response = await route.fetch();
+          const source = await response.text();
+          const capabilities = /import\s*\{[^}]*confirmNativeClose[^}]*\}\s*from\s*["'][^"']+["'];?/;
+          if (!capabilities.test(source)) throw new Error('Cannot locate close-guard platform import');
+          await route.fulfill({ response, body: source.replace(capabilities, `
+            const platform = { kind: 'tauri' };
+            const onNativeCloseRequested = (callback) => { window.__closeRequest = callback; };
+            const confirmNativeClose = async () => { window.__closeApprovals = (window.__closeApprovals ?? 0) + 1; };
+          `) });
+        });
+      },
+    });
+    await app.page.waitForFunction(() => !!window.__closeRequest);
+    return app;
+  };
+
+  const { page } = await openGuardedPage();
   const result = await page.evaluate(async () => {
     const lf = window.__lf;
     await lf.autosave.ready();
@@ -79,14 +80,13 @@ try {
     }
   });
   console.log(JSON.stringify(result, null, 2));
-  if (!result.pass) process.exitCode = 1;
+  assert.ok(result.pass, JSON.stringify(result));
 
   // ── Closing during the FIRST take ───────────────────────────────────────────────────────
   // RECORDING makes the jam non-blank while nothing is committed and the master grid is still 0
   // frames. The recovery save must treat that as "nothing to save" rather than a grid failure, so the
   // close approves silently instead of warning about losing loops that never existed.
-  const firstTakeErrors = [];
-  const firstTakePage = await openGuardedPage(firstTakeErrors);
+  const { page: firstTakePage, consoleErrors: firstTakeErrors } = await openGuardedPage();
   const firstTake = await firstTakePage.evaluate(async () => {
     const lf = window.__lf;
     await lf.looper.init();
@@ -132,7 +132,5 @@ try {
   });
   const autosaveErrors = firstTakeErrors.filter((text) => text.includes('[autosave]') || text.includes('[app] autosave'));
   console.log(JSON.stringify({ firstTake, autosaveErrors }, null, 2));
-  if (!firstTake.pass || autosaveErrors.length > 0) process.exitCode = 1;
-} finally {
-  await browser.close();
-}
+  assert.ok(firstTake.pass && autosaveErrors.length === 0, JSON.stringify({ firstTake, autosaveErrors }));
+});

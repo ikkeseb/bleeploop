@@ -1,12 +1,14 @@
 /**
- * Recovery import is transactional across Web Audio allocation/scheduling failures.
- * Run with Vite on :1420, or pass --url=http://localhost:1421.
+ * Recovery import is transactional across Web Audio allocation/scheduling failures: a failed archive
+ * read, buffer allocation or playback source-start during import must leave the previous archive (or
+ * blank state) intact, then a later explicit clear or retry recovers cleanly and the frontend reports
+ * the failure once. A fourth scenario checks that a live user load winning a race against startup
+ * recovery is never overwritten by the stale archive at close. Cannot see native storage limits or
+ * WebView2.
+ * Run: pnpm probe recovery-import-failure
  */
 import assert from 'node:assert/strict';
-import { chromium } from 'playwright';
-
-const url = process.argv.find((arg) => arg.startsWith('--url='))?.slice(6) ?? 'http://localhost:1420';
-const browser = await chromium.launch({ headless: true, args: ['--autoplay-policy=no-user-gesture-required'] });
+import { probe } from '../harness/probe.ts';
 
 const scenarios = [
   { failure: 'buffer', finish: 'clear' },
@@ -14,19 +16,11 @@ const scenarios = [
   { failure: 'read', finish: 'retry' },
 ];
 
-try {
+await probe(async ({ open, browser }) => {
   const results = [];
   for (const scenario of scenarios) {
     const context = await browser.newContext();
-    const page = await context.newPage();
-    const errors = [];
-    const reportedFailures = [];
-    page.on('pageerror', (error) => errors.push(String(error)));
-    page.on('console', (message) => {
-      if (message.type() === 'error') reportedFailures.push(message.text());
-    });
-    await page.goto(url);
-    await page.waitForFunction(() => !!window.__lf);
+    const { page, pageErrors: errors, consoleErrors: reportedFailures } = await open({ context });
 
     const prepared = await page.evaluate(async () => {
       const lf = window.__lf;
@@ -201,15 +195,7 @@ try {
   // must not protect the live jam's fingerprint and resurrect the older archive on close.
   {
     const context = await browser.newContext();
-    const page = await context.newPage();
-    const errors = [];
-    const reportedFailures = [];
-    page.on('pageerror', (error) => errors.push(String(error)));
-    page.on('console', (message) => {
-      if (message.type() === 'error') reportedFailures.push(message.text());
-    });
-    await page.goto(url);
-    await page.waitForFunction(() => !!window.__lf);
+    const { page, pageErrors: errors, consoleErrors: reportedFailures } = await open({ context });
     const prepared = await page.evaluate(async () => {
       const lf = window.__lf;
       await lf.autosave.ready();
@@ -339,6 +325,4 @@ try {
 
   console.log(JSON.stringify(results, null, 2));
   for (const result of results) assert.ok(result.pass, JSON.stringify(result));
-} finally {
-  await browser.close();
-}
+});

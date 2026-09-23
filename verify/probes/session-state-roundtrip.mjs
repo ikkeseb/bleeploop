@@ -1,17 +1,17 @@
-/** Recovery playback-state round trip through the production autosave archive and import path.
- * Run against Vite: node verify/probes/session-state-roundtrip.mjs --url=http://localhost:1420
+/**
+ * Playback-state round trip through the production autosave archive and import path: a PLAYING lane
+ * must restore STOPPED with no live source, a state-only change (no PCM/session edit) must still
+ * advance the autosave fingerprint on the next normal autosave (not a forced flush), and PLAY ALL
+ * after import must build every stopped lane's graph before starting so all lanes share one restart
+ * anchor even when a cold lane's graph build is slow.
+ * Run: pnpm probe session-state-roundtrip
  */
 import assert from 'node:assert/strict';
-import { chromium } from 'playwright';
+import { probe } from '../harness/probe.ts';
 
-const url = process.argv.find((arg) => arg.startsWith('--url='))?.slice(6) ?? 'http://localhost:1420';
-const browser = await chromium.launch({ args: ['--autoplay-policy=no-user-gesture-required'] });
-
-try {
+await probe(async ({ open, browser }) => {
   const context = await browser.newContext();
-  let page = await context.newPage();
-  await page.goto(url);
-  await page.waitForFunction(() => !!window.__lf);
+  let { page } = await open({ context });
 
   const before = await page.evaluate(async () => {
     const lf = window.__lf;
@@ -69,9 +69,7 @@ try {
   assert.equal(before.stateOnlyAutosaveAdvanced, true);
 
   await page.close();
-  page = await context.newPage();
-  await page.goto(url);
-  await page.waitForFunction(() => !!window.__lf);
+  ({ page } = await open({ context }));
   const after = await page.evaluate(async () => {
     const lf = window.__lf;
     const { engineState } = await import('/src/audio/looper/state.ts');
@@ -131,6 +129,4 @@ try {
 
   console.log(JSON.stringify({ pass: true, before, after }, null, 2));
   await context.close();
-} finally {
-  await browser.close();
-}
+});

@@ -1,23 +1,29 @@
-// Browser regression for the plugin slot's pending UI. It drives the production slot queue and
-// rendered controls with deferred host replies; it makes no native teardown or timing claim.
+/**
+ * Plugin slot pending UI: deferred swap/unload/load keep the slot's busy label honest and its
+ * source controls locked while the other slot stays usable; a rejected operation still decrements
+ * the pending count and restores interaction; programmatic queue callers count at enqueue time (no
+ * enabled frame between operations) and slot independence holds; an error thrown inside the queued
+ * operation itself still releases its pending count; and an effect's automatic GO LIVE stays queued
+ * behind its source load without disabling the internal auto-start. Drives the production slot queue
+ * and rendered controls with deferred host replies; it makes no native teardown or timing claim.
+ * Run: pnpm probe plugin-slot-pending [--screenshot=<path>]
+ */
 import assert from 'node:assert/strict';
-import { chromium } from 'playwright';
+import { probe, arg } from '../harness/probe.ts';
 
-const url = process.argv.find((arg) => arg.startsWith('--url='))?.slice(6) ?? 'http://localhost:1420';
-const screenshot = process.argv.find((arg) => arg.startsWith('--screenshot='))?.slice(13);
-const browser = await chromium.launch();
+const screenshot = arg('screenshot');
 
-try {
-  const page = await browser.newPage({ viewport: { width: 1280, height: 820 } });
-  // Render the real native-only slot chrome in the browser tier. The host methods themselves are
-  // replaced below before any operation is driven.
-  await page.route('**/src/platform/host.web.ts', async (route) => {
-    const response = await route.fetch();
-    const body = (await response.text()).replace('available: false', 'available: true');
-    await route.fulfill({ response, body });
+await probe(async ({ open }) => {
+  const { page } = await open({
+    viewport: { width: 1280, height: 820 },
+    // Render the real native-only slot chrome in the browser tier. The host methods themselves are
+    // replaced below before any operation is driven.
+    init: (p) => p.route('**/src/platform/host.web.ts', async (route) => {
+      const response = await route.fetch();
+      const body = (await response.text()).replace('available: false', 'available: true');
+      await route.fulfill({ response, body });
+    }),
   });
-  await page.goto(url);
-  await page.waitForFunction(() => !!window.__lf);
 
   const setup = await page.evaluate(async () => {
     const { platform } = await import('/src/platform/index.ts');
@@ -206,7 +212,4 @@ try {
   assert.equal((await slotUi(0)).pickerDisabled, false);
 
   await page.waitForFunction(() => window.__slotPendingProbe.autoEditorOpened === true);
-  console.log('PASS: pending swap/unload, failure recovery, queue ownership and automatic live/editor startup');
-} finally {
-  await browser.close();
-}
+}, { launch: {} });

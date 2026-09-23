@@ -31,8 +31,8 @@ export default defineConfig({
   preview: {
     port: 1420,
     // Mirror the dev server: fail loudly if 1420 is taken rather than silently rebind to 1421+.
-    // The verify probes (docs/VERIFY.md) hardcode localhost:1420, so a moved preview would measure
-    // a stale build with no error.
+    // A probe run directly (without `pnpm probe`) targets localhost:1420, so a moved preview would
+    // measure a stale build with no error.
     strictPort: true,
     headers: { ...crossOriginIsolation },
   },

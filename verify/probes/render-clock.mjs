@@ -1,10 +1,16 @@
-// Actual DEV observer worklet: identity PCM, absolute render frames, finite wall clock and overflow.
+/**
+ * Actual DEV observer worklet (`src/debug/render-clock-processor.ts`): identity PCM, absolute render
+ * frames and a finite wall clock over an OfflineAudioContext, plus SharedArrayBuffer overflow when the
+ * publish capacity is smaller than the rendered quanta.
+ * Run: pnpm probe render-clock [--url=<server>]
+ * Proves the DEV clock observer's correctness inside Chromium's offline renderer; it says nothing
+ * about the observer's cost on the real-time render thread or on native audio.
+ */
 import assert from 'node:assert/strict';
-import { chromium } from 'playwright';
-const browser = await chromium.launch();
-try {
-  const page = await browser.newPage();
-  await page.goto(process.argv.find(arg => arg.startsWith('--url='))?.slice(6) ?? 'http://localhost:1420');
+import { probe } from '../harness/probe.ts';
+
+await probe(async ({ open }) => {
+  const { page } = await open({ noLf: true });
   const results = await page.evaluate(async () => {
     const { default: url } = await import('/src/debug/render-clock-processor.ts?worker&url');
     const results = [];
@@ -45,4 +51,4 @@ try {
     { capacity: 64, count: 32, overflow: 0, identical: true, exactFrames: true, wallClockBounded: true },
     { capacity: 2, count: 2, overflow: 1, identical: true, exactFrames: true, wallClockBounded: true },
   ]);
-} finally { await browser.close(); }
+}, { launch: {} });

@@ -1,25 +1,20 @@
-/** Screenshot contact sheet: fixed looper scenes at three viewports, keyboard bottom and hidden.
- * Writes logs/contact-sheet/<viewport>-<kbd>-<scene>.png plus index.html tiling them, for the eye lap.
- * Asserts (FAIL lines, non-zero exit): with FX open every lane's clear button is fully visible
- * (audit A4); an ARMED later take draws no rec-red in its canvas while waiting (audit A3); no scene
- * logs console.error or an uncaught page error.
- * Run against Vite: node verify/probes/contact-sheet.mjs --url=http://localhost:1420
+/** Screenshot contact sheet: fixed looper scenes at three viewports (1280x820, 1920x1080, 1000x700),
+ * keyboard bottom and hidden, each in its own fresh browser context. Writes
+ * logs/contact-sheet/<viewport>-<kbd>-<scene>.png plus a tiling index.html unconditionally, before any
+ * FAIL is raised, so a red run still leaves the sheet for the eye lap. Asserts: with FX open every
+ * lane's clear button is fully visible (audit A4); an ARMED later take draws no rec-red in its canvas
+ * while waiting (audit A3); no scene logs console.error or an uncaught page error (tagged with the
+ * scene it happened in). Sees only the rendered DOM/canvas; a human still judges the screenshots.
+ * Run: pnpm probe contact-sheet
  */
-import { chromium } from 'playwright';
 import { mkdir, writeFile } from 'node:fs/promises';
+import { probe } from '../harness/probe.ts';
 
-const url = process.argv.find((arg) => arg.startsWith('--url='))?.slice(6) ?? 'http://localhost:1420';
 const outDir = 'logs/contact-sheet';
 const viewports = [[1280, 820], [1920, 1080], [1000, 700]];
 const placements = ['bottom', 'hidden'];
 const scenes = ['1-empty', '2-first-take-recording', '3-armed-waiting', '4-count-in', '5-fx-five-lanes', '6-help', '7-audio-settings'];
 const REC_PIXEL_LIMIT = 20; // anti-aliasing slack; a red playhead or tape is hundreds of pixels
-
-await mkdir(outDir, { recursive: true });
-const browser = await chromium.launch({ args: ['--autoplay-policy=no-user-gesture-required'] });
-const failures = [];
-const shots = [];
-const fail = (msg) => { failures.push(msg); console.log(`FAIL ${msg}`); };
 
 /** Five one-bar lanes at 120 BPM with a visible wave; `playing` lanes start PLAYING. */
 async function loadLanes(page, { count, playing, bpm = 120, bars = 1 }) {
@@ -40,17 +35,22 @@ async function loadLanes(page, { count, playing, bpm = 120, bars = 1 }) {
   }, { count, playing, bpm, bars });
 }
 
-try {
+await probe(async ({ browser, open }) => {
+  await mkdir(outDir, { recursive: true });
+  const failures = [];
+  const shots = [];
+  const fail = (msg) => { failures.push(msg); console.log(`FAIL ${msg}`); };
+
   for (const [width, height] of viewports) {
     for (const kbd of placements) {
-      const context = await browser.newContext({ viewport: { width, height } });
-      const page = await context.newPage();
       let scene = 'load';
       const errors = [];
-      page.on('console', (m) => { if (m.type() === 'error') errors.push({ scene, text: m.text() }); });
-      page.on('pageerror', (e) => errors.push({ scene, text: String(e) }));
-      await page.goto(url);
-      await page.waitForFunction(() => !!window.__lf);
+      const init = (page) => {
+        page.on('console', (m) => { if (m.type() === 'error') errors.push({ scene, text: m.text() }); });
+        page.on('pageerror', (e) => errors.push({ scene, text: String(e) }));
+      };
+      const context = await browser.newContext();
+      const { page } = await open({ context, viewport: { width, height }, init, allowPageErrors: true });
       await page.evaluate((v) => window.__lf.layoutStore.setKeyboardPlacement(v), kbd);
       const shoot = async (name) => {
         await page.evaluate(() => document.activeElement?.blur());
@@ -162,20 +162,20 @@ try {
       await context.close();
     }
   }
-} finally { await browser.close(); }
 
-const order = (s) => scenes.indexOf(s.scene);
-const rows = viewports.flatMap(([w, h]) => placements.map((kbd) => {
-  const cells = shots.filter((s) => s.viewport === `${w}x${h}` && s.kbd === kbd).sort((a, b) => order(a) - order(b))
-    .map((s) => `<figure><a href="${s.file}"><img src="${s.file}" loading="lazy"></a><figcaption>${s.scene}</figcaption></figure>`).join('');
-  return `<h2>${w}x${h}, keyboard ${kbd}</h2><div class="row">${cells}</div>`;
-})).join('\n');
-await writeFile(`${outDir}/index.html`, `<!doctype html><meta charset="utf-8"><title>BleepLoop contact sheet</title>
+  const order = (s) => scenes.indexOf(s.scene);
+  const rows = viewports.flatMap(([w, h]) => placements.map((kbd) => {
+    const cells = shots.filter((s) => s.viewport === `${w}x${h}` && s.kbd === kbd).sort((a, b) => order(a) - order(b))
+      .map((s) => `<figure><a href="${s.file}"><img src="${s.file}" loading="lazy"></a><figcaption>${s.scene}</figcaption></figure>`).join('');
+    return `<h2>${w}x${h}, keyboard ${kbd}</h2><div class="row">${cells}</div>`;
+  })).join('\n');
+  await writeFile(`${outDir}/index.html`, `<!doctype html><meta charset="utf-8"><title>BleepLoop contact sheet</title>
 <style>body{background:#111;color:#ddd;font:13px system-ui;margin:16px}.row{display:flex;gap:8px;overflow-x:auto}
 figure{margin:0;flex:0 0 auto}img{width:320px;border:1px solid #333;display:block}h2{font-size:14px;margin:18px 0 6px}</style>
 <h1>BleepLoop contact sheet</h1><p>${new Date().toISOString()} · ${failures.length} FAIL</p>
 ${failures.length ? `<pre>${failures.map((f) => `FAIL ${f}`).join('\n').replace(/</g, '&lt;')}</pre>` : ''}
 ${rows}
 `);
-console.log(`${shots.length} screenshots + index.html in ${outDir}`);
-if (failures.length) { console.log(`${failures.length} FAIL`); process.exit(1); }
+  console.log(`${shots.length} screenshots + index.html in ${outDir}`);
+  if (failures.length) throw new Error(`${failures.length} FAIL`);
+});

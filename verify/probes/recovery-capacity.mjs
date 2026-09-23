@@ -1,13 +1,16 @@
-// Run with the browser rig on port 1420: pnpm exec node verify/probes/recovery-capacity.mjs
-// Disposable browser storage only. Tests maximum recovery size and Chromium's independent WAV decoder.
-import { chromium } from 'playwright';
+/**
+ * Recovery archive capacity and cross-decoder interoperability, in disposable browser storage. Loads
+ * a 5-track, 30-bar session near the practical size ceiling, times the autosave flush, exports and
+ * reimports it back to an exact PCM match, and decodes a hand-built float32 WAV through Chromium's own
+ * independent decoder as an interoperability check of the float header. Cannot see native storage
+ * limits or WebView2.
+ * Run: pnpm probe recovery-capacity
+ */
 import assert from 'node:assert/strict';
+import { probe } from '../harness/probe.ts';
 
-const browser = await chromium.launch({ headless: true, args: ['--autoplay-policy=no-user-gesture-required'] });
-try {
-  const page = await browser.newPage({ viewport: { width: 1280, height: 820 } });
-  await page.goto('http://localhost:1420');
-  await page.waitForFunction(() => !!window.__lf);
+await probe(async ({ open }) => {
+  const { page } = await open({ viewport: { width: 1280, height: 820 } });
   await page.evaluate(() => window.__lf.autosave.ready());
   const result = await page.evaluate(async () => {
     const lf = window.__lf;
@@ -44,6 +47,4 @@ try {
   assert.ok(result.bytes <= result.limit);
   assert.ok(result.exact);
   console.log(JSON.stringify(result));
-} finally {
-  await browser.close();
-}
+});

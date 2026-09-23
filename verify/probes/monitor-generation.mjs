@@ -1,11 +1,17 @@
-// Actual monitor lifecycle with delayed host replies. No hardware latency claims.
-import { chromium } from 'playwright';
+/**
+ * Actual monitor lifecycle with delayed host replies: a rearmed monitor is not overwritten by an old
+ * reply; a stale configuration reply neither reopens nor overwrites a take's frozen compensation, and
+ * starts no new query; a reply inside the current generation respects its first-use freeze; an
+ * in-flight monitor arm is not overwritten by a newer buffer configuration; and when the most
+ * recently armed slot disarms, a surviving native monitor reopens compensation, freezes its first
+ * take immediately and ignores its own late latency reply after that. No hardware latency claims.
+ * Run: pnpm probe monitor-generation
+ */
 import assert from 'node:assert/strict';
-const browser = await chromium.launch({ args: ['--autoplay-policy=no-user-gesture-required'] });
-try {
-  const page = await browser.newPage();
-  await page.goto(process.argv.find(arg => arg.startsWith('--url='))?.slice(6) ?? 'http://localhost:1420');
-  await page.waitForFunction(() => !!window.__lf);
+import { probe } from '../harness/probe.ts';
+
+await probe(async ({ open }) => {
+  const { page } = await open();
   const result = await page.evaluate(async () => {
     const { platform } = await import('/src/platform/index.ts');
     const io = await import('/src/audio/native-io.ts');
@@ -131,4 +137,4 @@ try {
     { slot: 0, seconds: 0.011, frozen: true },
     'the promoted monitor\'s late latency reply must not overwrite its frozen first take',
   );
-} finally { await browser.close(); }
+});

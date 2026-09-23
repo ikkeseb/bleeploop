@@ -1,15 +1,18 @@
-// Vite on :1420. Measures the real per-track FX graph and checks pitch activation/reset PCM.
-// --baseline reads a reviewer-saved copy at logs/fx-baseline.ts and reports its resource cost.
-// Timings are offline DSP work, not whole-app CPU or physical output latency.
+/** Measures the real per-track FX graph's pitch stage offline: unused pitch allocates no delay lines,
+ * bypassed/reset output preserves the dry signal, enabling it mid-render costs no discontinuity and
+ * reuses its delay lines across repeated enable/bypass/reset, and a live chain in the running graph
+ * applies its stored pitch on first enable without dropping an audio block. `--baseline` reads a
+ * reviewer-saved copy at logs/fx-baseline.ts and reports its resource cost instead, for comparison.
+ * Timings are offline DSP render work, not whole-app CPU or physical output latency.
+ * Run: pnpm probe fx-pitch-cost [--baseline]
+ */
 import assert from 'node:assert/strict';
-import { chromium } from 'playwright';
+import { flag, probe } from '../harness/probe.ts';
 
-const baseline = process.argv.includes('--baseline');
-const browser = await chromium.launch({ headless: true, args: ['--autoplay-policy=no-user-gesture-required'] });
-try {
-  const page = await browser.newPage();
-  await page.goto(process.argv.find((arg) => arg.startsWith('--url='))?.slice(6) ?? 'http://localhost:1420');
-  await page.waitForFunction(() => !!window.__lf);
+const baseline = flag('baseline');
+
+await probe(async ({ open }) => {
+  const { page } = await open();
   const results = await page.evaluate(async (baseline) => {
     await window.__lf.engine.start();
     const path = baseline ? '/logs/fx-baseline.ts' : '/src/audio/fx/fx.ts';
@@ -179,4 +182,4 @@ try {
   assert.ok(live.maxJump < 0.03, 'live switching must retain smooth ramps');
   assert.ok(Math.abs(live.beforeHz - 220) < 10 && Math.abs(live.resetHz - 220) < 10);
   assert.ok(Math.abs(live.pitchHz - 440) < 10, 'first enable must apply the stored pitch');
-} finally { await browser.close(); }
+});

@@ -20,7 +20,7 @@
     "lint": "oxlint --deny-warnings src verify scripts",
     "verify": "node verify/run-guards.mjs",
     "check": "pnpm typecheck && pnpm lint && pnpm check:boundary && pnpm verify",
-    "verify:jam": "node verify/probes/golden-jam.mjs",
+    "verify:jam": "node verify/run-probes.mjs golden-jam",
     "probe": "node verify/run-probes.mjs",
     "prepare": "simple-git-hooks"
   },

@@ -1,13 +1,15 @@
-// pnpm exec node verify/probes/recovery-playback.mjs (Vite on 1420).
-// Measures main-thread delay during real recovery writes. Does not measure native bridge audio.
-import { chromium } from 'playwright';
+/**
+ * Main-thread continuity during real recovery writes: measures the worst setInterval tick gap and any
+ * long-task duration while `autosave.flush()` encodes and writes 1- and 5-track sessions, and confirms
+ * a parallel AudioWorklet meter on the live master bus never observes energy drop to silence. Does not
+ * measure native bridge audio or WebView2 timing.
+ * Run: pnpm probe recovery-playback
+ */
 import assert from 'node:assert/strict';
+import { probe } from '../harness/probe.ts';
 
-const browser = await chromium.launch({ headless: true, args: ['--autoplay-policy=no-user-gesture-required'] });
-try {
-  const page = await browser.newPage({ viewport: { width: 1280, height: 820 } });
-  await page.goto((process.argv.find(arg => arg.startsWith('--url='))?.slice(6) ?? 'http://localhost:1420'));
-  await page.waitForFunction(() => !!window.__lf);
+await probe(async ({ open }) => {
+  const { page } = await open({ viewport: { width: 1280, height: 820 } });
   await page.evaluate(() => window.__lf.autosave.ready());
   const results = await page.evaluate(async () => {
     const lf = window.__lf;
@@ -69,6 +71,4 @@ try {
     assert.ok(result.maxTickGapMs < 100, `Recovery blocked controls for ${result.maxTickGapMs} ms`);
   }
   console.log(JSON.stringify(results));
-} finally {
-  await browser.close();
-}
+});

@@ -1,40 +1,46 @@
-// Rendered regression coverage for session keyboard state, plugin controls and MIDI startup status.
+/**
+ * Rendered regression coverage for session keyboard state, plugin controls and MIDI startup status:
+ * a denied Web MIDI request logs and lands in `denied`, concurrent retries share one request, both
+ * empty native slots show the install hint, the keyboard octave survives a placement remount, plugin
+ * output-gain keyboard steps and slider input honor the unity detent, and a native monitor stream
+ * fault falls the slot back to the web monitor with the right label/title. No native/hardware claims
+ * (the plugin host and MIDI access are simulated in the page). Run: pnpm probe instrument-controls
+ */
 import assert from 'node:assert/strict';
-import { chromium } from 'playwright';
+import { probe } from '../harness/probe.ts';
 
-const url = process.argv.find((arg) => arg.startsWith('--url='))?.slice(6) ?? 'http://localhost:1420';
-const browser = await chromium.launch({ args: ['--autoplay-policy=no-user-gesture-required'] });
+await probe(async ({ open }) => {
+  // The harness's own consoleErrors only keeps `console.error` text; the denied-MIDI notice logs
+  // through `console.warn`, so this probe keeps its own listener across both types.
+  const consoleMessages = [];
+  const { page } = await open({
+    viewport: { width: 1280, height: 820 },
+    init: async (p) => {
+      p.on('console', (message) => {
+        if (message.type() === 'error' || message.type() === 'warning') consoleMessages.push(message.text());
+      });
+      await p.addInitScript(() => {
+        Object.defineProperty(navigator, 'requestMIDIAccess', {
+          configurable: true,
+          value: () => Promise.reject(new DOMException('nope', 'SecurityError')),
+        });
+      });
+      await p.route('**/src/platform/host.web.ts*', async (route) => {
+        const response = await route.fetch();
+        let body = await response.text();
+        if (!body.includes('available: false')) throw new Error('Could not enable simulated native chrome');
+        if (!body.includes('onStreamFault() {')) throw new Error('Could not expose the simulated stream-fault callback');
+        body = body
+          .replace('available: false', 'available: true')
+          .replace(
+            'onStreamFault() {',
+            'onStreamFault(callback) { globalThis.__instrumentControlsFault = callback;',
+          );
+        await route.fulfill({ response, body });
+      });
+    },
+  });
 
-try {
-  const page = await browser.newPage({ viewport: { width: 1280, height: 820 } });
-  const consoleErrors = [];
-  const pageErrors = [];
-  page.on('console', (message) => {
-    if (message.type() === 'error' || message.type() === 'warning') consoleErrors.push(message.text());
-  });
-  page.on('pageerror', (error) => pageErrors.push(String(error)));
-  await page.addInitScript(() => {
-    Object.defineProperty(navigator, 'requestMIDIAccess', {
-      configurable: true,
-      value: () => Promise.reject(new DOMException('nope', 'SecurityError')),
-    });
-  });
-  await page.route('**/src/platform/host.web.ts*', async (route) => {
-    const response = await route.fetch();
-    let body = await response.text();
-    if (!body.includes('available: false')) throw new Error('Could not enable simulated native chrome');
-    if (!body.includes('onStreamFault() {')) throw new Error('Could not expose the simulated stream-fault callback');
-    body = body
-      .replace('available: false', 'available: true')
-      .replace(
-        'onStreamFault() {',
-        'onStreamFault(callback) { globalThis.__instrumentControlsFault = callback;',
-      );
-    await route.fulfill({ response, body });
-  });
-
-  await page.goto(url);
-  await page.waitForFunction(() => !!window.__lf);
   await page.waitForFunction(() => window.__lf.midi.midiStatus() === 'denied');
   await page.waitForFunction(
     () => document.querySelector('[aria-label="Rescan plugins"]')?.disabled === false,
@@ -42,7 +48,7 @@ try {
 
   assert.equal(await page.evaluate(() => window.__lf.midi.midiStatus()), 'denied');
   assert.ok(
-    consoleErrors.some((message) => message.includes('[midi] requestMIDIAccess denied')),
+    consoleMessages.some((message) => message.includes('[midi] requestMIDIAccess denied')),
     'a denied Web MIDI request must reach the console (warn)',
   );
   const midiRetry = await page.evaluate(async () => {
@@ -164,9 +170,4 @@ try {
     'native monitor lost; go live again to restore low-latency monitoring',
   );
   assert.equal(await fallback.locator('.tgl__dot').count(), 1, 'the live dot must remain visible on fallback');
-
-  assert.deepEqual(pageErrors, []);
-  console.log('=== RESULT: instrument-controls passed ===');
-} finally {
-  await browser.close();
-}
+});

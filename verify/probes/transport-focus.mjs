@@ -1,18 +1,16 @@
 /** Transport keys (Space/Enter/1–5) vs. focus: the transport yields only to controls the user is
  * operating, never to focus the app moved itself (popover panel, trigger focus return after Escape).
- * Run against Vite: node verify/probes/transport-focus.mjs --url=http://localhost:1420
+ * Drives the rendered Help popover and BPM field through pointer and keyboard events; proves nothing
+ * about MIDI or hardware-key input.
+ * Run: pnpm probe transport-focus [--shots=<dir>]
  */
 import assert from 'node:assert/strict';
-import { chromium } from 'playwright';
+import { arg, probe } from '../harness/probe.ts';
 
-const url = process.argv.find((arg) => arg.startsWith('--url='))?.slice(6) ?? 'http://localhost:1420';
-const shots = process.argv.find((arg) => arg.startsWith('--shots='))?.slice(8);
-const browser = await chromium.launch({ args: ['--autoplay-policy=no-user-gesture-required'] });
+const shots = arg('shots');
 
-try {
-  const page = await browser.newPage({ viewport: { width: 1280, height: 820 } });
-  await page.goto(url);
-  await page.waitForFunction(() => !!window.__lf);
+await probe(async ({ open }) => {
+  const { page } = await open({ viewport: { width: 1280, height: 820 } });
   await page.evaluate(async () => {
     await window.__lf.ensureActive();
     await window.__lf.looper.init();
@@ -71,8 +69,4 @@ try {
   await page.waitForTimeout(150);
   assert.equal(await page.evaluate(() => window.__lf.clock.bpm()), bpmBefore + 1, 'Enter on BPM plus did not step BPM');
   assert.equal(await state(0), 'EMPTY', 'Enter on a Tab-focused button drove the looper');
-
-  console.log('transport-focus: PASS');
-} finally {
-  await browser.close();
-}
+});

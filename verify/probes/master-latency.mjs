@@ -1,16 +1,17 @@
 /**
- * Measures the production master limiter's DSP delay at 44.1/48 kHz, then checks whether native
- * record compensation includes it. Run with pnpm dev already open:
- *   node verify/probes/master-latency.mjs [--url=http://localhost:1420]
+ * Measures the production master limiter's DSP delay at 44.1/48 kHz against the real
+ * `computeC`/`WORKLET_QUANTUM_FRAMES` formula, then checks that the production compensation path
+ * feeds that measured graph latency through unchanged. Also injects one failed offline-latency
+ * measurement at startup and checks that `engine.start()` rejects, leaves the engine not started,
+ * retries on the next gesture and settles with exactly one successful measurement.
+ * Run: pnpm probe master-latency [--url=<server>] (run with `pnpm dev` already open)
  * Offline PCM proves graph latency only, not device latency or guitar alignment on the native rig.
  */
-import { chromium } from 'playwright';
+import assert from 'node:assert/strict';
+import { probe } from '../harness/probe.ts';
 
-const browser = await chromium.launch({ args: ['--autoplay-policy=no-user-gesture-required'] });
-try {
-  const page = await browser.newPage();
-  await page.goto(process.env.LF_URL ?? process.argv.find((arg) => arg.startsWith('--url='))?.slice(6) ?? 'http://localhost:1420');
-  await page.waitForFunction(() => !!window.__lf);
+await probe(async ({ open }) => {
+  const { page } = await open();
   const startup = await page.evaluate(async () => {
     const engine = window.__lf.engine;
     const Original = window.OfflineAudioContext;
@@ -97,7 +98,6 @@ try {
     return results;
   });
   console.log(JSON.stringify({ startup, measurements: result }, null, 2));
-  if (!startup.pass || result.some((entry) => !entry.pass)) process.exitCode = 1;
-} finally {
-  await browser.close();
-}
+  assert.ok(startup.pass, `startup latency measurement failed: ${JSON.stringify(startup)}`);
+  for (const entry of result) assert.ok(entry.pass, `${entry.name ?? entry.sampleRate}: ${JSON.stringify(entry)}`);
+});

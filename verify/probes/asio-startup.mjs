@@ -1,20 +1,22 @@
-// ASIO startup flows through the real frontend orchestration with an instrumented host: a saved
-// "off" never asks for the driver; a saved "on" probes at boot before plugins become selectable; a
-// blocked/failed probe offers RETRY and an explicit retry can publish; timed-out offers no retry;
-// not-compiled / disabled-by-flag hide the toggle. No hardware claims (the native probe itself is
-// covered by `cargo test` in src-tauri/src/asio_startup.rs and the tauri dev log).
-import { chromium } from 'playwright';
+/**
+ * ASIO startup flows through the real frontend orchestration with an instrumented host: a saved
+ * "off" never asks for the driver; a saved "on" probes at boot before plugins become selectable; a
+ * blocked/failed probe offers RETRY and an explicit retry can publish; timed-out offers no retry;
+ * not-compiled / disabled-by-flag hide the toggle. Drives the ASIO startup coordinator's frontend
+ * half — the native state machine itself is `cargo test` in `src-tauri/src/asio_startup.rs` — and
+ * makes no hardware claim. Run: pnpm probe asio-startup
+ */
+import { probe } from '../harness/probe.ts';
 import assert from 'node:assert/strict';
 import { mkdir } from 'node:fs/promises';
 
-const url = process.argv.find((arg) => arg.startsWith('--url='))?.slice(6) ?? 'http://localhost:1420';
-const browser = await chromium.launch();
+await probe(async ({ open }) => {
 
 async function scenario(name, saved, hostScript) {
-  const page = await browser.newPage({ viewport: { width: 1100, height: 760 } });
-  await page.addInitScript((s) => localStorage.setItem('lf.audioDevices', JSON.stringify(s)), saved);
-  await page.goto(url);
-  await page.waitForFunction(() => !!window.__lf);
+  const { page } = await open({
+    viewport: { width: 1100, height: 760 },
+    init: (p) => p.addInitScript((s) => localStorage.setItem('lf.audioDevices', JSON.stringify(s)), saved),
+  });
   const result = await page.evaluate(hostScript);
   await mkdir('logs/layout', { recursive: true });
   await page.screenshot({ path: `logs/layout/asio-startup-${name}.png` });
@@ -153,5 +155,4 @@ assert.equal(e2.state.toggle, null);
 assert.match(e2.state.soon ?? '', /--disable-asio/);
 assert.equal(e2.state.aboutBuild, true, 'the licence/About section is about the binary, not the launch');
 
-await browser.close();
-console.log('=== RESULT: asio-startup flows passed ===');
+}, { launch: {} });

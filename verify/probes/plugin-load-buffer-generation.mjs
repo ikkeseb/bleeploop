@@ -1,13 +1,16 @@
-// Browser repro for plugin-load buffer identity. It drives the production selectPlugin and
-// plugin-bridge modules with an instrumented host; it makes no native timing or COM claim.
+/**
+ * Plugin-load buffer identity: a failed load's already-posted buffer must be released rather than
+ * wired (it owns no bridge slot); a retry that starts before a stale prior load's buffer arrives
+ * must keep only the buffer belonging to its own source-load generation, wiring correctly and
+ * warming capture; and a failed AudioWorklet module load is retryable without leaking the next
+ * received buffer. Drives the production selectPlugin and plugin-bridge modules with an instrumented
+ * host; it makes no native timing or COM claim. Run: pnpm probe plugin-load-buffer-generation
+ */
 import assert from 'node:assert/strict';
-import { chromium } from 'playwright';
+import { probe } from '../harness/probe.ts';
 
-const browser = await chromium.launch({ args: ['--autoplay-policy=no-user-gesture-required'] });
-try {
-  const page = await browser.newPage();
-  await page.goto(process.argv.find((arg) => arg.startsWith('--url='))?.slice(6) ?? 'http://localhost:1420');
-  await page.waitForFunction(() => !!window.__lf);
+await probe(async ({ open }) => {
+  const { page } = await open();
 
   const result = await page.evaluate(async () => {
     const { platform } = await import('/src/platform/index.ts');
@@ -132,9 +135,7 @@ try {
     'failed-load buffers must be released, and a retry must keep the buffer from its own source load',
   );
 
-  const retryPage = await browser.newPage();
-  await retryPage.goto(process.argv.find((arg) => arg.startsWith('--url='))?.slice(6) ?? 'http://localhost:1420');
-  await retryPage.waitForFunction(() => !!window.__lf);
+  const { page: retryPage } = await open();
   const moduleRetry = await retryPage.evaluate(async () => {
     const { pluginBridge } = await import('/src/audio/plugin-bridge.ts');
     const released = [];
@@ -175,6 +176,4 @@ try {
     { calls: 2, marker: 333, released: false },
     'a failed AudioWorklet module load must be retryable without leaking the next received buffer',
   );
-} finally {
-  await browser.close();
-}
+});

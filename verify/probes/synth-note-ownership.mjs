@@ -1,14 +1,21 @@
-// Real synth/router ownership probe. Requires the browser verification rig; no MIDI hardware.
-// Each assertion follows rendered audio or Tone's actual voice-allocation rejection.
-import { chromium } from 'playwright';
+/**
+ * Real synth/router ownership: releasing one of two overlapping bass notes preserves the other held
+ * pitch and finishes its envelope on the final release; a sustained lead run under a fast on/off
+ * burst drops no attack; and every bounded-voice synth (lead, pad, piano, organ) sounds a fresh
+ * attack when its voice pool is full, survives a stale note-off for the stolen slot, and panics
+ * clean. Each assertion follows rendered audio or Tone's actual voice-allocation rejection; no MIDI
+ * hardware claim. Run: pnpm probe synth-note-ownership
+ */
 import assert from 'node:assert/strict';
-const browser = await chromium.launch({ headless: true, args: ['--autoplay-policy=no-user-gesture-required'] });
-try {
-  const page = await browser.newPage();
+import { probe } from '../harness/probe.ts';
+
+await probe(async ({ open }) => {
   const warnings = [];
-  page.on('console', (message) => { if (message.text().includes('Note dropped')) warnings.push(message.text()); });
-  await page.goto(process.argv.find((arg) => arg.startsWith('--url='))?.slice(6) ?? 'http://localhost:1420');
-  await page.waitForFunction(() => !!window.__lf);
+  const { page } = await open({
+    init: (p) => p.on('console', (message) => {
+      if (message.text().includes('Note dropped')) warnings.push(message.text());
+    }),
+  });
   const result = await page.evaluate(async () => {
     const { engine, inputRouter: router } = window.__lf;
     await engine.start();
@@ -87,4 +94,4 @@ try {
     assert.ok(row.fullyReleased < 1e-5, `${row.id}: panic must release every voice`);
   }
   assert.equal(warnings.length, 0, 'sustain voice management must preserve fresh attacks during a fast run');
-} finally { await browser.close(); }
+});

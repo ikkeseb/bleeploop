@@ -1,14 +1,20 @@
-// Requires the browser rig on :1420. Records real FX output at AudioWorklet frame timestamps.
-// LF_FX_BASELINE=1 selects a temporary fx-baseline.ts copied from HEAD by the reviewer.
-import { chromium } from 'playwright';
+/** Measures the real per-track rhythmic FX (tremolo/gate-style rate division) at AudioWorklet frame
+ * timestamps: two chains driven off the same timing agree with the expected on/off grid at two BPMs,
+ * and a delay chain reused across CLEAR picks up its next-take beat period. Without `--baseline`, also
+ * renders the production Tone module offline for the same grid and drives the real lane dispatcher
+ * (loadSession, clear, record at a new BPM) to check a retained FX chain's delay time refreshes to the
+ * new tempo. `--baseline`/`LF_FX_BASELINE=1` selects a temporary fx-baseline.ts copied from HEAD by
+ * the reviewer, to compare cost/behaviour against a change. Measures grid timing and PCM only; it
+ * cannot see native audio latency or anything below the Web Audio graph.
+ * Run: pnpm probe fx-grid [--baseline]
+ */
 import assert from 'node:assert/strict';
+import { flag, probe } from '../harness/probe.ts';
 
-const baseline = process.argv.includes('--baseline') || process.env.LF_FX_BASELINE === '1';
-const browser = await chromium.launch({ headless: true, args: ['--autoplay-policy=no-user-gesture-required'] });
-try {
-  const page = await browser.newPage();
-  await page.goto((process.argv.find(arg => arg.startsWith('--url='))?.slice(6) ?? 'http://localhost:1420'));
-  await page.waitForFunction(() => !!window.__lf);
+const baseline = flag('baseline') || process.env.LF_FX_BASELINE === '1';
+
+await probe(async ({ open }) => {
+  const { page } = await open();
   const results = await page.evaluate(async (baseline) => {
     const lf = window.__lf;
     await lf.engine.start();
@@ -188,6 +194,4 @@ try {
       assert.ok(Math.abs(result.reusedDelaySeconds - result.expected) < 1e-6, `stale delay: ${JSON.stringify(result)}`);
     }
   }
-} finally {
-  await browser.close();
-}
+});

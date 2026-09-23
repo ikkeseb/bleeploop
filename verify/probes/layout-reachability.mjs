@@ -1,25 +1,34 @@
-/** Rendered controls and source labels at the native minimum and a normal desktop size. */
-import { chromium } from 'playwright';
+/** Rendered controls and source labels at the native minimum (960x600) and a normal desktop size
+ * (1400x900): measures rendered control access and canvas identity (a lane's canvas must survive a
+ * keyboard-placement/FX-drawer change, not remount) across five keyboard placement/FX-drawer
+ * combinations, plus the drum-pad ribbon, the two-row command-bar cap and the muted-lane readout with
+ * a loop present. "Unreachable" means clipped below 98% visible OR the element under its own centre
+ * point is not itself (something else intercepts the click). `--plugin-source` substitutes
+ * `src/platform/host.web.ts` to simulate a live native plugin slot instead of the browser-tier
+ * fallback. `--label=<name>` tags screenshots and `logs/layout/<name>.json`, for comparing two runs
+ * (e.g. before/after a layout change). Measures the DOM only: no native chrome, no WebView2.
+ * Run: pnpm probe layout-reachability [--label=<name>] [--plugin-source]
+ */
 import { mkdir, writeFile } from 'node:fs/promises';
+import { arg, flag, probe } from '../harness/probe.ts';
 
-const url = process.argv.find(arg => arg.startsWith('--url='))?.slice(6) ?? 'http://localhost:1420';
-const label = process.argv.find(arg => arg.startsWith('--label='))?.slice(8) ?? 'current';
-const pluginSource = process.argv.includes('--plugin-source');
-await mkdir('logs/layout', { recursive: true });
-const browser = await chromium.launch({ args: ['--autoplay-policy=no-user-gesture-required'] });
-const results = [];
-const failures = [];
-try {
-  for (const [width, height] of [[960, 600], [1400, 900]]) {
-    const page = await browser.newPage({ viewport: { width, height } });
-    if (pluginSource) await page.route('**/src/platform/host.web.ts*', async route => {
+const label = arg('label') ?? 'current';
+const pluginSource = flag('plugin-source');
+
+await probe(async ({ open }) => {
+  await mkdir('logs/layout', { recursive: true });
+  const results = [];
+  const failures = [];
+  const init = pluginSource ? async (page) => {
+    await page.route('**/src/platform/host.web.ts*', async route => {
       const response = await route.fetch();
       const body = await response.text();
       if (!body.includes('available: false')) throw new Error('Could not enable simulated native chrome');
       await route.fulfill({ response, body: body.replace('available: false', 'available: true') });
     });
-    await page.goto(url);
-    await page.waitForFunction(() => !!window.__lf);
+  } : undefined;
+  for (const [width, height] of [[960, 600], [1400, 900]]) {
+    const { page } = await open({ viewport: { width, height }, init });
     if (pluginSource) {
       await page.waitForFunction(() => document.querySelector('[aria-label="Rescan plugins"]')?.disabled === false);
       await page.evaluate(async () => {
@@ -129,4 +138,4 @@ try {
   }
   await writeFile(`logs/layout/${label}.json`, JSON.stringify(results, null, 2));
   if (failures.length) throw new Error(`Inaccessible layout: ${failures.join(', ')}`);
-} finally { await browser.close(); }
+});

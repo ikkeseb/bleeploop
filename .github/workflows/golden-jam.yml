@@ -36,5 +36,5 @@ jobs:
 
       - run: pnpm exec playwright install --with-deps chromium
 
-      # Starts its own vite dev server on 1420 and tears it down; prints one line per check.
+      # pnpm probe starts its own Vite on a free port and stops it; the jam prints one line per check.
       - run: pnpm verify:jam

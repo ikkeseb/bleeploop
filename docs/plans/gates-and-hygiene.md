@@ -1,31 +1,13 @@
 # Work order: real-code gates and agent hygiene (OPEN)
 
-Pieces 2-6 of the 2026-09-23 fresh-eyes pass over code, gates, docs and agent workflow (piece 1, guards
-that drive the real looper, landed; `verify/README.md` owns the rig). Build them in this order, one
+Pieces 3-6 of the 2026-09-23 fresh-eyes pass over code, gates, docs and agent workflow (pieces 1 and 2,
+guards that drive the real looper and one probe harness with every probe automated, landed;
+`verify/README.md` owns both). Build them in this order, one
 piece per commit series, gates green before each push. Piece 6 waits on an owner decision. Taste findings from that day live in `docs/backlog-taste.md` and the hands-free milestone in
 `docs/plans/pedalboard.md`; neither is repeated here. Delete this file when the last piece lands, after
 folding what still binds into `verify/README.md`, the briefings or a call-site comment.
 
 Pieces 3 and 5 may edit `src/audio/`: the dev-app rule in `AGENTS.md` applies.
-
-## 2. One probe harness, every probe automated
-
-**Why.** 26 of 40 browser probes run in no automation. All 26 passed on the PC on 2026-09-23
-(`record-stop-window.mjs` is the slowest at 166 s), but a red one would go unnoticed.
-`verify/probes/recovery-capacity.mjs` and `verify/probes/recovery-failure.mjs` ignore `--url` and always hit port
-1420. The `--url` parser is copied 38 times and `chromium.launch` 40 times; no shared module exists.
-`verify/guards/marker.mjs` is pure Node but lacks the `-verify.mjs` suffix, so `pnpm verify` never runs
-it. Nothing explains the `fs-` prefix.
-
-**Do.** Split `verify/` into guards (plain Node, `pnpm verify`) and probes (browser). Write one shared
-probe module: launch, `--url`, wait for `__lf`, the result line. Add `pnpm probe <name>|--all|--list`,
-which starts its own Vite on a free port and stops it afterwards. Run every probe in
-`browser-lifecycle.yml`. Each probe's header comment becomes its documentation, replacing the
-per-probe paragraph in `verify/README.md`. Moving files moves paths that `STATUS.md` and the briefings
-cite; the docs guard lists them.
-
-**Done when** every probe runs in CI or its header says why it cannot, `verify/README.md` describes
-categories instead of listing probes, and `pnpm check` is green.
 
 ## 3. Comments and docs state current intent
 
@@ -94,6 +76,8 @@ built.
 
 ## Small fixes, any time
 
+- Diagnose the intermittent that keeps `verify/probes/record-stop-window.mjs` out of CI (its `@no-ci`
+  line has the numbers), then drop the `@no-ci`.
 - `retry` in `src/audio/midi.ts` lacks `@public`; only `verify/probes/instrument-controls.mjs` calls it, so
   knip reports it as unused.
 - `verify/probes/contact-sheet.mjs` shows only the web tier (synth pills), never the guitar-first screen.

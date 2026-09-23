@@ -1,29 +1,19 @@
 /**
- * Rendered-PCM proof for idle playback restart and live phase joins. Run with Vite on :1420:
- *   pnpm exec node verify/probes/playback-restart.mjs
- *   pnpm exec node verify/probes/playback-restart.mjs --url=http://localhost:1421
+ * Rendered-PCM proof for idle playback restart and live phase joins: measures rendered lane PCM for
+ * single/ALL idle restarts from frame zero, simultaneous lane starts, live-phase joins beside a muted
+ * lane pending END STOP, cold-graph starts (first PLAY and COPY into a lane that never played, under
+ * an injected FX-build cost) and PLAY ALL with one lane failing at source start or at buffer prep
+ * (the surviving lanes still start together, one toast, one release-log line per failure).
+ * Run: pnpm probe playback-restart [--url=<server>]
  *
  * Captures each lane at its GainNode with absolute AudioWorklet render frames. Seeded ramps make
  * source frame zero and live phase observable in PCM. This does not establish native ASIO feel.
  */
 import assert from 'node:assert/strict';
-import { chromium } from 'playwright';
+import { probe } from '../harness/probe.ts';
 
-const url = process.env.LF_URL
-  ?? process.argv.find((arg) => arg.startsWith('--url='))?.slice(6)
-  ?? 'http://localhost:1420';
-const browser = await chromium.launch({ headless: true, args: ['--autoplay-policy=no-user-gesture-required'] });
-
-try {
-  const page = await browser.newPage();
-  const browserErrors = [];
-  const consoleErrors = [];
-  page.on('pageerror', (error) => browserErrors.push(String(error)));
-  page.on('console', (message) => {
-    if (message.type() === 'error') consoleErrors.push(message.text());
-  });
-  await page.goto(url);
-  await page.waitForFunction(() => !!window.__lf);
+await probe(async ({ open, url }) => {
+  const { page, consoleErrors } = await open();
 
   const results = await page.evaluate(async () => {
     const lf = window.__lf;
@@ -684,15 +674,11 @@ try {
     masterFrames: results.masterFrames,
     passed: results.rows.filter((row) => row.pass).length,
     total: results.rows.length,
-    browserErrors,
     playFailureLogs: consoleErrors.filter((text) => text.includes('[looper] play failed')),
     results: results.rows,
   };
   console.log(JSON.stringify(summary, null, 2));
-  assert.equal(browserErrors.length, 0, `uncaught browser errors: ${browserErrors.join('\n')}`);
   assert.ok(results.rows.length > 0, 'probe produced no measurements');
   assert.equal(summary.playFailureLogs.length, 4, 'each failed PLAY ALL lane (start 1 + prep 1 + all-fail 2) must reach the release log exactly once');
   for (const result of results.rows) assert.ok(result.pass, `${result.name}: ${JSON.stringify(result)}`);
-} finally {
-  await browser.close();
-}
+});

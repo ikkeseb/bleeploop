@@ -1,22 +1,26 @@
-// Vite on :1420 (or --url=). Count actual playback-owned timer registrations, callbacks and cancellations.
-// Exercises the real looper with silent output. This measures retained callbacks, not CPU or memory.
-// Restart Vite before running after source edits; the state identity guard rejects stale HMR modules.
-import { chromium } from 'playwright';
+/**
+ * Counts actual playback-owned timer registrations, callbacks and cancellations through the real
+ * looper with silent output: rapid stop/reuse (20 cycles), compensated STOP waiting out the capture
+ * tail, CLEAR + reuse, normal boundary rearming, and a boundary swap whose source start fails (the
+ * lane must land STOPPED, logged once, with no successor timer, and PLAY restarts the committed
+ * loop). `--case=<name>` (rapid|stopTail|clearReuse|rearm|swapFail) restricts the run to one case.
+ * Run: pnpm probe overdub-timers [--case=<name>] [--url=<server>]
+ * This measures retained callbacks against the real looper, not CPU or memory; it does not exercise
+ * native ASIO scheduling. Restart Vite before running after source edits: the state-identity guard
+ * rejects a stale HMR module.
+ */
+import { probe, arg } from '../harness/probe.ts';
 import assert from 'node:assert/strict';
 
 // Every imported loop sample carries this level. Headless capture has no input signal, so an overdub
 // layer adds silence and a kept loop still reads LOAD_AMP per sample.
 const LOAD_AMP = 0.025;
-const selected = process.argv.find((arg) => arg.startsWith('--case='))?.slice(7);
+const selected = arg('case');
 const cases = ['rapid', 'stopTail', 'clearReuse', 'rearm', 'swapFail'];
 assert.ok(!selected || cases.includes(selected), `Unknown case: ${selected}`);
-const browser = await chromium.launch({ headless: true, args: ['--autoplay-policy=no-user-gesture-required'] });
-try {
-  const page = await browser.newPage();
-  const errors = [];
-  page.on('pageerror', (error) => errors.push(error.message));
-  await page.goto(process.argv.find((arg) => arg.startsWith('--url='))?.slice(6) ?? 'http://localhost:1420');
-  await page.waitForFunction(() => !!window.__lf);
+
+await probe(async ({ open }) => {
+  const { page } = await open();
   await page.evaluate(() => window.__lf.autosave.ready());
   const results = [];
   for (const name of cases.filter((value) => !selected || value === selected)) {
@@ -256,7 +260,4 @@ try {
       assert.equal(result.final.cancelled, 1);
     }
   }
-  assert.deepEqual(errors, [], 'unexpected browser errors');
-} finally {
-  await browser.close();
-}
+});

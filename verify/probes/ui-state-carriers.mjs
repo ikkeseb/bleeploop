@@ -1,16 +1,13 @@
-/** Accessibility and non-colour state carriers against the rendered app.
- * Run against Vite: node verify/probes/ui-state-carriers.mjs --url=http://localhost:1420
+/** Accessibility and non-colour state carriers against the rendered app: transport, meter, lamp,
+ * looper-announcement and toast state carriers, plus the looper refusal gates (a refused lane
+ * core's title/label reason, and a refused Space/Enter announcing that reason with no state change).
+ * Run: pnpm probe ui-state-carriers
  */
 import assert from 'node:assert/strict';
-import { chromium } from 'playwright';
+import { probe } from '../harness/probe.ts';
 
-const url = process.argv.find((arg) => arg.startsWith('--url='))?.slice(6) ?? 'http://localhost:1420';
-const browser = await chromium.launch({ args: ['--autoplay-policy=no-user-gesture-required'] });
-
-try {
-  const page = await browser.newPage({ viewport: { width: 1280, height: 820 } });
-  await page.goto(url);
-  await page.waitForFunction(() => !!window.__lf);
+await probe(async ({ open }) => {
+  const { page } = await open({ viewport: { width: 1280, height: 820 } });
 
   const firstTakeTransport = await page.evaluate(async () => {
     const lf = window.__lf;
@@ -120,8 +117,4 @@ try {
   assert.equal(await otherCore.getAttribute('aria-label'), 'Track 2 another track is recording, stop it first');
   await page.evaluate(() => window.__lf.looper.stop(0));
   await page.waitForFunction(() => window.__lf.looper.stateOf(0) === 'EMPTY');
-
-  console.log('=== RESULT: ui-state-carriers passed ===');
-} finally {
-  await browser.close();
-}
+});

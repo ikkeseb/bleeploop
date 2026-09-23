@@ -1,26 +1,18 @@
 /**
  * Arm/disarm race on the real capture module, with only `platform.audioInput.open` substituted for a
- * deferred promise so the gesture order is controlled exactly:
- *   node verify/probes/mic-arm-race.mjs --url=http://localhost:1420
- *
- * Proves that a disarm landing while getUserMedia is still open cancels that open (the late stream is
- * closed, its tracks stopped, inputArmed stays false) and that a burst of toggles ends in the state of
- * the LAST gesture. A last case runs the real browser-tier open with the context's splitter wiring made to
- * throw: the rejected open must stop the stream's tracks and disconnect its source. It substitutes the device open, so it says nothing about real microphone hardware,
- * permission prompts or native ASIO input.
+ * deferred promise so the gesture order is controlled exactly. Proves that a disarm landing while
+ * getUserMedia is still open cancels that open (the late stream is closed, its tracks stopped,
+ * inputArmed stays false) and that a burst of toggles ends in the state of the LAST gesture. A last
+ * case runs the real browser-tier open with the context's splitter wiring made to throw: the rejected
+ * open must stop the stream's tracks and disconnect its source. It substitutes the device open, so it
+ * says nothing about real microphone hardware, permission prompts or native ASIO input.
+ * Run: pnpm probe mic-arm-race
  */
 import assert from 'node:assert/strict';
-import { chromium } from 'playwright';
+import { probe } from '../harness/probe.ts';
 
-const url = process.argv.find((arg) => arg.startsWith('--url='))?.slice(6) ?? 'http://localhost:1420';
-const browser = await chromium.launch({ headless: true, args: ['--autoplay-policy=no-user-gesture-required'] });
-
-try {
-  const page = await browser.newPage();
-  const pageErrors = [];
-  page.on('pageerror', (error) => pageErrors.push(String(error)));
-  await page.goto(url);
-  await page.waitForFunction(() => !!window.__lf);
+await probe(async ({ open, url }) => {
+  const { page } = await open();
 
   const result = await page.evaluate(async () => {
     const lf = window.__lf;
@@ -239,9 +231,4 @@ try {
   assert.equal(burstOnCase.closes, 0, 'the adopted stream must survive the superseded disarm');
   assert.equal(burstFinal.armed, false, 'the adopted input still disarms normally');
   assert.equal(burstFinal.closes, 1, 'the ordinary disarm closes the adopted stream once');
-
-  assert.deepEqual(pageErrors, [], 'unexpected browser errors');
-  console.log('=== RESULT: mic-arm-race passed ===');
-} finally {
-  await browser.close();
-}
+});

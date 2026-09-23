@@ -1,27 +1,32 @@
-// Run with pnpm dev on port 1420: pnpm exec node verify/probes/recovery-failure.mjs
-// Real IndexedDB VersionError on the first open only, in disposable browser storage.
-import { chromium } from 'playwright';
+/**
+ * Recovery survives a real IndexedDB VersionError on the very first open, in disposable browser
+ * storage: the production open call is substituted with one that opens version 1 against a database
+ * already seeded at version 2, then falls through to the real open on the next call. Two attempts,
+ * each in a fresh browser context, to catch order-dependent bugs a single run would hide. Cannot see
+ * native storage limits or WebView2.
+ * Run: pnpm probe recovery-failure
+ */
 import assert from 'node:assert/strict';
+import { probe } from '../harness/probe.ts';
 
-const browser = await chromium.launch({ headless: true, args: ['--autoplay-policy=no-user-gesture-required'] });
-try {
+await probe(async ({ open, browser }) => {
   for (let attempt = 0; attempt < 2; attempt++) {
     const context = await browser.newContext();
     try {
-      const page = await context.newPage();
-      await page.addInitScript(() => {
-        const open = indexedDB.open.bind(indexedDB);
-        // IndexedDB processes opens for one database in order. Version 1 then fails against version 2.
-        const seed = open('lf-test-open-failure', 2);
-        seed.onsuccess = () => seed.result.close();
-        window.__recoveryOpenCalls = 0;
-        indexedDB.open = (...args) => {
-          window.__recoveryOpenCalls++;
-          return window.__recoveryOpenCalls === 1 ? open('lf-test-open-failure', 1) : open(...args);
-        };
+      const { page } = await open({
+        context,
+        init: (page) => page.addInitScript(() => {
+          const open = indexedDB.open.bind(indexedDB);
+          // IndexedDB processes opens for one database in order. Version 1 then fails against version 2.
+          const seed = open('lf-test-open-failure', 2);
+          seed.onsuccess = () => seed.result.close();
+          window.__recoveryOpenCalls = 0;
+          indexedDB.open = (...args) => {
+            window.__recoveryOpenCalls++;
+            return window.__recoveryOpenCalls === 1 ? open('lf-test-open-failure', 1) : open(...args);
+          };
+        }),
       });
-      await page.goto('http://localhost:1420');
-      await page.waitForFunction(() => !!window.__lf);
       await page.evaluate(() => window.__lf.autosave.ready());
       const result = await page.evaluate(async () => {
         const lf = window.__lf;
@@ -51,6 +56,4 @@ try {
       await context.close();
     }
   }
-} finally {
-  await browser.close();
-}
+});

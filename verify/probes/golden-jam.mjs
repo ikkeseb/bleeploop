@@ -55,20 +55,15 @@
  *   - Nothing native: the whole src-tauri half, the real record latency C on a rig, and the mic path are
  *     out of reach. Those stay by-ear/rig gates in STATUS.md.
  *
- * Deliberately OUTSIDE `pnpm verify` / `pnpm check` — it needs a browser and ~60 s, and those gates
- * are a ~1 s pre-commit reflex. Run it with `pnpm verify:jam` before/after touching looper timing.
+ * Deliberately OUTSIDE `pnpm verify` / `pnpm check` — it needs a browser and ~90 s, and those gates
+ * are a seconds-long pre-push reflex. Run it with `pnpm verify:jam` before/after touching looper timing.
  *
- * Run:  pnpm verify:jam            (starts its own vite dev server, or reuses one already on 1420)
- *       pnpm verify:jam --headed   (watch it play)
+ * @no-ci dispatched separately by .github/workflows/golden-jam.yml (never a push gate: it was dropped from push CI twice as flaky on loaded runners)
+ *
+ * Run:  pnpm verify:jam            (verify/run-probes.mjs owns the dev server)
+ *       pnpm probe golden-jam --headed   (watch it play)
  */
-import { chromium } from 'playwright';
-import { spawn, spawnSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
-
-const REPO = join(dirname(fileURLToPath(import.meta.url)), '../..');
-const URL = process.argv.find((arg) => arg.startsWith('--url='))?.slice(6) ?? 'http://localhost:1420';
-const HEADED = process.argv.includes('--headed');
+import { probe, flag } from '../harness/probe.ts';
 
 /** Musical shape of the jam. BPM 120 + 2 bars keeps every expected frame count an exact integer at
  *  both 44.1 k and 48 k, so the harness is sample-rate agnostic without special-casing. */
@@ -115,62 +110,19 @@ async function waitFor(page, fn, ms, label) {
   throw new Error(`timed out after ${ms} ms waiting for ${label}`);
 }
 
-async function serverUp() {
-  try {
-    const res = await fetch(URL, { signal: AbortSignal.timeout(1500) });
-    return res.ok;
-  } catch {
-    return false;
-  }
-}
-
-async function main() {
-  // ---- dev server: reuse one already running, else start (and own) one -------------------------
-  let vite = null;
-  if (await serverUp()) {
-    console.log(`golden-jam: reusing the dev server already on ${URL}`);
-  } else {
-    if (URL !== 'http://localhost:1420') throw new Error(`Start the verification server at ${URL} first`);
-    console.log('golden-jam: starting a dev server…');
-    // shell:true — on Windows pnpm is pnpm.cmd, which a bare spawn() can't exec (ENOENT).
-    vite = spawn('pnpm', ['dev'], { cwd: REPO, stdio: 'ignore', detached: false, shell: true });
-    const deadline = Date.now() + 30000;
-    while (Date.now() < deadline && !(await serverUp())) await new Promise((r) => setTimeout(r, 300));
-    if (!(await serverUp())) {
-      if (process.platform === 'win32') {
-        spawnSync('taskkill', ['/pid', String(vite.pid), '/T', '/F'], { stdio: 'ignore' });
-      } else {
-        vite.kill();
-      }
-      throw new Error('dev server did not come up on 1420 within 30 s');
-    }
-  }
-
-  const browser = await chromium.launch({
-    headless: !HEADED,
-    // Headless Chromium will not start an AudioContext without a gesture unless told otherwise; the
-    // page click below is kept too, so this stays a belt-and-braces flag rather than the only path.
-    args: ['--autoplay-policy=no-user-gesture-required'],
-  });
-
-  try {
-    const page = await browser.newPage();
+await probe(async ({ open }) => {
     // LF_JAM_CPU_THROTTLE=<n> slows the renderer n× (CDP Emulation) — the way to reproduce the
     // loaded-runner failures (off-grid overdub, 128-frame later-track slip) on a fast dev machine.
     const throttle = Number(process.env.LF_JAM_CPU_THROTTLE ?? 0);
-    if (throttle > 1) {
+    const init = throttle > 1 ? async (page) => {
       const cdp = await page.context().newCDPSession(page);
       await cdp.send('Emulation.setCPUThrottlingRate', { rate: throttle });
       console.log(`golden-jam: CPU throttled ${throttle}×`);
-    }
-    const pageErrors = [];
-    page.on('pageerror', (e) => pageErrors.push(String(e)));
-    page.on('console', (m) => {
-      if (m.type() === 'error') pageErrors.push(m.text());
-    });
-
-    await page.goto(URL, { waitUntil: 'domcontentloaded' });
-    await waitFor(page, () => typeof window.__lf !== 'undefined', 20000, 'the __lf debug hook');
+    } : undefined;
+    // allowPageErrors: the jam deliberately injects plugin-bridge losses that log through the
+    // release-log channel (console.error) and checks the exact count itself below, rather than
+    // treating any page error as an automatic failure.
+    const { page, pageErrors: uncaughtErrors, consoleErrors } = await open({ init, allowPageErrors: true });
 
     // The capture ring is a SharedArrayBuffer — without COOP/COEP looper.init() bails and every
     // button is silently dead, which would read here as a mysterious timeout instead of a cause.
@@ -1398,37 +1350,19 @@ async function main() {
       `master=${stayedBlank.master}, states=${stayedBlank.states.join('/')}`,
     );
 
-    const expectedLossErrors = pageErrors.filter((e) => e.includes('[looper] rejected track'));
-    const retakeDrops = pageErrors.filter((e) => e.includes('[looper] retake: dropped track'));
-    const unexpectedPageErrors = pageErrors.filter(
+    // uncaughtErrors + consoleErrors: the release log (src/platform/logging.ts) carries these
+    // injected losses as console.error, so the combined stream is what the old single pageErrors
+    // listener (page.on('pageerror') + page.on('console', 'error')) used to see.
+    const jamErrors = [...uncaughtErrors, ...consoleErrors];
+    const expectedLossErrors = jamErrors.filter((e) => e.includes('[looper] rejected track'));
+    const retakeDrops = jamErrors.filter((e) => e.includes('[looper] retake: dropped track'));
+    const unexpectedPageErrors = jamErrors.filter(
       (e) => !e.includes('[looper] rejected track') && !e.includes('[looper] retake: dropped track'),
     );
     check('the damaged retake pass was reported exactly once', retakeDrops.length === 1, `${retakeDrops.length} errors`);
     check('each injected loss reached the release-log channel', expectedLossErrors.length === 3, `${expectedLossErrors.length} errors`);
     check('no unexpected page errors during the jam', unexpectedPageErrors.length === 0, unexpectedPageErrors.slice(0, 3).join(' | '));
-  } finally {
-    await browser.close();
-    if (vite) {
-      // shell:true means vite.pid is the SHELL — a plain kill orphans the real vite (observed on
-      // Windows 2026-08-12: orphaned dev servers accumulated across runs). taskkill /T takes the tree.
-      if (process.platform === 'win32') {
-        spawnSync('taskkill', ['/pid', String(vite.pid), '/T', '/F'], { stdio: 'ignore' });
-      } else {
-        vite.kill('SIGTERM');
-        // vite's child esbuild/rolldown workers ignore a plain SIGTERM on the parent occasionally.
-        setTimeout(() => vite.kill('SIGKILL'), 2000).unref();
-      }
-    }
-  }
-}
 
-main()
-  .then(() => {
     console.log(`\n=== RESULT: ${passed}/${passed + failed} checks passed, ${failed} failed ===`);
-    process.exit(failed === 0 ? 0 : 1);
-  })
-  .catch((e) => {
-    console.error(`\ngolden-jam: ${e.message}`);
-    console.log(`\n=== RESULT: ${passed}/${passed + failed + 1} checks passed, ${failed + 1} failed ===`);
-    process.exit(1);
-  });
+    if (failed > 0) throw new Error(`${failed} check(s) failed`);
+}, flag('headed') ? { launch: { headless: false, args: ['--autoplay-policy=no-user-gesture-required'] } } : {});

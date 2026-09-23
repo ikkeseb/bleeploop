@@ -1,29 +1,31 @@
-// Browser probe for the instrument routing seam: a failed unload aborts a plugin swap or clear and
-// keeps the plugin, a swap stays silent (no synth built), picking a source moves the MIDI/keys slot
-// (effects and failed unloads excepted), and host-side sustain defers plugin note-offs.
-// Drives the production instrument module and MIDI parser with an instrumented host and a virtual Web
-// MIDI port; it makes no native unload, plugin-audio or latency claim.
+/**
+ * Instrument routing seam: a failed unload aborts a plugin swap or clear and keeps the plugin, a
+ * swap stays silent (no synth built), picking a source moves the MIDI/keys slot (effects and failed
+ * unloads excepted), and host-side sustain defers plugin note-offs (deferred note-off, re-strike
+ * order, release on a slot switch). Drives the production instrument module and MIDI parser with an
+ * instrumented host and a virtual Web MIDI port; it makes no native unload, plugin-audio or latency
+ * claim. Run: pnpm probe instrument-routing
+ */
 import assert from 'node:assert/strict';
-import { chromium } from 'playwright';
+import { probe } from '../harness/probe.ts';
 
-const url = process.argv.find((arg) => arg.startsWith('--url='))?.slice(6) ?? 'http://localhost:1420';
-const browser = await chromium.launch({ args: ['--autoplay-policy=no-user-gesture-required'] });
-
-try {
-  const page = await browser.newPage();
-  await page.route('**/src/platform/host.web.ts', async (route) => {
-    const response = await route.fetch();
-    const body = (await response.text()).replace('available: false', 'available: true');
-    await route.fulfill({ response, body });
+await probe(async ({ open }) => {
+  const { page } = await open({
+    init: async (p) => {
+      await p.route('**/src/platform/host.web.ts', async (route) => {
+        const response = await route.fetch();
+        const body = (await response.text()).replace('available: false', 'available: true');
+        await route.fulfill({ response, body });
+      });
+      await p.addInitScript(() => {
+        const inputs = new Map([['a', { id: 'a', name: 'Probe a', state: 'connected', onmidimessage: null }]]);
+        const access = { inputs, onstatechange: null };
+        window.__probeMidi = access;
+        Object.defineProperty(navigator, 'requestMIDIAccess', { configurable: true, value: async () => access });
+      });
+    },
   });
-  await page.addInitScript(() => {
-    const inputs = new Map([['a', { id: 'a', name: 'Probe a', state: 'connected', onmidimessage: null }]]);
-    const access = { inputs, onstatechange: null };
-    window.__probeMidi = access;
-    Object.defineProperty(navigator, 'requestMIDIAccess', { configurable: true, value: async () => access });
-  });
-  await page.goto(url);
-  await page.waitForFunction(() => !!window.__lf && !!window.__probeMidi.inputs.get('a').onmidimessage);
+  await page.waitForFunction(() => !!window.__probeMidi.inputs.get('a').onmidimessage);
 
   const result = await page.evaluate(async () => {
     const { platform } = await import('/src/platform/index.ts');
@@ -176,7 +178,4 @@ try {
     'a failed clear keeps the plugin, routes back to it and disposes the synth it built meanwhile');
   // Fails on the code before this check: selectSynth activated its slot even when the unload failed.
   assert.deepEqual(result.failedPick, { slot1: 'b', active: 0 }, 'a synth pick whose unload fails does not move the MIDI slot');
-  console.log('PASS: failed-unload swap/clear keep the plugin, silent swap, pick-moves-MIDI-slot (effects and failed unloads excepted), host-side plugin sustain');
-} finally {
-  await browser.close();
-}
+});

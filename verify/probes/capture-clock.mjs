@@ -1,15 +1,19 @@
-// Requires the browser rig. An absolute-frame-coded worklet measures real capture alignment.
-// --url=http://localhost:1421 selects a second rig. --stall-ms=0 disables controlled pop stalls.
-import { chromium } from 'playwright';
+/**
+ * Absolute-frame-coded AudioWorklet proof of real capture alignment: measures absolute capture
+ * frames under producer/consumer interleaving (`--stall-ms=` controls the injected pop stall, 0
+ * disables it) and checks that FIXED/AUTO/free takes, with and without compensation, land on the
+ * exact absolute sample grid and tile with zero drift. Requires the browser rig.
+ * Run: pnpm probe capture-clock [--stall-ms=<ms>] [--url=<server>]
+ * Proves frame-accurate capture in Chromium's Web Audio renderer; it does not establish native
+ * ASIO timing, device jitter or anything audible on the rig.
+ */
+import { probe, arg } from '../harness/probe.ts';
 import assert from 'node:assert/strict';
 
-const url = process.argv.find((arg) => arg.startsWith('--url='))?.slice(6) ?? 'http://localhost:1420';
-const stallMs = Number(process.argv.find((arg) => arg.startsWith('--stall-ms='))?.slice(11) ?? 8);
-const browser = await chromium.launch({ headless: true, args: ['--autoplay-policy=no-user-gesture-required'] });
-try {
-  const page = await browser.newPage();
-  await page.goto(url);
-  await page.waitForFunction(() => !!window.__lf);
+const stallMs = Number(arg('stall-ms') ?? 8);
+
+await probe(async ({ open }) => {
+  const { page } = await open();
   const result = await page.evaluate(async (stallMs) => {
     const lf = window.__lf;
     await lf.looper.init();
@@ -152,6 +156,4 @@ try {
       assert.equal(row.gridError, 0, `${row.kind}: committed grid must agree with the captured frame`);
     }
   }
-} finally {
-  await browser.close();
-}
+});

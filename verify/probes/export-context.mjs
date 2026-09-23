@@ -1,16 +1,20 @@
-/** Production wet-export isolation under delayed and rejected reverb generation.
- * Run against Vite: node verify/probes/export-context.mjs --url=http://localhost:1420
- * This checks browser graph ownership, not native download delivery or device sound.
+/**
+ * Production wet-export isolation under delayed and rejected reverb generation: an offline export
+ * render must not observe or block the live Tone context, and a live FX chain built mid-render must
+ * still succeed on the live context, with the render's own rejection surfacing even if worker cleanup
+ * also throws. A third case covers lossless editable downloads (identical PCM after export/reimport,
+ * preserved volume), a reverb-generation failure falling back to a dry archive, and bounded ZIP
+ * parsing (an oversized archive and a hostile repeated-payload archive both rejected). Checks browser
+ * graph ownership, not native download delivery or device sound.
+ * Run: pnpm probe export-context
  */
-import { chromium } from 'playwright';
+import assert from 'node:assert/strict';
+import { probe } from '../harness/probe.ts';
 
-const browser = await chromium.launch({ args: ['--autoplay-policy=no-user-gesture-required'] });
-try {
+await probe(async ({ open }) => {
   const results = [];
   for (const failure of [false, true]) {
-    const page = await browser.newPage();
-    await page.goto(process.argv.find((arg) => arg.startsWith('--url='))?.slice(6) ?? 'http://localhost:1420');
-    await page.waitForFunction(() => !!window.__lf);
+    const { page } = await open();
     results.push(await page.evaluate(async (failure) => {
       const { engine } = await import('/src/audio/engine.ts');
       const { FxChain, defaultFxStates } = await import('/src/audio/fx/fx.ts');
@@ -74,9 +78,7 @@ try {
     }, failure));
     await page.close();
   }
-  const page = await browser.newPage();
-  await page.goto(process.argv.find((arg) => arg.startsWith('--url='))?.slice(6) ?? 'http://localhost:1420');
-  await page.waitForFunction(() => !!window.__lf);
+  const { page } = await open();
   results.push(await page.evaluate(async () => {
     const lf = window.__lf;
     await lf.looper.init();
@@ -156,7 +158,5 @@ try {
   }));
   await page.close();
   console.log(JSON.stringify(results, null, 2));
-  if (results.some((result) => !result.pass)) process.exitCode = 1;
-} finally {
-  await browser.close();
-}
+  assert.ok(results.every((result) => result.pass), JSON.stringify(results));
+});

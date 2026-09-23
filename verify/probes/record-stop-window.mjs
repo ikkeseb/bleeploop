@@ -1,15 +1,21 @@
-// Vite on :1420. A delayed frame counter models native wet arrival using production's frozen C.
-// A manual first-take stop keeps its existing press/pad rule. A later stop chooses completed whole bars
-// and tiles that window across the master.
-// No native driver or physical latency is measured here.
-import { chromium } from 'playwright';
+/**
+ * Checks first/later/AUTO/FIXED capture windows, padding, cancellation, recorder release,
+ * playback-failure retry and the 60-second capacity cap. A delayed absolute-frame-coded AudioWorklet
+ * models native wet arrival using production's own frozen compensation (C). A manual first-take stop
+ * keeps its existing press/pad rule; a later stop chooses completed whole bars and tiles that window
+ * across the master. `--first-only` restricts the run to first-take cases.
+ * Run: pnpm probe record-stop-window [--first-only] [--url=<server>] (about 165 s for the full matrix)
+ * No native driver or physical latency is measured here.
+ *
+ * @no-ci intermittent: the 60 s capacity case misses one 128-frame quantum in ~1 of 3 full runs on the PC, never when it runs alone (0 of 8); cause unknown
+ */
+import { probe, flag } from '../harness/probe.ts';
 import assert from 'node:assert/strict';
 
-const browser = await chromium.launch({ headless: true, args: ['--autoplay-policy=no-user-gesture-required'] });
-try {
-  const page = await browser.newPage();
-  await page.goto(process.argv.find((arg) => arg.startsWith('--url='))?.slice(6) ?? 'http://localhost:1420');
-  await page.waitForFunction(() => !!window.__lf);
+const firstOnly = flag('first-only');
+
+await probe(async ({ open }) => {
+  const { page } = await open();
   await page.evaluate(() => window.__lf.autosave.ready());
   const results = [];
   const cases = ['first', 'later'].flatMap((take) => [0, 150].flatMap((trim) =>
@@ -21,7 +27,7 @@ try {
   cases.push(...['clearOther', 'lossOther', 'bufferFailure', 'sourceFailure', 'wholeBar', 'earlyBar'].map((mode) => ({ take: mode.endsWith('Other') ? 'later' : 'first', mode, trim: 150 })));
   cases.push(...['wholeBar', 'earlyBar'].map((mode) => ({ take: 'fixed', mode, trim: 150 })));
   cases.push({ take: 'first', mode: 'capacity', trim: 150 });
-  for (const testCase of cases.filter(({ take }) => !process.argv.includes('--first-only') || take === 'first')) {
+  for (const testCase of cases.filter(({ take }) => !firstOnly || take === 'first')) {
     const result = await page.evaluate(async ({ take, mode, trim }) => {
       const lf = window.__lf;
       await lf.looper.init();
@@ -189,6 +195,4 @@ try {
     }
   }
   console.log(`PASS: ${results.length} recording windows, zero missing or extra samples`);
-} finally {
-  await browser.close();
-}
+});
