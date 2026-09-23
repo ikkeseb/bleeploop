@@ -48,6 +48,7 @@ await probe(async ({ open, url }) => {
 
     const workletCode = `
       class RestartPcmCapture extends AudioWorkletProcessor {
+        next = -1; // Chromium can repeat a quantum's currentFrame (capture-processor.ts); a real input never repeats
         constructor(options) {
           super();
           this.frames = options.processorOptions.frames;
@@ -67,14 +68,16 @@ await probe(async ({ open, url }) => {
           };
         }
         process(inputs) {
+          const frame = Math.max(currentFrame, this.next);
+          this.next = frame + 128;
           if (!this.ready) {
             this.ready = true;
-            this.port.postMessage({ kind: 'ready', frame: currentFrame });
+            this.port.postMessage({ kind: 'ready', frame });
           }
           if (this.armRequested && !this.armed) {
             this.armed = true;
-            this.base = currentFrame;
-            this.port.postMessage({ kind: 'armed', frame: currentFrame });
+            this.base = frame;
+            this.port.postMessage({ kind: 'armed', frame });
           }
           if (!this.armed || this.sent) return true;
           const input = inputs[0] ?? [];

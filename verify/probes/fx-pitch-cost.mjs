@@ -122,18 +122,21 @@ await probe(async ({ open }) => {
     source.connect(gain); gain.connect(input(chain.input)); source.start();
     const moduleUrl = URL.createObjectURL(new Blob([`
       class Capture extends AudioWorkletProcessor {
+        next = -1; // Chromium can repeat a quantum's currentFrame (capture-processor.ts); a real input never repeats
         constructor(options) {
           super(); this.first = options.processorOptions.first;
           this.samples = new Float32Array(options.processorOptions.frames); this.sent = false;
         }
         process(inputs) {
           if (this.sent) return false;
+          const base = Math.max(currentFrame, this.next);
+          this.next = base + 128;
           const channel = inputs[0]?.[0];
           for (let k = 0; k < 128; k++) {
-            const index = currentFrame + k - this.first;
+            const index = base + k - this.first;
             if (index >= 0 && index < this.samples.length) this.samples[index] = channel?.[k] ?? 0;
           }
-          if (currentFrame + 128 >= this.first + this.samples.length) {
+          if (base + 128 >= this.first + this.samples.length) {
             this.sent = true; this.port.postMessage(this.samples, [this.samples.buffer]);
           }
           return true;
