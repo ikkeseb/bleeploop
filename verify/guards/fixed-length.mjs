@@ -38,9 +38,9 @@ async function fixedTake({ sr = 48000, bpm = 120, bars = 4, trimMs = null, start
   rig.setInput(MARKER);
   await rig.looper.recDub(0);
   const es = rig.state.engineState;
-  const start = es.captureStartFrame;
+  const start = es.recording?.startFrame ?? null;
   rig.setInput((f) => (f < start ? MARKER : code(f)));
-  return { rig, es, start, end: es.captureEndFrame, fpb: framesPerBar(bpm, sr) };
+  return { rig, es, start, end: es.recording?.endFrame ?? null, fpb: framesPerBar(bpm, sr) };
 }
 const committed = (rig) => rig.looper.masterLengthFrames() > 0 && rig.looper.trackInfo(0).state === 'PLAYING';
 async function untilCommitted(rig, limit) {
@@ -101,7 +101,7 @@ for (const [sr, bpm, bars] of [[48000, 120, 4], [44100, 100, 2], [48000, 90, 2],
     let leak = -1;
     for (let k = 0; k < target && leak < 0; k++) if (t.record[k] === MARKER) leak = k;
     ok(`B no count-bar leak ${tag}`, leak === -1, `leak at ${leak}`);
-    ok(`B recorder released ${tag}`, es.activeRecordIndex === -1 && es.captureStartFrame === null && es.captureEndFrame === null);
+    ok(`B recorder released ${tag}`, es.recording === null);
     ok(`B BPM still locked after the commit ${tag}`, rig.clock.bpmLocked() === true && rig.clock.bpm() === Math.round(bpm));
   }
 }
@@ -125,7 +125,7 @@ for (const [label, when] of [['count', 1.0], ['take', 3.5]]) {
   rig.looper.stop(0);
   await rig.advance(0.5);
   ok(`D/E abort during the ${label} -> EMPTY`, rig.looper.trackInfo(0).state === 'EMPTY' && rig.looper.masterLengthFrames() === 0);
-  ok(`D/E abort during the ${label} clears the window and the recorder`, es.captureStartFrame === null && es.captureEndFrame === null && es.activeRecordIndex === -1);
+  ok(`D/E abort during the ${label} clears the window and the recorder`, es.recording === null);
   ok(`D/E abort during the ${label} unlocks BPM`, rig.clock.bpmLocked() === false);
   ok(`D/E abort during the ${label} keeps no audio`, rig.tracks[0].record.every((x) => x === 0));
 }
@@ -143,14 +143,14 @@ console.log('=== F. A manual stop mid-take commits the completed bars; BPM stays
 console.log('=== I. A manual FIXED stop tightens its end once and waits for the missing tail ===');
 {
   const { rig, es, start, fpb } = await fixedTake({ bars: 4, trimMs: 100 });
-  const downbeat = (start - es.captureCompensationFrames) / 48000;
+  const downbeat = (start - (es.recording?.compensationFrames ?? 0)) / 48000;
   await rig.advanceTo(downbeat + (2 * fpb + 100) / 48000);
   await rig.looper.recDub(0);
-  ok('I the manual stop replaces the longer automatic end', es.captureEndFrame === start + 2 * fpb, `end-start=${es.captureEndFrame - start}`);
-  ok('I the missing tail keeps the recorder and the lock', !committed(rig) && es.activeRecordIndex === 0 && rig.clock.bpmLocked());
+  ok('I the manual stop replaces the longer automatic end', (es.recording?.endFrame ?? null) === start + 2 * fpb, `end-start=${(es.recording?.endFrame ?? null) - start}`);
+  ok('I the missing tail keeps the recorder and the lock', !committed(rig) && (es.recording?.track ?? -1) === 0 && rig.clock.bpmLocked());
   await rig.advanceTo(downbeat + (2 * fpb + 1500) / 48000);
   if (!committed(rig)) await rig.looper.recDub(0); // a press a bar later cannot extend the end
-  ok('I a repeated stop cannot extend the end', committed(rig) || es.captureEndFrame === start + 2 * fpb);
+  ok('I a repeated stop cannot extend the end', committed(rig) || (es.recording?.endFrame ?? null) === start + 2 * fpb);
   await untilCommitted(rig, 1);
   const t = rig.tracks[0];
   ok('I the tail completes exactly two bars', rig.looper.masterLengthFrames() === 2 * fpb);
@@ -186,7 +186,7 @@ console.log('=== J. A later FIXED take selects its bars; RETAKE keeps master-len
     rig.looper.setFixedLengthBars(bars);
     rig.looper.setRetakeEnabled(retake);
     await rig.looper.recDub(1);
-    const window = es.captureEndFrame - es.captureStartFrame;
+    const window = (es.recording?.endFrame ?? null) - (es.recording?.startFrame ?? null);
     rig.looper.stop(1);
     return window;
   };

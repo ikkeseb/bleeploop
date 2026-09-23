@@ -228,8 +228,8 @@ async function latencySession({ sr = 48000 } = {}) {
   await rig.looper.recDub(0);
   const downbeat = rig.draws().slice(mark).find((d) => d.countLeft === 4).time + 4 * (60 / rig.clock.bpm());
   const es = rig.state.engineState;
-  ok('C count-in with C disabled: the take window opens on the downbeat', es.captureCompensationFrames === 0 &&
-    es.captureStartFrame === Math.round(downbeat * sr), `start=${es.captureStartFrame} downbeat=${Math.round(downbeat * sr)}`);
+  ok('C count-in with C disabled: the take window opens on the downbeat', (es.recording?.compensationFrames ?? 0) === 0 &&
+    (es.recording?.startFrame ?? null) === Math.round(downbeat * sr), `start=${es.recording?.startFrame ?? null} downbeat=${Math.round(downbeat * sr)}`);
 }
 
 // ── Section E1 — the clickOut FLOOR repairs a WebView2 under-report ─────────────────────────────────
@@ -508,7 +508,7 @@ function drawSample(rnd) {
       const mark = rig.draws().length;
       await rig.looper.recDub(0);
       const es = rig.state.engineState;
-      const cCode = es.captureCompensationFrames;
+      const cCode = es.recording?.compensationFrames ?? 0;
       // The heard downbeat, from the count the clock scheduled (not from the window under test).
       downbeatFrame = Math.round((rig.draws().slice(mark).find((d) => d.countLeft === 4).time + 4 * (60 / bpm)) * sr);
       cTrue = cCode + delta;

@@ -8,20 +8,13 @@ piece per commit series, gates green before each push. Piece 6 waits on an owner
 `docs/plans/pedalboard.md`; neither is repeated here. Delete this file when the last piece lands, after
 folding what still binds into `verify/README.md`, the briefings or a call-site comment.
 
-Piece 5 edits `src/audio/`: the dev-app rule in `AGENTS.md` applies.
+## 5. One recorder-session object: landed, the jam is owed
 
-## 5. One recorder-session object
-
-**Why.** One capture's state spans about 10 `engineState` fields, 5 module-level `let`s in
-`src/audio/looper/machine.ts` and 6 overdub fields per track. Five sites reset it by hand:
-`releaseRecorderState` (14 assignments), `stop`, `clear` (about 20), `rejectRecordLoss` and
-`finishOverdub`. A forgotten field is a bug class.
-
-**Do.** A pure refactor, with no behaviour change: `recording: RecordSession | null` in the looper
-state, `overdub: OverdubSession | null` on `Track`. Releasing a capture sets the field to `null`.
-
-**Done when** the rig guards (`pnpm verify`) and `pnpm verify:jam` are green, and the next "Play first" jam in
-`STATUS.md` runs on this code before anything else lands in `src/audio/looper/`.
+One capture's state now lives in `engineState.recording: RecordSession | null` and one overdub's in
+`Track.overdub: OverdubSession | null` (`src/audio/looper/state.ts`); releasing the recorder is one
+write per field. The rig guards, `pnpm verify:jam` and `pnpm probe --ci` are green on it. **Open:** the
+next "Play first" jam in `STATUS.md` runs on this code before anything else lands in
+`src/audio/looper/`.
 
 ## 6. L2 loopback probe (owner decision)
 

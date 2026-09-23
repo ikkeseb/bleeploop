@@ -67,7 +67,7 @@ await probe(async ({ open }) => {
     await until(takeInjected);
     await until(() => lf.looper.stateOf(0) !== 'RECORDING');
     const take = { state: lf.looper.stateOf(0), frames: lf.looper.exportSnapshot().masterLengthFrames,
-      active: engineState.activeRecordIndex };
+      active: engineState.recording?.track ?? -1 };
     lf.looper.clearAll();
     lf.looper.setFixedLengthEnabled(false);
     return { dub, take, dropped: lf.looper.captureOverruns() };

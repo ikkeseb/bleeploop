@@ -21,6 +21,7 @@ import {
   setInputArmed,
   sr,
   TRACK_COUNT,
+  type RecordSession,
   type Track,
   type TrackState,
 } from './state';
@@ -179,15 +180,10 @@ async function buildEngine(): Promise<void> {
     gain: null,
     volume: 1,
     muted: false,
-    overdubBuf: null,
-    overdubSwapBufs: null,
-    overdubSwapIdx: 0,
+    overdub: null,
     undoBuf: null,
-    overdubPreviousUndoBuf: null,
     undoBufReversed: false,
-    overdubPreviousUndoBufReversed: false,
     reversed: false,
-    overdubTimer: null,
     fx: null,
     fxState: defaultFxStates(),
     armed: false,
@@ -240,7 +236,8 @@ function drainCapturedPackets(): number {
   const deliver = () => {
     if (frames === 0) return;
     engineState.captureFrontierFrame = firstFrame + frames;
-    if (engineState.activeRecordIndex >= 0) consume(engineState.activeRecordIndex, drainScratch, frames, firstFrame);
+    const rec = engineState.recording;
+    if (rec) consume(rec, drainScratch, frames, firstFrame);
     frames = 0;
   };
   for (let p = 0; p < got; p += CAPTURE_PACKET_SIZE) {
@@ -274,27 +271,27 @@ export function drainStaleFrames(): void {
 }
 
 export function flushActiveCapture(): void {
-  if (engineState.activeRecordIndex >= 0) drainCapturedPackets();
+  if (engineState.recording) drainCapturedPackets();
 }
 
 /**
  * Frame-exact arm split, shared by the first-track count-in and the later-track boundary arm:
  * compare the absolute capture deadline with this batch's render-frame timestamp. The main-thread
  * clock may advance while a stale ring snapshot is discarded; that cannot move the window.
- * pendingRecordStartFrame is only a diagnostic remaining count, never the timing authority.
+ * `pendingStartFrame` is only a diagnostic remaining count, never the timing authority.
  *
  * Returns -1 while still counting (caller discards the whole pre-downbeat batch), otherwise the
  * offset into `data` where the real take begins (0 when not armed / not straddling). On the
  * straddling batch it clears the arm and resets the write head + peaks so the take starts clean.
  */
-function armSplitOffset(t: Track, count: number, firstFrame: number): number {
+function armSplitOffset(t: Track, rec: RecordSession, count: number, firstFrame: number): number {
   if (!t.armed) return 0;
-  const split = armSplitAt(engineState.captureStartFrame ?? firstFrame, firstFrame, count);
-  engineState.pendingRecordStartFrame = split.pending;
+  const split = armSplitAt(rec.startFrame ?? firstFrame, firstFrame, count);
+  rec.pendingStartFrame = split.pending;
   if (split.offset < 0) {
     // This whole batch is discarded pre-roll, so losses through it cannot corrupt the take. Refresh
     // here, but not on the straddling batch below: that batch already contains the take's frame 0.
-    beginPluginRecordIntegrityWindow();
+    beginPluginRecordIntegrityWindow(rec);
     return -1; // still before the downbeat/boundary — discard these provisional frames
   }
   t.armed = false; // target reached: the real take begins (writeHead 0), waveform may grow
@@ -305,11 +302,12 @@ function armSplitOffset(t: Track, count: number, firstFrame: number): number {
 }
 
 /**
- * Write `count` freshly-captured frames into track `i`.
+ * Write `count` freshly-captured frames into the recording track `rec.track`.
  * - Recording: append the retained window; the machine decides the committed length.
  * - Overdub: sum the retained window modulo the master length.
  */
-function consume(i: number, data: Float32Array, count: number, firstFrame: number): void {
+function consume(rec: RecordSession, data: Float32Array, count: number, firstFrame: number): void {
+  const i = rec.track;
   const t = engineState.tracks[i];
   const master = masterLengthFrames();
 
@@ -323,7 +321,7 @@ function consume(i: number, data: Float32Array, count: number, firstFrame: numbe
       if (offset < 0) {
         // Loss before the retained look-back cannot damage the future take. Advance both baselines only
         // while the entire history is quiet; once possible onset audio exists, damage in it must count.
-        if (detector.historyIsQuiet(threshold)) refreshAutoRecordIntegrityWindow();
+        if (detector.historyIsQuiet(threshold)) refreshAutoRecordIntegrityWindow(rec);
         return;
       }
       const retained = detector.copiedFrames();
@@ -336,12 +334,12 @@ function consume(i: number, data: Float32Array, count: number, firstFrame: numbe
       beginAutoRecording(i, capturedStartCtx);
     } else {
       // Count-in or later-track boundary arm: both keep their exact timestamped start.
-      offset = armSplitOffset(t, count, firstFrame);
+      offset = armSplitOffset(t, rec, count, firstFrame);
     }
     if (offset < 0) return; // still counting in — discard the pre-downbeat frames (recorded dead air)
     // First and later takes append the same exclusive timestamp window. AUTO's detector
     // may already have copied its look-back prefix; append only the rest of this batch.
-    const end = Math.min(count, (engineState.captureEndFrame ?? Infinity) - firstFrame);
+    const end = Math.min(count, (rec.endFrame ?? Infinity) - firstFrame);
     const n = Math.max(0, Math.min(end - offset, t.record.length - t.writeHead));
     t.record.set(data.subarray(offset, offset + n), t.writeHead);
     t.writeHead += n;
@@ -349,16 +347,16 @@ function consume(i: number, data: Float32Array, count: number, firstFrame: numbe
     updateLivePeaks(t);
   }
 
-  if (t.state === 'OVERDUBBING' && master > 0 && t.overdubBuf) {
+  if (t.state === 'OVERDUBBING' && master > 0 && t.overdub) {
     // Sum incoming PCM into the working copy, wrapping mod master. Split into contiguous runs at each
     // wrap so the hot inner loop carries no per-sample `%` (the write region is contiguous within a run).
     // The outer step handles a batch that spans the wrap — or, after a stall, multiple loop periods —
     // with each overlapping pass summing onto the same positions.
-    const buf = t.overdubBuf;
-    let k = Math.max(0, (engineState.captureStartFrame ?? firstFrame) - firstFrame);
-    const end = Math.min(count, (engineState.captureEndFrame ?? Infinity) - firstFrame);
+    const buf = t.overdub.buf;
+    let k = Math.max(0, (rec.startFrame ?? firstFrame) - firstFrame);
+    const end = Math.min(count, (rec.endFrame ?? Infinity) - firstFrame);
     const gridFrame = Math.round(engineState.masterStartTime * sr());
-    let head = compensatedLoopFrame(firstFrame + k, engineState.captureCompensationFrames, gridFrame, master);
+    let head = compensatedLoopFrame(firstFrame + k, rec.compensationFrames, gridFrame, master);
     while (k < end) {
       const run = Math.min(end - k, master - head); // frames until the next wrap
       for (let j = 0; j < run; j++) buf[head + j] += data[k + j];
@@ -368,16 +366,16 @@ function consume(i: number, data: Float32Array, count: number, firstFrame: numbe
     }
     t.writeHead = head;
   }
-  const endFrame = engineState.captureEndFrame;
+  const endFrame = rec.endFrame;
   if (endFrame !== null && firstFrame + count >= endFrame) {
     // A rolling RETAKE slides to its next pass; anything else commits.
-    if (engineState.retakeRolling) completeRetakePass(i);
+    if (rec.retakeRolling) completeRetakePass(rec);
     else finishCapture(i);
     // Frames past the window end belong to whoever records next: the retake's next pass, or the lane a
     // retake handoff just started on this very frame. An ordinary commit leaves no recorder.
-    const next = engineState.activeRecordIndex;
+    const next = engineState.recording;
     const tail = Math.max(0, endFrame - firstFrame);
-    if (next >= 0 && tail < count) consume(next, data.subarray(tail, count), count - tail, firstFrame + tail);
+    if (next && tail < count) consume(next, data.subarray(tail, count), count - tail, firstFrame + tail);
   } else {
     publish(i);
   }

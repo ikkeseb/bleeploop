@@ -195,7 +195,7 @@ function inject(rig, step) {
       get() { Object.defineProperty(t, 'peakMin', { value: peakMin, writable: true, configurable: true }); throw fault; },
     });
   } else if (step === 'fill') {
-    const buf = t.overdubSwapBufs[t.overdubSwapIdx];
+    const buf = t.overdub.swapBufs[t.overdub.swapIdx];
     buf.getChannelData = function () { delete buf.getChannelData; throw fault; };
   } else rig.failNextSourceStart(fault);
 }
@@ -230,8 +230,8 @@ for (const { step, failAt, trimMs } of failures) {
   ok(`F ${tag} the failure is logged once`, errors.length === 1 && /overdub boundary swap failed/.test(String(errors[0]?.args[0])),
     JSON.stringify(errors.map((e) => String(e.args[0]))));
   ok(`F ${tag} the lane leaves OVERDUBBING into STOPPED`, rig.looper.trackInfo(0).state === 'STOPPED', rig.looper.trackInfo(0).state);
-  ok(`F ${tag} no swap timer is pending`, pendingSwaps(rig) === 0 && t.overdubTimer === null, `pending=${pendingSwaps(rig)}`);
-  ok(`F ${tag} the capture is released`, t.overdubBuf === null && rig.state.engineState.activeRecordIndex === -1);
+  ok(`F ${tag} no swap timer is pending`, pendingSwaps(rig) === 0 && (t.overdub?.timer ?? null) === null, `pending=${pendingSwaps(rig)}`);
+  ok(`F ${tag} the capture is released`, t.overdub === null && rig.state.engineState.recording === null);
   ok(`F ${tag} the owner is told`, rig.notify.toasts().some((n) => /overdub stopped/.test(n.message)));
   const swaps = swapsByBoundary(rig, mark, loop);
   ok(`F ${tag} swaps stop at the failed boundary`,

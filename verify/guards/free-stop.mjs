@@ -37,7 +37,7 @@ async function startTake({ bpm = 120, sr = 48000, trimMs = null } = {}) {
   await rig.looper.recDub(0);
   const downbeat = rig.draws().slice(mark).find((b) => b.countLeft === 4).time + 4 * (60 / bpm);
   const es = rig.state.engineState;
-  return { rig, downbeat, start: es.captureStartFrame, C: es.captureCompensationFrames, fpb: framesPerBar(bpm, sr) };
+  return { rig, downbeat, start: es.recording?.startFrame ?? null, C: es.recording?.compensationFrames ?? 0, fpb: framesPerBar(bpm, sr) };
 }
 const committed = (rig) => rig.looper.trackInfo(0).state === 'PLAYING' && rig.looper.masterLengthFrames() > 0;
 /** Advance in drain-sized steps until the take commits; returns the ctx time it committed at. */
@@ -55,9 +55,9 @@ for (const [bpm, sr] of [[120, 44100], [120, 48000], [90, 44100], [137, 48000]])
   const press = rig.now();
   await rig.looper.recDub(0);
   const es = rig.state.engineState;
-  ok(`A the end is exactly 8 bars from the take start bpm=${bpm} sr=${sr}`, es.captureEndFrame === start + 8 * fpb,
-    `end-start=${es.captureEndFrame - start}`);
-  ok(`A the tail is in flight: not committed at the press bpm=${bpm} sr=${sr}`, !committed(rig) && es.activeRecordIndex === 0);
+  ok(`A the end is exactly 8 bars from the take start bpm=${bpm} sr=${sr}`, (es.recording?.endFrame ?? null) === start + 8 * fpb,
+    `end-start=${(es.recording?.endFrame ?? null) - start}`);
+  ok(`A the tail is in flight: not committed at the press bpm=${bpm} sr=${sr}`, !committed(rig) && (es.recording?.track ?? -1) === 0);
   const at = await untilCommitted(rig);
   ok(`A commits exactly 8 bars bpm=${bpm} sr=${sr}`, rig.looper.masterLengthFrames() === 8 * fpb, `master=${rig.looper.masterLengthFrames()}`);
   ok(`A the wait is bounded by C (+ one drain) bpm=${bpm} sr=${sr}`, at - press <= C / sr + 0.03, `waited=${(at - press).toFixed(3)}s`);
@@ -87,7 +87,7 @@ for (const [bpm, sr] of [[120, 44100], [200, 48000]]) {
     const { rig, downbeat, start, fpb } = await startTake({ bpm, sr });
     await rig.advanceTo(downbeat + (4 * fpb) / sr - 0.6 * (beat / 4));
     await rig.looper.recDub(0);
-    ok(`C within grace -> waits for the 4th bar bpm=${bpm}`, !committed(rig) && rig.state.engineState.captureEndFrame === start + 4 * fpb);
+    ok(`C within grace -> waits for the 4th bar bpm=${bpm}`, !committed(rig) && (rig.state.engineState.recording?.endFrame ?? null) === start + 4 * fpb);
     await untilCommitted(rig);
     ok(`C within grace -> 4 bars bpm=${bpm}`, rig.looper.masterLengthFrames() === 4 * fpb, `master=${rig.looper.masterLengthFrames()}`);
   }
@@ -107,11 +107,11 @@ console.log('=== D. sub-bar stop retains its tail (+C) before one-bar padding ==
   const pressFrame = rig.frame();
   await rig.looper.recDub(0);
   const es = rig.state.engineState;
-  ok('D the end is the press + C, not the drained head', es.captureEndFrame === pressFrame + C, `end=${es.captureEndFrame} press+C=${pressFrame + C}`);
+  ok('D the end is the press + C, not the drained head', (es.recording?.endFrame ?? null) === pressFrame + C, `end=${es.recording?.endFrame ?? null} press+C=${pressFrame + C}`);
   ok('D the tail is deferred even below one bar', !committed(rig));
   await rig.advance(0.02);
   await rig.looper.recDub(0); // a second press while the tail is in flight would end later
-  ok('D a repeated stop cannot extend the end', committed(rig) || es.captureEndFrame === pressFrame + C, `end=${es.captureEndFrame}`);
+  ok('D a repeated stop cannot extend the end', committed(rig) || (es.recording?.endFrame ?? null) === pressFrame + C, `end=${es.recording?.endFrame ?? null}`);
   await untilCommitted(rig, 3);
   const t = rig.tracks[0];
   const kept = pressFrame + C - start;
@@ -128,7 +128,7 @@ console.log('=== G. C moves both edges, never the length; a repeated stop cannot
     `plain=${plain.start} comp=${comp.start} C=${comp.C}`);
   await comp.rig.advanceTo(comp.downbeat + (2 * comp.fpb) / 48000 + 0.02);
   await comp.rig.looper.recDub(0);
-  const end = comp.rig.state.engineState.captureEndFrame;
+  const end = comp.rig.state.engineState.recording?.endFrame ?? null;
   ok('G compensation preserves the musical length', end - comp.start === 2 * comp.fpb, `len=${end - comp.start}`);
   await untilCommitted(comp.rig);
   ok('G the compensated take commits the same bars', comp.rig.looper.masterLengthFrames() === 2 * comp.fpb);

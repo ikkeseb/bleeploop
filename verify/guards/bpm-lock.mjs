@@ -15,8 +15,8 @@ function ok(name, cond, detail = '') { checks++; if (!cond) { fails++; console.l
 
 /** The recorder window and lock, as the machine holds them. */
 function recorder(rig) {
-  const es = rig.state.engineState;
-  return { active: es.activeRecordIndex, start: es.captureStartFrame, end: es.captureEndFrame, locked: rig.clock.bpmLocked() };
+  const rec = rig.state.engineState.recording;
+  return { active: rec?.track ?? -1, start: rec?.startFrame ?? null, end: rec?.endFrame ?? null, locked: rig.clock.bpmLocked() };
 }
 async function pressRec(rig, lane, { fixed = false, bars = 2 } = {}) {
   rig.looper.setFixedLengthEnabled(fixed);

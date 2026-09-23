@@ -97,7 +97,7 @@ async function rollingFirstTake({ sr = 48000, bpm = 120, bars = 1, trimMs = null
   const fpb = framesPerBar(bpm, sr);
   const beat = 60 / bpm;
   const downbeat = count.time + 4 * beat;
-  const C = es.captureCompensationFrames;
+  const C = es.recording?.compensationFrames ?? 0;
   const start = Math.round(downbeat * sr) + C;
   rig.setInput((f) => (f < start ? MARKER : code(f)));
   const L = bars * fpb;
@@ -110,20 +110,20 @@ console.log('=== B. A rolling take slides one pass per edge and commits nothing 
 for (const [sr, bpm] of [[48000, 120], [44100, 97], [48000, 174]]) {
   const { rig, es, L, start, passStart, toCaptured } = await rollingFirstTake({ sr, bpm });
   const tag = `sr=${sr} bpm=${bpm}`;
-  ok(`B the first window is one pass from the counted downbeat ${tag}`, es.captureStartFrame === start && es.captureEndFrame === start + L,
-    `start=${es.captureStartFrame} (want ${start}) end=${es.captureEndFrame}`);
+  ok(`B the first window is one pass from the counted downbeat ${tag}`, (es.recording?.startFrame ?? null) === start && (es.recording?.endFrame ?? null) === start + L,
+    `start=${es.recording?.startFrame ?? null} (want ${start}) end=${es.recording?.endFrame ?? null}`);
   for (const p of [1, 2, 3, 4]) {
     await toCaptured(passStart(p) + L / 2);
     await rig.untilDrained();
     ok(`B pass ${p}: window = [start + ${p - 1}L, start + ${p}L) ${tag}`,
-      es.captureStartFrame === passStart(p) && es.captureEndFrame === passStart(p + 1),
-      `window=[${es.captureStartFrame}, ${es.captureEndFrame}) want [${passStart(p)}, ${passStart(p + 1)})`);
+      (es.recording?.startFrame ?? null) === passStart(p) && (es.recording?.endFrame ?? null) === passStart(p + 1),
+      `window=[${es.recording?.startFrame ?? null}, ${es.recording?.endFrame ?? null}) want [${passStart(p)}, ${passStart(p + 1)})`);
     ok(`B pass ${p}: the lane reports pass ${p}, still RECORDING, nothing committed ${tag}`,
       rig.looper.trackInfo(0).retakePass === p && rig.looper.trackInfo(0).state === 'RECORDING' && rig.looper.masterLengthFrames() === 0,
       `pass=${rig.looper.trackInfo(0).retakePass} state=${rig.looper.trackInfo(0).state} master=${rig.looper.masterLengthFrames()}`);
     ok(`B pass ${p}: the pass in flight writes from its own downbeat ${tag}`,
       rig.tracks[0].writeHead > 0 && mismatches(rig.tracks[0].record.subarray(0, rig.tracks[0].writeHead), passStart(p)) === 0);
-    if (p > 1) ok(`B pass ${p}: the previous clean pass is kept ${tag}`, es.retakeKept === true);
+    if (p > 1) ok(`B pass ${p}: the previous clean pass is kept ${tag}`, (es.recording?.retakeKept ?? false) === true);
   }
   rig.release();
 }
@@ -135,8 +135,8 @@ for (const [sr, bpm, bars, passes] of [[48000, 120, 1, 3], [44100, 97, 2, 2], [4
   await toCaptured(passStart(passes) + Math.round(L * 0.45));
   const mark = rig.sources().length;
   await rig.looper.recDub(0);
-  ok(`C the stop commits at once ${tag}`, rig.looper.trackInfo(0).state === 'PLAYING' && es.activeRecordIndex === -1,
-    `state=${rig.looper.trackInfo(0).state} recorder=${es.activeRecordIndex}`);
+  ok(`C the stop commits at once ${tag}`, rig.looper.trackInfo(0).state === 'PLAYING' && es.recording === null,
+    `state=${rig.looper.trackInfo(0).state} recorder=${es.recording?.track ?? -1}`);
   ok(`C the loop is one pass long ${tag}`, rig.looper.masterLengthFrames() === L, `master=${rig.looper.masterLengthFrames()} want ${L}`);
   const bad = mismatches(loop(rig, 0), passStart(passes - 1));
   ok(`C the loop holds exactly the last complete pass ${tag}`, bad === 0, `${bad} frames differ from pass ${passes - 1}`);
@@ -168,7 +168,7 @@ for (const trimMs of [null, 40]) {
     `state=${rig.looper.trackInfo(0).state} master=${rig.looper.masterLengthFrames()}`);
   const bad = mismatches(loop(rig, 0), passStart(2));
   ok(`D the loop is the pass in flight (pass 2), not pass 1 ${tag}`, bad === 0, `${bad} frames differ`);
-  ok(`D no third pass started ${tag}`, es.retakePass === 0 && es.activeRecordIndex === -1);
+  ok(`D no third pass started ${tag}`, (es.recording?.retakePass ?? 0) === 0 && es.recording === null);
   rig.release();
 }
 
@@ -197,15 +197,15 @@ async function lossyRoll() {
   const { rig, es, L, passStart, toCaptured } = await lossyRoll();
   await toCaptured(passStart(3) + L / 4);
   await rig.untilDrained();
-  ok('F the lossy pass 2 is dropped, and pass 1 with it', es.retakeKept === false && es.retakePass === 3);
+  ok('F the lossy pass 2 is dropped, and pass 1 with it', (es.recording?.retakeKept ?? false) === false && (es.recording?.retakePass ?? 0) === 3);
   ok('F the drop is logged and shown', rig.logs.some((l) => l.level === 'error' && String(l.args[0]).includes('pass 2')) &&
     rig.notify.toasts().some((t) => /pass 2 dropped/.test(t.message)));
   await toCaptured(passStart(4) + L / 4);
   await rig.untilDrained();
-  ok('F the clean pass after the loss is not kept either (tainted)', es.retakeKept === false && es.retakePass === 4);
+  ok('F the clean pass after the loss is not kept either (tainted)', (es.recording?.retakeKept ?? false) === false && (es.recording?.retakePass ?? 0) === 4);
   await toCaptured(passStart(5) + L / 4);
   await rig.untilDrained();
-  ok('F the next clean pass is kept again', es.retakeKept === true && es.retakePass === 5);
+  ok('F the next clean pass is kept again', (es.recording?.retakeKept ?? false) === true && (es.recording?.retakePass ?? 0) === 5);
   await rig.looper.recDub(0);
   ok('F a stop then commits that pass (4)', rig.looper.masterLengthFrames() === L && mismatches(loop(rig, 0), passStart(4)) === 0);
   rig.release();
@@ -237,15 +237,15 @@ async function rollingLaterTake({ fixed }) {
   rig.looper.setRetakeEnabled(true);
   rig.setInput((f) => code(f));
   await rig.looper.recDub(1);
-  const s1 = es.captureStartFrame;
+  const s1 = es.recording?.startFrame ?? null;
   const period = master / rig.sr;
   const tag = `(fixed=${fixed})`;
   ok(`G the later take arms on a master boundary ${tag}`, gridSlip(s1 / rig.sr, lane0Zero, period, rig.sr) < 0.01,
     `slip=${gridSlip(s1 / rig.sr, lane0Zero, period, rig.sr)}`);
-  ok(`G its pass is the master ${tag}`, es.captureEndFrame - s1 === master, `window=${es.captureEndFrame - s1}`);
+  ok(`G its pass is the master ${tag}`, (es.recording?.endFrame ?? null) - s1 === master, `window=${(es.recording?.endFrame ?? null) - s1}`);
   await rig.advanceTo((s1 + 2 * master + master / 2) / rig.sr);
   await rig.untilDrained();
-  ok(`G it rolled into pass 3 ${tag}`, rig.looper.trackInfo(1).retakePass === 3 && es.captureStartFrame === s1 + 2 * master,
+  ok(`G it rolled into pass 3 ${tag}`, rig.looper.trackInfo(1).retakePass === 3 && (es.recording?.startFrame ?? null) === s1 + 2 * master,
     `pass=${rig.looper.trackInfo(1).retakePass}`);
   return { rig, es, master, s1, period, lane0Zero, tag };
 }
@@ -256,8 +256,8 @@ for (const fixed of [true, false]) {
   await rig.looper.recDub(2);
   ok(`G REC on another lane commits the rolling lane ${tag}`, rig.looper.trackInfo(1).state === 'PLAYING', `lane2=${rig.looper.trackInfo(1).state}`);
   ok(`G the approved lane holds its last complete pass (2) ${tag}`, mismatches(loop(rig, 1), s1 + master) === 0);
-  ok(`G the approving lane records next ${tag}`, es.activeRecordIndex === 2 && rig.looper.trackInfo(2).state === 'RECORDING',
-    `lane3=${rig.looper.trackInfo(2).state} recorder=${es.activeRecordIndex}`);
+  ok(`G the approving lane records next ${tag}`, (es.recording?.track ?? -1) === 2 && rig.looper.trackInfo(2).state === 'RECORDING',
+    `lane3=${rig.looper.trackInfo(2).state} recorder=${es.recording?.track ?? -1}`);
   await rig.advance(0.05);
   const slip = gridSlip(loopZero(rig, mark), lane0Zero, period, rig.sr);
   ok(`G the approved lane plays on the master grid ${tag}`, slip < 0.01, `slip=${slip.toFixed(3)} frames`);
@@ -273,7 +273,7 @@ for (const fixed of [true, false]) {
   await rig.advanceTo((s1 + 3 * master + fpb / 4) / rig.sr);
   await rig.untilDrained();
   ok(`G it commits the pass in flight (3) at the edge ${tag}`, rig.looper.trackInfo(1).state === 'PLAYING' &&
-    mismatches(loop(rig, 1), s1 + 2 * master) === 0 && es.activeRecordIndex === -1,
+    mismatches(loop(rig, 1), s1 + 2 * master) === 0 && es.recording === null,
     `state=${rig.looper.trackInfo(1).state} mismatches=${mismatches(loop(rig, 1), s1 + 2 * master)}`);
   rig.release();
 }

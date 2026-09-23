@@ -1,5 +1,6 @@
 import { createSignal } from 'solid-js';
 import type { RingBuffer } from 'ringbuf.js';
+import type { PluginRecordLossSnapshot } from '../plugin-bridge';
 import { engine } from '../engine';
 import { clock } from '../clock';
 import { type FxChain, type FxState } from '../fx/fx';
@@ -173,26 +174,15 @@ export interface Track {
   fx: FxChain | null;
   /** FX state snapshot (source of truth for the UI; applied to `fx` when built). */
   fxState: FxState[];
-  /** Working copy used while overdubbing (summed layers). */
-  overdubBuf: Float32Array | null;
-  /**
-   * Two master-length playback AudioBuffers double-buffered for the overdub boundary swap: each boundary
-   * writes the freshly-summed loop into the buffer NOT currently being read and hands it to a new source
-   * (the outgoing source stopped a full loop period earlier), so the swap allocates nothing per period.
-   * Allocated at startOverdub, freed (null) at finishOverdub / abort / clear. `overdubSwapIdx` picks the next.
-   */
-  overdubSwapBufs: [AudioBuffer, AudioBuffer] | null;
-  overdubSwapIdx: number;
+  /** The overdub in flight on this track; null otherwise. Released with the recorder slot. */
+  overdub: OverdubSession | null;
   /**
    * One-level undo/redo buffer for the LAST overdub: the loop as it was BEFORE the current/most-recent
-   * overdub session, snapshotted at startOverdub (a SEPARATE copy — overdubBuf gets summed into, this one
-   * doesn't). `undoLastOverdub` swaps it with `record`, so a second call redoes. Sized to master; null
+   * overdub session, snapshotted at startOverdub (a SEPARATE copy — the overdub session's `buf` gets summed into,
+   * this one doesn't). `undoLastOverdub` swaps it with `record`, so a second call redoes. Sized to master; null
    * when there's nothing to undo (a fresh first take, or after clear). Survives STOP; cleared on clear().
    */
   undoBuf: Float32Array | null;
-  /** Previous one-level undo target retained only while a new overdub is in flight. If plugin PCM is
-   * lost, the new layer is rejected and this restores the undo history that existed before it began. */
-  overdubPreviousUndoBuf: Float32Array | null;
   /**
    * Whether the track's committed buffer is currently REVERSED relative to how it was recorded. Reversal
    * is its own inverse (a second `reverse(i)` restores forward), so this is a pure display flag. undo/redo
@@ -207,10 +197,6 @@ export interface Track {
    * `undoBuf === null`. Reset on clear().
    */
   undoBufReversed: boolean;
-  /** Orientation paired with `overdubPreviousUndoBuf`; meaningless while that buffer is null. */
-  overdubPreviousUndoBufReversed: boolean;
-  /** One pending boundary swap, cancelled when the overdub ends or playback stops. */
-  overdubTimer: ReturnType<typeof setTimeout> | null;
   /**
    * A later track is RECORDING but still waiting for the master boundary (the arm window).
    * While armed we suppress the waveform/playhead so the briefly-captured pre-boundary audio
@@ -230,6 +216,85 @@ export interface Track {
   peakVersion: number;
 }
 
+// ── Capture sessions ─────────────────────────────────────────────────────────────────────
+/**
+ * One overdub on one track: allocated at startOverdub, dropped (the track's `overdub` set to null) when
+ * the recorder slot is released — commit, rejection, abort or clear.
+ */
+interface OverdubSession {
+  /** Working copy of the loop, summed into by the capture drain. Kept for the whole session (each
+   *  boundary swap commits it into `record` and keeps accumulating into the same copy). */
+  buf: Float32Array;
+  /**
+   * Two master-length playback AudioBuffers double-buffered for the overdub boundary swap: each boundary
+   * writes the freshly-summed loop into the buffer NOT currently being read and hands it to a new source
+   * (the outgoing source stopped a full loop period earlier), so the swap allocates nothing per period.
+   * The live source keeps its own reference once the session ends. `swapIdx` picks the next.
+   */
+  swapBufs: [AudioBuffer, AudioBuffer];
+  swapIdx: number;
+  /** The one-level undo target from before this overdub began (`undoBuf` now holds the pre-dub loop).
+   *  If the layer is rejected for lost audio, this restores that undo history; a committed or aborted
+   *  layer supersedes it, so it is dropped with the session. */
+  previousUndoBuf: Float32Array | null;
+  /** Orientation paired with `previousUndoBuf`; meaningless while that buffer is null. */
+  previousUndoBufReversed: boolean;
+  /** One pending boundary swap, cancelled when the overdub ends or playback stops. */
+  timer: ReturnType<typeof setTimeout> | null;
+}
+
+/**
+ * The single recorder slot: the one take or overdub owning the capture ring. Created on the REC/DUB
+ * press (machine.ts startRecording / startOverdub); machine.ts `releaseRecorderState` sets
+ * `engineState.recording` to null when the capture commits, is rejected, aborted or cleared. Nothing
+ * in it outlives the capture.
+ */
+export interface RecordSession {
+  /** The recording track's index. */
+  track: number;
+  /** Absolute render-frame start of the capture window; null while AUTO listens. */
+  startFrame: number | null;
+  /** Exclusive absolute end, shared by automatic completion and manual stop; null for open overdub/AUTO. */
+  endFrame: number | null;
+  /** Record-latency compensation C applied to this window (frames). */
+  compensationFrames: number;
+  /** PLAY/STOP intent retained while audio performed before the press is still arriving. */
+  stopPlayback: boolean;
+  /** Diagnostic remaining arm frames. Actual capture uses `startFrame` against packet timestamps. */
+  pendingStartFrame: number;
+  /**
+   * RETAKE roll of the active take. While `retakeRolling`, reaching `endFrame` slides the capture window
+   * one pass forward instead of committing. `retakeBuf` holds the last complete CLEAN pass (valid when
+   * `retakeKept`); `retakePass` is the 1-based pass in flight.
+   */
+  retakeRolling: boolean;
+  retakeBuf: Float32Array | null;
+  retakeKept: boolean;
+  retakePass: number;
+  /** RETAKE: the loss counters are sampled per drain, so a loss seen when a pass completes cannot be
+   *  placed on one side of the pass edge. It discards that pass AND taints the next one. */
+  retakeTainted: boolean;
+  /** RETAKE: the lane whose REC press approved the rolling take; it records next. -1 = none. */
+  handoffLane: number;
+  /**
+   * ctx.currentTime of the FIRST track's take frame 0 = the counted come-in downbeat (recordStart in
+   * startRecording). The whole loop grid (loop-audio wraps + the metronome click + beat-LED) is phase-
+   * anchored to THIS, not to the commit instant — so the looper click stays on the SAME grid as the
+   * count-in click with no phase hop at commit. Set on first-track record press, read in finishRecording
+   * (the phase-preserving anchor). 0 = no counted take (a later take, an overdub, AUTO still listening).
+   */
+  firstTakeDownbeatCtx: number;
+  /**
+   * Capture-loss total at the arm. Timestamped packets expose gaps but cannot recover missing audio.
+   * A larger counter at commit rejects the take or restores the pre-dub loop. This conservative check
+   * also counts losses during discarded pre-roll.
+   */
+  overrunBaseline: number;
+  /** Plugin PCM loss totals at the arm. Both capture and plugin loss reject the take: a clean native
+   *  monitor does not establish that recordTap was continuous. */
+  pluginLossBaseline: PluginRecordLossSnapshot;
+}
+
 // ── Engine singletons (lazy) ─────────────────────────────────────────────────────────────
 /**
  * Mutable engine-singleton + transport state shared across the capture/playback/machine modules.
@@ -238,7 +303,8 @@ export interface Track {
  * playback.ts} are grouped into this single mutable object rather than left as bare module-level `let`s
  * (which would force either a setter-function per field or a circular import between capture.ts and
  * machine.ts). Fields referenced from exactly one file stay a local `let` in that file (see capture.ts /
- * machine.ts) rather than living here.
+ * machine.ts) rather than living here — except state whose lifetime is one capture, which lives in
+ * `recording` (RecordSession) or on the track's `overdub` (OverdubSession) so releasing it is one write.
  *
  * ⚠ INTERNAL to src/audio/looper/ — do NOT import from outside this directory. Everything external
  * (UI, __lf, verify ports) goes through the `looper` facade in looper.ts; importing this object
@@ -253,29 +319,11 @@ export const engineState = {
   /** Scratch buffer the drain loop pops into (reused; not in the audio thread). */
   drainScratch: null as Float32Array | null,
   packetScratch: null as Float64Array | null,
-  /** Absolute render-frame window for the single active recorder. */
-  captureStartFrame: null as number | null,
-  /** Exclusive absolute end, shared by automatic completion and manual stop; null for open overdub/AUTO. */
-  captureEndFrame: null as number | null,
-  captureCompensationFrames: 0,
-  /** PLAY/STOP intent retained while audio performed before the press is still arriving. */
-  captureStopPlayback: false,
+  /** The take or overdub owning the capture ring; null while nothing records. */
+  recording: null as RecordSession | null,
   captureFrontierFrame: 0,
-  /**
-   * RETAKE roll of the active take. While `retakeRolling`, reaching `captureEndFrame` slides the capture
-   * window one pass forward instead of committing. `retakeBuf` holds the last complete CLEAN pass (valid
-   * when `retakeKept`); `retakePass` is the 1-based pass in flight. All reset with the recorder slot.
-   */
-  retakeRolling: false,
-  retakeBuf: null as Float32Array | null,
-  retakeKept: false,
-  retakePass: 0,
-  /** The active recording track index, or -1. Owns the single capture ring while set. */
-  activeRecordIndex: -1,
   /** ctx.currentTime at which the master loop's downbeat occurs (anchor for all boundaries). */
   masterStartTime: 0,
-  /** Diagnostic remaining arm frames. Actual capture uses captureStartFrame against packet timestamps. */
-  pendingRecordStartFrame: 0,
   /** Max peak bins per track (sized from the record buffer length; set in init). */
   maxPeaks: 0,
   /**
@@ -294,6 +342,7 @@ export function sr(): number {
 
 export function publish(i: number): void {
   const t = engineState.tracks[i];
+  const rec = engineState.recording;
   trackSignals[i][1]({
     state: t.state,
     lengthFrames: t.lengthFrames,
@@ -303,7 +352,7 @@ export function publish(i: number): void {
     canReverse: t.lengthFrames > 0 && (t.state === 'PLAYING' || t.state === 'STOPPED'),
     reversed: t.reversed,
     stopAt: t.stopAt,
-    retakePass: engineState.retakeRolling && engineState.activeRecordIndex === i && !t.armed ? engineState.retakePass : 0,
+    retakePass: rec !== null && rec.retakeRolling && rec.track === i && !t.armed ? rec.retakePass : 0,
   });
   // Every state transition funnels through here, so this is the one choke point that knows whether the
   // transport is audibly alive. This call is DELIBERATELY outside the signal write above and must stay
@@ -313,7 +362,7 @@ export function publish(i: number): void {
   // count-in + recording/playback, silent when everything is stopped/empty).
   let activeUntil = 0;
   for (const tr of engineState.tracks) {
-    if (engineState.captureStopPlayback && masterLengthFrames() > 0 && tr === engineState.tracks[engineState.activeRecordIndex]) continue;
+    if (rec !== null && rec.stopPlayback && masterLengthFrames() > 0 && tr === engineState.tracks[rec.track]) continue;
     if ((tr.state === 'RECORDING' && !tr.autoArmed) || tr.state === 'OVERDUBBING') {
       activeUntil = Infinity;
       break;
@@ -364,7 +413,7 @@ export interface ExportSnapshot {
  * Read-only snapshot for WAV export (WAV-export v0). Returns COPIES of each committed track's mono
  * loop region. A track is committed once it has a loop length (lengthFrames > 0), which admits
  * PLAYING, STOPPED and OVERDUBBING. An OVERDUBBING track's `record` buffer always holds a complete,
- * coherent loop: startOverdub sums incoming PCM into a SEPARATE overdubBuf (capture.ts) and each
+ * coherent loop: startOverdub sums incoming PCM into a SEPARATE working copy (capture.ts) and each
  * boundary swap writes the freshly-committed layer back into `record` (playback.ts scheduleOverdubSwap),
  * so `record` is never torn mid-write — it is exactly the already-committed audio the user is hearing.
  * Export runs synchronously on the same main thread as the boundary swap, so a slice() cannot race it.

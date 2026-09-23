@@ -65,7 +65,7 @@ console.log('=== A. snapshot, multi-pass session, undo/redo toggle, live source 
   await rig.advanceTo(loop.next() - loop.period / 2);
   await rig.looper.recDub(0);
   ok('A DUB snapshots the pre-dub loop', t.undoBuf !== null && same(t.undoBuf, pre, master));
-  ok('A the snapshot is a separate copy', t.undoBuf !== t.record && t.undoBuf.buffer !== t.overdubBuf.buffer &&
+  ok('A the snapshot is a separate copy', t.undoBuf !== t.record && t.undoBuf.buffer !== t.overdub.buf.buffer &&
     t.undoBuf.buffer !== t.record.buffer);
   ok('A no undo while OVERDUBBING', !canUndo(rig));
   await rig.advanceTo(loop.next() - 0.01);

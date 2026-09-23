@@ -41,7 +41,7 @@ for (const sr of [44100, 48000]) {
         const elapsed = rig.now() - es.masterStartTime;
         await rig.advanceTo(es.masterStartTime + (Math.floor(elapsed / period) + 1 + phase) * period);
         await rig.looper.recDub(1);
-        const boundary = es.captureStartFrame;
+        const boundary = es.recording?.startFrame ?? null;
         await rig.advance(period * 2.1);
         const t = rig.tracks[1];
         const tag = `sr=${sr} bpm=${bpm} bars=${bars} phase=${phase}`;
@@ -67,7 +67,7 @@ for (const [label, stall, lossExpected] of [['1.5 s stall', 1.5, false], ['12 s 
   const es = rig.state.engineState;
   await rig.advance(0.5);
   await rig.looper.recDub(1);
-  const boundary = es.captureStartFrame;
+  const boundary = es.recording?.startFrame ?? null;
   await rig.advanceTo(boundary / rig.sr + 0.3);
   await rig.stall(stall);
   await rig.advance(master / rig.sr + 0.5);

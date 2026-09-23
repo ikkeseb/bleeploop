@@ -91,7 +91,7 @@ await probe(async ({ open }) => {
       }
       if (!observation) throw new Error('The stale-drain hook was not reached');
       const intendedFrame = Math.round((anchor + Math.ceil(observation.after - anchor)) * sr);
-      const pendingFrames = engineState.pendingRecordStartFrame;
+      const pendingFrames = engineState.recording?.pendingStartFrame ?? 0;
       const deadline = performance.now() + 3500;
       while (lf.looper.stateOf(1) !== 'PLAYING' && performance.now() < deadline) await pause(5);
       if (lf.looper.stateOf(1) !== 'PLAYING') throw new Error('Later recording did not complete');
@@ -120,8 +120,8 @@ await probe(async ({ open }) => {
       const cFrames = lf.recordLatency.recordCompensationFrames();
       await lf.looper.recDub(0);
       const startDeadline = performance.now() + 2000;
-      while (engineState.captureStartFrame === null && performance.now() < startDeadline) await pause(2);
-      const expectedFrame = engineState.captureStartFrame;
+      while ((engineState.recording?.startFrame ?? null) === null && performance.now() < startDeadline) await pause(2);
+      const expectedFrame = engineState.recording?.startFrame ?? null;
       if (expectedFrame === null) throw new Error(`${kind}: did not establish a capture deadline`);
       if (free) {
         const punchOut = (expectedFrame - cFrames) / sr + 1.03;

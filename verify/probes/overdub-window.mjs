@@ -148,7 +148,7 @@ await probe(async ({ open }) => {
       return buffer;
     };
     try { await lf.looper.recDub(0); } finally { ctx.createBuffer = createBuffer; }
-    const firstFrame = engineState.captureStartFrame;
+    const firstFrame = engineState.recording?.startFrame ?? null;
     const gridFrame = Math.round(engineState.masterStartTime * sr);
     while (ctx.currentTime < firstFrame / sr + 0.1) await pause(1);
     await lf.looper.recDub(0);

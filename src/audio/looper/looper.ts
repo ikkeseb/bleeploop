@@ -24,7 +24,7 @@
  * engine.masterGain (NOT back into looperInputBus — that would feed back).
  *
  * ── OVERDUB ───────────────────────────────────────────────────────────────────────────
- * While OVERDUBBING we sum incoming PCM into a COPY of the track buffer (overdubBuf). The
+ * While OVERDUBBING we sum incoming PCM into a COPY of the track buffer (`overdub.buf`). The
  * record write head wraps modulo masterLengthFrames so the new layer lands sample-aligned over
  * the existing loop. At the next loop boundary we build a fresh AudioBuffer from the summed
  * data and swap the playing source for one started exactly on the boundary. Phase stays aligned, but

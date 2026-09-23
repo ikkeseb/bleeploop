@@ -108,9 +108,9 @@ await probe(async ({ open }) => {
           await pause(5);
         }
       }
-      const captureStart = engineState.captureStartFrame;
+      const captureStart = engineState.recording?.startFrame ?? null;
       if (captureStart === null) throw new Error('No active capture window');
-      const automaticEnd = engineState.captureEndFrame;
+      const automaticEnd = engineState.recording?.endFrame ?? null;
       const musicalStart = captureStart - compensation;
       const nearBar = mode === 'afterLoop' || mode === 'wholeBar' || mode === 'earlyBar';
       await until(mode === 'afterLoop' ? musicalStart / sr + 4.02 : nearBar ? musicalStart / sr + (mode === 'earlyBar' ? 1.94 : 2.02) : captureStart / sr + 0.30);
@@ -130,7 +130,7 @@ await probe(async ({ open }) => {
         else lf.looper.playStop(index);
       } finally { delete ctx.currentTime; }
       const stateAtStop = lf.looper.stateOf(index);
-      const frameDeadline = engineState.captureEndFrame;
+      const frameDeadline = engineState.recording?.endFrame ?? null;
       if (mode === 'clearOther' || mode === 'lossOther') lf.looper.clear(0);
       if (mode === 'loss' || mode === 'lossOther') Atomics.add(engineState.heartbeat, 1, 128);
       if (mode === 'repeat' || mode === 'clear') {
@@ -164,13 +164,13 @@ await probe(async ({ open }) => {
         lf.looper.playStop(index);
         canRetryPlayback = lf.looper.stateOf(index) === 'PLAYING' && engineState.tracks[index].source !== null;
       }
-      const activeAfter = engineState.activeRecordIndex;
+      const activeAfter = engineState.recording?.track ?? -1;
       const playback = starts.find((entry) => entry.node === engineState.tracks[index].source);
       const playbackPhase = playback ? ((playback.when - musicalStart / sr) % 2 + 2) % 2 : null;
       const playbackOffset = playback?.offset ?? null;
       const masterAfter = lf.looper.masterLengthFrames();
-      const stopIntentAfter = engineState.captureStopPlayback;
-      const windowAfter = engineState.captureStartFrame;
+      const stopIntentAfter = engineState.recording?.stopPlayback ?? false;
+      const windowAfter = engineState.recording?.startFrame ?? null;
       const softOnsetRetained = !auto || (captureStart <= onset && pcm?.[onset - captureStart] === expectedSample(onset));
       await lf.looper.recDub(2);
       const canRecordNext = lf.looper.stateOf(2) === 'RECORDING';

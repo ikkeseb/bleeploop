@@ -57,6 +57,7 @@ import {
   setMasterLengthFrames,
   sr,
   TRACK_COUNT,
+  type RecordSession,
   type Track,
   volumeSignals,
 } from './state';
@@ -73,45 +74,49 @@ import {
 import { applyTrackGain, setMute, setVolume } from './mixer';
 
 /**
- * ctx.currentTime of the FIRST track's take frame 0 = the counted come-in downbeat (recordStart in
- * startRecording). The whole loop grid (loop-audio wraps + the metronome click + beat-LED) is phase-
- * anchored to THIS, not to the commit instant — so the looper click stays on the SAME grid as the
- * count-in click with no phase hop at commit. Set on first-track record press, read in finishRecording
- * (the phase-preserving anchor). 0 = no counted take in flight.
+ * Claim the single recorder slot for track `i`. The loss baselines, sampled by the caller at the arm, open
+ * the integrity window; every other field starts at its idle value and is filled in by the caller.
  */
-let firstTakeDownbeatCtx = 0;
-/**
- * Capture-loss total at each record or overdub arm. Timestamped packets expose gaps but cannot
- * recover missing audio. A larger counter at commit rejects the take or restores the pre-dub loop.
- * This conservative check also counts losses during discarded pre-roll.
- */
-let armOverrunBaseline = 0;
-/** Plugin PCM loss totals at the current take/layer's arm. Both capture and plugin loss reject
- * the take: a clean native monitor does not establish that recordTap was continuous. */
-let armPluginLossBaseline: PluginRecordLossSnapshot = { droppedFrames: 0, underruns: 0 };
-/** RETAKE: the loss counters are sampled per drain, so a loss seen when a pass completes cannot be placed
- * on one side of the pass edge. It discards that pass AND taints the next one. */
-let retakeTainted = false;
-/** RETAKE: the lane whose REC press approved the rolling take; it records next. -1 = none. */
-let handoffLane = -1;
+function openRecordSession(i: number, overrunBaseline: number, pluginLossBaseline: PluginRecordLossSnapshot): RecordSession {
+  const session: RecordSession = {
+    track: i,
+    startFrame: null,
+    endFrame: null,
+    compensationFrames: 0,
+    stopPlayback: false,
+    pendingStartFrame: 0,
+    retakeRolling: false,
+    retakeBuf: null,
+    retakeKept: false,
+    retakePass: 0,
+    retakeTainted: false,
+    handoffLane: -1,
+    firstTakeDownbeatCtx: 0,
+    overrunBaseline,
+    pluginLossBaseline,
+  };
+  engineState.recording = session;
+  return session;
+}
+
 // ── Master-loop derivation ───────────────────────────────────────────────────────────────
-function pluginLossSinceArm(): PluginRecordLossSnapshot {
+function pluginLossSinceArm(rec: RecordSession): PluginRecordLossSnapshot {
   const now = pluginBridge.recordLossSnapshot();
   return {
-    droppedFrames: Math.max(0, now.droppedFrames - armPluginLossBaseline.droppedFrames),
-    underruns: Math.max(0, now.underruns - armPluginLossBaseline.underruns),
+    droppedFrames: Math.max(0, now.droppedFrames - rec.pluginLossBaseline.droppedFrames),
+    underruns: Math.max(0, now.underruns - rec.pluginLossBaseline.underruns),
   };
 }
 
 /** Refresh after a fully discarded pre-roll batch; the straddling frame-0 batch is never excluded. */
-export function beginPluginRecordIntegrityWindow(): void {
-  armPluginLossBaseline = pluginBridge.recordLossSnapshot();
+export function beginPluginRecordIntegrityWindow(rec: RecordSession): void {
+  rec.pluginLossBaseline = pluginBridge.recordLossSnapshot();
 }
 
 /** AUTO may listen for minutes. Discarded quiet history must not poison the eventual take. */
-export function refreshAutoRecordIntegrityWindow(): void {
-  armOverrunBaseline = captureOverruns();
-  beginPluginRecordIntegrityWindow();
+export function refreshAutoRecordIntegrityWindow(rec: RecordSession): void {
+  rec.overrunBaseline = captureOverruns();
+  beginPluginRecordIntegrityWindow(rec);
 }
 
 function describePluginLoss(loss: PluginRecordLossSnapshot): string {
@@ -121,21 +126,23 @@ function describePluginLoss(loss: PluginRecordLossSnapshot): string {
   return parts.join(' and ');
 }
 
-/**
- * Reject a take/layer if either timestamped capture or the native-plugin PCM bridge lost audio after arm. A clean native monitor
- * does not prove the record branch was continuous: the monitor bypasses this JS bridge entirely.
- */
 /** What the record path lost since the integrity window opened; '' = the window is clean. */
-function recordLossDetail(): string {
-  const captureDropped = captureOverruns() - armOverrunBaseline;
+function recordLossDetail(rec: RecordSession): string {
+  const captureDropped = captureOverruns() - rec.overrunBaseline;
   return [
-    describePluginLoss(pluginLossSinceArm()),
+    describePluginLoss(pluginLossSinceArm(rec)),
     captureDropped > 0 ? `${captureDropped} capture frames dropped` : '',
   ].filter(Boolean).join(' and ');
 }
 
-function rejectRecordLoss(i: number): boolean {
-  const detail = recordLossDetail() || (retakeTainted ? 'an interruption at the edge of this pass' : '');
+/**
+ * Reject a take/layer if either timestamped capture or the native-plugin PCM bridge lost audio after arm. A clean native monitor
+ * does not prove the record branch was continuous: the monitor bypasses this JS bridge entirely.
+ * A rejected layer restores the pre-layer loop and the undo history from before it; the caller's release
+ * drops the overdub session.
+ */
+function rejectRecordLoss(i: number, rec: RecordSession): boolean {
+  const detail = recordLossDetail(rec) || (rec.retakeTainted ? 'an interruption at the edge of this pass' : '');
   if (!detail) return false;
 
   const t = engineState.tracks[i];
@@ -149,14 +156,10 @@ function rejectRecordLoss(i: number): boolean {
   if (overdub) {
     const master = masterLengthFrames();
     if (t.undoBuf) t.record.set(t.undoBuf.subarray(0, master), 0); // restore the pre-layer loop
-    t.undoBuf = t.overdubPreviousUndoBuf;
-    t.undoBufReversed = t.overdubPreviousUndoBufReversed;
-    t.overdubPreviousUndoBuf = null;
-    t.overdubPreviousUndoBufReversed = false;
-    t.overdubBuf = null;
-    t.overdubSwapBufs = null;
+    t.undoBuf = t.overdub?.previousUndoBuf ?? null;
+    t.undoBufReversed = t.overdub?.previousUndoBufReversed ?? false;
     recomputePeaks(t, master);
-    const stopAfter = engineState.captureStopPlayback;
+    const stopAfter = rec.stopPlayback;
     t.state = stopAfter ? 'STOPPED' : 'PLAYING';
     if (!stopAfter) startPlayback(i, makeLoopBuffer(t.record, master), nextBoundary());
     return true;
@@ -201,10 +204,10 @@ function reportCommitPlaybackFailure(i: number, err: unknown, kind: 'commit' | '
 }
 
 /** Commit a first or later take. Only the first take chooses a length and anchors the grid. */
-function finishRecording(i: number): void {
+function finishRecording(i: number, rec: RecordSession): void {
   const t = engineState.tracks[i];
   // Keep the unpadded length: a short first take waits for the next counted downbeat.
-  const raw = Math.min(t.writeHead, (engineState.captureEndFrame ?? Infinity) - (engineState.captureStartFrame ?? 0));
+  const raw = Math.min(t.writeHead, (rec.endFrame ?? Infinity) - (rec.startFrame ?? 0));
   let master = masterLengthFrames();
   const firstTake = master === 0;
   // A committing take has never played, so its gain → FX graph is still cold. Build it before the
@@ -216,7 +219,7 @@ function finishRecording(i: number): void {
   if (master === 0) {
     const plan = planCommit(raw, clock.bpm(), sr(), t.record.length);
     master = plan.master;
-    const timing = commitAnchor(firstTakeDownbeatCtx, master, sr(), when, raw);
+    const timing = commitAnchor(rec.firstTakeDownbeatCtx, master, sr(), when, raw);
     when = timing.playWhen;
     offset = timing.startOffset;
     clock.setBpm(plan.derivedBpm);
@@ -240,7 +243,7 @@ function finishRecording(i: number): void {
   t.lengthFrames = master;
   t.fillFrames = master;
   t.armed = false;
-  t.state = engineState.captureStopPlayback ? 'STOPPED' : 'PLAYING';
+  t.state = rec.stopPlayback ? 'STOPPED' : 'PLAYING';
   if (firstBeatPeriod > 0) clock.startMasterPulse(engineState.masterStartTime, firstBeatPeriod);
   recomputePeaks(t, master);
   if (t.state === 'PLAYING') startPlayback(i, makeLoopBuffer(t.record, master), when, offset);
@@ -248,15 +251,15 @@ function finishRecording(i: number): void {
 
 /** Every completed window releases its owner and publishes once, including loss and playback failure. */
 export function finishCapture(i: number): void {
-  if (engineState.activeRecordIndex !== i) return;
+  const rec = engineState.recording;
+  if (rec === null || rec.track !== i) return;
   const t = engineState.tracks[i];
-  const next = handoffLane;
-  const seam = engineState.captureEndFrame; // an approved retake ends ON a pass edge (= a master boundary + C)
-  handoffLane = -1;
+  const next = rec.handoffLane;
+  const seam = rec.endFrame; // an approved retake ends ON a pass edge (= a master boundary + C)
   try {
-    if (rejectRecordLoss(i)) return;
-    if (t.state === 'OVERDUBBING') finishOverdub(i);
-    else finishRecording(i);
+    if (rejectRecordLoss(i, rec)) return;
+    if (t.state === 'OVERDUBBING') finishOverdub(i, rec);
+    else finishRecording(i, rec);
   } catch (e) {
     stopAndFreeSource(t);
     t.state = t.lengthFrames > 0 ? 'STOPPED' : 'EMPTY';
@@ -298,7 +301,7 @@ function setAutoRecordSensitivity(n: number): void {
 }
 
 /** Bound a take at its existing master, FIXED bar count, or the free-record capacity. */
-function configureRecordingEnd(t: Track): void {
+function configureRecordingEnd(t: Track, rec: RecordSession): void {
   const master = masterLengthFrames();
   let frames = master || t.record.length;
   if (fixedLengthEnabled() && (master === 0 || !retakeEnabled())) {
@@ -306,14 +309,14 @@ function configureRecordingEnd(t: Track): void {
     const maxBars = maxWholeBars(master || t.record.length, fpb);
     frames = clampBars(fixedLengthBars(), maxBars) * fpb;
   }
-  engineState.captureEndFrame = engineState.captureStartFrame! + frames;
+  rec.endFrame = rec.startFrame! + frames;
   // RETAKE rolls any take whose length is decided here (a free first take is bounded only by capacity).
   if (retakeEnabled() && (master > 0 || fixedLengthEnabled())) {
-    engineState.retakeRolling = true;
-    engineState.retakeBuf = new Float32Array(frames); // allocated at arm, never in the drain
-    engineState.retakeKept = false;
-    engineState.retakePass = 1;
-    retakeTainted = false;
+    rec.retakeRolling = true;
+    rec.retakeBuf = new Float32Array(frames); // allocated at arm, never in the drain
+    rec.retakeKept = false;
+    rec.retakePass = 1;
+    rec.retakeTainted = false;
   }
 }
 
@@ -324,26 +327,27 @@ function configureRecordingEnd(t: Track): void {
  * first-take phase anchor and the integrity window all move by exactly one pass, so every later decision
  * (`stopCapture`, `finishRecording`) sees an ordinary take that began at this pass's downbeat.
  */
-export function completeRetakePass(i: number): void {
+export function completeRetakePass(rec: RecordSession): void {
+  const i = rec.track;
   const t = engineState.tracks[i];
-  const frames = engineState.captureEndFrame! - engineState.captureStartFrame!;
-  const detail = recordLossDetail();
-  engineState.retakeKept = !detail && !retakeTainted;
-  if (engineState.retakeKept) engineState.retakeBuf!.set(t.record.subarray(0, frames));
+  const frames = rec.endFrame! - rec.startFrame!;
+  const detail = recordLossDetail(rec);
+  rec.retakeKept = !detail && !rec.retakeTainted;
+  if (rec.retakeKept) rec.retakeBuf!.set(t.record.subarray(0, frames));
   if (detail) {
-    console.error(`[looper] retake: dropped track ${i}'s pass ${engineState.retakePass}: ${detail}`);
+    console.error(`[looper] retake: dropped track ${i}'s pass ${rec.retakePass}: ${detail}`);
     notifyError(
-      `Track ${i + 1}: pass ${engineState.retakePass} dropped`,
+      `Track ${i + 1}: pass ${rec.retakePass} dropped`,
       `Recorded audio was interrupted (${detail}). This pass and the next are skipped — keep playing.`,
     );
   }
-  retakeTainted = !!detail; // the loss cannot be placed on one side of the edge: the next pass is skipped too
-  armOverrunBaseline = captureOverruns();
-  beginPluginRecordIntegrityWindow();
-  engineState.captureStartFrame = engineState.captureEndFrame;
-  engineState.captureEndFrame = engineState.captureStartFrame! + frames;
-  if (firstTakeDownbeatCtx > 0) firstTakeDownbeatCtx += frames / sr();
-  engineState.retakePass++;
+  rec.retakeTainted = !!detail; // the loss cannot be placed on one side of the edge: the next pass is skipped too
+  rec.overrunBaseline = captureOverruns();
+  beginPluginRecordIntegrityWindow(rec);
+  rec.startFrame = rec.endFrame;
+  rec.endFrame = rec.startFrame! + frames;
+  if (rec.firstTakeDownbeatCtx > 0) rec.firstTakeDownbeatCtx += frames / sr();
+  rec.retakePass++;
   t.writeHead = 0;
   t.fillFrames = 0;
   resetPeaks(t);
@@ -357,46 +361,38 @@ export function completeRetakePass(i: number): void {
  */
 export function beginAutoRecording(i: number, capturedStartCtx: number): void {
   const t = engineState.tracks[i];
-  if (!t || !t.autoArmed || masterLengthFrames() !== 0) return;
-  engineState.captureCompensationFrames = recordCompensationFrames();
-  const compensationSec = engineState.captureCompensationFrames / sr();
-  firstTakeDownbeatCtx = Math.max(0, capturedStartCtx - compensationSec);
-  engineState.captureStartFrame = Math.round(capturedStartCtx * sr());
+  const rec = engineState.recording;
+  if (!t || !t.autoArmed || masterLengthFrames() !== 0 || !rec) return;
+  rec.compensationFrames = recordCompensationFrames();
+  const compensationSec = rec.compensationFrames / sr();
+  rec.firstTakeDownbeatCtx = Math.max(0, capturedStartCtx - compensationSec);
+  rec.startFrame = Math.round(capturedStartCtx * sr());
   t.autoArmed = false;
   clock.setBpmLocked(true);
-  configureRecordingEnd(t);
+  configureRecordingEnd(t, rec);
   publish(i); // makes transportActive true before the pulse schedules a sounding future beat
-  clock.startAutoRecordPulse(firstTakeDownbeatCtx, 60 / clock.bpm());
+  clock.startAutoRecordPulse(rec.firstTakeDownbeatCtx, 60 / clock.bpm());
 }
 
 // ── Shared teardown helpers ──────────────────────────────────────────────────────────────
 /**
- * Release the single-recorder slot + every piece of cross-cutting arm state a torn-down capture
- * must not leak into the next record: the absolute capture window, its diagnostic remaining count,
- * compensation and pending playback-stop intent, plus the first-take anchor and count-in BPM lock.
- * Callers keep their own state-transition specifics (EMPTY-vs-STOPPED, source teardown, buffer
- * wipe, count-pulse teardown). Only the owner may release the shared state.
+ * Release the single-recorder slot: drop the record session (window, compensation, stop intent, RETAKE
+ * roll, loss baselines, first-take anchor) and the track's overdub session, after cancelling its pending
+ * boundary swap; clear AUTO listening and the count-in BPM lock. Callers keep their own state-transition
+ * specifics (EMPTY-vs-STOPPED, source teardown, buffer wipe, count-pulse teardown). Only the owner may
+ * release the shared state.
  */
 function releaseRecorderState(i: number): void {
-  if (engineState.activeRecordIndex !== i) return;
+  if (engineState.recording?.track !== i) return;
   cancelOverdubSwap(i);
   const t = engineState.tracks[i];
   const wasAutoArmed = t?.autoArmed === true;
-  engineState.activeRecordIndex = -1;
-  if (t) t.autoArmed = false;
+  engineState.recording = null;
+  if (t) {
+    t.autoArmed = false;
+    t.overdub = null;
+  }
   if (wasAutoArmed) cancelAutoRecord();
-  engineState.pendingRecordStartFrame = 0;
-  engineState.captureStartFrame = null;
-  engineState.captureEndFrame = null;
-  engineState.captureCompensationFrames = 0;
-  engineState.captureStopPlayback = false;
-  engineState.retakeRolling = false;
-  engineState.retakeBuf = null;
-  engineState.retakeKept = false;
-  engineState.retakePass = 0;
-  retakeTainted = false;
-  handoffLane = -1;
-  firstTakeDownbeatCtx = 0;
   if (masterLengthFrames() === 0) clock.setBpmLocked(false);
 }
 
@@ -443,11 +439,11 @@ async function recDub(i: number): Promise<void> {
       // RETAKE: REC on another lane approves the rolling take; this lane then records from that take's
       // pass end (finishCapture hands over). With nothing to keep yet the press is ignored, as it is for
       // any second recorder.
-      const active = engineState.activeRecordIndex;
-      if (active >= 0 && engineState.retakeRolling && !engineState.tracks[active].armed) {
-        if (retakeStopPlan() === 'stop-now') break;
-        handoffLane = i;
-        stopCapture(active);
+      const rec = engineState.recording;
+      if (rec && rec.retakeRolling && !engineState.tracks[rec.track].armed) {
+        if (retakeStopPlan(rec) === 'stop-now') break;
+        rec.handoffLane = i;
+        stopCapture(rec.track);
       } else startRecording(i);
       break;
     }
@@ -489,7 +485,7 @@ function playStop(i: number): void {
       break; // disabled in UI
     case 'RECORDING':
     case 'OVERDUBBING':
-      engineState.captureStopPlayback = true;
+      if (engineState.recording) engineState.recording.stopPlayback = true;
       if (t.state === 'OVERDUBBING') {
         cancelOverdubSwap(i); // A boundary swap must not restart sound during the capture tail.
         stopAndFreeSource(t);
@@ -523,7 +519,7 @@ function requestLoopEndStop(i: number, when = nextBoundary()): void {
 
 /** `seamFrame`: a RETAKE handoff — begin exactly where the approved take's pass ended (a later take). */
 function startRecording(i: number, seamFrame: number | null = null): void {
-  if (engineState.activeRecordIndex >= 0) return; // single-recorder: ignore if another is recording
+  if (engineState.recording) return; // single-recorder: ignore if another is recording
   const t = engineState.tracks[i];
   t.writeHead = 0;
   t.fillFrames = 0;
@@ -533,22 +529,16 @@ function startRecording(i: number, seamFrame: number | null = null): void {
   // Capture begins clean from this press. A handoff keeps the ring: its seam may sit inside the batch
   // being drained right now, and the timestamped arm split discards everything before it anyway.
   if (seamFrame === null) drainStaleFrames();
-  engineState.activeRecordIndex = i;
-  armOverrunBaseline = captureOverruns(); // detect a capture drop between here and commit
-  beginPluginRecordIntegrityWindow();
-  engineState.captureStartFrame = null;
-  engineState.captureEndFrame = null;
-  engineState.captureCompensationFrames = 0;
-  engineState.captureStopPlayback = false;
+  // The session opens with no window, no compensation and no stop intent; the branches below fill it in.
+  const rec = openRecordSession(i, captureOverruns(), pluginBridge.recordLossSnapshot());
 
   if (masterLengthFrames() === 0) {
     if (autoRecordEnabled()) {
       // AUTO REC replaces only the first-track count-in. The capture ring keeps draining silence while
       // the pre-allocated detector listens; no click sounds and no BPM/length choice freezes until input
       // actually triggers. The same REC/DUB or PLAY/STOP gesture cancels through stopCapture().
+      // The window, pending count and first-take anchor stay at their idle values until the trigger.
       prepareAutoRecord();
-      engineState.pendingRecordStartFrame = 0;
-      firstTakeDownbeatCtx = 0;
       t.autoArmed = true;
       t.state = 'RECORDING';
       publish(i);
@@ -570,16 +560,16 @@ function startRecording(i: number, seamFrame: number | null = null): void {
     clock.setBpmLocked(true);
     t.armed = true; // counting in; the take (and waveform) begins at the come-in downbeat
     t.state = 'RECORDING';
-    firstTakeDownbeatCtx = recordStart; // the counted downbeat the loop grid is phase-anchored to at commit
+    rec.firstTakeDownbeatCtx = recordStart; // the counted downbeat the loop grid is phase-anchored to at commit
     // Discard the lead-in + count frames, PLUS the record-latency compensation C: the natively-monitored
     // guitar's recorded transient lands C frames late at the record tap, so starting the take C frames
     // later puts that transient ON frame 0 (= the counted downbeat the grid anchors to ⇒ on playback the
     // guitar lands on the click). C is 0 unless a native monitor is armed, so the synth/mic + verified
     // baselines are untouched; the whole capture window shifts uniformly so the loop length is unchanged.
     // firstTakeDownbeatCtx STAYS at recordStart (the heard click/grid anchor), NOT the shifted take start.
-    engineState.captureCompensationFrames = recordCompensationFrames();
-    engineState.captureStartFrame = Math.round(recordStart * sr()) + engineState.captureCompensationFrames;
-    engineState.pendingRecordStartFrame = pendingFrames + engineState.captureCompensationFrames;
+    rec.compensationFrames = recordCompensationFrames();
+    rec.startFrame = Math.round(recordStart * sr()) + rec.compensationFrames;
+    rec.pendingStartFrame = pendingFrames + rec.compensationFrames;
   } else {
     // LATER track: choose one absolute master boundary. Capture compares packet timestamps
     // with that deadline, so producer progress during this gesture cannot shift the take.
@@ -591,18 +581,18 @@ function startRecording(i: number, seamFrame: number | null = null): void {
     // master frames either way (the window shifts uniformly).
     const now = engine.ctx.currentTime;
     const boundary = nextBoundaryTime(engineState.masterStartTime, masterLengthFrames() / sr(), now);
-    engineState.captureCompensationFrames = recordCompensationFrames();
-    engineState.captureStartFrame = seamFrame ?? Math.round(boundary * sr()) + engineState.captureCompensationFrames;
-    engineState.pendingRecordStartFrame = Math.max(0, engineState.captureStartFrame - Math.round(now * sr()));
+    rec.compensationFrames = recordCompensationFrames();
+    rec.startFrame = seamFrame ?? Math.round(boundary * sr()) + rec.compensationFrames;
+    rec.pendingStartFrame = Math.max(0, rec.startFrame - Math.round(now * sr()));
   }
-  configureRecordingEnd(t);
+  configureRecordingEnd(t, rec);
   publish(i);
 }
 
 /** How a stop gesture pressed NOW resolves the rolling retake (pure rule: grid-math `planRetakeStop`). */
-function retakeStopPlan(): RetakeStop {
-  const press = Math.round(engine.ctx.currentTime * sr()) + engineState.captureCompensationFrames;
-  return planRetakeStop(press, engineState.captureEndFrame!, framesPerBar(clock.bpm(), sr()), engineState.retakeKept);
+function retakeStopPlan(rec: RecordSession): RetakeStop {
+  const press = Math.round(engine.ctx.currentTime * sr()) + rec.compensationFrames;
+  return planRetakeStop(press, rec.endFrame!, framesPerBar(clock.bpm(), sr()), rec.retakeKept);
 }
 
 /** Tighten the capture window once; repeated gestures cannot extend a take or layer. */
@@ -612,21 +602,23 @@ function stopCapture(i: number): void {
     stop(i); // Nothing retained yet: cancel count-in, boundary arm or AUTO listening.
     return;
   }
+  const rec = engineState.recording;
+  if (!rec) return; // only the recorder's owner reaches here
   const now = engine.ctx.currentTime;
-  let end = Math.round(now * sr()) + engineState.captureCompensationFrames;
+  let end = Math.round(now * sr()) + rec.compensationFrames;
   let useLaterStop = true;
-  if (engineState.retakeRolling) {
+  if (rec.retakeRolling) {
     // The roll ends with this gesture, whichever way it resolves (grid-math `planRetakeStop`).
-    engineState.retakeRolling = false;
-    const passEnd = engineState.captureEndFrame!;
-    const plan = retakeStopPlan();
+    rec.retakeRolling = false;
+    const passEnd = rec.endFrame!;
+    const plan = retakeStopPlan(rec);
     if (plan === 'keep-last') {
       // The kept pass replaces the one in flight; that pass's losses die with it.
-      t.record.set(engineState.retakeBuf!);
-      t.writeHead = passEnd - engineState.captureStartFrame!;
-      armOverrunBaseline = captureOverruns();
-      beginPluginRecordIntegrityWindow();
-      retakeTainted = false;
+      t.record.set(rec.retakeBuf!);
+      t.writeHead = passEnd - rec.startFrame!;
+      rec.overrunBaseline = captureOverruns();
+      beginPluginRecordIntegrityWindow(rec);
+      rec.retakeTainted = false;
       finishCapture(i);
       return;
     }
@@ -635,12 +627,12 @@ function stopCapture(i: number): void {
       useLaterStop = false;
     }
   }
-  if (t.state === 'RECORDING' && masterLengthFrames() === 0 && end !== engineState.captureEndFrame) {
+  if (t.state === 'RECORDING' && masterLengthFrames() === 0 && end !== rec.endFrame) {
     // Whole bars come from musical time, including the quarter-beat grace. A shorter take
     // retains audio through the press and is padded to one bar only after its tail arrives.
-    const elapsed = firstTakeDownbeatCtx > 0 ? now - firstTakeDownbeatCtx : 0;
+    const elapsed = rec.firstTakeDownbeatCtx > 0 ? now - rec.firstTakeDownbeatCtx : 0;
     const { bars, target } = planFreeStop(elapsed, clock.bpm(), sr(), t.record.length);
-    if (bars >= 1) end = engineState.captureStartFrame! + target;
+    if (bars >= 1) end = rec.startFrame! + target;
   }
   if (t.state === 'RECORDING' && masterLengthFrames() > 0 && useLaterStop) {
     const master = masterLengthFrames();
@@ -648,87 +640,90 @@ function stopCapture(i: number): void {
     if (master % fpb === 0) {
       const plan = planLaterStop(
         now,
-        engineState.captureStartFrame!,
-        engineState.captureCompensationFrames,
+        rec.startFrame!,
+        rec.compensationFrames,
         clock.bpm(),
         sr(),
         master / fpb,
       );
-      end = engineState.captureStartFrame! + plan.target;
+      end = rec.startFrame! + plan.target;
     }
   }
-  engineState.captureEndFrame = Math.min(engineState.captureEndFrame ?? Infinity, end);
+  rec.endFrame = Math.min(rec.endFrame ?? Infinity, end);
   flushActiveCapture();
-  if (engineState.activeRecordIndex === i && engineState.captureFrontierFrame >= engineState.captureEndFrame!) {
+  // The flush may already have committed (or handed the recorder on): re-read the slot.
+  const current = engineState.recording;
+  if (current?.track === i && engineState.captureFrontierFrame >= current.endFrame!) {
     finishCapture(i);
   }
 }
 
 function startOverdub(i: number): void {
-  if (engineState.activeRecordIndex >= 0) return; // only one recorder at a time
+  if (engineState.recording) return; // only one recorder at a time
   const t = engineState.tracks[i];
   if (t.reversed) return; // RC-505: reverse BLOCKS overdub — flip back to forward first
   const master = masterLengthFrames();
   if (master === 0) return;
   drainStaleFrames();
-  armOverrunBaseline = captureOverruns();
-  beginPluginRecordIntegrityWindow();
+  const overrunBaseline = captureOverruns();
+  const pluginLossBaseline = pluginBridge.recordLossSnapshot();
   const punchInFrame = Math.round(engine.ctx.currentTime * sr());
   const compensation = recordCompensationFrames();
-  // Work on a summed copy of the current loop. Kept for the whole session (each boundary swap commits
-  // it into `record` and keeps accumulating into the same copy), so nothing is allocated per period.
-  t.overdubBuf = t.record.slice(0, master);
-  // Pre-allocate the two playback AudioBuffers the boundary swap alternates between (double-buffer), so
-  // scheduleOverdubSwap writes into an existing buffer instead of minting a fresh one every loop period.
+  // Work on a summed copy of the current loop, and pre-allocate the two playback AudioBuffers the
+  // boundary swap alternates between (double-buffer), so nothing is allocated per period.
+  const buf = t.record.slice(0, master);
   const octx = engine.ctx;
-  t.overdubSwapBufs = [octx.createBuffer(1, master, octx.sampleRate), octx.createBuffer(1, master, octx.sampleRate)];
-  t.overdubSwapIdx = 0;
-  // Snapshot the pre-dub loop for one-level undo — a SEPARATE copy (overdubBuf gets summed into). Taken
-  // here, before the first scheduleOverdubSwap commits the summed layer back into `record`.
-  t.overdubPreviousUndoBuf = t.undoBuf;
-  t.overdubPreviousUndoBufReversed = t.undoBufReversed;
+  const swapBufs: [AudioBuffer, AudioBuffer] = [
+    octx.createBuffer(1, master, octx.sampleRate),
+    octx.createBuffer(1, master, octx.sampleRate),
+  ];
+  t.overdub = {
+    buf,
+    swapBufs,
+    swapIdx: 0,
+    previousUndoBuf: t.undoBuf,
+    previousUndoBufReversed: t.undoBufReversed,
+    timer: null,
+  };
+  // Snapshot the pre-dub loop for one-level undo — a SEPARATE copy (the session's `buf` gets summed into).
+  // Taken here, before the first scheduleOverdubSwap commits the summed layer back into `record`.
   t.undoBuf = t.record.slice(0, master);
   // Pair the snapshot's orientation so undo/redo keeps reversed honest.
   t.undoBufReversed = t.reversed;
   t.state = 'OVERDUBBING';
-  engineState.activeRecordIndex = i;
+  const rec = openRecordSession(i, overrunBaseline, pluginLossBaseline);
   // Keep only audio performed after this punch-in. Wet arriving before punchIn+C belongs to
   // earlier playing; capture maps retained packet frames back by C onto the master grid.
   const gridFrame = Math.round(engineState.masterStartTime * sr());
   t.writeHead = ((punchInFrame - gridFrame) % master + master) % master;
-  engineState.captureStartFrame = punchInFrame + compensation;
-  engineState.captureEndFrame = null;
-  engineState.captureCompensationFrames = compensation;
-  engineState.captureStopPlayback = false;
+  rec.startFrame = punchInFrame + compensation;
+  rec.compensationFrames = compensation;
   scheduleOverdubSwap(i, () => endOverdubAfterFailedSwap(i));
   publish(i);
 }
 
-/** Called by timestamped capture after the complete compensated punch-out window has arrived. */
-function finishOverdub(i: number): void {
+/**
+ * Called by timestamped capture after the complete compensated punch-out window has arrived. The
+ * caller's release drops the overdub session, and with it the undo target from before this layer.
+ */
+function finishOverdub(i: number, rec: RecordSession): void {
   const t = engineState.tracks[i];
   const master = masterLengthFrames();
-  if (t.overdubBuf) {
-    t.record.set(t.overdubBuf.subarray(0, master), 0);
-    t.overdubBuf = null;
-  }
-  t.overdubSwapBufs = null; // session over: release the double-buffer (the live source keeps its own ref)
-  t.overdubPreviousUndoBuf = null; // the new successful overdub supersedes the older undo target
-  t.overdubPreviousUndoBufReversed = false;
+  if (t.overdub) t.record.set(t.overdub.buf.subarray(0, master), 0);
   recomputePeaks(t, master);
-  const stopAfter = engineState.captureStopPlayback;
+  const stopAfter = rec.stopPlayback;
   t.state = stopAfter ? 'STOPPED' : 'PLAYING';
   // The final summed loop becomes audible on the next boundary.
   if (!stopAfter) startPlayback(i, makeLoopBuffer(t.record, master), nextBoundary());
 }
 
 /**
- * A boundary swap that threw (playback.ts logs it). The layer is still in `overdubBuf`, so end the
- * session exactly as STOP during an overdub does: finishOverdub commits what was captured, the stale
- * source stops and the lane lands in STOPPED. PLAY then restarts the committed loop.
+ * A boundary swap that threw (playback.ts logs it). The layer is still in the overdub session's `buf`, so
+ * end the session exactly as STOP during an overdub does: finishOverdub commits what was captured, the
+ * stale source stops and the lane lands in STOPPED. PLAY then restarts the committed loop.
  */
 function endOverdubAfterFailedSwap(i: number): void {
-  if (engineState.tracks[i].state !== 'OVERDUBBING' || engineState.activeRecordIndex !== i) return;
+  if (engineState.tracks[i].state !== 'OVERDUBBING' || engineState.recording?.track !== i) return;
   notifyError(
     `Track ${i + 1}: overdub stopped`,
     'Playback could not switch to the new layer. The layer was kept and the track is stopped. Press play to hear it.',
@@ -829,13 +824,8 @@ function stop(i: number): void {
     // free-run grid. A later-track arm (master > 0) must NOT touch the pulse: the master loop still
     // exists and owns it.
     const wasCountIn = t.state === 'RECORDING' && masterLengthFrames() === 0;
-    t.overdubBuf = null;
-    t.overdubSwapBufs = null; // release the double-buffer if this aborted an overdub
-    t.overdubPreviousUndoBuf = null;
-    t.overdubPreviousUndoBufReversed = false;
     t.armed = false;
-    firstTakeDownbeatCtx = 0; // symmetric with stopCapture's abort: drop the phase anchor of the aborted take
-    releaseRecorderState(i); // shared arm-state clears + fixed-length/BPM unlock
+    releaseRecorderState(i); // drops the record + overdub sessions, BPM unlock
     if (wasCountIn) clock.stopCountIn();
   }
   if (discardUncommitted) {
@@ -858,7 +848,7 @@ function stop(i: number): void {
  */
 function restartTimeIfIdle(): number | null {
   const master = masterLengthFrames();
-  if (master === 0 || engineState.activeRecordIndex >= 0 || engineState.tracks.some((t) => t.state === 'PLAYING')) {
+  if (master === 0 || engineState.recording || engineState.tracks.some((t) => t.state === 'PLAYING')) {
     return null;
   }
   const when = engine.ctx.currentTime + HEARTBEAT_INTERNAL_LATENCY;
@@ -984,7 +974,6 @@ function resetMaster(): void {
   setMasterLengthFrames(0);
   engineState.masterFramesPlain = 0;
   engineState.masterStartTime = 0;
-  firstTakeDownbeatCtx = 0; // blank slate: no counted take in flight
   engineState.loopPhasePlain = 0;
   clock.setBpmLocked(false);
   clock.stopMasterPulse(); // re-anchor the ctx pulse to free-run (LED keeps beating, no loop)
@@ -992,7 +981,7 @@ function resetMaster(): void {
 
 /** Reset the grid once no committed or in-flight lane remains. */
 function resetMasterIfBlank(): void {
-  if (engineState.activeRecordIndex < 0 && engineState.tracks.every((t) => t.state === 'EMPTY')) {
+  if (!engineState.recording && engineState.tracks.every((t) => t.state === 'EMPTY')) {
     resetMaster();
   }
 }
@@ -1005,22 +994,16 @@ function clear(i: number): void {
   const t = engineState.tracks[i];
   if (!t) return; // not yet initialized — nothing to clear
   t.stopAt = null;
-  // Clearing the track that owns the capture ring releases it and the shared arm-count (so a stale
-  // pendingRecordStartFrame from an aborted count-in / arm can't bleed into the next record). If this
+  // Clearing the track that owns the capture ring releases it and its record + overdub sessions. If this
   // was a first-track count-in it's also the last non-empty track, so resetMaster() below tears down
   // the count pulse + restores the free-run grid.
-  if (engineState.activeRecordIndex === i) {
-    releaseRecorderState(i); // shared arm-state clears + fixed-length/BPM unlock
-  }
+  releaseRecorderState(i); // no-op unless this track owns the recorder
   stopAndFreeSource(t);
   t.retiringSources.clear();
   t.record.fill(0);
-  t.overdubBuf = null;
-  t.overdubSwapBufs = null;
+  t.overdub = null;
   t.undoBuf = null;
-  t.overdubPreviousUndoBuf = null;
   t.undoBufReversed = false;
-  t.overdubPreviousUndoBufReversed = false;
   t.reversed = false;
   t.armed = false;
   t.autoArmed = false;
@@ -1067,7 +1050,7 @@ function copy(i: number): number {
   const master = masterLengthFrames();
   if (master === 0 || src.lengthFrames !== master) return -1;
   // A free lane is EMPTY and does not hold the recorder slot.
-  const j = engineState.tracks.findIndex((t, k) => t.state === 'EMPTY' && k !== engineState.activeRecordIndex);
+  const j = engineState.tracks.findIndex((t, k) => t.state === 'EMPTY' && k !== engineState.recording?.track);
   if (j < 0) return -1;
   const dst = engineState.tracks[j];
   dst.record.set(src.record.subarray(0, master), 0);

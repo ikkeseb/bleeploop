@@ -84,7 +84,7 @@ await probe(async ({ open }) => {
         await waitFor(() => ctx.currentTime >= engineState.masterStartTime + 0.15, 'imported playback start');
       };
       const snapshot = () => ({ pending: pending.size, scheduled: scheduled.length, fired, cancelled,
-        cancelledFromPlayback, peakPending, state: lf.looper.stateOf(0), active: engineState.activeRecordIndex });
+        cancelledFromPlayback, peakPending, state: lf.looper.stateOf(0), active: engineState.recording?.track ?? -1 });
       try {
         await load(name === 'rearm' || name === 'swapFail' ? 1 : 8);
         const overrunsBefore = lf.looper.captureOverruns();
@@ -113,7 +113,7 @@ await probe(async ({ open }) => {
           observations.beforeStop = snapshot();
           lf.looper.playStop(0);
           observations.duringTail = snapshot();
-          observations.hasCaptureEnd = engineState.captureEndFrame !== null;
+          observations.hasCaptureEnd = (engineState.recording?.endFrame ?? null) !== null;
           await waitFor(() => lf.looper.stateOf(0) === 'STOPPED', 'compensated stop completion');
           observations.sourceAfter = engineState.tracks[0].source !== null;
         } else if (name === 'clearReuse') {

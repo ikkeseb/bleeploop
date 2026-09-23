@@ -20,7 +20,7 @@ async function freeTake({ sr, bpm, fixedBars = 0 }) {
   rig.setInput(code);
   await rig.looper.recDub(0);
   const es = rig.state.engineState;
-  return { rig, start: es.captureStartFrame, end: es.captureEndFrame, cap: rig.tracks[0].record.length, fpb: framesPerBar(bpm, sr) };
+  return { rig, start: es.recording?.startFrame ?? null, end: es.recording?.endFrame ?? null, cap: rig.tracks[0].record.length, fpb: framesPerBar(bpm, sr) };
 }
 
 console.log('=== A. A free take held past 60 s AUTO-COMMITS at the buffer capacity ===');
@@ -37,7 +37,7 @@ for (const [sr, bpm] of [[48000, 120], [44100, 100], [48000, 137], [44100, 42]])
   ok(`A the commit came within one drain of the deadline sr=${sr}`,
     committedAt !== null && committedAt - (start + cap) / sr >= 0 && committedAt - (start + cap) / sr <= 0.03,
     `late by ${committedAt === null ? 'never' : (committedAt - (start + cap) / sr).toFixed(4)}s`);
-  ok(`A recorder released sr=${sr}`, rig.state.engineState.activeRecordIndex === -1);
+  ok(`A recorder released sr=${sr}`, rig.state.engineState.recording === null);
   ok(`A master = the largest whole-bar region that fits sr=${sr}`, master === Math.floor(cap / fpb) * fpb && master <= cap, `master=${master} cap=${cap}`);
   ok(`A no capture loss sr=${sr}`, rig.looper.captureOverruns() === 0);
   if (sr === 48000 && bpm === 120) {
@@ -52,7 +52,7 @@ console.log('=== D. No regression: below the capacity a free take keeps recordin
   const { rig } = await freeTake({ sr: 48000, bpm: 120 });
   await rig.advance(12);
   ok('D a 10 s free take did NOT auto-commit', rig.looper.trackInfo(0).state === 'RECORDING' && rig.looper.masterLengthFrames() === 0);
-  ok('D the recorder is still held', rig.state.engineState.activeRecordIndex === 0);
+  ok('D the recorder is still held', (rig.state.engineState.recording?.track ?? -1) === 0);
   ok('D no capture loss', rig.looper.captureOverruns() === 0);
 }
 {

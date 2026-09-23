@@ -38,11 +38,11 @@ for (const [label, press] of [['REC again', (r) => r.looper.recDub(1)], ['PLAY/S
   await armLater(rig, 1);
   await rig.advance(0.2); // pre-boundary frames drained and discarded
   const t = rig.tracks[1];
-  ok(`1 [${label}] still armed before the boundary`, t.armed === true && t.writeHead === 0 && es.pendingRecordStartFrame > 0);
+  ok(`1 [${label}] still armed before the boundary`, t.armed === true && t.writeHead === 0 && (es.recording?.pendingStartFrame ?? 0) > 0);
   await press(rig);
   ok(`1 [${label}] aborts to EMPTY (no dead loop)`, t.state === 'EMPTY' && t.lengthFrames === 0);
-  ok(`1 [${label}] arm countdown reset`, es.pendingRecordStartFrame === 0);
-  ok(`1 [${label}] recorder released`, es.activeRecordIndex === -1);
+  ok(`1 [${label}] arm countdown reset`, (es.recording?.pendingStartFrame ?? 0) === 0);
+  ok(`1 [${label}] recorder released`, es.recording === null);
   ok(`1 [${label}] no audio kept`, allZero(t.record, master) && t.peakCount === 0);
   ok(`1 [${label}] the master keeps playing, BPM locked`, rig.looper.masterLengthFrames() === master && rig.tracks[0].state === 'PLAYING' && rig.clock.bpmLocked());
   await rig.advance(master / rig.sr + 0.1);
@@ -102,16 +102,16 @@ console.log('=== 5. Only the recording lane releases the window; an in-flight la
 {
   const { rig, master, es } = await withMaster();
   await armLater(rig, 1);
-  const window = { start: es.captureStartFrame, end: es.captureEndFrame, pending: es.pendingRecordStartFrame };
+  const window = { start: es.recording?.startFrame ?? null, end: es.recording?.endFrame ?? null, pending: es.recording?.pendingStartFrame ?? 0 };
   rig.looper.clear(3);
   rig.looper.stop(4);
-  ok('5 another lane cannot release the recording window', es.activeRecordIndex === 1 && es.captureStartFrame === window.start &&
-    es.captureEndFrame === window.end && es.pendingRecordStartFrame === window.pending);
+  ok('5 another lane cannot release the recording window', (es.recording?.track ?? -1) === 1 && (es.recording?.startFrame ?? null) === window.start &&
+    (es.recording?.endFrame ?? null) === window.end && (es.recording?.pendingStartFrame ?? 0) === window.pending);
   rig.looper.clear(0); // the only committed lane
   ok('5 an in-flight lane preserves the master grid', rig.looper.masterLengthFrames() === master && rig.clock.bpmLocked());
   rig.looper.stop(1);
   ok('5 the owner cancellation resets the now-blank session',
-    es.activeRecordIndex === -1 && rig.looper.masterLengthFrames() === 0 && !rig.clock.bpmLocked());
+    es.recording === null && rig.looper.masterLengthFrames() === 0 && !rig.clock.bpmLocked());
 }
 
 console.log(`\n=== RESULT: ${checks - fails}/${checks} checks passed, ${fails} failed ===`);

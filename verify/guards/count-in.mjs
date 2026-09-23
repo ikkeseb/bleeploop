@@ -4,7 +4,7 @@
 //
 // What this PROVES (the analog feel is owed a by-ear check on the PC):
 //   - the press arms the take exactly one bar + the scheduling lead ahead:
-//     pendingRecordStartFrame = round((HBL + COUNT_IN_BEATS*beatPeriod)*sr)                [startRecording]
+//     recording.pendingStartFrame = round((HBL + COUNT_IN_BEATS*beatPeriod)*sr)            [startRecording]
 //   - the count is discarded frame-exactly and the take starts at frame 0 on the downbeat, however the
 //     drain batches straddle it (steady drain, ragged stalls, one batch spanning count + take) [consume]
 //   - a take shorter than one bar keeps its content from frame 0 and pads the rest of the bar
@@ -28,7 +28,7 @@ const MARKER = 0.5, TAKE = 0.7;
 async function pressWithMarker(rig) {
   rig.setInput(MARKER);
   await rig.looper.recDub(0);
-  const start = rig.state.engineState.captureStartFrame;
+  const start = rig.state.engineState.recording?.startFrame ?? null;
   rig.setInput((frame) => (frame < start ? MARKER : TAKE));
   return start;
 }
@@ -56,9 +56,9 @@ for (const sr of [48000, 44100]) {
     const es = rig.state.engineState;
     const beat = 60 / bpm;
     const expect = Math.round((HBL + COUNT_IN_BEATS * beat) * sr);
-    ok(`A looper arms pending exactly bpm=${bpm} sr=${sr}`, es.pendingRecordStartFrame === expect, `${es.pendingRecordStartFrame} vs ${expect}`);
+    ok(`A looper arms pending exactly bpm=${bpm} sr=${sr}`, (es.recording?.pendingStartFrame ?? 0) === expect, `${es.recording?.pendingStartFrame ?? 0} vs ${expect}`);
     ok(`A take starts on the counted downbeat bpm=${bpm} sr=${sr}`,
-      es.captureStartFrame === Math.round((now + HBL + COUNT_IN_BEATS * beat) * sr), `start=${es.captureStartFrame}`);
+      (es.recording?.startFrame ?? null) === Math.round((now + HBL + COUNT_IN_BEATS * beat) * sr), `start=${es.recording?.startFrame ?? null}`);
     const count = rig.draws().slice(mark)[0];
     ok(`A count "1" at now + HBL bpm=${bpm} sr=${sr}`, count && approx(count.time, now + HBL, 1e-12) && count.countLeft === 4, JSON.stringify(count));
   }
@@ -86,7 +86,7 @@ for (const [label, run] of Object.entries(regimes)) {
   const t = rig.tracks[0];
   const master = rig.looper.masterLengthFrames();
   ok(`B committed exactly 2 bars [${label}]`, master === 2 * framesPerBar(120, rig.sr), `master=${master}`);
-  ok(`B armed cleared, pending consumed [${label}]`, t.armed === false && rig.state.engineState.pendingRecordStartFrame === 0);
+  ok(`B armed cleared, pending consumed [${label}]`, t.armed === false && (rig.state.engineState.recording?.pendingStartFrame ?? 0) === 0);
   ok(`B frame 0 is the TAKE, not the count [${label}]`, approx(t.record[0], TAKE, FLT), `record[0]=${t.record[0]}`);
   ok(`B last loop frame is the take [${label}]`, approx(t.record[master - 1], TAKE, FLT));
   ok(`B no count-bar leak anywhere in the loop [${label}]`, leaks(t.record, 0, master) === -1, `leak at ${leaks(t.record, 0, master)}`);
@@ -146,13 +146,13 @@ console.log('=== D. Stop DURING the count aborts to EMPTY (no dead silent loop) 
   const t = rig.tracks[0];
   ok('D still armed before the come-in', t.armed === true && t.writeHead === 0);
   const es = rig.state.engineState;
-  ok('D the arm countdown reads the frames still to come', es.pendingRecordStartFrame === es.captureStartFrame - es.captureFrontierFrame &&
-    es.pendingRecordStartFrame > 0, `pending=${es.pendingRecordStartFrame} left=${es.captureStartFrame - es.captureFrontierFrame}`);
+  ok('D the arm countdown reads the frames still to come', (es.recording?.pendingStartFrame ?? 0) === (es.recording?.startFrame ?? null) - es.captureFrontierFrame &&
+    (es.recording?.pendingStartFrame ?? 0) > 0, `pending=${es.recording?.pendingStartFrame ?? 0} left=${(es.recording?.startFrame ?? null) - es.captureFrontierFrame}`);
   const mark = rig.draws().length;
   rig.looper.stop(0);
   ok('D aborts to EMPTY (no committed loop)', t.state === 'EMPTY' && t.lengthFrames === 0 && rig.looper.masterLengthFrames() === 0);
-  ok('D pending reset', es.pendingRecordStartFrame === 0);
-  ok('D recorder released', es.activeRecordIndex === -1);
+  ok('D pending reset', (es.recording?.pendingStartFrame ?? 0) === 0);
+  ok('D recorder released', es.recording === null);
   ok('D record buffer silent (no dead loop committed)', t.record.every((x) => x === 0));
   await rig.advance(2);
   const after = rig.draws().slice(mark);
@@ -172,7 +172,7 @@ console.log('=== E. A later-track arm abort leaves the master pulse alone ===');
   rig.looper.stop(1);
   await rig.advance(2);
   const after = rig.draws().slice(mark);
-  ok('E later abort to EMPTY', rig.tracks[1].state === 'EMPTY' && rig.state.engineState.pendingRecordStartFrame === 0);
+  ok('E later abort to EMPTY', rig.tracks[1].state === 'EMPTY' && (rig.state.engineState.recording?.pendingStartFrame ?? 0) === 0);
   ok('E master pulse still on the loop grid', after.length >= 3 && after.every((b) => approx((b.time - anchor) / beat, Math.round((b.time - anchor) / beat), 1e-6)));
 }
 

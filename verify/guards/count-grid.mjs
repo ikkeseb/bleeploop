@@ -85,8 +85,8 @@ for (const bpm of [120, 90, 200]) {
         await rig.looper.recDub(0);
         const tag = `bpm=${bpm} sr=${sr} metronome=${metronome ? 'on' : 'off'}${stall ? ' stall' : ''}`;
         const es = rig.state.engineState;
-        ok(`C ${tag} the take window opens at recordStart`, es.captureStartFrame === Math.round(a.recordStart * sr) &&
-          es.pendingRecordStartFrame === a.pending, `start=${es.captureStartFrame} pending=${es.pendingRecordStartFrame}`);
+        ok(`C ${tag} the take window opens at recordStart`, (es.recording?.startFrame ?? null) === Math.round(a.recordStart * sr) &&
+          (es.recording?.pendingStartFrame ?? 0) === a.pending, `start=${es.recording?.startFrame ?? null} pending=${es.recording?.pendingStartFrame ?? 0}`);
         if (stall) {
           // The count is already queued; the main thread then blocks across the downbeat, so one long
           // drain batch straddles the take's frame 0.

@@ -237,7 +237,7 @@ export class LooperRig {
   /** Release this generation's large buffers; its modules stay cached but inert. */
   release(): void {
     const es = this.state.engineState as unknown as Record<string, unknown>;
-    for (const key of ['tracks', 'ring', 'drainScratch', 'packetScratch', 'heartbeat', 'retakeBuf']) {
+    for (const key of ['tracks', 'ring', 'drainScratch', 'packetScratch', 'heartbeat', 'recording']) {
       es[key] = key === 'tracks' ? [] : null;
     }
     for (const ctx of FakeAudioContext.created) ctx.release();
