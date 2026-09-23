@@ -414,6 +414,23 @@ mod tests {
         report_new_rt_faults(&diag, 0, &mut reported);
         assert_eq!(reported, expected);
     }
+
+    /// The window the rendezvous closes: `create_shared_ring` has timed out but not yet dropped its
+    /// receiver when the UI callback replies. The buffer must come back to be closed, not sit in
+    /// the channel and leave with it.
+    #[test]
+    fn a_shared_ring_reply_nobody_receives_is_released() {
+        let (tx, rx) = shared_ring_channel();
+        let (released_tx, released_rx) = std::sync::mpsc::channel();
+        let ui = std::thread::spawn(move || {
+            let buffer = (7, SharedBufferHandle::detached_for_test());
+            reply_or_release(&tx, Ok(buffer), |(ptr, _)| released_tx.send(ptr).unwrap());
+        });
+        std::thread::sleep(Duration::from_millis(100)); // the UI callback replies meanwhile
+        drop(rx);
+        ui.join().unwrap();
+        assert_eq!(released_rx.try_recv().ok(), Some(7), "the late buffer was never released");
+    }
 }
 
 // ---- P9.4 drift controller (slow PI on hop-2 fill, discard-neutral PV — B2) ----------------
@@ -576,7 +593,7 @@ pub(super) fn create_shared_ring(
     );
     let json_w: Vec<u16> = json.encode_utf16().chain(std::iter::once(0)).collect();
 
-    let (tx, rx) = std::sync::mpsc::sync_channel::<LoadRing>(1);
+    let (tx, rx) = shared_ring_channel();
     let callback_live = Arc::new(AtomicBool::new(true));
     let callback_live_ui = callback_live.clone();
     let load_running_ui = load_running.clone();
@@ -629,14 +646,12 @@ pub(super) fn create_shared_ring(
                     Ok((ptr as usize, SharedBufferHandle(buf.into_raw() as usize)))
                 }
             })();
-            if let Err(std::sync::mpsc::SendError(result)) = tx.send(result) {
-                if let Ok((_, shared_buf)) = result {
-                    // The receiver timed out. The buffer was already posted, so close the native
-                    // mapping here and let the frontend reject/release it by load token.
-                    log::warn!("[plugin_host] slot {slot} late shared buffer lost its receiver; closing it on the UI thread");
-                    shared_buf.close_on_ui_thread(slot);
-                }
-            }
+            reply_or_release(&tx, result, |(_, shared_buf)| {
+                // The receiver timed out. The buffer was already posted, so close the native
+                // mapping here and let the frontend reject/release it by load token.
+                log::warn!("[plugin_host] slot {slot} late shared buffer lost its receiver; closing it on the UI thread");
+                shared_buf.close_on_ui_thread(slot);
+            });
         })
         .map_err(|e| format!("with_webview: {e}"))?;
 
@@ -651,6 +666,30 @@ pub(super) fn create_shared_ring(
 
 /// The `Ok`/`Err` payload `create_shared_ring` ships back over its channel.
 type LoadRing = Result<(usize, SharedBufferHandle), String>;
+
+/// `create_shared_ring`'s reply channel. Rendezvous (capacity 0) for the reason the load channel is
+/// (`load_ready_channel`): a send that succeeds was received, so a buffer that lands between the
+/// 5 s timeout and the channel's drop goes back to the UI callback, which `Close()`s it; a buffer
+/// slot would hold it and let it leave with the channel. The UI thread's send waits only for the
+/// caller to reach its `recv_timeout`, which it enters right after `with_webview` returns.
+fn shared_ring_channel() -> (
+    std::sync::mpsc::SyncSender<LoadRing>,
+    std::sync::mpsc::Receiver<LoadRing>,
+) {
+    std::sync::mpsc::sync_channel(0)
+}
+
+/// Hand the UI callback's result to the waiting `create_shared_ring`, or a buffer nobody receives
+/// any more to `release`.
+fn reply_or_release(
+    tx: &std::sync::mpsc::SyncSender<LoadRing>,
+    result: LoadRing,
+    release: impl FnOnce((usize, SharedBufferHandle)),
+) {
+    if let Err(std::sync::mpsc::SendError(Ok(late))) = tx.send(result) {
+        release(late);
+    }
+}
 
 /// The format-agnostic DOWNSTREAM half of an RT producer, extracted P10.1 so the CLAP and VST3
 /// producers share ONE copy of the subtle drift/resample/ring/pacing code (the only difference is

@@ -228,7 +228,4 @@ existing P9 ring → looper record tap (lag-tolerant, records wet "for free").
   reaction (slider snaps back to the plugin's value, a stuck-note cue) is unbuilt.
 - CLAP and VST3 duplicate the load choreography (`load`/`vst3_load` and both owner mains): one
   shared owner would keep B1/B11 from returning. Not built.
-- [reader] `create_shared_ring`'s reply channel still has capacity 1: a buffer that lands between
-  the owner's 5 s timeout and the channel's drop is dropped without `Close()`. The load channel
-  went rendezvous for the same race.
 
