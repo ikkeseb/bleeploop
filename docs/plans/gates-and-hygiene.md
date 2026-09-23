@@ -36,5 +36,6 @@ built.
 
 ## Small fixes, any time
 
-- Diagnose the intermittent that keeps `verify/probes/record-stop-window.mjs` out of CI (its `@no-ci`
-  line has the numbers), then drop the `@no-ci`.
+- `verify/probes/record-stop-window.mjs` stays out of CI (its `@no-ci` line has the numbers). Its main
+  cause, stale `currentFrame` stamps, landed in a8738fa. Rerun it until the remaining miss recurs, read
+  `firstMisses` in its log, fix, then drop the `@no-ci`.

@@ -4,15 +4,17 @@
  * models native wet arrival using production's own frozen compensation (C). A manual first-take stop
  * keeps its existing press/pad rule; a later stop chooses completed whole bars and tiles that window
  * across the master. `--first-only` restricts the run to first-take cases.
- * Run: pnpm probe record-stop-window [--first-only] [--url=<server>] (about 165 s for the full matrix)
+ * Run: pnpm probe record-stop-window [--first-only] [--churn=<nodes>] [--url=<server>] (about 165 s for
+ * the full matrix). `--churn=60` makes Chromium hand quanta a stale currentFrame (capture-processor.ts).
  * No native driver or physical latency is measured here.
  *
- * @no-ci intermittent: the 60 s capacity case misses one 128-frame quantum in ~1 of 3 full runs on the PC, never when it runs alone (0 of 8); cause unknown
+ * @no-ci intermittent: since the stale-currentFrame fix (a8738fa), 1 of 8 full runs on the PC missed one 128-frame quantum (AUTO recDub; before it, ~1 of 3 in the 60 s capacity case); cause unknown; the next red run's firstMisses locates it
  */
-import { probe, flag } from '../harness/probe.ts';
+import { probe, flag, arg } from '../harness/probe.ts';
 import assert from 'node:assert/strict';
 
 const firstOnly = flag('first-only');
+const churn = Number(arg('churn') ?? 0);
 
 await probe(async ({ open }) => {
   const { page } = await open();
@@ -28,7 +30,14 @@ await probe(async ({ open }) => {
   cases.push(...['wholeBar', 'earlyBar'].map((mode) => ({ take: 'fixed', mode, trim: 150 })));
   cases.push({ take: 'first', mode: 'capacity', trim: 150 });
   for (const testCase of cases.filter(({ take }) => !firstOnly || take === 'first')) {
-    const result = await page.evaluate(async ({ take, mode, trim }) => {
+    const result = await page.evaluate(async ({ take, mode, trim, churn }) => {
+      // --churn: connect and drop graph nodes every 5 ms so the main thread holds the graph lock and
+      // Chromium hands quanta a stale currentFrame (capture-processor.ts).
+      const churnTimer = churn && setInterval(() => {
+        const nodes = Array.from({ length: churn }, () => window.__lf.engine.ctx.createGain());
+        for (const node of nodes) node.connect(window.__lf.engine.ctx.destination);
+        for (const node of nodes) node.disconnect();
+      }, 5);
       const lf = window.__lf;
       await lf.looper.init();
       const { engineState } = await import('/src/audio/looper/state.ts');
@@ -73,10 +82,13 @@ await probe(async ({ open }) => {
       };
       const url = URL.createObjectURL(new Blob([`
         class Frames extends AudioWorkletProcessor {
+          next = -1; // Chromium can repeat a quantum's currentFrame (capture-processor.ts); a real input never repeats
           process(_inputs, outputs) {
             const out = outputs[0][0];
+            const base = Math.max(currentFrame, this.next);
+            this.next = base + out.length;
             for (let k = 0; k < out.length; k++) {
-              const frame = currentFrame + k;
+              const frame = base + k;
               out[k] = frame < ${onset} ? 0 :
                 ${auto} && frame < ${onset + 128} ? (frame - ${onset} + 1) / 65536 : frame - ${compensation} + 1;
             }
@@ -134,12 +146,14 @@ await probe(async ({ open }) => {
       const loopFrames = sr * (mode === 'capacity' ? 60 : take === 'later' ? 4 : 2);
       const expectedFrames = mode === 'capacity' ? loopFrames : take === 'later' ? (mode === 'afterLoop' ? loopFrames : sr * 2) : ['wholeBar', 'earlyBar', 'automatic'].includes(mode) ? sr * 2 : Math.min(sr * 2, stopFrame - musicalStart);
       let missing = 0, extra = 0;
+      const firstMisses = []; // [k, got, want, absolute frame]: enough to tell a shifted window from one bad quantum
       if (pcm) {
         for (let k = 0; k < pcm.length; k++) {
           const expected = take === 'later'
             ? expectedSample(captureStart + k % expectedFrames)
             : k < expectedFrames ? expectedSample(captureStart + k) : 0;
           if (pcm[k] !== expected) {
+            if (firstMisses.length < 3) firstMisses.push([k, pcm[k], expected, captureStart + k]);
             if (k < expectedFrames || take === 'later') missing++;
             else extra++;
           }
@@ -164,10 +178,11 @@ await probe(async ({ open }) => {
       const result = { take, mode, trim, sr, compensation, expectedFrames, loopFrames, stateAtStop, finalState,
         frames: pcm?.length ?? 0, missing, extra, activeAfter, canRecordNext, frameDeadline, automaticEnd, playbackPhase, playbackOffset, masterAfter, stopIntentAfter, windowAfter, softOnsetRetained, canRetryPlayback,
         head: pcm ? Array.from(pcm.subarray(0, 4)) : [], expectedHead: musicalStart + 1,
-        overruns: lf.looper.captureOverruns() - overrunsBefore };
+        overruns: lf.looper.captureOverruns() - overrunsBefore, firstMisses };
+      clearInterval(churnTimer);
       source.disconnect(); lf.looper.clearAll(); lf.recordLatency.clearMonitor(0); lf.recordLatency.setOffsetMs(0);
       return result;
-    }, testCase);
+    }, { ...testCase, churn });
     console.log(JSON.stringify(result));
     results.push(result);
   }
