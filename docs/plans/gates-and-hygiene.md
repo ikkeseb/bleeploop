@@ -26,9 +26,3 @@ from the grid, in frames and ms per buffer size. The cable plays exactly when th
 it measures the alignment half of Stops 1 and 3; feel stays with the ear. Unknown: whether the WebView
 output and the ASIO input can share the interface on the rig. Default if the owner says nothing: not
 built.
-
-## Small fixes, any time
-
-- `verify/probes/record-stop-window.mjs` stays out of CI (its `@no-ci` line has the numbers). Its main
-  cause, stale `currentFrame` stamps, landed in a8738fa. Rerun it until the remaining miss recurs, read
-  `firstMisses` in its log, fix, then drop the `@no-ci`.

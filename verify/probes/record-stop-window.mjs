@@ -7,8 +7,6 @@
  * Run: pnpm probe record-stop-window [--first-only] [--churn=<nodes>] [--url=<server>] (about 165 s for
  * the full matrix). `--churn=60` makes Chromium hand quanta a stale currentFrame (capture-processor.ts).
  * No native driver or physical latency is measured here.
- *
- * @no-ci intermittent: since the stale-currentFrame fix (a8738fa), 1 of 8 full runs on the PC missed one 128-frame quantum (AUTO recDub; before it, ~1 of 3 in the 60 s capacity case); cause unknown; the next red run's firstMisses locates it
  */
 import { probe, flag, arg } from '../harness/probe.ts';
 import assert from 'node:assert/strict';
@@ -69,9 +67,6 @@ await probe(async ({ open }) => {
       lf.recordLatency.setOffsetMs(trim);
       lf.recordLatency.beginMonitorGeneration(0, 0);
       const compensation = lf.recordLatency.recordCompensationFrames();
-      const onset = auto ? Math.ceil((ctx.currentTime + 0.15) * sr) : 0;
-      const expectedSample = (frame) => frame < onset ? 0 :
-        auto && frame < onset + 128 ? Math.fround((frame - onset + 1) / 65536) : frame - compensation + 1;
       const starts = [];
       const createSource = ctx.createBufferSource;
       ctx.createBufferSource = function () {
@@ -83,14 +78,23 @@ await probe(async ({ open }) => {
       const url = URL.createObjectURL(new Blob([`
         class Frames extends AudioWorkletProcessor {
           next = -1; // Chromium can repeat a quantum's currentFrame (capture-processor.ts); a real input never repeats
+          onset = ${auto ? 'Infinity' : 0}; // AUTO stays silent until the probe asks for its soft onset
+          constructor() {
+            super();
+            // Asked only after the arm, which drops whatever the ring holds (drainStaleFrames): the onset
+            // lands 150 ms after the next quantum, so the listening detector hears it however late the
+            // main thread ran.
+            this.port.onmessage = () => this.port.postMessage(this.onset = this.next + ${Math.ceil(0.15 * sr)});
+          }
           process(_inputs, outputs) {
             const out = outputs[0][0];
             const base = Math.max(currentFrame, this.next);
+            if (this.next < 0) this.port.postMessage(base); // the first quantum: the source renders
             this.next = base + out.length;
             for (let k = 0; k < out.length; k++) {
               const frame = base + k;
-              out[k] = frame < ${onset} ? 0 :
-                ${auto} && frame < ${onset + 128} ? (frame - ${onset} + 1) / 65536 : frame - ${compensation} + 1;
+              out[k] = frame < this.onset ? 0 :
+                ${auto} && frame < this.onset + 128 ? (frame - this.onset + 1) / 65536 : frame - ${compensation} + 1;
             }
             return true;
           }
@@ -99,8 +103,18 @@ await probe(async ({ open }) => {
       `], { type: 'text/javascript' }));
       await ctx.audioWorklet.addModule(url); URL.revokeObjectURL(url);
       const source = new AudioWorkletNode(ctx, `record-stop-${take}-${mode}-${trim}`, { numberOfInputs: 0, outputChannelCount: [1] });
+      const answer = (message) => new Promise((resolve, reject) => {
+        source.port.onmessage = (event) => resolve(event.data);
+        if (message) source.port.postMessage(message);
+        setTimeout(() => reject(new Error('The frame-coded source did not answer')), 5000);
+      });
+      const rendering = answer();
       source.connect(lf.engine.recordTap); // Silent branch only; frame values never reach the speakers.
+      await rendering; // the press waits until the source renders
       await lf.looper.recDub(index);
+      const onset = auto ? await answer('onset') : 0;
+      const expectedSample = (frame) => frame < onset ? 0 :
+        auto && frame < onset + 128 ? Math.fround((frame - onset + 1) / 65536) : frame - compensation + 1;
       if (auto) {
         const timeout = performance.now() + 5000;
         while (lf.looper.trackInfo(index).autoArmed) {
@@ -139,6 +153,11 @@ await probe(async ({ open }) => {
         else lf.looper.playStop(index);
       }
       await until(mode === 'automatic' || mode === 'capacity' ? automaticEnd / sr + 0.12 : Math.max(stopFrame / sr + compensation / sr, (frameDeadline ?? 0) / sr) + 0.12);
+      // The drain commits on a main-thread timer, which a stalled main thread (--churn) can hold past
+      // the window end; wait for it, with the injected failures still in place.
+      const waitFrom = performance.now();
+      while (engineState.recording && performance.now() < waitFrom + 2000) await pause(5);
+      const releaseWaitMs = Math.round(performance.now() - waitFrom); // logged: a slow release stays visible
       ctx.createBuffer = createBuffer;
       ctx.createBufferSource = createSource;
       const finalState = lf.looper.stateOf(index);
@@ -178,7 +197,7 @@ await probe(async ({ open }) => {
       const result = { take, mode, trim, sr, compensation, expectedFrames, loopFrames, stateAtStop, finalState,
         frames: pcm?.length ?? 0, missing, extra, activeAfter, canRecordNext, frameDeadline, automaticEnd, playbackPhase, playbackOffset, masterAfter, stopIntentAfter, windowAfter, softOnsetRetained, canRetryPlayback,
         head: pcm ? Array.from(pcm.subarray(0, 4)) : [], expectedHead: musicalStart + 1,
-        overruns: lf.looper.captureOverruns() - overrunsBefore, firstMisses };
+        overruns: lf.looper.captureOverruns() - overrunsBefore, firstMisses, releaseWaitMs };
       clearInterval(churnTimer);
       source.disconnect(); lf.looper.clearAll(); lf.recordLatency.clearMonitor(0); lf.recordLatency.setOffsetMs(0);
       return result;
