@@ -160,6 +160,13 @@ export class LooperRig {
     await flushMicrotasks();
   }
 
+  /** Render up to the next capture drain tick and let it run: the ring is empty right after. */
+  async untilDrained(): Promise<void> {
+    const due = timers.nextDue(/buildEngine/);
+    if (!Number.isFinite(due)) throw new Error('untilDrained: no capture drain timer (looper not initialised?)');
+    await this.advanceTo(due / 1000);
+  }
+
   /** A main-thread stall of `seconds`: audio renders, no timer fires, then every overdue timer fires once. */
   async stall(seconds: number): Promise<void> {
     await this.advance(seconds, { timers: false });

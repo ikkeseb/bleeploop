@@ -45,6 +45,13 @@ export class VirtualTimers {
     return n;
   }
 
+  /** The earliest due time (ms) among pending timers registered from `origin`, or Infinity. */
+  nextDue(origin?: RegExp): number {
+    let due = Infinity;
+    for (const t of this.live.values()) if (!origin || origin.test(t.origin)) due = Math.min(due, t.due);
+    return due;
+  }
+
   add(fn: () => void, ms: number | undefined, interval: boolean): number {
     const delay = Math.max(0, Number(ms) || 0);
     const id = this.nextId++;

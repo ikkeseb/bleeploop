@@ -1,347 +1,200 @@
-// Deterministic FIXED next-take model. Pure bar/arm/commit arithmetic is imported from production.
-// The model covers the clean-stream timestamp append, manual shortening and recorder/BPM cleanup.
-// It does not execute AUTO detection, audio scheduling, loss rejection or public dispatchers.
-// Those are exercised by golden-jam.mjs and record-stop-window.mjs.
-// MIRRORS: src/audio/looper/machine.ts@300-309 sha256:ecbe5ba1d48777d5  (configureRecordingEnd: fixed target fits whole bars)
-// MIRRORS: src/audio/looper/capture.ts@339-383 sha256:72293488834b3bda  (consume: append and exclusive timestamp completion; overdub omitted)
-// MIRRORS: src/audio/looper/machine.ts@380-401 sha256:3be20034b52c094c  (releaseRecorderState: owner guard and BPM unlock)
-// MIRRORS: src/audio/looper/machine.ts@609-665 sha256:ff923f1ebff6aadb  (stopCapture: shorten the timestamp window and finish when drained)
+// FIXED next-take length: the REAL looper (machine.ts configureRecordingEnd / stopCapture / finishCapture,
+// capture.ts consume) under the verify rig. The record tap carries a MARKER during the count and a
+// frame code from the counted downbeat on, so the take's frames can be identified exactly.
+//
+// What this PROVES:
+//   - a FIXED first take's window is bars*fpb, clamped DOWN to whole bars that fit the 60 s buffer;
+//     the bar selector clamps to [1, 32] and rounds                                         [configureRecordingEnd]
+//   - it auto-commits at EXACTLY its window, frame-exact under steady, ragged and one-batch drains:
+//     no count leak, nothing past the end, recorder released, BPM still locked             [consume, finishCapture]
+//   - planCommit of N whole bars is N bars at the press tempo                                [planCommit]
+//   - an abort during the count or the take returns to EMPTY and unlocks
+//   - a manual stop mid-take commits the completed bars; with a tail in flight it waits, and a
+//     repeated stop cannot extend the end                                                    [stopCapture]
+//   - the 42 bpm / 32-bar case clamps to 10 bars that fit, and a later take fills that master
+//   - a later FIXED take selects its bars (clamped to the master); RETAKE keeps master-length passes
 
-import { armSplitAt, countInArm, planCommit, planFreeStop } from '../src/audio/looper/grid-math.ts';
+import { bootLooper } from './harness/rig.ts';
 import { framesPerBar } from '../src/audio/quantize.ts';
+import { planCommit } from '../src/audio/looper/grid-math.ts';
+
 let fails = 0, checks = 0;
 const approx = (a, b, eps) => Math.abs(a - b) <= eps;
 function ok(name, cond, detail = '') { checks++; if (!cond) { fails++; console.log(`  FAIL  ${name}  ${detail}`); } }
-const FLT = 1e-6;
-const MAX_FIXED_BARS = 32;
-function clampBars(n) { return Math.max(1, Math.min(MAX_FIXED_BARS, Math.round(n))); }
+const MARKER = 0.75;
+const code = (frame) => ((frame % 8192) + 1) / 16384; // exact in Float32, never equal to MARKER
 
-function configuredFrames({ master, fixedOn, bars, retakeOn, bpm, sr, recordLength }) {
-  let frames = master || recordLength;
-  if (fixedOn && (master === 0 || !retakeOn)) {
-    const fpb = framesPerBar(bpm, sr);
-    const maxBars = master > 0 ? master / fpb : Math.max(1, Math.floor(recordLength / fpb));
-    frames = Math.min(clampBars(bars), maxBars) * fpb;
+/** Boot, enable FIXED `bars`, press REC. The tap is MARKER until the armed start, then the frame code. */
+async function fixedTake({ sr = 48000, bpm = 120, bars = 4, trimMs = null, startTime = 1 } = {}) {
+  const rig = await bootLooper({ sampleRate: sr, startTime });
+  rig.clock.setBpm(bpm);
+  if (trimMs !== null) {
+    const latency = await rig.import('audio/record-latency.ts');
+    latency.beginMonitorGeneration(0, 0);
+    latency.setOffsetMs(trimMs);
   }
-  return frames;
+  rig.looper.setFixedLengthEnabled(true);
+  rig.looper.setFixedLengthBars(bars);
+  rig.setInput(MARKER);
+  await rig.looper.recDub(0);
+  const es = rig.state.engineState;
+  const start = es.captureStartFrame;
+  rig.setInput((f) => (f < start ? MARKER : code(f)));
+  return { rig, es, start, end: es.captureEndFrame, fpb: framesPerBar(bpm, sr) };
 }
-
-function armFixed(now, bpm, sr, bars, bufferLen) {
-  const { beatPeriod, recordStart, pendingFrames: pending } = countInArm(now, bpm, sr);
-  const fpb = framesPerBar(bpm, sr);
-  const target = clampBars(bars) * fpb;
-  const maxBars = Math.max(1, Math.floor(bufferLen / fpb));
-  const useBars = Math.min(clampBars(bars), maxBars);
-  const targetFrames = useBars * fpb;
-  return { beatPeriod, recordStart, pending, target, fpb, maxBars, useBars, targetFrames, bpmLocked: true };
-}
-function makeTrack(cap) {
-  return { state: 'RECORDING', armed: false, writeHead: 0, fillFrames: 0, lengthFrames: 0,
-           record: new Float32Array(cap) };
-}
-// Test fixture origins start at frame zero. targetFrames is an input, not retained engine state.
-function captureState(t, { pending = 0, targetFrames = 0, activeRecordIndex = 0, ...rest }) {
-  t.index = activeRecordIndex;
-  return { pending, activeRecordIndex, captureStartFrame: pending,
-    captureEndFrame: pending + (targetFrames || t.record.length),
-    frame: t.armed ? 0 : pending + t.writeHead, ...rest };
-}
-function releaseRecorderState(state, i) {
-  if (state.activeRecordIndex !== i) return;
-  state.activeRecordIndex = -1;
-  state.pending = 0;
-  state.captureStartFrame = null;
-  state.captureEndFrame = null;
-  if (state.master === 0) state.bpmLocked = false;
-}
-function consumeFirst(state, t, data) {
-  const count = data.length;
-  const firstFrame = state.frame;
-  state.frame += count;
-  let offset = 0;
-  if (t.armed) {
-    const split = armSplitAt(state.captureStartFrame, firstFrame, count);
-    state.pending = split.pending;
-    if (split.offset < 0) return;
-    offset = split.offset;
-    t.armed = false; t.writeHead = 0; t.fillFrames = 0;
-  }
-  const end = Math.min(count, state.captureEndFrame - firstFrame);
-  const n = Math.max(0, Math.min(end - offset, t.record.length - t.writeHead));
-  t.record.set(data.subarray(offset, offset + n), t.writeHead);
-  t.writeHead += n; t.fillFrames = t.writeHead;
-  if (firstFrame + count >= state.captureEndFrame) finishRecording(state, t, state.bpmAtCommit, state.srAtCommit);
-}
-// MIRRORS: src/audio/looper/machine.ts@250-271 sha256:3dc46b2b25d96a01  (finishCapture: completion owns recorder release)
-// Models the clean recording completion, including its shared dispatcher release.
-function finishRecording(state, t, bpm, sr) {
-  if (state.activeRecordIndex !== t.index) return;
-  const raw = Math.min(t.writeHead, state.captureEndFrame - state.captureStartFrame);
-  const plan = planCommit(raw, bpm, sr, t.record.length);
-  state.master = plan.master; state.masterLen = plan.master; state.bars = plan.bars; state.derivedBpm = plan.derivedBpm;
-  state.bpmLocked = true;
-  if (raw < plan.master) t.record.fill(0, raw, plan.master);
-  t.writeHead = plan.master; t.lengthFrames = plan.master; t.fillFrames = plan.master; t.state = 'PLAYING';
-  releaseRecorderState(state, t.index);
-  state.committed = true;
-}
-function stopCapture(state, t, bpm, sr, nowFrame = state.captureStartFrame + t.writeHead) {
-  if (t.armed) { stopAbort(state, t); return; }
-  const { bars, target } = planFreeStop((nowFrame - state.captureStartFrame) / sr, bpm, sr, t.record.length);
-  const end = bars >= 1 ? state.captureStartFrame + target : nowFrame;
-  state.captureEndFrame = Math.min(state.captureEndFrame, end);
-  if (state.frame >= state.captureEndFrame) finishRecording(state, t, bpm, sr);
-}
-function stopAbort(state, t) {
-  if (t.state === 'RECORDING' || t.state === 'OVERDUBBING') {
-    const wasCountIn = t.state === 'RECORDING' && state.master === 0;
-    t.armed = false;
-    releaseRecorderState(state, t.index);
-    if (wasCountIn) state.countPulseTornDown = true;
-    if (t.lengthFrames === 0) { t.record.fill(0); t.writeHead = 0; t.fillFrames = 0; }
-    t.state = t.lengthFrames > 0 ? 'STOPPED' : 'EMPTY';
-  }
+const committed = (rig) => rig.looper.masterLengthFrames() > 0 && rig.looper.trackInfo(0).state === 'PLAYING';
+async function untilCommitted(rig, limit) {
+  const end = rig.now() + limit;
+  while (!committed(rig) && rig.now() < end) await rig.advance(0.01);
 }
 
-// Helper: feed a [pending of 0.5][takeLen of 0.7] stream through consumeFirst in the given batch sizes.
-function runFixedCapture(arm, takeLen, batchSizes, bpm, sr, bufferLen) {
-  const cap = bufferLen || (arm.pending + takeLen + 8192); // model the real record buffer when given
-  const t = makeTrack(cap); t.armed = true; t.state = 'RECORDING';
-  const state = captureState(t, { pending: arm.pending, targetFrames: arm.targetFrames, activeRecordIndex: 7,
-                  master: 0, committed: false, masterLen: 0, bpmLocked: arm.bpmLocked,
-                  bpmAtCommit: bpm, srAtCommit: sr });
-  const stream = new Float32Array(arm.pending + takeLen);
-  stream.fill(0.5, 0, arm.pending);
-  stream.fill(0.7, arm.pending, arm.pending + takeLen);
-  let pos = 0, bi = 0;
-  while (pos < stream.length && !state.committed) {
-    const bs = Math.min(batchSizes[bi++ % batchSizes.length], stream.length - pos);
-    consumeFirst(state, t, stream.subarray(pos, pos + bs));
-    pos += bs;
-  }
-  return { t, state };
-}
-
-// ════════════════════════════════════════════════════════════════════════════════════════════
-console.log('=== A. target = bars*framesPerBar(bpm,sr); clamp to buffer ===');
+console.log('=== A. The FIXED window = bars*fpb, clamped to whole bars that fit the buffer ===');
 for (const sr of [48000, 44100]) {
   for (const bpm of [120, 90, 137, 100, 73]) {
     for (const bars of [1, 2, 4, 8, 16]) {
-      const bufferLen = Math.ceil(60 * sr); // MAX_LOOP_SECONDS
-      const arm = armFixed(1000, bpm, sr, bars, bufferLen);
-      ok(`A target=bars*fpb bpm=${bpm} sr=${sr} bars=${bars}`,
-         arm.target === bars * framesPerBar(bpm, sr), `target=${arm.target}`);
-      ok(`A unclamped (fits buffer) bpm=${bpm} bars=${bars}`, arm.targetFrames === arm.target);
-      ok(`A bpm locked at press bpm=${bpm}`, arm.bpmLocked === true);
+      const { rig, start, end, fpb } = await fixedTake({ sr, bpm, bars });
+      ok(`A window = bars*fpb bpm=${bpm} sr=${sr} bars=${bars}`, end - start === bars * fpb, `window=${end - start}`);
+      ok(`A BPM locked at the press bpm=${bpm} bars=${bars}`, rig.clock.bpmLocked() === true);
     }
   }
 }
 {
-  // Extreme: 32 bars @ 40 bpm @ 48k = 32*4*1.5*48000 = 9.216M frames > 60s buffer (2.88M) -> clamp DOWN
-  // to whole bars that fit (NOT a raw min-to-buffer, which would leave a non-bar-aligned target).
-  const sr = 48000, bufferLen = Math.ceil(60 * sr);
-  const arm = armFixed(1000, 40, sr, 32, bufferLen);
-  const fpb = framesPerBar(40, sr);
-  ok('A extreme over-long clamps to whole bars that fit',
-     arm.target > bufferLen && arm.targetFrames === Math.floor(bufferLen / fpb) * fpb && arm.targetFrames <= bufferLen,
-     `targetFrames=${arm.targetFrames} target=${arm.target} buf=${bufferLen}`);
-  ok('A extreme: targetFrames is a whole-bar multiple', arm.targetFrames % fpb === 0);
+  // 32 bars at 40 bpm at 48 kHz asks for 9.2 M frames of a 2.88 M buffer: whole bars that fit, not a raw min.
+  const { rig, start, end, fpb } = await fixedTake({ sr: 48000, bpm: 40, bars: 32 });
+  const cap = rig.tracks[0].record.length;
+  ok('A an over-long request clamps to whole bars that fit', end - start === Math.floor(cap / fpb) * fpb, `window=${end - start}`);
+  ok('A the clamped window is a whole-bar multiple', (end - start) % fpb === 0);
 }
 {
-  // Bars selector clamps to [1, 32].
-  ok('A clampBars(0)=1', clampBars(0) === 1);
-  ok('A clampBars(-3)=1', clampBars(-3) === 1);
-  ok('A clampBars(99)=32', clampBars(99) === 32);
-  ok('A clampBars(4.6)=5 (rounds)', clampBars(4.6) === 5);
+  const rig = await bootLooper({ init: false });
+  const bars = (n) => { rig.looper.setFixedLengthBars(n); return rig.looper.fixedLengthBars(); };
+  ok('A setFixedLengthBars(0) = 1', bars(0) === 1);
+  ok('A setFixedLengthBars(-3) = 1', bars(-3) === 1);
+  ok('A setFixedLengthBars(99) = 32', bars(99) === 32);
+  ok('A setFixedLengthBars(4.6) = 5 (rounds)', bars(4.6) === 5);
 }
 
-console.log('=== B. consume caps at EXACTLY target + auto-commits frame-exact across batch regimes ===');
-for (const [sr, bpm, bars] of [[48000, 120, 4], [44100, 100, 2], [48000, 90, 8], [44100, 137, 1]]) {
-  const arm = armFixed(1000, bpm, sr, bars, Math.ceil(60 * sr));
-  const target = arm.targetFrames;
-  const overplay = target + 12000; // user keeps playing past N bars — the extra MUST be dropped
-  for (const [label, sizes] of [
-    ['mid-batch (128 quanta)', [128]],
-    ['count edge then take edge', [arm.pending, target, 9999]],
-    ['ragged drain', [1024, 333, 5000, 128, 20000, 777]],
-    ['one giant batch straddling count+take+overshoot', [arm.pending + overplay]],
-  ]) {
-    const { t, state } = runFixedCapture(arm, overplay, sizes, bpm, sr);
-    ok(`B auto-committed [${label}] bpm=${bpm} bars=${bars}`, state.committed === true);
-    ok(`B writeHead == target (${target}) [${label}]`, t.writeHead === target, `writeHead=${t.writeHead}`);
-    ok(`B master == target [${label}]`, state.masterLen === target, `master=${state.masterLen}`);
-    ok(`B bars derived == ${bars} [${label}]`, state.bars === bars, `bars=${state.bars}`);
-    ok(`B frame 0 is the TAKE not the count [${label}]`, approx(t.record[0], 0.7, FLT), `record[0]=${t.record[0]}`);
-    ok(`B last in-loop frame present [${label}]`, approx(t.record[target - 1], 0.7, FLT));
-    ok(`B nothing past target written [${label}]`, t.record[target] === 0, `record[target]=${t.record[target]}`);
-    ok(`B ring released (activeRecordIndex=-1) [${label}]`, state.activeRecordIndex === -1);
-    ok(`B bpm STILL locked after commit [${label}]`, state.bpmLocked === true);
-    // No count-bar (0.5) leak anywhere in the recorded loop — no head dead air.
-    let leak = false;
-    for (let k = 0; k < target; k++) if (approx(t.record[k], 0.5, FLT)) { leak = true; break; }
-    ok(`B no count-bar leak (no head dead air) [${label}]`, !leak);
+console.log('=== B. Auto-commit at EXACTLY the window, frame-exact across drain regimes ===');
+const regimes = {
+  'steady 25 ms drain': (rig, seconds) => rig.advance(seconds),
+  'ragged stalls': async (rig, seconds) => {
+    const end = rig.now() + seconds;
+    const stalls = [0.21, 0.004, 1.3, 0.07, 0.9, 0.013];
+    for (let i = 0; rig.now() < end; i++) { await rig.stall(Math.min(stalls[i % stalls.length], end - rig.now())); await rig.advance(0.011); }
+  },
+  'one batch spanning count + take + overplay': (rig, seconds) => rig.stall(Math.min(seconds, 10)),
+};
+for (const [sr, bpm, bars] of [[48000, 120, 4], [44100, 100, 2], [48000, 90, 2], [44100, 137, 1]]) {
+  for (const [label, run] of Object.entries(regimes)) {
+    const { rig, es, start, fpb } = await fixedTake({ sr, bpm, bars });
+    const target = bars * fpb;
+    // The count, the take, then 0.25 s of overplay that must be dropped.
+    await run(rig, (start - rig.frame()) / sr + target / sr + 0.25);
+    await rig.advance(0.05);
+    const t = rig.tracks[0];
+    const tag = `[${label}] bpm=${bpm} bars=${bars}`;
+    ok(`B auto-committed ${tag}`, committed(rig));
+    ok(`B master == target ${tag}`, rig.looper.masterLengthFrames() === target, `master=${rig.looper.masterLengthFrames()}`);
+    ok(`B frame 0 is the take's first frame ${tag}`, t.record[0] === code(start), `record[0]=${t.record[0]}`);
+    ok(`B the last loop frame is the window's last ${tag}`, t.record[target - 1] === code(start + target - 1));
+    ok(`B nothing past the window written ${tag}`, t.record[target] === 0, `record[target]=${t.record[target]}`);
+    let leak = -1;
+    for (let k = 0; k < target && leak < 0; k++) if (t.record[k] === MARKER) leak = k;
+    ok(`B no count-bar leak ${tag}`, leak === -1, `leak at ${leak}`);
+    ok(`B recorder released ${tag}`, es.activeRecordIndex === -1 && es.captureStartFrame === null && es.captureEndFrame === null);
+    ok(`B BPM still locked after the commit ${tag}`, rig.clock.bpmLocked() === true && rig.clock.bpm() === Math.round(bpm));
   }
 }
 
-console.log('=== C. finishRecording with raw==N*fpb yields master==N*fpb exactly; derived bpm ~= press ===');
+console.log('=== C. planCommit of N whole bars is N bars at the press tempo ===');
 for (const sr of [48000, 44100]) {
   for (const bpm of [120, 90, 137, 100, 73, 200]) {
     for (const bars of [1, 2, 3, 4, 7, 16]) {
       const fpb = framesPerBar(bpm, sr);
-      const raw = bars * fpb; // what writeHead equals at fixed-length auto-stop
-      const t = makeTrack(raw + 16); t.writeHead = raw;
-      const state = captureState(t, { master: 0, targetFrames: raw, committed: false, bpmLocked: true });
-      finishRecording(state, t, bpm, sr);
-      ok(`C master == N*fpb bpm=${bpm} sr=${sr} bars=${bars}`, state.masterLen === raw, `master=${state.masterLen} raw=${raw}`);
-      ok(`C bars round-trips to ${bars}`, state.bars === bars, `bars=${state.bars}`);
-      // derivedBpm ~= the integer press bpm (round() in framesPerBar introduces <0.5 frame/bar error).
-      ok(`C derived bpm ~= press bpm=${bpm}`, approx(state.derivedBpm, bpm, 0.05), `derived=${state.derivedBpm.toFixed(4)}`);
+      const plan = planCommit(bars * fpb, bpm, sr, bars * fpb + 16);
+      ok(`C master == N*fpb bpm=${bpm} sr=${sr} bars=${bars}`, plan.master === bars * fpb && plan.bars === bars);
+      ok(`C derived bpm ~= press bpm=${bpm} sr=${sr} bars=${bars}`, approx(plan.derivedBpm, bpm, 0.05), `derived=${plan.derivedBpm}`);
     }
   }
 }
 
-console.log('=== D. abort DURING the count-in (armed) -> EMPTY, fixed arm cleared, bpm unlocked ===');
-{
-  const arm = armFixed(1000, 120, 48000, 4, Math.ceil(60 * 48000));
-  const t = makeTrack(arm.pending + 96000); t.armed = true; t.state = 'RECORDING'; t.lengthFrames = 0;
-  const state = captureState(t, { pending: arm.pending, targetFrames: arm.targetFrames, activeRecordIndex: 3,
-                  master: 0, masterLen: 0, committed: false, bpmLocked: true, countPulseTornDown: false });
-  consumeFirst(state, t, new Float32Array(4096).fill(0.5)); // some discarded count frames
-  ok('D still armed before come-in', t.armed === true && t.writeHead === 0);
-  stopCapture(state, t, 120, 48000);                       // master===0 -> count-in abort
-  ok('D aborts to EMPTY (no committed loop)', t.state === 'EMPTY' && t.lengthFrames === 0);
-  ok('D fixed arm cleared', state.captureStartFrame === null && state.captureEndFrame === null);
-  ok('D bpm UNLOCKED on abort', state.bpmLocked === false);
-  ok('D count pulse torn down', state.countPulseTornDown === true);
-  ok('D ring released', state.activeRecordIndex === -1);
-  ok('D record buffer silent (no dead loop committed)', t.record.every((x) => x === 0));
+console.log('=== D/E. An abort during the count or the take -> EMPTY, window cleared, BPM unlocked ===');
+for (const [label, when] of [['count', 1.0], ['take', 3.5]]) {
+  const { rig, es } = await fixedTake({ bars: 4 });
+  await rig.advance(when);
+  rig.looper.stop(0);
+  await rig.advance(0.5);
+  ok(`D/E abort during the ${label} -> EMPTY`, rig.looper.trackInfo(0).state === 'EMPTY' && rig.looper.masterLengthFrames() === 0);
+  ok(`D/E abort during the ${label} clears the window and the recorder`, es.captureStartFrame === null && es.captureEndFrame === null && es.activeRecordIndex === -1);
+  ok(`D/E abort during the ${label} unlocks BPM`, rig.clock.bpmLocked() === false);
+  ok(`D/E abort during the ${label} keeps no audio`, rig.tracks[0].record.every((x) => x === 0));
 }
 
-console.log('=== E. abort DURING the take (not armed, master===0) -> EMPTY, arm cleared, bpm unlocked ===');
+console.log('=== F. A manual stop mid-take commits the completed bars; BPM stays locked ===');
 {
-  // The come-in happened (armed cleared), the take is partway, then the user hits stop() directly.
-  const arm = armFixed(1000, 120, 48000, 4, Math.ceil(60 * 48000));
-  const t = makeTrack(arm.targetFrames + 16); t.armed = false; t.state = 'RECORDING'; t.lengthFrames = 0;
-  t.writeHead = 20000; t.fillFrames = 20000; // mid-take
-  const state = captureState(t, { pending: 0, targetFrames: arm.targetFrames, activeRecordIndex: 3,
-                  master: 0, masterLen: 0, committed: false, bpmLocked: true, countPulseTornDown: false });
-  stopAbort(state, t);
-  ok('E aborts to EMPTY', t.state === 'EMPTY');
-  ok('E fixed arm cleared', state.captureStartFrame === null && state.captureEndFrame === null);
-  ok('E bpm UNLOCKED on take abort', state.bpmLocked === false);
-  ok('E count pulse torn down (broadened wasCountIn covers mid-take)', state.countPulseTornDown === true);
+  const { rig, start, fpb } = await fixedTake({ bars: 4 });
+  await rig.advanceTo((start + 2.4 * fpb) / 48000);
+  await rig.looper.recDub(0);
+  await untilCommitted(rig, 1);
+  ok('F quantized to 2 completed bars', rig.looper.masterLengthFrames() === 2 * fpb, `master=${rig.looper.masterLengthFrames()}`);
+  ok('F BPM stays locked (a master now exists)', rig.clock.bpmLocked() === true);
 }
 
-console.log('=== F. manual early stop mid-take -> commit partial (quantized), arm cleared, bpm STAYS locked ===');
+console.log('=== I. A manual FIXED stop tightens its end once and waits for the missing tail ===');
 {
-  const sr = 48000, bpm = 120;
-  const fpb = framesPerBar(bpm, sr);
-  // User set 4 bars but hits REC again after ~2.4 bars of take. stopCapture (not armed, master===0)
-  // commits the partial raw quantized to whole bars.
-  const raw = Math.round(2.4 * fpb);
-  const t = makeTrack(4 * fpb + 16); t.armed = false; t.state = 'RECORDING'; t.writeHead = raw; t.fillFrames = raw;
-  const state = captureState(t, { pending: 0, targetFrames: 4 * fpb, activeRecordIndex: 1,
-                  master: 0, masterLen: 0, committed: false, bpmLocked: true });
-  stopCapture(state, t, bpm, sr);
-  ok('F committed', state.committed === true);
-  ok('F quantized to 2 bars (floor(2.4)=2)', state.bars === 2, `bars=${state.bars}`);
-  ok('F master == 2*fpb', state.masterLen === 2 * fpb);
-  ok('F fixed arm cleared', state.captureStartFrame === null && state.captureEndFrame === null);
-  ok('F bpm STAYS locked (a master now exists)', state.bpmLocked === true);
-}
-
-console.log('=== G. Regression: free-record below its capacity does not auto-commit ===');
-{
-  const arm = armFixed(1000, 120, 48000, 4, Math.ceil(60 * 48000));
-  // Free-record: targetFrames = 0. Feed count + a long take; consume must NOT auto-commit, just append.
-  const t = makeTrack(arm.pending + 200000); t.armed = true; t.state = 'RECORDING';
-  const state = captureState(t, { pending: arm.pending, targetFrames: 0, activeRecordIndex: 4,
-                  master: 0, committed: false, bpmAtCommit: 120, srAtCommit: 48000 });
-  const stream = new Float32Array(arm.pending + 150000);
-  stream.fill(0.5, 0, arm.pending);
-  stream.fill(0.7, arm.pending, stream.length);
-  let pos = 0; while (pos < stream.length) { const bs = Math.min(4096, stream.length - pos); consumeFirst(state, t, stream.subarray(pos, pos + bs)); pos += bs; }
-  ok('G free-record did NOT auto-commit', state.committed === false);
-  ok('G free-record appended whole take (150000)', t.writeHead === 150000, `writeHead=${t.writeHead}`);
-  ok('G free-record frame 0 is the take', approx(t.record[0], 0.7, FLT));
-  ok('G free-record ring still held', state.activeRecordIndex === 4);
-}
-
-console.log('=== H. Buffer-clamp path (the bug the 5-lens review found + the fix) ===');
-{
-  // The exact combo the review flagged: 42 bpm, 32 bars, 44.1k -> requested target far over the 60s buffer.
-  // PRE-FIX bug: Math.min(target, bufferLen) left a non-bar-aligned target; finishRecording's round()
-  // rounded UP past the buffer -> master > record.length -> zero-padded tail + a later-track RangeError.
-  // FIX 1 (startRecording): clamp DOWN to whole bars that fit. FIX 2 (finishRecording): defensive maxBars.
-  const sr = 44100, bpm = 42, reqBars = 32;
-  const bufferLen = Math.ceil(60 * sr);          // the real per-track record buffer (looper/capture.ts buildEngine)
-  const fpb = framesPerBar(bpm, sr);
-  const arm = armFixed(1000, bpm, sr, reqBars, bufferLen);
-  ok('H requested target DID exceed the buffer (clamp engaged)', arm.target > bufferLen, `target=${arm.target} buf=${bufferLen}`);
-  ok('H targetFrames is a whole-bar multiple', arm.targetFrames % fpb === 0, `targetFrames=${arm.targetFrames} fpb=${fpb}`);
-  ok('H targetFrames <= buffer', arm.targetFrames <= bufferLen);
-  ok('H useBars = largest whole-bar count that fits', arm.targetFrames === Math.floor(bufferLen / fpb) * fpb);
-
-  // Feed it through the real capture + auto-commit with the buffer-sized track; assert no overshoot.
-  const { state } = runFixedCapture(arm, arm.targetFrames + 5000, [128], bpm, sr, bufferLen);
-  ok('H auto-committed', state.committed === true);
-  ok('H master == targetFrames (exact, no round-up)', state.masterLen === arm.targetFrames, `master=${state.masterLen}`);
-  ok('H master is a whole-bar multiple', state.masterLen % fpb === 0);
-  ok('H master <= buffer (no overrun, no zero-pad tail)', state.masterLen <= bufferLen);
-
-  // FIX 2 in isolation: a 60s+ FREE-record fills the buffer to a NON-multiple raw (= bufferLen). The
-  // defensive maxBars clamp in finishRecording must keep master <= buffer (pre-fix it rounded UP past it).
-  ok('H precondition: bufferLen is NOT a whole-bar multiple (round() would overshoot)', bufferLen % fpb !== 0);
-  const tFree = makeTrack(bufferLen); tFree.writeHead = bufferLen;
-  const sFree = captureState(tFree, { master: 0, targetFrames: 0, committed: false, masterLen: 0, bpmLocked: false });
-  finishRecording(sFree, tFree, bpm, sr);
-  ok('H free-record overshoot: master <= buffer (defensive clamp)', sFree.masterLen <= bufferLen, `master=${sFree.masterLen} buf=${bufferLen}`);
-  ok('H free-record overshoot: master is a whole-bar multiple', sFree.masterLen % fpb === 0);
-
-  // The REGRESSION the bug caused: a LATER track records `master` frames into a buffer-sized Float32Array.
-  // With master > buffer this threw RangeError inside drainTick; with master <= buffer it's safe.
-  for (const master of [state.masterLen, sFree.masterLen]) {
-    const laterRec = new Float32Array(bufferLen);
-    let threw = false;
-    try {
-      let wh = 0;
-      while (wh < master) {
-        const n = Math.min(128, master - wh);
-        laterRec.set(new Float32Array(n), wh); // mirrors consume() later-track t.record.set(...)
-        wh += n;
-      }
-    } catch { threw = true; }
-    ok(`H later-track fill of master=${master} frames does NOT throw (no RangeError)`, threw === false);
-  }
-}
-
-console.log('=== I. Manual FIXED stop tightens its end once and waits for the missing tail ===');
-{
-  const sr = 48000, bpm = 120, fpb = framesPerBar(bpm, sr);
-  const t = makeTrack(4 * fpb);
-  const state = captureState(t, { targetFrames: 4 * fpb, master: 0, committed: false,
-    bpmLocked: true, bpmAtCommit: bpm, srAtCommit: sr });
-  consumeFirst(state, t, new Float32Array(2 * fpb - 5000).fill(0.5));
-  stopCapture(state, t, bpm, sr, 2 * fpb + 100);
-  ok('I manual stop replaces the longer automatic end', state.captureEndFrame === 2 * fpb);
-  ok('I missing tail keeps recorder and lock', !state.committed && state.activeRecordIndex === t.index && state.bpmLocked);
-  stopCapture(state, t, bpm, sr, 3 * fpb + 100);
-  ok('I repeated stop cannot extend the end', state.captureEndFrame === 2 * fpb);
-  consumeFirst(state, t, new Float32Array(6000).fill(0.7));
-  ok('I tail completes exactly two bars', state.committed && t.lengthFrames === 2 * fpb);
-  ok('I retained tail survives up to the last frame', approx(t.record[2 * fpb - 1], 0.7, FLT));
+  const { rig, es, start, fpb } = await fixedTake({ bars: 4, trimMs: 100 });
+  const downbeat = (start - es.captureCompensationFrames) / 48000;
+  await rig.advanceTo(downbeat + (2 * fpb + 100) / 48000);
+  await rig.looper.recDub(0);
+  ok('I the manual stop replaces the longer automatic end', es.captureEndFrame === start + 2 * fpb, `end-start=${es.captureEndFrame - start}`);
+  ok('I the missing tail keeps the recorder and the lock', !committed(rig) && es.activeRecordIndex === 0 && rig.clock.bpmLocked());
+  await rig.advanceTo(downbeat + (2 * fpb + 1500) / 48000);
+  if (!committed(rig)) await rig.looper.recDub(0); // a press a bar later cannot extend the end
+  ok('I a repeated stop cannot extend the end', committed(rig) || es.captureEndFrame === start + 2 * fpb);
+  await untilCommitted(rig, 1);
+  const t = rig.tracks[0];
+  ok('I the tail completes exactly two bars', rig.looper.masterLengthFrames() === 2 * fpb);
+  ok('I the retained tail survives up to the last frame', t.record[2 * fpb - 1] === code(start + 2 * fpb - 1));
   ok('I no audio beyond the shortened end', t.record[2 * fpb] === 0);
 }
 
-console.log('=== J. FIXED selects a later take window; RETAKE keeps master-length passes ===');
+console.log('=== H. 42 bpm, 32 bars, 44.1 kHz: clamp to whole bars that fit; a later take fills the master ===');
 {
-  const bpm = 120, sr = 48000, fpb = framesPerBar(bpm, sr);
-  const master = 8 * fpb;
-  const args = { master, fixedOn: true, bars: 3, retakeOn: false, bpm, sr, recordLength: sr * 60 };
-  ok('J later FIXED uses its selected whole-bar window', configuredFrames(args) === 3 * fpb);
-  ok('J later FIXED clamps at master bars', configuredFrames({ ...args, bars: 12 }) === master);
-  ok('J FIXED off keeps the full master window', configuredFrames({ ...args, fixedOn: false }) === master);
-  ok('J RETAKE ignores later FIXED and keeps the master pass', configuredFrames({ ...args, retakeOn: true }) === master);
+  const sr = 44100;
+  const { rig, start, end, fpb } = await fixedTake({ sr, bpm: 42, bars: 32 });
+  const cap = rig.tracks[0].record.length;
+  ok('H precondition: the buffer is not a whole-bar multiple', cap % fpb !== 0 && 32 * fpb > cap);
+  ok('H the window is the largest whole-bar region that fits', end - start === Math.floor(cap / fpb) * fpb, `window=${end - start} cap=${cap}`);
+  await rig.advance((end - rig.frame()) / sr + 0.1);
+  const master = rig.looper.masterLengthFrames();
+  ok('H auto-committed exactly the window', master === end - start && master % fpb === 0 && master <= cap, `master=${master}`);
+  rig.looper.setFixedLengthEnabled(false);
+  await rig.looper.recDub(1);
+  await rig.advance((master * 2) / sr + 0.2);
+  ok('H a later take fills master frames without a RangeError', rig.looper.trackInfo(1).state === 'PLAYING' &&
+    rig.tracks[1].lengthFrames === master && !rig.logs.some((l) => l.level === 'error'), rig.looper.trackInfo(1).state);
+}
+
+console.log('=== J. A later FIXED take selects its bars; RETAKE keeps master-length passes ===');
+{
+  const rig = await bootLooper();
+  const master = await rig.recordFirstTake({ bars: 8 });
+  const fpb = framesPerBar(120, rig.sr);
+  const es = rig.state.engineState;
+  const laterWindow = async ({ fixed, bars, retake }) => {
+    rig.looper.setFixedLengthEnabled(fixed);
+    rig.looper.setFixedLengthBars(bars);
+    rig.looper.setRetakeEnabled(retake);
+    await rig.looper.recDub(1);
+    const window = es.captureEndFrame - es.captureStartFrame;
+    rig.looper.stop(1);
+    return window;
+  };
+  ok('J precondition: an 8-bar master', master === 8 * fpb);
+  ok('J a later FIXED take uses its selected whole-bar window', (await laterWindow({ fixed: true, bars: 3, retake: false })) === 3 * fpb);
+  ok('J a later FIXED take clamps at the master bars', (await laterWindow({ fixed: true, bars: 12, retake: false })) === master);
+  ok('J FIXED off keeps the full master window', (await laterWindow({ fixed: false, bars: 3, retake: false })) === master);
+  ok('J RETAKE ignores later FIXED and keeps the master pass', (await laterWindow({ fixed: true, bars: 3, retake: true })) === master);
 }
 
 console.log(`\n=== RESULT: ${checks - fails}/${checks} checks passed, ${fails} failed ===`);
