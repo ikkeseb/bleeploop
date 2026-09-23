@@ -31,9 +31,41 @@ fn diag(report: String) {
 static CLOSE_ALLOWED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 #[tauri::command]
-fn app_confirm_close(window: tauri::WebviewWindow) {
-    CLOSE_ALLOWED.store(true, std::sync::atomic::Ordering::SeqCst);
-    let _ = window.close();
+fn app_confirm_close(window: tauri::WebviewWindow) -> Result<(), String> {
+    allow_close_then(|| window.close().map_err(|e| e.to_string()))
+}
+
+/// Open the close guard, then run `close`. The flag must be up BEFORE the call: `close()` raises a
+/// fresh `CloseRequested` that the guard would veto otherwise. A failed close drops the flag again,
+/// so the next OS close still asks the frontend (audit B6).
+fn allow_close_then(close: impl FnOnce() -> Result<(), String>) -> Result<(), String> {
+    use std::sync::atomic::Ordering::SeqCst;
+    CLOSE_ALLOWED.store(true, SeqCst);
+    close().map_err(|e| {
+        CLOSE_ALLOWED.store(false, SeqCst);
+        log::error!("window close failed: {e}");
+        format!("could not close the window: {e}")
+    })
+}
+
+#[cfg(test)]
+mod close_guard_tests {
+    use super::*;
+    use std::sync::atomic::Ordering::SeqCst;
+
+    #[test]
+    fn a_failed_close_leaves_the_close_guard_armed() {
+        let err = allow_close_then(|| {
+            assert!(CLOSE_ALLOWED.load(SeqCst), "the flag is up while close runs");
+            Err("injected".to_string())
+        });
+        assert!(err.is_err());
+        assert!(!CLOSE_ALLOWED.load(SeqCst), "a failed close must not bypass the confirm");
+
+        assert!(allow_close_then(|| Ok(())).is_ok());
+        assert!(CLOSE_ALLOWED.load(SeqCst));
+        CLOSE_ALLOWED.store(false, SeqCst);
+    }
 }
 
 /// Sink for the frontend's `console.error` (and uncaught errors/rejections). A release WebView2 has

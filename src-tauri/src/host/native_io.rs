@@ -59,7 +59,8 @@ fn transition_action(
 pub(super) struct NativeIo {
     slot: u8,
     _format: &'static str,
-    window: tauri::WebviewWindow,
+    /// Tells the frontend a stream died (`plugin:stream-fault`, kind "input" | "output").
+    fault_sink: Box<dyn Fn(&'static str)>,
     diag: Arc<ProducerDiag>,
     has_input: bool,
     input_producer: Arc<Mutex<Producer<f32>>>,
@@ -91,10 +92,39 @@ impl NativeIo {
         monitor_consumer: Consumer<f32>,
         monitor_gain: Arc<AtomicU32>,
     ) -> Self {
+        let fault_sink = Box::new(move |kind: &'static str| {
+            let _ = window.emit(
+                "plugin:stream-fault",
+                serde_json::json!({ "slot": slot, "kind": kind }),
+            );
+        });
+        Self::with_fault_sink(
+            slot,
+            format,
+            fault_sink,
+            diag,
+            has_input,
+            input_producer,
+            monitor_consumer,
+            monitor_gain,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn with_fault_sink(
+        slot: u8,
+        format: &'static str,
+        fault_sink: Box<dyn Fn(&'static str)>,
+        diag: Arc<ProducerDiag>,
+        has_input: bool,
+        input_producer: Arc<Mutex<Producer<f32>>>,
+        monitor_consumer: Consumer<f32>,
+        monitor_gain: Arc<AtomicU32>,
+    ) -> Self {
         Self {
             slot,
             _format: format,
-            window,
+            fault_sink,
             diag,
             has_input,
             input_producer,
@@ -242,6 +272,9 @@ impl NativeIo {
                     Ok(())
                 }
                 Err(error) => {
+                    // The old stream is already gone: publish "no stream" so RT and the readers
+                    // stop using its rate (audit B7).
+                    self.publish_input(0, backend);
                     self.input_armed = false;
                     self.release_asio_if_unused();
                     Err(error)
@@ -320,6 +353,9 @@ impl NativeIo {
                     Ok(())
                 }
                 Err(error) => {
+                    // The old stream is already gone: publish "no stream" so RT and the latency
+                    // readout stop using its rate (audit B7).
+                    self.publish_monitor(0, backend);
                     self.monitor_armed = false;
                     self.release_asio_if_unused();
                     Err(error)
@@ -388,10 +424,7 @@ impl NativeIo {
             self.input_stream = None;
             self.input_channel = None;
             self.release_asio_if_unused();
-            let _ = self.window.emit(
-                "plugin:stream-fault",
-                serde_json::json!({ "slot": self.slot, "kind": "input" }),
-            );
+            (self.fault_sink)("input");
         }
 
         if self.monitor_fault.swap(false, Relaxed) && self.monitor_stream.is_some() {
@@ -401,10 +434,7 @@ impl NativeIo {
             self.drain_monitor();
             self.monitor_stream = None;
             self.release_asio_if_unused();
-            let _ = self.window.emit(
-                "plugin:stream-fault",
-                serde_json::json!({ "slot": self.slot, "kind": "output" }),
-            );
+            (self.fault_sink)("output");
         }
     }
 
@@ -436,6 +466,50 @@ impl Drop for NativeIo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_io(diag: &Arc<ProducerDiag>) -> NativeIo {
+        let (in_tx, _in_rx) = rtrb::RingBuffer::<f32>::new(16);
+        let (_mon_tx, mon_rx) = rtrb::RingBuffer::<f32>::new(16);
+        NativeIo::with_fault_sink(
+            0,
+            "test",
+            Box::new(|_| {}),
+            diag.clone(),
+            true,
+            Arc::new(Mutex::new(in_tx)),
+            mon_rx,
+            Arc::new(AtomicU32::new(1.0f32.to_bits())),
+        )
+    }
+
+    /// A re-arm drops the old stream before opening the new one; when that open fails (here: a
+    /// device id cpal cannot parse, so no hardware is needed) the published rates must say "no
+    /// stream", not the dropped stream's rate.
+    #[test]
+    fn a_failed_rearm_publishes_rate_zero() {
+        if AudioBackend::selected().is_asio() {
+            return; // the WASAPI open path is the one under test
+        }
+        let diag = Arc::new(ProducerDiag::new());
+        let mut io = test_io(&diag);
+        let not_cancelled = AtomicBool::new(false);
+
+        // As if a 48 kHz stream had been armed on both directions.
+        io.publish_input(48_000, AudioBackend::Wasapi);
+        io.publish_monitor(48_000, AudioBackend::Wasapi);
+        let input_gen = diag.input_gen.load(Relaxed);
+        let monitor_gen = diag.monitor_gen.load(Relaxed);
+
+        assert!(io
+            .arm_input(Some("no-such-device"), None, &not_cancelled)
+            .is_err());
+        assert_eq!(diag.input_rate.load(Relaxed), 0);
+        assert!(diag.input_gen.load(Relaxed) > input_gen, "RT must see the change");
+
+        assert!(io.arm_monitor(Some("no-such-device"), &not_cancelled).is_err());
+        assert_eq!(diag.monitor_rate.load(Relaxed), 0);
+        assert!(diag.monitor_gen.load(Relaxed) > monitor_gen, "RT must see the change");
+    }
 
     #[test]
     fn backend_transition_drops_both_retained_streams_only_while_idle() {

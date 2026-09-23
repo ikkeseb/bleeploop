@@ -49,6 +49,47 @@ mod note_validation_tests {
         assert!(validate_note_event(127, Some(1.1)).is_err());
     }
 }
+/// The sample rates `host_init` accepts. Every real `AudioContext` rate sits inside; outside it
+/// the RT pacing math (`Duration::from_secs_f64` of a block period) can panic or degenerate.
+const SAMPLE_RATE_RANGE: std::ops::RangeInclusive<f64> = 8_000.0..=384_000.0;
+
+fn validate_sample_rate(sample_rate: f64) -> Result<(), String> {
+    if sample_rate.is_finite() && SAMPLE_RATE_RANGE.contains(&sample_rate) {
+        Ok(())
+    } else {
+        Err(format!(
+            "unsupported sample rate {sample_rate} Hz (expected {}..={} Hz)",
+            SAMPLE_RATE_RANGE.start(),
+            SAMPLE_RATE_RANGE.end()
+        ))
+    }
+}
+
+#[cfg(test)]
+mod sample_rate_tests {
+    use super::validate_sample_rate;
+
+    #[test]
+    fn host_init_sample_rate_is_bounded_to_real_audio_rates() {
+        for ok in [8_000.0, 44_100.0, 48_000.0, 96_000.0, 384_000.0] {
+            assert!(validate_sample_rate(ok).is_ok(), "{ok} must be accepted");
+        }
+        for bad in [
+            0.0,
+            -48_000.0,
+            1e-300,
+            f64::MIN_POSITIVE,
+            7_999.0,
+            384_001.0,
+            1e12,
+            f64::INFINITY,
+            f64::NAN,
+        ] {
+            assert!(validate_sample_rate(bad).is_err(), "{bad} must be refused");
+        }
+    }
+}
+
 /// JS owns the `AudioContext`; it hands Rust the sample rate at startup so a later `loadPlugin`
 /// can `activate()` the plugin at the right rate (P9.2). Persists it into shared state.
 #[tauri::command]
@@ -56,9 +97,7 @@ pub async fn host_init(
     sample_rate: f64,
     state: tauri::State<'_, PluginHostState>,
 ) -> Result<u32, String> {
-    if !(sample_rate.is_finite() && sample_rate > 0.0) {
-        return Err(format!("host_init: invalid sample_rate {sample_rate}"));
-    }
+    validate_sample_rate(sample_rate)?;
     #[cfg(windows)]
     let frontend_epoch = super::clap::begin_frontend_session(&state)?;
     state
@@ -191,8 +230,7 @@ pub async fn plugin_note_on(
     validate_note_event(note, Some(velocity))?;
     #[cfg(windows)]
     {
-        super::clap::enqueue_event(&state, slot, super::clap::PluginEvent::NoteOn { key: note, velocity });
-        Ok(())
+        super::clap::enqueue_event(&state, slot, super::clap::PluginEvent::NoteOn { key: note, velocity })
     }
     #[cfg(not(windows))]
     {
@@ -201,7 +239,8 @@ pub async fn plugin_note_on(
     }
 }
 /// P9.5: route a note-off to the plugin. Enqueues a `NoteOffEvent` (matched by key, wildcard
-/// note_id) onto the slot's event ring.
+/// note_id) onto the slot's event ring. A full ring is an `Err` (the note would otherwise stick
+/// silently); the push waits on nothing but the producer Mutex.
 #[tauri::command]
 pub async fn plugin_note_off(
     slot: u8,
@@ -212,8 +251,7 @@ pub async fn plugin_note_off(
     validate_note_event(note, None)?;
     #[cfg(windows)]
     {
-        super::clap::enqueue_event(&state, slot, super::clap::PluginEvent::NoteOff { key: note });
-        Ok(())
+        super::clap::enqueue_event(&state, slot, super::clap::PluginEvent::NoteOff { key: note })
     }
     #[cfg(not(windows))]
     {
@@ -222,8 +260,9 @@ pub async fn plugin_note_off(
     }
 }
 /// P9.5: enqueue a `ParamValueEvent` onto the main→audio rtrb event ring (params are set on the
-/// audio thread via the process-input queue, never a direct main-thread setter). The RT side
-/// validates `param_id` with `ClapId::from_raw` and skips an invalid id rather than panicking.
+/// audio thread via the process-input queue, never a direct main-thread setter). `param_id` must
+/// be one the plugin listed (`listParams`) — an unknown id is an `Err` here and never reaches the
+/// ring, because a plugin may crash on it. A full ring is an `Err` too.
 #[tauri::command]
 pub async fn plugin_set_param(
     slot: u8,
@@ -234,8 +273,7 @@ pub async fn plugin_set_param(
     validate_slot(slot)?;
     #[cfg(windows)]
     {
-        super::clap::set_param(&state, slot, param_id, value);
-        Ok(())
+        super::clap::set_param(&state, slot, param_id, value)
     }
     #[cfg(not(windows))]
     {
@@ -646,6 +684,11 @@ pub fn plugin_asio_device_info() -> Option<super::state::AsioDeviceInfo> {
 /// `lib.rs::run()` dispatches `--scan-one` to this before Tauri ever starts.
 #[cfg(windows)]
 pub fn scan_one_main(path: &str) -> i32 {
+    // Wait until the parent has this process in its kill-on-close Job (no gate when run by hand).
+    if let Err(e) = super::scan::await_scan_gate() {
+        eprintln!("scan_one error: {e}");
+        return 3;
+    }
     match super::scan::scan_one(path) {
         Ok(descs) => match serde_json::to_string(&descs) {
             Ok(j) => {

@@ -170,56 +170,93 @@ pub enum OwnerRequest {
     ),
 }
 
+/// The parameter ids the host last enumerated for a slot (`listParams`: at load, on every
+/// `plugin_list_params`, and when the plugin reports a rescan). Written only by the owner thread,
+/// read by command threads; the RT thread never sees it. `plugin_set_param` checks against it
+/// because an id the plugin never listed can crash the plugin (Surge's ids are hash-like).
+pub(super) type ParamIds = Arc<std::sync::RwLock<std::collections::HashSet<u32>>>;
+
+/// Owner-side: replace the known id set with what the plugin just listed.
+pub(super) fn publish_param_ids(ids: &ParamIds, params: &[ParamDesc]) {
+    if let Ok(mut set) = ids.write() {
+        set.clear();
+        set.extend(params.iter().map(|p| p.id));
+    }
+}
+
+/// Push one event onto a slot's ring from a command thread (the producer Mutex is uncontended in
+/// practice: the RT side only holds the Consumer). A full ring bumps `events_dropped` and returns an
+/// error naming what was lost, so the caller (and the frontend) knows the plugin never got it: a
+/// dropped note-off is a stuck note.
+fn try_enqueue(
+    tx: &std::sync::Mutex<Producer<PluginEvent>>,
+    diag: &ProducerDiag,
+    slot: u8,
+    ev: PluginEvent,
+) -> Result<(), String> {
+    let mut prod = tx
+        .lock()
+        .map_err(|_| format!("slot {slot} event queue is unavailable (lock poisoned)"))?;
+    if prod.push(ev).is_err() {
+        diag.events_dropped.fetch_add(1, Relaxed);
+        let what = match ev {
+            PluginEvent::NoteOn { key, .. } => format!("note-on {key}"),
+            PluginEvent::NoteOff { key } => format!("note-off {key}"),
+            PluginEvent::Param { id, .. } => format!("parameter {id} change"),
+        };
+        return Err(format!("slot {slot} event queue is full; {what} was dropped"));
+    }
+    Ok(())
+}
+
 /// Command-side: push one `PluginEvent` onto a slot's ring. Clones the `Arc` handles out from
 /// under the slots lock so the (microsecond) push doesn't hold it. A push to an empty slot is a
-/// benign no-op (a note racing an unload); a full ring bumps `events_dropped` (never silent).
-pub fn enqueue_event(state: &PluginHostState, slot: u8, ev: PluginEvent) {
+/// benign no-op (a note racing an unload); a full ring bumps `events_dropped` and returns `Err`.
+pub fn enqueue_event(state: &PluginHostState, slot: u8, ev: PluginEvent) -> Result<(), String> {
     let handles = {
-        let slots = match state.slots.lock() {
-            Ok(s) => s,
-            Err(_) => return,
-        };
+        let slots = state.slots.lock().map_err(|_| "slots lock poisoned".to_string())?;
         slots[slot as usize]
             .loaded()
             .map(|h| (h.event_tx.clone(), h.diag.clone()))
     };
-    if let Some((tx, diag)) = handles {
-        if let Ok(mut prod) = tx.lock() {
-            if prod.push(ev).is_err() {
-                diag.events_dropped.fetch_add(1, Relaxed);
-            }
-        }
+    match handles {
+        Some((tx, diag)) => try_enqueue(&tx, &diag, slot, ev),
+        None => Ok(()),
     }
 }
 
-/// Command-side `plugin_set_param`: the value goes to the processor through the main→audio ring
+/// Command-side `plugin_set_param`: the id must be one the plugin listed (`ParamIds`), else `Err`
+/// before anything reaches the ring. The value goes to the processor through the main→audio ring
 /// (next block) and, on a VST3 slot, to the edit controller through the owner thread
-/// (`OwnerRequest::SetParamNormalized`). Fire-and-forget on both legs; a full ring counts in
-/// `events_dropped`, a gone owner thread means the slot is unloading.
-pub fn set_param(state: &PluginHostState, slot: u8, id: u32, value: f64) {
+/// (`OwnerRequest::SetParamNormalized`) — only when the ring push succeeded, so the plugin's GUI
+/// never shows a value its processor did not get. An empty slot is a no-op (a set racing an
+/// unload); a gone owner thread means the slot is unloading.
+pub fn set_param(state: &PluginHostState, slot: u8, id: u32, value: f64) -> Result<(), String> {
     let handles = {
-        let slots = match state.slots.lock() {
-            Ok(s) => s,
-            Err(_) => return,
-        };
+        let slots = state.slots.lock().map_err(|_| "slots lock poisoned".to_string())?;
         slots[slot as usize].loaded().map(|h| {
             (
                 h.event_tx.clone(),
                 h.diag.clone(),
+                h.param_ids.clone(),
                 (h.info.descriptor.format == "vst3").then(|| h.request_tx.clone()),
             )
         })
     };
-    if let Some((tx, diag, mirror)) = handles {
-        if let Ok(mut prod) = tx.lock() {
-            if prod.push(PluginEvent::Param { id, value }).is_err() {
-                diag.events_dropped.fetch_add(1, Relaxed);
-            }
-        }
-        if let Some(req_tx) = mirror {
-            let _ = req_tx.send(OwnerRequest::SetParamNormalized(id, value));
-        }
+    let Some((tx, diag, param_ids, mirror)) = handles else {
+        return Ok(());
+    };
+    let known = param_ids.read().map(|set| set.contains(&id)).unwrap_or(false);
+    if !known {
+        return Err(format!(
+            "parameter {id} is not one the plugin in slot {slot} listed"
+        ));
     }
+    try_enqueue(&tx, &diag, slot, PluginEvent::Param { id, value })?;
+    if let Some(req_tx) = mirror {
+        let _ = req_tx.send(OwnerRequest::SetParamNormalized(id, value));
+    }
+    Ok(())
 }
 
 /// Command-side: ask the owner thread to serialise the plugin and block (≤5 s) for the bytes.
@@ -416,8 +453,50 @@ pub fn set_buffer_size(frames: u32) {
     BLOCK_CONFIG_GEN.fetch_add(1, Release);
 }
 
+/// Enumerate the plugin's parameters (host-side `params` ext, a main-thread call): stable ids,
+/// ranges and the live value. Also what refreshes the slot's known-id set (`ParamIds`).
+fn clap_param_descs(instance: &mut PluginInstance<LfHost>) -> Result<Vec<ParamDesc>, String> {
+    let mut handle = instance.plugin_handle();
+    let params = handle
+        .get_extension::<PluginParams>()
+        .ok_or_else(|| "plugin has no params extension".to_string())?;
+    let count = params.count(&mut handle);
+    let mut out = Vec::with_capacity(count as usize);
+    let mut buf = ParamInfoBuffer::new();
+    for i in 0..count {
+        if let Some(info) = params.get_info(&mut handle, i, &mut buf) {
+            let id = info.id;
+            let (min_value, max_value, default_value) =
+                (info.min_value, info.max_value, info.default_value);
+            let name = String::from_utf8_lossy(info.name).into_owned();
+            // The LIVE value, so a drawer opened after a preset load or a state restore
+            // shows where the plugin actually is (falls back to default if unreadable).
+            let value = params.get_value(&mut handle, id).unwrap_or(default_value);
+            out.push(ParamDesc {
+                id: id.get(),
+                name,
+                min_value,
+                max_value,
+                default_value,
+                value,
+            });
+        }
+    }
+    Ok(out)
+}
+
+/// Owner-side: re-list the plugin's params into the known-id set (load, rescan). A plugin without
+/// the params ext lists nothing, so every host-side set is refused.
+fn refresh_clap_param_ids(instance: &mut PluginInstance<LfHost>, param_ids: &ParamIds) {
+    publish_param_ids(param_ids, &clap_param_descs(instance).unwrap_or_default());
+}
+
 /// Owner-thread side: service one request on clack's main thread (holds the `!Send` instance).
-fn handle_owner_request(req: OwnerRequest, instance: &mut PluginInstance<LfHost>) {
+fn handle_owner_request(
+    req: OwnerRequest,
+    instance: &mut PluginInstance<LfHost>,
+    param_ids: &ParamIds,
+) {
     match req {
         #[cfg(debug_assertions)]
         OwnerRequest::SaveState(reply) => {
@@ -448,35 +527,10 @@ fn handle_owner_request(req: OwnerRequest, instance: &mut PluginInstance<LfHost>
             let _ = reply.send(res);
         }
         OwnerRequest::ListParams(reply) => {
-            let res = (|| -> Result<Vec<ParamDesc>, String> {
-                let mut handle = instance.plugin_handle();
-                let params = handle
-                    .get_extension::<PluginParams>()
-                    .ok_or_else(|| "plugin has no params extension".to_string())?;
-                let count = params.count(&mut handle);
-                let mut out = Vec::with_capacity(count as usize);
-                let mut buf = ParamInfoBuffer::new();
-                for i in 0..count {
-                    if let Some(info) = params.get_info(&mut handle, i, &mut buf) {
-                        let id = info.id;
-                        let (min_value, max_value, default_value) =
-                            (info.min_value, info.max_value, info.default_value);
-                        let name = String::from_utf8_lossy(info.name).into_owned();
-                        // The LIVE value, so a drawer opened after a preset load or a state restore
-                        // shows where the plugin actually is (falls back to default if unreadable).
-                        let value = params.get_value(&mut handle, id).unwrap_or(default_value);
-                        out.push(ParamDesc {
-                            id: id.get(),
-                            name,
-                            min_value,
-                            max_value,
-                            default_value,
-                            value,
-                        });
-                    }
-                }
-                Ok(out)
-            })();
+            let res = clap_param_descs(instance);
+            if let Ok(params) = &res {
+                publish_param_ids(param_ids, params);
+            }
             let _ = reply.send(res);
         }
         // P10.0 editor + P11.0 input requests are intercepted in the owner loop (they need
@@ -1006,6 +1060,9 @@ pub struct SlotHandle {
     /// the command thread (no owner-request hop ⇒ slider responsiveness), like a diag atomic. On a
     /// VST3 slot it is a parked handle (the VST3 monitor lands in Stage B) — stored harmlessly.
     monitor_gain: Arc<AtomicU32>,
+    /// The ids `plugin_set_param` accepts. The SAME `Arc` the owner thread refills whenever it
+    /// enumerates the plugin's params (`ParamIds`).
+    param_ids: ParamIds,
 }
 
 impl SlotHandle {
@@ -1124,6 +1181,31 @@ fn spawn_rt(
         })
         .map_err(|e| format!("failed to spawn RT thread: {e}"))?;
     Ok(RtJoinGuard::new(rt_run, join))
+}
+
+/// Report a load only once its RT producer runs (audit B1). `spawn` starts the producer; only
+/// then does `ready_tx` carry `Ok(payload)`. A failed spawn hands the payload to `release` (the
+/// owner closes the already-posted SharedBuffer there) and then sends the error, so the load
+/// command answers `Err` instead of parking a slot that never makes a sound. The caller still owns
+/// the rest of the undo (deactivate, module teardown) on `None`. Shared by the CLAP and VST3 owners.
+pub(super) fn spawn_rt_then_ready<G, P>(
+    ready_tx: &std::sync::mpsc::SyncSender<Result<P, String>>,
+    payload: P,
+    spawn: impl FnOnce() -> Result<G, String>,
+    release: impl FnOnce(P),
+) -> Option<G> {
+    match spawn() {
+        Ok(guard) => {
+            let _ = ready_tx.send(Ok(payload));
+            Some(guard)
+        }
+        Err(e) => {
+            log::error!("[plugin_host] {e}");
+            release(payload);
+            let _ = ready_tx.send(Err(e));
+            None
+        }
+    }
 }
 
 /// Plugin-requested restart (CLAP `host.request_restart`), on the owner thread: stop + join the RT
@@ -1325,6 +1407,40 @@ mod host_lifecycle_tests {
         assert!(matches!(state.slots.lock().unwrap()[0], SlotState::Empty));
     }
 
+    /// Audit B1: the owner reports a load only after the RT producer spawned. A failed spawn gives
+    /// the payload (the posted SharedBuffer) back for release and the load command sees `Err`.
+    #[test]
+    fn a_failed_rt_spawn_fails_the_load() {
+        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<Result<&str, String>>(1);
+        let mut released = None;
+        let guard: Option<()> = spawn_rt_then_ready(
+            &ready_tx,
+            "shared buffer",
+            || Err("failed to spawn RT thread: injected".to_string()),
+            |payload| released = Some(payload),
+        );
+        assert!(guard.is_none());
+        assert_eq!(released, Some("shared buffer"), "the posted buffer is released");
+        assert_eq!(
+            ready_rx.try_recv().unwrap(),
+            Err("failed to spawn RT thread: injected".to_string())
+        );
+
+        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<Result<&str, String>>(1);
+        let guard = spawn_rt_then_ready(
+            &ready_tx,
+            "shared buffer",
+            || {
+                // Nothing may be reported before the producer exists.
+                assert!(ready_rx.try_recv().is_err());
+                Ok(7)
+            },
+            |_| panic!("a spawned producer must not release the buffer"),
+        );
+        assert_eq!(guard, Some(7));
+        assert_eq!(ready_rx.try_recv().unwrap(), Ok("shared buffer"));
+    }
+
     #[test]
     fn rt_join_guard_stops_and_joins_on_drop() {
         let running = Arc::new(AtomicBool::new(true));
@@ -1340,6 +1456,113 @@ mod host_lifecycle_tests {
 
         drop(RtJoinGuard::new(running, join));
         assert!(exited.load(Acquire));
+    }
+}
+
+/// The command-side checks of `plugin_note_on/off` and `plugin_set_param` against a parked slot
+/// with a small event ring and no plugin behind it: the ring's consumer and the owner channel are
+/// held by the test, so what reaches the processor and the VST3 controller is observable.
+#[cfg(test)]
+mod command_boundary_tests {
+    use super::*;
+
+    const LISTED: u32 = 825_615_485; // hash-like, as Surge's are
+
+    struct Fixture {
+        state: PluginHostState,
+        events: Consumer<PluginEvent>,
+        requests: std::sync::mpsc::Receiver<OwnerRequest>,
+        diag: Arc<ProducerDiag>,
+    }
+
+    fn loaded_slot(format: &str, ring_cap: usize) -> Fixture {
+        let (event_tx, events) = RingBuffer::<PluginEvent>::new(ring_cap);
+        let (request_tx, requests) = std::sync::mpsc::channel();
+        let diag = Arc::new(ProducerDiag::new());
+        let param_ids = ParamIds::default();
+        publish_param_ids(
+            &param_ids,
+            &[ParamDesc {
+                id: LISTED,
+                name: "Cutoff".to_string(),
+                min_value: 0.0,
+                max_value: 1.0,
+                default_value: 0.5,
+                value: 0.5,
+            }],
+        );
+        let handle = SlotHandle {
+            info: PluginInfo {
+                slot: 0,
+                descriptor: PluginDescriptor {
+                    id: "fixture".to_string(),
+                    name: "Fixture".to_string(),
+                    format: format.to_string(),
+                    path: String::new(),
+                    is_effect: None,
+                },
+            },
+            running: Arc::new(AtomicBool::new(true)),
+            diag: diag.clone(),
+            owner_join: std::thread::spawn(|| {}),
+            shared_buf: SharedBufferHandle::detached_for_test(),
+            event_tx: Arc::new(std::sync::Mutex::new(event_tx)),
+            request_tx,
+            monitor_gain: Arc::new(AtomicU32::new(1.0f32.to_bits())),
+            param_ids,
+        };
+        let state = PluginHostState::default();
+        state.slots.lock().unwrap()[0] = SlotState::Loaded(handle);
+        Fixture {
+            state,
+            events,
+            requests,
+            diag,
+        }
+    }
+
+    /// Audit B2: an id the plugin never listed is refused before it reaches the ring.
+    #[test]
+    fn set_param_refuses_an_id_the_plugin_never_listed() {
+        let mut f = loaded_slot("clap", 8);
+        assert!(set_param(&f.state, 0, LISTED + 1, 0.3).is_err());
+        assert!(f.events.pop().is_err(), "an unknown id must not reach the ring");
+
+        assert!(set_param(&f.state, 0, LISTED, 0.3).is_ok());
+        assert!(matches!(
+            f.events.pop(),
+            Ok(PluginEvent::Param { id: LISTED, .. })
+        ));
+    }
+
+    /// Audit B3: a full ring makes a note-off an `Err` (it would otherwise stick silently).
+    #[test]
+    fn a_note_off_into_a_full_ring_is_an_error() {
+        let f = loaded_slot("clap", 2);
+        for key in [60, 62] {
+            enqueue_event(&f.state, 0, PluginEvent::NoteOn { key, velocity: 1.0 }).unwrap();
+        }
+        let err = enqueue_event(&f.state, 0, PluginEvent::NoteOff { key: 60 }).unwrap_err();
+        assert!(err.contains("note-off 60"), "the error names the lost event: {err}");
+        assert_eq!(f.diag.events_dropped.load(Relaxed), 1);
+    }
+
+    /// Audit B4: a VST3 set whose ring push failed is not mirrored to the edit controller, so
+    /// the plugin's GUI keeps the value its processor actually has.
+    #[test]
+    fn vst3_set_param_mirrors_to_the_controller_only_after_a_successful_push() {
+        let f = loaded_slot("vst3", 1);
+        set_param(&f.state, 0, LISTED, 0.25).unwrap();
+        assert!(matches!(
+            f.requests.try_recv(),
+            Ok(OwnerRequest::SetParamNormalized(LISTED, v)) if v == 0.25
+        ));
+
+        assert!(set_param(&f.state, 0, LISTED, 0.75).is_err(), "the ring is full");
+        assert!(
+            f.requests.try_recv().is_err(),
+            "the controller must not get a value the processor never got"
+        );
     }
 }
 
@@ -1620,6 +1843,9 @@ fn owner_main(
     // SAME Arc and `set_monitor_gain` can store to it without an owner hop) and handed here to the
     // cpal OUTPUT callback. Read atomically each callback — no stream rebuild on a slider change.
     monitor_gain: Arc<AtomicU32>,
+    // The known param ids (`ParamIds`): filled here before the load is reported, refreshed on
+    // every enumeration; the SlotHandle holds the same Arc for `set_param`'s check.
+    param_ids: ParamIds,
 ) {
     // P10.0: the plugin→host "editor closed" signal, shared with the instance's Shared handler
     // (set by `HostGuiImpl::closed`) and polled by the owner loop below.
@@ -1803,8 +2029,8 @@ fn owner_main(
             is_effect: None,
         },
     };
-    let _ = ready_tx.send(Ok((info, shared_buf)));
-    diag.alive.store(true, Relaxed);
+    // Before the load is reported, so the frontend's first `setParameter` finds its ids.
+    refresh_clap_param_ids(&mut instance, &param_ids);
 
     // P11.0: the cpal→RT audio-input ring. Built owner-thread-local: the Consumer crosses to the
     // RT producer (like event_rx); the Producer stays owner-local behind an Arc<Mutex> so
@@ -1837,23 +2063,29 @@ fn owner_main(
     };
     // `Option` because a plugin-requested restart takes the guard out, joins, and puts a fresh one
     // back (`service_restart`); `None` after a failed restart = a silent, still-unloadable slot.
-    let mut rt_guard = match spawn_rt(
-        &rt_cfg,
-        stopped,
-        rings,
-        period_frames,
-        block_config_gen_at_load,
-        0.0, // a fresh load learns the drift from zero
-        diag.clone(),
-    ) {
-        Ok(g) => Some(g),
-        Err(e) => {
-            log::error!("[plugin_host] {e}");
-            let _ = instance.try_deactivate();
-            diag.alive.store(false, Relaxed);
-            return;
-        }
-    };
+    // The load is reported only after the producer spawned (`spawn_rt_then_ready`).
+    let mut rt_guard = spawn_rt_then_ready(
+        &ready_tx,
+        (info, shared_buf),
+        || {
+            spawn_rt(
+                &rt_cfg,
+                stopped,
+                rings,
+                period_frames,
+                block_config_gen_at_load,
+                0.0, // a fresh load learns the drift from zero
+                diag.clone(),
+            )
+        },
+        // Nothing writes the mapping: the producer never started.
+        |(_, shared_buf)| shared_buf.close(&window, slot),
+    );
+    if rt_guard.is_none() {
+        let _ = instance.try_deactivate();
+        return;
+    }
+    diag.alive.store(true, Relaxed);
     let mut native_io = NativeIo::new(
         slot,
         "CLAP",
@@ -1888,6 +2120,7 @@ fn owner_main(
         deliver_plugin_callback(&mut instance);
         // The plugin changed parameter values/info itself (params.rescan) → the web UI re-lists.
         if take_params_rescan(&mut instance) {
+            refresh_clap_param_ids(&mut instance, &param_ids);
             let _ = window.emit("plugin:params-changed", slot);
         }
         // The plugin asked for a deactivate → activate cycle (host.request_restart).
@@ -2001,7 +2234,7 @@ fn owner_main(
                 OwnerRequest::DisarmMonitor(_, reply) => {
                     let _ = reply.send(native_io.disarm_monitor());
                 }
-                other => handle_owner_request(other, &mut instance),
+                other => handle_owner_request(other, &mut instance, &param_ids),
             }
         }
         native_io.poll_faults();
@@ -2396,6 +2629,8 @@ pub fn load(
     // P11.3: native-monitor gain (linear, unity). Created here so the SlotHandle and the owner
     // thread share ONE Arc — `set_monitor_gain` then stores from the command thread with no hop.
     let monitor_gain = Arc::new(AtomicU32::new(1.0f32.to_bits()));
+    // The known param ids, filled by the owner thread before it reports the load (`ParamIds`).
+    let param_ids = ParamIds::default();
     let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<LoadReady>(1);
 
     // P9.5 control plane: the main→audio event ring (Producer kept here for the SlotHandle,
@@ -2408,6 +2643,7 @@ pub fn load(
     let owner_diag = diag.clone();
     let owner_window = window.clone();
     let owner_monitor_gain = monitor_gain.clone();
+    let owner_param_ids = param_ids.clone();
     let owner_join = match std::thread::Builder::new()
         .name(format!("lf-clap-owner-{slot}"))
         .spawn(move || {
@@ -2426,6 +2662,7 @@ pub fn load(
                 event_rx,
                 request_rx,
                 owner_monitor_gain,
+                owner_param_ids,
             )
         })
     {
@@ -2452,6 +2689,7 @@ pub fn load(
                 event_tx,
                 request_tx,
                 monitor_gain,
+                param_ids,
             },
         ),
         Ok(Err(e)) => {
@@ -2532,6 +2770,8 @@ pub fn vst3_load(
     // VST3 owner thread share ONE Arc — `set_monitor_gain` stores from the command thread with no
     // hop, and the owner hands a clone to the cpal-out callback (open_output_stream). Mirrors CLAP.
     let monitor_gain = Arc::new(AtomicU32::new(1.0f32.to_bits()));
+    // The known param ids, filled by the owner thread before it reports the load (`ParamIds`).
+    let param_ids = ParamIds::default();
     let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<LoadReady>(1);
     let (event_tx, event_rx) = RingBuffer::<PluginEvent>::new(EVENT_RING_CAP);
     let event_tx = Arc::new(std::sync::Mutex::new(event_tx));
@@ -2556,6 +2796,7 @@ pub fn vst3_load(
     // Clone the producer for the owner thread (editor performEdit → ring) BEFORE event_tx moves into
     // SlotHandle. The Arc<Mutex<>> serialises owner + command pushes into the single SPSC ring.
     let owner_event_tx = event_tx.clone();
+    let owner_param_ids = param_ids.clone();
     let owner_join = match std::thread::Builder::new()
         .name(format!("lf-vst3-owner-{slot}"))
         .spawn(move || {
@@ -2579,6 +2820,7 @@ pub fn vst3_load(
                 mon_tx,
                 mon_rx,
                 owner_monitor_gain,
+                owner_param_ids,
             )
         })
     {
@@ -2605,6 +2847,7 @@ pub fn vst3_load(
                 event_tx,
                 request_tx,
                 monitor_gain,
+                param_ids,
             },
         ),
         Ok(Err(e)) => {

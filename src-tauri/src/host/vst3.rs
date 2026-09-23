@@ -1,6 +1,7 @@
 use super::{
-    promote_pro_audio, revert, sum_to_mono, wasapi_period_frames, OwnerRequest, PluginEvent,
-    RtJoinGuard, RtRings, MAX_EVENTS_PER_BLOCK, OUT_RING_CAP,
+    promote_pro_audio, publish_param_ids, revert, spawn_rt_then_ready, sum_to_mono,
+    wasapi_period_frames, OwnerRequest, ParamIds, PluginEvent, RtJoinGuard, RtRings,
+    MAX_EVENTS_PER_BLOCK, OUT_RING_CAP,
 };
 use super::super::editor_window::{
     client_size, create_host_window, drain_after_editor_teardown, pump_thread_messages,
@@ -354,12 +355,19 @@ struct ParamChanged {
     value: f64,
 }
 
-/// The plugin's pending `restartComponent` cycle request. OR-ed across calls and across BOTH
-/// handler instances (the load-time one and an open editor's), drained by the owner loop into ONE
-/// `service_vst3_restart`. A flag store only: `raise` never runs foreign code, allocates or locks,
-/// so a plugin that (against the spec) reports from its own worker thread is still safe.
+/// The plugin's pending `restartComponent` reports. OR-ed across calls and across BOTH handler
+/// instances (the load-time one and an open editor's), drained by the owner loop once per turn:
+/// the cycle flags into ONE `service_vst3_restart`, everything else into the log line and, for
+/// `RELIST`, the re-list emit. A flag store only: `raise` never runs foreign code, logs, emits,
+/// allocates or locks, so a plugin that (against the spec) reports from its own worker thread is
+/// still safe.
 #[derive(Default)]
-struct RestartFlags(AtomicI32);
+struct RestartFlags {
+    /// Pending `CYCLE` flags.
+    cycle: AtomicI32,
+    /// Pending non-cycle flags (informational, `RELIST`).
+    notify: AtomicI32,
+}
 impl RestartFlags {
     /// The flags that need a deactivate → activate cycle; every other flag is informational.
     const CYCLE: i32 =
@@ -368,11 +376,22 @@ impl RestartFlags {
     const RELIST: i32 = RestartFlags_::kParamValuesChanged | RestartFlags_::kParamTitlesChanged;
 
     fn raise(&self, flags: i32) {
-        self.0.fetch_or(flags, Release);
+        let cycle = flags & Self::CYCLE;
+        if cycle != 0 {
+            self.cycle.fetch_or(cycle, Release);
+        }
+        let notify = flags & !Self::CYCLE;
+        if notify != 0 {
+            self.notify.fetch_or(notify, Release);
+        }
     }
-    /// Owner turn: everything raised so far (0 = nothing pending).
+    /// Owner turn: the cycle flags raised so far (0 = no cycle pending).
     fn take(&self) -> i32 {
-        self.0.swap(0, Acquire)
+        self.cycle.swap(0, Acquire)
+    }
+    /// Owner turn: the non-cycle flags raised so far (0 = nothing to report).
+    fn take_notify(&self) -> i32 {
+        self.notify.swap(0, Acquire)
     }
 }
 
@@ -421,24 +440,15 @@ impl IComponentHandlerTrait for LfComponentHandler {
     unsafe fn endEdit(&self, _id: ParamID) -> tresult {
         kResultOk
     }
-    /// The plugin reports that something changed behind the host's back. Parameter values or
-    /// titles changed (a preset loaded inside the plugin, a program change) → the web UI re-lists
-    /// its params. The cycle flags (`kReloadComponent`, `kIoChanged`, `kLatencyChanged`) are
-    /// raised on the shared `RestartFlags`; the owner loop runs `service_vst3_restart` on its next
-    /// turn. Usually called on the owner thread (from a controller call the host itself made, or
-    /// the editor pump); a foreign-thread call is tolerated because only atomics are touched.
+    /// The plugin reports that something changed behind the host's back. Every flag is raised on
+    /// the shared `RestartFlags` and nothing else happens here: the owner loop logs it on its next
+    /// turn, re-lists params for `RELIST` (a preset loaded inside the plugin, a program change)
+    /// and runs `service_vst3_restart` for a cycle flag (`kReloadComponent`, `kIoChanged`,
+    /// `kLatencyChanged`). Usually called on the owner thread (from a controller call the host
+    /// itself made, or the editor pump); a foreign-thread call is safe because only atomics are
+    /// touched — no log, no emit (audit B5).
     unsafe fn restartComponent(&self, flags: int32) -> tresult {
-        if flags & RestartFlags::RELIST != 0 {
-            let _ = self.window.emit("plugin:params-changed", self.slot);
-        }
-        if flags & RestartFlags::CYCLE != 0 {
-            self.restart.raise(flags & RestartFlags::CYCLE);
-        }
-        log::info!(
-            "[plugin_host] slot {} VST3 restartComponent({})",
-            self.slot,
-            restart_flag_names(flags)
-        );
+        self.restart.raise(flags);
         kResultOk
     }
 }
@@ -1266,6 +1276,9 @@ pub fn vst3_owner_main(
     mon_tx: Producer<f32>,
     mon_rx: Consumer<f32>,
     monitor_gain: Arc<AtomicU32>,
+    // The known param ids (`ParamIds`): filled before the load is reported, refreshed on every
+    // enumeration; the SlotHandle holds the same Arc for `set_param`'s check.
+    param_ids: ParamIds,
 ) {
     // Capture before setup reads CHOSEN_BLOCK_FRAMES. Any setting change during the foreign-plugin
     // setup window leaves a generation mismatch for the RT loop to reconcile.
@@ -1480,8 +1493,8 @@ pub fn vst3_owner_main(
             is_effect: None,
         },
     };
-    let _ = ready_tx.send(Ok((info, shared_buf)));
-    diag.alive.store(true, Relaxed);
+    // Before the load is reported, so the frontend's first `setParameter` finds its ids.
+    publish_param_ids(&param_ids, &list_vst3_params(&controller).unwrap_or_default());
 
     // Spawn the RT producer (moves the Send processor handle + the rings). Its run flag is its
     // own, so a plugin-requested restart can stop and respawn it without touching the owner's.
@@ -1500,45 +1513,51 @@ pub fn vst3_owner_main(
     };
     // `Option` because a plugin-requested restart takes the guard out, joins, and puts a fresh one
     // back (`service_vst3_restart`); `None` after a failed restart = a silent, still-unloadable slot.
-    let mut rt_guard = match spawn_vst3_rt(
-        &rt_cfg,
-        processor,
-        rings,
-        activation,
-        period_frames,
-        block_config_gen_at_load,
-        0.0, // a fresh load learns the drift from zero
-        diag.clone(),
-    ) {
-        Ok(g) => Some(g),
-        Err(e) => {
-            log::error!("[plugin_host] {e}");
-            // Release the edit controller BEFORE teardown's FreeLibrary — its Release (and, for a
-            // separated controller, terminate) vtbl code lives in the plugin DLL, so dropping it
-            // AFTER FreeLibrary calls into unmapped code (UAF). Mirror the happy-path teardown's
-            // controller handling so this error arm honors the same FreeLibrary-LAST invariant.
-            // (Bug-hunt 2026-06-21, #2.)
-            if let Some(ctl) = controller {
-                if controller_separated {
-                    // SAFETY: owner thread; no editor view was ever opened on this path. Disconnect
-                    // the connection points before terminating, then terminate the separate controller.
-                    unsafe {
-                        if let (Some(comp_cp), Some(ctrl_cp)) = (
-                            component.cast::<IConnectionPoint>(),
-                            ctl.cast::<IConnectionPoint>(),
-                        ) {
-                            let _ = comp_cp.disconnect(ctrl_cp.as_ptr());
-                            let _ = ctrl_cp.disconnect(comp_cp.as_ptr());
-                        }
-                        let _ = ctl.terminate();
+    // The load is reported only after the producer spawned (`spawn_rt_then_ready`).
+    let mut rt_guard = spawn_rt_then_ready(
+        &ready_tx,
+        (info, shared_buf),
+        || {
+            spawn_vst3_rt(
+                &rt_cfg,
+                processor,
+                rings,
+                activation,
+                period_frames,
+                block_config_gen_at_load,
+                0.0, // a fresh load learns the drift from zero
+                diag.clone(),
+            )
+        },
+        // Nothing writes the mapping: the producer never started.
+        |(_, shared_buf)| shared_buf.close(&window, slot),
+    );
+    if rt_guard.is_none() {
+        // Release the edit controller BEFORE teardown's FreeLibrary — its Release (and, for a
+        // separated controller, terminate) vtbl code lives in the plugin DLL, so dropping it
+        // AFTER FreeLibrary calls into unmapped code (UAF). Mirror the happy-path teardown's
+        // controller handling so this error arm honors the same FreeLibrary-LAST invariant.
+        // (Bug-hunt 2026-06-21, #2.)
+        if let Some(ctl) = controller {
+            if controller_separated {
+                // SAFETY: owner thread; no editor view was ever opened on this path. Disconnect
+                // the connection points before terminating, then terminate the separate controller.
+                unsafe {
+                    if let (Some(comp_cp), Some(ctrl_cp)) = (
+                        component.cast::<IConnectionPoint>(),
+                        ctl.cast::<IConnectionPoint>(),
+                    ) {
+                        let _ = comp_cp.disconnect(ctrl_cp.as_ptr());
+                        let _ = ctrl_cp.disconnect(comp_cp.as_ptr());
                     }
+                    let _ = ctl.terminate();
                 }
             }
-            teardown(component, host_ctx, hostapp, factory, module);
-            diag.alive.store(false, Relaxed);
-            return;
         }
-    };
+        teardown(component, host_ctx, hostapp, factory, module);
+        return;
+    }
+    diag.alive.store(true, Relaxed);
     let has_input = activation.in_channels > 0;
     let mut native_io = NativeIo::new(
         slot,
@@ -1587,9 +1606,15 @@ pub fn vst3_owner_main(
     let mut reported_rt_faults = 0u32;
     let mut activation = activation;
     while running.load(Relaxed) {
-        // The plugin asked for a deactivate → activate cycle (restartComponent with a cycle flag).
+        // The plugin's restartComponent reports, drained on the owner thread (the callback only
+        // raised flags; it may have run on a foreign thread). A cycle flag = the plugin asked for
+        // a deactivate → activate cycle.
         let flags = restart.take();
         if flags != 0 {
+            log::info!(
+                "[plugin_host] slot {slot} VST3 restartComponent({})",
+                restart_flag_names(flags)
+            );
             match service_vst3_restart(
                 flags,
                 &component,
@@ -1614,6 +1639,18 @@ pub fn vst3_owner_main(
                     if has_input { "yes" } else { "no" },
                     activation.in_channels
                 );
+            }
+        }
+        // After the cycle, so a re-list the plugin raised during its re-activation lands this turn.
+        let notices = restart.take_notify();
+        if notices != 0 {
+            log::info!(
+                "[plugin_host] slot {slot} VST3 restartComponent({})",
+                restart_flag_names(notices)
+            );
+            if notices & RestartFlags::RELIST != 0 {
+                publish_param_ids(&param_ids, &list_vst3_params(&controller).unwrap_or_default());
+                let _ = window.emit("plugin:params-changed", slot);
             }
         }
         // (a) Hosted editor: pump our window's messages, then react to the user's close box.
@@ -1689,7 +1726,11 @@ pub fn vst3_owner_main(
                     // Enumerate on the owner thread (the !Send controller is pinned here). The UI
                     // + any host-originated setParameter use these stable ids (Surge's are
                     // hash-like, not 0-based — never invent one).
-                    let _ = reply.send(list_vst3_params(&controller));
+                    let res = list_vst3_params(&controller);
+                    if let Ok(params) = &res {
+                        publish_param_ids(&param_ids, params);
+                    }
+                    let _ = reply.send(res);
                 }
                 OwnerRequest::SetParamNormalized(id, value) => {
                     // Host contract: the processor got this value through the ring; the controller
@@ -2295,3 +2336,83 @@ mod restart_tests;
 #[cfg(test)]
 #[path = "vst3_resize_fixture.rs"]
 mod resize_tests;
+
+/// Audit B5: `restartComponent`'s whole body is `RestartFlags::raise`, so a plugin calling it from
+/// its own worker thread must touch nothing but atomics there — no log (a lock + allocation) and no
+/// emit (the flags hold no window). The owner's drain then sees every flag, split by kind.
+#[cfg(test)]
+mod restart_flag_tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+    use std::thread::ThreadId;
+
+    /// Counts log records emitted on one watched thread; every other thread's records pass by.
+    struct ThreadLogCounter {
+        watched: Mutex<Option<ThreadId>>,
+        count: AtomicUsize,
+    }
+    impl log::Log for ThreadLogCounter {
+        fn enabled(&self, _: &log::Metadata) -> bool {
+            true
+        }
+        fn log(&self, _: &log::Record) {
+            let me = std::thread::current().id();
+            if *self.watched.lock().unwrap() == Some(me) {
+                self.count.fetch_add(1, Relaxed);
+            }
+        }
+        fn flush(&self) {}
+    }
+    static COUNTER: ThreadLogCounter = ThreadLogCounter {
+        watched: Mutex::new(None),
+        count: AtomicUsize::new(0),
+    };
+
+    /// Run `f` on a fresh thread and return how many log records it emitted there.
+    fn logs_on_a_foreign_thread(f: impl FnOnce() + Send + 'static) -> usize {
+        let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
+        let t = std::thread::spawn(move || {
+            go_rx.recv().unwrap();
+            f();
+        });
+        *COUNTER.watched.lock().unwrap() = Some(t.thread().id());
+        let before = COUNTER.count.load(Relaxed);
+        go_tx.send(()).unwrap();
+        t.join().unwrap();
+        *COUNTER.watched.lock().unwrap() = None;
+        COUNTER.count.load(Relaxed) - before
+    }
+
+    #[test]
+    fn restart_component_from_a_foreign_thread_only_raises_flags() {
+        let _ = log::set_logger(&COUNTER);
+        log::set_max_level(log::LevelFilter::Trace);
+        // The counter works: a thread that logs is seen.
+        assert_eq!(
+            logs_on_a_foreign_thread(|| log::info!("control record")),
+            1,
+            "the counting logger must be installed for this test to mean anything"
+        );
+
+        let restart = Arc::new(RestartFlags::default());
+        let raiser = restart.clone();
+        let logged = logs_on_a_foreign_thread(move || {
+            raiser.raise(
+                RestartFlags_::kParamValuesChanged
+                    | RestartFlags_::kLatencyChanged
+                    | RestartFlags_::kMidiCCAssignmentChanged,
+            );
+        });
+        assert_eq!(logged, 0, "restartComponent must not log on the plugin's thread");
+
+        // The owner turn: the cycle flag for service_vst3_restart, the rest for the log + re-list.
+        assert_eq!(restart.take(), RestartFlags_::kLatencyChanged);
+        let notices = restart.take_notify();
+        assert_eq!(
+            notices,
+            RestartFlags_::kParamValuesChanged | RestartFlags_::kMidiCCAssignmentChanged
+        );
+        assert_ne!(notices & RestartFlags::RELIST, 0);
+        assert_eq!((restart.take(), restart.take_notify()), (0, 0), "drained once");
+    }
+}

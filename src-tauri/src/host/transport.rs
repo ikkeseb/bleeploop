@@ -502,6 +502,12 @@ pub(super) struct SharedBufferHandle(usize);
 unsafe impl Send for SharedBufferHandle {}
 unsafe impl Sync for SharedBufferHandle {}
 impl SharedBufferHandle {
+    /// A handle that owns nothing, for slot fixtures that never reach `close`.
+    #[cfg(test)]
+    pub(super) fn detached_for_test() -> Self {
+        Self(0)
+    }
+
     /// Close a handle while already executing on the WebView UI thread. Used when the owner waiting
     /// for `create_shared_ring` has timed out and the callback can no longer hand the handle back.
     fn close_on_ui_thread(self, slot: u8) {
