@@ -48,9 +48,6 @@ not here.
 - **Failed plugin bundles (2026-09-10):** a bundle whose scan child failed (timeout, crash, unparsable)
   is remembered as failed and simply missing from the picker; only the log says why. Show it greyed
   with the reason, or keep the picker clean and leave it to the log?
-- **Audio Settings "sample rate: soon" (2026-09-10):** reads as a placeholder in a product; show the
-  live context rate read-only until the C2 selector lands?
-
 - **Minimum window:** at 960 × 600 with the keyboard visible, lane controls are vertically clipped. Improve minimum-height layout while keeping the normal five-lane proportions.
 - **Non-hue state cues (2026-09-22, built, unseen):** toast severity glyph (⚠ error / ✓ done) in a
   16 px accent column beside the stripe; the system lamp's warn ring; the record meter's 1 px ring at

@@ -121,7 +121,7 @@ export function AudioSettings() {
           }}
           aria-label="Audio input device"
         >
-          <option value="">{usingAsio() ? asioDeviceInfo()?.name ?? 'Default ASIO driver' : 'default input'}</option>
+          <option value="">{usingAsio() ? asioDeviceInfo()?.name ?? 'Default ASIO driver' : 'System default'}</option>
           <For each={inputDevices()}>{(d) => <option value={d.id}>{d.name}</option>}</For>
         </select>
         <Show when={deviceChannels() >= 2}>
@@ -135,7 +135,7 @@ export function AudioSettings() {
             }}
             aria-label="Input channel"
           >
-            <option value="">auto</option>
+            <option value="">Auto</option>
             <For each={Array.from({ length: deviceChannels() }, (_, i) => i)}>
               {(i) => <option value={String(i)}>Ch {i + 1}</option>}
             </For>
@@ -143,7 +143,7 @@ export function AudioSettings() {
         </Show>
       </div>
       <Show when={anyInputArmed()}>
-        <div class="audio-settings__hint" role="note">change applies on next input arm</div>
+        <div class="audio-settings__hint" role="note">Takes effect on the next GO LIVE.</div>
       </Show>
 
       <div class="audio-settings__row">
@@ -159,15 +159,15 @@ export function AudioSettings() {
           }}
           aria-label="Monitor output device"
         >
-          <option value="">{usingAsio() ? asioDeviceInfo()?.name ?? 'Default ASIO driver' : 'default output'}</option>
+          <option value="">{usingAsio() ? asioDeviceInfo()?.name ?? 'Default ASIO driver' : 'System default'}</option>
           <For each={outputDevices()}>{(d) => <option value={d.id}>{d.name}</option>}</For>
         </select>
       </div>
       <Show when={anyMonitorArmed()}>
-        <div class="audio-settings__hint" role="note">change applies on next monitor arm</div>
+        <div class="audio-settings__hint" role="note">Takes effect on the next GO LIVE.</div>
       </Show>
       <Show when={usingAsio()}>
-        <div class="audio-settings__hint" role="note">ASIO uses this driver for input and output. Switch off ASIO to choose Windows devices.</div>
+        <div class="audio-settings__hint audio-settings__hint--info" role="note">ASIO drives both input and output. Turn ASIO off to pick Windows devices.</div>
       </Show>
 
       <div class="audio-settings__row">
@@ -188,7 +188,7 @@ export function AudioSettings() {
         </select>
         <span class="audio-settings__readout">{bufferMs(bufferFrames())}</span>
       </div>
-      <div class="audio-settings__hint" role="note">Plugin processing block. The audio driver chooses its own device buffer.</div>
+      <div class="audio-settings__hint audio-settings__hint--info" role="note">The block plugins process in. The audio driver sets its own device buffer.</div>
 
       {/* Record-alignment trim — the RELEASE-BUILD surface for the by-ear record-latency offset, which was
           previously reachable only from the DEV `__lf.recordLatency.setOffsetMs` debug hook (so a shipped
@@ -290,12 +290,14 @@ export function AudioSettings() {
           so the host is locked while anything is armed — preventing an input-ASIO / output-WASAPI split
           (or vice versa, which on a seizing driver would fail the second arm). Disarm to change it. */}
       <Show when={asioOffered() && (anyInputArmed() || anyMonitorArmed())}>
-        <div class="audio-settings__hint" role="note">disarm to switch audio backend</div>
+        <div class="audio-settings__hint" role="note">Take every slot off INPUT LIVE to switch between ASIO and WASAPI.</div>
       </Show>
 
-      <div class="audio-settings__row audio-settings__row--disabled" aria-disabled="true">
+      {/* Read-only: the AudioContext runs at the output device's rate; a rate selector is not built. */}
+      <div class="audio-settings__row" title="BleepLoop runs at the audio device's sample rate.">
         <span class="audio-settings__label">sample rate</span>
-        <span class="audio-settings__soon">soon</span>
+        <span class="audio-settings__readout">{(engine.ctx.sampleRate / 1000).toFixed(1)} kHz</span>
+        <span class="audio-settings__soon">set by the audio device</span>
       </div>
 
       {/* Diagnostics (relocated from the command bar in W2): the read-only host/isolated/plugin/midi
