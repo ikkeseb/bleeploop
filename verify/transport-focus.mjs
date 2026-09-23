@@ -57,8 +57,10 @@ try {
   // 3. Real controls keep the key: Space in the BPM field does not arm; Tab to BPM plus + Enter
   //    activates that button, not PLAY/STOP.
   await page.getByRole('button', { name: 'BPM', exact: true }).click();
-  const bpmInput = page.locator('.transport__bpm-input');
-  await bpmInput.waitFor();
+  // The field takes focus one task after it mounts (Transport.tsx startEditFocused): wait for the
+  // focus, not the element, or Space lands on <body> and arms lane 1 — a race no hand can win.
+  await page.locator('.transport__bpm-input').waitFor();
+  await page.waitForFunction(() => document.activeElement?.classList.contains('transport__bpm-input'));
   await page.keyboard.press('Space');
   await page.waitForTimeout(150);
   assert.equal(await state(0), 'EMPTY', 'Space in the BPM input armed the looper');
