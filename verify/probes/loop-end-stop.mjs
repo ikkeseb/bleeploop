@@ -21,13 +21,26 @@ await probe(async ({ open }) => {
     await lf.looper.init();
     const ctx = lf.engine.ctx;
     await ctx.resume();
+    // The capture's base frame: Chromium can report a fresh node's FIRST quantum 128+ frames stale, and
+    // can repeat a quantum's currentFrame, either of which shifts every measured window. So the node
+    // says `ready` on its first quantum, and only the quantum after the main thread answers `arm` takes
+    // the base, floored at the previous quantum + 128 (the handshake playback-restart.mjs uses).
     const code = `class StopCapture extends AudioWorkletProcessor {
       constructor() {
         super(); this.samples = new Float32Array(sampleRate * 10); this.base = -1; this.length = 0;
-        this.port.onmessage = () => this.port.postMessage({base:this.base, samples:this.samples.slice(0,this.length)});
+        this.next = -1; this.ready = false; this.armRequested = false;
+        this.port.onmessage = ({ data }) => {
+          if (data === 'arm') this.armRequested = true;
+          else this.port.postMessage({ kind: 'data', base: this.base, samples: this.samples.slice(0, this.length) });
+        };
       }
       process(inputs) {
-        if (this.base < 0) this.base = currentFrame;
+        const frame = Math.max(currentFrame, this.next); this.next = frame + 128;
+        if (!this.ready) { this.ready = true; this.port.postMessage({ kind: 'ready' }); }
+        if (this.base < 0) {
+          if (!this.armRequested) return true;
+          this.base = frame; this.port.postMessage({ kind: 'armed' });
+        }
         const input = inputs[0]?.[0];
         const count = Math.min(128, this.samples.length - this.length);
         for(let i=0;i<count;i++) this.samples[this.length+i] = input?.[i] ?? 0;
@@ -49,13 +62,28 @@ await probe(async ({ open }) => {
           volume: 1, muted: false, reversed: false, fx: defaultFxStates() })) });
       await until(engineState.masterStartTime + 0.12);
     };
-    const capture = (input) => {
+    // Resolves with the reader once the capture is armed. Each reply's handler is in place before what
+    // triggers it: `ready` before the node is wired, `armed` before `arm`, `data` before `read`.
+    const capture = async (input) => {
       const node = new AudioWorkletNode(ctx, 'stop-capture');
+      const handlers = {};
+      node.port.onmessage = ({ data }) => handlers[data.kind]?.(data);
+      const reply = (kind, ms) => new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error(`capture ${kind} timed out after ${ms} ms`)), ms);
+        handlers[kind] = (data) => { clearTimeout(timer); resolve(data); };
+      });
+      const ready = reply('ready', 1500);
       input.connect(node); node.connect(ctx.destination);
+      await ready;
+      const armed = reply('armed', 1500);
+      node.port.postMessage('arm');
+      await armed;
       return async () => {
-        const data = await new Promise((resolve) => { node.port.onmessage = (event) => resolve(event.data); node.port.postMessage('read'); });
+        const data = reply('data', 5000);
+        node.port.postMessage('read');
+        const result = await data;
         input.disconnect(node); node.disconnect();
-        return data;
+        return result;
       };
     };
     const measure = (data, start, end) => {
@@ -84,7 +112,7 @@ await probe(async ({ open }) => {
   await page.getByRole('button', { name: 'Stop playing loops at loop end', exact: true }).click();
   check('Audio stops on loop edge while main thread is blocked', await page.evaluate(async () => {
     const p = window.__stopProbe; await p.load();
-    const read = p.capture(p.state.tracks[0].gain);
+    const read = await p.capture(p.state.tracks[0].gain);
     p.lf.looper.playStop(0); const end = p.lf.looper.trackInfo(0).stopAt;
     const recBefore = p.lf.looper.trackInfo(0).state;
     await p.lf.looper.recDub(0); p.lf.looper.reverse(0);
@@ -98,7 +126,7 @@ await probe(async ({ open }) => {
     return { pass: recBefore === 'PLAYING' && blocked && before.rms > 0.1 && after.peak < 0.00001 && Math.abs(frameError) <= 1 && p.lf.looper.trackInfo(0).state === 'STOPPED', frameError, before, after };
   }));
   check('Resume keeps the master phase', await page.evaluate(async () => {
-    const p = window.__stopProbe; const read = p.capture(p.state.tracks[0].gain);
+    const p = window.__stopProbe; const read = await p.capture(p.state.tracks[0].gain);
     p.lf.looper.playStop(0); await p.wait(120); const data = await read();
     let maxError = 0, count = 0;
     for (let i = 0; i < data.samples.length; i++) {
@@ -121,7 +149,7 @@ await probe(async ({ open }) => {
   }));
   check('Retiring reverse source stays audible until the stop edge', await page.evaluate(async () => {
     const p = window.__stopProbe; await p.load();
-    const read = p.capture(p.state.tracks[0].gain); p.lf.looper.reverse(0);
+    const read = await p.capture(p.state.tracks[0].gain); p.lf.looper.reverse(0);
     const retiring = p.state.tracks[0].retiringSources.size; p.lf.looper.playStop(0);
     const end = p.lf.looper.trackInfo(0).stopAt; await p.until(end + 0.15);
     const data = await read(), before = p.measure(data, end - 0.08, end), after = p.measure(data, end, end + 0.1);
@@ -129,7 +157,7 @@ await probe(async ({ open }) => {
   }));
   check('Two playing lanes stop on the same audio frame', await page.evaluate(async () => {
     const p = window.__stopProbe; await p.load(2);
-    const reads = [p.capture(p.state.tracks[0].gain), p.capture(p.state.tracks[1].gain)];
+    const reads = await Promise.all([p.capture(p.state.tracks[0].gain), p.capture(p.state.tracks[1].gain)]);
     p.lf.looper.stopAll();
     const ends = [p.lf.looper.trackInfo(0).stopAt, p.lf.looper.trackInfo(1).stopAt];
     await p.until(ends[0] + 0.15);
@@ -154,7 +182,7 @@ await probe(async ({ open }) => {
     check(resumeOther ? 'New playback restores a cancelled future click' : 'Stop All cancels the queued boundary click', await page.evaluate(async (restore) => {
       const p = window.__stopProbe; await p.load(2, 0);
       p.lf.looper.stop(1); p.lf.clock.setMetronome(true); p.lf.clock.setClickVolume(0.7);
-      const read = p.capture(p.lf.engine.masterGain);
+      const read = await p.capture(p.lf.engine.masterGain);
       const end = p.state.masterStartTime + 0.8;
       await p.until(end - 0.045); p.lf.looper.stopAll();
       if (restore) { await p.wait(5); p.lf.looper.playStop(1); }
