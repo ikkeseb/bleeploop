@@ -221,7 +221,7 @@ for (const t of tags) {
 // (imports can't drift), (b) ≥1 MIRRORS tag, or (c) an explicit `// MIRRORS-EXEMPT: <reason>` for guards that
 // genuinely port nothing (pure spec constants / self-contained format checks).
 // './harness/rig.ts' loads the real src/ modules, so a rig guard counts as an import.
-const SRC_IMPORT_RE = /['"](?:\.\.\/src\/|\.\/harness\/rig\.ts['"])/;
+const SRC_IMPORT_RE = /['"`](?:\.\.\/src\/|\.\/harness\/rig\.ts['"])/;
 const EXEMPT_RE = /MIRRORS-EXEMPT:/;
 const tagFiles = new Set(tags.map((t) => t.file));
 console.log(`\nfs-mirror-drift: coverage over ${guards.length} guard(s)`);
