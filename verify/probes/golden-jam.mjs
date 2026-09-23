@@ -35,8 +35,10 @@
  *      FIXED) commits at master length and repeats sample-exactly across it, RETAKE keeps rolling at the
  *      master whatever FIXED says, and PLAY on an idle transport re-anchors the master grid to frame 0
  *      while PLAY beside a playing lane joins the running phase (`looper.phaseValue()`)
- *  10. KEYS: real key presses through the window handler — a refused Space shows its reason on the
- *      selected lane only, changes nothing, and the cue leaves by itself
+ *  10. KEYS: real key presses through the window handler and the named actions — a refused Space shows
+ *      its reason on the selected lane only, changes nothing, and the cue leaves by itself; UNDO
+ *      (Backspace) restores the exact pre-dub PCM and redoes; next/prev wrap at both ends; CLEAR (Delete)
+ *      refuses a single press, a press after another key or after the window, and clears on a double press
  *
  * KNOWN LIMITS — do not read a green run as more than it is:
  *   - Everything measured comes from RECORDED PCM plus dispatcher state. Loop PLAYBACK is not captured
@@ -934,14 +936,71 @@ await probe(async ({ open }) => {
     const cueGoneAt = await waitFor(
       page,
       () => (document.querySelector('.lp-lane__wellmsg.is-cue') === null ? performance.now() : null),
-      5000,
+      6000,
       'the refusal cue to go away',
     );
+    // The cue lives 1.6 s; the upper bound leaves room for CDP round trips on a loaded machine
+    // (2.6 s measured once while other probes ran).
     check(
       'the refusal cue went away by itself after a moment',
-      cueGoneAt - cueFrom > 800 && cueGoneAt - cueFrom < 3000,
+      cueGoneAt - cueFrom > 800 && cueGoneAt - cueFrom < 4500,
       `${(cueGoneAt - cueFrom).toFixed(0)} ms`,
     );
+
+    // UNDO = Backspace on the selected lane: its PCM goes back, sample for sample, to the take measured
+    // before the overdub (`base`); a second Backspace puts the overdub (`dubbed`) back.
+    const samePcm = (a, b) =>
+      a.hits.length === b.hits.length && a.hits.every((h, k) => h === b.hits[k] && a.amps[k] === b.amps[k]);
+    await page.keyboard.press('Backspace');
+    const keyUndone = await probe(0);
+    check('Backspace (UNDO) restored the layer under the overdub', samePcm(keyUndone, base),
+      `peak ${keyUndone.peak.toFixed(3)}, ${keyUndone.hits.length} impulses`);
+    await page.keyboard.press('Backspace');
+    const keyRedone = await probe(0);
+    check('a second Backspace put the overdub back', samePcm(keyRedone, dubbed), `peak ${keyRedone.peak.toFixed(3)}`);
+
+    // NEXT / PREV = ↓ ↑, PageDown PageUp, → ←: from track 1 the selection steps and wraps at both ends.
+    const navSeen = [];
+    for (const key of ['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'PageDown', 'ArrowLeft', 'ArrowRight', 'ArrowRight']) {
+      await page.keyboard.press(key);
+      navSeen.push(await page.evaluate(() => window.__lf.looper.selectedTrack() + 1));
+    }
+    check('the arrow and page keys step the selected track and wrap at both ends',
+      navSeen.join(',') === '5,1,5,1,2,1,2,3', `tracks ${navSeen.join(',')} (want 5,1,5,1,2,1,2,3)`);
+
+    // CLEAR = Delete, guarded: a single press only arms and says so on the lane, another key between the
+    // two presses breaks the guard, so does a press after the confirm window; two in a row clear. On a
+    // COPY of track 1 in the first free lane, so the jam's own lanes stay as they were.
+    const clearLane = await page.evaluate(() => window.__lf.looper.copy(0));
+    const laneNow = () =>
+      page.evaluate(
+        (i) => ({
+          state: window.__lf.looper.stateOf(i),
+          cue: document.querySelectorAll('.lp-lane')[i]?.querySelector('.lp-lane__wellmsg.is-cue')?.textContent?.trim() ?? '',
+        }),
+        clearLane,
+      );
+    await page.keyboard.press(String(clearLane + 1));
+    await page.keyboard.press('Delete');
+    const oneDelete = await laneNow();
+    check('one Delete does not clear; the lane says to press again',
+      clearLane >= 0 && oneDelete.state !== 'EMPTY' && oneDelete.cue === 'press again to clear',
+      `lane ${clearLane + 1}: state=${oneDelete.state}, cue="${oneDelete.cue}"`);
+    await page.keyboard.press('ArrowDown');
+    await page.keyboard.press('ArrowUp');
+    await page.keyboard.press('Delete');
+    const brokenDelete = await laneNow();
+    check('another key between the two Deletes breaks the guard',
+      brokenDelete.state !== 'EMPTY' && brokenDelete.cue === 'press again to clear', `state=${brokenDelete.state}`);
+    await page.waitForTimeout(3000); // past the 2.5 s confirm window
+    await page.keyboard.press('Delete');
+    const lateDelete = await laneNow();
+    check('a Delete after the confirm window arms again instead of clearing',
+      lateDelete.state !== 'EMPTY' && lateDelete.cue === 'press again to clear', `state=${lateDelete.state}`);
+    await page.keyboard.press('Delete');
+    const doubleDelete = await laneNow();
+    check('two Deletes in a row clear the track', doubleDelete.state === 'EMPTY' && doubleDelete.cue === '',
+      `state=${doubleDelete.state}, cue="${doubleDelete.cue}"`);
 
     await page.evaluate(() => window.__lf.looper.playStop(0));
     check('playStop resumed the track', (await page.evaluate(() => window.__lf.looper.trackInfo(0).state)) === 'PLAYING');

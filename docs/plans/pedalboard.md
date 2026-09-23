@@ -2,19 +2,19 @@
 
 Decided 2026-09-23 from the product lens over that day's audit. The promise heads `README.md`: a
 guitarist's hands are on the guitar, and today every looper action needs the PC keyboard or the
-mouse. MIDI handles only CC64/1/123 and bend (`src/audio/midi.ts`); the keys bind only
-Esc/Space/Enter/1–5 (`src/app/transport-keys.ts`). `src/audio/looper/looper.ts` already exposes every
-action, so the milestone is adapters: capture, compensation and the rig-guarded algorithms stay
-untouched, and nothing here needs the rig to prove correctness. This file is deleted when the
-milestone lands; what still binds moves to the briefings.
+mouse. MIDI handles only CC64/1/123 and bend (`src/audio/midi.ts`); the keys reach the named actions
+of `src/app/actions.ts` through `src/app/transport-keys.ts`. `src/audio/looper/looper.ts` already
+exposes every action, so the milestone is adapters: capture, compensation and the rig-guarded
+algorithms stay untouched, and nothing here needs the rig to prove correctness. This file is
+deleted when the milestone lands; what still binds moves to the briefings.
 
 ## Pieces, in build order
 
 | # | Piece | Size | Seam | Proof |
 |---|---|---|---|---|
 | 1 | Refusal cue — **landed**: `refuseOnLane` in `src/ui/looper/gates.ts`, drawn in the lane's well by `Looper.tsx` | M | `src/ui/looper/` | `pnpm verify:jam` § keys: a refused Space shows its reason on the selected lane only, and the cue leaves by itself |
-| 2 | Action layer + keys: one named-action table (REC/DUB, PLAY/STOP, UNDO, CLEAR with a hold or double-press guard, next/prev track, ALL PLAY, STOP ALL, GO LIVE) dispatching to the looper API; new bindings for UNDO, next/prev, CLEAR | S | `src/app/transport-keys.ts` | `pnpm verify:jam` presses the keys through the real dispatchers: UNDO restores the previous layer, next/prev wraps, CLEAR refuses without its guard |
-| 3 | MIDI learn: CC/note → action per port and channel, persisted in localStorage; a learned message is consumed before the CC64/1/123 branch, unmapped traffic behaves as today; a learn row in Audio Settings | M | `src/audio/midi.ts`, new `src/audio/midi-actions.ts` (not yet built), `src/ui/settings/` | browser probe feeds raw bytes to an `@public` handler: learn a CC, reload, the CC fires the action; unmapped CC64/1/123 still reach the router; a CC mapped onto 64 does not also sustain |
+| 2 | Action layer + keys — **landed**: the named-action table in `src/app/actions.ts`; ↑↓ / PgUp PgDn / ←→ next/prev, Backspace UNDO, Delete twice CLEAR in `src/app/transport-keys.ts` | S | `src/app/` | `pnpm verify:jam` § keys: UNDO restores the exact pre-dub PCM and redoes, next/prev wrap, CLEAR refuses a single, interrupted or late press and clears on a double press |
+| 3 | MIDI learn: CC/note → action (`runAction`) per port and channel, persisted in localStorage; a learned message is consumed before the CC64/1/123 branch, unmapped traffic behaves as today; a learn row in Audio Settings | M | `src/audio/midi.ts`, new `src/audio/midi-actions.ts` (not yet built), `src/ui/settings/` | browser probe feeds raw bytes to an `@public` handler: learn a CC, reload, the CC fires the action; unmapped CC64/1/123 still reach the router; a CC mapped onto 64 does not also sustain |
 | 4 | Rig recall, frontend only: restore each slot's plugin path and input channel at launch through the existing load path; GO LIVE stays one press. Plugin tone state excluded | M | `src/audio/instrument.ts`, `src/audio/native-io.ts` | native probe under `tauri dev` (a plugin, no guitar): restart, both slots reload the same path and channel; arming stays with STATUS Stops 5/6 |
 | 5 | Help: a "Pedals" section (keystroke footswitches, MIDI learn); first screen ordered by the promise | S | `src/ui/settings/Help.tsx` | eye lap |
 

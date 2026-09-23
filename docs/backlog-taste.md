@@ -46,9 +46,11 @@ not here.
   de-emphasis is open — rebalance, don't remove (default-hidden / slimmer strip).
 - **Plugin drawer:** one by-eye lap with a real plugin drawer (params scroll INSIDE the card, header
   pinned); slot vertical-expand.
-- **Keyboard transport feel:** 1–5 / Space / Enter (drum mode: pads own 1–4, only 5 selects); a refused
-  Space/Enter shows its reason for 1.6 s as an amber boxed note in the selected lane's well, with an
-  amber lane edge (2026-09-23, built, unseen) — readable from the guitar? right colour and length?
+- **Keyboard transport feel:** 1–5, ↑↓ (or PgUp/PgDn, ←→) next/prev, Space, Enter, Backspace = UNDO,
+  Delete twice = CLEAR (drum mode: pads own 1–4, only 5 selects). A refused key shows its reason for
+  1.6 s as an amber boxed note in the selected lane's well with an amber lane edge; the first Delete
+  says "press again to clear" for the 2.5 s window (2026-09-23, built, unseen) — readable from the
+  guitar? right colour and length? Backspace/Delete the right keys?
 - **COPY pill (2026-09-18):** "⧉ COPY" after REV in the lane's pill row, hidden while no lane is
   EMPTY, always targets the first EMPTY lane — right place and word? Floated: a right-click
   context menu (none exists in the app yet) for picking the target lane. The pill row with DUB + REV
@@ -98,8 +100,6 @@ not here.
 - Undo as visible history (layer count on ↶ DUB); scenes/snapshots switched on the loop boundary;
   songs as chained scenes; click "01" to name a track; piano hidden by default; synth pills gone once a
   plugin is loaded.
-- Pedal mode: most USB footswitches send keystrokes, so 1–5/Space/Enter already work — a Help section
-  + a one-key UNDO binding; MIDI-CC foot control next.
 - Input FX (owner request): delay/stutter/reverb BEFORE the record tap, printed into the take, beside
   today's per-track post FX. Open design: the native monitor bypasses Web Audio, so the player would
   not hear what is recorded; C and grid-synced stutter need their own answer.

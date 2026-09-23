@@ -32,6 +32,18 @@ import './plugin-controls.css';
 const PARAM_PREVIEW_COUNT = 12;
 const GAIN_MAX = 1.5;
 
+// Each mounted PluginBar's GO LIVE press, by slot, so the named-action table (`src/app/actions.ts`)
+// runs the cap's own path (settings read, single-flight, toasts) rather than a copy of it.
+const livePresses: [(() => boolean) | null, (() => boolean) | null] = [null, null];
+
+/**
+ * Press slot `slot`'s GO LIVE / INPUT LIVE cap, exactly as a click would. False when that slot shows no
+ * enabled cap: no plugin loaded, the browser build, or a load or arm in flight.
+ */
+export function pressGoLive(slot: 0 | 1): boolean {
+  return livePresses[slot]?.() ?? false;
+}
+
 /** Format a linear gain (0..1.5) as a dB string for the output readout. Uses a single U+2212 minus
  * glyph throughout (matches the −∞ branch), and shows plain "0.0 dB" at unity. */
 function gainDb(v: number): string {
@@ -159,6 +171,21 @@ export function PluginBar(props: {
     } finally {
       setLiveBusy(false);
     }
+  }
+
+  // The cap's press for pressGoLive, with the button's own disabled rule. A swap remounts the bar, so
+  // the old registration only clears itself if no newer bar has replaced it.
+  if (platform.pluginHost.available) {
+    const slot = props.slot;
+    const press = () => {
+      if (sourcePending() || liveBusy()) return false;
+      void toggleLive();
+      return true;
+    };
+    livePresses[slot] = press;
+    onCleanup(() => {
+      if (livePresses[slot] === press) livePresses[slot] = null;
+    });
   }
 
   // A fresh dropdown pick starts itself: hearing yourself through the effect is the point of loading

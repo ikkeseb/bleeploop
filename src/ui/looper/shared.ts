@@ -31,13 +31,16 @@ export function anyTrackIn(...states: TrackState[]): boolean {
   );
 }
 
+/** How long a "press twice to destroy a take" confirm stays armed (lane CLR, ✕ ALL, the CLEAR key). */
+export const CONFIRM_WINDOW_MS = 2500;
+
 /**
  * Two-step confirm latch. The first `trigger()` only ARMS (opens a `windowMs` window and returns); a
  * second within it runs `action` and disarms. The window auto-closes. Shared by the per-track CLR and
  * the command bar's ✕ ALL so "press twice to destroy a take" behaves identically — no blocking confirm.
  * Registers its own `onCleanup`, so call it during component setup.
  */
-export function createTwoStepConfirm(action: () => void, windowMs = 2500) {
+export function createTwoStepConfirm(action: () => void, windowMs = CONFIRM_WINDOW_MS) {
   const [armed, setArmed] = createSignal(false);
   let timer: ReturnType<typeof setTimeout> | undefined;
   const trigger = () => {

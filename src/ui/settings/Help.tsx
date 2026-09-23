@@ -69,8 +69,9 @@ export function Help() {
       <section class="help__sec">
         <h3 class="help__h">Looper keys <span class="help__tag">work even with the keyboard hidden</span></h3>
         <ul class="help__list">
-          <li><kbd class="help__kbd">1</kbd>–<kbd class="help__kbd">5</kbd> select a track</li>
+          <li><kbd class="help__kbd">1</kbd>–<kbd class="help__kbd">5</kbd> select a track &middot; <kbd class="help__kbd">↑</kbd> <kbd class="help__kbd">↓</kbd> (or <kbd class="help__kbd">PgUp</kbd> <kbd class="help__kbd">PgDn</kbd>, <kbd class="help__kbd">←</kbd> <kbd class="help__kbd">→</kbd>) step to the previous / next one</li>
           <li><kbd class="help__kbd">Space</kbd> records / overdubs the selected track &middot; <kbd class="help__kbd">Enter</kbd> plays / stops it</li>
+          <li><kbd class="help__kbd">Backspace</kbd> undoes its last overdub (again to redo) &middot; <kbd class="help__kbd">Delete</kbd> twice clears it</li>
           <li>In drum mode the pads take <kbd class="help__kbd">1</kbd>–<kbd class="help__kbd">4</kbd>, so only <kbd class="help__kbd">5</kbd> selects a track there</li>
         </ul>
       </section>

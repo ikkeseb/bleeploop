@@ -2,7 +2,7 @@ import { activeIsDrum } from '../audio/instrument';
 import { looper } from '../audio/looper/looper';
 import { DRUM_KIT } from '../audio/synths/drum';
 import * as layoutStore from '../ui/layout/layout-store';
-import { dismissLaneCue, playStopGate, recDubGate, refuseOnLane } from '../ui/looper/gates';
+import { runAction, type ActionId } from './actions';
 
 export interface TransportKeysOptions {
   /** Escape was pressed — the app closes whichever popover is open. Never a play key. */
@@ -25,6 +25,24 @@ export interface TransportKeys {
    */
   returnFocus: (el: HTMLElement | undefined) => void;
 }
+
+/**
+ * Transport key → named action (`actions.ts`), on the selected track. The arrows and PageUp/PageDown
+ * are what page-turner footswitches send; Backspace/Delete are a keyboard's take-back keys (CLEAR
+ * wants a second press, see actions.ts). None is a note-play key, a drum pad, Esc or a digit.
+ */
+const KEY_ACTIONS: Readonly<Record<string, ActionId>> = {
+  ' ': 'recDub',
+  Enter: 'playStop',
+  Backspace: 'undo',
+  Delete: 'clear',
+  ArrowDown: 'nextTrack',
+  ArrowRight: 'nextTrack',
+  PageDown: 'nextTrack',
+  ArrowUp: 'prevTrack',
+  ArrowLeft: 'prevTrack',
+  PageUp: 'prevTrack',
+};
 
 /**
  * Keyboard looper transport: an always-on WINDOW handler so transport survives with the keyboard pane
@@ -54,6 +72,8 @@ export function installTransportKeys(opts: TransportKeysOptions): TransportKeys 
     //   popover trigger after Escape), so Space after Escape arms REC instead of re-opening;
     // - tabindex=-1 elements (the Help/Settings panels, focused on open for screen readers) are
     //   focus targets, not controls, so the play path stays live behind an open popover.
+    // The arrows and PageUp/PageDown lose nothing to this: every widget that binds them (sliders, the
+    // divider) keeps them above, and a focused panel never scrolled by key (its scroller is a child).
     const el = document.activeElement as HTMLElement | null;
     if (el && el !== document.body) {
       const tag = el.tagName;
@@ -63,23 +83,12 @@ export function installTransportKeys(opts: TransportKeysOptions): TransportKeys 
       }
     }
 
-    // Space = REC/DUB, Enter = PLAY/STOP on the selected track. preventDefault stops Space page-scroll.
-    // A refused press says why on the selected lane and the looper's status line (the same reason the
-    // lane button carries) instead of doing nothing; an accepted one takes a stale reason down.
-    if (e.key === ' ' || e.code === 'Space') {
+    // The transport keys run their named action (KEY_ACTIONS). preventDefault stops Space, the arrows
+    // and PageUp/PageDown from scrolling. A refused action says why on the selected lane (actions.ts).
+    const action = KEY_ACTIONS[e.code === 'Space' ? ' ' : e.key];
+    if (action) {
       e.preventDefault();
-      const gate = recDubGate(looper.selectedTrack());
-      if (!gate.ok) return refuseOnLane(looper.selectedTrack(), gate.reason);
-      dismissLaneCue();
-      looper.recDubSelected();
-      return;
-    }
-    if (e.key === 'Enter') {
-      e.preventDefault();
-      const gate = playStopGate(looper.selectedTrack());
-      if (!gate.ok) return refuseOnLane(looper.selectedTrack(), gate.reason);
-      dismissLaneCue();
-      looper.playStopSelected();
+      runAction(action);
       return;
     }
 

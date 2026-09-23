@@ -25,6 +25,8 @@ const REFUSAL = {
   reversed: refuse('overdub unavailable while reversed, switch to forward first'),
   otherRecording: refuse('another track is recording, stop it first'),
   empty: refuse('nothing to play, record first'),
+  noUndo: refuse('nothing to undo, overdub first'),
+  noClear: refuse('nothing to clear'),
 } as const;
 
 /** Any lane capturing (RECORDING incl. armed/listening, or OVERDUBBING) other than `except`. */
@@ -59,6 +61,19 @@ export function recDubGate(i: number): Gate {
 /** May the PLAY/STOP cap of lane `i` act now? Only an EMPTY lane has nothing to start or stop. */
 export function playStopGate(i: number): Gate {
   return looper.track(i)().state === 'EMPTY' ? REFUSAL.empty : OK;
+}
+
+/** May UNDO (the lane's ↶ DUB) act on lane `i`? Only with an overdub to swap, and not while ending. */
+export function undoGate(i: number): Gate {
+  const t = looper.track(i)();
+  if (!t.canUndo) return REFUSAL.noUndo;
+  if (t.stopAt !== null) return REFUSAL.stopping;
+  return OK;
+}
+
+/** May CLEAR act on lane `i`? Only an EMPTY lane has nothing to clear; the confirm is the caller's. */
+export function clearGate(i: number): Gate {
+  return looper.track(i)().state === 'EMPTY' ? REFUSAL.noClear : OK;
 }
 
 // The looper's polite live-region text (rendered by Looper.tsx). `equals: false` so the same refusal

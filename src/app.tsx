@@ -67,8 +67,9 @@ export function App() {
     const stopAutosave = autosave.start();
     onCleanup(stopAutosave);
     setCrossOriginIsolated(self.crossOriginIsolated === true);
-    // Keyboard transport (Space/Enter/1–5) + the Escape popover close + the pointer-blur discipline:
-    // `src/app/transport-keys.ts`. Window-level, so it never depends on what is focused or mounted.
+    // Keyboard transport (the named actions of `src/app/actions.ts`, plus 1–5) + the Escape popover
+    // close + the pointer-blur discipline: `src/app/transport-keys.ts`. Window-level, so it never
+    // depends on what is focused or mounted.
     transportKeys = installTransportKeys({
       onEscape: () => {
         if (settingsOpen()) setSettingsOpen(false);
