@@ -1,38 +1,13 @@
 # Work order: real-code gates and agent hygiene (OPEN)
 
-Pieces 3-6 of the 2026-09-23 fresh-eyes pass over code, gates, docs and agent workflow (pieces 1 and 2,
-guards that drive the real looper and one probe harness with every probe automated, landed;
-`verify/README.md` owns both). Build them in this order, one
+Pieces 4-6 of the 2026-09-23 fresh-eyes pass over code, gates, docs and agent workflow (pieces 1-3
+landed: guards that drive the real looper and one probe harness, both owned by `verify/README.md`, and
+comments/docs that state current intent). Build them in this order, one
 piece per commit series, gates green before each push. Piece 6 waits on an owner decision. Taste findings from that day live in `docs/backlog-taste.md` and the hands-free milestone in
 `docs/plans/pedalboard.md`; neither is repeated here. Delete this file when the last piece lands, after
 folding what still binds into `verify/README.md`, the briefings or a call-site comment.
 
-Pieces 3 and 5 may edit `src/audio/`: the dev-app rule in `AGENTS.md` applies.
-
-## 3. Comments and docs state current intent
-
-**Why.** 27 % of TypeScript lines are comments, half or more in `src/platform/host.ts`,
-`src/audio/clock.ts` and `src/audio/looper/looper.ts`. About 70 comment lines carry history (wave and
-phase labels such as `W3:` and `P11.3`, "the old topbar … is gone"). Comments still describe glass
-cards and an aurora background after the 2026-09-23 restyle; `--glass*` survive as legacy token names
-in `src/app.css`. An agent reads a comment as an instruction, so a stale one misleads. The docs have
-the same problem: dated correction notes in `docs/ARCHITECTURE.md`; the record-latency formula owned by
-`STATUS.md` Stop 1, though it binds whatever the lap says; a looper-UI spec that is a mockup production
-has deliberately left, read together with a delta list in `src/ui/AGENTS.md`.
-
-**Do.**
-- Sweep the comments so each states what the code does now and why. A cheaper agent may run the sweep;
-  the orchestrating session reviews every hunk.
-- Move the formula into the header of `src/audio/record-latency-math.ts`; `STATUS.md` and
-  `src/audio/AGENTS.md` point there.
-- Strip the dated correction notes from `docs/ARCHITECTURE.md`.
-- Propose retiring the mockup as the spec, with the contact sheet and the `src/app.css` tokens as the
-  visual reference. The owner confirms before the mockup file goes.
-- Extend `verify/guards/docs.mjs` to fail when the invariant titles in `AGENTS.md` and
-  `docs/ARCHITECTURE.md` diverge.
-
-**Done when** every remaining wave/phase label and glass/aurora mention in `src/` states a current
-fact, the formula has one home, and `pnpm check` is green.
+Piece 5 edits `src/audio/`: the dev-app rule in `AGENTS.md` applies.
 
 ## 4. Playbooks become commands
 
