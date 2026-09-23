@@ -1,178 +1,199 @@
-// fs-undo-verify.mjs — deterministic guard for the one-level overdub undo/redo (looper/machine.ts).
+// One-level overdub undo/redo: the REAL looper (src/audio/looper/machine.ts startOverdub's snapshot,
+// undoLastOverdub, swapLiveSource, clear, rejectRecordLoss) under the verify rig. The first take is a
+// frame code, the overdub a constant, so every buffer state is identifiable frame by frame.
 //
-// PORT of the undo state transitions (mirrors looper/machine.ts: startOverdub's undoBuf snapshot, the
-// overdub sum + boundary swap, endOverdub commit, undoLastOverdub's record<->undoBuf toggle, and clear).
-// A port because looper.ts (split into src/audio/looper/{state,capture,peaks,playback,machine,mixer}.ts
-// + a facade on 2026-07-01) needs AudioContext/ringbuf/Tone and
-// the buffers are private. The model below mirrors the SAME array ops; if you change that logic, update
-// this in lockstep. Run: node fs-undo-verify.mjs
-//
-// Proves: undoBuf is snapshotted at startOverdub as a SEPARATE copy (overdub summing never mutates it);
-// undo restores the loop to BEFORE the whole overdub session (not the last pass); undo/redo is a clean
-// toggle; frame count is preserved; a fresh session re-baselines undoBuf; the guards (null buffer / wrong
-// state) make undo a no-op; clear() drops the undo buffer.
+// What this PROVES:
+//   - DUB snapshots the pre-dub loop as a separate copy: summing and mid-session boundary commits never
+//     touch it; undo removes the whole session, not the last pass                           [A]
+//   - undo/redo is a clean toggle; a PLAYING lane swaps its source on the next boundary to exactly the
+//     restored loop                                                                        [A]
+//   - a fresh session re-baselines the snapshot to the current loop                          [B]
+//   - undo is a no-op with no snapshot, while OVERDUBBING and while a loop-end stop is pending [C]
+//   - STOPPED undoes in place without starting playback; PLAY plays the restored loop; CLEAR drops it [D]
+//   - an overdub rejected for capture loss restores the pre-layer loop AND the previous undo target [E]
 
-import assert from 'node:assert';
+import { bootLooper } from './harness/rig.ts';
 
-let passed = 0;
-let failed = 0;
-function check(name, fn) {
-  try {
-    fn();
-    passed++;
-  } catch (e) {
-    failed++;
-    console.error(`FAIL: ${name}\n  ${e.message}`);
+let fails = 0, checks = 0;
+function ok(name, cond, detail = '') { checks++; if (!cond) { fails++; console.log(`  FAIL  ${name}  ${detail}`); } }
+
+const code = (frame) => ((frame % 8192) + 1) / 16384;
+const DUB = 1 / 64;
+
+async function playingLoop() {
+  const rig = await bootLooper({ sampleRate: 48000, startTime: 20 });
+  rig.clock.setBpm(200);
+  rig.setInput(code);
+  const mark = rig.draws().length;
+  await rig.looper.recDub(0);
+  const downbeat = rig.draws().slice(mark).find((b) => b.countLeft === 4).time + 4 * 0.3;
+  await rig.advanceTo(downbeat + 1.2 + 0.05);
+  await rig.looper.recDub(0);
+  await rig.advance(0.25);
+  const master = rig.looper.masterLengthFrames();
+  const period = master / rig.sr;
+  const next = () => {
+    const start = rig.state.engineState.masterStartTime;
+    return start + (Math.floor((rig.now() - start) / period) + 1) * period;
+  };
+  return { rig, master, period, next, t: rig.tracks[0] };
+}
+const snap = (buf, master) => Float32Array.from(buf.subarray(0, master));
+const same = (a, b, master) => { for (let k = 0; k < master; k++) if (a[k] !== b[k]) return false; return true; };
+const canUndo = (rig) => rig.looper.trackInfo(0).canUndo;
+
+/** DUB from mid-period, across `boundaries` boundary swaps, then a quarter period more. */
+async function overdubSession(loop, boundaries, input = DUB) {
+  const { rig } = loop;
+  rig.setInput(input);
+  await rig.advanceTo(loop.next() - loop.period / 2);
+  await rig.looper.recDub(0);
+  for (let b = 0; b < boundaries; b++) await rig.advanceTo(loop.next() + 0.01);
+  await rig.advance(loop.period / 4);
+  await rig.looper.recDub(0);
+  await rig.advance(0.02);
+  rig.setInput(0);
+}
+
+console.log('=== A. snapshot, multi-pass session, undo/redo toggle, live source swap ===');
+{
+  const loop = await playingLoop();
+  const { rig, master, t } = loop;
+  ok('A a fresh take has nothing to undo', !canUndo(rig) && t.undoBuf === null);
+  const pre = snap(t.record, master);
+  rig.setInput(DUB);
+  await rig.advanceTo(loop.next() - loop.period / 2);
+  await rig.looper.recDub(0);
+  ok('A DUB snapshots the pre-dub loop', t.undoBuf !== null && same(t.undoBuf, pre, master));
+  ok('A the snapshot is a separate copy', t.undoBuf !== t.record && t.undoBuf.buffer !== t.overdubBuf.buffer &&
+    t.undoBuf.buffer !== t.record.buffer);
+  ok('A no undo while OVERDUBBING', !canUndo(rig));
+  await rig.advanceTo(loop.next() - 0.01);
+  ok('A summing leaves the loop alone until the boundary', same(t.record, pre, master));
+  await rig.advanceTo(loop.next() + 0.01);
+  ok('A the mid-session boundary commits the layer', !same(t.record, pre, master));
+  ok('A the snapshot still holds the pre-SESSION loop', same(t.undoBuf, pre, master));
+  await rig.advanceTo(loop.next() - loop.period / 2);
+  await rig.looper.recDub(0);
+  await rig.advance(0.02);
+  rig.setInput(0);
+  const dubbed = snap(t.record, master);
+  ok('A the session committed one period of layer', dubbed.reduce((s, v, k) => s + v - pre[k], 0) === master * DUB,
+    `added=${dubbed.reduce((s, v, k) => s + v - pre[k], 0) / DUB} frames`);
+  ok('A undo is available after the commit', canUndo(rig));
+  await rig.advanceTo(loop.next() + 0.01); // finishOverdub's restart is live
+  for (const [step, want, label] of [[1, pre, 'undo'], [2, dubbed, 'redo'], [3, pre, 'undo again']]) {
+    const mark = rig.sources().length;
+    const boundary = loop.next();
+    rig.looper.undoLastOverdub(0);
+    ok(`A ${step} ${label} sets the loop`, same(t.record, want, master));
+    ok(`A ${step} ${label} keeps the frame count`, t.lengthFrames === master && rig.looper.masterLengthFrames() === master);
+    const src = rig.sources()[mark];
+    ok(`A ${step} ${label} swaps the source on the next boundary`, rig.sources().length === mark + 1 &&
+      Math.abs(src.startTime - boundary) < 1e-9 && src.offset === 0, `start=${src?.startTime} boundary=${boundary}`);
+    ok(`A ${step} ${label}: the new source plays exactly the loop`, same(src.buffer.getChannelData(0), want, master) &&
+      src.buffer.length === master);
+    ok(`A ${step} ${label} leaves undo available`, canUndo(rig));
+    await rig.advanceTo(boundary + 0.01);
   }
 }
-const arr = (t) => Array.from(t.record);
-const eq = (t, expected) => assert.deepStrictEqual(arr(t), expected);
 
-// MIRRORS: src/audio/looper/machine.ts@680-692 sha256:3f15be4ec4d701d7  (startOverdub — undoBuf snapshot)
-// MIRRORS: src/audio/looper/machine.ts@749-767 sha256:acb253ec85a4c162  (undoLastOverdub — record<->undoBuf swap)
-// ===== BEGIN PORT of looper/machine.ts undo logic =====
-function mkTrack(record) {
-  return { record: Float32Array.from(record), undoBuf: null, overdubBuf: null, state: 'PLAYING', master: record.length, stopAt: null };
+console.log('=== B. a fresh session re-baselines the snapshot ===');
+{
+  const loop = await playingLoop();
+  const { rig, master, t } = loop;
+  await overdubSession(loop, 0);
+  const first = snap(t.record, master);
+  rig.setInput(DUB);
+  await rig.advanceTo(loop.next() + loop.period / 4);
+  await rig.looper.recDub(0);
+  ok('B the new session snapshots the current loop', same(t.undoBuf, first, master));
+  await rig.advance(loop.period / 4);
+  await rig.looper.recDub(0);
+  await rig.advance(0.02);
+  ok('B the second layer committed', !same(t.record, first, master));
+  rig.looper.undoLastOverdub(0);
+  ok('B undo restores the prior committed loop, not the take', same(t.record, first, master));
 }
-function canUndo(t) {
-  return t.undoBuf !== null && (t.state === 'PLAYING' || t.state === 'STOPPED');
-}
-function startOverdub(t) {
-  const m = t.master;
-  t.overdubBuf = t.record.slice(0, m); // working copy (summed into)
-  t.undoBuf = t.record.slice(0, m); // SEPARATE pre-dub snapshot for undo
-  t.state = 'OVERDUBBING';
-}
-function sumInto(t, layer) {
-  // mirrors the worklet summing incoming PCM into overdubBuf while OVERDUBBING (looper/capture.ts:271-279)
-  for (let k = 0; k < t.master; k++) t.overdubBuf[k] += layer[k];
-}
-function commitSwap(t) {
-  // scheduleOverdubSwap commits the summed layer while retaining the same working copy.
-  t.record.set(t.overdubBuf.subarray(0, t.master), 0);
-}
-function endOverdub(t) {
-  t.record.set(t.overdubBuf.subarray(0, t.master), 0);
-  t.overdubBuf = null;
-  t.state = 'PLAYING';
-}
-function undoLastOverdub(t) {
-  if (!t.undoBuf) return;
-  if (t.stopAt !== null) return;
-  if (t.state !== 'PLAYING' && t.state !== 'STOPPED') return;
-  const prev = t.record.slice(0, t.master);
-  t.record.set(t.undoBuf.subarray(0, t.master), 0);
-  t.undoBuf = prev;
-}
-function clear(t) {
-  t.record.fill(0);
-  t.overdubBuf = null;
-  t.undoBuf = null;
-  t.state = 'EMPTY';
-}
-// ===== END PORT =====
 
-// ---------------------------------------------------------------------------
-// 1. Single overdub pass: snapshot is separate, summing doesn't touch undoBuf.
-// ---------------------------------------------------------------------------
-let t = mkTrack([1, 2, 3, 4]);
-check('fresh take: nothing to undo', () => assert.strictEqual(canUndo(t), false));
-startOverdub(t);
-check('startOverdub snapshots pre-dub into undoBuf', () =>
-  assert.deepStrictEqual(Array.from(t.undoBuf), [1, 2, 3, 4]));
-sumInto(t, [10, 10, 10, 10]);
-check('summing mutates overdubBuf', () => assert.deepStrictEqual(Array.from(t.overdubBuf), [11, 12, 13, 14]));
-check('summing does NOT mutate undoBuf (separate copy)', () =>
-  assert.deepStrictEqual(Array.from(t.undoBuf), [1, 2, 3, 4]));
-check('summing does NOT mutate record yet', () => eq(t, [1, 2, 3, 4]));
-endOverdub(t);
-check('endOverdub commits summed layer to record', () => eq(t, [11, 12, 13, 14]));
-check('canUndo true after a committed overdub (PLAYING)', () => assert.strictEqual(canUndo(t), true));
+console.log('=== C. undo is a no-op without a snapshot, while OVERDUBBING, with a loop-end stop pending ===');
+{
+  const loop = await playingLoop();
+  const { rig, master, t } = loop;
+  const take = snap(t.record, master);
+  const mark = rig.sources().length;
+  rig.looper.undoLastOverdub(0);
+  ok('C no snapshot: loop and playback untouched', same(t.record, take, master) && rig.sources().length === mark);
+  rig.setInput(DUB);
+  await rig.advanceTo(loop.next() - loop.period / 2);
+  await rig.looper.recDub(0);
+  await rig.advanceTo(loop.next() + 0.01);
+  const mid = snap(t.record, master);
+  const snapshot = t.undoBuf;
+  rig.looper.undoLastOverdub(0);
+  ok('C OVERDUBBING: loop, snapshot and state untouched', same(t.record, mid, master) && t.undoBuf === snapshot &&
+    rig.looper.trackInfo(0).state === 'OVERDUBBING');
+  await rig.looper.recDub(0);
+  await rig.advance(0.02);
+  const dubbed = snap(t.record, master);
+  rig.looper.setLoopEndStopEnabled(true);
+  rig.looper.playStop(0);
+  ok('C precondition: a loop-end stop is pending', t.stopAt !== null);
+  const mark2 = rig.sources().length;
+  rig.looper.undoLastOverdub(0);
+  ok('C loop-end stop pending: loop and playback untouched', same(t.record, dubbed, master) && rig.sources().length === mark2);
+}
 
-// ---------------------------------------------------------------------------
-// 2. Undo / redo toggle, frame count preserved.
-// ---------------------------------------------------------------------------
-undoLastOverdub(t);
-check('undo restores the pre-dub loop', () => eq(t, [1, 2, 3, 4]));
-check('undo length preserved', () => assert.strictEqual(t.record.length, 4));
-undoLastOverdub(t);
-check('redo (second undo) returns to the dubbed loop', () => eq(t, [11, 12, 13, 14]));
-undoLastOverdub(t);
-check('third toggle = undo again', () => eq(t, [1, 2, 3, 4]));
+console.log('=== D. STOPPED undoes in place; PLAY plays the restored loop; CLEAR drops the snapshot ===');
+{
+  const loop = await playingLoop();
+  const { rig, master, t } = loop;
+  const pre = snap(t.record, master);
+  await overdubSession(loop, 1);
+  rig.looper.playStop(0);
+  ok('D precondition: STOPPED with undo available', rig.looper.trackInfo(0).state === 'STOPPED' && canUndo(rig));
+  const mark = rig.sources().length;
+  rig.looper.undoLastOverdub(0);
+  ok('D STOPPED undo restores the loop in place', same(t.record, pre, master));
+  ok('D STOPPED undo starts no playback', rig.sources().length === mark && t.source === null);
+  rig.looper.playStop(0);
+  await rig.advance(0.05);
+  ok('D PLAY plays the restored loop', t.source !== null && same(t.source.buffer.getChannelData(0), pre, master));
+  rig.looper.clear(0);
+  await rig.advance(0.05);
+  ok('D CLEAR drops the snapshot', t.undoBuf === null && !canUndo(rig));
+  // The lane keeps its full record capacity: a longer take than the undone loop still fits.
+  rig.setInput(code);
+  const mark2 = rig.draws().length;
+  await rig.looper.recDub(0);
+  const downbeat = rig.draws().slice(mark2).find((b) => b.countLeft === 4).time + 4 * 0.3;
+  await rig.advanceTo(downbeat + 3 * 1.2 + 0.05);
+  await rig.looper.recDub(0);
+  await rig.advance(0.25);
+  ok('D after undo and CLEAR a 3-bar take still fits', rig.looper.masterLengthFrames() === 3 * master,
+    `master=${rig.looper.masterLengthFrames()} want=${3 * master}`);
+}
 
-// ---------------------------------------------------------------------------
-// 3. Multi-pass session: undo restores to BEFORE the whole session, not the last pass.
-// ---------------------------------------------------------------------------
-t = mkTrack([11, 12, 13, 14]);
-startOverdub(t); // undoBuf = [11,12,13,14]
-sumInto(t, [1, 1, 1, 1]);
-commitSwap(t); // mid-session boundary -> record = [12,13,14,15]
-check('mid-session commit updated record', () => eq(t, [12, 13, 14, 15]));
-check('undoBuf still holds the PRE-SESSION loop after a mid-session commit', () =>
-  assert.deepStrictEqual(Array.from(t.undoBuf), [11, 12, 13, 14]));
-sumInto(t, [1, 1, 1, 1]);
-endOverdub(t); // record = [13,14,15,16]
-check('end of multi-pass session committed', () => eq(t, [13, 14, 15, 16]));
-undoLastOverdub(t);
-check('undo a multi-pass session restores the pre-SESSION loop (whole layer removed)', () =>
-  eq(t, [11, 12, 13, 14]));
+console.log('=== E. an overdub rejected for capture loss restores the loop and the previous undo target ===');
+{
+  const loop = await playingLoop();
+  const { rig, master, t } = loop;
+  const take = snap(t.record, master);
+  await overdubSession(loop, 0);
+  const first = snap(t.record, master);
+  rig.setInput(DUB);
+  await rig.advanceTo(loop.next() - loop.period / 2);
+  await rig.looper.recDub(0);
+  await rig.stall(12); // the capture ring (~10.9 s) overflows while the main thread is blocked
+  await rig.looper.recDub(0);
+  await rig.advance(0.05);
+  ok('E precondition: the layer was rejected', rig.logs.some((l) => /rejected track 0's overdub layer/.test(String(l.args[0]))));
+  ok('E the pre-layer loop is back', same(t.record, first, master));
+  ok('E the lane plays on', rig.looper.trackInfo(0).state === 'PLAYING');
+  ok('E undo still targets the loop before the kept layer', canUndo(rig) && same(t.undoBuf, take, master));
+  rig.looper.undoLastOverdub(0);
+  ok('E undo removes the kept layer', same(t.record, take, master));
+}
 
-// ---------------------------------------------------------------------------
-// 4. A fresh overdub session re-baselines undoBuf to the current record.
-// ---------------------------------------------------------------------------
-t = mkTrack([1, 1, 1, 1]);
-startOverdub(t);
-sumInto(t, [2, 2, 2, 2]);
-endOverdub(t); // record = [3,3,3,3], undoBuf = [1,1,1,1]
-startOverdub(t); // new session -> undoBuf re-baselines to [3,3,3,3]
-check('new session re-baselines undoBuf to current record', () =>
-  assert.deepStrictEqual(Array.from(t.undoBuf), [3, 3, 3, 3]));
-sumInto(t, [1, 1, 1, 1]);
-endOverdub(t); // record = [4,4,4,4]
-undoLastOverdub(t);
-check('undo after a re-baseline restores the prior committed loop', () => eq(t, [3, 3, 3, 3]));
-
-// ---------------------------------------------------------------------------
-// 5. Guards: no undo buffer / wrong state -> no-op. Buffers are distinct (no aliasing).
-// ---------------------------------------------------------------------------
-t = mkTrack([5, 6, 7, 8]);
-undoLastOverdub(t);
-check('undo with no undoBuf is a no-op', () => eq(t, [5, 6, 7, 8]));
-startOverdub(t);
-sumInto(t, [1, 1, 1, 1]);
-check('undo while OVERDUBBING is a no-op (record untouched mid-take)', () => {
-  const before = arr(t);
-  undoLastOverdub(t);
-  assert.deepStrictEqual(arr(t), before);
-});
-check('canUndo false while OVERDUBBING', () => assert.strictEqual(canUndo(t), false));
-endOverdub(t);
-// distinctness: mutating record must not bleed into undoBuf, and vice versa
-t.record[0] = 999;
-check('record and undoBuf are distinct arrays (no shared backing)', () =>
-  assert.notStrictEqual(t.undoBuf[0], 999));
-
-// ---------------------------------------------------------------------------
-// 6. STOPPED is undoable; clear() drops the undo buffer.
-// ---------------------------------------------------------------------------
-t = mkTrack([1, 2, 3, 4]);
-startOverdub(t);
-sumInto(t, [1, 1, 1, 1]);
-endOverdub(t);
-t.state = 'STOPPED';
-check('canUndo true while STOPPED', () => assert.strictEqual(canUndo(t), true));
-undoLastOverdub(t);
-check('undo works while STOPPED (buffer swapped in place)', () => eq(t, [1, 2, 3, 4]));
-clear(t);
-check('clear() drops the undo buffer', () => assert.strictEqual(t.undoBuf, null));
-check('canUndo false after clear (EMPTY)', () => assert.strictEqual(canUndo(t), false));
-
-check('undo cannot replace a source waiting for loop-end stop', () => {
-  const pending = mkTrack([1, 2, 3, 4]);
-  pending.undoBuf = Float32Array.from([4, 3, 2, 1]);
-  pending.stopAt = 10;
-  undoLastOverdub(pending);
-  eq(pending, [1, 2, 3, 4]);
-});
-console.log(`\n=== RESULT: ${passed}/${passed + failed} checks passed, ${failed} failed ===`);
-process.exit(failed === 0 ? 0 : 1);
+console.log(`\n=== RESULT: ${checks - fails}/${checks} checks passed, ${fails} failed ===`);
+process.exit(fails === 0 ? 0 : 1);
