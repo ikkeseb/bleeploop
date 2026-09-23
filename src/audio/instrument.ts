@@ -24,6 +24,7 @@ import {
   withAt,
 } from './instrument-slots';
 import { disarmInputInternal, disarmMonitorInternal } from './native-io';
+import { forgetSlotPlugin, rememberSlotPlugin } from './rig-recall';
 import { warm as warmCapture } from './looper/capture';
 import { reconcilePluginDescriptors, samePluginDescriptor } from './plugin-descriptor';
 
@@ -201,10 +202,13 @@ async function doSelectPlugin(slot: 0 | 1, desc: PluginDescriptor): Promise<void
     pluginBridge.cancelPluginLoad(slot, loadToken);
     console.error('[instrument] plugin load failed', e);
     notifyError('Plugin load failed', e);
+    // The slot holds nothing now, so the next launch must not retry this load (`rig-recall.ts`).
+    forgetSlotPlugin(slot);
     if (activeSlot() === slot) applyActiveRouting(); // ensure we're back on the synth
     return;
   }
   setSlotPlugins((prev) => withAt(prev, slot, desc));
+  rememberSlotPlugin(slot, desc);
   // Route to the plugin FIRST (drops the live synth-engine ref), THEN dispose the engine — so the
   // router never holds a reference to a disposed SynthEngine. If the slot isn't active the router
   // doesn't reference this engine anyway, so disposing it is safe regardless. An instrument plugin
@@ -251,6 +255,7 @@ async function unloadSlotPlugin(slot: 0 | 1, outgoing: PluginDescriptor, path: '
     }
     return false;
   }
+  forgetSlotPlugin(slot);
   releaseEditorAffinity(outgoing.path);
   return true;
 }

@@ -1,6 +1,7 @@
 import { engine } from '../audio/engine';
 import { initAudioDeviceSettings, refreshAndPruneDevices } from '../audio/audio-devices';
-import { resyncNativeSlots, scanForPlugins } from '../audio/instrument';
+import { availablePlugins, resyncNativeSlots, scanForPlugins, selectPlugin } from '../audio/instrument';
+import { recallRig } from '../audio/rig-recall';
 import { setNativeHostReady } from '../audio/instrument-slots';
 import { pluginBridge, type PluginBufferMeta } from '../audio/plugin-bridge';
 import { warm as warmCapture } from '../audio/looper/capture';
@@ -12,7 +13,8 @@ import { platform, registerPluginBufferSink, releasePluginBuffer } from '../plat
  * this is a no-op there and the UI surfaces only the six built-in synths). Prepare the audio bridge
  * (adopt the shared ctx + load the source worklet), register the WebView2 SharedBuffer sink
  * (→ plugin-bridge), tell Rust the engine sample rate, then scan installed CLAP/VST3 plugins so the
- * slot picker can list them. The picker drives load/editor/param from there.
+ * slot picker can list them, and reload each slot's plugin from the last run (`rig-recall.ts`). The
+ * picker drives load/editor/param from there.
  *
  * Returns a dispose fn (removes the first-gesture resume listener if it never fired).
  */
@@ -47,6 +49,8 @@ export function bootPluginHost(): () => void {
       // Publish selectable plugins only after driver, buffer and device preferences are ready.
       setNativeHostReady(true);
       await scanForPlugins();
+      // Rig recall: each slot's last plugin comes back through the normal load path, never armed.
+      await recallRig(availablePlugins(), selectPlugin);
     } catch (e) {
       // Never let a host-init failure become an unhandled rejection on startup; the picker just
       // stays empty (chip reads "0 found"). The built-in synths remain fully playable.
