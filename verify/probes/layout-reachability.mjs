@@ -6,6 +6,10 @@
  * at all three) the open Help and Audio Settings popovers must not overlap the command bar's rendered
  * box and must stay inside the window, also with a spacer one window tall planted in the panel body
  * (native-only rows the browser tier never renders), whose last row must then scroll into reach.
+ * At 960x600 (reduced motion) and 1000x700 with lane 1's FX drawer open, so the lane stack scrolls,
+ * each ArrowDown and digit must bring the selected lane wholly into the stack's view from the nearer
+ * edge and leave a lane already in view unscrolled; a pointer press on a half-hidden lane must land
+ * and scroll nothing.
  * "Unreachable" means clipped below 98% visible OR the element under its own centre
  * point is not itself (something else intercepts the click). `--plugin-source` substitutes
  * `src/platform/host.web.ts` to simulate a live native plugin slot instead of the browser-tier
@@ -174,6 +178,105 @@ await probe(async ({ open }) => {
       }
       await page.evaluate(fn => window.__lf.ui[fn](), hide);
     }
+    await page.close();
+  }
+  // The selected lane follows the transport keys into view. With lane 1's FX drawer open the lane stack
+  // scrolls at both sizes, and a lane the arrows or a digit selected below its fold stayed hidden, its
+  // refusal cue with it. After each press the selected lane must lie wholly inside the stack's visible
+  // rect, scrolled there from the nearer edge and not at all when it already showed; under reduced
+  // motion already inside the key's own dispatch (no smooth scroll). A pointer press on a half-hidden
+  // lane's PLAY must land and scroll nothing: the lane is under the pointer.
+  for (const [width, height, motion] of [[960, 600, 'reduce'], [1000, 700, 'no-preference']]) {
+    const { page } = await open({ viewport: { width, height }, init });
+    await page.emulateMedia({ reducedMotion: motion });
+    await page.evaluate(async () => {
+      const lf = window.__lf;
+      const { defaultFxStates } = await import('/src/audio/fx/fx.ts');
+      await lf.looper.init();
+      const frames = lf.engine.ctx.sampleRate * 2;
+      await lf.looper.loadSession({ bpm: 120, bars: 1, masterLengthFrames: frames,
+        tracks: [0, 1, 2, 3, 4].map(index => ({ index, pcm: new Float32Array(frames), volume: 1, muted: false,
+          reversed: false, fx: defaultFxStates() })) });
+      lf.looper.stopAll();
+    });
+    await page.getByRole('button', { name: 'Track 1 FX', exact: true }).click();
+    await page.evaluate(() => {
+      document.activeElement?.blur();
+      const stack = document.querySelector('.lp__lanes');
+      // The stack's client box: its fractional border box less the borders and a horizontal scrollbar
+      // (clientHeight alone is rounded).
+      window.__stackView = () => {
+        const s = stack.getBoundingClientRect();
+        return { top: s.top + stack.clientTop, bottom: s.bottom - (stack.offsetHeight - stack.clientTop - stack.clientHeight) };
+      };
+      // Lane i against that box: `top`/`bottom` are how far it sits inside each edge.
+      window.__laneView = (i) => {
+        const v = window.__stackView(), r = document.querySelectorAll('.lp-lane')[i].getBoundingClientRect();
+        return { selected: window.__lf.looper.selectedTrack(), scrollTop: stack.scrollTop, viewHeight: v.bottom - v.top,
+          overflow: stack.scrollHeight - stack.clientHeight, top: r.top - v.top, bottom: v.bottom - r.bottom };
+      };
+      // Registered after the app's transport handler, so it samples the lane right after that handler ran.
+      window.addEventListener('keydown', () => { window.__atKey = window.__laneView(window.__lf.looper.selectedTrack()); });
+    });
+    // Smooth scrolling ends when scrollTop holds still for 8 frames.
+    const settle = () => page.evaluate(() => new Promise(resolve => {
+      const stack = document.querySelector('.lp__lanes');
+      let last = stack.scrollTop, still = 0;
+      const tick = () => {
+        if (stack.scrollTop !== last) { last = stack.scrollTop; still = 0; } else if (++still >= 8) return resolve();
+        requestAnimationFrame(tick);
+      };
+      requestAnimationFrame(tick);
+    }));
+    // Wholly inside the stack's view. A revealed lane may stop under a pixel short: the scroll range is
+    // whole pixels, so at a fractional stack height the last lane cannot reach the edge (0.5 px measured
+    // at 1000x700 with --plugin-source).
+    const inside = (v, slack = 0.01) => v.top > -slack && v.bottom > -slack;
+    const name = `${label}-${width}x${height}-select-reveal-${motion}`;
+    const steps = [];
+    let ok = (await page.evaluate(() => window.__laneView(0))).overflow > 0;
+    let scrolled = 0;
+    let selected = 0;
+    for (const key of ['ArrowDown', 'ArrowDown', 'ArrowDown', 'ArrowDown', 'ArrowDown', '5', '3', '1']) {
+      const target = key === 'ArrowDown' ? (selected + 1) % 5 : Number(key) - 1;
+      const before = await page.evaluate(i => window.__laneView(i), target);
+      await page.keyboard.press(key);
+      if (motion !== 'reduce') await settle();
+      const { at, after } = await page.evaluate(() => ({ at: window.__atKey, after: window.__laneView(window.__lf.looper.selectedTrack()) }));
+      const moved = after.scrollTop - before.scrollTop;
+      // Nearer edge: the lane ends flush with the edge it came in from, give or take the whole pixel the
+      // reveal rounds past it; the far edge would leave the stack's height minus the lane's.
+      const stepOk = after.selected === target && inside(after, 1)
+        && (inside(before) ? moved === 0 : true)
+        && (moved > 0 ? after.bottom < 1 : moved < 0 ? after.top < 1 : true)
+        && (motion === 'reduce' ? inside(at, 1) && at.scrollTop === after.scrollTop : true);
+      if (moved !== 0) scrolled++;
+      ok &&= stepOk;
+      selected = target;
+      steps.push({ key, target: target + 1, stepOk, before, after, at });
+    }
+    ok &&= scrolled >= 3;
+    // Half of lane 5 below the fold, then a real pointer click on its PLAY (page.mouse: a locator click
+    // would scroll the button into view itself).
+    const press = await page.evaluate(() => {
+      const stack = document.querySelector('.lp__lanes'), lane = document.querySelectorAll('.lp-lane')[4];
+      stack.scrollTop = 0;
+      stack.scrollTop = Math.round(-window.__laneView(4).bottom - lane.offsetHeight / 2);
+      const play = lane.querySelector('.lp-pb--play').getBoundingClientRect();
+      return { scrollTop: stack.scrollTop, x: (play.left + play.right) / 2, y: (play.top + play.bottom) / 2,
+        playVisible: play.bottom <= window.__stackView().bottom, lane: window.__laneView(4) };
+    });
+    await page.mouse.click(press.x, press.y);
+    if (motion !== 'reduce') await settle();
+    await page.waitForTimeout(150);
+    const pressed = await page.evaluate(() => ({ state: window.__lf.looper.stateOf(4), view: window.__laneView(4) }));
+    const pointerOk = press.playVisible && !inside(press.lane) && pressed.view.selected === 4
+      && pressed.state === 'PLAYING' && pressed.view.scrollTop === press.scrollTop;
+    ok &&= pointerOk;
+    await page.screenshot({ path: `logs/layout/${name}.png` });
+    console.log(JSON.stringify({ name, ok, scrolled, pointerOk, press, pressed, steps }));
+    if (!ok) failures.push(name);
+    results.push({ name, ok, scrolled, pointerOk, press, pressed, steps });
     await page.close();
   }
   await writeFile(`logs/layout/${label}.json`, JSON.stringify(results, null, 2));

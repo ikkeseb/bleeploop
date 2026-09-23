@@ -136,6 +136,24 @@ function Fader(props: { index: number; disabled: boolean }) {
   );
 }
 
+/**
+ * Scroll the lane stack just enough to show `lane` whole, from the nearer edge, and not at all when it
+ * already shows; instantly under reduced motion. Only the stack scrolls: `scrollIntoView` would walk
+ * every scroll container above it too, the overflow-hidden zones included. Whole pixels, rounded past
+ * the edge, so a fractional lane edge never stays under the fold.
+ */
+function revealLane(lane: HTMLElement): void {
+  const stack = lane.parentElement;
+  if (!stack) return;
+  const view = stack.getBoundingClientRect();
+  const r = lane.getBoundingClientRect();
+  const dy =
+    r.top < view.top ? Math.floor(r.top - view.top) : r.bottom > view.bottom ? Math.ceil(r.bottom - view.bottom) : 0;
+  if (dy === 0) return;
+  const still = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  stack.scrollBy({ top: dy, behavior: still ? 'instant' : 'smooth' });
+}
+
 function TrackLane(props: {
   index: number;
   fxTrack: number | null;
@@ -263,8 +281,23 @@ function TrackLane(props: {
   });
   onCleanup(() => unregisterLane(props.index));
 
+  // A lane a key or a footswitch selects comes into view: at small windows the stack scrolls, and a
+  // selected lane below its fold hid its refusal cue too. Not on this lane's own pointer press: it is on
+  // screen already, and a scroll between pointerdown and pointerup would move the pressed button out
+  // from under the pointer and lose the click. A press on the lane already selected changes nothing, so
+  // its `pressed` waits for the next change, which moves the selection away and clears it here.
+  let laneEl: HTMLDivElement | undefined;
+  let pressed = false;
+  createEffect((was: boolean) => {
+    const selected = looper.selectedTrack() === props.index;
+    if (selected && !was && !pressed && laneEl) revealLane(laneEl);
+    pressed = false;
+    return selected;
+  }, looper.selectedTrack() === props.index);
+
   return (
     <div
+      ref={laneEl}
       class="lp-lane"
       classList={{
         'is-selected': looper.selectedTrack() === props.index,
@@ -276,7 +309,10 @@ function TrackLane(props: {
       role="group"
       aria-label={`Track ${props.index + 1}`}
       aria-current={looper.selectedTrack() === props.index ? 'true' : undefined}
-      onPointerDown={() => looper.selectTrack(props.index)}
+      onPointerDown={() => {
+        pressed = true;
+        looper.selectTrack(props.index);
+      }}
     >
       {/* left cluster: identity · core gesture · play-stop/clear pair */}
       <div class="lp-lane__left">

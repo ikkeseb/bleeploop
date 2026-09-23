@@ -49,8 +49,9 @@ not here.
 - **Keyboard transport feel:** 1–5, ↑↓ (or PgUp/PgDn, ←→) next/prev, Space, Enter, Backspace = UNDO,
   Delete twice = CLEAR (drum mode: pads own 1–4, only 5 selects). A refused key shows its reason for
   1.6 s as an amber boxed note in the selected lane's well with an amber lane edge; the first Delete
-  says "press again to clear" for the 2.5 s window (2026-09-23, built, unseen) — readable from the
-  guitar? right colour and length? Backspace/Delete the right keys?
+  says "press again to clear" for the 2.5 s window; a lane a key selects below the lane stack's fold
+  scrolls into view, smoothly unless reduced motion is on (2026-09-23, built, unseen) — readable from
+  the guitar? right colour and length? Backspace/Delete the right keys?
 - **COPY pill (2026-09-18):** "⧉ COPY" after REV in the lane's pill row, hidden while no lane is
   EMPTY, always targets the first EMPTY lane — right place and word? Floated: a right-click
   context menu (none exists in the app yet) for picking the target lane. The pill row with DUB + REV
