@@ -321,6 +321,8 @@ option {
 }
 .settings-popover {
   position: fixed;
+  top: 60px; /* fallback for an engine without anchor positioning (a Mac browser on the rig tier) */
+  right: clamp(16px, 2vw, 28px);
   position-anchor: --cmd;
   top: calc(anchor(bottom) + 8px);
   right: anchor(right);
