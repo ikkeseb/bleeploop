@@ -68,8 +68,7 @@ not here.
   warm-white legend on a lifted face with an edge, no hue — reads as ON at a glance, or add `● CLICK`?
 - **Hit targets under 24 px (2026-09-22):** `transport__step` 22 px, `toast__close` 20 px, the `lf-range`
   12 px band.
-- **Audio Settings popover (2026-09-22):** no max-height/scroll (Help has one); non-modal for the
-  keyboard yet modal for the pointer.
+- **Audio Settings popover (2026-09-22):** non-modal for the keyboard yet modal for the pointer.
 - **Empty plugin scan note (2026-09-22, built):** one muted mono line per slot, "No plugins found ·
   CLAP in … · rescan ⟳ in the command bar", hidden below 640 px window height so the drum pads stay
   reachable. Wording, and should it live in the picker's place instead of its own row?

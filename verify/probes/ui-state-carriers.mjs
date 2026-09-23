@@ -1,9 +1,11 @@
 /** Accessibility and non-colour state carriers against the rendered app: transport, meter, lamp,
  * looper-announcement and toast state carriers, plus the looper refusal gates (a refused lane
  * core's title/label reason, and a refused Space/Enter announcing that reason with no state change).
- * Toggles: every command-bar and lane toggle keeps ONE accessible name in both states and carries its
- * state in aria-pressed alone; the lane core, whose name says the action, carries no aria-pressed. The
- * mic toggle arms through a substituted device open, so it says nothing about a real input device.
+ * Toggles: each toggle it presses (the Transport toggles except END STOP, lane 1's MUTE and REV) keeps
+ * ONE accessible name in both states and carries its state in aria-pressed alone; the lane core, whose
+ * name says the action, carries no aria-pressed. Not pressed here: END STOP, lane FX and the keyboard
+ * show/hide cap (which still flips its name). The mic toggle arms through a substituted device open, so
+ * it says nothing about a real input device.
  * Run: pnpm probe ui-state-carriers
  */
 import assert from 'node:assert/strict';

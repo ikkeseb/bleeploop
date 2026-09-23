@@ -310,8 +310,10 @@ option {
 /* Full-screen transparent click-catcher: closes the popover on any outside click. The panel itself
    hangs under the command bar's right edge through CSS anchor positioning, so it follows the bar's
    real bottom edge in the one-row and the two-row arrangement alike (a fixed offset covered row 2).
-   Needs Chromium 125+ (WebView2 is evergreen). The panel bodies style themselves (AudioSettings.tsx,
-   Help.tsx). */
+   It stops 8px above the window's bottom edge and the panel body scrolls, so a tall panel (a live
+   native slot adds rows to Audio Settings) stays reachable in a short window. Needs Chromium 138+
+   (anchor positioning, the `stretch` size; WebView2 is evergreen). The panel bodies style themselves
+   (AudioSettings.tsx, Help.tsx). */
 .settings-popover__backdrop {
   position: fixed;
   inset: 0;
@@ -322,6 +324,13 @@ option {
   position-anchor: --cmd;
   top: calc(anchor(bottom) + 8px);
   right: anchor(right);
+  max-height: stretch;
+  margin-bottom: 8px;
+  display: flex;
+  flex-direction: column;
+}
+.settings-popover > * {
+  overflow-y: auto;
 }
 
 /* ---- stage + zones ----
