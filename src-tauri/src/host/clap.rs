@@ -10,9 +10,9 @@ use super::editor_window::{
 use super::native_io::NativeIo;
 use super::state::{ParamDesc, PluginDescriptor, PluginHostState, PluginInfo, SlotState};
 use super::transport::{
-    checked_plugin_channels, create_shared_ring, force_device_rate, report_new_rt_faults, Hop1Pipe,
-    InPipe, LoadReady, OutMonitorPipe, ProducerDiag, RtFault, SharedBufferHandle, HOP1_CAPACITY_FRAMES, LOAD_GEN,
-    TARGET_FILL_SECONDS,
+    checked_plugin_channels, checked_plugin_params, create_shared_ring, force_device_rate,
+    report_new_rt_faults, Hop1Pipe, InPipe, LoadReady, OutMonitorPipe, ProducerDiag, RtFault,
+    SharedBufferHandle, HOP1_CAPACITY_FRAMES, LOAD_GEN, TARGET_FILL_SECONDS,
 };
 
 use std::ffi::CString;
@@ -461,7 +461,7 @@ fn clap_param_descs(instance: &mut PluginInstance<LfHost>) -> Result<Vec<ParamDe
         .get_extension::<PluginParams>()
         .ok_or_else(|| "plugin has no params extension".to_string())?;
     let count = params.count(&mut handle);
-    let mut out = Vec::with_capacity(count as usize);
+    let mut out = Vec::with_capacity(checked_plugin_params(count as i64, "CLAP params")?);
     let mut buf = ParamInfoBuffer::new();
     for i in 0..count {
         if let Some(info) = params.get_info(&mut handle, i, &mut buf) {

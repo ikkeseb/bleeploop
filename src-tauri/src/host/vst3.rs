@@ -9,9 +9,9 @@ use super::super::editor_window::{
 };
 use super::super::native_io::NativeIo;
 use super::super::transport::{
-    checked_plugin_channels, create_shared_ring, force_device_rate, report_new_rt_faults, Hop1Pipe,
-    InPipe, LoadReady, OutMonitorPipe, ProducerDiag, RtFault, SharedBufferHandle, HOP1_CAPACITY_FRAMES,
-    TARGET_FILL_SECONDS,
+    checked_plugin_channels, checked_plugin_params, create_shared_ring, force_device_rate,
+    report_new_rt_faults, Hop1Pipe, InPipe, LoadReady, OutMonitorPipe, ProducerDiag, RtFault,
+    SharedBufferHandle, HOP1_CAPACITY_FRAMES, TARGET_FILL_SECONDS,
 };
 use super::super::state::{ParamDesc, PluginDescriptor, PluginInfo};
 
@@ -1913,7 +1913,8 @@ fn list_vst3_params(
     // SAFETY: owner thread; `ctl` is a live IEditController for the loaded plugin.
     unsafe {
         let count = ctl.getParameterCount();
-        let mut out = Vec::with_capacity(count.max(0) as usize);
+        let mut out =
+            Vec::with_capacity(checked_plugin_params(count as i64, "VST3 edit controller")?);
         for i in 0..count {
             let mut info: ParameterInfo = std::mem::zeroed();
             if ctl.getParameterInfo(i, &mut info) != kResultOk {

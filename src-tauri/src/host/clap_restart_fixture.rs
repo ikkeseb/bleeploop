@@ -1,17 +1,23 @@
 //! A raw CLAP plugin with real activate/process callbacks, loaded by clack with the production
 //! `LfHost` and driven by the production RT producer (`producer_loop`) against a plain heap ring in
 //! place of the WebView2 SharedBuffer. Proves the plugin-initiated paths: `host.request_restart`
-//! (deactivate → activate → RT resumed, on the right threads) and `clap_host_params.rescan`.
+//! (deactivate → activate → RT resumed, on the right threads) and `clap_host_params.rescan`; and,
+//! through its `clap.params` extension, that a malformed parameter count is refused.
 //! No audio device or GUI required.
 use super::super::transport::HOP1_HEADER_BYTES;
 use super::*;
 use clap_sys::{
     entry::clap_plugin_entry,
-    ext::params::{clap_host_params, CLAP_EXT_PARAMS, CLAP_PARAM_RESCAN_VALUES},
+    ext::params::{
+        clap_host_params, clap_param_info, clap_plugin_params, CLAP_EXT_PARAMS,
+        CLAP_PARAM_RESCAN_VALUES,
+    },
     factory::plugin_factory::clap_plugin_factory,
     host::clap_host,
+    id::clap_id,
     plugin::{clap_plugin, clap_plugin_descriptor},
     process::{clap_process, clap_process_status, CLAP_PROCESS_CONTINUE},
+    string_sizes::{CLAP_NAME_SIZE, CLAP_PATH_SIZE},
     version::CLAP_VERSION,
 };
 use std::ffi::{c_char, c_void, CStr};
@@ -51,6 +57,9 @@ struct FixtureState {
     /// process while inactive/not-processing, start while already processing — any is a violation.
     contract_violation: AtomicBool,
     main_thread_calls: Mutex<Vec<ThreadId>>,
+    /// What `clap.params` reports as its count; `get_info` answers only the first 16 indices, so
+    /// a malformed count stays cheap to walk.
+    param_count: AtomicU32,
 }
 
 unsafe fn state<'a>(plugin: *const clap_plugin) -> &'a FixtureState {
@@ -130,8 +139,54 @@ unsafe extern "C" fn destroy(plugin: *const clap_plugin) {
     }
 }
 
-unsafe extern "C" fn extension(_: *const clap_plugin, _: *const c_char) -> *const c_void {
-    std::ptr::null()
+unsafe extern "C" fn param_count(plugin: *const clap_plugin) -> u32 {
+    unsafe { state(plugin) }.param_count.load(Relaxed)
+}
+
+unsafe extern "C" fn param_info(
+    plugin: *const clap_plugin,
+    index: u32,
+    info: *mut clap_param_info,
+) -> bool {
+    if index >= unsafe { state(plugin) }.param_count.load(Relaxed).min(16) {
+        return false;
+    }
+    // SAFETY: the host passes a writable clap_param_info; every field is written.
+    unsafe {
+        info.write(clap_param_info {
+            id: 100 + index,
+            flags: 0,
+            cookie: std::ptr::null_mut(),
+            name: [0; CLAP_NAME_SIZE],
+            module: [0; CLAP_PATH_SIZE],
+            min_value: 0.0,
+            max_value: 1.0,
+            default_value: 0.5,
+        });
+    }
+    true
+}
+
+unsafe extern "C" fn param_value(_: *const clap_plugin, _: clap_id, out: *mut f64) -> bool {
+    unsafe { out.write(0.25) };
+    true
+}
+
+static PARAMS: clap_plugin_params = clap_plugin_params {
+    count: Some(param_count),
+    get_info: Some(param_info),
+    get_value: Some(param_value),
+    value_to_text: None,
+    text_to_value: None,
+    flush: None,
+};
+
+unsafe extern "C" fn extension(_: *const clap_plugin, id: *const c_char) -> *const c_void {
+    if unsafe { CStr::from_ptr(id) } == CLAP_EXT_PARAMS {
+        (&PARAMS as *const clap_plugin_params).cast()
+    } else {
+        std::ptr::null()
+    }
 }
 
 unsafe extern "C" fn create(
@@ -154,6 +209,7 @@ unsafe extern "C" fn create(
         processing: AtomicBool::new(false),
         contract_violation: AtomicBool::new(false),
         main_thread_calls: Mutex::new(Vec::new()),
+        param_count: AtomicU32::new(0),
     }));
     Box::into_raw(Box::new(clap_plugin {
         desc: &DESCRIPTOR,
@@ -406,4 +462,21 @@ fn params_rescan_from_the_plugin_reaches_the_owner_once_per_request() {
     assert!(!take_params_rescan(&mut instance), "a burst coalesces into one re-list");
     // request_flush is accepted (continuous processing is the flush) and must not panic.
     unsafe { ((*ext).request_flush.unwrap())(host) };
+}
+
+/// A plugin that reports a count no real plugin has gets an error, not an allocation sized from it;
+/// a sane count still lists every parameter, live values included.
+#[test]
+fn a_malformed_param_count_is_an_error_not_an_abort() {
+    let mut instance = fixture_instance();
+    let s = unsafe { state(instance.raw_instance() as *const clap_plugin) };
+    for bogus in [u32::MAX, 1 << 20] {
+        s.param_count.store(bogus, Relaxed);
+        let err = clap_param_descs(&mut instance).expect_err("a malformed count must be refused");
+        assert!(err.contains("parameter count"), "{bogus}: {err}");
+    }
+    s.param_count.store(3, Relaxed);
+    let params = clap_param_descs(&mut instance).expect("a sane count lists");
+    assert_eq!(params.iter().map(|p| p.id).collect::<Vec<_>>(), vec![100, 101, 102]);
+    assert!(params.iter().all(|p| p.default_value == 0.5 && p.value == 0.25));
 }

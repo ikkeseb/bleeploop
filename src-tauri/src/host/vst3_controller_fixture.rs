@@ -1,7 +1,8 @@
 //! A VST3 edit controller implemented in Rust through the real `IEditController` vtable
 //! (`ComWrapper`), holding its component handler the way the SDK's `EditController` does (add-ref'd),
-//! driven by the production editor open. Proves that an editor open never replaces the load-time
-//! component handler. No DLL or plugin GUI required; no window is shown.
+//! driven by the production parameter listing and editor open. Proves that a malformed parameter
+//! count is an error rather than a process abort, and that an editor open never replaces the
+//! load-time component handler. No DLL or plugin GUI required; no window is shown.
 use super::*;
 use std::sync::atomic::AtomicUsize;
 use vst3::Steinberg::{char16, int16, IBStream, TBool};
@@ -163,6 +164,21 @@ fn controller(
     let obj = ComWrapper::new(FixtureController::new(param_count));
     let ptr = obj.to_com_ptr::<IEditController>();
     (obj, ptr)
+}
+
+/// A controller that reports a count no real plugin has (or a negative one) gets an error, not
+/// an allocation sized from it; a sane count still lists every parameter, live values included.
+#[test]
+fn a_malformed_parameter_count_is_an_error_not_an_abort() {
+    for bogus in [i32::MAX, 1 << 20, -1] {
+        let (_obj, ctl) = controller(bogus);
+        let err = list_vst3_params(&ctl).expect_err("a malformed count must be refused");
+        assert!(err.contains("parameter count"), "{bogus}: {err}");
+    }
+    let (_obj, ctl) = controller(3);
+    let params = list_vst3_params(&ctl).expect("a sane count lists");
+    assert_eq!(params.iter().map(|p| p.id).collect::<Vec<_>>(), vec![1000, 1001, 1002]);
+    assert!(params.iter().all(|p| p.default_value == 0.5 && p.value == 0.25));
 }
 
 /// The owner sets ONE component handler at load. An editor open (here refused at the attach,

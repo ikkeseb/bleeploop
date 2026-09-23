@@ -50,21 +50,40 @@ pub(super) const HOP1_HEADER_BYTES: usize = 28;
 /// counter's own wrap. 16384 ≈ 340 ms @ 48 kHz — generous headroom; the JS drain caps real lag.
 pub(super) const HOP1_CAPACITY_FRAMES: u32 = 16384;
 
-/// Hard ceiling for channel rows allocated from foreign plugin metadata. A malformed plugin can
-/// report an arbitrary count; validating before the RT buffers are built turns a process-wide OOM
-/// into the normal load error path. Zero is valid only for an absent input bus.
+/// Hard ceilings for rows allocated from foreign plugin metadata. A malformed plugin can report an
+/// arbitrary count, and sizing an allocation from it aborts the whole process (an allocation
+/// failure does not unwind); validating the count first turns that into the normal error path.
+/// Channels: zero is valid only for an absent input bus.
 const MAX_PLUGIN_CHANNELS: i64 = 64;
+/// Parameters: the largest listing in the 30-plugin restart survey is 2855 (Surge XT VST3, hidden
+/// ones excluded); the ceiling leaves wide room above that and bounds one listing to a few MB.
+const MAX_PLUGIN_PARAMS: i64 = 1 << 16;
+
 pub(super) fn checked_plugin_channels(
     count: i64,
     bus: &str,
     allow_zero: bool,
 ) -> Result<u32, String> {
     let minimum = if allow_zero { 0 } else { 1 };
-    if (minimum..=MAX_PLUGIN_CHANNELS).contains(&count) {
-        Ok(count as u32)
+    checked_plugin_count(count, bus, "channel", minimum, MAX_PLUGIN_CHANNELS).map(|c| c as u32)
+}
+
+pub(super) fn checked_plugin_params(count: i64, source: &str) -> Result<usize, String> {
+    checked_plugin_count(count, source, "parameter", 0, MAX_PLUGIN_PARAMS).map(|c| c as usize)
+}
+
+fn checked_plugin_count(
+    count: i64,
+    source: &str,
+    kind: &str,
+    minimum: i64,
+    maximum: i64,
+) -> Result<i64, String> {
+    if (minimum..=maximum).contains(&count) {
+        Ok(count)
     } else {
         Err(format!(
-            "{bus} reports unsupported channel count {count} (supported {minimum}..={MAX_PLUGIN_CHANNELS})"
+            "{source} reports unsupported {kind} count {count} (supported {minimum}..={maximum})"
         ))
     }
 }
