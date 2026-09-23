@@ -1,24 +1,21 @@
-// Executable verification of the PHASE-PRESERVING COMMIT math (2026-06-20).
-// Ports the EXACT formulae from src/audio/looper/machine.ts commitMasterLoop (line-cited; commitMasterLoop
-// moved out of the former monolithic looper.ts into machine.ts on 2026-07-01)
-// and proves the fix for the by-ear finding that the looper click ran independent of, and off from, the count-in click.
+// Executable verification of the PHASE-PRESERVING COMMIT: the real grid-math commit math (planCommit,
+// commitAnchor, phaseOffset) swept across tempos, lengths and commit instants, plus the REAL
+// startPlayback clamp, resume and later-take join driven through the verify rig.
 //
-// ROOT CAUSE the fix addresses: the old commit anchored masterStartTime = ctx.currentTime + HBL, where
-// currentTime is a DRAIN-TICK moment ~30-50ms past the true counted downbeat. So the looper click +
-// loop-audio re-anchored OFF the count-in grid -> an audible phase hop at commit.
+// Background: an earlier commit anchored the grid to ctx.currentTime + HBL at a drain tick ~30-50 ms past
+// the counted downbeat, so the looper click and the loop audio re-anchored off the count-in grid (an
+// audible phase hop). The anchor is now the counted downbeat, an integer number of periods back.
 //
 // What this PROVES (the deterministic core; static review can't confirm the analog feel):
-//   A. startOffset ∈ [0, period); gridAnchor = playAt - startOffset is EXACTLY on the count grid
-//      (an integer number of loop periods from the counted downbeat firstTakeDownbeatCtx).
-//   B. The loop-audio wrap points (gridAnchor + k*period) and the click downbeats
-//      (gridAnchor + 4*bars*k * beatPeriod) COINCIDE on the count grid, with no accumulation.
-//   C. Fixed-length: late drain-tick discovery (auto-stop δ past the downbeat) still anchors the grid
-//      to the counted downbeat — startOffset stays small (≈ δ+HBL) and the FIRST wrap lands on-grid.
-//   D. Free-record floored to completed bars: the grid ALWAYS phase-locks to the count downbeat — no commit
-//      HOP for ANY stop point (section H sweeps every rounding zone, incl. the round-UP that hopped ~2.7 beats).
-//   E. startPlayback offset re-derivation when `when` is clamped up to now stays in [0, dur), phase-correct.
-//   F. The OLD anchor's phase error (the bug) is real and the NEW anchor eliminates it (contrast test).
-//   G. Later-track completion/resume join at the live phase; boundary overdub restarts keep offset 0.
+//   A. startOffset ∈ [0, period); gridAnchor = playAt - startOffset is EXACTLY on the count grid.
+//   B. The loop-audio wrap points and the click downbeats COINCIDE on the count grid, with no accumulation.
+//   C. Fixed-length: late drain-tick discovery still anchors the grid to the counted downbeat.
+//   D. Free-record floored to completed bars: the grid always phase-locks to the count downbeat; H sweeps
+//      every rounding zone with the real planCommit.
+//   E. The real startPlayback: a `when` clamped up to now advances the offset by the clamp, wrapped into
+//      [0, dur); a future `when` is kept exactly.
+//   G. The real resume and later-take commit join at the live master phase; R: a real first take's
+//      source and grid sit on the counted downbeat.
 // What it does NOT prove (needs a by-ear check on the PC): the audible seamlessness, the analog feel of the come-in.
 
 let fails = 0, checks = 0;
@@ -32,8 +29,9 @@ import { framesPerBar } from '../src/audio/quantize.ts';
 import {
   HEARTBEAT_INTERNAL_LATENCY as HBL,
   commitAnchor as realCommitAnchor,
-  phaseOffset,
+  planCommit,
 } from '../src/audio/looper/grid-math.ts';
+import { bootLooper } from './harness/rig.ts';
 
 // ---- commitMasterLoop phase-LOCKED anchor: the REAL commitAnchor (grid-math.ts, pure) — no port ----
 // The source computes playAt = ctx.currentTime + HBL at the commit instant and hands it in; this wrapper
@@ -41,14 +39,6 @@ import {
 function commitAnchor(firstTakeDownbeatCtx, master, sr, commitNow, raw = master) {
   const playAt = commitNow + HBL;
   return { playAt, ...realCommitAnchor(firstTakeDownbeatCtx, master, sr, playAt, raw) };
-}
-
-// MIRRORS: src/audio/looper/playback.ts@81-85 sha256:95a7581734ce461a  (startPlayback — startAt clamp + startOffset)
-// ---- startPlayback offset re-derivation (startAt clamp + startOffset) ----
-function playbackStartOffset(when, offset, dur, currentTime) {
-  const startAt = Math.max(when, currentTime);             // startPlayback: startAt
-  const startOffset = dur > 0 ? (offset + (startAt - when)) % dur : 0; // startPlayback: startOffset
-  return { startAt, startOffset };
 }
 
 // integer test: is x an integer multiple of p (to a sub-nanosecond residual)?
@@ -91,7 +81,7 @@ console.log('=== B. loop-audio wraps == click downbeats, on the count grid, no a
 for (const { sr, bpm, bars } of CFG) {
   const master = bars * framesPerBar(bpm, sr);
   const period = master / sr;
-  const beatPeriod = master / sr / (4 * bars);             // commitMasterLoop beatPeriod
+  const { beatPeriod } = planCommit(master, bpm, sr, master); // the pulse period the commit starts
   const recordStart = 7.0;
   const r = commitAnchor(recordStart, master, sr, recordStart + period + 0.031); // fixed-length-ish
   // 4*bars beats span exactly one loop period (the click's per-loop downbeat == the audio wrap).
@@ -198,19 +188,15 @@ for (const { sr, bpm } of [{ sr: 48000, bpm: 120 }, { sr: 44100, bpm: 137 }, { s
 }
 
 console.log('=== H. FLOOR quantize keeps the COMPLETED bars (master<=raw, no tail pad) — the floor-specific proof — 2026-06-26 ===');
-// Port commitMasterLoop's floor quantize + the phase-locked anchor; sweep the stop point across every
-// rounding zone. NB on what each assert proves: the `hop < 1e-9` zero-hop check is the always-true ANCHOR
+// The real planCommit floor + the phase-locked anchor; sweep the stop point across every rounding zone. NB on what each assert proves: the `hop < 1e-9` zero-hop check is the always-true ANCHOR
 // property — commitAnchor sets gridAnchor = playAt − ((playAt−recordStart) mod period), so (gridAnchor −
 // recordStart) is an exact period-multiple for ANY master, floor OR round (empirically 0.0 ns in both). It
 // does NOT distinguish the floor fix. The genuine floor-vs-round discriminator is the `master <= raw` check
 // below (0 violations under floor vs ~228/480 under round — round-UP padded the tail + re-anchored to the
 // stop, the ~2.5-2.7-beat hop heard on the rig). Both are kept: the anchor guarantees phase-lock, the floor keeps it pad-free.
 function commitFull(recordStart, sr, bpm, recordLen, commitNow, raw) {
-  const fpb = framesPerBar(bpm, sr);
-  const maxBars = Math.max(1, Math.floor(recordLen / fpb));
-  const bars = Math.min(maxBars, Math.max(1, Math.floor(raw / fpb)));   // FLOOR (was Math.round)
-  const master = bars * fpb;
-  return { fpb, bars, master, ...commitAnchor(recordStart, master, sr, commitNow, raw) };
+  const plan = planCommit(raw, bpm, sr, recordLen);
+  return { ...plan, ...commitAnchor(recordStart, plan.master, sr, commitNow, raw) };
 }
 for (const sr of [48000, 44100]) {
   for (const bpm of [120, 90, 137, 100, 73.5]) {
@@ -238,69 +224,101 @@ for (const sr of [48000, 44100]) {
   }
 }
 
-console.log('=== E. startPlayback offset re-derivation (when clamped to now) ===');
+console.log('=== E. the real startPlayback: offset re-derivation when `when` is clamped up to now ===');
 {
-  const dur = 2.0; // loop duration (s)
-  // Normal: when is in the future, startAt==when, offset unchanged.
-  let p = playbackStartOffset(100.02, 0.037, dur, 100.0);
-  ok('E future when: startAt==when', p.startAt === 100.02);
-  ok('E future when: offset unchanged', approx(p.startOffset, 0.037, 0), `off=${p.startOffset}`);
-  // Clamp: when already 0.01s in the PAST -> startAt=now, offset advanced by (now-when) so the sounding
-  // buffer position stays phase-correct.
-  p = playbackStartOffset(99.99, 0.037, dur, 100.0);
-  ok('E past when: startAt==now', p.startAt === 100.0);
-  ok('E past when: offset advanced by clamp', approx(p.startOffset, 0.037 + 0.01, 1e-12), `off=${p.startOffset}`);
-  ok('E offset stays in [0,dur)', p.startOffset >= 0 && p.startOffset < dur);
-  // Clamp larger than dur wraps cleanly into [0,dur).
-  p = playbackStartOffset(100.0 - 2.5, 0.1, dur, 100.0); // clamp 2.5s, dur 2.0 -> wraps
-  ok('E big clamp wraps into [0,dur)', p.startOffset >= 0 && p.startOffset < dur, `off=${p.startOffset}`);
-  ok('E big clamp value correct', approx(p.startOffset, (0.1 + 2.5) % dur, 1e-12), `off=${p.startOffset}`);
-}
-
-console.log('=== F. The OLD anchor had a real phase error; the NEW anchor eliminates it (contrast) ===');
-for (const { sr, bpm, bars } of [{ sr: 48000, bpm: 120, bars: 2 }, { sr: 44100, bpm: 137, bars: 1 }]) {
-  const master = bars * framesPerBar(bpm, sr);
-  const period = master / sr;
-  const recordStart = 50.0;
-  const delta = 0.041; // drain-tick latency past the true downbeat
-  const commitNow = recordStart + period + delta;
-  // OLD: anchor = commitNow + HBL (the bug). NEW: phase-preserving gridAnchor.
-  const oldAnchor = commitNow + HBL;
-  const r = commitAnchor(recordStart, master, sr, commitNow);
-  // The count grid's NEXT downbeat after the take is recordStart + period (where the heard click was).
-  const countDownbeat = recordStart + period;
-  const oldErr = Math.abs(((oldAnchor - countDownbeat) % period + period) % period);
-  const oldErrSigned = Math.min(oldErr, period - oldErr); // distance to nearest count-grid downbeat
-  const newErr = Math.min(
-    ((r.gridAnchor - countDownbeat) % period + period) % period,
-    period - ((r.gridAnchor - countDownbeat) % period + period) % period);
-  ok(`F OLD anchor is audibly off-grid sr=${sr} bpm=${bpm} (err=${(oldErrSigned * 1e3).toFixed(1)}ms)`,
-    oldErrSigned > 0.03, `oldErr=${(oldErrSigned * 1e3).toFixed(2)}ms (should be ~δ+HBL=${((delta + HBL) * 1e3).toFixed(0)}ms)`);
-  ok(`F NEW anchor is ON the count grid sr=${sr} bpm=${bpm}`,
-    newErr < 1e-9, `newErr=${(newErr * 1e9).toFixed(2)}ns`);
-  console.log(`    sr=${sr} bpm=${bpm} bars=${bars}: OLD off by ${(oldErrSigned * 1e3).toFixed(1)}ms, NEW off by ${(newErr * 1e9).toFixed(2)}ns`);
-}
-
-console.log('=== G. Live-phase joins and boundary restarts stay phase-locked ===');
-{
+  const rig = await bootLooper({ sampleRate: 48000, startTime: 100 });
+  const playback = await rig.import('audio/looper/playback.ts');
   const dur = 2.0;
-  const masterStart = 200.0;
-  const currentTime = 200.75;
-  // finishLaterRecording and resume use this exact live-phase pattern: schedule with the heartbeat lead,
-  // derive the offset from the shared master anchor (the REAL grid-math.ts phaseOffset), then let
-  // startPlayback apply any late clamp correction.
-  const when = currentTime + HBL;
-  const offset = phaseOffset(when, masterStart, dur);
-  const live = playbackStartOffset(when, offset, dur, currentTime);
-  ok('G later/resume join after heartbeat lead', live.startAt === when);
-  ok('G later/resume join at the current master phase', approx(live.startOffset, 0.77, 1e-12));
-  ok('G later/resume next wrap lands on the master grid',
-    isIntegerMultiple(live.startAt + (dur - live.startOffset) - masterStart, dur));
+  const buf = rig.ctx.createBuffer(1, dur * 48000, 48000);
+  const now = rig.now();
+  const start = (when, offset) => {
+    playback.startPlayback(1, buf, when, offset);
+    return rig.sources().at(-1);
+  };
+  let src = start(now + 0.02, 0.037);
+  ok('E future when: starts at when', src.startTime === now + 0.02);
+  ok('E future when: offset unchanged', src.offset === 0.037, `off=${src.offset}`);
+  ok('E the source loops the whole buffer', src.loop === true && src.loopStart === 0 && src.loopEnd === dur);
+  src = start(now - 0.01, 0.037);
+  ok('E past when: starts now', src.startTime === now);
+  ok('E past when: offset advanced by the clamp', approx(src.offset, 0.037 + 0.01, 1e-12), `off=${src.offset}`);
+  ok('E past when: buffer position at start stays phase-correct', approx(src.startTime - src.offset, now - 0.01 - 0.037, 1e-12));
+  src = start(now - 2.5, 0.1); // a clamp longer than the loop wraps
+  ok('E big clamp wraps into [0,dur)', src.offset >= 0 && src.offset < dur, `off=${src.offset}`);
+  ok('E big clamp value correct', approx(src.offset, (0.1 + 2.5) % dur, 1e-12), `off=${src.offset}`);
+  const prev = rig.sources().at(-2);
+  ok('E the previous source retires exactly at the new start', prev.stopTime === src.startTime);
+}
 
-  // endOverdub still swaps on a future boundary with the default source offset 0.
-  const boundary = playbackStartOffset(202.0, 0, dur, currentTime);
-  ok('G overdub boundary restart: offset 0', boundary.startOffset === 0);
-  ok('G overdub boundary restart: starts at boundary', boundary.startAt === 202.0);
+/** A committed first take on lane 0, returned with its counted downbeat. */
+async function committedTake({ bpm, sr, bars, stopAfter }) {
+  const rig = await bootLooper({ sampleRate: sr, startTime: 30 });
+  rig.clock.setBpm(bpm);
+  rig.setInput(0.5);
+  const mark = rig.draws().length;
+  await rig.looper.recDub(0);
+  const beat = 60 / bpm;
+  const downbeat = rig.draws().slice(mark).find((b) => b.countLeft === 4).time + 4 * beat;
+  await rig.advanceTo(downbeat + bars * 4 * beat + stopAfter);
+  await rig.looper.recDub(0);
+  await rig.advance(0.3);
+  const master = rig.looper.masterLengthFrames();
+  return { rig, downbeat, master, period: master / sr, anchor: rig.state.engineState.masterStartTime };
+}
+/** The loop wrap (buffer frame 0) this source reaches first, minus the grid anchor, in periods. */
+const wrapPhase = (src, anchor, period) => {
+  const x = (src.startTime - src.offset - anchor) / period;
+  return x - Math.round(x);
+};
+
+console.log('=== R. a real first take: source and grid on the counted downbeat ===');
+for (const [bpm, sr, bars, stopAfter] of [[120, 48000, 2, 0.04], [137, 44100, 1, 0.09], [90, 48000, 3, 0.2], [200, 48000, 4, 0.01]]) {
+  const { rig, downbeat, master, period, anchor } = await committedTake({ bpm, sr, bars, stopAfter });
+  const tag = `bpm=${bpm} sr=${sr} bars=${bars}`;
+  ok(`R ${tag} committed ${bars} bars`, master === bars * framesPerBar(bpm, sr), `master=${master}`);
+  ok(`R ${tag} the grid anchor is a whole number of periods from the counted downbeat`,
+    isIntegerMultiple(anchor - downbeat, period, 1e-9), `(anchor-downbeat)/period=${(anchor - downbeat) / period}`);
+  const src = rig.tracks[0].source;
+  ok(`R ${tag} the first source wraps on the grid`, Math.abs(wrapPhase(src, anchor, period)) < 1e-9,
+    `phase=${wrapPhase(src, anchor, period)}`);
+  ok(`R ${tag} it starts inside the loop`, src.offset >= 0 && src.offset < period);
+}
+
+console.log('=== G. the real later-take commit and resume join at the live master phase; idle PLAY re-anchors ===');
+for (const [bpm, sr] of [[120, 48000], [137, 44100]]) {
+  const { rig, period, anchor } = await committedTake({ bpm, sr, bars: 2, stopAfter: 0.05 });
+  const tag = `bpm=${bpm} sr=${sr}`;
+  // A later take on lane 2 commits at an arbitrary phase and must join the same grid.
+  rig.setInput(0.25);
+  await rig.looper.recDub(1);
+  const next = anchor + (Math.floor((rig.now() - anchor) / period) + 1) * period;
+  await rig.advanceTo(next + 0.6 * period); // 1.2 of 2 bars: commits one bar, tiled, at the press
+  await rig.looper.recDub(1);
+  await rig.advance(0.1);
+  const later = rig.tracks[1].source;
+  ok(`G ${tag} the later take commits`, rig.looper.trackInfo(1).state === 'PLAYING' && later !== null);
+  ok(`G ${tag} the later take joins at the master phase`, later !== null && Math.abs(wrapPhase(later, anchor, period)) < 1e-9 &&
+    later.offset >= 0 && later.offset < period, `phase=${later && wrapPhase(later, anchor, period)}`);
+  // Lane 2 stops and resumes while lane 1 keeps the transport running: a live-phase join.
+  rig.looper.playStop(1);
+  await rig.advance(0.77 * period);
+  const pressed = rig.now();
+  rig.looper.playStop(1);
+  const resumed = rig.tracks[1].source;
+  ok(`G ${tag} resume starts after the heartbeat lead`, approx(resumed.startTime, pressed + HBL, 1e-9),
+    `start-press=${resumed.startTime - pressed}`);
+  ok(`G ${tag} resume joins at the current master phase`, Math.abs(wrapPhase(resumed, anchor, period)) < 1e-9 &&
+    resumed.offset >= 0 && resumed.offset < period, `phase=${wrapPhase(resumed, anchor, period)} off=${resumed.offset}`);
+  ok(`G ${tag} the grid anchor did not move`, rig.state.engineState.masterStartTime === anchor);
+  // Both lanes stopped: PLAY re-anchors the grid at the press (+ lead) and starts from the top.
+  rig.looper.playStop(0);
+  rig.looper.playStop(1);
+  await rig.advance(0.4 * period);
+  const idlePress = rig.now();
+  rig.looper.playStop(0);
+  const top = rig.tracks[0].source;
+  ok(`G ${tag} idle PLAY starts from the top after the lead`, top.offset === 0 && approx(top.startTime, idlePress + HBL, 1e-9));
+  ok(`G ${tag} idle PLAY re-anchors the grid on its start`, rig.state.engineState.masterStartTime === top.startTime);
 }
 
 console.log(`\n=== RESULT: ${checks - fails}/${checks} checks passed, ${fails} failed ===`);
