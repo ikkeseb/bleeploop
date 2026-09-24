@@ -183,9 +183,14 @@ deleted, and align.rs asserts a take shifts by exactly align_frames. golden_jam.
 double press, is here) with absolute frames and the rendered output, at 44.1 k and 48 k, bit-identical
 across block sizes 1, 32, 64, 127, 128, 480 and 1024. gestures.rs runs proptest scripts (one
 recorder; a whole-bar master; every lane = master until F14/F16; undo twice = identity; undo after an
-N-cycle dub gives back the pre-dub loop; finite output) at two block sizes, bit-identical. cargo-mutants
-on grid and looper for acceptance, and again when either changes (the planted-bug rule of
-`verify/README.md`, automated; no scheduled workflow).
+N-cycle dub gives back the pre-dub loop; finite output) at two block sizes, bit-identical, with
+frame-stamped commands landing mid-block. cargo-mutants on grid and looper for acceptance, and again
+when either changes (the planted-bug rule of `verify/README.md`, automated; no scheduled workflow).
+Status (2026-09-24): 629 mutants, 95 survived the first run; new tests and removed dead conditions
+leave 6, all equivalent (named here as the rule asks): the keep-last `written` and the commit's `raw`
+minimum (the committed length does not move), an empty fill job at `lo == master`, a restore offset at
+exactly the span's end, `plan_later_stop`'s bar clamp (the window end bounds it), `pair`'s ordering
+(guarded by `assert_ne`).
 
 **Acceptance.** `cargo test -p lf-engine` green on ubuntu and windows CI; deny check green; every rig
 guard mapped or its deletion justified; golden jam green at 44.1 k and 48 k across all block sizes;

@@ -86,3 +86,20 @@ fn the_clear_confirm_window_is_2_5_seconds_exclusive() {
         assert_eq!(rig.state(0) == LaneState::Empty, clears, "second press {after} frames later");
     }
 }
+
+#[test]
+fn the_gates_let_through_what_they_should_and_lane_events_follow() {
+    let mut rig = Rig::new();
+    let mark = rig.events.len();
+    assert_eq!(refusal(&mut rig, 2, Action::RecDub), None, "an EMPTY lane with no recorder records");
+    assert!(rig.events[mark..].iter().any(|e| matches!(e, Event::Lane { lane: 2, info, .. } if info.state == LaneState::Recording)));
+    rig.set_level(0.5);
+    rig.advance(rig.seconds(2.5)); // past the count-in: the take records, unarmed
+    assert!(!rig.lane(2).armed);
+    assert_eq!(refusal(&mut rig, 0, Action::RecDub), Some(Refusal::OtherRecording), "a take in flight holds the recorder");
+    rig.press(Command::RecDub(2));
+    rig.set_level(0.0);
+    assert_eq!(refusal(&mut rig, 2, Action::RecDub), None, "a forward playing lane overdubs");
+    rig.idle(); // the short take's padding runs first
+    assert_eq!(rig.state(2), LaneState::Overdubbing);
+}

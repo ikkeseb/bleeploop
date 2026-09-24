@@ -162,3 +162,25 @@ fn g_later_takes_and_resumes_join_the_live_phase_idle_play_restarts_the_top() {
         plays_on_grid(&rig, &[rig.pcm(0)], press);
     }
 }
+
+#[test]
+fn play_beside_an_armed_lane_joins_and_idle_play_beats_the_master_grid() {
+    let (mut rig, _, master) = committed_take(120, 48000, 2, 0.05);
+    rig.press(Command::PlayStop(0));
+    rig.advance(master / 3);
+    rig.press(Command::RecDub(1)); // arms on the idle grid's next boundary
+    let anchor = rig.anchor();
+    rig.press(Command::PlayStop(0));
+    assert_eq!(rig.anchor(), anchor, "a PLAY while a lane is armed never moves its grid");
+    rig.press(Command::Stop(1));
+    rig.press(Command::PlayStop(0));
+    rig.advance(master / 3);
+    let mark = rig.events.len();
+    let press = rig.frame;
+    rig.press(Command::PlayStop(0));
+    assert_eq!(rig.anchor(), press);
+    rig.advance(master);
+    let beats = rig.beats_since(mark);
+    let grid = Grid::master(press, master, 2);
+    assert!(beats.len() >= 8 && beats.iter().enumerate().all(|(n, b)| b.0 == grid.beat_frame(n as u64)), "8 beats a loop");
+}

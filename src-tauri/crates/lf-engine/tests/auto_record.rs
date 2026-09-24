@@ -105,3 +105,14 @@ fn a_gap_while_listening_drops_the_history_before_it() {
     let start = rig.start_frame();
     assert!(start >= at + 100, "nothing from before the gap: start {start}");
 }
+
+#[test]
+fn the_sensitivity_sets_what_level_triggers() {
+    for (sensitivity, triggers) in [(1.0, false), (100.0, true)] {
+        let mut rig = listening(0);
+        rig.set(Command::SetAutoSensitivity(sensitivity));
+        rig.set_level(0.05); // -26 dBFS: under the -12 dBFS of 1, over the -60 dBFS of 100
+        rig.advance(4800);
+        assert_eq!(!rig.lane(0).auto_armed, triggers, "sensitivity {sensitivity}");
+    }
+}

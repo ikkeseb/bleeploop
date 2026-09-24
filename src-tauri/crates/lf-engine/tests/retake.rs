@@ -186,3 +186,13 @@ fn g_rec_on_another_lane_approves_a_later_roll_and_records_next() {
     assert!(rig.state(1) == LaneState::Playing && rig.window().is_none());
     assert_eq!(mismatches(&rig.pcm(1), s1 + 2 * master), 0, "commits the pass in flight (3)");
 }
+
+#[test]
+fn a_free_first_take_never_rolls() {
+    let mut rig = Rig::new();
+    rig.set(Command::SetRetake(true));
+    rig.set_level(0.5);
+    rig.press(Command::RecDub(0));
+    rig.advance(rig.seconds(3.0));
+    assert!(rig.state(0) == LaneState::Recording && rig.lane(0).retake_pass == 0, "no known length to roll around");
+}

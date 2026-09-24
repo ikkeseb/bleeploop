@@ -335,3 +335,31 @@ fn forced_h_the_click_is_a_transport_mode() {
     let beats = drive(&mut clock, 1000 + SR as Frame, Some(1000 + 12_000));
     assert_eq!(beats.iter().filter(|b| b.clicked).map(|b| b.frame).collect::<Vec<_>>(), [1000, 25_000]);
 }
+
+#[test]
+fn a_capture_ending_with_play_stop_clicks_through_its_tail_only_as_a_first_take() {
+    // An overdub stopped by PLAY/STOP is silent at once, click included, while its tail comes in.
+    let mut rig = Rig::with(common::Opts { align: 28_800, ..Default::default() });
+    rig.set_level(0.25);
+    rig.record_first_take(0, 1, 2400);
+    rig.set(Command::SetMetronome(true));
+    let dub = rig.events.len();
+    rig.press(Command::RecDub(0));
+    rig.advance(rig.seconds(1.0));
+    assert!(!rig.clicks_since(dub).is_empty(), "an overdub clicks");
+    let mark = rig.events.len();
+    rig.press(Command::PlayStop(0));
+    let end = rig.end_frame();
+    rig.advance_to(end);
+    assert!(!rig.beats_since(mark).is_empty() && rig.clicks_since(mark).is_empty());
+    // A first take stopped the same way keeps its click until it commits.
+    let mut rig = Rig::with(common::Opts { align: 28_800, ..Default::default() });
+    rig.set(Command::SetMetronome(true));
+    rig.set_level(0.25);
+    rig.press(Command::RecDub(0));
+    rig.advance(rig.seconds(2.0 + 1.3));
+    let mark = rig.events.len();
+    rig.press(Command::PlayStop(0));
+    rig.advance_to(rig.end_frame());
+    assert!(!rig.clicks_since(mark).is_empty());
+}

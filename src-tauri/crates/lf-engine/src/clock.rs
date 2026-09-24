@@ -147,11 +147,6 @@ impl Clock {
         self.pulse = Some(Pulse { grid, next: grid.first_beat_at_or_after(now), forced_until: beats, free_run: false });
     }
 
-    /// Abort a count-in: carry its grid into free-run.
-    pub fn stop_count_in(&mut self, now: Frame) {
-        self.start_free_run(now);
-    }
-
     /// Lock the pulse to a committed master: `4 * bars` beats per `master` frames from `anchor`, which may
     /// lie in the past (the counted downbeat); the next beat is the first at or after `now`. Keeps the
     /// anti-flam reference, so a count beat that just sounded cannot double with the master's.

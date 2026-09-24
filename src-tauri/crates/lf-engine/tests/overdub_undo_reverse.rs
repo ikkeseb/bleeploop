@@ -408,13 +408,13 @@ fn the_undo_copy_is_spread_over_frames_and_undo_waits_for_it() {
     let start = rig.frame;
     rig.press(Command::RecDub(0));
     let done = start + job_frames(master);
-    rig.advance_to(done - 1);
-    assert!(rig.engine.looper().busy(), "the spare copy is still running one frame before its end");
+    rig.advance_to(done - 3);
     rig.press(Command::RecDub(0)); // commit the layer at once
     rig.set_level(0.0);
     rig.press(Command::Undo(0)); // lands before the copy is done: it waits for it
+    assert!(rig.engine.looper().busy() && rig.pcm(0) != pre, "the undo waits for the copy");
+    rig.advance_to(done + 1);
     assert!(!rig.engine.looper().busy(), "done on its frame");
-    rig.advance(1);
     assert_eq!(rig.pcm(0), pre, "the held undo ran once the copy was complete");
 }
 

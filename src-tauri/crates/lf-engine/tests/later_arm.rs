@@ -156,3 +156,54 @@ fn arm_5_only_the_recording_lane_releases_its_window() {
     assert!(rig.window().is_none() && rig.master() == 0 && !rig.locked(), "its own cancel resets the blank session");
     assert!(rig.events.iter().any(|e| matches!(e, Event::Transport { master: 0, locked: false, .. })));
 }
+
+/// Every beat since `mark` sits exactly on the master grid (4 * bars beats per master).
+fn beats_on_master_grid(rig: &Rig, mark: usize, bars: Frame) -> usize {
+    let grid = lf_engine::grid::Grid::master(rig.anchor(), rig.master(), bars);
+    let beats = rig.beats_since(mark);
+    for b in &beats {
+        assert_eq!(grid.beat_frame(grid.first_beat_at_or_after(b.0)), b.0, "beat at {} is off the master grid", b.0);
+    }
+    beats.len()
+}
+
+#[test]
+fn an_aborted_or_rejected_later_take_keeps_the_master_pulse() {
+    // 137 bpm at 44.1 kHz: a master beat (19313.75 frames) and a tempo beat (19313.87) part within a few beats.
+    for reject in [false, true] {
+        let mut rig = Rig::at(44100);
+        rig.set(Command::SetBpm(137.0));
+        rig.set_level(0.5);
+        rig.record_first_take(0, 2, 1000);
+        rig.press(Command::RecDub(1));
+        if reject {
+            rig.advance_to(rig.start_frame() + 1000);
+            rig.gap();
+            rig.advance(10);
+            rig.press(Command::PlayStop(1));
+            rig.advance_to(rig.end_frame() + 1);
+            assert_eq!(rig.state(1), LaneState::Empty);
+        } else {
+            rig.press(Command::Stop(1));
+        }
+        let mark = rig.events.len();
+        rig.advance(rig.seconds(15.0));
+        assert!(beats_on_master_grid(&rig, mark, 2) >= 30);
+    }
+}
+
+#[test]
+fn a_gap_on_a_window_edge_damages_nothing() {
+    for at_end in [false, true] {
+        let mut rig = Rig::new();
+        rig.set_level(0.5);
+        let master = rig.record_first_take(0, 2, 2400);
+        rig.set_input(code);
+        rig.press(Command::RecDub(1));
+        let (start, end) = (rig.start_frame(), rig.end_frame());
+        rig.advance_to(if at_end { end } else { start });
+        rig.gap(); // the block starting on the edge follows the gap
+        rig.advance(master + 4800);
+        assert!(rig.state(1) == LaneState::Playing && rig.rejected() == 0, "a gap on the {} edge", if at_end { "end" } else { "start" });
+    }
+}

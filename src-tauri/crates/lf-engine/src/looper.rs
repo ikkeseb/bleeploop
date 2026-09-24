@@ -239,6 +239,9 @@ pub struct Looper {
     master: Frame,
     anchor: Frame,
     jobs: [Option<Job>; MAX_JOBS],
+    /// The most buffer positions one job moved in one step: what "no loop-sized work in one callback"
+    /// is checked against.
+    job_step_max: Frame,
     detector: Detector,
     gain_coef: f64,
     loop_end_stop: bool,
@@ -274,6 +277,7 @@ impl Looper {
             master: 0,
             anchor: 0,
             jobs: [None; MAX_JOBS],
+            job_step_max: 0,
             detector: Detector::new(sample_rate),
             gain_coef: (-1.0 / (GAIN_TAU_SECONDS * sample_rate as f64)).exp(),
             loop_end_stop: false,
@@ -317,7 +321,7 @@ impl Looper {
             armed: t.armed,
             auto_armed: t.auto_armed,
             can_undo: t.undo_valid && t.committed(),
-            can_reverse: t.length > 0 && t.committed(),
+            can_reverse: t.committed(),
             reversed: t.reversed,
             stop_at: t.stop_at,
             retake_pass: rolling.map_or(0, |r| r.pass),
@@ -365,6 +369,11 @@ impl Looper {
     fn oriented(&self, buf: usize, reversed: bool, len: Frame) -> Vec<f32> {
         let data = &self.bufs[buf][..len as usize];
         if reversed { data.iter().rev().copied().collect() } else { data.to_vec() }
+    }
+
+    /// The most buffer positions one block job moved in a single step since the engine started.
+    pub fn job_step_max(&self) -> Frame {
+        self.job_step_max
     }
 
     /// True while any block job runs.
@@ -560,7 +569,7 @@ impl Looper {
 
     pub fn copy(&mut self, cx: &mut Cx, i: usize) -> Applied {
         let src = self.lanes[i];
-        if !src.committed() || self.master == 0 || src.length != self.master {
+        if !src.committed() {
             return Applied::Done;
         }
         let wait = self.wait_for(Some(i), false);
@@ -802,7 +811,7 @@ impl Looper {
         }
         let Some(mut rec) = self.rec.filter(|r| r.lane == i) else { return };
         let mut end = cx.now + rec.align;
-        let mut later_stop = true;
+        let mut bar_plan = true;
         if rec.roll.is_some() {
             let plan = self.retake_plan(cx, &rec);
             rec.roll = None;
@@ -820,23 +829,22 @@ impl Looper {
                 }
                 RetakeStop::FinishPass => {
                     end = rec.end.unwrap();
-                    later_stop = false;
+                    bar_plan = false; // it ends on its own pass edge
                 }
                 RetakeStop::StopNow => {}
             }
         }
         let start = rec.start.unwrap();
-        if t.state == LaneState::Recording && self.master == 0 && Some(end) != rec.end {
-            // Whole bars from musical time, with the quarter-beat grace. A shorter take keeps its audio
-            // through the press and pads to one bar at the commit.
-            let elapsed = rec.downbeat.map_or(0, |d| cx.now - d);
-            if let Some(target) = plan_free_stop(elapsed, self.fpb(cx), self.capacity) {
-                end = start + target;
-            }
-        }
-        if t.state == LaneState::Recording && self.master > 0 && later_stop {
+        if t.state == LaneState::Recording && bar_plan {
+            // Whole bars from musical time, with the quarter-beat grace. A first take shorter than a bar
+            // keeps its audio through the press and pads to one bar at the commit.
             let fpb = self.fpb(cx);
-            if self.master % fpb == 0 {
+            if self.master == 0 {
+                let elapsed = rec.downbeat.map_or(0, |d| cx.now - d);
+                if let Some(target) = plan_free_stop(elapsed, fpb, self.capacity) {
+                    end = start + target;
+                }
+            } else if self.master % fpb == 0 {
                 end = start + plan_later_stop(cx.now, start, rec.align, fpb, self.master / fpb);
             }
         }
@@ -910,10 +918,7 @@ impl Looper {
         t.armed = false;
         t.written = 0;
         t.length = 0;
-        t.state = LaneState::Empty;
-        if self.master == 0 {
-            cx.clock.stop_count_in(cx.now);
-        }
+        t.state = LaneState::Empty; // a first take leaves a blank session: finish_capture resets it
     }
 
     /// RETAKE: the rolling take reached its window end. Set the pass aside when it is clean (a damaged
@@ -1020,17 +1025,15 @@ impl Looper {
             return;
         }
         self.lanes[i].stop_at = None;
-        let discard = t.state == LaneState::Recording && t.length == 0;
+        let discard = t.state == LaneState::Recording; // a take in flight never has a loop yet
         if self.capturing(i) {
-            let count_in = t.state == LaneState::Recording && self.master == 0;
+            // An aborted first take leaves a blank session, whose reset below hands the count-in pulse
+            // back to free-run.
             self.lanes[i].armed = false;
-            if let Some(rec) = self.rec.filter(|r| r.lane == i && r.kind == Kind::Overdub) {
+            if let Some(rec) = self.rec.filter(|r| r.kind == Kind::Overdub) {
                 self.discard_layer(cx, i, &rec);
             }
             self.release_recorder(cx, i);
-            if count_in {
-                cx.clock.stop_count_in(cx.now);
-            }
         }
         let t = &mut self.lanes[i];
         if discard {
@@ -1093,20 +1096,20 @@ impl Looper {
     }
 
     fn reset_master_if_blank(&mut self, cx: &mut Cx) {
-        if self.master > 0 && self.rec.is_none() && self.lanes.iter().all(|t| t.state == LaneState::Empty) {
+        if self.rec.is_none() && self.lanes.iter().all(|t| t.state == LaneState::Empty) {
             self.reset_master(cx);
         }
     }
 
     // ── Time ───────────────────────────────────────────────────────────────────────────────────────
 
-    /// The first frame after `now` at which something scheduled happens (a window edge, a loop-end stop,
-    /// a boundary swap, a job completing).
-    pub fn next_event(&self, now: Frame) -> Option<Frame> {
+    /// The earliest frame something is scheduled for (a window edge, a loop-end stop, a boundary swap,
+    /// a job completing); the caller skips what is not after the frame it renders.
+    pub fn next_event(&self) -> Option<Frame> {
         let lanes = self.lanes.iter().flat_map(|t| [t.stop_at, t.switch_at]).flatten();
         let rec = self.rec.iter().flat_map(|r| [r.start.filter(|_| self.lanes[r.lane].armed), r.end]).flatten();
         let jobs = self.jobs.iter().flatten().map(Job::done_frame);
-        lanes.chain(rec).chain(jobs).filter(|&f| f > now).min()
+        lanes.chain(rec).chain(jobs).min()
     }
 
     /// Run everything scheduled for `cx.now`.
@@ -1188,6 +1191,7 @@ impl Looper {
             return;
         }
         job.progress = to;
+        self.job_step_max = self.job_step_max.max(to - from);
         let visit = job.visit;
         match job.kind {
             JobKind::Fill { buf, fill } => {
@@ -1249,7 +1253,6 @@ impl Looper {
         let at = self.detector.scan(input, autorec::threshold(self.auto_sensitivity), &mut self.bufs[live])?;
         let onset = f0 + at as Frame - self.detector.copied() as Frame;
         self.lanes[rec.lane].written = self.detector.copied() as Frame;
-        cx.now = f0 + at as Frame;
         self.begin_auto(cx, onset);
         Some(at)
     }
@@ -1270,11 +1273,9 @@ impl Looper {
         let data = &mut self.bufs[lane.live];
         match rec.kind {
             Kind::Take => {
-                let cap_hi = hi.min(start + self.capacity);
-                if lo < cap_hi {
-                    data[(lo - start) as usize..(cap_hi - start) as usize].copy_from_slice(&input[(lo - f0) as usize..(cap_hi - f0) as usize]);
-                    lane.written = lane.written.max(cap_hi - start);
-                }
+                // A take's window never outgrows the buffer (configure_end), so neither does this write.
+                data[(lo - start) as usize..(hi - start) as usize].copy_from_slice(&input[(lo - f0) as usize..(hi - f0) as usize]);
+                lane.written = lane.written.max(hi - start);
             }
             Kind::Overdub => {
                 let master = self.master;
@@ -1298,8 +1299,8 @@ impl Looper {
         for i in 0..TRACK_COUNT {
             let t = &mut self.lanes[i];
             let target = if t.muted { 0.0 } else { t.volume as f64 };
-            let playing = master > 0
-                && (t.state == LaneState::Playing || (t.state == LaneState::Overdubbing && silent_lane != Some(i)));
+            // Only a committed lane plays, and a lane commits only onto a master.
+            let playing = t.state == LaneState::Playing || (t.state == LaneState::Overdubbing && silent_lane != Some(i));
             if !playing {
                 for _ in 0..out.len() {
                     t.gain = target + (t.gain - target) * self.gain_coef;

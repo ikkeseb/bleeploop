@@ -182,7 +182,7 @@ impl Engine {
             self.looper.publish(&mut cx);
 
             let mut next = end;
-            for at in [first_pending(&self.pending), self.looper.next_event(f), cx.clock.next_beat_frame()].into_iter().flatten() {
+            for at in [first_pending(&self.pending), self.looper.next_event(), cx.clock.next_beat_frame()].into_iter().flatten() {
                 if at > f {
                     next = next.min(at);
                 }
