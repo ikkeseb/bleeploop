@@ -1,6 +1,6 @@
 # Work order: real-code gates and agent hygiene (OPEN)
 
-Pieces 5-6 of the 2026-09-23 fresh-eyes pass over code, gates, docs and agent workflow (pieces 1-4
+Pieces 5-7 of the 2026-09-23 fresh-eyes pass (7 from the 2026-09-24 loopback measurement) over code, gates, docs and agent workflow (pieces 1-4
 landed: guards that drive the real looper and one probe harness, both owned by `verify/README.md`,
 comments/docs that state current intent, and the native playbooks as `pnpm native:*`/`rust:check`,
 owned by `docs/VERIFY.md`). Build them in this order, one
@@ -37,11 +37,17 @@ next "Play first" jam in `STATUS.md` runs on this code before anything else land
 
 ## 6. L2 loopback probe (owner decision)
 
-`docs/ARCHITECTURE.md` names L2, a physical loopback measurement, as the latency gate; no tool exists.
-Meanwhile the rig lap sits at its 10-stop cap and the last play was 2026-09-18. With one cable from
-the interface output to its input, a DEV command could schedule clicks on the real master grid, record
-through the native input path into the real looper, and report how far the recorded transient lands
-from the grid, in frames and ms per buffer size. The cable plays exactly when the click is heard, so
-it measures the alignment half of Stops 1 and 3; feel stays with the ear. Unknown: whether the WebView
-output and the ASIO input can share the interface on the rig. Default if the owner says nothing: not
-built.
+`docs/ARCHITECTURE.md` names L2, a physical loopback measurement, as the latency gate. `pnpm
+native:loopback` (2026-09-24) now measures the alignment half with one cable from an interface output
+into an input; feel stays with the ear. Open: whether it becomes an in-app calibration (STATUS D18).
+
+## 7. Hold the hop-2 fill on its setpoint (open)
+
+`pnpm native:loopback` (2026-09-24) showed that a take's offset follows the plugin bridge's hop-2 fill
+nearly ms for ms, and the drift controller (`DriftController` in `src-tauri/src/host/transport.rs`, wn
+0.04 rad/s) takes minutes to steer a displaced fill back. The drain now restarts hop-2 on the setpoint
+after the flush and after an underrun; a fill displaced without an underrun (a producer gap around GO
+LIVE left it at 12 ms) still drifts a take by up to ~27 ms/min, and take offsets vary by ~13 ms across
+launches. Candidates: a faster, PV-filtered controller, or putting hop-2 on the setpoint when a take
+arms while the native monitor is live (the web path is muted then). Proof: `native:loopback` drift
+under ~2 ms/min and residual spread under ~3 ms over five launches.

@@ -83,6 +83,7 @@ These commands run on Windows node, and from WSL through the `pnpm` wrapper:
 | `pnpm native:survey` | Restart survey (`src/debug/restart-survey.ts`): which plugins raise a restart or rescan request, and on which parameter. Also prints a `value-check` line per plugin (controller value vs what the host set). |
 | `pnpm native:swap` | Swap stress (`src/debug/swap-stress.ts`): every ordered pair is swapped in place in slot 0, first with the editor closed, then open, after tweaking the loaded plugin. A step that takes longer than 30 s prints `TIMEOUT`. |
 | `pnpm native:recall` | Rig recall (`src/debug/recall-restart.ts`), five launches: two plugins loaded and an input channel set come back after a restart and after a WebView reload, unarmed, and a close through the window's close button right after that reload keeps them for the next launch; a launch whose app.exe is killed while restoring makes the next one skip the recall with one log line and one toast; the launch after that is clean. |
+| `pnpm native:loopback` | Loopback sync (`src/debug/loopback-sync.ts`), ASIO, in its own app profile (`scripts/loopback-probe.tauri.json`): with an interface output cabled into an input (`--channel=<0-based>`, default 0), records the click as a FIXED first take and half-beat pulses as a later take, and prints `residual` (where a perfectly timed hit lands against the grid, + = late), the drift inside a take and `RT`, the native round trip a guitarist hears. `--plugin=` picks the effect (default Pro-Q), `--trim=<ms>` a rec align, `--bars=` the take length. |
 | `pnpm native:kill` | Stops `app`, `cargo` and whatever owns port 1420. |
 
 A `native:*` probe launches `tauri dev` (WASAPI; `--asio` for ASIO) with the probe's
@@ -135,6 +136,11 @@ blocks until the verdict, so an agent harness should run it in the background.
   production sampler with controlled timing inputs; `verify/probes/render-clock.mjs` proves that the DEV
   clock observer preserves PCM. Both run through `pnpm probe`.
 - **When to run the plugin probes, and their baselines** (the verdict alone doesn't say this):
+  - `native:loopback` after a change to record compensation, the plugin bridge or the drift
+    controller. Baseline (2026-09-24, Scarlett 2i2 3rd gen, ASIO 256, Pro-Q 3, a cable from line
+    out R into input 2): residual +64/+65 ms at trim 0, −3..+10 ms at trim 65; RT 50–51 ms; take B
+    spread ~1 ms; drift inside take A 7–27 ms/min, following the hop-2 fill (the per-slice lines). Two of about twelve launches failed GO LIVE with an
+    `arm_monitor` timeout (cause unknown); a relaunch passed.
   - `native:smoke` after any change to `editor_window.rs` or either host's editor open/close path.
     Baseline (2026-09-23, WASAPI, the app mostly on the default ~15 ms timer tick): `complete: 30
     opened, 0 failed, of 30`, each close 110–250 ms. Windows grants the app a 1 ms tick only some of

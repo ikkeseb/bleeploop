@@ -7,7 +7,9 @@ The owner's ear, eye or decision on the PC: ONE ordered lap plus the decisions t
 **Machine verification, Windows, 2026-09-19:** check/build, Rust checks and tests, the golden jam, an ASIO release and the browser probes (`verify/`) all passed.
 Driver latency reports are not guitar latency; after a relevant change, rerun only the affected check.
 
-**Last play: 2026-09-18** (`pnpm dev:asio`, free jam, two tracks): worked well, latency possibly a hair off; no stop walked.
+**Last play: 2026-09-24** (`pnpm dev:asio`, jam, two–three tracks, no pedal): the click too quiet at full
+volume (built: twice the level); loops audibly out of sync with the click, worse after STOP → PLAY ALL
+(measured, see Stop 1 and D18); END STOP unclear (`docs/backlog-taste.md`); no stop walked.
 
 ## Play first
 
@@ -64,6 +66,7 @@ Blocked on an owner decision, not on testing. The default column is what happens
 | D14 | Under deuteranopia REC red and PLAYING green still read as nearly the same yellow. Since the 2026-09-23 restyle a live capture is also a FILLED badge and a lit core face, and PLAYING a lit LED, so greyscale separates them by shape. Enough, or a palette move as well? | stays as built |
 | D16 | Host a browser demo on Cloudflare Pages? It contradicts "the browser tier is a verification rig". | no |
 | D17 | `LICENSE` and `authors` in `src-tauri/Cargo.toml` carry the GitHub handle (the no-names rule targets prose). Keep, or use a role? | stays as built |
+| D18 | Takes land ~65 ms late on this rig until rec align is set (Stop 1). Set rec align +65 by hand, or build a one-click cable calibration in Audio Settings on the `native:loopback` method (reopens D2/D7's "no L3 wizard")? | the owner sets rec align +65 by hand |
 
 **Answered 2026-09-23** (product lens over the 2026-09-23 audit; the promise now heads `README.md`):
 
@@ -94,8 +97,17 @@ The formula C, its freeze and why native monitoring cancels input+plugin latency
 
 - **Capture:** timestamped windows (`docs/ARCHITECTURE.md` § Audio architecture); overdub collects
   through punch-out+C (STOP silences playback meanwhile, CLEAR cancels).
-- **Unverified:** physical guitar alignment, converter latency, browser output reports, the fallback
-  128-frame allowance, native queue timing, simultaneous native/synth source alignment.
+- **Measured 2026-09-24 through a loopback cable** (`pnpm native:loopback`, baseline in
+  `docs/VERIFY.md`): at trim 0 a perfectly timed hit lands ~65 ms late on this rig (the WebView
+  output's real latency is above what it reports), and rec align +65 brings it to −3..+10 ms. The
+  native round trip a guitarist hears is 50–51 ms at buffer 256. The rest is the plugin bridge's
+  hop-2 fill, which is the record path's delay: after a flush or an underrun it now restarts on its
+  setpoint (`src/audio/plugin-bridge.ts`), but a fill knocked off it any other way (a producer gap
+  around GO LIVE) is still steered back over minutes, and a take recorded meanwhile drifts by up to
+  ~27 ms/min. Work order: `docs/plans/gates-and-hygiene.md` § 7.
+- **Unverified:** converter latency on its own, the fallback 128-frame allowance, simultaneous
+  native/synth source alignment, whether the ~65 ms holds across restarts, buffer sizes and output
+  devices.
 - **Diagnostics:** `__lf.recordLatency` `lastCompensation()` (graph term; `source` `timestamp` or
   `reported`, the floor applies to `reported` only), `snapshot`/`resnapshot`, `setEnabled`,
   `setFloorEnabled`; "rec align" = the saved ±250 ms trim. No `[rec-comp]` line on a guitar take =

@@ -225,6 +225,9 @@ existing P9 ring → looper record tap (lag-tolerant, records wet "for free").
 - `plugin_note_off` / `plugin_set_param` now answer `Err` on a full event ring or an unlisted param id
   (audit B2–B4); the frontend still `void`s them, so a rejection only reaches the release log. A UI
   reaction (slider snaps back to the plugin's value, a stuck-note cue) is unbuilt.
+- GO LIVE under ASIO timed out in `arm_monitor` ("timed out waiting on channel", then `disarm_input`
+  timed out too) on two of about twelve `pnpm native:loopback` launches on 2026-09-24; a relaunch
+  passed. Cause unknown.
 - CLAP and VST3 duplicate the load choreography (`load`/`vst3_load` and both owner mains): one
   shared owner would keep B1/B11 from returning. Not built.
 

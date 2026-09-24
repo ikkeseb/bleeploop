@@ -26,6 +26,7 @@
     "native:survey": "node scripts/native-probe.mjs restart-survey",
     "native:swap": "node scripts/native-probe.mjs swap-stress",
     "native:recall": "node scripts/native-probe.mjs recall-restart",
+    "native:loopback": "node scripts/native-probe.mjs loopback-sync --asio",
     "native:kill": "node scripts/native-kill.mjs",
     "rust:check": "node scripts/rust-check.mjs",
     "prepare": "simple-git-hooks"

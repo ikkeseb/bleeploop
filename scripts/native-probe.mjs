@@ -4,6 +4,7 @@
 //   pnpm native:survey  restart survey  (src/debug/restart-survey.ts)
 //   pnpm native:swap    swap stress     (src/debug/swap-stress.ts)
 //   pnpm native:recall  recall restart  (src/debug/recall-restart.ts): one launch per phase
+//   pnpm native:loopback  loopback sync (src/debug/loopback-sync.ts): needs an output cabled into input 1
 //
 // Options: `--asio` launches `pnpm dev:asio` instead of `pnpm dev:wasapi`; `--<knob>=<value>` becomes
 // `VITE_LF_PROBE_<KNOB>` (`--filter=Pro-Q,Saturn`, `--hold=`, `--settle=`, `--params=`, `--plugins=`:
@@ -26,6 +27,9 @@ const PROBES = {
   'editor-smoke': { tag: 'smoke', end: /^(complete: .*|no plugins.*)$/, pass: /^complete: \d+ opened, 0 failed/ },
   'restart-survey': { tag: 'survey', end: /^(complete|no plugins.*)$/, pass: /^complete$/ },
   'swap-stress': { tag: 'swap', end: /^(complete: .*|TIMEOUT .*|ABORTED.*|need at least .*)$/, pass: /^complete: \d+ swapped, 0 failed/ },
+  // `config`: a Tauri config overlay; its own identifier gives the run its own WebView2 profile, so the
+  // owner's jam, recovery and settings are never read or written.
+  'loopback-sync': { tag: 'loopback', end: /^(result: .*|FAIL.*)$/, pass: /^result: /, config: 'scripts/loopback-probe.tauri.json' },
   // `recallLines`: how many `[rig-recall]` log lines the phase must print.
   'recall-restart': {
     tag: 'recall',
@@ -93,7 +97,7 @@ function stopRun(child) {
 function launch(phase, phaseEnv) {
   return new Promise((resolve) => {
     if (phase.name) log.write(`\n===== phase ${phase.name} =====\n`);
-    const child = spawn(`pnpm ${devScript}`, { cwd: root, env: phaseEnv, shell: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(`pnpm ${devScript}${spec.config ? ` --config ${spec.config}` : ''}`, { cwd: root, env: phaseEnv, shell: true, stdio: ['ignore', 'pipe', 'pipe'] });
     let lastLine = Date.now();
     let seen = false;
     let partial = '';

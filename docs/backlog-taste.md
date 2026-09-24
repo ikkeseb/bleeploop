@@ -8,6 +8,10 @@ not here.
 
 ## One eye-lap, `pnpm dev:asio`, screen by screen
 
+- **END STOP reads as a record control (by ear, 2026-09-24):** with END STOP on and FIXED off, a stopped
+  free take kept every whole bar, which is as built (END STOP only stops playback); the name suggested
+  otherwise. The owner asks other players before deciding on wording or behaviour.
+
 - **Command bar (2026-09-02):** the two-row form whenever one row cannot fit (CLICK/FIXED/AUTO/TAP on
   row 2 at the Tauri default 1280); the ⬇/⬆ EXPORT/IMPORT icons in the tool cluster; the 4 px record-level
   meter left of MIC (−60..0 dBFS, green, red within 1 dB of full, a cyan tick at the AUTO trigger
