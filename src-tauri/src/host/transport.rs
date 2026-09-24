@@ -2,8 +2,10 @@
 //! (`clap::vst3_host`) producers: the hop-1 WebView2 SharedBuffer ring + resampler (`Hop1Pipe`),
 //! the cpal-input resampler (`InPipe`), the native-monitor output resampler (`OutMonitorPipe`),
 //! the shared drift-correction PI controller (`DriftController`), the per-slot RT diagnostics
-//! (`ProducerDiag`), and the high-res pacing timer (`PaceTimer`). This file is the future
-//! `crates/lf-rt` seam; no workspace/crate split is made here.
+//! (`ProducerDiag`), and the high-res pacing timer (`PaceTimer`). At the native engine's flip the
+//! WebView bridge (`Hop1Pipe`, the SharedBuffer ring, `PaceTimer`) goes; `InPipe`, `OutMonitorPipe`
+//! and `DriftController` are reshaped and move to the engine's device module
+//! (docs/plans/native-engine.md, Stage 4).
 
 use std::sync::atomic::{
     AtomicBool, AtomicU32, AtomicU64, AtomicUsize,

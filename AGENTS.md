@@ -22,8 +22,9 @@ Harness auto-load of nested files is not reliable: open the briefing yourself.
 | Any non-trivial work; `engine.ts`, bus wiring | `docs/ARCHITECTURE.md` |
 | Planning or performing a by-ear/eye/rig session; gate-adjacent code; latency | `STATUS.md` |
 | Releases, licences, workflow hardening | `docs/plans/release-prep.md` |
-| The next milestone (hands-free looper) and what is explicitly not built | `docs/plans/pedalboard.md` |
-| The open work order: real-code guards, probe automation, comment/doc sweeps, agent commands | `docs/plans/gates-and-hygiene.md` |
+| The native audio engine: the decided direction, its stages, gates and owner decisions | `docs/plans/native-engine.md` |
+| The hands-free looper (landed) and what is explicitly not built | `docs/plans/pedalboard.md` |
+| The open work order: the recorder-session jam and the looper fixes queued behind it | `docs/plans/gates-and-hygiene.md` |
 
 ## Standing rules
 
@@ -46,12 +47,15 @@ Harness auto-load of nested files is not reliable: open the briefing yourself.
   looper is the instrument. MIDI controller → synth/plugin is the second path, for the other layers,
   and runs on the WebView latency path; PC-keyboard→MIDI is its fallback. By-ear sessions happen on
   guitar. The on-screen keyboard stays available, but it is not the first-screen hero. The promise
-  heads `README.md`; the milestone and the not-built list live in `docs/plans/pedalboard.md`.
+  heads `README.md`; the not-built list lives in `docs/plans/pedalboard.md`.
+- **Direction: one native audio engine** (`docs/plans/native-engine.md`). Until its flip the live
+  line takes fixes only: no new work in paths the engine deletes (the plugin bridge, record
+  compensation, the Web Audio looper, synths and FX); new looper features are built in the engine.
 - **The browser tier is a VERIFICATION RIG, not a product.** BleepLoop ships as a standalone
   Windows app with native drivers and zero-latency monitoring.
 - **Measure latency changes on the path they change,** with signal/timestamp probes before and
   after. Replacing native monitoring or changing its buffering targets requires the L1+L2
-  measurements in `docs/ARCHITECTURE.md` § Decided: the looper stays in Web Audio.
+  measurements in `docs/ARCHITECTURE.md` § Decided: one native audio engine.
 - **Before editing `src/audio/`, check for the dev app (`app` process)**; if it runs, ask for it to
   be closed and wait — hot-reload stacks a second audio engine on the live one.
 - **Verify by driving the running app and measuring** — a typecheck, a code read or a subagent's
@@ -92,7 +96,8 @@ TypeScript and runs standalone in a browser. `src/platform/` is the ONLY place a
 never cross that boundary as PCM** — native audio reaches the Web Audio graph only as an
 *AudioNode*. Frontend `console.error` + uncaught errors feed the release log
 (`src/platform/logging.ts`): keep every `console.error` site. Stack: SolidJS + TypeScript + Vite 8
-(rolldown/oxc — esbuild is gone) + Tone.js + ringbuf.js.
+(rolldown/oxc — esbuild is gone) + Tone.js + ringbuf.js. This paragraph describes the shipping code
+until the native engine's flip.
 
 ## Invariants — titles only; `docs/ARCHITECTURE.md` owns the text
 

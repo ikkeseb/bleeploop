@@ -1,4 +1,4 @@
-# Next milestone: the hands-free looper (Pedalboard mode)
+# The hands-free looper (Pedalboard mode): landed, and the not-built list
 
 Decided 2026-09-23 from the product lens over that day's audit. The promise heads `README.md`: a
 guitarist's hands are on the guitar, so every looper action must be reachable by foot. The keys (a
@@ -6,7 +6,10 @@ keystroke footswitch sends them) and learned MIDI messages reach the named actio
 `src/app/actions.ts` through `src/app/transport-keys.ts` and `src/app/midi-actions.ts`.
 `src/audio/looper/looper.ts` already exposes every action, so the milestone is adapters: capture,
 compensation and the rig-guarded algorithms stay untouched, and nothing here needs the rig to prove
-correctness. This file is deleted when the milestone lands; what still binds moves to the briefings.
+correctness. The milestone landed; this file now holds the not-built list and goes when that list
+is folded into `docs/backlog-taste.md` or the engine plan. Engine-bound asks (D12 controller data to
+plugins, F8 synth plugins on the device clock, F14 multiply, F15 input FX): `docs/plans/native-engine.md`
+§ After the flip.
 
 ## Pieces, in build order
 
@@ -25,20 +28,11 @@ wired" and LoadState cancellation needs a design).
 
 ## Explicitly not built
 
-- **D12 full controller IPC to CLAP/VST3.** MIDI into a plugin stays on the WebView latency path
-  whatever the IPC carries; the S sustain alternative is built (STATUS D12-S).
-- **Native monitor path for synth plugins (tester F8).** Changes native buffering: needs the L1+L2
-  measurements first (`docs/ARCHITECTURE.md`), and the promise ranks synth layers second.
-- **Native looper core.** Falsified unless the L1/L2 gates say otherwise; it would end Mac development.
 - **VST3 plugin tone-state recall.** See above.
-- **Multiply (a later take k× master).** Adds unheard seams on top of the tile seams already owed to
-  the ear (`docs/plans/tester-feedback.md`). Revisit once those are heard.
 - **FREE tempo-setting first take, 3/4 and 6/8.** `beatsPerBar = 4` runs through grid math, click and
   count-in; no owner or tester ask; gate-adjacent timing code.
 - **Scenes and songs; panel drag; Day/Night; more built-in synths.** Taste or capacity with no effect
   on playing; each adds its own eye lap. Built-ins fill layers, they do not compete with plugins.
-- **Input FX.** Owner request, but the design is open: the native monitor bypasses Web Audio, so the
-  player would not hear what gets recorded. Design first.
 - **Built-in dry INPUT source; a second input channel.** Rust effort unknown; the promise assumes an
   amp-sim plugin. "Maybe later" (STATUS D2/D7).
 - **Diagnostics copy:** a copy-diagnostics button, the version in Help, open-log-folder and an issue
@@ -54,6 +48,3 @@ wired" and LoadState cancellation needs a design).
 
 - Whether the owner plays with a footswitch or MIDI foot controller, and what it sends. None → the
   pick moves to the first downloadable release (`docs/plans/release-prep.md`).
-- Whether a MIDI-keyboard player without ASIO or guitar (the tester's setup) is someone BleepLoop is
-  for. Yes → F8 becomes a roadmap item.
-- Whether the first downloadable release comes before any new feature.

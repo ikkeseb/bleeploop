@@ -32,9 +32,9 @@ All items remain open until the tester confirms. § Code reading records what th
 | F11 | The owner wants the click audible whenever armed and CLICK is enabled. | Include the armed waiting state in audible-click behavior. This is a requested change to the current transport-mode policy described in STATUS Stop 3, not implemented behavior. Check recording arm/wait states, including AUTO; preserve a clear distinction from native input GO LIVE. |
 | F12 | The owner asks about downloadable releases, possibly ASIO and non-ASIO variants, after the tester built the app manually. | Supply ready-to-run Windows downloads. Existing distribution decision is an ASIO build with WASAPI fallback, owned by docs/plans/release-prep.md. Two separate downloads are a question, not an approved change. A reported successful manual build is not independent verification of the clean-machine README path. |
 | F13 | Audio Settings' output reads "System default" every time it reopens; the tester wants to route the sound to a chosen output, as Ableton does. Screenshot: WASAPI, input Line (MG-XU), output list open. | One output pick routes everything. Reproduced on the dev PC: the pick was saved but the dropdown lost it (input too), and the pick steered only the plugin's native monitor while loops, synths and click followed the Windows default. |
-| F14 | A one-bar first take locks every later track to one bar. | A later track longer than the master: extend the loop, keeping the one-bar track repeating across it (an RC-505-style multiply). `docs/plans/pedalboard.md` lists Multiply as not built; this reopens it. |
-| F15 | No effects (delay, reverb) before recording into a track. | An elegant pre-record FX. The open design in `docs/backlog-taste.md` (Input FX) is about the guitar's native monitor; the tester plays keys, whose synths already run in Web Audio. |
-| F16 | No control over a recorded track's bar count after the fact. | Adjust the length of a committed track. Not built; design open. |
+| F14 | A one-bar first take locks every later track to one bar. | A later track longer than the master: extend the loop, keeping the one-bar track repeating across it (an RC-505-style multiply). Waits for the native engine (`docs/plans/native-engine.md` § After the flip). |
+| F15 | No effects (delay, reverb) before recording into a track. | An elegant pre-record FX. Waits for the native engine, where input, monitor and record tap share one callback (`docs/plans/native-engine.md` § After the flip). |
+| F16 | No control over a recorded track's bar count after the fact. | Adjust the length of a committed track. Design open; waits for the native engine (`docs/plans/native-engine.md` § After the flip). |
 
 ## Code reading at `d17c777`
 
@@ -51,7 +51,7 @@ to be re-checked before they steer a change.
 | F5 | PLAY on a STOPPED track computes its offset from the master phase (`machine.ts:809-810`); ALL PLAY does the same per track. No restart path exists. | Design: global vs per track |
 | F6 | The first 12 params show unfiltered (`PluginControls.tsx:31,256`); names come straight from the plugin's `info.title` with no fallback (`vst3.rs:1848-1879`). Empty names are plugin-reported, not UI placeholders. | Small fix |
 | F7 ✓ | No specific deadlock identified. The swap sequence has waits without a time limit: `owner_join.join()` (`clap.rs:1030`), editor teardown + message pump (`vst3.rs:893`, `editor_window.rs:244`), cpal WASAPI stream drop, a VST3 restart joining RT with the editor open (`vst3.rs:1184`), IPC with no frontend timeout. `scanning` clears only when the scan IPC returns (`instrument.ts:311`), so a long or hung scan explains an indicator that predates the freeze. | Needs runtime: log or repro |
-| F8 ✓ | A synth plugin can never reach the native monitor: `goLive` arms input first, which rejects a plugin without an input bus (`native-io.ts:85-87`). MIDI → plugin therefore always takes the WebView path: ~30 ms bridge-queue setpoint (`TARGET_FILL_SECONDS`, `transport.rs`), 128-frame worklet, Web Audio output. ASIO would not shorten that path. Native WASAPI is shared-mode, `BufferSize::Default` (`audio_output.rs:17`). | Architecture; owner roadmap call, measure first |
+| F8 ✓ | A synth plugin can never reach the native monitor: `goLive` arms input first, which rejects a plugin without an input bus (`native-io.ts:85-87`). MIDI → plugin therefore always takes the WebView path: ~30 ms bridge-queue setpoint (`TARGET_FILL_SECONDS`, `transport.rs`), 128-frame worklet, Web Audio output. ASIO would not shorten that path. Native WASAPI is shared-mode, `BufferSize::Default` (`audio_output.rs:17`). | Architecture; answered by the native engine (§ Work order, item 3) |
 | F9 ✓ | The toast is reachable without a GO LIVE click: a fresh pick auto-starts live input when the scan says `isEffect` (`PluginControls.tsx:160-166`), and the scan derives that from VST3 subCategories, not the actual input bus (`scan.rs:683`). Message site: `native_io.rs:201`. | Small fix |
 | F10 | The number is AUTO REC sensitivity, 1–100 → −12…−60 dBFS RMS (`auto-record.ts:8-19`); label built at `Transport.tsx:304`. | Wording only |
 | F11 ✓ | Ordinary ARMED already clicks with CLICK on; only AUTO LISTENING is excluded from the click gate (`state.ts:318`). AUTO exists for the first take only (`machine.ts` `beginAutoRecording`), so no grid exists while it listens. | No change: see § Work order |
@@ -131,8 +131,9 @@ Proven in the browser tier only (`pnpm check`, `pnpm build`, `pnpm verify:jam`, 
    - **F11: no code change.** Ordinary ARMED already clicks (`state.ts` `publish`). AUTO listening
      stays silent: AUTO exists only for the first take, so no grid exists to click on, and through a
      mic the click could trigger the take.
-3. **F8 waits** for an owner decision on a native monitor path for synth plugins; F12 stays with
-   `docs/plans/release-prep.md`.
+3. **F8: answered 2026-09-24** by the native engine (plugins and MIDI in the device callback,
+   `docs/plans/native-engine.md` Stage 4); nothing on the shipping line. F12 is the plan's Stage 0
+   (the first published release, `docs/plans/release-prep.md`).
 
 Preserve the complete intake while fixing one issue at a time. The tester's machine remains the
 final confirmation for its reported failures.

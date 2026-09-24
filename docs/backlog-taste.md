@@ -109,9 +109,6 @@ not here.
 - Undo as visible history (layer count on ↶ DUB); scenes/snapshots switched on the loop boundary;
   songs as chained scenes; click "01" to name a track; piano hidden by default; synth pills gone once a
   plugin is loaded.
-- Input FX (owner request): delay/stutter/reverb BEFORE the record tap, printed into the take, beside
-  today's per-track post FX. Open design: the native monitor bypasses Web Audio, so the player would
-  not hear what is recorded; C and grid-synced stutter need their own answer.
 
 ## Craft — `pnpm check` + screenshots, no ear
 

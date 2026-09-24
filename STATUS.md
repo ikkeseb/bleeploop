@@ -2,14 +2,16 @@
 
 The owner's ear, eye or decision on the PC: ONE ordered lap plus the decisions that block work. Taste:
 `docs/backlog-taste.md` (not a gate). Non-gate threads: `AGENTS.md` § Open threads. Tester reports:
-`docs/plans/tester-feedback.md` (not rig stops; machine proofs do not close them).
+`docs/plans/tester-feedback.md` (not rig stops; machine proofs do not close them). Direction since
+2026-09-24: one native audio engine (`docs/plans/native-engine.md`); this lap serves the shipping
+line until its flip.
 
 **Machine verification, Windows, 2026-09-19:** check/build, Rust checks and tests, the golden jam, an ASIO release and the browser probes (`verify/`) all passed.
 Driver latency reports are not guitar latency; after a relevant change, rerun only the affected check.
 
 **Last play: 2026-09-24** (`pnpm dev:asio`, jam, two–three tracks, no pedal): the click too quiet at full
 volume (built: twice the level); loops audibly out of sync with the click, worse after STOP → PLAY ALL
-(measured, see Stop 1 and D18); END STOP unclear (`docs/backlog-taste.md`); no stop walked.
+(measured, see Stop 1); END STOP unclear (`docs/backlog-taste.md`); no stop walked.
 
 ## Play first
 
@@ -26,9 +28,8 @@ A stop dies when it passes; past 10 stops, consolidate or flag it (AGENTS.md). D
 1. **ASIO · amp-sim live · buffer 256 — latency + the first take.** GO LIVE (VST3, Petrucci): wet
    audible; master fader scales the wet, not the recorded level; rec align keeps a saved trim. Loop
    against the click: first take, overdub and FIXED 4 keep their attacks and endings.
-2. **Same rig · buffer 128.** C still the same per config; the `ASIO_MAX_BLOCK_FRAMES` 256→128 lever
-   (~28 ms, crackle-risk — bump `INPUT_TARGET_SECONDS` a couple ms only if 128/64 crackles); switch to
-   1024 once for the declick fade-up, back to 256.
+2. **Same rig · buffer 128.** C still the same per config; switch to 1024 once for the declick fade-up,
+   back to 256.
 3. **The take itself, at 256.** Count-in feels right (1 bar, accent on 1, no dead air). FIXED 2
    stops on the downbeat after exactly 2 bars. Free record: stop ~on the downbeat after N bars → "N
    bars"; try an early and a mid-bar stop. Click: silent when idle, stops with stop-all, count-in still
@@ -46,8 +47,7 @@ A stop dies when it passes; past 10 stops, consolidate or flag it (AGENTS.md). D
 6. **Fault injection.** Yank the armed interface while LIVE → within ~2 s three log layers
    (`cpal stream error` → `FAULTED (device lost)` → `fell back to the web monitor path`), a toast, the
    wet continues via the web path; reconnect + re-arm OK. Negative
-   control: normal use NEVER logs `owner-request cancelled`. Does `[rec-comp] snapshot`'s
-   generation-vs-settle `cpalOut=` split per arm?
+   control: normal use NEVER logs `owner-request cancelled`.
 7. **MIC path + AUTO REC.** Audio Settings Ch 1 records only physical input 1, Ch 2 only input 2.
    AUTO REC: a muted-guitar noise floor must not arm, a real attack must (sensitivity, onset, feel).
 8. **Session files on the rig.** Import the exported zip through the native file picker and hear the
@@ -66,7 +66,18 @@ Blocked on an owner decision, not on testing. The default column is what happens
 | D14 | Under deuteranopia REC red and PLAYING green still read as nearly the same yellow. Since the 2026-09-23 restyle a live capture is also a FILLED badge and a lit core face, and PLAYING a lit LED, so greyscale separates them by shape. Enough, or a palette move as well? | stays as built |
 | D16 | Host a browser demo on Cloudflare Pages? It contradicts "the browser tier is a verification rig". | no |
 | D17 | `LICENSE` and `authors` in `src-tauri/Cargo.toml` carry the GitHub handle (the no-names rule targets prose). Keep, or use a role? | stays as built |
-| D18 | Takes land ~69 ms late on this rig until rec align is set (Stop 1). Set rec align +69 by hand, or build a one-click cable calibration in Audio Settings on the `native:loopback` method, keyed by the WebView's output device (reopens D2/D7's "no L3 wizard")? | the owner sets rec align +69 by hand |
+| E1 | Native-engine plan Stage 0: publish v0.1.0 once `docs/plans/release-prep.md`'s two open items are closed (artifact gated on its SHA, the CI-built exe heard on the rig)? | yes |
+| E2 | If the Stage 1 silent-share test fails: Share output goes to a user-picked endpoint, or rely on OBS/Discord app capture only? | user-picked endpoint |
+| E3 | Engine: a take recording when the audio device drops (needed by Stage 4) | punch out at the last frame, keep it |
+| E4 | Engine import needs a native file dialog: add `tauri-plugin-dialog` (Stage 5)? | yes |
+| E5 | v0.1.0's recovery records (IndexedDB) at the engine upgrade: drop with a release note, or hand the bytes over once (Stage 5)? | drop, release note |
+| E6 | A true 0 dBFS ceiling in the ported limiter (Stage 3), or a literal port of today's? | literal port |
+| E7 | v0.1.0 ships with rec align 0 plus a release note, or with the dev rig's +69 as the default? | 0 plus the note |
+
+**Answered 2026-09-24** (`docs/ARCHITECTURE.md` § Decided: one native audio engine):
+
+- **D18 — no calibration build:** the native engine drops rec align; on the shipping line the owner
+  sets rec align +69 by hand.
 
 **Answered 2026-09-23** (product lens over the 2026-09-23 audit; the promise now heads `README.md`):
 
@@ -101,11 +112,12 @@ The formula C, its freeze and why native monitoring cancels input+plugin latency
   `docs/VERIFY.md`): at trim 0 a perfectly timed hit lands ~65 ms late on this rig (the WebView
   output's real latency is above what it reports); since the worklet reads the bridge ring directly,
   rec align +60 leaves +8..+12 ms in six launches of seven, so +69 is this rig's value (−8 ms in the
-  seventh: open). The native round trip a guitarist hears is 44 ms at buffer 256 (WASAPI: ~280 ms).
+  seventh: not pursued, the engine removes the bridge). The native round trip a guitarist hears is 44 ms at buffer 256 (WASAPI: ~280 ms).
   The bridge queue is the record path's delay: the worklet holds it on one setpoint and settles it
   back after any step, and C follows its smoothed shift since the freeze
   (`src/audio/worklets/plugin-pcm-source.ts`, `record-latency.ts`). Inside a take the offset drifts
-  0.7–3.2 ms/min in most launches. Work order: `docs/plans/gates-and-hygiene.md` § 7.
+  0.7–3.2 ms/min in most launches. No further bridge work: the engine replaces it
+  (`docs/plans/native-engine.md`).
 - **Unverified:** converter latency on its own, the fallback 128-frame allowance, simultaneous
   native/synth source alignment, whether the ~65 ms holds across restarts, buffer sizes and output
   devices.

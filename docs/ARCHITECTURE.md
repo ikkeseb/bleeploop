@@ -164,20 +164,30 @@ silently points at the wrong rule. `verify/guards/docs.mjs` fails when they do.
    `sameTrack` equality + the `displayState`/`coreGlyph` memos in `Looper.tsx`.
 7. **All `@tauri-apps/*` confined to `src/platform/`** — CI-guarded.
 
-## Decided: the looper stays in Web Audio
+## Decided: one native audio engine (2026-09-24)
 
-Moving the looper, click and master mix native ("one clock by construction") was examined and
-rejected. Treat it as falsified unless the measurements below say otherwise:
+Replaces "the looper stays in Web Audio". Click, looper, synths, FX, mixer, limiter, MIDI and plugin
+processing move into ONE Rust engine clocked by the audio device; the WebView becomes UI only and
+reads a state feed (phase, track states, levels, waveform peaks), never PCM. Stages and gates:
+`docs/plans/native-engine.md`; its owner decisions are `STATUS.md` E1–E7. Until the flip (its Stage 6)
+the other sections describe the shipping code and still bind.
 
-- The six Web Audio synths stay web-side, so the compensation problem would move to the synth
-  ingress rather than disappear.
-- A live `AudioContext` cannot be externally clocked (Chromium paces rendering off its own output
-  stream). The real shape would be the existing two-hop ring plus a main-thread pump on the WHOLE
-  audible path, turning today's compensated constants into dropout risk under main-thread jank.
-- The `verify/` suite and the Playwright/`__lf` harness are web-side and there is no Playwright into
-  WebView2: the looper state machine would be re-verified by ear in RT Rust.
-- Loop playback runs through the Tone FX chain, which would need an alloc-free RT Rust rewrite or a
-  round trip back into Web Audio. Mac development of the core would end (no Rust toolchain there).
+Why the earlier rejection no longer holds:
+
+- The synths and FX move too, null-tested against reference renders of today's Tone code, so no
+  compensation moves to a synth ingress.
+- No `AudioContext` has to be clocked from outside: the engine owns the device callback.
+- The looper state machine moves to Rust with one owner and is re-verified offline by `cargo test`
+  (scripted renders, the rig-guard scenarios as spec, a golden-jam port), not by ear.
+- The measured pain is real: through the loopback cable a take lands ~65 ms late at trim 0, spreads
+  per launch and drifts inside a take (`docs/VERIFY.md`, the native:loopback baseline). It comes from
+  two clocks and the WebView's unreported output latency; a one-clock engine removes both, and the
+  wet master becomes one stream that can be shared.
+- Mac development of the audio core waits for a Rust toolchain there (later).
+
+What remains is the driver's own report: alignment takes the device's reported input + output
+latency, and drivers can under-report converter latency. The plan's Stage 1 measures that premise
+before any engine code; a failed premise stops the plan and goes back to the owner.
 
 What stays true: on an arbitrary Windows machine (WASAPI-shared, no ASIO) absolute latency is high
 and `ctx.outputLatency` cannot be trusted in either direction.
@@ -186,15 +196,14 @@ and `ctx.outputLatency` cannot be trusted in either direction.
 both, before and after the change:
 
 - **L1 — the rig protocol:** a stable compensation `C` per take, then the saved trim, re-confirmed at
-  buffer 64/128/256 and on an overdub.
+  buffer 64/128/256 and on an overdub. On the native engine L1 is the plan's Stage 1 A2–A4 bars at
+  64/128/256 (no C, no trim).
 - **L2 — a physical loopback measurement:** play the click out, capture it through the working
-  guitar input, cross-correlate scheduled against heard.
+  guitar input, cross-correlate scheduled against heard (`pnpm native:loopback`; on the engine, the
+  plan's Stage 1 probe).
 
-A native master-OUT tier is worth a spike only if L2 confirms real absolute-latency pain, gated on
-measured dropout under main-thread stress. A native looper core comes back on the table only if
-that tier proves insufficient AND native synths + FX are explicitly budgeted. If that day comes,
-`record-latency.ts` and the compensation sites in `looper/machine.ts` are DELETED, not ported: one
-clock needs no record-path compensation.
+At the flip `record-latency.ts` and the compensation sites in `looper/machine.ts` are DELETED, not
+ported.
 
 ## Known fragile piece (matches the brief's caveat)
 

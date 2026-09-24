@@ -104,7 +104,8 @@ Stale `<old-path>\rc500\…` build path on dev start → `rm -rf src-tauri/targe
 ## CLAP host + the audio transport (P9)
 
 All in `src-tauri/src/host/` (commands/scan/state/rt_alloc/editor_window/transport/clap/vst3 —
-`transport.rs` is the future `lf-rt` crate seam).
+`transport.rs` loses its WebView bridge at the native engine's flip and its pipes move to the
+engine's device module: `docs/plans/native-engine.md`).
 - **Cross-process audio = WebView2 `CreateSharedBuffer` + `PostSharedBufferToScript`** (via `with_webview`).
   The COM object is parked as a raw owning pointer (`SharedBufferHandle`, `transport.rs`) between the two
   UI-thread hops — never an `AgileReference`: this interface has no proxy, so the wrap fails on every load.

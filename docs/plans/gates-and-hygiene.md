@@ -1,10 +1,10 @@
 # Work order: real-code gates and agent hygiene (OPEN)
 
-Pieces 5-7 of the 2026-09-23 fresh-eyes pass (7 from the 2026-09-24 loopback measurement) over code, gates, docs and agent workflow (pieces 1-4
+Piece 5 of the 2026-09-23 fresh-eyes pass over code, gates, docs and agent workflow (pieces 1-4
 landed: guards that drive the real looper and one probe harness, both owned by `verify/README.md`,
 comments/docs that state current intent, and the native playbooks as `pnpm native:*`/`rust:check`,
-owned by `docs/VERIFY.md`). Build them in this order, one
-piece per commit series, gates green before each push. Piece 6 waits on an owner decision. Taste findings from that day live in `docs/backlog-taste.md` and the hands-free milestone in
+owned by `docs/VERIFY.md`; pieces 6-7, the L2 calibration and the bridge timeline, closed 2026-09-24
+by the native engine, `docs/plans/native-engine.md`). Gates green before each push. Taste findings from that day live in `docs/backlog-taste.md` and the hands-free milestone in
 `docs/plans/pedalboard.md`; neither is repeated here. Delete this file when the last piece lands, after
 folding what still binds into `verify/README.md`, the briefings or a call-site comment.
 
@@ -34,33 +34,3 @@ next "Play first" jam in `STATUS.md` runs on this code before anything else land
   with MIDI "future"; `src/app/actions.ts` and `src/app/midi-actions.ts` now sit above it.
 - knip reports `framesToBoundary` in `src/audio/looper/grid-math.ts` unused; deleting it is the owner's
   call.
-
-## 6. L2 loopback probe (owner decision)
-
-`docs/ARCHITECTURE.md` names L2, a physical loopback measurement, as the latency gate. `pnpm
-native:loopback` (2026-09-24) now measures the alignment half with one cable from an interface output
-into an input; feel stays with the ear. Open: whether it becomes an in-app calibration (STATUS D18).
-
-## 7. Takes on one timeline across launches (open)
-
-`pnpm native:loopback` (2026-09-24) showed that a take's offset follows the plugin bridge's queue
-nearly ms for ms. Landed, measured the same day:
-
-- **An armed ASIO input clocks the producer** (`Hop1Pipe::pace_on_input`, woken by the capture
-  callback). On QPC the input ring wandered by up to 6.5 ms and a stall left it ~80 ms deep for ~30 s;
-  the input and monitor rings now run without a drift controller, the monitor on a one-callback
-  cushion. RT fell from 50–51 to 44.4 ms at 256. The producer was never behind (`pace_late` 0, debug
-  build). WASAPI keeps the timer: its late capture callbacks ran the producer ~5 % fast.
-- **The worklet reads the bridge ring itself.** The main-thread drain into a second ring stalled and
-  rejected take B in about one launch of three, and the controller learned those stalls as drift. The
-  WebView2 buffer is now transferred to `plugin-pcm-source`, which holds the queue on one setpoint and
-  settles it back after any step (its header); Rust marks production jumps in header word 7. Seven
-  launches: no take rejected, residual +8.2..+12.4 ms at trim 60 in six.
-
-Open: one launch in seven read −8 ms (take B 17 ms earlier than take A, the controller's level swinging
-±8 ms on a ~12 s period) and one wound the controller to +143 ppm from a start offset (−10.8 ms/min in
-take A). Hypothesis, unmeasured: the worklet sees the queue only at render bursts, aliased against the
-producer's blocks, so the level and a settle's mean sit up to a block off and wander with the two
-clocks' phase. The candidate fix is timestamps (QPC per hop-1 block against the render's output
-timestamp) instead of queue counts. Proof: `native:loopback` drift under ~2 ms/min and residual spread
-under ~3 ms over five launches, no rejected take.
