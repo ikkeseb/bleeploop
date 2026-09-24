@@ -196,6 +196,12 @@ function logSnapshot(slot: number): void {
   }
 }
 
+/** The WebView's output device changed under an armed monitor: its latency samples describe the old
+ * device, so start a fresh window and re-open the freeze. */
+export function outputDeviceChanged(): void {
+  if (armedSlot !== null) snapshotTerms(armedSlot, true);
+}
+
 /**
  * The native monitor was disarmed (or its plugin unloaded). Clears compensation →
  * `recordCompensationFrames()` returns 0 (the verified synth/mic/no-monitor baseline). Pass the `slot`

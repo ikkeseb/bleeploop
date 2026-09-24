@@ -8,6 +8,8 @@ import {
 import { readAudioDeviceSettings, writeAudioDeviceSettings, type BufferFrames } from './audio-settings';
 import { notifyError } from '../notify';
 import { monitorArmed, refreshMonitorLatency } from './native-io';
+import { engine } from './engine';
+import { outputDeviceChanged } from './record-latency';
 
 /**
  * OWNS: the process-wide native audio configuration the Audio Settings panel edits — the enumerated cpal
@@ -106,6 +108,40 @@ export async function refreshAndPruneDevices(): Promise<void> {
   ) {
     writeAudioDeviceSettings({ outputDeviceId: '' });
   }
+  await applyWebOutput();
+}
+
+// Chromium's AudioContext sink API (WebView2 has it); not yet in TypeScript's DOM lib.
+type SinkContext = AudioContext & { readonly sinkId: string; setSinkId(sinkId: string): Promise<void> };
+
+/**
+ * Point the WebView's AudioContext (loops, synths, click) at the picked output, so one pick routes
+ * everything, as in a DAW. The pick is a cpal id; the browser's device ids are its own, so the match is
+ * by name: cpal's is the Windows endpoint name plus ` [kind] via bus`. Under ASIO the picker is off and
+ * the WebView stays on the system default. No-op when the context is already there, and in the web build.
+ */
+export async function applyWebOutput(): Promise<void> {
+  if (!platform.pluginHost.available) return;
+  const id = usingAsio() ? '' : readAudioDeviceSettings().outputDeviceId;
+  const name = outputDevices().find((d) => d.id === id)?.name;
+  const ctx = engine.ctx as SinkContext;
+  try {
+    let sinkId = '';
+    if (name) {
+      const match = (await navigator.mediaDevices.enumerateDevices())
+        .filter((d) => d.kind === 'audiooutput' && d.deviceId !== 'default' && d.deviceId !== 'communications')
+        .filter((d) => d.label && (name === d.label || name.startsWith(`${d.label} `)))
+        .sort((a, b) => b.label.length - a.label.length)[0];
+      if (!match) throw new Error(`no browser output named like "${name}"`);
+      sinkId = match.deviceId;
+    }
+    if (ctx.sinkId === sinkId) return;
+    await ctx.setSinkId(sinkId);
+    outputDeviceChanged();
+  } catch (e) {
+    console.error('[instrument] web output switch failed', e);
+    notifyError('Loops and synths stay on the previous output', e);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -203,6 +239,7 @@ export async function setAsioEnabled(enabled: boolean): Promise<void> {
     return;
   }
   if (enabled && asioRetryable()) await probeAsio(true);
+  await applyWebOutput();
 }
 
 /**

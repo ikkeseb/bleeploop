@@ -14,6 +14,7 @@ import {
   inputDevices,
   outputDevices,
   refreshAndPruneDevices,
+  applyWebOutput,
   setAsioEnabled,
   setBufferSize,
 } from '../../audio/audio-devices';
@@ -133,7 +134,9 @@ export function AudioSettings() {
           aria-label="Audio input device"
         >
           <option value="">{usingAsio() ? asioDeviceInfo()?.name ?? 'Default ASIO driver' : 'System default'}</option>
-          <For each={inputDevices()}>{(d) => <option value={d.id}>{d.name}</option>}</For>
+          <For each={inputDevices()}>
+            {(d) => <option value={d.id} selected={!usingAsio() && d.id === selectedDevice()}>{d.name}</option>}
+          </For>
         </select>
         <Show when={deviceChannels() >= 2}>
           <select
@@ -167,15 +170,18 @@ export function AudioSettings() {
             const v = e.currentTarget.value;
             setSelectedOutput(v);
             writeAudioDeviceSettings({ outputDeviceId: v });
+            void applyWebOutput();
           }}
           aria-label="Monitor output device"
         >
           <option value="">{usingAsio() ? asioDeviceInfo()?.name ?? 'Default ASIO driver' : 'System default'}</option>
-          <For each={outputDevices()}>{(d) => <option value={d.id}>{d.name}</option>}</For>
+          <For each={outputDevices()}>
+            {(d) => <option value={d.id} selected={!usingAsio() && d.id === selectedOutput()}>{d.name}</option>}
+          </For>
         </select>
       </div>
       <Show when={anyMonitorArmed()}>
-        <div class="audio-settings__hint" role="note">Takes effect on the next GO LIVE.</div>
+        <div class="audio-settings__hint" role="note">Loops and synths move now; the plugin monitor on the next GO LIVE.</div>
       </Show>
       <Show when={usingAsio()}>
         <div class="audio-settings__hint audio-settings__hint--info" role="note">ASIO drives both input and output. Turn ASIO off to pick Windows devices.</div>

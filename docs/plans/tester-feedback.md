@@ -1,6 +1,6 @@
 # First external tester feedback (OPEN)
 
-Owner-requested behavior and tester reports collected on 2026-09-19, with local fixes and
+Owner-requested behavior and tester reports collected from 2026-09-19 (F13–F16: 2026-09-24), with local fixes and
 verification recorded below. Testing is ongoing; fold new feedback into the
 matching item. When resolved, move enduring decisions to their owning briefings and delete this plan.
 
@@ -31,6 +31,10 @@ All items remain open until the tester confirms. § Code reading records what th
 | F10 | AUTO 50 is an unclear name. | Use wording that explains the mode and what the number controls. Final label is undecided. |
 | F11 | The owner wants the click audible whenever armed and CLICK is enabled. | Include the armed waiting state in audible-click behavior. This is a requested change to the current transport-mode policy described in STATUS Stop 3, not implemented behavior. Check recording arm/wait states, including AUTO; preserve a clear distinction from native input GO LIVE. |
 | F12 | The owner asks about downloadable releases, possibly ASIO and non-ASIO variants, after the tester built the app manually. | Supply ready-to-run Windows downloads. Existing distribution decision is an ASIO build with WASAPI fallback, owned by docs/plans/release-prep.md. Two separate downloads are a question, not an approved change. A reported successful manual build is not independent verification of the clean-machine README path. |
+| F13 | Audio Settings' output reads "System default" every time it reopens; the tester wants to route the sound to a chosen output, as Ableton does. Screenshot: WASAPI, input Line (MG-XU), output list open. | One output pick routes everything. Reproduced on the dev PC: the pick was saved but the dropdown lost it (input too), and the pick steered only the plugin's native monitor while loops, synths and click followed the Windows default. |
+| F14 | A one-bar first take locks every later track to one bar. | A later track longer than the master: extend the loop, keeping the one-bar track repeating across it (an RC-505-style multiply). `docs/plans/pedalboard.md` lists Multiply as not built; this reopens it. |
+| F15 | No effects (delay, reverb) before recording into a track. | An elegant pre-record FX. The open design in `docs/backlog-taste.md` (Input FX) is about the guitar's native monitor; the tester plays keys, whose synths already run in Web Audio. |
+| F16 | No control over a recorded track's bar count after the fact. | Adjust the length of a committed track. Not built; design open. |
 
 ## Code reading at `d17c777`
 
@@ -72,6 +76,11 @@ Proven in the browser tier only (`pnpm check`, `pnpm build`, `pnpm verify:jam`, 
   By ear, unheard: the tile seams, a 3-over-8 cut, reverse on a tiled track, and the downbeat click
   on a from-the-top start.
 - **F10:** the button reads `AUTO REC · SENS n` with an explanatory tooltip. Wording is the owner's eye.
+- **F13:** the dropdowns show the saved pick, and the WebView's output follows the output pick by
+  endpoint name (`applyWebOutput` in `src/audio/audio-devices.ts`); under ASIO it stays on the system
+  default. Verified in the Tauri app on the dev PC with a throwaway probe: the saved pick shows on reopen
+  and the context's sink follows it. The dev PC has one output device, so a switch between two
+  physical devices is unheard.
 
 ## Work order (owner-approved)
 
