@@ -226,8 +226,18 @@ fixture table), filter (two biquads, equal-power bypass), stutter, delay. **Hard
 audio-rate FM squares + resonant highpass); PitchShift (two modulated delay lines, its latency
 reproduced as heard, CPU budgeted); the convolution reverb (seeded IR with the same envelope and
 normalization, a partitioned FFT convolver — crate unknown); the limiter (Blink's
-DynamicsCompressorKernel: lookahead, knee, adaptive release, makeup). Blink ports are BSD-3: notices
-through `docs/plans/release-prep.md`.
+DynamicsCompressorKernel: lookahead, knee, adaptive release, makeup). Blink ports are BSD-3: the
+notice is in `THIRD-PARTY-NOTICES.md`; the installer carries it once the engine links.
+
+**Built (2026-09-25),** in `src-tauri/crates/lf-engine/src/dsp`, each bit-exact against its reference
+(class N at the harness floor): the limiter (`compressor.rs`, E6's default: a literal port), the
+AudioParam timeline with Tone's Param layer (`param.rs`), buffer playback and Tone's Noise
+(`buffer_source.rs`), fdlibm (`fdlibm.rs`) and the reverb IR (`reverb_ir.rs`; the stored IR comes from
+makeReverbBus's second `generate()`, draws 3 and 4). **The limiter is not wired** into the engine's
+master slot: it delays the output by Blink's 6 ms pre-delay (288 frames at 48 k, 264 at 44.1 k) and
+lifts everything under the threshold by its makeup gain (+0.57 dB), so the wiring adds its latency to
+the take alignment (`align_frames` + inserts + limiter) and moves the output-frame tests to a
+pre-limiter tap, with one test that the output is the limiter over that mix.
 
 **Acceptance.** Fixtures within budget; every scenario passes its class; alloc and block-size tests
 cover voices and FX (FFT paths ≤ −120 dB instead of bit-exact); six synths at full polyphony + full FX
