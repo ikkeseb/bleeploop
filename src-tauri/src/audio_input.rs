@@ -18,6 +18,46 @@ use std::sync::{Arc, Mutex, TryLockError};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{BufferSize, Sample, SampleFormat, StreamConfig};
 use rtrb::Producer;
+use windows::Win32::Foundation::{CloseHandle, HANDLE};
+use windows::Win32::System::Threading::{CreateEventW, SetEvent};
+
+/// Wakes the plugin's RT producer when a capture callback has pushed frames, so the producer runs on
+/// the capture device's clock (`host::transport::Hop1Pipe::pace_on_input`). An auto-reset event:
+/// `signal` is one non-blocking kernel call, safe on the driver's callback thread. A failed create
+/// leaves it invalid, and the producer keeps its own timer.
+pub struct InputWake(HANDLE);
+
+// SAFETY: an event handle may be signalled and waited on from any thread; `Drop` closes it once.
+unsafe impl Send for InputWake {}
+unsafe impl Sync for InputWake {}
+
+impl InputWake {
+    pub fn new() -> Self {
+        // SAFETY: plain auto-reset, initially unsignalled, unnamed event.
+        Self(unsafe { CreateEventW(None, false, false, None) }.unwrap_or_default())
+    }
+
+    /// The event to wait on; `None` if it could not be created.
+    pub fn handle(&self) -> Option<HANDLE> {
+        (!self.0.is_invalid()).then_some(self.0)
+    }
+
+    fn signal(&self) {
+        if let Some(h) = self.handle() {
+            // SAFETY: `h` is our live event.
+            let _ = unsafe { SetEvent(h) };
+        }
+    }
+}
+
+impl Drop for InputWake {
+    fn drop(&mut self) {
+        if let Some(h) = self.handle() {
+            // SAFETY: created by `new`, closed once here.
+            let _ = unsafe { CloseHandle(h) };
+        }
+    }
+}
 
 /// Selection for one concrete capture stream. ASIO retains this alongside the stream across disarm.
 pub struct InputChannelControl {
@@ -51,7 +91,7 @@ impl InputChannelControl {
 /// The real device callback's conversion and ring write, also exercised with multichannel fixtures.
 fn capture_channel<T: Sample>(
     data: &[T], channels: usize, selection: &InputChannelControl,
-    producer: &Mutex<Producer<f32>>, overruns: &AtomicU64,
+    producer: &Mutex<Producer<f32>>, overruns: &AtomicU64, wake: Option<&InputWake>,
 ) where f32: cpal::FromSample<T> {
     match producer.try_lock() {
         Ok(mut producer) => {
@@ -65,6 +105,9 @@ fn capture_channel<T: Sample>(
             }
             if dropped > 0 {
                 overruns.fetch_add(dropped, Relaxed);
+            }
+            if let Some(w) = wake {
+                w.signal();
             }
         }
         Err(TryLockError::WouldBlock | TryLockError::Poisoned(_)) => {
@@ -86,19 +129,19 @@ mod channel_tests {
         let overruns = AtomicU64::new(0);
         let channel = InputChannelControl::new(2, None).unwrap();
         let stereo = [0.75f32, -0.25, 0.5, -0.125];
-        capture_channel(&stereo, 2, &channel, &producer, &overruns);
+        capture_channel(&stereo, 2, &channel, &producer, &overruns, None);
         assert_eq!([consumer.pop().unwrap(), consumer.pop().unwrap()], [-0.25, -0.125]);
         channel.select(Some(0), &producer).unwrap();
-        capture_channel(&stereo, 2, &channel, &producer, &overruns);
+        capture_channel(&stereo, 2, &channel, &producer, &overruns, None);
         assert_eq!([consumer.pop().unwrap(), consumer.pop().unwrap()], [0.75, 0.5]);
 
         // ASIO commonly supplies I32. Exercise the same generic conversion invoked by that callback.
         let stereo_i32 = [1_073_741_824i32, -536_870_912, -1_073_741_824, 536_870_912];
         channel.select(None, &producer).unwrap();
-        capture_channel(&stereo_i32, 2, &channel, &producer, &overruns);
+        capture_channel(&stereo_i32, 2, &channel, &producer, &overruns, None);
         assert_eq!([consumer.pop().unwrap(), consumer.pop().unwrap()], [-0.25, 0.25]);
         assert!(channel.select(Some(2), &producer).is_err());
-        capture_channel(&stereo, 2, &channel, &producer, &overruns);
+        capture_channel(&stereo, 2, &channel, &producer, &overruns, None);
         assert_eq!([consumer.pop().unwrap(), consumer.pop().unwrap()], [-0.25, -0.125]);
         assert!(consumer.pop().is_err());
         assert_eq!(overruns.load(Relaxed), 0);
@@ -137,7 +180,7 @@ mod channel_tests {
         assert_eq!(generation.load(Acquire), 1);
         assert_eq!(consumer.pop().unwrap(), 0.75); // RT discards the old generation's queued PCM.
         let overruns = AtomicU64::new(0);
-        capture_channel(&[0.75f32, -0.5], 2, &channel, &producer, &overruns);
+        capture_channel(&[0.75f32, -0.5], 2, &channel, &producer, &overruns, None);
         assert_eq!(consumer.pop().unwrap(), -0.5);
         assert!(consumer.pop().is_err());
     }
@@ -158,7 +201,7 @@ mod channel_tests {
         });
 
         locked_rx.recv_timeout(Duration::from_secs(2)).unwrap();
-        capture_channel(&[0.75f32, -0.5, 0.25, -0.125], 2, &channel, &producer, &overruns);
+        capture_channel(&[0.75f32, -0.5, 0.25, -0.125], 2, &channel, &producer, &overruns, None);
         assert_eq!(overruns.load(Relaxed), 2);
         assert!(consumer.pop().is_err());
         release_tx.send(()).unwrap();
@@ -255,6 +298,7 @@ pub fn open_input_stream(
     producer: Arc<Mutex<Producer<f32>>>,
     overruns: Arc<AtomicU64>,
     fault: Arc<AtomicBool>,
+    wake: Arc<InputWake>,
 ) -> Result<(cpal::Stream, u32, Arc<InputChannelControl>), String> {
     // ASIO low-latency tier: capture on the startup-cached duplex device shared with the monitor (the
     // single ASIO driver can't be re-resolved once a stream holds it). WASAPI: resolve fresh by id.
@@ -276,12 +320,13 @@ pub fn open_input_stream(
                 producer.clone(),
                 overruns.clone(),
                 fault.clone(),
+                wake.clone(),
             ) {
                 Ok(r) => Ok(r),
                 Err(first) => {
                     log::warn!("[audio_input] ASIO input build failed ({first}); retrying once");
                     build_input_on(
-                        &c.device, c.in_cfg, c.in_fmt, channel, producer, overruns, fault,
+                        &c.device, c.in_cfg, c.in_fmt, channel, producer, overruns, fault, wake,
                     )
                 }
             };
@@ -306,6 +351,7 @@ pub fn open_input_stream(
         producer,
         overruns,
         fault,
+        wake,
     )
 }
 
@@ -315,7 +361,8 @@ pub fn open_input_stream(
 /// reduced to that mono channel as f32 and pushed into `producer`. Returns (stream, R_in, channel control). Shared by
 /// the WASAPI + ASIO paths; the `!Send` stream must stay on the caller's (owner) thread.
 ///
-/// `fault` carries the terminal-error latch (see `open_input_stream`).
+/// `fault` carries the terminal-error latch (see `open_input_stream`); `wake` is signalled after each
+/// push, so the RT producer runs on this stream's clock.
 fn build_input_on(
     device: &cpal::Device,
     config: StreamConfig,
@@ -324,6 +371,7 @@ fn build_input_on(
     producer: Arc<Mutex<Producer<f32>>>,
     overruns: Arc<AtomicU64>,
     fault: Arc<AtomicBool>,
+    wake: Arc<InputWake>,
 ) -> Result<(cpal::Stream, u32, Arc<InputChannelControl>), String> {
     let in_ch = (config.channels as usize).max(1);
     let in_rate = config.sample_rate;
@@ -338,10 +386,11 @@ fn build_input_on(
             let channel_a = channel_control.clone();
             let over_a = overruns.clone();
             let fault_a = fault.clone();
+            let wake_a = wake.clone();
             device.build_input_stream(
                 config,
                 move |data: &[$T], _: &cpal::InputCallbackInfo| {
-                    capture_channel(data, in_ch, &channel_a, &prod, &over_a);
+                    capture_channel(data, in_ch, &channel_a, &prod, &over_a, Some(&wake_a));
                 },
                 // Terminal by cpal contract: this stream is finished (device removed, driver reset)
                 // and its data callback stops firing — so latch the fault for the owner loop, which

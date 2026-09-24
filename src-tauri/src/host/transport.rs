@@ -24,9 +24,11 @@ use webview2_com::Microsoft::Web::WebView2::Win32::{
 use windows::core::{Interface, PCWSTR};
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::System::Threading::{
-    CreateWaitableTimerExW, SetWaitableTimer, WaitForSingleObject,
-    CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, INFINITE, TIMER_ALL_ACCESS,
+    CancelWaitableTimer, CreateWaitableTimerExW, SetWaitableTimer, WaitForMultipleObjects,
+    WaitForSingleObject, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, INFINITE, TIMER_ALL_ACCESS,
 };
+
+use crate::audio_input::InputWake;
 
 use super::state::PluginInfo;
 
@@ -35,17 +37,18 @@ use super::state::PluginInfo;
 /// JS side does PLAIN ordered reads/writes (Atomics are unsupported on this non-shared ArrayBuffer
 /// in Chromium 149); the Rust side uses release/acquire atomics over the same mapped memory, and
 /// x86-64 TSO makes the stores visible across in order. Layout MUST match
-/// `src/audio/plugin-bridge.ts` (28 bytes, 7×u32, single-writer-per-field):
+/// `src/audio/plugin-bridge.ts` (32 bytes, 8×u32, single-writer-per-field):
 ///   [0] write_frames    Rust→JS  hop-1 produced total (post-resample, C-rate)
 ///   [1] read_frames     JS→Rust  drain copy cursor (lag-capped; NOT a control signal)
 ///   [2] capacity_frames Rust→JS  ring cap (written once)
-///   [3] hop2_fill       JS→Rust  the PI controller's level signal (PV), discard-neutral (B2)
+///   [3] hop2_fill       JS→Rust  the PI controller's level signal (PV): produced minus render clock
 ///   [4] consumed        JS→Rust  worklet STAT_CONSUMED total (gate liveness + drift slope)
 ///   [5] underruns       JS→Rust  worklet STAT_UNDERRUNS total (M1)
 ///   [6] js_dropped      JS→Rust  cumulative lag-cap + flush discards (M2)
-///   data: `HOP1_CAPACITY_FRAMES` × f32, immediately after the header (offset 28 is 4-byte
+///   [7] epoch           Rust→JS  bumped where production jumps, not drifts (`Hop1Pipe::mark_step`)
+///   data: `HOP1_CAPACITY_FRAMES` × f32, immediately after the header (offset 32 is 4-byte
 ///         aligned → f32-aligned). Rust acquire-loads [3]..[6]; JS plain-writes them.
-pub(super) const HOP1_HEADER_BYTES: usize = 28;
+pub(super) const HOP1_HEADER_BYTES: usize = 32;
 /// Power of two so the ring index is `frame & (CAP-1)` and wraps seamlessly across the u32 frame
 /// counter's own wrap. 16384 ≈ 340 ms @ 48 kHz — generous headroom; the JS drain caps real lag.
 pub(super) const HOP1_CAPACITY_FRAMES: u32 = 16384;
@@ -193,6 +196,29 @@ impl PaceTimer {
             None => std::thread::sleep(dur),
         }
     }
+    /// Block for `dur` or until `wake` is signalled, whichever comes first. No allocation. A wake
+    /// cancels the timer, so a stale expiry cannot cut a later wait short.
+    fn wait_or(&self, dur: Duration, wake: HANDLE) {
+        // SAFETY: `h` is our live timer and `wake` a live event (the diag that owns it outlives the
+        // RT loop); `due` lives for the call.
+        unsafe {
+            match self.0 {
+                Some(h) => {
+                    let due: i64 = -((dur.as_nanos() / 100).min(i64::MAX as u128) as i64);
+                    if SetWaitableTimer(h, &due, 0, None, None, false).is_ok() {
+                        if WaitForMultipleObjects(&[wake, h], false, INFINITE).0 == 0 {
+                            let _ = CancelWaitableTimer(h);
+                        }
+                        return;
+                    }
+                    let _ = WaitForSingleObject(wake, dur.as_millis().max(1) as u32);
+                }
+                None => {
+                    let _ = WaitForSingleObject(wake, dur.as_millis().max(1) as u32);
+                }
+            }
+        }
+    }
 }
 impl Drop for PaceTimer {
     fn drop(&mut self) {
@@ -289,6 +315,7 @@ pub struct ProducerDiag {
     pub(super) events_dropped: AtomicU64, // ring-full + drain-cap overflow (cumulative; the gate windows it)
     // --- P11.0 audio-input diag (only meaningful when the slot has an input bus + is armed) ---
     pub(super) input_fill: AtomicU32,     // cpal→RT input-ring unread mono frames, snapshot each RT block
+    pub(super) input_fill_max: AtomicU32, // its peak since the last emit (swap-reset): how late the producer ran
     pub(super) input_starves: AtomicU64,  // RT blocks the input ring couldn't fully feed (cumulative; windowed)
     pub(super) input_overruns: AtomicU64, // capture frames dropped by a FULL input ring or a capture
     // callback that found the producer lock held by an owner rearm (owner mirrors from the cpal capture
@@ -305,6 +332,7 @@ pub struct ProducerDiag {
     pub(super) monitor_gen: AtomicU32, // owner Release-bump on EVERY arm/disarm → RT Acquire-rebuilds OutMonitorPipe
     pub(super) monitor_fill: AtomicU32, // mon-ring fill (R_out frames), snapshot each RT block
     pub(super) monitor_starves: AtomicU64, // cpal-out callbacks that underran (owner mirrors from the stream's counter)
+    pub(super) monitor_pads: AtomicU64, // silence frames the same-clock level rule padded (RT-written)
     pub(super) monitor_overruns: AtomicU64, // wet frames the FULL mon ring dropped on publish (RT-written).
     // Same asymmetry as `input_overruns`: a full ring means the cpal-out consumer is BEHIND, which never
     // shows up as a starve.
@@ -318,6 +346,12 @@ pub struct ProducerDiag {
     // --- P11.3 live buffer size ---
     pub(super) block_frames: AtomicU32, // the producer's ACTIVE RT block (D-frames); the gate reads it to confirm a buffer change
     pub(super) rt_faults: AtomicU32, // [`RtFault`] bitmask; RT sets, owner reports once per load
+    // --- pacing: does the producer keep its QPC cadence? (`Hop1Pipe::pace`) ---
+    pub(super) pace_late: AtomicU64,      // blocks that ended past their deadline (cumulative; windowed)
+    pub(super) pace_reanchors: AtomicU64, // stalls past MAX_CATCHUP_PERIODS: periods lost for good (cumulative)
+    pub(super) pace_late_max_us: AtomicU32, // worst lateness since the last emit (swap-reset)
+    /// Signalled by the capture callback after each push: the producer's clock while an input is armed.
+    pub(super) input_wake: Arc<InputWake>,
 }
 
 impl ProducerDiag {
@@ -359,11 +393,17 @@ impl ProducerDiag {
             monitor_fill: AtomicU32::new(0),
             monitor_starves: AtomicU64::new(0),
             monitor_overruns: AtomicU64::new(0),
+            monitor_pads: AtomicU64::new(0),
             monitor_drift_ppm_bits: AtomicU64::new(0.0f64.to_bits()),
             monitor_out_block: AtomicU32::new(0),
             monitor_output_latency_ns: AtomicU64::new(0),
             block_frames: AtomicU32::new(0),
             rt_faults: AtomicU32::new(0),
+            pace_late: AtomicU64::new(0),
+            pace_reanchors: AtomicU64::new(0),
+            pace_late_max_us: AtomicU32::new(0),
+            input_wake: Arc::new(InputWake::new()),
+            input_fill_max: AtomicU32::new(0),
         }
     }
 
@@ -757,7 +797,7 @@ impl Hop1Pipe {
         let ctrl = DriftController::new(sample_rate, device_rate, period_frames);
         let base = shared_ptr as *mut u8;
         // SAFETY: `shared_ptr` is the mapped base of the SharedBuffer from create_shared_ring,
-        // alive for this producer's life; the f32 data region begins at HOP1_HEADER_BYTES (28,
+        // alive for this producer's life; the f32 data region begins at HOP1_HEADER_BYTES (32,
         // 4-byte aligned → f32-aligned).
         let data = unsafe { base.add(HOP1_HEADER_BYTES) as *mut f32 };
         // Resume from the cursor already published in the header, not from 0: a fresh load has a
@@ -766,7 +806,7 @@ impl Hop1Pipe {
         // every block drop as "ring full" and the worklet underrun until unload (measured 2026-09-10).
         // SAFETY: header word [0] is the producer-owned write index (4-byte aligned, TSO-visible).
         let write_frames = unsafe { AtomicU32::from_ptr(base as *mut u32) }.load(Acquire);
-        Ok(Self {
+        let pipe = Self {
             rs,
             out_scratch,
             out_max,
@@ -781,7 +821,19 @@ impl Hop1Pipe {
             pacer: PaceTimer::new(),
             period_dur,
             next_deadline: Instant::now() + period_dur,
-        })
+        };
+        pipe.mark_step(); // a respawned producer resumes after a gap
+        Ok(pipe)
+    }
+
+    /// Production jumped rather than drifted (a pause, lost frames, a new pacing clock): bump the
+    /// header epoch so the bridge moves the jump into its level's base instead of feeding it to the
+    /// drift controller (`trackRateLevel` in `plugin-bridge.ts`). An input arm's switch to the capture
+    /// clock alone shifts production by up to a block, and that wound the controller to −90 ppm
+    /// (measured 2026-09-24).
+    pub(super) fn mark_step(&self) {
+        // SAFETY: header word [7] is producer-written only (4-byte aligned, inside the mapping).
+        unsafe { AtomicU32::from_ptr((self.base as *mut u32).add(7)) }.fetch_add(1, Release);
     }
 
     /// The controller's learned clock drift (ppm), handed to the producer that replaces this one
@@ -833,6 +885,7 @@ impl Hop1Pipe {
         self.out_max = out_max;
         self.out_scratch = vec![0.0f32; out_max];
         self.ctrl.set_block(period_frames, device_rate);
+        self.mark_step();
         // PRESERVE write_frames / base / data / cap_frames / cap / mask / pacer / nominal_ratio.
         Ok(())
     }
@@ -935,6 +988,7 @@ impl Hop1Pipe {
         diag.frames_written.fetch_add(produced as u64, Relaxed); // C-frames produced
         if dropped > 0 {
             diag.frames_dropped.fetch_add(dropped as u64, Relaxed);
+            self.mark_step();
         }
         diag.ring_used
             .store(self.write_frames.wrapping_sub(read_idx.load(Relaxed)) as usize, Relaxed);
@@ -961,21 +1015,56 @@ impl Hop1Pipe {
     /// Hold the absolute-deadline cadence: MEAN rate exact regardless of per-wait overshoot (a long
     /// wait is followed by a short one); the high-res `PaceTimer` trims residual jitter. A stall
     /// longer than MAX_CATCHUP periods re-anchors so a recovered hang can't burst-flood hop-1.
-    pub(super) fn pace(&mut self) {
+    pub(super) fn pace(&mut self, diag: &ProducerDiag) {
         let now = Instant::now();
+        // Input-clocked pacing leaves the deadline up to `INPUT_GRACE` out; a disarm must not wait it.
+        self.next_deadline = self.next_deadline.min(now + self.period_dur);
         if now < self.next_deadline {
             self.pacer.wait(self.next_deadline - now);
             self.next_deadline += self.period_dur;
         } else {
             let behind = now - self.next_deadline;
+            diag.pace_late.fetch_add(1, Relaxed);
+            diag.pace_late_max_us.fetch_max(behind.as_micros().min(u32::MAX as u128) as u32, Relaxed);
             self.next_deadline = if behind > self.period_dur * Self::MAX_CATCHUP_PERIODS {
+                diag.pace_reanchors.fetch_add(1, Relaxed);
+                self.mark_step();
                 now + self.period_dur
             } else {
                 self.next_deadline + self.period_dur
             };
         }
     }
+
+    /// Input-clocked pacing, while an input is armed: return as soon as `ready()` reports the next
+    /// block's input in the ring, sleeping on the capture callback's `wake` in between. The producer
+    /// then runs on the capture clock, so nothing drifts between capture and render, the input ring
+    /// holds at most a callback's frames, and after a stall it catches up at once from the frames
+    /// waiting in the ring. The timer pace re-anchored instead and left them there as latency: a
+    /// 72 ms stall kept the input ring ~80 ms deep for ~30 s while its drift loop drained it
+    /// (measured 2026-09-24). With no input for `INPUT_GRACE` one block runs on the timer, so hop-1
+    /// keeps flowing when capture stops. ASIO only: WASAPI-shared capture callbacks arrive late often
+    /// enough that those timer blocks ran the producer ~5 % fast (measured 2026-09-24).
+    pub(super) fn pace_on_input(&mut self, wake: HANDLE, mut ready: impl FnMut() -> bool) {
+        loop {
+            let now = Instant::now();
+            if ready() {
+                self.next_deadline = now + (self.period_dur * 2).max(INPUT_GRACE);
+                return;
+            }
+            if now >= self.next_deadline {
+                self.next_deadline = now + self.period_dur;
+                self.mark_step();
+                return;
+            }
+            self.pacer.wait_or(self.next_deadline - now, wake);
+        }
+    }
 }
+
+/// How long input-clocked pacing waits for capture before running a block on the timer: longer than
+/// any capture callback period (WASAPI shared ~10 ms), short enough that hop-2 (~30 ms) never runs dry.
+const INPUT_GRACE: Duration = Duration::from_millis(20);
 
 /// P11.3 (latency): cpal→RT input-ring fill setpoint, in SECONDS. The `InPipe` DriftController holds
 /// the ring at this fill — pure live-monitor latency (it sits in front of the plugin, ahead of both
@@ -1102,23 +1191,32 @@ impl InPipe {
         Ok(())
     }
 
+    /// Capture frames the next block consumes: input-clocked pacing waits until the ring holds them.
+    pub(super) fn need(&self) -> usize {
+        self.rs.input_frames_next().min(self.in_max)
+    }
+
     /// Produce one `block`-frame D-rate mono block into `out[..block]` from the cpal ring. Steps
     /// the drift controller on the pre-drain ring fill, resamples `R_in`→`D`, and zero-fills on
     /// starve (silence, never stale). No heap allocation. `engaged` gates the controller (after the
     /// global warmup); priming additionally holds it off until the ring first carries a full chunk.
+    /// `clocked`: the producer runs on the capture clock (`Hop1Pipe::pace_on_input`), which leaves
+    /// no drift to trim, so the ratio stays nominal.
     pub(super) fn fill_block(
         &mut self,
         in_rx: &mut Consumer<f32>,
         out: &mut [f32],
         block: usize,
         engaged: bool,
+        clocked: bool,
         diag: &ProducerDiag,
     ) {
         let avail = in_rx.slots();
         diag.input_fill.store(avail as u32, Relaxed);
+        diag.input_fill_max.fetch_max(avail as u32, Relaxed);
         // Drift trim (once engaged + primed): step on the pre-drain fill, then re-read the input
         // count rubato now wants (set_resample_ratio_relative recomputes needed_input_size).
-        let rel = if engaged && self.primed {
+        let rel = if engaged && self.primed && !clocked {
             self.ctrl.step(avail as f64)
         } else {
             1.0
@@ -1211,7 +1309,17 @@ pub(super) struct OutMonitorPipe {
     nominal_ratio: f64, // R_out / D — block-INDEPENDENT; reused by set_block (P11.3 live buffer)
     ctrl: DriftController,
     cap: usize,
+    // Same-clock level rule (see `publish`): the fill's minimum over the current window, publishes
+    // into the window, and silence to pad / wet frames to skip.
+    min_used: usize,
+    window: u32,
+    skip: usize,
+    pad: usize,
 }
+
+/// Publishes per same-clock level decision (~0.2 s at 256 frames).
+const SAME_CLOCK_WINDOW: u32 = 32;
+
 impl OutMonitorPipe {
     pub(super) fn new(
         out_rate: u32,
@@ -1258,6 +1366,10 @@ impl OutMonitorPipe {
             nominal_ratio,
             ctrl,
             cap,
+            min_used: usize::MAX,
+            window: 0,
+            skip: 0,
+            pad: 0,
         })
     }
 
@@ -1289,17 +1401,50 @@ impl OutMonitorPipe {
     /// Publish one D-rate wet mono block toward the native monitor: step the drift controller on the
     /// mon-ring fill (producer-side `cap - tx.slots()`), resample D→R_out, drop-on-full push. Silence
     /// on a resampler error (never a panic on the audio thread). No heap allocation.
+    ///
+    /// `same_clock`: capture and monitor ride one ASIO driver and the producer runs on its capture
+    /// clock (`Hop1Pipe::pace_on_input`), so nothing drifts and the ring needs no controller: it holds
+    /// a cushion of one output callback (`out_block`) ahead of each new block, which then plays one
+    /// callback after the next. Without the cushion a producer late by more than a callback period
+    /// starves the monitor: 2 clicks in 100 s at 256 frames (measured 2026-09-24). The fill seen here
+    /// is the cushion plus whatever of that same callback's pop has not happened yet (it pops sample
+    /// by sample, concurrently), so it reads anywhere up to one block over, and each window's minimum
+    /// is the level: under half a block it pads silence up to the cushion, and from two blocks (a
+    /// late block left behind) it skips the surplus from the next blocks. A block-and-a-half bound
+    /// skipped on mid-pop readings alone, ~4 times in 100 s (measured 2026-09-24).
     pub(super) fn publish(
         &mut self,
         mono: &[f32],
         engaged: bool,
+        same_clock: bool,
+        out_block: usize,
         tx: &mut Producer<f32>,
         diag: &ProducerDiag,
     ) {
         let free = tx.slots();
         let used = self.cap.saturating_sub(free);
-        diag.monitor_fill.store(used as u32, Relaxed);
-        let rel = if engaged { self.ctrl.step(used as f64) } else { 1.0 };
+        let rel = if same_clock {
+            self.min_used = self.min_used.min(used);
+            self.window += 1;
+            if self.window >= SAME_CLOCK_WINDOW {
+                let level = self.min_used;
+                if level < out_block / 2 {
+                    self.pad = out_block - level;
+                } else if level >= 2 * out_block {
+                    self.skip = level - out_block;
+                }
+                self.min_used = usize::MAX;
+                self.window = 0;
+            }
+            // What a new block waits behind by design: the cushion plus the wait for the next callback.
+            diag.monitor_fill.store((2 * out_block) as u32, Relaxed);
+            1.0
+        } else {
+            self.window = 0;
+            self.min_used = usize::MAX;
+            diag.monitor_fill.store(used as u32, Relaxed);
+            if engaged { self.ctrl.step(used as f64) } else { 1.0 }
+        };
         let clamped = rel.clamp(1.0 / (1.0 + MAX_REL_CORR), 1.0 + MAX_REL_CORR);
         let _ = self.rs.set_resample_ratio_relative(clamped, true);
         let block = mono.len();
@@ -1325,16 +1470,27 @@ impl OutMonitorPipe {
         // Drop-on-full: push what the ring holds; a lagging consumer loses the surplus. Nothing on the
         // consumer side can see that loss (a FULL ring never underruns ⇒ no starve), so count the
         // dropped frames here — one relaxed add per short push, never per sample.
-        let mut pushed = 0usize;
-        for &s in &self.out_scratch[..produced] {
+        if self.pad > 0 {
+            let mut padded = 0u64;
+            while self.pad > 0 && tx.push(0.0).is_ok() {
+                self.pad -= 1;
+                padded += 1;
+            }
+            self.pad = 0;
+            diag.monitor_pads.fetch_add(padded, Relaxed);
+        }
+        let skipped = self.skip.min(produced);
+        self.skip -= skipped;
+        let mut pushed = skipped;
+        for &s in &self.out_scratch[skipped..produced] {
             if tx.push(s).is_err() {
                 break;
             }
             pushed += 1;
         }
-        if pushed < produced {
+        if pushed < produced || skipped > 0 {
             diag.monitor_overruns
-                .fetch_add((produced - pushed) as u64, Relaxed);
+                .fetch_add((produced - pushed + skipped) as u64, Relaxed);
         }
         diag.monitor_drift_ppm_bits
             .store(self.ctrl.drift_ppm().to_bits(), Relaxed);

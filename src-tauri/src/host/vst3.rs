@@ -2075,6 +2075,8 @@ fn vst3_producer_loop(
     let pmode = ProcessModes_::kRealtime as i32;
     let ssize = SymbolicSampleSizes_::kSample32 as i32;
     let mut warmup: u32 = 8;
+    // An armed ASIO input clocks the producer (`Hop1Pipe::pace_on_input`); set at each input rebuild.
+    let mut clocked = false;
     while running.load(Relaxed) {
         // P11 input-SRC: (re)build on each arm/disarm/device-swap (gen bump). OUTSIDE the
         // rt_alloc guard (InPipe::new allocates) → steady state stays rt_allocs:0; fires only
@@ -2087,10 +2089,13 @@ fn vst3_producer_loop(
                 in_gen = gen_now;
                 let rate_now = diag.input_rate.load(Relaxed);
                 while in_rx.pop().is_ok() {}
+                pipe.mark_step(); // the flush and the change of pacing clock jump production
+                clocked = false;
                 in_pipe = if rate_now == 0 {
                     None
                 } else {
                     let is_asio = diag.input_is_asio.load(Relaxed);
+                    clocked = is_asio && diag.input_wake.handle().is_some();
                     match InPipe::new(rate_now, device_rate, period_frames, is_asio) {
                         Ok(p) => Some(p),
                         Err(_) => {
@@ -2208,7 +2213,7 @@ fn vst3_producer_loop(
             // (numInputs=0). Alloc-free (resampler + scratch live in InPipe).
             if in_chans > 0 {
                 match in_pipe.as_mut() {
-                    Some(p) => p.fill_block(&mut in_rx, &mut in_bufs[0], block, warmup == 0, &diag),
+                    Some(p) => p.fill_block(&mut in_rx, &mut in_bufs[0], block, warmup == 0, clocked, &diag),
                     None => {
                         for s in in_bufs[0][..block].iter_mut() {
                             *s = 0.0;
@@ -2273,7 +2278,16 @@ fn vst3_producer_loop(
             pipe.publish(&mono[..block], warmup == 0, &diag);
             // P11.3 Stage B branch-1: also push the SAME wet mono to the native monitor (armed).
             if let Some(mp) = out_pipe.as_mut() {
-                mp.publish(&mono[..block], warmup == 0, &mut mon_tx, &diag);
+                // One ASIO driver carries capture and monitor: the producer's clock is the monitor's.
+                let same_clock = clocked
+                    && in_pipe.is_some()
+                    && diag.input_is_asio.load(Relaxed)
+                    && diag.monitor_is_asio.load(Relaxed);
+                let out_block = match diag.monitor_out_block.load(Relaxed) as usize {
+                    0 => block,
+                    n => n,
+                };
+                mp.publish(&mono[..block], warmup == 0, same_clock, out_block, &mut mon_tx, &diag);
             }
         }
 
@@ -2284,7 +2298,11 @@ fn vst3_producer_loop(
                 super::super::rt_alloc::RT_ALLOCS.store(0, Relaxed);
             }
         }
-        pipe.pace();
+        // An armed ASIO input clocks the producer (`pace_on_input`); otherwise the absolute-deadline timer.
+        match (in_pipe.as_ref(), diag.input_wake.handle()) {
+            (Some(p), Some(wake)) if clocked => pipe.pace_on_input(wake, || in_rx.slots() >= p.need()),
+            _ => pipe.pace(&diag),
+        }
     }
 
     // SAFETY: stop processing on the RT thread before the owner deactivates the component.

@@ -1702,6 +1702,8 @@ struct GateState {
     input_overruns_b: u64,
     monitor_starves_b: u64,
     monitor_overruns_b: u64,
+    pace_late_b: u64,
+    pace_reanchors_b: u64,
 }
 
 #[cfg(debug_assertions)]
@@ -1719,6 +1721,8 @@ impl GateState {
             input_overruns_b: 0,
             monitor_starves_b: 0,
             monitor_overruns_b: 0,
+            pace_late_b: 0,
+            pace_reanchors_b: 0,
         }
     }
 }
@@ -1748,6 +1752,9 @@ fn emit_gate(diag: &ProducerDiag, gs: &mut GateState) {
         gs.input_overruns_b = diag.input_overruns.load(Relaxed);
         gs.monitor_starves_b = diag.monitor_starves.load(Relaxed);
         gs.monitor_overruns_b = diag.monitor_overruns.load(Relaxed);
+        gs.pace_late_b = diag.pace_late.load(Relaxed);
+        gs.pace_reanchors_b = diag.pace_reanchors.load(Relaxed);
+        diag.pace_late_max_us.store(0, Relaxed);
         // NB: out_peak is NOT reset here. Each load gets a fresh ProducerDiag (out_peak=0 at
         // construction), so the startup drone's peak accumulates and is reported by the first
         // real emit (a windowed swap) rather than being wiped by this warmup line.
@@ -1780,6 +1787,7 @@ fn emit_gate(diag: &ProducerDiag, gs: &mut GateState) {
     let input_overruns = input_overruns_now.wrapping_sub(gs.input_overruns_b);
     gs.input_overruns_b = input_overruns_now;
     let input_fill = diag.input_fill.load(Relaxed);
+    let input_fill_max = diag.input_fill_max.swap(0, Relaxed);
     let input_rate = diag.input_rate.load(Relaxed);
     let input_drift_ppm = f64::from_bits(diag.input_drift_ppm_bits.load(Relaxed));
     // P11.3 monitor: windowed starve + overrun counts and fill/rate/drift snapshots (0 on a slot with
@@ -1798,6 +1806,14 @@ fn emit_gate(diag: &ProducerDiag, gs: &mut GateState) {
     // out_peak: max |mono| over the window; swap-reset so each line reports its own window.
     // >0 once a routed note voices — the headless note-routing proof (P9.5).
     let out_peak = f32::from_bits(diag.out_peak_bits.swap(0, Relaxed));
+    // Pacing: blocks that ended past their deadline, and stalls long enough to lose periods for good.
+    let pace_late_now = diag.pace_late.load(Relaxed);
+    let pace_late = pace_late_now.wrapping_sub(gs.pace_late_b);
+    gs.pace_late_b = pace_late_now;
+    let pace_reanchors_now = diag.pace_reanchors.load(Relaxed);
+    let pace_reanchors = pace_reanchors_now.wrapping_sub(gs.pace_reanchors_b);
+    gs.pace_reanchors_b = pace_reanchors_now;
+    let pace_late_max_us = diag.pace_late_max_us.swap(0, Relaxed);
 
     // Control-band fill_pct: map hop2_fill onto [0, 2·target] so the setpoint reads as 50%.
     let hop2_fill = diag.hop2_fill.load(Relaxed);
@@ -1825,7 +1841,7 @@ fn emit_gate(diag: &ProducerDiag, gs: &mut GateState) {
     let used = diag.ring_used.load(Relaxed);
     let hop1_fill_pct = if cap > 0 { used * 100 / cap } else { 0 };
 
-    let line = serde_json::json!({
+    let mut line = serde_json::json!({
         "step": "gate",
         "t_s": gs.started.elapsed().as_secs(),
         "drift_ppm": ewma.round() as i64,
@@ -1867,6 +1883,12 @@ fn emit_gate(diag: &ProducerDiag, gs: &mut GateState) {
         "out_channels": diag.out_channels.load(Relaxed),
         "load_gen": load_gen,
     });
+    // Added after the macro: one more field inside it passes serde_json's recursion limit.
+    line["pace_late"] = pace_late.into();
+    line["pace_reanchors"] = pace_reanchors.into();
+    line["pace_late_max_us"] = pace_late_max_us.into();
+    line["input_fill_max"] = input_fill_max.into();
+    line["monitor_pads"] = diag.monitor_pads.load(Relaxed).into(); // cumulative
     println!("[diag] {line}");
 }
 
@@ -2449,6 +2471,8 @@ fn producer_loop(
 
     let mut steady: u64 = 0;
     let mut warmup: u32 = 8; // settle one-time lazy allocs before measuring rt_allocs
+    // An armed ASIO input clocks the producer (`Hop1Pipe::pace_on_input`); set at each input rebuild.
+    let mut clocked = false;
     while running.load(Relaxed) {
         // P11 input-SRC: (re)build the input resampler on each arm/disarm/device-swap (gen bump).
         // OUTSIDE the rt_alloc guard below (InPipe::new allocates) → steady state stays
@@ -2462,10 +2486,13 @@ fn producer_loop(
                 in_gen = gen_now;
                 let rate_now = diag.input_rate.load(Relaxed);
                 while in_rx.pop().is_ok() {}
+                pipe.mark_step(); // the flush and the change of pacing clock jump production
+                clocked = false;
                 in_pipe = if rate_now == 0 {
                     None
                 } else {
                     let is_asio = diag.input_is_asio.load(Relaxed);
+                    clocked = is_asio && diag.input_wake.handle().is_some();
                     match InPipe::new(rate_now, device_rate, period_frames, is_asio) {
                         Ok(p) => Some(p),
                         Err(_) => {
@@ -2573,7 +2600,7 @@ fn producer_loop(
             // byte-identical to P9. Alloc-free (the resampler + scratch are pre-built in InPipe).
             if in_chans > 0 {
                 match in_pipe.as_mut() {
-                    Some(p) => p.fill_block(&mut in_rx, &mut in_bufs[0], block, warmup == 0, &diag),
+                    Some(p) => p.fill_block(&mut in_rx, &mut in_bufs[0], block, warmup == 0, clocked, &diag),
                     None => {
                         for s in in_bufs[0][..block].iter_mut() {
                             *s = 0.0;
@@ -2640,7 +2667,16 @@ fn producer_loop(
             pipe.publish(&mono[..block], warmup == 0, &diag);
             // P11.3 branch-1: also push the SAME wet mono to the native monitor (when armed).
             if let Some(mp) = out_pipe.as_mut() {
-                mp.publish(&mono[..block], warmup == 0, &mut mon_tx, &diag);
+                // One ASIO driver carries capture and monitor: the producer's clock is the monitor's.
+                let same_clock = clocked
+                    && in_pipe.is_some()
+                    && diag.input_is_asio.load(Relaxed)
+                    && diag.monitor_is_asio.load(Relaxed);
+                let out_block = match diag.monitor_out_block.load(Relaxed) as usize {
+                    0 => block,
+                    n => n,
+                };
+                mp.publish(&mono[..block], warmup == 0, same_clock, out_block, &mut mon_tx, &diag);
             }
             steady = steady.wrapping_add(block as u64); // advance by D-frames (plugin phase at D)
         }
@@ -2652,7 +2688,11 @@ fn producer_loop(
                 super::rt_alloc::RT_ALLOCS.store(0, Relaxed);
             }
         }
-        pipe.pace(); // absolute-deadline cadence (mean rate exact; high-res timer trims jitter)
+        // An armed ASIO input clocks the producer (`pace_on_input`); otherwise the absolute-deadline timer.
+        match (in_pipe.as_ref(), diag.input_wake.handle()) {
+            (Some(p), Some(wake)) if clocked => pipe.pace_on_input(wake, || in_rx.slots() >= p.need()),
+            _ => pipe.pace(&diag),
+        }
     }
 
     let stopped = started.stop_processing();

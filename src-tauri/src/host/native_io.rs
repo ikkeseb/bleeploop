@@ -259,6 +259,7 @@ impl NativeIo {
                 self.input_producer.clone(),
                 self.input_overruns.clone(),
                 self.input_fault.clone(),
+                self.diag.input_wake.clone(),
             ) {
                 Ok((stream, rate, channel_control)) => {
                     self.input_channel = Some(channel_control);
