@@ -65,6 +65,8 @@ const H_JS_DROPPED = 6; // cumulative lag-cap + flush discards
 const DRAIN_INTERVAL_MS = 5;
 /** hop-2 capacity (~340ms @48k). Power-of-two-ish; ringbuf.js sizes the SAB from this. */
 const HOP2_CAPACITY_FRAMES = 16384;
+/** The drift controller's hop-2 fill setpoint: `TARGET_FILL_SECONDS` in src-tauri/src/host/transport.rs. */
+const HOP2_TARGET_SECONDS = 0.03;
 /** Real-lag cap: keep hop-1 backlog under this so jitter/drift stays bounded (~60ms latency). */
 const MAX_LAG_SECONDS = 0.06;
 /** Per-slot plugin output-gain defaults, chosen by plugin TYPE at load. An amp-sim/FX (has an
@@ -95,6 +97,7 @@ interface BridgeSlot {
   flushed: boolean; // discarded the suspended-context backlog on the first running drain
   jsDropped: number; // cumulative lag-cap + flush discards — mirrored into header[6]
   accountedUnderruns: number; // last worklet total folded into the process-wide record-loss counter
+  recenteredUnderruns: number; // worklet underrun total the drain last put hop-2 back on its setpoint for
   loadToken: number; // the frontend load request that owns this wiring
 }
 
@@ -257,6 +260,7 @@ export async function acceptPluginBuffer(ab: ArrayBuffer, meta: PluginBufferMeta
       flushed: false,
       jsDropped: 0,
       accountedUnderruns: 0,
+      recenteredUnderruns: 0,
       loadToken: meta.loadToken,
     };
     slot.timer = setInterval(() => drain(slot), DRAIN_INTERVAL_MS);
@@ -305,10 +309,22 @@ function mirror(s: BridgeSlot): void {
   s.header[H_JS_DROPPED] = s.jsDropped >>> 0; // lag-cap + flush discards
 }
 
+/** hop-2 frames short of the controller's setpoint (0 when at or above it). */
+function hop2Shortfall(s: BridgeSlot): number {
+  return ctx ? Math.max(0, Math.round(ctx.sampleRate * HOP2_TARGET_SECONDS) - s.hop2.available_read()) : 0;
+}
+
+/** Pad hop-2 with silence up to the setpoint (the main thread is hop-2's only writer). */
+function padHop2(s: BridgeSlot): void {
+  const frames = Math.min(hop2Shortfall(s), s.hop2.available_write(), s.scratch.length);
+  if (frames > 0) s.hop2.push(s.scratch.fill(0, 0, frames), frames);
+}
+
 /**
  * Move available frames from hop 1 (plain reads) into hop 2. Only runs while the context is running
  * (so a suspended context doesn't buffer stale audio = latency); flushes the suspended backlog once
- * on resume, then caps real lag so jitter/drift never grows the monitoring latency unbounded. Counts
+ * on resume and pads hop 2 to the drift controller's setpoint, puts hop 2 back on it after a worklet
+ * underrun, then caps real lag so jitter/drift never grows the monitoring latency unbounded. Counts
  * every discarded frame into `jsDropped` and mirrors the feedback fields at the end of the tick.
  */
 function drain(s: BridgeSlot): void {
@@ -322,11 +338,33 @@ function drain(s: BridgeSlot): void {
     dropFrames(s, (write - read0) >>> 0);
     s.header[H_READ] = write;
     s.flushed = true;
+    s.recenteredUnderruns = Atomics.load(s.stats, 1) >>> 0; // starving before the first audio is not an underrun to repair
+    padHop2(s);
     mirror(s);
     return;
   }
   let read = s.header[H_READ] >>> 0;
   let avail = (write - read) >>> 0;
+  // Back on the setpoint after a worklet underrun. hop-2's fill is the web path's delay and the recorded
+  // take's, and the drift controller is slow (minutes to settle): left to absorb the backlog a stall
+  // delivers at once, or to refill an emptied hop-2, it swings the fill by tens of ms for minutes, and
+  // takes recorded meanwhile land late and drift inside the take (measured through a loopback cable,
+  // 2026-09-24). So hop-1's oldest frames beyond what hop-2 lacks are dropped (the take spanning the
+  // underrun already fails its loss check) and any remaining shortfall is padded after the move. Only
+  // here: a drop anywhere else would reject a good take. The worklet alone pops hop-2, so the excess
+  // comes out of hop-1, whose reader this is.
+  const underruns = Atomics.load(s.stats, 1) >>> 0;
+  const underran = underruns !== s.recenteredUnderruns;
+  if (underran) {
+    s.recenteredUnderruns = underruns;
+    const excess = avail - hop2Shortfall(s);
+    if (excess > 0) {
+      dropFrames(s, excess);
+      read = (read + excess) >>> 0;
+      s.header[H_READ] = read;
+      avail -= excess;
+    }
+  }
   // Real-lag cap: if we've fallen too far behind (GC stall / clock drift), drop the oldest so the
   // monitoring latency stays bounded. A brief discontinuity beats an ever-growing delay. The dropped
   // frames are an audible glitch — count them so the gate can reject a stream that crackles.
@@ -350,6 +388,7 @@ function drain(s: BridgeSlot): void {
     }
     // toMove === 0 (hop-2 full, worklet not consuming yet) leaves the frames in hop-1 — not dropped.
   }
+  if (underran) padHop2(s);
   mirror(s); // refresh PV + counters every tick, regardless of whether audio moved
 }
 
