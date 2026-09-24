@@ -61,7 +61,9 @@ fn b_a_rolling_take_slides_one_pass_per_edge_and_commits_nothing() {
             assert_eq!(r.rig.window().map(|w| (w.1, w.2)), Some((Some(r.pass_start(p)), Some(r.pass_start(p + 1)))));
             let info = r.rig.lane(0);
             assert!(info.retake_pass == p as u32 && info.state == LaneState::Recording && r.rig.master() == 0);
-            assert_eq!(mismatches(&r.rig.engine.looper().take_pcm(0), r.pass_start(p)), 0, "pass {p} writes from its own downbeat");
+            let take = r.rig.engine.looper().take_pcm(0);
+            assert_eq!(take.len() as Frame, r.len / 2, "pass {p}: half a pass captured");
+            assert_eq!(mismatches(&take, r.pass_start(p)), 0, "pass {p} writes from its own downbeat");
         }
     }
 }
@@ -150,11 +152,13 @@ fn rolling_later_take(fixed: bool) -> (Rig, Frame, Frame) {
     rig.set(Command::SetRetake(true));
     rig.set_input(code);
     rig.press(Command::RecDub(1));
+    assert_eq!(rig.lane(1).retake_pass, 0, "no pass while armed for the boundary");
     let s1 = rig.start_frame();
     assert_eq!((s1 - rig.anchor()) % master, 0, "arms on a master boundary");
     assert_eq!(rig.end_frame() - s1, master, "its pass is the master (fixed={fixed})");
     rig.advance_to(s1 + 2 * master + master / 2);
     assert!(rig.lane(1).retake_pass == 3 && rig.start_frame() == s1 + 2 * master);
+    assert!([0, 2, 3, 4].iter().all(|&i| rig.lane(i).retake_pass == 0), "only the rolling lane shows a pass");
     (rig, master, s1)
 }
 
@@ -169,7 +173,9 @@ fn g_rec_on_another_lane_approves_a_later_roll_and_records_next() {
         assert_eq!(rig.start_frame(), s1 + 3 * master, "the approving lane records from the pass edge");
         rig.advance_to(s1 + 3 * master + master / 2);
         assert_eq!(rig.lane(2).retake_pass, 1, "RETAKE still on: the approving lane rolls in turn");
-        assert_eq!(mismatches(&rig.engine.looper().take_pcm(2), s1 + 3 * master), 0, "seamless: no frame lost at the handoff");
+        let take = rig.engine.looper().take_pcm(2);
+        assert_eq!(take.len() as Frame, master / 2);
+        assert_eq!(mismatches(&take, s1 + 3 * master), 0, "seamless: no frame lost at the handoff");
     }
     let (mut rig, master, s1) = rolling_later_take(false);
     let fpb = rig.fpb();

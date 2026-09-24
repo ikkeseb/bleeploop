@@ -200,16 +200,15 @@ impl Engine {
                 *m += w;
             }
             self.looper.capture(f, &self.wet[k0..k1]);
+            let target = if self.master_muted { 0.0 } else { self.master_volume as f64 };
+            for k in k0..k1 {
+                let out = (self.master_gain * mix[k] as f64) as f32;
+                self.master_gain = target + (self.master_gain - target) * self.master_coef;
+                // The limiter slot: Blink's DynamicsCompressorKernel is ported literally in Stage 3.
+                left[k] = out;
+                right[k] = out;
+            }
             f = next;
-        }
-
-        let target = if self.master_muted { 0.0 } else { self.master_volume as f64 };
-        for (k, &m) in mix.iter().enumerate() {
-            let out = (self.master_gain * m as f64) as f32;
-            self.master_gain = target + (self.master_gain - target) * self.master_coef;
-            // The limiter slot: Blink's DynamicsCompressorKernel is ported literally in Stage 3.
-            left[k] = out;
-            right[k] = out;
         }
     }
 

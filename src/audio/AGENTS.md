@@ -18,6 +18,9 @@ limiter placement): `docs/ARCHITECTURE.md` § Audio architecture — read it bef
 - **After looper/capture/state-machine changes run `pnpm verify:jam`.** `pnpm verify` drives the
   real looper on a fake audio layer (`verify/README.md`); it cannot see real render timing, the
   browser or WebView2.
+- **A looper behaviour fix lands in `src-tauri/crates/lf-engine` too**, with its engine test: the
+  dormant native engine ports this looper (`docs/plans/native-engine.md` § Stage 2) and must not drift
+  from it before its flip.
 
 ## One grid
 

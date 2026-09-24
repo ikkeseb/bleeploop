@@ -61,6 +61,7 @@ fn an_onset_starts_the_take_with_its_attack_and_anchors_the_grid() {
         let start = rig.start_frame();
         assert!(start <= at && at - start <= 2 * 192, "the soft attack is retained: start {start}, onset {at}");
         let take = rig.engine.looper().take_pcm(0);
+        assert_eq!(take.len() as Frame, rig.frame - start, "everything from the retained start");
         let input = onset_at(at);
         assert!(take.iter().enumerate().all(|(k, &x)| x == input(start + k as Frame)), "one contiguous run from the start");
         // The pulse runs at the current tempo from where the player played the onset.

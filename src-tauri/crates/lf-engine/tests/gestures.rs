@@ -18,6 +18,8 @@ const SR: u32 = 8000;
 #[derive(Clone, Debug)]
 enum Op {
     Press(Command),
+    /// A command stamped this many frames ahead (a MIDI pedal's press frame): it lands mid-block.
+    Later(Frame, Command),
     Wait(Frame),
     Gap,
     /// On the first lane that can undo.
@@ -47,9 +49,21 @@ fn op() -> impl Strategy<Value = Op> {
         1 => any::<bool>().prop_map(|b| Op::Press(Command::SetRetake(b))),
         1 => any::<bool>().prop_map(|b| Op::Press(Command::SetLoopEndStop(b))),
         1 => any::<bool>().prop_map(|b| Op::Press(Command::SetAutoRecord(b))),
+        1 => (lane(), 0u8..16).prop_map(|(i, v)| Op::Press(Command::SetVolume(i, v as f32 / 10.0))),
+        1 => (lane(), any::<bool>()).prop_map(|(i, b)| Op::Press(Command::SetMute(i, b))),
+        1 => (0u8..11).prop_map(|v| Op::Press(Command::SetMasterVolume(v as f32 / 10.0))),
+        1 => any::<bool>().prop_map(|b| Op::Press(Command::SetMasterMute(b))),
+        1 => (1u8..4).prop_map(|b| Op::Press(Command::SetMetronome(b != 2))),
         1 => prop_oneof![Just(Action::RecDub), Just(Action::PlayStop), Just(Action::Undo), Just(Action::Clear), Just(Action::NextTrack)]
             .prop_map(|a| Op::Press(Command::Action(a))),
         8 => (1i64..24_000).prop_map(Op::Wait),
+        4 => (1i64..400, prop_oneof![
+            lane().prop_map(Command::RecDub),
+            lane().prop_map(Command::PlayStop),
+            (0u8..11).prop_map(|v| Command::SetMasterVolume(v as f32 / 10.0)),
+            (lane(), 0u8..16).prop_map(|(i, v)| Command::SetVolume(i, v as f32 / 10.0)),
+            lane().prop_map(Command::Reverse),
+        ]).prop_map(|(d, c)| Op::Later(d, c)),
         1 => Just(Op::Gap),
         2 => Just(Op::UndoTwice),
         2 => (1u8..4).prop_map(Op::DubCycles),
@@ -84,14 +98,20 @@ fn check_invariants(rig: &Rig) {
 fn run(ops: &[Op], block: usize) -> u64 {
     let mut rig = Rig::with(Opts { sr: SR, start: SR as Frame, loop_seconds: 20.0, block, align: 37 });
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut stamped: Frame = 0; // the latest frame a Later command lands on
     rig.set_input(|f| code(f) - 0.25);
     rig.keep_output();
     for op in ops {
         match *op {
             Op::Press(command) => rig.press(command),
+            Op::Later(delay, command) => {
+                stamped = stamped.max(rig.frame + delay);
+                rig.send_at(rig.frame + delay, command);
+            }
             Op::Wait(frames) => rig.advance(frames),
             Op::Gap => rig.gap(),
             Op::UndoTwice => {
+                rig.advance_to(stamped + 1); // what the script stamped lands first
                 rig.idle();
                 if let Some(i) = (0..TRACK_COUNT).find(|&i| rig.lane(i).can_undo) {
                     let before = rig.pcm(i);
@@ -104,6 +124,7 @@ fn run(ops: &[Op], block: usize) -> u64 {
                 }
             }
             Op::DubCycles(n) => {
+                rig.advance_to(stamped + 1);
                 rig.idle();
                 let forward = |i: usize| {
                     let info = rig.lane(i);

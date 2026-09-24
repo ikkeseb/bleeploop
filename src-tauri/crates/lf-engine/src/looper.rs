@@ -202,8 +202,13 @@ struct Job {
 
 impl Job {
     fn done_frame(&self) -> Frame {
-        self.start + (self.visit.span + JOB_RATE - 1) / JOB_RATE
+        self.start + job_frames(self.visit.span)
     }
+}
+
+/// Rendered frames a block job over `span` buffer positions takes: `JOB_RATE` positions a frame.
+pub fn job_frames(span: Frame) -> Frame {
+    (span + JOB_RATE - 1) / JOB_RATE
 }
 
 /// What a command answers: done, or it waits for the lane's block jobs until a frame (`Held`: as a
@@ -418,8 +423,8 @@ impl Looper {
     // ── Commands ───────────────────────────────────────────────────────────────────────────────────
 
     /// When a command on `lane` may run: it waits for the block jobs on that lane, and for a pending
-    /// Restore when it may take the free buffer. Ending a capture never waits, and a command is judged
-    /// when it is pressed: one that would do nothing then is dropped rather than held for later.
+    /// Restore when it may take the free buffer. Ending a capture or silencing a lane never waits, and a
+    /// command is judged when it is pressed: one that would do nothing then is dropped rather than held.
     fn wait_for(&self, lane: Option<usize>, needs_free: bool) -> Applied {
         let until = self
             .jobs
@@ -469,7 +474,8 @@ impl Looper {
         if self.lanes[i].state == LaneState::Empty {
             return Applied::Done;
         }
-        if !self.capturing(i) {
+        if self.lanes[i].state == LaneState::Stopped {
+            // Only a resume waits: playback would start reading where a job has not been yet.
             let wait = self.wait_for(Some(i), false);
             if wait != Applied::Done {
                 return wait;
@@ -504,17 +510,8 @@ impl Looper {
     }
 
     /// The Stop command: abort whatever the lane captures (nothing is kept but a committed loop) and
-    /// silence it now.
+    /// silence it now. Silence never waits for a block job.
     pub fn stop_command(&mut self, cx: &mut Cx, i: usize) -> Applied {
-        if self.lanes[i].state == LaneState::Empty {
-            return Applied::Done;
-        }
-        if !self.capturing(i) {
-            let wait = self.wait_for(Some(i), false);
-            if wait != Applied::Done {
-                return wait;
-            }
-        }
         self.stop(cx, i);
         Applied::Done
     }
@@ -589,7 +586,7 @@ impl Looper {
     }
 
     pub fn clear(&mut self, cx: &mut Cx, i: usize) -> Applied {
-        if self.lanes[i].state == LaneState::Empty && self.rec.is_none_or(|r| r.lane != i) {
+        if self.lanes[i].state == LaneState::Empty {
             return Applied::Done;
         }
         let wait = self.wait_for(Some(i), false);
@@ -612,7 +609,7 @@ impl Looper {
         if wait != Applied::Done {
             return wait;
         }
-        let stopped: [bool; TRACK_COUNT] = std::array::from_fn(|i| self.lanes[i].state == LaneState::Stopped && self.lanes[i].length > 0);
+        let stopped: [bool; TRACK_COUNT] = std::array::from_fn(|i| self.lanes[i].state == LaneState::Stopped);
         if stopped.iter().any(|&s| s) {
             let restart = self.restart_if_idle(cx);
             for i in (0..TRACK_COUNT).filter(|&i| stopped[i]) {
@@ -624,7 +621,7 @@ impl Looper {
 
     /// Stop every live lane: PLAYING honours the loop-end stop, captures commit and stop at once.
     pub fn stop_all(&mut self, cx: &mut Cx) -> Applied {
-        let when = (self.loop_end_stop && self.master > 0).then(|| next_boundary(self.anchor, self.master, cx.now));
+        let when = self.loop_end_stop.then(|| next_boundary(self.anchor, self.master, cx.now));
         let force_now = self.lanes.iter().any(|t| t.stop_at.is_some());
         for i in 0..TRACK_COUNT {
             match self.lanes[i].state {
@@ -1351,5 +1348,19 @@ fn pair(bufs: &mut [Vec<f32>], src: usize, dst: usize) -> (&[f32], &mut [f32]) {
     } else {
         let (a, b) = bufs.split_at_mut(src);
         (&b[0], &mut a[dst])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_job_takes_one_frame_per_job_rate_positions_rounded_up() {
+        assert_eq!(job_frames(1), 1);
+        assert_eq!(job_frames(JOB_RATE), 1);
+        assert_eq!(job_frames(JOB_RATE + 1), 2);
+        assert_eq!(job_frames(2 * JOB_RATE - 1), 2);
+        assert_eq!(job_frames(2 * JOB_RATE), 2);
     }
 }

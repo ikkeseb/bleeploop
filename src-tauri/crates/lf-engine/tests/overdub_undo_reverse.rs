@@ -13,7 +13,7 @@ mod common;
 
 use common::{code, Rig};
 use lf_engine::grid::Frame;
-use lf_engine::looper::JOB_RATE;
+use lf_engine::looper::{job_frames, JOB_RATE};
 use lf_engine::{Action, Command, Event, LaneState, Refusal};
 
 const DUB: f32 = 1.0 / 64.0;
@@ -295,18 +295,21 @@ fn reverse_b_a_playing_lane_flips_on_the_next_boundary_twice_is_identity() {
 #[test]
 fn reverse_c_no_op_unless_committed_stopped_flips_in_place_clear_resets() {
     let (mut rig, master) = playing_loop();
+    assert!(rig.lane(0).can_reverse && !rig.lane(1).can_reverse, "a committed lane can reverse, an EMPTY one cannot");
     rig.press(Command::Reverse(1));
     assert!(!rig.lane(1).reversed);
     rig.set_input(code);
     rig.press(Command::RecDub(1));
     rig.advance_to(rig.next_boundary() + 4800);
     assert_eq!(rig.state(1), LaneState::Recording);
+    assert!(!rig.lane(1).can_reverse, "no reverse while RECORDING");
     rig.press(Command::Reverse(1));
     assert!(!rig.lane(1).reversed);
     rig.press(Command::Stop(1));
     rig.set_level(DUB);
     rig.press(Command::RecDub(0));
     assert_eq!(rig.state(0), LaneState::Overdubbing);
+    assert!(!rig.lane(0).can_reverse, "no reverse while OVERDUBBING");
     rig.press(Command::Reverse(0));
     assert!(!rig.lane(0).reversed);
     rig.press(Command::RecDub(0));
@@ -319,7 +322,7 @@ fn reverse_c_no_op_unless_committed_stopped_flips_in_place_clear_resets() {
     assert!(!rig.lane(0).reversed, "a pending loop-end stop blocks reverse: {:?}", rig.lane(0));
     assert!(rig.pcm(0) == dubbed, "the loop is untouched");
     rig.advance_to(rig.next_boundary() + 2400);
-    assert_eq!(rig.state(0), LaneState::Stopped);
+    assert!(rig.state(0) == LaneState::Stopped && rig.lane(0).can_reverse);
     rig.keep_output();
     rig.press(Command::Reverse(0));
     let flipped: Vec<f32> = dubbed.iter().rev().copied().collect();
@@ -395,4 +398,50 @@ fn reverse_d_the_flag_stays_honest_across_dub_reverse_undo_and_dub_is_refused_re
         }
     }
     assert!(counts.iter().all(|&n| n >= 3), "{counts:?}");
+}
+
+#[test]
+fn the_undo_copy_is_spread_over_frames_and_undo_waits_for_it() {
+    let (mut rig, master) = playing_loop();
+    let pre = rig.pcm(0);
+    rig.set_level(DUB);
+    let start = rig.frame;
+    rig.press(Command::RecDub(0));
+    let done = start + job_frames(master);
+    rig.advance_to(done - 1);
+    assert!(rig.engine.looper().busy(), "the spare copy is still running one frame before its end");
+    rig.press(Command::RecDub(0)); // commit the layer at once
+    rig.set_level(0.0);
+    rig.press(Command::Undo(0)); // lands before the copy is done: it waits for it
+    assert!(!rig.engine.looper().busy(), "done on its frame");
+    rig.advance(1);
+    assert_eq!(rig.pcm(0), pre, "the held undo ran once the copy was complete");
+}
+
+#[test]
+fn a_punch_out_never_waits_for_the_undo_copy() {
+    let mut rig = Rig::new();
+    rig.set_input(code);
+    let master = rig.record_first_take(0, 4, 2400); // 384000 frames: the copy takes 375
+    rig.set_level(0.0);
+    let pre = rig.pcm(0);
+    rig.set_level(DUB);
+    rig.press(Command::RecDub(0));
+    rig.advance(99);
+    assert!(rig.engine.looper().busy(), "the undo copy is still running");
+    rig.press(Command::RecDub(0)); // punch out on this frame, not when the copy is done
+    rig.set_level(0.0);
+    rig.idle();
+    assert_eq!(layer_sum(&rig.pcm(0), &pre), 100.0 * DUB as f64, "exactly the 100 frames played");
+    assert!(master > 0);
+}
+
+#[test]
+fn rec_on_a_lane_stopping_at_the_loop_end_starts_no_overdub() {
+    let (mut rig, _) = playing_loop();
+    rig.set(Command::SetLoopEndStop(true));
+    rig.press(Command::PlayStop(0));
+    rig.set_level(DUB);
+    rig.press(Command::RecDub(0));
+    assert!(rig.state(0) == LaneState::Playing && rig.lane(0).stop_at.is_some() && rig.window().is_none());
 }

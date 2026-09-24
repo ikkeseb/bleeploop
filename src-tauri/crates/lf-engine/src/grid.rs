@@ -279,9 +279,13 @@ mod tests {
             Grid::tempo(-5000, 7, 90, 48000),
             Grid::master(123, 77255 * 3, 3),
             Grid { base_frame: 10, base_index: 123457, num: 22050, den: 1 },
+            // Beats on a half frame (77255 / 4 * 2 = 38627.5): round half up puts them one frame later.
+            Grid::master(0, 77255, 1),
+            Grid { base_frame: 0, base_index: 0, num: 3, den: 2 },
         ];
         for g in grids {
-            for f in (g.base_frame - 3..g.base_frame + 200_000).step_by(997) {
+            let probes = (g.base_frame - 3..g.base_frame + 200_000).step_by(997).chain((0..40).map(|n| g.beat_frame(n)));
+            for f in probes {
                 let n = g.first_beat_at_or_after(f);
                 assert!(g.beat_frame(n) >= f);
                 assert!(n == g.base_index || g.beat_frame(n - 1) < f);
@@ -327,6 +331,7 @@ mod tests {
             }
         }
         assert_eq!(commit_anchor(None, 96000, 500), 500);
+        assert_eq!(commit_anchor(Some(100), 0, 500), 500, "no master: anchor at the commit");
     }
 
     #[test]
@@ -343,6 +348,10 @@ mod tests {
         let outside = 2 * fpb - fpb / 16 - 240;
         assert_eq!(plan_later_stop(480_000 + outside, 480_000, 0, fpb, 8), fpb);
         assert_eq!(plan_later_stop(480_000 + outside, 480_000 + 960, 960, fpb, 8), fpb);
+        // Musical time starts `align` before the window: a press on the grace edge keeps the bar.
+        let edge = 480_000 + 2 * fpb - fpb / 16;
+        assert_eq!(plan_later_stop(edge, 480_000 + 960, 960, fpb, 8), 2 * fpb);
+        assert_eq!(plan_later_stop(edge - 1, 480_000 + 960, 960, fpb, 8), fpb);
         // Free stop: no completed bar yet is None; the grace edge is inclusive.
         assert_eq!(plan_free_stop(fpb / 2, fpb, 60 * 48000), None);
         assert_eq!(plan_free_stop(fpb - fpb / 16, fpb, 60 * 48000), Some(fpb));
@@ -421,5 +430,8 @@ mod tests {
         let mut buf = vec![5.0; 8];
         fill(&mut buf, TakeFill::first(3, 8));
         assert_eq!(buf, [5., 5., 5., 0., 0., 0., 0., 0.]);
+        // A master that is no whole number of bars (a foreign import) is padded, never tiled.
+        assert_eq!(TakeFill::later(5, 4, 10), TakeFill::first(5, 10));
+        assert_eq!(TakeFill::later(5, 0, 10), TakeFill::first(5, 10));
     }
 }

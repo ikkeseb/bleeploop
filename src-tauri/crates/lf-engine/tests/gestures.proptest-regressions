@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc f5dddb91d37cb7e85175d67fff4b8df0fa1479c04f0b3b45248b34a359dc46a6 # shrinks to start_looping = false, ops = [Later(1, SetMasterVolume(0.0)), Wait(66)]
+cc c89f661f7d50c41ef239dc6ffd460156ed209bf52d8c2bc907cbaef515222364 # shrinks to start_looping = true, ops = [Later(1, RecDub(0)), DubCycles(1)]
