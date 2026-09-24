@@ -148,10 +148,11 @@ silently points at the wrong rule. `verify/guards/docs.mjs` fails when they do.
      Rust→renderer via WebView2 `CreateSharedBuffer`/`PostSharedBufferToScript` — OS shared memory
      that surfaces in JS as a **regular `ArrayBuffer`** (a *separate* mechanism from
      `crossOriginIsolated` SAB; both are needed, on different hops). **`Atomics` are unsupported on
-     that non-shared ArrayBuffer in Chromium 149**, so hop 1 (WebView2 buffer → drain) uses plain
-     ordered reads on x86-64 TSO + Rust-side release stores (spike-proven); hop 2 (drain →
-     `plugin-pcm-source` worklet) is a real `ringbuf.js` SAB where Atomics work. PCM never crosses
-     as IPC samples — native audio reaches Web Audio only as an AudioNode.
+     that non-shared ArrayBuffer in Chromium 149**, so the ring uses plain ordered reads on x86-64 TSO
+     + Rust-side release stores (spike-proven). The buffer is transferred to the `plugin-pcm-source`
+     worklet, which reads it on the render thread with its mapping live (measured 2026-09-24): no
+     main-thread step sits in the path. PCM never crosses as IPC samples — native audio reaches Web
+     Audio only as an AudioNode.
 4. **`?worker&url`** for all first-party TS worklets (forces TS→JS transpile + a plain URL
    for `addModule`). Bare `?url` ships un-transpiled TS; `?worker` wraps an IIFE for
    `new Worker()`. Prebuilt JS worklets load via `?url`/`/public`.

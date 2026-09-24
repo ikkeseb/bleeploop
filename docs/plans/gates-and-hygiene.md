@@ -43,25 +43,24 @@ into an input; feel stays with the ear. Open: whether it becomes an in-app calib
 
 ## 7. Takes on one timeline across launches (open)
 
-`pnpm native:loopback` (2026-09-24) showed that a take's offset follows the plugin bridge's hop-2 fill
+`pnpm native:loopback` (2026-09-24) showed that a take's offset follows the plugin bridge's queue
 nearly ms for ms. Landed, measured the same day:
 
-- **The producer was never behind** (`pace_late` 0 in steady state, debug build; no release build
-  needed). It ran on QPC while capture ran on the interface clock, so the input ring wandered by up to
-  6.5 ms and a stall left it ~80 ms deep for ~30 s. An armed ASIO input now clocks the producer
-  (`Hop1Pipe::pace_on_input`, woken by the capture callback); the input and monitor rings run without
-  a drift controller, the monitor on a one-callback cushion. RT fell from 50–51 to 44.4 ms at 256.
-  WASAPI keeps the timer: its capture callbacks arrive late often enough that the timer fallback ran
-  the producer ~5 % fast.
-- **The hop-2 controller learned stalls as drift** (a stall wound it to 230 ppm, an input arm to
-  −284 ppm: 14–22 ms/min of stretch in later takes). Its level is now frames produced minus
-  render-clock frames (`trackRateLevel` in `plugin-bridge.ts`); a step is held off it and moved into
-  its base, and Rust marks production jumps in hop-1 header word 7. Drift inside take A is now
-  under 2 ms/min in 8 of 12 launches, spread inside a take 0.2–0.9 ms.
+- **An armed ASIO input clocks the producer** (`Hop1Pipe::pace_on_input`, woken by the capture
+  callback). On QPC the input ring wandered by up to 6.5 ms and a stall left it ~80 ms deep for ~30 s;
+  the input and monitor rings now run without a drift controller, the monitor on a one-callback
+  cushion. RT fell from 50–51 to 44.4 ms at 256. The producer was never behind (`pace_late` 0, debug
+  build). WASAPI keeps the timer: its late capture callbacks ran the producer ~5 % fast.
+- **The worklet reads the bridge ring itself.** The main-thread drain into a second ring stalled and
+  rejected take B in about one launch of three, and the controller learned those stalls as drift. The
+  WebView2 buffer is now transferred to `plugin-pcm-source`, which holds the queue on one setpoint and
+  settles it back after any step (its header); Rust marks production jumps in header word 7. Seven
+  launches: no take rejected, residual +8.2..+12.4 ms at trim 60 in six.
 
-Open: across launches the residual still spreads by 5–10 ms at trim 60 (−0.9..+16 ms over twelve
-launches), and a launch or two in five wound the controller to −50..−90 ppm early (5–9 ms/min in that
-take); the header epoch landed for that, and two launches since read 1.4 and 0.7 ms/min, not yet five.
-Take B is rejected in about one launch of three: bursts of worklet underruns with the producer on
-time, so the main-thread drain stalls (seen before any of this landed too). Proof: `native:loopback` drift under ~2 ms/min and
-residual spread under ~3 ms over five launches, no rejected take.
+Open: one launch in seven read −8 ms (take B 17 ms earlier than take A, the controller's level swinging
+±8 ms on a ~12 s period) and one wound the controller to +143 ppm from a start offset (−10.8 ms/min in
+take A). Hypothesis, unmeasured: the worklet sees the queue only at render bursts, aliased against the
+producer's blocks, so the level and a settle's mean sit up to a block off and wander with the two
+clocks' phase. The candidate fix is timestamps (QPC per hop-1 block against the render's output
+timestamp) instead of queue counts. Proof: `native:loopback` drift under ~2 ms/min and residual spread
+under ~3 ms over five launches, no rejected take.
