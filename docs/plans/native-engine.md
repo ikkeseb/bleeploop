@@ -144,56 +144,54 @@ on ubuntu, `rust-test.yml` tests the workspace on Windows. Gotcha: `tauri dev` w
 `src-tauri/`, so engine edits relaunch a running dev app.
 
 **The state machine moves to Rust** (one owner, no IPC races between an engine event and a fresh
-gesture). TypeScript keeps UI and settings.
-
-| Module | Ported from | Notes |
-|---|---|---|
-| clock, click | `src/audio/clock.ts`, `src/audio/quantize.ts` | device-frame clock; click computed per sample from the grid; tap-tempo averaging stays in the UI and sends SetBpm |
-| grid | `src/audio/looper/grid-math.ts` | whole file; `compensatedLoopFrame` dropped |
-| looper machine | `src/audio/looper/machine.ts`, `src/audio/looper/transport-actions.ts`, `src/audio/looper/looper.ts` | the action gates (`src/ui/looper/gates.ts`) and the CLEAR double-press window move here; refusals return as events |
-| track, capture, playback | `src/audio/looper/state.ts`, `src/audio/looper/peaks.ts`, `src/audio/looper/capture.ts`, `src/audio/looper/auto-record.ts`, `src/audio/looper/playback.ts` | mono tracks; overdub sums in place, so swap buffers and swap timers go |
-| mixer, limiter, graph | `src/audio/looper/mixer.ts`, `src/audio/engine.ts` | bus topology as today: instrument → input bus → record tap (pre-limiter) and master → limiter |
+gesture). TypeScript keeps UI and settings. Built: the module map, the rules and what is not built yet
+are in the crate briefing (`src-tauri/crates/lf-engine/src/lib.rs`); tap-tempo averaging stays in the
+UI and sends SetBpm.
 
 **API.** Commands and events cross the RT boundary only over rtrb rings; a full event ring drops and
-counts, nothing blocks. `process(ctx, io, inserts)`: ctx carries the frame counter, sample rate, xrun
-flag and align_frames (a constant from the driver's report — not a user trim); `inserts` is the plugin
-seam (Stage 4; tests pass a fake). A UI gesture lands at the next block start (jitter: IPC + one block,
-inside the quarter-beat free-stop grace); MIDI pedals carry a device frame. Every control-rate step
-(k-rate params per 128 frames, the compressor's 32-frame divisions, LFO and envelope ticks) is
-anchored to the absolute frame counter: process() splits a block at those boundaries and never ticks
-at the block start. No internal FIFO.
+counts, nothing blocks. `process(ctx, input, left, right, inserts)`: ctx carries the frame counter, the
+xrun flag and align_frames (a constant from the driver's report — not a user trim); `inserts` is the
+plugin seam (Stage 4; tests pass a fake) and adds its reported latency to the alignment. A UI gesture
+lands at the next block start (jitter: IPC + one block, inside the quarter-beat free-stop grace); MIDI
+pedals carry a device frame. Every control-rate step Stage 3 adds (k-rate params per 128 frames, the
+compressor's 32-frame divisions, LFO and envelope ticks) is anchored to the absolute frame counter:
+process() splits a block at those boundaries and never ticks at the block start. No audio FIFO.
 
-**Memory.** Everything allocated in Engine::new: 5 × (record + undo) + 1 retake + 1 snapshot, 60 s ×
-sample rate mono f32 (~138 MB at 48 k, estimate). No O(loop) work in one callback. Undo keeps today's
-one-level UNDO/REDO toggle: a frame is copied live → spare only the first time an overdub epoch writes
-it; undo and redo swap the two buffers; at epoch start a budgeted block job re-syncs spare ← live over
-the previous epoch's span, and an undo or layer reject before that job finishes waits for it (an
-event). Copy and the snapshot are budgeted block jobs; Clear zeroes on write; Reverse is an
-index-mapping flag. A sample-rate change builds a new engine off-thread and retires the old one
-off-thread.
+**Memory.** Everything allocated (and its pages touched) in Engine::new: 5 × (live + spare) + 1 free
+buffer, 60 s × sample rate mono f32 (~127 MB at 48 k); the snapshot buffer arrives with export (Stage 5).
+Undo keeps the one-level UNDO/REDO toggle: undo and redo swap a lane's live and spare. At an overdub's
+start the spare is re-synced to the loop by a block job over the whole master, running ahead of the
+layer's write head; the previous undo target waits in the free buffer, so a layer rejected for an
+input gap gives back both the pre-layer loop and that target. COPY, a later take's tiling and a first
+take's padding are block jobs too; Clear zeroes on write; Reverse is an index-mapping flag. A
+sample-rate change builds a new engine off-thread and retires the old one off-thread (Stage 4).
 
-**Tests** (crates/lf-engine/tests, not yet built). A scenario helper scripts (frame, command) lists
-over frame-coded inputs and renders at block sizes {1, 32, 64, 127, 128, 480, 1024}, including runs
-that cross 32/128 boundaries with a parameter change in flight.
+**Decided while porting** (each test file header names what it changes): the count-in and an idle PLAY
+start on the press frame, with no Web Audio scheduling lead; undo and reverse on a playing lane still
+switch on the next loop boundary; Stop on an overdubbing lane discards the whole layer; an input gap
+damages only the RETAKE pass it falls in, and resets AUTO's listening history; a jump in the device
+frame counter drops the beats it skipped, count-in beats fire late as one click. A command is judged
+when it is pressed, and a command that waits for a block job holds every later one behind it.
 
-- The rig-guard scenarios become the spec, one test file per group: click_grid (grid, accent-grid,
-  pulse-forced-clamp), count_in (count-in, count-grid, bpm-lock), phase_preserve, first_take
-  (free-stop, free-record-cap, fixed-length, short-take), later_arm (later-arm, looper-arm),
-  overdub_undo_reverse, retake, auto_record. record-compensation is deleted, not ported; an align test
-  asserts a take shifts by exactly align_frames. Each file header names the guard it ports.
-- golden_jam.rs ports the golden jam (`verify/probes/golden-jam.mjs`, assertions 1–6, 8, 9; 7 becomes
-  an injected xrun; 10 stays a UI probe). Output is in hand and frames are absolute, which closes the
-  jam's playback and uniform-slip blind spots.
-- Block-size invariance (bit-exact), `assert_no_alloc` around every process call, proptest over legal
-  gesture scripts (one recorder; master = bars × frames-per-bar; every lane = master until F14/F16;
-  undo∘redo = identity; undo after an N-cycle dub is bit-exact to the pre-dub loop; no NaN or panic).
-  cargo-mutants on grid and machine for acceptance, and again when either changes (the planted-bug
-  rule of `verify/README.md`, automated; no scheduled workflow).
+**Tests** (built, `src-tauri/crates/lf-engine/tests`): a rig (`tests/common`) drives the engine with
+frame-coded input and frame-stamped commands, every `process` under `assert_no_alloc`. The 17 rig guards
+map to click_grid (grid, accent-grid, pulse-forced-clamp), count_in (count-in, count-grid, bpm-lock),
+phase_preserve, first_take (free-stop, free-record-cap, fixed-length, short-take), later_arm (later-arm,
+looper-arm), overdub_undo_reverse (overdub, undo, reverse), retake, auto_record; record-compensation is
+deleted, and align.rs asserts a take shifts by exactly align_frames. golden_jam.rs ports the golden jam
+(assertions 1–6, 8, 9; 7 as an input gap; 10 stays a UI probe, its engine half, gates and the CLEAR
+double press, is here) with absolute frames and the rendered output, at 44.1 k and 48 k, bit-identical
+across block sizes 1, 32, 64, 127, 128, 480 and 1024. gestures.rs runs proptest scripts (one
+recorder; a whole-bar master; every lane = master until F14/F16; undo twice = identity; undo after an
+N-cycle dub gives back the pre-dub loop; finite output) at two block sizes, bit-identical. cargo-mutants
+on grid and looper for acceptance, and again when either changes (the planted-bug rule of
+`verify/README.md`, automated; no scheduled workflow).
 
 **Acceptance.** `cargo test -p lf-engine` green on ubuntu and windows CI; deny check green; every rig
 guard mapped or its deletion justified; golden jam green at 44.1 k and 48 k across all block sizes;
-mutants killed or skipped with a reason; 5 lanes (one overdubbing) + click + limiter at 48 k / 64
-frames under 10 % of block time offline (estimate). The live line is untouched.
+mutants killed or skipped with a reason; 5 lanes (one overdubbing) + click at 48 k / 64 frames under
+10 % of block time offline (`src-tauri/crates/lf-engine/tests/perf.rs`, ignored by default: 0.17 % mean on the dev PC,
+2026-09-24; the limiter joins the number with its Stage 3 port). The live line is untouched.
 
 ## Stage 3 — synths and FX in lf-engine
 
