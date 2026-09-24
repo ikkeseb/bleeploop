@@ -66,18 +66,19 @@ Blocked on an owner decision, not on testing. The default column is what happens
 | D14 | Under deuteranopia REC red and PLAYING green still read as nearly the same yellow. Since the 2026-09-23 restyle a live capture is also a FILLED badge and a lit core face, and PLAYING a lit LED, so greyscale separates them by shape. Enough, or a palette move as well? | stays as built |
 | D16 | Host a browser demo on Cloudflare Pages? It contradicts "the browser tier is a verification rig". | no |
 | D17 | `LICENSE` and `authors` in `src-tauri/Cargo.toml` carry the GitHub handle (the no-names rule targets prose). Keep, or use a role? | stays as built |
-| E1 | Native-engine plan Stage 0: publish v0.1.0 once `docs/plans/release-prep.md`'s two open items are closed (artifact gated on its SHA, the CI-built exe heard on the rig)? | yes |
 | E2 | If the Stage 1 silent-share test fails: Share output goes to a user-picked endpoint, or rely on OBS/Discord app capture only? | user-picked endpoint |
 | E3 | Engine: a take recording when the audio device drops (needed by Stage 4) | punch out at the last frame, keep it |
 | E4 | Engine import needs a native file dialog: add `tauri-plugin-dialog` (Stage 5)? | yes |
 | E5 | v0.1.0's recovery records (IndexedDB) at the engine upgrade: drop with a release note, or hand the bytes over once (Stage 5)? | drop, release note |
 | E6 | A true 0 dBFS ceiling in the ported limiter (Stage 3), or a literal port of today's? | literal port |
-| E7 | v0.1.0 ships with rec align 0 plus a release note, or with the dev rig's +69 as the default? | 0 plus the note |
 
 **Answered 2026-09-24** (`docs/ARCHITECTURE.md` § Decided: one native audio engine):
 
 - **D18 — no calibration build:** the native engine drops rec align; on the shipping line the owner
   sets rec align +69 by hand.
+- **E1 — publish v0.1.0:** yes, once the CI-built exe is heard on the rig (the gating on its exact
+  commit is in `build-exe.yml`).
+- **E7 — v0.1.0 rec align:** ships at 0; the release notes say to set it by ear.
 
 **Answered 2026-09-23** (product lens over the 2026-09-23 audit; the promise now heads `README.md`):
 

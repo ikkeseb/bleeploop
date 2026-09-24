@@ -5,13 +5,17 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # build-exe.yml calls this for the exact commit it builds; a draft release waits for it.
+  workflow_call: {}
 
 # Least privilege: nothing here writes to the repo.
 permissions:
   contents: read
 
+# `github.workflow` is the CALLER's name under workflow_call, so a build-exe run never cancels, or
+# deadlocks on, a plain push run of the same ref.
 concurrency:
-  group: ${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 # The docs guard classifies the diff and always runs the deterministic verifiers. For a docs-only

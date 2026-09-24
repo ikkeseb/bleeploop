@@ -48,10 +48,7 @@ Built and machine-verified:
 
 Still open:
 
-- **Gate the exact artifact commit.** A manual `build-exe.yml` dispatch builds and stages a draft
-  without running `pnpm check`, Rust tests or the no-ASIO check. Add those gates to the artifact job,
-  or require their green results for its exact SHA before publishing; a green run on another commit
-  does not cover the download.
-- **Hear the first CI-built exe on the rig before offering it.** The artifact checks above do not
-  establish playback or input behavior; the rig has only ever heard SDK 2.3.3.
+- **Hear the first CI-built exe on the rig before offering it.** `build-exe.yml` reruns `ci` and
+  `rust-test` on the exact commit it builds, and the draft release waits for them; none of that
+  establishes playback or input behavior, and the rig has only ever heard SDK 2.3.3.
 - Unsigned builds trigger SmartScreen (said in the release notes); code signing is not planned.

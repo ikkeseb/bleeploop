@@ -20,7 +20,8 @@ other layers; the computer keyboard is the fallback.
 
 > Pre-release and Windows-only. There are no binary releases yet, so you build it from source
 > (see below). The low-latency ASIO® tier is an opt-in build feature that needs Steinberg's SDK,
-> see [Third-party notices](#license-and-third-party-notices).
+> see [Third-party notices](#license-and-third-party-notices). Guitar takes recorded through a plugin
+> land late until you set Audio Settings → rec align by ear (+69 ms on the developer's ASIO rig).
 
 ![BleepLoop](docs/media/bleeploop.png)
 
