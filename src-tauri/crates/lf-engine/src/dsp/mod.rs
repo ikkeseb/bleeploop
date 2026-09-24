@@ -3,5 +3,6 @@
 //! reference renders in `tests/fixtures/tone` (`verify/probes/tone-refs.mjs`) and holds the tightest
 //! tolerance class it passes (`tests/common/refs.rs`).
 
+pub mod compressor;
 pub mod noise;
 pub mod rng;

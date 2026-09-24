@@ -40,7 +40,8 @@
 //!
 //! # Not built yet
 //!
-//! The limiter, synths and FX (plan Stage 3), the device owner and plugin slots (Stage 4), waveform
+//! The synths and FX (plan Stage 3), the limiter in the master path (ported as `dsp::compressor`, not
+//! wired into `engine` yet), the device owner and plugin slots (Stage 4), waveform
 //! peaks and the export snapshot (with the feed, Stage 5).
 
 #![forbid(unsafe_code)]
