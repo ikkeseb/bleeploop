@@ -57,8 +57,7 @@ let manualOffsetMs = readStoredNumber(
  */
 let snapBaseLatency = 0; // median ctx.baseLatency over the window, frozen at first record (render-FIFO part of clickOut)
 let snapOutputLatency = 0; // median ctx.outputLatency over the window, frozen at first record (device part of clickOut)
-let snapHop1Frames = 0; // median pluginBridge hop-1 residency (Rust→drain) over the window, frozen at first record
-let snapHop2Frames = 0; // median pluginBridge hop-2 residency (drain→worklet) over the window, frozen at first record
+let snapHopFrames = 0; // median pluginBridge queue residency (Rust → render worklet) over the window, frozen at first record
 let snapRenderCursorSeconds: number | null = null;
 let snapQueueFrames: number | null = null; // the bridge's smoothed fill at the freeze (queueShift's origin)
 let snapFrozen = false; // true once a take has frozen the session's C terms; re-opened by arm/buffer-change/resnapshot
@@ -66,8 +65,7 @@ let snapFrozen = false; // true once a take has frozen the session's C terms; re
 // ── Rolling sample window for the stabilised hop + click-output terms (median over ~1 s) ────────────────
 // Cadence + capacity + median(): record-latency-math.ts (pure; the verifier imports them).
 // Pre-allocated sample storage; the main-thread sampler writes no reactive signals.
-const sampHop1 = new Float64Array(SAMPLE_CAPACITY);
-const sampHop2 = new Float64Array(SAMPLE_CAPACITY);
+const sampHop = new Float64Array(SAMPLE_CAPACITY);
 const sampBase = new Float64Array(SAMPLE_CAPACITY);
 const sampOut = new Float64Array(SAMPLE_CAPACITY);
 const sampRenderCursor = new Float64Array(SAMPLE_CAPACITY);
@@ -76,8 +74,8 @@ let sampHead = 0; // next write index (ring)
 let sampCount = 0; // valid sample count (saturates at SAMPLE_CAPACITY)
 let sampler: ReturnType<typeof setInterval> | null = null;
 
-/** Push one live sample (hop-1/hop-2 residency + click-output latencies) into the rolling window. Runs only
- *  while a monitor is armed. Reads `pluginBridge.stats(slot)` (null ⇒ both hops 0, matching a plugin-less slot)
+/** Push one live sample (bridge queue residency + click-output latencies) into the rolling window. Runs only
+ *  while a monitor is armed. Reads `pluginBridge.stats(slot)` (null ⇒ queue 0, matching a plugin-less slot)
  *  and `engine.ctx`. While the session is not yet frozen, refresh the working snapshot from the window so the
  *  DEV log / `__lf.snapshot` and the eventual freeze both reflect the warmed median. */
 function sampleTick(): void {
@@ -94,13 +92,12 @@ function sampleTick(): void {
       // A render boundary or a stalled read can pair the queue with a different cursor. Skip it.
       if (ctx.currentTime === renderBefore && now - readStart <= 2) {
         cursor = renderCursorTailSeconds(renderBefore, timestamp.contextTime ?? NaN, timestamp.performanceTime ?? NaN,
-          now, (stats.hop1Lag ?? 0) + (stats.hop2Fill ?? 0), ctx.sampleRate);
+          now, stats.queue, ctx.sampleRate);
       }
     }
   } catch { /* Unsupported/unavailable timestamps use the reported-latency fallback. */ }
   sampRenderCursor[sampHead] = cursor;
-  sampHop1[sampHead] = stats?.hop1Lag ?? 0;
-  sampHop2[sampHead] = stats?.hop2Fill ?? 0;
+  sampHop[sampHead] = stats?.queue ?? 0;
   sampBase[sampHead] = ctx.baseLatency || 0;
   sampOut[sampHead] = ctx.outputLatency || 0;
   sampHead = (sampHead + 1) % SAMPLE_CAPACITY;
@@ -115,8 +112,7 @@ function refreshSnapshotFromWindow(): void {
   snapRenderCursorSeconds = Number.isFinite(cursor) ? cursor : null;
   snapBaseLatency = median(sampBase, sampCount, sortScratch);
   snapOutputLatency = median(sampOut, sampCount, sortScratch);
-  snapHop1Frames = median(sampHop1, sampCount, sortScratch);
-  snapHop2Frames = median(sampHop2, sampCount, sortScratch);
+  snapHopFrames = median(sampHop, sampCount, sortScratch);
 }
 
 /** Start the rolling-window sampler (idempotent) + seed one immediate sample so the window is never empty. */
@@ -141,9 +137,7 @@ export interface CompensationBreakdown {
   renderCursorSeconds: number | null;
   slot: number;
   sr: number;
-  hop1Frames: number; // hop-1 (Rust→drain) residency
-  hop2Frames: number; // hop-2 (drain→worklet) residency
-  hopFrames: number; // hop1 + hop2 (the whole record-path bridge)
+  hopFrames: number; // the plugin bridge queue (the whole record-path bridge)
   workletFrames: number;
   cpalOutSeconds: number;
   baseLatency: number; // diagnostic/fallback ctx.baseLatency
@@ -181,7 +175,7 @@ export function updateMonitorLatency(slot: number, cpalOut: number): void {
  * refreshes the working snapshot from whatever samples exist. The actual FREEZE happens lazily at first record
  * use (`recordCompensationFrames`), so the C the first take sees is the warmed-window median — see the snap*
  * state note.
- * `pluginBridge.stats` is null when no plugin is wired in the slot ⇒ both hops 0.
+ * `pluginBridge.stats` is null when no plugin is wired in the slot ⇒ queue 0.
  */
 function snapshotTerms(slot: number, clearWindow = false): void {
   snapFrozen = false; // arm / buffer-change / manual resnapshot re-opens; first record will re-freeze it
@@ -195,7 +189,7 @@ function logSnapshot(slot: number): void {
   if (import.meta.env.DEV) {
     // DEV observability: this line shows generation opens / eligible settle updates + the current window median.
     console.error(
-      `[rec-comp] snapshot slot=${slot} (window n=${sampCount}) hop=${Math.round(snapHop1Frames + snapHop2Frames)}f(${Math.round(snapHop1Frames)}+${Math.round(snapHop2Frames)}) ` +
+      `[rec-comp] snapshot slot=${slot} (window n=${sampCount}) hop=${Math.round(snapHopFrames)}f ` +
         `base=${(snapBaseLatency * 1000).toFixed(1)}ms out=${(snapOutputLatency * 1000).toFixed(1)}ms ` +
         `cpalOut=${(cpalOutSeconds * 1000).toFixed(1)}ms`,
     );
@@ -214,8 +208,7 @@ export function clearMonitor(slot?: number): void {
     snapRenderCursorSeconds = null;
     snapBaseLatency = 0;
     snapOutputLatency = 0;
-    snapHop1Frames = 0;
-    snapHop2Frames = 0;
+    snapHopFrames = 0;
     snapFrozen = false;
     stopSampler(); // stop the rolling-window sampler + clear the window (no monitor ⇒ nothing to estimate)
   }
@@ -263,8 +256,6 @@ export function recordCompensationFrames(): number {
   // per-take read, which is why the window is frozen). Manual trim is read anew too.
   const liveQueue = pluginBridge.queueFrames(armedSlot);
   const queueShiftFrames = liveQueue !== null && snapQueueFrames !== null ? liveQueue - snapQueueFrames : 0;
-  const hop1Frames = snapHop1Frames;
-  const hop2Frames = snapHop2Frames + queueShiftFrames;
   const queueShiftSeconds = queueShiftFrames / sr;
   // Output reports are frozen with the bridge terms. Graph DSP is measured once at engine start;
   // native monitoring bypasses that graph, so its delay is added separately from the output reports.
@@ -272,8 +263,7 @@ export function recordCompensationFrames(): number {
   const { source, hopFrames, outputLatencyReported, outputLatency, outputFloored, cSeconds, frames } = computeC(
     {
       renderCursorSeconds: snapRenderCursorSeconds === null ? null : snapRenderCursorSeconds + queueShiftSeconds,
-      hop1Frames,
-      hop2Frames,
+      hopFrames: snapHopFrames + queueShiftFrames,
       cpalOutSeconds,
       baseLatency: snapBaseLatency,
       outputLatency: snapOutputLatency,
@@ -288,8 +278,6 @@ export function recordCompensationFrames(): number {
     renderCursorSeconds: snapRenderCursorSeconds === null ? null : snapRenderCursorSeconds + queueShiftSeconds,
     slot: armedSlot,
     sr,
-    hop1Frames,
-    hop2Frames,
     hopFrames,
     workletFrames: source === 'timestamp' ? 0 : WORKLET_QUANTUM_FRAMES,
     cpalOutSeconds,
@@ -345,9 +333,7 @@ export const recordLatency = {
     timingSource: snapRenderCursorSeconds === null ? 'reported' : 'timestamp',
     baseLatencyMs: snapBaseLatency * 1000,
     outputLatencyMs: snapOutputLatency * 1000,
-    hop1Frames: snapHop1Frames,
-    hop2Frames: snapHop2Frames,
-    hopFrames: snapHop1Frames + snapHop2Frames,
+    hopFrames: snapHopFrames,
     frozen: snapFrozen,
     windowSamples: sampCount,
   }),

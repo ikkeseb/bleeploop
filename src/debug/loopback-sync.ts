@@ -131,13 +131,13 @@ async function run(): Promise<void> {
 
   // ── take A: clicks only, no feedback ───────────────────────────────────────────────────────
   const lossA0 = pluginBridge.recordLossSnapshot();
-  // The web-side bridge queue (hop1 lag + hop2 fill) over the take, against ctx time.
-  const queue: { t: number; frames: number; hop1: number; hop2: number; wall: number; consumed: number }[] = [];
+  // The web-side bridge queue over the take, against ctx time.
+  const queue: { t: number; frames: number; wall: number; consumed: number }[] = [];
   let sampling = true;
   const sampler = (async () => {
     while (sampling) {
       const st = pluginBridge.stats(0);
-      if (st) queue.push({ t: ctx.currentTime, frames: st.hop1Lag + st.hop2Fill, hop1: st.hop1Lag, hop2: st.hop2Fill, wall: performance.now(), consumed: st.consumed });
+      if (st) queue.push({ t: ctx.currentTime, frames: st.queue, wall: performance.now(), consumed: st.consumed });
       await sleep(5);
     }
   })();
@@ -148,10 +148,10 @@ async function run(): Promise<void> {
   } catch (e) {
     sampling = false;
     await sampler;
-    // Where the real hop-2 fill went while the take recorded (diag shows the held PV instead).
+    // Where the bridge queue went while the take recorded (diag shows the held PV instead).
     for (let t = 0; t < 40; t += 2) {
       const part = queue.filter((q) => q.wall >= recWall + t * 1000 && q.wall < recWall + (t + 2) * 1000);
-      if (part.length) log(`fill +${t}s: hop2 min ${ms(Math.min(...part.map((q) => q.hop2)), sr)} median ${ms(median(part.map((q) => q.hop2)), sr)} ms`);
+      if (part.length) log(`fill +${t}s: queue min ${ms(Math.min(...part.map((q) => q.frames)), sr)} median ${ms(median(part.map((q) => q.frames)), sr)} ms`);
     }
     throw e;
   }
@@ -169,7 +169,7 @@ async function run(): Promise<void> {
     const ctxMs = (q.t - a.t) * 1000;
     const jump = ms(q.frames - a.frames, sr);
     if (Math.abs(jump) > 6 || wallMs > 40 || (wallMs > 30 && ctxMs < wallMs - 25)) {
-      log(`event +${Math.round(q.wall - commitWall)} ms after commit: queue ${ms(a.frames, sr)}→${ms(q.frames, sr)} ms (hop1 ${ms(q.hop1, sr)} hop2 ${ms(q.hop2, sr)}), wall gap ${wallMs.toFixed(1)} ms, ctx advanced ${ctxMs.toFixed(1)} ms, consumed +${q.consumed - a.consumed}f`);
+      log(`event +${Math.round(q.wall - commitWall)} ms after commit: queue ${ms(a.frames, sr)}→${ms(q.frames, sr)} ms, wall gap ${wallMs.toFixed(1)} ms, ctx advanced ${ctxMs.toFixed(1)} ms, consumed +${q.consumed - a.consumed}f`);
     }
   }
   const before = around.filter((q) => q.wall < commitWall);
@@ -204,14 +204,14 @@ async function run(): Promise<void> {
   const gain = median(clickPeaks) / 0.56;
   log(`take A: ${clickOffsets.length}/${beatsA} clicks, onset offset median ${ms(clickX, sr)} ms, spread ${ms(Math.min(...clickOffsets), sr)}..${ms(Math.max(...clickOffsets), sr)} ms, slope ${drift.toFixed(3)} ms/min, loop gain ${gain.toFixed(3)}, bridge loss ${lossA1.droppedFrames - lossA0.droppedFrames}f/${lossA1.underruns - lossA0.underruns} underruns`);
   log(`C terms: ${JSON.stringify(comp)}`);
-  // The web bridge queue over the take, in eighths (median hop1 lag / hop2 fill per slice).
+  // The web bridge queue over the take, in eighths (median per slice).
   const slices = 8;
   const perSlice = Math.floor(queue.length / slices);
   for (let j = 0; j < slices; j++) {
     const part = queue.slice(j * perSlice, (j + 1) * perSlice);
     const bar = Math.round((j * bars) / slices);
     const i = beatIdx.findIndex((k) => k >= bar * 4);
-    log(`slice ${j}: bar ${bar} click ${i < 0 ? '?' : ms(clickOffsets[i], sr)} ms | hop1 ${ms(median(part.map((q) => q.hop1)), sr)} ms hop2 ${ms(median(part.map((q) => q.hop2)), sr)} ms total ${ms(median(part.map((q) => q.frames)), sr)} ms`);
+    log(`slice ${j}: bar ${bar} click ${i < 0 ? '?' : ms(clickOffsets[i], sr)} ms | queue ${ms(median(part.map((q) => q.frames)), sr)} ms`);
   }
 
   // ── take B: pulses on the half beats, one echo round ───────────────────────────────────────

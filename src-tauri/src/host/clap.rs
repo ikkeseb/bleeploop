@@ -2019,7 +2019,7 @@ fn owner_main(
         let max_frames = MAX_SELECTABLE_BLOCK + 128;
 
         let cap_frames = HOP1_CAPACITY_FRAMES;
-        // Controller setpoint in C-frames (hop-2 fill is measured at C — the worklet pops at C).
+        // Controller setpoint in C-frames (the bridge queue is measured at C — the worklet pops at C).
         let target_frames = (TARGET_FILL_SECONDS * c).round() as u32;
         diag.init(
             c,
@@ -2050,7 +2050,7 @@ fn owner_main(
         }
 
         // Post the SharedBuffer only after activation succeeds. meta.sampleRate = C because hop-1
-        // frames are post-resample; the JS drain's maxLagFrames must be C-based, not D-based.
+        // frames are post-resample; the worklet's setpoint and lag cap must be C-based, not D-based.
         let (shared_ptr, shared_buf) =
             match create_shared_ring(
                 &window,
@@ -2408,7 +2408,7 @@ fn producer_loop(
     // P11 input-SRC: the cpal→D input resampler, (re)built on each arm/disarm/device-swap
     // (signalled by `diag.input_gen`). `None` = disarmed ⇒ feed silence. The build allocates
     // (rubato buffers + scratch) — an accepted ONE-SHOT cost at a user arm (not steady-state;
-    // absorbed by the ~30ms hop-2 output buffer), kept OUTSIDE the rt_alloc guard so the
+    // absorbed by the ~30ms bridge queue), kept OUTSIDE the rt_alloc guard so the
     // steady-state `rt_allocs:0` invariant holds. `in_gen` mirrors the last gen seen.
     let mut in_pipe: Option<InPipe> = None;
     let mut in_gen: u32 = 0;

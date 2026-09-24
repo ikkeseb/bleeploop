@@ -96,7 +96,6 @@ function openRecordSession(i: number, overrunBaseline: number, pluginLossBaselin
     pluginLossBaseline,
   };
   engineState.recording = session;
-  pluginBridge.setCaptureHold(true); // the bridge recentres nothing while a take records
   return session;
 }
 
@@ -389,7 +388,6 @@ function releaseRecorderState(i: number): void {
   const t = engineState.tracks[i];
   const wasAutoArmed = t?.autoArmed === true;
   engineState.recording = null;
-  pluginBridge.setCaptureHold(false);
   if (t) {
     t.autoArmed = false;
     t.overdub = null;

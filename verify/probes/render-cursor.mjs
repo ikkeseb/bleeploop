@@ -19,7 +19,7 @@ await probe(async ({ open }) => {
     await engine.start();
     const ctx = engine.ctx, sr = ctx.sampleRate;
     let queued = 441, phase = 0, valid = true;
-    pluginBridge.stats = () => { queued = ++phase % 2 ? 441 : 882; return { hop1Lag: 0, hop2Fill: queued }; };
+    pluginBridge.stats = () => { queued = ++phase % 2 ? 441 : 882; return { queue: queued }; };
     Object.defineProperty(ctx, 'baseLatency', { configurable: true, value: 0.01 });
     Object.defineProperty(ctx, 'outputLatency', { configurable: true, value: 0.08 });
     ctx.getOutputTimestamp = () => valid

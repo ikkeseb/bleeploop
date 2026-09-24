@@ -32,19 +32,21 @@ use crate::audio_input::InputWake;
 
 use super::state::PluginInfo;
 
-/// Hop-1 (WebView2 SharedBuffer) layout — a single-producer (RT thread) / single-consumer (JS
-/// main-thread drain) mono-f32 ring, plus a JS→Rust feedback channel (P9.4 drift control). The
-/// JS side does PLAIN ordered reads/writes (Atomics are unsupported on this non-shared ArrayBuffer
+/// Hop-1 (WebView2 SharedBuffer) layout — a single-producer (RT thread) / single-consumer (the
+/// `plugin-pcm-source` AudioWorklet, which the buffer is transferred to) mono-f32 ring, plus a
+/// JS→Rust feedback channel (P9.4 drift control). The JS side does PLAIN ordered reads/writes (Atomics are unsupported on this non-shared ArrayBuffer
 /// in Chromium 149); the Rust side uses release/acquire atomics over the same mapped memory, and
 /// x86-64 TSO makes the stores visible across in order. Layout MUST match
 /// `src/audio/plugin-bridge.ts` (32 bytes, 8×u32, single-writer-per-field):
 ///   [0] write_frames    Rust→JS  hop-1 produced total (post-resample, C-rate)
-///   [1] read_frames     JS→Rust  drain copy cursor (lag-capped; NOT a control signal)
+///   [1] read_frames     JS→Rust  the worklet's read cursor
 ///   [2] capacity_frames Rust→JS  ring cap (written once)
-///   [3] hop2_fill       JS→Rust  the PI controller's level signal (PV): produced minus render clock
-///   [4] consumed        JS→Rust  worklet STAT_CONSUMED total (gate liveness + drift slope)
-///   [5] underruns       JS→Rust  worklet STAT_UNDERRUNS total (M1)
-///   [6] js_dropped      JS→Rust  cumulative lag-cap + flush discards (M2)
+///   [3] hop2_fill       JS→Rust  the PI controller's level signal (PV): the ring's queue as the
+///                                worklet sees it each quantum, smoothed (the name predates the
+///                                single ring; the diag field keeps it)
+///   [4] consumed        JS→Rust  frames the worklet rendered (gate liveness + drift slope)
+///   [5] underruns       JS→Rust  starved quanta + settles that inserted silence (M1)
+///   [6] js_dropped      JS→Rust  frames the worklet dropped (lag cap, settle) (M2)
 ///   [7] epoch           Rust→JS  bumped where production jumps, not drifts (`Hop1Pipe::mark_step`)
 ///   data: `HOP1_CAPACITY_FRAMES` × f32, immediately after the header (offset 32 is 4-byte
 ///         aligned → f32-aligned). Rust acquire-loads [3]..[6]; JS plain-writes them.
@@ -297,7 +299,7 @@ pub struct ProducerDiag {
     pub(super) max_frames: AtomicU32,
     pub(super) out_channels: AtomicU32,
     // --- P9.4 feedback mirrors (from hop-1 header [3]..[6], one acquire-load per block) ---
-    pub(super) hop2_fill: AtomicU32, // PV — hop-2 fill in C-frames (discard-neutral, B2)
+    pub(super) hop2_fill: AtomicU32, // PV — the worklet's smoothed queue in C-frames (header[3])
     pub(super) consumed: AtomicU32,  // worklet STAT_CONSUMED total
     pub(super) underruns: AtomicU32, // worklet STAT_UNDERRUNS total (M1)
     pub(super) js_dropped: AtomicU32, // JS lag-cap + flush discards total (M2)
@@ -473,10 +475,10 @@ mod tests {
     }
 }
 
-// ---- P9.4 drift controller (slow PI on hop-2 fill, discard-neutral PV — B2) ----------------
+// ---- P9.4 drift controller (slow PI on the bridge queue the worklet reports — header[3]) -------
 
 /// Time-targeted (sample-rate-independent) so the band is rate-agnostic. Derivation in spec §3c.
-pub(super) const TARGET_FILL_SECONDS: f64 = 0.030; // ~30ms hop-2 setpoint (HOP2 cap ≈ 340ms @48k → headroom)
+pub(super) const TARGET_FILL_SECONDS: f64 = 0.030; // ~30ms bridge-queue setpoint (the worklet holds it too)
 // Tuning verified on PC (2026-06-15): with the producer now precisely paced (deadline + high-res
 // timer, P9.4-fix), the controller's real job is the residual crystal drift between QPC and the
 // sound-card clock (~400 ppm measured here). This ζ=0.625 tuning settles on the forced +200 ppm in
@@ -493,7 +495,7 @@ const I_CLAMP: f64 = MAX_REL_CORR;
 /// `RatioOutOfBounds` (B1). The per-call clamp uses (1 + MAX_REL_CORR); this is the ctor headroom.
 const MAX_RESAMPLE_RATIO_RELATIVE: f64 = 1.02;
 
-/// Slow PI controller on hop-2 fill. PV = `hop2_fill` (C-frames, discard-neutral). The plant is a
+/// Slow PI controller on the bridge queue. PV = header[3] (C-frames). The plant is a
 /// pure integrator (`fill(n) = fill(n-1) + produced − consumed`); PI makes the closed loop type-1
 /// so the integrator converges to the unknown residual clock-rate correction (≈ −eps) with zero
 /// steady-state fill error. Returns the RELATIVE ratio for rubato (multiplies nominal C/D).
@@ -827,8 +829,8 @@ impl Hop1Pipe {
     }
 
     /// Production jumped rather than drifted (a pause, lost frames, a new pacing clock): bump the
-    /// header epoch so the bridge moves the jump into its level's base instead of feeding it to the
-    /// drift controller (`trackRateLevel` in `plugin-bridge.ts`). An input arm's switch to the capture
+    /// header epoch so the worklet settles the queue back on its setpoint and holds the level off
+    /// the drift controller meanwhile (`src/audio/worklets/plugin-pcm-source.ts`). An input arm's switch to the capture
     /// clock alone shifts production by up to a block, and that wound the controller to −90 ppm
     /// (measured 2026-09-24).
     pub(super) fn mark_step(&self) {
@@ -918,7 +920,7 @@ impl Hop1Pipe {
             diag.out_peak_bits.store(blk_peak.to_bits(), Relaxed);
         }
 
-        // Drift control. PV = hop-2 fill (header[3], discard-neutral — B2). Engage only after
+        // Drift control. PV = the worklet's smoothed queue (header[3]). Engage only after
         // warmup (let rubato's output_delay + flush transient settle before the integrator winds);
         // resample every block regardless so the pipe flows.
         let hop2_fill = hop2_fill_idx.load(Acquire);
@@ -1063,17 +1065,17 @@ impl Hop1Pipe {
 }
 
 /// How long input-clocked pacing waits for capture before running a block on the timer: longer than
-/// any capture callback period (WASAPI shared ~10 ms), short enough that hop-2 (~30 ms) never runs dry.
+/// any capture callback period (WASAPI shared ~10 ms), short enough that the bridge queue (~30 ms) never runs dry.
 const INPUT_GRACE: Duration = Duration::from_millis(20);
 
 /// P11.3 (latency): cpal→RT input-ring fill setpoint, in SECONDS. The `InPipe` DriftController holds
 /// the ring at this fill — pure live-monitor latency (it sits in front of the plugin, ahead of both
-/// branches). Distinct from hop-2's `TARGET_FILL_SECONDS` (30ms): that one buffers the lag-tolerant
+/// branches). Distinct from the bridge's `TARGET_FILL_SECONDS` (30ms): that one buffers the lag-tolerant
 /// looper-record / WebView2 path and rightly stays generous; the input ring only needs to absorb the
 /// phase + jitter between the cpal capture callback (WASAPI-shared period ~10ms) and the QPC-paced RT
 /// drain (~10ms block), so ~1.5 callback periods is ample. Lower = less monitor delay; too low → the
 /// ring underruns (counted as `input_starves`). Measure-tuned; ASIO's tighter, jitter-free callback
-/// will let this drop much further. Reuse hop-2's 30ms here (the old `DriftController::new` default)
+/// will let this drop much further. Reuse the bridge's 30ms here (the old `DriftController::new` default)
 /// only if a WASAPI-shared input device starves at 15ms.
 const INPUT_TARGET_WASAPI: f64 = 0.015;
 /// ASIO tier: with the RT block capped to ASIO_MAX_BLOCK_FRAMES the per-block consume is smaller, so

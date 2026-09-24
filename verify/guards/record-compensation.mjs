@@ -5,7 +5,7 @@
 //
 // Latency itself is HARDWARE and can NOT be deterministically verified — the ear/waveform on the rig is the only
 // gate for "the loop lands on the click". What this PROVES is the LOGIC around it:
-//   0. The real sampler sums BOTH bridge hops (hop1Lag + hop2Fill); a plugin-less slot contributes 0.
+//   0. The real sampler reads the bridge queue (`stats().queue`); a plugin-less slot contributes 0.
 //   A. C = max(0, round((hop/sr + 128/sr − cpalOut + clickOut + trim/1000)·sr)), clickOut=max(outLat,cpalOut) [computeC]
 //   B. THE LOAD-BEARING PHYSICS (physical regime, reported outLat ≥ cpalOut): modelling the full
 //      record/monitor timeline with ARBITRARY input + plugin latency, the recorded transient lands on the
@@ -55,14 +55,14 @@ import {
 // in verify/guards/render-cursor.mjs; the actual sampler/freeze is exercised by render-cursor.mjs.
 function compFrames({ hop, cpalOut, outLat, trim = 0, sr, floorEnabled = true }) {
   return computeC(
-    { hop1Frames: hop, hop2Frames: 0, cpalOutSeconds: cpalOut, baseLatency: 0, outputLatency: outLat, trimMs: trim, floorEnabled },
+    { hopFrames: hop, cpalOutSeconds: cpalOut, baseLatency: 0, outputLatency: outLat, trimMs: trim, floorEnabled },
     sr,
   ).frames;
 }
 
 /**
  * A real record-latency module on a fresh rig, in the reported-latency regime (no output timestamps).
- * `tick(outLat, hop1, hop2)` sets what the sampler reads next and advances one sampler interval.
+ * `tick(outLat, hop)` sets what the sampler reads next and advances one sampler interval.
  */
 async function latencySession({ sr = 48000 } = {}) {
   const rig = await bootLooper({ sampleRate: sr, init: false });
@@ -71,30 +71,30 @@ async function latencySession({ sr = 48000 } = {}) {
   const { pluginBridge } = await rig.import('audio/plugin-bridge.ts');
   let stats = null;
   pluginBridge.stats = () => stats;
-  let queue = null; // the bridge's smoothed hop-2 fill; null = no wired slot (no per-take shift)
+  let queue = null; // the bridge's smoothed queue; null = no wired slot (no per-take shift)
   pluginBridge.queueFrames = () => queue;
   rig.ctx.getOutputTimestamp = undefined;
   rig.ctx.baseLatency = 0;
-  const set = (outLat, hop1, hop2 = 0) => {
+  const set = (outLat, hop) => {
     rig.ctx.outputLatency = outLat;
-    stats = hop1 === null ? null : { hop1Lag: hop1, hop2Fill: hop2 };
+    stats = hop === null ? null : { queue: hop };
   };
-  const tick = async (outLat, hop1, hop2 = 0) => {
-    set(outLat, hop1, hop2);
+  const tick = async (outLat, hop) => {
+    set(outLat, hop);
     await rig.advance(SAMPLE_INTERVAL_MS / 1000);
   };
   const setQueue = (frames) => { queue = frames; };
   return { rig, latency, set, tick, setQueue, C: () => latency.recordCompensationFrames() };
 }
 
-// ── Section 0 — the real sampler sums BOTH bridge hops (hop1Lag + hop2Fill) ────────────────────────
+// ── Section 0 — the real sampler reads the bridge queue ─────────────────────────────────────────────
 {
   const sr = 48000;
   const s0 = await latencySession({ sr });
-  s0.set(0.012, 130, 1440);
+  s0.set(0.012, 1570);
   s0.latency.beginMonitorGeneration(0, 0.006);
-  for (let i = 0; i < 5; i++) await s0.tick(0.012, 130, 1440);
-  ok('0 the sampled bridge term is hop1 + hop2', s0.C() === compFrames({ hop: 130 + 1440, cpalOut: 0.006, outLat: 0.012, sr }) &&
+  for (let i = 0; i < 5; i++) await s0.tick(0.012, 1570);
+  ok('0 the sampled bridge term is the queue', s0.C() === compFrames({ hop: 1570, cpalOut: 0.006, outLat: 0.012, sr }) &&
     s0.latency.lastCompensation().hopFrames === 1570, `C=${s0.C()} hop=${s0.latency.lastCompensation().hopFrames}`);
   const s1 = await latencySession({ sr });
   s1.set(0, null);

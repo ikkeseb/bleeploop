@@ -65,7 +65,7 @@ await probe(async ({ open }) => {
     const orphan = buffer(101);
     await pluginBridge.acceptPluginBuffer(orphan, meta(failedToken));
     const afterFailedLoad = {
-      marker: pluginBridge.stats(0)?.hop1Lag ?? null,
+      wired: pluginBridge.stats(0) !== null,
       orphanReleased: released.includes(orphan),
       slotPlugin: instrument.slotPlugins()[0]?.id ?? null,
     };
@@ -106,11 +106,13 @@ await probe(async ({ open }) => {
       await new Promise((resolve) => setTimeout(resolve, 5));
     }
     const afterRetry = {
-      // Capture warmup resumes the context, so the live drain may consume the header marker before
-      // this snapshot. Buffer ownership is proved by the release identities plus live slot wiring.
+      // Buffer ownership is proved by the release identities, the transfer and live slot wiring.
       wired: pluginBridge.stats(0) !== null,
       staleReleased: released.includes(staleA),
       validReleased: released.includes(validB),
+      // A wired buffer is transferred to its worklet (detached here); a released one never was.
+      staleTransferred: staleA.byteLength === 0,
+      validTransferred: validB.byteLength === 0,
       slotPlugin: instrument.slotPlugins()[0]?.id ?? null,
       captureWarm: window.__lf.looper.captureQuanta() > 0,
     };
@@ -123,11 +125,13 @@ await probe(async ({ open }) => {
   assert.deepEqual(
     result,
     {
-      afterFailedLoad: { marker: null, orphanReleased: true, slotPlugin: null },
+      afterFailedLoad: { wired: false, orphanReleased: true, slotPlugin: null },
       afterRetry: {
         wired: true,
         staleReleased: true,
         validReleased: false,
+        staleTransferred: false,
+        validTransferred: true,
         slotPlugin: 'retry-b',
         captureWarm: true,
       },
@@ -160,20 +164,19 @@ await probe(async ({ open }) => {
     const headerBytes = 32;
     const ab = new ArrayBuffer(headerBytes + capacityFrames * Float32Array.BYTES_PER_ELEMENT);
     const header = new Uint32Array(ab, 0, headerBytes / Uint32Array.BYTES_PER_ELEMENT);
-    header[0] = 333;
     header[2] = capacityFrames;
     await pluginBridge.acceptPluginBuffer(ab, {
       kind: 'plugin-audio', slot: 0, capacityFrames, headerBytes,
       sampleRate: window.__lf.engine.ctx.sampleRate, inChannels: 0, loadToken,
     });
-    const result = { calls, marker: pluginBridge.stats(0)?.hop1Lag ?? null, released: released.includes(ab) };
+    const result = { calls, wired: pluginBridge.stats(0) !== null, transferred: ab.byteLength === 0, released: released.includes(ab) };
     pluginBridge.teardownPluginSlot(0);
     return result;
   });
   console.log(JSON.stringify({ moduleRetry }));
   assert.deepEqual(
     moduleRetry,
-    { calls: 2, marker: 333, released: false },
+    { calls: 2, wired: true, transferred: true, released: false },
     'a failed AudioWorklet module load must be retryable without leaking the next received buffer',
   );
 });

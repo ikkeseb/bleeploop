@@ -50,7 +50,7 @@ export async function runMarkerProbe({ slot = 0, signal }: { slot?: 0 | 1; signa
     const formulaSample = () => {
       const snapshot = recordLatency.snapshot();
       const terms = {
-        hop1Frames: snapshot.hop1Frames, hop2Frames: snapshot.hop2Frames,
+        hopFrames: snapshot.hopFrames,
         cpalOutSeconds: recordLatency.cpalOutSeconds(), baseLatency: snapshot.baseLatencyMs / 1000,
         outputLatency: snapshot.outputLatencyMs / 1000, outputGraphLatencySeconds: graphMs / 1000,
         trimMs: 0, floorEnabled: recordLatency.isFloorEnabled(),
@@ -114,7 +114,7 @@ export async function runMarkerProbe({ slot = 0, signal }: { slot?: 0 | 1; signa
       const queue = sampled.instantaneousBridge;
       const cursorCompensationMs = anchor.performanceTime
         + (renderContextTime - anchor.contextTime) * 1000 - observedPerformanceMs
-        + ((queue?.hop1Lag ?? 0) + (queue?.hop2Fill ?? 0)) / sr * 1000
+        + (queue?.queue ?? 0) / sr * 1000
         - sampled.terms.cpalOutSeconds * 1000 + graphMs;
       anchors.push({ contextTime: anchor.contextTime, performanceTime: anchor.performanceTime,
         observedPerformanceMs, renderContextTime, readSpanMs: observedPerformanceMs - readStart,

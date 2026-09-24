@@ -350,7 +350,7 @@ fn plugin_requested_restart_cycles_activation_on_the_owner_without_reload() {
     assert_eq!(s.activations.load(Relaxed), 1);
     assert_eq!(s.starts.load(Relaxed), 1);
 
-    // Stand in for the JS drain: keep the header read cursor ([1]) caught up with the write cursor
+    // Stand in for the JS consumer (the worklet): keep the header read cursor ([1]) caught up with the write cursor
     // ([0]) until the producer is well past one ring capacity, so a restart that forgot the cursor
     // would wrap `used` and drop every block (the 2026-09-10 runtime finding).
     // SAFETY: the header words are 4-byte aligned; the RT thread is the sole writer of [0] and the

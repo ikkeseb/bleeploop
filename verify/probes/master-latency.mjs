@@ -56,11 +56,11 @@ await probe(async ({ open }) => {
       const dry = await firstSignal(false), limited = await firstSignal(true);
       const delayFrames = limited.first - dry.first;
       const outputGraphLatencySeconds = delayFrames / sampleRate;
-      const terms = { hop1Frames: 128, hop2Frames: 2048, cpalOutSeconds: 0.01,
+      const terms = { hopFrames: 2176, cpalOutSeconds: 0.01,
         baseLatency: 0.01, outputLatency: 0.02, trimMs: 0, floorEnabled: false,
         outputGraphLatencySeconds };
       const compensation = computeC(terms, sampleRate);
-      const expectedSeconds = (terms.hop1Frames + terms.hop2Frames + WORKLET_QUANTUM_FRAMES) / sampleRate
+      const expectedSeconds = (terms.hopFrames + WORKLET_QUANTUM_FRAMES) / sampleRate
         - terms.cpalOutSeconds + terms.baseLatency + terms.outputLatency + outputGraphLatencySeconds;
       const missingFrames = Math.round(expectedSeconds * sampleRate) - compensation.frames;
       results.push({ sampleRate, dry, limited, delayFrames, delayMs: outputGraphLatencySeconds * 1000,
@@ -80,7 +80,7 @@ await probe(async ({ open }) => {
       lf.recordLatency.beginMonitorGeneration(0, 0.01);
       const actual = lf.recordLatency.recordCompensationFrames();
       const breakdown = lf.recordLatency.lastCompensation();
-      const expected = computeC({ hop1Frames: breakdown.hop1Frames, hop2Frames: breakdown.hop2Frames,
+      const expected = computeC({ hopFrames: breakdown.hopFrames,
         cpalOutSeconds: breakdown.cpalOutSeconds, baseLatency: breakdown.baseLatency,
         outputLatency: breakdown.outputLatencyReported - breakdown.baseLatency,
         outputGraphLatencySeconds: measured, trimMs: 0, floorEnabled: false }, sr).frames;

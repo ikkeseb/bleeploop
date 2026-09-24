@@ -109,10 +109,11 @@ All in `src-tauri/src/host/` (commands/scan/state/rt_alloc/editor_window/transpo
   The COM object is parked as a raw owning pointer (`SharedBufferHandle`, `transport.rs`) between the two
   UI-thread hops — never an `AgileReference`: this interface has no proxy, so the wrap fails on every load.
   The buffer surfaces in JS as a **regular ArrayBuffer, NOT a SAB, and `Atomics` are UNSUPPORTED on it in
-  Chromium 149** → the committed **two-ring** transport: hop 1 (Rust→JS) plain ordered reads (x86-64 TSO +
-  Rust-side `AtomicU32::from_ptr` release/acquire), hop 2 a real `ringbuf.js` SAB → `plugin-pcm-source`
-  worklet → `engine.recordTap`/looper bus. Main-thread `setInterval(5ms)` drain (flush-on-resume + ~60ms
-  lag cap). `chrome.webview` stays in `host.tauri.ts`; `audio/plugin-bridge.ts` is WebView2-agnostic.
+  Chromium 149** → one ring read with plain ordered loads (x86-64 TSO + Rust-side `AtomicU32::from_ptr`
+  release/acquire). JS transfers the buffer to the `plugin-pcm-source` worklet, which reads it on the render
+  thread (→ `engine.recordTap`/looper bus) and writes the consumer header words; its queue policy is in
+  the worklet's header. `chrome.webview` stays in `host.tauri.ts`; `audio/plugin-bridge.ts` is
+  WebView2-agnostic.
 - **Every WebView document gets a `frontendEpoch` from `host_init`.** Native slots reserve an explicit
   `Loading` state before foreign setup, and every posted buffer carries that epoch. On reload, stale
   reservations are cancelled; a late owner must tear down instead of parking, and JS releases its buffer.
@@ -126,9 +127,9 @@ All in `src-tauri/src/host/` (commands/scan/state/rt_alloc/editor_window/transpo
   Windows timer tick → producer runs slow → crackle. The PC's QPC↔sound-card mismatch is **~400ppm**; the
   loop cancels it. **0 underruns is the definitive sync proof**, not the drift proxy. An armed ASIO input
   replaces the timer with the interface clock (`pace_on_input`), so the input and monitor rings need no
-  controller; WASAPI keeps the timer (late capture callbacks ran the producer ~5 % fast). The hop-2
-  controller's level is frames produced minus the render clock (`trackRateLevel` in
-  `src/audio/plugin-bridge.ts`); the producer bumps hop-1 header word 7 where production jumps.
+  controller; WASAPI keeps the timer (late capture callbacks ran the producer ~5 % fast). The hop-1
+  controller's level is the worklet's smoothed queue; the producer bumps header word 7 where production
+  jumps, and the worklet settles the queue back on its setpoint instead of feeding the step to the loop.
 - **Surge param ids are hash-like, NOT 0-based** (`first=825615485`); sending an unknown id CRASHES the
   plugin → always enumerate via `listParams`, never invent an id.
 - Test plugin **Surge XT** (`winget install SurgeSynth.SurgeXT` → `…\CLAP\Surge Synth Team\`, + Surge XT
@@ -186,7 +187,7 @@ existing P9 ring → looper record tap (lag-tolerant, records wet "for free").
 - **`InPipe`** (rubato `FixedAsync::Output`, cpal `R_in`→render `D`) + a `DriftController` on the cpal-ring
   fill (off while the capture clocks the producer) resamples the capture; `R_in` plumbed owner→RT via `diag.input_rate` + an `input_gen` counter (bump
   on every arm/disarm so the RT rebuilds + flushes the ring). `InPipe::new` (re)build sits OUTSIDE the
-  rt_alloc guard (a one-shot non-perf-moment alloc, absorbed by the ~30ms hop-2 buffer).
+  rt_alloc guard (a one-shot non-perf-moment alloc, absorbed by the ~30ms bridge queue).
 - **ASIO tier** (`--features asio`): routes BOTH capture + monitor through ONE full-duplex driver, ONE clock.
   cpal ASIO = ONE driver per device: once a stream holds it, cpal can't re-resolve the device or re-query
   configs → the duplex Device + configs are resolved ONCE per process (`audio_output::resolve_asio_cache`

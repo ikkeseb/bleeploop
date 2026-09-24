@@ -31,7 +31,7 @@ check('window needs three valid paired samples and expires invalidated entries',
   assert.ok(Number.isNaN(medianFinite(buf, 5, scratch)));
 });
 check('timestamp mode has no extra base latency, quantum or floor', () => {
-  const terms = { renderCursorSeconds: 0.09, hop1Frames: 128, hop2Frames: 1000,
+  const terms = { renderCursorSeconds: 0.09, hopFrames: 1128,
     cpalOutSeconds: 0.02, baseLatency: 0.01, outputLatency: 0.08,
     outputGraphLatencySeconds: 0.006, trimMs: 0, floorEnabled: true };
   const result = computeC(terms, 48000);

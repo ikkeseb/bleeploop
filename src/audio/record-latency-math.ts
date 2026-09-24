@@ -6,12 +6,12 @@
  *   C = median paired browser queue-tail presentation delay − nativeOut + measured graph delay (limiter)
  *       + trim, clamped at zero,
  * where sampling keeps queue occupancy and render-cursor time together. Without timestamps:
- *   C = (hop1 + hop2 + 128) / sr − nativeOut + clickOut + graph delay + trim.
+ *   C = (bridge queue + 128) / sr − nativeOut + clickOut + graph delay + trim.
  * nativeOut = monitor-ring residency + the median valid callback-to-playback report (the callback period
  * at startup or when unsupported). C is 0 unless a native monitor is armed: native monitoring cancels
  * input + plugin latency, so C compensates the record path only. The first record use freezes the median
  * per monitor generation; re-arm, a buffer change and resnapshot reopen it. Each later take shifts the
- * frozen queue term by how far the bridge's smoothed hop-2 fill has moved since then (`record-latency.ts`).
+ * frozen queue term by how far the bridge's smoothed queue has moved since then (`record-latency.ts`).
  * What no report sees, the WebView output's real latency above its reported one (~65 ms on the rig,
  * 2026-09-24), is the trim's job; `pnpm native:loopback` measures it.
  *
@@ -23,11 +23,11 @@
 /** Existing 128-frame bridge/render alignment heuristic, not a measured worklet-to-worklet DSP delay. */
 export const WORKLET_QUANTUM_FRAMES = 128;
 
-/** Sampler tick (ms). Deliberately incommensurate with the 5 ms drain phase (hop-1's oscillation period):
- *  nominal samples advance by 1 ms through all five phases instead of repeatedly observing one phase. */
+/** Sampler tick (ms). Deliberately incommensurate with the producer's block and the render burst, so the
+ *  samples walk through the bridge queue's saw instead of repeatedly observing one phase. */
 export const SAMPLE_INTERVAL_MS = 31;
-/** Rolling-window span (ms). ~1 s of samples: long enough to average out the hop-1 drain-phase swing + the
- *  hop-2 PI hunt + the `outputLatency` jitter, short enough to still reflect the current buffer config. */
+/** Rolling-window span (ms). ~1 s of samples: long enough to average out the bridge queue's saw + the
+ *  drift controller's hunt + the `outputLatency` jitter, short enough to still reflect the current buffer config. */
 export const SAMPLE_WINDOW_MS = 1000;
 export const SAMPLE_CAPACITY = Math.max(1, Math.ceil(SAMPLE_WINDOW_MS / SAMPLE_INTERVAL_MS)); // ~33 samples
 
@@ -71,8 +71,7 @@ export function renderCursorTailSeconds(
 
 export interface CompensationTerms {
   renderCursorSeconds?: number | null; // paired queue-tail presentation estimate; absent = reported fallback
-  hop1Frames: number; // hop-1 (Rust→drain) residency, frames
-  hop2Frames: number; // hop-2 (drain→worklet) residency, frames
+  hopFrames: number; // the plugin bridge queue's residency (Rust → render worklet), frames
   cpalOutSeconds: number; // the native monitor's output latency (s)
   baseLatency: number; // ctx.baseLatency (render FIFO), s
   outputLatency: number; // ctx.outputLatency (device), s
@@ -83,7 +82,7 @@ export interface CompensationTerms {
 
 export interface Compensation {
   source: 'timestamp' | 'reported';
-  hopFrames: number; // hop1 + hop2
+  hopFrames: number; // the bridge queue
   outputLatencyReported: number; // baseLatency + outputLatency (what Chromium/WebView2 reports)
   outputLatency: number; // timestamp diagnostic remainder, or effective reported fallback output latency
   outputFloored: boolean; // the floor lifted the reported value up to cpalOut
@@ -103,7 +102,7 @@ export interface Compensation {
  * Clamped ≥ 0 because the current capture arm cannot move before its requested start.
  */
 export function computeC(terms: CompensationTerms, sr: number): Compensation {
-  const hopFrames = terms.hop1Frames + terms.hop2Frames;
+  const hopFrames = terms.hopFrames;
   const outputLatencyReported = terms.baseLatency + terms.outputLatency;
   const timestamped = terms.renderCursorSeconds != null && Number.isFinite(terms.renderCursorSeconds) && terms.renderCursorSeconds >= 0;
   const outputLatency = timestamped ? terms.renderCursorSeconds! - hopFrames / sr : terms.floorEnabled

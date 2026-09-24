@@ -105,7 +105,7 @@ export function AudioSettings() {
       for (let slot = 0; slot < 2; slot++) {
         const st = pluginBridge.stats(slot);
         if (!st) continue;
-        parts.push(`${slot === 0 ? 'A' : 'B'} lag ${st.hop1Lag} · fill ${st.hop2Fill} · under ${st.underruns} · drop ${st.jsDropped}`);
+        parts.push(`${slot === 0 ? 'A' : 'B'} queue ${st.queue} · under ${st.underruns} · drop ${st.dropped}`);
       }
       setBridgeHealth(parts.length ? parts.join('  |  ') : 'no plugin loaded');
     };

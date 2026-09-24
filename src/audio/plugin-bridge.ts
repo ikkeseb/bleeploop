@@ -1,15 +1,16 @@
 /**
- * OWNS: the JS half of the two-ring plugin audio transport (native plugin audio → Web Audio) — the hop-1
- * → hop-2 drain, the per-slot gain staging into `recordTap` + the muteable web monitor, the feedback
- * fields the Rust drift controller reads, and the process-lifetime PCM-loss totals the looper's take
- * integrity check compares.
+ * OWNS: the JS half of the plugin audio transport (native plugin audio → Web Audio) — wiring the hop-1
+ * ring into its source worklet, the per-slot gain staging into `recordTap` + the muteable web monitor,
+ * and the process-lifetime PCM-loss totals the looper's take integrity check compares.
  *
  * The native host (Rust) writes the plugin's mono PCM into a WebView2 SharedBuffer ring (hop 1: a
- * regular cross-process ArrayBuffer — NO Atomics, plain ordered reads). A main-thread drain copies
- * available frames from hop 1 into a real `ringbuf.js` SharedArrayBuffer ring (hop 2: Atomics OK),
- * which a `plugin-pcm-source` AudioWorkletNode pops into a per-plugin gain. That gain splits to
- * `recordTap` at full level and `webMonitorGain → masterGain` for audible monitoring. The audible
- * branch mutes while the native monitor is armed; the record branch does not.
+ * regular cross-process ArrayBuffer — NO Atomics, plain ordered reads). The buffer is TRANSFERRED to a
+ * `plugin-pcm-source` AudioWorkletNode, which reads the ring on the render thread and writes the
+ * consumer half of its header (see the worklet's header for the queue policy: one setpoint, a settle
+ * after every step). The node feeds a per-plugin gain that splits to `recordTap` at full level and
+ * `webMonitorGain → masterGain` for audible monitoring. The audible branch mutes while the native
+ * monitor is armed; the record branch does not. After the transfer the main thread holds no view of
+ * the ring: it reads the worklet's counters and queue from a small stats SharedArrayBuffer.
  *
  * BOUNDARY: this file lives in `src/audio/` and is WebView2-agnostic. It receives a *plain*
  * ArrayBuffer + parsed meta from the platform layer (`host.tauri.ts` owns the `chrome.webview`
@@ -17,28 +18,23 @@
  * an injected `release` callback. No `@tauri-apps` / `chrome.webview` knowledge here.
  *
  * Hop-1 header layout (32 bytes, 8×u32; MUST match `host/transport.rs::create_shared_ring`):
- *   [0]=write_frames (Rust)   — hop-1 produced total, post-resample C-rate
- *   [1]=read_frames  (JS)     — drain copy cursor (lag-capped; NOT a control signal)
+ *   [0]=write_frames (Rust)     — hop-1 produced total, post-resample C-rate
+ *   [1]=read_frames  (worklet)  — the render thread's read cursor
  *   [2]=capacity_frames (Rust once)
- *   [3]=hop2_fill    (JS)     — the PI controller's level signal (PV): frames produced minus
- *                               render-clock frames, from one drain tick (`rateLevel`)
- *   [4]=consumed     (JS)     — worklet STAT_CONSUMED total (gate liveness + drift slope)
- *   [5]=underruns    (JS)     — worklet STAT_UNDERRUNS total
- *   [6]=js_dropped   (JS)     — cumulative lag-cap + flush discards
- *   [7]=epoch        (Rust)   — bumped where production jumps rather than drifts (rebases the level)
+ *   [3]=level        (worklet)  — the drift controller's PV: the queue at each quantum, smoothed; held on
+ *                                 the setpoint while the queue settles after a step
+ *   [4]=consumed     (worklet)  — frames rendered (gate liveness + drift slope)
+ *   [5]=underruns    (worklet)  — quanta that ran short, plus settles that inserted silence
+ *   [6]=dropped      (worklet)  — frames dropped by the lag cap or a settle
+ *   [7]=epoch        (Rust)     — bumped where production jumps rather than drifts (starts a settle)
  *   data: f32×cap, immediately after the 32-byte header (32 is 4-byte aligned → f32-aligned).
  *
- * The four JS-written feedback fields ([3]..[6]) feed the Rust producer's drift controller + gate.
- * They are plain ordered writes (TSO-visible to Rust's acquire-loads), mirrored on EVERY drain tick
- * — not just ticks that moved audio — so the controller's PV and the gate's counters stay fresh even
- * when hop-1 has nothing to copy (the worklet keeps consuming from hop-2 regardless).
- *
- * DRAIN = main thread `setInterval`. A dedicated Worker (lower jitter) would need the WebView2
- * ArrayBuffer to survive transfer into a Worker realm — unproven on this engine, while the measured
- * main-thread drain keeps up (fill ~2 %, 0 drops), so the Worker stays deferred. The drain caps real
- * lag so jitter shows up as bounded latency, not an overrun.
+ * The worklet writes [1] and [3]..[6] every quantum as plain ordered stores (TSO-visible to Rust's
+ * acquire-loads). WebView2 lets the SharedBuffer's ArrayBuffer transfer into the AudioWorklet realm
+ * with its mapping live (both directions, measured 2026-09-24). Teardown tells the worklet to drop its
+ * views, so the mapping goes when they are collected, and still calls `release` on the detached buffer
+ * (best-effort: whether WebView2 honours that after a transfer is unknown).
  */
-import { RingBuffer } from 'ringbuf.js';
 import { createSignal } from 'solid-js';
 import pluginPcmUrl from './worklets/plugin-pcm-source.ts?worker&url';
 import { engine } from './engine';
@@ -55,32 +51,21 @@ export interface PluginBufferMeta {
   loadToken: number; // frontend request identity; rejects late buffers from failed/superseded loads
 }
 
-// hop-1 header indices (u32 view) — must match the 8-field layout in host/transport.rs.
-const H_WRITE = 0;
-const H_READ = 1;
-// [2] = capacity_frames (Rust-written once; JS reads it via meta.capacityFrames, not the header).
-const H_HOP2_FILL = 3; // PI level signal (PV) — produced minus render clock
-const H_CONSUMED = 4; // worklet STAT_CONSUMED total
-const H_UNDERRUNS = 5; // worklet STAT_UNDERRUNS total
-const H_JS_DROPPED = 6; // cumulative lag-cap + flush discards
-const H_EPOCH = 7; // Rust bumps it where production jumps (`Hop1Pipe::mark_step`)
-const DRAIN_INTERVAL_MS = 5;
-/** hop-2 capacity (~340ms @48k). Power-of-two-ish; ringbuf.js sizes the SAB from this. */
-const HOP2_CAPACITY_FRAMES = 16384;
-/** The drift controller's hop-2 fill setpoint: `TARGET_FILL_SECONDS` in src-tauri/src/host/transport.rs. */
-const HOP2_TARGET_SECONDS = 0.03;
-/** How far hop-2's smoothed fill may sit off the setpoint, for how long, before an idle recentre. */
-const HOP2_IDLE_TOLERANCE_SECONDS = 0.004;
-const HOP2_IDLE_PATIENCE_MS = 500;
-/** Smoothing of the fill the recentre decisions read (render bursts move the raw fill by ~12 ms). */
-const HOP2_FILL_SMOOTHING = DRAIN_INTERVAL_MS / 300;
-/** Real-lag cap: keep hop-1 backlog under this so jitter/drift stays bounded (~60ms latency). */
+const H_LEVEL = 3; // hop-1 header word the drift controller reads as its level (PV)
+// Stats SAB (i32), written by the worklet; mirrored in `worklets/plugin-pcm-source.ts`.
+const STAT_CONSUMED = 0;
+const STAT_UNDERRUNS = 1;
+const STAT_DROPPED = 2;
+const STAT_QUEUE = 3;
+const STAT_LEVEL_X16 = 4;
+const STAT_LIVE = 5;
+const STAT_WORDS = 6;
+/** The queue's setpoint: the drift controller's `TARGET_FILL_SECONDS` in src-tauri/src/host/transport.rs. */
+const TARGET_SECONDS = 0.03;
+/** A backlog past this is dropped to the setpoint at once, so jitter shows as bounded latency. */
 const MAX_LAG_SECONDS = 0.06;
-/** A controller level this far off the setpoint is a step (production paused or lost, the clock
- * stopped), not clock drift: the loop holds a real rate mismatch within ~2 ms. */
-const RATE_STEP_SECONDS = 0.005;
-/** How long a step is held off the controller before its settled size moves into the base. */
-const RATE_STEP_SETTLE_MS = 1000;
+/** How long the queue's mean is measured after a step before the one correction. */
+const SETTLE_SECONDS = 1;
 /** Per-slot plugin output-gain defaults, chosen by plugin TYPE at load. An amp-sim/FX (has an
  * audio-input bus, `meta.inChannels > 0`) is already internally gain-staged, so its wet wants ~unity;
  * a synth (no input bus) renders default patches that clip, so it starts conservative. The user trims
@@ -90,37 +75,16 @@ const FX_DEFAULT_GAIN = 0.9;
 const SYNTH_DEFAULT_GAIN = 0.1;
 
 interface BridgeSlot {
-  ab: ArrayBuffer;
-  header: Uint32Array; // view over hop-1 header (first headerBytes)
-  data: Float32Array; // view over hop-1 data region (capacityFrames f32)
-  cap: number; // hop-1 capacity (power of two)
-  mask: number; // cap - 1
-  maxLagFrames: number;
+  ab: ArrayBuffer; // the hop-1 SharedBuffer, detached once transferred to the worklet
   node: AudioWorkletNode;
   gain: GainNode; // per-plugin gain staging (worklet → gain → {recordTap, webMonitorGain})
   gainValue: number; // intended target — survives setTargetAtTime ramps so the reactive value stays exact
   webMonitorGain: GainNode; // the audible web path (gain → webMonitorGain → masterGain); muted
   // (0) while the native cpal-out monitor is armed so the wet isn't heard twice (flam). The record tap
   // (gain → recordTap) stays at full level regardless, so the wet is still recorded.
-  hop2: RingBuffer;
-  stats: Int32Array;
-  scratch: Float32Array;
-  timer: ReturnType<typeof setInterval>;
-  flushed: boolean; // discarded the suspended-context backlog on the first running drain
-  jsDropped: number; // cumulative lag-cap + flush discards — mirrored into header[6]
-  accountedUnderruns: number; // last worklet total folded into the process-wide record-loss counter
-  recenteredUnderruns: number; // worklet underrun total the drain last put hop-2 back on its setpoint for
-  fillSmoothed: number; // hop-2 fill (frames), smoothed over ~0.3 s, for the recentre decisions
-  offSince: number; // performance.now() since the smoothed fill left the idle tolerance; NaN while inside
-  skipDebt: number; // hop-1 frames still to drop to bring an overfull hop-2 down (idle recentre)
-  webMuted: boolean; // the audible web path is muted (the native monitor carries the sound)
-  lastWrite: number; // hop-1 write cursor at the last running tick (u32)
-  writeTotal: number; // frames produced since the level's base, unwrapped
-  clockBase: number; // writeTotal − render frames − setpoint at the base: the level starts on the setpoint
-  rateLevel: number; // the controller's level (frames), smoothed over ~0.3 s — see `trackRateLevel`
-  stepSince: number; // performance.now() since rateLevel left the step tolerance; NaN while inside
-  running: boolean; // the context ran at the last tick (a resume rebases)
-  epoch: number; // header[7] at the last tick (a change rebases)
+  stats: Int32Array; // the worklet's counters and queue (STAT_*)
+  accountedUnderruns: number; // last worklet total folded into the process-wide record-loss counters
+  accountedDropped: number;
   loadToken: number; // the frontend load request that owns this wiring
 }
 
@@ -135,10 +99,6 @@ const slotMap = new Map<number, BridgeSlot>();
  * take must still fail closed. A record/overdub snapshots these totals at arm and compares at commit.
  */
 let recordDroppedFrames = 0;
-/** A take is recording (`setCaptureHold`): nothing is recentred, so the take keeps one timeline. The
- * drift controller keeps running: its level ignores stalls and the bridge's own drops and pads, so it
- * moves only with the clock rate and holds hop-2 still through a take. */
-let captureHold = false;
 let recordUnderruns = 0;
 const [gainValues, setGainValues] = createSignal<[number | null, number | null]>([null, null]);
 
@@ -229,28 +189,34 @@ export async function acceptPluginBuffer(ab: ArrayBuffer, meta: PluginBufferMeta
   }
   teardownSlotWiring(meta.slot); // replace any existing wiring without cancelling this load token
 
-  // Everything below adopts `ab` (the hop-1 cross-process SharedBuffer). If any of it throws AFTER the
-  // await — most realistically `new AudioWorkletNode` on a closed/interrupted context during a swap —
-  // `ab` is neither stored in slotMap nor released, so the OS shared mapping leaks for the plugin's
-  // lifetime. Release it on any failure (the slot stays empty, which is correct for a failed accept),
-  // then rethrow so the call-site .catch logs it.
+  // Everything below adopts `ab` (the hop-1 cross-process SharedBuffer). If any of it throws — most
+  // realistically `new AudioWorkletNode` on a closed/interrupted context during a swap — `ab`
+  // is neither stored in slotMap nor released, so the OS shared mapping leaks for the
+  // plugin's lifetime. Release it on any failure (the slot stays empty, which is correct for a failed
+  // accept), then rethrow so the call-site .catch logs it.
+  let node: AudioWorkletNode | null = null;
   try {
-    const cap = meta.capacityFrames;
-    const header = new Uint32Array(ab, 0, meta.headerBytes / 4);
-    const data = new Float32Array(ab, meta.headerBytes, cap);
-
-    // hop-2: a real SharedArrayBuffer ring (Atomics OK) feeding the worklet, plus a stats SAB.
-    const ringSab = RingBuffer.getStorageForCapacity(HOP2_CAPACITY_FRAMES, Float32Array);
-    const hop2 = new RingBuffer(ringSab, Float32Array);
-    const statsSab = new SharedArrayBuffer(2 * Int32Array.BYTES_PER_ELEMENT);
+    const sr = meta.sampleRate;
+    const targetFrames = Math.round(sr * TARGET_SECONDS);
+    // Until the worklet's first quantum the controller reads the setpoint (neutral), not a stale 0.
+    new Uint32Array(ab, 0, meta.headerBytes / 4)[H_LEVEL] = targetFrames;
+    const statsSab = new SharedArrayBuffer(STAT_WORDS * Int32Array.BYTES_PER_ELEMENT);
     const stats = new Int32Array(statsSab);
 
-    const node = new AudioWorkletNode(ctx, 'plugin-pcm-source', {
+    node = new AudioWorkletNode(ctx, 'plugin-pcm-source', {
       numberOfInputs: 0,
       numberOfOutputs: 1,
       outputChannelCount: [1],
-      processorOptions: { ringSab, statsSab },
+      processorOptions: {
+        statsSab,
+        headerBytes: meta.headerBytes,
+        capacityFrames: meta.capacityFrames,
+        targetFrames,
+        maxLagFrames: Math.round(sr * MAX_LAG_SECONDS),
+        settleFrames: Math.round(sr * SETTLE_SECONDS),
+      },
     });
+    node.port.postMessage(ab, [ab]); // the render thread owns the ring from here
     // Per-plugin gain staging: worklet → gain → {recordTap (record), webMonitorGain → masterGain
     // (audible)}. The plugin kind decides the default: the scan-category (slotKinds, set before load) is
     // authoritative; fall back to the input-bus count only when the plugin was unclassifiable.
@@ -271,37 +237,15 @@ export async function acceptPluginBuffer(ab: ArrayBuffer, meta: PluginBufferMeta
 
     const slot: BridgeSlot = {
       ab,
-      header,
-      data,
-      cap,
-      mask: cap - 1,
-      maxLagFrames: Math.max(128, Math.round(meta.sampleRate * MAX_LAG_SECONDS)),
       node,
       gain,
       gainValue,
       webMonitorGain,
-      hop2,
       stats,
-      scratch: new Float32Array(cap),
-      timer: undefined as unknown as ReturnType<typeof setInterval>,
-      flushed: false,
-      jsDropped: 0,
       accountedUnderruns: 0,
-      recenteredUnderruns: 0,
-      fillSmoothed: 0,
-      offSince: NaN,
-      skipDebt: 0,
-      webMuted: false,
-      lastWrite: 0,
-      writeTotal: 0,
-      clockBase: 0,
-      rateLevel: 0,
-      stepSince: NaN,
-      running: false,
-      epoch: 0,
+      accountedDropped: 0,
       loadToken: meta.loadToken,
     };
-    slot.timer = setInterval(() => drain(slot), DRAIN_INTERVAL_MS);
     slotMap.set(meta.slot, slot);
     setGainValue(meta.slot, gainValue);
     // The bridge is the earliest common success point for both native instruments and effects.
@@ -310,225 +254,24 @@ export async function acceptPluginBuffer(ab: ArrayBuffer, meta: PluginBufferMeta
     // independent of looper/capture.ts (machine.ts already imports this bridge).
     onPluginConnected?.();
     console.log(
-      `[plugin-bridge] slot ${meta.slot} wired: cap=${cap} sr=${meta.sampleRate} maxLag=${slot.maxLagFrames}`,
+      `[plugin-bridge] slot ${meta.slot} wired: cap=${meta.capacityFrames} sr=${sr} target=${targetFrames}`,
     );
   } catch (err) {
+    node?.port.postMessage('close'); // a worklet that already took the ring must stop driving it
+    node?.disconnect();
     releaseBuffer(ab);
     throw err;
   }
 }
 
-/** Fold worklet underruns since the last read into the process-lifetime total (u32 wrap-safe). */
-function accountUnderruns(s: BridgeSlot): void {
-  const current = Atomics.load(s.stats, 1) >>> 0;
-  const delta = (current - s.accountedUnderruns) >>> 0;
-  recordUnderruns += delta;
-  s.accountedUnderruns = current;
-}
-
-/** Count a hop-1 discard both on the slot's native diagnostic surface and for take integrity. */
-function dropFrames(s: BridgeSlot, frames: number): void {
-  if (frames <= 0) return;
-  s.jsDropped = (s.jsDropped + frames) >>> 0;
-  recordDroppedFrames += frames;
-}
-
-/**
- * Mirror the four JS-owned feedback fields into the hop-1 header (plain ordered writes; TSO-visible
- * to Rust's acquire-loads). The PI controller's level signal is `rateLevel`, not hop-2's fill: hop-2
- * moves with every main-thread stall, underrun, lag-cap drop and recentre, and the slow controller
- * learned those as clock drift (a stall wound it from 12 to 230 ppm, ~14 ms/min of stretch for the
- * takes after it, measured 2026-09-24). Called on every running drain tick, even ones that moved no
- * audio.
- */
-function mirror(s: BridgeSlot): void {
-  accountUnderruns(s);
-  // PV; held on the setpoint while a step settles, so the controller never learns one as drift.
-  const pv = Number.isNaN(s.stepSince) ? s.rateLevel : hop2TargetFrames();
-  s.header[H_HOP2_FILL] = Math.max(0, Math.round(pv)) >>> 0;
-  s.header[H_CONSUMED] = Atomics.load(s.stats, 0) >>> 0; // STAT_CONSUMED
-  s.header[H_UNDERRUNS] = Atomics.load(s.stats, 1) >>> 0; // STAT_UNDERRUNS
-  s.header[H_JS_DROPPED] = s.jsDropped >>> 0; // lag-cap + flush discards
-}
-
-/** The drift controller's hop-2 setpoint in frames. */
-function hop2TargetFrames(): number {
-  return ctx ? Math.round(ctx.sampleRate * HOP2_TARGET_SECONDS) : 0;
-}
-
-/** Render-clock frames: the rate the worklet pops hop-2 at, underruns included. */
-function renderFrames(): number {
-  return ctx ? ctx.currentTime * ctx.sampleRate : 0;
-}
-
-/**
- * The controller's level: frames produced minus render-clock frames, both read in this tick, so a
- * stall leaves a stale sample, never a wrong one, and the bridge's own drops and pads never enter it.
- * Only a mismatch between the producer's rate and the render clock moves it gradually. A step moves
- * it at once: the producer paused at an input arm (a 12 ms step wound the controller to −284 ppm and
- * stretched the next take by 22 ms/min, measured 2026-09-24), lost frames to a full hop-1, or the
- * context stopped. A step is held off the controller (`mirror`) and, once settled, moved into the base.
- * `rebase` (the first tick, a resume, a new producer epoch) puts the level straight back on the
- * setpoint, then holds it the same way: one raw sample sits up to a block off the level's mean, and
- * that offset alone wound the controller to −40..−84 ppm (measured 2026-09-24).
- */
-function trackRateLevel(s: BridgeSlot, write: number, rebase: boolean, now: number): void {
-  s.writeTotal += (write - s.lastWrite) >>> 0;
-  s.lastWrite = write;
-  const target = hop2TargetFrames();
-  const level = s.writeTotal - renderFrames() - s.clockBase;
-  if (rebase) {
-    s.clockBase += level - target;
-    s.rateLevel = target;
-    s.stepSince = now;
-    return;
-  }
-  s.rateLevel += (level - s.rateLevel) * HOP2_FILL_SMOOTHING;
-  const off = s.rateLevel - target;
-  if (Number.isNaN(s.stepSince)) {
-    if (ctx && Math.abs(off) >= ctx.sampleRate * RATE_STEP_SECONDS) s.stepSince = now;
-  } else if (now - s.stepSince >= RATE_STEP_SETTLE_MS) {
-    s.clockBase += off;
-    s.rateLevel = target;
-    s.stepSince = NaN;
-  }
-}
-
-/** hop-2 frames short of the controller's setpoint (0 when at or above it). */
-function hop2Shortfall(s: BridgeSlot): number {
-  return Math.max(0, hop2TargetFrames() - s.hop2.available_read());
-}
-
-/**
- * Between takes, with the native monitor carrying the sound (the web path muted, so nothing audible
- * glitches), put a hop-2 fill that has sat off the setpoint back on it: pad a short one at once, and
- * drain a long one by dropping the excess from hop-1 over the next ticks (`skipDebt`; hop-2 has one
- * reader, the worklet). Without this the controller's slow loop steers the offset out over minutes,
- * and a take recorded meanwhile lands off by it.
- */
-function recenterIdle(s: BridgeSlot): void {
-  if (!ctx) return;
-  const fill = s.hop2.available_read();
-  s.fillSmoothed += (fill - s.fillSmoothed) * HOP2_FILL_SMOOTHING;
-  if (captureHold || !s.webMuted) {
-    s.skipDebt = 0;
-    s.offSince = NaN;
-    return;
-  }
-  const off = s.fillSmoothed - hop2TargetFrames();
-  if (Math.abs(off) < ctx.sampleRate * HOP2_IDLE_TOLERANCE_SECONDS || s.skipDebt > 0) {
-    s.offSince = NaN;
-    return;
-  }
-  const now = performance.now();
-  if (Number.isNaN(s.offSince)) s.offSince = now;
-  if (now - s.offSince < HOP2_IDLE_PATIENCE_MS) return;
-  s.offSince = NaN;
-  if (off < 0) {
-    padHop2(s);
-    s.fillSmoothed = s.hop2.available_read();
-  } else {
-    s.skipDebt = Math.round(off);
-  }
-}
-
-/** Pad hop-2 with silence up to the setpoint (the main thread is hop-2's only writer). */
-function padHop2(s: BridgeSlot): void {
-  const frames = Math.min(hop2Shortfall(s), s.hop2.available_write(), s.scratch.length);
-  if (frames > 0) s.hop2.push(s.scratch.fill(0, 0, frames), frames);
-}
-
-/**
- * Move available frames from hop 1 (plain reads) into hop 2. Only runs while the context is running
- * (so a suspended context doesn't buffer stale audio = latency); flushes the suspended backlog once
- * on resume and pads hop 2 to the drift controller's setpoint, puts hop 2 back on it after a worklet
- * underrun, then caps real lag so jitter/drift never grows the monitoring latency unbounded. Counts
- * every discarded frame into `jsDropped` and mirrors the feedback fields at the end of the tick.
- */
-function drain(s: BridgeSlot): void {
-  if (!ctx || ctx.state !== 'running') {
-    s.running = false;
-    return;
-  }
-  // Plain ordered reads of the cross-process header (no Atomics on the WebView2 buffer).
-  const write = s.header[H_WRITE] >>> 0;
-  const epoch = s.header[H_EPOCH] >>> 0;
-  // Rebase on the first tick, on a resume and where the producer marks a jump.
-  trackRateLevel(s, write, !s.running || epoch !== s.epoch, performance.now());
-  s.running = true;
-  s.epoch = epoch;
-  if (!s.flushed) {
-    // Discard whatever accumulated while suspended so playback starts live (minimal latency). Count
-    // the discard and seed the feedback fields so Rust's first acquire-loads aren't garbage.
-    const read0 = s.header[H_READ] >>> 0;
-    dropFrames(s, (write - read0) >>> 0);
-    s.header[H_READ] = write;
-    s.flushed = true;
-    s.recenteredUnderruns = Atomics.load(s.stats, 1) >>> 0; // starving before the first audio is not an underrun to repair
-    padHop2(s);
-    s.fillSmoothed = s.hop2.available_read();
-    mirror(s);
-    return;
-  }
-  let read = s.header[H_READ] >>> 0;
-  let avail = (write - read) >>> 0;
-  // Back on the setpoint after a worklet underrun. hop-2's fill is the web path's delay and the recorded
-  // take's, and the drift controller is slow (minutes to settle): left to absorb the backlog a stall
-  // delivers at once, or to refill an emptied hop-2, it swings the fill by tens of ms for minutes, and
-  // takes recorded meanwhile land late and drift inside the take (measured through a loopback cable,
-  // 2026-09-24). So hop-1's oldest frames beyond what hop-2 lacks are dropped (the take spanning the
-  // underrun already fails its loss check) and any remaining shortfall is padded after the move. Only
-  // here: a drop anywhere else would reject a good take. The worklet alone pops hop-2, so the excess
-  // comes out of hop-1, whose reader this is.
-  const underruns = Atomics.load(s.stats, 1) >>> 0;
-  const underran = underruns !== s.recenteredUnderruns;
-  if (underran) {
-    s.recenteredUnderruns = underruns;
-    const excess = avail - hop2Shortfall(s);
-    if (excess > 0) {
-      dropFrames(s, excess);
-      read = (read + excess) >>> 0;
-      s.header[H_READ] = read;
-      avail -= excess;
-    }
-  }
-  if (s.skipDebt > 0 && avail > 0 && !captureHold) {
-    const skip = Math.min(s.skipDebt, avail);
-    dropFrames(s, skip);
-    read = (read + skip) >>> 0;
-    s.header[H_READ] = read;
-    avail -= skip;
-    s.skipDebt -= skip;
-  }
-  // Real-lag cap: if we've fallen too far behind (GC stall / clock drift), drop the oldest so the
-  // monitoring latency stays bounded. A brief discontinuity beats an ever-growing delay. The dropped
-  // frames are an audible glitch — count them so the gate can reject a stream that crackles.
-  if (avail > s.maxLagFrames) {
-    dropFrames(s, avail - s.maxLagFrames);
-    read = (write - s.maxLagFrames) >>> 0;
-    s.header[H_READ] = read;
-    avail = s.maxLagFrames;
-  }
-  if (avail > 0) {
-    const space = s.hop2.available_write();
-    const toMove = Math.min(avail, space, s.scratch.length);
-    if (toMove > 0) {
-      // Copy from the hop-1 ring into scratch (wraparound), then push to hop-2.
-      const start = read & s.mask;
-      const first = Math.min(toMove, s.cap - start);
-      s.scratch.set(s.data.subarray(start, start + first), 0);
-      if (toMove > first) s.scratch.set(s.data.subarray(0, toMove - first), first);
-      const pushed = s.hop2.push(s.scratch, toMove);
-      s.header[H_READ] = (read + pushed) >>> 0; // advance by what actually landed in hop-2
-    }
-    // toMove === 0 (hop-2 full, worklet not consuming yet) leaves the frames in hop-1 — not dropped.
-  }
-  if (underran) {
-    padHop2(s);
-    s.fillSmoothed = s.hop2.available_read();
-  }
-  recenterIdle(s);
-  mirror(s); // refresh PV + counters every tick, regardless of whether audio moved
+/** Fold the worklet's loss counters since the last read into the process-lifetime totals (u32 wrap-safe). */
+function accountLoss(s: BridgeSlot): void {
+  const underruns = Atomics.load(s.stats, STAT_UNDERRUNS) >>> 0;
+  const dropped = Atomics.load(s.stats, STAT_DROPPED) >>> 0;
+  recordUnderruns += (underruns - s.accountedUnderruns) >>> 0;
+  recordDroppedFrames += (dropped - s.accountedDropped) >>> 0;
+  s.accountedUnderruns = underruns;
+  s.accountedDropped = dropped;
 }
 
 /** Stop and release the current wiring without changing which load request may still supply a buffer. */
@@ -536,8 +279,8 @@ function teardownSlotWiring(slot: number): void {
   setGainValue(slot, null);
   const s = slotMap.get(slot);
   if (!s) return;
-  accountUnderruns(s); // preserve any final worklet loss after this slot disappears
-  clearInterval(s.timer);
+  accountLoss(s); // preserve any final worklet loss after this slot disappears
+  s.node.port.postMessage('close');
   try {
     s.node.disconnect();
     s.gain.disconnect();
@@ -579,7 +322,7 @@ export interface PluginRecordLossSnapshot {
 
 /** Monotonic process-lifetime snapshot used by the looper's arm→commit integrity check. */
 function recordLossSnapshot(): PluginRecordLossSnapshot {
-  for (const s of slotMap.values()) accountUnderruns(s);
+  for (const s of slotMap.values()) accountLoss(s);
   return { droppedFrames: recordDroppedFrames, underruns: recordUnderruns };
 }
 
@@ -589,18 +332,16 @@ export function injectRecordLossForTest(loss: Partial<PluginRecordLossSnapshot> 
   recordUnderruns += Math.max(0, Math.trunc(loss.underruns ?? 0));
 }
 
-/** DEV health snapshot for a slot (for __lf / diagnostics). */
-function stats(slot: number): Record<string, number> | null {
+/** DEV health snapshot for a slot (for __lf / diagnostics): the queue after the last render quantum and
+ * the worklet's totals. */
+function stats(slot: number): { queue: number; consumed: number; underruns: number; dropped: number } | null {
   const s = slotMap.get(slot);
   if (!s) return null;
-  const write = s.header[H_WRITE] >>> 0;
-  const read = s.header[H_READ] >>> 0;
   return {
-    hop1Lag: (write - read) >>> 0,
-    hop2Fill: s.hop2.available_read(),
-    consumed: Atomics.load(s.stats, 0),
-    underruns: Atomics.load(s.stats, 1),
-    jsDropped: s.jsDropped,
+    queue: Atomics.load(s.stats, STAT_QUEUE),
+    consumed: Atomics.load(s.stats, STAT_CONSUMED) >>> 0,
+    underruns: Atomics.load(s.stats, STAT_UNDERRUNS) >>> 0,
+    dropped: Atomics.load(s.stats, STAT_DROPPED) >>> 0,
   };
 }
 
@@ -626,19 +367,14 @@ function setWebMonitorMuted(slot: number, muted: boolean): void {
   const s = slotMap.get(slot);
   if (!s || !ctx) return;
   s.webMonitorGain.gain.setTargetAtTime(muted ? 0 : 1, ctx.currentTime, 0.01);
-  s.webMuted = muted;
 }
 
-/** The slot's hop-2 fill smoothed over ~0.3 s (frames): the record path's moving delay term; null
- * without a wired slot. Record compensation reads its shift since the freeze for each take. */
+/** The slot's queue smoothed over ~0.3 s (frames), the level the drift controller holds: the record
+ * path's moving delay term; null until the slot's queue first reached its setpoint. Record
+ * compensation reads its shift since the freeze for each take. */
 function queueFrames(slot: number): number | null {
   const s = slotMap.get(slot);
-  return s && s.flushed ? s.fillSmoothed : null;
-}
-
-/** A take starts (true) or its capture is released (false); see `captureHold`. */
-function setCaptureHold(on: boolean): void {
-  captureHold = on;
+  return s && Atomics.load(s.stats, STAT_LIVE) === 1 ? Atomics.load(s.stats, STAT_LEVEL_X16) / 16 : null;
 }
 
 export const pluginBridge = {
@@ -655,12 +391,10 @@ export const pluginBridge = {
   gains: gainValues,
   /** Mute/unmute the slot's audible web monitor path (record tap unaffected). */
   setWebMonitorMuted,
-  /** DEV: live health for a slot (hop-1 lag, hop-2 fill, consumed frames, underruns). */
+  /** DEV: live health for a slot (queue, consumed frames, underruns, drops). */
   stats,
   /** Monotonic loss totals for fail-closed looper recording integrity. */
   recordLossSnapshot,
-  /** A take records (the looper's recorder session): no recentring meanwhile. */
-  setCaptureHold,
-  /** The smoothed hop-2 fill (frames) record compensation tracks between takes. */
+  /** The smoothed queue (frames) record compensation tracks between takes. */
   queueFrames,
 } as const;
