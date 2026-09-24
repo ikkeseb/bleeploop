@@ -1,7 +1,7 @@
-//! fdlibm's `exp`, `log` and `pow`, as Chromium ships them (`third_party/fdlibm/ieee754.cc`, the copy
-//! V8's `Math.exp`/`Math.log`/`Math.pow` and Blink's Web Audio both call). A port that must reproduce
-//! Tone or Blink arithmetic bit for bit uses these instead of the platform libm, whose last bit differs
-//! between Windows, macOS and Linux.
+//! fdlibm's `exp`, `log`, `pow`, `sin`, `cos` and `expf`, as Chromium ships them
+//! (`third_party/fdlibm/ieee754.cc`, the copy V8's `Math.exp`/`Math.log`/`Math.pow` and Blink's Web
+//! Audio both call). A port that must reproduce Tone or Blink arithmetic bit for bit uses these instead
+//! of the platform libm, whose last bit differs between Windows, macOS and Linux.
 //!
 //! Ported from Chromium (Blink), Copyright The Chromium Authors, BSD-3-Clause.
 //! fdlibm: Copyright (C) 1993-2004 by Sun Microsystems, Inc. Permission to use, copy, modify, and
@@ -439,9 +439,192 @@ pub fn pow(x: f64, y: f64) -> f64 {
     s * z
 }
 
+/// `__ieee754_rem_pio2` for |x| up to 2^19·π/2: `x` less the nearest multiple `n` of π/2, as a
+/// head and a tail, and `n`. Every caller here passes at most π; past the medium range fdlibm switches
+/// to `__kernel_rem_pio2`, which is not ported (see [`sin`]).
+fn rem_pio2(x: f64) -> Option<(i32, f64, f64)> {
+    const NPIO2_HW: [i32; 32] = [
+        0x3FF921FB, 0x400921FB, 0x4012D97C, 0x401921FB, 0x401F6A7A, 0x4022D97C, 0x4025FDBB, 0x402921FB, 0x402C463A, 0x402F6A7A, 0x4031475C,
+        0x4032D97C, 0x40346B9C, 0x4035FDBB, 0x40378FDB, 0x403921FB, 0x403AB41B, 0x403C463A, 0x403DD85A, 0x403F6A7A, 0x40407E4C, 0x4041475C,
+        0x4042106C, 0x4042D97C, 0x4043A28C, 0x40446B9C, 0x404534AC, 0x4045FDBB, 0x4046C6CB, 0x40478FDB, 0x404858EB, 0x404921FB,
+    ];
+    const HALF: f64 = 5.00000000000000000000e-01;
+    const INVPIO2: f64 = 6.36619772367581382433e-01;
+    const PIO2_1: f64 = 1.57079632673412561417e+00;
+    const PIO2_1T: f64 = 6.07710050650619224932e-11;
+    const PIO2_2: f64 = 6.07710050630396597660e-11;
+    const PIO2_2T: f64 = 2.02226624879595063154e-21;
+    const PIO2_3: f64 = 2.02226624871116645580e-21;
+    const PIO2_3T: f64 = 8.47842766036889956997e-32;
+
+    let hx = high(x);
+    let ix = hx & 0x7FFF_FFFF;
+    if ix <= 0x3FE921FB {
+        return Some((0, x, 0.0));
+    }
+    if ix < 0x4002D97C {
+        // |x| < 3π/4: n = ±1.
+        return Some(if hx > 0 {
+            let mut z = x - PIO2_1;
+            if ix != 0x3FF921FB {
+                let y0 = z - PIO2_1T;
+                (1, y0, (z - y0) - PIO2_1T)
+            } else {
+                z -= PIO2_2;
+                let y0 = z - PIO2_2T;
+                (1, y0, (z - y0) - PIO2_2T)
+            }
+        } else {
+            let mut z = x + PIO2_1;
+            if ix != 0x3FF921FB {
+                let y0 = z + PIO2_1T;
+                (-1, y0, (z - y0) + PIO2_1T)
+            } else {
+                z += PIO2_2;
+                let y0 = z + PIO2_2T;
+                (-1, y0, (z - y0) + PIO2_2T)
+            }
+        });
+    }
+    if ix > 0x413921FB {
+        return None;
+    }
+    let t = x.abs();
+    let n = (t * INVPIO2 + HALF) as i32;
+    let f = n as f64;
+    let mut r = t - f * PIO2_1;
+    let mut w = f * PIO2_1T;
+    let mut y0;
+    if n < 32 && ix != NPIO2_HW[n as usize - 1] {
+        y0 = r - w;
+    } else {
+        let j = ix >> 20;
+        y0 = r - w;
+        let mut i = j - ((high(y0) >> 20) & 0x7FF);
+        if i > 16 {
+            let t = r;
+            w = f * PIO2_2;
+            r = t - w;
+            w = f * PIO2_2T - ((t - r) - w);
+            y0 = r - w;
+            i = j - ((high(y0) >> 20) & 0x7FF);
+            if i > 49 {
+                let t = r;
+                w = f * PIO2_3;
+                r = t - w;
+                w = f * PIO2_3T - ((t - r) - w);
+                y0 = r - w;
+            }
+        }
+    }
+    let y1 = (r - y0) - w;
+    Some(if hx < 0 { (-n, -y0, -y1) } else { (n, y0, y1) })
+}
+
+fn kernel_cos(x: f64, y: f64) -> f64 {
+    const C1: f64 = 4.16666666666666019037e-02;
+    const C2: f64 = -1.38888888888741095749e-03;
+    const C3: f64 = 2.48015872894767294178e-05;
+    const C4: f64 = -2.75573143513906633035e-07;
+    const C5: f64 = 2.08757232129817482790e-09;
+    const C6: f64 = -1.13596475577881948265e-11;
+    let ix = high(x) & 0x7FFF_FFFF;
+    if ix < 0x3E400000 && x as i32 == 0 {
+        return 1.0;
+    }
+    let z = x * x;
+    let r = z * (C1 + z * (C2 + z * (C3 + z * (C4 + z * (C5 + z * C6)))));
+    if ix < 0x3FD33333 {
+        1.0 - (0.5 * z - (z * r - x * y))
+    } else {
+        let qx = if ix > 0x3FE90000 { 0.28125 } else { from_words((ix - 0x0020_0000) as u32, 0) };
+        let iz = 0.5 * z - qx;
+        let a = 1.0 - qx;
+        a - (iz - (z * r - x * y))
+    }
+}
+
+fn kernel_sin(x: f64, y: f64, iy: i32) -> f64 {
+    const S1: f64 = -1.66666666666666324348e-01;
+    const S2: f64 = 8.33333333332248946124e-03;
+    const S3: f64 = -1.98412698298579493134e-04;
+    const S4: f64 = 2.75573137070700676789e-06;
+    const S5: f64 = -2.50507602534068634195e-08;
+    const S6: f64 = 1.58969099521155010221e-10;
+    let ix = high(x) & 0x7FFF_FFFF;
+    if ix < 0x3E400000 && x as i32 == 0 {
+        return x;
+    }
+    let z = x * x;
+    let v = z * x;
+    let r = S2 + z * (S3 + z * (S4 + z * (S5 + z * S6)));
+    if iy == 0 {
+        x + v * (S1 + z * r)
+    } else {
+        x - ((z * (0.5 * y - v * r) - y) - v * S1)
+    }
+}
+
+/// fdlibm's `sin`. Arguments past 2^19·π/2 (fdlibm's `__kernel_rem_pio2` range, which no caller
+/// reaches: the biquads and the panner pass at most π) fall back to the platform's `sin`.
+pub fn sin(x: f64) -> f64 {
+    let ix = high(x) & 0x7FFF_FFFF;
+    if ix <= 0x3FE921FB {
+        return kernel_sin(x, 0.0, 0);
+    }
+    if ix >= 0x7FF00000 {
+        return x - x;
+    }
+    let Some((n, y0, y1)) = rem_pio2(x) else { return x.sin() };
+    match n & 3 {
+        0 => kernel_sin(y0, y1, 1),
+        1 => kernel_cos(y0, y1),
+        2 => -kernel_sin(y0, y1, 1),
+        _ => -kernel_cos(y0, y1),
+    }
+}
+
+/// fdlibm's `cos`, with [`sin`]'s range limit.
+pub fn cos(x: f64) -> f64 {
+    let ix = high(x) & 0x7FFF_FFFF;
+    if ix <= 0x3FE921FB {
+        return kernel_cos(x, 0.0);
+    }
+    if ix >= 0x7FF00000 {
+        return x - x;
+    }
+    let Some((n, y0, y1)) = rem_pio2(x) else { return x.cos() };
+    match n & 3 {
+        0 => kernel_cos(y0, y1),
+        1 => -kernel_sin(y0, y1, 1),
+        2 => -kernel_cos(y0, y1),
+        _ => kernel_sin(y0, y1, 1),
+    }
+}
+
+/// fdlibm's `expf` as Chromium ships it: `exp` on the float argument, rounded to float.
+pub fn expf(x: f32) -> f32 {
+    exp(x as f64) as f32
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sin_and_cos_agree_with_the_platform_within_an_ulp_or_two() {
+        let mut x = -7.0f64;
+        while x < 7.0 {
+            assert!(close(sin(x), x.sin()), "sin({x}) {} vs {}", sin(x), x.sin());
+            assert!(close(cos(x), x.cos()), "cos({x}) {} vs {}", cos(x), x.cos());
+            x += 0.013_7;
+        }
+        for x in [0.0, 1e-9, std::f64::consts::FRAC_PI_4, std::f64::consts::FRAC_PI_2, std::f64::consts::PI, 1000.0, 1e5] {
+            assert!(close(sin(x), x.sin()) && close(cos(x), x.cos()), "{x}");
+        }
+        assert_eq!(cos(0.0), 1.0);
+        assert_eq!(sin(0.0), 0.0);
+    }
 
     // fdlibm is within 1 ulp of the true value; the platform libm is too, so they agree to 2 ulp.
     fn close(a: f64, b: f64) -> bool {

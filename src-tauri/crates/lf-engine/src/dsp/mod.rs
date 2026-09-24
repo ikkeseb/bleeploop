@@ -3,11 +3,15 @@
 //! reference renders in `tests/fixtures/tone` (`verify/probes/tone-refs.mjs`) and holds the tightest
 //! tolerance class it passes (`tests/common/refs.rs`).
 
+pub mod biquad;
 pub mod buffer_source;
 pub mod compressor;
+pub mod crossfade;
 pub mod delay;
 pub mod envelope;
 pub mod fdlibm;
+pub mod filter;
+pub mod fx;
 pub mod gain;
 pub mod noise;
 pub mod oscillator;
