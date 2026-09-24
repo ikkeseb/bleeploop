@@ -131,8 +131,28 @@ jobs:
         with:
           workspaces: src-tauri
 
-      - run: cargo check
+      - run: cargo check --workspace
         working-directory: src-tauri
 
       # `cargo test` is NOT here: it builds the full debug profile (~15 min on the Windows runner,
       # cached or not, vs ~2 min for the two checks) — it runs in rust-test.yml on src-tauri/ changes.
+
+  # lf-engine, the pure engine crate (docs/plans/native-engine.md § Stage 2): its tests build nothing of
+  # the app, so they run on every push, on Linux. rust-test.yml runs them again on Windows.
+  engine:
+    needs: docs_guard
+    if: needs.docs_guard.outputs.docs_only != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: src-tauri
+
+      - run: node scripts/engine-deny.mjs
+      - run: cargo test -p lf-engine
+        working-directory: src-tauri

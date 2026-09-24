@@ -45,6 +45,9 @@ rest is the map.
 
 ## Operational bits (recurring)
 
+- **`crates/lf-engine` is the pure native engine** (`docs/plans/native-engine.md`, dormant until its
+  flip). Its briefing is the crate doc in `crates/lf-engine/src/lib.rs`. `tauri dev` watches all of
+  `src-tauri/`, so an engine edit relaunches a running dev app.
 - **ASIO is a cargo OPT-IN feature** carried by the npm scripts (`pnpm dev:asio`, `pnpm build:app`);
   a plain `cargo build` must work without the LLVM/ASIO SDK, and `tauri dev` forces
   `--no-default-features` anyway.

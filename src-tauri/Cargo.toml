@@ -11,6 +11,11 @@ rust-version = "1.85"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+# The native audio engine grows beside the app as a pure crate (docs/plans/native-engine.md § Stage 2).
+# Profiles below apply to every member. scripts/engine-deny.mjs keeps the host crates out of its tree.
+[workspace]
+members = [".", "crates/lf-engine"]
+
 [lib]
 name = "app_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
@@ -111,6 +116,11 @@ vst3             = "0.3"
 # default (LF_FORCE_48K off, in plugin_host.rs) this is what makes a `tauri dev` by-ear trustworthy
 # vs a true release build — the 2026-06-17 ASIO "crackling" hunt showed dev-build by-ear was untrustworthy.
 [profile.dev.package."*"]
+opt-level = 3
+
+# "*" covers dependencies only, never a workspace member. The engine renders audio in its tests (and,
+# from Stage 4, in the dev app's callback), so it gets release-speed code in debug too.
+[profile.dev.package.lf-engine]
 opt-level = 3
 
 # --- cpal ASIO timestamp overflow workaround (P11.3 / ASIO-default) ---

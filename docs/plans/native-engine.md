@@ -135,14 +135,13 @@ interface driver's report against the physical path.
 
 *Owner: nothing to hear; progress is CI green on the engine tests.*
 
-**Crate** (not yet built): src-tauri/crates/lf-engine; `src-tauri/Cargo.toml` becomes the workspace
-root (`[workspace] members = [".", "crates/lf-engine"]`). Dependencies: `rtrb`, `libm` if needed;
-dev-only `assert_no_alloc`, `proptest`, `hound`. Deny check: `cargo tree -p lf-engine -e normal,build
---target all --prefix none --format {p}` fails on tauri, cpal, windows, windows-core, clack or vst3.
-Add `[profile.dev.package.lf-engine] opt-level = 3`. `pnpm rust:check` and `rust-test.yml` run
-`--workspace`, and `ci.yml` gains an ubuntu job running `cargo test -p lf-engine` in this stage, or the
-engine tests never run. Gotcha: `tauri dev` watches all of `src-tauri/`, so engine edits relaunch a
-running dev app.
+**Crate** (built): `src-tauri/crates/lf-engine`, a member of the `src-tauri/Cargo.toml` workspace.
+Dependencies: `rtrb`, `libm` if needed; dev-only `assert_no_alloc`, `proptest` (without its fork
+feature), `hound` when a test first writes audio. `scripts/engine-deny.mjs` fails the tree on the
+tauri and clack families, cpal, windows, windows-core, clap-sys or vst3; `pnpm rust:check` runs it
+with the `--workspace` check and test, `ci.yml`'s `engine` job runs it and `cargo test -p lf-engine`
+on ubuntu, `rust-test.yml` tests the workspace on Windows. Gotcha: `tauri dev` watches all of
+`src-tauri/`, so engine edits relaunch a running dev app.
 
 **The state machine moves to Rust** (one owner, no IPC races between an engine event and a fresh
 gesture). TypeScript keeps UI and settings.

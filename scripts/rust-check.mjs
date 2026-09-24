@@ -1,13 +1,14 @@
 // scripts/rust-check.mjs — the local Rust gate: `cargo check` without and with `asio`, then
-// `cargo test`, all `--no-default-features`, from src-tauri/. CI runs only the no-asio check (and
-// `cargo test` on native-code changes), so the asio half is proven here.
+// `cargo test`, all `--no-default-features`, from src-tauri/, then the lf-engine deny check. The
+// `--workspace` steps include lf-engine; `asio` is a feature of the app alone. CI runs only the no-asio
+// check (and `cargo test` on native-code changes), so the asio half is proven here.
 //
 //   pnpm rust:check
 //
 // Windows node only (from WSL the pnpm wrapper runs it there, on Windows `cargo`). Runs every step even
 // after a failure; the full output lands in logs/rust-check.log.
 
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createWriteStream, existsSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -21,9 +22,9 @@ mkdirSync(dirname(logPath), { recursive: true });
 const log = createWriteStream(logPath);
 
 const STEPS = [
-  ['check', '--no-default-features'],
+  ['check', '--workspace', '--no-default-features'],
   ['check', '--no-default-features', '--features', 'asio'],
-  ['test', '--no-default-features'],
+  ['test', '--workspace', '--no-default-features'],
 ];
 
 // asio-sys only rebuilds when its fingerprint changes, so a green asio check can be a stale target/
@@ -72,6 +73,15 @@ for (const args of STEPS) {
   }
 }
 
+const deny = spawnSync(process.execPath, [join(root, 'scripts', 'engine-deny.mjs')], { encoding: 'utf8' });
+log.write(`\n$ node scripts/engine-deny.mjs\n${deny.stdout}${deny.stderr}`);
+console.log(`  ${deny.status === 0 ? 'PASS' : 'FAIL'}  engine-deny`);
+if (deny.status !== 0) {
+  failed.push('engine-deny');
+  process.stderr.write(`${deny.stdout}${deny.stderr}\n`);
+}
+const total = STEPS.length + 1;
+
 await new Promise((resolve) => log.end(resolve));
-console.log(`\n=== rust:check: ${STEPS.length - failed.length}/${STEPS.length} passed${failed.length ? `; FAILED: ${failed.join(', ')}` : ''} (log: logs/rust-check.log) ===`);
+console.log(`\n=== rust:check: ${total - failed.length}/${total} passed${failed.length ? `; FAILED: ${failed.join(', ')}` : ''} (log: logs/rust-check.log) ===`);
 process.exit(failed.length ? 1 : 0);

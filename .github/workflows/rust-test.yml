@@ -1,6 +1,7 @@
 name: rust-test
 
-# The Rust unit tests (transport / clap / native_io / scan — pure logic, no device, no ASIO SDK).
+# The Rust unit tests (transport / clap / native_io / scan — pure logic, no device, no ASIO SDK), and
+# the lf-engine crate's tests on Windows (ci.yml runs them on Linux on every push).
 # Separate from `ci` because `cargo test` builds the full debug profile: ~15 min on the Windows runner
 # whether or not the cache is warm, against ~2 min for the two `cargo check`s. So it runs only when the
 # Rust tree changes (plus on demand), and never delays a TS-only push.
@@ -38,5 +39,5 @@ jobs:
         with:
           workspaces: src-tauri
 
-      - run: cargo test --no-default-features
+      - run: cargo test --workspace --no-default-features
         working-directory: src-tauri

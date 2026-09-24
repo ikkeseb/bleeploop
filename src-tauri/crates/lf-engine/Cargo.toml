@@ -1,0 +1,18 @@
+[package]
+name = "lf-engine"
+version = "0.1.0"
+description = "BleepLoop's native audio engine: clock, click, looper and mix on the device frame clock"
+authors = ["ikkeseb"]
+license = "MIT"
+repository = "https://github.com/ikkeseb/bleeploop"
+edition = "2021"
+rust-version = "1.85"
+publish = false
+
+# Pure on purpose: no host, device or plugin crate may enter this tree (scripts/engine-deny.mjs).
+[dependencies]
+rtrb = "0.3.4"
+
+[dev-dependencies]
+assert_no_alloc = "1.1"
+proptest = { version = "1", default-features = false, features = ["std"] }
