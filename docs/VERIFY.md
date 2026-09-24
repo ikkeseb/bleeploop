@@ -138,8 +138,11 @@ blocks until the verdict, so an agent harness should run it in the background.
 - **When to run the plugin probes, and their baselines** (the verdict alone doesn't say this):
   - `native:loopback` after a change to record compensation, the plugin bridge or the drift
     controller. Baseline (2026-09-24, Scarlett 2i2 3rd gen, ASIO 256, Pro-Q 3, a cable from line
-    out R into input 2): residual +64/+65 ms at trim 0, −3..+10 ms at trim 65; RT 50–51 ms; take B
-    spread ~1 ms; drift inside take A 7–27 ms/min, following the hop-2 fill (the per-slice lines). Two of about twelve launches failed GO LIVE with an
+    out R into input 2): residual +64/+65 ms at trim 0; after the queue-shift and idle-recentre
+    change, −8.2/−6.4/−4.2 ms at trim 65 over three launches; RT 50–51 ms; take B spread ~1 ms;
+    drift inside take A 2.6–15 ms/min, following the hop-2 fill (the per-slice lines). WASAPI
+    (`pnpm exec node scripts/native-probe.mjs loopback-sync --channel=1`): RT ~283 ms, a cabled
+    click lands ~220 ms after its beat. The probe runs the debug build. Two of about twelve launches failed GO LIVE with an
     `arm_monitor` timeout (cause unknown); a relaunch passed.
   - `native:smoke` after any change to `editor_window.rs` or either host's editor open/close path.
     Baseline (2026-09-23, WASAPI, the app mostly on the default ~15 ms timer tick): `complete: 30

@@ -142,7 +142,19 @@ async function run(): Promise<void> {
     }
   })();
   looper.recDub(0);
-  await until('take A to commit', () => looper.stateOf(0) === 'PLAYING', bars * 2 + 30);
+  const recWall = performance.now();
+  try {
+    await until('take A to commit', () => looper.stateOf(0) === 'PLAYING', bars * 2 + 30);
+  } catch (e) {
+    sampling = false;
+    await sampler;
+    // Where the real hop-2 fill went while the take recorded (diag shows the held PV instead).
+    for (let t = 0; t < 40; t += 2) {
+      const part = queue.filter((q) => q.wall >= recWall + t * 1000 && q.wall < recWall + (t + 2) * 1000);
+      if (part.length) log(`fill +${t}s: hop2 min ${ms(Math.min(...part.map((q) => q.hop2)), sr)} median ${ms(median(part.map((q) => q.hop2)), sr)} ms`);
+    }
+    throw e;
+  }
   const commitWall = performance.now();
   await sleep(6000);
   sampling = false;
@@ -240,7 +252,7 @@ async function run(): Promise<void> {
   const b = committed(1);
   const directs: number[] = [];
   const windowPre = Math.round(0.002 * sr);
-  const windowPost = Math.round(0.09 * sr);
+  const windowPost = Math.round(0.45 * sr);
   const avg = new Float64Array(windowPre + windowPost);
   let averaged = 0;
   for (let k = 0; k < Math.floor(b.length / beatFrames); k++) {

@@ -66,7 +66,7 @@ Blocked on an owner decision, not on testing. The default column is what happens
 | D14 | Under deuteranopia REC red and PLAYING green still read as nearly the same yellow. Since the 2026-09-23 restyle a live capture is also a FILLED badge and a lit core face, and PLAYING a lit LED, so greyscale separates them by shape. Enough, or a palette move as well? | stays as built |
 | D16 | Host a browser demo on Cloudflare Pages? It contradicts "the browser tier is a verification rig". | no |
 | D17 | `LICENSE` and `authors` in `src-tauri/Cargo.toml` carry the GitHub handle (the no-names rule targets prose). Keep, or use a role? | stays as built |
-| D18 | Takes land ~65 ms late on this rig until rec align is set (Stop 1). Set rec align +65 by hand, or build a one-click cable calibration in Audio Settings on the `native:loopback` method (reopens D2/D7's "no L3 wizard")? | the owner sets rec align +65 by hand |
+| D18 | Takes land ~60 ms late on this rig until rec align is set (Stop 1). Set rec align +60 by hand, or build a one-click cable calibration in Audio Settings on the `native:loopback` method, keyed by the WebView's output device (reopens D2/D7's "no L3 wizard")? | the owner sets rec align +60 by hand |
 
 **Answered 2026-09-23** (product lens over the 2026-09-23 audit; the promise now heads `README.md`):
 
@@ -99,12 +99,12 @@ The formula C, its freeze and why native monitoring cancels input+plugin latency
   through punch-out+C (STOP silences playback meanwhile, CLEAR cancels).
 - **Measured 2026-09-24 through a loopback cable** (`pnpm native:loopback`, baseline in
   `docs/VERIFY.md`): at trim 0 a perfectly timed hit lands ~65 ms late on this rig (the WebView
-  output's real latency is above what it reports), and rec align +65 brings it to −3..+10 ms. The
-  native round trip a guitarist hears is 50–51 ms at buffer 256. The rest is the plugin bridge's
-  hop-2 fill, which is the record path's delay: after a flush or an underrun it now restarts on its
-  setpoint (`src/audio/plugin-bridge.ts`), but a fill knocked off it any other way (a producer gap
-  around GO LIVE) is still steered back over minutes, and a take recorded meanwhile drifts by up to
-  ~27 ms/min. Work order: `docs/plans/gates-and-hygiene.md` § 7.
+  output's real latency is above what it reports); with the bridge fixes below, rec align +60 puts it
+  within about ±4 ms, the same across launches. The native round trip a guitarist hears is 50–51 ms
+  at buffer 256 (WASAPI: ~283 ms). The plugin bridge's hop-2 fill is the record path's delay: it now
+  restarts on its setpoint after a flush or an underrun, returns to it between takes, and C follows
+  its shift since the freeze (`src/audio/plugin-bridge.ts`, `record-latency.ts`). Inside a take the
+  drift controller still stretches by 2–15 ms/min. Work order: `docs/plans/gates-and-hygiene.md` § 7.
 - **Unverified:** converter latency on its own, the fallback 128-frame allowance, simultaneous
   native/synth source alignment, whether the ~65 ms holds across restarts, buffer sizes and output
   devices.

@@ -44,10 +44,12 @@ into an input; feel stays with the ear. Open: whether it becomes an in-app calib
 ## 7. Hold the hop-2 fill on its setpoint (open)
 
 `pnpm native:loopback` (2026-09-24) showed that a take's offset follows the plugin bridge's hop-2 fill
-nearly ms for ms, and the drift controller (`DriftController` in `src-tauri/src/host/transport.rs`, wn
-0.04 rad/s) takes minutes to steer a displaced fill back. The drain now restarts hop-2 on the setpoint
-after the flush and after an underrun; a fill displaced without an underrun (a producer gap around GO
-LIVE left it at 12 ms) still drifts a take by up to ~27 ms/min, and take offsets vary by ~13 ms across
-launches. Candidates: a faster, PV-filtered controller, or putting hop-2 on the setpoint when a take
-arms while the native monitor is live (the web path is muted then). Proof: `native:loopback` drift
-under ~2 ms/min and residual spread under ~3 ms over five launches.
+nearly ms for ms. Landed: the drain restarts hop-2 on the setpoint after the flush and after an
+underrun, returns it there between takes when the web path is muted, and C shifts by the smoothed
+fill's move since the freeze; take offsets now vary by ~4 ms across launches. Open: the drift
+controller (`DriftController` in `src-tauri/src/host/transport.rs`) still stretches a take by
+2–15 ms/min. Holding it during a take (PV reported at the setpoint) made takes flat when idle but ran
+the ring dry under load (47 underruns in one take): the producer falls behind under load, and the
+controller hides it by stretching. First find out why the producer falls behind (the probe runs the
+debug build; compare a release build), then hold the ratio during takes. Proof: `native:loopback`
+drift under ~2 ms/min and residual spread under ~3 ms over five launches, no rejected take.
