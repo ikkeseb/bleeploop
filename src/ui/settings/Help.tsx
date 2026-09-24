@@ -8,13 +8,14 @@ import { COMPUTER_MAP } from '../keyboard/Keyboard';
 import './help.css';
 
 /**
- * Help / quick-reference popover: how to play (guitar first, a MIDI controller for the other layers,
- * computer keys as a fallback), the looper + transport controls, the pedals, the play map, and the
- * layout move/hide/resize affordances. Same popover pattern as AudioSettings (a command-bar `.tool` cap
- * → a `<Show>`-mounted panel). It LEADS with the instrument (the looper) — the keyboard is the fallback
- * play path, so its sections come last. The drum-pad rows read from DRUM_KIT, the piano legend from
- * COMPUTER_MAP and the looper keys from KEY_ACTIONS, so none can drift from the real controls. The
- * looper/transport copy mirrors the controls in Looper.tsx + Transport.tsx.
+ * Help / quick-reference popover, ordered by the promise: the first screen is guitar, the looper keys
+ * and the pedals (every looper action by foot); then the looper + transport controls, the other layers
+ * (a MIDI controller, computer keys as a fallback), the play map, and the layout move/hide/resize
+ * affordances. The keyboard is the fallback play path, so its sections come last. Same popover
+ * pattern as AudioSettings (a command-bar `.tool` cap → a `<Show>`-mounted panel). The drum-pad rows
+ * read from DRUM_KIT, the piano legend from COMPUTER_MAP and the looper keys from KEY_ACTIONS, so none
+ * can drift from the real controls. The looper/transport copy mirrors the controls in Looper.tsx +
+ * Transport.tsx.
  */
 
 const PITCH_NAMES = ['C', 'C♯', 'D', 'D♯', 'E', 'F', 'F♯', 'G', 'G♯', 'A', 'A♯', 'B'] as const;
@@ -52,14 +53,39 @@ export function Help() {
       <div class="help__title">Quick reference</div>
 
       <section class="help__sec">
-        <h3 class="help__h">Playing</h3>
+        <h3 class="help__h">Guitar <span class="help__tag">the main way to play</span></h3>
         <ul class="help__list">
-          <li>Guitar is the main way to play: load an amp plugin and use <span class="help__note">GO LIVE</span>. <span class="help__note">INPUT LIVE</span> means that slot receives the selected input and monitors it natively. Choose the input channel in Audio Settings</li>
-          <li>A MIDI controller plays the synths and the other layers. Controller status shows in Audio Settings → diagnostics</li>
-          <li>Click a slot to send MIDI and keyboard notes to its plugin or built-in synth</li>
+          <li>Load an amp plugin and use <span class="help__note">GO LIVE</span>. <span class="help__note">INPUT LIVE</span> means that slot receives the selected input and monitors it natively. Choose the input channel in Audio Settings</li>
           <li>ASIO supports one live slot. To use another amp slot, <span class="help__note">UNLOAD</span> the first plugin. Turning INPUT LIVE off keeps its driver reserved</li>
           <li><span class="help__note">MIC</span> is a separate mic / line path. Leave it off when playing guitar through a live plugin. Synths and plugins feed the looper directly; the bar beside MIC shows record level</li>
-          <li>The computer keys below are a fallback when no controller is connected</li>
+        </ul>
+      </section>
+
+      <section class="help__sec">
+        <h3 class="help__h">Looper keys <span class="help__tag">work even with the keyboard hidden</span></h3>
+        <p class="help__sub">Record, play, undo and clear act on the selected track; undo again redoes.</p>
+        <div class="help__keyrow">
+          <For each={LOOPER_KEYS}>
+            {(entry) => (
+              <span class="help__chip">
+                <For each={entry.keys}>{(key) => <kbd class="help__kbd">{key}</kbd>}</For>
+                <span class="help__note">{entry.label}</span>
+              </span>
+            )}
+          </For>
+        </div>
+        <ul class="help__list">
+          <li><kbd class="help__kbd">1</kbd>–<kbd class="help__kbd">5</kbd> select a track</li>
+          <li>In drum mode the pads take <kbd class="help__kbd">1</kbd>–<kbd class="help__kbd">4</kbd>, so only <kbd class="help__kbd">5</kbd> selects a track there</li>
+        </ul>
+      </section>
+
+      <section class="help__sec">
+        <h3 class="help__h">Pedals <span class="help__tag">hands stay on the guitar</span></h3>
+        <ul class="help__list">
+          <li>A keystroke footswitch or page turner sends keys: set each pedal to one of the looper keys above</li>
+          <li>A MIDI footswitch or controller: Audio Settings → <span class="help__note">MIDI LEARN</span>. Pick an action, press <span class="help__note">LEARN</span>, then tap the pedal once. Momentary and latching pedals both run it once per press</li>
+          <li>A learned pedal or key only runs its action: it plays no note and holds no sustain. <span class="help__note">✕</span> in the list forgets it</li>
         </ul>
       </section>
 
@@ -89,30 +115,11 @@ export function Help() {
       </section>
 
       <section class="help__sec">
-        <h3 class="help__h">Looper keys <span class="help__tag">work even with the keyboard hidden</span></h3>
-        <p class="help__sub">Record, play, undo and clear act on the selected track; undo again redoes.</p>
-        <div class="help__keyrow">
-          <For each={LOOPER_KEYS}>
-            {(entry) => (
-              <span class="help__chip">
-                <For each={entry.keys}>{(key) => <kbd class="help__kbd">{key}</kbd>}</For>
-                <span class="help__note">{entry.label}</span>
-              </span>
-            )}
-          </For>
-        </div>
+        <h3 class="help__h">Other layers <span class="help__tag">synths · MIDI</span></h3>
         <ul class="help__list">
-          <li><kbd class="help__kbd">1</kbd>–<kbd class="help__kbd">5</kbd> select a track</li>
-          <li>In drum mode the pads take <kbd class="help__kbd">1</kbd>–<kbd class="help__kbd">4</kbd>, so only <kbd class="help__kbd">5</kbd> selects a track there</li>
-        </ul>
-      </section>
-
-      <section class="help__sec">
-        <h3 class="help__h">Pedals <span class="help__tag">hands stay on the guitar</span></h3>
-        <ul class="help__list">
-          <li>A keystroke footswitch or page turner sends keys: set each pedal to one of the looper keys above</li>
-          <li>A MIDI footswitch or controller: Audio Settings → <span class="help__note">MIDI LEARN</span>. Pick an action, press <span class="help__note">LEARN</span>, then tap the pedal once. Momentary and latching pedals both run it once per press</li>
-          <li>A learned pedal or key only runs its action: it plays no note and holds no sustain. <span class="help__note">✕</span> in the list forgets it</li>
+          <li>A MIDI controller plays the synths and the other layers. Controller status shows in Audio Settings → diagnostics</li>
+          <li>Click a slot to send MIDI and keyboard notes to its plugin or built-in synth</li>
+          <li>The computer keys below are a fallback when no controller is connected</li>
         </ul>
       </section>
 
