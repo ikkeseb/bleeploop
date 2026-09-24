@@ -15,6 +15,7 @@
 //! | [`autorec`] | the AUTO REC onset detector | `looper/auto-record.ts` |
 //! | [`engine`] | the callback: rings, the block split, the bus topology, master volume | `engine.ts`, `master.ts` |
 //! | [`api`] | commands, events, the process context, the plugin seam | — |
+//! | [`dsp`] | Stage 3 sound: param automation, gain, buffer playback and noise, the reverb IR, the limiter | Tone.js on Blink's Web Audio |
 //!
 //! # Rules
 //!

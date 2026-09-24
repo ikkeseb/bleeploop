@@ -86,6 +86,17 @@ hosts VST3 through the `vst3` crate (coupler-rs, MIT OR Apache-2.0), which since
 pre-generated bindings and needs no SDK at build time. Which SDK version those bindings were
 generated from is not stated by the crate — unknown here. BleepLoop uses no VST logo.
 
+### Ported code in `lf-engine` — Chromium (BSD-3-Clause) and fdlibm
+
+The native engine crate (`src-tauri/crates/lf-engine`, dormant until the native engine's flip) holds
+Rust ports of Chromium's Blink Web Audio code (`src/dsp/`), so its sound matches what the app renders
+today. Each ported file names its Blink sources and carries "Copyright The Chromium Authors,
+BSD-3-Clause"; the licence text is `licenses/BSD-3-Chromium.txt`. `src/dsp/fdlibm.rs` ports fdlibm as
+Chromium ships it: Copyright (C) 1993-2004 by Sun Microsystems, Inc.; "Permission to use, copy, modify,
+and distribute this software is freely granted, provided that this notice is preserved." Nothing links
+the crate into the app yet; the installer must carry this notice once it does
+(`docs/plans/release-prep.md`).
+
 ## Explicitly not covered here
 
 `@soundtouchjs/audio-worklet` is not listed: it has no references in `src/` (dead dependency,
