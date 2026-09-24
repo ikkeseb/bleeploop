@@ -99,8 +99,8 @@ blocks until the verdict, so an agent harness should run it in the background.
 - **No Playwright into WebView2.** For Tauri/native verification: grep `tauri dev` stdout for
   `[diag]`. **What reaches that stdout: only Rust `invoke('diag')`/`log::info!` lines +
   vite-forwarded `[console.error]`; plain `console.log` from WebView2 does NOT.**
-- Since P10.3 there are no DEV auto-load probes — to runtime-gate a native path, temp-wire a probe
-  that drives the PRODUCTION fns, grep, then revert.
+- The committed `native:*` probes (table above) runtime-gate the paths they name. For any other
+  native path, temp-wire a probe that drives the PRODUCTION fns, grep, then revert.
 - `tauri dev` does NOT self-terminate — stop it with `pnpm native:kill`. **Never kill all node: the
   agent session may be a node process.**
 - Screenshot the native window by its handle: `PrintWindow(hwnd, 3)` (client only + full content)
