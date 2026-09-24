@@ -16,16 +16,17 @@
  * `sharedbufferreceived` event and forwards it here via `acceptPluginBuffer`), and releases it via
  * an injected `release` callback. No `@tauri-apps` / `chrome.webview` knowledge here.
  *
- * Hop-1 header layout (28 bytes, 7×u32; MUST match `host/transport.rs::create_shared_ring`):
+ * Hop-1 header layout (32 bytes, 8×u32; MUST match `host/transport.rs::create_shared_ring`):
  *   [0]=write_frames (Rust)   — hop-1 produced total, post-resample C-rate
  *   [1]=read_frames  (JS)     — drain copy cursor (lag-capped; NOT a control signal)
  *   [2]=capacity_frames (Rust once)
- *   [3]=hop2_fill    (JS)     — the PI controller's level signal (PV): hop2.available_read(),
- *                               discard-neutral (no flush/lag-cap term)
+ *   [3]=hop2_fill    (JS)     — the PI controller's level signal (PV): frames produced minus
+ *                               render-clock frames, from one drain tick (`rateLevel`)
  *   [4]=consumed     (JS)     — worklet STAT_CONSUMED total (gate liveness + drift slope)
  *   [5]=underruns    (JS)     — worklet STAT_UNDERRUNS total
  *   [6]=js_dropped   (JS)     — cumulative lag-cap + flush discards
- *   data: f32×cap, immediately after the 28-byte header (28 is 4-byte aligned → f32-aligned).
+ *   [7]=epoch        (Rust)   — bumped where production jumps rather than drifts (rebases the level)
+ *   data: f32×cap, immediately after the 32-byte header (32 is 4-byte aligned → f32-aligned).
  *
  * The four JS-written feedback fields ([3]..[6]) feed the Rust producer's drift controller + gate.
  * They are plain ordered writes (TSO-visible to Rust's acquire-loads), mirrored on EVERY drain tick
@@ -54,14 +55,15 @@ export interface PluginBufferMeta {
   loadToken: number; // frontend request identity; rejects late buffers from failed/superseded loads
 }
 
-// hop-1 header indices (u32 view) — must match the 7-field layout in host/transport.rs.
+// hop-1 header indices (u32 view) — must match the 8-field layout in host/transport.rs.
 const H_WRITE = 0;
 const H_READ = 1;
 // [2] = capacity_frames (Rust-written once; JS reads it via meta.capacityFrames, not the header).
-const H_HOP2_FILL = 3; // PI level signal (PV) — discard-neutral
+const H_HOP2_FILL = 3; // PI level signal (PV) — produced minus render clock
 const H_CONSUMED = 4; // worklet STAT_CONSUMED total
 const H_UNDERRUNS = 5; // worklet STAT_UNDERRUNS total
 const H_JS_DROPPED = 6; // cumulative lag-cap + flush discards
+const H_EPOCH = 7; // Rust bumps it where production jumps (`Hop1Pipe::mark_step`)
 const DRAIN_INTERVAL_MS = 5;
 /** hop-2 capacity (~340ms @48k). Power-of-two-ish; ringbuf.js sizes the SAB from this. */
 const HOP2_CAPACITY_FRAMES = 16384;
@@ -74,6 +76,11 @@ const HOP2_IDLE_PATIENCE_MS = 500;
 const HOP2_FILL_SMOOTHING = DRAIN_INTERVAL_MS / 300;
 /** Real-lag cap: keep hop-1 backlog under this so jitter/drift stays bounded (~60ms latency). */
 const MAX_LAG_SECONDS = 0.06;
+/** A controller level this far off the setpoint is a step (production paused or lost, the clock
+ * stopped), not clock drift: the loop holds a real rate mismatch within ~2 ms. */
+const RATE_STEP_SECONDS = 0.005;
+/** How long a step is held off the controller before its settled size moves into the base. */
+const RATE_STEP_SETTLE_MS = 1000;
 /** Per-slot plugin output-gain defaults, chosen by plugin TYPE at load. An amp-sim/FX (has an
  * audio-input bus, `meta.inChannels > 0`) is already internally gain-staged, so its wet wants ~unity;
  * a synth (no input bus) renders default patches that clip, so it starts conservative. The user trims
@@ -107,6 +114,13 @@ interface BridgeSlot {
   offSince: number; // performance.now() since the smoothed fill left the idle tolerance; NaN while inside
   skipDebt: number; // hop-1 frames still to drop to bring an overfull hop-2 down (idle recentre)
   webMuted: boolean; // the audible web path is muted (the native monitor carries the sound)
+  lastWrite: number; // hop-1 write cursor at the last running tick (u32)
+  writeTotal: number; // frames produced since the level's base, unwrapped
+  clockBase: number; // writeTotal − render frames − setpoint at the base: the level starts on the setpoint
+  rateLevel: number; // the controller's level (frames), smoothed over ~0.3 s — see `trackRateLevel`
+  stepSince: number; // performance.now() since rateLevel left the step tolerance; NaN while inside
+  running: boolean; // the context ran at the last tick (a resume rebases)
+  epoch: number; // header[7] at the last tick (a change rebases)
   loadToken: number; // the frontend load request that owns this wiring
 }
 
@@ -121,9 +135,9 @@ const slotMap = new Map<number, BridgeSlot>();
  * take must still fail closed. A record/overdub snapshots these totals at arm and compares at commit.
  */
 let recordDroppedFrames = 0;
-/** A take is recording (`setCaptureHold`): nothing is recentred, so the take keeps one timeline. Holding
- * the drift controller as well was tried (2026-09-24): takes came out flat, but under load the ring ran
- * dry (47 underruns in one take), so the controller keeps its authority while a take records. */
+/** A take is recording (`setCaptureHold`): nothing is recentred, so the take keeps one timeline. The
+ * drift controller keeps running: its level ignores stalls and the bridge's own drops and pads, so it
+ * moves only with the clock rate and holds hop-2 still through a take. */
 let captureHold = false;
 let recordUnderruns = 0;
 const [gainValues, setGainValues] = createSignal<[number | null, number | null]>([null, null]);
@@ -278,6 +292,13 @@ export async function acceptPluginBuffer(ab: ArrayBuffer, meta: PluginBufferMeta
       offSince: NaN,
       skipDebt: 0,
       webMuted: false,
+      lastWrite: 0,
+      writeTotal: 0,
+      clockBase: 0,
+      rateLevel: 0,
+      stepSince: NaN,
+      running: false,
+      epoch: 0,
       loadToken: meta.loadToken,
     };
     slot.timer = setInterval(() => drain(slot), DRAIN_INTERVAL_MS);
@@ -314,13 +335,17 @@ function dropFrames(s: BridgeSlot, frames: number): void {
 
 /**
  * Mirror the four JS-owned feedback fields into the hop-1 header (plain ordered writes; TSO-visible
- * to Rust's acquire-loads). The PI controller's level signal is hop-2 fill — discard-neutral
- * (`available_read = pushed_total − consumed_total`, no flush/lag-cap term), so the loop never
- * chases a phantom backlog. Called on every running drain tick, even ones that moved no audio.
+ * to Rust's acquire-loads). The PI controller's level signal is `rateLevel`, not hop-2's fill: hop-2
+ * moves with every main-thread stall, underrun, lag-cap drop and recentre, and the slow controller
+ * learned those as clock drift (a stall wound it from 12 to 230 ppm, ~14 ms/min of stretch for the
+ * takes after it, measured 2026-09-24). Called on every running drain tick, even ones that moved no
+ * audio.
  */
 function mirror(s: BridgeSlot): void {
   accountUnderruns(s);
-  s.header[H_HOP2_FILL] = s.hop2.available_read() >>> 0; // PV
+  // PV; held on the setpoint while a step settles, so the controller never learns one as drift.
+  const pv = Number.isNaN(s.stepSince) ? s.rateLevel : hop2TargetFrames();
+  s.header[H_HOP2_FILL] = Math.max(0, Math.round(pv)) >>> 0;
   s.header[H_CONSUMED] = Atomics.load(s.stats, 0) >>> 0; // STAT_CONSUMED
   s.header[H_UNDERRUNS] = Atomics.load(s.stats, 1) >>> 0; // STAT_UNDERRUNS
   s.header[H_JS_DROPPED] = s.jsDropped >>> 0; // lag-cap + flush discards
@@ -329,6 +354,44 @@ function mirror(s: BridgeSlot): void {
 /** The drift controller's hop-2 setpoint in frames. */
 function hop2TargetFrames(): number {
   return ctx ? Math.round(ctx.sampleRate * HOP2_TARGET_SECONDS) : 0;
+}
+
+/** Render-clock frames: the rate the worklet pops hop-2 at, underruns included. */
+function renderFrames(): number {
+  return ctx ? ctx.currentTime * ctx.sampleRate : 0;
+}
+
+/**
+ * The controller's level: frames produced minus render-clock frames, both read in this tick, so a
+ * stall leaves a stale sample, never a wrong one, and the bridge's own drops and pads never enter it.
+ * Only a mismatch between the producer's rate and the render clock moves it gradually. A step moves
+ * it at once: the producer paused at an input arm (a 12 ms step wound the controller to −284 ppm and
+ * stretched the next take by 22 ms/min, measured 2026-09-24), lost frames to a full hop-1, or the
+ * context stopped. A step is held off the controller (`mirror`) and, once settled, moved into the base.
+ * `rebase` (the first tick, a resume, a new producer epoch) puts the level straight back on the
+ * setpoint, then holds it the same way: one raw sample sits up to a block off the level's mean, and
+ * that offset alone wound the controller to −40..−84 ppm (measured 2026-09-24).
+ */
+function trackRateLevel(s: BridgeSlot, write: number, rebase: boolean, now: number): void {
+  s.writeTotal += (write - s.lastWrite) >>> 0;
+  s.lastWrite = write;
+  const target = hop2TargetFrames();
+  const level = s.writeTotal - renderFrames() - s.clockBase;
+  if (rebase) {
+    s.clockBase += level - target;
+    s.rateLevel = target;
+    s.stepSince = now;
+    return;
+  }
+  s.rateLevel += (level - s.rateLevel) * HOP2_FILL_SMOOTHING;
+  const off = s.rateLevel - target;
+  if (Number.isNaN(s.stepSince)) {
+    if (ctx && Math.abs(off) >= ctx.sampleRate * RATE_STEP_SECONDS) s.stepSince = now;
+  } else if (now - s.stepSince >= RATE_STEP_SETTLE_MS) {
+    s.clockBase += off;
+    s.rateLevel = target;
+    s.stepSince = NaN;
+  }
 }
 
 /** hop-2 frames short of the controller's setpoint (0 when at or above it). */
@@ -383,9 +446,17 @@ function padHop2(s: BridgeSlot): void {
  * every discarded frame into `jsDropped` and mirrors the feedback fields at the end of the tick.
  */
 function drain(s: BridgeSlot): void {
-  if (!ctx || ctx.state !== 'running') return;
+  if (!ctx || ctx.state !== 'running') {
+    s.running = false;
+    return;
+  }
   // Plain ordered reads of the cross-process header (no Atomics on the WebView2 buffer).
   const write = s.header[H_WRITE] >>> 0;
+  const epoch = s.header[H_EPOCH] >>> 0;
+  // Rebase on the first tick, on a resume and where the producer marks a jump.
+  trackRateLevel(s, write, !s.running || epoch !== s.epoch, performance.now());
+  s.running = true;
+  s.epoch = epoch;
   if (!s.flushed) {
     // Discard whatever accumulated while suspended so playback starts live (minimal latency). Count
     // the discard and seed the feedback fields so Rust's first acquire-loads aren't garbage.

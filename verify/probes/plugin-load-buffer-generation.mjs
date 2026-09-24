@@ -35,7 +35,7 @@ await probe(async ({ open }) => {
       format: 'vst3',
       isEffect: false,
     });
-    const baseMeta = { kind: 'plugin-audio', slot: 0, capacityFrames: 1024, headerBytes: 28,
+    const baseMeta = { kind: 'plugin-audio', slot: 0, capacityFrames: 1024, headerBytes: 32,
       sampleRate: window.__lf.engine.ctx.sampleRate, inChannels: 0 };
     const meta = (loadToken) => ({ ...baseMeta, loadToken });
     const buffer = (marker) => {
@@ -157,7 +157,7 @@ await probe(async ({ open }) => {
     }
     const loadToken = pluginBridge.beginPluginLoad(0, false);
     const capacityFrames = 1024;
-    const headerBytes = 28;
+    const headerBytes = 32;
     const ab = new ArrayBuffer(headerBytes + capacityFrames * Float32Array.BYTES_PER_ELEMENT);
     const header = new Uint32Array(ab, 0, headerBytes / Uint32Array.BYTES_PER_ELEMENT);
     header[0] = 333;

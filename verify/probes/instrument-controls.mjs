@@ -100,7 +100,7 @@ await probe(async ({ open }) => {
       isEffect: true,
     };
     const capacityFrames = 1024;
-    const headerBytes = 28;
+    const headerBytes = 32;
     await pluginBridge.init(window.__lf.engine.ctx);
     const loadToken = pluginBridge.beginPluginLoad(0, true);
     const buffer = new ArrayBuffer(headerBytes + capacityFrames * Float32Array.BYTES_PER_ELEMENT);
