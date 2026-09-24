@@ -3,8 +3,8 @@
 //! The LFO is a Tone Oscillator (a custom wave when its phase is not 0), times `amplitude`, mapped from
 //! -1..1 to 0..1 (`AudioToGain`), then scaled to `min..max` (`Scale`: a Multiply by `max - min`, an Add
 //! of `min`). Its stopped-value signal and zeros only add +0 once it is started, and it is started when
-//! built, so they are left out. Tone builds the phase-shifted wave from `Math.sin`/`Math.cos` of the
-//! phase for the first partial: `real[1] = -sin(phase)`, `imag[1] = cos(phase)`.
+//! built, so they are left out. Tone builds the phase-shifted wave from `Math.sin`/`Math.cos` (V8's
+//! fdlibm) of the phase for the first partial: `real[1] = -sin(phase)`, `imag[1] = cos(phase)`.
 //!
 //! The Vibrato delays its input by the LFO: a Delay of `maxDelay` whose `delayTime` is the LFO scaled
 //! to 0..maxDelay, so at depth 0 it rests at half the maximum. Its Effect wrapper is a CrossFade at
@@ -13,11 +13,13 @@
 
 use std::sync::Arc;
 
-use super::signal::{Signal, WaveShaper};
+use crate::dsp::crossfade::pan_gains;
 use crate::dsp::delay::DelayNode;
+use crate::dsp::fdlibm;
 use crate::dsp::gain::GainNode;
 use crate::dsp::oscillator::{PeriodicWave, ToneOscillator};
 use crate::dsp::param::{Units, QUANTUM};
+use crate::dsp::signal::{Signal, WaveShaper};
 
 const Q: usize = QUANTUM;
 
@@ -49,8 +51,8 @@ impl Lfo {
         let phase = (phase_degrees * std::f64::consts::PI) / 180.0;
         let mut real = vec![0.0f32; 2048];
         let mut imag = vec![0.0f32; 2048];
-        real[1] = (-phase.sin()) as f32;
-        imag[1] = phase.cos() as f32;
+        real[1] = (-fdlibm::sin(phase)) as f32;
+        imag[1] = fdlibm::cos(phase) as f32;
         PeriodicWave::custom(&real, &imag, sample_rate)
     }
 
@@ -115,8 +117,8 @@ impl Vibrato {
         let mut delay = DelayNode::new(sample_rate, 0.0, max_delay, frame);
         delay.delay_time.connect_signal(false, frame);
         // StereoPanner, mono input, pan 1: (float)(1 * cos(pi/2)), (float)(1 * sin(pi/2)).
-        let pan_radian = std::f64::consts::FRAC_PI_2;
-        Vibrato { lfo, delay, dry_gain: pan_radian.cos() as f32, wet_gain: pan_radian.sin() as f32, out: [0.0; Q] }
+        let (dry_gain, wet_gain) = pan_gains(1.0);
+        Vibrato { lfo, delay, dry_gain, wet_gain, out: [0.0; Q] }
     }
 
     /// The LFO's `amplitude` (Tone's `depth`).

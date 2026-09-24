@@ -5,12 +5,9 @@
 //! → a StereoPannerNode's `pan`; the panner pans a constant 1 (Tone's looped 128-frame buffer of ones,
 //! channelCount 1) and a ChannelSplitter sends its left gain into `a`'s GainNode gain and its right
 //! gain into `b`'s. Both gains are Tone Gains built at 0, so each reads 0 plus the panner's output. The
-//! ports: Blink's `WaveShaperCurveValues` (the x86 path, in float) from
-//! `modules/webaudio/wave_shaper_handler.cc`, the mono branch of
-//! `StereoPanner::PanWithSampleAccurateValues` from `platform/audio/stereo_panner.cc`, and the
-//! GainNodes' sample-accurate product from `gain_handler.cc`, at Chromium 153.0.8010.12.
-//! standardized-audio-context connects a looped two-frame buffer of zeros into a WaveShaper whose
-//! curve is not zero at 0 (the DC fix); it adds nothing.
+//! shaper is a [`WaveShaper`]; this module ports the mono branch of
+//! `StereoPanner::PanWithSampleAccurateValues` from `platform/audio/stereo_panner.cc` (`pan_gains`)
+//! and the GainNodes' sample-accurate product from `gain_handler.cc`, at Chromium 153.0.8010.12.
 //!
 //! The curve is sampled, not the ideal `|x|`: at fade 0 the shaper reads midway between curve points
 //! 511 and 512, both `−1021/1023`, so the pan is −0.998 rather than −1 and `b` keeps a gain of
@@ -24,16 +21,20 @@
 //! Ported from Chromium (Blink), Copyright The Chromium Authors, BSD-3-Clause.
 
 use super::fdlibm;
-use super::filter::{connect_signal, Signal};
 use super::param::{AudioParam, Rate, ToneParam, Units, QUANTUM};
+use super::signal::{connect_signal, Signal, WaveShaper};
 
-/// GainToAudio's curve length (Tone's WaveShaper default).
-const CURVE: usize = 1024;
+/// The StereoPanner's gains for one pan value: a constant 1 panned equal-power, left and right.
+pub(crate) fn pan_gains(pan: f32) -> (f32, f32) {
+    let pan = (pan as f64).clamp(-1.0, 1.0);
+    let radian = (pan * 0.5 + 0.5) * std::f64::consts::FRAC_PI_2;
+    (fdlibm::cos(radian) as f32, fdlibm::sin(radian) as f32)
+}
 
 /// Tone's CrossFade on mono inputs.
 pub struct CrossFade {
     pub fade: Signal,
-    curve: [f32; CURVE],
+    gain_to_audio: WaveShaper,
     pan: AudioParam,
     a: ToneParam,
     b: ToneParam,
@@ -49,11 +50,6 @@ impl CrossFade {
     /// `new CrossFade({ fade })`, built while `frame` renders.
     pub fn new(sample_rate: f32, fade: f64, frame: u64) -> Self {
         let rate = sample_rate as f64;
-        // GainToAudio's mapping, evaluated in double and stored as float (Tone's `setMap`).
-        let curve = std::array::from_fn(|i| {
-            let normalized = (i as f64 / (CURVE - 1) as f64) * 2.0 - 1.0;
-            (normalized.abs() * 2.0 - 1.0) as f32
-        });
         let gain = |frame| {
             let native = AudioParam::new(rate, 1.0, f32::MIN, f32::MAX, Rate::A);
             let mut p = ToneParam::new(native, Units::Gain, Some(0.0), frame);
@@ -63,12 +59,12 @@ impl CrossFade {
         };
         let a = gain(frame);
         let b = gain(frame);
-        let fade = Signal::new(rate, Units::NormalRange, true, fade, frame);
+        let fade = Signal::new(sample_rate, Units::NormalRange, fade, frame);
         let mut pan = AudioParam::new(rate, 0.0, -1.0, 1.0, Rate::A);
         connect_signal(&mut pan, frame);
         CrossFade {
             fade,
-            curve,
+            gain_to_audio: WaveShaper::gain_to_audio(),
             pan,
             a,
             b,
@@ -81,43 +77,23 @@ impl CrossFade {
         }
     }
 
-    /// Blink's `WaveShaperCurveValues` on one value, in float as the x86 path computes it.
-    fn shape(curve: &[f32; CURVE], input: f32) -> f32 {
-        let max_index = (CURVE - 1) as i32;
-        let virtual_index = ((input + 1.0) * (0.5 * (CURVE - 1) as f64) as f32).clamp(0.0, max_index as f32);
-        let index1 = virtual_index as i32;
-        let v1 = curve[index1.clamp(0, max_index) as usize];
-        let v2 = curve[(index1 + 1).clamp(0, max_index) as usize];
-        let f = virtual_index - index1 as f32;
-        f * (v2 - v1) + v1
-    }
-
-    /// The panner's gains for one pan value: a constant 1 panned equal-power, left and right.
-    fn pan_gains(pan: f32) -> (f32, f32) {
-        let pan = (pan as f64).clamp(-1.0, 1.0);
-        let radian = (pan * 0.5 + 0.5) * std::f64::consts::FRAC_PI_2;
-        (fdlibm::cos(radian) as f32, fdlibm::sin(radian) as f32)
-    }
-
     /// The gains of `a` and `b` for the quantum at `quantum_start`.
     pub fn begin_quantum(&mut self, quantum_start: u64) {
-        let fade = *self.fade.render(quantum_start);
+        let fade = self.fade.process(quantum_start, None);
         if fade.iter().all(|&v| v == fade[0]) {
             // A fade holding still (every quantum but a ramp's) shapes and pans one value.
-            self.shaped.fill(Self::shape(&self.curve, fade[0]));
+            self.shaped.fill(self.gain_to_audio.shape(fade[0]));
         } else {
-            for (s, &v) in self.shaped.iter_mut().zip(&fade) {
-                *s = Self::shape(&self.curve, v);
-            }
+            self.gain_to_audio.process(fade, &mut self.shaped);
         }
         self.pan.calculate_sample_accurate_values(quantum_start, &mut self.pan_values, Some(&self.shaped));
         if self.pan_values.iter().all(|&v| v == self.pan_values[0]) {
-            let (l, r) = Self::pan_gains(self.pan_values[0]);
+            let (l, r) = pan_gains(self.pan_values[0]);
             self.left.fill(l);
             self.right.fill(r);
         } else {
             for ((l, r), &p) in self.left.iter_mut().zip(self.right.iter_mut()).zip(&self.pan_values) {
-                (*l, *r) = Self::pan_gains(p);
+                (*l, *r) = pan_gains(p);
             }
         }
         self.a.native.calculate_sample_accurate_values(quantum_start, &mut self.gain_a, Some(&self.left));

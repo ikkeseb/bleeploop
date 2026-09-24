@@ -1,14 +1,14 @@
 //! `DelayFx`: Tone's `FeedbackDelay` (`effect/FeedbackDelay.js` on `FeedbackEffect.js` and
-//! `Effect.js`) with its wet level as the bypass, and the Blink DelayNode it builds
-//! ([`BlinkDelay`]: `platform/audio/delay.cc` with the SSE2 a-rate loop of
-//! `platform/audio/cpu/x86/delay_sse2.cc`, driven as `modules/webaudio/delay_handler.cc` does, at
-//! Chromium 153.0.8010.12).
+//! `Effect.js`) with its wet level as the bypass, over the Blink DelayNode it builds
+//! ([`DelayNode`](crate::dsp::delay::DelayNode)).
 //!
 //! What Tone builds: `input` → the dry/wet CrossFade's `a`, and `input` → `effectSend` → DelayNode →
 //! `effectReturn` → the CrossFade's `b`, with `effectReturn` → the feedback Gain → `effectSend`. Blink
 //! renders the cycle by pulling `effectReturn` first: when the pull comes back around to it through
 //! the feedback Gain, it hands out its bus as the previous quantum left it. So the feedback reaches
-//! the delay one quantum late: `send[n] = input[n] + feedback · return[n − 128]`.
+//! the delay one quantum late: `send[n] = input[n] + feedback · return[n − 128]`. That lateness is
+//! this node's, not the delay kernel's: the kernel delays by exactly `delayTime`, and this node feeds
+//! it the previous quantum's return, frame by frame.
 //!
 //! Bypassed means wet 0, and a CrossFade at 0 still mixes `b` in at −56 dB (see the crossfade
 //! module): the echoes of a bypassed delay are in every chain's output, so this node renders them.
@@ -16,63 +16,8 @@
 
 use super::{clamp_index, division_beats, Ctl, FxParam, FxState, FxTiming, DIVISIONS, MAX_FEEDBACK, RAMP};
 use crate::dsp::crossfade::CrossFade;
+use crate::dsp::delay::DelayNode;
 use crate::dsp::param::{AudioParam, Rate, ToneParam, Units, QUANTUM};
-
-/// Blink's `Delay` kernel on one channel: a circular buffer one quantum longer than the longest delay.
-pub struct BlinkDelay {
-    buffer: Vec<f32>,
-    write_index: usize,
-    max_delay_time: f64,
-    sample_rate: f32,
-}
-
-impl BlinkDelay {
-    pub fn new(max_delay_time: f64, sample_rate: f32) -> Self {
-        // `BufferLengthForDelay`: a quantum plus the longest delay in frames, rounded up.
-        let frames = (max_delay_time * sample_rate as f64 * 1024.0).round() / 1024.0;
-        let length = QUANTUM + frames.ceil() as usize;
-        BlinkDelay { buffer: vec![0.0; length], write_index: 0, max_delay_time, sample_rate }
-    }
-
-    /// One frame of `ProcessARate`: write `input` at the quantum's frame `k`, read `delay_time`
-    /// seconds back. Blink copies the whole quantum in before reading; a read never reaches past the
-    /// frame being written unless the delay is under a frame, where the later sample weighs 0.
-    fn process_frame(&mut self, k: usize, input: f32, delay_time: f32) -> f32 {
-        let length = self.buffer.len();
-        let mut w = self.write_index + k;
-        if w >= length {
-            w -= length;
-        }
-        self.buffer[w] = input;
-        // The SSE2 lanes, in float.
-        let delay_time = if delay_time.is_nan() { self.max_delay_time as f32 } else { delay_time.max(0.0) };
-        let desired = delay_time * self.sample_rate;
-        let length_f = length as f32;
-        let mut position = w as f32 + (length_f - desired);
-        if position >= length_f {
-            position -= length_f;
-        }
-        let mut index1 = position as usize;
-        if index1 >= length {
-            index1 -= length;
-        }
-        let mut index2 = index1 + 1;
-        if index2 >= length {
-            index2 -= length;
-        }
-        let f = position - index1 as f32;
-        let (s1, s2) = (self.buffer[index1], self.buffer[index2]);
-        s1 + f * (s2 - s1)
-    }
-
-    /// Advance the write index past a rendered quantum.
-    fn end_quantum(&mut self) {
-        self.write_index += QUANTUM;
-        if self.write_index >= self.buffer.len() {
-            self.write_index -= self.buffer.len();
-        }
-    }
-}
 
 pub struct DelayFx {
     bypassed: bool,
@@ -85,9 +30,7 @@ pub struct DelayFx {
     dry_wet: CrossFade,
     /// The feedback Gain's gain.
     feedback_gain: ToneParam,
-    delay_time: ToneParam,
-    delay: BlinkDelay,
-    delay_times: [f32; QUANTUM],
+    delay: DelayNode,
     feedback_values: [f32; QUANTUM],
     /// `effectReturn`'s output: this quantum's, and the previous one the feedback reads.
     returned: [f32; QUANTUM],
@@ -107,11 +50,8 @@ impl DelayFx {
         // FeedbackEffect: the feedback Gain (normalRange).
         let gain = AudioParam::new(rate, 1.0, f32::MIN, f32::MAX, Rate::A);
         let feedback_gain = ToneParam::new(gain, Units::NormalRange, Some(feedback), frame);
-        // FeedbackDelay: `new Delay({ delayTime, maxDelay })`, its delayTime a time Param over the
-        // DelayNode's [0, maxDelay] param.
-        let max = f64::max(max_delay, delay_seconds);
-        let native = AudioParam::new(rate, 0.0, 0.0, max_delay as f32, Rate::A);
-        let delay_time = ToneParam::new(native, Units::Time, Some(delay_seconds), frame).with_range(Some(0.0), Some(max));
+        // FeedbackDelay: `new Delay({ delayTime, maxDelay })`.
+        let delay = DelayNode::new(sample_rate, delay_seconds, max_delay, frame);
         DelayFx {
             bypassed: true,
             time,
@@ -121,9 +61,7 @@ impl DelayFx {
             timing_set: false,
             dry_wet,
             feedback_gain,
-            delay_time,
-            delay: BlinkDelay::new(max_delay, sample_rate),
-            delay_times: [0.0; QUANTUM],
+            delay,
             feedback_values: [0.0; QUANTUM],
             returned: [0.0; QUANTUM],
             previous: [0.0; QUANTUM],
@@ -152,7 +90,7 @@ impl DelayFx {
         match param {
             FxParam::Time => {
                 self.time = clamp_index(value, DIVISIONS.len());
-                self.delay_time.ramp_to(self.beat_period * division_beats(self.time), RAMP, ctl.now, ctl.frame);
+                self.delay.delay_time.ramp_to(self.beat_period * division_beats(self.time), RAMP, ctl.now, ctl.frame);
             }
             FxParam::Feedback => {
                 self.feedback = value.clamp(0.0, MAX_FEEDBACK);
@@ -179,13 +117,13 @@ impl DelayFx {
         self.timing_set = true;
         self.beat_period = timing.beat_period;
         let now = ctl.context_time(self.sample_rate);
-        self.delay_time.cancel_scheduled_values(now, ctl.frame);
-        self.delay_time.set_value_at_time(self.beat_period * division_beats(self.time), now, ctl.frame);
+        self.delay.delay_time.cancel_scheduled_values(now, ctl.frame);
+        self.delay.delay_time.set_value_at_time(self.beat_period * division_beats(self.time), now, ctl.frame);
     }
 
     pub(super) fn begin_quantum(&mut self, quantum_start: u64) {
         self.dry_wet.begin_quantum(quantum_start);
-        self.delay_time.native.calculate_sample_accurate_values(quantum_start, &mut self.delay_times, None);
+        self.delay.begin_quantum(quantum_start, None);
         // The feedback GainNode: a-rate values while automated, else its one value.
         let gain = &mut self.feedback_gain.native;
         if gain.has_sample_accurate_values(quantum_start) {
@@ -200,12 +138,9 @@ impl DelayFx {
         for (i, &x) in input.iter().enumerate() {
             let k = at + i;
             let send = x + self.previous[k] * self.feedback_values[k];
-            let y = self.delay.process_frame(k, send, self.delay_times[k]);
+            let y = self.delay.process_frame(k, send);
             self.returned[k] = y;
             out[i] = x * self.dry_wet.gain_a(k) + y * self.dry_wet.gain_b(k);
-        }
-        if at + input.len() == QUANTUM {
-            self.delay.end_quantum();
         }
     }
 }

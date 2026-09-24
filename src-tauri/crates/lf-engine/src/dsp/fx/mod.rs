@@ -35,13 +35,13 @@ mod pitch;
 mod reverb;
 mod stutter;
 
-pub use delay::{BlinkDelay, DelayFx};
+pub use delay::DelayFx;
 pub use filter::FilterFx;
 pub use pitch::PitchFx;
 pub use reverb::ReverbSendFx;
 pub use stutter::StutterFx;
 
-use super::param::{context_frame, QUANTUM};
+use super::param::{self, QUANTUM};
 
 /// Every bypass and param transition ramps over 20 ms (`RAMP`).
 pub const RAMP: f64 = 0.02;
@@ -235,7 +235,7 @@ impl Ctl {
 
     /// Blink's context time for this call: what fx.ts reads as the native `currentTime`.
     pub fn context_time(&self, sample_rate: f32) -> f64 {
-        context_frame(self.frame) as f64 / sample_rate as f64
+        param::context_time(self.frame, sample_rate as f64)
     }
 }
 

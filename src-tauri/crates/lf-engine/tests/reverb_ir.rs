@@ -6,8 +6,9 @@ mod common;
 
 use std::sync::Arc;
 
-use assert_no_alloc::{assert_no_alloc, violation_count};
+use assert_no_alloc::assert_no_alloc;
 use common::refs::{self, Class};
+use common::violation_count;
 use lf_engine::dsp::buffer_source::{AudioBuffer, Noise};
 use lf_engine::dsp::gain::GainNode;
 use lf_engine::dsp::noise::NoiseTables;

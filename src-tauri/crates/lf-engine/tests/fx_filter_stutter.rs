@@ -10,8 +10,9 @@
 
 mod common;
 
-use assert_no_alloc::{assert_no_alloc, violation_count};
+use assert_no_alloc::assert_no_alloc;
 use common::refs::{self, Class, ScriptEvent};
+use common::violation_count;
 use lf_engine::dsp::fx::{Ctl, FxChain, FxKind, FxParam, FxState, FxTiming};
 use lf_engine::dsp::param::QUANTUM;
 

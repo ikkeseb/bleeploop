@@ -9,21 +9,24 @@
 //! reads `delayTime * rate` frames behind its write position (in float, as the SSE kernel does),
 //! linearly interpolated. A negative delay reads as 0, NaN as the maximum; a delay under one quantum
 //! reads this quantum's own input. Not ported: the k-rate path (`automationRate = "k-rate"`), which no
-//! Tone class sets, and what Blink does with a DelayNode inside a cycle (not read yet).
+//! Tone class sets.
+//!
+//! Two ways to drive it, the same arithmetic: a quantum at a time ([`DelayNode::process`]), or frame by
+//! frame ([`DelayNode::begin_quantum`], then [`DelayNode::process_frame`] for frames 0 to 127 in order)
+//! for a delay whose input is rendered frame by frame, such as one inside a feedback cycle. What Blink
+//! does to such a cycle belongs to its owner (see `fx::DelayFx`), not to the kernel.
 //!
 //! Blink stops processing a delay once its input has been silent for longer than the maximum delay
 //! (the node's tail); this one keeps writing zeros instead, which reads the same, since everything
-//! within reach of the read head is zero by then. Mono, one quantum per call; allocation happens
-//! only in [`Delay::new`].
+//! within reach of the read head is zero by then. Mono; allocation happens only in [`Delay::new`].
 //!
 //! Ported from Chromium (Blink), Copyright The Chromium Authors, BSD-3-Clause.
 
-use super::oscillator::time_to_sample_frame_up;
-use super::param::{AudioParam, Rate, ToneParam, Units, QUANTUM};
+use super::param::{time_to_sample_frame, AudioParam, Rate, Rounding, ToneParam, Units, QUANTUM};
 
 const Q: usize = QUANTUM;
 
-/// Blink's `Delay` kernel: one channel's circular buffer.
+/// Blink's `Delay` kernel: one channel's circular buffer, a quantum longer than the longest delay.
 pub struct Delay {
     buffer: Vec<f32>,
     write_index: usize,
@@ -34,7 +37,8 @@ pub struct Delay {
 impl Delay {
     pub fn new(max_delay_time: f64, sample_rate: f32) -> Self {
         assert!(max_delay_time > 0.0 && max_delay_time.is_finite(), "a positive maximum delay");
-        let length = Q + time_to_sample_frame_up(max_delay_time, sample_rate as f64) as usize;
+        // `BufferLengthForDelay`.
+        let length = Q + time_to_sample_frame(max_delay_time, sample_rate as f64, Rounding::Up) as usize;
         Delay { buffer: vec![0.0; length], write_index: 0, max_delay_time: max_delay_time as f32, sample_rate }
     }
 
@@ -47,40 +51,57 @@ impl Delay {
         self.max_delay_time
     }
 
-    /// `ProcessARate`: `delay_times` in seconds per frame (NaN becomes the maximum in place).
-    pub fn process_a_rate(&mut self, source: &[f32; Q], delay_times: &mut [f32; Q], destination: &mut [f32; Q]) {
-        let length = self.buffer.len();
-        for t in delay_times.iter_mut() {
-            if t.is_nan() {
-                *t = self.max_delay_time;
-            }
+    fn wrap(&self, i: usize) -> usize {
+        if i >= self.buffer.len() {
+            i - self.buffer.len()
+        } else {
+            i
         }
+    }
+
+    /// `ProcessARate` on a quantum: `delay_times` in seconds per frame.
+    pub fn process_a_rate(&mut self, source: &[f32; Q], delay_times: &[f32; Q], destination: &mut [f32; Q]) {
         // CopyToCircularBuffer.
-        let first = Q.min(length - self.write_index);
+        let first = Q.min(self.buffer.len() - self.write_index);
         self.buffer[self.write_index..self.write_index + first].copy_from_slice(&source[..first]);
         self.buffer[..Q - first].copy_from_slice(&source[first..]);
-
-        // ProcessARateVector: four frames at a time, float read positions.
-        let length_f = length as f32;
-        let wrap_index = |i: usize| if i >= length { i - length } else { i };
-        let mut write = [0, 1, 2, 3].map(|m| wrap_index(self.write_index + m));
-        for k in (0..Q).step_by(4) {
-            for m in 0..4 {
-                let delay_time = if delay_times[k + m] > 0.0 { delay_times[k + m] } else { 0.0 };
-                let desired_delay_frames = delay_time * self.sample_rate;
-                let mut read_position = write[m] as f32 + (length_f - desired_delay_frames);
-                if read_position >= length_f {
-                    read_position -= length_f;
-                }
-                let read_index1 = wrap_index(read_position as i32 as usize);
-                let read_index2 = wrap_index(read_index1 + 1);
-                let interpolation_factor = read_position - read_index1 as f32;
-                let (sample1, sample2) = (self.buffer[read_index1], self.buffer[read_index2]);
-                destination[k + m] = sample1 + interpolation_factor * (sample2 - sample1);
-                write[m] = wrap_index(write[m] + 4);
-            }
+        for (k, (d, &t)) in destination.iter_mut().zip(delay_times).enumerate() {
+            *d = self.read(k, t);
         }
-        self.write_index = wrap_index(self.write_index + Q);
+        self.write_index = self.wrap(self.write_index + Q);
+    }
+
+    /// Frame `k` of `ProcessARate`: write `input`, read `delay_time` seconds back; after frame 127 the
+    /// quantum ends. Frames go 0 to 127 in order. Reads what [`Delay::process_a_rate`] reads: a read
+    /// only reaches past the frame being written when the delay is under a frame, where the later
+    /// sample weighs 0.
+    pub fn process_frame(&mut self, k: usize, input: f32, delay_time: f32) -> f32 {
+        let w = self.wrap(self.write_index + k);
+        self.buffer[w] = input;
+        let y = self.read(k, delay_time);
+        if k == Q - 1 {
+            self.write_index = self.wrap(self.write_index + Q);
+        }
+        y
+    }
+
+    /// `ProcessARateVector`'s lane for frame `k` of the quantum: float read position, truncated to an
+    /// index as `_mm_cvttps_epi32` does, then `s1 + f * (s2 - s1)`.
+    fn read(&self, k: usize, delay_time: f32) -> f32 {
+        // ProcessARate's NaN substitution, then the kernel's max(0, t).
+        let delay_time = if delay_time.is_nan() { self.max_delay_time } else { delay_time };
+        let delay_time = if delay_time > 0.0 { delay_time } else { 0.0 };
+        let length_f = self.buffer.len() as f32;
+        let desired_delay_frames = delay_time * self.sample_rate;
+        let mut read_position = self.wrap(self.write_index + k) as f32 + (length_f - desired_delay_frames);
+        if read_position >= length_f {
+            read_position -= length_f;
+        }
+        let read_index1 = self.wrap(read_position as i32 as usize);
+        let read_index2 = self.wrap(read_index1 + 1);
+        let interpolation_factor = read_position - read_index1 as f32;
+        let (sample1, sample2) = (self.buffer[read_index1], self.buffer[read_index2]);
+        sample1 + interpolation_factor * (sample2 - sample1)
     }
 }
 
@@ -105,13 +126,23 @@ impl DelayNode {
     /// Render the quantum at `q`: `input` (`None` when silent) delayed by the param plus the signal
     /// connected to it, if any.
     pub fn process(&mut self, q: u64, input: Option<&[f32; Q]>, delay_time_input: Option<&[f32; Q]>) -> &[f32; Q] {
-        self.delay_time.native.calculate_sample_accurate_values(q, &mut self.times, delay_time_input);
+        self.begin_quantum(q, delay_time_input);
         let source = input.unwrap_or(&[0.0; Q]);
-        self.delay.process_a_rate(source, &mut self.times, &mut self.out);
+        self.delay.process_a_rate(source, &self.times, &mut self.out);
         &self.out
     }
 
-    /// The last rendered quantum.
+    /// The delay times of the quantum at `q`, for [`DelayNode::process_frame`].
+    pub fn begin_quantum(&mut self, q: u64, delay_time_input: Option<&[f32; Q]>) {
+        self.delay_time.native.calculate_sample_accurate_values(q, &mut self.times, delay_time_input);
+    }
+
+    /// Frame `k` of the quantum begun: `input` in, the delayed frame out (see [`Delay::process_frame`]).
+    pub fn process_frame(&mut self, k: usize, input: f32) -> f32 {
+        self.delay.process_frame(k, input, self.times[k])
+    }
+
+    /// The last quantum [`DelayNode::process`] rendered.
     pub fn output(&self) -> &[f32; Q] {
         &self.out
     }

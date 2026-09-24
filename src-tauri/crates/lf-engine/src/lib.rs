@@ -15,7 +15,7 @@
 //! | [`autorec`] | the AUTO REC onset detector | `looper/auto-record.ts` |
 //! | [`engine`] | the callback: rings, the block split, the bus topology, master volume | `engine.ts`, `master.ts` |
 //! | [`api`] | commands, events, the process context, the plugin seam | — |
-//! | [`dsp`] | Stage 3 sound: param automation, gain, buffer playback and noise, the reverb IR, the limiter | Tone.js on Blink's Web Audio |
+//! | [`dsp`] | Stage 3 sound: the Tone/Blink building blocks, the lead/piano/organ/pad synths, the per-track FX chain, the limiter | Tone.js on Blink's Web Audio |
 //!
 //! # Rules
 //!
@@ -41,9 +41,9 @@
 //!
 //! # Not built yet
 //!
-//! The synths and FX (plan Stage 3), the limiter in the master path (ported as `dsp::compressor`, not
-//! wired into `engine` yet), the device owner and plugin slots (Stage 4), waveform
-//! peaks and the export snapshot (with the feed, Stage 5).
+//! Stage 3's bass and drum kit, the PitchShift and the convolution reverb bus; wiring the synths, the FX
+//! chain and the limiter into [`engine`] (each is ported in [`dsp`] and tested alone); the device owner
+//! and plugin slots (Stage 4); waveform peaks and the export snapshot (with the feed, Stage 5).
 
 #![forbid(unsafe_code)]
 

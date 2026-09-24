@@ -6,13 +6,24 @@
 
 pub mod refs;
 
-use assert_no_alloc::{assert_no_alloc, violation_count, AllocDisabler};
+use assert_no_alloc::assert_no_alloc;
 use lf_engine::grid::{frames_per_bar, Frame};
 use lf_engine::{Command, Engine, EngineConfig, EngineHandle, Event, Inserts, LaneInfo, LaneState, ProcessContext, TimedCommand};
 
 // Every `process` call in every scenario runs under assert_no_alloc: the audio path never allocates.
+// The check runs in debug builds; the crate's default `disable_release` makes it a no-op in release.
+#[cfg(debug_assertions)]
 #[global_allocator]
-static ALLOCATOR: AllocDisabler = AllocDisabler;
+static ALLOCATOR: assert_no_alloc::AllocDisabler = assert_no_alloc::AllocDisabler;
+
+/// Allocations inside `assert_no_alloc` so far (debug builds count them, the `warn_debug` feature;
+/// release builds do not check, so 0).
+pub fn violation_count() -> u32 {
+    #[cfg(debug_assertions)]
+    return assert_no_alloc::violation_count();
+    #[cfg(not(debug_assertions))]
+    0
+}
 
 /// A take's frame code: exact in f32 and unique over 2^22 frames.
 pub fn code(frame: Frame) -> f32 {

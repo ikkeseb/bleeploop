@@ -1,70 +1,18 @@
 //! Tone's `Filter` (`component/filter/Filter.js`, Tone 15.1.22): 1 to 4 cascaded Blink biquads whose
-//! frequency, Q, detune and gain follow four Tone Signals; and Tone's `Signal` (`signal/Signal.js` over
-//! `signal/ToneConstantSource.js`), which the crossfade uses too.
+//! frequency, Q, detune and gain follow four Tone [`Signal`]s.
 //!
-//! A Signal is a Blink ConstantSourceNode whose `offset` is a Tone [`ToneParam`]; ToneConstantSource
-//! puts a gain envelope of exactly 1 after it from time 0, so its output is the offset's values. Tone
-//! connects a Signal into a param with `connectSignal`: the param's own schedule is cancelled and set
-//! to 0 at time 0, and the Signal's output sums in. So each biquad param here reads 0 plus its Signal,
-//! and is always sample-accurate: Blink computes the biquad coefficients per frame whenever a Signal
-//! moves inside a quantum (a ramp), once per quantum otherwise.
+//! Tone connects a Signal into a param with `connectSignal`: the param's own schedule is cancelled and
+//! set to 0 at time 0, and the Signal's output sums in. So each biquad param here reads 0 plus its
+//! Signal, and is always sample-accurate: Blink computes the biquad coefficients per frame whenever a
+//! Signal moves inside a quantum (a ramp), once per quantum otherwise.
 //!
 //! Tone builds one BiquadFilterNode per cascade stage, each with the same four connections, so every
 //! stage computes the same coefficients; the stages here do the same work Blink does. Tone's input and
 //! output Gains are unity copies and are left out.
 
 use super::biquad::{BiquadFilterNode, FilterType, ParamInputs};
-use super::param::{AudioParam, Rate, ToneParam, Units, QUANTUM};
-
-/// Tone's Signal: a ConstantSourceNode's offset param, rendered once per quantum.
-pub struct Signal {
-    pub param: ToneParam,
-    values: [f32; QUANTUM],
-}
-
-impl Signal {
-    /// `new Signal({ value, units, convert })`, built while `frame` renders.
-    pub fn new(sample_rate: f64, units: Units, convert: bool, value: f64, frame: u64) -> Self {
-        // ConstantSourceNode.offset: default 1, unbounded, a-rate.
-        let native = AudioParam::new(sample_rate, 1.0, f32::MIN, f32::MAX, Rate::A);
-        let mut param = ToneParam::new(native, units, None, frame);
-        if !convert {
-            param = param.without_conversion();
-        }
-        // Tone's Param constructor: a value other than the native default is set at time 0.
-        param.reset(Some(value), frame);
-        Signal { param, values: [0.0; QUANTUM] }
-    }
-
-    /// Render the quantum at `quantum_start` (ConstantSourceHandler::Process): the offset's a-rate
-    /// values while it has sample-accurate ones, else its k-rate value. Call once per quantum.
-    pub fn render(&mut self, quantum_start: u64) -> &[f32; QUANTUM] {
-        self.param.native.fill(quantum_start, &mut self.values);
-        &self.values
-    }
-
-    /// The quantum [`Signal::render`] last rendered.
-    pub fn values(&self) -> &[f32; QUANTUM] {
-        &self.values
-    }
-
-    /// `Signal.rampTo(value, rampTime)` at Tone's `now`.
-    pub fn ramp_to(&mut self, value: f64, ramp_time: f64, now: f64, frame: u64) {
-        self.param.ramp_to(value, ramp_time, now, frame);
-    }
-
-    /// `Signal.setValueAtTime(value, time)`.
-    pub fn set_value_at_time(&mut self, value: f64, time: f64, frame: u64) {
-        self.param.set_value_at_time(value, time, frame);
-    }
-}
-
-/// `connectSignal(signal, param)` on a native param: cancel its schedule, set 0 at time 0, sum in.
-pub fn connect_signal(param: &mut AudioParam, frame: u64) {
-    param.cancel_scheduled_values(0.0, frame);
-    param.set_value_at_time(0.0, 0.0, frame);
-    param.set_connected(true);
-}
+use super::param::{Units, QUANTUM};
+use super::signal::{connect_signal, Signal};
 
 /// Tone's rolloff choices: the number of cascaded biquads.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -92,11 +40,10 @@ impl Filter {
     /// `new Filter({ type, frequency, Q, rolloff })` with Tone's detune 0 and gain 0, built while
     /// `frame` renders.
     pub fn new(sample_rate: f32, kind: FilterType, frequency: f64, q: f64, rolloff: Rolloff, frame: u64) -> Self {
-        let rate = sample_rate as f64;
-        let q = Signal::new(rate, Units::Positive, true, q, frame);
-        let frequency = Signal::new(rate, Units::Frequency, true, frequency, frame);
-        let detune = Signal::new(rate, Units::Cents, true, 0.0, frame);
-        let gain = Signal::new(rate, Units::Decibels, false, 0.0, frame);
+        let q = Signal::new(sample_rate, Units::Positive, q, frame);
+        let frequency = Signal::new(sample_rate, Units::Frequency, frequency, frame);
+        let detune = Signal::new(sample_rate, Units::Cents, 0.0, frame);
+        let gain = Signal::unconverted(sample_rate, Units::Decibels, 0.0, frame);
         let mut stages = std::array::from_fn(|_| BiquadFilterNode::new(sample_rate, kind));
         for s in stages.iter_mut() {
             // Tone's BiquadFilter sets the node's params to its defaults (the native ones: nothing
@@ -111,15 +58,15 @@ impl Filter {
 
     /// Render the Signals for the quantum at `quantum_start` and update every stage's coefficients.
     pub fn begin_quantum(&mut self, quantum_start: u64) {
-        self.q.render(quantum_start);
-        self.frequency.render(quantum_start);
-        self.detune.render(quantum_start);
-        self.gain.render(quantum_start);
+        self.q.process(quantum_start, None);
+        self.frequency.process(quantum_start, None);
+        self.detune.process(quantum_start, None);
+        self.gain.process(quantum_start, None);
         let inputs = ParamInputs {
-            frequency: Some(self.frequency.values()),
-            q: Some(self.q.values()),
-            gain: Some(self.gain.values()),
-            detune: Some(self.detune.values()),
+            frequency: Some(self.frequency.output()),
+            q: Some(self.q.output()),
+            gain: Some(self.gain.output()),
+            detune: Some(self.detune.output()),
         };
         for s in self.stages[..self.count].iter_mut() {
             s.begin_quantum(quantum_start, inputs);

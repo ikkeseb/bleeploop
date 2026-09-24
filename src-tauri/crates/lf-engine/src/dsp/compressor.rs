@@ -22,10 +22,14 @@
 //! intermediate flushes; here only the state is flushed at each division's end (Blink's fallback
 //! `FlushDenormalFloatToZero`). The gain and detector live far above the denormal range in practice.
 
+// Blink's release-polynomial literals stay digit for digit as it writes them.
+#![allow(clippy::excessive_precision)]
+
+use super::param;
 use crate::grid::Frame;
 
-/// Frames per Web Audio render quantum: where parameter changes land.
-pub const QUANTUM: Frame = 128;
+/// Frames per Web Audio render quantum ([`param::QUANTUM`]): where parameter changes land.
+pub const QUANTUM: Frame = param::QUANTUM as Frame;
 /// Frames per envelope division (`kNumberOfDivisionFrames`).
 pub const DIVISION: Frame = 32;
 
@@ -152,15 +156,17 @@ impl Curve {
     fn k_at_slope(&self, desired_slope: f32) -> f32 {
         let db_x = self.db_threshold + self.db_knee;
         let x = db_to_linear(db_x);
+        // `SlopeAt` is 1 below the threshold (Blink's `x < threshold`, so a NaN `x` takes the other branch).
+        let linear = x < self.linear_threshold;
         let (mut x2, mut db_x2) = (1.0f32, 0.0f32);
-        if !(x < self.linear_threshold) {
+        if !linear {
             x2 = (x as f64 * 1.001) as f32;
             db_x2 = linear_to_db(x2);
         }
         let (mut min_k, mut max_k, mut k) = (0.1f32, 10000.0f32, 5.0f32);
         let mut slope = 1.0f32;
         for _ in 0..15 {
-            if !(x < self.linear_threshold) {
+            if !linear {
                 let db_y = linear_to_db(self.knee_curve(x, k));
                 let db_y2 = linear_to_db(self.knee_curve(x2, k));
                 slope = (db_y2 - db_y) / (db_x2 - db_x);

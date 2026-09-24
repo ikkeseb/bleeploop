@@ -14,8 +14,9 @@
 //! Scheduling and rendering never allocate. Every call takes the frame being rendered, for Blink's
 //! context time (`dsp::param`).
 
+use super::gain::ParamGain;
 use super::param::{Units, QUANTUM};
-use super::synth::signal::{ParamGain, Signal};
+use super::signal::Signal;
 
 const Q: usize = QUANTUM;
 

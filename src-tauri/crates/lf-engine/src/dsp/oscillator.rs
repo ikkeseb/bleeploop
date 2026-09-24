@@ -39,7 +39,8 @@
 use std::sync::Arc;
 
 use super::gain::GainNode;
-use super::param::{self, AudioParam, Rate, Timeline, Units, QUANTUM};
+use super::param::{self, time_to_sample_frame, AudioParam, Rate, Rounding, Timeline, Units, QUANTUM};
+use super::signal::connect_signal;
 
 const Q: usize = QUANTUM;
 
@@ -257,17 +258,6 @@ pub enum PlaybackState {
     Finished,
 }
 
-/// Blink's `TimeToSampleFrame` rounding up: round at 1024× oversampling first, so `k / rate` maps back
-/// to `k`.
-pub(crate) fn time_to_sample_frame_up(time: f64, sample_rate: f64) -> u64 {
-    let frame = ((time * sample_rate * 1024.0).round() / 1024.0).ceil();
-    if frame >= u64::MAX as f64 {
-        u64::MAX
-    } else {
-        frame as u64
-    }
-}
-
 /// The start/stop scheduling of Blink's `AudioScheduledSourceHandler`.
 struct Schedule {
     sample_rate: f32,
@@ -283,8 +273,8 @@ impl Schedule {
     fn update(&mut self, quantum_start: u64, out: &mut [f32; Q]) -> (usize, usize, f64) {
         let sample_rate = self.sample_rate as f64;
         let quantum_end = quantum_start + Q as u64;
-        let start_frame = time_to_sample_frame_up(self.start_time, sample_rate);
-        let end_frame = self.end_time.map(|t| time_to_sample_frame_up(t, sample_rate));
+        let start_frame = time_to_sample_frame(self.start_time, sample_rate, Rounding::Up);
+        let end_frame = self.end_time.map(|t| time_to_sample_frame(t, sample_rate, Rounding::Up));
         if end_frame.is_some_and(|e| e <= quantum_start) {
             self.state = PlaybackState::Finished;
         }
@@ -373,7 +363,7 @@ impl Oscillator {
             debug_assert!(false, "start once, at a time >= 0");
             return;
         }
-        self.schedule.start_time = when.max(param::context_frame(frame) as f64 / self.schedule.sample_rate as f64);
+        self.schedule.start_time = when.max(param::context_time(frame, self.schedule.sample_rate as f64));
         self.schedule.state = PlaybackState::Scheduled;
     }
 
@@ -747,13 +737,10 @@ impl OneShotOscillator {
         self.connect_signals(frame);
     }
 
-    /// The owner's frequency and detune signals connect in (`connectSignal`: cancelled, zeroed).
+    /// The owner's frequency and detune signals connect in.
     fn connect_signals(&mut self, frame: u64) {
-        for p in [&mut self.osc.frequency, &mut self.osc.detune] {
-            p.cancel_scheduled_values(0.0, frame);
-            p.set_value_at_time(0.0, 0.0, frame);
-            p.set_connected(true);
-        }
+        connect_signal(&mut self.osc.frequency, frame);
+        connect_signal(&mut self.osc.detune, frame);
     }
 
     fn free(&self) -> bool {
@@ -834,7 +821,7 @@ impl ToneOscillator {
     }
 
     fn current_time(&self, frame: u64) -> f64 {
-        param::context_frame(frame) as f64 / self.sample_rate as f64
+        param::context_time(frame, self.sample_rate as f64)
     }
 
     /// `Source.start(time)`: a restart while started (the running node keeps its phase and loses its
@@ -843,7 +830,7 @@ impl ToneOscillator {
         let current_time = self.current_time(frame);
         let time = time.max(current_time);
         if self.state.value_at(time) == State::Started {
-            debug_assert!(self.state.events.get(time).is_some_and(|e| time > e.time + 1e-6), "Start time must be strictly greater than previous start time");
+            debug_assert!(self.state.events.get(time).is_some_and(|e| param::gt(time, e.time)), "Start time must be strictly greater than previous start time");
             // Source.start cancels from `time` and sets "started" there; restart cancels it again.
             self.state.events.cancel(time);
             if let Some(i) = self.current {

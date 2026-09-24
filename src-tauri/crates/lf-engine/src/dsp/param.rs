@@ -57,6 +57,33 @@ pub fn context_frame(frame: u64) -> u64 {
     frame.next_multiple_of(QUANTUM as u64)
 }
 
+/// Blink's context time, in seconds, for a control call at `frame` ([`context_frame`]).
+pub fn context_time(frame: u64, sample_rate: f64) -> f64 {
+    context_frame(frame) as f64 / sample_rate
+}
+
+/// How [`time_to_sample_frame`] rounds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Rounding {
+    Nearest,
+    Up,
+}
+
+/// Blink's `TimeToSampleFrame` (`platform/audio/audio_utilities.cc`): round at 1024x oversampling
+/// first, so `k / rate` maps back to `k`.
+pub fn time_to_sample_frame(time: f64, sample_rate: f64, rounding: Rounding) -> u64 {
+    let frame = (time * sample_rate * 1024.0).round() / 1024.0;
+    let frame = match rounding {
+        Rounding::Nearest => frame.round(),
+        Rounding::Up => frame.ceil(),
+    };
+    if frame >= u64::MAX as f64 {
+        u64::MAX
+    } else {
+        frame as u64
+    }
+}
+
 /// Blink's `DiscreteTimeConstantForSampleRate`: 1 - exp(-1 / (rate * tau)).
 fn discrete_time_constant(time_constant: f64, sample_rate: f64) -> f64 {
     1.0 - fdlibm::exp(-1.0 / (sample_rate * time_constant))
@@ -211,7 +238,7 @@ impl AudioParam {
     }
 
     fn current_time(&self, frame: u64) -> f64 {
-        self.current_frame(frame) as f64 / self.sample_rate
+        context_time(frame, self.sample_rate)
     }
 
     /// The `value` attribute's setter: the intrinsic value now, and a setValueAtTime at the current
@@ -847,18 +874,22 @@ fn process_set_target(
 
 // ── Tone's layer ────────────────────────────────────────────────────────────────────────────────
 
-/// Tone's EPSILON comparisons (`core/util/Math.js`).
+/// Tone's EPSILON comparisons (`core/util/Math.js`: `GT`, `GTE`, `LT`, `EQ`).
 const EPSILON: f64 = 1e-6;
 
-fn gt(a: f64, b: f64) -> bool {
+pub(crate) fn gt(a: f64, b: f64) -> bool {
     a > b + EPSILON
 }
 
-fn lt(a: f64, b: f64) -> bool {
+pub(crate) fn gte(a: f64, b: f64) -> bool {
+    gt(a, b) || eq(a, b)
+}
+
+pub(crate) fn lt(a: f64, b: f64) -> bool {
     a + EPSILON < b
 }
 
-fn eq(a: f64, b: f64) -> bool {
+pub(crate) fn eq(a: f64, b: f64) -> bool {
     (a - b).abs() < EPSILON
 }
 

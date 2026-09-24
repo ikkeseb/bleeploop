@@ -1,7 +1,9 @@
 //! A gain stage: Tone's `Gain` (`core/context/Gain.js`, a [`ToneParam`] over the native gain) on
 //! Blink's GainNode (`modules/webaudio/gain_handler.cc`, with the silence propagation of
 //! `AudioHandler::ProcessIfNecessary` in `audio_handler.cc` and the gain copies of
-//! `platform/audio/audio_bus.cc`), at Chromium 153.0.8010.12. One call renders one quantum.
+//! `platform/audio/audio_bus.cc`), at Chromium 153.0.8010.12 ([`GainNode`]); and the same node with a
+//! signal connected into its gain, which makes the gain a-rate every quantum ([`ParamGain`]). One call
+//! renders one quantum.
 //!
 //! Ported from Chromium (Blink), Copyright The Chromium Authors, BSD-3-Clause.
 
@@ -88,5 +90,54 @@ impl GainNode {
 fn zero(out: &mut [[f32; QUANTUM]]) {
     for c in out.iter_mut() {
         c.fill(0.0);
+    }
+}
+
+/// A GainNode whose gain param has a signal connected: sample-accurate every quantum, the timeline
+/// plus the signal.
+pub struct ParamGain {
+    pub gain: ToneParam,
+    values: [f32; QUANTUM],
+}
+
+impl ParamGain {
+    /// Tone's `new Gain({ gain })` with a signal connected to its gain (`connectSignal` when
+    /// `zeroed`, which cancels the schedule and sets 0 at 0; a plain connect otherwise).
+    pub fn new(sample_rate: f32, gain: f64, zeroed: bool, frame: u64) -> Self {
+        let native = AudioParam::new(sample_rate as f64, 1.0, f32::MIN, f32::MAX, Rate::A);
+        let mut p = ParamGain { gain: ToneParam::new(native, Units::Gain, Some(gain), frame), values: [0.0; QUANTUM] };
+        p.connect(zeroed, frame);
+        p
+    }
+
+    pub fn reset(&mut self, gain: f64, zeroed: bool, frame: u64) {
+        self.gain.reset(Some(gain), frame);
+        self.connect(zeroed, frame);
+    }
+
+    fn connect(&mut self, zeroed: bool, frame: u64) {
+        if zeroed {
+            self.gain.connect_signal(false, frame);
+        } else {
+            self.gain.native.set_connected(true);
+        }
+    }
+
+    /// Render the quantum at `q`: `input` times the gain values. The automation runs whether or not
+    /// the input is silent (`None`).
+    pub fn process(&mut self, q: u64, input: Option<&[f32; QUANTUM]>, gain_input: Option<&[f32; QUANTUM]>, out: &mut [f32; QUANTUM]) -> bool {
+        self.gain.native.calculate_sample_accurate_values(q, &mut self.values, gain_input);
+        match input {
+            Some(x) => {
+                for ((o, &x), &g) in out.iter_mut().zip(x).zip(&self.values) {
+                    *o = x * g;
+                }
+                false
+            }
+            None => {
+                out.fill(0.0);
+                true
+            }
+        }
     }
 }

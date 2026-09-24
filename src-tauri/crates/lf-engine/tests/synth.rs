@@ -11,8 +11,9 @@
 
 mod common;
 
-use assert_no_alloc::{assert_no_alloc, violation_count};
+use assert_no_alloc::assert_no_alloc;
 use common::refs::{self, Class, ScriptEvent};
+use common::violation_count;
 use lf_engine::dsp::synth::{PolyKind, PolySynth};
 
 /// A scenario's calls in the probe's order, each with the Tone time it is made at: notes up front,

@@ -306,7 +306,7 @@ impl PolySynth {
 
     /// `allNotesOff()`: every voice releases 5 ms after the context time.
     pub fn all_notes_off(&mut self, frame: u64) {
-        let immediate = param::context_frame(frame) as f64 / self.sample_rate as f64;
+        let immediate = param::context_time(frame, self.sample_rate as f64);
         for entry in self.voices.iter_mut() {
             entry.note = None;
             entry.voice.trigger_release((immediate + 0.005).max(entry.attack_time), frame);

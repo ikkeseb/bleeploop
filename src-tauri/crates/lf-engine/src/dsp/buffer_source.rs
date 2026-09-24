@@ -26,7 +26,7 @@
 use std::sync::Arc;
 
 use super::gain::GainNode;
-use super::param::{self, AudioParam, Rate, Timeline, ToneParam, Units, QUANTUM};
+use super::param::{self, time_to_sample_frame, AudioParam, Rate, Rounding, Timeline, ToneParam, Units, QUANTUM};
 
 /// Channels a source renders (the noise tables are stereo).
 pub const MAX_CHANNELS: usize = 2;
@@ -73,26 +73,6 @@ impl AudioBuffer {
 
     pub fn duration(&self) -> f64 {
         self.length as f64 / self.sample_rate as f64
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Rounding {
-    Nearest,
-    Up,
-}
-
-/// Blink's `TimeToSampleFrame`: round at 1024× oversampling first, so `k / rate` maps back to `k`.
-fn time_to_sample_frame(time: f64, sample_rate: f64, rounding: Rounding) -> u64 {
-    let frame = (time * sample_rate * 1024.0).round() / 1024.0;
-    let frame = match rounding {
-        Rounding::Nearest => frame.round(),
-        Rounding::Up => frame.ceil(),
-    };
-    if frame >= u64::MAX as f64 {
-        u64::MAX
-    } else {
-        frame as u64
     }
 }
 
@@ -227,7 +207,7 @@ impl BufferSource {
             debug_assert!(false, "start once, at a time >= 0");
             return;
         }
-        self.start_time = when.max(param::context_frame(frame) as f64 / self.sample_rate as f64);
+        self.start_time = when.max(param::context_time(frame, self.sample_rate as f64));
         self.state = PlaybackState::Scheduled;
     }
 
@@ -242,7 +222,7 @@ impl BufferSource {
         self.is_grain = true;
         self.grain_offset = offset;
         self.grain_duration = duration.unwrap_or_else(|| self.buffer.as_ref().map_or(0.0, |b| b.duration()));
-        self.start_time = when.max(param::context_frame(frame) as f64 / self.sample_rate as f64);
+        self.start_time = when.max(param::context_time(frame, self.sample_rate as f64));
         if self.buffer.is_some() {
             self.clamp_grain_parameters();
         }
@@ -704,17 +684,17 @@ impl ToneBufferSource {
             let loop_end = if self.source.loop_end() != 0.0 { self.source.loop_end() } else { duration_s };
             let loop_start = self.source.loop_start();
             let loop_duration = loop_end - loop_start;
-            if param_gte(computed_offset, loop_end) {
+            if param::gte(computed_offset, loop_end) {
                 computed_offset = (computed_offset - loop_start) % loop_duration + loop_start;
             }
-            if (computed_offset - duration_s).abs() < 1e-6 {
+            if param::eq(computed_offset, duration_s) {
                 computed_offset = 0.0;
             }
         }
         let loop_end = if self.source.loop_end() != 0.0 { self.source.loop_end() } else { duration_s };
         self.source.set_buffer(Arc::clone(&self.buffer));
         self.source.set_loop_end(loop_end);
-        if computed_offset + 1e-6 < duration_s {
+        if param::lt(computed_offset, duration_s) {
             self.source_started = true;
             self.source.start_grain(time, computed_offset, None, frame);
         }
@@ -783,10 +763,6 @@ impl ToneBufferSource {
     }
 }
 
-fn param_gte(a: f64, b: f64) -> bool {
-    a > b + 1e-6 || (a - b).abs() < 1e-6
-}
-
 /// Sources one Noise keeps: the playing one plus those still fading or finishing after a restart.
 pub const NOISE_POOL: usize = 4;
 
@@ -840,7 +816,7 @@ impl Noise {
     pub fn start(&mut self, time: f64, random: f64, now: f64, frame: u64) {
         let time = time.max(now);
         if self.state_at(time) {
-            debug_assert!(self.state.get(time).is_some_and(|s| time > s.time + 1e-6), "start after the previous start");
+            debug_assert!(self.state.get(time).is_some_and(|s| param::gt(time, s.time)), "start after the previous start");
             self.state.cancel(time);
             self.state.add(State { time, started: true });
             // Source.restart: its cancel drops the start just added.

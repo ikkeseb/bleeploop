@@ -17,11 +17,11 @@
 
 use std::sync::Arc;
 
-use super::signal::{ParamGain, Signal, WaveShaper};
 use crate::dsp::envelope::{Adsr, AmplitudeEnvelope};
-use crate::dsp::gain::GainNode;
+use crate::dsp::gain::{GainNode, ParamGain};
 use crate::dsp::oscillator::{PeriodicWave, ToneOscillator};
 use crate::dsp::param::{Units, QUANTUM};
+use crate::dsp::signal::{Signal, WaveShaper};
 
 const Q: usize = QUANTUM;
 
