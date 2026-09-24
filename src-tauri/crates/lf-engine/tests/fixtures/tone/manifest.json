@@ -1,0 +1,2271 @@
+{
+ "note": "Written by verify/probes/tone-refs.mjs --write. Regenerate only with a stated reason; each port records its tolerance class against these bytes.",
+ "capture": {
+  "commit": "7e131e525747f48c2182f0316dab48d313202f41",
+  "dirty": true,
+  "tone": "15.1.22",
+  "chromium": "153.0.8010.12",
+  "rates": [
+   48000,
+   44100
+  ]
+ },
+ "tables": {
+  "prng": "mulberry32",
+  "seed": 1,
+  "order": [
+   "white",
+   "pink"
+  ],
+  "length": 220500,
+  "channels": 2,
+  "sha256": {
+   "white": "a635bb256868f6ab69871aff61ec95c479708572af9a193a3ba47414f279b518",
+   "pink": "c074f926cb1377751f26d30eef46bd4c85580fa49fb662ff504e1af43712bb59"
+  },
+  "rate": 48000
+ },
+ "scenarios": [
+  {
+   "id": "synth-lead-notes-48000",
+   "group": "synth",
+   "rate": 48000,
+   "seconds": 1,
+   "setup": {
+    "synth": "lead"
+   },
+   "events": [
+    {
+     "frame": 0,
+     "kind": "on",
+     "note": 36,
+     "velocity": 1
+    },
+    {
+     "frame": 9600,
+     "kind": "off",
+     "note": 36
+    },
+    {
+     "frame": 12000,
+     "kind": "on",
+     "note": 60,
+     "velocity": 0.5
+    },
+    {
+     "frame": 21600,
+     "kind": "off",
+     "note": 60
+    },
+    {
+     "frame": 24000,
+     "kind": "on",
+     "note": 84,
+     "velocity": 0.8
+    },
+    {
+     "frame": 33600,
+     "kind": "off",
+     "note": 84
+    },
+    {
+     "frame": 36000,
+     "kind": "on",
+     "note": 96,
+     "velocity": 0.25
+    },
+    {
+     "frame": 45600,
+     "kind": "off",
+     "note": 96
+    }
+   ],
+   "frames": 48000,
+   "channels": 1,
+   "peak": 0.32853978872299194,
+   "inputSha256": null,
+   "random": [],
+   "file": "synth-lead-notes-48000.wav",
+   "sha256": "5f0387526458a09e51019db77f2eb8c6eda5f723d3c3a7f03e7d96f5f69dc4ca",
+   "bytes": 192058
+  },
+  {
+   "id": "synth-lead-poly-48000",
+   "group": "synth",
+   "rate": 48000,
+   "seconds": 1.7,
+   "setup": {
+    "synth": "lead"
+   },
+   "events": [
+    {
+     "frame": 0,
+     "kind": "on",
+     "note": 48,
+     "velocity": 0.7
+    },
+    {
+     "frame": 0,
+     "kind": "on",
+     "note": 52,
+     "velocity": 0.7
+    },
+    {
+     "frame": 0,
+     "kind": "on",
+     "note": 56,
+     "velocity": 0.7
+    },
+    {
+     "frame": 0,
+     "kind": "on",
+     "note": 60,
+     "velocity": 0.7
+    },
+    {
+     "frame": 0,
+     "kind": "on",
+     "note": 64,
+     "velocity": 0.7
+    },
+    {
+     "frame": 0,
+     "kind": "on",
+     "note": 68,
+     "velocity": 0.7
+    },
+    {
+     "frame": 0,
+     "kind": "on",
+     "note": 72,
+     "velocity": 0.7
+    },
+    {
+     "frame": 0,
+     "kind": "on",
+     "note": 76,
+     "velocity": 0.7
+    },
+    {
+     "frame": 14400,
+     "kind": "on",
+     "note": 91,
+     "velocity": 0.9
+    },
+    {
+     "frame": 28800,
+     "kind": "off",
+     "note": 48
+    },
+    {
+     "frame": 28800,
+     "kind": "off",
+     "note": 52
+    },
+    {
+     "frame": 28800,
+     "kind": "off",
+     "note": 56
+    },
+    {
+     "frame": 28800,
+     "kind": "off",
+     "note": 60
+    },
+    {
+     "frame": 28800,
+     "kind": "off",
+     "note": 64
+    },
+    {
+     "frame": 28800,
+     "kind": "off",
+     "note": 68
+    },
+    {
+     "frame": 28800,
+     "kind": "off",
+     "note": 72
+    },
+    {
+     "frame": 28800,
+     "kind": "off",
+     "note": 76
+    },
+    {
+     "frame": 28800,
+     "kind": "off",
+     "note": 91
+    },
+    {
+     "frame": 38400,
+     "kind": "on",
+     "note": 64,
+     "velocity": 0.8
+    },
+    {
+     "frame": 43200,
+     "kind": "on",
+     "note": 67,
+     "velocity": 0.6
+    },
+    {
+     "frame": 48000,
+     "kind": "off",
+     "note": 64
+    },
+    {
+     "frame": 52800,
+     "kind": "off",
+     "note": 67
+    },
+    {
+     "frame": 55200,
+     "kind": "on",
+     "note": 57,
+     "velocity": 1
+    },
+    {
+     "frame": 57600,
+     "kind": "bend",
+     "value": 2
+    },
+    {
+     "frame": 60032,
+     "kind": "mod",
+     "value": 1
+    },
+    {
+     "frame": 69632,
+     "kind": "bend",
+     "value": -1.5
+    },
+    {
+     "frame": 74368,
+     "kind": "mod",
+     "value": 0
+    },
+    {
+     "frame": 76800,
+     "kind": "off",
+     "note": 57
+    }
+   ],
+   "frames": 81600,
+   "channels": 1,
+   "peak": 0.6396777033805847,
+   "inputSha256": null,
+   "random": [],
+   "file": "synth-lead-poly-48000.wav",
+   "sha256": "a684bc6bd7b9c4d68ddfcc6b03ac2d0ecf5d30ea7d0d4fce453b69a2fa0cbb39",
+   "bytes": 326458
+  },
+  {
+   "id": "synth-bass-notes-48000",
+   "group": "synth",
+   "rate": 48000,
+   "seconds": 1,
+   "setup": {
+    "synth": "bass"
+   },
+   "events": [
+    {
+     "frame": 0,
+     "kind": "on",
+     "note": 36,
+     "velocity": 1
+    },
+    {
+     "frame": 9600,
+     "kind": "off",
+     "note": 36
+    },
+    {
+     "frame": 12000,
+     "kind": "on",
+     "note": 60,
+     "velocity": 0.5
+    },
+    {
+     "frame": 21600,
+     "kind": "off",
+     "note": 60
+    },
+    {
+     "frame": 24000,
+     "kind": "on",
+     "note": 84,
+     "velocity": 0.8
+    },
+    {
+     "frame": 33600,
+     "kind": "off",
+     "note": 84
+    },
+    {
+     "frame": 36000,
+     "kind": "on",
+     "note": 96,
+     "velocity": 0.25
+    },
+    {
+     "frame": 45600,
+     "kind": "off",
+     "note": 96
+    }
+   ],
+   "frames": 48000,
+   "channels": 1,
+   "peak": 0.6182346940040588,
+   "inputSha256": null,
+   "random": [],
+   "file": "synth-bass-notes-48000.wav",
+   "sha256": "95d11b4bb348fbb74c5d5452222228d01d0e4c40d551e97541d215940598f704",
+   "bytes": 192058
+  },
+  {
+   "id": "synth-bass-poly-48000",
+   "group": "synth",
+   "rate": 48000,
+   "seconds": 1.7,
+   "setup": {
+    "synth": "bass"
+   },
+   "events": [
+    {
+     "frame": 0,
+     "kind": "on",
+     "note": 48,
+     "velocity": 0.7
+    },
+    {
+     "frame": 0,
+     "kind": "on",
+     "note": 52,
+     "velocity": 0.7
+    },
+    {
+     "frame": 0,
+     "kind": "on",
+     "note": 56,
+     "velocity": 0.7
+    },
+    {
+     "frame": 14400,
+     "kind": "on",
+     "note": 91,
+     "velocity": 0.9
+    },
+    {
+     "frame": 28800,
+     "kind": "off",
+     "note": 48
+    },
+    {
+     "frame": 28800,
+     "kind": "off",
+     "note": 52
+    },
+    {
+     "frame": 28800,
+     "kind": "off",
+     "note": 56
+    },
+    {
+     "frame": 28800,
+     "kind": "off",
+     "note": 91
+    },
+    {
+     "frame": 38400,
+     "kind": "on",
+     "note": 64,
+     "velocity": 0.8
+    },
+    {
+     "frame": 43200,
+     "kind": "on",
+     "note": 67,
+     "velocity": 0.6
+    },
+    {
+     "frame": 48000,
+     "kind": "off",
+     "note": 64
+    },
+    {
+     "frame": 52800,
+     "kind": "off",
+     "note": 67
+    },
+    {
+     "frame": 55200,
+     "kind": "on",
+     "note": 57,
+     "velocity": 1
+    },
+    {
+     "frame": 57600,
+     "kind": "bend",
+     "value": 2
+    },
+    {
+     "frame": 60032,
+     "kind": "mod",
+     "value": 1
+    },
+    {
+     "frame": 69632,
+     "kind": "bend",
+     "value": -1.5
+    },
+    {
+     "frame": 74368,
+     "kind": "mod",
+     "value": 0
+    },
+    {
+     "frame": 76800,
+     "kind": "off",
+     "note": 57
+    }
+   ],
+   "frames": 81600,
+   "channels": 1,
+   "peak": 0.6382102370262146,
+   "inputSha256": null,
+   "random": [],
+   "file": "synth-bass-poly-48000.wav",
+   "sha256": "feed980038eb345792e5a3fab67da122672e02956a9ad42029e581b1f62e9520",
+   "bytes": 326458
+  },
+  {
+   "id": "synth-pad-notes-48000",
+   "group": "synth",
+   "rate": 48000,
+   "seconds": 1,
+   "setup": {
+    "synth": "pad"
+   },
+   "events": [
+    {
+     "frame": 0,
+     "kind": "on",
+     "note": 36,
+     "velocity": 1
+    },
+    {
+     "frame": 9600,
+     "kind": "off",
+     "note": 36
+    },
+    {
+     "frame": 12000,
+     "kind": "on",
+     "note": 60,
+     "velocity": 0.5
+    },
+    {
+     "frame": 21600,
+     "kind": "off",
+     "note": 60
+    },
+    {
+     "frame": 24000,
+     "kind": "on",
+     "note": 84,
+     "velocity": 0.8
+    },
+    {
+     "frame": 33600,
+     "kind": "off",
+     "note": 84
+    },
+    {
+     "frame": 36000,
+     "kind": "on",
+     "note": 96,
+     "velocity": 0.25
+    },
+    {
+     "frame": 45600,
+     "kind": "off",
+     "note": 96
+    }
+   ],
+   "frames": 48000,
+   "channels": 1,
+   "peak": 0.050876520574092865,
+   "inputSha256": null,
+   "random": [],
+   "file": "synth-pad-notes-48000.wav",
+   "sha256": "e6fc10c616f69ebd29301ae320308ea9e93f95ea6a895ef2ec22f757590cc3fd",
+   "bytes": 192058
+  },
+  {
+   "id": "synth-pad-poly-48000",
+   "group": "synth",
+   "rate": 48000,
+   "seconds": 1.7,
+   "setup": {
+    "synth": "pad"
+   },
+   "events": [
+    {
+     "frame": 0,
+     "kind": "on",
+     "note": 48,
+     "velocity": 0.7
+    },
+    {
+     "frame": 0,
+     "kind": "on",
+     "note": 52,
+     "velocity": 0.7
+    },
+    {
+     "frame": 0,
+     "kind": "on",
+     "note": 56,
+     "velocity": 0.7
+    },
+    {
+     "frame": 0,
+     "kind": "on",
+     "note": 60,
+     "velocity": 0.7
+    },
+    {
+     "frame": 0,
+     "kind": "on",
+     "note": 64,
+     "velocity": 0.7
+    },
+    {
+     "frame": 0,
+     "kind": "on",
+     "note": 68,
+     "velocity": 0.7
+    },
+    {
+     "frame": 0,
+     "kind": "on",
+     "note": 72,
+     "velocity": 0.7
+    },
+    {
+     "frame": 0,
+     "kind": "on",
+     "note": 76,
+     "velocity": 0.7
+    },
+    {
+     "frame": 0,
+     "kind": "on",
+     "note": 80,
+     "velocity": 0.7
+    },
+    {
+     "frame": 0,
+     "kind": "on",
+     "note": 84,
+     "velocity": 0.7
+    },
+    {
+     "frame": 0,
+     "kind": "on",
+     "note": 88,
+     "velocity": 0.7
+    },
+    {
+     "frame": 0,
+     "kind": "on",
+     "note": 92,
+     "velocity": 0.7
+    },
+    {
+     "frame": 14400,
+     "kind": "on",
+     "note": 91,
+     "velocity": 0.9
+    },
+    {
+     "frame": 28800,
+     "kind": "off",
+     "note": 48
+    },
+    {
+     "frame": 28800,
+     "kind": "off",
+     "note": 52
+    },
+    {
+     "frame": 28800,
+     "kind": "off",
+     "note": 56
+    },
+    {
+     "frame": 28800,
+     "kind": "off",
+     "note": 60
+    },
+    {
+     "frame": 28800,
+     "kind": "off",
+     "note": 64
+    },
+    {
+     "frame": 28800,
+     "kind": "off",
+     "note": 68
+    },
+    {
+     "frame": 28800,
+     "kind": "off",
+     "note": 72
+    },
+    {
+     "frame": 28800,
+     "kind": "off",
+     "note": 76
+    },
+    {
+     "frame": 28800,
+     "kind": "off",
+     "note": 80
+    },
+    {
+     "frame": 28800,
+     "kind": "off",
+     "note": 84
+    },
+    {
+     "frame": 28800,
+     "kind": "off",
+     "note": 88
+    },
+    {
+     "frame": 28800,
+     "kind": "off",
+     "note": 92
+    },
+    {
+     "frame": 28800,
+     "kind": "off",
+     "note": 91
+    },
+    {
+     "frame": 38400,
+     "kind": "on",
+     "note": 64,
+     "velocity": 0.8
+    },
+    {
+     "frame": 43200,
+     "kind": "on",
+     "note": 67,
+     "velocity": 0.6
+    },
+    {
+     "frame": 48000,
+     "kind": "off",
+     "note": 64
+    },
+    {
+     "frame": 52800,
+     "kind": "off",
+     "note": 67
+    },
+    {
+     "frame": 55200,
+     "kind": "on",
+     "note": 57,
+     "velocity": 1
+    },
+    {
+     "frame": 57600,
+     "kind": "bend",
+     "value": 2
+    },
+    {
+     "frame": 60032,
+     "kind": "mod",
+     "value": 1
+    },
+    {
+     "frame": 69632,
+     "kind": "bend",
+     "value": -1.5
+    },
+    {
+     "frame": 74368,
+     "kind": "mod",
+     "value": 0
+    },
+    {
+     "frame": 76800,
+     "kind": "off",
+     "note": 57
+    }
+   ],
+   "frames": 81600,
+   "channels": 1,
+   "peak": 0.7749823331832886,
+   "inputSha256": null,
+   "random": [],
+   "file": "synth-pad-poly-48000.wav",
+   "sha256": "472a99c997b5e622c166dd0450a4482255cdc50c9d9aa3d1e25ff6a5c31f8f8a",
+   "bytes": 326458
+  },
+  {
+   "id": "synth-piano-notes-48000",
+   "group": "synth",
+   "rate": 48000,
+   "seconds": 1,
+   "setup": {
+    "synth": "piano"
+   },
+   "events": [
+    {
+     "frame": 0,
+     "kind": "on",
+     "note": 36,
+     "velocity": 1
+    },
+    {
+     "frame": 9600,
+     "kind": "off",
+     "note": 36
+    },
+    {
+     "frame": 12000,
+     "kind": "on",
+     "note": 60,
+     "velocity": 0.5
+    },
+    {
+     "frame": 21600,
+     "kind": "off",
+     "note": 60
+    },
+    {
+     "frame": 24000,
+     "kind": "on",
+     "note": 84,
+     "velocity": 0.8
+    },
+    {
+     "frame": 33600,
+     "kind": "off",
+     "note": 84
+    },
+    {
+     "frame": 36000,
+     "kind": "on",
+     "note": 96,
+     "velocity": 0.25
+    },
+    {
+     "frame": 45600,
+     "kind": "off",
+     "note": 96
+    }
+   ],
+   "frames": 48000,
+   "channels": 1,
+   "peak": 0.3023311495780945,
+   "inputSha256": null,
+   "random": [],
+   "file": "synth-piano-notes-48000.wav",
+   "sha256": "e128458af7962764082912348e025db0877413a2509de37ca781f81d5d4c901d",
+   "bytes": 192058
+  },
+  {
+   "id": "synth-piano-poly-48000",
+   "group": "synth",
+   "rate": 48000,
+   "seconds": 1.7,
+   "setup": {
+    "synth": "piano"
+   },
+   "events": [
+    {
+     "frame": 0,
+     "kind": "on",
+     "note": 48,
+     "velocity": 0.7
+    },
+    {
+     "frame": 0,
+     "kind": "on",
+     "note": 52,
+     "velocity": 0.7
+    },
+    {
+     "frame": 0,
+     "kind": "on",
+     "note": 56,
+     "velocity": 0.7
+    },
+    {
+     "frame": 0,
+     "kind": "on",
+     "note": 60,
+     "velocity": 0.7
+    },
+    {
+     "frame": 0,
+     "kind": "on",
+     "note": 64,
+     "velocity": 0.7
+    },
+    {
+     "frame": 0,
+     "kind": "on",
+     "note": 68,
+     "velocity": 0.7
+    },
+    {
+     "frame": 0,
+     "kind": "on",
+     "note": 72,
+     "velocity": 0.7
+    },
+    {
+     "frame": 0,
+     "kind": "on",
+     "note": 76,
+     "velocity": 0.7
+    },
+    {
+     "frame": 0,
+     "kind": "on",
+     "note": 80,
+     "velocity": 0.7
+    },
+    {
+     "frame": 0,
+     "kind": "on",
+     "note": 84,
+     "velocity": 0.7
+    },
+    {
+     "frame": 0,
+     "kind": "on",
+     "note": 88,
+     "velocity": 0.7
+    },
+    {
+     "frame": 0,
+     "kind": "on",
+     "note": 92,
+     "velocity": 0.7
+    },
+    {
+     "frame": 14400,
+     "kind": "on",
+     "note": 91,
+     "velocity": 0.9
+    },
+    {
+     "frame": 28800,
+     "kind": "off",
+     "note": 48
+    },
+    {
+     "frame": 28800,
+     "kind": "off",
+     "note": 52
+    },
+    {
+     "frame": 28800,
+     "kind": "off",
+     "note": 56
+    },
+    {
+     "frame": 28800,
+     "kind": "off",
+     "note": 60
+    },
+    {
+     "frame": 28800,
+     "kind": "off",
+     "note": 64
+    },
+    {
+     "frame": 28800,
+     "kind": "off",
+     "note": 68
+    },
+    {
+     "frame": 28800,
+     "kind": "off",
+     "note": 72
+    },
+    {
+     "frame": 28800,
+     "kind": "off",
+     "note": 76
+    },
+    {
+     "frame": 28800,
+     "kind": "off",
+     "note": 80
+    },
+    {
+     "frame": 28800,
+     "kind": "off",
+     "note": 84
+    },
+    {
+     "frame": 28800,
+     "kind": "off",
+     "note": 88
+    },
+    {
+     "frame": 28800,
+     "kind": "off",
+     "note": 92
+    },
+    {
+     "frame": 28800,
+     "kind": "off",
+     "note": 91
+    },
+    {
+     "frame": 38400,
+     "kind": "on",
+     "note": 64,
+     "velocity": 0.8
+    },
+    {
+     "frame": 43200,
+     "kind": "on",
+     "note": 67,
+     "velocity": 0.6
+    },
+    {
+     "frame": 48000,
+     "kind": "off",
+     "note": 64
+    },
+    {
+     "frame": 52800,
+     "kind": "off",
+     "note": 67
+    },
+    {
+     "frame": 55200,
+     "kind": "on",
+     "note": 57,
+     "velocity": 1
+    },
+    {
+     "frame": 57600,
+     "kind": "bend",
+     "value": 2
+    },
+    {
+     "frame": 60032,
+     "kind": "mod",
+     "value": 1
+    },
+    {
+     "frame": 69632,
+     "kind": "bend",
+     "value": -1.5
+    },
+    {
+     "frame": 74368,
+     "kind": "mod",
+     "value": 0
+    },
+    {
+     "frame": 76800,
+     "kind": "off",
+     "note": 57
+    }
+   ],
+   "frames": 81600,
+   "channels": 1,
+   "peak": 0.9524363875389099,
+   "inputSha256": null,
+   "random": [],
+   "file": "synth-piano-poly-48000.wav",
+   "sha256": "8f0a6d99c4509a23a4fa7e9d097d0e030787baab37b89d29a10e0a376e2b8681",
+   "bytes": 326458
+  },
+  {
+   "id": "synth-organ-notes-48000",
+   "group": "synth",
+   "rate": 48000,
+   "seconds": 1,
+   "setup": {
+    "synth": "organ"
+   },
+   "events": [
+    {
+     "frame": 0,
+     "kind": "on",
+     "note": 36,
+     "velocity": 1
+    },
+    {
+     "frame": 9600,
+     "kind": "off",
+     "note": 36
+    },
+    {
+     "frame": 12000,
+     "kind": "on",
+     "note": 60,
+     "velocity": 0.5
+    },
+    {
+     "frame": 21600,
+     "kind": "off",
+     "note": 60
+    },
+    {
+     "frame": 24000,
+     "kind": "on",
+     "note": 84,
+     "velocity": 0.8
+    },
+    {
+     "frame": 33600,
+     "kind": "off",
+     "note": 84
+    },
+    {
+     "frame": 36000,
+     "kind": "on",
+     "note": 96,
+     "velocity": 0.25
+    },
+    {
+     "frame": 45600,
+     "kind": "off",
+     "note": 96
+    }
+   ],
+   "frames": 48000,
+   "channels": 1,
+   "peak": 0.2005435824394226,
+   "inputSha256": null,
+   "random": [],
+   "file": "synth-organ-notes-48000.wav",
+   "sha256": "db0e178e89c080db239aabb388eba050d711e384dbbd7d0dd5939bb8fa01fcdd",
+   "bytes": 192058
+  },
+  {
+   "id": "synth-organ-poly-48000",
+   "group": "synth",
+   "rate": 48000,
+   "seconds": 1.7,
+   "setup": {
+    "synth": "organ"
+   },
+   "events": [
+    {
+     "frame": 0,
+     "kind": "on",
+     "note": 48,
+     "velocity": 0.7
+    },
+    {
+     "frame": 0,
+     "kind": "on",
+     "note": 52,
+     "velocity": 0.7
+    },
+    {
+     "frame": 0,
+     "kind": "on",
+     "note": 56,
+     "velocity": 0.7
+    },
+    {
+     "frame": 0,
+     "kind": "on",
+     "note": 60,
+     "velocity": 0.7
+    },
+    {
+     "frame": 0,
+     "kind": "on",
+     "note": 64,
+     "velocity": 0.7
+    },
+    {
+     "frame": 0,
+     "kind": "on",
+     "note": 68,
+     "velocity": 0.7
+    },
+    {
+     "frame": 0,
+     "kind": "on",
+     "note": 72,
+     "velocity": 0.7
+    },
+    {
+     "frame": 0,
+     "kind": "on",
+     "note": 76,
+     "velocity": 0.7
+    },
+    {
+     "frame": 14400,
+     "kind": "on",
+     "note": 91,
+     "velocity": 0.9
+    },
+    {
+     "frame": 28800,
+     "kind": "off",
+     "note": 48
+    },
+    {
+     "frame": 28800,
+     "kind": "off",
+     "note": 52
+    },
+    {
+     "frame": 28800,
+     "kind": "off",
+     "note": 56
+    },
+    {
+     "frame": 28800,
+     "kind": "off",
+     "note": 60
+    },
+    {
+     "frame": 28800,
+     "kind": "off",
+     "note": 64
+    },
+    {
+     "frame": 28800,
+     "kind": "off",
+     "note": 68
+    },
+    {
+     "frame": 28800,
+     "kind": "off",
+     "note": 72
+    },
+    {
+     "frame": 28800,
+     "kind": "off",
+     "note": 76
+    },
+    {
+     "frame": 28800,
+     "kind": "off",
+     "note": 91
+    },
+    {
+     "frame": 38400,
+     "kind": "on",
+     "note": 64,
+     "velocity": 0.8
+    },
+    {
+     "frame": 43200,
+     "kind": "on",
+     "note": 67,
+     "velocity": 0.6
+    },
+    {
+     "frame": 48000,
+     "kind": "off",
+     "note": 64
+    },
+    {
+     "frame": 52800,
+     "kind": "off",
+     "note": 67
+    },
+    {
+     "frame": 55200,
+     "kind": "on",
+     "note": 57,
+     "velocity": 1
+    },
+    {
+     "frame": 57600,
+     "kind": "bend",
+     "value": 2
+    },
+    {
+     "frame": 60032,
+     "kind": "mod",
+     "value": 1
+    },
+    {
+     "frame": 69632,
+     "kind": "bend",
+     "value": -1.5
+    },
+    {
+     "frame": 74368,
+     "kind": "mod",
+     "value": 0
+    },
+    {
+     "frame": 76800,
+     "kind": "off",
+     "note": 57
+    }
+   ],
+   "frames": 81600,
+   "channels": 1,
+   "peak": 0.9104483127593994,
+   "inputSha256": null,
+   "random": [],
+   "file": "synth-organ-poly-48000.wav",
+   "sha256": "a62e694f1d4286ac86b29ee4c46314291060b181610ef399f97130ac5c1f1bce",
+   "bytes": 326458
+  },
+  {
+   "id": "synth-drum-kit-48000",
+   "group": "synth",
+   "rate": 48000,
+   "seconds": 2.4,
+   "setup": {
+    "synth": "drum"
+   },
+   "events": [
+    {
+     "frame": 0,
+     "kind": "on",
+     "note": 49,
+     "velocity": 1
+    },
+    {
+     "frame": 4800,
+     "kind": "on",
+     "note": 51,
+     "velocity": 0.5
+    },
+    {
+     "frame": 9600,
+     "kind": "on",
+     "note": 56,
+     "velocity": 1
+    },
+    {
+     "frame": 14400,
+     "kind": "on",
+     "note": 54,
+     "velocity": 0.5
+    },
+    {
+     "frame": 19200,
+     "kind": "on",
+     "note": 39,
+     "velocity": 1
+    },
+    {
+     "frame": 24000,
+     "kind": "on",
+     "note": 40,
+     "velocity": 0.5
+    },
+    {
+     "frame": 28800,
+     "kind": "on",
+     "note": 44,
+     "velocity": 1
+    },
+    {
+     "frame": 33600,
+     "kind": "on",
+     "note": 37,
+     "velocity": 0.5
+    },
+    {
+     "frame": 38400,
+     "kind": "on",
+     "note": 36,
+     "velocity": 1
+    },
+    {
+     "frame": 43200,
+     "kind": "on",
+     "note": 38,
+     "velocity": 0.5
+    },
+    {
+     "frame": 48000,
+     "kind": "on",
+     "note": 42,
+     "velocity": 1
+    },
+    {
+     "frame": 52800,
+     "kind": "on",
+     "note": 46,
+     "velocity": 0.5
+    },
+    {
+     "frame": 57600,
+     "kind": "on",
+     "note": 35,
+     "velocity": 1
+    },
+    {
+     "frame": 62400,
+     "kind": "on",
+     "note": 45,
+     "velocity": 0.5
+    },
+    {
+     "frame": 67200,
+     "kind": "on",
+     "note": 47,
+     "velocity": 1
+    },
+    {
+     "frame": 72000,
+     "kind": "on",
+     "note": 50,
+     "velocity": 0.5
+    }
+   ],
+   "frames": 115200,
+   "channels": 2,
+   "peak": 0.6390466690063477,
+   "inputSha256": null,
+   "random": [
+    0.4325439161621034,
+    0.8017231374979019,
+    0.8880032976157963
+   ],
+   "file": "synth-drum-kit-48000.wav",
+   "sha256": "c74c183a31ea48ec6e396628f3bea4333aefeabe25b08e84fca10359dd92f1f7",
+   "bytes": 921658
+  },
+  {
+   "id": "fx-filter-dark-48000",
+   "group": "fx",
+   "rate": 48000,
+   "seconds": 1,
+   "setup": {
+    "states": [
+     {
+      "bypassed": false,
+      "params": {
+       "cutoff": 300,
+       "q": 0.7
+      }
+     },
+     {
+      "bypassed": true,
+      "params": {
+       "semitones": 0
+      }
+     },
+     {
+      "bypassed": true,
+      "params": {
+       "rate": 1
+      }
+     },
+     {
+      "bypassed": true,
+      "params": {
+       "time": 1,
+       "feedback": 0.4,
+       "mix": 0.3
+      }
+     },
+     {
+      "bypassed": true,
+      "params": {
+       "amount": 0.3
+      }
+     }
+    ],
+    "timing": {
+     "anchor": 0,
+     "beatPeriod": 0.5
+    },
+    "input": {
+     "active": 1
+    }
+   },
+   "events": [],
+   "frames": 48000,
+   "channels": 1,
+   "peak": 0.8711626529693604,
+   "inputSha256": "d4e8721bf11e359c74ce8d3820a9efacc415b7a7e8a1cf4b0a34cfc9f74f967a",
+   "random": [],
+   "file": "fx-filter-dark-48000.wav",
+   "sha256": "d6959bfc0817066048e7cc07c173121172cb2af7fd07e196cf9bf61846411add",
+   "bytes": 192058
+  },
+  {
+   "id": "fx-filter-reso-48000",
+   "group": "fx",
+   "rate": 48000,
+   "seconds": 1,
+   "setup": {
+    "states": [
+     {
+      "bypassed": false,
+      "params": {
+       "cutoff": 6000,
+       "q": 10
+      }
+     },
+     {
+      "bypassed": true,
+      "params": {
+       "semitones": 0
+      }
+     },
+     {
+      "bypassed": true,
+      "params": {
+       "rate": 1
+      }
+     },
+     {
+      "bypassed": true,
+      "params": {
+       "time": 1,
+       "feedback": 0.4,
+       "mix": 0.3
+      }
+     },
+     {
+      "bypassed": true,
+      "params": {
+       "amount": 0.3
+      }
+     }
+    ],
+    "timing": {
+     "anchor": 0,
+     "beatPeriod": 0.5
+    },
+    "input": {
+     "active": 1
+    }
+   },
+   "events": [],
+   "frames": 48000,
+   "channels": 1,
+   "peak": 2.1957058906555176,
+   "inputSha256": "d4e8721bf11e359c74ce8d3820a9efacc415b7a7e8a1cf4b0a34cfc9f74f967a",
+   "random": [],
+   "file": "fx-filter-reso-48000.wav",
+   "sha256": "b65ce57325319012306cbf4cdbc037ad353ea98e97f8b3c3830b9a3c8a4f0432",
+   "bytes": 192058
+  },
+  {
+   "id": "fx-filter-bypass-48000",
+   "group": "fx",
+   "rate": 48000,
+   "seconds": 1,
+   "setup": {
+    "states": [
+     {
+      "bypassed": false,
+      "params": {
+       "cutoff": 800,
+       "q": 4
+      }
+     },
+     {
+      "bypassed": true,
+      "params": {
+       "semitones": 0
+      }
+     },
+     {
+      "bypassed": true,
+      "params": {
+       "rate": 1
+      }
+     },
+     {
+      "bypassed": true,
+      "params": {
+       "time": 1,
+       "feedback": 0.4,
+       "mix": 0.3
+      }
+     },
+     {
+      "bypassed": true,
+      "params": {
+       "amount": 0.3
+      }
+     }
+    ],
+    "timing": {
+     "anchor": 0,
+     "beatPeriod": 0.5
+    },
+    "input": {
+     "active": 1
+    }
+   },
+   "events": [
+    {
+     "frame": 14464,
+     "kind": "param",
+     "fx": 0,
+     "key": "cutoff",
+     "value": 2400
+    },
+    {
+     "frame": 24064,
+     "kind": "bypass",
+     "fx": 0,
+     "value": true
+    },
+    {
+     "frame": 35968,
+     "kind": "bypass",
+     "fx": 0,
+     "value": false
+    }
+   ],
+   "frames": 48000,
+   "channels": 1,
+   "peak": 1.1335599422454834,
+   "inputSha256": "d4e8721bf11e359c74ce8d3820a9efacc415b7a7e8a1cf4b0a34cfc9f74f967a",
+   "random": [],
+   "file": "fx-filter-bypass-48000.wav",
+   "sha256": "09ac5581ca06761a5f2455fcfe37e9e5196dd2377a4a01569d09d97f37b59256",
+   "bytes": 192058
+  },
+  {
+   "id": "fx-pitch-down12-48000",
+   "group": "fx",
+   "rate": 48000,
+   "seconds": 1,
+   "setup": {
+    "states": [
+     {
+      "bypassed": true,
+      "params": {
+       "cutoff": 1200,
+       "q": 2
+      }
+     },
+     {
+      "bypassed": false,
+      "params": {
+       "semitones": -12
+      }
+     },
+     {
+      "bypassed": true,
+      "params": {
+       "rate": 1
+      }
+     },
+     {
+      "bypassed": true,
+      "params": {
+       "time": 1,
+       "feedback": 0.4,
+       "mix": 0.3
+      }
+     },
+     {
+      "bypassed": true,
+      "params": {
+       "amount": 0.3
+      }
+     }
+    ],
+    "timing": {
+     "anchor": 0,
+     "beatPeriod": 0.5
+    },
+    "input": {
+     "active": 0.7
+    }
+   },
+   "events": [],
+   "frames": 48000,
+   "channels": 1,
+   "peak": 0.7056052684783936,
+   "inputSha256": "471c77272212b8f0519b8044d2b04355d735a53af4626ce88651c830c1bccaaf",
+   "random": [],
+   "file": "fx-pitch-down12-48000.wav",
+   "sha256": "dbfd67856fe19fdf451c5b6d18331b7506e4f4ec795ba451295026148aed9f26",
+   "bytes": 192058
+  },
+  {
+   "id": "fx-pitch-up7-48000",
+   "group": "fx",
+   "rate": 48000,
+   "seconds": 1,
+   "setup": {
+    "states": [
+     {
+      "bypassed": true,
+      "params": {
+       "cutoff": 1200,
+       "q": 2
+      }
+     },
+     {
+      "bypassed": false,
+      "params": {
+       "semitones": 7
+      }
+     },
+     {
+      "bypassed": true,
+      "params": {
+       "rate": 1
+      }
+     },
+     {
+      "bypassed": true,
+      "params": {
+       "time": 1,
+       "feedback": 0.4,
+       "mix": 0.3
+      }
+     },
+     {
+      "bypassed": true,
+      "params": {
+       "amount": 0.3
+      }
+     }
+    ],
+    "timing": {
+     "anchor": 0,
+     "beatPeriod": 0.5
+    },
+    "input": {
+     "active": 0.7
+    }
+   },
+   "events": [],
+   "frames": 48000,
+   "channels": 1,
+   "peak": 0.7330033779144287,
+   "inputSha256": "471c77272212b8f0519b8044d2b04355d735a53af4626ce88651c830c1bccaaf",
+   "random": [],
+   "file": "fx-pitch-up7-48000.wav",
+   "sha256": "65b238f65025bf872ccd3258c51f887abde929cddafe6ad5868bd8981f1c12b1",
+   "bytes": 192058
+  },
+  {
+   "id": "fx-stutter-8th-48000",
+   "group": "fx",
+   "rate": 48000,
+   "seconds": 1,
+   "setup": {
+    "states": [
+     {
+      "bypassed": true,
+      "params": {
+       "cutoff": 1200,
+       "q": 2
+      }
+     },
+     {
+      "bypassed": true,
+      "params": {
+       "semitones": 0
+      }
+     },
+     {
+      "bypassed": false,
+      "params": {
+       "rate": 1
+      }
+     },
+     {
+      "bypassed": true,
+      "params": {
+       "time": 1,
+       "feedback": 0.4,
+       "mix": 0.3
+      }
+     },
+     {
+      "bypassed": true,
+      "params": {
+       "amount": 0.3
+      }
+     }
+    ],
+    "timing": {
+     "anchor": 0,
+     "beatPeriod": 0.5
+    },
+    "input": {
+     "active": 1
+    }
+   },
+   "events": [],
+   "frames": 48000,
+   "channels": 1,
+   "peak": 0.9791646003723145,
+   "inputSha256": "d4e8721bf11e359c74ce8d3820a9efacc415b7a7e8a1cf4b0a34cfc9f74f967a",
+   "random": [],
+   "file": "fx-stutter-8th-48000.wav",
+   "sha256": "0d0bd8f69c7e7eae17a189e8454fcae079aaf8c52df3bd0ec3c9fb893fea1d99",
+   "bytes": 192058
+  },
+  {
+   "id": "fx-stutter-137-48000",
+   "group": "fx",
+   "rate": 48000,
+   "seconds": 1,
+   "setup": {
+    "states": [
+     {
+      "bypassed": true,
+      "params": {
+       "cutoff": 1200,
+       "q": 2
+      }
+     },
+     {
+      "bypassed": true,
+      "params": {
+       "semitones": 0
+      }
+     },
+     {
+      "bypassed": false,
+      "params": {
+       "rate": 3
+      }
+     },
+     {
+      "bypassed": true,
+      "params": {
+       "time": 1,
+       "feedback": 0.4,
+       "mix": 0.3
+      }
+     },
+     {
+      "bypassed": true,
+      "params": {
+       "amount": 0.3
+      }
+     }
+    ],
+    "timing": {
+     "anchor": -0.087,
+     "beatPeriod": 0.43795833333333334
+    },
+    "input": {
+     "active": 1
+    }
+   },
+   "events": [
+    {
+     "frame": 24064,
+     "kind": "param",
+     "fx": 2,
+     "key": "rate",
+     "value": 2
+    }
+   ],
+   "frames": 48000,
+   "channels": 1,
+   "peak": 0.9791646003723145,
+   "inputSha256": "d4e8721bf11e359c74ce8d3820a9efacc415b7a7e8a1cf4b0a34cfc9f74f967a",
+   "random": [],
+   "file": "fx-stutter-137-48000.wav",
+   "sha256": "d2430e5f9cf0e2073eeb50ceaf6b1e1abb6f112743e441ba5335372d918cb402",
+   "bytes": 192058
+  },
+  {
+   "id": "fx-delay-default-48000",
+   "group": "fx",
+   "rate": 48000,
+   "seconds": 1.5,
+   "setup": {
+    "states": [
+     {
+      "bypassed": true,
+      "params": {
+       "cutoff": 1200,
+       "q": 2
+      }
+     },
+     {
+      "bypassed": true,
+      "params": {
+       "semitones": 0
+      }
+     },
+     {
+      "bypassed": true,
+      "params": {
+       "rate": 1
+      }
+     },
+     {
+      "bypassed": false,
+      "params": {
+       "time": 1,
+       "feedback": 0.4,
+       "mix": 0.3
+      }
+     },
+     {
+      "bypassed": true,
+      "params": {
+       "amount": 0.3
+      }
+     }
+    ],
+    "timing": {
+     "anchor": 0,
+     "beatPeriod": 0.5
+    },
+    "input": {
+     "active": 0.4
+    }
+   },
+   "events": [],
+   "frames": 72000,
+   "channels": 1,
+   "peak": 0.8544794321060181,
+   "inputSha256": "f41da734c9f86175c7b1ea62b4abcfe73085bd459aa53624114221d68fff886e",
+   "random": [],
+   "file": "fx-delay-default-48000.wav",
+   "sha256": "a82b97a760ef22217585093f04e9fcff8cef4233901e33570fdb4e7100d9f743",
+   "bytes": 288058
+  },
+  {
+   "id": "fx-delay-hot-48000",
+   "group": "fx",
+   "rate": 48000,
+   "seconds": 1.5,
+   "setup": {
+    "states": [
+     {
+      "bypassed": true,
+      "params": {
+       "cutoff": 1200,
+       "q": 2
+      }
+     },
+     {
+      "bypassed": true,
+      "params": {
+       "semitones": 0
+      }
+     },
+     {
+      "bypassed": true,
+      "params": {
+       "rate": 1
+      }
+     },
+     {
+      "bypassed": false,
+      "params": {
+       "time": 0,
+       "feedback": 0.95,
+       "mix": 1
+      }
+     },
+     {
+      "bypassed": true,
+      "params": {
+       "amount": 0.3
+      }
+     }
+    ],
+    "timing": {
+     "anchor": -0.087,
+     "beatPeriod": 0.43795833333333334
+    },
+    "input": {
+     "active": 0.4
+    }
+   },
+   "events": [],
+   "frames": 72000,
+   "channels": 1,
+   "peak": 0.6991627812385559,
+   "inputSha256": "f41da734c9f86175c7b1ea62b4abcfe73085bd459aa53624114221d68fff886e",
+   "random": [],
+   "file": "fx-delay-hot-48000.wav",
+   "sha256": "c8971ee67886c4b390f3cc54f171712591682f82e882a11931176d55bc0ae208",
+   "bytes": 288058
+  },
+  {
+   "id": "fx-reverb-full-48000",
+   "group": "fx",
+   "rate": 48000,
+   "seconds": 2.2,
+   "setup": {
+    "states": [
+     {
+      "bypassed": true,
+      "params": {
+       "cutoff": 1200,
+       "q": 2
+      }
+     },
+     {
+      "bypassed": true,
+      "params": {
+       "semitones": 0
+      }
+     },
+     {
+      "bypassed": true,
+      "params": {
+       "rate": 1
+      }
+     },
+     {
+      "bypassed": true,
+      "params": {
+       "time": 1,
+       "feedback": 0.4,
+       "mix": 0.3
+      }
+     },
+     {
+      "bypassed": false,
+      "params": {
+       "amount": 1
+      }
+     }
+    ],
+    "timing": {
+     "anchor": 0,
+     "beatPeriod": 0.5
+    },
+    "input": {
+     "active": 0.3
+    },
+    "reverb": true
+   },
+   "events": [],
+   "frames": 105600,
+   "channels": 2,
+   "peak": 0.8993170261383057,
+   "inputSha256": "4772c37571609a8ef581567a16821126b8465d1a6d5787814c40e9093134f565",
+   "random": [
+    0.12275114143267274,
+    0.9402236305177212,
+    0.5616482892073691,
+    0.04892311873845756
+   ],
+   "file": "fx-reverb-full-48000.wav",
+   "sha256": "7d33706f0d006f420dba82ff3195de0d3a88f9c7af24cbf13887ea7ba581d7c7",
+   "bytes": 844858
+  },
+  {
+   "id": "limiter-sweep-48000",
+   "group": "limiter",
+   "rate": 48000,
+   "seconds": 1.5,
+   "setup": {
+    "input": {
+     "ramp": 1
+    }
+   },
+   "events": [],
+   "frames": 72000,
+   "channels": 2,
+   "peak": 1.2303236722946167,
+   "inputSha256": "1d204104b021ef65ef3af33b798e3cee0e22d33f42a8ff5816ebcc503847a5e3",
+   "random": [],
+   "file": "limiter-sweep-48000.wav",
+   "sha256": "e7bbcbe4cf6c05dd464d8279f7a51dfb49d02449fbc4aa863e4be7734edfbdfa",
+   "bytes": 576058
+  },
+  {
+   "id": "ir-reverb-48000",
+   "group": "ir",
+   "rate": 48000,
+   "seconds": 0,
+   "setup": {
+    "decay": 2.6,
+    "preDelay": 0.02,
+    "normalize": true
+   },
+   "events": [],
+   "frames": 125760,
+   "channels": 2,
+   "peak": 0.9661943316459656,
+   "inputSha256": null,
+   "random": [
+    0.9051345845218748,
+    0.3797289610374719,
+    0.6617470039054751,
+    0.9149790718220174
+   ],
+   "file": "ir-reverb-48000.wav",
+   "sha256": "90f9b9e64fdaa06a0b4c32be706cc0029a66132ec12bc06cb5cae0ac3f67ad9f",
+   "bytes": 1006138
+  },
+  {
+   "id": "synth-lead-poly-44100",
+   "group": "synth",
+   "rate": 44100,
+   "seconds": 1.7,
+   "setup": {
+    "synth": "lead"
+   },
+   "events": [
+    {
+     "frame": 0,
+     "kind": "on",
+     "note": 48,
+     "velocity": 0.7
+    },
+    {
+     "frame": 0,
+     "kind": "on",
+     "note": 52,
+     "velocity": 0.7
+    },
+    {
+     "frame": 0,
+     "kind": "on",
+     "note": 56,
+     "velocity": 0.7
+    },
+    {
+     "frame": 0,
+     "kind": "on",
+     "note": 60,
+     "velocity": 0.7
+    },
+    {
+     "frame": 0,
+     "kind": "on",
+     "note": 64,
+     "velocity": 0.7
+    },
+    {
+     "frame": 0,
+     "kind": "on",
+     "note": 68,
+     "velocity": 0.7
+    },
+    {
+     "frame": 0,
+     "kind": "on",
+     "note": 72,
+     "velocity": 0.7
+    },
+    {
+     "frame": 0,
+     "kind": "on",
+     "note": 76,
+     "velocity": 0.7
+    },
+    {
+     "frame": 13230,
+     "kind": "on",
+     "note": 91,
+     "velocity": 0.9
+    },
+    {
+     "frame": 26460,
+     "kind": "off",
+     "note": 48
+    },
+    {
+     "frame": 26460,
+     "kind": "off",
+     "note": 52
+    },
+    {
+     "frame": 26460,
+     "kind": "off",
+     "note": 56
+    },
+    {
+     "frame": 26460,
+     "kind": "off",
+     "note": 60
+    },
+    {
+     "frame": 26460,
+     "kind": "off",
+     "note": 64
+    },
+    {
+     "frame": 26460,
+     "kind": "off",
+     "note": 68
+    },
+    {
+     "frame": 26460,
+     "kind": "off",
+     "note": 72
+    },
+    {
+     "frame": 26460,
+     "kind": "off",
+     "note": 76
+    },
+    {
+     "frame": 26460,
+     "kind": "off",
+     "note": 91
+    },
+    {
+     "frame": 35280,
+     "kind": "on",
+     "note": 64,
+     "velocity": 0.8
+    },
+    {
+     "frame": 39690,
+     "kind": "on",
+     "note": 67,
+     "velocity": 0.6
+    },
+    {
+     "frame": 44100,
+     "kind": "off",
+     "note": 64
+    },
+    {
+     "frame": 48510,
+     "kind": "off",
+     "note": 67
+    },
+    {
+     "frame": 50715,
+     "kind": "on",
+     "note": 57,
+     "velocity": 1
+    },
+    {
+     "frame": 52864,
+     "kind": "bend",
+     "value": 2
+    },
+    {
+     "frame": 55168,
+     "kind": "mod",
+     "value": 1
+    },
+    {
+     "frame": 64000,
+     "kind": "bend",
+     "value": -1.5
+    },
+    {
+     "frame": 68352,
+     "kind": "mod",
+     "value": 0
+    },
+    {
+     "frame": 70560,
+     "kind": "off",
+     "note": 57
+    }
+   ],
+   "frames": 74970,
+   "channels": 1,
+   "peak": 0.6376169919967651,
+   "inputSha256": null,
+   "random": [],
+   "file": "synth-lead-poly-44100.wav",
+   "sha256": "1e1a87508d11f43a27c91a3130ae3391645fcc5006fc55d18200a6864480441b",
+   "bytes": 299938
+  },
+  {
+   "id": "fx-filter-reso-44100",
+   "group": "fx",
+   "rate": 44100,
+   "seconds": 1,
+   "setup": {
+    "states": [
+     {
+      "bypassed": false,
+      "params": {
+       "cutoff": 6000,
+       "q": 10
+      }
+     },
+     {
+      "bypassed": true,
+      "params": {
+       "semitones": 0
+      }
+     },
+     {
+      "bypassed": true,
+      "params": {
+       "rate": 1
+      }
+     },
+     {
+      "bypassed": true,
+      "params": {
+       "time": 1,
+       "feedback": 0.4,
+       "mix": 0.3
+      }
+     },
+     {
+      "bypassed": true,
+      "params": {
+       "amount": 0.3
+      }
+     }
+    ],
+    "timing": {
+     "anchor": 0,
+     "beatPeriod": 0.5
+    },
+    "input": {
+     "active": 1
+    }
+   },
+   "events": [],
+   "frames": 44100,
+   "channels": 1,
+   "peak": 2.516963005065918,
+   "inputSha256": "c3bea0e69b80f6d70d857d51384fcc7caebb887a5b225255c17f5b77793c2697",
+   "random": [],
+   "file": "fx-filter-reso-44100.wav",
+   "sha256": "f37f584ea2713c12aaeb8546e84982ed3093333732c88e675d2ac2c70b01c23a",
+   "bytes": 176458
+  },
+  {
+   "id": "limiter-sweep-44100",
+   "group": "limiter",
+   "rate": 44100,
+   "seconds": 1,
+   "setup": {
+    "input": {
+     "ramp": 0.7
+    }
+   },
+   "events": [],
+   "frames": 44100,
+   "channels": 2,
+   "peak": 1.2472693920135498,
+   "inputSha256": "6508175ce335267a3fb63be6a592166e896638e15c4d2b894a768b7ec919137e",
+   "random": [],
+   "file": "limiter-sweep-44100.wav",
+   "sha256": "dde215cad910dbf8b347856372b3759baac778c3026d9bc147ec8c2c3231ea2c",
+   "bytes": 352858
+  }
+ ]
+}

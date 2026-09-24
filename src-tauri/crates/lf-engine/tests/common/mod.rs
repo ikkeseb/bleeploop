@@ -4,6 +4,8 @@
 //! The Rust twin of `verify/harness/rig.ts`.
 #![allow(dead_code)]
 
+pub mod refs;
+
 use assert_no_alloc::{assert_no_alloc, violation_count, AllocDisabler};
 use lf_engine::grid::{frames_per_bar, Frame};
 use lf_engine::{Command, Engine, EngineConfig, EngineHandle, Event, Inserts, LaneInfo, LaneState, ProcessContext, TimedCommand};

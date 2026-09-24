@@ -16,3 +16,8 @@ rtrb = "0.3.4"
 [dev-dependencies]
 assert_no_alloc = { version = "1.1", features = ["warn_debug"] }
 proptest = { version = "1", default-features = false, features = ["std"] }
+# The Tone reference fixtures (tests/common/refs.rs): the manifest, input hashes, the S-class STFT.
+rustfft = "6"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"

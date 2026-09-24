@@ -40,3 +40,6 @@ src-tauri/gen
 
 # written by build-exe.yml at build time (the GPLv3 source pointer for that exact build)
 licenses/SOURCE.txt
+
+# Rust renders written by a failing Stage 3 port test (tests/common/refs.rs), for an ear A/B
+src-tauri/crates/lf-engine/tests/fixtures/tone/out/

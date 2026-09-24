@@ -202,19 +202,23 @@ mutants killed or skipped with a reason; 5 lanes (one overdubbing) + click at 48
 
 *Owner: nothing to hear yet (STATUS E6 before the limiter port).*
 
-**Capture references first, while Tone still runs.** A new probe (not yet built):
-verify/probes/tone-refs.mjs renders Tone OfflineContext scenarios from the production modules (as
-`verify/probes/fx-grid.mjs` does) with `Math.random` seeded: note scripts per synth (range, velocity,
-full-polyphony chord, voice steal, legato, release, vibrato, bend), a seeded input per FX over a
-parameter grid, a limiter sweep plus bursts, and the generated reverb IR and noise tables. Float32 WAV
-through the real `encodeWav` (the piano peaks near 2.15). Fixtures sit in the crate's tests/fixtures
-with a manifest (scenario, sha256, capture commit, Tone and Chromium versions, rate). Budget ≤ 10 MB,
-48 k plus a 44.1 k spot set; regenerate only with a stated reason (git keeps every copy). The same
-probe captures short v0.1.0 exports (pcm16 zip, float32 recovery) as Stage 5 import fixtures.
+**References (built 2026-09-25, Chromium 153, Tone 15.1.22).** `verify/probes/tone-refs.mjs` renders
+Tone OfflineContext scenarios from the production modules with `Math.random` replaced by a seeded
+mulberry32: two note scripts per pitched synth (range and velocity; a full-polyphony chord, a voice
+steal, legato, bend and vibrato) and the drum kit, the FX over a parameter grid (with a mid-render param
+change and a bypass crossfade), the limiter on a ramp plus bursts, and the reverb IR. 48 k plus a
+44.1 k spot set, 26 float32 WAVs through the real `encodeWav`, 8.3 MB, in
+`src-tauri/crates/lf-engine/tests/fixtures/tone` with `manifest.json` (scenario scripts, frame-stamped
+events, every random draw, input hashes, capture commit and versions). The noise tables are not
+stored: `dsp::noise` regenerates them from their seed, bit-exact. Without `--write` the probe re-renders
+and compares (two renders differ by ≤ 1.8e-7: Blink sums a node's inputs in no fixed order). The
+port harness is `src-tauri/crates/lf-engine/tests/common/refs.rs`. Not captured yet: the v0.1.0
+exports (pcm16 zip, float32 recovery) for Stage 5's import fixtures.
 
 **Tolerance classes:** N = null residual ≤ −60 dB of the reference RMS; S = STFT bands within ±1 dB
-and RMS envelope within ±0.5 dB. Each port takes the tightest class it passes, recorded in the
-manifest. A failing test writes the Rust render beside the reference for an ear A/B.
+and RMS envelope within ±0.5 dB. Each port takes the tightest class it passes, recorded in its test
+(the manifest is regenerated whole). A failing test writes the Rust render to the fixtures' untracked
+`out/` for an ear A/B.
 
 **Ports, literal:** lead and piano (port Blink's band-limited PeriodicWave tables), pad (FM), organ
 (AM), bass (MonoSynth + 24 dB lowpass + filter envelope + vibrato), drum kit (Membrane, Noise with the

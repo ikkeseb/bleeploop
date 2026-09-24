@@ -48,6 +48,7 @@
 pub mod api;
 pub mod autorec;
 pub mod clock;
+pub mod dsp;
 pub mod engine;
 pub mod grid;
 pub mod looper;

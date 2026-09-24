@@ -2007,6 +2007,10 @@ dependencies = [
  "assert_no_alloc",
  "proptest",
  "rtrb",
+ "rustfft",
+ "serde",
+ "serde_json",
+ "sha2",
 ]
 
 [[package]]
