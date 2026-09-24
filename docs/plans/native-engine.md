@@ -112,6 +112,25 @@ against inLat+outLat only, never against a lag fitted from an earlier run.
 rerun. The results replace the RT baseline line in `docs/VERIFY.md`; the probe stays as the engine's
 L2 gate.
 
+**Measured so far (2026-09-24, dev PC, Scarlett 2i2 at 44.1 kHz, no cable in):** built and pushed;
+the cable matrix (`pnpm native:spike`) waits for the owner (cable in, monitors down, ~55 min of
+audible chirps). A virtual cable (VB-Cable) cannot stand in: it measures Windows' buffering, not the
+interface driver's report against the physical path.
+
+- A1 mechanism: ASIO 256, 3639/3639 callbacks sameCycle, 0 other-thread, 0 gaps, 0 xruns.
+- Driver report at ASIO 256: inLat 549 + outLat 637 frames = 26.9 ms before any plugin, so R2
+  (≤ 22.2 ms) likely fails on this driver at 256 if A2 confirms the report.
+- C1 partial: Archetype Petrucci X in the ASIO callback, 256, 20 s (`--quiet`): 0 gaps, 0 xruns,
+  0 allocs, block p99.9 28 % / max 32 % of the period; plugin latency 57 frames. The 120 s runs at
+  128 and 256 are open.
+- WASAPI mechanics (441-frame packets, `--quiet`): 0 gaps, 0 xruns. The first run showed a 298 ms
+  join ring: input ran 300 ms before output opened and the backlog was never drained. Drained to its
+  target, the parts sum to ~47 ms (input age 15.5 + ring 20 + output 12) against today's ~280 ms.
+  Whether the production WASAPI path carries a similar startup backlog: unknown, not examined.
+- S1, one `--probe-share all` run: FAIL. Process loopback captures the child after its session mute
+  and volume (digital zero for `mute` and `vol0`, the tone at 0.0 dB gain for `open`), so a muted
+  mirror is silent to app capture; `dual` shows no second peak. STATUS E2 decides the fallback.
+
 ## Stage 2 — lf-engine, the pure engine crate
 
 *Owner: nothing to hear; progress is CI green on the engine tests.*
