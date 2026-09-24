@@ -262,15 +262,17 @@ function triggerClick(time: number, isAccent: boolean, clamped = false, forced =
   const gain = ctx.createGain();
   osc.type = 'triangle'; // clean, no aliasing
   osc.frequency.value = isAccent ? 1500 : 1000;
-  const peak = (isAccent ? 0.5 : 0.28) * vol;
-  // 2 ms attack (no DC click) → 40 ms exponential decay (exp avoids an off-click; can't ramp to 0).
+  // Twice the old 0.5 / 0.28: at full click volume the old level drowned under a live amp-sim (by ear,
+  // 2026-09-24); the master limiter still catches the sum.
+  const peak = (isAccent ? 1 : 0.56) * vol;
+  // 2 ms attack (no DC click) → 60 ms exponential decay (exp avoids an off-click; can't ramp to 0).
   gain.gain.setValueAtTime(0, time);
   gain.gain.linearRampToValueAtTime(peak, time + 0.002);
-  gain.gain.exponentialRampToValueAtTime(0.0001, time + 0.04);
+  gain.gain.exponentialRampToValueAtTime(0.0001, time + 0.06);
   osc.connect(gain);
   gain.connect(engine.masterGain);
   osc.start(time);
-  osc.stop(time + 0.05);
+  osc.stop(time + 0.07);
   pendingClicks.set(osc, { time, forced });
   osc.onended = () => {
     pendingClicks.delete(osc);
