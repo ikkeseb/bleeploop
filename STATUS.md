@@ -100,11 +100,11 @@ The formula C, its freeze and why native monitoring cancels input+plugin latency
 - **Measured 2026-09-24 through a loopback cable** (`pnpm native:loopback`, baseline in
   `docs/VERIFY.md`): at trim 0 a perfectly timed hit lands ~65 ms late on this rig (the WebView
   output's real latency is above what it reports); with the bridge fixes below, rec align +60 puts it
-  within about ±4 ms, the same across launches. The native round trip a guitarist hears is 50–51 ms
-  at buffer 256 (WASAPI: ~283 ms). The plugin bridge's hop-2 fill is the record path's delay: it now
+  within −1..+16 ms across launches (open). The native round trip a guitarist hears is 44 ms
+  at buffer 256 (WASAPI: ~280 ms). The plugin bridge's hop-2 fill is the record path's delay: it
   restarts on its setpoint after a flush or an underrun, returns to it between takes, and C follows
   its shift since the freeze (`src/audio/plugin-bridge.ts`, `record-latency.ts`). Inside a take the
-  drift controller still stretches by 2–15 ms/min. Work order: `docs/plans/gates-and-hygiene.md` § 7.
+  offset now drifts under ~2 ms/min in most launches. Work order: `docs/plans/gates-and-hygiene.md` § 7.
 - **Unverified:** converter latency on its own, the fallback 128-frame allowance, simultaneous
   native/synth source alignment, whether the ~65 ms holds across restarts, buffer sizes and output
   devices.

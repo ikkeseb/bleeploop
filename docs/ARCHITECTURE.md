@@ -136,7 +136,8 @@ silently points at the wrong rule. `verify/guards/docs.mjs` fails when they do.
 
 1. **The Web Audio `AudioContext` is the single tempo/quantization authority.** Every grid-timed
    event is scheduled on ctx time. The native P11 cpal monitor is a second audible path by design,
-   slaved by the drift controller, never a second tempo authority.
+   clocked by the interface (the capture callback wakes the plugin producer), never a second tempo
+   authority.
 2. **Never touch `Tone` before the engine has run `setContext`.** No `getTransport()`, no Tone node
    construction, until `engine.ctx` exists — `clock.ts` routes all transport access through a `tp()`
    helper that touches `engine.ctx` first. (This silently broke the P3 metronome once.)

@@ -21,8 +21,8 @@ rest is the map.
 | **UI (WebView2 / main)** | The Tauri window, every WebView2 COM call (`with_webview` closures: `create_shared_ring` allocates + posts the hop-1 SharedBuffer, `SlotHandle::teardown` `Close()`s it, the permission auto-grant), the JS side | `window.emit` events (`plugin:param-changed`, `plugin:params-changed`, `plugin:editor-closed`, `plugin:stream-fault`, `lf://close-requested`); posted SharedBuffers | IPC commands |
 | **Command threads** (Tauri async runtime) | Nothing long-lived. Every `#[tauri::command]` in `host/commands.rs` is `async fn`, so it runs on the runtime pool, not the UI thread | IPC args | Briefly lock `PluginHostState.slots`; push `PluginEvent`s into the per-slot event ring (`enqueue_event`, Mutex'd Producer); send `OwnerRequest`s and block ≤5 s on a one-shot reply (`owner_request_5s`); spawn the owner thread at load and block ≤15 s on the rendezvous `ready_rx` (a result that arrives later is the owner's to undo: `spawn_rt_then_ready`); enumerate cpal devices directly (no stream is opened) |
 | **Per-slot owner** (`lf-clap-owner-{slot}` / `lf-vst3-owner-{slot}`) | The `!Send` plugin instance (clack main thread / VST3 component + controller), the `NativeIo` with BOTH `!Send` cpal streams, the editor host window + its Win32 pump, fault reporting | `request_rx` (CLAP ≤20 ms; VST3 ≤2 s idle; hosted editors poll at 20 ms), CLAP callback / restart / params-rescan requests, the `EditorClosed` flag, the cpal fault flags | Replies; `plugin:editor-closed`; `plugin:params-changed`; `plugin:stream-fault` (`poll_faults`); every ~2 s `mirror_diag` + `report_new_rt_faults` + (DEV) `emit_gate`. Spawns + joins the RT thread (`RtJoinGuard`, also on panic unwind); `deactivate` runs here after the join. A plugin-requested restart is serviced here too — CLAP `request_restart` (`service_restart`: join RT → deactivate → activate → respawn) and VST3 `restartComponent` cycle flags (`service_vst3_restart`: join RT, which ran `setProcessing(0)` → `setActive(0)` → `activate_component` → respawn); rings, the reconciled block and the learned hop-1 drift round-trip via `RtExit` / `Vst3RtExit` |
-| **Per-slot RT** (`lf-clap-rt-{slot}` / `lf-vst3-rt-{slot}`) | The process loop: MMCSS Pro Audio, paced by `PaceTimer`; drains ≤`MAX_EVENTS_PER_BLOCK` events, pulls mono from the input ring through `InPipe`, renders one D-block, sums to mono, `Hop1Pipe` resamples D→C into the SharedBuffer ring, `OutMonitorPipe` pushes wet into the monitor ring | Event ring (Consumer), input ring (Consumer), the JS-written header words + `BLOCK_CONFIG_GEN` / `input_gen` / `monitor_gen` (atomics) | Hop-1 ring, monitor ring (Producer), `ProducerDiag` atomics, latched `RtFault` bits |
-| **cpal capture callback** (driver thread) | Nothing — `audio_input::open_input_stream` downmixes to mono and pushes into the input ring's Producer via `try_lock` (contended ⇒ that callback's frames drop, `input_overruns`++); the error callback latches `input_fault` | Device samples | Input ring |
+| **Per-slot RT** (`lf-clap-rt-{slot}` / `lf-vst3-rt-{slot}`) | The process loop: MMCSS Pro Audio, clocked by the capture callback's `InputWake` while an ASIO input is armed (`Hop1Pipe::pace_on_input`), otherwise paced by `PaceTimer`; drains ≤`MAX_EVENTS_PER_BLOCK` events, pulls mono from the input ring through `InPipe`, renders one D-block, sums to mono, `Hop1Pipe` resamples D→C into the SharedBuffer ring, `OutMonitorPipe` pushes wet into the monitor ring | Event ring (Consumer), input ring (Consumer), the JS-written header words + `BLOCK_CONFIG_GEN` / `input_gen` / `monitor_gen` (atomics) | Hop-1 ring, monitor ring (Producer), `ProducerDiag` atomics, latched `RtFault` bits |
+| **cpal capture callback** (driver thread) | Nothing — `audio_input::open_input_stream` downmixes to mono and pushes into the input ring's Producer via `try_lock` (contended ⇒ that callback's frames drop, `input_overruns`++), then signals `InputWake`; the error callback latches `input_fault` | Device samples | Input ring |
 | **cpal output callback** (driver thread) | Nothing — `audio_output` pops the monitor ring's Consumer via `try_lock`, applies monitor gain × master gain × the declick fade, duplicates mono across channels; starves count `monitor_starves`; the error callback latches `monitor_fault`. Under ASIO both callbacks ride ONE duplex driver | Monitor ring | Device |
 | **Scan children** (`app.exe --scan-one <path>`) | One process per bundle inside a kill-on-close Job Object, 20 s timeout; two reader threads per child drain stdout/stderr with caps | Bundle path | Descriptor JSON |
 | **Plugin GUI threads** | A floating CLAP editor runs the plugin's own window thread and signals `HostGuiImpl::closed` → the `EditorClosed` flag, acked on the owner thread. A hosted editor embeds into the owner-thread host window and is pumped there. VST3 `performEdit`/`restartComponent` (ONE component handler per load, set at load; an editor never sets its own) arrive on the owner thread: the event ring + `plugin:param-changed`, `plugin:params-changed` for value/title flags, or the `RestartFlags` atom (drained once per owner turn; a foreign-thread call is safe because it only touches atomics); CLAP `params.rescan` sets the main-thread flag the owner drains | User input | Flags / events |
@@ -124,7 +124,11 @@ All in `src-tauri/src/host/` (commands/scan/state/rt_alloc/editor_window/transpo
   producer with **absolute-deadline accumulation + a high-res waitable timer** (`CreateWaitableTimerExW` +
   `CREATE_WAITABLE_TIMER_HIGH_RESOLUTION`) — a relative `thread::sleep(period−elapsed)` rounds up to the
   Windows timer tick → producer runs slow → crackle. The PC's QPC↔sound-card mismatch is **~400ppm**; the
-  loop cancels it. **0 underruns is the definitive sync proof**, not the drift proxy.
+  loop cancels it. **0 underruns is the definitive sync proof**, not the drift proxy. An armed ASIO input
+  replaces the timer with the interface clock (`pace_on_input`), so the input and monitor rings need no
+  controller; WASAPI keeps the timer (late capture callbacks ran the producer ~5 % fast). The hop-2
+  controller's level is frames produced minus the render clock (`trackRateLevel` in
+  `src/audio/plugin-bridge.ts`); the producer bumps hop-1 header word 7 where production jumps.
 - **Surge param ids are hash-like, NOT 0-based** (`first=825615485`); sending an unknown id CRASHES the
   plugin → always enumerate via `listParams`, never invent an id.
 - Test plugin **Surge XT** (`winget install SurgeSynth.SurgeXT` → `…\CLAP\Surge Synth Team\`, + Surge XT
@@ -180,7 +184,7 @@ existing P9 ring → looper record tap (lag-tolerant, records wet "for free").
   restart a plugin again. `performEdit` (GUI → host) is never mirrored back. A 30-plugin
   restart survey backs this: FabFilter raises `kLatencyChanged`, Neural DSP and Surge never do.
 - **`InPipe`** (rubato `FixedAsync::Output`, cpal `R_in`→render `D`) + a `DriftController` on the cpal-ring
-  fill resamples the capture; `R_in` plumbed owner→RT via `diag.input_rate` + an `input_gen` counter (bump
+  fill (off while the capture clocks the producer) resamples the capture; `R_in` plumbed owner→RT via `diag.input_rate` + an `input_gen` counter (bump
   on every arm/disarm so the RT rebuilds + flushes the ring). `InPipe::new` (re)build sits OUTSIDE the
   rt_alloc guard (a one-shot non-perf-moment alloc, absorbed by the ~30ms hop-2 buffer).
 - **ASIO tier** (`--features asio`): routes BOTH capture + monitor through ONE full-duplex driver, ONE clock.
@@ -228,6 +232,9 @@ existing P9 ring → looper record tap (lag-tolerant, records wet "for free").
 - GO LIVE under ASIO timed out in `arm_monitor` ("timed out waiting on channel", then `disarm_input`
   timed out too) on two of about twelve `pnpm native:loopback` launches on 2026-09-24; a relaunch
   passed. Cause unknown.
+- `vst3_restart_fixture`'s `plugin_requested_restart_cycles_activation_on_the_owner_without_reload`
+  failed once on 2026-09-24 (254 hop-1 frames dropped across the restart) and passed on the rerun.
+  Cause unknown.
 - CLAP and VST3 duplicate the load choreography (`load`/`vst3_load` and both owner mains): one
   shared owner would keep B1/B11 from returning. Not built.
 

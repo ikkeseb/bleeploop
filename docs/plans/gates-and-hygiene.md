@@ -41,15 +41,27 @@ next "Play first" jam in `STATUS.md` runs on this code before anything else land
 native:loopback` (2026-09-24) now measures the alignment half with one cable from an interface output
 into an input; feel stays with the ear. Open: whether it becomes an in-app calibration (STATUS D18).
 
-## 7. Hold the hop-2 fill on its setpoint (open)
+## 7. Takes on one timeline across launches (open)
 
 `pnpm native:loopback` (2026-09-24) showed that a take's offset follows the plugin bridge's hop-2 fill
-nearly ms for ms. Landed: the drain restarts hop-2 on the setpoint after the flush and after an
-underrun, returns it there between takes when the web path is muted, and C shifts by the smoothed
-fill's move since the freeze; take offsets now vary by ~4 ms across launches. Open: the drift
-controller (`DriftController` in `src-tauri/src/host/transport.rs`) still stretches a take by
-2–15 ms/min. Holding it during a take (PV reported at the setpoint) made takes flat when idle but ran
-the ring dry under load (47 underruns in one take): the producer falls behind under load, and the
-controller hides it by stretching. First find out why the producer falls behind (the probe runs the
-debug build; compare a release build), then hold the ratio during takes. Proof: `native:loopback`
-drift under ~2 ms/min and residual spread under ~3 ms over five launches, no rejected take.
+nearly ms for ms. Landed, measured the same day:
+
+- **The producer was never behind** (`pace_late` 0 in steady state, debug build; no release build
+  needed). It ran on QPC while capture ran on the interface clock, so the input ring wandered by up to
+  6.5 ms and a stall left it ~80 ms deep for ~30 s. An armed ASIO input now clocks the producer
+  (`Hop1Pipe::pace_on_input`, woken by the capture callback); the input and monitor rings run without
+  a drift controller, the monitor on a one-callback cushion. RT fell from 50–51 to 44.4 ms at 256.
+  WASAPI keeps the timer: its capture callbacks arrive late often enough that the timer fallback ran
+  the producer ~5 % fast.
+- **The hop-2 controller learned stalls as drift** (a stall wound it to 230 ppm, an input arm to
+  −284 ppm: 14–22 ms/min of stretch in later takes). Its level is now frames produced minus
+  render-clock frames (`trackRateLevel` in `plugin-bridge.ts`); a step is held off it and moved into
+  its base, and Rust marks production jumps in hop-1 header word 7. Drift inside take A is now
+  under 2 ms/min in 8 of 12 launches, spread inside a take 0.2–0.9 ms.
+
+Open: across launches the residual still spreads by 5–10 ms at trim 60 (−0.9..+16 ms over twelve
+launches), and a launch or two in five wound the controller to −50..−90 ppm early (5–9 ms/min in that
+take); the header epoch landed for that, and two launches since read 1.4 and 0.7 ms/min, not yet five.
+Take B is rejected in about one launch of three: bursts of worklet underruns with the producer on
+time, so the main-thread drain stalls (seen before any of this landed too). Proof: `native:loopback` drift under ~2 ms/min and
+residual spread under ~3 ms over five launches, no rejected take.
