@@ -25,7 +25,8 @@
 //             regime a rig is in is a by-ear/`[rec-comp]`-log call.                                   [computeC]
 //   F. OVERDUB compensation maps wet frames back by the SAME C onto the master grid     [compensatedLoopFrame]
 //   G. WINDOW-MEDIAN snapshot on the real module: the sampler's rolling window is frozen at FIRST record use,
-//      C is identical take-to-take and reproducible across re-arms, a new generation clears the old window,
+//      C is identical take-to-take (except the bridge queue's smoothed shift since the freeze) and
+//      reproducible across re-arms, a new generation clears the old window,
 //      settle updates only before first use, clear → C=0, and the by-ear trim stays live atop the frozen
 //      snapshot.                                                [record-latency.ts sampler / generation / freeze]
 
@@ -70,6 +71,8 @@ async function latencySession({ sr = 48000 } = {}) {
   const { pluginBridge } = await rig.import('audio/plugin-bridge.ts');
   let stats = null;
   pluginBridge.stats = () => stats;
+  let queue = null; // the bridge's smoothed hop-2 fill; null = no wired slot (no per-take shift)
+  pluginBridge.queueFrames = () => queue;
   rig.ctx.getOutputTimestamp = undefined;
   rig.ctx.baseLatency = 0;
   const set = (outLat, hop1, hop2 = 0) => {
@@ -80,7 +83,8 @@ async function latencySession({ sr = 48000 } = {}) {
     set(outLat, hop1, hop2);
     await rig.advance(SAMPLE_INTERVAL_MS / 1000);
   };
-  return { rig, latency, set, tick, C: () => latency.recordCompensationFrames() };
+  const setQueue = (frames) => { queue = frames; };
+  return { rig, latency, set, tick, setQueue, C: () => latency.recordCompensationFrames() };
 }
 
 // ── Section 0 — the real sampler sums BOTH bridge hops (hop1Lag + hop2Fill) ────────────────────────
@@ -473,6 +477,25 @@ function drawSample(rnd) {
   for (let i = 0; i < 33; i++) await g5.tick(0.04, 3000);
   g5.latency.updateMonitorLatency(0, 0.015);
   ok('G settle after the first take cannot change C', g5.C() === beforeLateSettle);
+
+  // The one live term: each take shifts C by how far the bridge's smoothed fill moved since the freeze
+  // (the record path's delay, frame for frame); the frozen window terms and the trim are unaffected.
+  const g6 = await latencySession({ sr });
+  g6.set(0.02, 1200);
+  g6.setQueue(1440);
+  g6.latency.beginMonitorGeneration(0, 0.006);
+  for (let i = 0; i < 33; i++) await g6.tick(0.02, 1200);
+  const atFreeze = g6.C();
+  ok('G an unmoved bridge queue keeps C at its frozen value', g6.C() === atFreeze);
+  g6.setQueue(1440 + 480);
+  for (let i = 0; i < 33; i++) await g6.tick(0.04, 3000);
+  ok('G C shifts by exactly the smoothed queue\'s move since the freeze', g6.C() === atFreeze + 480, `${g6.C() - atFreeze}f`);
+  g6.latency.setOffsetMs(5);
+  ok('G trim stays live atop the queue shift', g6.C() === atFreeze + 480 + Math.round(0.005 * sr));
+  g6.latency.setOffsetMs(0);
+  g6.latency.beginMonitorGeneration(0, 0.006);
+  for (let i = 0; i < 33; i++) await g6.tick(0.02, 1200);
+  ok('G a new generation takes its queue origin at its own freeze', g6.C() === atFreeze, `${g6.C() - atFreeze}f`);
 }
 
 // ── Section D/H — UNIFORM WINDOW SHIFT on the real looper: content offset == residual Δ, loss |Δ| (NOT C) ──

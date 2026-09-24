@@ -12,7 +12,8 @@
  * still needs the physical rig; this mapping does not independently validate the DAC.
  *
  * First record use freezes the current monitor generation. Rearm, configuration changes and explicit
- * resnapshot reopen it; delayed native updates respect the freeze. Saved manual trim stays live.
+ * resnapshot reopen it; delayed native updates respect the freeze. Saved manual trim stays live, and so
+ * does the bridge queue's smoothed shift since the freeze (`pluginBridge.queueFrames`).
  * Unarmed/disabled compensation remains zero. Native and synth inputs still share one record tap,
  * so simultaneous mixed-source alignment is not solved here.
  */
@@ -59,6 +60,7 @@ let snapOutputLatency = 0; // median ctx.outputLatency over the window, frozen a
 let snapHop1Frames = 0; // median pluginBridge hop-1 residency (Rust→drain) over the window, frozen at first record
 let snapHop2Frames = 0; // median pluginBridge hop-2 residency (drain→worklet) over the window, frozen at first record
 let snapRenderCursorSeconds: number | null = null;
+let snapQueueFrames: number | null = null; // the bridge's smoothed fill at the freeze (queueShift's origin)
 let snapFrozen = false; // true once a take has frozen the session's C terms; re-opened by arm/buffer-change/resnapshot
 
 // ── Rolling sample window for the stabilised hop + click-output terms (median over ~1 s) ────────────────
@@ -251,18 +253,25 @@ export function recordCompensationFrames(): number {
   // First use freezes the samples available so far; a very fast arm-to-record can use a short window.
   if (!snapFrozen) {
     refreshSnapshotFromWindow();
+    snapQueueFrames = pluginBridge.queueFrames(armedSlot);
     snapFrozen = true;
   }
   const sr = engine.ctx.sampleRate; // immutable for the context's lifetime — safe to read live
-  // Reuse the frozen bridge/output terms. Only manual trim is read anew for each take.
+  // Reuse the frozen terms. The bridge queue is the one that moves between takes, and it is the record
+  // path's delay frame for frame (loopback cable, 2026-09-24), so each take shifts the frozen cursor by
+  // how far the bridge's smoothed fill has moved since the freeze (raw samples jitter too much for a
+  // per-take read, which is why the window is frozen). Manual trim is read anew too.
+  const liveQueue = pluginBridge.queueFrames(armedSlot);
+  const queueShiftFrames = liveQueue !== null && snapQueueFrames !== null ? liveQueue - snapQueueFrames : 0;
   const hop1Frames = snapHop1Frames;
-  const hop2Frames = snapHop2Frames;
+  const hop2Frames = snapHop2Frames + queueShiftFrames;
+  const queueShiftSeconds = queueShiftFrames / sr;
   // Output reports are frozen with the bridge terms. Graph DSP is measured once at engine start;
   // native monitoring bypasses that graph, so its delay is added separately from the output reports.
   const outputGraphLatencySeconds = engine.outputGraphLatencySeconds;
   const { source, hopFrames, outputLatencyReported, outputLatency, outputFloored, cSeconds, frames } = computeC(
     {
-      renderCursorSeconds: snapRenderCursorSeconds,
+      renderCursorSeconds: snapRenderCursorSeconds === null ? null : snapRenderCursorSeconds + queueShiftSeconds,
       hop1Frames,
       hop2Frames,
       cpalOutSeconds,
@@ -276,7 +285,7 @@ export function recordCompensationFrames(): number {
   );
   lastBreakdown = {
     source,
-    renderCursorSeconds: snapRenderCursorSeconds,
+    renderCursorSeconds: snapRenderCursorSeconds === null ? null : snapRenderCursorSeconds + queueShiftSeconds,
     slot: armedSlot,
     sr,
     hop1Frames,

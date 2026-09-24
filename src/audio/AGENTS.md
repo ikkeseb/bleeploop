@@ -27,7 +27,9 @@ default), fixed-length record, undo and reverse all ride `masterStartTime` + the
 
 ## Record-latency compensation
 
-BUILT: timestamped capture windows, measured output terms and C frozen at first record use.
+BUILT: timestamped capture windows, measured output terms and C frozen at first record use, plus the
+bridge queue's shift since the freeze. Between takes the bridge keeps hop-2 on its setpoint, never
+during one (`plugin-bridge.ts`).
 BleepLoop monitors natively, so input+plugin latency CANCELS; C compensates the record path only and
 is 0 unless a native monitor is armed. The formula and its freeze: the header of
 `record-latency-math.ts`; it is APPLIED in `looper/machine.ts` (see its `OWNS:` line). Guardrails, rig

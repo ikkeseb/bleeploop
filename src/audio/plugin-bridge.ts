@@ -67,6 +67,11 @@ const DRAIN_INTERVAL_MS = 5;
 const HOP2_CAPACITY_FRAMES = 16384;
 /** The drift controller's hop-2 fill setpoint: `TARGET_FILL_SECONDS` in src-tauri/src/host/transport.rs. */
 const HOP2_TARGET_SECONDS = 0.03;
+/** How far hop-2's smoothed fill may sit off the setpoint, for how long, before an idle recentre. */
+const HOP2_IDLE_TOLERANCE_SECONDS = 0.004;
+const HOP2_IDLE_PATIENCE_MS = 500;
+/** Smoothing of the fill the recentre decisions read (render bursts move the raw fill by ~12 ms). */
+const HOP2_FILL_SMOOTHING = DRAIN_INTERVAL_MS / 300;
 /** Real-lag cap: keep hop-1 backlog under this so jitter/drift stays bounded (~60ms latency). */
 const MAX_LAG_SECONDS = 0.06;
 /** Per-slot plugin output-gain defaults, chosen by plugin TYPE at load. An amp-sim/FX (has an
@@ -98,6 +103,10 @@ interface BridgeSlot {
   jsDropped: number; // cumulative lag-cap + flush discards — mirrored into header[6]
   accountedUnderruns: number; // last worklet total folded into the process-wide record-loss counter
   recenteredUnderruns: number; // worklet underrun total the drain last put hop-2 back on its setpoint for
+  fillSmoothed: number; // hop-2 fill (frames), smoothed over ~0.3 s, for the recentre decisions
+  offSince: number; // performance.now() since the smoothed fill left the idle tolerance; NaN while inside
+  skipDebt: number; // hop-1 frames still to drop to bring an overfull hop-2 down (idle recentre)
+  webMuted: boolean; // the audible web path is muted (the native monitor carries the sound)
   loadToken: number; // the frontend load request that owns this wiring
 }
 
@@ -112,6 +121,10 @@ const slotMap = new Map<number, BridgeSlot>();
  * take must still fail closed. A record/overdub snapshots these totals at arm and compares at commit.
  */
 let recordDroppedFrames = 0;
+/** A take is recording (`setCaptureHold`): nothing is recentred, so the take keeps one timeline. Holding
+ * the drift controller as well was tried (2026-09-24): takes came out flat, but under load the ring ran
+ * dry (47 underruns in one take), so the controller keeps its authority while a take records. */
+let captureHold = false;
 let recordUnderruns = 0;
 const [gainValues, setGainValues] = createSignal<[number | null, number | null]>([null, null]);
 
@@ -261,6 +274,10 @@ export async function acceptPluginBuffer(ab: ArrayBuffer, meta: PluginBufferMeta
       jsDropped: 0,
       accountedUnderruns: 0,
       recenteredUnderruns: 0,
+      fillSmoothed: 0,
+      offSince: NaN,
+      skipDebt: 0,
+      webMuted: false,
       loadToken: meta.loadToken,
     };
     slot.timer = setInterval(() => drain(slot), DRAIN_INTERVAL_MS);
@@ -309,9 +326,47 @@ function mirror(s: BridgeSlot): void {
   s.header[H_JS_DROPPED] = s.jsDropped >>> 0; // lag-cap + flush discards
 }
 
+/** The drift controller's hop-2 setpoint in frames. */
+function hop2TargetFrames(): number {
+  return ctx ? Math.round(ctx.sampleRate * HOP2_TARGET_SECONDS) : 0;
+}
+
 /** hop-2 frames short of the controller's setpoint (0 when at or above it). */
 function hop2Shortfall(s: BridgeSlot): number {
-  return ctx ? Math.max(0, Math.round(ctx.sampleRate * HOP2_TARGET_SECONDS) - s.hop2.available_read()) : 0;
+  return Math.max(0, hop2TargetFrames() - s.hop2.available_read());
+}
+
+/**
+ * Between takes, with the native monitor carrying the sound (the web path muted, so nothing audible
+ * glitches), put a hop-2 fill that has sat off the setpoint back on it: pad a short one at once, and
+ * drain a long one by dropping the excess from hop-1 over the next ticks (`skipDebt`; hop-2 has one
+ * reader, the worklet). Without this the controller's slow loop steers the offset out over minutes,
+ * and a take recorded meanwhile lands off by it.
+ */
+function recenterIdle(s: BridgeSlot): void {
+  if (!ctx) return;
+  const fill = s.hop2.available_read();
+  s.fillSmoothed += (fill - s.fillSmoothed) * HOP2_FILL_SMOOTHING;
+  if (captureHold || !s.webMuted) {
+    s.skipDebt = 0;
+    s.offSince = NaN;
+    return;
+  }
+  const off = s.fillSmoothed - hop2TargetFrames();
+  if (Math.abs(off) < ctx.sampleRate * HOP2_IDLE_TOLERANCE_SECONDS || s.skipDebt > 0) {
+    s.offSince = NaN;
+    return;
+  }
+  const now = performance.now();
+  if (Number.isNaN(s.offSince)) s.offSince = now;
+  if (now - s.offSince < HOP2_IDLE_PATIENCE_MS) return;
+  s.offSince = NaN;
+  if (off < 0) {
+    padHop2(s);
+    s.fillSmoothed = s.hop2.available_read();
+  } else {
+    s.skipDebt = Math.round(off);
+  }
 }
 
 /** Pad hop-2 with silence up to the setpoint (the main thread is hop-2's only writer). */
@@ -340,6 +395,7 @@ function drain(s: BridgeSlot): void {
     s.flushed = true;
     s.recenteredUnderruns = Atomics.load(s.stats, 1) >>> 0; // starving before the first audio is not an underrun to repair
     padHop2(s);
+    s.fillSmoothed = s.hop2.available_read();
     mirror(s);
     return;
   }
@@ -365,6 +421,14 @@ function drain(s: BridgeSlot): void {
       avail -= excess;
     }
   }
+  if (s.skipDebt > 0 && avail > 0 && !captureHold) {
+    const skip = Math.min(s.skipDebt, avail);
+    dropFrames(s, skip);
+    read = (read + skip) >>> 0;
+    s.header[H_READ] = read;
+    avail -= skip;
+    s.skipDebt -= skip;
+  }
   // Real-lag cap: if we've fallen too far behind (GC stall / clock drift), drop the oldest so the
   // monitoring latency stays bounded. A brief discontinuity beats an ever-growing delay. The dropped
   // frames are an audible glitch — count them so the gate can reject a stream that crackles.
@@ -388,7 +452,11 @@ function drain(s: BridgeSlot): void {
     }
     // toMove === 0 (hop-2 full, worklet not consuming yet) leaves the frames in hop-1 — not dropped.
   }
-  if (underran) padHop2(s);
+  if (underran) {
+    padHop2(s);
+    s.fillSmoothed = s.hop2.available_read();
+  }
+  recenterIdle(s);
   mirror(s); // refresh PV + counters every tick, regardless of whether audio moved
 }
 
@@ -487,6 +555,19 @@ function setWebMonitorMuted(slot: number, muted: boolean): void {
   const s = slotMap.get(slot);
   if (!s || !ctx) return;
   s.webMonitorGain.gain.setTargetAtTime(muted ? 0 : 1, ctx.currentTime, 0.01);
+  s.webMuted = muted;
+}
+
+/** The slot's hop-2 fill smoothed over ~0.3 s (frames): the record path's moving delay term; null
+ * without a wired slot. Record compensation reads its shift since the freeze for each take. */
+function queueFrames(slot: number): number | null {
+  const s = slotMap.get(slot);
+  return s && s.flushed ? s.fillSmoothed : null;
+}
+
+/** A take starts (true) or its capture is released (false); see `captureHold`. */
+function setCaptureHold(on: boolean): void {
+  captureHold = on;
 }
 
 export const pluginBridge = {
@@ -507,4 +588,8 @@ export const pluginBridge = {
   stats,
   /** Monotonic loss totals for fail-closed looper recording integrity. */
   recordLossSnapshot,
+  /** A take records (the looper's recorder session): no recentring meanwhile. */
+  setCaptureHold,
+  /** The smoothed hop-2 fill (frames) record compensation tracks between takes. */
+  queueFrames,
 } as const;

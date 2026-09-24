@@ -10,7 +10,10 @@
  * nativeOut = monitor-ring residency + the median valid callback-to-playback report (the callback period
  * at startup or when unsupported). C is 0 unless a native monitor is armed: native monitoring cancels
  * input + plugin latency, so C compensates the record path only. The first record use freezes the median
- * per monitor generation; re-arm, a buffer change and resnapshot reopen it (`record-latency.ts`).
+ * per monitor generation; re-arm, a buffer change and resnapshot reopen it. Each later take shifts the
+ * frozen queue term by how far the bridge's smoothed hop-2 fill has moved since then (`record-latency.ts`).
+ * What no report sees, the WebView output's real latency above its reported one (~65 ms on the rig,
+ * 2026-09-24), is the trim's job; `pnpm native:loopback` measures it.
  *
  * PURE ON PURPOSE: no engine / bridge import, so `verify/guards/record-compensation.mjs` IMPORTS this
  * instead of mirroring it (see verify/README.md). `record-latency.ts` owns the live terms (sampler, freeze,
