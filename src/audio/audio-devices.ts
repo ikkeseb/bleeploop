@@ -10,6 +10,7 @@ import { notifyError } from '../notify';
 import { monitorArmed, refreshMonitorLatency } from './native-io';
 import { engine } from './engine';
 import { outputDeviceChanged } from './record-latency';
+import { matchWebOutput, outputLabelsHidden } from './output-match';
 
 /**
  * OWNS: the process-wide native audio configuration the Audio Settings panel edits — the enumerated cpal
@@ -117,8 +118,10 @@ type SinkContext = AudioContext & { readonly sinkId: string; setSinkId(sinkId: s
 /**
  * Point the WebView's AudioContext (loops, synths, click) at the picked output, so one pick routes
  * everything, as in a DAW. The pick is a cpal id; the browser's device ids are its own, so the match is
- * by name: cpal's is the Windows endpoint name plus ` [kind] via bus`. Under ASIO the picker is off and
- * the WebView stays on the system default. No-op when the context is already there, and in the web build.
+ * by name (`output-match.ts`). The names need a mic grant, which a keys player who never armed a mic
+ * lacks: a mic opened and closed at once gets it (auto-granted, `src-tauri/src/lib.rs`). Under ASIO the
+ * picker is off and the WebView stays on the system default. No-op when the context is already there,
+ * and in the web build.
  */
 export async function applyWebOutput(): Promise<void> {
   if (!platform.pluginHost.available) return;
@@ -128,12 +131,15 @@ export async function applyWebOutput(): Promise<void> {
   try {
     let sinkId = '';
     if (name) {
-      const match = (await navigator.mediaDevices.enumerateDevices())
-        .filter((d) => d.kind === 'audiooutput' && d.deviceId !== 'default' && d.deviceId !== 'communications')
-        .filter((d) => d.label && (name === d.label || name.startsWith(`${d.label} `)))
-        .sort((a, b) => b.label.length - a.label.length)[0];
+      let devices = await navigator.mediaDevices.enumerateDevices();
+      if (outputLabelsHidden(devices)) {
+        const mic = await navigator.mediaDevices.getUserMedia({ audio: true });
+        mic.getTracks().forEach((t) => t.stop());
+        devices = await navigator.mediaDevices.enumerateDevices();
+      }
+      const match = matchWebOutput(name, devices);
       if (!match) throw new Error(`no browser output named like "${name}"`);
-      sinkId = match.deviceId;
+      sinkId = match;
     }
     if (ctx.sinkId === sinkId) return;
     await ctx.setSinkId(sinkId);

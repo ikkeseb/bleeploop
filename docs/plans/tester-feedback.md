@@ -77,10 +77,15 @@ Proven in the browser tier only (`pnpm check`, `pnpm build`, `pnpm verify:jam`, 
   on a from-the-top start.
 - **F10:** the button reads `AUTO REC · SENS n` with an explanatory tooltip. Wording is the owner's eye.
 - **F13:** the dropdowns show the saved pick, and the WebView's output follows the output pick by
-  endpoint name (`applyWebOutput` in `src/audio/audio-devices.ts`); under ASIO it stays on the system
-  default. Verified in the Tauri app on the dev PC with a throwaway probe: the saved pick shows on reopen
-  and the context's sink follows it. The dev PC has one output device, so a switch between two
-  physical devices is unheard.
+  endpoint name (`applyWebOutput` in `src/audio/audio-devices.ts`, the match in
+  `src/audio/output-match.ts`); under ASIO it stays on the system default. Verified in the Tauri app on
+  the dev PC with a throwaway probe: the saved pick shows on reopen and the context's sink follows it.
+  The tester's first build toasted "Loops and synths stay on the previous output" for a USB headset. Two
+  causes, both fixed: WebView2 hides device labels until the session holds a mic grant (measured in a
+  fresh profile: every label empty, and the grant does not survive a relaunch), and Chromium appends
+  ` (vid:pid)` to a USB-class device's label. The dev PC's Focusrite runs a vendor driver and gets no
+  suffix, which is why it passed. Re-verified in a fresh profile: labels hidden, and the sink still
+  followed the pick. Unverified: the tester's machine, and a switch between two physical devices.
 
 ## Work order (owner-approved)
 
