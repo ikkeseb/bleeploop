@@ -2335,6 +2335,14 @@ mod resize_tests;
 #[path = "vst3_controller_fixture.rs"]
 mod controller_tests;
 
+// DEV Stage 1 premise spike (`docs/plans/native-engine.md`): the VST3 load + process sequence,
+// copied into one native device callback. A child here to reach the private load items.
+#[cfg(debug_assertions)]
+#[path = "engine_spike.rs"]
+mod engine_spike;
+#[cfg(debug_assertions)]
+pub(crate) use engine_spike::run as engine_spike_run;
+
 /// Audit B5: `restartComponent`'s whole body is `RestartFlags::raise`, so a plugin calling it from
 /// its own worker thread must touch nothing but atomics there — no log (a lock + allocation), no
 /// emit and no event-ring push. The owner's drain then sees every flag, split by kind.

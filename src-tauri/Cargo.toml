@@ -61,6 +61,10 @@ windows = { version = "0.61", features = [
     # P10.0 plugin-editor host window: create + pump a top-level Win32 window the plugin embeds into.
     "Win32_UI_WindowsAndMessaging",
     "Win32_System_LibraryLoader",
+    # DEV share probe (share_probe.rs): ActivateAudioInterfaceAsync takes a PROPVARIANT. cpal already
+    # enables both; listed here so the probe does not depend on feature unification.
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Variant",
 ] }
 # Pin windows-core to 0.61 to unify the graph. cpal 0.18.1 accepts windows + windows-core in the
 # range ">=0.61,<=0.62"; left alone, cargo greedily picks windows-core 0.62 for cpal's *direct* dep

@@ -2985,3 +2985,5 @@ pub fn vst3_load(
 
 #[path = "vst3.rs"]
 mod vst3_host;
+#[cfg(debug_assertions)]
+pub(crate) use vst3_host::engine_spike_run;

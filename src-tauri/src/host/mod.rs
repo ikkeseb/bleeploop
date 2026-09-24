@@ -40,6 +40,8 @@ pub use commands::*;
 pub use state::PluginHostState;
 #[cfg(all(windows, debug_assertions))]
 pub(crate) use clap::marker_probe_target;
+#[cfg(all(windows, debug_assertions))]
+pub(crate) use clap::engine_spike_run;
 
 #[cfg(debug_assertions)]
 #[global_allocator]

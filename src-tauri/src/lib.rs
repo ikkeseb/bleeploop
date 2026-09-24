@@ -13,6 +13,9 @@ mod audio_output;
 mod audio_latency_probe;
 #[cfg(all(windows, debug_assertions))]
 mod marker_probe;
+// Stage 1 silent-share probe (docs/plans/native-engine.md § Stage 1, S1).
+#[cfg(all(windows, debug_assertions))]
+mod share_probe;
 
 /// A diagnostic sink the frontend invokes once on startup (DEV only) so headless verification can
 /// read WebView2-internal facts (crossOriginIsolated, getUserMedia, MIDI, host kind) from
@@ -146,6 +149,27 @@ pub fn run() {
                 Ok(()) => std::process::exit(0),
                 Err(error) => {
                     eprintln!("[output-latency-probe] {error}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        // Native-engine Stage 1 premise spike (`docs/plans/native-engine.md`).
+        #[cfg(debug_assertions)]
+        if let Some(pos) = args.iter().position(|a| a == "--probe-engine-spike") {
+            match host::engine_spike_run(&args[pos + 1..]) {
+                Ok(()) => std::process::exit(0),
+                Err(error) => {
+                    eprintln!("[engine-spike] {error}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        #[cfg(debug_assertions)]
+        if let Some(pos) = args.iter().position(|a| a == "--probe-share" || a == "--probe-share-child") {
+            match share_probe::run(args[pos] == "--probe-share-child", &args[pos + 1..]) {
+                Ok(()) => std::process::exit(0),
+                Err(error) => {
+                    eprintln!("[share-probe] {error}");
                     std::process::exit(1);
                 }
             }

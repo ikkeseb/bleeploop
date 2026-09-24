@@ -39,14 +39,15 @@ calibration-free alignment, a low round trip (RT) with an amp in the callback, a
 round trip, and a silent share stream?
 
 **Shape.** DEV flags on the debug `app.exe`, beside `--probe-output-latency`
-(`src-tauri/src/audio_latency_probe.rs`); they exit before Tauri starts. New files (not yet built):
-src-tauri/src/host/engine_spike.rs as a DEV child module of `vst3.rs` (reaches the VST3 host's private
-items without widening visibility) and src-tauri/src/share_probe.rs. No production-path edit. A
-`pnpm native:spike` mode in `scripts/native-probe.mjs` (not yet built) runs the matrix and prints the
-table: per buffer size one 10-minute run (A4) and four 60 s launches.
+(`src-tauri/src/audio_latency_probe.rs`); they exit before Tauri starts. Files:
+`src-tauri/src/host/engine_spike.rs`, a DEV child module of `vst3.rs` (reaches the VST3 host's private
+items without widening visibility) and `src-tauri/src/share_probe.rs`. No production-path edit.
+`pnpm native:spike` (`scripts/native-spike.mjs`) runs the matrix and prints the table: per buffer
+size one 10-minute run (A4) and four 60 s launches. The probes run at the device's current rate and
+never change it (a forced 48 kHz disturbed the owner's listening).
 
-- `app.exe --probe-engine-spike <asio|wasapi> <64|128|256|default> [--plugin <file.vst3>] [--in N] [--out N] [--minutes N]`
-- `app.exe --probe-share <mute|vol0|open|zeros|dual>`
+- `app.exe --probe-engine-spike <asio|wasapi> <64|128|256|default> [--plugin <file.vst3>] [--in N] [--out N] [--minutes N | --seconds N] [--echo] [--quiet] [--device <name>]`
+- `app.exe --probe-share <mute|vol0|open|zeros|dual|all>`
 
 **ASIO, one callback.** Build and play the input stream first, then the output: asio-sys 0.3.0 runs
 registered callbacks in registration order inside one bufferSwitch. The input callback copies its
@@ -82,7 +83,7 @@ at the same time, plain endpoint loopback (what "share system audio" sees). The 
 needs are already on windows 0.61.3 through cpal (features unify; no version change).
 
 **Output:** one JSON line per phase (`[engine-spike]` / `[share-probe]`), then one
-`PASS|FAIL <id> <value> <bar>` line per criterion. 48 kHz; A-criteria at 64/128/256.
+`PASS|FAIL <id> <value> <bar>` line per criterion. The device's rate; A-criteria at 64/128/256.
 
 | id | bar | what it stands for |
 |---|---|---|
