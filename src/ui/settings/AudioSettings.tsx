@@ -211,8 +211,8 @@ export function AudioSettings() {
           build has no other way to trim it (the DEV-only hook is `__lf.recordLatency.setOffsetMs`). It
           nudges the compensation C (record-latency.ts): POSITIVE ms shifts the recorded take EARLIER on
           the grid, negative later. Only affects natively-monitored recording (guitar through a native
-          plugin monitor); synth/mic loops are untouched. This is a stopgap to be superseded by the L3
-          loopback calibration wizard. PLACEMENT IS PROVISIONAL — eye-gated. */}
+          plugin monitor); synth/mic loops are untouched. No calibration build replaces it (D18); the native
+          engine removes the setting (docs/plans/native-engine.md). PLACEMENT IS PROVISIONAL — eye-gated. */}
       <div
         class="audio-settings__row"
         title="Nudges recorded guitar alignment (native monitor only): positive ms lands the take earlier on the grid, negative later."

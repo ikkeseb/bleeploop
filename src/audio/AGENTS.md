@@ -48,5 +48,5 @@ protocol and debug levers: **`STATUS.md` § Stop 1** — read it before ANY late
 - **`Math.round(bpm)` in `clock.ts` is a negligible red herring** (0.011 ms, no accumulation).
 - **Live notes are scheduled at `ctx.currentTime + 5 ms`** in `input-router.ts`, bypassing Tone's
   100 ms lookAhead (the ~110 → ~17 ms input-latency win) — keep live notes off Tone's transport.
-- **Uncompensated latency, by choice:** inline PitchShift FX; the mic path (its fix is the L3
-  wizard, not a guess-term).
+- **Uncompensated latency, by choice:** inline PitchShift FX; the mic path (no L3 wizard and no
+  guess-term: STATUS D2/D7).
