@@ -396,6 +396,8 @@ impl Render {
     /// One output callback: `data` interleaved at the device's channel count, `entry` when the callback
     /// entered, `latency` the playback delay this stream reported for it.
     pub(crate) fn render<T: SizedSample + FromSample<f32>>(&mut self, data: &mut [T], entry: Instant, latency: Option<Duration>) {
+        // Its own clock, not `entry`: the fake driver's entries are synthetic.
+        let began = Instant::now();
         promote_once();
         let core = Arc::clone(&self.core);
         let counters = &core.counters;
@@ -467,6 +469,7 @@ impl Render {
             }
         }
         core.frame.store(frame + n as Frame, Relaxed);
+        counters.block_load.record(began.elapsed(), n, self.rate);
     }
 
     /// A block the engine did not render plays silence; a fade-out in progress has reached it.
@@ -639,6 +642,24 @@ mod tests {
         let (mut l, mut r) = ([1.0f32; 2], [1.0f32; 2]);
         fade(&mut gain, step, 0.0, &mut l, &mut r);
         assert_eq!((l, r), ([0.0; 2], [0.0; 2]));
+    }
+
+    #[test]
+    fn the_block_load_bins_by_share_of_the_period() {
+        use super::super::{LoadHistogram, LOAD_BINS};
+        let load = LoadHistogram::default();
+        let period = Duration::from_secs_f64(256.0 / 48_000.0);
+        for _ in 0..998 {
+            load.record(period.mul_f64(0.105), 256, 48_000);
+        }
+        load.record(period.mul_f64(0.455), 256, 48_000);
+        load.record(period * 3, 256, 48_000);
+        let all = load.snapshot();
+        assert_eq!(all.count(), 1000);
+        assert_eq!(all.quantile(0.5), Some(10));
+        assert_eq!(all.quantile(0.999), Some(45));
+        assert_eq!(all.max(), Some(LOAD_BINS - 1), "longer than the last bin lands in it");
+        assert_eq!(all.since(&all).quantile(0.5), None, "an empty phase has no quantile");
     }
 
     #[test]

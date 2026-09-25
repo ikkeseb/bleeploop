@@ -24,6 +24,7 @@
 //! | `pipes` | [`pipes::PullPipe`]: frames pushed on one clock, pulled resampled on another (the WASAPI join, Share output) |
 //! | `share` | Share output: the post-limiter master mirrored to a WASAPI endpoint while ASIO plays |
 //! | `midi` | native MIDI: ports, hot-plug, parse, the MIDI-learn bindings, notes and pedal actions |
+//! | `probe` | DEV: `app.exe --probe-engine`, the device side on real hardware (soak, switches, plugin swaps) |
 //!
 //! # Rules
 //!
@@ -61,6 +62,8 @@ pub mod frame_clock;
 pub mod midi;
 mod owner;
 pub(crate) mod pipes;
+#[cfg(debug_assertions)]
+pub(crate) mod probe;
 pub mod share;
 pub mod slot_host;
 #[cfg(test)]
@@ -174,6 +177,70 @@ pub struct IoCounters {
     pub panics: AtomicU64,
     /// Allocations inside the callback's guard (DEV builds: `host::rt_alloc`).
     pub rt_allocs: AtomicU64,
+    /// How long each output callback took (`EngineHost::block_load`).
+    pub block_load: LoadHistogram,
+}
+
+/// Bins of the block-load histogram: bin k counts the output callbacks that took k % up to (k + 1) %
+/// of their own block's period; the last bin, everything longer.
+pub const LOAD_BINS: usize = 200;
+
+/// The output callbacks' durations as a share of their block's period (the Stage 4 soak's bar: p99.9
+/// under 50 %, max under 90 %).
+pub struct LoadHistogram {
+    bins: [AtomicU64; LOAD_BINS],
+}
+
+impl Default for LoadHistogram {
+    fn default() -> Self {
+        LoadHistogram { bins: std::array::from_fn(|_| AtomicU64::new(0)) }
+    }
+}
+
+impl LoadHistogram {
+    /// Count one callback that took `elapsed` for `frames` at `rate`. Never allocates.
+    pub(crate) fn record(&self, elapsed: Duration, frames: usize, rate: u32) {
+        if frames == 0 || rate == 0 {
+            return;
+        }
+        let percent = elapsed.as_secs_f64() * rate as f64 * 100.0 / frames as f64;
+        self.bins[(percent as usize).min(LOAD_BINS - 1)].fetch_add(1, Relaxed);
+    }
+
+    fn snapshot(&self) -> BlockLoad {
+        BlockLoad { bins: std::array::from_fn(|k| self.bins[k].load(Relaxed)) }
+    }
+}
+
+/// A copy of the block-load histogram; [`BlockLoad::since`] gives one phase's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BlockLoad {
+    pub bins: [u64; LOAD_BINS],
+}
+
+impl BlockLoad {
+    pub fn since(&self, earlier: &BlockLoad) -> BlockLoad {
+        BlockLoad { bins: std::array::from_fn(|k| self.bins[k].saturating_sub(earlier.bins[k])) }
+    }
+
+    pub fn count(&self) -> u64 {
+        self.bins.iter().sum()
+    }
+
+    /// The bin the `q` quantile falls in (whole percent of the period, the load under k + 1 %).
+    pub fn quantile(&self, q: f64) -> Option<usize> {
+        let rank = ((q * self.count() as f64).ceil() as u64).max(1);
+        let mut seen = 0;
+        self.bins.iter().position(|&c| {
+            seen += c;
+            seen >= rank
+        })
+    }
+
+    /// The highest bin with a callback in it.
+    pub fn max(&self) -> Option<usize> {
+        self.bins.iter().rposition(|&c| c > 0)
+    }
 }
 
 /// A plain copy of the counters and the engine's own.
@@ -502,6 +569,11 @@ impl EngineHost {
             rt_allocs: c.rt_allocs.load(Relaxed),
             engine: self.core.engine_diag.load(),
         }
+    }
+
+    /// The output callbacks' durations so far (`LoadHistogram`).
+    pub fn block_load(&self) -> BlockLoad {
+        self.core.counters.block_load.snapshot()
     }
 
     /// Close the device and join the owner thread. The engine drops on the owner thread; a plugin unit

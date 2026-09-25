@@ -42,6 +42,8 @@ pub use state::PluginHostState;
 pub(crate) use clap::marker_probe_target;
 #[cfg(all(windows, debug_assertions))]
 pub(crate) use clap::engine_spike_run;
+#[cfg(all(windows, debug_assertions))]
+pub(crate) use scan::scan_one;
 #[cfg(windows)]
 #[allow(unused_imports)] // the native engine's plugin slots: dormant until Stage 5 wires them
 pub(crate) use clap::engine_slot;

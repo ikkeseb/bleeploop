@@ -348,12 +348,17 @@ WASAPI endpoint → the default endpoint. A take recording when the device drops
 
 **Gates.** `cargo test` on the fake-driver seams: the transition state machine, the install/remove/
 restart handshake with a fake processor on a fake driver thread, join and share convergence at
-±400 ppm, MIDI parse and binding rules ported from TS. The Stage 1 probe gains a scripted mode
-(`--script <file>`: frame-coded engine commands) that records, overdubs and loops headlessly, reruns
-the A/R/C/W/S bars on the engine, and drives 20 backend switches and a plugin swap matrix while loops
-play. A 10-min soak with two plugins at ASIO 128: host RT allocs 0 and every diag counter 0 (callback
-gaps, ASIO overloads, lock misses, duplex-order faults, join/share starves, command-ring full). The
-existing plugin fixtures and `pnpm native:swap|survey|smoke|recall` rerun.
+±400 ppm, MIDI parse and binding rules ported from TS. On the rig, `pnpm native:engine` runs the DEV
+probe `app.exe --probe-engine` (`src-tauri/src/engine_io/probe.rs`): a 10-min soak with two plugins at
+ASIO 128 (the amp-sim and Pro-Q), a loop on lane 0, then 20 backend and buffer switches and plugin
+swaps while it plays. The bar: host RT allocs 0 and every diag counter 0 (callback gaps, ASIO
+overloads, lock misses, duplex-order faults, join/share starves and trims, command-ring full), no
+device event, the loop playing through every switch at an unchanged rate, every plugin back in its
+slot, and the soak's output callbacks at p99.9 ≤ 50 %, max < 90 % of the period
+(`EngineHost::block_load`). The existing plugin fixtures and `pnpm native:swap|survey|smoke|recall`
+rerun. Not built (owner, 2026-09-25: the slim probe first): a scripted mode (`--script`, frame-coded
+engine commands) that reruns the Stage 1 A/R/C/W/S bars on the engine; it comes only if the rig run
+needs it. Stage 5's ported `native:loopback` measures the take against the click on the engine.
 
 **Built (2026-09-25), dormant**, every part proven without hardware (fakes, in-process fixture
 plugins, the real engine on a test thread): the slots and the punch-out in lf-engine
@@ -408,10 +413,9 @@ swap bindings; the no-device removal path (a 1-frame process and `stop` on the p
 test with a real unit, and the CLAP restart fixture's thread check would flag it.
 
 Still open in Stage 4: a cross-family review (the 2026-09-25 one ran on Opus and Gemini Flash; Codex
-had no quota); on the rig, the probe's scripted mode and its runs, the 10-minute soak (one
-`duplex_faults` per open would be the input running before the output exists: cpal 0.18.1 starts the
-driver at the input's build; the Stage 1 A1 run saw none), and the plugin fixture and `pnpm native:*`
-reruns.
+had no quota); on the rig, `pnpm native:engine` (one `duplex_faults` per open would be the input
+running before the output exists: cpal 0.18.1 starts the driver at the input's build; the Stage 1 A1
+run saw none), and the plugin fixture and `pnpm native:*` reruns.
 
 ## Stage 5 — cutover behind a hidden toggle
 

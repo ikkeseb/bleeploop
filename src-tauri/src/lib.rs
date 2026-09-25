@@ -169,6 +169,17 @@ pub fn run() {
                 }
             }
         }
+        // Native-engine Stage 4 rig probe (`docs/plans/native-engine.md` § Stage 4).
+        #[cfg(debug_assertions)]
+        if let Some(pos) = args.iter().position(|a| a == "--probe-engine") {
+            match engine_io::probe::run(&args[pos + 1..]) {
+                Ok(()) => std::process::exit(0),
+                Err(error) => {
+                    eprintln!("[engine-probe] {error}");
+                    std::process::exit(1);
+                }
+            }
+        }
         #[cfg(debug_assertions)]
         if let Some(pos) = args.iter().position(|a| a == "--probe-share" || a == "--probe-share-child") {
             match share_probe::run(args[pos] == "--probe-share-child", &args[pos + 1..]) {
