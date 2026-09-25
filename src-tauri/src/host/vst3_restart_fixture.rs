@@ -324,6 +324,48 @@ impl IAudioProcessorTrait for FixtureComponent {
     }
 }
 
+/// Stands in for the JS consumer (the worklet) for the rest of a test: a thread keeps the hop-1 read
+/// cursor (header word [1]) caught up with the write cursor ([0]), through the restart too. Like the
+/// worklet's render thread it runs at audio priority (MMCSS Pro Audio, as the producer does), so the
+/// test threads beside it cannot starve it, and it spins (`yield_now`): a 1 ms sleep can round up to
+/// the 15.6 ms timer tick Windows grants, past the ring's slack. Stops and joins on drop, so it never
+/// outlives the ring it reads.
+struct Drain {
+    stop: Arc<AtomicBool>,
+    join: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drain {
+    /// SAFETY: `header` points at the ring's two 4-byte-aligned cursor words, which outlive the
+    /// `Drain` (drop it before the ring); the RT thread is the sole writer of [0] and the sole reader
+    /// of [1], mirroring the WebView2 contract.
+    unsafe fn start(header: *mut u32) -> Drain {
+        let addr = header as usize;
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopped = stop.clone();
+        let join = std::thread::spawn(move || {
+            crate::engine_io::promote_pro_audio();
+            let header = addr as *mut u32;
+            // SAFETY: the caller's contract above.
+            let (write_idx, read_idx) = unsafe { (AtomicU32::from_ptr(header), AtomicU32::from_ptr(header.add(1))) };
+            while !stopped.load(Acquire) {
+                read_idx.store(write_idx.load(Acquire), Release);
+                std::thread::yield_now();
+            }
+        });
+        Drain { stop, join: Some(join) }
+    }
+}
+
+impl Drop for Drain {
+    fn drop(&mut self) {
+        self.stop.store(true, Release);
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
+    }
+}
+
 /// Spin until `pred` holds or `ms` elapse; returns whether it held.
 fn wait_for(ms: u64, pred: impl Fn() -> bool) -> bool {
     let deadline = Instant::now() + Duration::from_millis(ms);
@@ -405,19 +447,15 @@ fn plugin_requested_restart_cycles_activation_on_the_owner_without_reload() {
     );
     assert_eq!(s.starts.load(Relaxed), 1, "setProcessing(1) ran once, on the RT thread");
 
-    // Stand in for the JS drain: keep the header read cursor ([1]) caught up with the write cursor
-    // ([0]) until the producer is well past one ring capacity, so a restart that forgot the cursor
-    // would wrap `used` and drop every block (the 2026-09-10 CLAP runtime finding).
-    // SAFETY: the header words are 4-byte aligned; the RT thread is the sole writer of [0] and the
-    // sole reader of [1], mirroring the WebView2 contract.
+    // The JS consumer, kept caught up from here to the end: the producer runs well past one ring
+    // capacity first, so a restart that forgot the cursor would wrap `used` and drop every block
+    // (the 2026-09-10 CLAP runtime finding).
+    // SAFETY: the ring outlives `drain` (dropped before it at the end); see `Drain::start`.
+    let drain = unsafe { Drain::start(ring.as_mut_ptr()) };
+    // SAFETY: header word [0], 4-byte aligned; this thread only reads it.
     let write_idx = unsafe { AtomicU32::from_ptr(ring.as_mut_ptr()) };
-    let read_idx = unsafe { AtomicU32::from_ptr(ring.as_mut_ptr().add(1)) };
     assert!(
-        wait_for(4000, || {
-            let w = write_idx.load(Acquire);
-            read_idx.store(w, Release);
-            w > CAP_FRAMES * 2
-        }),
+        wait_for(4000, || write_idx.load(Acquire) > CAP_FRAMES * 2),
         "the producer must publish past one ring capacity with a draining reader"
     );
     let written_before_restart = write_idx.load(Acquire);
@@ -495,11 +533,7 @@ fn plugin_requested_restart_cycles_activation_on_the_owner_without_reload() {
     // The hop-1 write cursor continues from where the joined producer left it (the JS reader is
     // still at its old position), and — with the reader kept caught up — nothing is dropped.
     assert!(
-        wait_for(2000, || {
-            let w = write_idx.load(Acquire);
-            read_idx.store(w, Release);
-            w > written_before_restart + CAP_FRAMES
-        }),
+        wait_for(2000, || write_idx.load(Acquire) > written_before_restart + CAP_FRAMES),
         "the respawned producer must continue the published write cursor, not restart it at 0"
     );
     assert_eq!(
@@ -528,6 +562,7 @@ fn plugin_requested_restart_cycles_activation_on_the_owner_without_reload() {
     );
     assert_eq!(diag.rt_faults.load(Relaxed), 0, "no RT fault was latched across the cycle");
     drop(component);
+    drop(drain);
     drop(ring);
 }
 

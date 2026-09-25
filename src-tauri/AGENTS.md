@@ -242,11 +242,6 @@ existing P9 ring → looper record tap (lag-tolerant, records wet "for free").
 - GO LIVE under ASIO timed out in `arm_monitor` ("timed out waiting on channel", then `disarm_input`
   timed out too) on two of about twelve `pnpm native:loopback` launches on 2026-09-24; a relaunch
   passed. Cause unknown.
-- The CLAP and VST3 restart fixtures' `plugin_requested_restart_cycles_activation_on_the_owner_without_reload`
-  fails under machine load (254 to 1792 hop-1 frames dropped; 3 of 30 runs on 2026-09-25 with other
-  builds running). The test stops reading the ring from its last caught-up wait until after the
-  respawn, while the producer keeps writing into ~10 ms of slack: a fixture defect, not the host's
-  (the fix: drain in every wait).
 - A VST3 unit (live and engine) drops a param past 64 distinct ids in one block without a fault bit
   (`MAX_PARAM_QUEUES`), after the controller already took the value.
 - CLAP and VST3 duplicate the load choreography (`load`/`vst3_load` and both owner mains): one
