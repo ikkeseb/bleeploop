@@ -1,5 +1,5 @@
-//! ADSR envelopes: Tone.js 15.1.22's `component/envelope/Envelope.js` ([`Envelope`]) and
-//! `AmplitudeEnvelope.js` ([`AmplitudeEnvelope`]).
+//! ADSR envelopes: Tone.js 15.1.22's `component/envelope/Envelope.js` ([`Envelope`]),
+//! `AmplitudeEnvelope.js` ([`AmplitudeEnvelope`]) and `FrequencyEnvelope.js` ([`FrequencyEnvelope`]).
 //!
 //! An envelope is a Tone Signal (a constant source) whose offset Tone schedules: the attack from the
 //! envelope's current value (a partial attack takes the time left at the full attack's rate), up to
@@ -7,16 +7,19 @@
 //! from the value at its time down to 0. Linear curves are linear ramps; exponential ones are Tone's
 //! `targetRampTo` and `exponentialApproachValueAtTime` (a setTarget finished by a linear ramp over
 //! its last 10 %). A retrigger while sounding starts from where the envelope is, which Tone reads from
-//! its own model of the curve. An amplitude envelope connects that signal into a gain's param.
+//! its own model of the curve. An amplitude envelope connects that signal into a gain's param. A
+//! frequency envelope maps it through a `Pow` (a WaveShaper of `|x|^exponent`, 8192 points) and a
+//! `Scale` from `baseFrequency` to `baseFrequency * 2^octaves`.
 //! Deliberately not ported: array curves and the named shapes built from them (cosine, bounce,
 //! ripple, sine, step); no production synth sets one. Tone's `asArray` (an offline render) neither.
 //!
 //! Scheduling and rendering never allocate. Every call takes the frame being rendered, for Blink's
 //! context time (`dsp::param`).
 
+use super::fdlibm;
 use super::gain::ParamGain;
 use super::param::{Units, QUANTUM};
-use super::signal::Signal;
+use super::signal::{Scale, Signal, WaveShaper};
 
 const Q: usize = QUANTUM;
 
@@ -147,5 +150,40 @@ impl AmplitudeEnvelope {
     pub fn process(&mut self, q: u64, input: Option<&[f32; Q]>, out: &mut [f32; Q]) -> bool {
         let env = self.envelope.process(q);
         self.gain.process(q, input, Some(env), out)
+    }
+
+    /// [`AmplitudeEnvelope::process`] on several channels.
+    pub fn process_channels(&mut self, q: u64, input: Option<&[[f32; Q]]>, out: &mut [[f32; Q]]) -> bool {
+        let env = self.envelope.process(q);
+        self.gain.process_channels(q, input, Some(env), out)
+    }
+}
+
+/// Tone's `FrequencyEnvelope`: the envelope, raised to `exponent`, scaled to hertz.
+pub struct FrequencyEnvelope {
+    pub envelope: Envelope,
+    pow: WaveShaper,
+    scale: Scale,
+    shaped: [f32; Q],
+}
+
+impl FrequencyEnvelope {
+    /// `new FrequencyEnvelope({ ...adsr, baseFrequency, octaves, exponent })`.
+    pub fn new(adsr: Adsr, base_frequency: f64, octaves: f64, exponent: f64, sample_rate: f32, frame: u64) -> Self {
+        // `toFrequency(hertz)` is `1 / (1 / hertz)` (Tone's FrequencyClass round trip).
+        let base = 1.0 / (1.0 / base_frequency);
+        FrequencyEnvelope {
+            envelope: Envelope::new(adsr, sample_rate, frame),
+            pow: WaveShaper::new(8192, |x| fdlibm::pow(x.abs(), exponent)),
+            scale: Scale::new(sample_rate, base, base * fdlibm::pow(2.0, octaves), frame),
+            shaped: [0.0; Q],
+        }
+    }
+
+    /// Render the quantum at `q`: the frequency in hertz.
+    pub fn process(&mut self, q: u64) -> &[f32; Q] {
+        let env = self.envelope.process(q);
+        self.pow.process(env, &mut self.shaped);
+        self.scale.process(q, Some(&self.shaped))
     }
 }

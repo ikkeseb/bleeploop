@@ -140,4 +140,19 @@ impl ParamGain {
             }
         }
     }
+
+    /// [`ParamGain::process`] on several channels (a stereo source through one gain).
+    pub fn process_channels(&mut self, q: u64, input: Option<&[[f32; QUANTUM]]>, gain_input: Option<&[f32; QUANTUM]>, out: &mut [[f32; QUANTUM]]) -> bool {
+        self.gain.native.calculate_sample_accurate_values(q, &mut self.values, gain_input);
+        let Some(input) = input else {
+            zero(out);
+            return true;
+        };
+        for (o, i) in out.iter_mut().zip(input) {
+            for ((o, &x), &g) in o.iter_mut().zip(i).zip(&self.values) {
+                *o = x * g;
+            }
+        }
+        false
+    }
 }

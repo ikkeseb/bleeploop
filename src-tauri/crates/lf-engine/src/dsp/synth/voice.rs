@@ -74,7 +74,7 @@ impl Synth {
         self.trigger_envelope_release(time, frame);
     }
 
-    fn trigger_envelope_attack(&mut self, time: f64, velocity: f64, frame: u64) {
+    pub(crate) fn trigger_envelope_attack(&mut self, time: f64, velocity: f64, frame: u64) {
         self.envelope.envelope.trigger_attack(time, velocity, frame);
         self.oscillator.start(time, frame);
         let adsr = self.envelope.envelope.adsr;
@@ -83,7 +83,7 @@ impl Synth {
         }
     }
 
-    fn trigger_envelope_release(&mut self, time: f64, frame: u64) {
+    pub(crate) fn trigger_envelope_release(&mut self, time: f64, frame: u64) {
         self.envelope.envelope.trigger_release(time, frame);
         self.oscillator.stop(time + self.envelope.envelope.adsr.release, frame);
     }

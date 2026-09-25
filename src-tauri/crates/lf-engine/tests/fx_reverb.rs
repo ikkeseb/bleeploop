@@ -11,35 +11,17 @@ mod common;
 use std::sync::Arc;
 
 use assert_no_alloc::assert_no_alloc;
+use common::fx::{states, timing, BLOCKS};
 use common::refs::{self, Class};
 use common::violation_count;
 use lf_engine::dsp::buffer_source::AudioBuffer;
-use lf_engine::dsp::fx::{Ctl, FxChain, FxKind, FxState, FxTiming, ReverbBus, REVERB_DECAY, REVERB_PRE_DELAY};
+use lf_engine::dsp::fx::{Ctl, FxChain, ReverbBus, REVERB_DECAY, REVERB_PRE_DELAY};
 use lf_engine::dsp::noise::NoiseTables;
 use lf_engine::dsp::param::QUANTUM;
 use lf_engine::dsp::reverb_ir;
 use lf_engine::dsp::rng::Mulberry32;
 
 const ID: &str = "fx-reverb-full-48000";
-const BLOCKS: [usize; 5] = [1, 64, 127, 128, 480];
-
-fn states(s: &refs::Scenario) -> [FxState; 5] {
-    let json = s.setup["states"].as_array().expect("fx states");
-    FxKind::ALL.map(|kind| {
-        let entry = &json[kind.index()];
-        let mut state = FxState::default_for(kind);
-        state.bypassed = entry["bypassed"].as_bool().expect("bypassed");
-        for (i, def) in kind.params().iter().enumerate() {
-            state.params[i] = entry["params"][def.key].as_f64().expect("a param value");
-        }
-        state
-    })
-}
-
-fn timing(s: &refs::Scenario) -> FxTiming {
-    let t = &s.setup["timing"];
-    FxTiming { anchor: t["anchor"].as_f64().expect("anchor"), beat_period: t["beatPeriod"].as_f64().expect("beatPeriod") }
-}
 
 /// The bus's IR at `rate`, from the scenario's draws.
 fn impulse_response(s: &refs::Scenario) -> [Vec<f32>; 2] {

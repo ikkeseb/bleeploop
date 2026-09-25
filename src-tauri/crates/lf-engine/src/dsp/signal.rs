@@ -1,7 +1,7 @@
 //! Tone's signal plumbing, one quantum per call: Tone's `Signal` on Blink's ConstantSourceNode
-//! ([`Signal`]), Blink's WaveShaperNode with Tone's mapped curves ([`WaveShaper`]), and Tone's
-//! `connectSignal` into a native param ([`connect_signal`]; into a Tone param it is
-//! [`ToneParam::connect_signal`]).
+//! ([`Signal`]), Blink's WaveShaperNode with Tone's mapped curves ([`WaveShaper`]), Tone's `Scale`
+//! ([`Scale`]), and Tone's `connectSignal` into a native param ([`connect_signal`]; into a Tone param
+//! it is [`ToneParam::connect_signal`]).
 //!
 //! [`Signal`] ports `signal/Signal.js` over `signal/ToneConstantSource.js` and
 //! `modules/webaudio/constant_source_handler.cc`: a ConstantSourceNode started at construction, its
@@ -11,7 +11,9 @@
 //! (no oversampling). standardized-audio-context connects a looping silent buffer into every
 //! WaveShaperNode whose curve is not zero at its centre (its bug #119 workaround,
 //! `native-wave-shaper-node-factory.js`), so such a shaper never propagates silence: this one always
-//! maps its input, zero included. [`connect_signal`] ports `connectSignal` from `signal/Signal.js`.
+//! maps its input, zero included. [`Scale`] ports `signal/Scale.js` over `Multiply.js` and `Add.js`:
+//! a Gain whose gain is `max - min`, then a unity Gain summing that with a constant source of `min`.
+//! [`connect_signal`] ports `connectSignal` from `signal/Signal.js`.
 //!
 //! Every Tone source also gets a keep-alive gain of 0 into the destination from
 //! standardized-audio-context (`add-silent-connection.js`). Its only effect on the output is that every
@@ -19,6 +21,7 @@
 //!
 //! Ported from Chromium (Blink), Copyright The Chromium Authors, BSD-3-Clause.
 
+use super::gain::GainNode;
 use super::param::{AudioParam, Rate, ToneParam, Units, QUANTUM};
 
 const Q: usize = QUANTUM;
@@ -136,5 +139,41 @@ impl WaveShaper {
         let v2 = curve[(index1.wrapping_add(1)).clamp(0, max_index) as usize];
         let f = v - index1 as f32;
         f * (v2 - v1) + v1
+    }
+}
+
+/// Tone's `Scale`: `input * (max - min) + min`, in Blink's float arithmetic (the Multiply's gain, then
+/// the Add's sum; its unity Gain copies).
+pub struct Scale {
+    /// The Multiply: a Gain at `max - min`.
+    mult: GainNode,
+    /// The Add's addend: a Signal of `min`.
+    add: Signal,
+    scaled: [[f32; Q]; 1],
+    out: [f32; Q],
+}
+
+impl Scale {
+    /// `new Scale({ min, max })`, built while `frame` renders.
+    pub fn new(sample_rate: f32, min: f64, max: f64, frame: u64) -> Self {
+        let mut mult = GainNode::new(sample_rate as f64, 1.0, Units::Gain, frame);
+        mult.gain.set_value_at_time(max - min, 0.0, frame);
+        Scale { mult, add: Signal::new(sample_rate, Units::Number, min, frame), scaled: [[0.0; Q]], out: [0.0; Q] }
+    }
+
+    /// The `min`/`max` setters (`_setRange`) at Tone's `now`: the Add's value, then the Multiply's.
+    pub fn set_range(&mut self, min: f64, max: f64, now: f64, frame: u64) {
+        self.add.param.set_value(min, now, frame);
+        self.mult.gain.set_value(max - min, now, frame);
+    }
+
+    /// Render the quantum at `q` from `input` (`None` when silent).
+    pub fn process(&mut self, q: u64, input: Option<&[f32; Q]>) -> &[f32; Q] {
+        self.mult.process(q, input.map(std::slice::from_ref), &mut self.scaled);
+        let add = self.add.process(q, None);
+        for ((o, &x), &a) in self.out.iter_mut().zip(&self.scaled[0]).zip(add) {
+            *o = x + a;
+        }
+        &self.out
     }
 }

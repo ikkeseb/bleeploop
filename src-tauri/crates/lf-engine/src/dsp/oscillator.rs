@@ -22,8 +22,15 @@
 //! native OscillatorNode for every start after a stop (so its phase restarts at 0) and keeps the
 //! running one on a start before the stop time (a restart: the stop is cancelled, the phase runs on).
 //! The Omni wrapper and the Oscillator inside it keep identical state timelines, so one is kept. Their
-//! frequency and detune are Tone Signals the owner renders and passes in: the Oscillator's own
-//! signals between them are overridden to zero and only add +0, so they are left out.
+//! frequency and detune are Tone Signals the owner renders and passes in. The Oscillator's own Signals
+//! between them are overridden (their offsets add +0) but not transparent: each ToneConstantSource
+//! reaches the native params through its OneShotSource gain (0 at time 0, then 1 at time 0), and Blink
+//! renders that gain only when a started node pulls its params. Its events are clamped to the time of
+//! the first quantum it renders, `q / rate`, and where that time times the rate lands above `q` (at
+//! 48 k, the quanta at frames 7168 and 14336 among others) the quantum's first frame keeps the 0: a
+//! Tone oscillator whose first start falls in such a quantum reads frequency 0 there, which Blink's
+//! first-quantum phase increments turn into a one-frame phase lag for the whole note. Both gains are
+//! [`GainNode`]s here, rendered only in the quanta a node plays.
 //!
 //! Tone stops a native node from a timeout its clock fires on the first tick past the stop time; here
 //! the native stop is the stop time itself. Both land where the OneShotSource gain is already zero,
@@ -267,6 +274,27 @@ struct Schedule {
 }
 
 impl Schedule {
+    /// Whether [`Schedule::update`] will render frames in the quantum at `quantum_start` (only then
+    /// does Blink's `Process` go on to read the params, pulling what is connected to them).
+    fn renders(&self, quantum_start: u64) -> bool {
+        if matches!(self.state, PlaybackState::Unscheduled | PlaybackState::Finished) {
+            return false;
+        }
+        let sample_rate = self.sample_rate as f64;
+        let quantum_end = quantum_start + Q as u64;
+        let start_frame = time_to_sample_frame(self.start_time, sample_rate, Rounding::Up);
+        let end_frame = self.end_time.map(|t| time_to_sample_frame(t, sample_rate, Rounding::Up));
+        if end_frame.is_some_and(|e| e <= quantum_start) || start_frame >= quantum_end {
+            return false;
+        }
+        let offset = (start_frame.saturating_sub(quantum_start) as usize).min(Q);
+        let mut frames = Q - offset;
+        if let Some(end_frame) = end_frame.filter(|&e| e < quantum_end) {
+            frames = frames.saturating_sub(Q - (end_frame - quantum_start) as usize);
+        }
+        frames > 0
+    }
+
     /// `UpdateSchedulingInfo`: the frame offset the source starts at in this quantum, the frames it
     /// renders, and the sub-frame start offset on its first quantum. Zeroes the frames of `out` it
     /// does not render.
@@ -747,6 +775,11 @@ impl OneShotOscillator {
         matches!(self.osc.state(), PlaybackState::Unscheduled | PlaybackState::Finished)
     }
 
+    /// Whether this node reads its frequency and detune in the quantum at `q`.
+    fn renders(&self, q: u64) -> bool {
+        self.osc.schedule.renders(q)
+    }
+
     /// `start(time)`: `_startGain` then the native start.
     fn start(&mut self, time: f64, current_time: f64, frame: u64) {
         debug_assert!(self.start_time == -1.0, "Source cannot be started more than once");
@@ -795,11 +828,16 @@ pub struct ToneOscillator {
     /// Pool order of the node starts, to reuse the oldest.
     serial: [u64; NODE_POOL],
     next_serial: u64,
+    /// The gain envelopes of the Oscillator's own frequency and detune Signals (ToneConstantSource's
+    /// OneShotSource gain: 0 at 0, then 1 at 0), rendered only in quanta a node reads its params.
+    frequency_gain: GainNode,
+    detune_gain: GainNode,
+    gated: [[f32; Q]; 2],
 }
 
 impl ToneOscillator {
     pub fn new(wave: Arc<PeriodicWave>, sample_rate: f32, frame: u64) -> Self {
-        ToneOscillator {
+        let mut osc = ToneOscillator {
             sample_rate,
             sample_time: 1.0 / sample_rate as f64,
             nodes: (0..NODE_POOL).map(|_| OneShotOscillator::new(Arc::clone(&wave), sample_rate, frame)).collect(),
@@ -808,7 +846,18 @@ impl ToneOscillator {
             current: None,
             serial: [0; NODE_POOL],
             next_serial: 0,
-        }
+            frequency_gain: GainNode::new(sample_rate as f64, 0.0, Units::Gain, frame),
+            detune_gain: GainNode::new(sample_rate as f64, 0.0, Units::Gain, frame),
+            gated: [[0.0; Q]; 2],
+        };
+        osc.start_signal_gains(frame);
+        osc
+    }
+
+    /// The Signals' `start(0)`: their gain envelopes open at time 0.
+    fn start_signal_gains(&mut self, frame: u64) {
+        self.frequency_gain.gain.set_value_at_time(1.0, 0.0, frame);
+        self.detune_gain.gain.set_value_at_time(1.0, 0.0, frame);
     }
 
     /// Back to a freshly built oscillator.
@@ -818,6 +867,9 @@ impl ToneOscillator {
         }
         self.state.reset();
         self.current = None;
+        self.frequency_gain.reset(0.0, frame);
+        self.detune_gain.reset(0.0, frame);
+        self.start_signal_gains(frame);
     }
 
     fn current_time(&self, frame: u64) -> f64 {
@@ -873,6 +925,14 @@ impl ToneOscillator {
 
     /// Render the quantum at `q` into `out`; returns whether it is silent.
     pub fn process(&mut self, q: u64, frequency: &[f32; Q], detune: &[f32; Q], out: &mut [f32; Q]) -> bool {
+        // Blink pulls the Signals' gain envelopes only through a node that reads its params, so their
+        // automation first runs in the first quantum a node plays (see the module doc).
+        if self.nodes.iter().any(|n| n.renders(q)) {
+            let [f, d] = &mut self.gated;
+            self.frequency_gain.process(q, Some(std::slice::from_ref(frequency)), std::slice::from_mut(f));
+            self.detune_gain.process(q, Some(std::slice::from_ref(detune)), std::slice::from_mut(d));
+        }
+        let [frequency, detune] = &self.gated;
         let mut silent = true;
         for node in self.nodes.iter_mut() {
             if let Some(x) = node.process(q, frequency, detune) {

@@ -22,7 +22,7 @@ use crate::dsp::fdlibm;
 use crate::dsp::gain::GainNode;
 use crate::dsp::oscillator::{OscillatorType, PeriodicWave, ToneOscillator};
 use crate::dsp::param::{Units, QUANTUM};
-use crate::dsp::signal::{Signal, WaveShaper};
+use crate::dsp::signal::{Scale, Signal, WaveShaper};
 
 const Q: usize = QUANTUM;
 
@@ -34,14 +34,10 @@ pub struct Lfo {
     /// Tone's `amplitude` (normalRange).
     pub amplitude: GainNode,
     a2g: WaveShaper,
-    /// Scale's Multiply (`max - min`) and its Add (`min`).
-    scale: GainNode,
-    add: Signal,
+    scale: Scale,
     osc_out: [f32; Q],
     amplified: [[f32; Q]; 1],
     mapped: [f32; Q],
-    scaled: [[f32; Q]; 1],
-    out: [f32; Q],
 }
 
 impl Lfo {
@@ -93,21 +89,16 @@ impl Lfo {
     /// `new LFO({ frequency, min, max, amplitude })` with `wave`, not started yet.
     pub fn stopped(wave: Arc<PeriodicWave>, frequency: f64, min: f64, max: f64, amplitude: f64, sample_rate: f32, frame: u64) -> Self {
         let rate = sample_rate as f64;
-        let mut scale = GainNode::new(rate, 1.0, Units::Gain, frame);
-        scale.gain.set_value_at_time(max - min, 0.0, frame);
         Lfo {
             frequency: Signal::new(sample_rate, Units::Frequency, frequency, frame),
             detune: Signal::new(sample_rate, Units::Cents, 0.0, frame),
             oscillator: ToneOscillator::new(wave, sample_rate, frame),
             amplitude: GainNode::new(rate, amplitude, Units::NormalRange, frame),
             a2g: WaveShaper::audio_to_gain(),
-            scale,
-            add: Signal::new(sample_rate, Units::Number, min, frame),
+            scale: Scale::new(sample_rate, min, max, frame),
             osc_out: [0.0; Q],
             amplified: [[0.0; Q]],
             mapped: [0.0; Q],
-            scaled: [[0.0; Q]],
-            out: [0.0; Q],
         }
     }
 
@@ -120,8 +111,7 @@ impl Lfo {
     /// Multiply's). The LFO converts them to its destination's units first, a no-op for the numbers in
     /// seconds, hertz or normal range that reach it.
     pub fn set_range(&mut self, min: f64, max: f64, now: f64, frame: u64) {
-        self.add.param.set_value(min, now, frame);
-        self.scale.gain.set_value(max - min, now, frame);
+        self.scale.set_range(min, max, now, frame);
     }
 
     /// Render the quantum at `q`.
@@ -139,12 +129,7 @@ impl Lfo {
         self.amplitude.process(q, (!silent).then_some(std::slice::from_ref(&self.osc_out)), &mut self.amplified);
         // The shaper's input is never silent (the stopped signal feeds it too): zeros map as well.
         self.a2g.process(&self.amplified[0], &mut self.mapped);
-        self.scale.process(q, Some(std::slice::from_ref(&self.mapped)), &mut self.scaled);
-        let add = self.add.process(q, None);
-        for ((o, &x), &a) in self.out.iter_mut().zip(&self.scaled[0]).zip(add) {
-            *o = x + a;
-        }
-        &self.out
+        self.scale.process(q, Some(&self.mapped))
     }
 }
 

@@ -148,8 +148,9 @@ struct Entry {
     attack_time: f64,
 }
 
-/// `createModulation`: the voices' sum splits into a dry gain and the vibrato's wet gain.
-struct ModulationBus {
+/// `createModulation`: the voices' sum splits into a dry gain and the vibrato's wet gain (the poly
+/// synths' and the bass's).
+pub(crate) struct ModulationBus {
     dry: GainNode,
     wet: GainNode,
     vibrato: Vibrato,
@@ -160,7 +161,7 @@ struct ModulationBus {
 }
 
 impl ModulationBus {
-    fn new(sample_rate: f32, lfo_wave_rate: f32, now: f64, frame: u64) -> Self {
+    pub(crate) fn new(sample_rate: f32, lfo_wave_rate: f32, now: f64, frame: u64) -> Self {
         let rate = sample_rate as f64;
         let wave = Arc::new(Lfo::sine_wave(-90.0, lfo_wave_rate));
         ModulationBus {
@@ -173,7 +174,7 @@ impl ModulationBus {
         }
     }
 
-    fn set_modulation(&mut self, depth: f64, now: f64, frame: u64) {
+    pub(crate) fn set_modulation(&mut self, depth: f64, now: f64, frame: u64) {
         let d = depth.clamp(0.0, 1.0);
         self.vibrato.depth().gain.set_value(d * MOD_WHEEL_MAX_DEPTH, now, frame);
         let want_wet = d > 0.0;
@@ -184,7 +185,7 @@ impl ModulationBus {
         }
     }
 
-    fn process(&mut self, q: u64, input: Option<&[f32; Q]>, out: &mut [f32; Q]) {
+    pub(crate) fn process(&mut self, q: u64, input: Option<&[f32; Q]>, out: &mut [f32; Q]) {
         let dry_silent = self.dry.process(q, input.map(std::slice::from_ref), &mut self.dry_out);
         let vibrato = self.vibrato.process(q, input);
         let wet_silent = self.wet.process(q, Some(std::slice::from_ref(vibrato)), &mut self.wet_out);

@@ -234,13 +234,17 @@ normalization, Blink's partitioned convolver on RustFFT 6.4.1, the FFT Chromium 
 DynamicsCompressorKernel: lookahead, knee, adaptive release, makeup). Blink ports are BSD-3: the
 notice is in `THIRD-PARTY-NOTICES.md`; the installer carries it once the engine links.
 
-**Built (2026-09-25),** in `src-tauri/crates/lf-engine/src/dsp`, each bit-exact against its reference
-(class N at the harness floor): the limiter (`compressor.rs`, E6's default: a literal port), the
-AudioParam timeline with Tone's Param layer (`param.rs`), buffer playback and Tone's Noise
-(`buffer_source.rs`), fdlibm (`fdlibm.rs`) and the reverb IR (`reverb_ir.rs`; the stored IR comes from
-makeReverbBus's second `generate()`, draws 3 and 4), and the reverb bus (`convolver.rs`,
-`fx/reverb.rs`; bit-exact where RustFFT picks its AVX code, as it did for the reference; at 48 k it
-costs 1.8 % of a 128-frame quantum on average and 4 % in its worst, release). **The limiter is not wired** into the engine's
+**Built (2026-09-25),** in `src-tauri/crates/lf-engine/src/dsp` (module map in its `mod.rs`): every
+scenario passes class N. Bit-exact: the limiter (E6's default, a literal port), the reverb IR (from
+makeReverbBus's second `generate()`, draws 3 and 4), the filter, stutter and delay FX, the bypass
+crossfade and the reverb bus (where RustFFT picks its AVX code, as it did for the reference). Near
+exact: the lead, piano, organ and pad (−125 to −141 dB), the bass (−114 dB), the drum kit (−95 dB: the
+metals' FM near Nyquist and Blink's biquad tail-stop), the hot delay (−776 dB: Blink's denormal flush)
+and PitchShift (−69 to −72 dB, the nearest to the −60 dB bar: a 1-ulp wave-table difference moves its
+float delay reads). Costs per 128-frame quantum at 48 k, release, dev PC: pad at 12 voices 85 µs, the
+drum kit with all 16 voices ringing 367 µs (13.8 %), a chain with pitch on 18 µs, the reverb bus 47 µs
+mean and 106 µs worst. The acceptance run (six synths, five full chains, the bus, at 64 frames) is not
+built. **The limiter is not wired** into the engine's
 master slot: it delays the output by Blink's 6 ms pre-delay (288 frames at 48 k, 264 at 44.1 k) and
 lifts everything under the threshold by its makeup gain (+0.57 dB), so the wiring adds its latency to
 the take alignment (`align_frames` + inserts + limiter) and moves the output-frame tests to a
