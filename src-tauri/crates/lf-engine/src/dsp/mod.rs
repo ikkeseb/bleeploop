@@ -8,7 +8,7 @@
 //!   [`noise`]), [`oscillator`], [`envelope`], the delay line ([`delay`]), [`biquad`] and Tone's
 //!   [`filter`], [`crossfade`], fdlibm ([`fdlibm`]) and the seeded `Math.random` ([`rng`]).
 //! - Instruments and effects: the lead, piano, organ and pad synths with the app's poly layer and
-//!   modulation ([`synth`]); the per-track FX chain with its filter, stutter and feedback delay
+//!   modulation ([`synth`]); the per-track FX chain with its filter, pitch shift, stutter and feedback delay
 //!   ([`fx`]); the reverb IR ([`reverb_ir`]); the master limiter ([`compressor`]).
 //!
 //! The crate briefing (`lib.rs`) lists what is not built yet.

@@ -12,7 +12,7 @@
 //!
 //! Bypassed means wet 0, and a CrossFade at 0 still mixes `b` in at −56 dB (see the crossfade
 //! module): the echoes of a bypassed delay are in every chain's output, so this node renders them.
-//! The delay-* reference scenarios that judge the effect itself belong to a later wave.
+//! The fx-delay-* scenarios judge the effect itself (`tests/fx_delay_pitch.rs`).
 
 use super::{clamp_index, division_beats, Ctl, FxParam, FxState, FxTiming, DIVISIONS, MAX_FEEDBACK, RAMP};
 use crate::dsp::crossfade::CrossFade;
