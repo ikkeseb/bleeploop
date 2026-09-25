@@ -7,19 +7,22 @@ use super::*;
 use std::sync::atomic::AtomicUsize;
 use vst3::Steinberg::{char16, int16, IBStream, TBool};
 
-struct FixtureController {
+pub(super) struct FixtureController {
     param_count: AtomicI32,
     /// The handler the controller currently holds, and how often the host set one.
-    handler: Mutex<Option<ComPtr<IComponentHandler>>>,
+    pub(super) handler: Mutex<Option<ComPtr<IComponentHandler>>>,
     handler_sets: AtomicUsize,
+    /// Every `setParamNormalized` the host made (the engine-mode tests' controller mirror).
+    pub(super) set_normalized: Mutex<Vec<(ParamID, ParamValue)>>,
 }
 
 impl FixtureController {
-    fn new(param_count: i32) -> Self {
+    pub(super) fn new(param_count: i32) -> Self {
         Self {
             param_count: AtomicI32::new(param_count),
             handler: Mutex::new(None),
             handler_sets: AtomicUsize::new(0),
+            set_normalized: Mutex::new(Vec::new()),
         }
     }
     fn held_handler(&self) -> Option<usize> {
@@ -91,7 +94,8 @@ impl IEditControllerTrait for FixtureController {
     unsafe fn getParamNormalized(&self, _id: ParamID) -> ParamValue {
         0.25
     }
-    unsafe fn setParamNormalized(&self, _id: ParamID, _value: ParamValue) -> tresult {
+    unsafe fn setParamNormalized(&self, id: ParamID, value: ParamValue) -> tresult {
+        self.set_normalized.lock().unwrap().push((id, value));
         kResultOk
     }
     unsafe fn setComponentHandler(&self, handler: *mut IComponentHandler) -> tresult {

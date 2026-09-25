@@ -2335,6 +2335,11 @@ mod resize_tests;
 #[path = "vst3_controller_fixture.rs"]
 mod controller_tests;
 
+// Engine mode: this format's unit and owner (`engine_slot.rs`). Dormant until Stage 5 wires it.
+#[allow(dead_code)]
+#[path = "vst3_engine.rs"]
+pub(super) mod engine;
+
 // DEV Stage 1 premise spike (`docs/plans/native-engine.md`): the VST3 load + process sequence,
 // copied into one native device callback. A child here to reach the private load items.
 #[cfg(debug_assertions)]
