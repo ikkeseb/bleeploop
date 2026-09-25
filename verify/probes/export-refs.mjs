@@ -91,25 +91,27 @@ async function readRecovery() {
 }
 
 // ── Normalized comparison ────────────────────────────────────────────────────────────────────────
-/** Entries by name with the timestamped base cut off, so two captures line up. */
+/** Entries by name with the timestamped base cut off, so two captures line up, and session.json's
+ * text with the base cut out of its file fields too. */
 function entriesOf(zip) {
   const entries = parseZip(new Uint8Array(zip.buffer, zip.byteOffset, zip.length));
   const base = entries.find((e) => e.name.endsWith('-session.json')).name.slice(0, -'-session.json'.length);
-  return new Map(entries.map((e) => [e.name.slice(base.length), e.data]));
+  const byName = new Map(entries.map((e) => [e.name.slice(base.length), e.data]));
+  return { byName, session: new TextDecoder().decode(byName.get('-session.json')).replaceAll(base, '') };
 }
 
 /** Differences between two archives, [] when they match up to the normalized fields. */
 function compareArchives(label, committed, fresh) {
-  const a = entriesOf(committed);
-  const b = entriesOf(fresh);
+  const [a, b] = [committed, fresh].map(entriesOf);
   const out = [];
-  if ([...a.keys()].join() !== [...b.keys()].join()) return [`${label}: entries ${[...a.keys()]} vs ${[...b.keys()]}`];
-  for (const [name, old] of a) {
-    const now = b.get(name);
+  if ([...a.byName.keys()].join() !== [...b.byName.keys()].join()) {
+    return [`${label}: entries ${[...a.byName.keys()]} vs ${[...b.byName.keys()]}`];
+  }
+  for (const [name, old] of a.byName) {
+    const now = b.byName.get(name);
     if (name === '-session.json') {
-      const [x, y] = [old, now].map((d) => ({ ...JSON.parse(new TextDecoder().decode(d)), exported: null }));
-      for (const s of [x, y]) for (const t of s.tracks) t.file = t.file.replace(/^.*(-track\d\.wav)$/, '$1');
-      if (JSON.stringify(x) !== JSON.stringify(y)) out.push(`${label}${name}: session fields differ`);
+      const [x, y] = [a, b].map((m) => JSON.stringify({ ...JSON.parse(m.session), exported: null }));
+      if (x !== y) out.push(`${label}${name}: session fields differ`);
     } else if (name === '-master.wav') {
       const [x, y] = [old, now].map((d) => decodeWav(d).channels);
       let lsb = 0;
@@ -147,9 +149,9 @@ await probe(async ({ open, browser }) => {
 
   const exported = entriesOf(exportBytes);
   const recovered = entriesOf(recoveryBytes);
-  assert.deepEqual([...exported.keys()], ['-track1.wav', '-track2.wav', '-master.wav', '-session.json']);
-  assert.deepEqual([...recovered.keys()], ['-track1.wav', '-track2.wav', '-session.json']);
-  const master = JSON.parse(new TextDecoder().decode(exported.get('-session.json'))).master;
+  assert.deepEqual([...exported.byName.keys()], ['-track1.wav', '-track2.wav', '-master.wav', '-session.json']);
+  assert.deepEqual([...recovered.byName.keys()], ['-track1.wav', '-track2.wav', '-session.json']);
+  const master = JSON.parse(exported.session).master;
   assert.equal(master.kind, 'wet-v1', 'the wet master render fell back');
 
   const files = [
