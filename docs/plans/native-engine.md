@@ -415,11 +415,22 @@ test with a real unit, and the CLAP restart fixture's thread check would flag it
 Still open in Stage 4: a cross-family review (the 2026-09-25 one ran on Opus and Gemini Flash; Codex
 had no quota); on the rig, `pnpm native:engine` (one `duplex_faults` per open would be the input
 running before the output exists: cpal 0.18.1 starts the driver at the input's build; the Stage 1 A1
-run saw none), and the plugin fixture and `pnpm native:*` reruns. A first muted WASAPI run
-(2026-09-25, the Scarlett shared with a voice-chat app, both plugins, 60 s soak, 2 swaps) passed every
-check but the counters: 42 `gaps` (29 in the soak) and 9 `engine.xruns`, at a block time of p99.9
-< 37 %, max < 39 %, so the callbacks entered late rather than ran long. Cause unknown; the Stage 1
-spike saw 0 gaps on WASAPI (60 s, no plugin, the first 5 s not counted).
+run saw none), and the plugin fixture and `pnpm native:*` reruns.
+
+WASAPI on the Scarlett (muted `pnpm native:engine` runs, 2026-09-25, both plugins, 60 s soak): with no
+other app on the microphone every check passes, input and output both at 44 100.7 Hz against QPC. With
+a browser video call (and the Windows Settings app) holding the microphone, three runs saw 0 gaps but
+15 `join_trims` each; the third measured the input pushing 0.87 % more frames than the output pulled
+(44 482 vs 44 098 Hz), past what the join's controller (sized for ±400 ppm) holds, so the ring ran over
+twice its setpoint every 3–6 s and each trim skipped ~25 ms of input. Unknown: whether those extra
+frames are real time (a faster controller fixes it) or an artefact (resampling them shifts the pitch 15
+cents); the output rate did not move, on the same device. An earlier run, also with a call on the
+microphone, saw the reverse, 42 `gaps` (29 in the soak) and 9 `engine.xruns` but no trims, not
+reproduced since. The output buffer holds 970 frames (2.2 periods of 441), so a callback up to 2.2
+periods after the previous loses nothing, yet `lost_frames` counts a gap from 1.5 periods; by code
+reading, not measured, a gap whose callback delivers only one period (the audio engine itself ran late)
+counts a lost period, jumps the frame counter and skips the loop by it. The probe prints a trace of
+each gap, trim and the join's rates (`trace` in `src-tauri/src/engine_io/callback.rs`).
 
 ## Stage 5 — cutover behind a hidden toggle
 

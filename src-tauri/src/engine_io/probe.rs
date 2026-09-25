@@ -585,6 +585,9 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
     host.shutdown();
 
     let total = host.diag();
+    for line in super::callback::trace::lines() {
+        say(format!("trace {line}"));
+    }
     say(format!("total: callbacks {}, counters {}", total.callbacks, moved(&total, &IoDiag::default())));
     if faults(&total).iter().any(|(_, n)| *n > 0) {
         p.fails.push(("counters", moved(&total, &IoDiag::default())));

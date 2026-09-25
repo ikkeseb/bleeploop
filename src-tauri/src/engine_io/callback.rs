@@ -305,6 +305,8 @@ impl JoinInput {
         f32: FromSample<T>,
     {
         promote_once();
+        #[cfg(debug_assertions)]
+        trace::join_push(data.len() / self.channels);
         if let Some(frames) = self.probe.observe(latency, self.rate) {
             self.run.in_latency.store(frames, Relaxed);
         }
@@ -405,6 +407,8 @@ impl Render {
         self.run.callbacks.fetch_add(1, Relaxed);
         let n = data.len() / self.channels;
 
+        #[cfg(debug_assertions)]
+        trace::output(self.last, entry, n, latency, self.rate, self.run.callbacks.load(Relaxed));
         let lost = match self.last.replace((entry, n)) {
             Some((before, prev)) => {
                 let (gap, lost) = lost_frames(entry.saturating_duration_since(before), self.rate, prev, n);
@@ -423,8 +427,12 @@ impl Render {
             Source::Duplex => 0,
             Source::Join { pipe, x, joined, .. } => {
                 let m = n.min(x.len());
+                #[cfg(debug_assertions)]
+                let fill_before = pipe.fill();
                 let zeroed = pipe.pull(&mut x[..m]) + (n - m);
                 let trims = pipe.take_trims();
+                #[cfg(debug_assertions)]
+                trace::join_pull(self.run.callbacks.load(Relaxed), n, fill_before, trims > 0);
                 if trims > 0 {
                     counters.join_trims.fetch_add(trims, Relaxed);
                 }
@@ -559,6 +567,93 @@ fn lost_frames(elapsed: Duration, rate: u32, prev: usize, n: usize) -> (bool, Fr
     }
     let periods = ((elapsed - n as f64) / prev as f64).round();
     (true, if periods >= 1.0 { periods as Frame * prev as Frame } else { 0 })
+}
+
+/// DEV: what the counters cannot say, for the rig probe (`probe.rs` prints it). Each run's first output
+/// callback (WASAPI: its buffer), each gap and the two callbacks after it (a late wake that delivers the
+/// backlog, or a lost period), each join trim with the fill it found, and every 1000th join output
+/// callback the frames the input pushed and the output pulled so far (their rates, against QPC).
+#[cfg(debug_assertions)]
+pub(crate) mod trace {
+    use std::cell::Cell;
+    use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering::Relaxed};
+    use std::sync::OnceLock;
+    use std::time::{Duration, Instant};
+
+    const LEN: usize = 1024;
+    static RECORDS: [[AtomicI64; 6]; LEN] = [const { [const { AtomicI64::new(0) }; 6] }; LEN];
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    static IN_FRAMES: AtomicI64 = AtomicI64::new(0);
+    static OUT_FRAMES: AtomicI64 = AtomicI64::new(0);
+    static EPOCH: OnceLock<Instant> = OnceLock::new();
+
+    thread_local! {
+        static AFTER: Cell<u8> = const { Cell::new(0) };
+    }
+
+    fn put(r: [i64; 6]) {
+        let i = NEXT.fetch_add(1, Relaxed);
+        if i < LEN {
+            for (a, v) in RECORDS[i].iter().zip(r) {
+                a.store(v, Relaxed);
+            }
+        }
+    }
+
+    /// An output callback of `n` frames, entered at `entry`, after `last` (the previous entry and its
+    /// frames); the gap rule is `lost_frames`'.
+    pub(crate) fn output(last: Option<(Instant, usize)>, entry: Instant, n: usize, latency: Option<Duration>, rate: u32, callback: u64) {
+        let (kind, elapsed, prev) = match last {
+            None => (0, -1, 0),
+            Some((before, prev)) => {
+                let e = entry.saturating_duration_since(before).as_secs_f64() * rate as f64;
+                if prev > 0 && e > 1.5 * prev as f64 {
+                    AFTER.set(2);
+                    (1, e.round() as i64, prev)
+                } else if AFTER.get() > 0 {
+                    AFTER.set(AFTER.get() - 1);
+                    (2, e.round() as i64, prev)
+                } else {
+                    return;
+                }
+            }
+        };
+        let latency = latency.map_or(-1, |d| (d.as_secs_f64() * rate as f64).round() as i64);
+        put([kind, callback as i64, elapsed, prev as i64, n as i64, latency]);
+    }
+
+    /// A join output callback that pulled `n` frames from a ring holding `fill` (frames at the input's
+    /// rate), and whether that pull trimmed it.
+    pub(crate) fn join_pull(callback: u64, n: usize, fill: usize, trimmed: bool) {
+        let out = OUT_FRAMES.fetch_add(n as i64, Relaxed) + n as i64;
+        if trimmed {
+            put([3, callback as i64, 0, 0, n as i64, fill as i64]);
+        }
+        if callback % 1000 == 0 {
+            let ms = EPOCH.get_or_init(Instant::now).elapsed().as_millis() as i64;
+            put([4, callback as i64, ms, IN_FRAMES.load(Relaxed), out, fill as i64]);
+        }
+    }
+
+    /// A join input callback of `n` frames.
+    pub(crate) fn join_push(n: usize) {
+        IN_FRAMES.fetch_add(n as i64, Relaxed);
+    }
+
+    /// The records so far, one line each.
+    pub(crate) fn lines() -> Vec<String> {
+        (0..NEXT.load(Relaxed).min(LEN))
+            .map(|i| {
+                let [kind, cb, a, b, c, d] = std::array::from_fn(|k| RECORDS[i][k].load(Relaxed));
+                match kind {
+                    0 => format!("first callback {cb}: n={c} latency={d}"),
+                    1 | 2 => format!("{} callback {cb}: elapsed={a} prev={b} n={c} latency={d}", if kind == 1 { "GAP  " } else { "after" }),
+                    3 => format!("TRIM  callback {cb}: n={c} fill={d}"),
+                    _ => format!("join  callback {cb}: {a} ms, pushed {b}, pulled {c}, fill {d}"),
+                }
+            })
+            .collect()
+    }
 }
 
 /// Ramp the block toward `target` (0 = silence, 1 = full), a linear step per frame.
