@@ -58,8 +58,16 @@ impl Filter {
 
     /// Render the Signals for the quantum at `quantum_start` and update every stage's coefficients.
     pub fn begin_quantum(&mut self, quantum_start: u64) {
+        self.begin_quantum_driven(quantum_start, None);
+    }
+
+    /// [`Filter::begin_quantum`] with a signal connected into `frequency` (an envelope driving the
+    /// cutoff: `connectSignal` overrides the Signal, see [`ToneParam::connect_signal`]).
+    ///
+    /// [`ToneParam::connect_signal`]: super::param::ToneParam::connect_signal
+    pub fn begin_quantum_driven(&mut self, quantum_start: u64, frequency: Option<&[f32; QUANTUM]>) {
         self.q.process(quantum_start, None);
-        self.frequency.process(quantum_start, None);
+        self.frequency.process(quantum_start, frequency);
         self.detune.process(quantum_start, None);
         self.gain.process(quantum_start, None);
         let inputs = ParamInputs {
