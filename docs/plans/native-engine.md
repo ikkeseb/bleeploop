@@ -413,9 +413,35 @@ swap bindings; the no-device removal path (a 1-frame process and `stop` on the p
 test with a real unit, and the CLAP restart fixture's thread check would flag it.
 
 Still open in Stage 4: a cross-family review (the 2026-09-25 one ran on Opus and Gemini Flash; Codex
-had no quota); on the rig, `pnpm native:engine` (one `duplex_faults` per open would be the input
-running before the output exists: cpal 0.18.1 starts the driver at the input's build; the Stage 1 A1
-run saw none), and the plugin fixture and `pnpm native:*` reruns.
+had no quota); the gap detector and the re-open `duplex_faults` below (fixes not decided); and the
+plugin fixture and `pnpm native:*` reruns.
+
+The rig run (`pnpm native:engine`, 2026-09-25, ASIO 128, Archetype Petrucci X and Pro-Q 3): the 600 s
+soak is clean (206 717 callbacks, every counter 0, block time p99.9 < 30 %, max < 37 %); all 20
+switches start and the loop plays through them and the 4 swaps; every check passes but the counters (10
+`gaps`, 14 `duplex_faults`, 7 `engine.xruns`).
+
+- `duplex_faults`: none on the first open. Every ASIO re-open logs a BadMode input build and its retry
+  (`retry_on_asio`), and 14 of the 15 took exactly one fault. So the fault follows the retry's build
+  path, not cpal starting the driver at every input build. A candidate fix is resyncing without a count
+  on a run's first output callback (`Render::block`).
+
+- `gaps` and `engine.xruns`: none at ASIO 128/256 or in the soak. At ASIO 64, 4 gaps in 3 of 5 visits,
+  each a callback just over 1.5 periods late followed by early ones (98, 78, 8 frames: three callbacks
+  in under three periods), so no buffer was skipped, yet each counted a lost period, an xrun and a
+  64-frame jump of the frame counter. On WASAPI, 6 gaps in the first 1.6 s after a switch: the three
+  that delivered one period (n = 441, the padding at its usual 529) were the audio engine running late
+  and catching up two callbacks later (n = 882), yet each counted a lost period, an xrun and a
+  441-frame jump; those that delivered 882 counted none. So `lost_frames` infers a loss from one late
+  interval where the callback timeline shows none, on both backends; by code reading each such jump
+  skips the loop by that many frames.
+
+- Swaps: loads 7–78 ms; unloading Archetype while a second instance ran took 4 798 ms, 4 784 of them
+  the plugin's own release, deactivate, terminate and module unload, with the slot dry meanwhile.
+
+- One of the day's three probe launches hung on its first ASIO open: 0 callbacks, the open timed out at
+  15 s and the owner thread did not stop; the next launch opened fine. Cause unknown (compare the live
+  line's `arm_monitor` timeouts in `src-tauri/AGENTS.md`).
 
 WASAPI on the Scarlett (muted `pnpm native:engine` runs, 2026-09-25, both plugins, 60 s soak): with no
 other app on the microphone every check passes, input and output both at 44 100.7 Hz against QPC. With
@@ -427,10 +453,9 @@ frames are real time (a faster controller fixes it) or an artefact (resampling t
 cents); the output rate did not move, on the same device. An earlier run, also with a call on the
 microphone, saw the reverse, 42 `gaps` (29 in the soak) and 9 `engine.xruns` but no trims, not
 reproduced since. The output buffer holds 970 frames (2.2 periods of 441), so a callback up to 2.2
-periods after the previous loses nothing, yet `lost_frames` counts a gap from 1.5 periods; by code
-reading, not measured, a gap whose callback delivers only one period (the audio engine itself ran late)
-counts a lost period, jumps the frame counter and skips the loop by it. The probe prints a trace of
-each gap, trim and the join's rates (`trace` in `src-tauri/src/engine_io/callback.rs`).
+periods after the previous loses nothing (the rig run above shows `lost_frames` counting a loss inside
+that). The probe prints a trace of each gap, trim and the join's rates (`trace` in
+`src-tauri/src/engine_io/callback.rs`).
 
 ## Stage 5 — cutover behind a hidden toggle
 
