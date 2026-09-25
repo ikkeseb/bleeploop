@@ -6,16 +6,18 @@
 //! - Building blocks, one of each: param automation ([`param`], with Blink's time and quantum helpers),
 //!   [`gain`], Tone's signal plumbing ([`signal`]), buffer playback and noise ([`buffer_source`],
 //!   [`noise`]), [`oscillator`], [`envelope`], the delay line ([`delay`]), [`biquad`] and Tone's
-//!   [`filter`], [`crossfade`], fdlibm ([`fdlibm`]) and the seeded `Math.random` ([`rng`]).
+//!   [`filter`], [`crossfade`], Blink's ConvolverNode ([`convolver`]), fdlibm ([`fdlibm`]) and the seeded
+//!   `Math.random` ([`rng`]).
 //! - Instruments and effects: the lead, piano, organ and pad synths with the app's poly layer and
-//!   modulation ([`synth`]); the per-track FX chain with its filter, pitch shift, stutter and feedback delay
-//!   ([`fx`]); the reverb IR ([`reverb_ir`]); the master limiter ([`compressor`]).
+//!   modulation ([`synth`]); the per-track FX chain with its filter, pitch shift, stutter and feedback delay,
+//!   and the shared reverb bus ([`fx`]); the reverb IR ([`reverb_ir`]); the master limiter ([`compressor`]).
 //!
 //! The crate briefing (`lib.rs`) lists what is not built yet.
 
 pub mod biquad;
 pub mod buffer_source;
 pub mod compressor;
+pub mod convolver;
 pub mod crossfade;
 pub mod delay;
 pub mod envelope;

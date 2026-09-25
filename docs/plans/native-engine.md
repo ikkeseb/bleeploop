@@ -230,7 +230,7 @@ and RMS envelope within ±0.5 dB. Each port takes the tightest class it passes, 
 fixture table), filter (two biquads, equal-power bypass), stutter, delay. **Hard:** MetalSynth (six
 audio-rate FM squares + resonant highpass); PitchShift (two modulated delay lines, its latency
 reproduced as heard, CPU budgeted); the convolution reverb (seeded IR with the same envelope and
-normalization, a partitioned FFT convolver — crate unknown); the limiter (Blink's
+normalization, Blink's partitioned convolver on RustFFT 6.4.1, the FFT Chromium 153 runs); the limiter (Blink's
 DynamicsCompressorKernel: lookahead, knee, adaptive release, makeup). Blink ports are BSD-3: the
 notice is in `THIRD-PARTY-NOTICES.md`; the installer carries it once the engine links.
 
@@ -238,7 +238,9 @@ notice is in `THIRD-PARTY-NOTICES.md`; the installer carries it once the engine 
 (class N at the harness floor): the limiter (`compressor.rs`, E6's default: a literal port), the
 AudioParam timeline with Tone's Param layer (`param.rs`), buffer playback and Tone's Noise
 (`buffer_source.rs`), fdlibm (`fdlibm.rs`) and the reverb IR (`reverb_ir.rs`; the stored IR comes from
-makeReverbBus's second `generate()`, draws 3 and 4). **The limiter is not wired** into the engine's
+makeReverbBus's second `generate()`, draws 3 and 4), and the reverb bus (`convolver.rs`,
+`fx/reverb.rs`; bit-exact where RustFFT picks its AVX code, as it did for the reference; at 48 k it
+costs 1.8 % of a 128-frame quantum on average and 4 % in its worst, release). **The limiter is not wired** into the engine's
 master slot: it delays the output by Blink's 6 ms pre-delay (288 frames at 48 k, 264 at 44.1 k) and
 lifts everything under the threshold by its makeup gain (+0.57 dB), so the wiring adds its latency to
 the take alignment (`align_frames` + inserts + limiter) and moves the output-frame tests to a

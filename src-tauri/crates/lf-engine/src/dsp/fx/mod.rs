@@ -3,8 +3,12 @@
 //!
 //! ```text
 //! input → Filter → Pitch → Stutter → Delay → out
-//!                                         └→ reverb send (the shared reverb bus's input)
+//!                                         └→ reverb send ─┐
+//! every track's send ─────────────────────────────────────┴→ ReverbBus (stereo) → master
 //! ```
+//!
+//! The chain renders its output and its send; the caller sums the sends into the one shared
+//! [`ReverbBus`] (see the reverb module).
 //!
 //! Every node is built at construction and always renders, as in Tone: a bypassed Filter, Pitch or
 //! Stutter is a [`CrossFade`](super::crossfade::CrossFade) at fade 0, which still mixes its wet path in
@@ -38,7 +42,7 @@ mod stutter;
 pub use delay::DelayFx;
 pub use filter::FilterFx;
 pub use pitch::PitchFx;
-pub use reverb::ReverbSendFx;
+pub use reverb::{ReverbBus, ReverbSendFx, REVERB_DECAY, REVERB_PRE_DELAY};
 pub use stutter::StutterFx;
 
 use super::param::{self, QUANTUM};
@@ -335,6 +339,12 @@ impl FxChain {
         self.stutter.set_timing(timing, ctl);
         self.delay.set_timing(timing, ctl);
         Ok(())
+    }
+
+    /// The send is silent in the quantum last rendered (its gain is 0). A quantum in which every
+    /// chain's send is silent reaches the [`ReverbBus`] as `None`.
+    pub fn send_silent(&self) -> bool {
+        self.reverb.is_silent()
     }
 
     fn begin_quantum(&mut self, quantum_start: u64) {

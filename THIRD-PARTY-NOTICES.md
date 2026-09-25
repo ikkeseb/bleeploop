@@ -50,6 +50,7 @@ All versions below are as pinned/resolved in `src-tauri/Cargo.lock`.
 | cpal | 0.18.1 | Apache-2.0 (single license, not dual) |
 | rtrb | 0.3.4 | MIT OR Apache-2.0 |
 | rubato | 3.0.0 | MIT |
+| rustfft | 6.4.1 | MIT OR Apache-2.0 |
 | walkdir | 2.5.0 | `Unlicense/MIT` (crate's own non-SPDX-normalized string; effectively dual Unlicense-or-MIT) |
 | vst3 | 0.3.0 | MIT OR Apache-2.0 — see the separate VST3-hosting note below |
 | webview2-com | 0.38.2 | MIT |

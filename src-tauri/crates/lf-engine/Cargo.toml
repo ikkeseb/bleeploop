@@ -12,12 +12,14 @@ publish = false
 # Pure on purpose: no host, device or plugin crate may enter this tree (scripts/engine-deny.mjs).
 [dependencies]
 rtrb = "0.3.4"
+# The convolution reverb (dsp::convolver): Chromium 153's FFTFrame runs this crate at this version, so
+# pinned to the transforms Blink's ConvolverNode computes. Pure Rust; also the fixtures' STFT (refs.rs).
+rustfft = "=6.4.1"
 
 [dev-dependencies]
 assert_no_alloc = { version = "1.1", features = ["warn_debug"] }
 proptest = { version = "1", default-features = false, features = ["std"] }
-# The Tone reference fixtures (tests/common/refs.rs): the manifest, input hashes, the S-class STFT.
-rustfft = "6"
+# The Tone reference fixtures (tests/common/refs.rs): the manifest, input hashes.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
