@@ -21,7 +21,7 @@
 //!
 //! - **One clock: the device frame.** Input frame `x` is captured at frame `x`; a lane plays loop
 //!   position `(f - anchor) mod master` at frame `f`. A take starts `align_frames` (+ the plugin's
-//!   latency) after its downbeat. There is no user-facing record trim.
+//!   latency and the master limiter's pre-delay) after its downbeat. There is no user-facing record trim.
 //! - **Every state change lands on its exact frame.** `process` splits a block wherever a command, a
 //!   scheduled looper event, a beat or an AUTO trigger falls, so the same commands render bit-identical
 //!   output at any block size (the golden jam and the gesture property tests assert it).
@@ -41,8 +41,8 @@
 //!
 //! # Not built yet
 //!
-//! Wiring the synths, the FX chain, the reverb bus and the limiter into [`engine`] (each is ported in
-//! [`dsp`] and tested alone); the device owner and plugin slots (Stage 4); waveform peaks and the
+//! Wiring the synths, the FX chain and the reverb bus into [`engine`] (each is ported in [`dsp`] and
+//! tested alone; the limiter is wired); the device owner and plugin slots (Stage 4); waveform peaks and the
 //! export snapshot (with the feed, Stage 5).
 
 #![forbid(unsafe_code)]

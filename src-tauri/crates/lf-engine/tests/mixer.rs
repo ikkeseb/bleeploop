@@ -6,6 +6,7 @@
 mod common;
 
 use common::Rig;
+use lf_engine::dsp::compressor::Compressor;
 use lf_engine::grid::Frame;
 use lf_engine::Command;
 
@@ -83,4 +84,28 @@ fn a_dub_on_a_lane_being_copied_waits_for_the_copy() {
     rig.idle();
     assert_eq!(rig.pcm(1), pre, "the copy holds the loop from before the dub");
     assert_ne!(rig.pcm(0), pre, "the dub itself went on");
+}
+
+#[test]
+fn the_output_is_the_limiter_over_the_bus_plus_the_unlimited_monitor() {
+    let mut rig = Rig::new();
+    let start = rig.frame;
+    rig.keep_output();
+    rig.set(Command::SetMetronome(true));
+    rig.set(Command::SetMasterVolume(0.8));
+    rig.set_level(0.9);
+    rig.record_first_take(0, 1, 2400);
+    // A lane over the threshold, and a played signal that is not the loop.
+    rig.set(Command::SetVolume(0, 1.5));
+    rig.set_input(|f| 0.3 * (f as f32 * 0.01).sin());
+    rig.advance(48_000);
+    let mut limiter = Compressor::master_limiter(rig.sr as f32);
+    let (mut l, mut r) = (rig.bus.clone(), rig.bus.clone());
+    limiter.process(start, &mut l, &mut r);
+    let expected: Vec<f32> = l.iter().zip(&rig.monitor).map(|(x, m)| x + m).collect();
+    assert!(rig.heard == expected, "the output is limiter(bus) + monitor");
+    let peak = |x: &[f32]| x.iter().fold(0f32, |a, v| a.max(v.abs()));
+    // A literal port of the live limiter: it pulls the peak down hard but is no true ceiling (STATUS E6).
+    assert!(peak(&rig.bus) > 1.0 && peak(&l) < 0.8 * peak(&rig.bus), "the limiter engaged: {} -> {}", peak(&rig.bus), peak(&l));
+    assert!(peak(&rig.monitor) > 0.2, "the monitor carried the played signal");
 }

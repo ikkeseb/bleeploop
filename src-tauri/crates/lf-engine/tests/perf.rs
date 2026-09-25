@@ -5,7 +5,8 @@
 //!
 //! Keep `--test-threads=1`: run in parallel, the two bars slow each other down.
 //!
-//! - Stage 2: five lanes (one overdubbing) plus the click under 10 % of the block's real time.
+//! - Stage 2: five lanes (one overdubbing), the click and the master limiter under 10 % of the block's
+//!   real time.
 //! - Stage 3: that engine plus the full synth and FX load (below) under 50 %.
 //!
 //! lf-engine builds at opt-level 3 in the dev profile too, but the Stage 3 load mixes in this file,
@@ -20,7 +21,6 @@ use std::time::Instant;
 use assert_no_alloc::assert_no_alloc;
 use common::{code, violation_count, Opts, Rig};
 use lf_engine::dsp::buffer_source::AudioBuffer;
-use lf_engine::dsp::compressor::Compressor;
 use lf_engine::dsp::fx::{default_fx_states, Ctl, FxChain, FxKind, FxParam, FxTiming, ReverbBus, MAX_FEEDBACK, REVERB_DECAY, REVERB_PRE_DELAY};
 use lf_engine::dsp::noise::NoiseTables;
 use lf_engine::dsp::reverb_ir;
@@ -82,8 +82,8 @@ fn five_lanes_one_overdubbing_and_the_click_cost_under_a_tenth_of_the_block() {
 }
 
 /// The timed parts of a Stage 3 block, in render order; each includes adding its output into the mix.
-const PARTS: [&str; 10] =
-    ["engine: 5 lanes + click", "lead x8", "pad x12", "piano x12", "organ x8", "bass", "drum kit x16", "5 FX chains", "reverb bus", "limiter"];
+const PARTS: [&str; 9] =
+    ["engine: 5 lanes + click + limiter", "lead x8", "pad x12", "piano x12", "organ x8", "bass", "drum kit x16", "5 FX chains", "reverb bus"];
 
 /// The Stage 3 acceptance load, the worst a session can ask of the built-in sound at once:
 ///
@@ -96,11 +96,12 @@ const PARTS: [&str; 10] =
 ///   20 ms ramp every 14 blocks: per-frame coefficients), the pitch at +7, the stutter at 1/16, the delay
 ///   at 1/8 and full feedback (0.95), the reverb send at 1. Each chain is fed the white noise table from
 ///   its own offset: a busy lane that never takes a silent path;
-/// - the one reverb bus on the five sends, and the limiter over the stereo sum.
+/// - the one reverb bus on the five sends; the limiter runs inside the engine.
 ///
 /// The synths and FX are driven through their `dsp` APIs because they are not wired into `engine.rs`
 /// yet: the chains stand in for the lanes' FX, and the engine's own output joins the mix beside them.
-/// Wiring adds the block split around them, not their work.
+/// Wiring adds the block split around them, not their work; the limiter then carries them too, at the
+/// same cost.
 struct Stage3 {
     rig: Rig,
     engine_frame: Frame,
@@ -112,7 +113,6 @@ struct Stage3 {
     drum_notes: Vec<u8>,
     chains: Vec<FxChain>,
     bus: ReverbBus,
-    limiter: Compressor,
     lane_source: Vec<f32>,
     /// The frame the synths and FX render next (their clock starts at 0).
     frame: u64,
@@ -189,7 +189,6 @@ impl Stage3 {
             drum_notes,
             chains,
             bus,
-            limiter: Compressor::master_limiter(RATE),
             lane_source,
             frame: 0,
             block: 0,
@@ -286,9 +285,6 @@ impl Stage3 {
         }
         lap(8);
 
-        self.limiter.process(f as Frame, l, r);
-        lap(9);
-
         std::hint::black_box(&self.mix);
         self.frame += BLOCK as u64;
         self.engine_frame += BLOCK as Frame;
@@ -344,7 +340,7 @@ fn stage3_full_load_costs_under_half_the_block() {
         pct(worst)
     );
     for (name, t) in PARTS.iter().zip(parts) {
-        println!("  {name:<24} {:>6.1} µs  {:>5.2} %", t / blocks as f64 * 1e6, pct(t / blocks as f64));
+        println!("  {name:<33} {:>6.1} µs  {:>5.2} %", t / blocks as f64 * 1e6, pct(t / blocks as f64));
     }
     assert!(pct(mean) < 50.0, "mean block time {:.1} % of the block", pct(mean));
 }

@@ -1,7 +1,12 @@
 //! OWNS: the engine's callback: the command and event rings, the block split, and the bus topology.
-//! Input → the plugin inserts → the input bus, which is the record tap (pre-limiter) and joins the
-//! lanes and the click on the master bus (master volume, then the limiter slot) → stereo out. Ported
-//! from `src/audio/engine.ts` and `src/audio/master.ts`.
+//! Input → the plugin inserts → the wet signal, which is the record tap. The lanes and the click sum on
+//! the master bus: master volume, then the master limiter (`dsp::compressor`) → stereo out. The wet
+//! signal joins the output after the limiter, under the same master volume: the played instrument is
+//! heard without the limiter's pre-delay, as the native monitor is today, and like it is not limited.
+//! Ported from `src/audio/engine.ts` and `src/audio/master.ts`.
+//!
+//! The limiter delays everything it carries by its pre-delay, the click included, so a take's alignment
+//! is `align_frames` + the plugin's latency + the limiter's.
 //!
 //! `process` renders a block in chunks that end wherever something happens: a command's frame, a
 //! scheduled looper event, a beat, an AUTO trigger. Every state change therefore lands on its exact
@@ -11,6 +16,7 @@ use rtrb::{Consumer, Producer, RingBuffer};
 
 use crate::api::{Command, Event, Inserts, ProcessContext, TimedCommand, TRACK_COUNT};
 use crate::clock::Clock;
+use crate::dsp::compressor::Compressor;
 use crate::grid::Frame;
 use crate::looper::{Applied, Cx, Looper};
 
@@ -82,7 +88,13 @@ pub struct Engine {
     pending: [Option<Pending>; MAX_PENDING],
     seq: u64,
     wet: Vec<f32>,
+    /// The master bus: the lanes and the click, then under the master volume (the limiter's input).
     mix: Vec<f32>,
+    /// The wet signal under the master volume: what joins the output after the limiter.
+    monitor: Vec<f32>,
+    /// The frames `process` rendered last: the length of the taps.
+    rendered: usize,
+    limiter: Compressor,
     master_volume: f32,
     master_muted: bool,
     master_gain: f64,
@@ -107,6 +119,10 @@ impl Engine {
             seq: 0,
             wet: vec![0.0; config.max_block],
             mix: vec![0.0; config.max_block],
+            monitor: vec![0.0; config.max_block],
+            rendered: 0,
+            // Built here, so its start-up gain dip passes on the first frames the device renders.
+            limiter: Compressor::master_limiter(config.sample_rate as f32),
             master_volume: 1.0,
             master_muted: false,
             master_gain: 1.0,
@@ -135,6 +151,17 @@ impl Engine {
         self.pending.iter().flatten().any(|p| p.held)
     }
 
+    /// Frames the limiter delays the master bus by (Blink's 6 ms pre-delay, truncated).
+    pub fn limiter_latency(&self) -> Frame {
+        self.limiter.latency() as Frame
+    }
+
+    /// The last block before the limiter: the master bus (the lanes and the click under the master
+    /// volume) and the monitor (the wet signal under it). The output is `limiter(bus) + monitor`.
+    pub fn taps(&self) -> (&[f32], &[f32]) {
+        (&self.mix[..self.rendered], &self.monitor[..self.rendered])
+    }
+
     pub fn diag(&self) -> Diag {
         Diag { events_dropped: self.feed.dropped, commands_dropped: self.commands_dropped, xruns: self.xruns }
     }
@@ -157,7 +184,8 @@ impl Engine {
             self.hold(cmd.frame.unwrap_or(start).max(start), cmd.command);
         }
         inserts.process(start, input, &mut self.wet[..n]);
-        let align = ctx.align_frames + inserts.latency();
+        let align = ctx.align_frames + inserts.latency() + self.limiter.latency() as Frame;
+        self.rendered = n;
         let mix = &mut self.mix[..n];
         mix.fill(0.0);
 
@@ -196,19 +224,22 @@ impl Engine {
             let chunk = &mut mix[k0..k1];
             self.looper.render(f, chunk);
             self.clock.render_click(f, chunk);
-            for (m, w) in chunk.iter_mut().zip(&self.wet[k0..k1]) {
-                *m += w;
-            }
             self.looper.capture(f, &self.wet[k0..k1]);
             let target = if self.master_muted { 0.0 } else { self.master_volume as f64 };
-            for k in k0..k1 {
-                let out = (self.master_gain * mix[k] as f64) as f32;
+            for ((m, o), &w) in chunk.iter_mut().zip(&mut self.monitor[k0..k1]).zip(&self.wet[k0..k1]) {
+                let g = self.master_gain;
+                *m = (g * *m as f64) as f32;
+                *o = (g * w as f64) as f32;
                 self.master_gain = target + (self.master_gain - target) * self.master_coef;
-                // The limiter slot: Blink's DynamicsCompressorKernel is ported literally in Stage 3.
-                left[k] = out;
-                right[k] = out;
             }
             f = next;
+        }
+        left.copy_from_slice(mix);
+        right.copy_from_slice(mix);
+        self.limiter.process(start, left, right);
+        for ((l, r), m) in left.iter_mut().zip(right.iter_mut()).zip(&self.monitor[..n]) {
+            *l += m;
+            *r += m;
         }
     }
 

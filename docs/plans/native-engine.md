@@ -196,7 +196,7 @@ exactly the span's end, `plan_later_stop`'s bar clamp (the window end bounds it)
 guard mapped or its deletion justified; golden jam green at 44.1 k and 48 k across all block sizes;
 mutants killed or skipped with a reason; 5 lanes (one overdubbing) + click at 48 k / 64 frames under
 10 % of block time offline (`src-tauri/crates/lf-engine/tests/perf.rs`, ignored by default: 0.17 % mean on the dev PC,
-2026-09-24; the limiter joins the number with its Stage 3 port). The live line is untouched.
+2026-09-24; 0.33 % with the master limiter wired, 2026-09-25). The live line is untouched.
 
 ## Stage 3 — synths and FX in lf-engine
 
@@ -247,17 +247,22 @@ mean and 106 µs worst. The acceptance run (`src-tauri/crates/lf-engine/tests/pe
 release, 2026-09-25): the Stage 2 engine, all six synths with every voice sounding and the mod wheel
 full, five chains with every effect on (cutoff ramping, delay feedback 0.95) into the bus, and the
 limiter, at 48 k / 64 frames: mean 23.5 to 25.9 % of the 1333 µs block over three runs. The drum kit is
-10 to 11 % of it, the five chains 4.3 to 4.7 %, the bus 2.2 to 2.5 %, the engine 0.18 %. The synths
+10 to 11 % of it, the five chains 4.3 to 4.7 %, the bus 2.2 to 2.5 %, the engine 0.18 % (0.34 % with the
+limiter inside it; that run's mean 25.4 %). The synths
 compute whole 128-frame quanta, so every other 64-frame block carries their work: those blocks average
 42 to 47 %, the worst of the load's own cycle 41 to 42 %. p99.9 (83 to 115 %) and the worst block (110
 to 262 %) are preemption on a busy desktop at normal priority: the slow blocks cluster in time, not on
 the cycle. Rerun:
 `cargo test -p lf-engine --release --test perf -- --ignored --nocapture --test-threads=1`.
-**The limiter is not wired** into the engine's master slot: it delays the output by Blink's 6 ms
-pre-delay (288 frames at 48 k, 264 at 44.1 k) and lifts everything under the threshold by its makeup
-gain (+0.57 dB), so the wiring adds its latency to the take alignment (`align_frames` + inserts +
-limiter) and moves the output-frame tests to a pre-limiter tap, with one test that the output is the
-limiter over that mix.
+**The limiter is wired** (2026-09-25) on the master bus: lanes and click (later the synths, FX and
+reverb) under the master volume, then the limiter. The wet signal joins after it under the same master
+volume, unlimited (owner decision, 2026-09-25): the played instrument keeps today's native-monitor
+latency instead of gaining the 6 ms pre-delay (288 frames at 48 k, 264 at 44.1 k), and like today's
+monitor it is not limited. Everything on the bus is heard that much later and +0.57 dB louder under
+the threshold (makeup gain), so a take's alignment is `align_frames` + inserts + limiter. The rig's
+`align` is the looper's total and the output tests read the pre-limiter taps (`Engine::taps`);
+`src-tauri/crates/lf-engine/tests/align.rs` checks the real sum against the click as it leaves the limiter, `src-tauri/crates/lf-engine/tests/mixer.rs` that
+the output is limiter(bus) + monitor, bit for bit.
 
 **Acceptance.** Fixtures within budget; every scenario passes its class; alloc and block-size tests
 cover voices and FX (FFT paths ≤ −120 dB instead of bit-exact); six synths at full polyphony + full FX

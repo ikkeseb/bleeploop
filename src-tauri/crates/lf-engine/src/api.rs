@@ -150,8 +150,9 @@ pub struct ProcessContext {
     pub frame: Frame,
     /// The device lost audio just before this block (an xrun): its first frame follows a gap.
     pub xrun: bool,
-    /// Input plus output latency the driver reports, in frames. A take starts this much after its
-    /// downbeat, so what the player heard and played lines up on the grid. A constant, not a user trim.
+    /// Input plus output latency the driver reports, in frames. A take starts this much (plus the
+    /// plugin's latency and the master limiter's pre-delay) after its downbeat, so what the player heard
+    /// and played lines up on the grid. A constant, not a user trim.
     pub align_frames: Frame,
 }
 

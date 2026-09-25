@@ -70,8 +70,8 @@ fn settle(rig: &mut Rig) {
     }
 }
 
-/// The whole jam; returns its rendered output.
-fn jam(sr: u32, block: usize) -> Vec<f32> {
+/// The whole jam; returns its output before the limiter and as heard.
+fn jam(sr: u32, block: usize) -> [Vec<f32>; 2] {
     let mut rig = Rig::with(Opts { sr, start: sr as Frame, loop_seconds: 20.0, block, align: 0 });
     rig.keep_output();
     let beat = (60.0 / BPM as f64 * sr as f64).round() as Frame;
@@ -408,7 +408,7 @@ fn jam(sr: u32, block: usize) -> Vec<f32> {
     assert!(rig.state(0) == LaneState::Stopped && rig.lane(0).length == expected_master, "the take survives, whole bars");
 
     assert_eq!(rig.engine.diag().events_dropped, 0);
-    rig.output.take().unwrap().1
+    [rig.output.take().unwrap().1, std::mem::take(&mut rig.heard)]
 }
 
 #[test]
@@ -416,10 +416,11 @@ fn golden_jam_at_44k1_and_48k_bit_identical_across_block_sizes() {
     for sr in [44100, 48000] {
         let reference = jam(sr, 128);
         for block in [1, 32, 64, 127, 480, 1024] {
-            let out = jam(sr, block);
-            assert_eq!(out.len(), reference.len(), "sr={sr} block={block}");
-            let first = out.iter().zip(&reference).position(|(a, b)| a.to_bits() != b.to_bits());
-            assert_eq!(first, None, "sr={sr} block={block}: output differs from block 128");
+            for (tap, (out, reference)) in ["pre-limiter", "heard"].iter().zip(jam(sr, block).iter().zip(&reference)) {
+                assert_eq!(out.len(), reference.len(), "sr={sr} block={block} {tap}");
+                let first = out.iter().zip(reference).position(|(a, b)| a.to_bits() != b.to_bits());
+                assert_eq!(first, None, "sr={sr} block={block}: the {tap} output differs from block 128");
+            }
         }
     }
 }
