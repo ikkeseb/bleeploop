@@ -203,6 +203,15 @@ impl Rig {
         self.handle.slots[slot].returned()
     }
 
+    /// The device stops, as its owner then does: `Engine::punch_out` (STATUS E3), its events read. The
+    /// next block continues at `frame`, where the device owner resumes the counter.
+    pub fn punch_out(&mut self) {
+        self.engine.punch_out();
+        while let Ok(e) = self.handle.events.pop() {
+            self.events.push(e);
+        }
+    }
+
     pub fn send_at(&mut self, frame: Frame, command: Command) {
         self.handle.commands.push(TimedCommand { frame: Some(frame), command }).expect("command ring full");
     }

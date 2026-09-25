@@ -966,6 +966,32 @@ impl Looper {
         cx.clock.start_auto_record(downbeat, cx.now);
     }
 
+    /// The device stopped (STATUS E3): input frames from `cx.now` on never arrive, and rendering resumes
+    /// at `cx.now` when a device runs again. A capture that has retained nothing (a count-in, a
+    /// boundary arm, AUTO listening) is cancelled as Stop does. Anything else ends at `cx.now` and
+    /// commits through the usual path, where only an earlier input gap rejects it: a take, an overdub
+    /// layer, and a RETAKE roll as a stop gesture at `cx.now` ends it (a kept pass is kept). A RETAKE
+    /// approval's next take is not armed. Loop-end stops and block jobs carry on when rendering resumes.
+    pub fn punch_out(&mut self, cx: &mut Cx) {
+        let Some(mut rec) = self.rec else { return };
+        let i = rec.lane;
+        if self.lanes[i].armed || self.lanes[i].auto_armed {
+            self.stop(cx, i);
+            return;
+        }
+        rec.handoff = None;
+        if rec.roll.is_some() && self.retake_plan(cx, &rec) == RetakeStop::KeepLast {
+            self.rec = Some(rec);
+            self.stop_capture(cx, i);
+            return;
+        }
+        // The pass in flight (a stop in its grace would let it finish) ends where the input did.
+        rec.roll = None;
+        rec.end = Some(rec.end.map_or(cx.now, |e| e.min(cx.now)));
+        self.rec = Some(rec);
+        self.finish_capture(cx, i);
+    }
+
     // ── Overdub ────────────────────────────────────────────────────────────────────────────────────
 
     fn start_overdub(&mut self, cx: &mut Cx, i: usize) {

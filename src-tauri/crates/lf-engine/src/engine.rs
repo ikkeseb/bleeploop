@@ -263,21 +263,31 @@ impl Engine {
     }
 
     /// While no device runs and the host holds the engine: apply the slot ports' installs and removals
-    /// at once, without crossfades (a removed unit stops here, on the caller's thread).
+    /// at once, without crossfades (a removed unit gets its released notes in one silent frame, then
+    /// stops here, on the caller's thread).
     pub fn service_slots_idle(&mut self) {
         self.rack.service_idle();
     }
 
-    /// While no device runs: stop every installed unit and hand it back on its port (a sample-rate
-    /// change; the host re-activates each at the new rate and installs it into the new engine).
+    /// While no device runs: stop every unit, an install still waiting on its port included, and hand
+    /// it back on its port (a sample-rate change; the host re-activates each at the new rate and
+    /// installs it into the new engine).
     pub fn evict_slots(&mut self) {
         self.rack.evict();
     }
 
-    /// The device stopped (a switch, a close or its loss): a take or overdub in flight punches out at
-    /// the last rendered frame and is kept (STATUS E3). Call it while no device runs.
+    /// The device stopped (a switch, a close or its loss): a take or overdub in flight punches out after
+    /// the last rendered frame and is kept (STATUS E3; `Looper::punch_out`). Call it while no device
+    /// runs; the next block continues the frame counter where the last one ended. A no-op before the
+    /// first block.
     pub fn punch_out(&mut self) {
-        // Stage 4 engine lane: build it (a no-op until then).
+        if !self.started {
+            return;
+        }
+        // Nothing a punch-out does starts a capture, the only reader of the alignment.
+        let mut cx = Cx { now: self.next_frame, align: 0, clock: &mut self.clock, feed: &mut self.feed, fx: &mut self.fx };
+        self.looper.punch_out(&mut cx);
+        self.looper.publish(&mut cx);
     }
 
     /// Render one block: `input` is the mono device input, `left`/`right` the output (same length).
@@ -311,7 +321,6 @@ impl Engine {
         let live_latency = self.rack.live_latency();
         let align = ctx.align_frames + live_latency + self.limiter.latency() as Frame;
         let record_delay = ctx.input_frames + live_latency;
-        let bus_slots = self.rack.has_instrument();
         self.rendered = n;
         self.slots_done = 0;
         self.instruments_done = 0;
@@ -375,11 +384,9 @@ impl Engine {
             let (l, r) = (&mut mix_l[k0..k1], &mut mix_r[k0..k1]);
             l.copy_from_slice(&self.instrument[0][k0..k1]);
             r.copy_from_slice(&self.instrument[1][k0..k1]);
-            if bus_slots {
-                for ((l, r), &x) in l.iter_mut().zip(r.iter_mut()).zip(&self.slot_bus[k0..k1]) {
-                    *l += x;
-                    *r += x;
-                }
+            for ((l, r), &x) in l.iter_mut().zip(r.iter_mut()).zip(&self.slot_bus[k0..k1]) {
+                *l += x;
+                *r += x;
             }
             self.looper.render(f, len, &mut self.lanes);
             self.fx.render(f, &self.lanes, l, r);

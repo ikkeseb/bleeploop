@@ -23,15 +23,16 @@
 //! # Rules
 //!
 //! - **One clock: the device frame.** Input frame `x` is captured at frame `x`; a lane plays loop
-//!   position `(f - anchor) mod master` at frame `f`. A take starts `align_frames` (+ the plugin's
-//!   latency and the master limiter's pre-delay) after its downbeat; a built-in instrument's record path
-//!   lags it by the input side, so its notes land there too. There is no user-facing record trim. The
+//!   position `(f - anchor) mod master` at frame `f`. A take starts `align_frames` (+ the live effect
+//!   slot's latency, from the block after its live flag changes, and the master limiter's pre-delay)
+//!   after its downbeat; an instrument's record path lags it by the input side (a plugin instrument's,
+//!   less its own latency), so its notes land there too. There is no user-facing record trim. The
 //!   synths, FX and reverb run on the device frame less the frames the device skipped, so their blocks
 //!   follow each other ([`effects`]); the limiter stays on the device frame.
 //! - **Every state change lands on its exact frame.** `process` splits a block wherever a command, a
 //!   scheduled looper event, a beat, an AUTO trigger or a render quantum's end falls, so the same
-//!   commands render bit-identical output at any block size (the golden jam, the gesture property tests
-//!   and `tests/sound.rs` assert it). A note sounds one quantum after its frame ([`instruments::LEAD`]);
+//!   commands render bit-identical output at any block size (the golden jam, the gesture property tests,
+//!   `tests/sound.rs` and `tests/slots.rs` assert it). A note sounds one quantum after its frame ([`instruments::LEAD`]);
 //!   a wheel or an FX change sounds from the next 128-frame quantum boundary, as a live Web Audio call
 //!   with no look-ahead does.
 //! - **`process` never allocates, locks or waits.** Buffers are allocated (and their pages touched) in
@@ -40,9 +41,18 @@
 //!   COPY are block jobs of `looper::JOB_RATE` positions per rendered frame, started where a read or
 //!   write head touches next so they stay ahead of it. A command that needs a lane's job finished waits
 //!   for it (on an exact frame), and every command sent after it waits behind it, except the
-//!   instruments' (a note never waits on the looper). A full command table leaves the rest in the ring
+//!   instruments' and the plugin slots' (a note never waits on the looper). A full command table leaves the rest in the ring
 //!   for the next block: late, never dropped.
 //! - **A command is judged when it is pressed**: one that would do nothing then is dropped, never held.
+//! - **The engine never drops a plugin unit** (a drop frees memory and calls into the plugin's DLL).
+//!   Units enter and leave through their slot's [`SlotPort`], at a block start (at once while no device
+//!   runs: [`Engine::service_slots_idle`]); a removal releases the slot's notes,
+//!   crossfades to bypass, stops the unit once and hands it back, and an eviction hands back every unit,
+//!   a waiting install included. The slots render ahead to the next slot command, so a plugin sees one
+//!   call per block unless a stamped note, target, live flag or gain splits it there.
+//! - **A stopped device is a punch-out** (STATUS E3, [`Engine::punch_out`]): what records ends after the
+//!   last rendered frame and commits as usual, what has retained nothing is cancelled, and rendering
+//!   resumes on the next frame with loop-end stops and block jobs where they were.
 //!
 //! # Tests
 //!
@@ -50,8 +60,10 @@
 //! group, each header naming the guard it ports and what it drops; `tests/common` is the rig, and every
 //! `process` call there runs under `assert_no_alloc`. The looper's tests read [`Taps::looper`], the lanes
 //! before their FX (a bypassed chain is not bit-transparent, as in Tone); `tests/sound.rs` holds the
-//! wired sound. `tests/perf.rs` holds the ignored cost bars (Stage 2 and 3) and the Stage 3 load's alloc
-//! check.
+//! wired sound. `tests/slots.rs` holds the plugin slots, with fake units that record what they saw in
+//! preallocated buffers (never allocating in `process`) and are handed back to the test to drop;
+//! `tests/punch_out.rs` holds the punch-out. `tests/perf.rs` holds the ignored cost bars (Stage 2 and 3)
+//! and the Stage 3 load's alloc check.
 //!
 //! # Not built yet
 //!
