@@ -1,22 +1,39 @@
-//! The Stage 2 cost bar: five lanes (one overdubbing) plus the click at 48 kHz in 64-frame blocks
-//! should take under 10 % of the block's real time, measured offline. Ignored by default (timing on a
-//! shared CI runner is noise); run it on the PC:
+//! The cost bars, measured offline at 48 kHz in 64-frame blocks. Ignored by default (timing on a shared
+//! CI runner is noise); run them on the PC, in release:
 //!
-//!   cargo test -p lf-engine --test perf -- --ignored --nocapture
+//!   cargo test -p lf-engine --release --test perf -- --ignored --nocapture --test-threads=1
 //!
-//! lf-engine builds at opt-level 3 in the dev profile, so this measures optimized engine code. The
-//! limiter is not in the engine yet (plan Stage 3), so it is not in this number.
+//! Keep `--test-threads=1`: run in parallel, the two bars slow each other down.
+//!
+//! - Stage 2: five lanes (one overdubbing) plus the click under 10 % of the block's real time.
+//! - Stage 3: that engine plus the full synth and FX load (below) under 50 %.
+//!
+//! lf-engine builds at opt-level 3 in the dev profile too, but the Stage 3 load mixes in this file,
+//! which the dev profile leaves unoptimized: take the numbers from `--release`. The one test that is
+//! not ignored runs the Stage 3 load for a second under `assert_no_alloc`.
 
 mod common;
 
-use common::{code, Opts, Rig};
-use lf_engine::grid::Frame;
-use lf_engine::{Command, Dry, LaneState, ProcessContext};
+use std::sync::Arc;
 use std::time::Instant;
 
-#[test]
-#[ignore]
-fn five_lanes_one_overdubbing_and_the_click_cost_under_a_tenth_of_the_block() {
+use assert_no_alloc::assert_no_alloc;
+use common::{code, violation_count, Opts, Rig};
+use lf_engine::dsp::buffer_source::AudioBuffer;
+use lf_engine::dsp::compressor::Compressor;
+use lf_engine::dsp::fx::{default_fx_states, Ctl, FxChain, FxKind, FxParam, FxTiming, ReverbBus, MAX_FEEDBACK, REVERB_DECAY, REVERB_PRE_DELAY};
+use lf_engine::dsp::noise::NoiseTables;
+use lf_engine::dsp::reverb_ir;
+use lf_engine::dsp::rng::Mulberry32;
+use lf_engine::dsp::synth::{Bass, DrumKit, PolyKind, PolySynth};
+use lf_engine::grid::Frame;
+use lf_engine::{Command, Dry, LaneState, ProcessContext};
+
+const RATE: f32 = 48000.0;
+const BLOCK: usize = 64;
+
+/// Five lanes playing a 4-bar loop, lane 0 overdubbing, the click on; returns the rig and its master.
+fn five_lanes_one_overdubbing() -> (Rig, Frame) {
     let mut rig = Rig::with(Opts { loop_seconds: 60.0, ..Default::default() });
     rig.set(Command::SetMetronome(true));
     rig.set_input(code);
@@ -27,11 +44,16 @@ fn five_lanes_one_overdubbing_and_the_click_cost_under_a_tenth_of_the_block() {
     }
     rig.press(Command::RecDub(0));
     assert!((1..5).all(|i| rig.state(i) == LaneState::Playing) && rig.state(0) == LaneState::Overdubbing);
+    (rig, master)
+}
 
-    let block = 64usize;
-    let blocks = 48000 * 60 / block;
-    let input: Vec<f32> = (0..block).map(|k| code(k as Frame) - 0.25).collect();
-    let (mut left, mut right) = (vec![0.0f32; block], vec![0.0f32; block]);
+#[test]
+#[ignore]
+fn five_lanes_one_overdubbing_and_the_click_cost_under_a_tenth_of_the_block() {
+    let (mut rig, master) = five_lanes_one_overdubbing();
+    let blocks = 48000 * 60 / BLOCK;
+    let input: Vec<f32> = (0..BLOCK).map(|k| code(k as Frame) - 0.25).collect();
+    let (mut left, mut right) = (vec![0.0f32; BLOCK], vec![0.0f32; BLOCK]);
     let mut frame = rig.frame;
     let mut worst = 0.0f64;
     let mut times = Vec::with_capacity(blocks);
@@ -43,10 +65,10 @@ fn five_lanes_one_overdubbing_and_the_click_cost_under_a_tenth_of_the_block() {
         let dt = t.elapsed().as_secs_f64();
         worst = worst.max(dt);
         times.push(dt);
-        frame += block as Frame;
+        frame += BLOCK as Frame;
     }
     let total = started.elapsed().as_secs_f64();
-    let period = block as f64 / 48000.0;
+    let period = BLOCK as f64 / 48000.0;
     let mean = total / blocks as f64 / period;
     times.sort_by(f64::total_cmp);
     let p999 = times[blocks * 999 / 1000] / period;
@@ -57,4 +79,288 @@ fn five_lanes_one_overdubbing_and_the_click_cost_under_a_tenth_of_the_block() {
         worst / period * 100.0
     );
     assert!(mean < 0.10, "mean block time {:.2} % of the block", mean * 100.0);
+}
+
+/// The timed parts of a Stage 3 block, in render order; each includes adding its output into the mix.
+const PARTS: [&str; 10] =
+    ["engine: 5 lanes + click", "lead x8", "pad x12", "piano x12", "organ x8", "bass", "drum kit x16", "5 FX chains", "reverb bus", "limiter"];
+
+/// The Stage 3 acceptance load, the worst a session can ask of the built-in sound at once:
+///
+/// - the engine as the Stage 2 bar runs it (five lanes, one overdubbing, the click);
+/// - all six synths: the four poly synths with every voice held (lead 8, pad 12, piano 12, organ 8),
+///   bent, the mod wheel full (the vibrato path live); the bass re-struck every 188 blocks (~250 ms,
+///   its filter envelope moving); the drum kit's 16 voices re-hit every 30 blocks (40 ms, the pedal
+///   hat's ring), so every voice always sounds;
+/// - five FX chains with every effect on: the filter at Q 6 with its cutoff ramping all the time (a new
+///   20 ms ramp every 14 blocks: per-frame coefficients), the pitch at +7, the stutter at 1/16, the delay
+///   at 1/8 and full feedback (0.95), the reverb send at 1. Each chain is fed the white noise table from
+///   its own offset: a busy lane that never takes a silent path;
+/// - the one reverb bus on the five sends, and the limiter over the stereo sum.
+///
+/// The synths and FX are driven through their `dsp` APIs because they are not wired into `engine.rs`
+/// yet: the chains stand in for the lanes' FX, and the engine's own output joins the mix beside them.
+/// Wiring adds the block split around them, not their work.
+struct Stage3 {
+    rig: Rig,
+    engine_frame: Frame,
+    engine_input: [f32; BLOCK],
+    poly: [PolySynth; 4],
+    bass: Bass,
+    bass_note: u8,
+    drums: DrumKit,
+    drum_notes: Vec<u8>,
+    chains: Vec<FxChain>,
+    bus: ReverbBus,
+    limiter: Compressor,
+    lane_source: Vec<f32>,
+    /// The frame the synths and FX render next (their clock starts at 0).
+    frame: u64,
+    /// Blocks rendered.
+    block: u64,
+    mono: [f32; BLOCK],
+    lane: [f32; BLOCK],
+    out: [f32; BLOCK],
+    send: [f32; BLOCK],
+    sends: [f32; BLOCK],
+    wet: [[f32; BLOCK]; 2],
+    mix: [[f32; BLOCK]; 2],
+}
+
+const BASS_NOTES: [u8; 5] = [28, 31, 33, 35, 36];
+
+impl Stage3 {
+    fn new() -> Self {
+        let (rig, _) = five_lanes_one_overdubbing();
+        let engine_frame = rig.frame;
+        let mut engine_input = [0.0f32; BLOCK];
+        for (k, x) in engine_input.iter_mut().enumerate() {
+            *x = code(k as Frame) - 0.25;
+        }
+
+        let NoiseTables { white, pink } = NoiseTables::generate(&mut Mulberry32::new(7));
+        let lane_source = white[0].iter().map(|x| x * 0.5).collect();
+        let table = |[l, r]: [Vec<f32>; 2]| Arc::new(AudioBuffer::new(RATE, vec![l, r]));
+        let (white, pink) = (table(white), table(pink));
+
+        let poly = [PolyKind::Lead, PolyKind::Pad, PolyKind::Piano, PolyKind::Organ].map(|kind| {
+            let mut synth = PolySynth::new(kind, RATE, 0.0, 0);
+            for k in 0..kind.spec().max_polyphony as u8 {
+                synth.note_on(48 + 3 * k, 0.8, 0.0, 0);
+            }
+            synth.set_pitch_bend(0.5, 0.0, 0);
+            synth.set_modulation(1.0, 0.0, 0);
+            synth
+        });
+        let mut bass = Bass::new(RATE, 0.0, 0);
+        bass.set_modulation(1.0, 0.0, 0);
+        let drums = DrumKit::new(RATE, &white, &pink, Mulberry32::new(1), 0.0, 0);
+        let drum_notes: Vec<u8> = drums.notes().collect();
+        assert_eq!(drum_notes.len(), 16);
+
+        let start = Ctl { now: 0.0, frame: 0 };
+        let mut states = default_fx_states();
+        for s in states.iter_mut() {
+            s.bypassed = false;
+        }
+        states[FxKind::Filter.index()].params[..2].copy_from_slice(&[1200.0, 6.0]);
+        states[FxKind::Pitch.index()].params[0] = 7.0;
+        states[FxKind::Stutter.index()].params[0] = 3.0;
+        states[FxKind::Delay.index()].params = [1.0, MAX_FEEDBACK, 0.5];
+        states[FxKind::Reverb.index()].params[0] = 1.0;
+        let chains = (0..5)
+            .map(|_| {
+                let mut chain = FxChain::new(RATE, Some(&states), start);
+                chain.set_timing(FxTiming { anchor: 0.0, beat_period: 0.5 }, start).expect("a valid timing");
+                chain
+            })
+            .collect();
+        let ir = reverb_ir::generate(&white, RATE, REVERB_DECAY, REVERB_PRE_DELAY, [0.25, 0.75]);
+        let bus = ReverbBus::new(RATE, [&ir[0], &ir[1]], 0);
+
+        Stage3 {
+            rig,
+            engine_frame,
+            engine_input,
+            poly,
+            bass,
+            bass_note: BASS_NOTES[0],
+            drums,
+            drum_notes,
+            chains,
+            bus,
+            limiter: Compressor::master_limiter(RATE),
+            lane_source,
+            frame: 0,
+            block: 0,
+            mono: [0.0; BLOCK],
+            lane: [0.0; BLOCK],
+            out: [0.0; BLOCK],
+            send: [0.0; BLOCK],
+            sends: [0.0; BLOCK],
+            wet: [[0.0; BLOCK]; 2],
+            mix: [[0.0; BLOCK]; 2],
+        }
+    }
+
+    /// Render one block; `parts` gains each part's seconds. Returns the block's seconds.
+    fn render(&mut self, parts: &mut [f64; PARTS.len()]) -> f64 {
+        let (f, b) = (self.frame, self.block);
+        let now = f as f64 / RATE as f64;
+        let [l, r] = &mut self.mix;
+        let started = Instant::now();
+        let mut t = started;
+        let mut lap = |part: usize| {
+            let next = Instant::now();
+            parts[part] += (next - t).as_secs_f64();
+            t = next;
+        };
+
+        let ctx = ProcessContext { frame: self.engine_frame, xrun: false, align_frames: 0 };
+        self.rig.engine.process(&ctx, &self.engine_input, l, r, &mut Dry);
+        lap(0);
+
+        for (i, synth) in self.poly.iter_mut().enumerate() {
+            synth.render(f, &mut self.mono);
+            for ((l, r), &x) in l.iter_mut().zip(r.iter_mut()).zip(&self.mono) {
+                *l += 0.25 * x;
+                *r += 0.25 * x;
+            }
+            lap(1 + i);
+        }
+
+        if b % 188 == 0 {
+            let next = BASS_NOTES[(b / 188) as usize % BASS_NOTES.len()];
+            self.bass.note_on(next, 0.9, now, f);
+            if next != self.bass_note {
+                self.bass.note_off(self.bass_note, now, f);
+            }
+            self.bass_note = next;
+        }
+        self.bass.render(f, &mut self.mono);
+        for ((l, r), &x) in l.iter_mut().zip(r.iter_mut()).zip(&self.mono) {
+            *l += 0.25 * x;
+            *r += 0.25 * x;
+        }
+        lap(5);
+
+        if b % 30 == 0 {
+            for &note in &self.drum_notes {
+                self.drums.note_on(note, 1.0, now, f);
+            }
+        }
+        let [dl, dr] = &mut self.wet;
+        self.drums.render(f, dl, dr);
+        for (o, &x) in l.iter_mut().zip(dl.iter()).chain(r.iter_mut().zip(dr.iter())) {
+            *o += 0.5 * x;
+        }
+        lap(6);
+
+        self.sends.fill(0.0);
+        let mut any_send = false;
+        for (i, chain) in self.chains.iter_mut().enumerate() {
+            if b % 14 == 0 {
+                let cutoff = if (b / 14 + i as u64) % 2 == 0 { 300.0 } else { 6000.0 };
+                chain.set_param(FxParam::Cutoff, cutoff, Ctl::at(f, RATE));
+            }
+            let src = &self.lane_source;
+            for (k, x) in self.lane.iter_mut().enumerate() {
+                *x = src[(f as usize + k + i * 44100) % src.len()];
+            }
+            chain.process(f, &self.lane, &mut self.out, &mut self.send);
+            any_send |= !chain.send_silent();
+            for (s, &x) in self.sends.iter_mut().zip(&self.send) {
+                *s += x;
+            }
+            for ((l, r), &x) in l.iter_mut().zip(r.iter_mut()).zip(&self.out) {
+                *l += 0.3 * x;
+                *r += 0.3 * x;
+            }
+        }
+        lap(7);
+
+        let [wl, wr] = &mut self.wet;
+        self.bus.process(f, any_send.then_some(&self.sends[..]), wl, wr);
+        for (o, &x) in l.iter_mut().zip(wl.iter()).chain(r.iter_mut().zip(wr.iter())) {
+            *o += 0.3 * x;
+        }
+        lap(8);
+
+        self.limiter.process(f as Frame, l, r);
+        lap(9);
+
+        std::hint::black_box(&self.mix);
+        self.frame += BLOCK as u64;
+        self.engine_frame += BLOCK as Frame;
+        self.block += 1;
+        t.duration_since(started).as_secs_f64()
+    }
+}
+
+/// The Stage 3 bar: the load above under half the block's real time on average. The mean is the bar;
+/// p99.9 and the worst block print without a bar (Windows preempts a test thread now and then). The
+/// synths compute whole 128-frame quanta, so their work lands on every other 64-frame block: the mean
+/// of those blocks prints too. The load repeats every 64 blocks (the reverb's largest FFT stage runs
+/// every 32nd quantum), so the median per phase of that cycle is the scheduled worst block, free of
+/// preemption.
+#[test]
+#[ignore]
+fn stage3_full_load_costs_under_half_the_block() {
+    let mut load = Stage3::new();
+    let mut parts = [0.0f64; PARTS.len()];
+    // Past the pad's 0.8 s attack and the reverb's 2.62 s IR, then 20 s timed.
+    for _ in 0..48000 * 3 / BLOCK {
+        load.render(&mut parts);
+    }
+    let blocks = 48000 * 20 / BLOCK;
+    let mut parts = [0.0f64; PARTS.len()];
+    let mut times = Vec::with_capacity(blocks);
+    for _ in 0..blocks {
+        times.push(load.render(&mut parts));
+    }
+    let period = BLOCK as f64 / 48000.0;
+    let pct = |t: f64| t / period * 100.0;
+    let total: f64 = times.iter().sum();
+    let mean = total / blocks as f64;
+    let quantum_blocks = times.iter().step_by(2).sum::<f64>() / blocks.div_ceil(2) as f64;
+    let mut sorted = times.clone();
+    sorted.sort_by(f64::total_cmp);
+    let p999 = sorted[blocks * 999 / 1000];
+    let worst = sorted[blocks - 1];
+    let phase_median = |p: usize| {
+        let mut t: Vec<f64> = times.iter().skip(p).step_by(64).copied().collect();
+        t.sort_by(f64::total_cmp);
+        t[t.len() / 2]
+    };
+    let worst_phase = (0..64).map(phase_median).fold(0.0, f64::max);
+    println!(
+        "stage 3 load, {blocks} blocks of {BLOCK} at 48 k ({:.0} µs): mean {:.1} µs ({:.1} %); blocks that start a quantum {:.1} %; scheduled worst {:.1} %; p99.9 {:.1} %; worst {:.1} %",
+        period * 1e6,
+        mean * 1e6,
+        pct(mean),
+        pct(quantum_blocks),
+        pct(worst_phase),
+        pct(p999),
+        pct(worst)
+    );
+    for (name, t) in PARTS.iter().zip(parts) {
+        println!("  {name:<24} {:>6.1} µs  {:>5.2} %", t / blocks as f64 * 1e6, pct(t / blocks as f64));
+    }
+    assert!(pct(mean) < 50.0, "mean block time {:.1} % of the block", pct(mean));
+}
+
+/// The Stage 3 load renders without allocating: a second of it (drum re-hits, bass notes and cutoff
+/// ramps included) under `assert_no_alloc` (debug builds check; release builds do not).
+#[test]
+fn stage3_full_load_renders_without_allocating() {
+    let mut load = Stage3::new();
+    let mut parts = [0.0f64; PARTS.len()];
+    let before = violation_count();
+    assert_no_alloc(|| {
+        for _ in 0..48000 / BLOCK {
+            load.render(&mut parts);
+        }
+    });
+    assert_eq!(violation_count(), before, "the Stage 3 load allocated while rendering");
+    assert!(load.mix.iter().flatten().all(|x| x.is_finite()));
 }

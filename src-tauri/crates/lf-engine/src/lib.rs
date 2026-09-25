@@ -37,7 +37,7 @@
 //!
 //! `cargo test -p lf-engine` (Linux and Windows CI). `tests/` ports the Web Audio rig guards, one file per
 //! group, each header naming the guard it ports and what it drops; `tests/common` is the rig, and every
-//! `process` call there runs under `assert_no_alloc`. `tests/perf.rs` is the ignored cost measurement.
+//! `process` call there runs under `assert_no_alloc`. `tests/perf.rs` holds the ignored cost bars (Stage 2 and 3) and the Stage 3 load's alloc check.
 //!
 //! # Not built yet
 //!

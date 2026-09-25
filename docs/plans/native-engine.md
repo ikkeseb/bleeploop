@@ -243,12 +243,21 @@ metals' FM near Nyquist and Blink's biquad tail-stop), the hot delay (−776 dB:
 and PitchShift (−69 to −72 dB, the nearest to the −60 dB bar: a 1-ulp wave-table difference moves its
 float delay reads). Costs per 128-frame quantum at 48 k, release, dev PC: pad at 12 voices 85 µs, the
 drum kit with all 16 voices ringing 367 µs (13.8 %), a chain with pitch on 18 µs, the reverb bus 47 µs
-mean and 106 µs worst. The acceptance run (six synths, five full chains, the bus, at 64 frames) is not
-built. **The limiter is not wired** into the engine's
-master slot: it delays the output by Blink's 6 ms pre-delay (288 frames at 48 k, 264 at 44.1 k) and
-lifts everything under the threshold by its makeup gain (+0.57 dB), so the wiring adds its latency to
-the take alignment (`align_frames` + inserts + limiter) and moves the output-frame tests to a
-pre-limiter tap, with one test that the output is the limiter over that mix.
+mean and 106 µs worst. The acceptance run (`src-tauri/crates/lf-engine/tests/perf.rs`, ignored; dev PC,
+release, 2026-09-25): the Stage 2 engine, all six synths with every voice sounding and the mod wheel
+full, five chains with every effect on (cutoff ramping, delay feedback 0.95) into the bus, and the
+limiter, at 48 k / 64 frames: mean 23.5 to 25.9 % of the 1333 µs block over three runs. The drum kit is
+10 to 11 % of it, the five chains 4.3 to 4.7 %, the bus 2.2 to 2.5 %, the engine 0.18 %. The synths
+compute whole 128-frame quanta, so every other 64-frame block carries their work: those blocks average
+42 to 47 %, the worst of the load's own cycle 41 to 42 %. p99.9 (83 to 115 %) and the worst block (110
+to 262 %) are preemption on a busy desktop at normal priority: the slow blocks cluster in time, not on
+the cycle. Rerun:
+`cargo test -p lf-engine --release --test perf -- --ignored --nocapture --test-threads=1`.
+**The limiter is not wired** into the engine's master slot: it delays the output by Blink's 6 ms
+pre-delay (288 frames at 48 k, 264 at 44.1 k) and lifts everything under the threshold by its makeup
+gain (+0.57 dB), so the wiring adds its latency to the take alignment (`align_frames` + inserts +
+limiter) and moves the output-frame tests to a pre-limiter tap, with one test that the output is the
+limiter over that mix.
 
 **Acceptance.** Fixtures within budget; every scenario passes its class; alloc and block-size tests
 cover voices and FX (FFT paths ≤ −120 dB instead of bit-exact); six synths at full polyphony + full FX
