@@ -212,8 +212,13 @@ change and a bypass crossfade), the limiter on a ramp plus bursts, and the rever
 events, every random draw, input hashes, capture commit and versions). The noise tables are not
 stored: `dsp::noise` regenerates them from their seed, bit-exact. Without `--write` the probe re-renders
 and compares (two renders differ by ≤ 1.8e-7: Blink sums a node's inputs in no fixed order). The
-port harness is `src-tauri/crates/lf-engine/tests/common/refs.rs`. Not captured yet: the v0.1.0
-exports (pcm16 zip, float32 recovery) for Stage 5's import fixtures.
+port harness is `src-tauri/crates/lf-engine/tests/common/refs.rs`. Stage 5's import fixtures come from
+the sibling `verify/probes/export-refs.mjs` (UI, download and IndexedDB, not OfflineContexts): a 48 k,
+240 BPM, one-bar, two-lane session captured as the Export button's download (float32 stems, PCM16 wet
+master, session.json) and as autosave's IndexedDB recovery archive (float32 stems, session.json), 0.9 MB
+with its manifest in `src-tauri/crates/lf-engine/tests/fixtures/v0.1.0`, whose zip layout
+`src-tauri/crates/lf-engine/tests/v0_1_0_exports.rs` reads. Both probes hold the fixtures together to
+10 MB; its compare ignores only the timestamps.
 
 **Tolerance classes:** N = null residual ≤ −60 dB of the reference RMS; S = STFT bands within ±1 dB
 and RMS envelope within ±0.5 dB. Each port takes the tightest class it passes, recorded in its test

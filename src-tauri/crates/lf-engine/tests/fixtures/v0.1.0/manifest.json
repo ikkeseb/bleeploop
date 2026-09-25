@@ -1,0 +1,71 @@
+{
+ "note": "Written by verify/probes/export-refs.mjs --write. Stage 5 import fixtures: the native engine must import both archives.",
+ "capture": {
+  "commit": "54a38513a9a1e4c5315daba8677dbc591ea37152",
+  "dirty": false,
+  "chromium": "153.0.8010.12",
+  "savedAt": 1790294641552
+ },
+ "session": {
+  "bpm": 240,
+  "bars": 1,
+  "sampleRate": 48000,
+  "frames": 48000,
+  "tracks": "track 1: 220 Hz sine at 0.5 with 1.5, -1.5, 1e-7 at frame 1024, muted, volume 0.6, FX default; track 2: saw pluck per beat, volume 1.2, filter (cutoff 900, q 3) and delay (1/8., feedback 0.5, mix 0.4) on"
+ },
+ "files": [
+  {
+   "file": "export.zip",
+   "what": "The session export as downloaded: float32 mono stems, a PCM16 stereo wet master, session.json. Store-only zip.",
+   "how": "The Export button's download (buildExportBundle → makeZip), suggested name bleeploop-2026-09-25-0204.zip.",
+   "bytes": 578743,
+   "sha256": "b099c68797655f58d95a31c66c9fb35a985df1ce7408eb21865dabe49ef10034",
+   "entries": [
+    {
+     "name": "bleeploop-2026-09-25-0204-track1.wav",
+     "bytes": 192058,
+     "sha256": "5c280273ff5e31ab635547fbeb5f7225c8597eb93c4de149e66808e426a5cbde"
+    },
+    {
+     "name": "bleeploop-2026-09-25-0204-track2.wav",
+     "bytes": 192058,
+     "sha256": "51f73568bab8e3205aa5e20080fddb93f3e21de88bf1fcfd5656c297a8778d68"
+    },
+    {
+     "name": "bleeploop-2026-09-25-0204-master.wav",
+     "bytes": 192044,
+     "sha256": "3e4e982ac15667b400fbda4388ad9f483efe860de32baef2471e82b9e3704314"
+    },
+    {
+     "name": "bleeploop-2026-09-25-0204-session.json",
+     "bytes": 1965,
+     "sha256": "c11286690a4b6255a8e31d93a05ebfb3494ac547a793bc290dfd589281a88702"
+    }
+   ]
+  },
+  {
+   "file": "recovery.zip",
+   "what": "The recovery archive: float32 mono stems and session.json, no master. Store-only zip.",
+   "how": "autosave.flush() (recovery-worker → prepareStemArchive float32 → makeZip); the `bytes` ArrayBuffer of IndexedDB bleeploop/recovery record { key: \"latest\", savedAt, bytes }.",
+   "bytes": 386443,
+   "sha256": "5cd54db9bedc00bc530623e48c54a4704a69e4610f68d284ddde53d229c148cf",
+   "entries": [
+    {
+     "name": "bleeploop-2026-09-25-0204-track1.wav",
+     "bytes": 192058,
+     "sha256": "5c280273ff5e31ab635547fbeb5f7225c8597eb93c4de149e66808e426a5cbde"
+    },
+    {
+     "name": "bleeploop-2026-09-25-0204-track2.wav",
+     "bytes": 192058,
+     "sha256": "51f73568bab8e3205aa5e20080fddb93f3e21de88bf1fcfd5656c297a8778d68"
+    },
+    {
+     "name": "bleeploop-2026-09-25-0204-session.json",
+     "bytes": 1857,
+     "sha256": "a68d92b1c3727e3238cb6be0add802d81188be4acd41b34f6f701d7a6e29c16b"
+    }
+   ]
+  }
+ ]
+}
