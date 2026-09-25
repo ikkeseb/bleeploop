@@ -137,7 +137,11 @@ blocks until the verdict, so an agent harness should run it in the background.
   report; frontend console forwarding truncates long JSON. `verify/probes/render-cursor.mjs` exercises the
   production sampler with controlled timing inputs; `verify/probes/render-clock.mjs` proves that the DEV
   clock observer preserves PCM. Both run through `pnpm probe`.
-- **When to run the plugin probes, and their baselines** (the verdict alone doesn't say this):
+- **When to run the plugin probes, and their baselines** (the verdict alone doesn't say this). Narrow
+  `smoke`, `survey` and `swap` to `--filter="Surge XT Effects,Pro-Q,Gojira"` (CLAP and VST3, a
+  separated controller, FabFilter's latency restarts, Neural DSP's slow teardown) unless the change
+  reaches every plugin (scan, load, the editor host) or a plugin was just installed (survey that one):
+  a full sweep opens every installed plugin on the owner's desktop.
   - `native:loopback` after a change to record compensation, the plugin bridge or the drift
     controller. Baseline (2026-09-24, Scarlett 2i2 3rd gen, ASIO 256, Pro-Q 3, a cable from line
     out R into input 2): residual +64/+65 ms at trim 0. With the worklet reading the ring directly,
