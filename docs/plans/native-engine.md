@@ -413,9 +413,10 @@ swap bindings; an ASIO period the driver drops without its overload report is no
 output stay in step, the take is spliced there); the no-device removal path (a 1-frame process and `stop` on the plugin owner) has no
 test with a real unit, and the CLAP restart fixture's thread check would flag it.
 
-Still open in Stage 4: a `pnpm native:engine` rerun on the rig for the two counter fixes below
-(fake-proven), the plugin fixture and `pnpm native:*` reruns, and a fan-out review of the Stage 4 range
-on Opus (owner, 2026-09-25: it replaces the cross-family review).
+Still open in Stage 4: a fan-out review of the Stage 4 range on Opus (owner, 2026-09-25: it replaces
+the cross-family review). The plugin probes reran clean the same day (smoke 30 of 30; survey 32
+`restartComponent`, all latency, as the baseline; swap 24 of 24 at 55–584 ms; recall 5 phases), and
+the plugin fixtures pass in `pnpm rust:check`.
 
 The rig run (`pnpm native:engine`, 2026-09-25, ASIO 128, Archetype Petrucci X and Pro-Q 3): the 600 s
 soak is clean (206 717 callbacks, every counter 0, block time p99.9 < 30 %, max < 37 %); all 20
@@ -437,6 +438,12 @@ switches start and the loop plays through them and the 4 swaps; every check pass
   arrives as the driver's overload, a cpal xrun); WASAPI counts a gap only when a callback finds its
   endpoint buffer empty, jumps by what played past it and drops as much join input, so takes stay
   aligned (`callback::dry_frames`; the old jump left that input in the ring).
+
+- Rerun after both fixes (same day and setup): every check passes, every counter 0 over 224 763
+  callbacks, 20 switches and 4 swaps; soak p99.9 < 33 %, max < 52 %; all 15 ASIO re-opens still retry
+  their input build. The record phase opened with two callbacks at ≥ 199 % of the period (the next
+  wakes 603 and 640 frames apart at 128, then quick ones), with no overload report from the driver.
+  Cause unknown; not seen in the first run.
 
 - Swaps: loads 7–78 ms; unloading Archetype while a second instance ran took 4 798 ms, 4 784 of them
   the plugin's own release, deactivate, terminate and module unload, with the slot dry meanwhile.
