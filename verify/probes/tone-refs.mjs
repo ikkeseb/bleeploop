@@ -343,8 +343,13 @@ await probe(async ({ open, browser }) => {
   });
   const total = files.reduce((n, f) => n + f.bytes.length, 0);
   console.log(JSON.stringify(files.map((f) => ({ id: f.entry.id, ch: f.entry.channels, kb: Math.round(f.entry.bytes / 1024), peak: +f.entry.peak.toFixed(3), draws: f.entry.random.length }))));
-  console.log(`total ${(total / 1048576).toFixed(2)} MB of ${BUDGET_BYTES / 1048576} MB`);
-  assert.ok(total <= BUDGET_BYTES, 'fixtures over budget');
+  // One budget with export-refs's v0.1.0 fixtures (the two probes check the same sum).
+  const exportsDir = join(DIR, '../v0.1.0');
+  const exportBytes = existsSync(exportsDir)
+    ? readdirSync(exportsDir).filter((n) => n.endsWith('.zip')).reduce((n, name) => n + statSync(join(exportsDir, name)).size, 0)
+    : 0;
+  console.log(`total ${(total / 1048576).toFixed(2)} MB, with v0.1.0 ${((total + exportBytes) / 1048576).toFixed(2)} MB of ${BUDGET_BYTES / 1048576} MB`);
+  assert.ok(total + exportBytes <= BUDGET_BYTES, 'fixtures over budget (tone + v0.1.0)');
   for (const f of files) assert.ok(f.entry.peak > 1e-3, `${f.entry.id} rendered silence`);
 
   if (write) {
