@@ -1,4 +1,4 @@
-//! fdlibm's `exp`, `log`, `pow`, `sin`, `cos` and `expf`, as Chromium ships them
+//! fdlibm's `exp`, `log`, `pow`, `sin`, `cos`, `expf` and `powf`, as Chromium ships them
 //! (`third_party/fdlibm/ieee754.cc`, the copy V8's `Math.exp`/`Math.log`/`Math.pow` and Blink's Web
 //! Audio both call). A port that must reproduce Tone or Blink arithmetic bit for bit uses these instead
 //! of the platform libm, whose last bit differs between Windows, macOS and Linux.
@@ -605,6 +605,11 @@ pub fn cos(x: f64) -> f64 {
 /// fdlibm's `expf` as Chromium ships it: `exp` on the float argument, rounded to float.
 pub fn expf(x: f32) -> f32 {
     exp(x as f64) as f32
+}
+
+/// fdlibm's `powf` as Chromium ships it: `pow` on the float arguments, rounded to float.
+pub fn powf(x: f32, y: f32) -> f32 {
+    pow(x as f64, y as f64) as f32
 }
 
 #[cfg(test)]
