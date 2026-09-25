@@ -131,6 +131,24 @@ interface driver's report against the physical path.
   and volume (digital zero for `mute` and `vol0`, the tone at 0.0 dB gain for `open`), so a muted
   mirror is silent to app capture; `dual` shows no second peak. STATUS E2 decides the fallback.
 
+**First cable runs (2026-09-26, ASIO 256, 44.1 kHz, line out R → input 2 over a guitar cable,
+`--only=asio --launches=1 --long-min=1`):** two launches, 240/241 chirps found in each, spread < 0.001
+frame inside each run, 0 xruns.
+
+- A2: launch 1 lands at 1189.8 frames against the reported 1186 (+0.086 ms, PASS), so the 26.9 ms
+  report holds and R2 fails at 256 on this driver. Launch 2 lands at 1711.8 (+11.9 ms, FAIL): A3
+  moves 522 frames between the two launches. Not yet reproduced; the matrix's 4 launches per block
+  size decide it. Unproven lead: the spike plays the input stream before it builds the output
+  (`run_asio`), the order behind the first-open hang below, so the two streams' offset may differ
+  per launch.
+- The first open of each run's block size hung with no `started` line and fell to the runner's
+  timeout (64 and 128 on 2026-09-25, 256 on 2026-09-26); all 14 later opens at an unchanged size
+  started.
+- Launch 1 had one sameCycle miss (A1) and one 12 ms callback gap, at the moment a failing USB
+  device re-enumerated on another controller of the dev PC (a hardware fault, open).
+- Setup: the earlier INVALID runs had the cable in line out L (on the 2i2 the R jack is the left one
+  seen from behind); a second cable gave no signal from line out R either, cause unknown.
+
 ## Stage 2 — lf-engine, the pure engine crate
 
 *Owner: nothing to hear; progress is CI green on the engine tests.*
@@ -413,8 +431,27 @@ swap bindings; an ASIO period the driver drops without its overload report is no
 output stay in step, the take is spliced there); the no-device removal path (a 1-frame process and `stop` on the plugin owner) has no
 test with a real unit, and the CLAP restart fixture's thread check would flag it.
 
-Still open in Stage 4: a fan-out review of the Stage 4 range on Opus (owner, 2026-09-25: it replaces
-the cross-family review). The plugin probes reran clean the same day (smoke 30 of 30; survey 32
+Still open in Stage 4: the fixes from the fan-out review of `25501f5..5ab8b4c` (four Opus readers,
+2026-09-25; the owner let it replace the cross-family review). Before the owner plays on the engine:
+- **Open deadlock (likely):** `engine_io/cpal_driver.rs` `start` (and the spike's `run_asio`) plays the
+  input before building the output; on a first open cpal holds its `asio_streams` mutex through
+  `create_buffers` (which calls `ASIOStop`) while the playing input's bufferSwitch takes the same
+  mutex. Fix: build input, build output, play input, play output. Check whether the live line's
+  `NativeIo` shares the order.
+- **Orphaned unit (confirmed):** a unit returning after a `remove` timeout is `mem::forget`-ed while
+  `occupied` stays true, and a later swap can hand the old unit to the next owner (`own()` checks the
+  type only). Fix: an owner token per install; an orphan leaks.
+- **Abandoned open closes the device (confirmed):** `owner.rs` runs `open` before checking `claimed`,
+  then `stop(true)`, even for a channel-only request. Fix: check the claim first; restore the previous
+  device.
+- **Stuck notes with no device:** without a stamp, wheel/CC/NoteOff pass `midi/mod.rs` into the
+  undrained 256-slot command ring; once full, a NoteOff drops after the router forgot the note.
+Smaller, after the release: a parked unit never retried on a device change; `kNotImplemented` from
+`setProcessing` read as refusal; slot/lane/master gain left subnormal after 0 (snap to target);
+`tests/slots.rs:382` `<=` for `==`; each ASIO overload counted twice in `xruns`; an output lock miss
+reads as a duplex fault; the panic hook allocates on the audio thread; a MIDI port back within one
+1 s poll keeps a dead connection. Two live slots sum the dry input (+6 dB): whether more than one may
+be live is a Stage 5 question. The plugin probes reran clean the same day (smoke 30 of 30; survey 32
 `restartComponent`, all latency, as the baseline; swap 24 of 24 at 55–584 ms; recall 5 phases), and
 the plugin fixtures pass in `pnpm rust:check`.
 
@@ -449,8 +486,8 @@ switches start and the loop plays through them and the 4 swaps; every check pass
   the plugin's own release, deactivate, terminate and module unload, with the slot dry meanwhile.
 
 - One of the day's three probe launches hung on its first ASIO open: 0 callbacks, the open timed out at
-  15 s and the owner thread did not stop; the next launch opened fine. Cause unknown (compare the live
-  line's `arm_monitor` timeouts in `src-tauri/AGENTS.md`).
+  15 s and the owner thread did not stop; the next launch opened fine. Likely the open deadlock above
+  (compare the live line's `arm_monitor` timeouts in `src-tauri/AGENTS.md`).
 
 WASAPI on the Scarlett (muted `pnpm native:engine` runs, 2026-09-25, both plugins, 60 s soak): with no
 other app on the microphone every check passes, input and output both at 44 100.7 Hz against QPC. With
