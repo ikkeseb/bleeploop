@@ -9,7 +9,7 @@ pub mod refs;
 
 use assert_no_alloc::assert_no_alloc;
 use lf_engine::grid::{frames_per_bar, Frame};
-use lf_engine::{Command, Engine, EngineConfig, EngineHandle, Event, Inserts, LaneInfo, LaneState, ProcessContext, TimedCommand};
+use lf_engine::{Command, Engine, EngineConfig, EngineHandle, Event, LaneInfo, LaneState, ProcessContext, SlotEvent, SlotKind, SlotProcessor, TimedCommand};
 
 // Every `process` call in every scenario runs under assert_no_alloc: the audio path never allocates.
 // The check runs in debug builds; the crate's default `disable_release` makes it a no-op in release.
@@ -37,7 +37,7 @@ pub fn frame_of(sample: f32, near: Frame) -> Frame {
     f + ((near - f) as f64 / (1 << 22) as f64).round() as Frame * (1 << 22)
 }
 
-/// A plugin stand-in: the wet signal is the input `latency` frames late.
+/// A plugin stand-in: an effect whose output is its input `latency` frames late.
 pub struct Delay {
     pub latency: Frame,
     line: Vec<f32>,
@@ -49,9 +49,17 @@ impl Delay {
     }
 }
 
-impl Inserts for Delay {
-    fn process(&mut self, _frame: Frame, input: &[f32], wet: &mut [f32]) {
-        for (w, &x) in wet.iter_mut().zip(input) {
+impl SlotProcessor for Delay {
+    fn kind(&self) -> SlotKind {
+        SlotKind::Effect
+    }
+
+    fn latency(&self) -> Frame {
+        self.latency
+    }
+
+    fn process(&mut self, _frame: Frame, input: &[f32], _events: &[SlotEvent], out: &mut [f32]) {
+        for (w, &x) in out.iter_mut().zip(input) {
             if self.line.is_empty() {
                 *w = x;
             } else {
@@ -61,8 +69,10 @@ impl Inserts for Delay {
         }
     }
 
-    fn latency(&self) -> Frame {
-        self.latency
+    fn stop(&mut self) {}
+
+    fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send> {
+        self
     }
 }
 
@@ -80,7 +90,6 @@ pub struct Rig {
     /// Of the driver's report, the input side (`ProcessContext::input_frames`).
     pub input_latency: Frame,
     input: Box<dyn Fn(Frame) -> f32>,
-    pub inserts: Box<dyn Inserts>,
     pub events: Vec<Event>,
     /// From `keep_output`, what the looper plays before the limiter: the lanes before their FX, the
     /// click and the monitor (`Taps::looper` + `Taps::monitor`), and the frame it starts at.
@@ -123,7 +132,9 @@ impl Rig {
 
     pub fn with(o: Opts) -> Rig {
         let config = EngineConfig { max_loop_seconds: o.loop_seconds, ..EngineConfig::new(o.sr) };
-        let (engine, handle) = Engine::new(config);
+        let (engine, mut handle) = Engine::new(config);
+        // Slot 0 is live and empty: the input is the wet signal, as a dry GO LIVE.
+        handle.commands.push(TimedCommand { frame: None, command: Command::SetSlotLive(0, true) }).expect("command ring full");
         Rig {
             engine,
             handle,
@@ -133,7 +144,6 @@ impl Rig {
             align: o.align,
             input_latency: 0,
             input: Box::new(|_| 0.0),
-            inserts: Box::new(lf_engine::Dry),
             events: Vec::new(),
             output: None,
             heard: Vec::new(),
@@ -174,6 +184,23 @@ impl Rig {
     pub fn skip(&mut self, frames: Frame) {
         self.frame += frames;
         self.gap_next = true;
+    }
+
+    /// Install `unit` into `slot`: it applies at the next block start (engaged at once before the first
+    /// block, crossfading in after it).
+    pub fn install(&mut self, slot: usize, unit: Box<dyn SlotProcessor>) {
+        if self.handle.slots[slot].install(unit).is_err() {
+            panic!("slot {slot}'s message ring is full");
+        }
+    }
+
+    /// Ask for `slot`'s unit back; it returns on [`Rig::returned`] once it has crossfaded out.
+    pub fn remove(&mut self, slot: usize) {
+        assert!(self.handle.slots[slot].remove(), "slot {slot}'s message ring is full");
+    }
+
+    pub fn returned(&mut self, slot: usize) -> Option<Box<dyn SlotProcessor>> {
+        self.handle.slots[slot].returned()
     }
 
     pub fn send_at(&mut self, frame: Frame, command: Command) {
@@ -223,9 +250,9 @@ impl Rig {
         }
         let ctx = ProcessContext { frame: self.frame, xrun: std::mem::take(&mut self.gap_next), align_frames: self.align - self.engine.limiter_latency(), input_frames: self.input_latency };
         let violations = violation_count();
-        let (engine, inserts) = (&mut self.engine, self.inserts.as_mut());
+        let engine = &mut self.engine;
         let (input, left, right) = (&self.in_buf[..n], &mut self.left[..n], &mut self.right[..n]);
-        assert_no_alloc(|| engine.process(&ctx, input, left, right, inserts));
+        assert_no_alloc(|| engine.process(&ctx, input, left, right));
         assert_eq!(violation_count(), violations, "process allocated at frame {}", self.frame);
         if let Some((_, out)) = self.output.as_mut() {
             let taps = self.engine.taps();

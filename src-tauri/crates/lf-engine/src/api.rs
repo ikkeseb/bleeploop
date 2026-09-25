@@ -1,11 +1,16 @@
 //! OWNS: what crosses the RT boundary: the commands the UI (and, from Stage 4, native MIDI) sends, the
-//! events the engine answers with, and the per-callback context and I/O. Commands and events travel
-//! only over rtrb rings; a full event ring drops the event and counts it, nothing blocks.
+//! events the engine answers with, the per-callback context and I/O, and the plugin seam
+//! ([`SlotProcessor`]). Commands and events travel only over rtrb rings; a full event ring drops the
+//! event and counts it, nothing blocks.
+
+use std::any::Any;
 
 use crate::dsp::fx::{FxKind, FxParam};
 use crate::grid::Frame;
 
 pub const TRACK_COUNT: usize = 5;
+/// The plugin slots (`src/audio/instrument-slots.ts`: two instrument slots).
+pub const SLOT_COUNT: usize = 2;
 
 /// A command, applied at `frame` (a device frame, e.g. a MIDI pedal's press) or, with `None`, at the
 /// start of the next block the engine renders.
@@ -57,21 +62,27 @@ pub enum Command {
     /// A lane's FX parameter, in its def's units (`src/audio/fx/metadata.ts`).
     SetFxParam(u8, FxParam, f64),
     SetFxBypass(u8, FxKind, bool),
-    /// The built-in instrument notes go to; `None` while a plugin slot takes them (Stage 4). Sent on a
-    /// slot switch, not per note: it releases the held notes and hands the instrument the wheels, even
-    /// when the instrument stays (two slots may hold the same one, as two web synths).
-    SelectInstrument(Option<Instrument>),
-    /// A note (0..127) on the selected instrument; velocity 0..1. Sustain and the owner of a held note
-    /// stay with the sender (`src/audio/input-router.ts`). The instrument commands never wait behind a
-    /// looper command that waits for a block job; a note on or off sounds `instruments::LEAD` frames
-    /// after it is applied.
+    /// Where the notes go: a built-in instrument or a plugin slot. Sent on a slot switch, not per note:
+    /// it releases the held notes (of the instrument or slot it leaves) and hands a built-in instrument
+    /// the wheels, even when the target stays (two slots may hold the same synth, as two web synths).
+    SelectInstrument(NoteTarget),
+    /// A note (0..127) on the selected target; velocity 0..1. Sustain and the owner of a held note stay
+    /// with the sender (`src/audio/input-router.ts`). The instrument commands never wait behind a
+    /// looper command that waits for a block job. On a built-in instrument a note on or off sounds
+    /// `instruments::LEAD` frames after it is applied; a plugin slot gets it at the frame it is applied.
     NoteOn(u8, f32),
     NoteOff(u8),
-    /// The pitch wheel, in semitones.
+    /// The pitch wheel, in semitones (built-in instruments only; a plugin slot gets no wheels yet, D12).
     PitchBend(f64),
-    /// The mod wheel, 0..1.
+    /// The mod wheel, 0..1 (built-in instruments only).
     Modulation(f64),
     AllNotesOff,
+    /// GO LIVE: the device input feeds the slot (an empty slot, or one holding an effect, passes it on
+    /// as the wet signal; an instrument plugin takes no input). Off, the slot gets silence.
+    SetSlotLive(u8, bool),
+    /// The slot's output level (linear, 0..): the per-plugin gain staging (`plugin-bridge.ts`), on both
+    /// what is heard and what is recorded.
+    SetSlotGain(u8, f32),
 }
 
 impl Command {
@@ -87,6 +98,29 @@ impl Command {
                 | Command::AllNotesOff
         )
     }
+
+    /// A command a plugin slot hears: the note target, the notes, and the slot's live flag and gain.
+    /// Like the instrument commands it never waits behind the looper, and the engine renders the slots
+    /// up to its frame before applying it.
+    pub fn reaches_slots(&self) -> bool {
+        matches!(
+            self,
+            Command::SelectInstrument(_)
+                | Command::NoteOn(..)
+                | Command::NoteOff(_)
+                | Command::AllNotesOff
+                | Command::SetSlotLive(..)
+                | Command::SetSlotGain(..)
+        )
+    }
+}
+
+/// Where the notes go (`src/audio/instrument.ts`: the active slot's synth, or its plugin).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NoteTarget {
+    Builtin(Instrument),
+    /// The plugin in this slot (0..SLOT_COUNT).
+    Slot(u8),
 }
 
 /// The six built-in instruments (`src/audio/synths/index.ts`).
@@ -218,21 +252,53 @@ pub struct ProcessContext {
     pub input_frames: Frame,
 }
 
-/// The plugin seam (Stage 4): the instrument slot processes the mono device input into the wet signal
-/// the engine records and monitors.
-pub trait Inserts {
-    fn process(&mut self, frame: Frame, input: &[f32], wet: &mut [f32]);
-    /// Frames the wet signal lags its input; added to the alignment of every take armed after it.
-    fn latency(&self) -> Frame {
-        0
-    }
+/// What a plugin slot holds, fixed when it is installed (the web UI's synth/effect kind:
+/// `plugin-bridge.ts`, `inChannels > 0`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SlotKind {
+    /// Has an audio input: takes the device input while the slot is live; its output is the wet signal
+    /// (heard after the limiter, recorded at the take's alignment). Bypassed, it passes its input dry.
+    Effect,
+    /// No audio input: plays the notes while it is the note target; its output joins the master bus
+    /// and is recorded where a built-in instrument's is. Bypassed, it is silent.
+    Instrument,
 }
 
-/// No plugin: the dry input is the wet signal.
-pub struct Dry;
+/// A note for a plugin slot, `offset` frames into the `process` call that carries it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SlotEvent {
+    pub offset: u32,
+    pub kind: SlotEventKind,
+}
 
-impl Inserts for Dry {
-    fn process(&mut self, _frame: Frame, input: &[f32], wet: &mut [f32]) {
-        wet.copy_from_slice(input);
-    }
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum SlotEventKind {
+    /// Velocity 0..1.
+    NoteOn { key: u8, velocity: f32 },
+    NoteOff { key: u8 },
+}
+
+/// The plugin seam (Stage 4): one slot's processor, run inside the engine callback. The host builds and
+/// activates it off the audio thread and installs it through the slot's [`crate::SlotPort`]; the
+/// engine crossfades it in, and on removal crossfades it out, calls [`SlotProcessor::stop`] on the
+/// audio thread and hands it back through the same port. The engine never drops a unit: a drop frees
+/// memory and, for a plugin, calls into its DLL.
+pub trait SlotProcessor: Send {
+    /// Read once, at install.
+    fn kind(&self) -> SlotKind;
+    /// Frames the output lags its input (an effect) or a note (an instrument), as the plugin reported it
+    /// when it was activated. Read once, at install: a plugin whose latency changes is restarted, which
+    /// removes and reinstalls it.
+    fn latency(&self) -> Frame;
+    /// Render `out.len()` frames (= `input.len()`, at most the engine's `max_block`) from device frame
+    /// `frame`. `input` is the mono device input while the slot is live and silence otherwise (always
+    /// silence for an instrument); `events` are sorted by offset, every offset `< out.len()`. `out` is
+    /// overwritten with the slot's mono output. Never allocates, locks or waits.
+    fn process(&mut self, frame: Frame, input: &[f32], events: &[SlotEvent], out: &mut [f32]);
+    /// Called once, after the last `process` and before the unit leaves the engine (CLAP
+    /// `stop_processing`, VST3 `setProcessing(0)`); on the audio thread while a device runs, or on the
+    /// thread that holds the engine while none does. May come without any `process` before it.
+    fn stop(&mut self);
+    /// The host's way back to its concrete unit.
+    fn into_any(self: Box<Self>) -> Box<dyn Any + Send>;
 }

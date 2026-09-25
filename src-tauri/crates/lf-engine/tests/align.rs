@@ -25,7 +25,7 @@ fn player(downbeats: Vec<Frame>, delay: Frame) -> impl Fn(Frame) -> f32 {
 /// The driver reports `report` as `align_frames`; the looper adds the plugin and the limiter.
 fn rig(report: Frame) -> Rig {
     let mut rig = Rig::with(Opts { align: report + LIMITER, ..Default::default() });
-    rig.inserts = Box::new(Delay::new(PLUGIN));
+    rig.install(0, Box::new(Delay::new(PLUGIN)));
     rig
 }
 

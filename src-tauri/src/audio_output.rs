@@ -364,7 +364,7 @@ fn resolve_asio_cache() -> Result<AsioCache, String> {
 
 /// Resolve the WASAPI output (StreamConfig, SampleFormat) via a live query (the ASIO path uses the
 /// cached config instead — see AsioCache).
-fn output_config(device: &cpal::Device) -> Result<(StreamConfig, SampleFormat), String> {
+pub(crate) fn output_config(device: &cpal::Device) -> Result<(StreamConfig, SampleFormat), String> {
     let c = device
         .default_output_config()
         .map_err(|e| format!("cpal default_output_config: {e}"))?;
@@ -381,7 +381,7 @@ fn output_config(device: &cpal::Device) -> Result<(StreamConfig, SampleFormat), 
 /// Pick the WASAPI output device (None = default). The ASIO low-latency tier does NOT go through here —
 /// it uses the startup-cached duplex device (`asio_cache()`), because the single ASIO driver can't be
 /// re-resolved once a stream holds it.
-fn pick_output_device(device_id: Option<&str>) -> Result<cpal::Device, String> {
+pub(crate) fn pick_output_device(device_id: Option<&str>) -> Result<cpal::Device, String> {
     let host = cpal::default_host();
     match device_id {
         Some(id) => {

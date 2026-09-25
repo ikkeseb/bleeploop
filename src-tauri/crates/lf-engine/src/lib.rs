@@ -16,7 +16,8 @@
 //! | [`engine`] | the callback: rings, the block split, the bus topology, master volume | `engine.ts`, `master.ts` |
 //! | [`effects`] | each lane's FX chain, the shared reverb bus, their grid, CLEAR and COPY on a lane's FX | `fx/fx.ts`, `looper/{playback,machine}.ts` |
 //! | [`instruments`] | the six built-in instruments, the selected one, the wheels, their record path | `synths/index.ts`, `input-router.ts` |
-//! | [`api`] | commands, events, the process context, the plugin seam | — |
+//! | [`slots`] | the two plugin slots: install and removal through their ports, bypass crossfades, notes, live and gain, where each output goes | `plugin-bridge.ts`, `instrument-slots.ts` |
+//! | [`api`] | commands, events, the process context, the plugin seam ([`SlotProcessor`]) | — |
 //! | [`dsp`] | Stage 3 sound: the Tone/Blink building blocks, the six built-in synths, the per-track FX chain and the reverb bus, the limiter | Tone.js on Blink's Web Audio |
 //!
 //! # Rules
@@ -54,8 +55,9 @@
 //!
 //! # Not built yet
 //!
-//! The device owner and plugin slots (Stage 4; a plugin slot taking the notes is `SelectInstrument(None)`
-//! until then); waveform peaks and the export snapshot (with the feed, Stage 5).
+//! The device side (streams, MIDI, Share output) and the CLAP/VST3 units live in the app
+//! (`src-tauri/src/engine_io`, `src-tauri/src/host`: Stage 4); waveform peaks and the export snapshot
+//! come with the feed (Stage 5).
 
 #![forbid(unsafe_code)]
 
@@ -68,6 +70,8 @@ pub mod engine;
 pub mod grid;
 pub mod instruments;
 pub mod looper;
+pub mod slots;
 
 pub use api::*;
 pub use engine::{Diag, Engine, EngineConfig, EngineHandle, Taps};
+pub use slots::SlotPort;

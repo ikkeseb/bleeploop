@@ -1,14 +1,15 @@
 //! OWNS: the engine's callback: the command and event rings, the block split, and the bus topology.
-//! Input → the plugin inserts → the wet signal. The record tap is the wet signal plus the built-in
-//! instruments (`instruments`, delayed onto the guitar's grid). Each lane plays through its FX chain,
-//! whose reverb sends meet on one bus (`effects`); the chains, the reverb bus, the instruments and the
-//! click sum on the stereo master bus: master volume, then the master limiter (`dsp::compressor`) →
-//! stereo out. The wet signal joins the output after the limiter, under the same master volume: the
-//! played instrument is heard without the limiter's pre-delay, as the native monitor is today, and like
-//! it is not limited. Ported from `src/audio/engine.ts` and `src/audio/master.ts`.
+//! Input → the live plugin slot (`slots`: an effect, or an empty slot passing it dry) → the wet signal.
+//! The record tap is the wet signal plus the built-in instruments and the instrument plugin slots
+//! (`instruments`, `slots`: delayed onto the guitar's grid). Each lane plays through its FX chain,
+//! whose reverb sends meet on one bus (`effects`); the chains, the reverb bus, the instruments (built
+//! in and plugin) and the click sum on the stereo master bus: master volume, then the master limiter
+//! (`dsp::compressor`) → stereo out. The wet signal joins the output after the limiter, under the same
+//! master volume: the played instrument is heard without the limiter's pre-delay, as the native monitor
+//! is today, and like it is not limited. Ported from `src/audio/engine.ts` and `src/audio/master.ts`.
 //!
 //! The limiter delays everything it carries by its pre-delay, the click included, so a take's alignment
-//! is `align_frames` + the plugin's latency + the limiter's.
+//! is `align_frames` + the live effect's latency + the limiter's.
 //!
 //! `process` renders a block in chunks that end wherever something happens: a command's frame, a
 //! scheduled looper event, a beat, an AUTO trigger, and a render quantum's end (the FX and the reverb
@@ -21,7 +22,7 @@ use std::sync::Arc;
 
 use rtrb::{Consumer, Producer, RingBuffer};
 
-use crate::api::{Command, Event, Inserts, ProcessContext, TimedCommand, TRACK_COUNT};
+use crate::api::{Command, Event, NoteTarget, ProcessContext, SlotKind, TimedCommand, SLOT_COUNT, TRACK_COUNT};
 use crate::clock::Clock;
 use crate::dsp::buffer_source::AudioBuffer;
 use crate::dsp::compressor::Compressor;
@@ -32,6 +33,7 @@ use crate::effects::LaneFx;
 use crate::grid::Frame;
 use crate::instruments::Instruments;
 use crate::looper::{Applied, Cx, Looper};
+use crate::slots::{Rack, SlotPort};
 
 /// Commands the engine holds for a future frame (MIDI press frames, a wait for a block job).
 const MAX_PENDING: usize = 64;
@@ -57,10 +59,11 @@ impl EngineConfig {
     }
 }
 
-/// The non-RT side: send commands, read the feed.
+/// The non-RT side: send commands, read the feed, install and take back plugin units.
 pub struct EngineHandle {
     pub commands: Producer<TimedCommand>,
     pub events: Consumer<Event>,
+    pub slots: [SlotPort; SLOT_COUNT],
 }
 
 /// The event ring's producer. A full ring drops the event and counts it: the audio never waits.
@@ -94,6 +97,10 @@ pub struct Diag {
     pub events_dropped: u64,
     pub commands_dropped: u64,
     pub xruns: u64,
+    /// Notes a plugin slot could not queue (more than `slots::MAX_SLOT_EVENTS` between two renders).
+    pub slot_events_dropped: u64,
+    /// Units installed into an occupied slot (handed back) or leaked because nothing read the port.
+    pub slot_protocol_errors: u64,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -115,6 +122,11 @@ pub struct Engine {
     seq: u64,
     fx: LaneFx,
     instruments: Instruments,
+    rack: Rack,
+    /// The instrument plugin slots' mono output (the master bus takes it on both sides).
+    slot_bus: Vec<f32>,
+    /// The slots' frames rendered so far in this block (they render ahead, up to a slot command).
+    slots_done: usize,
     wet: Vec<f32>,
     /// The record tap: the wet signal plus the instruments' record path.
     record: Vec<f32>,
@@ -155,6 +167,7 @@ impl Engine {
         let NoiseTables { white, pink } = NoiseTables::generate(&mut Mulberry32::new(NOISE_SEED));
         let table = |[l, r]: [Vec<f32>; 2]| Arc::new(AudioBuffer::new(config.sample_rate as f32, vec![l, r]));
         let (white, pink) = (table(white), table(pink));
+        let (rack, slots) = Rack::new(config.sample_rate, config.max_block);
         let engine = Engine {
             config,
             clock: Clock::new(config.sample_rate),
@@ -165,6 +178,9 @@ impl Engine {
             seq: 0,
             fx: LaneFx::new(config.sample_rate, &white),
             instruments: Instruments::new(config.sample_rate, config.max_block, &white, &pink),
+            rack,
+            slot_bus: vec![0.0; config.max_block],
+            slots_done: 0,
             wet: vec![0.0; config.max_block],
             record: vec![0.0; config.max_block],
             instruments_done: 0,
@@ -187,7 +203,7 @@ impl Engine {
             commands_dropped: 0,
             xruns: 0,
         };
-        (engine, EngineHandle { commands: cmd_tx, events: evt_rx })
+        (engine, EngineHandle { commands: cmd_tx, events: evt_rx, slots })
     }
 
     pub fn config(&self) -> &EngineConfig {
@@ -227,15 +243,50 @@ impl Engine {
     }
 
     pub fn diag(&self) -> Diag {
-        Diag { events_dropped: self.feed.dropped, commands_dropped: self.commands_dropped, xruns: self.xruns }
+        Diag {
+            events_dropped: self.feed.dropped,
+            commands_dropped: self.commands_dropped,
+            xruns: self.xruns,
+            slot_events_dropped: self.rack.events_dropped,
+            slot_protocol_errors: self.rack.protocol_errors,
+        }
+    }
+
+    /// A plugin slot's unit: its kind and latency, `None` while the slot is empty.
+    pub fn slot(&self, slot: usize) -> Option<(SlotKind, Frame)> {
+        self.rack.installed(slot)
+    }
+
+    /// Frames the wet signal lags the input: the live effect's latency (0 with none).
+    pub fn live_latency(&self) -> Frame {
+        self.rack.live_latency()
+    }
+
+    /// While no device runs and the host holds the engine: apply the slot ports' installs and removals
+    /// at once, without crossfades (a removed unit stops here, on the caller's thread).
+    pub fn service_slots_idle(&mut self) {
+        self.rack.service_idle();
+    }
+
+    /// While no device runs: stop every installed unit and hand it back on its port (a sample-rate
+    /// change; the host re-activates each at the new rate and installs it into the new engine).
+    pub fn evict_slots(&mut self) {
+        self.rack.evict();
+    }
+
+    /// The device stopped (a switch, a close or its loss): a take or overdub in flight punches out at
+    /// the last rendered frame and is kept (STATUS E3). Call it while no device runs.
+    pub fn punch_out(&mut self) {
+        // Stage 4 engine lane: build it (a no-op until then).
     }
 
     /// Render one block: `input` is the mono device input, `left`/`right` the output (same length).
-    pub fn process(&mut self, ctx: &ProcessContext, input: &[f32], left: &mut [f32], right: &mut [f32], inserts: &mut dyn Inserts) {
+    pub fn process(&mut self, ctx: &ProcessContext, input: &[f32], left: &mut [f32], right: &mut [f32]) {
         let n = input.len();
         assert!(n <= self.config.max_block && left.len() == n && right.len() == n, "block larger than max_block");
         let start = ctx.frame;
         let end = start + n as Frame;
+        let first = !self.started;
         if !self.started {
             self.started = true;
             self.clock.ensure_running(start);
@@ -256,11 +307,13 @@ impl Engine {
             let Ok(cmd) = self.commands.pop() else { break };
             self.hold(cmd.frame.unwrap_or(start).max(start), cmd.command);
         }
-        inserts.process(start, input, &mut self.wet[..n]);
-        let align = ctx.align_frames + inserts.latency() + self.limiter.latency() as Frame;
-        let record_delay = ctx.input_frames + inserts.latency();
+        self.rack.begin_block(start, first);
+        let live_latency = self.rack.live_latency();
+        let align = ctx.align_frames + live_latency + self.limiter.latency() as Frame;
+        let record_delay = ctx.input_frames + live_latency;
+        let bus_slots = self.rack.has_instrument();
         self.rendered = n;
-        self.record[..n].copy_from_slice(&self.wet[..n]);
+        self.slots_done = 0;
         self.instruments_done = 0;
         let [mix_l, mix_r] = &mut self.mix;
         let (mix_l, mix_r) = (&mut mix_l[..n], &mut mix_r[..n]);
@@ -271,7 +324,7 @@ impl Engine {
             self.looper.events(&mut cx);
             while let Some(k) = due(&self.pending, f) {
                 let p = self.pending[k].take().unwrap();
-                let mut at = Apply { instruments: &mut self.instruments, master_volume: &mut self.master_volume, master_muted: &mut self.master_muted };
+                let mut at = Apply { instruments: &mut self.instruments, rack: &mut self.rack, master_volume: &mut self.master_volume, master_muted: &mut self.master_muted };
                 match apply(&mut self.looper, &mut cx, &mut at, p.command) {
                     Applied::WaitUntil(at) => insert(&mut self.pending, &mut self.commands_dropped, Pending { frame: at.max(f + 1), held: true, ..p }),
                     Applied::Held(at, command) => {
@@ -296,9 +349,17 @@ impl Engine {
             }
             self.looper.advance_jobs(next);
             let k0 = (f - start) as usize;
-            // The instruments reach the record tap before the AUTO scan reads it: render them up to
-            // `next`, and a trigger that ends the chunk early leaves the rest for the next chunk.
+            // The slots and the instruments reach the record tap before the AUTO scan reads it: render
+            // them up to `next`, and a trigger that ends the chunk early leaves the rest for the next
+            // chunk. The slots render further, up to the next slot command, so a plugin is called once
+            // per block unless one splits it.
             let k_next = (next - start) as usize;
+            if self.slots_done < k_next {
+                let until = first_slot_pending(&self.pending, f).map_or(end, |at| at.min(end));
+                let (a, b) = (self.slots_done, ((until - start) as usize).max(k_next));
+                self.rack.render(&input[a..b], &mut self.wet[a..b], &mut self.slot_bus[a..b], &mut self.record[a..b], record_delay);
+                self.slots_done = b;
+            }
             if self.instruments_done < k_next {
                 let (from, [il, ir]) = (self.instruments_done, &mut self.instrument);
                 let at = start + from as Frame;
@@ -314,6 +375,12 @@ impl Engine {
             let (l, r) = (&mut mix_l[k0..k1], &mut mix_r[k0..k1]);
             l.copy_from_slice(&self.instrument[0][k0..k1]);
             r.copy_from_slice(&self.instrument[1][k0..k1]);
+            if bus_slots {
+                for ((l, r), &x) in l.iter_mut().zip(r.iter_mut()).zip(&self.slot_bus[k0..k1]) {
+                    *l += x;
+                    *r += x;
+                }
+            }
             self.looper.render(f, len, &mut self.lanes);
             self.fx.render(f, &self.lanes, l, r);
             let click = &mut self.click[..len];
@@ -366,15 +433,15 @@ fn insert(pending: &mut [Option<Pending>; MAX_PENDING], dropped: &mut u64, p: Pe
 
 /// The first-sent command due at or before `f`, unless an earlier-sent one waits for a block job: then
 /// it waits behind that one. Due commands run in the order they were sent. A command for the
-/// instruments never waits behind the looper: it touches nothing a block job moves, and a note must
-/// sound when it is played (in the web app notes go straight to the synth).
+/// instruments or the plugin slots never waits behind the looper: it touches nothing a block job moves,
+/// and a note must sound when it is played (in the web app notes go straight to the synth).
 fn due(pending: &[Option<Pending>; MAX_PENDING], f: Frame) -> Option<usize> {
     let barrier = pending.iter().flatten().filter(|p| p.held && p.frame > f).map(|p| p.seq).min();
     pending
         .iter()
         .enumerate()
         .filter_map(|(k, p)| {
-            p.filter(|p| p.frame <= f && (barrier.is_none_or(|b| p.seq < b) || p.command.is_instrument())).map(|p| (p.seq, k))
+            p.filter(|p| p.frame <= f && (barrier.is_none_or(|b| p.seq < b) || p.command.is_instrument() || p.command.reaches_slots())).map(|p| (p.seq, k))
         })
         .min()
         .map(|(_, k)| k)
@@ -386,6 +453,11 @@ fn first_pending(pending: &[Option<Pending>; MAX_PENDING], f: Frame) -> Option<F
     pending.iter().flatten().map(|p| p.frame).filter(|&at| at > f).min()
 }
 
+/// The next frame after `f` a command the plugin slots hear is stamped for: where their render stops.
+fn first_slot_pending(pending: &[Option<Pending>; MAX_PENDING], f: Frame) -> Option<Frame> {
+    pending.iter().flatten().filter(|p| p.command.reaches_slots()).map(|p| p.frame).filter(|&at| at > f).min()
+}
+
 fn lane(i: u8) -> Option<usize> {
     let i = i as usize;
     (i < TRACK_COUNT).then_some(i)
@@ -394,6 +466,7 @@ fn lane(i: u8) -> Option<usize> {
 /// What a command reaches besides the looper and its context.
 struct Apply<'a> {
     instruments: &'a mut Instruments,
+    rack: &'a mut Rack,
     master_volume: &'a mut f32,
     master_muted: &'a mut bool,
 }
@@ -500,16 +573,23 @@ fn apply(looper: &mut Looper, cx: &mut Cx, at: &mut Apply, command: Command) -> 
             }
             Applied::Done
         }
-        Command::SelectInstrument(instrument) => {
-            at.instruments.select(instrument, now);
+        Command::SelectInstrument(target) => {
+            let (builtin, slot) = match target {
+                NoteTarget::Builtin(i) => (Some(i), None),
+                NoteTarget::Slot(s) => (None, Some(s as usize)),
+            };
+            at.instruments.select(builtin, now);
+            at.rack.select(slot, now);
             Applied::Done
         }
         Command::NoteOn(note, velocity) => {
             at.instruments.note_on(note, velocity, now);
+            at.rack.note_on(note, velocity, now);
             Applied::Done
         }
         Command::NoteOff(note) => {
             at.instruments.note_off(note, now);
+            at.rack.note_off(note, now);
             Applied::Done
         }
         Command::PitchBend(semitones) => {
@@ -522,6 +602,15 @@ fn apply(looper: &mut Looper, cx: &mut Cx, at: &mut Apply, command: Command) -> 
         }
         Command::AllNotesOff => {
             at.instruments.all_notes_off(now);
+            at.rack.all_notes_off(now);
+            Applied::Done
+        }
+        Command::SetSlotLive(i, on) => {
+            at.rack.set_live(i as usize, on);
+            Applied::Done
+        }
+        Command::SetSlotGain(i, gain) => {
+            at.rack.set_gain(i as usize, gain);
             Applied::Done
         }
     }

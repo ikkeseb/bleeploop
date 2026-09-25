@@ -29,7 +29,7 @@ mod editor_window;
 #[cfg(windows)]
 mod native_io;
 #[cfg(debug_assertions)]
-mod rt_alloc;
+pub(crate) mod rt_alloc;
 #[cfg(windows)]
 mod scan;
 mod state;

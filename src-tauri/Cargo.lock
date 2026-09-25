@@ -94,6 +94,7 @@ dependencies = [
  "clack-host",
  "clap-sys",
  "cpal",
+ "lf-engine",
  "log",
  "rtrb",
  "rubato",

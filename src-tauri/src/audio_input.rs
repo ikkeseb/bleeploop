@@ -250,7 +250,7 @@ pub fn list_input_devices() -> Result<Vec<InputDeviceInfo>, String> {
 /// it uses the startup-cached duplex device (`audio_output::asio_cache()`) shared with the monitor, so
 /// capture + playback ride ONE full-duplex driver (one clock); the single ASIO driver can't be
 /// re-resolved once a stream holds it.
-fn pick_input_device(device_id: Option<&str>) -> Result<cpal::Device, String> {
+pub(crate) fn pick_input_device(device_id: Option<&str>) -> Result<cpal::Device, String> {
     let host = cpal::default_host();
     match device_id {
         Some(id) => {

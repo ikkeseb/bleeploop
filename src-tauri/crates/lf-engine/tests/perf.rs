@@ -23,7 +23,7 @@ use common::{code, violation_count, Opts, Rig};
 use lf_engine::dsp::fx::{FxKind, FxParam, MAX_FEEDBACK};
 use lf_engine::dsp::synth::{Bass, PolyKind, PolySynth};
 use lf_engine::grid::Frame;
-use lf_engine::{Command, Dry, Instrument, LaneState, ProcessContext};
+use lf_engine::{Command, Instrument, LaneState, NoteTarget, ProcessContext};
 
 const RATE: f32 = 48000.0;
 const BLOCK: usize = 64;
@@ -57,7 +57,7 @@ fn five_lanes_one_overdubbing_and_the_click_cost_under_a_tenth_of_the_block() {
     for _ in 0..blocks {
         let t = Instant::now();
         let ctx = ProcessContext { frame, xrun: false, align_frames: 0, input_frames: 0 };
-        rig.engine.process(&ctx, &input, &mut left, &mut right, &mut Dry);
+        rig.engine.process(&ctx, &input, &mut left, &mut right);
         let dt = t.elapsed().as_secs_f64();
         worst = worst.max(dt);
         times.push(dt);
@@ -130,7 +130,7 @@ impl Stage3 {
                 rig.set(Command::SetFxBypass(lane, kind, false));
             }
         }
-        rig.set(Command::SelectInstrument(Some(Instrument::Drums)));
+        rig.set(Command::SelectInstrument(NoteTarget::Builtin(Instrument::Drums)));
         let engine_frame = rig.frame;
         let mut engine_input = [0.0f32; BLOCK];
         for (k, x) in engine_input.iter_mut().enumerate() {
@@ -195,7 +195,7 @@ impl Stage3 {
             }
         }
         let ctx = ProcessContext { frame: at, xrun: false, align_frames: 0, input_frames: 0 };
-        self.rig.engine.process(&ctx, &self.engine_input, l, r, &mut Dry);
+        self.rig.engine.process(&ctx, &self.engine_input, l, r);
         lap(0);
 
         for (i, synth) in self.poly.iter_mut().enumerate() {

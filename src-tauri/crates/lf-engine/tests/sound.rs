@@ -9,7 +9,7 @@ mod common;
 use common::{Delay, Opts, Rig};
 use lf_engine::dsp::fx::{default_fx_states, FxKind, FxParam};
 use lf_engine::grid::Frame;
-use lf_engine::{Command, Instrument, LaneState};
+use lf_engine::{Command, Instrument, LaneState, NoteTarget};
 
 fn peak(x: &[f32]) -> f32 {
     x.iter().fold(0.0, |m, v| m.max(v.abs()))
@@ -33,7 +33,7 @@ fn the_selected_instrument_sounds_on_the_bus_and_a_switch_releases_it() {
     rig.advance(4800);
     assert_eq!(peak(&rig.bus), 0.0, "no instrument selected: a note does nothing");
 
-    rig.set(Command::SelectInstrument(Some(Instrument::Lead)));
+    rig.set(Command::SelectInstrument(NoteTarget::Builtin(Instrument::Lead)));
     rig.keep_output();
     rig.press(Command::NoteOn(60, 0.8));
     rig.advance(4800);
@@ -43,7 +43,7 @@ fn the_selected_instrument_sounds_on_the_bus_and_a_switch_releases_it() {
     assert_eq!(rig.heard, rig.heard_right);
 
     // The switch releases the lead's held note; the pad takes the next one.
-    rig.set(Command::SelectInstrument(Some(Instrument::Pad)));
+    rig.set(Command::SelectInstrument(NoteTarget::Builtin(Instrument::Pad)));
     rig.advance(rig.seconds(3.0));
     rig.keep_output();
     rig.advance(4800);
@@ -56,7 +56,7 @@ fn the_selected_instrument_sounds_on_the_bus_and_a_switch_releases_it() {
 #[test]
 fn the_drum_kit_is_stereo_and_a_pitch_wheel_moves_the_synth() {
     let mut rig = Rig::new();
-    rig.set(Command::SelectInstrument(Some(Instrument::Drums)));
+    rig.set(Command::SelectInstrument(NoteTarget::Builtin(Instrument::Drums)));
     rig.keep_output();
     rig.press(Command::NoteOn(38, 1.0)); // the snare: stereo noise
     rig.advance(4800);
@@ -65,7 +65,7 @@ fn the_drum_kit_is_stereo_and_a_pitch_wheel_moves_the_synth() {
     // The same note with and without a bend differs: the wheel reaches the voice.
     let render = |bend: f64| {
         let mut rig = Rig::new();
-        rig.set(Command::SelectInstrument(Some(Instrument::Lead)));
+        rig.set(Command::SelectInstrument(NoteTarget::Builtin(Instrument::Lead)));
         rig.set(Command::PitchBend(bend));
         rig.keep_output();
         rig.press(Command::NoteOn(60, 0.8));
@@ -89,8 +89,8 @@ fn a_note_played_on_the_heard_click_lands_on_the_grid() {
     let take = |input_latency: Frame| {
         let mut rig = Rig::with(Opts { align: IN + OUT + LIMITER, ..Default::default() });
         rig.input_latency = input_latency;
-        rig.inserts = Box::new(Delay::new(PLUGIN));
-        rig.set(Command::SelectInstrument(Some(Instrument::Lead)));
+        rig.install(0, Box::new(Delay::new(PLUGIN)));
+        rig.set(Command::SelectInstrument(NoteTarget::Builtin(Instrument::Lead)));
         rig.set(Command::SetFixedLength(true));
         rig.set(Command::SetFixedBars(1.0));
         let mark = rig.events.len();
@@ -213,16 +213,16 @@ fn session(block: usize) -> [Vec<f32>; 2] {
         (170, Command::SetFxParam(0, FxParam::Rate, 3.0)),
         (211, Command::SetFxParam(1, FxParam::Feedback, 0.8)),
         (250, Command::SetFxParam(0, FxParam::Amount, 0.9)),
-        (300, Command::SelectInstrument(Some(Instrument::Drums))),
+        (300, Command::SelectInstrument(NoteTarget::Builtin(Instrument::Drums))),
         (301, Command::NoteOn(36, 1.0)),
         (5_000, Command::NoteOn(38, 0.7)),
         (9_777, Command::NoteOn(42, 0.5)),
-        (20_000, Command::SelectInstrument(Some(Instrument::Bass))),
+        (20_000, Command::SelectInstrument(NoteTarget::Builtin(Instrument::Bass))),
         (20_050, Command::Modulation(0.6)),
         (20_101, Command::NoteOn(40, 0.9)),
         (30_003, Command::PitchBend(-1.5)),
         (40_000, Command::NoteOff(40)),
-        (41_000, Command::SelectInstrument(Some(Instrument::Pad))),
+        (41_000, Command::SelectInstrument(NoteTarget::Builtin(Instrument::Pad))),
         (41_001, Command::NoteOn(60, 0.8)),
         (41_002, Command::NoteOn(64, 0.8)),
         (60_000, Command::SetFxParam(0, FxParam::Cutoff, 5000.0)),
@@ -260,7 +260,7 @@ fn a_note_never_waits_behind_a_held_looper_command() {
     rig.record_first_take(0, 16, 2400); // 32 s: a copy job runs for ~31 ms
     rig.set_level(0.0);
     rig.set(Command::SetMute(0, true));
-    rig.set(Command::SelectInstrument(Some(Instrument::Lead)));
+    rig.set(Command::SelectInstrument(NoteTarget::Builtin(Instrument::Lead)));
     rig.advance(4800);
     rig.press(Command::Copy(0));
     rig.press(Command::PlayStop(1));
@@ -277,7 +277,7 @@ fn a_note_never_waits_behind_a_held_looper_command() {
 #[test]
 fn a_burst_of_notes_is_never_dropped() {
     let mut rig = Rig::with(Opts { block: 4096, ..Default::default() });
-    rig.set(Command::SelectInstrument(Some(Instrument::Lead)));
+    rig.set(Command::SelectInstrument(NoteTarget::Builtin(Instrument::Lead)));
     for note in 0..100 {
         rig.send_at(rig.frame, Command::NoteOn(note, 0.8));
     }
@@ -297,10 +297,10 @@ fn a_burst_of_notes_is_never_dropped() {
 #[test]
 fn picking_the_selected_instrument_again_releases_its_notes() {
     let mut rig = Rig::new();
-    rig.set(Command::SelectInstrument(Some(Instrument::Lead)));
+    rig.set(Command::SelectInstrument(NoteTarget::Builtin(Instrument::Lead)));
     rig.press(Command::NoteOn(60, 0.8));
     rig.advance(4800);
-    rig.set(Command::SelectInstrument(Some(Instrument::Lead)));
+    rig.set(Command::SelectInstrument(NoteTarget::Builtin(Instrument::Lead)));
     rig.advance(rig.seconds(3.0));
     rig.keep_output();
     rig.advance(4800);
@@ -315,7 +315,7 @@ fn an_fx_parameter_is_clamped_to_its_range_and_a_note_past_127_does_nothing() {
     let chain = rig.engine.fx().chain(0);
     assert_eq!((chain.param(FxParam::Cutoff), chain.param(FxParam::Feedback)), (FxParam::Cutoff.def().min, FxParam::Feedback.def().max));
     let mut rig = Rig::new();
-    rig.set(Command::SelectInstrument(Some(Instrument::Bass)));
+    rig.set(Command::SelectInstrument(NoteTarget::Builtin(Instrument::Bass)));
     rig.keep_output();
     rig.press(Command::NoteOn(200, 1.0));
     rig.advance(4800);

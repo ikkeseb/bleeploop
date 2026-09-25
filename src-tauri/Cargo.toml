@@ -97,10 +97,15 @@ clack-extensions = { version = "=0.1.0", features = ["params", "state", "audio-p
 # run a device-less RT thread and promote it ourselves via the windows crate
 # (AvSetMmThreadCharacteristicsW, "Pro Audio"), so we take cpal WITHOUT realtime — no extra
 # windows-version surface from audio_thread_priority.
-cpal             = { version = "0.18", default-features = false }
+# Pinned exactly: the native engine's ASIO duplex relies on the callback order asio-sys 0.3.0 gives
+# (docs/plans/native-engine.md § Stage 4); 0.18.2 moves to asio-sys 0.4.0 and windows 0.62 and needs
+# its own A1 rerun first.
+cpal             = { version = "=0.18.1", default-features = false }
 rtrb             = "0.3.4"                  # wait-free SPSC ring, host side (backs the WebView2 buffer)
 rubato           = "3.0.0"                  # P9.4 producer-side fractional resampler (Async + FixedAsync::Input)
 walkdir          = "2"                      # CLAP-file + VST3-dir scan (no clack-finder)
+# The native engine (docs/plans/native-engine.md): pure, driven by `engine_io`.
+lf-engine        = { path = "crates/lf-engine" }
 # --- P10.1: native VST3 host ---
 # `vst3` 0.3.0 (coupler-rs / Micah Johnston): raw unsafe Steinberg FUnknown bindings. Only runtime
 # dep is `com-scrape-types` (NO windows/windows-core), so it cannot reconflict the pinned 0.61 graph
