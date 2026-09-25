@@ -415,7 +415,11 @@ test with a real unit, and the CLAP restart fixture's thread check would flag it
 Still open in Stage 4: a cross-family review (the 2026-09-25 one ran on Opus and Gemini Flash; Codex
 had no quota); on the rig, `pnpm native:engine` (one `duplex_faults` per open would be the input
 running before the output exists: cpal 0.18.1 starts the driver at the input's build; the Stage 1 A1
-run saw none), and the plugin fixture and `pnpm native:*` reruns.
+run saw none), and the plugin fixture and `pnpm native:*` reruns. A first muted WASAPI run
+(2026-09-25, the Scarlett shared with a voice-chat app, both plugins, 60 s soak, 2 swaps) passed every
+check but the counters: 42 `gaps` (29 in the soak) and 9 `engine.xruns`, at a block time of p99.9
+< 37 %, max < 39 %, so the callbacks entered late rather than ran long. Cause unknown; the Stage 1
+spike saw 0 gaps on WASAPI (60 s, no plugin, the first 5 s not counted).
 
 ## Stage 5 — cutover behind a hidden toggle
 

@@ -6,11 +6,13 @@
 //! come back, an error was logged, or the soak missed the block-load bar.
 //!
 //! `app.exe --probe-engine <asio|wasapi> <64|128|256|default> [--plugin <slot>=<file.vst3|.clap>]...
-//! [--seconds N] [--switches N] [--swaps N] [--in N] [--device <WASAPI name substring>]`
+//! [--seconds N] [--switches N] [--swaps N] [--in N] [--device <WASAPI name substring>] [--mute]`
 //!
 //! The take records input channel `--in` (0-based, default 0) through slot 0, live for the take only:
 //! keep that channel off a loopback cable, or the take's monitor feeds back through it. A swap puts the
-//! next plugin of the `--plugin` list into a slot (with one, the same plugin again).
+//! next plugin of the `--plugin` list into a slot (with one, the same plugin again). `--mute` mutes the
+//! master, the monitored input included: the device plays silence, so a WASAPI run can share the
+//! interface with other apps.
 
 use std::sync::atomic::{AtomicU64, Ordering::{Acquire, Relaxed}};
 use std::sync::Arc;
@@ -82,11 +84,12 @@ struct Args {
     swaps: usize,
     input: u32,
     device: Option<String>,
+    mute: bool,
 }
 
 fn parse_args(args: &[String]) -> Result<Args, String> {
     const USAGE: &str = "usage: --probe-engine <asio|wasapi> <64|128|256|default> [--plugin <slot>=<file.vst3|.clap>]... \
-        [--seconds N] [--switches N] [--swaps N] [--in N] [--device <WASAPI name substring>]";
+        [--seconds N] [--switches N] [--swaps N] [--in N] [--device <WASAPI name substring>] [--mute]";
     let backend = match args.first().map(String::as_str) {
         Some("asio") => AudioBackend::Asio,
         Some("wasapi") => AudioBackend::Wasapi,
@@ -100,7 +103,7 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
     if backend == AudioBackend::Wasapi && buffer.is_some() {
         return Err("WASAPI runs at the audio engine's period: use `default`".into());
     }
-    let mut parsed = Args { backend, buffer, plugins: Vec::new(), seconds: 60.0, switches: 0, swaps: 0, input: 0, device: None };
+    let mut parsed = Args { backend, buffer, plugins: Vec::new(), seconds: 60.0, switches: 0, swaps: 0, input: 0, device: None, mute: false };
     let mut rest = args[2..].iter();
     while let Some(flag) = rest.next() {
         let mut value = || rest.next().cloned().ok_or_else(|| format!("{flag} needs a value"));
@@ -120,6 +123,7 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
             "--swaps" => parsed.swaps = number(value()?)? as usize,
             "--in" => parsed.input = number(value()?)? as u32,
             "--device" => parsed.device = Some(value()?),
+            "--mute" => parsed.mute = true,
             _ => return Err(format!("unknown argument {flag}\n{USAGE}")),
         }
     }
@@ -281,6 +285,7 @@ struct Probe {
     length: Frame,
     beats: u64,
     rate: u32,
+    mute: bool,
     fails: Vec<(&'static str, String)>,
 }
 
@@ -292,6 +297,11 @@ impl Probe {
 
     fn send(&self, command: Command) -> Result<(), String> {
         self.host.send(TimedCommand { frame: None, command })
+    }
+
+    /// `--mute`: silence a new engine's master before anything sounds.
+    fn silence(&self) -> Result<(), String> {
+        if self.mute { self.send(Command::SetMasterMute(true)) } else { Ok(()) }
     }
 
     fn lane_is(&self, want: impl Fn(&LaneInfo) -> bool) -> bool {
@@ -453,6 +463,7 @@ impl Probe {
                 self.expect_slots(&format!("the switch to {}", label(next)));
                 if rebuilt {
                     self.lane = None;
+                    self.silence()?;
                     self.record_loop()?;
                 }
             }
@@ -477,6 +488,7 @@ impl Probe {
     fn drive(&mut self, a: &Args, devices: &Devices, start: &DeviceRequest) -> Result<(), String> {
         let mark = self.mark();
         let status = self.host.open(start.clone())?;
+        self.silence()?;
         self.rate = status.sample_rate;
         say(format!("open {}: {}", label(start), describe(&status)));
         for k in 0..self.slots.len() {
@@ -556,6 +568,7 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
         length: 0,
         beats: 0,
         rate: 0,
+        mute: a.mute,
         fails: Vec::new(),
     };
     if let Err(e) = p.drive(&a, &devices, &start) {
