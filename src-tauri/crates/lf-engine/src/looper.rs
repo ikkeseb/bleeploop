@@ -18,6 +18,7 @@
 use crate::api::{Action, Event, LaneInfo, LaneState, Refusal, TRACK_COUNT};
 use crate::autorec::{self, Detector};
 use crate::clock::Clock;
+use crate::effects::LaneFx;
 use crate::engine::Feed;
 use crate::grid::{
     clamp_bars, commit_anchor, frames_per_bar, loop_pos, max_whole_bars, next_boundary, plan_commit, plan_free_stop,
@@ -227,6 +228,8 @@ pub struct Cx<'a> {
     pub align: Frame,
     pub clock: &'a mut Clock,
     pub feed: &'a mut Feed,
+    /// The lanes' FX, which CLEAR resets and COPY copies.
+    pub fx: &'a mut LaneFx,
 }
 
 pub struct Looper {
@@ -588,6 +591,7 @@ impl Looper {
         dst.volume = src.volume;
         dst.muted = src.muted;
         dst.state = LaneState::Stopped;
+        cx.fx.copy(i, j, cx.now);
         let resume = src.state == LaneState::Playing && src.stop_at.is_none();
         let kind = JobKind::LaneCopy { src: src.live, dst: dst.live, from: i, to: j, resume };
         self.push_job(cx.now, j, kind, Visit { lo: 0, span: self.master, off: 0, modulus: self.master });
@@ -610,6 +614,7 @@ impl Looper {
         self.release_recorder(cx, i);
         let t = &mut self.lanes[i];
         *t = Lane { gain: t.gain, ..Lane::new(t.live, t.spare) };
+        cx.fx.reset(i, cx.now);
         self.reset_master_if_blank(cx);
     }
 
@@ -1292,11 +1297,14 @@ impl Looper {
         }
     }
 
-    /// Add every audible lane for frames `[f0, f0 + out.len())` into `out`.
-    pub fn render(&mut self, f0: Frame, out: &mut [f32]) {
+    /// Write every lane for frames `[f0, f0 + n)` into `out[i][..n]`, under its volume (silence when
+    /// it does not play).
+    pub fn render<const Q: usize>(&mut self, f0: Frame, n: usize, out: &mut [[f32; Q]; TRACK_COUNT]) {
         let master = self.master;
         let silent_lane = self.rec.filter(|r| r.stop_playback).map(|r| r.lane);
-        for i in 0..TRACK_COUNT {
+        for (i, out) in out.iter_mut().enumerate() {
+            let out = &mut out[..n];
+            out.fill(0.0);
             let t = &mut self.lanes[i];
             let target = if t.muted { 0.0 } else { t.volume as f64 };
             // Only a committed lane plays, and a lane commits only onto a master.
@@ -1311,7 +1319,7 @@ impl Looper {
             let mut pos = loop_pos(f0, self.anchor, master);
             for sample in out.iter_mut() {
                 let idx = if t.audible.reversed { master - 1 - pos } else { pos };
-                *sample += (t.gain * data[idx as usize] as f64) as f32;
+                *sample = (t.gain * data[idx as usize] as f64) as f32;
                 t.gain = target + (t.gain - target) * self.gain_coef;
                 pos += 1;
                 if pos == master {

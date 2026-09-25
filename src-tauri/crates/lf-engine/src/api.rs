@@ -2,6 +2,7 @@
 //! events the engine answers with, and the per-callback context and I/O. Commands and events travel
 //! only over rtrb rings; a full event ring drops the event and counts it, nothing blocks.
 
+use crate::dsp::fx::{FxKind, FxParam};
 use crate::grid::Frame;
 
 pub const TRACK_COUNT: usize = 5;
@@ -53,6 +54,63 @@ pub enum Command {
     SetAutoSensitivity(f64),
     SetVolume(u8, f32),
     SetMute(u8, bool),
+    /// A lane's FX parameter, in its def's units (`src/audio/fx/metadata.ts`).
+    SetFxParam(u8, FxParam, f64),
+    SetFxBypass(u8, FxKind, bool),
+    /// The built-in instrument notes go to; `None` while a plugin slot takes them (Stage 4). Sent on a
+    /// slot switch, not per note: it releases the held notes and hands the instrument the wheels, even
+    /// when the instrument stays (two slots may hold the same one, as two web synths).
+    SelectInstrument(Option<Instrument>),
+    /// A note (0..127) on the selected instrument; velocity 0..1. Sustain and the owner of a held note
+    /// stay with the sender (`src/audio/input-router.ts`). The instrument commands never wait behind a
+    /// looper command that waits for a block job; a note on or off sounds `instruments::LEAD` frames
+    /// after it is applied.
+    NoteOn(u8, f32),
+    NoteOff(u8),
+    /// The pitch wheel, in semitones.
+    PitchBend(f64),
+    /// The mod wheel, 0..1.
+    Modulation(f64),
+    AllNotesOff,
+}
+
+impl Command {
+    /// A command for the built-in instruments (notes, wheels, the pick).
+    pub fn is_instrument(&self) -> bool {
+        matches!(
+            self,
+            Command::SelectInstrument(_)
+                | Command::NoteOn(..)
+                | Command::NoteOff(_)
+                | Command::PitchBend(_)
+                | Command::Modulation(_)
+                | Command::AllNotesOff
+        )
+    }
+}
+
+/// The six built-in instruments (`src/audio/synths/index.ts`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Instrument {
+    Lead,
+    Pad,
+    Piano,
+    Organ,
+    Bass,
+    Drums,
+}
+
+impl Instrument {
+    pub const ALL: [Instrument; 6] = [Instrument::Lead, Instrument::Pad, Instrument::Piano, Instrument::Organ, Instrument::Bass, Instrument::Drums];
+
+    /// The id the UI and the session file use.
+    pub fn from_id(id: &str) -> Option<Instrument> {
+        Instrument::ALL.into_iter().find(|i| i.id() == id)
+    }
+
+    pub fn id(self) -> &'static str {
+        ["lead", "pad", "piano", "organ", "bass", "drum"][self as usize]
+    }
 }
 
 /// The named hands-free actions (`src/app/actions.ts`; GO LIVE stays with the plugin host).
@@ -154,6 +212,10 @@ pub struct ProcessContext {
     /// plugin's latency and the master limiter's pre-delay) after its downbeat, so what the player heard
     /// and played lines up on the grid. A constant, not a user trim.
     pub align_frames: Frame,
+    /// Of `align_frames`, the input side. A built-in instrument's note is played the output latency
+    /// after the click the player heard, so its record path lags it by this (plus the plugin's latency,
+    /// less the note's lead) to reach the grid where the guitar does.
+    pub input_frames: Frame,
 }
 
 /// The plugin seam (Stage 4): the instrument slot processes the mono device input into the wet signal

@@ -1,7 +1,8 @@
 //! Stage 3: the synths, the FX and the limiter, ported literally from what Tone.js builds on Blink's
 //! Web Audio nodes (docs/plans/native-engine.md § Stage 3). Each port is tested against the Tone
 //! reference renders in `tests/fixtures/tone` (`verify/probes/tone-refs.mjs`) and holds the tightest
-//! tolerance class it passes (`tests/common/refs.rs`). Only the limiter is wired into [`crate::engine`].
+//! tolerance class it passes (`tests/common/refs.rs`). The engine plays them through
+//! [`crate::effects`] and [`crate::instruments`], and the limiter on its master bus.
 //!
 //! - Building blocks, one of each: param automation ([`param`], with Blink's time and quantum helpers),
 //!   [`gain`], Tone's signal plumbing and `Scale` ([`signal`]), buffer playback and noise ([`buffer_source`],

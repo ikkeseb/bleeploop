@@ -77,15 +77,20 @@ pub struct Rig {
     /// reports it to the engine as `align_frames` less the limiter's latency, which the engine adds
     /// back, so a scenario reasons about the looper alone; `tests/align.rs` checks the real sum.
     pub align: Frame,
+    /// Of the driver's report, the input side (`ProcessContext::input_frames`).
+    pub input_latency: Frame,
     input: Box<dyn Fn(Frame) -> f32>,
     pub inserts: Box<dyn Inserts>,
     pub events: Vec<Event>,
-    /// The master before the limiter from `keep_output` (the bus plus the monitor: what the output
-    /// carries, `limiter_latency` earlier and unlimited), and the frame it starts at.
+    /// From `keep_output`, what the looper plays before the limiter: the lanes before their FX, the
+    /// click and the monitor (`Taps::looper` + `Taps::monitor`), and the frame it starts at.
     pub output: Option<(Frame, Vec<f32>)>,
-    /// The rendered left channel over the same frames, and the engine's two taps (`Engine::taps`).
+    /// The rendered channels over the same frames, and the engine's taps (`Engine::taps`): the bus's
+    /// two sides and the monitor.
     pub heard: Vec<f32>,
+    pub heard_right: Vec<f32>,
     pub bus: Vec<f32>,
+    pub bus_right: Vec<f32>,
     pub monitor: Vec<f32>,
     gap_next: bool,
     in_buf: Vec<f32>,
@@ -126,12 +131,15 @@ impl Rig {
             frame: o.start,
             block: o.block,
             align: o.align,
+            input_latency: 0,
             input: Box::new(|_| 0.0),
             inserts: Box::new(lf_engine::Dry),
             events: Vec::new(),
             output: None,
             heard: Vec::new(),
+            heard_right: Vec::new(),
             bus: Vec::new(),
+            bus_right: Vec::new(),
             monitor: Vec::new(),
             gap_next: false,
             in_buf: vec![0.0; 4096],
@@ -151,7 +159,9 @@ impl Rig {
     pub fn keep_output(&mut self) {
         self.output = Some((self.frame, Vec::new()));
         self.heard.clear();
+        self.heard_right.clear();
         self.bus.clear();
+        self.bus_right.clear();
         self.monitor.clear();
     }
 
@@ -211,18 +221,20 @@ impl Rig {
         for k in 0..n {
             self.in_buf[k] = (self.input)(self.frame + k as Frame);
         }
-        let ctx = ProcessContext { frame: self.frame, xrun: std::mem::take(&mut self.gap_next), align_frames: self.align - self.engine.limiter_latency() };
+        let ctx = ProcessContext { frame: self.frame, xrun: std::mem::take(&mut self.gap_next), align_frames: self.align - self.engine.limiter_latency(), input_frames: self.input_latency };
         let violations = violation_count();
         let (engine, inserts) = (&mut self.engine, self.inserts.as_mut());
         let (input, left, right) = (&self.in_buf[..n], &mut self.left[..n], &mut self.right[..n]);
         assert_no_alloc(|| engine.process(&ctx, input, left, right, inserts));
         assert_eq!(violation_count(), violations, "process allocated at frame {}", self.frame);
         if let Some((_, out)) = self.output.as_mut() {
-            let (bus, monitor) = self.engine.taps();
-            out.extend(bus.iter().zip(monitor).map(|(b, m)| b + m));
+            let taps = self.engine.taps();
+            out.extend(taps.looper.iter().zip(taps.monitor).map(|(b, m)| b + m));
             self.heard.extend_from_slice(&self.left[..n]);
-            self.bus.extend_from_slice(bus);
-            self.monitor.extend_from_slice(monitor);
+            self.heard_right.extend_from_slice(&self.right[..n]);
+            self.bus.extend_from_slice(taps.bus[0]);
+            self.bus_right.extend_from_slice(taps.bus[1]);
+            self.monitor.extend_from_slice(taps.monitor);
         }
         self.frame += n as Frame;
         while let Ok(e) = self.handle.events.pop() {

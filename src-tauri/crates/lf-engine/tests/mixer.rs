@@ -100,10 +100,10 @@ fn the_output_is_the_limiter_over_the_bus_plus_the_unlimited_monitor() {
     rig.set_input(|f| 0.3 * (f as f32 * 0.01).sin());
     rig.advance(48_000);
     let mut limiter = Compressor::master_limiter(rig.sr as f32);
-    let (mut l, mut r) = (rig.bus.clone(), rig.bus.clone());
+    let (mut l, mut r) = (rig.bus.clone(), rig.bus_right.clone());
     limiter.process(start, &mut l, &mut r);
-    let expected: Vec<f32> = l.iter().zip(&rig.monitor).map(|(x, m)| x + m).collect();
-    assert!(rig.heard == expected, "the output is limiter(bus) + monitor");
+    let plus_monitor = |side: &[f32]| side.iter().zip(&rig.monitor).map(|(x, m)| x + m).collect::<Vec<f32>>();
+    assert!(rig.heard == plus_monitor(&l) && rig.heard_right == plus_monitor(&r), "the output is limiter(bus) + monitor");
     let peak = |x: &[f32]| x.iter().fold(0f32, |a, v| a.max(v.abs()));
     // A literal port of the live limiter: it pulls the peak down hard but is no true ceiling (STATUS E6).
     assert!(peak(&rig.bus) > 1.0 && peak(&l) < 0.8 * peak(&rig.bus), "the limiter engaged: {} -> {}", peak(&rig.bus), peak(&l));

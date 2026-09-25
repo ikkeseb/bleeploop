@@ -6,8 +6,9 @@
 //! Keep `--test-threads=1`: run in parallel, the two bars slow each other down.
 //!
 //! - Stage 2: five lanes (one overdubbing), the click and the master limiter under 10 % of the block's
-//!   real time.
-//! - Stage 3: that engine plus the full synth and FX load (below) under 50 %.
+//!   real time (with the Stage 3 sound wired in and idle: bypassed FX, silent instruments).
+//! - Stage 3: that engine with every effect on and the drum kit playing, plus the other synths
+//!   beside it (below), under 50 %.
 //!
 //! lf-engine builds at opt-level 3 in the dev profile too, but the Stage 3 load mixes in this file,
 //! which the dev profile leaves unoptimized: take the numbers from `--release`. The one test that is
@@ -15,19 +16,14 @@
 
 mod common;
 
-use std::sync::Arc;
 use std::time::Instant;
 
 use assert_no_alloc::assert_no_alloc;
 use common::{code, violation_count, Opts, Rig};
-use lf_engine::dsp::buffer_source::AudioBuffer;
-use lf_engine::dsp::fx::{default_fx_states, Ctl, FxChain, FxKind, FxParam, FxTiming, ReverbBus, MAX_FEEDBACK, REVERB_DECAY, REVERB_PRE_DELAY};
-use lf_engine::dsp::noise::NoiseTables;
-use lf_engine::dsp::reverb_ir;
-use lf_engine::dsp::rng::Mulberry32;
-use lf_engine::dsp::synth::{Bass, DrumKit, PolyKind, PolySynth};
+use lf_engine::dsp::fx::{FxKind, FxParam, MAX_FEEDBACK};
+use lf_engine::dsp::synth::{Bass, PolyKind, PolySynth};
 use lf_engine::grid::Frame;
-use lf_engine::{Command, Dry, LaneState, ProcessContext};
+use lf_engine::{Command, Dry, Instrument, LaneState, ProcessContext};
 
 const RATE: f32 = 48000.0;
 const BLOCK: usize = 64;
@@ -60,7 +56,7 @@ fn five_lanes_one_overdubbing_and_the_click_cost_under_a_tenth_of_the_block() {
     let started = Instant::now();
     for _ in 0..blocks {
         let t = Instant::now();
-        let ctx = ProcessContext { frame, xrun: false, align_frames: 0 };
+        let ctx = ProcessContext { frame, xrun: false, align_frames: 0, input_frames: 0 };
         rig.engine.process(&ctx, &input, &mut left, &mut right, &mut Dry);
         let dt = t.elapsed().as_secs_f64();
         worst = worst.max(dt);
@@ -82,48 +78,32 @@ fn five_lanes_one_overdubbing_and_the_click_cost_under_a_tenth_of_the_block() {
 }
 
 /// The timed parts of a Stage 3 block, in render order; each includes adding its output into the mix.
-const PARTS: [&str; 9] =
-    ["engine: 5 lanes + click + limiter", "lead x8", "pad x12", "piano x12", "organ x8", "bass", "drum kit x16", "5 FX chains", "reverb bus"];
+const PARTS: [&str; 6] = ["engine: lanes + FX + reverb + drum kit + click + limiter", "lead x8", "pad x12", "piano x12", "organ x8", "bass"];
 
 /// The Stage 3 acceptance load, the worst a session can ask of the built-in sound at once:
 ///
-/// - the engine as the Stage 2 bar runs it (five lanes, one overdubbing, the click);
-/// - all six synths: the four poly synths with every voice held (lead 8, pad 12, piano 12, organ 8),
-///   bent, the mod wheel full (the vibrato path live); the bass re-struck every 188 blocks (~250 ms,
-///   its filter envelope moving); the drum kit's 16 voices re-hit every 30 blocks (40 ms, the pedal
-///   hat's ring), so every voice always sounds;
-/// - five FX chains with every effect on: the filter at Q 6 with its cutoff ramping all the time (a new
-///   20 ms ramp every 14 blocks: per-frame coefficients), the pitch at +7, the stutter at 1/16, the delay
-///   at 1/8 and full feedback (0.95), the reverb send at 1. Each chain is fed the white noise table from
-///   its own offset: a busy lane that never takes a silent path;
-/// - the one reverb bus on the five sends; the limiter runs inside the engine.
-///
-/// The synths and FX are driven through their `dsp` APIs because they are not wired into `engine.rs`
-/// yet: the chains stand in for the lanes' FX, and the engine's own output joins the mix beside them.
-/// Wiring adds the block split around them, not their work; the limiter then carries them too, at the
-/// same cost.
+/// - the engine as the Stage 2 bar runs it (five lanes, one overdubbing, the click), with every effect
+///   on every lane: the filter at Q 6 with its cutoff ramping all the time (a new 20 ms ramp every 14
+///   blocks: per-frame coefficients), the pitch at +7, the stutter at 1/16, the delay at 1/8 and full
+///   feedback (0.95), the reverb send at 1, so the one reverb bus is busy; and the drum kit selected
+///   with its 16 voices re-hit every 30 blocks (40 ms, the pedal hat's ring), so every voice sounds;
+/// - beside the engine, the other five synths sounding at once, which the engine never asks for (notes
+///   reach only the selected instrument; the others only ring out): the four poly synths with every
+///   voice held (lead 8, pad 12, piano 12, organ 8), bent, the mod wheel full (the vibrato path live),
+///   and the bass re-struck every 188 blocks (~250 ms, its filter envelope moving).
 struct Stage3 {
     rig: Rig,
     engine_frame: Frame,
     engine_input: [f32; BLOCK],
-    poly: [PolySynth; 4],
+    poly: Vec<PolySynth>,
     bass: Bass,
     bass_note: u8,
-    drums: DrumKit,
     drum_notes: Vec<u8>,
-    chains: Vec<FxChain>,
-    bus: ReverbBus,
-    lane_source: Vec<f32>,
-    /// The frame the synths and FX render next (their clock starts at 0).
+    /// The frame the synths beside the engine render next (their clock starts at 0).
     frame: u64,
     /// Blocks rendered.
     block: u64,
     mono: [f32; BLOCK],
-    lane: [f32; BLOCK],
-    out: [f32; BLOCK],
-    send: [f32; BLOCK],
-    sends: [f32; BLOCK],
-    wet: [[f32; BLOCK]; 2],
     mix: [[f32; BLOCK]; 2],
 }
 
@@ -131,52 +111,48 @@ const BASS_NOTES: [u8; 5] = [28, 31, 33, 35, 36];
 
 impl Stage3 {
     fn new() -> Self {
-        let (rig, _) = five_lanes_one_overdubbing();
+        let (mut rig, _) = five_lanes_one_overdubbing();
+        for lane in 0..5 {
+            let set = |p, v| Command::SetFxParam(lane, p, v);
+            for command in [
+                set(FxParam::Cutoff, 1200.0),
+                set(FxParam::Q, 6.0),
+                set(FxParam::Semitones, 7.0),
+                set(FxParam::Rate, 3.0),
+                set(FxParam::Time, 1.0),
+                set(FxParam::Feedback, MAX_FEEDBACK),
+                set(FxParam::Mix, 0.5),
+                set(FxParam::Amount, 1.0),
+            ] {
+                rig.set(command);
+            }
+            for kind in FxKind::ALL {
+                rig.set(Command::SetFxBypass(lane, kind, false));
+            }
+        }
+        rig.set(Command::SelectInstrument(Some(Instrument::Drums)));
         let engine_frame = rig.frame;
         let mut engine_input = [0.0f32; BLOCK];
         for (k, x) in engine_input.iter_mut().enumerate() {
             *x = code(k as Frame) - 0.25;
         }
 
-        let NoiseTables { white, pink } = NoiseTables::generate(&mut Mulberry32::new(7));
-        let lane_source = white[0].iter().map(|x| x * 0.5).collect();
-        let table = |[l, r]: [Vec<f32>; 2]| Arc::new(AudioBuffer::new(RATE, vec![l, r]));
-        let (white, pink) = (table(white), table(pink));
-
-        let poly = [PolyKind::Lead, PolyKind::Pad, PolyKind::Piano, PolyKind::Organ].map(|kind| {
-            let mut synth = PolySynth::new(kind, RATE, 0.0, 0);
-            for k in 0..kind.spec().max_polyphony as u8 {
-                synth.note_on(48 + 3 * k, 0.8, 0.0, 0);
-            }
-            synth.set_pitch_bend(0.5, 0.0, 0);
-            synth.set_modulation(1.0, 0.0, 0);
-            synth
-        });
-        let mut bass = Bass::new(RATE, 0.0, 0);
-        bass.set_modulation(1.0, 0.0, 0);
-        let drums = DrumKit::new(RATE, &white, &pink, Mulberry32::new(1), 0.0, 0);
-        let drum_notes: Vec<u8> = drums.notes().collect();
-        assert_eq!(drum_notes.len(), 16);
-
-        let start = Ctl { now: 0.0, frame: 0 };
-        let mut states = default_fx_states();
-        for s in states.iter_mut() {
-            s.bypassed = false;
-        }
-        states[FxKind::Filter.index()].params[..2].copy_from_slice(&[1200.0, 6.0]);
-        states[FxKind::Pitch.index()].params[0] = 7.0;
-        states[FxKind::Stutter.index()].params[0] = 3.0;
-        states[FxKind::Delay.index()].params = [1.0, MAX_FEEDBACK, 0.5];
-        states[FxKind::Reverb.index()].params[0] = 1.0;
-        let chains = (0..5)
-            .map(|_| {
-                let mut chain = FxChain::new(RATE, Some(&states), start);
-                chain.set_timing(FxTiming { anchor: 0.0, beat_period: 0.5 }, start).expect("a valid timing");
-                chain
+        let poly = [PolyKind::Lead, PolyKind::Pad, PolyKind::Piano, PolyKind::Organ]
+            .into_iter()
+            .map(|kind| {
+                let mut synth = PolySynth::new(kind, RATE, 0.0, 0);
+                for k in 0..kind.spec().max_polyphony as u8 {
+                    synth.note_on(48 + 3 * k, 0.8, 0.0, 0);
+                }
+                synth.set_pitch_bend(0.5, 0.0, 0);
+                synth.set_modulation(1.0, 0.0, 0);
+                synth
             })
             .collect();
-        let ir = reverb_ir::generate(&white, RATE, REVERB_DECAY, REVERB_PRE_DELAY, [0.25, 0.75]);
-        let bus = ReverbBus::new(RATE, [&ir[0], &ir[1]], 0);
+        let mut bass = Bass::new(RATE, 0.0, 0);
+        bass.set_modulation(1.0, 0.0, 0);
+        // The kit's GM notes (`dsp::synth::drum`).
+        let drum_notes = vec![35, 36, 37, 38, 39, 40, 42, 44, 45, 46, 47, 49, 50, 51, 54, 56];
 
         Stage3 {
             rig,
@@ -185,19 +161,10 @@ impl Stage3 {
             poly,
             bass,
             bass_note: BASS_NOTES[0],
-            drums,
             drum_notes,
-            chains,
-            bus,
-            lane_source,
             frame: 0,
             block: 0,
             mono: [0.0; BLOCK],
-            lane: [0.0; BLOCK],
-            out: [0.0; BLOCK],
-            send: [0.0; BLOCK],
-            sends: [0.0; BLOCK],
-            wet: [[0.0; BLOCK]; 2],
             mix: [[0.0; BLOCK]; 2],
         }
     }
@@ -215,7 +182,19 @@ impl Stage3 {
             t = next;
         };
 
-        let ctx = ProcessContext { frame: self.engine_frame, xrun: false, align_frames: 0 };
+        let at = self.engine_frame;
+        if b % 14 == 0 {
+            for lane in 0..5u8 {
+                let cutoff = if (b / 14 + lane as u64) % 2 == 0 { 300.0 } else { 6000.0 };
+                self.rig.send_at(at, Command::SetFxParam(lane, FxParam::Cutoff, cutoff));
+            }
+        }
+        if b % 30 == 0 {
+            for &note in &self.drum_notes {
+                self.rig.send_at(at, Command::NoteOn(note, 1.0));
+            }
+        }
+        let ctx = ProcessContext { frame: at, xrun: false, align_frames: 0, input_frames: 0 };
         self.rig.engine.process(&ctx, &self.engine_input, l, r, &mut Dry);
         lap(0);
 
@@ -242,48 +221,6 @@ impl Stage3 {
             *r += 0.25 * x;
         }
         lap(5);
-
-        if b % 30 == 0 {
-            for &note in &self.drum_notes {
-                self.drums.note_on(note, 1.0, now, f);
-            }
-        }
-        let [dl, dr] = &mut self.wet;
-        self.drums.render(f, dl, dr);
-        for (o, &x) in l.iter_mut().zip(dl.iter()).chain(r.iter_mut().zip(dr.iter())) {
-            *o += 0.5 * x;
-        }
-        lap(6);
-
-        self.sends.fill(0.0);
-        let mut any_send = false;
-        for (i, chain) in self.chains.iter_mut().enumerate() {
-            if b % 14 == 0 {
-                let cutoff = if (b / 14 + i as u64) % 2 == 0 { 300.0 } else { 6000.0 };
-                chain.set_param(FxParam::Cutoff, cutoff, Ctl::at(f, RATE));
-            }
-            let src = &self.lane_source;
-            for (k, x) in self.lane.iter_mut().enumerate() {
-                *x = src[(f as usize + k + i * 44100) % src.len()];
-            }
-            chain.process(f, &self.lane, &mut self.out, &mut self.send);
-            any_send |= !chain.send_silent();
-            for (s, &x) in self.sends.iter_mut().zip(&self.send) {
-                *s += x;
-            }
-            for ((l, r), &x) in l.iter_mut().zip(r.iter_mut()).zip(&self.out) {
-                *l += 0.3 * x;
-                *r += 0.3 * x;
-            }
-        }
-        lap(7);
-
-        let [wl, wr] = &mut self.wet;
-        self.bus.process(f, any_send.then_some(&self.sends[..]), wl, wr);
-        for (o, &x) in l.iter_mut().zip(wl.iter()).chain(r.iter_mut().zip(wr.iter())) {
-            *o += 0.3 * x;
-        }
-        lap(8);
 
         std::hint::black_box(&self.mix);
         self.frame += BLOCK as u64;

@@ -196,7 +196,8 @@ exactly the span's end, `plan_later_stop`'s bar clamp (the window end bounds it)
 guard mapped or its deletion justified; golden jam green at 44.1 k and 48 k across all block sizes;
 mutants killed or skipped with a reason; 5 lanes (one overdubbing) + click at 48 k / 64 frames under
 10 % of block time offline (`src-tauri/crates/lf-engine/tests/perf.rs`, ignored by default: 0.17 % mean on the dev PC,
-2026-09-24; 0.33 % with the master limiter wired, 2026-09-25). The live line is untouched.
+2026-09-24; 0.33 % with the master limiter wired, 3.8 to 4.0 % with the Stage 3 sound wired and idle,
+2026-09-25). The live line is untouched.
 
 ## Stage 3 — synths and FX in lf-engine
 
@@ -243,26 +244,45 @@ metals' FM near Nyquist and Blink's biquad tail-stop), the hot delay (−776 dB:
 and PitchShift (−69 to −72 dB, the nearest to the −60 dB bar: a 1-ulp wave-table difference moves its
 float delay reads). Costs per 128-frame quantum at 48 k, release, dev PC: pad at 12 voices 85 µs, the
 drum kit with all 16 voices ringing 367 µs (13.8 %), a chain with pitch on 18 µs, the reverb bus 47 µs
-mean and 106 µs worst. The acceptance run (`src-tauri/crates/lf-engine/tests/perf.rs`, ignored; dev PC,
-release, 2026-09-25): the Stage 2 engine, all six synths with every voice sounding and the mod wheel
-full, five chains with every effect on (cutoff ramping, delay feedback 0.95) into the bus, and the
-limiter, at 48 k / 64 frames: mean 23.5 to 25.9 % of the 1333 µs block over three runs. The drum kit is
-10 to 11 % of it, the five chains 4.3 to 4.7 %, the bus 2.2 to 2.5 %, the engine 0.18 % (0.34 % with the
-limiter inside it; that run's mean 25.4 %). The synths
-compute whole 128-frame quanta, so every other 64-frame block carries their work: those blocks average
-42 to 47 %, the worst of the load's own cycle 41 to 42 %. p99.9 (83 to 115 %) and the worst block (110
-to 262 %) are preemption on a busy desktop at normal priority: the slow blocks cluster in time, not on
-the cycle. Rerun:
-`cargo test -p lf-engine --release --test perf -- --ignored --nocapture --test-threads=1`.
-**The limiter is wired** (2026-09-25) on the master bus: lanes and click (later the synths, FX and
-reverb) under the master volume, then the limiter. The wet signal joins after it under the same master
-volume, unlimited (owner decision, 2026-09-25): the played instrument keeps today's native-monitor
-latency instead of gaining the 6 ms pre-delay (288 frames at 48 k, 264 at 44.1 k), and like today's
-monitor it is not limited. Everything on the bus is heard that much later and +0.57 dB louder under
-the threshold (makeup gain), so a take's alignment is `align_frames` + inserts + limiter. The rig's
-`align` is the looper's total and the output tests read the pre-limiter taps (`Engine::taps`);
-`src-tauri/crates/lf-engine/tests/align.rs` checks the real sum against the click as it leaves the limiter, `src-tauri/crates/lf-engine/tests/mixer.rs` that
-the output is limiter(bus) + monitor, bit for bit.
+mean and 106 µs worst.
+
+**Wired (2026-09-25)** in `src-tauri/crates/lf-engine/src/engine.rs`, with `src-tauri/crates/lf-engine/src/effects.rs` (each lane
+through its chain, the shared reverb bus, the grid, CLEAR resetting and COPY carrying a lane's FX) and
+`src-tauri/crates/lf-engine/src/instruments.rs` (all six built, one selected; a switch releases the
+held notes and hands over the wheels, also to the same instrument; a tail rings out where the web
+disposed a synth swapped within its slot). The stereo master bus carries the chains, the reverb bus, the instruments and the click under
+the master volume, then the limiter; the wet signal joins after it under the same master volume,
+unlimited (owner decision, 2026-09-25): the played instrument keeps today's native-monitor latency
+instead of gaining the 6 ms pre-delay (288 frames at 48 k, 264 at 44.1 k), and like today's monitor it
+is not limited. Everything on the bus is heard that much later and +0.57 dB louder under the threshold
+(makeup gain), so a take's alignment is `align_frames` + inserts + limiter. The instruments are heard
+and recorded, as on the web's looperInputBus. A note sounds one 128-frame quantum after it is applied
+(`LEAD`; the web scheduled 5 ms ahead, and the ported synths need a look-ahead), and never waits
+behind a looper command held for a block job; a wheel or an FX change sounds from the next quantum
+boundary. The record path lags the instruments by the input latency plus the plugin's, less the lead
+(`ProcessContext::input_frames`), so a note played on the heard click lands on the grid where a guitar
+note does. A full command table leaves the rest in the ring for the next block instead of dropping
+it. The synths, FX and reverb run on the device frame less the frames the device skipped, so their
+blocks always follow each other; the limiter stays on the device frame. Two
+literal Tone behaviours stay: a bypassed chain is not bit-transparent (about +0.035 dB), and a closed
+stutter gate leaks about 0.2 % of the dry signal; the looper's tests therefore read `Taps::looper`, the
+lanes before their FX. Tests: `src-tauri/crates/lf-engine/tests/sound.rs` (the instruments on the bus
+and on the grid, a note during a held command, a burst of notes, the reverb's stereo tail, CLEAR/COPY,
+the stutter on the grid across a restart, the whole wired sound bit-identical at seven block sizes); `src-tauri/crates/lf-engine/tests/align.rs` checks the take's sum against the click as it
+leaves the limiter, `src-tauri/crates/lf-engine/tests/mixer.rs` that the output is limiter(bus) + monitor on both sides, bit for bit.
+
+The acceptance run (`src-tauri/crates/lf-engine/tests/perf.rs`, ignored; dev PC, release, 2026-09-25,
+five runs) goes through the wired engine: five lanes (one overdubbing) with every effect on (cutoff
+ramping, delay feedback 0.95, send 1) into the bus, the click, the drum kit selected with all 16 voices
+re-hit, the limiter; and beside it the other five synths with every voice sounding and the mod wheel
+full, which a session never asks for (only the selected instrument takes notes). At 48 k / 64 frames:
+mean 24.7 to 25.0 % of the 1333 µs block, the engine's share 18.2 to 18.4 %. The synths and FX compute
+whole 128-frame quanta, so every other 64-frame block carries their work: those blocks average 47.8 to
+48.4 %, the worst of the load's own cycle 51.9 to 52.6 %. p99.9 (79 to 80 %) and the worst block (89
+to 127 %) are preemption on a busy desktop at normal priority. Idle, the wired sound lifts the Stage 2
+bar from 0.33 % to 3.8 to 4.0 % (a one-off probe splits it about evenly between the bypassed chains
+with the idle reverb bus and the six silent instruments): Blink renders a connected node whether or
+not it sounds, and the port does the same. Rerun: `cargo test -p lf-engine --release --test perf -- --ignored --nocapture --test-threads=1`.
 
 **Acceptance.** Fixtures within budget; every scenario passes its class; alloc and block-size tests
 cover voices and FX (FFT paths ≤ −120 dB instead of bit-exact); six synths at full polyphony + full FX
