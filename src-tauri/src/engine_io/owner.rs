@@ -35,9 +35,64 @@ const MAX_EVENTS: usize = 64;
 /// The owner thread's stack: engines are built and moved on it (`Engine` is ~20 KB inline; a Windows
 /// thread gets 1 MB by default), with room to spare.
 const STACK: usize = 4 << 20;
-/// WASAPI join: the ring's capacity and the fill it holds (`host/transport.rs`'s `INPUT_TARGET_WASAPI`).
+/// Put a new engine (built at `config`'s rate) in place of the running one, with no device running,
+/// and hand back the old one for the caller to drop off the audio thread. The old engine's units go to
+/// their plugin owners: pending installs land first, then every unit is evicted into
+/// `Core::evicted` (`SlotHost::take_evicted`). Every port is held across the swap, so a plugin owner
+/// cannot slip an install into the old engine. The device owner's rebuild, and the test device's.
+pub(crate) fn swap_engine(core: &Core, engine: Engine, handle: EngineHandle, config: EngineConfig) -> Option<Engine> {
+    let EngineHandle { commands, events, slots } = handle;
+    let mut ports = core.ports.each_ref().map(|p| p.lock().unwrap_or_else(|e| e.into_inner()));
+    let mut old = {
+        let mut rt = rt(core);
+        rt.faulted = false;
+        rt.engine.replace(engine)
+    };
+    let evict = old.is_some();
+    if let Some(old) = old.as_mut() {
+        let evicted = catch_unwind(AssertUnwindSafe(|| {
+            old.service_slots_idle();
+            old.evict_slots();
+        }));
+        if evicted.is_err() {
+            core.counters.panics.fetch_add(1, Relaxed);
+            log::error!("[engine_io] a unit panicked while it was evicted");
+        }
+    }
+    for (slot, (port, new)) in ports.iter_mut().zip(slots).enumerate() {
+        if let Some(port) = port.as_mut() {
+            while let Some(unit) = port.returned() {
+                park(core, slot, unit);
+            }
+        }
+        if evict {
+            core.occupied[slot].store(false, Release);
+        }
+        **port = Some(new);
+    }
+    *core.ends.lock().unwrap_or_else(|e| e.into_inner()) = Some(Ends { commands, events });
+    core.rate.store(config.sample_rate, Relaxed);
+    core.max_block.store(config.max_block as u32, Relaxed);
+    old
+}
+
+/// Keep an evicted unit for its plugin owner. A second one cannot come back under the slot protocol
+/// (one unit per slot); should it, it leaks rather than drop here (a drop calls its DLL).
+fn park(core: &Core, slot: usize, unit: Box<dyn SlotProcessor>) {
+    let mut waiting = core.evicted[slot].lock().unwrap_or_else(|e| e.into_inner());
+    if waiting.is_some() {
+        log::error!("[engine_io] slot {slot}: a second evicted unit came back while one waits; leaking it");
+        std::mem::forget(unit);
+    } else {
+        *waiting = Some(unit);
+    }
+}
+
+/// WASAPI join: the ring's capacity and the fill it holds. The setpoint follows the pipe's rule (the
+/// largest push plus the largest pull plus ~3 ms: `pipes::PipeConfig::setpoint`) for WASAPI shared
+/// mode's 10 ms periods on both sides; a device with longer periods starves the join (`join_starves`).
 const JOIN_CAPACITY_SECONDS: f64 = 0.2;
-const JOIN_SETPOINT_SECONDS: f64 = 0.015;
+const JOIN_SETPOINT_SECONDS: f64 = 0.025;
 
 type Reply<T> = SyncSender<Result<T, String>>;
 
@@ -201,55 +256,11 @@ impl<D: Driver> Owner<D> {
     fn build(&mut self, rate: u32, evict: bool) {
         let began = Instant::now();
         let config = EngineConfig { max_loop_seconds: self.config.max_loop_seconds, ..EngineConfig::new(rate) };
-        let (engine, EngineHandle { commands, events, slots }) = Engine::new(config);
-        // Hold every port across the swap: a plugin owner cannot slip an install into the old engine.
-        let mut ports = self.core.ports.each_ref().map(|p| p.lock().unwrap_or_else(|e| e.into_inner()));
-        let mut old = {
-            let mut rt = rt(&self.core);
-            rt.faulted = false;
-            rt.engine.replace(engine)
-        };
+        let (engine, handle) = Engine::new(config);
+        let old = swap_engine(&self.core, engine, handle, config);
         debug_assert_eq!(old.is_some(), evict, "an engine is replaced only for another rate");
-        if let Some(old) = old.as_mut() {
-            let evicted = catch_unwind(AssertUnwindSafe(|| {
-                // Pending installs land first, so every unit comes back on its port.
-                old.service_slots_idle();
-                old.evict_slots();
-            }));
-            if evicted.is_err() {
-                self.core.counters.panics.fetch_add(1, Relaxed);
-                log::error!("[engine_io] a unit panicked while it was evicted");
-            }
-        }
-        for (slot, (port, new)) in ports.iter_mut().zip(slots).enumerate() {
-            if let Some(port) = port.as_mut() {
-                while let Some(unit) = port.returned() {
-                    self.park(slot, unit);
-                }
-            }
-            if evict {
-                self.core.occupied[slot].store(false, Release);
-            }
-            **port = Some(new);
-        }
-        *self.core.ends.lock().unwrap_or_else(|e| e.into_inner()) = Some(Ends { commands, events });
-        self.core.rate.store(rate, Relaxed);
-        self.core.max_block.store(config.max_block as u32, Relaxed);
-        drop(ports);
         drop(old);
         log::info!("[engine_io] engine built at {rate} Hz in {} ms{}", began.elapsed().as_millis(), if evict { "; the old one's units wait for their owners" } else { "" });
-    }
-
-    /// Keep an evicted unit for its plugin owner. A second one cannot come back under the slot
-    /// protocol (one unit per slot); should it, it leaks rather than drop here (a drop calls its DLL).
-    fn park(&self, slot: usize, unit: Box<dyn SlotProcessor>) {
-        let mut waiting = self.core.evicted[slot].lock().unwrap_or_else(|e| e.into_inner());
-        if waiting.is_some() {
-            log::error!("[engine_io] slot {slot}: a second evicted unit came back while one waits; leaking it");
-            std::mem::forget(unit);
-        } else {
-            *waiting = Some(unit);
-        }
     }
 
     /// Start `spec`'s streams on the engine, wait for its first callbacks, then report it.

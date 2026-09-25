@@ -350,31 +350,3 @@ pub(super) fn rt_allocations(mut f: impl FnMut()) -> u64 {
         }
     }
 }
-
-/// Test-only: what the device owner does when a device opens at another rate. A new engine at
-/// `rate` (block ceiling `max_block`) replaces the old one, whose units are evicted into their slot
-/// hosts, while the test device keeps rendering: `test_rig` has no rate change of its own.
-#[cfg(test)]
-pub(super) fn reopen_at(device: &crate::engine_io::test_rig::TestDevice, rate: u32, max_block: usize) {
-    use crate::engine_io::Ends;
-    use lf_engine::{Engine, EngineConfig};
-
-    let core = &device.host().core;
-    let config = EngineConfig { max_loop_seconds: 2.0, max_block, ..EngineConfig::new(rate) };
-    let (engine, handle) = Engine::new(config);
-    let mut rt = core.rt.lock().unwrap();
-    if let Some(old) = rt.engine.as_mut() {
-        old.evict_slots();
-    }
-    for (i, port) in handle.slots.into_iter().enumerate() {
-        let mut held = core.ports[i].lock().unwrap();
-        if let Some(unit) = held.as_mut().and_then(|p| p.returned()) {
-            *core.evicted[i].lock().unwrap() = Some(unit);
-        }
-        *held = Some(port);
-    }
-    *core.ends.lock().unwrap() = Some(Ends { commands: handle.commands, events: handle.events });
-    core.rate.store(rate, Relaxed);
-    core.max_block.store(max_block as u32, Relaxed);
-    rt.engine = Some(engine);
-}

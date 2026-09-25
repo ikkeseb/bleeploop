@@ -1,7 +1,8 @@
 //! Test-only: an engine in a [`Core`] rendered by a plain thread instead of a device, so a plugin
 //! owner's install/remove/restart handshake runs against the real engine without hardware. The thread
 //! takes the engine lock the way the callback does (`try_lock`: a miss renders nothing and counts),
-//! publishes the frame clock, and keeps the left channel it rendered.
+//! publishes the frame clock, and keeps the left channel it rendered. [`TestDevice::rebuild_at`] swaps in
+//! an engine at another rate through the device owner's own `swap_engine`, evicting the units.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::{Acquire, Relaxed, Release}};
 use std::sync::{Arc, Mutex};
@@ -56,6 +57,7 @@ impl TestDevice {
                         for (k, s) in x.iter_mut().enumerate() {
                             *s = input(frame + k as Frame);
                         }
+                        let rate = core.rate.load(Relaxed);
                         match core.rt.try_lock() {
                             Ok(mut rt) => {
                                 if let Some(engine) = rt.engine.as_mut() {
@@ -92,14 +94,25 @@ impl TestDevice {
         &self.host
     }
 
-    /// Stop rendering (the device is gone; the engine and its slots stay).
+    /// A device at another rate: a new engine (2-second lanes, `max_block`) replaces the old one, whose
+    /// units go to their slot hosts' eviction mailboxes, while the render thread keeps rendering (it
+    /// renders nothing during the swap, which counts lock misses).
+    pub(crate) fn rebuild_at(&self, rate: u32, max_block: usize) {
+        let config = EngineConfig { max_loop_seconds: 2.0, max_block, ..EngineConfig::new(rate) };
+        let (engine, handle) = Engine::new(config);
+        drop(super::owner::swap_engine(&self.host.core, engine, handle, config));
+    }
+
+    /// Stop rendering (the device is gone; the engine and its slots stay). The render thread is joined
+    /// before `running` drops, as the device owner does: a slot host that sees it down takes the engine
+    /// lock itself, which must never happen under a live render.
     pub(crate) fn stop(&mut self) {
-        self.host.core.running.store(false, Release);
-        self.host.core.clock.clear();
         self.stop.store(true, Release);
         if let Some(join) = self.join.take() {
             let _ = join.join();
         }
+        self.host.core.running.store(false, Release);
+        self.host.core.clock.clear();
     }
 
     /// Wait until `n` more blocks have rendered (or `timeout` passed): true when they did.

@@ -51,8 +51,9 @@
 //!   a waiting install included. The slots render ahead to the next slot command, so a plugin sees one
 //!   call per block unless a stamped note, target, live flag or gain splits it there.
 //! - **A stopped device is a punch-out** (STATUS E3, [`Engine::punch_out`]): what records ends after the
-//!   last rendered frame and commits as usual, what has retained nothing is cancelled, and rendering
-//!   resumes on the next frame with loop-end stops and block jobs where they were.
+//!   last rendered frame and commits as usual (a RETAKE roll with a kept pass commits that pass), what
+//!   has retained nothing is cancelled, and rendering resumes on the next frame with loop-end stops and
+//!   block jobs where they were.
 //!
 //! # Tests
 //!
@@ -65,11 +66,11 @@
 //! `tests/punch_out.rs` holds the punch-out. `tests/perf.rs` holds the ignored cost bars (Stage 2 and 3)
 //! and the Stage 3 load's alloc check.
 //!
-//! # Not built yet
+//! # Beside this crate, and not built yet
 //!
-//! The device side (streams, MIDI, Share output) and the CLAP/VST3 units live in the app
-//! (`src-tauri/src/engine_io`, `src-tauri/src/host`: Stage 4); waveform peaks and the export snapshot
-//! come with the feed (Stage 5).
+//! The device side (streams, MIDI, Share output) is `src-tauri/src/engine_io`; the CLAP/VST3 units and
+//! their engine-mode owners are `src-tauri/src/host/engine_slot.rs` and its siblings. Not built:
+//! waveform peaks and the export snapshot (with the feed, Stage 5).
 
 #![forbid(unsafe_code)]
 

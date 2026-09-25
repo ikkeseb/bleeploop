@@ -1,9 +1,6 @@
 //! The device owner and the callbacks on the fake driver (`fake_driver.rs`): no hardware, the real
 //! engine. Each test drives an [`EngineHost`] as its callers will (open, switch, close, the slot
 //! handshake) and reads what the fake played, the counters and the device events.
-//!
-//! The WASAPI join needs the pipes lane's `pipes.rs`, and a take's punch-out the engine lane's
-//! `Engine::punch_out`; their tests are ignored until those land.
 
 use std::any::Any;
 use std::sync::atomic::{AtomicUsize, Ordering::{Relaxed, SeqCst}};
@@ -247,7 +244,6 @@ fn a_loop_resumes_in_place_across_a_switch_and_the_close_stops_the_device() {
 }
 
 #[test]
-#[ignore = "needs the engine lane's punch_out"]
 fn a_take_recording_when_the_device_switches_punches_out_and_is_kept() {
     let mut h = Harness::new();
     h.fake.set_input(tone);
@@ -290,7 +286,6 @@ fn a_lost_asio_device_is_rebuilt_from_its_cache_and_the_loop_carries_on() {
 }
 
 #[test]
-#[ignore = "needs the pipes lane"]
 fn a_lost_asio_device_that_cannot_come_back_falls_back_to_the_wasapi_defaults() {
     let h = Harness::new();
     h.open(asio(Some(256)));
@@ -308,7 +303,6 @@ fn a_lost_asio_device_that_cannot_come_back_falls_back_to_the_wasapi_defaults() 
 }
 
 #[test]
-#[ignore = "needs the pipes lane"]
 fn a_lost_wasapi_endpoint_falls_back_to_the_default_endpoint() {
     let h = Harness::new();
     h.fake.wasapi.lock().unwrap().push(("usb".into(), FakeDevice::new("USB interface", 48_000, 480)));
@@ -502,7 +496,6 @@ fn share_output_mirrors_the_master_only_while_asio_plays_and_drops_its_taps_off_
 }
 
 #[test]
-#[ignore = "needs the pipes lane"]
 fn on_wasapi_share_output_opens_no_mirror() {
     let h = Harness::new();
     h.host.set_share(Some("obs".into())).unwrap();
@@ -514,7 +507,6 @@ fn on_wasapi_share_output_opens_no_mirror() {
 }
 
 #[test]
-#[ignore = "needs the pipes lane"]
 fn wasapi_joins_the_input_across_a_400_ppm_skew_without_starving() {
     let h = Harness::new();
     h.fake.set_input(|_| 0.25);
@@ -530,7 +522,6 @@ fn wasapi_joins_the_input_across_a_400_ppm_skew_without_starving() {
 }
 
 #[test]
-#[ignore = "needs the pipes lane"]
 fn a_loop_resumes_in_place_across_a_switch_from_asio_to_wasapi() {
     let mut h = Harness::new();
     h.fake.set_input(tone);

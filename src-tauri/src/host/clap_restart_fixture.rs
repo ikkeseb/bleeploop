@@ -831,7 +831,7 @@ mod engine {
         let (handle, _) = load(&device, 0, &obs);
         assert!(wait_for(2000, || obs.processes.load(Relaxed) > 4));
 
-        engine_slot::reopen_at(&device, 44_100, 1024);
+        device.rebuild_at(44_100, 1024);
         assert!(
             wait_for(2000, || obs.activations.load(Relaxed) == 2 && obs.starts.load(Relaxed) == 2),
             "the owner took the unit back and reinstalled it"

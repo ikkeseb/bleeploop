@@ -988,7 +988,7 @@ mod engine {
         let s = made.component();
         assert!(wait_for(2000, || s.processes.load(Relaxed) > 4));
 
-        engine_slot::reopen_at(&device, 44_100, 1024);
+        device.rebuild_at(44_100, 1024);
         assert!(
             wait_for(2000, || s.activations.load(Relaxed) == 2 && s.starts.load(Relaxed) == 2),
             "the owner took the unit back and reinstalled it"

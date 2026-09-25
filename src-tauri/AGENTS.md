@@ -46,8 +46,13 @@ rest is the map.
 ## Operational bits (recurring)
 
 - **`crates/lf-engine` is the pure native engine** (`docs/plans/native-engine.md`, dormant until its
-  flip). Its briefing is the crate doc in `crates/lf-engine/src/lib.rs`. `tauri dev` watches all of
-  `src-tauri/`, so an engine edit relaunches a running dev app.
+  flip). Its briefing is the crate doc in `crates/lf-engine/src/lib.rs`; the engine's device side is
+  `src/engine_io` (briefing: its `mod.rs`), its plugin units and engine-mode owners
+  `host/engine_slot.rs`, `host/clap_engine.rs`, `host/vst3_engine.rs`. Nothing on the live line calls
+  them. `tauri dev` watches all of `src-tauri/`, so an engine edit relaunches a running dev app.
+- **Parallel worktrees need their own `CARGO_TARGET_DIR`.** Sharing one, every worktree links the same
+  `app_lib-<hash>` test binary and cargo judges path crates fresh by mtime, so one worktree can run
+  another's build of `app` or `lf-engine` (seen 2026-09-25).
 - **ASIO is a cargo OPT-IN feature** carried by the npm scripts (`pnpm dev:asio`, `pnpm build:app`);
   a plain `cargo build` must work without the LLVM/ASIO SDK, and `tauri dev` forces
   `--no-default-features` anyway.
@@ -237,9 +242,11 @@ existing P9 ring → looper record tap (lag-tolerant, records wet "for free").
 - GO LIVE under ASIO timed out in `arm_monitor` ("timed out waiting on channel", then `disarm_input`
   timed out too) on two of about twelve `pnpm native:loopback` launches on 2026-09-24; a relaunch
   passed. Cause unknown.
-- `vst3_restart_fixture`'s `plugin_requested_restart_cycles_activation_on_the_owner_without_reload`
-  failed once on 2026-09-24 (254 hop-1 frames dropped across the restart) and passed on the rerun.
-  Cause unknown.
+- The CLAP and VST3 restart fixtures' `plugin_requested_restart_cycles_activation_on_the_owner_without_reload`
+  fails under machine load (254 to 1792 hop-1 frames dropped; 3 of 30 runs on 2026-09-25 with other
+  builds running). The test stops reading the ring from its last caught-up wait until after the
+  respawn, while the producer keeps writing into ~10 ms of slack: a fixture defect, not the host's
+  (the fix: drain in every wait).
 - CLAP and VST3 duplicate the load choreography (`load`/`vst3_load` and both owner mains): one
   shared owner would keep B1/B11 from returning. Not built.
 

@@ -822,14 +822,7 @@ impl Looper {
             rec.roll = None;
             match plan {
                 RetakeStop::KeepLast => {
-                    // The kept pass replaces the one in flight, whose damage dies with it.
-                    let t = &mut self.lanes[i];
-                    std::mem::swap(&mut t.live, &mut self.free);
-                    t.audible = t.logical();
-                    t.written = rec.end.unwrap() - rec.start.unwrap();
-                    rec.damaged = false;
-                    self.rec = Some(rec);
-                    self.finish_capture(cx, i);
+                    self.keep_last_pass(cx, i, rec);
                     return;
                 }
                 RetakeStop::FinishPass => {
@@ -970,8 +963,9 @@ impl Looper {
     /// at `cx.now` when a device runs again. A capture that has retained nothing (a count-in, a
     /// boundary arm, AUTO listening) is cancelled as Stop does. Anything else ends at `cx.now` and
     /// commits through the usual path, where only an earlier input gap rejects it: a take, an overdub
-    /// layer, and a RETAKE roll as a stop gesture at `cx.now` ends it (a kept pass is kept). A RETAKE
-    /// approval's next take is not armed. Loop-end stops and block jobs carry on when rendering resumes.
+    /// layer, a RETAKE roll with no pass kept yet. A RETAKE roll with a kept pass commits that pass,
+    /// even inside the grace where a stop would let the pass in flight finish. A RETAKE approval's next
+    /// take is not armed. Loop-end stops and block jobs carry on when rendering resumes.
     pub fn punch_out(&mut self, cx: &mut Cx) {
         let Some(mut rec) = self.rec else { return };
         let i = rec.lane;
@@ -980,14 +974,28 @@ impl Looper {
             return;
         }
         rec.handoff = None;
-        if rec.roll.is_some() && self.retake_plan(cx, &rec) == RetakeStop::KeepLast {
-            self.rec = Some(rec);
-            self.stop_capture(cx, i);
+        let kept = rec.roll.is_some_and(|r| r.kept);
+        rec.roll = None;
+        if kept {
+            // A kept complete pass wins over the pass in flight, even inside its grace: a stop there
+            // lets that pass finish, but the device cannot, and committing it cut short would floor
+            // a many-bar take to one bar less.
+            self.keep_last_pass(cx, i, rec);
             return;
         }
-        // The pass in flight (a stop in its grace would let it finish) ends where the input did.
-        rec.roll = None;
+        // Nothing complete kept: the pass or take in flight ends where the input did.
         rec.end = Some(rec.end.map_or(cx.now, |e| e.min(cx.now)));
+        self.rec = Some(rec);
+        self.finish_capture(cx, i);
+    }
+
+    /// RETAKE: the kept pass replaces the one in flight, whose damage dies with it, and commits.
+    fn keep_last_pass(&mut self, cx: &mut Cx, i: usize, mut rec: Recorder) {
+        let t = &mut self.lanes[i];
+        std::mem::swap(&mut t.live, &mut self.free);
+        t.audible = t.logical();
+        t.written = rec.end.unwrap() - rec.start.unwrap();
+        rec.damaged = false;
         self.rec = Some(rec);
         self.finish_capture(cx, i);
     }

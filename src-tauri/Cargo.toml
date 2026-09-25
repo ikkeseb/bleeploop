@@ -127,9 +127,16 @@ vst3             = "0.3"
 opt-level = 3
 
 # "*" covers dependencies only, never a workspace member. The engine renders audio in its tests (and,
-# from Stage 4, in the dev app's callback), so it gets release-speed code in debug too.
+# from Stage 4, in the dev app's callback), so it gets release-speed code in debug too. One codegen
+# unit: split into several, its DSP lost cross-unit inlining whenever an unrelated module moved the
+# partition (a new module cost the Stage 3 load ~40 %, measured 2026-09-25 with the synths' code
+# untouched); one unit keeps the cost where the code puts it.
 [profile.dev.package.lf-engine]
 opt-level = 3
+codegen-units = 1
+
+[profile.release.package.lf-engine]
+codegen-units = 1
 
 # --- cpal ASIO timestamp overflow workaround (P11.3 / ASIO-default) ---
 # cpal 0.18.1 (latest) extends ASIO's per-callback `system_time` into a monotonic 64-bit clock in

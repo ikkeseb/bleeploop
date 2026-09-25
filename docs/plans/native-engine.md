@@ -292,18 +292,21 @@ on five lanes + reverb at 48 k / 64 frames under 50 % of block time offline (est
 
 *Owner: nothing to hear yet; everything audible waits for the Stage 5 lap.*
 
-**Where.** A module, not a crate (not yet built): src-tauri/src/engine_io, holding the device owner,
-streams, MIDI and the join and share pipes (InPipe, OutMonitorPipe and DriftController move there from
-`host/transport.rs`). lf-engine defines a SlotProcessor trait; the CLAP/VST3 host stays in
-`src-tauri/src/host/` and implements it.
+**Where** (built): a module, not a crate: `src-tauri/src/engine_io` (its `mod.rs` is the briefing)
+holds the device owner, the callbacks, MIDI, and the join and share pipes (`pipes.rs`, reshaped from
+`host/transport.rs`'s InPipe, OutMonitorPipe and DriftController, which the live line keeps until
+Stage 6). lf-engine defines the SlotProcessor trait and the slots (`slots.rs`); the CLAP/VST3 host
+stays in `src-tauri/src/host/` and implements it (`engine_slot.rs`, `clap_engine.rs`,
+`vst3_engine.rs`).
 
 **Module fates.** Reuse: `asio_startup.rs`, `host/scan.rs`, `host/editor_window.rs`,
-`host/rt_alloc.rs`, the callback/controller/resize fixtures. Reshape: `host/native_io.rs` becomes the
-process-wide device owner (its transition state machine is the kernel; per-slot NativeIo goes);
-`audio_output.rs`/`audio_input.rs` keep device lists, picks, the ASIO cache and channel select;
-`host/clap.rs`/`host/vst3.rs` keep load, params, state, editors and owner threads, and each producer
-loop becomes a SlotProcessor (~250 LOC each, estimate); `host/commands.rs` moves arm/disarm/gain/
-latency to engine-host commands; the restart fixtures assert "the engine kept rendering".
+`host/rt_alloc.rs`, the callback/controller/resize fixtures. `engine_io/owner.rs` is the process-wide
+device owner, with its own transition kernel (`transition.rs`); the per-slot `host/native_io.rs` stays
+for the live line and goes at Stage 6. `audio_output.rs`/`audio_input.rs` keep device lists, picks,
+the ASIO cache and channel select; `host/clap.rs`/`host/vst3.rs` keep load, params, state and
+editors; the engine-mode owners live beside the live ones until the flip deletes the live ones;
+`host/commands.rs` moves arm/disarm/gain/latency to engine-host commands (Stage 5); the restart
+fixtures assert "the engine kept rendering".
 
 **Device owner.** One owner thread serializes device transitions (cpal streams are Send; ownership is
 for ordering). The engine sits in a Mutex the callback only try_locks — a miss plays silence and
@@ -351,6 +354,50 @@ the A/R/C/W/S bars on the engine, and drives 20 backend switches and a plugin sw
 play. A 10-min soak with two plugins at ASIO 128: host RT allocs 0 and every diag counter 0 (callback
 gaps, ASIO overloads, lock misses, duplex-order faults, join/share starves, command-ring full). The
 existing plugin fixtures and `pnpm native:swap|survey|smoke|recall` rerun.
+
+**Built (2026-09-25), dormant**, every part proven without hardware (fakes, in-process fixture
+plugins, the real engine on a test thread): the slots and the punch-out in lf-engine
+(`tests/slots.rs`, `tests/punch_out.rs`); the device owner, the callbacks, ASIO duplex, the WASAPI
+join, Share output and native MIDI in `engine_io` (its `tests.rs` on a fake driver, the pipe matrix in
+`pipes.rs`); ClapUnit, Vst3Unit and the engine-mode owners in `host/` (the restart fixtures load the
+fixture plugins into a rendering engine). Code only a device or a real plugin can run is compile-checked
+(`--features asio` too). Decided while building:
+
+- **Slot routing follows today's web graph:** a live slot holding an effect (or nothing) takes the
+  input and its output is the wet signal (after the limiter, recorded at the take's alignment); an
+  instrument slot plays the notes while it is the note target (`SelectInstrument(NoteTarget::Slot)`)
+  and joins the master bus, recorded where a built-in instrument is, less its own latency. A plugin
+  hears a note on its frame (no `LEAD`); the wheels stay with the built-in synths (D12 later). The
+  slots render ahead to the next slot command: one plugin call per device block. A unit crossfades
+  in and out over 10 ms, counted in frames. With no device running, the thread that holds the engine
+  stands in for the audio thread (a removal's NoteOffs ride one silent 1-frame process, then stop):
+  unverified with real plugins.
+- **Every stop of the device punches out** (a switch and a close as well as a loss, STATUS E3): a
+  take or overdub in flight ends after the last rendered frame and commits as usual; a RETAKE roll
+  with a kept pass commits that pass, even inside the grace where a stop would let the pass in flight
+  finish (cut short, a many-bar take would floor a bar shorter).
+- **A device at another sample rate builds a new engine:** the plugin units go back to their owners,
+  who re-activate them at the new rate; the loops are lost. Same-rate switches and recoveries keep the
+  loops in place.
+- **A pedal's press frame** is the render position at its arrival plus one block: always the next
+  block or later, applied on that frame, jitter-free; the UI's gestures land at the next block start.
+- **The pipes:** a PullPipe's setpoint is at least the largest push plus the largest pull plus ~3 ms
+  (at 15 ms a 10 ms ↔ 10 ms WASAPI join starves), so the join holds 25 ms and Share output
+  max(20 ms, block + 13 ms). Their PI (ωn 0.1 rad/s, ζ 0.7, a 0.5 s low-pass on the fill) is faster
+  than the live line's and not yet heard; a 600 s simulated matrix at ±400 ppm runs without a
+  shortfall. cpal's `DeviceChanged` and `RealtimeDenied` are not faults (cpal 0.18.1 documents both as
+  non-fatal); every other error is a loss.
+- **Native MIDI** (midir 0.11, on windows 0.61): bindings key on port name + occurrence; WinMM input
+  ports are exclusive, so Web MIDI and native MIDI cannot hold one controller at once (the Stage 5
+  toggle picks one). Open for Stage 5: one note owner across the UI keys and MIDI (the web router
+  merged them), and resending the wheels after an engine rebuild.
+- **lf-engine builds as one codegen unit** (`src-tauri/Cargo.toml`): split, its DSP lost cross-unit
+  inlining whenever a new module moved the partition, and the Stage 3 load read 33 % instead of 25 %
+  with the synths' code untouched. Measured on the dev PC, release, 2026-09-25: Stage 2 idle 3.94 %,
+  Stage 3 load mean 24.5 % (the engine 18.2 %).
+
+Still open in Stage 4, all on the rig: the probe's scripted mode and its runs, the 10-minute soak,
+and the plugin fixture and `pnpm native:*` reruns.
 
 ## Stage 5 — cutover behind a hidden toggle
 
@@ -419,9 +466,10 @@ a regression (owner's call). Then delete:
   display math, FX labels) and `src/audio/` goes. In `src/debug/`: the loopback and render-clock
   probes; the marker probe if it measures only the bridge (unknown). In `src/platform/`: the
   SharedBuffer receive path and getUserMedia/Web MIDI.
-- **Rust:** from `host/transport.rs` the WebView bridge (Hop1Pipe, the SharedBuffer ring, PaceTimer,
-  the force-48k path; ~625 LOC); the old producer loops and RT spawn/join in clap.rs and vst3.rs;
-  `audio_latency_probe.rs` and `marker_probe.rs` if nothing else uses them.
+- **Rust:** `host/transport.rs` (the WebView bridge: Hop1Pipe, the SharedBuffer ring, PaceTimer, the
+  force-48k path; and the pipes `engine_io/pipes.rs` replaced); `host/native_io.rs`; the live owner
+  mains, producer loops and RT spawn/join in clap.rs and vst3.rs; `audio_latency_probe.rs` and
+  `marker_probe.rs` if nothing else uses them.
 - **verify:** the 17 rig guards (ported in Stage 2), the rig harness, pure guards whose modules died,
   the Web Audio probes including the golden jam and its workflow. UI probes rebase on the fake.
 - **Dependencies:** `tone`, `ringbuf.js` (its MPL notice with it); COOP/COEP only if nothing still

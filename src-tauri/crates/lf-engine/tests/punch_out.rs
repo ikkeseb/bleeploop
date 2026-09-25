@@ -190,14 +190,28 @@ fn a_retake_roll_keeps_its_last_complete_pass() {
     plays_on_in_place(&mut rig);
 }
 
+/// Inside the grace a stop gesture would let pass 2 finish; the device cannot, so pass 1, complete and
+/// kept, is the take (never pass 2 cut short, which a many-bar take would floor a bar shorter).
 #[test]
-fn a_retake_roll_with_nothing_kept_or_in_its_grace_ends_at_the_punch_out() {
-    for (passes, into) in [(0, 2), (1, 30)] {
+fn a_retake_roll_in_its_grace_keeps_the_last_complete_pass() {
+    let mut rig = Rig::new();
+    let (len, start) = rolling_retake(&mut rig);
+    rig.advance_to(start + 2 * len - len / 30);
+    rig.punch_out();
+    assert!(rig.state(0) == LaneState::Playing && rig.window().is_none());
+    assert_eq!(rig.master(), len);
+    assert_eq!(mismatches(&rig.pcm(0), start), 0, "pass 1, complete and kept");
+    plays_on_in_place(&mut rig);
+}
+
+#[test]
+fn a_retake_roll_with_nothing_kept_ends_at_the_punch_out() {
+    for into in [2, 30] {
         let mut rig = Rig::new();
         let (len, start) = rolling_retake(&mut rig);
-        let pass = start + passes * len;
-        // Pass 1 halfway (nothing kept), or pass 2 inside the grace before its edge.
-        let now = if into == 2 { pass + len / 2 } else { pass + len - len / into };
+        let pass = start;
+        // Pass 1 halfway, or inside the grace before its edge: nothing is kept yet either way.
+        let now = pass + len - len / into;
         rig.advance_to(now);
         rig.punch_out();
         assert!(rig.state(0) == LaneState::Playing && rig.window().is_none(), "the window never ends after the punch-out");
