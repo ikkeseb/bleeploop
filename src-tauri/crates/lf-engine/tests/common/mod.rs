@@ -4,6 +4,7 @@
 //! The Rust twin of `verify/harness/rig.ts`.
 #![allow(dead_code)]
 
+pub mod fx;
 pub mod refs;
 
 use assert_no_alloc::assert_no_alloc;

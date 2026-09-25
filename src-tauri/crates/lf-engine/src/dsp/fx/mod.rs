@@ -9,8 +9,8 @@
 //! Every node is built at construction and always renders, as in Tone: a bypassed Filter, Pitch or
 //! Stutter is a [`CrossFade`](super::crossfade::CrossFade) at fade 0, which still mixes its wet path in
 //! at −56 dB (see the crossfade module), and a bypassed Delay is its dry/wet CrossFade at wet 0, which
-//! does the same with its echoes. Only an effect Tone never builds stays out: the PitchShift, until the
-//! pitch is first enabled.
+//! does the same with its echoes. Only an effect Tone has not built yet stays out: the PitchShift, which
+//! fx.ts builds on the pitch's first enable and renders from then on, bypassed or not.
 //!
 //! # Control timing
 //!
@@ -290,7 +290,7 @@ impl FxChain {
     pub fn set_param(&mut self, param: FxParam, value: f64, ctl: Ctl) {
         match param.kind() {
             FxKind::Filter => self.filter.set_param(param, value, ctl),
-            FxKind::Pitch => self.pitch.set_param(value),
+            FxKind::Pitch => self.pitch.set_param(value, ctl),
             FxKind::Stutter => self.stutter.set_param(value, ctl),
             FxKind::Delay => self.delay.set_param(param, value, ctl),
             FxKind::Reverb => self.reverb.set_param(value, ctl),

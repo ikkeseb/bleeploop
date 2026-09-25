@@ -41,7 +41,7 @@
 //!
 //! # Not built yet
 //!
-//! Stage 3's bass and drum kit, the PitchShift and the convolution reverb bus; wiring the synths, the FX
+//! Stage 3's bass and drum kit and the convolution reverb bus; wiring the synths, the FX
 //! chain and the limiter into [`engine`] (each is ported in [`dsp`] and tested alone); the device owner
 //! and plugin slots (Stage 4); waveform peaks and the export snapshot (with the feed, Stage 5).
 

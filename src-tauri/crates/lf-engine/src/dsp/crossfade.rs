@@ -79,7 +79,13 @@ impl CrossFade {
 
     /// The gains of `a` and `b` for the quantum at `quantum_start`.
     pub fn begin_quantum(&mut self, quantum_start: u64) {
-        let fade = self.fade.process(quantum_start, None);
+        self.begin_quantum_driven(quantum_start, None);
+    }
+
+    /// [`CrossFade::begin_quantum`] with `fade_input` summed into the fade signal: a signal connected
+    /// to it (connect with `fade.param.connect_signal(true, ..)`, which zeroes the fade's own value).
+    pub fn begin_quantum_driven(&mut self, quantum_start: u64, fade_input: Option<&[f32; QUANTUM]>) {
+        let fade = self.fade.process(quantum_start, fade_input);
         if fade.iter().all(|&v| v == fade[0]) {
             // A fade holding still (every quantum but a ramp's) shapes and pans one value.
             self.shaped.fill(self.gain_to_audio.shape(fade[0]));
