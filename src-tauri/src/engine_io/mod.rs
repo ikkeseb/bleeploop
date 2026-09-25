@@ -29,9 +29,10 @@
 //! # Rules
 //!
 //! - **One clock: the output callback's frame counter.** ASIO: input built first, output second,
-//!   always as a pair (asio-sys 0.3.0 runs the registered callbacks in that order in one bufferSwitch;
-//!   the output checks the input's cycle count from its first callback on: a miss is a duplex-order
-//!   fault, counted). WASAPI: the output callback is the clock; the input joins through a ring and a
+//!   always as a pair, and neither plays until both are built (a playing input can deadlock the
+//!   output build: `cpal_driver`'s `start`). asio-sys 0.3.0 runs the registered callbacks in build
+//!   order in one bufferSwitch; the output checks the input's cycle count from its first callback on:
+//!   a miss is a duplex-order fault, counted. WASAPI: the output callback is the clock; the input joins through a ring and a
 //!   resampler with a drift controller. Every callback thread is promoted to MMCSS Pro Audio on first
 //!   entry.
 //! - **The frame counter pauses across a switch.** A backend switch or a fallback continues the

@@ -503,9 +503,8 @@ impl Render {
         let counters = &self.core.counters;
         let avail = match self.source {
             Source::Duplex => {
-                // A run's first output callback takes the input's count: the input is built and played
-                // first, so the cycles it ran alone are the start, not a fault. The rig's ASIO re-opens,
-                // whose input build retries (`cpal_driver::retry_on_asio`), each found it ahead.
+                // A run's first output callback takes the input's count: the input starts playing just
+                // before the output, so the cycles it ran alone are the start, not a fault.
                 rt.out_cycles = if rt.out_cycles == 0 { rt.in_cycles } else { rt.out_cycles + 1 };
                 let same = rt.in_cycles == rt.out_cycles && rt.handoff_len == n && n <= rt.handoff.len();
                 if !same && rt.out_cycles > 0 {

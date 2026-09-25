@@ -40,11 +40,15 @@ impl Driver for CpalDriver {
         }
     }
 
+    /// Both builds before either plays. A cpal ASIO build starts the driver and a playing stream's
+    /// callback takes cpal's `asio_streams` mutex; the output build holds that mutex while it re-creates
+    /// the buffers (`ASIOStop` first), so a playing input could block a bufferSwitch the stop waits on.
+    /// A paused stream's callback returns before the mutex.
     fn start(&mut self, device: CpalDevice, spec: &Spec, mut wiring: Wiring) -> Result<Started, String> {
         let asio = spec.backend.is_asio();
         let input = retry_on_asio(asio, "input", || input_stream(&device, spec, &mut wiring))?;
-        input.play().map_err(|e| format!("cpal input play: {e}"))?;
         let output = retry_on_asio(asio, "output", || output_stream(&device, spec, &mut wiring))?;
+        input.play().map_err(|e| format!("cpal input play: {e}"))?;
         output.play().map_err(|e| format!("cpal output play: {e}"))?;
         let block = output.buffer_size().unwrap_or(spec.block);
         Ok(Started { streams: Streams::new(Box::new(input), Box::new(output)), block })

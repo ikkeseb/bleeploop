@@ -12,7 +12,7 @@
 //! round the cable a second time: the echo spacing is the round trip a player hears.
 //!
 //! ASIO: asio-sys 0.3.0 runs every registered buffer callback, in registration order, inside one
-//! bufferSwitch. The input stream is built and played first, so its callback copies the block into
+//! bufferSwitch. The input stream is built first and plays first, so its callback copies the block into
 //! the engine's handoff and bumps a cycle count; the output callback then sees `sameCycle` when that
 //! count is one ahead of its own. cpal gives each ASIO stream its own TimeBase and the rig's driver
 //! trips cpal's timestamp overflow, so instants are never compared across streams: inLat and outLat
@@ -24,7 +24,7 @@
 
 use super::*;
 
-use std::sync::atomic::{AtomicU64, Ordering::SeqCst};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::SeqCst};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, SizedSample};
@@ -534,6 +534,8 @@ struct Counters {
     xruns: AtomicU64,
     /// Every other stream error: the run aborts.
     errors: AtomicU64,
+    /// `Engine::runaway`, mirrored so `wait_run` never takes the engine lock under a callback.
+    runaway: AtomicBool,
 }
 
 fn write_out<T: SizedSample + FromSample<f32>>(data: &mut [T], channels: usize, out_ch: usize, y: &[f32]) {
@@ -626,6 +628,7 @@ where
             minmax(&mut e.out_lat_ns, ns);
         }
         e.render(n, true);
+        counters.runaway.fetch_or(e.runaway, Relaxed);
         write_out(data, channels, e.out_ch, &e.y[..n]);
         drop(_alloc_guard);
         let (period_us, exit) = (e.period_us, Instant::now());
@@ -747,6 +750,7 @@ where
             minmax(&mut e.out_lat_ns, ns);
         }
         e.render(n, false);
+        counters.runaway.fetch_or(e.runaway, Relaxed);
         write_out(data, channels, e.out_ch, &e.y[..n]);
         drop(_alloc_guard);
         let exit = Instant::now();
@@ -947,7 +951,7 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
         out_marks: if a.backend.asio { Vec::new() } else { Vec::with_capacity(MARKS_CAP) },
         mmcss_out: false,
     }));
-    let counters = Arc::new(Counters { lock_miss: AtomicU64::new(0), xruns: AtomicU64::new(0), errors: AtomicU64::new(0) });
+    let counters = Arc::new(Counters { lock_miss: AtomicU64::new(0), xruns: AtomicU64::new(0), errors: AtomicU64::new(0), runaway: AtomicBool::new(false) });
     let result = if a.backend.asio {
         run_asio(&a, &engine, &counters)
     } else {
@@ -1014,9 +1018,10 @@ fn run_asio(a: &Args, engine: &Shared, counters: &Arc<Counters>) -> Result<(), S
         return Err(format!("channel out of range: in {} of {}, out {} of {}", a.in_ch, in_cfg.channels, a.out_ch, out_cfg.channels));
     }
     let (in_chans, out_chans) = (in_cfg.channels as usize, out_cfg.channels as usize);
-    // Input first: its callback registers first, so it runs first in every bufferSwitch.
+    // Input first: its callback registers first, so it runs first in every bufferSwitch. Neither plays
+    // until both are built: the output build stops the driver under cpal's stream mutex, which a
+    // playing input's callback takes (`engine_io::cpal_driver`'s `start`).
     let input = build_input!(device, in_cfg, in_fmt, counters, asio_input_cb(engine.clone(), counters.clone(), in_chans));
-    input.play().map_err(|e| format!("input play: {e}"))?;
     let output = build_output!(device, out_cfg, out_fmt, counters, asio_output_cb(engine.clone(), counters.clone(), out_chans));
     let block = output.buffer_size().unwrap_or(0) as u64;
     {
@@ -1024,9 +1029,10 @@ fn run_asio(a: &Args, engine: &Shared, counters: &Arc<Counters>) -> Result<(), S
         e.period_us = block * 1_000_000 / rate() as u64;
         e.started = Instant::now();
     }
+    input.play().map_err(|e| format!("input play: {e}"))?;
     output.play().map_err(|e| format!("output play: {e}"))?;
     println!("[engine-spike] started asio device=\"{name}\" block={block} in={in_fmt:?}x{in_chans} out={out_fmt:?}x{out_chans} seconds={}", a.seconds);
-    let aborted = wait_run(a.seconds, engine, counters);
+    let aborted = wait_run(a.seconds, counters);
     drop(output);
     drop(input);
     let e = engine.lock().map_err(|_| "engine lock poisoned")?;
@@ -1039,14 +1045,14 @@ fn run_asio(_: &Args, _: &Shared, _: &Arc<Counters>) -> Result<(), String> {
 }
 
 /// Sleep out the run, polling for an abort (stream error or runaway echo). Returns the reason.
-fn wait_run(seconds: f64, engine: &Shared, counters: &Counters) -> Option<String> {
+fn wait_run(seconds: f64, counters: &Counters) -> Option<String> {
     let end = Instant::now() + Duration::from_secs_f64(seconds + emit_start() as f64 / rate() as f64);
     while Instant::now() < end {
         std::thread::sleep(Duration::from_millis(200));
         if counters.errors.load(SeqCst) > 0 {
             return Some("stream error".into());
         }
-        if engine.lock().map(|e| e.runaway).unwrap_or(false) {
+        if counters.runaway.load(Relaxed) {
             return Some("runaway echo: monitor muted".into());
         }
     }
@@ -1240,7 +1246,7 @@ fn run_wasapi(a: &Args, engine: &Shared, counters: &Arc<Counters>, total_frames:
     }
     output.play().map_err(|e| format!("output play: {e}"))?;
     println!("[engine-spike] started wasapi in=\"{in_name}\" out=\"{out_name}\" inPacket={in_packet} outBlock={out_block} in={in_fmt:?}x{in_chans} out={out_fmt:?}x{out_chans} seconds={}", a.seconds);
-    let aborted = wait_run(a.seconds, engine, counters);
+    let aborted = wait_run(a.seconds, counters);
     drop(output);
     drop(input);
     let e = engine.lock().map_err(|_| "engine lock poisoned")?;

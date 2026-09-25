@@ -241,7 +241,9 @@ existing P9 ring → looper record tap (lag-tolerant, records wet "for free").
   reaction (slider snaps back to the plugin's value, a stuck-note cue) is unbuilt.
 - GO LIVE under ASIO timed out in `arm_monitor` ("timed out waiting on channel", then `disarm_input`
   timed out too) on two of about twelve `pnpm native:loopback` launches on 2026-09-24; a relaunch
-  passed. Cause unknown.
+  passed. Likely cause, not reproduced here: the engine's ASIO open deadlock (a playing input's
+  callback against the output build; `docs/plans/native-engine.md` § Stage 4), which GO LIVE's
+  input-then-monitor order shares. Fixed in the engine only.
 - A VST3 unit (live and engine) drops a param past 64 distinct ids in one block without a fault bit
   (`MAX_PARAM_QUEUES`), after the controller already took the value.
 - CLAP and VST3 duplicate the load choreography (`load`/`vst3_load` and both owner mains): one

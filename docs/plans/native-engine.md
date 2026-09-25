@@ -49,8 +49,9 @@ never change it (a forced 48 kHz disturbed the owner's listening).
 - `app.exe --probe-engine-spike <asio|wasapi> <64|128|256|default> [--plugin <file.vst3>] [--in N] [--out N] [--minutes N | --seconds N] [--echo] [--quiet] [--device <name>]`
 - `app.exe --probe-share <mute|vol0|open|zeros|dual|all>`
 
-**ASIO, one callback.** Build and play the input stream first, then the output: asio-sys 0.3.0 runs
-registered callbacks in registration order inside one bufferSwitch. The input callback copies its
+**ASIO, one callback.** Build the input stream first, then the output, and play both in that order
+once both are built: asio-sys 0.3.0 runs registered callbacks in registration order inside one
+bufferSwitch, and a playing input can deadlock the output build (Stage 4). The input callback copies its
 block into a preallocated handoff and increments an atomic cycle count; the output callback passes
 `sameCycle` when the input count is one ahead of its own. Latencies come only from deltas WITHIN one
 stream: inLat = input callback − capture, outLat = output playback − callback (both carry
@@ -137,15 +138,22 @@ frame inside each run, 0 xruns.
 
 - A2: launch 1 lands at 1189.8 frames against the reported 1186 (+0.086 ms, PASS), so the 26.9 ms
   report holds and R2 fails at 256 on this driver. Launch 2 lands at 1711.8 (+11.9 ms, FAIL): A3
-  moves 522 frames between the two launches. Not yet reproduced; the matrix's 4 launches per block
-  size decide it. Unproven lead: the spike plays the input stream before it builds the output
-  (`run_asio`), the order behind the first-open hang below, so the two streams' offset may differ
-  per launch.
+  moves 522 frames between the two launches.
 - The first open of each run's block size hung with no `started` line and fell to the runner's
   timeout (64 and 128 on 2026-09-25, 256 on 2026-09-26); all 14 later opens at an unchanged size
   started.
 - Launch 1 had one sameCycle miss (A1) and one 12 ms callback gap, at the moment a failing USB
   device re-enumerated on another controller of the dev PC (a hardware fault, open).
+
+**After the open-order fix (2026-09-26, same setup, `--only=asio --blocks=64,128,256 --launches=4
+--long-min=1`):** all 15 opens started, the first at each of three new block sizes among them. Every
+run passes A2 within 0.1 ms: 357.8–358.8 frames at 64 (reported 362, 8.1 ms), 667.8–668.8 at 128
+(666), 1187.8–1188.8 at 256 (1186). A3 moves 1 frame across the 5 launches at each size; the 522-frame
+launch did not come back (1 in 2 launches before the fix, 0 in 15 after; whether the order caused it
+is unproven). Three runs missed sameCycle once, each with one lock miss: the probe's own main thread
+held the engine lock to poll for a runaway echo (fixed: an atomic). The 128 one-minute run moved 1
+frame inside the run (A3.spread 1.00, bar ≤ 1). At 64, 9–19 callbacks per run came > 1.5 periods
+late (max 2.6 ms), 0 xruns; at 128 and 256, 0–1. A GPU job from another app ran meanwhile.
 - Setup: the earlier INVALID runs had the cable in line out L (on the 2i2 the R jack is the left one
   seen from behind); a second cable gave no signal from line out R either, cause unknown.
 
@@ -433,11 +441,6 @@ test with a real unit, and the CLAP restart fixture's thread check would flag it
 
 Still open in Stage 4: the fixes from the fan-out review of `25501f5..5ab8b4c` (four Opus readers,
 2026-09-25; the owner let it replace the cross-family review). Before the owner plays on the engine:
-- **Open deadlock (likely):** `engine_io/cpal_driver.rs` `start` (and the spike's `run_asio`) plays the
-  input before building the output; on a first open cpal holds its `asio_streams` mutex through
-  `create_buffers` (which calls `ASIOStop`) while the playing input's bufferSwitch takes the same
-  mutex. Fix: build input, build output, play input, play output. Check whether the live line's
-  `NativeIo` shares the order.
 - **Orphaned unit (confirmed):** a unit returning after a `remove` timeout is `mem::forget`-ed while
   `occupied` stays true, and a later swap can hand the old unit to the next owner (`own()` checks the
   type only). Fix: an owner token per install; an orphan leaks.
@@ -486,8 +489,14 @@ switches start and the loop plays through them and the 4 swaps; every check pass
   the plugin's own release, deactivate, terminate and module unload, with the slot dry meanwhile.
 
 - One of the day's three probe launches hung on its first ASIO open: 0 callbacks, the open timed out at
-  15 s and the owner thread did not stop; the next launch opened fine. Likely the open deadlock above
-  (compare the live line's `arm_monitor` timeouts in `src-tauri/AGENTS.md`).
+  15 s and the owner thread did not stop; the next launch opened fine. The engine (and the spike)
+  played the input before building the output, and cpal 0.18.1 builds the output under its
+  `asio_streams` mutex, stopping the driver (`ASIOStop`), while a playing input's bufferSwitch takes
+  that mutex; whether the stop waits for that bufferSwitch is the driver's. Fixed 2026-09-26: both
+  streams are built before either plays (`cpal_driver`'s `start`). A muted `pnpm native:engine
+  --seconds=60` then opened 16 ASIO and 5 WASAPI runs: every check passes, every counter 0. The live
+  line's `NativeIo` has the old order across two calls (GO LIVE plays the input, then arms the
+  monitor), unfixed; its `arm_monitor` timeouts (`src-tauri/AGENTS.md`) fit it.
 
 WASAPI on the Scarlett (muted `pnpm native:engine` runs, 2026-09-25, both plugins, 60 s soak): with no
 other app on the microphone every check passes, input and output both at 44 100.7 Hz against QPC. With
