@@ -12,7 +12,7 @@
 use std::cell::Cell;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, AtomicU8, Ordering::{Acquire, Relaxed, Release}};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 use std::time::{Duration, Instant};
 
 use cpal::{FromSample, Sample, SizedSample};
@@ -184,6 +184,17 @@ pub(crate) fn skip_promotion() {
     PROMOTED.with(|p| p.set(true));
 }
 
+/// The engine lock for a callback, or `None` when another thread holds it (a miss). A poisoned lock is
+/// taken anyway: nothing under it panics uncaught, and a poison from elsewhere must not silence the
+/// device for good.
+fn try_rt(core: &Core) -> Option<MutexGuard<'_, Rt>> {
+    match core.rt.try_lock() {
+        Ok(rt) => Some(rt),
+        Err(TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner()),
+        Err(TryLockError::WouldBlock) => None,
+    }
+}
+
 /// Run `body` as a callback's guarded section: a panic is caught and counted (false), and in DEV builds
 /// the allocations inside it are counted (`host::rt_alloc`; the counter is process-wide, so another
 /// thread's guarded allocation at the same moment would count here too).
@@ -248,7 +259,7 @@ impl DuplexInput {
         if let Some(frames) = self.probe.observe(latency, self.rate) {
             self.run.in_latency.store(frames, Relaxed);
         }
-        let Ok(mut rt) = self.core.rt.try_lock() else {
+        let Some(mut rt) = try_rt(&self.core) else {
             self.core.counters.lock_misses.fetch_add(1, Relaxed);
             return;
         };
@@ -263,7 +274,7 @@ impl DuplexInput {
             rt.in_cycles += 1;
         });
         if !ok {
-            rt.faulted = true;
+            self.core.latch_fault(rt);
         }
     }
 }
@@ -411,6 +422,10 @@ impl Render {
             Source::Join { pipe, x, joined, .. } => {
                 let m = n.min(x.len());
                 let zeroed = pipe.pull(&mut x[..m]) + (n - m);
+                let trims = pipe.take_trims();
+                if trims > 0 {
+                    counters.join_trims.fetch_add(trims, Relaxed);
+                }
                 if zeroed == 0 {
                     *joined = true;
                 } else if *joined {
@@ -426,18 +441,20 @@ impl Render {
         core.input_frames.store(input_frames, Relaxed);
         let fading = self.run.fade_out.load(Acquire);
         let silent_start = fading && self.gain == 0.0;
+        // Before the render: a press that arrives while this block renders maps to this block.
+        core.clock.publish(entry, frame, n as u32, self.rate);
 
-        match core.rt.try_lock() {
-            Ok(mut rt) => {
+        match try_rt(&core) {
+            Some(mut rt) => {
                 let rt = &mut *rt;
                 let ctx = ProcessContext { frame, xrun, align_frames: align, input_frames };
                 let ok = guarded(counters, || self.block(rt, data, n, avail, ctx, fading));
                 if !ok {
-                    rt.faulted = true;
+                    core.latch_fault(rt);
                     self.quiet(data, fading);
                 }
             }
-            Err(_) => {
+            None => {
                 counters.lock_misses.fetch_add(1, Relaxed);
                 self.missed = true;
                 self.quiet(data, fading);
@@ -449,7 +466,6 @@ impl Render {
                 self.run.faded.store(true, Release);
             }
         }
-        core.clock.publish(entry, frame, n as u32, self.rate);
         core.frame.store(frame + n as Frame, Relaxed);
     }
 

@@ -12,11 +12,14 @@
 //! is served straight into the caller's buffer: no output FIFO, no latency beyond the setpoint and
 //! the interpolator. Nothing here logs or allocates after [`pipe`].
 //!
-//! Startup and starves: the pipe primes (plays silence, consumes nothing) until the ring reaches the
-//! setpoint, then drops any backlog above it (the Stage 1 spike's WASAPI join carried a 298 ms startup
-//! backlog it never drained: `docs/plans/native-engine.md` § Stage 1). A ring that runs short after
-//! that serves what it holds, zero-fills the rest and primes again, so a pusher that stalls comes back
-//! at the setpoint instead of limping along on an empty ring.
+//! Startup, starves and trims: the pipe primes (plays silence, consumes nothing) until the ring reaches
+//! the setpoint, then drops any backlog above it (the Stage 1 spike's WASAPI join carried a 298 ms
+//! startup backlog it never drained: `docs/plans/native-engine.md` § Stage 1). A ring that runs short
+//! after that serves what it holds, zero-fills the rest and primes again, so a pusher that stalls comes
+//! back at the setpoint instead of limping along on an empty ring. A ring that runs over by more than
+//! the setpoint again (the puller stalled while the pusher kept on: a WASAPI render glitch) is trimmed
+//! back to it the same way, counted ([`PullPipe::take_trims`]): the ±1 % controller would take seconds
+//! to drain it, and the pipe's delay would sit that far past [`PullPipe::delay_frames`] meanwhile.
 
 use rtrb::{Consumer, Producer, RingBuffer};
 use rubato::audioadapter_buffers::direct::InterleavedSlice;
@@ -122,6 +125,8 @@ pub(crate) struct PullPipe {
     primed: bool,
     /// Primed once: silence before the first prime is startup, not a shortfall.
     started: bool,
+    /// Over-full rings trimmed back to the setpoint since the last [`PullPipe::take_trims`].
+    trims: u64,
 }
 
 /// Build a pipe (allocates: off the audio thread).
@@ -165,6 +170,7 @@ pub(crate) fn pipe(config: PipeConfig) -> Result<(PushEnd, PullPipe), String> {
             ctrl: DriftController { err: 0.0, integ: 0.0 },
             primed: false,
             started: false,
+            trims: 0,
         },
     ))
 }
@@ -176,7 +182,8 @@ impl PullPipe {
     /// finds the ring at or above the setpoint drops any startup backlog down to it (a capture that ran
     /// before the output opened must not ride along as latency). Until then the pull plays silence and
     /// consumes nothing; that startup silence returns 0. After it, a ring that ran short primes again
-    /// (silence, counted, until it is back at the setpoint). A larger `out` is served in `max_pull`
+    /// (silence, counted, until it is back at the setpoint), and a ring found above twice the setpoint
+    /// drops back to it (counted in [`PullPipe::take_trims`]). A larger `out` is served in `max_pull`
     /// pieces.
     pub(crate) fn pull(&mut self, out: &mut [f32]) -> usize {
         let ch = self.channels;
@@ -198,10 +205,20 @@ impl PullPipe {
                 out.fill(0.0);
                 return if self.started { n } else { 0 };
             }
-            if let Ok(backlog) = self.ring.read_chunk((fill - self.target) * ch) {
-                backlog.commit_all();
-            }
+            self.drop_to_target(fill);
             (self.primed, self.started) = (true, true);
+        } else {
+            // The fill a pull sees settles within about one push of the setpoint (a pull lands anywhere
+            // on the push sawtooth, plus the controller's ~3 ms while it learns), and the setpoint is at
+            // least the largest push plus the largest pull plus 3 ms (`PipeConfig::setpoint`): twice
+            // the setpoint is never reached in steady state, only after the puller lost time. The drift
+            // learned so far stays; the smoothed error restarts at the setpoint the ring now holds.
+            let fill = self.fill();
+            if fill > 2 * self.target {
+                self.drop_to_target(fill);
+                self.ctrl.err = 0.0;
+                self.trims += 1;
+            }
         }
         let fill = self.fill();
         let err = (fill as f64 - self.target as f64) / self.in_rate;
@@ -244,6 +261,19 @@ impl PullPipe {
         n - k
     }
 
+    /// Drop the oldest frames of a ring holding `fill` down to the setpoint.
+    fn drop_to_target(&mut self, fill: usize) {
+        if let Ok(backlog) = self.ring.read_chunk((fill - self.target) * self.channels) {
+            backlog.commit_all();
+        }
+    }
+
+    /// Over-full rings trimmed back to the setpoint since the last call (the caller counts them, as it
+    /// counts the zero-filled pulls `pull` returns); each one skipped the excess, a jump in what plays.
+    pub(crate) fn take_trims(&mut self) -> u64 {
+        std::mem::take(&mut self.trims)
+    }
+
     /// What the pipe delays a frame by once settled, in frames at `out_rate`: the setpoint plus the
     /// resampler's own delay. The join's share of `ProcessContext::input_frames`. Measured from the push
     /// call to the frame's place in a pull, averaged over a push's frames; while push and pull run in
@@ -277,6 +307,9 @@ pub(crate) mod tests {
         pub(crate) push: usize,
         /// Seconds the pusher runs before the first pull.
         pub(crate) head_start: f64,
+        /// (at, seconds): the first pull due at or after `at` comes that much late, the pusher running
+        /// on meanwhile (a render callback the device skipped).
+        pub(crate) stall: Option<(f64, f64)>,
     }
 
     pub(crate) struct Pulled<'a> {
@@ -307,7 +340,12 @@ pub(crate) mod tests {
             let (mut t_push, mut t_pull) = (0.0f64, self.head_start);
             let (mut pushed, mut pull_i, mut dropped) = (0u64, 0u64, 0usize);
             let mut n = pulls(0);
+            let mut stall = self.stall;
             while t_pull < seconds {
+                if let Some((_, late)) = stall.filter(|&(at, _)| t_pull >= at) {
+                    t_pull += late;
+                    stall = None;
+                }
                 if t_push <= t_pull {
                     for (k, frame) in block.chunks_mut(c.channels).enumerate() {
                         source(pushed + k as u64, frame);
@@ -360,9 +398,9 @@ pub(crate) mod tests {
             for skew in [400.0, -400.0] {
                 for pulls in ["256", "480", "470-490"] {
                     let push = in_rate as usize / 100;
-                    let clocks = Clocks { config: config(in_rate, out_rate), skew_ppm: skew, push, head_start: 0.0 };
+                    let clocks = Clocks { config: config(in_rate, out_rate), skew_ppm: skew, push, head_start: 0.0, stall: None };
                     let band_ms = push as f64 / in_rate as f64 * 1e3 + 3.0;
-                    let (mut settled_at, mut shorts, mut drops, mut lo_ms, mut hi_ms) = (0.0f64, 0, 0, 0.0f64, 0.0f64);
+                    let (mut settled_at, mut shorts, mut drops, mut trims, mut lo_ms, mut hi_ms) = (0.0f64, 0, 0, 0, 0.0f64, 0.0f64);
                     let (mut drift_sum, mut drift_n, mut drift_worst, mut wobble) = (0.0, 0u32, 0.0f64, 0.0f64);
                     let mut size: Box<dyn FnMut(u64) -> usize> = match pulls {
                         "256" => Box::new(|_| 256),
@@ -373,6 +411,7 @@ pub(crate) mod tests {
                         let e_ms = (p.fill_before as f64 / in_rate as f64 - SETPOINT) * 1e3;
                         shorts += (p.short > 0) as usize;
                         drops += p.dropped;
+                        trims = p.pipe.trims;
                         // Startup priming (the ring filling to the setpoint) is not a settling miss.
                         if p.pipe.started && (p.short > 0 || p.dropped > 0 || e_ms.abs() > band_ms) {
                             settled_at = p.t;
@@ -390,13 +429,13 @@ pub(crate) mod tests {
                     });
                     let drift = drift_sum / drift_n as f64;
                     report += &format!(
-                        "{in_rate}->{out_rate} {skew:+} ppm, pulls {pulls}: settled at {settled_at:.1} s, shorts {shorts}, overruns {drops}; \
+                        "{in_rate}->{out_rate} {skew:+} ppm, pulls {pulls}: settled at {settled_at:.1} s, shorts {shorts}, overruns {drops}, trims {trims}; \
                          after {SETTLED_BY} s: fill {lo_ms:+.1}..{hi_ms:+.1} ms, mean drift {drift:+.1} ppm (instant worst {drift_worst:.0} off), \
                          ratio wobble {wobble:.0} ppm\n"
                     );
-                    // No starve or overrun at all, the startup included: the setpoint's margin covers the
-                    // controller while it learns the drift.
-                    if shorts + drops > 0 || settled_at > SETTLED_BY || (drift - skew).abs() > 0.1 * skew.abs() {
+                    // No starve, overrun or trim at all, the startup included: the setpoint's margin covers
+                    // the controller while it learns the drift.
+                    if shorts + drops > 0 || trims > 0 || settled_at > SETTLED_BY || (drift - skew).abs() > 0.1 * skew.abs() {
                         failed += 1;
                         report += "  ^ FAILED\n";
                     }
@@ -411,7 +450,7 @@ pub(crate) mod tests {
     fn a_sine_keeps_its_frequency_and_has_no_discontinuity_after_settling() {
         for &(in_rate, out_rate) in &[(44_100u32, 48_000u32), (48_000, 44_100), (48_000, 48_000)] {
             let (skew, freq) = (400.0, 440.0);
-            let clocks = Clocks { config: config(in_rate, out_rate), skew_ppm: skew, push: in_rate as usize / 100, head_start: 0.0 };
+            let clocks = Clocks { config: config(in_rate, out_rate), skew_ppm: skew, push: in_rate as usize / 100, head_start: 0.0, stall: None };
             // Counted on the puller's frames: the pusher's clock runs `skew` fast, so its 440 Hz plays at
             // 440·(1 + skew) there once the pipe tracks it (untracked, it would read 400 ppm low).
             let expected = freq * (1.0 + skew * 1e-6);
@@ -423,6 +462,7 @@ pub(crate) mod tests {
                 wandering(),
                 |k, f| f[0] = (0.5 * (2.0 * std::f64::consts::PI * freq * k as f64 / in_rate as f64).sin()) as f32,
                 |p| {
+                    assert_eq!(p.pipe.trims, 0, "{in_rate}->{out_rate}: trimmed at {:.1} s", p.t);
                     for &y in p.out {
                         let y = y as f64;
                         if p.t >= SETTLED_BY {
@@ -455,7 +495,7 @@ pub(crate) mod tests {
         // the frame index as the signal, so the output names the frame it plays; the pull lands
         // mid-period so push/pull order never hangs on a float tie.
         let config = PipeConfig { setpoint: 0.020, ..config(48_000, 48_000) };
-        let clocks = Clocks { config, skew_ppm: 0.0, push: 480, head_start: 0.305 };
+        let clocks = Clocks { config, skew_ppm: 0.0, push: 480, head_start: 0.305, stall: None };
         let mut pulls = Vec::new();
         clocks.run(0.6, |_| 480, |k, f| f[0] = k as f32, |p| pulls.push((p.fill_before, p.short, p.out[100], p.pipe.fill())));
         let (fill_before, short, played, fill_after) = pulls[0];
@@ -469,6 +509,75 @@ pub(crate) mod tests {
         let worst = pulls[1..].iter().map(|p| p.0).max().unwrap();
         assert!(worst <= 960 + 480, "the fill after the drop: {worst}");
         assert!(pulls.iter().all(|p| p.1 == 0));
+    }
+
+    /// A render callback that comes 60–150 ms late (a WASAPI glitch) while the pusher runs on: the next
+    /// pull trims the excess once, the learned drift survives it, and the fill is back in the settled
+    /// band from the pull after, with no starve in the minute that follows. Left to the ±1 % controller,
+    /// the excess would drain over seconds and its recovery undershoot into a starve.
+    #[test]
+    fn a_late_puller_trims_the_excess_once_and_keeps_its_drift() {
+        let (mut report, mut failed) = (String::new(), 0);
+        for &(in_rate, out_rate) in &[(48_000u32, 48_000u32), (44_100, 48_000), (48_000, 44_100)] {
+            for skew in [400.0, -400.0] {
+                for late in [0.060, 0.100, 0.150] {
+                    let push = in_rate as usize / 100;
+                    let at = SETTLED_BY + 30.0;
+                    let clocks =
+                        Clocks { config: config(in_rate, out_rate), skew_ppm: skew, push, head_start: 0.0, stall: Some((at, late)) };
+                    let band_ms = push as f64 / in_rate as f64 * 1e3 + 3.0;
+                    let (mut trims, mut shorts, mut drops, mut worst_ms, mut stalled_fill_ms) = (0, 0, 0, 0.0f64, 0.0);
+                    let (mut drift_before, mut drift_after, mut resumed) = (0.0, 0.0, 0u32);
+                    clocks.run(at + late + 60.0, wandering(), |_, f| f.fill(0.0), |p| {
+                        if p.t < at {
+                            drift_before = p.pipe.drift_ppm();
+                            return;
+                        }
+                        let e_ms = (p.fill_before as f64 / in_rate as f64 - SETPOINT) * 1e3;
+                        trims = p.pipe.trims;
+                        shorts += (p.short > 0) as usize;
+                        drops += p.dropped;
+                        resumed += 1;
+                        if resumed == 1 {
+                            // The pull that comes late finds the excess and trims it.
+                            stalled_fill_ms = e_ms;
+                            drift_after = p.pipe.drift_ppm();
+                        } else {
+                            worst_ms = worst_ms.max(e_ms.abs());
+                        }
+                    });
+                    report += &format!(
+                        "{in_rate}->{out_rate} {skew:+} ppm, {:.0} ms late: found {stalled_fill_ms:+.1} ms over, trims {trims}, \
+                         then fill within {worst_ms:.1} ms (band {band_ms:.1}), shorts {shorts}, overruns {drops}, \
+                         drift {drift_before:+.0} -> {drift_after:+.0} ppm\n",
+                        late * 1e3
+                    );
+                    if trims != 1 || shorts + drops > 0 || worst_ms > band_ms || (drift_after - drift_before).abs() > 50.0 {
+                        failed += 1;
+                        report += "  ^ FAILED\n";
+                    }
+                }
+            }
+        }
+        println!("{report}");
+        assert_eq!(failed, 0, "cases failed:\n{report}");
+    }
+
+    /// Share output's shape (`share.rs`): 256-frame engine pushes at 48 kHz, 436–456-frame pulls at
+    /// 44.1 kHz, the 20 ms setpoint, stereo. Its sawtooth never reads as a trim.
+    #[test]
+    fn share_shaped_pushes_never_trim() {
+        for skew in [400.0, -400.0] {
+            let config = PipeConfig { channels: 2, setpoint: 0.020, ..config(48_000, 44_100) };
+            let clocks = Clocks { config, skew_ppm: skew, push: 256, head_start: 0.0, stall: None };
+            let mut size = wandering();
+            let (mut trims, mut shorts) = (0, 0);
+            clocks.run(300.0, |i| size(i) - 34, |_, f| f.fill(0.0), |p| {
+                trims = p.pipe.trims;
+                shorts += (p.pipe.started && p.short > 0) as usize;
+            });
+            assert_eq!((trims, shorts), (0, 0), "{skew:+} ppm: trims, shorts");
+        }
     }
 
     #[test]
@@ -526,10 +635,11 @@ pub(crate) mod tests {
         // 120 s), over pulls (256) that sample every phase of the pushes.
         for &(in_rate, out_rate) in &[(48_000u32, 48_000u32), (44_100, 48_000), (48_000, 44_100)] {
             let push = in_rate as usize / 100;
-            let clocks = Clocks { config: config(in_rate, out_rate), skew_ppm: 400.0, push, head_start: 0.0 };
+            let clocks = Clocks { config: config(in_rate, out_rate), skew_ppm: 400.0, push, head_start: 0.0, stall: None };
             let push_period = push as f64 / (in_rate as f64 * (1.0 + 400e-6));
             let (mut sum, mut count, mut delay_frames) = (0.0, 0u64, 0.0);
             clocks.run(180.0, |_| 256, |k, f| f[0] = (k % (1 << 20)) as f32, |p| {
+                assert_eq!(p.pipe.trims, 0, "{in_rate}->{out_rate}: trimmed at {:.1} s", p.t);
                 if p.t < 120.0 {
                     return;
                 }

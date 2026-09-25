@@ -20,8 +20,12 @@
 //!   reaches the router; only what learn leaves is played.
 //! - **Notes go unstamped, actions stamped.** A note, a pedal and a wheel land at the next block start
 //!   (`TimedCommand::frame` `None`), as the UI's gestures do; a bound action carries the frame its
-//!   arrival maps to ([`FrameClock::press_frame`], the arrival taken on the callback's entry), or none
-//!   while no device runs.
+//!   arrival maps to ([`FrameClock::press_frame`], the arrival taken on the callback's entry).
+//! - **While no device runs, nothing new starts.** The engine's command ring drains only in the
+//!   callback, so a bound action or a note-on sent then would fire at the next open (the looper
+//!   recording by itself; note-ons piling up until a note-off no longer fits). Both are dropped while
+//!   the clock has no stamp; a note-on before it reaches the router, so no note is held. Everything
+//!   else goes through as ever, so a note held before the stop still gets its note-off.
 //! - **One lock orders everything.** The router, MIDI learn and the port table sit in one `Mutex` the
 //!   port callbacks and the poller take; commands go to the sink under it, so the engine sees them in
 //!   the order the router decided them. None of these threads is an audio thread.
@@ -156,6 +160,8 @@ impl Core {
         // A connection already released (its port went away) has no owner left.
         let Some(port) = ports.iter().find(|p| p.conn == Some(conn)) else { return };
         let owner = (conn, message.channel());
+        // `None` while no device runs: what would start something is dropped (the rules above).
+        let stamp = self.clock.press_frame(at);
         let mut out = |command| self.send(None, command);
         let outcome = learn.consume(&port.key, &message, at);
         if let Some(b) = outcome.learned {
@@ -168,11 +174,16 @@ impl Core {
             self.emit(MidiEvent::Bindings(learn.bindings.clone()));
         }
         match outcome.fire.map(ActionId::engine_action) {
-            Some(Some(action)) => self.send(self.clock.press_frame(at), Command::Action(action)),
+            Some(Some(action)) => {
+                if stamp.is_some() {
+                    self.send(stamp, Command::Action(action));
+                }
+            }
             Some(None) => self.emit(MidiEvent::GoLive),
             None => {}
         }
-        if !outcome.consumed {
+        let starts = matches!(message, parse::Message::NoteOn { .. });
+        if !outcome.consumed && (stamp.is_some() || !starts) {
             router.message(owner, message, &mut out);
         }
     }
@@ -308,7 +319,7 @@ mod tests {
     const B: u32 = 2;
 
     /// A host with no poller and two ports, "Probe a" and "Probe b" on connections [`A`] and [`B`], as
-    /// the browser probes' two virtual Web MIDI inputs.
+    /// the browser probes' two virtual Web MIDI inputs, and a device running (its clock stamped).
     struct Rig {
         host: MidiHost,
         sent: Arc<Mutex<Vec<TimedCommand>>>,
@@ -318,6 +329,13 @@ mod tests {
 
     impl Rig {
         fn new() -> Rig {
+            let r = Rig::stopped();
+            r.clock.publish(r.t, 0, 256, 48_000);
+            r
+        }
+
+        /// No device runs: the clock has no stamp.
+        fn stopped() -> Rig {
             let sent = Arc::new(Mutex::new(Vec::new()));
             let sink: Sink = {
                 let sent = sent.clone();
@@ -397,24 +415,56 @@ mod tests {
 
     // probe midi-learn "after a reload the learned CC records the selected track, and its release runs
     // nothing": a bound press is Command::Action on the selected lane, stamped with the frame its arrival
-    // maps to (frame_clock.rs press_frame), unstamped while no callback runs.
+    // maps to (frame_clock.rs press_frame).
     #[test]
     fn a_bound_press_sends_its_action_stamped_with_the_press_frame_and_its_release_nothing() {
         let mut r = Rig::new();
         r.learn(ActionId::RecDub, A, &[[0xb0, 20, 127], [0xb0, 20, 0]]);
         r.wait(RELEASE * 2);
-        r.send(A, &[[0xb0, 20, 127]]);
-        assert_eq!(*r.sent.lock().unwrap(), [TimedCommand { frame: None, command: Command::Action(Action::RecDub) }]);
-        r.take();
-        r.send(A, &[[0xb0, 20, 0]]);
-        assert_eq!(r.take(), []);
-
         r.clock.publish(r.t, 48_000, 256, 48_000);
         r.wait(Duration::from_millis(1));
         r.send(A, &[[0xb0, 20, 127]]);
         let frame = r.clock.press_frame(r.t);
         assert_eq!(frame, Some(48_000 + 48 + 256));
         assert_eq!(*r.sent.lock().unwrap(), [TimedCommand { frame, command: Command::Action(Action::RecDub) }]);
+        r.take();
+        r.send(A, &[[0xb0, 20, 0]]);
+        assert_eq!(r.take(), []);
+    }
+
+    // While no device runs nothing drains the engine's ring: a bound press and a note-on sent then would
+    // fire at the next open. Both are dropped (the note-on never held); a note held from before the
+    // stop still gets its note-off, and learn still captures.
+    #[test]
+    fn with_no_device_running_actions_and_note_ons_are_dropped_and_note_offs_pass() {
+        let mut r = Rig::new();
+        r.learn(ActionId::RecDub, A, &[[0xb0, 20, 127], [0xb0, 20, 0]]);
+        r.wait(RELEASE * 2);
+        r.send(A, &[[0x90, 60, 100], [0xb0, 64, 127], [0x90, 62, 100], [0x80, 62, 0]]);
+        assert_eq!(r.take(), [on(60, 100), on(62, 100)], "the pedal holds 62");
+
+        r.clock.clear();
+        r.send(A, &[[0xb0, 20, 127], [0xb0, 20, 0], [0x90, 64, 100], [0x90, 60, 90]]);
+        assert_eq!(r.take(), [], "the bound press and the note-ons are dropped");
+        assert_eq!(r.host.core.lock().router.held(), [60], "the dropped note-ons hold nothing");
+        r.send(A, &[[0x80, 64, 0], [0x80, 60, 0], [0xb0, 64, 0]]);
+        assert_eq!(r.take(), [Command::NoteOff(62), Command::NoteOff(60)], "the held and sustained notes let go");
+        r.host.learn(ActionId::Undo);
+        r.send(A, &[[0xb0, 30, 127]]);
+        assert_eq!(r.host.learning(), None, "learn captured");
+        assert!(r.host.bindings().iter().any(|b| b.number == 30));
+
+        // A device again: as before.
+        r.clock.publish(r.t, 0, 256, 48_000);
+        r.wait(RELEASE * 2);
+        r.send(A, &[[0xb0, 20, 127], [0x90, 64, 100]]);
+        assert_eq!(r.take(), [Command::Action(Action::RecDub), on(64, 100)]);
+
+        // A rig that never had a device: nothing sent, nothing held.
+        let r = Rig::stopped();
+        r.send(A, &[[0x90, 60, 100], [0x80, 60, 0]]);
+        assert_eq!(r.take(), []);
+        assert!(r.host.core.lock().router.held().is_empty());
     }
 
     // probe midi-learn "Esc cancels a learn", "a CC after a cancelled learn binds nothing"
@@ -625,7 +675,9 @@ mod tests {
     #[test]
     fn a_refused_command_is_counted() {
         let sink: Sink = Arc::new(|_| Err("no audio device is open".into()));
-        let core = Arc::new(Core::new(sink, FrameClock::new()));
+        let clock = FrameClock::new();
+        clock.publish(Instant::now(), 0, 256, 48_000);
+        let core = Arc::new(Core::new(sink, clock));
         core.set_ports(vec![PortEntry { key: PortKey { name: "Probe a".into(), occurrence: 0 }, conn: Some(A) }]);
         let host = MidiHost { core, stop: None, poller: None };
         host.core.message(A, Instant::now(), &[0x90, 60, 100]);

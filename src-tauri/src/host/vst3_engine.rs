@@ -15,6 +15,7 @@ use lf_engine::grid::Frame;
 use lf_engine::{SlotEvent, SlotEventKind, SlotKind, SlotProcessor};
 
 use crate::engine_io::SlotHost;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 
 /// One activated VST3 processor with its event and parameter lists and pre-sized rows, built on
 /// the owner thread.
@@ -265,12 +266,13 @@ impl Drop for Vst3Plugin {
 
 impl Vst3Plugin {
     /// Owner thread, nothing processing: deactivate, then run the one activation sequence at the
-    /// engine's current rate with its largest block as the max. Returns what it negotiated.
+    /// engine's current rate with its largest block as the max. Returns what it negotiated, its max
+    /// block and the rate (`SlotHost::install` checks it).
     fn activate(
         &mut self,
         processor: &ComPtr<IAudioProcessor>,
         slot: &SlotHost,
-    ) -> Result<(Activation, u32), String> {
+    ) -> Result<(Activation, u32, u32), String> {
         if self.active {
             // SAFETY: owner thread; the unit is out of the engine and stopped.
             unsafe {
@@ -283,7 +285,7 @@ impl Vst3Plugin {
         // SAFETY: owner thread; the component is initialised and inactive, and nothing processes.
         let activation = unsafe { activate_component(&self.component, processor, rate as f64, max_frames) }?;
         self.active = true;
-        Ok((activation, max_frames))
+        Ok((activation, max_frames, rate))
     }
 }
 
@@ -305,11 +307,14 @@ fn reinstall(
             restart_flag_names(raised)
         );
     }
-    match activated {
-        Ok((activation, max_frames)) => unit.rearm(activation, max_frames),
+    let rate = match activated {
+        Ok((activation, max_frames, rate)) => {
+            unit.rearm(activation, max_frames);
+            rate
+        }
         Err(e) => return Err((unit, e)),
-    }
-    slot.install(unit).map_err(|(unit, e)| (own(unit), e))
+    };
+    slot.install(unit, rate).map_err(|(unit, e)| (own(unit), e))
 }
 
 /// A restart or an eviction: get the unit back (it came from the engine, the owner still holds it
@@ -369,15 +374,16 @@ pub(in super::super) fn run(ctx: OwnerCtx, path: String, id: &str) -> Result<(),
     })
 }
 
-/// Create class `id` from the factory, initialise and activate it, and build its unit. Copied from
-/// `vst3_owner_main`'s setup. Every error after the component exists tears it down (`Vst3Plugin`).
+/// Create class `id` from the factory, initialise and activate it, and build its unit (with the rate it
+/// activated at). Copied from `vst3_owner_main`'s setup. Every error after the component exists tears
+/// it down (`Vst3Plugin`).
 fn load(
     id: &str,
     open: impl FnOnce() -> Result<Opened, String>,
     slot: &SlotHost,
     params: Consumer<PluginEvent>,
     faults: Arc<AtomicU32>,
-) -> Result<(Vst3Plugin, Box<Vst3Unit>, String), String> {
+) -> Result<(Vst3Plugin, Box<Vst3Unit>, String, u32), String> {
     let target = super::super::super::scan::hex_to_tuid(id).ok_or_else(|| format!("bad VST3 class id: {id}"))?;
     let (module, factory) = open()?;
     // SAFETY: raw FUnknown COM on the owner thread, the live owner's sequence; every pointer is
@@ -419,12 +425,12 @@ fn load(
             .component
             .cast::<IAudioProcessor>()
             .ok_or_else(|| "plugin has no IAudioProcessor".to_string())?;
-        let (activation, max_frames) = plugin.activate(&processor, slot)?;
+        let (activation, max_frames, rate) = plugin.activate(&processor, slot)?;
         let unit = Vst3Unit::new(processor, activation, max_frames, params, faults)?;
         let (controller, separated) = obtain_controller(&plugin.factory, &plugin.component, &plugin.host_ctx);
         plugin.controller = controller;
         plugin.separated = separated;
-        Ok((plugin, unit, name))
+        Ok((plugin, unit, name, rate))
     }
 }
 
@@ -438,7 +444,7 @@ pub(super) fn run_with(
     let OwnerCtx { slot, running, requests, params, params_tx, param_ids, sink, editor_parent, ready } = ctx;
     let index = slot.slot();
     let faults = Arc::new(AtomicU32::new(0));
-    let (mut plugin, unit, name) = match load(id, open, &slot, params, faults.clone()) {
+    let (mut plugin, unit, name, rate) = match load(id, open, &slot, params, faults.clone()) {
         Ok(loaded) => loaded,
         Err(e) => {
             let _ = ready.send(Err(e));
@@ -469,7 +475,7 @@ pub(super) fn run_with(
         let _ = ready.send(Err("plugin load cancelled".to_string()));
         return Ok(());
     }
-    if let Err((unit, e)) = slot.install(unit) {
+    if let Err((unit, e)) = slot.install(unit, rate) {
         drop((unit, plugin));
         let _ = ready.send(Err(e));
         return Ok(());
@@ -483,6 +489,10 @@ pub(super) fn run_with(
     let mut parked: Option<Box<Vst3Unit>> = None;
     let mut editor = Vst3Editor::Closed;
     let mut reported = 0u32;
+    // A panic in the loop must not unwind past a unit the engine still runs (dropping `plugin` would
+    // deactivate and unload code the audio thread is inside): it is caught here, and the ordered
+    // teardown below takes the unit out of the engine first.
+    let served = catch_unwind(AssertUnwindSafe(|| {
     while running.load(Acquire) {
         // restartComponent only raised flags (maybe on a foreign thread); the cycle runs here.
         let flags = restart.take();
@@ -571,6 +581,10 @@ pub(super) fn run_with(
             }
         }
         report_faults(&faults, index, &mut reported);
+    }
+    }));
+    if served.is_err() {
+        log::error!("[plugin_host] engine slot {index}: the VST3 owner panicked; tearing the plugin down");
     }
     if !matches!(editor, Vst3Editor::Closed) {
         vst3_editor_close(&mut editor);

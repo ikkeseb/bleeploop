@@ -9,12 +9,13 @@
 
 mod common;
 
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering::SeqCst};
 use std::sync::{Arc, Mutex};
 
 use common::{Delay, Opts, Rig};
 use lf_engine::grid::Frame;
-use lf_engine::{Command, Instrument, LaneState, NoteTarget, SlotEvent, SlotEventKind, SlotKind, SlotProcessor};
+use lf_engine::{Command, Instrument, LaneState, NoteTarget, ProcessContext, SlotEvent, SlotEventKind, SlotKind, SlotProcessor};
 
 /// Frames of the bypass crossfade at 48 kHz: 10 ms.
 const FADE: usize = 480;
@@ -301,6 +302,89 @@ fn a_unit_with_nowhere_to_go_is_leaked_never_dropped_and_parked_ones_follow_once
     assert_eq!(back.len(), 6, "and the two parked ones");
     drop(back);
     assert_eq!(refused.drops.load(SeqCst), 6, "the leaked one is never dropped");
+}
+
+/// Where a [`Panicky`] unit panics.
+#[derive(Clone, Copy, PartialEq)]
+enum PanicIn {
+    Kind,
+    Stop,
+}
+
+/// A unit that panics in one method, as a plugin can, and counts its drops.
+struct Panicky {
+    at: PanicIn,
+    drops: Arc<AtomicUsize>,
+}
+
+impl SlotProcessor for Panicky {
+    fn kind(&self) -> SlotKind {
+        assert!(self.at != PanicIn::Kind, "the unit panics in kind()");
+        SlotKind::Effect
+    }
+
+    fn latency(&self) -> Frame {
+        0
+    }
+
+    fn process(&mut self, _frame: Frame, _input: &[f32], _events: &[SlotEvent], out: &mut [f32]) {
+        out.fill(0.0);
+    }
+
+    fn stop(&mut self) {
+        assert!(self.at != PanicIn::Stop, "the unit panics in stop()");
+    }
+
+    fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send> {
+        self
+    }
+}
+
+impl Drop for Panicky {
+    fn drop(&mut self) {
+        self.drops.fetch_add(1, SeqCst);
+    }
+}
+
+/// One block as the device callback renders it: under `catch_unwind`, its guard. False on a panic.
+fn guarded_block(rig: &mut Rig) -> bool {
+    let n = rig.block;
+    let ctx = ProcessContext { frame: rig.frame, xrun: false, align_frames: rig.align - rig.engine.limiter_latency(), input_frames: 0 };
+    let (input, mut left, mut right) = (vec![0.0; n], vec![0.0; n], vec![0.0; n]);
+    let engine = &mut rig.engine;
+    let ok = catch_unwind(AssertUnwindSafe(|| engine.process(&ctx, &input, &mut left, &mut right))).is_ok();
+    rig.frame += n as Frame;
+    ok
+}
+
+/// A unit that panics while the engine calls it at install (`kind`) or at the end of a removal (`stop`)
+/// unwinds out of the callback still held by its slot: the unwind drops nothing on the audio thread.
+#[test]
+fn a_unit_that_panics_is_never_dropped_by_the_unwind() {
+    let drops = Arc::new(AtomicUsize::new(0));
+    let mut rig = Rig::new();
+    rig.advance(128);
+    rig.install(0, Box::new(Panicky { at: PanicIn::Kind, drops: drops.clone() }));
+    assert!(!guarded_block(&mut rig), "kind() panicked inside the block");
+    assert_eq!(drops.load(SeqCst), 0, "the unwind dropped nothing");
+    // The owner evicts the faulted engine's units, under its own guard.
+    assert!(catch_unwind(AssertUnwindSafe(|| rig.engine.evict_slots())).is_ok());
+    let back = rig.returned(0).expect("the unit comes back");
+    assert_eq!(drops.load(SeqCst), 0);
+    drop(back);
+    assert_eq!(drops.load(SeqCst), 1);
+
+    let drops = Arc::new(AtomicUsize::new(0));
+    let mut rig = Rig::new();
+    rig.install(0, Box::new(Panicky { at: PanicIn::Stop, drops: drops.clone() }));
+    rig.advance(256);
+    rig.remove(0);
+    let blocks = (0..FADE / 128 + 2).take_while(|_| guarded_block(&mut rig)).count();
+    assert!(blocks <= FADE / 128, "stop() panicked once the fade reached bypass");
+    assert_eq!(drops.load(SeqCst), 0, "the unwind dropped nothing");
+    assert!(rig.returned(0).is_none() && rig.engine.slot(0).is_some(), "the unit stays in its slot");
+    drop(rig); // the engine's drop, off the audio thread
+    assert_eq!(drops.load(SeqCst), 1);
 }
 
 // ── Notes ────────────────────────────────────────────────────────────────────────────────────────────

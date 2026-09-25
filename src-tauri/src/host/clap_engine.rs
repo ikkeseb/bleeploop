@@ -15,6 +15,7 @@ use lf_engine::slots::MAX_SLOT_EVENTS;
 use lf_engine::{SlotEvent, SlotEventKind, SlotKind, SlotProcessor};
 
 use crate::engine_io::SlotHost;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 
 enum Processor {
     Stopped(StoppedPluginAudioProcessor<LfHost>),
@@ -44,6 +45,8 @@ pub(super) struct ClapUnit {
 
 /// What one activation gave the unit to build on.
 pub(super) struct Terms {
+    /// The engine rate it activated at (`SlotHost::install` checks it).
+    pub(super) rate: u32,
     pub(super) max_frames: u32,
     pub(super) in_channels: u32,
     pub(super) out_channels: u32,
@@ -279,7 +282,7 @@ fn activate(
         PluginAudioConfiguration { sample_rate: rate as f64, min_frames_count: 1, max_frames_count: max_frames };
     let stopped = instance.activate(|_, _| (), config).map_err(|e| format!("activate failed: {e}"))?;
     let latency = reported_latency(instance);
-    Ok((stopped, Terms { max_frames, in_channels, out_channels, latency }))
+    Ok((stopped, Terms { rate, max_frames, in_channels, out_channels, latency }))
 }
 
 /// Deactivate what the unit holds, activate again at the engine's current terms and install it.
@@ -297,7 +300,7 @@ fn reinstall(
         Err(e) => return Err((unit, e)),
     };
     unit.rearm(stopped, &terms);
-    match slot.install(unit) {
+    match slot.install(unit, terms.rate) {
         Ok(()) => Ok(()),
         Err((unit, e)) => {
             let mut unit = own(unit);
@@ -394,9 +397,9 @@ pub(super) fn run(
         // init() may request a callback, but only the fully initialized instance can receive it.
         deliver_plugin_callback(&mut instance);
         let (stopped, terms) = activate(&mut instance, &slot)?;
-        Ok((entry, instance, name, ClapUnit::new(stopped, &terms, params, faults.clone())))
+        Ok((entry, instance, name, terms.rate, ClapUnit::new(stopped, &terms, params, faults.clone())))
     });
-    let (entry, mut instance, name, mut unit) = match setup {
+    let (entry, mut instance, name, rate, mut unit) = match setup {
         Ok(loaded) => loaded,
         Err(e) => {
             let _ = ready.send(Err(e));
@@ -413,7 +416,7 @@ pub(super) fn run(
         let _ = ready.send(Err("plugin load cancelled".to_string()));
         return Ok(());
     }
-    if let Err((back, e)) = slot.install(unit) {
+    if let Err((back, e)) = slot.install(unit, rate) {
         if let Some(stopped) = own(back).take_stopped() {
             instance.deactivate(stopped);
         }
@@ -429,6 +432,9 @@ pub(super) fn run(
     let mut parked: Option<Box<ClapUnit>> = None;
     let mut editor = EditorSlot::Closed;
     let mut reported = 0u32;
+    // A panic in the loop must not unwind past a unit the engine still runs: it is caught here, and the
+    // ordered teardown below takes the unit out of the engine first.
+    let served = catch_unwind(AssertUnwindSafe(|| {
     while running.load(Acquire) {
         deliver_plugin_callback(&mut instance);
         if take_params_rescan(&mut instance) {
@@ -493,6 +499,10 @@ pub(super) fn run(
             }
         }
         report_faults(&faults, index, &mut reported);
+    }
+    }));
+    if served.is_err() {
+        log::error!("[plugin_host] engine slot {index}: the CLAP owner panicked; tearing the plugin down");
     }
     if !matches!(editor, EditorSlot::Closed) {
         editor_teardown(&mut instance, &mut editor, &hosted_hwnd);

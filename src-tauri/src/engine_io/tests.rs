@@ -169,18 +169,19 @@ fn tone(frame: Frame) -> f32 {
 }
 
 /// A plugin stand-in: an effect outputting a constant, counting its calls and stops; it panics on the
-/// call numbered `panic_at`, if one is set.
+/// call numbered `panic_at`, if one is set, and in `stop` if `panic_on_stop`.
 struct Unit {
     level: f32,
     calls: Arc<AtomicUsize>,
     stops: Arc<AtomicUsize>,
     panic_at: Option<usize>,
+    panic_on_stop: bool,
 }
 
 impl Unit {
     fn new(level: f32) -> (Box<Unit>, Arc<AtomicUsize>, Arc<AtomicUsize>) {
         let (calls, stops) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
-        (Box::new(Unit { level, calls: calls.clone(), stops: stops.clone(), panic_at: None }), calls, stops)
+        (Box::new(Unit { level, calls: calls.clone(), stops: stops.clone(), panic_at: None, panic_on_stop: false }), calls, stops)
     }
 }
 
@@ -200,6 +201,9 @@ impl SlotProcessor for Unit {
     }
     fn stop(&mut self) {
         self.stops.fetch_add(1, SeqCst);
+        if self.panic_on_stop {
+            panic!("the unit fails to stop (on purpose)");
+        }
     }
     fn into_any(self: Box<Self>) -> Box<dyn Any + Send> {
         self
@@ -322,7 +326,7 @@ fn a_new_rate_hands_the_units_to_their_owners_and_the_new_engine_takes_them_back
     h.open(asio(Some(256)));
     let slot = h.host.slot(0);
     let (unit, calls, stops) = Unit::new(0.1);
-    assert!(slot.install(unit).is_ok());
+    assert!(slot.install(unit, RATE as u32).is_ok());
     until("the unit renders", || calls.load(SeqCst) > 0);
 
     h.fake.asio.lock().unwrap().as_mut().unwrap().rate = 44_100;
@@ -332,7 +336,7 @@ fn a_new_rate_hands_the_units_to_their_owners_and_the_new_engine_takes_them_back
     let back = slot.take_evicted().expect("the evicted unit waits for its owner");
     assert_eq!(stops.load(SeqCst), 1, "stopped once, before it left");
     let rendered = calls.load(SeqCst);
-    assert!(slot.install(back).is_ok(), "the new engine takes it");
+    assert!(slot.install(back, 44_100).is_ok(), "the new engine takes it");
     until("the new engine renders the unit", || calls.load(SeqCst) > rendered);
     let back = slot.remove(Duration::from_secs(2)).unwrap().expect("the unit comes back");
     assert_eq!(back.into_any().downcast::<Unit>().unwrap().level, 0.1);
@@ -346,7 +350,7 @@ fn a_plugin_owner_installs_removes_and_reinstalls_while_the_engine_renders() {
     let slot = h.host.slot(1);
     for round in 1..=3 {
         let (unit, calls, stops) = Unit::new(0.2);
-        assert!(slot.install(unit).is_ok(), "round {round}");
+        assert!(slot.install(unit, RATE as u32).is_ok(), "round {round}");
         until("the unit renders", || calls.load(SeqCst) > 4);
         let callbacks = h.host.diag().callbacks;
         let back = slot.remove(Duration::from_secs(2)).unwrap().expect("the unit comes back");
@@ -360,23 +364,76 @@ fn a_plugin_owner_installs_removes_and_reinstalls_while_the_engine_renders() {
 }
 
 #[test]
-fn a_panicking_unit_counts_one_panic_goes_silent_and_leaves_the_lock_unpoisoned() {
+fn a_panicking_unit_faults_the_engine_and_the_owner_replaces_it_at_the_same_rate() {
     let h = Harness::new();
     h.open(asio(Some(256)));
-    let (mut unit, calls, _) = Unit::new(0.5);
+    let slot = h.host.slot(0);
+    let (mut unit, calls, stops) = Unit::new(0.5);
     unit.panic_at = Some(50);
     h.send(Command::SetSlotLive(0, true));
-    assert!(h.host.slot(0).install(unit).is_ok());
+    assert!(slot.install(unit, RATE as u32).is_ok());
     until("the unit panics", || h.host.diag().panics == 1);
-    let at = h.frame();
-    h.play(RATE / 10);
-    assert!(h.fake.heard(at..at + RATE / 20).iter().all(|&s| s == 0.0), "silence after the panic");
-    assert_eq!(calls.load(SeqCst), 50, "the engine is not called again");
+    let events = h.device_events(1);
+    assert!(matches!(events[..], [DeviceEvent::EngineFaulted]), "{events:?}");
+    let back = slot.take_evicted().expect("the unit waits for its owner");
+    assert_eq!((calls.load(SeqCst), stops.load(SeqCst)), (50, 1), "not called again; stopped on its way out");
+    drop(back);
+    until("the device runs again", || h.host.status().is_some());
+    assert_eq!(h.host.status().unwrap().sample_rate, 48_000);
+    h.play(RATE / 20);
     assert_eq!(h.host.diag().panics, 1);
     #[cfg(debug_assertions)]
     assert!(h.host.diag().rt_allocs > 0, "the guard counts: the panic's payload allocated under it");
     assert!(!h.host.core.rt.is_poisoned());
     h.host.close().unwrap();
+}
+
+#[test]
+fn a_unit_that_panics_in_the_idle_slot_service_faults_the_engine_without_poisoning_the_lock() {
+    let h = Harness::new();
+    h.open(asio(Some(256)));
+    let slot = h.host.slot(0);
+    let (mut unit, calls, _) = Unit::new(0.1);
+    unit.panic_on_stop = true;
+    assert!(slot.install(unit, RATE as u32).is_ok());
+    until("the unit renders", || calls.load(SeqCst) > 0);
+    h.host.close().unwrap();
+    // No device runs: the removal is serviced on this thread, and the unit's stop panics there.
+    assert!(slot.remove(Duration::from_millis(200)).is_err(), "a unit that cannot stop does not come back");
+    assert!(!h.host.core.rt.is_poisoned());
+    assert!(h.host.diag().panics >= 1);
+    let events = h.device_events(1);
+    assert!(matches!(events[..], [DeviceEvent::EngineFaulted]), "{events:?}");
+    h.open(asio(Some(256)));
+    h.play(RATE / 20);
+    assert_eq!(h.host.diag().lock_misses, 0, "the new engine renders");
+}
+
+#[test]
+fn a_unit_activated_at_a_replaced_rate_comes_back_for_re_activation() {
+    let h = Harness::new();
+    h.open(asio(Some(256)));
+    let slot = h.host.slot(0);
+    let (unit, calls, _) = Unit::new(0.1);
+    assert!(slot.install(unit, 44_100).is_ok(), "handed on, not refused");
+    let back = slot.take_evicted().expect("back for re-activation at the engine's rate");
+    assert_eq!(calls.load(SeqCst), 0, "never rendered at the wrong rate");
+    assert!(slot.install(back, RATE as u32).is_ok());
+    until("the unit renders", || calls.load(SeqCst) > 0);
+}
+
+#[test]
+fn a_shutdown_hands_an_installed_unit_back_to_its_owner_stopped() {
+    let h = Harness::new();
+    h.open(asio(Some(256)));
+    let slot = h.host.slot(1);
+    let (unit, calls, stops) = Unit::new(0.1);
+    assert!(slot.install(unit, RATE as u32).is_ok());
+    until("the unit renders", || calls.load(SeqCst) > 0);
+    h.host.shutdown();
+    let back = slot.remove(Duration::from_millis(100)).unwrap().expect("the unit comes back");
+    assert_eq!(stops.load(SeqCst), 1, "stopped once, before the engine dropped");
+    drop(back);
 }
 
 #[test]
@@ -556,7 +613,7 @@ fn a_clean_run_through_switches_and_a_plugin_swap_counts_nothing_and_allocates_n
     let slot = h.host.slot(0);
     for buffer in [128, 64, 256] {
         let (unit, calls, _) = Unit::new(0.0);
-        assert!(slot.install(unit).is_ok());
+        assert!(slot.install(unit, RATE as u32).is_ok());
         until("the unit renders", || calls.load(SeqCst) > 0);
         h.open(asio(Some(buffer)));
         h.play(length / 4);

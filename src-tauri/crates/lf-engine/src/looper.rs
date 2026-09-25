@@ -130,6 +130,9 @@ struct Recorder {
     /// A first take's counted downbeat: the grid the master is phase-locked to.
     downbeat: Option<Frame>,
     roll: Option<Roll>,
+    /// RETAKE: a stop in the grace ended the roll to let the pass in flight finish, while the last
+    /// complete clean pass still sits in the free buffer (a punch-out before the edge commits it).
+    finishing_kept: bool,
     /// An input gap fell inside the window (inside the pass in flight, for a roll).
     damaged: bool,
     /// RETAKE: the lane whose REC approved the roll records next, from its pass edge.
@@ -153,6 +156,7 @@ impl Recorder {
             stop_playback: false,
             downbeat: None,
             roll: None,
+            finishing_kept: false,
             damaged: false,
             handoff: None,
             first_pos: 0,
@@ -817,7 +821,7 @@ impl Looper {
         let Some(mut rec) = self.rec.filter(|r| r.lane == i) else { return };
         let mut end = cx.now + rec.align;
         let mut bar_plan = true;
-        if rec.roll.is_some() {
+        if let Some(roll) = rec.roll {
             let plan = self.retake_plan(cx, &rec);
             rec.roll = None;
             match plan {
@@ -828,6 +832,7 @@ impl Looper {
                 RetakeStop::FinishPass => {
                     end = rec.end.unwrap();
                     bar_plan = false; // it ends on its own pass edge
+                    rec.finishing_kept = roll.kept;
                 }
                 RetakeStop::StopNow => {}
             }
@@ -961,11 +966,14 @@ impl Looper {
 
     /// The device stopped (STATUS E3): input frames from `cx.now` on never arrive, and rendering resumes
     /// at `cx.now` when a device runs again. A capture that has retained nothing (a count-in, a
-    /// boundary arm, AUTO listening) is cancelled as Stop does. Anything else ends at `cx.now` and
+    /// boundary arm, AUTO listening, an overdub inside the `align` frames before its window opens) is
+    /// cancelled as Stop does, an overdub's lane playing on. Anything else ends at `cx.now` and
     /// commits through the usual path, where only an earlier input gap rejects it: a take, an overdub
     /// layer, a RETAKE roll with no pass kept yet. A RETAKE roll with a kept pass commits that pass,
-    /// even inside the grace where a stop would let the pass in flight finish. A RETAKE approval's next
-    /// take is not armed. Loop-end stops and block jobs carry on when rendering resumes.
+    /// even inside the grace where a stop would let the pass in flight finish (and after such a stop),
+    /// unless the pass in flight is complete and clean: its edge ends the last rendered block, so it
+    /// commits as that edge would have kept it. A RETAKE approval's next take is not armed. Loop-end
+    /// stops and block jobs carry on when rendering resumes.
     pub fn punch_out(&mut self, cx: &mut Cx) {
         let Some(mut rec) = self.rec else { return };
         let i = rec.lane;
@@ -973,17 +981,27 @@ impl Looper {
             self.stop(cx, i);
             return;
         }
+        if rec.kind == Kind::Overdub && rec.start.is_some_and(|s| s >= cx.now) {
+            // Nothing summed yet: the layer is discarded as Stop discards it, the undo target restored.
+            self.discard_layer(cx, i, &rec);
+            self.release_recorder(cx, i);
+            self.lanes[i].state = if rec.stop_playback { LaneState::Stopped } else { LaneState::Playing };
+            return;
+        }
         rec.handoff = None;
-        let kept = rec.roll.is_some_and(|r| r.kept);
+        let kept = rec.roll.is_some_and(|r| r.kept) || rec.finishing_kept;
+        // Events at a window edge run in the block after it: one ending the last rendered block has
+        // not run yet.
+        let complete = rec.end.is_some_and(|e| e <= cx.now) && !rec.damaged;
         rec.roll = None;
-        if kept {
+        if kept && !complete {
             // A kept complete pass wins over the pass in flight, even inside its grace: a stop there
             // lets that pass finish, but the device cannot, and committing it cut short would floor
             // a many-bar take to one bar less.
             self.keep_last_pass(cx, i, rec);
             return;
         }
-        // Nothing complete kept: the pass or take in flight ends where the input did.
+        // Nothing complete kept, or the pass in flight is: it ends where the input did, or on its edge.
         rec.end = Some(rec.end.map_or(cx.now, |e| e.min(cx.now)));
         self.rec = Some(rec);
         self.finish_capture(cx, i);

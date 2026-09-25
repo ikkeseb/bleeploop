@@ -3,8 +3,9 @@
 //! WinMM). The diff and the port keys are pure functions; the poller that applies them is the only code
 //! here that touches midir, and only real hardware runs it.
 //!
-//! A port is followed by midir's id (WinMM's device interface path), so two ports with one name stay
-//! apart; bindings name it by [`PortKey`], recomputed on every poll. WinMM input ports are exclusive: a
+//! A port is followed by its [`Ident`], midir's id with the port's name: two ports with one name stay
+//! apart, and so do the ports of one multi-port device, which share one id (WinMM's device interface
+//! path). Bindings name a port by [`PortKey`], recomputed on every poll. WinMM input ports are exclusive: a
 //! port another program (or the web app's Web MIDI) holds fails to open, and is retried every poll.
 //!
 //! Allocation per message: midir's WinMM handler copies each message into a `Vec` it clears and
@@ -32,6 +33,11 @@ pub(crate) fn port_keys(names: &[String]) -> Vec<PortKey> {
         .collect()
 }
 
+/// How the poller follows a port from poll to poll: (midir's id, the port's name). WinMM's id is the
+/// device interface path, which the ports of one multi-port USB device share; midir itself finds a
+/// port again by both (`current_port_number`).
+pub(crate) type Ident<'a> = (&'a str, &'a str);
+
 /// A poll's changes: indices into the present list to open, and into the open list to close.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Diff {
@@ -39,19 +45,46 @@ pub(crate) struct Diff {
     pub(crate) close: Vec<usize>,
 }
 
-/// Compare the open connections' port ids with the ids listed now.
-pub(crate) fn diff(open: &[&str], present: &[&str]) -> Diff {
+/// Compare the open connections' ports with the ports listed now.
+pub(crate) fn diff<T: PartialEq>(open: &[T], present: &[T]) -> Diff {
     Diff {
         open: (0..present.len()).filter(|&i| !open.contains(&present[i])).collect(),
         close: (0..open.len()).filter(|&i| !present.contains(&open[i])).collect(),
     }
 }
 
+/// Each present port's connection: the open one that follows it, or a fresh number when the diff opens
+/// it (`opening`, listed again in the second list with its index), or none.
+pub(crate) fn conns(open: &[(Ident, u32)], present: &[Ident], opening: &[usize], next_conn: &mut u32) -> (Vec<Option<u32>>, Vec<(usize, u32)>) {
+    let mut fresh = Vec::new();
+    let conns = present
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            open.iter().find(|(o, _)| o == p).map(|&(_, conn)| conn).or_else(|| {
+                opening.contains(&i).then(|| {
+                    *next_conn = next_conn.wrapping_add(1);
+                    fresh.push((i, *next_conn));
+                    *next_conn
+                })
+            })
+        })
+        .collect();
+    (conns, fresh)
+}
+
 /// One open connection, owned by the poller.
 struct Connection {
     id: String,
+    name: String,
     conn: u32,
     input: midir::MidiInputConnection<()>,
+}
+
+impl Connection {
+    fn ident(&self) -> Ident<'_> {
+        (&self.id, &self.name)
+    }
 }
 
 /// The poller thread: list, diff, close what went away (its notes released first), open what arrived,
@@ -59,14 +92,12 @@ struct Connection {
 pub(crate) fn run(core: Arc<Core>, stop: Receiver<()>) {
     let mut open: Vec<Connection> = Vec::new();
     let mut next_conn: u32 = 0;
-    let mut failed: Vec<String> = Vec::new();
+    let mut failed: Vec<(String, String)> = Vec::new();
     loop {
-        let listed = list();
-        let ids: Vec<&str> = listed.iter().map(|(p, _)| p.id.as_str()).collect();
         // `id()` allocates; the poll is not a hot path.
-        let open_ids: Vec<String> = open.iter().map(|c| c.id.clone()).collect();
-        let open_refs: Vec<&str> = open_ids.iter().map(String::as_str).collect();
-        let d = diff(&open_refs, &ids);
+        let listed = list();
+        let present: Vec<Ident> = listed.iter().map(|(p, _)| p.ident()).collect();
+        let d = diff(&open.iter().map(Connection::ident).collect::<Vec<_>>(), &present);
 
         let mut gone = Vec::new();
         for &i in d.close.iter().rev() {
@@ -80,38 +111,25 @@ pub(crate) fn run(core: Arc<Core>, stop: Receiver<()>) {
         }
 
         let names: Vec<String> = listed.iter().map(|(p, _)| p.name.clone()).collect();
-        let keys = port_keys(&names);
-        let mut fresh = Vec::new();
-        let entries: Vec<PortEntry> = listed
-            .iter()
-            .zip(keys)
-            .enumerate()
-            .map(|(i, ((p, _), key))| {
-                let conn = open.iter().find(|c| c.id == p.id).map(|c| c.conn).or_else(|| {
-                    d.open.contains(&i).then(|| {
-                        next_conn = next_conn.wrapping_add(1);
-                        fresh.push((i, next_conn));
-                        next_conn
-                    })
-                });
-                PortEntry { key, conn }
-            })
-            .collect();
+        let open_conns: Vec<(Ident, u32)> = open.iter().map(|c| (c.ident(), c.conn)).collect();
+        let (port_conns, fresh) = conns(&open_conns, &present, &d.open, &mut next_conn);
+        let entries: Vec<PortEntry> = port_keys(&names).into_iter().zip(port_conns).map(|(key, conn)| PortEntry { key, conn }).collect();
         // Registered before it connects, so the first message finds its port.
         core.set_ports(entries);
 
         for (i, conn) in fresh {
             let (p, port) = &listed[i];
+            let ident = (p.id.clone(), p.name.clone());
             match connect(&core, port, conn) {
                 Ok(input) => {
-                    failed.retain(|id| *id != p.id);
-                    open.push(Connection { id: p.id.clone(), conn, input });
+                    failed.retain(|f| *f != ident);
+                    open.push(Connection { id: ident.0, name: ident.1, conn, input });
                 }
                 Err(e) => {
                     core.port_gone(conn);
-                    if !failed.contains(&p.id) {
+                    if !failed.contains(&ident) {
                         log::warn!("[midi] could not open input {}: {e}", p.name);
-                        failed.push(p.id.clone());
+                        failed.push(ident);
                     }
                 }
             }
@@ -133,6 +151,12 @@ pub(crate) fn run(core: Arc<Core>, stop: Receiver<()>) {
 struct Listed {
     id: String,
     name: String,
+}
+
+impl Listed {
+    fn ident(&self) -> Ident<'_> {
+        (&self.id, &self.name)
+    }
 }
 
 /// The present input ports in the system's order (empty when midir cannot start).
@@ -177,6 +201,32 @@ mod tests {
         assert_eq!(diff(&["a", "b"], &["b", "a"]), Diff { open: vec![], close: vec![] });
         assert_eq!(diff(&["a", "b", "c"], &["c", "d", "a"]), Diff { open: vec![1], close: vec![1] });
         assert_eq!(diff(&["a"], &[]), Diff { open: vec![], close: vec![0] });
+    }
+
+    // Two ports of one multi-port device share WinMM's interface path: each keeps its own connection
+    // from poll to poll, so neither's messages reach the other's owner or get dropped.
+    #[test]
+    fn ports_that_share_an_id_keep_their_own_connections_across_polls() {
+        let present: [Ident; 3] = [("usb#pedal", "Pedal"), ("usb#pedal", "MIDIIN2 (Pedal)"), ("usb#keys", "Keys")];
+        let mut next = 0;
+        let d = diff(&[], &present);
+        assert_eq!(d, Diff { open: vec![0, 1, 2], close: vec![] });
+        let (first, fresh) = conns(&[], &present, &d.open, &mut next);
+        assert_eq!(first, [Some(1), Some(2), Some(3)]);
+        let open: Vec<(Ident, u32)> = fresh.iter().map(|&(i, conn)| (present[i], conn)).collect();
+        // The next polls: nothing opens or closes, and every port keeps its own connection, whatever the
+        // order the system lists them in.
+        let opened: Vec<Ident> = open.iter().map(|(p, _)| *p).collect();
+        for listed in [present, [present[1], present[2], present[0]]] {
+            let d = diff(&opened, &listed);
+            assert_eq!(d, Diff { open: vec![], close: vec![] });
+            let (again, fresh) = conns(&open, &listed, &d.open, &mut next);
+            let expect = if listed == present { [Some(1), Some(2), Some(3)] } else { [Some(2), Some(3), Some(1)] };
+            assert_eq!(again, expect);
+            assert!(fresh.is_empty());
+        }
+        // One of them unplugged: only it closes.
+        assert_eq!(diff(&opened, &[present[0], present[2]]), Diff { open: vec![], close: vec![1] });
     }
 
     // The native port key (midi-actions.ts keyed by Web MIDI id): the n-th port with a name.

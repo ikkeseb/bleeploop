@@ -17,9 +17,10 @@
 //! `process`, [`SlotProcessor::stop`] follows its last, and the unit goes back on the port's return
 //! ring (a full ring parks it until there is room). With no device running the ports are serviced at
 //! once, without fades, and one silent frame of `process` carries a removed unit's release. Nothing
-//! here drops a unit: an eviction hands back an install still waiting on a port too. Installing into
-//! an occupied slot is a protocol error: the new unit goes straight back, counted, never started or
-//! stopped.
+//! here drops a unit: an eviction hands back an install still waiting on a port too, and a unit's
+//! methods run only while its slot holds it, so a panic the callback's guard catches unwinds past no
+//! unit held as a local. Installing into an occupied slot is a protocol error: the new unit goes
+//! straight back, counted, never started or stopped.
 //!
 //! The engine renders the slots once per range, not per chunk: from where they stopped up to the next
 //! frame a slot command waits for (a note, the target, a slot's live flag or gain), so a plugin sees
@@ -240,14 +241,16 @@ impl Rack {
                             s.park(unit, &mut self.protocol_errors);
                             continue;
                         }
-                        s.kind = unit.kind();
-                        s.latency = unit.latency().max(0);
                         s.held = [0; 2];
                         s.events.clear();
                         s.removing = false;
                         s.engaged = true;
                         s.fade = if engaged { self.fade_frames } else { 0 };
-                        s.unit = Some(unit);
+                        // The slot holds the unit before any of its methods runs: one that panics
+                        // unwinds with the unit here, never dropped as a local.
+                        let unit = s.unit.insert(unit);
+                        s.kind = unit.kind();
+                        s.latency = unit.latency().max(0);
                     }
                     SlotMsg::Remove => {
                         if s.unit.is_none() {
@@ -306,10 +309,14 @@ impl Rack {
         }
     }
 
-    /// The unit leaves: stopped, then handed back.
+    /// The unit leaves: stopped while the slot still holds it, then handed back. A `stop` that panics
+    /// unwinds with the unit left in the slot, for the owner's eviction (or the engine's drop, off the
+    /// audio thread).
     fn finish_removal(s: &mut Slot, errors: &mut u64) {
-        if let Some(mut unit) = s.unit.take() {
+        if let Some(unit) = s.unit.as_mut() {
             unit.stop();
+        }
+        if let Some(unit) = s.unit.take() {
             s.park(unit, errors);
         }
         s.removing = false;

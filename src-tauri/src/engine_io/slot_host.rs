@@ -1,7 +1,9 @@
 //! OWNS: a plugin owner's handshake with the engine for one slot: install a unit, take it back, and
 //! pick up a unit the device side evicted (a sample-rate change built a new engine).
 //!
-//! The owner thread builds and activates a unit, then [`SlotHost::install`]s it; lifecycle work
+//! The owner thread builds and activates a unit at [`SlotHost::rate`], then [`SlotHost::install`]s it
+//! with that rate (a unit activated for an engine a rebuild has since replaced comes straight back as
+//! an eviction, to be re-activated); lifecycle work
 //! (a restart, a teardown) first [`SlotHost::remove`]s it, which blocks until the engine has
 //! crossfaded it out and stopped it. While a device runs the engine services the slot's port at each
 //! block start. While none runs nothing would, so the host takes the engine lock itself and services
@@ -9,6 +11,7 @@
 //! [`Core::evicted`] until its owner takes it back ([`SlotHost::take_evicted`]), re-activates it at
 //! the new [`SlotHost::rate`] and installs it again.
 
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -47,14 +50,15 @@ impl SlotHost {
         self.core.max_block.load(Relaxed) as usize
     }
 
-    /// Hand an activated unit to the engine; it crossfades in at the next block (engaged at once while
-    /// no device runs). Gives the unit back with the reason when no engine exists yet, the slot already
-    /// holds a unit, or the port is full.
-    pub fn install(&self, unit: Box<dyn SlotProcessor>) -> Result<(), (Box<dyn SlotProcessor>, String)> {
-        if self.core.occupied[self.slot].load(Acquire) {
-            return Err((unit, format!("slot {} already holds a unit", self.slot)));
-        }
+    /// Hand a unit activated at `rate` to the engine; it crossfades in at the next block (engaged at
+    /// once while no device runs). An engine at another rate has replaced the one `rate` was read from:
+    /// the unit goes to [`SlotHost::take_evicted`] instead, for its owner to re-activate. Gives the unit
+    /// back with the reason when no engine exists yet, the slot already holds a unit, or the port is
+    /// full.
+    pub fn install(&self, unit: Box<dyn SlotProcessor>, rate: u32) -> Result<(), (Box<dyn SlotProcessor>, String)> {
         {
+            // Under the port lock: a rebuild holds every port while it publishes the new rate and
+            // replaces the ports, so the rate and the port read here belong to one engine.
             let mut port = match self.core.ports[self.slot].lock() {
                 Ok(port) => port,
                 Err(_) => return Err((unit, "slot port poisoned".to_string())),
@@ -62,6 +66,17 @@ impl SlotHost {
             let Some(port) = port.as_mut() else {
                 return Err((unit, "no audio device is open".to_string()));
             };
+            if self.core.occupied[self.slot].load(Acquire) {
+                return Err((unit, format!("slot {} already holds a unit", self.slot)));
+            }
+            if self.core.rate.load(Relaxed) != rate {
+                let mut waiting = self.core.evicted[self.slot].lock().unwrap_or_else(|e| e.into_inner());
+                if waiting.is_some() {
+                    return Err((unit, format!("slot {} already holds a unit", self.slot)));
+                }
+                *waiting = Some(unit);
+                return Ok(());
+            }
             if let Err(unit) = port.install(unit) {
                 return Err((unit, format!("slot {}'s port is full", self.slot)));
             }
@@ -123,15 +138,23 @@ impl SlotHost {
         unit
     }
 
-    /// With no device running nothing services the port: do it here, under the engine lock.
+    /// With no device running nothing services the port: do it here, under the engine lock. A unit that
+    /// panics here faults the engine as a callback panic does (the owner replaces it); a faulted engine
+    /// is left to that.
     fn service_if_idle(&self) {
         if self.core.running.load(Acquire) {
             return;
         }
-        if let Ok(mut rt) = self.core.rt.lock() {
-            if let Some(engine) = rt.engine.as_mut() {
-                engine.service_slots_idle();
-            }
+        let mut rt = self.core.rt.lock().unwrap_or_else(|e| e.into_inner());
+        // The owner raises `running` under this lock: a device may have started while this waited.
+        if self.core.running.load(Acquire) || rt.faulted {
+            return;
+        }
+        let rt = &mut *rt;
+        let Some(engine) = rt.engine.as_mut() else { return };
+        if catch_unwind(AssertUnwindSafe(|| engine.service_slots_idle())).is_err() {
+            self.core.counters.panics.fetch_add(1, Relaxed);
+            self.core.latch_fault(rt);
         }
     }
 }
@@ -180,9 +203,9 @@ mod tests {
         let slot = device.host().slot(0);
         let (calls, stops) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
         let unit = Box::new(Constant { level: 0.25, calls: calls.clone(), stops: stops.clone() });
-        assert!(slot.install(unit).is_ok());
+        assert!(slot.install(unit, 48_000).is_ok());
         let again = Box::new(Constant { level: 0.0, calls: calls.clone(), stops: stops.clone() });
-        assert!(slot.install(again).is_err(), "one unit per slot");
+        assert!(slot.install(again, 48_000).is_err(), "one unit per slot");
         assert!(device.wait_blocks(20, Duration::from_secs(5)));
         assert!(calls.load(SeqCst) > 0, "the engine processed the unit");
         let back = slot.remove(Duration::from_secs(2)).expect("comes back").expect("a unit");
@@ -199,7 +222,7 @@ mod tests {
         let slot = device.host().slot(1);
         let stops = Arc::new(AtomicUsize::new(0));
         let unit = Box::new(Constant { level: 1.0, calls: Arc::new(AtomicUsize::new(0)), stops: stops.clone() });
-        assert!(slot.install(unit).is_ok());
+        assert!(slot.install(unit, 48_000).is_ok());
         assert!(slot.remove(Duration::from_millis(100)).unwrap().is_some());
         assert_eq!(stops.load(SeqCst), 1);
     }

@@ -868,7 +868,7 @@ fn a_unit_slices_a_long_call_places_each_event_and_allocates_nothing() {
     let stopped = instance.activate(|_, _| (), config).unwrap();
     let (mut params, ring) = RingBuffer::<PluginEvent>::new(8);
     let faults = Arc::new(AtomicU32::new(0));
-    let terms = Terms { max_frames: 64, in_channels: 0, out_channels: 2, latency: 0 };
+    let terms = Terms { rate: 48_000, max_frames: 64, in_channels: 0, out_channels: 2, latency: 0 };
     let unit = ClapUnit::new(stopped, &terms, ring, faults.clone());
     let (mut unit, runs) = std::thread::spawn(move || {
         let mut unit = unit;

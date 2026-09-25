@@ -58,7 +58,7 @@ impl FrameClock {
         c.seq.store(seq.wrapping_add(2), Release);
     }
 
-    /// No callback runs (the owner, before it drops the streams): presses fall back to "now".
+    /// No callback runs (the owner, before it drops the streams): presses find no stamp.
     pub fn clear(&self) {
         self.publish(epoch(), 0, 0, 0);
     }
@@ -82,7 +82,7 @@ impl FrameClock {
     }
 
     /// The frame a press that arrived at `at` lands on: the render position then, plus one block.
-    /// `None` while no callback runs (send it unstamped: it lands at the next block start).
+    /// `None` while no callback runs (native MIDI then drops the press: `super::midi`'s rules).
     pub fn press_frame(&self, at: Instant) -> Option<Frame> {
         let (entry_ns, frame, block, rate) = self.read()?;
         let since = stamp(at).saturating_sub(entry_ns) as f64 / 1e9;

@@ -134,6 +134,10 @@ impl Mirror {
         if short > 0 {
             counters.share_starves.fetch_add(1, Relaxed);
         }
+        let trims = self.pipe.take_trims();
+        if trims > 0 {
+            counters.share_trims.fetch_add(trims, Relaxed);
+        }
     }
 }
 
@@ -169,8 +173,8 @@ mod tests {
     use crate::engine_io::pipes::tests::wandering;
     use cpal::Sample;
 
-    fn counts(c: &IoCounters) -> (u64, u64) {
-        (c.share_starves.load(Relaxed), c.share_overruns.load(Relaxed))
+    fn counts(c: &IoCounters) -> (u64, u64, u64) {
+        (c.share_starves.load(Relaxed), c.share_overruns.load(Relaxed), c.share_trims.load(Relaxed))
     }
 
     /// The engine at 48 kHz in 256-frame ASIO blocks, the mirror at 44.1 kHz in wandering WASAPI-sized
@@ -203,7 +207,7 @@ mod tests {
                 i += 1;
             }
             // Not one starve or overrun, the startup included: the drift is learned inside the margin.
-            assert_eq!(counts(&counters), (0, 0), "{skew:+} ppm: starves/overruns");
+            assert_eq!(counts(&counters), (0, 0, 0), "{skew:+} ppm: starves/overruns/trims");
             let drift = mirror.pipe.drift_ppm();
             assert!((drift - skew).abs() < 0.1 * skew.abs(), "{skew:+} ppm: learned {drift}");
             // What the ring holds after a pull: under the 20 ms setpoint plus one engine block.

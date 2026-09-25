@@ -247,6 +247,8 @@ existing P9 ring → looper record tap (lag-tolerant, records wet "for free").
   builds running). The test stops reading the ring from its last caught-up wait until after the
   respawn, while the producer keeps writing into ~10 ms of slack: a fixture defect, not the host's
   (the fix: drain in every wait).
+- A VST3 unit (live and engine) drops a param past 64 distinct ids in one block without a fault bit
+  (`MAX_PARAM_QUEUES`), after the controller already took the value.
 - CLAP and VST3 duplicate the load choreography (`load`/`vst3_load` and both owner mains): one
   shared owner would keep B1/B11 from returning. Not built.
 

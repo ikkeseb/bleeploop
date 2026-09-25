@@ -377,8 +377,12 @@ fixture plugins into a rendering engine). Code only a device or a real plugin ca
   with a kept pass commits that pass, even inside the grace where a stop would let the pass in flight
   finish (cut short, a many-bar take would floor a bar shorter).
 - **A device at another sample rate builds a new engine:** the plugin units go back to their owners,
-  who re-activate them at the new rate; the loops are lost. Same-rate switches and recoveries keep the
-  loops in place.
+  who re-activate them at the new rate; the loops are lost, also when that device then fails to start
+  (the restore builds a fresh engine). Same-rate switches and recoveries keep the loops in place. A
+  unit installed with a rate a rebuild has since replaced goes back to its owner for re-activation.
+- **A panic under the engine lock replaces the engine** at the same rate and restarts the device: the
+  loops are lost, the units go back to their owners (`DeviceEvent::EngineFaulted`), at most once per
+  10 s. A unit that panics on its way out is leaked with the old engine, never dropped off its owner.
 - **A pedal's press frame** is the render position at its arrival plus one block: always the next
   block or later, applied on that frame, jitter-free; the UI's gestures land at the next block start.
 - **The pipes:** a PullPipe's setpoint is at least the largest push plus the largest pull plus ~3 ms
@@ -396,8 +400,18 @@ fixture plugins into a rendering engine). Code only a device or a real plugin ca
   with the synths' code untouched. Measured on the dev PC, release, 2026-09-25: Stage 2 idle 3.94 %,
   Stage 3 load mean 24.5 % (the engine 18.2 %).
 
-Still open in Stage 4, all on the rig: the probe's scripted mode and its runs, the 10-minute soak,
-and the plugin fixture and `pnpm native:*` reruns.
+Known limits, not built: a punch-out inside a take's last quarter-beat commits the whole bars before
+it, where a stop there rounds up (owner's call); the dry signal steps without a ramp on a live toggle
+and on an instrument installed into a live slot (web parity unknown; the lap's bypass stop hears it);
+a pedal binding's port occurrence is recounted on every hot-plug, so two same-named controllers can
+swap bindings; the no-device removal path (a 1-frame process and `stop` on the plugin owner) has no
+test with a real unit, and the CLAP restart fixture's thread check would flag it.
+
+Still open in Stage 4: a cross-family review (the 2026-09-25 one ran on Opus and Gemini Flash; Codex
+had no quota); on the rig, the probe's scripted mode and its runs, the 10-minute soak (one
+`duplex_faults` per open would be the input running before the output exists: cpal 0.18.1 starts the
+driver at the input's build; the Stage 1 A1 run saw none), and the plugin fixture and `pnpm native:*`
+reruns.
 
 ## Stage 5 — cutover behind a hidden toggle
 

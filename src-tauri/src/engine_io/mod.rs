@@ -7,7 +7,7 @@
 //! sits in one `Mutex` that the device callback only `try_lock`s (a miss plays silence and counts) and
 //! that the owner takes only with both streams dropped, so the engine and the plugin slots outlive
 //! device switches and loss. The callback body runs under `catch_unwind` inside the lock guard: a caught
-//! panic latches a fault and plays silence until a new engine replaces it, the `Mutex` is never
+//! panic latches a fault and plays silence until the owner replaces the engine, the `Mutex` is never
 //! poisoned, and nothing unwinds into asio-sys's `extern "C"` bufferSwitch.
 //!
 //! # Module map
@@ -41,7 +41,12 @@
 //!   new sample rate builds a new engine: the plugin units go back to their owners (`SlotHost`), and the
 //!   loops go with the old engine.
 //! - **`Core::running` is up from just before the streams start until just after they drop,** so a
-//!   slot host never takes the engine lock from under a callback (it waits on its port instead).
+//!   slot host never takes the engine lock from under a callback (it waits on its port instead). The
+//!   owner raises it under the engine lock, and a slot host checks it again once it holds the lock.
+//! - **A fault replaces the engine.** A panic caught under the engine lock (a callback, the idle slot
+//!   service, a punch-out) latches `Core::fault`; the owner then builds a new engine at the same rate
+//!   and restarts the device that ran. The loops go with the faulted engine, its units back to their
+//!   owners (`DeviceEvent::EngineFaulted`). A second fault within `FAULT_HOLDOFF` stays silent.
 //! - **The callback never allocates, logs, locks (beyond its `try_lock`) or waits.** Counters are
 //!   atomics the owner reads; the owner logs.
 //! - **cpal is pinned at `=0.18.1`:** the callback order the Stage 1 A1 run proved is read from
@@ -64,7 +69,7 @@ pub(crate) mod test_rig;
 mod tests;
 mod transition;
 
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering::{AcqRel, Acquire, Relaxed}};
 use std::sync::mpsc::{sync_channel, RecvTimeoutError, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -135,6 +140,9 @@ pub enum DeviceEvent {
     Fallback(DeviceStatus),
     /// Share output's endpoint stopped: the mirror is off and the pick forgotten.
     ShareLost { reason: String },
+    /// The engine panicked and a new one at the same rate replaced it: the loops are gone, the plugin
+    /// units went back to their owners.
+    EngineFaulted,
 }
 
 /// Counters the callbacks and pipes bump; every one stays 0 in a clean run (the Stage 4 soak).
@@ -153,12 +161,16 @@ pub struct IoCounters {
     /// was full (frames dropped).
     pub join_starves: AtomicU64,
     pub join_overruns: AtomicU64,
-    /// Share output: the mirror stream found its ring short, or the engine found it full.
+    /// WASAPI join: the ring ran over twice its setpoint (the output lost time) and was trimmed back.
+    pub join_trims: AtomicU64,
+    /// Share output: the mirror stream found its ring short, or the engine found it full, or the
+    /// mirror trimmed it back (it lost time).
     pub share_starves: AtomicU64,
     pub share_overruns: AtomicU64,
+    pub share_trims: AtomicU64,
     /// `EngineHost::send` found the command ring full.
     pub commands_full: AtomicU64,
-    /// A panic caught in the callback (the engine is silent until a new one replaces it).
+    /// A panic caught under the engine lock or while evicting (the owner replaces the engine).
     pub panics: AtomicU64,
     /// Allocations inside the callback's guard (DEV builds: `host::rt_alloc`).
     pub rt_allocs: AtomicU64,
@@ -174,8 +186,10 @@ pub struct IoDiag {
     pub duplex_faults: u64,
     pub join_starves: u64,
     pub join_overruns: u64,
+    pub join_trims: u64,
     pub share_starves: u64,
     pub share_overruns: u64,
+    pub share_trims: u64,
     pub commands_full: u64,
     pub panics: u64,
     pub rt_allocs: u64,
@@ -185,7 +199,8 @@ pub struct IoDiag {
 /// What the callback holds under the engine lock.
 pub(crate) struct Rt {
     pub(crate) engine: Option<Engine>,
-    /// A panic was caught in the callback: the engine stays silent until a new one replaces it.
+    /// A panic was caught under the lock: the engine stays silent until the owner replaces it
+    /// (`Core::fault` tells the owner).
     pub(crate) faulted: bool,
     /// ASIO: this cycle's input, copied by the input callback for the output callback, and each
     /// side's cycle count (equal after a whole cycle).
@@ -213,6 +228,8 @@ pub(crate) struct Core {
     pub(crate) ports: [Mutex<Option<SlotPort>>; SLOT_COUNT],
     /// A unit is in the engine for this slot (set by a successful install, cleared when it comes back).
     pub(crate) occupied: [AtomicBool; SLOT_COUNT],
+    /// `Rt::faulted` was latched: the owner replaces the engine at its next poll.
+    pub(crate) fault: AtomicBool,
     /// Units the device side took out on its own (a rebuild), waiting for their plugin owner.
     pub(crate) evicted: [Mutex<Option<Box<dyn SlotProcessor>>>; SLOT_COUNT],
     /// A device callback runs or is about to: the owner sets it just before the streams start and
@@ -256,6 +273,7 @@ impl Core {
             ends: Mutex::new(None),
             ports: std::array::from_fn(|_| Mutex::new(None)),
             occupied: std::array::from_fn(|_| AtomicBool::new(false)),
+            fault: AtomicBool::new(false),
             evicted: std::array::from_fn(|_| Mutex::new(None)),
             running: AtomicBool::new(false),
             rate: AtomicU32::new(0),
@@ -274,6 +292,12 @@ impl Core {
 
     pub(crate) fn rate(&self) -> Option<u32> {
         Some(self.rate.load(Relaxed)).filter(|&r| r != 0)
+    }
+
+    /// A panic was caught under the engine lock: silence the engine and tell the owner.
+    pub(crate) fn latch_fault(&self, rt: &mut Rt) {
+        rt.faulted = true;
+        self.fault.store(true, std::sync::atomic::Ordering::Release);
     }
 }
 
@@ -352,13 +376,17 @@ impl EngineHost {
         EngineHost { core }
     }
 
-    /// Ask the owner and wait for its answer (at most `timeout`).
-    fn ask<T>(&self, op: &str, timeout: Duration, request: impl FnOnce(SyncSender<Result<T, String>>) -> Request) -> Result<T, String> {
+    fn owner_tx(&self) -> Result<std::sync::mpsc::Sender<Request>, String> {
         let tx = match self.core.owner.lock() {
             Ok(owner) => owner.as_ref().map(|o| o.tx.clone()),
             Err(_) => None,
         };
-        let tx = tx.ok_or_else(|| "the audio device owner is not running".to_string())?;
+        tx.ok_or_else(|| "the audio device owner is not running".to_string())
+    }
+
+    /// Ask the owner and wait for its answer (at most `timeout`).
+    fn ask<T>(&self, op: &str, timeout: Duration, request: impl FnOnce(SyncSender<Result<T, String>>) -> Request) -> Result<T, String> {
+        let tx = self.owner_tx()?;
         let (reply_tx, reply_rx) = sync_channel(1);
         tx.send(request(reply_tx)).map_err(|_| "the audio device owner is gone".to_string())?;
         match reply_rx.recv_timeout(timeout) {
@@ -373,13 +401,24 @@ impl EngineHost {
     /// engine and evicts the plugin units into their slot hosts. A switch that fails to start reopens
     /// the device it replaced; a request for the running device only changes its channel.
     pub fn open(&self, request: DeviceRequest) -> Result<DeviceStatus, String> {
-        let cancelled = Arc::new(AtomicBool::new(false));
-        let result = self.ask("open", OPEN_TIMEOUT, |reply| Request::Open(request, cancelled.clone(), reply));
-        if result.is_err() {
-            // A result that arrives after the timeout is the owner's to undo.
-            cancelled.store(true, std::sync::atomic::Ordering::Release);
+        // Whoever claims the flag first decides: the owner once the open finished (its result is then
+        // this caller's), or this caller on its timeout (a later open is the owner's to undo).
+        let claimed = Arc::new(AtomicBool::new(false));
+        let tx = self.owner_tx()?;
+        let (reply_tx, reply_rx) = sync_channel(1);
+        tx.send(Request::Open(request, claimed.clone(), reply_tx)).map_err(|_| "the audio device owner is gone".to_string())?;
+        match reply_rx.recv_timeout(OPEN_TIMEOUT) {
+            Ok(result) => result,
+            Err(RecvTimeoutError::Timeout) => {
+                if claimed.compare_exchange(false, true, AcqRel, Acquire).is_ok() {
+                    Err(format!("open timed out after {} s", OPEN_TIMEOUT.as_secs()))
+                } else {
+                    // The owner claimed it at the deadline: its answer is on the way.
+                    reply_rx.recv().unwrap_or_else(|_| Err("the audio device owner stopped".to_string()))
+                }
+            }
+            Err(RecvTimeoutError::Disconnected) => Err("the audio device owner stopped".to_string()),
         }
-        result
     }
 
     /// Stop the device (loops pause in place; a take in flight punches out, STATUS E3).
@@ -454,8 +493,10 @@ impl EngineHost {
             duplex_faults: c.duplex_faults.load(Relaxed),
             join_starves: c.join_starves.load(Relaxed),
             join_overruns: c.join_overruns.load(Relaxed),
+            join_trims: c.join_trims.load(Relaxed),
             share_starves: c.share_starves.load(Relaxed),
             share_overruns: c.share_overruns.load(Relaxed),
+            share_trims: c.share_trims.load(Relaxed),
             commands_full: c.commands_full.load(Relaxed),
             panics: c.panics.load(Relaxed),
             rt_allocs: c.rt_allocs.load(Relaxed),
@@ -463,8 +504,9 @@ impl EngineHost {
         }
     }
 
-    /// Close the device and join the owner thread. The engine and its slots drop on the owner thread
-    /// (every plugin unit must have been removed first: `SlotHost::remove`). Later requests fail.
+    /// Close the device and join the owner thread. The engine drops on the owner thread; a plugin unit
+    /// still in it goes back to its owner first, stopped (`SlotHost::remove` / `take_evicted`). Later
+    /// requests fail.
     pub fn shutdown(&self) {
         let link = self.core.owner.lock().ok().and_then(|mut owner| owner.take());
         let Some(OwnerLink { tx, join }) = link else { return };

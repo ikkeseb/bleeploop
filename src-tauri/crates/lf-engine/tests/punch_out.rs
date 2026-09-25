@@ -225,7 +225,7 @@ fn a_retake_roll_with_nothing_kept_ends_at_the_punch_out() {
 }
 
 /// REC on another lane approves the roll and would record there from the pass edge; the device stops
-/// first: the pass in flight ends at the punch-out and the approved lane stays empty.
+/// first: the approved lane stays empty, and pass 1, complete and kept, is the take.
 #[test]
 fn a_retake_approval_waiting_for_its_pass_edge_arms_nothing() {
     let mut rig = Rig::new();
@@ -237,6 +237,48 @@ fn a_retake_approval_waiting_for_its_pass_edge_arms_nothing() {
     rig.punch_out();
     assert_eq!((rig.state(0), rig.state(1)), (LaneState::Playing, LaneState::Empty));
     assert!(rig.window().is_none());
+    assert_eq!(rig.master(), len);
+    assert_eq!(mismatches(&rig.pcm(0), start), 0, "pass 1, complete and kept");
+    plays_on_in_place(&mut rig);
+}
+
+/// A stop gesture in the grace lets pass 2 finish on its edge; the device stops first: pass 1, complete
+/// and kept, is the take, as without the gesture.
+#[test]
+fn a_retake_stopped_in_its_grace_keeps_the_last_complete_pass_on_a_punch_out() {
+    let mut rig = Rig::new();
+    let (len, start) = rolling_retake(&mut rig);
+    rig.advance_to(start + 2 * len - len / 32);
+    rig.press(Command::RecDub(0));
+    assert_eq!(rig.end_frame(), start + 2 * len, "the pass in flight finishes first");
+    rig.advance(100);
+    rig.punch_out();
+    assert!(rig.state(0) == LaneState::Playing && rig.window().is_none());
+    assert_eq!(rig.master(), len);
+    assert_eq!(mismatches(&rig.pcm(0), start), 0, "pass 1, complete and kept");
+    plays_on_in_place(&mut rig);
+}
+
+/// The last rendered block ends exactly on pass 2's edge, whose event runs only in the next block: pass
+/// 2 is complete. Clean, it is the take; damaged, the kept pass 1 is.
+#[test]
+fn a_retake_roll_stopped_on_its_pass_edge_commits_the_pass_it_completed() {
+    for damaged in [false, true] {
+        let mut rig = Rig::new();
+        let (len, start) = rolling_retake(&mut rig);
+        if damaged {
+            rig.advance_to(start + len + len / 2);
+            rig.gap();
+        }
+        rig.advance_to(start + 2 * len);
+        assert_eq!(rig.end_frame(), start + 2 * len, "the edge has not run yet");
+        rig.punch_out();
+        assert!(rig.state(0) == LaneState::Playing && rig.window().is_none());
+        assert_eq!(rig.master(), len);
+        let pass = if damaged { start } else { start + len };
+        assert_eq!(mismatches(&rig.pcm(0), pass), 0, "damaged {damaged}: the pass from {pass}");
+        assert_eq!(rig.rejected(), 0);
+    }
 }
 
 #[test]
@@ -262,6 +304,38 @@ fn an_overdub_layer_ends_at_the_punch_out_and_is_kept() {
     }
     assert_eq!(rig.engine.looper().undo_pcm(0), Some(before), "the undo target is the loop before it");
     plays_on_in_place(&mut rig);
+}
+
+/// An overdub's window opens `align` frames after the press; a punch-out before it has summed nothing,
+/// so the layer is discarded as Stop discards it: the lane plays on and undo still reaches the loop
+/// before the earlier layer.
+#[test]
+fn an_overdub_punched_out_before_its_window_opens_keeps_the_undo_target() {
+    let mut rig = Rig::with(Opts { align: 1920, ..Default::default() });
+    rig.set_level(0.5);
+    let master = rig.record_first_take(0, 1, 2400);
+    rig.idle();
+    let base = rig.pcm(0);
+    rig.set_level(DUB);
+    rig.press(Command::RecDub(0));
+    rig.advance(master / 4);
+    rig.press(Command::RecDub(0)); // the layer ends `align` frames later
+    rig.advance(4000);
+    rig.idle();
+    let layered = rig.pcm(0);
+    assert_ne!(layered, base);
+    assert_eq!(rig.engine.looper().undo_pcm(0), Some(base.clone()));
+
+    rig.press(Command::RecDub(0));
+    rig.advance(100); // inside `align`: its window has not opened
+    rig.punch_out();
+    assert!(rig.state(0) == LaneState::Playing && rig.window().is_none() && rig.lane(0).can_undo);
+    rig.idle();
+    assert_eq!(rig.pcm(0), layered, "the loop is untouched");
+    assert_eq!(rig.engine.looper().undo_pcm(0), Some(base.clone()), "the undo target is the one before");
+    rig.press(Command::Undo(0));
+    rig.idle();
+    assert_eq!(rig.pcm(0), base, "undo takes the earlier layer off");
 }
 
 #[test]

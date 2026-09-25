@@ -7,13 +7,13 @@
 //! requests it polls every `POLL` for what the callbacks latched: a dead stream, a dead Share mirror.
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::atomic::{AtomicBool, Ordering::{Acquire, Relaxed, Release}};
+use std::sync::atomic::{AtomicBool, Ordering::{AcqRel, Acquire, Relaxed, Release}};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender};
-use std::sync::Arc;
+use std::sync::{Arc, MutexGuard};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use lf_engine::{Engine, EngineConfig, EngineHandle, SlotProcessor};
+use lf_engine::{Engine, EngineConfig, EngineHandle, SlotPort, SlotProcessor, SLOT_COUNT};
 use rtrb::{Consumer, Producer, RingBuffer};
 
 use super::callback::{Run, Tap, TapEnd, LATENCY_SAMPLES, MAX_DEVICE_BLOCK};
@@ -32,48 +32,69 @@ const CALLBACK_WAIT: Duration = Duration::from_secs(1);
 const START_WAIT: Duration = Duration::from_secs(2);
 /// Device events kept for `EngineHost::take_device_events`; older ones drop.
 const MAX_EVENTS: usize = 64;
+/// The shortest time between two engine replacements after a fault: a unit that panics on every block
+/// would otherwise rebuild the engine in a loop. A fault inside it waits for it to pass.
+const FAULT_HOLDOFF: Duration = Duration::from_secs(10);
 /// The owner thread's stack: engines are built and moved on it (`Engine` is ~20 KB inline; a Windows
 /// thread gets 1 MB by default), with room to spare.
 const STACK: usize = 4 << 20;
 /// Put a new engine (built at `config`'s rate) in place of the running one, with no device running,
-/// and hand back the old one for the caller to drop off the audio thread. The old engine's units go to
-/// their plugin owners: pending installs land first, then every unit is evicted into
+/// and hand back the old one for the caller to drop off the audio thread (`None` when there was none,
+/// or when a unit panicked on its way out and the old engine was leaked: `evict`). The old engine's
+/// units go to their plugin owners: pending installs land first, then every unit is evicted into
 /// `Core::evicted` (`SlotHost::take_evicted`). Every port is held across the swap, so a plugin owner
-/// cannot slip an install into the old engine. The device owner's rebuild, and the test device's.
+/// cannot slip an install into the old engine, and the new terms are published before any unit is
+/// handed back, so its owner re-activates it at them. The device owner's rebuild, and the test
+/// device's.
 pub(crate) fn swap_engine(core: &Core, engine: Engine, handle: EngineHandle, config: EngineConfig) -> Option<Engine> {
     let EngineHandle { commands, events, slots } = handle;
     let mut ports = core.ports.each_ref().map(|p| p.lock().unwrap_or_else(|e| e.into_inner()));
-    let mut old = {
+    core.rate.store(config.sample_rate, Relaxed);
+    core.max_block.store(config.max_block as u32, Relaxed);
+    let old = {
         let mut rt = rt(core);
         rt.faulted = false;
+        core.fault.store(false, Relaxed);
         rt.engine.replace(engine)
     };
-    let evict = old.is_some();
-    if let Some(old) = old.as_mut() {
-        let evicted = catch_unwind(AssertUnwindSafe(|| {
-            old.service_slots_idle();
-            old.evict_slots();
-        }));
-        if evicted.is_err() {
-            core.counters.panics.fetch_add(1, Relaxed);
-            log::error!("[engine_io] a unit panicked while it was evicted");
-        }
-    }
-    for (slot, (port, new)) in ports.iter_mut().zip(slots).enumerate() {
-        if let Some(port) = port.as_mut() {
-            while let Some(unit) = port.returned() {
-                park(core, slot, unit);
-            }
-        }
-        if evict {
-            core.occupied[slot].store(false, Release);
-        }
+    core.rt.clear_poison();
+    let old = old.and_then(|old| evict(core, &mut ports, old));
+    for (port, new) in ports.iter_mut().zip(slots) {
         **port = Some(new);
     }
     *core.ends.lock().unwrap_or_else(|e| e.into_inner()) = Some(Ends { commands, events });
-    core.rate.store(config.sample_rate, Relaxed);
-    core.max_block.store(config.max_block as u32, Relaxed);
     old
+}
+
+/// Hand every unit of `old`, an engine nothing renders any more, to its plugin owner, stopped: into
+/// `Core::evicted`, with whatever its ports (held by the caller) had returned. Returns the engine for
+/// the caller to drop, or `None` when a unit panicked on its way out: the engine is leaked then, with
+/// any unit still in it, rather than dropped here (a drop calls the plugin's DLL off its owner thread).
+/// Such a slot stays occupied, so its owner's teardown leaks the plugin instead of unloading it.
+fn evict(core: &Core, ports: &mut [MutexGuard<'_, Option<SlotPort>>; SLOT_COUNT], mut old: Engine) -> Option<Engine> {
+    let clean = catch_unwind(AssertUnwindSafe(|| {
+        old.service_slots_idle();
+        old.evict_slots();
+    }))
+    .is_ok();
+    if !clean {
+        core.counters.panics.fetch_add(1, Relaxed);
+        log::error!("[engine_io] a unit panicked while it was evicted; leaking the old engine");
+    }
+    for (slot, port) in ports.iter_mut().enumerate() {
+        if let Some(port) = port.as_mut() {
+            while let Some(unit) = port.returned() {
+                park(core, slot, unit);
+                core.occupied[slot].store(false, Release);
+            }
+        }
+    }
+    if clean {
+        Some(old)
+    } else {
+        std::mem::forget(old);
+        None
+    }
 }
 
 /// Keep an evicted unit for its plugin owner. A second one cannot come back under the slot protocol
@@ -88,16 +109,19 @@ fn park(core: &Core, slot: usize, unit: Box<dyn SlotProcessor>) {
     }
 }
 
-/// WASAPI join: the ring's capacity and the fill it holds. The setpoint follows the pipe's rule (the
-/// largest push plus the largest pull plus ~3 ms: `pipes::PipeConfig::setpoint`) for WASAPI shared
-/// mode's 10 ms periods on both sides; a device with longer periods starves the join (`join_starves`).
-const JOIN_CAPACITY_SECONDS: f64 = 0.2;
+/// WASAPI join: the ring's capacity and the fill it holds. The capacity holds the capture that runs
+/// before the output opens (the Stage 1 spike measured ~300 ms; the prime drops it) without a drop. The
+/// setpoint follows the pipe's rule (the largest push plus the largest pull plus ~3 ms:
+/// `pipes::PipeConfig::setpoint`) for WASAPI shared mode's 10 ms periods on both sides; a device with
+/// longer periods starves the join (`join_starves`).
+const JOIN_CAPACITY_SECONDS: f64 = 0.5;
 const JOIN_SETPOINT_SECONDS: f64 = 0.025;
 
 type Reply<T> = SyncSender<Result<T, String>>;
 
 pub(crate) enum Request {
-    /// The flag is the caller's timeout: an open that succeeds after it is closed again.
+    /// The flag decides who owns the result: the first to claim it, the owner once the open finished or
+    /// the caller on its timeout. An open the caller gave up on is closed again.
     Open(DeviceRequest, Arc<AtomicBool>, Reply<DeviceStatus>),
     Close(Reply<()>),
     SetInputChannel(Option<u32>, Reply<()>),
@@ -135,6 +159,8 @@ struct Owner<D: Driver> {
     share: Option<String>,
     mirror: Option<Box<dyn Mirror>>,
     taps: TapHandoff,
+    /// When a fault last replaced the engine (`FAULT_HOLDOFF`).
+    replaced: Option<Instant>,
 }
 
 /// Start the owner thread for `core`.
@@ -147,7 +173,7 @@ pub(crate) fn spawn<D: Driver>(core: Arc<Core>, config: HostConfig, driver: D) -
     let join = std::thread::Builder::new()
         .name("lf-engine-owner".into())
         .stack_size(STACK)
-        .spawn(move || Owner { core, driver, config, active: None, share: None, mirror: None, taps }.serve(rx))?;
+        .spawn(move || Owner { core, driver, config, active: None, share: None, mirror: None, taps, replaced: None }.serve(rx))?;
     Ok(OwnerLink { tx, join })
 }
 
@@ -179,9 +205,10 @@ impl<D: Driver> Owner<D> {
 
     fn handle(&mut self, request: Request) {
         match request {
-            Request::Open(request, cancelled, reply) => {
+            Request::Open(request, claimed, reply) => {
                 let mut result = self.open(request, false, true);
-                if result.is_ok() && cancelled.load(Acquire) {
+                let abandoned = claimed.compare_exchange(false, true, AcqRel, Acquire).is_err();
+                if abandoned && result.is_ok() {
                     log::warn!("[engine_io] open finished after its caller timed out: closing the device again");
                     self.stop(true);
                     result = Err("the open was cancelled".to_string());
@@ -202,8 +229,11 @@ impl<D: Driver> Owner<D> {
         }
     }
 
-    /// What the callbacks latched: a dead stream (a loss), a dead Share mirror.
+    /// What the callbacks latched: a faulted engine, a dead stream (a loss), a dead Share mirror.
     fn poll(&mut self) {
+        if self.core.fault.swap(false, AcqRel) {
+            self.replace_faulted();
+        }
         if let Some(bits) = self.active.as_ref().map(|a| a.run.fault.load(Acquire)).filter(|&b| b != 0) {
             self.lose(bits);
         }
@@ -251,14 +281,15 @@ impl<D: Driver> Owner<D> {
         }
     }
 
-    /// Build an engine at `rate`. The one it replaces (`evict`: another rate) hands its units to their
-    /// plugin owners (`SlotHost::take_evicted`, re-activated at the new rate) and is dropped here.
+    /// Build an engine at `rate`. The one it replaces (`evict`: another rate, or a fault) hands its
+    /// units to their plugin owners (`SlotHost::take_evicted`, re-activated at the new rate) and is
+    /// dropped here.
     fn build(&mut self, rate: u32, evict: bool) {
         let began = Instant::now();
         let config = EngineConfig { max_loop_seconds: self.config.max_loop_seconds, ..EngineConfig::new(rate) };
         let (engine, handle) = Engine::new(config);
         let old = swap_engine(&self.core, engine, handle, config);
-        debug_assert_eq!(old.is_some(), evict, "an engine is replaced only for another rate");
+        debug_assert!(old.is_none() || evict, "an engine is replaced only for another rate or a fault");
         drop(old);
         log::info!("[engine_io] engine built at {rate} Hz in {} ms{}", began.elapsed().as_millis(), if evict { "; the old one's units wait for their owners" } else { "" });
     }
@@ -286,9 +317,13 @@ impl<D: Driver> Owner<D> {
             })?),
         };
         let wiring = Wiring::new(self.core.clone(), run.clone(), join);
-        // Up before the first callback: a slot host waits on its port instead of taking the engine lock
-        // from under the callback (a lock miss).
-        self.core.running.store(true, Release);
+        // Up before the first callback, and raised under the engine lock: a slot host servicing its
+        // port finishes first, and one waiting for the lock finds it up and waits on its port instead
+        // of taking the lock from under the callback (a lock miss).
+        {
+            let _rt = rt(&self.core);
+            self.core.running.store(true, Release);
+        }
         let started = match self.driver.start(device, &spec, wiring) {
             Ok(started) => started,
             Err(error) => {
@@ -310,6 +345,8 @@ impl<D: Driver> Owner<D> {
         if let Some(failure) = failure {
             drop(started.streams);
             self.halted();
+            // Its first callbacks may have started a take: it punches out as at any stop.
+            self.punch_out();
             return Err(failure);
         }
         let block = if started.block > 0 { started.block } else { spec.block };
@@ -365,20 +402,9 @@ impl<D: Driver> Owner<D> {
         drop(active.streams);
         // After the drop: a callback still in flight would publish over the cleared clock.
         self.halted();
+        self.punch_out();
         let tap = {
             let mut rt = rt(&self.core);
-            let rt = &mut *rt;
-            let punched = catch_unwind(AssertUnwindSafe(|| {
-                if !rt.faulted {
-                    if let Some(engine) = rt.engine.as_mut() {
-                        engine.punch_out();
-                    }
-                }
-            }));
-            if punched.is_err() {
-                rt.faulted = true;
-                self.core.counters.panics.fetch_add(1, Relaxed);
-            }
             // A tap still on its way in comes out with the one in use: the mirror they fed is gone.
             let pending = rt.taps.as_mut().and_then(|end| end.rx.pop().ok()).flatten();
             (rt.tap.take(), pending)
@@ -389,6 +415,42 @@ impl<D: Driver> Owner<D> {
         }
         // The tap is out: the mirror it fed goes last.
         self.mirror = None;
+    }
+
+    /// No stream runs: a take or overdub in flight ends after the last rendered frame and is kept.
+    fn punch_out(&self) {
+        let mut rt = rt(&self.core);
+        let rt = &mut *rt;
+        if rt.faulted {
+            return;
+        }
+        let Some(engine) = rt.engine.as_mut() else { return };
+        if catch_unwind(AssertUnwindSafe(|| engine.punch_out())).is_err() {
+            self.core.counters.panics.fetch_add(1, Relaxed);
+            self.core.latch_fault(rt);
+        }
+    }
+
+    /// The engine faulted (a panic under its lock): it plays silence and no longer services its slots.
+    /// Build a new one at the same rate (its loops are lost, its units go back to their owners) and
+    /// restart the device that ran. Within `FAULT_HOLDOFF` of the last replacement the fault waits.
+    fn replace_faulted(&mut self) {
+        let Some(rate) = self.core.rate() else { return };
+        if self.replaced.is_some_and(|at| at.elapsed() < FAULT_HOLDOFF) {
+            self.core.fault.store(true, Release);
+            return;
+        }
+        self.replaced = Some(Instant::now());
+        log::error!("[engine_io] the engine faulted: replacing it at {rate} Hz; its loops are lost, its plugin units go back to their owners");
+        let request = self.active.as_ref().map(|a| a.request.clone());
+        self.stop(false);
+        self.build(rate, true);
+        self.event(DeviceEvent::EngineFaulted);
+        if let Some(request) = request {
+            if let Err(error) = self.open(request, true, false) {
+                log::error!("[engine_io] the device did not restart after the engine was replaced: {error}");
+            }
+        }
     }
 
     /// A stream died: stop without a fade, report it, and try the fallbacks in order.
@@ -494,14 +556,18 @@ impl<D: Driver> Owner<D> {
         super::status(&self.core)
     }
 
-    /// Close the device and drop the engine and its slots here.
+    /// Close the device and drop the engine here. A unit still in it goes back to its plugin owner
+    /// first, stopped, as at a rebuild.
     fn shutdown(&mut self) {
         self.stop(true);
         let engine = rt(&self.core).engine.take();
-        *self.core.ends.lock().unwrap_or_else(|e| e.into_inner()) = None;
-        for port in &self.core.ports {
-            *port.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        let mut ports = self.core.ports.each_ref().map(|p| p.lock().unwrap_or_else(|e| e.into_inner()));
+        let engine = engine.and_then(|engine| evict(&self.core, &mut ports, engine));
+        for port in ports.iter_mut() {
+            **port = None;
         }
+        drop(ports);
+        *self.core.ends.lock().unwrap_or_else(|e| e.into_inner()) = None;
         self.core.rate.store(0, Relaxed);
         self.core.max_block.store(0, Relaxed);
         drop(engine);
