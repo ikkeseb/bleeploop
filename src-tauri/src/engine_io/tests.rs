@@ -454,17 +454,58 @@ fn a_held_engine_lock_plays_silence_counts_misses_and_flags_the_input_gap() {
 }
 
 #[test]
-fn a_late_callback_is_a_gap_that_jumps_the_frame_counter_and_flags_an_xrun() {
+fn a_late_asio_wake_loses_nothing() {
     let h = Harness::new();
     h.open(asio(Some(256)));
     h.play(RATE / 20);
     h.fake.gap.store(2, SeqCst);
     h.play(RATE / 20);
     let diag = h.host.diag();
-    assert_eq!((diag.gaps, diag.engine.xruns), (1, 1));
+    assert_eq!((diag.gaps, diag.engine.xruns), (0, 0), "{diag:?}");
     let run = &h.starts()[0];
-    let jumps: Vec<Frame> = run.windows(2).map(|w| w[1] - w[0]).filter(|&d| d != 256).collect();
-    assert_eq!(jumps, vec![3 * 256], "the two periods the device lost");
+    assert!(run.windows(2).all(|w| w[1] - w[0] == 256), "every bufferSwitch is one period on the frame counter");
+}
+
+#[test]
+fn a_late_wasapi_callback_that_finds_frames_still_queued_loses_nothing() {
+    let h = Harness::new();
+    h.open(wasapi(None, None));
+    h.play(RATE / 20);
+    // One period late: the 2.2-period buffer still holds 0.2 of one, and this callback fills two.
+    h.fake.gap.store(1, SeqCst);
+    h.play(RATE / 20);
+    let diag = h.host.diag();
+    assert_eq!((diag.gaps, diag.engine.xruns), (0, 0), "{diag:?}");
+    let first = h.starts()[0][0];
+    assert!(!h.fake.heard(first..h.frame()).iter().any(|s| s.is_nan()), "no frame skipped");
+}
+
+#[test]
+fn a_wasapi_buffer_that_ran_dry_skips_what_played_dry_in_the_frames_and_the_input_alike() {
+    let h = Harness::new();
+    // A ramp on the input, so what plays names the input frame it came from.
+    const STEP: f32 = 1.0e-7;
+    h.fake.set_input(|frame| (frame % (1 << 20)) as f32 * STEP);
+    h.open(wasapi(None, None));
+    h.send(Command::SetSlotLive(0, true));
+    // Input frames behind the frame counter where the input is heard (input 2 plays it doubled).
+    let lag = |h: &Harness| {
+        let at = h.frame();
+        let heard = h.fake.heard(at - 64..at);
+        (at - 32) as f64 - heard[31] as f64 / 2.0 / STEP as f64
+    };
+    h.play(RATE / 2);
+    let before = lag(&h);
+    // Three periods between wakes (1440 frames) against a 1056-frame buffer: 384 played dry.
+    h.fake.gap.store(2, SeqCst);
+    h.play(RATE / 10);
+    let diag = h.host.diag();
+    assert_eq!((diag.gaps, diag.engine.xruns, diag.join_trims), (1, 1, 0), "{diag:?}");
+    let first = h.starts()[0][0];
+    let skipped = h.fake.heard(first..h.frame()).iter().filter(|s| s.is_nan()).count();
+    assert_eq!(skipped, 384, "the frame counter skipped what the device played dry");
+    let after = lag(&h);
+    assert!((after - before).abs() < 2.0, "the input lands where it did: lag {before:.1} then {after:.1}");
 }
 
 #[test]
@@ -487,6 +528,22 @@ fn an_input_missing_from_its_cycle_is_one_duplex_fault() {
     h.fake.skip_input.store(true, SeqCst);
     h.play(RATE / 10);
     assert_eq!(h.host.diag().duplex_faults, 1, "counted once, then back in step");
+}
+
+#[test]
+fn an_asio_input_that_starts_cycles_before_its_output_is_no_duplex_fault() {
+    let h = Harness::new();
+    h.fake.set_input(|_| 0.25);
+    h.fake.lead_in.store(3, SeqCst);
+    h.open(asio(Some(256)));
+    h.send(Command::SetSlotLive(0, true));
+    h.play(RATE / 20);
+    h.fake.lead_in.store(1, SeqCst);
+    h.open(asio(Some(128)));
+    h.play(RATE / 20);
+    assert_eq!(h.host.diag().duplex_faults, 0, "the output's first callback takes the input's count");
+    let at = h.frame();
+    assert!(h.fake.heard(at - 64..at).iter().all(|s| (s - 0.5).abs() < 1e-3), "the input is heard");
 }
 
 #[test]

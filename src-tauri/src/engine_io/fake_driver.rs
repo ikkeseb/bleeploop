@@ -1,8 +1,10 @@
 //! Test-only: a [`Driver`] with no hardware. Its devices are knobs ([`FakeDevice`]); a started device
 //! is a thread that runs the real callback bodies (`callback.rs`) on synthetic time, a fixed factor
 //! faster than real time: each cycle the input body, then the output body, entered at the instant a
-//! device at that rate would have entered it. One-shot injections (a gap, an xrun, a missing input,
-//! a fatal error) land on the next cycle. The output's left channel is kept by device frame.
+//! device at that rate would have entered it. A WASAPI output keeps an endpoint buffer as cpal's does:
+//! each callback fills what the device played since the last one, the first the whole buffer. One-shot
+//! injections (a late wake, an xrun, a missing input, a fatal error, an ASIO input's lead) land on the
+//! next cycle or start. The output's left channel is kept by device frame.
 //!
 //! The ASIO device runs i32 samples (as Focusrite's driver does), WASAPI f32, so both conversions run.
 
@@ -26,6 +28,8 @@ const SPEED: f64 = 4.0;
 const MAX_BURST: usize = 64;
 /// Frames of the tape kept (the left channel by device frame).
 const TAPE_FRAMES: usize = 1 << 22;
+/// A WASAPI endpoint buffer in periods (the rig's: 970 frames at a 441-frame period).
+const WASAPI_BUFFER_PERIODS: f64 = 2.2;
 
 #[derive(Clone, Debug)]
 pub(crate) struct FakeDevice {
@@ -72,12 +76,15 @@ pub(crate) struct Fake {
     pub(crate) share_fails: AtomicBool,
     /// Streams started so far.
     pub(crate) started: AtomicU32,
-    /// One-shot, taken by the running device's next cycle: output periods it misses (a gap), a cpal
-    /// xrun report, an input callback that does not run, a fatal error on these streams (`Side` bits).
+    /// One-shot, taken by the running device's next cycle: periods its wake comes late (ASIO: the
+    /// bufferSwitches it skips; WASAPI: the input runs on, the output buffer drains), a cpal xrun
+    /// report, an input callback that does not run, a fatal error on these streams (`Side` bits).
     pub(crate) gap: AtomicU32,
     pub(crate) xrun: AtomicBool,
     pub(crate) skip_input: AtomicBool,
     pub(crate) fatal: AtomicU8,
+    /// One-shot, taken by the next ASIO start: input cycles before the output's first.
+    pub(crate) lead_in: AtomicU32,
     /// The device input: channel `c` carries `input(frame) * (c + 1)`.
     input: Mutex<Arc<dyn Fn(Frame) -> f32 + Send + Sync>>,
     /// The left channel played, by device frame (NaN where nothing played).
@@ -101,6 +108,7 @@ impl Fake {
             xrun: AtomicBool::new(false),
             skip_input: AtomicBool::new(false),
             fatal: AtomicU8::new(0),
+            lead_in: AtomicU32::new(0),
             input: Mutex::new(Arc::new(|_| 0.0)),
             tape: Mutex::new(Vec::new()),
             starts: Mutex::new(Vec::new()),
@@ -236,18 +244,26 @@ impl Play {
         EO: FnMut(cpal::Error),
     {
         let (rate, block) = (self.spec.rate, self.spec.block.max(1) as usize);
+        let asio = self.spec.backend.is_asio();
+        // WASAPI: the endpoint buffer and the frames queued in it.
+        let buffer = if asio { block } else { (block as f64 * WASAPI_BUFFER_PERIODS) as usize };
+        let mut queued: Option<usize> = None;
         let (in_ch, out_ch) = (self.spec.in_channels.max(1), self.spec.out_channels.max(1));
         let latency = |frames: u32, rate: u32| Some(Duration::from_secs_f64(frames as f64 / rate as f64));
         let (in_latency, out_latency) = (latency(self.device.input.in_latency, self.spec.in_rate), latency(self.device.output.out_latency, rate));
         let skew = *self.fake.skew_ppm.lock().unwrap();
         let in_per_out = self.spec.in_rate as f64 / rate as f64 * (1.0 + skew / 1e6);
         let mut data_in = vec![T::EQUILIBRIUM; (2 * block + 16) * in_ch];
-        let mut data_out = vec![T::EQUILIBRIUM; block * out_ch];
+        let mut data_out = vec![T::EQUILIBRIUM; buffer * out_ch];
         let (mut t, mut in_frame, mut carry) = (0u64, 0 as Frame, 0.0f64);
+        if asio {
+            for _ in 0..self.fake.lead_in.swap(0, Relaxed) {
+                self.capture_period(&mut data_in, &mut in_frame, block, in_ch, in_latency);
+            }
+        }
         let begun = Instant::now();
         let mut dead = false;
         while !self.stop.load(Acquire) {
-            let input = self.fake.input.lock().unwrap().clone();
             let ahead = (begun.elapsed().as_secs_f64() * rate as f64 * SPEED) as u64;
             let mut burst = 0;
             while !dead && t < ahead && burst < MAX_BURST {
@@ -265,34 +281,56 @@ impl Play {
                 if self.fake.xrun.swap(false, Relaxed) {
                     output_error(cpal::Error::new(cpal::ErrorKind::Xrun));
                 }
-                t += self.fake.gap.swap(0, Relaxed) as u64 * block as u64;
-                let k = if self.spec.backend.is_asio() {
-                    block
-                } else {
-                    carry += block as f64 * in_per_out;
-                    let k = carry.floor();
-                    carry -= k;
-                    k as usize
-                };
-                if !self.fake.skip_input.swap(false, Relaxed) {
-                    for (i, frame) in data_in[..k * in_ch].chunks_exact_mut(in_ch).enumerate() {
-                        let x = input(in_frame + i as Frame);
-                        for (c, s) in frame.iter_mut().enumerate() {
-                            *s = T::from_sample(x * (c + 1) as f32);
-                        }
+                let late = self.fake.gap.swap(0, Relaxed) as usize;
+                t += (late * block) as u64;
+                // ASIO: the skipped bufferSwitches took their input with them; WASAPI's input ran on.
+                let periods = if asio { 1 } else { 1 + late };
+                for period in 0..periods {
+                    let k = if asio {
+                        block
+                    } else {
+                        carry += block as f64 * in_per_out;
+                        let k = carry.floor();
+                        carry -= k;
+                        k as usize
+                    };
+                    if period == 0 && self.fake.skip_input.swap(false, Relaxed) {
+                        in_frame += k as Frame;
+                    } else {
+                        self.capture_period(&mut data_in, &mut in_frame, k, in_ch, in_latency);
                     }
-                    self.capture.capture(&data_in[..k * in_ch], in_latency);
                 }
-                in_frame += k as Frame;
+                let n = match queued {
+                    None => buffer,
+                    Some(q) => buffer - q.saturating_sub((1 + late) * block),
+                };
+                queued = (!asio).then_some(buffer);
                 let entry = begun + Duration::from_secs_f64(t as f64 / rate as f64);
-                self.render.render(&mut data_out, entry, out_latency);
-                let frame = self.core.frame.load(Relaxed) - block as Frame;
-                self.keep(frame, &data_out, out_ch);
+                self.render.render(&mut data_out[..n * out_ch], entry, out_latency);
+                let frame = self.core.frame.load(Relaxed) - n as Frame;
+                self.keep(frame, &data_out[..n * out_ch], out_ch);
                 t += block as u64;
                 burst += 1;
             }
             std::thread::sleep(Duration::from_millis(1));
         }
+    }
+
+    /// One input callback of `k` frames from the device input, from `in_frame` on.
+    fn capture_period<T>(&mut self, data_in: &mut [T], in_frame: &mut Frame, k: usize, in_ch: usize, latency: Option<Duration>)
+    where
+        T: SizedSample + FromSample<f32>,
+        f32: FromSample<T>,
+    {
+        let input = self.fake.input.lock().unwrap().clone();
+        for (i, frame) in data_in[..k * in_ch].chunks_exact_mut(in_ch).enumerate() {
+            let x = input(*in_frame + i as Frame);
+            for (c, s) in frame.iter_mut().enumerate() {
+                *s = T::from_sample(x * (c + 1) as f32);
+            }
+        }
+        self.capture.capture(&data_in[..k * in_ch], latency);
+        *in_frame += k as Frame;
     }
 
     fn keep<T: Sample>(&self, frame: Frame, data: &[T], channels: usize)

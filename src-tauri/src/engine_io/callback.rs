@@ -353,8 +353,10 @@ pub(crate) struct Render {
     left: Vec<f32>,
     right: Vec<f32>,
     zeros: Vec<f32>,
-    /// The previous callback's entry and frames (gap detection).
+    /// The previous callback's entry and frames (WASAPI's dry buffer, the DEV trace).
     last: Option<(Instant, usize)>,
+    /// WASAPI: the endpoint buffer, the largest callback this run (the first finds it empty).
+    cap: usize,
     /// The previous block never reached the engine (a lock miss): this one follows an input gap.
     missed: bool,
     gain: f32,
@@ -387,6 +389,7 @@ impl Render {
             right: vec![0.0; max_block],
             zeros: vec![0.0; max_block],
             last: None,
+            cap: 0,
             missed: false,
             gain: 0.0,
             step: (1.0 / (FADE_SECONDS * rate as f64).max(1.0)) as f32,
@@ -409,16 +412,19 @@ impl Render {
 
         #[cfg(debug_assertions)]
         trace::output(self.last, entry, n, latency, self.rate, self.run.callbacks.load(Relaxed));
-        let lost = match self.last.replace((entry, n)) {
-            Some((before, prev)) => {
-                let (gap, lost) = lost_frames(entry.saturating_duration_since(before), self.rate, prev, n);
-                if gap {
-                    counters.gaps.fetch_add(1, Relaxed);
-                }
-                lost
-            }
-            None => 0,
+        // The frames the device played that this run never rendered. Only WASAPI can say (`dry_frames`).
+        // ASIO infers nothing from timing: each bufferSwitch carries one period in and out, so the
+        // counter counts what the device took, and a late wake the driver makes up loses nothing (at 64
+        // frames the rig's driver woke 98, 78 and 8 frames apart). A period the driver drops arrives
+        // as its overload report, a cpal Xrun.
+        self.cap = self.cap.max(n);
+        let lost = match (self.last.replace((entry, n)), &self.source) {
+            (Some((before, _)), Source::Join { .. }) => dry_frames(entry.saturating_duration_since(before), self.rate, n, self.cap),
+            _ => 0,
         };
+        if lost > 0 {
+            counters.gaps.fetch_add(1, Relaxed);
+        }
         if let Some(frames) = self.probe.observe(latency, self.rate) {
             self.run.out_latency.store(frames, Relaxed);
         }
@@ -427,6 +433,8 @@ impl Render {
             Source::Duplex => 0,
             Source::Join { pipe, x, joined, .. } => {
                 let m = n.min(x.len());
+                // The input captured while the buffer played dry belongs to the frames skipped below.
+                pipe.skip(lost as usize);
                 #[cfg(debug_assertions)]
                 let fill_before = pipe.fill();
                 let zeroed = pipe.pull(&mut x[..m]) + (n - m);
@@ -495,9 +503,12 @@ impl Render {
         let counters = &self.core.counters;
         let avail = match self.source {
             Source::Duplex => {
-                rt.out_cycles += 1;
+                // A run's first output callback takes the input's count: the input is built and played
+                // first, so the cycles it ran alone are the start, not a fault. The rig's ASIO re-opens,
+                // whose input build retries (`cpal_driver::retry_on_asio`), each found it ahead.
+                rt.out_cycles = if rt.out_cycles == 0 { rt.in_cycles } else { rt.out_cycles + 1 };
                 let same = rt.in_cycles == rt.out_cycles && rt.handoff_len == n && n <= rt.handoff.len();
-                if !same {
+                if !same && rt.out_cycles > 0 {
                     // Out of step: count it once and resync, as the Stage 1 spike does.
                     counters.duplex_faults.fetch_add(1, Relaxed);
                     rt.out_cycles = rt.in_cycles;
@@ -553,25 +564,23 @@ impl Render {
     }
 }
 
-/// Gap detection for an entry `elapsed` after the previous one, which delivered `prev` frames: a gap is
-/// more than 1.5 periods; the frames lost are the whole periods the device played that this callback
-/// does not make up (ASIO: every late period; WASAPI: a late callback that delivers the backlog lost
-/// none).
-fn lost_frames(elapsed: Duration, rate: u32, prev: usize, n: usize) -> (bool, Frame) {
-    if prev == 0 {
-        return (false, 0);
+/// WASAPI: the frames the device played from an empty buffer between the previous callback, `elapsed`
+/// before this one, and this one of `n` frames. Every callback fills the endpoint buffer (`cap` frames:
+/// the run's first finds it empty and takes it whole), so it ran dry only if this callback finds it
+/// empty again, for as long as the device played past what it held. A late callback that finds frames
+/// still queued lost nothing, however late (the rig's n = 441 behind a late wake: the audio engine was
+/// late and caught up two callbacks later).
+fn dry_frames(elapsed: Duration, rate: u32, n: usize, cap: usize) -> Frame {
+    if n < cap {
+        return 0;
     }
-    let elapsed = elapsed.as_secs_f64() * rate as f64;
-    if elapsed <= 1.5 * prev as f64 {
-        return (false, 0);
-    }
-    let periods = ((elapsed - n as f64) / prev as f64).round();
-    (true, if periods >= 1.0 { periods as Frame * prev as Frame } else { 0 })
+    let played = elapsed.as_secs_f64() * rate as f64;
+    (played - cap as f64).round().max(0.0) as Frame
 }
 
 /// DEV: what the counters cannot say, for the rig probe (`probe.rs` prints it). Each run's first output
-/// callback (WASAPI: its buffer), each gap and the two callbacks after it (a late wake that delivers the
-/// backlog, or a lost period), each join trim with the fill it found, and every 1000th join output
+/// callback (WASAPI: its buffer), each late wake (more than 1.5 periods after the previous) and the two
+/// callbacks after it (a late wake the device makes up, or a buffer run dry), each join trim with the fill it found, and every 1000th join output
 /// callback the frames the input pushed and the output pulled so far (their rates, against QPC).
 #[cfg(debug_assertions)]
 pub(crate) mod trace {
@@ -601,7 +610,7 @@ pub(crate) mod trace {
     }
 
     /// An output callback of `n` frames, entered at `entry`, after `last` (the previous entry and its
-    /// frames); the gap rule is `lost_frames`'.
+    /// frames).
     pub(crate) fn output(last: Option<(Instant, usize)>, entry: Instant, n: usize, latency: Option<Duration>, rate: u32, callback: u64) {
         let (kind, elapsed, prev) = match last {
             None => (0, -1, 0),
@@ -647,7 +656,7 @@ pub(crate) mod trace {
                 let [kind, cb, a, b, c, d] = std::array::from_fn(|k| RECORDS[i][k].load(Relaxed));
                 match kind {
                     0 => format!("first callback {cb}: n={c} latency={d}"),
-                    1 | 2 => format!("{} callback {cb}: elapsed={a} prev={b} n={c} latency={d}", if kind == 1 { "GAP  " } else { "after" }),
+                    1 | 2 => format!("{} callback {cb}: elapsed={a} prev={b} n={c} latency={d}", if kind == 1 { "LATE " } else { "after" }),
                     3 => format!("TRIM  callback {cb}: n={c} fill={d}"),
                     _ => format!("join  callback {cb}: {a} ms, pushed {b}, pulled {c}, fill {d}"),
                 }
@@ -714,14 +723,12 @@ mod tests {
     }
 
     #[test]
-    fn a_late_entry_is_a_gap_and_loses_only_the_periods_nobody_made_up() {
-        let period = |k: f64| Duration::from_secs_f64(k * 256.0 / 48_000.0);
-        assert_eq!(lost_frames(period(1.0), 48_000, 256, 256), (false, 0), "on time");
-        assert_eq!(lost_frames(period(1.5), 48_000, 256, 256), (false, 0), "1.5 periods is not a gap");
-        assert_eq!(lost_frames(period(2.0), 48_000, 256, 256), (true, 256), "ASIO: one period lost");
-        assert_eq!(lost_frames(period(4.1), 48_000, 256, 256), (true, 768));
-        assert_eq!(lost_frames(period(2.0), 48_000, 256, 512), (true, 0), "WASAPI: the late callback carries the backlog");
-        assert_eq!(lost_frames(period(9.0), 48_000, 0, 256), (false, 0), "no previous period");
+    fn only_a_buffer_found_empty_lost_frames_and_only_what_played_past_it() {
+        let frames = |k: f64| Duration::from_secs_f64(k / 48_000.0);
+        assert_eq!(dry_frames(frames(441.0), 48_000, 441, 970), 0, "on time");
+        assert_eq!(dry_frames(frames(1_300.0), 48_000, 882, 970), 0, "late, but frames were still queued");
+        assert_eq!(dry_frames(frames(960.0), 48_000, 970, 970), 0, "empty just as it came");
+        assert_eq!(dry_frames(frames(1_323.0), 48_000, 970, 970), 353, "dry for what played past the buffer");
     }
 
     #[test]

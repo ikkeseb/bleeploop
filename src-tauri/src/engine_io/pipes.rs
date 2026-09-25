@@ -268,6 +268,17 @@ impl PullPipe {
         }
     }
 
+    /// Drop the oldest input that `frames` at `out_rate` would have pulled (at most what the ring holds):
+    /// the puller's device played that stretch from an empty buffer, so it has no frames to land on.
+    pub(crate) fn skip(&mut self, frames: usize) {
+        let k = ((frames as f64 * self.in_rate / self.out_rate).round() as usize).min(self.fill());
+        if k > 0 {
+            if let Ok(chunk) = self.ring.read_chunk(k * self.channels) {
+                chunk.commit_all();
+            }
+        }
+    }
+
     /// Over-full rings trimmed back to the setpoint since the last call (the caller counts them, as it
     /// counts the zero-filled pulls `pull` returns); each one skipped the excess, a jump in what plays.
     pub(crate) fn take_trims(&mut self) -> u64 {

@@ -30,12 +30,14 @@
 //!
 //! - **One clock: the output callback's frame counter.** ASIO: input built first, output second,
 //!   always as a pair (asio-sys 0.3.0 runs the registered callbacks in that order in one bufferSwitch;
-//!   the output checks the input's cycle count: a miss is a duplex-order fault, counted). WASAPI: the
-//!   output callback is the clock; the input joins through a ring and a resampler with a drift
-//!   controller. Every callback thread is promoted to MMCSS Pro Audio on first entry.
+//!   the output checks the input's cycle count from its first callback on: a miss is a duplex-order
+//!   fault, counted). WASAPI: the output callback is the clock; the input joins through a ring and a
+//!   resampler with a drift controller. Every callback thread is promoted to MMCSS Pro Audio on first
+//!   entry.
 //! - **The frame counter pauses across a switch.** A backend switch or a fallback continues the
-//!   counter where the last callback left it, so loops resume in place; a device gap inside a run
-//!   (an xrun) jumps it by the frames lost and flags `ProcessContext::xrun`.
+//!   counter where the last callback left it, so loops resume in place. It counts the frames the
+//!   device took: a late wake is no loss. Only a WASAPI buffer found empty jumps it, by what the device
+//!   played dry (the join drops as much input); that and every xrun flag `ProcessContext::xrun`.
 //! - **Every stop fades and punches out.** A switch or close ramps the output to silence (10 ms, then
 //!   two silent callbacks: a dropped ASIO stream leaves the driver playing its last two buffers), drops
 //!   the output then the input, and punches out a take in flight (STATUS E3). A loss drops at once. A
@@ -152,7 +154,8 @@ pub enum DeviceEvent {
 #[derive(Default)]
 pub struct IoCounters {
     pub callbacks: AtomicU64,
-    /// Callback entries more than 1.5 periods after the previous one.
+    /// WASAPI: the output buffer ran dry; the frame counter skipped what the device played dry, the
+    /// join as much input (`callback::dry_frames`). On ASIO the only report is the driver's overload, an xrun.
     pub gaps: AtomicU64,
     /// cpal's non-fatal `Xrun` reports (an ASIO overload, a WASAPI glitch).
     pub xruns: AtomicU64,
