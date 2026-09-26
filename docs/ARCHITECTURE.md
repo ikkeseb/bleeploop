@@ -200,7 +200,7 @@ both, before and after the change:
   64/128/256 (no C, no trim).
 - **L2 — a physical loopback measurement:** play the click out, capture it through the working
   guitar input, cross-correlate scheduled against heard (`pnpm native:loopback`; on the engine, the
-  plan's Stage 1 probe).
+  plan's Stage 1 probe, and `pnpm native:engine-loopback` for a take in the running app).
 
 At the flip `record-latency.ts` and the compensation sites in `looper/machine.ts` are DELETED, not
 ported.

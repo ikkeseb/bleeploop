@@ -110,8 +110,8 @@ frame — the cable then lands exactly RT late whatever the driver reports. A2 i
 against inLat+outLat only, never against a lag fitted from an earlier run.
 
 **Rules.** Time box 3 working days (estimate); INVALID (xcorr peak < 0.8) is a setup fault: fix and
-rerun. The probe stays as the engine's L2 gate; the `native:loopback` baseline in `docs/VERIFY.md`
-is replaced when that probe is ported to the engine (Stage 5).
+rerun. The probe stays as the engine's L2 gate; in the running app, `native:engine-loopback` (Stage 5)
+has its own baseline in `docs/VERIFY.md`, beside the web path's `native:loopback`.
 
 **Measured so far (2026-09-24, dev PC, Scarlett 2i2 at 44.1 kHz, no cable in):** built and pushed;
 the cable runs follow below. A virtual cable (VB-Cable) cannot stand in: it measures Windows' buffering, not the
@@ -425,7 +425,7 @@ slot, and the soak's output callbacks at p99.9 ≤ 50 %, max < 90 % of the perio
 (`EngineHost::block_load`). The existing plugin fixtures and `pnpm native:swap|survey|smoke|recall`
 rerun. Not built (owner, 2026-09-25: the slim probe first): a scripted mode (`--script`, frame-coded
 engine commands) that reruns the Stage 1 A/R/C/W/S bars on the engine; it comes only if the rig run
-needs it. Stage 5's ported `native:loopback` measures the take against the click on the engine.
+needs it. Stage 5's `native:engine-loopback` measures the take against the click on the engine.
 
 **Built (2026-09-25), dormant**, every part proven without hardware (fakes, in-process fixture
 plugins, the real engine on a test thread): the slots and the punch-out in lf-engine
@@ -636,7 +636,10 @@ play; export shape, v0.1.0 import, recovery after a kill, the close guard; a Web
 engine plays (new: the feed resyncs); device yank, ASIO↔WASAPI switch mid-session, Share output in
 OBS/Discord. Measured: `pnpm native:loopback` ported to the engine (residual within ±2 ms with no
 trim, spread ≤ 1 ms across launches, drift ≈ 0, RT ≤ the Stage 1 number, 10/10 launches with no
-rejected take), callback CPU at 64/128/256, UI layouts per 5 s ≤ today.
+rejected take), callback CPU at 64/128/256, UI layouts per 5 s ≤ today. Ported as `pnpm
+native:engine-loopback` (2026-09-26, `docs/VERIFY.md` baseline): within 0.12 ms at 64/128/256, 0.16 ms
+across launches at 64, drift ≈ 0, 6/6 launches with no rejected take; RT is not in it (Stage 1's R1
+stands).
 
 **The engine lap** (replaces stops, never appends; `STATUS.md` cap): Stop 1 and Stop 2's C check
 become "the take lands on the click, no trim, at 256 and 128"; Stop 6 is rewritten for the engine's

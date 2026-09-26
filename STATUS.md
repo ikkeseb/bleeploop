@@ -10,7 +10,9 @@ engine lap. The web path stays one switch away (Audio Settings → engine) until
 (40 guards) and `pnpm build` green; the browser probes 43/43 (`pnpm probe --ci`); on the rig (Scarlett
 2i2, ASIO 128, loopback cable) `native:engine-smoke` with Pro-Q, `native:engine-recovery` (export,
 import, recovery after a kill, real audio) and three same-size relaunches landing within 0.1 ms of
-the driver's report; the web path's `native:smoke` in its own profile.
+the driver's report; the web path's `native:smoke` in its own profile. Later that day:
+`native:engine-loopback` (six launches, ASIO 64/128/256) and the release build on the engine,
+`release:smoke`, in a fresh profile.
 Driver latency reports are not guitar latency; after a relevant change, rerun only the affected check.
 
 **Last play: 2026-09-24** (web path, `pnpm dev:asio`, jam, two–three tracks, no pedal): the click too
@@ -115,8 +117,11 @@ limiter's pre-delay) after its downbeat (`ProcessContext::align_frames`, lf-engi
 no trim. On the dev rig (Scarlett 2i2, loopback cable) the report holds within 0.1 ms at ASIO 64, 128
 and 256, once the engine opens the driver at another block size first: a relaunch at the size the
 driver last ran otherwise lands about two periods late (`docs/plans/native-engine.md` § Stage 1, Cause
-and fix). Round trip with Pro-Q: 8.1 ms at 64, 15.1 ms at 128, 26.8 ms at 256. Not measured in the
-running app with a real take (the in-app loopback probe is not ported to the engine yet).
+and fix). Round trip with Pro-Q: 8.1 ms at 64, 15.1 ms at 128, 26.8 ms at 256. In the running app
+through the cable (`pnpm native:engine-loopback`, six launches): the take lands within 0.12 ms of the
+click at 64, 128 and 256, a loop re-recorded from playback adds no error of its own, and STOP ALL →
+PLAY ALL keeps the click, its accent and the loops in place. A cable is a perfect player; whether a
+guitarist's take feels on the click is this stop.
 
 ### Stop 3 — take mechanics
 

@@ -7,6 +7,8 @@
 //   pnpm native:loopback  loopback sync (src/debug/loopback-sync.ts): needs an output cabled into input 1
 //   pnpm native:engine-smoke  the UI on the native engine (src/debug/engine-smoke.ts), engine mode on
 //   pnpm native:engine-recovery  export, import and recovery on the engine (src/debug/engine-recovery.ts)
+//   pnpm native:engine-loopback  where takes land against the click on the engine
+//     (src/debug/engine-loopback.ts): needs an output cabled into input 2 (`--channel=` is 0-based)
 //
 // Options: `--asio` launches `pnpm dev:asio` instead of `pnpm dev:wasapi`; `--<knob>=<value>` becomes
 // `VITE_LF_PROBE_<KNOB>` (`--filter=Pro-Q,Saturn`, `--hold=`, `--settle=`, `--params=`, `--plugins=`:
@@ -62,6 +64,14 @@ const PROBES = {
       { name: 'save', end: /^(saved: .*|FAIL.*)$/, pass: /^saved: /, exit: 'crash' },
       { name: 'restore', end: /^(restored: .*|FAIL.*)$/, pass: /^restored: /, exit: 'os-close' },
     ],
+  },
+  // engine-smoke's profile; one launch runs every buffer size, closed through its window.
+  'engine-loopback': {
+    tag: 'engine-loopback',
+    config: 'scripts/engine-probe.tauri.json',
+    engine: 'on',
+    cleanLog: true,
+    phases: [{ name: 'loopback', end: /^(complete: .*|FAIL.*)$/, pass: /^complete: /, exit: 'os-close' }],
   },
   // `recallLines`: how many `[rig-recall]` log lines the phase must print.
   'recall-restart': {
