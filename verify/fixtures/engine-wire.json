@@ -1,0 +1,262 @@
+{
+  "commands": [
+    { "RecDub": 0 },
+    { "PlayStop": 1 },
+    { "Stop": 2 },
+    { "Undo": 3 },
+    { "Reverse": 4 },
+    { "Copy": 0 },
+    { "Clear": 1 },
+    "PlayAll",
+    "StopAll",
+    "ClearAll",
+    { "Action": "RecDub" },
+    { "Action": "NextTrack" },
+    { "ActionOn": [2, "Clear"] },
+    { "SelectTrack": 3 },
+    { "SetBpm": 96.5 },
+    { "SetMetronome": true },
+    { "SetClickVolume": 0.8 },
+    { "SetMasterVolume": 0.75 },
+    { "SetMasterMute": false },
+    { "SetLoopEndStop": true },
+    { "SetFixedLength": true },
+    { "SetFixedBars": 4 },
+    { "SetRetake": false },
+    { "SetAutoRecord": true },
+    { "SetAutoSensitivity": 6 },
+    { "SetVolume": [0, 0.8] },
+    { "SetMute": [1, true] },
+    { "SetFxParam": [0, "cutoff", 2400] },
+    { "SetFxParam": [3, "feedback", 0.55] },
+    { "SetFxBypass": [0, "filter", false] },
+    { "SetFxBypass": [4, "reverb", true] },
+    { "SelectInstrument": { "Builtin": "lead" } },
+    { "SelectInstrument": { "Slot": 1 } },
+    { "NoteOn": [60, 0.75] },
+    { "NoteOff": 60 },
+    { "PitchBend": -2 },
+    { "Modulation": 0.5 },
+    "AllNotesOff",
+    { "SetSlotLive": [0, true] },
+    { "SetSlotGain": [1, 0.5] }
+  ],
+  "events": [
+    {
+      "Lane": {
+        "frame": 96000,
+        "lane": 0,
+        "info": {
+          "state": "Playing",
+          "length": 88200,
+          "armed": false,
+          "autoArmed": false,
+          "canUndo": true,
+          "canReverse": true,
+          "reversed": false,
+          "stopAt": null,
+          "retakePass": 0
+        }
+      }
+    },
+    {
+      "Lane": {
+        "frame": 97000,
+        "lane": 1,
+        "info": {
+          "state": "Recording",
+          "length": 0,
+          "armed": true,
+          "autoArmed": false,
+          "canUndo": false,
+          "canReverse": false,
+          "reversed": true,
+          "stopAt": 184200,
+          "retakePass": 2
+        }
+      }
+    },
+    { "Transport": { "frame": 96000, "master": 88200, "bpm": 120, "locked": true } },
+    { "Beat": { "frame": 99000, "beatInBar": 1, "countLeft": 0, "clicked": true } },
+    { "Selected": { "frame": 99100, "lane": 2 } },
+    { "Refused": { "frame": 99200, "lane": 2, "reason": "PlayFirst" } },
+    { "TakeRejected": { "frame": 99300, "lane": 1, "overdub": true } },
+    { "PassDropped": { "frame": 99400, "lane": 1, "pass": 3 } },
+    { "Copied": { "frame": 99500, "from": 0, "to": 3 } }
+  ],
+  "deviceEvents": [
+    { "Lost": { "backend": "Asio", "reason": "the stream stopped" } },
+    {
+      "Recovered": {
+        "backend": "Asio",
+        "sampleRate": 44100,
+        "block": 128,
+        "inputName": "Focusrite USB ASIO",
+        "outputName": "Focusrite USB ASIO",
+        "alignFrames": 666,
+        "inputFrames": 305
+      }
+    },
+    {
+      "Fallback": {
+        "backend": "Wasapi",
+        "sampleRate": 48000,
+        "block": 480,
+        "inputName": "Microphone (Realtek Audio)",
+        "outputName": "Speakers (Realtek Audio)",
+        "alignFrames": 1731,
+        "inputFrames": 1150
+      }
+    },
+    { "ShareLost": { "reason": "the Share output endpoint stopped" } },
+    "EngineFaulted"
+  ],
+  "deviceRequests": [
+    { "backend": "Asio", "input": null, "output": null, "inputChannel": 1, "buffer": 128 },
+    {
+      "backend": "Wasapi",
+      "input": "{0.0.1.00000000}.{8d4d5e1a-3c7b-4f0e-9d2a-5b6c7d8e9f01}",
+      "output": null,
+      "inputChannel": null,
+      "buffer": null
+    }
+  ],
+  "deviceStatuses": [
+    {
+      "backend": "Asio",
+      "sampleRate": 44100,
+      "block": 128,
+      "inputName": "Focusrite USB ASIO",
+      "outputName": "Focusrite USB ASIO",
+      "alignFrames": 666,
+      "inputFrames": 305
+    }
+  ],
+  "feed": [
+    {
+      "seq": 0,
+      "reset": true,
+      "events": [
+        { "Transport": { "frame": 96000, "master": 88200, "bpm": 120, "locked": true } },
+        {
+          "Lane": {
+            "frame": 96000,
+            "lane": 0,
+            "info": {
+              "state": "Playing",
+              "length": 88200,
+              "armed": false,
+              "autoArmed": false,
+              "canUndo": false,
+              "canReverse": true,
+              "reversed": false,
+              "stopAt": null,
+              "retakePass": 0
+            }
+          }
+        },
+        {
+          "Lane": {
+            "frame": 0,
+            "lane": 1,
+            "info": {
+              "state": "Empty",
+              "length": 0,
+              "armed": false,
+              "autoArmed": false,
+              "canUndo": false,
+              "canReverse": false,
+              "reversed": false,
+              "stopAt": null,
+              "retakePass": 0
+            }
+          }
+        },
+        {
+          "Lane": {
+            "frame": 0,
+            "lane": 2,
+            "info": {
+              "state": "Empty",
+              "length": 0,
+              "armed": false,
+              "autoArmed": false,
+              "canUndo": false,
+              "canReverse": false,
+              "reversed": false,
+              "stopAt": null,
+              "retakePass": 0
+            }
+          }
+        },
+        {
+          "Lane": {
+            "frame": 0,
+            "lane": 3,
+            "info": {
+              "state": "Empty",
+              "length": 0,
+              "armed": false,
+              "autoArmed": false,
+              "canUndo": false,
+              "canReverse": false,
+              "reversed": false,
+              "stopAt": null,
+              "retakePass": 0
+            }
+          }
+        },
+        {
+          "Lane": {
+            "frame": 0,
+            "lane": 4,
+            "info": {
+              "state": "Empty",
+              "length": 0,
+              "armed": false,
+              "autoArmed": false,
+              "canUndo": false,
+              "canReverse": false,
+              "reversed": false,
+              "stopAt": null,
+              "retakePass": 0
+            }
+          }
+        },
+        { "Selected": { "frame": 0, "lane": 0 } }
+      ],
+      "device": [],
+      "status": {
+        "backend": "Asio",
+        "sampleRate": 44100,
+        "block": 128,
+        "inputName": "Focusrite USB ASIO",
+        "outputName": "Focusrite USB ASIO",
+        "alignFrames": 666,
+        "inputFrames": 305
+      },
+      "anchor": { "frame": 1234560, "atMs": 1790000000123.25, "rate": 44100, "grid": 96666 },
+      "meter": { "peak": 0.125, "clip": false },
+      "peaks": [{ "lane": 0, "start": 0, "count": 3, "min": [-0.5, -0.25, -0.125], "max": [0.5, 0.25, 0.123] }]
+    },
+    {
+      "seq": 1,
+      "reset": false,
+      "events": [{ "Beat": { "frame": 1234688, "beatInBar": 2, "countLeft": 0, "clicked": true } }],
+      "device": [],
+      "anchor": { "frame": 1235456, "atMs": 1790000000143.5, "rate": 44100, "grid": 96666 },
+      "meter": { "peak": 1, "clip": true },
+      "peaks": [{ "lane": 1, "start": 4, "count": 6, "min": [-0.012, -0.3], "max": [0.02, 0.31] }]
+    },
+    {
+      "seq": 2,
+      "reset": false,
+      "events": [],
+      "device": [{ "Lost": { "backend": "Asio", "reason": "the stream stopped" } }],
+      "status": null,
+      "anchor": null,
+      "meter": null,
+      "peaks": []
+    }
+  ]
+}

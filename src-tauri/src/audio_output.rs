@@ -220,7 +220,7 @@ pub static ASIO_ENABLED: AtomicBool = AtomicBool::new(true);
 /// Backend captured once at the start of an owner-thread arm request. Stream open helpers receive
 /// this value explicitly so a concurrent preference change cannot split one request across ASIO and
 /// WASAPI. `NativeIo` also stores it beside each live stream; the global preference is not ownership.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum AudioBackend {
     Wasapi,
     Asio,

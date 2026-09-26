@@ -25,6 +25,7 @@
 //! | `share` | Share output: the post-limiter master mirrored to a WASAPI endpoint while ASIO plays |
 //! | `midi` | native MIDI: ports, hot-plug, parse, the MIDI-learn bindings, notes and pedal actions |
 //! | `probe` | DEV: `app.exe --probe-engine`, the device side on real hardware (soak, switches, plugin swaps) |
+//! | `wire` | the JSON wire to the UI: the serde mirror of the engine's commands and events, the feed frame |
 //!
 //! # Rules
 //!
@@ -74,6 +75,7 @@ pub(crate) mod test_rig;
 #[cfg(test)]
 mod tests;
 mod transition;
+pub mod wire;
 
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering::{AcqRel, Acquire, Relaxed}};
 use std::sync::mpsc::{sync_channel, RecvTimeoutError, SyncSender};
@@ -83,6 +85,7 @@ use std::time::Duration;
 use lf_engine::grid::Frame;
 use lf_engine::{Engine, Event, SlotPort, SlotProcessor, TimedCommand, SLOT_COUNT};
 use rtrb::{Consumer, Producer};
+use serde::{Deserialize, Serialize};
 
 use crate::audio_output::AudioBackend;
 use callback::{Tap, TapEnd, MAX_DEVICE_BLOCK};
@@ -106,7 +109,8 @@ impl Default for HostConfig {
 }
 
 /// A device to open (or switch to).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DeviceRequest {
     pub backend: AudioBackend,
     /// WASAPI capture device id (`audio_input::list_input_devices`); `None` = the default. ASIO uses
@@ -121,7 +125,8 @@ pub struct DeviceRequest {
 }
 
 /// The device that runs.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DeviceStatus {
     pub backend: AudioBackend,
     pub sample_rate: u32,
@@ -134,9 +139,8 @@ pub struct DeviceStatus {
     pub input_frames: Frame,
 }
 
-/// What happened to the device on its own (`EngineHost::take_device_events`; the Stage 5 feed toasts
-/// them).
-#[derive(Clone, Debug, PartialEq)]
+/// What happened to the device on its own (`EngineHost::take_device_events`; the feed carries them).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum DeviceEvent {
     /// The device stopped (unplugged, a driver reset): the engine, its loops and its slots stay.
     Lost { backend: AudioBackend, reason: String },
