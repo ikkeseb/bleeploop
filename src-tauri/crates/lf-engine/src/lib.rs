@@ -17,6 +17,7 @@
 //! | [`effects`] | each lane's FX chain, the shared reverb bus, their grid, CLEAR and COPY on a lane's FX | `fx/fx.ts`, `looper/{playback,machine}.ts` |
 //! | [`instruments`] | the six built-in instruments, the selected one, the wheels, their record path | `synths/index.ts`, `input-router.ts` |
 //! | [`overview`] | what the UI draws, for a reader off the audio thread: the grid anchor, each lane's buffer, orientation and frames, each buffer's waveform peaks | `looper/peaks.ts` |
+//! | [`session`] | saving and loading a session: a snapshot copied out a budget per frame, a load swapped into an empty looper, the host's port | `looper/session.ts`, `export/*` |
 //! | [`slots`] | the two plugin slots: install and removal through their ports, bypass crossfades, notes, live and gain, where each output goes | `plugin-bridge.ts`, `instrument-slots.ts` |
 //! | [`api`] | commands, events, the process context, the plugin seam ([`SlotProcessor`]) | — |
 //! | [`dsp`] | Stage 3 sound: the Tone/Blink building blocks, the six built-in synths, the per-track FX chain and the reverb bus, the limiter | Tone.js on Blink's Web Audio |
@@ -72,7 +73,7 @@
 //! The device side (streams, MIDI, Share output) is `src-tauri/src/engine_io`; the CLAP/VST3 units and
 //! their engine-mode owners are `src-tauri/src/host/engine_slot.rs` and its siblings; the feed that
 //! carries the events and the [`overview`] to the UI is `src-tauri/src/engine_io/feed.rs`. Not built:
-//! the export snapshot (Stage 5).
+//! nothing of Stage 5.
 
 #![forbid(unsafe_code)]
 
@@ -86,9 +87,11 @@ pub mod grid;
 pub mod instruments;
 pub mod looper;
 pub mod overview;
+pub mod session;
 pub mod slots;
 
 pub use api::*;
 pub use engine::{Diag, Engine, EngineConfig, EngineHandle, Taps};
 pub use overview::{LaneView, Overview};
+pub use session::{Load, LoadTrack, SessionError, SessionJob, SessionPort, Snapshot, SnapshotTrack};
 pub use slots::SlotPort;

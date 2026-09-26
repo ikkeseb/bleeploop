@@ -917,3 +917,54 @@ fn a_lane_the_engine_clears_forgets_its_kept_mix() {
     let kept = feed.tick(true).and_then(|f| f.settings).map(|s| s.into_iter().map(|c| c.0).collect::<Vec<_>>());
     assert_eq!(kept, Some(vec![Command::SetMasterVolume(0.7)]), "lane 3's volume and mute went with the clear");
 }
+
+/// A snapshot's bytes: its header as JSON and its PCM.
+fn session_parts(bytes: &[u8]) -> (serde_json::Value, Vec<f32>) {
+    let len = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
+    let header = serde_json::from_slice(&bytes[4..4 + len]).expect("a JSON header");
+    let pcm = bytes[4 + len..].chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
+    (header, pcm)
+}
+
+fn session_bytes(header: &serde_json::Value, pcm: &[f32]) -> Vec<u8> {
+    let json = serde_json::to_vec(header).unwrap();
+    let mut out = (json.len() as u32).to_le_bytes().to_vec();
+    out.extend_from_slice(&json);
+    pcm.iter().for_each(|x| out.extend_from_slice(&x.to_le_bytes()));
+    out
+}
+
+#[test]
+fn a_session_saves_and_loads_back_through_its_bytes_with_a_device_running_or_not() {
+    let mut h = Harness::new();
+    h.fake.set_input(tone);
+    h.open(asio(Some(256)));
+    let length = h.record_loop();
+    h.send(Command::Reverse(0));
+    h.play(RATE / 10);
+    let (header, pcm) = session_parts(&h.host.snapshot().expect("a snapshot while the device plays"));
+    assert_eq!(header["rate"], 48_000);
+    assert_eq!(header["bpm"], 240);
+    assert_eq!(header["masterLengthFrames"], length);
+    assert_eq!(header["tracks"], serde_json::json!([{ "index": 0, "frames": length, "reversed": true, "state": "Playing" }]));
+    assert_eq!(pcm.len(), length as usize);
+    assert!(pcm.iter().any(|&x| x.abs() > 0.1), "the loop holds the tone");
+
+    let load = serde_json::json!({ "bpm": 240, "bars": 1, "masterLengthFrames": length, "tracks": header["tracks"] });
+    let err = h.host.load_session(&session_bytes(&load, &pcm)).expect_err("the lanes are not empty");
+    assert!(err.contains("not empty"), "{err}");
+    h.send(Command::ClearAll);
+    h.wait_lane("the lane clears", 0, |i| i.state == LaneState::Empty);
+    h.host.load_session(&session_bytes(&load, &pcm)).expect("a load into the emptied engine");
+    let (again, back) = session_parts(&h.host.snapshot().unwrap());
+    assert_eq!(again["tracks"], header["tracks"]);
+    assert_eq!(back, pcm, "the loop comes back sample-exact, reversed flag and all");
+
+    h.host.close().unwrap();
+    let (closed, idle) = session_parts(&h.host.snapshot().expect("a snapshot with no device running"));
+    assert_eq!((closed["tracks"].clone(), idle), (header["tracks"].clone(), pcm.clone()));
+    let wrong = serde_json::json!({ "bpm": 120, "bars": 1, "masterLengthFrames": length, "tracks": header["tracks"] });
+    assert!(h.host.load_session(&session_bytes(&wrong, &pcm)).is_err(), "a tempo that disagrees with the length");
+    let diag = h.host.diag();
+    assert_eq!((diag.rt_allocs, diag.lock_misses, diag.panics), (0, 0, 0), "the engine side allocated nothing and the callback never missed");
+}

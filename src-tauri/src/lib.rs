@@ -361,6 +361,10 @@ pub fn run() {
             engine_io::mode::engine_set_share,
             #[cfg(windows)]
             engine_io::mode::engine_feed,
+            #[cfg(windows)]
+            engine_io::mode::engine_snapshot,
+            #[cfg(windows)]
+            engine_io::mode::engine_load_session,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

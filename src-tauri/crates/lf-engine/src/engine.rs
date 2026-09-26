@@ -34,6 +34,7 @@ use crate::grid::Frame;
 use crate::instruments::Instruments;
 use crate::looper::{Applied, Cx, Looper};
 use crate::overview::Overview;
+use crate::session::{SessionEnd, SessionPort};
 use crate::slots::{Rack, SlotPort};
 
 /// Commands the engine holds for a future frame (MIDI press frames, a wait for a block job).
@@ -68,6 +69,7 @@ pub struct EngineHandle {
     pub events: Consumer<Event>,
     pub slots: [SlotPort; SLOT_COUNT],
     pub overview: Arc<Overview>,
+    pub session: SessionPort,
 }
 
 /// The event ring's producer. A full ring drops the event and counts it: the audio never waits.
@@ -127,6 +129,7 @@ pub struct Engine {
     fx: LaneFx,
     instruments: Instruments,
     rack: Rack,
+    session: SessionEnd,
     /// The instrument plugin slots' mono output (the master bus takes it on both sides).
     slot_bus: Vec<f32>,
     /// The slots' frames rendered so far in this block (they render ahead, up to a slot command).
@@ -174,6 +177,7 @@ impl Engine {
         let (rack, slots) = Rack::new(config.sample_rate, config.max_block);
         let looper = Looper::new(config.sample_rate, capacity);
         let overview = looper.overview().clone();
+        let (session_port, session) = crate::session::channel();
         let engine = Engine {
             config,
             clock: Clock::new(config.sample_rate),
@@ -185,6 +189,7 @@ impl Engine {
             fx: LaneFx::new(config.sample_rate, &white),
             instruments: Instruments::new(config.sample_rate, config.max_block, &white, &pink),
             rack,
+            session,
             slot_bus: vec![0.0; config.max_block],
             slots_done: 0,
             wet: vec![0.0; config.max_block],
@@ -209,7 +214,7 @@ impl Engine {
             commands_dropped: 0,
             xruns: 0,
         };
-        (engine, EngineHandle { commands: cmd_tx, events: evt_rx, slots, overview })
+        (engine, EngineHandle { commands: cmd_tx, events: evt_rx, slots, overview, session: session_port })
     }
 
     pub fn config(&self) -> &EngineConfig {
@@ -275,6 +280,16 @@ impl Engine {
         self.rack.service_idle();
     }
 
+    /// While no device runs and the host holds the engine: run a session job on the port at once (a load
+    /// at the frame the next block would start, a snapshot copied whole).
+    pub fn service_session_idle(&mut self) {
+        let mut cx = Cx { now: self.next_frame, align: 0, clock: &mut self.clock, feed: &mut self.feed, fx: &mut self.fx };
+        self.session.begin(&mut self.looper, &mut cx, self.config.sample_rate, true);
+        self.session.advance(&self.looper, Frame::MAX / crate::session::SNAPSHOT_RATE);
+        let mut cx = Cx { now: self.next_frame, align: 0, clock: &mut self.clock, feed: &mut self.feed, fx: &mut self.fx };
+        self.looper.publish(&mut cx);
+    }
+
     /// While no device runs: stop every unit, an install still waiting on its port included, and hand
     /// it back on its port (a sample-rate change; the host re-activates each at the new rate and
     /// installs it into the new engine).
@@ -326,6 +341,10 @@ impl Engine {
         self.rack.begin_block(start, first);
         let live_latency = self.rack.live_latency();
         let align = ctx.align_frames + live_latency + self.limiter.latency() as Frame;
+        {
+            let mut cx = Cx { now: start, align, clock: &mut self.clock, feed: &mut self.feed, fx: &mut self.fx };
+            self.session.begin(&mut self.looper, &mut cx, self.config.sample_rate, false);
+        }
         let record_delay = ctx.input_frames + live_latency;
         self.rendered = n;
         self.slots_done = 0;
@@ -422,6 +441,7 @@ impl Engine {
             }
             f = next;
         }
+        self.session.advance(&self.looper, n as Frame);
         left.copy_from_slice(mix_l);
         right.copy_from_slice(mix_r);
         self.limiter.process(start, left, right);

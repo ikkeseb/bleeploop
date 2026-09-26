@@ -48,7 +48,7 @@ const STACK: usize = 4 << 20;
 /// handed back, so its owner re-activates it at them. The device owner's rebuild, and the test
 /// device's.
 pub(crate) fn swap_engine(core: &Core, engine: Engine, handle: EngineHandle, config: EngineConfig) -> Option<Engine> {
-    let EngineHandle { commands, events, slots, overview } = handle;
+    let EngineHandle { commands, events, slots, overview, session } = handle;
     let mut ports = core.ports.each_ref().map(|p| p.lock().unwrap_or_else(|e| e.into_inner()));
     core.rate.store(config.sample_rate, Relaxed);
     core.max_block.store(config.max_block as u32, Relaxed);
@@ -68,7 +68,7 @@ pub(crate) fn swap_engine(core: &Core, engine: Engine, handle: EngineHandle, con
         // before `ends`, as a sender takes them, so no batch splits around the replay.
         let settings = core.settings.lock().unwrap_or_else(|e| e.into_inner());
         let mut ends = core.ends.lock().unwrap_or_else(|e| e.into_inner());
-        let ends = ends.insert(Ends { commands, events, overview });
+        let ends = ends.insert(Ends { commands, events, overview, session: Some(session) });
         for command in settings.replay() {
             if ends.commands.push(TimedCommand { frame: None, command }).is_err() {
                 core.counters.commands_full.fetch_add(1, Relaxed);

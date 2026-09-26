@@ -780,7 +780,8 @@ export function engineSampleRate(): number {
 }
 
 function deviceLabel(s: DeviceStatus): string {
-  return s.inputName === s.outputName ? s.outputName : `${s.inputName} → ${s.outputName}`;
+  // An output-only device has no input name.
+  return !s.inputOpen || s.inputName === s.outputName ? s.outputName : `${s.inputName} → ${s.outputName}`;
 }
 
 let openTail: Promise<unknown> = Promise.resolve();

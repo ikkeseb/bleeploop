@@ -22,6 +22,7 @@ pub struct Overview {
     grid: AtomicI64,
     lanes: [LaneCell; TRACK_COUNT],
     buffers: Box<[Peaks]>,
+    capacity: usize,
 }
 
 #[derive(Default)]
@@ -31,18 +32,20 @@ struct LaneCell {
     reversed: AtomicBool,
 }
 
-/// One buffer's bins: min and max as f32 bits, and a dirty bit per bin since the reader last took it.
+/// One buffer's bins: min and max as f32 bits, a dirty bit per bin since the reader last took it, and
+/// how many writes the buffer has seen (a session snapshot checks it did not change under the copy).
 struct Peaks {
     min: Box<[AtomicU32]>,
     max: Box<[AtomicU32]>,
     dirty: Box<[AtomicU64]>,
+    writes: AtomicU64,
 }
 
 impl Peaks {
     fn new(bins: usize) -> Peaks {
         // Built by writing every element: the pages are touched here, not in the callback.
         let words = |n: usize| (0..n).map(|_| AtomicU32::new(0)).collect::<Box<[AtomicU32]>>();
-        Peaks { min: words(bins), max: words(bins), dirty: (0..bins.div_ceil(64)).map(|_| AtomicU64::new(0)).collect() }
+        Peaks { min: words(bins), max: words(bins), dirty: (0..bins.div_ceil(64)).map(|_| AtomicU64::new(0)).collect(), writes: AtomicU64::new(0) }
     }
 }
 
@@ -66,6 +69,7 @@ impl Overview {
             grid: AtomicI64::new(0),
             lanes: std::array::from_fn(|_| LaneCell::default()),
             buffers: (0..buffers).map(|_| Peaks::new(bins)).collect(),
+            capacity,
         }
     }
 
@@ -120,6 +124,7 @@ impl Overview {
         if lo >= hi || p.min.is_empty() {
             return;
         }
+        p.writes.fetch_add(1, Relaxed);
         let valid = valid.min(data.len());
         for bin in lo / PEAK_FRAMES..=((hi - 1) / PEAK_FRAMES).min(p.min.len() - 1) {
             let from = bin * PEAK_FRAMES;
@@ -129,6 +134,31 @@ impl Overview {
             p.max[bin].store(max.to_bits(), Relaxed);
             p.dirty[bin / 64].fetch_or(1 << (bin % 64), Release);
         }
+    }
+
+    /// Buffer `buf`'s bins set whole, from `bins` ((min, max) from bin 0; the rest cleared), and
+    /// marked for the reader: a session load, whose host computed them.
+    pub(crate) fn set_bins(&self, buf: usize, bins: &[(f32, f32)]) {
+        let p = &self.buffers[buf];
+        p.writes.fetch_add(1, Relaxed);
+        for (k, (min, max)) in p.min.iter().zip(p.max.iter()).enumerate() {
+            let (lo, hi) = bins.get(k).copied().unwrap_or((0.0, 0.0));
+            min.store(lo.to_bits(), Relaxed);
+            max.store(hi.to_bits(), Relaxed);
+        }
+        for word in p.dirty.iter() {
+            word.store(u64::MAX, Release);
+        }
+    }
+
+    /// How many writes buffer `buf` has seen.
+    pub(crate) fn writes(&self, buf: usize) -> u64 {
+        self.buffers[buf].writes.load(Relaxed)
+    }
+
+    /// The frames a buffer holds.
+    pub fn capacity(&self) -> usize {
+        self.capacity
     }
 
     /// Mark every bin of buffer `buf` taken (the reader sends the whole buffer instead).

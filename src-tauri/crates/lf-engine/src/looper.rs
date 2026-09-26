@@ -27,6 +27,7 @@ use crate::grid::{
     plan_later_stop, plan_retake_stop, Frame, Grid, RetakeStop, TakeFill, COUNT_IN_BEATS,
 };
 use crate::overview::{LaneView, Overview};
+use crate::session::{Load, Pin, SessionError, Snapshot, SnapshotTrack};
 
 pub const MAX_FIXED_BARS: Frame = 32;
 /// Buffer positions a block job moves per rendered frame. A job always starts where a read or write head
@@ -1428,6 +1429,103 @@ impl Looper {
                 }
             }
         }
+    }
+
+    // ── Session ────────────────────────────────────────────────────────────────────────────────────
+
+    /// A snapshot begins (no block job runs): pin each committed lane's loop (an OVERDUBBING lane's
+    /// undo buffer, its loop before the layer in flight) with its buffer's write count.
+    pub(crate) fn snapshot_begin(&self, s: &mut Snapshot, bpm: u32, rate: u32) {
+        s.started = true;
+        (s.rate, s.master, s.bpm, s.count, s.done) = (rate, self.master, bpm, 0, 0);
+        for (i, t) in self.lanes.iter().enumerate() {
+            let pin = match t.state {
+                LaneState::Playing | LaneState::Stopped if t.length > 0 => Pin { buf: t.live, backwards: t.reversed, writes: 0 },
+                // The undo buffer holds the loop as it stood when the layer began (`start_overdub`).
+                LaneState::Overdubbing if t.length > 0 => Pin { buf: t.spare, backwards: t.spare_reversed, writes: 0 },
+                _ => continue,
+            };
+            s.pins[s.count] = Some(Pin { writes: self.overview.writes(pin.buf), ..pin });
+            s.tracks[s.count] = Some(SnapshotTrack { index: i as u8, state: t.state, reversed: t.reversed });
+            s.count += 1;
+        }
+        let need = s.count * self.master as usize;
+        if s.pcm.len() < need {
+            s.result = Some(Err(SessionError::TooSmall(need)));
+        } else if s.count == 0 {
+            s.result = Some(Ok(()));
+        }
+    }
+
+    /// Copy up to `budget` more samples of the pinned loops, in play order; when the last is in, the
+    /// result: `Changed` if a pinned buffer was written meanwhile.
+    pub(crate) fn snapshot_copy(&self, s: &mut Snapshot, budget: usize) {
+        let master = s.master as usize;
+        let total = s.count * master;
+        let end = (s.done + budget).min(total);
+        while s.done < end {
+            let (k, from) = (s.done / master, s.done % master);
+            let to = master.min(from + end - s.done);
+            let Some(pin) = s.pins[k] else { break };
+            let src = &self.bufs[pin.buf][..master];
+            let dst = &mut s.pcm[k * master + from..k * master + to];
+            if pin.backwards {
+                for (j, d) in dst.iter_mut().enumerate() {
+                    *d = src[master - 1 - (from + j)];
+                }
+            } else {
+                dst.copy_from_slice(&src[from..to]);
+            }
+            s.done += to - from;
+        }
+        if s.done >= total {
+            let torn = s.pins[..s.count].iter().flatten().any(|p| self.overview.writes(p.buf) != p.writes);
+            s.result = Some(if torn { Err(SessionError::Changed) } else { Ok(()) });
+        }
+    }
+
+    /// Load a session at `cx.now` into an all-EMPTY looper with no take in flight: swap each lane's
+    /// buffer for the load's, lock the tempo, anchor the master grid on `cx.now` and play the PLAYING
+    /// lanes from loop position 0 there (the web `loadSession`). The engine's old buffers go back in
+    /// the load for the host to free. Checks everything before it changes anything.
+    pub(crate) fn load(&mut self, cx: &mut Cx, load: &mut Load) -> Result<(), SessionError> {
+        if self.rec.is_some() || self.master != 0 || self.lanes.iter().any(|t| t.state != LaneState::Empty) {
+            return Err(SessionError::NotEmpty);
+        }
+        let master = load.master;
+        if master <= 0 || master > self.capacity || load.bars < 1 {
+            return Err(SessionError::Invalid("the session's loop does not fit this engine"));
+        }
+        if load.bars * frames_per_bar(load.bpm as f64, self.sample_rate) != master {
+            return Err(SessionError::Invalid("the session's tempo, bars and loop length disagree"));
+        }
+        let mut seen = [false; TRACK_COUNT];
+        for track in &load.tracks {
+            let i = track.index as usize;
+            if i >= TRACK_COUNT || std::mem::replace(&mut seen[i], true) || track.buf.len() != self.capacity as usize {
+                return Err(SessionError::Invalid("a session track does not fit this engine"));
+            }
+        }
+        for track in &mut load.tracks {
+            let t = &mut self.lanes[track.index as usize];
+            std::mem::swap(&mut self.bufs[t.live], &mut track.buf);
+            self.overview.set_bins(t.live, &track.peaks);
+            t.length = master;
+            t.written = master;
+            t.reversed = track.reversed;
+            t.undo_valid = false;
+            t.audible = t.logical();
+            t.switch_at = None;
+            t.stop_at = None;
+            t.state = if track.playing { LaneState::Playing } else { LaneState::Stopped };
+        }
+        self.master = master;
+        self.anchor = cx.now;
+        cx.clock.set_locked(false);
+        cx.clock.set_bpm(load.bpm as f64, cx.now);
+        cx.clock.set_locked(true);
+        cx.clock.start_master(self.anchor, master, load.bars, cx.now);
+        Ok(())
     }
 
     // ── Feed ───────────────────────────────────────────────────────────────────────────────────────

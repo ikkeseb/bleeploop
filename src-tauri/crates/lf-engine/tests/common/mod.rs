@@ -203,6 +203,11 @@ impl Rig {
         self.handle.slots[slot].returned()
     }
 
+    /// The host's end of the session port (`lf_engine::session`).
+    pub fn session(&mut self) -> &mut lf_engine::SessionPort {
+        &mut self.handle.session
+    }
+
     /// The device stops, as its owner then does: `Engine::punch_out` (STATUS E3), its events read. The
     /// next block continues at `frame`, where the device owner resumes the counter.
     pub fn punch_out(&mut self) {

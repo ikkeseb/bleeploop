@@ -25,6 +25,7 @@
 //! | `feed` | the feed: what the UI reads back (events, device, status, anchor, meter, waveforms), on its own thread |
 //! | `mode` | engine mode: the toggle, the managed host, the `engine_*` Tauri commands, shutdown on exit |
 //! | `plugins` | engine mode's plugin slots: the live line's `plugin_*` commands routed to the engine slot owners |
+//! | `session` | a session's bytes to and from the engine: the snapshot the UI saves, the load it imports |
 //! | `settings` | the last value of every setting command, replayed into each new engine |
 //! | `share` | Share output: the post-limiter master mirrored to a WASAPI endpoint while ASIO plays |
 //! | `midi` | native MIDI: ports, hot-plug, parse, the MIDI-learn bindings, notes and pedal actions |
@@ -75,6 +76,7 @@ pub(crate) mod pipes;
 mod plugins;
 #[cfg(debug_assertions)]
 pub(crate) mod probe;
+mod session;
 mod settings;
 pub mod share;
 pub mod slot_host;
@@ -91,7 +93,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use lf_engine::grid::Frame;
-use lf_engine::{Command, Engine, Event, Overview, SlotPort, SlotProcessor, TimedCommand, SLOT_COUNT};
+use lf_engine::{Command, Engine, Event, Overview, SessionPort, SlotPort, SlotProcessor, TimedCommand, SLOT_COUNT};
 use rtrb::{Consumer, Producer};
 use serde::{Deserialize, Serialize};
 
@@ -308,6 +310,8 @@ pub(crate) struct Ends {
     pub(crate) commands: Producer<TimedCommand>,
     pub(crate) events: Consumer<Event>,
     pub(crate) overview: Arc<Overview>,
+    /// The session port (`session.rs`), out while a snapshot or load uses it.
+    pub(crate) session: Option<SessionPort>,
 }
 
 /// State shared by the device owner, the callbacks, the slot hosts and the command threads.
@@ -351,6 +355,9 @@ pub(crate) struct Core {
     /// a sample reached full scale.
     pub(crate) meter_peak: AtomicU32,
     pub(crate) meter_clip: AtomicBool,
+    /// One session job at a time (`session.rs`), and the jobs an earlier call gave up on that are still
+    /// in the engine of that generation: (generation, count).
+    pub(crate) session_busy: Mutex<(u64, usize)>,
     /// The engine's own counters, mirrored each callback so `EngineHost::diag` never takes the lock
     /// (a reader holding it would make the callback miss).
     pub(crate) engine_diag: EngineDiag,
@@ -394,6 +401,7 @@ impl Core {
             input_frames: AtomicI64::new(0),
             meter_peak: AtomicU32::new(0),
             meter_clip: AtomicBool::new(false),
+            session_busy: Mutex::new((0, 0)),
             engine_diag: EngineDiag::default(),
             device: Mutex::new(None),
             device_events: Mutex::new(Vec::new()),

@@ -200,6 +200,26 @@ pub async fn engine_set_share(endpoint: Option<String>) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || host.set_share(endpoint)).await.map_err(|e| format!("engine_set_share: {e}"))?
 }
 
+/// The committed loops as raw bytes (`session.rs`'s layout): JS gets an ArrayBuffer, not a JSON array.
+/// Off the IPC thread: a snapshot copies for up to about a second and a half.
+#[tauri::command]
+pub async fn engine_snapshot() -> Result<tauri::ipc::Response, String> {
+    let host = app()?.host()?;
+    let bytes = tauri::async_runtime::spawn_blocking(move || host.snapshot()).await.map_err(|e| format!("engine_snapshot: {e}"))??;
+    Ok(tauri::ipc::Response::new(bytes))
+}
+
+/// Load a session into an engine whose lanes are all EMPTY: the raw request body is the session's
+/// bytes (`session.rs`'s layout; `invoke('engine_load_session', bytes)` with a `Uint8Array`).
+#[tauri::command]
+pub async fn engine_load_session(request: tauri::ipc::Request<'_>) -> Result<(), String> {
+    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else {
+        return Err("engine_load_session takes the session's bytes as the raw request body".to_string());
+    };
+    let (host, bytes) = (app()?.host()?, bytes.clone());
+    tauri::async_runtime::spawn_blocking(move || host.load_session(&bytes)).await.map_err(|e| format!("engine_load_session: {e}"))?
+}
+
 /// Subscribe `channel` to the feed (replacing the last subscriber); its first frame is a reset.
 #[tauri::command]
 pub async fn engine_feed(channel: Channel<FeedFrame>) -> Result<(), String> {
