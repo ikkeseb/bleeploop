@@ -21,6 +21,10 @@
  *   STOP ALL → PLAY ALL: an idle transport restarts from the top and re-anchors the grid
  *   C  lane 3, click on, lanes 1–2 muted → clickX_C: does the click keep the grid after the restart?
  *   D  lane 4, click off, lane 1 playing, lanes 2–3 muted → loopX_D: do the loops keep their place?
+ *   E  lane 5, a multiply (F14): FIXED at two loops, click on, lanes 1–4 muted → clickX_E; the loop is
+ *      two loops long after it, and lane 1 holds its loop twice, bit for bit
+ *   F  lane 4 cleared and taken again over the grown loop, click on → clickX_F: the click after the
+ *      multiply's re-anchor
  * then CLEAR ALL, so the runner's window close meets no jam question. The pass bars print per buffer;
  * the verdict is `complete: …` when every bar passes, `FAIL …` otherwise. A whole-beat offset shows as
  * the accent off beat 1; a whole-bar one cannot show (every bar of the loop sounds alike).
@@ -283,6 +287,8 @@ interface BufferResult {
   b: TakeStats;
   c: TakeStats;
   d: TakeStats;
+  e: TakeStats;
+  f: TakeStats;
   bars: { name: string; ok: boolean; value: string }[];
 }
 
@@ -431,7 +437,8 @@ async function runBuffer(buffer: BufferFrames, bars: number, channel: number, re
     clock.setMetronome(true);
     const msA = await take(0, 'A', 2 + masterFrames / rate + 15);
     check(looper.masterLengthFrames() === masterFrames, `the master is ${looper.masterLengthFrames()} frames, expected ${masterFrames}`);
-    const a = analyse('A', 0, await committedPcm(0, masterFrames), rate, ref, channel);
+    const pcmA = await committedPcm(0, masterFrames);
+    const a = analyse('A', 0, pcmA, rate, ref, channel);
     const inputPeakA = guard.max;
 
     // ── B: lane 1's clicks through the cable, click off ──────────────────────────────────────────────
@@ -459,29 +466,54 @@ async function runBuffer(buffer: BufferFrames, bars: number, channel: number, re
     looper.setMute(0, false);
     const msD = await take(3, 'D', takeSeconds);
     const d = analyse('D', 3, await committedPcm(3, masterFrames), rate, ref, channel);
+
+    // ── E: a multiply, FIXED at two loops, the click alone ───────────────────────────────────────────
+    looper.setMute(0, true);
+    looper.setMute(3, true);
+    clock.setMetronome(true);
+    looper.setFixedLengthBars(2 * bars);
+    const grown = 2 * masterFrames;
+    const msE = await take(4, 'E', 2 * takeSeconds);
+    check(looper.masterLengthFrames() === grown, `after the multiply the master is ${looper.masterLengthFrames()} frames, expected ${grown}`);
+    const e = analyse('E', 4, await committedPcm(4, grown), rate, ref, channel);
+    const tiled = await committedPcm(0, grown);
+    let tileDiff = 0;
+    for (let k = 0; k < grown; k++) if (tiled[k] !== pcmA[k % masterFrames]) tileDiff++;
+
+    // ── F: lane 4 again over the grown loop, the click alone ─────────────────────────────────────────
+    looper.clear(3);
+    await until('lane 4 EMPTY', () => lane(3).state === 'EMPTY', 5);
+    looper.setMute(4, true);
+    const msF = await take(3, 'F', 2 * takeSeconds);
+    const f = analyse('F', 3, await committedPcm(3, grown), rate, ref, channel);
+    looper.setFixedLengthBars(bars);
     const inputPeak = guard.max;
     unwatchInput();
 
     looper.clearAll();
     await until('an empty looper after the takes', () => allEmpty() && looper.masterLengthFrames() === 0, 5);
     check(rejected.length === rejectedBefore, `take rejected: ${rejected.slice(rejectedBefore).join(', ')}`);
-    log(`  b${buffer} takes: A ${msA} ms, B ${msB} ms, C ${msC} ms, D ${msD} ms; input peak ${inputPeakA.toFixed(3)} (A), ${inputPeak.toFixed(3)} (all), ${rejected.length - rejectedBefore} rejected`);
+    log(`  b${buffer} takes: A ${msA} ms, B ${msB} ms, C ${msC} ms, D ${msD} ms, E ${msE} ms, F ${msF} ms; input peak ${inputPeakA.toFixed(3)} (A), ${inputPeak.toFixed(3)} (all), ${rejected.length - rejectedBefore} rejected`);
 
     // ── The bars ─────────────────────────────────────────────────────────────────────────────────────
-    const spreads = [a, b, c, d].map((s) => s.max - s.min);
-    const drifts = [a, b, c, d].map((s) => s.drift);
+    const takes = [a, b, c, d, e, f];
+    const spreads = takes.map((s) => s.max - s.min);
+    const drifts = takes.map((s) => s.drift);
     const barList = [
       { name: '|clickX_A| <= 2 ms', ok: Math.abs(a.x) <= 2, value: signed(a.x, 3) },
-      { name: 'accent on beat 1 A,B,C,D', ok: [a, b, c, d].every((s) => s.offBar.length === 0), value: [a, b, c, d].map((s) => s.offBar.length).join(',') },
-      { name: 'spread A,B,C,D <= 1 ms', ok: spreads.every((s) => s <= 1), value: spreads.map((s) => s.toFixed(3)).join(',') },
-      { name: '|drift| A,B,C,D <= 0.1 ms/min', ok: drifts.every((s) => Math.abs(s) <= 0.1), value: drifts.map((s) => signed(s, 3)).join(',') },
+      { name: 'accent on beat 1 A-F', ok: takes.every((s) => s.offBar.length === 0), value: takes.map((s) => s.offBar.length).join(',') },
+      { name: 'spread A-F <= 1 ms', ok: spreads.every((s) => s <= 1), value: spreads.map((s) => s.toFixed(3)).join(',') },
+      { name: '|drift| A-F <= 0.1 ms/min', ok: drifts.every((s) => Math.abs(s) <= 0.1), value: drifts.map((s) => signed(s, 3)).join(',') },
       // The same path measured twice: only the detector differs, so 0.1 ms (4 frames at 44.1 kHz) is room.
       { name: '|loopX_B - 2*clickX_A| <= 0.1 ms', ok: Math.abs(b.x - 2 * a.x) <= 0.1, value: `${signed(b.x, 3)} - 2*${signed(a.x, 3)} = ${signed(b.x - 2 * a.x, 3)}` },
       { name: '|clickX_C - clickX_A| <= 0.1 ms', ok: Math.abs(c.x - a.x) <= 0.1, value: signed(c.x - a.x, 3) },
       { name: '|loopX_D - loopX_B| <= 0.1 ms', ok: Math.abs(d.x - b.x) <= 0.1, value: signed(d.x - b.x, 3) },
+      { name: '|clickX_E - clickX_A| <= 0.1 ms (the multiply take)', ok: Math.abs(e.x - a.x) <= 0.1, value: signed(e.x - a.x, 3) },
+      { name: 'lane 1 is its loop twice after the multiply', ok: tileDiff === 0, value: `${tileDiff} of ${grown} frames differ` },
+      { name: '|clickX_F - clickX_A| <= 0.1 ms (after the re-anchor)', ok: Math.abs(f.x - a.x) <= 0.1, value: signed(f.x - a.x, 3) },
     ];
     for (const bar of barList) log(`b${buffer} ${bar.ok ? 'PASS' : 'FAIL'} ${bar.name}: ${bar.value}`);
-    return { device, a, b, c, d, bars: barList };
+    return { device, a, b, c, d, e, f, bars: barList };
   } finally {
     unwatchInput();
   }
