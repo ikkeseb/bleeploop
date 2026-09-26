@@ -26,5 +26,8 @@ is a one-line adapter). UI-only edits are safe while the dev app runs.
 - **Invariant 6 lives here:** the 60 fps canvas draw loop reads a plain mutable object, never a
   signal (`looper/waveform.ts` reads non-reactive looper getters). Measured cost + the fix
   pattern: `docs/ARCHITECTURE.md` invariant 6.
+- **Engine mode:** components take `looper`, `clock`, `master` and `sampleRate` from
+  `state/audio.ts`, which picks the web or the engine implementation; a direct import from
+  `src/audio/` bypasses engine mode without an error.
 - **Error toasts** (`toast/Toasts.tsx` renders `src/notify.ts`) sit ADDITIVELY beside the
   `console.error` sites, which feed the release log — keep both.
