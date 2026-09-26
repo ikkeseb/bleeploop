@@ -98,14 +98,15 @@ console.log(`native probe ${name}: pnpm ${devScript}, log ${join('logs', `native
 const tagged = new RegExp(`\\[${spec.tag}\\] (.*)$`);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-/** Stop the dev run and whatever it left; returns the "name pid" lines `killNative` stopped. */
+/** Stop the dev run and whatever it left; returns the "name pid" lines `killNative` stopped. The tree
+ * kill takes the run's own cargo; the sweep leaves any other cargo alone (someone else's build). */
 function stopRun(child) {
   try {
     execFileSync('taskkill', ['/T', '/F', '/PID', String(child.pid)], { stdio: 'ignore' });
   } catch {
     // already gone
   }
-  return killNative();
+  return killNative({ cargo: false });
 }
 
 /**

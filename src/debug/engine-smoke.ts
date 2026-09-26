@@ -20,7 +20,8 @@
  *
  * Trigger: `VITE_LF_PROBE=engine-smoke` at Vite start (DEV only). Knobs:
  *   `VITE_LF_PROBE_BUFFER`  the ASIO buffer in frames (default 128)
- *   `VITE_LF_PROBE_PLUGIN`  a plugin name substring to load into slot 1 and go live on (default: none)
+ *   `VITE_LF_PROBE_PLUGIN`  `<name substring>[:<format>]` to load into slot 1 and go live on, e.g.
+ *                           `Pro-Q:vst3` (default: none)
  */
 import { getContext } from 'tone';
 import { framesPerBar } from '../audio/quantize';
@@ -170,11 +171,11 @@ async function run(): Promise<void> {
   log('transport: STOP ALL, PLAY ALL and CLEAR changed the lanes');
 
   // ── A plugin live (once the engine routes plugins) ──────────────────────────────────────────────
-  const want = String(import.meta.env.VITE_LF_PROBE_PLUGIN ?? '').toLowerCase();
+  const [want, format] = String(import.meta.env.VITE_LF_PROBE_PLUGIN ?? '').toLowerCase().split(':');
   if (want) {
     await until('the plugin scan', () => nativeHostReady() && availablePlugins().length > 0, 300);
-    const desc = availablePlugins().find((d) => d.name.toLowerCase().includes(want));
-    check(desc !== undefined, `no scanned plugin matches "${want}"`);
+    const desc = availablePlugins().find((d) => d.name.toLowerCase().includes(want) && (!format || d.format === format));
+    check(desc !== undefined, `no scanned plugin matches "${want}${format ? `:${format}` : ''}"`);
     await selectPlugin(0, desc!);
     check(slotPlugins()[0]?.id === desc!.id, `could not load ${desc!.name}`);
     await goLive(0);
@@ -185,7 +186,7 @@ async function run(): Promise<void> {
       await sleep(40);
     }
     const moved = new Set(levels.map((l) => l.toFixed(6))).size > 1;
-    log(`plugin: ${desc!.name} live in slot 1, input peak ${Math.min(...levels).toExponential(2)}..${Math.max(...levels).toExponential(2)}`);
+    log(`plugin: ${desc!.name} (${desc!.format}) live in slot 1, input peak ${Math.min(...levels).toExponential(2)}..${Math.max(...levels).toExponential(2)}`);
     check(moved, 'the input meter did not move');
   }
 

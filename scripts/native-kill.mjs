@@ -1,5 +1,7 @@
 // scripts/native-kill.mjs — stop a `tauri dev` run: every `app` and `cargo` process plus whatever
-// listens on port 1420 (the dev Vite). Never every node process: the agent session may be one.
+// listens on port 1420 (the dev Vite). Never every node process: the agent session may be one. A probe
+// run sweeps with `cargo: false`: its own tree kill already took its cargo, and a cargo running now is
+// someone else's build.
 //
 //   pnpm native:kill
 //
@@ -24,9 +26,10 @@ export function assertWindows(command) {
   process.exit(1);
 }
 
-/** Stops the processes; returns their "name pid" lines. */
-export function killNative() {
-  const out = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', PS], { encoding: 'utf8' });
+/** Stops the processes; returns their "name pid" lines. `cargo: false` leaves cargo running. */
+export function killNative({ cargo = true } = {}) {
+  const script = cargo ? PS : PS.replace('app,cargo', 'app');
+  const out = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { encoding: 'utf8' });
   return out.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
 }
 
