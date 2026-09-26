@@ -167,7 +167,12 @@ late (max 2.6 ms), 0 xruns; at 128 and 256, 0–1. A GPU job from another app ra
   932.8 frames against 666), while the first open after a block-size change landed right (256 then 128:
   1187.8 and 666.8). `--preopen` (the spike opens the driver at another block size for 300 ms and
   drops the device, so the driver is destroyed, before the measured open) put 4 of 4 same-size
-  relaunches at 128 back within 0.1 ms (662.8–668.8). The engine's ASIO open does the same (Stage 5).
+  relaunches at 128 back within 0.1 ms (662.8–668.8). The engine's ASIO open does the same, on a cpal
+  device of its own per run (`src-tauri/src/engine_io/cpal_driver.rs`), measured on the engine's path
+  by `app.exe --probe-engine asio 128 --lag --in 1 --out 1 [--no-preopen]` (same setup, 10 s
+  launches): a 60 s run at 128 left the driver so (with or without the preopen; 10 s runs did not,
+  between unknown), and relaunches without the preopen then landed +6.0 ms late (3 of 3, 930.8–932.8;
+  the spike 2 of 2); with it 9 of 9 landed within 0.1 ms (661.8–668.8). An ASIO open costs ~500 ms more.
 - A2 within 0.1 ms in the other 20 ASIO runs. A3 at 128: 663.8 in all 5, against 667.8–668.8 two
   hours earlier (5 frames between sessions; bar 2, inside the OWNER zone). At 64 a one-sample step
   inside the 10-minute run (A3.spread 1.00, bar ≤ 1; A4 +0.905 frames/10 min, PASS); A4 0.000 at 128
