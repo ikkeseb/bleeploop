@@ -1,5 +1,5 @@
 import { createSignal, onCleanup } from 'solid-js';
-import { looper, type TrackState } from '../../audio/looper/looper';
+import { looper, type TrackState } from '../state/audio';
 import { framesPerBar } from '../../audio/quantize';
 
 /**

@@ -1,5 +1,6 @@
 import { createSignal } from 'solid-js';
 import {
+  engineMode,
   platform,
   type AsioStatusReport,
   type AudioInputDevice,
@@ -17,7 +18,9 @@ import { matchWebOutput, outputLabelsHidden } from './output-match';
  * capture/output devices (+ pruning of a persisted id that vanished), the global RT buffer size, and
  * the ASIO tier preference. None of it is per-slot, so nothing here rides the per-slot op chain.
  * Host writes are serialized here and published/persisted only after acknowledgement.
- * Everything is a no-op / empty / persisted-default in the browser build.
+ * Everything is a no-op / empty / persisted-default in the browser build. In engine mode the buffer and
+ * the tier are saved choices the engine's device open reads (`src/ui/state/engine-store.ts`), never
+ * written to the live plugin host, and the WebView plays nothing.
  */
 
 // Native capture devices the host enumerates.
@@ -124,7 +127,7 @@ type SinkContext = AudioContext & { readonly sinkId: string; setSinkId(sinkId: s
  * and in the web build.
  */
 export async function applyWebOutput(): Promise<void> {
-  if (!platform.pluginHost.available) return;
+  if (!platform.pluginHost.available || engineMode()) return;
   const id = usingAsio() ? '' : readAudioDeviceSettings().outputDeviceId;
   const name = outputDevices().find((d) => d.id === id)?.name;
   const ctx = engine.ctx as SinkContext;
@@ -159,6 +162,11 @@ export async function applyWebOutput(): Promise<void> {
  * order. Publish and persist only accepted values; a rejected write must not reset compensation.
  */
 export async function setBufferSize(frames: BufferFrames): Promise<void> {
+  if (engineMode()) {
+    setBufferFramesSig(frames);
+    writeAudioDeviceSettings({ bufferFrames: frames });
+    return;
+  }
   try {
     await configure(async () => {
       await platform.pluginHost.setBufferSize(frames);
@@ -233,6 +241,12 @@ export const asioRetryable = () => {
  * the explicit user action that runs the probe; turning it OFF never touches the driver.
  */
 export async function setAsioEnabled(enabled: boolean): Promise<void> {
+  if (engineMode()) {
+    setAsioEnabledSig(enabled);
+    writeAudioDeviceSettings({ asioEnabled: enabled });
+    if (enabled && asioRetryable()) await probeAsio(true);
+    return;
+  }
   try {
     await configure(async () => {
       await platform.pluginHost.setAsioEnabled(enabled);
@@ -259,9 +273,9 @@ export async function initAudioDeviceSettings(): Promise<void> {
   if (!platform.pluginHost.available) return;
   await configure(async () => {
     const saved = readAudioDeviceSettings();
-    await platform.pluginHost.setBufferSize(saved.bufferFrames);
+    if (!engineMode()) await platform.pluginHost.setBufferSize(saved.bufferFrames);
     setBufferFramesSig(saved.bufferFrames);
-    await platform.pluginHost.setAsioEnabled(saved.asioEnabled);
+    if (!engineMode()) await platform.pluginHost.setAsioEnabled(saved.asioEnabled);
     setAsioEnabledSig(saved.asioEnabled);
   });
   try {

@@ -8,8 +8,16 @@ import { createSignal } from 'solid-js';
 import { inputRouter, type PluginNoteSink } from './input-router';
 import { SYNTHS } from './synths';
 import type { SynthEngine } from './synths/synth';
-import { pluginBridge } from './plugin-bridge';
-import { platform, type PluginDescriptor, type PluginInfo } from '../platform';
+import { FX_DEFAULT_GAIN, SYNTH_DEFAULT_GAIN, pluginBridge } from './plugin-bridge';
+import {
+  engineMode,
+  platform,
+  sendEngine,
+  type InstrumentId,
+  type NoteTarget,
+  type PluginDescriptor,
+  type PluginInfo,
+} from '../platform';
 import { notifyError } from '../notify';
 import {
   activeSlot,
@@ -23,7 +31,7 @@ import {
   slotPlugins,
   withAt,
 } from './instrument-slots';
-import { disarmInputInternal, disarmMonitorInternal } from './native-io';
+import { disarmInputInternal, disarmMonitorInternal, resendEngineLive } from './native-io';
 import { forgetSlotPlugin, rememberSlotPlugin } from './rig-recall';
 import { warm as warmCapture } from './looper/capture';
 import { reconcilePluginDescriptors, samePluginDescriptor } from './plugin-descriptor';
@@ -71,6 +79,58 @@ const PLUGIN_SINKS: [PluginNoteSink, PluginNoteSink] = [
   },
 ];
 
+/**
+ * Engine mode's one note sink: the router's notes and wheels become engine commands for the target the
+ * last `SelectInstrument` named (a built-in instrument or a plugin slot). Sustain and a held note's
+ * owner stay in the router, as the engine expects (`lf_engine::Command::NoteOn`). No Web Audio: engine
+ * mode never builds a synth engine.
+ */
+const ENGINE_SINK: PluginNoteSink = {
+  noteOn: (note, velocity) => sendEngine({ NoteOn: [note, velocity] }),
+  noteOff: (note) => sendEngine({ NoteOff: note }),
+  setPitchBend: (semitones) => sendEngine({ PitchBend: semitones }),
+  setModulation: (depth) => sendEngine({ Modulation: depth }),
+};
+
+/** The note target last sent with its slot: a slot switch sends it again, even to the same synth. */
+let engineTarget = '';
+
+function routeEngine(i: 0 | 1): void {
+  const target: NoteTarget = slotPlugins()[i] ? { Slot: i } : { Builtin: slotIds()[i] as InstrumentId };
+  const key = `${i}:${JSON.stringify(target)}`;
+  if (key !== engineTarget) {
+    engineTarget = key;
+    // Release what the router holds on the target it leaves, then move (the engine releases too).
+    inputRouter.allNotesOff();
+    sendEngine({ SelectInstrument: target });
+  }
+  inputRouter.setActiveEngine(null);
+  inputRouter.setActivePlugin(ENGINE_SINK);
+}
+
+// Engine mode's per-slot plugin gain (the web path keeps it on the plugin bridge); null = no plugin.
+const [engineGains, setEngineGains] = createSignal<[number | null, number | null]>([null, null]);
+
+function setEngineGain(slot: 0 | 1, gain: number | null): void {
+  setEngineGains((prev) => withAt(prev, slot, gain));
+  if (gain !== null) sendEngine({ SetSlotGain: [slot, gain] });
+}
+
+/**
+ * Engine mode: send what this module and `native-io.ts` keep to an engine that may not have it (a new
+ * engine, a WebView reload): the note target, the slot gains and the live slot. Held notes are released
+ * and the wheels seeded again.
+ */
+export function engineResync(): void {
+  engineTarget = '';
+  inputRouter.setActivePlugin(null);
+  applyActiveRouting();
+  engineGains().forEach((gain, slot) => {
+    if (gain !== null) sendEngine({ SetSlotGain: [slot, gain] });
+  });
+  resendEngineLive();
+}
+
 function findFactory(id: string) {
   return SYNTHS.find((s) => s.id === id) ?? SYNTHS[0];
 }
@@ -91,6 +151,10 @@ function buildSlot(i: 0 | 1): void {
  */
 function applyActiveRouting(): void {
   const i = activeSlot();
+  if (engineMode()) {
+    routeEngine(i);
+    return;
+  }
   if (slotPlugins()[i]) {
     // Drop the synth-engine ref FIRST (flushes it if live) so a later panic/allNotesOff can't call
     // into a SynthEngine we dispose right after loading a plugin into this slot. Then the plugin
@@ -110,7 +174,7 @@ function applyActiveRouting(): void {
  */
 export function ensureActive(): void {
   applyActiveRouting();
-  warmCapture();
+  if (!engineMode()) warmCapture();
 }
 
 /**
@@ -240,6 +304,9 @@ async function doSelectPlugin(slot: 0 | 1, desc: PluginDescriptor, claimMidi: ()
   }
   setSlotPlugins((prev) => withAt(prev, slot, desc));
   rememberSlotPlugin(slot, desc);
+  // Engine mode has no bridge to pick the gain default: take the scan's kind, an unclassified plugin
+  // at the quieter synth level.
+  if (engineMode()) setEngineGain(slot, desc.isEffect === true ? FX_DEFAULT_GAIN : SYNTH_DEFAULT_GAIN);
   // Route to the plugin FIRST (drops the live synth-engine ref), THEN dispose the engine — so the
   // router never holds a reference to a disposed SynthEngine. If the slot isn't active the router
   // doesn't reference this engine anyway, so disposing it is safe regardless. An instrument plugin
@@ -265,6 +332,7 @@ async function unloadSlotPlugin(slot: 0 | 1, outgoing: PluginDescriptor, path: '
   await disarmMonitorInternal(slot); // stop the native monitor before its plugin goes away
   await disarmInputInternal(slot); // the outgoing plugin's input feed must stop before its unload
   pluginBridge.teardownPluginSlot(slot); // stop the audio drain + release the hop-1 buffer (sync)
+  if (engineMode()) setEngineGain(slot, null);
   setSlotPlugins((prev) => withAt(prev, slot, null));
   // Both calls flush held notes: the next plugin reuses the SAME stable PLUGIN_SINKS ref, so a later
   // applyActiveRouting would early-return without releasing a note held across the swap.
@@ -278,6 +346,7 @@ async function unloadSlotPlugin(slot: 0 | 1, outgoing: PluginDescriptor, path: '
     console.error(`[instrument] plugin unload${path === 'swap' ? ' (swap)' : ''} failed`, e);
     notifyError('Plugin unload failed', 'The plugin stays in the slot but is silent. Choose none or another plugin to retry.');
     setSlotPlugins((prev) => withAt(prev, slot, outgoing));
+    if (engineMode()) setEngineGain(slot, outgoing.isEffect === true ? FX_DEFAULT_GAIN : SYNTH_DEFAULT_GAIN);
     // Route to the restored plugin FIRST (drops any synth-engine ref), THEN dispose the engine built
     // while the slot read empty, so no idle SynthEngine lives beside the plugin.
     if (activeSlot() === slot) applyActiveRouting();
@@ -386,11 +455,16 @@ export async function scanForPlugins(opts: { force?: boolean } = {}): Promise<vo
  * `__lf.setPluginGain`). Thin pass-through to the audio bridge; no-op if no plugin is wired there.
  */
 export function setPluginGain(slot: 0 | 1, value: number): void {
-  pluginBridge.setGain(slot, value);
+  if (!engineMode()) {
+    pluginBridge.setGain(slot, value);
+    return;
+  }
+  if (engineGains()[slot] !== null) setEngineGain(slot, Math.max(0, value));
 }
 
 /** Reactive intended output gain for both slots; null means no plugin is wired there yet. */
-export const pluginGain = pluginBridge.gains;
+export const pluginGain = (): readonly [number | null, number | null] =>
+  engineMode() ? engineGains() : pluginBridge.gains();
 
 /** Read-only reactive accessors: the synth id per slot, the loaded plugin per slot (null = synth
  * mode), the active slot index. (Owned by `instrument-slots.ts`; re-exported as the UI's one path.) */

@@ -23,6 +23,10 @@ const SCHEDULE_AHEAD = 0.005;
 export interface PluginNoteSink {
   noteOn(note: number, velocity: number): void;
   noteOff(note: number): void;
+  /** The wheels, for a sink that plays them (the native engine's, `instrument.ts`); a plugin slot's
+   * web sink omits both. Seeded when the sink takes over, like a synth engine. */
+  setPitchBend?(semitones: number): void;
+  setModulation?(depth: number): void;
 }
 
 /**
@@ -68,6 +72,8 @@ class InputRouter {
     if (this.activePlugin === sink) return;
     this.allNotesOff();
     this.activePlugin = sink;
+    sink?.setPitchBend?.(this.pitchBend);
+    sink?.setModulation?.(this.modDepth);
   }
 
   get activeId(): string | null {
@@ -180,10 +186,9 @@ class InputRouter {
   private applyControllers(): void {
     this.pitchBend = [...this.bends.values()].at(-1) ?? 0;
     this.modDepth = [...this.modulation.values()].at(-1) ?? 0;
-    if (!this.activePlugin) {
-      this.active?.setPitchBend?.(this.pitchBend);
-      this.active?.setModulation?.(this.modDepth);
-    }
+    const target = this.activePlugin ?? this.active;
+    target?.setPitchBend?.(this.pitchBend);
+    target?.setModulation?.(this.modDepth);
   }
 
   /** Sink swaps release notes but preserve connected physical controller state. */

@@ -1,10 +1,9 @@
 import { createMemo, createSignal } from 'solid-js';
-import { clock } from '../../audio/clock';
-import { engine } from '../../audio/engine';
 import { exportLoops } from '../../audio/export/export';
 import { importSession, maxImportArchiveBytes } from '../../audio/export/import';
-import { looper } from '../../audio/looper/looper';
 import { notifyError, notifyInfo } from '../../notify';
+import { engineMode } from '../../platform';
+import { clock, looper, sampleRate } from '../state/audio';
 import { anyTrackIn, masterBars } from '../looper/shared';
 
 /**
@@ -14,11 +13,13 @@ import { anyTrackIn, masterBars } from '../looper/shared';
  *
  * Export every committed track (mono WAV) + the wet stereo master + session.json. Import a previous
  * export into an EMPTY looper — import never overwrites, so it is enabled only while no master loop
- * exists (the inverse of EXPORT).
+ * exists (the inverse of EXPORT). Both read and write the web looper, so engine mode disables them until
+ * the engine's session work lands (`docs/plans/native-engine.md` § Stage 5).
  */
 export function SessionTools() {
   const hasMaster = () => looper.masterLengthFrames() > 0;
-  const loopBars = () => masterBars(looper.masterLengthFrames(), clock.bpm(), engine.ctx.sampleRate);
+  const loopBars = () => masterBars(looper.masterLengthFrames(), clock.bpm(), sampleRate());
+  const notOnEngine = 'Not available on the native engine yet';
   const anyLive = createMemo(() => anyTrackIn('PLAYING', 'OVERDUBBING', 'RECORDING'));
   const anyCapturing = createMemo(() => anyTrackIn('RECORDING', 'OVERDUBBING'));
   // EXPORT needs committed audio and an idle capture path. A bare master length isn't enough —
@@ -51,7 +52,7 @@ export function SessionTools() {
     const file = input.files?.[0];
     if (!file) return;
     try {
-      const limit = maxImportArchiveBytes(engine.ctx.sampleRate);
+      const limit = maxImportArchiveBytes(sampleRate());
       if (file.size > limit) {
         throw new Error(`archive is too large (${file.size} bytes; maximum ${limit})`);
       }
@@ -71,11 +72,11 @@ export function SessionTools() {
         type="button"
         class="tool tool--export"
         classList={{ 'tool--on': exporting() }}
-        disabled={!anyCommitted() || anyCapturing() || exporting()}
+        disabled={engineMode() || !anyCommitted() || anyCapturing() || exporting()}
         onClick={() => void onExport()}
         aria-busy={exporting()}
         aria-label="Export loops as a zip of WAV files"
-        title="Export one .zip: each track + a master mix as WAV, plus session.json"
+        title={engineMode() ? notOnEngine : 'Export one .zip: each track + a master mix as WAV, plus session.json'}
       >
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
           <path d="M12 4v11M7.5 10.5 12 15l4.5-4.5" stroke-linecap="round" stroke-linejoin="round" />
@@ -85,10 +86,10 @@ export function SessionTools() {
       <button
         type="button"
         class="tool tool--import"
-        disabled={hasMaster() || anyLive()}
+        disabled={engineMode() || hasMaster() || anyLive()}
         onClick={() => importInputRef?.click()}
         aria-label="Import a session zip"
-        title="Import a BleepLoop export zip (stems + session.json), only while the looper is empty"
+        title={engineMode() ? notOnEngine : 'Import a BleepLoop export zip (stems + session.json), only while the looper is empty'}
       >
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
           <path d="M12 15V4M7.5 8.5 12 4l4.5 4.5" stroke-linecap="round" stroke-linejoin="round" />

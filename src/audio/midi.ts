@@ -2,7 +2,7 @@ import { createSignal } from 'solid-js';
 import { inputRouter } from './input-router';
 import { ensureActive } from './instrument';
 import { engine } from './engine';
-import { platform } from '../platform';
+import { engineMode, platform } from '../platform';
 import { notifyError } from '../notify';
 
 /**
@@ -86,7 +86,7 @@ function parseMidiMessage(ev: Event, port: string, portName: string): void {
       // phantom held-note entry if a slot is picked mid-hold. MIDI controller is the PRIMARY play path,
       // so this cold-start is the common case. ensureActive is idempotent + cheap (stable engine/sink
       // refs → no held-note flush on repeat).
-      void engine.start();
+      if (!engineMode()) void engine.start();
       ensureActive();
       inputRouter.handle({ type: 'on', note, velocity: vel, source: 'midi', owner });
     }

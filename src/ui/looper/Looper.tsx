@@ -1,7 +1,6 @@
 import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount, type JSX } from 'solid-js';
-import { looper, type TrackState } from '../../audio/looper/looper';
-import { clock } from '../../audio/clock';
-import { engine } from '../../audio/engine';
+import { clock, looper, sampleRate, type TrackState } from '../state/audio';
+import { engineMode } from '../../platform';
 import { registerLane, unregisterLane } from './waveform';
 import { createTwoStepConfirm, masterBars } from './shared';
 import { announceLooper, laneCue, liveMsg, playStopGate, recDubGate } from './gates';
@@ -466,8 +465,8 @@ export function Looper() {
   const masterLabel = () => {
     const m = master();
     if (m <= 0) return '—';
-    const bars = masterBars(m, clock.bpm(), engine.ctx.sampleRate);
-    const secs = m / engine.ctx.sampleRate;
+    const bars = masterBars(m, clock.bpm(), sampleRate());
+    const secs = m / sampleRate();
     return `${bars} bar${bars > 1 ? 's' : ''} · ${secs.toFixed(1)} s`;
   };
 
@@ -483,8 +482,9 @@ export function Looper() {
   });
 
   // The capture ring needs SharedArrayBuffer, which needs crossOriginIsolated (COOP/COEP). Without it
-  // looper.init() bails and every looper button is silently dead — so say so loudly instead.
-  const looperUnavailable = self.crossOriginIsolated !== true;
+  // looper.init() bails and every looper button is silently dead — so say so loudly instead. The native
+  // engine records without it.
+  const looperUnavailable = !engineMode() && self.crossOriginIsolated !== true;
 
   // Screen-reader status line: operational transitions are otherwise silent to AT. A polite live region
   // announces record/arm/overdub starts + the master-loop resolution, diffed so it fires on transitions.

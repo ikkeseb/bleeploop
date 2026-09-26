@@ -24,7 +24,7 @@ import * as midi from '../audio/midi';
 import { injectRecordLossForTest, pluginBridge } from '../audio/plugin-bridge';
 import { recordLatency } from '../audio/record-latency';
 import { dismissToast, notifyError, toasts } from '../notify';
-import { platform, reportDiagnostics } from '../platform';
+import { engineFake, platform, reportDiagnostics } from '../platform';
 import * as layoutStore from '../ui/layout/layout-store';
 
 /**
@@ -62,6 +62,10 @@ export interface LfDebug {
   /** Native bridge handles + the record-loss fault injector the golden jam uses. */
   pluginBridge: typeof pluginBridge & { injectRecordLossForTest: typeof injectRecordLossForTest };
   platform: typeof platform;
+  /** The web engine fake (`src/platform/host.web.ts`): the commands the UI sent and `emit(frame)` to
+   * script the feed. Engine mode on it needs `window.__lfEngineFake = true` before the app loads
+   * (`verify/probes/engine-seam.mjs`). Null under Tauri. */
+  native: typeof engineFake;
   /** Record-latency compensation levers: `lastCompensation()` shows the last C breakdown;
    * `setEnabled(false)` A/Bs the whole thing off by ear; `setOffsetMs(ms)` is the hidden trim;
    * `setFloorEnabled(false)` A/Bs just the clickOut floor. */
@@ -135,6 +139,7 @@ export function installLfDebug(ui: LfDebug['ui']): void {
     transport: () => getTransport(),
     pluginBridge: { ...pluginBridge, injectRecordLossForTest },
     platform,
+    native: engineFake,
     recordLatency,
     setMasterMute: (on) => {
       master.setMuted(on);

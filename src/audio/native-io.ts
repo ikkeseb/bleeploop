@@ -1,15 +1,16 @@
 import { createSignal } from 'solid-js';
 import { pluginBridge } from './plugin-bridge';
 import { recordLatency } from './record-latency';
-import { platform, type PluginSlot } from '../platform';
+import { engineMode, platform, sendEngine, type EngineCommand, type PluginSlot } from '../platform';
 import { notifyError } from '../notify';
-import { serializeSlot, slotPlugins, withAt } from './instrument-slots';
+import { activeSlot, serializeSlot, slotPlugins, withAt } from './instrument-slots';
 import { warm as warmCapture } from './looper/capture';
 
 /**
  * OWNS: native audio I/O per slot — feed a hardware input into the slot's loaded plugin, hear its wet
- * through the native low-latency cpal monitor, and fall back when a stream dies. Everything here is
- * a no-op / all-false in the browser build. The arm paths are serialised on the same per-slot chain
+ * through the native low-latency cpal monitor, and fall back when a stream dies. In engine mode, which
+ * one slot the engine's device input feeds (`SetSlotLive`). Everything here is a no-op / all-false in
+ * the browser build. The arm paths are serialised on the same per-slot chain
  * as load/unload (`instrument-slots.ts`) so they can never interleave with a plugin swap; the
  * `*Internal` disarms are exported for `instrument.ts`'s teardown paths, which are already inside a
  * serialised op and must not re-enter the chain.
@@ -30,6 +31,60 @@ const latencyRequest = [0, 0];
 // the replacement IPC query. Cleared when that slot's monitor actually goes away.
 const lastMonitorLatencySeconds = [0, 0];
 const latencySettleTimers: [ReturnType<typeof setTimeout> | null, ReturnType<typeof setTimeout> | null] = [null, null];
+
+// ---------------------------------------------------------------------------
+// Engine mode — the device input feeds ONE live slot
+// ---------------------------------------------------------------------------
+
+/**
+ * Engine mode: make `slot` the one slot the device input feeds (null = none). The engine passes the
+ * input through a live slot's effect, or dry through an empty slot; two live slots would sum the dry
+ * input twice (`docs/plans/native-engine.md` § Stage 5, Plugins). Both armed flags follow the live
+ * slot: the engine monitors in its own callback, so there is no web monitor to fall back to.
+ */
+function setEngineLive(slot: 0 | 1 | null): void {
+  const prev = inputArmed();
+  const next: [boolean, boolean] = [slot === 0, slot === 1];
+  const commands: EngineCommand[] = [];
+  for (const s of [0, 1] as const) if (prev[s] && !next[s]) commands.push({ SetSlotLive: [s, false] });
+  if (slot !== null && !prev[slot]) commands.push({ SetSlotLive: [slot, true] });
+  sendEngine(...commands);
+  setInputArmed(next);
+  setMonitorArmed(next);
+}
+
+/** Engine mode's MIC: whether the device input runs dry through an empty live slot. */
+export function engineInputLive(): boolean {
+  const [a, b] = inputArmed();
+  const live = a ? 0 : b ? 1 : null;
+  return live !== null && !slotPlugins()[live];
+}
+
+/**
+ * Engine mode's MIC toggle: the device input dry through an empty slot (heard and recorded, as the web
+ * MIC arm), the active slot first. It takes the one live slot, so it ends a plugin's GO LIVE; with a
+ * plugin in both slots no slot is empty, and it says so. Returns whether the input is live now.
+ */
+export function toggleEngineInput(): boolean {
+  if (engineInputLive()) {
+    setEngineLive(null);
+    return false;
+  }
+  const active = activeSlot();
+  const empty = ([active, active === 0 ? 1 : 0] as const).find((s) => !slotPlugins()[s]);
+  if (empty === undefined) {
+    notifyError('Both slots hold a plugin', 'Go live on the effect plugin to hear and record the input.');
+    return false;
+  }
+  setEngineLive(empty);
+  return true;
+}
+
+/** Engine mode: tell a new engine (or one the WebView lost track of) which slot is live. */
+export function resendEngineLive(): void {
+  const [a, b] = inputArmed();
+  sendEngine({ SetSlotLive: [0, a] }, { SetSlotLive: [1, b] });
+}
 
 function invalidateLatency(slot: 0 | 1): number {
   const timer = latencySettleTimers[slot];
@@ -77,6 +132,12 @@ export function goLive(
   channel?: number | null,
   outputDeviceId?: string | null,
 ): Promise<void> {
+  if (engineMode()) {
+    // The engine's device is already open (Audio Settings picks it); going live only routes its input.
+    return serializeSlot(slot, async () => {
+      if (slotPlugins()[slot]) setEngineLive(slot);
+    });
+  }
   return serializeSlot(slot, () => doGoLive(slot, inputDeviceId, channel, outputDeviceId));
 }
 
@@ -112,6 +173,11 @@ async function doGoLive(
  * (each internal disarm early-returns when its flag is already false).
  */
 export function stopLive(slot: 0 | 1): Promise<void> {
+  if (engineMode()) {
+    return serializeSlot(slot, async () => {
+      if (inputArmed()[slot]) setEngineLive(null);
+    });
+  }
   return serializeSlot(slot, () => doStopLive(slot));
 }
 
@@ -137,6 +203,10 @@ function reconcileInputGone(slot: 0 | 1): void {
  */
 export async function disarmInputInternal(slot: 0 | 1): Promise<void> {
   if (!inputArmed()[slot]) return;
+  if (engineMode()) {
+    setEngineLive(null);
+    return;
+  }
   reconcileInputGone(slot);
   try {
     await platform.pluginHost.disarmInput(slot);
@@ -255,6 +325,10 @@ function reconcileMonitorGone(slot: 0 | 1): void {
  */
 export async function disarmMonitorInternal(slot: 0 | 1): Promise<void> {
   if (!monitorArmed()[slot]) return;
+  if (engineMode()) {
+    setEngineLive(null);
+    return;
+  }
   reconcileMonitorGone(slot);
   try {
     await platform.pluginHost.disarmMonitor(slot);
@@ -272,6 +346,8 @@ export async function disarmMonitorInternal(slot: 0 | 1): Promise<void> {
  * no-ops.
  */
 export function setMonitorGain(slot: 0 | 1, value: number): Promise<void> {
+  // Engine mode: one slot gain (`setPluginGain` → SetSlotGain) serves what is heard and recorded.
+  if (engineMode()) return Promise.resolve();
   // Returns the (error-swallowed) promise so the caller can AWAIT it where ordering matters — arming
   // the monitor awaits this first so the cpal stream opens with the right gain, not a stale unity (the
   // slider path ignores the return and fires-and-forgets, which is fine: the atomic is idempotent).

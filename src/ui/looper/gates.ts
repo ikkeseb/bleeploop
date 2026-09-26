@@ -1,12 +1,14 @@
 import { createSignal } from 'solid-js';
-import { looper } from '../../audio/looper/looper';
+import { looper } from '../state/audio';
+import type { Refusal } from '../../platform';
 
 /**
  * OWNS: the looper UI's refusal gates, its screen-reader announcement line and the sighted lane cue.
  * One predicate per lane gesture, returning WHY a press is refused, so the lane button's disabled state,
  * its title, its ARIA label and the keyboard transport's refusal all speak one vocabulary. The engine
  * keeps its own self-protection (machine.ts recDub/playStop); these mirror it for the UI, they do not
- * replace it.
+ * replace it. In engine mode a hands-free press is gated by the engine, which names its reason by the
+ * same vocabulary (`refusalText`, `lf_engine::Refusal::text`).
  *
  * Reactive: the gates read the looper's public track signals, so call them from JSX, memos or an event
  * handler — never from the 60 fps draw loop (invariant 6).
@@ -16,7 +18,7 @@ export type Gate = { ok: true } | { ok: false; reason: string };
 /** Shared frozen results, one object per outcome, so a per-lane memo over a gate sees an unchanged
  * outcome as `===`-equal and settles instead of re-firing its disabled/title/aria subscribers. */
 const OK: Gate = Object.freeze({ ok: true });
-const refuse = (reason: string): Gate => Object.freeze({ ok: false, reason });
+const refuse = (reason: string) => Object.freeze({ ok: false as const, reason });
 
 /** The refusal vocabulary: short phrases a title, an aria-label and an announcement can all carry. */
 const REFUSAL = {
@@ -28,6 +30,31 @@ const REFUSAL = {
   noUndo: refuse('nothing to undo, overdub first'),
   noClear: refuse('nothing to clear'),
 } as const;
+
+/** CLEAR's first press, by key or pedal: the second one clears (`src/app/actions.ts`). */
+export const CONFIRM_CLEAR_TEXT = 'press again to clear';
+
+/** The words for an engine refusal: the vocabulary above. */
+export function refusalText(reason: Refusal): string {
+  switch (reason) {
+    case 'Stopping':
+      return REFUSAL.stopping.reason;
+    case 'PlayFirst':
+      return REFUSAL.playFirst.reason;
+    case 'Reversed':
+      return REFUSAL.reversed.reason;
+    case 'OtherRecording':
+      return REFUSAL.otherRecording.reason;
+    case 'Empty':
+      return REFUSAL.empty.reason;
+    case 'NoUndo':
+      return REFUSAL.noUndo.reason;
+    case 'NoClear':
+      return REFUSAL.noClear.reason;
+    case 'ConfirmClear':
+      return CONFIRM_CLEAR_TEXT;
+  }
+}
 
 /** Any lane capturing (RECORDING incl. armed/listening, or OVERDUBBING) other than `except`. */
 function otherCapturing(except: number): boolean {

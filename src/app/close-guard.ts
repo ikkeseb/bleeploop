@@ -1,8 +1,8 @@
 import { autosave } from '../audio/autosave';
-import { looper } from '../audio/looper/looper';
 import { rigRecallOnClose } from '../audio/rig-recall';
 import { notifyError } from '../notify';
 import { confirmNativeClose, onNativeCloseRequested, platform } from '../platform';
+import { looper } from '../ui/state/audio';
 
 /** How long the close waits for the recovery save before asking whether to close without it. */
 const FLUSH_DEADLINE_MS = 5000;
@@ -20,9 +20,12 @@ function jamInProgress(): boolean {
  * browser shows its own generic dialog) — NOT registered under Tauri, where the Rust guard owns close
  * and a beforeunload veto could fight the approved window.close().
  *
+ * `recovery` false (engine mode, which keeps no recovery yet) closes without a save and says the loops
+ * are lost: a flush of the idle web looper would replace an earlier recovery with nothing.
+ *
  * Returns a dispose fn (web tier removes its listener; the native subscription is app-lifetime).
  */
-export function installCloseGuard(): () => void {
+export function installCloseGuard({ recovery }: { recovery: boolean }): () => void {
   if (platform.kind === 'tauri') {
     // confirm() is a synchronous native WebView2 dialog. Flush the committed loops before approving
     // close. The empty path also flushes so CLEAR ALL followed immediately by close cannot resurrect
@@ -31,21 +34,23 @@ export function installCloseGuard(): () => void {
     const closeWithRecovery = async () => {
       if (closePending) return;
       closePending = true;
-      try {
-        // A flush that never settles would trap the window just like a failed one (closePending stays
-        // set, every later close press is swallowed) — so it gets a deadline and lands in the same ask.
-        let deadline: ReturnType<typeof setTimeout> | undefined;
-        const timedOut = new Promise<never>((_, reject) => {
-          deadline = setTimeout(() => reject(new Error(`recovery save did not finish in ${FLUSH_DEADLINE_MS} ms`)), FLUSH_DEADLINE_MS);
-        });
-        await Promise.race([autosave.flush(), timedOut]).finally(() => clearTimeout(deadline));
-      } catch (error) {
-        console.error('[app] autosave flush before close failed', error);
-        notifyError('Could not update recovery before closing', error);
-        // A failed save must never trap the window: the user decides whether to lose the jam.
-        if (!window.confirm('The loops could not be saved for recovery. Close anyway? They will be lost.')) {
-          closePending = false;
-          return;
+      if (recovery) {
+        try {
+          // A flush that never settles would trap the window just like a failed one (closePending stays
+          // set, every later close press is swallowed) — so it gets a deadline and lands in the same ask.
+          let deadline: ReturnType<typeof setTimeout> | undefined;
+          const timedOut = new Promise<never>((_, reject) => {
+            deadline = setTimeout(() => reject(new Error(`recovery save did not finish in ${FLUSH_DEADLINE_MS} ms`)), FLUSH_DEADLINE_MS);
+          });
+          await Promise.race([autosave.flush(), timedOut]).finally(() => clearTimeout(deadline));
+        } catch (error) {
+          console.error('[app] autosave flush before close failed', error);
+          notifyError('Could not update recovery before closing', error);
+          // A failed save must never trap the window: the user decides whether to lose the jam.
+          if (!window.confirm('The loops could not be saved for recovery. Close anyway? They will be lost.')) {
+            closePending = false;
+            return;
+          }
         }
       }
       // A clean close: a rig restored this launch comes back at the next one (`rig-recall.ts`).
@@ -65,7 +70,9 @@ export function installCloseGuard(): () => void {
       }
       if (
         window.confirm(
-          'Close BleepLoop? The latest committed loops will be saved locally. Audio still being recorded is not included.',
+          recovery
+            ? 'Close BleepLoop? The latest committed loops will be saved locally. Audio still being recorded is not included.'
+            : 'Close BleepLoop? The loops will be lost: the native engine does not save them yet.',
         )
       ) {
         void closeWithRecovery();

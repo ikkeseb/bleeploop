@@ -20,17 +20,19 @@ import {
 } from '../../audio/audio-devices';
 import { inputArmed, monitorArmed } from '../../audio/native-io';
 import { midiDevices, midiStatus } from '../../audio/midi';
+import { notifyError } from '../../notify';
 import { ACTION_LABELS, type ActionId } from '../../app/actions';
 import { bindings, cancelLearn, forget, learn, learning, type MidiBinding } from '../../app/midi-actions';
-import { platform } from '../../platform';
+import { engineMode, platform } from '../../platform';
 import {
   BUFFER_FRAMES_OPTIONS,
   readAudioDeviceSettings,
   writeAudioDeviceSettings,
   type BufferFrames,
 } from '../../audio/audio-settings';
-import { engine } from '../../audio/engine';
 import { offsetMs, RECORD_TRIM_MAX_MS, setOffsetMs } from '../../audio/record-latency';
+import { sampleRate } from '../state/audio';
+import { engineDevice, openEngineDevice, setEngineInputChannel } from '../state/engine-store';
 import './audio-settings.css';
 
 /**
@@ -40,14 +42,27 @@ import './audio-settings.css';
  * Arm toggles stay in PluginControls and read the device choice persisted here. Mounted inside a `<Show>` in app.tsx, so it
  * re-reads persisted state each time it opens (persisted localStorage is the source of truth; these
  * local signals mirror it). The sample-rate row is a disabled placeholder for increment C2.
+ *
+ * The engine row writes the engine-mode toggle for the next launch. In engine mode a device, buffer or
+ * driver pick reopens the engine's device at once, a channel pick switches it in place, and the rows
+ * that belong to the web path (rec align, the bridge readout) are gone.
  */
 
 /** Processing-block duration, not an input-to-output latency estimate. */
 function bufferMs(frames: number): string {
-  return `~${((frames / engine.ctx.sampleRate) * 1000).toFixed(1)} ms/block`;
+  return `~${((frames / sampleRate()) * 1000).toFixed(1)} ms/block`;
+}
+
+/** Reopen the engine's device on the saved picks (engine mode; the web path applies them on GO LIVE). */
+function reopenEngine(): void {
+  if (engineMode()) void openEngineDevice();
 }
 
 const ACTION_IDS = Object.keys(ACTION_LABELS) as ActionId[];
+
+// The engine toggle as saved for the next launch, once changed here (this launch runs `engineMode()`).
+// Module-level: the popover remounts on every open and must keep showing a pending switch.
+const [savedEngine, setSavedEngine] = createSignal<boolean | null>(null);
 
 /** A learned message as the bindings list shows it: "CC 64 · ch 1". */
 function midiSource(b: MidiBinding): string {
@@ -69,6 +84,23 @@ export function AudioSettings() {
   // so a later pedal press cannot bind out of sight.
   const [learnPick, setLearnPick] = createSignal<ActionId>(ACTION_IDS[0]);
   onCleanup(cancelLearn);
+  const nextEngine = () => savedEngine() ?? engineMode();
+  const onEngineToggle = (checkbox: HTMLInputElement) => {
+    const on = checkbox.checked;
+    platform.engine.setMode(on).then(
+      () => setSavedEngine(on),
+      (e: unknown) => {
+        checkbox.checked = nextEngine();
+        console.error('[AudioSettings] engine toggle failed', e);
+        notifyError("Couldn't save the engine choice", e);
+      },
+    );
+  };
+  const engineReadout = () => {
+    const d = engineDevice();
+    if (!d) return 'no device open';
+    return `${d.backend === 'Asio' ? 'ASIO' : 'WASAPI'} · ${d.inputName} → ${d.outputName} · ${d.block} frames · ${d.alignFrames} frames round trip`;
+  };
 
   // Channel count of the selected NAMED device (0 for "default input" — its id is '' so the channel
   // count is unknown). When ≥2 the channel selector appears; by design the explicit channel pick is
@@ -100,7 +132,7 @@ export function AudioSettings() {
   // Bridge health readout (native only): 2 Hz poll of pluginBridge.stats per slot while open.
   const [bridgeHealth, setBridgeHealth] = createSignal('no plugin loaded');
   onMount(() => {
-    if (!platform.pluginHost.available) return;
+    if (!platform.pluginHost.available || engineMode()) return;
     const poll = () => {
       const parts: string[] = [];
       for (let slot = 0; slot < 2; slot++) {
@@ -119,6 +151,29 @@ export function AudioSettings() {
     <div class="audio-settings" role="group" aria-label="Audio settings">
       <div class="audio-settings__title">Audio settings</div>
 
+      {/* The engine toggle: read at startup, so a change applies on the next launch (ASIO allows one
+          client, so the two paths never run side by side). */}
+      <Show when={platform.engine.available}>
+        <div
+          class="audio-settings__row"
+          title="Runs the looper, synths, FX and plugins in one native audio engine. Applies on the next launch."
+        >
+          <span class="audio-settings__label">engine</span>
+          <label class="audio-settings__toggle">
+            <input
+              type="checkbox"
+              checked={nextEngine()}
+              onChange={(e) => onEngineToggle(e.currentTarget)}
+              aria-label="Use the native audio engine from the next launch"
+            />
+            <span class="audio-settings__toggle-text">{nextEngine() ? 'native' : 'web audio'}</span>
+          </label>
+        </div>
+        <Show when={nextEngine() !== engineMode()}>
+          <div class="audio-settings__hint" role="note">Restart BleepLoop to switch the engine.</div>
+        </Show>
+      </Show>
+
       <div class="audio-settings__row">
         <span class="audio-settings__label">input</span>
         <select
@@ -130,6 +185,7 @@ export function AudioSettings() {
             setSelectedDevice(v);
             setSelectedChannel(''); // channel index is device-specific → reset to auto on swap
             writeAudioDeviceSettings({ inputDeviceId: v, inputChannel: '' });
+            reopenEngine();
           }}
           aria-label="Audio input device"
         >
@@ -146,6 +202,7 @@ export function AudioSettings() {
               const v = e.currentTarget.value;
               setSelectedChannel(v);
               writeAudioDeviceSettings({ inputChannel: v });
+              if (engineMode()) setEngineInputChannel(v);
             }}
             aria-label="Input channel"
           >
@@ -156,7 +213,7 @@ export function AudioSettings() {
           </select>
         </Show>
       </div>
-      <Show when={anyInputArmed()}>
+      <Show when={!engineMode() && anyInputArmed()}>
         <div class="audio-settings__hint" role="note">Takes effect on the next GO LIVE.</div>
       </Show>
 
@@ -171,6 +228,7 @@ export function AudioSettings() {
             setSelectedOutput(v);
             writeAudioDeviceSettings({ outputDeviceId: v });
             void applyWebOutput();
+            reopenEngine();
           }}
           aria-label="Monitor output device"
         >
@@ -180,7 +238,7 @@ export function AudioSettings() {
           </For>
         </select>
       </div>
-      <Show when={anyMonitorArmed()}>
+      <Show when={!engineMode() && anyMonitorArmed()}>
         <div class="audio-settings__hint" role="note">Loops and synths move now; the plugin monitor on the next GO LIVE.</div>
       </Show>
       <Show when={usingAsio()}>
@@ -188,14 +246,17 @@ export function AudioSettings() {
       </Show>
 
       <div class="audio-settings__row">
-        <span class="audio-settings__label">plugin buffer</span>
+        <span class="audio-settings__label">{engineMode() ? 'buffer' : 'plugin buffer'}</span>
         <select
           class="audio-settings__select"
           value={String(bufferFrames())}
           onChange={(e) => {
             const v = Number(e.currentTarget.value) as BufferFrames;
             const select = e.currentTarget;
-            void setBufferSize(v).then(() => { select.value = String(bufferFrames()); });
+            void setBufferSize(v).then(() => {
+              select.value = String(bufferFrames());
+              reopenEngine();
+            });
           }}
           aria-label="Buffer size in frames"
         >
@@ -205,7 +266,11 @@ export function AudioSettings() {
         </select>
         <span class="audio-settings__readout">{bufferMs(bufferFrames())}</span>
       </div>
-      <div class="audio-settings__hint audio-settings__hint--info" role="note">The block plugins process in. The audio driver sets its own device buffer.</div>
+      <div class="audio-settings__hint audio-settings__hint--info" role="note">
+        {engineMode()
+          ? 'Frames per device callback: smaller is lower latency, larger is safer.'
+          : 'The block plugins process in. The audio driver sets its own device buffer.'}
+      </div>
 
       {/* Record-alignment trim — the RELEASE-BUILD surface for the by-ear record-latency offset; a shipped
           build has no other way to trim it (the DEV-only hook is `__lf.recordLatency.setOffsetMs`). It
@@ -213,33 +278,35 @@ export function AudioSettings() {
           the grid, negative later. Only affects natively-monitored recording (guitar through a native
           plugin monitor); synth/mic loops are untouched. No calibration build replaces it (D18); the native
           engine removes the setting (docs/plans/native-engine.md). PLACEMENT IS PROVISIONAL — eye-gated. */}
-      <div
-        class="audio-settings__row"
-        title="Nudges recorded guitar alignment (native monitor only): positive ms lands the take earlier on the grid, negative later."
-      >
-        <span class="audio-settings__label">rec align</span>
-        <input
-          class="audio-settings__number"
-          type="number"
-          step="1"
-          min={-RECORD_TRIM_MAX_MS}
-          max={RECORD_TRIM_MAX_MS}
-          value={recAlign()}
-          onChange={(e) => {
-            const n = Number(e.currentTarget.value);
-            if (Number.isFinite(n)) {
-              setOffsetMs(Math.round(n));
-              const stored = offsetMs();
-              setRecAlign(stored);
-              // Signal equality makes the set above a no-op when clamping lands on the CURRENT value
-              // (e.g. stored 250, typed 400) — force the DOM too so the input always shows what was stored.
-              e.currentTarget.value = String(stored);
-            }
-          }}
-          aria-label="Recording alignment in milliseconds"
-        />
-        <span class="audio-settings__readout">ms</span>
-      </div>
+      <Show when={!engineMode()}>
+        <div
+          class="audio-settings__row"
+          title="Nudges recorded guitar alignment (native monitor only): positive ms lands the take earlier on the grid, negative later."
+        >
+          <span class="audio-settings__label">rec align</span>
+          <input
+            class="audio-settings__number"
+            type="number"
+            step="1"
+            min={-RECORD_TRIM_MAX_MS}
+            max={RECORD_TRIM_MAX_MS}
+            value={recAlign()}
+            onChange={(e) => {
+              const n = Number(e.currentTarget.value);
+              if (Number.isFinite(n)) {
+                setOffsetMs(Math.round(n));
+                const stored = offsetMs();
+                setRecAlign(stored);
+                // Signal equality makes the set above a no-op when clamping lands on the CURRENT value
+                // (e.g. stored 250, typed 400) — force the DOM too so the input always shows what was stored.
+                e.currentTarget.value = String(stored);
+              }
+            }}
+            aria-label="Recording alignment in milliseconds"
+          />
+          <span class="audio-settings__readout">ms</span>
+        </div>
+      </Show>
 
       {/* The ASIO row shows the toggle whenever the binary can do ASIO; the driver itself is contacted
           only by the startup probe (saved preference on) or by turning the toggle on / Retry. The
@@ -261,10 +328,13 @@ export function AudioSettings() {
             <input
               type="checkbox"
               checked={asioEnabled()}
-              disabled={anyInputArmed() || anyMonitorArmed() || asioStatus().status === 'probing'}
+              disabled={(!engineMode() && (anyInputArmed() || anyMonitorArmed())) || asioStatus().status === 'probing'}
               onChange={(e) => {
                 const checkbox = e.currentTarget;
-                void setAsioEnabled(checkbox.checked).then(() => { checkbox.checked = asioEnabled(); });
+                void setAsioEnabled(checkbox.checked).then(() => {
+                  checkbox.checked = asioEnabled();
+                  reopenEngine();
+                });
               }}
               aria-label="Use ASIO low-latency audio"
             />
@@ -306,14 +376,14 @@ export function AudioSettings() {
       {/* Switching backend re-opens the cpal stream (an arm operation) and input/output arm separately,
           so the host is locked while anything is armed — preventing an input-ASIO / output-WASAPI split
           (or vice versa, which on a seizing driver would fail the second arm). Disarm to change it. */}
-      <Show when={asioOffered() && (anyInputArmed() || anyMonitorArmed())}>
+      <Show when={!engineMode() && asioOffered() && (anyInputArmed() || anyMonitorArmed())}>
         <div class="audio-settings__hint" role="note">Take every slot off INPUT LIVE to switch between ASIO and WASAPI.</div>
       </Show>
 
       {/* Read-only: the AudioContext runs at the output device's rate; a rate selector is not built. */}
       <div class="audio-settings__row" title="BleepLoop runs at the audio device's sample rate.">
         <span class="audio-settings__label">sample rate</span>
-        <span class="audio-settings__readout">{(engine.ctx.sampleRate / 1000).toFixed(1)} kHz</span>
+        <span class="audio-settings__readout">{(sampleRate() / 1000).toFixed(1)} kHz</span>
         <span class="audio-settings__soon">set by the audio device</span>
       </div>
 
@@ -399,10 +469,16 @@ export function AudioSettings() {
         {/* Native plugin PCM bridge health per loaded slot — hop-1 lag / hop-2 fill (frames), worklet
             underruns, JS drops. Polled while the popover is open; the same numbers the looper's
             record-integrity check reads, so a rejected take can be explained here. */}
-        <Show when={platform.pluginHost.available}>
+        <Show when={platform.pluginHost.available && !engineMode()}>
           <div class="audio-settings__diag-row">
             <span>bridge</span>
             <b>{bridgeHealth()}</b>
+          </div>
+        </Show>
+        <Show when={engineMode()}>
+          <div class="audio-settings__diag-row">
+            <span>engine</span>
+            <b>{engineReadout()}</b>
           </div>
         </Show>
       </div>

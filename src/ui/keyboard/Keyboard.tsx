@@ -3,6 +3,7 @@ import { engine } from '../../audio/engine';
 import { inputRouter } from '../../audio/input-router';
 import { activeIsDrum, activeSlot, ensureActive, slotIds, slotPlugins } from '../../audio/instrument';
 import { DRUM_KIT } from '../../audio/synths/drum';
+import { engineMode } from '../../platform';
 import type { KeyboardPlacement } from '../layout/layout-store';
 import { isBlackKey, noteName, octaveBase } from './notes';
 import './keyboard.css';
@@ -88,7 +89,8 @@ export function Keyboard(props: KeyboardProps = {}) {
   // --- shared press/release ---
   async function startHold(hold: Hold, velocity: number) {
     try {
-      await engine.start();
+      // Engine mode plays in the native engine: no AudioContext to resume.
+      if (!engineMode()) await engine.start();
     } catch (err) {
       hold.active = false;
       console.error('[Keyboard] audio start failed', err);

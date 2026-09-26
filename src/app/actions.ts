@@ -1,8 +1,10 @@
 import { activeSlot, slotPlugins } from '../audio/instrument';
-import { looper } from '../audio/looper/looper';
+import { engineMode, sendEngine, type EngineAction } from '../platform';
 import { pressGoLive } from '../ui/instrument/PluginControls';
+import { looper } from '../ui/state/audio';
 import { CONFIRM_WINDOW_MS } from '../ui/looper/shared';
 import {
+  CONFIRM_CLEAR_TEXT,
   clearGate,
   dismissLaneCue,
   playStopGate,
@@ -17,7 +19,9 @@ import {
  * (`transport-keys.ts`) and MIDI learn (`midi-actions.ts`) dispatch through it. Each row
  * runs the path its on-screen control runs: the lane core, ▶/■, ↶ DUB, CLR, the command bar's ▶/■ ALL
  * and the slot's GO LIVE. The lane actions act on the SELECTED track, and a refused one says why on that
- * lane (gates.ts `refuseOnLane`) instead of doing nothing.
+ * lane (gates.ts `refuseOnLane`) instead of doing nothing. In engine mode the looper rows are the
+ * engine's hands-free `Action`s: the engine gates them, confirms CLEAR and names a refusal on the feed
+ * (`src/app/boot.ts` puts it on the lane).
  */
 export type ActionId =
   | 'recDub'
@@ -66,7 +70,7 @@ function clearTrack(i: number): void {
     return;
   }
   clearArmed = { track: i, at: performance.now() };
-  refuseOnLane(i, 'press again to clear', CONFIRM_WINDOW_MS);
+  refuseOnLane(i, CONFIRM_CLEAR_TEXT, CONFIRM_WINDOW_MS);
 }
 
 /** Step the selected track by `d`, wrapping at both ends. */
@@ -94,6 +98,18 @@ const ACTIONS: Readonly<Record<ActionId, () => void>> = {
   goLive: () => void pressGoLive(goLiveSlot()),
 };
 
+/** The looper rows as engine actions. */
+const ENGINE_ACTIONS: Readonly<Partial<Record<ActionId, EngineAction>>> = {
+  recDub: 'RecDub',
+  playStop: 'PlayStop',
+  undo: 'Undo',
+  clear: 'Clear',
+  nextTrack: 'NextTrack',
+  prevTrack: 'PrevTrack',
+  playAll: 'PlayAll',
+  stopAll: 'StopAll',
+};
+
 /** Every looper press passes here first: any press but CLEAR disarms a pending CLEAR, and every press
  * takes the last lane cue down (a newer press makes its reason stale). */
 function onPress(id?: ActionId): void {
@@ -104,7 +120,9 @@ function onPress(id?: ActionId): void {
 /** Run action `id`. */
 export function runAction(id: ActionId): void {
   onPress(id);
-  ACTIONS[id]();
+  const action = engineMode() ? ENGINE_ACTIONS[id] : undefined;
+  if (action) sendEngine({ Action: action });
+  else ACTIONS[id]();
 }
 
 /** Select track `i` outright (the digit keys). Not a table row, since it names its track, but a looper

@@ -6,7 +6,10 @@ import { setNativeHostReady } from '../audio/instrument-slots';
 import { pluginBridge, type PluginBufferMeta } from '../audio/plugin-bridge';
 import { warm as warmCapture } from '../audio/looper/capture';
 import { notifyError } from '../notify';
-import { platform, registerPluginBufferSink, releasePluginBuffer } from '../platform';
+import { engineMode, platform, registerPluginBufferSink, releasePluginBuffer } from '../platform';
+import { CONFIRM_WINDOW_MS } from '../ui/looper/shared';
+import { refusalText, refuseOnLane } from '../ui/looper/gates';
+import { onRefused, openEngineDevice, startEngineStore } from '../ui/state/engine-store';
 
 /**
  * Native plugin-host boot chain (Tauri/WebView2 only — `available` is false in the browser build, so
@@ -16,9 +19,11 @@ import { platform, registerPluginBufferSink, releasePluginBuffer } from '../plat
  * slot picker can list them, and reload each slot's plugin from the last run (`rig-recall.ts`). The
  * picker drives load/editor/param from there.
  *
- * Returns a dispose fn (removes the first-gesture resume listener if it never fired).
+ * Returns a dispose fn (removes the first-gesture resume listener if it never fired). In engine mode
+ * it runs `bootEngine` instead.
  */
 export function bootPluginHost(): () => void {
+  if (engineMode()) return bootEngine();
   if (!platform.pluginHost.available) return () => {};
   setNativeHostReady(false);
   void (async () => {
@@ -66,4 +71,41 @@ export function bootPluginHost(): () => void {
   };
   window.addEventListener('pointerdown', resume);
   return () => window.removeEventListener('pointerdown', resume);
+}
+
+/**
+ * Engine mode's boot chain: subscribe to the engine's feed (which sends the saved settings), put an
+ * engine refusal on its lane, start the ASIO driver when it is the saved choice, open the saved device,
+ * then the plugin host as in the web chain, minus the SharedBuffer bridge and the Web Audio context.
+ * The plugin host activates plugins at the device's rate. Returns the dispose fn.
+ */
+function bootEngine(): () => void {
+  const stopFeed = startEngineStore();
+  const stopRefusals = onRefused((lane, reason) =>
+    refuseOnLane(lane, refusalText(reason), reason === 'ConfirmClear' ? CONFIRM_WINDOW_MS : undefined),
+  );
+  if (platform.pluginHost.available) setNativeHostReady(false);
+  void (async () => {
+    try {
+      if (platform.pluginHost.available) {
+        await initAudioDeviceSettings();
+        await refreshAndPruneDevices();
+      }
+      const status = await openEngineDevice();
+      if (!platform.pluginHost.available) return;
+      // With no device open the host hears 48 kHz; the engine's slot owners decide what that means.
+      await platform.pluginHost.init(status?.sampleRate ?? 48000);
+      await resyncNativeSlots();
+      setNativeHostReady(true);
+      await scanForPlugins();
+      await recallRig(availablePlugins(), restorePlugin);
+    } catch (e) {
+      console.error('[app] engine boot failed', e);
+      notifyError('The audio engine failed to start', e);
+    }
+  })();
+  return () => {
+    stopFeed();
+    stopRefusals();
+  };
 }

@@ -1,5 +1,5 @@
 import { For, Show } from 'solid-js';
-import { looper } from '../../audio/looper/looper';
+import { looper } from '../state/audio';
 import { FX_META, FX_PARAM_DEFS, type FxParamDef } from '../../audio/fx/fx';
 import './fxpanel.css';
 

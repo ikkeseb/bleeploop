@@ -1,6 +1,4 @@
-import { looper, type PeakView, type TrackState } from '../../audio/looper/looper';
-import { clock } from '../../audio/clock';
-import { engine } from '../../audio/engine';
+import { clock, looper, sampleRate, type PeakView, type TrackState } from '../state/audio';
 import { masterBars } from './shared';
 
 /**
@@ -17,9 +15,10 @@ import { masterBars } from './shared';
  * GC even with all five tracks live.
  *
  * The bar grid is derived from `masterBars()` (the shared bar-math in `shared.ts`) so it can
- * never disagree with the spoken loop length. That is the ONLY place a Solid signal (`clock.bpm()`) is
- * read, and it is gated to a master-length change (a rare structural event; BPM is locked for the life
- * of a committed master) inside the cached-bitmap path — never in the per-frame steady state.
+ * never disagree with the spoken loop length. That is the ONLY place Solid signals are read
+ * (`clock.bpm()`, and in engine mode the device's rate behind `sampleRate()`), and it is gated to a
+ * master-length change (a rare structural event; BPM is locked for the life of a committed master)
+ * inside the cached-bitmap path — never in the per-frame steady state.
  *
  * Solid only ever creates/destroys the <canvas> elements (via the Looper component) and calls
  * `registerLane` / `unregisterLane`; all drawing lives here in plain TS.
@@ -267,7 +266,7 @@ function rasterise(
   // bpm signal read) is cached and only recomputed when the master loop length changes.
   if (masterFrames !== lane.gridMaster) {
     lane.gridMaster = masterFrames;
-    lane.gridBars = masterFrames > 0 ? masterBars(masterFrames, clock.bpm(), engine.ctx.sampleRate) : 0;
+    lane.gridBars = masterFrames > 0 ? masterBars(masterFrames, clock.bpm(), sampleRate()) : 0;
   }
   drawGrid(lane, lane.gridBars);
 

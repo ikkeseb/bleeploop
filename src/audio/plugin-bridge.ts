@@ -71,8 +71,8 @@ const SETTLE_SECONDS = 1;
  * a synth (no input bus) renders default patches that clip, so it starts conservative. The user trims
  * either from the plugin panel's output slider (→ `setGain`, also `__lf.setPluginGain`). The slider
  * scale runs 0..1.5, so these defaults leave headroom both ways. */
-const FX_DEFAULT_GAIN = 0.9;
-const SYNTH_DEFAULT_GAIN = 0.1;
+export const FX_DEFAULT_GAIN = 0.9;
+export const SYNTH_DEFAULT_GAIN = 0.1;
 
 interface BridgeSlot {
   ab: ArrayBuffer; // the hop-1 SharedBuffer, detached once transferred to the worklet

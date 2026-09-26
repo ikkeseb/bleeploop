@@ -1,9 +1,6 @@
 import { For, Show, createEffect, createMemo, createSignal, onCleanup } from 'solid-js';
-import { clock } from '../../audio/clock';
-import { engine } from '../../audio/engine';
 import { notifyError } from '../../notify';
-import { looper } from '../../audio/looper/looper';
-import { master } from '../../audio/master';
+import { clock, looper, master, sampleRate } from '../state/audio';
 import { anyTrackIn, createTwoStepConfirm, masterBars } from '../looper/shared';
 import { meterFrac, registerInputMeter, registerPhaseDial, unregisterInputMeter, unregisterPhaseDial } from '../looper/waveform';
 import { autoRecordThreshold } from '../../audio/looper/auto-record';
@@ -81,8 +78,8 @@ export function Transport() {
   // ----- loop ring-dial readout (moved off Looper's lp__head; same bars/secs math) -----
   const masterFrames = () => looper.masterLengthFrames();
   const hasMaster = () => masterFrames() > 0;
-  const loopBars = () => masterBars(masterFrames(), clock.bpm(), engine.ctx.sampleRate);
-  const loopSecs = () => masterFrames() / engine.ctx.sampleRate;
+  const loopBars = () => masterBars(masterFrames(), clock.bpm(), sampleRate());
+  const loopSecs = () => masterFrames() / sampleRate();
   // r=16 ⇒ circumference 2π·16 ≈ 100.53; the progress arc fills as the loop phase goes 0→1. The arc is
   // driven by the waveform rAF loop (registerPhaseDial), not a signal — invariant 6.
   const DIAL_C = 2 * Math.PI * 16;

@@ -2,7 +2,6 @@ import { Show, createEffect, createSignal, onCleanup, onMount } from 'solid-js';
 import { activeIsDrum, availablePlugins, nativeHostReady, scanForPlugins, scanning } from './audio/instrument';
 import * as midi from './audio/midi';
 import { autosave } from './audio/autosave';
-import { master } from './audio/master';
 import { Keyboard } from './ui/keyboard/Keyboard';
 import { Looper } from './ui/looper/Looper';
 import { Transport } from './ui/transport/Transport';
@@ -13,7 +12,8 @@ import { Help } from './ui/settings/Help';
 import { SplitStack, type StackPanel } from './ui/layout/SplitStack';
 import { Toasts } from './ui/toast/Toasts';
 import * as layoutStore from './ui/layout/layout-store';
-import { installFrontendLogPipe, platform } from './platform';
+import { engineMode, installFrontendLogPipe, platform } from './platform';
+import { master } from './ui/state/audio';
 import { bootPluginHost } from './app/boot';
 import { installCloseGuard } from './app/close-guard';
 import { installCmdFit } from './app/cmd-fit';
@@ -65,8 +65,8 @@ export function App() {
     // First: pipe console.error + uncaught errors into the native log, so even a plugin-host init
     // failure below is captured in a release build (no visible WebView2 console otherwise).
     installFrontendLogPipe();
-    const stopAutosave = autosave.start();
-    onCleanup(stopAutosave);
+    // Recovery saves the web looper; engine mode has none yet (`src/app/close-guard.ts`).
+    if (!engineMode()) onCleanup(autosave.start());
     setCrossOriginIsolated(self.crossOriginIsolated === true);
     // Keyboard transport (the named actions of `src/app/actions.ts`, plus 1–5) + the Escape popover
     // close + the pointer-blur discipline: `src/app/transport-keys.ts`. Window-level, so it never
@@ -81,15 +81,18 @@ export function App() {
     });
     onCleanup(transportKeys.dispose);
     // Close guard + local recovery (native confirm / web beforeunload): `src/app/close-guard.ts`.
-    onCleanup(installCloseGuard());
+    // Engine mode keeps no recovery yet (Stage 5: session and recovery follow the guitar path).
+    onCleanup(installCloseGuard({ recovery: !engineMode() }));
     // Sync masterGain to the persisted master volume (no-op at unity default; restores a saved level
-    // on reload). Creates the AudioContext suspended — matches the engine's lazy pattern.
+    // on reload). Creates the AudioContext suspended — matches the engine's lazy pattern. In engine mode
+    // it sends the level to the engine instead.
     master.init();
     // MIDI learn claims learned messages before the play path: `src/app/midi-actions.ts`. Then attempt
     // MIDI on mount — graceful if unavailable.
     onCleanup(installMidiActions());
     void midi.start();
-    // Native plugin host boot chain (no-op in the browser build): `src/app/boot.ts`.
+    // Native plugin host boot chain (no-op in the browser build), or the engine's in engine mode:
+    // `src/app/boot.ts`.
     onCleanup(bootPluginHost());
 
     if (import.meta.env.DEV) {
