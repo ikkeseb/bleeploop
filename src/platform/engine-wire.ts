@@ -119,6 +119,9 @@ export interface DeviceStatus {
   /** Input plus output latency the driver reports, and its input side (frames). */
   alignFrames: Frame;
   inputFrames: Frame;
+  /** False when WASAPI opened output only (no capture device, or its stream failed): the engine's
+   * input is silence. Always true on ASIO. */
+  inputOpen: boolean;
 }
 
 /** Rust `lf_engine::LaneInfo` (the TS `TrackPublic`). */
@@ -143,7 +146,10 @@ export type EngineEvent =
   | { type: 'Refused'; frame: Frame; lane: number; reason: Refusal }
   | { type: 'TakeRejected'; frame: Frame; lane: number; overdub: boolean }
   | { type: 'PassDropped'; frame: Frame; lane: number; pass: number }
-  | { type: 'Copied'; frame: Frame; from: number; to: number };
+  | { type: 'Copied'; frame: Frame; from: number; to: number }
+  /** The engine cleared the lane (CLEAR, a pedal's confirmed CLEAR, every lane on CLEAR ALL): its volume,
+   * mute and FX are back to their defaults. Before the lane's Lane event in the same frame. */
+  | { type: 'Cleared'; frame: Frame; lane: number };
 
 /** Rust `engine_io::DeviceEvent`, decoded to a `type`-tagged union. */
 export type DeviceEvent =
@@ -191,6 +197,9 @@ export interface FeedFrame {
   seq: number;
   /** The first frame after a subscribe or a new engine: the UI replaces its state with this one. */
   reset: boolean;
+  /** Reset frames only: the settings the engine remembers, in replay order, as the UI sent them. A
+   * setting missing from it is at the engine's default. */
+  settings?: EngineCommand[];
   events: EngineEvent[];
   device: DeviceEvent[];
   /** Absent = unchanged; null = no device runs; else the device that runs now. */
@@ -309,6 +318,8 @@ export function decodeEvent(raw: unknown): EngineEvent {
       return { type: 'PassDropped', frame: at, lane: lane(o.lane, 'PassDropped.lane'), pass: int(o.pass, 'PassDropped.pass') };
     case 'Copied':
       return { type: 'Copied', frame: at, from: lane(o.from, 'Copied.from'), to: lane(o.to, 'Copied.to') };
+    case 'Cleared':
+      return { type: 'Cleared', frame: at, lane: lane(o.lane, 'Cleared.lane') };
     default:
       return fail('unknown Event variant', raw);
   }
@@ -324,6 +335,7 @@ export function decodeDeviceStatus(raw: unknown): DeviceStatus {
     outputName: str(o.outputName, 'DeviceStatus.outputName'),
     alignFrames: int(o.alignFrames, 'DeviceStatus.alignFrames'),
     inputFrames: int(o.inputFrames, 'DeviceStatus.inputFrames'),
+    inputOpen: bool(o.inputOpen, 'DeviceStatus.inputOpen'),
   };
 }
 
@@ -387,6 +399,7 @@ export function decodeFeedFrame(raw: unknown): FeedFrame {
     peaks: o.peaks === undefined || o.peaks === null ? [] : array(o.peaks, 'feed.peaks').map(decodePeaks),
   };
   if ('status' in o) out.status = o.status === null ? null : decodeDeviceStatus(o.status);
+  if (o.settings !== undefined) out.settings = array(o.settings, 'feed.settings').map(decodeCommand);
   return out;
 }
 

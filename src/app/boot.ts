@@ -76,25 +76,22 @@ export function bootPluginHost(): () => void {
 }
 
 /**
- * Engine mode's boot chain: subscribe to the engine's feed (which sends the saved settings), put an
- * engine refusal on its lane, start the ASIO driver when it is the saved choice, open the saved device,
- * then the plugin host as in the web chain, minus the SharedBuffer bridge and the Web Audio context.
- * The plugin host activates plugins at the device's rate. Local recovery starts once a device runs
- * (its restore needs an engine at the device's rate). Returns the dispose fn.
+ * Engine mode's boot chain: subscribe to the engine's feed (its reset frame brings the engine's
+ * settings), put an engine refusal on its lane, start the ASIO driver when it is the saved choice and
+ * open the saved device. Everything that needs a running engine waits for the first device: Share
+ * output, local recovery (its restore loads into an engine at the device's rate) and the plugin host,
+ * as in the web chain minus the SharedBuffer bridge and the Web Audio context, activated at the device's
+ * rate. So a launch whose device does not open never recalls the rig, and cannot forget it on the loads
+ * that would fail. Returns the dispose fn.
  */
 function bootEngine(): () => void {
   const stopFeed = startEngineStore();
-  let stopAutosave: (() => void) | null = null;
-  let disposed = false;
-  void whenDevice().then(() => {
-    if (disposed) return;
-    restoreEngineShare();
-    stopAutosave = autosave.start(session);
-  });
   const stopRefusals = onEngineEvent((ev) => {
     if (ev.type !== 'Refused') return;
     refuseOnLane(ev.lane, refusalText(ev.reason), ev.reason === 'ConfirmClear' ? CONFIRM_WINDOW_MS : undefined);
   });
+  let stopAutosave: (() => void) | null = null;
+  let disposed = false;
   if (platform.pluginHost.available) setNativeHostReady(false);
   void (async () => {
     try {
@@ -102,10 +99,13 @@ function bootEngine(): () => void {
         await initAudioDeviceSettings();
         await refreshAndPruneDevices();
       }
-      const status = await openEngineDevice();
+      await openEngineDevice();
+      const status = await whenDevice();
+      if (disposed) return;
+      restoreEngineShare();
+      stopAutosave = autosave.start(session);
       if (!platform.pluginHost.available) return;
-      // With no device open the host hears 48 kHz; the engine's slot owners decide what that means.
-      await platform.pluginHost.init(status?.sampleRate ?? 48000);
+      await platform.pluginHost.init(status.sampleRate);
       await resyncNativeSlots();
       setNativeHostReady(true);
       await scanForPlugins();

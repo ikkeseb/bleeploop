@@ -297,8 +297,11 @@ async function doSelectPlugin(slot: 0 | 1, desc: PluginDescriptor, claimMidi: ()
     pluginBridge.cancelPluginLoad(slot, loadToken);
     console.error('[instrument] plugin load failed', e);
     notifyError('Plugin load failed', e);
-    // The slot holds nothing now, so the next launch must not retry this load (`rig-recall.ts`).
-    forgetSlotPlugin(slot);
+    // The slot holds nothing now, so the next launch must not retry this load (`rig-recall.ts`) —
+    // unless the load failed only because the engine has no device (engine mode loads into a running
+    // engine): the plugin is not at fault, and the rig must come back once a device runs.
+    const engineDown = engineMode() && (await platform.engine.status().catch(() => null)) === null;
+    if (!engineDown) forgetSlotPlugin(slot);
     if (activeSlot() === slot) applyActiveRouting(); // ensure we're back on the synth
     return;
   }

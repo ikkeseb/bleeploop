@@ -3,14 +3,16 @@
  * `window.__lfEngineFake` before the app loads, so it boots in engine mode against the fake host; the
  * probe then drives the real UI and scripts the feed through `__lf.native`:
  *
- * - boot: the saved device opens once (WASAPI in the browser, the saved buffer), the kept settings go
- *   out (master level, click, the note target), and no AudioContext is ever built (Tone's import-time
- *   default context included: `src/main.tsx` loads the app with the constructors hidden);
+ * - boot: the saved device opens once (WASAPI in the browser, the saved buffer); the first reset frame
+ *   gets what the UI persists and owns (master and click level, the note target), not defaults the
+ *   engine has; no AudioContext is ever built (Tone's import-time default context included:
+ *   `src/main.tsx` loads the app with the constructors hidden);
  * - gesture → command: BPM +, CLICK, the lane core (its pointerdown selects), Space (the engine's
  *   hands-free `Action`), a lane volume, MIC (an empty slot goes live), a PC key (NoteOn, NoteOff);
  * - frame → DOM: a count-in (ARMED, the numeral, the beat LED, the BPM lock), a live take, a committed
  *   loop (PLAYING, the loop readout, a moving ring dial from the clock anchor), the record meter, a
- *   refusal on its lane, the selection, and a COPY carrying the lane's volume.
+ *   refusal on its lane, the selection, a COPY carrying the lane's volume, a lane's mix kept when it only
+ *   goes EMPTY and reset by `Cleared`, and a reload's reset frame whose remembered settings are adopted.
  *
  * Cannot see the native engine, the Rust mirror of the wire, Tauri IPC or any timing: the fake answers
  * no command by itself, so every state the DOM shows here was scripted.
@@ -74,22 +76,23 @@ await probe(async ({ open }) => {
   const opened = await page.evaluate(() => window.__lf.native.opened);
   console.log('opened', JSON.stringify(opened));
   assert.deepEqual(opened, [{ backend: 'Wasapi', input: null, output: null, inputChannel: null, buffer: 256 }]);
-  const boot = await sent();
-  console.log(`boot sent ${boot.length} commands`);
-  for (const expected of [{ SetMasterVolume: 1 }, { SetMetronome: false }, { SetClickVolume: 0.7 }, { SelectInstrument: { Builtin: 'lead' } }]) {
-    assert.ok(boot.some((c) => JSON.stringify(c) === JSON.stringify(expected)), `boot sends ${JSON.stringify(expected)}`);
-  }
+  assert.deepEqual(await sent(), [], 'nothing is sent before the feed says what the engine has');
 
-  // The reset frame a subscribe starts with: every lane EMPTY, no master, the device and its clock.
-  await clearSent();
+  // The reset frame a subscribe starts with, from a fresh engine: every lane EMPTY, no master, the device
+  // and its clock, and no remembered settings. The UI sends what it persists and what it owns only.
   await emit({
     reset: true,
+    settings: [],
     events: [...[0, 1, 2, 3, 4].map((i) => laneEvent(i, lane('Empty'))), transport(0, false), { Selected: { frame: 0, lane: 0 } }],
     anchor: { frame: 0, atMs: Date.now(), rate: RATE, grid: 0 },
     meter: { peak: 0, clip: false },
   });
-  const resent = await sentAtLeast(1);
-  assert.ok(resent.some((c) => c.SetMasterVolume === 1), 'a reset frame sends the kept settings again');
+  const boot = await sentAtLeast(1);
+  console.log('first reset sent', JSON.stringify(boot));
+  for (const expected of [{ SetMasterVolume: 1 }, { SetClickVolume: 0.7 }, { SelectInstrument: { Builtin: 'lead' } }]) {
+    assert.ok(boot.some((c) => JSON.stringify(c) === JSON.stringify(expected)), `the first reset sends ${JSON.stringify(expected)}`);
+  }
+  assert.ok(!boot.some((c) => c.SetVolume || c.SetMetronome !== undefined), 'defaults the engine already has are not pushed');
 
   // ── Gestures → commands ───────────────────────────────────────────────────────────────────────
   await clearSent();
@@ -172,6 +175,13 @@ await probe(async ({ open }) => {
   assert.deepEqual(await sentAtLeast(1), [{ SetVolume: [0, 0.8] }], 'the fader sends SetVolume');
   await emit({ events: [{ Copied: { frame: BAR, from: 0, to: 1 } }, laneEvent(1, committed)] });
   assert.equal(await page.getByRole('slider', { name: 'Track 2 volume' }).inputValue(), '80', 'COPY carries the volume');
+  // A lane going EMPTY keeps its mix (an aborted take); only the engine's CLEAR resets it.
+  await clearSent();
+  await emit({ events: [laneEvent(1, lane('Empty'))] });
+  assert.equal(await page.getByRole('slider', { name: 'Track 2 volume' }).inputValue(), '80', 'EMPTY alone keeps the mix');
+  await emit({ events: [{ Cleared: { frame: BAR, lane: 1 } }] });
+  assert.equal(await page.getByRole('slider', { name: 'Track 2 volume' }).inputValue(), '100', 'Cleared resets the mix');
+  assert.deepEqual(await sent(), [], 'the engine reset its own mix: nothing is sent');
 
   // ── MIC and the play path ─────────────────────────────────────────────────────────────────────
   await clearSent();
@@ -190,6 +200,23 @@ await probe(async ({ open }) => {
   assert.ok(on, 'a PC key sends NoteOn');
   assert.ok(on.NoteOn[1] > 0 && on.NoteOn[1] <= 1, 'velocity is 0..1');
   assert.deepEqual(played.at(-1), { NoteOff: on.NoteOn[0] }, 'its release sends NoteOff');
+
+  // ── A WebView reload: the reset frame carries what the engine remembers, and the UI adopts it ─────
+  await clearSent();
+  await emit({
+    reset: true,
+    settings: [{ SetMasterVolume: 0.6 }, { SetMetronome: true }, { SetVolume: [0, 0.5] }, { SetFxBypass: [0, 'filter', false] }],
+    events: [laneEvent(0, committed), transport(BAR, true, 120), { Selected: { frame: BAR, lane: 0 } }],
+    anchor: { frame: BAR, atMs: Date.now(), rate: RATE, grid: 0 },
+    meter: { peak: 0, clip: false },
+  });
+  const adopted = await sentAtLeast(1);
+  console.log('second reset sent', JSON.stringify(adopted));
+  assert.equal(await page.getByRole('slider', { name: 'Track 1 volume' }).inputValue(), '50', "the engine's lane volume is adopted");
+  assert.equal(await page.getByRole('button', { name: 'Metronome click' }).getAttribute('aria-pressed'), 'true', "the engine's click is adopted");
+  assert.equal(await page.getByRole('slider', { name: 'Master volume' }).inputValue(), '60', "the engine's master volume is adopted");
+  assert.ok(!adopted.some((c) => c.SetVolume || c.SetMasterVolume !== undefined || c.SetMetronome !== undefined), 'adopted settings are not pushed back');
+  assert.ok(adopted.some((c) => c.SetClickVolume === 0.7), 'the persisted click volume the engine lacks is sent');
 
   // Engine mode never builds the web audio path, nor Tone's default context (`src/main.tsx`).
   const contexts = await page.evaluate(() => window.__audioContexts);

@@ -46,7 +46,7 @@ const COMMANDS = [
   'SetMute', 'SetFxParam', 'SetFxBypass', 'SelectInstrument', 'NoteOn', 'NoteOff', 'PitchBend', 'Modulation',
   'AllNotesOff', 'SetSlotLive', 'SetSlotGain',
 ];
-const EVENTS = ['Lane', 'Transport', 'Beat', 'Selected', 'Refused', 'TakeRejected', 'PassDropped', 'Copied'];
+const EVENTS = ['Lane', 'Transport', 'Beat', 'Selected', 'Refused', 'TakeRejected', 'PassDropped', 'Copied', 'Cleared'];
 const DEVICE_EVENTS = ['Lost', 'Recovered', 'Fallback', 'ShareLost', 'EngineFaulted'];
 
 // ── Commands: the TS side sends these; each fixture example is one the TS types accept as is ────────
@@ -100,11 +100,23 @@ for (const f of fixture.feed) {
     assert.deepEqual(decoded.events.map(rewire), f.events);
     assert.equal(decoded.device.length, f.device.length);
     if ('status' in f) assert.deepEqual(decoded.status, f.status);
+    if ('settings' in f) assert.deepEqual(decoded.settings, f.settings);
     assert.deepEqual(decoded.anchor, f.anchor);
     assert.deepEqual(decoded.meter, f.meter);
     assert.deepEqual(decoded.peaks, f.peaks);
   });
 }
+check('the fixture has a reset frame with remembered settings', () =>
+  assert.ok(fixture.feed.some((f) => f.reset && Array.isArray(f.settings) && f.settings.length > 0)),
+);
+check('the fixture has a device that opened without input', () => {
+  const statuses = [
+    ...fixture.deviceStatuses,
+    ...fixture.feed.map((f) => f.status).filter(Boolean),
+    ...fixture.deviceEvents.map((d) => d.Recovered ?? d.Fallback).filter(Boolean),
+  ];
+  assert.ok(statuses.some((s) => s.inputOpen === false));
+});
 check('the fixture has a status that is set, null and absent', () => {
   const statuses = fixture.feed.map((f) => ('status' in f ? (f.status === null ? 'null' : 'set') : 'absent'));
   assert.deepEqual([...new Set(statuses)].sort(), ['absent', 'null', 'set']);
@@ -130,6 +142,11 @@ const refused = {
   'a lane past the fifth': () => decodeCommand({ RecDub: 5 }),
   'an unknown command': () => decodeCommand('Panic'),
   'a feed frame without its events': () => decodeFeedFrame({ seq: 0, reset: false }),
+  'a status without inputOpen': () => {
+    const s = structuredClone(fixture.deviceStatuses[0]);
+    delete s.inputOpen;
+    decodeDeviceStatus(s);
+  },
   'an anchor without its grid': () => {
     const f = structuredClone(fixture.feed.find((x) => x.anchor));
     delete f.anchor.grid;

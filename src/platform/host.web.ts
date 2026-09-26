@@ -274,6 +274,7 @@ export const webEngineFake: EngineFake = {
       outputName: 'Fake output',
       alignFrames: 0,
       inputFrames: 0,
+      inputOpen: true,
     };
     return fakeStatus;
   },

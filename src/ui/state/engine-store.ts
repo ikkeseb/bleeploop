@@ -38,9 +38,9 @@ import { notifyError, notifyInfo } from '../../notify';
  *
  * The engine owns the musical state: lanes, the transport (master, BPM and its lock), the beat and the
  * selection arrive on the feed, and nothing here predicts them. It does not echo settings, so this store
- * keeps them (lane volume, mute and FX, the take modes, click, master): it sends each change, mirrors a
- * lane going back to EMPTY (its mix resets, as the engine's CLEAR does) and a COPY (`Copied`), and sends
- * all of them again on a `reset` frame, so the engine plays what the screen shows. `engineSession` is the
+ * keeps them (lane volume, mute and FX, the take modes, click, master): it sends each change, mirrors the
+ * engine's CLEAR (`Cleared`: the lane's mix resets) and COPY (`Copied`), and on a `reset` frame takes the
+ * settings the engine remembers, so the screen shows what the engine plays. `engineSession` is the
  * engine as export, recovery and import see it: the engine's PCM with this store's mix.
  *
  * Invariant 6: a frame writes a Solid signal only when its value changed; the waveform rAF reads the
@@ -245,7 +245,6 @@ function applyLane(lane: number, frame: number, info: LaneInfo): void {
   plain.waiting[lane] = waiting;
   plain.retakePass[lane] = info.retakePass;
   lanes[lane][1](trackView(info));
-  if (prev !== 'EMPTY' && next === 'EMPTY') resetLaneMix(lane);
 }
 
 function applyEvent(ev: EngineEvent): void {
@@ -283,6 +282,9 @@ function applyEvent(ev: EngineEvent): void {
     case 'Copied':
       copyLaneMix(ev.from, ev.to);
       break;
+    case 'Cleared':
+      clearLaneMix(ev.lane);
+      break;
   }
 }
 
@@ -314,6 +316,11 @@ function applyDeviceEvent(ev: DeviceEvent): void {
 const deviceWaiters: ((status: DeviceStatus) => void)[] = [];
 
 function setDevice(status: DeviceStatus | null): void {
+  // Once per open: WASAPI may run output only (no capture device, a microphone Windows blocks).
+  if (status && !status.inputOpen && (device()?.inputOpen ?? true)) {
+    console.error(`[engine] ${status.outputName} opened without an input`);
+    notifyError('The audio input did not open', 'The engine plays, but hears nothing. Check the input device and Windows microphone privacy.');
+  }
   // No device: the playhead holds where it is until the next anchor arrives.
   if (!status) plain.clock = { ...plain.clock, frame: renderedFrame(), atMs: Date.now(), rate: 0 };
   plain.heardLag = status ? Math.max(0, status.alignFrames - status.inputFrames) : 0;
@@ -348,7 +355,7 @@ function applyPeaks(lane: number, start: number, count: number, min: readonly nu
 /**
  * Apply one feed frame, its signal writes as one batch. A `reset` frame REPLACES the view: a lane, the
  * transport or the selection it leaves out goes back to its empty default, the peaks are redrawn from
- * the frame alone, and every setting this store keeps is sent again.
+ * the frame alone, and the settings come from the engine's memory (`adoptSettings`).
  */
 function applyFrame(f: FeedFrame): void {
   batch(() => applyFrameNow(f));
@@ -366,6 +373,7 @@ function applyFrameNow(f: FeedFrame): void {
   // start snaps to the grid it carries.
   if (f.status !== undefined) setDevice(f.status);
   if (f.anchor) plain.clock = f.anchor;
+  if (f.reset) adoptSettings(f.settings ?? []);
   for (const ev of f.events) {
     applyEvent(ev);
     for (const listener of eventListeners) listener(ev);
@@ -384,7 +392,6 @@ function applyFrameNow(f: FeedFrame): void {
   plain.level = f.meter?.peak ?? 0;
   plain.clip = f.meter?.clip ?? false;
   for (const p of f.peaks) applyPeaks(p.lane, p.start, p.count, p.min, p.max);
-  if (f.reset) pushSettings();
 }
 
 // ── The mix and the modes this store keeps ────────────────────────────────────────────────────────
@@ -402,18 +409,12 @@ function laneCommands(lane: number): EngineCommand[] {
   return [{ SetVolume: [lane, volumes[lane][0]()] }, { SetMute: [lane, mutes[lane][0]()] }, ...fxCommands(lane, fx[lane])];
 }
 
-/** A lane back to EMPTY: its mix returns to the defaults (the web's `clear()`), in the engine too. */
-function resetLaneMix(lane: number): void {
-  const commands: EngineCommand[] = [];
-  if (volumes[lane][0]() !== 1) commands.push({ SetVolume: [lane, 1] });
-  if (mutes[lane][0]()) commands.push({ SetMute: [lane, false] });
-  const defaults = defaultFx();
-  if (JSON.stringify(fx[lane]) !== JSON.stringify(defaults)) commands.push(...fxCommands(lane, defaults));
+/** The engine cleared the lane: its mix is back to the defaults there (the web's `clear()`), so here too. */
+function clearLaneMix(lane: number): void {
   volumes[lane][1](1);
   setMutePlain(lane, false);
-  fx[lane] = defaults;
+  fx[lane] = defaultFx();
   fxVersions[lane][1]((v) => v + 1);
-  sendEngine(...commands);
 }
 
 /** The engine copied lane `from` whole into `to` (its volume, mute and FX with it): mirror that. */
@@ -429,21 +430,62 @@ function setMutePlain(lane: number, on: boolean): void {
   plain.muted[lane] = on;
 }
 
-function pushSettings(): void {
-  const commands: EngineCommand[] = [
-    { SetMasterVolume: masterVolume() },
-    { SetMasterMute: masterMuted() },
-    { SetMetronome: metronome() },
-    { SetClickVolume: clickVolume() },
-    { SetLoopEndStop: loopEndStop() },
-    { SetFixedLength: fixedLength() },
-    { SetFixedBars: fixedBars() },
-    { SetRetake: retake() },
-    { SetAutoRecord: autoRecord() },
-    { SetAutoSensitivity: autoSensitivity() },
-  ];
-  for (let i = 0; i < ENGINE_LANES; i++) commands.push(...laneCommands(i));
-  sendEngine(...commands);
+/**
+ * A reset frame: take over the settings the engine remembers (one missing from `settings` is at the
+ * engine's default, which is the UI's) instead of pushing the UI's, so a WebView reload keeps a
+ * playing session's mix and modes. The UI still sends what it persists and the engine lacks (the master
+ * and click volumes on a first launch) and what it owns: the note target, the slot gains and the live
+ * slot (`engineResync`).
+ */
+function adoptSettings(settings: readonly EngineCommand[]): void {
+  setMasterMutedSignal(false);
+  setMetronomeSignal(false);
+  setLoopEndStopSignal(false);
+  setFixedLengthSignal(false);
+  setFixedBarsSignal(4);
+  setRetakeSignal(false);
+  setAutoRecordSignal(false);
+  setAutoSensitivitySignal(AUTO_RECORD_DEFAULT_SENSITIVITY);
+  for (let i = 0; i < ENGINE_LANES; i++) clearLaneMix(i);
+  let masterKnown = false;
+  let clickKnown = false;
+  for (const c of settings) {
+    if (typeof c === 'string') continue;
+    if ('SetMasterVolume' in c) {
+      masterKnown = true;
+      setMasterVolumeSignal(c.SetMasterVolume);
+      writeStoredNumber(MASTER_KEY, c.SetMasterVolume);
+    } else if ('SetClickVolume' in c) {
+      clickKnown = true;
+      setClickVolumeSignal(c.SetClickVolume);
+      writeStoredNumber(CLICK_KEY, c.SetClickVolume);
+    } else if ('SetMasterMute' in c) setMasterMutedSignal(c.SetMasterMute);
+    else if ('SetMetronome' in c) setMetronomeSignal(c.SetMetronome);
+    else if ('SetLoopEndStop' in c) setLoopEndStopSignal(c.SetLoopEndStop);
+    else if ('SetFixedLength' in c) setFixedLengthSignal(c.SetFixedLength);
+    else if ('SetFixedBars' in c) setFixedBarsSignal(c.SetFixedBars);
+    else if ('SetRetake' in c) setRetakeSignal(c.SetRetake);
+    else if ('SetAutoRecord' in c) setAutoRecordSignal(c.SetAutoRecord);
+    else if ('SetAutoSensitivity' in c) setAutoSensitivitySignal(c.SetAutoSensitivity);
+    else if ('SetVolume' in c) volumes[c.SetVolume[0]][1](c.SetVolume[1]);
+    else if ('SetMute' in c) setMutePlain(c.SetMute[0], c.SetMute[1]);
+    else if ('SetFxBypass' in c) {
+      const [l, kind, bypassed] = c.SetFxBypass;
+      const k = FX_META.findIndex((m) => m.kind === kind);
+      fx[l][k] = { ...fx[l][k], bypassed };
+      fxVersions[l][1]((v) => v + 1);
+    } else if ('SetFxParam' in c) {
+      const [l, key, value] = c.SetFxParam;
+      const k = FX_META.findIndex((m) => FX_PARAM_DEFS[m.kind].some((d) => d.key === key));
+      fx[l][k] = { ...fx[l][k], params: { ...fx[l][k].params, [key]: value } };
+      fxVersions[l][1]((v) => v + 1);
+    }
+    // The tempo and the selection arrive as events; the note target and the slots are the UI's.
+  }
+  const lacking: EngineCommand[] = [];
+  if (!masterKnown) lacking.push({ SetMasterVolume: masterVolume() });
+  if (!clickKnown) lacking.push({ SetClickVolume: clickVolume() });
+  sendEngine(...lacking);
   engineResync();
 }
 
@@ -723,7 +765,8 @@ export const engineMaster = {
     setMasterMutedSignal(on);
     sendEngine({ SetMasterMute: on });
   },
-  init: (): void => sendEngine({ SetMasterVolume: masterVolume() }, { SetMasterMute: masterMuted() }),
+  /** Nothing to do at mount: the feed's first (reset) frame settles the level with the engine. */
+  init: (): void => {},
 };
 
 // ── The device ────────────────────────────────────────────────────────────────────────────────────
@@ -808,9 +851,7 @@ export function setEngineInputChannel(channel: string): void {
   });
 }
 
-/** Subscribe to the feed and send the settings this store keeps. Returns the unsubscribe. */
+/** Subscribe to the feed; its first frame is a reset (`adoptSettings`). Returns the unsubscribe. */
 export function startEngineStore(): () => void {
-  const unsubscribe = platform.engine.subscribe(applyFrame);
-  pushSettings();
-  return unsubscribe;
+  return platform.engine.subscribe(applyFrame);
 }

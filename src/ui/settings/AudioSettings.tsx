@@ -100,7 +100,8 @@ export function AudioSettings() {
   const engineReadout = () => {
     const d = engineDevice();
     if (!d) return 'no device open';
-    return `${d.backend === 'Asio' ? 'ASIO' : 'WASAPI'} · ${d.inputName} → ${d.outputName} · ${d.block} frames · ${d.alignFrames} frames round trip`;
+    const input = d.inputOpen ? d.inputName : 'no input';
+    return `${d.backend === 'Asio' ? 'ASIO' : 'WASAPI'} · ${input} → ${d.outputName} · ${d.block} frames · ${d.alignFrames} frames round trip`;
   };
 
   // Channel count of the selected NAMED device (0 for "default input" — its id is '' so the channel
