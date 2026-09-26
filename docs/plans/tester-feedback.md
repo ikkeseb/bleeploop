@@ -32,8 +32,8 @@ All items remain open until the tester confirms. § Code reading records what th
 | F11 | The owner wants the click audible whenever armed and CLICK is enabled. | Include the armed waiting state in audible-click behavior. This is a requested change to the current transport-mode policy described in STATUS Stop 3, not implemented behavior. Check recording arm/wait states, including AUTO; preserve a clear distinction from native input GO LIVE. |
 | F12 | The owner asks about downloadable releases, possibly ASIO and non-ASIO variants, after the tester built the app manually. | Supply ready-to-run Windows downloads. Existing distribution decision is an ASIO build with WASAPI fallback, owned by docs/plans/release-prep.md. Two separate downloads are a question, not an approved change. A reported successful manual build is not independent verification of the clean-machine README path. |
 | F13 | Audio Settings' output reads "System default" every time it reopens; the tester wants to route the sound to a chosen output, as Ableton does. Screenshot: WASAPI, input Line (MG-XU), output list open. | One output pick routes everything. Reproduced on the dev PC: the pick was saved but the dropdown lost it (input too), and the pick steered only the plugin's native monitor while loops, synths and click followed the Windows default. |
-| F14 | A one-bar first take locks every later track to one bar. | A later track longer than the master: extend the loop, keeping the one-bar track repeating across it (an RC-505-style multiply). Waits for the native engine (`docs/plans/native-engine.md` § After the flip). |
-| F15 | No effects (delay, reverb) before recording into a track. | An elegant pre-record FX. Waits for the native engine, where input, monitor and record tap share one callback (`docs/plans/native-engine.md` § After the flip). |
+| F14 | A one-bar first take locks every later track to one bar. | A later track longer than the master: extend the loop, keeping the one-bar track repeating across it (an RC-505-style multiply). Built on the engine (§ Landed). |
+| F15 | No effects (delay, reverb) before recording into a track. | An elegant pre-record FX. Built on the engine (§ Landed). |
 | F16 | No control over a recorded track's bar count after the fact. | Adjust the length of a committed track. Design open; waits for the native engine (`docs/plans/native-engine.md` § After the flip). |
 
 ## Code reading at `d17c777`
@@ -86,6 +86,17 @@ Proven in the browser tier only (`pnpm check`, `pnpm build`, `pnpm verify:jam`, 
   ` (vid:pid)` to a USB-class device's label. The dev PC's Focusrite runs a vendor driver and gets no
   suffix, which is why it passed. Re-verified in a fresh profile: labels hidden, and the sink still
   followed the pick. Unverified: the tester's machine, and a switch between two physical devices.
+
+- **F14 (engine mode, 2026-09-26):** FIXED past the loop is the multiply: over a loop of m bars, FIXED
+  N > m records the largest multiple of m within N and the loop grows to it; the other tracks repeat
+  across it with no seam (`src-tauri/crates/lf-engine/tests/multiply.rs`). FIXED off still stops a
+  later take at the loop. Proven headless, in the browser tier and through the loopback cable in the
+  running app (`pnpm native:engine-loopback`, phases E and F); unheard.
+- **F15 (engine mode, 2026-09-26):** IN FX after MIC: an ECHO and a REVERB on the guitar (after the
+  amp-sim), heard and recorded, the dry sound and the take's timing untouched
+  (`src-tauri/crates/lf-engine/tests/input_fx.rs`). Unheard; default levels are an agent's pick.
+- **F3/F12 follow-up:** Help → About this build shows the version and commit, copies a diagnostics
+  block and opens the log folder; the repo has a bug-report form asking for both.
 
 ## Work order (owner-approved)
 

@@ -12,7 +12,11 @@ engine lap. The web path stays one switch away (Audio Settings → engine) until
 import, recovery after a kill, real audio) and three same-size relaunches landing within 0.1 ms of
 the driver's report; the web path's `native:smoke` in its own profile. Later that day:
 `native:engine-loopback` (six launches, ASIO 64/128/256) and the release build on the engine,
-`release:smoke`, in a fresh profile.
+`release:smoke`, in a fresh profile. In the evening, after multiply, IN FX, the stage view and
+Help's diagnostics landed: `pnpm rust:check` (462 tests), `pnpm check`, `pnpm build`, the browser
+probes 45/45; on the rig `native:engine-smoke` with Pro-Q and `native:engine-loopback` with its
+multiply phases (three launches, 30/30 bars at 64/128/256), and MIC's gain after a plugin unload
+measured through the cable.
 Driver latency reports are not guitar latency; after a relevant change, rerun only the affected check.
 
 **Last play: 2026-09-24** (web path, `pnpm dev:asio`, jam, two–three tracks, no pedal): the click too
@@ -28,6 +32,8 @@ Settings: ASIO, buffer 128, the guitar's input channel. Load the amp-sim, GO LIV
 say what felt wrong and re-scope. If it feels right, publish the draft.
 With a MIDI footswitch plugged: learn REC/DUB onto it (Audio Settings → midi learn, one tap) and take
 the jam's records with the foot. One press, one action? Still learned after the next restart?
+The draft is v0.1.0; what landed after it (multiply, IN FX, stage view, Help's diagnostics) runs from
+`pnpm dev:asio` and is folded into Stops 1 and 3 below.
 
 ## The rig lap — in plug order, each stop a yes/no
 
@@ -37,13 +43,17 @@ A stop dies when it passes; past 10 stops, consolidate or flag it (AGENTS.md). D
 1. **ASIO 128 · amp-sim live — feel and the first take.** GO LIVE (VST3, Petrucci): the guitar through
    the amp feels immediate; master fader scales the wet, not the recorded level. Loop against the
    click with no trim: first take, overdub and FIXED 4 keep their attacks and endings on the click.
+   IN FX (after MIC): ECHO and REVERB on the guitar still feel immediate, the echo sits on the tempo,
+   and a take recorded with them sounds as it did live.
 2. **Same rig · buffer 256, then 64.** The take still lands on the click at each size; the switch
    gap is short; loading a plugin while loops play crossfades in without a click.
 3. **The take itself, at 128.** Count-in feels right (1 bar, accent on 1, no dead air). FIXED 2
    stops on the downbeat after exactly 2 bars. Free record: stop ~on the downbeat after N bars → "N
    bars"; try an early and a mid-bar stop. Click: silent when idle, stops with stop-all, count-in still
    forced with click off. A later track starts at master phase with no seam against its tail. Punch
-   out of a sustained note: is the layer seam clean? Undo swap and reverse are click-free.
+   out of a sustained note: is the layer seam clean? Undo swap and reverse are click-free. Multiply:
+   over a 1-bar loop, FIXED 4 on another lane: the loop becomes 4 bars at the commit and the first lane
+   plays on with no seam or click there.
 4. **Long session · grid.** Same jam, 10+ min: loops and click stay tight, no LED hop at commit,
    later takes on-grid, a flam-free commit-beat click; tempo is locked mid-count-in; a free record
    past 60 s auto-closes on a bar (is that UX fine?).
@@ -79,6 +89,7 @@ Blocked on an owner decision, not on testing. The default column is what happens
 | E6 | A true 0 dBFS ceiling in the ported limiter, or a literal port of today's? | literal port |
 | E8 | Engine sessions: the snapshot's PCM crosses to TS once per save, so today's zip/WAV/recovery code stays (agents' call, 2026-09-26). Keep, or Rust writes the files? | keep |
 | E9 | WASAPI takes land late on drivers that hide their buffering (~215 ms on the Focusrite; `docs/plans/native-engine.md` § Stage 1 W1). Accept as documented, or build the one reported term (~40 ms, invisible on this rig)? | accept |
+| E10 | Multiply (F14) is FIXED past the loop only. Should a free later take (FIXED off) also run until the press and grow the loop, as the first take does, instead of closing at the loop length? | FIXED only |
 
 **Answered 2026-09-26:** the 12 ms ASIO launch is not a stop (cause found and fixed: the engine opens
 ASIO at another block size first); the first release is v0.1.0, on the engine (E1, E5 and E7 lapse);

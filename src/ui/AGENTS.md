@@ -30,5 +30,8 @@ is a one-line adapter). UI-only edits are safe while the dev app runs.
   `state/audio.ts`, which picks the web or the engine implementation; a direct import from
   `src/audio/` bypasses engine mode without an error at runtime. `verify/guards/audio-facade.mjs`
   fails it; its exceptions are the web-only paths, each with its reason.
+- **One lane derivation:** a lane's display state, word, well message and count-in come from
+  `looper/lane-state.ts`; the looper lanes and the stage view (`src/ui/stage/`) both read it, so a new
+  state lands there once.
 - **Error toasts** (`toast/Toasts.tsx` renders `src/notify.ts`) sit ADDITIVELY beside the
   `console.error` sites, which feed the release log — keep both.

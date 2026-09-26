@@ -72,7 +72,8 @@ rest is the map.
   = `pnpm build:app`; launch DIRECTLY (`Start-Process app.exe`), never via stdout-redirect.
 - **Release IPC surface:** `capabilities/default.json` grants only event listen/unlisten. `diag` and
   plugin state save/load are registered only under `debug_assertions` until production save/recall
-  ships; keep the handler cfg and frontend `import.meta.env.DEV` surface in lockstep.
+  ships; keep the handler cfg and frontend `import.meta.env.DEV` surface in lockstep. Help's
+  `app_log_dir` / `app_open_log_dir` (`lib.rs`) ship in release and take nothing from the WebView.
 - **Sample-rate selector "C2" — DECIDED (owner), NOT BUILT:** swappable 44.1/48k, default device
   native; RETIRES the `LF_FORCE_48K` dev hack (keep a 48k force for the P9.4 gate). Separate Rust
   increment.

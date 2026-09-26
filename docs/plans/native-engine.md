@@ -249,7 +249,7 @@ deleted, and align.rs asserts a take shifts by exactly align_frames. golden_jam.
 (assertions 1–6, 8, 9; 7 as an input gap; 10 stays a UI probe, its engine half, gates and the CLEAR
 double press, is here) with absolute frames and the rendered output, at 44.1 k and 48 k, bit-identical
 across block sizes 1, 32, 64, 127, 128, 480 and 1024. gestures.rs runs proptest scripts (one
-recorder; a whole-bar master; every lane = master until F14/F16; undo twice = identity; undo after an
+recorder; a whole-bar master; every lane = master (a multiply grows them all); undo twice = identity; undo after an
 N-cycle dub gives back the pre-dub loop; finite output) at two block sizes, bit-identical, with
 frame-stamped commands landing mid-block. cargo-mutants on grid and looper for acceptance, and again
 when either changes (the planted-bug rule of `verify/README.md`, automated; no scheduled workflow).
@@ -690,9 +690,15 @@ gone, the browser build is silent, and E5's recovery answer.
 
 ## After the flip: first features
 
-Built on the engine, in this order unless the owner reorders: F14 multiply (a later take longer than
-the master grows the loop; shorter tracks keep repeating), F15 input FX (an insert before the record
-tap, monitored in the same callback, so the player hears what is recorded), F16 track length after
-recording (session formatVersion 2). Also engine-bound from `docs/plans/pedalboard.md`: D12 controller
-data to plugins and F8 synth plugins on the device clock (both arrive with Stage 4). Stage 2 keeps
-F14/F16 possible (a per-track length field, lane length ≤ its buffer) and builds nothing more.
+Built on the engine, in this order unless the owner reorders:
+
+- **F14 multiply — built, not heard.** FIXED past the loop records whole loops and grows the master;
+  every other lane is tiled out to it, so every lane keeps one length (lf-engine `looper.rs`
+  `multiply`, `tests/multiply.rs`). FIXED off still closes a later take at the loop (STATUS E10).
+- **F15 input FX — built, not heard.** A wet-only ECHO and REVERB send on the live input, recorded and
+  monitored on the same frame; the dry signal and a take's alignment are untouched (lf-engine
+  `input_fx.rs`, `tests/input_fx.rs`; the IN FX pill in engine mode).
+- **F16 track length after recording** (session formatVersion 2): not built; its design is open.
+
+Also engine-bound from `docs/plans/pedalboard.md`: D12 controller data to plugins and F8 synth plugins
+on the device clock (both arrive with Stage 4).

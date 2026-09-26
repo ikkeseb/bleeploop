@@ -22,9 +22,10 @@ plugins, F8 synth plugins on the device clock, F14 multiply, F15 input FX): `doc
 | 5 | Help, first screen ordered by the promise — **landed**: guitar, then the looper keys, then the pedals; the MIDI/synth lines move to an "Other layers" section below Transport | S | `src/ui/settings/Help.tsx` | `pnpm probe contact-sheet` scene `6-help`: the three sections fill the first screen at 1280×820 and 1000×700; wording and order stay taste (`docs/backlog-taste.md` § Help popover) |
 
 The only ear or foot moment is one pedal press during the next "Play first" jam; it rides that
-session (`STATUS.md` § Play first) instead of adding a stop. Deferred inside the milestone: the stage
-view (eye-gated, needs the actions first) and VST3 tone-state recall (L Rust; VST3 save/load is "not
-wired" and LoadState cancellation needs a design).
+session (`STATUS.md` § Play first) instead of adding a stop. The stage view landed after the actions
+(2026-09-26): `src/ui/stage/`, B or the named action `stageView`, so a pedal can open it; its eye lap is
+a `docs/backlog-taste.md` line. Deferred inside the milestone: VST3 tone-state recall (L Rust; VST3
+save/load is "not wired" and LoadState cancellation needs a design).
 
 ## Explicitly not built
 
@@ -35,8 +36,6 @@ wired" and LoadState cancellation needs a design).
   on playing; each adds its own eye lap. Built-ins fill layers, they do not compete with plugins.
 - **Built-in dry INPUT source; a second input channel.** Rust effort unknown; the promise assumes an
   amp-sim plugin. "Maybe later" (STATUS D2/D7).
-- **Diagnostics copy:** a copy-diagnostics button, the version in Help, open-log-folder and an issue
-  template, so a tester report carries commit and driver (S).
 - **Recent-jams shelf:** keep the last N recovery archives on ✕ ALL and close, offered in IMPORT (M).
 - **Per-lane pan; resample on import/recovery** (S each). No pan exists today.
 - **One `.pill` primitive + type tokens; a first-run cue on the selected empty lane** (M, S). The

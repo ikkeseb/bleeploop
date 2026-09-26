@@ -47,8 +47,21 @@ not here.
   latching, the port on hover, ✕ forgets). Right place and words? Is "latching" clear to a guitarist?
 - **Lanes:** the selected-lane warm-white edge (no rail, owner 2026-09-23) — strong enough under
   PLAYING? the ARMED amber dashed-ring pulse; the 10 px state word with its LED; from 1.5 m little
-  carries (state word, REC core, four 5 px beat dots) — the "stage view" idea; undo/reverse cap placement (a per-track
+  carries (state word, REC core, four 5 px beat dots) — the stage view (B) is built for that; undo/reverse cap placement (a per-track
   properties surface?); the empty well says nothing at all (no first-run guidance in the looper).
+- **Stage view (2026-09-26, built, unseen):** B, the command-bar cap or a learned pedal: big state
+  pillars (PLAY / STOP / DUB / ARMED / MUTED / ENDING…), a four-block beat bar, the count-in in the
+  lane. Readable from where you stand with the guitar? MUTED and STOP are both grey: distinct enough?
+  The PC keyboard's note keys are silent inside it (so drum-mode 1–4 select lanes): right, or should
+  notes play?
+- **IN FX (2026-09-26, built, unheard):** the pill after MIC and its ECHO/REVERB popover (engine
+  mode). Defaults are an agent's pick: echo 1/8, feedback 0.4, level 0.5; reverb 0.5. The echo's level
+  is scaled so its repeats carry the input's energy (at feedback 0.95 the first echo is ~⅓ of the level):
+  does high feedback still feel like it should? The reverb is summed to mono as ½(L+R).
+- **FIXED past the loop (2026-09-26, built, unseen):** over a loop, + steps a bar at a time up to the
+  loop, then a whole loop at a time (the multiply); the title explains it. Clear enough?
+- **About this build (2026-09-26, built, unseen):** Help's last section — version · commit, Copy
+  diagnostics, Open log folder, below the fold at 1280×820. Findable when a tester is asked for it?
 - **Looper prominence:** does the first-run stage read looper-as-hero? `DEFAULT_STAGE_WEIGHTS` in
   `layout-store.ts` (keyboard 0.55 / looper 2.0, instrument = autoSize, keyboard BOTTOM). Keyboard
   de-emphasis is open — rebalance, don't remove (default-hidden / slimmer strip).
