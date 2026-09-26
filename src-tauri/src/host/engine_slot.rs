@@ -2,9 +2,9 @@
 //! spawns one owner thread per slot, and the handle a caller drives it through. The owner loads a
 //! CLAP or VST3 plugin as the live owners do, activates it at the engine's rate and installs its
 //! processor into the engine as an `lf_engine::SlotProcessor` unit (`clap_engine`, `vst3_engine`),
-//! so the plugin renders inside the device callback instead of on its own RT thread. Dormant until
-//! Stage 5 wires it behind the hidden toggle; the live owners (`owner_main`, `vst3_owner_main`) and
-//! everything they drive are untouched.
+//! so the plugin renders inside the device callback instead of on its own RT thread. Engine mode's
+//! `plugin_*` commands drive it (`engine_io/plugins.rs`); the live owners (`owner_main`,
+//! `vst3_owner_main`) and everything they drive are the web audio path's, untouched.
 //!
 //! An owner services what the live owner does, less the device (the engine owns it): params (the
 //! unit drains the slot's event ring; a VST3 set reaches the edit controller too), state, editors

@@ -1,6 +1,7 @@
 //! engine_io: the device side of the native engine (`docs/plans/native-engine.md` § Stage 4). Engine
-//! mode runs it behind the hidden toggle (`mode`; the UI drives it over `wire` and the feed), a DEV probe
-//! drives it headless, and nothing on the live line calls it. This doc is the module's briefing.
+//! mode runs it, the default unless the toggle says `off` (`mode`; the UI drives it over `wire` and the
+//! feed), a DEV probe drives it headless, and the web audio path never calls it. This doc is the
+//! module's briefing.
 //!
 //! [`EngineHost`] is the process-wide handle: one device owner thread serializes every device
 //! transition (open, backend switch, channel change, loss, close); the engine ([`lf_engine::Engine`])

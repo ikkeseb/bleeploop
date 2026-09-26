@@ -2987,7 +2987,7 @@ pub fn vst3_load(
 mod vst3_host;
 
 // Engine mode (docs/plans/native-engine.md § Stage 4): the same plugins as units inside the native
-// engine's callback, each with its own owner thread. Dormant until Stage 5 wires it.
+// engine's callback, each with its own owner thread (`engine_io/plugins.rs` routes to them).
 #[allow(dead_code)]
 #[path = "engine_slot.rs"]
 pub(crate) mod engine_slot;

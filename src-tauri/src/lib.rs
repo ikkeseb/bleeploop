@@ -9,8 +9,8 @@ mod audio_input;
 // monitor for the wet plugin signal (branch-1 of the split). No boundary change (cpal is Rust-internal).
 #[cfg(windows)]
 mod audio_output;
-// The native engine's device side (docs/plans/native-engine.md § Stage 4): engine mode runs it behind
-// the hidden toggle (`engine_io::mode`); a DEV probe drives it too.
+// The native engine's device side (docs/plans/native-engine.md § Stage 4): engine mode, the default
+// (`engine_io::mode`), runs it; a DEV probe drives it too.
 #[cfg(windows)]
 #[allow(dead_code)]
 mod engine_io;

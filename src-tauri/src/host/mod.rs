@@ -46,7 +46,7 @@ pub(crate) use clap::engine_spike_run;
 #[cfg(all(windows, debug_assertions))]
 pub(crate) use scan::scan_one;
 #[cfg(windows)]
-#[allow(unused_imports)] // the native engine's plugin slots: dormant until Stage 5 wires them
+#[allow(unused_imports)] // the native engine's plugin slots (engine mode's `plugin_*` commands)
 pub(crate) use clap::engine_slot;
 
 #[cfg(debug_assertions)]
