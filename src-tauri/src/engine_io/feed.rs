@@ -137,8 +137,9 @@ impl Feed {
     }
 
     /// The lanes' waveform bins that changed, in play order: every bin of a lane that shows another
-    /// buffer or orientation, holds less than before, or is new to the UI (a reset), else the bins its
-    /// buffer changed plus the ones it grew by.
+    /// buffer or orientation, holds less than before, grows while reversed (a multiply: its play order
+    /// counts back from the new end) or is new to the UI (a reset), else the bins its buffer changed plus
+    /// the ones it grew by.
     fn peaks(&mut self, reset: bool) -> Vec<PeakUpdate> {
         let mut out = Vec::new();
         let Some(overview) = self.overview.clone() else {
@@ -154,7 +155,7 @@ impl Feed {
             self.drawn[lane] = Some(now);
             self.bins.clear();
             match last {
-                Some(d) if d.buf == now.buf && d.reversed == now.reversed && count >= d.count => {
+                Some(d) if d.buf == now.buf && d.reversed == now.reversed && (count == d.count || (count > d.count && !now.reversed)) => {
                     let bins = &mut self.bins;
                     overview.take_dirty(view.buf, |b| {
                         if (b as u32) < count {

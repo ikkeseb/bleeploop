@@ -60,12 +60,13 @@ fn master_volume_and_mute_scale_everything() {
 }
 
 #[test]
-fn the_next_take_may_use_32_bars_before_a_master_and_the_masters_bars_after() {
+fn the_next_take_may_use_32_bars_before_a_master_and_whole_multiples_of_it_after() {
     let mut rig = Rig::new();
     assert_eq!(rig.engine.looper().next_take_max_bars(rig.bpm()), 32);
     rig.set_level(0.5);
     rig.record_first_take(0, 3, 2400);
-    assert_eq!(rig.engine.looper().next_take_max_bars(rig.bpm()), 3);
+    // 20 s of lane buffer holds 10 bars at 120 bpm: three loops of the 3-bar master (`tests/multiply.rs`).
+    assert_eq!(rig.engine.looper().next_take_max_bars(rig.bpm()), 9);
 }
 
 #[test]

@@ -1,8 +1,8 @@
 //! Property tests over gesture scripts (plan § Stage 2 Tests): any sequence of presses, settings and
-//! input gaps keeps one recorder, a whole-bar master, every committed lane at the master length (until
-//! F14/F16 lift that), finite output and no panic; UNDO twice is the identity; UNDO after an N-cycle
-//! overdub gives back the pre-dub loop bit for bit. Rendered at 8 kHz so a case stays cheap; the engine
-//! is rate-agnostic.
+//! input gaps keeps one recorder, a whole-bar master, every committed lane at the master length (a
+//! multiply grows them all; until F16 lifts that), finite output and no panic; UNDO twice is the
+//! identity; UNDO after an N-cycle overdub gives back the pre-dub loop bit for bit. Rendered at 8 kHz so
+//! a case stays cheap; the engine is rate-agnostic.
 
 mod common;
 

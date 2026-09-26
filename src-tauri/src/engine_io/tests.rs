@@ -887,6 +887,47 @@ fn the_feed_draws_a_take_as_it_records_and_the_whole_loop_on_a_reset() {
 }
 
 #[test]
+fn a_reversed_lane_a_multiply_grows_is_drawn_whole() {
+    use super::feed::Feed;
+    use lf_engine::overview::PEAK_FRAMES;
+    let mut h = Harness::new();
+    h.fake.set_input(tone);
+    h.open(asio(Some(256)));
+    let master = h.record_loop();
+    h.send(Command::Reverse(0));
+    h.wait_lane("lane 0 plays backwards", 0, |i| i.reversed);
+    let mut feed = Feed::new(h.host.clone());
+    let mut seen = Vec::new();
+    feed_until(&mut feed, &mut seen, "lane 0 drawn backwards", |f| f.peaks.iter().any(|p| p.lane == 0 && p.count > 0));
+    // FIXED 2 over the one-bar loop: a multiply. A reversed lane's play order counts back from its end,
+    // so every bin it shows moves when it grows.
+    let mark = seen.len();
+    for command in [Command::SetFixedLength(true), Command::SetFixedBars(2.0), Command::RecDub(1)] {
+        h.send(command);
+    }
+    feed_until(&mut feed, &mut seen, "the loop grows", |f| f.events.iter().any(|e| matches!(e.0, Event::Transport { master: m, .. } if m == 2 * master)));
+    h.play(RATE / 2); // the extension is done long before
+    feed_until(&mut feed, &mut seen, "a frame after the extension", |_| true);
+    feed_until(&mut feed, &mut seen, "and another", |_| true);
+    let bins = (2 * master as usize).div_ceil(PEAK_FRAMES);
+    let mut drawn: Vec<Option<(f32, f32)>> = vec![None; bins];
+    for update in seen[mark..].iter().flat_map(|f| &f.peaks).filter(|p| p.lane == 0 && p.count as usize == bins) {
+        for (k, (&lo, &hi)) in update.min.iter().zip(&update.max).enumerate() {
+            drawn[update.start as usize + k] = Some((lo, hi));
+        }
+    }
+    let (_, overview) = h.host.drain_feed(&mut Vec::new());
+    let overview = overview.expect("an engine runs");
+    let view = overview.lane(0);
+    assert!(view.reversed && view.frames == 2 * master);
+    for (play, bin) in drawn.iter().enumerate() {
+        let (lo, hi) = overview.bin(view.buf, bins - 1 - play);
+        let (min, max) = bin.unwrap_or_else(|| panic!("play bin {play} of {bins} was never sent after the multiply"));
+        assert!((min - lo).abs() < 1e-3 && (max - hi).abs() < 1e-3, "play bin {play}: sent ({min}, {max}), holds ({lo}, {hi})");
+    }
+}
+
+#[test]
 fn a_wasapi_endpoint_with_no_input_plays_output_only() {
     let h = Harness::new();
     h.fake.wasapi.lock().unwrap()[0].1.in_channels = 0;

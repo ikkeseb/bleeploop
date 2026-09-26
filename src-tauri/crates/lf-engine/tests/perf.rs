@@ -9,6 +9,8 @@
 //!   real time (with the Stage 3 sound wired in and idle: bypassed FX, silent instruments).
 //! - Stage 3: that engine with every effect on and the drum kit playing, plus the other synths
 //!   beside it (below), under 50 %.
+//! - A multiply burst (F14): the eight extension jobs of the worst multiply add under 10 % to the blocks
+//!   they run in.
 //!
 //! lf-engine builds at opt-level 3 in the dev profile too, but the Stage 3 load mixes in this file,
 //! which the dev profile leaves unoptimized: take the numbers from `--release`. The one test that is
@@ -75,6 +77,60 @@ fn five_lanes_one_overdubbing_and_the_click_cost_under_a_tenth_of_the_block() {
         worst / period * 100.0
     );
     assert!(mean < 0.10, "mean block time {:.2} % of the block", mean * 100.0);
+}
+
+/// The multiply burst (F14): four one-bar loops, each with an undo target, multiplied to 30 bars (the
+/// 60 s buffer at 120 BPM) by a FIXED take on lane 4, the click on. From the commit, eight extension
+/// jobs run one after another for about 0.45 s; the blocks they run in may cost at most a tenth of the
+/// block more than the same engine's blocks after them, on average. The worst block prints without a bar.
+#[test]
+#[ignore]
+fn a_multiply_burst_costs_under_a_tenth_of_the_block_more() {
+    let mut rig = Rig::with(Opts { loop_seconds: 60.0, block: BLOCK, ..Default::default() });
+    rig.set(Command::SetMetronome(true));
+    rig.set_input(code);
+    let master = rig.record_first_take(0, 1, 2400);
+    for _ in 1..4 {
+        rig.press(Command::Copy(0));
+        rig.idle();
+    }
+    for lane in 0..4 {
+        rig.press(Command::RecDub(lane));
+        rig.advance(master);
+        rig.press(Command::RecDub(lane));
+        rig.idle();
+    }
+    assert!((0..4).all(|i| rig.lane(i).can_undo && rig.state(i) == LaneState::Playing));
+    rig.set(Command::SetFixedLength(true));
+    rig.set(Command::SetFixedBars(30.0));
+    rig.press(Command::RecDub(4));
+    let end = rig.end_frame();
+    assert_eq!(end - rig.start_frame(), 30 * master, "a 30-bar window over the one-bar loop");
+    rig.advance_to(end - BLOCK as Frame);
+    assert!(!rig.engine.looper().busy());
+
+    let input: Vec<f32> = (0..BLOCK).map(|k| code(k as Frame) - 0.25).collect();
+    let (mut left, mut right) = (vec![0.0f32; BLOCK], vec![0.0f32; BLOCK]);
+    let mut frame = rig.frame;
+    let mut block = |engine: &mut lf_engine::Engine| {
+        let ctx = ProcessContext { frame, xrun: false, align_frames: 0, input_frames: 0 };
+        let t = Instant::now();
+        engine.process(&ctx, &input, &mut left, &mut right);
+        frame += BLOCK as Frame;
+        t.elapsed().as_secs_f64()
+    };
+    let mut burst = vec![block(&mut rig.engine)]; // the take's last block: the commit is due in the next
+    while burst.len() < 2 || rig.engine.looper().busy() {
+        burst.push(block(&mut rig.engine));
+    }
+    assert_eq!(rig.master(), 30 * master, "the multiply committed");
+    let after: Vec<f64> = (0..burst.len()).map(|_| block(&mut rig.engine)).collect();
+    let period = BLOCK as f64 / 48000.0;
+    let pct = |t: &[f64]| t.iter().sum::<f64>() / t.len() as f64 / period * 100.0;
+    let worst = burst.iter().copied().fold(0.0, f64::max) / period * 100.0;
+    let (during, steady) = (pct(&burst), pct(&after));
+    println!("multiply burst, {} blocks of {BLOCK}: mean {during:.1} % (after it {steady:.1} %), worst {worst:.1} % of the block", burst.len());
+    assert!(during - steady < 10.0, "the burst costs {:.1} % of the block more", during - steady);
 }
 
 /// The timed parts of a Stage 3 block, in render order; each includes adding its output into the mix.

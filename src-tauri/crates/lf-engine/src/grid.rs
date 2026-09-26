@@ -1,6 +1,7 @@
 //! OWNS: the pure grid arithmetic, in device frames: bar length, the whole-bar clamps, the commit and
-//! stop plans that turn a raw take into a master loop, the beat grid the click and the beat LED read, and
-//! the later-take tiling map. Ported from `src/audio/quantize.ts` and `src/audio/looper/grid-math.ts`.
+//! stop plans that turn a raw take into a master loop, a later take's bar count (a multiply past the
+//! master), the beat grid the click and the beat LED read, and the later-take tiling map. Ported from
+//! `src/audio/quantize.ts` and `src/audio/looper/grid-math.ts`; the multiply is the engine's own (F14).
 //!
 //! Every time here is an integer device frame; the only fractional quantity is a beat period, which a
 //! [`Grid`] carries as an exact ratio so a beat never drifts off the loop it belongs to.
@@ -135,11 +136,25 @@ pub fn plan_free_stop(elapsed: Frame, fpb: Frame, record_len: Frame) -> Option<F
     (bars >= 1).then(|| clamp_bars(bars, max_whole_bars(record_len, fpb)) * fpb)
 }
 
+/// The bars a later take records over a master of `master_bars` whole bars when `requested` are asked
+/// for (the FIXED count, or the bars an early stop completed). Up to the master: the request, at least
+/// one (a shorter take tiles across the loop). Past it, a multiply (F14): the loop grows to the take in
+/// whole loops, so the request floors to a multiple of the master, at most the largest multiple within
+/// `max_bars` (the lane buffer and the FIXED bound). A request below two loops therefore gives the master.
+pub fn later_take_bars(requested: Frame, master_bars: Frame, max_bars: Frame) -> Frame {
+    let master_bars = master_bars.max(1);
+    if requested <= master_bars {
+        return clamp_bars(requested, master_bars);
+    }
+    (requested / master_bars).min((max_bars / master_bars).max(1)) * master_bars
+}
+
 /// The later-take stop: completed bars since the take's musical start (its window start minus the
-/// alignment), clamped to `[1, master_bars]`.
-pub fn plan_later_stop(press: Frame, window_start: Frame, align: Frame, fpb: Frame, master_bars: Frame) -> Frame {
+/// alignment), as [`later_take_bars`] counts them: up to the master as they are (at least one), past it
+/// floored to whole loops (a multiply window stopped early).
+pub fn plan_later_stop(press: Frame, window_start: Frame, align: Frame, fpb: Frame, master_bars: Frame, max_bars: Frame) -> Frame {
     let elapsed = press - (window_start - align);
-    clamp_bars(bars_at(elapsed, fpb), master_bars) * fpb
+    later_take_bars(bars_at(elapsed, fpb), master_bars, max_bars) * fpb
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -181,6 +196,7 @@ pub fn loop_pos(frame: Frame, anchor: Frame, len: Frame) -> Frame {
 /// silence where the take never reached (`p % period >= raw`). One map for both commits (grid-math
 /// `commitLaterTake`): a first take pads its short tail (`period` = master); a later take floors to whole
 /// bars and tiles them across the master, blanking whatever a window cut short of its first bar left.
+/// A multiply extends every other loop with it ([`TakeFill::extend`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TakeFill {
     pub raw: Frame,
@@ -200,6 +216,12 @@ impl TakeFill {
         }
         let bars = clamp_bars(raw / fpb, max_whole_bars(master, fpb));
         TakeFill { raw: raw.min(master), period: bars * fpb, master }
+    }
+
+    /// A committed loop of `old` frames tiled out to a new master of `master` frames, a whole multiple of
+    /// it (a multiply): the same loop, repeating. Being whole loops, it reads the same backwards.
+    pub fn extend(old: Frame, master: Frame) -> Self {
+        TakeFill { raw: old, period: old, master }
     }
 
     /// The take frame loop position `p` plays, or `None` for silence.
@@ -337,25 +359,53 @@ mod tests {
     #[test]
     fn stop_plans_use_a_quarter_beat_grace() {
         let fpb = frames_per_bar(120.0, 48000);
-        let plan = |bars: f64| plan_later_stop((bars * fpb as f64) as Frame + 480_000, 480_000, 0, fpb, 8) / fpb;
+        let plan = |bars: f64| plan_later_stop((bars * fpb as f64) as Frame + 480_000, 480_000, 0, fpb, 8, 30) / fpb;
         assert_eq!(plan(0.4), 1);
         assert_eq!(plan(1.5), 1);
         assert_eq!(plan(2.0 - 1.0 / 32.0), 2);
         assert_eq!(plan(2.0 + 1e-6), 2);
         assert_eq!(plan(8.0), 8);
         assert_eq!(plan(11.0), 8);
+        // Past the master (a multiply window) the completed bars floor to whole loops, grace included.
+        assert_eq!(plan(16.0 - 1.0 / 32.0), 16);
+        assert_eq!(plan(23.9), 16);
         // The alignment shifts the window, not the musical time: a press just outside the grace stays out.
         let outside = 2 * fpb - fpb / 16 - 240;
-        assert_eq!(plan_later_stop(480_000 + outside, 480_000, 0, fpb, 8), fpb);
-        assert_eq!(plan_later_stop(480_000 + outside, 480_000 + 960, 960, fpb, 8), fpb);
+        assert_eq!(plan_later_stop(480_000 + outside, 480_000, 0, fpb, 8, 30), fpb);
+        assert_eq!(plan_later_stop(480_000 + outside, 480_000 + 960, 960, fpb, 8, 30), fpb);
         // Musical time starts `align` before the window: a press on the grace edge keeps the bar.
         let edge = 480_000 + 2 * fpb - fpb / 16;
-        assert_eq!(plan_later_stop(edge, 480_000 + 960, 960, fpb, 8), 2 * fpb);
-        assert_eq!(plan_later_stop(edge - 1, 480_000 + 960, 960, fpb, 8), fpb);
+        assert_eq!(plan_later_stop(edge, 480_000 + 960, 960, fpb, 8, 30), 2 * fpb);
+        assert_eq!(plan_later_stop(edge - 1, 480_000 + 960, 960, fpb, 8, 30), fpb);
         // Free stop: no completed bar yet is None; the grace edge is inclusive.
         assert_eq!(plan_free_stop(fpb / 2, fpb, 60 * 48000), None);
         assert_eq!(plan_free_stop(fpb - fpb / 16, fpb, 60 * 48000), Some(fpb));
         assert_eq!(plan_free_stop(fpb - fpb / 16 - 1, fpb, 60 * 48000), None);
+    }
+
+    #[test]
+    fn a_later_take_is_its_bars_up_to_the_master_and_whole_loops_past_it() {
+        // Up to the master (and a request below 1): as today, at least one bar.
+        for (req, m, want) in [(0, 2, 1), (1, 2, 1), (2, 2, 2), (3, 4, 3), (4, 4, 4), (32, 75, 32)] {
+            assert_eq!(later_take_bars(req, m, 30), want, "req={req} m={m}");
+        }
+        // Past it: floored to whole loops, so below two loops is the master.
+        for (req, m, want) in [(3, 2, 2), (4, 2, 4), (5, 2, 4), (8, 2, 8), (4, 1, 4), (7, 3, 6), (8, 3, 6), (9, 3, 9), (5, 4, 4)] {
+            assert_eq!(later_take_bars(req, m, 30), want, "req={req} m={m}");
+        }
+        // Capped at the largest multiple within the bound, never below the master.
+        for (req, m, max, want) in [(32, 1, 30, 30), (32, 2, 30, 30), (32, 3, 30, 30), (32, 4, 30, 28), (32, 7, 30, 28), (32, 3, 10, 9), (32, 4, 10, 8), (32, 6, 10, 6), (12, 6, 6, 6)] {
+            assert_eq!(later_take_bars(req, m, max), want, "req={req} m={m} max={max}");
+        }
+        // Always a whole number of loops once past the master, and never past the bound.
+        for m in 1..=12 {
+            for max in m..=32 {
+                for req in m + 1..=32 {
+                    let bars = later_take_bars(req, m, max);
+                    assert!(bars % m == 0 && bars >= m && bars <= req.max(m) && bars <= max, "req={req} m={m} max={max} -> {bars}");
+                }
+            }
+        }
     }
 
     #[test]
@@ -433,5 +483,14 @@ mod tests {
         // A master that is no whole number of bars (a foreign import) is padded, never tiled.
         assert_eq!(TakeFill::later(5, 4, 10), TakeFill::first(5, 10));
         assert_eq!(TakeFill::later(5, 0, 10), TakeFill::first(5, 10));
+        // A multiply extends a committed loop to whole copies of it; played backwards it is the loop
+        // backwards, repeating.
+        let mut buf: Vec<f32> = (1..=4).map(|v| v as f32).chain([7.0; 9]).collect();
+        let f = TakeFill::extend(4, 12);
+        assert_eq!(f.untouched(), 4);
+        fill(&mut buf, f);
+        assert_eq!(buf, [1., 2., 3., 4., 1., 2., 3., 4., 1., 2., 3., 4., 7.]);
+        let back: Vec<f32> = buf[..12].iter().rev().copied().collect();
+        assert!((0..12).all(|k| back[k] == [4., 3., 2., 1.][k % 4]));
     }
 }

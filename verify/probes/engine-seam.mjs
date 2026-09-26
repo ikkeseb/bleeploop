@@ -8,12 +8,14 @@
  *   engine has; no AudioContext is ever built (Tone's import-time default context included:
  *   `src/main.tsx` loads the app with the constructors hidden);
  * - gesture → command: BPM +, CLICK, the lane core (its pointerdown selects), Space (the engine's
- *   hands-free `Action`), a lane volume, MIC (an empty slot goes live), a PC key (NoteOn, NoteOff);
+ *   hands-free `Action`), a lane volume, MIC (an empty slot goes live), a PC key (NoteOn, NoteOff), the
+ *   FIXED stepper over a committed loop (a bar at a time up to the loop, whole loops past it: F14);
  * - frame → DOM: a count-in (ARMED, the numeral, the beat LED, the BPM lock), a beat LED shown when the
  *   beat is heard (its frame and the output latency against the clock anchor), a live take, a committed
  *   loop (PLAYING, the loop readout, a moving ring dial from the clock anchor), the record meter, a
  *   refusal on its lane, the selection, a COPY carrying the lane's volume, a lane's mix kept when it only
- *   goes EMPTY and reset by `Cleared`, and a reload's reset frame whose remembered settings are adopted.
+ *   goes EMPTY and reset by `Cleared`, a multiply take's record head sweeping its window (the canvas),
+ *   and a reload's reset frame whose remembered settings are adopted.
  *
  * Cannot see the native engine, the Rust mirror of the wire, Tauri IPC or any timing: the fake answers
  * no command by itself, so every state the DOM shows here was scripted.
@@ -221,6 +223,58 @@ await probe(async ({ open }) => {
   assert.equal(await page.getByRole('slider', { name: 'Master volume' }).inputValue(), '60', "the engine's master volume is adopted");
   assert.ok(!adopted.some((c) => c.SetVolume || c.SetMasterVolume !== undefined || c.SetMetronome !== undefined), 'adopted settings are not pushed back');
   assert.ok(adopted.some((c) => c.SetClickVolume === 0.7), 'the persisted click volume the engine lacks is sent');
+
+  // ── FIXED past the loop (F14 multiply): a bar at a time up to the loop, whole loops above it ─────
+  await emit({ events: [laneEvent(0, lane('Playing', { length: 2 * BAR, canReverse: true })), transport(2 * BAR, true, 120)] });
+  await clearSent();
+  const fixedToggle = page.getByRole('button', { name: 'Fixed take length', exact: true });
+  await fixedToggle.click();
+  assert.deepEqual(await sentAtLeast(1), [{ SetFixedLength: true }]);
+  assert.equal((await fixedToggle.textContent()).trim(), 'FIXED 4', 'FIXED 4 over a 2-bar loop: two loops');
+  assert.match(await fixedToggle.getAttribute('title'), /Longer: the loop grows to it in whole loops/);
+  const more = page.getByRole('button', { name: 'More bars', exact: true });
+  const fewer = page.getByRole('button', { name: 'Fewer bars', exact: true });
+  await clearSent();
+  for (const step of [more, fewer, fewer, fewer]) await step.click();
+  assert.deepEqual(await sentAtLeast(4), [{ SetFixedBars: 6 }, { SetFixedBars: 4 }, { SetFixedBars: 2 }, { SetFixedBars: 1 }]);
+  await emit({ events: [laneEvent(0, lane('Playing', { length: 3 * BAR, canReverse: true })), transport(3 * BAR, true, 120)] });
+  await clearSent();
+  for (const step of [more, more, more, fewer]) await step.click();
+  assert.deepEqual(await sentAtLeast(4), [{ SetFixedBars: 2 }, { SetFixedBars: 3 }, { SetFixedBars: 6 }, { SetFixedBars: 3 }], 'a 3-bar loop steps 1, 2, 3, 6');
+  await clearSent();
+  await more.click();
+  await emit({ events: [laneEvent(0, committed), transport(BAR, true, 120)] });
+  assert.equal((await fixedToggle.textContent()).trim(), 'FIXED 6', 'over a 1-bar loop every bar is a whole loop');
+  await fixedToggle.click();
+  assert.deepEqual(await sentAtLeast(2), [{ SetFixedBars: 6 }, { SetFixedLength: false }]);
+
+  // A multiply take's record head sweeps its window, not the old loop: FIXED 6 over the 1-bar loop,
+  // three bars into the take, the head (the rec-red column on the canvas's top row) is halfway across.
+  await clearSent();
+  await fixedToggle.click();
+  assert.deepEqual(await sentAtLeast(1), [{ SetFixedLength: true }]);
+  await emit({ events: [laneEvent(1, lane('Recording'), 0)], anchor: anchorAt(3 * BAR) });
+  const recHeadAt = () =>
+    lanes.nth(1).locator('canvas').evaluate((c) => {
+      const row = c.getContext('2d').getImageData(0, 0, c.width, 1).data;
+      const hits = [];
+      for (let x = 0; x < c.width; x++) {
+        const [r, g, b, a] = row.slice(4 * x, 4 * x + 4);
+        if (a > 200 && r > 200 && g < 120 && b < 140) hits.push(x);
+      }
+      return hits.length ? hits[hits.length >> 1] / c.width : -1;
+    });
+  let headAt = -1;
+  for (let tries = 0; tries < 40 && headAt < 0; tries++) {
+    await page.waitForTimeout(50);
+    headAt = await recHeadAt();
+  }
+  console.log('multiply take record head at', headAt.toFixed(3), 'of the lane');
+  assert.ok(Math.abs(headAt - 0.5) < 0.05, `three bars into a 6-bar multiply the head is halfway (${headAt})`);
+  await emit({ events: [laneEvent(1, lane('Empty'))] });
+  await clearSent();
+  await fixedToggle.click();
+  assert.deepEqual(await sentAtLeast(1), [{ SetFixedLength: false }]);
 
   // ── A beat is shown when it is heard: 0.3 s of frames ahead of the render clock, plus 0.1 s of output
   // latency, keeps the beat LED waiting ~0.4 s ───────────────────────────────────────────────────────

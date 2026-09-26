@@ -1,8 +1,8 @@
 //! OWNS: the looper: the five lanes and their buffers, the single recorder (a take, a RETAKE roll or an
 //! overdub), every EMPTY → RECORDING → PLAYING ⇄ OVERDUBBING (+ STOPPED) transition, the master loop
-//! (its length and grid anchor), the action gates with their refusals, and the block jobs that move
-//! loop-sized data. Ported from `src/audio/looper/{machine,state,capture,playback,mixer}.ts` and
-//! `src/ui/looper/gates.ts`.
+//! (its length and grid anchor, and the multiply that grows it), the action gates with their refusals,
+//! and the block jobs that move loop-sized data. Ported from
+//! `src/audio/looper/{machine,state,capture,playback,mixer}.ts` and `src/ui/looper/gates.ts`.
 //!
 //! One clock: input frame `x` is captured at device frame `x`, and a lane plays loop position
 //! `(f - anchor) mod master` at device frame `f`. A take starts `align` frames after its downbeat (the
@@ -14,6 +14,11 @@
 //! recorder borrows (a RETAKE's kept pass, an overdub's previous undo target). Undo swaps a lane's live
 //! and spare; a kept retake pass swaps in from the free buffer; reverse is an index-mapping flag. What
 //! must be copied is a block job (see [`Job`]); nothing does loop-sized work in one callback.
+//!
+//! Every committed lane is one master long. A later take longer than the master (FIXED past the loop:
+//! `grid::later_take_bars`) is a multiply (F14): it commits as the new master, a whole number of old
+//! loops, and every other loop (and its undo target) is tiled out to it by block jobs, so every lane
+//! still has the one length the session, export, undo and the overview know (see `multiply`).
 
 use std::sync::Arc;
 
@@ -23,8 +28,8 @@ use crate::clock::Clock;
 use crate::effects::LaneFx;
 use crate::engine::Feed;
 use crate::grid::{
-    clamp_bars, commit_anchor, frames_per_bar, loop_pos, max_whole_bars, next_boundary, plan_commit, plan_free_stop,
-    plan_later_stop, plan_retake_stop, Frame, Grid, RetakeStop, TakeFill, COUNT_IN_BEATS,
+    clamp_bars, commit_anchor, frames_per_bar, later_take_bars, loop_pos, max_whole_bars, next_boundary, plan_commit,
+    plan_free_stop, plan_later_stop, plan_retake_stop, Frame, Grid, RetakeStop, TakeFill, COUNT_IN_BEATS,
 };
 use crate::overview::{LaneView, Overview};
 use crate::session::{Load, Pin, SessionError, Snapshot, SnapshotTrack};
@@ -35,7 +40,10 @@ pub const MAX_FIXED_BARS: Frame = 32;
 pub const JOB_RATE: Frame = 1024;
 /// The hands-free CLEAR confirm window (`CONFIRM_WINDOW_MS`).
 const CONFIRM_WINDOW_MS: Frame = 2500;
-const MAX_JOBS: usize = 4;
+/// Block jobs in flight at once; `push_job` panics on a full table. A multiply starts the most at one
+/// frame: up to two per other lane (its loop and its undo target, 8), beside the COPYs that may still
+/// run into those lanes (3); 16 leaves room for the jobs pressed while they run.
+const MAX_JOBS: usize = 16;
 /// Lane volume smoothing: the Web Audio setTargetAtTime time constant.
 const GAIN_TAU_SECONDS: f64 = 0.01;
 
@@ -67,6 +75,9 @@ struct Lane {
     audible: Audible,
     switch_at: Option<Frame>,
     stop_at: Option<Frame>,
+    /// A multiply extends this lane from a loop of this many frames (0: none): until its jobs are done,
+    /// playback reads a position at or past it through the old loop (`render`).
+    extending: Frame,
     volume: f32,
     muted: bool,
     gain: f64,
@@ -88,6 +99,7 @@ impl Lane {
             audible: Audible { buf: live, reversed: false },
             switch_at: None,
             stop_at: None,
+            extending: 0,
             volume: 1.0,
             muted: false,
             gain: 1.0,
@@ -181,6 +193,8 @@ struct Visit {
 }
 
 impl Visit {
+    /// Step `s`'s position (the jobs move whole [`Visit::runs`]; the tests check them against this).
+    #[cfg(test)]
     fn at(&self, s: Frame) -> usize {
         ((self.lo + (self.off + s) % self.span) % self.modulus) as usize
     }
@@ -454,13 +468,29 @@ impl Looper {
         self.auto_sensitivity = s.round().clamp(autorec::MIN_SENSITIVITY, autorec::MAX_SENSITIVITY);
     }
 
-    /// The largest FIXED bar count the next take can use: the master's bars, else 32.
+    /// The largest FIXED bar count the next take can use: 32 before a master; over one, the longest
+    /// later take (a multiply of the master's bars as long as the lane buffer holds, at least the master).
     pub fn next_take_max_bars(&self, bpm: u32) -> Frame {
         if self.master > 0 {
-            MAX_FIXED_BARS.min(max_whole_bars(self.master, frames_per_bar(bpm as f64, self.sample_rate)))
+            self.later_bars(MAX_FIXED_BARS, frames_per_bar(bpm as f64, self.sample_rate))
         } else {
             MAX_FIXED_BARS
         }
+    }
+
+    /// The bars a later take over the master records when `requested` are asked for
+    /// (`grid::later_take_bars`, bounded by the lane buffer and the FIXED bound). A master of no whole
+    /// number of bars (a foreign import) never multiplies: at most its whole bars.
+    fn later_bars(&self, requested: Frame, fpb: Frame) -> Frame {
+        if self.master % fpb != 0 {
+            return clamp_bars(requested, max_whole_bars(self.master, fpb));
+        }
+        later_take_bars(requested, self.master / fpb, self.max_take_bars(fpb))
+    }
+
+    /// The most bars a take may record: what the lane buffer holds, within the FIXED bound.
+    fn max_take_bars(&self, fpb: Frame) -> Frame {
+        MAX_FIXED_BARS.min(max_whole_bars(self.capacity, fpb))
     }
 
     pub fn set_volume(&mut self, i: usize, v: f32) {
@@ -823,13 +853,15 @@ impl Looper {
         self.configure_end(cx);
     }
 
-    /// Bound the take at the master, the FIXED bar count or the buffer; RETAKE rolls a known length.
+    /// Bound the take at the master, the FIXED bar count or the buffer; RETAKE rolls a known length. A
+    /// later FIXED take past the master is a multiply window, whole loops long.
     fn configure_end(&mut self, cx: &Cx) {
         let master = self.master;
         let fixed = self.fixed_length && (master == 0 || !self.retake);
         let frames = if fixed {
             let fpb = self.fpb(cx);
-            clamp_bars(self.fixed_bars, max_whole_bars(if master > 0 { master } else { self.capacity }, fpb)) * fpb
+            let bars = if master > 0 { self.later_bars(self.fixed_bars, fpb) } else { clamp_bars(self.fixed_bars, max_whole_bars(self.capacity, fpb)) };
+            bars * fpb
         } else if master > 0 {
             master
         } else {
@@ -876,7 +908,8 @@ impl Looper {
         let start = rec.start.unwrap();
         if t.state == LaneState::Recording && bar_plan {
             // Whole bars from musical time, with the quarter-beat grace. A first take shorter than a bar
-            // keeps its audio through the press and pads to one bar at the commit.
+            // keeps its audio through the press and pads to one bar at the commit. A multiply window
+            // stopped past the master keeps its completed whole loops.
             let fpb = self.fpb(cx);
             if self.master == 0 {
                 let elapsed = rec.downbeat.map_or(0, |d| cx.now - d);
@@ -884,7 +917,7 @@ impl Looper {
                     end = start + target;
                 }
             } else if self.master % fpb == 0 {
-                end = start + plan_later_stop(cx.now, start, rec.align, fpb, self.master / fpb);
+                end = start + plan_later_stop(cx.now, start, rec.align, fpb, self.master / fpb, self.max_take_bars(fpb));
             }
         }
         rec.end = Some(rec.end.map_or(end, |e| e.min(end)));
@@ -917,6 +950,7 @@ impl Looper {
 
     fn commit_take(&mut self, cx: &mut Cx, i: usize, rec: &Recorder) {
         let raw = self.lanes[i].written.min(rec.end.unwrap() - rec.start.unwrap());
+        let fpb = self.fpb(cx);
         let fill = if self.master == 0 {
             let plan = plan_commit(raw, cx.clock.bpm() as f64, self.sample_rate, self.capacity);
             self.master = plan.master;
@@ -925,7 +959,15 @@ impl Looper {
             cx.clock.start_master(self.anchor, plan.master, plan.bars, cx.now);
             TakeFill::first(raw, plan.master)
         } else {
-            TakeFill::later(raw, self.fpb(cx), self.master)
+            // Completed bars past the master (a window's end, an early stop's plan, a punch-out's floor)
+            // are a multiply, whole loops long, which the take fills (padded like a first take).
+            let bars = self.later_bars(raw / fpb, fpb);
+            if bars * fpb > self.master {
+                self.multiply(cx, i, rec, bars, fpb);
+                TakeFill::first(raw, self.master)
+            } else {
+                TakeFill::later(raw, fpb, self.master)
+            }
         };
         let master = self.master;
         let reader = loop_pos(cx.now, self.anchor, master);
@@ -941,6 +983,57 @@ impl Looper {
             let off = if reader >= lo { reader - lo } else { 0 };
             let buf = t.live;
             self.push_job(cx.now, i, JobKind::Fill { buf, fill }, Visit { lo, span: master - lo, off, modulus: master });
+        }
+    }
+
+    /// F14 multiply: the later take on lane `i` commits as a new master of `bars` bars, a whole number of
+    /// old loops. The grid re-anchors on the take's boundary, which lies a whole number of old loops after
+    /// the old anchor, so every old lane keeps its phase and every beat its frame and accent (the beat
+    /// period is the same: `4 * bars` beats over `bars` bars). Every other committed lane (PLAYING or
+    /// STOPPED: none overdubs, there is one recorder) grows to the new length: its live buffer, and its
+    /// undo target when it has one, tile the old loop over `[old, new)` in block jobs. Whole loops tile
+    /// the same both ways, so a reversed lane stays right. Until a lane's jobs are done its playback reads
+    /// past the old loop through it (`extending`); nothing else reads a lane mid-extension: every command
+    /// that reads or writes a lane's buffers (an overdub, UNDO, REVERSE, COPY from it, CLEAR, a resume,
+    /// PLAY ALL) waits for its jobs (`wait_for`), a snapshot begins only once no job runs, and the
+    /// overview's bins follow the jobs as they write. The extensions run one after another, lane by lane
+    /// (up to eight loop-sized jobs at once would cost most of a block for ~60 ms at 30 bars): a lane's
+    /// commands wait for its own jobs only, at most ~0.45 s for the last of four lanes with undo targets
+    /// multiplied to 30 bars. A lane with a job already in flight (a COPY still writing into it) starts its
+    /// extension where that job is done. A job whose start lies ahead moves nothing until then
+    /// (`run_job`), and completes on its own done frame (`next_event`).
+    fn multiply(&mut self, cx: &mut Cx, i: usize, rec: &Recorder, bars: Frame, fpb: Frame) {
+        let old = self.master;
+        let new = bars * fpb;
+        // The take's frame 0 is its boundary: a whole number of old loops from the anchor (the nearest
+        // one, should a RETAKE handoff's seam carry another alignment).
+        let at = rec.start.unwrap() - rec.align;
+        let boundary = self.anchor + (at - self.anchor + old / 2).div_euclid(old) * old;
+        self.master = new;
+        self.anchor = boundary;
+        cx.clock.start_master(boundary, new, bars, cx.now);
+        let fill = TakeFill::extend(old, new);
+        let mut next = cx.now;
+        for k in 0..TRACK_COUNT {
+            if k == i || !self.lanes[k].committed() {
+                continue;
+            }
+            let mut start = self.jobs.iter().flatten().filter(|j| j.lane == k).map(Job::done_frame).fold(next, Frame::max);
+            let t = &mut self.lanes[k];
+            t.length = new;
+            t.written = new;
+            // A lane still extending from an earlier multiply keeps reading through its first loop, which
+            // every later length is a whole multiple of.
+            if t.extending == 0 {
+                t.extending = old;
+            }
+            let bufs = [Some(t.live), t.undo_valid.then_some(t.spare)];
+            for buf in bufs.into_iter().flatten() {
+                // In buffer order: playback reads through the old loop until the whole extension is done.
+                self.push_job(start, k, JobKind::Fill { buf, fill }, Visit { lo: old, span: new - old, off: 0, modulus: new });
+                start += job_frames(new - old);
+            }
+            next = start;
         }
     }
 
@@ -1245,9 +1338,10 @@ impl Looper {
         }
     }
 
-    fn push_job(&mut self, now: Frame, lane: usize, kind: JobKind, visit: Visit) {
+    /// A job on `lane` from frame `start` (now, or where a job it depends on is done).
+    fn push_job(&mut self, start: Frame, lane: usize, kind: JobKind, visit: Visit) {
         let slot = self.jobs.iter_mut().find(|j| j.is_none()).expect("block job slots exhausted");
-        *slot = Some(Job { kind, lane, visit, start: now, progress: 0 });
+        *slot = Some(Job { kind, lane, visit, start, progress: 0 });
     }
 
     fn complete_job(&mut self, cx: &mut Cx, job: Job) {
@@ -1264,6 +1358,10 @@ impl Looper {
                 }
             }
             JobKind::Fill { .. } | JobKind::Copy { .. } => {}
+        }
+        // A multiply's extension is done once the lane has no job left: playback reads it whole.
+        if self.jobs.iter().flatten().all(|j| j.lane != job.lane) {
+            self.lanes[job.lane].extending = 0;
         }
     }
 
@@ -1286,21 +1384,17 @@ impl Looper {
         job.progress = to;
         self.job_step_max = self.job_step_max.max(to - from);
         let visit = job.visit;
+        // Whole runs at once, not a modulo per position (per position, a 30-bar multiply's jobs cost more
+        // than the block: `tests/perf.rs`).
         let written = match job.kind {
             JobKind::Fill { buf, fill } => {
                 let data = &mut self.bufs[buf];
-                for s in from..to {
-                    let p = visit.at(s);
-                    data[p] = fill.source(p as Frame).map_or(0.0, |q| data[q as usize]);
-                }
+                visit.runs(from, to, |a, b| fill_run(data, fill, a, b));
                 buf
             }
             JobKind::Copy { src, dst } | JobKind::Restore { src, dst, .. } | JobKind::LaneCopy { src, dst, .. } => {
                 let (s_buf, d_buf) = pair(&mut self.bufs, src, dst);
-                for s in from..to {
-                    let p = visit.at(s);
-                    d_buf[p] = s_buf[p];
-                }
+                visit.runs(from, to, |a, b| d_buf[a..b].copy_from_slice(&s_buf[a..b]));
                 dst
             }
         };
@@ -1419,8 +1513,13 @@ impl Looper {
             }
             let data = &self.bufs[t.audible.buf];
             let mut pos = loop_pos(f0, self.anchor, master);
+            // Mid-multiply, what lies past the old loop is read through it (the same samples, once tiled).
+            let extending = if t.extending > 0 { t.extending } else { Frame::MAX };
             for sample in out.iter_mut() {
-                let idx = if t.audible.reversed { master - 1 - pos } else { pos };
+                let mut idx = if t.audible.reversed { master - 1 - pos } else { pos };
+                if idx >= extending {
+                    idx %= extending;
+                }
                 *sample = (t.gain * data[idx as usize] as f64) as f32;
                 t.gain = target + (t.gain - target) * self.gain_coef;
                 pos += 1;
@@ -1567,6 +1666,26 @@ fn pair(bufs: &mut [Vec<f32>], src: usize, dst: usize) -> (&[f32], &mut [f32]) {
     }
 }
 
+/// Positions `[a, b)` of `data` rewritten as `fill` maps them ([`TakeFill::source`]), a piece of the
+/// source at a time. Every source position lies below [`TakeFill::untouched`], which the fill never
+/// writes, and a piece's source ends at or before the period, at or before the piece (or is the piece
+/// itself, below the period), so the copies never overlap what they read.
+fn fill_run(data: &mut [f32], fill: TakeFill, a: usize, b: usize) {
+    let period = fill.period as usize;
+    let kept = fill.untouched() as usize;
+    let mut p = a;
+    while p < b {
+        let q = p % period;
+        let n = (b - p).min(period - q);
+        let copied = kept.saturating_sub(q).min(n);
+        if copied > 0 && q != p {
+            data.copy_within(q..q + copied, p);
+        }
+        data[p + copied..p + n].fill(0.0);
+        p += n;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1587,6 +1706,29 @@ mod tests {
                 want.sort_unstable();
                 got.sort_unstable();
                 assert_eq!(got, want, "{visit:?} {from}..{to}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_fill_run_writes_what_the_fill_maps_position_by_position() {
+        let mut seed = 1u32;
+        let base: Vec<f32> = (0..96)
+            .map(|_| {
+                seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                (seed >> 8) as f32 / (1u32 << 24) as f32 - 0.5
+            })
+            .collect();
+        for fill in [TakeFill::first(40, 96), TakeFill::later(70, 16, 96), TakeFill::later(10, 16, 96), TakeFill::extend(24, 96)] {
+            let lo = fill.untouched();
+            for (from, to) in [(lo, 96), (lo, lo + 1), (lo + 5, 90), (lo + 17, 96)] {
+                let mut want = base.clone();
+                for p in from..to {
+                    want[p as usize] = fill.source(p).map_or(0.0, |q| base[q as usize]);
+                }
+                let mut got = base.clone();
+                fill_run(&mut got, fill, from as usize, to as usize);
+                assert_eq!(got, want, "{fill:?} {from}..{to}");
             }
         }
     }

@@ -1,6 +1,7 @@
 import { For, Show, createEffect, createMemo, createSignal, onCleanup } from 'solid-js';
 import { notifyError } from '../../notify';
 import { clock, looper, master, sampleRate } from '../state/audio';
+import { laterTakeBars } from '../state/engine-store';
 import { anyTrackIn, createTwoStepConfirm, masterBars } from '../looper/shared';
 import { meterFrac, registerInputMeter, registerPhaseDial, unregisterInputMeter, unregisterPhaseDial } from '../looper/waveform';
 import { autoRecordThreshold } from '../../audio/looper/auto-record';
@@ -89,21 +90,36 @@ export function Transport() {
   const anyLive = createMemo(() => anyTrackIn('PLAYING', 'OVERDUBBING', 'RECORDING'));
   const anyCapturing = createMemo(() => anyTrackIn('RECORDING', 'OVERDUBBING'));
 
-  // ----- FIXED length, shown clamped to what the next take can actually be -----
-  // `nextTakeMaxBars()` is the master's bar count once a master exists, else 32. The label and the
-  // stepper show the EFFECTIVE value so the UI never promises more bars than the master has; the
-  // signal itself is left alone, so widening the master restores the user's choice.
+  // ----- FIXED length, shown as what the next take will actually record -----
+  // Up to the loop's bar count a later take is that many bars and repeats across the loop; past it the
+  // loop grows to it in whole loops (engine mode's multiply), so the stepper moves a bar at a time up to
+  // the loop and a whole loop at a time above it. `nextTakeMaxBars()` bounds it: 32 before a loop, then
+  // the longest take the looper records (the web looper: the loop itself). The label and the stepper
+  // show the EFFECTIVE value so the UI never promises a take the looper will not record; the signal
+  // itself is left alone, so a longer loop restores the user's choice.
   const maxTakeBars = createMemo(() => Math.max(1, Math.floor(looper.nextTakeMaxBars())));
-  const effectiveFixedBars = createMemo(() => Math.min(looper.fixedLengthBars(), maxTakeBars()));
+  const takeLoopBars = () => (hasMaster() ? loopBars() : 0);
+  const canMultiply = () => hasMaster() && maxTakeBars() > loopBars();
+  const effectiveFixedBars = createMemo(() =>
+    Math.min(maxTakeBars(), laterTakeBars(looper.fixedLengthBars(), takeLoopBars(), maxTakeBars())),
+  );
+  const stepFixedBars = (dir: 1 | -1) => {
+    const bars = effectiveFixedBars();
+    const loop = takeLoopBars();
+    const byLoop = loop > 0 && (dir > 0 ? bars >= loop : bars > loop);
+    looper.setFixedLengthBars(Math.max(1, Math.min(maxTakeBars(), bars + dir * (byLoop ? loop : 1))));
+  };
   // RETAKE passes roll at master length whatever FIXED says, so the group is meaningless there.
   const fixedIgnored = createMemo(() => looper.retakeEnabled() && hasMaster());
   const fixedDisabled = createMemo(() => anyCapturing() || fixedIgnored());
   const fixedTitle = () =>
     fixedIgnored()
       ? 'RETAKE takes roll at the full loop length, so FIXED is ignored while it is on'
-      : hasMaster()
-        ? 'Length of the next take, in bars (at most the loop). A shorter take repeats across the loop'
-        : 'Length of the first take, in bars (count-in + auto-stop on the downbeat)';
+      : canMultiply()
+        ? 'Length of the next take in bars. Shorter than the loop: it repeats across the loop. Longer: the loop grows to it in whole loops, and the other tracks repeat'
+        : hasMaster()
+          ? 'Length of the next take, in bars (at most the loop). A shorter take repeats across the loop'
+          : 'Length of the first take, in bars (count-in + auto-stop on the downbeat)';
 
   // Two-step clear-all — same latch as the per-track CLR; the guard keeps it from arming with nothing to clear.
   const clearAll = createTwoStepConfirm(() => looper.clearAll());
@@ -253,10 +269,10 @@ export function Transport() {
         </div>
 
         {/* Fixed-length record — the length of the NEXT take in bars. Before a loop exists that is the
-            first take (count-in, then auto-stop on the downbeat); after it, the next take, capped at the
-            loop's bar count — a shorter take repeats across the loop. Read at arm, so the controls stay
-            usable after the BPM lock and are locked only while a capture is live, or while RETAKE (whose
-            passes are master-length) overrides them. */}
+            first take (count-in, then auto-stop on the downbeat); after it, the next take — a shorter take
+            repeats across the loop, a longer one (engine mode) grows the loop in whole loops. Read at arm,
+            so the controls stay usable after the BPM lock and are locked only while a capture is live, or
+            while RETAKE (whose passes are master-length) overrides them. */}
         <div class="transport__fixed" role="group" aria-label="Take length in bars">
           <button
             class="transport__tgl"
@@ -275,7 +291,7 @@ export function Transport() {
                 class="transport__step"
                 aria-label="Fewer bars"
                 disabled={fixedDisabled()}
-                onClick={() => looper.setFixedLengthBars(effectiveFixedBars() - 1)}
+                onClick={() => stepFixedBars(-1)}
               >
                 −
               </button>
@@ -287,8 +303,8 @@ export function Transport() {
                 class="transport__step"
                 aria-label="More bars"
                 disabled={fixedDisabled() || effectiveFixedBars() >= maxTakeBars()}
-                onClick={() => looper.setFixedLengthBars(effectiveFixedBars() + 1)}
-                title={hasMaster() ? 'At most the loop length' : undefined}
+                onClick={() => stepFixedBars(1)}
+                title={hasMaster() ? (canMultiply() ? 'Past the loop: whole loops' : 'At most the loop length') : undefined}
               >
                 +
               </button>

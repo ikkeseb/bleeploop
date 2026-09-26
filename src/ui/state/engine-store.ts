@@ -22,7 +22,7 @@ import type { SessionSource } from '../../audio/export/session-source';
 import type { StemSnapshot } from '../../audio/export/stem-archive';
 import type { LoadSessionPayload } from '../../audio/looper/session';
 import { AUTO_RECORD_DEFAULT_SENSITIVITY } from '../../audio/looper/auto-record';
-import { averageInterval, framesPerBar, maxWholeBars } from '../../audio/quantize';
+import { averageInterval, clampBars, framesPerBar, maxWholeBars } from '../../audio/quantize';
 import { readStoredNumber, writeStoredNumber } from '../../audio/persist';
 import { readAudioDeviceSettings, writeAudioDeviceSettings } from '../../audio/audio-settings';
 import { usingAsio } from '../../audio/audio-devices';
@@ -120,7 +120,10 @@ const [device, setDeviceSignal] = createSignal<DeviceStatus | null>(null);
 
 // ── The settings this store keeps (the engine does not echo them) ──────────────────────────────────
 
-const MAX_FIXED_BARS = 32; // the web looper's bar selector bound (`state.ts`)
+const MAX_FIXED_BARS = 32; // the web looper's bar selector bound (`state.ts`), the engine's `MAX_FIXED_BARS`
+/** The engine's lane buffer: the host builds every engine with `HostConfig { max_loop_seconds: 60.0 }`
+ * (`src-tauri/src/engine_io/mod.rs`). It bounds a multiply (`nextTakeMaxBars`). */
+const LANE_BUFFER_SECONDS = 60;
 const MASTER_KEY = 'lf.masterVolume'; // shared with `master.ts`: one saved level for both paths
 const CLICK_KEY = 'lf.clickVolume'; // shared with `clock.ts`
 
@@ -162,6 +165,8 @@ const plain = {
   retakePass: Array.from({ length: ENGINE_LANES }, () => 0),
   /** The master boundary a later take started on (its record head counts from here). */
   takeStart: Array.from({ length: ENGINE_LANES }, () => 0),
+  /** The frames the lane's record head sweeps: the loop, or a multiply window past it. */
+  takeFrames: Array.from({ length: ENGINE_LANES }, () => 0),
   master: 0,
   /** The feed's clock anchor, with the master grid's (`grid`); `rate` 0 while no device runs (the
    * playhead holds still). */
@@ -222,12 +227,13 @@ function whenHeard(frame: number, show: () => void): void {
   beatTimers.add(timer);
 }
 
-/** A later take's record head, 0..1 of the master; -1 before a master exists (first take). */
+/** A later take's record head, 0..1 of the master (of a multiply's window, which grows the loop to it);
+ * -1 before a master exists (first take). */
 function recHeadFrac(i: number): number {
   const m = plain.master;
   if (m <= 0) return -1;
   if (plain.waiting[i]) return phaseValue();
-  const f = (heardFrame() - plain.takeStart[i]) / m;
+  const f = (heardFrame() - plain.takeStart[i]) / Math.max(m, plain.takeFrames[i]);
   return f < 0 ? 0 : f > 1 ? 1 : f;
 }
 
@@ -266,6 +272,7 @@ function applyLane(lane: number, frame: number, info: LaneInfo): void {
   const waiting = info.armed || info.autoArmed;
   if (next === 'RECORDING' && !waiting && (prev !== 'RECORDING' || plain.waiting[lane] || info.retakePass !== plain.retakePass[lane])) {
     plain.takeStart[lane] = nearestBoundary(frame);
+    plain.takeFrames[lane] = laterTakeFrames();
   }
   plain.state[lane] = next;
   plain.waiting[lane] = waiting;
@@ -554,9 +561,40 @@ function setFxParam(i: number, fxIndex: number, key: string, value: number): voi
   sendEngine({ SetFxParam: [i, key as FxParamId, applied] });
 }
 
+/**
+ * The bars a later take records over a loop of `loopBars` whole bars when `requested` are asked for: the
+ * engine's `later_take_bars` (`src-tauri/crates/lf-engine/src/grid.rs`). Up to the loop, the request (a
+ * shorter take repeats across the loop); past it, a multiply: whole loops, floored, at most the largest
+ * multiple within `maxBars`. No loop yet (`loopBars` 0): the request within [1, maxBars].
+ */
+export function laterTakeBars(requested: number, loopBars: number, maxBars: number): number {
+  if (loopBars < 1) return clampBars(requested, maxBars);
+  if (requested <= loopBars) return clampBars(requested, loopBars);
+  return Math.min(Math.floor(requested / loopBars), Math.max(1, Math.floor(maxBars / loopBars))) * loopBars;
+}
+
+/** The longest FIXED take, as the engine's `next_take_max_bars` rules it: 32 before a loop; over one of
+ * whole bars, the longest multiply of it the lane buffer holds; over one of no whole number of bars (a
+ * foreign import), its whole bars. */
 function nextTakeMaxBars(): number {
   const master = masterFrames();
-  return master > 0 ? Math.min(MAX_FIXED_BARS, maxWholeBars(master, framesPerBar(bpm(), engineSampleRate()))) : MAX_FIXED_BARS;
+  if (master <= 0) return MAX_FIXED_BARS;
+  const rate = engineSampleRate();
+  const fpb = framesPerBar(bpm(), rate);
+  if (master % fpb !== 0) return Math.min(MAX_FIXED_BARS, maxWholeBars(master, fpb));
+  const bufferBars = maxWholeBars(Math.ceil(LANE_BUFFER_SECONDS * rate), fpb);
+  return laterTakeBars(MAX_FIXED_BARS, master / fpb, Math.min(MAX_FIXED_BARS, bufferBars));
+}
+
+/** The window a later take records, as the engine's `configure_end` bounds it: FIXED's bars as a later
+ * take records them (past the loop, a multiply), else the loop (RETAKE rolls at the loop's length). */
+function laterTakeFrames(): number {
+  const master = plain.master;
+  if (master <= 0 || !fixedLength() || retake()) return master;
+  const fpb = framesPerBar(bpm(), engineSampleRate());
+  const max = nextTakeMaxBars();
+  const bars = master % fpb === 0 ? laterTakeBars(fixedBars(), master / fpb, max) : clampBars(fixedBars(), max);
+  return bars * fpb;
 }
 
 /** The first EMPTY lane (where COPY lands), or -1. */
