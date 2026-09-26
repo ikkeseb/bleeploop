@@ -1,6 +1,7 @@
 import { activeSlot, slotPlugins } from '../audio/instrument';
 import { engineMode, sendEngine, type EngineAction } from '../platform';
 import { pressGoLive } from '../ui/instrument/PluginControls';
+import { toggleStage } from '../ui/stage/stage-store';
 import { looper } from '../ui/state/audio';
 import { CONFIRM_WINDOW_MS } from '../ui/looper/shared';
 import {
@@ -18,7 +19,7 @@ import {
  * OWNS: the named actions a hands-free press can reach, in one table. The transport keys
  * (`transport-keys.ts`) and MIDI learn (`midi-actions.ts`) dispatch through it. Each row
  * runs the path its on-screen control runs: the lane core, ▶/■, ↶ DUB, CLR, the command bar's ▶/■ ALL
- * and the slot's GO LIVE. The lane actions act on the SELECTED track, and a refused one says why on that
+ * the slot's GO LIVE and the stage view's command-bar cap. The lane actions act on the SELECTED track, and a refused one says why on that
  * lane (gates.ts `refuseOnLane`) instead of doing nothing. In engine mode the looper rows are the
  * engine's hands-free `Action`s: the engine gates them, confirms CLEAR and names a refusal on the feed
  * (`src/app/boot.ts` puts it on the lane).
@@ -32,7 +33,8 @@ export type ActionId =
   | 'prevTrack'
   | 'playAll'
   | 'stopAll'
-  | 'goLive';
+  | 'goLive'
+  | 'stageView';
 
 /** Each action's name on screen, in the MIDI learn picker's order; Help's pedal keys read it too. */
 export const ACTION_LABELS: Readonly<Record<ActionId, string>> = {
@@ -45,6 +47,7 @@ export const ACTION_LABELS: Readonly<Record<ActionId, string>> = {
   playAll: 'Play all',
   stopAll: 'Stop all',
   goLive: 'Go live',
+  stageView: 'Stage view',
 };
 
 /** Act on the selected lane when `gate` lets the press through, else show why on that lane. */
@@ -96,6 +99,7 @@ const ACTIONS: Readonly<Record<ActionId, () => void>> = {
   playAll: () => looper.playAll(),
   stopAll: () => looper.stopAll(),
   goLive: () => void pressGoLive(goLiveSlot()),
+  stageView: toggleStage,
 };
 
 /** The looper rows as engine actions. */
@@ -117,9 +121,10 @@ function onPress(id?: ActionId): void {
   dismissLaneCue();
 }
 
-/** Run action `id`. */
+/** Run action `id`. Toggling the stage view is not a looper press: a pending CLEAR and a lane cue
+ * outlive it, in engine mode (whose engine never hears the toggle) and web mode alike. */
 export function runAction(id: ActionId): void {
-  onPress(id);
+  if (id !== 'stageView') onPress(id);
   const action = engineMode() ? ENGINE_ACTIONS[id] : undefined;
   if (action) sendEngine({ Action: action });
   else ACTIONS[id]();

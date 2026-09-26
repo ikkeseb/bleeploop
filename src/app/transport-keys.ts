@@ -1,6 +1,7 @@
 import { activeIsDrum } from '../audio/instrument';
 import { DRUM_KIT } from '../audio/synths/drum';
 import * as layoutStore from '../ui/layout/layout-store';
+import { stageOpen } from '../ui/stage/stage-store';
 import { runAction, selectTrack, type ActionId } from './actions';
 
 export interface TransportKeysOptions {
@@ -29,8 +30,8 @@ export interface TransportKeys {
 /**
  * Transport key → named action (`actions.ts`), on the selected track. The arrows and PageUp/PageDown
  * are what page-turner footswitches send; Backspace/Delete are a keyboard's take-back keys (CLEAR
- * wants a second press, see actions.ts). None is a note-play key, a drum pad, Esc or a digit. Help's
- * Looper keys section lists this table.
+ * wants a second press, see actions.ts); B opens and closes the stage view. None is a note-play key, a
+ * drum pad, Esc or a digit. A letter matches either case. Help's Looper keys section lists this table.
  */
 export const KEY_ACTIONS: Readonly<Record<string, ActionId>> = {
   ' ': 'recDub',
@@ -43,6 +44,7 @@ export const KEY_ACTIONS: Readonly<Record<string, ActionId>> = {
   ArrowUp: 'prevTrack',
   ArrowLeft: 'prevTrack',
   PageUp: 'prevTrack',
+  b: 'stageView',
 };
 
 /**
@@ -86,7 +88,7 @@ export function installTransportKeys(opts: TransportKeysOptions): TransportKeys 
 
     // The transport keys run their named action (KEY_ACTIONS). preventDefault stops Space, the arrows
     // and PageUp/PageDown from scrolling. A refused action says why on the selected lane (actions.ts).
-    const action = KEY_ACTIONS[e.code === 'Space' ? ' ' : e.key];
+    const action = KEY_ACTIONS[e.code === 'Space' ? ' ' : e.key.length === 1 ? e.key.toLowerCase() : e.key];
     if (action) {
       e.preventDefault();
       runAction(action);
@@ -100,10 +102,12 @@ export function installTransportKeys(opts: TransportKeysOptions): TransportKeys 
     // shared predicate from audio/instrument.ts, the same one Keyboard.tsx's drumActive reads.) The
     // yield only applies while the keyboard pane is VISIBLE: the pad key handler lives in Keyboard.tsx
     // and unmounts with the pane, so with it hidden the digits would otherwise go entirely dead in
-    // drum mode.
+    // drum mode. The stage view hides the keyboard too (it stays mounted underneath, its key handler
+    // off while the view is open), so there the digits always select.
     if (e.key >= '1' && e.key <= '5') {
       const idx = Number(e.key) - 1;
-      if (activeIsDrum() && layoutStore.keyboardVisible() && DRUM_KIT.some((pad) => pad.key === e.key)) return;
+      const padsLive = layoutStore.keyboardVisible() && !stageOpen();
+      if (activeIsDrum() && padsLive && DRUM_KIT.some((pad) => pad.key === e.key)) return;
       e.preventDefault();
       selectTrack(idx);
     }

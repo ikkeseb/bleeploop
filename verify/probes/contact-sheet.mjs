@@ -9,7 +9,9 @@
  * scenes prove the frontend's rendering of a native host's answers, never the native side.
  * 11-engine-in-fx is engine mode on the web engine fake (the engine-seam pattern: `__lfEngineFake` set
  * before the app loads, a scripted reset frame with both input sends on) with the IN FX popover open;
- * it proves the rendering only, never the engine. Writes
+ * it proves the rendering only, never the engine. 12-stage-view = the stage view (src/ui/stage/) over
+ * five loaded lanes (playing, stopped, one muted), in the web-tier context, opened by its command-bar
+ * cap. Writes
  * logs/contact-sheet/<viewport>-<kbd>-<scene>.png plus a tiling index.html unconditionally, before any
  * FAIL is raised, so a red run still leaves the sheet for the eye lap. Asserts: with FX open every
  * lane's clear button is fully visible (audit A4); an ARMED later take draws no rec-red in its canvas
@@ -24,7 +26,7 @@ const outDir = 'logs/contact-sheet';
 const viewports = [[1280, 820], [1920, 1080], [1000, 700]];
 const placements = ['bottom', 'hidden'];
 const scenes = ['1-empty', '2-first-take-recording', '3-armed-waiting', '4-count-in', '5-fx-five-lanes', '6-help', '7-audio-settings',
-  '8-native-first-launch', '9-amp-sim-live', '10-amp-sim-idle', '11-engine-in-fx'];
+  '8-native-first-launch', '9-amp-sim-live', '10-amp-sim-idle', '11-engine-in-fx', '12-stage-view'];
 const REC_PIXEL_LIMIT = 20; // anti-aliasing slack; a red playhead or tape is hundreds of pixels
 
 /** Five one-bar lanes at 120 BPM with a visible wave; `playing` lanes start PLAYING. */
@@ -182,6 +184,15 @@ await probe(async ({ browser, open }) => {
       await page.waitForTimeout(250);
       await shoot(scene);
       await page.evaluate(() => window.__lf.ui.closeSettings());
+
+      scene = '12-stage-view';
+      await loadLanes(page, { count: 5, playing: [0, 2, 3] });
+      await page.evaluate(() => window.__lf.looper.setMute(3, true));
+      await page.getByRole('button', { name: 'Stage view', exact: true }).click();
+      await page.getByRole('dialog', { name: 'Stage view', exact: true }).waitFor();
+      await page.waitForTimeout(400);
+      await shoot(scene);
+      await page.keyboard.press('Escape');
       await context.close();
 
       scene = '8-native-first-launch';

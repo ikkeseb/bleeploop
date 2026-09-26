@@ -1,0 +1,392 @@
+/* Stage view (StageView.tsx): the performance layer, read from 1.5–3 m. The same "Instrument" tokens as
+   the rest of the app (src/app.css header): matte tone steps, colour only for sound (the lane's --sc,
+   from --play/--rec/--dub/--cyan/--dim/--faint), warm-white (--engaged) for the selected lane, the lit
+   beat and the progress. Every size is fixed by the window (vh/vw) or the lane box (cqh), never by the
+   content, so a state change never moves the layout. */
+
+.sv {
+  --sv-pad: clamp(12px, 2vh, 24px);
+  --sv-gap: clamp(8px, 1.3vh, 14px);
+  --sv-head: clamp(54px, 8vh, 96px); /* the header strip, the beat bar and EXIT */
+  --sv-pillar: clamp(200px, 21vw, 420px);
+  --sv-ind: clamp(140px, 13vw, 250px);
+  position: fixed;
+  inset: 0;
+  z-index: 100; /* over the command-bar popovers (40), under the error toasts (200) */
+  display: grid;
+  grid-template-rows: var(--sv-head) auto minmax(0, 1fr);
+  gap: var(--sv-gap);
+  padding: var(--sv-pad);
+  background:
+    radial-gradient(120% 70% at 50% -30%, rgba(255, 244, 228, 0.035), transparent 60%),
+    var(--bg);
+  outline: none;
+}
+
+.sv-label {
+  font-size: clamp(10px, 1.3vh, 14px);
+  font-weight: 600;
+  letter-spacing: 0.18em;
+  color: var(--faint);
+}
+
+/* ---- header strip ---- */
+.sv-head {
+  display: flex;
+  align-items: stretch;
+  gap: var(--sv-gap);
+  min-width: 0;
+}
+.sv-stat {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 2px;
+  padding: 0 clamp(12px, 1.4vw, 24px);
+  border-radius: 14px;
+  background: var(--card);
+  border: 1px solid var(--edge);
+  box-shadow: inset 0 1px 0 var(--hair);
+}
+.sv-stat--bpm {
+  width: calc(var(--sv-head) * 2.1);
+}
+.sv-stat--loop {
+  width: calc(var(--sv-head) * 3.7);
+}
+.sv-stat__val {
+  font-size: calc(var(--sv-head) * 0.58);
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: -0.03em;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  color: var(--text);
+}
+.sv-stat__val--none {
+  color: var(--faint);
+}
+.sv-unit {
+  margin-left: 0.25em;
+  font-size: 0.5em;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  color: var(--dim);
+}
+.sv-secs {
+  margin-left: 0.6em;
+  font-size: 0.5em;
+  font-weight: 500;
+  letter-spacing: 0;
+  color: var(--dim);
+}
+
+/* the beat bar: four segments, the current beat lit warm-white; beat 1 is the wider, brighter-edged one */
+.sv-beats {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  gap: var(--sv-gap);
+}
+.sv-beat {
+  flex: 1 1 0;
+  display: grid;
+  place-items: center;
+  border-radius: 14px;
+  background: var(--surf-2);
+  border: 1px solid var(--edge);
+  font-style: normal;
+  font-size: calc(var(--sv-head) * 0.34);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--faint);
+  transition: background 0.05s, border-color 0.05s, color 0.05s;
+}
+.sv-beat--one {
+  flex-grow: 1.4;
+  border-color: var(--line-2);
+  color: var(--dim);
+}
+.sv-beat.is-on {
+  background: var(--engaged);
+  border-color: var(--engaged);
+  color: var(--bg);
+}
+.sv-beat--one.is-on {
+  box-shadow: 0 0 22px -6px var(--engaged);
+}
+
+.sv-exit {
+  flex: 0 0 auto;
+  width: var(--sv-head);
+  appearance: none;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border-radius: 14px;
+  background: var(--surf-2);
+  border: 1px solid var(--edge);
+  color: var(--dim);
+  cursor: pointer;
+}
+.sv-exit:hover {
+  color: var(--text);
+  background: var(--surf-3);
+}
+.sv-exit svg {
+  width: 38%;
+  height: 38%;
+}
+
+/* the loop's progress: a warm-white fill (scaleX from waveform.ts) under bar ticks cut in --bg */
+.sv-progress {
+  position: relative;
+  height: clamp(8px, 1.1vh, 12px);
+  border-radius: 99px;
+  overflow: hidden;
+  background: var(--sunk);
+  box-shadow: 0 1px 0 var(--hair);
+}
+.sv-progress__fill {
+  position: absolute;
+  inset: 0;
+  transform-origin: left center;
+  transform: scaleX(0);
+  background: color-mix(in srgb, var(--engaged) 78%, transparent);
+}
+.sv-progress::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: repeating-linear-gradient(
+    90deg,
+    transparent 0,
+    transparent calc(100% / var(--bars) - 3px),
+    var(--bg) calc(100% / var(--bars) - 3px),
+    var(--bg) calc(100% / var(--bars))
+  );
+}
+
+/* ---- the five lanes ---- */
+.sv-lanes {
+  display: grid;
+  grid-template-rows: repeat(5, minmax(0, 1fr));
+  gap: var(--sv-gap);
+  min-height: 0;
+}
+.sv-lane {
+  container-type: size;
+  --sc: var(--faint);
+  display: grid;
+  grid-template-columns: var(--sv-pillar) minmax(0, 1fr) var(--sv-ind);
+  gap: clamp(8px, 0.9vw, 16px);
+  padding: clamp(5px, 0.8vh, 9px);
+  border-radius: 18px;
+  background: var(--card);
+  border: 1px solid var(--edge);
+  box-shadow: inset 0 1px 0 var(--hair);
+  cursor: pointer;
+}
+.sv-lane[data-state='play'] { --sc: var(--play); }
+.sv-lane[data-state='rec'] { --sc: var(--rec); }
+.sv-lane[data-state='dub'] { --sc: var(--dub); }
+.sv-lane[data-state='armed'] { --sc: var(--dub); }
+.sv-lane[data-state='listening'] { --sc: var(--cyan); }
+.sv-lane[data-state='stop'] { --sc: var(--dim); }
+/* MUTED over a playing or stopped take: grey, like the looper lane — a live capture keeps its colour */
+.sv-lane[data-muted][data-state='play'],
+.sv-lane[data-muted][data-state='stop'] {
+  --sc: var(--faint);
+}
+/* a pending loop-end stop reads amber, as the looper lane's ENDING does, muted or not */
+.sv-lane.is-stopping,
+.sv-lane.is-stopping[data-muted][data-state] {
+  --sc: var(--dub);
+}
+.sv-lane[data-state='empty'] {
+  background: #0f1115; /* the looper lane's EMPTY tone: one step below a lane holding a take */
+}
+/* The selected lane: a warm-white edge outside the border, so selecting never moves the contents. */
+.sv-lane.is-selected {
+  outline: 3px solid var(--engaged);
+  outline-offset: 1px;
+}
+/* a refused press: the edge turns amber for the cue's life (the looper lane's is-cued twin) */
+.sv-lane.is-cued {
+  border-color: var(--dub);
+}
+
+/* the state pillar: its tint carries the state in peripheral vision, the word names it */
+.sv-pillar {
+  position: relative;
+  display: grid;
+  place-items: center;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--sc) 14%, var(--surf-1));
+  border: 2px solid color-mix(in srgb, var(--sc) 30%, transparent);
+}
+.sv-lane[data-state='empty'] .sv-pillar {
+  background: transparent;
+  border: 2px dashed rgba(255, 255, 255, 0.08);
+}
+.sv-lane[data-state='armed'] .sv-pillar,
+.sv-lane[data-state='listening'] .sv-pillar {
+  background: color-mix(in srgb, var(--sc) 8%, var(--surf-1));
+  border-style: dashed;
+  border-color: color-mix(in srgb, var(--sc) 70%, transparent);
+}
+.sv-lane[data-state='rec'] .sv-pillar,
+.sv-lane[data-state='dub'] .sv-pillar {
+  background: color-mix(in srgb, var(--sc) 26%, var(--surf-1));
+  border-color: var(--sc);
+}
+.sv-num {
+  position: absolute;
+  top: clamp(4px, 7cqh, 12px);
+  left: clamp(8px, 1vw, 14px);
+  font-size: min(19cqh, 30px);
+  font-weight: 600;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  color: var(--dim);
+}
+.sv-lane.is-selected .sv-num {
+  color: var(--engaged);
+}
+.sv-word {
+  font-size: min(42cqh, calc(var(--sv-pillar) / 5));
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+  color: var(--sc);
+}
+.sv-lane[data-state='empty'] .sv-word {
+  color: color-mix(in srgb, var(--faint) 60%, transparent); /* recedes, so the lanes holding sound lead */
+}
+
+/* the well: the looper lane's sunk floor, holding the waveform canvas and the big messages */
+.sv-well {
+  position: relative;
+  min-width: 0;
+  overflow: hidden;
+  border-radius: 12px;
+  background: var(--well);
+  border: 1px solid rgba(0, 0, 0, 0.55);
+  box-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.55), 0 1px 0 var(--hair);
+}
+.sv-well canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+.sv-msg {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2cqh;
+  padding: 0 12px;
+  text-align: center;
+  pointer-events: none;
+}
+.sv-msg__text {
+  max-width: 100%;
+  font-size: min(19cqh, 36px);
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  line-height: 1.15;
+  color: color-mix(in srgb, var(--sc) 80%, var(--dim));
+}
+/* the count-in: the numeral is the lane's biggest glyph, in the rec colour it counts toward, with its
+   label beside it rather than under it so the numeral can take the lane's full height */
+.sv-msg:has(.sv-count) {
+  flex-direction: row;
+  gap: 0.6em;
+}
+.sv-count {
+  font-size: 88cqh;
+  font-weight: 700;
+  line-height: 0.85;
+  letter-spacing: -0.04em;
+  font-variant-numeric: tabular-nums;
+  color: var(--rec);
+}
+/* a refused press's reason (gates.ts refuseOnLane), large and amber in a box over the waveform */
+.sv-msg.is-cue .sv-msg__text {
+  padding: 0.4em 0.8em;
+  border: 2px solid var(--dub);
+  border-radius: 10px;
+  background: var(--bg);
+  color: var(--dub);
+  font-size: min(22cqh, 40px);
+  text-transform: uppercase;
+  animation: sv-cue-in 0.16s ease-out;
+}
+@keyframes sv-cue-in {
+  from {
+    opacity: 0;
+  }
+}
+
+/* read-only indicators: volume in dB, MUTE and REV lit warm-white when engaged */
+.sv-ind {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 8cqh;
+  min-width: 0;
+}
+.sv-lane[data-state='empty'] .sv-ind {
+  visibility: hidden; /* nothing to read on an EMPTY lane; the box keeps its place */
+}
+.sv-vol {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+.sv-vol__db {
+  font-family: var(--mono);
+  font-size: min(20cqh, 34px);
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+  color: var(--text);
+}
+.sv-flags {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+.sv-flag {
+  padding: 0.35em 0;
+  border-radius: 8px;
+  border: 1px solid var(--edge);
+  text-align: center;
+  font-size: min(15cqh, 24px);
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  line-height: 1;
+  color: color-mix(in srgb, var(--faint) 55%, transparent);
+}
+.sv-flag.is-on {
+  color: var(--engaged);
+  border-color: color-mix(in srgb, var(--engaged) 55%, transparent);
+  background: var(--surf-3);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sv-beat {
+    transition: none;
+  }
+  .sv-msg.is-cue .sv-msg__text {
+    animation: none;
+  }
+}

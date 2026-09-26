@@ -4,6 +4,10 @@ import { masterBars } from './shared';
 /**
  * Waveform + bar-grid + playhead renderer.
  *
+ * OWNS: every looper canvas and the frame-driven chrome that rides the loop phase. A track may have
+ * more than one canvas (its looper lane, and its stage-view lane while that view is open), so lanes
+ * are keyed by canvas and each draws its track independently.
+ *
  * A SINGLE requestAnimationFrame loop drives every registered track canvas. It reads the looper's
  * pre-computed peak arrays through non-reactive getters (`looper.peaksInto` / `phaseValue` / `stateOf`
  * / `recHeadFrac` / `masterFramesValue` — NO Solid signals in the per-frame path, per invariant 6) and
@@ -20,7 +24,7 @@ import { masterBars } from './shared';
  * master-length change (a rare structural event; BPM is locked for the life of a committed master)
  * inside the cached-bitmap path — never in the per-frame steady state.
  *
- * Solid only ever creates/destroys the <canvas> elements (via the Looper component) and calls
+ * Solid only ever creates/destroys the <canvas> elements (the Looper and StageView components) and calls
  * `registerLane` / `unregisterLane`; all drawing lives here in plain TS.
  */
 
@@ -75,7 +79,7 @@ function gridFontFor(dpr: number): string {
   return `${(7.5 * dpr).toFixed(1)}px ui-monospace, 'SF Mono', Consolas, monospace`;
 }
 
-const lanes = new Map<number, Lane>();
+const lanes = new Map<HTMLCanvasElement, Lane>();
 
 /**
  * The command-bar ring dial rides the same loop: one SVG circle whose stroke-dashoffset follows the
@@ -154,8 +158,34 @@ export function unregisterPhaseDial(): void {
   stopIfIdle();
 }
 
+/**
+ * The stage view's loop-progress fill rides the loop too (StageView.tsx): its scaleX follows the plain
+ * loop phase, from this frame rather than a signal (invariant 6). Empty while no master loop exists.
+ */
+let progress: { el: HTMLElement; last: number } | null = null;
+
+function drawProgress(): void {
+  if (!progress) return;
+  const p = looper.masterFramesValue() > 0 ? looper.phaseValue() : 0;
+  if (Math.abs(p - progress.last) < 0.001) return;
+  progress.last = p;
+  progress.el.style.transform = `scaleX(${p.toFixed(4)})`;
+}
+
+/** Register the stage view's loop-progress fill. Starts the shared rAF loop if nothing else has. */
+export function registerLoopProgress(el: HTMLElement): void {
+  progress = { el, last: -1 };
+  if (rafId === 0) rafId = requestAnimationFrame(frame);
+}
+
+/** Unregister the loop-progress fill; stops the loop when nothing else is registered. */
+export function unregisterLoopProgress(): void {
+  progress = null;
+  stopIfIdle();
+}
+
 function stopIfIdle(): void {
-  if (lanes.size === 0 && dial === null && meter === null && rafId !== 0) {
+  if (lanes.size === 0 && dial === null && meter === null && progress === null && rafId !== 0) {
     cancelAnimationFrame(rafId);
     rafId = 0;
   }
@@ -420,13 +450,12 @@ function frame(): void {
   }
   drawDial();
   drawMeter();
+  drawProgress();
   rafId = requestAnimationFrame(frame);
 }
 
-/** Register a track's canvas with the renderer. Starts the shared rAF loop on the first lane. */
+/** Register a canvas that draws track `index`. Starts the shared rAF loop on the first lane. */
 export function registerLane(index: number, canvas: HTMLCanvasElement): void {
-  // Defensive: never keep two lanes for one index (a remount without cleanup would leak).
-  if (lanes.has(index)) unregisterLane(index);
   const ctx = canvas.getContext('2d');
   const wave = document.createElement('canvas');
   const wctx = wave.getContext('2d');
@@ -457,13 +486,13 @@ export function registerLane(index: number, canvas: HTMLCanvasElement): void {
     gridFont: gridFontFor(self.devicePixelRatio || 1),
   };
   syncSize(lane);
-  lanes.set(index, lane);
+  lanes.set(canvas, lane);
 
   if (rafId === 0) rafId = requestAnimationFrame(frame);
 }
 
-/** Unregister a track's canvas. Stops the shared rAF loop when the last lane goes away. */
-export function unregisterLane(index: number): void {
-  lanes.delete(index);
+/** Unregister a canvas. Stops the shared rAF loop when nothing is registered any more. */
+export function unregisterLane(canvas: HTMLCanvasElement): void {
+  lanes.delete(canvas);
   stopIfIdle();
 }

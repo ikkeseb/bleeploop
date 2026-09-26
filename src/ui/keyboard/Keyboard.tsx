@@ -5,6 +5,7 @@ import { activeIsDrum, activeSlot, ensureActive, slotIds, slotPlugins } from '..
 import { DRUM_KIT } from '../../audio/synths/drum';
 import { engineMode } from '../../platform';
 import type { KeyboardPlacement } from '../layout/layout-store';
+import { stageOpen } from '../stage/stage-store';
 import { isBlackKey, noteName, octaveBase } from './notes';
 import './keyboard.css';
 
@@ -154,6 +155,10 @@ export function Keyboard(props: KeyboardProps = {}) {
   const heldKeyNote = new Map<string, Hold>();
   function onKeyDown(e: KeyboardEvent) {
     if (e.repeat || e.metaKey || e.ctrlKey || e.altKey) return;
+    // The stage view hides the keyboard: while it is open no computer key plays a note or a pad, as
+    // with the pane hidden (this component stays mounted underneath, so its window listener would
+    // otherwise still fire). Drum mode's 1–4 then select lanes (src/app/transport-keys.ts).
+    if (stageOpen()) return;
     // Yield to text entry only: typing in a settings field (device <select>, the rec-align number box)
     // must not play — and with a track armed, record — notes. Unlike the transport yield in
     // src/app/transport-keys.ts this

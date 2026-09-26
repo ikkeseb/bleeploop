@@ -2,8 +2,9 @@ import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount, 
 import { clock, looper, sampleRate, type TrackState } from '../state/audio';
 import { engineMode } from '../../platform';
 import { registerLane, unregisterLane } from './waveform';
-import { createTwoStepConfirm, masterBars } from './shared';
-import { announceLooper, laneCue, liveMsg, playStopGate, recDubGate } from './gates';
+import { createTwoStepConfirm, masterBars, volumeDb } from './shared';
+import { announceLooper, liveMsg, playStopGate, recDubGate } from './gates';
+import { DATA_STATE, createLaneView, type LaneWord } from './lane-state';
 import { FxPanel } from './FxPanel';
 import './looper.css';
 
@@ -21,29 +22,8 @@ import './looper.css';
  * tokens.
  */
 
-/**
- * Display states add 'ARMED' — a later track that pressed REC but is still waiting for the master
- * loop boundary before its take begins. The engine reports this as RECORDING + `armed`; surfacing it
- * as its own state stops the lane from reading "recording" (red) for up to a full loop while nothing
- * is actually being kept (UX: the single most-bitten gap on every overdub), so it gets its own amber
- * dashed-ring-pulse treatment (data-state="armed") here.
- * LISTENING is the AUTO REC sibling: first-track REC is waiting for input rather than a known grid edge.
- */
-type DisplayState = TrackState | 'ARMED' | 'LISTENING';
-
-/** Map a display state to the lane's data-state vocab (drives --sc + core/identity/well treatment). */
-const DATA_STATE: Record<DisplayState, string> = {
-  EMPTY: 'empty',
-  RECORDING: 'rec',
-  ARMED: 'armed',
-  LISTENING: 'listening',
-  OVERDUBBING: 'dub',
-  PLAYING: 'play',
-  STOPPED: 'stop',
-};
-
-/** The identity-box state word, in the lane's state colour. */
-const STATE_WORD: Record<DisplayState, string> = {
+/** The lane identity-box word for each `LaneWord` (a rolling RETAKE's TAKE adds its pass count). */
+const STATE_WORD: Record<Exclude<LaneWord, 'TAKE'>, string> = {
   EMPTY: 'EMPTY',
   RECORDING: '● REC',
   ARMED: 'ARMED',
@@ -51,6 +31,8 @@ const STATE_WORD: Record<DisplayState, string> = {
   OVERDUBBING: 'OVERDUB',
   PLAYING: 'PLAYING',
   STOPPED: 'STOPPED',
+  ENDING: 'ENDING',
+  MUTED: 'MUTED',
 };
 
 // ---- core glyphs. currentColor → the core's state colour.
@@ -80,12 +62,7 @@ function Fader(props: { index: number; disabled: boolean }) {
   // 0..150 integer domain (= vol × 100); the unity tick + dB read-out are the per-track additions.
   const vol = () => looper.trackVolume(props.index);
   const frac = () => Math.max(0, Math.min(1, vol() / 1.5));
-  const dbStr = () => {
-    const v = vol();
-    if (v <= 0.0001) return '−∞';
-    const db = 20 * Math.log10(v);
-    return (db >= 0 ? '+' : '−') + Math.abs(db).toFixed(1) + ' dB';
-  };
+  const dbStr = () => volumeDb(vol());
 
   const onInput = (e: Event) => {
     const input = e.target as HTMLInputElement;
@@ -169,56 +146,23 @@ function TrackLane(props: {
 }) {
   const track = looper.track(props.index);
   const state = () => track().state;
-  const armed = () => track().armed;
-  const autoArmed = () => track().autoArmed;
   const canUndo = () => track().canUndo;
   const canReverse = () => track().canReverse;
   const reversed = () => track().reversed;
-  const stopping = () => track().stopAt !== null;
   const hasFreeLane = () => {
     for (let j = 0; j < looper.trackCount; j++) if (looper.track(j)().state === 'EMPTY') return true;
     return false;
   };
-  // The state the UI shows: RECORDING-but-armed becomes its own 'ARMED' (waiting-for-downbeat) state.
-  // Keep this memoized so unrelated public-track changes cannot rebuild coreGlyph's fresh JSX.
-  const displayState = createMemo((): DisplayState => {
-    if (state() !== 'RECORDING') return state();
-    if (autoArmed()) return 'LISTENING';
-    return armed() ? 'ARMED' : 'RECORDING';
-  });
+  // The lane's display state, word, well message and count-in numeral: `lane-state.ts`, shared with the
+  // stage view. EMPTY shows no well message — the bright ● core already says "press to record"; the
+  // spoken 'record' action lives on the core button's aria-label.
+  const { displayState, word, stopping, muted, cue, wellMsg, wellCount } = createLaneView(props.index);
   const fxSelected = () => props.fxTrack === props.index;
   const isEmpty = () => state() === 'EMPTY';
-  const muted = () => looper.trackMuted(props.index);
-  // The state word says what the lane SOUNDS like: a muted take that is playing or stopped reads
-  // MUTED (the loop still runs — the playhead keeps moving); a live capture keeps its own word so
-  // REC/OVERDUB is never hidden behind a mute. ENDING (stop at loop end) outranks both.
-  const stateWord = () =>
-    stopping()
-      ? 'ENDING'
-      : muted() && (displayState() === 'PLAYING' || displayState() === 'STOPPED')
-        ? 'MUTED'
-        : track().retakePass > 0
-          ? `TAKE ${track().retakePass}` // a rolling RETAKE counts its passes
-          : STATE_WORD[displayState()];
-  // A transport key refused on this lane (gates.ts refuseOnLane): its reason, while the cue lasts.
-  const cue = createMemo(() => {
-    const c = laneCue();
-    return c !== null && c.track === props.index ? c.text : '';
-  });
-  // Only ARMED shows a well message (waiting for the downbeat before the take begins). EMPTY shows nothing
-  // — the bright ● core already says "press to record". The spoken 'record' action lives on the core
-  // button's aria-label, untouched. A refusal cue outranks every message while it lasts.
-  // A FIRST take (no master yet) is armed behind the forced count-in → the well counts it down big
-  // (4-3-2-1, the numeral is clock.countLeft); a LATER take waits for the loop boundary → plain text.
-  const wellMsg = () => {
-    if (cue()) return cue();
-    if (stopping()) return 'STOPPING AT LOOP END';
-    if (displayState() === 'ARMED') return looper.masterLengthFrames() > 0 ? 'WAITING FOR DOWNBEAT' : 'COUNT-IN';
-    if (displayState() === 'LISTENING') return 'WAITING FOR INPUT';
-    return '';
+  const stateWord = () => {
+    const w = word();
+    return w === 'TAKE' ? `TAKE ${track().retakePass}` : STATE_WORD[w];
   };
-  const wellCount = () =>
-    !cue() && displayState() === 'ARMED' && looper.masterLengthFrames() === 0 ? clock.countLeft() : 0;
 
   // The core IS the REC/DUB capture gesture. Its glyph reflects the ACTION reached by pressing it now
   // (● start-record on empty/armed, ⊕ start-overdub on a playing/stopped take, ■ end the live capture);
@@ -287,7 +231,9 @@ function TrackLane(props: {
   onMount(() => {
     if (canvasEl) registerLane(props.index, canvasEl);
   });
-  onCleanup(() => unregisterLane(props.index));
+  onCleanup(() => {
+    if (canvasEl) unregisterLane(canvasEl);
+  });
 
   // A lane a key or a footswitch selects comes into view: at small windows the stack scrolls, and a
   // selected lane below its fold hid its refusal cue too. Not on this lane's own pointer press: it is on

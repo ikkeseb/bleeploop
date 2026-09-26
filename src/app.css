@@ -120,6 +120,13 @@ option {
   flex-direction: column;
 }
 
+/* The stage view (src/ui/stage/) covers the window: the command bar and the stage stay mounted and laid
+   out beneath it (inert, app.tsx) but are not painted. */
+.app--staged > .cmd,
+.app--staged > .stage {
+  visibility: hidden;
+}
+
 /* ---- command bar ----
    ONE card holding brand · system lamp · the transport clusters (Transport.tsx) · tool icons.
    Floats over the app background (margin, rounded, 1px --edge). Horizontal margins match the

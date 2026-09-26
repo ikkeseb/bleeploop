@@ -3,9 +3,10 @@ import { looper, type TrackState } from '../state/audio';
 import { framesPerBar } from '../../audio/quantize';
 
 /**
- * OWNS: the looper-UI helpers that the lanes (`Looper.tsx`), the waveform renderer (`waveform.ts`) and
- * the command bar (`Transport.tsx`, `SessionTools.tsx`) share. They live apart from the components so
- * the renderer never imports a component that imports the renderer.
+ * OWNS: the looper-UI helpers that the lanes (`Looper.tsx`), the waveform renderer (`waveform.ts`), the
+ * command bar (`Transport.tsx`, `SessionTools.tsx`) and the stage view (`src/ui/stage/StageView.tsx`)
+ * share. They live apart from the components so the renderer never imports a component that imports
+ * the renderer.
  */
 
 /**
@@ -29,6 +30,14 @@ export function anyTrackIn(...states: TrackState[]): boolean {
   return Array.from({ length: looper.trackCount }, (_, i) => looper.track(i)().state).some((s) =>
     states.includes(s),
   );
+}
+
+/** A lane volume (0..1.5, unity 1.0) as its dB read-out: `+0.0 dB`, `−6.0 dB`, `−∞` at silence. Shared by
+ * the lane fader (`Looper.tsx`) and the stage view's read-only indicator. */
+export function volumeDb(v: number): string {
+  if (v <= 0.0001) return '−∞';
+  const db = 20 * Math.log10(v);
+  return (db >= 0 ? '+' : '−') + Math.abs(db).toFixed(1) + ' dB';
 }
 
 /** How long a "press twice to destroy a take" confirm stays armed (lane CLR, ✕ ALL, the CLEAR key). */

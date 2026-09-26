@@ -11,6 +11,8 @@ import { AudioSettings } from './ui/settings/AudioSettings';
 import { Help } from './ui/settings/Help';
 import { SplitStack, type StackPanel } from './ui/layout/SplitStack';
 import { Toasts } from './ui/toast/Toasts';
+import { StageView } from './ui/stage/StageView';
+import { setStageOpen, stageOpen, toggleStage } from './ui/stage/stage-store';
 import * as layoutStore from './ui/layout/layout-store';
 import { engineMode, installFrontendLogPipe, platform } from './platform';
 import { master, session } from './ui/state/audio';
@@ -44,6 +46,7 @@ export function App() {
   // looper (the transport yield rule lives at the handler in transport-keys.ts).
   let helpBtn: HTMLButtonElement | undefined;
   let gearBtn: HTMLButtonElement | undefined;
+  let stageBtn: HTMLButtonElement | undefined;
   // Pointer-vs-keyboard provenance of the last input lives in the transport-keys handler (installed
   // in onMount): a pointer-driven close must not return focus to the trigger (see TransportKeys).
   // Read (never written) here, so no signal churn.
@@ -58,6 +61,16 @@ export function App() {
   createEffect<boolean>((prevOpen) => {
     const open = settingsOpen();
     if (prevOpen && !open && !lastInputWasPointer()) transportKeys?.returnFocus(gearBtn);
+    return open;
+  }, false);
+  // The stage view (`src/ui/stage/`) hides the popovers with the rest of the normal UI, so opening it
+  // closes them; a keyboard close returns focus to its command-bar cap, as the popovers do.
+  createEffect<boolean>((prevOpen) => {
+    const open = stageOpen();
+    if (open) {
+      setSettingsOpen(false);
+      setHelpOpen(false);
+    } else if (prevOpen && !lastInputWasPointer()) transportKeys?.returnFocus(stageBtn);
     return open;
   }, false);
 
@@ -77,6 +90,7 @@ export function App() {
         if (cancelLearn()) return;
         if (settingsOpen()) setSettingsOpen(false);
         if (helpOpen()) setHelpOpen(false);
+        if (stageOpen()) setStageOpen(false);
       },
     });
     onCleanup(transportKeys.dispose);
@@ -219,13 +233,13 @@ export function App() {
   };
 
   return (
-    <div class="app">
+    <div class="app" classList={{ 'app--staged': stageOpen() }}>
       {/* Command bar — ONE card combining brand, system lamp, transport, and tool icons. Left→right:
           brand · system lamp · (Transport fragment: BPM · CLICK/FIXED/TAP · loop ring-dial · ■/✕ ALL ·
           MIC · spacer · master) · tool icons. Host/isolated/plugin/midi detail lives in the Audio
           Settings diagnostics block; the lamp is their at-a-glance aggregate and its title lists all
           four. */}
-      <header class="cmd" ref={(el) => onCleanup(installCmdFit(el))}>
+      <header class="cmd" inert={stageOpen()} ref={(el) => onCleanup(installCmdFit(el))}>
         <span class="brand">
           <i class="brand__dot" aria-hidden="true" />
           <span>
@@ -288,6 +302,23 @@ export function App() {
               </svg>
             </button>
           </Show>
+          {/* Stage view — the performance layer read from across the room (`src/ui/stage/`); also on the
+              B key and a learnable pedal (the `stageView` action). Engaged = open. */}
+          <button
+            type="button"
+            class="tool tool--stage"
+            classList={{ 'tool--on': stageOpen() }}
+            aria-label="Stage view"
+            aria-pressed={stageOpen()}
+            ref={stageBtn}
+            title="Stage view (B)"
+            onClick={toggleStage}
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+              <rect x="3" y="4" width="18" height="16" rx="2" />
+              <path d="M7 9h2M7 12h2M7 15h2M12 9h5M12 12h5M12 15h5" stroke-linecap="round" />
+            </svg>
+          </button>
           {/* Help / shortcuts — universal (the keyboard play map applies in every build), so unlike the
               native-only rescan/gear it isn't gated on the plugin host. Engaged = panel open. */}
           <button
@@ -370,10 +401,16 @@ export function App() {
           popovers; pointer-transparent so the play path stays live behind it. */}
       <Toasts />
 
+      {/* The stage view: a full-window layer over the command bar and the stage below, which stay mounted
+          (no pane remounts, the looper keeps drawing) but go inert and unpainted while it is open. */}
+      <Show when={stageOpen()}>
+        <StageView onExit={() => setStageOpen(false)} />
+      </Show>
+
       {/* The stage is a vertical SplitStack of resizable regions; the keyboard slots in above the looper,
           below it, or is hidden (restore from the command-bar piano cap). Each region resizes by dragging the
           divider between it and its neighbour. */}
-      <main class="stage">
+      <main class="stage" inert={stageOpen()}>
         <SplitStack
           orientation="vertical"
           panels={stagePanels()}
