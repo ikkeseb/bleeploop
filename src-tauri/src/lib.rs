@@ -88,6 +88,34 @@ fn frontend_log(message: String) {
     log::error!(target: "webview", "{message}");
 }
 
+/// The release log's folder as Help's Copy diagnostics names it: tauri-plugin-log's `LogDir` target
+/// (set up in `run()`) resolves `app_log_dir()`. `%LOCALAPPDATA%` stands in for the user's profile, so
+/// a pasted report does not carry the Windows user name; Explorer's address bar expands it.
+#[tauri::command]
+fn app_log_dir(app: tauri::AppHandle) -> Result<String, String> {
+    use tauri::Manager;
+    let dir = app.path().app_log_dir().map_err(|e| e.to_string())?;
+    let under_local = app.path().local_data_dir().ok().and_then(|local| dir.strip_prefix(local).ok());
+    let shown = match under_local {
+        Some(rest) => std::path::Path::new("%LOCALAPPDATA%").join(rest),
+        None => dir.clone(),
+    };
+    Ok(shown.display().to_string())
+}
+
+/// Help's Open log folder: Explorer on the release log's folder, so a tester can attach the log to a
+/// report. No shell plugin: the one fixed folder, no path from the WebView. Explorer is not waited on
+/// (it can stay up as the shell), and it exits non-zero even on success.
+#[tauri::command]
+fn app_open_log_dir(app: tauri::AppHandle) -> Result<(), String> {
+    use tauri::Manager;
+    let dir = app.path().app_log_dir().map_err(|e| e.to_string())?;
+    std::process::Command::new("explorer").arg(&dir).spawn().map(drop).map_err(|e| {
+        log::error!("opening the log folder {} failed: {e}", dir.display());
+        format!("could not open the log folder: {e}")
+    })
+}
+
 /// Windows: auto-grant the WebView2 permission requests the app itself makes (Web MIDI, microphone)
 /// so navigator.requestMIDIAccess / getUserMedia resolve without a prompt — the desktop-app-native
 /// behaviour (P8). WebView2 v149 supports Web MIDI natively, so no midir bridge is needed; only the
@@ -306,6 +334,8 @@ pub fn run() {
             #[cfg(debug_assertions)]
             diag,
             frontend_log,
+            app_log_dir,
+            app_open_log_dir,
             app_confirm_close,
             host::host_init,
             host::plugin_scan,

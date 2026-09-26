@@ -1,10 +1,12 @@
-import { For, Show } from 'solid-js';
+import { For, Show, onMount } from 'solid-js';
 import { asioStatus } from '../../audio/audio-devices';
 import asioLogo from '../../assets/third-party/ASIO-compatible-logo-Steinberg-R-white-transparent-RGB.svg';
 import { DRUM_KIT } from '../../audio/synths/drum';
 import { ACTION_LABELS, type ActionId } from '../../app/actions';
 import { KEY_ACTIONS } from '../../app/transport-keys';
 import { COMPUTER_MAP } from '../keyboard/Keyboard';
+import { platform } from '../../platform';
+import { BUILD_LABEL, copyDiagnostics, logFolder, openLogFolder } from './diagnostics';
 import './help.css';
 
 /**
@@ -48,6 +50,8 @@ const LOOPER_KEYS = (Object.keys(ACTION_LABELS) as ActionId[])
   .filter((entry) => entry.keys.length > 0);
 
 export function Help() {
+  // Ask for the log folder as Help opens, so Copy diagnostics has it before the click.
+  onMount(() => void logFolder());
   return (
     <div class="help" role="group" aria-label="Quick reference">
       <div class="help__title">Quick reference</div>
@@ -191,20 +195,33 @@ export function Help() {
         </ul>
       </section>
 
-      {/* The app's "About box equivalent" for Steinberg's ASIO Usage Guidelines (1e/1f: ASIO is on by
-          default, so the unaltered logo must sit here, and only here). Section 14 allows the trademark
-          line as plain text beside the logo. Present in every build that links the SDK (the licence
-          statement is about the binary), whether or not the driver was started or disabled at launch. */}
-      <Show when={asioStatus().status !== 'not-compiled'}>
-        <section class="help__sec">
-          <h3 class="help__h">About this build</h3>
+      {/* The build a tester reports (`diagnostics.ts`): version + commit, Copy diagnostics, and Open log
+          folder where there is a log file. Also the app's "About box equivalent" for Steinberg's ASIO
+          Usage Guidelines (1e/1f: ASIO is on by default, so the unaltered logo must sit here, and only
+          here). Section 14 allows the trademark line as plain text beside the logo. The ASIO lines are
+          present in every build that links the SDK (the licence statement is about the binary), whether
+          or not the driver was started or disabled at launch. */}
+      <section class="help__sec">
+        <h3 class="help__h">About this build</h3>
+        <p class="help__about">{BUILD_LABEL}</p>
+        <Show when={asioStatus().status !== 'not-compiled'}>
           <p class="help__about">This build links the Steinberg ASIO® SDK and is licensed GPLv3. The BleepLoop source is MIT.</p>
           <div class="help__asio">
             <img class="help__asio-logo" src={asioLogo} alt="ASIO Compatible" />
             <span>ASIO is a registered trademark of Steinberg Media Technologies GmbH</span>
           </div>
-        </section>
-      </Show>
+        </Show>
+        <div class="help__actions">
+          <button type="button" class="help__btn" onClick={() => void copyDiagnostics()}>
+            Copy diagnostics
+          </button>
+          <Show when={platform.logs.available}>
+            <button type="button" class="help__btn" onClick={openLogFolder}>
+              Open log folder
+            </button>
+          </Show>
+        </div>
+      </section>
     </div>
   );
 }

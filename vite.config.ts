@@ -1,8 +1,25 @@
+import { execFileSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { defineConfig } from 'vite';
 import solid from 'vite-plugin-solid';
 
 // Tauri sets this when running `tauri dev` over the network; harmless in a plain browser.
 const tauriDevHost = process.env.TAURI_DEV_HOST;
+
+// Help's "About this build" and its copied diagnostics name the version and the commit a tester runs.
+const appVersion: string = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8')).version;
+
+/** The short commit the bundle is built from: CI's GITHUB_SHA, else git, else "unknown". A missing git
+ * never fails a build. */
+function buildCommit(): string {
+  const sha = process.env.GITHUB_SHA;
+  if (sha) return sha.slice(0, 7);
+  try {
+    return execFileSync('git', ['rev-parse', '--short', 'HEAD'], { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim() || 'unknown';
+  } catch {
+    return 'unknown';
+  }
+}
 
 // COOP/COEP make `self.crossOriginIsolated === true`, which unlocks SharedArrayBuffer +
 // Atomics — required by the looper's lock-free capture ring buffer (ringbuf.js). Set here
@@ -15,6 +32,11 @@ const crossOriginIsolation = {
 
 export default defineConfig({
   plugins: [solid()],
+  // Declared in src/env.d.ts.
+  define: {
+    __APP_VERSION__: JSON.stringify(appVersion),
+    __APP_COMMIT__: JSON.stringify(buildCommit()),
+  },
   // Tauri expects a fixed port and its own console; don't let Vite clear it.
   clearScreen: false,
   server: {

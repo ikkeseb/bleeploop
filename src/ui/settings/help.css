@@ -146,9 +146,10 @@
   line-height: 1.45;
 }
 
-/* "About this build" (ASIO builds only). The logo is Steinberg artwork: sized, never restyled. */
+/* "About this build": the version line, the ASIO lines (ASIO builds only) and the diagnostics actions.
+   The logo is Steinberg artwork: sized, never restyled. */
 .help__about {
-  margin: 0 0 8px;
+  margin: 0;
   font-size: 10.5px;
   color: var(--dim);
   line-height: 1.45;
@@ -157,6 +158,7 @@
   display: flex;
   align-items: center;
   gap: 8px;
+  margin-top: 2px;
   font-size: 9.5px;
   color: var(--dim);
   line-height: 1.4;
@@ -165,4 +167,35 @@
   width: 48px;
   height: auto;
   flex: none;
+}
+
+/* Copy diagnostics / Open log folder: small matte key faces (actions, not states — so no colour),
+   the same face as Audio Settings' RETRY ASIO and LEARN. */
+.help__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 4px;
+}
+.help__btn {
+  padding: 4px 9px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: var(--surf-2);
+  box-shadow: inset 0 1px 0 var(--hair);
+  color: var(--text);
+  font: inherit;
+  font-size: 9.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  cursor: pointer;
+  transition: background-color 0.15s;
+}
+.help__btn:hover {
+  background: var(--surf-3);
+}
+.help__btn:active {
+  background: var(--sunk);
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.6);
 }

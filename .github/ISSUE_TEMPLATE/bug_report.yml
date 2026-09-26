@@ -1,0 +1,36 @@
+name: Bug report
+description: Something broke, sounded wrong or did not do what you expected.
+labels: [bug]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: For a sound problem, say what you heard (crackle, a late take, silence) and what you played through.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Load an amp plugin in slot A and press GO LIVE
+        2. Record a take on track 1
+        3. …
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics
+      description: "In BleepLoop: Help (the ? at the top right) → About this build → Copy diagnostics, then paste it here. It names the version, commit, audio driver, device and plugins."
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Log (optional)
+      description: "Help → About this build → Open log folder, then drag bleeploop.log into this box. It holds the app's messages, which can name your devices and plugin folders; no audio."

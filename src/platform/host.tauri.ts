@@ -5,6 +5,7 @@ import type {
   AudioInputDevice,
   AudioOutputDevice,
   EngineHost,
+  LogFolder,
   Platform,
   PluginDescriptor,
   PluginHost,
@@ -217,15 +218,28 @@ const tauriEngineHost: EngineHost = {
   },
 };
 
+/** The release log's folder over Tauri IPC: `app_log_dir` / `app_open_log_dir` in `lib.rs`. */
+const tauriLogFolder: LogFolder = {
+  available: true,
+  path() {
+    return invoke<string>('app_log_dir');
+  },
+  async open() {
+    await invoke('app_open_log_dir');
+  },
+};
+
 /**
  * Tauri platform. Reuses the web getUserMedia/Web-MIDI capabilities (both work inside
- * WebView2 v149) and swaps in the native CLAP/VST3 `pluginHost` and the native `engine`.
+ * WebView2 v149) and swaps in the native CLAP/VST3 `pluginHost`, the native `engine` and the
+ * release log's folder (`logs`).
  */
 export const tauriPlatform: Platform = {
   ...webPlatform,
   kind: 'tauri',
   pluginHost: tauriPluginHost,
   engine: tauriEngineHost,
+  logs: tauriLogFolder,
 };
 
 // ── Close guard: Rust vetoes CloseRequested and forwards it as an event ────────────────────────

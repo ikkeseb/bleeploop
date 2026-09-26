@@ -5,6 +5,7 @@
 import type {
   AudioInputSource,
   EngineHost,
+  LogFolder,
   MidiBackend,
   OpenedInput,
   Platform,
@@ -211,6 +212,20 @@ const webMidi: MidiBackend = {
   },
 };
 
+const NO_LOG_FILE = 'The browser build writes no log file.';
+
+// Keep this below `webPluginHost`: probes that stand in for the native host flip the FIRST
+// `available: false` in this file, which must stay the plugin host's.
+const webLogFolder: LogFolder = {
+  available: false,
+  async path() {
+    throw new Error(NO_LOG_FILE);
+  },
+  async open() {
+    throw new Error(NO_LOG_FILE);
+  },
+};
+
 /** The web engine fake (below) plus what a probe reads and scripts through `__lf.native`. */
 export interface EngineFake extends EngineHost {
   /** Every command sent, in order (batches flattened). */
@@ -317,6 +332,7 @@ export const webPlatform: Platform = {
   kind: 'web',
   pluginHost: webPluginHost,
   engine: webEngineFake,
+  logs: webLogFolder,
   audioInput: webAudioInput,
   midi: webMidi,
 };

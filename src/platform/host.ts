@@ -7,12 +7,13 @@
  * standalone in a browser via `pnpm dev`, and gains native capabilities under Tauri later
  * with zero rewrite.
  *
- * Four capabilities are DECLARED here, but only TWO of them actually differ per platform:
+ * Five capabilities are DECLARED here, but only THREE of them actually differ per platform:
  *   - PluginHost      — native VST/CLAP hosting (web: stub; tauri: invoke/listen). The real seam.
  *   - EngineHost      — the native audio engine behind the engine-mode toggle (Stage 5 of
  *                        `docs/plans/native-engine.md`; web: a scriptable fake for probes).
+ *   - LogFolder       — the release log's folder, for Help's diagnostics (web: none).
  *   - AudioInputSource — mic/line. getUserMedia works inside WebView2, so tauri reuses the web one
- *                        verbatim (`tauriPlatform = { ...webPlatform, kind, pluginHost, engine }`).
+ *                        verbatim (`tauriPlatform = { ...webPlatform, kind, pluginHost, engine, logs }`).
  *   - MidiBackend      — W3C Web MIDI. WebView2 v149 ships it natively and `lib.rs` auto-grants the
  *                        permission, so tauri reuses the web one verbatim too. The engine's native
  *                        MIDI (midir, `src-tauri/src/engine_io/midi`) stays off for the release: WinMM
@@ -346,12 +347,27 @@ export interface EngineHost {
   subscribe(onFrame: (frame: FeedFrame) => void): () => void;
 }
 
+/**
+ * The release log's folder (tauri-plugin-log's rotated file, `src-tauri/src/lib.rs`). Help's "About
+ * this build" names it in the copied diagnostics and opens it, so a tester can attach the log to a
+ * report.
+ */
+export interface LogFolder {
+  /** False in the browser build: it writes no log file, and Help hides Open log folder. */
+  readonly available: boolean;
+  /** The folder's path, `%LOCALAPPDATA%` standing in for the user's profile. */
+  path(): Promise<string>;
+  /** Open the folder in Explorer. */
+  open(): Promise<void>;
+}
+
 export type PlatformKind = 'web' | 'tauri';
 
 export interface Platform {
   readonly kind: PlatformKind;
   readonly pluginHost: PluginHost;
   readonly engine: EngineHost;
+  readonly logs: LogFolder;
   readonly audioInput: AudioInputSource;
   readonly midi: MidiBackend;
 }
