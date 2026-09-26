@@ -9,7 +9,7 @@ import { notifyError } from '../notify';
 import { engineMode, platform, registerPluginBufferSink, releasePluginBuffer } from '../platform';
 import { CONFIRM_WINDOW_MS } from '../ui/looper/shared';
 import { refusalText, refuseOnLane } from '../ui/looper/gates';
-import { onRefused, openEngineDevice, startEngineStore } from '../ui/state/engine-store';
+import { onEngineEvent, openEngineDevice, startEngineStore } from '../ui/state/engine-store';
 
 /**
  * Native plugin-host boot chain (Tauri/WebView2 only — `available` is false in the browser build, so
@@ -81,9 +81,10 @@ export function bootPluginHost(): () => void {
  */
 function bootEngine(): () => void {
   const stopFeed = startEngineStore();
-  const stopRefusals = onRefused((lane, reason) =>
-    refuseOnLane(lane, refusalText(reason), reason === 'ConfirmClear' ? CONFIRM_WINDOW_MS : undefined),
-  );
+  const stopRefusals = onEngineEvent((ev) => {
+    if (ev.type !== 'Refused') return;
+    refuseOnLane(ev.lane, refusalText(ev.reason), ev.reason === 'ConfirmClear' ? CONFIRM_WINDOW_MS : undefined);
+  });
   if (platform.pluginHost.available) setNativeHostReady(false);
   void (async () => {
     try {

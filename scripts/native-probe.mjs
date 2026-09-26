@@ -5,6 +5,7 @@
 //   pnpm native:swap    swap stress     (src/debug/swap-stress.ts)
 //   pnpm native:recall  recall restart  (src/debug/recall-restart.ts): one launch per phase
 //   pnpm native:loopback  loopback sync (src/debug/loopback-sync.ts): needs an output cabled into input 1
+//   pnpm native:engine-smoke  the UI on the native engine (src/debug/engine-smoke.ts), engine mode on
 //
 // Options: `--asio` launches `pnpm dev:asio` instead of `pnpm dev:wasapi`; `--<knob>=<value>` becomes
 // `VITE_LF_PROBE_<KNOB>` (`--filter=Pro-Q,Saturn`, `--hold=`, `--settle=`, `--params=`, `--plugins=`:
@@ -18,7 +19,7 @@
 // full log lands in logs/native-<probe>.log. Windows node only: the app windows open on the PC desktop.
 
 import { execFileSync, spawn } from 'node:child_process';
-import { createWriteStream, mkdirSync, readFileSync } from 'node:fs';
+import { createWriteStream, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { appRunning, assertWindows, closeAppWindow, killNative, nativeRunning } from './native-kill.mjs';
@@ -30,6 +31,16 @@ const PROBES = {
   // `config`: a Tauri config overlay; its own identifier gives the run its own WebView2 profile, so the
   // owner's jam, recovery and settings are never read or written.
   'loopback-sync': { tag: 'loopback', end: /^(result: .*|FAIL.*)$/, pass: /^result: /, config: 'scripts/loopback-probe.tauri.json' },
+  // Engine mode on in its own profile: the toggle file lives in the identifier's app-local data folder
+  // (`src-tauri/src/engine_io/mode.rs`). One launch, closed through its window as the close button
+  // does; any other frontend `console.error` line fails it.
+  'engine-smoke': {
+    tag: 'engine-smoke',
+    config: 'scripts/engine-probe.tauri.json',
+    engineMode: 'com.bleeploop.engine-probe',
+    cleanLog: true,
+    phases: [{ name: 'smoke', end: /^(complete: .*|FAIL.*)$/, pass: /^complete: /, exit: 'os-close' }],
+  },
   // `recallLines`: how many `[rig-recall]` log lines the phase must print.
   'recall-restart': {
     tag: 'recall',
@@ -65,6 +76,13 @@ for (const arg of args) {
   }
 }
 const devScript = args.includes('--asio') ? 'dev:asio' : 'dev:wasapi';
+
+if (spec.engineMode) {
+  // Tauri's app-local data folder on Windows: %LOCALAPPDATA%\<identifier>.
+  const dir = join(process.env.LOCALAPPDATA ?? '', spec.engineMode);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'engine-mode'), 'on');
+}
 
 const busy = nativeRunning();
 if (busy.length) {
@@ -102,6 +120,7 @@ function launch(phase, phaseEnv) {
     let seen = false;
     let partial = '';
     let recallLines = 0;
+    const webviewErrors = [];
     let verdict;
     let settled = false;
 
@@ -109,7 +128,7 @@ function launch(phase, phaseEnv) {
       if (settled) return;
       settled = true;
       clearInterval(watchdog);
-      resolve({ line, reason, recallLines, stopped: stopRun(child) });
+      resolve({ line, reason, recallLines, webviewErrors, stopped: stopRun(child) });
     };
     // After the verdict line: `close` waits for the app to quit by itself, `os-close` closes its window
     // first, `crash` kills app.exe alone at once (no tree kill: the WebView2 processes are left to
@@ -149,6 +168,7 @@ function launch(phase, phaseEnv) {
         // eslint-disable-next-line no-control-regex
         const clean = raw.replace(/\x1b\[[0-9;]*m/g, '');
         if (clean.includes('[rig-recall]')) recallLines++;
+        if (spec.cleanLog && clean.includes('[webview][ERROR]') && !clean.includes(`[${spec.tag}]`)) webviewErrors.push(clean);
         const msg = clean.match(tagged)?.[1]?.trimEnd();
         if (msg === undefined) continue;
         seen = true;
@@ -183,6 +203,12 @@ for (const phase of phases) {
   result = await launch(phase, phaseEnv);
   if (result.stopped.length) console.log(`  stopped ${result.stopped.join(', ')}`);
   ok = result.line !== null && phase.pass.test(result.line);
+  if (ok && spec.cleanLog && result.webviewErrors.length) {
+    ok = false;
+    for (const line of result.webviewErrors) console.log(`  ${line}`);
+    result.reason = `${result.webviewErrors.length} frontend console.error line(s) besides the probe's own`;
+    result.line = null;
+  }
   if (ok && phase.recallLines !== undefined && result.recallLines !== phase.recallLines) {
     ok = false;
     result.reason = `${phase.name}: ${result.recallLines} [rig-recall] line(s), expected ${phase.recallLines}`;

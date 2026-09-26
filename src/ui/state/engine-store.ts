@@ -12,7 +12,6 @@ import {
   type FxParamId,
   type LaneInfo,
   type LaneState,
-  type Refusal,
 } from '../../platform';
 import type { PeakView, TrackState } from '../../audio/looper/looper';
 import { FX_META, FX_PARAM_DEFS, type FxState } from '../../audio/fx/metadata';
@@ -218,13 +217,14 @@ function peaksInto(i: number, out: PeakView): PeakView {
 
 // ── The feed reducer ──────────────────────────────────────────────────────────────────────────────
 
-type RefusalListener = (lane: number, reason: Refusal) => void;
-const refusalListeners = new Set<RefusalListener>();
+type EventListener = (ev: EngineEvent) => void;
+const eventListeners = new Set<EventListener>();
 
-/** Hear the engine refuse a hands-free press (the app shows why on the lane). Returns the unsubscribe. */
-export function onRefused(listener: RefusalListener): () => void {
-  refusalListeners.add(listener);
-  return () => refusalListeners.delete(listener);
+/** Hear every engine event after the store applied it (the app puts a refusal on its lane; the native
+ * smoke probe records beats). Returns the unsubscribe. */
+export function onEngineEvent(listener: EventListener): () => void {
+  eventListeners.add(listener);
+  return () => eventListeners.delete(listener);
 }
 
 function applyLane(lane: number, frame: number, info: LaneInfo): void {
@@ -258,9 +258,6 @@ function applyEvent(ev: EngineEvent): void {
       break;
     case 'Selected':
       setSelectedTrack(ev.lane);
-      break;
-    case 'Refused':
-      for (const listener of refusalListeners) listener(ev.lane, ev.reason);
       break;
     case 'TakeRejected':
       console.error(`[engine] track ${ev.lane}'s ${ev.overdub ? 'overdub layer' : 'take'} rejected: input gap`);
@@ -352,7 +349,10 @@ function applyFrameNow(f: FeedFrame): void {
   // start snaps to the grid it carries.
   if (f.status !== undefined) setDevice(f.status);
   if (f.anchor) plain.clock = f.anchor;
-  for (const ev of f.events) applyEvent(ev);
+  for (const ev of f.events) {
+    applyEvent(ev);
+    for (const listener of eventListeners) listener(ev);
+  }
   if (f.reset) {
     for (let i = 0; i < ENGINE_LANES; i++) {
       if (!f.events.some((ev) => ev.type === 'Lane' && ev.lane === i)) applyLane(i, 0, EMPTY_INFO);
