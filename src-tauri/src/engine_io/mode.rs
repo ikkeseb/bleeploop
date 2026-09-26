@@ -11,6 +11,7 @@
 
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
 
 use lf_engine::{Command, TimedCommand, SLOT_COUNT};
 use tauri::ipc::Channel;
@@ -28,6 +29,9 @@ const ASIO_HOLDER: u8 = 2;
 
 /// Set once, at setup.
 static APP: OnceLock<EngineApp> = OnceLock::new();
+
+/// How long the exit waits for the engine's shutdown (the plugins' unloads, then the device's close).
+const SHUTDOWN_WAIT: Duration = Duration::from_secs(8);
 
 /// This launch's engine, when it runs on the engine: the live line's `plugin_*` commands route to it.
 pub fn engine() -> Option<&'static EngineApp> {
@@ -91,14 +95,23 @@ impl EngineApp {
     }
 
     /// On exit: stop the feed, unload the plugins while the device still plays (each crossfades out),
-    /// then close the device and drop the engine on its owner thread.
+    /// then close the device and drop the engine on its owner thread. Waits at most `SHUTDOWN_WAIT`: a
+    /// plugin that hangs in its teardown is left to the process's exit rather than holding the app open.
     pub fn shutdown() {
         let Some(app) = engine() else { return };
-        if let Some((host, feed)) = &app.engine {
-            feed.stop();
-            app.unload_all();
-            host.shutdown();
-            log::info!("[engine_io] engine mode shut down");
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let spawned = std::thread::Builder::new().name("lf-engine-shutdown".into()).spawn(move || {
+            if let Some((host, feed)) = &app.engine {
+                feed.stop();
+                app.unload_all();
+                host.shutdown();
+            }
+            let _ = done_tx.send(());
+        });
+        match spawned.map(|_| done_rx.recv_timeout(SHUTDOWN_WAIT)) {
+            Ok(Ok(())) => log::info!("[engine_io] engine mode shut down"),
+            Ok(Err(_)) => log::error!("[engine_io] the engine did not shut down within {} s; exiting anyway", SHUTDOWN_WAIT.as_secs()),
+            Err(e) => log::error!("[engine_io] no thread for the engine's shutdown ({e}); exiting without it"),
         }
     }
 }
@@ -160,9 +173,11 @@ pub async fn engine_set_input_channel(channel: Option<u32>) -> Result<(), String
 
 /// A batch of commands, in order, at the next block. Fire-and-forget: what the engine refuses comes
 /// back on the feed; an error means the rest of the batch did not reach it. A slot going live takes the
-/// other slot off first: one is live at a time (two would sum the dry input twice).
+/// other slot off first: one is live at a time (two would sum the dry input twice). Synchronous: it
+/// runs on the main thread, where the IPC hands requests over in order, so two batches cannot swap
+/// (an async command runs on the runtime's pool); it only takes two brief locks.
 #[tauri::command]
-pub async fn engine_send(commands: Vec<WireCommand>) -> Result<(), String> {
+pub fn engine_send(commands: Vec<WireCommand>) -> Result<(), String> {
     let host = app()?.host()?;
     host.send_all(one_live(commands.into_iter().map(|c| c.0)).map(|command| TimedCommand { frame: None, command }))
 }

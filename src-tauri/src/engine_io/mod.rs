@@ -91,7 +91,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use lf_engine::grid::Frame;
-use lf_engine::{Engine, Event, Overview, SlotPort, SlotProcessor, TimedCommand, SLOT_COUNT};
+use lf_engine::{Command, Engine, Event, Overview, SlotPort, SlotProcessor, TimedCommand, SLOT_COUNT};
 use rtrb::{Consumer, Producer};
 use serde::{Deserialize, Serialize};
 
@@ -561,11 +561,13 @@ impl EngineHost {
         self.send_all([command])
     }
 
-    /// Queue a batch in order, as one: no engine rebuild's replay lands inside it. Stops at the first
-    /// command that fails (the rest are not sent).
+    /// Queue a batch in order, as one: no engine rebuild's replay lands inside it. A full ring stops it
+    /// there (the rest are not sent). While no engine exists every setting in it is kept, a note
+    /// release is dropped (nothing can be held), and any other action makes it an error.
     pub fn send_all(&self, commands: impl IntoIterator<Item = TimedCommand>) -> Result<(), String> {
         let mut settings = self.core.settings.lock().map_err(|_| "engine settings poisoned".to_string())?;
         let mut ends = self.core.ends.lock().map_err(|_| "engine ends poisoned".to_string())?;
+        let mut refused = false;
         for command in commands {
             let setting = settings.record(&command.command);
             match ends.as_mut() {
@@ -573,11 +575,10 @@ impl EngineHost {
                     self.core.counters.commands_full.fetch_add(1, Relaxed);
                     "the engine's command ring is full".to_string()
                 })?,
-                None if setting => {}
-                None => return Err("no audio device is open".to_string()),
+                None => refused |= !setting && !matches!(command.command, Command::NoteOff(_) | Command::AllNotesOff),
             }
         }
-        Ok(())
+        if refused { Err("no audio device is open".to_string()) } else { Ok(()) }
     }
 
     /// Lane `to` took lane `from`'s mixer and FX (the engine's `Copied` event): the kept settings follow.
