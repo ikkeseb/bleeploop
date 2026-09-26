@@ -42,6 +42,10 @@
  *   `VITE_LF_PROBE_BARS`     take length in bars at 120 BPM (default 8)
  *   `VITE_LF_PROBE_PLUGIN`   `<name substring>[:<format>]` loaded into slot 1 and taken live (default
  *                            `Pro-Q:vst3`); empty or `none`: MIC, the input dry through an empty live slot
+ *   `VITE_LF_PROBE_ECHO`     `1`: IN FX's ECHO (1/16, no feedback, level 0.5) is on while A records, and
+ *                            each beat's echo in A is measured against its click: one sixteenth later
+ *                            (within 0.05 ms) at half its level. C (echo off) = A is then the bar that the
+ *                            echo leaves the dry click where it was
  *   `VITE_LF_PROBE_UNLOAD_FIRST`  with MIC only: `<name substring>[:<format>]` loaded into slot 1 and
  *                            unloaded before MIC takes that slot, so the MIC takes' peak gain shows what
  *                            the unload left on the slot (compare it with a run without this knob)
@@ -53,7 +57,7 @@ import { availablePlugins, clearPlugin, nativeHostReady, pluginGain, selectPlugi
 import { goLive, inputArmed, stopLive } from '../audio/native-io';
 import { engineMode, type DeviceStatus, type PluginDescriptor } from '../platform';
 import { clock, looper, master, session } from '../ui/state/audio';
-import { engineDevice, onEngineEvent, openEngineDevice, setEngineInputChannel } from '../ui/state/engine-store';
+import { engineDevice, engineInputSends, onEngineEvent, openEngineDevice, setEngineInputChannel } from '../ui/state/engine-store';
 
 const TAG = '[engine-loopback]';
 const BPM = 120;
@@ -262,6 +266,32 @@ function analyse(name: string, laneIndex: number, pcm: Float32Array, rate: numbe
   return stats;
 }
 
+/** IN FX's echo in a take of the click (ECHO at 1/16, no feedback): each beat's echo onset against its
+ * click's, less a sixteenth note (ms), and its peak over the click's. */
+function echoIn(pcm: Float32Array, rate: number): { delay: number; ratio: number; found: number } {
+  const beat = (rate * 60) / BPM;
+  const sixteenth = beat / 4;
+  const reach = Math.round(beat / 8);
+  const beats = Math.round(pcm.length / beat);
+  const at = (from: number) => {
+    const win = new Float32Array(2 * reach);
+    const start = Math.round(from) - reach;
+    for (let i = 0; i < win.length; i++) win[i] = pcm[(((start + i) % pcm.length) + pcm.length) % pcm.length];
+    const o = onsetOf(win);
+    return { onset: o.onset < 0 ? NaN : start + o.onset, peak: o.peak };
+  };
+  const delays: number[] = [];
+  const ratios: number[] = [];
+  for (let k = 0; k < beats; k++) {
+    const click = at(k * beat);
+    const echo = at(k * beat + sixteenth);
+    if (!Number.isFinite(click.onset) || !Number.isFinite(echo.onset) || click.peak <= 0) continue;
+    delays.push(echo.onset - click.onset - sixteenth);
+    ratios.push(echo.peak / click.peak);
+  }
+  return { delay: toMs(median(delays), rate), ratio: median(ratios), found: delays.length };
+}
+
 /** The committed PCM of lane `i`, from the engine's snapshot. */
 async function committedPcm(i: number, masterFrames: number): Promise<Float32Array> {
   const snap = await session.exportSnapshot();
@@ -289,6 +319,7 @@ interface BufferResult {
   d: TakeStats;
   e: TakeStats;
   f: TakeStats;
+  echo: { delay: number; ratio: number; found: number } | null;
   bars: { name: string; ok: boolean; value: string }[];
 }
 
@@ -382,7 +413,8 @@ async function run(): Promise<void> {
   log(`input ${channel + 1} (channel ${channel}): ${source}; master 1, click ${CLICK_VOLUME}; ${bars} bars at ${BPM} BPM; buffers ${buffers.join(',')}`);
 
   const results: BufferResult[] = [];
-  for (const buffer of buffers) results.push(await runBuffer(buffer as BufferFrames, bars, channel, rejected));
+  const withEcho = !['', '0'].includes(String(import.meta.env.VITE_LF_PROBE_ECHO ?? '').trim());
+  for (const buffer of buffers) results.push(await runBuffer(buffer as BufferFrames, bars, channel, rejected, withEcho));
 
   if (liveSlot !== null) await stopLive(liveSlot);
   liveSlot = null;
@@ -405,7 +437,7 @@ async function run(): Promise<void> {
   log(`complete: input ${channel + 1}, ${short}, ${bars} bars, ms net, rejected ${rejected.length}; ${summary}`);
 }
 
-async function runBuffer(buffer: BufferFrames, bars: number, channel: number, rejected: string[]): Promise<BufferResult> {
+async function runBuffer(buffer: BufferFrames, bars: number, channel: number, rejected: string[], withEcho: boolean): Promise<BufferResult> {
   // ── Switch the device, as Audio Settings' buffer picker does ───────────────────────────────────────
   if (engineDevice()?.block !== buffer) {
     const t0 = performance.now();
@@ -435,10 +467,20 @@ async function runBuffer(buffer: BufferFrames, bars: number, channel: number, re
   try {
     // ── A: the click, a FIXED first take ─────────────────────────────────────────────────────────────
     clock.setMetronome(true);
+    if (withEcho) {
+      engineInputSends.setValue('echoTime', 3); // 1/16 (the lane delay's divisions)
+      engineInputSends.setValue('echoFeedback', 0);
+      engineInputSends.setValue('echoLevel', 0.5);
+      engineInputSends.setOn('echo', true);
+      await sleep(300);
+    }
     const msA = await take(0, 'A', 2 + masterFrames / rate + 15);
+    if (withEcho) engineInputSends.setOn('echo', false);
     check(looper.masterLengthFrames() === masterFrames, `the master is ${looper.masterLengthFrames()} frames, expected ${masterFrames}`);
     const pcmA = await committedPcm(0, masterFrames);
     const a = analyse('A', 0, pcmA, rate, ref, channel);
+    const echo = withEcho ? echoIn(pcmA, rate) : null;
+    if (echo) log(`  take A echo: ${echo.found} beats, ${signed(echo.delay, 3)} ms off a sixteenth, at ${echo.ratio.toFixed(3)} of its click`);
     const inputPeakA = guard.max;
 
     // ── B: lane 1's clicks through the cable, click off ──────────────────────────────────────────────
@@ -511,10 +553,17 @@ async function runBuffer(buffer: BufferFrames, bars: number, channel: number, re
       { name: '|clickX_E - clickX_A| <= 0.1 ms (the multiply take)', ok: Math.abs(e.x - a.x) <= 0.1, value: signed(e.x - a.x, 3) },
       { name: 'lane 1 is its loop twice after the multiply', ok: tileDiff === 0, value: `${tileDiff} of ${grown} frames differ` },
       { name: '|clickX_F - clickX_A| <= 0.1 ms (after the re-anchor)', ok: Math.abs(f.x - a.x) <= 0.1, value: signed(f.x - a.x, 3) },
+      ...(echo
+        ? [
+            { name: 'echo in A one sixteenth after its click, within 0.05 ms', ok: echo.found >= takes[0].found / 2 && Math.abs(echo.delay) <= 0.05, value: `${signed(echo.delay, 3)} ms over ${echo.found} beats` },
+            { name: 'echo in A at half its click (0.45..0.55)', ok: echo.ratio >= 0.45 && echo.ratio <= 0.55, value: echo.ratio.toFixed(3) },
+          ]
+        : []),
     ];
     for (const bar of barList) log(`b${buffer} ${bar.ok ? 'PASS' : 'FAIL'} ${bar.name}: ${bar.value}`);
-    return { device, a, b, c, d, e, f, bars: barList };
+    return { device, a, b, c, d, e, f, echo, bars: barList };
   } finally {
     unwatchInput();
+    if (withEcho) engineInputSends.setOn('echo', false);
   }
 }

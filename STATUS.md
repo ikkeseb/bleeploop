@@ -15,8 +15,8 @@ the driver's report; the web path's `native:smoke` in its own profile. Later tha
 `release:smoke`, in a fresh profile. In the evening, after multiply, IN FX, the stage view and
 Help's diagnostics landed: `pnpm rust:check` (462 tests), `pnpm check`, `pnpm build`, the browser
 probes 45/45; on the rig `native:engine-smoke` with Pro-Q and `native:engine-loopback` with its
-multiply phases (three launches, 30/30 bars at 64/128/256), and MIC's gain after a plugin unload
-measured through the cable.
+multiply phases (three launches, 30/30 bars at 64/128/256) and IN FX's echo (`--echo=1`, 12/12 at 128),
+and MIC's gain after a plugin unload measured through the cable.
 Driver latency reports are not guitar latency; after a relevant change, rerun only the affected check.
 
 **Last play: 2026-09-24** (web path, `pnpm dev:asio`, jam, two–three tracks, no pedal): the click too

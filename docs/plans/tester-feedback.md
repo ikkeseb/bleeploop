@@ -94,7 +94,10 @@ Proven in the browser tier only (`pnpm check`, `pnpm build`, `pnpm verify:jam`, 
   running app (`pnpm native:engine-loopback`, phases E and F); unheard.
 - **F15 (engine mode, 2026-09-26):** IN FX after MIC: an ECHO and a REVERB on the guitar (after the
   amp-sim), heard and recorded, the dry sound and the take's timing untouched
-  (`src-tauri/crates/lf-engine/tests/input_fx.rs`). Unheard; default levels are an agent's pick.
+  (`src-tauri/crates/lf-engine/tests/input_fx.rs`). Through the loopback cable in the running app
+  (`pnpm native:engine-loopback --echo=1`, ASIO 128): each click's echo one sixteenth later within
+  0.005 ms at 0.48 of it, the dry click where it was without the echo. Unheard; default levels are an
+  agent's pick.
 - **F3/F12 follow-up:** Help → About this build shows the version and commit, copies a diagnostics
   block and opens the log folder; the repo has a bug-report form asking for both.
 
