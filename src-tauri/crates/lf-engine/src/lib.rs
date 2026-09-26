@@ -16,6 +16,7 @@
 //! | [`engine`] | the callback: rings, the block split, the bus topology, master volume | `engine.ts`, `master.ts` |
 //! | [`effects`] | each lane's FX chain, the shared reverb bus, their grid, CLEAR and COPY on a lane's FX | `fx/fx.ts`, `looper/{playback,machine}.ts` |
 //! | [`instruments`] | the six built-in instruments, the selected one, the wheels, their record path | `synths/index.ts`, `input-router.ts` |
+//! | [`overview`] | what the UI draws, for a reader off the audio thread: the grid anchor, each lane's buffer, orientation and frames | — |
 //! | [`slots`] | the two plugin slots: install and removal through their ports, bypass crossfades, notes, live and gain, where each output goes | `plugin-bridge.ts`, `instrument-slots.ts` |
 //! | [`api`] | commands, events, the process context, the plugin seam ([`SlotProcessor`]) | — |
 //! | [`dsp`] | Stage 3 sound: the Tone/Blink building blocks, the six built-in synths, the per-track FX chain and the reverb bus, the limiter | Tone.js on Blink's Web Audio |
@@ -83,8 +84,10 @@ pub mod engine;
 pub mod grid;
 pub mod instruments;
 pub mod looper;
+pub mod overview;
 pub mod slots;
 
 pub use api::*;
 pub use engine::{Diag, Engine, EngineConfig, EngineHandle, Taps};
+pub use overview::{LaneView, Overview};
 pub use slots::SlotPort;

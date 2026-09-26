@@ -9,8 +9,8 @@ mod audio_input;
 // monitor for the wet plugin signal (branch-1 of the split). No boundary change (cpal is Rust-internal).
 #[cfg(windows)]
 mod audio_output;
-// The native engine's device side (docs/plans/native-engine.md § Stage 4): dormant until Stage 5
-// wires it behind a hidden toggle; a DEV probe drives it.
+// The native engine's device side (docs/plans/native-engine.md § Stage 4): engine mode runs it behind
+// the hidden toggle (`engine_io::mode`); a DEV probe drives it too.
 #[cfg(windows)]
 #[allow(dead_code)]
 mod engine_io;
@@ -277,6 +277,8 @@ pub fn run() {
                 if let Some(window) = app.get_webview_window("main") {
                     register_permission_autogrant(&window);
                 }
+                // Engine mode, read from its toggle once per launch.
+                app.manage(engine_io::mode::EngineApp::setup(app.handle()));
             }
             Ok(())
         })
@@ -337,7 +339,38 @@ pub fn run() {
             host::plugin_asio_device_info,
             host::plugin_asio_status,
             host::plugin_asio_probe,
+            // Engine mode (docs/plans/native-engine.md § Stage 5).
+            #[cfg(windows)]
+            engine_io::mode::engine_mode,
+            #[cfg(windows)]
+            engine_io::mode::engine_set_mode,
+            #[cfg(windows)]
+            engine_io::mode::engine_open,
+            #[cfg(windows)]
+            engine_io::mode::engine_close,
+            #[cfg(windows)]
+            engine_io::mode::engine_status,
+            #[cfg(windows)]
+            engine_io::mode::engine_set_input_channel,
+            #[cfg(windows)]
+            engine_io::mode::engine_send,
+            #[cfg(windows)]
+            engine_io::mode::engine_set_share,
+            #[cfg(windows)]
+            engine_io::mode::engine_feed,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            // The engine closes its device and drops the engine on its own threads, not in a destructor.
+            #[cfg(windows)]
+            if let tauri::RunEvent::Exit = event {
+                use tauri::Manager;
+                if let Some(engine) = app.try_state::<engine_io::mode::EngineApp>() {
+                    engine.shutdown();
+                }
+            }
+            #[cfg(not(windows))]
+            let _ = (app, event);
+        });
 }

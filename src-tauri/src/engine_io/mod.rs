@@ -1,6 +1,6 @@
-//! engine_io: the device side of the native engine (`docs/plans/native-engine.md` § Stage 4). Dormant
-//! until the plan's Stage 6 flip: a DEV probe drives it, and nothing on the live line calls it. This doc
-//! is the module's briefing.
+//! engine_io: the device side of the native engine (`docs/plans/native-engine.md` § Stage 4). Engine
+//! mode runs it behind the hidden toggle (`mode`; the UI drives it over `wire` and the feed), a DEV probe
+//! drives it headless, and nothing on the live line calls it. This doc is the module's briefing.
 //!
 //! [`EngineHost`] is the process-wide handle: one device owner thread serializes every device
 //! transition (open, backend switch, channel change, loss, close); the engine ([`lf_engine::Engine`])
@@ -22,6 +22,9 @@
 //! | `slot_host` | [`SlotHost`]: a plugin owner's install/remove/eviction handshake with the engine |
 //! | `frame_clock` | [`FrameClock`]: the callback's (time, frame) stamp and a press's frame |
 //! | `pipes` | [`pipes::PullPipe`]: frames pushed on one clock, pulled resampled on another (the WASAPI join, Share output) |
+//! | `feed` | the feed: what the UI reads back (events, device, status, anchor, meter, waveforms), on its own thread |
+//! | `mode` | engine mode: the toggle, the managed host, the `engine_*` Tauri commands, shutdown on exit |
+//! | `settings` | the last value of every setting command, replayed into each new engine |
 //! | `share` | Share output: the post-limiter master mirrored to a WASAPI endpoint while ASIO plays |
 //! | `midi` | native MIDI: ports, hot-plug, parse, the MIDI-learn bindings, notes and pedal actions |
 //! | `probe` | DEV: `app.exe --probe-engine`, the device side on real hardware (soak, switches, plugin swaps) |
@@ -62,12 +65,15 @@ mod cpal_driver;
 mod driver;
 #[cfg(test)]
 mod fake_driver;
+mod feed;
 pub mod frame_clock;
 pub mod midi;
+pub mod mode;
 mod owner;
 pub(crate) mod pipes;
 #[cfg(debug_assertions)]
 pub(crate) mod probe;
+mod settings;
 pub mod share;
 pub mod slot_host;
 #[cfg(test)]
@@ -83,7 +89,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use lf_engine::grid::Frame;
-use lf_engine::{Engine, Event, SlotPort, SlotProcessor, TimedCommand, SLOT_COUNT};
+use lf_engine::{Engine, Event, Overview, SlotPort, SlotProcessor, TimedCommand, SLOT_COUNT};
 use rtrb::{Consumer, Producer};
 use serde::{Deserialize, Serialize};
 
@@ -292,6 +298,7 @@ pub(crate) struct Rt {
 pub(crate) struct Ends {
     pub(crate) commands: Producer<TimedCommand>,
     pub(crate) events: Consumer<Event>,
+    pub(crate) overview: Arc<Overview>,
 }
 
 /// State shared by the device owner, the callbacks, the slot hosts and the command threads.
@@ -299,6 +306,10 @@ pub(crate) struct Core {
     /// The callback only `try_lock`s it.
     pub(crate) rt: Mutex<Rt>,
     pub(crate) ends: Mutex<Option<Ends>>,
+    /// The last value of every setting command, replayed into each new engine. Taken before `ends`.
+    pub(crate) settings: Mutex<settings::Settings>,
+    /// Bumped whenever the engine is replaced or dropped (the feed resyncs the UI).
+    pub(crate) engine_gen: AtomicU64,
     /// Each slot's port into the current engine (`None` before the first device opens).
     pub(crate) ports: [Mutex<Option<SlotPort>>; SLOT_COUNT],
     /// Whose unit is in the engine for this slot: the installing [`SlotHost`]'s token, set by a
@@ -327,6 +338,10 @@ pub(crate) struct Core {
     /// The alignment the output callback last rendered with (`DeviceStatus`).
     pub(crate) align_frames: AtomicI64,
     pub(crate) input_frames: AtomicI64,
+    /// The input meter since the feed last took it: the capture channel's peak (f32 bits) and whether
+    /// a sample reached full scale.
+    pub(crate) meter_peak: AtomicU32,
+    pub(crate) meter_clip: AtomicBool,
     /// The engine's own counters, mirrored each callback so `EngineHost::diag` never takes the lock
     /// (a reader holding it would make the callback miss).
     pub(crate) engine_diag: EngineDiag,
@@ -351,6 +366,8 @@ impl Core {
                 taps: None,
             }),
             ends: Mutex::new(None),
+            settings: Mutex::new(settings::Settings::default()),
+            engine_gen: AtomicU64::new(0),
             ports: std::array::from_fn(|_| Mutex::new(None)),
             holder: std::array::from_fn(|_| AtomicU64::new(0)),
             next_token: AtomicU64::new(1),
@@ -364,6 +381,8 @@ impl Core {
             frame: AtomicI64::new(0),
             align_frames: AtomicI64::new(0),
             input_frames: AtomicI64::new(0),
+            meter_peak: AtomicU32::new(0),
+            meter_clip: AtomicBool::new(false),
             engine_diag: EngineDiag::default(),
             device: Mutex::new(None),
             device_events: Mutex::new(Vec::new()),
@@ -528,14 +547,49 @@ impl EngineHost {
         self.core.device_events.lock().map(|mut events| std::mem::take(&mut *events)).unwrap_or_default()
     }
 
-    /// Queue a command for the engine. Err when no engine exists yet or the ring is full (counted).
+    /// Queue a command for the engine. A setting is also kept and replayed into every new engine
+    /// (`settings`), so one sent before the first open is not lost. Err when the ring is full
+    /// (counted), or for an action while no engine exists yet.
     pub fn send(&self, command: TimedCommand) -> Result<(), String> {
+        self.send_all([command])
+    }
+
+    /// Queue a batch in order, as one: no engine rebuild's replay lands inside it. Stops at the first
+    /// command that fails (the rest are not sent).
+    pub fn send_all(&self, commands: impl IntoIterator<Item = TimedCommand>) -> Result<(), String> {
+        let mut settings = self.core.settings.lock().map_err(|_| "engine settings poisoned".to_string())?;
         let mut ends = self.core.ends.lock().map_err(|_| "engine ends poisoned".to_string())?;
-        let ends = ends.as_mut().ok_or_else(|| "no audio device is open".to_string())?;
-        ends.commands.push(command).map_err(|_| {
-            self.core.counters.commands_full.fetch_add(1, Relaxed);
-            "the engine's command ring is full".to_string()
-        })
+        for command in commands {
+            let setting = settings.record(&command.command);
+            match ends.as_mut() {
+                Some(ends) => ends.commands.push(command).map_err(|_| {
+                    self.core.counters.commands_full.fetch_add(1, Relaxed);
+                    "the engine's command ring is full".to_string()
+                })?,
+                None if setting => {}
+                None => return Err("no audio device is open".to_string()),
+            }
+        }
+        Ok(())
+    }
+
+    /// Lane `to` took lane `from`'s mixer and FX (the engine's `Copied` event): the kept settings follow.
+    pub(crate) fn copied(&self, from: u8, to: u8) {
+        if let Ok(mut settings) = self.core.settings.lock() {
+            settings.copy_lane(from, to);
+        }
+    }
+
+    /// Move the engine's events into `out`, as `drain_events`; with the generation of the engine they
+    /// came from and its overview (`None` while no engine exists), read under the same lock.
+    pub(crate) fn drain_feed(&self, out: &mut Vec<Event>) -> (u64, Option<Arc<Overview>>) {
+        let Ok(mut ends) = self.core.ends.lock() else { return (self.core.engine_gen.load(Acquire), None) };
+        let gen = self.core.engine_gen.load(Acquire);
+        let Some(ends) = ends.as_mut() else { return (gen, None) };
+        while let Ok(e) = ends.events.pop() {
+            out.push(e);
+        }
+        (gen, Some(ends.overview.clone()))
     }
 
     /// Move the engine's events into `out`.
@@ -547,6 +601,13 @@ impl EngineHost {
                 }
             }
         }
+    }
+
+    /// The input meter since the last call: the capture channel's linear peak, and whether a sample
+    /// reached full scale.
+    pub fn take_meter(&self) -> (f32, bool) {
+        let peak = f32::from_bits(self.core.meter_peak.swap(0, Relaxed));
+        (peak, self.core.meter_clip.swap(false, Relaxed))
     }
 
     /// The engine's sample rate, once a device opened.

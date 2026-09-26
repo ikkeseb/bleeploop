@@ -81,6 +81,15 @@ impl FrameClock {
         None
     }
 
+    /// The last callback's stamp: device frame `frame` began rendering at `at` (Unix time, ms), at
+    /// `rate` frames a second. `None` while no callback runs.
+    pub fn anchor(&self) -> Option<(Frame, f64, u32)> {
+        let (entry_ns, frame, _, rate) = self.read()?;
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?;
+        let ago_ns = stamp(Instant::now()).saturating_sub(entry_ns);
+        Some((frame, now.as_secs_f64() * 1e3 - ago_ns as f64 / 1e6, rate))
+    }
+
     /// The frame a press that arrived at `at` lands on: the render position then, plus one block.
     /// `None` while no callback runs (native MIDI then drops the press: `super::midi`'s rules).
     pub fn press_frame(&self, at: Instant) -> Option<Frame> {

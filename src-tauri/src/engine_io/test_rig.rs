@@ -37,7 +37,7 @@ impl TestDevice {
         let [p0, p1] = handle.slots;
         *core.ports[0].lock().unwrap() = Some(p0);
         *core.ports[1].lock().unwrap() = Some(p1);
-        *core.ends.lock().unwrap() = Some(Ends { commands: handle.commands, events: handle.events });
+        *core.ends.lock().unwrap() = Some(Ends { commands: handle.commands, events: handle.events, overview: handle.overview });
         core.rt.lock().unwrap().engine = Some(engine);
         core.rate.store(rate, Relaxed);
         core.max_block.store(config.max_block as u32, Relaxed);

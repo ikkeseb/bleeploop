@@ -19,6 +19,16 @@ fn validate_slot(slot: u8) -> Result<(), String> {
     }
 }
 
+/// In engine mode the engine owns the audio device: the live line's device arms are refused (GO LIVE
+/// is the engine's `SetSlotLive`).
+#[cfg(windows)]
+fn refuse_in_engine_mode(command: &str) -> Result<(), String> {
+    if crate::engine_io::mode::active() {
+        return Err(format!("{command}: engine mode owns the audio device"));
+    }
+    Ok(())
+}
+
 fn validate_note_event(note: u16, velocity: Option<f64>) -> Result<(), String> {
     if note > 127 {
         return Err(format!("invalid MIDI note {note} (expected 0..=127)"));
@@ -420,6 +430,7 @@ pub async fn plugin_arm_input(
     validate_slot(slot)?;
     #[cfg(windows)]
     {
+        refuse_in_engine_mode("plugin_arm_input")?;
         super::clap::arm_input(&state, slot, device_id, channel)
     }
     #[cfg(not(windows))]
@@ -482,6 +493,7 @@ pub async fn plugin_arm_monitor(
     validate_slot(slot)?;
     #[cfg(windows)]
     {
+        refuse_in_engine_mode("plugin_arm_monitor")?;
         super::clap::arm_monitor(&state, slot, device_id)
     }
     #[cfg(not(windows))]

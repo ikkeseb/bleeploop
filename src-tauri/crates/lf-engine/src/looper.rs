@@ -15,6 +15,8 @@
 //! and spare; a kept retake pass swaps in from the free buffer; reverse is an index-mapping flag. What
 //! must be copied is a block job (see [`Job`]); nothing does loop-sized work in one callback.
 
+use std::sync::Arc;
+
 use crate::api::{Action, Event, LaneInfo, LaneState, Refusal, TRACK_COUNT};
 use crate::autorec::{self, Detector};
 use crate::clock::Clock;
@@ -24,6 +26,7 @@ use crate::grid::{
     clamp_bars, commit_anchor, frames_per_bar, loop_pos, max_whole_bars, next_boundary, plan_commit, plan_free_stop,
     plan_later_stop, plan_retake_stop, Frame, Grid, RetakeStop, TakeFill, COUNT_IN_BEATS,
 };
+use crate::overview::{LaneView, Overview};
 
 pub const MAX_FIXED_BARS: Frame = 32;
 /// Buffer positions a block job moves per rendered frame. A job always starts where a read or write head
@@ -261,6 +264,7 @@ pub struct Looper {
     clear_armed: Option<(usize, Frame)>,
     published: [Option<LaneInfo>; TRACK_COUNT],
     published_transport: Option<(Frame, u32, bool)>,
+    overview: Arc<Overview>,
 }
 
 impl Looper {
@@ -297,6 +301,7 @@ impl Looper {
             clear_armed: None,
             published: [None; TRACK_COUNT],
             published_transport: None,
+            overview: Arc::new(Overview::new()),
         }
     }
 
@@ -317,6 +322,11 @@ impl Looper {
 
     pub fn selected(&self) -> usize {
         self.selected
+    }
+
+    /// What the UI draws, for a reader off the audio thread (`EngineHandle::overview`).
+    pub fn overview(&self) -> &Arc<Overview> {
+        &self.overview
     }
 
     pub fn info(&self, i: usize) -> LaneInfo {
@@ -1383,7 +1393,7 @@ impl Looper {
 
     // ── Feed ───────────────────────────────────────────────────────────────────────────────────────
 
-    /// Emit what changed since the last publish: lane infos and the transport.
+    /// Emit what changed since the last publish: lane infos and the transport; and store the overview.
     pub fn publish(&mut self, cx: &mut Cx) {
         for i in 0..TRACK_COUNT {
             let info = self.info(i);
@@ -1391,7 +1401,15 @@ impl Looper {
                 self.published[i] = Some(info);
                 cx.feed.push(Event::Lane { frame: cx.now, lane: i as u8, info });
             }
+            let t = &self.lanes[i];
+            let frames = match t.state {
+                LaneState::Recording if !t.armed && !t.auto_armed => t.written.min(self.capacity),
+                LaneState::Overdubbing | LaneState::Playing | LaneState::Stopped => t.length,
+                _ => 0,
+            };
+            self.overview.set_lane(i, LaneView { buf: t.live, frames, reversed: t.reversed });
         }
+        self.overview.set_grid(self.anchor);
         let transport = (self.master, cx.clock.bpm(), cx.clock.locked());
         if self.published_transport != Some(transport) {
             self.published_transport = Some(transport);

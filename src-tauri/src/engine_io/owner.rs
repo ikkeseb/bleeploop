@@ -13,7 +13,7 @@ use std::sync::{Arc, MutexGuard};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use lf_engine::{Engine, EngineConfig, EngineHandle, SlotPort, SlotProcessor, SLOT_COUNT};
+use lf_engine::{Engine, EngineConfig, EngineHandle, SlotPort, SlotProcessor, TimedCommand, SLOT_COUNT};
 use rtrb::{Consumer, Producer, RingBuffer};
 
 use super::callback::{Run, Tap, TapEnd, LATENCY_SAMPLES, MAX_DEVICE_BLOCK};
@@ -48,7 +48,7 @@ const STACK: usize = 4 << 20;
 /// handed back, so its owner re-activates it at them. The device owner's rebuild, and the test
 /// device's.
 pub(crate) fn swap_engine(core: &Core, engine: Engine, handle: EngineHandle, config: EngineConfig) -> Option<Engine> {
-    let EngineHandle { commands, events, slots } = handle;
+    let EngineHandle { commands, events, slots, overview } = handle;
     let mut ports = core.ports.each_ref().map(|p| p.lock().unwrap_or_else(|e| e.into_inner()));
     core.rate.store(config.sample_rate, Relaxed);
     core.max_block.store(config.max_block as u32, Relaxed);
@@ -63,7 +63,19 @@ pub(crate) fn swap_engine(core: &Core, engine: Engine, handle: EngineHandle, con
     for (port, new) in ports.iter_mut().zip(slots) {
         **port = Some(new);
     }
-    *core.ends.lock().unwrap_or_else(|e| e.into_inner()) = Some(Ends { commands, events });
+    {
+        // The kept settings go in first, in order: they apply at the new engine's first block. Taken
+        // before `ends`, as a sender takes them, so no batch splits around the replay.
+        let settings = core.settings.lock().unwrap_or_else(|e| e.into_inner());
+        let mut ends = core.ends.lock().unwrap_or_else(|e| e.into_inner());
+        let ends = ends.insert(Ends { commands, events, overview });
+        for command in settings.replay() {
+            if ends.commands.push(TimedCommand { frame: None, command }).is_err() {
+                core.counters.commands_full.fetch_add(1, Relaxed);
+            }
+        }
+        core.engine_gen.fetch_add(1, Release);
+    }
     old
 }
 
@@ -594,7 +606,11 @@ impl<D: Driver> Owner<D> {
             **port = None;
         }
         drop(ports);
-        *self.core.ends.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        {
+            let mut ends = self.core.ends.lock().unwrap_or_else(|e| e.into_inner());
+            *ends = None;
+            self.core.engine_gen.fetch_add(1, Release);
+        }
         self.core.rate.store(0, Relaxed);
         self.core.max_block.store(0, Relaxed);
         drop(engine);

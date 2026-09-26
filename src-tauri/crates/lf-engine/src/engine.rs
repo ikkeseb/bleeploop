@@ -33,6 +33,7 @@ use crate::effects::LaneFx;
 use crate::grid::Frame;
 use crate::instruments::Instruments;
 use crate::looper::{Applied, Cx, Looper};
+use crate::overview::Overview;
 use crate::slots::{Rack, SlotPort};
 
 /// Commands the engine holds for a future frame (MIDI press frames, a wait for a block job).
@@ -59,11 +60,12 @@ impl EngineConfig {
     }
 }
 
-/// The non-RT side: send commands, read the feed, install and take back plugin units.
+/// The non-RT side: send commands, read the feed and the overview, install and take back plugin units.
 pub struct EngineHandle {
     pub commands: Producer<TimedCommand>,
     pub events: Consumer<Event>,
     pub slots: [SlotPort; SLOT_COUNT],
+    pub overview: Arc<Overview>,
 }
 
 /// The event ring's producer. A full ring drops the event and counts it: the audio never waits.
@@ -168,10 +170,12 @@ impl Engine {
         let table = |[l, r]: [Vec<f32>; 2]| Arc::new(AudioBuffer::new(config.sample_rate as f32, vec![l, r]));
         let (white, pink) = (table(white), table(pink));
         let (rack, slots) = Rack::new(config.sample_rate, config.max_block);
+        let looper = Looper::new(config.sample_rate, capacity);
+        let overview = looper.overview().clone();
         let engine = Engine {
             config,
             clock: Clock::new(config.sample_rate),
-            looper: Looper::new(config.sample_rate, capacity),
+            looper,
             feed: Feed { tx: evt_tx, dropped: 0 },
             commands: cmd_rx,
             pending: [None; MAX_PENDING],
@@ -203,7 +207,7 @@ impl Engine {
             commands_dropped: 0,
             xruns: 0,
         };
-        (engine, EngineHandle { commands: cmd_tx, events: evt_rx, slots })
+        (engine, EngineHandle { commands: cmd_tx, events: evt_rx, slots, overview })
     }
 
     pub fn config(&self) -> &EngineConfig {

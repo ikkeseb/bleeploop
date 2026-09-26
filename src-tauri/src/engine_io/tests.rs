@@ -763,3 +763,85 @@ fn a_clean_run_through_switches_and_a_plugin_swap_counts_nothing_and_allocates_n
     let quiet = super::IoDiag { callbacks: diag.callbacks, ..Default::default() };
     assert_eq!(diag, quiet, "every counter but the callbacks stays 0");
 }
+
+#[test]
+fn settings_sent_before_the_first_open_and_across_a_new_rate_reach_every_engine() {
+    let mut h = Harness::new();
+    let send = |command| h.host.send(TimedCommand { frame: None, command });
+    assert!(send(Command::SetBpm(90.0)).is_ok(), "a setting is kept while no engine exists");
+    assert!(send(Command::RecDub(0)).is_err(), "an action needs an engine");
+    h.open(asio(Some(256)));
+    h.wait_event("the first engine starts at the kept tempo", |e| matches!(e, Event::Transport { bpm: 90, .. }).then_some(()));
+    h.send(Command::SetBpm(100.0));
+    h.wait_event("the tempo changes", |e| matches!(e, Event::Transport { bpm: 100, .. }).then_some(()));
+    h.fake.asio.lock().unwrap().as_mut().unwrap().rate = 44_100;
+    h.open(asio(Some(128)));
+    let bpm = h.wait_event("the new engine reports its transport", |e| match e {
+        Event::Transport { bpm, .. } => Some(*bpm),
+        _ => None,
+    });
+    assert_eq!(bpm, 100, "a new engine gets the last tempo sent, before its first publish");
+}
+
+/// Tick `feed` until it sends a frame `want` accepts; every frame sent meanwhile goes to `seen`.
+fn feed_until(feed: &mut super::feed::Feed, seen: &mut Vec<super::wire::FeedFrame>, what: &str, want: impl Fn(&super::wire::FeedFrame) -> bool) -> super::wire::FeedFrame {
+    let deadline = Instant::now() + PATIENCE;
+    loop {
+        if let Some(frame) = feed.tick(false) {
+            seen.push(frame.clone());
+            if want(&frame) {
+                return frame;
+            }
+        }
+        assert!(Instant::now() < deadline, "no feed frame: {what}");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+#[test]
+fn the_feed_resyncs_a_new_subscriber_and_a_new_engine() {
+    use super::feed::Feed;
+    let h = Harness::new();
+    h.fake.set_input(tone);
+    let mut feed = Feed::new(h.host.clone());
+    let lanes = |f: &super::wire::FeedFrame| f.events.iter().filter(|e| matches!(e.0, Event::Lane { info, .. } if info.state == LaneState::Empty)).count();
+
+    let first = feed.tick(true).expect("a new subscriber gets a frame at once");
+    assert!(first.reset && first.status == Some(None) && first.anchor.is_none() && first.meter.is_none());
+    assert_eq!(lanes(&first), 5, "every lane, EMPTY");
+    assert!(matches!(first.events.last().map(|e| e.0), Some(Event::Selected { lane: 0, .. })));
+    assert!(feed.tick(false).is_none(), "no device and nothing changed: nothing to send");
+
+    h.host.send(TimedCommand { frame: None, command: Command::SetBpm(240.0) }).unwrap();
+    h.open(asio(Some(256)));
+    let mut seen = Vec::new();
+    let reset = feed_until(&mut feed, &mut seen, "the first engine resets the UI", |f| f.reset);
+    assert!(matches!(reset.status, Some(Some(DeviceStatus { sample_rate: 48_000, .. }))));
+    let anchor = feed_until(&mut feed, &mut seen, "the running device's anchor", |f| f.anchor.is_some()).anchor.unwrap();
+    assert_eq!(anchor.rate, 48_000);
+    assert!(anchor.frame >= 0 && anchor.at_ms > 1.7e12, "a device frame at a Unix time");
+    let meter = feed_until(&mut feed, &mut seen, "the input meter moves", |f| f.meter.is_some_and(|m| m.peak > 0.0)).meter.unwrap();
+    assert!(meter.peak <= 0.5 && !meter.clip, "the tone's peak, no clip");
+    let kept = |f: &super::wire::FeedFrame| f.events.iter().any(|e| matches!(e.0, Event::Transport { bpm: 240, .. }));
+    if !seen.iter().any(kept) {
+        feed_until(&mut feed, &mut seen, "the kept tempo on the transport", kept);
+    }
+
+    // A second subscriber (a WebView reload) gets the whole state again.
+    let again = feed.tick(true).expect("a reset frame");
+    assert!(again.reset && matches!(again.status, Some(Some(_))));
+    assert!(matches!(again.events.first().map(|e| e.0), Some(Event::Transport { bpm: 240, .. })), "the transport the engine reported");
+    assert_eq!(lanes(&again), 5);
+
+    // Another rate builds a new engine: the UI resets again.
+    h.fake.asio.lock().unwrap().as_mut().unwrap().rate = 44_100;
+    h.open(asio(Some(128)));
+    let reset = feed_until(&mut feed, &mut seen, "the new engine resets the UI", |f| f.reset);
+    assert!(reset.seq > again.seq);
+    let anchor = feed_until(&mut feed, &mut seen, "the new device's anchor", |f| f.anchor.is_some_and(|a| a.rate == 44_100)).anchor.unwrap();
+    assert_eq!(anchor.rate, 44_100);
+    h.host.close().unwrap();
+    let closed = feed_until(&mut feed, &mut seen, "the stopped device", |f| f.status == Some(None));
+    assert!(closed.anchor.is_none() && closed.meter.is_none());
+    assert!(seen.windows(2).all(|w| w[1].seq > w[0].seq), "frames in order");
+}

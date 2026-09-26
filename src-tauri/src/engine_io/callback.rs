@@ -33,6 +33,8 @@ const FADE_SECONDS: f64 = 0.010;
 const SILENT_BLOCKS: u32 = 2;
 /// Latency reports whose median the alignment takes before it freezes for the run.
 pub(crate) const LATENCY_SAMPLES: usize = 16;
+/// An input sample at or past this reached full scale (the meter's clip).
+const CLIP_LEVEL: f32 = 0.999;
 
 /// Share output's end in the callback (`share::ShareTap`; a fake in tests): fed the rendered stereo
 /// master every block. Never blocks or allocates.
@@ -521,6 +523,7 @@ impl Render {
             Source::Duplex => &handoff[..],
             Source::Join { x, .. } => &x[..],
         };
+        meter(&self.core, &input[..avail.min(input.len())]);
         let mut engine = engine.as_mut().filter(|_| !*faulted);
         let max_block = self.left.len();
         let target = if fading { 0.0 } else { 1.0 };
@@ -560,6 +563,18 @@ impl Render {
             Source::Join { pipe, delay, .. } => *delay.get_or_insert_with(|| pipe.delay_frames().round() as Frame),
         };
         (align + delay, input + delay)
+    }
+}
+
+/// Fold a block of input into the meter the feed takes: its peak, and a clip.
+fn meter(core: &Core, input: &[f32]) {
+    let peak = input.iter().fold(0.0f32, |m, x| m.max(x.abs()));
+    if peak > 0.0 {
+        // A non-negative f32's bits order as the value does.
+        core.meter_peak.fetch_max(peak.to_bits(), Relaxed);
+    }
+    if peak >= CLIP_LEVEL {
+        core.meter_clip.store(true, Relaxed);
     }
 }
 
