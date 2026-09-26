@@ -196,6 +196,32 @@ function phaseValue(): number {
   return (p < 0 ? p + m : p) / m;
 }
 
+/** When device frame `frame` is heard, on `Date.now()`'s clock; now while no device runs. */
+function heardAtMs(frame: number): number {
+  const c = plain.clock;
+  return c.rate > 0 ? c.atMs + ((frame - c.frame + plain.heardLag) * 1000) / c.rate : Date.now();
+}
+
+/** The longest a beat waits to be shown: a stale anchor must not park it. */
+const MAX_BEAT_WAIT_MS = 1000;
+const beatTimers = new Set<ReturnType<typeof setTimeout>>();
+
+/** Run `show` when device frame `frame` is heard (the beat LED and the count-in numeral, as the playhead
+ * is drawn): a beat arrives on the feed as the engine renders it, one output latency early. A few writes
+ * a second, each one change (invariant 6). */
+function whenHeard(frame: number, show: () => void): void {
+  const wait = Math.min(MAX_BEAT_WAIT_MS, heardAtMs(frame) - Date.now());
+  if (wait <= 0) {
+    show();
+    return;
+  }
+  const timer = setTimeout(() => {
+    beatTimers.delete(timer);
+    show();
+  }, wait);
+  beatTimers.add(timer);
+}
+
 /** A later take's record head, 0..1 of the master; -1 before a master exists (first take). */
 function recHeadFrac(i: number): number {
   const m = plain.master;
@@ -258,10 +284,14 @@ function applyEvent(ev: EngineEvent): void {
       setBpmSignal(ev.bpm);
       setBpmLocked(ev.locked);
       break;
-    case 'Beat':
-      setBeat(ev.beatInBar % 4);
-      setCountLeft(ev.countLeft);
+    case 'Beat': {
+      const { beatInBar, countLeft: left } = ev;
+      whenHeard(ev.frame, () => {
+        setBeat(beatInBar % 4);
+        setCountLeft(left);
+      });
       break;
+    }
     case 'Selected':
       setSelectedTrack(ev.lane);
       break;
@@ -367,6 +397,8 @@ function applyFrameNow(f: FeedFrame): void {
       p.count = 0;
       p.version++;
     }
+    for (const timer of beatTimers) clearTimeout(timer);
+    beatTimers.clear();
     setCountLeft(0);
   }
   // The device and its clock first: the anchor is read after the frame's events, so a take the events

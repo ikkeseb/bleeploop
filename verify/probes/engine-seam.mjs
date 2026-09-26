@@ -9,7 +9,8 @@
  *   `src/main.tsx` loads the app with the constructors hidden);
  * - gesture → command: BPM +, CLICK, the lane core (its pointerdown selects), Space (the engine's
  *   hands-free `Action`), a lane volume, MIC (an empty slot goes live), a PC key (NoteOn, NoteOff);
- * - frame → DOM: a count-in (ARMED, the numeral, the beat LED, the BPM lock), a live take, a committed
+ * - frame → DOM: a count-in (ARMED, the numeral, the beat LED, the BPM lock), a beat LED shown when the
+ *   beat is heard (its frame and the output latency against the clock anchor), a live take, a committed
  *   loop (PLAYING, the loop readout, a moving ring dial from the clock anchor), the record meter, a
  *   refusal on its lane, the selection, a COPY carrying the lane's volume, a lane's mix kept when it only
  *   goes EMPTY and reset by `Cleared`, and a reload's reset frame whose remembered settings are adopted.
@@ -37,6 +38,8 @@ const lane = (state, extra = {}) => ({
   ...extra,
 });
 const laneEvent = (i, info, frame = 0) => ({ Lane: { frame, lane: i, info } });
+/** The clock anchor with `frame` rendering now: a beat at that frame is heard at once (heard lag 0). */
+const anchorAt = (frame) => ({ frame, atMs: Date.now(), rate: RATE, grid: 0 });
 const transport = (master, locked, bpm = 120) => ({ Transport: { frame: 0, master, bpm, locked } });
 
 await probe(async ({ open }) => {
@@ -118,6 +121,7 @@ await probe(async ({ open }) => {
       transport(0, true, 121),
       { Beat: { frame: 0, beatInBar: 0, countLeft: 4, clicked: true } },
     ],
+    anchor: anchorAt(0),
   });
   assert.equal(await lanes.nth(0).getAttribute('data-state'), 'armed');
   assert.equal(await lanes.nth(0).locator('.lp-lane__count').textContent(), '4');
@@ -126,11 +130,11 @@ await probe(async ({ open }) => {
   assert.ok(await page.getByRole('button', { name: 'BPM plus' }).isDisabled(), 'BPM + is disabled while locked');
   assert.ok(await page.locator('.transport__beat').nth(0).evaluate((el) => el.classList.contains('on')), 'beat LED 1 lit');
 
-  await emit({ events: [{ Beat: { frame: 12000, beatInBar: 1, countLeft: 3, clicked: true } }] });
+  await emit({ events: [{ Beat: { frame: 12000, beatInBar: 1, countLeft: 3, clicked: true } }], anchor: anchorAt(12000) });
   assert.equal(await lanes.nth(0).locator('.lp-lane__count').textContent(), '3');
   assert.ok(await page.locator('.transport__beat').nth(1).evaluate((el) => el.classList.contains('on')), 'beat LED 2 lit');
 
-  await emit({ events: [laneEvent(0, lane('Recording')), { Beat: { frame: BAR, beatInBar: 0, countLeft: 0, clicked: true } }] });
+  await emit({ events: [laneEvent(0, lane('Recording')), { Beat: { frame: BAR, beatInBar: 0, countLeft: 0, clicked: true } }], anchor: anchorAt(BAR) });
   assert.equal(await lanes.nth(0).getAttribute('data-state'), 'rec');
   assert.equal(await lanes.nth(0).locator('.lp-lane__state').textContent(), '● REC');
 
@@ -217,6 +221,21 @@ await probe(async ({ open }) => {
   assert.equal(await page.getByRole('slider', { name: 'Master volume' }).inputValue(), '60', "the engine's master volume is adopted");
   assert.ok(!adopted.some((c) => c.SetVolume || c.SetMasterVolume !== undefined || c.SetMetronome !== undefined), 'adopted settings are not pushed back');
   assert.ok(adopted.some((c) => c.SetClickVolume === 0.7), 'the persisted click volume the engine lacks is sent');
+
+  // ── A beat is shown when it is heard: 0.3 s of frames ahead of the render clock, plus 0.1 s of output
+  // latency, keeps the beat LED waiting ~0.4 s ───────────────────────────────────────────────────────
+  const led = (k) => page.locator('.transport__beat').nth(k).evaluate((el) => el.classList.contains('on'));
+  await emit({
+    status: { backend: 'Wasapi', sampleRate: RATE, block: 256, inputName: 'Fake input', outputName: 'Fake output', alignFrames: 4800, inputFrames: 0, inputOpen: true },
+    anchor: anchorAt(10 * BAR),
+    events: [{ Beat: { frame: 10 * BAR + 14400, beatInBar: 2, countLeft: 0, clicked: true } }],
+  });
+  const t0 = Date.now();
+  assert.equal(await led(2), false, 'the beat is not shown before it is heard');
+  await page.waitForFunction(() => document.querySelectorAll('.transport__beat')[2].classList.contains('on'), undefined, { timeout: 2000, polling: 10 });
+  const shownAfter = Date.now() - t0;
+  console.log(`beat shown ${shownAfter} ms after its frame arrived (heard 400 ms later)`);
+  assert.ok(shownAfter > 250 && shownAfter < 700, `the beat LED waited for the heard time (${shownAfter} ms)`);
 
   // Engine mode never builds the web audio path, nor Tone's default context (`src/main.tsx`).
   const contexts = await page.evaluate(() => window.__audioContexts);
