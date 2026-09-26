@@ -3,8 +3,9 @@
 //! Tauri commands, and the shutdown on exit.
 //!
 //! The toggle is a file in the app-local data folder, read once at setup and applied on the next
-//! launch, never live (ASIO allows one client). Off, the app is the live line and every `engine_*`
-//! command but `engine_mode`, `engine_set_mode` and `engine_status` answers an error. On, the engine
+//! launch, never live (ASIO allows one client). Engine mode is the default: only `off` in the file (the
+//! Audio Settings switch writes `on` or `off`) runs the web audio path, the live line; there every
+//! `engine_*` command but `engine_mode`, `engine_set_mode` and `engine_status` answers an error. On, the engine
 //! owns the audio device: it claims the ASIO duplex holder, the live line's `plugin_*` commands route to
 //! the engine's slots or refuse (`engine()`), and one plugin slot is live at a time. Blocking work (an
 //! open waits up to 15 s) runs off the IPC thread.
@@ -22,7 +23,8 @@ use super::plugins::EngineSlot;
 use super::wire::{FeedFrame, WireCommand};
 use super::{DeviceRequest, DeviceStatus, EngineHost, HostConfig};
 
-/// The toggle file in the app-local data folder: `on` runs this app on the engine.
+/// The toggle file in the app-local data folder: `off` runs this app on the web audio path; anything
+/// else, or no file, on the engine.
 const TOGGLE_FILE: &str = "engine-mode";
 /// The engine's claim on `audio_output`'s ASIO duplex holder (the live line's slots are 0 and 1).
 const ASIO_HOLDER: u8 = 2;
@@ -51,8 +53,8 @@ pub struct EngineApp {
 }
 
 impl EngineApp {
-    /// Read the toggle and, when it is on, start the host (its device owner; no device opens until the
-    /// UI asks) and the feed. Once per process.
+    /// Read the toggle and, unless it is off, start the host (its device owner; no device opens until
+    /// the UI asks) and the feed. Once per process.
     pub fn setup(app: &AppHandle) {
         if APP.set(EngineApp::start(app)).is_err() {
             log::error!("[engine_io] engine mode was set up twice; the second is ignored");
@@ -63,12 +65,13 @@ impl EngineApp {
         let toggle = match app.path().app_local_data_dir() {
             Ok(dir) => Some(dir.join(TOGGLE_FILE)),
             Err(e) => {
-                log::warn!("[engine_io] no app-local data dir ({e}); engine mode stays off");
+                log::warn!("[engine_io] no app-local data dir ({e}); the engine toggle cannot be read or saved");
                 None
             }
         };
         let off = |toggle| EngineApp { toggle, engine: None, slots: Mutex::new(std::array::from_fn(|_| EngineSlot::Empty)) };
-        if !toggle.as_ref().is_some_and(|path| read_toggle(path)) {
+        if toggle.as_ref().is_some_and(|path| toggled_off(path)) {
+            log::info!("[engine_io] web audio mode: the engine toggle is off");
             return off(toggle);
         }
         if !crate::audio_output::try_acquire_asio_holder(ASIO_HOLDER) {
@@ -121,8 +124,9 @@ fn app() -> Result<&'static EngineApp, String> {
     APP.get().ok_or_else(|| "engine mode is not set up".to_string())
 }
 
-fn read_toggle(path: &std::path::Path) -> bool {
-    std::fs::read_to_string(path).is_ok_and(|text| text.trim() == "on")
+/// The toggle file says `off`. No file, or one that cannot be read, leaves the engine on.
+fn toggled_off(path: &std::path::Path) -> bool {
+    std::fs::read_to_string(path).is_ok_and(|text| text.trim() == "off")
 }
 
 /// Whether this launch runs on the engine.
@@ -231,6 +235,20 @@ pub async fn engine_feed(channel: Channel<FeedFrame>) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_an_off_in_the_toggle_file_turns_the_engine_off() {
+        let dir = std::env::temp_dir().join(format!("lf-engine-toggle-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(TOGGLE_FILE);
+        let _ = std::fs::remove_file(&path);
+        assert!(!toggled_off(&path), "no file: the engine");
+        for (text, off) in [("off\n", true), ("off", true), ("on\n", false), ("", false), ("OFF", false)] {
+            std::fs::write(&path, text).unwrap();
+            assert_eq!(toggled_off(&path), off, "{text:?}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn a_slot_going_live_takes_the_other_off_first() {

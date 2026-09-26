@@ -25,20 +25,29 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { appRunning, assertWindows, closeAppWindow, killNative, nativeRunning } from './native-kill.mjs';
 
+// Every probe runs in a profile of its own: `config` is a Tauri config overlay whose identifier gives the
+// run its own WebView2 profile and app-local data folder, so the owner's jam, recovery, settings and
+// engine toggle are never read or written. `engine` goes into that folder's toggle file before launch
+// (`src-tauri/src/engine_io/mode.rs`: engine mode unless it says `off`): the classic probes test the web
+// audio path, the engine probes the engine.
+const CLASSIC = 'scripts/classic-probe.tauri.json';
 const PROBES = {
-  'editor-smoke': { tag: 'smoke', end: /^(complete: .*|no plugins.*)$/, pass: /^complete: \d+ opened, 0 failed/ },
-  'restart-survey': { tag: 'survey', end: /^(complete|no plugins.*)$/, pass: /^complete$/ },
-  'swap-stress': { tag: 'swap', end: /^(complete: .*|TIMEOUT .*|ABORTED.*|need at least .*)$/, pass: /^complete: \d+ swapped, 0 failed/ },
-  // `config`: a Tauri config overlay; its own identifier gives the run its own WebView2 profile, so the
-  // owner's jam, recovery and settings are never read or written.
-  'loopback-sync': { tag: 'loopback', end: /^(result: .*|FAIL.*)$/, pass: /^result: /, config: 'scripts/loopback-probe.tauri.json' },
-  // Engine mode on in its own profile: the toggle file lives in the identifier's app-local data folder
-  // (`src-tauri/src/engine_io/mode.rs`). One launch, closed through its window as the close button
-  // does; any other frontend `console.error` line fails it.
+  'editor-smoke': { tag: 'smoke', end: /^(complete: .*|no plugins.*)$/, pass: /^complete: \d+ opened, 0 failed/, config: CLASSIC, engine: 'off' },
+  'restart-survey': { tag: 'survey', end: /^(complete|no plugins.*)$/, pass: /^complete$/, config: CLASSIC, engine: 'off' },
+  'swap-stress': {
+    tag: 'swap',
+    end: /^(complete: .*|TIMEOUT .*|ABORTED.*|need at least .*)$/,
+    pass: /^complete: \d+ swapped, 0 failed/,
+    config: CLASSIC,
+    engine: 'off',
+  },
+  'loopback-sync': { tag: 'loopback', end: /^(result: .*|FAIL.*)$/, pass: /^result: /, config: 'scripts/loopback-probe.tauri.json', engine: 'off' },
+  // One launch, closed through its window as the close button does; any other frontend `console.error`
+  // line fails it.
   'engine-smoke': {
     tag: 'engine-smoke',
     config: 'scripts/engine-probe.tauri.json',
-    engineMode: 'com.bleeploop.engine-probe',
+    engine: 'on',
     cleanLog: true,
     phases: [{ name: 'smoke', end: /^(complete: .*|FAIL.*)$/, pass: /^complete: /, exit: 'os-close' }],
   },
@@ -47,7 +56,7 @@ const PROBES = {
   'engine-recovery': {
     tag: 'engine-recovery',
     config: 'scripts/engine-probe.tauri.json',
-    engineMode: 'com.bleeploop.engine-probe',
+    engine: 'on',
     cleanLog: true,
     phases: [
       { name: 'save', end: /^(saved: .*|FAIL.*)$/, pass: /^saved: /, exit: 'crash' },
@@ -57,6 +66,8 @@ const PROBES = {
   // `recallLines`: how many `[rig-recall]` log lines the phase must print.
   'recall-restart': {
     tag: 'recall',
+    config: CLASSIC,
+    engine: 'off',
     phases: [
       { name: 'save', end: /^(saved: .*|FAIL.*)$/, pass: /^saved: /, exit: 'close', recallLines: 0 },
       { name: 'check', end: /^(restored: .*|FAIL.*)$/, pass: /^restored: /, exit: 'os-close', recallLines: 0 },
@@ -90,13 +101,6 @@ for (const arg of args) {
 }
 const devScript = args.includes('--asio') ? 'dev:asio' : 'dev:wasapi';
 
-if (spec.engineMode) {
-  // Tauri's app-local data folder on Windows: %LOCALAPPDATA%\<identifier>.
-  const dir = join(process.env.LOCALAPPDATA ?? '', spec.engineMode);
-  mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, 'engine-mode'), 'on');
-}
-
 const busy = nativeRunning();
 if (busy.length) {
   console.error(`native probe: already running (${busy.join(', ')}). Close the app or run pnpm native:kill first.`);
@@ -104,6 +108,17 @@ if (busy.length) {
 }
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
+
+// The engine toggle in the probe's own profile: Tauri's app-local data folder on Windows is
+// %LOCALAPPDATA%\<identifier>. The default identifier is the owner's profile: never written.
+const identifier = JSON.parse(readFileSync(join(root, spec.config), 'utf8')).identifier;
+if (!identifier || identifier === 'com.bleeploop.app') {
+  console.error(`native probe ${name}: ${spec.config} must name a probe profile of its own`);
+  process.exit(1);
+}
+const profile = join(process.env.LOCALAPPDATA ?? '', identifier);
+mkdirSync(profile, { recursive: true });
+writeFileSync(join(profile, 'engine-mode'), spec.engine);
 const logPath = join(root, 'logs', `native-${name}.log`);
 mkdirSync(dirname(logPath), { recursive: true });
 const log = createWriteStream(logPath);
@@ -129,7 +144,7 @@ function stopRun(child) {
 function launch(phase, phaseEnv) {
   return new Promise((resolve) => {
     if (phase.name) log.write(`\n===== phase ${phase.name} =====\n`);
-    const child = spawn(`pnpm ${devScript}${spec.config ? ` --config ${spec.config}` : ''}`, { cwd: root, env: phaseEnv, shell: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(`pnpm ${devScript} --config ${spec.config}`, { cwd: root, env: phaseEnv, shell: true, stdio: ['ignore', 'pipe', 'pipe'] });
     let lastLine = Date.now();
     let seen = false;
     let partial = '';
