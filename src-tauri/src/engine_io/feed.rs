@@ -6,8 +6,10 @@
 //!
 //! The feed is the only reader of the engine's event ring and of the device events, so it keeps a
 //! mirror of the lanes, the transport and the selection: a new subscriber (a WebView reload) and a
-//! new engine (another sample rate, a fault) get a `reset` frame that carries all of it. The thread
-//! drains while nobody subscribes, so the event ring never fills.
+//! new engine (another sample rate, a fault) get a `reset` frame that carries all of it, with the
+//! settings the host keeps (`settings.rs`), so the UI adopts them. It also tells the settings memory
+//! what the engine reset (`Cleared`) or copied (`Copied`). The thread drains while nobody subscribes,
+//! so the event ring never fills.
 
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use std::sync::{Arc, Mutex};
@@ -18,7 +20,7 @@ use lf_engine::grid::Frame;
 use lf_engine::overview::PEAK_FRAMES;
 use lf_engine::{Event, LaneInfo, LaneState, Overview, TRACK_COUNT};
 
-use super::wire::{ClockAnchor, FeedFrame, Meter, PeakUpdate, WireEvent};
+use super::wire::{ClockAnchor, FeedFrame, Meter, PeakUpdate, WireCommand, WireEvent};
 use super::{DeviceStatus, EngineHost};
 
 /// The feed's period: about 60 frames a second.
@@ -106,6 +108,7 @@ impl Feed {
                 Event::Transport { .. } => self.transport = Some(*event),
                 Event::Selected { frame, lane } => self.selected = (frame, lane),
                 Event::Copied { from, to, .. } => self.host.copied(from, to),
+                Event::Cleared { lane, .. } => self.host.cleared(lane),
                 _ => {}
             }
         }
@@ -127,9 +130,10 @@ impl Feed {
             return None;
         }
         let events = if reset { self.state_events() } else { self.drained.iter().copied().map(WireEvent).collect() };
+        let settings = reset.then(|| self.host.settings().into_iter().map(WireCommand).collect());
         self.sent = Some(Instant::now());
         self.seq += 1;
-        Some(FeedFrame { seq: self.seq - 1, reset, events, device, status, anchor, meter, peaks })
+        Some(FeedFrame { seq: self.seq - 1, reset, events, device, status, anchor, meter, peaks, settings })
     }
 
     /// The lanes' waveform bins that changed, in play order: every bin of a lane that shows another

@@ -82,7 +82,8 @@
     { "Refused": { "frame": 99200, "lane": 2, "reason": "PlayFirst" } },
     { "TakeRejected": { "frame": 99300, "lane": 1, "overdub": true } },
     { "PassDropped": { "frame": 99400, "lane": 1, "pass": 3 } },
-    { "Copied": { "frame": 99500, "from": 0, "to": 3 } }
+    { "Copied": { "frame": 99500, "from": 0, "to": 3 } },
+    { "Cleared": { "frame": 99600, "lane": 4 } }
   ],
   "deviceEvents": [
     { "Lost": { "backend": "Asio", "reason": "the stream stopped" } },
@@ -93,6 +94,7 @@
         "block": 128,
         "inputName": "Focusrite USB ASIO",
         "outputName": "Focusrite USB ASIO",
+        "inputOpen": true,
         "alignFrames": 666,
         "inputFrames": 305
       }
@@ -102,8 +104,9 @@
         "backend": "Wasapi",
         "sampleRate": 48000,
         "block": 480,
-        "inputName": "Microphone (Realtek Audio)",
+        "inputName": "",
         "outputName": "Speakers (Realtek Audio)",
+        "inputOpen": false,
         "alignFrames": 1731,
         "inputFrames": 1150
       }
@@ -128,6 +131,7 @@
       "block": 128,
       "inputName": "Focusrite USB ASIO",
       "outputName": "Focusrite USB ASIO",
+      "inputOpen": true,
       "alignFrames": 666,
       "inputFrames": 305
     }
@@ -232,12 +236,23 @@
         "block": 128,
         "inputName": "Focusrite USB ASIO",
         "outputName": "Focusrite USB ASIO",
+        "inputOpen": true,
         "alignFrames": 666,
         "inputFrames": 305
       },
       "anchor": { "frame": 1234560, "atMs": 1790000000123.25, "rate": 44100, "grid": 96666 },
       "meter": { "peak": 0.125, "clip": false },
-      "peaks": [{ "lane": 0, "start": 0, "count": 3, "min": [-0.5, -0.25, -0.125], "max": [0.5, 0.25, 0.123] }]
+      "peaks": [{ "lane": 0, "start": 0, "count": 3, "min": [-0.5, -0.25, -0.125], "max": [0.5, 0.25, 0.123] }],
+      "settings": [
+        { "SetBpm": 96 },
+        { "SetMasterVolume": 0.8 },
+        { "SetFixedBars": 2 },
+        { "SetVolume": [0, 0.5] },
+        { "SetFxBypass": [0, "filter", false] },
+        { "SetFxParam": [0, "cutoff", 900] },
+        { "SelectInstrument": { "Builtin": "pad" } },
+        { "SetSlotLive": [0, true] }
+      ]
     },
     {
       "seq": 1,

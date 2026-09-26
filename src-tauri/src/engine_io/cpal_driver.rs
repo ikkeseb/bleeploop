@@ -34,9 +34,10 @@ pub(crate) struct CpalDriver {
 /// How long the preopen runs the driver at the other block size (the Stage 1 fix measured with this).
 const PREOPEN_RUN: Duration = Duration::from_millis(300);
 
-/// A resolved pair: the input and output devices with their stream configs.
+/// A resolved pair: the input and output devices with their stream configs. No input: WASAPI output
+/// only (no capture endpoint), the engine's input silent.
 pub(crate) struct CpalDevice {
-    input: cpal::Device,
+    input: Option<cpal::Device>,
     in_config: StreamConfig,
     in_format: SampleFormat,
     output: cpal::Device,
@@ -58,15 +59,38 @@ impl Driver for CpalDriver {
     /// callback takes cpal's `asio_streams` mutex; the output build holds that mutex while it re-creates
     /// the buffers (`ASIOStop` first), so a playing input could block a bufferSwitch the stop waits on.
     /// A paused stream's callback returns before the mutex.
+    ///
+    /// WASAPI plays without its input when the capture stream does not build or play (a microphone
+    /// Windows' privacy settings block): the engine's input is silence and the status says so. ASIO's
+    /// duplex needs both.
     fn start(&mut self, device: CpalDevice, spec: &Spec, mut wiring: Wiring) -> Result<Started, String> {
         let asio = spec.backend.is_asio();
         let device = if asio { asio_run(device, spec, self.preopen)? } else { device };
-        let input = retry_on_asio(asio, "input", || input_stream(&device, spec, &mut wiring))?;
+        let input = match device.input.as_ref() {
+            Some(input) => match retry_on_asio(asio, "input", || input_stream(input, &device, spec, &mut wiring)) {
+                Ok(stream) => Some(stream),
+                Err(error) if !asio => {
+                    log::warn!("[engine_io] the WASAPI input did not open ({error}): output only");
+                    None
+                }
+                Err(error) => return Err(error),
+            },
+            None => None,
+        };
         let output = retry_on_asio(asio, "output", || output_stream(&device, spec, &mut wiring))?;
-        input.play().map_err(|e| format!("cpal input play: {e}"))?;
+        let input = match input.map(|stream| stream.play().map(|()| stream)) {
+            Some(Err(error)) if !asio => {
+                log::warn!("[engine_io] the WASAPI input did not play ({error}): output only");
+                None
+            }
+            Some(played) => Some(played.map_err(|e| format!("cpal input play: {e}"))?),
+            None => None,
+        };
         output.play().map_err(|e| format!("cpal output play: {e}"))?;
         let block = output.buffer_size().unwrap_or(spec.block);
-        Ok(Started { streams: Streams::new(Box::new(input), Box::new(output)), block })
+        let input_open = input.is_some();
+        let input = input.map(|stream| Box::new(stream) as Box<dyn Send>);
+        Ok(Started { streams: Streams::new(input, Box::new(output)), block, input_open })
     }
 
     fn open_share(&mut self, endpoint: &str, rate: u32, block: u32, core: &Arc<Core>) -> Result<Share, String> {
@@ -100,13 +124,13 @@ fn retry_on_asio(asio: bool, what: &str, mut build: impl FnMut() -> Result<cpal:
     }
 }
 
-fn input_stream(device: &CpalDevice, spec: &Spec, wiring: &mut Wiring) -> Result<cpal::Stream, String> {
+fn input_stream(input: &cpal::Device, device: &CpalDevice, spec: &Spec, wiring: &mut Wiring) -> Result<cpal::Stream, String> {
     let capture = wiring.capture(spec)?;
     let on_error = wiring.on_error(Side::Input);
     macro_rules! build {
         ($T:ty) => {{
             let mut capture = capture;
-            device.input.build_input_stream::<$T, _, _>(
+            input.build_input_stream::<$T, _, _>(
                 device.in_config,
                 move |data: &[$T], info: &cpal::InputCallbackInfo| {
                     let t = info.timestamp();
@@ -180,7 +204,7 @@ fn resolve_asio(request: &DeviceRequest) -> Result<(Spec, CpalDevice), String> {
         output_name: cache.name.clone(),
     };
     let device = CpalDevice {
-        input: cache.device.clone(),
+        input: Some(cache.device.clone()),
         in_config,
         in_format: cache.in_fmt,
         output: cache.device.clone(),
@@ -205,7 +229,7 @@ fn asio_run(device: CpalDevice, spec: &Spec, preopen: bool) -> Result<CpalDevice
         }
     }
     let fresh = find_asio(&spec.output_name)?;
-    Ok(CpalDevice { input: fresh.clone(), output: fresh, ..device })
+    Ok(CpalDevice { input: Some(fresh.clone()), output: fresh, ..device })
 }
 
 #[cfg(not(feature = "asio"))]
@@ -264,13 +288,27 @@ fn other_block(device: &CpalDevice, block: u32) -> u32 {
 }
 
 /// WASAPI shared mode: the picked (or default) endpoints at their mix formats; the period is the
-/// audio engine's, so `DeviceRequest::buffer` does not apply.
+/// audio engine's, so `DeviceRequest::buffer` does not apply. With no default capture endpoint (or one
+/// that reports no format) it plays output only; a picked input that is gone is an error.
 fn resolve_wasapi(request: &DeviceRequest) -> Result<(Spec, CpalDevice), String> {
     let output = crate::audio_output::pick_output_device(request.output.as_deref())?;
     let (out_config, out_format) = crate::audio_output::output_config(&output)?;
-    let input = crate::audio_input::pick_input_device(request.input.as_deref())?;
-    let supported = input.default_input_config().map_err(|e| format!("cpal default_input_config: {e}"))?;
-    let in_config = StreamConfig { channels: supported.channels(), sample_rate: supported.sample_rate(), buffer_size: cpal::BufferSize::Default };
+    let input = crate::audio_input::pick_input_device(request.input.as_deref()).and_then(|input| {
+        let supported = input.default_input_config().map_err(|e| format!("cpal default_input_config: {e}"))?;
+        Ok((input, supported))
+    });
+    let input = match input {
+        Ok(found) => Some(found),
+        Err(error) if request.input.is_none() => {
+            log::warn!("[engine_io] no WASAPI capture ({error}): output only");
+            None
+        }
+        Err(error) => return Err(error),
+    };
+    let in_config = match &input {
+        Some((_, supported)) => StreamConfig { channels: supported.channels(), sample_rate: supported.sample_rate(), buffer_size: cpal::BufferSize::Default },
+        None => out_config,
+    };
     if in_config.sample_rate == 0 || out_config.sample_rate == 0 {
         return Err("a WASAPI endpoint reports a zero sample rate".to_string());
     }
@@ -279,11 +317,12 @@ fn resolve_wasapi(request: &DeviceRequest) -> Result<(Spec, CpalDevice), String>
         backend: AudioBackend::Wasapi,
         rate: out_config.sample_rate,
         in_rate: in_config.sample_rate,
-        in_channels: in_config.channels as usize,
+        in_channels: if input.is_some() { in_config.channels as usize } else { 0 },
         out_channels: out_config.channels as usize,
         block: 0,
-        input_name: name(&input, "Unknown input"),
+        input_name: input.as_ref().map_or_else(String::new, |(d, _)| name(d, "Unknown input")),
         output_name: name(&output, "Unknown output"),
     };
-    Ok((spec, CpalDevice { input, in_config, in_format: supported.sample_format(), output, out_config, out_format }))
+    let in_format = input.as_ref().map_or(out_format, |(_, supported)| supported.sample_format());
+    Ok((spec, CpalDevice { input: input.map(|(d, _)| d), in_config, in_format, output, out_config, out_format }))
 }

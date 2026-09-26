@@ -185,7 +185,8 @@ impl Driver for FakeDriver {
             self.0.fail_starts.fetch_sub(1, Release);
             return Err("fake: the device did not start".to_string());
         }
-        let capture = wiring.capture(spec)?;
+        // An endpoint with no input channels plays output only, as a PC with no capture device.
+        let capture = if spec.in_channels > 0 { Some(wiring.capture(spec)?) } else { None };
         let render = wiring.render(spec)?;
         let errors = (wiring.on_error(Side::Input), wiring.on_error(Side::Output));
         let stop = Arc::new(AtomicBool::new(false));
@@ -204,7 +205,8 @@ impl Driver for FakeDriver {
             })
             .map_err(|e| e.to_string())?;
         self.0.started.fetch_add(1, Relaxed);
-        Ok(Started { streams: Streams::new(Box::new(()), Box::new(Running { stop, join: Some(join) })), block: spec.block })
+        let input_open = spec.in_channels > 0;
+        Ok(Started { streams: Streams::new(input_open.then(|| Box::new(()) as Box<dyn Send>), Box::new(Running { stop, join: Some(join) })), block: spec.block, input_open })
     }
 
     fn open_share(&mut self, endpoint: &str, _rate: u32, _block: u32, _core: &Arc<Core>) -> Result<Share, String> {
@@ -237,7 +239,7 @@ struct Play {
     core: Arc<Core>,
     spec: Spec,
     device: FakePair,
-    capture: Capture,
+    capture: Option<Capture>,
     render: Render,
     stop: Arc<AtomicBool>,
 }
@@ -336,7 +338,9 @@ impl Play {
                 *s = T::from_sample(x * (c + 1) as f32);
             }
         }
-        self.capture.capture(&data_in[..k * in_ch], latency);
+        if let Some(capture) = self.capture.as_mut() {
+            capture.capture(&data_in[..k * in_ch], latency);
+        }
         *in_frame += k as Frame;
     }
 

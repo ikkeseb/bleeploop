@@ -8,7 +8,7 @@ mod common;
 
 use common::{code, Rig};
 use lf_engine::overview::PEAK_FRAMES;
-use lf_engine::Command;
+use lf_engine::{Command, Event};
 
 /// Every bin of lane `lane`'s buffer, up to the frames the lane holds, is its min and max.
 fn peaks_describe(rig: &Rig, lane: usize, tag: &str) {
@@ -62,8 +62,14 @@ fn the_peaks_follow_every_write_and_the_view_follows_undo_reverse_and_clear() {
     assert_eq!((reversed.buf, reversed.reversed), (undone.buf, true), "REVERSE writes nothing");
     peaks_describe(&rig, 0, "reversed");
 
+    let mark = rig.events.len();
     rig.press(Command::Clear(0));
     assert_eq!(rig.engine.looper().overview().lane(0).frames, 0, "a cleared lane holds nothing");
+    let cleared = |rig: &Rig, mark: usize| rig.events[mark..].iter().filter_map(|e| match e { Event::Cleared { lane, .. } => Some(*lane), _ => None }).collect::<Vec<_>>();
+    assert_eq!(cleared(&rig, mark), [0], "CLEAR says so");
+    let mark = rig.events.len();
+    rig.press(Command::ClearAll);
+    assert_eq!(cleared(&rig, mark), [0, 1, 2, 3, 4], "CLEAR ALL clears every lane, an empty one too");
 }
 
 #[test]

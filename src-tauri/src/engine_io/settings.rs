@@ -5,10 +5,10 @@
 //! A setting is a command that sets a value (the tempo, the click, the master, the looper's modes, a
 //! lane's volume, mute and FX, the note target, the wheels, a plugin slot's live flag and gain, the
 //! selected lane); everything else (the looper's gestures, notes) acts once and is not kept. What the
-//! engine resets, the memory forgets: CLEAR on a lane resets its volume, mute and FX (so does CLEAR
-//! ALL for every lane), and a COPY hands the destination the source's (`copy_lane`, on the engine's
-//! `Copied` event). A CLEAR the engine confirms on a pedal's second press (`Action::Clear`) is not
-//! seen here: that lane's pre-clear mixer and FX would come back after a rebuild.
+//! engine resets, the memory forgets, as the feed reads it happen: a cleared lane's volume, mute and FX
+//! (`cleared`, on the engine's `Cleared` event: CLEAR, a pedal's CLEAR, CLEAR ALL), and a COPY hands the
+//! destination the source's (`copy_lane`, on `Copied`). A setting for a lane sent in the moment between
+//! its clear and the feed reading it (a block and a feed tick) is forgotten with it.
 
 use std::collections::BTreeMap;
 
@@ -113,13 +113,8 @@ pub(crate) struct Settings {
 }
 
 impl Settings {
-    /// Keep `command` if it is a setting (true), and forget what a CLEAR resets.
+    /// Keep `command` if it is a setting (true).
     pub(crate) fn record(&mut self, command: &Command) -> bool {
-        match *command {
-            Command::Clear(i) => self.forget_lane(i),
-            Command::ClearAll => (0..TRACK_COUNT as u8).for_each(|i| self.forget_lane(i)),
-            _ => {}
-        }
         match key(command) {
             Some(key) => {
                 self.last.insert(key, *command);
@@ -151,6 +146,11 @@ impl Settings {
             })
             .collect();
         self.last.extend(copied);
+    }
+
+    /// The engine cleared lane `lane`: its volume, mute and FX are back at their defaults.
+    pub(crate) fn cleared(&mut self, lane: u8) {
+        self.forget_lane(lane);
     }
 
     fn forget_lane(&mut self, lane: u8) {
@@ -192,7 +192,7 @@ mod tests {
     }
 
     #[test]
-    fn clear_forgets_what_the_engine_resets_and_copy_hands_it_on() {
+    fn a_cleared_lane_forgets_what_the_engine_resets_and_copy_hands_it_on() {
         let mut s = Settings::default();
         s.record(&Command::SetVolume(0, 0.5));
         s.record(&Command::SetFxParam(0, FxParam::Cutoff, 900.0));
@@ -202,10 +202,12 @@ mod tests {
         s.copy_lane(0, 3);
         assert!(replay(&s).contains(&Command::SetFxParam(3, FxParam::Cutoff, 900.0)));
         assert!(replay(&s).contains(&Command::SetVolume(3, 0.5)));
-        s.record(&Command::Clear(0));
+        assert!(!s.record(&Command::Clear(0)), "a CLEAR is an action: the engine's Cleared event is what forgets");
+        assert!(replay(&s).contains(&Command::SetVolume(0, 0.5)));
+        s.cleared(0);
         assert!(!replay(&s).iter().any(|c| matches!(c, Command::SetVolume(0, _) | Command::SetFxParam(0, ..) | Command::SetFxBypass(0, ..))));
         assert!(replay(&s).contains(&Command::SetMute(1, true)));
-        s.record(&Command::ClearAll);
-        assert_eq!(replay(&s), [Command::SetMasterVolume(0.7)], "CLEAR ALL resets every lane, not the master");
+        (0..TRACK_COUNT as u8).for_each(|i| s.cleared(i));
+        assert_eq!(replay(&s), [Command::SetMasterVolume(0.7)], "CLEAR ALL clears every lane, not the master");
     }
 }

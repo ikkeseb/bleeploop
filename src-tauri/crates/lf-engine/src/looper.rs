@@ -653,6 +653,7 @@ impl Looper {
         let t = &mut self.lanes[i];
         *t = Lane { gain: t.gain, ..Lane::new(t.live, t.spare) };
         cx.fx.reset(i, cx.now);
+        cx.feed.push(Event::Cleared { frame: cx.now, lane: i as u8 });
         self.reset_master_if_blank(cx);
     }
 

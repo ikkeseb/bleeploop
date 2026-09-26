@@ -283,7 +283,8 @@ impl<D: Driver> Owner<D> {
             }
         }
         let (spec, device) = self.driver.resolve(&request)?;
-        let channel = transition::input_channel(spec.in_channels, request.input_channel, lenient)?;
+        // An output-only device takes any channel pick: it captures nothing.
+        let channel = transition::input_channel(spec.in_channels, request.input_channel, lenient || spec.in_channels == 0)?;
         let previous = self.active.as_ref().map(|a| a.request.clone());
         let healthy = self.active.as_ref().is_some_and(|a| !a.run.faulted());
         let steps = transition::steps(self.core.rate(), self.active.is_some(), healthy, Some(spec.rate));
@@ -393,8 +394,9 @@ impl<D: Driver> Owner<D> {
             backend: spec.backend,
             sample_rate: spec.rate,
             block,
-            input_name: spec.input_name.clone(),
+            input_name: if started.input_open { spec.input_name.clone() } else { String::new() },
             output_name: spec.output_name.clone(),
+            input_open: started.input_open,
             // `status()` reads the alignment the callback renders with.
             align_frames: 0,
             input_frames: 0,
@@ -515,7 +517,7 @@ impl<D: Driver> Owner<D> {
 
     fn set_input_channel(&mut self, channel: Option<u32>) -> Result<(), String> {
         let active = self.active.as_mut().ok_or("no audio device is open")?;
-        let resolved = transition::input_channel(active.spec.in_channels, channel, false)?;
+        let resolved = transition::input_channel(active.spec.in_channels, channel, active.spec.in_channels == 0)?;
         active.run.channel.store(resolved, Relaxed);
         active.request.input_channel = channel;
         Ok(())

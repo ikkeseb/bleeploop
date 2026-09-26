@@ -113,6 +113,7 @@ enum EventDef {
     TakeRejected { frame: Frame, lane: u8, overdub: bool },
     PassDropped { frame: Frame, lane: u8, pass: u32 },
     Copied { frame: Frame, from: u8, to: u8 },
+    Cleared { frame: Frame, lane: u8 },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -257,6 +258,11 @@ pub struct FeedFrame {
     /// `null` while no device runs.
     pub meter: Option<Meter>,
     pub peaks: Vec<PeakUpdate>,
+    /// Reset frames only (absent otherwise): the settings the host keeps and replays into every new
+    /// engine (`settings.rs`), in replay order and as the UI sends them. A setting never sent, or one a
+    /// lane's clear forgot, is at the engine's default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings: Option<Vec<WireCommand>>,
 }
 
 /// A field that may be absent (`None`), `null` (`Some(None)`) or a value.
@@ -328,7 +334,7 @@ mod tests {
         }
     }
 
-    const EVENTS: usize = 8;
+    const EVENTS: usize = 9;
     fn event_index(e: &Event) -> usize {
         match e {
             Event::Lane { .. } => 0,
@@ -339,6 +345,7 @@ mod tests {
             Event::TakeRejected { .. } => 5,
             Event::PassDropped { .. } => 6,
             Event::Copied { .. } => 7,
+            Event::Cleared { .. } => 8,
         }
     }
 
@@ -419,6 +426,7 @@ mod tests {
         assert!(frames.iter().any(|f| f.reset && matches!(f.status, Some(Some(_)))), "a reset frame with a status");
         assert!(frames.iter().any(|f| f.status == Some(None)), "a frame whose device stopped (status null)");
         assert!(frames.iter().any(|f| f.status.is_none()), "a frame with no status change (status absent)");
+        assert!(frames.iter().all(|f| f.settings.is_some() == f.reset), "settings on the reset frames only");
     }
 
     #[test]

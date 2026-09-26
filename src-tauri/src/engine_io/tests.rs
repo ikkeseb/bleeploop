@@ -827,9 +827,10 @@ fn the_feed_resyncs_a_new_subscriber_and_a_new_engine() {
         feed_until(&mut feed, &mut seen, "the kept tempo on the transport", kept);
     }
 
-    // A second subscriber (a WebView reload) gets the whole state again.
+    // A second subscriber (a WebView reload) gets the whole state again, with the kept settings.
     let again = feed.tick(true).expect("a reset frame");
     assert!(again.reset && matches!(again.status, Some(Some(_))));
+    assert_eq!(again.settings.as_deref().map(|s| s.iter().map(|c| c.0).collect::<Vec<_>>()), Some(vec![Command::SetBpm(240.0)]));
     assert!(matches!(again.events.first().map(|e| e.0), Some(Event::Transport { bpm: 240, .. })), "the transport the engine reported");
     assert_eq!(lanes(&again), 5);
 
@@ -883,4 +884,36 @@ fn the_feed_draws_a_take_as_it_records_and_the_whole_loop_on_a_reset() {
     h.send(Command::Clear(0));
     let cleared = feed_until(&mut feed, &mut seen, "the cleared lane's empty update", |f| f.peaks.iter().any(|p| p.lane == 0 && p.count == 0));
     assert!(cleared.peaks.iter().any(|p| p.lane == 0 && p.min.is_empty()));
+}
+
+#[test]
+fn a_wasapi_endpoint_with_no_input_plays_output_only() {
+    let h = Harness::new();
+    h.fake.wasapi.lock().unwrap()[0].1.in_channels = 0;
+    let status = h.host.open(DeviceRequest { input_channel: Some(1), ..wasapi(None, None) }).expect("output only opens");
+    assert!(!status.input_open && status.input_name.is_empty(), "{status:?}");
+    let frame = h.frame();
+    h.play(RATE / 10);
+    assert!(h.frame() > frame, "the device plays");
+    assert!(h.host.set_input_channel(Some(0)).is_ok(), "a channel pick changes nothing and is no error");
+    let (peak, _) = h.host.take_meter();
+    assert_eq!(peak, 0.0, "the input is silence");
+    assert_eq!(h.host.diag().join_starves, 0, "a join that never had input is no starve");
+    h.fake.wasapi.lock().unwrap()[0].1.in_channels = 2;
+    assert!(h.open(asio(Some(256))).input_open);
+}
+
+#[test]
+fn a_lane_the_engine_clears_forgets_its_kept_mix() {
+    use super::feed::Feed;
+    let h = Harness::new();
+    let mut feed = Feed::new(h.host.clone());
+    h.open(asio(Some(256)));
+    for command in [Command::SetVolume(3, 0.5), Command::SetMute(3, true), Command::SetMasterVolume(0.7), Command::ClearAll] {
+        h.send(command);
+    }
+    let mut seen = Vec::new();
+    feed_until(&mut feed, &mut seen, "the engine clears every lane", |f| f.events.iter().any(|e| matches!(e.0, Event::Cleared { lane: 3, .. })));
+    let kept = feed.tick(true).and_then(|f| f.settings).map(|s| s.into_iter().map(|c| c.0).collect::<Vec<_>>());
+    assert_eq!(kept, Some(vec![Command::SetMasterVolume(0.7)]), "lane 3's volume and mute went with the clear");
 }

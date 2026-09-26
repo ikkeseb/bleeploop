@@ -233,6 +233,10 @@ pub enum Event {
     /// A RETAKE pass saw an input gap: it is dropped, and the kept pass before it with it.
     PassDropped { frame: Frame, lane: u8, pass: u32 },
     Copied { frame: Frame, from: u8, to: u8 },
+    /// The lane was cleared: its loop gone, its volume, mute and FX back to their defaults (CLEAR, a
+    /// pedal's confirmed CLEAR, and every lane at CLEAR ALL, an empty one included). A lane that goes
+    /// EMPTY any other way (a cancelled count-in, a stopped or rejected first take) keeps its mix.
+    Cleared { frame: Frame, lane: u8 },
 }
 
 /// The callback's view of the device.

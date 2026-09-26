@@ -140,8 +140,12 @@ pub struct DeviceStatus {
     pub sample_rate: u32,
     /// Frames per output callback (the driver's; a WASAPI callback may vary around it).
     pub block: u32,
+    /// Empty while the input does not run.
     pub input_name: String,
     pub output_name: String,
+    /// The input runs. False: WASAPI plays output only (no capture endpoint, or its stream did not
+    /// open, e.g. a microphone Windows' privacy settings block) and the engine's input is silence.
+    pub input_open: bool,
     /// Input plus output latency in frames (`ProcessContext::align_frames`), and its input side.
     pub align_frames: Frame,
     pub input_frames: Frame,
@@ -586,6 +590,18 @@ impl EngineHost {
         if let Ok(mut settings) = self.core.settings.lock() {
             settings.copy_lane(from, to);
         }
+    }
+
+    /// The engine cleared `lane` (its `Cleared` event): the kept settings forget its mixer and FX.
+    pub(crate) fn cleared(&self, lane: u8) {
+        if let Ok(mut settings) = self.core.settings.lock() {
+            settings.cleared(lane);
+        }
+    }
+
+    /// The kept settings, in replay order (a reset frame hands them to the UI).
+    pub(crate) fn settings(&self) -> Vec<lf_engine::Command> {
+        self.core.settings.lock().map(|s| s.replay().collect()).unwrap_or_default()
     }
 
     /// Move the engine's events into `out`, as `drain_events`; with the generation of the engine they

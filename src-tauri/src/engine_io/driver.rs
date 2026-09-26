@@ -18,6 +18,7 @@ pub(crate) struct Spec {
     pub(crate) rate: u32,
     /// The input's rate (ASIO: one driver, the same rate; WASAPI: the join resamples it).
     pub(crate) in_rate: u32,
+    /// 0: no input (WASAPI output only; the engine's input is silence).
     pub(crate) in_channels: usize,
     pub(crate) out_channels: usize,
     /// Frames per callback asked of the driver (ASIO `DeviceRequest::buffer`), 0 = the driver's own.
@@ -33,8 +34,9 @@ pub(crate) struct Streams {
 }
 
 impl Streams {
-    pub(crate) fn new(input: Box<dyn Send>, output: Box<dyn Send>) -> Streams {
-        Streams { output: Some(output), input: Some(input) }
+    /// `input`: `None` when the device plays output only.
+    pub(crate) fn new(input: Option<Box<dyn Send>>, output: Box<dyn Send>) -> Streams {
+        Streams { output: Some(output), input }
     }
 }
 
@@ -45,10 +47,12 @@ impl Drop for Streams {
     }
 }
 
-/// A started device: its streams and the frames per output callback the driver settled on.
+/// A started device: its streams, the frames per output callback the driver settled on, and whether
+/// its input runs.
 pub(crate) struct Started {
     pub(crate) streams: Streams,
     pub(crate) block: u32,
+    pub(crate) input_open: bool,
 }
 
 /// The callback bodies for one run. ASIO's are cheap and built fresh for each stream build (a failed
