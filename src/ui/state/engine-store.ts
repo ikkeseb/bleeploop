@@ -363,10 +363,9 @@ function applyFrameNow(f: FeedFrame): void {
     if (!f.events.some((ev) => ev.type === 'Selected')) setSelectedTrack(0);
   }
   for (const d of f.device) applyDeviceEvent(d);
-  if (f.meter) {
-    plain.level = f.meter.peak;
-    plain.clip = f.meter.clip;
-  }
+  // No meter: no device runs, so the input reads silent.
+  plain.level = f.meter?.peak ?? 0;
+  plain.clip = f.meter?.clip ?? false;
   for (const p of f.peaks) applyPeaks(p.lane, p.start, p.count, p.min, p.max);
   if (f.reset) pushSettings();
 }
