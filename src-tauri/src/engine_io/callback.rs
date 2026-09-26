@@ -518,7 +518,15 @@ impl Render {
             }
             Source::Join { .. } => avail,
         };
-        let Rt { engine, faulted, handoff, tap, .. } = rt;
+        let Rt {
+            engine,
+            faulted,
+            handoff,
+            tap,
+            #[cfg(debug_assertions)]
+            lag,
+            ..
+        } = rt;
         let input: &[f32] = match &self.source {
             Source::Duplex => &handoff[..],
             Source::Join { x, .. } => &x[..],
@@ -543,6 +551,10 @@ impl Render {
                 }
             }
             fade(&mut self.gain, self.step, target, left, right);
+            #[cfg(debug_assertions)]
+            if let Some(lag) = lag.as_mut() {
+                lag.block(ctx.frame + off as Frame, x, left, right);
+            }
             if let Some(tap) = tap.as_mut() {
                 tap.push(left, right, counters);
             }

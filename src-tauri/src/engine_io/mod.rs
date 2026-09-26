@@ -292,6 +292,9 @@ pub(crate) struct Rt {
     /// Share output's tap, and the handoff it arrives on while streams run (`None` without an owner).
     pub(crate) tap: Option<Box<dyn Tap>>,
     pub(crate) taps: Option<TapEnd>,
+    /// DEV: the probe's lag phase (`probe::LagRig`), set while no device runs.
+    #[cfg(debug_assertions)]
+    pub(crate) lag: Option<Box<probe::LagRig>>,
 }
 
 /// The engine's non-RT ends, replaced with the engine (a sample-rate change builds a new one).
@@ -364,6 +367,8 @@ impl Core {
                 out_cycles: 0,
                 tap: None,
                 taps: None,
+                #[cfg(debug_assertions)]
+                lag: None,
             }),
             ends: Mutex::new(None),
             settings: Mutex::new(settings::Settings::default()),
@@ -465,7 +470,7 @@ impl EngineHost {
     /// Spawn the device owner thread. No device opens and no engine exists until [`EngineHost::open`].
     /// The owner runs until [`EngineHost::shutdown`].
     pub fn new(config: HostConfig) -> EngineHost {
-        EngineHost::with_driver(config, cpal_driver::CpalDriver)
+        EngineHost::with_driver(config, cpal_driver::CpalDriver { preopen: true })
     }
 
     /// A host whose owner opens devices through `driver` (the tests' fake).

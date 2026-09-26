@@ -6,7 +6,14 @@
 //! come back, an error was logged, or the soak missed the block-load bar.
 //!
 //! `app.exe --probe-engine <asio|wasapi> <64|128|256|default> [--plugin <slot>=<file.vst3|.clap>]...
-//! [--seconds N] [--switches N] [--swaps N] [--in N] [--device <WASAPI name substring>] [--mute]`
+//! [--seconds N] [--switches N] [--swaps N] [--in N] [--device <WASAPI name substring>] [--mute]
+//! [--lag [--out N] [--no-preopen]]`
+//!
+//! `--lag` runs only the lag phase instead (the Stage 1 A2 bar on the engine's own open path): a chirp
+//! leaves on output `--out` (0-based, default 1) every quarter second and comes back through a loopback
+//! cable on input `--in`; each arrival's lag is compared with the alignment the engine renders with
+//! (the driver's input plus output latency). `--no-preopen` opens ASIO without the preopen
+//! (`cpal_driver`), for a before-and-after comparison.
 //!
 //! The take records input channel `--in` (0-based, default 0) through slot 0, live for the take only:
 //! keep that channel off a loopback cable, or the take's monitor feeds back through it. A swap puts the
@@ -22,6 +29,7 @@ use lf_engine::grid::Frame;
 use lf_engine::{Command, Event, LaneInfo, LaneState, TimedCommand, SLOT_COUNT};
 
 use super::{BlockLoad, DeviceRequest, DeviceStatus, EngineHost, HostConfig, IoDiag, LOAD_BINS};
+use crate::chirp_lag::{chirp, find_arrivals, median, spread, CHIRP_LEN};
 use crate::audio_output::AudioBackend;
 use crate::host::engine_slot::{self, EngineSlotEvent, EngineSlotHandle, EventSink, PluginFormat};
 
@@ -85,11 +93,14 @@ struct Args {
     input: u32,
     device: Option<String>,
     mute: bool,
+    lag: bool,
+    out: usize,
+    preopen: bool,
 }
 
 fn parse_args(args: &[String]) -> Result<Args, String> {
     const USAGE: &str = "usage: --probe-engine <asio|wasapi> <64|128|256|default> [--plugin <slot>=<file.vst3|.clap>]... \
-        [--seconds N] [--switches N] [--swaps N] [--in N] [--device <WASAPI name substring>] [--mute]";
+        [--seconds N] [--switches N] [--swaps N] [--in N] [--device <WASAPI name substring>] [--mute] [--lag [--out N] [--no-preopen]]";
     let backend = match args.first().map(String::as_str) {
         Some("asio") => AudioBackend::Asio,
         Some("wasapi") => AudioBackend::Wasapi,
@@ -103,7 +114,20 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
     if backend == AudioBackend::Wasapi && buffer.is_some() {
         return Err("WASAPI runs at the audio engine's period: use `default`".into());
     }
-    let mut parsed = Args { backend, buffer, plugins: Vec::new(), seconds: 60.0, switches: 0, swaps: 0, input: 0, device: None, mute: false };
+    let mut parsed = Args {
+        backend,
+        buffer,
+        plugins: Vec::new(),
+        seconds: 60.0,
+        switches: 0,
+        swaps: 0,
+        input: 0,
+        device: None,
+        mute: false,
+        lag: false,
+        out: 1,
+        preopen: true,
+    };
     let mut rest = args[2..].iter();
     while let Some(flag) = rest.next() {
         let mut value = || rest.next().cloned().ok_or_else(|| format!("{flag} needs a value"));
@@ -124,6 +148,9 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
             "--in" => parsed.input = number(value()?)? as u32,
             "--device" => parsed.device = Some(value()?),
             "--mute" => parsed.mute = true,
+            "--lag" => parsed.lag = true,
+            "--out" => parsed.out = number(value()?)? as usize,
+            "--no-preopen" => parsed.preopen = false,
             _ => return Err(format!("unknown argument {flag}\n{USAGE}")),
         }
     }
@@ -536,6 +563,119 @@ fn asio_available() -> bool {
     }
 }
 
+/// The lag phase's hook in the output callback (`Rt::lag`): it adds the chirp to one output side every
+/// `period` frames from `emit_from`, and records the engine's input, both counted from the first frame
+/// it renders on the callback's frame counter. Preallocated: the callback never allocates in it.
+pub(crate) struct LagRig {
+    chirp: [f32; CHIRP_LEN],
+    right: bool,
+    period: usize,
+    emit_from: usize,
+    start: Option<Frame>,
+    recorded: Vec<f32>,
+    len: usize,
+}
+
+impl LagRig {
+    fn new(rate: u32, seconds: f64, right: bool) -> LagRig {
+        LagRig {
+            chirp: chirp(rate),
+            right,
+            period: rate as usize / 4,
+            emit_from: rate as usize,
+            start: None,
+            recorded: vec![0.0; ((seconds + 3.0) * rate as f64) as usize],
+            len: 0,
+        }
+    }
+
+    /// One slice of the output callback: `input` the engine's input from device frame `frame`, `left`
+    /// and `right` what it rendered there.
+    pub(crate) fn block(&mut self, frame: Frame, input: &[f32], left: &mut [f32], right: &mut [f32]) {
+        let start = *self.start.get_or_insert(frame);
+        let Ok(off) = usize::try_from(frame - start) else { return };
+        let out = if self.right { right } else { left };
+        for (k, (&x, y)) in input.iter().zip(out.iter_mut()).enumerate() {
+            let f = off + k;
+            if let Some(r) = self.recorded.get_mut(f) {
+                *r = x;
+                self.len = self.len.max(f + 1);
+            }
+            if f >= self.emit_from && (f - self.emit_from) % self.period < CHIRP_LEN {
+                *y += self.chirp[(f - self.emit_from) % self.period];
+            }
+        }
+    }
+
+    /// Each chirp's lag, input arrival minus output frame (sub-frame), and how many were not found.
+    fn lags(&self, window: usize) -> (Vec<f64>, usize) {
+        let (mut lags, mut invalid) = (Vec::new(), 0);
+        let mut e = self.emit_from;
+        while e + window < self.len {
+            match find_arrivals(&self.recorded[..self.len], &self.chirp, e, e + window, false).0 {
+                Some(hit) if hit.ncc >= 0.8 => lags.push(hit.pos - e as f64),
+                _ => invalid += 1,
+            }
+            e += self.period;
+        }
+        (lags, invalid)
+    }
+}
+
+/// `--lag`: open the device with the chirp rig in the callback, play `--seconds`, close, and judge the
+/// median lag against the alignment the engine rendered with (the Stage 1 A2 bar: within 1 ms).
+fn lag_run(a: &Args, request: DeviceRequest) -> Result<(), String> {
+    let rate = match request.backend {
+        #[cfg(feature = "asio")]
+        AudioBackend::Asio => crate::audio_output::asio_cache().map_or(48_000, |c| c.out_cfg.sample_rate),
+        _ => 48_000,
+    };
+    let host = EngineHost::with_driver(HostConfig::default(), super::cpal_driver::CpalDriver { preopen: a.preopen });
+    host.core.rt.lock().map_err(|_| "engine lock poisoned")?.lag = Some(Box::new(LagRig::new(rate, a.seconds, a.out == 1)));
+    let began = Instant::now();
+    let opened = host.open(request.clone());
+    let open_ms = began.elapsed().as_millis();
+    let status = match opened {
+        Ok(status) => status,
+        Err(e) => {
+            host.shutdown();
+            return Err(format!("open {}: {e}", label(&request)));
+        }
+    };
+    say(format!("open {} in {open_ms} ms (preopen {}): {}", label(&request), if a.preopen { "on" } else { "off" }, describe(&status)));
+    std::thread::sleep(Duration::from_secs_f64(a.seconds + 1.0));
+    let status = host.status().unwrap_or(status);
+    let close = host.close();
+    let rig = host.core.rt.lock().map_err(|_| "engine lock poisoned")?.lag.take();
+    let diag = host.diag();
+    host.shutdown();
+    close?;
+    let rig = rig.ok_or("the lag rig is gone")?;
+    let (lags, invalid) = rig.lags(status.sample_rate as usize * 85 / 1000);
+    let expected = status.align_frames as f64;
+    let (lag, spread_f) = (median(&lags), spread(&lags));
+    let ms = |frames: f64| frames * 1000.0 / status.sample_rate as f64;
+    say(serde_json::json!({
+        "phase": "lag", "backend": format!("{:?}", status.backend), "block": status.block, "rate": status.sample_rate,
+        "preopen": a.preopen, "openMs": open_ms, "in": a.input, "out": a.out,
+        "alignFrames": status.align_frames, "inputFrames": status.input_frames,
+        "found": lags.len(), "invalid": invalid, "lagMedianFrames": lag, "lagSpreadFrames": spread_f,
+        "residualFrames": lag - expected, "residualMs": ms(lag - expected), "counters": moved(&diag, &IoDiag::default()),
+    })
+    .to_string());
+    if lags.is_empty() || invalid * 10 > lags.len() + invalid {
+        say(format!("INVALID {invalid} of {} chirps below xcorr 0.8: check the cable and --in/--out", lags.len() + invalid));
+        return Err("invalid run".into());
+    }
+    let pass = ms(lag - expected).abs() <= 1.0;
+    say(format!(
+        "{} A2 {:+.3}ms (lag {lag:.2}f, align {expected:.0}f, spread {spread_f:.2}f) | |median lag - (inLat+outLat)| <= 1.0 ms",
+        if pass { "PASS" } else { "FAIL" },
+        ms(lag - expected)
+    ));
+    if pass { Ok(()) } else { Err("the take would land off the grid".into()) }
+}
+
 pub(crate) fn run(args: &[String]) -> Result<(), String> {
     let a = parse_args(args)?;
     if log::set_logger(&LOG).is_ok() {
@@ -556,6 +696,9 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
         let sentinel = std::env::temp_dir().join("bleeploop-engine-probe-asio");
         let report = crate::audio_output::probe_asio_startup(&sentinel, true);
         say(format!("asio startup: {}", serde_json::to_string(&report).unwrap_or_default()));
+    }
+    if a.lag {
+        return lag_run(&a, start);
     }
 
     let host = EngineHost::new(HostConfig::default());

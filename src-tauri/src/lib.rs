@@ -16,6 +16,9 @@ mod audio_output;
 mod engine_io;
 #[cfg(all(windows, debug_assertions))]
 mod audio_latency_probe;
+// DEV: the loopback chirp analysis the spike and the engine probe share.
+#[cfg(all(windows, debug_assertions))]
+mod chirp_lag;
 #[cfg(all(windows, debug_assertions))]
 mod marker_probe;
 // Stage 1 silent-share probe (docs/plans/native-engine.md § Stage 1, S1).

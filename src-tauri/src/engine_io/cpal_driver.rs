@@ -2,12 +2,19 @@
 //! `audio_output::asio_cache`) and WASAPI (devices by id, `audio_output`/`audio_input`'s picks), running
 //! the bodies of `callback.rs`; and Share output's mirror (`share.rs`).
 //!
+//! An ASIO run builds on a cpal device of its own, found again by the cached driver's name (the cached
+//! one would hand a new run the last run's stream state), and first opens the driver at another block
+//! size and destroys it (`preopen`): opened again at the size it last ran, the rig's driver delivers
+//! about two periods later than it reports (`docs/plans/native-engine.md` § Stage 1, "Cause and fix").
+//! A cpal ASIO driver lives as long as a stream holds it: dropping a run's streams stops it, disposes
+//! its buffers and exits it (asio-sys's `Driver` drop).
+//!
 //! Every latency handed to a body is a delta within ONE stream's timestamps (input: callback − capture;
 //! output: playback − callback): cpal ASIO instants are never compared across streams, each stream
 //! having its own time base (`docs/plans/native-engine.md` § Stage 1).
 
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use cpal::traits::{DeviceTrait, StreamTrait};
 use cpal::{SampleFormat, StreamConfig};
@@ -18,7 +25,14 @@ use super::share::{ShareOutput, ShareTap};
 use super::{Core, DeviceRequest, IoCounters};
 use crate::audio_output::AudioBackend;
 
-pub(crate) struct CpalDriver;
+pub(crate) struct CpalDriver {
+    /// ASIO: open the driver at another block size before each run (`preopen`). Off only for the
+    /// engine probe's before-and-after comparison (`--no-preopen`).
+    pub(crate) preopen: bool,
+}
+
+/// How long the preopen runs the driver at the other block size (the Stage 1 fix measured with this).
+const PREOPEN_RUN: Duration = Duration::from_millis(300);
 
 /// A resolved pair: the input and output devices with their stream configs.
 pub(crate) struct CpalDevice {
@@ -46,6 +60,7 @@ impl Driver for CpalDriver {
     /// A paused stream's callback returns before the mutex.
     fn start(&mut self, device: CpalDevice, spec: &Spec, mut wiring: Wiring) -> Result<Started, String> {
         let asio = spec.backend.is_asio();
+        let device = if asio { asio_run(device, spec, self.preopen)? } else { device };
         let input = retry_on_asio(asio, "input", || input_stream(&device, spec, &mut wiring))?;
         let output = retry_on_asio(asio, "output", || output_stream(&device, spec, &mut wiring))?;
         input.play().map_err(|e| format!("cpal input play: {e}"))?;
@@ -178,6 +193,74 @@ fn resolve_asio(request: &DeviceRequest) -> Result<(Spec, CpalDevice), String> {
 #[cfg(not(feature = "asio"))]
 fn resolve_asio(_: &DeviceRequest) -> Result<(Spec, CpalDevice), String> {
     Err("this build has no ASIO support".to_string())
+}
+
+/// ASIO: the device a run builds on, its driver opened at another block size and destroyed first when
+/// the run asks for a size (`preopen`; a preopen that fails is logged and the run goes on).
+#[cfg(feature = "asio")]
+fn asio_run(device: CpalDevice, spec: &Spec, preopen: bool) -> Result<CpalDevice, String> {
+    if preopen && spec.block > 0 {
+        if let Err(error) = preopen_asio(&device, spec) {
+            log::warn!("[engine_io] the ASIO preopen failed ({error}); opening at {} frames anyway", spec.block);
+        }
+    }
+    let fresh = find_asio(&spec.output_name)?;
+    Ok(CpalDevice { input: fresh.clone(), output: fresh, ..device })
+}
+
+#[cfg(not(feature = "asio"))]
+fn asio_run(_: CpalDevice, _: &Spec, _: bool) -> Result<CpalDevice, String> {
+    Err("this build has no ASIO support".to_string())
+}
+
+/// The cached ASIO driver as a new cpal device, with no stream state: found by name, which loads each
+/// driver listed before it once (as the startup probe did) and this one, then exits it again.
+#[cfg(feature = "asio")]
+fn find_asio(name: &str) -> Result<cpal::Device, String> {
+    use cpal::traits::HostTrait;
+    let host = cpal::host_from_id(cpal::HostId::Asio).map_err(|e| format!("ASIO host unavailable ({e})"))?;
+    let mut devices = host.devices().map_err(|e| format!("ASIO devices: {e}"))?;
+    devices
+        .find(|d| d.description().is_ok_and(|x| x.to_string() == name))
+        .ok_or_else(|| format!("the ASIO driver \"{name}\" did not load"))
+}
+
+/// Open the driver at a block size other than the run's, play it silent for `PREOPEN_RUN` and drop it
+/// (both streams, then the device): the driver is stopped, its buffers disposed and it exits, so the
+/// run's open is its first at the run's size.
+#[cfg(feature = "asio")]
+fn preopen_asio(device: &CpalDevice, spec: &Spec) -> Result<(), String> {
+    let began = Instant::now();
+    let other = other_block(device, spec.block);
+    let fresh = find_asio(&spec.output_name)?;
+    let (mut in_config, mut out_config) = (device.in_config, device.out_config);
+    in_config.buffer_size = cpal::BufferSize::Fixed(other);
+    out_config.buffer_size = cpal::BufferSize::Fixed(other);
+    // Both built before either plays, as a run is (`start`); an ASIO sample format's silence is zero bytes.
+    let input = fresh
+        .build_input_stream_raw(in_config, device.in_format, |_: &cpal::Data, _: &cpal::InputCallbackInfo| {}, |_| {}, None)
+        .map_err(|e| format!("preopen input: {e}"))?;
+    let output = fresh
+        .build_output_stream_raw(out_config, device.out_format, |data: &mut cpal::Data, _: &cpal::OutputCallbackInfo| data.bytes_mut().fill(0), |_| {}, None)
+        .map_err(|e| format!("preopen output: {e}"))?;
+    input.play().map_err(|e| format!("preopen input play: {e}"))?;
+    output.play().map_err(|e| format!("preopen output play: {e}"))?;
+    std::thread::sleep(PREOPEN_RUN);
+    drop(output);
+    drop(input);
+    drop(fresh);
+    log::info!("[engine_io] ASIO preopen at {other} frames before the {}-frame open: {} ms", spec.block, began.elapsed().as_millis());
+    Ok(())
+}
+
+/// A block size the driver takes that is not `block`.
+#[cfg(feature = "asio")]
+fn other_block(device: &CpalDevice, block: u32) -> u32 {
+    let (min, max) = match device.output.default_output_config().map(|c| *c.buffer_size()) {
+        Ok(cpal::SupportedBufferSize::Range { min, max }) => (min, max),
+        _ => (0, u32::MAX),
+    };
+    [256, 128, 512, 64, 1024].into_iter().find(|&b| b != block && (min..=max).contains(&b)).unwrap_or(if block == 256 { 128 } else { 256 })
 }
 
 /// WASAPI shared mode: the picked (or default) endpoints at their mix formats; the period is the
