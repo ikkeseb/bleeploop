@@ -570,24 +570,29 @@ test and `verify/guards/engine-wire.mjs`:
 
 - Tauri commands: `engine_mode` / `engine_set_mode(enabled)`; `engine_open(request)` →
   `DeviceStatus` (also switches; blocking work off the IPC thread); `engine_close`; `engine_status`;
-  `engine_set_input_channel(channel)`; `engine_send(commands)` (a batch, fire-and-forget, errors come
-  back on the feed); `engine_set_share(endpoint)`; `engine_feed(channel)` subscribes a Tauri Channel.
+  `engine_set_input_channel(channel)`; `engine_send(commands)` (a batch, synchronous so batches keep
+  IPC order; before any engine exists it keeps the settings, drops note-offs and refuses other actions);
+  `engine_set_share(endpoint)`; `engine_feed(channel)` subscribes a Tauri Channel; `engine_snapshot` /
+  `engine_load_session` (Session, below). `DeviceStatus.inputOpen` is false when WASAPI runs output-only
+  (no capture endpoint, or its build failed: the input is silence).
 - `Command` and `Event` in serde's external tagging with Rust variant names (`"PlayAll"`,
   `{"RecDub":0}`, `{"SetVolume":[0,0.8]}`); struct fields camelCase; `FxParam`/`FxKind` as the TS
   keys, `Instrument` as its id, `NoteTarget` as `{"Builtin":"lead"}` / `{"Slot":0}`.
 - Feed frame, ~60/s from a non-RT feed thread (`engine_io/feed.rs`), sent when something changed or
   the meter moved, and at least every 500 ms while a device runs: `seq`, `reset` (true on the first
   frame after a subscribe or a new engine: the UI replaces its state, so a WebView reload resyncs; it
-  carries the transport, every lane and the selection), `events`, `device` (DeviceEvent), `status`
+  carries the transport, every lane, the selection and `settings`, the remembered setting commands in
+  replay order, which the UI adopts), `events` (with `Cleared`, sent only where the engine really
+  clears a lane: the UI resets that lane's mix on it and on nothing else), `device` (DeviceEvent), `status`
   (absent when unchanged, `null` with no device), `anchor` (`frame`, `atMs` in Unix ms, `rate`, and
   `grid`, the looper's anchor: a lane plays `(f - grid) mod master` at frame `f`), `meter` (the capture
   channel's peak and clip), `peaks` (per lane, 1024-frame bins in play order, only those that changed;
   lf-engine keeps them per buffer, `overview.rs`). Never PCM. One subscriber: a new one replaces it.
 - `EngineHost` keeps the last value of every setting command and replays them into each new engine (the
   first, a rate change, `EngineFaulted`), so the UI's settings survive and one sent before the first
-  open is kept (`engine_io/settings.rs`). CLEAR forgets a lane's mixer and FX, a COPY hands them on;
-  a CLEAR a pedal confirms is not seen there, so that lane's old mixer and FX come back after a rebuild
-  (known limit).
+  open is kept (`engine_io/settings.rs`). `Cleared` forgets a lane's mixer and FX, a COPY hands them
+  on; a lane setting sent between a clear and the feed reading it (one block plus one tick) is
+  forgotten with it (known limit).
 
 **Plugins** (built, `engine_io/plugins.rs`): in engine mode the `plugin_*` load, unload, editor and
 parameter commands route to the engine slot owners (`host/engine_slot.rs`) under the same names and
@@ -603,13 +608,23 @@ the anchor, Solid signals are written only on change. MIDI keeps Web MIDI and th
 release (the native `MidiHost` stays off: WinMM ports are exclusive).
 
 **Web fake** in `src/platform/host.web.ts`: records every send and emits frames a probe scripts; not a
-second looper. UI probes assert gesture → command and frame → DOM. After the flip `pnpm dev` makes
-no sound (the browser tier stays a verification rig).
+second looper. UI probes assert gesture → command and frame → DOM. Until Stage 6 deletes the web
+path, the browser build runs it (the browser tier stays a verification rig).
 
-**Session, recovery, export, import** (after the guitar path): Export keeps today's zip layout and
-session.json fields. Open: whether the snapshot's PCM may cross to TS once per save (reusing today's
-zip, WAV and IndexedDB code) or Rust writes the files. Settings, rig recall and MIDI bindings stay in
-TS storage, mirrored to native at boot.
+**Session, recovery, export, import** (built; `lf-engine/src/session.rs`, `engine_io/session.rs`,
+`src/audio/export/session-source.ts`): the snapshot's PCM crosses to TS once per save, off the RT
+path, so today's zip, WAV, session.json and IndexedDB code stay (an agent's call on the owner's
+delegation, 2026-09-26: the owner may reverse it). Bytes both ways: `[u32 LE header length][JSON
+header][f32 LE mono PCM, lanes in header order, play order]`; the snapshot header is {rate,
+masterLengthFrames, bpm, tracks: [{index, frames, reversed, state}]}, the load header {bpm, bars,
+masterLengthFrames, tracks}. The engine pins each committed lane's buffer with its write count (an
+OVERDUBBING lane gives its undo buffer, the loop before the layer) and copies 1024 positions per
+rendered block into a buffer the host pre-touched; a buffer written meanwhile answers `Changed` and the
+host retries. A load goes into an all-EMPTY engine only: it swaps each lane's buffer in (the old ones go
+back to the host to free), sets BPM and the grid, and starts PLAYING lanes at position 0. With no
+device the host services the port under the engine lock. Export's wet master is still the web path's
+offline render, so its FX may sound unlike the engine's. Recovery starts once a device runs. Settings,
+rig recall and MIDI bindings stay in TS storage, mirrored to native at boot.
 
 **Parity checklist** (each item a cargo test, a UI probe on the fake, or a lap stop): rec/dub/play/
 stop/undo/retake/clear/reverse, count-in and accent, BPM lock, fixed/free length, record cap, auto
