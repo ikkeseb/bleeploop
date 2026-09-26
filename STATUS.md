@@ -90,6 +90,7 @@ Blocked on an owner decision, not on testing. The default column is what happens
 | E8 | Engine sessions: the snapshot's PCM crosses to TS once per save, so today's zip/WAV/recovery code stays (agents' call, 2026-09-26). Keep, or Rust writes the files? | keep |
 | E9 | WASAPI takes land late on drivers that hide their buffering (~215 ms on the Focusrite; `docs/plans/native-engine.md` § Stage 1 W1). Accept as documented, or build the one reported term (~40 ms, invisible on this rig)? | accept |
 | E10 | Multiply (F14) is FIXED past the loop only. Should a free later take (FIXED off) also run until the press and grow the loop, as the first take does, instead of closing at the loop length? | FIXED only |
+| E11 | F16 (a track's length after recording), proposed: a lane control keeps the track's first N bars and repeats them across the loop, one UNDO away, on the engine's existing tiling (the loop's length is unchanged). Build it? | not built |
 
 **Answered 2026-09-26:** the 12 ms ASIO launch is not a stop (cause found and fixed: the engine opens
 ASIO at another block size first); the first release is v0.1.0, on the engine (E1, E5 and E7 lapse);

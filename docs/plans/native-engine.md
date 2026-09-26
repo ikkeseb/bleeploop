@@ -698,7 +698,7 @@ Built on the engine, in this order unless the owner reorders:
 - **F15 input FX — built, not heard.** A wet-only ECHO and REVERB send on the live input, recorded and
   monitored on the same frame; the dry signal and a take's alignment are untouched (lf-engine
   `input_fx.rs`, `tests/input_fx.rs`; the IN FX pill in engine mode).
-- **F16 track length after recording** (session formatVersion 2): not built; its design is open.
+- **F16 track length after recording**: not built; a proposed design waits on the owner (STATUS E11).
 
 Also engine-bound from `docs/plans/pedalboard.md`: D12 controller data to plugins and F8 synth plugins
 on the device clock (both arrive with Stage 4).
