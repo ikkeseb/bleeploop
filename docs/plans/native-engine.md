@@ -183,6 +183,15 @@ late (max 2.6 ms), 0 xruns; at 128 and 256, 0–1. A GPU job from another app ra
   28 % and 21 % of the period).
 - W1 FAIL: the chirps land 220 ms after cpal's QPC stamps predict (spread 8 ms), while the parts sum
   to 35.9 ms (input age 13.9, ring 10, output 12); the echo run found no echo. Inside the OWNER zone.
+  On the engine's path (same night, `--probe-engine wasapi default --lag`, 8 launches): takes would
+  land +211.5 to +229.4 ms late against the align the engine uses. Not the join ring (fill 921–1170
+  against its 1102 setpoint). A render clock on the endpoint (`IAudioClock`) runs 35–44 ms behind what
+  the audio engine took, a term cpal's stamps miss; the rest, ~75 ms out and ~100 ms in, sits in the
+  Focusrite WDM driver (4.143.0.261), which reports none of it (ASIO on the same box: 8 ms round
+  trip; `--split out|in` measures each side against ASIO). No API reports the hidden part, and a
+  per-device constant would miss by ±9 ms between launches. Separately, the join's startup transient
+  moved the lag 2–17 ms in the first 10–60 s in 7 of 8 launches. First release: WASAPI takes are
+  documented as unaligned on such drivers; ASIO is the play path.
 - S1 FAIL as on 2026-09-24: process loopback captures after the session mute and volume (STATUS E2).
 - Conditions: the GPU job ran throughout, and the failing USB port re-enumerated about 40 times
   (another controller); C1 saw 0 gaps anyway.
