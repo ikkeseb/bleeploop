@@ -111,9 +111,13 @@ function routeEngine(i: 0 | 1): void {
 // Engine mode's per-slot plugin gain (the web path keeps it on the plugin bridge); null = no plugin.
 const [engineGains, setEngineGains] = createSignal<[number | null, number | null]>([null, null]);
 
+/** An empty slot passes the input at unity (MIC), as a new engine starts it: an unload must not leave
+ * the outgoing plugin's gain on the slot MIC records through. */
+const EMPTY_SLOT_GAIN = 1;
+
 function setEngineGain(slot: 0 | 1, gain: number | null): void {
   setEngineGains((prev) => withAt(prev, slot, gain));
-  if (gain !== null) sendEngine({ SetSlotGain: [slot, gain] });
+  sendEngine({ SetSlotGain: [slot, gain ?? EMPTY_SLOT_GAIN] });
 }
 
 /**
@@ -125,9 +129,7 @@ export function engineResync(): void {
   engineTarget = '';
   inputRouter.setActivePlugin(null);
   applyActiveRouting();
-  engineGains().forEach((gain, slot) => {
-    if (gain !== null) sendEngine({ SetSlotGain: [slot, gain] });
-  });
+  engineGains().forEach((gain, slot) => sendEngine({ SetSlotGain: [slot, gain ?? EMPTY_SLOT_GAIN] }));
   resendEngineLive();
 }
 

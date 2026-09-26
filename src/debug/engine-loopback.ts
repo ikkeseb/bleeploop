@@ -38,13 +38,16 @@
  *   `VITE_LF_PROBE_BARS`     take length in bars at 120 BPM (default 8)
  *   `VITE_LF_PROBE_PLUGIN`   `<name substring>[:<format>]` loaded into slot 1 and taken live (default
  *                            `Pro-Q:vst3`); empty or `none`: MIC, the input dry through an empty live slot
+ *   `VITE_LF_PROBE_UNLOAD_FIRST`  with MIC only: `<name substring>[:<format>]` loaded into slot 1 and
+ *                            unloaded before MIC takes that slot, so the MIC takes' peak gain shows what
+ *                            the unload left on the slot (compare it with a run without this knob)
  */
 import { framesPerBar } from '../audio/quantize';
 import { setBufferSize, usingAsio } from '../audio/audio-devices';
 import { BUFFER_FRAMES_OPTIONS, writeAudioDeviceSettings, type BufferFrames } from '../audio/audio-settings';
-import { availablePlugins, nativeHostReady, pluginGain, selectPlugin, slotPlugins } from '../audio/instrument';
+import { availablePlugins, clearPlugin, nativeHostReady, pluginGain, selectPlugin, slotPlugins } from '../audio/instrument';
 import { goLive, inputArmed, stopLive } from '../audio/native-io';
-import { engineMode, type DeviceStatus } from '../platform';
+import { engineMode, type DeviceStatus, type PluginDescriptor } from '../platform';
 import { clock, looper, master, session } from '../ui/state/audio';
 import { engineDevice, onEngineEvent, openEngineDevice, setEngineInputChannel } from '../ui/state/engine-store';
 
@@ -302,6 +305,21 @@ export async function runEngineLoopback(): Promise<void> {
   }
 }
 
+/** Load the scanned plugin matching `name` (and `format`) into slot 1, once the scan has finished. */
+async function loadInSlot1(name: string, format: string | undefined): Promise<PluginDescriptor> {
+  for (let waited = 0; !(nativeHostReady() && availablePlugins().length > 0); waited += 60) {
+    check(waited < 600, 'the plugin scan did not finish within 10 min');
+    log(`  waiting for the plugin scan (${waited} s)`);
+    const deadline = performance.now() + 60_000;
+    while (performance.now() < deadline && !(nativeHostReady() && availablePlugins().length > 0)) await sleep(200);
+  }
+  const desc = availablePlugins().find((d) => d.name.toLowerCase().includes(name) && (!format || d.format === format));
+  check(desc !== undefined, `no scanned plugin matches "${name}${format ? `:${format}` : ''}"`);
+  if (slotPlugins()[0]?.id !== desc!.id) await selectPlugin(0, desc!);
+  check(slotPlugins()[0]?.id === desc!.id, `could not load ${desc!.name}`);
+  return desc!;
+}
+
 async function run(): Promise<void> {
   check(engineMode(), 'engine mode is off in this profile (the runner writes its toggle file)');
   const channel = Number(import.meta.env.VITE_LF_PROBE_CHANNEL ?? 1);
@@ -330,26 +348,26 @@ async function run(): Promise<void> {
   let source: string;
   let short: string;
   if (want) {
-    for (let waited = 0; !(nativeHostReady() && availablePlugins().length > 0); waited += 60) {
-      check(waited < 600, 'the plugin scan did not finish within 10 min');
-      log(`  waiting for the plugin scan (${waited} s)`);
-      const deadline = performance.now() + 60_000;
-      while (performance.now() < deadline && !(nativeHostReady() && availablePlugins().length > 0)) await sleep(200);
-    }
-    const desc = availablePlugins().find((d) => d.name.toLowerCase().includes(want) && (!format || d.format === format));
-    check(desc !== undefined, `no scanned plugin matches "${want}${format ? `:${format}` : ''}"`);
-    if (slotPlugins()[0]?.id !== desc!.id) await selectPlugin(0, desc!);
-    check(slotPlugins()[0]?.id === desc!.id, `could not load ${desc!.name}`);
+    const desc = await loadInSlot1(want, format);
     await goLive(0);
-    check(inputArmed()[0], `GO LIVE did not take ${desc!.name} live`);
-    short = `${desc!.name} [${desc!.format}]`;
+    check(inputArmed()[0], `GO LIVE did not take ${desc.name} live`);
+    short = `${desc.name} [${desc.format}]`;
     source = `${short} live in slot 1, gain ${pluginGain()[0]}`;
   } else {
+    const unloadKnob = String(import.meta.env.VITE_LF_PROBE_UNLOAD_FIRST ?? '').trim().toLowerCase();
+    let unloaded = '';
+    if (unloadKnob) {
+      const [name, fmt] = unloadKnob.split(':');
+      const desc = await loadInSlot1(name, fmt);
+      await clearPlugin(0);
+      check(!slotPlugins()[0], `could not unload ${desc.name}`);
+      unloaded = `, after ${desc.name} [${desc.format}] was loaded there and unloaded`;
+    }
     check(!slotPlugins()[0] || !slotPlugins()[1], 'MIC needs an empty slot');
     if (!looper.inputArmed()) check(await looper.toggleInput(), 'MIC could not take an empty slot live');
     check(looper.inputArmed(), 'MIC is not live');
     short = 'MIC';
-    source = `MIC (the input dry through an empty live slot ${inputArmed()[0] ? 1 : 2}, engine slot gain default)`;
+    source = `MIC (the input dry through an empty live slot ${inputArmed()[0] ? 1 : 2}${unloaded})`;
   }
   liveSlot = inputArmed()[0] ? 0 : inputArmed()[1] ? 1 : null;
   master.setMuted(false);
