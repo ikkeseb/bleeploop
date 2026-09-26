@@ -87,11 +87,13 @@ struct Args {
     /// No chirps: the output stays silent (C1 and plugin checks need no cable).
     quiet: bool,
     device: Option<String>,
+    /// ASIO: open and close the driver once at another block size first (the same-size relaunch test).
+    preopen: bool,
 }
 
 fn parse_args(args: &[String]) -> Result<Args, String> {
     const USAGE: &str = "usage: --probe-engine-spike <asio|wasapi> <64|128|256|default> [--plugin <file.vst3>] \
-        [--in N] [--out N] [--minutes N | --seconds N] [--echo] [--quiet] [--device <name substring, WASAPI>]";
+        [--in N] [--out N] [--minutes N | --seconds N] [--echo] [--quiet] [--preopen] [--device <name substring, WASAPI>]";
     let backend = match args.first().map(String::as_str) {
         Some("asio") => ASIO_BACKEND,
         Some("wasapi") => WASAPI_BACKEND,
@@ -112,6 +114,7 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
         echo: false,
         quiet: false,
         device: None,
+        preopen: false,
     };
     let mut rest = args[2..].iter();
     while let Some(flag) = rest.next() {
@@ -126,6 +129,7 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
             "--device" => parsed.device = Some(value()?),
             "--echo" => parsed.echo = true,
             "--quiet" => parsed.quiet = true,
+            "--preopen" => parsed.preopen = true,
             _ => return Err(format!("unknown argument {flag}\n{USAGE}")),
         }
     }
@@ -1009,6 +1013,9 @@ fn resolve_config(device: &cpal::Device, input: bool, block: Option<u32>) -> Res
 #[cfg(feature = "asio")]
 fn run_asio(a: &Args, engine: &Shared, counters: &Arc<Counters>) -> Result<(), String> {
     let host = cpal::host_from_id(cpal::HostId::Asio).map_err(|e| format!("ASIO host: {e}"))?;
+    if let (true, Some(block)) = (a.preopen, a.block) {
+        preopen_asio(&host, if block == 256 { 128 } else { 256 })?;
+    }
     let device = host.default_output_device().ok_or("no ASIO device")?;
     let name = device.description().map(|d| d.to_string()).unwrap_or_default();
     // Both configs while the driver is free: it can't be re-queried once a stream holds it.
@@ -1037,6 +1044,35 @@ fn run_asio(a: &Args, engine: &Shared, counters: &Arc<Counters>) -> Result<(), S
     drop(input);
     let e = engine.lock().map_err(|_| "engine lock poisoned")?;
     report_asio(a, &e, counters, &name, block, aborted)
+}
+
+/// Open the driver at `block`, run it briefly silent, and drop the device so the driver is destroyed
+/// (stop, dispose, exit) before the measured open.
+#[cfg(feature = "asio")]
+fn preopen_asio(host: &cpal::Host, block: u32) -> Result<(), String> {
+    let device = host.default_output_device().ok_or("no ASIO device (preopen)")?;
+    let (in_cfg, in_fmt) = resolve_config(&device, true, Some(block))?;
+    let (out_cfg, out_fmt) = resolve_config(&device, false, Some(block))?;
+    let input = device
+        .build_input_stream_raw(in_cfg, in_fmt, |_: &cpal::Data, _: &cpal::InputCallbackInfo| {}, |_| {}, None)
+        .map_err(|e| format!("preopen input: {e}"))?;
+    let output = device
+        .build_output_stream_raw(
+            out_cfg,
+            out_fmt,
+            |data: &mut cpal::Data, _: &cpal::OutputCallbackInfo| data.bytes_mut().fill(0),
+            |_| {},
+            None,
+        )
+        .map_err(|e| format!("preopen output: {e}"))?;
+    input.play().map_err(|e| format!("preopen input play: {e}"))?;
+    output.play().map_err(|e| format!("preopen output play: {e}"))?;
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    drop(output);
+    drop(input);
+    drop(device);
+    println!("[engine-spike] preopen at block {block} done");
+    Ok(())
 }
 
 #[cfg(not(feature = "asio"))]

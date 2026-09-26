@@ -27,6 +27,7 @@ const opt = {
   in: '1',
   out: '1',
   device: 'Focusrite',
+  preopen: '',
   proq: join(vst3, 'FabFilter', 'FabFilter Pro-Q 3.vst3'),
   amp: join(vst3, 'Neural DSP', 'Archetype Petrucci X.vst3'),
 };
@@ -40,7 +41,7 @@ for (const arg of process.argv.slice(2)) {
 }
 const only = new Set(opt.only.split(','));
 const blocks = opt.blocks.split(',');
-const chans = ['--in', opt.in, '--out', opt.out];
+const chans = ['--in', opt.in, '--out', opt.out, ...(opt.preopen === '1' ? ['--preopen'] : [])];
 
 if (appRunning()) {
   console.error('native:spike: an app is running. Close it or run pnpm native:kill first.');

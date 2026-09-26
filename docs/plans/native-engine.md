@@ -160,9 +160,14 @@ late (max 2.6 ms), 0 xruns; at 128 and 256, 0–1. A GPU job from another app ra
   bufferSwitch) and the driver reported the same latency, so the extra 528 frames sit in the driver
   or the interface, and the open order does not decide it. Two of 13 measured launches at 256 over
   two days, none of 22 at 64 or 128. Reproduced, so the Stage 1 STOP rule applied. **Owner,
-  2026-09-26: not a stop; the plan continues.** By-ear sessions on the engine run at 128 until the
-  cause is known; 256 stays selectable with this residual, and its R2 FAIL is accepted (256 is the
-  owner's everyday DAW setting on this rig).
+  2026-09-26: not a stop; the plan continues;** the R2 FAIL at 256 is accepted (256 is the owner's
+  everyday DAW setting on this rig).
+- **Cause and fix (same night, same setup):** a relaunch at the block size the driver last ran lands
+  about two periods late and stays there: 128 went +5.9 to +6.1 ms in 14 of 14 such launches (926.8–
+  932.8 frames against 666), while the first open after a block-size change landed right (256 then 128:
+  1187.8 and 666.8). `--preopen` (the spike opens the driver at another block size for 300 ms and
+  drops the device, so the driver is destroyed, before the measured open) put 4 of 4 same-size
+  relaunches at 128 back within 0.1 ms (662.8–668.8). The engine's ASIO open does the same (Stage 5).
 - A2 within 0.1 ms in the other 20 ASIO runs. A3 at 128: 663.8 in all 5, against 667.8–668.8 two
   hours earlier (5 frames between sessions; bar 2, inside the OWNER zone). At 64 a one-sample step
   inside the 10-minute run (A3.spread 1.00, bar ≤ 1; A4 +0.905 frames/10 min, PASS); A4 0.000 at 128
@@ -602,7 +607,7 @@ timbre against today.
 
 ## Stage 6 — flip and delete
 
-*Owner: publishes v0.2.0.*
+*Owner: publishes v0.1.0 (the first release; see Stage 5's release cut).*
 
 Native becomes the default. The web path stays one release as a fallback toggle only if the lap found
 a regression (owner's call). Then delete:
@@ -637,7 +642,7 @@ replaces `src/audio/AGENTS.md`, commands, the dev-app rule), `verify/README.md` 
 rig tier), `docs/VERIFY.md`, the STATUS lap, `README.md` (no rec align, the silent browser build).
 
 **Gates and release.** `pnpm check` gains `cargo test -p lf-engine` (it warns and skips where cargo is
-absent: the Mac until its toolchain lands). Release v0.2.0 from the same workflow; notes: rec align
+absent: the Mac until its toolchain lands). Release v0.1.0 from the same workflow; notes: rec align
 gone, the browser build is silent, and E5's recovery answer.
 
 ## After the flip: first features
