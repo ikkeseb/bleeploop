@@ -96,7 +96,11 @@ A `native:*` probe launches `tauri dev` (WASAPI; `--asio` for ASIO) with the pro
 lets the app close itself between phases, except after the check phase, whose window the runner sends
 the OS close (as the close button does), and in the crash phase, where it kills app.exe alone. Only
 `native:recall` restores plugins at launch, from a record of its own, never the owner's; the other
-probes start from empty slots. Windows open on the PC desktop and
+probes start from empty slots. Every probe runs in a profile of its own and writes its engine toggle
+first: the web-path probes (smoke, survey, swap, recall, loopback) `off`, in
+`scripts/classic-probe.tauri.json` or loopback's own (their first run scans plugins cold), the engine
+probes `on`. The owner's `pnpm dev:asio` starts in engine mode; the web path is Audio Settings →
+engine → web audio, then a restart. Windows open on the PC desktop and
 no gesture is needed. It refuses to start while an app is running. `--<knob>=<value>` sets `VITE_LF_PROBE_<KNOB>` (`--filter=Pro-Q,Saturn`;
 each probe's header lists its knobs), and the full log lands in `logs/native-<probe>.log`. It
 blocks until the verdict, so an agent harness should run it in the background.

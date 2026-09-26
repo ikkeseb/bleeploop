@@ -147,7 +147,7 @@ jobs:
           cat > notes.md <<EOF
           BleepLoop $RELEASE_TAG for Windows 10/11 (x64). Download \`$setup\`. The installer fetches the WebView2 runtime if the machine lacks it.
 
-          Guitar takes recorded through a plugin land late until you set Audio Settings → rec align by ear: record against the click and raise the value until the take sits on the beat (+69 ms on the developer's ASIO rig; yours will differ). A later version aligns takes itself and drops the setting.
+          This first release runs on BleepLoop's native audio engine: the looper, click, synths, FX and your plugin run inside the audio driver's callback, and takes land on the grid from the driver's reported latency, with no latency setting. Play through your interface's ASIO driver. WASAPI works as a fallback, but Windows and some drivers add latency they do not report, so WASAPI takes can land late (about 215 ms on the developer's Focusrite). The earlier audio path is still there as a fallback: Audio Settings → the engine switch, then restart.
 
           The build is not code-signed, so Windows SmartScreen warns on first run: choose "More info", then "Run anyway". Check the download against \`SHA256SUMS.txt\` first.
 

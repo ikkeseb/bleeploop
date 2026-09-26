@@ -5,8 +5,9 @@ VERIFY = how to prove it · `STATUS.md` = what is open. `CLAUDE.md` is a one-lin
 this file.
 
 **BleepLoop** — a Windows desktop instrument: an instrument host (two native-VST slots + six
-built-in Web Audio synths) over an RC-505 MK II–style 5-track looper, shipped as a Tauri v2 app
-(Rust + WebView2). Phases P0–P11 are done and LIVE on `main`.
+built-in synths) over an RC-505 MK II–style 5-track looper, all in one native audio engine, shipped
+as a Tauri v2 app (Rust + WebView2). Phases P0–P11 are done and LIVE on `main`; v0.1.0 is the first
+release.
 
 ## Read before you work — area briefings
 
@@ -44,13 +45,14 @@ Harness auto-load of nested files is not reliable: open the briefing yourself.
   settle. Rank unbuilt work by provenance: the owner's ear > the owner's stated roadmap > an agent's
   tier list.
 - **The play path is guitar → amp-sim plugin (native monitor) → play/loop/dub at low latency.** The
-  looper is the instrument. MIDI controller → synth/plugin is the second path, for the other layers,
-  and runs on the WebView latency path; PC-keyboard→MIDI is its fallback. By-ear sessions happen on
+  looper is the instrument. MIDI controller → synth/plugin is the second path, for the other layers;
+  its MIDI arrives through the WebView (Web MIDI); PC-keyboard→MIDI is its fallback. By-ear sessions happen on
   guitar. The on-screen keyboard stays available, but it is not the first-screen hero. The promise
   heads `README.md`; the not-built list lives in `docs/plans/pedalboard.md`.
-- **Direction: one native audio engine** (`docs/plans/native-engine.md`). Until its flip the live
-  line takes fixes only: no new work in paths the engine deletes (the plugin bridge, record
-  compensation, the Web Audio looper, synths and FX); new looper features are built in the engine.
+- **One native audio engine is the default** (`docs/plans/native-engine.md`, flipped for v0.1.0). The
+  web path behind the Audio Settings switch takes fixes only until Stage 6 deletes it: no new work in
+  the plugin bridge, record compensation, the Web Audio looper, synths or FX; new features are built
+  in the engine.
 - **The browser tier is a VERIFICATION RIG, not a product.** BleepLoop ships as a standalone
   Windows app with native drivers and zero-latency monitoring.
 - **Measure latency changes on the path they change,** with signal/timestamp probes before and
@@ -90,14 +92,17 @@ Harness auto-load of nested files is not reliable: open the briefing yourself.
 
 ## Architecture in one paragraph
 
-Native VST hosting is the *only* thing that forces Tauri/Rust; everything else is pure Web Audio /
-TypeScript and runs standalone in a browser. `src/platform/` is the ONLY place allowed to import
-`@tauri-apps/*`; `audio/` and `ui/` depend on its interfaces, never the reverse. **Audio buffers
-never cross that boundary as PCM** — native audio reaches the Web Audio graph only as an
-*AudioNode*. Frontend `console.error` + uncaught errors feed the release log
-(`src/platform/logging.ts`): keep every `console.error` site. Stack: SolidJS + TypeScript + Vite 8
-(rolldown/oxc — esbuild is gone) + Tone.js + ringbuf.js. This paragraph describes the shipping code
-until the native engine's flip.
+The app runs on one native audio engine by default: `src-tauri/crates/lf-engine` (pure, briefing in
+its `lib.rs`) and its device side `src-tauri/src/engine_io` (briefing in its `mod.rs`); the WebView
+sends commands and reads a JSON feed (`docs/plans/native-engine.md` § Stage 5). `src/platform/` is the
+ONLY place allowed to import `@tauri-apps/*`; `audio/` and `ui/` depend on its interfaces, never the
+reverse; UI components reach audio through `src/ui/state/audio.ts` (guarded). Live audio never
+crosses that boundary as PCM; a session save's snapshot does, once, off the RT path. Frontend
+`console.error` + uncaught errors feed the release log (`src/platform/logging.ts`): keep every
+`console.error` site. Stack: SolidJS + TypeScript + Vite 8 (rolldown/oxc — esbuild is gone), Rust +
+cpal + the CLAP/VST3 hosts. The web path (Web Audio, Tone.js, ringbuf.js, the plugin bridge) stays
+behind the Audio Settings switch and runs the browser build until Stage 6; the invariants below and
+`docs/ARCHITECTURE.md` still describe that path until Stage 6 rewrites them.
 
 ## Invariants — titles only; `docs/ARCHITECTURE.md` owns the text
 

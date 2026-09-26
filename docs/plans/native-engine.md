@@ -12,8 +12,8 @@ runtime (already true in the release build); the wet master shareable to OBS, br
 
 **Working rules**
 
-- The live line takes fixes only (`AGENTS.md` § Standing rules). Engine code lands on `main`, additive
-  and dormant (a DEV probe, then a hidden toggle) until Stage 6.
+- The web path takes fixes only (`AGENTS.md` § Standing rules). Engine mode is the default since
+  v0.1.0; the web path stays behind the Audio Settings switch until Stage 6.
 - Every stage ends machine-verified on the PC. By-ear items gather into ONE engine lap at Stage 5.
 - Numbers marked "estimate" are estimates; a pass bar says what it stands for.
 - The Mac gets a Rust toolchain later (owner, 2026-09-24); until then engine work is PC-only.
@@ -559,10 +559,12 @@ in point releases. Stage 6's deletion follows the release: until then the web pa
 toggle.
 
 **Toggle** (built, `src-tauri/src/engine_io/mode.rs`): a file in the app-local data folder
-(`engine-mode`: `on`), read at `setup` and applied on restart, never live (ASIO allows one client); an
-Audio Settings switch writes it. Engine mode runs one `EngineHost` and its feed thread, claims the ASIO
+(`engine-mode`; exactly `off` runs the web path, anything else or no file runs the engine, the default
+since v0.1.0), read at `setup` and applied on restart, never live (ASIO allows one client); the Audio
+Settings engine switch writes it. Engine mode runs one `EngineHost` and its feed thread, claims the ASIO
 duplex holder, refuses the live line's arm/monitor commands, skips the plugin bridge and Web Audio at
-boot, and on exit unloads the plugins, then shuts the host down. The flip changes the default.
+boot, and on exit unloads the plugins, then shuts the host down (bounded: a stuck plugin teardown is
+left to process exit).
 
 **Wire** (JSON; built): the Rust mirror `src-tauri/src/engine_io/wire.rs`, the TS mirror
 `src/platform/engine-wire.ts`, one fixture `verify/fixtures/engine-wire.json` parsed by both a cargo
@@ -647,8 +649,8 @@ timbre against today.
 
 *Owner: publishes v0.1.0 (the first release; see Stage 5's release cut).*
 
-Native becomes the default. The web path stays one release as a fallback toggle only if the lap found
-a regression (owner's call). Then delete:
+Native became the default for v0.1.0, with the web path behind the Audio Settings switch. Whether it
+stays one more release depends on the engine lap (owner's call). Then delete:
 
 - **TS:** the Web Audio audio path in `src/audio/` (looper, engine, clock, master, capture, playback,
   plugin bridge, record latency, input router, Web MIDI, device glue, output match, autosave, export,
