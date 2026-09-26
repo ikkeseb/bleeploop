@@ -81,6 +81,11 @@ export function startPlayback(i: number, audioBuf: AudioBuffer, when: number, of
   const startAt = Math.max(when, ctx.currentTime);
   // If `when` had to be clamped up to now, advance the offset by the same amount so the buffer position
   // that sounds at startAt stays phase-correct. Wrap into [0, duration) (offset is 0 on the boundary paths).
+  // Phase over head is the designed fallback: a late start loses its first 0.3–15 ms on the first pass
+  // (only under planted main-thread stalls; none in ~200 unloaded gestures). Rarer, a start that takes
+  // effect 1–3 quanta after the clamp plays 128–384 frames behind the grid until restarted (13 of 247
+  // late starts); clamping to `ctx.currentTime + 256 / sampleRate`, the lead `fx.ts` uses, cut that to
+  // 1 of 203 under the same stalls. Not applied: the engine replaces this path at Stage 6.
   const dur = audioBuf.duration;
   const startOffset = dur > 0 ? (offset + (startAt - when)) % dur : 0;
   const prev = t.source;

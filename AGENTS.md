@@ -25,7 +25,6 @@ Harness auto-load of nested files is not reliable: open the briefing yourself.
 | Releases, licences, workflow hardening | `docs/plans/release-prep.md` |
 | The native audio engine: the decided direction, its stages, gates and owner decisions | `docs/plans/native-engine.md` |
 | The hands-free looper (landed) and what is explicitly not built | `docs/plans/pedalboard.md` |
-| The open work order: the recorder-session jam and the looper fixes queued behind it | `docs/plans/gates-and-hygiene.md` |
 
 ## Standing rules
 
