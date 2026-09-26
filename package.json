@@ -28,6 +28,7 @@
     "native:recall": "node scripts/native-probe.mjs recall-restart",
     "native:loopback": "node scripts/native-probe.mjs loopback-sync --asio",
     "native:engine-smoke": "node scripts/native-probe.mjs engine-smoke --asio",
+    "native:engine-recovery": "node scripts/native-probe.mjs engine-recovery --asio",
     "native:spike": "node scripts/native-spike.mjs",
     "native:engine": "node scripts/native-engine.mjs",
     "native:kill": "node scripts/native-kill.mjs",

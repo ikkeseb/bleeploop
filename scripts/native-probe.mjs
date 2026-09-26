@@ -6,6 +6,7 @@
 //   pnpm native:recall  recall restart  (src/debug/recall-restart.ts): one launch per phase
 //   pnpm native:loopback  loopback sync (src/debug/loopback-sync.ts): needs an output cabled into input 1
 //   pnpm native:engine-smoke  the UI on the native engine (src/debug/engine-smoke.ts), engine mode on
+//   pnpm native:engine-recovery  export, import and recovery on the engine (src/debug/engine-recovery.ts)
 //
 // Options: `--asio` launches `pnpm dev:asio` instead of `pnpm dev:wasapi`; `--<knob>=<value>` becomes
 // `VITE_LF_PROBE_<KNOB>` (`--filter=Pro-Q,Saturn`, `--hold=`, `--settle=`, `--params=`, `--plugins=`:
@@ -40,6 +41,18 @@ const PROBES = {
     engineMode: 'com.bleeploop.engine-probe',
     cleanLog: true,
     phases: [{ name: 'smoke', end: /^(complete: .*|FAIL.*)$/, pass: /^complete: /, exit: 'os-close' }],
+  },
+  // The same profile; the save phase ends with app.exe killed while its loops play, the restore phase
+  // with a window close.
+  'engine-recovery': {
+    tag: 'engine-recovery',
+    config: 'scripts/engine-probe.tauri.json',
+    engineMode: 'com.bleeploop.engine-probe',
+    cleanLog: true,
+    phases: [
+      { name: 'save', end: /^(saved: .*|FAIL.*)$/, pass: /^saved: /, exit: 'crash' },
+      { name: 'restore', end: /^(restored: .*|FAIL.*)$/, pass: /^restored: /, exit: 'os-close' },
+    ],
   },
   // `recallLines`: how many `[rig-recall]` log lines the phase must print.
   'recall-restart': {
