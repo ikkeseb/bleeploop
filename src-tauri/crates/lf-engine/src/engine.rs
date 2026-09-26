@@ -55,8 +55,10 @@ pub struct EngineConfig {
 }
 
 impl EngineConfig {
+    /// The command ring holds a new engine's settings replay (about a hundred commands) and the UI's
+    /// batch after it with room to spare; the engine takes up to `MAX_PENDING` a block, the rest wait.
     pub fn new(sample_rate: u32) -> Self {
-        EngineConfig { sample_rate, max_loop_seconds: 60.0, max_block: 4096, command_capacity: 256, event_capacity: 4096 }
+        EngineConfig { sample_rate, max_loop_seconds: 60.0, max_block: 4096, command_capacity: 1024, event_capacity: 4096 }
     }
 }
 
