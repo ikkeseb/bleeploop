@@ -19,8 +19,9 @@ fn validate_slot(slot: u8) -> Result<(), String> {
     }
 }
 
-/// In engine mode the engine owns the audio device: the live line's device arms are refused (GO LIVE
-/// is the engine's `SetSlotLive`).
+/// In engine mode the engine owns the audio device and routes the notes: the live line's device arms
+/// and note commands are refused (GO LIVE is the engine's `SetSlotLive`, notes go through
+/// `engine_send`). The plugin commands route to the engine's slots (`engine_io::plugins`).
 #[cfg(windows)]
 fn refuse_in_engine_mode(command: &str) -> Result<(), String> {
     if crate::engine_io::mode::active() {
@@ -173,6 +174,10 @@ pub async fn plugin_load(
         // Dispatch by bundle extension: `.vst3` (file or folder bundle) → the VST3 host; everything
         // else (`.clap`) → the CLAP host. The control plane downstream (event ring, shared buffer,
         // gate) is identical; only the upstream render differs.
+        if let Some(engine) = crate::engine_io::mode::engine() {
+            let _ = load_token; // the live load's token for its posted buffer; an engine slot posts none
+            return engine.plugin_load(&state, &window, slot, path, id, frontend_epoch);
+        }
         if path.to_ascii_lowercase().ends_with(".vst3") {
             super::clap::vst3_load(&state, &window, slot, path, id, frontend_epoch, load_token)
         } else {
@@ -198,6 +203,9 @@ pub async fn plugin_unload(
     validate_slot(slot)?;
     #[cfg(windows)]
     {
+        if let Some(engine) = crate::engine_io::mode::engine() {
+            return engine.plugin_unload(slot);
+        }
         super::clap::unload(&state, &window, slot)
     }
     #[cfg(not(windows))]
@@ -217,6 +225,9 @@ pub async fn plugin_list_loaded(
 ) -> Result<Vec<PluginInfo>, String> {
     #[cfg(windows)]
     {
+        if let Some(engine) = crate::engine_io::mode::engine() {
+            return engine.plugin_list_loaded();
+        }
         super::clap::list_loaded(&state)
     }
     #[cfg(not(windows))]
@@ -240,6 +251,7 @@ pub async fn plugin_note_on(
     validate_note_event(note, Some(velocity))?;
     #[cfg(windows)]
     {
+        refuse_in_engine_mode("plugin_note_on (notes go through engine_send)")?;
         super::clap::enqueue_event(&state, slot, super::clap::PluginEvent::NoteOn { key: note, velocity })
     }
     #[cfg(not(windows))]
@@ -261,6 +273,7 @@ pub async fn plugin_note_off(
     validate_note_event(note, None)?;
     #[cfg(windows)]
     {
+        refuse_in_engine_mode("plugin_note_off (notes go through engine_send)")?;
         super::clap::enqueue_event(&state, slot, super::clap::PluginEvent::NoteOff { key: note })
     }
     #[cfg(not(windows))]
@@ -283,6 +296,9 @@ pub async fn plugin_set_param(
     validate_slot(slot)?;
     #[cfg(windows)]
     {
+        if let Some(engine) = crate::engine_io::mode::engine() {
+            return engine.plugin_set_param(slot, param_id, value);
+        }
         super::clap::set_param(&state, slot, param_id, value)
     }
     #[cfg(not(windows))]
@@ -303,6 +319,9 @@ pub async fn plugin_save_state(
     validate_slot(slot)?;
     #[cfg(windows)]
     {
+        if let Some(engine) = crate::engine_io::mode::engine() {
+            return engine.plugin_save_state(slot);
+        }
         super::clap::save_state(&state, slot)
     }
     #[cfg(not(windows))]
@@ -323,6 +342,9 @@ pub async fn plugin_load_state(
     validate_slot(slot)?;
     #[cfg(windows)]
     {
+        if let Some(engine) = crate::engine_io::mode::engine() {
+            return engine.plugin_load_state(slot, bytes);
+        }
         super::clap::load_state(&state, slot, bytes)
     }
     #[cfg(not(windows))]
@@ -341,6 +363,9 @@ pub async fn plugin_list_params(
     validate_slot(slot)?;
     #[cfg(windows)]
     {
+        if let Some(engine) = crate::engine_io::mode::engine() {
+            return engine.plugin_list_params(slot);
+        }
         super::clap::list_params(&state, slot)
     }
     #[cfg(not(windows))]
@@ -364,6 +389,9 @@ pub async fn plugin_open_editor(
     #[cfg(windows)]
     {
         let _ = mode; // P10.0: always floating
+        if let Some(engine) = crate::engine_io::mode::engine() {
+            return engine.plugin_open_editor(slot);
+        }
         super::clap::open_editor(&state, slot)
     }
     #[cfg(not(windows))]
@@ -382,6 +410,9 @@ pub async fn plugin_close_editor(
     validate_slot(slot)?;
     #[cfg(windows)]
     {
+        if let Some(engine) = crate::engine_io::mode::engine() {
+            return engine.plugin_close_editor(slot);
+        }
         super::clap::close_editor(&state, slot)
     }
     #[cfg(not(windows))]
@@ -449,6 +480,9 @@ pub async fn plugin_disarm_input(
     validate_slot(slot)?;
     #[cfg(windows)]
     {
+        if crate::engine_io::mode::active() {
+            return Ok(()); // nothing is armed on the live line in engine mode
+        }
         super::clap::disarm_input(&state, slot)
     }
     #[cfg(not(windows))]
@@ -511,6 +545,9 @@ pub async fn plugin_disarm_monitor(
     validate_slot(slot)?;
     #[cfg(windows)]
     {
+        if crate::engine_io::mode::active() {
+            return Ok(()); // nothing is armed on the live line in engine mode
+        }
         super::clap::disarm_monitor(&state, slot)
     }
     #[cfg(not(windows))]
@@ -531,6 +568,9 @@ pub async fn plugin_set_monitor_gain(
     validate_slot(slot)?;
     #[cfg(windows)]
     {
+        if let Some(engine) = crate::engine_io::mode::engine() {
+            return engine.plugin_gain(slot, gain);
+        }
         super::clap::set_monitor_gain(&state, slot, gain)
     }
     #[cfg(not(windows))]
@@ -564,6 +604,9 @@ pub async fn plugin_monitor_latency(
     validate_slot(slot)?;
     #[cfg(windows)]
     {
+        if crate::engine_io::mode::active() {
+            return Ok(0.0); // the engine aligns takes itself: no record compensation
+        }
         super::clap::monitor_latency_seconds(&state, slot)
     }
     #[cfg(not(windows))]

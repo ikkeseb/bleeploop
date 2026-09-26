@@ -38,6 +38,7 @@ mod transport;
 
 pub use commands::*;
 pub use state::PluginHostState;
+pub(crate) use state::{ParamDesc, PluginDescriptor, PluginInfo};
 #[cfg(all(windows, debug_assertions))]
 pub(crate) use clap::marker_probe_target;
 #[cfg(all(windows, debug_assertions))]

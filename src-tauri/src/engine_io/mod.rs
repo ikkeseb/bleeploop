@@ -24,6 +24,7 @@
 //! | `pipes` | [`pipes::PullPipe`]: frames pushed on one clock, pulled resampled on another (the WASAPI join, Share output) |
 //! | `feed` | the feed: what the UI reads back (events, device, status, anchor, meter, waveforms), on its own thread |
 //! | `mode` | engine mode: the toggle, the managed host, the `engine_*` Tauri commands, shutdown on exit |
+//! | `plugins` | engine mode's plugin slots: the live line's `plugin_*` commands routed to the engine slot owners |
 //! | `settings` | the last value of every setting command, replayed into each new engine |
 //! | `share` | Share output: the post-limiter master mirrored to a WASAPI endpoint while ASIO plays |
 //! | `midi` | native MIDI: ports, hot-plug, parse, the MIDI-learn bindings, notes and pedal actions |
@@ -71,6 +72,7 @@ pub mod midi;
 pub mod mode;
 mod owner;
 pub(crate) mod pipes;
+mod plugins;
 #[cfg(debug_assertions)]
 pub(crate) mod probe;
 mod settings;

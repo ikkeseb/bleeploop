@@ -1,21 +1,23 @@
-//! OWNS: engine mode (`docs/plans/native-engine.md` § Stage 5, Toggle): the toggle file, the managed
-//! [`EngineApp`] with the process's one [`EngineHost`] and its feed, the `engine_*` Tauri commands, and
-//! the host's shutdown on exit.
+//! OWNS: engine mode (`docs/plans/native-engine.md` § Stage 5, Toggle): the toggle file, the process's
+//! [`EngineApp`] with its one [`EngineHost`], its feed and its plugin slots (`plugins`), the `engine_*`
+//! Tauri commands, and the shutdown on exit.
 //!
 //! The toggle is a file in the app-local data folder, read once at setup and applied on the next
 //! launch, never live (ASIO allows one client). Off, the app is the live line and every `engine_*`
 //! command but `engine_mode`, `engine_set_mode` and `engine_status` answers an error. On, the engine
-//! owns the audio device: it claims the ASIO duplex holder, and the live line's input and monitor arms
-//! are refused (`active`). Blocking work (an open waits up to 15 s) runs off the IPC thread.
+//! owns the audio device: it claims the ASIO duplex holder, the live line's `plugin_*` commands route to
+//! the engine's slots or refuse (`engine()`), and one plugin slot is live at a time. Blocking work (an
+//! open waits up to 15 s) runs off the IPC thread.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
+use std::sync::{Mutex, OnceLock};
 
-use lf_engine::TimedCommand;
+use lf_engine::{Command, TimedCommand, SLOT_COUNT};
 use tauri::ipc::Channel;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Manager};
 
 use super::feed::FeedThread;
+use super::plugins::EngineSlot;
 use super::wire::{FeedFrame, WireCommand};
 use super::{DeviceRequest, DeviceStatus, EngineHost, HostConfig};
 
@@ -24,24 +26,36 @@ const TOGGLE_FILE: &str = "engine-mode";
 /// The engine's claim on `audio_output`'s ASIO duplex holder (the live line's slots are 0 and 1).
 const ASIO_HOLDER: u8 = 2;
 
-/// This launch runs on the engine (set once, at setup).
-static ACTIVE: AtomicBool = AtomicBool::new(false);
+/// Set once, at setup.
+static APP: OnceLock<EngineApp> = OnceLock::new();
 
-/// Whether this launch runs on the engine: the live line's device commands refuse while it does.
-pub fn active() -> bool {
-    ACTIVE.load(Relaxed)
+/// This launch's engine, when it runs on the engine: the live line's `plugin_*` commands route to it.
+pub fn engine() -> Option<&'static EngineApp> {
+    APP.get().filter(|app| app.engine.is_some())
 }
 
-/// Managed state: the engine host and its feed while engine mode is on.
+/// Whether this launch runs on the engine.
+pub fn active() -> bool {
+    engine().is_some()
+}
+
+/// Engine mode's state: the toggle, and the host, its feed and its plugin slots while it is on.
 pub struct EngineApp {
     toggle: Option<PathBuf>,
     engine: Option<(EngineHost, FeedThread)>,
+    pub(super) slots: Mutex<[EngineSlot; SLOT_COUNT]>,
 }
 
 impl EngineApp {
     /// Read the toggle and, when it is on, start the host (its device owner; no device opens until the
-    /// UI asks) and the feed.
-    pub fn setup(app: &AppHandle) -> EngineApp {
+    /// UI asks) and the feed. Once per process.
+    pub fn setup(app: &AppHandle) {
+        if APP.set(EngineApp::start(app)).is_err() {
+            log::error!("[engine_io] engine mode was set up twice; the second is ignored");
+        }
+    }
+
+    fn start(app: &AppHandle) -> EngineApp {
         let toggle = match app.path().app_local_data_dir() {
             Ok(dir) => Some(dir.join(TOGGLE_FILE)),
             Err(e) => {
@@ -49,42 +63,49 @@ impl EngineApp {
                 None
             }
         };
-        let on = toggle.as_ref().is_some_and(|path| read_toggle(path));
-        if !on {
-            return EngineApp { toggle, engine: None };
+        let off = |toggle| EngineApp { toggle, engine: None, slots: Mutex::new(std::array::from_fn(|_| EngineSlot::Empty)) };
+        if !toggle.as_ref().is_some_and(|path| read_toggle(path)) {
+            return off(toggle);
         }
         if !crate::audio_output::try_acquire_asio_holder(ASIO_HOLDER) {
             log::error!("[engine_io] the ASIO duplex holder is taken before setup; engine mode stays off");
-            return EngineApp { toggle, engine: None };
+            return off(toggle);
         }
         let host = EngineHost::new(HostConfig::default());
         match FeedThread::spawn(host.clone()) {
             Ok(feed) => {
-                ACTIVE.store(true, Relaxed);
                 log::info!("[engine_io] engine mode: the native engine owns the audio device");
-                EngineApp { toggle, engine: Some((host, feed)) }
+                EngineApp { engine: Some((host, feed)), ..off(toggle) }
             }
             Err(e) => {
                 log::error!("[engine_io] the feed thread did not start ({e}); engine mode stays off");
                 host.shutdown();
                 crate::audio_output::release_asio_holder(ASIO_HOLDER);
-                EngineApp { toggle, engine: None }
+                off(toggle)
             }
         }
     }
 
-    fn host(&self) -> Result<EngineHost, String> {
+    pub(super) fn host(&self) -> Result<EngineHost, String> {
         self.engine.as_ref().map(|(host, _)| host.clone()).ok_or_else(|| "engine mode is off".to_string())
     }
 
-    /// On exit: stop the feed, then close the device and drop the engine on its owner thread.
-    pub fn shutdown(&self) {
-        if let Some((host, feed)) = &self.engine {
+    /// On exit: stop the feed, unload the plugins while the device still plays (each crossfades out),
+    /// then close the device and drop the engine on its owner thread.
+    pub fn shutdown() {
+        let Some(app) = engine() else { return };
+        if let Some((host, feed)) = &app.engine {
             feed.stop();
+            app.unload_all();
             host.shutdown();
             log::info!("[engine_io] engine mode shut down");
         }
     }
+}
+
+/// The app's one state, for a command.
+fn app() -> Result<&'static EngineApp, String> {
+    APP.get().ok_or_else(|| "engine mode is not set up".to_string())
 }
 
 fn read_toggle(path: &std::path::Path) -> bool {
@@ -99,8 +120,8 @@ pub fn engine_mode() -> bool {
 
 /// Write the toggle for the next launch.
 #[tauri::command]
-pub async fn engine_set_mode(enabled: bool, state: State<'_, EngineApp>) -> Result<(), String> {
-    let path = state.toggle.clone().ok_or("no app-local data folder for the engine toggle")?;
+pub async fn engine_set_mode(enabled: bool) -> Result<(), String> {
+    let path = app()?.toggle.clone().ok_or("no app-local data folder for the engine toggle")?;
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| format!("engine toggle: {e}"))?;
     }
@@ -111,51 +132,74 @@ pub async fn engine_set_mode(enabled: bool, state: State<'_, EngineApp>) -> Resu
 
 /// Open the device, or switch to another; resolves with the device that runs.
 #[tauri::command]
-pub async fn engine_open(request: DeviceRequest, state: State<'_, EngineApp>) -> Result<DeviceStatus, String> {
-    let host = state.host()?;
+pub async fn engine_open(request: DeviceRequest) -> Result<DeviceStatus, String> {
+    let host = app()?.host()?;
     log::info!("[engine_io] open requested: {request:?}");
     tauri::async_runtime::spawn_blocking(move || host.open(request)).await.map_err(|e| format!("engine_open: {e}"))?
 }
 
 /// Stop the device (the loops pause in place).
 #[tauri::command]
-pub async fn engine_close(state: State<'_, EngineApp>) -> Result<(), String> {
-    let host = state.host()?;
+pub async fn engine_close() -> Result<(), String> {
+    let host = app()?.host()?;
     tauri::async_runtime::spawn_blocking(move || host.close()).await.map_err(|e| format!("engine_close: {e}"))?
 }
 
 /// The device that runs, or `null`.
 #[tauri::command]
-pub async fn engine_status(state: State<'_, EngineApp>) -> Result<Option<DeviceStatus>, String> {
-    Ok(state.host().ok().and_then(|host| host.status()))
+pub async fn engine_status() -> Result<Option<DeviceStatus>, String> {
+    Ok(app().ok().and_then(|app| app.host().ok()).and_then(|host| host.status()))
 }
 
 /// The capture channel (0-based; `null` = auto), switched without rebuilding a stream.
 #[tauri::command]
-pub async fn engine_set_input_channel(channel: Option<u32>, state: State<'_, EngineApp>) -> Result<(), String> {
-    let host = state.host()?;
+pub async fn engine_set_input_channel(channel: Option<u32>) -> Result<(), String> {
+    let host = app()?.host()?;
     tauri::async_runtime::spawn_blocking(move || host.set_input_channel(channel)).await.map_err(|e| format!("engine_set_input_channel: {e}"))?
 }
 
 /// A batch of commands, in order, at the next block. Fire-and-forget: what the engine refuses comes
-/// back on the feed; an error means the rest of the batch did not reach it.
+/// back on the feed; an error means the rest of the batch did not reach it. A slot going live takes the
+/// other slot off first: one is live at a time (two would sum the dry input twice).
 #[tauri::command]
-pub async fn engine_send(commands: Vec<WireCommand>, state: State<'_, EngineApp>) -> Result<(), String> {
-    let host = state.host()?;
-    host.send_all(commands.into_iter().map(|c| TimedCommand { frame: None, command: c.0 }))
+pub async fn engine_send(commands: Vec<WireCommand>) -> Result<(), String> {
+    let host = app()?.host()?;
+    host.send_all(one_live(commands.into_iter().map(|c| c.0)).map(|command| TimedCommand { frame: None, command }))
+}
+
+/// `SetSlotLive(i, true)` preceded by every other slot's `SetSlotLive(j, false)`.
+fn one_live(commands: impl Iterator<Item = Command>) -> impl Iterator<Item = Command> {
+    commands.flat_map(|command| {
+        let others = match command {
+            Command::SetSlotLive(i, true) => (0..SLOT_COUNT as u8).filter(|&j| j != i).collect(),
+            _ => Vec::new(),
+        };
+        others.into_iter().map(|j| Command::SetSlotLive(j, false)).chain([command])
+    })
 }
 
 /// Share output's WASAPI render endpoint, or `null` for off.
 #[tauri::command]
-pub async fn engine_set_share(endpoint: Option<String>, state: State<'_, EngineApp>) -> Result<(), String> {
-    let host = state.host()?;
+pub async fn engine_set_share(endpoint: Option<String>) -> Result<(), String> {
+    let host = app()?.host()?;
     tauri::async_runtime::spawn_blocking(move || host.set_share(endpoint)).await.map_err(|e| format!("engine_set_share: {e}"))?
 }
 
 /// Subscribe `channel` to the feed (replacing the last subscriber); its first frame is a reset.
 #[tauri::command]
-pub async fn engine_feed(channel: Channel<FeedFrame>, state: State<'_, EngineApp>) -> Result<(), String> {
-    let (_, feed) = state.engine.as_ref().ok_or("engine mode is off")?;
+pub async fn engine_feed(channel: Channel<FeedFrame>) -> Result<(), String> {
+    let (_, feed) = app()?.engine.as_ref().ok_or("engine mode is off")?;
     feed.subscribe(move |frame| channel.send(frame).is_ok());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_slot_going_live_takes_the_other_off_first() {
+        let sent: Vec<Command> = one_live([Command::SetSlotLive(1, true), Command::PlayAll, Command::SetSlotLive(0, false)].into_iter()).collect();
+        assert_eq!(sent, [Command::SetSlotLive(0, false), Command::SetSlotLive(1, true), Command::PlayAll, Command::SetSlotLive(0, false)]);
+    }
 }

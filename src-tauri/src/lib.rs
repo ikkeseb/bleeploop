@@ -281,7 +281,7 @@ pub fn run() {
                     register_permission_autogrant(&window);
                 }
                 // Engine mode, read from its toggle once per launch.
-                app.manage(engine_io::mode::EngineApp::setup(app.handle()));
+                engine_io::mode::EngineApp::setup(app.handle());
             }
             Ok(())
         })
@@ -366,14 +366,12 @@ pub fn run() {
         .expect("error while building tauri application")
         .run(|app, event| {
             // The engine closes its device and drops the engine on its own threads, not in a destructor.
+            let _ = app;
             #[cfg(windows)]
             if let tauri::RunEvent::Exit = event {
-                use tauri::Manager;
-                if let Some(engine) = app.try_state::<engine_io::mode::EngineApp>() {
-                    engine.shutdown();
-                }
+                engine_io::mode::EngineApp::shutdown();
             }
             #[cfg(not(windows))]
-            let _ = (app, event);
+            let _ = event;
         });
 }
