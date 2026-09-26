@@ -545,8 +545,8 @@ claims the ASIO duplex holder, refuses the live line's arm/monitor commands, ski
 Web Audio at boot, and shuts the host down on exit. The flip changes the default.
 
 **Wire** (JSON). Not built yet: the Rust mirror `src-tauri/src/engine_io/wire.rs`,
-the TS mirror `src/platform/engine-wire.ts` (not built yet) and one fixture (not built yet)
-`verify/fixtures/engine-wire.json`, parsed by both a cargo test and a TS guard:
+the TS mirror `src/platform/engine-wire.ts` (not built yet) and one fixture
+`verify/fixtures/engine-wire.json` (not built yet), parsed by both a cargo test and a TS guard:
 
 - Tauri commands: `engine_mode` / `engine_set_mode(enabled)`; `engine_open(request)` →
   `DeviceStatus` (also switches; blocking work off the IPC thread); `engine_close`; `engine_status`;
