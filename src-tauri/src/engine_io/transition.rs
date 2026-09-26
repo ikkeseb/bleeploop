@@ -40,11 +40,14 @@ pub(crate) fn steps(engine: Option<u32>, running: bool, healthy: bool, target: O
 
 /// `next` asks for the device that runs, at most with another capture channel: the owner changes the
 /// channel in place instead (a rebuilt ASIO input would register after the output and add a block).
-/// ASIO ignores the WASAPI ids (one cached duplex driver).
+/// ASIO ignores the WASAPI ids (one cached duplex driver); WASAPI ignores the buffer (the audio engine's
+/// period).
 pub(crate) fn same_device(running: &DeviceRequest, next: &DeviceRequest) -> bool {
     running.backend == next.backend
-        && running.buffer == next.buffer
-        && (next.backend.is_asio() || (running.input == next.input && running.output == next.output))
+        && match next.backend {
+            AudioBackend::Asio => running.buffer == next.buffer,
+            AudioBackend::Wasapi => running.input == next.input && running.output == next.output,
+        }
 }
 
 /// Where a lost device falls back to, tried in order: ASIO rebuilds from the cache once, then falls back
@@ -132,6 +135,8 @@ mod tests {
         let mut ids = asio(Some(256));
         ids.input = Some("ignored".into());
         assert!(same_device(&asio(Some(256)), &ids), "ASIO ignores the WASAPI ids");
+        let sized = DeviceRequest { buffer: Some(128), ..wasapi(Some("in"), Some("out")) };
+        assert!(same_device(&wasapi(Some("in"), Some("out")), &sized), "WASAPI ignores the buffer");
     }
 
     #[test]
