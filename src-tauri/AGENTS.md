@@ -45,11 +45,13 @@ rest is the map.
 
 ## Operational bits (recurring)
 
-- **`crates/lf-engine` is the pure native engine** (`docs/plans/native-engine.md`, dormant until its
-  flip). Its briefing is the crate doc in `crates/lf-engine/src/lib.rs`; the engine's device side is
+- **`crates/lf-engine` is the pure native engine** (`docs/plans/native-engine.md`). Its briefing is the crate doc in `crates/lf-engine/src/lib.rs`; the engine's device side is
   `src/engine_io` (briefing: its `mod.rs`), its plugin units and engine-mode owners
-  `host/engine_slot.rs`, `host/clap_engine.rs`, `host/vst3_engine.rs`. Nothing on the live line calls
-  them. `tauri dev` watches all of `src-tauri/`, so an engine edit relaunches a running dev app.
+  `host/engine_slot.rs`, `host/clap_engine.rs`, `host/vst3_engine.rs`. Engine mode runs them behind the
+  hidden toggle (`src/engine_io/mode.rs`; the `plugin_*` commands route there); nothing on the live line
+  calls them. `tauri dev` watches all of `src-tauri/`, so an engine edit relaunches a running dev app.
+- **An engine ASIO open opens the driver at another block size first** (`engine_io/cpal_driver.rs`,
+  ~500 ms): opened again at the size it last ran, the rig's Focusrite driver lands two periods late.
 - **Parallel worktrees need their own `CARGO_TARGET_DIR`.** Sharing one, every worktree links the same
   `app_lib-<hash>` test binary and cargo judges path crates fresh by mtime, so one worktree can run
   another's build of `app` or `lf-engine` (seen 2026-09-25).

@@ -5,10 +5,14 @@
 //
 //   pnpm native:engine [--backend=asio] [--buffer=128] [--seconds=600] [--switches=20] [--swaps=4]
 //                      [--in=0] [--device=Focusrite] [--amp=<vst3>] [--proq=<vst3>] [--mute=1]
+//   pnpm native:engine --lag=1 --in=1 [--out=1] [--seconds=10] [--preopen=0]
 //
 // Needs no running `app` and no cable; `--amp=` or `--proq=` (empty) leaves that slot empty. The take
 // records input `--in` (0-based) through the amp while it records: keep that input off a loopback cable.
-// `--mute=1` plays silence. The full log lands in logs/native-engine.log. Windows node only.
+// `--mute=1` plays silence. `--lag=1` runs only the lag phase instead: a chirp out `--out` through the
+// loopback cable into `--in`, judged against the driver's reported latency (the Stage 1 A2 bar on the
+// engine's open path; audible); `--preopen=0` opens ASIO without its preopen, for a before-and-after.
+// The full log lands in logs/native-engine.log. Windows node only.
 
 import { execFileSync, spawn } from 'node:child_process';
 import { createWriteStream, mkdirSync } from 'node:fs';
@@ -30,6 +34,9 @@ const opt = {
   amp: join(vst3, 'Neural DSP', 'Archetype Petrucci X.vst3'),
   proq: join(vst3, 'FabFilter', 'FabFilter Pro-Q 3.vst3'),
   mute: '',
+  lag: '',
+  out: '1',
+  preopen: '',
 };
 for (const arg of process.argv.slice(2)) {
   const m = arg.match(/^--([\w-]+)=(.*)$/);
@@ -54,12 +61,15 @@ execFileSync('cargo', ['build', '--features', 'asio'], { cwd: join(root, 'src-ta
 const exe = join(root, 'src-tauri', 'target', 'debug', 'app.exe');
 
 const plugins = [opt.amp, opt.proq].flatMap((path, slot) => (path ? ['--plugin', `${slot}=${path}`] : []));
-const args = [
-  '--probe-engine', opt.backend, opt.buffer, ...plugins,
-  '--seconds', opt.seconds, '--switches', opt.switches, '--swaps', opt.swaps, '--in', opt.in,
-  ...(opt.device ? ['--device', opt.device] : []),
-  ...(opt.mute ? ['--mute'] : []),
-];
+const args = opt.lag
+  ? ['--probe-engine', opt.backend, opt.buffer, '--lag', '--seconds', opt.seconds, '--in', opt.in, '--out', opt.out,
+      ...(opt.preopen === '0' ? ['--no-preopen'] : [])]
+  : [
+      '--probe-engine', opt.backend, opt.buffer, ...plugins,
+      '--seconds', opt.seconds, '--switches', opt.switches, '--swaps', opt.swaps, '--in', opt.in,
+      ...(opt.device ? ['--device', opt.device] : []),
+      ...(opt.mute ? ['--mute'] : []),
+    ];
 // The soak, ~15 s a switch, ~30 s a swap, and room for loads and the teardown.
 const timeoutS = Number(opt.seconds) + 15 * Number(opt.switches) + 30 * Number(opt.swaps) + 300;
 log.write(`app.exe ${args.join(' ')}\n`);

@@ -549,10 +549,11 @@ a plugin slot live, waveforms and meters) and Share output; the rest of the pari
 in point releases. Stage 6's deletion follows the release: until then the web path stays behind the
 toggle.
 
-**Toggle:** a file in the app-local data folder, read at `setup` and applied on restart, never live
-(ASIO allows one client); an Audio Settings switch writes it. Engine mode manages one `EngineHost`,
-claims the ASIO duplex holder, refuses the live line's arm/monitor commands, skips the plugin bridge and
-Web Audio at boot, and shuts the host down on exit. The flip changes the default.
+**Toggle** (built, `src-tauri/src/engine_io/mode.rs`): a file in the app-local data folder
+(`engine-mode`: `on`), read at `setup` and applied on restart, never live (ASIO allows one client); an
+Audio Settings switch writes it. Engine mode runs one `EngineHost` and its feed thread, claims the ASIO
+duplex holder, refuses the live line's arm/monitor commands, skips the plugin bridge and Web Audio at
+boot, and on exit unloads the plugins, then shuts the host down. The flip changes the default.
 
 **Wire** (JSON; built): the Rust mirror `src-tauri/src/engine_io/wire.rs`, the TS mirror
 `src/platform/engine-wire.ts`, one fixture `verify/fixtures/engine-wire.json` parsed by both a cargo
@@ -565,18 +566,26 @@ test and `verify/guards/engine-wire.mjs`:
 - `Command` and `Event` in serde's external tagging with Rust variant names (`"PlayAll"`,
   `{"RecDub":0}`, `{"SetVolume":[0,0.8]}`); struct fields camelCase; `FxParam`/`FxKind` as the TS
   keys, `Instrument` as its id, `NoteTarget` as `{"Builtin":"lead"}` / `{"Slot":0}`.
-- Feed frame, ~60/s from a non-RT feed thread, sent when something changed or a meter moved: `seq`,
-  `reset` (true on the first frame after a subscribe or a new engine: the UI replaces its state, so a
-  WebView reload resyncs), `events`, `device` (DeviceEvent), `status` (when it changed), `anchor`
-  (`frame`, `atMs` in Unix ms, `rate`), `meter` (input peak and clip), `peaks` (per lane, only bins
-  that changed). Never PCM.
-- `EngineHost` keeps the last value of every setting command and replays them into a new engine (a
-  rate change, `EngineFaulted`), so the UI's settings survive.
+- Feed frame, ~60/s from a non-RT feed thread (`engine_io/feed.rs`), sent when something changed or
+  the meter moved, and at least every 500 ms while a device runs: `seq`, `reset` (true on the first
+  frame after a subscribe or a new engine: the UI replaces its state, so a WebView reload resyncs; it
+  carries the transport, every lane and the selection), `events`, `device` (DeviceEvent), `status`
+  (absent when unchanged, `null` with no device), `anchor` (`frame`, `atMs` in Unix ms, `rate`, and
+  `grid`, the looper's anchor: a lane plays `(f - grid) mod master` at frame `f`), `meter` (the capture
+  channel's peak and clip), `peaks` (per lane, 1024-frame bins in play order, only those that changed;
+  lf-engine keeps them per buffer, `overview.rs`). Never PCM. One subscriber: a new one replaces it.
+- `EngineHost` keeps the last value of every setting command and replays them into each new engine (the
+  first, a rate change, `EngineFaulted`), so the UI's settings survive and one sent before the first
+  open is kept (`engine_io/settings.rs`). CLEAR forgets a lane's mixer and FX, a COPY hands them on;
+  a CLEAR a pedal confirms is not seen there, so that lane's old mixer and FX come back after a rebuild
+  (known limit).
 
-**Plugins:** in engine mode the `plugin_*` load, unload, editor and parameter commands route to the
-engine slot owners (`host/engine_slot.rs`) under the same names and events; GO LIVE becomes
-`SetSlotLive`, the plugin gain `SetSlotGain`, notes go through `engine_send`. One slot is live at a
-time (two would sum the dry input twice). Scan and the ASIO status calls are unchanged.
+**Plugins** (built, `engine_io/plugins.rs`): in engine mode the `plugin_*` load, unload, editor and
+parameter commands route to the engine slot owners (`host/engine_slot.rs`) under the same names and
+events; a plugin loads into an open device's engine. GO LIVE becomes `SetSlotLive`, the plugin gain
+`SetSlotGain` (`plugin_set_monitor_gain` maps to it), notes go through `engine_send` (the live note
+commands refuse). One slot is live at a time (two would sum the dry input twice): `engine_send` takes
+the other off first. Scan and the ASIO status calls are unchanged.
 
 **UI side:** `Platform.engine` in `src/platform/host.ts`; an engine store behind the same facade the UI
 already reads (`looper`, `clock`, `master`), so components change only their import. Invariant 6
