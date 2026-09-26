@@ -28,6 +28,7 @@ is a one-line adapter). UI-only edits are safe while the dev app runs.
   pattern: `docs/ARCHITECTURE.md` invariant 6.
 - **Engine mode:** components take `looper`, `clock`, `master` and `sampleRate` from
   `state/audio.ts`, which picks the web or the engine implementation; a direct import from
-  `src/audio/` bypasses engine mode without an error.
+  `src/audio/` bypasses engine mode without an error at runtime. `verify/guards/audio-facade.mjs`
+  fails it; its exceptions are the web-only paths, each with its reason.
 - **Error toasts** (`toast/Toasts.tsx` renders `src/notify.ts`) sit ADDITIVELY beside the
   `console.error` sites, which feed the release log — keep both.
