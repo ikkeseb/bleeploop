@@ -21,11 +21,13 @@
 //! - **Notes go unstamped, actions stamped.** A note, a pedal and a wheel land at the next block start
 //!   (`TimedCommand::frame` `None`), as the UI's gestures do; a bound action carries the frame its
 //!   arrival maps to ([`FrameClock::press_frame`], the arrival taken on the callback's entry).
-//! - **While no device runs, nothing new starts.** The engine's command ring drains only in the
+//! - **While no device runs, only releases reach the engine.** Its command ring drains only in the
 //!   callback, so a bound action or a note-on sent then would fire at the next open (the looper
 //!   recording by itself; note-ons piling up until a note-off no longer fits). Both are dropped while
-//!   the clock has no stamp; a note-on before it reaches the router, so no note is held. Everything
-//!   else goes through as ever, so a note held before the stop still gets its note-off.
+//!   the clock has no stamp; a note-on before it reaches the router, so no note is held. The wheels
+//!   wait in the router, and the engine hears where they ended with the first message once a device
+//!   runs, so a sweep cannot fill the ring ahead of a note-off. Releases go through, so a note held
+//!   before the stop still gets its note-off.
 //! - **One lock orders everything.** The router, MIDI learn and the port table sit in one `Mutex` the
 //!   port callbacks and the poller take; commands go to the sink under it, so the engine sees them in
 //!   the order the router decided them. None of these threads is an audio thread.
@@ -160,9 +162,10 @@ impl Core {
         // A connection already released (its port went away) has no owner left.
         let Some(port) = ports.iter().find(|p| p.conn == Some(conn)) else { return };
         let owner = (conn, message.channel());
-        // `None` while no device runs: what would start something is dropped (the rules above).
+        // `None` while no device runs: only releases go through (the rules above).
         let stamp = self.clock.press_frame(at);
         let mut out = |command| self.send(None, command);
+        router.hold_wheels(stamp.is_none(), &mut out);
         let outcome = learn.consume(&port.key, &message, at);
         if let Some(b) = outcome.learned {
             if b.kind == Kind::Cc {
@@ -193,7 +196,9 @@ impl Core {
     pub(crate) fn port_gone(&self, conn: u32) -> Option<String> {
         let mut state = self.lock();
         let State { router, ports, .. } = &mut *state;
-        router.release_port(conn, &mut |command| self.send(None, command));
+        let mut out = |command| self.send(None, command);
+        router.hold_wheels(self.clock.press_frame(Instant::now()).is_none(), &mut out);
+        router.release_port(conn, &mut out);
         let entry = ports.iter_mut().find(|p| p.conn == Some(conn))?;
         entry.conn = None;
         Some(entry.key.name.clone())
@@ -669,6 +674,25 @@ mod tests {
         assert_eq!(r.take(), []);
         r.host.all_notes_off().unwrap();
         assert_eq!(r.take(), [Command::AllNotesOff]);
+    }
+
+    // A wheel sweep while no device runs would fill the engine's ring ahead of the note-off: only the
+    // release goes out, and the wheels catch up with the first message once a device runs.
+    #[test]
+    fn with_no_device_a_wheel_sweep_holds_nothing_up_and_the_wheels_catch_up_after() {
+        let r = Rig::new();
+        r.send(A, &[[0x90, 60, 100]]);
+        assert_eq!(r.take(), [on(60, 100)]);
+        r.clock.clear();
+        for v in 0..=127u8 {
+            r.send(A, &[[0xb0, 1, v], [0xe0, 0, v]]);
+        }
+        r.send(A, &[[0xe0, 0x00, 0x50], [0xb0, 1, 90], [0x80, 60, 0]]);
+        assert_eq!(r.take(), [Command::NoteOff(60)], "only the release");
+        r.clock.publish(r.t, 0, 256, 48_000);
+        r.send(A, &[[0x90, 62, 100]]);
+        let bend = (f64::from(0x50u16 << 7) - 8192.0) / 8192.0 * 2.0;
+        assert_eq!(r.take(), [Command::PitchBend(bend), Command::Modulation(90.0 / 127.0), on(62, 100)]);
     }
 
     // The sink refuses (no device open): the router carries on and each refusal is counted.

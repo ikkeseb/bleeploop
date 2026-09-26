@@ -3,7 +3,7 @@
 //! handshake) and reads what the fake played, the counters and the device events.
 
 use std::any::Any;
-use std::sync::atomic::{AtomicUsize, Ordering::{Relaxed, SeqCst}};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::{Relaxed, SeqCst}};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -12,6 +12,7 @@ use lf_engine::{Command, Event, LaneInfo, LaneState, SlotEvent, SlotKind, SlotPr
 
 use super::callback::Side;
 use super::fake_driver::{Fake, FakeDevice, FakeDriver};
+use super::owner::Request;
 use super::{DeviceEvent, DeviceRequest, DeviceStatus, EngineHost, HostConfig};
 use crate::audio_output::AudioBackend;
 
@@ -434,6 +435,86 @@ fn a_shutdown_hands_an_installed_unit_back_to_its_owner_stopped() {
     let back = slot.remove(Duration::from_millis(100)).unwrap().expect("the unit comes back");
     assert_eq!(stops.load(SeqCst), 1, "stopped once, before the engine dropped");
     drop(back);
+}
+
+/// Install a unit on a new handle for slot 0, then give it up as a plugin owner's teardown does when
+/// `remove` times out: the test holds the engine lock, so no block services the removal in time.
+/// Returns the unit's call count (the unit holds a clone: a count of 2 means it was never dropped) and
+/// its stop count.
+fn abandon_a_unit(h: &Harness) -> (Arc<AtomicUsize>, Arc<AtomicUsize>) {
+    let first = h.host.slot(0);
+    let (orphan, calls, stops) = Unit::new(0.1);
+    assert!(first.install(orphan, RATE as u32).is_ok());
+    until("the unit renders", || calls.load(SeqCst) > 0);
+    let _held = h.host.core.rt.lock().unwrap();
+    assert!(first.remove(Duration::from_millis(20)).is_err(), "no block runs while the lock is held");
+    first.abandon();
+    (calls, stops)
+}
+
+#[test]
+fn an_abandoned_unit_leaks_once_it_is_out_and_the_slot_frees_for_the_next_owner() {
+    let h = Harness::new();
+    h.open(asio(Some(256)));
+    let (calls, stops) = abandon_a_unit(&h);
+    until("the engine takes the orphan out", || stops.load(SeqCst) == 1);
+    // It stops the unit, then hands it back: a few more blocks and it is on the port.
+    h.play(RATE / 50);
+    let next = h.host.slot(0);
+    assert!(next.remove(Duration::from_millis(20)).unwrap().is_none(), "nothing of the next owner's is in the slot");
+    let (unit, _, _) = Unit::new(0.3);
+    assert!(next.install(unit, RATE as u32).is_ok(), "the slot frees once the orphan is out");
+    let back = next.remove(Duration::from_secs(2)).unwrap().expect("the next owner's own unit comes back");
+    assert_eq!(back.into_any().downcast::<Unit>().unwrap().level, 0.3);
+    assert_eq!(Arc::strong_count(&calls), 2, "the orphan leaked, never dropped");
+}
+
+#[test]
+fn an_abandoned_unit_a_new_rate_evicts_never_reaches_the_next_owner() {
+    let h = Harness::new();
+    h.open(asio(Some(256)));
+    let (calls, _) = abandon_a_unit(&h);
+    let next = h.host.slot(0);
+    h.fake.asio.lock().unwrap().as_mut().unwrap().rate = 44_100;
+    h.open(asio(Some(128)));
+    assert!(next.take_evicted().is_none(), "the orphan is no one's to take back");
+    let (unit, _, _) = Unit::new(0.3);
+    assert!(next.install(unit, 44_100).is_ok(), "the eviction freed the slot");
+    assert_eq!(Arc::strong_count(&calls), 2, "the orphan leaked, never dropped");
+}
+
+/// `Request::Open` as `EngineHost::open` sends it, with the caller's claim in the test's hand.
+fn open_claimed(h: &Harness, request: DeviceRequest, claimed: &Arc<AtomicBool>) -> Result<DeviceStatus, String> {
+    let (reply_tx, reply_rx) = std::sync::mpsc::sync_channel(1);
+    h.host.owner_tx().unwrap().send(Request::Open(request, claimed.clone(), reply_tx)).unwrap();
+    reply_rx.recv_timeout(PATIENCE).expect("the owner answers")
+}
+
+#[test]
+fn a_channel_change_its_caller_gave_up_on_before_it_ran_leaves_the_device_running() {
+    let h = Harness::new();
+    h.open(asio(Some(256)));
+    let claimed = Arc::new(AtomicBool::new(true));
+    assert!(open_claimed(&h, DeviceRequest { input_channel: Some(1), ..asio(Some(256)) }, &claimed).is_err());
+    assert_eq!(h.host.status().map(|s| s.block), Some(256), "the device still runs");
+    let frame = h.frame();
+    h.play(RATE / 20);
+    assert!(h.frame() > frame);
+    assert_eq!(h.fake.started.load(SeqCst), 1);
+}
+
+#[test]
+fn a_switch_its_caller_gave_up_on_midway_puts_back_the_device_that_ran() {
+    let h = Harness::new();
+    h.open(asio(Some(256)));
+    let claimed = Arc::new(AtomicBool::new(false));
+    let gave_up = claimed.clone();
+    *h.fake.on_start.lock().unwrap() = Some(Box::new(move || gave_up.store(true, SeqCst)));
+    assert!(open_claimed(&h, asio(Some(128)), &claimed).is_err(), "the caller hears the open was cancelled");
+    assert_eq!(h.host.status().map(|s| s.block), Some(256), "the device that ran before runs again");
+    let frame = h.frame();
+    h.play(RATE / 20);
+    assert!(h.frame() > frame);
 }
 
 #[test]

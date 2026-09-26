@@ -19,6 +19,7 @@ use rtrb::{Consumer, Producer, RingBuffer};
 use super::callback::{Run, Tap, TapEnd, LATENCY_SAMPLES, MAX_DEVICE_BLOCK};
 use super::driver::{Driver, Mirror, Spec, Streams, Wiring};
 use super::pipes::{self, PipeConfig};
+use super::slot_host::ORPHAN;
 use super::{transition, Core, DeviceEvent, DeviceRequest, DeviceStatus, Ends, HostConfig, Rt};
 use crate::audio_output::AudioBackend;
 
@@ -70,7 +71,8 @@ pub(crate) fn swap_engine(core: &Core, engine: Engine, handle: EngineHandle, con
 /// `Core::evicted`, with whatever its ports (held by the caller) had returned. Returns the engine for
 /// the caller to drop, or `None` when a unit panicked on its way out: the engine is leaked then, with
 /// any unit still in it, rather than dropped here (a drop calls the plugin's DLL off its owner thread).
-/// Such a slot stays occupied, so its owner's teardown leaks the plugin instead of unloading it.
+/// Such a slot stays held (`Core::holder`), so its owner's teardown leaks the plugin instead of
+/// unloading it.
 fn evict(core: &Core, ports: &mut [MutexGuard<'_, Option<SlotPort>>; SLOT_COUNT], mut old: Engine) -> Option<Engine> {
     let clean = catch_unwind(AssertUnwindSafe(|| {
         old.service_slots_idle();
@@ -85,7 +87,6 @@ fn evict(core: &Core, ports: &mut [MutexGuard<'_, Option<SlotPort>>; SLOT_COUNT]
         if let Some(port) = port.as_mut() {
             while let Some(unit) = port.returned() {
                 park(core, slot, unit);
-                core.occupied[slot].store(false, Release);
             }
         }
     }
@@ -97,15 +98,22 @@ fn evict(core: &Core, ports: &mut [MutexGuard<'_, Option<SlotPort>>; SLOT_COUNT]
     }
 }
 
-/// Keep an evicted unit for its plugin owner. A second one cannot come back under the slot protocol
-/// (one unit per slot); should it, it leaks rather than drop here (a drop calls its DLL).
+/// Keep an evicted unit for its plugin owner (the slot's holder), and free the slot. A unit its owner
+/// abandoned (`SlotHost::abandon`) leaks, as does a second one, which the slot protocol rules out (one
+/// unit per slot): never a drop here (a drop calls its DLL).
 fn park(core: &Core, slot: usize, unit: Box<dyn SlotProcessor>) {
+    let owner = core.holder[slot].swap(0, AcqRel);
+    if owner == 0 || owner == ORPHAN {
+        log::warn!("[engine_io] slot {slot}: an evicted unit has no owner left; leaking it");
+        std::mem::forget(unit);
+        return;
+    }
     let mut waiting = core.evicted[slot].lock().unwrap_or_else(|e| e.into_inner());
     if waiting.is_some() {
         log::error!("[engine_io] slot {slot}: a second evicted unit came back while one waits; leaking it");
         std::mem::forget(unit);
     } else {
-        *waiting = Some(unit);
+        *waiting = Some((owner, unit));
     }
 }
 
@@ -121,7 +129,8 @@ type Reply<T> = SyncSender<Result<T, String>>;
 
 pub(crate) enum Request {
     /// The flag decides who owns the result: the first to claim it, the owner once the open finished or
-    /// the caller on its timeout. An open the caller gave up on is closed again.
+    /// the caller on its timeout. An open the caller gave up on is undone (`Owner::undo_open`), and one
+    /// it gave up on before the owner took it up never runs.
     Open(DeviceRequest, Arc<AtomicBool>, Reply<DeviceStatus>),
     Close(Reply<()>),
     SetInputChannel(Option<u32>, Reply<()>),
@@ -206,11 +215,17 @@ impl<D: Driver> Owner<D> {
     fn handle(&mut self, request: Request) {
         match request {
             Request::Open(request, claimed, reply) => {
+                if claimed.load(Acquire) {
+                    log::warn!("[engine_io] an open its caller gave up on while it waited: skipped");
+                    let _ = reply.send(Err("the open was cancelled".to_string()));
+                    return;
+                }
+                let previous = self.active.as_ref().map(|a| a.request.clone());
                 let mut result = self.open(request, false, true);
                 let abandoned = claimed.compare_exchange(false, true, AcqRel, Acquire).is_err();
                 if abandoned && result.is_ok() {
-                    log::warn!("[engine_io] open finished after its caller timed out: closing the device again");
-                    self.stop(true);
+                    log::warn!("[engine_io] open finished after its caller timed out: undoing it");
+                    self.undo_open(previous);
                     result = Err("the open was cancelled".to_string());
                 }
                 let _ = reply.send(result);
@@ -278,6 +293,18 @@ impl<D: Driver> Owner<D> {
                 }
                 Err(error)
             }
+        }
+    }
+
+    /// An open its caller gave up on (it reported the open as failed): what ran before runs again, its
+    /// channel included, or the device closes when none ran.
+    fn undo_open(&mut self, previous: Option<DeviceRequest>) {
+        let Some(previous) = previous else {
+            self.stop(true);
+            return;
+        };
+        if let Err(error) = self.open(previous, true, false) {
+            log::error!("[engine_io] the device that ran before did not reopen: {error}");
         }
     }
 

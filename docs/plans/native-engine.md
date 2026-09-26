@@ -114,16 +114,15 @@ rerun. The results replace the RT baseline line in `docs/VERIFY.md`; the probe s
 L2 gate.
 
 **Measured so far (2026-09-24, dev PC, Scarlett 2i2 at 44.1 kHz, no cable in):** built and pushed;
-the cable matrix (`pnpm native:spike`) waits for the owner (cable in, monitors down, ~55 min of
-audible chirps). A virtual cable (VB-Cable) cannot stand in: it measures Windows' buffering, not the
+the cable runs follow below. A virtual cable (VB-Cable) cannot stand in: it measures Windows' buffering, not the
 interface driver's report against the physical path.
 
 - A1 mechanism: ASIO 256, 3639/3639 callbacks sameCycle, 0 other-thread, 0 gaps, 0 xruns.
 - Driver report at ASIO 256: inLat 549 + outLat 637 frames = 26.9 ms before any plugin, so R2
   (≤ 22.2 ms) likely fails on this driver at 256 if A2 confirms the report.
 - C1 partial: Archetype Petrucci X in the ASIO callback, 256, 20 s (`--quiet`): 0 gaps, 0 xruns,
-  0 allocs, block p99.9 28 % / max 32 % of the period; plugin latency 57 frames. The 120 s runs at
-  128 and 256 are open.
+  0 allocs, block p99.9 28 % / max 32 % of the period; plugin latency 57 frames. The 120 s runs are
+  in the full matrix below.
 - WASAPI mechanics (441-frame packets, `--quiet`): 0 gaps, 0 xruns. The first run showed a 298 ms
   join ring: input ran 300 ms before output opened and the backlog was never drained. Drained to its
   target, the parts sum to ~47 ms (input age 15.5 + ring 20 + output 12) against today's ~280 ms.
@@ -149,11 +148,31 @@ frame inside each run, 0 xruns.
 --long-min=1`):** all 15 opens started, the first at each of three new block sizes among them. Every
 run passes A2 within 0.1 ms: 357.8–358.8 frames at 64 (reported 362, 8.1 ms), 667.8–668.8 at 128
 (666), 1187.8–1188.8 at 256 (1186). A3 moves 1 frame across the 5 launches at each size; the 522-frame
-launch did not come back (1 in 2 launches before the fix, 0 in 15 after; whether the order caused it
-is unproven). Three runs missed sameCycle once, each with one lock miss: the probe's own main thread
+launch did not come back in these 15 (it did in the full matrix below). Three runs missed sameCycle once, each with one lock miss: the probe's own main thread
 held the engine lock to poll for a runaway echo (fixed: an atomic). The 128 one-minute run moved 1
 frame inside the run (A3.spread 1.00, bar ≤ 1). At 64, 9–19 callbacks per run came > 1.5 periods
 late (max 2.6 ms), 0 xruns; at 128 and 256, 0–1. A GPU job from another app ran meanwhile.
+
+**Full matrix (2026-09-26, 01:22–02:20, same setup, `pnpm native:spike`), for the owner:**
+
+- **The 12 ms launch is back, past the OWNER zone:** 256 launch 3 landed at 1716.8 frames against
+  the reported 1186 (+12.0 ms; A3 moves 529 frames). A1 held on it (input and output in one
+  bufferSwitch) and the driver reported the same latency, so the extra 528 frames sit in the driver
+  or the interface, and the open order does not decide it. Two of 13 measured launches at 256 over
+  two days, none of 22 at 64 or 128. Reproduced, so the Stage 1 STOP rule applies: the owner decides.
+- A2 within 0.1 ms in the other 20 ASIO runs. A3 at 128: 663.8 in all 5, against 667.8–668.8 two
+  hours earlier (5 frames between sessions; bar 2, inside the OWNER zone). At 64 a one-sample step
+  inside the 10-minute run (A3.spread 1.00, bar ≤ 1; A4 +0.905 frames/10 min, PASS); A4 0.000 at 128
+  and 256. A1 on every cycle in all 21 ASIO runs.
+- R1 PASS at every size (RT within 0.05 frame of the lag, Pro-Q at zero latency). R2: 8.1 ms at 64,
+  15.1 ms at 128, 26.8 ms at 256 (FAIL, as the driver's report predicted).
+- C1 PASS at 128 and 256 (Archetype, 125 s: 0 gaps, 0 xruns, 0 allocs; p99.9 21 % and 19 %, max
+  28 % and 21 % of the period).
+- W1 FAIL: the chirps land 220 ms after cpal's QPC stamps predict (spread 8 ms), while the parts sum
+  to 35.9 ms (input age 13.9, ring 10, output 12); the echo run found no echo. Inside the OWNER zone.
+- S1 FAIL as on 2026-09-24: process loopback captures after the session mute and volume (STATUS E2).
+- Conditions: the GPU job ran throughout, and the failing USB port re-enumerated about 40 times
+  (another controller); C1 saw 0 gaps anyway.
 - Setup: the earlier INVALID runs had the cable in line out L (on the 2i2 the R jack is the left one
   seen from behind); a second cable gave no signal from line out R either, cause unknown.
 
@@ -439,16 +458,11 @@ swap bindings; an ASIO period the driver drops without its overload report is no
 output stay in step, the take is spliced there); the no-device removal path (a 1-frame process and `stop` on the plugin owner) has no
 test with a real unit, and the CLAP restart fixture's thread check would flag it.
 
-Still open in Stage 4: the fixes from the fan-out review of `25501f5..5ab8b4c` (four Opus readers,
-2026-09-25; the owner let it replace the cross-family review). Before the owner plays on the engine:
-- **Orphaned unit (confirmed):** a unit returning after a `remove` timeout is `mem::forget`-ed while
-  `occupied` stays true, and a later swap can hand the old unit to the next owner (`own()` checks the
-  type only). Fix: an owner token per install; an orphan leaks.
-- **Abandoned open closes the device (confirmed):** `owner.rs` runs `open` before checking `claimed`,
-  then `stop(true)`, even for a channel-only request. Fix: check the claim first; restore the previous
-  device.
-- **Stuck notes with no device:** without a stamp, wheel/CC/NoteOff pass `midi/mod.rs` into the
-  undrained 256-slot command ring; once full, a NoteOff drops after the router forgot the note.
+Still open in Stage 4: what is left of the fan-out review of `25501f5..5ab8b4c` (four Opus readers,
+2026-09-25; the owner let it replace the cross-family review). Its four before-play fixes landed
+2026-09-26: the open deadlock (below), an owner token per `SlotHost` (an abandoned unit leaks and
+never reaches the next owner), an open its caller gave up on puts back what ran before, and the
+wheels wait in the MIDI router while no device runs.
 Smaller, after the release: a parked unit never retried on a device change; `kNotImplemented` from
 `setProcessing` read as refusal; slot/lane/master gain left subnormal after 0 (snap to target);
 `tests/slots.rs:382` `<=` for `==`; each ASIO overload counted twice in `xruns`; an output lock miss

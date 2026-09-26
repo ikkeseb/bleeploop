@@ -85,6 +85,8 @@ pub(crate) struct Fake {
     pub(crate) fatal: AtomicU8,
     /// One-shot, taken by the next ASIO start: input cycles before the output's first.
     pub(crate) lead_in: AtomicU32,
+    /// One-shot, run by the next start before it starts: a test's way into an open midway.
+    pub(crate) on_start: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     /// The device input: channel `c` carries `input(frame) * (c + 1)`.
     input: Mutex<Arc<dyn Fn(Frame) -> f32 + Send + Sync>>,
     /// The left channel played, by device frame (NaN where nothing played).
@@ -109,6 +111,7 @@ impl Fake {
             skip_input: AtomicBool::new(false),
             fatal: AtomicU8::new(0),
             lead_in: AtomicU32::new(0),
+            on_start: Mutex::new(None),
             input: Mutex::new(Arc::new(|_| 0.0)),
             tape: Mutex::new(Vec::new()),
             starts: Mutex::new(Vec::new()),
@@ -174,6 +177,10 @@ impl Driver for FakeDriver {
     }
 
     fn start(&mut self, device: FakePair, spec: &Spec, mut wiring: Wiring) -> Result<Started, String> {
+        let hook = self.0.on_start.lock().unwrap().take();
+        if let Some(hook) = hook {
+            hook();
+        }
         if self.0.fail_starts.load(Acquire) > 0 {
             self.0.fail_starts.fetch_sub(1, Release);
             return Err("fake: the device did not start".to_string());

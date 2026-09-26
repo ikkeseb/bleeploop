@@ -10,30 +10,40 @@
 //! the port at once (no crossfade: nothing is sounding). A unit the device side evicted waits in
 //! [`Core::evicted`] until its owner takes it back ([`SlotHost::take_evicted`]), re-activates it at
 //! the new [`SlotHost::rate`] and installs it again.
+//!
+//! Each [`EngineHost::slot`](super::EngineHost::slot) call is one owner's handle, with its own token:
+//! a unit comes back (on the port, or evicted) only to the handle that installed it or a clone. An
+//! owner that gives up on its unit ([`SlotHost::abandon`]: a `remove` timed out, so it leaks the
+//! plugin) orphans it: whenever the unit comes back it leaks too, and the slot frees.
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
+use std::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use lf_engine::SlotProcessor;
+use lf_engine::{SlotPort, SlotProcessor};
 
 use super::Core;
 
 /// How often `remove` looks for its unit.
 const POLL: Duration = Duration::from_millis(1);
 
-/// One slot's handshake with the engine (`EngineHost::slot`). Cheap to clone; one plugin owner uses a
-/// slot at a time.
+/// `Core::holder` for a unit whose owner abandoned it.
+pub(crate) const ORPHAN: u64 = u64::MAX;
+
+/// One slot's handshake with the engine (`EngineHost::slot`). Cheap to clone (a clone is the same
+/// owner); one plugin owner uses a slot at a time.
 #[derive(Clone)]
 pub struct SlotHost {
     core: Arc<Core>,
     slot: usize,
+    token: u64,
 }
 
 impl SlotHost {
     pub(crate) fn new(core: Arc<Core>, slot: usize) -> SlotHost {
-        SlotHost { core, slot }
+        let token = core.next_token.fetch_add(1, Relaxed);
+        SlotHost { core, slot, token }
     }
 
     pub fn slot(&self) -> usize {
@@ -53,8 +63,8 @@ impl SlotHost {
     /// Hand a unit activated at `rate` to the engine; it crossfades in at the next block (engaged at
     /// once while no device runs). An engine at another rate has replaced the one `rate` was read from:
     /// the unit goes to [`SlotHost::take_evicted`] instead, for its owner to re-activate. Gives the unit
-    /// back with the reason when no engine exists yet, the slot already holds a unit, or the port is
-    /// full.
+    /// back with the reason when no engine exists yet, the slot already holds a unit (an orphan still
+    /// in the engine included: try again once it is out), or the port is full.
     pub fn install(&self, unit: Box<dyn SlotProcessor>, rate: u32) -> Result<(), (Box<dyn SlotProcessor>, String)> {
         {
             // Under the port lock: a rebuild holds every port while it publishes the new rate and
@@ -66,7 +76,8 @@ impl SlotHost {
             let Some(port) = port.as_mut() else {
                 return Err((unit, "no audio device is open".to_string()));
             };
-            if self.core.occupied[self.slot].load(Acquire) {
+            self.reap(port);
+            if self.core.holder[self.slot].load(Acquire) != 0 {
                 return Err((unit, format!("slot {} already holds a unit", self.slot)));
             }
             if self.core.rate.load(Relaxed) != rate {
@@ -74,13 +85,13 @@ impl SlotHost {
                 if waiting.is_some() {
                     return Err((unit, format!("slot {} already holds a unit", self.slot)));
                 }
-                *waiting = Some(unit);
+                *waiting = Some((self.token, unit));
                 return Ok(());
             }
             if let Err(unit) = port.install(unit) {
                 return Err((unit, format!("slot {}'s port is full", self.slot)));
             }
-            self.core.occupied[self.slot].store(true, Release);
+            self.core.holder[self.slot].store(self.token, Release);
         }
         self.service_if_idle();
         Ok(())
@@ -93,11 +104,11 @@ impl SlotHost {
         if let Some(unit) = self.take_evicted() {
             return Ok(Some(unit));
         }
-        if !self.core.occupied[self.slot].load(Acquire) {
-            return Ok(None);
-        }
         {
             let mut port = self.core.ports[self.slot].lock().map_err(|_| "slot port poisoned".to_string())?;
+            if self.core.holder[self.slot].load(Acquire) != self.token {
+                return Ok(None);
+            }
             let port = port.as_mut().ok_or_else(|| "no engine holds this slot".to_string())?;
             if !port.remove() {
                 return Err(format!("slot {}'s port is full", self.slot));
@@ -119,21 +130,55 @@ impl SlotHost {
         }
     }
 
-    /// A unit the device side evicted from this slot (a new engine at another rate): re-activate it at
-    /// [`SlotHost::rate`] and install it again. The plugin owner polls this every turn.
+    /// This owner's unit, if the device side evicted it (a new engine at another rate): re-activate it
+    /// at [`SlotHost::rate`] and install it again. The plugin owner polls this every turn.
     pub fn take_evicted(&self) -> Option<Box<dyn SlotProcessor>> {
-        let unit = self.core.evicted[self.slot].lock().ok()?.take();
-        if unit.is_some() {
-            self.core.occupied[self.slot].store(false, Release);
+        let mut waiting = self.core.evicted[self.slot].lock().ok()?;
+        if waiting.as_ref().is_some_and(|(owner, _)| *owner == self.token) {
+            waiting.take().map(|(_, unit)| unit)
+        } else {
+            None
         }
-        unit
     }
 
-    /// A unit the engine handed back on the port.
+    /// Give up on this owner's unit: a `remove` timed out and the owner leaks its plugin rather than
+    /// unload code the unit may still run. Whenever the unit comes back it leaks too, never reaching
+    /// another owner, and the slot frees ([`SlotHost::install`] or the device side's eviction reaps it).
+    pub fn abandon(&self) {
+        let mut port = self.core.ports[self.slot].lock().unwrap_or_else(|e| e.into_inner());
+        if self.core.holder[self.slot].compare_exchange(self.token, ORPHAN, AcqRel, Acquire).is_ok() {
+            if let Some(port) = port.as_mut() {
+                self.reap(port);
+            }
+        }
+        let mut waiting = self.core.evicted[self.slot].lock().unwrap_or_else(|e| e.into_inner());
+        if waiting.as_ref().is_some_and(|(owner, _)| *owner == self.token) {
+            std::mem::forget(waiting.take());
+        }
+    }
+
+    /// Under the slot's port lock: an abandoned unit the engine has handed back leaks, and the slot
+    /// frees. Its plugin stays loaded, leaked by its owner, but nothing may call into it again (a drop
+    /// included).
+    fn reap(&self, port: &mut SlotPort) {
+        if self.core.holder[self.slot].load(Acquire) == ORPHAN {
+            if let Some(unit) = port.returned() {
+                log::warn!("[engine_io] slot {}: an abandoned unit came back; leaking it", self.slot);
+                std::mem::forget(unit);
+                self.core.holder[self.slot].store(0, Release);
+            }
+        }
+    }
+
+    /// This owner's unit, if the engine handed it back on the port.
     fn returned(&self) -> Option<Box<dyn SlotProcessor>> {
-        let unit = self.core.ports[self.slot].lock().ok()?.as_mut()?.returned();
+        let mut port = self.core.ports[self.slot].lock().ok()?;
+        if self.core.holder[self.slot].load(Acquire) != self.token {
+            return None;
+        }
+        let unit = port.as_mut()?.returned();
         if unit.is_some() {
-            self.core.occupied[self.slot].store(false, Release);
+            self.core.holder[self.slot].store(0, Release);
         }
         unit
     }

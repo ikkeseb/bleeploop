@@ -31,6 +31,8 @@ pub(crate) struct Router {
     /// What the engine was last told.
     pitch_bend: f64,
     mod_depth: f64,
+    /// No device runs: the wheels wait here (`hold_wheels`).
+    wheels_held: bool,
 }
 
 fn entry(list: &mut Vec<(u8, Vec<Owner>)>, note: u8) -> &mut Vec<Owner> {
@@ -194,9 +196,20 @@ impl Router {
         }
     }
 
+    /// While no device runs (`held`), the wheels stay here: the engine's command ring drains only in the
+    /// callback, and a sweep would fill it ahead of a note-off. Let go, the engine hears where they
+    /// ended.
+    pub(crate) fn hold_wheels(&mut self, held: bool, out: &mut impl FnMut(Command)) {
+        self.wheels_held = held;
+        self.apply_controllers(out);
+    }
+
     /// `applyControllers`. The web set both wheels on the synth every time; the engine keeps its wheels
     /// and hands them to the next instrument itself, so only a value that changed is sent.
     fn apply_controllers(&mut self, out: &mut impl FnMut(Command)) {
+        if self.wheels_held {
+            return;
+        }
         let bend = self.bends.last().map_or(0.0, |(_, v)| *v);
         let depth = self.modulation.last().map_or(0.0, |(_, v)| *v);
         if bend != self.pitch_bend {

@@ -237,7 +237,7 @@ impl SlotProcessor for ClapUnit {
     }
 }
 
-/// A unit the engine handed back. Only this slot's owner installs into it, so it is ours.
+/// A unit the engine handed back: a `SlotHost` hands back only what its own handle installed.
 fn own(unit: Box<dyn SlotProcessor>) -> Box<ClapUnit> {
     unit.into_any()
         .downcast::<ClapUnit>()
@@ -529,6 +529,7 @@ fn teardown(
             Ok(unit) => unit.map(own),
             Err(e) => {
                 log::error!("[plugin_host] engine slot {index} CLAP teardown: {e}; leaving the plugin loaded");
+                slot.abandon();
                 std::mem::forget(instance);
                 std::mem::forget(entry);
                 return Err(e);

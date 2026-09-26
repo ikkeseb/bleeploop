@@ -297,12 +297,17 @@ pub(crate) struct Core {
     pub(crate) ends: Mutex<Option<Ends>>,
     /// Each slot's port into the current engine (`None` before the first device opens).
     pub(crate) ports: [Mutex<Option<SlotPort>>; SLOT_COUNT],
-    /// A unit is in the engine for this slot (set by a successful install, cleared when it comes back).
-    pub(crate) occupied: [AtomicBool; SLOT_COUNT],
+    /// Whose unit is in the engine for this slot: the installing [`SlotHost`]'s token, set by a
+    /// successful install and cleared (0) when the unit comes back; [`slot_host::ORPHAN`] once its owner
+    /// gave up on it (`SlotHost::abandon`).
+    pub(crate) holder: [AtomicU64; SLOT_COUNT],
+    /// The next [`SlotHost`]'s token (from 1).
+    pub(crate) next_token: AtomicU64,
     /// `Rt::faulted` was latched: the owner replaces the engine at its next poll.
     pub(crate) fault: AtomicBool,
-    /// Units the device side took out on its own (a rebuild), waiting for their plugin owner.
-    pub(crate) evicted: [Mutex<Option<Box<dyn SlotProcessor>>>; SLOT_COUNT],
+    /// Units the device side took out on its own (a rebuild), waiting for their plugin owner, with its
+    /// token: only that owner's [`SlotHost`] takes one back.
+    pub(crate) evicted: [Mutex<Option<(u64, Box<dyn SlotProcessor>)>>; SLOT_COUNT],
     /// A device callback runs or is about to: the owner sets it just before the streams start and
     /// clears it just after they drop. While it is false, a slot host may take the engine lock itself
     /// (`SlotHost`); while it is true, it waits for the callback to service its port.
@@ -343,7 +348,8 @@ impl Core {
             }),
             ends: Mutex::new(None),
             ports: std::array::from_fn(|_| Mutex::new(None)),
-            occupied: std::array::from_fn(|_| AtomicBool::new(false)),
+            holder: std::array::from_fn(|_| AtomicU64::new(0)),
+            next_token: AtomicU64::new(1),
             fault: AtomicBool::new(false),
             evicted: std::array::from_fn(|_| Mutex::new(None)),
             running: AtomicBool::new(false),
@@ -544,7 +550,8 @@ impl EngineHost {
         self.core.rate()
     }
 
-    /// A plugin owner's handle on `slot` (panics on a slot ≥ `SLOT_COUNT`).
+    /// A plugin owner's handle on `slot` (panics on a slot ≥ `SLOT_COUNT`). Each call is a new owner:
+    /// a unit comes back only to the handle that installed it, or a clone of it.
     pub fn slot(&self, slot: usize) -> SlotHost {
         assert!(slot < SLOT_COUNT, "no slot {slot}");
         SlotHost::new(self.core.clone(), slot)

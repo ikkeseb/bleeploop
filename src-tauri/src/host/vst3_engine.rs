@@ -214,7 +214,7 @@ impl SlotProcessor for Vst3Unit {
     }
 }
 
-/// A unit the engine handed back. Only this slot's owner installs into it, so it is ours. The
+/// A unit the engine handed back: a `SlotHost` hands back only what its own handle installed. The
 /// engine stops a unit before it leaves; stopping again is a no-op, and covers one that did not.
 fn own(unit: Box<dyn SlotProcessor>) -> Box<Vst3Unit> {
     let mut unit = unit
@@ -612,6 +612,7 @@ fn teardown(
             Ok(unit) => unit.map(own),
             Err(e) => {
                 log::error!("[plugin_host] engine slot {index} VST3 teardown: {e}; leaving the plugin loaded");
+                slot.abandon();
                 std::mem::forget(plugin);
                 std::mem::forget(handler);
                 return Err(e);
