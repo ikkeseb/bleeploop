@@ -83,6 +83,11 @@ pub enum Command {
     /// The slot's output level (linear, 0..): the per-plugin gain staging (`plugin-bridge.ts`), on both
     /// what is heard and what is recorded.
     SetSlotGain(u8, f32),
+    /// An input send on or off (`input_fx`): the ECHO or the REVERB on the wet signal, heard and
+    /// recorded. Off closes its input and lets its tail ring out. A rig setting, not a lane's.
+    SetInputSend(InputSend, bool),
+    /// An input send's parameter, clamped to its range ([`InputSendParam::range`]).
+    SetInputSendParam(InputSendParam, f64),
 }
 
 impl Command {
@@ -112,6 +117,73 @@ impl Command {
                 | Command::SetSlotLive(..)
                 | Command::SetSlotGain(..)
         )
+    }
+
+    /// A command for the input sends. It never waits behind the looper either: it touches only the
+    /// sends, which no block job moves, and the player hears the echo come on as they switch it.
+    pub fn is_input_send(&self) -> bool {
+        matches!(self, Command::SetInputSend(..) | Command::SetInputSendParam(..))
+    }
+}
+
+/// The two input sends (`input_fx`), on the live input before the record tap.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InputSend {
+    /// A tempo-synced feedback delay.
+    Echo,
+    Reverb,
+}
+
+impl InputSend {
+    pub const ALL: [InputSend; 2] = [InputSend::Echo, InputSend::Reverb];
+
+    /// The key the UI sends (`src/platform/engine-wire.ts`).
+    pub fn key(self) -> &'static str {
+        ["echo", "reverb"][self as usize]
+    }
+
+    pub fn from_key(key: &str) -> Option<InputSend> {
+        InputSend::ALL.into_iter().find(|s| s.key() == key)
+    }
+}
+
+/// An input send's parameter. The echo's time is an index into the lane delay's divisions
+/// (`dsp::fx::DIVISIONS`: 1/4, 1/8, 1/8., 1/16); feedback and the levels are linear.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InputSendParam {
+    EchoTime,
+    EchoFeedback,
+    EchoLevel,
+    ReverbLevel,
+}
+
+impl InputSendParam {
+    pub const ALL: [InputSendParam; 4] = [InputSendParam::EchoTime, InputSendParam::EchoFeedback, InputSendParam::EchoLevel, InputSendParam::ReverbLevel];
+
+    /// The key the UI sends (`src/platform/engine-wire.ts`).
+    pub fn key(self) -> &'static str {
+        ["echoTime", "echoFeedback", "echoLevel", "reverbLevel"][self as usize]
+    }
+
+    pub fn from_key(key: &str) -> Option<InputSendParam> {
+        InputSendParam::ALL.into_iter().find(|p| p.key() == key)
+    }
+
+    pub fn send(self) -> InputSend {
+        match self {
+            InputSendParam::ReverbLevel => InputSend::Reverb,
+            _ => InputSend::Echo,
+        }
+    }
+
+    /// Minimum, maximum and default (the UI's too: `src/ui/state/engine-store.ts`).
+    pub fn range(self) -> (f64, f64, f64) {
+        match self {
+            InputSendParam::EchoTime => (0.0, (crate::dsp::fx::DIVISIONS.len() - 1) as f64, 1.0),
+            InputSendParam::EchoFeedback => (0.0, crate::dsp::fx::MAX_FEEDBACK, 0.4),
+            InputSendParam::EchoLevel => (0.0, 1.0, 0.5),
+            InputSendParam::ReverbLevel => (0.0, 1.0, 0.5),
+        }
     }
 }
 

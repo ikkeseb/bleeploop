@@ -6,8 +6,8 @@
 //!
 //! Serde's external tagging with the Rust variant names: a unit variant is its name (`"PlayAll"`), a
 //! newtype `{"RecDub":0}`, a tuple `{"SetVolume":[0,0.8]}`, a struct variant an object with camelCase
-//! fields. `FxParam`/`FxKind` travel as the TS keys (`src/audio/fx/metadata.ts`), an `Instrument` as its
-//! id, a `NoteTarget` as `{"Builtin":"lead"}` / `{"Slot":0}`, a `Frame` (i64) as a JSON number. The
+//! fields. `FxParam`/`FxKind` travel as the TS keys (`src/audio/fx/metadata.ts`), an `InputSend` and an
+//! `InputSendParam` as their `key()`, an `Instrument` as its id, a `NoteTarget` as `{"Builtin":"lead"}` / `{"Slot":0}`, a `Frame` (i64) as a JSON number. The
 //! mirrors are serde `remote` derives: a variant or field lf-engine adds fails to compile here until it
 //! is mirrored.
 //!
@@ -16,7 +16,7 @@
 
 use lf_engine::dsp::fx::{FxKind, FxParam};
 use lf_engine::grid::Frame;
-use lf_engine::{Action, Command, Event, Instrument, LaneInfo, LaneState, NoteTarget, Refusal};
+use lf_engine::{Action, Command, Event, InputSend, InputSendParam, Instrument, LaneInfo, LaneState, NoteTarget, Refusal};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::{DeviceEvent, DeviceStatus};
@@ -70,6 +70,8 @@ enum CommandDef {
     AllNotesOff,
     SetSlotLive(u8, bool),
     SetSlotGain(u8, f32),
+    SetInputSend(#[serde(with = "input_send")] InputSend, bool),
+    SetInputSendParam(#[serde(with = "input_send_param")] InputSendParam, f64),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -203,6 +205,34 @@ mod fx_param {
     }
 }
 
+/// An `InputSend` as its key (`InputSend::key`).
+mod input_send {
+    use super::*;
+
+    pub fn serialize<S: Serializer>(v: &InputSend, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(v.key())
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<InputSend, D::Error> {
+        let key = String::deserialize(d)?;
+        InputSend::from_key(&key).ok_or_else(|| serde::de::Error::custom(format!("unknown input send \"{key}\"")))
+    }
+}
+
+/// An `InputSendParam` as its key (`InputSendParam::key`).
+mod input_send_param {
+    use super::*;
+
+    pub fn serialize<S: Serializer>(v: &InputSendParam, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(v.key())
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<InputSendParam, D::Error> {
+        let key = String::deserialize(d)?;
+        InputSendParam::from_key(&key).ok_or_else(|| serde::de::Error::custom(format!("unknown input send param \"{key}\"")))
+    }
+}
+
 /// Where the feed's playhead comes from: device frame `frame` was rendered at Unix time `at_ms`, the
 /// device runs `rate` frames a second, and loop position 0 plays at `grid + k * master`
 /// (`Looper::anchor`): at device frame `f` a lane plays `(f - grid) mod master`. `at_ms` is when the
@@ -291,7 +321,7 @@ mod tests {
 
     /// Every `Command` variant, by position: a new variant fails to compile here until it has a
     /// number (bump `COMMANDS`) and an example in the fixture.
-    const COMMANDS: usize = 36;
+    const COMMANDS: usize = 38;
     fn command_index(c: &Command) -> usize {
         use Command::*;
         match c {
@@ -331,6 +361,8 @@ mod tests {
             AllNotesOff => 33,
             SetSlotLive(..) => 34,
             SetSlotGain(..) => 35,
+            SetInputSend(..) => 36,
+            SetInputSendParam(..) => 37,
         }
     }
 
@@ -436,6 +468,12 @@ mod tests {
         assert_eq!(command(r#"{"SelectInstrument":{"Builtin":"drum"}}"#).unwrap(), Command::SelectInstrument(NoteTarget::Builtin(Instrument::Drums)));
         assert!(command(r#"{"SetFxParam":[2,"Feedback",0.5]}"#).is_err(), "keys are the TS keys, lower case");
         assert!(command(r#"{"SelectInstrument":{"Builtin":"drums"}}"#).is_err(), "an instrument is its id");
+        assert_eq!(command(r#"{"SetInputSend":["echo",true]}"#).unwrap(), Command::SetInputSend(InputSend::Echo, true));
+        assert!(command(r#"{"SetInputSend":["Echo",true]}"#).is_err(), "a send is its key");
+        for param in InputSendParam::ALL {
+            let json = serde_json::to_value(WireCommand(Command::SetInputSendParam(param, param.range().2))).unwrap();
+            assert_eq!(json["SetInputSendParam"][0], Value::from(param.key()));
+        }
         for kind in FxKind::ALL {
             let key = serde_json::to_value(WireCommand(Command::SetFxBypass(0, kind, true))).unwrap()["SetFxBypass"][1].clone();
             assert_eq!(key, Value::from(kind.label().to_ascii_lowercase()), "{kind:?}");

@@ -783,6 +783,34 @@ fn settings_sent_before_the_first_open_and_across_a_new_rate_reach_every_engine(
     assert_eq!(bpm, 100, "a new engine gets the last tempo sent, before its first publish");
 }
 
+#[test]
+fn the_input_sends_are_kept_before_the_first_open_and_replayed_into_a_new_engine() {
+    use lf_engine::{InputSend, InputSendParam};
+    let h = Harness::new();
+    h.fake.set_input(|_| 0.25);
+    for command in [
+        Command::SetInputSendParam(InputSendParam::EchoFeedback, 0.0),
+        Command::SetInputSendParam(InputSendParam::EchoLevel, 1.0),
+        Command::SetInputSend(InputSend::Echo, true),
+        Command::SetSlotLive(0, true),
+    ] {
+        assert!(h.host.send(TimedCommand { frame: None, command }).is_ok(), "a setting is kept while no engine exists");
+    }
+    // The input (0.5 on the fake's second channel) and its echo at level 1, one 1/8 at 120 BPM later.
+    let heard = |h: &Harness| {
+        h.play(RATE / 2);
+        let at = h.frame();
+        h.fake.heard(at - 64..at)
+    };
+    h.open(asio(Some(256)));
+    assert!(heard(&h).iter().all(|s| (s - 1.0).abs() < 1e-3), "the first engine echoes the input");
+    h.fake.asio.lock().unwrap().as_mut().unwrap().rate = 44_100;
+    h.open(asio(Some(128)));
+    assert!(heard(&h).iter().all(|s| (s - 1.0).abs() < 1e-3), "a new engine gets the sends back");
+    h.send(Command::SetInputSend(InputSend::Echo, false));
+    assert!(heard(&h).iter().all(|s| (s - 0.5).abs() < 1e-3), "off, the dry input alone");
+}
+
 /// Tick `feed` until it sends a frame `want` accepts; every frame sent meanwhile goes to `seen`.
 fn feed_until(feed: &mut super::feed::Feed, seen: &mut Vec<super::wire::FeedFrame>, what: &str, want: impl Fn(&super::wire::FeedFrame) -> bool) -> super::wire::FeedFrame {
     let deadline = Instant::now() + PATIENCE;

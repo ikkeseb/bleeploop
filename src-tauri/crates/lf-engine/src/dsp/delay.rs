@@ -51,6 +51,11 @@ impl Delay {
         self.max_delay_time
     }
 
+    /// The circular buffer's length: after this many frames written, nothing older is left in it.
+    pub fn buffer_frames(&self) -> usize {
+        self.buffer.len()
+    }
+
     fn wrap(&self, i: usize) -> usize {
         if i >= self.buffer.len() {
             i - self.buffer.len()
@@ -83,6 +88,25 @@ impl Delay {
             self.write_index = self.wrap(self.write_index + Q);
         }
         y
+    }
+
+    /// Frame `k` of a feedback loop, read first: the frame `delay_time` seconds back, before frame `k` is
+    /// written ([`Delay::write_frame`], for the same `k`, follows). For a delay of at least one frame
+    /// this is what [`Delay::process_frame`] reads (its read never reaches the frame being written), so
+    /// an owner can feed the delayed frame back into frame `k` itself, where a Blink cycle feeds it a
+    /// quantum late (`fx::DelayFx`).
+    pub fn read_frame(&self, k: usize, delay_time: f32) -> f32 {
+        self.read(k, delay_time)
+    }
+
+    /// Frame `k` of a feedback loop, written after its [`Delay::read_frame`]; after frame 127 the quantum
+    /// ends. Frames go 0 to 127 in order.
+    pub fn write_frame(&mut self, k: usize, input: f32) {
+        let w = self.wrap(self.write_index + k);
+        self.buffer[w] = input;
+        if k == Q - 1 {
+            self.write_index = self.wrap(self.write_index + Q);
+        }
     }
 
     /// `ProcessARateVector`'s lane for frame `k` of the quantum: float read position, truncated to an
@@ -140,6 +164,16 @@ impl DelayNode {
     /// Frame `k` of the quantum begun: `input` in, the delayed frame out (see [`Delay::process_frame`]).
     pub fn process_frame(&mut self, k: usize, input: f32) -> f32 {
         self.delay.process_frame(k, input, self.times[k])
+    }
+
+    /// Frame `k` of the quantum begun, read before it is written (see [`Delay::read_frame`]).
+    pub fn read_frame(&self, k: usize) -> f32 {
+        self.delay.read_frame(k, self.times[k])
+    }
+
+    /// Frame `k` of the quantum begun, written after its read (see [`Delay::write_frame`]).
+    pub fn write_frame(&mut self, k: usize, input: f32) {
+        self.delay.write_frame(k, input);
     }
 
     /// The last quantum [`DelayNode::process`] rendered.

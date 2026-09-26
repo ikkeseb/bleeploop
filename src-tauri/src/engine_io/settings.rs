@@ -2,9 +2,9 @@
 //! one at another sample rate, one that replaced a faulted engine), so the UI's settings survive a
 //! rebuild and a setting sent before the first open is kept (`docs/plans/native-engine.md` § Stage 5).
 //!
-//! A setting is a command that sets a value (the tempo, the click, the master, the looper's modes, a
-//! lane's volume, mute and FX, the note target, the wheels, a plugin slot's live flag and gain, the
-//! selected lane); everything else (the looper's gestures, notes) acts once and is not kept. What the
+//! A setting is a command that sets a value (the tempo, the click, the master, the input sends, the
+//! looper's modes, a lane's volume, mute and FX, the note target, the wheels, a plugin slot's live flag
+//! and gain, the selected lane); everything else (the looper's gestures, notes) acts once and is not kept. What the
 //! engine resets, the memory forgets, as the feed reads it happen: a cleared lane's volume, mute and FX
 //! (`cleared`, on the engine's `Cleared` event: CLEAR, a pedal's CLEAR, CLEAR ALL), and a COPY hands the
 //! destination the source's (`copy_lane`, on `Copied`). A setting for a lane sent in the moment between
@@ -23,6 +23,11 @@ enum Key {
     ClickVolume,
     MasterVolume,
     MasterMute,
+    /// An input send's param, by `InputSendParam as usize`; before the sends' on/off, so a send that
+    /// comes on in a new engine comes on with its values.
+    InputSendParam(usize),
+    /// An input send, by `InputSend as usize`.
+    InputSend(usize),
     LoopEndStop,
     FixedLength,
     FixedBars,
@@ -62,6 +67,8 @@ fn key(command: &Command) -> Option<Key> {
         Command::SetClickVolume(_) => Key::ClickVolume,
         Command::SetMasterVolume(_) => Key::MasterVolume,
         Command::SetMasterMute(_) => Key::MasterMute,
+        Command::SetInputSendParam(param, _) => Key::InputSendParam(param as usize),
+        Command::SetInputSend(send, _) => Key::InputSend(send as usize),
         Command::SetLoopEndStop(_) => Key::LoopEndStop,
         Command::SetFixedLength(_) => Key::FixedLength,
         Command::SetFixedBars(_) => Key::FixedBars,
@@ -167,7 +174,7 @@ impl Settings {
 mod tests {
     use super::*;
     use lf_engine::dsp::fx::{FxKind, FxParam};
-    use lf_engine::{Instrument, NoteTarget};
+    use lf_engine::{InputSend, InputSendParam, Instrument, NoteTarget};
 
     fn replay(s: &Settings) -> Vec<Command> {
         s.replay().collect()
@@ -184,10 +191,19 @@ mod tests {
         assert!(s.record(&Command::SelectInstrument(NoteTarget::Builtin(Instrument::Pad))));
         assert!(!s.record(&Command::SetVolume(9, 0.5)), "a lane out of range is not a setting");
         assert!(!s.record(&Command::SetSlotLive(2, true)), "a slot out of range is not a setting");
+        assert!(s.record(&Command::SetInputSend(InputSend::Echo, true)));
+        assert!(s.record(&Command::SetInputSendParam(InputSendParam::EchoLevel, 0.2)));
+        assert!(s.record(&Command::SetInputSendParam(InputSendParam::EchoLevel, 0.6)));
         assert_eq!(
             replay(&s),
-            [Command::SetBpm(100.0), Command::SelectInstrument(NoteTarget::Builtin(Instrument::Pad)), Command::PitchBend(1.0)],
-            "the note target is replayed before the wheels it hands over"
+            [
+                Command::SetBpm(100.0),
+                Command::SetInputSendParam(InputSendParam::EchoLevel, 0.6),
+                Command::SetInputSend(InputSend::Echo, true),
+                Command::SelectInstrument(NoteTarget::Builtin(Instrument::Pad)),
+                Command::PitchBend(1.0)
+            ],
+            "the note target is replayed before the wheels it hands over, a send's values before the send"
         );
     }
 
@@ -199,6 +215,7 @@ mod tests {
         s.record(&Command::SetFxBypass(0, FxKind::Delay, false));
         s.record(&Command::SetMute(1, true));
         s.record(&Command::SetMasterVolume(0.7));
+        s.record(&Command::SetInputSend(InputSend::Reverb, true));
         s.copy_lane(0, 3);
         assert!(replay(&s).contains(&Command::SetFxParam(3, FxParam::Cutoff, 900.0)));
         assert!(replay(&s).contains(&Command::SetVolume(3, 0.5)));
@@ -208,6 +225,10 @@ mod tests {
         assert!(!replay(&s).iter().any(|c| matches!(c, Command::SetVolume(0, _) | Command::SetFxParam(0, ..) | Command::SetFxBypass(0, ..))));
         assert!(replay(&s).contains(&Command::SetMute(1, true)));
         (0..TRACK_COUNT as u8).for_each(|i| s.cleared(i));
-        assert_eq!(replay(&s), [Command::SetMasterVolume(0.7)], "CLEAR ALL clears every lane, not the master");
+        assert_eq!(
+            replay(&s),
+            [Command::SetMasterVolume(0.7), Command::SetInputSend(InputSend::Reverb, true)],
+            "CLEAR ALL clears every lane, not the master nor the input sends"
+        );
     }
 }

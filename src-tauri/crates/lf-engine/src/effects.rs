@@ -45,17 +45,23 @@ pub struct LaneFx {
     wet: [[f32; QUANTUM]; 2],
 }
 
+/// The bus reverb's IR, from `white`, Tone's white noise table (the one the drum kit plays too:
+/// `Instruments::new`). Allocates: `Engine::new` builds it once, for this bus and the input sends'
+/// reverb (`input_fx`).
+pub fn reverb_ir(sample_rate: u32, white: &Arc<AudioBuffer>) -> [Vec<f32>; 2] {
+    reverb_ir::generate(white, sample_rate as f32, REVERB_DECAY, REVERB_PRE_DELAY, IR_DRAWS)
+}
+
 impl LaneFx {
-    /// Allocates (the reverb IR and its convolver): build it off the audio thread. `white` is Tone's
-    /// white noise table, the one the drum kit plays too (`Instruments::new`).
-    pub fn new(sample_rate: u32, white: &Arc<AudioBuffer>) -> Self {
+    /// Allocates (the chains and the bus's convolver over `ir`, [`reverb_ir`]): build it off the audio
+    /// thread.
+    pub fn new(sample_rate: u32, ir: [&[f32]; 2]) -> Self {
         let sr = sample_rate as f32;
-        let ir = reverb_ir::generate(white, sr, REVERB_DECAY, REVERB_PRE_DELAY, IR_DRAWS);
         let start = Ctl::at(0, sr);
         LaneFx {
             sample_rate,
             chains: (0..TRACK_COUNT).map(|_| FxChain::new(sr, None, start)).collect(),
-            bus: ReverbBus::new(sr, [&ir[0], &ir[1]], 0),
+            bus: ReverbBus::new(sr, ir, 0),
             offset: 0,
             timing: None,
             out: [0.0; QUANTUM],

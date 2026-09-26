@@ -1,5 +1,6 @@
 /**
- * Real pointer/key gestures against the rendered app: BPM field Escape/Enter/blur commit rules,
+ * Real pointer/key gestures against the rendered app: no IN FX control in web mode (the input sends are
+ * engine-only), BPM field Escape/Enter/blur commit rules,
  * pointer capture across octave changes, independent MIDI ownership (another owner's held pitch
  * survives a pointer's own release), and the playable upper note range. No hardware/native claims.
  * Run: pnpm probe input-controls
@@ -9,6 +10,10 @@ import { probe } from '../harness/probe.ts';
 
 await probe(async ({ open }) => {
   const { page } = await open({ viewport: { width: 1280, height: 820 } });
+  // The input sends live in the native engine alone: the web path renders no IN FX control.
+  await page.getByRole('button', { name: 'Mic / line input' }).waitFor();
+  assert.equal(await page.getByRole('button', { name: 'Input effects' }).count(), 0, 'no IN FX in web mode');
+  assert.equal(await page.locator('.infx__pill').count(), 0, 'no IN FX pill in web mode');
   const initialBpm = await page.evaluate(() => window.__lf.clock.bpm());
   const edit = async value => {
     await page.getByRole('button', { name: 'BPM', exact: true }).click();

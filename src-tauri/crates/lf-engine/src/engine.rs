@@ -1,15 +1,18 @@
 //! OWNS: the engine's callback: the command and event rings, the block split, and the bus topology.
 //! Input → the live plugin slot (`slots`: an effect, or an empty slot passing it dry) → the wet signal.
-//! The record tap is the wet signal plus the built-in instruments and the instrument plugin slots
-//! (`instruments`, `slots`: delayed onto the guitar's grid). Each lane plays through its FX chain,
+//! The input sends (`input_fx`: ECHO, REVERB) read the wet signal and render wet only. The record tap
+//! is the wet signal plus the sends' output plus the built-in instruments and the instrument plugin
+//! slots (`instruments`, `slots`: delayed onto the guitar's grid). Each lane plays through its FX chain,
 //! whose reverb sends meet on one bus (`effects`); the chains, the reverb bus, the instruments (built
 //! in and plugin) and the click sum on the stereo master bus: master volume, then the master limiter
-//! (`dsp::compressor`) → stereo out. The wet signal joins the output after the limiter, under the same
-//! master volume: the played instrument is heard without the limiter's pre-delay, as the native monitor
-//! is today, and like it is not limited. Ported from `src/audio/engine.ts` and `src/audio/master.ts`.
+//! (`dsp::compressor`) → stereo out. The wet signal and the sends' output (the monitor) join the output
+//! after the limiter, under the same master volume: the played instrument is heard without the
+//! limiter's pre-delay, as the native monitor is today, and like it is not limited; the sends are heard
+//! on the frame they are recorded. Ported from `src/audio/engine.ts` and `src/audio/master.ts`.
 //!
 //! The limiter delays everything it carries by its pre-delay, the click included, so a take's alignment
-//! is `align_frames` + the live effect's latency + the limiter's.
+//! is `align_frames` + the live effect's latency + the limiter's. The sends add no term: the dry signal
+//! does not pass through them.
 //!
 //! `process` renders a block in chunks that end wherever something happens: a command's frame, a
 //! scheduled looper event, a beat, an AUTO trigger, and a render quantum's end (the FX and the reverb
@@ -29,8 +32,9 @@ use crate::dsp::compressor::Compressor;
 use crate::dsp::noise::NoiseTables;
 use crate::dsp::param::QUANTUM;
 use crate::dsp::rng::Mulberry32;
-use crate::effects::LaneFx;
+use crate::effects::{self, LaneFx};
 use crate::grid::Frame;
+use crate::input_fx::InputFx;
 use crate::instruments::Instruments;
 use crate::looper::{Applied, Cx, Looper};
 use crate::overview::Overview;
@@ -90,8 +94,11 @@ impl Feed {
 pub struct Taps<'a> {
     /// The master bus's two sides: everything but the wet signal, under the master volume.
     pub bus: [&'a [f32]; 2],
-    /// The wet signal under the master volume.
+    /// The wet signal and the input sends under the master volume.
     pub monitor: &'a [f32],
+    /// The record tap: what a capture writes (the wet signal, the input sends, the instruments' record
+    /// path).
+    pub record: &'a [f32],
     /// The lanes before their FX plus the click, under the master volume: what the looper plays,
     /// without the FX's colour (a bypassed chain is not bit-transparent, as in Tone).
     pub looper: &'a [f32],
@@ -127,6 +134,7 @@ pub struct Engine {
     pending: [Option<Pending>; MAX_PENDING],
     seq: u64,
     fx: LaneFx,
+    input_fx: InputFx,
     instruments: Instruments,
     rack: Rack,
     session: SessionEnd,
@@ -135,7 +143,13 @@ pub struct Engine {
     /// The slots' frames rendered so far in this block (they render ahead, up to a slot command).
     slots_done: usize,
     wet: Vec<f32>,
-    /// The record tap: the wet signal plus the instruments' record path.
+    /// The input sends' output (zeros where they were silent).
+    sends: Vec<f32>,
+    /// The sends' frames rendered so far in this block (ahead of the AUTO scan, like the instruments').
+    sends_done: usize,
+    /// The sends sounded somewhere in this block: only then does the monitor take them.
+    sends_sounded: bool,
+    /// The record tap: the wet signal plus the input sends and the instruments' record path.
     record: Vec<f32>,
     /// The instruments' frames rendered so far in this block (they render ahead of an AUTO scan).
     instruments_done: usize,
@@ -145,7 +159,8 @@ pub struct Engine {
     /// The stereo master bus: the lanes through their FX, the reverb bus, the instruments and the click,
     /// then under the master volume (the limiter's input).
     mix: [Vec<f32>; 2],
-    /// The wet signal under the master volume: what joins the output after the limiter.
+    /// The wet signal and the input sends under the master volume: what joins the output after the
+    /// limiter.
     monitor: Vec<f32>,
     /// The looper's own mix under the master volume: the lanes before their FX, and the click.
     looper_mix: Vec<f32>,
@@ -174,6 +189,7 @@ impl Engine {
         let NoiseTables { white, pink } = NoiseTables::generate(&mut Mulberry32::new(NOISE_SEED));
         let table = |[l, r]: [Vec<f32>; 2]| Arc::new(AudioBuffer::new(config.sample_rate as f32, vec![l, r]));
         let (white, pink) = (table(white), table(pink));
+        let ir = effects::reverb_ir(config.sample_rate, &white);
         let (rack, slots) = Rack::new(config.sample_rate, config.max_block);
         let looper = Looper::new(config.sample_rate, capacity);
         let overview = looper.overview().clone();
@@ -186,13 +202,17 @@ impl Engine {
             commands: cmd_rx,
             pending: [None; MAX_PENDING],
             seq: 0,
-            fx: LaneFx::new(config.sample_rate, &white),
+            fx: LaneFx::new(config.sample_rate, [&ir[0], &ir[1]]),
+            input_fx: InputFx::new(config.sample_rate, [&ir[0], &ir[1]]),
             instruments: Instruments::new(config.sample_rate, config.max_block, &white, &pink),
             rack,
             session,
             slot_bus: vec![0.0; config.max_block],
             slots_done: 0,
             wet: vec![0.0; config.max_block],
+            sends: vec![0.0; config.max_block],
+            sends_done: 0,
+            sends_sounded: false,
             record: vec![0.0; config.max_block],
             instruments_done: 0,
             instrument: [vec![0.0; config.max_block], vec![0.0; config.max_block]],
@@ -237,6 +257,10 @@ impl Engine {
         &self.instruments
     }
 
+    pub fn input_fx(&self) -> &InputFx {
+        &self.input_fx
+    }
+
     /// True while a command waits for a block job.
     pub fn holding(&self) -> bool {
         self.pending.iter().flatten().any(|p| p.held)
@@ -250,7 +274,7 @@ impl Engine {
     /// The last block before the limiter. The output is `limiter(bus) + monitor` on each side.
     pub fn taps(&self) -> Taps<'_> {
         let n = self.rendered;
-        Taps { bus: [&self.mix[0][..n], &self.mix[1][..n]], monitor: &self.monitor[..n], looper: &self.looper_mix[..n] }
+        Taps { bus: [&self.mix[0][..n], &self.mix[1][..n]], monitor: &self.monitor[..n], looper: &self.looper_mix[..n], record: &self.record[..n] }
     }
 
     pub fn diag(&self) -> Diag {
@@ -327,6 +351,7 @@ impl Engine {
         }
         self.next_frame = end;
         self.fx.set_offset(self.skipped);
+        self.input_fx.set_offset(self.skipped);
         self.instruments.set_offset(self.skipped);
         if ctx.xrun {
             self.xruns += 1;
@@ -349,6 +374,8 @@ impl Engine {
         self.rendered = n;
         self.slots_done = 0;
         self.instruments_done = 0;
+        self.sends_done = 0;
+        self.sends_sounded = false;
         let [mix_l, mix_r] = &mut self.mix;
         let (mix_l, mix_r) = (&mut mix_l[..n], &mut mix_r[..n]);
 
@@ -358,7 +385,13 @@ impl Engine {
             self.looper.events(&mut cx);
             while let Some(k) = due(&self.pending, f) {
                 let p = self.pending[k].take().unwrap();
-                let mut at = Apply { instruments: &mut self.instruments, rack: &mut self.rack, master_volume: &mut self.master_volume, master_muted: &mut self.master_muted };
+                let mut at = Apply {
+                    instruments: &mut self.instruments,
+                    rack: &mut self.rack,
+                    input_fx: &mut self.input_fx,
+                    master_volume: &mut self.master_volume,
+                    master_muted: &mut self.master_muted,
+                };
                 match apply(&mut self.looper, &mut cx, &mut at, p.command) {
                     Applied::WaitUntil(at) => insert(&mut self.pending, &mut self.commands_dropped, Pending { frame: at.max(f + 1), held: true, ..p }),
                     Applied::Held(at, command) => {
@@ -373,6 +406,7 @@ impl Engine {
             }
             self.looper.publish(&mut cx);
             self.fx.follow_grid(self.looper.anchor(), self.looper.master(), self.clock.bpm(), f);
+            self.input_fx.follow_tempo(self.clock.bpm(), f);
 
             let quantum_end = f - (f - self.skipped).rem_euclid(QUANTUM as Frame) + QUANTUM as Frame;
             let mut next = end.min(quantum_end);
@@ -383,9 +417,9 @@ impl Engine {
             }
             self.looper.advance_jobs(next);
             let k0 = (f - start) as usize;
-            // The slots and the instruments reach the record tap before the AUTO scan reads it: render
-            // them up to `next`, and a trigger that ends the chunk early leaves the rest for the next
-            // chunk. The slots render further, up to the next slot command, so a plugin is called once
+            // The slots, the instruments and the input sends reach the record tap before the AUTO scan
+            // reads it: render them up to `next`, and a trigger that ends the chunk early leaves the rest
+            // for the next chunk. The slots render further, up to the next slot command, so a plugin is called once
             // per block unless one splits it.
             let k_next = (next - start) as usize;
             if self.slots_done < k_next {
@@ -399,6 +433,17 @@ impl Engine {
                 let at = start + from as Frame;
                 self.instruments.render(at, record_delay, &mut il[from..k_next], &mut ir[from..k_next], &mut self.record[from..k_next]);
                 self.instruments_done = k_next;
+            }
+            if self.sends_done < k_next {
+                // Within the chunk's quantum: the rack has rendered the wet signal this far.
+                let (a, b) = (self.sends_done, k_next);
+                if self.input_fx.render(start + a as Frame, &self.wet[a..b], &mut self.sends[a..b]) {
+                    self.sends_sounded = true;
+                    for (r, &y) in self.record[a..b].iter_mut().zip(&self.sends[a..b]) {
+                        *r += y;
+                    }
+                }
+                self.sends_done = b;
             }
             let mut cx = Cx { now: f, align, clock: &mut self.clock, feed: &mut self.feed, fx: &mut self.fx };
             if let Some(at) = self.looper.scan_auto(&mut cx, f, &self.record[k0..k_next]) {
@@ -431,11 +476,15 @@ impl Engine {
             }
             self.looper.capture(f, &self.record[k0..k1]);
             let target = if self.master_muted { 0.0 } else { self.master_volume as f64 };
-            for ((((l, r), o), m), &w) in l.iter_mut().zip(r.iter_mut()).zip(&mut self.monitor[k0..k1]).zip(looper_mix.iter_mut()).zip(&self.wet[k0..k1]) {
+            let (wet, sends, sounded) = (&self.wet[k0..k1], &self.sends[k0..k1], self.sends_sounded);
+            for ((((l, r), o), m), (&w, &y)) in l.iter_mut().zip(r.iter_mut()).zip(&mut self.monitor[k0..k1]).zip(looper_mix.iter_mut()).zip(wet.iter().zip(sends)) {
                 let g = self.master_gain;
                 *l = (g * *l as f64) as f32;
                 *r = (g * *r as f64) as f32;
                 *o = (g * w as f64) as f32;
+                if sounded {
+                    *o += (g * y as f64) as f32;
+                }
                 *m = (g * *m as f64) as f32;
                 self.master_gain = target + (self.master_gain - target) * self.master_coef;
             }
@@ -466,15 +515,16 @@ fn insert(pending: &mut [Option<Pending>; MAX_PENDING], dropped: &mut u64, p: Pe
 
 /// The first-sent command due at or before `f`, unless an earlier-sent one waits for a block job: then
 /// it waits behind that one. Due commands run in the order they were sent. A command for the
-/// instruments or the plugin slots never waits behind the looper: it touches nothing a block job moves,
-/// and a note must sound when it is played (in the web app notes go straight to the synth).
+/// instruments, the plugin slots or the input sends never waits behind the looper: it touches nothing a
+/// block job moves, and a note must sound when it is played (in the web app notes go straight to the
+/// synth), an echo when it is switched on.
 fn due(pending: &[Option<Pending>; MAX_PENDING], f: Frame) -> Option<usize> {
     let barrier = pending.iter().flatten().filter(|p| p.held && p.frame > f).map(|p| p.seq).min();
     pending
         .iter()
         .enumerate()
         .filter_map(|(k, p)| {
-            p.filter(|p| p.frame <= f && (barrier.is_none_or(|b| p.seq < b) || p.command.is_instrument() || p.command.reaches_slots())).map(|p| (p.seq, k))
+            p.filter(|p| p.frame <= f && (barrier.is_none_or(|b| p.seq < b) || p.command.is_instrument() || p.command.reaches_slots() || p.command.is_input_send())).map(|p| (p.seq, k))
         })
         .min()
         .map(|(_, k)| k)
@@ -500,6 +550,7 @@ fn lane(i: u8) -> Option<usize> {
 struct Apply<'a> {
     instruments: &'a mut Instruments,
     rack: &'a mut Rack,
+    input_fx: &'a mut InputFx,
     master_volume: &'a mut f32,
     master_muted: &'a mut bool,
 }
@@ -644,6 +695,14 @@ fn apply(looper: &mut Looper, cx: &mut Cx, at: &mut Apply, command: Command) -> 
         }
         Command::SetSlotGain(i, gain) => {
             at.rack.set_gain(i as usize, gain);
+            Applied::Done
+        }
+        Command::SetInputSend(send, on) => {
+            at.input_fx.set_on(send, on, now);
+            Applied::Done
+        }
+        Command::SetInputSendParam(param, value) => {
+            at.input_fx.set_param(param, value, now);
             Applied::Done
         }
     }

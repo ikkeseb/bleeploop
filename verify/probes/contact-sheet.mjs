@@ -6,7 +6,10 @@
  * load/arm/editor replies. 8-native-first-launch = the host booted, nothing loaded (slot A offers
  * "Load amp / plugin…"); 9-amp-sim-live = the amp-sim picked in slot A's dropdown, which auto-starts
  * GO LIVE and the editor (INPUT LIVE); 10-amp-sim-idle = the same after stopping live input. Those
- * scenes prove the frontend's rendering of a native host's answers, never the native side. Writes
+ * scenes prove the frontend's rendering of a native host's answers, never the native side.
+ * 11-engine-in-fx is engine mode on the web engine fake (the engine-seam pattern: `__lfEngineFake` set
+ * before the app loads, a scripted reset frame with both input sends on) with the IN FX popover open;
+ * it proves the rendering only, never the engine. Writes
  * logs/contact-sheet/<viewport>-<kbd>-<scene>.png plus a tiling index.html unconditionally, before any
  * FAIL is raised, so a red run still leaves the sheet for the eye lap. Asserts: with FX open every
  * lane's clear button is fully visible (audit A4); an ARMED later take draws no rec-red in its canvas
@@ -21,7 +24,7 @@ const outDir = 'logs/contact-sheet';
 const viewports = [[1280, 820], [1920, 1080], [1000, 700]];
 const placements = ['bottom', 'hidden'];
 const scenes = ['1-empty', '2-first-take-recording', '3-armed-waiting', '4-count-in', '5-fx-five-lanes', '6-help', '7-audio-settings',
-  '8-native-first-launch', '9-amp-sim-live', '10-amp-sim-idle'];
+  '8-native-first-launch', '9-amp-sim-live', '10-amp-sim-idle', '11-engine-in-fx'];
 const REC_PIXEL_LIMIT = 20; // anti-aliasing slack; a red playhead or tape is hundreds of pixels
 
 /** Five one-bar lanes at 120 BPM with a visible wave; `playing` lanes start PLAYING. */
@@ -58,12 +61,14 @@ await probe(async ({ browser, open }) => {
         page.on('console', (m) => { if (m.type() === 'error' && !m.text().startsWith('[rec-comp] snapshot')) errors.push({ scene, text: m.text() }); });
         page.on('pageerror', (e) => errors.push({ scene, text: String(e) }));
       };
-      // `native` serves host.web.ts with `available: true`, so the native-only chrome renders.
-      const openPage = async (native) => {
+      // `native` serves host.web.ts with `available: true`, so the native-only chrome renders; `engine`
+      // boots engine mode on the web engine fake instead.
+      const openPage = async (mode) => {
         const ctx = await browser.newContext();
         const opened = await open({ context: ctx, viewport: { width, height }, allowPageErrors: true, init: (p) => {
           init(p);
-          if (native) return p.route('**/src/platform/host.web.ts', async (route) => {
+          if (mode === 'engine') return p.addInitScript(() => { window.__lfEngineFake = true; });
+          if (mode === 'native') return p.route('**/src/platform/host.web.ts', async (route) => {
             const response = await route.fetch();
             await route.fulfill({ response, body: (await response.text()).replace('available: false', 'available: true') });
           });
@@ -71,7 +76,7 @@ await probe(async ({ browser, open }) => {
         await opened.page.evaluate((v) => window.__lf.layoutStore.setKeyboardPlacement(v), kbd);
         return [ctx, opened.page];
       };
-      let [context, page] = await openPage(false);
+      let [context, page] = await openPage('web');
       const shoot = async (name) => {
         await page.evaluate(() => document.activeElement?.blur());
         const file = `${width}x${height}-${kbd}-${name}.png`;
@@ -180,7 +185,7 @@ await probe(async ({ browser, open }) => {
       await context.close();
 
       scene = '8-native-first-launch';
-      [context, page] = await openPage(true);
+      [context, page] = await openPage('native');
       await page.evaluate(async () => {
         const { platform } = await import('/src/platform/index.ts');
         const instrument = await import('/src/audio/instrument.ts');
@@ -214,6 +219,30 @@ await probe(async ({ browser, open }) => {
       scene = '10-amp-sim-idle';
       await page.getByRole('button', { name: 'Stop live input for slot 1', exact: true }).click();
       await page.getByRole('button', { name: 'Go live for slot 1', exact: true }).waitFor();
+      await page.waitForTimeout(250);
+      await shoot(scene);
+
+      await context.close();
+
+      scene = '11-engine-in-fx';
+      [context, page] = await openPage('engine');
+      await page.waitForFunction(() => window.__lf.native.opened.length === 1, undefined, { timeout: 5000 });
+      await page.evaluate(() => {
+        const info = { state: 'Empty', length: 0, armed: false, autoArmed: false, canUndo: false, canReverse: false, reversed: false, stopAt: null, retakePass: 0 };
+        window.__lf.native.emit({
+          seq: 1,
+          reset: true,
+          settings: [{ SetInputSend: ['echo', true] }, { SetInputSend: ['reverb', true] }],
+          events: [...[0, 1, 2, 3, 4].map((lane) => ({ Lane: { frame: 0, lane, info } })),
+            { Transport: { frame: 0, master: 0, bpm: 120, locked: false } }, { Selected: { frame: 0, lane: 0 } }],
+          device: [],
+          anchor: { frame: 0, atMs: Date.now(), rate: 48000, grid: 0 },
+          meter: { peak: 0, clip: false },
+          peaks: [],
+        });
+      });
+      await page.getByRole('button', { name: 'Input effects', exact: true }).click();
+      await page.getByRole('dialog', { name: 'Input effects', exact: true }).waitFor();
       await page.waitForTimeout(250);
       await shoot(scene);
 

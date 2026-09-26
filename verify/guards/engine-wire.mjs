@@ -44,7 +44,7 @@ const COMMANDS = [
   'ActionOn', 'SelectTrack', 'SetBpm', 'SetMetronome', 'SetClickVolume', 'SetMasterVolume', 'SetMasterMute',
   'SetLoopEndStop', 'SetFixedLength', 'SetFixedBars', 'SetRetake', 'SetAutoRecord', 'SetAutoSensitivity', 'SetVolume',
   'SetMute', 'SetFxParam', 'SetFxBypass', 'SelectInstrument', 'NoteOn', 'NoteOff', 'PitchBend', 'Modulation',
-  'AllNotesOff', 'SetSlotLive', 'SetSlotGain',
+  'AllNotesOff', 'SetSlotLive', 'SetSlotGain', 'SetInputSend', 'SetInputSendParam',
 ];
 const EVENTS = ['Lane', 'Transport', 'Beat', 'Selected', 'Refused', 'TakeRejected', 'PassDropped', 'Copied', 'Cleared'];
 const DEVICE_EVENTS = ['Lost', 'Recovered', 'Fallback', 'ShareLost', 'EngineFaulted'];
@@ -139,6 +139,8 @@ const refused = {
   'an unknown event': () => decodeEvent({ Tempo: { frame: 0 } }),
   'a PascalCase FX param': () => decodeCommand({ SetFxParam: [0, 'Cutoff', 1] }),
   'an instrument by its Rust name': () => decodeCommand({ SelectInstrument: { Builtin: 'drums' } }),
+  'an input send by its Rust name': () => decodeCommand({ SetInputSend: ['Echo', true] }),
+  'a snake_case input send param': () => decodeCommand({ SetInputSendParam: ['echo_level', 0.5] }),
   'a lane past the fifth': () => decodeCommand({ RecDub: 5 }),
   'an unknown command': () => decodeCommand('Panic'),
   'a feed frame without its events': () => decodeFeedFrame({ seq: 0, reset: false }),

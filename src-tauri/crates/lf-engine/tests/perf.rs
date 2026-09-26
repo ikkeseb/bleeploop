@@ -7,8 +7,10 @@
 //!
 //! - Stage 2: five lanes (one overdubbing), the click and the master limiter under 10 % of the block's
 //!   real time (with the Stage 3 sound wired in and idle: bypassed FX, silent instruments).
-//! - Stage 3: that engine with every effect on and the drum kit playing, plus the other synths
-//!   beside it (below), under 50 %.
+//! - Stage 3: that engine with every effect on, both input sends on and the drum kit playing, plus
+//!   the other synths beside it (below), under 50 %.
+//! - The input sends (F15): what ECHO and REVERB on the live input add to the Stage 2 engine, printed
+//!   beside it (no bar of their own; the Stage 3 bar carries them).
 //! - A multiply burst (F14): the eight extension jobs of the worst multiply add under 10 % to the blocks
 //!   they run in.
 //!
@@ -25,7 +27,7 @@ use common::{code, violation_count, Opts, Rig};
 use lf_engine::dsp::fx::{FxKind, FxParam, MAX_FEEDBACK};
 use lf_engine::dsp::synth::{Bass, PolyKind, PolySynth};
 use lf_engine::grid::Frame;
-use lf_engine::{Command, Instrument, LaneState, NoteTarget, ProcessContext};
+use lf_engine::{Command, InputSend, InputSendParam, Instrument, LaneState, NoteTarget, ProcessContext};
 
 const RATE: f32 = 48000.0;
 const BLOCK: usize = 64;
@@ -45,11 +47,24 @@ fn five_lanes_one_overdubbing() -> (Rig, Frame) {
     (rig, master)
 }
 
-#[test]
-#[ignore]
-fn five_lanes_one_overdubbing_and_the_click_cost_under_a_tenth_of_the_block() {
-    let (mut rig, master) = five_lanes_one_overdubbing();
-    let blocks = 48000 * 60 / BLOCK;
+/// Both input sends on, at their heaviest: the echo at full level and feedback 0.95, the reverb at full
+/// level (the rig's slot 0 is live, so they hear the input).
+fn input_sends_on(rig: &mut Rig) {
+    for command in [
+        Command::SetInputSendParam(InputSendParam::EchoTime, 1.0),
+        Command::SetInputSendParam(InputSendParam::EchoFeedback, MAX_FEEDBACK),
+        Command::SetInputSendParam(InputSendParam::EchoLevel, 1.0),
+        Command::SetInputSendParam(InputSendParam::ReverbLevel, 1.0),
+        Command::SetInputSend(InputSend::Echo, true),
+        Command::SetInputSend(InputSend::Reverb, true),
+    ] {
+        rig.set(command);
+    }
+}
+
+/// Render `blocks` blocks of 64 with a busy input; returns the mean, p99.9 and worst block time as a
+/// fraction of the block's real time.
+fn time_blocks(rig: &mut Rig, blocks: usize) -> (f64, f64, f64) {
     let input: Vec<f32> = (0..BLOCK).map(|k| code(k as Frame) - 0.25).collect();
     let (mut left, mut right) = (vec![0.0f32; BLOCK], vec![0.0f32; BLOCK]);
     let mut frame = rig.frame;
@@ -65,16 +80,24 @@ fn five_lanes_one_overdubbing_and_the_click_cost_under_a_tenth_of_the_block() {
         times.push(dt);
         frame += BLOCK as Frame;
     }
+    rig.frame = frame;
     let total = started.elapsed().as_secs_f64();
     let period = BLOCK as f64 / 48000.0;
-    let mean = total / blocks as f64 / period;
     times.sort_by(f64::total_cmp);
-    let p999 = times[blocks * 999 / 1000] / period;
+    (total / blocks as f64 / period, times[blocks * 999 / 1000] / period, worst / period)
+}
+
+#[test]
+#[ignore]
+fn five_lanes_one_overdubbing_and_the_click_cost_under_a_tenth_of_the_block() {
+    let (mut rig, master) = five_lanes_one_overdubbing();
+    let blocks = 48000 * 60 / BLOCK;
+    let (mean, p999, worst) = time_blocks(&mut rig, blocks);
     println!(
         "master {master} frames; {blocks} blocks: mean {:.2} %, p99.9 {:.2} %, worst {:.1} % of the block",
         mean * 100.0,
         p999 * 100.0,
-        worst / period * 100.0
+        worst * 100.0
     );
     assert!(mean < 0.10, "mean block time {:.2} % of the block", mean * 100.0);
 }
@@ -133,15 +156,41 @@ fn a_multiply_burst_costs_under_a_tenth_of_the_block_more() {
     assert!(during - steady < 10.0, "the burst costs {:.1} % of the block more", during - steady);
 }
 
+/// What the two input sends add: the Stage 2 engine timed with them off, then (past the reverb's IR
+/// and the echo's build-up) with both on at their heaviest, 20 s each, in one run.
+#[test]
+#[ignore]
+fn the_input_sends_cost() {
+    let (mut rig, _) = five_lanes_one_overdubbing();
+    let blocks = 48000 * 20 / BLOCK;
+    let period = BLOCK as f64 / 48000.0;
+    let (off, ..) = time_blocks(&mut rig, blocks);
+    input_sends_on(&mut rig);
+    time_blocks(&mut rig, 48000 * 3 / BLOCK);
+    let (on, p999, worst) = time_blocks(&mut rig, blocks);
+    println!(
+        "stage 2 engine, {blocks} blocks of {BLOCK} at 48 k: sends off mean {:.1} µs ({:.2} %); both on mean {:.1} µs ({:.2} %), p99.9 {:.2} %, worst {:.1} %; the sends add {:.1} µs ({:.2} %)",
+        off * period * 1e6,
+        off * 100.0,
+        on * period * 1e6,
+        on * 100.0,
+        p999 * 100.0,
+        worst * 100.0,
+        (on - off) * period * 1e6,
+        (on - off) * 100.0
+    );
+}
+
 /// The timed parts of a Stage 3 block, in render order; each includes adding its output into the mix.
-const PARTS: [&str; 6] = ["engine: lanes + FX + reverb + drum kit + click + limiter", "lead x8", "pad x12", "piano x12", "organ x8", "bass"];
+const PARTS: [&str; 6] = ["engine: lanes + FX + reverb + input sends + drum kit + click + limiter", "lead x8", "pad x12", "piano x12", "organ x8", "bass"];
 
 /// The Stage 3 acceptance load, the worst a session can ask of the built-in sound at once:
 ///
 /// - the engine as the Stage 2 bar runs it (five lanes, one overdubbing, the click), with every effect
 ///   on every lane: the filter at Q 6 with its cutoff ramping all the time (a new 20 ms ramp every 14
 ///   blocks: per-frame coefficients), the pitch at +7, the stutter at 1/16, the delay at 1/8 and full
-///   feedback (0.95), the reverb send at 1, so the one reverb bus is busy; and the drum kit selected
+///   feedback (0.95), the reverb send at 1, so the one reverb bus is busy; both input sends on at
+///   their heaviest (the echo at feedback 0.95, both levels 1) on the live input; and the drum kit selected
 ///   with its 16 voices re-hit every 30 blocks (40 ms, the pedal hat's ring), so every voice sounds;
 /// - beside the engine, the other five synths sounding at once, which the engine never asks for (notes
 ///   reach only the selected instrument; the others only ring out): the four poly synths with every
@@ -186,6 +235,7 @@ impl Stage3 {
                 rig.set(Command::SetFxBypass(lane, kind, false));
             }
         }
+        input_sends_on(&mut rig);
         rig.set(Command::SelectInstrument(NoteTarget::Builtin(Instrument::Drums)));
         let engine_frame = rig.frame;
         let mut engine_input = [0.0f32; BLOCK];

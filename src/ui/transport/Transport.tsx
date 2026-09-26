@@ -5,6 +5,7 @@ import { laterTakeBars } from '../state/engine-store';
 import { anyTrackIn, createTwoStepConfirm, masterBars } from '../looper/shared';
 import { meterFrac, registerInputMeter, registerPhaseDial, unregisterInputMeter, unregisterPhaseDial } from '../looper/waveform';
 import { autoRecordThreshold } from '../../audio/looper/auto-record';
+import { InputFx } from './InputFx';
 import './transport.css';
 
 /**
@@ -12,13 +13,13 @@ import './transport.css';
  * flex items of the `.cmd` header in app.tsx — the internal `.grow` spacer then pushes master + the
  * app.tsx tool icons to the far right. Left→right: BPM group (34px numeral + steppers + beat dots) ·
  * CLICK / FIXED-N / AUTO / TAP / END STOP toggles · loop ring-dial readout · ■/▶ ALL + ✕ ALL (two-step) + MIC LIVE ·
- * spacer · master mute + slider + value. EXPORT / IMPORT are icon tools in app.tsx's `.tools`
+ * IN FX (engine mode only: `InputFx.tsx`) · spacer · master mute + slider + value. EXPORT / IMPORT are icon tools in app.tsx's `.tools`
  * cluster (`SessionTools.tsx`).
  *
  * The ALL / MIC / loop-readout / master controls live here alone — this command-bar cluster is their
  * single home (the looper zone has no head row).
  */
-export function Transport() {
+export function Transport(props: { returnFocus?: (el: HTMLElement | undefined) => void }) {
   const anyStopping = createMemo(() =>
     Array.from({ length: looper.trackCount }, (_, i) => looper.track(i)().stopAt !== null).some(Boolean),
   );
@@ -415,7 +416,7 @@ export function Transport() {
         </div>
       </div>
 
-      {/* Global transport: ■/▶ ALL · ✕ ALL (two-step) · MIC LIVE. */}
+      {/* Global transport: ■/▶ ALL · ✕ ALL (two-step) · MIC LIVE · IN FX (the input sends, engine mode). */}
       <div class="transport__global">
         <button
           class="transport__tgl"
@@ -468,6 +469,7 @@ export function Transport() {
         >
           {looper.inputArmed() ? '● MIC LIVE' : 'MIC'}
         </button>
+        <InputFx returnFocus={props.returnFocus} />
       </div>
 
       {/* flexible spacer — pushes master + the app.tsx tool icons to the far right */}

@@ -12,12 +12,14 @@ import {
   type EngineEvent,
   type FeedFrame,
   type FxParamId,
+  type InputSendId,
+  type InputSendParamId,
   type LoadHeader,
   type LaneInfo,
   type LaneState,
 } from '../../platform';
 import type { PeakView, TrackState } from '../../audio/looper/looper';
-import { FX_META, FX_PARAM_DEFS, validateFxStates, type FxState } from '../../audio/fx/metadata';
+import { FX_META, FX_PARAM_DEFS, validateFxStates, type FxParamDef, type FxState } from '../../audio/fx/metadata';
 import type { SessionSource } from '../../audio/export/session-source';
 import type { StemSnapshot } from '../../audio/export/stem-archive';
 import type { LoadSessionPayload } from '../../audio/looper/session';
@@ -38,7 +40,8 @@ import { notifyError, notifyInfo } from '../../notify';
  *
  * The engine owns the musical state: lanes, the transport (master, BPM and its lock), the beat and the
  * selection arrive on the feed, and nothing here predicts them. It does not echo settings, so this store
- * keeps them (lane volume, mute and FX, the take modes, click, master): it sends each change, mirrors the
+ * keeps them (lane volume, mute and FX, the take modes, click, master, the input sends): it sends each
+ * change, mirrors the
  * engine's CLEAR (`Cleared`: the lane's mix resets) and COPY (`Copied`), and on a `reset` frame takes the
  * settings the engine remembers, so the screen shows what the engine plays. `engineSession` is the
  * engine as export, recovery and import see it: the engine's PCM with this store's mix.
@@ -141,6 +144,70 @@ const [metronome, setMetronomeSignal] = createSignal(false);
 const [clickVolume, setClickVolumeSignal] = createSignal(readStoredNumber(CLICK_KEY, 0.7, 0, 1));
 const [masterVolume, setMasterVolumeSignal] = createSignal(readStoredNumber(MASTER_KEY, 1, 0, 1));
 const [masterMuted, setMasterMutedSignal] = createSignal(false);
+
+// ── The input sends (ECHO, REVERB on the live input): a rig setting, not a session's, so kept in
+// localStorage like the master and click levels, restored at boot and sent to an engine that lacks them ─
+
+/** An input send param's range and default (Rust `InputSendParam::range`); the echo's time is an index
+ * into the lane delay's divisions. */
+export interface InputSendParamDef extends FxParamDef {
+  key: InputSendParamId;
+  send: InputSendId;
+}
+
+const DELAY_TIME = FX_PARAM_DEFS.delay[0];
+const INPUT_SEND_PARAMS: readonly InputSendParamDef[] = [
+  { ...DELAY_TIME, key: 'echoTime', send: 'echo', label: 'Time' },
+  { key: 'echoFeedback', send: 'echo', label: 'Fbk', min: 0, max: 0.95, step: 0.01, default: 0.4 },
+  { key: 'echoLevel', send: 'echo', label: 'Level', min: 0, max: 1, step: 0.01, default: 0.5 },
+  { key: 'reverbLevel', send: 'reverb', label: 'Level', min: 0, max: 1, step: 0.01, default: 0.5 },
+];
+const INPUT_SENDS: readonly InputSendId[] = ['echo', 'reverb'];
+const inputSendKey = (id: string) => `lf.inputSend.${id}`;
+
+const inputSendOn = Object.fromEntries(
+  INPUT_SENDS.map((id) => [id, createSignal(readStoredNumber(inputSendKey(id), 0, 0, 1) === 1)]),
+) as Record<InputSendId, ReturnType<typeof createSignal<boolean>>>;
+const inputSendValues = Object.fromEntries(
+  INPUT_SEND_PARAMS.map((d) => [d.key, createSignal(readStoredNumber(inputSendKey(d.key), d.default, d.min, d.max))]),
+) as Record<InputSendParamId, ReturnType<typeof createSignal<number>>>;
+
+function adoptInputSend(id: InputSendId, on: boolean): void {
+  inputSendOn[id][1](on);
+  writeStoredNumber(inputSendKey(id), on ? 1 : 0);
+}
+
+/** The value `key` takes: clamped to its range, a division rounded to its index. */
+function inputSendValue(key: InputSendParamId, value: number): number | null {
+  const def = INPUT_SEND_PARAMS.find((d) => d.key === key);
+  if (!def || !Number.isFinite(value)) return null;
+  const bounded = Math.max(def.min, Math.min(def.max, value));
+  return def.integer ? Math.round(bounded) : bounded;
+}
+
+function adoptInputSendParam(key: InputSendParamId, value: number): void {
+  const applied = inputSendValue(key, value);
+  if (applied === null) return;
+  inputSendValues[key][1](applied);
+  writeStoredNumber(inputSendKey(key), applied);
+}
+
+/** Engine mode's input sends, for the command bar's IN FX control (the web path has none). */
+export const engineInputSends = {
+  params: INPUT_SEND_PARAMS,
+  on: (id: InputSendId): boolean => inputSendOn[id][0](),
+  setOn: (id: InputSendId, on: boolean): void => {
+    adoptInputSend(id, on);
+    sendEngine({ SetInputSend: [id, on] });
+  },
+  value: (key: InputSendParamId): number => inputSendValues[key][0](),
+  setValue: (key: InputSendParamId, value: number): void => {
+    adoptInputSendParam(key, value);
+    sendEngine({ SetInputSendParam: [key, inputSendValues[key][0]()] });
+  },
+  /** Some send is on: the IN FX control reads engaged. */
+  anyOn: (): boolean => INPUT_SENDS.some((id) => inputSendOn[id][0]()),
+};
 
 function defaultFx(): FxState[] {
   return FX_META.map((m) => ({
@@ -473,7 +540,7 @@ function setMutePlain(lane: number, on: boolean): void {
  * A reset frame: take over the settings the engine remembers (one missing from `settings` is at the
  * engine's default, which is the UI's) instead of pushing the UI's, so a WebView reload keeps a
  * playing session's mix and modes. The UI still sends what it persists and the engine lacks (the master
- * and click volumes on a first launch) and what it owns: the note target, the slot gains and the live
+ * and click volumes and the input sends on a first launch) and what it owns: the note target, the slot gains and the live
  * slot (`engineResync`).
  */
 function adoptSettings(settings: readonly EngineCommand[]): void {
@@ -488,6 +555,7 @@ function adoptSettings(settings: readonly EngineCommand[]): void {
   for (let i = 0; i < ENGINE_LANES; i++) clearLaneMix(i);
   let masterKnown = false;
   let clickKnown = false;
+  const sendsKnown = new Set<string>();
   for (const c of settings) {
     if (typeof c === 'string') continue;
     if ('SetMasterVolume' in c) {
@@ -498,6 +566,12 @@ function adoptSettings(settings: readonly EngineCommand[]): void {
       clickKnown = true;
       setClickVolumeSignal(c.SetClickVolume);
       writeStoredNumber(CLICK_KEY, c.SetClickVolume);
+    } else if ('SetInputSend' in c) {
+      sendsKnown.add(c.SetInputSend[0]);
+      adoptInputSend(c.SetInputSend[0], c.SetInputSend[1]);
+    } else if ('SetInputSendParam' in c) {
+      sendsKnown.add(c.SetInputSendParam[0]);
+      adoptInputSendParam(c.SetInputSendParam[0], c.SetInputSendParam[1]);
     } else if ('SetMasterMute' in c) setMasterMutedSignal(c.SetMasterMute);
     else if ('SetMetronome' in c) setMetronomeSignal(c.SetMetronome);
     else if ('SetLoopEndStop' in c) setLoopEndStopSignal(c.SetLoopEndStop);
@@ -524,6 +598,13 @@ function adoptSettings(settings: readonly EngineCommand[]): void {
   const lacking: EngineCommand[] = [];
   if (!masterKnown) lacking.push({ SetMasterVolume: masterVolume() });
   if (!clickKnown) lacking.push({ SetClickVolume: clickVolume() });
+  // The input sends the engine lacks: values first, so a send that comes on comes on with them.
+  for (const d of INPUT_SEND_PARAMS) {
+    if (!sendsKnown.has(d.key)) lacking.push({ SetInputSendParam: [d.key, inputSendValues[d.key][0]()] });
+  }
+  for (const id of INPUT_SENDS) {
+    if (!sendsKnown.has(id)) lacking.push({ SetInputSend: [id, inputSendOn[id][0]()] });
+  }
   sendEngine(...lacking);
   engineResync();
 }

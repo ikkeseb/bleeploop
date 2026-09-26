@@ -248,7 +248,7 @@ export function App() {
           </span>
         </Show>
 
-        <Transport />
+        <Transport returnFocus={(el) => transportKeys?.returnFocus(el)} />
 
         <div class="tools">
           <SessionTools />

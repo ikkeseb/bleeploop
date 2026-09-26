@@ -101,6 +101,8 @@ pub struct Rig {
     pub bus: Vec<f32>,
     pub bus_right: Vec<f32>,
     pub monitor: Vec<f32>,
+    /// The record tap over the same frames (`Taps::record`).
+    pub record: Vec<f32>,
     gap_next: bool,
     in_buf: Vec<f32>,
     left: Vec<f32>,
@@ -151,6 +153,7 @@ impl Rig {
             bus: Vec::new(),
             bus_right: Vec::new(),
             monitor: Vec::new(),
+            record: Vec::new(),
             gap_next: false,
             in_buf: vec![0.0; 4096],
             left: vec![0.0; 4096],
@@ -173,6 +176,7 @@ impl Rig {
         self.bus.clear();
         self.bus_right.clear();
         self.monitor.clear();
+        self.record.clear();
     }
 
     /// The next rendered block starts after an input gap (an xrun).
@@ -276,6 +280,7 @@ impl Rig {
             self.bus.extend_from_slice(taps.bus[0]);
             self.bus_right.extend_from_slice(taps.bus[1]);
             self.monitor.extend_from_slice(taps.monitor);
+            self.record.extend_from_slice(taps.record);
         }
         self.frame += n as Frame;
         while let Ok(e) = self.handle.events.pop() {

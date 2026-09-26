@@ -15,6 +15,7 @@
 //! | [`autorec`] | the AUTO REC onset detector | `looper/auto-record.ts` |
 //! | [`engine`] | the callback: rings, the block split, the bus topology, master volume | `engine.ts`, `master.ts` |
 //! | [`effects`] | each lane's FX chain, the shared reverb bus, their grid, CLEAR and COPY on a lane's FX | `fx/fx.ts`, `looper/{playback,machine}.ts` |
+//! | [`input_fx`] | the input sends: ECHO and REVERB on the wet signal, wet only, into the record tap and the monitor | — (engine only) |
 //! | [`instruments`] | the six built-in instruments, the selected one, the wheels, their record path | `synths/index.ts`, `input-router.ts` |
 //! | [`overview`] | what the UI draws, for a reader off the audio thread: the grid anchor, each lane's buffer, orientation and frames, each buffer's waveform peaks | `looper/peaks.ts` |
 //! | [`session`] | saving and loading a session: a snapshot copied out a budget per frame, a load swapped into an empty looper, the host's port | `looper/session.ts`, `export/*` |
@@ -32,15 +33,16 @@
 //!   position `(f - anchor) mod master` at frame `f`. A take starts `align_frames` (+ the live effect
 //!   slot's latency, from the block after its live flag changes, and the master limiter's pre-delay)
 //!   after its downbeat; an instrument's record path lags it by the input side (a plugin instrument's,
-//!   less its own latency), so its notes land there too. There is no user-facing record trim. The
-//!   synths, FX and reverb run on the device frame less the frames the device skipped, so their blocks
-//!   follow each other ([`effects`]); the limiter stays on the device frame.
+//!   less its own latency), so its notes land there too. The input sends are wet only and add nothing
+//!   to the alignment. There is no user-facing record trim. The synths, FX, input sends and reverbs run
+//!   on the device frame less the frames the device skipped, so their blocks follow each other
+//!   ([`effects`]); the limiter stays on the device frame.
 //! - **Every state change lands on its exact frame.** `process` splits a block wherever a command, a
 //!   scheduled looper event, a beat, an AUTO trigger or a render quantum's end falls, so the same
 //!   commands render bit-identical output at any block size (the golden jam, the gesture property tests,
 //!   `tests/sound.rs` and `tests/slots.rs` assert it). A note sounds one quantum after its frame ([`instruments::LEAD`]);
-//!   a wheel or an FX change sounds from the next 128-frame quantum boundary, as a live Web Audio call
-//!   with no look-ahead does.
+//!   a wheel or an FX change (a lane's or an input send's) sounds from the next 128-frame quantum
+//!   boundary, as a live Web Audio call with no look-ahead does.
 //! - **`process` never allocates, locks or waits.** Buffers are allocated (and their pages touched) in
 //!   `Engine::new`; commands and events cross on rtrb rings; a full event ring drops and counts.
 //! - **No loop-sized work in one callback.** Tiling, the undo copy, a discarded layer's restore, COPY
@@ -48,8 +50,9 @@
 //!   rendered frame, started where a read or write head touches next so they stay ahead of it (a lane a
 //!   multiply extends reads through its old loop instead until the extension is done). A command that
 //!   needs a lane's job finished waits for it (on an exact frame), and every command sent after it waits
-//!   behind it, except the instruments' and the plugin slots' (a note never waits on the looper). A full
-//!   command table leaves the rest in the ring for the next block: late, never dropped.
+//!   behind it, except the instruments', the plugin slots' and the input sends' (a note never waits on
+//!   the looper). A full command table leaves the rest in the ring for the next block: late, never
+//!   dropped.
 //! - **A command is judged when it is pressed**: one that would do nothing then is dropped, never held.
 //! - **The engine never drops a plugin unit** (a drop frees memory and calls into the plugin's DLL).
 //!   Units enter and leave through their slot's [`SlotPort`], at a block start (at once while no device
@@ -70,8 +73,9 @@
 //! before their FX (a bypassed chain is not bit-transparent, as in Tone); `tests/sound.rs` holds the
 //! wired sound. `tests/slots.rs` holds the plugin slots, with fake units that record what they saw in
 //! preallocated buffers (never allocating in `process`) and are handed back to the test to drop;
-//! `tests/punch_out.rs` holds the punch-out, `tests/multiply.rs` the multiply. `tests/perf.rs` holds the
-//! ignored cost bars (Stage 2 and 3) and the Stage 3 load's alloc check.
+//! `tests/punch_out.rs` holds the punch-out, `tests/multiply.rs` the multiply, `tests/input_fx.rs` the
+//! input sends. `tests/perf.rs` holds the ignored cost bars (Stage 2 and 3, the input sends, a multiply's
+//! burst) and the Stage 3 load's alloc check.
 //!
 //! # Beside this crate, and not built yet
 //!
@@ -89,6 +93,7 @@ pub mod dsp;
 pub mod effects;
 pub mod engine;
 pub mod grid;
+pub mod input_fx;
 pub mod instruments;
 pub mod looper;
 pub mod overview;

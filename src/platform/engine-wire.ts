@@ -7,7 +7,8 @@
  * Serde's external tagging with the Rust variant names (`src-tauri/crates/lf-engine/src/api.rs`): a
  * unit variant is its name (`"PlayAll"`), a newtype `{"RecDub":0}`, a tuple `{"SetVolume":[0,0.8]}`, a
  * struct variant an object with camelCase fields. `FxParam`/`FxKind` travel as the TS keys
- * (`src/audio/fx/metadata.ts`), an `Instrument` as its id, a `Frame` (i64) as a JSON number.
+ * (`src/audio/fx/metadata.ts`), an `InputSend`/`InputSendParam` as its key (`api.rs`), an `Instrument`
+ * as its id, a `Frame` (i64) as a JSON number.
  *
  * Commands go out as the typed values below (Tauri serialises them). Everything that comes back passes
  * a decoder that throws on a variant or a field it does not know how to read, so a drift between the
@@ -35,6 +36,9 @@ export type InstrumentId = 'lead' | 'pad' | 'piano' | 'organ' | 'bass' | 'drum';
 export type FxKindId = 'filter' | 'pitch' | 'stutter' | 'delay' | 'reverb';
 export type FxParamId = 'cutoff' | 'q' | 'semitones' | 'rate' | 'time' | 'feedback' | 'mix' | 'amount';
 export type NoteTarget = { Builtin: InstrumentId } | { Slot: number };
+/** The input sends (Rust `lf_engine::InputSend`, `InputSendParam`): ECHO and REVERB on the live input. */
+export type InputSendId = 'echo' | 'reverb';
+export type InputSendParamId = 'echoTime' | 'echoFeedback' | 'echoLevel' | 'reverbLevel';
 export type AudioBackend = 'Wasapi' | 'Asio';
 
 const LANE_STATES: readonly LaneState[] = ['Empty', 'Recording', 'Overdubbing', 'Playing', 'Stopped'];
@@ -52,6 +56,8 @@ const ACTIONS: readonly EngineAction[] = ['RecDub', 'PlayStop', 'Undo', 'Clear',
 const INSTRUMENTS: readonly InstrumentId[] = ['lead', 'pad', 'piano', 'organ', 'bass', 'drum'];
 const FX_KINDS: readonly FxKindId[] = ['filter', 'pitch', 'stutter', 'delay', 'reverb'];
 const FX_PARAMS: readonly FxParamId[] = ['cutoff', 'q', 'semitones', 'rate', 'time', 'feedback', 'mix', 'amount'];
+const INPUT_SENDS: readonly InputSendId[] = ['echo', 'reverb'];
+const INPUT_SEND_PARAMS: readonly InputSendParamId[] = ['echoTime', 'echoFeedback', 'echoLevel', 'reverbLevel'];
 const BACKENDS: readonly AudioBackend[] = ['Wasapi', 'Asio'];
 
 /** Lanes and plugin slots (`lf_engine::TRACK_COUNT`, `SLOT_COUNT`). */
@@ -95,7 +101,9 @@ export type EngineCommand =
   | { PitchBend: number }
   | { Modulation: number }
   | { SetSlotLive: [number, boolean] }
-  | { SetSlotGain: [number, number] };
+  | { SetSlotGain: [number, number] }
+  | { SetInputSend: [InputSendId, boolean] }
+  | { SetInputSendParam: [InputSendParamId, number] };
 
 /** Rust `engine_io::DeviceRequest`: what `engine_open` opens (or switches to). */
 export interface DeviceRequest {
@@ -497,6 +505,18 @@ export function decodeCommand(raw: unknown): EngineCommand {
         const [s, v] = pair('(slot, gain)');
         slot(s, 'SetSlotGain.slot');
         num(v, 'SetSlotGain.gain');
+        break;
+      }
+      case 'SetInputSend': {
+        const [s, v] = pair('(send, on)');
+        oneOf(s, INPUT_SENDS, 'SetInputSend.send');
+        bool(v, 'SetInputSend.on');
+        break;
+      }
+      case 'SetInputSendParam': {
+        const [k, v] = pair('(param, value)');
+        oneOf(k, INPUT_SEND_PARAMS, 'SetInputSendParam.param');
+        num(v, 'SetInputSendParam.value');
         break;
       }
       default:

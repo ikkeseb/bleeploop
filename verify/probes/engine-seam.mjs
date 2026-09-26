@@ -9,13 +9,15 @@
  *   `src/main.tsx` loads the app with the constructors hidden);
  * - gesture → command: BPM +, CLICK, the lane core (its pointerdown selects), Space (the engine's
  *   hands-free `Action`), a lane volume, MIC (an empty slot goes live), a PC key (NoteOn, NoteOff), the
- *   FIXED stepper over a committed loop (a bar at a time up to the loop, whole loops past it: F14);
+ *   FIXED stepper over a committed loop (a bar at a time up to the loop, whole loops past it: F14), IN FX
+ *   (the input sends: ECHO on, its level and division, kept in localStorage; the pill reads engaged);
  * - frame → DOM: a count-in (ARMED, the numeral, the beat LED, the BPM lock), a beat LED shown when the
  *   beat is heard (its frame and the output latency against the clock anchor), a live take, a committed
  *   loop (PLAYING, the loop readout, a moving ring dial from the clock anchor), the record meter, a
  *   refusal on its lane, the selection, a COPY carrying the lane's volume, a lane's mix kept when it only
  *   goes EMPTY and reset by `Cleared`, a multiply take's record head sweeping its window (the canvas),
- *   and a reload's reset frame whose remembered settings are adopted.
+ *   and a reload's reset frame whose remembered settings are adopted (the input sends it lacks are sent
+ *   from what the UI kept).
  *
  * Cannot see the native engine, the Rust mirror of the wire, Tauri IPC or any timing: the fake answers
  * no command by itself, so every state the DOM shows here was scripted.
@@ -207,11 +209,40 @@ await probe(async ({ open }) => {
   assert.ok(on.NoteOn[1] > 0 && on.NoteOn[1] <= 1, 'velocity is 0..1');
   assert.deepEqual(played.at(-1), { NoteOff: on.NoteOn[0] }, 'its release sends NoteOff');
 
+  // ── IN FX: the input sends, a rig setting the UI keeps ────────────────────────────────────────────
+  const infx = page.getByRole('button', { name: 'Input effects' });
+  const engaged = () => infx.evaluate((el) => el.classList.contains('is-on'));
+  const dialog = page.getByRole('dialog', { name: 'Input effects' });
+  assert.equal(await engaged(), false, 'IN FX starts off');
+  await infx.click();
+  await dialog.waitFor();
+  await clearSent();
+  await page.getByRole('button', { name: 'Input echo' }).click();
+  assert.deepEqual(await sentAtLeast(1), [{ SetInputSend: ['echo', true] }], 'ECHO sends SetInputSend');
+  assert.equal(await engaged(), true, 'IN FX reads engaged while a send is on');
+  await clearSent();
+  await page.getByRole('slider', { name: 'Echo level' }).fill('0.8');
+  assert.deepEqual(await sentAtLeast(1), [{ SetInputSendParam: ['echoLevel', 0.8] }], 'the level slider sends its value');
+  await clearSent();
+  await page.getByRole('combobox', { name: 'Echo time' }).selectOption({ label: '1/16' });
+  assert.deepEqual(await sentAtLeast(1), [{ SetInputSendParam: ['echoTime', 3] }], 'the division sends its index');
+  const kept = await page.evaluate(() => [localStorage.getItem('lf.inputSend.echo'), localStorage.getItem('lf.inputSend.echoLevel')]);
+  assert.deepEqual(kept, ['1', '0.8'], 'kept for the next launch');
+  await page.keyboard.press('Escape');
+  await dialog.waitFor({ state: 'detached' });
+  assert.equal(await page.evaluate(() => document.activeElement?.getAttribute('aria-label')), 'Input effects', 'Escape returns focus to IN FX');
+
   // ── A WebView reload: the reset frame carries what the engine remembers, and the UI adopts it ─────
   await clearSent();
   await emit({
     reset: true,
-    settings: [{ SetMasterVolume: 0.6 }, { SetMetronome: true }, { SetVolume: [0, 0.5] }, { SetFxBypass: [0, 'filter', false] }],
+    settings: [
+      { SetMasterVolume: 0.6 },
+      { SetInputSend: ['echo', false] },
+      { SetMetronome: true },
+      { SetVolume: [0, 0.5] },
+      { SetFxBypass: [0, 'filter', false] },
+    ],
     events: [laneEvent(0, committed), transport(BAR, true, 120), { Selected: { frame: BAR, lane: 0 } }],
     anchor: { frame: BAR, atMs: Date.now(), rate: RATE, grid: 0 },
     meter: { peak: 0, clip: false },
@@ -223,6 +254,10 @@ await probe(async ({ open }) => {
   assert.equal(await page.getByRole('slider', { name: 'Master volume' }).inputValue(), '60', "the engine's master volume is adopted");
   assert.ok(!adopted.some((c) => c.SetVolume || c.SetMasterVolume !== undefined || c.SetMetronome !== undefined), 'adopted settings are not pushed back');
   assert.ok(adopted.some((c) => c.SetClickVolume === 0.7), 'the persisted click volume the engine lacks is sent');
+  assert.equal(await engaged(), false, "the engine's echo (off) is adopted");
+  assert.ok(!adopted.some((c) => c.SetInputSend?.[0] === 'echo'), 'the adopted send is not pushed back');
+  assert.ok(adopted.some((c) => JSON.stringify(c) === JSON.stringify({ SetInputSendParam: ['echoLevel', 0.8] })), 'the kept echo level the engine lacks is sent');
+  assert.equal(await page.evaluate(() => localStorage.getItem('lf.inputSend.echo')), '0', "the engine's echo is kept");
 
   // ── FIXED past the loop (F14 multiply): a bar at a time up to the loop, whole loops above it ─────
   await emit({ events: [laneEvent(0, lane('Playing', { length: 2 * BAR, canReverse: true })), transport(2 * BAR, true, 120)] });

@@ -39,7 +39,11 @@
     { "Modulation": 0.5 },
     "AllNotesOff",
     { "SetSlotLive": [0, true] },
-    { "SetSlotGain": [1, 0.5] }
+    { "SetSlotGain": [1, 0.5] },
+    { "SetInputSend": ["echo", true] },
+    { "SetInputSend": ["reverb", false] },
+    { "SetInputSendParam": ["echoTime", 2] },
+    { "SetInputSendParam": ["reverbLevel", 0.35] }
   ],
   "events": [
     {
