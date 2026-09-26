@@ -11,7 +11,9 @@ import assert from 'node:assert/strict';
 import { probe } from '../harness/probe.ts';
 
 await probe(async ({ open }) => {
-  const { page } = await open({ noLf: true });
+  // After the app booted (`__lf`): it loads its modules after the page (`src/main.tsx`), and their own
+  // workers must not count as the encoder's.
+  const { page } = await open();
   const result = await page.evaluate(async () => {
     const { encodeRecovery } = await import('/src/audio/export/recovery-encode.ts');
     const { parseZip } = await import('/src/audio/export/unzip.ts');

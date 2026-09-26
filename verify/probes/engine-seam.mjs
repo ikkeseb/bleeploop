@@ -4,8 +4,8 @@
  * probe then drives the real UI and scripts the feed through `__lf.native`:
  *
  * - boot: the saved device opens once (WASAPI in the browser, the saved buffer), the kept settings go
- *   out (master level, click, the note target), and the web engine's AudioContext is never built (Tone's
- *   import-time default context is, idle, in engine mode too);
+ *   out (master level, click, the note target), and no AudioContext is ever built (Tone's import-time
+ *   default context included: `src/main.tsx` loads the app with the constructors hidden);
  * - gesture → command: BPM +, CLICK, the lane core (its pointerdown selects), Space (the engine's
  *   hands-free `Action`), a lane volume, MIC (an empty slot goes live), a PC key (NoteOn, NoteOff);
  * - frame → DOM: a count-in (ARMED, the numeral, the beat LED, the BPM lock), a live take, a committed
@@ -191,11 +191,11 @@ await probe(async ({ open }) => {
   assert.ok(on.NoteOn[1] > 0 && on.NoteOn[1] <= 1, 'velocity is 0..1');
   assert.deepEqual(played.at(-1), { NoteOff: on.NoteOn[0] }, 'its release sends NoteOff');
 
-  // Engine mode never builds the web audio path. Tone's index builds its default context when the module
-  // loads (`var Transport = getContext().transport`), in engine mode too: at most that one exists, idle.
+  // Engine mode never builds the web audio path, nor Tone's default context (`src/main.tsx`).
   const contexts = await page.evaluate(() => window.__audioContexts);
   for (const stack of contexts) console.log(stack);
   assert.equal(await page.evaluate(() => window.__lf.engine._ctx), undefined, "the web engine's AudioContext was never built");
-  assert.ok(contexts.length <= 1, "no AudioContext beyond Tone's import-time default");
+  assert.equal(contexts.length, 0, 'no AudioContext was constructed');
+  assert.equal(await page.evaluate(() => typeof window.AudioContext), 'function', 'the constructor is back after the app loaded');
   assert.deepEqual(consoleErrors, [], 'no console errors');
 });
