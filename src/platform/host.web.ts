@@ -12,6 +12,7 @@ import type {
 } from './host';
 import {
   decodeFeedFrame,
+  encodeSessionBytes,
   type DeviceRequest,
   type DeviceStatus,
   type EngineCommand,
@@ -216,6 +217,12 @@ export interface EngineFake extends EngineHost {
   readonly sent: EngineCommand[];
   /** Every request `open()` received. */
   readonly opened: DeviceRequest[];
+  /** What `snapshot()` answers (a probe sets it; null answers an empty engine). */
+  snapshotBytes: ArrayBuffer | null;
+  /** Every session `loadSession()` received. */
+  readonly loadedSessions: Uint8Array[];
+  /** Every Share endpoint `setShare()` received. */
+  readonly shares: (string | null)[];
   /**
    * Decode `raw` as a feed frame (the real decoder) and hand it to the subscribers, as the native feed
    * would. Only probes call it, through `__lf.native`.
@@ -247,6 +254,9 @@ export const webEngineFake: EngineFake = {
   },
   sent: [],
   opened: [],
+  snapshotBytes: null,
+  loadedSessions: [],
+  shares: [],
   async mode() {
     return engineForced();
   },
@@ -280,8 +290,17 @@ export const webEngineFake: EngineFake = {
     if (!engineForced()) throw new Error(NO_ENGINE);
     webEngineFake.sent.push(...commands);
   },
-  async setShare() {
+  async setShare(endpoint) {
     if (!engineForced()) throw new Error(NO_ENGINE);
+    webEngineFake.shares.push(endpoint);
+  },
+  async snapshot() {
+    if (!engineForced()) throw new Error(NO_ENGINE);
+    return webEngineFake.snapshotBytes?.slice(0) ?? encodeSessionBytes({ rate: 48000, masterLengthFrames: 0, bpm: 120, tracks: [] }, []).buffer;
+  },
+  async loadSession(bytes) {
+    if (!engineForced()) throw new Error(NO_ENGINE);
+    webEngineFake.loadedSessions.push(bytes.slice());
   },
   subscribe(onFrame) {
     engineSubscribers.add(onFrame);

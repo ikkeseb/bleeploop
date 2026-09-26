@@ -183,6 +183,14 @@ const tauriEngineHost: EngineHost = {
   async setShare(endpoint) {
     await invoke('engine_set_share', { endpoint });
   },
+  // The session moves as raw bytes both ways: a JSON number array of a minute of five lanes would be
+  // tens of megabytes of text.
+  snapshot() {
+    return invoke<ArrayBuffer>('engine_snapshot');
+  },
+  async loadSession(bytes) {
+    await invoke('engine_load_session', bytes);
+  },
   subscribe(onFrame) {
     const channel = new Channel<unknown>();
     let live = true;

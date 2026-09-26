@@ -31,6 +31,8 @@ export interface AudioDeviceSettings {
   /** Prefer the ASIO low-latency tier (vs WASAPI-shared). Default true; ignored
    * unless the native build offers ASIO and a device is present. Applies on the next arm. */
   asioEnabled: boolean;
+  /** Engine mode's Share output: the cpal output id the master is mirrored to; '' = off. */
+  shareDeviceId: string;
 }
 
 const DEFAULTS: AudioDeviceSettings = {
@@ -39,6 +41,7 @@ const DEFAULTS: AudioDeviceSettings = {
   outputDeviceId: '',
   bufferFrames: DEFAULT_BUFFER_FRAMES,
   asioEnabled: true,
+  shareDeviceId: '',
 };
 
 /** Read the persisted device settings, falling back to defaults for any missing/invalid field. */
@@ -55,6 +58,7 @@ export function readAudioDeviceSettings(): AudioDeviceSettings {
         ? (p.bufferFrames as BufferFrames)
         : DEFAULT_BUFFER_FRAMES,
       asioEnabled: typeof p.asioEnabled === 'boolean' ? p.asioEnabled : true,
+      shareDeviceId: typeof p.shareDeviceId === 'string' ? p.shareDeviceId : '',
     };
   } catch {
     return { ...DEFAULTS };

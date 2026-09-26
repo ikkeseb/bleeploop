@@ -1,6 +1,8 @@
 import { batch, createSignal, type Accessor } from 'solid-js';
 import {
   ENGINE_LANES,
+  decodeSnapshot,
+  encodeSessionBytes,
   platform,
   sendEngine,
   type DeviceEvent,
@@ -10,15 +12,19 @@ import {
   type EngineEvent,
   type FeedFrame,
   type FxParamId,
+  type LoadHeader,
   type LaneInfo,
   type LaneState,
 } from '../../platform';
 import type { PeakView, TrackState } from '../../audio/looper/looper';
-import { FX_META, FX_PARAM_DEFS, type FxState } from '../../audio/fx/metadata';
+import { FX_META, FX_PARAM_DEFS, validateFxStates, type FxState } from '../../audio/fx/metadata';
+import type { SessionSource } from '../../audio/export/session-source';
+import type { StemSnapshot } from '../../audio/export/stem-archive';
+import type { LoadSessionPayload } from '../../audio/looper/session';
 import { AUTO_RECORD_DEFAULT_SENSITIVITY } from '../../audio/looper/auto-record';
 import { averageInterval, framesPerBar, maxWholeBars } from '../../audio/quantize';
 import { readStoredNumber, writeStoredNumber } from '../../audio/persist';
-import { readAudioDeviceSettings } from '../../audio/audio-settings';
+import { readAudioDeviceSettings, writeAudioDeviceSettings } from '../../audio/audio-settings';
 import { usingAsio } from '../../audio/audio-devices';
 import { engineResync } from '../../audio/instrument';
 import { engineInputLive, toggleEngineInput } from '../../audio/native-io';
@@ -34,7 +40,8 @@ import { notifyError, notifyInfo } from '../../notify';
  * selection arrive on the feed, and nothing here predicts them. It does not echo settings, so this store
  * keeps them (lane volume, mute and FX, the take modes, click, master): it sends each change, mirrors a
  * lane going back to EMPTY (its mix resets, as the engine's CLEAR does) and a COPY (`Copied`), and sends
- * all of them again on a `reset` frame, so the engine plays what the screen shows.
+ * all of them again on a `reset` frame, so the engine plays what the screen shows. `engineSession` is the
+ * engine as export, recovery and import see it: the engine's PCM with this store's mix.
  *
  * Invariant 6: a frame writes a Solid signal only when its value changed; the waveform rAF reads the
  * plain mirror (`plain`) and extrapolates the playhead from the feed's clock anchor.
@@ -295,6 +302,7 @@ function applyDeviceEvent(ev: DeviceEvent): void {
     case 'ShareLost':
       console.error(`[engine] share output lost: ${ev.reason}`);
       notifyError('Share output stopped', ev.reason);
+      forgetShare();
       break;
     case 'EngineFaulted':
       console.error('[engine] the engine faulted and was replaced');
@@ -303,11 +311,20 @@ function applyDeviceEvent(ev: DeviceEvent): void {
   }
 }
 
+const deviceWaiters: ((status: DeviceStatus) => void)[] = [];
+
 function setDevice(status: DeviceStatus | null): void {
   // No device: the playhead holds where it is until the next anchor arrives.
   if (!status) plain.clock = { ...plain.clock, frame: renderedFrame(), atMs: Date.now(), rate: 0 };
   plain.heardLag = status ? Math.max(0, status.alignFrames - status.inputFrames) : 0;
   setDeviceSignal(status);
+  if (status) for (const resolve of deviceWaiters.splice(0)) resolve(status);
+}
+
+/** Resolves once a device runs (at once when one does). */
+export function whenDevice(): Promise<DeviceStatus> {
+  const running = device();
+  return running ? Promise.resolve(running) : new Promise((resolve) => deviceWaiters.push(resolve));
 }
 
 function applyPeaks(lane: number, start: number, count: number, min: readonly number[], max: readonly number[]): void {
@@ -554,6 +571,92 @@ export const engineLooper = {
   },
 };
 
+// ── Session: export, recovery and import (`src/audio/export/session-source.ts`) ─────────────────────
+
+const FROM_SNAPSHOT = { Playing: 'PLAYING', Stopped: 'STOPPED', Overdubbing: 'OVERDUBBING' } as const;
+const TO_LOAD = { PLAYING: 'Playing', STOPPED: 'Stopped' } as const;
+
+/** The committed lanes: the engine's PCM (play order) with this store's mix. */
+async function exportSnapshot(): Promise<StemSnapshot> {
+  const { header, pcm } = decodeSnapshot(await platform.engine.snapshot());
+  return {
+    sampleRate: header.rate,
+    masterLengthFrames: header.masterLengthFrames,
+    tracks: header.tracks.map((t, k) => ({
+      index: t.index,
+      pcm: pcm[k],
+      volume: volumes[t.index][0](),
+      muted: mutes[t.index][0](),
+      reversed: t.reversed,
+      fx: fx[t.index].map((s) => ({ bypassed: s.bypassed, params: { ...s.params } })),
+      state: FROM_SNAPSHOT[t.state],
+    })),
+  };
+}
+
+/**
+ * Load a session into an all-empty engine: the loops go to the engine (which sets and locks the tempo
+ * and starts the PLAYING lanes together), then their mix to the engine and this store. Checks what the
+ * web looper's `loadSession` checks before sending anything; the engine checks again.
+ */
+async function loadSession(payload: LoadSessionPayload): Promise<void> {
+  const rate = device()?.sampleRate;
+  if (!rate) throw new Error('loadSession: no audio device is open');
+  const { bpm, bars, masterLengthFrames: master, tracks } = payload;
+  if (!plain.state.every((s) => s === 'EMPTY')) {
+    throw new Error('loadSession: import never overwrites a session; clear all tracks first');
+  }
+  if (!Array.isArray(tracks) || tracks.length < 1) throw new Error('loadSession: payload has no tracks');
+  if (!Number.isInteger(bpm) || bpm < 40 || bpm > 300) throw new Error(`loadSession: bpm must be an integer in 40..300, got ${bpm}`);
+  if (!Number.isInteger(bars) || bars < 1) throw new Error(`loadSession: bars must be a positive integer, got ${bars}`);
+  const expected = bars * framesPerBar(bpm, rate);
+  if (master !== expected) throw new Error(`loadSession: BPM, bars and masterLengthFrames disagree (expected ${expected}, got ${master})`);
+  const seen = new Set<number>();
+  const loaded = tracks.map((t) => {
+    if (!Number.isInteger(t.index) || t.index < 0 || t.index >= ENGINE_LANES) throw new Error(`loadSession: track index ${t.index} out of range`);
+    if (seen.has(t.index)) throw new Error(`loadSession: duplicate track index ${t.index}`);
+    seen.add(t.index);
+    if (t.pcm.length !== master) throw new Error(`loadSession: track ${t.index + 1} pcm is ${t.pcm.length} frames, expected ${master}`);
+    const state = t.state ?? 'PLAYING';
+    if (state !== 'PLAYING' && state !== 'STOPPED') throw new Error(`loadSession: track ${t.index + 1} state must be PLAYING or STOPPED`);
+    return { ...t, state, fx: validateFxStates(t.fx, `loadSession: track ${t.index + 1}`) };
+  });
+  const header: LoadHeader = {
+    bpm,
+    bars,
+    masterLengthFrames: master,
+    tracks: loaded.map((t) => ({ index: t.index, frames: master, reversed: t.reversed, state: TO_LOAD[t.state] })),
+  };
+  await platform.engine.loadSession(encodeSessionBytes(header, loaded.map((t) => t.pcm)));
+  for (const t of loaded) {
+    volumes[t.index][1](Math.max(0, Math.min(1.5, t.volume)));
+    setMutePlain(t.index, t.muted);
+    fx[t.index] = t.fx;
+    fxVersions[t.index][1]((v) => v + 1);
+    sendEngine(...laneCommands(t.index));
+  }
+}
+
+/** The engine as export, recovery and import read and write it. */
+export const engineSession: SessionSource = {
+  trackCount: ENGINE_LANES,
+  stateOf: (i) => plain.state[i] ?? 'EMPTY',
+  trackInfo: (i) => lanes[i][0](),
+  peaksInto,
+  trackVolume: (i) => volumes[i][0](),
+  trackMuted: (i) => mutes[i][0](),
+  fxState: (i) => {
+    fxVersions[i][0]();
+    return fx[i];
+  },
+  masterFramesValue: () => plain.master,
+  exportSnapshot,
+  loadSession,
+  bpm,
+  sampleRate: () => engineSampleRate(),
+  masterLevel: () => (masterMuted() ? 0 : masterVolume()),
+};
+
 // ── clock and master ──────────────────────────────────────────────────────────────────────────────
 
 const clampBpm = (n: number) => Math.max(40, Math.min(300, Math.round(n)));
@@ -667,6 +770,34 @@ export function openEngineDevice(): Promise<DeviceStatus | null> {
   });
   openTail = run;
   return run;
+}
+
+// Share output: the master mirrored to a Windows render device while the engine runs on ASIO. The pick
+// is saved and sent again at each launch; a lost endpoint forgets it.
+const [share, setShareSignal] = createSignal(readAudioDeviceSettings().shareDeviceId);
+
+/** Share output's endpoint ('' = off). */
+export const engineShare = share;
+
+function forgetShare(): void {
+  setShareSignal('');
+  writeAudioDeviceSettings({ shareDeviceId: '' });
+}
+
+/** Mirror the master to `id` ('' = off), and keep the pick for the next launch. */
+export function setEngineShare(id: string): Promise<void> {
+  setShareSignal(id);
+  writeAudioDeviceSettings({ shareDeviceId: id });
+  return platform.engine.setShare(id || null).catch((err: unknown) => {
+    forgetShare();
+    console.error('[engine] share output failed', err);
+    notifyError("Couldn't start Share output", err);
+  });
+}
+
+/** Send the saved Share pick to the engine (boot, once a device runs). */
+export function restoreEngineShare(): void {
+  if (share()) void setEngineShare(share());
 }
 
 /** Switch the capture channel without reopening the device ('' = auto). */

@@ -5,7 +5,8 @@
 // localStorage shim installed before the first call is enough to exercise it. Run: node verify/guards/audio-settings.mjs
 //
 // Covers readAudioDeviceSettings's field-by-field validation + DEFAULTS fallback (missing key, corrupt
-// JSON, out-of-range / wrong-typed bufferFrames, non-string device ids, non-boolean asioEnabled) and
+// JSON, out-of-range / wrong-typed bufferFrames, non-string device ids (Share output's included),
+// non-boolean asioEnabled) and
 // writeAudioDeviceSettings's partial-merge + best-effort (swallow-throw) contract. These validators run on
 // every launch and are easy to silently break; they had zero coverage before this guard.
 
@@ -42,6 +43,7 @@ const DEFAULTS = {
   outputDeviceId: '',
   bufferFrames: DEFAULT_BUFFER_FRAMES,
   asioEnabled: true,
+  shareDeviceId: '',
 };
 
 let passed = 0;
@@ -83,6 +85,7 @@ const full = {
   outputDeviceId: 'out-9',
   bufferFrames: 128,
   asioEnabled: false,
+  shareDeviceId: 'share-3',
 };
 store.set(KEY, JSON.stringify(full));
 check('valid full object preserved', () => assert.deepStrictEqual(readAudioDeviceSettings(), full));
@@ -106,12 +109,13 @@ for (const bad of [999, 0, -64, 100, 'abc', null, 1.5, NaN, [], {}]) {
 // 4. Device ids: non-string -> ''.  asioEnabled: non-boolean -> true (default); false preserved.
 // ---------------------------------------------------------------------------
 reset();
-store.set(KEY, JSON.stringify({ inputDeviceId: 42, inputChannel: {}, outputDeviceId: true }));
+store.set(KEY, JSON.stringify({ inputDeviceId: 42, inputChannel: {}, outputDeviceId: true, shareDeviceId: 7 }));
 check('non-string device ids -> empty strings', () => {
   const s = readAudioDeviceSettings();
   assert.strictEqual(s.inputDeviceId, '');
   assert.strictEqual(s.inputChannel, '');
   assert.strictEqual(s.outputDeviceId, '');
+  assert.strictEqual(s.shareDeviceId, '');
 });
 reset();
 store.set(KEY, JSON.stringify({ asioEnabled: 'yes' }));

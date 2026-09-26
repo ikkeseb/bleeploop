@@ -2,14 +2,16 @@ import { looper as webLooper } from '../../audio/looper/looper';
 import { clock as webClock } from '../../audio/clock';
 import { master as webMaster } from '../../audio/master';
 import { engine } from '../../audio/engine';
+import { webSession, type SessionSource } from '../../audio/export/session-source';
 import { engineMode } from '../../platform';
-import { engineClock, engineLooper, engineMaster, engineSampleRate } from './engine-store';
+import { engineClock, engineLooper, engineMaster, engineSampleRate, engineSession } from './engine-store';
 
 /**
  * OWNS: which audio implementation the UI talks to — the web modules or engine mode's store
  * (`engine-store.ts`), picked per access by `engineMode()`, which is settled before the app renders and
  * never changes while it runs. Components import `looper`, `clock`, `master` and `sampleRate` from
- * here; `__lf`, the verify ports and the web-only paths (export, import, recovery) keep the web modules.
+ * here, and hand `session` to export, import and recovery; `__lf` and the verify ports keep the web
+ * modules.
  */
 
 export type { PeakView, TrackState } from '../../audio/looper/looper';
@@ -95,6 +97,7 @@ function byMode<T extends object>(web: T, native: T): T {
 export const looper: LooperView = byMode<LooperView>(webLooper, engineLooper);
 export const clock: ClockView = byMode<ClockView>(webClock, engineClock);
 export const master: MasterView = byMode<MasterView>(webMaster, engineMaster);
+export const session: SessionSource = byMode<SessionSource>(webSession, engineSession);
 
 /** The audio clock's rate: the engine's device in engine mode, else the AudioContext's. */
 export function sampleRate(): number {

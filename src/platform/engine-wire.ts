@@ -507,3 +507,96 @@ export function decodeDeviceRequest(raw: unknown): DeviceRequest {
     buffer: nullable(o.buffer, (v) => int(v, 'DeviceRequest.buffer', 1)),
   };
 }
+
+// ── Session bytes (`engine_snapshot` / `engine_load_session`) ───────────────────────────────────────
+//
+// `[u32 LE headerLen][headerLen bytes of UTF-8 JSON][f32 LE mono PCM per header track, in header order]`,
+// no padding; each block holds `frames` samples. The PCM is in PLAY order (what is heard from loop
+// position 0, as the web looper stores it); `reversed` says the lane plays its recording backwards.
+// PCM moves as whole typed-array copies in the platform's byte order: little-endian on every target.
+
+/** One lane in a snapshot: committed lanes only. */
+export interface SnapshotTrack {
+  index: number;
+  frames: number;
+  reversed: boolean;
+  state: 'Playing' | 'Stopped' | 'Overdubbing';
+}
+
+/** `engine_snapshot`'s header. */
+export interface SnapshotHeader {
+  rate: number;
+  masterLengthFrames: number;
+  bpm: number;
+  tracks: SnapshotTrack[];
+}
+
+/** `engine_load_session`'s header: into an all-empty engine at the device's rate. */
+export interface LoadHeader {
+  bpm: number;
+  bars: number;
+  masterLengthFrames: number;
+  tracks: { index: number; frames: number; reversed: boolean; state: 'Playing' | 'Stopped' }[];
+}
+
+/** Pack a header and its PCM blocks (one per header track, in order). */
+export function encodeSessionBytes(header: LoadHeader | SnapshotHeader, pcm: readonly Float32Array[]): Uint8Array<ArrayBuffer> {
+  if (pcm.length !== header.tracks.length) fail('one PCM block per header track', { tracks: header.tracks.length, blocks: pcm.length });
+  const json = new TextEncoder().encode(JSON.stringify(header));
+  const samples = pcm.reduce((n, block, k) => {
+    if (block.length !== header.tracks[k].frames) fail(`track ${header.tracks[k].index}'s block holds ${block.length} samples`, header.tracks[k].frames);
+    return n + block.length;
+  }, 0);
+  const bytes = new Uint8Array(4 + json.length + samples * 4);
+  const view = new DataView(bytes.buffer);
+  view.setUint32(0, json.length, true);
+  bytes.set(json, 4);
+  let at = 4 + json.length;
+  for (const block of pcm) {
+    bytes.set(new Uint8Array(block.buffer, block.byteOffset, block.byteLength), at);
+    at += block.byteLength;
+  }
+  return bytes;
+}
+
+/** Split session bytes into their JSON header and one PCM block per header track. */
+export function splitSessionBytes(buffer: ArrayBuffer): { header: unknown; pcm: Float32Array[] } {
+  const view = new DataView(buffer);
+  if (buffer.byteLength < 4) fail('session bytes too short for a header length', buffer.byteLength);
+  const headerLen = view.getUint32(0, true);
+  if (4 + headerLen > buffer.byteLength) fail('session header runs past the bytes', { headerLen, bytes: buffer.byteLength });
+  const header: unknown = JSON.parse(new TextDecoder().decode(new Uint8Array(buffer, 4, headerLen)));
+  const tracks = array(obj(header, 'session header').tracks, 'session header.tracks');
+  const pcm: Float32Array[] = [];
+  let at = 4 + headerLen;
+  for (const t of tracks) {
+    const frames = int(obj(t, 'session track').frames, 'session track.frames');
+    if (at + frames * 4 > buffer.byteLength) fail('session PCM runs past the bytes', { at, frames, bytes: buffer.byteLength });
+    pcm.push(new Float32Array(buffer.slice(at, at + frames * 4)));
+    at += frames * 4;
+  }
+  if (at !== buffer.byteLength) fail('session bytes carry more than their header lists', { end: at, bytes: buffer.byteLength });
+  return { header, pcm };
+}
+
+/** Read `engine_snapshot`'s bytes. */
+export function decodeSnapshot(buffer: ArrayBuffer): { header: SnapshotHeader; pcm: Float32Array[] } {
+  const { header, pcm } = splitSessionBytes(buffer);
+  const o = obj(header, 'snapshot header');
+  const master = int(o.masterLengthFrames, 'snapshot.masterLengthFrames');
+  const tracks = array(o.tracks, 'snapshot.tracks').map((raw): SnapshotTrack => {
+    const t = obj(raw, 'snapshot track');
+    const track: SnapshotTrack = {
+      index: lane(t.index, 'snapshot track.index'),
+      frames: int(t.frames, 'snapshot track.frames'),
+      reversed: bool(t.reversed, 'snapshot track.reversed'),
+      state: oneOf(t.state, ['Playing', 'Stopped', 'Overdubbing'] as const, 'snapshot track.state'),
+    };
+    if (track.frames !== master) fail(`snapshot track ${track.index} is not one master long`, track.frames);
+    return track;
+  });
+  return {
+    header: { rate: int(o.rate, 'snapshot.rate', 1), masterLengthFrames: master, bpm: int(o.bpm, 'snapshot.bpm', 1), tracks },
+    pcm,
+  };
+}

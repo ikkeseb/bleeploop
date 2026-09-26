@@ -9,7 +9,9 @@ import { notifyError } from '../notify';
 import { engineMode, platform, registerPluginBufferSink, releasePluginBuffer } from '../platform';
 import { CONFIRM_WINDOW_MS } from '../ui/looper/shared';
 import { refusalText, refuseOnLane } from '../ui/looper/gates';
-import { onEngineEvent, openEngineDevice, startEngineStore } from '../ui/state/engine-store';
+import { onEngineEvent, openEngineDevice, restoreEngineShare, startEngineStore, whenDevice } from '../ui/state/engine-store';
+import { session } from '../ui/state/audio';
+import { autosave } from '../audio/autosave';
 
 /**
  * Native plugin-host boot chain (Tauri/WebView2 only — `available` is false in the browser build, so
@@ -77,10 +79,18 @@ export function bootPluginHost(): () => void {
  * Engine mode's boot chain: subscribe to the engine's feed (which sends the saved settings), put an
  * engine refusal on its lane, start the ASIO driver when it is the saved choice, open the saved device,
  * then the plugin host as in the web chain, minus the SharedBuffer bridge and the Web Audio context.
- * The plugin host activates plugins at the device's rate. Returns the dispose fn.
+ * The plugin host activates plugins at the device's rate. Local recovery starts once a device runs
+ * (its restore needs an engine at the device's rate). Returns the dispose fn.
  */
 function bootEngine(): () => void {
   const stopFeed = startEngineStore();
+  let stopAutosave: (() => void) | null = null;
+  let disposed = false;
+  void whenDevice().then(() => {
+    if (disposed) return;
+    restoreEngineShare();
+    stopAutosave = autosave.start(session);
+  });
   const stopRefusals = onEngineEvent((ev) => {
     if (ev.type !== 'Refused') return;
     refuseOnLane(ev.lane, refusalText(ev.reason), ev.reason === 'ConfirmClear' ? CONFIRM_WINDOW_MS : undefined);
@@ -106,6 +116,8 @@ function bootEngine(): () => void {
     }
   })();
   return () => {
+    disposed = true;
+    stopAutosave?.();
     stopFeed();
     stopRefusals();
   };

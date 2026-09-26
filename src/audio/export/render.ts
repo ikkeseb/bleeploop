@@ -10,7 +10,7 @@
 // Warm-up passes are derived from the enabled delay/reverb tails and the FINAL period is kept: the
 // retained slice is steady-state and loops like live playback even when the FX tail spans several
 // short loop periods. Inherited constraint: enabled PitchShift latency is reproduced as heard.
-import { Gain, OfflineContext } from 'tone';
+import { Gain, OfflineContext, getContext, setContext } from 'tone';
 import { makeMasterLimiter } from '../engine';
 import { FxChain, makeReverbBus } from '../fx/fx';
 import type { ExportSnapshot } from '../looper/state';
@@ -30,7 +30,9 @@ export interface WetMaster {
  * one loop retains one phase of that longer pattern, rather than its complete three-bar cycle.
  *
  * Every export node receives its own context explicitly. Async reverb preparation and failures
- * cannot change the live Tone context, so playing and building live nodes remain independent.
+ * cannot change the live Tone context, so playing and building live nodes remain independent. Tone
+ * still builds its shared noise buffer (the reverb's) on its global context: engine mode loads Tone
+ * with none (`src/main.tsx`), so there the offline context stands in as the global while it renders.
  */
 export async function renderWetMaster(
   snap: ExportSnapshot,
@@ -45,6 +47,11 @@ export async function renderWetMaster(
 
   const offline = new OfflineContext(2, duration, sr);
   const cleanup: (() => void)[] = [];
+  const global = getContext();
+  if (typeof (global.rawContext as { createBuffer?: unknown }).createBuffer !== 'function') {
+    setContext(offline);
+    cleanup.push(() => setContext(global));
+  }
   try {
     offline.transport.bpm.value = bpm;
     const raw = offline.rawContext;

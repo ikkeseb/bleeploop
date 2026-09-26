@@ -13,7 +13,7 @@ import { SplitStack, type StackPanel } from './ui/layout/SplitStack';
 import { Toasts } from './ui/toast/Toasts';
 import * as layoutStore from './ui/layout/layout-store';
 import { engineMode, installFrontendLogPipe, platform } from './platform';
-import { master } from './ui/state/audio';
+import { master, session } from './ui/state/audio';
 import { bootPluginHost } from './app/boot';
 import { installCloseGuard } from './app/close-guard';
 import { installCmdFit } from './app/cmd-fit';
@@ -65,8 +65,8 @@ export function App() {
     // First: pipe console.error + uncaught errors into the native log, so even a plugin-host init
     // failure below is captured in a release build (no visible WebView2 console otherwise).
     installFrontendLogPipe();
-    // Recovery saves the web looper; engine mode has none yet (`src/app/close-guard.ts`).
-    if (!engineMode()) onCleanup(autosave.start());
+    // Local recovery of the jam. Engine mode starts it once its device runs (`src/app/boot.ts`).
+    if (!engineMode()) onCleanup(autosave.start(session));
     setCrossOriginIsolated(self.crossOriginIsolated === true);
     // Keyboard transport (the named actions of `src/app/actions.ts`, plus 1–5) + the Escape popover
     // close + the pointer-blur discipline: `src/app/transport-keys.ts`. Window-level, so it never
@@ -81,8 +81,7 @@ export function App() {
     });
     onCleanup(transportKeys.dispose);
     // Close guard + local recovery (native confirm / web beforeunload): `src/app/close-guard.ts`.
-    // Engine mode keeps no recovery yet (Stage 5: session and recovery follow the guitar path).
-    onCleanup(installCloseGuard({ recovery: !engineMode() }));
+    onCleanup(installCloseGuard());
     // Sync masterGain to the persisted master volume (no-op at unity default; restores a saved level
     // on reload). Creates the AudioContext suspended — matches the engine's lazy pattern. In engine mode
     // it sends the level to the engine instead.

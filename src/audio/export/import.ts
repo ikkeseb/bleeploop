@@ -12,11 +12,11 @@
 //
 // The session.json schema + validateSession live in the PURE session-schema.ts (no engine/looper/Web
 // Audio) so verify/guards/import.mjs can import the validator under Node. This coordinator is the
-// browser-only half, so it imports engine/looper STATICALLY (they're statically imported app-wide
-// anyway — a lazy import() here bought nothing but two INEFFECTIVE_DYNAMIC_IMPORT build warnings).
-import { engine } from '../engine';
-import { looper } from '../looper/looper';
+// browser-only half, so it imports the web looper STATICALLY, through session-source.ts (it is statically
+// imported app-wide anyway — a lazy import() here bought nothing but two INEFFECTIVE_DYNAMIC_IMPORT
+// build warnings).
 import { MAX_LOOP_SECONDS, TRACK_COUNT } from '../looper/state';
+import { webSession, type SessionSource } from './session-source';
 import { validateSession } from './session-schema.ts';
 import { parseZip } from './unzip.ts';
 import { decodeWav } from './wav.ts';
@@ -39,11 +39,11 @@ export function maxImportArchiveBytes(sampleRate: number): number {
  * and hand the payload to looper.loadSession — which restores PLAYING tracks on one shared grid anchor
  * while preserving STOPPED tracks without starting sources. Throws a descriptive Error on any problem
  * (the UI catches + notifies; nothing is mutated unless every stem validated). Browser-only: this is
- * the path that touches engine/looper.
+ * the path that touches engine/looper. `source` is the looper to load into (`session-source.ts`).
  */
-export async function importSession(bytes: Uint8Array | ArrayBuffer): Promise<void> {
+export async function importSession(bytes: Uint8Array | ArrayBuffer, source: SessionSource = webSession): Promise<void> {
   const u8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
-  const limit = maxImportArchiveBytes(engine.ctx.sampleRate);
+  const limit = maxImportArchiveBytes(source.sampleRate());
   if (u8.byteLength > limit) {
     throw new Error(`archive is ${u8.byteLength} bytes; maximum is ${limit}`);
   }
@@ -72,7 +72,7 @@ export async function importSession(bytes: Uint8Array | ArrayBuffer): Promise<vo
   }
   const session = validateSession(parsed);
 
-  const engineRate = engine.ctx.sampleRate;
+  const engineRate = source.sampleRate();
   if (session.sampleRate !== engineRate) {
     // Deliberate v0 constraint: no resampling (see the header comment).
     throw new Error(
@@ -105,7 +105,7 @@ export async function importSession(bytes: Uint8Array | ArrayBuffer): Promise<vo
     };
   });
 
-  await looper.loadSession({
+  await source.loadSession({
     bpm: session.bpm,
     bars: session.bars,
     masterLengthFrames: session.masterLengthFrames,

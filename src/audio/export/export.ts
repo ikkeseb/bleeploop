@@ -7,9 +7,8 @@
 // Boundary-clean (no @tauri-apps/* import, no src/platform/ seam) so it builds and verifies on the Mac
 // half; the actual file-drop behavior under WebView2 is a PC gate.
 import { notifyError } from '../../notify';
-import { looper } from '../looper/looper';
-import { master } from '../master';
 import { renderWetMaster } from './render';
+import { webSession, type SessionSource } from './session-source';
 import { encodeWav, mixMono } from './wav';
 import { makeZip } from './zip';
 import { prepareStemArchive, exportBase } from './stem-archive';
@@ -50,41 +49,40 @@ export interface BuildExportOptions {
  * beats a lost take. Returns null when nothing is committed; a normal all-STOPPED export still
  * includes a silent master alongside real stems.
  * A wet export requires a finished take so its snapshot cannot contain an unfinished layer.
- * Recovery snapshots pass `includeMaster:false` and remain available during capture.
+ * Recovery snapshots pass `includeMaster:false` and remain available during capture. `source` is the
+ * looper to read (`session-source.ts`: the web looper, or engine mode's store). On the engine the wet
+ * master is still this Web Audio render of the stems and their FX (an OfflineAudioContext opens no
+ * device), so its FX may sound unlike the engine's own.
  */
 export async function buildExportBundle(
   meta: { bpm: number; bars: number },
   options: BuildExportOptions = {},
+  source: SessionSource = webSession,
 ): Promise<{ zipBytes: Uint8Array<ArrayBuffer>; base: string } | null> {
   if (options.includeMaster !== false) {
-    for (let i = 0; i < looper.trackCount; i++) {
-      const state = looper.stateOf(i);
+    for (let i = 0; i < source.trackCount; i++) {
+      const state = source.stateOf(i);
       if (state === 'RECORDING' || state === 'OVERDUBBING') {
         throw new Error('Finish the active recording before exporting');
       }
     }
   }
-  const snap = looper.exportSnapshot();
+  // Each track carries the state it had as its PCM was read (the web looper reads both in one tick,
+  // the engine in one snapshot), so they can't disagree. STOPPED tracks still export their raw stem but
+  // are EXCLUDED from the master mix, so the exported master is exactly the audible mix. All-STOPPED is
+  // allowed (masterTracks empty ⇒ silent master alongside real stems — nothing is lost).
+  const snap = await source.exportSnapshot();
   if (snap.masterLengthFrames <= 0 || snap.tracks.length === 0) return null; // button should already guard this
   const base = exportBase();
   const sr = snap.sampleRate;
-
-  // Per-track live state, read synchronously with the snapshot (both are plain engineState reads on the
-  // same tick, before any await, so they can't disagree). STOPPED tracks still export their raw stem but
-  // are EXCLUDED from the master mix, so the exported master is exactly the audible mix. All-STOPPED is
-  // allowed (masterTracks empty ⇒ silent master alongside real stems — nothing is lost).
-  const withState = snap.tracks.map((t) => ({ t, state: looper.stateOf(t.index) }));
-  const { entries, session } = prepareStemArchive(
-    { ...snap, tracks: withState.map(({ t, state }) => ({ ...t, state })) },
-    meta, base, options.stemFormat ?? 'float32',
-  );
+  const { entries, session } = prepareStemArchive(snap, meta, base, options.stemFormat ?? 'float32');
 
   if (options.includeMaster !== false) {
     // v1 wet master; v0 dry mixdown as the fallback so one render bug can't lose the whole export.
     // Both mix ONLY audible tracks (STOPPED excluded) so the master == what you hear. Recovery
     // snapshots skip this whole branch: their job is preserving editable stems, not rendering a mix.
-    const masterTracks = withState.filter((x) => x.state !== 'STOPPED').map((x) => x.t);
-    const masterLevel = master.muted() ? 0 : master.volume();
+    const masterTracks = snap.tracks.filter((t) => t.state !== 'STOPPED');
+    const masterLevel = source.masterLevel();
     let masterChannels: Float32Array[];
     let masterKind: 'wet-v1' | 'dry-fallback';
     try {
@@ -119,8 +117,11 @@ export async function buildExportBundle(
 /** Export = build the bundle + drop it as ONE .zip download (one file, one gesture — see header).
  * Returns the archive's filename so the caller can name it to the user, or null when nothing was
  * exported. The download is handed to the WebView; where it lands is the WebView's call. */
-export async function exportLoops(meta: { bpm: number; bars: number }): Promise<string | null> {
-  const bundle = await buildExportBundle(meta);
+export async function exportLoops(
+  meta: { bpm: number; bars: number },
+  source: SessionSource = webSession,
+): Promise<string | null> {
+  const bundle = await buildExportBundle(meta, {}, source);
   if (!bundle) return null; // nothing committed — button should already guard this
   const filename = `${bundle.base}.zip`;
   download(bundle.zipBytes, filename, 'application/zip');

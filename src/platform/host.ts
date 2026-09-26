@@ -334,8 +334,13 @@ export interface EngineHost {
   /** A batch of commands, applied in order at the next block. Fire-and-forget: engine refusals come
    * back on the feed; a rejection means the batch never reached the engine. */
   send(commands: readonly EngineCommand[]): Promise<void>;
-  /** Share output's endpoint (a WASAPI render id), or null for off. */
+  /** Share output's endpoint (a WASAPI render id, as `listOutputDevices` lists them), or null for off.
+   * The mirror runs while the device is ASIO. */
   setShare(endpoint: string | null): Promise<void>;
+  /** The committed lanes' PCM and what they are (`engine-wire.ts` § Session bytes). */
+  snapshot(): Promise<ArrayBuffer>;
+  /** Load a session into an all-empty engine (`engine-wire.ts` § Session bytes). */
+  loadSession(bytes: Uint8Array<ArrayBuffer>): Promise<void>;
   /** Subscribe to the feed (~60 frames/s while something changes); the first frame has `reset`.
    * Returns the unsubscribe. */
   subscribe(onFrame: (frame: FeedFrame) => void): () => void;

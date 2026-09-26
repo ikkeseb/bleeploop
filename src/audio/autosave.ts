@@ -1,10 +1,9 @@
 import { notifyError } from '../notify';
-import { clock } from './clock';
-import { engine } from './engine';
 import { encodeRecovery } from './export/recovery-encode';
 import { exportBase } from './export/stem-archive';
 import { importSession } from './export/import';
-import { looper, type PeakView } from './looper/looper';
+import { webSession, type SessionSource } from './export/session-source';
+import type { PeakView } from './looper/looper';
 import { framesPerBar } from './quantize';
 
 const DB_NAME = 'bleeploop';
@@ -26,7 +25,7 @@ interface JamFingerprint {
   stable: boolean;
 }
 
-const peakViews: PeakView[] = Array.from({ length: looper.trackCount }, () => ({
+const peakViews: PeakView[] = Array.from({ length: webSession.trackCount }, () => ({
   min: null,
   max: null,
   count: 0,
@@ -37,6 +36,10 @@ let database: Promise<IDBDatabase> | null = null;
 let operation: Promise<void> = Promise.resolve();
 let readyPromise: Promise<void> = Promise.resolve();
 let stopActive: (() => void) | null = null;
+/** The looper the recovery reads and restores into (`start` sets it: the web looper, or the engine's). */
+let source: SessionSource = webSession;
+/** Whether `start` ever ran: before it, `flush` must not replace a recovery nothing has tried to restore. */
+let started = false;
 /** Preserve the last valid archive while live state still matches a failed restore's rollback. */
 let failedRestoreFingerprint = '';
 
@@ -117,19 +120,19 @@ function serialized<T>(task: () => Promise<T>): Promise<T> {
 
 /** Cheap metadata-only dirty check. PCM is copied only inside persistCurrent(). */
 function inspectJam(): JamFingerprint {
-  const parts = [String(looper.masterFramesValue())];
-  let blank = looper.masterFramesValue() === 0;
+  const parts = [String(source.masterFramesValue())];
+  let blank = source.masterFramesValue() === 0;
   let stable = true;
 
-  for (let i = 0; i < looper.trackCount; i++) {
-    const state = looper.stateOf(i);
-    const info = looper.trackInfo(i);
-    const peaks = looper.peaksInto(i, peakViews[i]);
+  for (let i = 0; i < source.trackCount; i++) {
+    const state = source.stateOf(i);
+    const info = source.trackInfo(i);
+    const peaks = source.peaksInto(i, peakViews[i]);
     if (state !== 'EMPTY') blank = false;
     if (state === 'RECORDING' || state === 'OVERDUBBING') stable = false;
     parts.push(
-      `${i}:${state}:${info.lengthFrames}:${peaks.version}:${looper.trackVolume(i)}:${Number(looper.trackMuted(i))}:` +
-        JSON.stringify(looper.fxState(i)),
+      `${i}:${state}:${info.lengthFrames}:${peaks.version}:${source.trackVolume(i)}:${Number(source.trackMuted(i))}:` +
+        JSON.stringify(source.fxState(i)),
     );
   }
 
@@ -143,33 +146,27 @@ async function persistCurrent(snapshot = inspectJam()): Promise<void> {
     failedRestoreFingerprint = '';
     return;
   }
-  const bpm = clock.bpm();
-  const masterFrames = looper.masterFramesValue();
+  // The tempo is locked while loops exist, so reading it beside the snapshot is safe.
+  const bpm = source.bpm();
   // "Nothing committed" is decided BEFORE the grid is validated. A first take in flight is RECORDING, so
   // the fingerprint is not blank, yet no loop is committed and the master grid is still 0 frames — the
   // whole-bar check below would reject that as a save failure and the close guard would warn about losing
   // loops that never existed. No committed audio means there is nothing to save and no grid to validate.
-  const committed = looper.exportSnapshot();
+  const committed = await source.exportSnapshot();
   if (committed.tracks.length === 0) {
     await writeLatest(null);
     failedRestoreFingerprint = '';
     return;
   }
-  const perBar = framesPerBar(bpm, engine.ctx.sampleRate);
+  const masterFrames = committed.masterLengthFrames;
+  const perBar = framesPerBar(bpm, committed.sampleRate);
   const bars = masterFrames / perBar;
   if (!Number.isInteger(bars) || bars < 1) {
     throw new Error(`Current loop grid is not whole bars (${masterFrames} frames at ${bpm} BPM)`);
   }
-  // Capture metadata beside the PCM copies before yielding to the worker. The serialized save
+  // The snapshot holds copies of the PCM with each lane's state as it was read. The serialized save
   // queue keeps a slow encode/write from overtaking a newer save or CLEAR ALL.
-  const bytes = await encodeRecovery({
-    snapshot: {
-      ...committed,
-      tracks: committed.tracks.map((t) => ({ ...t, state: looper.stateOf(t.index) })),
-    },
-    meta: { bpm, bars },
-    base: exportBase(),
-  });
+  const bytes = await encodeRecovery({ snapshot: committed, meta: { bpm, bars }, base: exportBase() });
   await writeLatest(bytes);
   failedRestoreFingerprint = '';
 }
@@ -181,7 +178,7 @@ async function restoreLatestImpl(): Promise<boolean> {
       failedRestoreFingerprint = '';
       return false;
     }
-    await importSession(saved.bytes);
+    await importSession(saved.bytes, source);
     failedRestoreFingerprint = '';
     console.info(`[autosave] restored local recovery from ${new Date(saved.savedAt).toISOString()}`);
     return true;
@@ -199,8 +196,12 @@ function reportFailure(message: string, error: unknown): void {
   notifyError(message, error);
 }
 
-function start(): () => void {
+/** Start recovery for `from` (default the web looper): restore the saved jam, then save on each quiet
+ * change. Returns the stop. */
+function start(from: SessionSource = webSession): () => void {
   if (stopActive) return stopActive;
+  source = from;
+  started = true;
   let stopped = false;
   let timer: ReturnType<typeof setInterval> | null = null;
   let observed = '';
@@ -271,8 +272,11 @@ function start(): () => void {
   return stopActive;
 }
 
-/** Force the latest coherent committed state to disk, including deletion after CLEAR ALL. */
+/** Force the latest coherent committed state to disk, including deletion after CLEAR ALL. A no-op before
+ * `start`: an empty looper that never tried the restore must not delete the saved jam (engine mode starts
+ * recovery only once its device runs). */
 async function flush(): Promise<void> {
+  if (!started) return;
   await readyPromise;
   await serialized(() => persistCurrent());
 }

@@ -32,7 +32,7 @@ import {
 } from '../../audio/audio-settings';
 import { offsetMs, RECORD_TRIM_MAX_MS, setOffsetMs } from '../../audio/record-latency';
 import { sampleRate } from '../state/audio';
-import { engineDevice, openEngineDevice, setEngineInputChannel } from '../state/engine-store';
+import { engineDevice, engineShare, openEngineDevice, setEngineInputChannel, setEngineShare } from '../state/engine-store';
 import './audio-settings.css';
 
 /**
@@ -44,8 +44,9 @@ import './audio-settings.css';
  * local signals mirror it). The sample-rate row is a disabled placeholder for increment C2.
  *
  * The engine row writes the engine-mode toggle for the next launch. In engine mode a device, buffer or
- * driver pick reopens the engine's device at once, a channel pick switches it in place, and the rows
- * that belong to the web path (rec align, the bridge readout) are gone.
+ * driver pick reopens the engine's device at once, a channel pick switches it in place, the share row
+ * picks Share output's device, and the rows that belong to the web path (rec align, the bridge readout)
+ * are gone.
  */
 
 /** Processing-block duration, not an input-to-output latency estimate. */
@@ -240,6 +241,33 @@ export function AudioSettings() {
       </div>
       <Show when={!engineMode() && anyMonitorArmed()}>
         <div class="audio-settings__hint" role="note">Loops and synths move now; the plugin monitor on the next GO LIVE.</div>
+      </Show>
+
+      {/* Share output (engine mode): the master mirrored to a Windows device for OBS, a browser or a call,
+          while the engine runs on ASIO. A device that goes away turns it off with a toast. */}
+      <Show when={engineMode()}>
+        <div class="audio-settings__row" title="Mirror the master to another Windows device while ASIO runs">
+          <span class="audio-settings__label">share</span>
+          <select
+            class="audio-settings__select"
+            value={engineShare()}
+            onChange={(e) => {
+              const select = e.currentTarget;
+              void setEngineShare(select.value).then(() => {
+                select.value = engineShare();
+              });
+            }}
+            aria-label="Share output device"
+          >
+            <option value="">Off</option>
+            <For each={outputDevices()}>
+              {(d) => <option value={d.id} selected={d.id === engineShare()}>{d.name}</option>}
+            </For>
+          </select>
+        </div>
+        <div class="audio-settings__hint audio-settings__hint--info" role="note">
+          Mirrors the master to that device while ASIO runs. On WASAPI, capture BleepLoop's own output instead.
+        </div>
       </Show>
       <Show when={usingAsio()}>
         <div class="audio-settings__hint audio-settings__hint--info" role="note">ASIO drives both input and output. Turn ASIO off to pick Windows devices.</div>
