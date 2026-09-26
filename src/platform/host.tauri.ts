@@ -1,9 +1,10 @@
-import { invoke } from '@tauri-apps/api/core';
+import { Channel, invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type {
   AsioStatusReport,
   AudioInputDevice,
   AudioOutputDevice,
+  EngineHost,
   Platform,
   PluginDescriptor,
   PluginHost,
@@ -12,6 +13,7 @@ import type {
   PluginSlot,
 } from './host';
 import { webPlatform } from './host.web';
+import { decodeDeviceStatus, decodeFeedFrame } from './engine-wire';
 // notify.ts is a ROOT-level module (src/notify.ts), NOT under ../audio or ../ui, so importing it from
 // a platform/ file is boundary-clean: check-boundary.mjs's leak regex only flags ../audio/ + ../ui/
 // imports. It's the one user-visible error surface, imported here so a native transport failure below
@@ -151,13 +153,71 @@ const tauriPluginHost: PluginHost = {
 };
 
 /**
+ * The native engine over Tauri IPC: each method maps to an `engine_*` command in Rust
+ * (`src-tauri/src/engine_io`); the feed arrives on a Tauri Channel. Payloads: `engine-wire.ts`.
+ */
+const tauriEngineHost: EngineHost = {
+  available: true,
+  mode() {
+    return invoke<boolean>('engine_mode');
+  },
+  async setMode(enabled) {
+    await invoke('engine_set_mode', { enabled });
+  },
+  async open(request) {
+    return decodeDeviceStatus(await invoke<unknown>('engine_open', { request }));
+  },
+  async close() {
+    await invoke('engine_close');
+  },
+  async status() {
+    const status = await invoke<unknown>('engine_status');
+    return status == null ? null : decodeDeviceStatus(status);
+  },
+  async setInputChannel(channel) {
+    await invoke('engine_set_input_channel', { channel });
+  },
+  async send(commands) {
+    await invoke('engine_send', { commands });
+  },
+  async setShare(endpoint) {
+    await invoke('engine_set_share', { endpoint });
+  },
+  subscribe(onFrame) {
+    const channel = new Channel<unknown>();
+    let live = true;
+    let reported = false;
+    channel.onmessage = (raw) => {
+      if (!live) return;
+      try {
+        onFrame(decodeFeedFrame(raw));
+      } catch (err) {
+        // One report per subscription: a wire drift would otherwise log 60 times a second.
+        if (reported) return;
+        reported = true;
+        console.error('[host.tauri] engine feed frame rejected', err);
+        notifyError('The audio engine sent something the app cannot read', err);
+      }
+    };
+    invoke('engine_feed', { channel }).catch((err: unknown) => {
+      console.error('[host.tauri] engine feed subscribe failed', err);
+      notifyError('The app lost contact with the audio engine', err);
+    });
+    return () => {
+      live = false;
+    };
+  },
+};
+
+/**
  * Tauri platform. Reuses the web getUserMedia/Web-MIDI capabilities (both work inside
- * WebView2 v149) and swaps in the native CLAP/VST3 `pluginHost`. Only `kind` + `pluginHost` differ.
+ * WebView2 v149) and swaps in the native CLAP/VST3 `pluginHost` and the native `engine`.
  */
 export const tauriPlatform: Platform = {
   ...webPlatform,
   kind: 'tauri',
   pluginHost: tauriPluginHost,
+  engine: tauriEngineHost,
 };
 
 // ── Close guard: Rust vetoes CloseRequested and forwards it as an event ────────────────────────

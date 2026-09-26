@@ -4,11 +4,19 @@
  */
 import type {
   AudioInputSource,
+  EngineHost,
   MidiBackend,
   OpenedInput,
   Platform,
   PluginHost,
 } from './host';
+import {
+  decodeFeedFrame,
+  type DeviceRequest,
+  type DeviceStatus,
+  type EngineCommand,
+  type FeedFrame,
+} from './engine-wire.ts'; // explicit .ts: Node guards import this file
 
 const NO_NATIVE_HOST =
   'Native VST host is unavailable in the browser build — use the built-in synths.';
@@ -202,9 +210,93 @@ const webMidi: MidiBackend = {
   },
 };
 
+/** The web engine fake (below) plus what a probe reads and scripts through `__lf.native`. */
+export interface EngineFake extends EngineHost {
+  /** Every command sent, in order (batches flattened). */
+  readonly sent: EngineCommand[];
+  /** Every request `open()` received. */
+  readonly opened: DeviceRequest[];
+  /**
+   * Decode `raw` as a feed frame (the real decoder) and hand it to the subscribers, as the native feed
+   * would. Only probes call it, through `__lf.native`.
+   * @public
+   */
+  emit(raw: unknown): void;
+}
+
+const NO_ENGINE = 'The native engine is unavailable in the browser build.';
+
+/** Forced on only by a DEV probe's init script (`verify/probes/engine-seam.mjs`), before the app loads.
+ * Read when asked, never at module load: Node guards import this file without Vite's env. */
+function engineForced(): boolean {
+  return import.meta.env.DEV && (globalThis as { __lfEngineFake?: unknown }).__lfEngineFake === true;
+}
+
+const engineSubscribers = new Set<(frame: FeedFrame) => void>();
+let fakeStatus: DeviceStatus | null = null;
+
+/**
+ * The engine host's browser stand-in: engine mode is off (`available` false) unless a DEV probe forces
+ * it on. Forced on, it answers `open()` with a canned device, records every batch in `sent` and hands a
+ * probe-scripted frame from `emit()` to the subscribers. Not a second looper: nothing answers a command
+ * by itself, so a probe asserts gesture → command and frame → DOM.
+ */
+export const webEngineFake: EngineFake = {
+  get available() {
+    return engineForced();
+  },
+  sent: [],
+  opened: [],
+  async mode() {
+    return engineForced();
+  },
+  async setMode() {
+    if (!engineForced()) throw new Error(NO_ENGINE);
+  },
+  async open(request) {
+    if (!engineForced()) throw new Error(NO_ENGINE);
+    webEngineFake.opened.push(request);
+    fakeStatus = {
+      backend: request.backend,
+      sampleRate: 48000,
+      block: request.buffer ?? 256,
+      inputName: 'Fake input',
+      outputName: 'Fake output',
+      alignFrames: 0,
+      inputFrames: 0,
+    };
+    return fakeStatus;
+  },
+  async close() {
+    fakeStatus = null;
+  },
+  async status() {
+    return fakeStatus;
+  },
+  async setInputChannel() {
+    if (!engineForced()) throw new Error(NO_ENGINE);
+  },
+  async send(commands) {
+    if (!engineForced()) throw new Error(NO_ENGINE);
+    webEngineFake.sent.push(...commands);
+  },
+  async setShare() {
+    if (!engineForced()) throw new Error(NO_ENGINE);
+  },
+  subscribe(onFrame) {
+    engineSubscribers.add(onFrame);
+    return () => engineSubscribers.delete(onFrame);
+  },
+  emit(raw) {
+    const frame = decodeFeedFrame(raw);
+    for (const onFrame of engineSubscribers) onFrame(frame);
+  },
+};
+
 export const webPlatform: Platform = {
   kind: 'web',
   pluginHost: webPluginHost,
+  engine: webEngineFake,
   audioInput: webAudioInput,
   midi: webMidi,
 };

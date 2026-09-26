@@ -7,17 +7,21 @@
  * standalone in a browser via `pnpm dev`, and gains native capabilities under Tauri later
  * with zero rewrite.
  *
- * Three capabilities are DECLARED here, but only ONE of them actually differs per platform:
+ * Four capabilities are DECLARED here, but only TWO of them actually differ per platform:
  *   - PluginHost      — native VST/CLAP hosting (web: stub; tauri: invoke/listen). The real seam.
+ *   - EngineHost      — the native audio engine behind the engine-mode toggle (Stage 5 of
+ *                        `docs/plans/native-engine.md`; web: a scriptable fake for probes).
  *   - AudioInputSource — mic/line. getUserMedia works inside WebView2, so tauri reuses the web one
- *                        verbatim (`tauriPlatform = { ...webPlatform, kind, pluginHost }`).
+ *                        verbatim (`tauriPlatform = { ...webPlatform, kind, pluginHost, engine }`).
  *   - MidiBackend      — W3C Web MIDI. WebView2 v149 ships it natively and `lib.rs` auto-grants the
- *                        permission, so tauri reuses the web one verbatim too. NO midir bridge and no
- *                        `tauri-plugin-midi` exist, and neither crate is in Cargo.toml.
+ *                        permission, so tauri reuses the web one verbatim too. The engine's native
+ *                        MIDI (midir, `src-tauri/src/engine_io/midi`) stays off for the release: WinMM
+ *                        ports are exclusive, and Web MIDI keeps the controller.
  *
  * Audio buffers NEVER cross this boundary as PCM — native audio reaches the Web Audio
  * graph only as an AudioNode (MediaStream / SharedArrayBuffer ring).
  */
+import type { DeviceRequest, DeviceStatus, EngineCommand, FeedFrame } from './engine-wire';
 
 export type PluginSlot = 0 | 1;
 export type PluginFormat = 'clap' | 'vst3';
@@ -307,11 +311,42 @@ export interface MidiBackend {
   requestAccess(): Promise<MIDIAccess | null>;
 }
 
+/**
+ * The native audio engine (`src-tauri/src/engine_io`): one device, the looper, synths, FX, mixer and
+ * plugin slots in the audio callback. The UI sends commands and reads the feed; no PCM crosses. The
+ * payloads are `engine-wire.ts`. The engine runs only in engine mode, a toggle the host reads at
+ * startup (applied on restart, never live).
+ */
+export interface EngineHost {
+  /** False in the browser build (unless a DEV probe forces the web fake on, `host.web.ts`). */
+  readonly available: boolean;
+  /** Whether this launch runs on the engine. */
+  mode(): Promise<boolean>;
+  /** Write the toggle for the next launch. */
+  setMode(enabled: boolean): Promise<void>;
+  /** Open the device, or switch to another; resolves with the device that runs. */
+  open(request: DeviceRequest): Promise<DeviceStatus>;
+  close(): Promise<void>;
+  /** The device that runs, or null. */
+  status(): Promise<DeviceStatus | null>;
+  /** The capture channel (0-based; null = auto), switched without reopening the device. */
+  setInputChannel(channel: number | null): Promise<void>;
+  /** A batch of commands, applied in order at the next block. Fire-and-forget: engine refusals come
+   * back on the feed; a rejection means the batch never reached the engine. */
+  send(commands: readonly EngineCommand[]): Promise<void>;
+  /** Share output's endpoint (a WASAPI render id), or null for off. */
+  setShare(endpoint: string | null): Promise<void>;
+  /** Subscribe to the feed (~60 frames/s while something changes); the first frame has `reset`.
+   * Returns the unsubscribe. */
+  subscribe(onFrame: (frame: FeedFrame) => void): () => void;
+}
+
 export type PlatformKind = 'web' | 'tauri';
 
 export interface Platform {
   readonly kind: PlatformKind;
   readonly pluginHost: PluginHost;
+  readonly engine: EngineHost;
   readonly audioInput: AudioInputSource;
   readonly midi: MidiBackend;
 }
