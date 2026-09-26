@@ -6,8 +6,8 @@
 //! re-arm, a swap that throws) guard machinery that no longer exists and are not ported; what they
 //! protected is asserted on the loop and on the rendered output: every captured frame summed exactly
 //! once, heard on the grid. undo.mjs's "summing leaves the loop alone until the boundary" becomes "the
-//! undo target keeps the pre-session loop while the layer sums in". Peaks are not built yet (reverse.mjs
-//! A's peak check waits for them).
+//! undo target keeps the pre-session loop while the layer sums in". reverse.mjs A's peak check is
+//! `tests/peaks.rs`.
 
 mod common;
 

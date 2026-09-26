@@ -15,6 +15,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use lf_engine::grid::Frame;
+use lf_engine::overview::PEAK_FRAMES;
 use lf_engine::{Event, LaneInfo, LaneState, Overview, TRACK_COUNT};
 
 use super::wire::{ClockAnchor, FeedFrame, Meter, PeakUpdate, WireEvent};
@@ -38,6 +39,14 @@ const EMPTY_LANE: LaneInfo = LaneInfo {
     retake_pass: 0,
 };
 
+/// What the UI was last sent of a lane's waveform.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Drawn {
+    buf: usize,
+    reversed: bool,
+    count: u32,
+}
+
 /// One tick's worth of the feed, kept between ticks.
 pub(crate) struct Feed {
     host: EngineHost,
@@ -53,6 +62,9 @@ pub(crate) struct Feed {
     meter: Option<Meter>,
     sent: Option<Instant>,
     drained: Vec<Event>,
+    /// Each lane's waveform as last sent (`None`: nothing yet, or a reset since).
+    drawn: [Option<Drawn>; TRACK_COUNT],
+    bins: Vec<u32>,
 }
 
 impl Feed {
@@ -69,6 +81,8 @@ impl Feed {
             meter: None,
             sent: None,
             drained: Vec::with_capacity(256),
+            drawn: [None; TRACK_COUNT],
+            bins: Vec::new(),
         }
     }
 
@@ -107,7 +121,7 @@ impl Feed {
         });
         let metered = meter != self.meter;
         self.meter = meter;
-        let peaks: Vec<PeakUpdate> = Vec::new();
+        let peaks = self.peaks(reset);
         let due = running && self.sent.is_none_or(|at| at.elapsed() >= REFRESH);
         if !(reset || due || metered || status.is_some() || !self.drained.is_empty() || !device.is_empty() || !peaks.is_empty()) {
             return None;
@@ -116,6 +130,74 @@ impl Feed {
         self.sent = Some(Instant::now());
         self.seq += 1;
         Some(FeedFrame { seq: self.seq - 1, reset, events, device, status, anchor, meter, peaks })
+    }
+
+    /// The lanes' waveform bins that changed, in play order: every bin of a lane that shows another
+    /// buffer or orientation, holds less than before, or is new to the UI (a reset), else the bins its
+    /// buffer changed plus the ones it grew by.
+    fn peaks(&mut self, reset: bool) -> Vec<PeakUpdate> {
+        let mut out = Vec::new();
+        let Some(overview) = self.overview.clone() else {
+            self.drawn = [None; TRACK_COUNT];
+            return out;
+        };
+        let total = overview.bins();
+        for lane in 0..TRACK_COUNT {
+            let view = overview.lane(lane);
+            let count = (view.frames.max(0) as usize).div_ceil(PEAK_FRAMES).min(total) as u32;
+            let now = Drawn { buf: view.buf, reversed: view.reversed, count };
+            let last = if reset { None } else { self.drawn[lane] };
+            self.drawn[lane] = Some(now);
+            self.bins.clear();
+            match last {
+                Some(d) if d.buf == now.buf && d.reversed == now.reversed && count >= d.count => {
+                    let bins = &mut self.bins;
+                    overview.take_dirty(view.buf, |b| {
+                        if (b as u32) < count {
+                            bins.push(b as u32);
+                        }
+                    });
+                    bins.extend(d.count..count);
+                }
+                _ => {
+                    overview.clear_dirty(view.buf);
+                    if count == 0 {
+                        // Cleared (or a pass starting over): one empty update, none for a lane never drawn.
+                        if last.is_some_and(|d| d.count > 0) {
+                            out.push(PeakUpdate { lane: lane as u8, start: 0, count: 0, min: Vec::new(), max: Vec::new() });
+                        }
+                        continue;
+                    }
+                    self.bins.extend(0..count);
+                }
+            }
+            if now.reversed {
+                for b in self.bins.iter_mut() {
+                    *b = count - 1 - *b;
+                }
+            }
+            self.bins.sort_unstable();
+            self.bins.dedup();
+            // Contiguous runs of play bins, one update each.
+            let mut k = 0;
+            while k < self.bins.len() {
+                let start = self.bins[k];
+                let mut end = k + 1;
+                while end < self.bins.len() && self.bins[end] == self.bins[end - 1] + 1 {
+                    end += 1;
+                }
+                let (mut min, mut max) = (Vec::with_capacity(end - k), Vec::with_capacity(end - k));
+                for &play in &self.bins[k..end] {
+                    let bin = if now.reversed { count - 1 - play } else { play };
+                    let (lo, hi) = overview.bin(view.buf, bin as usize);
+                    min.push(round(lo));
+                    max.push(round(hi));
+                }
+                out.push(PeakUpdate { lane: lane as u8, start, count, min, max });
+                k = end;
+            }
+        }
+        out
     }
 
     fn anchor(&self) -> Option<ClockAnchor> {
@@ -135,6 +217,11 @@ impl Feed {
         let rest = self.drained.iter().copied().filter(|e| !matches!(e, Event::Lane { .. } | Event::Transport { .. } | Event::Selected { .. }));
         self.transport.into_iter().chain(lanes).chain([selected]).chain(rest).map(WireEvent).collect()
     }
+}
+
+/// A bin's value as sent: three decimals are plenty for a waveform and keep the JSON short.
+fn round(v: f32) -> f32 {
+    ((v as f64 * 1000.0).round() / 1000.0) as f32
 }
 
 /// Where frames go: false when the subscriber is gone.

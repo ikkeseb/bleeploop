@@ -845,3 +845,42 @@ fn the_feed_resyncs_a_new_subscriber_and_a_new_engine() {
     assert!(closed.anchor.is_none() && closed.meter.is_none());
     assert!(seen.windows(2).all(|w| w[1].seq > w[0].seq), "frames in order");
 }
+
+#[test]
+fn the_feed_draws_a_take_as_it_records_and_the_whole_loop_on_a_reset() {
+    use super::feed::Feed;
+    use super::wire::FeedFrame;
+    let h = Harness::new();
+    h.fake.set_input(tone);
+    let mut feed = Feed::new(h.host.clone());
+    let mut seen = Vec::new();
+    let lane0 = |f: &FeedFrame, want: fn(&LaneInfo) -> bool| f.events.iter().any(|e| matches!(e.0, Event::Lane { lane: 0, info, .. } if want(&info)));
+    h.open(asio(Some(256)));
+    for command in [Command::SetBpm(240.0), Command::SetSlotLive(0, true), Command::RecDub(0)] {
+        h.send(command);
+    }
+    feed_until(&mut feed, &mut seen, "the take starts", |f| lane0(f, |i| i.state == LaneState::Recording && !i.armed));
+    let growing = feed_until(&mut feed, &mut seen, "the take draws as it records", |f| f.peaks.iter().any(|p| p.lane == 0 && p.count >= 4));
+    let update = growing.peaks.iter().find(|p| p.lane == 0).unwrap();
+    // The fake's input 2 carries the tone at 0.2.
+    assert!(update.max.iter().all(|&m| (0.0..=0.201).contains(&m)) && update.min.iter().all(|&m| (-0.201..=0.0).contains(&m)), "the tone's peaks: {update:?}");
+    h.play(RATE * 3 / 2);
+    h.send(Command::RecDub(0));
+    let playing = feed_until(&mut feed, &mut seen, "the loop plays", |f| lane0(f, |i| i.state == LaneState::Playing && i.length > 0));
+    let length = playing.events.iter().find_map(|e| match e.0 {
+        Event::Lane { lane: 0, info, .. } if info.length > 0 => Some(info.length),
+        _ => None,
+    });
+    let bins = (length.unwrap() as usize).div_ceil(lf_engine::overview::PEAK_FRAMES) as u32;
+
+    let reset = feed.tick(true).expect("a reset frame");
+    let full: Vec<_> = reset.peaks.iter().filter(|p| p.lane == 0).collect();
+    assert_eq!(full.len(), 1, "the whole loop in one run");
+    assert_eq!((full[0].start, full[0].count, full[0].min.len() as u32), (0, bins, bins));
+    assert!(full[0].max.iter().filter(|&&m| m > 0.19).count() as u32 > bins / 2, "the loop holds the tone");
+    assert!(reset.peaks.iter().all(|p| p.lane == 0), "the empty lanes send nothing");
+
+    h.send(Command::Clear(0));
+    let cleared = feed_until(&mut feed, &mut seen, "the cleared lane's empty update", |f| f.peaks.iter().any(|p| p.lane == 0 && p.count == 0));
+    assert!(cleared.peaks.iter().any(|p| p.lane == 0 && p.min.is_empty()));
+}

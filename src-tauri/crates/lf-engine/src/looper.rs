@@ -183,6 +183,30 @@ impl Visit {
     fn at(&self, s: Frame) -> usize {
         ((self.lo + (self.off + s) % self.span) % self.modulus) as usize
     }
+
+    /// The positions steps `from..to` visit, as contiguous runs `[a, b)`: `(off + s) % span` wraps at
+    /// most once over a job's steps, and `lo + x` passes `modulus` at most once in each piece.
+    fn runs(&self, from: Frame, to: Frame, mut run: impl FnMut(usize, usize)) {
+        if from >= to {
+            return;
+        }
+        let x0 = (self.off + from) % self.span;
+        let first = (to - from).min(self.span - x0);
+        for (xa, xb) in [(x0, x0 + first), (0, to - from - first)] {
+            if xa >= xb {
+                continue;
+            }
+            let (a, b) = (self.lo + xa, self.lo + xb);
+            if b <= self.modulus {
+                run(a as usize, b as usize);
+            } else if a >= self.modulus {
+                run((a - self.modulus) as usize, (b - self.modulus) as usize);
+            } else {
+                run(a as usize, self.modulus as usize);
+                run(0, (b - self.modulus) as usize);
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -301,7 +325,7 @@ impl Looper {
             clear_armed: None,
             published: [None; TRACK_COUNT],
             published_transport: None,
-            overview: Arc::new(Overview::new()),
+            overview: Arc::new(Overview::new(2 * TRACK_COUNT + 1, capacity as usize)),
         }
     }
 
@@ -1260,13 +1284,14 @@ impl Looper {
         job.progress = to;
         self.job_step_max = self.job_step_max.max(to - from);
         let visit = job.visit;
-        match job.kind {
+        let written = match job.kind {
             JobKind::Fill { buf, fill } => {
                 let data = &mut self.bufs[buf];
                 for s in from..to {
                     let p = visit.at(s);
                     data[p] = fill.source(p as Frame).map_or(0.0, |q| data[q as usize]);
                 }
+                buf
             }
             JobKind::Copy { src, dst } | JobKind::Restore { src, dst, .. } | JobKind::LaneCopy { src, dst, .. } => {
                 let (s_buf, d_buf) = pair(&mut self.bufs, src, dst);
@@ -1274,8 +1299,11 @@ impl Looper {
                     let p = visit.at(s);
                     d_buf[p] = s_buf[p];
                 }
+                dst
             }
-        }
+        };
+        let data = &self.bufs[written];
+        visit.runs(from, to, |a, b| self.overview.touch(written, data, a, b, visit.modulus as usize));
     }
 
     /// The transport is audibly alive (the click is a transport mode): until `Frame::MAX` while a lane
@@ -1318,8 +1346,10 @@ impl Looper {
         }
         let live = self.lanes[rec.lane].live;
         let at = self.detector.scan(input, autorec::threshold(self.auto_sensitivity), &mut self.bufs[live])?;
-        let onset = f0 + at as Frame - self.detector.copied() as Frame;
-        self.lanes[rec.lane].written = self.detector.copied() as Frame;
+        let copied = self.detector.copied();
+        let onset = f0 + at as Frame - copied as Frame;
+        self.lanes[rec.lane].written = copied as Frame;
+        self.overview.touch(live, &self.bufs[live], 0, copied, copied);
         self.begin_auto(cx, onset);
         Some(at)
     }
@@ -1337,16 +1367,19 @@ impl Looper {
         if lo >= hi {
             return;
         }
-        let data = &mut self.bufs[lane.live];
+        let (buf, data) = (lane.live, &mut self.bufs[lane.live]);
         match rec.kind {
             Kind::Take => {
                 // A take's window never outgrows the buffer (configure_end), so neither does this write.
-                data[(lo - start) as usize..(hi - start) as usize].copy_from_slice(&input[(lo - f0) as usize..(hi - f0) as usize]);
+                let (a, b) = ((lo - start) as usize, (hi - start) as usize);
+                data[a..b].copy_from_slice(&input[(lo - f0) as usize..(hi - f0) as usize]);
                 lane.written = lane.written.max(hi - start);
+                self.overview.touch(buf, data, a, b, lane.written as usize);
             }
             Kind::Overdub => {
                 let master = self.master;
-                let mut pos = loop_pos(lo - rec.align, self.anchor, master);
+                let first = loop_pos(lo - rec.align, self.anchor, master);
+                let mut pos = first;
                 for &x in &input[(lo - f0) as usize..(hi - f0) as usize] {
                     data[pos as usize] += x;
                     pos += 1;
@@ -1355,6 +1388,11 @@ impl Looper {
                     }
                 }
                 rec.summed += hi - lo;
+                let (first, n, master) = (first as usize, (hi - lo) as usize, master as usize);
+                self.overview.touch(buf, data, first, (first + n).min(master), master);
+                if first + n > master {
+                    self.overview.touch(buf, data, 0, first + n - master, master);
+                }
             }
         }
     }
@@ -1433,6 +1471,26 @@ fn pair(bufs: &mut [Vec<f32>], src: usize, dst: usize) -> (&[f32], &mut [f32]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_visits_runs_cover_exactly_its_positions() {
+        for visit in [
+            Visit { lo: 0, span: 10, off: 0, modulus: 10 },
+            Visit { lo: 0, span: 10, off: 7, modulus: 10 },
+            Visit { lo: 3, span: 7, off: 5, modulus: 10 },
+            Visit { lo: 6, span: 8, off: 3, modulus: 10 },
+            Visit { lo: 9, span: 4, off: 0, modulus: 10 },
+        ] {
+            for (from, to) in [(0, visit.span), (2, 5), (0, 1), (1, visit.span)] {
+                let mut want: Vec<usize> = (from..to).map(|s| visit.at(s)).collect();
+                let mut got = Vec::new();
+                visit.runs(from, to, |a, b| got.extend(a..b));
+                want.sort_unstable();
+                got.sort_unstable();
+                assert_eq!(got, want, "{visit:?} {from}..{to}");
+            }
+        }
+    }
 
     #[test]
     fn a_job_takes_one_frame_per_job_rate_positions_rounded_up() {
