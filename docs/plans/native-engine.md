@@ -110,8 +110,8 @@ frame — the cable then lands exactly RT late whatever the driver reports. A2 i
 against inLat+outLat only, never against a lag fitted from an earlier run.
 
 **Rules.** Time box 3 working days (estimate); INVALID (xcorr peak < 0.8) is a setup fault: fix and
-rerun. The results replace the RT baseline line in `docs/VERIFY.md`; the probe stays as the engine's
-L2 gate.
+rerun. The probe stays as the engine's L2 gate; the `native:loopback` baseline in `docs/VERIFY.md`
+is replaced when that probe is ported to the engine (Stage 5).
 
 **Measured so far (2026-09-24, dev PC, Scarlett 2i2 at 44.1 kHz, no cable in):** built and pushed;
 the cable runs follow below. A virtual cable (VB-Cable) cannot stand in: it measures Windows' buffering, not the
@@ -159,7 +159,10 @@ late (max 2.6 ms), 0 xruns; at 128 and 256, 0–1. A GPU job from another app ra
   the reported 1186 (+12.0 ms; A3 moves 529 frames). A1 held on it (input and output in one
   bufferSwitch) and the driver reported the same latency, so the extra 528 frames sit in the driver
   or the interface, and the open order does not decide it. Two of 13 measured launches at 256 over
-  two days, none of 22 at 64 or 128. Reproduced, so the Stage 1 STOP rule applies: the owner decides.
+  two days, none of 22 at 64 or 128. Reproduced, so the Stage 1 STOP rule applied. **Owner,
+  2026-09-26: not a stop; the plan continues.** By-ear sessions on the engine run at 128 until the
+  cause is known; 256 stays selectable with this residual, and its R2 FAIL is accepted (256 is the
+  owner's everyday DAW setting on this rig).
 - A2 within 0.1 ms in the other 20 ASIO runs. A3 at 128: 663.8 in all 5, against 667.8–668.8 two
   hours earlier (5 frames between sessions; bar 2, inside the OWNER zone). At 64 a one-sample step
   inside the 10-minute run (A3.spread 1.00, bar ≤ 1; A4 +0.905 frames/10 min, PASS); A4 0.000 at 128
@@ -529,37 +532,56 @@ join's rates (`trace` in `src-tauri/src/engine_io/callback.rs`).
 
 *Owner: turns the engine toggle on and walks the engine lap.*
 
-**Engine-host seam** in `src/platform/host.ts`: `Platform` gains `engine: EngineHost`. Commands out
-are fire-and-forget (`send(cmd)` → invoke → the command ring; errors come back on the feed): transport,
-track volume/mute/reverse/FX, BPM/bars, click, notes, synth pick, auto-rec threshold, the MIDI-binding
-mirror. Request/response: devices, setDevice, setShare, exportSession, importSession, recovery. The
-arm/monitor/gain/buffer/latency calls and noteOn/noteOff leave `PluginHost`; scan, load, editors,
-params, state and the ASIO status calls stay.
+**Release cut (owner, 2026-09-26):** the repo's first public release runs on the engine, soon; small
+bugs are acceptable. v0.1.0 is not published, so Stage 0, E1, E5, E7 and the v0.1.0 import fixtures
+lapse. The release gates on the guitar path (device, transport, 5 tracks, click and count-in, lane FX,
+a plugin slot live, waveforms and meters) and Share output; the rest of the parity checklist can follow
+in point releases. Stage 6's deletion follows the release: until then the web path stays behind the
+toggle.
 
-**State feed in:** a Tauri v2 ipc Channel of raw bytes, ~60 frames/s from a non-RT feed thread: track
-states, levels, input peak and clip, the phase anchor (device frame, loop start, master length,
-sample rate), and waveform peak buckets only when a track's peaks change. Never PCM; the layout is
-fixed and versioned. Invariant 6 holds: the channel writes one plain mutable feed object, the waveform
-rAF reads it and extrapolates the playhead from the anchor, Solid signals are written only on change.
-Measure the feed's IPC cost and playhead jitter before committing to it. One golden wire fixture
-(every command and event as JSON plus one binary frame) is parsed by both a cargo test and a TS guard.
+**Toggle:** a file in the app-local data folder, read at `setup` and applied on restart, never live
+(ASIO allows one client); an Audio Settings switch writes it. Engine mode manages one `EngineHost`,
+claims the ASIO duplex holder, refuses the live line's arm/monitor commands, skips the plugin bridge and
+Web Audio at boot, and shuts the host down on exit. The flip changes the default.
+
+**Wire** (JSON). Not built yet: the Rust mirror `src-tauri/src/engine_io/wire.rs`,
+the TS mirror `src/platform/engine-wire.ts` (not built yet) and one fixture (not built yet)
+`verify/fixtures/engine-wire.json`, parsed by both a cargo test and a TS guard:
+
+- Tauri commands: `engine_mode` / `engine_set_mode(enabled)`; `engine_open(request)` →
+  `DeviceStatus` (also switches; blocking work off the IPC thread); `engine_close`; `engine_status`;
+  `engine_set_input_channel(channel)`; `engine_send(commands)` (a batch, fire-and-forget, errors come
+  back on the feed); `engine_set_share(endpoint)`; `engine_feed(channel)` subscribes a Tauri Channel.
+- `Command` and `Event` in serde's external tagging with Rust variant names (`"PlayAll"`,
+  `{"RecDub":0}`, `{"SetVolume":[0,0.8]}`); struct fields camelCase; `FxParam`/`FxKind` as the TS
+  keys, `Instrument` as its id, `NoteTarget` as `{"Builtin":"lead"}` / `{"Slot":0}`.
+- Feed frame, ~60/s from a non-RT feed thread, sent when something changed or a meter moved: `seq`,
+  `reset` (true on the first frame after a subscribe or a new engine: the UI replaces its state, so a
+  WebView reload resyncs), `events`, `device` (DeviceEvent), `status` (when it changed), `anchor`
+  (`frame`, `atMs` in Unix ms, `rate`), `meter` (input peak and clip), `peaks` (per lane, only bins
+  that changed). Never PCM.
+- `EngineHost` keeps the last value of every setting command and replays them into a new engine (a
+  rate change, `EngineFaulted`), so the UI's settings survive.
+
+**Plugins:** in engine mode the `plugin_*` load, unload, editor and parameter commands route to the
+engine slot owners (`host/engine_slot.rs`) under the same names and events; GO LIVE becomes
+`SetSlotLive`, the plugin gain `SetSlotGain`, notes go through `engine_send`. One slot is live at a
+time (two would sum the dry input twice). Scan and the ASIO status calls are unchanged.
+
+**UI side:** `Platform.engine` in `src/platform/host.ts`; an engine store behind the same facade the UI
+already reads (`looper`, `clock`, `master`), so components change only their import. Invariant 6
+holds: the feed writes one plain mirror, the waveform rAF reads it and extrapolates the playhead from
+the anchor, Solid signals are written only on change. MIDI keeps Web MIDI and the TS learn for the
+release (the native `MidiHost` stays off: WinMM ports are exclusive).
 
 **Web fake** in `src/platform/host.web.ts`: records every send and emits frames a probe scripts; not a
 second looper. UI probes assert gesture → command and frame → DOM. After the flip `pnpm dev` makes
 no sound (the browser tier stays a verification rig).
 
-**Session, recovery, export, import go native.** Recovery and export read a snapshot: the engine
-copies a track into the preallocated snapshot buffer as a budgeted block job and hands it to the IO
-thread over a ring, which returns it after writing. Export keeps today's zip layout and session.json
-fields; the wet master comes from an offline engine running the same process() (no parallel FX
-implementation). Import by path (native open dialog plus window drag-drop, STATUS E4); session
-validation ported to Rust with the same rules; the v0.1.0 fixtures must import. Recovery: float32 stems
-+ session.json written atomically to the app-data folder on today's timing (STATUS E5 for v0.1.0's
-IndexedDB records). Settings, rig recall and MIDI bindings stay in TS storage, mirrored to native at
-boot.
-
-**Toggle:** one hidden Audio Settings switch, persisted natively and applied on restart, never live
-(ASIO allows one client); probes set it in their own profile. Web stays the default until Stage 6.
+**Session, recovery, export, import** (after the guitar path): Export keeps today's zip layout and
+session.json fields. Open: whether the snapshot's PCM may cross to TS once per save (reusing today's
+zip, WAV and IndexedDB code) or Rust writes the files. Settings, rig recall and MIDI bindings stay in
+TS storage, mirrored to native at boot.
 
 **Parity checklist** (each item a cargo test, a UI probe on the fake, or a lap stop): rec/dub/play/
 stop/undo/retake/clear/reverse, count-in and accent, BPM lock, fixed/free length, record cap, auto
