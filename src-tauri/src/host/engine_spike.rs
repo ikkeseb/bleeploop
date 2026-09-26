@@ -88,6 +88,7 @@ struct Args {
     quiet: bool,
     device: Option<String>,
     /// ASIO: open and close the driver once at another block size first (the same-size relaunch test).
+    #[cfg_attr(not(feature = "asio"), allow(dead_code))]
     preopen: bool,
 }
 
