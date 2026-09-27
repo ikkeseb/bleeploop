@@ -1,7 +1,8 @@
-import { For, Show, createSignal, onCleanup, onMount } from 'solid-js';
+import { For, Show, createEffect, createSignal, onCleanup, onMount } from 'solid-js';
 import { Portal } from 'solid-js/web';
 import { engineMode, type InputSendId } from '../../platform';
 import { engineInputSends, type InputSendParamDef } from '../state/engine-store';
+import { stageOpen } from '../stage/stage-store';
 import '../looper/fxpanel.css';
 import './input-fx.css';
 
@@ -85,6 +86,12 @@ function InputFxControl(props: { returnFocus?: (el: HTMLElement | undefined) => 
     setOpen(false);
     if (keyboard) props.returnFocus?.(trigger);
   };
+  // The stage view covers the command bar but not this portal: left open, its controls stay focusable
+  // behind the stage and take the transport keys. Opening the stage closes it, as it does Settings and
+  // Help (app.tsx).
+  createEffect(() => {
+    if (stageOpen()) setOpen(false);
+  });
   return (
     <>
       <button

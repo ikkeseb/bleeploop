@@ -231,6 +231,16 @@ await probe(async ({ open }) => {
   await page.keyboard.press('Escape');
   await dialog.waitFor({ state: 'detached' });
   assert.equal(await page.evaluate(() => document.activeElement?.getAttribute('aria-label')), 'Input effects', 'Escape returns focus to IN FX');
+  // The stage view (a pedal's press here: B with nothing focused) closes an open IN FX, whose portal it
+  // would otherwise leave focusable behind the stage.
+  await infx.click();
+  await dialog.waitFor();
+  await page.evaluate(() => /** @type {HTMLElement | null} */ (document.activeElement)?.blur());
+  await page.keyboard.press('b');
+  await page.locator('.sv').waitFor();
+  await dialog.waitFor({ state: 'detached' });
+  await page.keyboard.press('b');
+  await page.locator('.sv').waitFor({ state: 'detached' });
 
   // ── A WebView reload: the reset frame carries what the engine remembers, and the UI adopts it ─────
   await clearSent();
