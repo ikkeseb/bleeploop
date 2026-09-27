@@ -241,7 +241,9 @@ frame counter drops the beats it skipped, count-in beats fire late as one click.
 when it is pressed, and a command that waits for a block job holds every later one behind it. A jump in
 the device frame counter moves every block job's schedule with it (`Looper::skip`): work is owed for the
 frames rendered, never for the frames lost. A hands-free press is resolved by the engine in command
-order (its lane, HALVE's bars, HOLD's lane), never from the UI's feed mirror; every looper press but
+order (its lane, HALVE's bars, HOLD's lane per pedal: `Hold(control)` / `Release(control)`), never from
+the UI's feed mirror; an overdub an input gap damaged writes nothing more (its rejection restores the
+loop before it); every looper press but
 CLEAR's confirming one disarms a pending pedal CLEAR (a pedal's setting toggle announces itself with
 `Press`), a setting alone does not.
 
@@ -728,8 +730,9 @@ Built on the engine, in this order unless the owner reorders:
   lane FX drawer's Dub feedback slider).
 - **FADE — built, not heard.** One press (the command bar's FADE, the `fadeAll` pedal action): every
   playing lane fades from the press to silence on the first bar line at or after 1, 2, 4 or 8 bars
-  (default 2) and stops there; a separate fade gain leaves the lanes' volumes alone, and a second press
-  stops at once (lf-engine `tests/fade.rs`; loopback phase I).
+  (default 2) and stops there; a separate fade gain leaves the lanes' volumes alone and also rides the
+  lane's delay feedback, so the returns go quiet with it; a second press stops at once (lf-engine
+  `tests/fade.rs`; loopback phase I). Its bars persist like the other transport settings.
 
 Also engine-bound from `docs/plans/pedalboard.md`: D12 controller data to plugins and F8 synth plugins
 on the device clock (both arrive with Stage 4).
