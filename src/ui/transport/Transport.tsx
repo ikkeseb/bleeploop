@@ -3,6 +3,7 @@ import { notifyError } from '../../notify';
 import { clock, looper, master, sampleRate } from '../state/audio';
 import { laterTakeBars } from '../state/engine-store';
 import { anyTrackIn, createTwoStepConfirm, masterBars } from '../looper/shared';
+import { fixedGate, tapGate } from '../looper/gates';
 import { meterFrac, registerInputMeter, registerPhaseDial, unregisterInputMeter, unregisterPhaseDial } from '../looper/waveform';
 import { autoRecordThreshold } from '../../audio/looper/auto-record';
 import { InputFx } from './InputFx';
@@ -112,7 +113,7 @@ export function Transport(props: { returnFocus?: (el: HTMLElement | undefined) =
   };
   // RETAKE passes roll at master length whatever FIXED says, so the group is meaningless there.
   const fixedIgnored = createMemo(() => looper.retakeEnabled() && hasMaster());
-  const fixedDisabled = createMemo(() => anyCapturing() || fixedIgnored());
+  const fixedDisabled = createMemo(() => !fixedGate().ok);
   const fixedTitle = () =>
     fixedIgnored()
       ? 'RETAKE takes roll at the full loop length, so FIXED is ignored while it is on'
@@ -365,7 +366,7 @@ export function Transport(props: { returnFocus?: (el: HTMLElement | undefined) =
         <button
           class="transport__tgl"
           aria-label="Tap tempo"
-          disabled={clock.bpmLocked()}
+          disabled={!tapGate().ok}
           onClick={() => clock.tap()}
           title={clock.bpmLocked() ? 'Tempo locked to the loop. Clear all to retap' : 'Tap a tempo'}
         >

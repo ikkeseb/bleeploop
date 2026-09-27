@@ -38,8 +38,6 @@ type LooperView = {
   | 'retakeEnabled'
   | 'selectedTrack'
   | 'selectTrack'
-  | 'recDubSelected'
-  | 'playStopSelected'
   | 'track'
   | 'trackInfo'
   | 'masterLengthFrames'

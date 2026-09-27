@@ -917,7 +917,7 @@ await probe(async ({ open }) => {
     // A refused press used to reach screen readers only: Space on the selected STOPPED lane is refused
     // ("play first"), so its reason must appear in THAT lane's well, never reach REC/DUB, and leave by
     // itself. The engine also ignores REC/DUB on a STOPPED lane, so the lane's state cannot tell a refusal
-    // from a press that got through: a stub that only counts stands in for the selected-lane REC/DUB entry
+    // from a press that got through: a stub that only counts stands in for the looper's REC/DUB entry
     // instead. An accepted Space on PLAYING track 2 first proves the stub sits on the key's path.
     console.log('\ngolden-jam: keys\n');
     const cueTexts = () =>
@@ -928,10 +928,10 @@ await probe(async ({ open }) => {
       );
     await page.evaluate(() => {
       const looper = window.__lf.looper;
-      const real = looper.recDubSelected;
+      const real = looper.recDub;
       window.__recDubPresses = 0;
-      looper.recDubSelected = () => void window.__recDubPresses++;
-      window.__restoreRecDub = () => ((looper.recDubSelected = real), window.__recDubPresses);
+      looper.recDub = async () => void window.__recDubPresses++;
+      window.__restoreRecDub = () => ((looper.recDub = real), window.__recDubPresses);
     });
     await page.keyboard.press('2');
     await page.keyboard.press('Space');

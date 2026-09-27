@@ -55,6 +55,9 @@
 .sv-stat--loop {
   width: calc(var(--sv-head) * 3.7);
 }
+.sv-stat--bar {
+  width: calc(var(--sv-head) * 2.4); /* fits "32 / 32" */
+}
 .sv-stat__val {
   font-size: calc(var(--sv-head) * 0.58);
   font-weight: 600;

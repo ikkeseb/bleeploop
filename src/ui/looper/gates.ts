@@ -1,11 +1,12 @@
 import { createSignal } from 'solid-js';
-import { looper } from '../state/audio';
-import type { Refusal } from '../../platform';
+import { clock, looper } from '../state/audio';
+import { engineMode, type Refusal } from '../../platform';
 
 /**
  * OWNS: the looper UI's refusal gates, its screen-reader announcement line and the sighted lane cue.
- * One predicate per lane gesture, returning WHY a press is refused, so the lane button's disabled state,
- * its title, its ARIA label and the keyboard transport's refusal all speak one vocabulary. The engine
+ * One predicate per lane gesture (and per command-bar toggle a pedal reaches), returning WHY a press is
+ * refused, so the control's disabled state, its title, its ARIA label and a key's or pedal's refusal
+ * (`src/app/actions.ts`) all speak one vocabulary. The engine
  * keeps its own self-protection (machine.ts recDub/playStop); these mirror it for the UI, they do not
  * replace it. In engine mode a hands-free press is gated by the engine, which names its reason by the
  * same vocabulary (`refusalText`, `lf_engine::Refusal::text`).
@@ -29,6 +30,14 @@ const REFUSAL = {
   empty: refuse('nothing to play, record first'),
   noUndo: refuse('nothing to undo, overdub first'),
   noClear: refuse('nothing to clear'),
+  noMute: refuse('nothing to mute, record first'),
+  noReverse: refuse('nothing to reverse, record first'),
+  noCopy: refuse('nothing to copy, record first'),
+  noFreeLane: refuse('no empty track to copy to'),
+  tempoLocked: refuse('tempo locked to the loop, clear all to retap'),
+  fixedCapturing: refuse('a take is recording, FIXED changes after it'),
+  fixedRetake: refuse('RETAKE is on, so FIXED is ignored'),
+  noInputFx: refuse('input effects need the native engine'),
 } as const;
 
 /** CLEAR's first press, by key or pedal: the second one clears (`src/app/actions.ts`). */
@@ -57,7 +66,7 @@ export function refusalText(reason: Refusal): string {
 }
 
 /** Any lane capturing (RECORDING incl. armed/listening, or OVERDUBBING) other than `except`. */
-function otherCapturing(except: number): boolean {
+function otherCapturing(except = -1): boolean {
   for (let j = 0; j < looper.trackCount; j++) {
     if (j === except) continue;
     const s = looper.track(j)().state;
@@ -101,6 +110,44 @@ export function undoGate(i: number): Gate {
 /** May CLEAR act on lane `i`? Only an EMPTY lane has nothing to clear; the confirm is the caller's. */
 export function clearGate(i: number): Gate {
   return looper.track(i)().state === 'EMPTY' ? REFUSAL.noClear : OK;
+}
+
+/** May MUTE (the lane's MUTE cap) act on lane `i`? An EMPTY lane's cap is disabled. */
+export function muteGate(i: number): Gate {
+  return looper.track(i)().state === 'EMPTY' ? REFUSAL.noMute : OK;
+}
+
+/** May REV act on lane `i`? The cap shows once the lane has a loop and is disabled while it ends. */
+export function reverseGate(i: number): Gate {
+  const t = looper.track(i)();
+  if (!t.canReverse) return REFUSAL.noReverse;
+  if (t.stopAt !== null) return REFUSAL.stopping;
+  return OK;
+}
+
+/** May COPY act on lane `i`? The cap shows once the lane has a loop and another lane is EMPTY. */
+export function copyGate(i: number): Gate {
+  if (!looper.track(i)().canReverse) return REFUSAL.noCopy;
+  for (let j = 0; j < looper.trackCount; j++) if (looper.track(j)().state === 'EMPTY') return OK;
+  return REFUSAL.noFreeLane;
+}
+
+/** May TAP set the tempo? Not once a loop has fixed it. */
+export function tapGate(): Gate {
+  return clock.bpmLocked() ? REFUSAL.tempoLocked : OK;
+}
+
+/** May FIXED be switched? Not while a capture reads it, nor while RETAKE (whose passes roll at the
+ * loop's length) overrides it over a loop. */
+export function fixedGate(): Gate {
+  if (otherCapturing()) return REFUSAL.fixedCapturing;
+  if (looper.retakeEnabled() && looper.masterLengthFrames() > 0) return REFUSAL.fixedRetake;
+  return OK;
+}
+
+/** May an IN FX send be switched? Only the native engine has input sends. */
+export function inputFxGate(): Gate {
+  return engineMode() ? OK : REFUSAL.noInputFx;
 }
 
 // The looper's polite live-region text (rendered by Looper.tsx). `equals: false` so the same refusal

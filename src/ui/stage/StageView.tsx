@@ -1,4 +1,4 @@
-import { For, Show, onCleanup, onMount } from 'solid-js';
+import { For, Show, createMemo, onCleanup, onMount } from 'solid-js';
 import { clock, looper, sampleRate } from '../state/audio';
 import { registerLane, registerLoopProgress, unregisterLane, unregisterLoopProgress } from '../looper/waveform';
 import { masterBars, volumeDb } from '../looper/shared';
@@ -7,7 +7,8 @@ import './stage.css';
 
 /**
  * The stage view: a full-window performance layer over the normal UI, readable from 1.5–3 m with a
- * guitar in hand. A header strip (BPM, the loop length, a four-segment beat bar, the loop's progress)
+ * guitar in hand. A header strip (BPM, the loop length, the bar of the loop that plays, a four-segment
+ * beat bar, the loop's progress)
  * over five equal lanes, each a state pillar (lane number + a big state word on a tint of its state
  * colour) · the lane's waveform and playhead · read-only volume/MUTE/REV indicators. The selected lane
  * carries a warm-white edge; a pointer press on a lane selects it; the only control is EXIT.
@@ -101,6 +102,16 @@ function StageLane(props: { index: number }) {
 export function StageView(props: { onExit: () => void }) {
   const masterFrames = () => looper.masterLengthFrames();
   const bars = () => masterBars(masterFrames(), clock.bpm(), sampleRate());
+  // The bar of the loop that plays (1-based; 0 with no loop or no beat): re-read on each beat the beat
+  // bar lights, from the plain loop phase (invariant 6: the beat signal, never the draw loop). The phase
+  // is rounded to the nearest beat first, since a beat's signal and the phase are read a moment apart
+  // and a downbeat must not read as the bar before it.
+  const loopBar = createMemo(() => {
+    clock.beat();
+    const beats = bars() * 4;
+    if (beats === 0 || !clock.running()) return 0;
+    return Math.floor((Math.round(looper.phaseValue() * beats) % beats) / 4) + 1;
+  });
 
   // A dialog over an inert page: focus moves into it (the root is a tabindex=-1 focus target, not a
   // control, so the transport keys stay live — transport-keys.ts's yield rule).
@@ -126,6 +137,15 @@ export function StageView(props: { onExit: () => void }) {
               {bars()}
               <span class="sv-unit">{bars() === 1 ? 'BAR' : 'BARS'}</span>
               <span class="sv-secs">{(masterFrames() / sampleRate()).toFixed(1)} s</span>
+            </span>
+          </Show>
+        </div>
+        <div class="sv-stat sv-stat--bar">
+          <span class="sv-label">BAR</span>
+          <Show when={loopBar() > 0} fallback={<span class="sv-stat__val sv-stat__val--none">—</span>}>
+            <span class="sv-stat__val">
+              {loopBar()}
+              <span class="sv-unit">/ {bars()}</span>
             </span>
           </Show>
         </div>

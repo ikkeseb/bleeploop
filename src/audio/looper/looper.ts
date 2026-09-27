@@ -115,7 +115,7 @@ import {
   trackMuted,
   trackVolume,
 } from './mixer';
-import { playStopSelected, recDubSelected, selectTrack, selectedTrack } from './transport-actions';
+import { selectTrack, selectedTrack } from './transport-actions';
 
 export type { TrackState, PeakView } from './state';
 
@@ -155,10 +155,6 @@ export const looper = {
   selectedTrack,
   /** Select track `i` for keyboard/MIDI transport (0-based, clamped). */
   selectTrack,
-  /** REC/DUB toggle on the selected track (keyboard/MIDI entry; same path as the lane core). */
-  recDubSelected,
-  /** PLAY/STOP on the selected track (keyboard/MIDI entry; same path as the lane PLAY/STOP cap). */
-  playStopSelected,
   /** Reactive per-track state and committed loop length. */
   track: (i: number) => trackSignals[i][0],
   /** Non-reactive snapshot of a track's public info. */

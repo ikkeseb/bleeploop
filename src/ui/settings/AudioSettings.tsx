@@ -21,8 +21,18 @@ import {
 import { inputArmed, monitorArmed } from '../../audio/native-io';
 import { midiDevices, midiStatus } from '../../audio/midi';
 import { notifyError } from '../../notify';
-import { ACTION_LABELS, type ActionId } from '../../app/actions';
-import { bindings, cancelLearn, forget, learn, learning, type MidiBinding } from '../../app/midi-actions';
+import { ACTION_LABELS, isLaneAction, type ActionId, type Target } from '../../app/actions';
+import {
+  awaitingRelease,
+  bindings,
+  cancelLearn,
+  forget,
+  learn,
+  learning,
+  setHold,
+  setMomentary,
+  type MidiBinding,
+} from '../../app/midi-actions';
 import { engineMode, platform } from '../../platform';
 import {
   BUFFER_FRAMES_OPTIONS,
@@ -31,7 +41,7 @@ import {
   type BufferFrames,
 } from '../../audio/audio-settings';
 import { offsetMs, RECORD_TRIM_MAX_MS, setOffsetMs } from '../../audio/record-latency';
-import { sampleRate } from '../state/audio';
+import { looper, sampleRate } from '../state/audio';
 import { engineDevice, engineShare, openEngineDevice, setEngineInputChannel, setEngineShare } from '../state/engine-store';
 import './audio-settings.css';
 
@@ -60,6 +70,8 @@ function reopenEngine(): void {
 }
 
 const ACTION_IDS = Object.keys(ACTION_LABELS) as ActionId[];
+const LANE_ACTION_IDS = ACTION_IDS.filter(isLaneAction);
+const GLOBAL_ACTION_IDS = ACTION_IDS.filter((id) => !isLaneAction(id));
 
 // The engine toggle as saved for the next launch, once changed here (this launch runs `engineMode()`).
 // Module-level: the popover remounts on every open and must keep showing a pending switch.
@@ -68,6 +80,11 @@ const [savedEngine, setSavedEngine] = createSignal<boolean | null>(null);
 /** A learned message as the bindings list shows it: "CC 64 · ch 1". */
 function midiSource(b: MidiBinding): string {
   return `${b.kind === 'cc' ? 'CC' : 'note'} ${b.number} · ch ${b.channel + 1}`;
+}
+
+/** A binding's action as the list names it: "Play / stop · Track 2" for a lane action on a named track. */
+function bindingAction(b: MidiBinding): string {
+  return b.target === null ? ACTION_LABELS[b.action] : `${ACTION_LABELS[b.action]} · Track ${b.target + 1}`;
 }
 
 export function AudioSettings() {
@@ -84,6 +101,7 @@ export function AudioSettings() {
   // The action the MIDI learn row binds to. A learn still listening when the panel closes is cancelled,
   // so a later pedal press cannot bind out of sight.
   const [learnPick, setLearnPick] = createSignal<ActionId>(ACTION_IDS[0]);
+  const [learnTarget, setLearnTarget] = createSignal<Target>(null);
   onCleanup(cancelLearn);
   const nextEngine = () => savedEngine() ?? engineMode();
   const onEngineToggle = (checkbox: HTMLInputElement) => {
@@ -416,10 +434,11 @@ export function AudioSettings() {
         <span class="audio-settings__soon">set by the audio device</span>
       </div>
 
-      {/* MIDI learn: pick an action, LEARN, and the next CC or note-on from any port runs it from then on
-          (a second click or Esc cancels). A learned message never reaches the play path. The bindings,
-          their persistence and the momentary/latching read live in `src/app/midi-actions.ts`. */}
-      <div class="audio-settings__row" title="A MIDI footswitch or key runs this action; the track actions act on the selected track.">
+      {/* MIDI learn: pick an action (a track action also its track), LEARN, and the next CC or note-on from
+          any port runs it from then on (a second click or Esc cancels). A learned message never reaches
+          the play path. The bindings, their persistence and the momentary/latching read live in
+          `src/app/midi-actions.ts`; each line can switch the kind, and a momentary REC/DUB pedal can HOLD. */}
+      <div class="audio-settings__row" title="A MIDI footswitch or key runs this action">
         <span class="audio-settings__label">midi learn</span>
         <select
           class="audio-settings__select"
@@ -428,7 +447,12 @@ export function AudioSettings() {
           onChange={(e) => setLearnPick(e.currentTarget.value as ActionId)}
           aria-label="Action to learn"
         >
-          <For each={ACTION_IDS}>{(id) => <option value={id}>{ACTION_LABELS[id]}</option>}</For>
+          <optgroup label="Track actions">
+            <For each={LANE_ACTION_IDS}>{(id) => <option value={id}>{ACTION_LABELS[id]}</option>}</For>
+          </optgroup>
+          <optgroup label="Global actions">
+            <For each={GLOBAL_ACTION_IDS}>{(id) => <option value={id}>{ACTION_LABELS[id]}</option>}</For>
+          </optgroup>
         </select>
         <button
           type="button"
@@ -436,29 +460,72 @@ export function AudioSettings() {
           classList={{ 'audio-settings__btn--listening': learning() !== null }}
           aria-pressed={learning() !== null}
           disabled={learning() === null && midiStatus() !== 'connected'}
-          onClick={() => (learning() === null ? learn(learnPick()) : cancelLearn())}
+          onClick={() => (learning() === null ? learn(learnPick(), learnTarget()) : cancelLearn())}
           aria-label="Learn a MIDI control for this action"
         >
           {learning() === null ? 'LEARN' : 'LISTENING'}
         </button>
       </div>
+      <Show when={isLaneAction(learnPick())}>
+        <div class="audio-settings__row" title="The track this action acts on">
+          <span class="audio-settings__label">on track</span>
+          <select
+            class="audio-settings__select"
+            value={learnTarget() === null ? '' : String(learnTarget())}
+            disabled={learning() !== null}
+            onChange={(e) => setLearnTarget(e.currentTarget.value === '' ? null : Number(e.currentTarget.value))}
+            aria-label="Track the action acts on"
+          >
+            <option value="">Selected track</option>
+            <For each={Array.from({ length: looper.trackCount }, (_, i) => i)}>{(i) => <option value={String(i)}>Track {i + 1}</option>}</For>
+          </select>
+        </div>
+      </Show>
       <Show when={learning() !== null}>
         <div class="audio-settings__hint audio-settings__hint--info" role="status">Tap a pedal or key on a MIDI device. Esc cancels.</div>
+      </Show>
+      <Show when={awaitingRelease()}>
+        {(b) => (
+          <div class="audio-settings__hint audio-settings__hint--info" role="status">
+            Learned {midiSource(b())}. Let go of the pedal, then close this panel to try it.
+          </div>
+        )}
       </Show>
       <Show when={bindings().length > 0}>
         <ul class="audio-settings__bindings" aria-label="MIDI bindings">
           <For each={bindings()}>
             {(b) => (
               <li class="audio-settings__binding" title={b.portName}>
-                <span class="audio-settings__binding-action">{ACTION_LABELS[b.action]}</span>
-                <span class="audio-settings__binding-src">
-                  {midiSource(b)} · {b.momentary ? 'momentary' : 'latching'}
-                </span>
+                <span class="audio-settings__binding-action">{bindingAction(b)}</span>
+                <span class="audio-settings__binding-src">{midiSource(b)}</span>
+                <button
+                  type="button"
+                  class="audio-settings__chip"
+                  onClick={() => setMomentary(b, !b.momentary)}
+                  aria-label={`${bindingAction(b)} on ${midiSource(b)}: ${b.momentary ? 'momentary' : 'latching'} pedal, switch to ${b.momentary ? 'latching' : 'momentary'}`}
+                  title="How the pedal was read. Switch it if a press runs twice, or every other press runs nothing"
+                >
+                  {b.momentary ? 'momentary' : 'latching'}
+                </button>
+                <Show when={b.action === 'recDub'}>
+                  <button
+                    type="button"
+                    class="audio-settings__chip"
+                    classList={{ 'is-on': b.hold }}
+                    disabled={!b.momentary}
+                    aria-pressed={b.hold}
+                    onClick={() => setHold(b, !b.hold)}
+                    aria-label={`Hold to record on ${midiSource(b)}`}
+                    title={b.momentary ? 'Hold the pedal to record or overdub, let go to stop' : 'HOLD needs a momentary pedal'}
+                  >
+                    HOLD
+                  </button>
+                </Show>
                 <button
                   type="button"
                   class="audio-settings__binding-clear"
                   onClick={() => forget(b)}
-                  aria-label={`Forget ${ACTION_LABELS[b.action]} on ${midiSource(b)}, ${b.portName}`}
+                  aria-label={`Forget ${bindingAction(b)} on ${midiSource(b)}, ${b.portName}`}
                 >
                   ✕
                 </button>

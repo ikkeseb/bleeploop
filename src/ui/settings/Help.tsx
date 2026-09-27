@@ -88,7 +88,9 @@ export function Help() {
         <h3 class="help__h">Pedals <span class="help__tag">hands stay on the guitar</span></h3>
         <ul class="help__list">
           <li>A keystroke footswitch or page turner sends keys: set each pedal to one of the looper keys above</li>
-          <li>A MIDI footswitch or controller: Audio Settings → <span class="help__note">MIDI LEARN</span>. Pick an action, press <span class="help__note">LEARN</span>, then tap the pedal once. Momentary and latching pedals both run it once per press</li>
+          <li>A MIDI footswitch or controller: Audio Settings → <span class="help__note">MIDI LEARN</span>. Pick an action, press <span class="help__note">LEARN</span>, then tap the pedal once. Momentary and latching pedals both run it once per press; if a press runs twice or not at all, switch its kind in the list</li>
+          <li>Every looper control can be learned. A track action (record, play, undo, clear, mute, reverse, copy) acts on the selected track or on the track you pick; tap tempo, click, end stop, fixed and the input echo and reverb switch as their buttons do</li>
+          <li><span class="help__note">HOLD</span> on a momentary record pedal: hold it to record or overdub, let go to stop</li>
           <li>A learned pedal or key only runs its action: it plays no note and holds no sustain. <span class="help__note">✕</span> in the list forgets it</li>
         </ul>
       </section>

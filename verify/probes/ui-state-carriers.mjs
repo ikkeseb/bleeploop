@@ -1,7 +1,7 @@
 /** Accessibility and non-colour state carriers against the rendered app: transport, meter, lamp,
  * looper-announcement and toast state carriers, plus the looper refusal gates (a refused lane
  * core's title/label reason, and a refused Space/Enter announcing that reason without reaching its
- * action, counted by a stub on the selected-lane entry).
+ * action, counted by a stub on the looper's REC/DUB and PLAY/STOP entries).
  * Toggles: each toggle it presses (the Transport toggles except END STOP, lane 1's MUTE and REV) keeps
  * ONE accessible name in both states and carries its state in aria-pressed alone; the lane core, whose
  * name says the action, carries no aria-pressed. Not pressed here: END STOP, lane FX and the keyboard
@@ -121,17 +121,17 @@ await probe(async ({ open }) => {
   // Refusal gate (src/ui/looper/gates.ts): a refused Space/Enter says the lane button's reason on the
   // looper status line instead of a silent no-op, and never reaches the action. The engine also ignores
   // REC/DUB on a STOPPED lane and PLAY/STOP on an EMPTY one, so the lane's state cannot tell a refusal
-  // from a press that got through: stubs that only count stand in for the selected-lane REC/DUB and
+  // from a press that got through: stubs that only count stand in for the looper's REC/DUB and
   // PLAY/STOP entries instead. An accepted Space and Enter on PLAYING track 2 first prove the stubs sit
   // on the keys' path.
   const live = page.locator('.lp__sr-status');
   await page.evaluate(() => {
     const looper = window.__lf.looper;
-    const real = { recDub: looper.recDubSelected, playStop: looper.playStopSelected };
+    const real = { recDub: looper.recDub, playStop: looper.playStop };
     window.__presses = { recDub: 0, playStop: 0 };
-    looper.recDubSelected = () => void window.__presses.recDub++;
-    looper.playStopSelected = () => void window.__presses.playStop++;
-    window.__restorePresses = () => Object.assign(looper, { recDubSelected: real.recDub, playStopSelected: real.playStop });
+    looper.recDub = async () => void window.__presses.recDub++;
+    looper.playStop = () => void window.__presses.playStop++;
+    window.__restorePresses = () => Object.assign(looper, real);
     document.activeElement?.blur?.();
   });
   const presses = () => page.evaluate(() => ({ ...window.__presses }));

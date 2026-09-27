@@ -186,8 +186,8 @@
   background: var(--surf-3);
 }
 
-/* The learned MIDI bindings: one line each in the value column (action · message · pedal kind), with a
-   ✕ that forgets it. The port name is the line's title. */
+/* The learned MIDI bindings: one line each in the value column (action · message · the pedal-kind switch
+   · HOLD on a REC/DUB pedal), with a ✕ that forgets it. The port name is the line's title. */
 .audio-settings__bindings {
   margin: -4px 0 0;
   padding: 0 0 0 83px;
@@ -216,6 +216,37 @@
   color: var(--dim);
   font-size: 10px;
   font-variant-numeric: tabular-nums;
+}
+/* the pedal-kind switch and HOLD: small key faces; HOLD engaged = warm-white */
+.audio-settings__chip {
+  flex: 0 0 auto;
+  height: 22px;
+  padding: 0 7px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: var(--surf-2);
+  box-shadow: inset 0 1px 0 var(--hair);
+  color: var(--dim);
+  font: inherit;
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+}
+.audio-settings__chip:hover:not(:disabled) {
+  color: var(--text);
+  background: var(--surf-3);
+}
+.audio-settings__chip.is-on {
+  color: var(--bg);
+  background: var(--engaged);
+}
+.audio-settings__chip:disabled {
+  cursor: default;
+  background: transparent;
+  box-shadow: none;
+  border-color: rgba(255, 255, 255, 0.06);
+  color: var(--faint);
 }
 .audio-settings__binding-clear {
   flex: 0 0 auto;

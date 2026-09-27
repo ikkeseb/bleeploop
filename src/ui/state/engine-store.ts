@@ -711,8 +711,6 @@ export const engineLooper = {
   },
   selectedTrack,
   selectTrack: (i: number): void => sendEngine({ SelectTrack: clampLane(i) }),
-  recDubSelected: (): void => sendEngine({ RecDub: selectedTrack() }),
-  playStopSelected: (): void => sendEngine({ PlayStop: selectedTrack() }),
   track: (i: number): Accessor<TrackView> => lanes[i][0],
   trackInfo: (i: number): TrackView => lanes[i][0](),
   masterLengthFrames: masterFrames,

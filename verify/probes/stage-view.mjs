@@ -8,10 +8,12 @@
  * MUTED and an ARMED later take waiting for the downbeat; a refused Enter shows its reason on its lane;
  * digit and pointer selection move the warm-white edge. With the view open no computer key plays a note
  * or a drum pad (a held A / 3 lights no key, each checked against a control outside the view), and drum
- * mode's 3 selects lane 3. Legibility, measured at 1280x820, 1920x1080 and
- * 1000x700: the state word's cap height (Geist 'E' ascent) and the beat bar's height, and nothing clips
- * or overlaps (word and number inside the pillar, even for the longest words ENDING / TAKE 12; header
- * values inside their boxes; lanes inside the window). No console.error. Screenshots land in
+ * mode's 3 selects lane 3. The bar counter reads — with no loop, and on a 2- and a 4-bar loop at 240 BPM
+ * shows the bar the loop phase is in, stepping one bar at a time across the loop boundary. Legibility,
+ * measured at 1280x820, 1920x1080 and 1000x700: the state word's cap height (Geist 'E' ascent) and the
+ * beat bar's height, and nothing clips or overlaps (word and number inside the pillar, even for the
+ * longest words ENDING / TAKE 12; header values inside their boxes, the bar counter's widest "32 / 32"
+ * too, at the BPM's size; lanes inside the window). No console.error. Screenshots land in
  * logs/stage-view/<viewport>-<scene>.png for the eye. Sees the rendered DOM and computed styles in
  * Chromium, never WebView2, the engine-mode feed or the distance it is read from.
  * Run: pnpm probe stage-view
@@ -113,7 +115,20 @@ await probe(async ({ open }) => {
     const exit = r(document.querySelector('.sv-exit'));
     if (!inside(exit, { left: 0, top: 0, right: innerWidth, bottom: innerHeight })) problems.push('EXIT outside the window');
     const beatBoxes = [...document.querySelectorAll('.sv-beat')].map((b) => Math.round(r(b).width));
-    return { beatBarPx: Math.round(beats.height), beatBoxes, words, problems };
+    // The bar counter's widest reading, "32 / 32", in a hidden copy of its box.
+    const barStat = document.querySelector('.sv-stat--bar');
+    const widest = barStat.cloneNode(true);
+    widest.style.cssText = 'position: absolute; visibility: hidden';
+    const widestVal = widest.querySelector('.sv-stat__val');
+    widestVal.className = 'sv-stat__val';
+    widestVal.innerHTML = '32<span class="sv-unit">/ 32</span>';
+    barStat.parentElement.append(widest);
+    for (const part of widest.children) if (!inside(r(part), r(widest))) problems.push('header: "32 / 32" clips the bar counter');
+    widest.remove();
+    const px = (q) => parseFloat(getComputedStyle(document.querySelector(q)).fontSize);
+    const barFontPx = px('.sv-stat--bar .sv-stat__val');
+    if (barFontPx !== px('.sv-stat--bpm .sv-stat__val')) problems.push(`the bar counter (${barFontPx} px) is smaller than the BPM`);
+    return { beatBarPx: Math.round(beats.height), beatBoxes, barFontPx, words, problems };
   });
 
   await page.evaluate(() => {
@@ -149,6 +164,7 @@ await probe(async ({ open }) => {
   // ---- real takes through the transport keys, inside the view ----
   await page.waitForTimeout(200);
   await checkWords('empty');
+  assert.equal(await page.locator('.sv-stat--bar .sv-stat__val').textContent(), '—', 'no loop: the bar counter reads —');
   // Fixed sizes: the lane boxes measured now must not move when the states change (checked at 'mixed').
   const boxes = () => page.evaluate(() => [...document.querySelectorAll('.sv-lane')].map((l) =>
     ['.sv-pillar', '.sv-well', '.sv-ind'].map((q) => { const b = l.querySelector(q).getBoundingClientRect(); return [b.x, b.y, b.width, b.height].map(Math.round).join(','); }).join(' ')));
@@ -210,7 +226,7 @@ await probe(async ({ open }) => {
     await page.waitForTimeout(300);
     const m = await measure();
     legibility[vp] = m;
-    console.log(JSON.stringify({ vp, beatBarPx: m.beatBarPx, beatBoxes: m.beatBoxes, word: m.words[0], problems: m.problems }));
+    console.log(JSON.stringify({ vp, beatBarPx: m.beatBarPx, beatBoxes: m.beatBoxes, barFontPx: m.barFontPx, word: m.words[0], problems: m.problems }));
     assert.deepEqual(m.problems, [], `${vp}: nothing clips or overlaps`);
     await shoot('mixed');
   }
@@ -282,6 +298,55 @@ await probe(async ({ open }) => {
   assert.equal(drumSel[2].selected, true, 'inside the view, drum mode 3 selects lane 3');
   await page.keyboard.press('Escape');
   await expectOpen(false, 'Escape closes after the drum check');
+
+  // ---- the bar counter: the bar of the loop that plays, across a loop boundary, on a 2- and a 4-bar loop ----
+  // A loop at 240 BPM (one bar a second), sampled every 40 ms for a loop and a half: the counter's reading
+  // beside the loop phase read in the same instant. Away from a bar line the reading is the phase's bar; at
+  // a bar line it may still show the bar before (it moves on the beat, not per frame).
+  const barCounter = async (bars) => {
+    await page.evaluate(async (n) => {
+      const lf = window.__lf;
+      const { defaultFxStates } = await import('/src/audio/fx/fx.ts');
+      lf.looper.clearAll();
+      const bpm = 240;
+      const frames = Math.round(lf.engine.ctx.sampleRate * (60 / bpm) * 4 * n);
+      const pcm = new Float32Array(frames);
+      for (let f = 0; f < frames; f++) pcm[f] = 0.3 * Math.sin(f / 60);
+      await lf.looper.loadSession({ bpm, bars: n, masterLengthFrames: frames,
+        tracks: [{ index: 0, pcm, volume: 1, muted: false, reversed: false, state: 'PLAYING', fx: defaultFxStates() }] });
+    }, bars);
+    await page.keyboard.press('b');
+    await expectOpen(true, `B opens over a ${bars}-bar loop`);
+    await page.waitForTimeout(300);
+    const samples = await page.evaluate(async (n) => {
+      const seen = [];
+      const until = performance.now() + (n + 1.5) * 1000;
+      while (performance.now() < until) {
+        seen.push({ text: document.querySelector('.sv-stat--bar .sv-stat__val').textContent, phase: window.__lf.looper.phaseValue() });
+        await new Promise((resolve) => setTimeout(resolve, 40));
+      }
+      return seen;
+    }, bars);
+    vp = '1280x820';
+    await shoot(`bar-counter-${bars}`);
+    await page.keyboard.press('Escape');
+    await expectOpen(false, 'Escape closes after the bar counter');
+    const readings = samples.map(({ text, phase }) => {
+      const m = /^(\d+)\s*\/\s*(\d+)$/.exec(text.trim());
+      const at = phase * bars;
+      return { bar: m ? Number(m[1]) : null, of: m ? Number(m[2]) : null, want: Math.floor(at) + 1, nearLine: at % 1 < 0.15 || at % 1 > 0.9 };
+    });
+    const sequence = readings.map((x) => x.bar).filter((b, i, all) => i === 0 || b !== all[i - 1]);
+    console.log(JSON.stringify({ scene: `bar-counter-${bars}`, samples: readings.length, sequence }));
+    assert.ok(readings.every((x) => x.of === bars), `${bars}-bar loop: every reading is "N / ${bars}" (${[...new Set(samples.map((x) => x.text))].join(', ')})`);
+    const wrong = readings.filter((x) => !x.nearLine && x.bar !== x.want);
+    assert.deepEqual(wrong, [], `${bars}-bar loop: away from a bar line the counter shows the phase's bar`);
+    assert.ok(sequence.every((b, i) => i === 0 || b === (sequence[i - 1] % bars) + 1), `${bars}-bar loop: the counter steps one bar at a time and wraps (${sequence.join(' ')})`);
+    assert.ok(sequence.some((b, i) => i > 0 && b === 1 && sequence[i - 1] === bars), `${bars}-bar loop: it crossed the loop boundary ${bars} → 1 (${sequence.join(' ')})`);
+    assert.deepEqual([...new Set(sequence)].sort((a, b) => a - b), Array.from({ length: bars }, (_, i) => i + 1), `${bars}-bar loop: every bar shows`);
+  };
+  await barCounter(2);
+  await barCounter(4);
 
   const errors = consoleErrors.filter((t) => !t.startsWith('[rec-comp] snapshot'));
   assert.deepEqual(errors, [], 'no console.error');
