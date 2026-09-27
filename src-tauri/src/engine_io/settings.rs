@@ -8,7 +8,8 @@
 //! notes) acts once and is not kept. What the engine resets, the memory forgets, as the feed reads it
 //! happen: a cleared lane's volume, mute, DUB FEEDBACK and FX (`cleared`, on the engine's `Cleared`
 //! event: CLEAR, a pedal's CLEAR, CLEAR ALL), and a COPY hands the
-//! destination the source's (`copy_lane`, on `Copied`). A setting for a lane sent in the moment between
+//! destination the source's (`copy_lane`, on `Copied`, whose DUB FEEDBACK is the value the engine copied,
+//! not the source's as the memory holds it by then). A setting for a lane sent in the moment between
 //! its clear and the feed reading it (a block and a feed tick) is forgotten with it. What the engine sets
 //! itself, the memory keeps as if the UI had sent it: a pedal's MUTE (`Muted`, as `SetMute`).
 
@@ -140,8 +141,9 @@ impl Settings {
         }
     }
 
-    /// Lane `to` took lane `from`'s mixer, DUB FEEDBACK and FX (the engine's COPY).
-    pub(crate) fn copy_lane(&mut self, from: u8, to: u8) {
+    /// Lane `to` took lane `from`'s mixer and FX, and the DUB FEEDBACK `feedback` (the engine's COPY,
+    /// whose `Copied` says what it copied: the source's may have moved before the copy was done).
+    pub(crate) fn copy_lane(&mut self, from: u8, to: u8, feedback: f32) {
         if from == to {
             return;
         }
@@ -163,6 +165,7 @@ impl Settings {
             })
             .collect();
         self.last.extend(copied);
+        self.record(&Command::SetDubFeedback(to, feedback));
     }
 
     /// The engine cleared lane `lane`: its volume, mute, DUB FEEDBACK and FX are back at their defaults.
@@ -229,10 +232,15 @@ mod tests {
         s.record(&Command::SetDubFeedback(0, 0.25));
         s.record(&Command::SetMasterVolume(0.7));
         s.record(&Command::SetInputSend(InputSend::Reverb, true));
-        s.copy_lane(0, 3);
+        s.copy_lane(0, 3, 0.25);
         assert!(replay(&s).contains(&Command::SetFxParam(3, FxParam::Cutoff, 900.0)));
         assert!(replay(&s).contains(&Command::SetVolume(3, 0.5)));
         assert!(replay(&s).contains(&Command::SetDubFeedback(3, 0.25)), "COPY hands DUB FEEDBACK on");
+        // The source moved on before the copy was done: the copy keeps the value the engine copied.
+        s.record(&Command::SetDubFeedback(0, 0.75));
+        s.copy_lane(0, 4, 0.25);
+        assert!(replay(&s).contains(&Command::SetDubFeedback(4, 0.25)), "the copied value, not the source's since");
+        assert!(replay(&s).contains(&Command::SetDubFeedback(0, 0.75)));
         assert!(!s.record(&Command::Clear(0)), "a CLEAR is an action: the engine's Cleared event is what forgets");
         assert!(replay(&s).contains(&Command::SetVolume(0, 0.5)));
         s.cleared(0);

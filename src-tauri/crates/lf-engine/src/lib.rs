@@ -36,7 +36,10 @@
 //!   the plain sum, bit for bit; 0 replaces). The undo target is still the loop at dub start.
 //! - **FADE is a pending stop with a ramp:** every playing lane stops on a bar line (the click's grid), its
 //!   level ramped down to it over the stored volume, which never moves; what a loop-end stop refuses, a
-//!   fading lane refuses too (`Refusal::Fading`).
+//!   fading lane refuses too (`Refusal::Fading`). The ramp is on the lane before its FX and on its delay's
+//!   feedback, so its returns (the delay, the reverb send) fall with it and what rings on past the bar
+//!   line is the tail of a loop already faded out; a lane started meanwhile is untouched, and a stop now
+//!   (a second press, STOP ALL) leaves the returns ringing as any stop does.
 //! - **One clock: the device frame.** Input frame `x` is captured at frame `x`; a lane plays loop
 //!   position `(f - anchor) mod master` at frame `f`. A take starts `align_frames` (+ the live effect
 //!   slot's latency, from the block after its live flag changes, and the master limiter's pre-delay)
@@ -62,12 +65,15 @@
 //!   behind it, except the instruments', the plugin slots' and the input sends' (a note never waits on
 //!   the looper). A full command table leaves the rest in the ring for the next block: late, never
 //!   dropped. A jump in the device frame moves every job's schedule with it (`Looper::skip`): work is
-//!   owed for the frames rendered, never for the ones the device lost.
+//!   owed for the frames rendered, never for the ones the device lost. An overdub an input gap damaged
+//!   (a jump's, an xrun's) writes nothing more, so its undo copy reads only the loop before it and the
+//!   rejection at its end restores that bit for bit.
 //! - **A command is judged when it is pressed**: one that would do nothing then is dropped, never held.
 //!   A hands-free press ([`Action`]) acts on the lane the engine has selected when it lands, or a named
-//!   one, never on what the UI last saw on the feed: HALVE's bars, HOLD's lane and a pedal MUTE's state
-//!   are the engine's. Every looper press but CLEAR's confirming one disarms a pending pedal CLEAR (a
-//!   pedal's setting toggle says it is one with [`Command::Press`]); a setting alone does not.
+//!   one, never on what the UI last saw on the feed: HALVE's bars, HOLD's lane (per pedal: an accepted
+//!   press's, for that pedal's release) and a pedal MUTE's state are the engine's. Every looper press
+//!   but CLEAR's confirming one disarms a pending pedal CLEAR (a pedal's setting toggle says it is one
+//!   with [`Command::Press`]); a setting alone does not.
 //! - **The engine never drops a plugin unit** (a drop frees memory and calls into the plugin's DLL).
 //!   Units enter and leave through their slot's [`SlotPort`], at a block start (at once while no device
 //!   runs: [`Engine::service_slots_idle`]); a removal releases the slot's notes,

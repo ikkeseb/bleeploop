@@ -3,11 +3,16 @@
 //! default 2) from the press, on the click's grid. The fade is its own gain over the lane's volume,
 //! which never moves, so PLAY ALL brings the lanes back at their level. A second press stops the
 //! fading lanes at once; so do STOP ALL and a lane's PLAY/STOP, as for a loop-end stop. Refused while a
-//! lane captures and with nothing playing. No web guard precedes this: the Web Audio looper never faded.
+//! lane captures and with nothing playing. The lane's FX returns fall with it (its delay's feedback takes
+//! the ramp): on the final output, past the bar line only the tail of the faded loop rings on, far below
+//! what a plain stop there leaves; a stop at once leaves them ringing as STOP ALL does, and a lane
+//! started during the fade keeps its returns whole. No web guard precedes this: the Web Audio looper
+//! never faded.
 
 mod common;
 
 use common::{Opts, Rig};
+use lf_engine::dsp::fx::{FxKind, FxParam};
 use lf_engine::grid::Frame;
 use lf_engine::{Action, Command, Event, LaneState, Refusal};
 
@@ -265,4 +270,137 @@ fn the_click_stops_where_the_fade_ends() {
     let clicks = rig.clicks_since(mark);
     assert_eq!(clicks.len(), 8, "the two bars' beats click: {clicks:?}");
     assert!(clicks.iter().all(|&(f, _)| f < end), "and none from the bar line on");
+}
+
+// ── The lane's FX returns: its delay and its reverb send ─────────────────────────────────────────────
+
+/// A deterministic noise, within ±`level`.
+fn noise(f: Frame, level: f32) -> f32 {
+    let h = (f as u64 ^ 0x5DEE_CE66D).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    ((h >> 40) as f32 / (1u64 << 24) as f32 * 2.0 - 1.0) * level
+}
+
+/// Lane `lane`'s delay on at feedback 0.95 and half wet, and its reverb send full.
+fn engage_returns(rig: &mut Rig, lane: u8) {
+    rig.set(Command::SetFxBypass(lane, FxKind::Delay, false));
+    rig.set(Command::SetFxParam(lane, FxParam::Feedback, 0.95));
+    rig.set(Command::SetFxParam(lane, FxParam::Mix, 0.5));
+    rig.set(Command::SetFxBypass(lane, FxKind::Reverb, false));
+    rig.set(Command::SetFxParam(lane, FxParam::Amount, 1.0));
+}
+
+/// Lane 0 PLAYING a two-bar loop of noise at 120 bpm through its delay and reverb (`engage_returns`),
+/// four bars on so the echoes have built up, the input silent; the output kept from here.
+fn with_returns() -> Rig {
+    let mut rig = Rig::with(Opts { sr: SR, start: SR as Frame, ..Default::default() });
+    rig.set_input(|f| noise(f, 0.05));
+    rig.record_first_take(0, 2, 240);
+    rig.set_level(0.0);
+    engage_returns(&mut rig, 0);
+    rig.idle();
+    rig.advance(4 * rig.fpb());
+    rig.advance_to(next_bar(&rig));
+    rig.keep_output();
+    rig
+}
+
+/// The final output (the left channel, after the limiter) over device frames `[a, b)`.
+fn out(rig: &Rig, a: Frame, b: Frame) -> &[f32] {
+    let start = rig.output.as_ref().unwrap().0;
+    &rig.heard[(a - start) as usize..(b - start) as usize]
+}
+
+fn db(ratio: f64) -> f64 {
+    20.0 * ratio.log10()
+}
+
+#[test]
+fn a_fade_takes_the_lanes_delay_and_reverb_down_with_it_and_leaves_only_their_tail() {
+    let mut faded = with_returns();
+    let mut stopped = with_returns();
+    let (press, fpb) = (faded.frame, faded.fpb());
+    let end = press + 2 * fpb;
+    fade(&mut faded);
+    assert_eq!(faded.lane(0).stop_at, Some(end));
+    // The twin stops plainly on the same bar line: its returns ring on with the loop at full level.
+    stopped.advance_to(end);
+    stopped.press(Command::PlayStop(0));
+    for rig in [&mut faded, &mut stopped] {
+        rig.advance_to(end + 2 * fpb);
+    }
+    let before = rms(out(&stopped, press, end));
+    let bars = [rms(out(&faded, press, press + fpb)), rms(out(&faded, press + fpb, end))];
+    let tail = [rms(out(&faded, end, end + fpb)), rms(out(&faded, end + fpb, end + 2 * fpb))];
+    let full = rms(out(&stopped, end, end + fpb));
+    println!(
+        "unfaded {before:.5}; fading bars {bars:.5?}; after the bar line [{:.2e}, {:.2e}] ({:.1} dB below a plain stop's {full:.5})",
+        tail[0],
+        tail[1],
+        -db(tail[0] / full)
+    );
+    assert!(bars[0] < before && bars[1] < bars[0] / 4.0, "the whole lane falls through the fade");
+    assert!(full > before / 4.0, "a plain stop leaves the returns ringing");
+    assert!(db(tail[0] / full) < -30.0, "a fade leaves only the tail of what had faded: {:.1} dB", db(tail[0] / full));
+    assert!(tail[0] > 0.0 && tail[1] < tail[0], "a tail, dying away");
+}
+
+#[test]
+fn a_second_press_stops_the_returns_input_as_stop_all_does_and_they_ring_on_from_where_they_were() {
+    let mut second = with_returns();
+    let mut stop_all = with_returns();
+    let fpb = second.fpb();
+    for rig in [&mut second, &mut stop_all] {
+        fade(rig);
+        rig.advance(fpb / 2);
+    }
+    let now = second.frame;
+    fade(&mut second);
+    stop_all.press(Command::StopAll);
+    for rig in [&mut second, &mut stop_all] {
+        rig.advance(fpb);
+    }
+    assert_eq!(second.state(0), LaneState::Stopped);
+    assert_eq!(out(&second, now, now + fpb), out(&stop_all, now, now + fpb), "the returns as STOP ALL leaves them");
+    let quarter = fpb / 4;
+    let (last, next) = (rms(out(&second, now - quarter, now)), rms(out(&second, now, now + quarter)));
+    println!("the quarter bar before the second press {last:.5}, after it {next:.5}");
+    assert!(next > 0.0 && next < last, "they ring on, and nothing comes back louder");
+}
+
+#[test]
+fn a_lane_started_during_a_fade_keeps_its_returns_whole() {
+    // Lane 0 fades (muted from the start, so it and its FX never sound); lane 1, started during the fade
+    // with its own delay and reverb, sounds bit for bit as it does when lane 0 simply stops on the
+    // fade's bar line.
+    let twin = |fades: bool| {
+        let mut rig = Rig::with(Opts { sr: SR, start: SR as Frame, ..Default::default() });
+        rig.set(Command::SetMute(0, true));
+        rig.set_input(|f| noise(f, 0.05));
+        rig.record_first_take(0, 2, 240);
+        rig.set_level(0.0);
+        rig.press(Command::Copy(0));
+        rig.idle();
+        rig.press(Command::PlayStop(1));
+        rig.set(Command::SetMute(1, false));
+        engage_returns(&mut rig, 1);
+        rig.advance_to(next_bar(&rig));
+        rig.keep_output();
+        let end = rig.frame + 2 * rig.fpb();
+        if fades {
+            fade(&mut rig);
+            assert_eq!(rig.lane(0).stop_at, Some(end));
+        } else {
+            rig.send_at(end, Command::PlayStop(0));
+            rig.advance(1);
+        }
+        rig.advance(rig.fpb() / 2);
+        rig.press(Command::PlayStop(1));
+        assert!(rig.state(1) == LaneState::Playing && !rig.lane(1).fading);
+        rig.advance_to(end + 2 * rig.fpb());
+        assert_eq!(rig.state(0), LaneState::Stopped);
+        rig.heard.clone()
+    };
+    let (fading, plain) = (twin(true), twin(false));
+    assert!(rms(&fading) > 0.0);
+    assert!(fading.iter().zip(&plain).all(|(a, b)| a.to_bits() == b.to_bits()), "lane 1 untouched by lane 0's fade");
 }

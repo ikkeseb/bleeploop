@@ -43,9 +43,10 @@ import { notifyError, notifyInfo } from '../../notify';
  * The engine owns the musical state: lanes, the transport (master, BPM and its lock), the beat and the
  * selection arrive on the feed, and nothing here predicts them. It does not echo settings, so this store
  * keeps them (lane volume, mute, DUB FEEDBACK and FX, the take modes and FADE's bars, click, master, the
- * input sends): it sends each change, mirrors the engine's CLEAR (`Cleared`: the lane's mix resets), COPY
- * (`Copied`) and a pedal's MUTE (`Muted`), and on a `reset` frame takes the
- * settings the engine remembers, so the screen shows what the engine plays. `engineSession` is the
+ * input sends; FADE's bars, click, master and the sends across a restart too): it sends each change,
+ * mirrors the engine's CLEAR (`Cleared`: the lane's mix resets), COPY (`Copied`) and a pedal's MUTE
+ * (`Muted`), and on a `reset` frame takes the settings the engine remembers, so the screen shows what
+ * the engine plays. `engineSession` is the
  * engine as export, recovery and import see it: the engine's PCM with this store's mix, and the token of
  * the player's clear that emptied the looper (recovery deletes the jam for it, and keeps it for a new
  * engine's empty lanes). `openEngineDevice` turns the engine's refusal of a switch to another rate into
@@ -153,7 +154,20 @@ const [fixedBars, setFixedBarsSignal] = createSignal(4);
 /** FADE's lengths in bars (Rust `looper::FADE_BARS`) and the default. */
 export const FADE_BARS = [1, 2, 4, 8] as const;
 const DEFAULT_FADE_BARS = 2;
-const [fadeBars, setFadeBarsSignal] = createSignal(DEFAULT_FADE_BARS);
+/** FADE's bars outlive a restart, as the master and click levels do: restored at boot, sent to an engine
+ * that lacks them, adopted (and kept) from one that has them. */
+const FADE_BARS_KEY = 'lf.fadeBars';
+/** The longest of `FADE_BARS` at most `n`, at least the shortest (the engine's `set_fade_bars`). */
+const fadeBarsOf = (n: number): number => [...FADE_BARS].reverse().find((b) => b <= n) ?? FADE_BARS[0];
+const [fadeBars, setFadeBarsSignal] = createSignal(
+  fadeBarsOf(readStoredNumber(FADE_BARS_KEY, DEFAULT_FADE_BARS, FADE_BARS[0], FADE_BARS[FADE_BARS.length - 1])),
+);
+
+function adoptFadeBars(n: number): void {
+  const bars = fadeBarsOf(n);
+  setFadeBarsSignal(bars);
+  writeStoredNumber(FADE_BARS_KEY, bars);
+}
 const [retake, setRetakeSignal] = createSignal(false);
 const [autoRecord, setAutoRecordSignal] = createSignal(false);
 const [autoSensitivity, setAutoSensitivitySignal] = createSignal(AUTO_RECORD_DEFAULT_SENSITIVITY);
@@ -426,7 +440,7 @@ function applyEvent(ev: EngineEvent): void {
       );
       break;
     case 'Copied':
-      copyLaneMix(ev.from, ev.to);
+      copyLaneMix(ev.from, ev.to, ev.feedback);
       break;
     case 'Cleared':
       // Before the lane's own Lane event: its state is still the one the clear ended.
@@ -607,12 +621,12 @@ function clearLaneMix(lane: number): void {
   fxVersions[lane][1]((v) => v + 1);
 }
 
-/** The engine copied lane `from` whole into `to` (its volume, mute, DUB FEEDBACK and FX with it): mirror
- * that. */
-function copyLaneMix(from: number, to: number): void {
+/** The engine copied lane `from` whole into `to` (its volume, mute and FX with it, and the DUB FEEDBACK
+ * `feedback` its `Copied` says it copied, which the source's may have moved on from): mirror that. */
+function copyLaneMix(from: number, to: number, feedback: number): void {
   volumes[to][1](volumes[from][0]());
   setMutePlain(to, mutes[from][0]());
-  dubFeedbacks[to][1](dubFeedbacks[from][0]());
+  dubFeedbacks[to][1](feedback);
   fx[to] = fx[from].map((s) => ({ bypassed: s.bypassed, params: { ...s.params } }));
   fxVersions[to][1]((v) => v + 1);
 }
@@ -626,8 +640,8 @@ function setMutePlain(lane: number, on: boolean): void {
  * A reset frame: take over the settings the engine remembers (one missing from `settings` is at the
  * engine's default, which is the UI's) instead of pushing the UI's, so a WebView reload keeps a
  * playing session's mix and modes. The UI still sends what it persists and the engine lacks (the master
- * and click volumes and the input sends on a first launch) and what it owns: the note target, the slot gains and the live
- * slot (`engineResync`).
+ * and click volumes, FADE's bars and the input sends on a first launch) and what it owns: the note
+ * target, the slot gains and the live slot (`engineResync`).
  */
 function adoptSettings(settings: readonly EngineCommand[]): void {
   setMasterMutedSignal(false);
@@ -635,13 +649,13 @@ function adoptSettings(settings: readonly EngineCommand[]): void {
   setLoopEndStopSignal(false);
   setFixedLengthSignal(false);
   setFixedBarsSignal(4);
-  setFadeBarsSignal(DEFAULT_FADE_BARS);
   setRetakeSignal(false);
   setAutoRecordSignal(false);
   setAutoSensitivitySignal(AUTO_RECORD_DEFAULT_SENSITIVITY);
   for (let i = 0; i < ENGINE_LANES; i++) clearLaneMix(i);
   let masterKnown = false;
   let clickKnown = false;
+  let fadeKnown = false;
   const sendsKnown = new Set<string>();
   for (const c of settings) {
     if (typeof c === 'string') continue;
@@ -664,7 +678,10 @@ function adoptSettings(settings: readonly EngineCommand[]): void {
     else if ('SetLoopEndStop' in c) setLoopEndStopSignal(c.SetLoopEndStop);
     else if ('SetFixedLength' in c) setFixedLengthSignal(c.SetFixedLength);
     else if ('SetFixedBars' in c) setFixedBarsSignal(c.SetFixedBars);
-    else if ('SetFadeBars' in c) setFadeBarsSignal(c.SetFadeBars);
+    else if ('SetFadeBars' in c) {
+      fadeKnown = true;
+      adoptFadeBars(c.SetFadeBars);
+    }
     else if ('SetRetake' in c) setRetakeSignal(c.SetRetake);
     else if ('SetAutoRecord' in c) setAutoRecordSignal(c.SetAutoRecord);
     else if ('SetAutoSensitivity' in c) setAutoSensitivitySignal(c.SetAutoSensitivity);
@@ -687,6 +704,7 @@ function adoptSettings(settings: readonly EngineCommand[]): void {
   const lacking: EngineCommand[] = [];
   if (!masterKnown) lacking.push({ SetMasterVolume: masterVolume() });
   if (!clickKnown) lacking.push({ SetClickVolume: clickVolume() });
+  if (!fadeKnown) lacking.push({ SetFadeBars: fadeBars() });
   // The input sends the engine lacks: values first, so a send that comes on comes on with them.
   for (const d of INPUT_SEND_PARAMS) {
     if (!sendsKnown.has(d.key)) lacking.push({ SetInputSendParam: [d.key, inputSendValues[d.key][0]()] });
@@ -789,9 +807,8 @@ export const engineFade = {
   /** FADE's length in bars (one of `FADE_BARS`). */
   bars: fadeBars,
   setBars: (n: number): void => {
-    const bars = [...FADE_BARS].reverse().find((b) => b <= n) ?? FADE_BARS[0];
-    setFadeBarsSignal(bars);
-    sendEngine({ SetFadeBars: bars });
+    adoptFadeBars(n);
+    sendEngine({ SetFadeBars: fadeBars() });
   },
   /** Every playing lane fades out over the bars and stops on the bar line; a second press stops them now. */
   fadeAll: (): void => sendEngine({ Action: 'FadeAll' }),

@@ -108,7 +108,7 @@ impl Feed {
                 Event::Lane { frame, lane, info } if usize::from(lane) < TRACK_COUNT => self.lanes[usize::from(lane)] = Some((frame, info)),
                 Event::Transport { .. } => self.transport = Some(*event),
                 Event::Selected { frame, lane } => self.selected = (frame, lane),
-                Event::Copied { from, to, .. } => self.host.copied(from, to),
+                Event::Copied { from, to, feedback, .. } => self.host.copied(from, to, feedback),
                 Event::Cleared { lane, .. } => self.host.cleared(lane),
                 Event::Muted { lane, on, .. } => self.host.muted(lane, on),
                 _ => {}

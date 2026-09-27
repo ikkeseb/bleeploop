@@ -13,6 +13,11 @@
 //! Bypassed means wet 0, and a CrossFade at 0 still mixes `b` in at −56 dB (see the crossfade
 //! module): the echoes of a bypassed delay are in every chain's output, so this node renders them.
 //! The fx-delay-* scenarios judge the effect itself (`tests/fx_delay_pitch.rs`).
+//!
+//! The engine's FADE (no Tone counterpart) hands a fading lane's gain to [`DelayFx::process`]: the
+//! feedback takes it too, so the echoes the delay held before the fade fall with the lane (at feedback
+//! 0.95 they would otherwise ring on at their old level long after it stopped), and what the delay
+//! still holds at the lane's stop is the echo of a loop already faded out.
 
 use super::{clamp_index, division_beats, Ctl, FxParam, FxState, FxTiming, DIVISIONS, MAX_FEEDBACK, RAMP};
 use crate::dsp::crossfade::CrossFade;
@@ -134,10 +139,15 @@ impl DelayFx {
         self.previous = self.returned;
     }
 
-    pub(super) fn process(&mut self, at: usize, input: &[f32], out: &mut [f32]) {
+    /// `fade`: a fading lane's gain on these frames, which the feedback takes as well.
+    pub(super) fn process(&mut self, at: usize, input: &[f32], fade: Option<&[f32]>, out: &mut [f32]) {
         for (i, &x) in input.iter().enumerate() {
             let k = at + i;
-            let send = x + self.previous[k] * self.feedback_values[k];
+            let mut fed = self.previous[k] * self.feedback_values[k];
+            if let Some(fade) = fade {
+                fed *= fade[i];
+            }
+            let send = x + fed;
             let y = self.delay.process_frame(k, send);
             self.returned[k] = y;
             out[i] = x * self.dry_wet.gain_a(k) + y * self.dry_wet.gain_b(k);

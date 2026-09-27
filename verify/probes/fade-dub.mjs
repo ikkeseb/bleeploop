@@ -8,13 +8,15 @@
  *   reason while nothing plays and while a lane records. Lanes the feed reports fading read FADING (the
  *   word where ENDING shows, the well's FADING OUT), in the looper and in the stage view; the pill reads
  *   FADING and a press stops the fade; an engine refusal (`Fading`) lands on its lane. A reset frame's
- *   remembered bars are adopted.
+ *   remembered bars are adopted. The bars persist: across launches of one browser profile, a fresh
+ *   engine gets the bars last chosen, and an engine's remembered bars win and are kept.
  * - `fadeAll` ('Fade out all', `src/app/actions.ts`): in MIDI learn's picker; in engine mode it sends the
  *   engine's action; in web mode (a second page) it says why not on the lane, and no FADE or DUB FEEDBACK
  *   control shows.
  * - DUB FEEDBACK (the lane's FX drawer, `src/ui/looper/FxPanel.tsx`): the slider starts at 100 %, sends
- *   `SetDubFeedback` as a fraction, reads REPLACE at 0; a reset frame's value is adopted, COPY hands it to
- *   the copy and CLEAR resets it (the engine's `Copied` / `Cleared`).
+ *   `SetDubFeedback` as a fraction, reads REPLACE at 0; a reset frame's value is adopted, COPY hands the
+ *   copy the value the engine's `Copied` says it copied (the source may have moved since), and CLEAR
+ *   resets it (`Cleared`).
  *
  * Cannot see the native engine (lf-engine `tests/fade.rs` and `tests/dub_feedback.rs` hold the audio),
  * Tauri IPC or any timing: the fake answers no command by itself, so every state the DOM shows was
@@ -47,7 +49,7 @@ const laneEvent = (i, info, frame = 0) => ({ Lane: { frame, lane: i, info } });
 const transport = (master, locked = true) => ({ Transport: { frame: 0, master, bpm: 120, locked } });
 const anchorAt = (frame) => ({ frame, atMs: Date.now(), rate: RATE, grid: 0 });
 
-await probe(async ({ open }) => {
+await probe(async ({ browser, open }) => {
   await mkdir(outDir, { recursive: true });
   const { page, consoleErrors } = await open({
     viewport: { width: 1600, height: 900 },
@@ -178,9 +180,11 @@ await probe(async ({ open }) => {
   assert.equal(await dubText(), 'REPLACE', '0 % reads as replace');
   await page.locator('.lp-drawer').screenshot({ path: `${outDir}/fx-drawer.png` });
   await dub(0).fill('40');
-  await emit({ events: [{ Copied: { frame: BAR, from: 0, to: 2 } }, laneEvent(2, playing())] });
+  // COPY took 40 %; the source moves to 75 % before the copy's Copied lands, which carries what it copied.
+  await dub(0).fill('75');
+  await emit({ events: [{ Copied: { frame: BAR, from: 0, to: 2, feedback: 0.4 } }, laneEvent(2, playing())] });
   await openFx(2);
-  assert.equal(await dub(2).inputValue(), '40', 'COPY hands DUB FEEDBACK to the copy');
+  assert.equal(await dub(2).inputValue(), '40', "COPY hands the copy the DUB FEEDBACK the engine copied, not the source's later one");
   await emit({ events: [{ Cleared: { frame: BAR, lane: 2 } }, laneEvent(2, playing())] });
   assert.equal(await dub(2).inputValue(), '100', 'CLEAR resets it');
 
@@ -198,6 +202,45 @@ await probe(async ({ open }) => {
   const adopted = await sent();
   assert.ok(!adopted.some((c) => c.SetFadeBars !== undefined || c.SetDubFeedback), 'adopted settings are not pushed back');
   assert.deepEqual(consoleErrors, [], 'no console errors');
+
+  // ── FADE's bars outlive a restart, as the master and click levels do ─────────────────────────────
+  // One browser profile, launched three times: the bars chosen are sent to a fresh engine (which
+  // remembers nothing), and an engine that remembers bars wins and is kept for the next launch.
+  const profile = await browser.newContext({ viewport: { width: 1600, height: 900 } });
+  const launch = async (settings) => {
+    const app = await open({ context: profile, init: (p) => p.addInitScript(() => void (window.__lfEngineFake = true)) });
+    await app.page.waitForFunction(() => window.__lf.native.opened.length === 1, undefined, { timeout: 5000 });
+    await app.page.evaluate((f) => window.__lf.native.emit(f), {
+      seq: 1,
+      reset: true,
+      settings,
+      events: [transport(2 * BAR), laneEvent(0, playing()), { Selected: { frame: 0, lane: 0 } }],
+      anchor: anchorAt(0),
+      meter: { peak: 0, clip: false },
+    });
+    const bars = () => app.page.locator('.transport__fade .transport__bars-val').innerText().then((t) => t.replace(/\s+/g, ' ').trim().toLowerCase());
+    const sentFade = () => app.page.evaluate(() => window.__lf.native.sent.filter((c) => c.SetFadeBars !== undefined));
+    return { ...app, bars, sentFade };
+  };
+  const first = await launch([]);
+  assert.equal(await first.bars(), '2 bars', 'a first launch: the default');
+  const longerThere = first.page.getByRole('button', { name: 'Longer fade', exact: true });
+  await longerThere.click();
+  await longerThere.click();
+  assert.equal(await first.bars(), '8 bars');
+  await first.page.close();
+  const second = await launch([]);
+  assert.equal(await second.bars(), '8 bars', 'a fresh launch keeps 8 bars');
+  assert.deepEqual(await second.sentFade(), [{ SetFadeBars: 8 }], 'and sends them to the engine, which lacks them');
+  await second.page.close();
+  const third = await launch([{ SetFadeBars: 4 }]);
+  assert.equal(await third.bars(), '4 bars', "an engine's remembered bars win");
+  assert.deepEqual(await third.sentFade(), [], 'and are not pushed back');
+  await third.page.close();
+  const fourth = await launch([]);
+  assert.equal(await fourth.bars(), '4 bars', 'the adopted bars are kept for the next launch');
+  for (const app of [first, second, third, fourth]) assert.deepEqual(app.consoleErrors, [], 'no console errors across the launches');
+  await profile.close();
 
   // ── Web mode: no FADE, no DUB FEEDBACK, and the pedal says why ────────────────────────────────────
   const web = await open({ viewport: { width: 1600, height: 900 } });

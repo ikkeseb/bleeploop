@@ -5,7 +5,9 @@
 //! A lane plays through its chain (lane volume first, as the web's gain feeds the chain); the chain's
 //! output goes to the master bus and its reverb send into the one [`ReverbBus`], whose stereo output
 //! goes to the master bus too. Every chain and the bus are built in [`LaneFx::new`] and render every
-//! block, so a delay or reverb tail rings on after its lane stops, as the web's chains do once built.
+//! block, so a delay or reverb tail rings on after its lane stops, as the web's chains do once built. A
+//! lane that FADEs (the engine's own, no web counterpart) takes its returns down with it: its delay feeds
+//! its echoes back under the fade's ramp ([`LaneFx::render`]).
 //!
 //! The DSP runs on its own clock: the device frame less every frame the device skipped (an xrun that
 //! jumps the frame counter), so its blocks always follow each other, as Blink's do. Methods take device
@@ -130,17 +132,21 @@ impl LaneFx {
     }
 
     /// Render frames `frame..frame + n`, inside one quantum: lane `i`'s signal is `lanes[i]`; the chains'
-    /// outputs and the bus's are added to `left`/`right`.
-    pub fn render(&mut self, frame: Frame, lanes: &[[f32; QUANTUM]; TRACK_COUNT], left: &mut [f32], right: &mut [f32]) {
+    /// outputs and the bus's are added to `left`/`right`. A lane `fading` (FADE) has its ramp in
+    /// `fades[i]`: its signal is already ramped, and its delay feeds its echoes back under the ramp too,
+    /// so the echoes it held before the fade die with it instead of ringing on past the bar line at their
+    /// old level (`FxChain::process_fading`). The shared reverb bus is fed the fading send; a lane that
+    /// does not fade is untouched.
+    pub fn render(&mut self, frame: Frame, lanes: &[[f32; QUANTUM]; TRACK_COUNT], fading: [bool; TRACK_COUNT], fades: &[[f32; QUANTUM]; TRACK_COUNT], left: &mut [f32], right: &mut [f32]) {
         let n = left.len();
         let f = self.dsp(frame);
         debug_assert!(n <= QUANTUM && (f % QUANTUM as u64) as usize + n <= QUANTUM, "a render crosses a quantum");
         let sends = &mut self.sends[..n];
         sends.fill(0.0);
         let mut any_send = false;
-        for (chain, lane) in self.chains.iter_mut().zip(lanes) {
+        for (i, (chain, lane)) in self.chains.iter_mut().zip(lanes).enumerate() {
             let (out, send) = (&mut self.out[..n], &mut self.send[..n]);
-            chain.process(f, &lane[..n], out, send);
+            chain.process_fading(f, &lane[..n], fading[i].then(|| &fades[i][..n]), out, send);
             any_send |= !chain.send_silent();
             for (s, &x) in sends.iter_mut().zip(send.iter()) {
                 *s += x;

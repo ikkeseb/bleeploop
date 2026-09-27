@@ -117,10 +117,22 @@ function endWait(b: MidiBinding): void {
   if (awaitingRelease() === b) setAwaitingRelease(null);
 }
 
-// Each HOLD press, by its control, until its release ends the capture there: its target, and the lane
-// the web path acted on (the engine resolves its own).
-const held = new Map<string, { target: Target; lane: number }>();
+// Each HOLD press, by its control, until its release ends the capture there: its target, the lane the
+// web path acted on (the engine resolves its own), and the number the engine knows the control by.
+const held = new Map<string, { target: Target; lane: number; control: number }>();
 const controlKey = (b: MidiBinding) => `${b.port}\n${b.channel}\n${b.kind}\n${b.number}`;
+
+/** The number HOLD's press on control `key` goes to the engine with, which its release repeats: the one
+ * the control holds already (its release was lost), else the smallest no held control has, so two
+ * pedals down at once are two controls to the engine and each release ends its own press. */
+function holdControl(key: string): number {
+  const own = held.get(key);
+  if (own) return own.control;
+  const taken = new Set([...held.values()].map((h) => h.control));
+  let n = 0;
+  while (taken.has(n)) n++;
+  return n;
+}
 
 function save(list: readonly MidiBinding[]): void {
   setBindings(list);
@@ -213,15 +225,17 @@ function consume(port: string, portName: string, status: number, data1: number, 
     runAction(b.action, b.target);
   } else if (high === b.pressHigh) {
     if (b.hold) {
-      held.set(controlKey(b), { target: b.target, lane: targetLane(b.target) });
-      pressHold(b.target);
+      const key = controlKey(b);
+      const control = holdControl(key);
+      held.set(key, { target: b.target, lane: targetLane(b.target), control });
+      pressHold(b.target, control);
     } else {
       runAction(b.action, b.target);
     }
   } else {
     const press = held.get(controlKey(b));
     held.delete(controlKey(b));
-    if (press) releaseHold(press.target, press.lane);
+    if (press) releaseHold(press.target, press.lane, press.control);
   }
   return true;
 }

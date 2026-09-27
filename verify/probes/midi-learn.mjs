@@ -20,7 +20,7 @@
  * track's. In engine mode (the web engine fake) a track action sends the engine's action (`Action` on the
  * engine's own selection, `ActionOn` a named track: MUTE, REV, COPY and HALVE too), a global toggle sends
  * `Press` then its control's command, and HOLD's press and release send the engine's REC/DUB or `Hold` and
- * `Release` whatever the feed shows; an engine refusal (NO MUTE) lands on its lane.
+ * `Release` whatever the feed shows, two selected-track HOLD pedals down at once by two control numbers; an engine refusal (NO MUTE) lands on its lane.
  * logs/midi-learn/bindings.png shows the row and a long list for the eye. It cannot see a real
  * controller, whether WebView2 keeps a port's id across a restart or replug, a real foot against the
  * learn read, or the native engine answering (`STATUS.md` § Play first).
@@ -618,9 +618,9 @@ await probe(async ({ open }) => {
       [15, 'playStop', ''], [16, 'clickToggle', null], [17, 'endStopToggle', null], [18, 'fixedToggle', null],
       [19, 'inFxEcho', null], [20, 'inFxReverb', null], [21, 'mute', '3'], [22, 'recDub', '0'],
       [23, 'mute', ''], [24, 'reverse', ''], [25, 'copy', ''], [26, 'halveTrack', ''], [27, 'halveTrack', '2'],
-      [28, 'tapTempo', null], [29, 'recDub', ''],
+      [28, 'tapTempo', null], [29, 'recDub', ''], [30, 'recDub', ''],
     ];
-    const holds = [22, 29];
+    const holds = [22, 29, 30];
     for (const [cc, action, target] of bindings) {
       await ep.selectOption(PICK, action, { timeout: 3000 });
       if (target !== null) await ep.selectOption(TARGET, target, { timeout: 3000 });
@@ -645,7 +645,9 @@ await probe(async ({ open }) => {
     const cue4 = await ep.evaluate(() => document.querySelectorAll('.lp-lane')[3]?.querySelector('.lp-lane__wellmsg.is-cue')?.textContent.trim() ?? '');
     // HOLD on track 1: the press, then the release while the feed says the lane overdubs; then a press
     // whose capture never shows (a take that closed itself) and its release: the engine judges each
-    // release, so both are sent. Then HOLD on the selected track: the engine's Hold and Release.
+    // release, so both are sent. Then two HOLD pedals on the selected track, down at once: the engine's
+    // Hold and Release, each by its pedal's control number, which a pedal pressed again after its
+    // release takes back from the free ones.
     const holdStep = async (cc, value, feedState) => {
       await ep.evaluate(() => void (window.__lf.native.sent.length = 0));
       if (feedState) {
@@ -657,7 +659,14 @@ await probe(async ({ open }) => {
       return ep.evaluate(() => window.__lf.native.sent.slice());
     };
     const hold = [await holdStep(22, 127), await holdStep(22, 0, 'Overdubbing'), await holdStep(22, 127, 'Playing'), await holdStep(22, 0)];
-    const holdSelected = [await holdStep(29, 127), await holdStep(29, 0, 'Playing')];
+    const holdSelected = [
+      await holdStep(29, 127),
+      await holdStep(30, 127),
+      await holdStep(29, 0, 'Playing'),
+      await holdStep(29, 127),
+      await holdStep(30, 0),
+      await holdStep(29, 0),
+    ];
     const pressed = (name) => ep.evaluate((n) => document.querySelector(`[aria-label="${n}"]`)?.getAttribute('aria-pressed') ?? null, name);
     return {
       hold,
@@ -818,11 +827,18 @@ await probe(async ({ open }) => {
   check(() => assert.deepEqual(out.engine, {
     hold: [
       [{ SelectTrack: 0 }, { ActionOn: [0, 'RecDub'] }],
-      [{ ActionOn: [0, 'Release'] }],
+      [{ ActionOn: [0, { Release: 0 }] }],
       [{ SelectTrack: 0 }, { ActionOn: [0, 'RecDub'] }],
-      [{ ActionOn: [0, 'Release'] }],
+      [{ ActionOn: [0, { Release: 0 }] }],
     ],
-    holdSelected: [[{ Action: 'Hold' }], [{ Action: 'Release' }]],
+    holdSelected: [
+      [{ Action: { Hold: 0 } }],
+      [{ Action: { Hold: 1 } }],
+      [{ Action: { Release: 0 } }],
+      [{ Action: { Hold: 0 } }],
+      [{ Action: { Release: 1 } }],
+      [{ Action: { Release: 0 } }],
+    ],
     sent: {
       10: [{ SelectTrack: 2 }, { ActionOn: [2, 'RecDub'] }],
       11: [{ ActionOn: [1, 'PlayStop'] }],

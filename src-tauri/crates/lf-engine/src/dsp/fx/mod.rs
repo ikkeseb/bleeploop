@@ -359,7 +359,13 @@ impl FxChain {
     /// Render `input` (frames `frame..frame + input.len()`) into `out` (the chain's output, the dry
     /// path to the master) and `send` (the reverb bus's input from this track).
     pub fn process(&mut self, frame: u64, input: &[f32], out: &mut [f32], send: &mut [f32]) {
-        debug_assert!(input.len() == out.len() && out.len() == send.len());
+        self.process_fading(frame, input, None, out, send);
+    }
+
+    /// [`FxChain::process`] for a lane that fades (the engine's FADE): `fade` is its gain on the same
+    /// frames, which the delay's feedback takes as well ([`DelayFx`]). `None` is `process`, bit for bit.
+    pub fn process_fading(&mut self, frame: u64, input: &[f32], fade: Option<&[f32]>, out: &mut [f32], send: &mut [f32]) {
+        debug_assert!(input.len() == out.len() && out.len() == send.len() && fade.is_none_or(|g| g.len() == input.len()));
         let q = QUANTUM as u64;
         let mut done = 0;
         while done < input.len() {
@@ -375,7 +381,7 @@ impl FxChain {
             self.filter.process(at, &input[span.clone()], a);
             self.pitch.process(at, a, b);
             self.stutter.process(at, b, a);
-            self.delay.process(at, a, &mut out[span.clone()]);
+            self.delay.process(at, a, fade.map(|g| &g[span.clone()]), &mut out[span.clone()]);
             self.reverb.process(at, &out[span.clone()], &mut send[span]);
             done += n;
         }

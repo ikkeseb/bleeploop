@@ -1,7 +1,8 @@
 //! Block jobs (plan § Memory: no loop-sized work in one callback): they are spread over frames, they run
 //! ahead of every head that reads or writes what they touch (checked on the rendered output from the
 //! very frame they start), only the commands that would collide with a job wait for it, and a jump in the
-//! device frame counter moves their schedule instead of making the work it skipped fall due at once.
+//! device frame counter moves their schedule instead of making the work it skipped fall due at once (an
+//! overdub the jump's gap damaged stops writing, so its delayed undo copy still restores it exactly).
 
 mod common;
 
@@ -101,6 +102,35 @@ fn a_layer_rejected_before_its_undo_copy_finished_restores_exactly() {
     rig.set_level(0.0);
     rig.idle();
     assert_eq!(rig.pcm(0), pre);
+}
+
+#[test]
+fn a_jump_while_a_long_loops_undo_copy_runs_rejects_the_layer_and_restores_the_loop_bit_for_bit() {
+    // A 16-bar loop at 8 kHz: 256000 positions, an undo copy of 250 frames. The jump carries the write
+    // head far past the copy, which the jump delays (`Looper::skip`); the dub goes on for a whole loop.
+    let mut rig = Rig::with(Opts { sr: 8000, start: 8000, loop_seconds: 40.0, ..Default::default() });
+    rig.set_input(code);
+    let master = rig.record_first_take(0, 16, 240);
+    rig.set_level(0.0);
+    rig.idle();
+    let pre = rig.pcm(0);
+    assert!(job_frames(master) > 200, "the undo copy outlasts the frames before the jump");
+    let rejected = rig.rejected();
+    rig.set_input(|f| code(f) / 4.0);
+    rig.press(Command::RecDub(0));
+    rig.advance(20);
+    assert!(rig.engine.looper().busy(), "the undo copy still runs");
+    rig.skip(master / 2);
+    rig.advance(master + 1000);
+    rig.press(Command::RecDub(0));
+    rig.set_level(0.0);
+    rig.idle();
+    assert_eq!(rig.rejected(), rejected + 1, "the jump's gap rejects the layer");
+    assert_eq!(rig.state(0), LaneState::Playing);
+    let got = rig.pcm(0);
+    let wrong: Vec<usize> = (0..pre.len()).filter(|&p| got[p].to_bits() != pre[p].to_bits()).collect();
+    assert!(wrong.is_empty(), "{} positions kept the rejected layer, from {:?}", wrong.len(), wrong.first());
+    assert!(!rig.lane(0).can_undo, "no undo target: the loop never had one");
 }
 
 #[test]

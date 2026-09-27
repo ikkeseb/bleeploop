@@ -2,9 +2,9 @@
 //! the engine: every refusal, spoken as an event with its reason, and the selection they act on. A press
 //! acts on the lane the engine has selected when it lands, never on what a feed frame showed the UI: NEXT
 //! TRACK then MUTE, REVERSE, COPY or HALVE in one block act on the new lane, HALVE on the loop as it stands
-//! then, and HOLD's release where its press acted, only while that lane still captures. Every looper
-//! press disarms a pending pedal CLEAR (a pedal's setting toggle says so with `Press`); a setting alone
-//! does not.
+//! then, and HOLD's release where its own pedal's accepted press acted (two pedals down at once are two
+//! controls), only while that lane still captures. Every looper press disarms a pending pedal CLEAR (a
+//! pedal's setting toggle says so with `Press`); a setting alone does not.
 
 mod common;
 
@@ -235,24 +235,24 @@ fn a_hold_release_ends_the_capture_its_press_started_while_that_lane_still_captu
     // Before the capture starts: a first take's count-in, and a later take's boundary arm, are cancelled.
     let mut rig = Rig::new();
     rig.press(Command::SelectTrack(2));
-    rig.press(Command::Action(Action::Hold));
+    rig.press(Command::Action(Action::Hold(0)));
     assert!(rig.lane(2).armed && rig.locked(), "counting in");
     rig.advance(rig.seconds(0.5));
-    rig.press(Command::Action(Action::Release));
+    rig.press(Command::Action(Action::Release(0)));
     assert_eq!(rig.state(2), LaneState::Empty, "the count-in is cancelled");
     assert!(!rig.locked() && rig.master() == 0);
     let mut rig = two_lanes(1);
     rig.press(Command::SelectTrack(2));
-    rig.press(Command::Action(Action::Hold));
+    rig.press(Command::Action(Action::Hold(0)));
     assert!(rig.lane(2).armed, "armed for the boundary");
-    rig.press(Command::Action(Action::Release));
+    rig.press(Command::Action(Action::Release(0)));
     assert_eq!(rig.state(2), LaneState::Empty, "the boundary arm is cancelled");
     // After it starts: the take commits (on to its bar line), an overdub's layer commits.
     rig.set_level(0.25);
-    rig.press(Command::Action(Action::Hold));
+    rig.press(Command::Action(Action::Hold(0)));
     let start = rig.start_frame();
     rig.advance_to(start + rig.fpb() / 2);
-    rig.press(Command::Action(Action::Release));
+    rig.press(Command::Action(Action::Release(0)));
     assert_eq!(rig.end_frame(), start + rig.fpb(), "the release ends the take on its bar line");
     rig.advance_to(start + rig.fpb() + 1);
     rig.set_level(0.0);
@@ -260,10 +260,10 @@ fn a_hold_release_ends_the_capture_its_press_started_while_that_lane_still_captu
     assert_eq!(rig.state(2), LaneState::Playing, "the take commits");
     rig.set_level(0.25);
     rig.press(Command::SelectTrack(0));
-    rig.press(Command::Action(Action::Hold));
+    rig.press(Command::Action(Action::Hold(0)));
     assert_eq!(rig.state(0), LaneState::Overdubbing);
     rig.advance(1000);
-    rig.press(Command::Action(Action::Release));
+    rig.press(Command::Action(Action::Release(0)));
     rig.set_level(0.0);
     assert_eq!(rig.state(0), LaneState::Playing, "the layer commits");
     rig.idle();
@@ -276,11 +276,11 @@ fn a_hold_release_after_fixed_closed_the_take_starts_nothing() {
     rig.set(Command::SetFixedLength(true));
     rig.set(Command::SetFixedBars(1.0));
     rig.press(Command::SelectTrack(2));
-    rig.press(Command::Action(Action::Hold));
+    rig.press(Command::Action(Action::Hold(0)));
     rig.advance_to(rig.end_frame() + 100);
     assert_eq!(rig.state(2), LaneState::Playing, "FIXED closed the take");
     let mark = rig.events.len();
-    rig.press(Command::Action(Action::Release));
+    rig.press(Command::Action(Action::Release(0)));
     rig.advance(1000);
     assert_eq!(rig.state(2), LaneState::Playing, "no overdub starts");
     assert!(rig.window().is_none());
@@ -292,24 +292,77 @@ fn a_hold_release_acts_where_its_press_did_whatever_the_selection_since() {
     let mut rig = two_lanes(1);
     rig.set_level(0.25);
     rig.press(Command::SelectTrack(0));
-    at_once(&mut rig, &[Command::Action(Action::NextTrack), Command::Action(Action::Hold)]);
+    at_once(&mut rig, &[Command::Action(Action::NextTrack), Command::Action(Action::Hold(0))]);
     assert_eq!(rig.state(1), LaneState::Overdubbing, "the press acted on the new lane");
     rig.advance(500);
     rig.press(Command::Action(Action::NextTrack));
-    rig.press(Command::Action(Action::Release));
+    rig.press(Command::Action(Action::Release(0)));
     rig.set_level(0.0);
     assert_eq!((rig.state(1), rig.state(2)), (LaneState::Playing, LaneState::Empty), "the release ended lane 1's layer");
     // A second release has no press to answer.
     rig.press(Command::SelectTrack(1));
-    rig.press(Command::Action(Action::Release));
+    rig.press(Command::Action(Action::Release(0)));
     assert_eq!(rig.state(1), LaneState::Playing);
     // A named HOLD presses REC/DUB there and releases there.
     rig.set_level(0.25);
     rig.press(Command::ActionOn(0, Action::RecDub));
     assert_eq!(rig.state(0), LaneState::Overdubbing);
-    rig.press(Command::ActionOn(0, Action::Release));
+    rig.press(Command::ActionOn(0, Action::Release(0)));
     rig.set_level(0.0);
     assert_eq!(rig.state(0), LaneState::Playing);
+}
+
+#[test]
+fn two_hold_pedals_each_release_only_the_capture_their_own_press_started() {
+    // Pedal A (control 0) holds lane 0's overdub; pedal B (control 1), pressed on lane 1 meanwhile, is
+    // refused (another lane records) and remembers nothing. B's release, before or after A's, ends
+    // nothing; A's ends lane 0's layer.
+    for b_first in [true, false] {
+        let mut rig = two_lanes(1);
+        rig.set_level(0.25);
+        rig.press(Command::SelectTrack(0));
+        rig.press(Command::Action(Action::Hold(0)));
+        assert_eq!(rig.state(0), LaneState::Overdubbing);
+        rig.press(Command::Action(Action::NextTrack));
+        let mark = rig.events.len();
+        rig.press(Command::Action(Action::Hold(1)));
+        assert_eq!(refusals_since(&rig, mark), [(1, Refusal::OtherRecording)], "B is refused");
+        if b_first {
+            rig.press(Command::Action(Action::Release(1)));
+            assert_eq!(rig.state(0), LaneState::Overdubbing, "B's release leaves A's layer be");
+        }
+        rig.press(Command::Action(Action::Release(0)));
+        assert_eq!(rig.state(0), LaneState::Playing, "A's release ends A's layer (B first: {b_first})");
+        rig.press(Command::Action(Action::Release(1)));
+        assert_eq!((rig.state(0), rig.state(1)), (LaneState::Playing, LaneState::Playing), "B's release ends nothing");
+        assert!(rig.window().is_none());
+    }
+    // A refused press also forgets what its control held before: A's release got lost after it held lane
+    // 0, lane 0 overdubs again from the screen, and A pressed on lane 1 is refused; its release leaves
+    // that layer be.
+    let mut rig = two_lanes(1);
+    rig.set_level(0.25);
+    rig.press(Command::SelectTrack(0));
+    rig.press(Command::Action(Action::Hold(0)));
+    rig.press(Command::RecDub(0));
+    assert_eq!(rig.state(0), LaneState::Playing, "ended on screen: A's release never came");
+    rig.idle();
+    rig.press(Command::RecDub(0));
+    assert_eq!(rig.state(0), LaneState::Overdubbing, "an on-screen overdub");
+    rig.press(Command::SelectTrack(1));
+    let mark = rig.events.len();
+    rig.press(Command::Action(Action::Hold(0)));
+    assert_eq!(refusals_since(&rig, mark), [(1, Refusal::OtherRecording)]);
+    rig.press(Command::Action(Action::Release(0)));
+    assert_eq!(rig.state(0), LaneState::Overdubbing, "A's refused press left its release nothing to end");
+    rig.press(Command::RecDub(0));
+    rig.idle();
+    // A control past the table acts, and its release does nothing.
+    rig.press(Command::SelectTrack(0));
+    rig.press(Command::Action(Action::Hold(200)));
+    assert_eq!(rig.state(0), LaneState::Overdubbing);
+    rig.press(Command::Action(Action::Release(200)));
+    assert_eq!(rig.state(0), LaneState::Overdubbing);
 }
 
 /// A pedal's CLEAR on lane 0, then `between`, then CLEAR again inside the confirm window: did it clear?

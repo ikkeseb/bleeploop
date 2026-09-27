@@ -155,6 +155,8 @@ pub struct Engine {
     instruments_done: usize,
     instrument: [Vec<f32>; 2],
     lanes: [[f32; QUANTUM]; TRACK_COUNT],
+    /// A fading lane's ramp over the chunk (`Looper::render`), for its FX.
+    fades: [[f32; QUANTUM]; TRACK_COUNT],
     click: [f32; QUANTUM],
     /// The stereo master bus: the lanes through their FX, the reverb bus, the instruments and the click,
     /// then under the master volume (the limiter's input).
@@ -217,6 +219,7 @@ impl Engine {
             instruments_done: 0,
             instrument: [vec![0.0; config.max_block], vec![0.0; config.max_block]],
             lanes: [[0.0; QUANTUM]; TRACK_COUNT],
+            fades: [[0.0; QUANTUM]; TRACK_COUNT],
             click: [0.0; QUANTUM],
             mix: [vec![0.0; config.max_block], vec![0.0; config.max_block]],
             monitor: vec![0.0; config.max_block],
@@ -460,8 +463,8 @@ impl Engine {
                 *l += x;
                 *r += x;
             }
-            self.looper.render(f, len, &mut self.lanes);
-            self.fx.render(f, &self.lanes, l, r);
+            let fading = self.looper.render(f, len, &mut self.lanes, &mut self.fades);
+            self.fx.render(f, &self.lanes, fading, &self.fades, l, r);
             let click = &mut self.click[..len];
             click.fill(0.0);
             self.clock.render_click(f, click);

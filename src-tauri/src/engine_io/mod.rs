@@ -652,10 +652,11 @@ impl EngineHost {
         if refused { Err("no audio device is open".to_string()) } else { Ok(()) }
     }
 
-    /// Lane `to` took lane `from`'s mixer and FX (the engine's `Copied` event): the kept settings follow.
-    pub(crate) fn copied(&self, from: u8, to: u8) {
+    /// Lane `to` took lane `from`'s mixer and FX, and the DUB FEEDBACK `feedback` (the engine's `Copied`
+    /// event): the kept settings follow.
+    pub(crate) fn copied(&self, from: u8, to: u8, feedback: f32) {
         if let Ok(mut settings) = self.core.settings.lock() {
-            settings.copy_lane(from, to);
+            settings.copy_lane(from, to, feedback);
         }
     }
 

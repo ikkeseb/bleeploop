@@ -182,7 +182,7 @@ await probe(async ({ open }) => {
   await clearSent();
   await page.getByRole('slider', { name: 'Track 1 volume' }).fill('80');
   assert.deepEqual(await sentAtLeast(1), [{ SetVolume: [0, 0.8] }], 'the fader sends SetVolume');
-  await emit({ events: [{ Copied: { frame: BAR, from: 0, to: 1 } }, laneEvent(1, committed)] });
+  await emit({ events: [{ Copied: { frame: BAR, from: 0, to: 1, feedback: 1 } }, laneEvent(1, committed)] });
   assert.equal(await page.getByRole('slider', { name: 'Track 2 volume' }).inputValue(), '80', 'COPY carries the volume');
   // A lane going EMPTY keeps its mix (an aborted take); only the engine's CLEAR resets it.
   await clearSent();

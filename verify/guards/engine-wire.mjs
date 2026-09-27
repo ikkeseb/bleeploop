@@ -66,7 +66,7 @@ check('the fixture covers every command the TS side can send', () =>
   assert.deepEqual([...new Set(fixture.commands.map((c) => tag(c)[0]))].sort(), [...COMMANDS].sort()),
 );
 check('the fixture sends every hands-free action', () => {
-  const actions = fixture.commands.map((c) => c.Action ?? c.ActionOn?.[1]).filter((a) => a !== undefined);
+  const actions = fixture.commands.map((c) => c.Action ?? c.ActionOn?.[1]).filter((a) => a !== undefined).map((a) => tag(a)[0]);
   assert.deepEqual([...new Set(actions)].sort(), [...ACTIONS].sort());
 });
 
@@ -185,6 +185,9 @@ const refused = {
   },
   'an unknown command': () => decodeCommand('Panic'),
   'an unknown action': () => decodeCommand({ Action: 'Panic' }),
+  'a HOLD without its control': () => decodeCommand({ Action: 'Hold' }),
+  'a HOLD release past a u8 control': () => decodeCommand({ ActionOn: [0, { Release: 256 }] }),
+  'a unit action with a payload': () => decodeCommand({ Action: { FadeAll: 1 } }),
   'a press with a payload': () => decodeCommand({ Press: 0 }),
   'a feed frame without its events': () => decodeFeedFrame({ seq: 0, reset: false }),
   'a status without inputOpen': () => {

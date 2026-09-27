@@ -10,7 +10,7 @@ mod common;
 
 use common::{code, Opts, Rig};
 use lf_engine::grid::Frame;
-use lf_engine::{Command, LaneState};
+use lf_engine::{Command, Event, LaneState};
 
 /// 8 kHz keeps the loops short; the frame code stays unique.
 const SR: u32 = 8000;
@@ -57,6 +57,11 @@ fn pass(old: &[f32], fb: f32, input: impl Fn(usize) -> f32) -> Vec<f32> {
 
 #[test]
 fn full_feedback_is_todays_overdub_bit_for_bit() {
+    // The web looper's overdub, computed here without the engine: each position the dub passes becomes
+    // `old + x` in f32, in capture order. Rounding-sensitive input (a full mantissa over the take's small
+    // codes) and several passes, so a sum in another order or precision, or a feedback a hair off 1,
+    // lands on other bits somewhere. The default and an explicit 1 both match it.
+    let input = |f: Frame| ((f as f64 * 0.7373).sin() * 0.3 + 1.0 / 3.0) as f32;
     let mut plain = looping();
     let mut set = looping();
     set.set(Command::SetDubFeedback(0, 1.0));
@@ -64,21 +69,30 @@ fn full_feedback_is_todays_overdub_bit_for_bit() {
     assert_eq!(set.engine.looper().dub_feedback(0), 1.0);
     assert_eq!(plain.engine.looper().dub_feedback(0), 1.0, "the default is 1");
     let before = plain.pcm(0);
-    for rig in [&mut plain, &mut set] {
+    for (name, rig) in [("the default", &mut plain), ("an explicit 1", &mut set)] {
         let master = rig.master();
         rig.advance_to(rig.next_boundary() + master / 3);
-        rig.set_input(|f| code(f) * 0.5);
+        let from = rig.frame;
+        rig.set_input(input);
         rig.press(Command::RecDub(0));
-        rig.advance(2 * master + 77);
+        rig.advance(3 * master + 77);
+        let to = rig.frame; // the stop press: the layer holds input frames [from, to)
         rig.press(Command::RecDub(0));
         rig.set_level(0.0);
         rig.idle();
+        let mut legacy = before.clone();
+        let mut exact: Vec<f64> = before.iter().map(|&x| x as f64).collect();
+        for f in from..to {
+            let p = pos_of(rig, f);
+            legacy[p] += input(f);
+            exact[p] += input(f) as f64;
+        }
+        let got = rig.pcm(0);
+        let wrong = (0..got.len()).filter(|&p| got[p].to_bits() != legacy[p].to_bits()).count();
+        assert_eq!(wrong, 0, "{name}: positions off the plain f32 sum, of {}", got.len());
+        let rounded = (0..got.len()).filter(|&p| got[p] as f64 != exact[p]).count();
+        assert!(rounded > got.len() / 2, "{name}: the sums round ({rounded} positions), so the check sees their order");
     }
-    assert_eq!(plain.pcm(0), set.pcm(0), "feedback 1 changes nothing");
-    let after = plain.pcm(0);
-    let changed = after.iter().zip(&before).filter(|(a, b)| a != b).count();
-    assert_eq!(changed, after.len(), "every position was dubbed");
-    assert!(after.iter().zip(&before).all(|(a, b)| a > b), "and summed: the old layer is all there");
 }
 
 #[test]
@@ -180,8 +194,17 @@ fn copy_hands_the_setting_on_clear_resets_it_and_it_is_clamped() {
     let mut rig = looping();
     rig.set(Command::SetDubFeedback(0, 0.5));
     rig.press(Command::Copy(0));
+    // The source moves on before the copy is done: the copy keeps what COPY took, and says so.
+    rig.set(Command::SetDubFeedback(0, 0.75));
+    assert!(rig.engine.looper().busy(), "the copy still runs");
     rig.idle();
     assert_eq!(rig.engine.looper().dub_feedback(1), 0.5, "COPY takes it, as it takes the volume");
+    let copied = rig.events.iter().find_map(|e| match *e {
+        Event::Copied { from: 0, to: 1, feedback, .. } => Some(feedback),
+        _ => None,
+    });
+    assert_eq!(copied, Some(0.5), "Copied carries the value it copied, not the source's since");
+    rig.set(Command::SetDubFeedback(0, 0.5));
     // The copy's own dub fades its old layer by the copied setting.
     let old = rig.pcm(1);
     let master = rig.master();

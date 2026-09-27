@@ -26,11 +26,12 @@
 //! An overdub writes `input + feedback * old` at each position it passes (DUB FEEDBACK, a lane setting:
 //! 1 sums, as ever; 0 replaces), so continuous dubbing lets the older layers fade pass by pass; its undo
 //! target is still the loop before it. FADE is a pending stop with a ramp: every playing lane stops on a
-//! bar line and fades down to it under its volume, which never moves (`fade_all`, `render`).
+//! bar line and fades down to it under its volume, which never moves, its FX returns with it (`fade_all`,
+//! `render`).
 
 use std::sync::Arc;
 
-use crate::api::{Action, Command, Event, LaneInfo, LaneState, Refusal, TRACK_COUNT};
+use crate::api::{Action, Command, Event, LaneInfo, LaneState, Refusal, HOLD_CONTROLS, TRACK_COUNT};
 use crate::autorec::{self, Detector};
 use crate::clock::Clock;
 use crate::effects::LaneFx;
@@ -255,8 +256,9 @@ enum JobKind {
     Copy { src: usize, dst: usize },
     /// A discarded overdub layer: copy the pre-layer loop back, then return the previous undo target.
     Restore { src: usize, dst: usize, prev_undo_valid: bool, prev_spare_reversed: bool },
-    /// COPY into lane `dst`: done, it becomes STOPPED, or PLAYING when its source played.
-    LaneCopy { src: usize, dst: usize, from: usize, to: usize, resume: bool },
+    /// COPY into lane `dst`: done, it becomes STOPPED, or PLAYING when its source played; `feedback` is
+    /// the DUB FEEDBACK it copied, which `Event::Copied` reports.
+    LaneCopy { src: usize, dst: usize, from: usize, to: usize, resume: bool, feedback: f32 },
     /// TRIM: `dst` becomes `src` as `fill` maps it, in heard order: the job's positions are loop
     /// positions as heard, which a `reversed` pair of buffers holds backwards ([`trim_run`]).
     Trim { src: usize, dst: usize, fill: TakeFill, reversed: bool },
@@ -334,8 +336,9 @@ pub struct Looper {
     auto_sensitivity: f64,
     selected: usize,
     clear_armed: Option<(usize, Frame)>,
-    /// The lane the last HOLD press on the selected lane acted on, until its release.
-    hold: Option<usize>,
+    /// Per HOLD control: the lane its last accepted press on the selected lane acted on, until its
+    /// release.
+    holds: [Option<usize>; HOLD_CONTROLS],
     published: [Option<LaneInfo>; TRACK_COUNT],
     published_transport: Option<(Frame, u32, bool)>,
     overview: Arc<Overview>,
@@ -376,7 +379,7 @@ impl Looper {
             auto_sensitivity: autorec::DEFAULT_SENSITIVITY,
             selected: 0,
             clear_armed: None,
-            hold: None,
+            holds: [None; HOLD_CONTROLS],
             published: [None; TRACK_COUNT],
             published_transport: None,
             overview: Arc::new(Overview::new(2 * TRACK_COUNT + 1, capacity as usize)),
@@ -784,7 +787,7 @@ impl Looper {
         dst.state = LaneState::Stopped;
         cx.fx.copy(i, j, cx.now);
         let resume = src.state == LaneState::Playing && src.stop_at.is_none();
-        let kind = JobKind::LaneCopy { src: src.live, dst: dst.live, from: i, to: j, resume };
+        let kind = JobKind::LaneCopy { src: src.live, dst: dst.live, from: i, to: j, resume, feedback: src.feedback };
         self.push_job(cx.now, j, kind, Visit { lo: 0, span: self.master, off: 0, modulus: self.master });
         Applied::Done
     }
@@ -850,6 +853,8 @@ impl Looper {
     /// brings a faded lane back at its level). A fading lane takes what a stopping lane takes: PLAY/STOP
     /// or STOP ALL stops it at once, a REC/DUB, UNDO, REVERSE or TRIM is refused, a COPY of it lands
     /// STOPPED. A second press while lanes fade stops them at once; a lane started meanwhile plays on.
+    /// The ramp takes the lane's FX returns down too (`render`, `LaneFx::render`): past the bar line
+    /// only the tail of the faded loop rings on; a stop at once leaves them ringing, as any stop does.
     /// Refused while a lane captures (the refusal names that lane: nothing it records is closed or
     /// thrown away behind the player's back) and with nothing playing (on lane `i`, the selected one).
     pub fn fade_all(&mut self, cx: &mut Cx, i: usize) -> Applied {
@@ -903,32 +908,38 @@ impl Looper {
     }
 
     /// The lane a hands-free press sent without one acts on: the selected lane, and for HOLD's release the
-    /// lane its press acted on (`None`: no HOLD press waits for a release). A HOLD press remembers it here.
+    /// lane its control's accepted press acted on (`None`: none waits for a release). `action` remembers
+    /// an accepted HOLD press.
     pub fn press_lane(&mut self, action: Action) -> Option<usize> {
         match action {
-            Action::Release => self.hold.take(),
-            Action::Hold => {
-                self.hold = Some(self.selected);
-                self.hold
-            }
+            Action::Release(control) => self.holds.get_mut(control as usize).and_then(Option::take),
             _ => Some(self.selected),
         }
     }
 
     /// A hands-free press on lane `i` (the selected one when pressed, or a named one): the UI's gates,
     /// spoken as refusals. Every press but CLEAR disarms a pending CLEAR; HOLD's release only when it ends
-    /// a capture (a release that does nothing is not a press, as in the web path).
+    /// a capture (a release that does nothing is not a press, as in the web path). An accepted HOLD press
+    /// remembers lane `i` for its control's release; a refused one leaves that release nothing to end.
     pub fn action(&mut self, cx: &mut Cx, i: usize, action: Action) -> Applied {
-        if !matches!(action, Action::Clear | Action::Release) {
+        if !matches!(action, Action::Clear | Action::Release(_)) {
             self.clear_armed = None;
         }
         let refuse = |cx: &mut Cx, reason: Refusal| cx.feed.push(Event::Refused { frame: cx.now, lane: i as u8, reason });
         match action {
-            // A HOLD press is REC/DUB (`press_lane` remembered its lane).
-            Action::RecDub | Action::Hold => match self.rec_dub_gate(i) {
-                Ok(()) => return self.rec_dub(cx, i),
-                Err(reason) => refuse(cx, reason),
-            },
+            // A HOLD press is REC/DUB, whose lane its control's release ends.
+            Action::RecDub | Action::Hold(_) => {
+                let gate = self.rec_dub_gate(i);
+                if let Action::Hold(control) = action {
+                    if let Some(hold) = self.holds.get_mut(control as usize) {
+                        *hold = gate.is_ok().then_some(i);
+                    }
+                }
+                match gate {
+                    Ok(()) => return self.rec_dub(cx, i),
+                    Err(reason) => refuse(cx, reason),
+                }
+            }
             Action::PlayStop => match self.lanes[i].state {
                 LaneState::Empty => refuse(cx, Refusal::Empty),
                 _ => return self.play_stop(cx, i),
@@ -999,7 +1010,7 @@ impl Looper {
                     applied => applied,
                 };
             }
-            Action::Release => {
+            Action::Release(_) => {
                 if self.capturing(i) {
                     self.clear_armed = None;
                     return self.rec_dub(cx, i);
@@ -1578,9 +1589,10 @@ impl Looper {
     /// frames skipped (all of it would fall due in the next callback: an overrun). The jump already lost
     /// audio: a head it carried past a job's reads what the job has not written yet (a commit's padding
     /// and tiling, a TRIM, a discarded layer's restore) until the job overtakes it again, at most
-    /// `frames / JOB_RATE` frames later, and an overdub's write head can reach its undo copy first (the
-    /// jump's input gap rejects that layer anyway). A lane a multiply extends reads through its old loop
-    /// as ever.
+    /// `frames / JOB_RATE` frames later. An overdub's write head, which the jump carries past its undo
+    /// copy, writes nothing more: the jump's input gap damaged that layer (`capture`), so the copy reads
+    /// only the loop before it and the rejection restores that exactly. A lane a multiply extends reads
+    /// through its old loop as ever.
     pub fn skip(&mut self, frames: Frame) {
         for job in self.jobs.iter_mut().flatten() {
             job.start += frames;
@@ -1600,8 +1612,8 @@ impl Looper {
             JobKind::Restore { prev_undo_valid, prev_spare_reversed, .. } => {
                 self.restore_undo(job.lane, prev_undo_valid, prev_spare_reversed);
             }
-            JobKind::LaneCopy { from, to, resume, .. } => {
-                cx.feed.push(Event::Copied { frame: cx.now, from: from as u8, to: to as u8 });
+            JobKind::LaneCopy { from, to, resume, feedback, .. } => {
+                cx.feed.push(Event::Copied { frame: cx.now, from: from as u8, to: to as u8, feedback });
                 if resume && self.lanes[to].state == LaneState::Stopped {
                     self.resume(cx, to, None);
                 }
@@ -1711,12 +1723,15 @@ impl Looper {
         Some(at)
     }
 
-    /// Write the record tap for frames `[f0, f0 + input.len())` into the recorder's window.
+    /// Write the record tap for frames `[f0, f0 + input.len())` into the recorder's window. An overdub
+    /// an input gap damaged writes nothing more: it is rejected at its end, and a write after the gap
+    /// could land where its undo copy has not been yet (a device jump carries the write head past the
+    /// copy, `skip`), which the rejection would then restore as the loop before the layer.
     pub fn capture(&mut self, f0: Frame, input: &[f32]) {
         let Some(rec) = self.rec.as_mut() else { return };
         let Some(start) = rec.start else { return };
         let lane = &mut self.lanes[rec.lane];
-        if lane.auto_armed {
+        if lane.auto_armed || (rec.damaged && rec.kind == Kind::Overdub) {
             return;
         }
         let lo = f0.max(start);
@@ -1758,12 +1773,16 @@ impl Looper {
     }
 
     /// Write every lane for frames `[f0, f0 + n)` into `out[i][..n]`, under its volume (silence when
-    /// it does not play).
-    pub fn render<const Q: usize>(&mut self, f0: Frame, n: usize, out: &mut [[f32; Q]; TRACK_COUNT]) {
+    /// it does not play), and a fading lane's ramp over those frames into `fades[i][..n]`; returns which
+    /// lanes fade. The ramp is on the lane before its FX, so everything its FX return (the delay, the
+    /// reverb send) is fed the fading loop, and the FX take it for the delay's feedback too
+    /// (`LaneFx::render`).
+    pub fn render<const Q: usize>(&mut self, f0: Frame, n: usize, out: &mut [[f32; Q]; TRACK_COUNT], fades: &mut [[f32; Q]; TRACK_COUNT]) -> [bool; TRACK_COUNT] {
         let master = self.master;
         let silent_lane = self.rec.filter(|r| r.stop_playback).map(|r| r.lane);
-        for (i, out) in out.iter_mut().enumerate() {
-            let out = &mut out[..n];
+        let mut fading = [false; TRACK_COUNT];
+        for (i, (out, fade)) in out.iter_mut().zip(fades.iter_mut()).enumerate() {
+            let (out, fade) = (&mut out[..n], &mut fade[..n]);
             out.fill(0.0);
             let t = &mut self.lanes[i];
             let target = if t.muted { 0.0 } else { t.volume as f64 };
@@ -1782,6 +1801,7 @@ impl Looper {
             // FADE: `r` runs linearly from 1 at the press to 0 where the lane stops; the level is `r²`
             // over the volume (half-way down it is at -12 dB).
             let ramp = t.fade_from.zip(t.stop_at).map(|(from, to)| (to, 1.0 / (to - from).max(1) as f64));
+            fading[i] = ramp.is_some();
             for (k, sample) in out.iter_mut().enumerate() {
                 let mut idx = if t.audible.reversed { master - 1 - pos } else { pos };
                 if idx >= extending {
@@ -1791,6 +1811,7 @@ impl Looper {
                 if let Some((to, inv)) = ramp {
                     let r = ((to - f0 - k as Frame) as f64 * inv).clamp(0.0, 1.0);
                     g *= r * r;
+                    fade[k] = (r * r) as f32;
                 }
                 *sample = (g * data[idx as usize] as f64) as f32;
                 t.gain = target + (t.gain - target) * self.gain_coef;
@@ -1800,6 +1821,7 @@ impl Looper {
                 }
             }
         }
+        fading
     }
 
     // ── Session ────────────────────────────────────────────────────────────────────────────────────

@@ -402,7 +402,7 @@ fn g_a_copy_still_running_at_the_commit_ends_extended() {
         assert_eq!((rig.state(i), rig.pcm(i) == want), (LaneState::Playing, true), "lane {i}: the loop, extended");
         peaks_describe(&rig, i, "copied");
     }
-    let resumed = |to: u8| rig.events.iter().find_map(|e| match *e { Event::Copied { frame, from: 0, to: t } if t == to => Some(frame), _ => None }).unwrap();
+    let resumed = |to: u8| rig.events.iter().find_map(|e| match *e { Event::Copied { frame, from: 0, to: t, .. } if t == to => Some(frame), _ => None }).unwrap();
     let (resumed2, resumed3) = (resumed(2), resumed(3));
     assert!(resumed2 > end && resumed3 > resumed2, "the first copy finished after the commit, the second after the extension");
     // From the commit on, every lane at the new grid phase (a lane mid-extension reads through its loop).

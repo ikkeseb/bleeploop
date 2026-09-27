@@ -94,8 +94,8 @@ enum ActionDef {
     Reverse,
     Copy,
     Halve,
-    Hold,
-    Release,
+    Hold(u8),
+    Release(u8),
     FadeAll,
 }
 
@@ -126,7 +126,7 @@ enum EventDef {
     },
     TakeRejected { frame: Frame, lane: u8, overdub: bool },
     PassDropped { frame: Frame, lane: u8, pass: u32 },
-    Copied { frame: Frame, from: u8, to: u8 },
+    Copied { frame: Frame, from: u8, to: u8, feedback: f32 },
     Cleared { frame: Frame, lane: u8 },
     Muted { frame: Frame, lane: u8, on: bool },
 }
@@ -409,8 +409,8 @@ mod tests {
             Action::Reverse => 9,
             Action::Copy => 10,
             Action::Halve => 11,
-            Action::Hold => 12,
-            Action::Release => 13,
+            Action::Hold(_) => 12,
+            Action::Release(_) => 13,
             Action::FadeAll => 14,
         }
     }

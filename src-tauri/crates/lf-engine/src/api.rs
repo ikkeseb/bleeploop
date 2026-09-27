@@ -9,6 +9,8 @@ use crate::dsp::fx::{FxKind, FxParam};
 use crate::grid::Frame;
 
 pub const TRACK_COUNT: usize = 5;
+/// The HOLD controls the engine tells apart ([`Action::Hold`]): pedals held down at once.
+pub const HOLD_CONTROLS: usize = 16;
 /// The plugin slots (`src/audio/instrument-slots.ts`: two instrument slots).
 pub const SLOT_COUNT: usize = 2;
 
@@ -257,14 +259,18 @@ pub enum Action {
     /// TRIM to the first half of the loop's whole bars, rounded down, as the loop stands when the press
     /// applies; refused as [`Command::Trim`] is.
     Halve,
-    /// HOLD's press on the selected lane: REC/DUB, and that lane is where the next [`Action::Release`]
-    /// without a lane acts (a press on a named lane sends REC/DUB and a release on that lane instead).
-    Hold,
-    /// HOLD's release: ends the capture on its lane (a count-in, a boundary arm or AUTO listening is
-    /// cancelled, as REC/DUB's stop cancels it), and does nothing once the lane no longer captures (a take
-    /// that FIXED closed stays closed). As `Command::Action`, its lane is the one the last
-    /// [`Action::Hold`] acted on.
-    Release,
+    /// HOLD's press on the selected lane, by the control (pedal) the UI numbers it with: REC/DUB, and once
+    /// the press is accepted, that lane is where the same control's [`Action::Release`] without a lane
+    /// acts. A refused press remembers nothing for its control and never touches another control's lane
+    /// (a press on a named lane sends REC/DUB and a release on that lane instead). A control number past
+    /// [`HOLD_CONTROLS`] is remembered nowhere: its release does nothing.
+    Hold(u8),
+    /// HOLD's release, by the control whose press it answers: ends the capture on its lane (a count-in, a
+    /// boundary arm or AUTO listening is cancelled, as REC/DUB's stop cancels it), and does nothing once
+    /// the lane no longer captures (a take that FIXED closed stays closed). As `Command::Action`, its lane
+    /// is the one that control's last accepted [`Action::Hold`] acted on; as `Command::ActionOn`, the
+    /// named one.
+    Release(u8),
     /// FADE (all): every playing lane fades to silence over the fade's bars and stops on the bar line;
     /// a second press while they fade stops them at once.
     FadeAll,
@@ -366,7 +372,9 @@ pub enum Event {
     TakeRejected { frame: Frame, lane: u8, overdub: bool },
     /// A RETAKE pass saw an input gap: it is dropped, and the kept pass before it with it.
     PassDropped { frame: Frame, lane: u8, pass: u32 },
-    Copied { frame: Frame, from: u8, to: u8 },
+    /// COPY into lane `to` is done. `feedback` is the DUB FEEDBACK it copied, the source's when COPY
+    /// applied (the source's may have moved since): the UI and the host's settings memory take it.
+    Copied { frame: Frame, from: u8, to: u8, feedback: f32 },
     /// The lane was cleared: its loop gone, its volume, mute and FX back to their defaults (CLEAR, a
     /// pedal's confirmed CLEAR, and every lane at CLEAR ALL, an empty one included). A lane that goes
     /// EMPTY any other way (a cancelled count-in, a stopped or rejected first take) keeps its mix.

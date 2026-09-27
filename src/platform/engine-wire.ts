@@ -38,7 +38,8 @@ export type Refusal =
   | 'Fading'
   | 'NoFade';
 /** The hands-free actions (`src/app/actions.ts`; GO LIVE stays with the plugin host). `Halve` is TRIM to
- * the first half of the loop's bars; `Hold` and `Release` are HOLD's press and release; `FadeAll` is FADE. */
+ * the first half of the loop's bars; `Hold` and `Release` are HOLD's press and release, by the number of
+ * the control (0..255) whose press the release ends; `FadeAll` is FADE. */
 export type EngineAction =
   | 'RecDub'
   | 'PlayStop'
@@ -52,8 +53,8 @@ export type EngineAction =
   | 'Reverse'
   | 'Copy'
   | 'Halve'
-  | 'Hold'
-  | 'Release'
+  | { Hold: number }
+  | { Release: number }
   | 'FadeAll';
 /** The built-in instruments by id (`src/audio/synths/index.ts`). */
 export type InstrumentId = 'lead' | 'pad' | 'piano' | 'organ' | 'bass' | 'drum';
@@ -84,7 +85,8 @@ const REFUSALS: readonly Refusal[] = [
   'Fading',
   'NoFade',
 ];
-const ACTIONS: readonly EngineAction[] = [
+/** The unit actions; `Hold` and `Release` carry their control (`decodeAction`). */
+const ACTIONS: readonly Extract<EngineAction, string>[] = [
   'RecDub',
   'PlayStop',
   'Undo',
@@ -97,8 +99,6 @@ const ACTIONS: readonly EngineAction[] = [
   'Reverse',
   'Copy',
   'Halve',
-  'Hold',
-  'Release',
   'FadeAll',
 ];
 const INSTRUMENTS: readonly InstrumentId[] = ['lead', 'pad', 'piano', 'organ', 'bass', 'drum'];
@@ -214,7 +214,9 @@ export type EngineEvent =
   | { type: 'Refused'; frame: Frame; lane: number; reason: Refusal }
   | { type: 'TakeRejected'; frame: Frame; lane: number; overdub: boolean }
   | { type: 'PassDropped'; frame: Frame; lane: number; pass: number }
-  | { type: 'Copied'; frame: Frame; from: number; to: number }
+  /** COPY into `to` is done; `feedback` is the DUB FEEDBACK the engine copied (the source's may have moved
+   * since). */
+  | { type: 'Copied'; frame: Frame; from: number; to: number; feedback: number }
   /** The engine cleared the lane (CLEAR, a pedal's confirmed CLEAR, every lane on CLEAR ALL): its volume,
    * mute and FX are back to their defaults. Before the lane's Lane event in the same frame. */
   | { type: 'Cleared'; frame: Frame; lane: number }
@@ -346,6 +348,15 @@ function tagged(v: unknown, what: string): [string, unknown] {
 }
 
 const lane = (v: unknown, what: string) => int(v, what, 0, ENGINE_LANES - 1);
+
+/** An `Action`: a unit action's name, or `{"Hold": control}` / `{"Release": control}` (a u8). */
+function decodeAction(v: unknown, what: string): EngineAction {
+  const [name, control] = tagged(v, what);
+  if (name === 'Hold' || name === 'Release') int(control, `${what}.${name}`, 0, 255);
+  else if (control !== undefined) fail(`${what} ${name} is a unit variant`, v);
+  else oneOf(name, ACTIONS, what);
+  return v as EngineAction;
+}
 const slot = (v: unknown, what: string) => int(v, what, 0, ENGINE_SLOTS - 1);
 const frame = (v: unknown, what: string) => int(v, what, Number.MIN_SAFE_INTEGER);
 const nullable = <T>(v: unknown, read: (v: unknown) => T): T | null => (v === null || v === undefined ? null : read(v));
@@ -398,7 +409,13 @@ export function decodeEvent(raw: unknown): EngineEvent {
     case 'PassDropped':
       return { type: 'PassDropped', frame: at, lane: lane(o.lane, 'PassDropped.lane'), pass: int(o.pass, 'PassDropped.pass') };
     case 'Copied':
-      return { type: 'Copied', frame: at, from: lane(o.from, 'Copied.from'), to: lane(o.to, 'Copied.to') };
+      return {
+        type: 'Copied',
+        frame: at,
+        from: lane(o.from, 'Copied.from'),
+        to: lane(o.to, 'Copied.to'),
+        feedback: num(o.feedback, 'Copied.feedback'),
+      };
     case 'Cleared':
       return { type: 'Cleared', frame: at, lane: lane(o.lane, 'Cleared.lane') };
     case 'Muted':
@@ -537,12 +554,12 @@ export function decodeCommand(raw: unknown): EngineCommand {
   } else {
     switch (name) {
       case 'Action':
-        oneOf(p, ACTIONS, 'Action');
+        decodeAction(p, 'Action');
         break;
       case 'ActionOn': {
         const [l, a] = pair('(lane, action)');
         lane(l, 'ActionOn.lane');
-        oneOf(a, ACTIONS, 'ActionOn.action');
+        decodeAction(a, 'ActionOn.action');
         break;
       }
       case 'SetVolume': {
