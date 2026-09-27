@@ -165,7 +165,10 @@ guitarist's take feels on the click is this stop.
 
 The engine's device owner (`src-tauri/src/engine_io/owner.rs`): a lost device keeps the engine, its
 loops and its slots, tries the same device again, then falls back to WASAPI's defaults; the UI toasts
-each step. Proven on the fake driver (`engine_io/tests.rs`), not by a yank on the rig.
+each step. Proven on the fake driver (`engine_io/tests.rs`), not by a yank on the rig. A fallback at
+another rate drops the loops from the engine and keeps them in recovery, with a toast; a player's device
+pick at another rate with loops asks first. On the lap, if the WASAPI default runs at another rate than
+ASIO: yank with loops playing, read the toast, replug and relaunch: the loops come back.
 
 ### Stop 8 — session lifecycle
 

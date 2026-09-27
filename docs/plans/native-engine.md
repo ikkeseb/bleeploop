@@ -449,8 +449,14 @@ fixture plugins into a rendering engine). Code only a device or a real plugin ca
   with a kept pass commits that pass, even inside the grace where a stop would let the pass in flight
   finish (cut short, a many-bar take would floor a bar shorter).
 - **A device at another sample rate builds a new engine:** the plugin units go back to their owners,
-  who re-activate them at the new rate; the loops are lost, also when that device then fails to start
-  (the restore builds a fresh engine). Same-rate switches and recoveries keep the loops in place. A
+  who re-activate them at the new rate; the loops leave the engine (no resampling), also when that
+  device then fails to start (the restore builds a fresh engine). A player's switch there while any
+  lane is not EMPTY is refused (`OpenError::RateChange`, the rate known from `Driver::resolve` before
+  anything stops) until the UI confirms and opens again with `force`: it stops the device first (the
+  take punches out), saves an authoritative snapshot to the recovery, then switches. The owner's own
+  reopen after a loss goes ahead and reports `DeviceEvent::LoopsDropped`. Either way the recovery keeps
+  the jam for a launch at its rate (`src/audio/autosave.ts`). Same-rate switches and recoveries keep
+  the loops in place. A
   unit installed with a rate a rebuild has since replaced goes back to its owner for re-activation.
 - **A panic under the engine lock replaces the engine** at the same rate and restarts the device: the
   loops are lost, the units go back to their owners (`DeviceEvent::EngineFaulted`), at most once per
@@ -625,7 +631,9 @@ rendered block into a buffer the host pre-touched; a buffer written meanwhile an
 host retries. A load goes into an all-EMPTY engine only: it swaps each lane's buffer in (the old ones go
 back to the host to free), sets BPM and the grid, and starts PLAYING lanes at position 0. With no
 device the host services the port under the engine lock. Export's wet master is still the web path's
-offline render, so its FX may sound unlike the engine's. Recovery starts once a device runs. Settings,
+offline render, so its FX may sound unlike the engine's. Recovery starts once a device runs; it saves the
+committed loops also while a lane records or overdubs (a dubbing lane as its loop before the layer, the
+undo buffer the snapshot pins). Settings,
 rig recall and MIDI bindings stay in TS storage, mirrored to native at boot.
 
 **Parity checklist** (each item a cargo test, a UI probe on the fake, or a lap stop): rec/dub/play/

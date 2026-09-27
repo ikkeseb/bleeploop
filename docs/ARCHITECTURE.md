@@ -83,7 +83,12 @@ an explicit distortion/latency choice and another latency measurement. Capture a
 
 **Session recovery:** committed track audio, mix settings and PLAYING/STOPPED state round-trip through
 the archive. Legacy missing state and OVERDUBBING restore as PLAYING. Autosave polls every 500 ms and
-waits two seconds for stable state; an abrupt crash inside that window can lose the latest change.
+saves once the committed loops have held still for two seconds, also while a take records or a layer
+sums (a lane mid-overdub is saved as its loop before the layer); an abrupt crash inside that window can
+lose the latest committed change. The engine cannot resample, so recovery keeps one jam per sample rate
+(`latest` plus `kept-<rate>`) and a launch restores its own rate's. Only the player's clear that
+emptied the looper deletes one: an engine rebuilt at another rate, a fault or a WebView reload leaves
+empty lanes that keep it (rules: the header of `src/audio/autosave.ts`).
 Orderly native close flushes before exit. Recovery is not a synchronous durability guarantee.
 
 **ASIO startup:** resolving the ASIO device loads and initialises the third-party driver DLL
