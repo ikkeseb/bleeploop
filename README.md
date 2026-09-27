@@ -36,7 +36,11 @@ keyboard fill the other layers; the computer keyboard is the fallback.
 - AUTO REC arms a track and starts the take when you start playing, instead of the count-in.
 - RETAKE keeps recording round the loop until you stop and keeps the last complete pass (the first
   track needs FIXED).
-- END STOP stops playing loops at the loop end; a second press stops them at once.
+- END STOP stops playing loops at the loop end; a second press stops them at once. FADE ends a song
+  with a fade: every playing track fades out over 1, 2, 4 or 8 bars and stops on the bar line; the
+  tracks keep their volumes, so PLAY ALL brings them back.
+- DUB FEEDBACK (a track's FX drawer): how much of the layers under an overdub it keeps, pass by pass,
+  so a loop can evolve instead of only piling up; 0 % replaces them.
 - COPY duplicates a track, with its FX, volume and mute, into the first empty track.
 - A later take shorter than the loop repeats (tiles) across it, so every track has the loop's exact
   length. Keep playing past the loop, or set FIXED longer than it, and the take grows the loop in whole
@@ -60,7 +64,7 @@ keyboard fill the other layers; the computer keyboard is the fallback.
 - Share output mirrors the master to a second output device, for OBS, a browser or a voice chat.
 - MIDI controllers work through WebView2's native Web MIDI, and a MIDI footswitch, key or CC can be
   learned onto any looper control in Audio Settings: a track action on the selected track or a fixed
-  one, tap tempo, the click, END STOP, FIXED and the input effects, and HOLD to record while the pedal
+  one, tap tempo, the click, END STOP, FIXED, FADE and the input effects, and HOLD to record while the pedal
   is down. Without one, the computer keyboard plays notes and
   runs the transport (1-5 or the arrow keys to select a track, Space to record, Enter to play and
   stop, Backspace to undo; Help lists every key).

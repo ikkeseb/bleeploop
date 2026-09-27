@@ -138,7 +138,9 @@ indeterminate value.
   hands the recorder over on the pass edge.
 - **FX (per track, fixed order, each bypassable):** Filter → PitchShift → Stutter → Delay →
   Reverb. Stutter phase and delay divisions use the looper's explicit frame-derived grid, also supplied
-  by the offline renderer. Pitch via Tone.PitchShift only (no offline HQ/WSOLA mode). Reverb defaults to one
+  by the offline renderer. On the engine that grid's origin is the beat grid's (set by the first take,
+  an import or an idle restart), which a multiply leaves in place, so a dotted STUTTER keeps its phase
+  across one (`Looper::grid_origin`). Pitch via Tone.PitchShift only (no offline HQ/WSOLA mode). Reverb defaults to one
   shared send bus (or algorithmic) — not five ConvolverNodes — to protect WebView2 CPU.
 
 ## Cross-cutting invariants (do not violate)

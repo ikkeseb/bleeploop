@@ -238,7 +238,12 @@ start on the press frame, with no Web Audio scheduling lead; undo and reverse on
 switch on the next loop boundary; Stop on an overdubbing lane discards the whole layer; an input gap
 damages only the RETAKE pass it falls in, and resets AUTO's listening history; a jump in the device
 frame counter drops the beats it skipped, count-in beats fire late as one click. A command is judged
-when it is pressed, and a command that waits for a block job holds every later one behind it.
+when it is pressed, and a command that waits for a block job holds every later one behind it. A jump in
+the device frame counter moves every block job's schedule with it (`Looper::skip`): work is owed for the
+frames rendered, never for the frames lost. A hands-free press is resolved by the engine in command
+order (its lane, HALVE's bars, HOLD's lane), never from the UI's feed mirror; every looper press but
+CLEAR's confirming one disarms a pending pedal CLEAR (a pedal's setting toggle announces itself with
+`Press`), a setting alone does not.
 
 **Tests** (built, `src-tauri/crates/lf-engine/tests`): a rig (`tests/common`) drives the engine with
 frame-coded input and frame-stamped commands, every `process` under `assert_no_alloc`. The 17 rig guards
@@ -712,8 +717,19 @@ Built on the engine, in this order unless the owner reorders:
   `input_fx.rs`, `tests/input_fx.rs`; the IN FX pill in engine mode).
 - **F16 TRIM — built, not heard.** A committed lane keeps its first N bars as heard (a reversed lane: of
   its reversed playback), repeated across the loop and cut at its end; the loop keeps its length, the
-  loop before the trim is the lane's undo target, and a playing lane hears it from the next boundary
-  (lf-engine `looper.rs` `trim`, `tests/trim.rs`; the lane's ✂ TRIM and the Halve track pedal action).
+  loop before the trim is the lane's undo target, and a playing lane hears it from the next boundary;
+  a TRIM pressed while a swap is still due there (an UNDO or a TRIM in the same loop) waits for it and
+  trims the loop as it then stands (lf-engine `looper.rs` `trim`, `tests/trim.rs`; the lane's ✂ TRIM
+  and the Halve track pedal action).
+- **DUB FEEDBACK — built, not heard.** A lane setting, 0–100 % (default 100 %: the plain sum, bit for
+  bit): an overdub writes `input + feedback × old` at each position it passes, so continuous dubbing
+  fades the older layers pass by pass; 0 % replaces. UNDO gives back the loop at dub start; COPY takes
+  it, CLEAR resets it; `session.json` carries it per track (lf-engine `tests/dub_feedback.rs`; the
+  lane FX drawer's Dub feedback slider).
+- **FADE — built, not heard.** One press (the command bar's FADE, the `fadeAll` pedal action): every
+  playing lane fades from the press to silence on the first bar line at or after 1, 2, 4 or 8 bars
+  (default 2) and stops there; a separate fade gain leaves the lanes' volumes alone, and a second press
+  stops at once (lf-engine `tests/fade.rs`; loopback phase I).
 
 Also engine-bound from `docs/plans/pedalboard.md`: D12 controller data to plugins and F8 synth plugins
 on the device clock (both arrive with Stage 4).

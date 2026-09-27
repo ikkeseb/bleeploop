@@ -73,7 +73,18 @@ not here.
 - **✂ TRIM (2026-09-27, built, unseen):** the pill after ⧉ COPY opens KEEP FIRST [−] N [+] BARS · TRIM,
   N starting at half the loop; with six lane pills showing, COPY and TRIM shrink to their glyphs. The
   waveform shows the trim at once while the sound switches at the next loop start (as UNDO and REV do).
-  Halve track rounds an odd loop down (7 keeps 3). Readable, and right?
+  Halve track rounds an odd loop down (7 keeps 3). A second TRIM (or TRIM after ↶ UNDO) in the same
+  loop: the loop plays whole to its end, then only the latest trim (2 then 5 keeps 2+2+1). Readable,
+  and right?
+- **FADE (2026-09-27, built, unheard/unseen):** the level is r² of a linear ramp from the press to the
+  stop (−12 dB half-way); it starts at the press and ends on the first bar line at or after its bars
+  (2 bars pressed mid-bar lasts up to almost 3). FADE plus a − 2 BARS + stepper beside ■ ALL (~170 px
+  on row 1); FADING in END STOP's ENDING colours. Natural ending? Start on the next bar instead? Keep
+  the stepper visible?
+- **DUB FEEDBACK (2026-09-27, built, unheard/unseen):** the lane FX drawer's last module, slider OLD
+  from 100 % down to REPLACE at 0. Clear, right place? What does 50 % continuous dubbing sound like?
+- **CLEAR's confirm (2026-09-27):** in engine mode every pedal press between two CLEAR presses makes
+  the second ask again; an on-screen click in between does not (web mode alike). Keep?
 - **↶ UNDO (2026-09-27):** was ↶ DUB; it undoes an overdub or a TRIM, and the pedal action reads
   'Undo / redo'. Right words?
 - **Tone recall (2026-09-27, built, unheard):** tweak the amp-sim in its editor and in the PARAMS drawer,

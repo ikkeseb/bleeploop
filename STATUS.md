@@ -18,7 +18,11 @@ probes 45/45; on the rig `native:engine-smoke` with Pro-Q and `native:engine-loo
 multiply phases (three launches, 30/30 bars at 64/128/256) and IN FX's echo (`--echo=1`, 12/12 at 128),
 and MIC's gain after a plugin unload measured through the cable. On 2026-09-27, after the free
 multiply (E10) and TRIM (F16): `pnpm rust:check` (473 tests), the browser probes 46/46, and on the rig
-`native:engine-loopback` with its new phases G and H, 16/16 bars at 64/128/256.
+`native:engine-loopback` with its new phases G and H, 16/16 bars at 64/128/256. After the engine
+review fixes, FADE and DUB FEEDBACK: `pnpm rust:check` (533 tests), `pnpm verify:jam`, and on the rig
+`native:engine-loopback` with phase I (FADE), 20/20 bars at 64/128/256, and `--echo=1` at 128 with the
+echo checked on every click (one of two launches failed drift by 0.004 ms/min after a one-frame step
+inside take A; the relaunch passed).
 Driver latency reports are not guitar latency; after a relevant change, rerun only the affected check.
 
 **Last play: 2026-09-24** (web path, `pnpm dev:asio`, jam, two–three tracks, no pedal): the click too
@@ -60,6 +64,9 @@ A stop dies when it passes; past 10 stops, consolidate or flag it (AGENTS.md). D
    plays on with no seam or click there. FIXED off: a take stopped ~1.6 loops in records on to two
    loops and grows the loop, ~1.3 loops in keeps one at once. TRIM: halve an 8-bar lane while it
    plays: its first 4 bars from the next loop start, ↶ UNDO brings the 8 back, no click at either swap.
+   FADE (2 bars) while three lanes play: the level falls smoothly to the bar line, the lanes stop there,
+   PLAY ALL brings them back at their level. DUB FEEDBACK 50 % on a lane, dub two passes: the old
+   layers fade; 0 % replaces; ↶ UNDO brings the loop before the dub back.
 4. **Long session · grid.** Same jam, 10+ min: loops and click stay tight, no LED hop at commit,
    later takes on-grid, a flam-free commit-beat click; tempo is locked mid-count-in; a free record
    past 60 s auto-closes on a bar (is that UX fine?).
