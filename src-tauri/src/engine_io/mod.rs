@@ -633,7 +633,8 @@ impl EngineHost {
 
     /// Queue a batch in order, as one: no engine rebuild's replay lands inside it. A full ring stops it
     /// there (the rest are not sent). While no engine exists every setting in it is kept, a note
-    /// release is dropped (nothing can be held), and any other action makes it an error.
+    /// release and a `Press` are dropped (nothing can be held, no CLEAR armed), and any other action
+    /// makes it an error.
     pub fn send_all(&self, commands: impl IntoIterator<Item = TimedCommand>) -> Result<(), String> {
         let mut settings = self.core.settings.lock().map_err(|_| "engine settings poisoned".to_string())?;
         let mut ends = self.core.ends.lock().map_err(|_| "engine ends poisoned".to_string())?;
@@ -645,7 +646,7 @@ impl EngineHost {
                     self.core.counters.commands_full.fetch_add(1, Relaxed);
                     "the engine's command ring is full".to_string()
                 })?,
-                None => refused |= !setting && !matches!(command.command, Command::NoteOff(_) | Command::AllNotesOff),
+                None => refused |= !setting && !matches!(command.command, Command::NoteOff(_) | Command::AllNotesOff | Command::Press),
             }
         }
         if refused { Err("no audio device is open".to_string()) } else { Ok(()) }
@@ -662,6 +663,13 @@ impl EngineHost {
     pub(crate) fn cleared(&self, lane: u8) {
         if let Ok(mut settings) = self.core.settings.lock() {
             settings.cleared(lane);
+        }
+    }
+
+    /// A pedal's MUTE switched `lane` (the engine's `Muted` event): kept as the UI's `SetMute` would be.
+    pub(crate) fn muted(&self, lane: u8, on: bool) {
+        if let Ok(mut settings) = self.core.settings.lock() {
+            settings.record(&Command::SetMute(lane, on));
         }
     }
 

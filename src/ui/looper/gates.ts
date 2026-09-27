@@ -70,6 +70,14 @@ export function refusalText(reason: Refusal): string {
       return REFUSAL.capturing.reason;
     case 'NoTrim':
       return REFUSAL.noTrim.reason;
+    case 'NoMute':
+      return REFUSAL.noMute.reason;
+    case 'NoReverse':
+      return REFUSAL.noReverse.reason;
+    case 'NoCopy':
+      return REFUSAL.noCopy.reason;
+    case 'NoFreeLane':
+      return REFUSAL.noFreeLane.reason;
   }
 }
 

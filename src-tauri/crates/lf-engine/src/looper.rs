@@ -25,7 +25,7 @@
 
 use std::sync::Arc;
 
-use crate::api::{Action, Event, LaneInfo, LaneState, Refusal, TRACK_COUNT};
+use crate::api::{Action, Command, Event, LaneInfo, LaneState, Refusal, TRACK_COUNT};
 use crate::autorec::{self, Detector};
 use crate::clock::Clock;
 use crate::effects::LaneFx;
@@ -294,10 +294,16 @@ pub struct Looper {
     rec: Option<Recorder>,
     master: Frame,
     anchor: Frame,
+    /// The beat grid's origin, which the lanes' rhythmic FX follow: where the first take, an import or an
+    /// idle restart put loop position 0. A multiply re-anchors the loop a whole number of old loops later
+    /// but keeps every beat on its frame, so it leaves this be: a dotted gate would jump phase otherwise.
+    origin: Frame,
     jobs: [Option<Job>; MAX_JOBS],
     /// The most buffer positions one job moved in one step: what "no loop-sized work in one callback"
     /// is checked against.
     job_step_max: Frame,
+    /// Every buffer position the block jobs have moved.
+    job_work: Frame,
     detector: Detector,
     gain_coef: f64,
     loop_end_stop: bool,
@@ -308,6 +314,8 @@ pub struct Looper {
     auto_sensitivity: f64,
     selected: usize,
     clear_armed: Option<(usize, Frame)>,
+    /// The lane the last HOLD press on the selected lane acted on, until its release.
+    hold: Option<usize>,
     published: [Option<LaneInfo>; TRACK_COUNT],
     published_transport: Option<(Frame, u32, bool)>,
     overview: Arc<Overview>,
@@ -333,8 +341,10 @@ impl Looper {
             rec: None,
             master: 0,
             anchor: 0,
+            origin: 0,
             jobs: [None; MAX_JOBS],
             job_step_max: 0,
+            job_work: 0,
             detector: Detector::new(sample_rate),
             gain_coef: (-1.0 / (GAIN_TAU_SECONDS * sample_rate as f64)).exp(),
             loop_end_stop: false,
@@ -345,6 +355,7 @@ impl Looper {
             auto_sensitivity: autorec::DEFAULT_SENSITIVITY,
             selected: 0,
             clear_armed: None,
+            hold: None,
             published: [None; TRACK_COUNT],
             published_transport: None,
             overview: Arc::new(Overview::new(2 * TRACK_COUNT + 1, capacity as usize)),
@@ -364,6 +375,11 @@ impl Looper {
     /// The master grid's anchor: loop position 0 plays at `anchor + k * master`.
     pub fn anchor(&self) -> Frame {
         self.anchor
+    }
+
+    /// The beat grid's origin (see `origin`): what the lanes' FX follow (`LaneFx::follow_grid`).
+    pub fn grid_origin(&self) -> Frame {
+        self.origin
     }
 
     pub fn selected(&self) -> usize {
@@ -437,6 +453,12 @@ impl Looper {
     /// The most buffer positions one block job moved in a single step since the engine started.
     pub fn job_step_max(&self) -> Frame {
         self.job_step_max
+    }
+
+    /// Every buffer position the block jobs have moved since the engine started: read around a block,
+    /// what that callback's jobs cost.
+    pub fn job_work(&self) -> Frame {
+        self.job_work
     }
 
     /// True while any block job runs.
@@ -655,7 +677,10 @@ impl Looper {
     /// the reader of either orientation, and a PLAYING lane hears it from the next loop boundary, where an
     /// undo or a reverse swaps in. Judged when pressed: refused with a reason on a lane that captures, has
     /// nothing to keep or is stopping at the loop end; it waits for the lane's jobs (a multiply's
-    /// extension, a COPY into it).
+    /// extension, a COPY into it), and for a swap still due at the boundary when the spare it writes is
+    /// the buffer playing until then (an UNDO, or a TRIM, pressed in this loop): applied on the boundary,
+    /// it is heard from there, so a second TRIM before the boundary is heard there instead of the first,
+    /// and the loop playing now plays whole up to it.
     pub fn trim(&mut self, cx: &mut Cx, i: usize, bars: Frame) -> Applied {
         let refuse = |cx: &mut Cx, reason: Refusal| {
             cx.feed.push(Event::Refused { frame: cx.now, lane: i as u8, reason });
@@ -680,10 +705,9 @@ impl Looper {
             return wait;
         }
         let t = &mut self.lanes[i];
-        // The spare becomes the trimmed loop. An undo still playing it before its boundary lets go now: the
-        // loop it swapped in plays from this frame (as when an overdub starts there).
-        if t.audible.buf == t.spare {
-            t.audible = t.logical();
+        // The spare becomes the trimmed loop: while it still plays, the trim waits for its swap.
+        if let Some(at) = t.switch_at.filter(|_| t.audible.buf == t.spare) {
+            return Applied::WaitUntil(at);
         }
         std::mem::swap(&mut t.live, &mut t.spare);
         t.spare_reversed = t.reversed;
@@ -794,15 +818,36 @@ impl Looper {
         self.selected = i.min(TRACK_COUNT - 1);
     }
 
-    /// A hands-free press on lane `i` (the selected one when pressed): the UI's gates, spoken as
-    /// refusals.
+    /// A looper press that is not a hands-free action (the on-screen controls, a pedal's setting toggle:
+    /// `Command::Press`): a pending pedal CLEAR is not confirmed by the press after it.
+    pub fn disarm_clear(&mut self) {
+        self.clear_armed = None;
+    }
+
+    /// The lane a hands-free press sent without one acts on: the selected lane, and for HOLD's release the
+    /// lane its press acted on (`None`: no HOLD press waits for a release). A HOLD press remembers it here.
+    pub fn press_lane(&mut self, action: Action) -> Option<usize> {
+        match action {
+            Action::Release => self.hold.take(),
+            Action::Hold => {
+                self.hold = Some(self.selected);
+                self.hold
+            }
+            _ => Some(self.selected),
+        }
+    }
+
+    /// A hands-free press on lane `i` (the selected one when pressed, or a named one): the UI's gates,
+    /// spoken as refusals. Every press but CLEAR disarms a pending CLEAR; HOLD's release only when it ends
+    /// a capture (a release that does nothing is not a press, as in the web path).
     pub fn action(&mut self, cx: &mut Cx, i: usize, action: Action) -> Applied {
-        if action != Action::Clear {
+        if !matches!(action, Action::Clear | Action::Release) {
             self.clear_armed = None;
         }
         let refuse = |cx: &mut Cx, reason: Refusal| cx.feed.push(Event::Refused { frame: cx.now, lane: i as u8, reason });
         match action {
-            Action::RecDub => match self.rec_dub_gate(i) {
+            // A HOLD press is REC/DUB (`press_lane` remembered its lane).
+            Action::RecDub | Action::Hold => match self.rec_dub_gate(i) {
                 Ok(()) => return self.rec_dub(cx, i),
                 Err(reason) => refuse(cx, reason),
             },
@@ -839,6 +884,49 @@ impl Looper {
             Action::PrevTrack => self.select((i + TRACK_COUNT - 1) % TRACK_COUNT),
             Action::PlayAll => return self.play_all(cx),
             Action::StopAll => return self.stop_all(cx),
+            Action::Mute => {
+                if self.lanes[i].state == LaneState::Empty {
+                    refuse(cx, Refusal::NoMute);
+                } else {
+                    let on = !self.lanes[i].muted;
+                    self.set_mute(i, on);
+                    cx.feed.push(Event::Muted { frame: cx.now, lane: i as u8, on });
+                }
+            }
+            Action::Reverse => {
+                let t = &self.lanes[i];
+                if !t.committed() {
+                    refuse(cx, Refusal::NoReverse);
+                } else if t.stop_at.is_some() {
+                    refuse(cx, Refusal::Stopping);
+                } else {
+                    return self.reverse(cx, i);
+                }
+            }
+            Action::Copy => {
+                if !self.lanes[i].committed() {
+                    refuse(cx, Refusal::NoCopy);
+                } else if self.lanes.iter().all(|t| t.state != LaneState::Empty) {
+                    refuse(cx, Refusal::NoFreeLane);
+                } else {
+                    return self.copy(cx, i);
+                }
+            }
+            Action::Halve => {
+                // The bars are judged now: a trim held for a job keeps them, whatever the loop does meanwhile.
+                let (fpb, master) = (self.fpb(cx), self.master);
+                let bars = if master > 0 && master % fpb == 0 { master / fpb / 2 } else { 0 };
+                return match self.trim(cx, i, bars) {
+                    Applied::WaitUntil(at) => Applied::Held(at, Command::Trim(i as u8, bars as u32)),
+                    applied => applied,
+                };
+            }
+            Action::Release => {
+                if self.capturing(i) {
+                    self.clear_armed = None;
+                    return self.rec_dub(cx, i);
+                }
+            }
         }
         Applied::Done
     }
@@ -1017,6 +1105,7 @@ impl Looper {
             let plan = plan_commit(raw, cx.clock.bpm() as f64, self.sample_rate, self.capacity);
             self.master = plan.master;
             self.anchor = commit_anchor(rec.downbeat, plan.master, cx.now);
+            self.origin = self.anchor;
             cx.clock.set_locked(true);
             cx.clock.start_master(self.anchor, plan.master, plan.bars, cx.now);
             TakeFill::first(raw, plan.master)
@@ -1051,7 +1140,8 @@ impl Looper {
     /// F14 multiply: the later take on lane `i` commits as a new master of `bars` bars, a whole number of
     /// old loops. The grid re-anchors on the take's boundary, which lies a whole number of old loops after
     /// the old anchor, so every old lane keeps its phase and every beat its frame and accent (the beat
-    /// period is the same: `4 * bars` beats over `bars` bars). Every other committed lane (PLAYING or
+    /// period is the same: `4 * bars` beats over `bars` bars); the beat grid's origin, which the FX
+    /// follow, stays where it was. Every other committed lane (PLAYING or
     /// STOPPED: none overdubs, there is one recorder) grows to the new length: its live buffer, and its
     /// undo target when it has one, tile the old loop over `[old, new)` in block jobs. Whole loops tile
     /// the same both ways, so a reversed lane stays right. Until a lane's jobs are done its playback reads
@@ -1302,6 +1392,7 @@ impl Looper {
             return None;
         }
         self.anchor = cx.now;
+        self.origin = cx.now;
         let bars = self.master / self.fpb(cx);
         cx.clock.start_master(cx.now, self.master, bars.max(1), cx.now);
         Some(cx.now)
@@ -1339,6 +1430,7 @@ impl Looper {
     fn reset_master(&mut self, cx: &mut Cx) {
         self.master = 0;
         self.anchor = 0;
+        self.origin = 0;
         cx.clock.set_locked(false);
         cx.clock.stop_master(cx.now);
     }
@@ -1400,6 +1492,20 @@ impl Looper {
         }
     }
 
+    /// The device skipped `frames` before the block about to render (its frame counter jumped): every
+    /// block job's schedule moves with it, so a job owes work for the frames rendered, never for the
+    /// frames skipped (all of it would fall due in the next callback: an overrun). The jump already lost
+    /// audio: a head it carried past a job's reads what the job has not written yet (a commit's padding
+    /// and tiling, a TRIM, a discarded layer's restore) until the job overtakes it again, at most
+    /// `frames / JOB_RATE` frames later, and an overdub's write head can reach its undo copy first (the
+    /// jump's input gap rejects that layer anyway). A lane a multiply extends reads through its old loop
+    /// as ever.
+    pub fn skip(&mut self, frames: Frame) {
+        for job in self.jobs.iter_mut().flatten() {
+            job.start += frames;
+        }
+    }
+
     /// A job on `lane` from frame `start` (now, or where a job it depends on is done).
     fn push_job(&mut self, start: Frame, lane: usize, kind: JobKind, visit: Visit) {
         let slot = self.jobs.iter_mut().find(|j| j.is_none()).expect("block job slots exhausted");
@@ -1445,6 +1551,7 @@ impl Looper {
         }
         job.progress = to;
         self.job_step_max = self.job_step_max.max(to - from);
+        self.job_work += to - from;
         let visit = job.visit;
         // Whole runs at once, not a modulo per position (per position, a 30-bar multiply's jobs cost more
         // than the block: `tests/perf.rs`).
@@ -1693,6 +1800,7 @@ impl Looper {
         }
         self.master = master;
         self.anchor = cx.now;
+        self.origin = cx.now;
         cx.clock.set_locked(false);
         cx.clock.set_bpm(load.bpm as f64, cx.now);
         cx.clock.set_locked(true);

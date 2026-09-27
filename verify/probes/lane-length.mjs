@@ -9,9 +9,11 @@
  *   starts at half the loop's bars, steps inside 1..bars−1, sends `Trim` with the chosen bars and closes;
  *   Escape closes it and hands focus back to the pill, an outside click closes it, neither sends. An
  *   engine refusal lands on its lane. ↶ UNDO names the trim.
- * - Halve (`halveTrack`, `src/app/actions.ts`): sends the selected lane's `Trim` at half its bars,
- *   rounded down; with nothing to halve it sends nothing and says why on the lane; MIDI learn lists it.
- *   In web mode (a second page, no engine) it says "needs the native engine" and no TRIM pill shows.
+ * - Halve (`halveTrack`, `src/app/actions.ts`): sends the engine's `Halve` (on the engine's own selection,
+ *   or `ActionOn` a named track), never a `Trim` with bars the UI counted: the engine judges the lane and
+ *   the loop's bars as they stand when the press lands (lf-engine `tests/actions.rs`). Its refusal, from
+ *   the feed, lands on its lane; MIDI learn lists it. In web mode (a second page, no engine) it says
+ *   "needs the native engine" and no TRIM pill shows.
  * - E10: a free later take (FIXED off) runs until the press, so its record head sweeps the loops it has
  *   reached (1.5 loops in: three quarters of a lane two loops wide), never a close at the loop's end.
  *
@@ -60,7 +62,7 @@ await probe(async ({ open }) => {
   const lanes = page.locator('.lp-lane');
   const pill = (i) => lanes.nth(i).getByRole('button', { name: `Trim track ${i + 1}`, exact: true });
   const well = (i) => lanes.nth(i).locator('.lp-lane__wellmsg');
-  const runAction = (id) => page.evaluate((a) => import('/src/app/actions.ts').then((m) => m.runAction(a)), id);
+  const runAction = (id, target = null) => page.evaluate(([a, t]) => import('/src/app/actions.ts').then((m) => m.runAction(a, t)), [id, target]);
   const shown = () => Promise.all([0, 1, 2, 3, 4].map((i) => pill(i).count().then((n) => n === 1)));
 
   await page.waitForFunction(() => window.__lf.native.opened.length === 1, undefined, { timeout: 5000 });
@@ -161,27 +163,31 @@ await probe(async ({ open }) => {
   // ── Halve ────────────────────────────────────────────────────────────────────────────────────────
   await clearSent();
   await runAction('halveTrack');
-  assert.deepEqual(await trims(), [{ Trim: [0, 4] }], 'halve an 8-bar loop: its first 4 bars');
+  await runAction('halveTrack', 2);
+  const sentHalves = await sent();
+  assert.deepEqual(sentHalves, [{ Action: 'Halve' }, { ActionOn: [2, 'Halve'] }], "halve: the engine's action, on its own selection or the named track");
   await emit({ events: [transport(7 * BAR), laneEvent(0, committed('Playing', 7))] });
-  await runAction('halveTrack');
-  assert.deepEqual((await trims()).at(-1), { Trim: [0, 3] }, 'halve a 7-bar loop: 3, rounded down');
   await pill(0).click();
   await dialog.waitFor();
   assert.equal(await value(), '3', "the popover's N starts at half of 7 bars, rounded down");
   await page.keyboard.press('Escape');
   await dialog.waitFor({ state: 'detached' });
-  const refusedOn = async (i, reason, what) => {
+  // Whatever the UI shows of the lane (an EMPTY one, an overdubbing one), the press goes to the engine,
+  // whose refusal lands on its lane.
+  const refusedOn = async (i, reason, text, what) => {
     await clearSent();
     await emit({ events: [{ Selected: { frame: 0, lane: i } }] });
     await runAction('halveTrack');
+    assert.deepEqual(await sent(), [{ Action: 'Halve' }], `${what}: the press goes to the engine`);
+    await emit({ events: [{ Refused: { frame: 0, lane: i, reason } }] });
     await page.waitForTimeout(100);
-    assert.deepEqual(await trims(), [], `${what}: nothing sent`);
-    assert.match(await well(i).textContent(), reason, `${what}: the reason on the lane`);
+    assert.match(await well(i).textContent(), text, `${what}: the engine's reason on the lane`);
   };
-  await refusedOn(4, /nothing to trim, the loop needs two bars or more/, 'an EMPTY lane');
-  await refusedOn(2, /this track is recording, stop it first/, 'an overdubbing lane');
+  await refusedOn(4, 'NoTrim', /nothing to trim, the loop needs two bars or more/, 'an EMPTY lane');
+  await refusedOn(2, 'Capturing', /this track is recording, stop it first/, 'an overdubbing lane');
   await emit({ events: [transport(BAR), laneEvent(0, committed('Playing', 1))] });
-  await refusedOn(0, /nothing to trim, the loop needs two bars or more/, 'a one-bar loop');
+  await refusedOn(0, 'NoTrim', /nothing to trim, the loop needs two bars or more/, 'a one-bar loop');
+  assert.deepEqual(await trims(), [], 'no Trim with bars the UI counted');
   const label = await page.evaluate(() => import('/src/app/actions.ts').then((m) => m.ACTION_LABELS.halveTrack));
   assert.equal(label, 'Halve track (keep first half)');
   await page.evaluate(() => window.__lf.ui.openSettings());

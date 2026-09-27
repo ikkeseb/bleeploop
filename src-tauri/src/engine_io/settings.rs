@@ -8,7 +8,8 @@
 //! engine resets, the memory forgets, as the feed reads it happen: a cleared lane's volume, mute and FX
 //! (`cleared`, on the engine's `Cleared` event: CLEAR, a pedal's CLEAR, CLEAR ALL), and a COPY hands the
 //! destination the source's (`copy_lane`, on `Copied`). A setting for a lane sent in the moment between
-//! its clear and the feed reading it (a block and a feed tick) is forgotten with it.
+//! its clear and the feed reading it (a block and a feed tick) is forgotten with it. What the engine sets
+//! itself, the memory keeps as if the UI had sent it: a pedal's MUTE (`Muted`, as `SetMute`).
 
 use std::collections::BTreeMap;
 
@@ -98,6 +99,7 @@ fn key(command: &Command) -> Option<Key> {
         | Command::ClearAll
         | Command::Action(_)
         | Command::ActionOn(..)
+        | Command::Press
         | Command::NoteOn(..)
         | Command::NoteOff(_)
         | Command::AllNotesOff => return None,

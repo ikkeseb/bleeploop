@@ -919,6 +919,7 @@ fn settings_sent_before_the_first_open_and_across_a_new_rate_reach_every_engine(
     let send = |command| h.host.send(TimedCommand { frame: None, command });
     assert!(send(Command::SetBpm(90.0)).is_ok(), "a setting is kept while no engine exists");
     assert!(send(Command::RecDub(0)).is_err(), "an action needs an engine");
+    assert!(send(Command::Press).is_ok(), "a pedal's press marker is dropped: no engine has a CLEAR armed");
     h.open(asio(Some(256)));
     h.wait_event("the first engine starts at the kept tempo", |e| matches!(e, Event::Transport { bpm: 90, .. }).then_some(()));
     h.send(Command::SetBpm(100.0));

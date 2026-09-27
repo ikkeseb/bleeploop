@@ -45,9 +45,17 @@ const COMMANDS = [
   'ActionOn', 'SelectTrack', 'SetBpm', 'SetMetronome', 'SetClickVolume', 'SetMasterVolume', 'SetMasterMute',
   'SetLoopEndStop', 'SetFixedLength', 'SetFixedBars', 'SetRetake', 'SetAutoRecord', 'SetAutoSensitivity', 'SetVolume',
   'SetMute', 'SetFxParam', 'SetFxBypass', 'SelectInstrument', 'NoteOn', 'NoteOff', 'PitchBend', 'Modulation',
-  'AllNotesOff', 'SetSlotLive', 'SetSlotGain', 'SetInputSend', 'SetInputSendParam',
+  'AllNotesOff', 'SetSlotLive', 'SetSlotGain', 'SetInputSend', 'SetInputSendParam', 'Press',
 ];
-const EVENTS = ['Lane', 'Transport', 'Beat', 'Selected', 'Refused', 'TakeRejected', 'PassDropped', 'Copied', 'Cleared'];
+const ACTIONS = [
+  'RecDub', 'PlayStop', 'Undo', 'Clear', 'NextTrack', 'PrevTrack', 'PlayAll', 'StopAll', 'Mute', 'Reverse', 'Copy', 'Halve',
+  'Hold', 'Release',
+];
+const REFUSALS = [
+  'Stopping', 'PlayFirst', 'Reversed', 'OtherRecording', 'Empty', 'NoUndo', 'NoClear', 'ConfirmClear', 'Capturing', 'NoTrim',
+  'NoMute', 'NoReverse', 'NoCopy', 'NoFreeLane',
+];
+const EVENTS = ['Lane', 'Transport', 'Beat', 'Selected', 'Refused', 'TakeRejected', 'PassDropped', 'Copied', 'Cleared', 'Muted'];
 const DEVICE_EVENTS = ['Lost', 'Recovered', 'Fallback', 'ShareLost', 'EngineFaulted', 'LoopsDropped'];
 
 // ── Commands: the TS side sends these; each fixture example is one the TS types accept as is ────────
@@ -57,6 +65,10 @@ for (const c of fixture.commands) {
 check('the fixture covers every command the TS side can send', () =>
   assert.deepEqual([...new Set(fixture.commands.map((c) => tag(c)[0]))].sort(), [...COMMANDS].sort()),
 );
+check('the fixture sends every hands-free action', () => {
+  const actions = fixture.commands.map((c) => c.Action ?? c.ActionOn?.[1]).filter((a) => a !== undefined);
+  assert.deepEqual([...new Set(actions)].sort(), [...ACTIONS].sort());
+});
 
 // ── Events: every field the Rust side writes is read ────────────────────────────────────────────────
 /** The decoded event back in the wire's shape, from the fields the decoder produced. */
@@ -70,6 +82,10 @@ for (const e of fixture.events) {
 check('the fixture covers every event', () =>
   assert.deepEqual([...new Set(fixture.events.map((e) => tag(e)[0]))].sort(), [...EVENTS].sort()),
 );
+check('the fixture answers every refusal', () => {
+  const reasons = fixture.events.map((e) => e.Refused?.reason).filter((r) => r !== undefined);
+  assert.deepEqual([...new Set(reasons)].sort(), [...REFUSALS].sort());
+});
 
 // ── Device events, requests, statuses ────────────────────────────────────────────────────────────────
 for (const d of fixture.deviceEvents) {
@@ -162,6 +178,8 @@ const refused = {
   'a trim of no bars': () => decodeCommand({ Trim: [0, 0] }),
   'a trim of a fractional bar count': () => decodeCommand({ Trim: [0, 1.5] }),
   'an unknown command': () => decodeCommand('Panic'),
+  'an unknown action': () => decodeCommand({ Action: 'Panic' }),
+  'a press with a payload': () => decodeCommand({ Press: 0 }),
   'a feed frame without its events': () => decodeFeedFrame({ seq: 0, reset: false }),
   'a status without inputOpen': () => {
     const s = structuredClone(fixture.deviceStatuses[0]);

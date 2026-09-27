@@ -48,6 +48,7 @@ enum CommandDef {
     ClearAll,
     Action(#[serde(with = "ActionDef")] Action),
     ActionOn(u8, #[serde(with = "ActionDef")] Action),
+    Press,
     SelectTrack(u8),
     SetBpm(f64),
     SetMetronome(bool),
@@ -87,6 +88,12 @@ enum ActionDef {
     PrevTrack,
     PlayAll,
     StopAll,
+    Mute,
+    Reverse,
+    Copy,
+    Halve,
+    Hold,
+    Release,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -118,6 +125,7 @@ enum EventDef {
     PassDropped { frame: Frame, lane: u8, pass: u32 },
     Copied { frame: Frame, from: u8, to: u8 },
     Cleared { frame: Frame, lane: u8 },
+    Muted { frame: Frame, lane: u8, on: bool },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -158,6 +166,10 @@ enum RefusalDef {
     ConfirmClear,
     Capturing,
     NoTrim,
+    NoMute,
+    NoReverse,
+    NoCopy,
+    NoFreeLane,
 }
 
 /// An `Instrument` as its id (`Instrument::id`).
@@ -325,7 +337,7 @@ mod tests {
 
     /// Every `Command` variant, by position: a new variant fails to compile here until it has a
     /// number (bump `COMMANDS`) and an example in the fixture.
-    const COMMANDS: usize = 39;
+    const COMMANDS: usize = 40;
     fn command_index(c: &Command) -> usize {
         use Command::*;
         match c {
@@ -368,10 +380,53 @@ mod tests {
             SetInputSend(..) => 36,
             SetInputSendParam(..) => 37,
             Trim(..) => 38,
+            Press => 39,
         }
     }
 
-    const EVENTS: usize = 9;
+    /// Every `Action` and `Refusal` variant, by position: a new one fails to compile here until the
+    /// fixture sends (or answers) it.
+    const ACTIONS: usize = 14;
+    fn action_index(a: &Action) -> usize {
+        match a {
+            Action::RecDub => 0,
+            Action::PlayStop => 1,
+            Action::Undo => 2,
+            Action::Clear => 3,
+            Action::NextTrack => 4,
+            Action::PrevTrack => 5,
+            Action::PlayAll => 6,
+            Action::StopAll => 7,
+            Action::Mute => 8,
+            Action::Reverse => 9,
+            Action::Copy => 10,
+            Action::Halve => 11,
+            Action::Hold => 12,
+            Action::Release => 13,
+        }
+    }
+
+    const REFUSALS: usize = 14;
+    fn refusal_index(r: &Refusal) -> usize {
+        match r {
+            Refusal::Stopping => 0,
+            Refusal::PlayFirst => 1,
+            Refusal::Reversed => 2,
+            Refusal::OtherRecording => 3,
+            Refusal::Empty => 4,
+            Refusal::NoUndo => 5,
+            Refusal::NoClear => 6,
+            Refusal::ConfirmClear => 7,
+            Refusal::Capturing => 8,
+            Refusal::NoTrim => 9,
+            Refusal::NoMute => 10,
+            Refusal::NoReverse => 11,
+            Refusal::NoCopy => 12,
+            Refusal::NoFreeLane => 13,
+        }
+    }
+
+    const EVENTS: usize = 10;
     fn event_index(e: &Event) -> usize {
         match e {
             Event::Lane { .. } => 0,
@@ -383,6 +438,7 @@ mod tests {
             Event::PassDropped { .. } => 6,
             Event::Copied { .. } => 7,
             Event::Cleared { .. } => 8,
+            Event::Muted { .. } => 9,
         }
     }
 
@@ -441,12 +497,22 @@ mod tests {
     fn every_command_round_trips_through_the_fixture() {
         let commands: Vec<WireCommand> = round_trip("commands");
         covers("commands", commands.iter().map(|c| command_index(&c.0)), COMMANDS);
+        let actions = commands.iter().filter_map(|c| match c.0 {
+            Command::Action(a) | Command::ActionOn(_, a) => Some(action_index(&a)),
+            _ => None,
+        });
+        covers("commands (their actions)", actions, ACTIONS);
     }
 
     #[test]
     fn every_event_round_trips_through_the_fixture() {
         let events: Vec<WireEvent> = round_trip("events");
         covers("events", events.iter().map(|e| event_index(&e.0)), EVENTS);
+        let refusals = events.iter().filter_map(|e| match e.0 {
+            Event::Refused { reason, .. } => Some(refusal_index(&reason)),
+            _ => None,
+        });
+        covers("events (their refusals)", refusals, REFUSALS);
     }
 
     #[test]

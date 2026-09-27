@@ -1,12 +1,13 @@
 //! Block jobs (plan § Memory: no loop-sized work in one callback): they are spread over frames, they run
 //! ahead of every head that reads or writes what they touch (checked on the rendered output from the
-//! very frame they start), and only the commands that would collide with a job wait for it.
+//! very frame they start), only the commands that would collide with a job wait for it, and a jump in the
+//! device frame counter moves their schedule instead of making the work it skipped fall due at once.
 
 mod common;
 
-use common::{code, Rig};
+use common::{code, Opts, Rig};
 use lf_engine::grid::Frame;
-use lf_engine::looper::JOB_RATE;
+use lf_engine::looper::{job_frames, JOB_RATE};
 use lf_engine::{Command, Event, LaneState};
 
 /// A two-bar master of the frame code on lane 0, then silence.
@@ -136,4 +137,55 @@ fn only_colliding_commands_wait() {
     rig.press(Command::PlayStop(1));
     assert_eq!(rig.state(1), LaneState::Stopped, "a stop is never held");
     assert!(rig.engine.looper().busy(), "and all of it before the tiling is done");
+}
+
+#[test]
+fn a_device_jump_moves_the_jobs_instead_of_owing_their_work_to_one_callback() {
+    // A multiply's eight extension jobs (four lanes, each with an undo target), pending when the device
+    // frame counter jumps past all of them (the WASAPI join adding the frames it lost).
+    let mut rig = Rig::with(Opts { sr: 8000, start: 8000, ..Default::default() });
+    rig.set_input(code);
+    let master = rig.record_first_take(0, 1, 240);
+    rig.set_level(0.0);
+    rig.idle();
+    for _ in 1..4 {
+        rig.press(Command::Copy(0));
+        rig.idle();
+    }
+    for lane in 0..4u8 {
+        rig.set_input(move |f| code(f + 1000 * lane as Frame) / 8.0);
+        rig.press(Command::RecDub(lane));
+        rig.advance(master / 3);
+        rig.press(Command::RecDub(lane));
+        rig.set_level(0.0);
+        rig.advance(100);
+        rig.idle();
+    }
+    assert!((0..4).all(|i| rig.lane(i).can_undo));
+    let loops: Vec<(Vec<f32>, Vec<f32>)> = (0..4).map(|i| (rig.pcm(i), rig.engine.looper().undo_pcm(i).unwrap())).collect();
+    rig.set(Command::SetFixedLength(true));
+    rig.set(Command::SetFixedBars(8.0));
+    rig.press(Command::RecDub(4));
+    rig.advance_to(rig.end_frame() + 1);
+    assert_eq!(rig.master(), 8 * master, "the multiply committed");
+    let work = job_frames(7 * master);
+    assert!(rig.engine.looper().busy(), "the extensions run");
+    // The jump: past the last job's done frame, several times over.
+    rig.skip(8 * work * 4);
+    let mut blocks = 0;
+    while rig.engine.looper().busy() {
+        let before = rig.engine.looper().job_work();
+        rig.advance(rig.block as Frame);
+        let moved = rig.engine.looper().job_work() - before;
+        assert!(moved <= JOB_RATE * rig.block as Frame, "block {blocks} after the jump moved {moved} positions");
+        blocks += 1;
+    }
+    assert!(blocks as Frame >= 8 * work / rig.block as Frame, "the jobs ran on for {blocks} blocks, paced by rendered frames");
+    let max = rig.engine.looper().job_step_max();
+    assert!(max <= JOB_RATE * rig.block as Frame, "a job step moved {max} positions");
+    let tiled = |pcm: &[f32]| (0..8 * master as usize).map(|k| pcm[k % pcm.len()]).collect::<Vec<f32>>();
+    for (i, (live, undo)) in loops.iter().enumerate() {
+        assert_eq!(rig.pcm(i), tiled(live), "lane {i}: its loop tiled, bit-exact");
+        assert_eq!(rig.engine.looper().undo_pcm(i), Some(tiled(undo)), "lane {i}: its undo target tiled, bit-exact");
+    }
 }

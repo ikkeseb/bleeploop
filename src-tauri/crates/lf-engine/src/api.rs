@@ -46,9 +46,13 @@ pub enum Command {
     ClearAll,
     /// A hands-free press on the selected lane: gated, and refused with a reason (keys, pedals).
     Action(Action),
-    /// A hands-free press bound to its lane: what a press held for a block job re-enters as, so a
-    /// selection change meanwhile cannot move it.
+    /// A hands-free press bound to its lane: a press aimed at a named lane, and what a press held for a
+    /// block job re-enters as, so a selection change meanwhile cannot move it.
     ActionOn(u8, Action),
+    /// A hands-free press the engine does not run as an [`Action`] (TAP, a CLICK, END STOP or FIXED
+    /// toggle, an input send, GO LIVE), sent just before the setting it changes: a looper press all the
+    /// same, so it disarms a pending pedal CLEAR. The setting alone does not (a slider, a settings replay).
+    Press,
     SelectTrack(u8),
     SetBpm(f64),
     SetMetronome(bool),
@@ -224,7 +228,10 @@ impl Instrument {
     }
 }
 
-/// The named hands-free actions (`src/app/actions.ts`; GO LIVE stays with the plugin host).
+/// The named hands-free actions (`src/app/actions.ts`; GO LIVE stays with the plugin host). A lane action
+/// acts on the lane the engine has selected when it applies the press (`Command::Action`), or on a named
+/// one (`Command::ActionOn`), so a press right after NEXT TRACK acts on the new lane whatever the UI has
+/// seen of the selection yet.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
     RecDub,
@@ -237,6 +244,22 @@ pub enum Action {
     PrevTrack,
     PlayAll,
     StopAll,
+    /// MUTE on or off (answered by [`Event::Muted`]: the UI keeps the lane's mix).
+    Mute,
+    Reverse,
+    /// COPY into the first EMPTY lane.
+    Copy,
+    /// TRIM to the first half of the loop's whole bars, rounded down, as the loop stands when the press
+    /// applies; refused as [`Command::Trim`] is.
+    Halve,
+    /// HOLD's press on the selected lane: REC/DUB, and that lane is where the next [`Action::Release`]
+    /// without a lane acts (a press on a named lane sends REC/DUB and a release on that lane instead).
+    Hold,
+    /// HOLD's release: ends the capture on its lane (a count-in, a boundary arm or AUTO listening is
+    /// cancelled, as REC/DUB's stop cancels it), and does nothing once the lane no longer captures (a take
+    /// that FIXED closed stays closed). As `Command::Action`, its lane is the one the last
+    /// [`Action::Hold`] acted on.
+    Release,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -283,6 +306,14 @@ pub enum Refusal {
     Capturing,
     /// TRIM with nothing to keep: no committed loop of two whole bars or more, or a bar count outside it.
     NoTrim,
+    /// MUTE on an EMPTY lane.
+    NoMute,
+    /// REVERSE on a lane with no committed loop.
+    NoReverse,
+    /// COPY from a lane with no committed loop.
+    NoCopy,
+    /// COPY with no EMPTY lane to copy to.
+    NoFreeLane,
 }
 
 impl Refusal {
@@ -298,6 +329,10 @@ impl Refusal {
             Refusal::ConfirmClear => "press again to clear",
             Refusal::Capturing => "this track is recording, stop it first",
             Refusal::NoTrim => "nothing to trim, the loop needs two bars or more",
+            Refusal::NoMute => "nothing to mute, record first",
+            Refusal::NoReverse => "nothing to reverse, record first",
+            Refusal::NoCopy => "nothing to copy, record first",
+            Refusal::NoFreeLane => "no empty track to copy to",
         }
     }
 }
@@ -320,6 +355,9 @@ pub enum Event {
     /// pedal's confirmed CLEAR, and every lane at CLEAR ALL, an empty one included). A lane that goes
     /// EMPTY any other way (a cancelled count-in, a stopped or rejected first take) keeps its mix.
     Cleared { frame: Frame, lane: u8 },
+    /// A hands-free MUTE ([`Action::Mute`]) switched the lane's mute: the UI and the host's settings
+    /// memory, which keep the lane's mix, follow it.
+    Muted { frame: Frame, lane: u8, on: bool },
 }
 
 /// The callback's view of the device.

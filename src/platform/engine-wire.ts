@@ -30,9 +30,28 @@ export type Refusal =
   | 'NoClear'
   | 'ConfirmClear'
   | 'Capturing'
-  | 'NoTrim';
-/** The hands-free actions (`src/app/actions.ts`; GO LIVE stays with the plugin host). */
-export type EngineAction = 'RecDub' | 'PlayStop' | 'Undo' | 'Clear' | 'NextTrack' | 'PrevTrack' | 'PlayAll' | 'StopAll';
+  | 'NoTrim'
+  | 'NoMute'
+  | 'NoReverse'
+  | 'NoCopy'
+  | 'NoFreeLane';
+/** The hands-free actions (`src/app/actions.ts`; GO LIVE stays with the plugin host). `Halve` is TRIM to
+ * the first half of the loop's bars; `Hold` and `Release` are HOLD's press and release. */
+export type EngineAction =
+  | 'RecDub'
+  | 'PlayStop'
+  | 'Undo'
+  | 'Clear'
+  | 'NextTrack'
+  | 'PrevTrack'
+  | 'PlayAll'
+  | 'StopAll'
+  | 'Mute'
+  | 'Reverse'
+  | 'Copy'
+  | 'Halve'
+  | 'Hold'
+  | 'Release';
 /** The built-in instruments by id (`src/audio/synths/index.ts`). */
 export type InstrumentId = 'lead' | 'pad' | 'piano' | 'organ' | 'bass' | 'drum';
 export type FxKindId = 'filter' | 'pitch' | 'stutter' | 'delay' | 'reverb';
@@ -55,8 +74,27 @@ const REFUSALS: readonly Refusal[] = [
   'ConfirmClear',
   'Capturing',
   'NoTrim',
+  'NoMute',
+  'NoReverse',
+  'NoCopy',
+  'NoFreeLane',
 ];
-const ACTIONS: readonly EngineAction[] = ['RecDub', 'PlayStop', 'Undo', 'Clear', 'NextTrack', 'PrevTrack', 'PlayAll', 'StopAll'];
+const ACTIONS: readonly EngineAction[] = [
+  'RecDub',
+  'PlayStop',
+  'Undo',
+  'Clear',
+  'NextTrack',
+  'PrevTrack',
+  'PlayAll',
+  'StopAll',
+  'Mute',
+  'Reverse',
+  'Copy',
+  'Halve',
+  'Hold',
+  'Release',
+];
 const INSTRUMENTS: readonly InstrumentId[] = ['lead', 'pad', 'piano', 'organ', 'bass', 'drum'];
 const FX_KINDS: readonly FxKindId[] = ['filter', 'pitch', 'stutter', 'delay', 'reverb'];
 const FX_PARAMS: readonly FxParamId[] = ['cutoff', 'q', 'semitones', 'rate', 'time', 'feedback', 'mix', 'amount'];
@@ -74,6 +112,9 @@ export type EngineCommand =
   | 'StopAll'
   | 'ClearAll'
   | 'AllNotesOff'
+  /** A hands-free press the engine does not run as an action (TAP, a toggle, an input send, GO LIVE), sent
+   * before the setting it changes: it disarms a pending pedal CLEAR, which the setting alone does not. */
+  | 'Press'
   | { RecDub: number }
   | { PlayStop: number }
   | { Stop: number }
@@ -163,7 +204,9 @@ export type EngineEvent =
   | { type: 'Copied'; frame: Frame; from: number; to: number }
   /** The engine cleared the lane (CLEAR, a pedal's confirmed CLEAR, every lane on CLEAR ALL): its volume,
    * mute and FX are back to their defaults. Before the lane's Lane event in the same frame. */
-  | { type: 'Cleared'; frame: Frame; lane: number };
+  | { type: 'Cleared'; frame: Frame; lane: number }
+  /** A pedal's MUTE switched the lane's mute (the UI keeps the lane's mix, so it follows). */
+  | { type: 'Muted'; frame: Frame; lane: number; on: boolean };
 
 /** Rust `engine_io::DeviceEvent`, decoded to a `type`-tagged union. */
 export type DeviceEvent =
@@ -344,6 +387,8 @@ export function decodeEvent(raw: unknown): EngineEvent {
       return { type: 'Copied', frame: at, from: lane(o.from, 'Copied.from'), to: lane(o.to, 'Copied.to') };
     case 'Cleared':
       return { type: 'Cleared', frame: at, lane: lane(o.lane, 'Cleared.lane') };
+    case 'Muted':
+      return { type: 'Muted', frame: at, lane: lane(o.lane, 'Muted.lane'), on: bool(o.on, 'Muted.on') };
     default:
       return fail('unknown Event variant', raw);
   }
@@ -446,7 +491,7 @@ export function decodeFeedFrame(raw: unknown): FeedFrame {
 
 // ── Command and request validators (the fixture guard; the UI builds these values typed) ────────────
 
-const UNIT_COMMANDS = ['PlayAll', 'StopAll', 'ClearAll', 'AllNotesOff'] as const;
+const UNIT_COMMANDS = ['PlayAll', 'StopAll', 'ClearAll', 'AllNotesOff', 'Press'] as const;
 const LANE_COMMANDS = ['RecDub', 'PlayStop', 'Stop', 'Undo', 'Reverse', 'Copy', 'Clear', 'SelectTrack'] as const;
 const BOOL_COMMANDS = ['SetMetronome', 'SetMasterMute', 'SetLoopEndStop', 'SetFixedLength', 'SetRetake', 'SetAutoRecord'] as const;
 const NUMBER_COMMANDS = [

@@ -51,9 +51,12 @@
  *   `VITE_LF_PROBE_PLUGIN`   `<name substring>[:<format>]` loaded into slot 1 and taken live (default
  *                            `Pro-Q:vst3`); empty or `none`: MIC, the input dry through an empty live slot
  *   `VITE_LF_PROBE_ECHO`     `1`: IN FX's ECHO (1/16, no feedback, level 0.5) is on while A records, and
- *                            each beat's echo in A is measured against its click: one sixteenth later
- *                            (within 0.05 ms) at half its level. C (echo off) = A is then the bar that the
- *                            echo leaves the dry click where it was
+ *                            every click in A must have its echo clear of the noise floor, each one
+ *                            sixteenth later (within 0.05 ms) at half its level (0.45..0.55), beat by
+ *                            beat: a lost echo is named, never averaged away. The check first passes a
+ *                            synthetic take with every echo and fails one whose echoes stop 20 beats
+ *                            into 32 (`echoSelfTest`). C (echo off) = A is then the bar that the echo
+ *                            leaves the dry click where it was
  *   `VITE_LF_PROBE_UNLOAD_FIRST`  with MIC only: `<name substring>[:<format>]` loaded into slot 1 and
  *                            unloaded before MIC takes that slot, so the MIC takes' peak gain shows what
  *                            the unload left on the slot (compare it with a run without this knob)
@@ -221,14 +224,19 @@ interface TakeStats {
   offBar: number[];
 }
 
+/** A take's noise floor, its median |x|, from every 64th sample: sorting the whole take would stall the
+ * main thread. */
+function noiseFloor(pcm: Float32Array): number {
+  return median(Array.from({ length: Math.floor(pcm.length / 64) }, (_, i) => Math.abs(pcm[i * 64])));
+}
+
 /** Every beat's click in a committed lane, against its beat frame. */
 function analyse(name: string, laneIndex: number, pcm: Float32Array, rate: number, ref: Reference, channel: number): TakeStats {
   const beat = (rate * 60) / BPM;
   const beats = Math.round(pcm.length / beat);
   const half = Math.round(beat / 2);
   const n = pcm.length;
-  // Noise floor from every 64th sample: sorting the whole take would stall the main thread.
-  const floor = median(Array.from({ length: Math.floor(n / 64) }, (_, i) => Math.abs(pcm[i * 64])));
+  const floor = noiseFloor(pcm);
   const win = new Float32Array(Math.round(beat));
   const hits: { k: number; raw: number; peak: number }[] = [];
   let loudest = 0;
@@ -274,30 +282,86 @@ function analyse(name: string, laneIndex: number, pcm: Float32Array, rate: numbe
   return stats;
 }
 
-/** IN FX's echo in a take of the click (ECHO at 1/16, no feedback): each beat's echo onset against its
- * click's, less a sixteenth note (ms), and its peak over the click's. */
-function echoIn(pcm: Float32Array, rate: number): { delay: number; ratio: number; found: number } {
+/** IN FX's echo in a take of the click (ECHO at 1/16, no feedback), beat by beat. */
+interface EchoStats {
+  /** Beats whose click stands clear of the noise floor, as `analyse` counts a click. */
+  clicks: number;
+  /** Of those, the beats whose echo does not. */
+  missing: number[];
+  /** Each echo found: its onset off one sixteenth after its click's (ms), and its peak over the click's. */
+  delays: number[];
+  ratios: number[];
+}
+
+function echoIn(pcm: Float32Array, rate: number): EchoStats {
   const beat = (rate * 60) / BPM;
   const sixteenth = beat / 4;
   const reach = Math.round(beat / 8);
   const beats = Math.round(pcm.length / beat);
+  const clear = Math.max(noiseFloor(pcm) * FLOOR_FACTOR, 1e-6);
   const at = (from: number) => {
     const win = new Float32Array(2 * reach);
     const start = Math.round(from) - reach;
     for (let i = 0; i < win.length; i++) win[i] = pcm[(((start + i) % pcm.length) + pcm.length) % pcm.length];
     const o = onsetOf(win);
-    return { onset: o.onset < 0 ? NaN : start + o.onset, peak: o.peak };
+    return { onset: o.onset < 0 || o.peak < clear ? NaN : start + o.onset, peak: o.peak };
   };
-  const delays: number[] = [];
-  const ratios: number[] = [];
+  const stats: EchoStats = { clicks: 0, missing: [], delays: [], ratios: [] };
   for (let k = 0; k < beats; k++) {
     const click = at(k * beat);
+    if (!Number.isFinite(click.onset)) continue;
+    stats.clicks++;
     const echo = at(k * beat + sixteenth);
-    if (!Number.isFinite(click.onset) || !Number.isFinite(echo.onset) || click.peak <= 0) continue;
-    delays.push(echo.onset - click.onset - sixteenth);
-    ratios.push(echo.peak / click.peak);
+    if (!Number.isFinite(echo.onset)) {
+      stats.missing.push(k);
+      continue;
+    }
+    stats.delays.push(toMs(echo.onset - click.onset - sixteenth, rate));
+    stats.ratios.push(echo.peak / click.peak);
   }
-  return { delay: toMs(median(delays), rate), ratio: median(ratios), found: delays.length };
+  return stats;
+}
+
+type Bar = { name: string; ok: boolean; value: string };
+
+/** The echo's bars over a take of `clicks` clicks: an echo after every one, each on time and at half its
+ * click. Per beat, so a take whose echo stops partway fails however many beats came before. */
+function echoBars(echo: EchoStats, clicks: number): Bar[] {
+  const found = echo.delays.length;
+  const worst = echo.delays.reduce((w, d) => (Math.abs(d) > Math.abs(w) ? d : w), 0);
+  const [lo, hi] = found ? [Math.min(...echo.ratios), Math.max(...echo.ratios)] : [NaN, NaN];
+  const missing = echo.missing.length ? `, none after beat(s) ${echo.missing.join(',')}` : '';
+  return [
+    { name: 'an echo in A after every click', ok: echo.missing.length === 0 && found >= clicks, value: `${found}/${clicks} clicks${missing}` },
+    { name: 'every echo in A one sixteenth after its click, within 0.05 ms', ok: found > 0 && Math.abs(worst) <= 0.05, value: `worst ${signed(worst, 3)} ms over ${found}` },
+    { name: 'every echo in A at half its click (0.45..0.55)', ok: found > 0 && lo >= 0.45 && hi <= 0.55, value: `${lo.toFixed(3)}..${hi.toFixed(3)}` },
+  ];
+}
+
+/** The echo check against a synthetic take of 32 beats of the ideal click, each echoed at half its level
+ * one sixteenth later: it must pass with every echo and fail when the echoes stop after the 20th beat (a
+ * review's case: a median over the beats passed it). A check that cannot tell fails the run. */
+function echoSelfTest(rate: number): void {
+  const beat = (rate * 60) / BPM;
+  const beats = 32;
+  // Without its last 10 ms at 1e-4, which a real take's noise floor buries and a silent one would not.
+  const click = referenceClick(false, rate).subarray(0, Math.round(0.06 * rate));
+  const bars = (echoed: number) => {
+    const pcm = new Float32Array(Math.round(beats * beat));
+    const put = (from: number, gain: number) => {
+      const start = Math.round(from);
+      for (let i = 0; i < click.length; i++) pcm[(start + i) % pcm.length] += gain * click[i];
+    };
+    for (let k = 0; k < beats; k++) {
+      put(k * beat, 1);
+      if (k < echoed) put(k * beat + beat / 4, 0.5);
+    }
+    return echoBars(echoIn(pcm, rate), beats);
+  };
+  const whole = bars(beats);
+  check(whole.every((b) => b.ok), `the echo check fails a synthetic take with every echo: ${whole.map((b) => `${b.name}: ${b.value}`).join('; ')}`);
+  const dropout = bars(20);
+  check(!dropout[0].ok && dropout[0].value.endsWith(Array.from({ length: 12 }, (_, i) => 20 + i).join(',')), `the echo check misses the lost echoes of a synthetic take whose echoes stop after 20 of 32 beats: ${dropout[0].value}`);
 }
 
 /** Every beat's click in the first `beats` beats of a committed lane (the rest of the take is silent). */
@@ -343,8 +407,8 @@ interface BufferResult {
   f: TakeStats;
   g: TakeStats;
   h: TakeStats;
-  echo: { delay: number; ratio: number; found: number } | null;
-  bars: { name: string; ok: boolean; value: string }[];
+  echo: EchoStats | null;
+  bars: Bar[];
 }
 
 // ── The run ───────────────────────────────────────────────────────────────────────────────────────────
@@ -492,6 +556,7 @@ async function runBuffer(buffer: BufferFrames, bars: number, channel: number, re
     // ── A: the click, a FIXED first take ─────────────────────────────────────────────────────────────
     clock.setMetronome(true);
     if (withEcho) {
+      echoSelfTest(rate);
       engineInputSends.setValue('echoTime', 3); // 1/16 (the lane delay's divisions)
       engineInputSends.setValue('echoFeedback', 0);
       engineInputSends.setValue('echoLevel', 0.5);
@@ -504,7 +569,10 @@ async function runBuffer(buffer: BufferFrames, bars: number, channel: number, re
     const pcmA = await committedPcm(0, masterFrames);
     const a = analyse('A', 0, pcmA, rate, ref, channel);
     const echo = withEcho ? echoIn(pcmA, rate) : null;
-    if (echo) log(`  take A echo: ${echo.found} beats, ${signed(echo.delay, 3)} ms off a sixteenth, at ${echo.ratio.toFixed(3)} of its click`);
+    if (echo) {
+      const range = (xs: number[], digits: number) => (xs.length ? `${signed(Math.min(...xs), digits)}..${signed(Math.max(...xs), digits)}` : 'none');
+      log(`  take A echo: ${echo.delays.length}/${echo.clicks} clicks echoed${echo.missing.length ? ` (none after beat(s) ${echo.missing.join(',')})` : ''}, ${range(echo.delays, 3)} ms off a sixteenth, at ${range(echo.ratios, 3)} of its click`);
+    }
     const inputPeakA = guard.max;
 
     // ── B: lane 1's clicks through the cable, click off ──────────────────────────────────────────────
@@ -612,7 +680,7 @@ async function runBuffer(buffer: BufferFrames, bars: number, channel: number, re
     const takes = [a, b, c, d, e, f, g, h];
     const spreads = takes.map((s) => s.max - s.min);
     const drifts = takes.map((s) => s.drift);
-    const barList = [
+    const barList: Bar[] = [
       { name: '|clickX_A| <= 2 ms', ok: Math.abs(a.x) <= 2, value: signed(a.x, 3) },
       { name: 'accent on beat 1 A-H', ok: takes.every((s) => s.offBar.length === 0), value: takes.map((s) => s.offBar.length).join(',') },
       { name: 'spread A-H <= 1 ms', ok: spreads.every((s) => s <= 1), value: spreads.map((s) => s.toFixed(3)).join(',') },
@@ -630,12 +698,7 @@ async function runBuffer(buffer: BufferFrames, bars: number, channel: number, re
       { name: 'every beat of H clicks (the trimmed lane through the cable)', ok: h.found === h.beats, value: `${h.found}/${h.beats}` },
       { name: '|loopX_H - loopX_B| <= 0.1 ms (the trimmed lane)', ok: Math.abs(h.x - b.x) <= 0.1, value: signed(h.x - b.x, 3) },
       { name: 'UNDO gives lane 2 back as it was before TRIM', ok: undoDiff === 0, value: `${undoDiff} of ${grownG} frames differ` },
-      ...(echo
-        ? [
-            { name: 'echo in A one sixteenth after its click, within 0.05 ms', ok: echo.found >= takes[0].found / 2 && Math.abs(echo.delay) <= 0.05, value: `${signed(echo.delay, 3)} ms over ${echo.found} beats` },
-            { name: 'echo in A at half its click (0.45..0.55)', ok: echo.ratio >= 0.45 && echo.ratio <= 0.55, value: echo.ratio.toFixed(3) },
-          ]
-        : []),
+      ...(echo ? echoBars(echo, a.found) : []),
     ];
     for (const bar of barList) log(`b${buffer} ${bar.ok ? 'PASS' : 'FAIL'} ${bar.name}: ${bar.value}`);
     return { device, a, b, c, d, e, f, g, h, echo, bars: barList };

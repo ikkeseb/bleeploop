@@ -8,7 +8,7 @@
 //! mirror of the lanes, the transport and the selection: a new subscriber (a WebView reload) and a
 //! new engine (another sample rate, a fault) get a `reset` frame that carries all of it, with the
 //! settings the host keeps (`settings.rs`), so the UI adopts them. It also tells the settings memory
-//! what the engine reset (`Cleared`) or copied (`Copied`). The thread drains while nobody subscribes,
+//! what the engine reset (`Cleared`), copied (`Copied`) or muted itself (`Muted`). The thread drains while nobody subscribes,
 //! so the event ring never fills.
 
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
@@ -109,6 +109,7 @@ impl Feed {
                 Event::Selected { frame, lane } => self.selected = (frame, lane),
                 Event::Copied { from, to, .. } => self.host.copied(from, to),
                 Event::Cleared { lane, .. } => self.host.cleared(lane),
+                Event::Muted { lane, on, .. } => self.host.muted(lane, on),
                 _ => {}
             }
         }

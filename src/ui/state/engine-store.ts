@@ -43,8 +43,8 @@ import { notifyError, notifyInfo } from '../../notify';
  * The engine owns the musical state: lanes, the transport (master, BPM and its lock), the beat and the
  * selection arrive on the feed, and nothing here predicts them. It does not echo settings, so this store
  * keeps them (lane volume, mute and FX, the take modes, click, master, the input sends): it sends each
- * change, mirrors the
- * engine's CLEAR (`Cleared`: the lane's mix resets) and COPY (`Copied`), and on a `reset` frame takes the
+ * change, mirrors the engine's CLEAR (`Cleared`: the lane's mix resets), COPY (`Copied`) and a pedal's
+ * MUTE (`Muted`), and on a `reset` frame takes the
  * settings the engine remembers, so the screen shows what the engine plays. `engineSession` is the
  * engine as export, recovery and import see it: the engine's PCM with this store's mix, and the token of
  * the player's clear that emptied the looper (recovery deletes the jam for it, and keeps it for a new
@@ -423,6 +423,9 @@ function applyEvent(ev: EngineEvent): void {
         tookLoop = true;
       }
       clearLaneMix(ev.lane);
+      break;
+    case 'Muted':
+      setMutePlain(ev.lane, ev.on);
       break;
   }
 }

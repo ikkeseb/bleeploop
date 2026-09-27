@@ -3,7 +3,7 @@ import { engineMode, sendEngine, type EngineAction, type InputSendId } from '../
 import { pressGoLive } from '../ui/instrument/PluginControls';
 import { toggleStage } from '../ui/stage/stage-store';
 import { clock, looper } from '../ui/state/audio';
-import { engineInputSends, trimLane } from '../ui/state/engine-store';
+import { engineInputSends } from '../ui/state/engine-store';
 import { CONFIRM_WINDOW_MS } from '../ui/looper/shared';
 import {
   CONFIRM_CLEAR_TEXT,
@@ -12,7 +12,6 @@ import {
   dismissLaneCue,
   fixedGate,
   inputFxGate,
-  loopWholeBars,
   muteGate,
   playStopGate,
   recDubGate,
@@ -35,9 +34,12 @@ import {
  * track leaves the selection alone, except REC/DUB, which selects its track so the transport keys
  * follow the take. A refused press says why on its lane (gates.ts `refuseOnLane`) instead of doing
  * nothing; a refused global one says it on the selected lane, where the player is looking. In engine
- * mode the rows with an engine `Action` go to the engine, which gates them, confirms CLEAR per lane and
- * names a refusal on the feed (`src/app/boot.ts` puts it on the lane); the others run their control's
- * facade call, which sends the control's own command.
+ * mode every lane row, NEXT/PREV TRACK and ▶/■ ALL go to the engine as its `Action`: on the lane the
+ * engine has selected when the press lands (never the UI's copy of the selection, which a feed frame
+ * may not have refreshed yet), or `ActionOn` a named track. The engine gates them, confirms CLEAR per
+ * lane, resolves HOLD's lane and names a refusal on the feed (`src/app/boot.ts` puts it on the lane).
+ * The other global rows run their control's facade call, which sends the control's own command, after
+ * a `Press` that tells the engine a looper press came (a pending pedal CLEAR is not confirmed past it).
  */
 type LaneActionId = 'recDub' | 'playStop' | 'undo' | 'clear' | 'mute' | 'reverse' | 'copy' | 'halveTrack';
 type GlobalActionId =
@@ -112,11 +114,12 @@ const LANE: Readonly<Record<LaneActionId, LaneRow>> = {
   playStop: { gate: playStopGate, act: (i) => looper.playStop(i), engine: 'PlayStop' },
   undo: { gate: undoGate, act: (i) => looper.undoLastOverdub(i), engine: 'Undo' }, // a second press redoes, as ↶ UNDO does
   clear: { gate: clearGate, act: clearTrack, engine: 'Clear' },
-  mute: { gate: muteGate, act: (i) => looper.setMute(i, !looper.trackMuted(i)) },
-  reverse: { gate: reverseGate, act: (i) => looper.reverse(i) },
-  copy: { gate: copyGate, act: (i) => void looper.copy(i) },
-  // TRIM to the first half of the loop's bars, rounded down (one UNDO away). The web path has no TRIM.
-  halveTrack: { gate: trimGate, act: (i) => trimLane(i, Math.floor(loopWholeBars() / 2)) },
+  mute: { gate: muteGate, act: (i) => looper.setMute(i, !looper.trackMuted(i)), engine: 'Mute' },
+  reverse: { gate: reverseGate, act: (i) => looper.reverse(i), engine: 'Reverse' },
+  copy: { gate: copyGate, act: (i) => void looper.copy(i), engine: 'Copy' },
+  // TRIM to the first half of the loop's bars, rounded down (one UNDO away): the engine's `Halve` judges
+  // the bars as the loop stands when the press lands. The web path has no TRIM: its gate refuses.
+  halveTrack: { gate: trimGate, act: () => {}, engine: 'Halve' },
 };
 
 export function isLaneAction(id: ActionId): id is LaneActionId {
@@ -215,18 +218,38 @@ export function runAction(id: ActionId, target: Target = null): void {
     return;
   }
   const action = engineMode() ? ENGINE_GLOBAL[id] : undefined;
-  if (action) sendEngine({ Action: action });
-  else GLOBAL[id]();
+  if (action) {
+    sendEngine({ Action: action });
+    return;
+  }
+  if (engineMode() && id !== 'stageView') sendEngine('Press');
+  GLOBAL[id]();
 }
 
-/** HOLD's release (`midi-actions.ts`): REC/DUB again on lane `i`, where its press acted, while that lane
- * still captures. A take that closed itself meanwhile (FIXED) stays closed instead of starting an
- * overdub. */
-export function releaseHold(i: number): void {
-  const s = looper.track(i)().state;
+/** HOLD's press (`midi-actions.ts`): REC/DUB on `target`. On the selected track in engine mode it is the
+ * engine's `Hold`, which remembers the lane the engine acted on for the release. */
+export function pressHold(target: Target): void {
+  if (!engineMode() || target !== null) {
+    runAction('recDub', target);
+    return;
+  }
+  onPress('recDub');
+  sendEngine({ Action: 'Hold' });
+}
+
+/** HOLD's release: end the capture its press started, while that lane still captures. A take that closed
+ * itself meanwhile (FIXED) stays closed instead of starting an overdub. The engine judges it on its own
+ * state, where its press landed (`target`: the named track, or the lane the engine's `Hold` acted on);
+ * the web path on lane `lane`, where its press acted. */
+export function releaseHold(target: Target, lane: number): void {
+  if (engineMode()) {
+    sendEngine(target === null ? { Action: 'Release' } : { ActionOn: [target, 'Release'] });
+    return;
+  }
+  const s = looper.track(lane)().state;
   if (s !== 'RECORDING' && s !== 'OVERDUBBING') return;
   onPress('recDub');
-  runOnLane('recDub', i, true);
+  runOnLane('recDub', lane, true);
 }
 
 /** Select track `i` outright (the digit keys). Not a table row, since it names its track, but a looper

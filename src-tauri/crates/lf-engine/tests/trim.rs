@@ -3,7 +3,9 @@
 //! with; the loop keeps its length, the lane its orientation. The loop before the trim is the lane's
 //! one-level undo target, so UNDO toggles it as it does an overdub. A PLAYING lane hears the trimmed loop
 //! from the next loop boundary; a block job builds it, in heard order, so it is ready there even for a
-//! press a frame before the boundary. No web guard precedes this: the Web Audio looper never trimmed.
+//! press a frame before the boundary. A TRIM pressed while the loop playing until that boundary is the
+//! spare it would write (an UNDO or a TRIM pressed in the same loop) waits for the boundary, and is heard
+//! from there. No web guard precedes this: the Web Audio looper never trimmed.
 
 mod common;
 
@@ -291,7 +293,7 @@ fn e_a_stopped_lane_trims_at_once_and_plays_it_once_the_job_is_done() {
 }
 
 #[test]
-fn f_a_trim_during_an_undo_swap_plays_the_undone_loop_at_once_and_the_trim_from_the_boundary() {
+fn f_a_trim_during_an_undo_swap_waits_for_it_and_is_heard_from_the_boundary() {
     let mut rig = rig();
     let master = loop_of(&mut rig, 4);
     let pre = rig.pcm(0);
@@ -310,11 +312,49 @@ fn f_a_trim_during_an_undo_swap_plays_the_undone_loop_at_once_and_the_trim_from_
     rig.keep_output();
     let from = rig.frame;
     assert_eq!(trim(&mut rig, 0, 1), []);
+    assert!(rig.engine.holding(), "the trim waits for the undo's swap: it would write the loop playing now");
     rig.advance_to(boundary + master / 2);
     let trimmed = first_tiled(&pre, rig.fpb());
-    plays(&rig, from, |f, pos| if f < boundary { pre[pos] } else { trimmed[pos] }, "undo, then trim");
+    plays(&rig, from, |f, pos| if f < boundary { dubbed[pos] } else { trimmed[pos] }, "undo, then trim");
     assert_eq!(rig.engine.looper().undo_pcm(0), Some(pre.clone()), "the loop the undo gave back is the undo target");
     assert_ne!(dubbed, pre);
+}
+
+#[test]
+fn h_a_second_trim_before_the_boundary_is_heard_there_instead_of_the_first() {
+    for reversed in [false, true] {
+        for (first, second) in [(4, 3), (2, 5)] {
+            // Pressed while the first trim's job runs, and after it is done.
+            for late in [false, true] {
+                let tag = format!("reversed={reversed} trims {first} then {second}, late={late}");
+                let mut rig = rig();
+                let master = loop_of(&mut rig, 8);
+                let gap = if late { 2 * job_frames(master) } else { 1 };
+                let fpb = rig.fpb();
+                if reversed {
+                    reverse_lane_0(&mut rig);
+                }
+                let before = rig.pcm(0);
+                rig.advance_to(rig.next_boundary() + master / 5);
+                let boundary = rig.next_boundary();
+                rig.keep_output();
+                let from = rig.frame;
+                assert_eq!(trim(&mut rig, 0, first), [], "{tag}");
+                rig.advance(gap);
+                assert_eq!(trim(&mut rig, 0, second), [], "{tag}");
+                assert!(rig.engine.holding(), "{tag}: the second trim waits");
+                rig.advance_to(boundary + master + master / 3);
+                // Each trim keeps the first bars of the lane's loop as it stands: the second, of the first's.
+                let once = first_tiled(&before, first as Frame * fpb);
+                let twice = first_tiled(&once, second as Frame * fpb);
+                plays(&rig, from, |f, pos| if f < boundary { before[pos] } else { twice[pos] }, &tag);
+                assert_eq!(rig.pcm(0), twice, "{tag}");
+                assert_eq!(rig.engine.looper().undo_pcm(0), Some(once), "{tag}: UNDO gives back the first trim");
+                assert_eq!(rig.lane(0).reversed, reversed, "{tag}");
+                steps_stay_small(&rig);
+            }
+        }
+    }
 }
 
 /// A jam with trims: of a playing lane, of a reversed copy, UNDO, a trim of a stopped lane and its resume.

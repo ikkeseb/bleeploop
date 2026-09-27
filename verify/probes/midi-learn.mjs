@@ -17,7 +17,10 @@
  * track actions aimed at a named track (REC/DUB, PLAY/STOP, MUTE, REV, COPY) act there, only REC/DUB
  * moving the selection; HOLD starts an overdub on 127 and ends it on 0, one REC/DUB each; a latching
  * pedal cannot HOLD; CLEAR confirms per target; a binding saved before targets loads as the selected
- * track's; in engine mode (the web engine fake) each press sends its control's command for its lane.
+ * track's. In engine mode (the web engine fake) a track action sends the engine's action (`Action` on the
+ * engine's own selection, `ActionOn` a named track: MUTE, REV, COPY and HALVE too), a global toggle sends
+ * `Press` then its control's command, and HOLD's press and release send the engine's REC/DUB or `Hold` and
+ * `Release` whatever the feed shows; an engine refusal (NO MUTE) lands on its lane.
  * logs/midi-learn/bindings.png shows the row and a long list for the eye. It cannot see a real
  * controller, whether WebView2 keeps a port's id across a restart or replug, a real foot against the
  * learn read, or the native engine answering (`STATUS.md` § Play first).
@@ -614,40 +617,51 @@ await probe(async ({ open }) => {
       [10, 'recDub', '2'], [11, 'playStop', '1'], [12, 'mute', '0'], [13, 'reverse', '1'], [14, 'copy', '0'],
       [15, 'playStop', ''], [16, 'clickToggle', null], [17, 'endStopToggle', null], [18, 'fixedToggle', null],
       [19, 'inFxEcho', null], [20, 'inFxReverb', null], [21, 'mute', '3'], [22, 'recDub', '0'],
+      [23, 'mute', ''], [24, 'reverse', ''], [25, 'copy', ''], [26, 'halveTrack', ''], [27, 'halveTrack', '2'],
+      [28, 'tapTempo', null], [29, 'recDub', ''],
     ];
+    const holds = [22, 29];
     for (const [cc, action, target] of bindings) {
       await ep.selectOption(PICK, action, { timeout: 3000 });
       if (target !== null) await ep.selectOption(TARGET, target, { timeout: 3000 });
       await ep.click(LEARN);
       await ep.evaluate((c) => window.__send('a', [[0xb0, c, 127], [0xb0, c, 0]]), cc);
     }
-    await ep.locator('.audio-settings__binding', { hasText: 'CC 22 · ch 1' }).getByRole('button', { name: /^Hold to record/ }).click({ timeout: 3000 });
+    for (const cc of holds) {
+      await ep.locator('.audio-settings__binding', { hasText: `CC ${cc} · ch 1` }).getByRole('button', { name: /^Hold to record/ }).click({ timeout: 3000 });
+    }
     await ep.evaluate(() => window.__lf.ui.closeSettings());
     const sentBy = {};
-    for (const [cc] of bindings.filter(([c]) => c !== 22)) {
+    for (const [cc] of bindings.filter(([c]) => !holds.includes(c))) {
       await ep.evaluate(() => void (window.__lf.native.sent.length = 0));
       await ep.evaluate((c) => window.__send('a', [[0xb0, c, 127], [0xb0, c, 0]]), cc);
       await ep.waitForTimeout(60);
       sentBy[cc] = await ep.evaluate(() => window.__lf.native.sent.slice());
     }
+    // The engine's refusal of the MUTE on EMPTY track 4 (CC 21), which the fake does not answer by itself.
+    let seq = 1;
+    await ep.evaluate((f) => window.__lf.native.emit(f), { seq: ++seq, reset: false, events: [{ Refused: { frame: 0, lane: 3, reason: 'NoMute' } }] });
+    await ep.waitForTimeout(60);
     const cue4 = await ep.evaluate(() => document.querySelectorAll('.lp-lane')[3]?.querySelector('.lp-lane__wellmsg.is-cue')?.textContent.trim() ?? '');
     // HOLD on track 1: the press, then the release while the feed says the lane overdubs; then a press
-    // whose capture never shows (a take that closed itself) and a release that sends nothing.
-    let seq = 1;
-    const holdStep = async (value, feedState) => {
+    // whose capture never shows (a take that closed itself) and its release: the engine judges each
+    // release, so both are sent. Then HOLD on the selected track: the engine's Hold and Release.
+    const holdStep = async (cc, value, feedState) => {
       await ep.evaluate(() => void (window.__lf.native.sent.length = 0));
       if (feedState) {
         const frame = { seq: ++seq, reset: false, events: [{ Lane: { frame: 0, lane: 0, info: info(feedState, { length: 96000, canReverse: true }) } }] };
         await ep.evaluate((f) => window.__lf.native.emit(f), frame);
       }
-      await ep.evaluate((v) => window.__send('a', [[0xb0, 22, v]]), value);
+      await ep.evaluate(([c, v]) => window.__send('a', [[0xb0, c, v]]), [cc, value]);
       await ep.waitForTimeout(60);
       return ep.evaluate(() => window.__lf.native.sent.slice());
     };
-    const hold = [await holdStep(127), await holdStep(0, 'Overdubbing'), await holdStep(127, 'Playing'), await holdStep(0)];
+    const hold = [await holdStep(22, 127), await holdStep(22, 0, 'Overdubbing'), await holdStep(22, 127, 'Playing'), await holdStep(22, 0)];
+    const holdSelected = [await holdStep(29, 127), await holdStep(29, 0, 'Playing')];
     const pressed = (name) => ep.evaluate((n) => document.querySelector(`[aria-label="${n}"]`)?.getAttribute('aria-pressed') ?? null, name);
     return {
       hold,
+      holdSelected,
       sent: sentBy,
       controls: {
         click: await pressed('Metronome click'),
@@ -804,27 +818,34 @@ await probe(async ({ open }) => {
   check(() => assert.deepEqual(out.engine, {
     hold: [
       [{ SelectTrack: 0 }, { ActionOn: [0, 'RecDub'] }],
-      [{ ActionOn: [0, 'RecDub'] }],
+      [{ ActionOn: [0, 'Release'] }],
       [{ SelectTrack: 0 }, { ActionOn: [0, 'RecDub'] }],
-      [],
+      [{ ActionOn: [0, 'Release'] }],
     ],
+    holdSelected: [[{ Action: 'Hold' }], [{ Action: 'Release' }]],
     sent: {
       10: [{ SelectTrack: 2 }, { ActionOn: [2, 'RecDub'] }],
       11: [{ ActionOn: [1, 'PlayStop'] }],
-      12: [{ SetMute: [0, true] }],
-      13: [{ Reverse: 1 }],
-      14: [{ Copy: 0 }],
+      12: [{ ActionOn: [0, 'Mute'] }],
+      13: [{ ActionOn: [1, 'Reverse'] }],
+      14: [{ ActionOn: [0, 'Copy'] }],
       15: [{ Action: 'PlayStop' }],
-      16: [{ SetMetronome: true }],
-      17: [{ SetLoopEndStop: true }],
-      18: [{ SetFixedLength: true }],
-      19: [{ SetInputSend: ['echo', true] }],
-      20: [{ SetInputSend: ['reverb', true] }],
-      21: [],
+      16: ['Press', { SetMetronome: true }],
+      17: ['Press', { SetLoopEndStop: true }],
+      18: ['Press', { SetFixedLength: true }],
+      19: ['Press', { SetInputSend: ['echo', true] }],
+      20: ['Press', { SetInputSend: ['reverb', true] }],
+      21: [{ ActionOn: [3, 'Mute'] }],
+      23: [{ Action: 'Mute' }],
+      24: [{ Action: 'Reverse' }],
+      25: [{ Action: 'Copy' }],
+      26: [{ Action: 'Halve' }],
+      27: [{ ActionOn: [2, 'Halve'] }],
+      28: ['Press'],
     },
     controls: { click: 'true', endStop: 'true', fixed: 'true', inFx: true },
     cue4: 'nothing to mute, record first',
-  }, "engine mode: a press sends its lane control's command for the target lane, a global its control's; a refused one says why on its lane"));
+  }, "engine mode: a track press sends the engine's action for the engine's selection or its named track, a global toggle Press then its control's command, HOLD the engine's press and release; an engine refusal says why on its lane"));
   for (const failure of failures) console.log(`FAIL ${failure}`);
   assert.equal(failures.length, 0, `${failures.length} of ${checks} checks failed`);
 });

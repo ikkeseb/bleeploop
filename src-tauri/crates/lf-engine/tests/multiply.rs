@@ -9,10 +9,14 @@
 //! stop past its first loop pass keeps the NEAREST whole number of loops (recording on to it when it lies
 //! ahead), so a free take grows the loop the same way; a FIXED multiply window stopped early follows the
 //! same rule (`e_…`, `j_…`, `k_…`).
+//!
+//! The beat grid's origin, which the lanes' rhythmic FX follow, stays put across a multiply: a dotted
+//! STUTTER keeps its phase through the commit (`l_…`).
 
 mod common;
 
 use common::{code, Opts, Rig};
+use lf_engine::dsp::fx::{FxKind, FxParam};
 use lf_engine::grid::{Frame, Grid};
 use lf_engine::looper::{job_frames, JOB_RATE};
 use lf_engine::overview::PEAK_FRAMES;
@@ -576,4 +580,42 @@ fn k_a_free_later_take_pressed_past_the_loop_keeps_the_nearest_whole_loops() {
             steps_stay_small(&rig);
         }
     }
+}
+
+#[test]
+fn l_a_dotted_stutter_keeps_its_phase_across_the_commit() {
+    // Lane 0's loop plays through a 1/8. STUTTER, with and without a silent FIXED take on lane 1 that
+    // multiplies it. The multiply re-anchors the loop a whole number of bars later, which is no whole
+    // number of dotted eighths (four beats over three quarters of one): the FX follow the beat grid's
+    // origin, which the multiply leaves where it was, so the bus cannot tell the two sessions apart.
+    let run = |multiply: bool| {
+        let mut rig = Rig::new();
+        let master = master_of(&mut rig, 1, code);
+        rig.set(Command::SetFxParam(0, FxParam::Rate, 2.0));
+        rig.set(Command::SetFxBypass(0, FxKind::Stutter, false));
+        rig.set(Command::SetFixedLength(true));
+        rig.set(Command::SetFixedBars(4.0));
+        // A take whose boundary lies a whole number of bars from the old anchor that three does not divide:
+        // there the old code's gate would jump phase.
+        while ((rig.next_boundary() - rig.anchor()) / master) % 3 == 0 {
+            rig.advance(master);
+        }
+        rig.keep_output();
+        if multiply {
+            rig.press(Command::RecDub(1));
+        } else {
+            rig.advance(1);
+        }
+        rig.advance(10 * master);
+        rig
+    };
+    let (with, without) = (run(true), run(false));
+    assert_eq!(with.master(), 4 * without.master(), "the multiply committed inside the render");
+    assert!(with.anchor() != without.anchor(), "and re-anchored the loop");
+    for (tap, a, b) in [("left", &with.bus, &without.bus), ("right", &with.bus_right, &without.bus_right)] {
+        assert_eq!(a.len(), b.len());
+        let first = a.iter().zip(b).position(|(x, y)| x.to_bits() != y.to_bits());
+        assert_eq!(first, None, "the {tap} bus differs from the session without a multiply");
+    }
+    assert!(with.bus.iter().any(|&x| x != 0.0), "the lane sounds through its gate");
 }

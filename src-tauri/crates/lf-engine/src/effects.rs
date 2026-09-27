@@ -11,10 +11,12 @@
 //! jumps the frame counter), so its blocks always follow each other, as Blink's do. Methods take device
 //! frames; [`LaneFx::set_offset`] keeps the difference.
 //!
-//! The chains take the looper's grid (its anchor and the tempo's beat) whenever it moves, where the
-//! web handed it to a chain as its lane started: the grid moves only while no lane plays, so every
-//! playing lane has the grid it would have had. (A device gap moves the anchor on the DSP clock while
-//! lanes play; the re-timed grid keeps the device-frame phase.) CLEAR resets the lane's FX to the
+//! The chains take the looper's beat grid (its origin and the tempo's beat) whenever it moves, where the
+//! web handed the loop's anchor to a chain as its lane started: the grid moves only while no lane plays
+//! (a first take, an import, an idle restart), so every playing lane has the grid it would have had. A
+//! multiply re-anchors the loop, not the beat grid (`Looper::grid_origin`): a stutter's dotted gate keeps
+//! its phase across it. (A device gap moves the origin on the DSP clock while lanes play; the re-timed
+//! grid keeps the device-frame phase.) CLEAR resets the lane's FX to the
 //! defaults, COPY gives the copy the source's FX (`machine.ts` `clear`, `copy`). A parameter is clamped
 //! to its def's range; a change sounds from the next quantum boundary, as a live Web Audio param does.
 
@@ -37,7 +39,7 @@ pub struct LaneFx {
     bus: ReverbBus,
     /// Device frames the DSP clock is behind.
     offset: Frame,
-    /// The grid the chains hold: the anchor on the DSP clock and the tempo.
+    /// The grid the chains hold: the origin on the DSP clock and the tempo.
     timing: Option<(Frame, u32)>,
     out: [f32; QUANTUM],
     send: [f32; QUANTUM],
@@ -111,10 +113,10 @@ impl LaneFx {
         self.chains[to].set_state(&state, ctl);
     }
 
-    /// Hand every chain the looper's grid if it moved: loop position 0 at `anchor`, a beat a quarter of
-    /// a bar at `bpm`. No grid (`master` 0) leaves the last one.
-    pub fn follow_grid(&mut self, anchor: Frame, master: Frame, bpm: u32, frame: Frame) {
-        let anchor = anchor - self.offset;
+    /// Hand every chain the looper's beat grid if it moved: its origin at `origin` (a device frame), a
+    /// beat a quarter of a bar at `bpm`. No grid (`master` 0) leaves the last one.
+    pub fn follow_grid(&mut self, origin: Frame, master: Frame, bpm: u32, frame: Frame) {
+        let anchor = origin - self.offset;
         if master == 0 || self.timing == Some((anchor, bpm)) {
             return;
         }

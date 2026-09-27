@@ -347,7 +347,9 @@ impl Engine {
             self.clock.ensure_running(start);
             self.skipped = start;
         } else if start != self.next_frame {
+            // A jump: the DSP clock and the block jobs pace by the frames rendered, not by the ones lost.
             self.skipped += start - self.next_frame;
+            self.looper.skip(start - self.next_frame);
         }
         self.next_frame = end;
         self.fx.set_offset(self.skipped);
@@ -405,7 +407,7 @@ impl Engine {
                 cx.feed.push(Event::Beat { frame: f, beat_in_bar: beat.beat_in_bar, count_left: beat.count_left, clicked: beat.clicked });
             }
             self.looper.publish(&mut cx);
-            self.fx.follow_grid(self.looper.anchor(), self.looper.master(), self.clock.bpm(), f);
+            self.fx.follow_grid(self.looper.grid_origin(), self.looper.master(), self.clock.bpm(), f);
             self.input_fx.follow_tempo(self.clock.bpm(), f);
 
             let quantum_end = f - (f - self.skipped).rem_euclid(QUANTUM as Frame) + QUANTUM as Frame;
@@ -557,6 +559,26 @@ struct Apply<'a> {
 
 fn apply(looper: &mut Looper, cx: &mut Cx, at: &mut Apply, command: Command) -> Applied {
     let now = cx.now;
+    // A looper press disarms a pending pedal CLEAR: every gesture here, the on-screen controls' too, and
+    // `Press`, which a pedal sends before the setting it toggles. An action decides for itself
+    // (`Looper::action`), a selection too; a setting alone never does (a slider, a settings replay).
+    if matches!(
+        command,
+        Command::RecDub(_)
+            | Command::PlayStop(_)
+            | Command::Stop(_)
+            | Command::Undo(_)
+            | Command::Reverse(_)
+            | Command::Copy(_)
+            | Command::Trim(..)
+            | Command::Clear(_)
+            | Command::PlayAll
+            | Command::StopAll
+            | Command::ClearAll
+            | Command::Press
+    ) {
+        looper.disarm_clear();
+    }
     match command {
         Command::RecDub(i) => lane(i).map_or(Applied::Done, |i| looper.rec_dub(cx, i)),
         Command::PlayStop(i) => lane(i).map_or(Applied::Done, |i| looper.play_stop(cx, i)),
@@ -570,7 +592,8 @@ fn apply(looper: &mut Looper, cx: &mut Cx, at: &mut Apply, command: Command) -> 
         Command::StopAll => looper.stop_all(cx),
         Command::ClearAll => looper.clear_all(cx),
         Command::Action(action) => {
-            let i = looper.selected() as u8;
+            let Some(i) = looper.press_lane(action) else { return Applied::Done };
+            let i = i as u8;
             match apply(looper, cx, at, Command::ActionOn(i, action)) {
                 Applied::WaitUntil(at) => Applied::Held(at, Command::ActionOn(i, action)),
                 done => done,
@@ -585,6 +608,7 @@ fn apply(looper: &mut Looper, cx: &mut Cx, at: &mut Apply, command: Command) -> 
             }
             applied
         }
+        Command::Press => Applied::Done,
         Command::SelectTrack(i) => {
             looper.select(i as usize);
             cx.feed.push(Event::Selected { frame: now, lane: looper.selected() as u8 });

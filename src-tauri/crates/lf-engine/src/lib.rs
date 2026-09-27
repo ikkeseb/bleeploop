@@ -28,8 +28,10 @@
 //! - **Every committed lane is one master long.** A later take longer than the master (FIXED past the
 //!   loop, or a free take stopped past its first loop pass: the nearest whole loop, E10) multiplies it:
 //!   the take becomes the new master, whole old loops long, and the other loops tile out to it with the
-//!   grid, its beats and every lane's phase unchanged (`looper::Looper`'s multiply, F14). A TRIM keeps
-//!   the length too: the lane's first bars repeat across the loop (F16).
+//!   grid, its beats and every lane's phase unchanged (`looper::Looper`'s multiply, F14); the lanes' FX
+//!   follow the beat grid's origin, which a multiply leaves where it was. A TRIM keeps the length too: the
+//!   lane's first bars repeat across the loop (F16), heard from the next boundary (a second TRIM before
+//!   it waits for it, and is heard there instead).
 //! - **One clock: the device frame.** Input frame `x` is captured at frame `x`; a lane plays loop
 //!   position `(f - anchor) mod master` at frame `f`. A take starts `align_frames` (+ the live effect
 //!   slot's latency, from the block after its live flag changes, and the master limiter's pre-delay)
@@ -54,8 +56,13 @@
 //!   needs a lane's job finished waits for it (on an exact frame), and every command sent after it waits
 //!   behind it, except the instruments', the plugin slots' and the input sends' (a note never waits on
 //!   the looper). A full command table leaves the rest in the ring for the next block: late, never
-//!   dropped.
+//!   dropped. A jump in the device frame moves every job's schedule with it (`Looper::skip`): work is
+//!   owed for the frames rendered, never for the ones the device lost.
 //! - **A command is judged when it is pressed**: one that would do nothing then is dropped, never held.
+//!   A hands-free press ([`Action`]) acts on the lane the engine has selected when it lands, or a named
+//!   one, never on what the UI last saw on the feed: HALVE's bars, HOLD's lane and a pedal MUTE's state
+//!   are the engine's. Every looper press but CLEAR's confirming one disarms a pending pedal CLEAR (a
+//!   pedal's setting toggle says it is one with [`Command::Press`]); a setting alone does not.
 //! - **The engine never drops a plugin unit** (a drop frees memory and calls into the plugin's DLL).
 //!   Units enter and leave through their slot's [`SlotPort`], at a block start (at once while no device
 //!   runs: [`Engine::service_slots_idle`]); a removal releases the slot's notes,

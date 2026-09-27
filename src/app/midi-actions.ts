@@ -1,6 +1,6 @@
 import { createSignal } from 'solid-js';
 import { releaseController, setMidiConsumer } from '../audio/midi';
-import { ACTION_LABELS, isLaneAction, isTrack, releaseHold, runAction, targetLane, type ActionId, type Target } from './actions';
+import { ACTION_LABELS, isLaneAction, isTrack, pressHold, releaseHold, runAction, targetLane, type ActionId, type Target } from './actions';
 
 /**
  * OWNS: MIDI learn. A learned CC or note, on one input port and channel, runs a named action
@@ -24,7 +24,8 @@ export interface MidiBinding {
   target: Target;
   pressHigh: boolean;
   momentary: boolean;
-  /** HOLD, on a momentary REC/DUB pedal only: its release runs REC/DUB again (`releaseHold`). */
+  /** HOLD, on a momentary REC/DUB pedal only: its release ends the capture its press started
+   * (`pressHold`, `releaseHold`). */
   hold: boolean;
 }
 
@@ -33,14 +34,14 @@ export interface MidiBinding {
 // on every press. The values alone cannot tell a momentary release from a latching press, so the learn
 // gesture decides, and runs nothing while it does: after the learning press the binding waits for its
 // release (`waits`). The other side seen, however long the pedal was held, reads as momentary: it fires
-// on each message on the press side and swallows the release (or, with HOLD, runs REC/DUB on it). The
-// same side seen again, or no release within RELEASE_WAIT_MS, leaves it latching: it fires on every
-// message, so a latching or same-value pedal fires once per press too. Level rather than edge on the
-// press side, so a lost release message cannot swallow the next press. The wait belongs to the binding,
-// not to the learn row: another LEARN, Esc or the panel closing while the pedal is still down leaves it
-// running, so that release is still read as the release, never as a press or a new learn. A latching
-// pedal pressed a second time within RELEASE_WAIT_MS of its learn reads as momentary; the list shows the
-// kind, and its switch fixes a wrong read.
+// on each message on the press side and swallows the release (or, with HOLD, ends the capture its
+// press started). The same side seen again, or no release within RELEASE_WAIT_MS, leaves it latching: it
+// fires on every message, so a latching or same-value pedal fires once per press too. Level rather than
+// edge on the press side, so a lost release message cannot swallow the next press. The wait belongs to
+// the binding, not to the learn row: another LEARN, Esc or the panel closing while the pedal is still
+// down leaves it running, so that release is still read as the release, never as a press or a new
+// learn. A latching pedal pressed a second time within RELEASE_WAIT_MS of its learn reads as momentary;
+// the list shows the kind, and its switch fixes a wrong read.
 
 const STORAGE_KEY = 'lf.midiLearn';
 /** How long a learned binding waits for its learning press's release before it stays latching. */
@@ -116,8 +117,9 @@ function endWait(b: MidiBinding): void {
   if (awaitingRelease() === b) setAwaitingRelease(null);
 }
 
-// The lane each HOLD press acted on, by its control, until its release ends the capture there.
-const held = new Map<string, number>();
+// Each HOLD press, by its control, until its release ends the capture there: its target, and the lane
+// the web path acted on (the engine resolves its own).
+const held = new Map<string, { target: Target; lane: number }>();
 const controlKey = (b: MidiBinding) => `${b.port}\n${b.channel}\n${b.kind}\n${b.number}`;
 
 function save(list: readonly MidiBinding[]): void {
@@ -210,12 +212,16 @@ function consume(port: string, portName: string, status: number, data1: number, 
   if (!b.momentary) {
     runAction(b.action, b.target);
   } else if (high === b.pressHigh) {
-    if (b.hold) held.set(controlKey(b), targetLane(b.target));
-    runAction(b.action, b.target);
+    if (b.hold) {
+      held.set(controlKey(b), { target: b.target, lane: targetLane(b.target) });
+      pressHold(b.target);
+    } else {
+      runAction(b.action, b.target);
+    }
   } else {
-    const lane = held.get(controlKey(b));
+    const press = held.get(controlKey(b));
     held.delete(controlKey(b));
-    if (lane !== undefined) releaseHold(lane);
+    if (press) releaseHold(press.target, press.lane);
   }
   return true;
 }
