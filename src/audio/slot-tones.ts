@@ -1,16 +1,16 @@
 /**
  * OWNS: the plugin tones a session carries (engine mode). A TONE is a plugin's saved state; the native
- * host keeps one per plugin in its tone store and restores it inside every load by itself
+ * host keeps one per slot and plugin in its tone store and restores it inside every load by itself
  * (`src-tauri/src/host/tone.rs`), so rig recall brings the player's tone back with the plugin. This
  * module moves tones across a session export and import:
  *
  * - export takes each loaded slot's tone fresh, through the slot's owner (`takeSlotTones`);
- * - import stores each tone under the plugin session.json names for it (the host refuses a tone file of
- *   another plugin). A slot that holds that plugin now is reloaded in place so the load applies it,
+ * - import stores each tone under its slot and the plugin session.json names for it (the host refuses
+ *   a tone file of another plugin). A slot that holds that plugin now is reloaded in place so the load applies it,
  *   keeping its level and GO LIVE, unless the player picked another plugin for it, or loaded it again,
  *   while the import ran;
  *   a slot that holds another plugin or none is left alone, and one toast says which plugin to load
- *   (its next load, in either slot, restores the session's tone). The player's rig is never swapped
+ *   (its next load in that slot restores the session's tone). The player's rig is never swapped
  *   (`restoreSessionTones`).
  *
  * The web audio path keeps no tones: both are no-ops there.
@@ -78,7 +78,7 @@ export async function restoreSessionTones(tones: readonly SlotTone[]): Promise<v
     }
     const token = stored.reloadToken;
     if (token === null) {
-      notifyInfo(`This session used ${stored.name} in slot ${letter} — load it to hear the session's tone`);
+      notifyInfo(`This session used ${stored.name} in slot ${letter} — load it there to hear the session's tone`);
       continue;
     }
     const reload = await reloadPlugin(tone.slot, tone.plugin, since, token);

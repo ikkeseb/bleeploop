@@ -27,7 +27,8 @@
  * Trigger: `VITE_LF_PROBE=tone-recall` at Vite start (DEV only). Knobs:
  *   `VITE_LF_PROBE_PHASE`    the phase (set by the runner)
  *   `VITE_LF_PROBE_PLUGINS`  `<name>:<format>,<name>:<format>` for slots A and B (default
- *                            `Pro-Q 3:vst3,Surge XT Effects:clap`: two effects, one per format)
+ *                            `Pro-Q 3:vst3,Surge XT Effects:clap`: two effects, one per format; the
+ *                            same plugin twice checks that each slot keeps a tone of its own)
  *   `VITE_LF_PROBE_EXPECT`   what the previous phase set, handed over by the runner (JSON)
  */
 import { autosave } from '../audio/autosave';
@@ -202,11 +203,12 @@ async function save(): Promise<string> {
   }
   const held = [await surviving(0, moved[0]), await surviving(1, moved[1])];
   // One more move each, then the close well inside the owner's save debounce: these values reach the
-  // store on the exit path alone.
-  const expect: Expect = [
-    { ...held[0], value: await moveAway(0, held[0], [held[0].value, held[0].default]) },
-    { ...held[1], value: await moveAway(1, held[1], [held[1].value, held[1].default]) },
-  ];
+  // store on the exit path alone. The same plugin in both slots gets two values, so a store that kept
+  // one tone per plugin would hand one slot the other's.
+  const a: Probed = { ...held[0], value: await moveAway(0, held[0], [held[0].value, held[0].default]) };
+  const same = pluginDescriptorKey(picks[0]) === pluginDescriptorKey(picks[1]);
+  const b: Probed = { ...held[1], value: await moveAway(1, held[1], [held[1].value, held[1].default, ...(same ? [a.value] : [])]) };
+  const expect: Expect = [a, b];
   return JSON.stringify(expect);
 }
 
@@ -267,7 +269,7 @@ async function checkPhase(expect: Expect): Promise<string> {
   check(slotPlugins()[1] === null, 'slot B did not unload');
   await restoreSessionTones(await importSession(bundle!.zipBytes, session));
   await until('slot A back after the second import', () => slotPendingCounts().every((n) => n === 0) && slotPlugins()[0] !== null, 30);
-  const want = `This session used ${b.name} in slot B — load it to hear the session's tone`;
+  const want = `This session used ${b.name} in slot B — load it there to hear the session's tone`;
   const shown = toasts().map((t) => t.message);
   check(shown.includes(want), `toasts ${JSON.stringify(shown)}, want "${want}"`);
   check(slotPlugins()[1] === null && (await loaded())[1] === null, 'the import loaded something into slot B');

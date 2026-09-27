@@ -1071,12 +1071,12 @@ mod engine {
 
     /// The fixture's state as the store holds it.
     fn stored(dir: &TempDir) -> Option<Vec<u8>> {
-        dir.binding(identity()).store.load(&identity()).unwrap().map(|t| t.state)
+        dir.binding(0, identity()).store.load(0, &identity()).unwrap().map(|t| t.state)
     }
 
     fn store_tone(dir: &TempDir, state: &[u8]) {
         let t = tone::Tone { identity: identity(), name: "Restart fixture".into(), state: state.to_vec() };
-        dir.binding(identity()).store.save_encoded(&tone::encode(&t)).unwrap();
+        dir.binding(0, identity()).store.save_encoded(0, &tone::encode(&t)).unwrap();
     }
 
     #[test]
@@ -1086,7 +1086,7 @@ mod engine {
         let dir = TempDir::new("clap-engine");
         store_tone(&dir, b"state v");
         let obs = Arc::new(Observed::default());
-        let (handle, _) = load_with_tone(&device, 0, &obs, Some(dir.binding(identity())));
+        let (handle, _) = load_with_tone(&device, 0, &obs, Some(dir.binding(0, identity())));
         assert_eq!(handle.tone(), Some(ToneRestore::Restored));
         assert_eq!(*obs.saved.lock().unwrap(), b"state v", "the plugin read the whole state");
         assert!(!obs.loaded_while_active.load(Relaxed), "the tone went in before activate");
@@ -1118,19 +1118,19 @@ mod engine {
     }
 
     #[test]
-    fn an_import_stops_every_earlier_load_of_its_plugin_saving_and_its_reload_restores_it() {
+    fn an_import_stops_the_earlier_load_in_its_slot_saving_and_its_reload_restores_it() {
         let _one = engine_slot::one_engine_test_at_a_time();
         let device = device(48_000);
         let dir = TempDir::new("clap-import");
         store_tone(&dir, b"state v");
         // The plugin in both slots, loaded before a session import stores its tone for slot A.
         let (a, b) = (fresh(), fresh());
-        let (slot_a, _) = load_with_tone(&device, 0, &a, Some(dir.binding(identity())));
-        let (slot_b, _) = load_with_tone(&device, 1, &b, Some(dir.binding(identity())));
+        let (slot_a, _) = load_with_tone(&device, 0, &a, Some(dir.binding(0, identity())));
+        let (slot_b, _) = load_with_tone(&device, 1, &b, Some(dir.binding(1, identity())));
         let t = tone::Tone { identity: identity(), name: "Restart fixture".into(), state: b"imported".to_vec() };
-        let imported = dir.store().import(&tone::encode(&t), &identity()).unwrap();
+        let imported = dir.store().import(0, &tone::encode(&t), &identity()).unwrap();
 
-        // Both slots change and save on: none of it lands on the import.
+        // Both slots change and save on: none of it lands on the import, and slot B keeps its own tone.
         *a.saved.lock().unwrap() = b"slot a".to_vec();
         *b.saved.lock().unwrap() = b"slot b".to_vec();
         slot_a.set_param(101, 0.75).unwrap();
@@ -1142,7 +1142,7 @@ mod engine {
 
         // Slot A's reload is handed the import, and restores it even if the file changed since.
         store_tone(&dir, b"written since");
-        let mut binding = dir.binding(identity());
+        let mut binding = dir.binding(0, identity());
         binding.imported = Some(imported);
         let reloaded = fresh();
         let (slot_a, _) = load_with_tone(&device, 0, &reloaded, Some(binding));
@@ -1153,7 +1153,9 @@ mod engine {
         slot_a.unload().unwrap();
         assert_eq!(stored(&dir).as_deref(), Some(&b"after"[..]), "a load from after the import saves as usual");
         slot_b.unload().unwrap();
-        assert_eq!(stored(&dir).as_deref(), Some(&b"after"[..]), "and slot B's older load still does not");
+        assert_eq!(stored(&dir).as_deref(), Some(&b"after"[..]), "slot B's load never writes slot A's tone");
+        let slot_b_tone = dir.store().load(1, &identity()).unwrap().map(|t| t.state);
+        assert_eq!(slot_b_tone.as_deref(), Some(&b"slot b"[..]), "it saves its own");
     }
 
     /// A watcher for an instance that refuses its tone as `how` does, and lists two params.
@@ -1177,7 +1179,7 @@ mod engine {
         let dir = TempDir::new("clap-kept");
         store_tone(&dir, b"state v");
         let (first, second) = (refusing(|o| &o.refuse_state), fresh());
-        let (handle, _) = load_observed(&device, 0, vec![first, second.clone()], Some(dir.binding(identity())));
+        let (handle, _) = load_observed(&device, 0, vec![first, second.clone()], Some(dir.binding(0, identity())));
         assert_eq!(handle.tone(), Some(ToneRestore::Failed), "refused, reported");
         assert!(wait_for(2000, || second.processes.load(Relaxed) > 4), "and the load went on");
         // The app's exit: a save asked of every slot, then the unload. Neither writes the defaults over
@@ -1190,7 +1192,7 @@ mod engine {
 
         // A change the player makes is what the defaults replace it for.
         let (first, second) = (refusing(|o| &o.refuse_state), fresh());
-        let (handle, _) = load_observed(&device, 0, vec![first, second], Some(dir.binding(identity())));
+        let (handle, _) = load_observed(&device, 0, vec![first, second], Some(dir.binding(0, identity())));
         handle.set_param(101, 0.75).unwrap();
         handle.unload().unwrap();
         assert_eq!(stored(&dir).as_deref(), Some(&b""[..]), "a change is saved as usual");
@@ -1203,7 +1205,7 @@ mod engine {
         let dir = TempDir::new("clap-half");
         store_tone(&dir, b"state v");
         let (first, second) = (refusing(|o| &o.half_apply_state), fresh());
-        let (handle, _) = load_observed(&device, 0, vec![first.clone(), second.clone()], Some(dir.binding(identity())));
+        let (handle, _) = load_observed(&device, 0, vec![first.clone(), second.clone()], Some(dir.binding(0, identity())));
         assert_eq!(handle.tone(), Some(ToneRestore::Failed), "refused, reported");
         assert_eq!(first.activations.load(Relaxed), 0, "the instance that took part of the tone never ran");
         assert!(first.destroy_seq.load(Relaxed) > 0, "it was destroyed");
@@ -1223,7 +1225,7 @@ mod engine {
         let dir = TempDir::new("clap-flood");
         store_tone(&dir, b"state v");
         let obs = Arc::new(Observed::default());
-        let (handle, _) = load_with_tone(&device, 0, &obs, Some(dir.binding(identity())));
+        let (handle, _) = load_with_tone(&device, 0, &obs, Some(dir.binding(0, identity())));
         assert_eq!(handle.tone(), Some(ToneRestore::Restored));
         obs.flood_save.store(true, Relaxed);
         let taken = handle.take_tone();

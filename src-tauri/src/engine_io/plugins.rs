@@ -105,7 +105,7 @@ impl EngineApp {
         let identity = ToneIdentity { format: if vst3 { "vst3" } else { "clap" }.to_string(), path: path.clone(), id: id.clone() };
         // Past the reservation, so nothing below may return early: a poisoned lock just hands nothing over.
         let imported = self.reload_tones().ok().and_then(|mut tones| tones.take(usize::from(slot), tone_token, &identity));
-        let tone = self.tones.clone().map(|store| ToneBinding { store, identity, imported });
+        let tone = self.tones.clone().map(|store| ToneBinding { store, slot: usize::from(slot), identity, imported });
         let began = Instant::now();
         let loaded = engine_slot::load(format, path.clone(), id.clone(), host.slot(usize::from(slot)), parent, sink, tone);
         let mut slots = self.slots()?;
@@ -233,14 +233,14 @@ impl EngineApp {
 
     /// `plugin_tone_import`: a session's tone for `slot`, which session.json says belongs to `expected`
     /// (a tone file of another plugin is refused before anything is stored). It goes into the store
-    /// under that plugin, so its next load, in either slot, restores it, and no load of it from before
-    /// the import (in either slot) saves over it (`ToneStore::import`). When `slot` holds that plugin
+    /// under that plugin in `slot`, so its next load there restores it, and no load of it there from
+    /// before the import saves over it (`ToneStore::import`). When `slot` holds that plugin
     /// now, the answer carries a reload token and the imported bytes are parked under it: the caller
     /// reloads the slot, passing the token to the load, to hear them, or `plugin_tone_forget`s it.
     /// Nothing is loaded, swapped or unloaded here.
     pub(crate) fn plugin_tone_import(&self, slot: u8, bytes: &[u8], expected: &ToneIdentity) -> Result<ToneImport, String> {
         let store = self.tones.as_ref().ok_or("no app-local data folder to keep tones in")?;
-        let imported = store.import(bytes, expected)?;
+        let imported = store.import(usize::from(slot), bytes, expected)?;
         let holds = |s: &EngineSlot| {
             matches!(s, EngineSlot::Loaded { info, .. } if {
                 let d = &info.descriptor;
@@ -250,19 +250,14 @@ impl EngineApp {
         let (name, size, ToneIdentity { format, path, id }) =
             (imported.tone.name.clone(), imported.tone.state.len(), imported.tone.identity.clone());
         // What the slot holds and the parking in one step: any load after it takes or drops the park.
-        let (reload_token, also) = {
+        let reload_token = {
             let slots = self.slots()?;
-            let also = (0u8..).zip(slots.iter()).find(|&(s, e)| s != slot && holds(e)).map(|(s, _)| s);
             let held = holds(&slots[usize::from(slot)]);
-            (if held { Some(self.reload_tones()?.park(usize::from(slot), imported)) } else { None }, also)
+            if held { Some(self.reload_tones()?.park(usize::from(slot), imported)) } else { None }
         };
         log::info!(
-            "[plugin_host] engine slot {slot}: a session's tone for {name} stored ({size} bytes){}{}",
+            "[plugin_host] engine slot {slot}: a session's tone for {name} stored ({size} bytes){}",
             if reload_token.is_some() { "; the slot holds it and reloads" } else { "" },
-            match also {
-                Some(other) => format!("; slot {other} holds it too and stores nothing more for it until its next load"),
-                None => String::new(),
-            }
         );
         Ok(ToneImport { reload_token, name, format, path, id })
     }

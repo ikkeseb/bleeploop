@@ -1197,7 +1197,7 @@ mod engine {
 
     /// The fixture's tone as the store holds it: its component and controller states.
     fn stored(dir: &TempDir) -> Option<(Vec<u8>, Vec<u8>)> {
-        let tone = dir.binding(identity()).store.load(&identity()).unwrap()?;
+        let tone = dir.binding(0, identity()).store.load(0, &identity()).unwrap()?;
         let (component, controller) = tone::decode_vst3(&tone.state).unwrap();
         Some((component.to_vec(), controller.to_vec()))
     }
@@ -1209,7 +1209,7 @@ mod engine {
 
     fn store_tone(dir: &TempDir, component: &[u8], controller: &[u8]) {
         let t = tone::Tone { identity: identity(), name: "Engine fixture".into(), state: tone::encode_vst3(component, controller) };
-        dir.binding(identity()).store.save_encoded(&tone::encode(&t)).unwrap();
+        dir.binding(0, identity()).store.save_encoded(0, &tone::encode(&t)).unwrap();
     }
 
     #[test]
@@ -1218,7 +1218,7 @@ mod engine {
         let device = device(48_000);
         let dir = TempDir::new("vst3-engine");
         store_tone(&dir, &framed(b"component v"), b"controller v");
-        let (handle, made, _) = load_with_tone(&device, 0, 0, 0.0, 0, Some(dir.binding(identity())), StateAnswer::Takes);
+        let (handle, made, _) = load_with_tone(&device, 0, 0, 0.0, 0, Some(dir.binding(0, identity())), StateAnswer::Takes);
         let (s, controller) = (made.component(), made.controller());
         assert_eq!(handle.tone(), Some(ToneRestore::Restored));
         assert_eq!(*s.state.lock().unwrap(), b"component v", "the component read the stream it was given");
@@ -1264,7 +1264,7 @@ mod engine {
         let dir = TempDir::new("vst3-refused");
         store_tone(&dir, &framed(b"component v"), b"");
         let kept = Some((framed(b"component v"), Vec::new()));
-        let (handle, made, _) = load_with_tone(&device, 0, 0, 0.0, 0, Some(dir.binding(identity())), StateAnswer::Refuses);
+        let (handle, made, _) = load_with_tone(&device, 0, 0, 0.0, 0, Some(dir.binding(0, identity())), StateAnswer::Refuses);
         let s = made.component();
         assert_eq!(handle.tone(), Some(ToneRestore::Failed), "refused, reported");
         assert!(s.state.lock().unwrap().is_empty(), "the component kept its defaults");
@@ -1279,16 +1279,16 @@ mod engine {
         handle.unload().unwrap();
         assert_eq!(stored(&dir), kept, "so does the unload");
         // A change the player makes is what the defaults replace it for.
-        let (handle, _, _) = load_with_tone(&device, 0, 0, 0.0, 0, Some(dir.binding(identity())), StateAnswer::Refuses);
+        let (handle, _, _) = load_with_tone(&device, 0, 0, 0.0, 0, Some(dir.binding(0, identity())), StateAnswer::Refuses);
         handle.set_param(1001, 0.3).unwrap();
         handle.unload().unwrap();
         assert_eq!(stored(&dir), Some((framed(b""), Vec::new())), "a change is saved as usual");
         store_tone(&dir, &framed(b"component v"), b"");
 
-        let path = dir.0.join(identity().file_name());
+        let path = dir.0.join(identity().file_name(0));
         let bytes = std::fs::read(&path).unwrap();
         std::fs::write(&path, &bytes[..bytes.len() - 3]).unwrap();
-        let (handle, made, _) = load_with_tone(&device, 1, 0, 0.0, 0, Some(dir.binding(identity())), StateAnswer::Takes);
+        let (handle, made, _) = load_with_tone(&device, 1, 0, 0.0, 0, Some(dir.binding(0, identity())), StateAnswer::Takes);
         assert_eq!(handle.tone(), Some(ToneRestore::Failed), "a truncated file is no tone");
         assert_eq!(made.component().set_states.load(Relaxed), 0, "and never reaches the plugin");
         handle.unload().unwrap();
@@ -1301,7 +1301,7 @@ mod engine {
         let dir = TempDir::new("vst3-half");
         store_tone(&dir, &framed(b"component v"), b"controller v");
         let answer = StateAnswer::HalfAppliesThenRefuses;
-        let (handle, made, _) = load_with_tone(&device, 0, 0, 0.0, 0, Some(dir.binding(identity())), answer);
+        let (handle, made, _) = load_with_tone(&device, 0, 0, 0.0, 0, Some(dir.binding(0, identity())), answer);
         assert_eq!(handle.tone(), Some(ToneRestore::Failed), "refused, reported");
         assert_eq!(made.components.load(Relaxed), 2, "the instance that took part of the tone was discarded");
         let s = made.component();
@@ -1318,10 +1318,10 @@ mod engine {
         let _one = engine_slot::one_engine_test_at_a_time();
         let device = device(48_000);
         let dir = TempDir::new("vst3-import");
-        let (handle, made, _) = load_with_tone(&device, 0, 0, 0.0, 0, Some(dir.binding(identity())), StateAnswer::Takes);
+        let (handle, made, _) = load_with_tone(&device, 0, 0, 0.0, 0, Some(dir.binding(0, identity())), StateAnswer::Takes);
         assert_eq!(handle.tone(), None, "nothing stored yet");
         let t = tone::Tone { identity: identity(), name: "Engine fixture".into(), state: tone::encode_vst3(b"imported", b"") };
-        dir.store().import(&tone::encode(&t), &identity()).unwrap();
+        dir.store().import(0, &tone::encode(&t), &identity()).unwrap();
         *made.component().state.lock().unwrap() = b"this load".to_vec();
         handle.set_param(1001, 0.3).unwrap();
         let file = tone::decode(&handle.take_tone().unwrap()).unwrap();

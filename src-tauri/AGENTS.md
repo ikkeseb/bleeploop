@@ -189,7 +189,7 @@ The known-fragile area: read this whole section before any plugin-GUI/VST3 work.
   controller and sets its handler BEFORE activation (the SDK host's order); the live owner does not,
   and the web path's owners keep no tones. A plugin that refuses its tone is discarded and created
   again before it activates (it may have taken half the state); a session import goes through its
-  plugin's write lock in the store (`ToneStore::import`), never an owner request, and its bytes reach
+  tone's write lock in the store (`ToneStore::import`), never an owner request, and its bytes reach
   only the reload's load that passes the import's reload token (`ToneHandoff`). An owner's turn never
   waits on a lock held across disk I/O. Why a save skips the store: `tone.rs`.
 
@@ -254,9 +254,10 @@ existing P9 ring → looper record tap (lag-tolerant, records wet "for free").
 
 ## Open threads (no gate)
 
-- Tone recall: an owner's save of plugin P waits on P's own in-flight store write (an import of P under
-  its write lock). A disk write that hangs therefore stalls that owner, and an unload joins it without a
-  timeout. Other plugins' writes never block it; a store worker doing the file I/O would remove the wait.
+- Tone recall: an owner's save of plugin P in slot S waits on that tone's own in-flight store write (an
+  import of P into S under its write lock). A disk write that hangs therefore stalls that owner, and an
+  unload joins it without a timeout. Other tones' writes never block it; a store worker doing the file
+  I/O would remove the wait.
 - `plugin_note_off` / `plugin_set_param` now answer `Err` on a full event ring or an unlisted param id
   (audit B2–B4); the frontend still `void`s them, so a rejection only reaches the release log. A UI
   reaction (slider snaps back to the plugin's value, a stuck-note cue) is unbuilt.

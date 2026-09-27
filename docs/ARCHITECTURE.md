@@ -91,13 +91,13 @@ emptied the looper deletes one: an engine rebuilt at another rate, a fault or a 
 empty lanes that keep it (rules: the header of `src/audio/autosave.ts`).
 Orderly native close flushes before exit. Recovery is not a synchronous durability guarantee.
 
-**Tone recall (engine mode):** a tone is a plugin's saved state, one per plugin identity (format, path,
-id), owned by `src-tauri/src/host/tone.rs`, restored only inside a load, before activation. A load that
+**Tone recall (engine mode):** a tone is a plugin's saved state, one per slot and plugin identity
+(format, path, id), so the same plugin in both slots keeps two tones; owned by
+`src-tauri/src/host/tone.rs`, restored only inside a load, before activation. A load that
 could not restore its tone never writes the plugin's defaults over it until the player changes
 something; a plugin that refuses is created again, so it runs at its real defaults. A session import is
 checked against the plugin session.json names and written under the store's lock; no earlier load of
-that plugin, in either slot, stores over it. Known limit: the same plugin in both slots shares one
-stored tone, and for ordinary saves the last one wins.
+that plugin in that slot stores over it.
 
 **ASIO startup:** resolving the ASIO device loads and initialises the third-party driver DLL
 in-process (asio-sys → `CoCreateInstance` + `ASIOInit`), and a broken driver hangs or crashes there
