@@ -69,9 +69,10 @@ impl std::ops::Deref for FixtureState {
 const TEST_DEVICE_THREAD: &str = "lf-test-device";
 
 thread_local! {
-    /// What the next instance created on this thread records into; a fresh `Observed` when unset.
-    /// An engine-mode test sets it from the owner thread, just before that thread instantiates.
-    static OBSERVE: RefCell<Option<Arc<Observed>>> = const { RefCell::new(None) };
+    /// What the next instances created on this thread record into, in order; a fresh `Observed` once
+    /// it runs out. An engine-mode test sets it from the owner thread, just before that thread
+    /// instantiates (a load that discards a refusing instance creates a second one).
+    static OBSERVE: RefCell<Vec<Arc<Observed>>> = const { RefCell::new(Vec::new()) };
 }
 
 /// Every lifecycle call the plugin sees, with the thread it saw it on. `Mutex<Vec<ThreadId>>` on
@@ -124,6 +125,16 @@ struct Observed {
     saved: Mutex<Vec<u8>>,
     /// `load` refuses whatever it is given.
     refuse_state: AtomicBool,
+    /// `load` applies what it is given, then refuses: a plugin that takes the fields it knows before
+    /// it meets one it does not.
+    half_apply_state: AtomicBool,
+    /// `save` writes 1 MiB at a time until the host's stream refuses a write (a sampler, or a runaway
+    /// plugin), ignoring the refusal once and writing on; `save_accepted` counts what the host took.
+    flood_save: AtomicBool,
+    save_accepted: AtomicUsize,
+    /// The next main-thread callback opens a window whose procedure posts itself another message
+    /// for every one it handles, forever (`flood_window`).
+    flood_messages: AtomicBool,
     state_loads: AtomicUsize,
     /// A `load` arrived while the plugin was active: a tone must go in before activation.
     loaded_while_active: AtomicBool,
@@ -292,9 +303,64 @@ unsafe extern "C" fn process(
 
 unsafe extern "C" fn reset(_: *const clap_plugin) {}
 
-/// The plugin's main-thread callback: marks its state dirty through the host when a test asked.
+/// Messages `flood_window`'s procedure has handled.
+static FLOODED: AtomicUsize = AtomicUsize::new(0);
+
+/// A window procedure that answers each `WM_APP` by posting itself another: its thread's queue is
+/// never empty again, as with a plugin whose timer or async update keeps rescheduling itself.
+unsafe extern "system" fn flood_proc(
+    hwnd: windows::Win32::Foundation::HWND,
+    msg: u32,
+    wparam: windows::Win32::Foundation::WPARAM,
+    lparam: windows::Win32::Foundation::LPARAM,
+) -> windows::Win32::Foundation::LRESULT {
+    use windows::Win32::UI::WindowsAndMessaging::{DefWindowProcW, PostMessageW, WM_APP};
+    if msg == WM_APP {
+        FLOODED.fetch_add(1, Relaxed);
+        // SAFETY: posting to the window this procedure serves.
+        let _ = unsafe { PostMessageW(Some(hwnd), WM_APP, wparam, lparam) };
+        return windows::Win32::Foundation::LRESULT(0);
+    }
+    // SAFETY: the default procedure for everything else.
+    unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+}
+
+/// Open a message-only `flood_proc` window on this thread and post it its first message. It lives
+/// until the thread ends.
+fn flood_window() {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CreateWindowExW, PostMessageW, RegisterClassW, HWND_MESSAGE, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WNDCLASSW,
+    };
+    let class = windows::core::w!("BleepLoopFloodFixture");
+    // SAFETY: a 'static class name and procedure; registering twice fails harmlessly.
+    unsafe {
+        RegisterClassW(&WNDCLASSW { lpfnWndProc: Some(flood_proc), lpszClassName: class, ..Default::default() });
+        let hwnd = CreateWindowExW(
+            WINDOW_EX_STYLE(0),
+            class,
+            windows::core::w!(""),
+            WINDOW_STYLE(0),
+            0,
+            0,
+            0,
+            0,
+            Some(HWND_MESSAGE),
+            None,
+            None,
+            None,
+        )
+        .expect("a message-only window");
+        PostMessageW(Some(hwnd), WM_APP, Default::default(), Default::default()).expect("the first message");
+    }
+}
+
+/// The plugin's main-thread callback: marks its state dirty through the host, or starts a message
+/// flood on its thread, when a test asked.
 unsafe extern "C" fn on_main_thread(plugin: *const clap_plugin) {
     let s = unsafe { state(plugin) };
+    if s.flood_messages.swap(false, Relaxed) {
+        flood_window();
+    }
     if !s.dirty_on_callback.swap(false, Relaxed) {
         return;
     }
@@ -312,6 +378,22 @@ unsafe extern "C" fn on_main_thread(plugin: *const clap_plugin) {
 /// `clap.state` save: the whole state in one write.
 unsafe extern "C" fn state_save(plugin: *const clap_plugin, stream: *const clap_ostream) -> bool {
     let s = unsafe { state(plugin) };
+    if s.flood_save.load(Relaxed) {
+        static MIB: [u8; 1 << 20] = [0x5a; 1 << 20];
+        // SAFETY: the host's stream is valid for this call.
+        let (stream, mut refusals) = (unsafe { &*stream }, 0);
+        let Some(write) = stream.write else { return false };
+        // Bounded here (64 MiB) only so an unbounded host fails this test instead of the machine.
+        while refusals < 2 && s.save_accepted.load(Relaxed) < 64 << 20 {
+            let n = unsafe { write(stream, MIB.as_ptr().cast(), MIB.len() as u64) };
+            if n < 0 {
+                refusals += 1;
+            } else {
+                s.save_accepted.fetch_add(n as usize, Relaxed);
+            }
+        }
+        return true; // as a plugin that ignores the failed writes would
+    }
     let bytes = s.saved.lock().unwrap().clone();
     // SAFETY: the host's stream is valid for this call.
     unsafe {
@@ -341,6 +423,10 @@ unsafe extern "C" fn state_load(plugin: *const clap_plugin, stream: *const clap_
             }
             bytes.extend_from_slice(&chunk[..n as usize]);
         }
+    }
+    if s.half_apply_state.load(Relaxed) {
+        *s.saved.lock().unwrap() = bytes;
+        return false;
     }
     if s.refuse_state.load(Relaxed) {
         return false;
@@ -466,7 +552,10 @@ unsafe extern "C" fn create(
     if unsafe { CStr::from_ptr(id) } != c"bleeploop.restart-fixture" {
         return std::ptr::null();
     }
-    let obs = OBSERVE.with(|o| o.borrow_mut().take()).unwrap_or_default();
+    let obs = OBSERVE.with(|o| {
+        let mut queue = o.borrow_mut();
+        if queue.is_empty() { Arc::default() } else { queue.remove(0) }
+    });
     obs.host.store(host.cast_mut(), Relaxed);
     let state = Box::into_raw(Box::new(FixtureState {
         host,
@@ -807,9 +896,18 @@ mod engine {
         obs: &Arc<Observed>,
         tone: Option<ToneBinding>,
     ) -> (EngineSlotHandle, Arc<Mutex<Vec<EngineSlotEvent>>>) {
+        load_observed(device, slot, vec![obs.clone()], tone)
+    }
+
+    /// As `load_with_tone`, with a watcher for each instance the owner creates, in order.
+    fn load_observed(
+        device: &TestDevice,
+        slot: usize,
+        obs: Vec<Arc<Observed>>,
+        tone: Option<ToneBinding>,
+    ) -> (EngineSlotHandle, Arc<Mutex<Vec<EngineSlotEvent>>>) {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let sink_seen = seen.clone();
-        let obs = obs.clone();
         let handle = engine_slot::spawn(
             PluginFormat::Clap,
             device.host().slot(slot),
@@ -818,7 +916,7 @@ mod engine {
             tone,
             move |ctx| {
                 super::super::clap_engine::run(ctx, "bleeploop.restart-fixture", move || {
-                    OBSERVE.with(|o| *o.borrow_mut() = Some(obs));
+                    OBSERVE.with(|o| *o.borrow_mut() = obs);
                     // SAFETY: as `fixture_instance`: a static entry whose callbacks obey the ABI.
                     unsafe { PluginEntry::load_from_raw(&ENTRY, c"bleeploop-restart-fixture.clap") }
                         .map_err(|e| e.to_string())
@@ -1020,26 +1118,144 @@ mod engine {
     }
 
     #[test]
-    fn a_tone_the_plugin_refuses_loads_at_the_defaults_and_a_superseded_load_saves_nothing() {
+    fn an_import_stops_every_earlier_load_of_its_plugin_saving_and_its_reload_restores_it() {
         let _one = engine_slot::one_engine_test_at_a_time();
         let device = device(48_000);
-        let dir = TempDir::new("clap-refused");
+        let dir = TempDir::new("clap-import");
         store_tone(&dir, b"state v");
-        let obs = Arc::new(Observed::default());
-        obs.refuse_state.store(true, Relaxed);
-        obs.param_count.store(2, Relaxed);
-        let (handle, _) = load_with_tone(&device, 0, &obs, Some(dir.binding(identity())));
-        assert_eq!(handle.tone(), Some(ToneRestore::Failed), "refused, reported");
-        assert!(obs.saved.lock().unwrap().is_empty(), "the plugin kept its defaults");
-        assert!(wait_for(2000, || obs.processes.load(Relaxed) > 4), "and the load went on");
+        // The plugin in both slots, loaded before a session import stores its tone for slot A.
+        let (a, b) = (fresh(), fresh());
+        let (slot_a, _) = load_with_tone(&device, 0, &a, Some(dir.binding(identity())));
+        let (slot_b, _) = load_with_tone(&device, 1, &b, Some(dir.binding(identity())));
+        let t = tone::Tone { identity: identity(), name: "Restart fixture".into(), state: b"imported".to_vec() };
+        let imported = dir.store().import(&tone::encode(&t), &identity()).unwrap();
 
-        // A session import stored its tone and this slot reloads: nothing this load does lands on it.
-        handle.supersede_tone().unwrap();
-        store_tone(&dir, b"imported");
-        *obs.saved.lock().unwrap() = b"this load".to_vec();
+        // Both slots change and save on: none of it lands on the import.
+        *a.saved.lock().unwrap() = b"slot a".to_vec();
+        *b.saved.lock().unwrap() = b"slot b".to_vec();
+        slot_a.set_param(101, 0.75).unwrap();
+        slot_b.set_param(101, 0.25).unwrap();
+        let exit = slot_b.start_tone_save().unwrap().recv_timeout(Duration::from_secs(2)).unwrap().unwrap();
+        assert_eq!(tone::decode(&exit).unwrap().state, b"slot b", "an export or the exit still gets what B plays");
+        slot_a.unload().unwrap();
+        assert_eq!(stored(&dir).as_deref(), Some(&b"imported"[..]), "the store keeps the import");
+
+        // Slot A's reload is handed the import, and restores it even if the file changed since.
+        store_tone(&dir, b"written since");
+        let mut binding = dir.binding(identity());
+        binding.imported = Some(imported);
+        let reloaded = fresh();
+        let (slot_a, _) = load_with_tone(&device, 0, &reloaded, Some(binding));
+        assert_eq!(slot_a.tone(), Some(ToneRestore::Restored));
+        assert_eq!(*reloaded.saved.lock().unwrap(), b"imported", "the reload plays the session's tone");
+        *reloaded.saved.lock().unwrap() = b"after".to_vec();
+        slot_a.set_param(101, 0.5).unwrap();
+        slot_a.unload().unwrap();
+        assert_eq!(stored(&dir).as_deref(), Some(&b"after"[..]), "a load from after the import saves as usual");
+        slot_b.unload().unwrap();
+        assert_eq!(stored(&dir).as_deref(), Some(&b"after"[..]), "and slot B's older load still does not");
+    }
+
+    /// A watcher for an instance that refuses its tone as `how` does, and lists two params.
+    fn refusing(how: fn(&Observed) -> &AtomicBool) -> Arc<Observed> {
+        let obs = Arc::new(Observed::default());
+        how(&obs).store(true, Relaxed);
+        obs.param_count.store(2, Relaxed);
+        obs
+    }
+
+    fn fresh() -> Arc<Observed> {
+        let obs = Arc::new(Observed::default());
+        obs.param_count.store(2, Relaxed);
+        obs
+    }
+
+    #[test]
+    fn a_refused_tone_stays_stored_through_the_exit_save_and_the_unload() {
+        let _one = engine_slot::one_engine_test_at_a_time();
+        let device = device(48_000);
+        let dir = TempDir::new("clap-kept");
+        store_tone(&dir, b"state v");
+        let (first, second) = (refusing(|o| &o.refuse_state), fresh());
+        let (handle, _) = load_observed(&device, 0, vec![first, second.clone()], Some(dir.binding(identity())));
+        assert_eq!(handle.tone(), Some(ToneRestore::Failed), "refused, reported");
+        assert!(wait_for(2000, || second.processes.load(Relaxed) > 4), "and the load went on");
+        // The app's exit: a save asked of every slot, then the unload. Neither writes the defaults over
+        // the tone the plugin refused (a reinstalled version of it may take it again).
+        let exit = handle.start_tone_save().unwrap().recv_timeout(Duration::from_secs(2)).unwrap().unwrap();
+        assert_eq!(tone::decode(&exit).unwrap().state, b"", "the save still hands back what plays: the defaults");
+        assert_eq!(stored(&dir).as_deref(), Some(&b"state v"[..]), "the exit's save leaves the stored tone alone");
+        handle.unload().unwrap();
+        assert_eq!(stored(&dir).as_deref(), Some(&b"state v"[..]), "so does the unload");
+
+        // A change the player makes is what the defaults replace it for.
+        let (first, second) = (refusing(|o| &o.refuse_state), fresh());
+        let (handle, _) = load_observed(&device, 0, vec![first, second], Some(dir.binding(identity())));
         handle.set_param(101, 0.75).unwrap();
         handle.unload().unwrap();
-        assert_eq!(stored(&dir).as_deref(), Some(&b"imported"[..]), "the store keeps the import");
+        assert_eq!(stored(&dir).as_deref(), Some(&b""[..]), "a change is saved as usual");
+    }
+
+    #[test]
+    fn a_tone_the_plugin_half_takes_then_refuses_leaves_a_fresh_instance_at_its_defaults() {
+        let _one = engine_slot::one_engine_test_at_a_time();
+        let device = device(48_000);
+        let dir = TempDir::new("clap-half");
+        store_tone(&dir, b"state v");
+        let (first, second) = (refusing(|o| &o.half_apply_state), fresh());
+        let (handle, _) = load_observed(&device, 0, vec![first.clone(), second.clone()], Some(dir.binding(identity())));
+        assert_eq!(handle.tone(), Some(ToneRestore::Failed), "refused, reported");
+        assert_eq!(first.activations.load(Relaxed), 0, "the instance that took part of the tone never ran");
+        assert!(first.destroy_seq.load(Relaxed) > 0, "it was destroyed");
+        assert_eq!(second.state_loads.load(Relaxed), 0, "a fresh instance never saw the tone");
+        assert!(wait_for(2000, || second.processes.load(Relaxed) > 4), "and it runs");
+        let taken = tone::decode(&handle.take_tone().unwrap()).unwrap();
+        assert!(taken.state.is_empty(), "at its true defaults: {:?}", String::from_utf8_lossy(&taken.state));
+        handle.unload().unwrap();
+        assert_eq!(stored(&dir).as_deref(), Some(&b"state v"[..]), "the stored tone stays");
+        assert!(!second.contract_violation.load(Relaxed));
+    }
+
+    #[test]
+    fn a_state_past_the_limit_is_refused_as_it_is_written_and_never_stored() {
+        let _one = engine_slot::one_engine_test_at_a_time();
+        let device = device(48_000);
+        let dir = TempDir::new("clap-flood");
+        store_tone(&dir, b"state v");
+        let obs = Arc::new(Observed::default());
+        let (handle, _) = load_with_tone(&device, 0, &obs, Some(dir.binding(identity())));
+        assert_eq!(handle.tone(), Some(ToneRestore::Restored));
+        obs.flood_save.store(true, Relaxed);
+        let taken = handle.take_tone();
+        let accepted = obs.save_accepted.load(Relaxed);
+        assert!(accepted <= tone::MAX_STATE_BYTES, "the host took {accepted} bytes, past the limit");
+        assert!(taken.is_err(), "a state that did not fit is an error, even though the plugin said it saved");
+        assert_eq!(stored(&dir).as_deref(), Some(&b"state v"[..]), "and nothing truncated reaches the store");
+        obs.flood_save.store(false, Relaxed);
+        handle.unload().unwrap();
+    }
+
+    #[test]
+    fn a_plugin_flooding_its_thread_with_messages_still_gets_requests_and_unloads() {
+        let _one = engine_slot::one_engine_test_at_a_time();
+        let device = device(48_000);
+        let obs = fresh();
+        let (handle, _) = load(&device, 0, &obs);
+        obs.flood_messages.store(true, Relaxed);
+        let host = obs.host.load(Relaxed);
+        // SAFETY: the host lives while the plugin is loaded; `request_callback` is thread-safe.
+        unsafe { ((*host).request_callback.unwrap())(host) };
+        let before = FLOODED.load(Relaxed);
+        assert!(wait_for(2000, || FLOODED.load(Relaxed) > before + 1000), "the flood runs on the owner thread");
+        let listed = handle.list_params().map(|params| params.len());
+        // Off this thread, so a stuck owner fails the test instead of hanging it.
+        let (unloaded_tx, unloaded) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = unloaded_tx.send(handle.unload());
+        });
+        let unloaded = unloaded.recv_timeout(Duration::from_secs(10));
+        assert_eq!(listed, Ok(2), "a request is still answered");
+        assert!(matches!(unloaded, Ok(Ok(()))), "and the unload finishes: {unloaded:?}");
     }
 
     #[test]

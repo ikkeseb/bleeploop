@@ -3,7 +3,9 @@
 //! (`host/engine_slot.rs`) under the same names, payloads and window events (`plugin:param-changed`,
 //! `plugin:params-changed`, `plugin:editor-closed`), and tone recall's commands (`host/tone.rs`): every
 //! load restores the plugin's stored tone, a session export takes a slot's tone fresh, an import stores
-//! one, and the app's exit saves them all before the unloads. A plugin loads into an engine that exists:
+//! one (checked against the plugin session.json names; every load of that plugin from before it stops
+//! saving, and the slot it reloads is handed the imported bytes), and the app's exit saves them all
+//! before the unloads. A plugin loads into an engine that exists:
 //! open the device first. GO LIVE is the engine's `SetSlotLive` and the plugin's gain `SetSlotGain` (sent
 //! with `engine_send`; the monitor-gain command maps to it), notes go through `engine_send`.
 //!
@@ -21,7 +23,7 @@ use tauri::Emitter;
 
 use super::mode::EngineApp;
 use crate::host::engine_slot::{self, EngineSlotEvent, EngineSlotHandle, EventSink, PluginFormat};
-use crate::host::tone::{self, ToneBinding, ToneIdentity};
+use crate::host::tone::{Imported, ToneBinding, ToneIdentity};
 use crate::host::{ParamDesc, PluginDescriptor, PluginHostState, PluginInfo, ToneImport};
 
 /// How long an unload waits for a command still using the slot's handle (an owner round trip is ≤ 5 s).
@@ -48,6 +50,12 @@ struct ParamChanged {
 impl EngineApp {
     fn slots(&self) -> Result<std::sync::MutexGuard<'_, [EngineSlot; lf_engine::SLOT_COUNT]>, String> {
         self.slots.lock().map_err(|_| "engine slots poisoned".to_string())
+    }
+
+    /// Per slot: the tone a session import stored for the plugin the slot held, for the reload that
+    /// follows. The slot's next load takes it, and restores it if it loads that plugin.
+    fn reload_tones(&self) -> Result<std::sync::MutexGuard<'_, [Option<Imported>; lf_engine::SLOT_COUNT]>, String> {
+        self.reload_tones.lock().map_err(|_| "engine reload tones poisoned".to_string())
     }
 
     fn handle(&self, slot: u8) -> Result<Arc<EngineSlotHandle>, String> {
@@ -92,10 +100,11 @@ impl EngineApp {
             };
         });
         let parent = window.hwnd().map(|h| h.0 as usize).unwrap_or(0);
-        let tone = self.tones.clone().map(|store| ToneBinding {
-            store,
-            identity: ToneIdentity { format: if vst3 { "vst3" } else { "clap" }.to_string(), path: path.clone(), id: id.clone() },
-        });
+        let identity = ToneIdentity { format: if vst3 { "vst3" } else { "clap" }.to_string(), path: path.clone(), id: id.clone() };
+        // Past the reservation, so nothing below may return early: a poisoned lock just hands nothing over.
+        let imported = self.reload_tones().ok().and_then(|mut tones| tones[usize::from(slot)].take());
+        let imported = imported.filter(|i| i.tone.identity == identity);
+        let tone = self.tones.clone().map(|store| ToneBinding { store, identity, imported });
         let began = Instant::now();
         let loaded = engine_slot::load(format, path.clone(), id.clone(), host.slot(usize::from(slot)), parent, sink, tone);
         let mut slots = self.slots()?;
@@ -221,33 +230,41 @@ impl EngineApp {
         self.handle(slot)?.take_tone()
     }
 
-    /// `plugin_tone_import`: a session's tone for `slot`. It goes into the store under the plugin it
-    /// names, so the next load of that plugin, in either slot, restores it. When `slot` holds that plugin
-    /// now, its owner first stops saving over it and the answer says `held`: the caller reloads the slot
-    /// to hear it. Nothing is loaded, swapped or unloaded here.
-    pub(crate) fn plugin_tone_import(&self, slot: u8, bytes: &[u8]) -> Result<ToneImport, String> {
+    /// `plugin_tone_import`: a session's tone for `slot`, which session.json says belongs to `expected`
+    /// (a tone file of another plugin is refused before anything is stored). It goes into the store
+    /// under that plugin, so its next load, in either slot, restores it, and no load of it from before
+    /// the import (in either slot) saves over it (`ToneStore::import`). When `slot` holds that plugin
+    /// now, the answer says `held` and the slot's next load is handed the imported bytes: the caller
+    /// reloads the slot to hear them. Nothing is loaded, swapped or unloaded here.
+    pub(crate) fn plugin_tone_import(&self, slot: u8, bytes: &[u8], expected: &ToneIdentity) -> Result<ToneImport, String> {
         let store = self.tones.as_ref().ok_or("no app-local data folder to keep tones in")?;
-        let tone = tone::decode(bytes)?;
-        let held = match &self.slots()?[usize::from(slot)] {
-            EngineSlot::Loaded { handle, info } => {
+        let imported = store.import(bytes, expected)?;
+        let holds = |s: &EngineSlot| {
+            matches!(s, EngineSlot::Loaded { info, .. } if {
                 let d = &info.descriptor;
-                let same = d.format == tone.identity.format && d.path == tone.identity.path && d.id == tone.identity.id;
-                same.then(|| handle.clone())
-            }
-            _ => None,
+                d.format == expected.format && d.path == expected.path && d.id == expected.id
+            })
         };
-        if let Some(handle) = &held {
-            handle.supersede_tone()?;
+        let (held, also) = {
+            let slots = self.slots()?;
+            (holds(&slots[usize::from(slot)]), (0u8..).zip(slots.iter()).find(|&(s, e)| s != slot && holds(e)).map(|(s, _)| s))
+        };
+        if held {
+            self.reload_tones()?[usize::from(slot)] = Some(imported.clone());
         }
-        store.save_encoded(bytes)?;
+        let Imported { tone, .. } = imported;
         log::info!(
-            "[plugin_host] engine slot {slot}: a session's tone for {} stored ({} bytes){}",
+            "[plugin_host] engine slot {slot}: a session's tone for {} stored ({} bytes){}{}",
             tone.name,
             tone.state.len(),
-            if held.is_some() { "; the slot holds it and reloads" } else { "" }
+            if held { "; the slot holds it and reloads" } else { "" },
+            match also {
+                Some(other) => format!("; slot {other} holds it too and stores nothing more for it until its next load"),
+                None => String::new(),
+            }
         );
         let ToneIdentity { format, path, id } = tone.identity;
-        Ok(ToneImport { held: held.is_some(), name: tone.name, format, path, id })
+        Ok(ToneImport { held, name: tone.name, format, path, id })
     }
 
     pub(crate) fn plugin_open_editor(&self, slot: u8) -> Result<(), String> {

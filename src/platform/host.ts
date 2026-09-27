@@ -158,13 +158,18 @@ export interface PluginHost {
   /**
    * Tone recall, engine mode only (`src-tauri/src/host/tone.rs`): every load restores the plugin's
    * stored tone by itself (`PluginInfo.tone`). `takeTone` saves the slot's tone now, through its
-   * owner, into the store, and hands back the tone file's bytes (a session export's), or null when the
-   * plugin keeps no state. `importTone` stores a session's tone under the plugin it names and says
-   * whether `slot` holds that plugin now; it loads and swaps nothing. Both reject on the web audio path
-   * and in the browser build.
+   * owner (the store gets it as from any save), and hands back the tone file's bytes (a session
+   * export's), or null when the plugin keeps no state. `importTone` stores a session's tone under
+   * `plugin`, the plugin session.json names for it (the host refuses a tone file of any other plugin),
+   * and says whether `slot` holds that plugin now; it loads and swaps nothing. Both reject on the web
+   * audio path and in the browser build.
    */
   takeTone(slot: PluginSlot): Promise<Uint8Array | null>;
-  importTone(slot: PluginSlot, bytes: Uint8Array): Promise<ToneImport>;
+  importTone(
+    slot: PluginSlot,
+    bytes: Uint8Array,
+    plugin: Pick<PluginDescriptor, 'format' | 'path' | 'id'>,
+  ): Promise<ToneImport>;
 
   // ── Native audio INPUT ──────────────────────────────────────────────────────────────────
   // Route a hardware guitar/line signal INTO the slot's loaded plugin so an FX plugin (amp-sim)

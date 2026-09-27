@@ -7,10 +7,11 @@
 //! sequence and the teardown are copied from the live owner rather than shared: nothing but a
 //! window-bound owner and a real DLL exercise those. Unlike the live owner's, this load creates the
 //! edit controller and sets its component handler before the component activates, the SDK host's
-//! order, so a stored tone reaches both halves before anything processes.
+//! order, so a stored tone reaches both halves before anything processes; a component that refuses the
+//! tone is torn down and created again from the same module (`load`).
 
 use super::super::engine_slot::{
-    keep_tone, report_faults, restore_tone, EngineSlotEvent, OwnerCtx, Ready, FAULT_PROCESS,
+    keep_tone, report_faults, restore_tone, EngineSlotEvent, OwnerCtx, Ready, Restore, FAULT_PROCESS,
     FAULT_START, OWNER_POLL, REMOVE_TIMEOUT,
 };
 use super::super::super::state::ToneRestore;
@@ -446,22 +447,17 @@ pub(in super::super) fn run(ctx: OwnerCtx, path: String, id: &str) -> Result<(),
 /// did with the stored tone.
 type Loaded = (Vst3Plugin, Box<Vst3Unit>, String, u32, Option<ToneRestore>);
 
-/// Create class `id` from the factory, initialise it, create its edit controller and give it the
-/// load's component `handler`, restore the stored tone, activate, and build its unit. Copied from
-/// `vst3_owner_main`'s setup, with the controller and the tone before the activation. Every error after
-/// the component exists tears it down (`Vst3Plugin`); the handler outlives the plugin (the caller's).
-fn load(
+/// Create class `target` (`id`) from the factory, initialise it, create its edit controller and give it
+/// the load's component `handler`. Copied from `vst3_owner_main`'s setup, with the controller before the
+/// activation. The plugin takes the module and the factory; every error after the component exists
+/// tears it down (`Vst3Plugin`), and one before it drops the factory, then the module.
+fn create(
+    opened: Opened,
+    target: &TUID,
     id: &str,
-    open: impl FnOnce() -> Result<Opened, String>,
-    slot: &SlotHost,
-    params: Consumer<PluginEvent>,
-    faults: Arc<AtomicU32>,
     handler: &ComWrapper<LfComponentHandler>,
-    restart: &RestartFlags,
-    tone: &ToneKeeper,
-) -> Result<Loaded, String> {
-    let target = super::super::super::scan::hex_to_tuid(id).ok_or_else(|| format!("bad VST3 class id: {id}"))?;
-    let (module, factory) = open()?;
+) -> Result<(Vst3Plugin, ComPtr<IAudioProcessor>, String), String> {
+    let (module, factory) = opened;
     // SAFETY: raw FUnknown COM on the owner thread, the live owner's sequence; every pointer is
     // valid for its call.
     unsafe {
@@ -469,7 +465,7 @@ fn load(
         let mut name = id.to_string();
         for i in 0..factory.countClasses() {
             let mut info: PClassInfo = std::mem::zeroed();
-            if factory.getClassInfo(i, &mut info) != kResultOk || info.cid != target {
+            if factory.getClassInfo(i, &mut info) != kResultOk || info.cid != *target {
                 continue;
             }
             name = super::super::super::scan::c_chars_to_string(&info.name);
@@ -509,15 +505,41 @@ fn load(
         if let (Some(ctl), Some(hp)) = (plugin.controller.as_ref(), handler.to_com_ptr::<IComponentHandler>()) {
             ctl.setComponentHandler(hp.as_ptr());
         }
-        // The stored tone goes in before the component activates: nothing processes it yet.
-        let restored = restore_tone(tone, slot.slot(), &name, |state| restore_state(&plugin, state, slot.slot()));
-        let (activation, max_frames, rate) = plugin.activate(&processor, slot)?;
-        // A restart or a re-list the restore or the activation raised describes the state just
-        // activated, as a cycle's does (`reinstall`); the param ids are listed after the load anyway.
-        let _ = (restart.take(), restart.take_notify());
-        let unit = Vst3Unit::new(processor, activation, max_frames, params, faults)?;
-        Ok((plugin, unit, name, rate, restored))
+        Ok((plugin, processor, name))
     }
+}
+
+/// Create the plugin (`create`), restore the stored tone, activate, and build its unit. A component
+/// that refuses its tone may have taken part of it: it is torn down and created again, without a tone,
+/// from the same module, so the plugin runs at the defaults the player is told it loaded with. The
+/// handler outlives the plugin (the caller's).
+fn load(
+    id: &str,
+    open: impl FnOnce() -> Result<Opened, String>,
+    slot: &SlotHost,
+    params: Consumer<PluginEvent>,
+    faults: Arc<AtomicU32>,
+    handler: &ComWrapper<LfComponentHandler>,
+    restart: &RestartFlags,
+    tone: &mut ToneKeeper,
+) -> Result<Loaded, String> {
+    let target = super::super::super::scan::hex_to_tuid(id).ok_or_else(|| format!("bad VST3 class id: {id}"))?;
+    let (mut plugin, mut processor, name) = create(open()?, &target, id, handler)?;
+    // The stored tone goes in before the component activates: nothing processes it yet.
+    let restored = restore_tone(tone, slot.slot(), &name, |state| restore_state(&plugin, state, slot.slot()));
+    if restored == Restore::Refused {
+        // The module stays loaded across the swap: the plugin gives it up before it is torn down.
+        let opened = (plugin._module.take(), plugin.factory.clone());
+        drop(processor);
+        drop(plugin);
+        (plugin, processor, _) = create(opened, &target, id, handler)?;
+    }
+    let (activation, max_frames, rate) = plugin.activate(&processor, slot)?;
+    // A restart or a re-list the restore or the activation raised describes the state just
+    // activated, as a cycle's does (`reinstall`); the param ids are listed after the load anyway.
+    let _ = (restart.take(), restart.take_notify());
+    let unit = Vst3Unit::new(processor, activation, max_frames, params, faults)?;
+    Ok((plugin, unit, name, rate, restored.report()))
 }
 
 /// The engine-mode VST3 owner. `open` yields the module and factory (a bundle in production, an
@@ -543,7 +565,7 @@ pub(super) fn run_with(
         }),
         restart: restart.clone(),
     });
-    let loaded = load(id, open, &slot, params, faults.clone(), &handler, &restart, &tone);
+    let loaded = load(id, open, &slot, params, faults.clone(), &handler, &restart, &mut tone);
     let (mut plugin, unit, name, rate, restored) = match loaded {
         Ok(loaded) => loaded,
         Err(e) => {
@@ -642,10 +664,6 @@ pub(super) fn run_with(
                 }
                 OwnerRequest::SaveTone(reply) => {
                     let _ = reply.send(keep_tone(&mut tone, index, "asked", &name, || save_state(&plugin)));
-                }
-                OwnerRequest::SupersedeTone(reply) => {
-                    tone.supersede();
-                    let _ = reply.send(Ok(()));
                 }
                 OwnerRequest::ListParams(reply) => {
                     let res = list_vst3_params(&plugin.controller);

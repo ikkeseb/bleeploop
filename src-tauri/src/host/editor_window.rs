@@ -240,15 +240,29 @@ pub(super) fn show_host_window_front(hwnd: HWND) {
     }
 }
 
-/// Drain + dispatch all pending Win32 messages for this thread. Must run regularly while a hosted
-/// editor is open, or the embedded plugin UI freezes.
+/// The most one `pump_thread_messages` call dispatches: a plugin whose messages keep posting more (a
+/// timer or an async update that reschedules itself) must not keep its owner from requests, tone saves
+/// and shutdown. What is left waits for the owner's next turn.
+const PUMP_MAX_MESSAGES: usize = 64;
+const PUMP_BUDGET: Duration = Duration::from_millis(2);
+
+/// Dispatch this thread's pending Win32 messages, at most `PUMP_MAX_MESSAGES` of them or for
+/// `PUMP_BUDGET`, whichever ends first. Must run regularly while a hosted editor is open, or the
+/// embedded plugin UI freezes; an engine-mode owner runs it every turn.
 pub(super) fn pump_thread_messages() {
+    let started = Instant::now();
     let mut msg = MSG::default();
-    // SAFETY: standard message pump; `msg` is a valid local for each call.
-    unsafe {
-        while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
+    for _ in 0..PUMP_MAX_MESSAGES {
+        // SAFETY: standard message pump; `msg` is a valid local for each call.
+        unsafe {
+            if !PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
+                return;
+            }
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
+        }
+        if started.elapsed() >= PUMP_BUDGET {
+            return;
         }
     }
 }

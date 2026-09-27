@@ -348,10 +348,12 @@ impl IPlugFrameTrait for LfPlugFrame {
 
 /// Host `IBStream` over memory: what a VST3 plugin writes its state into (`getState`) and reads it
 /// back from (`setState`, `setComponentState`) for engine mode's tones (`host/tone.rs`). Read, write,
-/// seek and tell over one growable buffer, as the SDK's `MemoryStream`: a read past the end returns
-/// what is left, a write past the end grows the buffer (zero-filling a gap a seek left), and nothing
-/// grows past `tone::MAX_STATE_BYTES`. Owner-thread only: the plugin uses it inside the call the host
-/// made, and the host reads the bytes back after it returns.
+/// seek and tell over one growable buffer, as the SDK's `MemoryStream`: a read returns what is left
+/// and moves the cursor only by what it read (a read past the end leaves it where a seek put it), a
+/// write past the end grows the buffer (zero-filling a gap a seek left), an empty transfer touches
+/// nothing (its buffer may be null), and nothing grows past `tone::MAX_STATE_BYTES`. Owner-thread
+/// only: the plugin uses it inside the call the host made, and the host reads the bytes back after it
+/// returns.
 pub(super) struct MemStream {
     bytes: RefCell<Vec<u8>>,
     pos: Cell<usize>,
@@ -378,11 +380,13 @@ impl IBStreamTrait for MemStream {
             return kInvalidArgument;
         }
         let bytes = self.bytes.borrow();
-        let at = self.pos.get().min(bytes.len());
-        let n = (num_bytes as usize).min(bytes.len() - at);
-        // SAFETY: the plugin's buffer holds `num_bytes` ≥ n bytes; the source range is in bounds.
-        std::ptr::copy_nonoverlapping(bytes.as_ptr().add(at), buffer.cast::<u8>(), n);
-        self.pos.set(at + n);
+        let at = self.pos.get();
+        let n = (num_bytes as usize).min(bytes.len().saturating_sub(at));
+        if n > 0 {
+            // SAFETY: the plugin's buffer holds `num_bytes` ≥ n bytes; the source range is in bounds.
+            std::ptr::copy_nonoverlapping(bytes.as_ptr().add(at), buffer.cast::<u8>(), n);
+            self.pos.set(at + n);
+        }
         if !num_bytes_read.is_null() {
             *num_bytes_read = n as int32;
         }
@@ -394,16 +398,18 @@ impl IBStreamTrait for MemStream {
         }
         let at = self.pos.get();
         let n = num_bytes as usize;
-        let Some(end) = at.checked_add(n).filter(|&end| end <= super::super::tone::MAX_STATE_BYTES) else {
-            return kResultFalse;
-        };
-        let mut bytes = self.bytes.borrow_mut();
-        if bytes.len() < end {
-            bytes.resize(end, 0);
+        if n > 0 {
+            let Some(end) = at.checked_add(n).filter(|&end| end <= super::super::tone::MAX_STATE_BYTES) else {
+                return kResultFalse;
+            };
+            let mut bytes = self.bytes.borrow_mut();
+            if bytes.len() < end {
+                bytes.resize(end, 0);
+            }
+            // SAFETY: the plugin's buffer holds `num_bytes` bytes; the destination range was sized above.
+            std::ptr::copy_nonoverlapping(buffer.cast::<u8>().cast_const(), bytes.as_mut_ptr().add(at), n);
+            self.pos.set(end);
         }
-        // SAFETY: the plugin's buffer holds `num_bytes` bytes; the destination range was sized above.
-        std::ptr::copy_nonoverlapping(buffer.cast::<u8>().cast_const(), bytes.as_mut_ptr().add(at), n);
-        self.pos.set(end);
         if !num_bytes_written.is_null() {
             *num_bytes_written = n as int32;
         }
@@ -1836,11 +1842,8 @@ pub fn vst3_owner_main(
                 }
                 // An unload's wake-up: nothing to do, the loop condition sees `running=false`.
                 OwnerRequest::Wake => {}
-                // Tone recall is engine mode's (`vst3_engine`); nothing sends these to a live owner.
+                // Tone recall is engine mode's (`vst3_engine`); nothing sends it to a live owner.
                 OwnerRequest::SaveTone(reply) => {
-                    let _ = reply.send(Err(super::TONES_ON_THE_ENGINE_ONLY.to_string()));
-                }
-                OwnerRequest::SupersedeTone(reply) => {
                     let _ = reply.send(Err(super::TONES_ON_THE_ENGINE_ONLY.to_string()));
                 }
             }

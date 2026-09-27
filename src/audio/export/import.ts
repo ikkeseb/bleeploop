@@ -85,6 +85,11 @@ export async function importSession(bytes: Uint8Array | ArrayBuffer, source: Ses
   const tones: SlotTone[] = validateSessionPlugins(parsed, session.tracks.map((t) => t.file)).map((p) => {
     const entry = byName.get(p.file);
     if (!entry) throw new Error(`session.json lists "${p.file}" but the archive has no entry with that name`);
+    // Checked here, before anything reaches the host: the archive limit alone would pass one tone the
+    // size the stems are allowed.
+    if (entry.data.byteLength > MAX_TONE_BYTES) {
+      throw new Error(`"${p.file}": a tone of ${entry.data.byteLength} bytes; the largest a tone can be is ${MAX_TONE_BYTES}`);
+    }
     const { slot, format, path, id, name } = p;
     return { slot, plugin: { format, path, id, name }, bytes: entry.data };
   });

@@ -36,6 +36,10 @@ const latencySettleTimers: [ReturnType<typeof setTimeout> | null, ReturnType<typ
 // Engine mode — the device input feeds ONE live slot
 // ---------------------------------------------------------------------------
 
+// Every change of the live slot, counted: a tone reload that ended its slot's GO LIVE can tell whether a
+// live slot was chosen since (`resumeEngineLive`).
+let liveChoices = 0;
+
 /**
  * Engine mode: make `slot` the one slot the device input feeds (null = none). The engine passes the
  * input through a live slot's effect, or dry through an empty slot; two live slots would sum the dry
@@ -51,6 +55,19 @@ function setEngineLive(slot: 0 | 1 | null): void {
   sendEngine(...commands);
   setInputArmed(next);
   setMonitorArmed(next);
+  liveChoices++;
+}
+
+/** Engine mode: how many times the live slot has changed (`resumeEngineLive`). */
+export const liveChoiceCount = (): number => liveChoices;
+
+/**
+ * Engine mode, inside `slot`'s serialized op (a tone reload, `instrument.ts`): make `slot` live again,
+ * unless the live slot changed after `since` (`liveChoiceCount`, read when the reload ended its GO
+ * LIVE). A choice made during the reload stands.
+ */
+export function resumeEngineLive(slot: 0 | 1, since: number): void {
+  if (engineMode() && liveChoices === since && slotPlugins()[slot]) setEngineLive(slot);
 }
 
 /** Engine mode's MIC: whether the device input runs dry through an empty live slot. */

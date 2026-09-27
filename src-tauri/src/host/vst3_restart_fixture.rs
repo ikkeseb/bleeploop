@@ -71,6 +71,9 @@ struct FixtureComponent {
     state: Mutex<Vec<u8>>,
     /// `setState` refuses whatever it is given.
     refuse_state: AtomicBool,
+    /// `setState` applies what it is given, then refuses: a plugin that takes the fields it knows
+    /// before it meets one it does not.
+    half_apply_state: AtomicBool,
     set_states: AtomicUsize,
     /// A `setState` arrived while the component was active: a tone must go in before activation.
     state_set_while_active: AtomicBool,
@@ -113,6 +116,7 @@ impl FixtureComponent {
             terminate_seq: AtomicUsize::new(0),
             state: Mutex::new(Vec::new()),
             refuse_state: AtomicBool::new(false),
+            half_apply_state: AtomicBool::new(false),
             set_states: AtomicUsize::new(0),
             state_set_while_active: AtomicBool::new(false),
         }
@@ -220,6 +224,10 @@ impl IComponentTrait for FixtureComponent {
         self.state_set_while_active.fetch_or(self.active.load(Relaxed), Relaxed);
         let bytes = read_stream(state);
         let framed = bytes.get(..4).map(|len| u32::from_le_bytes(len.try_into().unwrap()) as usize);
+        if self.half_apply_state.load(Relaxed) && framed.is_some() {
+            *self.state.lock().unwrap() = bytes[4..].to_vec();
+            return kResultFalse;
+        }
         if self.refuse_state.load(Relaxed) || framed != Some(bytes.len() - 4) {
             return kResultFalse;
         }
@@ -280,6 +288,49 @@ fn the_host_stream_reads_writes_seeks_and_tells() {
         let limit = super::super::super::tone::MAX_STATE_BYTES as int64;
         assert_eq!(ptr.seek(limit, kIBSeekSet, &mut at), kResultOk);
         assert_eq!(ptr.write(b"z".as_ptr() as *mut c_void, 1, &mut n), kResultFalse, "never past the tone limit");
+    }
+}
+
+/// A read past the end reads nothing and leaves the cursor where it was: a plugin that seeks past
+/// the end, reads, then tells or writes lands where it seeked, not back at the end.
+#[test]
+fn a_read_past_the_end_keeps_the_cursor() {
+    use IStreamSeekMode_::kIBSeekSet;
+    let stream = ComWrapper::new(MemStream::reading(b"abc"));
+    let ptr = stream.to_com_ptr::<IBStream>().unwrap();
+    // SAFETY: every pointer handed to the stream is valid for its call.
+    unsafe {
+        let (mut buf, mut n, mut at) = ([0u8; 4], -1, 0);
+        assert_eq!(ptr.seek(5, kIBSeekSet, &mut at), kResultOk);
+        assert_eq!(ptr.read(buf.as_mut_ptr().cast(), 4, &mut n), kResultOk);
+        assert_eq!(n, 0, "nothing past the end");
+        assert_eq!(ptr.tell(&mut at), kResultOk);
+        assert_eq!(at, 5, "the cursor stays where the seek put it");
+        assert_eq!(ptr.write(b"xy".as_ptr() as *mut c_void, 2, &mut n), kResultOk);
+        assert_eq!(stream.bytes(), b"abc\0\0xy", "the write lands at the seeked position");
+    }
+}
+
+/// Zero bytes with a null buffer is a valid call (a plugin writing or reading an empty field): it
+/// moves nothing, grows nothing and never touches the null pointer.
+#[test]
+fn a_zero_length_transfer_with_a_null_buffer_is_a_no_op() {
+    use IStreamSeekMode_::kIBSeekSet;
+    let stream = ComWrapper::new(MemStream::reading(b"abc"));
+    let ptr = stream.to_com_ptr::<IBStream>().unwrap();
+    // SAFETY: the only null buffers passed come with a zero length; the counts are optional.
+    unsafe {
+        let (mut n, mut at) = (-1, -1);
+        assert_eq!(ptr.read(std::ptr::null_mut(), 0, &mut n), kResultOk);
+        assert_eq!(n, 0);
+        assert_eq!(ptr.write(std::ptr::null_mut(), 0, &mut n), kResultOk);
+        assert_eq!(n, 0);
+        assert_eq!(ptr.read(std::ptr::null_mut(), 0, std::ptr::null_mut()), kResultOk);
+        assert_eq!(ptr.tell(&mut at), kResultOk);
+        assert_eq!(at, 0, "nothing moved");
+        assert_eq!(ptr.seek(5, kIBSeekSet, &mut at), kResultOk);
+        assert_eq!(ptr.write(std::ptr::null_mut(), 0, std::ptr::null_mut()), kResultOk);
+        assert_eq!(stream.bytes(), b"abc", "an empty write past the end grows nothing");
     }
 }
 
@@ -843,6 +894,18 @@ mod engine {
     struct Made {
         component: Mutex<Option<ComWrapper<FixtureComponent>>>,
         controller: Mutex<Option<ComWrapper<FixtureController>>>,
+        /// How many components the factory made (a load that discards a refusing instance makes two).
+        components: AtomicUsize,
+    }
+
+    /// What the fixture component's `setState` does with a tone.
+    #[derive(Clone, Copy, PartialEq)]
+    enum StateAnswer {
+        Takes,
+        /// Refuses it untouched.
+        Refuses,
+        /// Applies it, then refuses (`half_apply_state`).
+        HalfAppliesThenRefuses,
     }
 
     impl Made {
@@ -861,8 +924,8 @@ mod engine {
         latency: u32,
         output_level: f32,
         inputs: i32,
-        /// The component refuses every `setState` (a tone it cannot take).
-        refuse_state: bool,
+        /// What every component it makes does with a `setState`.
+        answer: StateAnswer,
     }
 
     impl Class for FixtureFactory {
@@ -899,10 +962,12 @@ mod engine {
                 component.latency.store(self.latency, Relaxed);
                 component.output_level.store(self.output_level.to_bits(), Relaxed);
                 component.inputs.store(self.inputs, Relaxed);
-                component.refuse_state.store(self.refuse_state, Relaxed);
+                component.refuse_state.store(self.answer == StateAnswer::Refuses, Relaxed);
+                component.half_apply_state.store(self.answer == StateAnswer::HalfAppliesThenRefuses, Relaxed);
                 let wrapper = ComWrapper::new(component);
                 *obj = wrapper.to_com_ptr::<IComponent>().unwrap().into_raw().cast();
                 *self.made.component.lock().unwrap() = Some(wrapper);
+                self.made.components.fetch_add(1, Relaxed);
                 kResultOk
             } else if cid == CONTROLLER_CID {
                 let wrapper = ComWrapper::new(FixtureController::new(2));
@@ -943,7 +1008,7 @@ mod engine {
         output_level: f32,
         inputs: i32,
     ) -> (EngineSlotHandle, Arc<Made>, Arc<Mutex<Vec<EngineSlotEvent>>>) {
-        load_with_tone(device, slot, latency, output_level, inputs, None, false)
+        load_with_tone(device, slot, latency, output_level, inputs, None, StateAnswer::Takes)
     }
 
     fn load_with_tone(
@@ -953,7 +1018,7 @@ mod engine {
         output_level: f32,
         inputs: i32,
         tone: Option<ToneBinding>,
-        refuse_state: bool,
+        answer: StateAnswer,
     ) -> (EngineSlotHandle, Arc<Made>, Arc<Mutex<Vec<EngineSlotEvent>>>) {
         let made = Arc::new(Made::default());
         let seen = Arc::new(Mutex::new(Vec::new()));
@@ -968,7 +1033,7 @@ mod engine {
                 let id = super::super::super::super::scan::tuid_to_hex(&COMPONENT_CID);
                 super::super::engine::run_with(ctx, &id, move || {
                     let factory =
-                        ComWrapper::new(FixtureFactory { made: factory_made, latency, output_level, inputs, refuse_state });
+                        ComWrapper::new(FixtureFactory { made: factory_made, latency, output_level, inputs, answer });
                     Ok((None, factory.to_com_ptr::<IPluginFactory>().ok_or("factory COM failed")?))
                 })
             },
@@ -1153,7 +1218,7 @@ mod engine {
         let device = device(48_000);
         let dir = TempDir::new("vst3-engine");
         store_tone(&dir, &framed(b"component v"), b"controller v");
-        let (handle, made, _) = load_with_tone(&device, 0, 0, 0.0, 0, Some(dir.binding(identity())), false);
+        let (handle, made, _) = load_with_tone(&device, 0, 0, 0.0, 0, Some(dir.binding(identity())), StateAnswer::Takes);
         let (s, controller) = (made.component(), made.controller());
         assert_eq!(handle.tone(), Some(ToneRestore::Restored));
         assert_eq!(*s.state.lock().unwrap(), b"component v", "the component read the stream it was given");
@@ -1198,32 +1263,65 @@ mod engine {
         let device = device(48_000);
         let dir = TempDir::new("vst3-refused");
         store_tone(&dir, &framed(b"component v"), b"");
-        let (handle, made, _) = load_with_tone(&device, 0, 0, 0.0, 0, Some(dir.binding(identity())), true);
+        let kept = Some((framed(b"component v"), Vec::new()));
+        let (handle, made, _) = load_with_tone(&device, 0, 0, 0.0, 0, Some(dir.binding(identity())), StateAnswer::Refuses);
         let s = made.component();
         assert_eq!(handle.tone(), Some(ToneRestore::Failed), "refused, reported");
         assert!(s.state.lock().unwrap().is_empty(), "the component kept its defaults");
         assert!(wait_for(2000, || s.processes.load(Relaxed) > 4), "and the load went on");
+        // The app's exit: a save asked of every slot, then the unload. Neither writes the defaults over
+        // the tone the plugin refused (a reinstalled version of it may take it again).
+        let exit = handle.start_tone_save().unwrap().recv_timeout(Duration::from_secs(2)).unwrap().unwrap();
+        let exit = tone::decode(&exit).unwrap();
+        let (component, _) = tone::decode_vst3(&exit.state).unwrap();
+        assert_eq!(component, &framed(b"")[..], "the save still hands back what plays: the defaults");
+        assert_eq!(stored(&dir), kept, "the exit's save leaves the stored tone alone");
         handle.unload().unwrap();
-        assert!(stored(&dir).is_some(), "an unload with nothing changed leaves the stored tone alone");
+        assert_eq!(stored(&dir), kept, "so does the unload");
+        // A change the player makes is what the defaults replace it for.
+        let (handle, _, _) = load_with_tone(&device, 0, 0, 0.0, 0, Some(dir.binding(identity())), StateAnswer::Refuses);
+        handle.set_param(1001, 0.3).unwrap();
+        handle.unload().unwrap();
+        assert_eq!(stored(&dir), Some((framed(b""), Vec::new())), "a change is saved as usual");
+        store_tone(&dir, &framed(b"component v"), b"");
 
         let path = dir.0.join(identity().file_name());
         let bytes = std::fs::read(&path).unwrap();
         std::fs::write(&path, &bytes[..bytes.len() - 3]).unwrap();
-        let (handle, made, _) = load_with_tone(&device, 1, 0, 0.0, 0, Some(dir.binding(identity())), false);
+        let (handle, made, _) = load_with_tone(&device, 1, 0, 0.0, 0, Some(dir.binding(identity())), StateAnswer::Takes);
         assert_eq!(handle.tone(), Some(ToneRestore::Failed), "a truncated file is no tone");
         assert_eq!(made.component().set_states.load(Relaxed), 0, "and never reaches the plugin");
         handle.unload().unwrap();
     }
 
     #[test]
-    fn a_superseded_load_never_writes_over_an_imported_tone() {
+    fn a_tone_the_plugin_half_takes_then_refuses_leaves_a_fresh_instance_at_its_defaults() {
         let _one = engine_slot::one_engine_test_at_a_time();
         let device = device(48_000);
-        let dir = TempDir::new("vst3-supersede");
-        let (handle, made, _) = load_with_tone(&device, 0, 0, 0.0, 0, Some(dir.binding(identity())), false);
+        let dir = TempDir::new("vst3-half");
+        store_tone(&dir, &framed(b"component v"), b"controller v");
+        let answer = StateAnswer::HalfAppliesThenRefuses;
+        let (handle, made, _) = load_with_tone(&device, 0, 0, 0.0, 0, Some(dir.binding(identity())), answer);
+        assert_eq!(handle.tone(), Some(ToneRestore::Failed), "refused, reported");
+        assert_eq!(made.components.load(Relaxed), 2, "the instance that took part of the tone was discarded");
+        let s = made.component();
+        assert!(s.state.lock().unwrap().is_empty(), "the running component is at its true defaults");
+        assert!(made.controller().state_calls.lock().unwrap().is_empty(), "and so is its controller");
+        assert!(wait_for(2000, || s.processes.load(Relaxed) > 4), "and it runs");
+        handle.unload().unwrap();
+        assert_eq!(stored(&dir), Some((framed(b"component v"), b"controller v".to_vec())), "the stored tone stays");
+        assert!(!s.contract_violation.load(Relaxed));
+    }
+
+    #[test]
+    fn a_load_from_before_an_import_never_writes_over_it() {
+        let _one = engine_slot::one_engine_test_at_a_time();
+        let device = device(48_000);
+        let dir = TempDir::new("vst3-import");
+        let (handle, made, _) = load_with_tone(&device, 0, 0, 0.0, 0, Some(dir.binding(identity())), StateAnswer::Takes);
         assert_eq!(handle.tone(), None, "nothing stored yet");
-        handle.supersede_tone().unwrap();
-        store_tone(&dir, b"imported", b"");
+        let t = tone::Tone { identity: identity(), name: "Engine fixture".into(), state: tone::encode_vst3(b"imported", b"") };
+        dir.store().import(&tone::encode(&t), &identity()).unwrap();
         *made.component().state.lock().unwrap() = b"this load".to_vec();
         handle.set_param(1001, 0.3).unwrap();
         let file = tone::decode(&handle.take_tone().unwrap()).unwrap();

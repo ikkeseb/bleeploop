@@ -8,15 +8,30 @@
 //! Nothing here touches a plugin. The engine-mode owners (`clap_engine`, `vst3_engine`) restore a tone
 //! only inside their load sequence, before the plugin activates, and save one only on their own thread,
 //! through a [`ToneKeeper`]: debounced after the last change, when the editor closes, before an unload,
-//! and when a session export or the app's exit asks.
+//! and when a session export or the app's exit asks. Every save hands the tone back; whether it also
+//! lands in the store is the keeper's call:
+//!
+//! - a load whose restore failed (the file unreadable, or the plugin refused it, perhaps after an
+//!   update) leaves the stored tone alone until the player changes something: a reinstalled version of
+//!   the plugin may take it again, and the defaults it fell back to are nothing to keep;
+//! - a session import ([`ToneStore::import`]) is written and counted under the store's lock, which every
+//!   write takes, so no save interleaves with it. It is checked first against the plugin session.json
+//!   names, and a failed write changes nothing. From then on every load of that plugin from before the
+//!   import, in either slot, saves nothing more to the store; the slot the import reloads restores the
+//!   imported bytes as they were handed over ([`ToneBinding::imported`]), not the file another load may
+//!   have written since.
+//!
+//! Known limit: the same plugin in both slots shares one stored tone, and for ordinary saves the last one
+//! wins.
 
+use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{
     AtomicBool, AtomicU64,
     Ordering::{Acquire, Relaxed},
 };
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 /// How long a plugin must go without a change before its tone is saved. A kill loses at most this.
@@ -54,7 +69,7 @@ fn fnv1a64(parts: &[&[u8]]) -> u64 {
 
 /// Which plugin a tone belongs to: the scan descriptor's format (`clap` | `vst3`), bundle path and
 /// plugin id.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct ToneIdentity {
     pub(crate) format: String,
     pub(crate) path: String,
@@ -193,19 +208,52 @@ pub(crate) fn decode_vst3(bytes: &[u8]) -> Result<(&[u8], &[u8]), String> {
     Ok((component, controller))
 }
 
-/// The tone store: `tones/` in the app-local data folder (a probe's run has a profile of its own).
+/// The tone store: `tones/` in the app-local data folder (a probe's run has a profile of its own), and
+/// how many session imports have replaced each plugin's tone this run. Clones share both.
 #[derive(Clone, Debug)]
 pub(crate) struct ToneStore {
     dir: PathBuf,
+    /// Per plugin (its file name): the session imports of this run. Every write to the store happens
+    /// under this lock, so an import and a load's save never interleave.
+    imports: Arc<Mutex<HashMap<String, u64>>>,
+}
+
+/// A session import, stored: the tone, and the store's import count for its plugin after it. The
+/// reload that restores these bytes is a load from after the import.
+#[derive(Clone, Debug)]
+pub(crate) struct Imported {
+    pub(crate) tone: Tone,
+    pub(crate) revision: u64,
 }
 
 impl ToneStore {
     pub(crate) fn new(dir: PathBuf) -> ToneStore {
-        ToneStore { dir }
+        ToneStore { dir, imports: Arc::default() }
     }
 
     fn path(&self, identity: &ToneIdentity) -> PathBuf {
         self.dir.join(identity.file_name())
+    }
+
+    /// The store's lock. Nothing under it panics mid-write, so a poisoned one is taken as it is.
+    fn imports(&self) -> MutexGuard<'_, HashMap<String, u64>> {
+        self.imports.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn revision_in(imports: &HashMap<String, u64>, identity: &ToneIdentity) -> u64 {
+        imports.get(&identity.file_name()).copied().unwrap_or(0)
+    }
+
+    /// How many session imports have replaced `identity`'s tone this run.
+    pub(crate) fn revision(&self, identity: &ToneIdentity) -> u64 {
+        Self::revision_in(&self.imports(), identity)
+    }
+
+    /// A load's read: the stored tone (as `load`) and the import count it belongs to, taken together so
+    /// an import lands wholly before or wholly after it.
+    pub(crate) fn load_for_restore(&self, identity: &ToneIdentity) -> (Result<Option<Tone>, String>, u64) {
+        let imports = self.imports();
+        (self.load(identity), Self::revision_in(&imports, identity))
     }
 
     /// The tone stored for `identity`: `Ok(None)` when there is none, `Err` when the file cannot be
@@ -224,18 +272,54 @@ impl ToneStore {
         Ok(Some(tone))
     }
 
-    /// Store a tone file's bytes (checked first) under the identity they carry; returns the tone.
+    /// A session import: store a tone file's bytes (checked first) for `expected`, the plugin session.json
+    /// names, then count the import, so no load of that plugin from before it saves over it. A tone file
+    /// of another plugin is refused before anything is written, and a failed write counts nothing.
+    pub(crate) fn import(&self, bytes: &[u8], expected: &ToneIdentity) -> Result<Imported, String> {
+        let tone = decode(bytes)?;
+        if &tone.identity != expected {
+            return Err(format!(
+                "the session's tone file belongs to {} ({}), not to the plugin session.json names ({})",
+                tone.name, tone.identity.path, expected.path
+            ));
+        }
+        let mut imports = self.imports();
+        self.write(&tone.identity, bytes)?;
+        let revision = imports.entry(tone.identity.file_name()).or_insert(0);
+        *revision += 1;
+        Ok(Imported { revision: *revision, tone })
+    }
+
+    /// A load's save: store a tone file's bytes for `identity` unless a session import replaced its tone
+    /// after the load read it (`revision`, from `load_for_restore`). `Ok(false)`: not stored.
+    fn save_from_load(&self, identity: &ToneIdentity, revision: u64, bytes: &[u8]) -> Result<bool, String> {
+        let imports = self.imports();
+        if Self::revision_in(&imports, identity) != revision {
+            return Ok(false);
+        }
+        self.write(identity, bytes)?;
+        Ok(true)
+    }
+
+    /// Under the lock only (`imports`).
+    fn write(&self, identity: &ToneIdentity, bytes: &[u8]) -> Result<(), String> {
+        std::fs::create_dir_all(&self.dir).map_err(|e| format!("{}: {e}", self.dir.display()))?;
+        write_atomic(&self.path(identity), bytes)
+    }
+
+    /// Test-only: store a tone file's bytes under the identity they carry, as a save from nowhere would.
+    #[cfg(test)]
     pub(crate) fn save_encoded(&self, bytes: &[u8]) -> Result<Tone, String> {
         let tone = decode(bytes)?;
-        std::fs::create_dir_all(&self.dir).map_err(|e| format!("{}: {e}", self.dir.display()))?;
-        write_atomic(&self.path(&tone.identity), bytes)?;
+        let _lock = self.imports();
+        self.write(&tone.identity, bytes)?;
         Ok(tone)
     }
 }
 
 /// Write `bytes` to a temporary file beside `path`, flush it to disk, then rename it over `path`: a
 /// reader sees the old file or the new one, never half of either. The temporary name is unique per
-/// write, so two owners saving one plugin's tone at once cannot interleave (the last rename wins).
+/// write, and a failed write removes it.
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let tmp = path.with_extension(format!("tmp-{}-{}", std::process::id(), NEXT.fetch_add(1, Relaxed)));
@@ -281,6 +365,16 @@ impl Debounce {
 pub(crate) struct ToneBinding {
     pub(crate) store: ToneStore,
     pub(crate) identity: ToneIdentity,
+    /// The reload a session import asked for: the imported tone, which this load restores as it was
+    /// handed over instead of reading the store.
+    pub(crate) imported: Option<Imported>,
+}
+
+/// What a save did: the tone file's bytes (empty for a plugin that keeps no state), and why the store
+/// did not get them (`None`: it did, or there is no store).
+pub(crate) struct Saved {
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) not_stored: Option<&'static str>,
 }
 
 /// An engine-mode owner's tone bookkeeping. `edited` is raised wherever a change is seen off the owner
@@ -291,14 +385,16 @@ pub(crate) struct ToneKeeper {
     binding: Option<ToneBinding>,
     edited: Arc<AtomicBool>,
     debounce: Debounce,
-    /// A session import replaced this plugin's stored tone and the slot reloads to apply it: this
-    /// load's state must not be written over it.
-    superseded: bool,
+    /// The store's import count for this plugin when this load read its tone: once an import has
+    /// counted past it, this load saves nothing more to the store.
+    revision: u64,
+    /// This load's restore failed and nothing has changed since: the stored tone stays as it is.
+    keep_stored: bool,
 }
 
 impl ToneKeeper {
     pub(crate) fn new(binding: Option<ToneBinding>, edited: Arc<AtomicBool>) -> ToneKeeper {
-        ToneKeeper { binding, edited, debounce: Debounce::default(), superseded: false }
+        ToneKeeper { binding, edited, debounce: Debounce::default(), revision: 0, keep_stored: false }
     }
 
     /// The flag a change raises (the unit and the component handler hold it too).
@@ -306,52 +402,80 @@ impl ToneKeeper {
         self.edited.clone()
     }
 
-    /// The state to restore at load: `Ok(None)` when nothing is stored.
-    pub(crate) fn stored(&self) -> Result<Option<Vec<u8>>, String> {
-        match &self.binding {
-            Some(b) => Ok(b.store.load(&b.identity)?.map(|tone| tone.state)),
-            None => Ok(None),
+    /// The state to restore at load (`Ok(None)`: nothing is stored): the imported tone a reload was
+    /// handed, else the store's. Notes which import it belongs to.
+    pub(crate) fn stored(&mut self) -> Result<Option<Vec<u8>>, String> {
+        let Some(b) = &mut self.binding else { return Ok(None) };
+        if let Some(imported) = b.imported.take() {
+            self.revision = imported.revision;
+            return Ok(Some(imported.tone.state));
         }
+        let (stored, revision) = b.store.load_for_restore(&b.identity);
+        self.revision = revision;
+        Ok(stored?.map(|tone| tone.state))
+    }
+
+    /// The restore failed: no save replaces the stored tone until something changes (`keep_stored`).
+    pub(crate) fn keep_stored(&mut self) {
+        self.keep_stored = true;
+    }
+
+    /// After a restore: what the plugin reported while it took the state describes the state just
+    /// loaded, not a change.
+    pub(crate) fn settle(&mut self) {
+        self.edited.store(false, Relaxed);
+        self.debounce.clear();
+    }
+
+    fn changed(&mut self, now: Instant) {
+        self.debounce.touch(now);
+        self.keep_stored = false;
     }
 
     /// An owner-thread change (a CLAP `mark_dirty` or params rescan, a VST3 re-list).
     pub(crate) fn note_change(&mut self, now: Instant) {
-        self.debounce.touch(now);
+        self.changed(now);
     }
 
-    /// Owner turn: fold in what `edited` saw; true when a debounced save is due now.
+    /// Owner turn: fold in what `edited` saw; true when a debounced save is due now and may still land.
     pub(crate) fn poll(&mut self, now: Instant) -> bool {
         if self.edited.swap(false, Acquire) {
-            self.debounce.touch(now);
+            self.changed(now);
         }
-        !self.superseded && self.debounce.due(now)
+        if !self.debounce.due(now) {
+            return false;
+        }
+        if self.superseded() {
+            self.debounce.clear();
+            return false;
+        }
+        true
     }
 
     /// Whether a change is waiting to be saved (an unload saves it first).
     pub(crate) fn dirty(&mut self) -> bool {
         if self.edited.swap(false, Acquire) {
-            self.debounce.touch(Instant::now());
+            self.changed(Instant::now());
         }
-        !self.superseded && self.debounce.dirty()
+        self.debounce.dirty() && !self.superseded()
     }
 
-    /// Stop saving for the rest of this load (`superseded`).
-    pub(crate) fn supersede(&mut self) {
-        self.superseded = true;
-        self.debounce.clear();
+    /// A session import replaced this plugin's tone after this load read it.
+    fn superseded(&self) -> bool {
+        self.binding.as_ref().is_some_and(|b| b.store.revision(&b.identity) != self.revision)
     }
 
-    /// Save now: `take` asks the plugin named `name` for its state (`Ok(None)`: it keeps none). The
-    /// store gets the tone (unless this load is superseded) and the tone file's bytes come back, empty
-    /// for a plugin that keeps no state. The pending change is settled either way, so a failing save
-    /// waits for the next change rather than retrying every turn.
+    /// Save now: `take` asks the plugin named `name` for its state (`Ok(None)`: it keeps none). The tone
+    /// file's bytes come back either way; the store gets them unless this load keeps the stored tone or
+    /// an import superseded it. The pending change is settled either way, so a failing save waits for
+    /// the next change rather than retrying every turn.
     pub(crate) fn save(
         &mut self,
         name: &str,
         take: impl FnOnce() -> Result<Option<Vec<u8>>, String>,
-    ) -> Result<Vec<u8>, String> {
+    ) -> Result<Saved, String> {
         self.debounce.clear();
-        let Some(state) = take()? else { return Ok(Vec::new()) };
+        let Some(state) = take()? else { return Ok(Saved { bytes: Vec::new(), not_stored: None }) };
         if state.len() > MAX_STATE_BYTES {
             return Err(format!("the plugin's state is {} bytes, more than {MAX_STATE_BYTES}", state.len()));
         }
@@ -361,17 +485,20 @@ impl ToneKeeper {
         };
         let name: String = name.chars().take(256).collect();
         let bytes = encode(&Tone { identity, name, state });
-        if let (Some(b), false) = (&self.binding, self.superseded) {
-            b.store.save_encoded(&bytes)?;
-        }
-        Ok(bytes)
+        let not_stored = match &self.binding {
+            None => None,
+            Some(_) if self.keep_stored => Some("the stored tone this load could not restore is kept until something changes"),
+            Some(b) => (!b.store.save_from_load(&b.identity, self.revision, &bytes)?)
+                .then_some("a session import replaced this plugin's tone after this load"),
+        };
+        Ok(Saved { bytes, not_stored })
     }
 }
 
-/// Test-only: a fresh folder under the system temp dir, removed on drop (the store tests and the
-/// engine-mode fixtures keep their tones there).
+/// Test-only: a fresh folder under the system temp dir with one store over it, removed on drop (the
+/// store tests and the engine-mode fixtures keep their tones there).
 #[cfg(test)]
-pub(crate) struct TempDir(pub(crate) PathBuf);
+pub(crate) struct TempDir(pub(crate) PathBuf, ToneStore);
 
 #[cfg(test)]
 impl TempDir {
@@ -379,12 +506,17 @@ impl TempDir {
         static N: AtomicU64 = AtomicU64::new(0);
         let dir = std::env::temp_dir().join(format!("lf-tone-{tag}-{}-{}", std::process::id(), N.fetch_add(1, Relaxed)));
         let _ = std::fs::remove_dir_all(&dir);
-        TempDir(dir)
+        TempDir(dir.clone(), ToneStore::new(dir))
     }
 
-    /// A binding to a store in this folder, for `identity`.
+    /// The folder's store (every binding shares it, as the app's loads share one).
+    pub(crate) fn store(&self) -> &ToneStore {
+        &self.1
+    }
+
+    /// A binding to the folder's store, for `identity`.
     pub(crate) fn binding(&self, identity: ToneIdentity) -> ToneBinding {
-        ToneBinding { store: ToneStore::new(self.0.clone()), identity }
+        ToneBinding { store: self.1.clone(), identity, imported: None }
     }
 }
 
@@ -516,11 +648,10 @@ mod tests {
     }
 
     #[test]
-    fn a_keeper_saves_after_quiet_and_never_over_an_import() {
+    fn a_keeper_saves_after_quiet() {
         let dir = TempDir::new("keeper");
-        let binding = ToneBinding { store: ToneStore::new(dir.0.clone()), identity: identity() };
         let edited = Arc::new(AtomicBool::new(false));
-        let mut keeper = ToneKeeper::new(Some(binding.clone()), edited.clone());
+        let mut keeper = ToneKeeper::new(Some(dir.binding(identity())), edited.clone());
         let t0 = Instant::now();
         assert!(!keeper.poll(t0), "nothing changed");
         assert_eq!(keeper.stored().unwrap(), None);
@@ -529,26 +660,104 @@ mod tests {
         assert!(!keeper.poll(t0));
         assert!(keeper.dirty());
         assert!(keeper.poll(t0 + SAVE_QUIET), "due once the change is quiet");
-        let bytes = keeper.save("Pro-Q 3", || Ok(Some(b"state v".to_vec()))).unwrap();
-        assert_eq!(decode(&bytes).unwrap(), tone(b"state v"));
+        let saved = keeper.save("Pro-Q 3", || Ok(Some(b"state v".to_vec()))).unwrap();
+        assert_eq!((decode(&saved.bytes).unwrap(), saved.not_stored), (tone(b"state v"), None));
         assert!(!keeper.dirty() && !keeper.poll(t0 + SAVE_QUIET * 3), "saved: nothing pending");
         assert_eq!(keeper.stored().unwrap().as_deref(), Some(&b"state v"[..]), "the next load finds it");
 
-        // A session import wrote its tone and the slot reloads: this load never writes over it.
-        binding.store.save_encoded(&encode(&tone(b"imported"))).unwrap();
-        keeper.supersede();
-        edited.store(true, Relaxed);
-        assert!(!keeper.poll(t0 + SAVE_QUIET * 9) && !keeper.dirty());
-        let fresh = keeper.save("Pro-Q 3", || Ok(Some(b"state w".to_vec()))).unwrap();
-        assert_eq!(decode(&fresh).unwrap().state, b"state w", "an export still gets this load's state");
-        assert_eq!(keeper.stored().unwrap().as_deref(), Some(&b"imported"[..]), "the store keeps the import");
-
         assert!(keeper.save("x", || Ok(Some(vec![0; MAX_STATE_BYTES + 1]))).is_err(), "an oversized state is refused");
-        assert_eq!(keeper.save("x", || Ok(None)).unwrap(), Vec::<u8>::new(), "a plugin that keeps no state");
+        assert_eq!(keeper.save("x", || Ok(None)).unwrap().bytes, Vec::<u8>::new(), "a plugin that keeps no state");
         edited.store(true, Relaxed);
-        let mut fresh = ToneKeeper::new(Some(binding), edited.clone());
+        let mut fresh = ToneKeeper::new(Some(dir.binding(identity())), edited.clone());
         assert!(fresh.dirty());
         assert!(fresh.save("x", || Err("the plugin refused".to_string())).is_err());
         assert!(!fresh.dirty(), "a failed save waits for the next change");
+    }
+
+    #[test]
+    fn a_load_that_could_not_restore_keeps_the_stored_tone_until_a_change() {
+        let dir = TempDir::new("kept");
+        dir.store().save_encoded(&encode(&tone(b"refused"))).unwrap();
+        let edited = Arc::new(AtomicBool::new(false));
+        let mut keeper = ToneKeeper::new(Some(dir.binding(identity())), edited.clone());
+        assert_eq!(keeper.stored().unwrap().as_deref(), Some(&b"refused"[..]));
+        edited.store(true, Relaxed); // what the plugin raised while it refused the state
+        keeper.settle();
+        keeper.keep_stored();
+        assert!(!keeper.dirty(), "the restore itself is no change");
+        let saved = keeper.save("Pro-Q 3", || Ok(Some(b"defaults".to_vec()))).unwrap();
+        assert_eq!(decode(&saved.bytes).unwrap().state, b"defaults", "a save still hands back what plays");
+        assert!(saved.not_stored.is_some());
+        assert_eq!(keeper.stored().unwrap().as_deref(), Some(&b"refused"[..]), "the store keeps the tone");
+
+        edited.store(true, Relaxed); // the player turns a knob
+        assert!(keeper.dirty());
+        let saved = keeper.save("Pro-Q 3", || Ok(Some(b"edited".to_vec()))).unwrap();
+        assert_eq!(saved.not_stored, None);
+        assert_eq!(keeper.stored().unwrap().as_deref(), Some(&b"edited"[..]), "a change replaces it");
+    }
+
+    #[test]
+    fn an_import_supersedes_every_earlier_load_of_its_plugin() {
+        let dir = TempDir::new("import");
+        let t0 = Instant::now();
+        // The plugin in both slots, loaded before the import.
+        let (a_edited, b_edited) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
+        let mut a = ToneKeeper::new(Some(dir.binding(identity())), a_edited.clone());
+        let mut b = ToneKeeper::new(Some(dir.binding(identity())), b_edited.clone());
+        assert_eq!((a.stored().unwrap(), b.stored().unwrap()), (None, None));
+
+        let imported = dir.store().import(&encode(&tone(b"imported")), &identity()).unwrap();
+        assert_eq!((imported.tone.state.as_slice(), imported.revision), (&b"imported"[..], 1));
+        a_edited.store(true, Relaxed);
+        b_edited.store(true, Relaxed);
+        assert!(!a.poll(t0 + SAVE_QUIET * 9) && !b.dirty(), "neither load schedules a save any more");
+        let saved = a.save("Pro-Q 3", || Ok(Some(b"slot a".to_vec()))).unwrap();
+        assert_eq!(decode(&saved.bytes).unwrap().state, b"slot a", "an export still gets this load's state");
+        assert!(saved.not_stored.is_some());
+        assert!(b.save("Pro-Q 3", || Ok(Some(b"slot b".to_vec()))).unwrap().not_stored.is_some(), "nor the other slot's");
+        assert_eq!(dir.store().load(&identity()).unwrap().unwrap().state, b"imported", "the store keeps the import");
+
+        // A load from after the import saves as usual: last save wins, as for any two loads.
+        let mut later = ToneKeeper::new(Some(dir.binding(identity())), Arc::new(AtomicBool::new(false)));
+        assert_eq!(later.stored().unwrap().as_deref(), Some(&b"imported"[..]));
+        assert_eq!(later.save("Pro-Q 3", || Ok(Some(b"later".to_vec()))).unwrap().not_stored, None);
+
+        // The reload the import asked for restores the imported bytes it was handed, not the file.
+        let mut binding = dir.binding(identity());
+        binding.imported = Some(imported);
+        let mut reload = ToneKeeper::new(Some(binding), Arc::new(AtomicBool::new(false)));
+        assert_eq!(reload.stored().unwrap().as_deref(), Some(&b"imported"[..]));
+        assert_eq!(reload.save("Pro-Q 3", || Ok(Some(b"reloaded".to_vec()))).unwrap().not_stored, None, "and saves");
+        assert_eq!(dir.store().load(&identity()).unwrap().unwrap().state, b"reloaded");
+    }
+
+    #[test]
+    fn a_failed_or_foreign_import_changes_nothing() {
+        let dir = TempDir::new("import-failed");
+        dir.store().save_encoded(&encode(&tone(b"before"))).unwrap();
+        let edited = Arc::new(AtomicBool::new(false));
+        let mut keeper = ToneKeeper::new(Some(dir.binding(identity())), edited.clone());
+        assert_eq!(keeper.stored().unwrap().as_deref(), Some(&b"before"[..]));
+
+        // A tone file of another plugin than the one session.json names.
+        let mut other = tone(b"other");
+        other.identity.id = "another".to_string();
+        let refused = dir.store().import(&encode(&other), &identity()).unwrap_err();
+        assert!(refused.contains("not to the plugin session.json names"), "{refused}");
+        assert!(dir.store().load(&other.identity).unwrap().is_none(), "nothing written under either plugin");
+
+        // A write that fails: a folder stands where the file goes.
+        let path = dir.0.join(identity().file_name());
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert!(dir.store().import(&encode(&tone(b"imported")), &identity()).is_err());
+        std::fs::remove_dir(&path).unwrap();
+        assert_eq!(dir.store().revision(&identity()), 0, "neither counts as an import");
+
+        edited.store(true, Relaxed);
+        assert!(keeper.dirty(), "the loaded plugin still saves");
+        assert_eq!(keeper.save("Pro-Q 3", || Ok(Some(b"after".to_vec()))).unwrap().not_stored, None);
+        assert_eq!(dir.store().load(&identity()).unwrap().unwrap().state, b"after");
     }
 }

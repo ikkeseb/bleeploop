@@ -1,14 +1,16 @@
 //! OWNS: a CLAP plugin in the engine: `ClapUnit` (its audio processor as an
 //! `lf_engine::SlotProcessor`) and the engine-mode owner thread that loads, activates, restarts,
 //! re-activates after an eviction and tears it down (`engine_slot` holds the API), keeping the
-//! plugin's tone as `engine_slot` describes (the `state` extension's blob). It follows `owner_main`
+//! plugin's tone as `engine_slot` describes (the `state` extension's blob, captured under the tone
+//! limit: `CappedState`). It follows `owner_main`
 //! minus the RT thread, the hop-1 ring and the device; the load sequence is copied from there rather
 //! than shared, because nothing but a window-bound owner exercises that one.
 
 use super::engine_slot::{
-    keep_tone, report_faults, restore_tone, EngineSlotEvent, OwnerCtx, Ready, FAULT_PARAM,
+    keep_tone, report_faults, restore_tone, EngineSlotEvent, OwnerCtx, Ready, Restore, FAULT_PARAM,
     FAULT_PROCESS, FAULT_START, OWNER_POLL, REMOVE_TIMEOUT,
 };
+use crate::host::tone::MAX_STATE_BYTES;
 use super::*;
 
 use clack_host::events::io::{OutputEventBuffer, TryPushError};
@@ -414,13 +416,41 @@ fn instantiate(
     Ok((instance, name))
 }
 
+/// Where `state.save` writes: it refuses a write that would grow the state past `MAX_STATE_BYTES`,
+/// and stays refused, so a plugin that ignores a failed write and reports success still ends in an
+/// error rather than a truncated tone.
+#[derive(Default)]
+struct CappedState {
+    bytes: Vec<u8>,
+    overflowed: bool,
+}
+
+impl std::io::Write for CappedState {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if self.overflowed || self.bytes.len().saturating_add(buf.len()) > MAX_STATE_BYTES {
+            self.overflowed = true;
+            return Err(std::io::Error::other("past the tone limit"));
+        }
+        self.bytes.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 /// The plugin's state (`state` extension), for its tone: `Ok(None)` when it has no such extension.
 fn save_state(instance: &mut PluginInstance<LfHost>) -> Result<Option<Vec<u8>>, String> {
     let mut handle = instance.plugin_handle();
     let Some(ext) = handle.get_extension::<PluginState>() else { return Ok(None) };
-    let mut state = Vec::new();
-    ext.save(&mut handle, &mut state).map_err(|e| format!("state.save: {e}"))?;
-    Ok(Some(state))
+    let mut state = CappedState::default();
+    let saved = ext.save(&mut handle, &mut state);
+    if state.overflowed {
+        return Err(format!("the plugin's state is more than {MAX_STATE_BYTES} bytes"));
+    }
+    saved.map_err(|e| format!("state.save: {e}"))?;
+    Ok(Some(state.bytes))
 }
 
 /// Restore a tone's state (`state.load`, a main-thread call; the load runs it before activating).
@@ -447,7 +477,14 @@ pub(super) fn run(
         // init() may request a callback, but only the fully initialized instance can receive it.
         deliver_plugin_callback(&mut instance);
         // The stored tone goes in before the plugin activates: nothing processes it yet.
-        let restored = restore_tone(&tone, index, &name, |state| load_state(&mut instance, state));
+        let restored = restore_tone(&mut tone, index, &name, |state| load_state(&mut instance, state));
+        if restored == Restore::Refused {
+            // The plugin may have taken part of the tone before it refused: a fresh instance is at the
+            // defaults the player is told it loaded with.
+            drop(instance);
+            instance = instantiate(&entry, id, &editor_closed, &hosted_hwnd)?.0;
+            deliver_plugin_callback(&mut instance);
+        }
         // What the restore raised (a restart, a rescan, `mark_dirty`) describes the state just loaded,
         // which the activation and the param listing below read anyway.
         instance.access_shared_handler(|s| s.restart_requested.store(false, Release));
@@ -455,7 +492,7 @@ pub(super) fn run(
         instance.access_handler_mut(|m| m.state_dirty = false);
         let (stopped, terms) = activate(&mut instance, &slot)?;
         let unit = ClapUnit::new(stopped, &terms, params, faults.clone(), tone.edited());
-        Ok((entry, instance, name, terms.rate, unit, restored))
+        Ok((entry, instance, name, terms.rate, unit, restored.report()))
     });
     let (entry, mut instance, name, rate, mut unit, restored) = match setup {
         Ok(loaded) => loaded,
@@ -562,10 +599,6 @@ pub(super) fn run(
                 }
                 OwnerRequest::SaveTone(reply) => {
                     let _ = reply.send(keep_tone(&mut tone, index, "asked", &name, || save_state(&mut instance)));
-                }
-                OwnerRequest::SupersedeTone(reply) => {
-                    tone.supersede();
-                    let _ = reply.send(Ok(()));
                 }
                 // Params as the live owner serves them; a device request never comes from an engine
                 // handle and is answered as misrouted.

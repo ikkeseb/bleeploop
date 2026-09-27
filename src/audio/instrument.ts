@@ -32,7 +32,14 @@ import {
   slotPlugins,
   withAt,
 } from './instrument-slots';
-import { disarmInputInternal, disarmMonitorInternal, goLive, inputArmed, resendEngineLive } from './native-io';
+import {
+  disarmInputInternal,
+  disarmMonitorInternal,
+  inputArmed,
+  liveChoiceCount,
+  resendEngineLive,
+  resumeEngineLive,
+} from './native-io';
 import { forgetSlotPlugin, rememberSlotPlugin } from './rig-recall';
 import { warm as warmCapture } from './looper/capture';
 import { reconcilePluginDescriptors, samePluginDescriptor } from './plugin-descriptor';
@@ -333,27 +340,32 @@ async function doSelectPlugin(slot: 0 | 1, desc: PluginDescriptor, claimMidi: ()
 
 /**
  * Reload the plugin in `slot` in place, through the normal unload and load, so the load applies the
- * tone a session import just stored (`slot-tones.ts`). The unload ends the slot's GO LIVE (an empty live
- * slot would pass the input dry), so a slot that was live goes live again once its plugin is back,
- * through the normal GO LIVE; its output level is kept, and MIDI stays where it was. Nothing happens if
- * the player changed the slot's source meanwhile. Engine mode's (the web path keeps no tones). Returns
- * whether the plugin is back.
+ * tone a session import just stored (`slot-tones.ts`), if the slot still holds `expected`, the plugin
+ * the import found there: a slot the player moved to another plugin or none meanwhile is left alone
+ * (`moved`). The unload ends the slot's GO LIVE (an empty live slot would pass the input dry), so a slot
+ * that was live goes live again once its plugin is back, unless the player chose a live slot during the
+ * reload (the newer choice stands); its output level is kept, and MIDI stays where it was. One op on
+ * the slot's chain, so nothing the player does to the slot interleaves with it. Engine mode's (the web
+ * path keeps no tones).
  */
-export async function reloadPlugin(slot: 0 | 1): Promise<boolean> {
-  const desc = slotPlugins()[slot];
-  if (!desc) return false;
-  const wasLive = inputArmed()[slot];
-  const gain = pluginGain()[slot];
-  const back = await serializeSlot(slot, async () => {
-    if (!samePluginDescriptor(slotPlugins()[slot], desc)) return false;
-    if (!(await unloadSlotPlugin(slot, desc, 'swap'))) return false;
+export function reloadPlugin(
+  slot: 0 | 1,
+  expected: Pick<PluginDescriptor, 'format' | 'path' | 'id'>,
+): Promise<'reloaded' | 'moved' | 'failed'> {
+  return serializeSlot(slot, async () => {
+    const desc = slotPlugins()[slot];
+    if (!desc || !samePluginDescriptor(desc, expected)) return 'moved';
+    const wasLive = inputArmed()[slot];
+    const gain = pluginGain()[slot];
+    if (!(await unloadSlotPlugin(slot, desc, 'swap'))) return 'failed';
+    // The unload ended this slot's GO LIVE; any live choice after this one is the player's.
+    const liveSince = liveChoiceCount();
     await doSelectPlugin(slot, desc, () => false);
-    return samePluginDescriptor(slotPlugins()[slot], desc);
+    if (!samePluginDescriptor(slotPlugins()[slot], desc)) return 'failed';
+    if (gain !== null) setPluginGain(slot, gain);
+    if (wasLive) resumeEngineLive(slot, liveSince);
+    return 'reloaded';
   });
-  if (!back) return false;
-  if (gain !== null) setPluginGain(slot, gain);
-  if (wasLive) await goLive(slot);
-  return true;
 }
 
 /**

@@ -107,7 +107,7 @@ const OUT_RING_CAP: usize = 8192;
 /// request (`take_uncancelled`, which lists the one exception) and ROLLS BACK a late success (the
 /// `OpenEditor`/`Arm*` arms). Otherwise a late-succeeding monitor arm leaves a native stream running
 /// that the frontend booked as failed — the wet then sounds twice (native monitor + the web path JS
-/// never muted). `SaveTone`/`SupersedeTone`/`ListParams` carry no token: none of them changes what the
+/// never muted). `SaveTone`/`ListParams` carry no token: none of them changes what the
 /// plugin plays. No request pushes state INTO a running plugin: a tone is restored only inside an
 /// engine-mode load (`host/tone.rs`).
 pub enum OwnerRequest {
@@ -115,9 +115,6 @@ pub enum OwnerRequest {
     /// store, and reply with the tone file's bytes (empty: the plugin keeps no state). The web audio
     /// path's owners keep no tones and answer an error.
     SaveTone(std::sync::mpsc::SyncSender<Result<Vec<u8>, String>>),
-    /// Engine mode: a session import replaced this plugin's stored tone and the slot is about to
-    /// reload to apply it; this load saves nothing more to the store.
-    SupersedeTone(std::sync::mpsc::SyncSender<Result<(), String>>),
     ListParams(std::sync::mpsc::SyncSender<Result<Vec<ParamDesc>, String>>),
     /// VST3 only: mirror a HOST-originated parameter set (`plugin_set_param`) to the edit
     /// controller with `IEditController::setParamNormalized`. The processor already gets the value
@@ -475,12 +472,9 @@ fn handle_owner_request(
     param_ids: &ParamIds,
 ) {
     match req {
-        // Tone recall is engine mode's: its owner (`clap_engine`) serves these before they get here, and
-        // nothing sends them to a live owner.
+        // Tone recall is engine mode's: its owner (`clap_engine`) serves this before it gets here, and
+        // nothing sends it to a live owner.
         OwnerRequest::SaveTone(reply) => {
-            let _ = reply.send(Err(TONES_ON_THE_ENGINE_ONLY.to_string()));
-        }
-        OwnerRequest::SupersedeTone(reply) => {
             let _ = reply.send(Err(TONES_ON_THE_ENGINE_ONLY.to_string()));
         }
         OwnerRequest::ListParams(reply) => {

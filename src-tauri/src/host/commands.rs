@@ -325,9 +325,10 @@ pub async fn plugin_tone_take(slot: u8) -> Result<tauri::ipc::Response, String> 
     }
 }
 /// Engine mode: store a session import's tone for a slot. The raw request body is the tone file's
-/// bytes and the `slot` header names the slot (`invoke('plugin_tone_import', bytes, { headers })`).
-/// The answer names the plugin the tone belongs to and whether the slot holds it now; nothing is
-/// loaded or swapped here (`EngineApp::plugin_tone_import`).
+/// bytes, the `slot` header names the slot and the `plugin` header the plugin session.json names for
+/// it (`{ format, path, id }` as JSON, ASCII with `\u` escapes; a tone file of another plugin is
+/// refused). The answer names the plugin the tone belongs to and whether the slot holds it now;
+/// nothing is loaded or swapped here (`EngineApp::plugin_tone_import`).
 #[tauri::command]
 pub async fn plugin_tone_import(request: tauri::ipc::Request<'_>) -> Result<ToneImport, String> {
     let slot: u8 = request
@@ -342,8 +343,14 @@ pub async fn plugin_tone_import(request: tauri::ipc::Request<'_>) -> Result<Tone
     };
     #[cfg(windows)]
     {
+        let expected: super::tone::ToneIdentity = request
+            .headers()
+            .get("plugin")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| serde_json::from_str(v).ok())
+            .ok_or("plugin_tone_import needs the plugin the session names (a plugin header)")?;
         let engine = crate::engine_io::mode::engine().ok_or(TONES_ON_THE_ENGINE_ONLY)?;
-        engine.plugin_tone_import(slot, bytes)
+        engine.plugin_tone_import(slot, bytes, &expected)
     }
     #[cfg(not(windows))]
     {

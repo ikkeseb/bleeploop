@@ -5,10 +5,12 @@
  * module moves tones across a session export and import:
  *
  * - export takes each loaded slot's tone fresh, through the slot's owner (`takeSlotTones`);
- * - import stores each tone the session names under its plugin. A slot that holds that plugin now is
- *   reloaded in place so the load applies it, keeping its level and GO LIVE; a slot that holds another
- *   plugin or none is left alone, and one toast says which plugin to load (its next load, in either
- *   slot, restores the session's tone). The player's rig is never swapped (`restoreSessionTones`).
+ * - import stores each tone under the plugin session.json names for it (the host refuses a tone file of
+ *   another plugin). A slot that holds that plugin now is reloaded in place so the load applies it,
+ *   keeping its level and GO LIVE, unless the player picked another plugin for it while the import ran;
+ *   a slot that holds another plugin or none is left alone, and one toast says which plugin to load
+ *   (its next load, in either slot, restores the session's tone). The player's rig is never swapped
+ *   (`restoreSessionTones`).
  *
  * The web audio path keeps no tones: both are no-ops there.
  */
@@ -53,9 +55,10 @@ export async function takeSlotTones(): Promise<SlotTone[]> {
 
 /**
  * Store a session's tones (import, after its loops loaded). For each: the native host stores it under
- * the plugin it names; a slot holding that plugin now reloads to apply it, any other slot is left alone
- * with a toast naming the plugin to load. A tone the host refuses (corrupt, not a tone) is logged and
- * toasted; the loops stay imported.
+ * the plugin session.json names; a slot holding that plugin reloads to apply it (still holding it once
+ * the host answered: `reloadPlugin`), any other slot is left alone with a toast naming the plugin to
+ * load. A tone the host refuses (corrupt, not a tone, another plugin's) is logged and toasted; the
+ * loops stay imported.
  */
 export async function restoreSessionTones(tones: readonly SlotTone[]): Promise<void> {
   if (!engineMode()) return;
@@ -63,7 +66,7 @@ export async function restoreSessionTones(tones: readonly SlotTone[]): Promise<v
     const letter = slotLetter(tone.slot);
     let stored: ToneImport;
     try {
-      stored = await platform.pluginHost.importTone(tone.slot, tone.bytes);
+      stored = await platform.pluginHost.importTone(tone.slot, tone.bytes, tone.plugin);
     } catch (e) {
       console.error(`[slot-tones] slot ${letter}: the session's tone for ${tone.plugin.name} could not be kept`, e);
       notifyError(`${tone.plugin.name}: the session's saved settings could not be kept`, e);
@@ -73,7 +76,7 @@ export async function restoreSessionTones(tones: readonly SlotTone[]): Promise<v
       notifyInfo(`This session used ${stored.name} in slot ${letter} — load it to hear the session's tone`);
       continue;
     }
-    if (!(await reloadPlugin(tone.slot))) {
+    if ((await reloadPlugin(tone.slot, tone.plugin)) === 'failed') {
       console.error(`[slot-tones] slot ${letter}: ${stored.name} did not come back after taking the session's tone`);
     }
   }

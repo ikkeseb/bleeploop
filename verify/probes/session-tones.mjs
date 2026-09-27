@@ -4,8 +4,12 @@
  * tone to the host (`importTone`), reloads a slot that holds that plugin through the normal unload and
  * load, keeping its level and GO LIVE, and leaves a slot that holds another plugin or none alone, with
  * one toast naming the plugin to load. A load whose stored tone the host could not restore toasts. The
- * plugin host is a stand-in that records its calls and treats a tone as opaque bytes, as the frontend
- * does. Cannot see the native store, a real plugin or the Rust side: `pnpm native:tone-recall` does.
+ * host is handed the plugin session.json names with each tone (it refuses a tone of another plugin). A
+ * reload is skipped when the player picked another plugin for the slot while the import was in flight,
+ * and GO LIVE comes back only if the player chose no other live slot meanwhile. An archive whose tone
+ * entry is past the tone limit is refused before anything is handed to the host. The plugin host is a
+ * stand-in that records its calls and treats a tone as opaque bytes, as the frontend does. Cannot see
+ * the native store, a real plugin or the Rust side: `pnpm native:tone-recall` does.
  * Run: pnpm probe session-tones
  */
 import assert from 'node:assert/strict';
@@ -39,6 +43,7 @@ await probe(async ({ open }) => {
       const { buildExportBundle } = await import('/src/audio/export/export.ts');
       const { importSession } = await import('/src/audio/export/import.ts');
       const { parseZip } = await import('/src/audio/export/unzip.ts');
+      const { makeZip } = await import('/src/audio/export/zip.ts');
       const { restoreSessionTones } = await import('/src/audio/slot-tones.ts');
       const { toasts } = await import('/src/notify.ts');
       const { session } = await import('/src/ui/state/audio.ts');
@@ -61,9 +66,19 @@ await probe(async ({ open }) => {
       const held = [null, null];
       const store = new Map();
       let refuse = false;
+      // A gate holds the answer of one slot's import or load until the test opens it.
+      const gate = () => {
+        let open;
+        const closed = new Promise((resolve) => (open = resolve));
+        return { closed, open };
+      };
+      let importGate = null;
+      let loadGate = null;
+      const expected = [];
       const host = platform.pluginHost;
       host.loadPlugin = async (slot, _path, id) => {
         calls.push(`load ${slot} ${id}`);
+        if (loadGate?.slot === slot) await loadGate.closed;
         held[slot] = id;
         return { slot, descriptor: byId(id), tone: refuse ? 'failed' : store.has(id) ? 'restored' : undefined };
       };
@@ -77,12 +92,17 @@ await probe(async ({ open }) => {
         store.set(held[slot], bytes);
         return bytes;
       };
-      host.importTone = async (slot, bytes) => {
-        const [id] = new TextDecoder().decode(bytes).split(' ');
-        calls.push(`import ${slot} ${new TextDecoder().decode(bytes)}`);
+      host.importTone = async (slot, bytes, plugin) => {
+        const text = new TextDecoder().decode(bytes.subarray(0, 32));
+        const [id] = text.split(' ');
+        calls.push(`import ${slot} ${text}`);
+        expected.push(plugin ? { format: plugin.format, path: plugin.path, id: plugin.id } : null);
         store.set(id, bytes);
         const { name, format, path } = byId(id);
-        return { held: held[slot] === id, name, format, path, id };
+        // Answered as the native host answers: for the slot as it was when the tone was stored.
+        const answer = { held: held[slot] === id, name, format, path, id };
+        if (importGate?.slot === slot) await importGate.closed;
+        return answer;
       };
 
       // ── A rig: the amp in slot A, live, at 0.6; the synth in slot B; one committed lane ───────────
@@ -148,6 +168,7 @@ await probe(async ({ open }) => {
       const first = await reimport();
       const afterFirst = {
         ...first,
+        expected: expected.splice(0),
         slots: instrument.slotPlugins().map((d) => d?.id ?? null),
         live: nativeIo.inputArmed().slice(),
         gain: instrument.pluginGain().slice(),
@@ -167,7 +188,71 @@ await probe(async ({ open }) => {
       refuse = true;
       await instrument.selectPlugin(1, synth);
       const refused = { slot: instrument.slotPlugins()[1]?.id ?? null, toasts: toasts().map((t) => t.message) };
-      return { exported, afterFirst, afterSecond, refused, loadedSessions: native.loadedSessions.length };
+      refuse = false;
+
+      // ── The player picks another plugin for slot A while the import is in flight ────────────────────
+      // The host answered for slot A as it was (the amp, held); by the time the answer lands the slot
+      // holds the synth, which must not be reloaded.
+      const toastsBefore = new Set(toasts().map((t) => t.message));
+      feed('Empty');
+      await pause(50);
+      importGate = { slot: 0, ...gate() };
+      calls.length = 0;
+      const inFlight = importSession(bundle.zipBytes, session).then(restoreSessionTones);
+      await until('the import of slot A', () => calls.includes('import 0 amp state 0'));
+      await instrument.selectPlugin(0, synth);
+      const picked = calls.length;
+      importGate.open();
+      await inFlight;
+      importGate = null;
+      const moved = {
+        after: calls.slice(picked),
+        slots: instrument.slotPlugins().map((d) => d?.id ?? null),
+        newToasts: toasts().map((t) => t.message).filter((m) => !toastsBefore.has(m)),
+      };
+
+      // ── The player makes slot B live while slot A reloads: the newer choice stands ──────────────────
+      await instrument.selectPlugin(0, amp);
+      await nativeIo.goLive(0);
+      feed('Empty');
+      await pause(50);
+      loadGate = { slot: 0, ...gate() };
+      calls.length = 0;
+      const reloading = importSession(bundle.zipBytes, session).then(restoreSessionTones);
+      await until('slot A reloading', () => calls.includes('load 0 amp'));
+      await nativeIo.goLive(1);
+      const liveMidReload = nativeIo.inputArmed().slice();
+      loadGate.open();
+      await reloading;
+      loadGate = null;
+      const liveChoice = { calls: calls.slice(), liveMidReload, live: nativeIo.inputArmed().slice() };
+
+      // ── A tone entry past the tone limit never reaches the host ─────────────────────────────────────
+      feed('Empty');
+      await pause(50);
+      const oversized = makeZip(
+        parseZip(bundle.zipBytes).map((e) =>
+          e.name.endsWith('-tone-slot-a.bin') ? { name: e.name, data: new Uint8Array((16 << 20) + (1 << 16) + 1) } : e,
+        ),
+      );
+      calls.length = 0;
+      let bigTone = null;
+      try {
+        await restoreSessionTones(await importSession(oversized, session));
+      } catch (e) {
+        bigTone = e instanceof Error ? e.message : String(e);
+      }
+      const tooBig = { error: bigTone, calls: calls.slice() };
+      return {
+        exported,
+        afterFirst,
+        afterSecond,
+        refused,
+        moved,
+        liveChoice,
+        tooBig,
+        loadedSessions: native.loadedSessions.length,
+      };
     },
     { RATE, MASTER },
   );
@@ -202,6 +287,14 @@ await probe(async ({ open }) => {
     'and the engine gets it back',
   );
   assert.equal(out.afterFirst.toasts.length, 0, `no toast: ${JSON.stringify(out.afterFirst.toasts)}`);
+  assert.deepEqual(
+    out.afterFirst.expected,
+    [
+      { format: 'vst3', path: 'C:\\probe\\amp.vst3', id: 'amp' },
+      { format: 'clap', path: 'C:\\probe\\syn.clap', id: 'syn' },
+    ],
+    'the host is handed the plugin session.json names with each tone, to check it against the tone file',
+  );
 
   assert.deepEqual(
     out.afterSecond.calls,
@@ -216,6 +309,19 @@ await probe(async ({ open }) => {
     out.refused.toasts.includes('Probe Synth: saved settings could not be restored; it loaded with its defaults'),
     `the player is told: ${JSON.stringify(out.refused.toasts)}`,
   );
-  assert.equal(out.loadedSessions, 2, 'both imports reached the engine');
+  assert.ok(
+    !out.moved.after.some((c) => c.startsWith('unload 0') || c.startsWith('load 0')),
+    `a slot the player moved to another plugin during the import is not reloaded: ${out.moved.after.join(', ')}`,
+  );
+  assert.deepEqual(out.moved.slots, ['syn', 'syn'], 'the player’s pick stands');
+  assert.deepEqual(out.moved.newToasts, [], 'and nothing extra is toasted');
+
+  assert.deepEqual(out.liveChoice.liveMidReload, [false, true], 'slot B went live while slot A reloaded');
+  assert.ok(out.liveChoice.calls.includes('load 0 amp'), `slot A reloaded: ${out.liveChoice.calls.join(', ')}`);
+  assert.deepEqual(out.liveChoice.live, [false, true], 'the reload does not take GO LIVE back from the newer choice');
+
+  assert.match(out.tooBig.error ?? '', /tone/, `an oversized tone entry is refused: ${out.tooBig.error}`);
+  assert.deepEqual(out.tooBig.calls, [], 'before anything reaches the host');
+  assert.equal(out.loadedSessions, 4, 'the four imports that passed reached the engine');
   assert.deepEqual(consoleErrors, [], 'no console errors');
 });

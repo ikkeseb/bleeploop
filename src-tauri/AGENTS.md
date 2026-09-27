@@ -157,7 +157,9 @@ The known-fragile area: read this whole section before any plugin-GUI/VST3 work.
   (`PeekMessage` + `MsgWaitForMultipleObjectsEx(20ms)`) ONLY while a hosted editor is open; an
   engine-mode owner pumps every turn, editor or not: a JUCE plugin (Neural DSP) runs its message thread
   there, and unpumped, a host-set parameter never reached its saved state (measured with
-  `pnpm native:tone-recall`, Archetype Petrucci). GUI calls go via the owner channel, NOT
+  `pnpm native:tone-recall`, Archetype Petrucci). Each pump call is bounded (64 messages or 2 ms,
+  `editor_window::pump_thread_messages`), so a plugin whose messages repost themselves cannot keep an
+  owner from its requests, saves or unload. GUI calls go via the owner channel, NOT
   `run_on_main_thread`.
 - **Editor size is the plugin's, measured not computed:** `editor_window::set_client_size` sizes the
   CLIENT area by measuring the real frame (DPI-correct), at creation and on every plugin-initiated
@@ -185,7 +187,9 @@ The known-fragile area: read this whole section before any plugin-GUI/VST3 work.
   `setComponentState` and `setState`, through the host `MemStream` (`vst3.rs`) — and the owner saves it
   on its own thread. No request pushes state into a running plugin. The engine VST3 load creates the
   controller and sets its handler BEFORE activation (the SDK host's order); the live owner does not,
-  and the web path's owners keep no tones.
+  and the web path's owners keep no tones. A plugin that refuses its tone is discarded and created
+  again before it activates (it may have taken half the state); a session import goes through the
+  store's lock (`ToneStore::import`), never an owner request. Why a save skips the store: `tone.rs`.
 
 ## Native audio input → wet monitoring, ASIO (P11)
 

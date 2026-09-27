@@ -102,8 +102,13 @@ const tauriPluginHost: PluginHost = {
     const bytes = await invoke<ArrayBuffer>('plugin_tone_take', { slot });
     return bytes.byteLength > 0 ? new Uint8Array(bytes) : null;
   },
-  importTone(slot, bytes) {
-    return invoke<ToneImport>('plugin_tone_import', bytes, { headers: { slot: String(slot) } });
+  importTone(slot, bytes, { format, path, id }) {
+    // A header value must be ASCII: the plugin goes as JSON with every other character \u-escaped.
+    const plugin = JSON.stringify({ format, path, id }).replace(
+      /[\u007f-\uffff]/g,
+      (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`,
+    );
+    return invoke<ToneImport>('plugin_tone_import', bytes, { headers: { slot: String(slot), plugin } });
   },
   listInputDevices() {
     return invoke<AudioInputDevice[]>('plugin_list_input_devices');
