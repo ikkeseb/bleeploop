@@ -254,6 +254,9 @@ existing P9 ring → looper record tap (lag-tolerant, records wet "for free").
 
 ## Open threads (no gate)
 
+- Tone recall: an owner's save of plugin P waits on P's own in-flight store write (an import of P under
+  its write lock). A disk write that hangs therefore stalls that owner, and an unload joins it without a
+  timeout. Other plugins' writes never block it; a store worker doing the file I/O would remove the wait.
 - `plugin_note_off` / `plugin_set_param` now answer `Err` on a full event ring or an unlisted param id
   (audit B2–B4); the frontend still `void`s them, so a rejection only reaches the release log. A UI
   reaction (slider snaps back to the plugin's value, a stuck-note cue) is unbuilt.
