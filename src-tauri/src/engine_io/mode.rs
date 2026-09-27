@@ -20,7 +20,7 @@ use tauri::{AppHandle, Manager};
 
 use super::feed::FeedThread;
 use super::plugins::EngineSlot;
-use crate::host::tone::{Imported, ToneStore};
+use crate::host::tone::{ToneHandoff, ToneStore};
 use super::wire::{FeedFrame, WireCommand};
 use super::{DeviceRequest, DeviceStatus, EngineHost, HostConfig, OpenError};
 
@@ -56,8 +56,8 @@ pub struct EngineApp {
     pub(super) slots: Mutex<[EngineSlot; SLOT_COUNT]>,
     /// `None` without an app-local data folder: plugins then load at their defaults and keep nothing.
     pub(super) tones: Option<ToneStore>,
-    /// A session import's tone for the reload of the slot that held its plugin (`plugins`).
-    pub(super) reload_tones: Mutex<[Option<Imported>; SLOT_COUNT]>,
+    /// A session import's tone, parked for the reload of the slot that held its plugin (`plugins`).
+    pub(super) reload_tones: Mutex<ToneHandoff<SLOT_COUNT>>,
 }
 
 impl EngineApp {
@@ -84,7 +84,7 @@ impl EngineApp {
             engine: None,
             slots: Mutex::new(std::array::from_fn(|_| EngineSlot::Empty)),
             tones: None,
-            reload_tones: Mutex::new(std::array::from_fn(|_| None)),
+            reload_tones: Mutex::default(),
         };
         if toggle.as_ref().is_some_and(|path| toggled_off(path)) {
             log::info!("[engine_io] web audio mode: the engine toggle is off");

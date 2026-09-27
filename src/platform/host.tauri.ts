@@ -57,9 +57,9 @@ const tauriPluginHost: PluginHost = {
   scanPlugins(force = false) {
     return invoke<PluginDescriptor[]>('plugin_scan', { force });
   },
-  loadPlugin(slot, path, id, loadToken) {
+  loadPlugin(slot, path, id, loadToken, toneToken) {
     if (frontendEpoch === 0) throw new Error('plugin host not initialized');
-    return invoke<PluginInfo>('plugin_load', { slot, path, id, frontendEpoch, loadToken });
+    return invoke<PluginInfo>('plugin_load', { slot, path, id, frontendEpoch, loadToken, toneToken: toneToken ?? null });
   },
   async unloadPlugin(slot) {
     await invoke('plugin_unload', { slot });
@@ -109,6 +109,9 @@ const tauriPluginHost: PluginHost = {
       (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`,
     );
     return invoke<ToneImport>('plugin_tone_import', bytes, { headers: { slot: String(slot), plugin } });
+  },
+  async forgetTone(slot, reloadToken) {
+    await invoke('plugin_tone_forget', { slot, token: reloadToken });
   },
   listInputDevices() {
     return invoke<AudioInputDevice[]>('plugin_list_input_devices');

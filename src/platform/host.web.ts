@@ -31,7 +31,7 @@ const webPluginHost: PluginHost = {
   async scanPlugins() {
     return [];
   },
-  async loadPlugin(_slot, _path, _id, _loadToken) {
+  async loadPlugin(_slot, _path, _id, _loadToken, _toneToken) {
     throw new Error(NO_NATIVE_HOST);
   },
   async unloadPlugin() {
@@ -74,6 +74,9 @@ const webPluginHost: PluginHost = {
     return null; // no plugin loads in the browser build, so none keeps a tone
   },
   async importTone() {
+    throw new Error(NO_NATIVE_HOST);
+  },
+  async forgetTone() {
     throw new Error(NO_NATIVE_HOST);
   },
   async listInputDevices() {

@@ -14,12 +14,16 @@
 //! - a load whose restore failed (the file unreadable, or the plugin refused it, perhaps after an
 //!   update) leaves the stored tone alone until the player changes something: a reinstalled version of
 //!   the plugin may take it again, and the defaults it fell back to are nothing to keep;
-//! - a session import ([`ToneStore::import`]) is written and counted under the store's lock, which every
-//!   write takes, so no save interleaves with it. It is checked first against the plugin session.json
-//!   names, and a failed write changes nothing. From then on every load of that plugin from before the
-//!   import, in either slot, saves nothing more to the store; the slot the import reloads restores the
-//!   imported bytes as they were handed over ([`ToneBinding::imported`]), not the file another load may
-//!   have written since.
+//! - a session import ([`ToneStore::import`]) is written and counted under its plugin's write lock,
+//!   which every write of that plugin's file takes, so no save interleaves with it. It is checked first
+//!   against the plugin session.json names, and a failed write changes nothing. From then on every load
+//!   of that plugin from before the import, in either slot, saves nothing more to the store; the slot the
+//!   import reloads restores the imported bytes as they were handed over ([`ToneBinding::imported`], parked
+//!   under a reload token in a [`ToneHandoff`]), not the file another load may have written since.
+//!
+//! An owner's turn reads the import count without waiting on any lock held across disk I/O
+//! (`ToneKeeper::poll`): a write stalled in the file system holds up the saves of its own plugin, never
+//! an owner's requests, editor pump or unload.
 //!
 //! Known limit: the same plugin in both slots shares one stored tone, and for ordinary saves the last one
 //! wins.
@@ -29,7 +33,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{
     AtomicBool, AtomicU64,
-    Ordering::{Acquire, Relaxed},
+    Ordering::{Acquire, Relaxed, Release},
 };
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
@@ -209,13 +213,33 @@ pub(crate) fn decode_vst3(bytes: &[u8]) -> Result<(&[u8], &[u8]), String> {
 }
 
 /// The tone store: `tones/` in the app-local data folder (a probe's run has a profile of its own), and
-/// how many session imports have replaced each plugin's tone this run. Clones share both.
+/// per plugin how many session imports have replaced its tone this run. Clones share both.
 #[derive(Clone, Debug)]
 pub(crate) struct ToneStore {
     dir: PathBuf,
-    /// Per plugin (its file name): the session imports of this run. Every write to the store happens
-    /// under this lock, so an import and a load's save never interleave.
-    imports: Arc<Mutex<HashMap<String, u64>>>,
+    /// Per plugin (its file name). The map's lock is held only to find an entry, never across I/O.
+    entries: Arc<Mutex<HashMap<String, Arc<Entry>>>>,
+    /// Test-only: the next write stops mid-way until the test lets it go (`stall_next_write`).
+    #[cfg(test)]
+    stall: Arc<Mutex<Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>>>,
+}
+
+/// One plugin's place in the store.
+#[derive(Debug, Default)]
+struct Entry {
+    /// The session imports of this run. It advances only under `write` and only after the import's
+    /// file landed, and an owner's turn reads it without a lock.
+    revision: AtomicU64,
+    /// Held across every write of this plugin's file (and a load's read of it with its revision), so an
+    /// import and a load's save never interleave. Another plugin's writes never wait on it.
+    write: Mutex<()>,
+}
+
+impl Entry {
+    /// Nothing under the lock panics mid-write, so a poisoned one is taken as it is.
+    fn write(&self) -> MutexGuard<'_, ()> {
+        self.write.lock().unwrap_or_else(PoisonError::into_inner)
+    }
 }
 
 /// A session import, stored: the tone, and the store's import count for its plugin after it. The
@@ -228,32 +252,34 @@ pub(crate) struct Imported {
 
 impl ToneStore {
     pub(crate) fn new(dir: PathBuf) -> ToneStore {
-        ToneStore { dir, imports: Arc::default() }
+        ToneStore {
+            dir,
+            entries: Arc::default(),
+            #[cfg(test)]
+            stall: Arc::default(),
+        }
     }
 
     fn path(&self, identity: &ToneIdentity) -> PathBuf {
         self.dir.join(identity.file_name())
     }
 
-    /// The store's lock. Nothing under it panics mid-write, so a poisoned one is taken as it is.
-    fn imports(&self) -> MutexGuard<'_, HashMap<String, u64>> {
-        self.imports.lock().unwrap_or_else(PoisonError::into_inner)
+    fn entry(&self, identity: &ToneIdentity) -> Arc<Entry> {
+        let mut entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
+        entries.entry(identity.file_name()).or_default().clone()
     }
 
-    fn revision_in(imports: &HashMap<String, u64>, identity: &ToneIdentity) -> u64 {
-        imports.get(&identity.file_name()).copied().unwrap_or(0)
-    }
-
-    /// How many session imports have replaced `identity`'s tone this run.
+    /// How many session imports have replaced `identity`'s tone this run. Waits on no write.
     pub(crate) fn revision(&self, identity: &ToneIdentity) -> u64 {
-        Self::revision_in(&self.imports(), identity)
+        self.entry(identity).revision.load(Acquire)
     }
 
     /// A load's read: the stored tone (as `load`) and the import count it belongs to, taken together so
     /// an import lands wholly before or wholly after it.
     pub(crate) fn load_for_restore(&self, identity: &ToneIdentity) -> (Result<Option<Tone>, String>, u64) {
-        let imports = self.imports();
-        (self.load(identity), Self::revision_in(&imports, identity))
+        let entry = self.entry(identity);
+        let _write = entry.write();
+        (self.load(identity), entry.revision.load(Acquire))
     }
 
     /// The tone stored for `identity`: `Ok(None)` when there is none, `Err` when the file cannot be
@@ -283,26 +309,35 @@ impl ToneStore {
                 tone.name, tone.identity.path, expected.path
             ));
         }
-        let mut imports = self.imports();
+        let entry = self.entry(&tone.identity);
+        let _write = entry.write();
         self.write(&tone.identity, bytes)?;
-        let revision = imports.entry(tone.identity.file_name()).or_insert(0);
-        *revision += 1;
-        Ok(Imported { revision: *revision, tone })
+        let revision = entry.revision.fetch_add(1, Release) + 1;
+        Ok(Imported { revision, tone })
     }
 
     /// A load's save: store a tone file's bytes for `identity` unless a session import replaced its tone
     /// after the load read it (`revision`, from `load_for_restore`). `Ok(false)`: not stored.
     fn save_from_load(&self, identity: &ToneIdentity, revision: u64, bytes: &[u8]) -> Result<bool, String> {
-        let imports = self.imports();
-        if Self::revision_in(&imports, identity) != revision {
+        let entry = self.entry(identity);
+        let _write = entry.write();
+        if entry.revision.load(Acquire) != revision {
             return Ok(false);
         }
         self.write(identity, bytes)?;
         Ok(true)
     }
 
-    /// Under the lock only (`imports`).
+    /// Under the plugin's write lock only (`Entry::write`).
     fn write(&self, identity: &ToneIdentity, bytes: &[u8]) -> Result<(), String> {
+        #[cfg(test)]
+        {
+            let stall = self.stall.lock().unwrap_or_else(PoisonError::into_inner).take();
+            if let Some((entered, go)) = stall {
+                let _ = entered.send(());
+                let _ = go.recv();
+            }
+        }
         std::fs::create_dir_all(&self.dir).map_err(|e| format!("{}: {e}", self.dir.display()))?;
         write_atomic(&self.path(identity), bytes)
     }
@@ -311,9 +346,20 @@ impl ToneStore {
     #[cfg(test)]
     pub(crate) fn save_encoded(&self, bytes: &[u8]) -> Result<Tone, String> {
         let tone = decode(bytes)?;
-        let _lock = self.imports();
+        let entry = self.entry(&tone.identity);
+        let _write = entry.write();
         self.write(&tone.identity, bytes)?;
         Ok(tone)
+    }
+
+    /// Test-only: the next write, holding its plugin's write lock, signals `entered` and waits for `go`
+    /// (a file system that stalls).
+    #[cfg(test)]
+    pub(crate) fn stall_next_write(&self) -> (std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
+        let (entered_tx, entered) = std::sync::mpsc::channel();
+        let (go, go_rx) = std::sync::mpsc::channel();
+        *self.stall.lock().unwrap_or_else(PoisonError::into_inner) = Some((entered_tx, go_rx));
+        (entered, go)
     }
 }
 
@@ -368,6 +414,44 @@ pub(crate) struct ToneBinding {
     /// The reload a session import asked for: the imported tone, which this load restores as it was
     /// handed over instead of reading the store.
     pub(crate) imported: Option<Imported>,
+}
+
+/// The imported tones parked for the reloads a session import asked for, one per slot, each under a
+/// reload token the import answers. Only the load that passes that token back takes it; any other load
+/// of the slot (a source change) drops it, and so does a reload the frontend skipped (`forget`).
+#[derive(Debug)]
+pub(crate) struct ToneHandoff<const SLOTS: usize> {
+    last: u32,
+    parked: [Option<(u32, Imported)>; SLOTS],
+}
+
+impl<const SLOTS: usize> Default for ToneHandoff<SLOTS> {
+    fn default() -> Self {
+        ToneHandoff { last: 0, parked: std::array::from_fn(|_| None) }
+    }
+}
+
+impl<const SLOTS: usize> ToneHandoff<SLOTS> {
+    /// Park `imported` for `slot`'s reload, replacing an earlier one there; the token its load passes.
+    pub(crate) fn park(&mut self, slot: usize, imported: Imported) -> u32 {
+        self.last = self.last.checked_add(1).unwrap_or(1);
+        self.parked[slot] = Some((self.last, imported));
+        self.last
+    }
+
+    /// A load of `identity` into `slot`, passing `token` (`None`: not a reload): the parked tone when
+    /// the token and the plugin are its own. Whatever was parked for the slot is gone after any load.
+    pub(crate) fn take(&mut self, slot: usize, token: Option<u32>, identity: &ToneIdentity) -> Option<Imported> {
+        let (parked, imported) = self.parked[slot].take()?;
+        (token == Some(parked) && &imported.tone.identity == identity).then_some(imported)
+    }
+
+    /// The reload that `token` was for did not happen: drop its tone, if it is still parked.
+    pub(crate) fn forget(&mut self, slot: usize, token: u32) {
+        if self.parked[slot].as_ref().is_some_and(|(parked, _)| *parked == token) {
+            self.parked[slot] = None;
+        }
+    }
 }
 
 /// What a save did: the tone file's bytes (empty for a plugin that keeps no state), and why the store
@@ -460,7 +544,8 @@ impl ToneKeeper {
         self.debounce.dirty() && !self.superseded()
     }
 
-    /// A session import replaced this plugin's tone after this load read it.
+    /// A session import replaced this plugin's tone after this load read it. A lock-free read: an
+    /// import still writing is not counted yet, and the save that follows checks again under the lock.
     fn superseded(&self) -> bool {
         self.binding.as_ref().is_some_and(|b| b.store.revision(&b.identity) != self.revision)
     }
@@ -759,5 +844,81 @@ mod tests {
         assert!(keeper.dirty(), "the loaded plugin still saves");
         assert_eq!(keeper.save("Pro-Q 3", || Ok(Some(b"after".to_vec()))).unwrap().not_stored, None);
         assert_eq!(dir.store().load(&identity()).unwrap().unwrap().state, b"after");
+    }
+
+    #[test]
+    fn a_write_stalled_under_the_store_lock_holds_up_no_owner_turn() {
+        let dir = TempDir::new("stall");
+        let other = ToneIdentity { format: "clap".into(), path: r"C:\other.clap".into(), id: "org.other".into() };
+        // Two owners from before the import: the imported plugin, dirty, and another plugin.
+        let edited = Arc::new(AtomicBool::new(false));
+        let mut owner = ToneKeeper::new(Some(dir.binding(identity())), edited.clone());
+        let mut elsewhere = ToneKeeper::new(Some(dir.binding(other.clone())), Arc::new(AtomicBool::new(false)));
+        assert_eq!((owner.stored().unwrap(), elsewhere.stored().unwrap()), (None, None));
+        edited.store(true, Relaxed);
+
+        // The import stalls in the file system, holding its plugin's write lock.
+        let (entered, go) = dir.store().stall_next_write();
+        let store = dir.store().clone();
+        let import = std::thread::spawn(move || store.import(&encode(&tone(b"imported")), &identity()));
+        entered.recv_timeout(Duration::from_secs(5)).expect("the import reached its write");
+
+        // Each owner's turn on a thread of its own, so a turn that blocks fails the test instead of hanging it.
+        let (tx, turns) = std::sync::mpsc::channel();
+        let turn = std::thread::spawn(move || {
+            let dirty = owner.dirty();
+            let due = owner.poll(Instant::now() + SAVE_QUIET * 2);
+            let _ = tx.send((dirty, due));
+            let saved = elsewhere.save("Other", || Ok(Some(b"other".to_vec())));
+            let _ = tx.send((saved.is_ok_and(|s| s.not_stored.is_none()), true));
+            owner
+        });
+        let polled = turns.recv_timeout(Duration::from_secs(2));
+        let other_saved = turns.recv_timeout(Duration::from_secs(2));
+        go.send(()).unwrap();
+        assert_eq!(polled.expect("the owner's turn waited on another operation's write"), (true, true), "not counted yet");
+        assert_eq!(other_saved.expect("another plugin's save waited on this plugin's write"), (true, true));
+
+        // The import lands and counts; the save the turn scheduled then stores nothing over it.
+        let mut owner = turn.join().unwrap();
+        assert_eq!(import.join().unwrap().unwrap().revision, 1);
+        let saved = owner.save("Pro-Q 3", || Ok(Some(b"slot a".to_vec()))).unwrap();
+        assert!(saved.not_stored.is_some(), "the save checks again under the lock");
+        assert!(!owner.dirty(), "and the owner schedules nothing more");
+        assert_eq!(dir.store().load(&identity()).unwrap().unwrap().state, b"imported");
+        assert_eq!(dir.store().load(&other).unwrap().unwrap().state, b"other");
+    }
+
+    #[test]
+    fn a_parked_tone_goes_only_to_the_load_that_passes_its_token() {
+        let dir = TempDir::new("handoff");
+        let imported = dir.store().import(&encode(&tone(b"imported")), &identity()).unwrap();
+        let mut handoff = ToneHandoff::<2>::default();
+
+        // A load without the token (the player's own pick of the plugin) takes nothing and drops it.
+        let token = handoff.park(0, imported.clone());
+        assert!(handoff.take(0, None, &identity()).is_none());
+        assert!(handoff.take(0, Some(token), &identity()).is_none(), "gone after that load");
+
+        // Another token, the other slot, another plugin: none takes it, and each drops it.
+        let token = handoff.park(0, imported.clone());
+        assert!(handoff.take(0, Some(token + 1), &identity()).is_none());
+        assert!(handoff.take(0, Some(token), &identity()).is_none());
+        let token = handoff.park(0, imported.clone());
+        assert!(handoff.take(1, Some(token), &identity()).is_none(), "slot B's load");
+        let mut other = identity();
+        other.id = "another".into();
+        assert!(handoff.take(0, Some(token), &other).is_none(), "another plugin in slot A");
+
+        // A skipped reload drops it; a stale token does not drop a newer import's tone.
+        let skipped = handoff.park(0, imported.clone());
+        handoff.forget(0, skipped);
+        assert!(handoff.take(0, Some(skipped), &identity()).is_none());
+        let newer = handoff.park(0, imported.clone());
+        handoff.forget(0, skipped);
+        assert_ne!(newer, skipped);
+        let taken = handoff.take(0, Some(newer), &identity()).expect("the reload's own load takes it");
+        assert_eq!((taken.tone.state.as_slice(), taken.revision), (&b"imported"[..], imported.revision));
+        assert!(handoff.take(0, Some(newer), &identity()).is_none(), "once");
     }
 }

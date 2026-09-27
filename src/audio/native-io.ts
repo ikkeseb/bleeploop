@@ -36,8 +36,8 @@ const latencySettleTimers: [ReturnType<typeof setTimeout> | null, ReturnType<typ
 // Engine mode — the device input feeds ONE live slot
 // ---------------------------------------------------------------------------
 
-// Every change of the live slot, counted: a tone reload that ended its slot's GO LIVE can tell whether a
-// live slot was chosen since (`resumeEngineLive`).
+// The player's live-slot choices (GO LIVE, stop, MIC), counted; an unload's own disarm is none. A tone
+// reload that ends its slot's GO LIVE can tell whether the player chose a live slot since (`resumeEngineLive`).
 let liveChoices = 0;
 
 /**
@@ -55,16 +55,21 @@ function setEngineLive(slot: 0 | 1 | null): void {
   sendEngine(...commands);
   setInputArmed(next);
   setMonitorArmed(next);
-  liveChoices++;
 }
 
-/** Engine mode: how many times the live slot has changed (`resumeEngineLive`). */
+/** The player's choice of the live slot (`liveChoices`). */
+function chooseEngineLive(slot: 0 | 1 | null): void {
+  liveChoices++;
+  setEngineLive(slot);
+}
+
+/** Engine mode: how many live-slot choices the player has made (`resumeEngineLive`). */
 export const liveChoiceCount = (): number => liveChoices;
 
 /**
  * Engine mode, inside `slot`'s serialized op (a tone reload, `instrument.ts`): make `slot` live again,
- * unless the live slot changed after `since` (`liveChoiceCount`, read when the reload ended its GO
- * LIVE). A choice made during the reload stands.
+ * unless the player chose a live slot after `since` (`liveChoiceCount`, read before the reload began,
+ * its unload included). A choice made during the reload stands.
  */
 export function resumeEngineLive(slot: 0 | 1, since: number): void {
   if (engineMode() && liveChoices === since && slotPlugins()[slot]) setEngineLive(slot);
@@ -84,7 +89,7 @@ export function engineInputLive(): boolean {
  */
 export function toggleEngineInput(): boolean {
   if (engineInputLive()) {
-    setEngineLive(null);
+    chooseEngineLive(null);
     return false;
   }
   const active = activeSlot();
@@ -93,7 +98,7 @@ export function toggleEngineInput(): boolean {
     notifyError('Both slots hold a plugin', 'Go live on the effect plugin to hear and record the input.');
     return false;
   }
-  setEngineLive(empty);
+  chooseEngineLive(empty);
   return true;
 }
 
@@ -152,7 +157,7 @@ export function goLive(
   if (engineMode()) {
     // The engine's device is already open (Audio Settings picks it); going live only routes its input.
     return serializeSlot(slot, async () => {
-      if (slotPlugins()[slot]) setEngineLive(slot);
+      if (slotPlugins()[slot]) chooseEngineLive(slot);
     });
   }
   return serializeSlot(slot, () => doGoLive(slot, inputDeviceId, channel, outputDeviceId));
@@ -192,7 +197,7 @@ async function doGoLive(
 export function stopLive(slot: 0 | 1): Promise<void> {
   if (engineMode()) {
     return serializeSlot(slot, async () => {
-      if (inputArmed()[slot]) setEngineLive(null);
+      if (inputArmed()[slot]) chooseEngineLive(null);
     });
   }
   return serializeSlot(slot, () => doStopLive(slot));

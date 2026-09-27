@@ -40,12 +40,12 @@ pub struct PluginInfo {
 }
 
 /// A session import's tone, stored (`plugin_tone_import`). Mirrors `ToneImport` in
-/// `src/platform/host.ts`: the plugin it belongs to, and whether the slot holds that plugin now (the
-/// caller then reloads the slot to hear it).
+/// `src/platform/host.ts`: the plugin it belongs to, and when the slot holds that plugin now, the
+/// token of the reload that hears it (the caller passes it to that reload's `plugin_load`).
 #[derive(Serialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct ToneImport {
-    pub held: bool,
+    pub reload_token: Option<u32>,
     pub name: String,
     pub format: String,
     pub path: String,

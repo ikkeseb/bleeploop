@@ -50,8 +50,10 @@ export interface PluginInfo {
 /** A session import's tone, stored by the native host (`PluginHost.importTone`): the plugin it
  * belongs to, and whether the slot holds that plugin now. */
 export interface ToneImport {
-  /** The slot holds that plugin, and its load stopped saving over the stored tone: reload it to hear it. */
-  held: boolean;
+  /** Non-null: the slot holds that plugin, and its load stopped saving over the stored tone. The
+   * imported tone is parked for the reload that passes this token to its `loadPlugin`; a reload that
+   * does not happen hands it back (`forgetTone`). */
+  reloadToken: number | null;
   name: string;
   format: PluginFormat;
   path: string;
@@ -101,9 +103,10 @@ export interface PluginHost {
   /**
    * `id` is required, not optional: a single `.clap`/`.vst3` bundle can export multiple plugin
    * descriptors, so `(slot, path)` alone would silently load `descriptor[0]`. Pass the
-   * `PluginDescriptor.id` from `scanPlugins()` to pick the exact one.
+   * `PluginDescriptor.id` from `scanPlugins()` to pick the exact one. `toneToken`: the session import's
+   * reload token (`ToneImport.reloadToken`) when this load is that reload (engine mode).
    */
-  loadPlugin(slot: PluginSlot, path: string, id: string, loadToken: number): Promise<PluginInfo>;
+  loadPlugin(slot: PluginSlot, path: string, id: string, loadToken: number, toneToken?: number): Promise<PluginInfo>;
   unloadPlugin(slot: PluginSlot): Promise<void>;
   /**
    * List the plugins currently loaded in the native slots (frontend-reload wedge resync). A WebView
@@ -161,8 +164,9 @@ export interface PluginHost {
    * owner (the store gets it as from any save), and hands back the tone file's bytes (a session
    * export's), or null when the plugin keeps no state. `importTone` stores a session's tone under
    * `plugin`, the plugin session.json names for it (the host refuses a tone file of any other plugin),
-   * and says whether `slot` holds that plugin now; it loads and swaps nothing. Both reject on the web
-   * audio path and in the browser build.
+   * and says whether `slot` holds that plugin now; it loads and swaps nothing. `forgetTone` drops the
+   * tone an import parked under `reloadToken` for a reload that did not happen. All three reject on the
+   * web audio path and in the browser build.
    */
   takeTone(slot: PluginSlot): Promise<Uint8Array | null>;
   importTone(
@@ -170,6 +174,7 @@ export interface PluginHost {
     bytes: Uint8Array,
     plugin: Pick<PluginDescriptor, 'format' | 'path' | 'id'>,
   ): Promise<ToneImport>;
+  forgetTone(slot: PluginSlot, reloadToken: number): Promise<void>;
 
   // ── Native audio INPUT ──────────────────────────────────────────────────────────────────
   // Route a hardware guitar/line signal INTO the slot's loaded plugin so an FX plugin (amp-sim)

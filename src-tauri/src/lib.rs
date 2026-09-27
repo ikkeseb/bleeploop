@@ -349,6 +349,7 @@ pub fn run() {
             // Engine mode's tone recall (host/tone.rs): a session export's and import's tones.
             host::plugin_tone_take,
             host::plugin_tone_import,
+            host::plugin_tone_forget,
             host::plugin_open_editor,
             host::plugin_close_editor,
             // P11.0 native audio-input path (guitar → plugin → wet monitor/record).

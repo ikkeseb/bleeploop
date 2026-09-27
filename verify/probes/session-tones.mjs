@@ -5,8 +5,10 @@
  * load, keeping its level and GO LIVE, and leaves a slot that holds another plugin or none alone, with
  * one toast naming the plugin to load. A load whose stored tone the host could not restore toasts. The
  * host is handed the plugin session.json names with each tone (it refuses a tone of another plugin). A
- * reload is skipped when the player picked another plugin for the slot while the import was in flight,
- * and GO LIVE comes back only if the player chose no other live slot meanwhile. An archive whose tone
+ * reload is skipped when the player picked another plugin for the slot while the import was in flight, or
+ * the same plugin again (another instance), and its parked tone is handed back; the reload's load passes
+ * the reload token the import answered. GO LIVE comes back only if the player chose no other live slot
+ * after the reload began, its unload included. An archive whose tone
  * entry is past the tone limit is refused before anything is handed to the host. The plugin host is a
  * stand-in that records its calls and treats a tone as opaque bytes, as the frontend does. Cannot see
  * the native store, a real plugin or the Rust side: `pnpm native:tone-recall` does.
@@ -74,17 +76,27 @@ await probe(async ({ open }) => {
       };
       let importGate = null;
       let loadGate = null;
+      let unloadGate = null;
       const expected = [];
+      // The reload tokens the stand-in answered, and the one each load passed.
+      let lastToken = 0;
+      const answered = [];
+      const loadTokens = [];
       const host = platform.pluginHost;
-      host.loadPlugin = async (slot, _path, id) => {
+      host.loadPlugin = async (slot, _path, id, _loadToken, toneToken) => {
         calls.push(`load ${slot} ${id}`);
+        loadTokens.push(toneToken ?? null);
         if (loadGate?.slot === slot) await loadGate.closed;
         held[slot] = id;
         return { slot, descriptor: byId(id), tone: refuse ? 'failed' : store.has(id) ? 'restored' : undefined };
       };
       host.unloadPlugin = async (slot) => {
         calls.push(`unload ${slot}`);
+        if (unloadGate?.slot === slot) await unloadGate.closed;
         held[slot] = null;
+      };
+      host.forgetTone = async (slot, token) => {
+        calls.push(`forget ${slot} ${token}`);
       };
       host.takeTone = async (slot) => {
         calls.push(`take ${slot}`);
@@ -100,7 +112,9 @@ await probe(async ({ open }) => {
         store.set(id, bytes);
         const { name, format, path } = byId(id);
         // Answered as the native host answers: for the slot as it was when the tone was stored.
-        const answer = { held: held[slot] === id, name, format, path, id };
+        const reloadToken = held[slot] === id ? ++lastToken : null;
+        if (reloadToken !== null) answered.push(reloadToken);
+        const answer = { reloadToken, name, format, path, id };
         if (importGate?.slot === slot) await importGate.closed;
         return answer;
       };
@@ -165,9 +179,11 @@ await probe(async ({ open }) => {
         await restoreSessionTones(await importSession(bundle.zipBytes, session));
         return { calls: calls.slice(), sent: native.sent.slice(sentBefore).map((c) => JSON.stringify(c)) };
       };
+      loadTokens.length = 0;
       const first = await reimport();
       const afterFirst = {
         ...first,
+        tokens: { answered: answered.splice(0), passed: loadTokens.splice(0) },
         expected: expected.splice(0),
         slots: instrument.slotPlugins().map((d) => d?.id ?? null),
         live: nativeIo.inputArmed().slice(),
@@ -227,6 +243,43 @@ await probe(async ({ open }) => {
       loadGate = null;
       const liveChoice = { calls: calls.slice(), liveMidReload, live: nativeIo.inputArmed().slice() };
 
+      // ── The player makes slot B live while slot A's reload unloads: the newer choice stands ─────────
+      await nativeIo.goLive(0);
+      feed('Empty');
+      await pause(50);
+      unloadGate = { slot: 0, ...gate() };
+      calls.length = 0;
+      const unloading = importSession(bundle.zipBytes, session).then(restoreSessionTones);
+      await until('slot A unloading', () => calls.includes('unload 0'));
+      await nativeIo.goLive(1);
+      const liveMidUnload = nativeIo.inputArmed().slice();
+      unloadGate.open();
+      await unloading;
+      unloadGate = null;
+      const liveDuringUnload = { calls: calls.slice(), liveMidUnload, live: nativeIo.inputArmed().slice() };
+
+      // ── The player switches slot A to the synth and back to the amp while the import is in flight ───
+      // The host answered for the amp slot A held before; the amp there now is another instance, which
+      // must not be reloaded, and the tone parked for that reload is handed back.
+      feed('Empty');
+      await pause(50);
+      importGate = { slot: 0, ...gate() };
+      calls.length = 0;
+      answered.length = 0;
+      const backAgain = importSession(bundle.zipBytes, session).then(restoreSessionTones);
+      await until('the import of slot A', () => calls.includes('import 0 amp state 0'));
+      await instrument.selectPlugin(0, synth);
+      await instrument.selectPlugin(0, amp);
+      const switched = calls.length;
+      importGate.open();
+      await backAgain;
+      importGate = null;
+      const sameAgain = {
+        after: calls.slice(switched),
+        token: answered[0] ?? null,
+        slots: instrument.slotPlugins().map((d) => d?.id ?? null),
+      };
+
       // ── A tone entry past the tone limit never reaches the host ─────────────────────────────────────
       feed('Empty');
       await pause(50);
@@ -250,6 +303,8 @@ await probe(async ({ open }) => {
         refused,
         moved,
         liveChoice,
+        liveDuringUnload,
+        sameAgain,
         tooBig,
         loadedSessions: native.loadedSessions.length,
       };
@@ -319,9 +374,22 @@ await probe(async ({ open }) => {
   assert.deepEqual(out.liveChoice.liveMidReload, [false, true], 'slot B went live while slot A reloaded');
   assert.ok(out.liveChoice.calls.includes('load 0 amp'), `slot A reloaded: ${out.liveChoice.calls.join(', ')}`);
   assert.deepEqual(out.liveChoice.live, [false, true], 'the reload does not take GO LIVE back from the newer choice');
+  assert.deepEqual(out.afterFirst.tokens.passed, out.afterFirst.tokens.answered, 'each reload passes the token its import answered');
+  assert.equal(out.afterFirst.tokens.answered.length, 2);
+
+  assert.deepEqual(out.liveDuringUnload.liveMidUnload, [false, true], 'slot B went live while slot A unloaded');
+  assert.ok(out.liveDuringUnload.calls.includes('load 0 amp'), `slot A reloaded: ${out.liveDuringUnload.calls.join(', ')}`);
+  assert.deepEqual(out.liveDuringUnload.live, [false, true], 'a choice made during the reload’s unload stands too');
+
+  assert.ok(
+    !out.sameAgain.after.some((c) => c.startsWith('unload 0') || c.startsWith('load 0')),
+    `the same plugin loaded again during the import is another instance, not reloaded: ${out.sameAgain.after.join(', ')}`,
+  );
+  assert.deepEqual(out.sameAgain.slots, ['amp', 'syn']);
+  assert.ok(out.sameAgain.token !== null && out.sameAgain.after.includes(`forget 0 ${out.sameAgain.token}`), `its parked tone is handed back: ${out.sameAgain.after.join(', ')}`);
 
   assert.match(out.tooBig.error ?? '', /tone/, `an oversized tone entry is refused: ${out.tooBig.error}`);
   assert.deepEqual(out.tooBig.calls, [], 'before anything reaches the host');
-  assert.equal(out.loadedSessions, 4, 'the four imports that passed reached the engine');
+  assert.equal(out.loadedSessions, 6, 'the six imports that passed reached the engine');
   assert.deepEqual(consoleErrors, [], 'no console errors');
 });

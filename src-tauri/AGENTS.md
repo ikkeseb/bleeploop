@@ -74,7 +74,7 @@ rest is the map.
   registered only under `debug_assertions`; keep the handler cfg and frontend `import.meta.env.DEV`
   surface in lockstep. Help's `app_log_dir` / `app_open_log_dir` (`lib.rs`) ship in release and take
   nothing from the WebView; so do tone recall's `plugin_tone_take` / `plugin_tone_import` (raw bytes
-  both ways, engine mode only).
+  both ways) and `plugin_tone_forget`, engine mode only.
 - **Sample-rate selector "C2" — DECIDED (owner), NOT BUILT:** swappable 44.1/48k, default device
   native; RETIRES the `LF_FORCE_48K` dev hack (keep a 48k force for the P9.4 gate). Separate Rust
   increment.
@@ -188,8 +188,10 @@ The known-fragile area: read this whole section before any plugin-GUI/VST3 work.
   on its own thread. No request pushes state into a running plugin. The engine VST3 load creates the
   controller and sets its handler BEFORE activation (the SDK host's order); the live owner does not,
   and the web path's owners keep no tones. A plugin that refuses its tone is discarded and created
-  again before it activates (it may have taken half the state); a session import goes through the
-  store's lock (`ToneStore::import`), never an owner request. Why a save skips the store: `tone.rs`.
+  again before it activates (it may have taken half the state); a session import goes through its
+  plugin's write lock in the store (`ToneStore::import`), never an owner request, and its bytes reach
+  only the reload's load that passes the import's reload token (`ToneHandoff`). An owner's turn never
+  waits on a lock held across disk I/O. Why a save skips the store: `tone.rs`.
 
 ## Native audio input → wet monitoring, ASIO (P11)
 

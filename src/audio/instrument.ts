@@ -70,6 +70,14 @@ const chosenSource: [boolean, boolean] = [false, false];
 let chosenActive = false;
 const nothingChosen = () => !chosenSource[0] && !chosenSource[1] && !chosenActive;
 
+// Every native load and unload a slot has begun, counted: one plugin instance per value. A tone reload
+// that saw the slot's plugin before a session import runs only while the count is unchanged
+// (`reloadPlugin`); the same plugin loaded again meanwhile is another instance.
+const sourceOps: [number, number] = [0, 0];
+
+/** Which instance `slot` holds: read before a session import asks the host, for its reload. */
+export const slotSourceGeneration = (slot: 0 | 1): number => sourceOps[slot];
+
 /**
  * Stable per-slot note sinks routing to the native plugin in that slot. STABLE refs (built once) so
  * `inputRouter.setActivePlugin` early-returns when the routing is unchanged — a fresh closure per
@@ -291,7 +299,13 @@ export function restorePlugin(slot: 0 | 1, desc: PluginDescriptor): Promise<void
   return serializeSlot(slot, () => doSelectPlugin(slot, desc, nothingChosen));
 }
 
-async function doSelectPlugin(slot: 0 | 1, desc: PluginDescriptor, claimMidi: () => boolean): Promise<void> {
+/** `toneToken`: a session import's reload token when this load is that reload (`reloadPlugin`). */
+async function doSelectPlugin(
+  slot: 0 | 1,
+  desc: PluginDescriptor,
+  claimMidi: () => boolean,
+  toneToken?: number,
+): Promise<void> {
   const outgoing = slotPlugins()[slot];
   if (samePluginDescriptor(outgoing, desc)) return; // already loaded
   // Swap: tear down + unload any existing plugin in this slot before loading the new one. A failed
@@ -302,9 +316,10 @@ async function doSelectPlugin(slot: 0 | 1, desc: PluginDescriptor, claimMidi: ()
   // output-gain default (FX ~unity / synth conservative) from the scan category, not the input bus.
   const loadToken = pluginBridge.beginPluginLoad(slot, desc.isEffect);
   let tone: PluginInfo['tone'];
+  sourceOps[slot]++;
   try {
     // `?.`: a browser probe's stand-in host may answer nothing (the tone is optional anyway).
-    tone = (await platform.pluginHost.loadPlugin(slot, desc.path, desc.id, loadToken))?.tone;
+    tone = (await platform.pluginHost.loadPlugin(slot, desc.path, desc.id, loadToken, toneToken))?.tone;
   } catch (e) {
     pluginBridge.cancelPluginLoad(slot, loadToken);
     console.error('[instrument] plugin load failed', e);
@@ -340,27 +355,32 @@ async function doSelectPlugin(slot: 0 | 1, desc: PluginDescriptor, claimMidi: ()
 
 /**
  * Reload the plugin in `slot` in place, through the normal unload and load, so the load applies the
- * tone a session import just stored (`slot-tones.ts`), if the slot still holds `expected`, the plugin
- * the import found there: a slot the player moved to another plugin or none meanwhile is left alone
- * (`moved`). The unload ends the slot's GO LIVE (an empty live slot would pass the input dry), so a slot
- * that was live goes live again once its plugin is back, unless the player chose a live slot during the
- * reload (the newer choice stands); its output level is kept, and MIDI stays where it was. One op on
- * the slot's chain, so nothing the player does to the slot interleaves with it. Engine mode's (the web
- * path keeps no tones).
+ * tone a session import just stored (`slot-tones.ts`), if the slot still holds the plugin instance the
+ * import found there: `expected`, loaded no later than source generation `since`
+ * (`slotSourceGeneration`, read before the import asked the host). A slot the player moved to another
+ * plugin or none meanwhile, or loaded again, is left alone (`moved`). The load passes `toneToken`, the
+ * import's reload token, so it restores the tone the host parked for it. The unload ends the slot's GO
+ * LIVE (an empty live slot would pass the input dry), so a slot that was live goes live again once its
+ * plugin is back, unless the player chose a live slot after the reload began (the newer choice
+ * stands); its output level is kept, and MIDI stays where it was. One op on the slot's chain, so
+ * nothing the player does to the slot interleaves with it. Engine mode's (the web path keeps no tones).
  */
 export function reloadPlugin(
   slot: 0 | 1,
   expected: Pick<PluginDescriptor, 'format' | 'path' | 'id'>,
+  since: number,
+  toneToken: number,
 ): Promise<'reloaded' | 'moved' | 'failed'> {
   return serializeSlot(slot, async () => {
     const desc = slotPlugins()[slot];
-    if (!desc || !samePluginDescriptor(desc, expected)) return 'moved';
+    if (!desc || sourceOps[slot] !== since || !samePluginDescriptor(desc, expected)) return 'moved';
     const wasLive = inputArmed()[slot];
     const gain = pluginGain()[slot];
-    if (!(await unloadSlotPlugin(slot, desc, 'swap'))) return 'failed';
-    // The unload ended this slot's GO LIVE; any live choice after this one is the player's.
+    // Read before the unload, whose own disarm counts as no choice: another slot the player makes live
+    // while this one unloads keeps GO LIVE.
     const liveSince = liveChoiceCount();
-    await doSelectPlugin(slot, desc, () => false);
+    if (!(await unloadSlotPlugin(slot, desc, 'swap'))) return 'failed';
+    await doSelectPlugin(slot, desc, () => false, toneToken);
     if (!samePluginDescriptor(slotPlugins()[slot], desc)) return 'failed';
     if (gain !== null) setPluginGain(slot, gain);
     if (wasLive) resumeEngineLive(slot, liveSince);
@@ -377,6 +397,7 @@ export function reloadPlugin(
  * whether it unloaded.
  */
 async function unloadSlotPlugin(slot: 0 | 1, outgoing: PluginDescriptor, path: 'swap' | 'clear'): Promise<boolean> {
+  sourceOps[slot]++;
   await disarmMonitorInternal(slot); // stop the native monitor before its plugin goes away
   await disarmInputInternal(slot); // the outgoing plugin's input feed must stop before its unload
   pluginBridge.teardownPluginSlot(slot); // stop the audio drain + release the hop-1 buffer (sync)

@@ -166,6 +166,7 @@ pub async fn plugin_load(
     id: String,
     frontend_epoch: u32,
     load_token: u32,
+    tone_token: Option<u32>,
     window: tauri::WebviewWindow,
     state: tauri::State<'_, PluginHostState>,
 ) -> Result<PluginInfo, String> {
@@ -177,8 +178,9 @@ pub async fn plugin_load(
         // gate) is identical; only the upstream render differs.
         if let Some(engine) = crate::engine_io::mode::engine() {
             let _ = load_token; // the live load's token for its posted buffer; an engine slot posts none
-            return engine.plugin_load(&state, &window, slot, path, id, frontend_epoch);
+            return engine.plugin_load(&state, &window, slot, path, id, frontend_epoch, tone_token);
         }
+        let _ = tone_token; // the web audio path keeps no tones
         if path.to_ascii_lowercase().ends_with(".vst3") {
             super::clap::vst3_load(&state, &window, slot, path, id, frontend_epoch, load_token)
         } else {
@@ -187,7 +189,7 @@ pub async fn plugin_load(
     }
     #[cfg(not(windows))]
     {
-        let _ = (&state, &window, &path, &id, frontend_epoch, load_token);
+        let _ = (&state, &window, &path, &id, frontend_epoch, load_token, tone_token);
         Err(format!("plugin_load is Windows-only (slot={slot})"))
     }
 }
@@ -327,8 +329,8 @@ pub async fn plugin_tone_take(slot: u8) -> Result<tauri::ipc::Response, String> 
 /// Engine mode: store a session import's tone for a slot. The raw request body is the tone file's
 /// bytes, the `slot` header names the slot and the `plugin` header the plugin session.json names for
 /// it (`{ format, path, id }` as JSON, ASCII with `\u` escapes; a tone file of another plugin is
-/// refused). The answer names the plugin the tone belongs to and whether the slot holds it now;
-/// nothing is loaded or swapped here (`EngineApp::plugin_tone_import`).
+/// refused). The answer names the plugin the tone belongs to and, when the slot holds it now, the token
+/// of the reload that hears it; nothing is loaded or swapped here (`EngineApp::plugin_tone_import`).
 #[tauri::command]
 pub async fn plugin_tone_import(request: tauri::ipc::Request<'_>) -> Result<ToneImport, String> {
     let slot: u8 = request
@@ -356,6 +358,22 @@ pub async fn plugin_tone_import(request: tauri::ipc::Request<'_>) -> Result<Tone
     {
         let _ = bytes;
         Err(format!("plugin_tone_import is Windows-only (slot={slot})"))
+    }
+}
+/// Engine mode: the reload a session import answered `token` for did not happen (the slot moved while
+/// the import ran): drop the tone parked for it (`EngineApp::plugin_tone_forget`).
+#[tauri::command]
+pub async fn plugin_tone_forget(slot: u8, token: u32) -> Result<(), String> {
+    validate_slot(slot)?;
+    #[cfg(windows)]
+    {
+        let engine = crate::engine_io::mode::engine().ok_or(TONES_ON_THE_ENGINE_ONLY)?;
+        engine.plugin_tone_forget(slot, token)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = token;
+        Err(format!("plugin_tone_forget is Windows-only (slot={slot})"))
     }
 }
 /// Tone recall's commands answer this on the web audio path, which keeps no tones.

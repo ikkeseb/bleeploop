@@ -4,8 +4,8 @@
 //! `plugin:params-changed`, `plugin:editor-closed`), and tone recall's commands (`host/tone.rs`): every
 //! load restores the plugin's stored tone, a session export takes a slot's tone fresh, an import stores
 //! one (checked against the plugin session.json names; every load of that plugin from before it stops
-//! saving, and the slot it reloads is handed the imported bytes), and the app's exit saves them all
-//! before the unloads. A plugin loads into an engine that exists:
+//! saving, and the reload of the slot that held it is handed the imported bytes under a reload token),
+//! and the app's exit saves them all before the unloads. A plugin loads into an engine that exists:
 //! open the device first. GO LIVE is the engine's `SetSlotLive` and the plugin's gain `SetSlotGain` (sent
 //! with `engine_send`; the monitor-gain command maps to it), notes go through `engine_send`.
 //!
@@ -23,7 +23,7 @@ use tauri::Emitter;
 
 use super::mode::EngineApp;
 use crate::host::engine_slot::{self, EngineSlotEvent, EngineSlotHandle, EventSink, PluginFormat};
-use crate::host::tone::{Imported, ToneBinding, ToneIdentity};
+use crate::host::tone::{ToneBinding, ToneHandoff, ToneIdentity};
 use crate::host::{ParamDesc, PluginDescriptor, PluginHostState, PluginInfo, ToneImport};
 
 /// How long an unload waits for a command still using the slot's handle (an owner round trip is ≤ 5 s).
@@ -52,9 +52,9 @@ impl EngineApp {
         self.slots.lock().map_err(|_| "engine slots poisoned".to_string())
     }
 
-    /// Per slot: the tone a session import stored for the plugin the slot held, for the reload that
-    /// follows. The slot's next load takes it, and restores it if it loads that plugin.
-    fn reload_tones(&self) -> Result<std::sync::MutexGuard<'_, [Option<Imported>; lf_engine::SLOT_COUNT]>, String> {
+    /// Per slot: the tone a session import stored for the plugin the slot held, parked for the reload
+    /// that follows (`ToneHandoff`). Taken after `slots` when both are held.
+    fn reload_tones(&self) -> Result<std::sync::MutexGuard<'_, ToneHandoff<{ lf_engine::SLOT_COUNT }>>, String> {
         self.reload_tones.lock().map_err(|_| "engine reload tones poisoned".to_string())
     }
 
@@ -66,7 +66,8 @@ impl EngineApp {
     }
 
     /// `plugin_load`: load plugin `id` from `path` into the engine's `slot` (≤ 15 s) for the document
-    /// with `frontend_epoch`.
+    /// with `frontend_epoch`. `tone_token`: the reload token a session import answered, when this load is
+    /// that reload; it restores the imported tone parked under it. Any load drops what was parked.
     pub(crate) fn plugin_load(
         &self,
         state: &PluginHostState,
@@ -75,6 +76,7 @@ impl EngineApp {
         path: String,
         id: String,
         frontend_epoch: u32,
+        tone_token: Option<u32>,
     ) -> Result<PluginInfo, String> {
         let host = self.host()?;
         {
@@ -102,8 +104,7 @@ impl EngineApp {
         let parent = window.hwnd().map(|h| h.0 as usize).unwrap_or(0);
         let identity = ToneIdentity { format: if vst3 { "vst3" } else { "clap" }.to_string(), path: path.clone(), id: id.clone() };
         // Past the reservation, so nothing below may return early: a poisoned lock just hands nothing over.
-        let imported = self.reload_tones().ok().and_then(|mut tones| tones[usize::from(slot)].take());
-        let imported = imported.filter(|i| i.tone.identity == identity);
+        let imported = self.reload_tones().ok().and_then(|mut tones| tones.take(usize::from(slot), tone_token, &identity));
         let tone = self.tones.clone().map(|store| ToneBinding { store, identity, imported });
         let began = Instant::now();
         let loaded = engine_slot::load(format, path.clone(), id.clone(), host.slot(usize::from(slot)), parent, sink, tone);
@@ -234,8 +235,9 @@ impl EngineApp {
     /// (a tone file of another plugin is refused before anything is stored). It goes into the store
     /// under that plugin, so its next load, in either slot, restores it, and no load of it from before
     /// the import (in either slot) saves over it (`ToneStore::import`). When `slot` holds that plugin
-    /// now, the answer says `held` and the slot's next load is handed the imported bytes: the caller
-    /// reloads the slot to hear them. Nothing is loaded, swapped or unloaded here.
+    /// now, the answer carries a reload token and the imported bytes are parked under it: the caller
+    /// reloads the slot, passing the token to the load, to hear them, or `plugin_tone_forget`s it.
+    /// Nothing is loaded, swapped or unloaded here.
     pub(crate) fn plugin_tone_import(&self, slot: u8, bytes: &[u8], expected: &ToneIdentity) -> Result<ToneImport, String> {
         let store = self.tones.as_ref().ok_or("no app-local data folder to keep tones in")?;
         let imported = store.import(bytes, expected)?;
@@ -245,26 +247,31 @@ impl EngineApp {
                 d.format == expected.format && d.path == expected.path && d.id == expected.id
             })
         };
-        let (held, also) = {
+        let (name, size, ToneIdentity { format, path, id }) =
+            (imported.tone.name.clone(), imported.tone.state.len(), imported.tone.identity.clone());
+        // What the slot holds and the parking in one step: any load after it takes or drops the park.
+        let (reload_token, also) = {
             let slots = self.slots()?;
-            (holds(&slots[usize::from(slot)]), (0u8..).zip(slots.iter()).find(|&(s, e)| s != slot && holds(e)).map(|(s, _)| s))
+            let also = (0u8..).zip(slots.iter()).find(|&(s, e)| s != slot && holds(e)).map(|(s, _)| s);
+            let held = holds(&slots[usize::from(slot)]);
+            (if held { Some(self.reload_tones()?.park(usize::from(slot), imported)) } else { None }, also)
         };
-        if held {
-            self.reload_tones()?[usize::from(slot)] = Some(imported.clone());
-        }
-        let Imported { tone, .. } = imported;
         log::info!(
-            "[plugin_host] engine slot {slot}: a session's tone for {} stored ({} bytes){}{}",
-            tone.name,
-            tone.state.len(),
-            if held { "; the slot holds it and reloads" } else { "" },
+            "[plugin_host] engine slot {slot}: a session's tone for {name} stored ({size} bytes){}{}",
+            if reload_token.is_some() { "; the slot holds it and reloads" } else { "" },
             match also {
                 Some(other) => format!("; slot {other} holds it too and stores nothing more for it until its next load"),
                 None => String::new(),
             }
         );
-        let ToneIdentity { format, path, id } = tone.identity;
-        Ok(ToneImport { held, name: tone.name, format, path, id })
+        Ok(ToneImport { reload_token, name, format, path, id })
+    }
+
+    /// `plugin_tone_forget`: the reload `token` was answered for did not happen (the slot moved while
+    /// the import ran): drop the tone parked under it, if it is still there.
+    pub(crate) fn plugin_tone_forget(&self, slot: u8, token: u32) -> Result<(), String> {
+        self.reload_tones()?.forget(usize::from(slot), token);
+        Ok(())
     }
 
     pub(crate) fn plugin_open_editor(&self, slot: u8) -> Result<(), String> {
