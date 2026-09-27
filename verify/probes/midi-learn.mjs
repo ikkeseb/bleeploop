@@ -8,8 +8,11 @@
  * still reach the input router, while CC64 learned on another port with its pedal down lets that pedal go
  * and never sustains, and a learned CC1 hands the vibrato back to the wheel moved before it; a learned note
  * does not sound and neither its note-on nor its note-off reaches the router; forgetting a binding hands
- * its CC back to the play path. The foot vocabulary (`src/app/actions.ts`): a learning press held 1.2 s
- * reads as momentary and fires once per tap after it; the line's kind switch changes how it fires; tap
+ * its CC back to the play path. A latching learn's wait for a release ends on its 10 s timer (fired by the
+ * probe, not slept) and clears the hint. The foot vocabulary (`src/app/actions.ts`): a learning press held
+ * 1.2 s reads as momentary and fires once per tap after it, and so does one released only after the panel
+ * closed or after LEARN was pressed again (that release is never the new learn's press); the line's kind
+ * switch changes how it fires; tap
  * tempo, CLICK, END STOP and FIXED work their controls and IN FX is refused with a cue on the web path;
  * track actions aimed at a named track (REC/DUB, PLAY/STOP, MUTE, REV, COPY) act there, only REC/DUB
  * moving the selection; HOLD starts an overdub on 127 and ends it on 0, one REC/DUB each; a latching
@@ -76,6 +79,32 @@ await probe(async ({ open }) => {
     await page.click(LEARN);
     await send(port, ...messages);
   };
+  /** Run `body` (a learn) catching the release-wait timers it starts (RELEASE_WAIT_MS, 10 s, in
+   * `midi-actions.ts`), the monitor-generation pattern; returns the function that fires them now and
+   * resolves to how many it fired, so the 10 s expiry is checked without sleeping. */
+  const catchWait = async (body) => {
+    await page.evaluate(() => {
+      const real = window.setTimeout;
+      window.__realSetTimeout = real;
+      window.__waitTimers = [];
+      window.setTimeout = (fn, delay, ...args) => {
+        if (delay === 10_000) window.__waitTimers.push(fn);
+        return real(fn, delay, ...args);
+      };
+    });
+    try {
+      await body();
+    } finally {
+      await page.evaluate(() => void (window.setTimeout = window.__realSetTimeout));
+    }
+    return () =>
+      page.evaluate(() => {
+        const due = window.__waitTimers.splice(0);
+        for (const fn of due) fn();
+        return due.length;
+      });
+  };
+  const HINT = '.audio-settings__hint[role="status"]';
   /** Poll track 1's state for up to `ms` until it is `want`; returns the last state seen. */
   const track1State = (want, ms) =>
     page.evaluate(
@@ -144,15 +173,19 @@ await probe(async ({ open }) => {
   const momentarySteps = await stepThrough('a', [0xb0, 21, 127], [0xb0, 21, 0], [0xb0, 21, 127], [0xb0, 21, 0], [0xb0, 21, 127], [0xb0, 21, 0]);
   out.momentary = { learn: momentaryLearn, steps: momentarySteps };
   // Latching: 127 on one press, 0 on the next. The learning press sends 127 and nothing follows it; the
-  // panel closing ends the wait for a release, as its hint says.
+  // panel closing leaves the wait for a release running (the hint is still up), and its 10 s timer ends
+  // it and the hint.
   await selectTrack(0);
-  await learnVia('nextTrack', 'a', [0xb0, 22, 127]);
-  const latchingHint = await page.locator('.audio-settings__hint[role="status"]').textContent({ timeout: 3000 }).catch(() => null);
+  const expireLatching = await catchWait(() => learnVia('nextTrack', 'a', [0xb0, 22, 127]));
+  const latchingHint = await page.locator(HINT).textContent({ timeout: 3000 }).catch(() => null);
   await page.evaluate(() => window.__lf.ui.closeSettings());
   await openSettings();
+  const hintAfterClose = await page.locator(HINT).count();
+  const waitTimers = await expireLatching();
+  const hintAfterWait = await page.locator(HINT).count();
   const latchingLearn = await selected();
   const latchingSteps = await stepThrough('a', [0xb0, 22, 0], [0xb0, 22, 127], [0xb0, 22, 0], [0xb0, 22, 127]);
-  out.latching = { learn: latchingLearn, steps: latchingSteps, hint: latchingHint };
+  out.latching = { learn: latchingLearn, steps: latchingSteps, hint: latchingHint, hintAfterClose, waitTimers, hintAfterWait };
   // Reversed polarity (0 on press, 127 on release), on port b, channel 3.
   await selectTrack(0);
   await learnVia('nextTrack', 'b', [0xb2, 23, 0], [0xb2, 23, 127]);
@@ -293,11 +326,6 @@ await probe(async ({ open }) => {
   };
   /** A tap: press and release in one burst. */
   const tap = (cc) => send('a', [0xb0, cc, 127], [0xb0, cc, 0]);
-  /** End a learn's wait for a release, as a player does: close the panel. */
-  const endLearn = async () => {
-    await page.evaluate(() => window.__lf.ui.closeSettings());
-    await openSettings();
-  };
   /** Poll lane `i`'s state for up to `ms` until it is `want`; returns the last state seen. */
   const waitState = (i, want, ms = 5000) =>
     page.evaluate(
@@ -334,7 +362,34 @@ await probe(async ({ open }) => {
     return { afterLearn, line: await lineOf('CC 60'), steps };
   });
 
-  // The kind switch on that line: latching fires on the release too, momentary again only on the press.
+  // A momentary pedal still down when the panel closes: its release, out of sight, is still read as its
+  // release (momentary) and runs nothing; each later tap fires once.
+  await scenario('closeWhileHeld', async () => {
+    await selectTrack(0);
+    await learnOn('nextTrack', null, 'a', [0xb0, 61, 127]);
+    await page.evaluate(() => window.__lf.ui.closeSettings());
+    await page.waitForSelector(LEARN, { state: 'detached' });
+    await send('a', [0xb0, 61, 0]);
+    const afterRelease = await selected();
+    const steps = await stepThrough('a', [0xb0, 61, 127], [0xb0, 61, 0], [0xb0, 61, 127], [0xb0, 61, 0]);
+    await openSettings();
+    return { afterRelease, line: await lineOf('CC 61'), steps };
+  });
+
+  // LEARN pressed for another action while the learned pedal is still down: its release is its release
+  // (momentary, runs nothing), not the new learn's press; the new learn keeps listening for the next tap.
+  await scenario('learnWhileHeld', async () => {
+    await selectTrack(0);
+    await learnOn('nextTrack', null, 'a', [0xb0, 62, 127]);
+    await page.selectOption(PICK, 'prevTrack', { timeout: 3000 });
+    await page.click(LEARN);
+    await send('a', [0xb0, 62, 0]);
+    const stillLearning = await learning();
+    await send('a', [0xb0, 63, 127], [0xb0, 63, 0]);
+    return { stillLearning, selected: await selected(), lines: [await lineOf('CC 62'), await lineOf('CC 63')] };
+  });
+
+  // The kind switch on the held learn's line (CC 60): latching fires on the release too, momentary again only on the press.
   await scenario('kindSwitch', async () => {
     const kind = bindingRow('CC 60').locator('.audio-settings__chip').first();
     await selectTrack(0);
@@ -470,8 +525,8 @@ await probe(async ({ open }) => {
   // A latching REC/DUB pedal has no HOLD: its switch is disabled and the store refuses it. The HOLD pedal
   // switched to latching loses its HOLD.
   await scenario('latchingHold', async () => {
-    await learnOn('recDub', '', 'a', [0xb0, 76, 127]);
-    await endLearn();
+    const expire = await catchWait(() => learnOn('recDub', '', 'a', [0xb0, 76, 127]));
+    await expire();
     const holdOf = (source) => bindingRow(source).getByRole('button', { name: /^Hold to record/ });
     const read = async (source) => ({
       kind: await bindingRow(source).locator('.audio-settings__chip').first().textContent({ timeout: 3000 }),
@@ -636,8 +691,11 @@ await probe(async ({ open }) => {
   check(() => assert.deepEqual(out.latching, {
     learn: 0,
     steps: [1, 2, 3, 4],
-    hint: 'Learned CC 22 · ch 1. Let go of the pedal, then close this panel to try it.',
-  }, 'each latching press fires once, the learning press none'));
+    hint: 'Learned CC 22 · ch 1. Let go of the pedal, and try it once this line is gone.',
+    hintAfterClose: 1,
+    waitTimers: 1,
+    hintAfterWait: 0,
+  }, "each latching press fires once, the learning press none; closing the panel leaves the wait for a release running, its 10 s timer ends it and the hint"));
   check(() => assert.deepEqual(out.reversed, { steps: [1, 1, 2, 2] }, 'a reversed-polarity pedal fires once per press, on the press (0)'));
   check(() => assert.deepEqual(out.unmapped, [
     ['setSustain', true, A0],
@@ -683,6 +741,16 @@ await probe(async ({ open }) => {
     line: 'Next track | CC 60 · ch 1 | momentary',
     steps: [1, 1, 2, 2],
   }, 'a learning press held 1.2 s reads as momentary, its release runs nothing, and each later tap fires once'));
+  check(() => assert.deepEqual(out.closeWhileHeld, {
+    afterRelease: 0,
+    line: 'Next track | CC 61 · ch 1 | momentary',
+    steps: [1, 1, 2, 2],
+  }, 'a learning press released after the panel closed reads as momentary, its release runs nothing, and each later tap fires once'));
+  check(() => assert.deepEqual(out.learnWhileHeld, {
+    stillLearning: 'true',
+    selected: 0,
+    lines: ['Next track | CC 62 · ch 1 | momentary', 'Previous track | CC 63 · ch 1 | momentary'],
+  }, "a learned pedal released after LEARN was pressed again reads as momentary and is not the new learn's press"));
   check(() => assert.deepEqual(out.kindSwitch, {
     latching: { kind: 'latching', steps: [1, 2] },
     momentary: { kind: 'momentary', steps: [1, 1] },

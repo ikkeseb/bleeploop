@@ -487,7 +487,7 @@ export function AudioSettings() {
       <Show when={awaitingRelease()}>
         {(b) => (
           <div class="audio-settings__hint audio-settings__hint--info" role="status">
-            Learned {midiSource(b())}. Let go of the pedal, then close this panel to try it.
+            Learned {midiSource(b())}. Let go of the pedal, and try it once this line is gone.
           </div>
         )}
       </Show>

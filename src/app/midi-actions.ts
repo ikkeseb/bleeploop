@@ -32,15 +32,19 @@ export interface MidiBinding {
 // pedal sends one value per press, alternating (127, then 0 on the next press); some send the same value
 // on every press. The values alone cannot tell a momentary release from a latching press, so the learn
 // gesture decides, and runs nothing while it does: after the learning press the binding waits for its
-// release (`awaitingRelease`). The other side seen, however long the pedal was held, reads as momentary:
-// it fires on each message on the press side and swallows the release (or, with HOLD, runs REC/DUB on
-// it). The same side seen again, or the learn row moving on (another LEARN, Esc, the panel closing),
-// leaves it latching: it fires on every message, so a latching or same-value pedal fires once per press
-// too. Level rather than edge on the press side, so a lost release message cannot swallow the next
-// press. A latching pedal pressed a second time before the row moves on reads as momentary; the list
-// shows the kind, and its switch fixes a wrong read.
+// release (`waits`). The other side seen, however long the pedal was held, reads as momentary: it fires
+// on each message on the press side and swallows the release (or, with HOLD, runs REC/DUB on it). The
+// same side seen again, or no release within RELEASE_WAIT_MS, leaves it latching: it fires on every
+// message, so a latching or same-value pedal fires once per press too. Level rather than edge on the
+// press side, so a lost release message cannot swallow the next press. The wait belongs to the binding,
+// not to the learn row: another LEARN, Esc or the panel closing while the pedal is still down leaves it
+// running, so that release is still read as the release, never as a press or a new learn. A latching
+// pedal pressed a second time within RELEASE_WAIT_MS of its learn reads as momentary; the list shows the
+// kind, and its switch fixes a wrong read.
 
 const STORAGE_KEY = 'lf.midiLearn';
+/** How long a learned binding waits for its learning press's release before it stays latching. */
+const RELEASE_WAIT_MS = 10_000;
 
 /** A persisted binding as it may come back: saved before targets and HOLD, or hand-edited. Null when
  * malformed or naming an action that no longer exists. */
@@ -91,9 +95,26 @@ const [learning, setLearning] = createSignal<{ action: ActionId; target: Target 
 /** What the next CC or note-on will be learned onto, or null. */
 export { learning };
 
+// Each binding whose learning press's release may still come (Footswitches, above), with the timer that
+// ends its wait. A plain Map: only the hint below is read by the UI.
+const waits = new Map<MidiBinding, ReturnType<typeof setTimeout>>();
 const [awaitingRelease, setAwaitingRelease] = createSignal<MidiBinding | null>(null);
-/** The binding just learned while its release may still come (Footswitches, above), or null. */
+/** The latest learned binding still waiting for its release, or null (the learn row's hint). */
 export { awaitingRelease };
+
+function startWait(b: MidiBinding): void {
+  waits.set(b, setTimeout(() => endWait(b), RELEASE_WAIT_MS));
+  setAwaitingRelease(b);
+}
+
+/** End binding `b`'s wait for its release, if it has one. */
+function endWait(b: MidiBinding): void {
+  const timer = waits.get(b);
+  if (timer === undefined) return;
+  clearTimeout(timer);
+  waits.delete(b);
+  if (awaitingRelease() === b) setAwaitingRelease(null);
+}
 
 // The lane each HOLD press acted on, by its control, until its release ends the capture there.
 const held = new Map<string, number>();
@@ -110,29 +131,27 @@ function save(list: readonly MidiBinding[]): void {
 
 /** Replace binding `b` with `next`, in place. A wait for `b`'s release ends: its kind is settled. */
 function update(b: MidiBinding, next: MidiBinding): void {
-  if (awaitingRelease() === b) setAwaitingRelease(null);
+  endWait(b);
   held.delete(controlKey(b));
   save(bindings().map((x) => (x === b ? next : x)));
 }
 
 /** Learn the next CC or note-on, from any port, onto `action` (a lane action on `target`). */
 export function learn(action: ActionId, target: Target = null): void {
-  setAwaitingRelease(null);
   setLearning({ action, target: isLaneAction(action) ? target : null });
 }
 
-/** Stop listening, and stop waiting for a learned pedal's release. True when a learn was pending (Esc
- * spends itself on it). */
+/** Stop listening. A learned pedal's wait for its release goes on (Footswitches, above). True when a learn
+ * was pending (Esc spends itself on it). */
 export function cancelLearn(): boolean {
   const was = learning() !== null;
   setLearning(null);
-  setAwaitingRelease(null);
   return was;
 }
 
 /** Drop binding `b`: its messages reach the play path again. */
 export function forget(b: MidiBinding): void {
-  if (awaitingRelease() === b) setAwaitingRelease(null);
+  endWait(b);
   held.delete(controlKey(b));
   save(bindings().filter((x) => x !== b));
 }
@@ -156,34 +175,38 @@ function consume(port: string, portName: string, status: number, data1: number, 
   // A note-on at velocity 0 is a note-off, as in midi.ts.
   const high = kind === 'cc' ? data2 >= 64 : type === 0x90 && data2 > 0;
 
+  const b = bindings().find((x) => x.port === port && x.channel === channel && x.kind === kind && x.number === data1);
+  // A learned pedal's release is its release, before anything else: even with LEARN listening again, it
+  // is never a learn press.
+  if (b && waits.has(b)) {
+    endWait(b);
+    if (high !== b.pressHigh) {
+      update(b, { ...b, momentary: true });
+      return true;
+    }
+    // The press side again with no release between: a latching or same-value pedal. It runs (or is
+    // learned) below.
+  }
+
   const pick = learning();
   // CC 120–127 are channel-mode messages (all sound off, all notes off, …), never a switch.
   if (pick !== null && (kind === 'cc' ? data1 < 120 : high)) {
     const binding: MidiBinding = {
       port, portName, channel, kind, number: data1, ...pick, pressHigh: high, momentary: false, hold: false,
     };
-    // One action per message: learning a bound message again moves it.
+    // One action per message: learning a bound message again moves it (its wait ended above).
     const others = bindings().filter(
-      (b) => !(b.port === port && b.channel === channel && b.kind === kind && b.number === data1),
+      (x) => !(x.port === port && x.channel === channel && x.kind === kind && x.number === data1),
     );
     held.delete(controlKey(binding));
     save([...others, binding]);
     if (kind === 'cc') releaseController(port, channel, data1);
     setLearning(null);
-    setAwaitingRelease(binding);
+    startWait(binding);
     return true;
   }
 
-  const b = bindings().find((x) => x.port === port && x.channel === channel && x.kind === kind && x.number === data1);
   if (!b) return false;
-  if (awaitingRelease() === b) {
-    setAwaitingRelease(null);
-    if (high !== b.pressHigh) {
-      update(b, { ...b, momentary: true });
-      return true;
-    }
-    // The press side again with no release between: a latching or same-value pedal. It runs below.
-  }
   if (!b.momentary) {
     runAction(b.action, b.target);
   } else if (high === b.pressHigh) {
