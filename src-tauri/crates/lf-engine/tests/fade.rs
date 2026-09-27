@@ -236,6 +236,22 @@ fn a_fading_lane_refuses_what_a_stopping_one_refuses_and_says_it_fades() {
     assert_eq!(rig.state(2), LaneState::Stopped, "a COPY of a fading lane lands STOPPED");
 }
 
+/// The pedal's own REVERSE and HALVE (`tests/actions.rs`) refuse a fading lane as they refuse a stopping
+/// one, and say it fades; its COPY lands STOPPED, as the on-screen one does.
+#[test]
+fn a_fading_lanes_pedal_reverse_and_halve_say_it_fades_and_its_copy_lands_stopped() {
+    let mut rig = two_lanes(128);
+    fade(&mut rig);
+    let mark = rig.events.len();
+    rig.press(Command::Action(Action::Reverse));
+    rig.press(Command::Action(Action::Halve));
+    assert_eq!(refusals(&rig, mark), [(0, Refusal::Fading), (0, Refusal::Fading)]);
+    assert!(rig.lane(0).fading && !rig.lane(0).reversed && !rig.lane(0).can_undo, "neither acted");
+    rig.press(Command::Action(Action::Copy));
+    rig.idle();
+    assert_eq!(rig.state(2), LaneState::Stopped, "a pedal COPY of a fading lane lands STOPPED");
+}
+
 #[test]
 fn the_click_stops_where_the_fade_ends() {
     let mut rig = two_lanes(128);

@@ -331,6 +331,7 @@ fn every_looper_press_disarms_a_pending_clear_and_a_setting_alone_does_not() {
     assert!(!clears_past(&[Command::Action(Action::Mute)]), "CLEAR, MUTE, CLEAR asks again");
     assert!(!clears_past(&[Command::ActionOn(1, Action::Reverse)]));
     assert!(!clears_past(&[Command::Action(Action::Halve)]), "CLEAR, HALVE, CLEAR asks again");
+    assert!(!clears_past(&[Command::Action(Action::FadeAll)]), "CLEAR, FADE, CLEAR asks again");
     assert!(!clears_past(&[Command::Press, Command::SetMetronome(true)]), "CLEAR, a pedal's CLICK, CLEAR asks again");
     assert!(!clears_past(&[Command::Press, Command::SetInputSend(lf_engine::InputSend::Echo, true)]));
     // The on-screen controls' gestures.
@@ -339,5 +340,6 @@ fn every_looper_press_disarms_a_pending_clear_and_a_setting_alone_does_not() {
     // A setting alone: a slider, a replayed setting.
     assert!(clears_past(&[Command::SetMetronome(true)]), "a setting is no press");
     assert!(clears_past(&[Command::SetVolume(0, 0.5), Command::SetMute(1, true)]));
+    assert!(clears_past(&[Command::SetDubFeedback(0, 0.5), Command::SetFadeBars(4)]), "DUB FEEDBACK and FADE's bars are settings");
     assert!(clears_past(&[]));
 }
