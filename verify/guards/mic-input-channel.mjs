@@ -148,4 +148,4 @@ await check('selected-channel input loss still reports once and never on close',
 });
 
 console.log(`\n=== RESULT: ${passed}/${passed + failed} checks passed, ${failed} failed ===`);
-process.exit(failed === 0 ? 0 : 1);
+process.exitCode = failed === 0 ? 0 : 1;
