@@ -22,8 +22,9 @@ import { arg, probe } from '../harness/probe.ts';
 
 const shots = arg('shots');
 const version = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')).version;
-// The same answer vite.config.ts bakes in; the probe's Vite runs from this checkout.
-const commit = buildCommit();
+// The same answer vite.config.ts bakes in; the probe's Vite runs from this checkout. Its "-dirty" is read
+// when Vite starts, and a file saved during the run can flip it: the commit must match, the suffix may not.
+const commit = buildCommit().replace(/-dirty$/, '');
 const LOG_DIR = '%LOCALAPPDATA%\\com.bleeploop.app\\logs';
 
 await probe(async ({ browser, open }) => {
@@ -51,8 +52,8 @@ await probe(async ({ browser, open }) => {
   {
     const { page, consoleErrors } = await open({ context, viewport: { width: 1280, height: 820 } });
     const about = await openAbout(page);
-    const label = `BleepLoop ${version} · ${commit}`;
-    assert.equal((await about.locator('.help__about').first().textContent())?.trim(), label, 'the version line');
+    const label = (await about.locator('.help__about').first().textContent())?.trim() ?? '';
+    assert.match(label, new RegExp(`^BleepLoop ${version.replaceAll('.', '\\.')} · ${commit}(-dirty)?$`), 'the version line');
     assert.equal(await about.getByRole('button', { name: 'Open log folder' }).count(), 0, 'Open log folder in the browser build');
     if (shots) await page.screenshot({ path: `${shots}/diagnostics-about-web.png` });
     const lines = await copy(page, about);
