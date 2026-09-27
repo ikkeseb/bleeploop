@@ -67,6 +67,18 @@
   border-color: rgba(244, 239, 230, 0.28);
 }
 
+/* a module that is a setting, not an effect (DUB FEEDBACK): a heading where the key face would be */
+.fxp-mod__title {
+  padding: 6px 7px;
+  border: 1px solid transparent;
+  color: var(--dim);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
 .fxp-mod__params {
   display: flex;
   flex-direction: column;

@@ -4,8 +4,9 @@
 // itself statically imports engine/looper and is browser-only) so it cannot drift from the source.
 // Asserts the export.ts session.json schema gate: a golden session round-trips, the formatVersion gate
 // (missing = legacy v1, ===1 accepted, newer rejected), every malformed shape throws descriptively, and
-// volume clamp + legacy muted/state values normalize, while invalid shapes reject. This is what
-// SESSION IMPORT relies on to never hand looper.loadSession a payload that could corrupt the master grid.
+// volume clamp + legacy muted/state values normalize (a missing dubFeedback reads as 1), while invalid
+// shapes reject. This is what SESSION IMPORT relies on to never hand looper.loadSession a payload that
+// could corrupt the master grid.
 // Run: node verify/guards/import.mjs
 import { validateSession, validateSessionPlugins } from '../../src/audio/export/session-schema.ts';
 import { framesPerBar } from '../../src/audio/quantize.ts';
@@ -405,6 +406,26 @@ throws('H.an empty id rejects', () => validateSessionPlugins(withPlugins([{ ...a
 throws('H.a tone file that is a stem rejects', () => validateSessionPlugins(withPlugins([{ ...amp, file: 'lf-track1.wav' }]), trackFiles), 'already another entry');
 throws('H.two slots sharing a tone file reject', () =>
   validateSessionPlugins(withPlugins([amp, { ...amp, slot: 'B' }]), trackFiles), 'already another entry');
+
+// ── I: DUB FEEDBACK (engine mode's lane setting): missing = 1 (every earlier export), clamps to 0..1 ──
+{
+  const out = validateSession(golden());
+  ok('I.missing dubFeedback reads as 1 (a plain sum)', out.tracks.every((t) => t.dubFeedback === 1));
+  const s = golden();
+  s.tracks[0].dubFeedback = 0.4;
+  s.tracks[1].dubFeedback = 0;
+  const kept = validateSession(s);
+  ok('I.dubFeedback round-trips', kept.tracks[0].dubFeedback === 0.4 && kept.tracks[1].dubFeedback === 0);
+  s.tracks[0].dubFeedback = 3;
+  s.tracks[1].dubFeedback = -1;
+  const clamped = validateSession(s);
+  ok('I.dubFeedback clamps to 0..1', clamped.tracks[0].dubFeedback === 1 && clamped.tracks[1].dubFeedback === 0);
+}
+throws('I.dubFeedback mis-typed rejects', () => {
+  const s = golden();
+  s.tracks[0].dubFeedback = 'half';
+  validateSession(s);
+}, 'dubFeedback must be a number');
 
 console.log(`\n=== RESULT: ${checks - fails}/${checks} checks passed, ${fails} failed ===`);
 if (fails) process.exit(1);

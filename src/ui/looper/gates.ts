@@ -42,6 +42,8 @@ const REFUSAL = {
   capturing: refuse('this track is recording, stop it first'),
   noTrim: refuse('nothing to trim, the loop needs two bars or more'),
   needsEngine: refuse('needs the native engine'),
+  fading: refuse('fading out, wait or stop now'),
+  noFade: refuse('nothing is playing to fade'),
 } as const;
 
 /** CLEAR's first press, by key or pedal: the second one clears (`src/app/actions.ts`). */
@@ -78,7 +80,17 @@ export function refusalText(reason: Refusal): string {
       return REFUSAL.noCopy.reason;
     case 'NoFreeLane':
       return REFUSAL.noFreeLane.reason;
+    case 'Fading':
+      return REFUSAL.fading.reason;
+    case 'NoFade':
+      return REFUSAL.noFade.reason;
   }
+}
+
+/** A lane with a pending stop refuses what would outlive it: a fade's, or the loop end's. */
+function stopping(t: { stopAt: number | null; fading?: boolean }): Gate | null {
+  if (t.stopAt === null) return null;
+  return t.fading ? REFUSAL.fading : REFUSAL.stopping;
 }
 
 /** Any lane capturing (RECORDING incl. armed/listening, or OVERDUBBING) other than `except`. */
@@ -101,7 +113,8 @@ function retakeRolling(): boolean {
 export function recDubGate(i: number): Gate {
   const t = looper.track(i)();
   if (t.state === 'RECORDING' || t.state === 'OVERDUBBING') return OK;
-  if (t.stopAt !== null) return REFUSAL.stopping;
+  const ending = stopping(t);
+  if (ending) return ending;
   if (t.state === 'STOPPED') return REFUSAL.playFirst;
   if (t.state === 'PLAYING' && t.reversed) return REFUSAL.reversed;
   if (otherCapturing(i) && !(t.state === 'EMPTY' && retakeRolling())) {
@@ -120,8 +133,7 @@ export function playStopGate(i: number): Gate {
 export function undoGate(i: number): Gate {
   const t = looper.track(i)();
   if (!t.canUndo) return REFUSAL.noUndo;
-  if (t.stopAt !== null) return REFUSAL.stopping;
-  return OK;
+  return stopping(t) ?? OK;
 }
 
 /** The whole bars of the master loop, or 0 when there is none or it is no whole number of bars (a
@@ -134,14 +146,13 @@ export function loopWholeBars(): number {
 
 /** May TRIM (the lane's ✂ TRIM, the halve pedal) act on lane `i`? The engine's own check
  * (`Looper::trim`), in its order: engine mode only, not while the lane captures, only a committed loop of
- * two whole bars or more, and not while it stops at the loop end. */
+ * two whole bars or more, and not while it stops (at the loop end, or where a fade ends). */
 export function trimGate(i: number): Gate {
   if (!engineMode()) return REFUSAL.needsEngine;
   const t = looper.track(i)();
   if (t.state === 'RECORDING' || t.state === 'OVERDUBBING') return REFUSAL.capturing;
   if (t.state === 'EMPTY' || loopWholeBars() < 2) return REFUSAL.noTrim;
-  if (t.stopAt !== null) return REFUSAL.stopping;
-  return OK;
+  return stopping(t) ?? OK;
 }
 
 /** May CLEAR act on lane `i`? Only an EMPTY lane has nothing to clear; the confirm is the caller's. */
@@ -158,8 +169,7 @@ export function muteGate(i: number): Gate {
 export function reverseGate(i: number): Gate {
   const t = looper.track(i)();
   if (!t.canReverse) return REFUSAL.noReverse;
-  if (t.stopAt !== null) return REFUSAL.stopping;
-  return OK;
+  return stopping(t) ?? OK;
 }
 
 /** May COPY act on lane `i`? The cap shows once the lane has a loop and another lane is EMPTY. */
@@ -180,6 +190,17 @@ export function fixedGate(): Gate {
   if (otherCapturing()) return REFUSAL.fixedCapturing;
   if (looper.retakeEnabled() && looper.masterLengthFrames() > 0) return REFUSAL.fixedRetake;
   return OK;
+}
+
+/** May FADE act? The engine's own check (`Looper::fade_all`), in its order: engine mode only; a fade
+ * running is stopped at once by a second press; not while a lane records or overdubs; only with a lane
+ * playing. */
+export function fadeGate(): Gate {
+  if (!engineMode()) return REFUSAL.needsEngine;
+  const tracks = Array.from({ length: looper.trackCount }, (_, j) => looper.track(j)());
+  if (tracks.some((t) => t.fading)) return OK;
+  if (tracks.some((t) => t.state === 'RECORDING' || t.state === 'OVERDUBBING')) return REFUSAL.capturing;
+  return tracks.some((t) => t.state === 'PLAYING') ? OK : REFUSAL.noFade;
 }
 
 /** May an IN FX send be switched? Only the native engine has input sends. */

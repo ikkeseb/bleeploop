@@ -42,9 +42,9 @@ import { notifyError, notifyInfo } from '../../notify';
  *
  * The engine owns the musical state: lanes, the transport (master, BPM and its lock), the beat and the
  * selection arrive on the feed, and nothing here predicts them. It does not echo settings, so this store
- * keeps them (lane volume, mute and FX, the take modes, click, master, the input sends): it sends each
- * change, mirrors the engine's CLEAR (`Cleared`: the lane's mix resets), COPY (`Copied`) and a pedal's
- * MUTE (`Muted`), and on a `reset` frame takes the
+ * keeps them (lane volume, mute, DUB FEEDBACK and FX, the take modes and FADE's bars, click, master, the
+ * input sends): it sends each change, mirrors the engine's CLEAR (`Cleared`: the lane's mix resets), COPY
+ * (`Copied`) and a pedal's MUTE (`Muted`), and on a `reset` frame takes the
  * settings the engine remembers, so the screen shows what the engine plays. `engineSession` is the
  * engine as export, recovery and import see it: the engine's PCM with this store's mix, and the token of
  * the player's clear that emptied the looper (recovery deletes the jam for it, and keeps it for a new
@@ -64,8 +64,11 @@ interface TrackView {
   readonly canUndo: boolean;
   readonly canReverse: boolean;
   readonly reversed: boolean;
-  /** The frame of a pending loop-end stop (the web holds a ctx time; the UI tests only for null). */
+  /** The frame of a pending stop, at the loop end or where a fade ends (the web holds a ctx time; the UI
+   * tests only for null). */
   readonly stopAt: number | null;
+  /** FADE: the lane fades out and stops at `stopAt`. */
+  readonly fading: boolean;
   readonly retakePass: number;
 }
 
@@ -86,6 +89,7 @@ const EMPTY_INFO: LaneInfo = {
   canReverse: false,
   reversed: false,
   stopAt: null,
+  fading: false,
   retakePass: 0,
 };
 
@@ -99,6 +103,7 @@ function trackView(info: LaneInfo): TrackView {
     canReverse: info.canReverse,
     reversed: info.reversed,
     stopAt: info.stopAt,
+    fading: info.fading,
     retakePass: info.retakePass,
   };
 }
@@ -113,6 +118,7 @@ function sameTrack(a: TrackView, b: TrackView): boolean {
     a.canReverse === b.canReverse &&
     a.reversed === b.reversed &&
     a.stopAt === b.stopAt &&
+    a.fading === b.fading &&
     a.retakePass === b.retakePass
   );
 }
@@ -137,11 +143,17 @@ const CLICK_KEY = 'lf.clickVolume'; // shared with `clock.ts`
 
 const volumes = Array.from({ length: ENGINE_LANES }, () => createSignal(1));
 const mutes = Array.from({ length: ENGINE_LANES }, () => createSignal(false));
+/** DUB FEEDBACK per lane, 0..1 (1: an overdub sums, as ever; 0: it replaces what it passes over). */
+const dubFeedbacks = Array.from({ length: ENGINE_LANES }, () => createSignal(1));
 const fxVersions = Array.from({ length: ENGINE_LANES }, () => createSignal(0));
 const fx: FxState[][] = Array.from({ length: ENGINE_LANES }, defaultFx);
 const [loopEndStop, setLoopEndStopSignal] = createSignal(false);
 const [fixedLength, setFixedLengthSignal] = createSignal(false);
 const [fixedBars, setFixedBarsSignal] = createSignal(4);
+/** FADE's lengths in bars (Rust `looper::FADE_BARS`) and the default. */
+export const FADE_BARS = [1, 2, 4, 8] as const;
+const DEFAULT_FADE_BARS = 2;
+const [fadeBars, setFadeBarsSignal] = createSignal(DEFAULT_FADE_BARS);
 const [retake, setRetakeSignal] = createSignal(false);
 const [autoRecord, setAutoRecordSignal] = createSignal(false);
 const [autoSensitivity, setAutoSensitivitySignal] = createSignal(AUTO_RECORD_DEFAULT_SENSITIVITY);
@@ -578,21 +590,29 @@ function fxCommands(lane: number, states: readonly FxState[]): EngineCommand[] {
 }
 
 function laneCommands(lane: number): EngineCommand[] {
-  return [{ SetVolume: [lane, volumes[lane][0]()] }, { SetMute: [lane, mutes[lane][0]()] }, ...fxCommands(lane, fx[lane])];
+  return [
+    { SetVolume: [lane, volumes[lane][0]()] },
+    { SetMute: [lane, mutes[lane][0]()] },
+    { SetDubFeedback: [lane, dubFeedbacks[lane][0]()] },
+    ...fxCommands(lane, fx[lane]),
+  ];
 }
 
 /** The engine cleared the lane: its mix is back to the defaults there (the web's `clear()`), so here too. */
 function clearLaneMix(lane: number): void {
   volumes[lane][1](1);
   setMutePlain(lane, false);
+  dubFeedbacks[lane][1](1);
   fx[lane] = defaultFx();
   fxVersions[lane][1]((v) => v + 1);
 }
 
-/** The engine copied lane `from` whole into `to` (its volume, mute and FX with it): mirror that. */
+/** The engine copied lane `from` whole into `to` (its volume, mute, DUB FEEDBACK and FX with it): mirror
+ * that. */
 function copyLaneMix(from: number, to: number): void {
   volumes[to][1](volumes[from][0]());
   setMutePlain(to, mutes[from][0]());
+  dubFeedbacks[to][1](dubFeedbacks[from][0]());
   fx[to] = fx[from].map((s) => ({ bypassed: s.bypassed, params: { ...s.params } }));
   fxVersions[to][1]((v) => v + 1);
 }
@@ -615,6 +635,7 @@ function adoptSettings(settings: readonly EngineCommand[]): void {
   setLoopEndStopSignal(false);
   setFixedLengthSignal(false);
   setFixedBarsSignal(4);
+  setFadeBarsSignal(DEFAULT_FADE_BARS);
   setRetakeSignal(false);
   setAutoRecordSignal(false);
   setAutoSensitivitySignal(AUTO_RECORD_DEFAULT_SENSITIVITY);
@@ -643,11 +664,13 @@ function adoptSettings(settings: readonly EngineCommand[]): void {
     else if ('SetLoopEndStop' in c) setLoopEndStopSignal(c.SetLoopEndStop);
     else if ('SetFixedLength' in c) setFixedLengthSignal(c.SetFixedLength);
     else if ('SetFixedBars' in c) setFixedBarsSignal(c.SetFixedBars);
+    else if ('SetFadeBars' in c) setFadeBarsSignal(c.SetFadeBars);
     else if ('SetRetake' in c) setRetakeSignal(c.SetRetake);
     else if ('SetAutoRecord' in c) setAutoRecordSignal(c.SetAutoRecord);
     else if ('SetAutoSensitivity' in c) setAutoSensitivitySignal(c.SetAutoSensitivity);
     else if ('SetVolume' in c) volumes[c.SetVolume[0]][1](c.SetVolume[1]);
     else if ('SetMute' in c) setMutePlain(c.SetMute[0], c.SetMute[1]);
+    else if ('SetDubFeedback' in c) dubFeedbacks[c.SetDubFeedback[0]][1](c.SetDubFeedback[1]);
     else if ('SetFxBypass' in c) {
       const [l, kind, bypassed] = c.SetFxBypass;
       const k = FX_META.findIndex((m) => m.kind === kind);
@@ -686,6 +709,13 @@ function setVolume(i: number, v: number): void {
 function setMute(i: number, on: boolean): void {
   setMutePlain(i, on);
   sendEngine({ SetMute: [i, on] });
+}
+
+/** DUB FEEDBACK of lane `i`, clamped to 0..1 as the engine clamps it. */
+function setDubFeedback(i: number, v: number): void {
+  const clamped = Math.max(0, Math.min(1, Number.isFinite(v) ? v : 1));
+  dubFeedbacks[i][1](clamped);
+  sendEngine({ SetDubFeedback: [i, clamped] });
 }
 
 function setFxBypass(i: number, fxIndex: number, bypassed: boolean): void {
@@ -752,6 +782,28 @@ function laterTakeFrames(): number {
 export function trimLane(i: number, bars: number): void {
   sendEngine({ Trim: [clampLane(i), Math.max(1, Math.round(bars))] });
 }
+
+/** Engine mode's FADE, the command bar's (the web looper has none). The engine judges a press and names a
+ * refusal on the feed. */
+export const engineFade = {
+  /** FADE's length in bars (one of `FADE_BARS`). */
+  bars: fadeBars,
+  setBars: (n: number): void => {
+    const bars = [...FADE_BARS].reverse().find((b) => b <= n) ?? FADE_BARS[0];
+    setFadeBarsSignal(bars);
+    sendEngine({ SetFadeBars: bars });
+  },
+  /** Every playing lane fades out over the bars and stops on the bar line; a second press stops them now. */
+  fadeAll: (): void => sendEngine({ Action: 'FadeAll' }),
+  /** Some lane is fading. */
+  fading: (): boolean => lanes.some(([track]) => track().fading),
+};
+
+/** Engine mode's DUB FEEDBACK per lane, the FX drawer's (the web looper only sums). */
+export const engineDubFeedback = {
+  value: (i: number): number => dubFeedbacks[i][0](),
+  set: setDubFeedback,
+};
 
 /** The first EMPTY lane (where COPY lands), or -1. */
 function firstEmptyLane(): number {
@@ -855,6 +907,7 @@ async function exportSnapshot(): Promise<StemSnapshot> {
       muted: mutes[t.index][0](),
       reversed: t.reversed,
       fx: fx[t.index].map((s) => ({ bypassed: s.bypassed, params: { ...s.params } })),
+      dubFeedback: dubFeedbacks[t.index][0](),
       state: FROM_SNAPSHOT[t.state],
     })),
   };
@@ -897,6 +950,8 @@ async function loadSession(payload: LoadSessionPayload): Promise<void> {
   for (const t of loaded) {
     volumes[t.index][1](Math.max(0, Math.min(1.5, t.volume)));
     setMutePlain(t.index, t.muted);
+    // A session saved before DUB FEEDBACK sums, as it did.
+    dubFeedbacks[t.index][1](Math.max(0, Math.min(1, t.dubFeedback ?? 1)));
     fx[t.index] = t.fx;
     fxVersions[t.index][1]((v) => v + 1);
     sendEngine(...laneCommands(t.index));
@@ -916,6 +971,7 @@ export const engineSession: SessionSource = {
   },
   trackVolume: (i) => volumes[i][0](),
   trackMuted: (i) => mutes[i][0](),
+  trackDubFeedback: (i) => dubFeedbacks[i][0](),
   fxState: (i) => {
     fxVersions[i][0]();
     return fx[i];

@@ -32,6 +32,7 @@ const STATE_WORD: Record<Exclude<LaneWord, 'TAKE'>, string> = {
   OVERDUBBING: 'OVERDUB',
   PLAYING: 'PLAYING',
   STOPPED: 'STOPPED',
+  FADING: 'FADING',
   ENDING: 'ENDING',
   MUTED: 'MUTED',
 };
@@ -158,7 +159,7 @@ function TrackLane(props: {
   // The lane's display state, word, well message and count-in numeral: `lane-state.ts`, shared with the
   // stage view. EMPTY shows no well message — the bright ● core already says "press to record"; the
   // spoken 'record' action lives on the core button's aria-label.
-  const { displayState, word, stopping, muted, cue, wellMsg, wellCount } = createLaneView(props.index);
+  const { displayState, word, stopping, fading, muted, cue, wellMsg, wellCount } = createLaneView(props.index);
   const fxSelected = () => props.fxTrack === props.index;
   const isEmpty = () => state() === 'EMPTY';
   const stateWord = () => {
@@ -295,7 +296,15 @@ function TrackLane(props: {
             disabled={!playGate().ok}
             onClick={() => looper.playStop(props.index)}
             aria-label={`Track ${props.index + 1} ${playStopLabel()}`}
-            title={stopping() ? 'Stopping at loop end. Press again to stop now.' : playGate().ok ? undefined : playStopLabel()}
+            title={
+              fading()
+                ? 'Fading out. Press to stop now.'
+                : stopping()
+                  ? 'Stopping at loop end. Press again to stop now.'
+                  : playGate().ok
+                    ? undefined
+                    : playStopLabel()
+            }
           >
             {playStopGlyph()} {stopping() ? 'NOW' : playStopGlyph() === '▶' ? 'PLAY' : 'STOP'}
           </button>
@@ -447,13 +456,14 @@ export function Looper(props: { returnFocus?: (el: HTMLElement | undefined) => v
     armed: false,
     autoArmed: false,
     stopAt: null as number | null,
+    fading: false,
   }));
   let prevHasMaster = false;
   let prevSelected = looper.selectedTrack();
   createEffect(() => {
     const cur = Array.from({ length: looper.trackCount }, (_, i) => {
       const t = looper.track(i)();
-      return { state: t.state, armed: t.armed, autoArmed: t.autoArmed, stopAt: t.stopAt };
+      return { state: t.state, armed: t.armed, autoArmed: t.autoArmed, stopAt: t.stopAt, fading: t.fading === true };
     });
     const masterNow = hasMaster();
     let msg = '';
@@ -471,7 +481,8 @@ export function Looper(props: { returnFocus?: (el: HTMLElement | undefined) => v
       const isListening = c.state === 'RECORDING' && c.autoArmed;
       const wasLiveRec = p.state === 'RECORDING' && !p.armed && !p.autoArmed;
       const isLiveRec = c.state === 'RECORDING' && !c.armed && !c.autoArmed;
-      if (c.stopAt !== null && p.stopAt === null) msg = `Track ${i + 1} stopping at loop end. Press stop again to stop now.`;
+      if (c.fading && !p.fading) msg = `Track ${i + 1} fading out. Press stop to stop now.`;
+      else if (c.stopAt !== null && p.stopAt === null) msg = `Track ${i + 1} stopping at loop end. Press stop again to stop now.`;
       else if (c.state === 'STOPPED' && p.stopAt !== null) msg = `Track ${i + 1} stopped`;
       else if (isListening && !wasListening) msg = `Track ${i + 1} listening for input`;
       else if (isArmed && !wasArmed) msg = `Track ${i + 1} armed, waiting for the downbeat`;

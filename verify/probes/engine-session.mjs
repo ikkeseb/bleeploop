@@ -6,8 +6,10 @@
  * answer, then drives the real UI:
  *
  * - export: the Export button's download holds both stems exactly as the snapshot's PCM (play order), the
- *   store's mix, the lane states, and a wet master rendered offline (no AudioContext is built);
- * - recovery: autosave saves the jam, and a reloaded page (a fresh engine) loads it back into the engine;
+ *   store's mix (DUB FEEDBACK included, set in the lane's FX drawer), the lane states, and a wet master
+ *   rendered offline (no AudioContext is built);
+ * - recovery: autosave saves the jam, and a reloaded page (a fresh engine) loads it back into the engine
+ *   and sends the loaded lanes' mix, DUB FEEDBACK included;
  * - import: the exported zip goes to the engine as one session (header, PCM, orientation), and the store
  *   sends the loaded lanes' mix;
  * - Share output: the saved pick reaches the engine at boot, and ShareLost clears it with a toast.
@@ -33,6 +35,7 @@ const lane = (state, extra = {}) => ({
   canReverse: state === 'Playing' || state === 'Stopped',
   reversed: false,
   stopAt: null,
+  fading: false,
   retakePass: 0,
   ...extra,
 });
@@ -97,6 +100,9 @@ await probe(async ({ browser, open }) => {
     return [Array.from(a), Array.from(b)];
   }, MASTER);
   await page.getByRole('slider', { name: 'Track 1 volume' }).fill('80');
+  await page.getByRole('button', { name: 'Track 1 FX', exact: true }).click();
+  await page.getByRole('slider', { name: 'Track 1 dub feedback', exact: true }).fill('40');
+  await page.getByRole('button', { name: 'Close FX panel' }).click();
 
   // ── Export: the button's download ─────────────────────────────────────────────────────────────────
   const downloading = page.waitForEvent('download');
@@ -113,10 +119,10 @@ await probe(async ({ browser, open }) => {
   assert.equal(session.bpm, 120);
   assert.equal(session.bars, 1);
   assert.deepEqual(
-    session.tracks.map((t) => [t.track, t.volume, t.muted, t.reversed, t.state]),
+    session.tracks.map((t) => [t.track, t.volume, t.muted, t.reversed, t.state, t.dubFeedback]),
     [
-      [1, 0.8, false, false, 'PLAYING'],
-      [2, 1, false, true, 'STOPPED'],
+      [1, 0.8, false, false, 'PLAYING', 0.4],
+      [2, 1, false, true, 'STOPPED', 1],
     ],
   );
   for (const [k, t] of session.tracks.entries()) {
@@ -152,6 +158,8 @@ await probe(async ({ browser, open }) => {
   });
   assert.deepEqual(recovered.pcm, pcm.map((block) => block.map((x) => Math.fround(x))), 'the recovered PCM is the snapshot');
   assert.ok(recovered.sent.some((c) => JSON.stringify(c) === JSON.stringify({ SetVolume: [0, 0.8] })), 'the recovered mix is sent');
+  assert.ok(recovered.sent.some((c) => JSON.stringify(c) === JSON.stringify({ SetDubFeedback: [0, 0.4] })), 'with its DUB FEEDBACK');
+  assert.ok(recovered.sent.some((c) => JSON.stringify(c) === JSON.stringify({ SetDubFeedback: [1, 1] })), 'a lane left at 100 % gets 100 %');
 
   // ── Import: the exported zip into the (still empty) engine ────────────────────────────────────────
   await page.locator('input[type="file"]').setInputFiles({ name: download.suggestedFilename(), mimeType: 'application/zip', buffer: zip });

@@ -238,10 +238,12 @@
   border-color: color-mix(in srgb, var(--dub) 55%, transparent);
 }
 
-/* Mode groups pair a pill with its contextual control. AUTO reserves the control's width. */
+/* Mode groups pair a pill with its contextual control. AUTO reserves the control's width. FADE's bars
+   stay beside it: a fade's length is set before the press that ends the song. */
 .transport__click,
 .transport__fixed,
-.transport__auto {
+.transport__auto,
+.transport__fade {
   display: flex;
   align-items: center;
   gap: 7px;

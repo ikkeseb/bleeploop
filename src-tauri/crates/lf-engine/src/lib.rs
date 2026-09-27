@@ -10,8 +10,8 @@
 //! | Module | Owns | Ported from |
 //! |---|---|---|
 //! | [`grid`] | frames per bar, whole-bar clamps, commit and stop plans, a later take's bars (the multiply), the beat [`grid::Grid`], take fill | `quantize.ts`, `looper/grid-math.ts` |
-//! | [`clock`] | tempo and its lock, the beat pulse (free-run, count-in, master), the click | `clock.ts` |
-//! | [`looper`] | lanes and buffers, the recorder, every transition, the multiply, TRIM, gates and refusals, block jobs | `looper/{machine,state,capture,playback,mixer}.ts`, `ui/looper/gates.ts` |
+//! | [`clock`] | tempo and its lock, the beat pulse (free-run, count-in, master), the click, the bar line a FADE ends on | `clock.ts` |
+//! | [`looper`] | lanes and buffers, the recorder, every transition, the multiply, TRIM, DUB FEEDBACK, FADE, gates and refusals, block jobs | `looper/{machine,state,capture,playback,mixer}.ts`, `ui/looper/gates.ts` |
 //! | [`autorec`] | the AUTO REC onset detector | `looper/auto-record.ts` |
 //! | [`engine`] | the callback: rings, the block split, the bus topology, master volume | `engine.ts`, `master.ts` |
 //! | [`effects`] | each lane's FX chain, the shared reverb bus, their grid, CLEAR and COPY on a lane's FX | `fx/fx.ts`, `looper/{playback,machine}.ts` |
@@ -32,6 +32,11 @@
 //!   follow the beat grid's origin, which a multiply leaves where it was. A TRIM keeps the length too: the
 //!   lane's first bars repeat across the loop (F16), heard from the next boundary (a second TRIM before
 //!   it waits for it, and is heard there instead).
+//! - **An overdub writes `input + feedback * old`** (DUB FEEDBACK, a lane setting beside its volume: 1 is
+//!   the plain sum, bit for bit; 0 replaces). The undo target is still the loop at dub start.
+//! - **FADE is a pending stop with a ramp:** every playing lane stops on a bar line (the click's grid), its
+//!   level ramped down to it over the stored volume, which never moves; what a loop-end stop refuses, a
+//!   fading lane refuses too (`Refusal::Fading`).
 //! - **One clock: the device frame.** Input frame `x` is captured at frame `x`; a lane plays loop
 //!   position `(f - anchor) mod master` at frame `f`. A take starts `align_frames` (+ the live effect
 //!   slot's latency, from the block after its live flag changes, and the master limiter's pre-delay)
@@ -83,7 +88,8 @@
 //! wired sound. `tests/slots.rs` holds the plugin slots, with fake units that record what they saw in
 //! preallocated buffers (never allocating in `process`) and are handed back to the test to drop;
 //! `tests/punch_out.rs` holds the punch-out, `tests/multiply.rs` the multiply (a free take's too),
-//! `tests/trim.rs` the TRIM, `tests/input_fx.rs` the input sends. `tests/perf.rs` holds the ignored cost
+//! `tests/trim.rs` the TRIM, `tests/dub_feedback.rs` DUB FEEDBACK, `tests/fade.rs` FADE, `tests/input_fx.rs`
+//! the input sends. `tests/perf.rs` holds the ignored cost
 //! bars (Stage 2 and 3, the input sends, a multiply's burst, a TRIM's) and the Stage 3 load's alloc
 //! check.
 //!

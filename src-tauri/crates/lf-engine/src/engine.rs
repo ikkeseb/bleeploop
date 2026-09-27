@@ -638,6 +638,10 @@ fn apply(looper: &mut Looper, cx: &mut Cx, at: &mut Apply, command: Command) -> 
             looper.set_loop_end_stop(on);
             Applied::Done
         }
+        Command::SetFadeBars(bars) => {
+            looper.set_fade_bars(bars);
+            Applied::Done
+        }
         Command::SetFixedLength(on) => {
             looper.set_fixed_length(on);
             Applied::Done
@@ -667,6 +671,12 @@ fn apply(looper: &mut Looper, cx: &mut Cx, at: &mut Apply, command: Command) -> 
         Command::SetMute(i, on) => {
             if let Some(i) = lane(i) {
                 looper.set_mute(i, on);
+            }
+            Applied::Done
+        }
+        Command::SetDubFeedback(i, v) => {
+            if let Some(i) = lane(i) {
+                looper.set_dub_feedback(i, v);
             }
             Applied::Done
         }

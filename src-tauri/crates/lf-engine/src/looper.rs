@@ -1,7 +1,7 @@
 //! OWNS: the looper: the five lanes and their buffers, the single recorder (a take, a RETAKE roll or an
 //! overdub), every EMPTY → RECORDING → PLAYING ⇄ OVERDUBBING (+ STOPPED) transition, the master loop
-//! (its length and grid anchor, and the multiply that grows it), TRIM, the action gates with their
-//! refusals, and the block jobs that move loop-sized data. Ported from
+//! (its length and grid anchor, and the multiply that grows it), TRIM, DUB FEEDBACK, FADE, the action
+//! gates with their refusals, and the block jobs that move loop-sized data. Ported from
 //! `src/audio/looper/{machine,state,capture,playback,mixer}.ts` and `src/ui/looper/gates.ts`.
 //!
 //! One clock: input frame `x` is captured at device frame `x`, and a lane plays loop position
@@ -22,6 +22,11 @@
 //! loop (and its undo target) is tiled out to it by block jobs, so every lane still has the one length
 //! the session, export, undo and the overview know (see `multiply`). A TRIM (F16) keeps that length too:
 //! the lane's first bars repeat across it (see `trim`).
+//!
+//! An overdub writes `input + feedback * old` at each position it passes (DUB FEEDBACK, a lane setting:
+//! 1 sums, as ever; 0 replaces), so continuous dubbing lets the older layers fade pass by pass; its undo
+//! target is still the loop before it. FADE is a pending stop with a ramp: every playing lane stops on a
+//! bar line and fades down to it under its volume, which never moves (`fade_all`, `render`).
 
 use std::sync::Arc;
 
@@ -50,6 +55,9 @@ const CONFIRM_WINDOW_MS: Frame = 2500;
 const MAX_JOBS: usize = 16;
 /// Lane volume smoothing: the Web Audio setTargetAtTime time constant.
 const GAIN_TAU_SECONDS: f64 = 0.01;
+/// FADE's lengths in bars (`set_fade_bars`) and the default.
+pub const FADE_BARS: [u64; 4] = [1, 2, 4, 8];
+pub const DEFAULT_FADE_BARS: u64 = 2;
 
 /// What the lane's playback reads: a buffer and its orientation. It follows the lane's logical
 /// buffer at once while stopped, and at the next loop boundary while playing (an undo or reverse swaps
@@ -82,8 +90,12 @@ struct Lane {
     /// A multiply extends this lane from a loop of this many frames (0: none): until its jobs are done,
     /// playback reads a position at or past it through the old loop (`render`).
     extending: Frame,
+    /// FADE: the frame the lane's fade began; it reaches silence, and the lane stops, at `stop_at`.
+    fade_from: Option<Frame>,
     volume: f32,
     muted: bool,
+    /// DUB FEEDBACK, 0..1: an overdub writes `input + feedback * old`.
+    feedback: f32,
     gain: f64,
 }
 
@@ -104,8 +116,10 @@ impl Lane {
             switch_at: None,
             stop_at: None,
             extending: 0,
+            fade_from: None,
             volume: 1.0,
             muted: false,
+            feedback: 1.0,
             gain: 1.0,
         }
     }
@@ -116,6 +130,11 @@ impl Lane {
 
     fn committed(&self) -> bool {
         matches!(self.state, LaneState::Playing | LaneState::Stopped)
+    }
+
+    /// Why a press a pending stop blocks is refused: the fade's, or the loop end's.
+    fn stopping(&self) -> Refusal {
+        if self.fade_from.is_some() { Refusal::Fading } else { Refusal::Stopping }
     }
 }
 
@@ -309,6 +328,7 @@ pub struct Looper {
     loop_end_stop: bool,
     fixed_length: bool,
     fixed_bars: Frame,
+    fade_bars: u64,
     retake: bool,
     auto_record: bool,
     auto_sensitivity: f64,
@@ -350,6 +370,7 @@ impl Looper {
             loop_end_stop: false,
             fixed_length: false,
             fixed_bars: 4,
+            fade_bars: DEFAULT_FADE_BARS,
             retake: false,
             auto_record: false,
             auto_sensitivity: autorec::DEFAULT_SENSITIVITY,
@@ -403,6 +424,7 @@ impl Looper {
             can_reverse: t.committed(),
             reversed: t.reversed,
             stop_at: t.stop_at,
+            fading: t.fade_from.is_some(),
             retake_pass: rolling.map_or(0, |r| r.pass),
         }
     }
@@ -419,6 +441,11 @@ impl Looper {
 
     pub fn volume(&self, i: usize) -> (f32, bool) {
         (self.lanes[i].volume, self.lanes[i].muted)
+    }
+
+    /// Lane `i`'s DUB FEEDBACK.
+    pub fn dub_feedback(&self, i: usize) -> f32 {
+        self.lanes[i].feedback
     }
 
     /// The committed loop of lane `i` as it plays forward: its logical buffer, read through its
@@ -484,6 +511,15 @@ impl Looper {
         self.fixed_bars
     }
 
+    /// FADE's length: the longest of `FADE_BARS` at most `bars`, at least the shortest.
+    pub fn set_fade_bars(&mut self, bars: u32) {
+        self.fade_bars = FADE_BARS.into_iter().rfind(|&b| b <= bars as u64).unwrap_or(FADE_BARS[0]);
+    }
+
+    pub fn fade_bars(&self) -> u64 {
+        self.fade_bars
+    }
+
     pub fn set_retake(&mut self, on: bool) {
         self.retake = on;
     }
@@ -528,6 +564,12 @@ impl Looper {
 
     pub fn set_mute(&mut self, i: usize, on: bool) {
         self.lanes[i].muted = on;
+    }
+
+    /// DUB FEEDBACK, clamped to 0..1 (a value that is no number keeps today's sum, 1). An overdub in
+    /// flight takes it from its next captured frame.
+    pub fn set_dub_feedback(&mut self, i: usize, v: f32) {
+        self.lanes[i].feedback = if v.is_finite() { v.clamp(0.0, 1.0) } else { 1.0 };
     }
 
     // ── Commands ───────────────────────────────────────────────────────────────────────────────────
@@ -694,7 +736,7 @@ impl Looper {
             return refuse(cx, Refusal::NoTrim);
         }
         if t.stop_at.is_some() {
-            return refuse(cx, Refusal::Stopping);
+            return refuse(cx, t.stopping());
         }
         let (fpb, master) = (self.fpb(cx), self.master);
         if master % fpb != 0 || bars < 1 || bars >= master / fpb {
@@ -738,6 +780,7 @@ impl Looper {
         dst.audible = dst.logical();
         dst.volume = src.volume;
         dst.muted = src.muted;
+        dst.feedback = src.feedback;
         dst.state = LaneState::Stopped;
         cx.fx.copy(i, j, cx.now);
         let resume = src.state == LaneState::Playing && src.stop_at.is_none();
@@ -801,6 +844,41 @@ impl Looper {
         Applied::Done
     }
 
+    /// FADE (all): every PLAYING lane fades from the press to silence on a bar line, the first at or
+    /// after `fade_bars` bars from the press (on the click's grid), and stops there: a pending stop, as
+    /// END STOP's, whose ramp `render` applies over the volume (the stored volume never moves, so PLAY ALL
+    /// brings a faded lane back at its level). A fading lane takes what a stopping lane takes: PLAY/STOP
+    /// or STOP ALL stops it at once, a REC/DUB, UNDO, REVERSE or TRIM is refused, a COPY of it lands
+    /// STOPPED. A second press while lanes fade stops them at once; a lane started meanwhile plays on.
+    /// Refused while a lane captures (the refusal names that lane: nothing it records is closed or
+    /// thrown away behind the player's back) and with nothing playing (on lane `i`, the selected one).
+    pub fn fade_all(&mut self, cx: &mut Cx, i: usize) -> Applied {
+        if self.lanes.iter().any(|t| t.fade_from.is_some()) {
+            for k in 0..TRACK_COUNT {
+                if self.lanes[k].fade_from.is_some() {
+                    self.stop(cx, k);
+                }
+            }
+            return Applied::Done;
+        }
+        let refuse = |cx: &mut Cx, lane: usize, reason: Refusal| cx.feed.push(Event::Refused { frame: cx.now, lane: lane as u8, reason });
+        if let Some(k) = (0..TRACK_COUNT).find(|&k| self.capturing(k)) {
+            refuse(cx, k, Refusal::Capturing);
+            return Applied::Done;
+        }
+        let end = cx.clock.downbeat_after(cx.now, self.fade_bars);
+        match end {
+            Some(end) if self.lanes.iter().any(|t| t.state == LaneState::Playing) => {
+                for t in self.lanes.iter_mut().filter(|t| t.state == LaneState::Playing) {
+                    t.stop_at = Some(end);
+                    t.fade_from = Some(cx.now);
+                }
+            }
+            _ => refuse(cx, i, Refusal::NoFade),
+        }
+        Applied::Done
+    }
+
     pub fn clear_all(&mut self, cx: &mut Cx) -> Applied {
         let wait = self.wait_for(None, false);
         if wait != Applied::Done {
@@ -860,7 +938,7 @@ impl Looper {
                 if !info.can_undo {
                     refuse(cx, Refusal::NoUndo);
                 } else if info.stop_at.is_some() {
-                    refuse(cx, Refusal::Stopping);
+                    refuse(cx, self.lanes[i].stopping());
                 } else {
                     return self.undo(cx, i);
                 }
@@ -898,7 +976,7 @@ impl Looper {
                 if !t.committed() {
                     refuse(cx, Refusal::NoReverse);
                 } else if t.stop_at.is_some() {
-                    refuse(cx, Refusal::Stopping);
+                    refuse(cx, t.stopping());
                 } else {
                     return self.reverse(cx, i);
                 }
@@ -927,6 +1005,7 @@ impl Looper {
                     return self.rec_dub(cx, i);
                 }
             }
+            Action::FadeAll => return self.fade_all(cx, i),
         }
         Applied::Done
     }
@@ -938,7 +1017,7 @@ impl Looper {
             return Ok(());
         }
         if t.stop_at.is_some() {
-            return Err(Refusal::Stopping);
+            return Err(t.stopping());
         }
         if t.state == LaneState::Stopped {
             return Err(Refusal::PlayFirst);
@@ -1363,6 +1442,7 @@ impl Looper {
             return;
         }
         self.lanes[i].stop_at = None;
+        self.lanes[i].fade_from = None;
         let discard = t.state == LaneState::Recording; // a take in flight never has a loop yet
         if self.capturing(i) {
             // An aborted first take leaves a blank session, whose reset below hands the count-in pulse
@@ -1409,6 +1489,7 @@ impl Looper {
         }
         let t = &mut self.lanes[i];
         t.stop_at = None;
+        t.fade_from = None;
         t.audible = t.logical();
         t.switch_at = None;
         t.state = LaneState::Playing;
@@ -1656,8 +1737,11 @@ impl Looper {
                 let master = self.master;
                 let first = loop_pos(lo - rec.align, self.anchor, master);
                 let mut pos = first;
+                // DUB FEEDBACK: at 1 this is `old + x` bit for bit (a product by 1 is exact, a sum commutes).
+                let fb = lane.feedback;
                 for &x in &input[(lo - f0) as usize..(hi - f0) as usize] {
-                    data[pos as usize] += x;
+                    let old = &mut data[pos as usize];
+                    *old = x + fb * *old;
                     pos += 1;
                     if pos == master {
                         pos = 0;
@@ -1695,12 +1779,20 @@ impl Looper {
             let mut pos = loop_pos(f0, self.anchor, master);
             // Mid-multiply, what lies past the old loop is read through it (the same samples, once tiled).
             let extending = if t.extending > 0 { t.extending } else { Frame::MAX };
-            for sample in out.iter_mut() {
+            // FADE: `r` runs linearly from 1 at the press to 0 where the lane stops; the level is `r²`
+            // over the volume (half-way down it is at -12 dB).
+            let ramp = t.fade_from.zip(t.stop_at).map(|(from, to)| (to, 1.0 / (to - from).max(1) as f64));
+            for (k, sample) in out.iter_mut().enumerate() {
                 let mut idx = if t.audible.reversed { master - 1 - pos } else { pos };
                 if idx >= extending {
                     idx %= extending;
                 }
-                *sample = (t.gain * data[idx as usize] as f64) as f32;
+                let mut g = t.gain;
+                if let Some((to, inv)) = ramp {
+                    let r = ((to - f0 - k as Frame) as f64 * inv).clamp(0.0, 1.0);
+                    g *= r * r;
+                }
+                *sample = (g * data[idx as usize] as f64) as f32;
                 t.gain = target + (t.gain - target) * self.gain_coef;
                 pos += 1;
                 if pos == master {

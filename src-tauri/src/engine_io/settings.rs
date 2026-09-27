@@ -3,10 +3,11 @@
 //! rebuild and a setting sent before the first open is kept (`docs/plans/native-engine.md` § Stage 5).
 //!
 //! A setting is a command that sets a value (the tempo, the click, the master, the input sends, the
-//! looper's modes, a lane's volume, mute and FX, the note target, the wheels, a plugin slot's live flag
-//! and gain, the selected lane); everything else (the looper's gestures, notes) acts once and is not kept. What the
-//! engine resets, the memory forgets, as the feed reads it happen: a cleared lane's volume, mute and FX
-//! (`cleared`, on the engine's `Cleared` event: CLEAR, a pedal's CLEAR, CLEAR ALL), and a COPY hands the
+//! looper's modes and FADE's length, a lane's volume, mute, DUB FEEDBACK and FX, the note target, the
+//! wheels, a plugin slot's live flag and gain, the selected lane); everything else (the looper's gestures,
+//! notes) acts once and is not kept. What the engine resets, the memory forgets, as the feed reads it
+//! happen: a cleared lane's volume, mute, DUB FEEDBACK and FX (`cleared`, on the engine's `Cleared`
+//! event: CLEAR, a pedal's CLEAR, CLEAR ALL), and a COPY hands the
 //! destination the source's (`copy_lane`, on `Copied`). A setting for a lane sent in the moment between
 //! its clear and the feed reading it (a block and a feed tick) is forgotten with it. What the engine sets
 //! itself, the memory keeps as if the UI had sent it: a pedal's MUTE (`Muted`, as `SetMute`).
@@ -30,6 +31,7 @@ enum Key {
     /// An input send, by `InputSend as usize`.
     InputSend(usize),
     LoopEndStop,
+    FadeBars,
     FixedLength,
     FixedBars,
     Retake,
@@ -38,6 +40,7 @@ enum Key {
     SelectTrack,
     Volume(u8),
     Mute(u8),
+    DubFeedback(u8),
     /// A lane's effect, by `FxKind::index`.
     FxBypass(u8, usize),
     /// A lane's FX param, by `FxKind::index * MAX_PARAMS + FxParam::index`.
@@ -52,7 +55,7 @@ enum Key {
 impl Key {
     fn lane(self) -> Option<u8> {
         match self {
-            Key::Volume(i) | Key::Mute(i) | Key::FxBypass(i, _) | Key::FxParam(i, _) => Some(i),
+            Key::Volume(i) | Key::Mute(i) | Key::DubFeedback(i) | Key::FxBypass(i, _) | Key::FxParam(i, _) => Some(i),
             _ => None,
         }
     }
@@ -71,6 +74,7 @@ fn key(command: &Command) -> Option<Key> {
         Command::SetInputSendParam(param, _) => Key::InputSendParam(param as usize),
         Command::SetInputSend(send, _) => Key::InputSend(send as usize),
         Command::SetLoopEndStop(_) => Key::LoopEndStop,
+        Command::SetFadeBars(_) => Key::FadeBars,
         Command::SetFixedLength(_) => Key::FixedLength,
         Command::SetFixedBars(_) => Key::FixedBars,
         Command::SetRetake(_) => Key::Retake,
@@ -79,6 +83,7 @@ fn key(command: &Command) -> Option<Key> {
         Command::SelectTrack(i) => lane(i).map(|_| Key::SelectTrack)?,
         Command::SetVolume(i, _) => Key::Volume(lane(i)?),
         Command::SetMute(i, _) => Key::Mute(lane(i)?),
+        Command::SetDubFeedback(i, _) => Key::DubFeedback(lane(i)?),
         Command::SetFxBypass(i, kind, _) => Key::FxBypass(lane(i)?, kind.index()),
         Command::SetFxParam(i, param, _) => Key::FxParam(lane(i)?, param.kind().index() * MAX_PARAMS + param.index()),
         Command::SelectInstrument(_) => Key::Instrument,
@@ -111,6 +116,7 @@ fn on_lane(command: Command, to: u8) -> Command {
     match command {
         Command::SetVolume(_, v) => Command::SetVolume(to, v),
         Command::SetMute(_, m) => Command::SetMute(to, m),
+        Command::SetDubFeedback(_, v) => Command::SetDubFeedback(to, v),
         Command::SetFxBypass(_, kind, b) => Command::SetFxBypass(to, kind, b),
         Command::SetFxParam(_, param, v) => Command::SetFxParam(to, param, v),
         other => other,
@@ -134,7 +140,7 @@ impl Settings {
         }
     }
 
-    /// Lane `to` took lane `from`'s mixer and FX (the engine's COPY).
+    /// Lane `to` took lane `from`'s mixer, DUB FEEDBACK and FX (the engine's COPY).
     pub(crate) fn copy_lane(&mut self, from: u8, to: u8) {
         if from == to {
             return;
@@ -148,6 +154,7 @@ impl Settings {
                 let key = match *k {
                     Key::Volume(_) => Key::Volume(to),
                     Key::Mute(_) => Key::Mute(to),
+                    Key::DubFeedback(_) => Key::DubFeedback(to),
                     Key::FxBypass(_, x) => Key::FxBypass(to, x),
                     Key::FxParam(_, x) => Key::FxParam(to, x),
                     other => other,
@@ -158,7 +165,7 @@ impl Settings {
         self.last.extend(copied);
     }
 
-    /// The engine cleared lane `lane`: its volume, mute and FX are back at their defaults.
+    /// The engine cleared lane `lane`: its volume, mute, DUB FEEDBACK and FX are back at their defaults.
     pub(crate) fn cleared(&mut self, lane: u8) {
         self.forget_lane(lane);
     }
@@ -197,12 +204,14 @@ mod tests {
         assert!(s.record(&Command::SetInputSend(InputSend::Echo, true)));
         assert!(s.record(&Command::SetInputSendParam(InputSendParam::EchoLevel, 0.2)));
         assert!(s.record(&Command::SetInputSendParam(InputSendParam::EchoLevel, 0.6)));
+        assert!(s.record(&Command::SetFadeBars(4)));
         assert_eq!(
             replay(&s),
             [
                 Command::SetBpm(100.0),
                 Command::SetInputSendParam(InputSendParam::EchoLevel, 0.6),
                 Command::SetInputSend(InputSend::Echo, true),
+                Command::SetFadeBars(4),
                 Command::SelectInstrument(NoteTarget::Builtin(Instrument::Pad)),
                 Command::PitchBend(1.0)
             ],
@@ -217,15 +226,17 @@ mod tests {
         s.record(&Command::SetFxParam(0, FxParam::Cutoff, 900.0));
         s.record(&Command::SetFxBypass(0, FxKind::Delay, false));
         s.record(&Command::SetMute(1, true));
+        s.record(&Command::SetDubFeedback(0, 0.25));
         s.record(&Command::SetMasterVolume(0.7));
         s.record(&Command::SetInputSend(InputSend::Reverb, true));
         s.copy_lane(0, 3);
         assert!(replay(&s).contains(&Command::SetFxParam(3, FxParam::Cutoff, 900.0)));
         assert!(replay(&s).contains(&Command::SetVolume(3, 0.5)));
+        assert!(replay(&s).contains(&Command::SetDubFeedback(3, 0.25)), "COPY hands DUB FEEDBACK on");
         assert!(!s.record(&Command::Clear(0)), "a CLEAR is an action: the engine's Cleared event is what forgets");
         assert!(replay(&s).contains(&Command::SetVolume(0, 0.5)));
         s.cleared(0);
-        assert!(!replay(&s).iter().any(|c| matches!(c, Command::SetVolume(0, _) | Command::SetFxParam(0, ..) | Command::SetFxBypass(0, ..))));
+        assert!(!replay(&s).iter().any(|c| matches!(c, Command::SetVolume(0, _) | Command::SetDubFeedback(0, _) | Command::SetFxParam(0, ..) | Command::SetFxBypass(0, ..))));
         assert!(replay(&s).contains(&Command::SetMute(1, true)));
         (0..TRACK_COUNT as u8).for_each(|i| s.cleared(i));
         assert_eq!(

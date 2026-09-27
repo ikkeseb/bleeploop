@@ -239,7 +239,8 @@ function inspectJam(): JamFingerprint {
     committed = true;
     parts.push(
       `${i}:${state === 'OVERDUBBING' ? 'PLAYING' : state}:${source.trackInfo(i).lengthFrames}:${revision}:` +
-        `${source.trackVolume(i)}:${Number(source.trackMuted(i))}:${JSON.stringify(source.fxState(i))}`,
+        `${source.trackVolume(i)}:${Number(source.trackMuted(i))}:${source.trackDubFeedback(i)}:` +
+        JSON.stringify(source.fxState(i)),
     );
   }
 

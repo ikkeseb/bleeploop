@@ -43,17 +43,17 @@ const keys = (o) => Object.keys(o).sort();
 const COMMANDS = [
   'RecDub', 'PlayStop', 'Stop', 'Undo', 'Reverse', 'Copy', 'Trim', 'Clear', 'PlayAll', 'StopAll', 'ClearAll', 'Action',
   'ActionOn', 'SelectTrack', 'SetBpm', 'SetMetronome', 'SetClickVolume', 'SetMasterVolume', 'SetMasterMute',
-  'SetLoopEndStop', 'SetFixedLength', 'SetFixedBars', 'SetRetake', 'SetAutoRecord', 'SetAutoSensitivity', 'SetVolume',
-  'SetMute', 'SetFxParam', 'SetFxBypass', 'SelectInstrument', 'NoteOn', 'NoteOff', 'PitchBend', 'Modulation',
+  'SetLoopEndStop', 'SetFadeBars', 'SetFixedLength', 'SetFixedBars', 'SetRetake', 'SetAutoRecord', 'SetAutoSensitivity',
+  'SetVolume', 'SetMute', 'SetDubFeedback', 'SetFxParam', 'SetFxBypass', 'SelectInstrument', 'NoteOn', 'NoteOff', 'PitchBend', 'Modulation',
   'AllNotesOff', 'SetSlotLive', 'SetSlotGain', 'SetInputSend', 'SetInputSendParam', 'Press',
 ];
 const ACTIONS = [
   'RecDub', 'PlayStop', 'Undo', 'Clear', 'NextTrack', 'PrevTrack', 'PlayAll', 'StopAll', 'Mute', 'Reverse', 'Copy', 'Halve',
-  'Hold', 'Release',
+  'Hold', 'Release', 'FadeAll',
 ];
 const REFUSALS = [
   'Stopping', 'PlayFirst', 'Reversed', 'OtherRecording', 'Empty', 'NoUndo', 'NoClear', 'ConfirmClear', 'Capturing', 'NoTrim',
-  'NoMute', 'NoReverse', 'NoCopy', 'NoFreeLane',
+  'NoMute', 'NoReverse', 'NoCopy', 'NoFreeLane', 'Fading', 'NoFade',
 ];
 const EVENTS = ['Lane', 'Transport', 'Beat', 'Selected', 'Refused', 'TakeRejected', 'PassDropped', 'Copied', 'Cleared', 'Muted'];
 const DEVICE_EVENTS = ['Lost', 'Recovered', 'Fallback', 'ShareLost', 'EngineFaulted', 'LoopsDropped'];
@@ -177,6 +177,12 @@ const refused = {
   'a lane past the fifth': () => decodeCommand({ RecDub: 5 }),
   'a trim of no bars': () => decodeCommand({ Trim: [0, 0] }),
   'a trim of a fractional bar count': () => decodeCommand({ Trim: [0, 1.5] }),
+  'a fade of a fractional bar count': () => decodeCommand({ SetFadeBars: 2.5 }),
+  'a lane info without fading': () => {
+    const e = structuredClone(lane);
+    delete e.Lane.info.fading;
+    decodeEvent(e);
+  },
   'an unknown command': () => decodeCommand('Panic'),
   'an unknown action': () => decodeCommand({ Action: 'Panic' }),
   'a press with a payload': () => decodeCommand({ Press: 0 }),

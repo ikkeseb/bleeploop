@@ -32,6 +32,8 @@ export interface SessionSource {
   spendClear(token: ClearToken): void;
   trackVolume(i: number): number;
   trackMuted(i: number): boolean;
+  /** DUB FEEDBACK (0..1): engine mode's lane setting; the web looper only sums (1). */
+  trackDubFeedback(i: number): number;
   fxState(i: number): FxState[];
   masterFramesValue(): number;
   /** Copies of the committed lanes' PCM with their mix, each with the state it had as it was read. */
@@ -66,6 +68,7 @@ export const webSession: SessionSource = {
   spendClear: () => {},
   trackVolume: (i) => looper.trackVolume(i),
   trackMuted: (i) => looper.trackMuted(i),
+  trackDubFeedback: () => 1,
   fxState: (i) => looper.fxState(i),
   masterFramesValue: () => looper.masterFramesValue(),
   exportSnapshot: async () => {

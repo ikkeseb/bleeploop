@@ -29,6 +29,7 @@ const STAGE_WORD: Record<Exclude<LaneWord, 'TAKE'>, string> = {
   OVERDUBBING: 'DUB',
   PLAYING: 'PLAY',
   STOPPED: 'STOP',
+  FADING: 'FADING',
   ENDING: 'ENDING',
   MUTED: 'MUTED',
 };

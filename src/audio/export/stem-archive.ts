@@ -4,7 +4,8 @@ import { encodeWav } from './wav';
 import type { ZipEntry } from './zip';
 
 export interface StemSnapshot extends Omit<ExportSnapshot, 'tracks'> {
-  tracks: (ExportSnapshot['tracks'][number] & { state: TrackState })[];
+  /** `dubFeedback`: engine mode's DUB FEEDBACK (0..1); the web looper, which only sums, leaves it out. */
+  tracks: (ExportSnapshot['tracks'][number] & { state: TrackState; dubFeedback?: number })[];
 }
 
 /** Local timestamp yyyy-MM-dd-HHmm for the archive and its entries. */
@@ -26,7 +27,7 @@ export function prepareStemArchive(
     entries.push({ name: file, data: encodeWav([t.pcm], snap.sampleRate, format) });
     return {
       track, file, volume: t.volume, muted: t.muted, reversed: t.reversed,
-      frames: t.pcm.length, state: t.state, fx: t.fx,
+      frames: t.pcm.length, state: t.state, fx: t.fx, dubFeedback: t.dubFeedback ?? 1,
     };
   });
   return {

@@ -61,6 +61,8 @@ pub enum Command {
     SetMasterVolume(f32),
     SetMasterMute(bool),
     SetLoopEndStop(bool),
+    /// FADE's length in bars: 1, 2, 4 or 8 (another count snaps down to one of them, at least 1).
+    SetFadeBars(u32),
     SetFixedLength(bool),
     SetFixedBars(f64),
     SetRetake(bool),
@@ -68,6 +70,9 @@ pub enum Command {
     SetAutoSensitivity(f64),
     SetVolume(u8, f32),
     SetMute(u8, bool),
+    /// A lane's DUB FEEDBACK (0..1, default 1): what an overdub keeps of the loop it writes over, pass by
+    /// pass (`input + feedback * old`); 0 replaces it.
+    SetDubFeedback(u8, f32),
     /// A lane's FX parameter, in its def's units (`src/audio/fx/metadata.ts`).
     SetFxParam(u8, FxParam, f64),
     SetFxBypass(u8, FxKind, bool),
@@ -260,6 +265,9 @@ pub enum Action {
     /// that FIXED closed stays closed). As `Command::Action`, its lane is the one the last
     /// [`Action::Hold`] acted on.
     Release,
+    /// FADE (all): every playing lane fades to silence over the fade's bars and stops on the bar line;
+    /// a second press while they fade stops them at once.
+    FadeAll,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -284,8 +292,10 @@ pub struct LaneInfo {
     pub can_undo: bool,
     pub can_reverse: bool,
     pub reversed: bool,
-    /// A pending loop-end stop.
+    /// A pending stop: at the loop end (END STOP), or where a fade ends.
     pub stop_at: Option<Frame>,
+    /// FADE: the lane fades to silence and stops at `stop_at`.
+    pub fading: bool,
     /// RETAKE: the 1-based pass in flight, 0 when the lane is not rolling.
     pub retake_pass: u32,
 }
@@ -314,6 +324,10 @@ pub enum Refusal {
     NoCopy,
     /// COPY with no EMPTY lane to copy to.
     NoFreeLane,
+    /// A press a fading lane cannot take (it stops where the fade ends).
+    Fading,
+    /// FADE with no lane playing.
+    NoFade,
 }
 
 impl Refusal {
@@ -333,6 +347,8 @@ impl Refusal {
             Refusal::NoReverse => "nothing to reverse, record first",
             Refusal::NoCopy => "nothing to copy, record first",
             Refusal::NoFreeLane => "no empty track to copy to",
+            Refusal::Fading => "fading out, wait or stop now",
+            Refusal::NoFade => "nothing is playing to fade",
         }
     }
 }

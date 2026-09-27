@@ -34,9 +34,11 @@ export type Refusal =
   | 'NoMute'
   | 'NoReverse'
   | 'NoCopy'
-  | 'NoFreeLane';
+  | 'NoFreeLane'
+  | 'Fading'
+  | 'NoFade';
 /** The hands-free actions (`src/app/actions.ts`; GO LIVE stays with the plugin host). `Halve` is TRIM to
- * the first half of the loop's bars; `Hold` and `Release` are HOLD's press and release. */
+ * the first half of the loop's bars; `Hold` and `Release` are HOLD's press and release; `FadeAll` is FADE. */
 export type EngineAction =
   | 'RecDub'
   | 'PlayStop'
@@ -51,7 +53,8 @@ export type EngineAction =
   | 'Copy'
   | 'Halve'
   | 'Hold'
-  | 'Release';
+  | 'Release'
+  | 'FadeAll';
 /** The built-in instruments by id (`src/audio/synths/index.ts`). */
 export type InstrumentId = 'lead' | 'pad' | 'piano' | 'organ' | 'bass' | 'drum';
 export type FxKindId = 'filter' | 'pitch' | 'stutter' | 'delay' | 'reverb';
@@ -78,6 +81,8 @@ const REFUSALS: readonly Refusal[] = [
   'NoReverse',
   'NoCopy',
   'NoFreeLane',
+  'Fading',
+  'NoFade',
 ];
 const ACTIONS: readonly EngineAction[] = [
   'RecDub',
@@ -94,6 +99,7 @@ const ACTIONS: readonly EngineAction[] = [
   'Halve',
   'Hold',
   'Release',
+  'FadeAll',
 ];
 const INSTRUMENTS: readonly InstrumentId[] = ['lead', 'pad', 'piano', 'organ', 'bass', 'drum'];
 const FX_KINDS: readonly FxKindId[] = ['filter', 'pitch', 'stutter', 'delay', 'reverb'];
@@ -133,6 +139,8 @@ export type EngineCommand =
   | { SetMasterVolume: number }
   | { SetMasterMute: boolean }
   | { SetLoopEndStop: boolean }
+  /** FADE's length: 1, 2, 4 or 8 bars. */
+  | { SetFadeBars: number }
   | { SetFixedLength: boolean }
   | { SetFixedBars: number }
   | { SetRetake: boolean }
@@ -140,6 +148,8 @@ export type EngineCommand =
   | { SetAutoSensitivity: number }
   | { SetVolume: [number, number] }
   | { SetMute: [number, boolean] }
+  /** DUB FEEDBACK, 0..1: what an overdub keeps of the loop it passes over (0 replaces it). */
+  | { SetDubFeedback: [number, number] }
   | { SetFxParam: [number, FxParamId, number] }
   | { SetFxBypass: [number, FxKindId, boolean] }
   | { SelectInstrument: NoteTarget }
@@ -188,7 +198,10 @@ export interface LaneInfo {
   canUndo: boolean;
   canReverse: boolean;
   reversed: boolean;
+  /** A pending stop: at the loop end (END STOP), or where a fade ends. */
   stopAt: Frame | null;
+  /** FADE: the lane fades out and stops at `stopAt`. */
+  fading: boolean;
   retakePass: number;
 }
 
@@ -348,6 +361,7 @@ function decodeLaneInfo(v: unknown): LaneInfo {
     canReverse: bool(o.canReverse, 'LaneInfo.canReverse'),
     reversed: bool(o.reversed, 'LaneInfo.reversed'),
     stopAt: o.stopAt === null ? null : frame(o.stopAt, 'LaneInfo.stopAt'),
+    fading: bool(o.fading, 'LaneInfo.fading'),
     retakePass: int(o.retakePass, 'LaneInfo.retakePass'),
   };
 }
@@ -541,6 +555,15 @@ export function decodeCommand(raw: unknown): EngineCommand {
         const [l, bars] = pair('(lane, bars)');
         lane(l, 'Trim.lane');
         int(bars, 'Trim.bars', 1);
+        break;
+      }
+      case 'SetFadeBars':
+        int(p, 'SetFadeBars', 1);
+        break;
+      case 'SetDubFeedback': {
+        const [l, v] = pair('(lane, feedback)');
+        lane(l, 'SetDubFeedback.lane');
+        num(v, 'SetDubFeedback.feedback');
         break;
       }
       case 'SetMute': {

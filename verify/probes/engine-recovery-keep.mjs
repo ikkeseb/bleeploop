@@ -39,6 +39,7 @@ const lane = (state, frames) => ({
   canReverse: state === 'Playing' || state === 'Stopped',
   reversed: false,
   stopAt: null,
+  fading: false,
   retakePass: 0,
 });
 const laneEvent = (i, info) => ({ Lane: { frame: 0, lane: i, info } });

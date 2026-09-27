@@ -595,7 +595,7 @@ await probe(async ({ open }) => {
     await ep.waitForFunction(() => window.__lf.native.opened.length === 1, undefined, { timeout: 5000 });
     await ep.waitForFunction(() => !!window.__probeMidi.inputs.get('a').onmidimessage);
     const info = (state, extra = {}) => ({
-      state, length: 0, armed: false, autoArmed: false, canUndo: false, canReverse: false, reversed: false, stopAt: null, retakePass: 0, ...extra,
+      state, length: 0, armed: false, autoArmed: false, canUndo: false, canReverse: false, reversed: false, stopAt: null, fading: false, retakePass: 0, ...extra,
     });
     const playing = info('Playing', { length: 96000, canReverse: true });
     const lanes = [playing, playing, info('Empty'), info('Empty'), info('Empty')];

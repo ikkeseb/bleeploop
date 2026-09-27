@@ -33,6 +33,12 @@
  *      bit for bit; then lane 3 takes lane 2 through the cable, click off, lane 1 muted → loopX_H: every
  *      beat of the grown loop clicks (the untrimmed lane is silent past its first loop's clicks), on the
  *      grid of B; UNDO gives lane 2 back as it was, bit for bit
+ *   I  FADE (all) over two bars, pressed half a second before a loop boundary with lane 1 (the small
+ *      loop's clicks) alone audible, and a take on lane 4 from that boundary, click off: the fading lanes
+ *      stop on the downbeat two bars on (the feed's beats and lane events), each beat's click through the
+ *      cable falls, at ((8 − k)/8)² of the first (the fade's squared ramp, k the beat), and silence
+ *      follows the bar line; PLAY ALL then brings lane 1 back at its level (the input meter's peak, and
+ *      its stored volume)
  * then CLEAR ALL, so the runner's window close meets no jam question. The pass bars print per buffer;
  * the verdict is `complete: …` when every bar passes, `FAIL …` otherwise. A whole-beat offset shows as
  * the accent off beat 1; a whole-bar one cannot show (every bar of the loop sounds alike).
@@ -68,7 +74,7 @@ import { availablePlugins, clearPlugin, nativeHostReady, pluginGain, selectPlugi
 import { goLive, inputArmed, stopLive } from '../audio/native-io';
 import { engineMode, type DeviceStatus, type PluginDescriptor } from '../platform';
 import { clock, looper, master, session } from '../ui/state/audio';
-import { engineDevice, engineInputSends, onEngineEvent, openEngineDevice, setEngineInputChannel, trimLane } from '../ui/state/engine-store';
+import { engineDevice, engineFade, engineInputSends, onEngineEvent, openEngineDevice, setEngineInputChannel, trimLane } from '../ui/state/engine-store';
 
 const TAG = '[engine-loopback]';
 const BPM = 120;
@@ -397,6 +403,39 @@ async function take(i: number, name: string, seconds: number): Promise<number> {
   return Math.round(performance.now() - t0);
 }
 
+/** Phase I's fade: every beat of its bars, and what came after. */
+interface FadeStats {
+  /** Each beat's click peak in the take over the playing lane's own click at that beat, relative to the
+   * first beat's: the fade's gain through the cable. */
+  levels: number[];
+  /** The loudest window past the fade's bar line, over the take's noise floor bar (0 = silent). */
+  after: number;
+  /** The fading lanes stopped on a downbeat the fade's bars on (the feed's beats and lane events). */
+  onBar: boolean;
+  stops: string;
+  /** Lane 1's input-meter peak after PLAY ALL over before the fade, and whether its volume stayed. */
+  back: number;
+  volumeKept: boolean;
+}
+
+/** A take's click peak at each of its first `beats` beats (half a beat either side). */
+function beatPeaks(pcm: Float32Array, beats: number, rate: number): number[] {
+  const beat = (rate * 60) / BPM;
+  return Array.from({ length: beats }, (_, k) => peakIn(pcm, Math.round((k - 0.5) * beat), Math.round((k + 0.5) * beat)).value);
+}
+
+/** The loudest input-meter reading over `ms`. The meter holds each feed frame's peak for one tick
+ * (60 Hz), so it is read faster than that: at 20 ms one frame in six went unread, and with it, in one
+ * run, the bar's only accent (the reading then was a plain beat's, 0.56 of it). */
+async function meterPeak(ms: number): Promise<number> {
+  let max = 0;
+  for (const end = performance.now() + ms; performance.now() < end; ) {
+    max = Math.max(max, looper.levelValue());
+    await sleep(4);
+  }
+  return max;
+}
+
 interface BufferResult {
   device: DeviceStatus;
   a: TakeStats;
@@ -407,6 +446,7 @@ interface BufferResult {
   f: TakeStats;
   g: TakeStats;
   h: TakeStats;
+  fade: FadeStats;
   echo: EchoStats | null;
   bars: Bar[];
 }
@@ -523,6 +563,83 @@ async function run(): Promise<void> {
     return;
   }
   log(`complete: input ${channel + 1}, ${short}, ${bars} bars, ms net, rejected ${rejected.length}; ${summary}`);
+}
+
+/**
+ * Phase I. Lanes 1–3 hold the grown small loop (`grown` frames; lane 1 A2's clicks on every beat); lane 4
+ * is EMPTY; FIXED records `grown` frames. Only lane 1 is heard. FADE is pressed half a second before a
+ * loop boundary and lane 4's take armed with it, so the take starts on that boundary: the fade's two bars
+ * end on the take's bar 2, whatever the press's exact frame, and beat `k` of the take is at ((8 − k)/8)²
+ * of beat 0 under the fade's squared ramp (the ratio of two points on it needs no press frame).
+ */
+async function fadePhase(grown: number, rate: number): Promise<{ fade: FadeStats; msI: number }> {
+  const FADE_BARS = 2;
+  const fadeBeats = FADE_BARS * BEATS_PER_BAR;
+  looper.setMute(0, false);
+  looper.setMute(1, true);
+  looper.setMute(2, true);
+  clock.setMetronome(false);
+  engineFade.setBars(FADE_BARS);
+  const volume = looper.trackVolume(0);
+  const downbeats: number[] = [];
+  const stops: { lane: number; frame: number }[] = [];
+  const off = onEngineEvent((ev) => {
+    if (ev.type === 'Beat' && ev.beatInBar === 0) downbeats.push(ev.frame);
+    if (ev.type === 'Lane' && ev.info.state === 'Stopped') stops.push({ lane: ev.lane, frame: ev.frame });
+  });
+  try {
+    const loopMs = (grown / rate) * 1000;
+    // Two bars: two accents.
+    const before = await meterPeak(4200);
+    // Half a second (±0.1 s) before the next loop boundary, as the heard phase reads it.
+    await until('half a second before a loop boundary', () => {
+      const left = (1 - looper.phaseValue()) * loopMs;
+      return left >= 400 && left <= 600;
+    }, loopMs / 1000 + 5);
+    const t0 = performance.now();
+    const pressedAt = downbeats.length;
+    engineFade.fadeAll();
+    void looper.recDub(3);
+    await until('lanes 1–3 fading', () => [0, 1, 2].every((i) => lane(i).fading), 2);
+    const end = lane(0).stopAt!;
+    await until('take I to start recording', () => lane(3).state === 'RECORDING' && !lane(3).armed, 3);
+    await until('lanes 1–3 STOPPED after the fade', () => [0, 1, 2].every((i) => lane(i).state === 'STOPPED'), 10);
+    await until('take I to commit', () => lane(3).state === 'PLAYING', loopMs / 1000 + 5);
+    const msI = Math.round(performance.now() - t0);
+    const take = await committedPcm(3, grown);
+    const lane1 = await committedPcm(0, grown);
+
+    // The fade through the cable: each beat's click over lane 1's own click there, from the take's boundary.
+    const beats = Math.round(grown / ((rate * 60) / BPM));
+    const got = beatPeaks(take, beats, rate);
+    const own = beatPeaks(lane1, beats, rate);
+    const raw = got.slice(0, fadeBeats).map((p, k) => p / own[k]);
+    const levels = raw.map((l) => l / raw[0]);
+    // Past the bar line: the loudest beat window over the bar a click must clear (analyse's floor × FLOOR_FACTOR).
+    const floor = median(Array.from({ length: Math.floor(take.length / 64) }, (_, i) => Math.abs(take[i * 64])));
+    const after = Math.max(...got.slice(fadeBeats)) / Math.max(floor * FLOOR_FACTOR, 1e-6);
+    log(`  take I: fade to frame ${end}, beat levels ${levels.map((l) => l.toFixed(3)).join(' ')}, after the bar line ${after.toFixed(3)} of the floor bar, floor ${floor.toExponential(2)}`);
+
+    // The stop: every fading lane reported STOPPED on the fade's end, a downbeat the fade's bars after the
+    // first downbeat at or past the press.
+    const laneStops = stops.filter((s) => s.lane <= 2);
+    const firstBar = downbeats.slice(pressedAt)[0];
+    const fpb = framesPerBar(BPM, rate);
+    const onBar = laneStops.length === 3 && laneStops.every((s) => s.frame === end) && downbeats.includes(end) && end === firstBar + FADE_BARS * fpb;
+    const stopsText = `end ${end}, stops ${laneStops.map((s) => `${s.lane + 1}@${s.frame}`).join(',')}, downbeats ${downbeats.slice(pressedAt, pressedAt + 4).join(',')}`;
+
+    // PLAY ALL: lane 1 back at its own level, the take on lane 4 muted.
+    looper.setMute(3, true);
+    looper.playAll();
+    await until('lanes 1–3 PLAYING again', () => [0, 1, 2].every((i) => lane(i).state === 'PLAYING'), 5);
+    await sleep(300);
+    const after2 = await meterPeak(4200);
+    const fade: FadeStats = { levels, after, onBar, stops: stopsText, back: after2 / before, volumeKept: looper.trackVolume(0) === volume };
+    log(`  take I: meter peak ${before.toFixed(3)} before the fade, ${after2.toFixed(3)} after PLAY ALL; ${stopsText}`);
+    return { fade, msI };
+  } finally {
+    off();
+  }
 }
 
 async function runBuffer(buffer: BufferFrames, bars: number, channel: number, rejected: string[], withEcho: boolean): Promise<BufferResult> {
@@ -668,13 +785,16 @@ async function runBuffer(buffer: BufferFrames, bars: number, channel: number, re
     await sleep(300);
     const undoDiff = tiledDiff(await committedPcm(1, grownG), pcmG, grownG);
     looper.setFixedLengthBars(bars);
+
+    // ── I: FADE over two bars, lane 1 alone audible, taken through the cable by lane 4 ────────────────
+    const { fade, msI } = await fadePhase(grownG, rate);
     const inputPeak = guard.max;
     unwatchInput();
 
     looper.clearAll();
     await until('an empty looper after the takes', () => allEmpty() && looper.masterLengthFrames() === 0, 5);
     check(rejected.length === rejectedBefore, `take rejected: ${rejected.slice(rejectedBefore).join(', ')}`);
-    log(`  b${buffer} takes: A ${msA} ms, B ${msB} ms, C ${msC} ms, D ${msD} ms, E ${msE} ms, F ${msF} ms, A2 ${msA2} ms, G ${msG} ms, H ${msH} ms; input peak ${inputPeakA.toFixed(3)} (A), ${inputPeak.toFixed(3)} (all), ${rejected.length - rejectedBefore} rejected`);
+    log(`  b${buffer} takes: A ${msA} ms, B ${msB} ms, C ${msC} ms, D ${msD} ms, E ${msE} ms, F ${msF} ms, A2 ${msA2} ms, G ${msG} ms, H ${msH} ms, I ${msI} ms; input peak ${inputPeakA.toFixed(3)} (A), ${inputPeak.toFixed(3)} (all), ${rejected.length - rejectedBefore} rejected`);
 
     // ── The bars ─────────────────────────────────────────────────────────────────────────────────────
     const takes = [a, b, c, d, e, f, g, h];
@@ -698,10 +818,18 @@ async function runBuffer(buffer: BufferFrames, bars: number, channel: number, re
       { name: 'every beat of H clicks (the trimmed lane through the cable)', ok: h.found === h.beats, value: `${h.found}/${h.beats}` },
       { name: '|loopX_H - loopX_B| <= 0.1 ms (the trimmed lane)', ok: Math.abs(h.x - b.x) <= 0.1, value: signed(h.x - b.x, 3) },
       { name: 'UNDO gives lane 2 back as it was before TRIM', ok: undoDiff === 0, value: `${undoDiff} of ${grownG} frames differ` },
+      { name: 'I: the fading lanes stop on the downbeat the fade ends on', ok: fade.onBar, value: fade.stops },
+      {
+        name: "I: each beat's click through the cable falls, at ((8-k)/8)^2 of the first within 10 % (k <= 5)",
+        ok: fade.levels.every((l, k) => k === 0 || l < fade.levels[k - 1]) && fade.levels.slice(0, 6).every((l, k) => Math.abs(l / ((8 - k) / 8) ** 2 - 1) <= 0.1),
+        value: fade.levels.map((l, k) => `${l.toFixed(3)}/${(((8 - k) / 8) ** 2).toFixed(3)}`).join(' '),
+      },
+      { name: 'I: silence from the bar line (no click over the floor bar)', ok: fade.after < 1, value: `${fade.after.toFixed(3)} of the floor bar` },
+      { name: 'I: PLAY ALL brings lane 1 back at its level (meter 0.8..1.25, volume kept)', ok: fade.back >= 0.8 && fade.back <= 1.25 && fade.volumeKept, value: `${fade.back.toFixed(3)}, volume ${fade.volumeKept ? 'kept' : 'moved'}` },
       ...(echo ? echoBars(echo, a.found) : []),
     ];
     for (const bar of barList) log(`b${buffer} ${bar.ok ? 'PASS' : 'FAIL'} ${bar.name}: ${bar.value}`);
-    return { device, a, b, c, d, e, f, g, h, echo, bars: barList };
+    return { device, a, b, c, d, e, f, g, h, fade, echo, bars: barList };
   } finally {
     unwatchInput();
     if (withEcho) engineInputSends.setOn('echo', false);

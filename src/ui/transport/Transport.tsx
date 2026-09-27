@@ -1,9 +1,10 @@
 import { For, Show, createEffect, createMemo, createSignal, onCleanup } from 'solid-js';
 import { notifyError } from '../../notify';
 import { clock, looper, master, sampleRate } from '../state/audio';
-import { laterTakeBars } from '../state/engine-store';
+import { FADE_BARS, engineFade, laterTakeBars } from '../state/engine-store';
+import { engineMode } from '../../platform';
 import { anyTrackIn, createTwoStepConfirm, masterBars } from '../looper/shared';
-import { fixedGate, tapGate } from '../looper/gates';
+import { fadeGate, fixedGate, tapGate } from '../looper/gates';
 import { meterFrac, registerInputMeter, registerPhaseDial, unregisterInputMeter, unregisterPhaseDial } from '../looper/waveform';
 import { autoRecordThreshold } from '../../audio/looper/auto-record';
 import { InputFx } from './InputFx';
@@ -13,8 +14,9 @@ import './transport.css';
  * Command-bar transport cluster. Renders as a Fragment so its children become direct
  * flex items of the `.cmd` header in app.tsx — the internal `.grow` spacer then pushes master + the
  * app.tsx tool icons to the far right. Left→right: BPM group (34px numeral + steppers + beat dots) ·
- * CLICK / FIXED-N / AUTO / TAP / END STOP toggles · loop ring-dial readout · ■/▶ ALL + ✕ ALL (two-step) + MIC LIVE ·
- * IN FX (engine mode only: `InputFx.tsx`) · spacer · master mute + slider + value. EXPORT / IMPORT are icon tools in app.tsx's `.tools`
+ * CLICK / FIXED-N / AUTO / TAP / END STOP toggles · loop ring-dial readout · ■/▶ ALL + FADE and its bars (engine
+ * mode only) + ✕ ALL (two-step) + MIC LIVE · IN FX (engine mode only: `InputFx.tsx`) · spacer · master mute +
+ * slider + value. EXPORT / IMPORT are icon tools in app.tsx's `.tools`
  * cluster (`SessionTools.tsx`).
  *
  * The ALL / MIC / loop-readout / master controls live here alone — this command-bar cluster is their
@@ -87,7 +89,7 @@ export function Transport(props: { returnFocus?: (el: HTMLElement | undefined) =
   // driven by the waveform rAF loop (registerPhaseDial), not a signal — invariant 6.
   const DIAL_C = 2 * Math.PI * 16;
 
-  // ----- global transport (■/▶ ALL, ✕ ALL two-step, MIC) wired to the shared looper store -----
+  // ----- global transport (■/▶ ALL, FADE, ✕ ALL two-step, MIC) wired to the shared looper store -----
   // Memoized so each five-lane scan runs once per state change, not once per consuming control per render.
   const anyLive = createMemo(() => anyTrackIn('PLAYING', 'OVERDUBBING', 'RECORDING'));
   const anyCapturing = createMemo(() => anyTrackIn('RECORDING', 'OVERDUBBING'));
@@ -123,6 +125,21 @@ export function Transport(props: { returnFocus?: (el: HTMLElement | undefined) =
         : hasMaster()
           ? 'Length of the next take, in bars (at most the loop). A shorter take repeats across the loop'
           : 'Length of the first take, in bars (count-in + auto-stop on the downbeat)';
+
+  // ----- FADE (engine mode): every playing lane fades out over FADE's bars and stops on the bar line; a
+  // second press while they fade stops them at once. Its bars step through FADE_BARS, read at the press.
+  const fadeState = createMemo(() => fadeGate());
+  const fadeBars = () => engineFade.bars();
+  const stepFadeBars = (dir: 1 | -1) => {
+    const k = FADE_BARS.indexOf(fadeBars() as (typeof FADE_BARS)[number]);
+    engineFade.setBars(FADE_BARS[Math.max(0, Math.min(FADE_BARS.length - 1, k + dir))]);
+  };
+  const fadeTitle = () => {
+    const g = fadeState();
+    if (!g.ok) return `Fade out: ${g.reason}`;
+    if (engineFade.fading()) return 'Fading out. Press again to stop now';
+    return `Fade every playing track out over ${fadeBars()} ${fadeBars() === 1 ? 'bar' : 'bars'}, then stop on the bar line`;
+  };
 
   // Two-step clear-all — same latch as the per-track CLR; the guard keeps it from arming with nothing to clear.
   const clearAll = createTwoStepConfirm(() => looper.clearAll());
@@ -418,7 +435,8 @@ export function Transport(props: { returnFocus?: (el: HTMLElement | undefined) =
         </div>
       </div>
 
-      {/* Global transport: ■/▶ ALL · ✕ ALL (two-step) · MIC LIVE · IN FX (the input sends, engine mode). */}
+      {/* Global transport: ■/▶ ALL · FADE + its bars (engine mode) · ✕ ALL (two-step) · MIC LIVE · IN FX (the
+          input sends, engine mode). */}
       <div class="transport__global">
         <button
           class="transport__tgl"
@@ -430,6 +448,42 @@ export function Transport(props: { returnFocus?: (el: HTMLElement | undefined) =
         >
           {anyStopping() ? '■ NOW' : anyLive() ? '■ ALL' : '▶ ALL'}
         </button>
+        <Show when={engineMode()}>
+          <div class="transport__fade" role="group" aria-label="Fade out">
+            <button
+              class="transport__tgl"
+              classList={{ 'is-armed': engineFade.fading() }}
+              disabled={!fadeState().ok}
+              onClick={() => engineFade.fadeAll()}
+              aria-label={engineFade.fading() ? 'Stop the fade now' : 'Fade out all tracks'}
+              title={fadeTitle()}
+            >
+              {engineFade.fading() ? 'FADING' : 'FADE'}
+            </button>
+            <div class="transport__bars" role="group" aria-label="Fade length in bars">
+              <button
+                class="transport__step"
+                aria-label="Shorter fade"
+                disabled={fadeBars() <= FADE_BARS[0]}
+                onClick={() => stepFadeBars(-1)}
+              >
+                −
+              </button>
+              <span class="transport__bars-val">
+                {fadeBars()}
+                <span class="transport__bars-unit">{fadeBars() === 1 ? 'bar' : 'bars'}</span>
+              </span>
+              <button
+                class="transport__step"
+                aria-label="Longer fade"
+                disabled={fadeBars() >= FADE_BARS[FADE_BARS.length - 1]}
+                onClick={() => stepFadeBars(1)}
+              >
+                +
+              </button>
+            </div>
+          </div>
+        </Show>
         <button
           class="transport__tgl"
           classList={{ 'is-armed': clearAll.armed() }}

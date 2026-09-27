@@ -239,7 +239,7 @@ await probe(async ({ browser, open }) => {
       [context, page] = await openPage('engine');
       await page.waitForFunction(() => window.__lf.native.opened.length === 1, undefined, { timeout: 5000 });
       await page.evaluate(() => {
-        const info = { state: 'Empty', length: 0, armed: false, autoArmed: false, canUndo: false, canReverse: false, reversed: false, stopAt: null, retakePass: 0 };
+        const info = { state: 'Empty', length: 0, armed: false, autoArmed: false, canUndo: false, canReverse: false, reversed: false, stopAt: null, fading: false, retakePass: 0 };
         window.__lf.native.emit({
           seq: 1,
           reset: true,

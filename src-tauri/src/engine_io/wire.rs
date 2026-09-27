@@ -56,6 +56,7 @@ enum CommandDef {
     SetMasterVolume(f32),
     SetMasterMute(bool),
     SetLoopEndStop(bool),
+    SetFadeBars(u32),
     SetFixedLength(bool),
     SetFixedBars(f64),
     SetRetake(bool),
@@ -63,6 +64,7 @@ enum CommandDef {
     SetAutoSensitivity(f64),
     SetVolume(u8, f32),
     SetMute(u8, bool),
+    SetDubFeedback(u8, f32),
     SetFxParam(u8, #[serde(with = "fx_param")] FxParam, f64),
     SetFxBypass(u8, #[serde(with = "fx_kind")] FxKind, bool),
     SelectInstrument(#[serde(with = "NoteTargetDef")] NoteTarget),
@@ -94,6 +96,7 @@ enum ActionDef {
     Halve,
     Hold,
     Release,
+    FadeAll,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -140,6 +143,7 @@ struct LaneInfoDef {
     can_reverse: bool,
     reversed: bool,
     stop_at: Option<Frame>,
+    fading: bool,
     retake_pass: u32,
 }
 
@@ -170,6 +174,8 @@ enum RefusalDef {
     NoReverse,
     NoCopy,
     NoFreeLane,
+    Fading,
+    NoFade,
 }
 
 /// An `Instrument` as its id (`Instrument::id`).
@@ -337,7 +343,7 @@ mod tests {
 
     /// Every `Command` variant, by position: a new variant fails to compile here until it has a
     /// number (bump `COMMANDS`) and an example in the fixture.
-    const COMMANDS: usize = 40;
+    const COMMANDS: usize = 42;
     fn command_index(c: &Command) -> usize {
         use Command::*;
         match c {
@@ -381,12 +387,14 @@ mod tests {
             SetInputSendParam(..) => 37,
             Trim(..) => 38,
             Press => 39,
+            SetDubFeedback(..) => 40,
+            SetFadeBars(_) => 41,
         }
     }
 
     /// Every `Action` and `Refusal` variant, by position: a new one fails to compile here until the
     /// fixture sends (or answers) it.
-    const ACTIONS: usize = 14;
+    const ACTIONS: usize = 15;
     fn action_index(a: &Action) -> usize {
         match a {
             Action::RecDub => 0,
@@ -403,10 +411,11 @@ mod tests {
             Action::Halve => 11,
             Action::Hold => 12,
             Action::Release => 13,
+            Action::FadeAll => 14,
         }
     }
 
-    const REFUSALS: usize = 14;
+    const REFUSALS: usize = 16;
     fn refusal_index(r: &Refusal) -> usize {
         match r {
             Refusal::Stopping => 0,
@@ -423,6 +432,8 @@ mod tests {
             Refusal::NoReverse => 11,
             Refusal::NoCopy => 12,
             Refusal::NoFreeLane => 13,
+            Refusal::Fading => 14,
+            Refusal::NoFade => 15,
         }
     }
 
@@ -553,6 +564,10 @@ mod tests {
         assert!(command(r#"{"SetInputSend":["Echo",true]}"#).is_err(), "a send is its key");
         assert_eq!(command(r#"{"Trim":[1,3]}"#).unwrap(), Command::Trim(1, 3));
         assert!(command(r#"{"Trim":[1,-1]}"#).is_err() && command(r#"{"Trim":[1,1.5]}"#).is_err(), "a bar count is a whole number");
+        assert_eq!(command(r#"{"SetFadeBars":4}"#).unwrap(), Command::SetFadeBars(4));
+        assert!(command(r#"{"SetFadeBars":2.5}"#).is_err(), "a fade's bars are a whole number");
+        assert_eq!(command(r#"{"Action":"FadeAll"}"#).unwrap(), Command::Action(Action::FadeAll));
+        assert_eq!(command(r#"{"SetDubFeedback":[2,0.5]}"#).unwrap(), Command::SetDubFeedback(2, 0.5));
         for param in InputSendParam::ALL {
             let json = serde_json::to_value(WireCommand(Command::SetInputSendParam(param, param.range().2))).unwrap();
             assert_eq!(json["SetInputSendParam"][0], Value::from(param.key()));

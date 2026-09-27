@@ -25,6 +25,8 @@ export interface ParsedSessionTrack {
   frames: number;
   /** Exactly 5 entries, chain order filter,pitch,stutter,delay,reverb. */
   fx: FxState[];
+  /** DUB FEEDBACK, clamped to [0, 1]; missing (every export before it) normalizes to 1, a plain sum. */
+  dubFeedback: number;
 }
 export interface ParsedSession {
   bpm: number;
@@ -93,7 +95,8 @@ export function validateSessionPlugins(json: unknown, trackFiles: readonly strin
  * frames that differs from masterLengthFrames, a repeated stem file, or an fx array that doesn't
  * exactly match the five-effect key/range contract. Two fields normalize instead of rejecting: volume
  * clamps into [0, 1.5]; muted accepts legacy 0/1 and missing-as-false; reversed is optional and
- * missing-as-false for legacy format-v1 exports. Per-track state preserves STOPPED; PLAYING stays
+ * missing-as-false for legacy format-v1 exports; dubFeedback is optional, clamps into [0, 1] and reads
+ * missing as 1. Per-track state preserves STOPPED; PLAYING stays
  * PLAYING; missing state and OVERDUBBING normalize to PLAYING because legacy archives omitted state
  * and an export taken during overdub contains only the last committed loop, not the unfinished layer.
  * Other states are rejected rather than reviving an impossible capture state.
@@ -199,7 +202,12 @@ export function validateSession(json: unknown): ParsedSession {
       );
     }
     const fx: FxState[] = validateFxStates(t.fx, `session.json: track ${trackNo}`);
-    return { track: trackNo, file: t.file, volume, muted, reversed, state, frames: master, fx };
+    let dubFeedback = 1;
+    if (typeof t.dubFeedback === 'number' && Number.isFinite(t.dubFeedback)) dubFeedback = Math.max(0, Math.min(1, t.dubFeedback));
+    else if (t.dubFeedback !== undefined) {
+      throw new Error(`session.json: track ${trackNo} dubFeedback must be a number, got ${JSON.stringify(t.dubFeedback)}`);
+    }
+    return { track: trackNo, file: t.file, volume, muted, reversed, state, frames: master, fx, dubFeedback };
   });
   return { bpm, bars, masterLengthFrames: master, sampleRate, tracks };
 }

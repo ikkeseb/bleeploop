@@ -39,6 +39,7 @@ const lane = (state, extra = {}) => ({
   canReverse: false,
   reversed: false,
   stopAt: null,
+  fading: false,
   retakePass: 0,
   ...extra,
 });

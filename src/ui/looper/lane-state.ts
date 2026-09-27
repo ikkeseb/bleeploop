@@ -33,15 +33,18 @@ export const DATA_STATE: Readonly<Record<DisplayState, string>> = {
   STOPPED: 'stop',
 };
 
-/** The word a lane reads as: its display state, unless a pending loop-end stop (ENDING), a mute over a
- * take that is not capturing (MUTED) or a rolling RETAKE (TAKE, with `retakePass`) outranks it. */
-export type LaneWord = DisplayState | 'ENDING' | 'MUTED' | 'TAKE';
+/** The word a lane reads as: its display state, unless a fade (FADING, engine mode), a pending loop-end
+ * stop (ENDING), a mute over a take that is not capturing (MUTED) or a rolling RETAKE (TAKE, with
+ * `retakePass`) outranks it. */
+export type LaneWord = DisplayState | 'FADING' | 'ENDING' | 'MUTED' | 'TAKE';
 
 interface LaneView {
   displayState: Accessor<DisplayState>;
   word: Accessor<LaneWord>;
-  /** A stop is pending at the loop end. */
+  /** A stop is pending: at the loop end, or where a fade ends. */
   stopping: Accessor<boolean>;
+  /** The lane fades out (FADE) and stops where the fade ends. */
+  fading: Accessor<boolean>;
   muted: Accessor<boolean>;
   /** A refused press's reason on this lane (gates.ts `refuseOnLane`), while the cue lasts; else ''. */
   cue: Accessor<string>;
@@ -55,6 +58,7 @@ interface LaneView {
 export function createLaneView(i: number): LaneView {
   const track = looper.track(i);
   const stopping = () => track().stopAt !== null;
+  const fading = () => track().fading === true;
   const muted = () => looper.trackMuted(i);
   // RECORDING-but-armed becomes its own 'ARMED' (waiting-for-downbeat) state. Memoized so unrelated
   // public-track changes cannot re-run what hangs off it (the lane core's glyph is fresh JSX per call).
@@ -66,9 +70,10 @@ export function createLaneView(i: number): LaneView {
   });
   // The word says what the lane SOUNDS like: a muted take that is playing or stopped reads MUTED (the
   // loop still runs — the playhead keeps moving); a live capture keeps its own word so REC/OVERDUB is
-  // never hidden behind a mute. ENDING (stop at loop end) outranks both.
+  // never hidden behind a mute. FADING, and ENDING (stop at loop end), outrank both.
   const word = createMemo((): LaneWord => {
     const d = displayState();
+    if (fading()) return 'FADING';
     if (stopping()) return 'ENDING';
     if (muted() && (d === 'PLAYING' || d === 'STOPPED')) return 'MUTED';
     if (track().retakePass > 0) return 'TAKE'; // a rolling RETAKE counts its passes
@@ -84,6 +89,7 @@ export function createLaneView(i: number): LaneView {
   // (4-3-2-1, the numeral is clock.countLeft); a LATER take waits for the loop boundary → plain text.
   const wellMsg = () => {
     if (cue()) return cue();
+    if (fading()) return 'FADING OUT';
     if (stopping()) return 'STOPPING AT LOOP END';
     if (displayState() === 'ARMED') return looper.masterLengthFrames() > 0 ? 'WAITING FOR DOWNBEAT' : 'COUNT-IN';
     if (displayState() === 'LISTENING') return 'WAITING FOR INPUT';
@@ -91,5 +97,5 @@ export function createLaneView(i: number): LaneView {
   };
   const wellCount = () =>
     !cue() && displayState() === 'ARMED' && looper.masterLengthFrames() === 0 ? clock.countLeft() : 0;
-  return { displayState, word, stopping, muted, cue, wellMsg, wellCount };
+  return { displayState, word, stopping, fading, muted, cue, wellMsg, wellCount };
 }

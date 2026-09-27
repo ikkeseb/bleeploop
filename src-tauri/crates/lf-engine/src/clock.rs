@@ -1,5 +1,6 @@
 //! OWNS: tempo (the BPM and its lock) and the beat pulse: ONE grid that serves the free-run, count-in and
-//! master anchors, the metronome click it triggers and the click's anti-flam guard. Ported from
+//! master anchors, the metronome click it triggers, the click's anti-flam guard and the bar line a FADE
+//! ends on. Ported from
 //! `src/audio/clock.ts`; tap tempo stays in the UI and arrives as a tempo command.
 //!
 //! No lookahead scheduler: a beat fires on the exact frame its grid puts it, inside `process`. Only a
@@ -85,6 +86,14 @@ impl Clock {
     /// The frame the pulse fires its next beat on; `None` before the transport runs.
     pub fn next_beat_frame(&self) -> Option<Frame> {
         self.pulse.map(|p| p.grid.beat_frame(p.next))
+    }
+
+    /// The downbeat `bars` bars after the first one at or after `frame`, on the grid the click plays
+    /// (where a FADE ends); `None` before the transport runs.
+    pub fn downbeat_after(&self, frame: Frame, bars: u64) -> Option<Frame> {
+        let grid = self.pulse?.grid;
+        let first = grid.first_beat_at_or_after(frame).next_multiple_of(BEATS_PER_BAR);
+        Some(grid.beat_frame(first + bars * BEATS_PER_BAR))
     }
 
     /// Start the free-running pulse at `now` if nothing runs yet (the engine's first frame).

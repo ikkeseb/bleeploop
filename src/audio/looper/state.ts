@@ -62,6 +62,8 @@ interface TrackPublic {
   readonly reversed: boolean;
   /** Absolute audio time of a requested loop-end stop; null while no stop is pending. */
   readonly stopAt: number | null;
+  /** Engine mode's FADE: the lane fades out and stops at `stopAt`. This looper never fades (absent). */
+  readonly fading?: boolean;
   /** RETAKE: the 1-based pass being recorded while the take rolls; 0 when this take is not rolling. */
   readonly retakePass: number;
 }

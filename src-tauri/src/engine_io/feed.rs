@@ -38,6 +38,7 @@ const EMPTY_LANE: LaneInfo = LaneInfo {
     can_reverse: false,
     reversed: false,
     stop_at: None,
+    fading: false,
     retake_pass: 0,
 };
 

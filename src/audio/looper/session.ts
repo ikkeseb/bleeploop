@@ -31,6 +31,8 @@ export interface LoadSessionTrack {
   /** Missing stays compatible with older direct fixtures and normalizes to PLAYING. */
   state?: 'PLAYING' | 'STOPPED';
   fx: FxState[];
+  /** DUB FEEDBACK (0..1): engine mode's; this looper only sums and ignores it. Missing reads as 1. */
+  dubFeedback?: number;
 }
 export interface LoadSessionPayload {
   bpm: number;

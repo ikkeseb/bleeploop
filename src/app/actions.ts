@@ -3,13 +3,14 @@ import { engineMode, sendEngine, type EngineAction, type InputSendId } from '../
 import { pressGoLive } from '../ui/instrument/PluginControls';
 import { toggleStage } from '../ui/stage/stage-store';
 import { clock, looper } from '../ui/state/audio';
-import { engineInputSends } from '../ui/state/engine-store';
+import { engineFade, engineInputSends } from '../ui/state/engine-store';
 import { CONFIRM_WINDOW_MS } from '../ui/looper/shared';
 import {
   CONFIRM_CLEAR_TEXT,
   clearGate,
   copyGate,
   dismissLaneCue,
+  fadeGate,
   fixedGate,
   inputFxGate,
   muteGate,
@@ -28,13 +29,14 @@ import {
  * (`transport-keys.ts`) and MIDI learn (`midi-actions.ts`) dispatch through it. Each row runs the path
  * its on-screen control runs: the lane core, ▶/■, ↶ UNDO, CLR, MUTE, ↺ REV, ⧉ COPY and ✂ TRIM (halve:
  * the first half); the command bar's
- * ▶/■ ALL, TAP, CLICK, END STOP, FIXED and IN FX's two sends; the slot's GO LIVE and the stage view's cap.
+ * ▶/■ ALL, FADE, TAP, CLICK, END STOP, FIXED and IN FX's two sends; the slot's GO LIVE and the stage view's
+ * cap.
  *
  * A lane action (`LANE`) acts on a `Target`: the SELECTED track, or a named one. A press on a named
  * track leaves the selection alone, except REC/DUB, which selects its track so the transport keys
  * follow the take. A refused press says why on its lane (gates.ts `refuseOnLane`) instead of doing
  * nothing; a refused global one says it on the selected lane, where the player is looking. In engine
- * mode every lane row, NEXT/PREV TRACK and ▶/■ ALL go to the engine as its `Action`: on the lane the
+ * mode every lane row, NEXT/PREV TRACK, ▶/■ ALL and FADE go to the engine as its `Action`: on the lane the
  * engine has selected when the press lands (never the UI's copy of the selection, which a feed frame
  * may not have refreshed yet), or `ActionOn` a named track. The engine gates them, confirms CLEAR per
  * lane, resolves HOLD's lane and names a refusal on the feed (`src/app/boot.ts` puts it on the lane).
@@ -47,6 +49,7 @@ type GlobalActionId =
   | 'prevTrack'
   | 'playAll'
   | 'stopAll'
+  | 'fadeAll'
   | 'goLive'
   | 'stageView'
   | 'tapTempo'
@@ -75,6 +78,7 @@ export const ACTION_LABELS: Readonly<Record<ActionId, string>> = {
   prevTrack: 'Previous track',
   playAll: 'Play all',
   stopAll: 'Stop all',
+  fadeAll: 'Fade out all',
   goLive: 'Go live',
   stageView: 'Stage view',
   tapTempo: 'Tap tempo',
@@ -165,6 +169,8 @@ const GLOBAL: Readonly<Record<GlobalActionId, () => void>> = {
   prevTrack: step(-1),
   playAll: () => looper.playAll(),
   stopAll: () => looper.stopAll(),
+  // Engine mode sends the engine's FADE (ENGINE_GLOBAL); here, in web mode, the gate says why not.
+  fadeAll: gated(fadeGate, () => engineFade.fadeAll()),
   goLive: () => void pressGoLive(goLiveSlot()),
   stageView: toggleStage,
   tapTempo: gated(tapGate, () => clock.tap()),
@@ -181,6 +187,7 @@ const ENGINE_GLOBAL: Readonly<Partial<Record<GlobalActionId, EngineAction>>> = {
   prevTrack: 'PrevTrack',
   playAll: 'PlayAll',
   stopAll: 'StopAll',
+  fadeAll: 'FadeAll',
 };
 
 /** Every looper press passes here first: any press but CLEAR disarms a pending CLEAR, and every press

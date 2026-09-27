@@ -13,6 +13,7 @@
     "ClearAll",
     { "Action": "RecDub" },
     { "Action": "NextTrack" },
+    { "Action": "FadeAll" },
     { "ActionOn": [2, "Clear"] },
     { "Action": "PlayStop" },
     { "ActionOn": [4, "Undo"] },
@@ -36,6 +37,7 @@
     { "SetMasterVolume": 0.75 },
     { "SetMasterMute": false },
     { "SetLoopEndStop": true },
+    { "SetFadeBars": 4 },
     { "SetFixedLength": true },
     { "SetFixedBars": 4 },
     { "SetRetake": false },
@@ -43,6 +45,7 @@
     { "SetAutoSensitivity": 6 },
     { "SetVolume": [0, 0.8] },
     { "SetMute": [1, true] },
+    { "SetDubFeedback": [2, 0.5] },
     { "SetFxParam": [0, "cutoff", 2400] },
     { "SetFxParam": [3, "feedback", 0.55] },
     { "SetFxBypass": [0, "filter", false] },
@@ -75,6 +78,7 @@
           "canReverse": true,
           "reversed": false,
           "stopAt": null,
+          "fading": false,
           "retakePass": 0
         }
       }
@@ -92,7 +96,26 @@
           "canReverse": false,
           "reversed": true,
           "stopAt": 184200,
+          "fading": false,
           "retakePass": 2
+        }
+      }
+    },
+    {
+      "Lane": {
+        "frame": 98000,
+        "lane": 2,
+        "info": {
+          "state": "Playing",
+          "length": 88200,
+          "armed": false,
+          "autoArmed": false,
+          "canUndo": false,
+          "canReverse": true,
+          "reversed": false,
+          "stopAt": 264600,
+          "fading": true,
+          "retakePass": 0
         }
       }
     },
@@ -113,6 +136,8 @@
     { "Refused": { "frame": 99229, "lane": 3, "reason": "NoReverse" } },
     { "Refused": { "frame": 99230, "lane": 3, "reason": "NoCopy" } },
     { "Refused": { "frame": 99231, "lane": 0, "reason": "NoFreeLane" } },
+    { "Refused": { "frame": 99232, "lane": 2, "reason": "Fading" } },
+    { "Refused": { "frame": 99233, "lane": 0, "reason": "NoFade" } },
     { "TakeRejected": { "frame": 99300, "lane": 1, "overdub": true } },
     { "PassDropped": { "frame": 99400, "lane": 1, "pass": 3 } },
     { "Copied": { "frame": 99500, "from": 0, "to": 3 } },
@@ -194,6 +219,7 @@
               "canReverse": true,
               "reversed": false,
               "stopAt": null,
+              "fading": false,
               "retakePass": 0
             }
           }
@@ -211,6 +237,7 @@
               "canReverse": false,
               "reversed": false,
               "stopAt": null,
+              "fading": false,
               "retakePass": 0
             }
           }
@@ -228,6 +255,7 @@
               "canReverse": false,
               "reversed": false,
               "stopAt": null,
+              "fading": false,
               "retakePass": 0
             }
           }
@@ -245,6 +273,7 @@
               "canReverse": false,
               "reversed": false,
               "stopAt": null,
+              "fading": false,
               "retakePass": 0
             }
           }
@@ -262,6 +291,7 @@
               "canReverse": false,
               "reversed": false,
               "stopAt": null,
+              "fading": false,
               "retakePass": 0
             }
           }

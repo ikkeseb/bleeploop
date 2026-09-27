@@ -1,5 +1,7 @@
 import { For, Show } from 'solid-js';
 import { looper } from '../state/audio';
+import { engineDubFeedback } from '../state/engine-store';
+import { engineMode } from '../../platform';
 import { FX_META, FX_PARAM_DEFS, type FxParamDef } from '../../audio/fx/fx';
 import './fxpanel.css';
 
@@ -8,6 +10,8 @@ import './fxpanel.css';
  * toggle plus its params (sliders for continuous params, a select for tempo-synced divisions).
  * All edits go through the looper's imperative setFx* API, which applies them click-free to the
  * live chain and bumps a reactive version so this panel re-reads state. No audio runs here.
+ * In engine mode a last module holds the lane's DUB FEEDBACK: not an effect on what plays, but what
+ * an overdub keeps of the layers under it (`lf_engine::looper`), so a heading instead of a bypass key.
  */
 
 function formatVal(v: number, def: FxParamDef): string {
@@ -55,6 +59,36 @@ function ParamControl(props: { index: number; fxIndex: number; def: FxParamDef; 
   );
 }
 
+/** DUB FEEDBACK: 100 % keeps every old layer (an overdub sums, as ever), 0 % replaces what the dub passes
+ * over; between, continuous dubbing fades the old layers pass by pass. */
+function DubFeedback(props: { index: number }) {
+  const pct = () => Math.round(engineDubFeedback.value(props.index) * 100);
+  return (
+    <div class="fxp-mod fxp-mod--on fxp-dub">
+      <span class="fxp-mod__title" title="What an overdub keeps of the layers under it, pass by pass. 0 %: the dub replaces them">
+        Dub feedback
+      </span>
+      <div class="fxp-mod__params">
+        <label class="fxp-param">
+          <span class="fxp-param__label">Old</span>
+          <input
+            type="range"
+            class="lf-range fxp-param__range"
+            min={0}
+            max={100}
+            step={1}
+            value={pct()}
+            aria-label={`Track ${props.index + 1} dub feedback`}
+            aria-valuetext={pct() === 0 ? '0 percent: the dub replaces the old layers' : `${pct()} percent of the old layers kept`}
+            onInput={(e) => engineDubFeedback.set(props.index, Number(e.currentTarget.value) / 100)}
+          />
+          <span class="fxp-param__val">{pct() === 0 ? 'REPLACE' : `${pct()} %`}</span>
+        </label>
+      </div>
+    </div>
+  );
+}
+
 export function FxPanel(props: { index: number }) {
   const states = () => looper.fxState(props.index);
 
@@ -93,6 +127,9 @@ export function FxPanel(props: { index: number }) {
           );
         }}
       </For>
+      <Show when={engineMode()}>
+        <DubFeedback index={props.index} />
+      </Show>
     </div>
   );
 }

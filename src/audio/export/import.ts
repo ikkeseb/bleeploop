@@ -124,6 +124,7 @@ export async function importSession(bytes: Uint8Array | ArrayBuffer, source: Ses
       reversed: st.reversed,
       state: st.state,
       fx: st.fx,
+      dubFeedback: st.dubFeedback,
     };
   });
 
