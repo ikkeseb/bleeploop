@@ -52,7 +52,8 @@ keyboard fill the other layers; the computer keyboard is the fallback.
   large enough to read from where you stand with the guitar.
 - Six built-in synths, one of them a 16-voice GM drum kit.
 - Two native CLAP/VST3 plugin slots with floating plugin editors; each slot reloads its last plugin at
-  launch, never armed.
+  launch with the settings you left it at, never armed, and an exported session carries each slot's
+  settings.
 - Guitar or line input monitored through your plugin inside the engine's callback: an 8 ms round
   trip at ASIO 64 and 15 ms at 128 on the developer's interface. Takes are placed from the driver's
   reported latency.

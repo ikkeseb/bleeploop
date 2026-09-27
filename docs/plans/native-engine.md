@@ -634,7 +634,9 @@ device the host services the port under the engine lock. Export's wet master is 
 offline render, so its FX may sound unlike the engine's. Recovery starts once a device runs; it saves the
 committed loops also while a lane records or overdubs (a dubbing lane as its loop before the layer, the
 undo buffer the snapshot pins). Settings,
-rig recall and MIDI bindings stay in TS storage, mirrored to native at boot.
+rig recall and MIDI bindings stay in TS storage, mirrored to native at boot. Each plugin's tone lives
+natively (`src-tauri/src/host/tone.rs`, one file per plugin in the app-local data folder) and crosses to
+TS only inside a session export or import.
 
 **Parity checklist** (each item a cargo test, a UI probe on the fake, or a lap stop): rec/dub/play/
 stop/undo/retake/clear/reverse, count-in and accent, BPM lock, fixed/free length, record cap, auto

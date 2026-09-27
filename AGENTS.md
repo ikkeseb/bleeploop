@@ -119,6 +119,6 @@ together.
 ## Open threads (non-gate)
 
 Everything owed an ear/eye/rig check or an owner decision lives in `STATUS.md`. Besides that:
-**08-11 residuals** — the LoadState timeout (documented at its command fn; needs a design, not a
-token) and the check-then-set race note in the R1 commit message. **Native host residuals** (from
+**08-11 residual** — the check-then-set race note in the R1 commit message (the LoadState request is
+gone: a tone is restored only inside an engine-mode load, `src-tauri/src/host/tone.rs`). **Native host residuals** (from
 the 2026-09-23 audit; no gate): `src-tauri/AGENTS.md` § Open threads.

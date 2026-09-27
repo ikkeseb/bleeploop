@@ -63,7 +63,8 @@ A stop dies when it passes; past 10 stops, consolidate or flag it (AGENTS.md). D
 4. **Long session · grid.** Same jam, 10+ min: loops and click stay tight, no LED hop at commit,
    later takes on-grid, a flam-free commit-beat click; tempo is locked mid-count-in; a free record
    past 60 s auto-closes on a bar (is that UX fine?).
-5. **Reload + editors.** Load → GO LIVE → close and reopen the app → the plugin is back, not live, and
+5. **Reload + editors.** Load → GO LIVE → close and reopen the app → the plugin is back, not live, with
+   the amp-sim's knobs (editor and drawer) where you left them, and
    one GO LIVE re-arms. Editor in front; close → reopen, no hang. FabFilter editor open: a drawer
    slider moves its knob and back; the editor's own size menu → the host window follows.
 6. **Fault injection.** Yank the interface while loops play → a toast, the loops and the plugin stay;
@@ -71,7 +72,7 @@ A stop dies when it passes; past 10 stops, consolidate or flag it (AGENTS.md). D
 7. **Inputs + AUTO REC.** Audio Settings Ch 1 records only physical input 1, Ch 2 only input 2.
    AUTO REC: a muted-guitar noise floor must not arm, a real attack must (sensitivity, onset, feel).
 8. **Session files + Share output.** Export, CLEAR ALL, import the zip: the loops come back on the
-   grid; open a stem and the master in a DAW (the master's FX come from the web path's render: close
+   grid and the amp-sim sounds as it did at the export (a slot holding another plugin gets a toast); open a stem and the master in a DAW (the master's FX come from the web path's render: close
    enough?). Kill the app mid-jam → relaunch restores it. Share output → OBS, Chrome and Discord hear
    the master.
 9. **Synths, FX and WASAPI.** The six synths and the lane FX against the web path (Audio Settings →

@@ -76,6 +76,12 @@ not here.
   Halve track rounds an odd loop down (7 keeps 3). Readable, and right?
 - **↶ UNDO (2026-09-27):** was ↶ DUB; it undoes an overdub or a TRIM, and the pedal action reads
   'Undo / redo'. Right words?
+- **Tone recall (2026-09-27, built, unheard):** tweak the amp-sim in its editor and in the PARAMS drawer,
+  restart, and import a session: does it sound exactly as left each time? A refused tone toasts
+  "<name>: saved settings could not be restored; it loaded with its defaults" at every load until the
+  plugin is changed once (the saved settings are kept): say that they are kept? An import whose slot
+  holds another plugin toasts "This session used X in slot B — load it to hear the session's tone":
+  enough, or offer to load it?
 - **About this build (2026-09-26, built, unseen):** Help's last section — version · commit, Copy
   diagnostics, Open log folder, below the fold at 1280×820. Findable when a tester is asked for it?
 - **Looper prominence:** does the first-run stage read looper-as-hero? `DEFAULT_STAGE_WEIGHTS` in
