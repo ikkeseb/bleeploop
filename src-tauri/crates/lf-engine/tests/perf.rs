@@ -13,6 +13,8 @@
 //!   beside it (no bar of their own; the Stage 3 bar carries them).
 //! - A multiply burst (F14): the eight extension jobs of the worst multiply add under 10 % to the blocks
 //!   they run in.
+//! - A TRIM (F16) of the longest loop (32 bars, the whole 60 s buffer): its job adds under 10 % to the
+//!   blocks it runs in, and no step of it moves more than `JOB_RATE` positions a frame.
 //!
 //! lf-engine builds at opt-level 3 in the dev profile too, but the Stage 3 load mixes in this file,
 //! which the dev profile leaves unoptimized: take the numbers from `--release`. The one test that is
@@ -27,6 +29,7 @@ use common::{code, violation_count, Opts, Rig};
 use lf_engine::dsp::fx::{FxKind, FxParam, MAX_FEEDBACK};
 use lf_engine::dsp::synth::{Bass, PolyKind, PolySynth};
 use lf_engine::grid::Frame;
+use lf_engine::looper::{job_frames, JOB_RATE};
 use lf_engine::{Command, InputSend, InputSendParam, Instrument, LaneState, NoteTarget, ProcessContext};
 
 const RATE: f32 = 48000.0;
@@ -154,6 +157,60 @@ fn a_multiply_burst_costs_under_a_tenth_of_the_block_more() {
     let (during, steady) = (pct(&burst), pct(&after));
     println!("multiply burst, {} blocks of {BLOCK}: mean {during:.1} % (after it {steady:.1} %), worst {worst:.1} % of the block", burst.len());
     assert!(during - steady < 10.0, "the burst costs {:.1} % of the block more", during - steady);
+}
+
+/// The TRIM burst (F16): a 32-bar loop at 128 BPM, the whole 60 s lane buffer, on five playing lanes with
+/// the click on, lane 0 trimmed to its first half. The job copies the loop at `JOB_RATE` positions a frame
+/// (about 59 ms); the blocks it runs in may cost at most a tenth of the block more than the same engine's
+/// blocks after it, on average, and no step moves more than `JOB_RATE` positions a rendered frame. The
+/// worst block prints without a bar.
+#[test]
+#[ignore]
+fn a_trim_of_the_longest_loop_costs_under_a_tenth_of_the_block_more() {
+    let mut rig = Rig::with(Opts { loop_seconds: 60.0, block: BLOCK, ..Default::default() });
+    rig.set(Command::SetBpm(128.0));
+    rig.set(Command::SetMetronome(true));
+    rig.set(Command::SetFixedLength(true));
+    rig.set(Command::SetFixedBars(32.0));
+    rig.set_input(code);
+    rig.press(Command::RecDub(0));
+    while rig.master() == 0 {
+        rig.advance(BLOCK as Frame);
+    }
+    let master = rig.master();
+    assert_eq!(master, 32 * rig.fpb(), "32 bars fill the 60 s buffer");
+    for _ in 1..5 {
+        rig.press(Command::Copy(0));
+        rig.idle();
+    }
+    assert!((0..5).all(|i| rig.state(i) == LaneState::Playing));
+
+    let input: Vec<f32> = (0..BLOCK).map(|k| code(k as Frame) - 0.25).collect();
+    let (mut left, mut right) = (vec![0.0f32; BLOCK], vec![0.0f32; BLOCK]);
+    rig.send_at(rig.frame, Command::Trim(0, 16));
+    let mut frame = rig.frame;
+    let mut block = |engine: &mut lf_engine::Engine| {
+        let ctx = ProcessContext { frame, xrun: false, align_frames: 0, input_frames: 0 };
+        let t = Instant::now();
+        engine.process(&ctx, &input, &mut left, &mut right);
+        frame += BLOCK as Frame;
+        t.elapsed().as_secs_f64()
+    };
+    let mut burst = Vec::new();
+    while burst.is_empty() || rig.engine.looper().busy() {
+        burst.push(block(&mut rig.engine));
+    }
+    assert!(burst.len() as Frame >= job_frames(master) / BLOCK as Frame, "the job ran over {} blocks", burst.len());
+    let after: Vec<f64> = (0..burst.len()).map(|_| block(&mut rig.engine)).collect();
+    let period = BLOCK as f64 / 48000.0;
+    let pct = |t: &[f64]| t.iter().sum::<f64>() / t.len() as f64 / period * 100.0;
+    let worst = burst.iter().copied().fold(0.0, f64::max) / period * 100.0;
+    let (during, steady) = (pct(&burst), pct(&after));
+    let step = rig.engine.looper().job_step_max();
+    println!("trim of {master} frames, {} blocks of {BLOCK}: mean {during:.1} % (after it {steady:.1} %), worst {worst:.1} % of the block; largest job step {step} positions", burst.len());
+    assert!(step <= JOB_RATE * BLOCK as Frame, "a job step moved {step} positions");
+    assert!(during - steady < 10.0, "the trim costs {:.1} % of the block more", during - steady);
+    assert!(rig.lane(0).can_undo && rig.master() == master);
 }
 
 /// What the two input sends add: the Stage 2 engine timed with them off, then (past the reverb's IR

@@ -149,12 +149,23 @@ pub fn later_take_bars(requested: Frame, master_bars: Frame, max_bars: Frame) ->
     (requested / master_bars).min((max_bars / master_bars).max(1)) * master_bars
 }
 
-/// The later-take stop: completed bars since the take's musical start (its window start minus the
-/// alignment), as [`later_take_bars`] counts them: up to the master as they are (at least one), past it
-/// floored to whole loops (a multiply window stopped early).
+/// The later-take stop, in frames from the take's musical start (its window start minus the
+/// alignment). Inside the first loop pass: the completed bars, as [`later_take_bars`] counts them (at
+/// least one: a press inside the first bar records on to its bar line; the quarter-beat grace
+/// included). Past it: the NEAREST whole number of loops (ties go up), at most the whole loops within
+/// `max_bars`, so a player who meant one loop and pressed late keeps one, and one who meant two and
+/// pressed early does not lose the second. The take records on to that boundary when it lies after the
+/// press. One rule for a free later take and a FIXED multiply window stopped early (E10); the caller
+/// keeps it within the window.
 pub fn plan_later_stop(press: Frame, window_start: Frame, align: Frame, fpb: Frame, master_bars: Frame, max_bars: Frame) -> Frame {
     let elapsed = press - (window_start - align);
-    later_take_bars(bars_at(elapsed, fpb), master_bars, max_bars) * fpb
+    let master_bars = master_bars.max(1);
+    let master = master_bars * fpb;
+    if elapsed < master {
+        return later_take_bars(bars_at(elapsed, fpb), master_bars, max_bars) * fpb;
+    }
+    let loops = (2 * elapsed + master).div_euclid(2 * master);
+    loops.min((max_bars / master_bars).max(1)) * master
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -365,10 +376,20 @@ mod tests {
         assert_eq!(plan(2.0 - 1.0 / 32.0), 2);
         assert_eq!(plan(2.0 + 1e-6), 2);
         assert_eq!(plan(8.0), 8);
+        assert_eq!(plan(8.0 - 1.0 / 32.0), 8, "the grace before the loop's end keeps the loop");
+        // Past the first loop pass (a free take, a multiply window): the nearest whole number of loops, a
+        // tie going up, at most the whole loops within the bound (30 bars: three 8-bar loops).
         assert_eq!(plan(11.0), 8);
-        // Past the master (a multiply window) the completed bars floor to whole loops, grace included.
+        assert_eq!(plan(12.0 - 1e-3), 8);
+        assert_eq!(plan(12.0), 16, "a tie goes up");
         assert_eq!(plan(16.0 - 1.0 / 32.0), 16);
-        assert_eq!(plan(23.9), 16);
+        assert_eq!(plan(19.9), 16);
+        assert_eq!(plan(23.9), 24);
+        assert_eq!(plan(29.0), 24, "never past the bound");
+        // Musical time starts `align` before the window: past the first pass the nearest rule counts from
+        // there too.
+        assert_eq!(plan_later_stop(480_000 + 12 * fpb - 1, 480_000 + 960, 960, fpb, 8, 30), 8 * fpb);
+        assert_eq!(plan_later_stop(480_000 + 12 * fpb, 480_000 + 960, 960, fpb, 8, 30), 16 * fpb);
         // The alignment shifts the window, not the musical time: a press just outside the grace stays out.
         let outside = 2 * fpb - fpb / 16 - 240;
         assert_eq!(plan_later_stop(480_000 + outside, 480_000, 0, fpb, 8, 30), fpb);

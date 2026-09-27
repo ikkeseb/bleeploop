@@ -232,7 +232,8 @@ const plain = {
   retakePass: Array.from({ length: ENGINE_LANES }, () => 0),
   /** The master boundary a later take started on (its record head counts from here). */
   takeStart: Array.from({ length: ENGINE_LANES }, () => 0),
-  /** The frames the lane's record head sweeps: the loop, or a multiply window past it. */
+  /** The frames the lane's record head sweeps: the loop, or a multiply window past it; 0 for a free
+   * take, which sweeps the loops it has reached (`laterTakeFrames`). */
   takeFrames: Array.from({ length: ENGINE_LANES }, () => 0),
   master: 0,
   /** The feed's clock anchor, with the master grid's (`grid`); `rate` 0 while no device runs (the
@@ -294,13 +295,17 @@ function whenHeard(frame: number, show: () => void): void {
   beatTimers.add(timer);
 }
 
-/** A later take's record head, 0..1 of the master (of a multiply's window, which grows the loop to it);
- * -1 before a master exists (first take). */
+/** A later take's record head, 0..1 of the master (of a multiply's window, which grows the loop to it;
+ * of a free take's loops so far, which may grow it); -1 before a master exists (first take). */
 function recHeadFrac(i: number): number {
   const m = plain.master;
   if (m <= 0) return -1;
   if (plain.waiting[i]) return phaseValue();
-  const f = (heardFrame() - plain.takeStart[i]) / Math.max(m, plain.takeFrames[i]);
+  const elapsed = heardFrame() - plain.takeStart[i];
+  // A free take (E10) runs until the press: the lane spans the loops it has reached, never promising a
+  // close at the loop's end.
+  const span = plain.takeFrames[i] > 0 ? Math.max(m, plain.takeFrames[i]) : Math.max(1, Math.ceil(elapsed / m)) * m;
+  const f = elapsed / span;
   return f < 0 ? 0 : f > 1 ? 1 : f;
 }
 
@@ -668,14 +673,23 @@ function nextTakeMaxBars(): number {
 }
 
 /** The window a later take records, as the engine's `configure_end` bounds it: FIXED's bars as a later
- * take records them (past the loop, a multiply), else the loop (RETAKE rolls at the loop's length). */
+ * take records them (past the loop, a multiply), the loop under RETAKE (it rolls at the loop's length)
+ * or over a loop of no whole number of bars; 0 for a free take (E10), which runs until the press and
+ * whose length the stop picks. */
 function laterTakeFrames(): number {
   const master = plain.master;
-  if (master <= 0 || !fixedLength() || retake()) return master;
+  if (master <= 0 || retake()) return master;
   const fpb = framesPerBar(bpm(), engineSampleRate());
+  if (!fixedLength()) return master % fpb === 0 ? 0 : master;
   const max = nextTakeMaxBars();
   const bars = master % fpb === 0 ? laterTakeBars(fixedBars(), master / fpb, max) : clampBars(fixedBars(), max);
   return bars * fpb;
+}
+
+/** TRIM (F16): lane `i` keeps its first `bars` bars as heard, repeated across the loop; one UNDO gives
+ * the loop back. The engine judges it and names a refusal on the feed. */
+export function trimLane(i: number, bars: number): void {
+  sendEngine({ Trim: [clampLane(i), Math.max(1, Math.round(bars))] });
 }
 
 /** The first EMPTY lane (where COPY lands), or -1. */

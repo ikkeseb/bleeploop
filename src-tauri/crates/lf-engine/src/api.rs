@@ -29,11 +29,16 @@ pub enum Command {
     /// Abort: a count-in, an armed take, AUTO listening or an uncommitted take go back to EMPTY, an
     /// overdub layer is discarded, a playing lane stops now.
     Stop(u8),
-    /// One-level UNDO/REDO of the lane's last overdub.
+    /// One-level UNDO/REDO of the lane's last overdub or TRIM.
     Undo(u8),
     Reverse(u8),
     /// Copy the lane into the first EMPTY lane (answered by [`Event::Copied`]).
     Copy(u8),
+    /// TRIM (F16): the lane keeps its first `bars` bars as heard and repeats them across the loop, whose
+    /// length stays; the loop before it becomes the lane's undo target. A committed lane only, over a
+    /// loop of whole bars, `1 <= bars <` its bars; anything else is refused with a reason
+    /// ([`Refusal::Capturing`], [`Refusal::Stopping`], [`Refusal::NoTrim`]).
+    Trim(u8, u32),
     /// Clear the lane (the on-screen control confirms first).
     Clear(u8),
     PlayAll,
@@ -274,6 +279,10 @@ pub enum Refusal {
     NoClear,
     /// The first CLEAR press: press again to clear.
     ConfirmClear,
+    /// TRIM on a lane that records or overdubs.
+    Capturing,
+    /// TRIM with nothing to keep: no committed loop of two whole bars or more, or a bar count outside it.
+    NoTrim,
 }
 
 impl Refusal {
@@ -287,6 +296,8 @@ impl Refusal {
             Refusal::NoUndo => "nothing to undo, overdub first",
             Refusal::NoClear => "nothing to clear",
             Refusal::ConfirmClear => "press again to clear",
+            Refusal::Capturing => "this track is recording, stop it first",
+            Refusal::NoTrim => "nothing to trim, the loop needs two bars or more",
         }
     }
 }

@@ -34,7 +34,8 @@ fn snapshot(rig: &mut Rig, samples: usize) -> Snapshot {
 }
 
 /// Three committed lanes at 120 BPM, a one-bar master: lane 0 the frame code, lane 1 a later take of
-/// another signal (then reversed), lane 2 a later take, stopped.
+/// another signal (then reversed), lane 2 a later take, stopped. Each later take ends with REC 1.3 loops
+/// in: one loop, committed at once (E10).
 fn three_lanes() -> Rig {
     let mut rig = Rig::new();
     rig.set(Command::SetBpm(120.0));
@@ -44,7 +45,8 @@ fn three_lanes() -> Rig {
         rig.set_input(move |f| signal * code(f) * 64.0);
         rig.press(Command::RecDub(lane));
         let master = rig.master();
-        rig.advance_to(rig.next_boundary() + master + 4800);
+        rig.advance_to(rig.start_frame() + master * 13 / 10);
+        rig.press(Command::RecDub(lane));
         rig.idle();
         assert_eq!(rig.state(lane as usize), LaneState::Playing);
     }

@@ -184,7 +184,7 @@ export function App() {
     // looper's RAF canvases + capture state do NOT remount.
     <section class="zone zone--looper" aria-label="Looper">
       <div class="zone__body">
-        <Looper />
+        <Looper returnFocus={(el) => transportKeys?.returnFocus(el)} />
       </div>
     </section>
   );

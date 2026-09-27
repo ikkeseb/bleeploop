@@ -1,0 +1,72 @@
+/* ✂ TRIM popover — "Instrument". Hangs under the pill that opened it (anchor positioning, as IN FX's
+   popover hangs from its pill: input-fx.css); only the open lane's pill carries the anchor name, so one
+   name serves five lanes. The floating panel tone and a hairline of top light; chrome stays monochrome,
+   and the TRIM button is the one engaged-looking face (the warm-white legend). */
+.lp-pb--trim.is-open {
+  anchor-name: --lf-trim;
+  color: var(--engaged);
+  background: var(--surf-3);
+}
+.trim-popover {
+  position: fixed;
+  top: 40vh; /* fallback for an engine without anchor positioning (a Mac browser on the rig tier) */
+  right: clamp(16px, 2vw, 28px);
+  position-anchor: --lf-trim;
+  top: calc(anchor(bottom) + 6px);
+  right: anchor(right);
+  position-try-fallbacks: flip-block;
+  outline: none;
+}
+.trim {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 9px 10px;
+  border-radius: 12px;
+  background: var(--panel);
+  border: 1px solid var(--edge);
+  box-shadow: inset 0 1px 0 var(--hair), 0 20px 48px -14px rgba(0, 0, 0, 0.72);
+}
+.trim__label,
+.trim__unit {
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  color: var(--faint);
+}
+.trim__label {
+  margin-right: 2px;
+}
+.trim__val {
+  min-width: 22px;
+  text-align: center;
+  font-family: var(--mono);
+  font-size: 13px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+  line-height: 1;
+}
+.trim__go {
+  margin-left: 6px;
+  height: 24px;
+  padding: 0 12px;
+  border: 1px solid rgba(244, 239, 230, 0.28);
+  border-radius: 7px;
+  background: var(--surf-3);
+  box-shadow: inset 0 1px 0 var(--hair);
+  color: var(--engaged);
+  font-family: var(--sans);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  cursor: pointer;
+  transition: color 0.12s, background-color 0.12s;
+}
+.trim__go:hover {
+  background: color-mix(in srgb, var(--engaged) 10%, var(--surf-3));
+}
+.trim__go:active {
+  background: var(--sunk);
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.6);
+}

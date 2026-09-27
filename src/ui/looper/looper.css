@@ -474,6 +474,11 @@
   min-width: 0;
   padding: 0;
 }
+/* Six pills (FX, MUTE, ↶ UNDO, ↺ REV, ⧉ COPY, ✂ TRIM) overflow one row of the narrowest cluster: COPY and
+   TRIM keep their glyph; their names stay in the label and the title. */
+.lp-lane__mods:has(> :nth-child(6)) .lp-pb__word {
+  display: none;
+}
 
 /* horizontal volume slider — native range styled to match the command bar's .transport__volume */
 .lp-lane__vol {

@@ -4,6 +4,11 @@
 //! so every beat, accent and old lane's phase carries on untouched; every other loop and its undo target
 //! tile out to the new length in block jobs, read through the old loop until they are done. No web guard
 //! precedes this: the Web Audio looper never multiplied.
+//!
+//! E10 (an owner decision): FIXED off, a later take runs until the press, as the first take does, and a
+//! stop past its first loop pass keeps the NEAREST whole number of loops (recording on to it when it lies
+//! ahead), so a free take grows the loop the same way; a FIXED multiply window stopped early follows the
+//! same rule (`e_…`, `j_…`, `k_…`).
 
 mod common;
 
@@ -250,15 +255,22 @@ fn d_undo_after_a_multiply_gives_the_loop_from_before_the_dub_tiled() {
     peaks_describe(&rig, 0, "redone");
 }
 
-/// A two-bar master of the frame code and a FIXED `fixed` take on lane 1 of the negated code, ended by
-/// `stop` (REC/DUB, or the device stopping) `bars` bars after the take's musical start (`None`: at its
-/// window end). Returns the rig (settled), the old loop and the take's first frame.
-fn early_stop(align: Frame, fixed: f64, stop: Option<(f64, bool)>) -> (Rig, Vec<f32>, Frame) {
+/// A two-bar master of the frame code and a take on lane 1 of the negated code (FIXED at `fixed` bars;
+/// `None`: FIXED off, a free take), ended by `stop` (REC/DUB, or the device stopping) `bars` bars after
+/// the take's musical start (`None`: at its window end). Returns the rig (settled), the old loop and the
+/// take's first frame.
+fn early_stop(align: Frame, fixed: Option<f64>, stop: Option<(f64, bool)>) -> (Rig, Vec<f32>, Frame) {
     let mut rig = Rig::with(Opts { align, ..Default::default() });
     master_of(&mut rig, 2, code);
     let old = rig.pcm(0);
     rig.set_input(|f| -code(f));
-    let (start, end) = arm_fixed(&mut rig, 1, fixed);
+    let (start, end) = match fixed {
+        Some(bars) => arm_fixed(&mut rig, 1, bars),
+        None => {
+            rig.press(Command::RecDub(1));
+            (rig.start_frame(), rig.end_frame())
+        }
+    };
     match stop {
         Some((bars, punch_out)) => {
             rig.advance_to(start - align + (bars * rig.fpb() as f64) as Frame);
@@ -270,51 +282,70 @@ fn early_stop(align: Frame, fixed: f64, stop: Option<(f64, bool)>) -> (Rig, Vec<
         }
         None => rig.advance_to(end + 1),
     }
-    // A stop in the grace waits for the bar line.
+    // A stop that records on waits for its bar line or loop boundary.
     if let Some(end) = rig.window().and_then(|w| w.2) {
         rig.advance_to(end + 1);
     }
     rig.set_level(0.0);
     rig.idle();
-    assert!(rig.window().is_none() && rig.state(1) == LaneState::Playing, "{fixed} {stop:?}: committed");
+    assert!(rig.window().is_none() && rig.state(1) == LaneState::Playing, "{fixed:?} {stop:?}: committed");
     (rig, old, start)
 }
 
+/// The first `bars` bars of the take that began at `start`, as it was played.
+fn take_bars(rig: &Rig, start: Frame, bars: Frame) -> Vec<f32> {
+    (0..bars * rig.fpb()).map(|k| -code(start + k)).collect()
+}
+
 #[test]
-fn e_an_early_stop_keeps_whole_loops_past_the_master_and_whole_bars_below_it() {
+fn e_an_early_stop_keeps_the_nearest_whole_loops_past_the_master_and_whole_bars_below_it() {
+    // Both gestures, one rule (E10): a FIXED 8 multiply window and a free take, over a 2-bar master.
     for align in [0, 480] {
-        for punch_out in [false, true] {
-            // 5.3 bars into a FIXED 8 window over a 2-bar master: two whole loops, four bars.
-            let (rig, old, start) = early_stop(align, 8.0, Some((5.3, punch_out)));
-            let fpb = rig.fpb();
-            assert_eq!(rig.master(), 4 * fpb, "align={align} punch_out={punch_out}: 5.3 bars keep 4");
-            let take = rig.pcm(1);
-            assert!(take.iter().enumerate().all(|(k, &x)| x == -code(start + k as Frame)), "the first four bars of the take");
-            assert_eq!(rig.pcm(0), tiled(&old, 4 * fpb));
-            // 1.5 bars: an ordinary one-bar take, tiled across the two-bar master.
-            let (rig, old, start) = early_stop(align, 8.0, Some((1.5, punch_out)));
-            assert_eq!(rig.master(), 2 * fpb, "1.5 bars do not multiply");
-            let bar: Vec<f32> = (0..fpb).map(|k| -code(start + k)).collect();
-            assert_eq!(rig.pcm(1), tiled(&bar, 2 * fpb), "one bar tiled across the master");
-            assert_eq!(rig.pcm(0), old, "the master is untouched");
+        for fixed in [Some(8.0), None] {
+            let fpb = Rig::new().fpb();
+            for punch_out in [false, true] {
+                // 1.5 bars, inside the first loop pass: an ordinary one-bar take, tiled across the master.
+                let (rig, old, start) = early_stop(align, fixed, Some((1.5, punch_out)));
+                assert_eq!(rig.master(), 2 * fpb, "{fixed:?}: 1.5 bars do not multiply");
+                assert_eq!(rig.pcm(1), tiled(&take_bars(&rig, start, 1), 2 * fpb), "one bar tiled across the master");
+                assert_eq!(rig.pcm(0), old, "the master is untouched");
+                // 2.6 bars, 1.3 loops: the nearest is one loop, which the take already holds.
+                let (rig, old, start) = early_stop(align, fixed, Some((2.6, punch_out)));
+                assert_eq!(rig.master(), 2 * fpb, "{fixed:?} punch_out={punch_out}: 1.3 loops keep one");
+                assert!(rig.pcm(1) == take_bars(&rig, start, 2) && rig.pcm(0) == old);
+            }
+            // 5.3 bars, 2.65 loops: REC records on to the nearest whole loop, three (six bars). The device
+            // stopping cannot record on: it keeps the two loops it completed.
+            let (rig, old, start) = early_stop(align, fixed, Some((5.3, false)));
+            assert_eq!(rig.master(), 6 * fpb, "align={align} {fixed:?}: 5.3 bars record on to 6");
+            assert_eq!(rig.pcm(1), take_bars(&rig, start, 6), "the first six bars of the take");
+            assert_eq!(rig.pcm(0), tiled(&old, 6 * fpb));
+            let (rig, old, start) = early_stop(align, fixed, Some((5.3, true)));
+            assert_eq!(rig.master(), 4 * fpb, "a punch-out keeps the completed loops");
+            assert!(rig.pcm(1) == take_bars(&rig, start, 4) && rig.pcm(0) == tiled(&old, 4 * fpb));
+            // 3.5 bars, 1.75 loops: two loops, recording on to the boundary. 3 bars is the tie: up.
+            for bars in [3.5, 3.0] {
+                let (rig, old, start) = early_stop(align, fixed, Some((bars, false)));
+                assert_eq!(rig.master(), 4 * fpb, "{fixed:?}: {bars} bars keep two loops");
+                assert!(rig.pcm(1) == take_bars(&rig, start, 4) && rig.pcm(0) == tiled(&old, 4 * fpb));
+            }
+            // A stop in the grace before the fourth bar line keeps the 4 bars, waiting for the tail.
+            let (rig, _, _) = early_stop(align, fixed, Some((4.0 - 1.0 / 32.0, false)));
+            assert_eq!(rig.master(), 4 * fpb);
+            // A stop inside the first bar records on to its bar line: one bar, tiled.
+            let (rig, _, start) = early_stop(align, fixed, Some((0.4, false)));
+            assert!(rig.master() == 2 * fpb && rig.pcm(1) == tiled(&take_bars(&rig, start, 1), 2 * fpb));
         }
-        // 3.5 bars complete one loop and a half: the master, no multiply.
-        let (rig, old, start) = early_stop(align, 8.0, Some((3.5, false)));
-        let fpb = rig.fpb();
-        assert_eq!(rig.master(), 2 * fpb);
-        assert!(rig.pcm(1).iter().enumerate().all(|(k, &x)| x == -code(start + k as Frame)) && rig.pcm(0) == old);
         // FIXED 3 over a 2-bar master is a 2-bar take: whole loops only.
+        let fpb = Rig::new().fpb();
         let mut rig = Rig::with(Opts { align, ..Default::default() });
         master_of(&mut rig, 2, code);
         let (start, end) = arm_fixed(&mut rig, 1, 3.0);
         assert_eq!(end - start, 2 * fpb, "FIXED 3 records the master's two bars");
         rig.press(Command::Stop(1));
-        let (rig, old, start) = early_stop(align, 3.0, None);
+        let (rig, old, start) = early_stop(align, Some(3.0), None);
         assert_eq!(rig.master(), 2 * fpb);
-        assert!(rig.pcm(1).iter().enumerate().all(|(k, &x)| x == -code(start + k as Frame)) && rig.pcm(0) == old);
-        // A stop in the grace before the fourth bar line keeps the 4 bars, waiting for the tail.
-        let (rig, _, _) = early_stop(align, 8.0, Some((4.0 - 1.0 / 32.0, false)));
-        assert_eq!(rig.master(), 4 * fpb);
+        assert!(rig.pcm(1) == take_bars(&rig, start, 2) && rig.pcm(0) == old);
     }
 }
 
@@ -462,5 +493,87 @@ fn i_the_most_jobs_a_multiply_starts_fit_and_every_step_stays_small() {
             assert_eq!(rig.pcm(i + 2), tiled(&before[i], 4 * master), "block={block}: lane {}'s copy", i + 2);
         }
         steps_stay_small(&rig);
+    }
+}
+
+#[test]
+fn j_a_free_later_take_runs_to_the_longest_multiply_and_closes_there_by_itself() {
+    for align in [0, 480] {
+        let mut rig = Rig::with(Opts { align, ..Default::default() });
+        let master = master_of(&mut rig, 2, code);
+        let old = rig.pcm(0);
+        rig.set_input(|f| -code(f));
+        rig.press(Command::RecDub(1));
+        let (start, end) = (rig.start_frame(), rig.end_frame());
+        let max = rig.engine.looper().next_take_max_bars(rig.bpm());
+        assert_eq!((max, end - start), (10, 10 * rig.fpb()), "the 20 s buffer holds five loops of two bars");
+        rig.advance_to(end);
+        assert_eq!((rig.state(1), rig.master()), (LaneState::Recording, master), "align={align}: it runs on past the loop");
+        rig.advance(1);
+        assert_eq!(rig.master(), 5 * master, "closed by itself: a multiply of five loops");
+        rig.set_level(0.0);
+        rig.idle();
+        assert_eq!(rig.pcm(1), take_bars(&rig, start, 10), "take frame k at loop position k");
+        assert_eq!(rig.pcm(0), tiled(&old, 5 * master), "the old loop, five times, bit-exact");
+        steps_stay_small(&rig);
+    }
+    // RETAKE is unchanged: it rolls at the loop's length.
+    let mut rig = Rig::new();
+    let master = master_of(&mut rig, 2, code);
+    rig.set(Command::SetRetake(true));
+    rig.press(Command::RecDub(1));
+    assert_eq!(rig.end_frame() - rig.start_frame(), master, "a RETAKE pass is one loop");
+    rig.advance_to(rig.end_frame() + 1);
+    assert_eq!((rig.state(1), rig.lane(1).retake_pass, rig.master()), (LaneState::Recording, 2, master));
+}
+
+#[test]
+fn k_a_free_later_take_pressed_past_the_loop_keeps_the_nearest_whole_loops() {
+    for align in [0, 480] {
+        // 1.3 loops: one loop, committed at the press, the master as it was.
+        let mut rig = Rig::with(Opts { align, ..Default::default() });
+        let master = master_of(&mut rig, 2, code);
+        let old = rig.pcm(0);
+        rig.set_input(|f| -code(f));
+        rig.press(Command::RecDub(1));
+        let start = rig.start_frame();
+        rig.advance_to(start - align + master * 13 / 10);
+        rig.press(Command::RecDub(1));
+        assert_eq!((rig.state(1), rig.master()), (LaneState::Playing, master), "align={align}: committed at the press");
+        rig.set_level(0.0);
+        rig.idle();
+        assert!(rig.pcm(1) == take_bars(&rig, start, 2) && rig.pcm(0) == old);
+        steps_stay_small(&rig);
+    }
+    // 1.6 loops: it records on to two loops and commits as a multiply; the old lane (forward or reversed)
+    // plays on unbroken across the take, the commit and the grown loop (a silent take: the tap is lane 0).
+    for reversed in [false, true] {
+        for align in [0, 480] {
+            let mut rig = Rig::with(Opts { align, ..Default::default() });
+            let master = master_of(&mut rig, 2, code);
+            if reversed {
+                rig.press(Command::Reverse(0));
+                rig.advance_to(rig.next_boundary() + 1);
+            }
+            let played = rig.pcm(0);
+            let old_anchor = rig.anchor();
+            rig.keep_output();
+            let from = rig.frame;
+            rig.press(Command::RecDub(1));
+            let start = rig.start_frame();
+            rig.advance_to(start - align + master * 16 / 10);
+            rig.press(Command::RecDub(1));
+            assert_eq!((rig.state(1), rig.end_frame()), (LaneState::Recording, start + 2 * master), "records on to two loops");
+            rig.advance_to(start + 4 * master + master / 3);
+            assert_eq!(rig.master(), 2 * master, "reversed={reversed} align={align}: a multiply to two loops");
+            let out = &rig.output.as_ref().unwrap().1;
+            for f in from..rig.frame {
+                let want = played[(f - old_anchor).rem_euclid(master) as usize];
+                assert_eq!(out[(f - from) as usize], want, "reversed={reversed} align={align}: frame {f}");
+            }
+            rig.idle();
+            assert_eq!(rig.pcm(0), tiled(&played, 2 * master), "the loop as it plays, twice");
+            steps_stay_small(&rig);
+        }
     }
 }

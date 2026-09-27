@@ -3,7 +3,7 @@ import { engineMode, sendEngine, type EngineAction, type InputSendId } from '../
 import { pressGoLive } from '../ui/instrument/PluginControls';
 import { toggleStage } from '../ui/stage/stage-store';
 import { clock, looper } from '../ui/state/audio';
-import { engineInputSends } from '../ui/state/engine-store';
+import { engineInputSends, trimLane } from '../ui/state/engine-store';
 import { CONFIRM_WINDOW_MS } from '../ui/looper/shared';
 import {
   CONFIRM_CLEAR_TEXT,
@@ -12,12 +12,14 @@ import {
   dismissLaneCue,
   fixedGate,
   inputFxGate,
+  loopWholeBars,
   muteGate,
   playStopGate,
   recDubGate,
   refuseOnLane,
   reverseGate,
   tapGate,
+  trimGate,
   undoGate,
   type Gate,
 } from '../ui/looper/gates';
@@ -25,7 +27,8 @@ import {
 /**
  * OWNS: the named actions a hands-free press can reach, in one table. The transport keys
  * (`transport-keys.ts`) and MIDI learn (`midi-actions.ts`) dispatch through it. Each row runs the path
- * its on-screen control runs: the lane core, ▶/■, ↶ DUB, CLR, MUTE, ↺ REV and ⧉ COPY; the command bar's
+ * its on-screen control runs: the lane core, ▶/■, ↶ UNDO, CLR, MUTE, ↺ REV, ⧉ COPY and ✂ TRIM (halve:
+ * the first half); the command bar's
  * ▶/■ ALL, TAP, CLICK, END STOP, FIXED and IN FX's two sends; the slot's GO LIVE and the stage view's cap.
  *
  * A lane action (`LANE`) acts on a `Target`: the SELECTED track, or a named one. A press on a named
@@ -36,7 +39,7 @@ import {
  * names a refusal on the feed (`src/app/boot.ts` puts it on the lane); the others run their control's
  * facade call, which sends the control's own command.
  */
-type LaneActionId = 'recDub' | 'playStop' | 'undo' | 'clear' | 'mute' | 'reverse' | 'copy';
+type LaneActionId = 'recDub' | 'playStop' | 'undo' | 'clear' | 'mute' | 'reverse' | 'copy' | 'halveTrack';
 type GlobalActionId =
   | 'nextTrack'
   | 'prevTrack'
@@ -60,11 +63,12 @@ export type Target = number | null;
 export const ACTION_LABELS: Readonly<Record<ActionId, string>> = {
   recDub: 'Record / overdub',
   playStop: 'Play / stop',
-  undo: 'Undo overdub',
+  undo: 'Undo / redo',
   clear: 'Clear (press twice)',
   mute: 'Mute / unmute',
   reverse: 'Reverse / forward',
   copy: 'Copy to an empty track',
+  halveTrack: 'Halve track (keep first half)',
   nextTrack: 'Next track',
   prevTrack: 'Previous track',
   playAll: 'Play all',
@@ -106,11 +110,13 @@ interface LaneRow {
 const LANE: Readonly<Record<LaneActionId, LaneRow>> = {
   recDub: { gate: recDubGate, act: (i) => void looper.recDub(i), engine: 'RecDub' },
   playStop: { gate: playStopGate, act: (i) => looper.playStop(i), engine: 'PlayStop' },
-  undo: { gate: undoGate, act: (i) => looper.undoLastOverdub(i), engine: 'Undo' }, // a second press redoes, as ↶ DUB does
+  undo: { gate: undoGate, act: (i) => looper.undoLastOverdub(i), engine: 'Undo' }, // a second press redoes, as ↶ UNDO does
   clear: { gate: clearGate, act: clearTrack, engine: 'Clear' },
   mute: { gate: muteGate, act: (i) => looper.setMute(i, !looper.trackMuted(i)) },
   reverse: { gate: reverseGate, act: (i) => looper.reverse(i) },
   copy: { gate: copyGate, act: (i) => void looper.copy(i) },
+  // TRIM to the first half of the loop's bars, rounded down (one UNDO away). The web path has no TRIM.
+  halveTrack: { gate: trimGate, act: (i) => trimLane(i, Math.floor(loopWholeBars() / 2)) },
 };
 
 export function isLaneAction(id: ActionId): id is LaneActionId {

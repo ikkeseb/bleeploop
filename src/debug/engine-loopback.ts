@@ -25,6 +25,14 @@
  *      two loops long after it, and lane 1 holds its loop twice, bit for bit
  *   F  lane 4 cleared and taken again over the grown loop, click on → clickX_F: the click after the
  *      multiply's re-anchor
+ *   CLEAR ALL, then a FIXED first take of half the bars (at least 2) on lane 1, click on: the small loop
+ *   G  lane 2, a FREE take (FIXED off, E10), click on for its first 0.6 loops, lane 1 muted, stopped by
+ *      REC 1.75 loops in → clickX_G: it records on to two loops and the loop grows to them; lane 1
+ *      holds its loop twice, bit for bit
+ *   H  lane 2 TRIMmed to half the small loop's bars (F16): its committed PCM is those bars repeated,
+ *      bit for bit; then lane 3 takes lane 2 through the cable, click off, lane 1 muted → loopX_H: every
+ *      beat of the grown loop clicks (the untrimmed lane is silent past its first loop's clicks), on the
+ *      grid of B; UNDO gives lane 2 back as it was, bit for bit
  * then CLEAR ALL, so the runner's window close meets no jam question. The pass bars print per buffer;
  * the verdict is `complete: …` when every bar passes, `FAIL …` otherwise. A whole-beat offset shows as
  * the accent off beat 1; a whole-bar one cannot show (every bar of the loop sounds alike).
@@ -57,7 +65,7 @@ import { availablePlugins, clearPlugin, nativeHostReady, pluginGain, selectPlugi
 import { goLive, inputArmed, stopLive } from '../audio/native-io';
 import { engineMode, type DeviceStatus, type PluginDescriptor } from '../platform';
 import { clock, looper, master, session } from '../ui/state/audio';
-import { engineDevice, engineInputSends, onEngineEvent, openEngineDevice, setEngineInputChannel } from '../ui/state/engine-store';
+import { engineDevice, engineInputSends, onEngineEvent, openEngineDevice, setEngineInputChannel, trimLane } from '../ui/state/engine-store';
 
 const TAG = '[engine-loopback]';
 const BPM = 120;
@@ -292,6 +300,20 @@ function echoIn(pcm: Float32Array, rate: number): { delay: number; ratio: number
   return { delay: toMs(median(delays), rate), ratio: median(ratios), found: delays.length };
 }
 
+/** Every beat's click in the first `beats` beats of a committed lane (the rest of the take is silent). */
+function analyseFirst(name: string, laneIndex: number, pcm: Float32Array, beats: number, rate: number, ref: Reference, channel: number): TakeStats {
+  return analyse(name, laneIndex, pcm.subarray(0, Math.round((beats * rate * 60) / BPM)), rate, ref, channel);
+}
+
+/** How many samples of `got` differ from `pcm`'s first `frames` repeated out to `got`'s length (the
+ * snapshot already held `got` to the master's length). */
+function tiledDiff(got: Float32Array, pcm: Float32Array, frames: number): number {
+  check(frames > 0 && frames <= pcm.length, `a tile of ${frames} frames from ${pcm.length}`);
+  let diff = 0;
+  for (let k = 0; k < got.length; k++) if (got[k] !== pcm[k % frames]) diff++;
+  return diff;
+}
+
 /** The committed PCM of lane `i`, from the engine's snapshot. */
 async function committedPcm(i: number, masterFrames: number): Promise<Float32Array> {
   const snap = await session.exportSnapshot();
@@ -319,6 +341,8 @@ interface BufferResult {
   d: TakeStats;
   e: TakeStats;
   f: TakeStats;
+  g: TakeStats;
+  h: TakeStats;
   echo: { delay: number; ratio: number; found: number } | null;
   bars: { name: string; ok: boolean; value: string }[];
 }
@@ -528,6 +552,53 @@ async function runBuffer(buffer: BufferFrames, bars: number, channel: number, re
     looper.setMute(4, true);
     const msF = await take(3, 'F', 2 * takeSeconds);
     const f = analyse('F', 3, await committedPcm(3, grown), rate, ref, channel);
+
+    // ── A small loop for G and H: CLEAR ALL, a FIXED first take of half the bars, the click on ─────────
+    looper.clearAll();
+    await until('an empty looper before G', () => allEmpty() && looper.masterLengthFrames() === 0 && !clock.bpmLocked(), 5);
+    clock.setBpm(BPM);
+    await until(`${BPM} BPM on the feed`, () => clock.bpm() === BPM, 5);
+    const small = Math.max(2, Math.floor(bars / 2));
+    const smallFrames = small * framesPerBar(BPM, rate);
+    looper.setFixedLengthBars(small);
+    const msA2 = await take(0, 'A2', 2 + smallFrames / rate + 15);
+    const pcmA2 = await committedPcm(0, smallFrames);
+
+    // ── G: a free take (E10), the click for its first 0.6 loops, REC 1.75 loops in: two loops ──────────
+    looper.setMute(0, true);
+    looper.setFixedLengthEnabled(false);
+    const tG = performance.now();
+    void looper.recDub(1);
+    await until('take G to start recording', () => lane(1).state === 'RECORDING' && !lane(1).armed, smallFrames / rate + 5);
+    const recording = performance.now();
+    const loopMs = (smallFrames / rate) * 1000;
+    await sleep(0.6 * loopMs);
+    clock.setMetronome(false);
+    await sleep(recording + 1.75 * loopMs - performance.now());
+    check(lane(1).state === 'RECORDING', `take G stopped by itself before its REC press (${lane(1).state})`);
+    void looper.recDub(1);
+    await until('take G to commit', () => lane(1).state === 'PLAYING', loopMs / 1000 + 5);
+    const msG = Math.round(performance.now() - tG);
+    const grownG = 2 * smallFrames;
+    check(looper.masterLengthFrames() === grownG, `after take G the master is ${looper.masterLengthFrames()} frames, expected ${grownG} (two loops)`);
+    const pcmG = await committedPcm(1, grownG);
+    // TRIM keeps half the small loop's bars: all inside the clicks' 0.6 loops.
+    const keep = Math.max(1, Math.floor(small / 2));
+    const g = analyseFirst('G', 1, pcmG, 4 * keep, rate, ref, channel);
+    const tileDiffG = tiledDiff(await committedPcm(0, grownG), pcmA2, smallFrames);
+
+    // ── H: TRIM lane 2 to its first bars, then lane 3 takes it through the cable ───────────────────────
+    const keepFrames = keep * framesPerBar(BPM, rate);
+    trimLane(1, keep);
+    await until('lane 2 trimmed', () => lane(1).canUndo, 5);
+    const trimDiff = tiledDiff(await committedPcm(1, grownG), pcmG, keepFrames);
+    looper.setFixedLengthEnabled(true);
+    looper.setFixedLengthBars(2 * small);
+    const msH = await take(2, 'H', 2 * (grownG / rate) + 15);
+    const h = analyse('H', 2, await committedPcm(2, grownG), rate, ref, channel);
+    looper.undoLastOverdub(1);
+    await sleep(300);
+    const undoDiff = tiledDiff(await committedPcm(1, grownG), pcmG, grownG);
     looper.setFixedLengthBars(bars);
     const inputPeak = guard.max;
     unwatchInput();
@@ -535,17 +606,17 @@ async function runBuffer(buffer: BufferFrames, bars: number, channel: number, re
     looper.clearAll();
     await until('an empty looper after the takes', () => allEmpty() && looper.masterLengthFrames() === 0, 5);
     check(rejected.length === rejectedBefore, `take rejected: ${rejected.slice(rejectedBefore).join(', ')}`);
-    log(`  b${buffer} takes: A ${msA} ms, B ${msB} ms, C ${msC} ms, D ${msD} ms, E ${msE} ms, F ${msF} ms; input peak ${inputPeakA.toFixed(3)} (A), ${inputPeak.toFixed(3)} (all), ${rejected.length - rejectedBefore} rejected`);
+    log(`  b${buffer} takes: A ${msA} ms, B ${msB} ms, C ${msC} ms, D ${msD} ms, E ${msE} ms, F ${msF} ms, A2 ${msA2} ms, G ${msG} ms, H ${msH} ms; input peak ${inputPeakA.toFixed(3)} (A), ${inputPeak.toFixed(3)} (all), ${rejected.length - rejectedBefore} rejected`);
 
     // ── The bars ─────────────────────────────────────────────────────────────────────────────────────
-    const takes = [a, b, c, d, e, f];
+    const takes = [a, b, c, d, e, f, g, h];
     const spreads = takes.map((s) => s.max - s.min);
     const drifts = takes.map((s) => s.drift);
     const barList = [
       { name: '|clickX_A| <= 2 ms', ok: Math.abs(a.x) <= 2, value: signed(a.x, 3) },
-      { name: 'accent on beat 1 A-F', ok: takes.every((s) => s.offBar.length === 0), value: takes.map((s) => s.offBar.length).join(',') },
-      { name: 'spread A-F <= 1 ms', ok: spreads.every((s) => s <= 1), value: spreads.map((s) => s.toFixed(3)).join(',') },
-      { name: '|drift| A-F <= 0.1 ms/min', ok: drifts.every((s) => Math.abs(s) <= 0.1), value: drifts.map((s) => signed(s, 3)).join(',') },
+      { name: 'accent on beat 1 A-H', ok: takes.every((s) => s.offBar.length === 0), value: takes.map((s) => s.offBar.length).join(',') },
+      { name: 'spread A-H <= 1 ms', ok: spreads.every((s) => s <= 1), value: spreads.map((s) => s.toFixed(3)).join(',') },
+      { name: '|drift| A-H <= 0.1 ms/min', ok: drifts.every((s) => Math.abs(s) <= 0.1), value: drifts.map((s) => signed(s, 3)).join(',') },
       // The same path measured twice: only the detector differs, so 0.1 ms (4 frames at 44.1 kHz) is room.
       { name: '|loopX_B - 2*clickX_A| <= 0.1 ms', ok: Math.abs(b.x - 2 * a.x) <= 0.1, value: `${signed(b.x, 3)} - 2*${signed(a.x, 3)} = ${signed(b.x - 2 * a.x, 3)}` },
       { name: '|clickX_C - clickX_A| <= 0.1 ms', ok: Math.abs(c.x - a.x) <= 0.1, value: signed(c.x - a.x, 3) },
@@ -553,6 +624,12 @@ async function runBuffer(buffer: BufferFrames, bars: number, channel: number, re
       { name: '|clickX_E - clickX_A| <= 0.1 ms (the multiply take)', ok: Math.abs(e.x - a.x) <= 0.1, value: signed(e.x - a.x, 3) },
       { name: 'lane 1 is its loop twice after the multiply', ok: tileDiff === 0, value: `${tileDiff} of ${grown} frames differ` },
       { name: '|clickX_F - clickX_A| <= 0.1 ms (after the re-anchor)', ok: Math.abs(f.x - a.x) <= 0.1, value: signed(f.x - a.x, 3) },
+      { name: '|clickX_G - clickX_A| <= 0.1 ms (the free take, E10)', ok: Math.abs(g.x - a.x) <= 0.1, value: signed(g.x - a.x, 3) },
+      { name: 'lane 1 is its loop twice after the free take', ok: tileDiffG === 0, value: `${tileDiffG} of ${grownG} frames differ` },
+      { name: `lane 2 is its first ${keep} bar(s) repeated after TRIM`, ok: trimDiff === 0, value: `${trimDiff} of ${grownG} frames differ` },
+      { name: 'every beat of H clicks (the trimmed lane through the cable)', ok: h.found === h.beats, value: `${h.found}/${h.beats}` },
+      { name: '|loopX_H - loopX_B| <= 0.1 ms (the trimmed lane)', ok: Math.abs(h.x - b.x) <= 0.1, value: signed(h.x - b.x, 3) },
+      { name: 'UNDO gives lane 2 back as it was before TRIM', ok: undoDiff === 0, value: `${undoDiff} of ${grownG} frames differ` },
       ...(echo
         ? [
             { name: 'echo in A one sixteenth after its click, within 0.05 ms', ok: echo.found >= takes[0].found / 2 && Math.abs(echo.delay) <= 0.05, value: `${signed(echo.delay, 3)} ms over ${echo.found} beats` },
@@ -561,7 +638,7 @@ async function runBuffer(buffer: BufferFrames, bars: number, channel: number, re
         : []),
     ];
     for (const bar of barList) log(`b${buffer} ${bar.ok ? 'PASS' : 'FAIL'} ${bar.name}: ${bar.value}`);
-    return { device, a, b, c, d, e, f, echo, bars: barList };
+    return { device, a, b, c, d, e, f, g, h, echo, bars: barList };
   } finally {
     unwatchInput();
     if (withEcho) engineInputSends.setOn('echo', false);

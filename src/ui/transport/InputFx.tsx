@@ -1,8 +1,9 @@
-import { For, Show, createEffect, createSignal, onCleanup, onMount } from 'solid-js';
+import { For, Show, createEffect, createSignal } from 'solid-js';
 import { Portal } from 'solid-js/web';
 import { engineMode, type InputSendId } from '../../platform';
 import { engineInputSends, type InputSendParamDef } from '../state/engine-store';
 import { stageOpen } from '../stage/stage-store';
+import { EscapeCloses } from '../looper/shared';
 import '../looper/fxpanel.css';
 import './input-fx.css';
 
@@ -63,16 +64,6 @@ function SendParam(props: { def: InputSendParamDef; send: string }) {
       </Show>
     </label>
   );
-}
-
-/** Close on Escape wherever focus is (a pointer press blurs the control it activated: transport-keys). */
-function EscapeCloses(props: { close: () => void }) {
-  const onKey = (e: KeyboardEvent) => {
-    if (e.key === 'Escape') props.close();
-  };
-  onMount(() => window.addEventListener('keydown', onKey));
-  onCleanup(() => window.removeEventListener('keydown', onKey));
-  return null;
 }
 
 function InputFxControl(props: { returnFocus?: (el: HTMLElement | undefined) => void }) {

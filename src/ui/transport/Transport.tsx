@@ -95,7 +95,8 @@ export function Transport(props: { returnFocus?: (el: HTMLElement | undefined) =
   // ----- FIXED length, shown as what the next take will actually record -----
   // Up to the loop's bar count a later take is that many bars and repeats across the loop; past it the
   // loop grows to it in whole loops (engine mode's multiply), so the stepper moves a bar at a time up to
-  // the loop and a whole loop at a time above it. `nextTakeMaxBars()` bounds it: 32 before a loop, then
+  // the loop and a whole loop at a time above it. FIXED off, an engine-mode take runs until the press and
+  // may grow the loop too (E10: the stop picks the nearest whole number of loops). `nextTakeMaxBars()` bounds it: 32 before a loop, then
   // the longest take the looper records (the web looper: the loop itself). The label and the stepper
   // show the EFFECTIVE value so the UI never promises a take the looper will not record; the signal
   // itself is left alone, so a longer loop restores the user's choice.
@@ -118,7 +119,7 @@ export function Transport(props: { returnFocus?: (el: HTMLElement | undefined) =
     fixedIgnored()
       ? 'RETAKE takes roll at the full loop length, so FIXED is ignored while it is on'
       : canMultiply()
-        ? 'Length of the next take in bars. Shorter than the loop: it repeats across the loop. Longer: the loop grows to it in whole loops, and the other tracks repeat'
+        ? 'Length of the next take in bars. Shorter than the loop: it repeats across the loop. Longer: the loop grows to it in whole loops, and the other tracks repeat. Off: the take runs until you stop it, and a take stopped past the loop grows it to the nearest whole number of loops'
         : hasMaster()
           ? 'Length of the next take, in bars (at most the loop). A shorter take repeats across the loop'
           : 'Length of the first take, in bars (count-in + auto-stop on the downbeat)';

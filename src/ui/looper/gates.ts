@@ -1,5 +1,6 @@
 import { createSignal } from 'solid-js';
-import { clock, looper } from '../state/audio';
+import { clock, looper, sampleRate } from '../state/audio';
+import { framesPerBar } from '../../audio/quantize';
 import { engineMode, type Refusal } from '../../platform';
 
 /**
@@ -38,6 +39,9 @@ const REFUSAL = {
   fixedCapturing: refuse('a take is recording, FIXED changes after it'),
   fixedRetake: refuse('RETAKE is on, so FIXED is ignored'),
   noInputFx: refuse('input effects need the native engine'),
+  capturing: refuse('this track is recording, stop it first'),
+  noTrim: refuse('nothing to trim, the loop needs two bars or more'),
+  needsEngine: refuse('needs the native engine'),
 } as const;
 
 /** CLEAR's first press, by key or pedal: the second one clears (`src/app/actions.ts`). */
@@ -62,6 +66,10 @@ export function refusalText(reason: Refusal): string {
       return REFUSAL.noClear.reason;
     case 'ConfirmClear':
       return CONFIRM_CLEAR_TEXT;
+    case 'Capturing':
+      return REFUSAL.capturing.reason;
+    case 'NoTrim':
+      return REFUSAL.noTrim.reason;
   }
 }
 
@@ -99,10 +107,31 @@ export function playStopGate(i: number): Gate {
   return looper.track(i)().state === 'EMPTY' ? REFUSAL.empty : OK;
 }
 
-/** May UNDO (the lane's ↶ DUB) act on lane `i`? Only with an overdub to swap, and not while ending. */
+/** May UNDO (the lane's ↶ UNDO) act on lane `i`? Only with an overdub or a trim to swap, and not while
+ * ending. */
 export function undoGate(i: number): Gate {
   const t = looper.track(i)();
   if (!t.canUndo) return REFUSAL.noUndo;
+  if (t.stopAt !== null) return REFUSAL.stopping;
+  return OK;
+}
+
+/** The whole bars of the master loop, or 0 when there is none or it is no whole number of bars (a
+ * foreign import): what TRIM can keep a part of. */
+export function loopWholeBars(): number {
+  const master = looper.masterLengthFrames();
+  const fpb = framesPerBar(clock.bpm(), sampleRate());
+  return master > 0 && master % fpb === 0 ? master / fpb : 0;
+}
+
+/** May TRIM (the lane's ✂ TRIM, the halve pedal) act on lane `i`? The engine's own check
+ * (`Looper::trim`), in its order: engine mode only, not while the lane captures, only a committed loop of
+ * two whole bars or more, and not while it stops at the loop end. */
+export function trimGate(i: number): Gate {
+  if (!engineMode()) return REFUSAL.needsEngine;
+  const t = looper.track(i)();
+  if (t.state === 'RECORDING' || t.state === 'OVERDUBBING') return REFUSAL.capturing;
+  if (t.state === 'EMPTY' || loopWholeBars() < 2) return REFUSAL.noTrim;
   if (t.stopAt !== null) return REFUSAL.stopping;
   return OK;
 }

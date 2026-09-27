@@ -1,7 +1,7 @@
 //! OWNS: the looper: the five lanes and their buffers, the single recorder (a take, a RETAKE roll or an
 //! overdub), every EMPTY → RECORDING → PLAYING ⇄ OVERDUBBING (+ STOPPED) transition, the master loop
-//! (its length and grid anchor, and the multiply that grows it), the action gates with their refusals,
-//! and the block jobs that move loop-sized data. Ported from
+//! (its length and grid anchor, and the multiply that grows it), TRIM, the action gates with their
+//! refusals, and the block jobs that move loop-sized data. Ported from
 //! `src/audio/looper/{machine,state,capture,playback,mixer}.ts` and `src/ui/looper/gates.ts`.
 //!
 //! One clock: input frame `x` is captured at device frame `x`, and a lane plays loop position
@@ -12,13 +12,16 @@
 //!
 //! Buffers are a pool allocated once: each lane owns a live and a spare buffer, plus one free buffer the
 //! recorder borrows (a RETAKE's kept pass, an overdub's previous undo target). Undo swaps a lane's live
-//! and spare; a kept retake pass swaps in from the free buffer; reverse is an index-mapping flag. What
+//! and spare (a TRIM swaps them too, and builds the trimmed loop in the new live); a kept retake pass
+//! swaps in from the free buffer; reverse is an index-mapping flag. What
 //! must be copied is a block job (see [`Job`]); nothing does loop-sized work in one callback.
 //!
 //! Every committed lane is one master long. A later take longer than the master (FIXED past the loop:
-//! `grid::later_take_bars`) is a multiply (F14): it commits as the new master, a whole number of old
-//! loops, and every other loop (and its undo target) is tiled out to it by block jobs, so every lane
-//! still has the one length the session, export, undo and the overview know (see `multiply`).
+//! `grid::later_take_bars`, or a free take stopped past its first loop pass: `grid::plan_later_stop`,
+//! E10) is a multiply (F14): it commits as the new master, a whole number of old loops, and every other
+//! loop (and its undo target) is tiled out to it by block jobs, so every lane still has the one length
+//! the session, export, undo and the overview know (see `multiply`). A TRIM (F16) keeps that length too:
+//! the lane's first bars repeat across it (see `trim`).
 
 use std::sync::Arc;
 
@@ -41,8 +44,9 @@ pub const JOB_RATE: Frame = 1024;
 /// The hands-free CLEAR confirm window (`CONFIRM_WINDOW_MS`).
 const CONFIRM_WINDOW_MS: Frame = 2500;
 /// Block jobs in flight at once; `push_job` panics on a full table. A multiply starts the most at one
-/// frame: up to two per other lane (its loop and its undo target, 8), beside the COPYs that may still
-/// run into those lanes (3); 16 leaves room for the jobs pressed while they run.
+/// frame: up to two per other lane (its loop and its undo target, 8), beside the one job that may still
+/// run on each of those lanes (a COPY into it, a TRIM: 4); 16 leaves room for the jobs pressed while
+/// they run.
 const MAX_JOBS: usize = 16;
 /// Lane volume smoothing: the Web Audio setTargetAtTime time constant.
 const GAIN_TAU_SECONDS: f64 = 0.01;
@@ -234,6 +238,9 @@ enum JobKind {
     Restore { src: usize, dst: usize, prev_undo_valid: bool, prev_spare_reversed: bool },
     /// COPY into lane `dst`: done, it becomes STOPPED, or PLAYING when its source played.
     LaneCopy { src: usize, dst: usize, from: usize, to: usize, resume: bool },
+    /// TRIM: `dst` becomes `src` as `fill` maps it, in heard order: the job's positions are loop
+    /// positions as heard, which a `reversed` pair of buffers holds backwards ([`trim_run`]).
+    Trim { src: usize, dst: usize, fill: TakeFill, reversed: bool },
 }
 
 /// Loop-sized work spread over frames: `JOB_RATE` positions per rendered frame from `start`, so its
@@ -639,6 +646,54 @@ impl Looper {
         }
     }
 
+    /// F16 TRIM: lane `i` keeps its first `bars` bars AS HEARD (on a reversed lane, the first bars of its
+    /// reversed playback) and repeats them across the loop, cut at the loop end (3 over 8 plays 3+3+2):
+    /// the map a short later take commits with (`TakeFill::later`), so the loop keeps its length and the
+    /// lane its orientation. The loop before the trim becomes the lane's undo target (replacing an older
+    /// one): UNDO gives it back and a second UNDO trims again, as for an overdub. The trimmed loop is
+    /// built in the spare buffer by a block job in heard order from loop position 0, so it stays ahead of
+    /// the reader of either orientation, and a PLAYING lane hears it from the next loop boundary, where an
+    /// undo or a reverse swaps in. Judged when pressed: refused with a reason on a lane that captures, has
+    /// nothing to keep or is stopping at the loop end; it waits for the lane's jobs (a multiply's
+    /// extension, a COPY into it).
+    pub fn trim(&mut self, cx: &mut Cx, i: usize, bars: Frame) -> Applied {
+        let refuse = |cx: &mut Cx, reason: Refusal| {
+            cx.feed.push(Event::Refused { frame: cx.now, lane: i as u8, reason });
+            Applied::Done
+        };
+        let t = self.lanes[i];
+        if self.capturing(i) {
+            return refuse(cx, Refusal::Capturing);
+        }
+        if !t.committed() {
+            return refuse(cx, Refusal::NoTrim);
+        }
+        if t.stop_at.is_some() {
+            return refuse(cx, Refusal::Stopping);
+        }
+        let (fpb, master) = (self.fpb(cx), self.master);
+        if master % fpb != 0 || bars < 1 || bars >= master / fpb {
+            return refuse(cx, Refusal::NoTrim);
+        }
+        let wait = self.wait_for(Some(i), false);
+        if wait != Applied::Done {
+            return wait;
+        }
+        let t = &mut self.lanes[i];
+        // The spare becomes the trimmed loop. An undo still playing it before its boundary lets go now: the
+        // loop it swapped in plays from this frame (as when an overdub starts there).
+        if t.audible.buf == t.spare {
+            t.audible = t.logical();
+        }
+        std::mem::swap(&mut t.live, &mut t.spare);
+        t.spare_reversed = t.reversed;
+        t.undo_valid = true;
+        let kind = JobKind::Trim { src: t.spare, dst: t.live, fill: TakeFill::later(bars * fpb, fpb, master), reversed: t.reversed };
+        self.follow_logical(cx.now, i);
+        self.push_job(cx.now, i, kind, Visit { lo: 0, span: master, off: 0, modulus: master });
+        Applied::Done
+    }
+
     pub fn copy(&mut self, cx: &mut Cx, i: usize) -> Applied {
         let src = self.lanes[i];
         if !src.committed() {
@@ -853,15 +908,21 @@ impl Looper {
         self.configure_end(cx);
     }
 
-    /// Bound the take at the master, the FIXED bar count or the buffer; RETAKE rolls a known length. A
-    /// later FIXED take past the master is a multiply window, whole loops long.
+    /// Bound the take at the FIXED bar count or the buffer; RETAKE rolls a known length (the master once
+    /// there is one). A later FIXED take past the master is a multiply window, whole loops long. A free
+    /// later take (E10) runs until the press, as the first take does: its window is the longest multiply
+    /// the lane buffer and the FIXED bound allow, where it closes by itself, and the stop plan picks its
+    /// length (`stop_capture`). Over a master of no whole number of bars (a foreign import) it closes at
+    /// the master.
     fn configure_end(&mut self, cx: &Cx) {
         let master = self.master;
         let fixed = self.fixed_length && (master == 0 || !self.retake);
+        let fpb = self.fpb(cx);
         let frames = if fixed {
-            let fpb = self.fpb(cx);
             let bars = if master > 0 { self.later_bars(self.fixed_bars, fpb) } else { clamp_bars(self.fixed_bars, max_whole_bars(self.capacity, fpb)) };
             bars * fpb
+        } else if master > 0 && !self.retake && master % fpb == 0 {
+            (self.later_bars(MAX_FIXED_BARS, fpb) * fpb).max(master)
         } else if master > 0 {
             master
         } else {
@@ -908,8 +969,9 @@ impl Looper {
         let start = rec.start.unwrap();
         if t.state == LaneState::Recording && bar_plan {
             // Whole bars from musical time, with the quarter-beat grace. A first take shorter than a bar
-            // keeps its audio through the press and pads to one bar at the commit. A multiply window
-            // stopped past the master keeps its completed whole loops.
+            // keeps its audio through the press and pads to one bar at the commit. A later take stopped
+            // past its first loop pass (a free one, or a multiply window) ends on the nearest whole loop,
+            // recording on to it when it lies ahead (`plan_later_stop`).
             let fpb = self.fpb(cx);
             if self.master == 0 {
                 let elapsed = rec.downbeat.map_or(0, |d| cx.now - d);
@@ -1357,7 +1419,7 @@ impl Looper {
                     self.resume(cx, to, None);
                 }
             }
-            JobKind::Fill { .. } | JobKind::Copy { .. } => {}
+            JobKind::Fill { .. } | JobKind::Copy { .. } | JobKind::Trim { .. } => {}
         }
         // A multiply's extension is done once the lane has no job left: playback reads it whole.
         if self.jobs.iter().flatten().all(|j| j.lane != job.lane) {
@@ -1397,9 +1459,20 @@ impl Looper {
                 visit.runs(from, to, |a, b| d_buf[a..b].copy_from_slice(&s_buf[a..b]));
                 dst
             }
+            JobKind::Trim { src, dst, fill, reversed } => {
+                let (s_buf, d_buf) = pair(&mut self.bufs, src, dst);
+                visit.runs(from, to, |a, b| trim_run(s_buf, d_buf, fill, reversed, a, b));
+                dst
+            }
         };
         let data = &self.bufs[written];
-        visit.runs(from, to, |a, b| self.overview.touch(written, data, a, b, visit.modulus as usize));
+        let m = visit.modulus as usize;
+        // A reversed trim wrote heard positions `[a, b)`, which its buffer holds at `[m - b, m - a)`.
+        let backwards = matches!(job.kind, JobKind::Trim { reversed: true, .. });
+        visit.runs(from, to, |a, b| {
+            let (a, b) = if backwards { (m - b, m - a) } else { (a, b) };
+            self.overview.touch(written, data, a, b, m);
+        });
     }
 
     /// The transport is audibly alive (the click is a transport mode): until `Frame::MAX` while a lane
@@ -1686,6 +1759,25 @@ fn fill_run(data: &mut [f32], fill: TakeFill, a: usize, b: usize) {
     }
 }
 
+/// Heard positions `[a, b)` of a trimmed loop (`fill.master` frames): heard position `h` plays the old
+/// loop's heard position `fill.source(h)`, which is always inside the kept bars. A buffer pair that plays
+/// `reversed` holds heard position `h` at `master - 1 - h` in both. A piece of the period at a time; the
+/// two buffers are distinct, so nothing overlaps.
+fn trim_run(src: &[f32], dst: &mut [f32], fill: TakeFill, reversed: bool, a: usize, b: usize) {
+    let (period, m) = (fill.period as usize, fill.master as usize);
+    let mut h = a;
+    while h < b {
+        let x = h % period;
+        let n = (b - h).min(period - x);
+        if reversed {
+            dst[m - h - n..m - h].copy_from_slice(&src[m - x - n..m - x]);
+        } else {
+            dst[h..h + n].copy_from_slice(&src[x..x + n]);
+        }
+        h += n;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1729,6 +1821,26 @@ mod tests {
                 let mut got = base.clone();
                 fill_run(&mut got, fill, from as usize, to as usize);
                 assert_eq!(got, want, "{fill:?} {from}..{to}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_trim_run_writes_the_kept_bars_tiled_as_heard_either_way() {
+        let (m, fpb) = (96usize, 12);
+        let src: Vec<f32> = (0..m).map(|k| k as f32 + 1.0).collect();
+        for bars in [1, 3, 5, 7] {
+            let fill = TakeFill::later(bars * fpb, fpb, m as Frame);
+            for reversed in [false, true] {
+                let heard = |buf: &[f32], h: usize| if reversed { buf[m - 1 - h] } else { buf[h] };
+                for (from, to) in [(0, m), (0, 1), (5, 40), (37, m)] {
+                    let mut dst = vec![-1.0f32; m];
+                    trim_run(&src, &mut dst, fill, reversed, from, to);
+                    for h in 0..m {
+                        let want = if (from..to).contains(&h) { heard(&src, fill.source(h as Frame).unwrap() as usize) } else { -1.0 };
+                        assert_eq!(heard(&dst, h), want, "bars={bars} reversed={reversed} {from}..{to} h={h}");
+                    }
+                }
             }
         }
     }

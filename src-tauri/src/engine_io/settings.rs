@@ -91,6 +91,7 @@ fn key(command: &Command) -> Option<Key> {
         | Command::Undo(_)
         | Command::Reverse(_)
         | Command::Copy(_)
+        | Command::Trim(..)
         | Command::Clear(_)
         | Command::PlayAll
         | Command::StopAll

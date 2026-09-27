@@ -6,6 +6,7 @@ import { createTwoStepConfirm, masterBars, volumeDb } from './shared';
 import { announceLooper, liveMsg, playStopGate, recDubGate } from './gates';
 import { DATA_STATE, createLaneView, type LaneWord } from './lane-state';
 import { FxPanel } from './FxPanel';
+import { Trim } from './Trim';
 import './looper.css';
 
 /**
@@ -13,7 +14,7 @@ import './looper.css';
  * `src/ui/AGENTS.md`). Each lane, left→right: an identity box
  * (mono track number + state word), the round core REC/DUB gesture, a stacked PLAY-STOP/CLR pair,
  * the recessed wave well (holding the waveform canvas + its playhead), and a right cluster of
- * FX/MUTE/undo/reverse pills over a horizontal volume slider.
+ * FX/MUTE/undo/reverse/copy/trim pills over a horizontal volume slider.
  *
  * The audio engine, the waveform.ts rAF renderer (which draws each <canvas> by reading non-reactive
  * looper getters), and the per-track state machine are UNCHANGED — this is a presentation layer.
@@ -143,6 +144,7 @@ function TrackLane(props: {
   index: number;
   fxTrack: number | null;
   onToggleFx: (i: number) => void;
+  returnFocus?: (el: HTMLElement | undefined) => void;
 }) {
   const track = looper.track(props.index);
   const state = () => track().state;
@@ -352,17 +354,17 @@ function TrackLane(props: {
             MUTE
           </button>
 
-          {/* One-level undo of the last overdub — appears only once a take has been dubbed (its own
-              affordance = "you just layered, here's undo"). Toggles undo/redo. */}
+          {/* One-level undo of the last overdub or trim — appears only once a take has been dubbed or
+              trimmed (its own affordance = "you just changed it, here's undo"). Toggles undo/redo. */}
           <Show when={canUndo()}>
             <button
               class="lp-pb lp-pb--undo"
               disabled={stopping()}
               onClick={() => looper.undoLastOverdub(props.index)}
-              aria-label={`Track ${props.index + 1} undo or redo the last overdub`}
-              title="Undo / redo the last overdub"
+              aria-label={`Track ${props.index + 1} undo or redo the last overdub or trim`}
+              title="Undo / redo the last overdub or trim"
             >
-              ↶ DUB
+              ↶ UNDO
             </button>
           </Show>
 
@@ -391,9 +393,14 @@ function TrackLane(props: {
               aria-label={`Copy track ${props.index + 1} to the first empty lane`}
               title="Copy this lane to the first empty lane"
             >
-              ⧉ COPY
+              <span>
+                ⧉<span class="lp-pb__word"> COPY</span>
+              </span>
             </button>
           </Show>
+
+          {/* ✂ TRIM (engine mode) — keep the first N bars, repeated across the loop; one UNDO away. */}
+          <Trim index={props.index} returnFocus={props.returnFocus} />
         </div>
 
         <Fader index={props.index} disabled={isEmpty()} />
@@ -402,7 +409,8 @@ function TrackLane(props: {
   );
 }
 
-export function Looper() {
+/** `returnFocus` is the transport keys' (app.tsx), for a keyboard close of a lane's popover. */
+export function Looper(props: { returnFocus?: (el: HTMLElement | undefined) => void }) {
   const master = () => looper.masterLengthFrames();
   const hasMaster = () => master() > 0;
 
@@ -500,7 +508,7 @@ export function Looper() {
         <For each={Array.from({ length: looper.trackCount }, (_, i) => i)}>
           {(i) => (
             <>
-              <TrackLane index={i} fxTrack={fxTrack()} onToggleFx={toggleFx} />
+              <TrackLane index={i} fxTrack={fxTrack()} onToggleFx={toggleFx} returnFocus={props.returnFocus} />
               <Show when={fxTrack() === i}>
                 <div class="lp-drawer" role="group" aria-label={`FX, Track ${i + 1}`}>
                   <div class="lp-drawer__head">

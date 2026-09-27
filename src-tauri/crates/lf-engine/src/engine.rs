@@ -564,6 +564,7 @@ fn apply(looper: &mut Looper, cx: &mut Cx, at: &mut Apply, command: Command) -> 
         Command::Undo(i) => lane(i).map_or(Applied::Done, |i| looper.undo(cx, i)),
         Command::Reverse(i) => lane(i).map_or(Applied::Done, |i| looper.reverse(cx, i)),
         Command::Copy(i) => lane(i).map_or(Applied::Done, |i| looper.copy(cx, i)),
+        Command::Trim(i, bars) => lane(i).map_or(Applied::Done, |i| looper.trim(cx, i, bars as Frame)),
         Command::Clear(i) => lane(i).map_or(Applied::Done, |i| looper.clear(cx, i)),
         Command::PlayAll => looper.play_all(cx),
         Command::StopAll => looper.stop_all(cx),

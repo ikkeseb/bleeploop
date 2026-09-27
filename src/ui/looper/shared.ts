@@ -1,11 +1,11 @@
-import { createSignal, onCleanup } from 'solid-js';
+import { createSignal, onCleanup, onMount } from 'solid-js';
 import { looper, type TrackState } from '../state/audio';
 import { framesPerBar } from '../../audio/quantize';
 
 /**
- * OWNS: the looper-UI helpers that the lanes (`Looper.tsx`), the waveform renderer (`waveform.ts`), the
- * command bar (`Transport.tsx`, `SessionTools.tsx`) and the stage view (`src/ui/stage/StageView.tsx`)
- * share. They live apart from the components so the renderer never imports a component that imports
+ * OWNS: the looper-UI helpers that the lanes (`Looper.tsx`, `Trim.tsx`), the waveform renderer
+ * (`waveform.ts`), the command bar (`Transport.tsx`, `SessionTools.tsx`, `InputFx.tsx`) and the stage
+ * view (`src/ui/stage/StageView.tsx`) share. They live apart from the components so the renderer never imports a component that imports
  * the renderer.
  */
 
@@ -64,4 +64,15 @@ export function createTwoStepConfirm(action: () => void, windowMs = CONFIRM_WIND
   };
   onCleanup(() => clearTimeout(timer));
   return { armed, trigger };
+}
+
+/** Mounted while a popover is open (IN FX, a lane's TRIM): Escape closes it wherever focus is (a pointer
+ * press blurs the control it activated: `transport-keys.ts`). */
+export function EscapeCloses(props: { close: () => void }) {
+  const onKey = (e: KeyboardEvent) => {
+    if (e.key === 'Escape') props.close();
+  };
+  onMount(() => window.addEventListener('keydown', onKey));
+  onCleanup(() => window.removeEventListener('keydown', onKey));
+  return null;
 }

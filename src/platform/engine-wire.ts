@@ -28,7 +28,9 @@ export type Refusal =
   | 'Empty'
   | 'NoUndo'
   | 'NoClear'
-  | 'ConfirmClear';
+  | 'ConfirmClear'
+  | 'Capturing'
+  | 'NoTrim';
 /** The hands-free actions (`src/app/actions.ts`; GO LIVE stays with the plugin host). */
 export type EngineAction = 'RecDub' | 'PlayStop' | 'Undo' | 'Clear' | 'NextTrack' | 'PrevTrack' | 'PlayAll' | 'StopAll';
 /** The built-in instruments by id (`src/audio/synths/index.ts`). */
@@ -51,6 +53,8 @@ const REFUSALS: readonly Refusal[] = [
   'NoUndo',
   'NoClear',
   'ConfirmClear',
+  'Capturing',
+  'NoTrim',
 ];
 const ACTIONS: readonly EngineAction[] = ['RecDub', 'PlayStop', 'Undo', 'Clear', 'NextTrack', 'PrevTrack', 'PlayAll', 'StopAll'];
 const INSTRUMENTS: readonly InstrumentId[] = ['lead', 'pad', 'piano', 'organ', 'bass', 'drum'];
@@ -76,6 +80,8 @@ export type EngineCommand =
   | { Undo: number }
   | { Reverse: number }
   | { Copy: number }
+  /** TRIM (F16): the lane keeps its first `bars` bars as heard, repeated across the loop. */
+  | { Trim: [number, number] }
   | { Clear: number }
   | { SelectTrack: number }
   | { Action: EngineAction }
@@ -457,6 +463,12 @@ export function decodeCommand(raw: unknown): EngineCommand {
         const [l, v] = pair('(lane, volume)');
         lane(l, 'SetVolume.lane');
         num(v, 'SetVolume.volume');
+        break;
+      }
+      case 'Trim': {
+        const [l, bars] = pair('(lane, bars)');
+        lane(l, 'Trim.lane');
+        int(bars, 'Trim.bars', 1);
         break;
       }
       case 'SetMute': {

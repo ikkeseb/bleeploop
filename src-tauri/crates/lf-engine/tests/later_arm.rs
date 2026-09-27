@@ -6,6 +6,9 @@
 //! the take is rejected, never committed shifted. looper-arm's "STOP keeps the committed PCM" on an
 //! overdubbing lane: the engine's Stop discards the whole layer (the Web Audio looper dropped only the
 //! pass since its last boundary swap), so the committed loop is the pre-dub loop.
+//!
+//! A free later take runs until the press (E10; `tests/multiply.rs` holds the take that grows the loop):
+//! the takes here end with a REC press 1.3 loops in, which keeps one loop and commits at once.
 
 mod common;
 
@@ -31,7 +34,9 @@ fn a_later_takes_land_frame_exact_on_the_master_grid() {
                     rig.press(Command::RecDub(1));
                     let boundary = rig.start_frame();
                     assert_eq!(boundary, rig.next_boundary(), "arms on the next boundary");
-                    rig.advance(master * 21 / 10);
+                    rig.advance_to(boundary + master * 13 / 10);
+                    rig.press(Command::RecDub(1));
+                    rig.advance(master * 8 / 10);
                     let pcm = rig.pcm(1);
                     assert!(rig.state(1) == LaneState::Playing && pcm.len() == master as usize);
                     let first = frame_of(pcm[0], boundary);
@@ -59,7 +64,10 @@ fn b_a_gap_before_the_window_costs_nothing_inside_it_rejects_the_take() {
             rig.advance_to(boundary + rig.seconds(0.3));
         }
         rig.gap();
-        rig.advance(master + rig.seconds(4.5));
+        rig.advance(1);
+        rig.advance_to(boundary + master * 13 / 10);
+        rig.press(Command::RecDub(1));
+        rig.advance(rig.seconds(4.5));
         if inside {
             assert!(rig.state(1) == LaneState::Empty && rig.lane(1).length == 0, "a damaged take is never committed");
             assert_eq!(rig.rejected(), 1, "reported once");
@@ -102,7 +110,10 @@ fn arm_2_3_a_later_take_records_from_frame_0_and_a_short_one_tiles() {
     rig.set_level(0.7);
     rig.advance(rig.seconds(0.9));
     rig.press(Command::RecDub(1));
-    rig.advance(2 * master);
+    let boundary = rig.start_frame();
+    rig.advance_to(boundary + master * 13 / 10);
+    rig.press(Command::RecDub(1));
+    rig.advance(master);
     let pcm = rig.pcm(1);
     assert!(rig.state(1) == LaneState::Playing && pcm.len() == master as usize && !rig.lane(1).armed);
     assert!(pcm[0] == 0.7 && pcm[master as usize - 1] == 0.7);
@@ -199,8 +210,12 @@ fn a_gap_on_a_window_edge_damages_nothing() {
         rig.set_level(0.5);
         let master = rig.record_first_take(0, 2, 2400);
         rig.set_input(code);
+        // FIXED at the loop's bars: the window closes on its own edge, one loop in.
+        rig.set(Command::SetFixedLength(true));
+        rig.set(Command::SetFixedBars(2.0));
         rig.press(Command::RecDub(1));
         let (start, end) = (rig.start_frame(), rig.end_frame());
+        assert_eq!(end - start, master);
         rig.advance_to(if at_end { end } else { start });
         rig.gap(); // the block starting on the edge follows the gap
         rig.advance(master + 4800);

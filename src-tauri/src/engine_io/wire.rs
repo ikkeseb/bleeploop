@@ -40,6 +40,7 @@ enum CommandDef {
     Undo(u8),
     Reverse(u8),
     Copy(u8),
+    Trim(u8, u32),
     Clear(u8),
     PlayAll,
     StopAll,
@@ -154,6 +155,8 @@ enum RefusalDef {
     NoUndo,
     NoClear,
     ConfirmClear,
+    Capturing,
+    NoTrim,
 }
 
 /// An `Instrument` as its id (`Instrument::id`).
@@ -321,7 +324,7 @@ mod tests {
 
     /// Every `Command` variant, by position: a new variant fails to compile here until it has a
     /// number (bump `COMMANDS`) and an example in the fixture.
-    const COMMANDS: usize = 38;
+    const COMMANDS: usize = 39;
     fn command_index(c: &Command) -> usize {
         use Command::*;
         match c {
@@ -363,6 +366,7 @@ mod tests {
             SetSlotGain(..) => 35,
             SetInputSend(..) => 36,
             SetInputSendParam(..) => 37,
+            Trim(..) => 38,
         }
     }
 
@@ -470,6 +474,8 @@ mod tests {
         assert!(command(r#"{"SelectInstrument":{"Builtin":"drums"}}"#).is_err(), "an instrument is its id");
         assert_eq!(command(r#"{"SetInputSend":["echo",true]}"#).unwrap(), Command::SetInputSend(InputSend::Echo, true));
         assert!(command(r#"{"SetInputSend":["Echo",true]}"#).is_err(), "a send is its key");
+        assert_eq!(command(r#"{"Trim":[1,3]}"#).unwrap(), Command::Trim(1, 3));
+        assert!(command(r#"{"Trim":[1,-1]}"#).is_err() && command(r#"{"Trim":[1,1.5]}"#).is_err(), "a bar count is a whole number");
         for param in InputSendParam::ALL {
             let json = serde_json::to_value(WireCommand(Command::SetInputSendParam(param, param.range().2))).unwrap();
             assert_eq!(json["SetInputSendParam"][0], Value::from(param.key()));

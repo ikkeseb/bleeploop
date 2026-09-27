@@ -40,7 +40,7 @@ const tag = (v) => (typeof v === 'string' ? [v, undefined] : Object.entries(v)[0
 const keys = (o) => Object.keys(o).sort();
 
 const COMMANDS = [
-  'RecDub', 'PlayStop', 'Stop', 'Undo', 'Reverse', 'Copy', 'Clear', 'PlayAll', 'StopAll', 'ClearAll', 'Action',
+  'RecDub', 'PlayStop', 'Stop', 'Undo', 'Reverse', 'Copy', 'Trim', 'Clear', 'PlayAll', 'StopAll', 'ClearAll', 'Action',
   'ActionOn', 'SelectTrack', 'SetBpm', 'SetMetronome', 'SetClickVolume', 'SetMasterVolume', 'SetMasterMute',
   'SetLoopEndStop', 'SetFixedLength', 'SetFixedBars', 'SetRetake', 'SetAutoRecord', 'SetAutoSensitivity', 'SetVolume',
   'SetMute', 'SetFxParam', 'SetFxBypass', 'SelectInstrument', 'NoteOn', 'NoteOff', 'PitchBend', 'Modulation',
@@ -142,6 +142,8 @@ const refused = {
   'an input send by its Rust name': () => decodeCommand({ SetInputSend: ['Echo', true] }),
   'a snake_case input send param': () => decodeCommand({ SetInputSendParam: ['echo_level', 0.5] }),
   'a lane past the fifth': () => decodeCommand({ RecDub: 5 }),
+  'a trim of no bars': () => decodeCommand({ Trim: [0, 0] }),
+  'a trim of a fractional bar count': () => decodeCommand({ Trim: [0, 1.5] }),
   'an unknown command': () => decodeCommand('Panic'),
   'a feed frame without its events': () => decodeFeedFrame({ seq: 0, reset: false }),
   'a status without inputOpen': () => {

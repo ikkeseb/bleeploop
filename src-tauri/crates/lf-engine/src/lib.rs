@@ -11,7 +11,7 @@
 //! |---|---|---|
 //! | [`grid`] | frames per bar, whole-bar clamps, commit and stop plans, a later take's bars (the multiply), the beat [`grid::Grid`], take fill | `quantize.ts`, `looper/grid-math.ts` |
 //! | [`clock`] | tempo and its lock, the beat pulse (free-run, count-in, master), the click | `clock.ts` |
-//! | [`looper`] | lanes and buffers, the recorder, every transition, the multiply, gates and refusals, block jobs | `looper/{machine,state,capture,playback,mixer}.ts`, `ui/looper/gates.ts` |
+//! | [`looper`] | lanes and buffers, the recorder, every transition, the multiply, TRIM, gates and refusals, block jobs | `looper/{machine,state,capture,playback,mixer}.ts`, `ui/looper/gates.ts` |
 //! | [`autorec`] | the AUTO REC onset detector | `looper/auto-record.ts` |
 //! | [`engine`] | the callback: rings, the block split, the bus topology, master volume | `engine.ts`, `master.ts` |
 //! | [`effects`] | each lane's FX chain, the shared reverb bus, their grid, CLEAR and COPY on a lane's FX | `fx/fx.ts`, `looper/{playback,machine}.ts` |
@@ -26,9 +26,10 @@
 //! # Rules
 //!
 //! - **Every committed lane is one master long.** A later take longer than the master (FIXED past the
-//!   loop) multiplies it: the take becomes the new master, whole old loops long, and the other loops
-//!   tile out to it with the grid, its beats and every lane's phase unchanged (`looper::Looper`'s
-//!   multiply, F14).
+//!   loop, or a free take stopped past its first loop pass: the nearest whole loop, E10) multiplies it:
+//!   the take becomes the new master, whole old loops long, and the other loops tile out to it with the
+//!   grid, its beats and every lane's phase unchanged (`looper::Looper`'s multiply, F14). A TRIM keeps
+//!   the length too: the lane's first bars repeat across the loop (F16).
 //! - **One clock: the device frame.** Input frame `x` is captured at frame `x`; a lane plays loop
 //!   position `(f - anchor) mod master` at frame `f`. A take starts `align_frames` (+ the live effect
 //!   slot's latency, from the block after its live flag changes, and the master limiter's pre-delay)
@@ -45,10 +46,11 @@
 //!   boundary, as a live Web Audio call with no look-ahead does.
 //! - **`process` never allocates, locks or waits.** Buffers are allocated (and their pages touched) in
 //!   `Engine::new`; commands and events cross on rtrb rings; a full event ring drops and counts.
-//! - **No loop-sized work in one callback.** Tiling, the undo copy, a discarded layer's restore, COPY
-//!   and a multiply's extension of the other loops are block jobs of `looper::JOB_RATE` positions per
-//!   rendered frame, started where a read or write head touches next so they stay ahead of it (a lane a
-//!   multiply extends reads through its old loop instead until the extension is done). A command that
+//! - **No loop-sized work in one callback.** Tiling, the undo copy, a discarded layer's restore, COPY,
+//!   a multiply's extension of the other loops and a TRIM are block jobs of `looper::JOB_RATE` positions
+//!   per rendered frame, started where a read or write head touches next so they stay ahead of it (a lane
+//!   a multiply extends reads through its old loop instead until the extension is done; a TRIM writes in
+//!   heard order from loop position 0, where the swap at the next boundary reads first). A command that
 //!   needs a lane's job finished waits for it (on an exact frame), and every command sent after it waits
 //!   behind it, except the instruments', the plugin slots' and the input sends' (a note never waits on
 //!   the looper). A full command table leaves the rest in the ring for the next block: late, never
@@ -73,9 +75,10 @@
 //! before their FX (a bypassed chain is not bit-transparent, as in Tone); `tests/sound.rs` holds the
 //! wired sound. `tests/slots.rs` holds the plugin slots, with fake units that record what they saw in
 //! preallocated buffers (never allocating in `process`) and are handed back to the test to drop;
-//! `tests/punch_out.rs` holds the punch-out, `tests/multiply.rs` the multiply, `tests/input_fx.rs` the
-//! input sends. `tests/perf.rs` holds the ignored cost bars (Stage 2 and 3, the input sends, a multiply's
-//! burst) and the Stage 3 load's alloc check.
+//! `tests/punch_out.rs` holds the punch-out, `tests/multiply.rs` the multiply (a free take's too),
+//! `tests/trim.rs` the TRIM, `tests/input_fx.rs` the input sends. `tests/perf.rs` holds the ignored cost
+//! bars (Stage 2 and 3, the input sends, a multiply's burst, a TRIM's) and the Stage 3 load's alloc
+//! check.
 //!
 //! # Beside this crate, and not built yet
 //!

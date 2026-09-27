@@ -92,6 +92,7 @@ export function Help() {
           <li>Every looper control can be learned. A track action (record, play, undo, clear, mute, reverse, copy) acts on the selected track or on the track you pick; tap tempo, click, end stop, fixed and the input echo and reverb switch as their buttons do</li>
           <li><span class="help__note">HOLD</span> on a momentary record pedal: hold it to record or overdub, let go to stop</li>
           <li>A learned pedal or key only runs its action: it plays no note and holds no sustain. <span class="help__note">✕</span> in the list forgets it</li>
+          <li><span class="help__note">Halve track</span> (MIDI learn only) keeps the selected track's first half, as <span class="help__note">✂ TRIM</span> does; undo gives the whole loop back</li>
         </ul>
       </section>
 
@@ -100,12 +101,14 @@ export function Help() {
         <ul class="help__list">
           <li>The big ring records a track, then overdubs (layers) onto it once it has a take</li>
           <li><span class="help__note">▶ / ■</span> plays or stops a track &middot; <span class="help__note">CLR</span> clears it (press twice to confirm)</li>
-          <li><span class="help__note">↶ DUB</span> undoes the last overdub layer (press again to redo)</li>
+          <li><span class="help__note">↶ UNDO</span> undoes the last overdub layer or trim (press again to redo)</li>
           <li><span class="help__note">FX</span> opens a track's effects &middot; <span class="help__note">MUTE</span> silences it &middot; the volume slider has a 0 dB detent at 1.0</li>
           <li><span class="help__note">↺ REV</span> reverses a track in place. Overdub is blocked while reversed</li>
           <li><span class="help__note">⧉ COPY</span> copies a take to the first empty track</li>
+          <li><span class="help__note">✂ TRIM</span> keeps a track's first bars and repeats them across the loop. The loop keeps its length</li>
           <li>All tracks share one loop, so they stay locked together and can't drift</li>
           <li>A take shorter than the loop repeats across it — stop early, or set the bars with <span class="help__note">FIXED</span></li>
+          <li>Keep playing past the end of the loop and the take grows it: the loop becomes as many whole loops as you played, rounded to the nearest, and the other tracks repeat</li>
         </ul>
       </section>
 
@@ -114,7 +117,7 @@ export function Help() {
         <ul class="help__list">
           <li>A 1-bar count-in (four clicks) leads the first recording. You come in on the counted "1", not the button press</li>
           <li><span class="help__note">CLICK</span> toggles the metronome (its own volume, never recorded, silent while nothing runs)</li>
-          <li><span class="help__note">FIXED N</span> records exactly N bars and auto-stops on the downbeat</li>
+          <li><span class="help__note">FIXED N</span> records exactly N bars and auto-stops on the downbeat. Off, every take runs until you stop it</li>
           <li><span class="help__note">AUTO REC · SENS</span> replaces the first count-in: arm the track, then playing starts the take. Raise sensitivity for quieter input; the cyan tick on the record level is the trigger</li>
           <li>Click the <span class="help__note">BPM</span> to type it, or <span class="help__note">TAP</span> a tempo. Tempo locks to the first loop (clear all to change)</li>
         </ul>
