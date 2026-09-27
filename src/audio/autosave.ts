@@ -29,8 +29,6 @@ const STORE = 'recovery';
 const LATEST = 'latest';
 /** The key of the jam kept at `rate` while `LATEST` holds one at another rate. */
 const keptKey = (rate: number) => `kept-${rate}`;
-/** The one kept jam of a build that kept two jams (never released): filed under its rate's key once. */
-const LEGACY_KEPT = 'kept';
 const POLL_MS = 500;
 const QUIET_MS = 2000;
 
@@ -212,18 +210,6 @@ async function promote(kept: RecoveryRecord, rate: number, latest: RecoveryRecor
   latestRate = rate;
 }
 
-/** File a kept jam from the build that kept two under its rate's key (one whose rate cannot be read
- * stays where it is). */
-async function migrateLegacyKept(): Promise<void> {
-  const legacy = await readRecord(LEGACY_KEPT);
-  const rate = legacy ? recordRate(legacy) : undefined;
-  if (!legacy || rate === undefined) return;
-  await write((store) => {
-    store.put({ ...legacy, key: keptKey(rate), rate } satisfies RecoveryRecord);
-    store.delete(LEGACY_KEPT);
-  });
-}
-
 /** Serialize restore/save/delete so a slow IndexedDB write can never overtake a newer snapshot. */
 function serialized<T>(task: () => Promise<T>): Promise<T> {
   const next = operation.then(task, task);
@@ -306,7 +292,6 @@ async function restoreLatestImpl(): Promise<Restore> {
     const rate = source.sampleRate();
     const latest = await readRecord(LATEST);
     latestRate = latest ? recordRate(latest) : null;
-    await migrateLegacyKept();
     const here = latest && !elsewhere(latestRate, rate) ? latest : null;
     const kept = here ? null : await readRecord(keptKey(rate));
     const saved = here ?? kept;
@@ -437,8 +422,13 @@ async function saveNow(): Promise<void> {
   if (!started) return;
   await readyPromise;
   await serialized(async () => {
+    const token = source.clearToken();
     const committed = await source.exportSnapshot();
-    if (committed.tracks.length > 0) await saveSnapshot(committed);
+    if (committed.tracks.length === 0) return;
+    await saveSnapshot(committed);
+    // A loop exists again, whatever the lanes here still read: a clear from before it no longer empties
+    // the looper, so a flush that sees no loop yet must not spend it on this save.
+    if (token) source.spendClear(token);
   });
 }
 
