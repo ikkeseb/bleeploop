@@ -16,16 +16,14 @@
  * here is a stand-in. Run: pnpm probe diagnostics [--shots=<dir>]
  */
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { buildCommit } from '../../scripts/build-commit.mjs';
 import { readFileSync } from 'node:fs';
 import { arg, probe } from '../harness/probe.ts';
 
 const shots = arg('shots');
 const version = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')).version;
 // The same answer vite.config.ts bakes in; the probe's Vite runs from this checkout.
-const commit = process.env.GITHUB_SHA
-  ? process.env.GITHUB_SHA.slice(0, 7)
-  : execFileSync('git', ['rev-parse', '--short', 'HEAD'], { encoding: 'utf8' }).trim();
+const commit = buildCommit();
 const LOG_DIR = '%LOCALAPPDATA%\\com.bleeploop.app\\logs';
 
 await probe(async ({ browser, open }) => {
