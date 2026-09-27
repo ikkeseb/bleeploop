@@ -1,18 +1,19 @@
 //! OWNS: what the UI draws from the looper, shared with a reader that never takes the engine lock (the
-//! host's feed thread): the master grid's anchor, each lane's buffer, orientation and frames, and each
-//! buffer's waveform peaks. The looper stores into it (relaxed atomic stores and bit sets: it never
-//! allocates, locks or waits); a reader polls it ([`EngineHandle::overview`](crate::EngineHandle)). Each
-//! value is current on its own: a reader may see one lane's update a chunk before another's, and a bin
-//! a chunk before the lane's frames that reach it.
+//! host's feed thread, and its device owner's check that the engine holds audio): the master grid's
+//! anchor, each lane's state, buffer, orientation and frames, and each buffer's waveform peaks. The
+//! looper stores into it (relaxed atomic stores and bit sets: it never allocates, locks or waits); a
+//! reader polls it ([`EngineHandle::overview`](crate::EngineHandle)). Each value is current on its own:
+//! a reader may see one lane's update a chunk before another's, and a bin a chunk before the lane's
+//! frames that reach it.
 //!
 //! Peaks belong to buffers, not lanes: one min/max pair per [`PEAK_FRAMES`] frames (the web looper's
 //! `PEAK_FRAMES`), recomputed wherever a buffer is written (a take's capture, an overdub's sum, AUTO's
 //! onset, the block jobs) and marked dirty for the reader. An undo, a kept RETAKE pass or a reverse
 //! writes nothing: the lane shows another buffer, or the same one backwards ([`LaneView`]).
 
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering::{Acquire, Relaxed, Release}};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, AtomicU8, Ordering::{Acquire, Relaxed, Release}};
 
-use crate::api::TRACK_COUNT;
+use crate::api::{LaneState, TRACK_COUNT};
 use crate::grid::Frame;
 
 /// Frames per waveform bin.
@@ -30,6 +31,8 @@ struct LaneCell {
     buf: AtomicU32,
     frames: AtomicI64,
     reversed: AtomicBool,
+    /// The lane's state, as `state_code` stores it.
+    state: AtomicU8,
 }
 
 /// One buffer's bins: min and max as f32 bits, a dirty bit per bin since the reader last took it, and
@@ -50,8 +53,11 @@ impl Peaks {
 }
 
 /// One lane as the UI draws it.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LaneView {
+    /// Anything but EMPTY holds audio, or will: a loop, a take in flight or armed, a kept RETAKE pass
+    /// (whose `frames` read 0 until the next pass captures).
+    pub state: LaneState,
     /// The buffer the lane shows (its live one): an undo or a kept RETAKE pass changes it.
     pub buf: usize,
     /// What it holds: the frames captured so far while it records a take, its loop once committed
@@ -80,7 +86,12 @@ impl Overview {
 
     pub fn lane(&self, i: usize) -> LaneView {
         let c = &self.lanes[i];
-        LaneView { buf: c.buf.load(Relaxed) as usize, frames: c.frames.load(Relaxed), reversed: c.reversed.load(Relaxed) }
+        LaneView {
+            state: state_of(c.state.load(Relaxed)),
+            buf: c.buf.load(Relaxed) as usize,
+            frames: c.frames.load(Relaxed),
+            reversed: c.reversed.load(Relaxed),
+        }
     }
 
     /// Bins a buffer holds.
@@ -112,6 +123,7 @@ impl Overview {
 
     pub(crate) fn set_lane(&self, i: usize, view: LaneView) {
         let c = &self.lanes[i];
+        c.state.store(state_code(view.state), Relaxed);
         c.buf.store(view.buf as u32, Relaxed);
         c.frames.store(view.frames, Relaxed);
         c.reversed.store(view.reversed, Relaxed);
@@ -169,6 +181,27 @@ impl Overview {
     }
 }
 
+/// A lane state as an atomic holds it (`state_of` reads it back).
+fn state_code(state: LaneState) -> u8 {
+    match state {
+        LaneState::Empty => 0,
+        LaneState::Recording => 1,
+        LaneState::Overdubbing => 2,
+        LaneState::Playing => 3,
+        LaneState::Stopped => 4,
+    }
+}
+
+fn state_of(code: u8) -> LaneState {
+    match code {
+        1 => LaneState::Recording,
+        2 => LaneState::Overdubbing,
+        3 => LaneState::Playing,
+        4 => LaneState::Stopped,
+        _ => LaneState::Empty,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -192,5 +225,15 @@ mod tests {
         o.clear_dirty(0);
         o.take_dirty(0, |b| seen.push(b));
         assert_eq!(seen, [0, 1]);
+    }
+
+    #[test]
+    fn a_lane_reads_back_every_state_it_was_given() {
+        let o = Overview::new(1, PEAK_FRAMES);
+        for state in [LaneState::Empty, LaneState::Recording, LaneState::Overdubbing, LaneState::Playing, LaneState::Stopped] {
+            let view = LaneView { state, buf: 0, frames: 7, reversed: true };
+            o.set_lane(1, view);
+            assert_eq!(o.lane(1), view);
+        }
     }
 }

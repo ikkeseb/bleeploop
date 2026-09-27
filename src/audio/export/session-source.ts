@@ -21,10 +21,15 @@ export interface SessionSource {
    * the loop without the layer in flight), so saves land during a dub. The engine's holds still while a
    * take records too; the web looper's moves with the take's waveform, so no save lands during one. */
   revision(i: number): number;
-  /** The lanes last lost their loops to a player's CLEAR or CLEAR ALL, not to the looper being replaced
-   * (engine mode: another sample rate, a fault, a WebView reload): only then does an empty looper delete
-   * the recovery (`../autosave.ts`). */
-  playerCleared(): boolean;
+  /**
+   * The player's clear that emptied the looper (CLEAR ALL, or the CLEAR of the last loop), while it still
+   * stands: only it lets an empty looper delete the recovery (`../autosave.ts`), once (`spendClear`).
+   * Null after a partial clear, after any commit since, and once the looper was replaced (engine mode:
+   * another sample rate, a fault, a WebView reload), whose empty lanes keep the jam.
+   */
+  clearToken(): ClearToken | null;
+  /** The recovery deleted the jam `token` let it delete. */
+  spendClear(token: ClearToken): void;
   trackVolume(i: number): number;
   trackMuted(i: number): boolean;
   fxState(i: number): FxState[];
@@ -39,7 +44,13 @@ export interface SessionSource {
   masterLevel(): number;
 }
 
+/** A player's clear that emptied the looper, as `SessionSource.clearToken` hands it out: compared by
+ * identity. */
+export type ClearToken = object;
+
 const peakView: PeakView = { min: null, max: null, count: 0, version: -1 };
+/** The web looper's one token: it has no replacement path, so every clear that empties it is the player's. */
+const webClear: ClearToken = {};
 
 /** The web looper as a session source, looked up at each call (as the coordinators did, so a DEV probe
  * that wraps a `looper` member still sees every call). Its snapshot and the lane states are read in one
@@ -51,7 +62,8 @@ export const webSession: SessionSource = {
   stateOf: (i) => looper.stateOf(i),
   trackInfo: (i) => looper.trackInfo(i),
   revision: (i) => looper.peaksInto(i, peakView).version,
-  playerCleared: () => true,
+  clearToken: () => webClear,
+  spendClear: () => {},
   trackVolume: (i) => looper.trackVolume(i),
   trackMuted: (i) => looper.trackMuted(i),
   fxState: (i) => looper.fxState(i),

@@ -513,7 +513,8 @@ impl<D: Driver> Owner<D> {
     }
 
     /// A stream died: stop without a fade, report it, and try the fallbacks in order. One that runs at
-    /// another rate builds a new engine and the loops leave with the old one: `LoopsDropped` says so.
+    /// another rate builds a new engine and the loops leave with the old one, whether or not its streams
+    /// then start: `LoopsDropped` says so, once.
     fn lose(&mut self, bits: u8) {
         let Some(active) = self.active.as_ref() else { return };
         let (lost, backend, reason) = (active.request.clone(), active.spec.backend, error_text(&active.run));
@@ -522,21 +523,37 @@ impl<D: Driver> Owner<D> {
         self.stop(false);
         self.event(DeviceEvent::Lost { backend, reason });
         // Read after the stop: its punch-out may have committed a take.
-        let (held, from) = (self.core.holds_audio(), self.core.rate());
+        let mut held = self.core.rate().filter(|_| self.core.holds_audio());
+        let engine = self.core.engine_gen.load(Acquire);
         let (input, output) = (bits & super::callback::Side::Input as u8 != 0, bits & super::callback::Side::Output as u8 != 0);
         for next in transition::fallbacks(&lost, input, output) {
-            match self.open(next.clone(), By::Owner) {
+            let result = self.open(next.clone(), By::Owner);
+            // A new engine since (here only another rate builds one), whether or not its streams then
+            // started: the loops left with the old one.
+            let dropped = match (held, self.core.rate()) {
+                (Some(from), Some(to)) if self.core.engine_gen.load(Acquire) != engine => {
+                    held = None;
+                    Some((from, to))
+                }
+                _ => None,
+            };
+            let started = match result {
                 Ok(status) => {
                     log::warn!("[engine_io] {} on {:?} \"{}\"", if next == lost { "recovered" } else { "fell back" }, status.backend, status.output_name);
-                    let to = status.sample_rate;
                     self.event(if next == lost { DeviceEvent::Recovered(status) } else { DeviceEvent::Fallback(status) });
-                    if let Some(from) = from.filter(|&from| held && from != to) {
-                        log::warn!("[engine_io] the loops recorded at {from} Hz left with the old engine: \"{device}\" is gone and the device that runs is at {to} Hz");
-                        self.event(DeviceEvent::LoopsDropped { device, from, to });
-                    }
-                    return;
+                    true
                 }
-                Err(error) => log::warn!("[engine_io] fallback {:?} did not open: {error}", next.backend),
+                Err(error) => {
+                    log::warn!("[engine_io] fallback {:?} did not open: {error}", next.backend);
+                    false
+                }
+            };
+            if let Some((from, to)) = dropped {
+                log::warn!("[engine_io] the loops recorded at {from} Hz left with the old engine: \"{device}\" is gone and the engine was rebuilt at {to} Hz");
+                self.event(DeviceEvent::LoopsDropped { device: device.clone(), from, to });
+            }
+            if started {
+                return;
             }
         }
         log::error!("[engine_io] no fallback device opened; the engine waits for the next open");

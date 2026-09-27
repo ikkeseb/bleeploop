@@ -5,17 +5,18 @@
  * - A save holds the committed loops only, and lands while the player keeps capturing: a take in flight
  *   has no loop yet, and a lane mid-overdub is saved as its loop before the layer (the source's
  *   snapshot). It waits for `QUIET_MS` without a committed change, so a long dub costs one save.
- * - Only a player's clear empties the recovery (`SessionSource.playerCleared`). A looper that went empty
- *   because it was replaced (engine mode: another sample rate, a fault) keeps its last jam for the next
- *   launch.
- * - Jams are kept per sample rate, two deep. The engine cannot play loops at another rate (no
- *   resampling), so when a jam at a new rate first saves, the `LATEST` one at the old rate moves to
- *   `KEPT` instead of being overwritten, and a launch at its rate restores it. A clear empties only the
- *   running rate's jam.
+ * - Only the player's clear that emptied the looper empties the recovery (`SessionSource.clearToken`,
+ *   spent by the deletion). A looper that went empty because it was replaced (engine mode: another
+ *   sample rate, a fault) keeps its last jam for the next launch.
+ * - One jam is kept per sample rate. The engine cannot play loops at another rate (no resampling), so a
+ *   jam waits for a launch at its own. `LATEST` holds the most recent jam, and each other rate's waits
+ *   under its own key (`keptKey`). A save supersedes the jam kept at its rate and moves a latest at
+ *   another rate to that rate's key; a player's clear deletes the running rate's jam from both places;
+ *   a launch restores the running rate's jam from either, and it becomes the latest.
  */
 import { notifyError, notifyInfo } from '../notify';
 import { encodeRecovery } from './export/recovery-encode';
-import { exportBase } from './export/stem-archive';
+import { exportBase, type StemSnapshot } from './export/stem-archive';
 import { importSession } from './export/import';
 import { webSession, type SessionSource } from './export/session-source';
 import { parseZip } from './export/unzip';
@@ -24,17 +25,17 @@ import { framesPerBar } from './quantize';
 const DB_NAME = 'bleeploop';
 const DB_VERSION = 1;
 const STORE = 'recovery';
-/** The jam this looper saves, and a clear deletes. */
+/** The most recent jam, whatever its rate. */
 const LATEST = 'latest';
-/** The jam at another rate than `LATEST`'s, moved aside when a jam at a new rate first saved. */
-const KEPT = 'kept';
+/** The key of the jam kept at `rate` while `LATEST` holds one at another rate. */
+const keptKey = (rate: number) => `kept-${rate}`;
+/** The one kept jam of a build that kept two jams (never released): filed under its rate's key once. */
+const LEGACY_KEPT = 'kept';
 const POLL_MS = 500;
 const QUIET_MS = 2000;
 
-type Slot = typeof LATEST | typeof KEPT;
-
 interface RecoveryRecord {
-  key: Slot;
+  key: string;
   savedAt: number;
   /** The jam's sample rate. Records from before it was stored name it only in their archive. */
   rate?: number;
@@ -109,16 +110,16 @@ function requestResult<T>(request: IDBRequest<T>): Promise<T> {
   });
 }
 
-async function readRecord(slot: Slot): Promise<RecoveryRecord | null> {
+async function readRecord(key: string): Promise<RecoveryRecord | null> {
   const db = await openDatabase();
   const tx = db.transaction(STORE, 'readonly');
   const done = transactionDone(tx);
   // Observe both failures immediately: an aborted request also rejects its transaction.
-  const [value] = await Promise.all([requestResult(tx.objectStore(STORE).get(slot)), done]);
+  const [value] = await Promise.all([requestResult(tx.objectStore(STORE).get(key)), done]);
   if (value === undefined) return null;
   const record = value as Partial<RecoveryRecord>;
   if (
-    record.key !== slot ||
+    record.key !== key ||
     typeof record.savedAt !== 'number' ||
     !(record.bytes instanceof ArrayBuffer) ||
     (record.rate !== undefined && typeof record.rate !== 'number')
@@ -126,6 +127,22 @@ async function readRecord(slot: Slot): Promise<RecoveryRecord | null> {
     throw new Error('Saved recovery data has an invalid shape');
   }
   return record as RecoveryRecord;
+}
+
+/** One write transaction: `place` puts its requests on the store. One that throws as it is placed (a
+ * quota error) aborts the transaction, so none of its writes land without the others. */
+async function write(place: (store: IDBObjectStore) => void): Promise<void> {
+  const db = await openDatabase();
+  const tx = db.transaction(STORE, 'readwrite');
+  const done = transactionDone(tx);
+  try {
+    place(tx.objectStore(STORE));
+  } catch (error) {
+    tx.abort();
+    await done.catch(() => undefined);
+    throw error;
+  }
+  await done;
 }
 
 /** A record's sample rate: stored, or read from its archive's session.json (undefined if unreadable). */
@@ -151,51 +168,60 @@ async function latestRateNow(): Promise<number | null | undefined> {
   return latestRate;
 }
 
-/** Save a jam at `rate` as the latest. One at another rate there moves to `KEPT` first (the transaction
- * reads it back, the only save that copies the old archive). */
+/** Save a jam at `rate` as the latest. It supersedes the jam kept at its rate, and a latest at another
+ * rate moves to that rate's key (the transaction reads it back, the only save that copies the old
+ * archive). */
 async function saveLatest(bytes: Uint8Array<ArrayBuffer>, rate: number): Promise<void> {
   const from = await latestRateNow();
-  const db = await openDatabase();
-  const tx = db.transaction(STORE, 'readwrite');
-  const done = transactionDone(tx);
-  const store = tx.objectStore(STORE);
   const record: RecoveryRecord = { key: LATEST, savedAt: Date.now(), rate, bytes: bytes.buffer };
-  if (elsewhere(from, rate)) {
-    const previous = store.get(LATEST);
-    previous.onsuccess = () => {
-      const old = previous.result as RecoveryRecord | undefined;
-      if (old) store.put({ ...old, key: KEPT, rate: from } satisfies RecoveryRecord);
-      store.put(record);
-    };
-  } else {
+  await write((store) => {
+    if (elsewhere(from, rate)) {
+      // Read before the put below replaces it; moved aside once read.
+      const previous = store.get(LATEST);
+      previous.onsuccess = () => {
+        const old = previous.result as RecoveryRecord | undefined;
+        if (old) store.put({ ...old, key: keptKey(from), rate: from } satisfies RecoveryRecord);
+      };
+    }
     store.put(record);
-  }
-  await done;
+    store.delete(keptKey(rate));
+  });
   latestRate = rate;
 }
 
-/** A player's clear at `rate`: delete the latest jam, unless it is one at another rate (never theirs to
- * clear here). */
-async function deleteLatest(rate: number): Promise<void> {
-  if (elsewhere(await latestRateNow(), rate)) return;
-  const db = await openDatabase();
-  const tx = db.transaction(STORE, 'readwrite');
-  const done = transactionDone(tx);
-  tx.objectStore(STORE).delete(LATEST);
-  await done;
-  latestRate = null;
+/** A player's clear at `rate`: delete that rate's jam from both places. A latest at another rate is never
+ * theirs to clear here. */
+async function deleteJam(rate: number): Promise<void> {
+  const mine = !elsewhere(await latestRateNow(), rate);
+  await write((store) => {
+    if (mine) store.delete(LATEST);
+    store.delete(keptKey(rate));
+  });
+  if (mine) latestRate = null;
 }
 
-/** Swap the two slots: the kept jam, just restored, becomes the latest; the latest waits in `KEPT`. */
-async function swapSlots(latest: RecoveryRecord | null, kept: RecoveryRecord): Promise<void> {
-  const db = await openDatabase();
-  const tx = db.transaction(STORE, 'readwrite');
-  const done = transactionDone(tx);
-  const store = tx.objectStore(STORE);
-  store.put({ ...kept, key: LATEST } satisfies RecoveryRecord);
-  if (latest) store.put({ ...latest, key: KEPT, rate: latestRate ?? latest.rate } satisfies RecoveryRecord);
-  else store.delete(KEPT);
-  await done;
+/** The jam kept at `rate`, just restored, becomes the latest; a `latest` at another rate moves to its own
+ * key. */
+async function promote(kept: RecoveryRecord, rate: number, latest: RecoveryRecord | null): Promise<void> {
+  const from = latestRate;
+  await write((store) => {
+    if (latest && typeof from === 'number') store.put({ ...latest, key: keptKey(from), rate: from } satisfies RecoveryRecord);
+    store.put({ ...kept, key: LATEST, rate } satisfies RecoveryRecord);
+    store.delete(keptKey(rate));
+  });
+  latestRate = rate;
+}
+
+/** File a kept jam from the build that kept two under its rate's key (one whose rate cannot be read
+ * stays where it is). */
+async function migrateLegacyKept(): Promise<void> {
+  const legacy = await readRecord(LEGACY_KEPT);
+  const rate = legacy ? recordRate(legacy) : undefined;
+  if (!legacy || rate === undefined) return;
+  await write((store) => {
+    store.put({ ...legacy, key: keptKey(rate), rate } satisfies RecoveryRecord);
+    store.delete(LEGACY_KEPT);
+  });
 }
 
 /** Serialize restore/save/delete so a slow IndexedDB write can never overtake a newer snapshot. */
@@ -234,9 +260,14 @@ function inspectJam(): JamFingerprint {
   return { value: `${committed ? master : '-'}|${parts.join('|')}`, blank, committed };
 }
 
-/** Nothing is committed: a player's clear deletes the running rate's jam; a replaced looper keeps it. */
+/** Nothing is committed. The player's clear that emptied the looper deletes the running rate's jam, once;
+ * a looper that was replaced keeps it. */
 async function forgetJam(): Promise<void> {
-  if (source.playerCleared()) await deleteLatest(source.sampleRate());
+  const token = source.clearToken();
+  if (token) {
+    await deleteJam(source.sampleRate());
+    source.spendClear(token);
+  }
   failedRestoreFingerprint = '';
 }
 
@@ -246,10 +277,15 @@ async function persistCurrent(snapshot = inspectJam()): Promise<void> {
   // the master grid is still 0 frames: the whole-bar check below would reject that as a save failure and
   // the close guard would warn about losing loops that never existed.
   if (!snapshot.committed) return forgetJam();
-  // The tempo is locked while loops exist, so reading it beside the snapshot is safe.
-  const bpm = source.bpm();
   const committed = await source.exportSnapshot();
   if (committed.tracks.length === 0) return forgetJam();
+  await saveSnapshot(committed);
+}
+
+/** Save `committed` (it holds a loop) as the latest jam at its rate. */
+async function saveSnapshot(committed: StemSnapshot): Promise<void> {
+  // The tempo is locked while loops exist, so reading it beside the snapshot is safe.
+  const bpm = source.bpm();
   const masterFrames = committed.masterLengthFrames;
   const perBar = framesPerBar(bpm, committed.sampleRate);
   const bars = masterFrames / perBar;
@@ -263,24 +299,23 @@ async function persistCurrent(snapshot = inspectJam()): Promise<void> {
   failedRestoreFingerprint = '';
 }
 
-/** Restore the jam at the running rate into a blank looper: the latest one, or else the one kept aside
- * at this rate (the slots then swap). */
+/** Restore the jam at the running rate into a blank looper: the latest one, or else the one kept at this
+ * rate, which then becomes the latest. */
 async function restoreLatestImpl(): Promise<Restore> {
   try {
     const rate = source.sampleRate();
     const latest = await readRecord(LATEST);
     latestRate = latest ? recordRate(latest) : null;
-    const kept = elsewhere(latestRate, rate) || !latest ? await readRecord(KEPT) : null;
-    const saved = latest && !elsewhere(latestRate, rate) ? latest : kept && recordRate(kept) === rate ? kept : null;
+    await migrateLegacyKept();
+    const here = latest && !elsewhere(latestRate, rate) ? latest : null;
+    const kept = here ? null : await readRecord(keptKey(rate));
+    const saved = here ?? kept;
     if (!saved || !inspectJam().blank) {
       failedRestoreFingerprint = '';
       return { restored: false, keptAt: !saved && elsewhere(latestRate, rate) ? latestRate : null };
     }
     await importSession(saved.bytes, source);
-    if (saved === kept) {
-      await swapSlots(latest, kept);
-      latestRate = rate;
-    }
+    if (saved === kept) await promote(kept, rate, latest);
     failedRestoreFingerprint = '';
     console.info(`[autosave] restored local recovery from ${new Date(saved.savedAt).toISOString()}`);
     return { restored: true, keptAt: null };
@@ -392,20 +427,33 @@ async function flush(): Promise<void> {
   await serialized(() => persistCurrent());
 }
 
+/**
+ * Save what the looper holds now, from its snapshot, whatever its lanes last showed here: engine mode,
+ * before a switch drops the loops. The device's stop may just have committed a take whose lane still
+ * reads RECORDING (its feed frame not yet in). Saves a snapshot that holds a loop; never deletes. A no-op
+ * before `start`, as `flush`.
+ */
+async function saveNow(): Promise<void> {
+  if (!started) return;
+  await readyPromise;
+  await serialized(async () => {
+    const committed = await source.exportSnapshot();
+    if (committed.tracks.length > 0) await saveSnapshot(committed);
+  });
+}
+
 export const autosave = {
   start,
   /** Resolves when the one startup restore attempt has completed. */
   ready: () => readyPromise,
   flush,
+  saveNow,
   restoreLatest: () => serialized(async () => (await restoreLatestImpl()).restored),
-  /** Delete every saved jam, the kept one too. */
+  /** Delete every saved jam, the kept ones too. */
   clearSaved: () => serialized(async () => {
-    const db = await openDatabase();
-    const tx = db.transaction(STORE, 'readwrite');
-    const done = transactionDone(tx);
-    tx.objectStore(STORE).delete(LATEST);
-    tx.objectStore(STORE).delete(KEPT);
-    await done;
+    await write((store) => {
+      store.clear();
+    });
     latestRate = null;
     failedRestoreFingerprint = '';
   }),

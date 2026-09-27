@@ -21,7 +21,7 @@ import {
 } from '../../platform';
 import type { PeakView, TrackState } from '../../audio/looper/looper';
 import { FX_META, FX_PARAM_DEFS, validateFxStates, type FxParamDef, type FxState } from '../../audio/fx/metadata';
-import type { SessionSource } from '../../audio/export/session-source';
+import type { ClearToken, SessionSource } from '../../audio/export/session-source';
 import type { StemSnapshot } from '../../audio/export/stem-archive';
 import type { LoadSessionPayload } from '../../audio/looper/session';
 import { AUTO_RECORD_DEFAULT_SENSITIVITY } from '../../audio/looper/auto-record';
@@ -46,9 +46,10 @@ import { notifyError, notifyInfo } from '../../notify';
  * change, mirrors the
  * engine's CLEAR (`Cleared`: the lane's mix resets) and COPY (`Copied`), and on a `reset` frame takes the
  * settings the engine remembers, so the screen shows what the engine plays. `engineSession` is the
- * engine as export, recovery and import see it: the engine's PCM with this store's mix, and whether the
- * lanes last emptied by a player's clear or by a new engine (recovery keeps the jam for the latter).
- * `openEngineDevice` turns the engine's refusal of a switch to another rate into the player's confirm.
+ * engine as export, recovery and import see it: the engine's PCM with this store's mix, and the token of
+ * the player's clear that emptied the looper (recovery deletes the jam for it, and keeps it for a new
+ * engine's empty lanes). `openEngineDevice` turns the engine's refusal of a switch to another rate into
+ * the player's confirm.
  *
  * Invariant 6: a frame writes a Solid signal only when its value changed; the waveform rAF reads the
  * plain mirror (`plain`) and extrapolates the playhead from the feed's clock anchor.
@@ -257,12 +258,21 @@ const plain = {
    * records nor overdubs, and the end of a take or layer. Still while a layer sums, whose snapshot is
    * the loop before it (`engineSession.revision`). */
   revision: Array.from({ length: ENGINE_LANES }, () => 0),
-  /** The lanes last lost their loops to a player's clear (a `Cleared` on a lane that held one), not to a
-   * reset frame (a new engine: another rate, a fault; a WebView reload). */
-  playerCleared: false,
+  /** Reset frames applied: the engine this view follows (a new one: another rate, a fault; or a new
+   * subscriber, a WebView reload). */
+  resets: 0,
+  /** Per lane: a `Cleared` took its loop and its own `Lane` event has not arrived yet (a feed tick may
+   * split them). */
+  clearing: Array.from({ length: ENGINE_LANES }, () => false),
+  /** The player's clear that emptied the looper, in engine `gen` (`engineSession.clearToken`). */
+  clear: null as { gen: number } | null,
 };
 
 const capturing = (s: TrackState) => s === 'RECORDING' || s === 'OVERDUBBING';
+/** The lane holds a committed loop (overdubbing included; a take in flight has none yet). */
+const holdsLoop = (s: TrackState) => s === 'PLAYING' || s === 'STOPPED' || s === 'OVERDUBBING';
+/** A `Cleared` in the frame being applied took a loop (`noteClear`). */
+let tookLoop = false;
 
 /** The device frame the engine renders now, extrapolated from the last clock anchor. */
 function renderedFrame(): number {
@@ -360,6 +370,7 @@ function applyLane(lane: number, frame: number, info: LaneInfo): void {
     plain.takeFrames[lane] = laterTakeFrames();
   }
   if (capturing(prev) && !capturing(next)) plain.revision[lane]++;
+  plain.clearing[lane] = false;
   plain.state[lane] = next;
   plain.waiting[lane] = waiting;
   plain.retakePass[lane] = info.retakePass;
@@ -407,7 +418,10 @@ function applyEvent(ev: EngineEvent): void {
       break;
     case 'Cleared':
       // Before the lane's own Lane event: its state is still the one the clear ended.
-      if (plain.state[ev.lane] !== 'EMPTY' && plain.state[ev.lane] !== 'RECORDING') plain.playerCleared = true;
+      if (holdsLoop(plain.state[ev.lane])) {
+        plain.clearing[ev.lane] = true;
+        tookLoop = true;
+      }
       clearLaneMix(ev.lane);
       break;
   }
@@ -439,11 +453,11 @@ function applyDeviceEvent(ev: DeviceEvent): void {
       );
       break;
     case 'LoopsDropped':
-      console.error(`[engine] the loops recorded at ${ev.from} Hz left the engine: the device now runs at ${ev.to} Hz`);
+      console.error(`[engine] the loops recorded at ${ev.from} Hz left the engine: it was rebuilt at ${ev.to} Hz`);
       notifyInfo(
         'Loops kept in recovery',
-        `The backup device runs at ${kHz(ev.to)}, and your loops were recorded at ${kHz(ev.from)}. ` +
-          `Reconnect ${ev.device} and restart BleepLoop to get them back.`,
+        `The audio engine was rebuilt at ${kHz(ev.to)} for the backup device, and your loops were recorded at ` +
+          `${kHz(ev.from)}. Reconnect ${ev.device} and restart BleepLoop to get them back.`,
       );
       break;
   }
@@ -490,6 +504,17 @@ function applyPeaks(lane: number, start: number, count: number, min: readonly nu
 }
 
 /**
+ * After a frame's events: a clear that took a loop and left no lane holding one hands the recovery its
+ * token, bound to this engine; any loop still or again held cancels it (a partial clear, a commit). A
+ * lane whose `Cleared` came without its own event yet counts as empty.
+ */
+function noteClear(): void {
+  const loops = plain.state.some((s, i) => holdsLoop(s) && !plain.clearing[i]);
+  if (loops) plain.clear = null;
+  else if (tookLoop) plain.clear = { gen: plain.resets };
+}
+
+/**
  * Apply one feed frame, its signal writes as one batch. A `reset` frame REPLACES the view: a lane, the
  * transport or the selection it leaves out goes back to its empty default, the peaks are redrawn from
  * the frame alone, and the settings come from the engine's memory (`adoptSettings`).
@@ -505,7 +530,8 @@ function applyFrameNow(f: FeedFrame): void {
       p.version++;
     }
     for (let i = 0; i < ENGINE_LANES; i++) plain.revision[i]++;
-    plain.playerCleared = false;
+    plain.resets++;
+    plain.clearing.fill(false);
     for (const timer of beatTimers) clearTimeout(timer);
     beatTimers.clear();
     setCountLeft(0);
@@ -515,6 +541,7 @@ function applyFrameNow(f: FeedFrame): void {
   if (f.status !== undefined) setDevice(f.status);
   if (f.anchor) plain.clock = f.anchor;
   if (f.reset) adoptSettings(f.settings ?? []);
+  tookLoop = false;
   for (const ev of f.events) {
     applyEvent(ev);
     for (const listener of eventListeners) listener(ev);
@@ -528,6 +555,7 @@ function applyFrameNow(f: FeedFrame): void {
     }
     if (!f.events.some((ev) => ev.type === 'Selected')) setSelectedTrack(0);
   }
+  noteClear();
   for (const d of f.device) applyDeviceEvent(d);
   // No meter: no device runs, so the input reads silent.
   plain.level = f.meter?.peak ?? 0;
@@ -878,7 +906,11 @@ export const engineSession: SessionSource = {
   stateOf: (i) => plain.state[i] ?? 'EMPTY',
   trackInfo: (i) => lanes[i][0](),
   revision: (i) => plain.revision[i] ?? 0,
-  playerCleared: () => plain.playerCleared,
+  // A new engine since (a reset frame) voids it: its empty lanes are not the player's clear.
+  clearToken: (): ClearToken | null => (plain.clear?.gen === plain.resets ? plain.clear : null),
+  spendClear: (token) => {
+    if (plain.clear === token) plain.clear = null;
+  },
   trackVolume: (i) => volumes[i][0](),
   trackMuted: (i) => mutes[i][0](),
   fxState: (i) => {
@@ -988,9 +1020,40 @@ let openTail: Promise<unknown> = Promise.resolve();
 /** The saved picks that name a device. */
 type DevicePicks = Pick<AudioDeviceSettings, 'inputDeviceId' | 'inputChannel' | 'outputDeviceId' | 'bufferFrames' | 'asioEnabled'>;
 
-/** The device that runs as this store opened it: its request and the picks that named it. A switch the
- * player declines puts the picks back. */
-let opened: { request: DeviceRequest; picks: DevicePicks } | null = null;
+/** A device as this store asks for it: the request, and the picks that named it. */
+interface DeviceChoice {
+  request: DeviceRequest;
+  picks: DevicePicks;
+}
+
+/** A device choice that runs. */
+type Running = DeviceChoice & { status: DeviceStatus };
+
+/** The device that runs, as this store opened it. A switch the player declines, or one whose recovery
+ * save fails, puts its picks back. */
+let opened: DeviceChoice | null = null;
+
+/** The device the saved picks name. */
+function picked(): DeviceChoice {
+  const s = readAudioDeviceSettings();
+  const asio = usingAsio();
+  return {
+    request: {
+      backend: asio ? 'Asio' : 'Wasapi',
+      input: asio ? null : s.inputDeviceId || null,
+      output: asio ? null : s.outputDeviceId || null,
+      inputChannel: s.inputChannel === '' ? null : Number(s.inputChannel),
+      buffer: s.bufferFrames,
+    },
+    picks: {
+      inputDeviceId: s.inputDeviceId,
+      inputChannel: s.inputChannel,
+      outputDeviceId: s.outputDeviceId,
+      bufferFrames: s.bufferFrames,
+      asioEnabled: s.asioEnabled,
+    },
+  };
+}
 
 /**
  * Open (or switch to) the device Audio Settings names: ASIO's cached driver when the ASIO tier is in
@@ -1003,26 +1066,11 @@ let opened: { request: DeviceRequest; picks: DevicePicks } | null = null;
  */
 export function openEngineDevice(): Promise<DeviceStatus | null> {
   const run = openTail.then(async () => {
-    const s = readAudioDeviceSettings();
-    const asio = usingAsio();
-    const request: DeviceRequest = {
-      backend: asio ? 'Asio' : 'Wasapi',
-      input: asio ? null : s.inputDeviceId || null,
-      output: asio ? null : s.outputDeviceId || null,
-      inputChannel: s.inputChannel === '' ? null : Number(s.inputChannel),
-      buffer: s.bufferFrames,
-    };
-    const picks: DevicePicks = {
-      inputDeviceId: s.inputDeviceId,
-      inputChannel: s.inputChannel,
-      outputDeviceId: s.outputDeviceId,
-      bufferFrames: s.bufferFrames,
-      asioEnabled: s.asioEnabled,
-    };
+    const wanted = picked();
     try {
-      let status: DeviceStatus;
+      let runs: Running;
       try {
-        status = await platform.engine.open(request);
+        runs = { ...wanted, status: await platform.engine.open(wanted.request) };
       } catch (err) {
         const refused = decodeOpenError(err);
         if (refused.type !== 'RateChange') throw err;
@@ -1034,11 +1082,11 @@ export function openEngineDevice(): Promise<DeviceStatus | null> {
           putBackPicks();
           return device();
         }
-        status = await switchDroppingLoops(request);
+        runs = await switchDroppingLoops(wanted);
       }
-      setDevice(status);
-      opened = { request, picks };
-      return status;
+      setDevice(runs.status);
+      opened = { request: runs.request, picks: runs.picks };
+      return runs.status;
     } catch (err) {
       console.error('[engine] device open failed', err);
       notifyError("Couldn't open the audio device", err);
@@ -1060,22 +1108,24 @@ function putBackPicks(): void {
 
 /**
  * The player confirmed a switch that drops the loops from the engine. The device stops first, so a take
- * or layer in flight punches out and commits (STATUS E3); the recovery saves the loops as they stand;
- * then the switch goes ahead, forced. A save that fails reopens the device that ran instead, so the
- * switch never loses loops the recovery does not hold.
+ * or layer in flight punches out and commits (STATUS E3); the recovery saves the engine's snapshot, read
+ * now, whatever the lanes here still show (the commit's feed frame may not be in yet); only then does
+ * the switch go ahead, forced. A save that fails reopens the device that ran instead, so the switch never
+ * loses loops the recovery does not hold. Resolves with the device that runs, as it was asked for.
  */
-async function switchDroppingLoops(request: DeviceRequest): Promise<DeviceStatus> {
+async function switchDroppingLoops(wanted: DeviceChoice): Promise<Running> {
   await platform.engine.close();
   try {
-    await autosave.flush();
+    await autosave.saveNow();
   } catch (err) {
     console.error('[engine] the recovery save before a rate change failed', err);
     notifyError('The device did not switch', 'The loops could not be saved to recovery first, so they stay here.');
     if (!opened) throw err;
+    const ran = opened;
     putBackPicks();
-    return platform.engine.open(opened.request);
+    return { ...ran, status: await platform.engine.open(ran.request) };
   }
-  return platform.engine.open(request, true);
+  return { ...wanted, status: await platform.engine.open(wanted.request, true) };
 }
 
 // Share output: the master mirrored to a Windows render device while the engine runs on ASIO. The pick

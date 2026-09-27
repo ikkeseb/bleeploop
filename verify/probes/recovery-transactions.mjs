@@ -69,9 +69,12 @@ await probe(async ({ open }) => {
           if (mode === 'abort-put-after-success') request.addEventListener('success', () => this.transaction.abort(), { once: true });
           return request;
         };
+        // A clear deletes its rate's jam from both keys in one transaction: one injection per transaction.
+        const aborted = new WeakSet();
         IDBObjectStore.prototype.delete = function (...args) {
           const request = nativeDelete.apply(this, args);
-          if (target(this) && mode === 'abort-delete-after-success') {
+          if (target(this) && mode === 'abort-delete-after-success' && !aborted.has(this.transaction)) {
+            aborted.add(this.transaction);
             injected++;
             request.addEventListener('success', () => this.transaction.abort(), { once: true });
           }

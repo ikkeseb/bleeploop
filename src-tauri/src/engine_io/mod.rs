@@ -52,11 +52,12 @@
 //!   new sample rate builds a new engine: the plugin units go back to their owners (`SlotHost`), and the
 //!   loops go with the old engine.
 //! - **Loops never leave on a player's switch unasked.** An open that would build an engine at another
-//!   rate while this one holds audio (a loop or a take in flight) is refused with
-//!   [`OpenError::RateChange`] (the rate is known from `Driver::resolve`, before anything stops) until
-//!   the UI confirms and opens again with `force`. The owner's own reopens (a loss's recovery or
-//!   fallback, a replaced engine) go ahead; one that lands on another rate reports
-//!   [`DeviceEvent::LoopsDropped`], and the UI keeps the loops in its recovery (`src/audio/autosave.ts`).
+//!   rate while this one holds audio (any lane not EMPTY: a loop, a take in flight or armed, a kept
+//!   RETAKE pass) is refused with [`OpenError::RateChange`] (the rate is known from `Driver::resolve`,
+//!   before anything stops) until the UI confirms and opens again with `force`. The owner's own reopens
+//!   (a loss's recovery or fallback, a replaced engine) go ahead; a loss's fallback that rebuilds the
+//!   engine at another rate reports [`DeviceEvent::LoopsDropped`], whether or not that device then
+//!   starts, and the UI keeps the loops in its recovery (`src/audio/autosave.ts`).
 //! - **`Core::running` is up from just before the streams start until just after they drop,** so a
 //!   slot host never takes the engine lock from under a callback (it waits on its port instead). The
 //!   owner raises it under the engine lock, and a slot host checks it again once it holds the lock.
@@ -100,7 +101,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use lf_engine::grid::Frame;
-use lf_engine::{Command, Engine, Event, Overview, SessionPort, SlotPort, SlotProcessor, TimedCommand, SLOT_COUNT, TRACK_COUNT};
+use lf_engine::{Command, Engine, Event, LaneState, Overview, SessionPort, SlotPort, SlotProcessor, TimedCommand, SLOT_COUNT, TRACK_COUNT};
 use rtrb::{Consumer, Producer};
 use serde::{Deserialize, Serialize};
 
@@ -174,9 +175,10 @@ pub enum DeviceEvent {
     /// The engine panicked and a new one at the same rate replaced it: the loops are gone, the plugin
     /// units went back to their owners.
     EngineFaulted,
-    /// The device that came back or took over after a loss runs at `to` Hz, not the engine's `from`:
-    /// a new engine runs there, and the loops the old one held left with it (no resampling). The UI
-    /// keeps them in its recovery. `device` is the lost one. Follows its `Recovered` or `Fallback`.
+    /// A loss's fallback rebuilt the engine at `to` Hz, not its `from`: the loops the old one held left
+    /// with it (no resampling), whether or not that device then started. The UI keeps them in its
+    /// recovery. `device` is the lost one. Follows the fallback's `Recovered` or `Fallback` when it
+    /// started, else its failure.
     LoopsDropped { device: String, from: u32, to: u32 },
 }
 
@@ -184,7 +186,7 @@ pub enum DeviceEvent {
 /// object (`{"RateChange":{…}}`), so the UI tells the two apart.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OpenError {
-    /// `device` runs at `to` Hz and the engine at `from` Hz holds audio (a loop, or a take in flight):
+    /// `device` runs at `to` Hz and the engine at `from` Hz holds audio (`Core::holds_audio`):
     /// a switch would build a new engine there, and the loops cannot play in it. Open again with
     /// `force` to switch anyway.
     RateChange { device: String, from: u32, to: u32 },
@@ -459,11 +461,12 @@ impl Core {
         Some(self.rate.load(Relaxed)).filter(|&r| r != 0)
     }
 
-    /// Some lane of the engine holds audio: a loop, or a take in flight (its overview, read without the
-    /// engine lock).
+    /// Some lane of the engine holds audio, or will: any lane not EMPTY (a loop, a take in flight or
+    /// armed, a kept RETAKE pass). Read from its overview's lane states, without the engine lock: a
+    /// lane's frames read 0 across a RETAKE pass boundary and through a count-in.
     pub(crate) fn holds_audio(&self) -> bool {
         let ends = self.ends.lock().unwrap_or_else(|e| e.into_inner());
-        ends.as_ref().is_some_and(|e| (0..TRACK_COUNT).any(|i| e.overview.lane(i).frames > 0))
+        ends.as_ref().is_some_and(|e| (0..TRACK_COUNT).any(|i| e.overview.lane(i).state != LaneState::Empty))
     }
 
     /// A panic was caught under the engine lock: silence the engine and tell the owner.

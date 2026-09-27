@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use lf_engine::grid::Frame;
-use lf_engine::{Command, Event, LaneInfo, LaneState, SlotEvent, SlotKind, SlotProcessor, TimedCommand};
+use lf_engine::{Command, Event, LaneInfo, LaneState, ProcessContext, SlotEvent, SlotKind, SlotProcessor, TimedCommand};
 
 use super::callback::Side;
 use super::fake_driver::{Fake, FakeDevice, FakeDriver};
@@ -326,6 +326,29 @@ fn a_lost_device_whose_fallback_runs_at_another_rate_says_the_loops_left_the_eng
 }
 
 #[test]
+fn a_fallback_that_rebuilds_at_another_rate_and_then_fails_still_says_the_loops_left_the_engine() {
+    let mut h = Harness::new();
+    h.fake.set_input(tone);
+    h.fake.wasapi.lock().unwrap()[0].1.rate = 44_100;
+    h.open(asio(Some(256)));
+    h.record_loop();
+    // The ASIO rebuild fails at 48 kHz; the WASAPI default builds an engine at 44.1 kHz, then fails too.
+    h.fake.fail_starts.store(2, SeqCst);
+    h.fake.fatal.store(Side::Output as u8, SeqCst);
+    until("both fallbacks tried", || h.fake.fail_starts.load(SeqCst) == 0);
+    // Queued behind the loss: the owner takes it once its fallbacks are done.
+    h.host.close().unwrap();
+    let events = h.host.take_device_events();
+    assert!(matches!(events[0], DeviceEvent::Lost { backend: AudioBackend::Asio, .. }), "{events:?}");
+    assert_eq!(
+        events[1..],
+        [DeviceEvent::LoopsDropped { device: "Fake ASIO".into(), from: 48_000, to: 44_100 }],
+        "the loops left with the 48 kHz engine though no device started"
+    );
+    assert_eq!((h.host.status(), h.host.core.rate()), (None, Some(44_100)));
+}
+
+#[test]
 fn a_lost_wasapi_endpoint_falls_back_to_the_default_endpoint() {
     let h = Harness::new();
     h.fake.wasapi.lock().unwrap().push(("usb".into(), FakeDevice::new("USB interface", 48_000, 480)));
@@ -384,6 +407,67 @@ fn a_switch_to_another_rate_waits_for_force_while_the_engine_holds_loops() {
     assert!(!h.host.core.holds_audio(), "the loops went with the old engine");
     h.fake.asio.lock().unwrap().as_mut().unwrap().rate = 48_000;
     assert_eq!(h.open(asio(Some(256))).sample_rate, 48_000, "with nothing to lose, another rate needs no force");
+}
+
+/// A first take on lane 0, FIXED at one bar (240 BPM) with RETAKE on, on an engine whose device the test
+/// stopped: it renders only as the test drives it (`render_stopped`), so a block can end exactly on a
+/// pass boundary. The ASIO driver now runs at 44.1 kHz. Returns the next frame to render.
+fn retake_on_a_stopped_engine(h: &Harness) -> Frame {
+    h.fake.set_input(tone);
+    h.open(asio(Some(256)));
+    h.host.close().unwrap();
+    h.fake.asio.lock().unwrap().as_mut().unwrap().rate = 44_100;
+    for command in [Command::SetBpm(240.0), Command::SetFixedLength(true), Command::SetFixedBars(1.0), Command::SetRetake(true), Command::RecDub(0)] {
+        h.send(command);
+    }
+    h.frame()
+}
+
+/// Render `blocks` 64-frame blocks of the fake's input on the stopped engine, under its lock as a callback
+/// does; lane 0 after them.
+fn render_stopped(h: &Harness, frame: &mut Frame, blocks: usize) -> LaneInfo {
+    let (mut l, mut r) = ([0.0f32; 64], [0.0f32; 64]);
+    let mut rt = h.host.core.rt.lock().unwrap();
+    let engine = rt.engine.as_mut().unwrap();
+    for _ in 0..blocks {
+        let input: [f32; 64] = std::array::from_fn(|k| tone(*frame + k as Frame));
+        engine.process(&ProcessContext { frame: *frame, xrun: false, align_frames: 0, input_frames: 0 }, &input, &mut l, &mut r);
+        *frame += 64;
+    }
+    engine.looper().info(0)
+}
+
+#[test]
+fn a_switch_to_another_rate_waits_for_force_at_a_retake_pass_boundary() {
+    let h = Harness::new();
+    let mut frame = retake_on_a_stopped_engine(&h);
+    let mut blocks = 0;
+    while render_stopped(&h, &mut frame, 1).retake_pass < 2 {
+        blocks += 1;
+        assert!(blocks < 4 * RATE as usize / 64, "the first pass never completed");
+    }
+    let kept = render_stopped(&h, &mut frame, 0);
+    let frames = h.host.core.ends.lock().unwrap().as_ref().unwrap().overview.lane(0).frames;
+    assert_eq!((kept.state, frames), (LaneState::Recording, 0), "the kept pass reads no frames at its boundary");
+    assert_eq!(
+        h.host.open(asio(Some(256)), false),
+        Err(OpenError::RateChange { device: "Fake ASIO".into(), from: 48_000, to: 44_100 }),
+        "a kept RETAKE pass is audio the switch would drop"
+    );
+    assert_eq!(h.host.core.rate(), Some(48_000), "the engine and its pass stay");
+}
+
+#[test]
+fn a_switch_to_another_rate_waits_for_force_through_a_count_in() {
+    let h = Harness::new();
+    let mut frame = retake_on_a_stopped_engine(&h);
+    let armed = render_stopped(&h, &mut frame, 4);
+    assert!(armed.state == LaneState::Recording && armed.armed, "the count-in runs: {armed:?}");
+    assert_eq!(
+        h.host.open(asio(Some(256)), false),
+        Err(OpenError::RateChange { device: "Fake ASIO".into(), from: 48_000, to: 44_100 }),
+        "an armed count-in has recorded nothing, and still asks"
+    );
 }
 
 #[test]

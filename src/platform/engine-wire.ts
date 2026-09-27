@@ -172,8 +172,8 @@ export type DeviceEvent =
   | { type: 'Fallback'; status: DeviceStatus }
   | { type: 'ShareLost'; reason: string }
   | { type: 'EngineFaulted' }
-  /** The device that came back or took over after a loss runs at `to` Hz, not the engine's `from`: a new
-   * engine runs there, and the loops left with the old one. `device` is the lost one. */
+  /** A loss's fallback rebuilt the engine at `to` Hz, not its `from`, whether or not that device then
+   * started: the loops left with the old engine. `device` is the lost one. */
   | { type: 'LoopsDropped'; device: string; from: number; to: number };
 
 /**

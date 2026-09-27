@@ -1716,7 +1716,7 @@ impl Looper {
                 LaneState::Overdubbing | LaneState::Playing | LaneState::Stopped => t.length,
                 _ => 0,
             };
-            self.overview.set_lane(i, LaneView { buf: t.live, frames, reversed: t.reversed });
+            self.overview.set_lane(i, LaneView { state: t.state, buf: t.live, frames, reversed: t.reversed });
         }
         self.overview.set_grid(self.anchor);
         let transport = (self.master, cx.clock.bpm(), cx.clock.locked());
