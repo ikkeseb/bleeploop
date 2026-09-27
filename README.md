@@ -39,8 +39,9 @@ keyboard fill the other layers; the computer keyboard is the fallback.
 - END STOP stops playing loops at the loop end; a second press stops them at once.
 - COPY duplicates a track, with its FX, volume and mute, into the first empty track.
 - A later take shorter than the loop repeats (tiles) across it, so every track has the loop's exact
-  length. With FIXED set longer than the loop, the take grows the loop in whole loops instead
-  (multiply), and the other tracks repeat across it.
+  length. Keep playing past the loop, or set FIXED longer than it, and the take grows the loop in whole
+  loops instead (multiply), and the other tracks repeat across it. TRIM keeps a track's first bars and
+  repeats them across the loop; undo brings the whole take back.
 - Local recovery: committed loops are saved as you play and restored when you reopen, and closing
   the app with a jam in progress asks first.
 - Per-track FX: filter, pitch shift, tempo-synced stutter, feedback delay and a shared reverb send.

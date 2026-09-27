@@ -16,7 +16,9 @@ the driver's report; the web path's `native:smoke` in its own profile. Later tha
 Help's diagnostics landed: `pnpm rust:check` (462 tests), `pnpm check`, `pnpm build`, the browser
 probes 45/45; on the rig `native:engine-smoke` with Pro-Q and `native:engine-loopback` with its
 multiply phases (three launches, 30/30 bars at 64/128/256) and IN FX's echo (`--echo=1`, 12/12 at 128),
-and MIC's gain after a plugin unload measured through the cable.
+and MIC's gain after a plugin unload measured through the cable. On 2026-09-27, after the free
+multiply (E10) and TRIM (F16): `pnpm rust:check` (473 tests), the browser probes 46/46, and on the rig
+`native:engine-loopback` with its new phases G and H, 16/16 bars at 64/128/256.
 Driver latency reports are not guitar latency; after a relevant change, rerun only the affected check.
 
 **Last play: 2026-09-24** (web path, `pnpm dev:asio`, jam, two–three tracks, no pedal): the click too
@@ -33,7 +35,8 @@ say what felt wrong and re-scope. If it feels right, publish the draft.
 With a MIDI footswitch plugged: learn REC/DUB onto it (Audio Settings → midi learn, one tap) and take
 the jam's records with the foot. One press, one action? Still learned after the next restart? Then
 switch it to HOLD and hold it through one overdub.
-The draft is v0.1.0; what landed after it (multiply, IN FX, stage view, Help's diagnostics) runs from
+The draft is v0.1.0; what landed after it (multiply, the free take that grows the loop, TRIM, IN FX, stage view, the foot
+vocabulary, Help's diagnostics) runs from
 `pnpm dev:asio` and is folded into Stops 1 and 3 below.
 
 ## The rig lap — in plug order, each stop a yes/no
@@ -54,7 +57,9 @@ A stop dies when it passes; past 10 stops, consolidate or flag it (AGENTS.md). D
    forced with click off. A later track starts at master phase with no seam against its tail. Punch
    out of a sustained note: is the layer seam clean? Undo swap and reverse are click-free. Multiply:
    over a 1-bar loop, FIXED 4 on another lane: the loop becomes 4 bars at the commit and the first lane
-   plays on with no seam or click there.
+   plays on with no seam or click there. FIXED off: a take stopped ~1.6 loops in records on to two
+   loops and grows the loop, ~1.3 loops in keeps one at once. TRIM: halve an 8-bar lane while it
+   plays: its first 4 bars from the next loop start, ↶ UNDO brings the 8 back, no click at either swap.
 4. **Long session · grid.** Same jam, 10+ min: loops and click stay tight, no LED hop at commit,
    later takes on-grid, a flam-free commit-beat click; tempo is locked mid-count-in; a free record
    past 60 s auto-closes on a bar (is that UX fine?).
@@ -90,8 +95,12 @@ Blocked on an owner decision, not on testing. The default column is what happens
 | E6 | A true 0 dBFS ceiling in the ported limiter, or a literal port of today's? | literal port |
 | E8 | Engine sessions: the snapshot's PCM crosses to TS once per save, so today's zip/WAV/recovery code stays (agents' call, 2026-09-26). Keep, or Rust writes the files? | keep |
 | E9 | WASAPI takes land late on drivers that hide their buffering (~215 ms on the Focusrite; `docs/plans/native-engine.md` § Stage 1 W1). Accept as documented, or build the one reported term (~40 ms, invisible on this rig)? | accept |
-| E10 | Multiply (F14) is FIXED past the loop only. Should a free later take (FIXED off) also run until the press and grow the loop, as the first take does, instead of closing at the loop length? | FIXED only |
-| E11 | F16 (a track's length after recording), proposed: a lane control keeps the track's first N bars and repeats them across the loop, one UNDO away, on the engine's existing tiling (the loop's length is unchanged). Build it? | not built |
+
+**Answered 2026-09-27:** E10 and E11, yes, both built in engine mode (`docs/plans/native-engine.md`
+§ After the flip). A free later take runs until the press; a stop past its first loop pass keeps the
+nearest whole number of loops (the agents' pick: a late press on one loop keeps one, an early press on
+two keeps two), growing the loop through the multiply. ✂ TRIM and the Halve track pedal action keep a
+track's first bars repeated across the loop, one UNDO away.
 
 **Answered 2026-09-26:** the 12 ms ASIO launch is not a stop (cause found and fixed: the engine opens
 ASIO at another block size first); the first release is v0.1.0, on the engine (E1, E5 and E7 lapse);

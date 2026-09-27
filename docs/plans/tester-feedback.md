@@ -34,7 +34,7 @@ All items remain open until the tester confirms. § Code reading records what th
 | F13 | Audio Settings' output reads "System default" every time it reopens; the tester wants to route the sound to a chosen output, as Ableton does. Screenshot: WASAPI, input Line (MG-XU), output list open. | One output pick routes everything. Reproduced on the dev PC: the pick was saved but the dropdown lost it (input too), and the pick steered only the plugin's native monitor while loops, synths and click followed the Windows default. |
 | F14 | A one-bar first take locks every later track to one bar. | A later track longer than the master: extend the loop, keeping the one-bar track repeating across it (an RC-505-style multiply). Built on the engine (§ Landed). |
 | F15 | No effects (delay, reverb) before recording into a track. | An elegant pre-record FX. Built on the engine (§ Landed). |
-| F16 | No control over a recorded track's bar count after the fact. | Adjust the length of a committed track. Design open; waits for the native engine (`docs/plans/native-engine.md` § After the flip). |
+| F16 | No control over a recorded track's bar count after the fact. | Adjust the length of a committed track. Built on the engine (§ Landed): TRIM keeps the track's first N bars, repeated across the loop, one UNDO away. |
 
 ## Code reading at `d17c777`
 
@@ -89,8 +89,8 @@ Proven in the browser tier only (`pnpm check`, `pnpm build`, `pnpm verify:jam`, 
 
 - **F14 (engine mode, 2026-09-26):** FIXED past the loop is the multiply: over a loop of m bars, FIXED
   N > m records the largest multiple of m within N and the loop grows to it; the other tracks repeat
-  across it with no seam (`src-tauri/crates/lf-engine/tests/multiply.rs`). FIXED off still stops a
-  later take at the loop. Proven headless, in the browser tier and through the loopback cable in the
+  across it with no seam (`src-tauri/crates/lf-engine/tests/multiply.rs`). FIXED off, a later take runs
+  until the press and grows the loop to the nearest whole number of loops (E10, 2026-09-27). Proven headless, in the browser tier and through the loopback cable in the
   running app (`pnpm native:engine-loopback`, phases E and F); unheard.
 - **F15 (engine mode, 2026-09-26):** IN FX after MIC: an ECHO and a REVERB on the guitar (after the
   amp-sim), heard and recorded, the dry sound and the take's timing untouched
@@ -98,6 +98,11 @@ Proven in the browser tier only (`pnpm check`, `pnpm build`, `pnpm verify:jam`, 
   (`pnpm native:engine-loopback --echo=1`, ASIO 128): each click's echo one sixteenth later within
   0.005 ms at 0.48 of it, the dry click where it was without the echo. Unheard; default levels are an
   agent's pick.
+- **F16 (engine mode, 2026-09-27):** ✂ TRIM on a lane keeps its first N bars as heard, repeated across
+  the loop (3 over 8 plays 3+3+2), one UNDO away; the Halve track pedal action keeps the first half.
+  Proven headless (`src-tauri/crates/lf-engine/tests/trim.rs`), in the browser tier
+  (`verify/probes/lane-length.mjs`) and through the loopback cable in the running app
+  (`pnpm native:engine-loopback`, phase H); unheard.
 - **F3/F12 follow-up:** Help → About this build shows the version and commit, copies a diagnostics
   block and opens the log folder; the repo has a bug-report form asking for both.
 

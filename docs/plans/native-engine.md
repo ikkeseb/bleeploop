@@ -694,11 +694,16 @@ Built on the engine, in this order unless the owner reorders:
 
 - **F14 multiply — built, not heard.** FIXED past the loop records whole loops and grows the master;
   every other lane is tiled out to it, so every lane keeps one length (lf-engine `looper.rs`
-  `multiply`, `tests/multiply.rs`). FIXED off still closes a later take at the loop (STATUS E10).
+  `multiply`, `tests/multiply.rs`). FIXED off, a later take runs until the press and a stop past its
+  first loop pass keeps the nearest whole number of loops, growing the loop the same way (E10,
+  2026-09-27: `grid::plan_later_stop`).
 - **F15 input FX — built, not heard.** A wet-only ECHO and REVERB send on the live input, recorded and
   monitored on the same frame; the dry signal and a take's alignment are untouched (lf-engine
   `input_fx.rs`, `tests/input_fx.rs`; the IN FX pill in engine mode).
-- **F16 track length after recording**: not built; a proposed design waits on the owner (STATUS E11).
+- **F16 TRIM — built, not heard.** A committed lane keeps its first N bars as heard (a reversed lane: of
+  its reversed playback), repeated across the loop and cut at its end; the loop keeps its length, the
+  loop before the trim is the lane's undo target, and a playing lane hears it from the next boundary
+  (lf-engine `looper.rs` `trim`, `tests/trim.rs`; the lane's ✂ TRIM and the Halve track pedal action).
 
 Also engine-bound from `docs/plans/pedalboard.md`: D12 controller data to plugins and F8 synth plugins
 on the device clock (both arrive with Stage 4).

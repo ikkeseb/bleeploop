@@ -67,6 +67,15 @@ not here.
   does high feedback still feel like it should? The reverb is summed to mono as ½(L+R).
 - **FIXED past the loop (2026-09-26, built, unseen):** over a loop, + steps a bar at a time up to the
   loop, then a whole loop at a time (the multiply); the title explains it. Clear enough?
+- **A free take past the loop (E10, 2026-09-27, built, unseen/unheard):** the lane's record head spans
+  the loops reached so far (it jumps back to the middle when a pass starts); a stop 1.5 loops in keeps
+  two, just under keeps one. Clear, and right by ear, or lean toward the longer take?
+- **✂ TRIM (2026-09-27, built, unseen):** the pill after ⧉ COPY opens KEEP FIRST [−] N [+] BARS · TRIM,
+  N starting at half the loop; with six lane pills showing, COPY and TRIM shrink to their glyphs. The
+  waveform shows the trim at once while the sound switches at the next loop start (as UNDO and REV do).
+  Halve track rounds an odd loop down (7 keeps 3). Readable, and right?
+- **↶ UNDO (2026-09-27):** was ↶ DUB; it undoes an overdub or a TRIM, and the pedal action reads
+  'Undo / redo'. Right words?
 - **About this build (2026-09-26, built, unseen):** Help's last section — version · commit, Copy
   diagnostics, Open log folder, below the fold at 1280×820. Findable when a tester is asked for it?
 - **Looper prominence:** does the first-run stage read looper-as-hero? `DEFAULT_STAGE_WEIGHTS` in
