@@ -346,10 +346,9 @@ pub fn run() {
             host::plugin_note_off,
             host::plugin_set_param,
             host::plugin_list_params,
-            #[cfg(debug_assertions)]
-            host::plugin_save_state,
-            #[cfg(debug_assertions)]
-            host::plugin_load_state,
+            // Engine mode's tone recall (host/tone.rs): a session export's and import's tones.
+            host::plugin_tone_take,
+            host::plugin_tone_import,
             host::plugin_open_editor,
             host::plugin_close_editor,
             // P11.0 native audio-input path (guitar → plugin → wet monitor/record).

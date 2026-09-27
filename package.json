@@ -30,6 +30,7 @@
     "native:engine-smoke": "node scripts/native-probe.mjs engine-smoke --asio",
     "native:engine-recovery": "node scripts/native-probe.mjs engine-recovery --asio",
     "native:engine-loopback": "node scripts/native-probe.mjs engine-loopback --asio",
+    "native:tone-recall": "node scripts/native-probe.mjs tone-recall",
     "release:smoke": "node scripts/release-smoke.mjs",
     "native:spike": "node scripts/native-spike.mjs",
     "native:engine": "node scripts/native-engine.mjs",

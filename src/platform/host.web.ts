@@ -70,12 +70,11 @@ const webPluginHost: PluginHost = {
   onStreamFault() {
     return () => {}; // no native cpal streams in the browser build ⇒ nothing can fault
   },
-  async saveState() {
-    // No live plugin in the browser build — loadPlugin already threw before any caller gets here.
-    throw new Error(NO_NATIVE_HOST);
+  async takeTone() {
+    return null; // no plugin loads in the browser build, so none keeps a tone
   },
-  async loadState() {
-    /* no-op */
+  async importTone() {
+    throw new Error(NO_NATIVE_HOST);
   },
   async listInputDevices() {
     return [];

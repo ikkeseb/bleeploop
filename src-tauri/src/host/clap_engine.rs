@@ -1,15 +1,19 @@
 //! OWNS: a CLAP plugin in the engine: `ClapUnit` (its audio processor as an
 //! `lf_engine::SlotProcessor`) and the engine-mode owner thread that loads, activates, restarts,
-//! re-activates after an eviction and tears it down (`engine_slot` holds the API). It follows
-//! `owner_main` minus the RT thread, the hop-1 ring and the device; the load sequence is copied from
-//! there rather than shared, because nothing but a window-bound owner exercises that one.
+//! re-activates after an eviction and tears it down (`engine_slot` holds the API), keeping the
+//! plugin's tone as `engine_slot` describes (the `state` extension's blob). It follows `owner_main`
+//! minus the RT thread, the hop-1 ring and the device; the load sequence is copied from there rather
+//! than shared, because nothing but a window-bound owner exercises that one.
 
 use super::engine_slot::{
-    report_faults, EngineSlotEvent, OwnerCtx, Ready, FAULT_PARAM, FAULT_PROCESS, FAULT_START,
-    OWNER_POLL, REMOVE_TIMEOUT,
+    keep_tone, report_faults, restore_tone, EngineSlotEvent, OwnerCtx, Ready, FAULT_PARAM,
+    FAULT_PROCESS, FAULT_START, OWNER_POLL, REMOVE_TIMEOUT,
 };
 use super::*;
 
+use clack_host::events::io::{OutputEventBuffer, TryPushError};
+use clack_host::events::spaces::CoreEventSpace;
+use clack_host::events::UnknownEvent;
 use lf_engine::grid::Frame;
 use lf_engine::slots::MAX_SLOT_EVENTS;
 use lf_engine::{SlotEvent, SlotEventKind, SlotKind, SlotProcessor};
@@ -41,6 +45,27 @@ pub(super) struct ClapUnit {
     out_ports: AudioPorts,
     steady: u64,
     faults: Arc<AtomicU32>,
+    /// The plugin's own parameter changes, reported on its output events.
+    edits: ParamEdits,
+    /// The owner's `ToneKeeper` flag, raised when `edits` saw one (an atomic store on the audio thread).
+    edited: Arc<AtomicBool>,
+}
+
+/// The unit's output events: the plugin reports its editor's parameter changes here (CLAP has the
+/// plugin send them from `process`). None is kept; the unit only notes that one came, so the owner
+/// saves the tone. No allocation, no lock.
+#[derive(Default)]
+struct ParamEdits {
+    seen: bool,
+}
+
+impl OutputEventBuffer for ParamEdits {
+    fn try_push(&mut self, event: &UnknownEvent) -> Result<(), TryPushError> {
+        if matches!(event.as_core_event(), Some(CoreEventSpace::ParamValue(_) | CoreEventSpace::ParamGestureEnd(_))) {
+            self.seen = true;
+        }
+        Ok(())
+    }
 }
 
 /// What one activation gave the unit to build on.
@@ -59,6 +84,7 @@ impl ClapUnit {
         terms: &Terms,
         params: Consumer<PluginEvent>,
         faults: Arc<AtomicU32>,
+        edited: Arc<AtomicBool>,
     ) -> Box<ClapUnit> {
         let mut unit = Box::new(ClapUnit {
             processor: None,
@@ -76,6 +102,8 @@ impl ClapUnit {
             out_ports: AudioPorts::with_capacity(1, 1),
             steady: 0,
             faults,
+            edits: ParamEdits::default(),
+            edited,
         });
         unit.rearm(stopped, terms);
         unit
@@ -146,6 +174,8 @@ impl SlotProcessor for ClapUnit {
             out_ports,
             steady,
             faults,
+            edits,
+            edited,
             ..
         } = self;
         let Some(Processor::Started(started)) = processor.as_mut() else {
@@ -208,7 +238,7 @@ impl SlotProcessor for ClapUnit {
                     }])
                 };
                 let input_events = InputEvents::from_buffer(buf);
-                let mut output_events = OutputEvents::void();
+                let mut output_events = OutputEvents::from_buffer(edits);
                 let mut output_audio = out_ports.with_output_buffers([AudioPortBuffer {
                     latency: 0,
                     channels: AudioPortBufferType::f32_output_only(out_bufs.iter_mut().map(|c| &mut c[..len])),
@@ -222,6 +252,9 @@ impl SlotProcessor for ClapUnit {
             sum_to_mono(out_bufs, &mut out[at..at + len], len, chans);
             *steady = steady.wrapping_add(len as u64);
             at += len;
+        }
+        if std::mem::take(&mut edits.seen) {
+            edited.store(true, Release);
         }
     }
 
@@ -370,6 +403,7 @@ fn instantiate(
             hosted_hwnd: hh,
             callback_requested: AtomicBool::new(false),
             restart_requested: AtomicBool::new(false),
+            keeps_tone: true,
         },
         |_| LfMain::default(),
         entry,
@@ -380,6 +414,22 @@ fn instantiate(
     Ok((instance, name))
 }
 
+/// The plugin's state (`state` extension), for its tone: `Ok(None)` when it has no such extension.
+fn save_state(instance: &mut PluginInstance<LfHost>) -> Result<Option<Vec<u8>>, String> {
+    let mut handle = instance.plugin_handle();
+    let Some(ext) = handle.get_extension::<PluginState>() else { return Ok(None) };
+    let mut state = Vec::new();
+    ext.save(&mut handle, &mut state).map_err(|e| format!("state.save: {e}"))?;
+    Ok(Some(state))
+}
+
+/// Restore a tone's state (`state.load`, a main-thread call; the load runs it before activating).
+fn load_state(instance: &mut PluginInstance<LfHost>, state: &[u8]) -> Result<(), String> {
+    let mut handle = instance.plugin_handle();
+    let ext = handle.get_extension::<PluginState>().ok_or("the plugin has no state extension")?;
+    ext.load(&mut handle, &mut std::io::Cursor::new(state)).map_err(|_| "the plugin refused its saved state".to_string())
+}
+
 /// The engine-mode CLAP owner: clack's main thread for this slot. `open` yields the entry (a
 /// bundle path in production, an in-process fixture in the tests); returns the teardown's result.
 pub(super) fn run(
@@ -387,7 +437,7 @@ pub(super) fn run(
     id: &str,
     open: impl FnOnce() -> Result<PluginEntry, String>,
 ) -> Result<(), String> {
-    let OwnerCtx { slot, running, requests, params, param_ids, sink, editor_parent, ready, .. } = ctx;
+    let OwnerCtx { slot, running, requests, params, param_ids, sink, editor_parent, ready, mut tone, .. } = ctx;
     let index = slot.slot();
     let editor_closed = Arc::new(EditorClosed::default());
     let hosted_hwnd = Arc::new(AtomicIsize::new(0));
@@ -396,10 +446,18 @@ pub(super) fn run(
         let (mut instance, name) = instantiate(&entry, id, &editor_closed, &hosted_hwnd)?;
         // init() may request a callback, but only the fully initialized instance can receive it.
         deliver_plugin_callback(&mut instance);
+        // The stored tone goes in before the plugin activates: nothing processes it yet.
+        let restored = restore_tone(&tone, index, &name, |state| load_state(&mut instance, state));
+        // What the restore raised (a restart, a rescan, `mark_dirty`) describes the state just loaded,
+        // which the activation and the param listing below read anyway.
+        instance.access_shared_handler(|s| s.restart_requested.store(false, Release));
+        let _ = take_params_rescan(&mut instance);
+        instance.access_handler_mut(|m| m.state_dirty = false);
         let (stopped, terms) = activate(&mut instance, &slot)?;
-        Ok((entry, instance, name, terms.rate, ClapUnit::new(stopped, &terms, params, faults.clone())))
+        let unit = ClapUnit::new(stopped, &terms, params, faults.clone(), tone.edited());
+        Ok((entry, instance, name, terms.rate, unit, restored))
     });
-    let (entry, mut instance, name, rate, mut unit) = match setup {
+    let (entry, mut instance, name, rate, mut unit, restored) = match setup {
         Ok(loaded) => loaded,
         Err(e) => {
             let _ = ready.send(Err(e));
@@ -423,7 +481,7 @@ pub(super) fn run(
         let _ = ready.send(Err(e));
         return Ok(());
     }
-    if ready.send(Ok(Ready { name, kind })).is_err() {
+    if ready.send(Ok(Ready { name: name.clone(), kind, tone: restored })).is_err() {
         log::warn!("[plugin_host] engine slot {index}: the load finished after its caller gave up; undoing it");
         return teardown(&slot, instance, entry, None);
     }
@@ -440,6 +498,10 @@ pub(super) fn run(
         if take_params_rescan(&mut instance) {
             refresh_clap_param_ids(&mut instance, &param_ids);
             sink(EngineSlotEvent::ParamsChanged);
+            tone.note_change(Instant::now());
+        }
+        if instance.access_handler_mut(|m| std::mem::take(&mut m.state_dirty)) {
+            tone.note_change(Instant::now());
         }
         if instance.access_shared_handler(|s| s.restart_requested.swap(false, Acquire)) {
             cycle(&mut instance, &slot, &mut parked, None, "restart at the plugin's request");
@@ -452,13 +514,17 @@ pub(super) fn run(
         if editor_closed.fired.swap(false, Acquire) && matches!(editor, EditorSlot::Floating) {
             editor_teardown(&mut instance, &mut editor, &hosted_hwnd);
             sink(EngineSlotEvent::EditorClosed);
+            let _ = keep_tone(&mut tone, index, "editor closed", &name, || save_state(&mut instance));
         }
-        // A hosted editor needs this thread to pump its window, and reports its close box here.
+        // Every turn, editor or not: a plugin's own messages on this thread (a JUCE plugin's timers and
+        // async updates) must not wait for the next editor, or its state lags what it plays and a tone
+        // saved meanwhile is stale. A hosted editor's window needs it too, and reports its close here.
+        pump_thread_messages();
         if matches!(editor, EditorSlot::Hosted(_)) {
-            pump_thread_messages();
             if matches!(&editor, EditorSlot::Hosted(window) if window.close_requested()) {
                 editor_teardown(&mut instance, &mut editor, &hosted_hwnd);
                 sink(EngineSlotEvent::EditorClosed);
+                let _ = keep_tone(&mut tone, index, "editor closed", &name, || save_state(&mut instance));
             }
         }
         let request = if matches!(editor, EditorSlot::Hosted(_)) {
@@ -490,13 +556,24 @@ pub(super) fn run(
                 OwnerRequest::CloseEditor(_, reply) => {
                     if !matches!(editor, EditorSlot::Closed) {
                         editor_teardown(&mut instance, &mut editor, &hosted_hwnd);
+                        let _ = keep_tone(&mut tone, index, "editor closed", &name, || save_state(&mut instance));
                     }
                     let _ = reply.send(Ok(()));
                 }
-                // State and params as the live owner serves them; a device request never comes
-                // from an engine handle and is answered as misrouted.
+                OwnerRequest::SaveTone(reply) => {
+                    let _ = reply.send(keep_tone(&mut tone, index, "asked", &name, || save_state(&mut instance)));
+                }
+                OwnerRequest::SupersedeTone(reply) => {
+                    tone.supersede();
+                    let _ = reply.send(Ok(()));
+                }
+                // Params as the live owner serves them; a device request never comes from an engine
+                // handle and is answered as misrouted.
                 other => handle_owner_request(other, &mut instance, &param_ids),
             }
+        }
+        if tone.poll(Instant::now()) {
+            let _ = keep_tone(&mut tone, index, "changes went quiet", &name, || save_state(&mut instance));
         }
         report_faults(&faults, index, &mut reported);
     }
@@ -504,8 +581,14 @@ pub(super) fn run(
     if served.is_err() {
         log::error!("[plugin_host] engine slot {index}: the CLAP owner panicked; tearing the plugin down");
     }
-    if !matches!(editor, EditorSlot::Closed) {
+    let editor_open = !matches!(editor, EditorSlot::Closed);
+    if editor_open {
         editor_teardown(&mut instance, &mut editor, &hosted_hwnd);
+    }
+    // Before the teardown: a change not saved yet, and what an open editor may have changed unseen. Not
+    // after a panic, which may have left the plugin half way through something.
+    if served.is_ok() && (editor_open || tone.dirty()) {
+        let _ = keep_tone(&mut tone, index, "unload", &name, || save_state(&mut instance));
     }
     let result = teardown(&slot, instance, entry, parked);
     report_faults(&faults, index, &mut reported);

@@ -9,7 +9,8 @@
 //!   - `slot` is 0 | 1 (two native slots); we take it as `u8` and validate.
 //!   - `loadPlugin` REQUIRES `id`: one `.clap` bundle can export several descriptors, so
 //!     `(slot, path)` alone would silently load `descriptor[0]`.
-//!   - state is opaque plugin-defined bytes (CLAP `state` ext); JS sees a Uint8Array.
+//!   - a tone (engine mode) is a tone file's bytes (`tone.rs`), raw both ways: JS sees an
+//!     ArrayBuffer and sends a Uint8Array.
 //!   - every command returns `Result<_, String>` so a stub/error surfaces as a rejected JS promise
 //!     rather than a panic across the IPC boundary.
 //!
@@ -34,11 +35,13 @@ pub(crate) mod rt_alloc;
 mod scan;
 mod state;
 #[cfg(windows)]
+pub(crate) mod tone;
+#[cfg(windows)]
 mod transport;
 
 pub use commands::*;
 pub use state::PluginHostState;
-pub(crate) use state::{ParamDesc, PluginDescriptor, PluginInfo};
+pub(crate) use state::{ParamDesc, PluginDescriptor, PluginInfo, ToneImport};
 #[cfg(all(windows, debug_assertions))]
 pub(crate) use clap::marker_probe_target;
 #[cfg(all(windows, debug_assertions))]

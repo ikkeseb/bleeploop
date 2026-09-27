@@ -33,8 +33,7 @@ use clack_extensions::params::{
 use clack_extensions::gui::{
     GuiApiType, GuiConfiguration, GuiSize, HostGui, HostGuiImpl, PluginGui, Window,
 };
-#[cfg(debug_assertions)]
-use clack_extensions::state::PluginState;
+use clack_extensions::state::{HostState, HostStateImpl, PluginState};
 use clack_host::entry::PluginEntry;
 use clack_host::host::{HostError, HostExtensions};
 use clack_host::events::event_types::{NoteOffEvent, NoteOnEvent, ParamValueEvent};
@@ -98,8 +97,8 @@ const ASIO_MAX_BLOCK_FRAMES: u32 = 256;
 /// fill near the monitor target setpoint (MONITOR_TARGET_WASAPI/ASIO). Drop-on-full / zero-fill.
 const OUT_RING_CAP: usize = 8192;
 /// A request from a command thread to the owner (clack main) thread, which owns the `!Send`
-/// `PluginInstance`. State save/load is a CLAP main-thread call, so it can't run on the command
-/// thread — it's handed here with a one-shot reply channel the caller blocks on.
+/// `PluginInstance`. A parameter listing or a state save is a CLAP main-thread call, so it can't run on
+/// the command thread — it's handed here with a one-shot reply channel the caller blocks on.
 ///
 /// The six REVERSIBLE MUTATING requests (editor open/close, input + monitor arm/disarm) also carry
 /// an `Arc<AtomicBool>` CANCELLATION token. Dropping the reply receiver on a timeout does NOT
@@ -108,12 +107,17 @@ const OUT_RING_CAP: usize = 8192;
 /// request (`take_uncancelled`, which lists the one exception) and ROLLS BACK a late success (the
 /// `OpenEditor`/`Arm*` arms). Otherwise a late-succeeding monitor arm leaves a native stream running
 /// that the frontend booked as failed — the wet then sounds twice (native monitor + the web path JS
-/// never muted). `SaveState`/`LoadState`/`ListParams` carry no token (see `load_state`).
+/// never muted). `SaveTone`/`SupersedeTone`/`ListParams` carry no token: none of them changes what the
+/// plugin plays. No request pushes state INTO a running plugin: a tone is restored only inside an
+/// engine-mode load (`host/tone.rs`).
 pub enum OwnerRequest {
-    #[cfg(debug_assertions)]
-    SaveState(std::sync::mpsc::SyncSender<Result<Vec<u8>, String>>),
-    #[cfg(debug_assertions)]
-    LoadState(Vec<u8>, std::sync::mpsc::SyncSender<Result<(), String>>),
+    /// Engine mode: save the plugin's tone now (a session export takes it fresh), keep it in the
+    /// store, and reply with the tone file's bytes (empty: the plugin keeps no state). The web audio
+    /// path's owners keep no tones and answer an error.
+    SaveTone(std::sync::mpsc::SyncSender<Result<Vec<u8>, String>>),
+    /// Engine mode: a session import replaced this plugin's stored tone and the slot is about to
+    /// reload to apply it; this load saves nothing more to the store.
+    SupersedeTone(std::sync::mpsc::SyncSender<Result<(), String>>),
     ListParams(std::sync::mpsc::SyncSender<Result<Vec<ParamDesc>, String>>),
     /// VST3 only: mirror a HOST-originated parameter set (`plugin_set_param`) to the edit
     /// controller with `IEditController::setParamNormalized`. The processor already gets the value
@@ -257,36 +261,6 @@ pub fn set_param(state: &PluginHostState, slot: u8, id: u32, value: f64) -> Resu
         let _ = req_tx.send(OwnerRequest::SetParamNormalized(id, value));
     }
     Ok(())
-}
-
-/// Command-side: ask the owner thread to serialise the plugin and block (≤5 s) for the bytes.
-#[cfg(debug_assertions)]
-pub fn save_state(state: &PluginHostState, slot: u8) -> Result<Vec<u8>, String> {
-    let req_tx = slot_request_tx(state, slot)?;
-    let (reply_tx, reply_rx) = std::sync::mpsc::sync_channel(1);
-    req_tx
-        .send(OwnerRequest::SaveState(reply_tx))
-        .map_err(|_| "owner thread gone".to_string())?;
-    reply_rx
-        .recv_timeout(Duration::from_secs(5))
-        .map_err(|e| format!("save_state timed out: {e}"))?
-}
-
-/// Command-side: hand the owner thread bytes to restore and block (≤5 s) for the result.
-/// RESIDUAL (known): unlike the six reversible requests this one carries no cancellation token, so
-/// a `state.load` that finishes after the 5 s wait still applies to the plugin while the caller has
-/// reported failure. Left as-is deliberately: restoring state has no inverse to roll back to (the
-/// pre-load state is not captured anywhere), so cancelling it needs a design, not a token.
-#[cfg(debug_assertions)]
-pub fn load_state(state: &PluginHostState, slot: u8, bytes: Vec<u8>) -> Result<(), String> {
-    let req_tx = slot_request_tx(state, slot)?;
-    let (reply_tx, reply_rx) = std::sync::mpsc::sync_channel(1);
-    req_tx
-        .send(OwnerRequest::LoadState(bytes, reply_tx))
-        .map_err(|_| "owner thread gone".to_string())?;
-    reply_rx
-        .recv_timeout(Duration::from_secs(5))
-        .map_err(|e| format!("load_state timed out: {e}"))?
 }
 
 /// Command-side: ask the owner thread to enumerate the plugin's parameters (host-side `params`
@@ -491,6 +465,9 @@ fn refresh_clap_param_ids(instance: &mut PluginInstance<LfHost>, param_ids: &Par
     publish_param_ids(param_ids, &clap_param_descs(instance).unwrap_or_default());
 }
 
+/// The web audio path's owners keep no tones (`host/tone.rs` is engine mode's).
+const TONES_ON_THE_ENGINE_ONLY: &str = "tone recall runs on the native engine only";
+
 /// Owner-thread side: service one request on clack's main thread (holds the `!Send` instance).
 fn handle_owner_request(
     req: OwnerRequest,
@@ -498,33 +475,13 @@ fn handle_owner_request(
     param_ids: &ParamIds,
 ) {
     match req {
-        #[cfg(debug_assertions)]
-        OwnerRequest::SaveState(reply) => {
-            let res = (|| -> Result<Vec<u8>, String> {
-                let mut handle = instance.plugin_handle();
-                let ext = handle
-                    .get_extension::<PluginState>()
-                    .ok_or_else(|| "plugin has no state extension".to_string())?;
-                let mut buf: Vec<u8> = Vec::new();
-                ext.save(&mut handle, &mut buf)
-                    .map_err(|e| format!("state.save: {e}"))?;
-                Ok(buf)
-            })();
-            let _ = reply.send(res);
+        // Tone recall is engine mode's: its owner (`clap_engine`) serves these before they get here, and
+        // nothing sends them to a live owner.
+        OwnerRequest::SaveTone(reply) => {
+            let _ = reply.send(Err(TONES_ON_THE_ENGINE_ONLY.to_string()));
         }
-        #[cfg(debug_assertions)]
-        OwnerRequest::LoadState(bytes, reply) => {
-            let res = (|| -> Result<(), String> {
-                let mut handle = instance.plugin_handle();
-                let ext = handle
-                    .get_extension::<PluginState>()
-                    .ok_or_else(|| "plugin has no state extension".to_string())?;
-                let mut cur = std::io::Cursor::new(&bytes[..]);
-                ext.load(&mut handle, &mut cur)
-                    .map_err(|e| format!("state.load: {e}"))?;
-                Ok(())
-            })();
-            let _ = reply.send(res);
+        OwnerRequest::SupersedeTone(reply) => {
+            let _ = reply.send(Err(TONES_ON_THE_ENGINE_ONLY.to_string()));
         }
         OwnerRequest::ListParams(reply) => {
             let res = clap_param_descs(instance);
@@ -774,6 +731,10 @@ struct LfShared {
     callback_requested: AtomicBool,
     /// Set by `request_restart` (any thread), drained by the owner loop into ONE `service_restart`.
     restart_requested: AtomicBool,
+    /// Engine mode's owner keeps the plugin's tone (`host/tone.rs`): the host declares the `state`
+    /// extension, so the plugin can report a change with `mark_dirty`. The web audio path's owners
+    /// keep no tones and declare it not.
+    keeps_tone: bool,
 }
 impl<'a> SharedHandler<'a> for LfShared {
     /// [thread-safe] The plugin needs a deactivate → activate cycle (its latency, ports or internal
@@ -804,8 +765,15 @@ impl HostParamsImplShared for LfShared {
 #[derive(Default)]
 struct LfMain {
     params_rescan: bool,
+    /// The plugin's `clap_host_state.mark_dirty`: its state changed (engine mode saves its tone).
+    state_dirty: bool,
 }
 impl<'a> MainThreadHandler<'a> for LfMain {}
+impl HostStateImpl for LfMain {
+    fn mark_dirty(&mut self) {
+        self.state_dirty = true;
+    }
+}
 impl HostParamsImplMainThread for LfMain {
     fn rescan(&mut self, _flags: ParamRescanFlags) {
         self.params_rescan = true;
@@ -854,6 +822,7 @@ mod resize_tests {
             hosted_hwnd: hosted_hwnd.clone(),
             callback_requested: AtomicBool::new(false),
             restart_requested: AtomicBool::new(false),
+            keeps_tone: false,
         }
     }
 
@@ -928,10 +897,13 @@ impl HostHandlers for LfHost {
     /// P10.0: declare the host-side `gui` extension so the plugin can find our `clap_host_gui` and
     /// call `closed` when its floating window is dismissed. The default `declare_extensions` is
     /// empty — without this override `closed` never fires.
-    fn declare_extensions(builder: &mut HostExtensions<Self>, _shared: &Self::Shared<'_>) {
+    fn declare_extensions(builder: &mut HostExtensions<Self>, shared: &Self::Shared<'_>) {
         // `params`: the plugin's rescan/clear/request_flush callbacks (without it a preset loaded in
         // the plugin's GUI leaves the web UI's sliders stale).
         builder.register::<HostGui>().register::<HostParams>();
+        if shared.keeps_tone {
+            builder.register::<HostState>();
+        }
     }
 }
 
@@ -1568,6 +1540,7 @@ mod command_boundary_tests {
                     path: String::new(),
                     is_effect: None,
                 },
+                tone: None,
             },
             running: Arc::new(AtomicBool::new(true)),
             diag: diag.clone(),
@@ -1971,6 +1944,7 @@ fn owner_main(
                 hosted_hwnd: hh_for_shared,
                 callback_requested: AtomicBool::new(false),
                 restart_requested: AtomicBool::new(false),
+                keeps_tone: false,
             },
             |_| LfMain::default(),
             &entry,
@@ -2117,6 +2091,7 @@ fn owner_main(
             // descriptor with the real category); leave it unclassified.
             is_effect: None,
         },
+        tone: None,
     };
     // Before the load is reported, so the frontend's first `setParameter` finds its ids.
     refresh_clap_param_ids(&mut instance, &param_ids);

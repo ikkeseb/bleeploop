@@ -9,6 +9,8 @@
 //   pnpm native:engine-recovery  export, import and recovery on the engine (src/debug/engine-recovery.ts)
 //   pnpm native:engine-loopback  where takes land against the click on the engine
 //     (src/debug/engine-loopback.ts): needs an output cabled into input 2 (`--channel=` is 0-based)
+//   pnpm native:tone-recall  a plugin's tone across a restart, a session export and import, and a kill
+//     (src/debug/tone-recall.ts): one launch per phase, on WASAPI
 //
 // Options: `--asio` launches `pnpm dev:asio` instead of `pnpm dev:wasapi`; `--<knob>=<value>` becomes
 // `VITE_LF_PROBE_<KNOB>` (`--filter=Pro-Q,Saturn`, `--hold=`, `--settle=`, `--params=`, `--plugins=`:
@@ -72,6 +74,19 @@ const PROBES = {
     engine: 'on',
     cleanLog: true,
     phases: [{ name: 'loopback', end: /^(complete: .*|FAIL.*)$/, pass: /^complete: /, exit: 'os-close' }],
+  },
+  // A profile of its own (its own tone store); save closes itself, check is killed once its tones are
+  // saved by the debounce alone, after closes itself. `set: ` hands over like `saved: `.
+  'tone-recall': {
+    tag: 'tone',
+    config: 'scripts/tone-probe.tauri.json',
+    engine: 'on',
+    cleanLog: true,
+    phases: [
+      { name: 'save', end: /^(saved: .*|FAIL.*)$/, pass: /^saved: /, exit: 'close' },
+      { name: 'check', end: /^(set: .*|FAIL.*)$/, pass: /^set: /, exit: 'crash' },
+      { name: 'after', end: /^(restored: .*|FAIL.*)$/, pass: /^restored: /, exit: 'close' },
+    ],
   },
   // `recallLines`: how many `[rig-recall]` log lines the phase must print.
   'recall-restart': {
@@ -253,7 +268,7 @@ for (const phase of phases) {
     result.reason = `${phase.name}: ${result.recallLines} [rig-recall] line(s), expected ${phase.recallLines}`;
     result.line = null;
   }
-  if (ok && result.line.startsWith('saved: ')) handover = result.line.slice('saved: '.length);
+  if (ok && /^(saved|set): /.test(result.line)) handover = result.line.replace(/^\w+: /, '');
   if (!ok) {
     if (phase.name && result.line) result.line = `${phase.name}: ${result.line}`;
     break;

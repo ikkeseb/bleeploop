@@ -148,7 +148,7 @@ await probe(async ({ open }) => {
     let repeatedPayloadRejected = false;
     const began = performance.now();
     try { await importSession(hostile); }
-    catch (error) { repeatedPayloadRejected = String(error).includes('128 entries; maximum is 7'); }
+    catch (error) { repeatedPayloadRejected = String(error).includes('128 entries; maximum is 9'); }
     const rejectionMs = performance.now() - began;
     return { name: 'Download bundle preserves editable overdub headroom and quiet samples', errors,
       samples: Array.from(restored.pcm.slice(1024, 1027)), volume: restored.volume,

@@ -12,6 +12,7 @@ import type {
   PluginInfo,
   PluginParamDesc,
   PluginSlot,
+  ToneImport,
 } from './host';
 import { webPlatform } from './host.web';
 import { decodeDeviceStatus, decodeFeedFrame } from './engine-wire';
@@ -96,11 +97,13 @@ const tauriPluginHost: PluginHost = {
   onStreamFault(cb) {
     return subscribe<{ slot: PluginSlot; kind: 'input' | 'output' }>('plugin:stream-fault', cb);
   },
-  async saveState(slot) {
-    return new Uint8Array(await invoke<number[]>('plugin_save_state', { slot }));
+  // A tone moves as raw bytes both ways, as a session does (`engine_snapshot`).
+  async takeTone(slot) {
+    const bytes = await invoke<ArrayBuffer>('plugin_tone_take', { slot });
+    return bytes.byteLength > 0 ? new Uint8Array(bytes) : null;
   },
-  async loadState(slot, bytes) {
-    await invoke('plugin_load_state', { slot, bytes: Array.from(bytes) });
+  importTone(slot, bytes) {
+    return invoke<ToneImport>('plugin_tone_import', bytes, { headers: { slot: String(slot) } });
   },
   listInputDevices() {
     return invoke<AudioInputDevice[]>('plugin_list_input_devices');

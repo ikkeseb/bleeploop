@@ -1,6 +1,7 @@
 // src/audio/export/export.ts
 // WAV-export coordinator: pulls a read-only snapshot of the committed looper tracks and drops
-// ONE .zip (per-track mono WAVs + a stereo master mix + session.json) via blob + <a download>.
+// ONE .zip (per-track mono WAVs + a stereo master mix + session.json, and in engine mode each loaded
+// plugin slot's tone, `../slot-tones.ts`) via blob + <a download>.
 // Everything is bundled into a single archive on purpose: browsers (and WebView2) gate more than one
 // programmatic download per user gesture, so firing a separate <a>.click() per file silently delivers
 // only the first — one zip is one gesture, so the whole export always reaches the user (see zip.ts).
@@ -12,6 +13,7 @@ import { webSession, type SessionSource } from './session-source';
 import { encodeWav, mixMono } from './wav';
 import { makeZip } from './zip';
 import { prepareStemArchive, exportBase } from './stem-archive';
+import { slotLetter, takeSlotTones } from '../slot-tones';
 
 function download(bytes: Uint8Array<ArrayBuffer> | string, filename: string, mime: string): void {
   const blob = new Blob([bytes], { type: mime });
@@ -109,6 +111,14 @@ export async function buildExportBundle(
       },
     });
   }
+  // Engine mode: each loaded slot's tone, taken fresh (`slot-tones.ts`), as a tone file per slot, and
+  // session.json names the plugin it belongs to (`validateSessionPlugins` reads it back).
+  const plugins = (await takeSlotTones()).map(({ slot, plugin, bytes }) => {
+    const file = `${base}-tone-slot-${slotLetter(slot).toLowerCase()}.bin`;
+    entries.push({ name: file, data: bytes });
+    return { slot: slotLetter(slot), ...plugin, file };
+  });
+  if (plugins.length > 0) Object.assign(session, { plugins });
   entries.push({ name: `${base}-session.json`, data: new TextEncoder().encode(JSON.stringify(session, null, 2)) });
 
   return { zipBytes: makeZip(entries), base };

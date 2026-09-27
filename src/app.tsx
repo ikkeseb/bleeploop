@@ -120,7 +120,7 @@ export function App() {
       // Env-triggered native probes (DEV, PC only): `src/debug/restart-survey.ts`,
       // `src/debug/editor-smoke.ts`, `src/debug/swap-stress.ts`, `src/debug/recall-restart.ts`,
       // `src/debug/loopback-sync.ts`, `src/debug/engine-smoke.ts`, `src/debug/engine-recovery.ts`,
-      // `src/debug/engine-loopback.ts`.
+      // `src/debug/engine-loopback.ts`, `src/debug/tone-recall.ts`.
       if (import.meta.env.VITE_LF_PROBE === 'restart-survey') {
         void import('./debug/restart-survey').then((m) => m.runRestartSurvey());
       } else if (import.meta.env.VITE_LF_PROBE === 'editor-smoke') {
@@ -137,6 +137,8 @@ export function App() {
         void import('./debug/engine-recovery').then((m) => m.runEngineRecovery());
       } else if (import.meta.env.VITE_LF_PROBE === 'engine-loopback') {
         void import('./debug/engine-loopback').then((m) => m.runEngineLoopback());
+      } else if (import.meta.env.VITE_LF_PROBE === 'tone-recall') {
+        void import('./debug/tone-recall').then((m) => m.runToneRecall());
       }
     }
   });

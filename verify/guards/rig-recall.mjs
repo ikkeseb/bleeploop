@@ -1,8 +1,8 @@
 // verify/guards/rig-recall.mjs — the REAL src/audio/rig-recall.ts under the verify hooks: which build
 // recalls, and from which keys. The owner's build (no `VITE_LF_PROBE`) uses the `lf.` keys; the
-// recall's own native probe (`recall-restart`) keys of its own, never the owner's; every other DEV
-// native probe neither restores nor stores, so a run killed with a plugin loaded never hands that
-// plugin to its next run. Each case loads a fresh generation (`?g=N`) under its own env.
+// recall's own native probes (`recall-restart`, `tone-recall`) keys of their own, never the owner's nor
+// each other's; every other DEV native probe neither restores nor stores, so a run killed with a
+// plugin loaded never hands that plugin to its next run. Each case loads a fresh generation (`?g=N`) under its own env.
 // The record, the marker and the skip rules across launches: verify/probes/rig-recall.mjs.
 
 import assert from 'node:assert';
@@ -56,15 +56,23 @@ await check("the owner's build restores from the lf. keys", async () => {
   assert.equal(store.get('lf.probe.recall-restart.rigRecall'), record(null, SYN), "the probe's record is untouched");
 });
 
-await check('the recall probe restores from its own keys, never the owner\'s', async () => {
-  const owner = record(SYN, null);
-  const { m, loads } = await launch('recall-restart', { 'lf.rigRecall': owner, 'lf.probe.recall-restart.rigRecall': record(FX, null) });
-  assert.deepEqual(loads, [[0, 'probe.fx']]);
-  m.rememberSlotPlugin(1, SYN);
-  m.forgetSlotPlugin(0);
-  assert.deepEqual(JSON.parse(store.get('lf.probe.recall-restart.rigRecall')).map((p) => p?.id ?? null), [null, 'probe.syn']);
-  assert.equal(store.get('lf.rigRecall'), owner, "the owner's record is untouched");
-});
+for (const [probe, other] of [['recall-restart', 'tone-recall'], ['tone-recall', 'recall-restart']]) {
+  await check(`the ${probe} probe restores from its own keys, never the owner's`, async () => {
+    const owner = record(SYN, null);
+    const others = record(null, FX);
+    const { m, loads } = await launch(probe, {
+      'lf.rigRecall': owner,
+      [`lf.probe.${probe}.rigRecall`]: record(FX, null),
+      [`lf.probe.${other}.rigRecall`]: others,
+    });
+    assert.deepEqual(loads, [[0, 'probe.fx']]);
+    m.rememberSlotPlugin(1, SYN);
+    m.forgetSlotPlugin(0);
+    assert.deepEqual(JSON.parse(store.get(`lf.probe.${probe}.rigRecall`)).map((p) => p?.id ?? null), [null, 'probe.syn']);
+    assert.equal(store.get('lf.rigRecall'), owner, "the owner's record is untouched");
+    assert.equal(store.get(`lf.probe.${other}.rigRecall`), others, "the other probe's record is untouched");
+  });
+}
 
 for (const probe of ['editor-smoke', 'restart-survey', 'swap-stress']) {
   await check(`${probe} neither restores nor stores`, async () => {

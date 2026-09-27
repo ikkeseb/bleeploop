@@ -14,6 +14,10 @@ pub(super) struct FixtureController {
     handler_sets: AtomicUsize,
     /// Every `setParamNormalized` the host made (the engine-mode tests' controller mirror).
     pub(super) set_normalized: Mutex<Vec<(ParamID, ParamValue)>>,
+    /// The tone tests: the controller's own state (`getState` writes it, `setState` replaces it), and
+    /// every state call in order, with what it read.
+    pub(super) state: Mutex<Vec<u8>>,
+    pub(super) state_calls: Mutex<Vec<(&'static str, Vec<u8>)>>,
 }
 
 impl FixtureController {
@@ -23,6 +27,8 @@ impl FixtureController {
             handler: Mutex::new(None),
             handler_sets: AtomicUsize::new(0),
             set_normalized: Mutex::new(Vec::new()),
+            state: Mutex::new(Vec::new()),
+            state_calls: Mutex::new(Vec::new()),
         }
     }
     fn held_handler(&self) -> Option<usize> {
@@ -44,14 +50,19 @@ impl IPluginBaseTrait for FixtureController {
 }
 
 impl IEditControllerTrait for FixtureController {
-    unsafe fn setComponentState(&self, _state: *mut IBStream) -> tresult {
+    unsafe fn setComponentState(&self, state: *mut IBStream) -> tresult {
+        let bytes = super::restart_tests::read_stream(state);
+        self.state_calls.lock().unwrap().push(("setComponentState", bytes));
         kResultOk
     }
-    unsafe fn setState(&self, _state: *mut IBStream) -> tresult {
+    unsafe fn setState(&self, state: *mut IBStream) -> tresult {
+        let bytes = super::restart_tests::read_stream(state);
+        self.state_calls.lock().unwrap().push(("setState", bytes.clone()));
+        *self.state.lock().unwrap() = bytes;
         kResultOk
     }
-    unsafe fn getState(&self, _state: *mut IBStream) -> tresult {
-        kResultOk
+    unsafe fn getState(&self, state: *mut IBStream) -> tresult {
+        super::restart_tests::write_stream(state, &self.state.lock().unwrap())
     }
     unsafe fn getParameterCount(&self) -> int32 {
         self.param_count.load(Relaxed)

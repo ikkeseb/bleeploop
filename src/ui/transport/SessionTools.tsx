@@ -1,6 +1,7 @@
 import { createMemo, createSignal } from 'solid-js';
 import { exportLoops } from '../../audio/export/export';
 import { importSession, maxImportArchiveBytes } from '../../audio/export/import';
+import { restoreSessionTones } from '../../audio/slot-tones';
 import { notifyError, notifyInfo } from '../../notify';
 import { clock, looper, sampleRate, session } from '../state/audio';
 import { anyTrackIn, masterBars } from '../looper/shared';
@@ -10,9 +11,10 @@ import { anyTrackIn, masterBars } from '../looper/shared';
  * They are file operations, not transport, and as labelled pills they pushed the bar past the viewport
  * at every width below 1600 (the Tauri default is 1280).
  *
- * Export every committed track (mono WAV) + the wet stereo master + session.json. Import a previous
- * export into an EMPTY looper — import never overwrites, so it is enabled only while no master loop
- * exists (the inverse of EXPORT). Both go through the mode's `session` (the web looper or the engine).
+ * Export every committed track (mono WAV) + the wet stereo master + session.json, and on the engine each
+ * loaded plugin slot's tone. Import a previous export into an EMPTY looper — import never overwrites, so
+ * it is enabled only while no master loop exists (the inverse of EXPORT) — then store the tones it
+ * carries (`slot-tones.ts`). Both go through the mode's `session` (the web looper or the engine).
  */
 export function SessionTools() {
   const hasMaster = () => looper.masterLengthFrames() > 0;
@@ -53,8 +55,10 @@ export function SessionTools() {
       if (file.size > limit) {
         throw new Error(`archive is too large (${file.size} bytes; maximum ${limit})`);
       }
-      await importSession(await file.arrayBuffer(), session);
-      // No success toast — five lanes lighting up IS the feedback.
+      const tones = await importSession(await file.arrayBuffer(), session);
+      // No success toast — five lanes lighting up IS the feedback. The tones come after the loops: a
+      // tone the host refuses toasts on its own and never takes the loops back out.
+      await restoreSessionTones(tones);
     } catch (err) {
       console.error('[transport] import failed', err);
       notifyError('Import failed: ' + (err instanceof Error ? err.message : String(err)));

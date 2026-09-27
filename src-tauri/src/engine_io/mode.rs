@@ -20,12 +20,15 @@ use tauri::{AppHandle, Manager};
 
 use super::feed::FeedThread;
 use super::plugins::EngineSlot;
+use crate::host::tone::ToneStore;
 use super::wire::{FeedFrame, WireCommand};
 use super::{DeviceRequest, DeviceStatus, EngineHost, HostConfig, OpenError};
 
 /// The toggle file in the app-local data folder: `off` runs this app on the web audio path; anything
 /// else, or no file, on the engine.
 const TOGGLE_FILE: &str = "engine-mode";
+/// The tone store's folder in the app-local data folder (`host/tone.rs`).
+const TONES_DIR: &str = "tones";
 /// The engine's claim on `audio_output`'s ASIO duplex holder (the live line's slots are 0 and 1).
 const ASIO_HOLDER: u8 = 2;
 
@@ -45,11 +48,14 @@ pub fn active() -> bool {
     engine().is_some()
 }
 
-/// Engine mode's state: the toggle, and the host, its feed and its plugin slots while it is on.
+/// Engine mode's state: the toggle, and the host, its feed, its plugin slots and the tone store while
+/// it is on.
 pub struct EngineApp {
     toggle: Option<PathBuf>,
     engine: Option<(EngineHost, FeedThread)>,
     pub(super) slots: Mutex<[EngineSlot; SLOT_COUNT]>,
+    /// `None` without an app-local data folder: plugins then load at their defaults and keep nothing.
+    pub(super) tones: Option<ToneStore>,
 }
 
 impl EngineApp {
@@ -62,14 +68,21 @@ impl EngineApp {
     }
 
     fn start(app: &AppHandle) -> EngineApp {
-        let toggle = match app.path().app_local_data_dir() {
-            Ok(dir) => Some(dir.join(TOGGLE_FILE)),
+        let data = match app.path().app_local_data_dir() {
+            Ok(dir) => Some(dir),
             Err(e) => {
-                log::warn!("[engine_io] no app-local data dir ({e}); the engine toggle cannot be read or saved");
+                log::warn!("[engine_io] no app-local data dir ({e}); the engine toggle cannot be read or saved, and no tone is kept");
                 None
             }
         };
-        let off = |toggle| EngineApp { toggle, engine: None, slots: Mutex::new(std::array::from_fn(|_| EngineSlot::Empty)) };
+        let toggle = data.as_ref().map(|dir| dir.join(TOGGLE_FILE));
+        let tones = data.map(|dir| ToneStore::new(dir.join(TONES_DIR)));
+        let off = |toggle| EngineApp {
+            toggle,
+            engine: None,
+            slots: Mutex::new(std::array::from_fn(|_| EngineSlot::Empty)),
+            tones: None,
+        };
         if toggle.as_ref().is_some_and(|path| toggled_off(path)) {
             log::info!("[engine_io] web audio mode: the engine toggle is off");
             return off(toggle);
@@ -82,7 +95,7 @@ impl EngineApp {
         match FeedThread::spawn(host.clone()) {
             Ok(feed) => {
                 log::info!("[engine_io] engine mode: the native engine owns the audio device");
-                EngineApp { engine: Some((host, feed)), ..off(toggle) }
+                EngineApp { engine: Some((host, feed)), tones, ..off(toggle) }
             }
             Err(e) => {
                 log::error!("[engine_io] the feed thread did not start ({e}); engine mode stays off");
@@ -97,15 +110,17 @@ impl EngineApp {
         self.engine.as_ref().map(|(host, _)| host.clone()).ok_or_else(|| "engine mode is off".to_string())
     }
 
-    /// On exit: stop the feed, unload the plugins while the device still plays (each crossfades out),
-    /// then close the device and drop the engine on its owner thread. Waits at most `SHUTDOWN_WAIT`: a
-    /// plugin that hangs in its teardown is left to the process's exit rather than holding the app open.
+    /// On exit: stop the feed, save every slot's tone (`save_tones_on_exit`, bounded on its own), unload
+    /// the plugins while the device still plays (each crossfades out), then close the device and drop
+    /// the engine on its owner thread. Waits at most `SHUTDOWN_WAIT`: a plugin that hangs in its save or
+    /// its teardown is left to the process's exit rather than holding the app open.
     pub fn shutdown() {
         let Some(app) = engine() else { return };
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         let spawned = std::thread::Builder::new().name("lf-engine-shutdown".into()).spawn(move || {
             if let Some((host, feed)) = &app.engine {
                 feed.stop();
+                app.save_tones_on_exit();
                 app.unload_all();
                 host.shutdown();
             }

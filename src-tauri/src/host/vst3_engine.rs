@@ -1,15 +1,22 @@
 //! OWNS: a VST3 plugin in the engine: `Vst3Unit` (the processor with its event and parameter lists,
 //! as an `lf_engine::SlotProcessor`) and the engine-mode owner thread that loads, activates,
-//! restarts, re-activates after an eviction and tears it down (`engine_slot` holds the API). It
-//! follows `vst3_owner_main` minus the RT thread, the hop-1 ring and the device; the Stage 1 spike's
-//! `PluginUnit` was the unit's prototype. The load sequence and the teardown are copied from the
-//! live owner rather than shared: nothing but a window-bound owner and a real DLL exercise those.
+//! restarts, re-activates after an eviction and tears it down (`engine_slot` holds the API), keeping
+//! the plugin's tone as `engine_slot` describes: the component's and the edit controller's states in
+//! one container (`save_state`, `restore_state`). It follows `vst3_owner_main` minus the RT thread,
+//! the hop-1 ring and the device; the Stage 1 spike's `PluginUnit` was the unit's prototype. The load
+//! sequence and the teardown are copied from the live owner rather than shared: nothing but a
+//! window-bound owner and a real DLL exercise those. Unlike the live owner's, this load creates the
+//! edit controller and sets its component handler before the component activates, the SDK host's
+//! order, so a stored tone reaches both halves before anything processes.
 
 use super::super::engine_slot::{
-    report_faults, EngineSlotEvent, OwnerCtx, Ready, FAULT_PROCESS, FAULT_START, OWNER_POLL,
-    REMOVE_TIMEOUT,
+    keep_tone, report_faults, restore_tone, EngineSlotEvent, OwnerCtx, Ready, FAULT_PROCESS,
+    FAULT_START, OWNER_POLL, REMOVE_TIMEOUT,
 };
+use super::super::super::state::ToneRestore;
+use super::super::super::tone::{self, ToneKeeper};
 use super::*;
+use vst3::Steinberg::kNotImplemented;
 
 use lf_engine::grid::Frame;
 use lf_engine::{SlotEvent, SlotEventKind, SlotKind, SlotProcessor};
@@ -289,6 +296,67 @@ impl Vst3Plugin {
     }
 }
 
+/// A fresh `MemStream` and the `IBStream` pointer a plugin call takes.
+fn stream(over: &[u8]) -> Result<(ComWrapper<MemStream>, ComPtr<IBStream>), String> {
+    let stream = ComWrapper::new(MemStream::reading(over));
+    let ptr = stream.to_com_ptr::<IBStream>().ok_or("stream COM failed")?;
+    Ok((stream, ptr))
+}
+
+/// The plugin's state, for its tone: the component's (`IComponent::getState`, which must succeed) and
+/// the edit controller's (`IEditController::getState`; one that refuses or keeps nothing adds an empty
+/// state), in one container (`tone::encode_vst3`). Owner thread.
+fn save_state(plugin: &Vst3Plugin) -> Result<Option<Vec<u8>>, String> {
+    let (component, ptr) = stream(&[])?;
+    // SAFETY: owner thread; the component is initialised and the stream outlives the call.
+    let r = unsafe { plugin.component.getState(ptr.as_ptr()) };
+    if r != kResultOk {
+        return Err(format!("IComponent::getState → {r:#x}"));
+    }
+    let controller = match plugin.controller.as_ref() {
+        Some(ctl) => {
+            let (state, ptr) = stream(&[])?;
+            // SAFETY: owner thread; live controller; the stream outlives the call.
+            match unsafe { ctl.getState(ptr.as_ptr()) } {
+                r if r == kResultOk => state.bytes(),
+                _ => Vec::new(),
+            }
+        }
+        None => Vec::new(),
+    };
+    Ok(Some(tone::encode_vst3(&component.bytes(), &controller)))
+}
+
+/// Restore a tone's state, in the SDK host's order: `IComponent::setState`, then the edit controller's
+/// `setComponentState` with the component's state (a stream of its own, from the start) and its own
+/// `setState`. The component refusing is the restore failing; a controller that refuses only leaves
+/// the editor's knobs behind the sound, which is logged. Owner thread, before the component activates.
+fn restore_state(plugin: &Vst3Plugin, state: &[u8], slot: usize) -> Result<(), String> {
+    let (component, controller) = tone::decode_vst3(state)?;
+    let (_keep, ptr) = stream(component)?;
+    // SAFETY: owner thread; the component is initialised and inactive; the stream outlives the call.
+    let r = unsafe { plugin.component.setState(ptr.as_ptr()) };
+    if r != kResultOk {
+        return Err(format!("the component refused its saved state ({r:#x})"));
+    }
+    let Some(ctl) = plugin.controller.as_ref() else { return Ok(()) };
+    let (_keep, ptr) = stream(component)?;
+    // SAFETY: owner thread; live controller; the stream outlives the call.
+    let r = unsafe { ctl.setComponentState(ptr.as_ptr()) };
+    if r != kResultOk && r != kNotImplemented {
+        log::warn!("[plugin_host] engine slot {slot}: the edit controller refused the component state ({r:#x}); its editor may show stale values");
+    }
+    if !controller.is_empty() {
+        let (_keep, ptr) = stream(controller)?;
+        // SAFETY: as above.
+        let r = unsafe { ctl.setState(ptr.as_ptr()) };
+        if r != kResultOk && r != kNotImplemented {
+            log::warn!("[plugin_host] engine slot {slot}: the edit controller refused its saved state ({r:#x})");
+        }
+    }
+    Ok(())
+}
+
 /// Re-activate the unit at the engine's current terms and install it. A restart report the plugin
 /// raises from inside the cycle (a `kLatencyChanged` from `setActive(1)`) describes the state just
 /// activated and is consumed, as the live cycle does. On failure the unit comes back to the caller.
@@ -374,16 +442,24 @@ pub(in super::super) fn run(ctx: OwnerCtx, path: String, id: &str) -> Result<(),
     })
 }
 
-/// Create class `id` from the factory, initialise and activate it, and build its unit (with the rate it
-/// activated at). Copied from `vst3_owner_main`'s setup. Every error after the component exists tears
-/// it down (`Vst3Plugin`).
+/// What a load hands the owner: the plugin, its unit, its name, the rate it activated at and what it
+/// did with the stored tone.
+type Loaded = (Vst3Plugin, Box<Vst3Unit>, String, u32, Option<ToneRestore>);
+
+/// Create class `id` from the factory, initialise it, create its edit controller and give it the
+/// load's component `handler`, restore the stored tone, activate, and build its unit. Copied from
+/// `vst3_owner_main`'s setup, with the controller and the tone before the activation. Every error after
+/// the component exists tears it down (`Vst3Plugin`); the handler outlives the plugin (the caller's).
 fn load(
     id: &str,
     open: impl FnOnce() -> Result<Opened, String>,
     slot: &SlotHost,
     params: Consumer<PluginEvent>,
     faults: Arc<AtomicU32>,
-) -> Result<(Vst3Plugin, Box<Vst3Unit>, String, u32), String> {
+    handler: &ComWrapper<LfComponentHandler>,
+    restart: &RestartFlags,
+    tone: &ToneKeeper,
+) -> Result<Loaded, String> {
     let target = super::super::super::scan::hex_to_tuid(id).ok_or_else(|| format!("bad VST3 class id: {id}"))?;
     let (module, factory) = open()?;
     // SAFETY: raw FUnknown COM on the owner thread, the live owner's sequence; every pointer is
@@ -425,12 +501,22 @@ fn load(
             .component
             .cast::<IAudioProcessor>()
             .ok_or_else(|| "plugin has no IAudioProcessor".to_string())?;
-        let (activation, max_frames, rate) = plugin.activate(&processor, slot)?;
-        let unit = Vst3Unit::new(processor, activation, max_frames, params, faults)?;
         let (controller, separated) = obtain_controller(&plugin.factory, &plugin.component, &plugin.host_ctx);
         plugin.controller = controller;
         plugin.separated = separated;
-        Ok((plugin, unit, name, rate))
+        // The one component handler of this load, set before anything can report through it and kept
+        // until the plugin is torn down (editors use it too).
+        if let (Some(ctl), Some(hp)) = (plugin.controller.as_ref(), handler.to_com_ptr::<IComponentHandler>()) {
+            ctl.setComponentHandler(hp.as_ptr());
+        }
+        // The stored tone goes in before the component activates: nothing processes it yet.
+        let restored = restore_tone(tone, slot.slot(), &name, |state| restore_state(&plugin, state, slot.slot()));
+        let (activation, max_frames, rate) = plugin.activate(&processor, slot)?;
+        // A restart or a re-list the restore or the activation raised describes the state just
+        // activated, as a cycle's does (`reinstall`); the param ids are listed after the load anyway.
+        let _ = (restart.take(), restart.take_notify());
+        let unit = Vst3Unit::new(processor, activation, max_frames, params, faults)?;
+        Ok((plugin, unit, name, rate, restored))
     }
 }
 
@@ -441,10 +527,24 @@ pub(super) fn run_with(
     id: &str,
     open: impl FnOnce() -> Result<Opened, String>,
 ) -> Result<(), String> {
-    let OwnerCtx { slot, running, requests, params, params_tx, param_ids, sink, editor_parent, ready } = ctx;
+    let OwnerCtx { slot, running, requests, params, params_tx, param_ids, sink, editor_parent, ready, mut tone } = ctx;
     let index = slot.slot();
     let faults = Arc::new(AtomicU32::new(0));
-    let (mut plugin, unit, name, rate) = match load(id, open, &slot, params, faults.clone()) {
+    // The load's component handler: an editor's `performEdit` reaches the processor, the caller and
+    // the tone (a change to save).
+    let restart = Arc::new(RestartFlags::default());
+    let edits = sink.clone();
+    let edited = tone.edited();
+    let handler = ComWrapper::new(LfComponentHandler {
+        event_tx: params_tx,
+        param_changed: Box::new(move |id, value| {
+            edited.store(true, Release);
+            edits(EngineSlotEvent::ParamChanged { id, value })
+        }),
+        restart: restart.clone(),
+    });
+    let loaded = load(id, open, &slot, params, faults.clone(), &handler, &restart, &tone);
+    let (mut plugin, unit, name, rate, restored) = match loaded {
         Ok(loaded) => loaded,
         Err(e) => {
             let _ = ready.send(Err(e));
@@ -453,21 +553,6 @@ pub(super) fn run_with(
     };
     // Before the load is reported, so the caller's first `set_param` finds its ids.
     publish_param_ids(&param_ids, &list_vst3_params(&plugin.controller).unwrap_or_default());
-    // The one component handler of this load, set before anything can report through it and kept
-    // until the plugin is torn down (editors use it too).
-    let restart = Arc::new(RestartFlags::default());
-    let edits = sink.clone();
-    let handler = ComWrapper::new(LfComponentHandler {
-        event_tx: params_tx,
-        param_changed: Box::new(move |id, value| edits(EngineSlotEvent::ParamChanged { id, value })),
-        restart: restart.clone(),
-    });
-    if let (Some(ctl), Some(hp)) = (plugin.controller.as_ref(), handler.to_com_ptr::<IComponentHandler>()) {
-        // SAFETY: owner thread; `ctl` is this load's live, initialised controller.
-        unsafe {
-            ctl.setComponentHandler(hp.as_ptr());
-        }
-    }
     let kind = unit.kind;
     // Not installed: the unit, then the plugin, go before the handler the controller holds.
     if !running.load(Acquire) {
@@ -480,7 +565,7 @@ pub(super) fn run_with(
         let _ = ready.send(Err(e));
         return Ok(());
     }
-    if ready.send(Ok(Ready { name, kind })).is_err() {
+    if ready.send(Ok(Ready { name: name.clone(), kind, tone: restored })).is_err() {
         log::warn!("[plugin_host] engine slot {index}: the load finished after its caller gave up; undoing it");
         return teardown(&slot, plugin, None, handler);
     }
@@ -504,17 +589,22 @@ pub(super) fn run_with(
         if restart.take_notify() & RestartFlags::RELIST != 0 {
             publish_param_ids(&param_ids, &list_vst3_params(&plugin.controller).unwrap_or_default());
             sink(EngineSlotEvent::ParamsChanged);
+            tone.note_change(Instant::now());
         }
         // A new engine at another rate evicted the unit; it comes back stopped.
         if let Some(unit) = slot.take_evicted() {
             cycle(&mut plugin, &slot, &restart, &mut parked, Some(own(unit)), "re-activation after a device change");
         }
-        // The hosted editor needs this thread to pump its window, and reports its close box here.
+        // Every turn, editor or not: a JUCE plugin (Neural DSP) runs its message thread here, and its
+        // timers and async updates must not wait for the next editor, or its state lags what it plays
+        // and a tone saved meanwhile is stale. The hosted editor's window needs it too, and reports its
+        // close box here.
+        pump_thread_messages();
         if matches!(editor, Vst3Editor::Open { .. }) {
-            pump_thread_messages();
             if matches!(&editor, Vst3Editor::Open { win, .. } if win.close_requested()) {
                 vst3_editor_close(&mut editor);
                 sink(EngineSlotEvent::EditorClosed);
+                let _ = keep_tone(&mut tone, index, "editor closed", &name, || save_state(&plugin));
             }
         }
         let request = if matches!(editor, Vst3Editor::Open { .. }) {
@@ -546,7 +636,15 @@ pub(super) fn run_with(
                 OwnerRequest::CloseEditor(_, reply) => {
                     if !matches!(editor, Vst3Editor::Closed) {
                         vst3_editor_close(&mut editor);
+                        let _ = keep_tone(&mut tone, index, "editor closed", &name, || save_state(&plugin));
                     }
+                    let _ = reply.send(Ok(()));
+                }
+                OwnerRequest::SaveTone(reply) => {
+                    let _ = reply.send(keep_tone(&mut tone, index, "asked", &name, || save_state(&plugin)));
+                }
+                OwnerRequest::SupersedeTone(reply) => {
+                    tone.supersede();
                     let _ = reply.send(Ok(()));
                 }
                 OwnerRequest::ListParams(reply) => {
@@ -575,10 +673,10 @@ pub(super) fn run_with(
                 OwnerRequest::DisarmInput(_, reply) | OwnerRequest::DisarmMonitor(_, reply) => {
                     let _ = reply.send(Ok(()));
                 }
-                // DEV state save/load: not wired for VST3, as on the live line.
-                #[cfg(debug_assertions)]
-                other => reply_unsupported(other),
             }
+        }
+        if tone.poll(Instant::now()) {
+            let _ = keep_tone(&mut tone, index, "changes went quiet", &name, || save_state(&plugin));
         }
         report_faults(&faults, index, &mut reported);
     }
@@ -586,8 +684,14 @@ pub(super) fn run_with(
     if served.is_err() {
         log::error!("[plugin_host] engine slot {index}: the VST3 owner panicked; tearing the plugin down");
     }
-    if !matches!(editor, Vst3Editor::Closed) {
+    let editor_open = !matches!(editor, Vst3Editor::Closed);
+    if editor_open {
         vst3_editor_close(&mut editor);
+    }
+    // Before the teardown: a change not saved yet, and what an open editor may have changed unseen. Not
+    // after a panic, which may have left the plugin half way through something.
+    if served.is_ok() && (editor_open || tone.dirty()) {
+        let _ = keep_tone(&mut tone, index, "unload", &name, || save_state(&plugin));
     }
     let result = teardown(&slot, plugin, parked, handler);
     report_faults(&faults, index, &mut reported);

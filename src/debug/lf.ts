@@ -83,8 +83,6 @@ export interface LfDebug {
    * `__lf.onPluginParam(e => console.log(e))` then drag a knob. */
   onPluginParam: (cb: (e: { slot: 0 | 1; id: number; value: number }) => void) => () => void;
   onPluginEditorClosed: (cb: (slot: 0 | 1) => void) => () => void;
-  pluginSaveState: (slot?: number) => ReturnType<typeof platform.pluginHost.saveState>;
-  pluginLoadState: (bytes: Uint8Array, slot?: number) => Promise<void>;
   pluginPanic: () => void;
   /** Session import/export headless: a probe builds the zip bytes, feeds them back through import,
    * and byte-asserts the round trip without touching <a download> or a file input. */
@@ -153,8 +151,6 @@ export function installLfDebug(ui: LfDebug['ui']): void {
     pluginListParams: (slot = 0) => platform.pluginHost.listParams(slot as 0 | 1),
     onPluginParam: (cb) => platform.pluginHost.onParamChanged(cb),
     onPluginEditorClosed: (cb) => platform.pluginHost.onEditorClosed(cb),
-    pluginSaveState: (slot = 0) => platform.pluginHost.saveState(slot as 0 | 1),
-    pluginLoadState: (bytes, slot = 0) => platform.pluginHost.loadState(slot as 0 | 1, bytes),
     pluginPanic: () => inputRouter.allNotesOff(),
     importSession,
     buildExportBundle,

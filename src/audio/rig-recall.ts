@@ -1,10 +1,11 @@
 /**
  * OWNS: rig recall — which plugin each slot held when the app last ran, restoring it at launch
  * through the normal load path, and the in-flight marker that keeps a plugin which crashes or hangs
- * the host at load from taking down every later launch. Only the plugin's identity is kept: not its
- * tone state (VST3 state recall is not built) and never an arm, so GO LIVE stays one press. The
- * guitar input channel is not here: it is the one global Audio Settings choice, already persisted by
- * `audio-settings.ts`.
+ * the host at load from taking down every later launch. Only the plugin's identity is kept here, and
+ * never an arm, so GO LIVE stays one press. Its tone comes back with it on the engine: the native host
+ * keeps each plugin's state in its tone store and restores it inside every load
+ * (`src-tauri/src/host/tone.rs`; the web audio path keeps none). The guitar input channel is not here:
+ * it is the one global Audio Settings choice, already persisted by `audio-settings.ts`.
  *
  * The record follows the slot: `instrument.ts` remembers a plugin when its load succeeds and forgets
  * it when the slot's plugin unloads, a load into the slot fails or a synth is picked for it. A WebView
@@ -18,10 +19,12 @@ import { withAt } from './instrument-slots';
 
 // Where the record and the marker live; null turns rig recall off. A DEV native probe (`VITE_LF_PROBE`)
 // starts from empty slots and stores nothing: a run killed mid-probe would hand its next run the
-// plugin that wedged it. Only the recall's own probe (`src/debug/recall-restart.ts`) recalls, from keys
-// of its own, so an agent's run never touches the rig the owner's dev sessions restore.
+// plugin that wedged it. Only the recall's own probes (`src/debug/recall-restart.ts`,
+// `src/debug/tone-recall.ts`) recall, each from keys of its own, so an agent's run never touches the rig
+// the owner's dev sessions restore.
 const PROBE = import.meta.env.VITE_LF_PROBE as string | undefined;
-const PREFIX = !PROBE ? 'lf.' : PROBE === 'recall-restart' ? `lf.probe.${PROBE}.` : null;
+const RECALL_PROBES = ['recall-restart', 'tone-recall'];
+const PREFIX = !PROBE ? 'lf.' : RECALL_PROBES.includes(PROBE) ? `lf.probe.${PROBE}.` : null;
 const KEYS = PREFIX === null ? null : { record: `${PREFIX}rigRecall`, marker: `${PREFIX}rigRecallInFlight` };
 /** How long the marker outlives the last recalled load: a plugin that takes the host down in its
  * first moments of processing is a crash at load too. */

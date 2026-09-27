@@ -67,6 +67,13 @@ struct FixtureComponent {
     stop_seq: AtomicUsize,
     deactivate_seq: AtomicUsize,
     terminate_seq: AtomicUsize,
+    /// The component's state: what `getState` writes and `setState` replaces (the tone tests).
+    state: Mutex<Vec<u8>>,
+    /// `setState` refuses whatever it is given.
+    refuse_state: AtomicBool,
+    set_states: AtomicUsize,
+    /// A `setState` arrived while the component was active: a tone must go in before activation.
+    state_set_while_active: AtomicBool,
 }
 
 impl FixtureComponent {
@@ -104,6 +111,10 @@ impl FixtureComponent {
             stop_seq: AtomicUsize::new(0),
             deactivate_seq: AtomicUsize::new(0),
             terminate_seq: AtomicUsize::new(0),
+            state: Mutex::new(Vec::new()),
+            refuse_state: AtomicBool::new(false),
+            set_states: AtomicUsize::new(0),
+            state_set_while_active: AtomicBool::new(false),
         }
     }
     fn tick(&self, at: &AtomicUsize) {
@@ -203,12 +214,93 @@ impl IComponentTrait for FixtureComponent {
         }
         kResultOk
     }
-    unsafe fn setState(&self, _state: *mut IBStream) -> tresult {
+    /// Reads a length prefix, then that many bytes, as a plugin that framed its own state would.
+    unsafe fn setState(&self, state: *mut IBStream) -> tresult {
+        self.violate_if(!self.on_owner());
+        self.state_set_while_active.fetch_or(self.active.load(Relaxed), Relaxed);
+        let bytes = read_stream(state);
+        let framed = bytes.get(..4).map(|len| u32::from_le_bytes(len.try_into().unwrap()) as usize);
+        if self.refuse_state.load(Relaxed) || framed != Some(bytes.len() - 4) {
+            return kResultFalse;
+        }
+        *self.state.lock().unwrap() = bytes[4..].to_vec();
+        self.set_states.fetch_add(1, Relaxed);
         kResultOk
     }
-    unsafe fn getState(&self, _state: *mut IBStream) -> tresult {
-        kResultOk
+    /// Writes a placeholder, the state, then seeks back to fill the length in, as JUCE's framing
+    /// does: the host's stream must seek and tell.
+    unsafe fn getState(&self, state: *mut IBStream) -> tresult {
+        self.violate_if(!self.on_owner());
+        let stream = ComRef::<IBStream>::from_raw(state).expect("a stream");
+        let body = self.state.lock().unwrap().clone();
+        let mut n = 0;
+        let mut at: int64 = -1;
+        let written = stream.write([0u8; 4].as_ptr() as *mut c_void, 4, &mut n) == kResultOk
+            && stream.write(body.as_ptr() as *mut c_void, body.len() as int32, &mut n) == kResultOk
+            && stream.tell(&mut at) == kResultOk
+            && stream.seek(0, IStreamSeekMode_::kIBSeekSet, std::ptr::null_mut()) == kResultOk
+            && stream.write((body.len() as u32).to_le_bytes().as_ptr() as *mut c_void, 4, &mut n) == kResultOk
+            && stream.seek(at, IStreamSeekMode_::kIBSeekSet, std::ptr::null_mut()) == kResultOk;
+        if written { kResultOk } else { kResultFalse }
     }
+}
+
+/// The host stream a VST3 tone goes through (`MemStream`): a read stops at the end, a write grows
+/// it (a gap a seek left reads as zeros), seek and tell agree in every mode, and a bad argument is
+/// refused rather than trusted.
+#[test]
+fn the_host_stream_reads_writes_seeks_and_tells() {
+    use IStreamSeekMode_::{kIBSeekCur, kIBSeekEnd, kIBSeekSet};
+    let stream = ComWrapper::new(MemStream::reading(b"abc"));
+    let ptr = stream.to_com_ptr::<IBStream>().unwrap();
+    // SAFETY: every pointer handed to the stream is valid for its call.
+    unsafe {
+        let (mut buf, mut n, mut at) = ([0u8; 8], 0, 0);
+        assert_eq!(ptr.read(buf.as_mut_ptr().cast(), 8, &mut n), kResultOk);
+        assert_eq!((n, &buf[..3]), (3, &b"abc"[..]));
+        assert_eq!(ptr.read(buf.as_mut_ptr().cast(), 8, &mut n), kResultOk);
+        assert_eq!(n, 0, "at the end");
+        assert_eq!(ptr.seek(5, kIBSeekSet, &mut at), kResultOk);
+        assert_eq!(at, 5);
+        assert_eq!(ptr.write(b"xy".as_ptr() as *mut c_void, 2, &mut n), kResultOk);
+        assert_eq!(n, 2);
+        assert_eq!(stream.bytes(), b"abc\0\0xy");
+        assert_eq!(ptr.tell(&mut at), kResultOk);
+        assert_eq!(at, 7);
+        assert_eq!(ptr.seek(-2, kIBSeekEnd, &mut at), kResultOk);
+        assert_eq!(at, 5);
+        assert_eq!(ptr.seek(1, kIBSeekCur, std::ptr::null_mut()), kResultOk);
+        assert_eq!(ptr.read(buf.as_mut_ptr().cast(), 1, std::ptr::null_mut()), kResultOk);
+        assert_eq!(buf[0], b'y');
+        assert_eq!(ptr.seek(-1, kIBSeekSet, &mut at), kInvalidArgument, "before the start");
+        assert_eq!(ptr.seek(0, 7, &mut at), kInvalidArgument, "no such mode");
+        assert_eq!(ptr.read(buf.as_mut_ptr().cast(), -1, &mut n), kInvalidArgument);
+        assert_eq!(ptr.write(std::ptr::null_mut(), 4, &mut n), kInvalidArgument);
+        assert_eq!(ptr.tell(std::ptr::null_mut()), kInvalidArgument);
+        let limit = super::super::super::tone::MAX_STATE_BYTES as int64;
+        assert_eq!(ptr.seek(limit, kIBSeekSet, &mut at), kResultOk);
+        assert_eq!(ptr.write(b"z".as_ptr() as *mut c_void, 1, &mut n), kResultFalse, "never past the tone limit");
+    }
+}
+
+/// Everything left in a host stream, read in small pieces as a plugin reading field by field would.
+pub(super) unsafe fn read_stream(stream: *mut IBStream) -> Vec<u8> {
+    let stream = ComRef::<IBStream>::from_raw(stream).expect("a stream");
+    let (mut out, mut chunk) = (Vec::new(), [0u8; 7]);
+    loop {
+        let mut n = 0;
+        if stream.read(chunk.as_mut_ptr().cast(), chunk.len() as int32, &mut n) != kResultOk || n <= 0 {
+            return out;
+        }
+        out.extend_from_slice(&chunk[..n as usize]);
+    }
+}
+
+/// Write `bytes` into a host stream in one call.
+pub(super) unsafe fn write_stream(stream: *mut IBStream, bytes: &[u8]) -> tresult {
+    let stream = ComRef::<IBStream>::from_raw(stream).expect("a stream");
+    let mut n = 0;
+    stream.write(bytes.as_ptr() as *mut c_void, bytes.len() as int32, &mut n)
 }
 
 impl IAudioProcessorTrait for FixtureComponent {
@@ -726,6 +818,8 @@ fn rejected_processing_start_never_enters_process_and_latches_the_fault() {
 
 mod engine {
     use super::super::super::engine_slot::{self, EngineSlotEvent, EngineSlotHandle, PluginFormat};
+    use super::super::super::super::state::ToneRestore;
+    use super::super::super::super::tone::{self, TempDir, ToneBinding, ToneIdentity, SAVE_QUIET};
     use super::super::controller_tests::FixtureController;
     use super::*;
     use crate::engine_io::test_rig::TestDevice;
@@ -767,6 +861,8 @@ mod engine {
         latency: u32,
         output_level: f32,
         inputs: i32,
+        /// The component refuses every `setState` (a tone it cannot take).
+        refuse_state: bool,
     }
 
     impl Class for FixtureFactory {
@@ -803,6 +899,7 @@ mod engine {
                 component.latency.store(self.latency, Relaxed);
                 component.output_level.store(self.output_level.to_bits(), Relaxed);
                 component.inputs.store(self.inputs, Relaxed);
+                component.refuse_state.store(self.refuse_state, Relaxed);
                 let wrapper = ComWrapper::new(component);
                 *obj = wrapper.to_com_ptr::<IComponent>().unwrap().into_raw().cast();
                 *self.made.component.lock().unwrap() = Some(wrapper);
@@ -846,6 +943,18 @@ mod engine {
         output_level: f32,
         inputs: i32,
     ) -> (EngineSlotHandle, Arc<Made>, Arc<Mutex<Vec<EngineSlotEvent>>>) {
+        load_with_tone(device, slot, latency, output_level, inputs, None, false)
+    }
+
+    fn load_with_tone(
+        device: &TestDevice,
+        slot: usize,
+        latency: u32,
+        output_level: f32,
+        inputs: i32,
+        tone: Option<ToneBinding>,
+        refuse_state: bool,
+    ) -> (EngineSlotHandle, Arc<Made>, Arc<Mutex<Vec<EngineSlotEvent>>>) {
         let made = Arc::new(Made::default());
         let seen = Arc::new(Mutex::new(Vec::new()));
         let (factory_made, sink_seen) = (made.clone(), seen.clone());
@@ -854,10 +963,12 @@ mod engine {
             device.host().slot(slot),
             0,
             Arc::new(move |e| sink_seen.lock().unwrap().push(e)),
+            tone,
             move |ctx| {
                 let id = super::super::super::super::scan::tuid_to_hex(&COMPONENT_CID);
                 super::super::engine::run_with(ctx, &id, move || {
-                    let factory = ComWrapper::new(FixtureFactory { made: factory_made, latency, output_level, inputs });
+                    let factory =
+                        ComWrapper::new(FixtureFactory { made: factory_made, latency, output_level, inputs, refuse_state });
                     Ok((None, factory.to_com_ptr::<IPluginFactory>().ok_or("factory COM failed")?))
                 })
             },
@@ -1013,6 +1124,112 @@ mod engine {
         assert!(wait_for(2000, || seen.lock().unwrap().last() == Some(&EngineSlotEvent::ParamsChanged)));
         assert_eq!(s.activations.load(Relaxed), 1, "a re-list is not a restart");
         handle.unload().unwrap();
+    }
+
+    fn identity() -> ToneIdentity {
+        ToneIdentity { format: "vst3".into(), path: r"C:\fixture.vst3".into(), id: "engine-fixture".into() }
+    }
+
+    /// The fixture's tone as the store holds it: its component and controller states.
+    fn stored(dir: &TempDir) -> Option<(Vec<u8>, Vec<u8>)> {
+        let tone = dir.binding(identity()).store.load(&identity()).unwrap()?;
+        let (component, controller) = tone::decode_vst3(&tone.state).unwrap();
+        Some((component.to_vec(), controller.to_vec()))
+    }
+
+    /// A component state as the fixture frames it: a u32 length, then the bytes.
+    fn framed(body: &[u8]) -> Vec<u8> {
+        [&(body.len() as u32).to_le_bytes()[..], body].concat()
+    }
+
+    fn store_tone(dir: &TempDir, component: &[u8], controller: &[u8]) {
+        let t = tone::Tone { identity: identity(), name: "Engine fixture".into(), state: tone::encode_vst3(component, controller) };
+        dir.binding(identity()).store.save_encoded(&tone::encode(&t)).unwrap();
+    }
+
+    #[test]
+    fn a_stored_tone_reaches_both_halves_before_activation_and_saves_follow_changes() {
+        let _one = engine_slot::one_engine_test_at_a_time();
+        let device = device(48_000);
+        let dir = TempDir::new("vst3-engine");
+        store_tone(&dir, &framed(b"component v"), b"controller v");
+        let (handle, made, _) = load_with_tone(&device, 0, 0, 0.0, 0, Some(dir.binding(identity())), false);
+        let (s, controller) = (made.component(), made.controller());
+        assert_eq!(handle.tone(), Some(ToneRestore::Restored));
+        assert_eq!(*s.state.lock().unwrap(), b"component v", "the component read the stream it was given");
+        assert!(!s.state_set_while_active.load(Relaxed), "the tone went in before setActive(1)");
+        assert_eq!(
+            *controller.state_calls.lock().unwrap(),
+            [("setComponentState", b"\x0b\0\0\0component v".to_vec()), ("setState", b"controller v".to_vec())],
+            "the controller hears the component's state from its start, then its own"
+        );
+        assert!(wait_for(2000, || s.processes.load(Relaxed) > 4), "and the plugin runs");
+
+        // An export takes the tone fresh, through a stream that had to seek and tell.
+        *s.state.lock().unwrap() = b"component w".to_vec();
+        *controller.state.lock().unwrap() = b"controller w".to_vec();
+        let file = tone::decode(&handle.take_tone().unwrap()).unwrap();
+        assert_eq!(file.identity, identity());
+        let w = framed(b"component w");
+        assert_eq!(tone::decode_vst3(&file.state).unwrap(), (&w[..], &b"controller w"[..]));
+        assert_eq!(stored(&dir), Some((w, b"controller w".to_vec())), "and it lands in the store");
+
+        // A host parameter set is a change: saved once it has been quiet for SAVE_QUIET.
+        *s.state.lock().unwrap() = b"component x".to_vec();
+        handle.set_param(1001, 0.3).unwrap();
+        let wait = (SAVE_QUIET.as_millis() * 2 + 1000) as u64;
+        assert!(
+            wait_for(wait, || stored(&dir).is_some_and(|(c, _)| c.ends_with(b"component x"))),
+            "debounced save after a host set"
+        );
+
+        // An editor's performEdit is a change too; an unload saves it at once.
+        *s.state.lock().unwrap() = b"component y".to_vec();
+        // SAFETY: the handler is alive (held by the controller and this clone).
+        assert_eq!(unsafe { plugin_side_handler(&made).performEdit(1000, 0.6) }, kResultOk);
+        handle.unload().unwrap();
+        assert!(stored(&dir).is_some_and(|(c, _)| c.ends_with(b"component y")), "saved before the teardown");
+        assert!(!s.contract_violation.load(Relaxed), "state calls on the owner thread");
+    }
+
+    #[test]
+    fn a_tone_the_plugin_refuses_or_a_corrupt_file_loads_at_the_defaults() {
+        let _one = engine_slot::one_engine_test_at_a_time();
+        let device = device(48_000);
+        let dir = TempDir::new("vst3-refused");
+        store_tone(&dir, &framed(b"component v"), b"");
+        let (handle, made, _) = load_with_tone(&device, 0, 0, 0.0, 0, Some(dir.binding(identity())), true);
+        let s = made.component();
+        assert_eq!(handle.tone(), Some(ToneRestore::Failed), "refused, reported");
+        assert!(s.state.lock().unwrap().is_empty(), "the component kept its defaults");
+        assert!(wait_for(2000, || s.processes.load(Relaxed) > 4), "and the load went on");
+        handle.unload().unwrap();
+        assert!(stored(&dir).is_some(), "an unload with nothing changed leaves the stored tone alone");
+
+        let path = dir.0.join(identity().file_name());
+        let bytes = std::fs::read(&path).unwrap();
+        std::fs::write(&path, &bytes[..bytes.len() - 3]).unwrap();
+        let (handle, made, _) = load_with_tone(&device, 1, 0, 0.0, 0, Some(dir.binding(identity())), false);
+        assert_eq!(handle.tone(), Some(ToneRestore::Failed), "a truncated file is no tone");
+        assert_eq!(made.component().set_states.load(Relaxed), 0, "and never reaches the plugin");
+        handle.unload().unwrap();
+    }
+
+    #[test]
+    fn a_superseded_load_never_writes_over_an_imported_tone() {
+        let _one = engine_slot::one_engine_test_at_a_time();
+        let device = device(48_000);
+        let dir = TempDir::new("vst3-supersede");
+        let (handle, made, _) = load_with_tone(&device, 0, 0, 0.0, 0, Some(dir.binding(identity())), false);
+        assert_eq!(handle.tone(), None, "nothing stored yet");
+        handle.supersede_tone().unwrap();
+        store_tone(&dir, b"imported", b"");
+        *made.component().state.lock().unwrap() = b"this load".to_vec();
+        handle.set_param(1001, 0.3).unwrap();
+        let file = tone::decode(&handle.take_tone().unwrap()).unwrap();
+        assert!(tone::decode_vst3(&file.state).unwrap().0.ends_with(b"this load"), "an export still gets this load's state");
+        handle.unload().unwrap();
+        assert_eq!(stored(&dir), Some((b"imported".to_vec(), Vec::new())), "the store keeps the import");
     }
 
     #[test]

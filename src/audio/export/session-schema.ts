@@ -34,6 +34,57 @@ export interface ParsedSession {
   tracks: ParsedSessionTrack[];
 }
 
+/** One plugin slot in session.json's optional `plugins` list (engine mode's export): which plugin the
+ * slot held, and the archive entry holding its tone (a tone file, `src-tauri/src/host/tone.rs`). */
+export interface ParsedSessionPlugin {
+  /** 0 = slot A, 1 = slot B (session.json writes the letter). */
+  slot: 0 | 1;
+  format: 'clap' | 'vst3';
+  path: string;
+  id: string;
+  name: string;
+  /** The tone file's entry name inside the archive. */
+  file: string;
+}
+
+/**
+ * Validate session.json's optional `plugins` list: a session exported with plugins loaded names each
+ * slot's plugin and its tone entry. Missing means none (an export from before tone recall, a recovery,
+ * the web audio path). PURE — safe under Node. Throws a descriptive Error on a list that is not an
+ * array, an entry that is not an object, a slot other than "A"/"B" or repeated, a format other than
+ * clap/vst3, an empty or non-string path, id, name or file, and a file a track or another slot uses.
+ * `trackFiles` are the stems' entry names (validateSession's). Unknown keys are ignored.
+ */
+export function validateSessionPlugins(json: unknown, trackFiles: readonly string[] = []): ParsedSessionPlugin[] {
+  const raw = (json as Record<string, unknown> | null)?.plugins;
+  if (raw === undefined) return [];
+  if (!Array.isArray(raw)) throw new Error('session.json: plugins must be an array');
+  const files = new Set(trackFiles);
+  const slots = new Set<number>();
+  return raw.map((entry: unknown, i: number) => {
+    if (typeof entry !== 'object' || entry === null) throw new Error(`session.json: plugins[${i}] is not an object`);
+    const p = entry as Record<string, unknown>;
+    if (p.slot !== 'A' && p.slot !== 'B') {
+      throw new Error(`session.json: plugins[${i}].slot must be "A" or "B", got ${JSON.stringify(p.slot)}`);
+    }
+    const slot = p.slot === 'A' ? 0 : 1;
+    if (slots.has(slot)) throw new Error(`session.json: slot ${p.slot} is listed twice in plugins`);
+    slots.add(slot);
+    if (p.format !== 'clap' && p.format !== 'vst3') {
+      throw new Error(`session.json: plugins[${i}].format must be "clap" or "vst3", got ${JSON.stringify(p.format)}`);
+    }
+    const text = (key: 'path' | 'id' | 'name' | 'file'): string => {
+      const v = p[key];
+      if (typeof v !== 'string' || v.length === 0) throw new Error(`session.json: plugins[${i}].${key} missing or not a string`);
+      return v;
+    };
+    const file = text('file');
+    if (files.has(file)) throw new Error(`session.json: plugins[${i}].file "${file}" is already another entry's`);
+    files.add(file);
+    return { slot, format: p.format, path: text('path'), id: text('id'), name: text('name'), file };
+  });
+}
+
 /**
  * Validate + normalize a parsed session.json (the schema export.ts writes). PURE — safe under Node.
  * Throws a descriptive Error on: a non-BleepLoop app tag, a formatVersion newer than this build

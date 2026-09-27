@@ -70,10 +70,11 @@ rest is the map.
   `asio-sys` 0.4; cpal stays pinned at 0.18.1 until that pair is built and heard on the rig.
 - **PROD-EXE recipe:** raw `cargo build --release` = a DEV-mode binary (wants devUrl). The real exe
   = `pnpm build:app`; launch DIRECTLY (`Start-Process app.exe`), never via stdout-redirect.
-- **Release IPC surface:** `capabilities/default.json` grants only event listen/unlisten. `diag` and
-  plugin state save/load are registered only under `debug_assertions` until production save/recall
-  ships; keep the handler cfg and frontend `import.meta.env.DEV` surface in lockstep. Help's
-  `app_log_dir` / `app_open_log_dir` (`lib.rs`) ship in release and take nothing from the WebView.
+- **Release IPC surface:** `capabilities/default.json` grants only event listen/unlisten. `diag` is
+  registered only under `debug_assertions`; keep the handler cfg and frontend `import.meta.env.DEV`
+  surface in lockstep. Help's `app_log_dir` / `app_open_log_dir` (`lib.rs`) ship in release and take
+  nothing from the WebView; so do tone recall's `plugin_tone_take` / `plugin_tone_import` (raw bytes
+  both ways, engine mode only).
 - **Sample-rate selector "C2" — DECIDED (owner), NOT BUILT:** swappable 44.1/48k, default device
   native; RETIRES the `LF_FORCE_48K` dev hack (keep a 48k force for the P9.4 gate). Separate Rust
   increment.
@@ -152,9 +153,12 @@ engine's device module: `docs/plans/native-engine.md`).
 
 The known-fragile area: read this whole section before any plugin-GUI/VST3 work.
 - **Plugin editors embed into a host-owned top-level Win32 window** (`CreateWindowExW`, owned by the main
-  window — NOT reparented into the WebView2 surface). The owner thread runs a Win32 message pump
-  (`PeekMessage` + `MsgWaitForMultipleObjectsEx(20ms)`) ONLY while a hosted editor is open. GUI calls go
-  via the owner channel, NOT `run_on_main_thread`.
+  window — NOT reparented into the WebView2 surface). A live owner runs a Win32 message pump
+  (`PeekMessage` + `MsgWaitForMultipleObjectsEx(20ms)`) ONLY while a hosted editor is open; an
+  engine-mode owner pumps every turn, editor or not: a JUCE plugin (Neural DSP) runs its message thread
+  there, and unpumped, a host-set parameter never reached its saved state (measured with
+  `pnpm native:tone-recall`, Archetype Petrucci). GUI calls go via the owner channel, NOT
+  `run_on_main_thread`.
 - **Editor size is the plugin's, measured not computed:** `editor_window::set_client_size` sizes the
   CLIENT area by measuring the real frame (DPI-correct), at creation and on every plugin-initiated
   resize — VST3 `IPlugFrame::resizeView` (then `onSize` with the granted size) and hosted-CLAP
@@ -176,7 +180,12 @@ The known-fragile area: read this whole section before any plugin-GUI/VST3 work.
   descriptor `id` = the class TUID hex. `host/vst3.rs` stays a child mod OF `host/clap.rs` (`#[path]` decl, so
   `vst3::Steinberg` imports don't collide with clack and `super::` keeps meaning); `unload`/`note_on/off`/
   event-ring/bridge are format-agnostic + shared.
-- **Deferred past P10:** `setComponentState`/VST3 save-load state (IBStream MemStream, by-eye-gated).
+- **Tone recall (engine mode only; briefing: `host/tone.rs`):** a load restores the plugin's stored
+  state before it activates — CLAP `state.load`; VST3 `IComponent::setState`, then the controller's
+  `setComponentState` and `setState`, through the host `MemStream` (`vst3.rs`) — and the owner saves it
+  on its own thread. No request pushes state into a running plugin. The engine VST3 load creates the
+  controller and sets its handler BEFORE activation (the SDK host's order); the live owner does not,
+  and the web path's owners keep no tones.
 
 ## Native audio input → wet monitoring, ASIO (P11)
 

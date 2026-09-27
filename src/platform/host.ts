@@ -42,6 +42,20 @@ export interface PluginDescriptor {
 export interface PluginInfo {
   slot: PluginSlot;
   descriptor: PluginDescriptor;
+  /** Engine mode's load answer: what the load did with the plugin's stored tone (`src-tauri/src/host/
+   * tone.rs`). Absent: nothing was stored, or the web audio path loaded it (it keeps no tones). */
+  tone?: 'restored' | 'failed';
+}
+
+/** A session import's tone, stored by the native host (`PluginHost.importTone`): the plugin it
+ * belongs to, and whether the slot holds that plugin now. */
+export interface ToneImport {
+  /** The slot holds that plugin, and its load stopped saving over the stored tone: reload it to hear it. */
+  held: boolean;
+  name: string;
+  format: PluginFormat;
+  path: string;
+  id: string;
 }
 
 /** One plugin parameter's metadata. `id` is the stable CLAP param id `setParameter` takes. */
@@ -142,12 +156,15 @@ export interface PluginHost {
    */
   onStreamFault(cb: (e: { slot: PluginSlot; kind: 'input' | 'output' }) => void): () => void;
   /**
-   * Plugin preset/state via CLAP's `state` extension. Opaque plugin-defined bytes:
-   * `saveState` serialises the live plugin, `loadState` restores it. The looper/preset story
-   * depends on this round-trip surviving load → unload → reload.
+   * Tone recall, engine mode only (`src-tauri/src/host/tone.rs`): every load restores the plugin's
+   * stored tone by itself (`PluginInfo.tone`). `takeTone` saves the slot's tone now, through its
+   * owner, into the store, and hands back the tone file's bytes (a session export's), or null when the
+   * plugin keeps no state. `importTone` stores a session's tone under the plugin it names and says
+   * whether `slot` holds that plugin now; it loads and swaps nothing. Both reject on the web audio path
+   * and in the browser build.
    */
-  saveState(slot: PluginSlot): Promise<Uint8Array>;
-  loadState(slot: PluginSlot, bytes: Uint8Array): Promise<void>;
+  takeTone(slot: PluginSlot): Promise<Uint8Array | null>;
+  importTone(slot: PluginSlot, bytes: Uint8Array): Promise<ToneImport>;
 
   // ── Native audio INPUT ──────────────────────────────────────────────────────────────────
   // Route a hardware guitar/line signal INTO the slot's loaded plugin so an FX plugin (amp-sim)

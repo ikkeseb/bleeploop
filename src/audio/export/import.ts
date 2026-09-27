@@ -2,7 +2,9 @@
 // SESSION-IMPORT coordinator: the read-back mate of export.ts. Takes the bytes of an exported
 // BleepLoop .zip, finds + validates its session.json, decodes each referenced stem WAV, and hands
 // the assembled payload to looper.loadSession (the grid-critical core, which re-validates its own
-// preconditions and establishes the master grid). Like export.ts this coordinator THROWS and never
+// preconditions and establishes the master grid). The slot tones the session carries (engine mode's
+// export) are validated with it and handed back, for the caller to store once the loops are in
+// (`restoreSessionTones`, `../slot-tones.ts`). Like export.ts this coordinator THROWS and never
 // toasts — the UI catches + notifies. Unlike export.ts, the one-download-per-gesture constraint does
 // NOT apply here: import consumes bytes the UI hands in (file input / drag-drop), no downloads.
 //
@@ -16,19 +18,26 @@
 // imported app-wide anyway — a lazy import() here bought nothing but two INEFFECTIVE_DYNAMIC_IMPORT
 // build warnings).
 import { MAX_LOOP_SECONDS, TRACK_COUNT } from '../looper/state';
+import type { SlotTone } from '../slot-tones';
 import { webSession, type SessionSource } from './session-source';
-import { validateSession } from './session-schema.ts';
+import { validateSession, validateSessionPlugins } from './session-schema.ts';
 import { parseZip } from './unzip.ts';
 import { decodeWav } from './wav.ts';
 
 const ZIP_OVERHEAD_BYTES = 1 << 20;
+/** The plugin slots, each of which may carry a tone. */
+const SLOT_COUNT = 2;
+/** The largest tone file: `MAX_STATE_BYTES` in `src-tauri/src/host/tone.rs` plus its small header.
+ * Change them together. */
+const MAX_TONE_BYTES = (16 << 20) + (1 << 16);
 
-/** Allow five Float32 editable stems plus a PCM16 stereo master and metadata. */
+/** Allow five Float32 editable stems plus a PCM16 stereo master, two slot tones and metadata. */
 export function maxImportArchiveBytes(sampleRate: number): number {
   return (
     (TRACK_COUNT * Float32Array.BYTES_PER_ELEMENT + 2 * Int16Array.BYTES_PER_ELEMENT) *
       MAX_LOOP_SECONDS *
     sampleRate +
+    SLOT_COUNT * MAX_TONE_BYTES +
     ZIP_OVERHEAD_BYTES
   );
 }
@@ -40,14 +49,16 @@ export function maxImportArchiveBytes(sampleRate: number): number {
  * while preserving STOPPED tracks without starting sources. Throws a descriptive Error on any problem
  * (the UI catches + notifies; nothing is mutated unless every stem validated). Browser-only: this is
  * the path that touches engine/looper. `source` is the looper to load into (`session-source.ts`).
+ * Resolves with the slot tones the session carries (none for an older export or a recovery), checked
+ * against session.json but not yet stored anywhere: the caller hands them to `restoreSessionTones`.
  */
-export async function importSession(bytes: Uint8Array | ArrayBuffer, source: SessionSource = webSession): Promise<void> {
+export async function importSession(bytes: Uint8Array | ArrayBuffer, source: SessionSource = webSession): Promise<SlotTone[]> {
   const u8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
   const limit = maxImportArchiveBytes(source.sampleRate());
   if (u8.byteLength > limit) {
     throw new Error(`archive is ${u8.byteLength} bytes; maximum is ${limit}`);
   }
-  const entries = parseZip(u8, TRACK_COUNT + 2); // Five stems, one master and one session.json.
+  const entries = parseZip(u8, TRACK_COUNT + 2 + SLOT_COUNT); // Five stems, a master, session.json, two tones.
   const byName = new Map<string, (typeof entries)[number]>();
   for (const entry of entries) {
     if (byName.has(entry.name)) {
@@ -71,6 +82,12 @@ export async function importSession(bytes: Uint8Array | ArrayBuffer, source: Ses
     throw new Error(`could not parse ${sessions[0].name}: ${err instanceof Error ? err.message : String(err)}`);
   }
   const session = validateSession(parsed);
+  const tones: SlotTone[] = validateSessionPlugins(parsed, session.tracks.map((t) => t.file)).map((p) => {
+    const entry = byName.get(p.file);
+    if (!entry) throw new Error(`session.json lists "${p.file}" but the archive has no entry with that name`);
+    const { slot, format, path, id, name } = p;
+    return { slot, plugin: { format, path, id, name }, bytes: entry.data };
+  });
 
   const engineRate = source.sampleRate();
   if (session.sampleRate !== engineRate) {
@@ -111,4 +128,5 @@ export async function importSession(bytes: Uint8Array | ArrayBuffer, source: Ses
     masterLengthFrames: session.masterLengthFrames,
     tracks,
   });
+  return tones;
 }

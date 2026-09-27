@@ -33,6 +33,32 @@ pub struct PluginDescriptor {
 pub struct PluginInfo {
     pub slot: u8,
     pub descriptor: PluginDescriptor,
+    /// Engine mode's load answer: what it did with the plugin's stored tone (`host/tone.rs`). `None`:
+    /// nothing was stored, or the web audio path loaded it (it keeps no tones).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tone: Option<ToneRestore>,
+}
+
+/// A session import's tone, stored (`plugin_tone_import`). Mirrors `ToneImport` in
+/// `src/platform/host.ts`: the plugin it belongs to, and whether the slot holds that plugin now (the
+/// caller then reloads the slot to hear it).
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct ToneImport {
+    pub held: bool,
+    pub name: String,
+    pub format: String,
+    pub path: String,
+    pub id: String,
+}
+
+/// What a load did with the plugin's stored tone. Mirrors `PluginInfo.tone` in `src/platform/host.ts`.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ToneRestore {
+    Restored,
+    /// The file was unreadable or the plugin refused it: the plugin runs at its defaults.
+    Failed,
 }
 
 /// Native slot lifecycle. `Loading` is a real reservation: a WebView reload can cancel it before

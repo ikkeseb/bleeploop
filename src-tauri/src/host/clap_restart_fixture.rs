@@ -19,6 +19,8 @@ use clap_sys::{
         clap_host_params, clap_param_info, clap_plugin_params, CLAP_EXT_PARAMS,
         CLAP_PARAM_RESCAN_VALUES,
     },
+    ext::state::{clap_host_state, clap_plugin_state, CLAP_EXT_STATE},
+    stream::{clap_istream, clap_ostream},
     factory::plugin_factory::clap_plugin_factory,
     host::clap_host,
     id::{clap_id, CLAP_INVALID_ID},
@@ -118,6 +120,18 @@ struct Observed {
     stop_seq: AtomicUsize,
     deactivate_seq: AtomicUsize,
     destroy_seq: AtomicUsize,
+    /// The tone tests (`clap.state`): the plugin's state, which `save` writes and `load` replaces.
+    saved: Mutex<Vec<u8>>,
+    /// `load` refuses whatever it is given.
+    refuse_state: AtomicBool,
+    state_loads: AtomicUsize,
+    /// A `load` arrived while the plugin was active: a tone must go in before activation.
+    loaded_while_active: AtomicBool,
+    /// The next `process` reports a parameter change on its output events, as an editor knob does.
+    emit_edit: AtomicBool,
+    /// The next main-thread callback calls the host's `clap_host_state.mark_dirty`.
+    dirty_on_callback: AtomicBool,
+    marked_dirty: AtomicUsize,
 }
 
 impl Observed {
@@ -233,6 +247,28 @@ unsafe extern "C" fn process(
                 }
             }
         }
+        if s.emit_edit.swap(false, Relaxed) {
+            let edit = clap_event_param_value {
+                header: clap_event_header {
+                    size: std::mem::size_of::<clap_event_param_value>() as u32,
+                    time: 0,
+                    space_id: CLAP_CORE_EVENT_SPACE_ID,
+                    type_: CLAP_EVENT_PARAM_VALUE,
+                    flags: 0,
+                },
+                param_id: 100,
+                cookie: std::ptr::null_mut(),
+                note_id: -1,
+                port_index: -1,
+                channel: -1,
+                key: -1,
+                value: 0.9,
+            };
+            let out = &*p.out_events;
+            if let Some(push) = out.try_push {
+                push(out, &edit.header);
+            }
+        }
         let level = f32::from_bits(s.output_level.load(Relaxed));
         if p.audio_inputs_count > 0 && p.audio_outputs_count > 0 {
             let (input, output) = (&*p.audio_inputs, &*p.audio_outputs);
@@ -256,7 +292,65 @@ unsafe extern "C" fn process(
 
 unsafe extern "C" fn reset(_: *const clap_plugin) {}
 
-unsafe extern "C" fn on_main_thread(_: *const clap_plugin) {}
+/// The plugin's main-thread callback: marks its state dirty through the host when a test asked.
+unsafe extern "C" fn on_main_thread(plugin: *const clap_plugin) {
+    let s = unsafe { state(plugin) };
+    if !s.dirty_on_callback.swap(false, Relaxed) {
+        return;
+    }
+    // SAFETY: the host outlives its plugin; a non-null "clap.state" extension is a clap_host_state.
+    unsafe {
+        let host = &*s.host;
+        let ext = host.get_extension.map_or(std::ptr::null(), |get| get(host, CLAP_EXT_STATE.as_ptr()));
+        if let Some(mark_dirty) = ext.cast::<clap_host_state>().as_ref().and_then(|e| e.mark_dirty) {
+            mark_dirty(host);
+            s.marked_dirty.fetch_add(1, Relaxed);
+        }
+    }
+}
+
+/// `clap.state` save: the whole state in one write.
+unsafe extern "C" fn state_save(plugin: *const clap_plugin, stream: *const clap_ostream) -> bool {
+    let s = unsafe { state(plugin) };
+    let bytes = s.saved.lock().unwrap().clone();
+    // SAFETY: the host's stream is valid for this call.
+    unsafe {
+        let stream = &*stream;
+        let Some(write) = stream.write else { return false };
+        bytes.is_empty() || write(stream, bytes.as_ptr().cast(), bytes.len() as u64) == bytes.len() as i64
+    }
+}
+
+/// `clap.state` load: read to the end in small pieces, as a plugin reading field by field would.
+unsafe extern "C" fn state_load(plugin: *const clap_plugin, stream: *const clap_istream) -> bool {
+    let s = unsafe { state(plugin) };
+    if s.owner != std::thread::current().id() {
+        s.contract_violation.store(true, Relaxed);
+    }
+    s.loaded_while_active.fetch_or(s.active.load(Relaxed), Relaxed);
+    let mut bytes = Vec::new();
+    // SAFETY: the host's stream is valid for this call; `chunk` holds what each read asks for.
+    unsafe {
+        let stream = &*stream;
+        let Some(read) = stream.read else { return false };
+        let mut chunk = [0u8; 5];
+        loop {
+            let n = read(stream, chunk.as_mut_ptr().cast(), chunk.len() as u64);
+            if n <= 0 {
+                break;
+            }
+            bytes.extend_from_slice(&chunk[..n as usize]);
+        }
+    }
+    if s.refuse_state.load(Relaxed) {
+        return false;
+    }
+    *s.saved.lock().unwrap() = bytes;
+    s.state_loads.fetch_add(1, Relaxed);
+    true
+}
+
+static STATE: clap_plugin_state = clap_plugin_state { save: Some(state_save), load: Some(state_load) };
 
 unsafe extern "C" fn destroy(plugin: *const clap_plugin) {
     let s = unsafe { state(plugin) };
@@ -357,6 +451,8 @@ unsafe extern "C" fn extension(_: *const clap_plugin, id: *const c_char) -> *con
         (&LATENCY as *const clap_plugin_latency).cast()
     } else if id == CLAP_EXT_AUDIO_PORTS {
         (&AUDIO_PORTS as *const clap_plugin_audio_ports).cast()
+    } else if id == CLAP_EXT_STATE {
+        (&STATE as *const clap_plugin_state).cast()
     } else {
         std::ptr::null()
     }
@@ -443,6 +539,7 @@ fn fixture_instance() -> PluginInstance<LfHost> {
             hosted_hwnd: Arc::new(AtomicIsize::new(0)),
             callback_requested: AtomicBool::new(false),
             restart_requested: AtomicBool::new(false),
+            keeps_tone: false,
         },
         |_| LfMain::default(),
         &entry,
@@ -686,6 +783,8 @@ fn a_malformed_param_count_is_an_error_not_an_abort() {
 
 mod engine {
     use super::super::engine_slot::{self, EngineSlotEvent, EngineSlotHandle, PluginFormat};
+    use super::super::super::state::ToneRestore;
+    use super::super::super::tone::{self, TempDir, ToneBinding, ToneIdentity, SAVE_QUIET};
     use super::*;
     use crate::engine_io::test_rig::TestDevice;
     use lf_engine::{Command, NoteTarget, SlotKind, TimedCommand};
@@ -699,6 +798,15 @@ mod engine {
     /// Load the fixture into `slot` through the engine-mode owner; `obs` watches the instance the
     /// owner thread creates. The sink keeps every event.
     fn load(device: &TestDevice, slot: usize, obs: &Arc<Observed>) -> (EngineSlotHandle, Arc<Mutex<Vec<EngineSlotEvent>>>) {
+        load_with_tone(device, slot, obs, None)
+    }
+
+    fn load_with_tone(
+        device: &TestDevice,
+        slot: usize,
+        obs: &Arc<Observed>,
+        tone: Option<ToneBinding>,
+    ) -> (EngineSlotHandle, Arc<Mutex<Vec<EngineSlotEvent>>>) {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let sink_seen = seen.clone();
         let obs = obs.clone();
@@ -707,6 +815,7 @@ mod engine {
             device.host().slot(slot),
             0,
             Arc::new(move |e| sink_seen.lock().unwrap().push(e)),
+            tone,
             move |ctx| {
                 super::super::clap_engine::run(ctx, "bleeploop.restart-fixture", move || {
                     OBSERVE.with(|o| *o.borrow_mut() = Some(obs));
@@ -858,6 +967,81 @@ mod engine {
         handle.unload().unwrap();
     }
 
+    fn identity() -> ToneIdentity {
+        ToneIdentity { format: "clap".into(), path: r"C:\fixture.clap".into(), id: "bleeploop.restart-fixture".into() }
+    }
+
+    /// The fixture's state as the store holds it.
+    fn stored(dir: &TempDir) -> Option<Vec<u8>> {
+        dir.binding(identity()).store.load(&identity()).unwrap().map(|t| t.state)
+    }
+
+    fn store_tone(dir: &TempDir, state: &[u8]) {
+        let t = tone::Tone { identity: identity(), name: "Restart fixture".into(), state: state.to_vec() };
+        dir.binding(identity()).store.save_encoded(&tone::encode(&t)).unwrap();
+    }
+
+    #[test]
+    fn a_stored_tone_goes_in_before_activation_and_saves_follow_the_plugins_changes() {
+        let _one = engine_slot::one_engine_test_at_a_time();
+        let device = device(48_000);
+        let dir = TempDir::new("clap-engine");
+        store_tone(&dir, b"state v");
+        let obs = Arc::new(Observed::default());
+        let (handle, _) = load_with_tone(&device, 0, &obs, Some(dir.binding(identity())));
+        assert_eq!(handle.tone(), Some(ToneRestore::Restored));
+        assert_eq!(*obs.saved.lock().unwrap(), b"state v", "the plugin read the whole state");
+        assert!(!obs.loaded_while_active.load(Relaxed), "the tone went in before activate");
+        assert!(wait_for(2000, || obs.processes.load(Relaxed) > 4), "and the plugin runs");
+
+        // An export takes the tone fresh; it lands in the store too.
+        *obs.saved.lock().unwrap() = b"state w".to_vec();
+        let file = tone::decode(&handle.take_tone().unwrap()).unwrap();
+        assert_eq!((file.identity, file.name.as_str(), file.state), (identity(), "Restart fixture", b"state w".to_vec()));
+        assert_eq!(stored(&dir).as_deref(), Some(&b"state w"[..]));
+
+        // A change the plugin reports on its output events (its editor, on the audio thread): saved once
+        // it has been quiet for SAVE_QUIET.
+        *obs.saved.lock().unwrap() = b"state x".to_vec();
+        obs.emit_edit.store(true, Relaxed);
+        let wait = (SAVE_QUIET.as_millis() * 2 + 1000) as u64;
+        assert!(wait_for(wait, || stored(&dir).as_deref() == Some(&b"state x"[..])), "debounced save after an edit");
+
+        // `mark_dirty` from the plugin's main thread; an unload saves it at once.
+        *obs.saved.lock().unwrap() = b"state y".to_vec();
+        obs.dirty_on_callback.store(true, Relaxed);
+        let host = obs.host.load(Relaxed);
+        // SAFETY: the host lives while the plugin is loaded; `request_callback` is thread-safe.
+        unsafe { ((*host).request_callback.unwrap())(host) };
+        assert!(wait_for(2000, || obs.marked_dirty.load(Relaxed) == 1), "the host declares clap.state");
+        handle.unload().unwrap();
+        assert_eq!(stored(&dir).as_deref(), Some(&b"state y"[..]), "saved before the teardown");
+        assert!(!obs.contract_violation.load(Relaxed), "state calls on the owner thread");
+    }
+
+    #[test]
+    fn a_tone_the_plugin_refuses_loads_at_the_defaults_and_a_superseded_load_saves_nothing() {
+        let _one = engine_slot::one_engine_test_at_a_time();
+        let device = device(48_000);
+        let dir = TempDir::new("clap-refused");
+        store_tone(&dir, b"state v");
+        let obs = Arc::new(Observed::default());
+        obs.refuse_state.store(true, Relaxed);
+        obs.param_count.store(2, Relaxed);
+        let (handle, _) = load_with_tone(&device, 0, &obs, Some(dir.binding(identity())));
+        assert_eq!(handle.tone(), Some(ToneRestore::Failed), "refused, reported");
+        assert!(obs.saved.lock().unwrap().is_empty(), "the plugin kept its defaults");
+        assert!(wait_for(2000, || obs.processes.load(Relaxed) > 4), "and the load went on");
+
+        // A session import stored its tone and this slot reloads: nothing this load does lands on it.
+        handle.supersede_tone().unwrap();
+        store_tone(&dir, b"imported");
+        *obs.saved.lock().unwrap() = b"this load".to_vec();
+        handle.set_param(101, 0.75).unwrap();
+        handle.unload().unwrap();
+        assert_eq!(stored(&dir).as_deref(), Some(&b"imported"[..]), "the store keeps the import");
+    }
+
     #[test]
     fn an_eviction_reactivates_the_plugin_at_the_new_rate() {
         let _one = engine_slot::one_engine_test_at_a_time();
@@ -904,7 +1088,7 @@ fn a_unit_slices_a_long_call_places_each_event_and_allocates_nothing() {
     let (mut params, ring) = RingBuffer::<PluginEvent>::new(8);
     let faults = Arc::new(AtomicU32::new(0));
     let terms = Terms { rate: 48_000, max_frames: 64, in_channels: 0, out_channels: 2, latency: 0 };
-    let unit = ClapUnit::new(stopped, &terms, ring, faults.clone());
+    let unit = ClapUnit::new(stopped, &terms, ring, faults.clone(), Arc::new(AtomicBool::new(false)));
     let (mut unit, runs) = std::thread::spawn(move || {
         let mut unit = unit;
         let (input, mut out) = ([0.0f32; 200], [0.0f32; 200]);

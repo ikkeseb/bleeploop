@@ -1,8 +1,9 @@
 /**
- * OWNS: what is in each of the two slots — the synth id / loaded plugin, the load + unload + swap chains,
- * the plugin scan, editor affinity, and which slot is active (input routing). Native input/monitor arm:
- * `native-io.ts`; device lists, buffer size, ASIO tier: `audio-devices.ts`; the slot state cell + per-slot
- * op chain: `instrument-slots.ts`.
+ * OWNS: what is in each of the two slots — the synth id / loaded plugin, the load + unload + swap chains
+ * (and the in-place reload a session's tone asks for), the plugin scan, editor affinity, and which slot
+ * is active (input routing). Native input/monitor arm: `native-io.ts`; device lists, buffer size, ASIO
+ * tier: `audio-devices.ts`; the slot state cell + per-slot op chain: `instrument-slots.ts`; tones in a
+ * session: `slot-tones.ts`.
  */
 import { createSignal } from 'solid-js';
 import { inputRouter, type PluginNoteSink } from './input-router';
@@ -31,7 +32,7 @@ import {
   slotPlugins,
   withAt,
 } from './instrument-slots';
-import { disarmInputInternal, disarmMonitorInternal, resendEngineLive } from './native-io';
+import { disarmInputInternal, disarmMonitorInternal, goLive, inputArmed, resendEngineLive } from './native-io';
 import { forgetSlotPlugin, rememberSlotPlugin } from './rig-recall';
 import { warm as warmCapture } from './looper/capture';
 import { reconcilePluginDescriptors, samePluginDescriptor } from './plugin-descriptor';
@@ -293,8 +294,10 @@ async function doSelectPlugin(slot: 0 | 1, desc: PluginDescriptor, claimMidi: ()
   // Tell the bridge this slot's plugin kind BEFORE the load, so acceptPluginBuffer picks the right
   // output-gain default (FX ~unity / synth conservative) from the scan category, not the input bus.
   const loadToken = pluginBridge.beginPluginLoad(slot, desc.isEffect);
+  let tone: PluginInfo['tone'];
   try {
-    await platform.pluginHost.loadPlugin(slot, desc.path, desc.id, loadToken);
+    // `?.`: a browser probe's stand-in host may answer nothing (the tone is optional anyway).
+    tone = (await platform.pluginHost.loadPlugin(slot, desc.path, desc.id, loadToken))?.tone;
   } catch (e) {
     pluginBridge.cancelPluginLoad(slot, loadToken);
     console.error('[instrument] plugin load failed', e);
@@ -309,6 +312,9 @@ async function doSelectPlugin(slot: 0 | 1, desc: PluginDescriptor, claimMidi: ()
   }
   setSlotPlugins((prev) => withAt(prev, slot, desc));
   rememberSlotPlugin(slot, desc);
+  // Engine mode restored the plugin's stored tone inside the load; one it could not restore (the host
+  // logged why) leaves the plugin at its defaults, and the player should know.
+  if (tone === 'failed') notifyError(`${desc.name}: saved settings could not be restored; it loaded with its defaults`);
   // Engine mode has no bridge to pick the gain default: take the scan's kind, an unclassified plugin
   // at the quieter synth level.
   if (engineMode()) setEngineGain(slot, desc.isEffect === true ? FX_DEFAULT_GAIN : SYNTH_DEFAULT_GAIN);
@@ -323,6 +329,31 @@ async function doSelectPlugin(slot: 0 | 1, desc: PluginDescriptor, claimMidi: ()
     engines[slot]!.dispose();
     engines[slot] = null;
   }
+}
+
+/**
+ * Reload the plugin in `slot` in place, through the normal unload and load, so the load applies the
+ * tone a session import just stored (`slot-tones.ts`). The unload ends the slot's GO LIVE (an empty live
+ * slot would pass the input dry), so a slot that was live goes live again once its plugin is back,
+ * through the normal GO LIVE; its output level is kept, and MIDI stays where it was. Nothing happens if
+ * the player changed the slot's source meanwhile. Engine mode's (the web path keeps no tones). Returns
+ * whether the plugin is back.
+ */
+export async function reloadPlugin(slot: 0 | 1): Promise<boolean> {
+  const desc = slotPlugins()[slot];
+  if (!desc) return false;
+  const wasLive = inputArmed()[slot];
+  const gain = pluginGain()[slot];
+  const back = await serializeSlot(slot, async () => {
+    if (!samePluginDescriptor(slotPlugins()[slot], desc)) return false;
+    if (!(await unloadSlotPlugin(slot, desc, 'swap'))) return false;
+    await doSelectPlugin(slot, desc, () => false);
+    return samePluginDescriptor(slotPlugins()[slot], desc);
+  });
+  if (!back) return false;
+  if (gain !== null) setPluginGain(slot, gain);
+  if (wasLive) await goLive(slot);
+  return true;
 }
 
 /**

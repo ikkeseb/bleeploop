@@ -42,9 +42,10 @@ use vst3::Steinberg::Vst::{
     ParamValue, ProcessData, ProcessModes_,
     ProcessSetup, RestartFlags_, SpeakerArr, String128, SymbolicSampleSizes_, TChar, ViewType,
 };
+use vst3::Steinberg::IBStream_::IStreamSeekMode_;
 use vst3::Steinberg::{
     int32, int64, kInvalidArgument, kPlatformTypeHWND, kResultFalse, kResultOk, kResultTrue,
-    tresult, uint32, FIDString, FUnknown, IPluginBaseTrait, IPluginFactory,
+    tresult, uint32, FIDString, FUnknown, IBStream, IBStreamTrait, IPluginBaseTrait, IPluginFactory,
     IPluginFactoryTrait, IPlugFrame, IPlugFrameTrait, IPlugView, IPlugViewTrait, PClassInfo,
     ViewRect, TUID,
 };
@@ -342,6 +343,95 @@ impl IPlugFrameTrait for LfPlugFrame {
             Some(v) => v.onSize(&mut granted),
             None => kResultFalse,
         }
+    }
+}
+
+/// Host `IBStream` over memory: what a VST3 plugin writes its state into (`getState`) and reads it
+/// back from (`setState`, `setComponentState`) for engine mode's tones (`host/tone.rs`). Read, write,
+/// seek and tell over one growable buffer, as the SDK's `MemoryStream`: a read past the end returns
+/// what is left, a write past the end grows the buffer (zero-filling a gap a seek left), and nothing
+/// grows past `tone::MAX_STATE_BYTES`. Owner-thread only: the plugin uses it inside the call the host
+/// made, and the host reads the bytes back after it returns.
+pub(super) struct MemStream {
+    bytes: RefCell<Vec<u8>>,
+    pos: Cell<usize>,
+}
+impl MemStream {
+    /// A stream at position 0 over `bytes`: a `setState` reads it, a `getState` writes into an empty one.
+    pub(super) fn reading(bytes: &[u8]) -> Self {
+        Self {
+            bytes: RefCell::new(bytes.to_vec()),
+            pos: Cell::new(0),
+        }
+    }
+    /// What the plugin wrote.
+    pub(super) fn bytes(&self) -> Vec<u8> {
+        self.bytes.borrow().clone()
+    }
+}
+impl Class for MemStream {
+    type Interfaces = (IBStream,);
+}
+impl IBStreamTrait for MemStream {
+    unsafe fn read(&self, buffer: *mut c_void, num_bytes: int32, num_bytes_read: *mut int32) -> tresult {
+        if num_bytes < 0 || (buffer.is_null() && num_bytes > 0) {
+            return kInvalidArgument;
+        }
+        let bytes = self.bytes.borrow();
+        let at = self.pos.get().min(bytes.len());
+        let n = (num_bytes as usize).min(bytes.len() - at);
+        // SAFETY: the plugin's buffer holds `num_bytes` ≥ n bytes; the source range is in bounds.
+        std::ptr::copy_nonoverlapping(bytes.as_ptr().add(at), buffer.cast::<u8>(), n);
+        self.pos.set(at + n);
+        if !num_bytes_read.is_null() {
+            *num_bytes_read = n as int32;
+        }
+        kResultOk
+    }
+    unsafe fn write(&self, buffer: *mut c_void, num_bytes: int32, num_bytes_written: *mut int32) -> tresult {
+        if num_bytes < 0 || (buffer.is_null() && num_bytes > 0) {
+            return kInvalidArgument;
+        }
+        let at = self.pos.get();
+        let n = num_bytes as usize;
+        let Some(end) = at.checked_add(n).filter(|&end| end <= super::super::tone::MAX_STATE_BYTES) else {
+            return kResultFalse;
+        };
+        let mut bytes = self.bytes.borrow_mut();
+        if bytes.len() < end {
+            bytes.resize(end, 0);
+        }
+        // SAFETY: the plugin's buffer holds `num_bytes` bytes; the destination range was sized above.
+        std::ptr::copy_nonoverlapping(buffer.cast::<u8>().cast_const(), bytes.as_mut_ptr().add(at), n);
+        self.pos.set(end);
+        if !num_bytes_written.is_null() {
+            *num_bytes_written = n as int32;
+        }
+        kResultOk
+    }
+    unsafe fn seek(&self, pos: int64, mode: int32, result: *mut int64) -> tresult {
+        let base = match mode {
+            IStreamSeekMode_::kIBSeekSet => 0,
+            IStreamSeekMode_::kIBSeekCur => self.pos.get() as int64,
+            IStreamSeekMode_::kIBSeekEnd => self.bytes.borrow().len() as int64,
+            _ => return kInvalidArgument,
+        };
+        let limit = super::super::tone::MAX_STATE_BYTES as int64;
+        let Some(to) = base.checked_add(pos).filter(|to| (0..=limit).contains(to)) else {
+            return kInvalidArgument;
+        };
+        self.pos.set(to as usize);
+        if !result.is_null() {
+            *result = to;
+        }
+        kResultOk
+    }
+    unsafe fn tell(&self, pos: *mut int64) -> tresult {
+        if pos.is_null() {
+            return kInvalidArgument;
+        }
+        *pos = self.pos.get() as int64;
+        kResultOk
     }
 }
 
@@ -1473,6 +1563,7 @@ pub fn vst3_owner_main(
             path,
             is_effect: None,
         },
+        tone: None,
     };
     // Before the load is reported, so the frontend's first `setParameter` finds its ids.
     publish_param_ids(&param_ids, &list_vst3_params(&controller).unwrap_or_default());
@@ -1745,8 +1836,13 @@ pub fn vst3_owner_main(
                 }
                 // An unload's wake-up: nothing to do, the loop condition sees `running=false`.
                 OwnerRequest::Wake => {}
-                #[cfg(debug_assertions)]
-                other => reply_unsupported(other), // DEV state save/load is not wired for VST3
+                // Tone recall is engine mode's (`vst3_engine`); nothing sends these to a live owner.
+                OwnerRequest::SaveTone(reply) => {
+                    let _ = reply.send(Err(super::TONES_ON_THE_ENGINE_ONLY.to_string()));
+                }
+                OwnerRequest::SupersedeTone(reply) => {
+                    let _ = reply.send(Err(super::TONES_ON_THE_ENGINE_ONLY.to_string()));
+                }
             }
         }
         native_io.poll_faults();
@@ -1849,48 +1945,6 @@ fn teardown(
     let t = Instant::now();
     drop(module);
     [deactivate_ms, terminate_ms, release_ms, t.elapsed().as_millis()]
-}
-
-/// Reply to a DEV control request the VST3 host doesn't service (state save/load).
-#[cfg(debug_assertions)]
-fn reply_unsupported(req: OwnerRequest) {
-    let msg = || "VST3 state save/load is not wired".to_string();
-    match req {
-        #[cfg(debug_assertions)]
-        OwnerRequest::SaveState(r) => {
-            let _ = r.send(Err(msg()));
-        }
-        #[cfg(debug_assertions)]
-        OwnerRequest::LoadState(_, r) => {
-            let _ = r.send(Err(msg()));
-        }
-        OwnerRequest::ListParams(r) => {
-            let _ = r.send(Ok(Vec::new()));
-        }
-        OwnerRequest::SetParamNormalized(..) | OwnerRequest::Wake => {}
-        OwnerRequest::OpenEditor(_, r) => {
-            let _ = r.send(Err(msg()));
-        }
-        OwnerRequest::CloseEditor(_, r) => {
-            let _ = r.send(Ok(()));
-        }
-        // P11.0 input requests are handled in the VST3 owner loop's explicit arms; this is only
-        // for match exhaustiveness (they never route here).
-        OwnerRequest::ArmInput(_, _, _, r) => {
-            let _ = r.send(Err(msg()));
-        }
-        OwnerRequest::DisarmInput(_, r) => {
-            let _ = r.send(Ok(()));
-        }
-        // P11.3 Stage B native monitor: now handled in the VST3 owner loop's explicit arms; this
-        // is only for match exhaustiveness (they never route here).
-        OwnerRequest::ArmMonitor(_, _, r) => {
-            let _ = r.send(Err(msg()));
-        }
-        OwnerRequest::DisarmMonitor(_, r) => {
-            let _ = r.send(Ok(()));
-        }
-    }
 }
 
 /// Decode a VST3 `String128` (`[i16; 128]` UTF-16, NUL-terminated) into a Rust `String`.

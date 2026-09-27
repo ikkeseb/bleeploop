@@ -1,4 +1,5 @@
-// verify/guards/import.mjs — deterministic guard for src/audio/export/session-schema.ts (validateSession).
+// verify/guards/import.mjs — deterministic guard for src/audio/export/session-schema.ts (validateSession,
+// and validateSessionPlugins: the slot tones engine mode's export names).
 // Imports the REAL session validator from the PURE schema module (Node TS type-stripping — import.ts
 // itself statically imports engine/looper and is browser-only) so it cannot drift from the source.
 // Asserts the export.ts session.json schema gate: a golden session round-trips, the formatVersion gate
@@ -6,7 +7,7 @@
 // volume clamp + legacy muted/state values normalize, while invalid shapes reject. This is what
 // SESSION IMPORT relies on to never hand looper.loadSession a payload that could corrupt the master grid.
 // Run: node verify/guards/import.mjs
-import { validateSession } from '../../src/audio/export/session-schema.ts';
+import { validateSession, validateSessionPlugins } from '../../src/audio/export/session-schema.ts';
 import { framesPerBar } from '../../src/audio/quantize.ts';
 
 let fails = 0,
@@ -383,6 +384,27 @@ throws('G.reversed non-boolean rejects', () => {
   s.tracks[0].reversed = 1;
   validateSession(s);
 }, 'reversed must be a boolean');
+
+// ── H: the slot tones (`plugins`) ───────────────────────────────────────────────────────────────────
+const amp = { slot: 'A', format: 'vst3', path: 'C:\\VST3\\Amp.vst3', id: 'abc', name: 'Amp', file: 'lf-tone-slot-a.bin' };
+const withPlugins = (plugins) => ({ ...golden(), plugins });
+const trackFiles = golden().tracks.map((t) => t.file);
+ok('H.no plugins field: no tones (older exports, recoveries)', validateSessionPlugins(golden(), trackFiles).length === 0);
+{
+  const parsed = validateSessionPlugins(withPlugins([amp, { ...amp, slot: 'B', format: 'clap', file: 'lf-tone-slot-b.bin' }]), trackFiles);
+  ok('H.two slots parse, A → 0 and B → 1', parsed.length === 2 && parsed[0].slot === 0 && parsed[1].slot === 1 && parsed[1].format === 'clap');
+  ok('H.the identity and file come through', parsed[0].path === amp.path && parsed[0].id === 'abc' && parsed[0].name === 'Amp' && parsed[0].file === amp.file);
+}
+ok('H.validateSession ignores plugins (an older build imports the loops)', validateSession(withPlugins([amp])).tracks.length === 2);
+throws('H.plugins not an array rejects', () => validateSessionPlugins(withPlugins({}), trackFiles), 'must be an array');
+throws('H.a slot other than A/B rejects', () => validateSessionPlugins(withPlugins([{ ...amp, slot: 0 }]), trackFiles), '"A" or "B"');
+throws('H.a slot listed twice rejects', () => validateSessionPlugins(withPlugins([amp, { ...amp, file: 'x.bin' }]), trackFiles), 'listed twice');
+throws('H.an unknown format rejects', () => validateSessionPlugins(withPlugins([{ ...amp, format: 'au' }]), trackFiles), '"clap" or "vst3"');
+throws('H.a missing file rejects', () => validateSessionPlugins(withPlugins([{ ...amp, file: undefined }]), trackFiles), 'file missing');
+throws('H.an empty id rejects', () => validateSessionPlugins(withPlugins([{ ...amp, id: '' }]), trackFiles), 'id missing');
+throws('H.a tone file that is a stem rejects', () => validateSessionPlugins(withPlugins([{ ...amp, file: 'lf-track1.wav' }]), trackFiles), 'already another entry');
+throws('H.two slots sharing a tone file reject', () =>
+  validateSessionPlugins(withPlugins([amp, { ...amp, slot: 'B' }]), trackFiles), 'already another entry');
 
 console.log(`\n=== RESULT: ${checks - fails}/${checks} checks passed, ${fails} failed ===`);
 if (fails) process.exit(1);

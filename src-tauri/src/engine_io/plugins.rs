@@ -1,9 +1,11 @@
 //! OWNS: engine mode's plugin slots (`docs/plans/native-engine.md` § Stage 5, Plugins): the live line's
-//! `plugin_*` load, unload, list, parameter, state and editor commands, routed to the engine slot owners
+//! `plugin_*` load, unload, list, parameter and editor commands, routed to the engine slot owners
 //! (`host/engine_slot.rs`) under the same names, payloads and window events (`plugin:param-changed`,
-//! `plugin:params-changed`, `plugin:editor-closed`). A plugin loads into an engine that exists: open the
-//! device first. GO LIVE is the engine's `SetSlotLive` and the plugin's gain `SetSlotGain` (sent with
-//! `engine_send`; the monitor-gain command maps to it), notes go through `engine_send`.
+//! `plugin:params-changed`, `plugin:editor-closed`), and tone recall's commands (`host/tone.rs`): every
+//! load restores the plugin's stored tone, a session export takes a slot's tone fresh, an import stores
+//! one, and the app's exit saves them all before the unloads. A plugin loads into an engine that exists:
+//! open the device first. GO LIVE is the engine's `SetSlotLive` and the plugin's gain `SetSlotGain` (sent
+//! with `engine_send`; the monitor-gain command maps to it), notes go through `engine_send`.
 //!
 //! A slot is reserved while it loads, for the WebView document that asked (its `frontendEpoch`): a
 //! reload's unload cancels the reservation, and a load that finishes for a replaced document unloads
@@ -19,10 +21,14 @@ use tauri::Emitter;
 
 use super::mode::EngineApp;
 use crate::host::engine_slot::{self, EngineSlotEvent, EngineSlotHandle, EventSink, PluginFormat};
-use crate::host::{ParamDesc, PluginDescriptor, PluginHostState, PluginInfo};
+use crate::host::tone::{self, ToneBinding, ToneIdentity};
+use crate::host::{ParamDesc, PluginDescriptor, PluginHostState, PluginInfo, ToneImport};
 
 /// How long an unload waits for a command still using the slot's handle (an owner round trip is ≤ 5 s).
 const UNLOAD_WAIT: Duration = Duration::from_secs(6);
+
+/// How long the exit waits, in all, for the slots' tone saves before it unloads them anyway.
+const EXIT_SAVE_WAIT: Duration = Duration::from_secs(2);
 
 pub(crate) enum EngineSlot {
     Empty,
@@ -86,8 +92,12 @@ impl EngineApp {
             };
         });
         let parent = window.hwnd().map(|h| h.0 as usize).unwrap_or(0);
+        let tone = self.tones.clone().map(|store| ToneBinding {
+            store,
+            identity: ToneIdentity { format: if vst3 { "vst3" } else { "clap" }.to_string(), path: path.clone(), id: id.clone() },
+        });
         let began = Instant::now();
-        let loaded = engine_slot::load(format, path.clone(), id.clone(), host.slot(usize::from(slot)), parent, sink);
+        let loaded = engine_slot::load(format, path.clone(), id.clone(), host.slot(usize::from(slot)), parent, sink, tone);
         let mut slots = self.slots()?;
         let owns = matches!(slots[usize::from(slot)], EngineSlot::Loading { epoch } if epoch == frontend_epoch)
             && state.frontend_epoch.load(Relaxed) == frontend_epoch;
@@ -115,7 +125,7 @@ impl EngineApp {
             // As the live load answers: the frontend keeps the scan's descriptor for gain staging.
             is_effect: None,
         };
-        let info = PluginInfo { slot, descriptor };
+        let info = PluginInfo { slot, descriptor, tone: handle.tone() };
         log::info!("[plugin_host] engine slot {slot}: {} ({:?}) loaded in {} ms", info.descriptor.name, handle.kind(), began.elapsed().as_millis());
         slots[usize::from(slot)] = EngineSlot::Loaded { handle: Arc::new(handle), info: info.clone() };
         Ok(info)
@@ -140,6 +150,34 @@ impl EngineApp {
                     handle = shared;
                     std::thread::sleep(Duration::from_millis(5));
                 }
+            }
+        }
+    }
+
+    /// On exit, before the unloads: every loaded slot saves its tone at once (each owner on its own
+    /// thread), waited for at most `EXIT_SAVE_WAIT` in all. A plugin stuck in its save is logged and left
+    /// to the unload's own bound (`mode::SHUTDOWN_WAIT`), and the other slot's save is not held up by it.
+    pub(super) fn save_tones_on_exit(&self) {
+        let loaded: Vec<(u8, Arc<EngineSlotHandle>)> = match self.slots() {
+            Ok(slots) => (0u8..)
+                .zip(slots.iter())
+                .filter_map(|(slot, s)| match s {
+                    EngineSlot::Loaded { handle, .. } => Some((slot, handle.clone())),
+                    _ => None,
+                })
+                .collect(),
+            Err(e) => return log::error!("[plugin_host] tone saves on exit: {e}"),
+        };
+        let asked: Vec<_> = loaded.iter().map(|(slot, handle)| (*slot, handle.start_tone_save())).collect();
+        let deadline = Instant::now() + EXIT_SAVE_WAIT;
+        for (slot, asked) in asked {
+            let saved = asked.and_then(|reply| {
+                reply
+                    .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                    .map_err(|_| format!("no answer within {} ms", EXIT_SAVE_WAIT.as_millis()))?
+            });
+            if let Err(e) = saved {
+                log::error!("[plugin_host] engine slot {slot}: the tone save on exit failed: {e}");
             }
         }
     }
@@ -177,14 +215,39 @@ impl EngineApp {
         self.handle(slot)?.list_params()
     }
 
-    #[cfg(debug_assertions)]
-    pub(crate) fn plugin_save_state(&self, slot: u8) -> Result<Vec<u8>, String> {
-        self.handle(slot)?.save_state()
+    /// `plugin_tone_take`: the slot's tone, saved fresh through its owner (it lands in the store too);
+    /// the tone file's bytes, empty when the plugin keeps no state.
+    pub(crate) fn plugin_tone_take(&self, slot: u8) -> Result<Vec<u8>, String> {
+        self.handle(slot)?.take_tone()
     }
 
-    #[cfg(debug_assertions)]
-    pub(crate) fn plugin_load_state(&self, slot: u8, bytes: Vec<u8>) -> Result<(), String> {
-        self.handle(slot)?.load_state(bytes)
+    /// `plugin_tone_import`: a session's tone for `slot`. It goes into the store under the plugin it
+    /// names, so the next load of that plugin, in either slot, restores it. When `slot` holds that plugin
+    /// now, its owner first stops saving over it and the answer says `held`: the caller reloads the slot
+    /// to hear it. Nothing is loaded, swapped or unloaded here.
+    pub(crate) fn plugin_tone_import(&self, slot: u8, bytes: &[u8]) -> Result<ToneImport, String> {
+        let store = self.tones.as_ref().ok_or("no app-local data folder to keep tones in")?;
+        let tone = tone::decode(bytes)?;
+        let held = match &self.slots()?[usize::from(slot)] {
+            EngineSlot::Loaded { handle, info } => {
+                let d = &info.descriptor;
+                let same = d.format == tone.identity.format && d.path == tone.identity.path && d.id == tone.identity.id;
+                same.then(|| handle.clone())
+            }
+            _ => None,
+        };
+        if let Some(handle) = &held {
+            handle.supersede_tone()?;
+        }
+        store.save_encoded(bytes)?;
+        log::info!(
+            "[plugin_host] engine slot {slot}: a session's tone for {} stored ({} bytes){}",
+            tone.name,
+            tone.state.len(),
+            if held.is_some() { "; the slot holds it and reloads" } else { "" }
+        );
+        let ToneIdentity { format, path, id } = tone.identity;
+        Ok(ToneImport { held: held.is_some(), name: tone.name, format, path, id })
     }
 
     pub(crate) fn plugin_open_editor(&self, slot: u8) -> Result<(), String> {

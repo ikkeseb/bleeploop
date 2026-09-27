@@ -6,11 +6,12 @@
 //!   - `slot` is 0 | 1 (two native slots); we take it as `u8` and validate.
 //!   - `loadPlugin` REQUIRES `id`: one `.clap` bundle can export several descriptors, so
 //!     `(slot, path)` alone would silently load `descriptor[0]`.
-//!   - state is opaque plugin-defined bytes (CLAP `state` ext); JS sees a Uint8Array.
+//!   - a tone (engine mode) is a tone file's bytes (`host/tone.rs`), raw both ways: JS sees an
+//!     ArrayBuffer and sends a Uint8Array.
 //!   - every command returns `Result<_, String>` so a stub/error surfaces as a rejected JS promise
 //!     rather than a panic across the IPC boundary.
 
-use super::state::{AudioInputDevice, AudioOutputDevice, ParamDesc, PluginDescriptor, PluginHostState, PluginInfo};
+use super::state::{AudioInputDevice, AudioOutputDevice, ParamDesc, PluginDescriptor, PluginHostState, PluginInfo, ToneImport};
 
 fn validate_slot(slot: u8) -> Result<(), String> {
     match slot {
@@ -307,52 +308,52 @@ pub async fn plugin_set_param(
         Ok(())
     }
 }
-/// P9.5: serialise the live plugin via clack's `state` extension. The `!Send` instance lives on the
-/// owner thread, so this hands a request to it and waits for the bytes back (state save/load is a
-/// CLAP main-thread call). DEV-only until production save/recall ships; JS receives a Uint8Array.
-#[cfg(debug_assertions)]
+/// Engine mode's tone recall (`host/tone.rs`): save the slot's plugin tone now, through its owner, into
+/// the store, and answer the tone file's bytes as the raw response (empty: the plugin keeps no state).
+/// A session export takes each loaded slot's tone this way. The web audio path keeps no tones.
 #[tauri::command]
-pub async fn plugin_save_state(
-    slot: u8,
-    state: tauri::State<'_, PluginHostState>,
-) -> Result<Vec<u8>, String> {
+pub async fn plugin_tone_take(slot: u8) -> Result<tauri::ipc::Response, String> {
     validate_slot(slot)?;
     #[cfg(windows)]
     {
-        if let Some(engine) = crate::engine_io::mode::engine() {
-            return engine.plugin_save_state(slot);
-        }
-        super::clap::save_state(&state, slot)
+        let engine = crate::engine_io::mode::engine().ok_or(TONES_ON_THE_ENGINE_ONLY)?;
+        Ok(tauri::ipc::Response::new(engine.plugin_tone_take(slot)?))
     }
     #[cfg(not(windows))]
     {
-        let _ = &state;
-        Err(format!("plugin_save_state is Windows-only (slot={slot})"))
+        Err(format!("plugin_tone_take is Windows-only (slot={slot})"))
     }
 }
-/// P9.5: restore opaque plugin-defined bytes via clack's `state` extension (owner/main thread).
-/// DEV-only until production save/recall ships.
-#[cfg(debug_assertions)]
+/// Engine mode: store a session import's tone for a slot. The raw request body is the tone file's
+/// bytes and the `slot` header names the slot (`invoke('plugin_tone_import', bytes, { headers })`).
+/// The answer names the plugin the tone belongs to and whether the slot holds it now; nothing is
+/// loaded or swapped here (`EngineApp::plugin_tone_import`).
 #[tauri::command]
-pub async fn plugin_load_state(
-    slot: u8,
-    bytes: Vec<u8>,
-    state: tauri::State<'_, PluginHostState>,
-) -> Result<(), String> {
+pub async fn plugin_tone_import(request: tauri::ipc::Request<'_>) -> Result<ToneImport, String> {
+    let slot: u8 = request
+        .headers()
+        .get("slot")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse().ok())
+        .ok_or("plugin_tone_import needs a slot header")?;
     validate_slot(slot)?;
+    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else {
+        return Err("plugin_tone_import takes the tone file's bytes as the raw request body".to_string());
+    };
     #[cfg(windows)]
     {
-        if let Some(engine) = crate::engine_io::mode::engine() {
-            return engine.plugin_load_state(slot, bytes);
-        }
-        super::clap::load_state(&state, slot, bytes)
+        let engine = crate::engine_io::mode::engine().ok_or(TONES_ON_THE_ENGINE_ONLY)?;
+        engine.plugin_tone_import(slot, bytes)
     }
     #[cfg(not(windows))]
     {
-        let _ = (&state, bytes);
-        Err(format!("plugin_load_state is Windows-only (slot={slot})"))
+        let _ = bytes;
+        Err(format!("plugin_tone_import is Windows-only (slot={slot})"))
     }
 }
+/// Tone recall's commands answer this on the web audio path, which keeps no tones.
+#[cfg(windows)]
+const TONES_ON_THE_ENGINE_ONLY: &str = "tone recall runs on the native engine only";
 /// P9.5: enumerate the loaded plugin's parameters (stable ids + ranges). Drives the future param UI
 /// and lets a caller pick a real param id to `setParameter` (a CLAP main-thread `params` query).
 #[tauri::command]

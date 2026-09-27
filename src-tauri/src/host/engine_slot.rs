@@ -7,12 +7,16 @@
 //! `vst3_owner_main`) and everything they drive are the web audio path's, untouched.
 //!
 //! An owner services what the live owner does, less the device (the engine owns it): params (the
-//! unit drains the slot's event ring; a VST3 set reaches the edit controller too), state, editors
-//! with their Win32 pump, plugin callbacks and params rescans, a plugin-requested restart and an
-//! eviction (the unit comes back → deactivate → activate at the engine's current rate and block →
-//! reinstall; the slot is bypassed meanwhile and the engine never waits), and the ordered teardown.
-//! Events go to a sink closure instead of a window, so an owner runs headless. Notes never pass
-//! through here: the engine routes them (`Command::SelectInstrument(NoteTarget::Slot(i))`, then
+//! unit drains the slot's event ring; a VST3 set reaches the edit controller too), editors, plugin
+//! callbacks and params rescans, the thread's Win32 messages on every turn (a live owner pumps only
+//! while an editor is open; a JUCE plugin's message thread is this one), a plugin-requested restart and an eviction (the
+//! unit comes back → deactivate → activate at the engine's current rate and block → reinstall; the
+//! slot is bypassed meanwhile and the engine never waits), and the ordered teardown. It also keeps the
+//! plugin's TONE (`host/tone.rs`): the stored one is restored inside the load, before the plugin
+//! activates (`restore_tone`), and the owner saves it on its own thread (`keep_tone`) once a change
+//! has gone quiet, when the editor closes, before the teardown, and when asked (a session export, the
+//! app's exit). Events go to a sink closure instead of a window, so an owner runs headless. Notes never
+//! pass through here: the engine routes them (`Command::SelectInstrument(NoteTarget::Slot(i))`, then
 //! `Command::NoteOn`).
 
 use std::sync::atomic::{
@@ -28,7 +32,8 @@ use clack_host::entry::PluginEntry;
 use lf_engine::SlotKind;
 use rtrb::{Consumer, Producer, RingBuffer};
 
-use super::super::state::ParamDesc;
+use super::super::state::{ParamDesc, ToneRestore};
+use super::super::tone::{ToneBinding, ToneKeeper};
 use super::{
     load_ready_channel, owner_request_5s, OwnerRequest, ParamIds, PluginEvent, EVENT_RING_CAP,
 };
@@ -108,18 +113,67 @@ pub(super) struct OwnerCtx {
     /// Rendezvous (`load_ready_channel`): a send that fails means the caller gave up, and the owner
     /// undoes the load itself.
     pub(super) ready: SyncSender<Result<Ready, String>>,
+    /// The plugin's tone: what the load restores and where the owner saves it.
+    pub(super) tone: ToneKeeper,
 }
 
 /// An installed load, as the owner reports it.
 pub(super) struct Ready {
     pub(super) name: String,
     pub(super) kind: SlotKind,
+    /// What the load did with the stored tone (`None`: nothing was stored).
+    pub(super) tone: Option<ToneRestore>,
+}
+
+/// Owner thread, inside the load, before the plugin activates: hand the stored tone to `apply` (the
+/// format's state setter). A tone that cannot be read, or that the plugin refuses, is logged and the
+/// load goes on at the plugin's defaults: a load never fails because of its tone.
+pub(super) fn restore_tone(
+    tone: &ToneKeeper,
+    slot: usize,
+    name: &str,
+    apply: impl FnOnce(&[u8]) -> Result<(), String>,
+) -> Option<ToneRestore> {
+    let restored = tone.stored().and_then(|stored| match stored {
+        Some(state) => apply(&state).map(|()| Some(state.len())),
+        None => Ok(None),
+    });
+    match restored {
+        Ok(None) => None,
+        Ok(Some(bytes)) => {
+            log::info!("[plugin_host] engine slot {slot}: {name} restored its tone ({bytes} bytes)");
+            Some(ToneRestore::Restored)
+        }
+        Err(e) => {
+            log::warn!("[plugin_host] engine slot {slot}: {name}'s saved tone could not be restored ({e}); it loads with its defaults");
+            Some(ToneRestore::Failed)
+        }
+    }
+}
+
+/// Owner thread: save the tone now (`ToneKeeper::save`, `take` being the format's state getter) for
+/// `why`, and log the outcome. Returns the tone file's bytes for a caller that asked for them.
+pub(super) fn keep_tone(
+    tone: &mut ToneKeeper,
+    slot: usize,
+    why: &str,
+    name: &str,
+    take: impl FnOnce() -> Result<Option<Vec<u8>>, String>,
+) -> Result<Vec<u8>, String> {
+    let t = Instant::now();
+    let saved = tone.save(name, take);
+    match &saved {
+        Ok(bytes) => log::info!("[plugin_host] engine slot {slot}: tone saved ({why}): {} bytes in {} ms", bytes.len(), t.elapsed().as_millis()),
+        Err(e) => log::error!("[plugin_host] engine slot {slot}: saving the tone ({why}) failed: {e}"),
+    }
+    saved
 }
 
 /// Load plugin `id` from `path` into the engine slot `slot`: spawn its owner thread
 /// (`lf-clap-engine-{slot}` / `lf-vst3-engine-{slot}`) and wait (≤ 15 s) until the unit is in the
-/// engine. Err when no device has opened yet (`SlotHost::rate` is `None`), the slot already holds a
-/// unit, or the plugin fails to load or activate.
+/// engine, with the plugin's tone restored from `tone` (`None`: no store, nothing kept). Err when no
+/// device has opened yet (`SlotHost::rate` is `None`), the slot already holds a unit, or the plugin
+/// fails to load or activate; never because of its tone.
 pub(crate) fn load(
     format: PluginFormat,
     path: String,
@@ -127,16 +181,17 @@ pub(crate) fn load(
     slot: SlotHost,
     editor_parent: usize,
     sink: EventSink,
+    tone: Option<ToneBinding>,
 ) -> Result<EngineSlotHandle, String> {
     match format {
-        PluginFormat::Clap => spawn(format, slot, editor_parent, sink, move |ctx| {
+        PluginFormat::Clap => spawn(format, slot, editor_parent, sink, tone, move |ctx| {
             super::clap_engine::run(ctx, &id, move || {
                 // SAFETY: PluginEntry::load runs the bundle's foreign entry-init code; the
                 // out-of-process scan vetted the bundle, as for the live load.
                 unsafe { PluginEntry::load(&path) }.map_err(|e| format!("load failed: {e}"))
             })
         }),
-        PluginFormat::Vst3 => spawn(format, slot, editor_parent, sink, move |ctx| {
+        PluginFormat::Vst3 => spawn(format, slot, editor_parent, sink, tone, move |ctx| {
             super::vst3_host::engine::run(ctx, path, &id)
         }),
     }
@@ -149,10 +204,12 @@ pub(super) fn spawn(
     slot: SlotHost,
     editor_parent: usize,
     sink: EventSink,
+    tone: Option<ToneBinding>,
     run: impl FnOnce(OwnerCtx) -> Result<(), String> + Send + 'static,
 ) -> Result<EngineSlotHandle, String> {
     let index = slot.slot();
     let running = Arc::new(AtomicBool::new(true));
+    let edited = Arc::new(AtomicBool::new(false));
     let (params_tx, params) = RingBuffer::<PluginEvent>::new(EVENT_RING_CAP);
     let params_tx = Arc::new(Mutex::new(params_tx));
     let (request_tx, requests) = std::sync::mpsc::channel();
@@ -168,6 +225,7 @@ pub(super) fn spawn(
         sink,
         editor_parent,
         ready,
+        tone: ToneKeeper::new(tone, edited.clone()),
     };
     let tag = match format {
         PluginFormat::Clap => "clap",
@@ -178,16 +236,18 @@ pub(super) fn spawn(
         .spawn(move || run(ctx))
         .map_err(|e| format!("spawn owner thread: {e}"))?;
     match ready_rx.recv_timeout(LOAD_TIMEOUT) {
-        Ok(Ok(Ready { name, kind })) => Ok(EngineSlotHandle {
+        Ok(Ok(Ready { name, kind, tone })) => Ok(EngineSlotHandle {
             slot: index,
             format,
             name,
             kind,
+            tone,
             running,
             owner: Some(owner),
             requests: request_tx,
             params_tx,
             param_ids,
+            edited,
         }),
         Ok(Err(e)) => {
             running.store(false, Release);
@@ -210,11 +270,14 @@ pub(crate) struct EngineSlotHandle {
     format: PluginFormat,
     name: String,
     kind: SlotKind,
+    tone: Option<ToneRestore>,
     running: Arc<AtomicBool>,
     owner: Option<JoinHandle<Result<(), String>>>,
     requests: Sender<OwnerRequest>,
     params_tx: Arc<Mutex<Producer<PluginEvent>>>,
     param_ids: ParamIds,
+    /// The owner's `ToneKeeper` flag: a host parameter set is a change to save.
+    edited: Arc<AtomicBool>,
 }
 
 impl EngineSlotHandle {
@@ -226,6 +289,11 @@ impl EngineSlotHandle {
     /// at every reinstall, so a restart that adds or drops the input bus changes it there.
     pub(crate) fn kind(&self) -> SlotKind {
         self.kind
+    }
+
+    /// What the load did with the plugin's stored tone (`None`: nothing was stored).
+    pub(crate) fn tone(&self) -> Option<ToneRestore> {
+        self.tone
     }
 
     /// Set a parameter the plugin listed: the unit applies it at the start of the next block it
@@ -247,6 +315,7 @@ impl EngineSlotHandle {
         if !pushed {
             return Err(format!("slot {slot} event queue is full; parameter {id} change was dropped"));
         }
+        self.edited.store(true, Release);
         if self.format == PluginFormat::Vst3 {
             let _ = self.requests.send(OwnerRequest::SetParamNormalized(id, value));
         }
@@ -258,17 +327,24 @@ impl EngineSlotHandle {
         self.ask("list_params", OwnerRequest::ListParams)
     }
 
-    /// DEV, as the live `plugin_save_state`: production save/recall is not built.
-    #[cfg(debug_assertions)]
-    pub(crate) fn save_state(&self) -> Result<Vec<u8>, String> {
-        self.ask("save_state", OwnerRequest::SaveState)
+    /// Save the plugin's tone now, through its owner, into the store; the tone file's bytes (empty:
+    /// the plugin keeps no state). A session export takes each slot's tone fresh this way (≤ 5 s).
+    pub(crate) fn take_tone(&self) -> Result<Vec<u8>, String> {
+        self.ask("take_tone", OwnerRequest::SaveTone)
     }
 
-    /// DEV, as the live `plugin_load_state` (and with its residual: a restore that lands after the
-    /// 5 s wait still applies).
-    #[cfg(debug_assertions)]
-    pub(crate) fn load_state(&self, bytes: Vec<u8>) -> Result<(), String> {
-        self.ask("load_state", |reply| OwnerRequest::LoadState(bytes, reply))
+    /// Ask for a tone save without waiting: the app's exit sends one to every slot, then waits on all
+    /// the replies under one deadline.
+    pub(crate) fn start_tone_save(&self) -> Result<Receiver<Result<Vec<u8>, String>>, String> {
+        let (reply_tx, reply_rx) = std::sync::mpsc::sync_channel(1);
+        self.requests.send(OwnerRequest::SaveTone(reply_tx)).map_err(|_| "owner thread gone".to_string())?;
+        Ok(reply_rx)
+    }
+
+    /// A session import is replacing this plugin's stored tone and the slot reloads to apply it: from
+    /// the reply on, this load saves nothing more to the store (≤ 5 s).
+    pub(crate) fn supersede_tone(&self) -> Result<(), String> {
+        self.ask("supersede_tone", OwnerRequest::SupersedeTone)
     }
 
     /// Open the plugin's editor (≤ 5 s; an editor that comes up later is closed again).

@@ -153,6 +153,7 @@ fn init_reentrant_and_background_requests_reach_the_owner_once_per_turn() {
             hosted_hwnd: Arc::new(AtomicIsize::new(0)),
             callback_requested: AtomicBool::new(false),
             restart_requested: AtomicBool::new(false),
+            keeps_tone: false,
         },
         |_| LfMain::default(),
         &entry,
