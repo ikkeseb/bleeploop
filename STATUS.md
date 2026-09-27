@@ -31,7 +31,8 @@ Settings: ASIO, buffer 128, the guitar's input channel. Load the amp-sim, GO LIV
 **before reading further**, write the opinion down. If it feels off, that outranks every green check:
 say what felt wrong and re-scope. If it feels right, publish the draft.
 With a MIDI footswitch plugged: learn REC/DUB onto it (Audio Settings → midi learn, one tap) and take
-the jam's records with the foot. One press, one action? Still learned after the next restart?
+the jam's records with the foot. One press, one action? Still learned after the next restart? Then
+switch it to HOLD and hold it through one overdub.
 The draft is v0.1.0; what landed after it (multiply, IN FX, stage view, Help's diagnostics) runs from
 `pnpm dev:asio` and is folded into Stops 1 and 3 below.
 

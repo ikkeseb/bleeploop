@@ -42,9 +42,15 @@ not here.
   slots and covers its ellipsis. Pills off the label's row, a shorter label, or none in synth mode?
 - **Audio Settings:** the "rec align" trim row after the buffer row — placement + wording; status chips
   moved into the diagnostics block (unratified).
-- **MIDI learn row (2026-09-23, built, unseen):** above diagnostics — action picker + LEARN (a cyan
-  LISTENING while it waits), then one line per binding (action · CC/note · channel · momentary or
-  latching, the port on hover, ✕ forgets). Right place and words? Is "latching" clear to a guitarist?
+- **MIDI learn row (2026-09-23, extended 2026-09-27, built, unseen):** above diagnostics — an action
+  picker grouped into track and global actions, an ON TRACK row for a track action (the selected track
+  or 1–5), LEARN (a cyan LISTENING while it waits, then "Let go of the pedal, and try it once this line
+  is gone", up to 10 s for a latching pedal), then one line per binding (action · track, CC/note ·
+  channel, a momentary/latching switch, HOLD on a record pedal, the port on hover, ✕ forgets). Right
+  place and words? Is "latching" clear to a guitarist? A long list makes the popover tall.
+- **Refused global pedal presses (2026-09-27, built, unseen):** TAP while the tempo is locked, FIXED
+  while recording or under RETAKE, IN FX on the web path say why in the selected lane's well: the right
+  place for a global reason?
 - **Lanes:** the selected-lane warm-white edge (no rail, owner 2026-09-23) — strong enough under
   PLAYING? the ARMED amber dashed-ring pulse; the 10 px state word with its LED; from 1.5 m little
   carries (state word, REC core, four 5 px beat dots) — the stage view (B) is built for that; undo/reverse cap placement (a per-track
@@ -53,7 +59,8 @@ not here.
   pillars (PLAY / STOP / DUB / ARMED / MUTED / ENDING…), a four-block beat bar, the count-in in the
   lane. Readable from where you stand with the guitar? MUTED and STOP are both grey: distinct enough?
   The PC keyboard's note keys are silent inside it (so drum-mode 1–4 select lanes): right, or should
-  notes play?
+  notes play? BAR n / N (2026-09-27) sits between LOOP and the beat bar, the total at half size, dim:
+  readable at 1.5–3 m, total too small?
 - **IN FX (2026-09-26, built, unheard):** the pill after MIC and its ECHO/REVERB popover (engine
   mode). Defaults are an agent's pick: echo 1/8, feedback 0.4, level 0.5; reverb 0.5. The echo's level
   is scaled so its repeats carry the input's energy (at feedback 0.95 the first echo is ~⅓ of the level):

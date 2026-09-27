@@ -47,8 +47,8 @@ keyboard fill the other layers; the computer keyboard is the fallback.
   Each one bypasses without a click.
 - IN FX: a tempo-synced echo and a reverb on the live input, heard and recorded, while the dry signal
   and a take's timing stay untouched.
-- Stage view (B, or a learned pedal): each track's state, the beat and the count-in, large enough to
-  read from where you stand with the guitar.
+- Stage view (B, or a learned pedal): each track's state, the bar and the beat, and the count-in,
+  large enough to read from where you stand with the guitar.
 - Six built-in synths, one of them a 16-voice GM drum kit.
 - Two native CLAP/VST3 plugin slots with floating plugin editors; each slot reloads its last plugin at
   launch, never armed.
@@ -57,7 +57,9 @@ keyboard fill the other layers; the computer keyboard is the fallback.
   reported latency.
 - Share output mirrors the master to a second output device, for OBS, a browser or a voice chat.
 - MIDI controllers work through WebView2's native Web MIDI, and a MIDI footswitch, key or CC can be
-  learned onto a looper action in Audio Settings. Without one, the computer keyboard plays notes and
+  learned onto any looper control in Audio Settings: a track action on the selected track or a fixed
+  one, tap tempo, the click, END STOP, FIXED and the input effects, and HOLD to record while the pedal
+  is down. Without one, the computer keyboard plays notes and
   runs the transport (1-5 or the arrow keys to select a track, Space to record, Enter to play and
   stop, Backspace to undo; Help lists every key).
 - Session export and import as one `.zip`: a WAV stem per track, a wet stereo master render and a
