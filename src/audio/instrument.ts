@@ -115,9 +115,9 @@ const [engineGains, setEngineGains] = createSignal<[number | null, number | null
  * the outgoing plugin's gain on the slot MIC records through. */
 const EMPTY_SLOT_GAIN = 1;
 
-function setEngineGain(slot: 0 | 1, gain: number | null): void {
+function setEngineGain(slot: 0 | 1, gain: number | null, send = true): void {
   setEngineGains((prev) => withAt(prev, slot, gain));
-  sendEngine({ SetSlotGain: [slot, gain ?? EMPTY_SLOT_GAIN] });
+  if (send) sendEngine({ SetSlotGain: [slot, gain ?? EMPTY_SLOT_GAIN] });
 }
 
 /**
@@ -337,7 +337,9 @@ async function unloadSlotPlugin(slot: 0 | 1, outgoing: PluginDescriptor, path: '
   await disarmMonitorInternal(slot); // stop the native monitor before its plugin goes away
   await disarmInputInternal(slot); // the outgoing plugin's input feed must stop before its unload
   pluginBridge.teardownPluginSlot(slot); // stop the audio drain + release the hop-1 buffer (sync)
-  if (engineMode()) setEngineGain(slot, null);
+  // The slot reads empty at once, but the engine keeps the outgoing gain until the unload is done: the
+  // plugin plays out its removal fade (and any tail) at the level the player set, not at unity.
+  if (engineMode()) setEngineGain(slot, null, false);
   setSlotPlugins((prev) => withAt(prev, slot, null));
   // Both calls flush held notes: the next plugin reuses the SAME stable PLUGIN_SINKS ref, so a later
   // applyActiveRouting would early-return without releasing a note held across the swap.
@@ -361,6 +363,7 @@ async function unloadSlotPlugin(slot: 0 | 1, outgoing: PluginDescriptor, path: '
     }
     return false;
   }
+  if (engineMode() && engineGains()[slot] === null) sendEngine({ SetSlotGain: [slot, EMPTY_SLOT_GAIN] });
   forgetSlotPlugin(slot);
   releaseEditorAffinity(outgoing.path);
   return true;
