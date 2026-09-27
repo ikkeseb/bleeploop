@@ -64,9 +64,10 @@ function bufferMs(frames: number): string {
   return `~${((frames / sampleRate()) * 1000).toFixed(1)} ms/block`;
 }
 
-/** Reopen the engine's device on the saved picks (engine mode; the web path applies them on GO LIVE). */
-function reopenEngine(): void {
-  if (engineMode()) void openEngineDevice();
+/** Reopen the engine's device on the saved picks (engine mode; the web path applies them on GO LIVE),
+ * then `synced`: a switch the player declines puts back the picks of the device that runs. */
+function reopenEngine(synced: () => void): void {
+  if (engineMode()) void openEngineDevice().then(synced);
 }
 
 const ACTION_IDS = Object.keys(ACTION_LABELS) as ActionId[];
@@ -138,15 +139,19 @@ export function AudioSettings() {
   const anyInputArmed = () => inputArmed().some(Boolean);
   const anyMonitorArmed = () => monitorArmed().some(Boolean);
 
+  const syncPicks = () => {
+    const s = readAudioDeviceSettings();
+    setSelectedDevice(s.inputDeviceId);
+    setSelectedChannel(s.inputChannel);
+    setSelectedOutput(s.outputDeviceId);
+  };
+
   onMount(async () => {
     // Refresh the device lists + prune any persisted id no longer present (shared with the startup
     // prune so arming never sees a stale id), then re-sync the local signals from the pruned persisted
     // settings — catches a device unplugged since this popover last opened. No-op in the web build.
     await refreshAndPruneDevices();
-    const s = readAudioDeviceSettings();
-    setSelectedDevice(s.inputDeviceId);
-    setSelectedChannel(s.inputChannel);
-    setSelectedOutput(s.outputDeviceId);
+    syncPicks();
   });
 
   // Bridge health readout (native only): 2 Hz poll of pluginBridge.stats per slot while open.
@@ -205,7 +210,7 @@ export function AudioSettings() {
             setSelectedDevice(v);
             setSelectedChannel(''); // channel index is device-specific → reset to auto on swap
             writeAudioDeviceSettings({ inputDeviceId: v, inputChannel: '' });
-            reopenEngine();
+            reopenEngine(syncPicks);
           }}
           aria-label="Audio input device"
         >
@@ -248,7 +253,7 @@ export function AudioSettings() {
             setSelectedOutput(v);
             writeAudioDeviceSettings({ outputDeviceId: v });
             void applyWebOutput();
-            reopenEngine();
+            reopenEngine(syncPicks);
           }}
           aria-label="Monitor output device"
         >
@@ -302,7 +307,7 @@ export function AudioSettings() {
             const select = e.currentTarget;
             void setBufferSize(v).then(() => {
               select.value = String(bufferFrames());
-              reopenEngine();
+              reopenEngine(syncPicks);
             });
           }}
           aria-label="Buffer size in frames"
@@ -380,7 +385,7 @@ export function AudioSettings() {
                 const checkbox = e.currentTarget;
                 void setAsioEnabled(checkbox.checked).then(() => {
                   checkbox.checked = asioEnabled();
-                  reopenEngine();
+                  reopenEngine(syncPicks);
                 });
               }}
               aria-label="Use ASIO low-latency audio"

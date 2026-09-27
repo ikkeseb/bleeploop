@@ -16,7 +16,15 @@ export interface SessionSource {
   readonly trackCount: number;
   stateOf(i: number): TrackState;
   trackInfo(i: number): { readonly lengthFrames: number };
-  peaksInto(i: number, out: PeakView): PeakView;
+  /** Changes whenever lane `i`'s committed loop may have changed: recovery's dirty check, which waits
+   * for it to hold still. While the lane overdubs it moves only when a layer commits (the snapshot holds
+   * the loop without the layer in flight), so saves land during a dub. The engine's holds still while a
+   * take records too; the web looper's moves with the take's waveform, so no save lands during one. */
+  revision(i: number): number;
+  /** The lanes last lost their loops to a player's CLEAR or CLEAR ALL, not to the looper being replaced
+   * (engine mode: another sample rate, a fault, a WebView reload): only then does an empty looper delete
+   * the recovery (`../autosave.ts`). */
+  playerCleared(): boolean;
   trackVolume(i: number): number;
   trackMuted(i: number): boolean;
   fxState(i: number): FxState[];
@@ -31,14 +39,19 @@ export interface SessionSource {
   masterLevel(): number;
 }
 
+const peakView: PeakView = { min: null, max: null, count: 0, version: -1 };
+
 /** The web looper as a session source, looked up at each call (as the coordinators did, so a DEV probe
  * that wraps a `looper` member still sees every call). Its snapshot and the lane states are read in one
- * tick. */
+ * tick. Its revision is the waveform's: an overdub commits its layer at each loop boundary (`record`
+ * holds the last one), so its waveform moves only there. It has no replacement path: it empties only
+ * by a player's clear. */
 export const webSession: SessionSource = {
   trackCount: looper.trackCount,
   stateOf: (i) => looper.stateOf(i),
   trackInfo: (i) => looper.trackInfo(i),
-  peaksInto: (i, out) => looper.peaksInto(i, out),
+  revision: (i) => looper.peaksInto(i, peakView).version,
+  playerCleared: () => true,
   trackVolume: (i) => looper.trackVolume(i),
   trackMuted: (i) => looper.trackMuted(i),
   fxState: (i) => looper.fxState(i),

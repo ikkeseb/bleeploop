@@ -51,6 +51,12 @@
 //!   the output then the input, and punches out a take in flight (STATUS E3). A loss drops at once. A
 //!   new sample rate builds a new engine: the plugin units go back to their owners (`SlotHost`), and the
 //!   loops go with the old engine.
+//! - **Loops never leave on a player's switch unasked.** An open that would build an engine at another
+//!   rate while this one holds audio (a loop or a take in flight) is refused with
+//!   [`OpenError::RateChange`] (the rate is known from `Driver::resolve`, before anything stops) until
+//!   the UI confirms and opens again with `force`. The owner's own reopens (a loss's recovery or
+//!   fallback, a replaced engine) go ahead; one that lands on another rate reports
+//!   [`DeviceEvent::LoopsDropped`], and the UI keeps the loops in its recovery (`src/audio/autosave.ts`).
 //! - **`Core::running` is up from just before the streams start until just after they drop,** so a
 //!   slot host never takes the engine lock from under a callback (it waits on its port instead). The
 //!   owner raises it under the engine lock, and a slot host checks it again once it holds the lock.
@@ -94,7 +100,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use lf_engine::grid::Frame;
-use lf_engine::{Command, Engine, Event, Overview, SessionPort, SlotPort, SlotProcessor, TimedCommand, SLOT_COUNT};
+use lf_engine::{Command, Engine, Event, Overview, SessionPort, SlotPort, SlotProcessor, TimedCommand, SLOT_COUNT, TRACK_COUNT};
 use rtrb::{Consumer, Producer};
 use serde::{Deserialize, Serialize};
 
@@ -168,6 +174,45 @@ pub enum DeviceEvent {
     /// The engine panicked and a new one at the same rate replaced it: the loops are gone, the plugin
     /// units went back to their owners.
     EngineFaulted,
+    /// The device that came back or took over after a loss runs at `to` Hz, not the engine's `from`:
+    /// a new engine runs there, and the loops the old one held left with it (no resampling). The UI
+    /// keeps them in its recovery. `device` is the lost one. Follows its `Recovered` or `Fallback`.
+    LoopsDropped { device: String, from: u32, to: u32 },
+}
+
+/// Why [`EngineHost::open`] did not open the device. On the wire a failure is its text, a refusal an
+/// object (`{"RateChange":{…}}`), so the UI tells the two apart.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OpenError {
+    /// `device` runs at `to` Hz and the engine at `from` Hz holds audio (a loop, or a take in flight):
+    /// a switch would build a new engine there, and the loops cannot play in it. Open again with
+    /// `force` to switch anyway.
+    RateChange { device: String, from: u32, to: u32 },
+    #[serde(untagged)]
+    Failed(String),
+}
+
+impl std::fmt::Display for OpenError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            OpenError::RateChange { device, from, to } => {
+                write!(f, "\"{device}\" runs at {to} Hz; the loops were recorded at {from} Hz and cannot play there")
+            }
+            OpenError::Failed(text) => f.write_str(text),
+        }
+    }
+}
+
+impl From<String> for OpenError {
+    fn from(text: String) -> OpenError {
+        OpenError::Failed(text)
+    }
+}
+
+impl From<OpenError> for String {
+    fn from(error: OpenError) -> String {
+        error.to_string()
+    }
 }
 
 /// Counters the callbacks and pipes bump; every one stays 0 in a clean run (the Stage 4 soak).
@@ -414,6 +459,13 @@ impl Core {
         Some(self.rate.load(Relaxed)).filter(|&r| r != 0)
     }
 
+    /// Some lane of the engine holds audio: a loop, or a take in flight (its overview, read without the
+    /// engine lock).
+    pub(crate) fn holds_audio(&self) -> bool {
+        let ends = self.ends.lock().unwrap_or_else(|e| e.into_inner());
+        ends.as_ref().is_some_and(|e| (0..TRACK_COUNT).any(|i| e.overview.lane(i).frames > 0))
+    }
+
     /// A panic was caught under the engine lock: silence the engine and tell the owner.
     pub(crate) fn latch_fault(&self, rt: &mut Rt) {
         rt.faulted = true;
@@ -518,26 +570,28 @@ impl EngineHost {
 
     /// Open a device, or switch to one: blocks until its streams run or the open fails (≤ 15 s). The
     /// first open builds the engine at the device's rate; a later open at another rate builds a new
-    /// engine and evicts the plugin units into their slot hosts. A switch that fails to start reopens
-    /// the device it replaced; a request for the running device only changes its channel.
-    pub fn open(&self, request: DeviceRequest) -> Result<DeviceStatus, String> {
+    /// engine and evicts the plugin units into their slot hosts, and the loops go with the old engine,
+    /// so while it holds audio that switch is refused ([`OpenError::RateChange`]) unless `force`. A
+    /// switch that fails to start reopens the device it replaced; a request for the running device only
+    /// changes its channel.
+    pub fn open(&self, request: DeviceRequest, force: bool) -> Result<DeviceStatus, OpenError> {
         // Whoever claims the flag first decides: the owner once the open finished (its result is then
         // this caller's), or this caller on its timeout (a later open is the owner's to undo).
         let claimed = Arc::new(AtomicBool::new(false));
         let tx = self.owner_tx()?;
         let (reply_tx, reply_rx) = sync_channel(1);
-        tx.send(Request::Open(request, claimed.clone(), reply_tx)).map_err(|_| "the audio device owner is gone".to_string())?;
+        tx.send(Request::Open(request, force, claimed.clone(), reply_tx)).map_err(|_| "the audio device owner is gone".to_string())?;
         match reply_rx.recv_timeout(OPEN_TIMEOUT) {
             Ok(result) => result,
             Err(RecvTimeoutError::Timeout) => {
                 if claimed.compare_exchange(false, true, AcqRel, Acquire).is_ok() {
-                    Err(format!("open timed out after {} s", OPEN_TIMEOUT.as_secs()))
+                    Err(format!("open timed out after {} s", OPEN_TIMEOUT.as_secs()).into())
                 } else {
                     // The owner claimed it at the deadline: its answer is on the way.
-                    reply_rx.recv().unwrap_or_else(|_| Err("the audio device owner stopped".to_string()))
+                    reply_rx.recv().unwrap_or_else(|_| Err("the audio device owner stopped".to_string().into()))
                 }
             }
-            Err(RecvTimeoutError::Disconnected) => Err("the audio device owner stopped".to_string()),
+            Err(RecvTimeoutError::Disconnected) => Err("the audio device owner stopped".to_string().into()),
         }
     }
 

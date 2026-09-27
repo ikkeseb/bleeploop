@@ -17,6 +17,7 @@ import {
   decodeDeviceStatus,
   decodeEvent,
   decodeFeedFrame,
+  decodeOpenError,
 } from '../../src/platform/engine-wire.ts';
 
 const fixture = JSON.parse(readFileSync(new URL('../fixtures/engine-wire.json', import.meta.url), 'utf8'));
@@ -47,7 +48,7 @@ const COMMANDS = [
   'AllNotesOff', 'SetSlotLive', 'SetSlotGain', 'SetInputSend', 'SetInputSendParam',
 ];
 const EVENTS = ['Lane', 'Transport', 'Beat', 'Selected', 'Refused', 'TakeRejected', 'PassDropped', 'Copied', 'Cleared'];
-const DEVICE_EVENTS = ['Lost', 'Recovered', 'Fallback', 'ShareLost', 'EngineFaulted'];
+const DEVICE_EVENTS = ['Lost', 'Recovered', 'Fallback', 'ShareLost', 'EngineFaulted', 'LoopsDropped'];
 
 // ── Commands: the TS side sends these; each fixture example is one the TS types accept as is ────────
 for (const c of fixture.commands) {
@@ -83,6 +84,22 @@ for (const d of fixture.deviceEvents) {
 check('the fixture covers every device event', () =>
   assert.deepEqual([...new Set(fixture.deviceEvents.map((d) => tag(d)[0]))].sort(), [...DEVICE_EVENTS].sort()),
 );
+// ── Open errors: a refusal reads as one, with every field; a failure is its text ───────────────────
+for (const e of fixture.openErrors) {
+  check(`open error ${JSON.stringify(e)}`, () => {
+    const decoded = decodeOpenError(structuredClone(e));
+    if (typeof e === 'string') return assert.deepEqual(decoded, { type: 'Failed', text: e });
+    const [name, payload] = tag(e);
+    assert.deepEqual(rewire(decoded), { [name]: payload });
+  });
+}
+check('the fixture has a refusal and a failure', () =>
+  assert.deepEqual([...new Set(fixture.openErrors.map((e) => (typeof e === 'string' ? 'Failed' : tag(e)[0])))].sort(), ['Failed', 'RateChange']),
+);
+check('a refusal with a drifted field is refused', () =>
+  assert.throws(() => decodeOpenError({ RateChange: { device: 'x', from_rate: 44100, to: 48000 } })),
+);
+
 for (const r of fixture.deviceRequests) {
   check(`device request ${JSON.stringify(r)}`, () => assert.deepEqual(decodeDeviceRequest(structuredClone(r)), r));
 }

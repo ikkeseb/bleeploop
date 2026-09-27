@@ -13,7 +13,7 @@ use lf_engine::{Command, Event, LaneInfo, LaneState, SlotEvent, SlotKind, SlotPr
 use super::callback::Side;
 use super::fake_driver::{Fake, FakeDevice, FakeDriver};
 use super::owner::Request;
-use super::{DeviceEvent, DeviceRequest, DeviceStatus, EngineHost, HostConfig};
+use super::{DeviceEvent, DeviceRequest, DeviceStatus, EngineHost, HostConfig, OpenError};
 use crate::audio_output::AudioBackend;
 
 /// The longest any wait here takes: the fake plays faster than real time, so a wait that runs this long
@@ -59,7 +59,7 @@ impl Harness {
     }
 
     fn open(&self, request: DeviceRequest) -> DeviceStatus {
-        self.host.open(request).expect("the fake device opens")
+        self.host.open(request, false).expect("the fake device opens")
     }
 
     fn send(&self, command: Command) {
@@ -288,6 +288,7 @@ fn a_lost_asio_device_is_rebuilt_from_its_cache_and_the_loop_carries_on() {
     assert_eq!(starts[1][0], starts[0].last().unwrap() + 256, "the frame counter carries over the loss");
     assert_resumed_in_place(&h, 1, length);
     assert_eq!(h.host.status().map(|s| s.backend), Some(AudioBackend::Asio));
+    assert_eq!(h.host.take_device_events(), [], "the same rate: the loops stayed, nothing more to say");
 }
 
 #[test]
@@ -305,6 +306,23 @@ fn a_lost_asio_device_that_cannot_come_back_falls_back_to_the_wasapi_defaults() 
     }
     h.play(RATE / 10);
     assert_eq!(h.host.diag().join_starves, 0);
+}
+
+#[test]
+fn a_lost_device_whose_fallback_runs_at_another_rate_says_the_loops_left_the_engine() {
+    let mut h = Harness::new();
+    h.fake.set_input(tone);
+    h.fake.wasapi.lock().unwrap()[0].1.rate = 44_100;
+    h.open(asio(Some(256)));
+    h.record_loop();
+    h.fake.fail_starts.store(1, SeqCst);
+    h.fake.fatal.store(Side::Output as u8, SeqCst);
+    let events = h.device_events(3);
+    assert!(matches!(events[0], DeviceEvent::Lost { backend: AudioBackend::Asio, .. }), "{events:?}");
+    assert!(matches!(&events[1], DeviceEvent::Fallback(s) if (s.backend, s.sample_rate) == (AudioBackend::Wasapi, 44_100)), "{events:?}");
+    assert_eq!(events[2], DeviceEvent::LoopsDropped { device: "Fake ASIO".into(), from: 48_000, to: 44_100 }, "the UI keeps them in recovery");
+    assert!(!h.host.core.holds_audio(), "a new engine at 44.1 kHz, empty");
+    assert_eq!(h.host.status().map(|s| s.sample_rate), Some(44_100));
 }
 
 #[test]
@@ -342,6 +360,53 @@ fn a_new_rate_hands_the_units_to_their_owners_and_the_new_engine_takes_them_back
     let back = slot.remove(Duration::from_secs(2)).unwrap().expect("the unit comes back");
     assert_eq!(back.into_any().downcast::<Unit>().unwrap().level, 0.1);
     assert_eq!(h.host.diag().lock_misses, 0);
+}
+
+#[test]
+fn a_switch_to_another_rate_waits_for_force_while_the_engine_holds_loops() {
+    let mut h = Harness::new();
+    h.fake.set_input(tone);
+    h.open(asio(Some(256)));
+    let length = h.record_loop();
+    h.play(2 * length);
+    h.fake.asio.lock().unwrap().as_mut().unwrap().rate = 44_100;
+    let refused = h.host.open(asio(Some(128)), false);
+    assert_eq!(refused, Err(OpenError::RateChange { device: "Fake ASIO".into(), from: 48_000, to: 44_100 }));
+    assert_eq!(h.host.status().map(|s| (s.sample_rate, s.block)), Some((48_000, 256)), "the device that ran still runs");
+    assert_eq!(h.fake.started.load(SeqCst), 1, "nothing stopped or started");
+    h.play(length / 2);
+    let at = h.frame();
+    let diff = max_diff(&h.fake.heard(at - 4_000..at), &h.fake.heard(at - 4_000 - length..at - length));
+    assert!(diff < 1e-4 && h.fake.heard(at - 4_000..at).iter().any(|s| s.abs() > 0.05), "the loop plays on (diff {diff})");
+
+    let forced = h.host.open(asio(Some(128)), true).expect("forced, the switch goes ahead");
+    assert_eq!(forced.sample_rate, 44_100);
+    assert!(!h.host.core.holds_audio(), "the loops went with the old engine");
+    h.fake.asio.lock().unwrap().as_mut().unwrap().rate = 48_000;
+    assert_eq!(h.open(asio(Some(256))).sample_rate, 48_000, "with nothing to lose, another rate needs no force");
+}
+
+#[test]
+fn a_snapshot_taken_during_a_long_overdub_holds_the_loop_before_the_layer() {
+    let mut h = Harness::new();
+    h.fake.set_input(tone);
+    h.open(asio(Some(256)));
+    let length = h.record_loop();
+    let (_, before) = session_parts(&h.host.snapshot().expect("a snapshot of the committed take"));
+    h.fake.set_input(|frame| 0.1 * (frame as f32 * 0.002_3).sin());
+    h.send(Command::SetSlotLive(0, true));
+    h.send(Command::RecDub(0));
+    h.wait_lane("the overdub runs", 0, |i| i.state == LaneState::Overdubbing);
+    for pass in 0..3 {
+        h.play(length * 2 / 3);
+        let (header, pcm) = session_parts(&h.host.snapshot().expect("a snapshot while the layer sums"));
+        assert_eq!(header["tracks"][0]["state"], "Overdubbing", "pass {pass}");
+        assert!(pcm == before, "pass {pass}: the loop before the layer, never a part of it");
+    }
+    h.send(Command::RecDub(0));
+    h.wait_lane("the layer commits", 0, |i| i.state == LaneState::Playing);
+    let (_, after) = session_parts(&h.host.snapshot().expect("a snapshot of the committed layer"));
+    assert!(max_diff(&after, &before) > 0.05, "the committed layer is in the next snapshot");
 }
 
 #[test]
@@ -484,9 +549,9 @@ fn an_abandoned_unit_a_new_rate_evicts_never_reaches_the_next_owner() {
 }
 
 /// `Request::Open` as `EngineHost::open` sends it, with the caller's claim in the test's hand.
-fn open_claimed(h: &Harness, request: DeviceRequest, claimed: &Arc<AtomicBool>) -> Result<DeviceStatus, String> {
+fn open_claimed(h: &Harness, request: DeviceRequest, claimed: &Arc<AtomicBool>) -> Result<DeviceStatus, OpenError> {
     let (reply_tx, reply_rx) = std::sync::mpsc::sync_channel(1);
-    h.host.owner_tx().unwrap().send(Request::Open(request, claimed.clone(), reply_tx)).unwrap();
+    h.host.owner_tx().unwrap().send(Request::Open(request, false, claimed.clone(), reply_tx)).unwrap();
     reply_rx.recv_timeout(PATIENCE).expect("the owner answers")
 }
 
@@ -733,12 +798,12 @@ fn a_switch_that_fails_to_start_reopens_the_device_it_replaced() {
     let h = Harness::new();
     h.open(asio(Some(256)));
     h.fake.fail_starts.store(1, SeqCst);
-    assert!(h.host.open(asio(Some(128))).is_err());
+    assert!(h.host.open(asio(Some(128)), false).is_err());
     assert_eq!(h.host.status().map(|s| s.block), Some(256), "the previous device plays again");
     let frame = h.frame();
     h.play(RATE / 20);
     assert!(h.frame() > frame);
-    assert!(h.host.open(DeviceRequest { backend: AudioBackend::Wasapi, output: Some("gone".into()), ..asio(None) }).is_err());
+    assert!(h.host.open(DeviceRequest { backend: AudioBackend::Wasapi, output: Some("gone".into()), ..asio(None) }, false).is_err());
     assert_eq!(h.fake.started.load(SeqCst), 2, "a device that does not resolve leaves the running one alone");
 }
 
@@ -959,7 +1024,7 @@ fn a_reversed_lane_a_multiply_grows_is_drawn_whole() {
 fn a_wasapi_endpoint_with_no_input_plays_output_only() {
     let h = Harness::new();
     h.fake.wasapi.lock().unwrap()[0].1.in_channels = 0;
-    let status = h.host.open(DeviceRequest { input_channel: Some(1), ..wasapi(None, None) }).expect("output only opens");
+    let status = h.host.open(DeviceRequest { input_channel: Some(1), ..wasapi(None, None) }, false).expect("output only opens");
     assert!(!status.input_open && status.input_name.is_empty(), "{status:?}");
     let frame = h.frame();
     h.play(RATE / 10);

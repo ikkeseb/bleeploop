@@ -21,7 +21,7 @@ use tauri::{AppHandle, Manager};
 use super::feed::FeedThread;
 use super::plugins::EngineSlot;
 use super::wire::{FeedFrame, WireCommand};
-use super::{DeviceRequest, DeviceStatus, EngineHost, HostConfig};
+use super::{DeviceRequest, DeviceStatus, EngineHost, HostConfig, OpenError};
 
 /// The toggle file in the app-local data folder: `off` runs this app on the web audio path; anything
 /// else, or no file, on the engine.
@@ -147,12 +147,13 @@ pub async fn engine_set_mode(enabled: bool) -> Result<(), String> {
     Ok(())
 }
 
-/// Open the device, or switch to another; resolves with the device that runs.
+/// Open the device, or switch to another; resolves with the device that runs. A switch to another rate
+/// while the engine holds audio is refused (`OpenError::RateChange`, which the UI confirms) unless `force`.
 #[tauri::command]
-pub async fn engine_open(request: DeviceRequest) -> Result<DeviceStatus, String> {
+pub async fn engine_open(request: DeviceRequest, force: bool) -> Result<DeviceStatus, OpenError> {
     let host = app()?.host()?;
-    log::info!("[engine_io] open requested: {request:?}");
-    tauri::async_runtime::spawn_blocking(move || host.open(request)).await.map_err(|e| format!("engine_open: {e}"))?
+    log::info!("[engine_io] open requested: {request:?}{}", if force { " (forced)" } else { "" });
+    tauri::async_runtime::spawn_blocking(move || host.open(request, force)).await.map_err(|e| format!("engine_open: {e}"))?
 }
 
 /// Stop the device (the loops pause in place).

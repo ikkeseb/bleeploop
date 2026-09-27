@@ -171,7 +171,17 @@ export type DeviceEvent =
   | { type: 'Recovered'; status: DeviceStatus }
   | { type: 'Fallback'; status: DeviceStatus }
   | { type: 'ShareLost'; reason: string }
-  | { type: 'EngineFaulted' };
+  | { type: 'EngineFaulted' }
+  /** The device that came back or took over after a loss runs at `to` Hz, not the engine's `from`: a new
+   * engine runs there, and the loops left with the old one. `device` is the lost one. */
+  | { type: 'LoopsDropped'; device: string; from: number; to: number };
+
+/**
+ * Rust `engine_io::OpenError`: why `engine_open` did not open. A refusal: `device` runs at `to` Hz while
+ * the engine, at `from` Hz, holds audio, so a switch would drop the loops (open again with `force` once the
+ * player confirms). A failure: the open's text.
+ */
+export type OpenError = { type: 'RateChange'; device: string; from: number; to: number } | { type: 'Failed'; text: string };
 
 /**
  * Where the playhead comes from: the callback rendering device frame `frame` entered at Unix time
@@ -369,9 +379,26 @@ export function decodeDeviceEvent(raw: unknown): DeviceEvent {
     case 'EngineFaulted':
       if (payload !== undefined) fail('EngineFaulted is a unit variant', raw);
       return { type: 'EngineFaulted' };
+    case 'LoopsDropped': {
+      const o = obj(payload, 'DeviceEvent.LoopsDropped');
+      return { type: 'LoopsDropped', ...rateChange(o, 'LoopsDropped') };
+    }
     default:
       return fail('unknown DeviceEvent variant', raw);
   }
+}
+
+function rateChange(o: Obj, what: string): { device: string; from: number; to: number } {
+  return { device: str(o.device, `${what}.device`), from: int(o.from, `${what}.from`, 1), to: int(o.to, `${what}.to`, 1) };
+}
+
+/** What an `engine_open` rejection holds: a refusal object, or a failure's text (anything else is read as
+ * its text, so an IPC error never masks as a refusal). */
+export function decodeOpenError(raw: unknown): OpenError {
+  if (typeof raw === 'object' && raw !== null && 'RateChange' in raw) {
+    return { type: 'RateChange', ...rateChange(obj((raw as Obj).RateChange, 'OpenError.RateChange'), 'RateChange') };
+  }
+  return { type: 'Failed', text: raw instanceof Error ? raw.message : String(raw) };
 }
 
 function decodePeaks(raw: unknown): PeakUpdate {

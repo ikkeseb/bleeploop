@@ -11,8 +11,9 @@
 //! mirrors are serde `remote` derives: a variant or field lf-engine adds fails to compile here until it
 //! is mirrored.
 //!
-//! `DeviceRequest`, `DeviceStatus`, `DeviceEvent` and `AudioBackend` derive serde where they are
-//! defined (camelCase fields, backends as `"Asio"` / `"Wasapi"`).
+//! `DeviceRequest`, `DeviceStatus`, `DeviceEvent`, `OpenError` and `AudioBackend` derive serde where they
+//! are defined (camelCase fields, backends as `"Asio"` / `"Wasapi"`; an `OpenError` is its text, or
+//! `{"RateChange":{…}}` for a refusal).
 
 use lf_engine::dsp::fx::{FxKind, FxParam};
 use lf_engine::grid::Frame;
@@ -316,7 +317,7 @@ mod present {
 
 #[cfg(test)]
 mod tests {
-    use super::super::DeviceRequest;
+    use super::super::{DeviceRequest, OpenError};
     use super::*;
     use serde_json::Value;
 
@@ -385,7 +386,7 @@ mod tests {
         }
     }
 
-    const DEVICE_EVENTS: usize = 5;
+    const DEVICE_EVENTS: usize = 6;
     fn device_event_index(e: &DeviceEvent) -> usize {
         match e {
             DeviceEvent::Lost { .. } => 0,
@@ -393,6 +394,7 @@ mod tests {
             DeviceEvent::Fallback(_) => 2,
             DeviceEvent::ShareLost { .. } => 3,
             DeviceEvent::EngineFaulted => 4,
+            DeviceEvent::LoopsDropped { .. } => 5,
         }
     }
 
@@ -451,6 +453,15 @@ mod tests {
     fn every_device_event_round_trips_through_the_fixture() {
         let events: Vec<DeviceEvent> = round_trip("deviceEvents");
         covers("deviceEvents", events.iter().map(device_event_index), DEVICE_EVENTS);
+    }
+
+    #[test]
+    fn an_open_error_is_its_text_and_a_refusal_an_object() {
+        let errors: Vec<OpenError> = round_trip("openErrors");
+        assert!(errors.iter().any(|e| matches!(e, OpenError::RateChange { .. })), "a refusal");
+        assert!(errors.iter().any(|e| matches!(e, OpenError::Failed(_))), "a failure");
+        let failed = serde_json::to_value(OpenError::Failed("the device did not start".into())).unwrap();
+        assert_eq!(failed, Value::from("the device did not start"), "a failure stays a plain string");
     }
 
     #[test]

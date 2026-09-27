@@ -501,7 +501,8 @@ impl Probe {
     fn switch(&mut self, next: &DeviceRequest) -> Result<(), String> {
         let mark = self.mark();
         let began = Instant::now();
-        match self.host.open(next.clone()) {
+        // Forced: a switch to another rate drops the loop, which this phase then records again.
+        match self.host.open(next.clone(), true) {
             Ok(status) => {
                 let rebuilt = status.sample_rate != self.rate;
                 say(format!(
@@ -539,7 +540,7 @@ impl Probe {
 
     fn drive(&mut self, a: &Args, devices: &Devices, start: &DeviceRequest) -> Result<(), String> {
         let mark = self.mark();
-        let status = self.host.open(start.clone())?;
+        let status = self.host.open(start.clone(), false)?;
         self.silence()?;
         self.rate = status.sample_rate;
         say(format!("open {}: {}", label(start), describe(&status)));
@@ -681,7 +682,7 @@ fn lag_run(a: &Args, devices: &Devices, request: DeviceRequest) -> Result<(), St
     host.core.rt.lock().map_err(|_| "engine lock poisoned")?.lag = Some(Box::new(LagRig::new(rate, a.seconds, a.out == 1, period, a.split)));
     let t0 = Instant::now();
     let began = Instant::now();
-    let opened = host.open(request.clone());
+    let opened = host.open(request.clone(), false);
     let open_ms = began.elapsed().as_millis();
     let status = match opened {
         Ok(status) => status,

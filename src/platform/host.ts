@@ -325,8 +325,10 @@ export interface EngineHost {
   mode(): Promise<boolean>;
   /** Write the toggle for the next launch. */
   setMode(enabled: boolean): Promise<void>;
-  /** Open the device, or switch to another; resolves with the device that runs. */
-  open(request: DeviceRequest): Promise<DeviceStatus>;
+  /** Open the device, or switch to another; resolves with the device that runs. Rejects with the wire's
+   * `OpenError` (`decodeOpenError`): a switch to another rate while the engine holds audio is refused
+   * unless `force` (the player confirmed dropping the loops from the engine). */
+  open(request: DeviceRequest, force?: boolean): Promise<DeviceStatus>;
   close(): Promise<void>;
   /** The device that runs, or null. */
   status(): Promise<DeviceStatus | null>;

@@ -165,8 +165,8 @@ const tauriEngineHost: EngineHost = {
   async setMode(enabled) {
     await invoke('engine_set_mode', { enabled });
   },
-  async open(request) {
-    return decodeDeviceStatus(await invoke<unknown>('engine_open', { request }));
+  async open(request, force = false) {
+    return decodeDeviceStatus(await invoke<unknown>('engine_open', { request, force }));
   },
   async close() {
     await invoke('engine_close');

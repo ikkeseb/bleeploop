@@ -230,8 +230,15 @@ const webLogFolder: LogFolder = {
 export interface EngineFake extends EngineHost {
   /** Every command sent, in order (batches flattened). */
   readonly sent: EngineCommand[];
-  /** Every request `open()` received. */
+  /** Every request `open()` received, and whether it was forced. */
   readonly opened: DeviceRequest[];
+  readonly forced: boolean[];
+  /**
+   * A probe-scripted refusal: while set, `open()` without `force` rejects with it as the native owner
+   * refuses a switch to another rate while the engine holds audio (`OpenError::RateChange`). The rate
+   * `open()` answers is `window.__lfEngineFakeRate` (48 kHz unless an init script or a probe sets it).
+   */
+  refusal: { device: string; from: number; to: number } | null;
   /** What `snapshot()` answers (a probe sets it; null answers an empty engine). */
   snapshotBytes: ArrayBuffer | null;
   /** Every session `loadSession()` received. */
@@ -256,6 +263,7 @@ function engineForced(): boolean {
 
 const engineSubscribers = new Set<(frame: FeedFrame) => void>();
 let fakeStatus: DeviceStatus | null = null;
+const fakeRate = () => (globalThis as { __lfEngineFakeRate?: number }).__lfEngineFakeRate ?? 48000;
 
 /**
  * The engine host's browser stand-in: engine mode is off (`available` false) unless a DEV probe forces
@@ -269,6 +277,8 @@ export const webEngineFake: EngineFake = {
   },
   sent: [],
   opened: [],
+  forced: [],
+  refusal: null,
   snapshotBytes: null,
   loadedSessions: [],
   shares: [],
@@ -278,12 +288,14 @@ export const webEngineFake: EngineFake = {
   async setMode() {
     if (!engineForced()) throw new Error(NO_ENGINE);
   },
-  async open(request) {
+  async open(request, force = false) {
     if (!engineForced()) throw new Error(NO_ENGINE);
     webEngineFake.opened.push(request);
+    webEngineFake.forced.push(force);
+    if (webEngineFake.refusal && !force) throw { RateChange: { ...webEngineFake.refusal } };
     fakeStatus = {
       backend: request.backend,
-      sampleRate: 48000,
+      sampleRate: fakeRate(),
       block: request.buffer ?? 256,
       inputName: 'Fake input',
       outputName: 'Fake output',
@@ -312,7 +324,7 @@ export const webEngineFake: EngineFake = {
   },
   async snapshot() {
     if (!engineForced()) throw new Error(NO_ENGINE);
-    return webEngineFake.snapshotBytes?.slice(0) ?? encodeSessionBytes({ rate: 48000, masterLengthFrames: 0, bpm: 120, tracks: [] }, []).buffer;
+    return webEngineFake.snapshotBytes?.slice(0) ?? encodeSessionBytes({ rate: fakeRate(), masterLengthFrames: 0, bpm: 120, tracks: [] }, []).buffer;
   },
   async loadSession(bytes) {
     if (!engineForced()) throw new Error(NO_ENGINE);

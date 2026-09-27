@@ -119,7 +119,12 @@
       }
     },
     { "ShareLost": { "reason": "the Share output endpoint stopped" } },
-    "EngineFaulted"
+    "EngineFaulted",
+    { "LoopsDropped": { "device": "Focusrite USB ASIO", "from": 44100, "to": 48000 } }
+  ],
+  "openErrors": [
+    { "RateChange": { "device": "Speakers (Realtek Audio)", "from": 44100, "to": 48000 } },
+    "the device did not start"
   ],
   "deviceRequests": [
     { "backend": "Asio", "input": null, "output": null, "inputChannel": 1, "buffer": 128 },

@@ -20,7 +20,7 @@ use super::callback::{Run, Tap, TapEnd, LATENCY_SAMPLES, MAX_DEVICE_BLOCK};
 use super::driver::{Driver, Mirror, Spec, Streams, Wiring};
 use super::pipes::{self, PipeConfig};
 use super::slot_host::ORPHAN;
-use super::{transition, Core, DeviceEvent, DeviceRequest, DeviceStatus, Ends, HostConfig, Rt};
+use super::{transition, Core, DeviceEvent, DeviceRequest, DeviceStatus, Ends, HostConfig, OpenError, Rt};
 use crate::audio_output::AudioBackend;
 
 /// How often the owner looks at the latches between requests.
@@ -140,10 +140,11 @@ const JOIN_SETPOINT_SECONDS: f64 = 0.025;
 type Reply<T> = SyncSender<Result<T, String>>;
 
 pub(crate) enum Request {
-    /// The flag decides who owns the result: the first to claim it, the owner once the open finished or
-    /// the caller on its timeout. An open the caller gave up on is undone (`Owner::undo_open`), and one
-    /// it gave up on before the owner took it up never runs.
-    Open(DeviceRequest, Arc<AtomicBool>, Reply<DeviceStatus>),
+    /// A player's open, forced or not (`EngineHost::open`). The flag decides who owns the result: the
+    /// first to claim it, the owner once the open finished or the caller on its timeout. An open the
+    /// caller gave up on is undone (`Owner::undo_open`), and one it gave up on before the owner took it
+    /// up never runs.
+    Open(DeviceRequest, bool, Arc<AtomicBool>, SyncSender<Result<DeviceStatus, OpenError>>),
     Close(Reply<()>),
     SetInputChannel(Option<u32>, Reply<()>),
     SetShare(Option<String>, Reply<()>),
@@ -154,6 +155,15 @@ pub(crate) enum Request {
 pub(crate) struct OwnerLink {
     pub(crate) tx: Sender<Request>,
     pub(crate) join: JoinHandle<()>,
+}
+
+/// Who opens: the player (`EngineHost::open`; `force` lets a switch drop the loops at another rate), or
+/// the owner on its own (a loss's recovery or fallback, the device a failed switch or a replaced engine
+/// reopens), which takes auto where the new input lacks the channel and never refuses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum By {
+    Player { force: bool },
+    Owner,
 }
 
 /// The device that runs.
@@ -226,19 +236,19 @@ impl<D: Driver> Owner<D> {
 
     fn handle(&mut self, request: Request) {
         match request {
-            Request::Open(request, claimed, reply) => {
+            Request::Open(request, force, claimed, reply) => {
                 if claimed.load(Acquire) {
                     log::warn!("[engine_io] an open its caller gave up on while it waited: skipped");
-                    let _ = reply.send(Err("the open was cancelled".to_string()));
+                    let _ = reply.send(Err("the open was cancelled".to_string().into()));
                     return;
                 }
                 let previous = self.active.as_ref().map(|a| a.request.clone());
-                let mut result = self.open(request, false, true);
+                let mut result = self.open(request, By::Player { force });
                 let abandoned = claimed.compare_exchange(false, true, AcqRel, Acquire).is_err();
                 if abandoned && result.is_ok() {
                     log::warn!("[engine_io] open finished after its caller timed out: undoing it");
                     self.undo_open(previous);
-                    result = Err("the open was cancelled".to_string());
+                    result = Err("the open was cancelled".to_string().into());
                 }
                 let _ = reply.send(result);
             }
@@ -273,21 +283,29 @@ impl<D: Driver> Owner<D> {
     }
 
     /// Open `request`, or switch to it. A request for the device that runs only changes its channel.
-    /// `lenient`: a fallback, which takes auto where the new input lacks the channel. `restore`: a
-    /// switch that fails to start reopens the device it replaced.
-    fn open(&mut self, request: DeviceRequest, lenient: bool, restore: bool) -> Result<DeviceStatus, String> {
+    /// The player's open (`By::Player`) is refused, before anything stops, when it would build an engine
+    /// at another rate while this one holds audio, unless forced; a switch of the player's that fails to
+    /// start reopens the device it replaced. The owner's (`By::Owner`) takes auto where the new input
+    /// lacks the channel.
+    fn open(&mut self, request: DeviceRequest, by: By) -> Result<DeviceStatus, OpenError> {
         if let Some(active) = self.active.as_ref().filter(|a| !a.run.faulted()) {
             if transition::same_device(&active.request, &request) {
                 self.set_input_channel(request.input_channel)?;
-                return self.status().ok_or_else(|| "the device stopped".to_string());
+                return Ok(self.status().ok_or_else(|| "the device stopped".to_string())?);
             }
         }
         let (spec, device) = self.driver.resolve(&request)?;
         // An output-only device takes any channel pick: it captures nothing.
-        let channel = transition::input_channel(spec.in_channels, request.input_channel, lenient || spec.in_channels == 0)?;
+        let channel = transition::input_channel(spec.in_channels, request.input_channel, by == By::Owner || spec.in_channels == 0)?;
         let previous = self.active.as_ref().map(|a| a.request.clone());
         let healthy = self.active.as_ref().is_some_and(|a| !a.run.faulted());
         let steps = transition::steps(self.core.rate(), self.active.is_some(), healthy, Some(spec.rate));
+        if let (By::Player { force: false }, true, Some(from)) = (by, steps.evict, self.core.rate()) {
+            if self.core.holds_audio() {
+                log::info!("[engine_io] a switch to {} Hz refused: the engine at {from} Hz holds audio", spec.rate);
+                return Err(OpenError::RateChange { device: spec.output_name.clone(), from, to: spec.rate });
+            }
+        }
         if steps.stop {
             self.stop(steps.fade_out);
         }
@@ -298,13 +316,13 @@ impl<D: Driver> Owner<D> {
             Ok(status) => Ok(status),
             Err(error) => {
                 log::error!("[engine_io] the device did not start: {error}");
-                if let Some(previous) = previous.filter(|_| restore) {
-                    match self.open(previous, true, false) {
+                if let Some(previous) = previous.filter(|_| by != By::Owner) {
+                    match self.open(previous, By::Owner) {
                         Ok(_) => log::warn!("[engine_io] reopened the previous device"),
                         Err(e) => log::error!("[engine_io] the previous device did not reopen either: {e}"),
                     }
                 }
-                Err(error)
+                Err(error.into())
             }
         }
     }
@@ -316,7 +334,7 @@ impl<D: Driver> Owner<D> {
             self.stop(true);
             return;
         };
-        if let Err(error) = self.open(previous, true, false) {
+        if let Err(error) = self.open(previous, By::Owner) {
             log::error!("[engine_io] the device that ran before did not reopen: {error}");
         }
     }
@@ -488,25 +506,34 @@ impl<D: Driver> Owner<D> {
         self.build(rate, true);
         self.event(DeviceEvent::EngineFaulted);
         if let Some(request) = request {
-            if let Err(error) = self.open(request, true, false) {
+            if let Err(error) = self.open(request, By::Owner) {
                 log::error!("[engine_io] the device did not restart after the engine was replaced: {error}");
             }
         }
     }
 
-    /// A stream died: stop without a fade, report it, and try the fallbacks in order.
+    /// A stream died: stop without a fade, report it, and try the fallbacks in order. One that runs at
+    /// another rate builds a new engine and the loops leave with the old one: `LoopsDropped` says so.
     fn lose(&mut self, bits: u8) {
         let Some(active) = self.active.as_ref() else { return };
         let (lost, backend, reason) = (active.request.clone(), active.spec.backend, error_text(&active.run));
+        let device = active.spec.output_name.clone();
         log::error!("[engine_io] the {backend:?} device was lost ({reason}); the engine and its slots stay");
         self.stop(false);
         self.event(DeviceEvent::Lost { backend, reason });
+        // Read after the stop: its punch-out may have committed a take.
+        let (held, from) = (self.core.holds_audio(), self.core.rate());
         let (input, output) = (bits & super::callback::Side::Input as u8 != 0, bits & super::callback::Side::Output as u8 != 0);
         for next in transition::fallbacks(&lost, input, output) {
-            match self.open(next.clone(), true, false) {
+            match self.open(next.clone(), By::Owner) {
                 Ok(status) => {
                     log::warn!("[engine_io] {} on {:?} \"{}\"", if next == lost { "recovered" } else { "fell back" }, status.backend, status.output_name);
+                    let to = status.sample_rate;
                     self.event(if next == lost { DeviceEvent::Recovered(status) } else { DeviceEvent::Fallback(status) });
+                    if let Some(from) = from.filter(|&from| held && from != to) {
+                        log::warn!("[engine_io] the loops recorded at {from} Hz left with the old engine: \"{device}\" is gone and the device that runs is at {to} Hz");
+                        self.event(DeviceEvent::LoopsDropped { device, from, to });
+                    }
                     return;
                 }
                 Err(error) => log::warn!("[engine_io] fallback {:?} did not open: {error}", next.backend),
