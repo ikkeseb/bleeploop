@@ -4,8 +4,10 @@
  * still succeed on the live context, with the render's own rejection surfacing even if worker cleanup
  * also throws. A third case covers lossless editable downloads (identical PCM after export/reimport,
  * preserved volume), a reverb-generation failure falling back to a dry archive, and bounded ZIP
- * parsing (an oversized archive and a hostile repeated-payload archive both rejected). Checks browser
- * graph ownership, not native download delivery or device sound.
+ * parsing (an oversized archive and a hostile repeated-payload archive both rejected). A fourth: the
+ * master mixes a STOPPED track and leaves out a muted one (the owner's stopped session exported a silent
+ * master, tester-feedback F26). Checks browser graph ownership, not native download delivery or device
+ * sound.
  * Run: pnpm probe export-context
  */
 import assert from 'node:assert/strict';
@@ -157,6 +159,30 @@ await probe(async ({ open }) => {
         && contextPreserved && oversizedRejected && repeatedPayloadRejected };
   }));
   await page.close();
+  const stopped = await open();
+  results.push(await stopped.page.evaluate(async () => {
+    const lf = window.__lf;
+    await lf.looper.init();
+    const { defaultFxStates } = await import('/src/audio/fx/fx.ts');
+    const { buildExportBundle } = await import('/src/audio/export/export.ts');
+    const { parseZip } = await import('/src/audio/export/unzip.ts');
+    const { decodeWav } = await import('/src/audio/export/wav.ts');
+    const sr = lf.engine.ctx.sampleRate;
+    const pcm = Float32Array.from({ length: sr * 2 }, (_, k) => 0.5 * Math.sin((2 * Math.PI * 220 * k) / sr));
+    const masterPeak = async (muted) => {
+      lf.looper.clearAll();
+      await lf.looper.loadSession({ bpm: 120, bars: 1, masterLengthFrames: pcm.length,
+        tracks: [{ index: 0, pcm, volume: 1, muted, reversed: false, state: 'STOPPED', fx: defaultFxStates() }] });
+      const bundle = await buildExportBundle({ bpm: 120, bars: 1 });
+      const master = parseZip(bundle.zipBytes).find((entry) => entry.name.endsWith('-master.wav'));
+      return Math.max(...decodeWav(master.data).channels.map((c) => c.reduce((m, x) => Math.max(m, Math.abs(x)), 0)));
+    };
+    const heard = await masterPeak(false);
+    const muted = await masterPeak(true);
+    return { name: 'The master mixes a STOPPED track and leaves out a muted one', heard, muted,
+      pass: lf.looper.stateOf(0) === 'STOPPED' && heard > 0.1 && muted < 1e-4 };
+  }));
+  await stopped.page.close();
   console.log(JSON.stringify(results, null, 2));
   assert.ok(results.every((result) => result.pass), JSON.stringify(results));
 });

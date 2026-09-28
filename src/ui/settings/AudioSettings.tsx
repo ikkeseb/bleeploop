@@ -324,7 +324,9 @@ export function AudioSettings() {
           </select>
         </div>
         <div class="audio-settings__hint audio-settings__hint--info" role="note">
-          Mirrors the master to that device while ASIO runs. On WASAPI, capture BleepLoop's own output instead.
+          Mirrors the master to that device while ASIO runs. Pick one you don't listen on, such as a virtual
+          cable: on the interface in your ears, you hear everything twice. On WASAPI, capture BleepLoop's own
+          output instead.
         </div>
       </Show>
       <Show when={usingAsio()}>

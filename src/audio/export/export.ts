@@ -44,12 +44,11 @@ export interface BuildExportOptions {
  * capture (unity, pre-volume/pre-mute/pre-limiter/pre-FX) — EVERY committed track (incl. STOPPED)
  * exports its stem, so no audio is ever lost. When included, the master (v1) is a WET stereo render:
  * each track through its real FX chain + the shared reverb + the master limiter in an
- * OfflineAudioContext (render.ts), i.e. what you hear. STOPPED tracks are therefore EXCLUDED from the
- * master (mute honoured in the mix as before). If that render fails, the export still completes with
- * the v0 DRY volume/mute
- * dual-mono mixdown (flagged in session.json as master.kind = 'dry-fallback') — a degraded master
- * beats a lost take. Returns null when nothing is committed; a normal all-STOPPED export still
- * includes a silent master alongside real stems.
+ * OfflineAudioContext (render.ts): the mix as it sounds with every track playing. A STOPPED track is
+ * IN the master (the owner exported a stopped session and got silence, tester-feedback F26); only
+ * MUTE leaves a track out. If that render fails, the export still completes with the v0 DRY
+ * volume/mute dual-mono mixdown (flagged in session.json as master.kind = 'dry-fallback') — a
+ * degraded master beats a lost take. Returns null when nothing is committed.
  * A wet export requires a finished take so its snapshot cannot contain an unfinished layer.
  * Recovery snapshots pass `includeMaster:false` and remain available during capture. `source` is the
  * looper to read (`session-source.ts`: the web looper, or engine mode's store). On the engine the wet
@@ -70,9 +69,7 @@ export async function buildExportBundle(
     }
   }
   // Each track carries the state it had as its PCM was read (the web looper reads both in one tick,
-  // the engine in one snapshot), so they can't disagree. STOPPED tracks still export their raw stem but
-  // are EXCLUDED from the master mix, so the exported master is exactly the audible mix. All-STOPPED is
-  // allowed (masterTracks empty ⇒ silent master alongside real stems — nothing is lost).
+  // the engine in one snapshot), so they can't disagree; session.json keeps it for the import.
   const snap = await source.exportSnapshot();
   if (snap.masterLengthFrames <= 0 || snap.tracks.length === 0) return null; // button should already guard this
   const base = exportBase();
@@ -81,20 +78,19 @@ export async function buildExportBundle(
 
   if (options.includeMaster !== false) {
     // v1 wet master; v0 dry mixdown as the fallback so one render bug can't lose the whole export.
-    // Both mix ONLY audible tracks (STOPPED excluded) so the master == what you hear. Recovery
+    // Both mix every committed track, STOPPED included; mute and volume apply as heard. Recovery
     // snapshots skip this whole branch: their job is preserving editable stems, not rendering a mix.
-    const masterTracks = snap.tracks.filter((t) => t.state !== 'STOPPED');
     const masterLevel = source.masterLevel();
     let masterChannels: Float32Array[];
     let masterKind: 'wet-v1' | 'dry-fallback';
     try {
-      const wet = await renderWetMaster({ ...snap, tracks: masterTracks }, meta.bpm, masterLevel);
+      const wet = await renderWetMaster(snap, meta.bpm, masterLevel);
       masterChannels = [wet.left, wet.right];
       masterKind = 'wet-v1';
     } catch (err) {
       console.error('[export] wet master render failed — falling back to the dry mixdown', err);
       notifyError('Wet master render failed — exported a dry mixdown instead');
-      const mono = mixMono(masterTracks, snap.masterLengthFrames, masterLevel);
+      const mono = mixMono(snap.tracks, snap.masterLengthFrames, masterLevel);
       masterChannels = [mono, mono];
       masterKind = 'dry-fallback';
     }

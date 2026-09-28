@@ -1409,3 +1409,30 @@ fn a_session_saves_and_loads_back_through_its_bytes_with_a_device_running_or_not
     let diag = h.host.diag();
     assert_eq!((diag.rt_allocs, diag.lock_misses, diag.panics), (0, 0, 0), "the engine side allocated nothing and the callback never missed");
 }
+
+#[test]
+fn the_glitch_watch_logs_a_span_only_when_a_fault_counter_moved_in_it() {
+    use super::owner::{GlitchWatch, GLITCH_EVERY};
+    use super::{IoDiag, LoadHistogram};
+
+    let t0 = Instant::now();
+    let histogram = LoadHistogram::default();
+    let mut watch = GlitchWatch::new(t0, IoDiag::default(), histogram.snapshot());
+    let calm = IoDiag { callbacks: 1_000, ..IoDiag::default() };
+    let unread = || -> (IoDiag, super::BlockLoad) { panic!("read before the span ended") };
+    assert_eq!(watch.tick(t0 + GLITCH_EVERY / 2, unread), None, "inside the span nothing is read");
+    assert_eq!(watch.tick(t0 + GLITCH_EVERY, || (calm, histogram.snapshot())), None, "callbacks alone are no fault");
+
+    // 64 frames at 48 kHz is 1.33 ms: a 0.5 ms block is 37.5 % of its period.
+    histogram.record(Duration::from_micros(500), 64, 48_000);
+    let glitch = IoDiag { callbacks: 2_000, xruns: 2, share_starves: 1, ..IoDiag::default() };
+    let line = watch.tick(t0 + 2 * GLITCH_EVERY, || (glitch, histogram.snapshot())).expect("the xruns are logged");
+    assert_eq!(line, "xruns=2 share_starves=1 (block time p50<38% p99.9<38% max<38%)");
+
+    // The next span starts from the last read: the same counters are no new fault, and its block times
+    // are its own ("none" without a callback).
+    let quiet = watch.tick(t0 + 3 * GLITCH_EVERY, || (glitch, histogram.snapshot()));
+    assert_eq!(quiet, None);
+    let again = IoDiag { xruns: 3, ..glitch };
+    assert_eq!(watch.tick(t0 + 4 * GLITCH_EVERY, || (again, histogram.snapshot())).as_deref(), Some("xruns=1 (block time none)"));
+}

@@ -343,6 +343,15 @@ impl BlockLoad {
     pub fn max(&self) -> Option<usize> {
         self.bins.iter().rposition(|&c| c > 0)
     }
+
+    /// p50, p99.9 and max as the bins' bounds in whole percent of the period, or "none".
+    pub(crate) fn text(&self) -> String {
+        let bound = |k: usize| if k == LOAD_BINS - 1 { format!(">={k}%") } else { format!("<{}%", k + 1) };
+        match (self.quantile(0.5), self.quantile(0.999), self.max()) {
+            (Some(p50), Some(p999), Some(max)) => format!("p50{} p99.9{} max{}", bound(p50), bound(p999), bound(max)),
+            _ => "none".to_string(),
+        }
+    }
 }
 
 /// A plain copy of the counters and the engine's own.
@@ -363,6 +372,44 @@ pub struct IoDiag {
     pub panics: u64,
     pub rt_allocs: u64,
     pub engine: lf_engine::Diag,
+}
+
+impl IoDiag {
+    /// Every counter that stays 0 in a clean run, by name (all but `callbacks`).
+    pub(crate) fn faults(&self) -> [(&'static str, u64); 18] {
+        [
+            ("gaps", self.gaps),
+            ("xruns", self.xruns),
+            ("lock_misses", self.lock_misses),
+            ("duplex_faults", self.duplex_faults),
+            ("join_starves", self.join_starves),
+            ("join_overruns", self.join_overruns),
+            ("join_trims", self.join_trims),
+            ("share_starves", self.share_starves),
+            ("share_overruns", self.share_overruns),
+            ("share_trims", self.share_trims),
+            ("commands_full", self.commands_full),
+            ("panics", self.panics),
+            ("rt_allocs", self.rt_allocs),
+            ("engine.events_dropped", self.engine.events_dropped),
+            ("engine.commands_dropped", self.engine.commands_dropped),
+            ("engine.xruns", self.engine.xruns),
+            ("engine.slot_events_dropped", self.engine.slot_events_dropped),
+            ("engine.slot_protocol_errors", self.engine.slot_protocol_errors),
+        ]
+    }
+
+    /// The fault counters that moved since `before`, as `name=delta`, or `None` when none did.
+    pub(crate) fn moved_since(&self, before: &IoDiag) -> Option<String> {
+        let moved: Vec<String> = self
+            .faults()
+            .iter()
+            .zip(before.faults().iter())
+            .filter(|(n, b)| n.1 > b.1)
+            .map(|(n, b)| format!("{}={}", n.0, n.1 - b.1))
+            .collect();
+        (!moved.is_empty()).then(|| moved.join(" "))
+    }
 }
 
 /// What the callback holds under the engine lock.
@@ -505,6 +552,28 @@ impl Core {
     pub(crate) fn latch_fault(&self, rt: &mut Rt) {
         rt.faulted = true;
         self.fault.store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    /// A plain copy of the counters (`EngineHost::diag`; the owner's glitch watch reads it too).
+    pub(crate) fn diag(&self) -> IoDiag {
+        let c = &self.counters;
+        IoDiag {
+            callbacks: c.callbacks.load(Relaxed),
+            gaps: c.gaps.load(Relaxed),
+            xruns: c.xruns.load(Relaxed),
+            lock_misses: c.lock_misses.load(Relaxed),
+            duplex_faults: c.duplex_faults.load(Relaxed),
+            join_starves: c.join_starves.load(Relaxed),
+            join_overruns: c.join_overruns.load(Relaxed),
+            join_trims: c.join_trims.load(Relaxed),
+            share_starves: c.share_starves.load(Relaxed),
+            share_overruns: c.share_overruns.load(Relaxed),
+            share_trims: c.share_trims.load(Relaxed),
+            commands_full: c.commands_full.load(Relaxed),
+            panics: c.panics.load(Relaxed),
+            rt_allocs: c.rt_allocs.load(Relaxed),
+            engine: self.engine_diag.load(),
+        }
     }
 }
 
@@ -771,24 +840,7 @@ impl EngineHost {
     }
 
     pub fn diag(&self) -> IoDiag {
-        let c = &self.core.counters;
-        IoDiag {
-            callbacks: c.callbacks.load(Relaxed),
-            gaps: c.gaps.load(Relaxed),
-            xruns: c.xruns.load(Relaxed),
-            lock_misses: c.lock_misses.load(Relaxed),
-            duplex_faults: c.duplex_faults.load(Relaxed),
-            join_starves: c.join_starves.load(Relaxed),
-            join_overruns: c.join_overruns.load(Relaxed),
-            join_trims: c.join_trims.load(Relaxed),
-            share_starves: c.share_starves.load(Relaxed),
-            share_overruns: c.share_overruns.load(Relaxed),
-            share_trims: c.share_trims.load(Relaxed),
-            commands_full: c.commands_full.load(Relaxed),
-            panics: c.panics.load(Relaxed),
-            rt_allocs: c.rt_allocs.load(Relaxed),
-            engine: self.core.engine_diag.load(),
-        }
+        self.core.diag()
     }
 
     /// The output callbacks' durations so far (`LoadHistogram`).

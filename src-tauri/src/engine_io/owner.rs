@@ -4,7 +4,8 @@
 //!
 //! The owner takes the engine lock only while no stream runs, and builds engines here, never on a
 //! callback (`Engine::new` allocates every buffer: ~130 MB and ~100 ms at 60-second lanes). Between
-//! requests it polls every `POLL` for what the callbacks latched: a dead stream, a dead Share mirror.
+//! requests it polls every `POLL` for what the callbacks latched: a dead stream, a dead Share mirror;
+//! and once a `GLITCH_EVERY` it logs the fault counters that moved ([`GlitchWatch`]).
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, Ordering::{AcqRel, Acquire, Relaxed, Release}};
@@ -20,7 +21,7 @@ use super::callback::{Run, Tap, TapEnd, LATENCY_SAMPLES, MAX_DEVICE_BLOCK};
 use super::driver::{Driver, Mirror, Spec, StartError, Streams, Wiring};
 use super::pipes::{self, PipeConfig};
 use super::slot_host::ORPHAN;
-use super::{transition, Core, DeviceEvent, DeviceRequest, DeviceStatus, Ends, HostConfig, OpenError, Rt};
+use super::{transition, BlockLoad, Core, DeviceEvent, DeviceRequest, DeviceStatus, Ends, HostConfig, IoDiag, OpenError, Rt};
 use crate::asio_startup::AsioStatusReport;
 use crate::audio_output::AudioBackend;
 
@@ -37,6 +38,8 @@ const MAX_EVENTS: usize = 64;
 /// The shortest time between two engine replacements after a fault: a unit that panics on every block
 /// would otherwise rebuild the engine in a loop. A fault inside it waits for it to pass.
 const FAULT_HOLDOFF: Duration = Duration::from_secs(10);
+/// How often the owner looks at the fault counters for the release log (`GlitchWatch`).
+pub(crate) const GLITCH_EVERY: Duration = Duration::from_secs(1);
 /// The owner thread's stack: engines are built and moved on it (`Engine` is ~20 KB inline; a Windows
 /// thread gets 1 MB by default), with room to spare.
 const STACK: usize = 4 << 20;
@@ -182,6 +185,35 @@ struct Active {
     block: u32,
 }
 
+/// The release log's view of the callbacks, which cannot log: once a `GLITCH_EVERY`, the fault counters
+/// that moved in that span (`IoDiag::faults`), with the output callbacks' block times over the same span.
+/// A crackle heard at a time then has a line to match. An xrun while every block stayed well inside its
+/// period points away from the engine (the driver, USB, the system); blocks near 100 % point at it.
+pub(crate) struct GlitchWatch {
+    at: Instant,
+    diag: IoDiag,
+    load: BlockLoad,
+}
+
+impl GlitchWatch {
+    pub(crate) fn new(at: Instant, diag: IoDiag, load: BlockLoad) -> GlitchWatch {
+        GlitchWatch { at, diag, load }
+    }
+
+    /// At `now`: once a span has passed, read the counters (`read`) and start the next span; the line to
+    /// log when a fault counter moved in the one that ended.
+    pub(crate) fn tick(&mut self, now: Instant, read: impl FnOnce() -> (IoDiag, BlockLoad)) -> Option<String> {
+        if now.saturating_duration_since(self.at) < GLITCH_EVERY {
+            return None;
+        }
+        let (diag, load) = read();
+        let moved = diag.moved_since(&self.diag);
+        let span = load.since(&self.load);
+        *self = GlitchWatch { at: now, diag, load };
+        moved.map(|moved| format!("{moved} (block time {})", span.text()))
+    }
+}
+
 /// The owner's end of the Share tap handoff (`callback::TapEnd` is the callback's).
 struct TapHandoff {
     tx: Producer<Option<Box<dyn Tap>>>,
@@ -199,6 +231,7 @@ struct Owner<D: Driver> {
     taps: TapHandoff,
     /// When a fault last replaced the engine (`FAULT_HOLDOFF`).
     replaced: Option<Instant>,
+    glitches: GlitchWatch,
 }
 
 /// Start the owner thread for `core`.
@@ -211,7 +244,10 @@ pub(crate) fn spawn<D: Driver>(core: Arc<Core>, config: HostConfig, driver: D) -
     let join = std::thread::Builder::new()
         .name("lf-engine-owner".into())
         .stack_size(STACK)
-        .spawn(move || Owner { core, driver, config, active: None, share: None, mirror: None, taps, replaced: None }.serve(rx))?;
+        .spawn(move || {
+            let glitches = GlitchWatch::new(Instant::now(), core.diag(), core.counters.block_load.snapshot());
+            Owner { core, driver, config, active: None, share: None, mirror: None, taps, replaced: None, glitches }.serve(rx)
+        })?;
     Ok(OwnerLink { tx, join })
 }
 
@@ -289,6 +325,13 @@ impl<D: Driver> Owner<D> {
             self.close_mirror();
             self.share = None;
             self.event(DeviceEvent::ShareLost { reason: "the Share output endpoint stopped".to_string() });
+        }
+        let core = &self.core;
+        if let Some(line) = self.glitches.tick(Instant::now(), || (core.diag(), core.counters.block_load.snapshot())) {
+            match self.active.as_ref() {
+                Some(a) => log::warn!("[engine_io] audio glitch: {line}, {:?} {} frames", a.request.backend, a.block),
+                None => log::warn!("[engine_io] audio glitch: {line}, no device running"),
+            }
         }
     }
 

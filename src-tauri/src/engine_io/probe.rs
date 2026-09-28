@@ -34,7 +34,7 @@ use std::time::{Duration, Instant};
 use lf_engine::grid::Frame;
 use lf_engine::{Command, Event, LaneInfo, LaneState, TimedCommand, SLOT_COUNT};
 
-use super::{BlockLoad, DeviceRequest, DeviceStatus, EngineHost, HostConfig, IoDiag, LOAD_BINS};
+use super::{BlockLoad, DeviceRequest, DeviceStatus, EngineHost, HostConfig, IoDiag};
 use crate::chirp_lag::{chirp, find_arrivals, median, slope, spread, CHIRP_LEN};
 use crate::audio_output::AudioBackend;
 use crate::host::engine_slot::{self, EngineSlotEvent, EngineSlotHandle, EventSink, PluginFormat};
@@ -277,47 +277,9 @@ fn describe(s: &DeviceStatus) -> String {
     )
 }
 
-/// Every counter that stays 0 in a clean run.
-fn faults(d: &IoDiag) -> [(&'static str, u64); 18] {
-    [
-        ("gaps", d.gaps),
-        ("xruns", d.xruns),
-        ("lock_misses", d.lock_misses),
-        ("duplex_faults", d.duplex_faults),
-        ("join_starves", d.join_starves),
-        ("join_overruns", d.join_overruns),
-        ("join_trims", d.join_trims),
-        ("share_starves", d.share_starves),
-        ("share_overruns", d.share_overruns),
-        ("share_trims", d.share_trims),
-        ("commands_full", d.commands_full),
-        ("panics", d.panics),
-        ("rt_allocs", d.rt_allocs),
-        ("engine.events_dropped", d.engine.events_dropped),
-        ("engine.commands_dropped", d.engine.commands_dropped),
-        ("engine.xruns", d.engine.xruns),
-        ("engine.slot_events_dropped", d.engine.slot_events_dropped),
-        ("engine.slot_protocol_errors", d.engine.slot_protocol_errors),
-    ]
-}
-
 /// The counters that moved from `before` to `now`, or "all 0".
 fn moved(now: &IoDiag, before: &IoDiag) -> String {
-    let moved: Vec<String> = faults(now)
-        .iter()
-        .zip(faults(before).iter())
-        .filter(|(n, b)| n.1 > b.1)
-        .map(|(n, b)| format!("{}={}", n.0, n.1 - b.1))
-        .collect();
-    if moved.is_empty() { "all 0".to_string() } else { moved.join(" ") }
-}
-
-fn load_text(load: &BlockLoad) -> String {
-    let bound = |k: usize| if k == LOAD_BINS - 1 { format!(">={k}%") } else { format!("<{}%", k + 1) };
-    match (load.quantile(0.5), load.quantile(0.999), load.max()) {
-        (Some(p50), Some(p999), Some(max)) => format!("p50{} p99.9{} max{}", bound(p50), bound(p999), bound(max)),
-        _ => "none".to_string(),
-    }
+    now.moved_since(before).unwrap_or_else(|| "all 0".to_string())
 }
 
 /// Where a phase started.
@@ -416,7 +378,7 @@ impl Probe {
             "phase {name}: {:.1} s, callbacks {}, block {}, counters {}",
             since.at.elapsed().as_secs_f64(),
             diag.callbacks - since.diag.callbacks,
-            load_text(&load),
+            load.text(),
             moved(&diag, &since.diag)
         ));
         load
@@ -559,7 +521,7 @@ impl Probe {
         let load = self.phase("soak", &mark);
         match (load.quantile(0.999), load.max()) {
             (Some(p999), Some(max)) if p999 < P999_BAR && max < MAX_BAR => {}
-            (Some(_), Some(_)) => self.fail("load", format!("soak block {}", load_text(&load))),
+            (Some(_), Some(_)) => self.fail("load", format!("soak block {}", load.text())),
             _ => self.fail("load", "no callback in the soak".to_string()),
         }
         self.expect_loop("the soak");
@@ -1195,7 +1157,7 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
         say(format!("trace {line}"));
     }
     say(format!("total: callbacks {}, counters {}", total.callbacks, moved(&total, &IoDiag::default())));
-    if faults(&total).iter().any(|(_, n)| *n > 0) {
+    if total.faults().iter().any(|(_, n)| *n > 0) {
         p.fails.push(("counters", moved(&total, &IoDiag::default())));
     }
     let errors = LOG.errors.load(Relaxed);
