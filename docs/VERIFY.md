@@ -4,64 +4,58 @@
 
 The app is verified by **driving it and measuring**, not by reading code or trusting a typecheck.
 Subagent "typecheck green" self-reports are NOT sufficient — always run the runtime probe yourself.
-Static gates first (`pnpm check`, `pnpm build`), then the runtime probe below. Deterministic
-audio-logic guards live in `verify/` (`pnpm verify`, ≈1s; see `verify/README.md`).
+Static gates first (`pnpm check`, `pnpm build`), then the runtime probe below. The engine's
+behaviour is `cargo test -p lf-engine` (`pnpm test:engine`, in `pnpm check`); the frontend's
+deterministic guards and browser probes live in `verify/` (see `verify/README.md`).
 
 Git hooks are local checkout state. Before relying on the push gate, inspect the file returned by
 `git rev-parse --git-path hooks/pre-push`; it must run `pnpm check`. If absent, install the configured
 hook with `pnpm exec simple-git-hooks`. An existing `node_modules` directory does not prove that the
 package's prepare script installed hooks in this checkout.
 
-## Browser harness (web build, `pnpm dev` on http://localhost:1420)
+## Browser harness (web build, `pnpm dev` on http://localhost:1420: the UI, silent)
 
 - **Playwright, NOT claude-in-chrome.** claude-in-chrome is blocked on `localhost:1420` by an
-  enterprise Chrome policy; Playwright launches its own browser (COI true, no extensions). Use
+  enterprise Chrome policy; Playwright launches its own browser (no extensions). Use
   whichever driver the session has: **playwright-cli** when present (proven 2026-07-10; async work =
   `eval "(async () => {…})()"`), else the **Playwright MCP** (`browser_evaluate` takes a `() => {…}`
   function — wrap async in an IIFE; screenshot: OMIT `filename` so it lands in `.playwright-mcp/`,
   or read the inline image), else a plain `node` Playwright script on `verify/harness/probe.ts` (what
   every probe in `verify/probes/` does).
-- Any click is a user gesture that unlocks the AudioContext (the `BleepLoop` header title is a safe
-  one).
 - **From WSL on the PC:** the `pnpm` wrapper hands a `/mnt/c` checkout to Windows `pnpm.exe`, so
   every `pnpm` command, including the native ones below, runs on Windows node, Windows `cargo` and
   the Windows Playwright browsers. That is the working lane. Vite then listens on Windows localhost
   only: `curl` from WSL hangs, and Linux node cannot drive it. A `pnpm install` that wants to rebuild
   `node_modules` aborts without a TTY — pass `--config.confirmModulesPurge=false`. An ad-hoc
   `tauri dev` from WSL takes env through `WSLENV=A:B`. Only the by-ear gates need a person at the PC.
-- You can drive reactive UI state directly (e.g. `__lf.clock.setBpmLocked(true)`) instead of
-  reproducing the full looper flow, then assert via DOM reads + screenshot. The web build hides
-  Tauri-only chrome (settings gear) — drive the reactive state directly instead. If a probe needs a
-  missing handle, add it to `__lf` and keep it so the next probe can reuse it.
+- The browser build has no engine. For looper UI, turn on the engine fake (an init script setting
+  `window.__lfEngineFake = true` before the app loads), script feed frames with `__lf.native.emit`
+  and read what the UI sent in `__lf.native.sent` (pattern: `verify/probes/engine-seam.mjs`), then
+  assert via DOM reads + screenshot. The web build hides Tauri-only chrome (settings gear) — drive
+  the reactive state directly instead. If a probe needs a missing handle, add it to `__lf` and keep
+  it so the next probe can reuse it.
 
 ## The DEV debug hook
 
-`window.__lf` (built in `src/debug/lf.ts` behind a declared `LfDebug` interface, installed by `app.tsx` in DEV only) exposes the audio engine, instrument controls, clock,
-looper, master, layout store, audio-device settings, MIDI manager, native platform/bridge, record
-latency controls, session import/export, notification store, popover drivers, and `transport()` (raw
-Tone transport handle). This is how you drive and inspect the app from Playwright.
+`window.__lf` (built in `src/debug/lf.ts` behind a declared `LfDebug` interface, installed by `app.tsx` in DEV only) exposes
+the input router, instrument and plugin-slot controls, the engine store's clock, looper and master,
+the layout store, audio-device settings, the MIDI manager, the platform and the engine fake
+(`native`), session import/export and autosave, the notification store and the popover drivers. This
+is how you drive and inspect the app from Playwright.
 
 ## Measuring audio (not hearing it)
 
-- The looper's capture worklet taps `engine.recordTap`, so **synth/plugin output is recordable
-  without a mic** — record real loops headless by triggering notes; no `getUserMedia` needed. This
-  is central to how the app is verified.
-- Tap `engine.masterGain` with an AnalyserNode and read the peak after triggering notes, or use
-  `looper.trackPeak(i)` / `looper.captureQuanta()` (the worklet heartbeat).
-- Trigger notes with `__lf.ensureActive()` then
-  `__lf.inputRouter.handle({type:'on',note,velocity,source})` — `velocity` is MIDI **0..127** (a 0..1
-  value plays ~40 dB too quiet and looks like a gain bug; it isn't).
-- `__lf.looper.levelValue()` reads the record-tap peak (linear, fast decay) headless — the command-bar
-  meter draws it on a −60..0 dBFS scale.
-- An AnalyserNode on `masterGain` measures *pre-limiter* (linear) — per-track volume scales the
-  reading proportionally. Measure synth gain with CLEAN note-isolation (a hanging note pollutes the
-  peak).
+The browser build is silent, so sound is measured on the engine: offline in `cargo test -p
+lf-engine` (rendered PCM, frame by frame; the synths and FX against reference renders), and in the
+running app through the `native:*` probes below (`native:engine-loopback` through a cable). In a
+probe, a note is a command: `__lf.inputRouter.handle({type:'on',note,velocity,source})` sends it to
+the engine (the fake's `sent`), and `velocity` is MIDI **0..127** (a 0..1 value plays ~40 dB too
+quiet and looks like a gain bug; it isn't).
 
 ## Recurring web-verify gotchas
 
 - **Web MIDI shows `unsupported` under Playwright's Chromium** — expected (real Chrome/Edge has it;
   WebView2 has the native path). Not a bug.
-- `getUserMedia` is unavailable headless (can't drive mic-arm).
 - `getComputedStyle` right after a manual `classList` mutation in a Playwright `evaluate` returns
   STALE values → **verify rendered CSS by screenshot, not getComputedStyle**.
 - **playwright-cli specifics (2026-07-02):** `fill` alone does NOT fire Solid's `onChange` (native
@@ -84,8 +78,8 @@ These commands run on Windows node, and from WSL through the `pnpm` wrapper:
 | `pnpm native:swap` | Swap stress (`src/debug/swap-stress.ts`): every ordered pair is swapped in place in slot 0, first with the editor closed, then open, after tweaking the loaded plugin. A step that takes longer than 30 s prints `TIMEOUT`. |
 | `pnpm native:recall` | Rig recall (`src/debug/recall-restart.ts`), five launches: two plugins loaded and an input channel set come back after a restart and after a WebView reload, unarmed, and a close through the window's close button right after that reload keeps them for the next launch; a launch whose app.exe is killed while restoring makes the next one skip the recall with one log line and one toast; the launch after that is clean. |
 | `pnpm native:loopback` | Loopback sync (`src/debug/loopback-sync.ts`), ASIO, in its own app profile (`scripts/loopback-probe.tauri.json`): with an interface output cabled into an input (`--channel=<0-based>`, default 0), records the click as a FIXED first take and half-beat pulses as a later take, and prints `residual` (where a perfectly timed hit lands against the grid, + = late), the drift inside a take and `RT`, the native round trip a guitarist hears. `--plugin=` picks the effect (default Pro-Q), `--trim=<ms>` a rec align, `--bars=` the take length. |
-| `pnpm native:spike` | The native-engine Stage 1 premise spike (`docs/plans/native-engine.md` § Stage 1): builds the debug app with ASIO and runs `--probe-engine-spike` (one-callback ASIO alignment, the echo round trip with Pro-Q, the amp-sim's callback cost, WASAPI) and `--probe-share` one process at a time, then prints one PASS/FAIL table. Needs the loopback cable (default line out R → input 2) and makes audible chirps; runs at the device's current rate. `--only=`, `--blocks=`, `--launches=`, `--long-min=` narrow it. |
-| `pnpm native:engine` | The native-engine Stage 4 rig run (`docs/plans/native-engine.md` § Stage 4): builds the debug app with ASIO and runs one `--probe-engine` process (`src-tauri/src/engine_io/probe.rs`): the engine at ASIO 128 with the amp-sim and Pro-Q in its two slots, a loop on lane 0, a 10-minute soak, 20 backend/buffer switches and 4 plugin swaps while the loop plays. Prints each phase's counters and block time and one PASS/FAIL per check; exit 0 = all pass. Needs no cable; the take records `--in` (default input 1). `--seconds=`, `--switches=`, `--swaps=`, `--buffer=`, `--amp=`/`--proq=` (empty: no plugin) narrow it; `--mute=1` plays silence. `--lag=1 --in=1 --seconds=10` runs only the lag phase instead (needs the loopback cable, audible chirps): the Stage 1 A2 bar on the engine's own open path, the chirp's lag against the driver's reported latency within 1 ms; `--preopen=0` skips the ASIO preopen (`src-tauri/src/engine_io/cpal_driver.rs`) for a before-and-after. |
+| `pnpm native:spike` | The engine's premise spike (`docs/ARCHITECTURE.md` § Measured premise): builds the debug app with ASIO and runs `--probe-engine-spike` (one-callback ASIO alignment, the echo round trip with Pro-Q, the amp-sim's callback cost, WASAPI) and `--probe-share` one process at a time, then prints one PASS/FAIL table. Needs the loopback cable (default line out R → input 2) and makes audible chirps; runs at the device's current rate. `--only=`, `--blocks=`, `--launches=`, `--long-min=` narrow it. |
+| `pnpm native:engine` | The device side's rig run: builds the debug app with ASIO and runs one `--probe-engine` process (`src-tauri/src/engine_io/probe.rs`): the engine at ASIO 128 with the amp-sim and Pro-Q in its two slots, a loop on lane 0, a 10-minute soak, 20 backend/buffer switches and 4 plugin swaps while the loop plays. Prints each phase's counters and block time and one PASS/FAIL per check; exit 0 = all pass. Needs no cable; the take records `--in` (default input 1). `--seconds=`, `--switches=`, `--swaps=`, `--buffer=`, `--amp=`/`--proq=` (empty: no plugin) narrow it; `--mute=1` plays silence. `--lag=1 --in=1 --seconds=10` runs only the lag phase instead (needs the loopback cable, audible chirps): the premise's alignment bar on the engine's own open path, the chirp's lag against the driver's reported latency within 1 ms; `--preopen=0` skips the ASIO preopen (`src-tauri/src/engine_io/cpal_driver.rs`) for a before-and-after. |
 | `pnpm native:engine-smoke` | The UI on the native engine (`src/debug/engine-smoke.ts`), ASIO, in its own app profile with engine mode on (`scripts/engine-probe.tauri.json`; the runner writes the toggle file there): the device reopens at `--buffer=` (default 128); a FIXED 1-bar first take counts in 4-3-2-1 with the click (feed and screen) and plays one bar at the device's rate; a later take, an overdub with UNDO, STOP ALL, PLAY ALL and CLEAR change the lanes; `--plugin=<name>[:<format>]` (e.g. `Pro-Q:vst3`) also loads that plugin into slot 1, goes live and checks that the input meter moves. Fails on any other frontend `console.error`; the run ends with a close through the window, as the close button does. |
 | `pnpm native:engine-recovery` | Engine mode's session paths (`src/debug/engine-recovery.ts`), ASIO, in engine-smoke's profile, two launches: two lanes recorded from the input with the click on (the loopback cable gives them audio; a silent lane fails) are exported to a zip, cleared and imported back with the same PCM and mix, and once autosave holds the jam app.exe is killed with the loops playing; the relaunch restores the same lanes from recovery, then clears them (which deletes the recovery) and closes through its window. |
 | `pnpm native:tone-recall` | Tone recall on the engine (`src/debug/tone-recall.ts`), WASAPI, in its own profile with engine mode on (`scripts/tone-probe.tauri.json`), master muted, three launches. Save: loads two plugins (default `Pro-Q 3:vst3,Surge XT Effects:clap`, `--plugins=`), moves their first parameters through the host's set_param, unloads and loads both, keeps per slot the first parameter that came back exactly and away from its default, moves it once more and closes, so the exit path saves. Check: rig recall restores both at that value; an export carries a tone per slot; moving the values and importing restores them and keeps slot A's GO LIVE; an import with slot B emptied toasts and loads nothing there, and the plugin's next load restores the session's value; the runner kills app.exe 3.5 s after the last change. After: that change is back (the debounced save alone). Hears nothing and cannot reach a plugin's own editor (`performEdit`, CLAP output events and `mark_dirty` are the Rust fixtures'). |
@@ -125,32 +119,21 @@ blocks until the verdict, so an agent harness should run it in the background.
   it. (*Claude Code specifics:* background via the PowerShell `run_in_background` tool, poll with a
   Bash `run_in_background` `until grep -q … ; do sleep 2; done` loop — foreground `sleep` and
   PowerShell `Start-Sleep`+chaining are blocked by that harness.)
-- Plugin-scan and ASIO probes work WITHOUT the full app (`--scan-one`, `--probe-asio`) — see
-  `src-tauri/AGENTS.md` "Native-host verify ops".
-- Output latency can be measured silently through the production callback with a DEV build:
-  `src-tauri/target/debug/app.exe --probe-output-latency asio 256 4` or
-  `src-tauri/target/debug/app.exe --probe-output-latency wasapi default 4`.
-  The arguments select backend, requested buffer and seconds. Run driver probes sequentially and
-  close their streams before opening another configuration. The result compares callback period,
-  driver presentation delay and the production median; it does not measure physical DAC latency.
-- DEV marker comparison: in a fresh isolated app profile, load exactly one effect, start the engine,
-  go LIVE and settle for at least three seconds. A temporary DEV entry can then call
-  `runMarkerProbe({ slot: 0 })` from `src/debug/marker-probe.ts`. The runner sends its JSON to native
-  diagnostics and returns it. Relaunch for another run; native storage is deliberately one-shot.
-  Use a separate Vite port and a Tauri config overlay with a distinct app `identifier`. Verify the
-  matching directory under Windows LocalAppData before calling it a separate profile. Tauri 2.11.2
-  drops WindowConfig.dataDirectory while converting WebviewAttributes, so that field alone does not
-  isolate this version. A separate origin isolates localStorage/IndexedDB; it is not a separate profile.
-  Keep the regular app mounted and exercise production startup/load functions. Run on an empty jam
-  with web mic disarmed. Do not automate WebView2 through Playwright. The native `diag` log contains the complete
-  report; frontend console forwarding truncates long JSON. `verify/probes/render-cursor.mjs` exercises the
-  production sampler with controlled timing inputs; `verify/probes/render-clock.mjs` proves that the DEV
-  clock observer preserves PCM. Both run through `pnpm probe`.
+- The plugin scan works WITHOUT the full app (`--scan-one`) — see `src-tauri/AGENTS.md`
+  "Native-host verify ops".
 - **When to run the plugin probes, and their baselines** (the verdict alone doesn't say this). Narrow
   `smoke`, `survey` and `swap` to `--filter="Surge XT Effects,Pro-Q,Gojira"` (CLAP and VST3, a
   separated controller, FabFilter's latency restarts, Neural DSP's slow teardown) unless the change
   reaches every plugin (scan, load, the editor host) or a plugin was just installed (survey that one):
   a full sweep opens every installed plugin on the owner's desktop.
+  - `native:engine` after a change to the device owner, the callbacks, the pipes or the slot
+    handshake. Baseline (2026-09-25, ASIO 128, Archetype Petrucci X and Pro-Q 3): every check passes,
+    every counter 0 over 224 763 callbacks, 20 switches and 4 swaps; soak block time p99.9 < 33 %, max
+    < 52 %; every ASIO re-open retries its input build once (a BadMode, then fine); unloading
+    Archetype while a second instance ran took 4.8 s, nearly all of it the plugin's own teardown, the
+    slot dry meanwhile. On WASAPI with another app holding the microphone the input can run 0.87 %
+    fast, past what the join's controller holds: `join_trims` every 3–6 s, each skipping ~25 ms of
+    input (real time or an artefact: unknown).
   - `native:engine-loopback` after a change to the engine's alignment, click, grid, device open or
     snapshot. Baseline (2026-09-26, Scarlett 2i2 3rd gen, 44.1 kHz, a cable from line out R into
     input 2; six launches, Pro-Q 3 and MIC): A −0.11..+0.09 ms at ASIO 64, 128 and 256, spread
@@ -173,17 +156,6 @@ blocks until the verdict, so an agent harness should run it in the background.
     gain 0.106) each read one beat 147–250 ms early, near its window's start (once take A too), which
     fails spread and drift while every other beat sits within 0.005 ms. v0.1.0's code on the same rig
     reads the same in B and D, so it predates the change (cause unknown).
-  - `native:loopback` after a change to record compensation, the plugin bridge or the drift
-    controller. Baseline (2026-09-24, Scarlett 2i2 3rd gen, ASIO 256, Pro-Q 3, a cable from line
-    out R into input 2): residual +64/+65 ms at trim 0. With the worklet reading the ring directly,
-    seven launches at trim 60: residual +8.2..+12.4 ms in six, −8.1 ms in one; RT 44.4 ms; no take
-    rejected (before: about one launch in three); drift inside take A 0.7–3.2 ms/min in six,
-    −10.8 ms/min in one where the controller wound to +143 ppm from a start offset. WASAPI
-    (`pnpm exec node scripts/native-probe.mjs loopback-sync --channel=1`), measured before the worklet
-    change: RT ~280 ms, residual −125 ms at trim 60. The probe runs the debug build. Two of about twelve launches failed GO LIVE
-    with an `arm_monitor` timeout (cause unknown); a relaunch passed. The gate `[diag]` line's
-    `pace_late`/`pace_reanchors`/`pace_late_max_us` say whether the producer kept its clock,
-    `input_fill_max` how late it ran, `monitor_pads` what the same-clock monitor padded.
   - `native:smoke` after any change to `editor_window.rs` or either host's editor open/close path.
     Baseline (2026-09-23, WASAPI, the app mostly on the default ~15 ms timer tick): `complete: 30
     opened, 0 failed, of 30`, each close 110–250 ms. Windows grants the app a 1 ms tick only some of
@@ -201,7 +173,7 @@ blocks until the verdict, so an agent harness should run it in the background.
     swapped, 0 failed`, each swap 40–380 ms; a swap away from Archetype Gojira 500–920 ms, ~600 ms of it the
     plugin's own teardown (`release=` in the `VST3 teardown` line; ~200 ms at a 1 ms tick).
   - `native:recall` after a change to the boot chain, load or unload, the close guard, or
-    `src/audio/rig-recall.ts`. Baseline (2026-09-23, WASAPI, the default Surge XT Effects CLAP + Surge
+    `src/ui/state/rig-recall.ts`. Baseline (2026-09-23, WASAPI, the default Surge XT Effects CLAP + Surge
     XT VST3): `PASS: 5 phases` in about 1 min, twice; the check phase's close reached the page
     250–450 ms after its verdict line, inside the settle window; the crash phase killed app.exe
     100–180 ms after the marker's line, and the next launch still found the marker. A run that fails
