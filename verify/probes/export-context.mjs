@@ -1,34 +1,58 @@
 /**
- * Production wet-export isolation under delayed and rejected reverb generation: an offline export
- * render must not observe or block the live Tone context, and a live FX chain built mid-render must
- * still succeed on the live context, with the render's own rejection surfacing even if worker cleanup
- * also throws. A third case covers lossless editable downloads (identical PCM after export/reimport,
- * preserved volume), a reverb-generation failure falling back to a dry archive, and bounded ZIP
- * parsing (an oversized archive and a hostile repeated-payload archive both rejected). A fourth: the
- * master mixes a STOPPED track and leaves out a muted one (the owner's stopped session exported a silent
- * master, tester-feedback F26). Checks browser graph ownership, not native download delivery or device
- * sound.
+ * The export's offline wet render and the archive paths around it, with the real TypeScript executing
+ * (`src/session/render.ts` and `offline-fx.ts` on Tone's OfflineContext; `export.ts`, `import.ts`,
+ * `unzip.ts`), the engine side on the web engine fake (`src/platform/host.web.ts`, the `engine-seam`
+ * pattern: the probe scripts the feed and the snapshot the engine would answer through `__lf.native`):
+ *
+ * - The render leaves Tone's global context as it found it, whether it resolves or rejects, and its own
+ *   rejection (an injected reverb-generation failure) surfaces even when a cleanup step throws too.
+ * - An editable export keeps float32 stems exactly (samples past ±1 and a 1e-7), and importing the zip
+ *   hands the engine that PCM exactly and restores the lane's volume. A reverb-generation failure still
+ *   completes the export, with a dry master (`master.kind` 'dry-fallback'), and leaves Tone's context
+ *   alone. Import refuses an archive over its size cap and a small archive whose central directory
+ *   repeats one payload 128 times (entry cap 9).
+ * - The master mixes a STOPPED lane and leaves out a muted one (tester-feedback F26).
+ *
+ * Cannot see the engine's own FX (lf-engine plays them; this render may sound unlike it), the native
+ * snapshot and load (the fake answers them), download delivery in WebView2, or anything audible.
  * Run: pnpm probe export-context
  */
 import assert from 'node:assert/strict';
 import { probe } from '../harness/probe.ts';
 
+const RATE = 48000;
+const MASTER = 2 * RATE; // one bar at 120 BPM
+
+const lane = (state, extra = {}) => ({
+  state,
+  length: state === 'Empty' ? 0 : MASTER,
+  armed: false,
+  autoArmed: false,
+  canUndo: false,
+  canReverse: state === 'Playing' || state === 'Stopped',
+  reversed: false,
+  stopAt: null,
+  fading: false,
+  retakePass: 0,
+  ...extra,
+});
+const laneEvent = (i, info) => ({ Lane: { frame: 0, lane: i, info } });
+const transport = (master) => ({ Transport: { frame: 0, master, bpm: 120, locked: master > 0 } });
+
 await probe(async ({ open }) => {
   const results = [];
+
+  // ── The render: Tone's context, and its own rejection past a cleanup failure ──────────────────────
   for (const failure of [false, true]) {
     const { page } = await open();
     results.push(await page.evaluate(async (failure) => {
-      const { engine } = await import('/src/audio/engine.ts');
-      const { FxChain, defaultFxStates } = await import('/src/audio/fx/fx.ts');
-      const { renderWetMaster } = await import('/src/audio/export/render.ts');
-      const transformed = await (await fetch('/src/audio/fx/fx.ts')).text();
+      // The Tone module the app's offline render imports (Vite's pre-bundled copy).
+      const transformed = await (await fetch('/src/session/offline-fx.ts')).text();
       const tonePath = transformed.match(/from\s+["']([^"']*\/tone[^"']*)["']/)?.[1];
-      if (!tonePath) throw new Error('Could not resolve application Tone module');
+      if (!tonePath) throw new Error('Could not resolve the application Tone module');
       const Tone = await import(tonePath);
-      await engine.start();
-      // Build the live shared reverb before delaying only the export's new reverb.
-      const warm = new FxChain(defaultFxStates());
-      warm.dispose();
+      const { renderWetMaster } = await import('/src/session/render.ts');
+      const { defaultFxStates } = await import('/src/ui/state/fx-metadata.ts');
       const originalContext = Tone.getContext();
       const originalGenerate = Tone.Reverb.prototype.generate;
       const originalDispose = Tone.Gain.prototype.dispose;
@@ -41,76 +65,121 @@ await probe(async ({ open }) => {
         }
         return result;
       };
-      let release;
-      const barrier = new Promise((resolve) => { release = resolve; });
       const generationCalls = new WeakMap();
       Tone.Reverb.prototype.generate = function () {
         const actual = originalGenerate.call(this);
         const count = (generationCalls.get(this) ?? 0) + 1;
         generationCalls.set(this, count);
-        if (count === 1) return actual; // Constructor ignores its promise; makeReverbBus awaits call two.
-        return actual.then(async (value) => {
-          await barrier;
-          if (failure) throw new Error('Injected export reverb failure');
-          return value;
-        });
+        // The constructor ignores its promise; makeReverbBus awaits call two.
+        if (count === 1 || !failure) return actual;
+        return actual.then(() => { throw new Error('Injected export reverb failure'); });
       };
-      const sr = engine.ctx.sampleRate;
-      const pcm = new Float32Array(Math.round(sr * 2));
+      const pcm = new Float32Array(48000 * 2);
       pcm[128] = 0.1;
-      const rendering = renderWetMaster({ sampleRate: sr, masterLengthFrames: pcm.length,
-        tracks: [{ index: 0, pcm, volume: 1, muted: false, reversed: false, fx: defaultFxStates() }] }, 120, 1)
-        .then(() => ({ rejected: false }), (error) => ({ rejected: true, error: String(error) }));
-      await new Promise((resolve) => setTimeout(resolve, 100));
-      const during = Tone.getContext() === originalContext;
-      // A fresh lane takes exactly this production constructor path at first playback.
-      let liveError = null;
-      let live;
-      try { live = new FxChain(defaultFxStates()); } catch (error) { liveError = String(error); }
-      release();
-      const outcome = await rendering;
+      let outcome;
+      try {
+        outcome = await renderWetMaster({ sampleRate: 48000, masterLengthFrames: pcm.length,
+          tracks: [{ index: 0, pcm, volume: 1, muted: false, reversed: false, fx: defaultFxStates() }] }, 120, 1)
+          .then(() => ({ rejected: false }), (error) => ({ rejected: true, error: String(error) }));
+      } finally {
+        Tone.Reverb.prototype.generate = originalGenerate;
+        Tone.Gain.prototype.dispose = originalDispose;
+      }
       const after = Tone.getContext() === originalContext;
-      Tone.Reverb.prototype.generate = originalGenerate;
-      Tone.Gain.prototype.dispose = originalDispose;
-      Tone.setContext(originalContext); // Keep cleanup valid even on the red baseline.
-      live?.dispose();
-      return { failure, during, after, liveError, cleanupFailures, ...outcome,
-        pass: during && after && liveError === null && outcome.rejected === failure
+      Tone.setContext(originalContext); // Keep the page usable even on a red run.
+      return { name: `The render ${failure ? 'rejects with its own error' : 'resolves'} and restores Tone's context`,
+        failure, after, cleanupFailures, ...outcome,
+        pass: after && outcome.rejected === failure
           && (!failure || (cleanupFailures === 1 && outcome.error.includes('Injected export reverb failure'))) };
     }, failure));
     await page.close();
   }
-  const { page } = await open();
+
+  // ── The engine fake: a device, and every lane EMPTY ───────────────────────────────────────────────
+  const { page, consoleErrors } = await open({ init: (p) => p.addInitScript(() => void (window.__lfEngineFake = true)) });
+  await page.waitForFunction(() => window.__lf.native.opened.length === 1, undefined, { timeout: 10000 });
+  let seq = 0;
+  const emit = (frame) => page.evaluate((f) => window.__lf.native.emit(f), { seq: ++seq, reset: false, events: [], ...frame });
+  await emit({
+    reset: true,
+    settings: [],
+    events: [transport(0), ...[0, 1, 2, 3, 4].map((i) => laneEvent(i, lane('Empty'))), { Selected: { frame: 0, lane: 0 } }],
+    anchor: { frame: 0, atMs: Date.now(), rate: RATE, grid: 0 },
+    meter: { peak: 0, clip: false },
+  });
+  await page.evaluate(() => window.__lf.autosave.ready());
+
+  /** The engine now holds `pcm` on lane 0 in `state`: the feed says so and the snapshot answers it. */
+  const engineHolds = async (pcm, state) => {
+    await page.evaluate(async ([pcm, state, master]) => {
+      const { encodeSessionBytes } = await import('/src/platform/engine-wire.ts');
+      window.__lf.native.snapshotBytes = encodeSessionBytes(
+        { rate: 48000, masterLengthFrames: master, bpm: 120, tracks: [{ index: 0, frames: master, reversed: false, state }] },
+        [Float32Array.from(pcm)],
+      ).buffer;
+    }, [pcm, state, MASTER]);
+    await emit({ events: [transport(MASTER), laneEvent(0, lane(state))] });
+  };
+
+  // ── The editable download and its import ──────────────────────────────────────────────────────────
+  const editable = Array.from({ length: MASTER }, () => 0);
+  editable.splice(1024, 3, 1.5, -1.5, 1e-7);
+  // Loaded as an import loads it (the engine takes the bytes, the store the mix), then the engine plays it.
+  await page.evaluate(async ([pcm, master]) => {
+    const { session } = await import('/src/ui/state/audio.ts');
+    const { defaultFxStates } = await import('/src/ui/state/fx-metadata.ts');
+    await session.loadSession({ bpm: 120, bars: 1, masterLengthFrames: master,
+      tracks: [{ index: 0, pcm: Float32Array.from(pcm), volume: 0.25, muted: false, reversed: false, fx: defaultFxStates() }] });
+  }, [editable, MASTER]);
+  await engineHolds(editable, 'Playing');
+  const exported = await page.evaluate(async (pcm) => {
+    const lf = window.__lf;
+    const { session } = await import('/src/ui/state/audio.ts');
+    const { parseZip } = await import('/src/session/unzip.ts');
+    const { decodeWav } = await import('/src/session/wav.ts');
+    const bundle = await lf.buildExportBundle({ bpm: 120, bars: 1 }, {}, session);
+    if (!bundle) throw new Error('No export bundle');
+    window.__bundle = bundle.zipBytes;
+    const stem = decodeWav(parseZip(bundle.zipBytes).find((entry) => entry.name.endsWith('-track1.wav')).data).channels[0];
+    const want = Float32Array.from(pcm);
+    return { stemErrors: want.reduce((n, x, k) => n + Number(stem[k] !== x), 0), stemSamples: Array.from(stem.slice(1024, 1027)) };
+  }, editable);
+  // The engine cleared (every lane EMPTY) and the lane's volume moved: only the import brings it back.
+  await emit({ events: [transport(0), laneEvent(0, lane('Empty'))] });
+  await page.evaluate(() => {
+    window.__lf.looper.setVolume(0, 1);
+    window.__lf.native.sent.length = 0;
+  });
+  results.push(await page.evaluate(async ([pcm, exported]) => {
+    const lf = window.__lf;
+    const { session } = await import('/src/ui/state/audio.ts');
+    const { splitSessionBytes } = await import('/src/platform/engine-wire.ts');
+    const before = lf.native.loadedSessions.length;
+    await lf.importSession(window.__bundle, session);
+    const loads = lf.native.loadedSessions.length - before;
+    const restored = splitSessionBytes(lf.native.loadedSessions.at(-1).slice().buffer).pcm[0];
+    const want = Float32Array.from(pcm);
+    const errors = exported.stemErrors + want.reduce((n, x, k) => n + Number(restored[k] !== x), 0);
+    const volume = session.trackVolume(0);
+    const volumeSent = lf.native.sent.some((c) => JSON.stringify(c) === JSON.stringify({ SetVolume: [0, 0.25] }));
+    return { name: 'Download bundle preserves editable overdub headroom and quiet samples', loads, errors,
+      stemSamples: exported.stemSamples, samples: Array.from(restored.slice(1024, 1027)), volume, volumeSent,
+      pass: loads === 1 && errors === 0 && volume === 0.25 && volumeSent };
+  }, [editable, exported]));
+
+  // ── The dry fallback, and the import caps ─────────────────────────────────────────────────────────
+  await engineHolds(editable, 'Playing');
   results.push(await page.evaluate(async () => {
     const lf = window.__lf;
-    await lf.looper.init();
-    const { defaultFxStates } = await import('/src/audio/fx/fx.ts');
-    const { buildExportBundle } = await import('/src/audio/export/export.ts');
-    const { importSession, maxImportArchiveBytes } = await import('/src/audio/export/import.ts');
-    const { parseZip } = await import('/src/audio/export/unzip.ts');
-    const { makeZip } = await import('/src/audio/export/zip.ts');
-    const { decodeWav } = await import('/src/audio/export/wav.ts');
-    const sr = lf.engine.ctx.sampleRate;
-    const pcm = new Float32Array(sr * 2);
-    pcm.set([1.5, -1.5, 1e-7], 1024);
-    await lf.looper.loadSession({ bpm: 120, bars: 1, masterLengthFrames: pcm.length,
-      tracks: [{ index: 0, pcm, volume: 0.25, muted: false, reversed: false, fx: defaultFxStates() }] });
-    const bundle = await buildExportBundle({ bpm: 120, bars: 1 });
-    if (!bundle) throw new Error('No export bundle');
-    const entries = parseZip(bundle.zipBytes);
-    const stem = entries.find((entry) => entry.name.endsWith('-track1.wav'));
-    const decoded = decodeWav(stem.data).channels[0];
-    lf.looper.clearAll();
-    await importSession(bundle.zipBytes);
-    const restored = lf.looper.exportSnapshot().tracks[0];
-    let errors = 0;
-    for (let k = 0; k < pcm.length; k++) {
-      if (decoded[k] !== pcm[k] || restored.pcm[k] !== pcm[k]) errors++;
-    }
-    const transformed = await (await fetch('/src/audio/fx/fx.ts')).text();
+    // The Tone module the app's offline render imports (Vite's pre-bundled copy).
+    const transformed = await (await fetch('/src/session/offline-fx.ts')).text();
     const tonePath = transformed.match(/from\s+["']([^"']*\/tone[^"']*)["']/)?.[1];
-    if (!tonePath) throw new Error('Could not resolve application Tone module');
+    if (!tonePath) throw new Error('Could not resolve the application Tone module');
     const Tone = await import(tonePath);
+    const { session } = await import('/src/ui/state/audio.ts');
+    const { maxImportArchiveBytes } = await import('/src/session/import.ts');
+    const { parseZip } = await import('/src/session/unzip.ts');
+    const { makeZip } = await import('/src/session/zip.ts');
     const originalContext = Tone.getContext();
     const originalGenerate = Tone.Reverb.prototype.generate;
     const calls = new WeakMap();
@@ -122,16 +191,16 @@ await probe(async ({ open }) => {
     };
     let fallbackKind;
     try {
-      const fallback = await buildExportBundle({ bpm: 120, bars: 1 });
+      const fallback = await lf.buildExportBundle({ bpm: 120, bars: 1 }, {}, session);
       const metadata = parseZip(fallback.zipBytes).find((entry) => entry.name.endsWith('-session.json'));
       fallbackKind = JSON.parse(new TextDecoder().decode(metadata.data)).master.kind;
     } finally {
       Tone.Reverb.prototype.generate = originalGenerate;
     }
     const contextPreserved = Tone.getContext() === originalContext;
-    const cap = maxImportArchiveBytes(sr);
+    const cap = maxImportArchiveBytes(48000);
     let oversizedRejected = false;
-    try { await importSession(new Uint8Array(cap + 1)); }
+    try { await lf.importSession(new Uint8Array(cap + 1), session); }
     catch (error) { oversizedRejected = String(error).includes(`maximum is ${cap}`); }
     // A small valid ZIP can repeat one large local payload through many central-directory records.
     const one = makeZip([{ name: 'same.wav', data: new Uint8Array(1024 * 1024) }]);
@@ -149,40 +218,37 @@ await probe(async ({ open }) => {
     directory.setUint32(end + 12, count * size, true);
     let repeatedPayloadRejected = false;
     const began = performance.now();
-    try { await importSession(hostile); }
+    try { await lf.importSession(hostile, session); }
     catch (error) { repeatedPayloadRejected = String(error).includes('128 entries; maximum is 9'); }
     const rejectionMs = performance.now() - began;
-    return { name: 'Download bundle preserves editable overdub headroom and quiet samples', errors,
-      samples: Array.from(restored.pcm.slice(1024, 1027)), volume: restored.volume,
+    return { name: 'A failed wet render exports a dry master; import refuses oversized and repeated-payload archives',
       fallbackKind, contextPreserved, oversizedRejected, cap, repeatedPayloadRejected, rejectionMs,
-      pass: errors === 0 && restored.volume === 0.25 && fallbackKind === 'dry-fallback'
-        && contextPreserved && oversizedRejected && repeatedPayloadRejected };
+      pass: fallbackKind === 'dry-fallback' && contextPreserved && oversizedRejected && repeatedPayloadRejected };
   }));
-  await page.close();
-  const stopped = await open();
-  results.push(await stopped.page.evaluate(async () => {
+
+  // ── F26: the master mixes a STOPPED lane and leaves out a muted one ───────────────────────────────
+  const sine = Array.from({ length: MASTER }, (_, k) => 0.5 * Math.sin((2 * Math.PI * 220 * k) / RATE));
+  await engineHolds(sine, 'Stopped');
+  const masterPeak = (muted) => page.evaluate(async (muted) => {
     const lf = window.__lf;
-    await lf.looper.init();
-    const { defaultFxStates } = await import('/src/audio/fx/fx.ts');
-    const { buildExportBundle } = await import('/src/audio/export/export.ts');
-    const { parseZip } = await import('/src/audio/export/unzip.ts');
-    const { decodeWav } = await import('/src/audio/export/wav.ts');
-    const sr = lf.engine.ctx.sampleRate;
-    const pcm = Float32Array.from({ length: sr * 2 }, (_, k) => 0.5 * Math.sin((2 * Math.PI * 220 * k) / sr));
-    const masterPeak = async (muted) => {
-      lf.looper.clearAll();
-      await lf.looper.loadSession({ bpm: 120, bars: 1, masterLengthFrames: pcm.length,
-        tracks: [{ index: 0, pcm, volume: 1, muted, reversed: false, state: 'STOPPED', fx: defaultFxStates() }] });
-      const bundle = await buildExportBundle({ bpm: 120, bars: 1 });
-      const master = parseZip(bundle.zipBytes).find((entry) => entry.name.endsWith('-master.wav'));
-      return Math.max(...decodeWav(master.data).channels.map((c) => c.reduce((m, x) => Math.max(m, Math.abs(x)), 0)));
-    };
-    const heard = await masterPeak(false);
-    const muted = await masterPeak(true);
-    return { name: 'The master mixes a STOPPED track and leaves out a muted one', heard, muted,
-      pass: lf.looper.stateOf(0) === 'STOPPED' && heard > 0.1 && muted < 1e-4 };
-  }));
-  await stopped.page.close();
+    const { session } = await import('/src/ui/state/audio.ts');
+    const { parseZip } = await import('/src/session/unzip.ts');
+    const { decodeWav } = await import('/src/session/wav.ts');
+    lf.looper.setMute(0, muted);
+    const bundle = await lf.buildExportBundle({ bpm: 120, bars: 1 }, {}, session);
+    const master = parseZip(bundle.zipBytes).find((entry) => entry.name.endsWith('-master.wav'));
+    return Math.max(...decodeWav(master.data).channels.map((c) => c.reduce((m, x) => Math.max(m, Math.abs(x)), 0)));
+  }, muted);
+  await page.evaluate(() => window.__lf.looper.setVolume(0, 1));
+  const heard = await masterPeak(false);
+  const muted = await masterPeak(true);
+  const stateOf = await page.evaluate(() => window.__lf.looper.stateOf(0));
+  results.push({ name: 'The master mixes a STOPPED track and leaves out a muted one', stateOf, heard, muted,
+    pass: stateOf === 'STOPPED' && heard > 0.1 && muted < 1e-4 });
+
   console.log(JSON.stringify(results, null, 2));
   assert.ok(results.every((result) => result.pass), JSON.stringify(results));
+  // The injected reverb failure's fallback logs the one error this page may show.
+  const unexpected = consoleErrors.filter((text) => !text.includes('[export] wet master render failed'));
+  assert.deepEqual(unexpected, [], 'no other console errors');
 });
