@@ -15,6 +15,9 @@ import { engineClock, engineLooper, engineMaster, engineSampleRate, engineSessio
  */
 
 export type { PeakView, TrackState } from '../../audio/looper/looper';
+/** Frames per waveform peak bin, in both modes: the engine feed's bins are the same 1024 frames
+ * (`PeakUpdate` in `src/platform/engine-wire.ts`) but carry no size, so this one constant sizes them. */
+export { PEAK_FRAMES } from '../../audio/looper/looper';
 
 /** What the UI reads of the looper: the web facade's members that the engine store also provides
  * (two of the web's are raw Solid setters; the UI only ever passes them a boolean). */
@@ -51,6 +54,7 @@ type LooperView = {
   | 'mutedOf'
   | 'waitingOf'
   | 'recHeadFrac'
+  | 'recSpanFrames'
   | 'masterFramesValue'
   | 'fxState'
   | 'setFxBypass'

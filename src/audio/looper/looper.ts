@@ -39,8 +39,8 @@
  *   state.ts     — constants, Track/TrackPublic/PeakView types, the reactive Solid signals, the plain
  *                   engine-singleton `engineState` mutable object, and the read-only accessors
  *                   (publish/trackPeak/trackInfo/captureQuanta/captureOverruns/peaksInto/phaseValue/
- *                   stateOf/fillFramesOf/recHeadFrac/masterFramesValue/sr). The base every other module
- *                   imports.
+ *                   stateOf/fillFramesOf/recHeadFrac/recSpanFrames/masterFramesValue/sr). The base every
+ *                   other module imports.
  *   peaks.ts     — waveform peak precompute (updateLivePeaks/recomputePeaks/resetPeaks). Depends on state.
  *   playback.ts  — AudioBufferSourceNode scheduling, boundary math, the overdub boundary-swap timer.
  *                   Depends on state + peaks.
@@ -79,6 +79,7 @@ import {
   peaksInto,
   phaseValue,
   recHeadFrac,
+  recSpanFrames,
   retakeEnabled,
   setRetakeEnabled,
   stateOf,
@@ -118,6 +119,8 @@ import {
 import { selectTrack, selectedTrack } from './transport-actions';
 
 export type { TrackState, PeakView } from './state';
+/** The peak bin size, and a first take's drawn span: engine mode's store and the waveform read them here. */
+export { PEAK_FRAMES, firstTakeSpan, openingSpan } from './state';
 
 // ── Exported singleton ───────────────────────────────────────────────────────────────────
 export const looper = {
@@ -194,8 +197,10 @@ export const looper = {
   waitingOf,
   /** Plain captured-frame count (non-reactive) for probes and the draw loop. */
   fillFramesOf,
-  /** Later-track record-head fraction 0..1, or -1 if no master yet (non-reactive). */
+  /** Record-head fraction 0..1 of the take's span, or -1 while a first take waits (non-reactive). */
   recHeadFrac,
+  /** Frames a recording take is drawn across: the master, or a first take's doubling span (non-reactive). */
+  recSpanFrames,
   /** Plain master loop length in frames (non-reactive) for the draw loop. */
   masterFramesValue,
   /** Reactive per-track FX state array (five entries, chain order). */
