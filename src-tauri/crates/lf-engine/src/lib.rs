@@ -16,10 +16,10 @@
 //! | [`engine`] | the callback: rings, the block split, the bus topology, master volume | `engine.ts`, `master.ts` |
 //! | [`effects`] | each lane's FX chain, the shared reverb bus, their grid, CLEAR and COPY on a lane's FX | `fx/fx.ts`, `looper/{playback,machine}.ts` |
 //! | [`input_fx`] | the input sends: ECHO and REVERB on the wet signal, wet only, into the record tap and the monitor | — (engine only) |
-//! | [`instruments`] | the six built-in instruments, the selected one, the wheels, their record path | `synths/index.ts`, `input-router.ts` |
+//! | [`instruments`] | the six built-in instruments, the selected one (or none), each one's level, the wheels, their record path | `synths/index.ts`, `input-router.ts` |
 //! | [`overview`] | what the UI draws, for a reader off the audio thread: the grid anchor, each lane's state, buffer, orientation and frames, each buffer's waveform peaks | `looper/peaks.ts` |
 //! | [`session`] | saving and loading a session: a snapshot copied out a budget per frame, a load swapped into an empty looper, the host's port | `looper/session.ts`, `export/*` |
-//! | [`slots`] | the two plugin slots: install and removal through their ports, bypass crossfades, notes, live and gain, where each output goes | `plugin-bridge.ts`, `instrument-slots.ts` |
+//! | [`slots`] | the two plugin slots: install and removal through their ports, bypass crossfades, notes, live and gain, each slot's own input, where each output goes | `plugin-bridge.ts`, `instrument-slots.ts` |
 //! | [`api`] | commands, events, the process context, the plugin seam ([`SlotProcessor`]) | — |
 //! | [`dsp`] | Stage 3 sound: the Tone/Blink building blocks, the six built-in synths, the per-track FX chain and the reverb bus, the limiter | Tone.js on Blink's Web Audio |
 //!
@@ -40,11 +40,15 @@
 //!   feedback, so its returns (the delay, the reverb send) fall with it and what rings on past the bar
 //!   line is the tail of a loop already faded out; a lane started meanwhile is untouched, and a stop now
 //!   (a second press, STOP ALL) leaves the returns ringing as any stop does.
-//! - **One clock: the device frame.** Input frame `x` is captured at frame `x`; a lane plays loop
-//!   position `(f - anchor) mod master` at frame `f`. A take starts `align_frames` (+ the live effect
-//!   slot's latency, from the block after its live flag changes, and the master limiter's pre-delay)
-//!   after its downbeat; an instrument's record path lags it by the input side (a plugin instrument's,
-//!   less its own latency), so its notes land there too. The input sends are wet only and add nothing
+//! - **One clock: the device frame.** Input frame `x` is captured at frame `x`, on each slot's own
+//!   input (its capture channel: [`Engine::process_inputs`]); a lane plays loop position
+//!   `(f - anchor) mod master` at frame `f`. A take starts `align_frames` (+ the largest live effect
+//!   slot's latency, from the block after a live flag changes, and the master limiter's pre-delay)
+//!   after its downbeat; every live slot's wet reaches the record tap at that latency (one with less is
+//!   delayed by the difference, heard at once), and an instrument's record path lags it by the input
+//!   side (a plugin instrument's, less its own latency), so its notes land there too. That live latency
+//!   and each slot's delay hold from a capture's arm to its end ([`slots`]): a change applies once
+//!   nothing captures. The input sends are wet only and add nothing
 //!   to the alignment. There is no user-facing record trim. The synths, FX, input sends and reverbs run
 //!   on the device frame less the frames the device skipped, so their blocks follow each other
 //!   ([`effects`]); the limiter stays on the device frame.

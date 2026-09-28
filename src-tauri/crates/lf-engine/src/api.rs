@@ -78,9 +78,10 @@ pub enum Command {
     /// A lane's FX parameter, in its def's units (`src/audio/fx/metadata.ts`).
     SetFxParam(u8, FxParam, f64),
     SetFxBypass(u8, FxKind, bool),
-    /// Where the notes go: a built-in instrument or a plugin slot. Sent on a slot switch, not per note:
-    /// it releases the held notes (of the instrument or slot it leaves) and hands a built-in instrument
-    /// the wheels, even when the target stays (two slots may hold the same synth, as two web synths).
+    /// Where the notes go: a built-in instrument, a plugin slot, or nowhere ([`NoteTarget::Off`]). Sent on
+    /// a slot switch, not per note: it releases the held notes (of the instrument or slot it leaves) and
+    /// hands a built-in instrument the wheels, even when the target stays (two slots may hold the same
+    /// synth, as two web synths).
     SelectInstrument(NoteTarget),
     /// A note (0..127) on the selected target; velocity 0..1. Sustain and the owner of a held note stay
     /// with the sender (`src/audio/input-router.ts`). The instrument commands never wait behind a
@@ -93,12 +94,16 @@ pub enum Command {
     /// The mod wheel, 0..1 (built-in instruments only).
     Modulation(f64),
     AllNotesOff,
-    /// GO LIVE: the device input feeds the slot (an empty slot, or one holding an effect, passes it on
-    /// as the wet signal; an instrument plugin takes no input). Off, the slot gets silence.
+    /// GO LIVE: the slot's own input (its capture channel, picked on the device side) feeds the slot (an
+    /// empty slot, or one holding an effect, passes it on as the wet signal; an instrument plugin takes
+    /// no input). Off, the slot gets silence. Both slots may be live at once.
     SetSlotLive(u8, bool),
     /// The slot's output level (linear, 0..): the per-plugin gain staging (`plugin-bridge.ts`), on both
-    /// what is heard and what is recorded.
+    /// what is heard and what is recorded; an empty live slot's is its input's level.
     SetSlotGain(u8, f32),
+    /// A built-in instrument's output level (linear, 0.., default 1), smoothed as a slot's gain: on what
+    /// is heard and what is recorded, whether or not it is the note target, so a tail rings out at it.
+    SetInstrumentGain(Instrument, f32),
     /// An input send on or off (`input_fx`): the ECHO or the REVERB on the wet signal, heard and
     /// recorded. Off closes its input and lets its tail ring out. A rig setting, not a lane's.
     SetInputSend(InputSend, bool),
@@ -107,7 +112,7 @@ pub enum Command {
 }
 
 impl Command {
-    /// A command for the built-in instruments (notes, wheels, the pick).
+    /// A command for the built-in instruments (notes, wheels, the pick, a level).
     pub fn is_instrument(&self) -> bool {
         matches!(
             self,
@@ -117,6 +122,7 @@ impl Command {
                 | Command::PitchBend(_)
                 | Command::Modulation(_)
                 | Command::AllNotesOff
+                | Command::SetInstrumentGain(..)
         )
     }
 
@@ -209,6 +215,8 @@ pub enum NoteTarget {
     Builtin(Instrument),
     /// The plugin in this slot (0..SLOT_COUNT).
     Slot(u8),
+    /// Nowhere: a note sounds nothing (a slot whose source is off).
+    Off,
 }
 
 /// The six built-in instruments (`src/audio/synths/index.ts`).
@@ -405,7 +413,7 @@ pub struct ProcessContext {
 /// `plugin-bridge.ts`, `inChannels > 0`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SlotKind {
-    /// Has an audio input: takes the device input while the slot is live; its output is the wet signal
+    /// Has an audio input: takes the slot's input while the slot is live; its output is the wet signal
     /// (heard after the limiter, recorded at the take's alignment). Bypassed, it passes its input dry.
     Effect,
     /// No audio input: plays the notes while it is the note target; its output joins the master bus
@@ -440,7 +448,7 @@ pub trait SlotProcessor: Send {
     /// removes and reinstalls it.
     fn latency(&self) -> Frame;
     /// Render `out.len()` frames (= `input.len()`, at most the engine's `max_block`) from device frame
-    /// `frame`. `input` is the mono device input while the slot is live and silence otherwise (always
+    /// `frame`. `input` is the slot's mono input while the slot is live and silence otherwise (always
     /// silence for an instrument); `events` are sorted by offset, every offset `< out.len()`. `out` is
     /// overwritten with the slot's mono output. Never allocates, locks or waits. Called on the audio
     /// thread, except one silent frame carrying a removal's released notes while no device runs (on the

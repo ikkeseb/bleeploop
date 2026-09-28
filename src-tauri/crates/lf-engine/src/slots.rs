@@ -3,9 +3,15 @@
 //! where a slot's output goes. The processors themselves are the host's (`src-tauri/src/host`, which
 //! implements [`SlotProcessor`] for CLAP and VST3).
 //!
-//! A slot holding an effect (or nothing) passes the device input on while it is live and gets silence
-//! otherwise; its output is the wet signal, which the engine hears after the limiter and records at the
-//! take's alignment. A slot holding an instrument plays the notes while it is the note target; its
+//! Each slot has its own input (the device side picks its capture channel). A slot holding an effect
+//! (or nothing) passes its input on while it is live and gets silence otherwise; its output is the wet
+//! signal, which the engine hears after the limiter at once and records at the take's alignment: the
+//! largest live effect's latency, so a live slot with less (an empty one, a quicker effect) reaches the
+//! record tap that much later and two live inputs land together. That record compensation is latched
+//! ([`Rack::latch_record`]): it holds while a capture runs, so a slot going live or not, or a unit
+//! coming or going, never moves what records mid-take (a slot off live feeds its line silence, and what
+//! was on the way drains in place). A slot holding an instrument plays the notes while it is the note
+//! target; its
 //! output joins the master bus and goes to the record tap delayed like a built-in instrument's, less the
 //! plugin's own latency (`instruments`). Outputs are mono, as today's bridge is.
 //!
@@ -115,6 +121,10 @@ struct Slot {
     out: Vec<f32>,
     /// An instrument slot's record path: its output, `delay - latency` frames late.
     line: Vec<f32>,
+    /// A slot's wet on its way to the record tap, `dw` frames late: the latched record latency less
+    /// the slot's own, as [`Rack::latch_record`] last took them.
+    wet_line: Vec<f32>,
+    dw: usize,
     write: usize,
 }
 
@@ -177,6 +187,8 @@ pub(crate) struct Rack {
     gain_coef: f64,
     /// The slot that takes the notes, if a slot is the note target.
     target: Option<usize>,
+    /// The live latency the record tap is aligned on ([`Rack::latch_record`]).
+    record_latency: Frame,
     /// The device frame the next render call starts at.
     cursor: Frame,
     pub(crate) events_dropped: u64,
@@ -207,6 +219,8 @@ impl Rack {
                 events: Vec::with_capacity(MAX_SLOT_EVENTS),
                 out: vec![0.0; max_block.max(1)],
                 line: vec![0.0; line],
+                wet_line: vec![0.0; line],
+                dw: 0,
                 write: 0,
             }
         });
@@ -220,6 +234,7 @@ impl Rack {
             fade_frames: (FADE_SECONDS * sample_rate as f64).round().max(1.0) as u32,
             gain_coef: (-1.0 / (GAIN_TAU_SECONDS * sample_rate as f64)).exp(),
             target: None,
+            record_latency: 0,
             cursor: 0,
             events_dropped: 0,
             protocol_errors: 0,
@@ -324,9 +339,28 @@ impl Rack {
         s.events.clear();
     }
 
-    /// Frames the wet signal lags the input: the largest latency of a live slot's effect.
+    /// The largest latency of a live slot's effect now: what [`Rack::latch_record`] takes while open.
     pub(crate) fn live_latency(&self) -> Frame {
         self.slots.iter().filter(|s| s.live && s.unit.is_some() && s.kind == SlotKind::Effect).map(|s| s.latency).max().unwrap_or(0)
+    }
+
+    /// At a block start: while `open`, the record compensation follows the slots (the live latency, and
+    /// each slot's wet delayed by what its own latency lacks of it); shut, it holds what it last took.
+    /// The engine shuts it while a capture's alignment is fixed, which took the same live latency.
+    pub(crate) fn latch_record(&mut self, open: bool) {
+        if !open {
+            return;
+        }
+        self.record_latency = self.live_latency();
+        for s in self.slots.iter_mut() {
+            let own = if s.unit.is_some() && s.kind == SlotKind::Effect { s.latency } else { 0 };
+            s.dw = (self.record_latency - own).clamp(0, (s.wet_line.len() - 1) as Frame) as usize;
+        }
+    }
+
+    /// The live latency the record tap is aligned on, as last latched.
+    pub(crate) fn record_latency(&self) -> Frame {
+        self.record_latency
     }
 
     pub(crate) fn installed(&self, slot: usize) -> Option<(SlotKind, Frame)> {
@@ -389,17 +423,20 @@ impl Rack {
         }
     }
 
-    /// Render both slots over `input.len()` frames from the cursor: `wet` and `bus` are overwritten
-    /// (the effects' and the instruments' outputs), `record` gets `wet` plus the instruments' record
-    /// path, `delay` frames late less each one's latency (`delay` = the input side plus the live
-    /// effect's latency, as the built-in instruments' record path).
-    pub(crate) fn render(&mut self, input: &[f32], wet: &mut [f32], bus: &mut [f32], record: &mut [f32], delay: Frame) {
-        let m = input.len();
+    /// Render both slots over `wet.len()` frames from the cursor, slot `s` reading `inputs[s]`: `wet`,
+    /// `aligned` and `bus` are overwritten (the effects' outputs as heard and at the take's alignment,
+    /// and the instruments'), `record` gets `aligned` plus the instruments' record path, `delay` frames
+    /// late less each one's latency (`delay` = the input side plus the latched record latency, as the
+    /// built-in instruments' record path).
+    pub(crate) fn render(&mut self, inputs: [&[f32]; SLOT_COUNT], wet: &mut [f32], aligned: &mut [f32], bus: &mut [f32], record: &mut [f32], delay: Frame) {
+        let m = wet.len();
         wet.fill(0.0);
+        aligned.fill(0.0);
         bus.fill(0.0);
         record.fill(0.0);
         let (frame, fade_frames) = (self.cursor, self.fade_frames);
-        for s in self.slots.iter_mut() {
+        for (s, input) in self.slots.iter_mut().zip(inputs) {
+            let input = &input[..m];
             let x = if s.takes_input() { input } else { &self.zeros[..m] };
             // A removal completes on the frame its fade reaches bypass, whatever the call's bounds: from
             // there the slot is empty and passes what an empty slot does.
@@ -416,7 +453,7 @@ impl Rack {
             s.events.clear();
             let instrument = s.instrument();
             let len = s.line.len();
-            let d = (delay - s.latency).clamp(0, (len - 1) as Frame) as usize;
+            let (d, dw) = ((delay - s.latency).clamp(0, (len - 1) as Frame) as usize, s.dw);
             for k in 0..m {
                 let gone = s.removing && s.fade == 0;
                 let b = if gone { empty[k] } else { x[k] };
@@ -439,18 +476,21 @@ impl Rack {
                 if instrument && !gone {
                     bus[k] += y;
                     s.line[s.write] = y;
+                    s.wet_line[s.write] = 0.0;
                 } else {
                     wet[k] += y;
                     s.line[s.write] = 0.0;
+                    s.wet_line[s.write] = y;
                 }
                 record[k] += s.line[(s.write + len - d) % len];
+                aligned[k] += s.wet_line[(s.write + len - dw) % len];
                 s.write = (s.write + 1) % len;
             }
             if s.removing && s.fade == 0 {
                 Self::finish_removal(s, &mut self.protocol_errors);
             }
         }
-        for (r, &w) in record.iter_mut().zip(wet.iter()) {
+        for (r, &w) in record.iter_mut().zip(aligned.iter()) {
             *r += w;
         }
         self.cursor += m as Frame;

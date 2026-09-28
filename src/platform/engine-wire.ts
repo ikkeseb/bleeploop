@@ -60,7 +60,9 @@ export type EngineAction =
 export type InstrumentId = 'lead' | 'pad' | 'piano' | 'organ' | 'bass' | 'drum';
 export type FxKindId = 'filter' | 'pitch' | 'stutter' | 'delay' | 'reverb';
 export type FxParamId = 'cutoff' | 'q' | 'semitones' | 'rate' | 'time' | 'feedback' | 'mix' | 'amount';
-export type NoteTarget = { Builtin: InstrumentId } | { Slot: number };
+/** Where the notes go: a built-in instrument, a plugin slot's plugin, or nowhere (`'Off'`: a slot whose
+ * source is off; switching to it releases the held notes as any switch does). */
+export type NoteTarget = { Builtin: InstrumentId } | { Slot: number } | 'Off';
 /** The input sends (Rust `lf_engine::InputSend`, `InputSendParam`): ECHO and REVERB on the live input. */
 export type InputSendId = 'echo' | 'reverb';
 export type InputSendParamId = 'echoTime' | 'echoFeedback' | 'echoLevel' | 'reverbLevel';
@@ -157,22 +159,28 @@ export type EngineCommand =
   | { NoteOff: number }
   | { PitchBend: number }
   | { Modulation: number }
+  /** GO LIVE: the slot's own input (its capture channel, `EngineHost.setSlotInputChannel`) feeds it; both
+   * slots may be live at once. */
   | { SetSlotLive: [number, boolean] }
+  /** A slot's output level (linear, 0..), heard and recorded; an empty live slot's is its input's level. */
   | { SetSlotGain: [number, number] }
+  /** A built-in instrument's output level (linear, 0.., default 1), smoothed, heard and recorded, whether
+   * or not it is the note target. */
+  | { SetInstrumentGain: [InstrumentId, number] }
   | { SetInputSend: [InputSendId, boolean] }
   | { SetInputSendParam: [InputSendParamId, number] };
 
-/** Rust `engine_io::DeviceRequest`: what `engine_open` opens (or switches to). */
-export interface DeviceRequest {
+/** Rust `engine_io::DeviceRequest`: what `engine_open` opens (or switches to). The capture channels are
+ * each plugin slot's (`inputChannels`), or one for both (`inputChannel`); 0-based, null = auto (input 2
+ * on a device with two or more). */
+export type DeviceRequest = {
   backend: AudioBackend;
   /** WASAPI capture / render endpoint id; null = the default. ASIO ignores both (the cached driver). */
   input: string | null;
   output: string | null;
-  /** 0-based capture channel; null = auto. */
-  inputChannel: number | null;
   /** Frames per device callback; null = the driver's default. */
   buffer: number | null;
-}
+} & ({ inputChannels: [number | null, number | null] } | { inputChannel: number | null });
 
 /** Rust `engine_io::DeviceStatus`: the device that runs. */
 export interface DeviceStatus {
@@ -607,7 +615,7 @@ export function decodeCommand(raw: unknown): EngineCommand {
         const [target, v] = tagged(p, 'NoteTarget');
         if (target === 'Builtin') oneOf(v, INSTRUMENTS, 'NoteTarget.Builtin');
         else if (target === 'Slot') slot(v, 'NoteTarget.Slot');
-        else fail('unknown NoteTarget variant', p);
+        else if (target !== 'Off' || v !== undefined) fail('unknown NoteTarget variant', p);
         break;
       }
       case 'NoteOn': {
@@ -629,6 +637,12 @@ export function decodeCommand(raw: unknown): EngineCommand {
         const [s, v] = pair('(slot, gain)');
         slot(s, 'SetSlotGain.slot');
         num(v, 'SetSlotGain.gain');
+        break;
+      }
+      case 'SetInstrumentGain': {
+        const [i, v] = pair('(instrument, gain)');
+        oneOf(i, INSTRUMENTS, 'SetInstrumentGain.instrument');
+        num(v, 'SetInstrumentGain.gain');
         break;
       }
       case 'SetInputSend': {
@@ -656,13 +670,16 @@ export function decodeCommand(raw: unknown): EngineCommand {
  */
 export function decodeDeviceRequest(raw: unknown): DeviceRequest {
   const o = obj(raw, 'DeviceRequest');
-  return {
+  const base = {
     backend: oneOf(o.backend, BACKENDS, 'DeviceRequest.backend'),
     input: nullable(o.input, (v) => str(v, 'DeviceRequest.input')),
     output: nullable(o.output, (v) => str(v, 'DeviceRequest.output')),
-    inputChannel: nullable(o.inputChannel, (v) => int(v, 'DeviceRequest.inputChannel')),
     buffer: nullable(o.buffer, (v) => int(v, 'DeviceRequest.buffer', 1)),
   };
+  const channel = (v: unknown, what: string) => nullable(v, (c) => int(c, what));
+  if (o.inputChannels === undefined) return { ...base, inputChannel: channel(o.inputChannel, 'DeviceRequest.inputChannel') };
+  const [a, b] = array(o.inputChannels, 'DeviceRequest.inputChannels', ENGINE_SLOTS);
+  return { ...base, inputChannels: [channel(a, 'DeviceRequest.inputChannels[0]'), channel(b, 'DeviceRequest.inputChannels[1]')] };
 }
 
 // ── Session bytes (`engine_snapshot` / `engine_load_session`) ───────────────────────────────────────

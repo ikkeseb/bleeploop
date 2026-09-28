@@ -1,9 +1,10 @@
 //! OWNS: the engine's callback: the command and event rings, the block split, and the bus topology.
-//! Input → the live plugin slot (`slots`: an effect, or an empty slot passing it dry) → the wet signal.
-//! The input sends (`input_fx`: ECHO, REVERB) read the wet signal and render wet only. The record tap
-//! is the wet signal plus the sends' output plus the built-in instruments and the instrument plugin
-//! slots (`instruments`, `slots`: delayed onto the guitar's grid). Each lane plays through its FX chain,
-//! whose reverb sends meet on one bus (`effects`); the chains, the reverb bus, the instruments (built
+//! Each slot's input → that slot while it is live (`slots`: an effect, or an empty slot passing it dry)
+//! → the wet signal, heard at once and, for the record tap, aligned on the largest live latency. The
+//! input sends (`input_fx`: ECHO, REVERB) read the aligned wet signal and render wet only. The record
+//! tap is the aligned wet signal plus the sends' output plus the built-in instruments and the
+//! instrument plugin slots (`instruments`, `slots`: delayed onto the guitar's grid). Each lane plays
+//! through its FX chain, whose reverb sends meet on one bus (`effects`); the chains, the reverb bus, the instruments (built
 //! in and plugin) and the click sum on the stereo master bus: master volume, then the master limiter
 //! (`dsp::compressor`) → stereo out. The wet signal and the sends' output (the monitor) join the output
 //! after the limiter, under the same master volume: the played instrument is heard without the
@@ -11,8 +12,8 @@
 //! on the frame they are recorded. Ported from `src/audio/engine.ts` and `src/audio/master.ts`.
 //!
 //! The limiter delays everything it carries by its pre-delay, the click included, so a take's alignment
-//! is `align_frames` + the live effect's latency + the limiter's. The sends add no term: the dry signal
-//! does not pass through them.
+//! is `align_frames` + the largest live effect's latency + the limiter's. The sends add no term: the dry
+//! signal does not pass through them.
 //!
 //! `process` renders a block in chunks that end wherever something happens: a command's frame, a
 //! scheduled looper event, a beat, an AUTO trigger, and a render quantum's end (the FX and the reverb
@@ -143,6 +144,8 @@ pub struct Engine {
     /// The slots' frames rendered so far in this block (they render ahead, up to a slot command).
     slots_done: usize,
     wet: Vec<f32>,
+    /// The wet signal at the take's alignment (`slots`): what the record tap and the input sends take.
+    aligned: Vec<f32>,
     /// The input sends' output (zeros where they were silent).
     sends: Vec<f32>,
     /// The sends' frames rendered so far in this block (ahead of the AUTO scan, like the instruments').
@@ -212,6 +215,7 @@ impl Engine {
             slot_bus: vec![0.0; config.max_block],
             slots_done: 0,
             wet: vec![0.0; config.max_block],
+            aligned: vec![0.0; config.max_block],
             sends: vec![0.0; config.max_block],
             sends_done: 0,
             sends_sounded: false,
@@ -295,9 +299,10 @@ impl Engine {
         self.rack.installed(slot)
     }
 
-    /// Frames the wet signal lags the input: the live effect's latency (0 with none).
+    /// Frames the wet signal lags the input at the record tap: the largest live effect's latency (0 with
+    /// none), as latched at the last block start (it holds while a capture runs).
     pub fn live_latency(&self) -> Frame {
-        self.rack.live_latency()
+        self.rack.record_latency()
     }
 
     /// While no device runs and the host holds the engine: apply the slot ports' installs and removals
@@ -338,10 +343,16 @@ impl Engine {
         self.looper.publish(&mut cx);
     }
 
-    /// Render one block: `input` is the mono device input, `left`/`right` the output (same length).
+    /// Render one block with every slot reading `input`, the mono device input: [`Engine::process_inputs`].
     pub fn process(&mut self, ctx: &ProcessContext, input: &[f32], left: &mut [f32], right: &mut [f32]) {
-        let n = input.len();
-        assert!(n <= self.config.max_block && left.len() == n && right.len() == n, "block larger than max_block");
+        self.process_inputs(ctx, [input; SLOT_COUNT], left, right);
+    }
+
+    /// Render one block: `inputs[s]` is slot `s`'s mono input (its capture channel), `left`/`right` the
+    /// output (every one the same length).
+    pub fn process_inputs(&mut self, ctx: &ProcessContext, inputs: [&[f32]; SLOT_COUNT], left: &mut [f32], right: &mut [f32]) {
+        let n = left.len();
+        assert!(n <= self.config.max_block && right.len() == n && inputs.iter().all(|x| x.len() == n), "block larger than max_block");
         let start = ctx.frame;
         let end = start + n as Frame;
         let first = !self.started;
@@ -369,7 +380,12 @@ impl Engine {
             self.hold(cmd.frame.unwrap_or(start).max(start), cmd.command);
         }
         self.rack.begin_block(start, first);
-        let live_latency = self.rack.live_latency();
+        // A capture's alignment is fixed from its arm (AUTO's, from its onset) to its end: the record
+        // compensation holds with it, so no live flag or plugin latency changed meanwhile moves what it
+        // records (a skip or a repeat), and a change reaches both once nothing captures.
+        let open = self.looper.recorder().is_none_or(|(_, start, _)| start.is_none());
+        self.rack.latch_record(open);
+        let live_latency = self.rack.record_latency();
         let align = ctx.align_frames + live_latency + self.limiter.latency() as Frame;
         {
             let mut cx = Cx { now: start, align, clock: &mut self.clock, feed: &mut self.feed, fx: &mut self.fx };
@@ -430,7 +446,14 @@ impl Engine {
             if self.slots_done < k_next {
                 let until = first_slot_pending(&self.pending, f).map_or(end, |at| at.min(end));
                 let (a, b) = (self.slots_done, ((until - start) as usize).max(k_next));
-                self.rack.render(&input[a..b], &mut self.wet[a..b], &mut self.slot_bus[a..b], &mut self.record[a..b], record_delay);
+                self.rack.render(
+                    inputs.map(|x| &x[a..b]),
+                    &mut self.wet[a..b],
+                    &mut self.aligned[a..b],
+                    &mut self.slot_bus[a..b],
+                    &mut self.record[a..b],
+                    record_delay,
+                );
                 self.slots_done = b;
             }
             if self.instruments_done < k_next {
@@ -440,9 +463,11 @@ impl Engine {
                 self.instruments_done = k_next;
             }
             if self.sends_done < k_next {
-                // Within the chunk's quantum: the rack has rendered the wet signal this far.
+                // Within the chunk's quantum: the rack has rendered the wet signal this far. The sends take
+                // it aligned, so what they record lands with the take; a live slot quicker than the
+                // latched latency hears its own echo that difference late.
                 let (a, b) = (self.sends_done, k_next);
-                if self.input_fx.render(start + a as Frame, &self.wet[a..b], &mut self.sends[a..b]) {
+                if self.input_fx.render(start + a as Frame, &self.aligned[a..b], &mut self.sends[a..b]) {
                     self.sends_sounded = true;
                     for (r, &y) in self.record[a..b].iter_mut().zip(&self.sends[a..b]) {
                         *r += y;
@@ -699,6 +724,7 @@ fn apply(looper: &mut Looper, cx: &mut Cx, at: &mut Apply, command: Command) -> 
             let (builtin, slot) = match target {
                 NoteTarget::Builtin(i) => (Some(i), None),
                 NoteTarget::Slot(s) => (None, Some(s as usize)),
+                NoteTarget::Off => (None, None),
             };
             at.instruments.select(builtin, now);
             at.rack.select(slot, now);
@@ -733,6 +759,10 @@ fn apply(looper: &mut Looper, cx: &mut Cx, at: &mut Apply, command: Command) -> 
         }
         Command::SetSlotGain(i, gain) => {
             at.rack.set_gain(i as usize, gain);
+            Applied::Done
+        }
+        Command::SetInstrumentGain(i, gain) => {
+            at.instruments.set_gain(i, gain);
             Applied::Done
         }
         Command::SetInputSend(send, on) => {

@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use lf_engine::grid::Frame;
-use lf_engine::{Command, Event, LaneInfo, LaneState, ProcessContext, SlotEvent, SlotKind, SlotProcessor, TimedCommand};
+use lf_engine::{Command, Event, LaneInfo, LaneState, ProcessContext, SlotEvent, SlotKind, SlotProcessor, TimedCommand, SLOT_COUNT};
 
 use super::callback::Side;
 use super::fake_driver::{Fake, FakeDevice, FakeDriver};
@@ -27,7 +27,7 @@ const RATE: Frame = 48_000;
 static SERIAL: Mutex<()> = Mutex::new(());
 
 fn asio(buffer: Option<u32>) -> DeviceRequest {
-    DeviceRequest { backend: AudioBackend::Asio, input: None, output: None, input_channel: None, buffer }
+    DeviceRequest { backend: AudioBackend::Asio, input: None, output: None, input_channels: [None; SLOT_COUNT], buffer }
 }
 
 fn wasapi(input: Option<&str>, output: Option<&str>) -> DeviceRequest {
@@ -35,7 +35,7 @@ fn wasapi(input: Option<&str>, output: Option<&str>) -> DeviceRequest {
         backend: AudioBackend::Wasapi,
         input: input.map(str::to_string),
         output: output.map(str::to_string),
-        input_channel: None,
+        input_channels: [None; SLOT_COUNT],
         buffer: None,
     }
 }
@@ -664,7 +664,7 @@ fn a_channel_change_its_caller_gave_up_on_before_it_ran_leaves_the_device_runnin
     let h = Harness::new();
     h.open(asio(Some(256)));
     let claimed = Arc::new(AtomicBool::new(true));
-    assert!(open_claimed(&h, DeviceRequest { input_channel: Some(1), ..asio(Some(256)) }, &claimed).is_err());
+    assert!(open_claimed(&h, DeviceRequest { input_channels: [Some(1); SLOT_COUNT], ..asio(Some(256)) }, &claimed).is_err());
     assert_eq!(h.host.status().map(|s| s.block), Some(256), "the device still runs");
     let frame = h.frame();
     h.play(RATE / 20);
@@ -808,14 +808,88 @@ fn the_capture_channel_changes_without_a_new_stream() {
         h.fake.heard(at - 64..at)
     };
     assert!(heard(&h).iter().all(|s| (s - 0.5).abs() < 1e-3), "auto takes input 2 (0.5 on the fake)");
-    h.host.set_input_channel(Some(0)).unwrap();
+    h.host.set_slot_input_channel(0, Some(0)).unwrap();
     assert!(heard(&h).iter().all(|s| (s - 0.25).abs() < 1e-3), "input 1");
-    assert!(h.host.set_input_channel(Some(2)).is_err(), "the fake has two inputs");
-    let mut same = asio(Some(256));
-    same.input_channel = Some(1);
+    assert!(h.host.set_slot_input_channel(0, Some(2)).is_err(), "the fake has two inputs");
+    let same = DeviceRequest { input_channels: [Some(1); SLOT_COUNT], ..asio(Some(256)) };
     h.open(same);
     assert!(heard(&h).iter().all(|s| (s - 0.5).abs() < 1e-3), "an open of the running device only changes the channel");
     assert_eq!(h.fake.started.load(SeqCst), 1, "one stream pair throughout");
+}
+
+/// What the device plays after another `seconds`: the left channel's last 64 frames.
+fn heard_after(h: &Harness, seconds: f64) -> Vec<f32> {
+    h.play((RATE as f64 * seconds) as Frame);
+    let at = h.frame();
+    h.fake.heard(at - 64..at)
+}
+
+fn all_near(heard: &[f32], want: f32) -> bool {
+    heard.iter().all(|s| (s - want).abs() < 1e-3)
+}
+
+/// Four inputs, the fake's channel c carrying (c + 1) × the input, so every channel sounds apart: two
+/// empty live slots on inputs 1 and 4 are heard as their sum, each alone as its own channel.
+#[test]
+fn each_slot_reads_its_own_capture_channel_on_asio_and_wasapi() {
+    let h = Harness::new();
+    h.fake.asio.lock().unwrap().as_mut().unwrap().in_channels = 4;
+    h.fake.wasapi.lock().unwrap()[0].1.in_channels = 4;
+    h.fake.set_input(|_| 0.0625);
+    for request in [asio(Some(256)), wasapi(None, None)] {
+        let backend = request.backend;
+        h.open(DeviceRequest { input_channels: [Some(0), Some(3)], ..request });
+        h.send(Command::SetSlotLive(0, true));
+        h.send(Command::SetSlotLive(1, true));
+        assert!(all_near(&heard_after(&h, 0.2), 0.0625 + 0.25), "{backend:?}: input 1 on slot 0 plus input 4 on slot 1");
+        h.send(Command::SetSlotLive(0, false));
+        assert!(all_near(&heard_after(&h, 0.1), 0.25), "{backend:?}: slot 1 alone reads input 4");
+        h.send(Command::SetSlotLive(0, true));
+        h.send(Command::SetSlotLive(1, false));
+        assert!(all_near(&heard_after(&h, 0.1), 0.0625), "{backend:?}: slot 0 alone reads input 1");
+    }
+    let diag = h.host.diag();
+    assert_eq!((diag.rt_allocs, diag.join_starves, diag.join_overruns), (0, 0, 0), "{diag:?}");
+}
+
+#[test]
+fn auto_is_input_two_for_each_slot_and_a_missing_channel_is_refused_per_slot() {
+    let h = Harness::new();
+    h.fake.set_input(|_| 0.125);
+    h.open(asio(Some(256)));
+    h.send(Command::SetSlotLive(0, true));
+    h.send(Command::SetSlotLive(1, true));
+    assert!(all_near(&heard_after(&h, 0.1), 0.25 + 0.25), "auto: input 2 for each slot");
+    h.host.set_slot_input_channel(1, Some(0)).unwrap();
+    assert!(all_near(&heard_after(&h, 0.1), 0.25 + 0.125), "slot 1 moves to input 1, slot 0 stays on auto");
+    assert!(h.host.set_slot_input_channel(0, Some(2)).is_err(), "the fake has two inputs");
+    assert!(h.host.set_slot_input_channel(2, Some(0)).is_err(), "and there are two slots");
+    let refused = DeviceRequest { input_channels: [Some(0), Some(2)], ..asio(Some(256)) };
+    assert!(h.host.open(refused, false).is_err(), "an open with one slot's channel missing is refused");
+    assert!(all_near(&heard_after(&h, 0.1), 0.375), "a refused pick changes neither slot");
+    assert_eq!(h.fake.started.load(SeqCst), 1, "one stream pair throughout");
+}
+
+#[test]
+fn a_reopen_keeps_each_slots_channel_and_one_input_channel_sets_both() {
+    let h = Harness::new();
+    h.fake.asio.lock().unwrap().as_mut().unwrap().in_channels = 4;
+    h.fake.set_input(|_| 0.0625);
+    h.open(asio(Some(256)));
+    h.host.set_slot_input_channel(0, Some(0)).unwrap();
+    h.host.set_slot_input_channel(1, Some(2)).unwrap();
+    h.send(Command::SetSlotLive(0, true));
+    h.send(Command::SetSlotLive(1, true));
+    assert!(all_near(&heard_after(&h, 0.1), 0.0625 + 0.1875), "inputs 1 and 3");
+    // A loss: the owner reopens the request that ran, both picks in it.
+    h.fake.fatal.store(Side::Output as u8, SeqCst);
+    let events = h.device_events(2);
+    assert!(matches!(events[1], DeviceEvent::Recovered(_)), "{events:?}");
+    assert!(all_near(&heard_after(&h, 0.1), 0.0625 + 0.1875), "both picks survive the reopen");
+    // A request with one channel (the Audio Settings pick) sets both slots.
+    let one: DeviceRequest = serde_json::from_value(serde_json::json!({ "backend": "Asio", "input": null, "output": null, "inputChannel": 3, "buffer": 128 })).unwrap();
+    h.open(one);
+    assert!(all_near(&heard_after(&h, 0.1), 0.25 + 0.25), "input 4 on both slots");
 }
 
 #[test]
@@ -1129,12 +1203,12 @@ fn a_reversed_lane_a_multiply_grows_is_drawn_whole() {
 fn a_wasapi_endpoint_with_no_input_plays_output_only() {
     let h = Harness::new();
     h.fake.wasapi.lock().unwrap()[0].1.in_channels = 0;
-    let status = h.host.open(DeviceRequest { input_channel: Some(1), ..wasapi(None, None) }, false).expect("output only opens");
+    let status = h.host.open(DeviceRequest { input_channels: [Some(1), Some(3)], ..wasapi(None, None) }, false).expect("output only opens");
     assert!(!status.input_open && status.input_name.is_empty(), "{status:?}");
     let frame = h.frame();
     h.play(RATE / 10);
     assert!(h.frame() > frame, "the device plays");
-    assert!(h.host.set_input_channel(Some(0)).is_ok(), "a channel pick changes nothing and is no error");
+    assert!(h.host.set_slot_input_channel(1, Some(0)).is_ok(), "a channel pick changes nothing and is no error");
     let (peak, _) = h.host.take_meter();
     assert_eq!(peak, 0.0, "the input is silence");
     assert_eq!(h.host.diag().join_starves, 0, "a join that never had input is no starve");

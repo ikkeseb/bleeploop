@@ -45,7 +45,7 @@ const COMMANDS = [
   'ActionOn', 'SelectTrack', 'SetBpm', 'SetMetronome', 'SetClickVolume', 'SetMasterVolume', 'SetMasterMute',
   'SetLoopEndStop', 'SetFadeBars', 'SetFixedLength', 'SetFixedBars', 'SetRetake', 'SetAutoRecord', 'SetAutoSensitivity',
   'SetVolume', 'SetMute', 'SetDubFeedback', 'SetFxParam', 'SetFxBypass', 'SelectInstrument', 'NoteOn', 'NoteOff', 'PitchBend', 'Modulation',
-  'AllNotesOff', 'SetSlotLive', 'SetSlotGain', 'SetInputSend', 'SetInputSendParam', 'Press',
+  'AllNotesOff', 'SetSlotLive', 'SetSlotGain', 'SetInstrumentGain', 'SetInputSend', 'SetInputSendParam', 'Press',
 ];
 const ACTIONS = [
   'RecDub', 'PlayStop', 'Undo', 'Clear', 'NextTrack', 'PrevTrack', 'PlayAll', 'StopAll', 'Mute', 'Reverse', 'Copy', 'Halve',
@@ -65,6 +65,10 @@ for (const c of fixture.commands) {
 check('the fixture covers every command the TS side can send', () =>
   assert.deepEqual([...new Set(fixture.commands.map((c) => tag(c)[0]))].sort(), [...COMMANDS].sort()),
 );
+check('the fixture sends every note target', () => {
+  const targets = fixture.commands.filter((c) => c.SelectInstrument !== undefined).map((c) => tag(c.SelectInstrument)[0]);
+  assert.deepEqual([...new Set(targets)].sort(), ['Builtin', 'Off', 'Slot']);
+});
 check('the fixture sends every hands-free action', () => {
   const actions = fixture.commands.map((c) => c.Action ?? c.ActionOn?.[1]).filter((a) => a !== undefined).map((a) => tag(a)[0]);
   assert.deepEqual([...new Set(actions)].sort(), [...ACTIONS].sort());
@@ -119,6 +123,10 @@ check('a refusal with a drifted field is refused', () =>
 for (const r of fixture.deviceRequests) {
   check(`device request ${JSON.stringify(r)}`, () => assert.deepEqual(decodeDeviceRequest(structuredClone(r)), r));
 }
+check('a device request with one channel for both slots reads as sent (the Rust side sets both)', () => {
+  const one = { backend: 'Asio', input: null, output: null, inputChannel: 2, buffer: null };
+  assert.deepEqual(decodeDeviceRequest(structuredClone(one)), one);
+});
 for (const s of fixture.deviceStatuses) {
   check(`device status ${s.backend}`, () => assert.deepEqual(decodeDeviceStatus(structuredClone(s)), s));
 }
@@ -184,6 +192,11 @@ const refused = {
     decodeEvent(e);
   },
   'an unknown command': () => decodeCommand('Panic'),
+  'an unknown note target': () => decodeCommand({ SelectInstrument: 'None' }),
+  'an Off target with a payload': () => decodeCommand({ SelectInstrument: { Off: 0 } }),
+  'an instrument level by the Rust name': () => decodeCommand({ SetInstrumentGain: ['Pad', 0.5] }),
+  'a device request with a third slot': () =>
+    decodeDeviceRequest({ backend: 'Asio', input: null, output: null, inputChannels: [0, 1, 2], buffer: null }),
   'an unknown action': () => decodeCommand({ Action: 'Panic' }),
   'a HOLD without its control': () => decodeCommand({ Action: 'Hold' }),
   'a HOLD release past a u8 control': () => decodeCommand({ ActionOn: [0, { Release: 256 }] }),

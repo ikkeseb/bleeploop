@@ -11,13 +11,13 @@
 
 use std::cell::Cell;
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, AtomicU8, Ordering::{Acquire, Relaxed, Release}};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicU8, Ordering::{Acquire, Relaxed, Release}};
 use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 use std::time::{Duration, Instant};
 
 use cpal::{FromSample, Sample, SizedSample};
 use lf_engine::grid::Frame;
-use lf_engine::ProcessContext;
+use lf_engine::{ProcessContext, SLOT_COUNT};
 use rtrb::{Consumer, Producer};
 
 use super::pipes::{PullPipe, PushEnd};
@@ -35,6 +35,8 @@ const SILENT_BLOCKS: u32 = 2;
 pub(crate) const LATENCY_SAMPLES: usize = 16;
 /// An input sample at or past this reached full scale (the meter's clip).
 const CLIP_LEVEL: f32 = 0.999;
+/// Frames the WASAPI input callback converts at a time.
+const SCRATCH_FRAMES: usize = 1024;
 
 /// Share output's end in the callback (`share::ShareTap`; a fake in tests): fed the rendered stereo
 /// master every block. Never blocks or allocates.
@@ -75,8 +77,9 @@ pub(crate) enum Side {
 
 /// What one run's callbacks share with the owner.
 pub(crate) struct Run {
-    /// The capture channel the input callback reads (`EngineHost::set_input_channel`).
-    pub(crate) channel: AtomicU32,
+    /// The capture channel each slot reads (`EngineHost::set_slot_input_channel`), 32 bits a slot in one
+    /// word: a change of both is one store, so no callback reads half of it.
+    picks: AtomicU64,
     /// The owner asks for the fade-out; the output callback answers once the device plays silence.
     pub(crate) fade_out: AtomicBool,
     pub(crate) faded: AtomicBool,
@@ -94,9 +97,9 @@ pub(crate) struct Run {
 }
 
 impl Run {
-    pub(crate) fn new(channel: u32) -> Run {
+    pub(crate) fn new(channels: [u32; SLOT_COUNT]) -> Run {
         Run {
-            channel: AtomicU32::new(channel),
+            picks: AtomicU64::new(pack(channels)),
             fade_out: AtomicBool::new(false),
             faded: AtomicBool::new(false),
             fault: AtomicU8::new(0),
@@ -134,11 +137,37 @@ impl Run {
         self.fault.load(Acquire) != 0
     }
 
+    /// Each slot's capture channel, as the owner last set them.
+    pub(crate) fn slot_channels(&self) -> [u32; SLOT_COUNT] {
+        unpack(self.picks.load(Relaxed))
+    }
+
+    /// Set every slot's capture channel at once (the owner; the callbacks read them each block).
+    pub(crate) fn set_slot_channels(&self, channels: [u32; SLOT_COUNT]) {
+        self.picks.store(pack(channels), Relaxed);
+    }
+
+    /// Each slot's capture channel on an input with `channels` channels (a pick past them reads the last).
+    fn picks(&self, channels: usize) -> [usize; SLOT_COUNT] {
+        self.slot_channels().map(|c| (c as usize).min(channels - 1))
+    }
+
     /// The alignment the callbacks measured so far: (input + output, input), in frames.
     pub(crate) fn latency(&self) -> (Frame, Frame) {
         let (input, output) = (self.in_latency.load(Relaxed), self.out_latency.load(Relaxed));
         (input + output, input)
     }
+}
+
+const _: () = assert!(SLOT_COUNT * 32 <= 64, "every slot's pick fits the one word");
+
+/// Every slot's capture channel in one word, slot `s` in bits `32 s..32 (s + 1)`.
+fn pack(channels: [u32; SLOT_COUNT]) -> u64 {
+    channels.iter().enumerate().fold(0, |word, (s, &c)| word | (c as u64) << (32 * s))
+}
+
+fn unpack(word: u64) -> [u32; SLOT_COUNT] {
+    std::array::from_fn(|s| (word >> (32 * s)) as u32)
 }
 
 /// The median of a run's first `LATENCY_SAMPLES` latency reports, then frozen.
@@ -239,7 +268,7 @@ impl Capture {
 }
 
 /// ASIO's input callback: asio-sys runs it first in every bufferSwitch (it registered first), so it
-/// copies the selected channel into the handoff for this cycle's output callback and counts the cycle.
+/// copies each slot's channel into its handoff for this cycle's output callback and counts the cycle.
 pub(crate) struct DuplexInput {
     core: Arc<Core>,
     run: Arc<Run>,
@@ -265,12 +294,14 @@ impl DuplexInput {
             self.core.counters.lock_misses.fetch_add(1, Relaxed);
             return;
         };
-        let (channels, channel) = (self.channels, (self.run.channel.load(Relaxed) as usize).min(self.channels - 1));
+        let (channels, picks) = (self.channels, self.run.picks(self.channels));
         let rt = &mut *rt;
         let ok = guarded(&self.core.counters, || {
             let n = data.len() / channels;
-            for (h, frame) in rt.handoff.iter_mut().zip(data.chunks_exact(channels)) {
-                *h = f32::from_sample(frame[channel]);
+            for (handoff, channel) in rt.handoff.iter_mut().zip(picks) {
+                for (h, frame) in handoff.iter_mut().zip(data.chunks_exact(channels)) {
+                    *h = f32::from_sample(frame[channel]);
+                }
             }
             rt.handoff_len = n;
             rt.in_cycles += 1;
@@ -281,8 +312,8 @@ impl DuplexInput {
     }
 }
 
-/// WASAPI's input callback, on its own thread and clock: pushes the selected channel into the join
-/// pipe the output callback pulls from (drop-on-full, counted), and measures the capture's age.
+/// WASAPI's input callback, on its own thread and clock: pushes each slot's channel, interleaved, into
+/// the join pipe the output callback pulls from (drop-on-full, counted), and measures the capture's age.
 pub(crate) struct JoinInput {
     core: Arc<Core>,
     run: Arc<Run>,
@@ -290,6 +321,7 @@ pub(crate) struct JoinInput {
     /// The engine's rate: the age is measured in its frames.
     rate: u32,
     push: PushEnd,
+    /// `SCRATCH_FRAMES` frames of the slots' streams, interleaved.
     scratch: Vec<f32>,
     probe: Probe,
     /// A caught panic: the input stays silent for the rest of the run.
@@ -299,7 +331,7 @@ pub(crate) struct JoinInput {
 impl JoinInput {
     /// Allocates: build it on the owner thread.
     pub(crate) fn new(core: Arc<Core>, run: Arc<Run>, channels: usize, rate: u32, push: PushEnd) -> JoinInput {
-        JoinInput { core, run, channels: channels.max(1), rate, push, scratch: vec![0.0; 1024], probe: Probe::new(), dead: false }
+        JoinInput { core, run, channels: channels.max(1), rate, push, scratch: vec![0.0; SCRATCH_FRAMES * SLOT_COUNT], probe: Probe::new(), dead: false }
     }
 
     fn capture<T: SizedSample>(&mut self, data: &[T], latency: Option<Duration>)
@@ -315,16 +347,18 @@ impl JoinInput {
         if self.dead {
             return;
         }
-        let (channels, channel) = (self.channels, (self.run.channel.load(Relaxed) as usize).min(self.channels - 1));
+        let (channels, picks) = (self.channels, self.run.picks(self.channels));
         let (push, scratch, counters) = (&mut self.push, &mut self.scratch, &self.core.counters);
         let ok = guarded(counters, || {
             let mut dropped = 0;
-            for chunk in data.chunks(channels * scratch.len()) {
-                let mono = &mut scratch[..chunk.len() / channels];
-                for (s, frame) in mono.iter_mut().zip(chunk.chunks_exact(channels)) {
-                    *s = f32::from_sample(frame[channel]);
+            for chunk in data.chunks(channels * SCRATCH_FRAMES) {
+                let out = &mut scratch[..chunk.len() / channels * SLOT_COUNT];
+                for (o, frame) in out.chunks_exact_mut(SLOT_COUNT).zip(chunk.chunks_exact(channels)) {
+                    for (s, &channel) in o.iter_mut().zip(&picks) {
+                        *s = f32::from_sample(frame[channel]);
+                    }
                 }
-                dropped += push.push(mono);
+                dropped += push.push(out);
             }
             if dropped > 0 {
                 counters.join_overruns.fetch_add(1, Relaxed);
@@ -336,11 +370,12 @@ impl JoinInput {
 
 /// Where the output callback's input comes from.
 enum Source {
-    /// ASIO: this cycle's handoff in `Rt`.
+    /// ASIO: this cycle's handoffs in `Rt`.
     Duplex,
-    /// WASAPI: the join pipe, pulled to exactly this block. `joined` once a pull came back whole: the
-    /// startup pulls before the input arrives are not starves.
-    Join { pipe: PullPipe, x: Vec<f32>, joined: bool, delay: Option<Frame> },
+    /// WASAPI: the join pipe, pulled to exactly this block (the slots' streams interleaved in `x`), then
+    /// each slot's into `xs`. `joined` once a pull came back whole: the startup pulls before the input
+    /// arrives are not starves.
+    Join { pipe: PullPipe, x: Vec<f32>, xs: [Vec<f32>; SLOT_COUNT], joined: bool, delay: Option<Frame> },
 }
 
 /// The output callback: the one clock. It numbers the device frames, renders the engine in slices of
@@ -375,8 +410,9 @@ impl Render {
 
     /// WASAPI's output callback, pulling the input through the join pipe.
     pub(crate) fn join(core: Arc<Core>, run: Arc<Run>, channels: usize, rate: u32, pipe: PullPipe) -> Render {
-        let x = vec![0.0; MAX_DEVICE_BLOCK];
-        Render::new(core, run, channels, rate, Source::Join { pipe, x, joined: false, delay: None })
+        let x = vec![0.0; MAX_DEVICE_BLOCK * SLOT_COUNT];
+        let xs = std::array::from_fn(|_| vec![0.0; MAX_DEVICE_BLOCK]);
+        Render::new(core, run, channels, rate, Source::Join { pipe, x, xs, joined: false, delay: None })
     }
 
     fn new(core: Arc<Core>, run: Arc<Run>, channels: usize, rate: u32, source: Source) -> Render {
@@ -433,13 +469,18 @@ impl Render {
         // The join pipe is this callback's own: pull even when the engine is locked, so its fill holds.
         let avail = match &mut self.source {
             Source::Duplex => 0,
-            Source::Join { pipe, x, joined, .. } => {
-                let m = n.min(x.len());
+            Source::Join { pipe, x, xs, joined, .. } => {
+                let m = n.min(MAX_DEVICE_BLOCK);
                 // The input captured while the buffer played dry belongs to the frames skipped below.
                 pipe.skip(lost as usize);
                 #[cfg(debug_assertions)]
                 let fill_before = pipe.fill();
-                let zeroed = pipe.pull(&mut x[..m]) + (n - m);
+                let zeroed = pipe.pull(&mut x[..m * SLOT_COUNT]) + (n - m);
+                for (s, xs) in xs.iter_mut().enumerate() {
+                    for (y, frame) in xs[..m].iter_mut().zip(x.chunks_exact(SLOT_COUNT)) {
+                        *y = frame[s];
+                    }
+                }
                 let trims = pipe.take_trims();
                 #[cfg(debug_assertions)]
                 trace::join_pull(self.run.callbacks.load(Relaxed), n, fill_before, trims > 0);
@@ -508,7 +549,7 @@ impl Render {
                 // A run's first output callback takes the input's count: the input starts playing just
                 // before the output, so the cycles it ran alone are the start, not a fault.
                 rt.out_cycles = if rt.out_cycles == 0 { rt.in_cycles } else { rt.out_cycles + 1 };
-                let same = rt.in_cycles == rt.out_cycles && rt.handoff_len == n && n <= rt.handoff.len();
+                let same = rt.in_cycles == rt.out_cycles && rt.handoff_len == n && n <= MAX_DEVICE_BLOCK;
                 if !same && rt.out_cycles > 0 {
                     // Out of step: count it once and resync, as the Stage 1 spike does.
                     counters.duplex_faults.fetch_add(1, Relaxed);
@@ -527,23 +568,25 @@ impl Render {
             lag,
             ..
         } = rt;
-        let input: &[f32] = match &self.source {
-            Source::Duplex => &handoff[..],
-            Source::Join { x, .. } => &x[..],
+        let inputs: [&[f32]; SLOT_COUNT] = match &self.source {
+            Source::Duplex => handoff.each_ref().map(|h| &h[..]),
+            Source::Join { xs, .. } => xs.each_ref().map(|x| &x[..]),
         };
-        meter(&self.core, &input[..avail.min(input.len())]);
+        for input in inputs {
+            meter(&self.core, &input[..avail.min(input.len())]);
+        }
         let mut engine = engine.as_mut().filter(|_| !*faulted);
         let max_block = self.left.len();
         let target = if fading { 0.0 } else { 1.0 };
         let mut off = 0;
         while off < n {
             let m = (n - off).min(max_block);
-            let x = if off + m <= avail { &input[off..off + m] } else { &self.zeros[..m] };
+            let x = inputs.map(|input| if off + m <= avail { &input[off..off + m] } else { &self.zeros[..m] });
             let (left, right) = (&mut self.left[..m], &mut self.right[..m]);
             match engine.as_deref_mut() {
                 Some(engine) => {
                     let ctx = ProcessContext { frame: ctx.frame + off as Frame, xrun: ctx.xrun && off == 0, ..ctx };
-                    engine.process(&ctx, x, left, right);
+                    engine.process_inputs(&ctx, x, left, right);
                 }
                 None => {
                     left.fill(0.0);
@@ -553,7 +596,7 @@ impl Render {
             fade(&mut self.gain, self.step, target, left, right);
             #[cfg(debug_assertions)]
             if let Some(lag) = lag.as_mut() {
-                lag.block(ctx.frame + off as Frame, x, left, right);
+                lag.block(ctx.frame + off as Frame, x[0], left, right);
             }
             if let Some(tap) = tap.as_mut() {
                 tap.push(left, right, counters);
@@ -788,6 +831,15 @@ mod tests {
         assert_eq!(all.quantile(0.999), Some(45));
         assert_eq!(all.max(), Some(LOAD_BINS - 1), "longer than the last bin lands in it");
         assert_eq!(all.since(&all).quantile(0.5), None, "an empty phase has no quantile");
+    }
+
+    #[test]
+    fn every_slots_pick_travels_in_one_word() {
+        let run = Run::new([3, u32::MAX]);
+        assert_eq!(run.slot_channels(), [3, u32::MAX]);
+        run.set_slot_channels([u32::MAX, 0]);
+        assert_eq!(run.slot_channels(), [u32::MAX, 0], "a swap lands whole");
+        assert_eq!(run.picks(2), [1, 0], "a pick past the device's channels reads its last");
     }
 
     #[test]

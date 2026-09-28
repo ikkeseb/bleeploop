@@ -767,6 +767,145 @@ fn a_slot_passes_the_input_only_while_live() {
     assert!(probe.input_peak() > 0.4, "live, it gets the input");
 }
 
+// ── Each slot its own input ──────────────────────────────────────────────────────────────────────────
+
+/// Two capture channels, one per live slot (distinct levels, so a slot reading the other's, or both
+/// reading one, shows): each slot takes only its own, and both are heard and recorded, each once.
+#[test]
+fn two_live_slots_each_monitor_and_record_only_their_own_input() {
+    let mut rig = Rig::new();
+    rig.set_inputs(|_| 0.25, |_| 0.5);
+    rig.set(Command::SetSlotLive(1, true));
+    rig.keep_output();
+    rig.advance(1000);
+    assert_bits(&rig.monitor, |_| 0.75, "both live: each input heard once");
+    rig.set(Command::SetSlotLive(0, false));
+    rig.keep_output();
+    rig.advance(1000);
+    assert_bits(&rig.monitor, |_| 0.5, "slot 1 alone: its own input");
+    rig.set(Command::SetSlotLive(0, true));
+    rig.set(Command::SetSlotLive(1, false));
+    rig.keep_output();
+    rig.advance(1000);
+    assert_bits(&rig.monitor, |_| 0.25, "slot 0 alone: its own input");
+
+    rig.set(Command::SetSlotLive(1, true));
+    rig.set(Command::SetFixedLength(true));
+    rig.set(Command::SetFixedBars(1.0));
+    rig.press(Command::RecDub(0));
+    rig.advance_to(rig.end_frame() + 1);
+    assert_eq!(rig.state(0), LaneState::Playing);
+    assert!(rig.pcm(0).iter().all(|&x| (x - 0.75).abs() < 1e-6), "recorded: both inputs, each once");
+
+    let (a, b) = (Probe::new(), Probe::new());
+    rig.install(0, Fake::effect(0.0, 1.0, &a));
+    rig.install(1, Fake::effect(0.0, 1.0, &b));
+    rig.advance(1024);
+    assert_eq!((a.input_peak(), b.input_peak()), (0.25, 0.5), "each effect takes its own slot's input");
+}
+
+/// A dry slot and a live effect with latency, each on its own input, played at once (on the heard
+/// downbeat): each is heard as soon as it can be, the dry one at once and the effect its latency
+/// later, and both land together on the take's first frame.
+#[test]
+fn a_dry_and_a_latent_live_slot_land_together_in_the_take() {
+    let mut rig = Rig::with(Opts { align: PHYS + LIMITER, ..Default::default() });
+    rig.install(0, Box::new(Delay::new(PLUGIN)));
+    rig.set(Command::SetSlotLive(1, true));
+    rig.set(Command::SetFixedLength(true));
+    rig.set(Command::SetFixedBars(1.0));
+    let mark = rig.events.len();
+    rig.press(Command::RecDub(0));
+    let downbeat = rig.count_one(mark) + 4 * 24_000;
+    let played = downbeat + LIMITER + PHYS;
+    rig.set_inputs(move |f| if f == played { 1.0 } else { 0.0 }, move |f| if f == played { 0.5 } else { 0.0 });
+    assert_eq!(rig.start_frame() - downbeat, PHYS + PLUGIN + LIMITER, "the live effect's latency joins the alignment");
+    rig.keep_output();
+    let from = rig.frame;
+    rig.advance_to(rig.end_frame() + 1);
+    let heard: Vec<(Frame, f32)> = rig.monitor.iter().enumerate().filter(|(_, &x)| x != 0.0).map(|(k, &x)| (from + k as Frame, x)).collect();
+    assert_eq!(heard, [(played, 0.5), (played + PLUGIN, 1.0)], "heard: the dry note at once, the effect's its latency later");
+    assert_eq!(rig.state(0), LaneState::Playing);
+    let pcm = rig.pcm(0);
+    let hits: Vec<(usize, f32)> = pcm.iter().enumerate().filter(|(_, &x)| x != 0.0).map(|(k, &x)| (k, x)).collect();
+    assert_eq!(hits, [(0, 1.5)], "recorded: both notes, together, on the loop's frame 0");
+}
+
+/// A mid-take change to the live slots, at frame `at` of the take.
+#[derive(Clone, Copy, Debug)]
+enum MidTake {
+    /// Slot 0 (the effect's) goes live or off.
+    EffectLive(bool),
+    /// Slot 1 (the dry one) goes off.
+    DryOff,
+    /// Slot 0's effect leaves (its slot stays live, empty).
+    RemoveEffect,
+}
+
+/// A two-bar take with a dry voice (a frame code) on slot 1 and an effect (`LATENCY` frames of delay)
+/// on slot 0 fed `fx` times the code; one [`MidTake`] change a bar in. The take's alignment is fixed at
+/// its arm, and the record compensation holds with it: each voice lands on the loop as its latched delay
+/// puts it, frame for frame, with nothing skipped or repeated at the change, and what was on its way
+/// when a slot went off still lands. `expected(t, at)` is the loop's frame at input frame `t` given the
+/// change at `at`.
+fn take_through(effect_live: bool, change: MidTake, fx: f32, expected: impl Fn(Frame, Frame) -> f32) {
+    const LATENCY: Frame = 480;
+    let mut rig = Rig::with(Opts { align: PHYS + LIMITER, ..Default::default() });
+    rig.install(0, Box::new(Delay::new(LATENCY)));
+    rig.set(Command::SetSlotLive(0, effect_live));
+    rig.set(Command::SetSlotLive(1, true));
+    rig.set_inputs(move |f| fx * common::code(f), common::code);
+    rig.set(Command::SetFixedLength(true));
+    rig.set(Command::SetFixedBars(2.0));
+    rig.press(Command::RecDub(0));
+    let start = rig.start_frame();
+    rig.advance_to(start + rig.fpb() + 77);
+    let at = rig.frame;
+    match change {
+        MidTake::EffectLive(on) => rig.set(Command::SetSlotLive(0, on)),
+        MidTake::DryOff => rig.set(Command::SetSlotLive(1, false)),
+        MidTake::RemoveEffect => rig.remove(0),
+    }
+    rig.advance_to(rig.end_frame() + 1);
+    assert_eq!(rig.state(0), LaneState::Playing, "{change:?}");
+    let pcm = rig.pcm(0);
+    assert_eq!(pcm.len() as Frame, 2 * rig.fpb());
+    let wrong = pcm.iter().enumerate().find(|&(k, &x)| x.to_bits() != expected(start + k as Frame, at).to_bits());
+    assert_eq!(wrong.map(|(k, &x)| (k, x, expected(start + k as Frame, at))), None, "{change:?}: the first frame off its latched delay (loop frame, got, want)");
+}
+
+#[test]
+fn the_record_compensation_holds_through_a_take_whatever_the_slots_do_mid_take() {
+    const L: Frame = 480;
+    let code = common::code;
+    // Latched with the effect live: both voices L late, the effect's until its input stopped at `at`.
+    take_through(true, MidTake::EffectLive(false), 2.0, |t, at| code(t - L) + if t - L < at { 2.0 * code(t - L) } else { 0.0 });
+    // Latched with it off: the dry voice stays on time, the effect's lands L late from its input's start.
+    take_through(false, MidTake::EffectLive(true), 2.0, |t, at| code(t) + if t - L >= at { 2.0 * code(t - L) } else { 0.0 });
+    // The dry slot off: what was on its way (L frames) still lands, then silence.
+    take_through(true, MidTake::DryOff, 2.0, |t, at| 2.0 * code(t - L) + if t - L < at { code(t - L) } else { 0.0 });
+    // The effect leaves: the dry voice keeps its delay.
+    take_through(true, MidTake::RemoveEffect, 0.0, |t, _| code(t - L));
+}
+
+/// `NoteTarget::Off` takes a slot's notes nowhere: switching to it releases what the slot holds, and a
+/// note after it reaches no slot.
+#[test]
+fn off_releases_a_slots_held_note_and_sends_it_no_more() {
+    let probe = Probe::new();
+    let mut rig = Rig::new();
+    rig.install(1, Fake::instrument(0.0, 0, &probe));
+    rig.set(Command::SelectInstrument(NoteTarget::Slot(1)));
+    rig.press(Command::NoteOn(60, 1.0));
+    rig.press(Command::SelectInstrument(NoteTarget::Off));
+    rig.keep_output();
+    rig.press(Command::NoteOn(62, 1.0));
+    rig.press(Command::NoteOff(60));
+    rig.advance(1024);
+    assert_eq!(probe.keys(), vec![(true, 60), (false, 60)], "the held note released at the switch, nothing after it");
+    assert!(rig.bus.iter().all(|&x| x == 0.0), "no note sounds");
+}
+
 // ── With no device running ────────────────────────────────────────────────────────────────────────────
 
 #[test]

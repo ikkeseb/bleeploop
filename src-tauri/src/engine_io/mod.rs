@@ -4,7 +4,7 @@
 //! module's briefing.
 //!
 //! [`EngineHost`] is the process-wide handle: one device owner thread serializes every device
-//! transition (open, backend switch, channel change, loss, close); the engine ([`lf_engine::Engine`])
+//! transition (open, backend switch, a slot's channel change, loss, close); the engine ([`lf_engine::Engine`])
 //! sits in one `Mutex` that the device callback only `try_lock`s (a miss plays silence and counts) and
 //! that the owner takes only with both streams dropped, so the engine and the plugin slots outlive
 //! device switches and loss. The callback body runs under `catch_unwind` inside the lock guard: a caught
@@ -42,6 +42,11 @@
 //!   a miss is a duplex-order fault, counted. WASAPI: the output callback is the clock; the input joins through a ring and a
 //!   resampler with a drift controller. Every callback thread is promoted to MMCSS Pro Audio on first
 //!   entry.
+//! - **Each plugin slot reads its own capture channel** (`DeviceRequest::input_channels`; auto is input
+//!   2 on a device with two or more). The input callback publishes one mono stream per slot, from the
+//!   picks in `Run` (atomics, changed in place): ASIO copies each slot's channel into its own handoff,
+//!   WASAPI pushes them interleaved through the one join pipe. The engine hands each slot its own
+//!   (`Engine::process_inputs`); the meter takes the louder.
 //! - **The frame counter pauses across a switch.** A backend switch or a fallback continues the
 //!   counter where the last callback left it, so loops resume in place. It counts the frames the
 //!   device took: a late wake is no loss. Only a WASAPI buffer found empty jumps it, by what the device
@@ -128,7 +133,7 @@ impl Default for HostConfig {
 
 /// A device to open (or switch to).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", from = "RequestWire")]
 pub struct DeviceRequest {
     pub backend: AudioBackend,
     /// WASAPI capture device id (`audio_input::list_input_devices`); `None` = the default. ASIO uses
@@ -136,10 +141,32 @@ pub struct DeviceRequest {
     pub input: Option<String>,
     /// WASAPI render device id (`audio_output::list_output_devices`); `None` = the default.
     pub output: Option<String>,
-    /// The capture channel (0-based); `None` = auto (`audio_input::InputChannelControl`).
-    pub input_channel: Option<u32>,
+    /// Each plugin slot's capture channel (0-based); `None` = auto (`transition::input_channel`). On
+    /// the wire `inputChannels: [a, b]`; a request with one `inputChannel` instead sets both slots.
+    pub input_channels: [Option<u32>; SLOT_COUNT],
     /// Frames per device callback; `None` = the driver's default.
     pub buffer: Option<u32>,
+}
+
+/// A [`DeviceRequest`] as it arrives: each slot's channel, or one channel for both.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RequestWire {
+    backend: AudioBackend,
+    input: Option<String>,
+    output: Option<String>,
+    #[serde(default)]
+    input_channels: Option<[Option<u32>; SLOT_COUNT]>,
+    #[serde(default)]
+    input_channel: Option<u32>,
+    buffer: Option<u32>,
+}
+
+impl From<RequestWire> for DeviceRequest {
+    fn from(w: RequestWire) -> DeviceRequest {
+        let input_channels = w.input_channels.unwrap_or([w.input_channel; SLOT_COUNT]);
+        DeviceRequest { backend: w.backend, input: w.input, output: w.output, input_channels, buffer: w.buffer }
+    }
 }
 
 /// The device that runs.
@@ -339,9 +366,9 @@ pub(crate) struct Rt {
     /// A panic was caught under the lock: the engine stays silent until the owner replaces it
     /// (`Core::fault` tells the owner).
     pub(crate) faulted: bool,
-    /// ASIO: this cycle's input, copied by the input callback for the output callback, and each
-    /// side's cycle count (equal after a whole cycle).
-    pub(crate) handoff: Vec<f32>,
+    /// ASIO: this cycle's input, each slot's channel, copied by the input callback for the output
+    /// callback, and each side's cycle count (equal after a whole cycle).
+    pub(crate) handoff: [Vec<f32>; SLOT_COUNT],
     pub(crate) handoff_len: usize,
     pub(crate) in_cycles: u64,
     pub(crate) out_cycles: u64,
@@ -399,8 +426,8 @@ pub(crate) struct Core {
     /// The alignment the output callback last rendered with (`DeviceStatus`).
     pub(crate) align_frames: AtomicI64,
     pub(crate) input_frames: AtomicI64,
-    /// The input meter since the feed last took it: the capture channel's peak (f32 bits) and whether
-    /// a sample reached full scale.
+    /// The input meter since the feed last took it: the slots' capture channels' peak (f32 bits) and
+    /// whether a sample reached full scale.
     pub(crate) meter_peak: AtomicU32,
     pub(crate) meter_clip: AtomicBool,
     /// One session job at a time (`session.rs`), and the jobs an earlier call gave up on that are still
@@ -422,7 +449,7 @@ impl Core {
             rt: Mutex::new(Rt {
                 engine: None,
                 faulted: false,
-                handoff: vec![0.0; MAX_DEVICE_BLOCK],
+                handoff: std::array::from_fn(|_| vec![0.0; MAX_DEVICE_BLOCK]),
                 handoff_len: 0,
                 in_cycles: 0,
                 out_cycles: 0,
@@ -576,7 +603,7 @@ impl EngineHost {
     /// engine and evicts the plugin units into their slot hosts, and the loops go with the old engine,
     /// so while it holds audio that switch is refused ([`OpenError::RateChange`]) unless `force`. A
     /// switch that fails to start reopens the device it replaced; a request for the running device only
-    /// changes its channel.
+    /// changes its channels.
     pub fn open(&self, request: DeviceRequest, force: bool) -> Result<DeviceStatus, OpenError> {
         // Whoever claims the flag first decides: the owner once the open finished (its result is then
         // this caller's), or this caller on its timeout (a later open is the owner's to undo).
@@ -603,9 +630,11 @@ impl EngineHost {
         self.ask("close", REQUEST_TIMEOUT, Request::Close)
     }
 
-    /// Change the capture channel without rebuilding a stream.
-    pub fn set_input_channel(&self, channel: Option<u32>) -> Result<(), String> {
-        self.ask("set_input_channel", REQUEST_TIMEOUT, |reply| Request::SetInputChannel(channel, reply))
+    /// Change `slot`'s capture channel (`None` = auto) without rebuilding a stream; the running
+    /// request keeps it, so the owner's reopens (a loss, a fault) keep it too. Refused for a channel the
+    /// device lacks (the other slot's stays), and while no device runs.
+    pub fn set_slot_input_channel(&self, slot: usize, channel: Option<u32>) -> Result<(), String> {
+        self.ask("set_slot_input_channel", REQUEST_TIMEOUT, |reply| Request::SetSlotInputChannel(slot, channel, reply))
     }
 
     /// Share output (STATUS E2): mirror the post-limiter master to this WASAPI render endpoint while
@@ -702,7 +731,7 @@ impl EngineHost {
         }
     }
 
-    /// The input meter since the last call: the capture channel's linear peak, and whether a sample
+    /// The input meter since the last call: the louder slot input's linear peak, and whether a sample
     /// reached full scale.
     pub fn take_meter(&self) -> (f32, bool) {
         let peak = f32::from_bits(self.core.meter_peak.swap(0, Relaxed));

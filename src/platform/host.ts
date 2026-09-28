@@ -380,8 +380,10 @@ export interface EngineHost {
   close(): Promise<void>;
   /** The device that runs, or null. */
   status(): Promise<DeviceStatus | null>;
-  /** The capture channel (0-based; null = auto), switched without reopening the device. */
-  setInputChannel(channel: number | null): Promise<void>;
+  /** A plugin slot's capture channel (0-based; null = auto: input 2 on a device with two or more),
+   * switched without reopening the device; the running device keeps it for its own reopens. Rejects for
+   * a channel the device lacks (nothing changes) and while no device runs. */
+  setSlotInputChannel(slot: number, channel: number | null): Promise<void>;
   /** A batch of commands, applied in order at the next block. Fire-and-forget: engine refusals come
    * back on the feed; a rejection means the batch never reached the engine. */
   send(commands: readonly EngineCommand[]): Promise<void>;
