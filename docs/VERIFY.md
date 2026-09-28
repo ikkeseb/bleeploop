@@ -167,6 +167,12 @@ blocks until the verdict, so an agent harness should run it in the background.
     ((8 − k)/8)² 1 0.766 0.563 0.391 0.250 0.141 0.063 0.016, past the bar line a quarter of the floor
     bar, and lane 1 came back at 1.000 after PLAY ALL; the first launch failed that last bar once at 256
     (0.563: a meter read every 20 ms missed the bar's accent, now read every 4 ms over two bars).
+    After the per-slot input and the record-compensation latch (2026-09-28, a guitar cable from line
+    out R into input 2, input gain at 11 o'clock, peak gain 0.33; the cable used before gave no signal
+    on either input): 20/20 bars at 64 and 256; at 128, in two launches, B and D (re-recorded, peak
+    gain 0.106) each read one beat 147–250 ms early, near its window's start (once take A too), which
+    fails spread and drift while every other beat sits within 0.005 ms. v0.1.0's code on the same rig
+    reads the same in B and D, so it predates the change (cause unknown).
   - `native:loopback` after a change to record compensation, the plugin bridge or the drift
     controller. Baseline (2026-09-24, Scarlett 2i2 3rd gen, ASIO 256, Pro-Q 3, a cable from line
     out R into input 2): residual +64/+65 ms at trim 0. With the worklet reading the ring directly,

@@ -22,7 +22,10 @@ multiply (E10) and TRIM (F16): `pnpm rust:check` (473 tests), the browser probes
 review fixes, FADE and DUB FEEDBACK: `pnpm rust:check` (533 tests), `pnpm verify:jam`, and on the rig
 `native:engine-loopback` with phase I (FADE), 20/20 bars at 64/128/256, and `--echo=1` at 128 with the
 echo checked on every click (one of two launches failed drift by 0.004 ms/min after a one-frame step
-inside take A; the relaunch passed).
+inside take A; the relaunch passed). On 2026-09-28, after the per-slot input, the ASIO driver work and
+the record-compensation latch: `pnpm rust:check` (562 tests), the browser probes 53/53, and on the rig
+`native:engine-loopback` 20/20 at 64 and 256 and 18/20 at 128 (a detector reading v0.1.0 repeats,
+`docs/VERIFY.md`), and `release:smoke` 6/6 in a fresh profile with the input taken on an Off slot.
 Driver latency reports are not guitar latency; after a relevant change, rerun only the affected check.
 
 **Last play: 2026-09-28** (engine, a local release build, ASIO; a second player on a WASAPI build
