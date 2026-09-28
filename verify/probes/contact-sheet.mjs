@@ -1,22 +1,23 @@
 /** Screenshot contact sheet: fixed looper scenes at three viewports (1280x820, 1920x1080, 1000x700),
- * keyboard bottom and hidden, each in its own fresh browser context. Scenes 1-7 are the web tier (synth
- * pills, no plugin host). Scenes 8-10 are the Windows app's guitar-first screen, in a second fresh
- * context whose platform host is substituted (the plugin-slot-pending pattern): `available` on, a scan
- * that finds one amp-sim (an effect whose input arm succeeds, standing in for an input bus), and stubbed
- * load/arm/editor replies. 8-native-first-launch = the host booted, nothing loaded (slot A's source
- * picker offers the amp-sim under Plugins); 9-amp-sim-live = the amp-sim picked in slot A's picker, which auto-starts
- * GO LIVE and the editor (INPUT LIVE); 10-amp-sim-idle = the same after stopping live input. Those
- * scenes prove the frontend's rendering of a native host's answers, never the native side.
- * 11-engine-in-fx is engine mode on the web engine fake (the engine-seam pattern: `__lfEngineFake` set
- * before the app loads, a scripted reset frame with every input send on) with the IN FX popover open;
- * it proves the rendering only, never the engine. 12-stage-view = the stage view (src/ui/stage/) over
- * five loaded lanes (playing, stopped, one muted), in the web-tier context, opened by its command-bar
- * cap. Writes
- * logs/contact-sheet/<viewport>-<kbd>-<scene>.png plus a tiling index.html unconditionally, before any
- * FAIL is raised, so a red run still leaves the sheet for the eye lap. Asserts: with FX open every
- * lane's clear button is fully visible (audit A4); an ARMED later take draws no rec-red in its canvas
- * while waiting (audit A3); no scene logs console.error or an uncaught page error (tagged with the
- * scene it happened in). Sees only the rendered DOM/canvas; a human still judges the screenshots.
+ * keyboard bottom and hidden, in engine mode on the web engine fake (`src/platform/host.web.ts`, the
+ * `engine-seam` pattern: `window.__lfEngineFake` set before the app loads, every lane, the clock and the
+ * waveforms scripted on the feed through `__lf.native`). Scenes 1-7, 11 and 12 run in one fresh browser
+ * context: 1-empty, 4-count-in (lane 1 ARMED behind the count-in), 2-first-take-recording (a first take
+ * one second in), 3-armed-waiting (a two-bar loop at 60 BPM playing, lane 2 an ARMED later take waiting
+ * for the boundary), 5-fx-five-lanes (five stopped one-bar lanes, lane 1's FX drawer open), 6-help,
+ * 7-audio-settings, 12-stage-view (five lanes, three playing, one muted, opened by its command-bar cap)
+ * and 11-engine-in-fx (a reset frame with every input send on, the IN FX popover open). Scenes 8-10 are
+ * the Windows app's guitar-first screen, in a second fresh context whose plugin host is served with
+ * `available: true` (host.web.ts routed, the slot-sources pattern) and stubbed: a scan that finds one
+ * amp-sim (an effect), stubbed load/editor replies. 8-native-first-launch = the host booted, nothing
+ * loaded (slot A's source picker offers the amp-sim under Plugins); 9-amp-sim-live = the amp-sim picked in
+ * slot A's picker, which auto-starts GO LIVE and the editor (INPUT LIVE); 10-amp-sim-idle = the same after
+ * stopping live input. Writes logs/contact-sheet/<viewport>-<kbd>-<scene>.png plus a tiling index.html
+ * unconditionally, before any FAIL is raised, so a red run still leaves the sheet for the eye lap.
+ * Asserts: with FX open every lane's clear button is fully visible (audit A4); an ARMED later take draws
+ * no rec-red in its canvas while waiting (audit A3); no scene logs console.error or an uncaught page error
+ * (tagged with the scene it happened in). Sees only the rendered DOM/canvas of scripted states: never the
+ * native engine, a real plugin host or WebView2; a human still judges the screenshots.
  * Run: pnpm probe contact-sheet
  */
 import { mkdir, writeFile } from 'node:fs/promises';
@@ -28,25 +29,46 @@ const placements = ['bottom', 'hidden'];
 const scenes = ['1-empty', '2-first-take-recording', '3-armed-waiting', '4-count-in', '5-fx-five-lanes', '6-help', '7-audio-settings',
   '8-native-first-launch', '9-amp-sim-live', '10-amp-sim-idle', '11-engine-in-fx', '12-stage-view'];
 const REC_PIXEL_LIMIT = 20; // anti-aliasing slack; a red playhead or tape is hundreds of pixels
+const RATE = 48000;
+const PEAK_FRAMES = 1024; // the engine's waveform bin (`lf-engine/src/overview.rs`)
+const AMP_SIM = { id: 'probe.amp-sim', name: 'Probe Amp Sim', format: 'vst3', isEffect: true,
+  path: 'C:\\Program Files\\Common Files\\VST3\\Probe Amp Sim.vst3' };
 
-/** Five one-bar lanes at 120 BPM with a visible wave; `playing` lanes start PLAYING. */
-async function loadLanes(page, { count, playing, bpm = 120, bars = 1 }) {
-  await page.evaluate(async ({ count, playing, bpm, bars }) => {
-    const lf = window.__lf;
-    const { defaultFxStates } = await import('/src/audio/fx/fx.ts');
-    lf.looper.clearAll();
-    const frames = Math.round(lf.engine.ctx.sampleRate * (60 / bpm) * 4 * bars);
-    const tracks = Array.from({ length: count }, (_, index) => {
-      const pcm = new Float32Array(frames);
-      for (let f = 0; f < frames; f++) pcm[f] = 0.4 * Math.sin(f / (40 + index * 9)) * Math.abs(Math.sin(f / 9000));
-      return { index, pcm, volume: 1, muted: false, reversed: false,
-        state: playing.includes(index) ? 'PLAYING' : 'STOPPED', fx: defaultFxStates() };
-    });
-    lf.looper.setFixedLengthEnabled(false);
-    lf.looper.setLoopEndStopEnabled(false);
-    await lf.looper.loadSession({ bpm, bars, masterLengthFrames: frames, tracks });
-  }, { count, playing, bpm, bars });
-}
+const lane = (state, extra = {}) => ({
+  state,
+  length: 0,
+  armed: false,
+  autoArmed: false,
+  canUndo: false,
+  canReverse: false,
+  reversed: false,
+  stopAt: null,
+  fading: false,
+  retakePass: 0,
+  ...extra,
+});
+const laneEvent = (i, info, frame = 0) => ({ Lane: { frame, lane: i, info } });
+const transport = (master, locked, bpm) => ({ Transport: { frame: 0, master, bpm, locked } });
+/** The clock anchor with `frame` rendering now. */
+const anchorAt = (frame) => ({ frame, atMs: Date.now(), rate: RATE, grid: 0 });
+/** `bins` waveform bins of lane `i` from bin 0, a visible wave a little different per lane, in a lane view
+ * of `count` bins. */
+const wave = (i, bins, count = bins) => {
+  const max = Array.from({ length: bins }, (_, b) => 0.05 + 0.4 * Math.abs(Math.sin((b * PEAK_FRAMES) / 9000 + i)));
+  return { lane: i, start: 0, count, min: max.map((v) => -v), max };
+};
+/** The looper's lanes at `bars` bars of `bpm`: `playing` lanes PLAYING, the other `count` lanes STOPPED,
+ * the rest EMPTY, each with its waveform. */
+const loopFrame = ({ count, playing, bpm = 120, bars = 1 }) => {
+  const master = Math.round(RATE * (60 / bpm) * 4 * bars);
+  const bins = Math.ceil(master / PEAK_FRAMES);
+  return {
+    events: [transport(master, true, bpm), ...[0, 1, 2, 3, 4].map((i) =>
+      laneEvent(i, i >= count ? lane('Empty') : lane(playing.includes(i) ? 'Playing' : 'Stopped', { length: master, canReverse: true })))],
+    anchor: anchorAt(RATE / 2),
+    peaks: Array.from({ length: count }, (_, i) => wave(i, bins)),
+  };
+};
 
 await probe(async ({ browser, open }) => {
   await mkdir(outDir, { recursive: true });
@@ -59,26 +81,36 @@ await probe(async ({ browser, open }) => {
       let scene = 'load';
       const errors = [];
       const init = (page) => {
-        // `[rec-comp] snapshot` is record-latency.ts's DEV-only going-live log line, not a fault.
-        page.on('console', (m) => { if (m.type() === 'error' && !m.text().startsWith('[rec-comp] snapshot')) errors.push({ scene, text: m.text() }); });
+        page.on('console', (m) => { if (m.type() === 'error') errors.push({ scene, text: m.text() }); });
         page.on('pageerror', (e) => errors.push({ scene, text: String(e) }));
       };
-      // `native` serves host.web.ts with `available: true`, so the native-only chrome renders; `engine`
-      // boots engine mode on the web engine fake instead.
-      const openPage = async (mode) => {
+      // Engine mode on the fake; `native` also serves host.web.ts with `available: true`, so the native-only
+      // chrome (the plugin host, GO LIVE, the editor) renders.
+      const openPage = async (native) => {
         const ctx = await browser.newContext();
-        const opened = await open({ context: ctx, viewport: { width, height }, allowPageErrors: true, init: (p) => {
+        const opened = await open({ context: ctx, viewport: { width, height }, allowPageErrors: true, init: async (p) => {
           init(p);
-          if (mode === 'engine') return p.addInitScript(() => { window.__lfEngineFake = true; });
-          if (mode === 'native') return p.route('**/src/platform/host.web.ts', async (route) => {
+          if (native) await p.route('**/src/platform/host.web.ts', async (route) => {
             const response = await route.fetch();
             await route.fulfill({ response, body: (await response.text()).replace('available: false', 'available: true') });
           });
+          await p.addInitScript(() => { window.__lfEngineFake = true; });
         } });
+        await opened.page.waitForFunction(() => window.__lf.native.opened.length === 1, undefined, { timeout: 5000 });
         await opened.page.evaluate((v) => window.__lf.layoutStore.setKeyboardPlacement(v), kbd);
         return [ctx, opened.page];
       };
-      let [context, page] = await openPage('web');
+      let [context, page] = await openPage(false);
+      let seq = 0;
+      const emit = (frame) => page.evaluate((f) => window.__lf.native.emit(f), { seq: ++seq, reset: false, events: [], ...frame });
+      /** A reset frame: a fresh engine with every lane EMPTY and `settings` remembered. */
+      const reset = (settings = []) => emit({
+        reset: true,
+        settings,
+        events: [...[0, 1, 2, 3, 4].map((i) => laneEvent(i, lane('Empty'))), transport(0, false, 120), { Selected: { frame: 0, lane: 0 } }],
+        anchor: anchorAt(0),
+        meter: { peak: 0, clip: false },
+      });
       const shoot = async (name) => {
         await page.evaluate(() => document.activeElement?.blur());
         const file = `${width}x${height}-${kbd}-${name}.png`;
@@ -88,31 +120,35 @@ await probe(async ({ browser, open }) => {
       const tag = `${width}x${height}-${kbd}`;
 
       scene = '1-empty';
-      await page.evaluate(() => window.__lf.looper.init());
+      await reset();
       await page.waitForTimeout(200);
       await shoot(scene);
 
       // The first take counts in one bar (4 beats), then records from the counted downbeat.
       scene = '4-count-in';
-      await page.evaluate(() => window.__lf.looper.recDub(0));
-      await page.waitForFunction(() => window.__lf.looper.trackInfo(0).armed);
+      await emit({
+        events: [laneEvent(0, lane('Recording', { armed: true })), transport(0, true, 120), { Beat: { frame: 0, beatInBar: 0, countLeft: 4, clicked: true } }],
+        anchor: anchorAt(0),
+      });
       await page.waitForTimeout(400);
       await shoot(scene);
 
+      // One second into the take (it started on the counted downbeat, a bar after the press).
       scene = '2-first-take-recording';
-      await page.waitForFunction(() => !window.__lf.looper.trackInfo(0).armed && window.__lf.looper.stateOf(0) === 'RECORDING', undefined, { timeout: 10000 });
-      await page.waitForTimeout(1000);
+      const bar120 = 2 * RATE;
+      await emit({
+        events: [laneEvent(0, lane('Recording'), bar120), { Beat: { frame: bar120, beatInBar: 0, countLeft: 0, clicked: true } }],
+        anchor: anchorAt(bar120 + RATE),
+        peaks: [wave(0, Math.ceil(RATE / PEAK_FRAMES))],
+      });
+      await page.waitForTimeout(400);
       await shoot(scene);
 
-      // Lane 1 plays a two-bar loop at 60 BPM (8 s); lane 2 arms a later take that waits ~7 s for the next boundary.
+      // Lane 1 plays a two-bar loop at 60 BPM (8 s), a second in; lane 2 is a later take ARMED for the next
+      // boundary, ~7 s away.
       scene = '3-armed-waiting';
-      await page.evaluate(() => window.__lf.looper.stop(0));
-      await page.waitForFunction(() => window.__lf.looper.stateOf(0) !== 'RECORDING');
-      await loadLanes(page, { count: 1, playing: [0], bpm: 60, bars: 2 });
-      // Loading starts playback on a boundary; arming at once would catch it, so let the loop run a second.
-      await page.waitForTimeout(1000);
-      await page.evaluate(() => window.__lf.looper.recDub(1));
-      await page.waitForFunction(() => window.__lf.looper.trackInfo(1).armed);
+      await emit(loopFrame({ count: 1, playing: [0], bpm: 60, bars: 2 }));
+      await emit({ events: [laneEvent(1, lane('Recording', { armed: true }))] });
       await page.waitForTimeout(700);
       await shoot(scene);
       const red = await page.evaluate(() => {
@@ -140,11 +176,10 @@ await probe(async ({ browser, open }) => {
       console.log(JSON.stringify({ tag, scene, ...red }));
       if (!red.armed) fail(`${tag} ${scene}: lane 2 was no longer armed at measurement`);
       else if (red.lane2RecPixels > REC_PIXEL_LIMIT) fail(`${tag} ${scene}: A3 armed lane 2 canvas has ${red.lane2RecPixels} rec-red pixels while waiting (limit ${REC_PIXEL_LIMIT}; empty lane 3 has ${red.lane3RecPixels})`);
-      await page.evaluate(() => window.__lf.looper.stop(1));
-      await page.waitForFunction(() => window.__lf.looper.stateOf(1) === 'EMPTY');
+      await emit({ events: [laneEvent(1, lane('Empty'))] });
 
       scene = '5-fx-five-lanes';
-      await loadLanes(page, { count: 5, playing: [] });
+      await emit(loopFrame({ count: 5, playing: [] }));
       await page.getByRole('button', { name: 'Track 1 FX', exact: true }).click();
       await page.getByRole('group', { name: 'FX, Track 1', exact: true }).waitFor();
       await page.waitForTimeout(250);
@@ -168,7 +203,8 @@ await probe(async ({ browser, open }) => {
       // shown): that corner scrolls by design, so the five-full-lanes rule holds only above it.
       const fiveLanesMustFit = height >= 820 || kbd === 'hidden';
       for (const c of clr) {
-        if (fiveLanesMustFit && c.fraction < 0.999) fail(`${tag} ${scene}: A4 Track ${c.lane} clear is ${Math.round(c.fraction * 100)}% visible (button ${c.top}..${c.bottom}px, clipped at ${c.visibleBottom}px)`);
+        if (c.missing) fail(`${tag} ${scene}: A4 Track ${c.lane} clear is missing`);
+        else if (fiveLanesMustFit && c.fraction < 0.999) fail(`${tag} ${scene}: A4 Track ${c.lane} clear is ${Math.round(c.fraction * 100)}% visible (button ${c.top}..${c.bottom}px, clipped at ${c.visibleBottom}px)`);
       }
       await page.getByRole('button', { name: 'Track 1 FX', exact: true }).click();
 
@@ -186,20 +222,30 @@ await probe(async ({ browser, open }) => {
       await page.evaluate(() => window.__lf.ui.closeSettings());
 
       scene = '12-stage-view';
-      await loadLanes(page, { count: 5, playing: [0, 2, 3] });
+      await emit(loopFrame({ count: 5, playing: [0, 2, 3] }));
       await page.evaluate(() => window.__lf.looper.setMute(3, true));
       await page.getByRole('button', { name: 'Stage view', exact: true }).click();
       await page.getByRole('dialog', { name: 'Stage view', exact: true }).waitFor();
       await page.waitForTimeout(400);
       await shoot(scene);
       await page.keyboard.press('Escape');
+      await page.getByRole('dialog', { name: 'Stage view', exact: true }).waitFor({ state: 'detached' });
+
+      // A reload's reset frame from an engine that remembers every input send on.
+      scene = '11-engine-in-fx';
+      await reset([{ SetInputSend: ['echo', true] }, { SetInputSend: ['reverb', true] }, { SetInputSend: ['ring', true] }]);
+      await page.getByRole('button', { name: 'Input effects', exact: true }).click();
+      await page.getByRole('dialog', { name: 'Input effects', exact: true }).waitFor();
+      await page.waitForTimeout(250);
+      await shoot(scene);
       await context.close();
 
       scene = '8-native-first-launch';
-      [context, page] = await openPage('native');
-      await page.evaluate(async () => {
+      [context, page] = await openPage(true);
+      seq = 0;
+      await page.evaluate(async (ampSim) => {
         const { platform } = await import('/src/platform/index.ts');
-        const instrument = await import('/src/audio/instrument.ts');
+        const instrument = await import('/src/ui/state/instrument.ts');
         const host = platform.pluginHost;
         // Let the app's own boot chain finish (its scan found nothing), then rescan with the amp-sim.
         const deadline = Date.now() + 10000;
@@ -207,15 +253,14 @@ await probe(async ({ browser, open }) => {
           if (Date.now() > deadline) throw new Error('native host boot did not finish');
           await new Promise((r) => setTimeout(r, 50));
         }
-        const ampSim = { id: 'probe.amp-sim', name: 'Probe Amp Sim', format: 'vst3', isEffect: true,
-          path: 'C:\\Program Files\\Common Files\\VST3\\Probe Amp Sim.vst3' };
         host.scanPlugins = async () => [ampSim];
         host.loadPlugin = async (slot) => ({ slot, descriptor: ampSim });
-        host.armInput = async () => {};
-        host.armMonitor = async () => {};
+        host.unloadPlugin = async () => {};
         host.openEditor = async () => {};
+        host.listParams = async () => [];
         await instrument.scanForPlugins();
-      });
+      }, AMP_SIM);
+      await reset();
       await page.getByRole('combobox', { name: 'Source for slot 1', exact: true }).locator('option', { hasText: 'Probe Amp Sim' }).waitFor({ state: 'attached' });
       await page.waitForTimeout(200);
       await shoot(scene);
@@ -230,30 +275,6 @@ await probe(async ({ browser, open }) => {
       scene = '10-amp-sim-idle';
       await page.getByRole('button', { name: 'Stop live input for slot 1', exact: true }).click();
       await page.getByRole('button', { name: 'Go live for slot 1', exact: true }).waitFor();
-      await page.waitForTimeout(250);
-      await shoot(scene);
-
-      await context.close();
-
-      scene = '11-engine-in-fx';
-      [context, page] = await openPage('engine');
-      await page.waitForFunction(() => window.__lf.native.opened.length === 1, undefined, { timeout: 5000 });
-      await page.evaluate(() => {
-        const info = { state: 'Empty', length: 0, armed: false, autoArmed: false, canUndo: false, canReverse: false, reversed: false, stopAt: null, fading: false, retakePass: 0 };
-        window.__lf.native.emit({
-          seq: 1,
-          reset: true,
-          settings: [{ SetInputSend: ['echo', true] }, { SetInputSend: ['reverb', true] }, { SetInputSend: ['ring', true] }],
-          events: [...[0, 1, 2, 3, 4].map((lane) => ({ Lane: { frame: 0, lane, info } })),
-            { Transport: { frame: 0, master: 0, bpm: 120, locked: false } }, { Selected: { frame: 0, lane: 0 } }],
-          device: [],
-          anchor: { frame: 0, atMs: Date.now(), rate: 48000, grid: 0 },
-          meter: { peak: 0, clip: false },
-          peaks: [],
-        });
-      });
-      await page.getByRole('button', { name: 'Input effects', exact: true }).click();
-      await page.getByRole('dialog', { name: 'Input effects', exact: true }).waitFor();
       await page.waitForTimeout(250);
       await shoot(scene);
 
