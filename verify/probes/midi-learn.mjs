@@ -1,29 +1,32 @@
 /**
  * MIDI learn (`src/app/midi-actions.ts`) through the real Audio Settings learn row and the real MIDI
- * parser, with two virtual Web MIDI ports fed raw bytes (the midi-note-ownership pattern): a CC learned
- * onto REC/DUB survives a reload and records the selected track; the learning press and its release run
- * nothing; a momentary, a latching and a reversed-polarity footswitch each fire once per press, on the
- * press (the selected track is read after every message); Esc, a second LEARN click and closing the panel
- * cancel a learn; a channel-mode CC (120–127) or a note-off never becomes a learn; unlearned CC64/1/123
- * still reach the input router, while CC64 learned on another port with its pedal down lets that pedal go
- * and never sustains, and a learned CC1 hands the vibrato back to the wheel moved before it; a learned note
- * does not sound and neither its note-on nor its note-off reaches the router; forgetting a binding hands
- * its CC back to the play path. A latching learn's wait for a release ends on its 10 s timer (fired by the
- * probe, not slept) and clears the hint. The foot vocabulary (`src/app/actions.ts`): a learning press held
- * 1.2 s reads as momentary and fires once per tap after it, and so does one released only after the panel
+ * parser, with two virtual Web MIDI ports fed raw bytes (the midi-note-ownership pattern), on the web
+ * engine fake (`src/platform/host.web.ts`, the engine-seam pattern): what a press runs is what the UI
+ * sends the engine, read from `__lf.native.sent`. A CC learned onto REC/DUB survives a reload and sends
+ * the engine's REC/DUB; the learning press and its release run nothing; a momentary, a latching and a
+ * reversed-polarity footswitch each fire once per press, on the press (counted after every message); Esc,
+ * a second LEARN click and closing the panel cancel a learn; a channel-mode CC (120–127) or a note-off
+ * never becomes a learn; unlearned CC64/1/123 still reach the input router, while CC64 learned on another
+ * port with its pedal down lets that pedal go and never sustains (its note's `NoteOff` is sent at once),
+ * and a learned CC1 hands the vibrato back to the wheel moved before it; a learned note sends no `NoteOn`
+ * and neither its note-on nor its note-off reaches the router; forgetting a binding hands its CC back to
+ * the play path. A latching learn's wait for a release ends on its 10 s timer (fired by the probe, not
+ * slept) and clears the hint. The foot vocabulary (`src/app/actions.ts`): a learning press held 1.2 s
+ * reads as momentary and fires once per tap after it, and so does one released only after the panel
  * closed or after LEARN was pressed again (that release is never the new learn's press); the line's kind
- * switch changes how it fires; tap
- * tempo, CLICK, END STOP and FIXED work their controls and IN FX is refused with a cue on the web path;
- * track actions aimed at a named track (REC/DUB, PLAY/STOP, MUTE, REV, COPY) act there, only REC/DUB
- * moving the selection; HOLD starts an overdub on 127 and ends it on 0, one REC/DUB each; a latching
- * pedal cannot HOLD; CLEAR confirms per target; a binding saved before targets loads as the selected
- * track's. In engine mode (the web engine fake) a track action sends the engine's action (`Action` on the
- * engine's own selection, `ActionOn` a named track: MUTE, REV, COPY and HALVE too), a global toggle sends
- * `Press` then its control's command, and HOLD's press and release send the engine's REC/DUB or `Hold` and
- * `Release` whatever the feed shows, two selected-track HOLD pedals down at once by two control numbers; an engine refusal (NO MUTE) lands on its lane.
+ * switch changes how it fires; tap tempo sends the tapped BPM, CLICK, END STOP and FIXED work their
+ * controls, and a tap on a locked tempo is refused with a cue; bindings aimed at a named track read so in
+ * the list; a latching pedal cannot HOLD; CLEAR on a named track sends the engine's CLEAR there; a
+ * binding saved before targets loads as the selected track's (the engine's `Action`), and the engine's
+ * refusal of it shows on its lane. On a second page, a track action sends the engine's action (`Action`
+ * on the engine's own selection, `ActionOn` a named track: MUTE, REV, COPY and HALVE too; only REC/DUB
+ * selects its track), a global toggle sends `Press` then its control's command, and HOLD's press and
+ * release send the engine's REC/DUB or `Hold` and `Release` whatever the feed shows, two selected-track
+ * HOLD pedals down at once by two control numbers; an engine refusal (NO MUTE) lands on its lane.
  * logs/midi-learn/bindings.png shows the row and a long list for the eye. It cannot see a real
  * controller, whether WebView2 keeps a port's id across a restart or replug, a real foot against the
- * learn read, or the native engine answering (`STATUS.md` § Play first).
+ * learn read, or the native engine answering (lf-engine `tests/actions.rs` owns what a press does to
+ * the loops; `STATUS.md` § Play first).
  * Run: pnpm probe midi-learn
  */
 import assert from 'node:assert/strict';
@@ -44,26 +47,68 @@ const midiFake = () => {
   Object.defineProperty(navigator, 'requestMIDIAccess', { configurable: true, value: async () => access });
 };
 
+const RATE = 48000;
+const laneInfo = (state, extra = {}) => ({
+  state, length: 0, armed: false, autoArmed: false, canUndo: false, canReverse: false, reversed: false, stopAt: null, fading: false, retakePass: 0, ...extra,
+});
+const EMPTY_LANES = [0, 1, 2, 3, 4].map(() => laneInfo('Empty'));
+
 await probe(async ({ open }) => {
-  const { page } = await open({ init: (p) => p.addInitScript(midiFake) });
-  const midiReady = () => page.waitForFunction(() => !!window.__probeMidi.inputs.get('a').onmidimessage);
-  await midiReady();
+  const { page } = await open({
+    init: async (p) => {
+      await p.addInitScript(() => void (window.__lfEngineFake = true));
+      await p.addInitScript(midiFake);
+    },
+  });
+  let seq = 0;
+  /** The feed's reset frame: these lanes, this transport, lane 0 selected. */
+  const reset = (lanes = EMPTY_LANES, master = 0, locked = false) =>
+    page.evaluate((f) => window.__lf.native.emit(f), {
+      seq: ++seq,
+      reset: true,
+      settings: [],
+      events: [
+        ...lanes.map((info, lane) => ({ Lane: { frame: 0, lane, info } })),
+        { Transport: { frame: 0, master, bpm: 120, locked } },
+        { Selected: { frame: 0, lane: 0 } },
+      ],
+      anchor: { frame: 0, atMs: Date.now(), rate: RATE, grid: 0 },
+      meter: { peak: 0, clip: false },
+    });
+  const emit = (events) => page.evaluate((f) => window.__lf.native.emit(f), { seq: ++seq, reset: false, events });
+  /** Boot (or a reload): the engine fake opened and MIDI attached, then the first reset frame. */
+  const ready = async () => {
+    await page.waitForFunction(() => window.__lf.native.opened.length === 1 && !!window.__probeMidi.inputs.get('a').onmidimessage);
+    seq = 0;
+    await reset();
+  };
+  await ready();
 
   /** Feed raw messages to a port's handler, all in one synchronous burst (a tap is one burst). */
   const send = (port, ...messages) => page.evaluate(([p, m]) => window.__send(p, m), [port, messages]);
   const pause = (ms) => page.waitForTimeout(ms);
-  const selected = () => page.evaluate(() => window.__lf.looper.selectedTrack());
-  /** Send each message on its own and read the selected track after each, so a press and a release that
-   * fire the same number of times still tell apart. */
-  const stepThrough = async (port, ...messages) => {
+  /** Where the sent log stands now, and what was sent since `mark` (after the outbox flushed). */
+  const mark = () => page.evaluate(() => window.__lf.native.sent.length);
+  const sentSince = async (from) => {
+    await pause(20);
+    return page.evaluate((m) => window.__lf.native.sent.slice(m), from);
+  };
+  /** How many times the engine's `Action` `name` was sent since `from`. */
+  const actions = async (from, name) => (await sentSince(from)).filter((c) => c.Action === name).length;
+  /** What the router sent the engine since `from`: 'on:60' / 'off:60'. */
+  const notesSince = async (from) =>
+    (await sentSince(from)).filter((c) => c.NoteOn || c.NoteOff !== undefined).map((c) => (c.NoteOn ? `on:${c.NoteOn[0]}` : `off:${c.NoteOff}`));
+  /** Send each message on its own and count the engine's `name` actions after each, from before the first:
+   * a press and a release that fire the same number of times still tell apart. */
+  const stepThrough = async (name, port, ...messages) => {
+    const from = await mark();
     const seen = [];
     for (const message of messages) {
       await send(port, message);
-      seen.push(await selected());
+      seen.push(await actions(from, name));
     }
     return seen;
   };
-  const selectTrack = (i) => page.evaluate((t) => window.__lf.looper.selectTrack(t), i);
   const learning = () => page.evaluate((s) => document.querySelector(s)?.getAttribute('aria-pressed') ?? null, LEARN);
   const openSettings = async () => {
     await page.evaluate(() => window.__lf.ui.openSettings());
@@ -83,8 +128,8 @@ await probe(async ({ open }) => {
     await send(port, ...messages);
   };
   /** Run `body` (a learn) catching the release-wait timers it starts (RELEASE_WAIT_MS, 10 s, in
-   * `midi-actions.ts`), the monitor-generation pattern; returns the function that fires them now and
-   * resolves to how many it fired, so the 10 s expiry is checked without sleeping. */
+   * `midi-actions.ts`); returns the function that fires them now and resolves to how many it fired, so
+   * the 10 s expiry is checked without sleeping. */
   const catchWait = async (body) => {
     await page.evaluate(() => {
       const real = window.setTimeout;
@@ -108,40 +153,23 @@ await probe(async ({ open }) => {
       });
   };
   const HINT = '.audio-settings__hint[role="status"]';
-  /** Poll track 1's state for up to `ms` until it is `want`; returns the last state seen. */
-  const track1State = (want, ms) =>
-    page.evaluate(
-      ([w, limit]) =>
-        new Promise((resolve) => {
-          const until = performance.now() + limit;
-          const tick = () => {
-            const s = window.__lf.looper.stateOf(0);
-            if (s === w || performance.now() > until) resolve(s);
-            else setTimeout(tick, 20);
-          };
-          tick();
-        }),
-      [want, ms],
-    );
   const out = {};
 
   // ---- learn a CC onto REC/DUB through the row, then reload ------------------------------------------
   await openSettings();
+  let from = await mark();
   await learnVia('recDub', 'a', [0xb0, 20, 127], [0xb0, 20, 0]);
-  out.learned = { lines: await bindingLines(), learning: await learning(), track1: await track1State('RECORDING', 300) };
+  out.learned = { lines: await bindingLines(), learning: await learning(), sent: await sentSince(from) };
 
   await page.reload();
   await page.waitForFunction(() => '__lf' in window, undefined, { timeout: 30_000 });
-  await midiReady();
+  await ready();
+  from = await mark();
   await send('a', [0xb0, 20, 127]);
-  const pressed = await track1State('RECORDING', 5000);
-  const armed = await page.evaluate(() => window.__lf.looper.waitingOf(0));
+  const pressed = await sentSince(from);
+  from = await mark();
   await send('a', [0xb0, 20, 0]);
-  await pause(300);
-  out.afterReload = { pressed, armed, afterRelease: await page.evaluate(() => window.__lf.looper.stateOf(0)) };
-  // Housekeeping, not a claim: nothing below reads the looper's track state.
-  await page.evaluate(() => window.__lf.looper.clearAll());
-  out.cleared = await track1State('EMPTY', 5000);
+  out.afterReload = { pressed, released: await sentSince(from) };
 
   await openSettings();
   out.reloadedLines = await bindingLines();
@@ -168,17 +196,17 @@ await probe(async ({ open }) => {
   await openSettings();
   out.closeCancels = { armed: closeArmed, after: await learning(), lines: await bindingLines() };
 
-  // ---- footswitches: every press fires once, on the press, counted on NEXT TRACK from track 1 ----------
+  // ---- footswitches: every press fires once, on the press, counted in NEXT TRACK actions sent ----------
   // Momentary: 127 on press, 0 on release. The learning tap sends both.
-  await selectTrack(0);
+  from = await mark();
   await learnVia('nextTrack', 'a', [0xb0, 21, 127], [0xb0, 21, 0]);
-  const momentaryLearn = await selected();
-  const momentarySteps = await stepThrough('a', [0xb0, 21, 127], [0xb0, 21, 0], [0xb0, 21, 127], [0xb0, 21, 0], [0xb0, 21, 127], [0xb0, 21, 0]);
+  const momentaryLearn = await actions(from, 'NextTrack');
+  const momentarySteps = await stepThrough('NextTrack', 'a', [0xb0, 21, 127], [0xb0, 21, 0], [0xb0, 21, 127], [0xb0, 21, 0], [0xb0, 21, 127], [0xb0, 21, 0]);
   out.momentary = { learn: momentaryLearn, steps: momentarySteps };
   // Latching: 127 on one press, 0 on the next. The learning press sends 127 and nothing follows it; the
   // panel closing leaves the wait for a release running (the hint is still up), and its 10 s timer ends
   // it and the hint.
-  await selectTrack(0);
+  from = await mark();
   const expireLatching = await catchWait(() => learnVia('nextTrack', 'a', [0xb0, 22, 127]));
   const latchingHint = await page.locator(HINT).textContent({ timeout: 3000 }).catch(() => null);
   await page.evaluate(() => window.__lf.ui.closeSettings());
@@ -186,28 +214,19 @@ await probe(async ({ open }) => {
   const hintAfterClose = await page.locator(HINT).count();
   const waitTimers = await expireLatching();
   const hintAfterWait = await page.locator(HINT).count();
-  const latchingLearn = await selected();
-  const latchingSteps = await stepThrough('a', [0xb0, 22, 0], [0xb0, 22, 127], [0xb0, 22, 0], [0xb0, 22, 127]);
+  const latchingLearn = await actions(from, 'NextTrack');
+  const latchingSteps = await stepThrough('NextTrack', 'a', [0xb0, 22, 0], [0xb0, 22, 127], [0xb0, 22, 0], [0xb0, 22, 127]);
   out.latching = { learn: latchingLearn, steps: latchingSteps, hint: latchingHint, hintAfterClose, waitTimers, hintAfterWait };
   // Reversed polarity (0 on press, 127 on release), on port b, channel 3.
-  await selectTrack(0);
   await learnVia('nextTrack', 'b', [0xb2, 23, 0], [0xb2, 23, 127]);
-  out.reversed = { steps: await stepThrough('b', [0xb2, 23, 0], [0xb2, 23, 127], [0xb2, 23, 0], [0xb2, 23, 127]) };
+  out.reversed = { steps: await stepThrough('NextTrack', 'b', [0xb2, 23, 0], [0xb2, 23, 127], [0xb2, 23, 0], [0xb2, 23, 127]) };
 
-  // ---- the play path: router calls and sound -------------------------------------------------------
+  // ---- the play path: router calls and the notes the engine gets ---------------------------------
   await page.evaluate(async () => {
     const lf = window.__lf;
-    await lf.engine.start();
     lf.selectSynth(0, 'organ'); lf.setActiveSlot(0);
-    await new Promise((resolve) => setTimeout(resolve, 150));
+    await new Promise((resolve) => setTimeout(resolve, 50));
     lf.ensureActive();
-    const analyser = lf.engine.ctx.createAnalyser(); analyser.fftSize = 4096;
-    lf.engine.instrumentBus.connect(analyser);
-    const data = new Float32Array(analyser.fftSize);
-    window.__rms = () => {
-      analyser.getFloatTimeDomainData(data);
-      return Math.sqrt(data.reduce((sum, sample) => sum + sample * sample, 0) / data.length);
-    };
     // Record every router entry the MIDI parser uses, then call through.
     const router = lf.inputRouter;
     window.__calls = [];
@@ -219,7 +238,6 @@ await probe(async ({ open }) => {
       };
     }
   });
-  const rms = () => page.evaluate(() => window.__rms());
   const takeCalls = () => page.evaluate(() => window.__calls.splice(0));
   const A0 = JSON.stringify(['a', 0]);
   const B0 = JSON.stringify(['b', 0]);
@@ -249,27 +267,28 @@ await probe(async ({ open }) => {
   // pedal runs NEXT TRACK and never sustains port b's note. The learning tap is the pedal coming up and
   // going down again, so it reads as reversed and fires as it comes up, once per press.
   await send('b', [0xb0, 64, 127]); // down before LEARN: the router holds port b's sustain
-  await selectTrack(0);
   await takeCalls();
   await learnVia('nextTrack', 'b', [0xb0, 64, 0], [0xb0, 64, 127]);
   out.learnLetsGo = await takeCalls();
-  await send('b', [0x90, 67, 100]); await pause(120);
-  await send('b', [0x80, 67, 0]); await pause(300);
-  const mappedRms = await rms();
-  const mappedSteps = await stepThrough('b', [0xb0, 64, 0], [0xb0, 64, 127]);
+  from = await mark();
+  await send('b', [0x90, 67, 100], [0x80, 67, 0]);
+  const mappedNotes = await notesSince(from);
+  const mappedSteps = await stepThrough('NextTrack', 'b', [0xb0, 64, 0], [0xb0, 64, 127]);
   out.mapped64 = {
-    rms: mappedRms,
+    notes: mappedNotes,
     sustainCalls: (await takeCalls()).filter(([name]) => name === 'setSustain'),
     steps: mappedSteps,
   };
-  // Control: the same note under port a's unlearned CC64 is held by the pedal.
-  await send('a', [0xb0, 64, 127], [0x90, 67, 100]); await pause(120);
-  await send('a', [0x80, 67, 0]); await pause(300);
-  out.unmapped64Rms = await rms();
-  await send('a', [0xb0, 64, 0]); await pause(300);
+  // Control: the same note under port a's unlearned CC64 is held by the pedal, and its pedal-up lets it go.
+  from = await mark();
+  await send('a', [0xb0, 64, 127], [0x90, 67, 100], [0x80, 67, 0]);
+  const heldByPedal = await notesSince(from);
+  from = await mark();
+  await send('a', [0xb0, 64, 0]);
+  out.unmapped64 = { held: heldByPedal, pedalUp: await notesSince(from) };
   // A mod wheel learned on port a, channel 6, lets its vibrato go the way an unplug does: the depth falls
   // back to the wheel moved before it (port b, channel 1), not to 0 over it. The depth read is the router's
-  // last-moved-wheel result, the value it hands the active synth (a TS-private field, read for the probe).
+  // last-moved-wheel result, the value it hands the engine (a TS-private field, read for the probe).
   const modDepth = () => page.evaluate(() => window.__lf.inputRouter.modDepth);
   await send('b', [0xb0, 1, 50]);
   await send('a', [0xb5, 1, 100]);
@@ -278,26 +297,26 @@ await probe(async ({ open }) => {
   out.wheelLetsGo = { before: wheelBefore, after: await modDepth() };
   await send('b', [0xb0, 1, 0]); // housekeeping: the vibrato at rest for the notes below
 
-  // A learned note (port b, channel 2) runs PREVIOUS TRACK on its note-on: silent, never held, no router
-  // event either way (a note-off as 0x80 and as a velocity-0 note-on).
-  await selectTrack(4);
+  // A learned note (port b, channel 2) runs PREVIOUS TRACK on its note-on: no NoteOn, never held, no
+  // router event either way (a note-off as 0x80 and as a velocity-0 note-on).
   await learnVia('prevTrack', 'b', [0x91, 60, 100], [0x81, 60, 0]);
   await takeCalls();
-  await send('b', [0x91, 60, 100]); await pause(150);
-  const noteRms = await rms();
+  from = await mark();
+  await send('b', [0x91, 60, 100]);
+  const notesOnPress = await notesSince(from);
   const heldDuring = await page.evaluate(() => [...window.__lf.inputRouter.held]);
-  const selectedOnPress = await selected();
+  const onPress = await actions(from, 'PrevTrack');
   await send('b', [0x81, 60, 0], [0x91, 60, 100], [0x91, 60, 0]);
   out.learnedNote = {
-    rms: noteRms,
+    notes: notesOnPress,
     held: heldDuring,
     routerEvents: (await takeCalls()).filter(([name, ev]) => name === 'handle' && ev.note === 60),
-    selected: [selectedOnPress, await selected()],
+    presses: [onPress, await actions(from, 'PrevTrack')],
   };
-  // Control: an unlearned note on the same port and channel sounds.
-  await send('b', [0x91, 62, 100]); await pause(150);
-  out.unlearnedNoteRms = await rms();
-  await send('b', [0x81, 62, 0]); await pause(300);
+  // Control: an unlearned note on the same port and channel goes to the engine.
+  from = await mark();
+  await send('b', [0x91, 62, 100], [0x81, 62, 0]);
+  out.unlearnedNote = await notesSince(from);
 
   // ---- the list, and forgetting a binding --------------------------------------------------------------
   out.lines = await bindingLines();
@@ -329,22 +348,6 @@ await probe(async ({ open }) => {
   };
   /** A tap: press and release in one burst. */
   const tap = (cc) => send('a', [0xb0, cc, 127], [0xb0, cc, 0]);
-  /** Poll lane `i`'s state for up to `ms` until it is `want`; returns the last state seen. */
-  const waitState = (i, want, ms = 5000) =>
-    page.evaluate(
-      ([t, w, limit]) =>
-        new Promise((resolve) => {
-          const until = performance.now() + limit;
-          const tick = () => {
-            const s = window.__lf.looper.stateOf(t);
-            if (s === w || performance.now() > until) resolve(s);
-            else setTimeout(tick, 20);
-          };
-          tick();
-        }),
-      [i, want, ms],
-    );
-  const laneState = (i) => page.evaluate((t) => window.__lf.looper.stateOf(t), i);
   const pressedOf = (name) =>
     page.evaluate((n) => document.querySelector(`[aria-label="${n}"]`)?.getAttribute('aria-pressed') ?? null, name);
   /** The cue on lane `i`'s well, or '' when it shows none. */
@@ -356,25 +359,25 @@ await probe(async ({ open }) => {
   // A learning press held 1.2 s before its release: read as momentary, and neither message runs anything.
   // Then each tap fires once, on the press.
   await scenario('heldLearn', async () => {
-    await selectTrack(0);
+    const start = await mark();
     await learnOn('nextTrack', null, 'a', [0xb0, 60, 127]);
     await pause(1200);
     await send('a', [0xb0, 60, 0]);
-    const afterLearn = await selected();
-    const steps = await stepThrough('a', [0xb0, 60, 127], [0xb0, 60, 0], [0xb0, 60, 127], [0xb0, 60, 0]);
+    const afterLearn = await actions(start, 'NextTrack');
+    const steps = await stepThrough('NextTrack', 'a', [0xb0, 60, 127], [0xb0, 60, 0], [0xb0, 60, 127], [0xb0, 60, 0]);
     return { afterLearn, line: await lineOf('CC 60'), steps };
   });
 
   // A momentary pedal still down when the panel closes: its release, out of sight, is still read as its
   // release (momentary) and runs nothing; each later tap fires once.
   await scenario('closeWhileHeld', async () => {
-    await selectTrack(0);
+    const start = await mark();
     await learnOn('nextTrack', null, 'a', [0xb0, 61, 127]);
     await page.evaluate(() => window.__lf.ui.closeSettings());
     await page.waitForSelector(LEARN, { state: 'detached' });
     await send('a', [0xb0, 61, 0]);
-    const afterRelease = await selected();
-    const steps = await stepThrough('a', [0xb0, 61, 127], [0xb0, 61, 0], [0xb0, 61, 127], [0xb0, 61, 0]);
+    const afterRelease = await actions(start, 'NextTrack');
+    const steps = await stepThrough('NextTrack', 'a', [0xb0, 61, 127], [0xb0, 61, 0], [0xb0, 61, 127], [0xb0, 61, 0]);
     await openSettings();
     return { afterRelease, line: await lineOf('CC 61'), steps };
   });
@@ -382,43 +385,41 @@ await probe(async ({ open }) => {
   // LEARN pressed for another action while the learned pedal is still down: its release is its release
   // (momentary, runs nothing), not the new learn's press; the new learn keeps listening for the next tap.
   await scenario('learnWhileHeld', async () => {
-    await selectTrack(0);
+    const start = await mark();
     await learnOn('nextTrack', null, 'a', [0xb0, 62, 127]);
     await page.selectOption(PICK, 'prevTrack', { timeout: 3000 });
     await page.click(LEARN);
     await send('a', [0xb0, 62, 0]);
     const stillLearning = await learning();
     await send('a', [0xb0, 63, 127], [0xb0, 63, 0]);
-    return { stillLearning, selected: await selected(), lines: [await lineOf('CC 62'), await lineOf('CC 63')] };
+    return {
+      stillLearning,
+      ran: (await actions(start, 'NextTrack')) + (await actions(start, 'PrevTrack')),
+      lines: [await lineOf('CC 62'), await lineOf('CC 63')],
+    };
   });
 
   // The kind switch on the held learn's line (CC 60): latching fires on the release too, momentary again only on the press.
   await scenario('kindSwitch', async () => {
     const kind = bindingRow('CC 60').locator('.audio-settings__chip').first();
-    await selectTrack(0);
     await kind.click({ timeout: 3000 });
-    const latching = { kind: await kind.textContent(), steps: await stepThrough('a', [0xb0, 60, 127], [0xb0, 60, 0]) };
-    await selectTrack(0);
+    const latching = { kind: await kind.textContent(), steps: await stepThrough('NextTrack', 'a', [0xb0, 60, 127], [0xb0, 60, 0]) };
     await kind.click();
-    const momentary = { kind: await kind.textContent(), steps: await stepThrough('a', [0xb0, 60, 127], [0xb0, 60, 0]) };
+    const momentary = { kind: await kind.textContent(), steps: await stepThrough('NextTrack', 'a', [0xb0, 60, 127], [0xb0, 60, 0]) };
     return { latching, momentary };
   });
 
-  // The new global actions on an empty looper, each against its command-bar control. IN FX has no input
-  // sends on the web path: refused, with the reason on the selected lane.
+  // The global actions on an empty looper, each against its command-bar control.
   await scenario('globals', async () => {
-    await page.evaluate(() => window.__lf.looper.clearAll());
-    await selectTrack(1);
-    for (const [cc, action] of [[80, 'tapTempo'], [81, 'clickToggle'], [82, 'endStopToggle'], [83, 'fixedToggle'], [84, 'inFxEcho'], [85, 'inFxReverb']]) {
+    for (const [cc, action] of [[80, 'tapTempo'], [81, 'clickToggle'], [82, 'endStopToggle'], [83, 'fixedToggle']]) {
       await learnOn(action, null, 'a', [0xb0, cc, 127], [0xb0, cc, 0]);
     }
-    const bpmNum = () => page.evaluate(() => Number(document.querySelector('.transport__bpm-num').textContent));
-    const bpmBefore = await bpmNum();
+    const start = await mark();
     for (let k = 0; k < 4; k++) {
       await tap(80);
       await pause(400);
     }
-    const bpm = await bpmNum();
+    const bpms = (await sentSince(start)).filter((c) => c.SetBpm !== undefined).map((c) => c.SetBpm);
     const toggles = {};
     for (const [cc, name] of [[81, 'Metronome click'], [82, 'Stop playing loops at loop end'], [83, 'Fixed take length']]) {
       const seen = [await pressedOf(name)];
@@ -428,101 +429,31 @@ await probe(async ({ open }) => {
       seen.push(await pressedOf(name));
       toggles[name] = seen;
     }
-    await tap(84);
-    const echoCue = await cueOn(1);
-    await tap(85);
-    const reverbCue = await cueOn(1);
-    return { bpmBefore, bpmMoved: bpm !== bpmBefore && bpm >= 130 && bpm <= 165, toggles, echoCue, reverbCue };
+    return { bpmSent: bpms.length > 0 && bpms.at(-1) >= 130 && bpms.at(-1) <= 165, toggles };
   });
 
-  // Two playing loops (2 bars at 240 BPM: a 2 s loop) on tracks 1 and 2, then presses aimed at a track.
+  // Two playing loops on tracks 1 and 2 with the tempo locked; bindings aimed at a named track read so in
+  // the list, and a tap tempo is refused on the selected lane. (What each named press sends is the
+  // second page's check below.)
   await scenario('targets', async () => {
-    await page.evaluate(async () => {
-      const lf = window.__lf;
-      const { defaultFxStates } = await import('/src/audio/fx/fx.ts');
-      lf.looper.clearAll();
-      const bpm = 240, bars = 2;
-      const frames = Math.round(lf.engine.ctx.sampleRate * (60 / bpm) * 4 * bars);
-      const tracks = [0, 1].map((index) => {
-        const pcm = new Float32Array(frames);
-        for (let f = 0; f < frames; f++) pcm[f] = 0.2 * Math.sin(f / (40 + index * 9));
-        return { index, pcm, volume: 1, muted: false, reversed: false, state: 'PLAYING', fx: defaultFxStates() };
-      });
-      await lf.looper.loadSession({ bpm, bars, masterLengthFrames: frames, tracks });
-    });
-    await waitState(1, 'PLAYING');
+    const playing = laneInfo('Playing', { length: 4 * RATE, canReverse: true });
+    await reset([playing, playing, ...EMPTY_LANES.slice(2)], 4 * RATE, true);
     for (const [cc, action, target] of [[70, 'recDub', '2'], [71, 'playStop', '1'], [72, 'mute', '0'], [73, 'reverse', '1'], [74, 'copy', '0']]) {
       await learnOn(action, target, 'a', [0xb0, cc, 127], [0xb0, cc, 0]);
     }
     const r = { lines: [await lineOf('CC 70'), await lineOf('CC 71'), await lineOf('CC 72'), await lineOf('CC 73'), await lineOf('CC 74')] };
-    await selectTrack(0);
+    const start = await mark();
     await tap(80);
-    r.tapLocked = await cueOn(0);
-
-    await tap(71);
-    r.playStop = { state: await waitState(1, 'STOPPED'), selected: await selected() };
-    await tap(71);
-    r.playStop.again = await waitState(1, 'PLAYING');
-
-    await tap(72);
-    r.mute = { muted: await page.evaluate(() => window.__lf.looper.trackMuted(0)), selected: await selected() };
-    await tap(72);
-    r.mute.again = await page.evaluate(() => window.__lf.looper.trackMuted(0));
-
-    await tap(73);
-    r.reverse = {
-      reversed: await page
-        .waitForFunction(() => window.__lf.looper.trackInfo(1).reversed, undefined, { timeout: 5000 })
-        .then(() => true, () => false),
-      selected: await selected(),
-    };
-
-    await send('a', [0xb0, 70, 127]);
-    r.recDub = { state: await waitState(2, 'RECORDING'), selected: await selected() };
-    await send('a', [0xb0, 70, 0]);
-    await pause(200);
-    r.recDub.afterRelease = await laneState(2);
-    await page.evaluate(() => window.__lf.looper.stop(2)); // housekeeping: lane 3 armed, back to EMPTY
-    await waitState(2, 'EMPTY');
-    await selectTrack(0);
-
-    await tap(74);
-    r.copy = {
-      filled: await page
-        .waitForFunction(() => window.__lf.looper.stateOf(2) !== 'EMPTY', undefined, { timeout: 5000 })
-        .then(() => true, () => false),
-      selected: await selected(),
-    };
+    r.tapLocked = { cue: await cueOn(0), bpm: (await sentSince(start)).filter((c) => c.SetBpm !== undefined) };
     return r;
   });
 
-  // HOLD on a momentary REC/DUB pedal aimed at track 1: 127 starts the overdub, 0 ends it. Every REC/DUB
-  // call is logged with the lane's state when it came.
+  // HOLD switched on for a momentary REC/DUB pedal aimed at track 1 (what it sends: the second page).
   await scenario('hold', async () => {
     await learnOn('recDub', '0', 'a', [0xb0, 75, 127], [0xb0, 75, 0]);
     const hold = bindingRow('CC 75').getByRole('button', { name: /^Hold to record/ });
     await hold.click({ timeout: 3000 });
-    const on = await hold.getAttribute('aria-pressed');
-    await page.evaluate(() => {
-      const L = window.__lf.looper;
-      const real = L.recDub;
-      window.__recDubs = [];
-      L.recDub = (i) => {
-        window.__recDubs.push([i, L.stateOf(i)]);
-        return real(i);
-      };
-      window.__restoreRecDub = () => {
-        L.recDub = real;
-        return window.__recDubs;
-      };
-    });
-    await send('a', [0xb0, 75, 127]);
-    const down = await waitState(0, 'OVERDUBBING');
-    await pause(300);
-    await send('a', [0xb0, 75, 0]);
-    const up = await waitState(0, 'PLAYING');
-    await pause(300);
-    return { on, down, up, calls: await page.evaluate(() => window.__restoreRecDub()) };
+    return { on: await hold.getAttribute('aria-pressed') };
   });
 
   // A latching REC/DUB pedal has no HOLD: its switch is disabled and the store refuses it. The HOLD pedal
@@ -546,15 +477,15 @@ await probe(async ({ open }) => {
     return { latching, switched: await read('CC 75') };
   });
 
-  // CLEAR confirms per target: track 2 then track 3 arms each, the second track-3 press clears track 3.
+  // CLEAR on a named track sends the engine's CLEAR there, each press (the engine confirms per lane).
   await scenario('clearPerTarget', async () => {
     await learnOn('clear', '1', 'a', [0xb0, 77, 127], [0xb0, 77, 0]);
     await learnOn('clear', '2', 'a', [0xb0, 78, 127], [0xb0, 78, 0]);
+    const start = await mark();
     await tap(77);
     await tap(78);
-    const afterOneEach = [await laneState(1), await laneState(2)];
     await tap(78);
-    return { afterOneEach, track3: await waitState(2, 'EMPTY'), track2: await laneState(1) };
+    return (await sentSince(start)).filter((c) => c.ActionOn || c.Action);
   });
 
   // For the eye: the learn row and a long bindings list (targets, kinds, HOLD).
@@ -562,7 +493,8 @@ await probe(async ({ open }) => {
   await page.selectOption(PICK, 'recDub');
   await page.locator('#lf-audio-popover').screenshot({ path: 'logs/midi-learn/bindings.png' });
 
-  // A binding saved before targets (no target, no hold) loads as the selected track's.
+  // A binding saved before targets (no target, no hold) loads as the selected track's: the engine's own
+  // `Action`, and the engine's refusal of it shows on its lane.
   await scenario('oldFormat', async () => {
     await page.evaluate(() => {
       const list = JSON.parse(localStorage.getItem('lf.midiLearn') ?? '[]');
@@ -571,15 +503,18 @@ await probe(async ({ open }) => {
     });
     await page.reload();
     await page.waitForFunction(() => '__lf' in window, undefined, { timeout: 30_000 });
-    await midiReady();
+    await ready();
     await openSettings();
     const stored = await page.evaluate(async () => {
       const b = (await import('/src/app/midi-actions.ts')).bindings().find((x) => x.number === 90);
       return b ? { target: b.target, hold: b.hold } : null;
     });
-    await selectTrack(3);
+    const start = await mark();
     await tap(90);
-    return { line: await lineOf('CC 90'), stored, cue: await cueOn(3) };
+    const sent = await sentSince(start);
+    await emit([{ Refused: { frame: 0, lane: 3, reason: 'Empty' } }]);
+    await pause(60);
+    return { line: await lineOf('CC 90'), stored, sent, cue: await cueOn(3) };
   });
 
   // Engine mode, on the web engine fake: each press sends what its lane's control sends for that lane.
@@ -698,17 +633,17 @@ await probe(async ({ open }) => {
   check(() => assert.deepEqual(out.learned, {
     lines: ['Record / overdub | CC 20 · ch 1 | momentary'],
     learning: 'false',
-    track1: 'EMPTY',
+    sent: [],
   }, 'a learning tap binds the CC as momentary, ends the learn and runs nothing'));
-  check(() => assert.deepEqual(out.afterReload, { pressed: 'RECORDING', armed: true, afterRelease: 'RECORDING' },
-    'after a reload the learned CC records the selected track, and its release runs nothing'));
+  check(() => assert.deepEqual(out.afterReload, { pressed: [{ Action: 'RecDub' }], released: [] },
+    "after a reload the learned CC sends the engine's REC/DUB, and its release runs nothing"));
   check(() => assert.deepEqual(out.reloadedLines, ['Record / overdub | CC 20 · ch 1 | momentary'], 'the list survives a reload'));
   check(() => assert.deepEqual(out.esc, { armed: 'true', after: 'false', panelOpen: true }, 'Esc cancels a learn and leaves the panel open'));
   check(() => assert.deepEqual(out.secondClick, { armed: 'true', after: 'false' }, 'a second click on LEARN cancels it'));
   check(() => assert.deepEqual(out.afterCancel.after, out.afterCancel.before, 'a CC after a cancelled learn binds nothing'));
   check(() => assert.deepEqual(out.closeCancels, { armed: 'true', after: 'false', lines: out.afterCancel.before },
     'closing the panel cancels a learn, and a CC after it binds nothing'));
-  // One entry per message: the selected track after it. A press steps once; its release steps nothing.
+  // One entry per message: the NEXT TRACK actions sent so far. A press adds one; its release none.
   check(() => assert.deepEqual(out.momentary, { learn: 0, steps: [1, 1, 2, 2, 3, 3] },
     'each momentary press fires once, on the press; the learning tap none'));
   check(() => assert.deepEqual(out.latching, {
@@ -732,17 +667,18 @@ await probe(async ({ open }) => {
   check(() => assert.deepEqual(out.noteOffWhileLearning, { calls: [noteOff61, noteOff61], learning: 'true', lines: linesBeforeRefusals },
     'a note-off (0x80 or velocity 0) is never learned: it reaches the router and the learn keeps listening'));
   check(() => assert.deepEqual(out.learnLetsGo, [['setSustain', false, B0]], 'learning CC64 lets go of the pedal held down on its port'));
-  check(() => assert.ok(out.mapped64.rms < 1e-5, `a CC learned onto 64 must not sustain (rms ${out.mapped64.rms})`));
+  check(() => assert.deepEqual(out.mapped64.notes, ['on:67', 'off:67'], 'a CC learned onto 64 must not sustain: the NoteOff goes at the release'));
   check(() => assert.deepEqual(out.mapped64.sustainCalls, [], 'a CC learned onto 64 never reaches setSustain'));
   check(() => assert.deepEqual(out.mapped64.steps, [1, 1], 'the learned CC64 press ran its action once, on the press (0)'));
-  check(() => assert.ok(out.unmapped64Rms > 0.01, `the other port's unlearned CC64 still sustains (rms ${out.unmapped64Rms})`));
+  check(() => assert.deepEqual(out.unmapped64, { held: ['on:67'], pedalUp: ['off:67'] },
+    "the other port's unlearned CC64 still sustains: the NoteOff waits for its pedal-up"));
   check(() => assert.deepEqual(out.wheelLetsGo, { before: 100 / 127, after: 50 / 127 },
     'learning CC1 hands the vibrato back to the wheel moved before it'));
-  check(() => assert.ok(out.learnedNote.rms < 1e-5, `a learned note must not sound (rms ${out.learnedNote.rms})`));
+  check(() => assert.deepEqual(out.learnedNote.notes, [], 'a learned note sends no NoteOn'));
   check(() => assert.deepEqual(out.learnedNote.held, [], 'a learned note is never held'));
   check(() => assert.deepEqual(out.learnedNote.routerEvents, [], 'neither the learned note-on nor its note-off reaches the router'));
-  check(() => assert.deepEqual(out.learnedNote.selected, [3, 2], 'two presses of the learned note stepped back twice, each on its note-on'));
-  check(() => assert.ok(out.unlearnedNoteRms > 0.01, `an unlearned note on the same channel sounds (rms ${out.unlearnedNoteRms})`));
+  check(() => assert.deepEqual(out.learnedNote.presses, [1, 2], 'two presses of the learned note stepped back twice, each on its note-on'));
+  check(() => assert.deepEqual(out.unlearnedNote, ['on:62', 'off:62'], 'an unlearned note on the same channel goes to the engine'));
   check(() => assert.deepEqual(out.lines, [
     'Record / overdub | CC 20 · ch 1 | momentary',
     'Next track | CC 21 · ch 1 | momentary',
@@ -771,7 +707,7 @@ await probe(async ({ open }) => {
   }, 'a learning press released after the panel closed reads as momentary, its release runs nothing, and each later tap fires once'));
   check(() => assert.deepEqual(out.learnWhileHeld, {
     stillLearning: 'true',
-    selected: 0,
+    ran: 0,
     lines: ['Next track | CC 62 · ch 1 | momentary', 'Previous track | CC 63 · ch 1 | momentary'],
   }, "a learned pedal released after LEARN was pressed again reads as momentary and is not the new learn's press"));
   check(() => assert.deepEqual(out.kindSwitch, {
@@ -779,16 +715,13 @@ await probe(async ({ open }) => {
     momentary: { kind: 'momentary', steps: [1, 1] },
   }, "the kind switch changes how the pedal fires: latching on both messages, momentary on the press only"));
   check(() => assert.deepEqual(out.globals, {
-    bpmBefore: out.globals.bpmBefore,
-    bpmMoved: true,
+    bpmSent: true,
     toggles: {
       'Metronome click': ['false', 'true', 'false'],
       'Stop playing loops at loop end': ['false', 'true', 'false'],
       'Fixed take length': ['false', 'true', 'false'],
     },
-    echoCue: 'input effects need the native engine',
-    reverbCue: 'input effects need the native engine',
-  }, 'tap tempo sets the BPM, CLICK / END STOP / FIXED toggle their controls, IN FX is refused on the web path with a cue'));
+  }, 'tap tempo sends the tapped BPM, CLICK / END STOP / FIXED toggle their controls'));
   check(() => assert.deepEqual(out.targets, {
     lines: [
       'Record / overdub · Track 3 | CC 70 · ch 1 | momentary',
@@ -797,33 +730,24 @@ await probe(async ({ open }) => {
       'Reverse / forward · Track 2 | CC 73 · ch 1 | momentary',
       'Copy to an empty track · Track 1 | CC 74 · ch 1 | momentary',
     ],
-    tapLocked: 'tempo locked to the loop, clear all to retap',
-    playStop: { state: 'STOPPED', selected: 0, again: 'PLAYING' },
-    mute: { muted: true, selected: 0, again: false },
-    reverse: { reversed: true, selected: 0 },
-    recDub: { state: 'RECORDING', selected: 2, afterRelease: 'RECORDING' },
-    copy: { filled: true, selected: 0 },
-  }, 'a press on a named track acts there from a track-1 selection; only REC/DUB moves the selection'));
-  check(() => assert.deepEqual(out.hold, {
-    on: 'true',
-    down: 'OVERDUBBING',
-    up: 'PLAYING',
-    calls: [[0, 'PLAYING'], [0, 'OVERDUBBING']],
-  }, 'HOLD: 127 starts the overdub and 0 ends it, one REC/DUB each'));
+    tapLocked: { cue: 'tempo locked to the loop, clear all to retap', bpm: [] },
+  }, 'bindings aimed at a named track say so in the list; a tap on a locked tempo is refused with its cue'));
+  check(() => assert.deepEqual(out.hold, { on: 'true' }, 'a momentary REC/DUB pedal takes HOLD'));
   check(() => assert.deepEqual(out.latchingHold, {
     latching: { kind: 'latching', disabled: true, pressed: 'false', afterSetHold: 'false' },
     switched: { kind: 'latching', disabled: true, pressed: 'false' },
   }, 'a latching pedal cannot HOLD, and a HOLD pedal switched to latching loses it'));
-  check(() => assert.deepEqual(out.clearPerTarget, {
-    afterOneEach: ['PLAYING', 'PLAYING'],
-    track3: 'EMPTY',
-    track2: 'PLAYING',
-  }, "CLEAR confirms per target: one press on track 2 and one on track 3 clear nothing, track 3's second press clears it"));
+  check(() => assert.deepEqual(out.clearPerTarget, [
+    { ActionOn: [1, 'Clear'] },
+    { ActionOn: [2, 'Clear'] },
+    { ActionOn: [2, 'Clear'] },
+  ], "CLEAR on a named track sends the engine's CLEAR on that track, each press"));
   check(() => assert.deepEqual(out.oldFormat, {
     line: 'Play / stop | CC 90 · ch 1 | momentary',
     stored: { target: null, hold: false },
+    sent: [{ Action: 'PlayStop' }],
     cue: 'nothing to play, record first',
-  }, 'a binding saved without a target loads as the selected track'));
+  }, "a binding saved without a target loads as the selected track's"));
   check(() => assert.deepEqual(out.engine, {
     hold: [
       [{ SelectTrack: 0 }, { ActionOn: [0, 'RecDub'] }],

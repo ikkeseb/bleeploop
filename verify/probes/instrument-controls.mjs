@@ -1,10 +1,11 @@
 /**
- * Rendered regression coverage for session keyboard state, plugin controls and MIDI startup status:
- * a denied Web MIDI request logs and lands in `denied`, concurrent retries share one request, both
- * empty native slots show the install hint, the keyboard octave survives a placement remount, the slot
- * volume (a plugin's output gain) honors the unity detent under keyboard steps and slider input, and a native monitor stream
- * fault falls the slot back to the web monitor with the right label/title. No native/hardware claims
- * (the plugin host and MIDI access are simulated in the page). Run: pnpm probe instrument-controls
+ * Rendered regression coverage for keyboard state, plugin controls and MIDI startup status, on the web
+ * engine fake (`src/platform/host.web.ts`, the engine-seam pattern) with the native slot chrome on
+ * (host.web.ts served with `available: true`): a denied Web MIDI request logs and lands in `denied`,
+ * concurrent retries share one request, both empty native slots show the install hint, the keyboard
+ * octave survives a placement remount, and the slot volume (a plugin's output gain) honors the unity
+ * detent under keyboard steps and slider input. The plugin host and MIDI access are simulated in the
+ * page; no native or hardware claim. Run: pnpm probe instrument-controls
  */
 import assert from 'node:assert/strict';
 import { probe } from '../harness/probe.ts';
@@ -25,18 +26,12 @@ await probe(async ({ open }) => {
           value: () => Promise.reject(new DOMException('nope', 'SecurityError')),
         });
       });
+      await p.addInitScript(() => void (window.__lfEngineFake = true));
       await p.route('**/src/platform/host.web.ts*', async (route) => {
         const response = await route.fetch();
-        let body = await response.text();
+        const body = await response.text();
         if (!body.includes('available: false')) throw new Error('Could not enable simulated native chrome');
-        if (!body.includes('onStreamFault() {')) throw new Error('Could not expose the simulated stream-fault callback');
-        body = body
-          .replace('available: false', 'available: true')
-          .replace(
-            'onStreamFault() {',
-            'onStreamFault(callback) { globalThis.__instrumentControlsFault = callback;',
-          );
-        await route.fulfill({ response, body });
+        await route.fulfill({ response, body: body.replace('available: false', 'available: true') });
       });
     },
   });
@@ -90,8 +85,7 @@ await probe(async ({ open }) => {
 
   await page.evaluate(async () => {
     const { platform } = await import('/src/platform/index.ts');
-    const slots = await import('/src/audio/instrument-slots.ts');
-    const { pluginBridge } = await import('/src/audio/plugin-bridge.ts');
+    const instrument = await import('/src/ui/state/instrument.ts');
     const descriptor = {
       id: 'instrument-controls',
       name: 'Instrument Controls Probe',
@@ -99,42 +93,24 @@ await probe(async ({ open }) => {
       format: 'vst3',
       isEffect: true,
     };
-    const capacityFrames = 1024;
-    const headerBytes = 32;
-    await pluginBridge.init(window.__lf.engine.ctx);
-    const loadToken = pluginBridge.beginPluginLoad(0, true);
-    const buffer = new ArrayBuffer(headerBytes + capacityFrames * Float32Array.BYTES_PER_ELEMENT);
-    new Uint32Array(buffer, 0, headerBytes / Uint32Array.BYTES_PER_ELEMENT)[2] = capacityFrames;
-    await pluginBridge.acceptPluginBuffer(buffer, {
-      kind: 'plugin-audio',
-      slot: 0,
-      capacityFrames,
-      headerBytes,
-      sampleRate: window.__lf.engine.ctx.sampleRate,
-      inChannels: 2,
-      loadToken,
-    });
-    platform.pluginHost.armInput = async () => {};
-    platform.pluginHost.disarmInput = async () => {};
-    platform.pluginHost.armMonitor = async () => {};
-    platform.pluginHost.disarmMonitor = async () => {};
-    platform.pluginHost.setMonitorGain = async () => {};
-    platform.pluginHost.monitorLatencySeconds = async () => 0;
+    platform.pluginHost.loadPlugin = async (slot) => ({ slot, descriptor });
     platform.pluginHost.listParams = async () => [];
-    slots.setSlotPlugins([descriptor, null]);
+    platform.pluginHost.openEditor = async () => {};
+    await instrument.selectPlugin(0, descriptor);
+    window.__gain = () => instrument.pluginGain()[0];
   });
 
   const paramsButton = page.getByRole('button', { name: /Plugin parameters for slot 1/ });
   await paramsButton.click();
   const output = page.getByRole('slider', { name: 'Volume for slot 1', exact: true });
   await page.evaluate(() => window.__lf.setPluginGain(1, 0));
-  await page.waitForFunction(() => window.__lf.pluginBridge.gains()[0] === 1);
+  await page.waitForFunction(() => window.__gain() === 1);
   await output.focus();
   await page.keyboard.press('ArrowRight');
   await page.keyboard.press('ArrowRight');
   await page.keyboard.press('ArrowRight');
   assert.ok(
-    await page.evaluate(() => window.__lf.pluginBridge.gains()[0] > 1),
+    await page.evaluate(() => window.__gain() > 1),
     'keyboard steps must leave the unity detent',
   );
 
@@ -142,32 +118,12 @@ await probe(async ({ open }) => {
     element.value = '1.05';
     element.dispatchEvent(new Event('input', { bubbles: true }));
   });
-  assert.equal(await page.evaluate(() => window.__lf.pluginBridge.gains()[0]), 1.05);
+  assert.equal(await page.evaluate(() => window.__gain()), 1.05);
   await page.keyboard.press('ArrowLeft');
   await page.keyboard.press('ArrowLeft');
   assert.equal(
-    await page.evaluate(() => window.__lf.pluginBridge.gains()[0]),
+    await page.evaluate(() => window.__gain()),
     1,
     'approaching unity must retain the soft detent',
   );
-
-  await page.getByRole('button', { name: 'Go live for slot 1', exact: true }).click();
-  await page.getByRole('button', { name: 'Stop live input for slot 1', exact: true }).waitFor();
-  await page.evaluate(() => {
-    if (typeof globalThis.__instrumentControlsFault !== 'function') {
-      throw new Error('stream-fault callback was not registered');
-    }
-    globalThis.__instrumentControlsFault({ slot: 0, kind: 'output' });
-  });
-  const fallback = page.getByRole('button', {
-    name: 'Input live, monitoring through the web path; click to stop',
-    exact: true,
-  });
-  await fallback.waitFor();
-  assert.equal((await fallback.textContent())?.trim(), 'INPUT LIVE · WEB MONITOR');
-  assert.equal(
-    await fallback.getAttribute('title'),
-    'native monitor lost; go live again to restore low-latency monitoring',
-  );
-  assert.equal(await fallback.locator('.tgl__dot').count(), 1, 'the live dot must remain visible on fallback');
 });

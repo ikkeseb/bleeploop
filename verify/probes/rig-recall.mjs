@@ -1,20 +1,22 @@
 /**
- * Rig recall across launches: each launch reloads the page, whose mount runs the production boot
- * chain over a substituted plugin host (installed before any app module runs) and the real close
- * guard with only its native close capabilities substituted, so the record and the in-flight marker
- * live in the page's real localStorage between launches. Proves: two plugins picked in the slot
- * dropdowns (the effect's automatic GO LIVE included) come back at the next launch through the load
- * path, slot 0 then slot 1, without an arm, a monitor or an editor call and with GO LIVE unpressed, the
- * restored instrument taking the MIDI slot; an unloaded slot stays empty; a slot whose plugin is
- * missing from the scan is skipped with one `[rig-recall]` log line and no toast, and returns once the
- * plugin is back; a load that fails at recall shows one toast and is not retried; a pick made while
- * slot 0 restores wins slot 1; a launch stopped during a hanging load (a close through the close
- * button included), or after the loads but inside the settle window, makes the next launch skip the
- * recall with one log line and one toast and forget the record, so the launch after that is clean; a
- * close through the close button once the loads are back keeps the rig for the next launch; a synth
- * picked, or a slot activated, while the scan still runs keeps its slot and the MIDI slot, and the
- * synth's slot stays a synth at the launch after. The native load, the scan, the OS close and a real
- * crash are out of reach here: `pnpm native:recall` covers them on the PC.
+ * Rig recall across launches (`src/ui/state/rig-recall.ts`), on the web engine fake
+ * (`src/platform/host.web.ts`, the engine-seam pattern): each launch reloads the page, whose mount runs
+ * the production boot chain (`bootEngine`) over a substituted plugin host (installed before any app
+ * module runs) and the real close guard with only its native close capabilities substituted, so the
+ * record and the in-flight marker live in the page's real localStorage between launches. GO LIVE is the
+ * engine's `SetSlotLive`, read from `__lf.native.sent`. Proves: two plugins picked in the slot dropdowns
+ * (the effect's automatic GO LIVE included) come back at the next launch through the load path, slot 0
+ * then slot 1, without GO LIVE or an editor call and with GO LIVE unpressed, the restored instrument
+ * taking the MIDI slot; an unloaded slot stays empty; a slot whose plugin is missing from the scan is
+ * skipped with one `[rig-recall]` log line and no toast, and returns once the plugin is back; a load
+ * that fails at recall shows one toast and is not retried; a pick made while slot 0 restores wins slot
+ * 1; a launch stopped during a hanging load (a close through the close button included), or after the
+ * loads but inside the settle window, makes the next launch skip the recall with one log line and one
+ * toast and forget the record, so the launch after that is clean; a close through the close button once
+ * the loads are back keeps the rig for the next launch; a synth picked, or a slot activated, while the
+ * scan still runs keeps its slot and the MIDI slot, and the synth's slot stays a synth at the launch
+ * after. The native load, the scan, the OS close and a real crash are out of reach here:
+ * `pnpm native:recall` covers them on the PC.
  * Run: pnpm probe rig-recall
  */
 import assert from 'node:assert/strict';
@@ -35,7 +37,7 @@ const keyOf = (d) => JSON.stringify([d.format, d.path, d.id]);
  */
 function installFakeHost() {
   const { scan = [], loads = {}, holdScan = false } = JSON.parse(sessionStorage.getItem('recallProbe') ?? '{}');
-  const calls = { load: [], arm: [], editor: [] };
+  const calls = { load: [], editor: [] };
   const pending = [];
   let releaseScan = () => {};
   const scanned = holdScan ? new Promise((resolve) => (releaseScan = () => resolve(scan))) : Promise.resolve(scan);
@@ -54,8 +56,6 @@ function installFakeHost() {
     },
     unloadPlugin: async () => {},
     listParams: async () => [],
-    armInput: async (slot) => { calls.arm.push(`input ${slot}`); },
-    armMonitor: async (slot) => { calls.arm.push(`monitor ${slot}`); },
     openEditor: async (slot) => { calls.editor.push(slot); },
   };
 }
@@ -64,6 +64,7 @@ await probe(async ({ open }) => {
   const app = await open({
     viewport: { width: 1280, height: 820 },
     init: (p) => Promise.all([
+      p.addInitScript(() => void (window.__lfEngineFake = true)),
       p.addInitScript(installFakeHost),
       p.route('**/src/platform/host.web.ts', async (route) => {
         const response = await route.fetch();
@@ -95,9 +96,9 @@ await probe(async ({ open }) => {
     await page.waitForFunction(() => '__lf' in window && !!window.__closeRequest);
     await page.evaluate(async () => {
       Object.assign(window.__recallProbe, {
-        instrument: await import('/src/audio/instrument.ts'),
-        slots: await import('/src/audio/instrument-slots.ts'),
-        recall: await import('/src/audio/rig-recall.ts'),
+        instrument: await import('/src/ui/state/instrument.ts'),
+        slots: await import('/src/ui/state/instrument-slots.ts'),
+        recall: await import('/src/ui/state/rig-recall.ts'),
       });
     });
     return { errorsBefore };
@@ -108,16 +109,16 @@ await probe(async ({ open }) => {
     await page.waitForFunction(() => window.__recallProbe.recall.rigRecallDone(), undefined, { timeout: 20_000 });
     const state = await page.evaluate(async () => {
       const { calls, instrument, recall } = window.__recallProbe;
-      const io = await import('/src/audio/native-io.ts');
-      const { pluginDescriptorKey } = await import('/src/audio/plugin-descriptor.ts');
+      const io = await import('/src/ui/state/native-io.ts');
+      const { pluginDescriptorKey } = await import('/src/ui/state/plugin-descriptor.ts');
       return {
         loads: calls.load,
-        arms: calls.arm,
+        arms: window.__lf.native.sent.filter((c) => c.SetSlotLive?.[1] === true).map((c) => `live ${c.SetSlotLive[0]}`),
         editors: calls.editor,
         slots: instrument.slotPlugins().map((d) => (d ? pluginDescriptorKey(d) : null)),
         synths: instrument.slotIds(),
         active: instrument.activeSlot(),
-        armed: [...io.inputArmed(), ...io.monitorArmed()],
+        armed: [...io.inputArmed()],
         live: [...document.querySelectorAll('.slot')].map((el) => el.querySelector('.tgl.live')?.textContent?.trim() ?? null),
         inFlight: recall.recallInFlight(),
         toasts: window.__lf.notify.toasts().map((t) => `${t.message} x${t.count}`),
@@ -143,7 +144,7 @@ await probe(async ({ open }) => {
   };
   const expectIdle = (s, what) => assert.deepEqual(
     { arms: s.arms, editors: s.editors, armed: s.armed, inFlight: s.inFlight },
-    { arms: [], editors: [], armed: [false, false, false, false], inFlight: false },
+    { arms: [], editors: [], armed: [false, false], inFlight: false },
     `${what}: nothing armed, no editor, no marker`,
   );
 
@@ -153,15 +154,17 @@ await probe(async ({ open }) => {
   assert.deepEqual(s.loads, [], 'a first launch restores nothing');
   await pick(0, FX);
   await pick(1, SYN);
-  const picked = await page.evaluate(() => window.__recallProbe.calls);
-  assert.deepEqual(picked.arm, ['input 0', 'monitor 0'], 'the dropdown pick of an effect goes live on its own (baseline)');
+  await page.waitForFunction(() => window.__recallProbe.calls.editor.length === 2);
+  const picked = await page.evaluate(() => window.__lf.native.sent.filter((c) => c.SetSlotLive?.[1] === true));
+  assert.deepEqual(picked, [{ SetSlotLive: [0, true] }], 'the dropdown pick of an effect goes live on its own (baseline)');
 
   // 2. Restart: both come back in slot order, nothing armed, GO LIVE unpressed.
   s = await settle(await launch({ scan: ALL }));
   assert.deepEqual(s.loads, [loadOf(0, FX), loadOf(1, SYN)]);
   assert.deepEqual(s.slots, [keyOf(FX), keyOf(SYN)]);
   expectIdle(s, 'restored rig');
-  assert.deepEqual(s.live, ['GO LIVE', 'GO LIVE']);
+  // An instrument plugin takes no input, so slot 1 shows no GO LIVE cap at all (`slotTakesInput`).
+  assert.deepEqual(s.live, ['GO LIVE', null], 'the restored effect\'s GO LIVE is unpressed');
   assert.deepEqual(s.toasts, []);
   assert.deepEqual(s.recallLogs, []);
   assert.equal(s.active, 1, 'the restored instrument takes the MIDI slot when the player chose nothing');
