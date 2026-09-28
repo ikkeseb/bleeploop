@@ -1,7 +1,7 @@
 //! OWNS: the engine's callback: the command and event rings, the block split, and the bus topology.
 //! Each slot's input → that slot while it is live (`slots`: an effect, or an empty slot passing it dry)
 //! → the wet signal, heard at once and, for the record tap, aligned on the largest live latency. The
-//! input sends (`input_fx`: ECHO, REVERB) read the aligned wet signal and render wet only. The record
+//! input sends (`input_fx`: ECHO, REVERB, RING MOD) read the aligned wet signal and render wet only. The record
 //! tap is the aligned wet signal plus the sends' output plus the built-in instruments and the
 //! instrument plugin slots (`instruments`, `slots`: delayed onto the guitar's grid). Each lane plays
 //! through its FX chain, whose reverb sends meet on one bus (`effects`); the chains, the reverb bus, the instruments (built

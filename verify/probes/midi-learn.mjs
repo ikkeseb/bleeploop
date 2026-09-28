@@ -618,7 +618,7 @@ await probe(async ({ open }) => {
       [15, 'playStop', ''], [16, 'clickToggle', null], [17, 'endStopToggle', null], [18, 'fixedToggle', null],
       [19, 'inFxEcho', null], [20, 'inFxReverb', null], [21, 'mute', '3'], [22, 'recDub', '0'],
       [23, 'mute', ''], [24, 'reverse', ''], [25, 'copy', ''], [26, 'halveTrack', ''], [27, 'halveTrack', '2'],
-      [28, 'tapTempo', null], [29, 'recDub', ''], [30, 'recDub', ''],
+      [28, 'tapTempo', null], [29, 'recDub', ''], [30, 'recDub', ''], [31, 'inFxRing', null],
     ];
     const holds = [22, 29, 30];
     for (const [cc, action, target] of bindings) {
@@ -858,6 +858,7 @@ await probe(async ({ open }) => {
       26: [{ Action: 'Halve' }],
       27: [{ ActionOn: [2, 'Halve'] }],
       28: ['Press'],
+      31: ['Press', { SetInputSend: ['ring', true] }],
     },
     controls: { click: 'true', endStop: 'true', fixed: 'true', inFx: true },
     cue4: 'nothing to mute, record first',

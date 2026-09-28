@@ -1,13 +1,16 @@
-//! The input sends (`lf_engine::input_fx`, tester report F15): ECHO and REVERB on the wet signal, wet
-//! only, into the record tap and the monitor on the same frame. Every scenario runs with slot 0 live and
+//! The input sends (`lf_engine::input_fx`, tester reports F15 and F24): ECHO, REVERB and RING MOD on the
+//! wet signal, wet only, into the record tap and the monitor on the same frame. Every scenario runs with slot 0 live and
 //! empty (the rig's MIC), so the wet signal is the input itself: with the master at 1 the record tap and
 //! the monitor are the input, bit for bit, whenever the sends add nothing. A new guard, not a port: the
 //! web path has no input sends.
 
 mod common;
 
+use std::f64::consts::TAU;
+
 use common::{Delay, Opts, Rig};
 use lf_engine::grid::Frame;
+use lf_engine::input_fx::InputFx;
 use lf_engine::{Command, InputSend, InputSendParam};
 
 /// A 1/8 note at 120 BPM (the default tempo) at 48 kHz.
@@ -39,6 +42,12 @@ fn echo(rig: &mut Rig, level: f64, feedback: f64) {
 fn reverb(rig: &mut Rig, level: f64) {
     rig.set(Command::SetInputSendParam(InputSendParam::ReverbLevel, level));
     rig.set(Command::SetInputSend(InputSend::Reverb, true));
+}
+
+fn ring(rig: &mut Rig, level: f64, freq: f64) {
+    rig.set(Command::SetInputSendParam(InputSendParam::RingLevel, level));
+    rig.set(Command::SetInputSendParam(InputSendParam::RingFreq, freq));
+    rig.set(Command::SetInputSend(InputSend::Ring, true));
 }
 
 fn bits(v: &[f32]) -> Vec<u32> {
@@ -220,19 +229,21 @@ fn a_send_that_is_off_and_decayed_leaves_the_output_as_if_it_had_never_been_on()
     }
     echo(&mut was, 0.5, 0.4);
     reverb(&mut was, 0.5);
+    ring(&mut was, 0.5, 440.0);
     for rig in [&mut never, &mut was] {
         rig.advance_to(96_000);
     }
     was.set(Command::SetInputSend(InputSend::Echo, false));
     was.set(Command::SetInputSend(InputSend::Reverb, false));
-    never.advance(2);
+    was.set(Command::SetInputSend(InputSend::Ring, false));
+    never.advance(3);
     assert!(!was.engine.input_fx().idle(), "the tails ring");
     // The echo decays under −120 dB in 15 repeats of 1/8 (0.4^15 < 1e-6), then its 2 s line empties;
     // the reverb's IR is 2.62 s long.
     for rig in [&mut never, &mut was] {
         rig.advance(rig.seconds(8.0));
     }
-    assert!(was.engine.input_fx().idle(), "both sends idle");
+    assert!(was.engine.input_fx().idle(), "every send idle");
     for rig in [&mut never, &mut was] {
         rig.keep_output();
         rig.advance(rig.seconds(1.0));
@@ -273,6 +284,7 @@ fn a_take_with_the_sends_on_has_its_dry_note_where_it_has_it_with_them_off() {
         echo(rig, 0.5, 0.0);
         reverb(rig, 0.5);
     });
+    let ringed = first_take(|rig| ring(rig, 0.5, 440.0));
     let first = |pcm: &[f32]| pcm.iter().position(|&x| x != 0.0);
     assert_eq!(dry[0], 1.0, "the note on beat 1 is the loop's frame 0");
     assert_eq!(dry.iter().filter(|&&x| x != 0.0).count(), 1);
@@ -280,6 +292,9 @@ fn a_take_with_the_sends_on_has_its_dry_note_where_it_has_it_with_them_off() {
     assert_eq!(echoed[EIGHTH as usize], 0.5, "its echo one 1/8 later, on the grid");
     assert_eq!(echoed.iter().filter(|&&x| x != 0.0).count(), 2);
     assert_eq!((first(&both), both[0]), (Some(0), 1.0), "and so does the reverb");
+    // The ring has no delay: it adds to the note on the note's frame, and nowhere else.
+    assert_eq!(first(&ringed), Some(0), "the ring lands on the dry note's frame");
+    assert_eq!(ringed.iter().filter(|&&x| x != 0.0).count(), 1, "and adds nothing where the input is silent");
 }
 
 /// The input sends' part of `tests/sound.rs`'s block-size guard: the same commands, landing mid-quantum,
@@ -291,14 +306,20 @@ fn scenario(block: usize) -> [Vec<f32>; 4] {
     for (at, command) in [
         (1_001, Command::SetInputSendParam(InputSendParam::EchoFeedback, 0.6)),
         (1_001, Command::SetInputSend(InputSend::Echo, true)),
+        (2_222, Command::SetInputSendParam(InputSendParam::RingFreq, 173.0)),
+        (2_222, Command::SetInputSend(InputSend::Ring, true)),
         (3_333, Command::SetInputSend(InputSend::Reverb, true)),
         (20_011, Command::SetInputSendParam(InputSendParam::EchoTime, 2.0)),
+        (25_013, Command::SetInputSendParam(InputSendParam::RingFreq, 1234.5)),
         (30_005, Command::SetInputSendParam(InputSendParam::EchoLevel, 0.9)),
         (40_003, Command::SetBpm(97.0)),
+        (50_009, Command::SetInputSendParam(InputSendParam::RingLevel, 0.8)),
         (60_007, Command::SetInputSend(InputSend::Echo, false)),
         (61_000, Command::SetInputSendParam(InputSendParam::ReverbLevel, 0.2)),
         (70_001, Command::SetInputSend(InputSend::Reverb, false)),
+        (80_003, Command::SetInputSend(InputSend::Ring, false)),
         (90_000, Command::SetInputSend(InputSend::Echo, true)),
+        (100_001, Command::SetInputSend(InputSend::Ring, true)),
     ] {
         rig.send_at(t + at, command);
     }
@@ -334,4 +355,207 @@ fn a_send_never_waits_behind_a_held_looper_command() {
     rig.press(Command::SetInputSend(InputSend::Echo, true));
     assert!(rig.engine.holding(), "the job is still running");
     assert!(rig.engine.input_fx().is_on(InputSend::Echo), "the echo is on meanwhile");
+}
+
+// ── RING MOD (F24) ──────────────────────────────────────────────────────────────────────────────────
+
+/// The rig's rate.
+const SR: f64 = 48000.0;
+
+/// A sine at `hz`, amplitude 0.5.
+fn tone(hz: f64) -> impl Fn(Frame) -> f32 {
+    move |f| 0.5 * (TAU * hz * f as f64 / SR).sin() as f32
+}
+
+/// The amplitude of `v`'s component at `hz` (one DFT bin: `v` must hold whole cycles of it).
+fn bin(v: &[f32], hz: f64) -> f64 {
+    let w = TAU * hz / SR;
+    let (re, im) = v.iter().enumerate().fold((0.0, 0.0), |(re, im), (k, &x)| {
+        let a = w * k as f64;
+        (re + x as f64 * a.cos(), im - x as f64 * a.sin())
+    });
+    2.0 * (re * re + im * im).sqrt() / v.len() as f64
+}
+
+/// On a constant input the ring's output is its carrier at `level · c`: every frame is
+/// `level · c · sin(φ₀ + 2πF·k/sr)`, φ₀ the phase the ring holds where the window starts.
+#[test]
+fn the_ring_on_a_constant_input_is_its_sine_carrier_at_its_level() {
+    const C: f32 = 0.6;
+    const LEVEL: f64 = 0.8;
+    const F: f64 = 300.0;
+    let mut rig = Rig::new();
+    rig.set_level(C);
+    ring(&mut rig, LEVEL, F);
+    rig.advance(2400); // past the ramps (20 ms from the frame they land on)
+    let phase = rig.engine.input_fx().ring_phase();
+    assert!((0.0..TAU).contains(&phase), "the phase is wrapped: {phase}");
+    rig.keep_output();
+    rig.advance(rig.seconds(1.0));
+    let got = added(&rig, |_| C);
+    let mut worst = 0.0f64;
+    for (k, &y) in got.iter().enumerate() {
+        let want = LEVEL * C as f64 * (phase + TAU * F * k as f64 / SR).sin();
+        let err = (y as f64 - want).abs();
+        worst = worst.max(err);
+        assert!(err <= 1e-5, "frame {k}: {y} where the carrier is {want}");
+    }
+    println!("ring on a constant {C}: worst error against level · c · sin(φ₀ + 2πF·k/sr) {worst:.2e}");
+    let peak = got.iter().fold(0.0f32, |a, &x| a.max(x.abs())) as f64;
+    assert!((peak - LEVEL * C as f64).abs() < 1e-3, "its peak is level · c: {peak}");
+    assert_eq!(bits(&rig.monitor), bits(&rig.record), "heard as recorded");
+}
+
+/// Ring modulation, not amplitude modulation or a pass-through: a 1000 Hz input on a 300 Hz carrier
+/// comes out at 700 and 1300 Hz, each at half the input's amplitude times the level, with neither the
+/// input's 1000 Hz nor the carrier's 300 Hz left in it (at least 40 dB under the sidebands).
+#[test]
+fn the_ring_moves_a_note_to_the_sum_and_difference_of_it_and_the_carrier() {
+    let mut rig = Rig::new();
+    rig.set_input(tone(1000.0));
+    ring(&mut rig, 1.0, 300.0);
+    rig.advance(2400);
+    rig.keep_output();
+    rig.advance(4800); // 0.1 s: whole cycles of 300, 700, 1000 and 1300 Hz
+    let out = added(&rig, tone(1000.0));
+    let [lower, upper, note, carrier] = [700.0, 1300.0, 1000.0, 300.0].map(|hz| bin(&out, hz));
+    let db = |a: f64, b: f64| 20.0 * (a / b).log10();
+    println!(
+        "ring 300 Hz on 1000 Hz: 700 Hz {lower:.5}, 1300 Hz {upper:.5}, 1000 Hz {note:.2e} ({:.0} dB under), 300 Hz {carrier:.2e} ({:.0} dB under)",
+        db(lower.min(upper), note),
+        db(lower.min(upper), carrier)
+    );
+    for (hz, a) in [(700, lower), (1300, upper)] {
+        assert!((a - 0.25).abs() < 0.0025, "{hz} Hz at {a}, where 1 · 0.5 / 2 is 0.25");
+    }
+    assert!(db(lower.min(upper), note) >= 40.0, "the input's 1000 Hz is gone: {note}");
+    assert!(db(lower.min(upper), carrier) >= 40.0, "the carrier's 300 Hz is not heard: {carrier}");
+}
+
+/// The dry part of the record tap and the monitor is the same bits with the ring on as with it off:
+/// with it on, each is (bit for bit) the tap with it off plus the ring's own output, rendered by an
+/// `InputFx` beside the engine from the same wet signal and commands.
+#[test]
+fn the_ring_adds_its_output_to_the_dry_bits_and_changes_none_of_them() {
+    let mut off = Rig::new();
+    let mut on = Rig::new();
+    for rig in [&mut off, &mut on] {
+        rig.set_input(busy);
+    }
+    let start = on.frame;
+    let commands = [
+        (InputSendParam::RingLevel, 1.0),
+        (InputSendParam::RingFreq, 523.0),
+    ];
+    for (param, value) in commands {
+        on.send_at(start, Command::SetInputSendParam(param, value));
+    }
+    on.send_at(start, Command::SetInputSend(InputSend::Ring, true));
+    let ir = [0.0f32; 256]; // the reverb stays off: its IR is never heard
+    let mut alone = InputFx::new(48000, [&ir[..], &ir[..]]);
+    for (param, value) in commands {
+        alone.set_param(param, value, start);
+    }
+    alone.set_on(InputSend::Ring, true, start);
+    for rig in [&mut off, &mut on] {
+        rig.keep_output();
+        rig.advance(rig.seconds(1.0));
+    }
+    let wet: Vec<f32> = (0..off.record.len()).map(|k| busy(start + k as Frame)).collect();
+    let mut ring_out = vec![0.0f32; wet.len()];
+    assert!(alone.render(start, &wet, &mut ring_out), "the ring sounds");
+    assert_eq!(bits(&off.record), bits(&wet), "off, the record tap is the wet signal");
+    assert_eq!(bits(&off.monitor), bits(&wet), "off, the monitor is the wet signal");
+    let plus = |dry: &[f32]| -> Vec<f32> { dry.iter().zip(&ring_out).map(|(&d, &y)| d + y).collect() };
+    assert_eq!(bits(&on.record), bits(&plus(&off.record)), "on, the record tap is the dry bits plus the ring");
+    assert_eq!(bits(&on.monitor), bits(&plus(&off.monitor)), "on, the monitor is the dry bits plus the ring");
+    let sounding = ring_out.iter().filter(|&&y| y != 0.0).count();
+    assert!(sounding > wet.len() * 9 / 10, "the ring sounded on {sounding} of {} frames", wet.len());
+}
+
+/// Off after on: the gate ramps down over 20 ms, then the ring outputs exact zeros and holds its phase;
+/// `render` reports silence once every send is off, and not while another still sounds.
+#[test]
+fn the_ring_switched_off_goes_silent_after_its_ramp_and_idle_once_every_send_is() {
+    let mut rig = Rig::new();
+    rig.set_input(busy);
+    ring(&mut rig, 1.0, 440.0);
+    rig.advance(4800);
+    assert!(!rig.engine.input_fx().idle(), "the ring sounds");
+    rig.keep_output();
+    rig.set(Command::SetInputSend(InputSend::Ring, false));
+    // 960 frames of ramp, the quantum it lands in and the one it ends in.
+    rig.advance(960 + 2 * 128);
+    let fading = added(&rig, busy);
+    // Past the next quantum boundary (where a cut would already be silent) and inside the ramp.
+    assert!(fading[300..600].iter().any(|&y| y != 0.0), "the ring fades out, not cut");
+    assert!(rig.engine.input_fx().idle(), "the ring has no tail: idle once its gate is shut");
+    let phase = rig.engine.input_fx().ring_phase();
+    rig.keep_output();
+    rig.advance(rig.seconds(0.5));
+    let input: Vec<f32> = (0..rig.record.len()).map(|k| busy(rig.output.as_ref().unwrap().0 + k as Frame)).collect();
+    assert_eq!(bits(&rig.record), bits(&input), "the record tap is the input: the ring adds exact zeros");
+    assert_eq!(bits(&rig.monitor), bits(&input), "and so is the monitor");
+    assert_eq!(rig.engine.input_fx().ring_phase(), phase, "an idle ring holds its phase");
+
+    // Silence only when all three are silent: the ring off while the echo still sounds is not idle.
+    echo(&mut rig, 0.5, 0.0);
+    ring(&mut rig, 1.0, 440.0);
+    rig.advance(4800);
+    rig.set(Command::SetInputSend(InputSend::Ring, false));
+    rig.advance(960 + 2 * 128);
+    assert!(!rig.engine.input_fx().idle(), "the echo still sounds");
+    rig.set(Command::SetInputSend(InputSend::Echo, false));
+    // With no feedback the echo is silent once its 2 s line has emptied.
+    rig.advance(rig.seconds(3.0));
+    assert!(rig.engine.input_fx().idle(), "every send is off and silent");
+}
+
+/// A frequency change is an exponential ramp that ends 20 ms after the frame it lands on and, like every
+/// change here, is heard from the next quantum boundary: the carrier's phase increment holds until that
+/// boundary, then follows the ramp over the `960 − d` frames left of it (`d` the frames from the landing
+/// to the boundary) and never jumps. Landing 78 frames before a boundary, no step of the increment is
+/// larger than one frame of that ramp at its top, `2π/sr · 1500 · ((1500/440)^(1/(960 − 78)) − 1)` ≈
+/// 0.00027 rad; a jump from 440 to 1500 Hz would be `2π/sr · 1060` ≈ 0.139 rad.
+#[test]
+fn a_ring_frequency_change_ramps_the_carriers_phase_increment() {
+    const FROM: f64 = 440.0;
+    const TO: f64 = 1500.0;
+    const RAMP: usize = 960; // 20 ms at 48 kHz
+    const Q: Frame = 128;
+    let mut rig = Rig::with(Opts { block: 1, ..Default::default() });
+    rig.set_level(0.5);
+    ring(&mut rig, 1.0, FROM);
+    rig.advance(2400);
+    // No frames skipped: the DSP clock is the device frame, and a quantum starts on a multiple of 128.
+    let boundary = (rig.frame / Q + 2) * Q;
+    rig.advance_to(boundary - 78);
+    let landed = rig.frame;
+    let d = (boundary - landed) as usize;
+    assert_eq!(d, 78);
+    let mut phases = vec![rig.engine.input_fx().ring_phase()];
+    rig.set(Command::SetInputSendParam(InputSendParam::RingFreq, TO));
+    for _ in 0..2400 {
+        phases.push(rig.engine.input_fx().ring_phase());
+        rig.advance(1);
+    }
+    // incs[j]: the increment frame `landed + j` added.
+    let incs: Vec<f64> = phases.windows(2).map(|w| (w[1] - w[0]).rem_euclid(TAU)).collect();
+    let inc = |hz: f64| TAU * hz / SR;
+    for (j, &x) in incs[..d].iter().enumerate() {
+        assert!((x - inc(FROM)).abs() < 1e-12, "frame {j} after the change, before the boundary: {x}");
+    }
+    assert!(incs[d + 1] > inc(FROM) + 1e-9, "the ramp is heard from the boundary");
+    assert!(incs[RAMP - 2] < inc(TO) - 1e-9, "still ramping just before its 20 ms are up");
+    for (j, &x) in incs.iter().enumerate().skip(RAMP + 1) {
+        assert!((x - inc(TO)).abs() < 1e-12, "frame {j} after the change, past the ramp: {x}");
+    }
+    let bound = inc(TO) * ((TO / FROM).powf(1.0 / (RAMP - d) as f64) - 1.0);
+    let steps: Vec<f64> = incs.windows(2).map(|w| (w[1] - w[0]).abs()).collect();
+    let largest = steps.iter().fold(0.0f64, |a, &s| a.max(s));
+    println!(
+        "ring 440 -> 1500 Hz, landing {d} frames before a quantum boundary: largest step of the phase increment {largest:.3e} rad (bound {bound:.3e}), a jump {:.3e}",
+        inc(TO - FROM)
+    );
+    assert!(largest <= bound * 1.001, "a step of {largest}");
 }

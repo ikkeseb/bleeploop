@@ -16,7 +16,7 @@
   outline: none;
 }
 .infx-popover .infx {
-  width: 320px;
+  width: 480px;
   flex-wrap: nowrap;
   align-items: flex-start;
   background: var(--panel);

@@ -104,8 +104,8 @@ pub enum Command {
     /// A built-in instrument's output level (linear, 0.., default 1), smoothed as a slot's gain: on what
     /// is heard and what is recorded, whether or not it is the note target, so a tail rings out at it.
     SetInstrumentGain(Instrument, f32),
-    /// An input send on or off (`input_fx`): the ECHO or the REVERB on the wet signal, heard and
-    /// recorded. Off closes its input and lets its tail ring out. A rig setting, not a lane's.
+    /// An input send on or off (`input_fx`): the ECHO, the REVERB or the RING MOD on the wet signal,
+    /// heard and recorded. Off closes its input and lets its tail ring out. A rig setting, not a lane's.
     SetInputSend(InputSend, bool),
     /// An input send's parameter, clamped to its range ([`InputSendParam::range`]).
     SetInputSendParam(InputSendParam, f64),
@@ -148,20 +148,22 @@ impl Command {
     }
 }
 
-/// The two input sends (`input_fx`), on the live input before the record tap.
+/// The three input sends (`input_fx`), on the live input before the record tap.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InputSend {
     /// A tempo-synced feedback delay.
     Echo,
     Reverb,
+    /// A ring modulator: the input times a sine carrier.
+    Ring,
 }
 
 impl InputSend {
-    pub const ALL: [InputSend; 2] = [InputSend::Echo, InputSend::Reverb];
+    pub const ALL: [InputSend; 3] = [InputSend::Echo, InputSend::Reverb, InputSend::Ring];
 
     /// The key the UI sends (`src/platform/engine-wire.ts`).
     pub fn key(self) -> &'static str {
-        ["echo", "reverb"][self as usize]
+        ["echo", "reverb", "ring"][self as usize]
     }
 
     pub fn from_key(key: &str) -> Option<InputSend> {
@@ -170,21 +172,31 @@ impl InputSend {
 }
 
 /// An input send's parameter. The echo's time is an index into the lane delay's divisions
-/// (`dsp::fx::DIVISIONS`: 1/4, 1/8, 1/8., 1/16); feedback and the levels are linear.
+/// (`dsp::fx::DIVISIONS`: 1/4, 1/8, 1/8., 1/16); the ring's frequency is its carrier's, in Hz;
+/// feedback and the levels are linear.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InputSendParam {
     EchoTime,
     EchoFeedback,
     EchoLevel,
     ReverbLevel,
+    RingFreq,
+    RingLevel,
 }
 
 impl InputSendParam {
-    pub const ALL: [InputSendParam; 4] = [InputSendParam::EchoTime, InputSendParam::EchoFeedback, InputSendParam::EchoLevel, InputSendParam::ReverbLevel];
+    pub const ALL: [InputSendParam; 6] = [
+        InputSendParam::EchoTime,
+        InputSendParam::EchoFeedback,
+        InputSendParam::EchoLevel,
+        InputSendParam::ReverbLevel,
+        InputSendParam::RingFreq,
+        InputSendParam::RingLevel,
+    ];
 
     /// The key the UI sends (`src/platform/engine-wire.ts`).
     pub fn key(self) -> &'static str {
-        ["echoTime", "echoFeedback", "echoLevel", "reverbLevel"][self as usize]
+        ["echoTime", "echoFeedback", "echoLevel", "reverbLevel", "ringFreq", "ringLevel"][self as usize]
     }
 
     pub fn from_key(key: &str) -> Option<InputSendParam> {
@@ -193,8 +205,9 @@ impl InputSendParam {
 
     pub fn send(self) -> InputSend {
         match self {
+            InputSendParam::EchoTime | InputSendParam::EchoFeedback | InputSendParam::EchoLevel => InputSend::Echo,
             InputSendParam::ReverbLevel => InputSend::Reverb,
-            _ => InputSend::Echo,
+            InputSendParam::RingFreq | InputSendParam::RingLevel => InputSend::Ring,
         }
     }
 
@@ -205,6 +218,8 @@ impl InputSendParam {
             InputSendParam::EchoFeedback => (0.0, crate::dsp::fx::MAX_FEEDBACK, 0.4),
             InputSendParam::EchoLevel => (0.0, 1.0, 0.5),
             InputSendParam::ReverbLevel => (0.0, 1.0, 0.5),
+            InputSendParam::RingFreq => (20.0, 1500.0, 440.0),
+            InputSendParam::RingLevel => (0.0, 1.0, 0.5),
         }
     }
 }

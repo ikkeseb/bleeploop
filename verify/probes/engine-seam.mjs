@@ -227,6 +227,22 @@ await probe(async ({ open }) => {
   assert.deepEqual(await sentAtLeast(1), [{ SetInputSendParam: ['echoTime', 3] }], 'the division sends its index');
   const kept = await page.evaluate(() => [localStorage.getItem('lf.inputSend.echo'), localStorage.getItem('lf.inputSend.echoLevel')]);
   assert.deepEqual(kept, ['1', '0.8'], 'kept for the next launch');
+  // RING MOD: its toggle and its Freq slider, in whole Hz; kept as the echo is, then switched off again.
+  const ringToggle = page.getByRole('button', { name: 'Input ring mod' });
+  await clearSent();
+  await ringToggle.click();
+  assert.deepEqual(await sentAtLeast(1), [{ SetInputSend: ['ring', true] }], 'RING MOD sends SetInputSend');
+  await clearSent();
+  const ringFreq = page.getByRole('slider', { name: 'Ring mod freq' });
+  await ringFreq.fill('900');
+  assert.deepEqual(await sentAtLeast(1), [{ SetInputSendParam: ['ringFreq', 900] }], 'the Freq slider sends its Hz');
+  const ringRead = await page.locator('.fxp-param', { has: ringFreq }).locator('.fxp-param__val').textContent();
+  assert.equal(ringRead, '900 Hz', 'the Freq reads whole Hz with its unit');
+  const keptRing = await page.evaluate(() => [localStorage.getItem('lf.inputSend.ring'), localStorage.getItem('lf.inputSend.ringFreq')]);
+  assert.deepEqual(keptRing, ['1', '900'], 'the ring is kept for the next launch');
+  await clearSent();
+  await ringToggle.click();
+  assert.deepEqual(await sentAtLeast(1), [{ SetInputSend: ['ring', false] }], 'RING MOD switches off');
   await page.keyboard.press('Escape');
   await dialog.waitFor({ state: 'detached' });
   assert.equal(await page.evaluate(() => document.activeElement?.getAttribute('aria-label')), 'Input effects', 'Escape returns focus to IN FX');

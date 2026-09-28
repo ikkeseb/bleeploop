@@ -184,7 +184,7 @@ const [clickVolume, setClickVolumeSignal] = createSignal(readStoredNumber(CLICK_
 const [masterVolume, setMasterVolumeSignal] = createSignal(readStoredNumber(MASTER_KEY, 1, 0, 1));
 const [masterMuted, setMasterMutedSignal] = createSignal(false);
 
-// ── The input sends (ECHO, REVERB on the live input): a rig setting, not a session's, so kept in
+// ── The input sends (ECHO, REVERB, RING MOD on the live input): a rig setting, not a session's, so kept in
 // localStorage like the master and click levels, restored at boot and sent to an engine that lacks them ─
 
 /** An input send param's range and default (Rust `InputSendParam::range`); the echo's time is an index
@@ -200,8 +200,10 @@ const INPUT_SEND_PARAMS: readonly InputSendParamDef[] = [
   { key: 'echoFeedback', send: 'echo', label: 'Fbk', min: 0, max: 0.95, step: 0.01, default: 0.4 },
   { key: 'echoLevel', send: 'echo', label: 'Level', min: 0, max: 1, step: 0.01, default: 0.5 },
   { key: 'reverbLevel', send: 'reverb', label: 'Level', min: 0, max: 1, step: 0.01, default: 0.5 },
+  { key: 'ringFreq', send: 'ring', label: 'Freq', min: 20, max: 1500, step: 1, default: 440, unit: 'Hz' },
+  { key: 'ringLevel', send: 'ring', label: 'Level', min: 0, max: 1, step: 0.01, default: 0.5 },
 ];
-const INPUT_SENDS: readonly InputSendId[] = ['echo', 'reverb'];
+const INPUT_SENDS: readonly InputSendId[] = ['echo', 'reverb', 'ring'];
 const inputSendKey = (id: string) => `lf.inputSend.${id}`;
 
 const inputSendOn = Object.fromEntries(

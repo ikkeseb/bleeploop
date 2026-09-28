@@ -581,6 +581,20 @@ mod tests {
         assert!(command(r#"{"SelectInstrument":{"Builtin":"drums"}}"#).is_err(), "an instrument is its id");
         assert_eq!(command(r#"{"SetInputSend":["echo",true]}"#).unwrap(), Command::SetInputSend(InputSend::Echo, true));
         assert!(command(r#"{"SetInputSend":["Echo",true]}"#).is_err(), "a send is its key");
+        assert_eq!(command(r#"{"SetInputSend":["ring",true]}"#).unwrap(), Command::SetInputSend(InputSend::Ring, true));
+        assert!(command(r#"{"SetInputSend":["ringMod",true]}"#).is_err(), "the ring's key is \"ring\"");
+        assert_eq!(
+            command(r#"{"SetInputSendParam":["ringFreq",440]}"#).unwrap(),
+            Command::SetInputSendParam(InputSendParam::RingFreq, 440.0)
+        );
+        assert_eq!(
+            command(r#"{"SetInputSendParam":["ringLevel",0.5]}"#).unwrap(),
+            Command::SetInputSendParam(InputSendParam::RingLevel, 0.5)
+        );
+        for send in InputSend::ALL {
+            let json = serde_json::to_value(WireCommand(Command::SetInputSend(send, true))).unwrap();
+            assert_eq!(json["SetInputSend"][0], Value::from(send.key()));
+        }
         assert_eq!(command(r#"{"Trim":[1,3]}"#).unwrap(), Command::Trim(1, 3));
         assert!(command(r#"{"Trim":[1,-1]}"#).is_err() && command(r#"{"Trim":[1,1.5]}"#).is_err(), "a bar count is a whole number");
         assert_eq!(command(r#"{"SetFadeBars":4}"#).unwrap(), Command::SetFadeBars(4));

@@ -8,23 +8,25 @@ import '../looper/fxpanel.css';
 import './input-fx.css';
 
 /**
- * IN FX: the input sends, ECHO and REVERB on the live input (the amp-sim's output, or the dry input on
- * MIC). What they add is heard and recorded on the same frame; the dry signal never passes through them
- * (`src-tauri/crates/lf-engine/src/input_fx.rs`). A rig setting, kept in localStorage by the engine
- * store. Engine mode only: the web path has no input sends, so nothing renders there.
+ * IN FX: the input sends, ECHO, REVERB and RING MOD on the live input (the amp-sim's output, or the dry
+ * input on MIC). What they add is heard and recorded on the same frame; the dry signal never passes
+ * through them (`src-tauri/crates/lf-engine/src/input_fx.rs`). A rig setting, kept in localStorage by the
+ * engine store. Engine mode only: the web path has no input sends, so nothing renders there.
  *
- * The command-bar pill opens a small popover under itself with the two sends as FxPanel's modules (the
+ * The command-bar pill opens a small popover under itself with the three sends as FxPanel's modules (the
  * same key-face toggle, sliders and division select); the pill reads engaged (warm white) while any
- * send is on.
+ * send is on. The ring's frequency reads in whole Hz with its unit.
  */
 
 const SENDS: readonly { id: InputSendId; label: string }[] = [
   { id: 'echo', label: 'Echo' },
   { id: 'reverb', label: 'Reverb' },
+  { id: 'ring', label: 'Ring mod' },
 ];
 
 function formatValue(v: number, def: InputSendParamDef): string {
   if (def.choices) return def.choices[Math.round(v)] ?? String(v);
+  if (def.unit === 'Hz') return `${Math.round(v)} Hz`;
   return v.toFixed(2);
 }
 
@@ -93,7 +95,7 @@ function InputFxControl(props: { returnFocus?: (el: HTMLElement | undefined) => 
         aria-haspopup="dialog"
         aria-expanded={open()}
         aria-controls="lf-infx-popover"
-        title="Echo and reverb on the live input: heard and recorded, the dry sound untouched"
+        title="Echo, reverb and ring mod on the live input: heard and recorded, the dry sound untouched"
         onClick={() => setOpen((v) => !v)}
       >
         IN FX

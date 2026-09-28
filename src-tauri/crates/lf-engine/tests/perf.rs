@@ -7,9 +7,9 @@
 //!
 //! - Stage 2: five lanes (one overdubbing), the click and the master limiter under 10 % of the block's
 //!   real time (with the Stage 3 sound wired in and idle: bypassed FX, silent instruments).
-//! - Stage 3: that engine with every effect on, both input sends on and the drum kit playing, plus
+//! - Stage 3: that engine with every effect on, every input send on and the drum kit playing, plus
 //!   the other synths beside it (below), under 50 %.
-//! - The input sends (F15): what ECHO and REVERB on the live input add to the Stage 2 engine, printed
+//! - The input sends (F15, F24): what ECHO, REVERB and RING MOD on the live input add to the Stage 2 engine, printed
 //!   beside it (no bar of their own; the Stage 3 bar carries them).
 //! - A multiply burst (F14): the eight extension jobs of the worst multiply add under 10 % to the blocks
 //!   they run in.
@@ -50,16 +50,19 @@ fn five_lanes_one_overdubbing() -> (Rig, Frame) {
     (rig, master)
 }
 
-/// Both input sends on, at their heaviest: the echo at full level and feedback 0.95, the reverb at full
-/// level (the rig's slot 0 is live, so they hear the input).
+/// Every input send on, at its heaviest: the echo at full level and feedback 0.95, the reverb and the
+/// ring at full level (the rig's slot 0 is live, so they hear the input).
 fn input_sends_on(rig: &mut Rig) {
     for command in [
         Command::SetInputSendParam(InputSendParam::EchoTime, 1.0),
         Command::SetInputSendParam(InputSendParam::EchoFeedback, MAX_FEEDBACK),
         Command::SetInputSendParam(InputSendParam::EchoLevel, 1.0),
         Command::SetInputSendParam(InputSendParam::ReverbLevel, 1.0),
+        Command::SetInputSendParam(InputSendParam::RingFreq, 1500.0),
+        Command::SetInputSendParam(InputSendParam::RingLevel, 1.0),
         Command::SetInputSend(InputSend::Echo, true),
         Command::SetInputSend(InputSend::Reverb, true),
+        Command::SetInputSend(InputSend::Ring, true),
     ] {
         rig.set(command);
     }
@@ -213,8 +216,8 @@ fn a_trim_of_the_longest_loop_costs_under_a_tenth_of_the_block_more() {
     assert!(rig.lane(0).can_undo && rig.master() == master);
 }
 
-/// What the two input sends add: the Stage 2 engine timed with them off, then (past the reverb's IR
-/// and the echo's build-up) with both on at their heaviest, 20 s each, in one run.
+/// What the input sends add: the Stage 2 engine timed with them off, then (past the reverb's IR and the
+/// echo's build-up) with all three on at their heaviest, 20 s each, in one run.
 #[test]
 #[ignore]
 fn the_input_sends_cost() {
@@ -226,7 +229,7 @@ fn the_input_sends_cost() {
     time_blocks(&mut rig, 48000 * 3 / BLOCK);
     let (on, p999, worst) = time_blocks(&mut rig, blocks);
     println!(
-        "stage 2 engine, {blocks} blocks of {BLOCK} at 48 k: sends off mean {:.1} µs ({:.2} %); both on mean {:.1} µs ({:.2} %), p99.9 {:.2} %, worst {:.1} %; the sends add {:.1} µs ({:.2} %)",
+        "stage 2 engine, {blocks} blocks of {BLOCK} at 48 k: sends off mean {:.1} µs ({:.2} %); all on mean {:.1} µs ({:.2} %), p99.9 {:.2} %, worst {:.1} %; the sends add {:.1} µs ({:.2} %)",
         off * period * 1e6,
         off * 100.0,
         on * period * 1e6,
@@ -246,8 +249,8 @@ const PARTS: [&str; 6] = ["engine: lanes + FX + reverb + input sends + drum kit 
 /// - the engine as the Stage 2 bar runs it (five lanes, one overdubbing, the click), with every effect
 ///   on every lane: the filter at Q 6 with its cutoff ramping all the time (a new 20 ms ramp every 14
 ///   blocks: per-frame coefficients), the pitch at +7, the stutter at 1/16, the delay at 1/8 and full
-///   feedback (0.95), the reverb send at 1, so the one reverb bus is busy; both input sends on at
-///   their heaviest (the echo at feedback 0.95, both levels 1) on the live input; and the drum kit selected
+///   feedback (0.95), the reverb send at 1, so the one reverb bus is busy; every input send on at
+///   its heaviest (the echo at feedback 0.95, every level 1) on the live input; and the drum kit selected
 ///   with its 16 voices re-hit every 30 blocks (40 ms, the pedal hat's ring), so every voice sounds;
 /// - beside the engine, the other five synths sounding at once, which the engine never asks for (notes
 ///   reach only the selected instrument; the others only ring out): the four poly synths with every

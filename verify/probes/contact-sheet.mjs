@@ -8,7 +8,7 @@
  * GO LIVE and the editor (INPUT LIVE); 10-amp-sim-idle = the same after stopping live input. Those
  * scenes prove the frontend's rendering of a native host's answers, never the native side.
  * 11-engine-in-fx is engine mode on the web engine fake (the engine-seam pattern: `__lfEngineFake` set
- * before the app loads, a scripted reset frame with both input sends on) with the IN FX popover open;
+ * before the app loads, a scripted reset frame with every input send on) with the IN FX popover open;
  * it proves the rendering only, never the engine. 12-stage-view = the stage view (src/ui/stage/) over
  * five loaded lanes (playing, stopped, one muted), in the web-tier context, opened by its command-bar
  * cap. Writes
@@ -243,7 +243,7 @@ await probe(async ({ browser, open }) => {
         window.__lf.native.emit({
           seq: 1,
           reset: true,
-          settings: [{ SetInputSend: ['echo', true] }, { SetInputSend: ['reverb', true] }],
+          settings: [{ SetInputSend: ['echo', true] }, { SetInputSend: ['reverb', true] }, { SetInputSend: ['ring', true] }],
           events: [...[0, 1, 2, 3, 4].map((lane) => ({ Lane: { frame: 0, lane, info } })),
             { Transport: { frame: 0, master: 0, bpm: 120, locked: false } }, { Selected: { frame: 0, lane: 0 } }],
           device: [],

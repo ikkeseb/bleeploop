@@ -30,7 +30,7 @@ import {
  * (`transport-keys.ts`) and MIDI learn (`midi-actions.ts`) dispatch through it. Each row runs the path
  * its on-screen control runs: the lane core, ▶/■, ↶ UNDO, CLR, MUTE, ↺ REV, ⧉ COPY and ✂ TRIM (halve:
  * the first half); the command bar's
- * ▶/■ ALL, FADE, TAP, CLICK, END STOP, FIXED and IN FX's two sends; the slot's GO LIVE and the stage view's
+ * ▶/■ ALL, FADE, TAP, CLICK, END STOP, FIXED and IN FX's three sends; the slot's GO LIVE and the stage view's
  * cap.
  *
  * A lane action (`LANE`) acts on a `Target`: the SELECTED track, or a named one. A press on a named
@@ -58,7 +58,8 @@ type GlobalActionId =
   | 'endStopToggle'
   | 'fixedToggle'
   | 'inFxEcho'
-  | 'inFxReverb';
+  | 'inFxReverb'
+  | 'inFxRing';
 export type ActionId = LaneActionId | GlobalActionId;
 
 /** A lane action's track: 0-based, or null for the selected track. */
@@ -88,6 +89,7 @@ export const ACTION_LABELS: Readonly<Record<ActionId, string>> = {
   fixedToggle: 'Fixed length on / off',
   inFxEcho: 'Input echo on / off',
   inFxReverb: 'Input reverb on / off',
+  inFxRing: 'Input ring mod on / off',
 };
 
 // CLEAR's guard. A take is irreversible, so the first press only arms and says so on the lane; the
@@ -183,6 +185,7 @@ const GLOBAL: Readonly<Record<GlobalActionId, () => void>> = {
   fixedToggle: gated(fixedGate, () => looper.setFixedLengthEnabled(!looper.fixedLengthEnabled())),
   inFxEcho: gated(inputFxGate, toggleSend('echo')),
   inFxReverb: gated(inputFxGate, toggleSend('reverb')),
+  inFxRing: gated(inputFxGate, toggleSend('ring')),
 };
 
 /** The global rows the engine runs as its own hands-free actions. */

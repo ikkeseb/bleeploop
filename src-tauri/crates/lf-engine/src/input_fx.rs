@@ -1,7 +1,7 @@
-//! OWNS: the input sends (tester report F15): ECHO and REVERB on the wet signal (the live slot's
-//! output: an amp-sim, or the dry input through an empty live slot), before the record tap. The engine
-//! adds their mono sum to the record tap and to the monitor on the frame it renders them, so the player
-//! hears what is recorded, and the dry play path gains no latency.
+//! OWNS: the input sends: ECHO and REVERB (tester report F15) and RING MOD (F24) on the wet signal (the
+//! live slot's output: an amp-sim, or the dry input through an empty live slot), before the record tap.
+//! The engine adds their mono sum to the record tap and to the monitor on the frame it renders them, so
+//! the player hears what is recorded, and the dry play path gains no latency.
 //!
 //! Wet only: the dry signal never passes through a send. A send reads the wet signal and renders only
 //! its own output (no dry/wet CrossFade, which would change the dry bits and leak its wet path at
@@ -16,9 +16,17 @@
 //! - REVERB: its own convolver ([`Convolver`]) over the lanes' bus IR (`effects::reverb_ir`), fed
 //!   `gate · x` and heard as `level · (L + R) / 2`: the stereo tail summed to mono as the instruments'
 //!   record path sums a stereo synth.
+//! - RING MOD: the wet signal times a sine carrier, heard as `gate · level · x · sin φ`; the carrier's
+//!   phase φ advances by `2π · freq / sample_rate` a frame (accumulated in f64 and wrapped to [0, 2π)).
+//!   For an input without DC the product keeps neither the input's frequencies nor the carrier's,
+//!   only their sums and differences (a 1000 Hz note on a 300 Hz carrier sounds at 700 and 1300 Hz); a
+//!   DC offset comes out as the carrier itself. Its one state is the carrier's phase, so it has no tail.
 //!
 //! The levels are linear gains, 0..1 like the lanes' reverb send, and the monitor has no limiter, so
-//! at 1 neither send should clip a normal guitar signal. The echo line's gain grows with its feedback:
+//! at 1 no send should clip a normal guitar signal. The ring's output is never louder than its input
+//! (`|sin φ| ≤ 1`): at level 1 the sine carrier puts it about 3 dB under the input (its RMS, `1/√2`).
+//! Added to the dry signal, the sum peaks at up to `1 + level` times the input where the carrier's sign
+//! agrees with it, as a level-1 echo's first repeat can. The echo line's gain grows with its feedback:
 //! `1 / (1 − fb²)` in energy for a broadband input (+10 dB at 0.95), so the echo's level is scaled by
 //! `√(1 − fb²)`: at level 1 the whole train of repeats carries the input's energy at any feedback (the
 //! first echo at 0.92 of the input at the default 0.4, 0.31 at 0.95). A sustained pitch whose period
@@ -32,7 +40,8 @@
 //! from the frame it lands on, computed per 128-frame quantum on the DSP clock, so a change sounds from
 //! the next quantum boundary and any block split renders the same bits. The echo's time follows the
 //! clock's tempo at once from the next quantum boundary (a lane delay's `set_timing`); a division change
-//! ramps.
+//! ramps. The ring's frequency ramps exponentially, as Tone ramps a frequency (`ToneParam::ramp_to`): its
+//! phase increment follows the ramp from the next quantum boundary and never jumps to the new value.
 //!
 //! # Off, and idle
 //!
@@ -45,15 +54,19 @@
 //!   it renders nothing until the gate opens;
 //! - the reverb hands its convolver no input while the gate is shut: the convolver goes silent once
 //!   the IR's length has passed without input (Blink's tail rule) and skips its work. Before the gate
-//!   first opens it is never called.
+//!   first opens it is never called;
+//! - the ring has no tail: a quantum whose gate values are all 0 renders nothing, and its carrier's
+//!   phase holds still, so the phase depends only on the frames the ring rendered, never on how the
+//!   blocks split them.
 //!
-//! While both are silent [`InputFx::render`] says so and the engine adds nothing: the record tap and
-//! the monitor are then bit-identical to never having had a send on. Everything is allocated in
+//! While all three are silent [`InputFx::render`] says so and the engine adds nothing: the record tap
+//! and the monitor are then bit-identical to never having had a send on. Everything is allocated in
 //! [`InputFx::new`]; rendering and the controls never allocate.
 
 use crate::api::{InputSend, InputSendParam};
 use crate::dsp::convolver::Convolver;
 use crate::dsp::delay::DelayNode;
+use crate::dsp::fdlibm;
 use crate::dsp::fx::{clamp_index, division_beats, Ctl, DIVISIONS, MAX_FEEDBACK, RAMP};
 use crate::dsp::param::{AudioParam, Rate, ToneParam, Units, QUANTUM};
 use crate::grid::{frames_per_bar, Frame};
@@ -65,7 +78,7 @@ const FLUSH: f32 = 1e-6;
 /// The tempo the echo's time starts from, until the clock hands it one.
 const START_BEAT_PERIOD: f64 = 0.5;
 
-/// A gain param starting at `value`.
+/// A param starting at `value`: a gain, or the ring's frequency.
 fn gain(sample_rate: f32, units: Units, value: f64, frame: u64) -> ToneParam {
     let native = AudioParam::new(sample_rate as f64, 1.0, f32::MIN, f32::MAX, Rate::A);
     ToneParam::new(native, units, Some(value), frame)
@@ -290,7 +303,91 @@ impl Reverb {
     }
 }
 
-/// The two input sends and the tempo their echo follows.
+struct Ring {
+    on: bool,
+    freq: f64,
+    level: f64,
+    sample_rate: f64,
+    gate: ToneParam,
+    /// The carrier's frequency in Hz (exponential ramps: [`Units::Frequency`]).
+    freq_hz: ToneParam,
+    level_gain: ToneParam,
+    gates: [f32; QUANTUM],
+    freqs: [f32; QUANTUM],
+    levels: [f32; QUANTUM],
+    /// The carrier's phase at the next frame the ring renders, in [0, 2π).
+    phase: f64,
+    /// The gate is shut for the whole quantum being rendered: it renders nothing.
+    idle: bool,
+}
+
+impl Ring {
+    fn new(sample_rate: f32, ctl: Ctl) -> Self {
+        let freq = InputSendParam::RingFreq.range().2;
+        let level = InputSendParam::RingLevel.range().2;
+        Ring {
+            on: false,
+            freq,
+            level,
+            sample_rate: sample_rate as f64,
+            gate: gain(sample_rate, Units::Gain, 0.0, ctl.frame),
+            freq_hz: gain(sample_rate, Units::Frequency, freq, ctl.frame),
+            level_gain: gain(sample_rate, Units::Gain, level, ctl.frame),
+            gates: [0.0; QUANTUM],
+            freqs: [0.0; QUANTUM],
+            levels: [0.0; QUANTUM],
+            phase: 0.0,
+            idle: true,
+        }
+    }
+
+    fn set_on(&mut self, on: bool, ctl: Ctl) {
+        self.on = on;
+        self.gate.ramp_to(if on { 1.0 } else { 0.0 }, RAMP, ctl.now, ctl.frame);
+    }
+
+    fn set_param(&mut self, param: InputSendParam, value: f64, ctl: Ctl) {
+        let (min, max, _) = param.range();
+        let value = value.clamp(min, max);
+        if param == InputSendParam::RingFreq {
+            self.freq = value;
+            self.freq_hz.ramp_to(value, RAMP, ctl.now, ctl.frame);
+        } else {
+            self.level = value;
+            self.level_gain.ramp_to(value, RAMP, ctl.now, ctl.frame);
+        }
+    }
+
+    fn begin_quantum(&mut self, q: u64) {
+        self.idle = !fill(&mut self.gate, q, &mut self.gates);
+        if !self.idle {
+            fill(&mut self.freq_hz, q, &mut self.freqs);
+            fill(&mut self.level_gain, q, &mut self.levels);
+        }
+    }
+
+    /// Frames `at..at + input.len()` of the quantum begun into `out`; false (and zeros, the phase held)
+    /// while idle.
+    fn process(&mut self, at: usize, input: &[f32], out: &mut [f32]) -> bool {
+        if self.idle {
+            out.fill(0.0);
+            return false;
+        }
+        let per_hz = std::f64::consts::TAU / self.sample_rate;
+        for (i, (&x, o)) in input.iter().zip(out.iter_mut()).enumerate() {
+            let k = at + i;
+            *o = self.gates[k] * self.levels[k] * x * fdlibm::sin(self.phase) as f32;
+            // The frequency is at most 1500 Hz, far under the sample rate: one wrap a frame at most.
+            self.phase += per_hz * self.freqs[k] as f64;
+            if self.phase >= std::f64::consts::TAU {
+                self.phase -= std::f64::consts::TAU;
+            }
+        }
+        true
+    }
+}
+
+/// The three input sends and the tempo their echo follows.
 pub struct InputFx {
     sample_rate: u32,
     /// Device frames the DSP clock is behind (`effects`).
@@ -299,6 +396,7 @@ pub struct InputFx {
     bpm: u32,
     echo: Echo,
     reverb: Reverb,
+    ring: Ring,
     /// The quantum whose control values are computed.
     prepared: Option<u64>,
     mono: [f32; QUANTUM],
@@ -306,7 +404,7 @@ pub struct InputFx {
 
 impl InputFx {
     /// Allocates (the echo's line, the reverb's convolver over `ir`, `effects::reverb_ir`): build it off
-    /// the audio thread. Both sends start off.
+    /// the audio thread. Every send starts off.
     pub fn new(sample_rate: u32, ir: [&[f32]; 2]) -> Self {
         let sr = sample_rate as f32;
         let start = Ctl::at(0, sr);
@@ -316,6 +414,7 @@ impl InputFx {
             bpm: 0,
             echo: Echo::new(sr, start),
             reverb: Reverb::new(sr, ir, start),
+            ring: Ring::new(sr, start),
             prepared: None,
             mono: [0.0; QUANTUM],
         }
@@ -337,6 +436,7 @@ impl InputFx {
         match send {
             InputSend::Echo => self.echo.on,
             InputSend::Reverb => self.reverb.on,
+            InputSend::Ring => self.ring.on,
         }
     }
 
@@ -346,12 +446,20 @@ impl InputFx {
             InputSendParam::EchoFeedback => self.echo.feedback,
             InputSendParam::EchoLevel => self.echo.level,
             InputSendParam::ReverbLevel => self.reverb.level,
+            InputSendParam::RingFreq => self.ring.freq,
+            InputSendParam::RingLevel => self.ring.level,
         }
     }
 
-    /// Neither send rendered anything in the last frames rendered (both off and decayed, or never on).
+    /// No send rendered anything in the last frames rendered (all off and decayed, or never on).
     pub fn idle(&self) -> bool {
-        self.echo.idle && self.reverb.silent
+        self.echo.idle && self.reverb.silent && self.ring.idle
+    }
+
+    /// The ring's carrier phase at the next frame it renders, in radians in [0, 2π): what its tests
+    /// read.
+    pub fn ring_phase(&self) -> f64 {
+        self.ring.phase
     }
 
     pub fn set_on(&mut self, send: InputSend, on: bool, frame: Frame) {
@@ -359,6 +467,7 @@ impl InputFx {
         match send {
             InputSend::Echo => self.echo.set_on(on, ctl),
             InputSend::Reverb => self.reverb.set_on(on, ctl),
+            InputSend::Ring => self.ring.set_on(on, ctl),
         }
     }
 
@@ -371,6 +480,7 @@ impl InputFx {
         match param.send() {
             InputSend::Echo => self.echo.set_param(param, value, ctl),
             InputSend::Reverb => self.reverb.set_level(value, ctl),
+            InputSend::Ring => self.ring.set_param(param, value, ctl),
         }
     }
 
@@ -387,7 +497,7 @@ impl InputFx {
         self.echo.set_beat_period(beat_period, ctl);
     }
 
-    /// Render frames `frame..frame + input.len()` of the wet signal `input` into `out`, the two sends'
+    /// Render frames `frame..frame + input.len()` of the wet signal `input` into `out`, the three sends'
     /// mono sum. Returns false when nothing sounded (then `out` is all zeros and the engine adds
     /// nothing). Blocks follow each other on the DSP clock.
     pub fn render(&mut self, frame: Frame, input: &[f32], out: &mut [f32]) -> bool {
@@ -402,6 +512,7 @@ impl InputFx {
             if self.prepared != Some(quantum_start) {
                 self.echo.begin_quantum(quantum_start);
                 self.reverb.begin_quantum(quantum_start);
+                self.ring.begin_quantum(quantum_start);
                 self.prepared = Some(quantum_start);
             }
             let at = (f - quantum_start) as usize;
@@ -410,6 +521,12 @@ impl InputFx {
             let echo = self.echo.process(at, &input[span.clone()], &mut out[span.clone()]);
             let mono = &mut self.mono[..n];
             if self.reverb.process(f, at, &input[span.clone()], mono) {
+                for (o, &r) in out[span.clone()].iter_mut().zip(mono.iter()) {
+                    *o += r;
+                }
+                sounded = true;
+            }
+            if self.ring.process(at, &input[span.clone()], mono) {
                 for (o, &r) in out[span].iter_mut().zip(mono.iter()) {
                     *o += r;
                 }

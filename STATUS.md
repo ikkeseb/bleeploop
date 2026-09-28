@@ -54,7 +54,8 @@ A stop dies when it passes; past 10 stops, consolidate or flag it (AGENTS.md). D
    the amp feels immediate; master fader scales the wet, not the recorded level. Loop against the
    click with no trim: first take, overdub and FIXED 4 keep their attacks and endings on the click.
    IN FX: ECHO and REVERB on the guitar still feel immediate, the echo sits on the tempo,
-   and a take recorded with them sounds as it did live.
+   and a take recorded with them sounds as it did live. RING MOD (F24, never heard): its Freq range
+   20–1500 Hz and 440 Hz default are an agent's pick — keep, or name what to change.
 2. **Same rig · buffer 256, then 64.** The take still lands on the click at each size; the switch
    gap is short; loading a plugin while loops play crossfades in without a click.
 3. **The take itself, at 128.** Count-in feels right (1 bar, accent on 1, no dead air). FIXED 2

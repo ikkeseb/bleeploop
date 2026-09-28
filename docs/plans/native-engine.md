@@ -718,6 +718,8 @@ Built on the engine, in this order unless the owner reorders:
   a TRIM pressed while a swap is still due there (an UNDO or a TRIM in the same loop) waits for it and
   trims the loop as it then stands (lf-engine `looper.rs` `trim`, `tests/trim.rs`; the lane's ✂ TRIM
   and the Halve track pedal action).
+- **F24 ring modulator — built, not heard.** A third input send beside ECHO and REVERB: the wet
+  signal times a sine carrier, wet only (lf-engine `input_fx.rs`, `tests/input_fx.rs`; IN FX's Ring mod).
 - **DUB FEEDBACK — built, not heard.** A lane setting, 0–100 % (default 100 %: the plain sum, bit for
   bit): an overdub writes `input + feedback × old` at each position it passes, so continuous dubbing
   fades the older layers pass by pass; 0 % replaces. UNDO gives back the loop at dub start; COPY takes

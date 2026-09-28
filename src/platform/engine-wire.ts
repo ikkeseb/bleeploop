@@ -63,9 +63,10 @@ export type FxParamId = 'cutoff' | 'q' | 'semitones' | 'rate' | 'time' | 'feedba
 /** Where the notes go: a built-in instrument, a plugin slot's plugin, or nowhere (`'Off'`: a slot whose
  * source is off; switching to it releases the held notes as any switch does). */
 export type NoteTarget = { Builtin: InstrumentId } | { Slot: number } | 'Off';
-/** The input sends (Rust `lf_engine::InputSend`, `InputSendParam`): ECHO and REVERB on the live input. */
-export type InputSendId = 'echo' | 'reverb';
-export type InputSendParamId = 'echoTime' | 'echoFeedback' | 'echoLevel' | 'reverbLevel';
+/** The input sends (Rust `lf_engine::InputSend`, `InputSendParam`): ECHO, REVERB and RING MOD on the live
+ * input. */
+export type InputSendId = 'echo' | 'reverb' | 'ring';
+export type InputSendParamId = 'echoTime' | 'echoFeedback' | 'echoLevel' | 'reverbLevel' | 'ringFreq' | 'ringLevel';
 export type AudioBackend = 'Wasapi' | 'Asio';
 
 const LANE_STATES: readonly LaneState[] = ['Empty', 'Recording', 'Overdubbing', 'Playing', 'Stopped'];
@@ -106,8 +107,8 @@ const ACTIONS: readonly Extract<EngineAction, string>[] = [
 const INSTRUMENTS: readonly InstrumentId[] = ['lead', 'pad', 'piano', 'organ', 'bass', 'drum'];
 const FX_KINDS: readonly FxKindId[] = ['filter', 'pitch', 'stutter', 'delay', 'reverb'];
 const FX_PARAMS: readonly FxParamId[] = ['cutoff', 'q', 'semitones', 'rate', 'time', 'feedback', 'mix', 'amount'];
-const INPUT_SENDS: readonly InputSendId[] = ['echo', 'reverb'];
-const INPUT_SEND_PARAMS: readonly InputSendParamId[] = ['echoTime', 'echoFeedback', 'echoLevel', 'reverbLevel'];
+const INPUT_SENDS: readonly InputSendId[] = ['echo', 'reverb', 'ring'];
+const INPUT_SEND_PARAMS: readonly InputSendParamId[] = ['echoTime', 'echoFeedback', 'echoLevel', 'reverbLevel', 'ringFreq', 'ringLevel'];
 const BACKENDS: readonly AudioBackend[] = ['Wasapi', 'Asio'];
 
 /** Lanes and plugin slots (`lf_engine::TRACK_COUNT`, `SLOT_COUNT`). */

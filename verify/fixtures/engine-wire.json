@@ -63,8 +63,10 @@
     { "SetInstrumentGain": ["pad", 0.5] },
     { "SetInputSend": ["echo", true] },
     { "SetInputSend": ["reverb", false] },
+    { "SetInputSend": ["ring", true] },
     { "SetInputSendParam": ["echoTime", 2] },
-    { "SetInputSendParam": ["reverbLevel", 0.35] }
+    { "SetInputSendParam": ["reverbLevel", 0.35] },
+    { "SetInputSendParam": ["ringFreq", 440] }
   ],
   "events": [
     {
