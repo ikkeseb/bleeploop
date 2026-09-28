@@ -130,15 +130,15 @@ Proven in the browser tier only (`pnpm check`, `pnpm build`, `pnpm verify:jam`, 
   shares, so the drawn take holds still as bins arrive (`verify/probes/wave-steady.mjs`: within 1 px
   per span; red against the old placement). Not eye-checked in WebView2.
 - **F22 (2026-09-28):** the Share row's note says to pick a device the player does not listen on, such
-  as a virtual cable. A warning when Share targets the ASIO interface is not built.
+  as a virtual cable. A warning when Share targets the ASIO interface is not built. In v0.1.2.
 - **F23 (2026-09-28):** the device owner logs `[engine_io] audio glitch: <counter>=<n> (block time p50…
   p99.9… max…), <backend> <frames> frames` for each second in which a fault counter moved (`GlitchWatch`,
   `src-tauri/src/engine_io/owner.rs`; unit test in `engine_io/tests.rs`). An xrun while every block
   stayed well under its period points away from the engine. A clean `native:engine-smoke` run (ASIO 128)
-  logged none; no real glitch has fired it yet.
+  logged none; no real glitch has fired it yet. In v0.1.2.
 - **F26 (2026-09-28):** the export's master mixes every committed track, STOPPED included; MUTE leaves
   one out (`buildExportBundle`). `verify/probes/export-context.mjs` renders a stopped track (peak 0.54)
-  and a muted stopped one (silent); red on the old code. Not run in the Tauri app.
+  and a muted stopped one (silent); red on the old code. Not run in the Tauri app. In v0.1.2.
 - **F3/F12 follow-up:** Help → About this build shows the version and commit, copies a diagnostics
   block and opens the log folder; the repo has a bug-report form asking for both.
 

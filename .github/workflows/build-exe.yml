@@ -3,7 +3,9 @@ name: build-exe
 # The shippable Windows build, made on a clean runner: the NSIS installer plus the bare exe, kept as a
 # run artifact. On demand (Actions tab) and on a `v*` tag push; never on a plain main push (a release
 # build is ~15-20 min of Windows runner). A tag push, or a dispatch with `release_tag` set, also
-# stages a DRAFT GitHub Release - publishing it stays a manual click.
+# stages a DRAFT GitHub Release - publishing it stays a manual click. Release by pushing the tag: a
+# dispatch's draft has no tag yet, so publishing it creates one, that tag's push starts this workflow
+# again, and its `gh release create` collides with the release that now exists.
 #
 # Built with `--features asio`: ASIO is the low-latency tier, WASAPI stays selectable in the app. The
 # Steinberg ASIO SDK is dual-licensed (proprietary or GPLv3 - its own LICENSE.txt); this build takes
