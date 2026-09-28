@@ -8,7 +8,9 @@
 //! about two periods later than it reports (`docs/plans/native-engine.md` § Stage 1, "Cause and fix").
 //! Every size asked of an ASIO driver lies inside the range it reported to the probe (cpal refuses any
 //! other): a request outside it opens at `transition::asio_block`'s pick, and a driver with one size
-//! only gets no preopen.
+//! only gets no preopen. A driver whose sizes come in steps can still refuse a size inside that range
+//! (cpal checks `min + k·step`, the probe sees only min and max): the build's refusal is
+//! `StartError::Buffer`, and the owner opens again at the driver's own size.
 //! A cpal ASIO driver lives as long as a stream holds it: dropping a run's streams stops it, disposes
 //! its buffers and exits it (asio-sys's `Driver` drop).
 //!
@@ -23,7 +25,7 @@ use cpal::traits::{DeviceTrait, StreamTrait};
 use cpal::{SampleFormat, StreamConfig};
 
 use super::callback::{Side, Tap};
-use super::driver::{Driver, Mirror, Share, Spec, Started, Streams, Wiring};
+use super::driver::{Driver, Mirror, Share, Spec, StartError, Started, Streams, Wiring};
 use super::share::{ShareOutput, ShareTap};
 #[cfg(feature = "asio")]
 use super::transition;
@@ -62,6 +64,17 @@ impl Driver for CpalDriver {
         }
     }
 
+    fn asio_driver(&self) -> Option<String> {
+        #[cfg(feature = "asio")]
+        {
+            crate::audio_output::asio_cache().map(|cache| cache.name.clone())
+        }
+        #[cfg(not(feature = "asio"))]
+        {
+            None
+        }
+    }
+
     /// Both builds before either plays. A cpal ASIO build starts the driver and a playing stream's
     /// callback takes cpal's `asio_streams` mutex; the output build holds that mutex while it re-creates
     /// the buffers (`ASIOStop` first), so a playing input could block a bufferSwitch the stop waits on.
@@ -70,7 +83,7 @@ impl Driver for CpalDriver {
     /// WASAPI plays without its input when the capture stream does not build or play (a microphone
     /// Windows' privacy settings block): the engine's input is silence and the status says so. ASIO's
     /// duplex needs both.
-    fn start(&mut self, device: CpalDevice, spec: &Spec, mut wiring: Wiring) -> Result<Started, String> {
+    fn start(&mut self, device: CpalDevice, spec: &Spec, mut wiring: Wiring) -> Result<Started, StartError> {
         let asio = spec.backend.is_asio();
         let device = if asio { asio_run(device, spec, self.preopen)? } else { device };
         let input = match device.input.as_ref() {
@@ -120,10 +133,11 @@ impl Mirror for ShareOutput {
 
 /// Build once more after a failed ASIO build: a driver left running by the previous run's streams
 /// (dropping an ASIO stream only removes its callback) makes cpal's reuse path fail with BadMode, and the
-/// failed build resets it, so the second build takes the prepare path (as `audio_output` does).
-fn retry_on_asio(asio: bool, what: &str, mut build: impl FnMut() -> Result<cpal::Stream, String>) -> Result<cpal::Stream, String> {
+/// failed build resets it, so the second build takes the prepare path (as `audio_output` does). A refused
+/// size is not retried: the driver refuses it again.
+fn retry_on_asio(asio: bool, what: &str, mut build: impl FnMut() -> Result<cpal::Stream, StartError>) -> Result<cpal::Stream, StartError> {
     match build() {
-        Err(first) if asio => {
+        Err(StartError::Failed(first)) if asio => {
             log::warn!("[engine_io] ASIO {what} build failed ({first}); retrying once");
             build()
         }
@@ -131,7 +145,17 @@ fn retry_on_asio(asio: bool, what: &str, mut build: impl FnMut() -> Result<cpal:
     }
 }
 
-fn input_stream(input: &cpal::Device, device: &CpalDevice, spec: &Spec, wiring: &mut Wiring) -> Result<cpal::Stream, String> {
+/// A stream build's error: cpal's `UnsupportedConfig` for a fixed size is the driver refusing that size
+/// (outside its range, or between its steps), which the owner answers with the driver's own size.
+fn build_error(what: &str, error: cpal::Error, buffer: cpal::BufferSize) -> StartError {
+    let text = format!("{what}: {error}");
+    match (error.kind(), buffer) {
+        (cpal::ErrorKind::UnsupportedConfig, cpal::BufferSize::Fixed(_)) => StartError::Buffer(text),
+        _ => StartError::Failed(text),
+    }
+}
+
+fn input_stream(input: &cpal::Device, device: &CpalDevice, spec: &Spec, wiring: &mut Wiring) -> Result<cpal::Stream, StartError> {
     let capture = wiring.capture(spec)?;
     let on_error = wiring.on_error(Side::Input);
     macro_rules! build {
@@ -154,12 +178,12 @@ fn input_stream(input: &cpal::Device, device: &CpalDevice, spec: &Spec, wiring: 
         SampleFormat::I32 => build!(i32),
         SampleFormat::I16 => build!(i16),
         SampleFormat::U16 => build!(u16),
-        other => return Err(format!("unsupported input sample format: {other:?}")),
+        other => return Err(format!("unsupported input sample format: {other:?}").into()),
     }
-    .map_err(|e| format!("cpal build_input_stream: {e}"))
+    .map_err(|e| build_error("cpal build_input_stream", e, device.in_config.buffer_size))
 }
 
-fn output_stream(device: &CpalDevice, spec: &Spec, wiring: &mut Wiring) -> Result<cpal::Stream, String> {
+fn output_stream(device: &CpalDevice, spec: &Spec, wiring: &mut Wiring) -> Result<cpal::Stream, StartError> {
     let render = wiring.render(spec)?;
     let on_error = wiring.on_error(Side::Output);
     macro_rules! build {
@@ -182,9 +206,9 @@ fn output_stream(device: &CpalDevice, spec: &Spec, wiring: &mut Wiring) -> Resul
         SampleFormat::I32 => build!(i32),
         SampleFormat::I16 => build!(i16),
         SampleFormat::U16 => build!(u16),
-        other => return Err(format!("unsupported output sample format: {other:?}")),
+        other => return Err(format!("unsupported output sample format: {other:?}").into()),
     }
-    .map_err(|e| format!("cpal build_output_stream: {e}"))
+    .map_err(|e| build_error("cpal build_output_stream", e, device.out_config.buffer_size))
 }
 
 /// ASIO: the cached duplex driver, both directions on it; `DeviceRequest::buffer` becomes a fixed

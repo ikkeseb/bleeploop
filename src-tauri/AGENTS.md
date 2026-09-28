@@ -53,8 +53,10 @@ rest is the map.
 - **An engine ASIO open opens the driver at another block size first** (`engine_io/cpal_driver.rs`,
   ~500 ms): opened again at the size it last ran, the rig's Focusrite driver lands two periods late.
 - **An ASIO driver is never asked for a buffer outside the range it reported to the probe** (cpal
-  refuses it): a request outside opens at `engine_io::transition::asio_block`'s pick, `DeviceStatus.block`
-  says what opened, and a one-size driver (set in its own control panel) gets no preopen.
+  refuses it): a request outside opens at `engine_io::transition::asio_block`'s pick, and a one-size
+  driver (set in its own control panel) gets no preopen. A size inside the range that the driver still
+  refuses (sizes in steps, `min + k·step`, which the probe cannot see) opens once more at the driver's
+  own size, with no preopen; `DeviceStatus.block` is the size the callbacks deliver.
 - **Parallel worktrees need their own `CARGO_TARGET_DIR`.** Sharing one, every worktree links the same
   `app_lib-<hash>` test binary and cargo judges path crates fresh by mtime, so one worktree can run
   another's build of `app` or `lf-engine` (seen 2026-09-25).
@@ -223,9 +225,11 @@ existing P9 ring → looper record tap (lag-tolerant, records wet "for free").
   configs → the duplex Device + configs are resolved once per driver pick (`audio_output::resolve_asio_cache`
   behind the `asio_startup.rs` coordinator; `cpal::Device` is Send+Sync, so the cache is a static `Arc`
   a stream build clones). Only a driver switch (`plugin_asio_switch`) replaces it, while nothing holds
-  the driver: engine mode's device closed, no live slot holding `ASIO_DUPLEX_HOLDER`. Both streams build
-  from the cache. **Never call the resolver from `run()`:** it loads the driver DLL
-  in-process; the frontend requests it after the UI is up (the **ASIO startup** paragraph in `docs/ARCHITECTURE.md` § Audio architecture). **ASIO `Stream::drop` only removes
+  the driver: in engine mode it runs on the device owner, which closes its ASIO run first and reopens it
+  after, so no open or recovery takes the cache midway; on the web path no live slot may hold
+  `ASIO_DUPLEX_HOLDER`. Picking a driver by name loads each driver cpal lists before it once (cpal 0.18.1
+  has no by-name constructor), an accepted cost. Both streams build from the cache. **Never call the
+  resolver from `run()`:** it loads the driver DLL in-process; the frontend requests it after the UI is up (the **ASIO startup** paragraph in `docs/ARCHITECTURE.md` § Audio architecture). **ASIO `Stream::drop` only removes
   callbacks** (never `driver.stop`, never tears down `asio_streams`) → `host::native_io::NativeIo` keeps
   both streams alive across disarm (output plays silence → no drone; re-arm makes ZERO cpal calls → no
   BadMode). Each retained stream stores its actual backend. A backend transition is allowed only while both

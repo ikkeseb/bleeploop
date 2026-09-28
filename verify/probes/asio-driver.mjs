@@ -7,21 +7,30 @@
  *   disabled rescan button's title says why, Diagnostics' engine row carries the reason, and the open's
  *   toast stays;
  * - the Driver row lists Automatic (naming the driver it took) and the installed drivers; picking one
- *   closes the device, switches the driver, then reopens (in that order), saves the pick and leaves the
- *   saved buffer alone;
+ *   switches the driver (the scripted host closes the device on ASIO and reopens it, as the native
+ *   device owner does), then the picks open; the pick is saved and the saved buffer left alone;
  * - a driver fixed at 512 frames: the Buffer select offers 512 alone, shows it and says where to change
  *   it; a wide range offers the sizes inside it;
- * - a switch the host refuses: a toast, the device reopens and the pick stays the driver that runs.
+ * - a switch the host refuses: a toast, the device reopens and the pick stays the driver that runs;
+ * - a switch to a driver at another rate while the engine holds loops, confirmed, whose recovery save
+ *   fails: the driver that ran comes back before the device reopens, so it runs there, not silent.
  *
- * The native half (the coordinator's switch, the range clamp) is `cargo test` (`asio_startup.rs`,
- * `engine_io/transition.rs`, `engine_io/tests.rs`); this probe sees neither a driver nor cpal.
+ * The native half (the owner-run switch, the range clamp, a stepped driver's fallback) is `cargo test`
+ * (`asio_startup.rs`, `engine_io/transition.rs`, `engine_io/tests.rs`); this probe sees neither a driver
+ * nor cpal.
  * Run: pnpm probe asio-driver
  */
 import { probe } from '../harness/probe.ts';
 import assert from 'node:assert/strict';
 import { mkdir } from 'node:fs/promises';
 
-const DRIVERS = { 'Focusrite USB ASIO': [16, 2048], 'Yamaha Steinberg USB ASIO': [512, 512], 'ASIO4ALL v2': [64, 2048] };
+// name: [buffer min, buffer max, rate]
+const DRIVERS = {
+  'Focusrite USB ASIO': [16, 2048, 48000],
+  'Yamaha Steinberg USB ASIO': [512, 512, 48000],
+  'ASIO4ALL v2': [64, 2048, 48000],
+  'RME at 44.1 kHz': [64, 2048, 44100],
+};
 
 await probe(async ({ open }) => {
   const { page } = await open({
@@ -89,18 +98,29 @@ await probe(async ({ open }) => {
       const [bufferMin, bufferMax] = drivers[asio.cached];
       return { name: asio.cached, inputChannels: 2, outputChannels: 2, bufferMin, bufferMax };
     };
-    // As the native command: refused while the engine's device holds the driver.
+    // As the native command in engine mode, on the device owner: a device on ASIO closes, the driver
+    // switches (or the switch is refused), and what ran opens again on the driver cached then, as the
+    // player's open would (a refusal at another rate is the owner's to log).
     host.asioSwitch = async (driver) => {
       calls.push(`switch:${driver}`);
-      if ((await engine.status())?.backend === 'Asio') throw new Error('the audio device still holds the ASIO driver');
-      if (asio.refuseNext) { asio.refuseNext = false; throw new Error('a driver probe is already running'); }
-      asio.cached = pick(driver);
+      const ran = (await engine.status())?.backend === 'Asio' ? window.__lf.native.opened.at(-1) : null;
+      if (ran) await engine.close();
+      let refused = null;
+      if (asio.refuseNext) { asio.refuseNext = false; refused = new Error('a driver probe is already running'); }
+      else asio.cached = pick(driver);
+      if (ran) await engine.open(ran).catch(() => null);
+      if (refused) throw refused;
       return report();
     };
-    // The fake engine opens at the size the driver takes, as the native driver does (`asio_block`).
+    // The fake engine opens at the size the driver takes, as the native driver does (`asio_block`), and
+    // refuses a driver at another rate unless forced (the engine holds loops at 48 kHz).
+    const native = window.__lf.native;
     const open = engine.open.bind(engine);
     engine.open = async (request, force) => {
       calls.push(`open:${request.backend}:${request.buffer}`);
+      const rate = request.backend === 'Asio' && asio.cached ? drivers[asio.cached][2] : 48000;
+      native.refusal = rate === 48000 ? null : { device: asio.cached, from: 48000, to: rate };
+      window.__lfEngineFakeRate = rate;
       const status = await open(request, force);
       if (request.backend !== 'Asio' || !asio.cached || request.buffer == null) return status;
       const [min, max] = drivers[asio.cached];
@@ -153,17 +173,18 @@ await probe(async ({ open }) => {
   console.log('wide', JSON.stringify(wide));
   assert.deepEqual(wide.driver, {
     value: '',
-    options: ['Automatic (Focusrite USB ASIO)', 'Focusrite USB ASIO', 'Yamaha Steinberg USB ASIO', 'ASIO4ALL v2'],
+    options: ['Automatic (Focusrite USB ASIO)', ...Object.keys(DRIVERS)],
     disabled: false,
   });
   assert.deepEqual(wide.buffer, { value: '64', options: [64, 128, 256, 512, 1024] });
   assert.doesNotMatch(wide.hint ?? '', /control panel/);
   await mkdir('logs/layout', { recursive: true });
 
-  // 4. A live switch to a driver fixed at 512 frames: close, switch, reopen, in that order.
+  // 4. A live switch to a driver fixed at 512 frames: the switch (the device closes and reopens inside it),
+  // then the picks open.
   const toYamaha = await pickDriver('Yamaha Steinberg USB ASIO');
   console.log('switch', JSON.stringify(toYamaha));
-  assert.deepEqual(toYamaha.slice(0, 3), ['close', 'switch:Yamaha Steinberg USB ASIO', 'open:Asio:64']);
+  assert.deepEqual(toYamaha.slice(0, 4), ['switch:Yamaha Steinberg USB ASIO', 'close', 'open:Asio:64', 'open:Asio:64']);
   const fixed = await readSettings();
   console.log('fixed', JSON.stringify(fixed));
   assert.equal(fixed.driver.value, 'Yamaha Steinberg USB ASIO');
@@ -182,7 +203,7 @@ await probe(async ({ open }) => {
   await page.evaluate(() => { window.__asioFake.refuseNext = true; });
   const refused = await pickDriver('ASIO4ALL v2');
   console.log('refused', JSON.stringify(refused));
-  assert.deepEqual(refused.slice(0, 3), ['close', 'switch:ASIO4ALL v2', 'open:Asio:64']);
+  assert.deepEqual(refused.slice(0, 4), ['switch:ASIO4ALL v2', 'close', 'open:Asio:64', 'open:Asio:64']);
   const after = await readSettings();
   const toasts = await page.evaluate(() => window.__lf.notify.toasts().map((t) => t.message));
   assert.ok(toasts.includes("Couldn't switch the ASIO driver"), 'the refusal toasts');
@@ -190,6 +211,44 @@ await probe(async ({ open }) => {
   assert.equal(after.saved.asioDriver, 'Yamaha Steinberg USB ASIO');
   assert.deepEqual(after.buffer, { value: '512', options: [512] });
 
-  // 6. The device runs: the slot note is the plugin scan's again.
+  // 6. A switch to a driver at another rate while the engine holds loops: confirmed, but the recovery
+  // save fails, so the loops stay and the device must run again on the driver that ran. The store
+  // switches back first; reopening the old request on the new driver would be refused again (silence).
+  await page.evaluate(async () => {
+    const { autosave } = await import('/src/audio/autosave.ts');
+    window.__saveNow = autosave.saveNow;
+    autosave.saveNow = async () => {
+      throw new Error('injected: the recovery save failed');
+    };
+  });
+  page.once('dialog', (d) => void d.accept());
+  const kept = await pickDriver('RME at 44.1 kHz');
+  console.log('save failed', JSON.stringify(kept));
+  const back = kept.indexOf('switch:Yamaha Steinberg USB ASIO');
+  assert.ok(back > kept.indexOf('switch:RME at 44.1 kHz'), 'the store switches back to the driver that ran');
+  assert.equal(kept[back + 1], 'open:Asio:64', 'then reopens its request');
+  const afterSave = await page.evaluate(async () => {
+    const { platform } = await import('/src/platform/index.ts');
+    const { engineDevice } = await import('/src/ui/state/engine-store.ts');
+    return {
+      runs: (await platform.engine.status())?.sampleRate ?? null,
+      shown: engineDevice()?.outputName ?? null,
+      saved: JSON.parse(localStorage.getItem('lf.audioDevices')).asioDriver,
+      toasts: window.__lf.notify.toasts().map((t) => t.message),
+    };
+  });
+  console.log('after the failed save', JSON.stringify(afterSave));
+  assert.deepEqual(
+    { runs: afterSave.runs, shown: afterSave.shown, saved: afterSave.saved },
+    { runs: 48000, shown: 'Yamaha Steinberg USB ASIO', saved: 'Yamaha Steinberg USB ASIO' },
+    'the device runs on the driver that ran, and the pick says so',
+  );
+  assert.ok(afterSave.toasts.includes('The device did not switch'), 'the failed save toasts');
+  await page.evaluate(async () => {
+    const { autosave } = await import('/src/audio/autosave.ts');
+    autosave.saveNow = window.__saveNow;
+  });
+
+  // 7. The device runs: the slot note is the plugin scan's again.
   await page.waitForFunction(() => !document.querySelector('.slot__plugin-note')?.textContent?.includes('No audio device open'));
 });

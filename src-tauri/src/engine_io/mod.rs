@@ -4,8 +4,8 @@
 //! module's briefing.
 //!
 //! [`EngineHost`] is the process-wide handle: one device owner thread serializes every device
-//! transition (open, backend switch, a slot's channel change, loss, close); the engine ([`lf_engine::Engine`])
-//! sits in one `Mutex` that the device callback only `try_lock`s (a miss plays silence and counts) and
+//! transition (open, backend switch, a slot's channel change, an ASIO driver switch, loss, close); the
+//! engine ([`lf_engine::Engine`]) sits in one `Mutex` that the device callback only `try_lock`s (a miss plays silence and counts) and
 //! that the owner takes only with both streams dropped, so the engine and the plugin slots outlive
 //! device switches and loss. The callback body runs under `catch_unwind` inside the lock guard: a caught
 //! panic latches a fault and plays silence until the owner replaces the engine, the `Mutex` is never
@@ -43,8 +43,10 @@
 //!   resampler with a drift controller. Every callback thread is promoted to MMCSS Pro Audio on first
 //!   entry.
 //! - **Each plugin slot reads its own capture channel** (`DeviceRequest::input_channels`; auto is input
-//!   2 on a device with two or more). The input callback publishes one mono stream per slot, from the
-//!   picks in `Run` (atomics, changed in place): ASIO copies each slot's channel into its own handoff,
+//!   2 on a device with two or more). An open never fails on a pick: a slot whose pick the device lacks
+//!   (saved on a driver with more inputs) reads auto, and `DeviceStatus::input_channels` says what each
+//!   slot reads; only a change on the running device refuses one. The input callback publishes one
+//!   mono stream per slot, from the picks in `Run` (atomics, changed in place): ASIO copies each slot's channel into its own handoff,
 //!   WASAPI pushes them interleaved through the one join pipe. The engine hands each slot its own
 //!   (`Engine::process_inputs`); the meter takes the louder.
 //! - **The frame counter pauses across a switch.** A backend switch or a fallback continues the
@@ -183,6 +185,9 @@ pub struct DeviceStatus {
     /// The input runs. False: WASAPI plays output only (no capture endpoint, or its stream did not
     /// open, e.g. a microphone Windows' privacy settings block) and the engine's input is silence.
     pub input_open: bool,
+    /// The capture channel each plugin slot reads (0-based): its pick, or auto where it has none or the
+    /// device lacks it.
+    pub input_channels: [u32; SLOT_COUNT],
     /// Input plus output latency in frames (`ProcessContext::align_frames`), and its input side.
     pub align_frames: Frame,
     pub input_frames: Frame,
@@ -544,6 +549,8 @@ fn status(core: &Core) -> Option<DeviceStatus> {
 /// How long a caller waits for the owner: an open builds an engine and starts a device.
 const OPEN_TIMEOUT: Duration = Duration::from_secs(15);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+/// A driver switch: a close, the new driver's probe (its own 15-second deadline) and a reopen.
+const SWITCH_TIMEOUT: Duration = Duration::from_secs(35);
 
 /// MMCSS "Pro Audio" for the calling thread: every engine, join and share callback calls it once, on
 /// its first entry (cpal's `realtime` feature stays off: `Cargo.toml`). False when Windows refused.
@@ -603,7 +610,7 @@ impl EngineHost {
     /// engine and evicts the plugin units into their slot hosts, and the loops go with the old engine,
     /// so while it holds audio that switch is refused ([`OpenError::RateChange`]) unless `force`. A
     /// switch that fails to start reopens the device it replaced; a request for the running device only
-    /// changes its channels.
+    /// changes its channels. A slot's pick the device lacks reads auto (the status says which).
     pub fn open(&self, request: DeviceRequest, force: bool) -> Result<DeviceStatus, OpenError> {
         // Whoever claims the flag first decides: the owner once the open finished (its result is then
         // this caller's), or this caller on its timeout (a later open is the owner's to undo).
@@ -635,6 +642,15 @@ impl EngineHost {
     /// device lacks (the other slot's stays), and while no device runs.
     pub fn set_slot_input_channel(&self, slot: usize, channel: Option<u32>) -> Result<(), String> {
         self.ask("set_slot_input_channel", REQUEST_TIMEOUT, |reply| Request::SetSlotInputChannel(slot, channel, reply))
+    }
+
+    /// Switch the ASIO driver: `switch` replaces the cached one (`audio_output::switch_asio_driver`) on
+    /// the owner, between two of its transitions, so no open, reopen or recovery takes the cache while it
+    /// changes. A device running on ASIO closes first and opens again after, on the driver then cached,
+    /// unless that one runs at another rate while the engine holds audio (the UI's open asks first).
+    /// Resolves with `switch`'s report.
+    pub fn switch_asio(&self, switch: impl FnOnce() -> Result<crate::asio_startup::AsioStatusReport, String> + Send + 'static) -> Result<crate::asio_startup::AsioStatusReport, String> {
+        self.ask("switch_asio", SWITCH_TIMEOUT, |reply| Request::SwitchAsio(Box::new(switch), reply))
     }
 
     /// Share output (STATUS E2): mirror the post-limiter master to this WASAPI render endpoint while

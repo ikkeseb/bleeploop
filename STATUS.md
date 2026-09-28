@@ -166,7 +166,8 @@ guitarist's take feels on the click is this stop.
 - **Same file in both slots:** only the first opener gets an editor (why: the comment at
   `editorAffinity` in `src/audio/instrument.ts`).
 - **Editor-to-front:** dropping behind after a click into BleepLoop is intended.
-- One slot is live at a time on the engine (two would sum the dry input twice).
+- One slot is live at a time on the engine, the frontend's choice: two live slots would sum the dry
+  input twice only when both read the same channel.
 
 ### Stop 6 — fault paths
 

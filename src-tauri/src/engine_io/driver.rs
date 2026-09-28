@@ -24,6 +24,7 @@ pub(crate) struct Spec {
     /// Frames per callback asked of the driver (ASIO `DeviceRequest::buffer`), 0 = the driver's own.
     pub(crate) block: u32,
     pub(crate) input_name: String,
+    /// ASIO: the driver's name, as `Driver::asio_driver` gives it.
     pub(crate) output_name: String,
 }
 
@@ -53,6 +54,36 @@ pub(crate) struct Started {
     pub(crate) streams: Streams,
     pub(crate) block: u32,
     pub(crate) input_open: bool,
+}
+
+/// Why [`Driver::start`] did not start the device.
+#[derive(Debug)]
+pub(crate) enum StartError {
+    /// The driver refused the fixed size `Spec::block` asked of it (cpal's `UnsupportedConfig`): a
+    /// driver whose sizes come in steps (`min + k·step`) refuses sizes inside the range the probe
+    /// reported. The owner opens again at the driver's own size.
+    Buffer(String),
+    Failed(String),
+}
+
+impl std::fmt::Display for StartError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            StartError::Buffer(text) | StartError::Failed(text) => f.write_str(text),
+        }
+    }
+}
+
+impl From<String> for StartError {
+    fn from(text: String) -> StartError {
+        StartError::Failed(text)
+    }
+}
+
+impl From<StartError> for String {
+    fn from(error: StartError) -> String {
+        error.to_string()
+    }
 }
 
 /// The callback bodies for one run. ASIO's are cheap and built fresh for each stream build (a failed
@@ -119,9 +150,13 @@ pub(crate) trait Driver: Send + 'static {
     /// the running device alone.
     fn resolve(&mut self, request: &DeviceRequest) -> Result<(Spec, Self::Device), String>;
 
+    /// The ASIO driver a resolve would take now (its name; `None`: none is cached). A driver switch
+    /// replaces it, so a device running on another one is not the device an ASIO request names.
+    fn asio_driver(&self) -> Option<String>;
+
     /// Build and play the streams, the input first, then the output (ASIO runs its registered
     /// callbacks in that order in one bufferSwitch), each running `wiring`'s bodies.
-    fn start(&mut self, device: Self::Device, spec: &Spec, wiring: Wiring) -> Result<Started, String>;
+    fn start(&mut self, device: Self::Device, spec: &Spec, wiring: Wiring) -> Result<Started, StartError>;
 
     /// Open Share output's mirror on the WASAPI render `endpoint`, for an engine at `rate` rendering
     /// `block`-frame blocks: the mirror and the tap the callback feeds.

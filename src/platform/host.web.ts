@@ -304,6 +304,8 @@ export const webEngineFake: EngineFake = {
     webEngineFake.opened.push(request);
     webEngineFake.forced.push(force);
     if (webEngineFake.refusal && !force) throw { RateChange: { ...webEngineFake.refusal } };
+    // A two-input device: auto (null) reads input 2, as the engine picks it.
+    const picks = 'inputChannels' in request ? request.inputChannels : [request.inputChannel, request.inputChannel];
     fakeStatus = {
       backend: request.backend,
       sampleRate: fakeRate(),
@@ -313,6 +315,7 @@ export const webEngineFake: EngineFake = {
       alignFrames: 0,
       inputFrames: 0,
       inputOpen: true,
+      inputChannels: [picks[0] ?? 1, picks[1] ?? 1],
     };
     return fakeStatus;
   },

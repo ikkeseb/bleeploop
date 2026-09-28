@@ -229,9 +229,10 @@ export async function probeAsio(explicit: boolean): Promise<AsioStatusReport> {
 
 /**
  * Replace the ASIO driver with `driver` ('' = automatic) without a restart: the host drops the cached
- * driver and probes this one. The pick is saved once the host took it. Nothing may hold the driver:
- * engine mode's device closes first (`switchEngineAsioDriver` in `src/ui/state/engine-store.ts` runs the
- * whole switch). Rejects when the host refuses, with the status as it was.
+ * driver and probes this one. The pick is saved once the host took it. Nothing may hold the driver: in
+ * engine mode the host's device owner closes its ASIO run first and reopens it after
+ * (`switchEngineAsioDriver` in `src/ui/state/engine-store.ts` runs the whole switch). Rejects when the
+ * host refuses, with the status as it was.
  */
 export async function switchAsioDriver(driver: string): Promise<AsioStatusReport> {
   let report = asioStatus();
