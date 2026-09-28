@@ -1,4 +1,4 @@
-//! The drum kit: `src/audio/synths/drum.ts` on Tone.js 15.1.22's `instrument/MembraneSynth.js`,
+//! The drum kit: `synths/drum.ts` on Tone.js 15.1.22's `instrument/MembraneSynth.js`,
 //! `NoiseSynth.js` and `MetalSynth.js` (with `source/oscillator/FMOscillator.js`), each with the
 //! output `Volume` of `Instrument.js` and the note handling of `Monophonic.js` and
 //! `triggerAttackRelease`.

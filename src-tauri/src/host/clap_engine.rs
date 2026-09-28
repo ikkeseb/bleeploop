@@ -2,8 +2,8 @@
 //! `lf_engine::SlotProcessor`) and the engine-mode owner thread that loads, activates, restarts,
 //! re-activates after an eviction and tears it down (`engine_slot` holds the API), keeping the
 //! plugin's tone as `engine_slot` describes (the `state` extension's blob, captured under the tone
-//! limit: `CappedState`). It followed the web path's CLAP owner (deleted in Stage 6) minus the RT
-//! thread, the hop-1 ring and the device.
+//! limit: `CappedState`). It followed the WebView bridge's CLAP owner (deleted in Stage 6) minus its RT
+//! thread, its hop-1 ring and the device.
 
 use super::engine_slot::{
     keep_tone, report_faults, restore_tone, EngineSlotEvent, OwnerCtx, Ready, Restore, FAULT_PARAM,

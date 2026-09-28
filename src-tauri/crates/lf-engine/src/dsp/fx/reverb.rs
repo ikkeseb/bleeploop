@@ -4,7 +4,7 @@
 //! A send at gain 0 contributes exactly nothing to the mix: the GainNode multiplies by 0 while its
 //! gain is automated and outputs silence after, and the reverb of silence is silence.
 //!
-//! The bus is `makeReverbBus` (`src/audio/fx/fx.ts`): a Gain of 1 summing every track's send into
+//! The bus is `makeReverbBus` (`fx/fx.ts`): a Gain of 1 summing every track's send into
 //! Tone's `Reverb` (`effect/Reverb.js` on `Effect.js`) at wet 1, whose output goes to the master. What
 //! Tone builds: the input fans to the dry/wet CrossFade's `a` and, through `effectSend`, to a Blink
 //! ConvolverNode ([`Convolver`], `normalize` on) whose stereo output returns through `effectReturn`
@@ -23,7 +23,7 @@ use crate::dsp::crossfade::CrossFade;
 use crate::dsp::param::{AudioParam, Rate, ToneParam, Units, QUANTUM};
 
 /// The bus reverb's decay and pre-delay in seconds (`REVERB_DECAY_SECONDS`,
-/// `REVERB_PRE_DELAY_SECONDS` in `src/audio/fx/metadata.ts`).
+/// `REVERB_PRE_DELAY_SECONDS` in `src/ui/state/fx-metadata.ts`).
 pub const REVERB_DECAY: f64 = 2.6;
 pub const REVERB_PRE_DELAY: f64 = 0.02;
 

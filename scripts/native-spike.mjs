@@ -1,4 +1,4 @@
-// scripts/native-spike.mjs — the native-engine Stage 1 premise spike (docs/plans/native-engine.md):
+// scripts/native-spike.mjs — the native engine's premise spike (docs/ARCHITECTURE.md § Measured premise):
 // builds the debug app with ASIO, runs the `--probe-engine-spike` / `--probe-share` matrix one
 // process at a time and prints one PASS/FAIL table.
 //

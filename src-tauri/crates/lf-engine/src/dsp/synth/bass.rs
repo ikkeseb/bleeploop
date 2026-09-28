@@ -1,4 +1,4 @@
-//! The bass: `src/audio/synths/bass.ts` on Tone.js 15.1.22's `instrument/MonoSynth.js` ([`MonoSynth`],
+//! The bass: `synths/bass.ts` on Tone.js 15.1.22's `instrument/MonoSynth.js` ([`MonoSynth`],
 //! with the note handling of `Monophonic.js` and the output `Volume` of `Instrument.js`) and the app's
 //! held-note stack and modulation ([`Bass`]).
 //!

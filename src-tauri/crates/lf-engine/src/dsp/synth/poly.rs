@@ -1,5 +1,5 @@
-//! The app's poly synths: `src/audio/synths/index.ts` (the POLY_VOICES specs, `makePolySynth`) and
-//! `src/audio/synths/modulation.ts` (pitch bend and the mod-wheel vibrato), on the Tone voices of
+//! The app's poly synths: `synths/index.ts` (the POLY_VOICES specs, `makePolySynth`) and
+//! `synths/modulation.ts` (pitch bend and the mod-wheel vibrato), on the Tone voices of
 //! [`super::voice`].
 //!
 //! A poly synth is a fixed pool of voices. A note-on takes the voice already holding that note, else
@@ -50,7 +50,7 @@ pub enum PolyKind {
 }
 
 impl PolyKind {
-    /// The registry id (`SYNTHS` in `src/audio/synths/index.ts`).
+    /// The registry id (`SYNTHS` in `src/ui/state/instruments.ts`).
     pub fn from_id(id: &str) -> Option<PolyKind> {
         match id {
             "lead" => Some(PolyKind::Lead),
@@ -90,7 +90,7 @@ pub struct PolyVoiceSpec {
     pub voice: VoiceSpec,
 }
 
-/// `POLY_VOICES` in `src/audio/synths/index.ts` (its comments give the trims' reasons).
+/// `POLY_VOICES` in `synths/index.ts` (its comments give the trims' reasons).
 pub const POLY_VOICES: [PolyVoiceSpec; 4] = [
     PolyVoiceSpec {
         id: "lead",
@@ -136,7 +136,7 @@ pub const POLY_VOICES: [PolyVoiceSpec; 4] = [
     },
 ];
 
-/// `midiToFreq` (`src/audio/types.ts`).
+/// `midiToFreq` (`types.ts`).
 pub fn midi_to_freq(note: u8) -> f64 {
     440.0 * fdlibm::pow(2.0, (note as f64 - 69.0) / 12.0)
 }

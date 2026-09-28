@@ -1,9 +1,14 @@
-//! DEV engine probe (`docs/plans/native-engine.md` § Stage 4, the rig gates): the device side on real
+//! DEV engine probe, the rig gate: the device side on real
 //! hardware, headless. `app.exe --probe-engine …` exits before Tauri starts. It opens the device, loads
 //! a plugin into each slot asked for, records a loop on lane 0, soaks, then switches backend and buffer
 //! size and swaps the plugins while the loop plays, printing each phase's counters. It fails when a
 //! counter moved, the device reported an event, the loop stopped at an unchanged rate, a plugin did not
 //! come back, an error was logged, or the soak missed the block-load bar.
+//!
+//! The rig's clean run to compare against (ASIO 128, Archetype Petrucci X and Pro-Q 3, a 600 s soak,
+//! 20 switches, 4 swaps): every counter 0 over ~225 000 callbacks, soak block time p99.9 < 33 % and
+//! max < 52 % of the period, plugin loads 7–78 ms. Every ASIO re-open logs a BadMode input build and
+//! its retry (`cpal_driver`'s `retry_on_asio`): expected, not a fault.
 //!
 //! `app.exe --probe-engine <asio|wasapi> <64|128|256|default> [--plugin <slot>=<file.vst3|.clap>]...
 //! [--seconds N] [--switches N] [--swaps N] [--in N] [--device <WASAPI name substring>] [--mute]

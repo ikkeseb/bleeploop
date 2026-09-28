@@ -1,6 +1,6 @@
 //! OWNS: the six built-in instruments, which one plays (or none), each one's level, the performance
-//! wheels, and the instruments' record path. Ported from `src/audio/synths/index.ts` and the synth side of
-//! `src/audio/input-router.ts`; the router's sustain and its per-source note ownership stay with the
+//! wheels, and the instruments' record path. Ported from `synths/index.ts` and the synth side of
+//! `input-router.ts`; the router's sustain and its per-source note ownership stay with the
 //! sender.
 //!
 //! All six are built in [`Instruments::new`] and render every block, so a switch never allocates and a

@@ -11,7 +11,7 @@ use crate::grid::Frame;
 pub const TRACK_COUNT: usize = 5;
 /// The HOLD controls the engine tells apart ([`Action::Hold`]): pedals held down at once.
 pub const HOLD_CONTROLS: usize = 16;
-/// The plugin slots (`src/audio/instrument-slots.ts`: two instrument slots).
+/// The plugin slots (`src/ui/state/instrument-slots.ts`: two instrument slots).
 pub const SLOT_COUNT: usize = 2;
 
 /// A command, applied at `frame` (a device frame, e.g. a MIDI pedal's press) or, with `None`, at the
@@ -59,7 +59,7 @@ pub enum Command {
     SetBpm(f64),
     SetMetronome(bool),
     SetClickVolume(f32),
-    /// The master output level (0..1) and its mute (`src/audio/master.ts`).
+    /// The master output level (0..1) and its mute (`master.ts`).
     SetMasterVolume(f32),
     SetMasterMute(bool),
     SetLoopEndStop(bool),
@@ -75,7 +75,7 @@ pub enum Command {
     /// A lane's DUB FEEDBACK (0..1, default 1): what an overdub keeps of the loop it writes over, pass by
     /// pass (`input + feedback * old`); 0 replaces it.
     SetDubFeedback(u8, f32),
-    /// A lane's FX parameter, in its def's units (`src/audio/fx/metadata.ts`).
+    /// A lane's FX parameter, in its def's units (`src/ui/state/fx-metadata.ts`).
     SetFxParam(u8, FxParam, f64),
     SetFxBypass(u8, FxKind, bool),
     /// Where the notes go: a built-in instrument, a plugin slot, or nowhere ([`NoteTarget::Off`]). Sent on
@@ -84,7 +84,7 @@ pub enum Command {
     /// synth, as two web synths).
     SelectInstrument(NoteTarget),
     /// A note (0..127) on the selected target; velocity 0..1. Sustain and the owner of a held note stay
-    /// with the sender (`src/audio/input-router.ts`). The instrument commands never wait behind a
+    /// with the sender (`src/ui/state/input-router.ts`). The instrument commands never wait behind a
     /// looper command that waits for a block job. On a built-in instrument a note on or off sounds
     /// `instruments::LEAD` frames after it is applied; a plugin slot gets it at the frame it is applied.
     NoteOn(u8, f32),
@@ -224,7 +224,7 @@ impl InputSendParam {
     }
 }
 
-/// Where the notes go (`src/audio/instrument.ts`: the active slot's synth, or its plugin).
+/// Where the notes go (`src/ui/state/instrument.ts`: the active slot's synth, or its plugin).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NoteTarget {
     Builtin(Instrument),
@@ -234,7 +234,7 @@ pub enum NoteTarget {
     Off,
 }
 
-/// The six built-in instruments (`src/audio/synths/index.ts`).
+/// The six built-in instruments (`src/ui/state/instruments.ts`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Instrument {
     Lead,

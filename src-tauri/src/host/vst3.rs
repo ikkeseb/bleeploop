@@ -477,7 +477,7 @@ impl RestartFlags {
 /// `PluginEvent::Param` (drained next block into the real `RtParamChanges` → the processor's
 /// sound changes — required because Surge is separated-component, so `setParamNormalized` on the
 /// controller alone never reaches the processor), and (b) the web UI via `plugin:param-changed`.
-/// Runs on the OWNER/UI-pump thread (NEVER the RT thread), so the `Mutex` lock + `emit` are off
+/// Runs on the OWNER/UI-pump thread (NEVER the audio thread), so the `Mutex` lock + `emit` are off
 /// the hot path. The id is the controller's OWN id → valid by construction (no hash-id segfault
 /// risk; that only applies to host-originated `setParameter`). ONE handler per load: the owner
 /// sets it on the controller at load and keeps its `ComWrapper` alive until the owner exits; an
@@ -526,7 +526,7 @@ impl IComponentHandlerTrait for LfComponentHandler {
     }
 }
 
-/// RT-thread-owned event storage shared (Rc) between the producer (which fills it each block)
+/// Audio-thread-owned event storage shared (Rc) between the unit (which fills it each block)
 /// and the `RtEventList` COM object the plugin reads in `process()`. Interior-mutable (every
 /// IEventList method is `&self`); pre-grown so fill is alloc-free. Never crosses threads.
 struct EventListInner {
@@ -595,8 +595,8 @@ impl IEventListTrait for RtEventList {
 /// the pre-grown queue pool so the RT path is alloc-free (invariant #5).
 const MAX_PARAM_QUEUES: usize = 64;
 
-/// Interior-mutable storage for ONE param's pending change, shared (`Rc`) between the RT
-/// producer (which writes the Cells each block) and the `RtParamQueue` COM object the plugin
+/// Interior-mutable storage for ONE param's pending change, shared (`Rc`) between the unit
+/// on the audio thread (which writes the Cells each block) and the `RtParamQueue` COM object the plugin
 /// reads in `process()`. Mirrors `EventListInner`'s split (the Cells can NOT live inside the COM
 /// object — `ComWrapper` owns its data in an `Arc`, unreachable as a separate handle). One point
 /// per queue (`sampleOffset 0`) is enough for an instantaneous knob set. Never crosses threads.
@@ -655,7 +655,7 @@ impl IParamValueQueueTrait for RtParamQueue {
 /// RT-local storage backing the real host `IParameterChanges`. Holds a PRE-BUILT pool of
 /// `RtParamQueue` COM objects (built once before the loop → alloc-free per block): the owning
 /// `ComWrapper`s + `ComPtr`s are kept alive here (a cached raw `as_ptr()` alone would dangle —
-/// `as_ptr` does no refcounting), and the `Rc<ParamQueueInner>` clones let the producer mutate
+/// `as_ptr` does no refcounting), and the `Rc<ParamQueueInner>` clones let the unit mutate
 /// each queue's id/value. `push_param` coalesces per id (VST3 wants ≤1 queue per id/block).
 struct ParamChangesInner {
     inners: Vec<Rc<ParamQueueInner>>,
@@ -1033,7 +1033,7 @@ struct Activation {
 /// The one VST3 activation sequence, run at load and again after every plugin-requested restart:
 /// request stereo buses, read back what the plugin actually gave, `setupProcessing` at D /
 /// `max_frames`, activate the buses, `setActive(1)`, read the latency. Requires an initialised,
-/// INACTIVE component with no RT producer running; a failure leaves it inactive.
+/// INACTIVE component that nothing processes; a failure leaves it inactive.
 ///
 /// # Safety
 /// Owner thread only; `component` and `processor` are live handles to the same plugin object.
@@ -1148,7 +1148,7 @@ fn teardown(
     factory: ComPtr<IPluginFactory>,
     module: Vst3Module,
 ) -> [u128; 4] {
-    // SAFETY: the RT producer has stopped (joined); deactivate + terminate on the owner thread.
+    // SAFETY: the caller has stopped processing; deactivate + terminate on the owner thread.
     let t = Instant::now();
     unsafe {
         let _ = component.setActive(0);
@@ -1231,7 +1231,7 @@ mod controller_tests;
 #[path = "vst3_engine.rs"]
 pub(super) mod engine;
 
-// DEV Stage 1 premise spike (`docs/plans/native-engine.md`): the VST3 load + process sequence,
+// DEV Stage 1 premise spike (`docs/ARCHITECTURE.md` § Measured premise): the VST3 load + process sequence,
 // copied into one native device callback. A child here to reach the private load items.
 #[cfg(debug_assertions)]
 #[path = "engine_spike.rs"]

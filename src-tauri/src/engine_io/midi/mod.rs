@@ -1,4 +1,5 @@
-//! OWNS: native MIDI for the engine (`docs/plans/native-engine.md` § Stage 4): the input ports (midir,
+//! OWNS: native MIDI for the engine, built and tested but never started by the app (MIDI arrives
+//! through the WebView's Web MIDI, and WinMM input ports are exclusive): the input ports (midir,
 //! one connection per port, hot-plug polling), message parsing, the MIDI-learn bindings mirrored
 //! from settings (`src/app/midi-actions.ts`), and what a message becomes: a note for the engine
 //! (next block start) or a looper action stamped with its press frame (`super::FrameClock`). This doc
@@ -8,10 +9,10 @@
 //!
 //! | Module | Owns | Ported from |
 //! |---|---|---|
-//! | this file | [`MidiHost`], the state the port callbacks share ([`Core`]), the UI events | `src/audio/midi.ts` (glue) |
+//! | this file | [`MidiHost`], the state the port callbacks share ([`Core`]), the UI events | `src/ui/state/midi.ts` (glue) |
 //! | `parse` | bytes to `parse::Message`, and what is ignored | `midi.ts` `parseMidiMessage` |
 //! | `bindings` | [`Binding`], learn capture, matching, momentary vs latching, consume-first | `src/app/midi-actions.ts`, `src/app/actions.ts` |
-//! | `router` | per-owner note ownership, sustain, the wheels | `src/audio/input-router.ts` |
+//! | `router` | per-owner note ownership, sustain, the wheels | `src/ui/state/input-router.ts` |
 //! | `ports` | midir connections, the hot-plug poll and its diff, the port keys | `midi.ts` `attachInputs` |
 //!
 //! # Rules

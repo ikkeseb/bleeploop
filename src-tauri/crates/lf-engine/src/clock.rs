@@ -1,7 +1,7 @@
 //! OWNS: tempo (the BPM and its lock) and the beat pulse: ONE grid that serves the free-run, count-in and
 //! master anchors, the metronome click it triggers, the click's anti-flam guard and the bar line a FADE
 //! ends on. Ported from
-//! `src/audio/clock.ts`; tap tempo stays in the UI and arrives as a tempo command.
+//! `clock.ts`; tap tempo stays in the UI and arrives as a tempo command.
 //!
 //! No lookahead scheduler: a beat fires on the exact frame its grid puts it, inside `process`. Only a
 //! jump in the device frame counter (a callback the device never delivered) can leave beats behind:

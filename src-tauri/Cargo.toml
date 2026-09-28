@@ -11,7 +11,7 @@ rust-version = "1.85"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
-# The native audio engine grows beside the app as a pure crate (docs/plans/native-engine.md § Stage 2).
+# The native audio engine is a pure crate beside the app (briefing: crates/lf-engine/src/lib.rs).
 # Profiles below apply to every member. scripts/engine-deny.mjs keeps the host crates out of its tree.
 [workspace]
 members = [".", "crates/lf-engine"]
@@ -21,7 +21,7 @@ name = "app_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [features]
-# P11.3 (native low-latency monitor): the cpal ASIO backend. OFF by default because it needs a build
+# P11.3: the cpal ASIO backend, the engine's low-latency tier. OFF by default because it needs a build
 # toolchain the normal dev/build path doesn't: libclang (cpal's asio-sys runs bindgen) + the Steinberg
 # ASIO SDK via the CPAL_ASIO_DIR env var. Build with `--features asio` once that's set up. ASIO drivers
 # are per-device + user-installed (Focusrite/Scarlett ships one), so WASAPI stays the universal default
@@ -96,7 +96,7 @@ clack-extensions = { version = "=0.1.0", features = ["params", "state", "audio-p
 # (AvSetMmThreadCharacteristicsW, "Pro Audio"), so we take cpal WITHOUT realtime — no extra
 # windows-version surface from audio_thread_priority.
 # Pinned exactly: the native engine's ASIO duplex relies on the callback order asio-sys 0.3.0 gives
-# (docs/plans/native-engine.md § Stage 4); 0.18.2 moves to asio-sys 0.4.0 and windows 0.62 and needs
+# (src/engine_io/mod.rs, the cpal pin); 0.18.2 moves to asio-sys 0.4.0 and windows 0.62 and needs
 # its own A1 rerun first.
 cpal             = { version = "=0.18.1", default-features = false }
 # The asio-sys cpal 0.18.1 builds on (the same crate, so one driver registry and one loaded driver);
@@ -105,7 +105,7 @@ asio-sys         = { version = "=0.3.0", optional = true }
 rtrb             = "0.3.4"                  # wait-free SPSC rings (engine commands, plugin events, the pipes)
 rubato           = "3.0.0"                  # the engine pipes' fractional resampler (engine_io::pipes)
 walkdir          = "2"                      # CLAP-file + VST3-dir scan (no clack-finder)
-# The native engine (docs/plans/native-engine.md): pure, driven by `engine_io`.
+# The native engine (briefing: crates/lf-engine/src/lib.rs): pure, driven by `engine_io`.
 lf-engine        = { path = "crates/lf-engine" }
 # Native MIDI input for the engine (engine_io::midi; WinMM on Windows). 0.11 accepts windows
 # >=0.59,<=0.62; the lock holds it on 0.61 with the rest of the graph (see windows-core above).

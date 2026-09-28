@@ -1,5 +1,17 @@
 //! The Tone reference fixtures (`tests/fixtures/tone`, written by `verify/probes/tone-refs.mjs --write`)
-//! and the tolerance classes a Stage 3 port is judged by (docs/plans/native-engine.md § Stage 3).
+//! and the tolerance classes a Stage 3 port is judged by ([`Class`]; which port holds which, and its
+//! residual: `src/dsp/mod.rs`).
+//!
+//! The fixtures are Tone OfflineContext renders of the Web Audio modules, `Math.random` replaced by a
+//! seeded mulberry32: two note scripts per pitched synth (range and velocity; a full-polyphony chord, a
+//! voice steal, legato, bend and vibrato) and the drum kit, the FX over a parameter grid (with a
+//! mid-render param change and a bypass crossfade), the limiter on a ramp plus bursts, and the reverb
+//! IR; 48 kHz plus a 44.1 kHz spot set, float32 WAVs through the app's `encodeWav`, with `manifest.json`
+//! (scenario scripts, frame-stamped events, every random draw, input hashes, capture commit and
+//! versions; regenerated whole). The noise tables are not stored: `dsp::noise` regenerates them from
+//! their seed. Without `--write` the probe re-renders and compares (two renders differ by ≤ 1.8e-7:
+//! Blink sums a node's inputs in no fixed order). The probe and its sibling `export-refs.mjs` (the
+//! v0.1.0 import fixtures, `tests/fixtures/v0.1.0`) hold the fixtures together to 10 MB.
 //!
 //! A port test replays a scenario's setup and events from the manifest, renders the same number of
 //! frames and channels, and calls [`assert_class`] with the tightest class it passes. A failure writes

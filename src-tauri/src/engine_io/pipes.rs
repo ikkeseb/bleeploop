@@ -3,8 +3,7 @@
 //! controller trimming the ratio so the ring holds its setpoint. The WASAPI join (input → engine) and
 //! Share output (engine → mirror endpoint) both run on it.
 //!
-//! Reshaped from the web path's `InPipe`/`OutMonitorPipe`/`DriftController` (`host/transport.rs`,
-//! deleted with the WebView bridge in Stage 6).
+//! Reshaped from the WebView bridge's `InPipe`/`OutMonitorPipe`/`DriftController`, deleted in Stage 6.
 //!
 //! Shape: the pusher writes interleaved f32 into an rtrb ring; each `pull` steps the drift controller
 //! once on the ring's fill, then resamples exactly the frames asked for (rubato `Async` poly-cubic,
@@ -14,12 +13,19 @@
 //!
 //! Startup, starves and trims: the pipe primes (plays silence, consumes nothing) until the ring reaches
 //! the setpoint, then drops any backlog above it (the Stage 1 spike's WASAPI join carried a 298 ms
-//! startup backlog it never drained: `docs/plans/native-engine.md` § Stage 1). A ring that runs short
+//! startup backlog it never drained: `docs/ARCHITECTURE.md` § Measured premise). A ring that runs short
 //! after that serves what it holds, zero-fills the rest and primes again, so a pusher that stalls comes
 //! back at the setpoint instead of limping along on an empty ring. A ring that runs over by more than
 //! the setpoint again (the puller stalled while the pusher kept on: a WASAPI render glitch) is trimmed
 //! back to it the same way, counted ([`PullPipe::take_trims`]): the ±1 % controller would take seconds
 //! to drain it, and the pipe's delay would sit that far past [`PullPipe::delay_frames`] meanwhile.
+//!
+//! Measured limit (WASAPI on the rig's Scarlett, a browser call holding the microphone): the input
+//! pushed 0.87 % more frames than the output pulled, past what the controller (sized for ±400 ppm)
+//! holds, so the join ran over and trimmed ~25 ms of input every 3–6 s (15 `join_trims` per 60 s
+//! soak). Whether those frames are real time (a faster controller fixes it) or an artefact (resampling
+//! them shifts the pitch 15 cents): unknown. With nothing else on the microphone, input and output ran
+//! at 44 100.7 Hz against QPC and every counter stayed 0.
 
 use rtrb::{Consumer, Producer, RingBuffer};
 use rubato::audioadapter_buffers::direct::InterleavedSlice;
@@ -44,7 +50,7 @@ pub(crate) struct PipeConfig {
     pub(crate) max_pull: usize,
 }
 
-// PI gains: ωn = √KI = 0.1 rad/s, ζ = KP / (2ωn) = 0.7. Faster than the web path's
+// PI gains: ωn = √KI = 0.1 rad/s, ζ = KP / (2ωn) = 0.7. Faster than the WebView bridge's
 // `DriftController` (ωn 0.04): a pipe that starts with its drift unknown must not dip into a starve
 // while it learns it, and at 0.04 rad/s a 10 ms ↔ 10 ms WASAPI join at −400 ppm ran short in its first
 // minute (the matrix test below).
@@ -140,7 +146,7 @@ pub(crate) fn pipe(config: PipeConfig) -> Result<(PushEnd, PullPipe), String> {
         return Err(format!("pipe: the setpoint does not fit the ring ({config:?})"));
     }
     // Poly cubic, not sinc: the ratio moves every pull and sinc would recompute its anti-alias
-    // filters on each change (the web path's reasoning for its `Hop1Pipe`).
+    // filters on each change (the WebView bridge's reasoning for its resampler).
     let rs = Async::<f32>::new_poly(
         out_rate as f64 / in_rate as f64,
         MAX_RATIO_RELATIVE,

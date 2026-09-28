@@ -54,7 +54,7 @@ pub enum PluginEvent {
 }
 
 /// rtrb depth (events buffered between a command push and the next RT drain). Generous: at the
-/// ~10 ms WASAPI block the RT thread drains up to `MAX_EVENTS_PER_BLOCK` each block (≫ any human
+/// ~10 ms WASAPI block the audio thread drains up to `MAX_EVENTS_PER_BLOCK` each block (≫ any human
 /// or single-knob input rate), so overflow is unreachable in practice — it's counted, not
 /// coalesced (`events_dropped` in the gate). True per-paramId coalescing is deferred until a
 /// param/automation UI can actually outrun this (post-P9.5); the deep ring makes it moot now.
@@ -102,7 +102,7 @@ pub enum OwnerRequest {
 
 /// The parameter ids the host last enumerated for a slot (`listParams`: at load, on every
 /// `plugin_list_params`, and when the plugin reports a rescan). Written only by the owner thread,
-/// read by command threads; the RT thread never sees it. `plugin_set_param` checks against it
+/// read by command threads; the audio thread never sees it. `plugin_set_param` checks against it
 /// because an id the plugin never listed can crash the plugin (Surge's ids are hash-like).
 pub(super) type ParamIds = Arc<std::sync::RwLock<std::collections::HashSet<u32>>>;
 
@@ -701,7 +701,7 @@ fn sum_to_mono(out_bufs: &[Vec<f32>], mono: &mut [f32], block: usize, chans: usi
 #[path = "vst3.rs"]
 mod vst3_host;
 
-// Engine mode (docs/plans/native-engine.md § Stage 4): the same plugins as units inside the native
+// Engine mode (briefing: `src-tauri/AGENTS.md` § Plugin hosting): the same plugins as units inside the native
 // engine's callback, each with its own owner thread (`engine_io/plugins.rs` routes to them).
 #[allow(dead_code)]
 #[path = "engine_slot.rs"]

@@ -6,7 +6,7 @@
 //! the context rate, truncated to whole frames as the OfflineAudioContext length is.
 //!
 //! Each Noise start draws one `Math.random` for its table offset, left then right. Tone's Reverb
-//! generates in its constructor and `makeReverbBus` (`src/audio/fx/fx.ts`) calls `generate()` again;
+//! generates in its constructor and `makeReverbBus` (`fx/fx.ts`) calls `generate()` again;
 //! the second generation's buffer is set last (it waits for the first's `ready`), so the IR the
 //! convolver holds comes from the SECOND pair of draws. The `ir-reverb-48000` fixture confirms it
 //! (`tests/reverb_ir.rs`): its draws 3 and 4 null the reference, draws 1 and 2 do not.

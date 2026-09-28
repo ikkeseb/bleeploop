@@ -16,7 +16,7 @@
 //! `1e-7` floor for exponential targets) and `connectSignal` from `signal/Signal.js`. JS arithmetic
 //! uses fdlibm, as V8 does.
 //!
-//! The Tone API that reaches a param from `src/audio/{synths,fx,engine.ts}` and the Tone classes they
+//! The Tone API that reaches a param from `{synths,fx,engine.ts}` and the Tone classes they
 //! build (Envelope, Monophonic, MembraneSynth, OneShotSource, Signal, Reverb, Gain, Filter): the value
 //! setter, `setValueAtTime`, `linearRampToValueAtTime`, `exponentialRampToValueAtTime`,
 //! `setTargetAtTime`, `cancelScheduledValues`, `cancelAndHoldAtTime`, `setRampPoint`, `rampTo`,

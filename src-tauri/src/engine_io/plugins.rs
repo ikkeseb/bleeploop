@@ -1,4 +1,4 @@
-//! OWNS: engine mode's plugin slots (`docs/plans/native-engine.md` § Stage 5, Plugins): the
+//! OWNS: engine mode's plugin slots: the
 //! `plugin_*` load, unload, list, parameter and editor commands, routed to the engine slot owners
 //! (`host/engine_slot.rs`) with their window events (`plugin:param-changed`,
 //! `plugin:params-changed`, `plugin:editor-closed`), and tone recall's commands (`host/tone.rs`): every
@@ -7,7 +7,7 @@
 //! saving, and the reload of the slot that held it is handed the imported bytes under a reload token),
 //! and the app's exit saves them all before the unloads. A plugin loads into an engine that exists:
 //! open the device first. GO LIVE is the engine's `SetSlotLive` and the plugin's gain `SetSlotGain` (sent
-//! with `engine_send`; the monitor-gain command maps to it), notes go through `engine_send`.
+//! with `engine_send`), notes go through `engine_send`.
 //!
 //! A slot is reserved while it loads, for the WebView document that asked (its `frontendEpoch`): a
 //! reload's unload cancels the reservation, and a load that finishes for a replaced document unloads

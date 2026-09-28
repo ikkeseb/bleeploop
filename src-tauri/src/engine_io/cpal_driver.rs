@@ -5,7 +5,10 @@
 //! An ASIO run builds on a cpal device of its own, found again by the cached driver's name (the cached
 //! one would hand a new run the last run's stream state), and first opens the driver at another block
 //! size and destroys it (`preopen`): opened again at the size it last ran, the rig's driver delivers
-//! about two periods later than it reports (`docs/plans/native-engine.md` § Stage 1, "Cause and fix").
+//! about two periods later than it reports (`docs/ARCHITECTURE.md` § Measured premise).
+//! With the preopen, 9 of 9 same-size relaunches at 128 landed within 0.1 ms of the report; without
+//! it, +6.0 ms (3 of 3). It costs ~500 ms per open;
+//! `app.exe --probe-engine asio 128 --lag --in 1 --out 1 [--no-preopen]` measures it again.
 //! Every size asked of an ASIO driver lies inside the range it reported to the probe (cpal refuses any
 //! other): a request outside it opens at `transition::asio_block`'s pick, and a driver with one size
 //! only gets no preopen. A driver whose sizes come in steps can still refuse a size inside that range
@@ -16,7 +19,7 @@
 //!
 //! Every latency handed to a body is a delta within ONE stream's timestamps (input: callback − capture;
 //! output: playback − callback): cpal ASIO instants are never compared across streams, each stream
-//! having its own time base (`docs/plans/native-engine.md` § Stage 1).
+//! having its own time base (`docs/ARCHITECTURE.md` § Measured premise).
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};

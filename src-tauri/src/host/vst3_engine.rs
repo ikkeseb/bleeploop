@@ -2,8 +2,8 @@
 //! as an `lf_engine::SlotProcessor`) and the engine-mode owner thread that loads, activates,
 //! restarts, re-activates after an eviction and tears it down (`engine_slot` holds the API), keeping
 //! the plugin's tone as `engine_slot` describes: the component's and the edit controller's states in
-//! one container (`save_state`, `restore_state`). It followed the web path's VST3 owner (deleted in
-//! Stage 6) minus the RT thread, the hop-1 ring and the device; the Stage 1 spike's `PluginUnit` was
+//! one container (`save_state`, `restore_state`). It followed the WebView bridge's VST3 owner (deleted in
+//! Stage 6) minus its RT thread, its hop-1 ring and the device; the Stage 1 spike's `PluginUnit` was
 //! the unit's prototype. Unlike that owner's, this load creates the
 //! edit controller and sets its component handler before the component activates, the SDK host's
 //! order, so a stored tone reaches both halves before anything processes; a component that refuses the
@@ -126,7 +126,7 @@ impl SlotProcessor for Vst3Unit {
                 return;
             }
             // SAFETY: the processor is active (the owner activated it before the install);
-            // setProcessing runs on the thread that processes, as the live producer and the spike do.
+            // setProcessing runs on the thread that processes, as the Stage 1 spike does.
             if unsafe { self.processor.setProcessing(1) } != kResultOk {
                 self.refused = true;
                 self.faults.fetch_or(FAULT_START, Relaxed);
@@ -461,7 +461,7 @@ fn create(
     handler: &ComWrapper<LfComponentHandler>,
 ) -> Result<(Vst3Plugin, ComPtr<IAudioProcessor>, String), String> {
     let (module, factory) = opened;
-    // SAFETY: raw FUnknown COM on the owner thread, the live owner's sequence; every pointer is
+    // SAFETY: raw FUnknown COM on the owner thread, the VST3 load sequence; every pointer is
     // valid for its call.
     unsafe {
         let mut component: Option<ComPtr<IComponent>> = None;

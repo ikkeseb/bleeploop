@@ -1,7 +1,7 @@
 //! DEV: the loopback chirp and its offline analysis, shared by the Stage 1 spike
 //! (`host/engine_spike.rs`) and the engine probe's lag phase (`engine_io/probe.rs`): a chirp leaves on
 //! one output channel, comes back through a cable on an input, and each arrival is found by normalised
-//! cross-correlation, refined to a sub-frame position (`docs/plans/native-engine.md` § Stage 1).
+//! cross-correlation, refined to a sub-frame position (`docs/ARCHITECTURE.md` § Measured premise).
 
 pub(crate) const CHIRP_LEN: usize = 64;
 pub(crate) const CHIRP_AMP: f32 = 0.5;

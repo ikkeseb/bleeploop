@@ -1,5 +1,5 @@
-//! OWNS: what the sender keeps for the engine's note commands, ported from `src/audio/input-router.ts`
-//! and the play-path branch of `src/audio/midi.ts`: which owner (a port's channel) holds each note,
+//! OWNS: what the sender keeps for the engine's note commands, ported from `src/ui/state/input-router.ts`
+//! and the play-path branch of `src/ui/state/midi.ts`: which owner (a port's channel) holds each note,
 //! each owner's sustain pedal and the notes it defers, and the wheels with the last moved one winning.
 //! The engine plays what it is told (`lf_engine::Command::NoteOn`); the router decides when to tell it.
 //!

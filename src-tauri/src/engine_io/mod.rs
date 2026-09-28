@@ -1,4 +1,4 @@
-//! engine_io: the device side of the native engine (`docs/plans/native-engine.md` § Stage 4). The app
+//! engine_io: the device side of the native engine. The app
 //! always runs it (`mode`; the UI drives it over `wire` and the feed), and a DEV probe drives it
 //! headless. This doc is the module's briefing.
 //!
@@ -28,7 +28,7 @@
 //! | `session` | a session's bytes to and from the engine: the snapshot the UI saves, the load it imports |
 //! | `settings` | the last value of every setting command, replayed into each new engine |
 //! | `share` | Share output: the post-limiter master mirrored to a WASAPI endpoint while ASIO plays |
-//! | `midi` | native MIDI: ports, hot-plug, parse, the MIDI-learn bindings, notes and pedal actions |
+//! | `midi` | native MIDI (built, never started by the app): ports, hot-plug, parse, the MIDI-learn bindings, notes and pedal actions |
 //! | `probe` | DEV: `app.exe --probe-engine`, the device side on real hardware (soak, switches, plugin swaps) |
 //! | `wire` | the JSON wire to the UI: the serde mirror of the engine's commands and events, the feed frame |
 //!
@@ -57,13 +57,17 @@
 //!   the output then the input, and punches out a take in flight (STATUS E3). A loss drops at once. A
 //!   new sample rate builds a new engine: the plugin units go back to their owners (`SlotHost`), and the
 //!   loops go with the old engine.
+//! - **A loss keeps the engine and its slots.** An error callback latches and the owner drops the
+//!   streams: an ASIO driver rebuilds from its cache, else the owner falls back to the WASAPI default;
+//!   a lost WASAPI endpoint falls back to the default endpoint (`transition`'s fallbacks). cpal's
+//!   `DeviceChanged` and `RealtimeDenied` are not losses (cpal 0.18.1 documents both as non-fatal).
 //! - **Loops never leave on a player's switch unasked.** An open that would build an engine at another
 //!   rate while this one holds audio (any lane not EMPTY: a loop, a take in flight or armed, a kept
 //!   RETAKE pass) is refused with [`OpenError::RateChange`] (the rate is known from `Driver::resolve`,
 //!   before anything stops) until the UI confirms and opens again with `force`. The owner's own reopens
 //!   (a loss's recovery or fallback, a replaced engine) go ahead; a loss's fallback that rebuilds the
 //!   engine at another rate reports [`DeviceEvent::LoopsDropped`], whether or not that device then
-//!   starts, and the UI keeps the loops in its recovery (`src/audio/autosave.ts`).
+//!   starts, and the UI keeps the loops in its recovery (`src/session/autosave.ts`).
 //! - **`Core::running` is up from just before the streams start until just after they drop,** so a
 //!   slot host never takes the engine lock from under a callback (it waits on its port instead). The
 //!   owner raises it under the engine lock, and a slot host checks it again once it holds the lock.
@@ -75,6 +79,15 @@
 //!   atomics the owner reads; the owner logs.
 //! - **cpal is pinned at `=0.18.1`:** the callback order the Stage 1 A1 run proved is read from
 //!   asio-sys 0.3.0; 0.18.2 moves to asio-sys 0.4.0 and windows 0.62 and needs its own A1 rerun.
+//!
+//! # Tests
+//!
+//! Everything here runs without hardware in `cargo test`: the transition kernel's tables, the device
+//! owner and the callbacks on the fake driver (`tests.rs`), the install/remove/restart handshake with
+//! the fixture plugins in a rendering engine (`host/`'s restart fixtures), the pipe matrix at ±400 ppm
+//! (`pipes.rs`), MIDI parse and bindings (`midi`), the wire fixture (`wire.rs`). Code only a device or
+//! a real plugin can run is compile-checked (`--features asio` too); on the rig, `pnpm native:engine`
+//! runs `probe.rs`'s bar.
 
 mod callback;
 mod cpal_driver;
