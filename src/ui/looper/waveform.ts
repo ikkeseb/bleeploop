@@ -1,4 +1,4 @@
-import { clock, looper, sampleRate, type PeakView, type TrackState } from '../state/audio';
+import { PEAK_FRAMES, clock, looper, sampleRate, type PeakView, type TrackState } from '../state/audio';
 import { masterBars } from './shared';
 
 /**
@@ -10,19 +10,21 @@ import { masterBars } from './shared';
  *
  * A SINGLE requestAnimationFrame loop drives every registered track canvas. It reads the looper's
  * pre-computed peak arrays through non-reactive getters (`looper.peaksInto` / `phaseValue` / `stateOf`
- * / `recHeadFrac` / `masterFramesValue` — NO Solid signals in the per-frame path, per invariant 6) and
- * never scans raw PCM. Per track the waveform (two-layer envelope) AND its bar grid are rasterised into
- * an off-screen canvas and cached; the bitmap is re-rasterised ONLY when the peaks change (version
- * bump), the track state changes (colour), the master loop length changes (grid geometry), or the
- * element resizes. Every frame the loop just blits that cached bitmap and draws the playhead — so the
- * steady-state per-frame cost is a `drawImage` + a few `fillRect`s per track, holding 60fps with flat
- * GC even with all five tracks live.
+ * / `recHeadFrac` / `recSpanFrames` / `masterFramesValue` — NO Solid signals in the per-frame path, per
+ * invariant 6) and never scans raw PCM. Per track the waveform (two-layer envelope) AND its bar grid are
+ * rasterised into an off-screen canvas and cached; the bitmap is re-rasterised ONLY when the peaks change
+ * (version bump), the track state changes (colour), the master loop length changes (grid geometry), a
+ * recording take's span changes (bin placement), or the element resizes. Every frame the loop just
+ * blits that cached bitmap and draws the playhead — so the steady-state per-frame cost is a `drawImage`
+ * + a few `fillRect`s per track, holding 60fps with flat GC even with all five tracks live.
  *
  * The bar grid is derived from `masterBars()` (the shared bar-math in `shared.ts`) so it can
  * never disagree with the spoken loop length. That is the ONLY place Solid signals are read
  * (`clock.bpm()`, and in engine mode the device's rate behind `sampleRate()`), and it is gated to a
  * master-length change (a rare structural event; BPM is locked for the life of a committed master)
- * inside the cached-bitmap path — never in the per-frame steady state.
+ * inside the cached-bitmap path — never in the per-frame steady state. (The web looper's
+ * `recSpanFrames` reads its tempo once per take for a first take's opening span; engine mode's store
+ * takes it as the take starts, off the draw loop.)
  *
  * Solid only ever creates/destroys the <canvas> elements (the Looper and StageView components) and calls
  * `registerLane` / `unregisterLane`; all drawing lives here in plain TS.
@@ -67,6 +69,8 @@ interface Lane {
   lastMuted: boolean;
   /** Master loop length at the last rasterise — grid geometry changes when this does. */
   lastMasterFrames: number;
+  /** A recording take's span at the last rasterise (0: none) — its bins are placed over it. */
+  lastSpan: number;
   /** Grid cache: the bar count for `gridMaster`, recomputed (reading bpm) only when master changes. */
   gridMaster: number;
   gridBars: number;
@@ -272,8 +276,9 @@ function drawGrid(lane: Lane, bars: number): void {
  * The envelope is drawn per device-pixel column: a translucent OUTER min/max peak (globalAlpha .34)
  * plus a solid INNER body (globalAlpha .95) whose height is a one-pole-smoothed mean-|peak| — the
  * RMS-ish core, mirrored around mid. We only have min/max bins, so the per-column mean is approximated
- * as (|min|+|max|)/2. During a later-track take the recorded region occupies only `waveCols` (the
- * record-head fraction of the width) and the remainder gets the dotted rec-red "tape to fill" guide.
+ * as (|min|+|max|)/2. While a take records (`span` > 0, its `recSpanFrames`) each bin sits at its frame
+ * over the span, so the recorded region covers `cols` columns and, on a later take, the remainder gets
+ * the dotted rec-red "tape to fill" guide.
  */
 function rasterise(
   lane: Lane,
@@ -283,7 +288,7 @@ function rasterise(
   state: TrackState,
   masterFrames: number,
   muted: boolean,
-  waiting: boolean,
+  span: number,
 ): void {
   const { wctx, dw, dh, dpr } = lane;
   wctx.clearRect(0, 0, dw, dh);
@@ -300,31 +305,36 @@ function rasterise(
   }
   drawGrid(lane, lane.gridBars);
 
+  // Bins across the full width: a recording take's span in bins, else the loop's `count`. While a take
+  // records, bin b sits at b·PEAK_FRAMES/span of the width whatever the record head does, so a drawn
+  // feature holds still as bins arrive and moves only when the span grows (a free take passing the loop,
+  // a first take doubling its window). `cols` is the recorded region.
+  const across = span > 0 ? span / PEAK_FRAMES : count;
+  const cols = span > 0 ? Math.min(dw, Math.ceil((count / across) * dw)) : dw;
+
   // Centre line vs "tape to fill": while a later track is laying down a take, the mid line becomes a
-  // dotted rec-red guide over the not-yet-recorded remainder (right of the record head); otherwise it
-  // is a plain faint centre line. (First-track grow-from-left has no known length → plain line, no tape.)
-  // Armed / count-in / listening is not a take yet: plain line, no tape (the chrome says ARMED).
-  const recording = state === 'RECORDING' && !waiting;
-  const headFrac = recording ? looper.recHeadFrac(lane.index) : -1;
-  const hasTape = recording && headFrac >= 0;
-  const waveCols = hasTape ? Math.min(dw, Math.max(0, Math.round(headFrac * dw))) : dw;
+  // dotted rec-red guide over the not-yet-recorded remainder; otherwise it is a plain faint centre line.
+  // (A first take's span is only a window, not its length → plain line, no tape.) Armed / count-in /
+  // listening is not a take yet (span 0): plain line, no tape (the chrome says ARMED).
+  const hasTape = span > 0 && masterFrames > 0;
 
   if (!hasTape) {
     wctx.fillStyle = lane.colors.mid;
     wctx.fillRect(0, Math.round(midY), dw, 1);
   }
 
-  // Two-layer envelope. Down-samples `count` peak bins across `waveCols` device columns: with more bins
-  // than columns we take the extremes per column group, with fewer we stretch. O(waveCols + count).
-  if (count > 0 && min && max && waveCols >= 1) {
+  // Two-layer envelope. Down-samples the peak bins across `cols` device columns: with more bins than
+  // columns we take the extremes per column group, with fewer we stretch. O(cols + count).
+  if (count > 0 && min && max && cols >= 1) {
     // STOPPED reads as a dimmed take; MUTED dims further so a silent lane is never mistaken for a
     // sounding one (the state word says MUTED, the lane's --sc goes grey — this is the wave's half).
     const dimMul = muted ? 0.3 : state === 'STOPPED' ? 0.55 : 1;
     wctx.fillStyle = waveColor(lane.colors, state);
     let body = 0;
-    for (let x = 0; x < waveCols; x++) {
-      const p0 = Math.floor((x / waveCols) * count);
-      let p1 = Math.floor(((x + 1) / waveCols) * count);
+    for (let x = 0; x < cols; x++) {
+      const p0 = Math.floor((x / dw) * across);
+      if (p0 >= count) break;
+      let p1 = Math.floor(((x + 1) / dw) * across);
       if (p1 <= p0) p1 = p0 + 1;
       if (p1 > count) p1 = count;
       let mn = min[p0];
@@ -356,7 +366,7 @@ function rasterise(
     wctx.globalAlpha = 1;
   }
 
-  // Dotted rec-red "tape to fill" over the remainder to the right of the record head.
+  // Dotted rec-red "tape to fill" over the remainder to the right of the recorded region.
   if (hasTape) {
     wctx.fillStyle = lane.colors.rec;
     wctx.globalAlpha = 0.5;
@@ -364,7 +374,7 @@ function rasterise(
     const dashH = Math.max(1, Math.round(dpr));
     const dashW = Math.max(1, Math.round(3 * dpr));
     const step = Math.max(2, Math.round(7 * dpr));
-    for (let x = waveCols + Math.round(6 * dpr); x < dw; x += step) {
+    for (let x = cols + Math.round(6 * dpr); x < dw; x += step) {
       wctx.fillRect(x, dashY, dashW, dashH);
     }
     wctx.globalAlpha = 1;
@@ -385,8 +395,9 @@ function drawPlayhead(lane: Lane, state: TrackState, waiting: boolean): void {
       color = lane.colors.overdubbing;
     }
   } else if (state === 'RECORDING') {
+    // The head sweeps the same span the bins are placed over (`recSpanFrames`); -1 (no track yet): the
+    // right edge.
     const frac = looper.recHeadFrac(lane.index);
-    // -1 => first track, master not yet defined: head rides the right edge of the grown data.
     x = frac < 0 ? dw - lane.dpr : frac * dw;
     color = lane.colors.rec;
   } else if (state === 'PLAYING' || state === 'OVERDUBBING') {
@@ -416,6 +427,8 @@ function frame(): void {
     const master = looper.masterFramesValue();
     // Armed / count-in / AUTO LISTEN: the chrome says ARMED/LISTENING, so the well draws no rec-red.
     const waiting = state === 'RECORDING' && looper.waitingOf(lane.index);
+    // A take laying down audio places its bins over its span: re-placed when that span grows.
+    const span = state === 'RECORDING' && !waiting ? looper.recSpanFrames(lane.index) : 0;
     looper.peaksInto(lane.index, peakScratch);
 
     const dirty =
@@ -424,14 +437,16 @@ function frame(): void {
       state !== lane.lastState ||
       waiting !== lane.lastWaiting ||
       muted !== lane.lastMuted ||
-      master !== lane.lastMasterFrames;
+      master !== lane.lastMasterFrames ||
+      span !== lane.lastSpan;
     if (dirty) {
-      rasterise(lane, peakScratch.count, peakScratch.min, peakScratch.max, state, master, muted, waiting);
+      rasterise(lane, peakScratch.count, peakScratch.min, peakScratch.max, state, master, muted, span);
       lane.lastVersion = peakScratch.version;
       lane.lastWaiting = waiting;
       lane.lastState = state;
       lane.lastMuted = muted;
       lane.lastMasterFrames = master;
+      lane.lastSpan = span;
     }
 
     // Blit + playhead only when the bitmap changed this frame OR the lane carries a MOVING playhead
@@ -481,6 +496,7 @@ export function registerLane(index: number, canvas: HTMLCanvasElement): void {
     lastState: '',
     lastMuted: false,
     lastMasterFrames: -1,
+    lastSpan: 0,
     gridMaster: -1,
     gridBars: 0,
     gridFont: gridFontFor(self.devicePixelRatio || 1),

@@ -19,7 +19,7 @@ import {
   type LaneInfo,
   type LaneState,
 } from '../../platform';
-import type { PeakView, TrackState } from '../../audio/looper/looper';
+import { firstTakeSpan, openingSpan, type PeakView, type TrackState } from '../../audio/looper/looper';
 import { FX_META, FX_PARAM_DEFS, validateFxStates, type FxParamDef, type FxState } from '../../audio/fx/metadata';
 import type { ClearToken, SessionSource } from '../../audio/export/session-source';
 import type { StemSnapshot } from '../../audio/export/stem-archive';
@@ -266,6 +266,10 @@ const plain = {
   /** The frames the lane's record head sweeps: the loop, or a multiply window past it; 0 for a free
    * take, which sweeps the loops it has reached (`laterTakeFrames`). */
   takeFrames: Array.from({ length: ENGINE_LANES }, () => 0),
+  /** A first take's opening span (`openingSpan`), taken as it starts (`recSpanFrames`). */
+  opening: Array.from({ length: ENGINE_LANES }, () => 1),
+  /** The span the lane's take has reached (`recSpanFrames`); 0 as a take starts. */
+  span: Array.from({ length: ENGINE_LANES }, () => 0),
   master: 0,
   /** The feed's clock anchor, with the master grid's (`grid`); `rate` 0 while no device runs (the
    * playhead holds still). */
@@ -344,17 +348,32 @@ function whenHeard(frame: number, show: () => void): void {
   beatTimers.add(timer);
 }
 
-/** A later take's record head, 0..1 of the master (of a multiply's window, which grows the loop to it;
- * of a free take's loops so far, which may grow it); -1 before a master exists (first take). */
-function recHeadFrac(i: number): number {
+/** The frames lane `i`'s take is drawn across while it records, the span its record head sweeps: the
+ * master (a multiply's window, which grows the loop to it; a free take's loops so far, which may grow
+ * it), or before a master a first take's doubling span (`firstTakeSpan`). The waveform places peak bins
+ * by frame over it, so bins and head share one scale. */
+function recSpanFrames(i: number): number {
   const m = plain.master;
-  if (m <= 0) return -1;
-  if (plain.waiting[i]) return phaseValue();
   const elapsed = heardFrame() - plain.takeStart[i];
   // A free take (E10) runs until the press: the lane spans the loops it has reached, never promising a
   // close at the loop's end.
-  const span = plain.takeFrames[i] > 0 ? Math.max(m, plain.takeFrames[i]) : Math.max(1, Math.ceil(elapsed / m)) * m;
-  const f = elapsed / span;
+  const span =
+    m <= 0
+      ? firstTakeSpan(plain.opening[i], elapsed)
+      : plain.takeFrames[i] > 0
+        ? Math.max(m, plain.takeFrames[i])
+        : Math.max(1, Math.ceil(elapsed / m)) * m;
+  // A new anchor may step the extrapolated head back: a span once reached holds, so the bins are
+  // re-placed once as it grows, never back and forth.
+  if (span > plain.span[i]) plain.span[i] = span;
+  return plain.span[i];
+}
+
+/** A take's record head, 0..1 of its span (`recSpanFrames`); a later take waiting for its downbeat rides
+ * the loop phase, a first take waiting (count-in, AUTO listening) has none: -1. */
+function recHeadFrac(i: number): number {
+  if (plain.waiting[i]) return plain.master > 0 ? phaseValue() : -1;
+  const f = (heardFrame() - plain.takeStart[i]) / recSpanFrames(i);
   return f < 0 ? 0 : f > 1 ? 1 : f;
 }
 
@@ -394,6 +413,8 @@ function applyLane(lane: number, frame: number, info: LaneInfo): void {
   if (next === 'RECORDING' && !waiting && (prev !== 'RECORDING' || plain.waiting[lane] || info.retakePass !== plain.retakePass[lane])) {
     plain.takeStart[lane] = nearestBoundary(frame);
     plain.takeFrames[lane] = laterTakeFrames();
+    plain.opening[lane] = openingSpan(bpm(), engineSampleRate());
+    plain.span[lane] = 0;
   }
   if (capturing(prev) && !capturing(next)) plain.revision[lane]++;
   plain.clearing[lane] = false;
@@ -869,6 +890,7 @@ export const engineLooper = {
   mutedOf: (i: number): boolean => plain.muted[i] ?? false,
   waitingOf: (i: number): boolean => plain.waiting[i] ?? false,
   recHeadFrac,
+  recSpanFrames,
   masterFramesValue: (): number => plain.master,
   fxState: (i: number): FxState[] => {
     fxVersions[i][0]();

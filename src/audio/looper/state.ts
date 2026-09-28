@@ -5,6 +5,7 @@ import { engine } from '../engine';
 import { clock } from '../clock';
 import { type FxChain, type FxState } from '../fx/fx';
 import { AUTO_RECORD_DEFAULT_SENSITIVITY } from './auto-record';
+import { framesPerBar } from '../quantize';
 
 /**
  * OWNS: shared looper state — constants, the per-track `Track` record shape, the reactive Solid signals
@@ -512,17 +513,55 @@ export function fillFramesOf(i: number): number {
 }
 
 /**
- * Record-head position 0..1 for a later track currently RECORDING (writeHead / master). Returns
- * -1 when the master loop isn't defined yet (first track records in grow-from-left mode, where
- * the head is simply the right edge of the drawn waveform).
+ * The span a first take (no loop yet) is drawn across: 4 bars at the tempo when it starts, or 8 s with
+ * no tempo. Taken once per take, never per drawn frame (invariant 6).
+ */
+export function openingSpan(bpm: number, sampleRate: number): number {
+  const frames = bpm > 0 && Number.isFinite(bpm) ? 4 * framesPerBar(bpm, sampleRate) : 8 * sampleRate;
+  return Math.max(1, frames);
+}
+
+/**
+ * A first take's span `elapsed` frames in: the opening span, doubled each time the take reaches it. Its
+ * peaks are placed by frame over this span, so they move only when it doubles, never as bins arrive.
+ * Engine mode's store uses it too (`src/ui/state/engine-store.ts`).
+ */
+export function firstTakeSpan(opening: number, elapsed: number): number {
+  let span = opening;
+  for (let k = 0; k < 32 && elapsed >= span; k++) span *= 2;
+  return span;
+}
+
+/** The first take's opening span, taken once per capture (keyed by its session). */
+const opening = { rec: null as RecordSession | null, frames: 1 };
+
+/**
+ * The frames track `i`'s take is drawn across while it records, the span its record head sweeps: the
+ * master loop (a later take's window never passes it here), or a first take's doubling span
+ * (`firstTakeSpan`). The waveform places peak bins by frame over it, so bins and head share one scale.
+ */
+export function recSpanFrames(i: number): number {
+  const t = engineState.tracks[i];
+  if (!t) return 0;
+  if (engineState.masterFramesPlain > 0) return engineState.masterFramesPlain;
+  if (engineState.recording !== opening.rec) {
+    opening.rec = engineState.recording;
+    opening.frames = openingSpan(clock.bpm(), sr());
+  }
+  return firstTakeSpan(opening.frames, t.writeHead);
+}
+
+/**
+ * Record-head position 0..1 of the span (`recSpanFrames`) for a track currently RECORDING (writeHead /
+ * span); -1 while a first take waits (count-in, AUTO listening): no head yet.
  */
 export function recHeadFrac(i: number): number {
   const t = engineState.tracks[i];
-  if (!t || engineState.masterFramesPlain <= 0) return -1;
+  if (!t) return -1;
   // While armed (waiting for the boundary) the rec head rides the master loop phase, in sync
   // with the other tracks; once the real take starts it follows the write head.
-  if (t.armed) return engineState.loopPhasePlain;
-  return Math.min(1, t.writeHead / engineState.masterFramesPlain);
+  if (t.armed || t.autoArmed) return engineState.masterFramesPlain > 0 ? engineState.loopPhasePlain : -1;
+  return Math.min(1, t.writeHead / recSpanFrames(i));
 }
 
 /** Plain master loop length in frames (mirror of the signal) for the draw loop. */
