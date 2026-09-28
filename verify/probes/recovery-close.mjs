@@ -1,13 +1,55 @@
 /**
- * Actual close-guard + IndexedDB deletion rollback, with only native close capabilities substituted.
- * Browser proof of frontend close approval; does not exercise Rust/WebView2 window events. Two cases:
- * a failed recovery deletion must not approve the close, then a retry once the deletion works must
- * approve and clear the stale jam; and closing DURING the very first take (RECORDING, nothing
- * committed, no master grid yet) must approve with no failure notice at all.
+ * The close guard (`src/app/close-guard.ts`) and the recovery's IndexedDB deletion rollback
+ * (`src/session/autosave.ts`), with only the native close capabilities substituted, on the web engine
+ * fake (`src/platform/host.web.ts`): the probe scripts the lanes on the feed and the snapshot the engine
+ * answers. Two cases:
+ *
+ * - after the player's CLEAR ALL of a saved jam, a failed recovery deletion must not approve the close
+ *   and shows the failure notice; a retry once the deletion works approves and clears the stale jam;
+ * - closing DURING the very first take (the feed shows RECORDING, nothing committed, no master grid yet)
+ *   must approve with no failure notice at all and save nothing.
+ *
+ * Browser proof of frontend close approval: cannot see Rust/WebView2 window events or the native engine.
  * Run: pnpm probe recovery-close
  */
 import assert from 'node:assert/strict';
 import { probe } from '../harness/probe.ts';
+
+/** Page helpers: the feed frames the engine would send, and the snapshot it answers. */
+function engineScript() {
+  window.__lfEngineFake = true;
+  const RATE = 48000;
+  const frames = 2 * RATE; // one bar at 120 BPM
+  let seq = 0;
+  const emit = (frame) => window.__lf.native.emit({ seq: ++seq, reset: false, events: [], ...frame });
+  const lane = (state, length) => ({ state, length, armed: false, autoArmed: false, canUndo: false,
+    canReverse: false, reversed: false, stopAt: null, fading: false, retakePass: 0 });
+  window.__engine = {
+    /** The engine's first frame: every lane EMPTY. */
+    blank: () => emit({ reset: true, settings: [], anchor: { frame: 0, atMs: Date.now(), rate: RATE, grid: 0 },
+      events: [{ Transport: { frame: 0, master: 0, bpm: 120, locked: false } },
+        ...[0, 1, 2, 3, 4].map((i) => ({ Lane: { frame: 0, lane: i, info: lane('Empty', 0) } }))] }),
+    /** A loop committed on lane 1 (sample 17 is 1.75); the snapshot answers it. */
+    async commit() {
+      const { encodeSessionBytes } = await import('/src/platform/engine-wire.ts');
+      const pcm = new Float32Array(frames);
+      pcm[17] = 1.75;
+      window.__lf.native.snapshotBytes = encodeSessionBytes({ rate: RATE, masterLengthFrames: frames, bpm: 120,
+        tracks: [{ index: 0, frames, reversed: false, state: 'Playing' }] }, [pcm]).buffer;
+      emit({ events: [{ Transport: { frame: 0, master: frames, bpm: 120, locked: true } },
+        { Lane: { frame: 0, lane: 0, info: lane('Playing', frames) } }] });
+    },
+    /** The engine's CLEAR ALL: `Cleared` before each lane's own event; its snapshot is empty. */
+    clearAll() {
+      window.__lf.native.snapshotBytes = null;
+      emit({ events: [...[0, 1, 2, 3, 4].flatMap((i) => [{ Cleared: { frame: 0, lane: i } },
+        { Lane: { frame: 0, lane: i, info: lane('Empty', 0) } }]),
+      { Transport: { frame: 0, master: 0, bpm: 120, locked: false } }] });
+    },
+    /** A first take records on lane 1: no loop yet. */
+    firstTake: () => emit({ events: [{ Lane: { frame: 0, lane: 0, info: lane('Recording', 0) } }] }),
+  };
+}
 
 await probe(async ({ open }) => {
   /** A page with the native close capabilities substituted. Each case gets its own page (an approved
@@ -16,6 +58,7 @@ await probe(async ({ open }) => {
   const openGuardedPage = async () => {
     const app = await open({
       init: async (page) => {
+        await page.addInitScript(engineScript);
         await page.route('**/src/app/close-guard.ts*', async (route) => {
           const response = await route.fetch();
           const source = await response.text();
@@ -29,7 +72,7 @@ await probe(async ({ open }) => {
         });
       },
     });
-    await app.page.waitForFunction(() => !!window.__closeRequest);
+    await app.page.waitForFunction(() => !!window.__closeRequest && window.__lf.native.opened.length >= 1);
     return app;
   };
 
@@ -38,13 +81,10 @@ await probe(async ({ open }) => {
     const lf = window.__lf;
     await lf.autosave.ready();
     lf.autosave.start()();
-    await lf.looper.init();
-    const pcm = new Float32Array(lf.engine.ctx.sampleRate * 2);
-    pcm[17] = 1.75;
-    await lf.looper.loadSession({ bpm: 120, bars: 1, masterLengthFrames: pcm.length,
-      tracks: [{ index: 0, pcm, volume: 0.5, muted: true, reversed: false, fx: lf.looper.fxState(0) }] });
+    window.__engine.blank();
+    await window.__engine.commit();
     await lf.autosave.flush();
-    lf.looper.clearAll();
+    window.__engine.clearAll();
     const original = IDBObjectStore.prototype.delete;
     let abortedDeletes = 0;
     IDBObjectStore.prototype.delete = function (...args) {
@@ -89,9 +129,7 @@ await probe(async ({ open }) => {
   const { page: firstTakePage, consoleErrors: firstTakeErrors } = await openGuardedPage();
   const firstTake = await firstTakePage.evaluate(async () => {
     const lf = window.__lf;
-    await lf.looper.init();
-    lf.master.setMuted(true);
-    lf.clock.setMetronome(false);
+    await lf.autosave.ready();
     window.confirm = () => true; // the user's "yes, close" — the notice under test is the failure one
     const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
     const waitFor = async (predicate, label, ms = 10000) => {
@@ -102,8 +140,8 @@ await probe(async ({ open }) => {
       }
     };
     const approvalsBefore = window.__closeApprovals ?? 0;
-    await lf.looper.recDub(0);
-    await waitFor(() => lf.looper.stateOf(0) === 'RECORDING', 'first take to reach RECORDING');
+    window.__engine.blank();
+    window.__engine.firstTake();
     const stateAtClose = lf.looper.stateOf(0);
     const masterFramesAtClose = lf.looper.masterLengthFrames();
     let flushError = null;
@@ -117,8 +155,6 @@ await probe(async ({ open }) => {
     const approvals = (window.__closeApprovals ?? 0) - approvalsBefore;
     const visibleError = document.body.textContent.includes('Could not update recovery before closing');
     const savedAfterClose = await lf.autosave.hasSaved();
-    lf.looper.clearAll();
-    lf.master.setMuted(false);
     return {
       stateAtClose,
       masterFramesAtClose,

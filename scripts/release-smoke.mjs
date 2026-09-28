@@ -9,9 +9,9 @@
 //                no CSP violation: not in the page (replayed over CDP from before the attach) and not in
 //                the release log (`[csp]`, `[window.error]`, `[unhandledrejection]` lines,
 //                src/platform/logging.ts)
-//   engine       Audio Settings' engine switch reads `native` and its engine row names a running device;
-//                the log says the engine owns the device. The device a launch opens by itself is printed,
-//                not judged (a `--fresh` run shows a new user's first launch)
+//   engine       Audio Settings' engine row names a running device; the log says the engine owns the
+//                device. The device a launch opens by itself is printed, not judged (a `--fresh` run
+//                shows a new user's first launch)
 //   device       ASIO on and buffer `--buffer=` (default 128) picked in Audio Settings as a user would;
 //                the engine row shows ASIO at that buffer and the log shows the reopen
 //   take         with CLICK on, FIXED 1 bar and slot 1 set to Off on input `--channel=` (0-based, default
@@ -109,11 +109,10 @@ const logFile = join(profile, 'logs', 'bleeploop.log');
 const out = join(root, 'logs', 'release-smoke');
 mkdirSync(out, { recursive: true });
 if (flags.has('fresh')) rmSync(profile, { recursive: true, force: true });
-const toggle = join(profile, 'engine-mode');
 const logStart = existsSync(logFile) ? statSync(logFile).size : 0;
 const linesBefore = logStart ? readFileSync(logFile).subarray(0, logStart).toString('utf8').split('\n').length - 1 : 0;
 console.log(`release smoke: ${opts.exe}`);
-console.log(`  profile ${profile}${flags.has('fresh') ? ' (deleted first: a first launch)' : ''}; engine toggle file: ${existsSync(toggle) ? JSON.stringify(readFileSync(toggle, 'utf8')) : 'none (engine by default)'}`);
+console.log(`  profile ${profile}${flags.has('fresh') ? ' (deleted first: a first launch)' : ''}`);
 
 // ── Helpers ───────────────────────────────────────────────────────────────────────────────────────
 function ps(script) {
@@ -345,7 +344,6 @@ try {
       lanes: [...document.querySelectorAll('.lp-lane')].map((l) => /** @type {HTMLElement} */ (l).dataset.state).join(','),
       looperHeight: Math.round(document.querySelector('.lp')?.getBoundingClientRect().height ?? 0),
       textLength: document.body.innerText.length,
-      isolated: self.crossOriginIsolated,
     }));
     await page.screenshot({ path: join(out, 'boot.png') });
     const logBad = runLog().filter((e) => /\[(csp|window\.error|unhandledrejection)\]/.test(e.line));
@@ -353,7 +351,7 @@ try {
     must(pageErrors.length === 0, `page errors: ${pageErrors.join(' | ')}`);
     must(logBad.length === 0, `release log: ${logBad.map(cite).join(' | ')}`);
     return [
-      `${dom.url} "${dom.title}", lanes ${dom.lanes}, looper ${dom.looperHeight} px, crossOriginIsolated ${dom.isolated}`,
+      `${dom.url} "${dom.title}", lanes ${dom.lanes}, looper ${dom.looperHeight} px`,
       `no page error or CSP report (CDP replay + live); no [csp]/[window.error]/[unhandledrejection] in the release log`,
       `screenshot ${join(out, 'boot.png')}`,
     ];
@@ -362,12 +360,6 @@ try {
   // ── engine ────────────────────────────────────────────────────────────────────────────────────
   const engined = booted && (await check('engine', async () => {
     await openSettings();
-    const sw = await page.evaluate(() => {
-      const box = /** @type {HTMLInputElement | null} */ (document.querySelector('input[aria-label="Use the native audio engine from the next launch"]'));
-      return box ? { checked: box.checked, text: box.closest('label')?.querySelector('.audio-settings__toggle-text')?.textContent ?? null } : null;
-    });
-    must(sw !== null, 'Audio Settings shows no engine switch (platform.engine unavailable?)');
-    must(sw.checked && sw.text === 'native', `the engine switch reads ${JSON.stringify(sw)}`);
     await page.waitForFunction(() => {
       const row = [...document.querySelectorAll('.audio-settings__diag-row')].find((r) => r.querySelector('span')?.textContent === 'engine');
       const text = row?.querySelector('b')?.textContent;
@@ -381,7 +373,7 @@ try {
     const asio = await page.evaluate(() => /** @type {HTMLInputElement | null} */ (document.querySelector('input[aria-label="Use ASIO low-latency audio"]'))?.checked ?? null);
     const buffer = await page.locator('select[aria-label="Buffer size in frames"]').inputValue();
     return [
-      `switch "${sw.text}" (checked), host ${host}, engine row "${readout}"`,
+      `host ${host}, engine row "${readout}"`,
       cite(owns),
       `opened by itself (not judged): ${opened ? cite(opened) : 'no "running" log line'}; ASIO toggle ${asio}, buffer select ${buffer}`,
     ];
