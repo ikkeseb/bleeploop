@@ -1,5 +1,5 @@
 /**
- * DEV probe: the UI on the native engine, in the real app (`docs/plans/native-engine.md` § Stage 5).
+ * DEV probe: the UI on the native engine, in the real app (`docs/VERIFY.md`, native:engine-smoke).
  * `pnpm native:engine-smoke` launches the ASIO dev app in its own profile, and this page drives the same facades the lanes and the command
  * bar use, reading back through the feed and the DOM:
  *

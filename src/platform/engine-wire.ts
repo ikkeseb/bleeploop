@@ -1,6 +1,5 @@
 /**
- * OWNS: the JSON wire between the UI and the native engine host (`docs/plans/native-engine.md`
- * § Stage 5, Wire): the payloads of the `engine_*` Tauri commands, the `Command` batch the UI sends and
+ * OWNS: the JSON wire between the UI and the native engine host: the payloads of the `engine_*` Tauri commands, the `Command` batch the UI sends and
  * the feed frame it reads back. The Rust mirror is `src-tauri/src/engine_io/wire.rs`; one fixture,
  * `verify/fixtures/engine-wire.json`, holds both sides to the same JSON.
  *

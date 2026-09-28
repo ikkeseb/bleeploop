@@ -8,7 +8,7 @@
  *
  * Four capabilities are DECLARED here, but only THREE of them actually differ per platform:
  *   - PluginHost      — native VST/CLAP hosting (web: stub; tauri: invoke/listen). The real seam.
- *   - EngineHost      — the native audio engine (`docs/plans/native-engine.md`; web: a scriptable fake
+ *   - EngineHost      — the native audio engine (`docs/ARCHITECTURE.md`; web: a scriptable fake
  *                        for probes).
  *   - LogFolder       — the release log's folder, for Help's diagnostics (web: none).
  *   - MidiBackend      — W3C Web MIDI. WebView2 v149 ships it natively and `lib.rs` auto-grants the

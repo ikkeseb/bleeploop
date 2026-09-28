@@ -48,7 +48,7 @@ export const confirmNativeClose: () => Promise<void> = underTauri
   ? tauriConfirmClose
   : async () => {};
 
-// ── The engine's command queue (`docs/plans/native-engine.md` § Stage 5) ─────────────────────────────
+// ── The engine's command queue ─────────────────────────────────────────────────────────────────────
 
 let outbox: EngineCommand[] = [];
 

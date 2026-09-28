@@ -1,7 +1,7 @@
 /**
  * DEV probe: where takes land against the click on the native engine, in the real running app, through
  * a physical loopback cable (an interface output wired into an input). The cable is a player who hits
- * every click exactly as it leaves the interface. The bar it serves is `docs/plans/native-engine.md` § Stage 5, "Parity checklist".
+ * every click exactly as it leaves the interface. Its bars: `docs/VERIFY.md`, native:engine-loopback.
  *
  * The engine starts a take the driver's input + output latency, the live effect's latency and the master
  * limiter's pre-delay after its downbeat (`ProcessContext::align_frames`, lf-engine `api.rs`), so a

@@ -1,38 +1,42 @@
 # BleepLoop — Architecture
 
-A standalone Windows desktop app for instant musical jamming: an **instrument host** (two
-native-VST slots + six built-in Web Audio synths) sitting over an **RC-505 MK II–style
-5-track looper**. Built on **Tauri v2** (Rust backend + web frontend).
+A standalone Windows desktop app for instant musical jamming: an **instrument host** (two native
+plugin slots + six built-in synths) sitting over an **RC-505 MK II–style 5-track looper**, all in
+**one native audio engine**. Built on **Tauri v2**: Rust for the engine and the plugin hosts, a
+WebView2 frontend for the UI.
 
-## The load-bearing idea: a thin capability boundary
+## The load-bearing idea: one engine, a UI that only asks
 
-Native VST hosting is the only thing that *forces* Tauri/Rust — everything else (synths,
-looper, FX, MIDI, keyboard, waveforms) is pure Web Audio / TypeScript. So the whole
-frontend is built and verified **standalone in a browser** (`pnpm dev`, port 1420) with
-**zero compile-time or runtime dependency on Tauri or Rust**, and the native shell is
-layered on later without a frontend rewrite.
+Every sample is the engine's: the click, the looper, the synths, the FX, the mixer, the limiter and
+the two plugin slots run in ONE device callback, clocked by the audio interface
+(`src-tauri/crates/lf-engine`, pure; its device side `src-tauri/src/engine_io`). The WebView is the
+UI: it sends commands (a batch per gesture, `engine_send`) and reads a feed (~60 frames/s: transport,
+lanes, the grid anchor, the meter, waveform peaks; never PCM). The wire is
+`src-tauri/src/engine_io/wire.rs`, mirrored in `src/platform/engine-wire.ts`. Settings, rig recall
+and MIDI-learn bindings stay in the WebView's storage and are mirrored to native at boot; the engine
+host replays every remembered setting into each new engine (`engine_io/settings.rs`).
 
 `src/platform/` is the **only** place allowed to import `@tauri-apps/*` (enforced by
-`scripts/check-boundary.mjs`, run via `pnpm check:boundary`). It exposes three interfaces
-that `audio/` and `ui/` depend on — never the reverse:
+`scripts/check-boundary.mjs`, run via `pnpm check:boundary`). `ui/`, `session/` and `app/` depend on
+its interfaces, never the reverse (`src/platform/host.ts`):
 
 | Interface | Web impl | Tauri impl |
 |---|---|---|
-| `PluginHost` | stub: `available=false`, six synths fill both slots | `invoke()`/`listen()` → Rust CLAP/VST3 host |
-| `AudioInputSource` | `getUserMedia` → MediaStreamAudioSourceNode | **the same web impl, reused verbatim** |
-| `MidiBackend` | `navigator.requestMIDIAccess` (Chromium/Edge native) | **the same web impl, reused verbatim** |
+| `EngineHost` | a scriptable fake: records every send, emits the frames a probe scripts; not a second looper | `invoke()` + a Tauri Channel → the engine host |
+| `PluginHost` | stub: `available=false` | `invoke()`/`listen()` → the CLAP/VST3 hosts |
+| `MidiBackend` | `navigator.requestMIDIAccess` | **the same web impl, reused verbatim** |
+| `LogFolder` | none | the release log's folder (Help's diagnostics) |
 
-Three interfaces are declared; in practice only **`PluginHost`** differs. `tauriPlatform` is literally
-`{ ...webPlatform, kind: 'tauri', pluginHost: tauriPluginHost }` — WebView2 v149 has native Web MIDI
-(`lib.rs` auto-grants the MIDI/microphone permission kinds to the app's own origin) and `getUserMedia` works inside it, so neither needed a native
-path. There is no native MIDI shim: neither `tauri-plugin-midi` nor `midir` is in `Cargo.toml`.
+MIDI arrives through Web MIDI: WebView2 has it natively (`lib.rs` auto-grants the MIDI permission to
+the app's own origin). The engine's native MIDI (midir, `engine_io/midi`) is built and off: WinMM
+input ports are exclusive, so Web MIDI and native MIDI cannot hold one controller at once.
 
-Runtime selection: `isTauri() ? tauriPlatform : webPlatform`. `@tauri-apps/api` is pure JS,
-so installing it now is safe — `isTauri()` simply returns false in a browser.
+The browser build (`pnpm dev`) renders the whole UI and is silent: with no engine behind it,
+`src/main.tsx` hides the AudioContext constructors while the app loads (Tone would otherwise open an
+output stream). The DEV engine fake (`window.__lfEngineFake`) is the seam every browser probe drives.
 
-**Audio buffers NEVER cross this boundary as PCM.** Native VST audio reaches the Web Audio
-graph only as an *AudioNode* (MediaStream or a SharedArrayBuffer ring), never as
-IPC-serialized samples (latency/jitter/drift would be unacceptable).
+**Live audio NEVER crosses this boundary as PCM.** A session save's snapshot does, once, off the RT
+path (`EngineHost.snapshot` / `loadSession`).
 
 ## Stack
 
@@ -40,58 +44,62 @@ IPC-serialized samples (latency/jitter/drift would be unacceptable).
   runtime, no VDOM. The 60 fps canvas hot path **bypasses framework reactivity** entirely
   (one `requestAnimationFrame` loop reading a plain mutable state object); signals are
   reserved for low-frequency chrome (transport mode, track LEDs, tempo, FX labels).
-- **Tone.js 15.1.22** under a thin `AudioEngine` facade — synth voices, the
-  "Tale of Two Clocks" lookahead transport, and FX classes, on *our* shared AudioContext
-  (not lock-in; raw nodes interop via `Tone.getContext().rawContext`).
-  Built-in poly synths own bounded reusable voice pools so release tails cannot drop new attacks.
-  The mono bass uses last-held-note priority. Input ownership distinguishes MIDI ports/channels and
-  individual pointers; releasing one owner cannot stop another owner's held note.
-- **ringbuf.js 0.4.0** — wait-free SPSC SharedArrayBuffer ring for AudioWorklet→main PCM.
+- **Rust:** lf-engine (rtrb rings; the synths, FX, reverb and limiter ported from Tone 15.1.22 on
+  Blink and null-tested against its renders, `src-tauri/crates/lf-engine/src/dsp/mod.rs`; RustFFT),
+  cpal 0.18.1 (pinned; ASIO a cargo opt-in feature), clack-host for CLAP and `vst3` for VST3.
+- **Tone.js 15.1.22** renders only the export's wet master, on an `OfflineContext`
+  (`src/session/render.ts`, `offline-fx.ts`), until that render is ported to lf-engine: its FX may
+  sound unlike the engine's.
 
 ## Audio architecture
 
-Wet export builds a separate `OfflineContext` and passes it explicitly to every FX node.
-It never swaps Tone's global context across an async operation. Editable stems use Float32 WAV;
-the flattened stereo master remains PCM16.
+The bus topology is `src-tauri/crates/lf-engine/src/engine.rs`'s header; the engine's rules are its
+crate briefing (`src-tauri/crates/lf-engine/src/lib.rs`); the device side's are
+`src-tauri/src/engine_io/mod.rs`. In short:
 
-One shared `AudioContext({ latencyHint: 'interactive' })`, created lazily on first user
-gesture; `Tone.setContext(ctx)` is called **before any Tone node** (asserted in
-`engine.ts`). Master graph:
+- **Master bus:** each lane through its FX chain, the shared reverb bus, the instruments (built-in
+  or a plugin slot's) and the click, × master volume → the master limiter → out.
+- **Live input:** each slot's input → the slot while it is live (an effect, or dry when empty) → the
+  wet signal; the input sends (ECHO, REVERB, RING MOD) render wet only from it. The monitor (wet +
+  sends) joins the output after the limiter under the same master volume: unlimited, and without the
+  limiter's pre-delay. The record tap is the wet signal, aligned, plus the sends and the instruments.
 
-```
-synths (Tone) ── instrumentBus ─┐
-mic/line (getUserMedia) ────────┴─ looperInputBus ─┬─ masterGain ─ limiter ─ destination  (audible)
-                                                  └─ recordTap   (SILENT record-only mirror)
+- **One clock, no trim:** a lane plays loop position `(f - anchor) mod master` at device frame `f`;
+  a take starts the driver's reported input + output latency (+ the largest live effect's latency +
+  the limiter's pre-delay) after its downbeat. There is no user-facing record trim (D18).
+- **Frame-identical lanes by construction:** every committed lane is one master long, in integer
+  frames; a later take longer than the master multiplies it and the other lanes tile out to it. State
+  per lane: EMPTY → RECORDING → PLAYING ⇄ OVERDUBBING, plus STOPPED.
+- **FX (per lane, fixed order, each bypassable):** Filter → Pitch → Stutter → Delay, with a reverb
+  send into one shared reverb bus. Stutter phase and delay divisions follow the beat grid's origin (set
+  by the first take, an import or an idle restart), which a multiply leaves in place.
+- **END STOP** (optional): a stop waits for the next master-loop boundary; a second press stops at
+  once. **RETAKE** (optional): a take whose length is known at arm slides its window one pass forward
+  at each window end instead of committing; the stop keeps the last complete pass, and REC on another
+  lane approves it and hands the recorder over on the pass edge.
 
-plugin worklet ─ gain ─┬─ recordTap                         (record; always full)
-                        └─ webMonitorGain ─ masterGain       (audible; muted for native monitor)
-```
+**Output headroom:** the master limiter is a literal port of the Web Audio compressor the app used
+before (E6), a finite-ratio compressor, not a guaranteed 0 dBFS ceiling: an offline 48 kHz render of a
+440 Hz sine at amplitude 5 peaked at 1.116 after it. Summed lanes can therefore clip at the sink; gain
+staging remains necessary, and a true ceiling needs an explicit distortion/latency choice and another
+latency measurement. The live wet signal joins after the limiter and is not limited.
 
-Three load-bearing details: `recordTap` is a
-**separate silent branch** off `looperInputBus` (not an annotation on the audible edge) and is where
-the looper captures; a hard-knee `DynamicsCompressor` **limiter** sits between `masterGain` and
-`destination`, so loops are captured pre-compressor while playback receives gain reduction; and plugin
-wet does **not** join `instrumentBus` — it connects straight to `recordTap` for record plus a
-separately-muteable `webMonitorGain → masterGain` for audible, which is how arming the native monitor
-silences the web path without touching the record tap.
-
-**Output headroom:** `makeMasterLimiter` is a finite-ratio compressor, not a guaranteed 0 dBFS ceiling.
-An offline 48 kHz render of a 440 Hz sine at amplitude 5 peaked at 1.116 after compression.
-Summed tracks can therefore clip at the sink. Gain staging remains necessary; a true ceiling needs
-an explicit distortion/latency choice and another latency measurement. Capture and per-track volume
-(`looper.setVolume`, mute via `looper.setMute`) sit upstream of the compressor.
+**Session files** (`src/session/`): export writes a zip of Float32 WAV stems, a PCM16 wet master and
+`session.json`; import takes one back while every lane is EMPTY. The PCM comes from `engine_snapshot`
+and goes back through `engine_load_session` (the bytes: `src/platform/engine-wire.ts`). The wet master
+is rendered offline on Tone (above), with an explicit `OfflineContext` passed to every FX node, never
+Tone's global context swapped across an async operation.
 
 **Session recovery:** committed track audio, mix settings and PLAYING/STOPPED state round-trip through
-the archive. Legacy missing state and OVERDUBBING restore as PLAYING. Autosave polls every 500 ms and
-saves once the committed loops have held still for two seconds, also while a take records or a layer
-sums (a lane mid-overdub is saved as its loop before the layer); an abrupt crash inside that window can
-lose the latest committed change. The engine cannot resample, so recovery keeps one jam per sample rate
-(`latest` plus `kept-<rate>`) and a launch restores its own rate's. Only the player's clear that
-emptied the looper deletes one: an engine rebuilt at another rate, a fault or a WebView reload leaves
-empty lanes that keep it (rules: the header of `src/audio/autosave.ts`).
-Orderly native close flushes before exit. Recovery is not a synchronous durability guarantee.
+the archive. Legacy missing state and OVERDUBBING restore as PLAYING. Autosave saves once the committed
+loops have held still, also while a take records or a layer sums (a lane mid-overdub is saved as its
+loop before the layer); an abrupt crash inside that window can lose the latest committed change. The
+engine cannot resample, so recovery keeps one jam per sample rate and a launch restores its own
+rate's; only the player's clear that emptied the looper deletes one (rules: the header of
+`src/session/autosave.ts`). Recovery starts once a device runs. Orderly native close flushes before
+exit. Recovery is not a synchronous durability guarantee.
 
-**Tone recall (engine mode):** a tone is a plugin's saved state, one per slot and plugin identity
+**Tone recall:** a tone is a plugin's saved state, one per slot and plugin identity
 (format, path, id), so the same plugin in both slots keeps two tones; owned by
 `src-tauri/src/host/tone.rs`, restored only inside a load, before activation. A load that
 could not restore its tone never writes the plugin's defaults over it until the player changes
@@ -114,111 +122,89 @@ ASIO stream build. Upstream note: asio-sys 0.3 passes an uninitialised `ASIODriv
 (the SDK's application window handle) to the driver's `init`; a driver that uses it sees an
 indeterminate value.
 
-- **Looper capture:** getUserMedia (EC/NS/AGC off) → selected input channel → centred mono →
-  `capture` AudioWorkletNode whose `process()` publishes each 128-frame quantum WITH its absolute
-  render-frame timestamp in one complete ring packet (no allocation, no per-quantum postMessage). An explicit Ch N pick
-  requests enough discrete lanes and routes only ChannelSplitter output N; auto keeps the legacy
-  advisory-mono/sum path. Main thread drains the ring for the record buffer + incremental min/max
-  waveform peaks. Recording windows use those timestamps, including compensated overdub punch-in/out;
-  main-thread drain timing cannot move a take. Dropped capture packets reject the affected take or layer.
-  Timing probe: `verify/probes/capture-clock.mjs`.
-- **Playback/overdub:** per-track AudioBuffer via AudioBufferSourceNode (`loop=true`),
-  started/stopped at quantized absolute `currentTime`. Overdub = double-buffer + sample-
-  aligned source swap at the next `loopEnd`.
-- **Frame-identical tracks by construction:** looper master-loop length is stored in **integer
-  frames**; later tracks commit exactly `masterLengthFrames` (a shorter whole-bar take is tiled across
-  the master), so all tracks are frame-identical and cannot drift relative to each other. State machine per track: EMPTY → RECORDING → PLAYING ⇄
-  OVERDUBBING, plus STOPPED.
-- **Musical stop:** optional END STOP schedules playing sources at the next master-loop boundary;
-  a second press stops immediately. The click shares the final activity deadline. Capture stop/commit
-  behavior is unchanged.
-- **RETAKE:** optional; a take whose length is known at arm (FIXED first take, any later take) slides
-  its capture window one pass forward at each window end instead of committing, setting the finished
-  pass aside. The stop gesture keeps the last complete pass; REC on another lane also approves and
-  hands the recorder over on the pass edge.
-- **FX (per track, fixed order, each bypassable):** Filter → PitchShift → Stutter → Delay →
-  Reverb. Stutter phase and delay divisions use the looper's explicit frame-derived grid, also supplied
-  by the offline renderer. On the engine that grid's origin is the beat grid's (set by the first take,
-  an import or an idle restart), which a multiply leaves in place, so a dotted STUTTER keeps its phase
-  across one (`Looper::grid_origin`). Pitch via Tone.PitchShift only (no offline HQ/WSOLA mode). Reverb defaults to one
-  shared send bus (or algorithmic) — not five ConvolverNodes — to protect WebView2 CPU.
-
 ## Cross-cutting invariants (do not violate)
 
 **This numbered list is THE numbering.** Source comments cite these by number ("invariant 6"), and
 `AGENTS.md` carries the same titles in the same order — if the two diverge, every in-code citation
 silently points at the wrong rule. `verify/guards/docs.mjs` fails when they do.
 
-1. **The Web Audio `AudioContext` is the single tempo/quantization authority.** Every grid-timed
-   event is scheduled on ctx time. The native P11 cpal monitor is a second audible path by design,
-   clocked by the interface (the capture callback wakes the plugin producer), never a second tempo
-   authority.
-2. **Never touch `Tone` before the engine has run `setContext`.** No `getTransport()`, no Tone node
-   construction, until `engine.ctx` exists — `clock.ts` routes all transport access through a `tp()`
-   helper that touches `engine.ctx` first. (This silently broke the P3 metronome once.)
-3. **COOP `same-origin` + COEP `require-corp`** on both Vite (done, P0) and the Tauri asset
-   protocol (P7) → `crossOriginIsolated` → SharedArrayBuffer. Ship a postMessage-batched
-   fallback if isolation is ever unavailable.
-   - **P9 native-audio transport (verified on WebView2 v149, P9.0):** plugin PCM crosses
-     Rust→renderer via WebView2 `CreateSharedBuffer`/`PostSharedBufferToScript` — OS shared memory
-     that surfaces in JS as a **regular `ArrayBuffer`** (a *separate* mechanism from
-     `crossOriginIsolated` SAB; both are needed, on different hops). **`Atomics` are unsupported on
-     that non-shared ArrayBuffer in Chromium 149**, so the ring uses plain ordered reads on x86-64 TSO
-     + Rust-side release stores (spike-proven). The buffer is transferred to the `plugin-pcm-source`
-     worklet, which reads it on the render thread with its mapping live (measured 2026-09-24): no
-     main-thread step sits in the path. PCM never crosses as IPC samples — native audio reaches Web
-     Audio only as an AudioNode.
-4. **`?worker&url`** for all first-party TS worklets (forces TS→JS transpile + a plain URL
-   for `addModule`). Bare `?url` ships un-transpiled TS; `?worker` wraps an IIFE for
-   `new Worker()`. Prebuilt JS worklets load via `?url`/`/public`.
-5. **No allocation in `AudioWorkletProcessor.process()`** — pre-allocate in the constructor.
+1. **The engine's device-frame clock is the single tempo/quantization authority.** Every grid-timed
+   event (a command, a beat, a loop boundary, a take's window) lands on an absolute frame of the output
+   callback's counter; nothing in the WebView keeps time. The UI extrapolates the playhead from the
+   feed's anchor for display only.
+2. **Commands and events cross the RT boundary only through rtrb rings.** A full event ring drops and
+   counts; a full command table leaves the rest in the ring for the next block. Nothing blocks.
+3. **The engine alone owns musical state: the UI sends commands and reads the feed.** A command is
+   judged when it lands, on the engine's state, never on what the UI last saw; the feed carries the
+   outcome. Live audio never crosses the platform boundary as PCM (a session save's snapshot does,
+   once, off the RT path).
+4. **Plugin lifecycle runs off the RT thread, with the slot bypassed.** Load, activate, restart and
+   teardown run on the slot's owner thread; the callback crossfades a unit in and out and hands it
+   back on a ring, never drops one (a drop frees memory and calls into the plugin's DLL). An effect
+   slot passes dry meanwhile, an instrument slot is silent; loops and click never wait.
+5. **The RT path (engine callback, plugin process) never allocates, logs, blocks or waits on a
+   lock.** The callback only `try_lock`s the engine (a miss plays silence and counts); buffers are
+   allocated and touched before the first callback; failures latch counters and fault bits that a
+   non-RT thread reports. Tests run every `process` under `assert_no_alloc`; in DEV builds the device
+   callback counts any allocation (`src-tauri/src/host/rt_alloc.rs`).
 6. **No Solid signal WRITES from audio-path timers, and no signal READS in the 60 fps draw loop** —
    rAF + a plain mutable object only. A capture drain writing a fresh object into a track signal 40×/s
-   cost ~200 full-document layout events per 5 s of recording. Both halves are the same mistake, and `engineState.loopPhasePlain`
-   is the pattern to copy; the write-half fix (measured 200 → 1 layouts per 5 s) is `state.ts`'s
-   `sameTrack` equality + the `displayState`/`coreGlyph` memos in `Looper.tsx`.
+   once cost ~200 full-document layout events per 5 s of recording. The pattern: the feed handler
+   writes one plain mirror and writes a signal only when its value changed; the waveform rAF reads the
+   mirror (`src/ui/state/engine-store.ts`).
 7. **All `@tauri-apps/*` confined to `src/platform/`** — CI-guarded.
 
 ## Decided: one native audio engine (2026-09-24)
 
-Replaces "the looper stays in Web Audio". Click, looper, synths, FX, mixer, limiter, MIDI and plugin
-processing move into ONE Rust engine clocked by the audio device; the WebView becomes UI only and
-reads a state feed (phase, track states, levels, waveform peaks), never PCM. Stages and gates:
-`docs/plans/native-engine.md`; its owner decisions are `STATUS.md` E1–E7. Until the flip (its Stage 6)
-the other sections describe the shipping code and still bind.
+Replaced "the looper stays in Web Audio". Click, looper, synths, FX, mixer, limiter and plugin
+processing run in ONE Rust engine clocked by the audio device; the WebView is UI only and reads a
+state feed, never PCM. Shipped as the default in v0.1.0; the Web Audio path was deleted after the
+engine lap.
 
-Why the earlier rejection no longer holds:
+Why the earlier rejection no longer held:
 
-- The synths and FX move too, null-tested against reference renders of today's Tone code, so no
-  compensation moves to a synth ingress.
+- The synths and FX moved too, null-tested against reference renders of the Tone code, so no
+  compensation moved to a synth ingress.
 - No `AudioContext` has to be clocked from outside: the engine owns the device callback.
-- The looper state machine moves to Rust with one owner and is re-verified offline by `cargo test`
-  (scripted renders, the rig-guard scenarios as spec, a golden-jam port), not by ear.
-- The measured pain is real: through the loopback cable a take lands ~65 ms late at trim 0, spreads
-  per launch and drifts inside a take (`docs/VERIFY.md`, the native:loopback baseline). It comes from
-  two clocks and the WebView's unreported output latency; a one-clock engine removes both, and the
-  wet master becomes one stream that can be shared.
-- Mac development of the audio core waits for a Rust toolchain there (later).
+- The looper state machine has one owner in Rust and is verified offline by `cargo test -p lf-engine`
+  (scripted renders, the old rig-guard scenarios as spec, a golden-jam port), not by ear.
+- The pain was measured: through the loopback cable a Web Audio take landed ~65 ms late at trim 0,
+  spread per launch and drifted 0.7–3.2 ms/min inside a take. It came from two clocks and the
+  WebView's unreported output latency; one clock removes both, and the wet master is one stream that
+  can be shared.
 
 What remains is the driver's own report: alignment takes the device's reported input + output
-latency, and drivers can under-report converter latency. The plan's Stage 1 measures that premise
-before any engine code; a failed premise stops the plan and goes back to the owner.
+latency, and a driver can under-report its converters. What stays true: on an arbitrary Windows
+machine (WASAPI-shared, no ASIO) absolute latency is high and its report cannot be trusted.
 
-What stays true: on an arbitrary Windows machine (WASAPI-shared, no ASIO) absolute latency is high
-and `ctx.outputLatency` cannot be trusted in either direction.
+### Measured premise
+
+Measured before any engine code (the premise spike: `pnpm native:spike`, `app.exe
+--probe-engine-spike` and `--probe-share`, `src-tauri/src/host/engine_spike.rs`,
+`src-tauri/src/share_probe.rs`), then on the engine's own open path (`app.exe --probe-engine asio 128
+--lag`). Rig: the dev PC, Scarlett 2i2 3rd gen at 44.1 kHz, a cable from line out R into input 2; a
+64-frame chirp played out and captured on one frame counter, cross-correlated offline. A virtual cable
+cannot stand in: it measures Windows' buffering, not the driver's report.
+
+| Bar | Result on the rig |
+|---|---|
+| One callback (ASIO): input and output in one bufferSwitch on every cycle | holds at 64/128/256 |
+| The driver's report alone puts a take on the grid: \|lag − (inLat + outLat)\| ≤ 1 ms, dry input | within 0.1 ms at 64/128/256 — once the driver is opened at another block size first: reopened at the size it last ran, it lands about two periods late (`src-tauri/src/engine_io/cpal_driver.rs`) |
+| One clock, stable across launches: spread ≤ 1 frame per run | holds; between sessions the landing moved 5 frames at 128 |
+| Nothing drifts inside a take: ≤ 1 frame over 10 min | 0.000 at 128 and 256, +0.9 frames at 64 |
+| No hidden buffering on the in-callback plugin path: round trip = lag + plugin latency | holds (Pro-Q 3, zero-latency mode) |
+| Round trip at most half the Web Audio path's 44.4 ms at 256 | 8.1 ms at 64, 15.1 ms at 128, 26.8 ms at 256 (fails at 256 on this driver's report; accepted by the owner: 256 is the everyday DAW setting) |
+| An amp-sim leaves room: 120 s at 128 and 256, 0 gaps, 0 xruns, 0 allocs, block p99.9 ≤ 50 % | Archetype Petrucci X: p99.9 21 % and 19 %, max 28 % and 21 % of the period |
+| WASAPI takes align from timestamps | no: on the Focusrite WDM driver takes land +211 to +229 ms late against the engine's align. ~35–44 ms is an endpoint clock term cpal's stamps miss; the rest sits in the driver, which reports none of it, and a per-device constant would miss by ±9 ms between launches. WASAPI takes are documented as unaligned on such drivers; ASIO is the play path (STATUS E9) |
+| A muted mirror is capturable (Share output) | no: process loopback captures after the session's mute and volume, so Share output goes to a user-picked endpoint (STATUS E2) |
 
 **The measurement gate.** Replacing native monitoring or changing its buffering targets requires
 both, before and after the change:
 
-- **L1 — the rig protocol:** a stable compensation `C` per take, then the saved trim, re-confirmed at
-  buffer 64/128/256 and on an overdub. On the native engine L1 is the plan's Stage 1 A2–A4 bars at
-  64/128/256 (no C, no trim).
+- **L1 — the rig protocol:** the alignment, spread and drift bars above at 64/128/256 (no trim).
 - **L2 — a physical loopback measurement:** play the click out, capture it through the working
-  guitar input, cross-correlate scheduled against heard (`pnpm native:loopback`; on the engine, the
-  plan's Stage 1 probe, and `pnpm native:engine-loopback` for a take in the running app).
-
-At the flip `record-latency.ts` and the compensation sites in `looper/machine.ts` are DELETED, not
-ported.
+  guitar input, cross-correlate scheduled against heard: the premise spike, and `pnpm
+  native:engine-loopback` for a take in the running app (baseline: `docs/VERIFY.md`).
 
 ## Known fragile piece (matches the brief's caveat)
 

@@ -12,7 +12,7 @@ memory or upstream docs. Versions are the ones actually resolved in this repo
 | Package | Version | License | Notes |
 |---|---|---|---|
 | [solid-js](https://github.com/solidjs/solid) | 1.9.13 | MIT | UI reactivity runtime |
-| [tone](https://github.com/Tonejs/Tone.js) | 15.1.22 | MIT | Web Audio synth/transport layer |
+| [tone](https://github.com/Tonejs/Tone.js) | 15.1.22 | MIT | the export's offline wet-master render |
 | [@tauri-apps/api](https://github.com/tauri-apps/tauri) | 2.11.0 | Apache-2.0 OR MIT | Tauri JS bindings |
 
 ### Geist and Geist Mono — SIL Open Font License 1.1

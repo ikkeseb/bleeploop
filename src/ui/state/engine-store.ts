@@ -42,9 +42,9 @@ import { engineInputLive, toggleEngineInput } from './native-io';
 import { notifyError, notifyInfo } from '../../notify';
 
 /**
- * OWNS: the UI's view of the native engine (`docs/plans/native-engine.md` § Stage 5, UI side): the feed
- * reducer, the device that runs, and the `looper` / `clock` / `master` shapes the UI reads (through
- * `audio.ts` beside this file), built on engine commands and the feed.
+ * OWNS: the UI's view of the native engine (invariants 3 and 6): the feed reducer, the device that
+ * runs, and the `looper` / `clock` / `master` shapes the UI reads (through `audio.ts` beside this
+ * file), built on engine commands and the feed.
  *
  * The engine owns the musical state: lanes, the transport (master, BPM and its lock), the beat and the
  * selection arrive on the feed, and nothing here predicts them. It does not echo settings, so this store
@@ -1049,7 +1049,7 @@ function setBpm(n: number): void {
   if (clamped !== bpm()) sendEngine({ SetBpm: clamped });
 }
 
-// Tap tempo stays in the UI (`docs/plans/native-engine.md` § Stage 2).
+// Tap tempo stays in the UI: it averages the taps and sends SetBpm.
 const TAP_RESET_MS = 2000;
 const TAP_MAX_HISTORY = 8;
 let tapTimes: number[] = [];

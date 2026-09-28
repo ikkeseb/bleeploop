@@ -16,7 +16,7 @@ keyboard fill the other layers; the computer keyboard is the fallback.
 - Not an amp sim: bring your own plugin.
 - Not a low-latency MIDI host: MIDI arrives through WebView2's Web MIDI, a few milliseconds behind
   what a DAW would see.
-- Not a web app: the browser build is a verification rig.
+- Not a web app: the browser build is a silent verification rig.
 - Not cross-platform: Windows only.
 
 > Early release, Windows only: the installer is on the
@@ -86,8 +86,8 @@ keyboard fill the other layers; the computer keyboard is the fallback.
 
 ## Getting started
 
-The frontend runs on its own in a browser with no native dependencies. Plugin hosting and native
-audio I/O come from the Tauri shell around it.
+The frontend renders on its own in a browser with no native dependencies, silent: the sound, plugin
+hosting and audio I/O are the native engine's, in the Tauri shell around it.
 
 ### Web frontend only
 
@@ -97,7 +97,7 @@ audio I/O come from the Tauri shell around it.
 git clone https://github.com/ikkeseb/bleeploop.git
 cd bleeploop
 pnpm install
-pnpm dev          # http://localhost:1420
+pnpm dev          # http://localhost:1420, the UI only, silent
 ```
 
 ### Full native app
@@ -124,15 +124,15 @@ pnpm dev:asio     # full app, ASIO + native sample rate
 
 | Command | What it does |
 |---|---|
-| `pnpm dev` | Vite dev server, frontend only |
+| `pnpm dev` | Vite dev server, frontend only (silent) |
 | `pnpm dev:asio` | Full app, ASIO low-latency + native sample rate |
 | `pnpm dev:wasapi` | Full app, WASAPI (no ASIO SDK needed) |
 | `pnpm build` | `tsc --noEmit && vite build`, which the Tauri bundle depends on |
 | `pnpm build:app` | Standalone release exe with ASIO (`tauri build --no-bundle --features asio`) |
-| `pnpm check` | Typecheck, oxlint, the capability-boundary check and the `verify/` guards. Also the pre-push hook |
-| `pnpm verify` | Deterministic guards for the audio core's pure logic, no browser or hardware |
+| `pnpm check` | Typecheck, oxlint, the capability-boundary check, the `verify/` guards and the engine's tests (skipped without cargo). Also the pre-push hook |
+| `pnpm verify` | Deterministic guards for the frontend's pure logic, file formats, the engine wire and the docs; no browser or hardware |
+| `pnpm test:engine` | The engine's tests (`cargo test -p lf-engine`): looper, click, grid, synths and FX rendered offline, frame by frame |
 | `pnpm probe <name>` | One browser probe against the real app on its own Vite server; `--ci` runs every CI probe, `--list` names them |
-| `pnpm verify:jam` | The golden jam. Drives the real app in a headless browser and checks the recorded grid frame by frame (~95 s, not part of `pnpm check`) |
 | `pnpm rust:check` | `cargo check` without and with ASIO, `cargo test`, then the check that keeps the engine crate free of host, device and plugin dependencies (Windows; the ASIO step needs the SDK) |
 | `pnpm native:smoke` · `native:survey` · `native:swap` · `native:recall` | Launch the full app with a DEV plugin probe, print its verdict and stop (Windows, installed plugins) |
 
@@ -147,26 +147,25 @@ One native audio engine, clocked by the audio device, owns the sound: looper, cl
 limiter and the plugin slots run in the driver's callback (`src-tauri/crates/lf-engine`, the device
 side in `src-tauri/src/engine_io`). The WebView is the UI: it sends commands and draws a state feed.
 `src/platform/` is the only directory allowed to import `@tauri-apps/*`, and `pnpm check:boundary`
-enforces that. The earlier Web Audio path is still in the tree as a fallback (Audio Settings → the
-engine switch, applied on restart) and is what the browser build runs; it goes in a later release
-(`docs/plans/native-engine.md`).
+enforces that. The browser build renders the UI and is silent.
 
 Full design decisions and invariants: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 Live project state and open threads: [`STATUS.md`](STATUS.md).
 
 ## Verification
 
-There is no unit-test runner. Two layers cover the audio core:
+There is no JS unit-test runner. Three layers:
 
-- `pnpm verify` (a few seconds, part of `pnpm check`) runs the real source with no browser,
-  `AudioContext` or hardware: pure modules (looper frame math, latency compensation) are imported
-  directly, and the looper, capture window and clock run on a fake Web Audio layer that renders
-  quanta and fires the app's timers on the audio clock.
-- `pnpm verify:jam` (~95 s, outside `pnpm check`) is the golden jam. It drives the real app in a
-  headless browser, records impulses on the beat grid and checks the committed loop frame by frame.
-  Focused browser probes (`pnpm probe`, in CI) also cover input ownership, session round trips,
-  recovery failures and plugin lifecycle transitions; see [`verify/README.md`](verify/README.md). The `pnpm verify` guards
-  never reach a real audio graph, browser or WebView2.
+- `cargo test -p lf-engine` (`pnpm test:engine`, part of `pnpm check`) renders the engine offline:
+  every looper transition, the click and grid, a golden-jam port and property tests, bit-identical
+  across block sizes, and the synths and FX null-tested against reference renders of the Tone code
+  they replaced.
+- `pnpm verify` (a few seconds, part of `pnpm check`) runs the frontend's real source in plain Node:
+  pure modules, file formats and the engine wire.
+- Browser probes (`pnpm probe`, in CI) drive the real UI in headless Chromium against a scripted
+  engine fake: a gesture sends the right command, a feed frame shows the right screen; they also
+  cover input ownership, session round trips and recovery. See [`verify/README.md`](verify/README.md).
+  None of these reaches a real device, WebView2 or anything audible.
 
 Feel, the native half and real rig latency are verified by running the app and measuring it, not by
 reading code or trusting a typecheck. [`docs/VERIFY.md`](docs/VERIFY.md) explains how: the browser
@@ -177,7 +176,7 @@ harness, the `window.__lf` debug hook, audio measurement and the `tauri dev` rou
 The source is MIT, see [`LICENSE`](LICENSE). A binary built with `--features asio` links the
 Steinberg ASIO SDK and is GPLv3 as a whole. [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md)
 lists the dependency licences, read from the installed packages and crates, and `licenses/` holds
-the GPLv3 and MPL-2.0 texts that ship with the installer.
+the licence texts that ship with the installer.
 
 <img src="src/assets/third-party/ASIO-compatible-logo-Steinberg-TM-BW.jpg" alt="ASIO Compatible" width="72" />
 

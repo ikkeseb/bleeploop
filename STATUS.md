@@ -2,9 +2,8 @@
 
 The owner's ear, eye or decision on the PC: ONE ordered lap plus the decisions that block work. Taste:
 `docs/backlog-taste.md` (not a gate). Non-gate threads: `AGENTS.md` § Open threads. Tester reports:
-`docs/plans/tester-feedback.md` (not rig stops; machine proofs do not close them). Since v0.1.0 the
-app runs on the native engine by default (`docs/plans/native-engine.md` § Stage 5); this is the
-engine lap. The web path stays one switch away (Audio Settings → engine) until Stage 6.
+`docs/plans/tester-feedback.md` (not rig stops; machine proofs do not close them). The app runs one
+native audio engine (`docs/ARCHITECTURE.md`); this is the engine lap.
 
 **Machine verification, Windows, 2026-09-26 (engine mode):** `pnpm rust:check` 4/4 (438 tests), `pnpm check`
 (40 guards) and `pnpm build` green; the browser probes 43/43 (`pnpm probe --ci`); on the rig (Scarlett
@@ -83,11 +82,11 @@ A stop dies when it passes; past 10 stops, consolidate or flag it (AGENTS.md). D
    live at once, each on its own input, both heard and recorded.
    AUTO REC: a muted-guitar noise floor must not arm, a real attack must (sensitivity, onset, feel).
 8. **Session files + Share output.** Export, CLEAR ALL, import the zip: the loops come back on the
-   grid and the amp-sim sounds as it did at the export (a slot holding another plugin gets a toast); open a stem and the master in a DAW (the master's FX come from the web path's render: close
-   enough?). Kill the app mid-jam → relaunch restores it. Share output → OBS, Chrome and Discord hear
+   grid and the amp-sim sounds as it did at the export (a slot holding another plugin gets a toast); open a stem and the master in a DAW (the master's FX come from the export's offline Tone render:
+   close enough?). Kill the app mid-jam → relaunch restores it. Share output → OBS, Chrome and Discord hear
    the master.
-9. **Synths, FX and WASAPI.** The six synths and the lane FX against the web path (Audio Settings →
-   engine → web audio, restart): same character? Then WASAPI: how much worse is the latency by ear
+9. **Synths, FX and WASAPI.** The six synths and the lane FX against the web path of a v0.1.x
+   release (Audio Settings → engine → web audio, restart): same character? Then WASAPI: how much worse is the latency by ear
    (takes land late there by design, `README.md`)?
 10. **MIDI controller — only if one is plugged (skip otherwise).** Unplug mid-note →
     toast + note release. Mod-wheel vibrato, pitch-bend, CC64 sustain feel.
@@ -106,10 +105,10 @@ Blocked on an owner decision, not on testing. The default column is what happens
 | E4 | Engine import through a native file dialog (`tauri-plugin-dialog`), or the WebView's file picker as today? | the WebView's picker |
 | E6 | A true 0 dBFS ceiling in the ported limiter, or a literal port of today's? | literal port |
 | E8 | Engine sessions: the snapshot's PCM crosses to TS once per save, so today's zip/WAV/recovery code stays (agents' call, 2026-09-26). Keep, or Rust writes the files? | keep |
-| E9 | WASAPI takes land late on drivers that hide their buffering (~215 ms on the Focusrite; `docs/plans/native-engine.md` § Stage 1 W1). Accept as documented, or build the one reported term (~40 ms, invisible on this rig)? | accept |
+| E9 | WASAPI takes land late on drivers that hide their buffering (~215 ms on the Focusrite; `docs/ARCHITECTURE.md` § Measured premise). Accept as documented, or build the one reported term (~40 ms, invisible on this rig)? | accept |
 
-**Answered 2026-09-27:** E10 and E11, yes, both built in engine mode (`docs/plans/native-engine.md`
-§ After the flip). A free later take runs until the press; a stop past its first loop pass keeps the
+**Answered 2026-09-27:** E10 and E11, yes, both built (the lf-engine briefing,
+`src-tauri/crates/lf-engine/src/lib.rs`). A free later take runs until the press; a stop past its first loop pass keeps the
 nearest whole number of loops (the agents' pick: a late press on one loop keeps one, an early press on
 two keeps two), growing the loop through the multiply. ✂ TRIM and the Halve track pedal action keep a
 track's first bars repeated across the loop, one UNDO away.
@@ -129,13 +128,13 @@ E2 is built as its default (Share output to a user-picked endpoint).
   stay built-in only.
 - **D13 — built:** picking a synth or instrument plugin makes its slot the MIDI slot; an effect plugin
   does not, verified by `verify/probes/instrument-routing.mjs`.
-- **D15 — built:** a failed overdub boundary swap keeps the layer and stops the lane, verified by
-  `verify/probes/overdub-timers.mjs --case=swapFail` and `verify/guards/overdub.mjs`.
+- **D15 — gone with the web path:** a failed overdub boundary swap was a Web Audio source failure;
+  the engine has no such swap.
 
 **Answered 2026-09-18:**
 
 - **D2 / D7 — no:** guitar records through the native input, never the mic/line path; no L3 wizard. Per-slot input channels landed 2026-09-28 (`docs/plans/tester-feedback.md` F17).
-- **D3 — built:** the per-take `[rec-comp]` line logs in release too (`record-latency.ts`); the snapshot line is DEV-only.
+- **D3 — gone with the web path's record compensation** (the per-take `[rec-comp]` line).
 - **D4 — stays disabled** (empty-lane right cluster).
 - **D6 — (b):** teach the slot swap in UI/copy (line in `docs/backlog-taste.md`).
 - **D9 — struck** (what was off: unknown).
@@ -150,8 +149,7 @@ A take starts the driver's reported input plus output latency (plus the plugin's
 limiter's pre-delay) after its downbeat (`ProcessContext::align_frames`, lf-engine `api.rs`); there is
 no trim. On the dev rig (Scarlett 2i2, loopback cable) the report holds within 0.1 ms at ASIO 64, 128
 and 256, once the engine opens the driver at another block size first: a relaunch at the size the
-driver last ran otherwise lands about two periods late (`docs/plans/native-engine.md` § Stage 1, Cause
-and fix). Round trip with Pro-Q: 8.1 ms at 64, 15.1 ms at 128, 26.8 ms at 256. In the running app
+driver last ran otherwise lands about two periods late (`docs/ARCHITECTURE.md` § Measured premise). Round trip with Pro-Q: 8.1 ms at 64, 15.1 ms at 128, 26.8 ms at 256. In the running app
 through the cable (`pnpm native:engine-loopback`, six launches): the take lands within 0.12 ms of the
 click at 64, 128 and 256, a loop re-recorded from playback adds no error of its own, and STOP ALL →
 PLAY ALL keeps the click, its accent and the loops in place. A cable is a perfect player; whether a
@@ -169,7 +167,7 @@ guitarist's take feels on the click is this stop.
 ### Stop 5 — reload + editors
 
 - **Same file in both slots:** only the first opener gets an editor (why: the comment at
-  `editorAffinity` in `src/audio/instrument.ts`).
+  `editorAffinity` in `src/ui/state/instrument.ts`).
 - **Editor-to-front:** dropping behind after a click into BleepLoop is intended.
 
 ### Stop 6 — fault paths
@@ -184,6 +182,6 @@ ASIO: yank with loops playing, read the toast, replug and relaunch: the loops co
 ### Stop 8 — session lifecycle
 
 Formats: the zip layout and `session.json` as before (`docs/ARCHITECTURE.md` § Audio architecture);
-on the engine the PCM comes from `engine_snapshot` (`docs/plans/native-engine.md` § Stage 5, Session).
-The master excludes STOPPED tracks, stems include them; import works only while every lane is EMPTY.
+the PCM comes from `engine_snapshot` (`docs/ARCHITECTURE.md` § Audio architecture, Session files).
+The master and the stems both include STOPPED tracks (F26); import works only while every lane is EMPTY.
 Recovery starts once a device runs.
