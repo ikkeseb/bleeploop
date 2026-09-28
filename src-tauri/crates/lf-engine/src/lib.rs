@@ -46,7 +46,9 @@
 //!   slot's latency, from the block after a live flag changes, and the master limiter's pre-delay)
 //!   after its downbeat; every live slot's wet reaches the record tap at that latency (one with less is
 //!   delayed by the difference, heard at once), and an instrument's record path lags it by the input
-//!   side (a plugin instrument's, less its own latency), so its notes land there too. The input sends are wet only and add nothing
+//!   side (a plugin instrument's, less its own latency), so its notes land there too. That live latency
+//!   and each slot's delay hold from a capture's arm to its end ([`slots`]): a change applies once
+//!   nothing captures. The input sends are wet only and add nothing
 //!   to the alignment. There is no user-facing record trim. The synths, FX, input sends and reverbs run
 //!   on the device frame less the frames the device skipped, so their blocks follow each other
 //!   ([`effects`]); the limiter stays on the device frame.

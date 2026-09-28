@@ -11,7 +11,7 @@
 
 use std::cell::Cell;
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, AtomicU8, Ordering::{Acquire, Relaxed, Release}};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicU8, Ordering::{Acquire, Relaxed, Release}};
 use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 use std::time::{Duration, Instant};
 
@@ -77,8 +77,9 @@ pub(crate) enum Side {
 
 /// What one run's callbacks share with the owner.
 pub(crate) struct Run {
-    /// The capture channel each slot reads (`EngineHost::set_slot_input_channel`).
-    pub(crate) slot_channels: [AtomicU32; SLOT_COUNT],
+    /// The capture channel each slot reads (`EngineHost::set_slot_input_channel`), 32 bits a slot in one
+    /// word: a change of both is one store, so no callback reads half of it.
+    picks: AtomicU64,
     /// The owner asks for the fade-out; the output callback answers once the device plays silence.
     pub(crate) fade_out: AtomicBool,
     pub(crate) faded: AtomicBool,
@@ -98,7 +99,7 @@ pub(crate) struct Run {
 impl Run {
     pub(crate) fn new(channels: [u32; SLOT_COUNT]) -> Run {
         Run {
-            slot_channels: channels.map(AtomicU32::new),
+            picks: AtomicU64::new(pack(channels)),
             fade_out: AtomicBool::new(false),
             faded: AtomicBool::new(false),
             fault: AtomicU8::new(0),
@@ -136,9 +137,19 @@ impl Run {
         self.fault.load(Acquire) != 0
     }
 
+    /// Each slot's capture channel, as the owner last set them.
+    pub(crate) fn slot_channels(&self) -> [u32; SLOT_COUNT] {
+        unpack(self.picks.load(Relaxed))
+    }
+
+    /// Set every slot's capture channel at once (the owner; the callbacks read them each block).
+    pub(crate) fn set_slot_channels(&self, channels: [u32; SLOT_COUNT]) {
+        self.picks.store(pack(channels), Relaxed);
+    }
+
     /// Each slot's capture channel on an input with `channels` channels (a pick past them reads the last).
     fn picks(&self, channels: usize) -> [usize; SLOT_COUNT] {
-        std::array::from_fn(|s| (self.slot_channels[s].load(Relaxed) as usize).min(channels - 1))
+        self.slot_channels().map(|c| (c as usize).min(channels - 1))
     }
 
     /// The alignment the callbacks measured so far: (input + output, input), in frames.
@@ -146,6 +157,17 @@ impl Run {
         let (input, output) = (self.in_latency.load(Relaxed), self.out_latency.load(Relaxed));
         (input + output, input)
     }
+}
+
+const _: () = assert!(SLOT_COUNT * 32 <= 64, "every slot's pick fits the one word");
+
+/// Every slot's capture channel in one word, slot `s` in bits `32 s..32 (s + 1)`.
+fn pack(channels: [u32; SLOT_COUNT]) -> u64 {
+    channels.iter().enumerate().fold(0, |word, (s, &c)| word | (c as u64) << (32 * s))
+}
+
+fn unpack(word: u64) -> [u32; SLOT_COUNT] {
+    std::array::from_fn(|s| (word >> (32 * s)) as u32)
 }
 
 /// The median of a run's first `LATENCY_SAMPLES` latency reports, then frozen.
@@ -809,6 +831,15 @@ mod tests {
         assert_eq!(all.quantile(0.999), Some(45));
         assert_eq!(all.max(), Some(LOAD_BINS - 1), "longer than the last bin lands in it");
         assert_eq!(all.since(&all).quantile(0.5), None, "an empty phase has no quantile");
+    }
+
+    #[test]
+    fn every_slots_pick_travels_in_one_word() {
+        let run = Run::new([3, u32::MAX]);
+        assert_eq!(run.slot_channels(), [3, u32::MAX]);
+        run.set_slot_channels([u32::MAX, 0]);
+        assert_eq!(run.slot_channels(), [u32::MAX, 0], "a swap lands whole");
+        assert_eq!(run.picks(2), [1, 0], "a pick past the device's channels reads its last");
     }
 
     #[test]

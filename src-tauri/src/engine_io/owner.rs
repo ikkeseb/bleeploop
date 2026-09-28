@@ -564,9 +564,7 @@ impl<D: Driver> Owner<D> {
     fn set_input_channels(&mut self, channels: [Option<u32>; SLOT_COUNT]) -> Result<(), String> {
         let active = self.active.as_mut().ok_or("no audio device is open")?;
         let resolved = transition::input_channels(active.spec.in_channels, channels, active.spec.in_channels == 0)?;
-        for (pick, channel) in active.run.slot_channels.iter().zip(resolved) {
-            pick.store(channel, Relaxed);
-        }
+        active.run.set_slot_channels(resolved);
         active.request.input_channels = channels;
         Ok(())
     }
@@ -575,8 +573,13 @@ impl<D: Driver> Owner<D> {
     /// reopen may have taken auto for a pick the device lacks).
     fn set_slot_input_channel(&mut self, slot: usize, channel: Option<u32>) -> Result<(), String> {
         let active = self.active.as_mut().ok_or("no audio device is open")?;
-        let pick = active.run.slot_channels.get(slot).ok_or_else(|| format!("no slot {slot}"))?;
-        pick.store(transition::input_channel(active.spec.in_channels, channel, active.spec.in_channels == 0)?, Relaxed);
+        if slot >= SLOT_COUNT {
+            return Err(format!("no slot {slot}"));
+        }
+        // The owner is the only writer: the other slot's pick is the one it last stored.
+        let mut picks = active.run.slot_channels();
+        picks[slot] = transition::input_channel(active.spec.in_channels, channel, active.spec.in_channels == 0)?;
+        active.run.set_slot_channels(picks);
         active.request.input_channels[slot] = channel;
         Ok(())
     }

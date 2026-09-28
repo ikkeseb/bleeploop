@@ -300,9 +300,9 @@ impl Engine {
     }
 
     /// Frames the wet signal lags the input at the record tap: the largest live effect's latency (0 with
-    /// none).
+    /// none), as latched at the last block start (it holds while a capture runs).
     pub fn live_latency(&self) -> Frame {
-        self.rack.live_latency()
+        self.rack.record_latency()
     }
 
     /// While no device runs and the host holds the engine: apply the slot ports' installs and removals
@@ -380,7 +380,12 @@ impl Engine {
             self.hold(cmd.frame.unwrap_or(start).max(start), cmd.command);
         }
         self.rack.begin_block(start, first);
-        let live_latency = self.rack.live_latency();
+        // A capture's alignment is fixed from its arm (AUTO's, from its onset) to its end: the record
+        // compensation holds with it, so no live flag or plugin latency changed meanwhile moves what it
+        // records (a skip or a repeat), and a change reaches both once nothing captures.
+        let open = self.looper.recorder().is_none_or(|(_, start, _)| start.is_none());
+        self.rack.latch_record(open);
+        let live_latency = self.rack.record_latency();
         let align = ctx.align_frames + live_latency + self.limiter.latency() as Frame;
         {
             let mut cx = Cx { now: start, align, clock: &mut self.clock, feed: &mut self.feed, fx: &mut self.fx };
@@ -448,7 +453,6 @@ impl Engine {
                     &mut self.slot_bus[a..b],
                     &mut self.record[a..b],
                     record_delay,
-                    live_latency,
                 );
                 self.slots_done = b;
             }
@@ -459,7 +463,9 @@ impl Engine {
                 self.instruments_done = k_next;
             }
             if self.sends_done < k_next {
-                // Within the chunk's quantum: the rack has rendered the wet signal this far.
+                // Within the chunk's quantum: the rack has rendered the wet signal this far. The sends take
+                // it aligned, so what they record lands with the take; a live slot quicker than the
+                // latched latency hears its own echo that difference late.
                 let (a, b) = (self.sends_done, k_next);
                 if self.input_fx.render(start + a as Frame, &self.aligned[a..b], &mut self.sends[a..b]) {
                     self.sends_sounded = true;
