@@ -12,11 +12,12 @@
 //   engine       Audio Settings' engine switch reads `native` and its engine row names a running device;
 //                the log says the engine owns the device. The device a launch opens by itself is printed,
 //                not judged (a `--fresh` run shows a new user's first launch)
-//   device       ASIO on, input channel `--channel=` (0-based, default 1 = input 2) and buffer
-//                `--buffer=` (default 128) picked in Audio Settings as a user would; the engine row shows
-//                ASIO at that buffer and the log shows the reopen
-//   take         with CLICK on, FIXED 1 bar and MIC live, a press on lane 1's record core takes the lane
-//                armed → rec → play, and its waveform canvas is not flat (lane 3, empty, is the control)
+//   device       ASIO on and buffer `--buffer=` (default 128) picked in Audio Settings as a user would;
+//                the engine row shows ASIO at that buffer and the log shows the reopen
+//   take         with CLICK on, FIXED 1 bar and slot 1 set to Off on input `--channel=` (0-based, default
+//                1 = input 2) and live, as a user takes the input dry in the slot header, a press on
+//                lane 1's record core takes the lane armed → rec → play, and its waveform canvas is not
+//                flat (lane 3, empty, is the control)
 //   feed         something on screen moves with the engine: the beat LEDs, the record-level meter, the
 //                lane-1 playhead. The meter reads the device input, and before the first take the
 //                click is silent (it sounds on a count-in or while the transport runs: lf-engine
@@ -396,12 +397,6 @@ try {
     await page.waitForFunction(() => document.querySelector('input[aria-label="Use ASIO low-latency audio"]')?.closest('label')?.textContent?.includes('low-latency'), undefined, { timeout: 20_000 });
     const driver = await page.locator('select[aria-label="Audio input device"] option').first().textContent();
     must(/focusrite/i.test(driver ?? ''), `the ASIO driver is "${driver}", not the Focusrite (Audio Settings offers no driver pick)`);
-    const channel = page.locator('select[aria-label="Input channel"]');
-    let channelNote = 'the UI offers no channel pick';
-    if ((await channel.count()) === 1) {
-      await channel.selectOption(String(opts.channel));
-      channelNote = `channel "${await channel.locator('option:checked').textContent()}" picked`;
-    }
     const bufferSel = page.locator('select[aria-label="Buffer size in frames"]');
     const bufferWas = await bufferSel.inputValue();
     await bufferSel.selectOption(String(opts.buffer));
@@ -422,7 +417,7 @@ try {
     must(reopen !== null, `the release log shows no ASIO reopen at ${opts.buffer} frames`);
     await closeSettings();
     return [
-      `ASIO ${asioWasOn ? 'already on' : 'turned on'}, driver "${driver}", ${channelNote}, buffer ${bufferWas} → ${opts.buffer}`,
+      `ASIO ${asioWasOn ? 'already on' : 'turned on'}, driver "${driver}", buffer ${bufferWas} → ${opts.buffer}`,
       `engine row "${readout}"`,
       ...(request ? [cite(request)] : []),
       cite(reopen),
@@ -439,14 +434,23 @@ try {
     if ((await pressed('Fixed take length')) !== 'true') await page.locator('button[aria-label="Fixed take length"]').click();
     await page.waitForFunction(() => document.querySelector('button[aria-label="Fixed take length"]')?.getAttribute('aria-pressed') === 'true', undefined, { timeout: 5000 });
     for (let i = 0; i < 16; i++) {
-      const bars = Number.parseInt((await page.locator('.transport__bars-val').textContent()) ?? '', 10);
+      const bars = Number.parseInt((await page.locator('.transport__fixed .transport__bars-val').textContent()) ?? '', 10);
       if (bars === 1) break;
       await page.locator(`button[aria-label="${bars > 1 ? 'Fewer bars' : 'More bars'}"]`).click();
     }
     const fixed = (await page.locator('button[aria-label="Fixed take length"]').textContent())?.trim();
     must(fixed === 'FIXED 1', `the take length reads "${fixed}"`);
-    if ((await pressed('Mic / line input')) !== 'true') await page.locator('button[aria-label="Mic / line input"]').click();
-    await page.waitForFunction(() => document.querySelector('button[aria-label="Mic / line input"]')?.getAttribute('aria-pressed') === 'true', undefined, { timeout: 5000 });
+    // The input dry, as a user takes it: slot 1 Off, its input picked, GO LIVE.
+    const source = page.locator('select[aria-label="Source for slot 1"]');
+    const sourceWas = await source.locator('option:checked').textContent();
+    await source.selectOption('off');
+    const inputSel = page.locator('select[aria-label="Input for slot 1"]');
+    await inputSel.waitFor({ state: 'visible', timeout: 10_000 });
+    await inputSel.selectOption(String(opts.channel));
+    const input = await inputSel.locator('option:checked').textContent();
+    const goLive = page.locator('button[aria-label="Go live for slot 1"]');
+    if ((await goLive.count()) === 1) await goLive.click();
+    await page.locator('button[aria-label="Stop live input for slot 1"][aria-pressed="true"]').waitFor({ timeout: 10_000 });
     await sleep(3000); // the idle window: LEDs and the meter before any take
     const idle = await readSampler();
 
@@ -454,7 +458,7 @@ try {
     await page.locator('.lp-lane').nth(0).locator('.lp-core').click();
     await page.waitForFunction(() => document.querySelectorAll('.lp-lane')[0]?.getAttribute('data-state') === 'play', undefined, { timeout: 20_000 });
     const recMs = Date.now() - tRec;
-    await page.locator('button[aria-label="Mic / line input"]').click(); // MIC off: the loop plays on
+    await page.locator('button[aria-label="Stop live input for slot 1"]').click(); // input off: the loop plays on
     await sleep(600);
     const inkA = await laneInk(0);
     await sleep(400);
@@ -469,7 +473,7 @@ try {
     must(inkA.max >= 0.15 * inkA.h && inkA.tall >= 4, `lane 1's waveform is flat: tallest column ${inkA.max}/${inkA.h} px, ${inkA.tall} columns ≥ 10 %`);
     must(inkA.max > control.max, `lane 1 draws no more than the empty lane 3 (${inkA.max} vs ${control.max} px)`);
     return [
-      `lane 1 ${lane1.join(' → ')} in ${recMs} ms (count-in numerals ${seen.counts.join(',') || 'none'}), ${fixed}, CLICK on, MIC live for the take`,
+      `lane 1 ${lane1.join(' → ')} in ${recMs} ms (count-in numerals ${seen.counts.join(',') || 'none'}), ${fixed}, CLICK on, slot 1 ${sourceWas} → Off on "${input}", live for the take`,
       `waveform: tallest column ${inkA.max}/${inkA.h} px, ${inkA.tall} columns ≥ 10 % of the height, ${inkA.distinct} distinct heights; empty lane 3: tallest ${control.max} px`,
       `screenshot ${join(out, 'after-take.png')}`,
     ];
@@ -498,8 +502,11 @@ try {
   // ── exit ──────────────────────────────────────────────────────────────────────────────────────
   await check('exit', async () => {
     const clearAll = page.locator('button.transport__tgl', { hasText: '✕' });
-    await clearAll.click();
-    await page.locator('button[aria-label="Clear all tracks, press again to confirm"]').click({ timeout: 3000 }).catch(() => {});
+    // Disabled with every lane empty (a take that failed before recording).
+    if (await clearAll.isEnabled()) {
+      await clearAll.click();
+      await page.locator('button[aria-label="Clear all tracks, press again to confirm"]').click({ timeout: 3000 }).catch(() => {});
+    }
     await page.waitForFunction(() => [...document.querySelectorAll('.lp-lane')].every((l) => l.getAttribute('data-state') === 'empty'), undefined, { timeout: 10_000 });
     const lanes = (await Promise.all([0, 1, 2, 3, 4].map(laneState))).join(',');
     const sent = osClose(pid);

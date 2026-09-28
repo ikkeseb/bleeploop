@@ -75,7 +75,8 @@ A stop dies when it passes; past 10 stops, consolidate or flag it (AGENTS.md). D
    slider moves its knob and back; the editor's own size menu → the host window follows.
 6. **Fault injection.** Yank the interface while loops play → a toast, the loops and the plugin stay;
    reconnect → the same device comes back (or WASAPI takes over) and the loops play on.
-7. **Inputs + AUTO REC.** Audio Settings Ch 1 records only physical input 1, Ch 2 only input 2.
+7. **Inputs + AUTO REC.** A slot on In 1 records only physical input 1, In 2 only input 2; both slots
+   live at once, each on its own input, both heard and recorded.
    AUTO REC: a muted-guitar noise floor must not arm, a real attack must (sensitivity, onset, feel).
 8. **Session files + Share output.** Export, CLEAR ALL, import the zip: the loops come back on the
    grid and the amp-sim sounds as it did at the export (a slot holding another plugin gets a toast); open a stem and the master in a DAW (the master's FX come from the web path's render: close
@@ -166,8 +167,6 @@ guitarist's take feels on the click is this stop.
 - **Same file in both slots:** only the first opener gets an editor (why: the comment at
   `editorAffinity` in `src/audio/instrument.ts`).
 - **Editor-to-front:** dropping behind after a click into BleepLoop is intended.
-- One slot is live at a time on the engine, the frontend's choice: two live slots would sum the dry
-  input twice only when both read the same channel.
 
 ### Stop 6 — fault paths
 
