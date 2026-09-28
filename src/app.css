@@ -146,10 +146,10 @@ option {
   anchor-name: --cmd; /* the popovers hang from its bottom edge (.settings-popover) */
 }
 /* Two-row arrangement when one row cannot fit — measured and flagged by app/cmd-fit.ts (a media query
-   cannot see the contextual sliders). Row 1 keeps brand · lamp · BPM · loop dial · ALL/MIC · master ·
-   tools; the modes cluster (transport.css) drops to row 2, left-aligned under BPM. The ::after element
-   is the forced line break between the two `order` bands (its own zero-height line, so the row gap
-   counts twice). The narrower rungs stay in transport.css ("Narrow-width ladder"). */
+   cannot see the contextual sliders). Row 1 keeps brand · lamp · BPM · TAP · loop dial · END STOP ·
+   ALL/MIC · master · tools; the modes cluster (transport.css) drops to row 2, left-aligned under BPM.
+   The ::after element is the forced line break between the two `order` bands (its own zero-height
+   line, so the row gap counts twice). The narrower rungs stay in transport.css ("Narrow-width ladder"). */
 .cmd--stack {
   flex-wrap: wrap;
   row-gap: 3px;

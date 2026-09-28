@@ -1,6 +1,6 @@
 # First external tester feedback (OPEN)
 
-Owner-requested behavior and tester reports collected from 2026-09-19 (F13–F16: 2026-09-24; F17–F25: 2026-09-28), with local fixes and
+Owner-requested behavior and tester reports collected from 2026-09-19 (F13–F16: 2026-09-24; F17–F26: 2026-09-28), with local fixes and
 verification recorded below. Testing is ongoing; fold new feedback into the
 matching item. When resolved, move enduring decisions to their owning briefings and delete this plan.
 
@@ -40,10 +40,11 @@ All items remain open until the tester confirms. § Code reading records what th
 | F19 | With ASIO4ALL installed, the app silently took it (the first registered driver) and routed to the wrong hardware. | Pick the ASIO driver. Built (§ Landed). |
 | F20 | The lane waveform jitters while recording, maybe with 1–2 tracks, maybe always (owner, by eye). | A steady waveform while recording. Built (§ Landed). |
 | F21 | No volume control for the built-in synths or a loaded plugin. | A level per slot. Built (§ Landed). |
-| F22 | With Share output on the interface the player also listens on, the player hears their loops twice ("doubled wet"), slightly late; the Share list showed one device because the others were disabled in Windows. | Say what Share is for and warn when its target is the same physical interface as the ASIO device. Whether the call app can capture a virtual cable instead is outside this repo. Not built. |
-| F23 | Crackle on the owner's Focusrite Scarlett when ASIO runs while a call uses the same interface through Windows audio; everything at 44.1 kHz, buffer 64. | Cause unknown; a larger buffer (128) is the first thing to try. Not built. |
+| F22 | With Share output on the interface the player also listens on, the player hears their loops twice ("doubled wet"), slightly late; the Share list showed one device because the others were disabled in Windows. | Say what Share is for and warn when its target is the same physical interface as the ASIO device. Whether the call app can capture a virtual cable instead is outside this repo. Not built. Workaround proven by the owner (2026-09-28): Share output on VB-Cable's CABLE Input reached a call's whole-screen share with no doubling for the player. |
+| F23 | Crackle on the owner's Focusrite Scarlett when ASIO runs while a call uses the same interface through Windows audio; everything at 44.1 kHz, buffer 64. By 2026-09-28 it recurs every 5–10 minutes or less often, the call's far end hears it too, and switching amp-sim presets or settings brings it on. | Cause unknown. At one timed crackle (2026-09-28, ASIO 64): no plugin loaded (slot A Off and live on In 2, slot B a built-in synth); Share output, the call's playback and its mic all on the Scarlett, the only enabled Windows devices; no process above ~2 % CPU; nothing in the release log, because the engine counts xruns (`IoCounters`) but neither shows nor logs them. Whether the far end hears it on the loops or on the voice is unknown. Next: buffer 128, then 256 (20/20 in `native:engine-loopback`). A log line per missed block is proposed, not built. |
 | F24 | A ring modulator would be a great effect to have. | A wish, not ranked. |
 | F25 | Automatic updates, so players keep up with frequent releases. | Wanted in time (owner); needs an updater signing key the owner creates. Not built. |
+| F26 | The exported master has sound only if the tracks play while exporting (owner). | By design today: the master mixes only tracks that are not STOPPED, to equal what is heard, so all-stopped gives a silent master; every committed track's raw stem exports whatever its state (`buildExportBundle`, `src/audio/export/export.ts`). Whether the stems were silent too is unknown: no archive from that export was found on the dev PC. Whether the master should mix stopped tracks is the owner's call. Not built. |
 
 ## Code reading at `d17c777`
 

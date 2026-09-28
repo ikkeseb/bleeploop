@@ -379,10 +379,13 @@
 /* Narrow-width ladder. The `.cmd` card (app.css) is `overflow: hidden` via body, so anything that does
    not fit is simply unreachable. First rung: when one row cannot fit (measured by app/cmd-fit.ts —
    including the contextual CLICK / FIXED controls and reserved AUTO width) the bar carries
-   `.cmd--stack` and the CLICK / FIXED / AUTO / TAP cluster takes a second row under BPM. `order` moves
-   it visually only — DOM/tab order is unchanged. The width stays intrinsic (no flex-basis: 100%) so
-   the measurement cannot see its own effect. */
-.cmd--stack .transport__modes {
+   `.cmd--stack` and the CLICK / FIXED / RETAKE / AUTO cluster takes a second row under BPM; TAP and
+   END STOP (`.transport__pair`) follow it there only when row 1 is still full without the tool icons
+   (`.cmd--stack-pair`: TAP lands under BPM, END STOP after AUTO). `order` moves them visually only —
+   DOM/tab order is unchanged. The width stays intrinsic (no flex-basis: 100%) so the measurement
+   cannot see its own effect. */
+.cmd--stack .transport__modes,
+.cmd--stack-pair .transport__pair {
   order: 2;
 }
 /* Further rungs drop the loop seconds + BPM beat dots. */

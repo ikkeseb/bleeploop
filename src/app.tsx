@@ -238,7 +238,7 @@ export function App() {
   return (
     <div class="app" classList={{ 'app--staged': stageOpen() }}>
       {/* Command bar — ONE card combining brand, system lamp, transport, and tool icons. Left→right:
-          brand · system lamp · (Transport fragment: BPM · CLICK/FIXED/TAP · loop ring-dial · ■/✕ ALL ·
+          brand · system lamp · (Transport fragment: BPM · TAP · CLICK/FIXED · loop ring-dial · END STOP · ■/✕ ALL ·
           MIC · spacer · master) · tool icons. Host/isolated/plugin/midi detail lives in the Audio
           Settings diagnostics block; the lamp is their at-a-glance aggregate and its title lists all
           four. */}

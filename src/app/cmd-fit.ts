@@ -18,11 +18,13 @@ export function installCmdFit(bar: HTMLElement): () => void {
     const gap = parseFloat(cs.columnGap) || 0;
     let need = parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight);
     let modes = 0;
+    let tools = 0;
     let n = 0;
     for (const child of Array.from(bar.children) as HTMLElement[]) {
       if (child.classList.contains('cmd__sr')) continue; // visually-hidden live region (absolute)
       const w = child.classList.contains('transport__grow') ? SPACER_MIN_PX : child.getBoundingClientRect().width;
       if (child.classList.contains('transport__modes')) modes = w;
+      if (child.classList.contains('tools')) tools = w;
       need += w;
       n++;
     }
@@ -32,10 +34,15 @@ export function installCmdFit(bar: HTMLElement): () => void {
     // Second rung: with the modes on row 2, can the REST still share row 1? If not, the tools cluster
     // joins the modes on row 2 (right-aligned) instead of wrapping onto a third row of its own — the
     // bar is never taller than two rows, so the stage below never jumps when a loop readout appears.
-    // Both rungs measure intrinsic widths, so neither can see its own effect.
-    const stackTools = stack && need - modes - gap > width;
+    // Third rung: TAP and END STOP (`.transport__pair`) hold row 1 only while it still fits without the
+    // tools; otherwise they join the modes. Every rung measures intrinsic widths, so none can see its
+    // own effect.
+    const row1 = need - modes - gap;
+    const stackTools = stack && row1 > width;
+    const stackPair = stackTools && row1 - tools - gap > width;
     bar.classList.toggle('cmd--stack', stack);
     bar.classList.toggle('cmd--stack-tools', stackTools);
+    bar.classList.toggle('cmd--stack-pair', stackPair);
   };
   let raf = 0;
   const schedule = (): void => {

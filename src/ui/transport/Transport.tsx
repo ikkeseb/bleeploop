@@ -13,8 +13,8 @@ import './transport.css';
 /**
  * Command-bar transport cluster. Renders as a Fragment so its children become direct
  * flex items of the `.cmd` header in app.tsx — the internal `.grow` spacer then pushes master + the
- * app.tsx tool icons to the far right. Left→right: BPM group (34px numeral + steppers + beat dots) ·
- * CLICK / FIXED-N / AUTO / TAP / END STOP toggles · loop ring-dial readout · ■/▶ ALL + FADE and its bars (engine
+ * app.tsx tool icons to the far right. Left→right: BPM group (34px numeral + steppers + beat dots) · TAP ·
+ * CLICK / FIXED-N / RETAKE / AUTO toggles · loop ring-dial readout · END STOP · ■/▶ ALL + FADE and its bars (engine
  * mode only) + ✕ ALL (two-step) + the record level + MIC LIVE (the web path's; in engine mode raw input is a
  * slot set to Off and live) · IN FX (engine mode only: `InputFx.tsx`) · spacer · master mute +
  * slider + value. EXPORT / IMPORT are icon tools in app.tsx's `.tools`
@@ -257,9 +257,21 @@ export function Transport(props: { returnFocus?: (el: HTMLElement | undefined) =
         </div>
       </div>
 
-      {/* Playback/record modes share the wrapping row, leaving global transport beside the loop dial.
-          Every toggle here, MIC and master mute keep ONE aria-label and say on/off through aria-pressed
-          alone; a label that flips as well reads "Click off, pressed". */}
+      {/* TAP beside the tempo it sets; dead once a loop fixes the tempo (clock.tap -> setBpm no-ops while
+          locked). It and END STOP are the `transport__pair`: row 1 while it fits (app/cmd-fit.ts). */}
+      <button
+        class="transport__tgl transport__pair"
+        aria-label="Tap tempo"
+        disabled={!tapGate().ok}
+        onClick={() => clock.tap()}
+        title={clock.bpmLocked() ? 'Tempo locked to the loop. Clear all to retap' : 'Tap a tempo'}
+      >
+        TAP
+      </button>
+
+      {/* Record modes (how the next take records) take the wrapping row, leaving global transport beside
+          the loop dial. Every toggle here, TAP / END STOP, MIC and master mute keep ONE aria-label and say
+          on/off through aria-pressed alone; a label that flips as well reads "Click off, pressed". */}
       <div class="transport__modes">
         <div class="transport__click" role="group" aria-label="Metronome">
           <button
@@ -380,27 +392,6 @@ export function Transport(props: { returnFocus?: (el: HTMLElement | undefined) =
             onInput={(e) => looper.setAutoRecordSensitivity(Number((e.target as HTMLInputElement).value))}
           />
         </div>
-
-        {/* TAP — dead once a loop fixes the tempo (clock.tap -> setBpm no-ops while locked). */}
-        <button
-          class="transport__tgl"
-          aria-label="Tap tempo"
-          disabled={!tapGate().ok}
-          onClick={() => clock.tap()}
-          title={clock.bpmLocked() ? 'Tempo locked to the loop. Clear all to retap' : 'Tap a tempo'}
-        >
-          TAP
-        </button>
-        <button
-          class="transport__tgl"
-          classList={{ 'is-on': looper.loopEndStopEnabled() }}
-          aria-label="Stop playing loops at loop end"
-          aria-pressed={looper.loopEndStopEnabled()}
-          onClick={() => looper.setLoopEndStopEnabled(!looper.loopEndStopEnabled())}
-          title="Stop playback at loop end. Press STOP again for immediate stop. Recording and overdub still commit and stop immediately."
-        >
-          END STOP
-        </button>
       </div>
 
       {/* Loop readout — the mini ring-dial (progress = loopPhase) + N BARS · S.S s. */}
@@ -435,6 +426,18 @@ export function Transport(props: { returnFocus?: (el: HTMLElement | undefined) =
           </span>
         </div>
       </div>
+
+      {/* END STOP — how every stop lands, beside the loop it ends and the ■/▶ ALL it changes. */}
+      <button
+        class="transport__tgl transport__pair"
+        classList={{ 'is-on': looper.loopEndStopEnabled() }}
+        aria-label="Stop playing loops at loop end"
+        aria-pressed={looper.loopEndStopEnabled()}
+        onClick={() => looper.setLoopEndStopEnabled(!looper.loopEndStopEnabled())}
+        title="Stop playback at loop end. Press STOP again for immediate stop. Recording and overdub still commit and stop immediately."
+      >
+        END STOP
+      </button>
 
       {/* Global transport: ■/▶ ALL · FADE + its bars (engine mode) · ✕ ALL (two-step) · record level · MIC
           LIVE (web path) · IN FX (the input sends, engine mode). */}
