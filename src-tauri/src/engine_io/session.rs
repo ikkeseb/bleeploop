@@ -1,5 +1,5 @@
-//! OWNS: a session's bytes between the UI and the engine (`docs/plans/native-engine.md` § Stage 5,
-//! Session): [`EngineHost::snapshot`] (what `engine_snapshot` answers, for export and crash recovery)
+//! OWNS: a session's bytes between the UI and the engine:
+//! [`EngineHost::snapshot`] (what `engine_snapshot` answers, for export and crash recovery)
 //! and [`EngineHost::load_session`] (what `engine_load_session` takes, for import and recovery). The PCM
 //! crosses to the UI once per save; the engine side is `lf_engine::session` (a budgeted copy out, a
 //! swap in: nothing allocates, frees or waits on the audio thread). Buffers are built and freed here, on
@@ -13,6 +13,10 @@
 //! loop as committed before the layer in flight). A load's: `{"bpm","bars","masterLengthFrames","tracks"}`
 //! with `state` `"Playing"` | `"Stopped"`, into an engine whose lanes are all EMPTY; `bpm` is an integer
 //! 40..300 and `masterLengthFrames` is `bars` bars of it at the engine's rate.
+//!
+//! Only the loops cross here, once per save and off the RT path (invariant 3). Settings, rig recall and
+//! MIDI bindings stay in the UI's storage; each plugin's tone lives natively (`host/tone.rs`) and
+//! crosses only inside a session export or import (`plugin_tone_take` / `plugin_tone_import`).
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::Ordering::{Acquire, Relaxed};

@@ -1,4 +1,4 @@
-//! OWNS: Share output (`docs/plans/native-engine.md` § Stage 4, STATUS E2 "user-picked endpoint"): while
+//! OWNS: Share output (STATUS E2 "user-picked endpoint"): while
 //! ASIO plays (its output bypasses the Windows audio engine, so no app capture can hear it), the
 //! engine's post-limiter stereo master is mirrored to a WASAPI render endpoint the user picked, for
 //! OBS, browsers and voice chat. On WASAPI no mirror opens: app capture takes the main output.
@@ -18,7 +18,7 @@ use lf_engine::grid::Frame;
 use super::pipes::{self, PipeConfig, PullPipe, PushEnd};
 use super::IoCounters;
 
-/// The mirror's fill setpoint (the plan's 20 ms), raised to `PipeConfig::setpoint`'s floor when the
+/// The mirror's fill setpoint (20 ms), raised to `PipeConfig::setpoint`'s floor when the
 /// engine block is large: one engine block, one ~10 ms WASAPI shared period, 3 ms.
 const SETPOINT: f64 = 0.020;
 const WASAPI_PERIOD: f64 = 0.010;

@@ -1,4 +1,4 @@
-//! OWNS: engine mode (`docs/plans/native-engine.md` § Stage 5): the process's [`EngineApp`] with its
+//! OWNS: engine mode: the process's [`EngineApp`] with its
 //! one [`EngineHost`], its feed and its plugin slots (`plugins`), the `engine_*` Tauri commands, and
 //! the shutdown on exit.
 //!
@@ -158,7 +158,7 @@ pub async fn engine_set_slot_input_channel(slot: u8, channel: Option<u32>) -> Re
 
 /// A batch of commands, in order, at the next block. Fire-and-forget: what the engine refuses comes
 /// back on the feed; an error means the rest of the batch did not reach it. Each slot reads its own
-/// input, so several may be live at once: which are is the UI's call (`src/audio/native-io.ts`).
+/// input, so several may be live at once: which are is the UI's call (`src/ui/state/native-io.ts`).
 /// Synchronous: it runs on the main thread, where the IPC hands requests over in order, so two batches
 /// cannot swap (an async command runs on the runtime's pool); it only takes two brief locks.
 #[tauri::command]

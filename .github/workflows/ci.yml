@@ -137,7 +137,7 @@ jobs:
       # `cargo test` is NOT here: it builds the full debug profile (~15 min on the Windows runner,
       # cached or not, vs ~2 min for the two checks) — it runs in rust-test.yml on src-tauri/ changes.
 
-  # lf-engine, the pure engine crate (docs/plans/native-engine.md § Stage 2): its tests build nothing of
+  # lf-engine, the pure engine crate (briefing: its src/lib.rs): its tests build nothing of
   # the app, so they run on every push, on Linux. rust-test.yml runs them again on Windows.
   engine:
     needs: docs_guard

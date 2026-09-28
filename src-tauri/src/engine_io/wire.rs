@@ -1,12 +1,12 @@
-//! OWNS: the JSON wire between the UI and the engine host (`docs/plans/native-engine.md` § Stage 5,
-//! Wire): the serde mirror of lf-engine's commands and events (the crate stays serde-free), the feed
+//! OWNS: the JSON wire between the UI and the engine host: the serde
+//! mirror of lf-engine's commands and events (the crate stays serde-free), the feed
 //! frame the feed thread sends, and the fixture test. The TS mirror is `src/platform/engine-wire.ts`;
 //! `verify/fixtures/engine-wire.json` holds both sides to the same JSON (this file's test and a TS
 //! guard parse it).
 //!
 //! Serde's external tagging with the Rust variant names: a unit variant is its name (`"PlayAll"`), a
 //! newtype `{"RecDub":0}`, a tuple `{"SetVolume":[0,0.8]}`, a struct variant an object with camelCase
-//! fields. `FxParam`/`FxKind` travel as the TS keys (`src/audio/fx/metadata.ts`), an `InputSend` and an
+//! fields. `FxParam`/`FxKind` travel as the TS keys (`src/ui/state/fx-metadata.ts`), an `InputSend` and an
 //! `InputSendParam` as their `key()`, an `Instrument` as its id, a `NoteTarget` as `{"Builtin":"lead"}` /
 //! `{"Slot":0}` / `"Off"`, a `Frame` (i64) as a JSON number. The
 //! mirrors are serde `remote` derives: a variant or field lf-engine adds fails to compile here until it
@@ -16,6 +16,10 @@
 //! are defined (camelCase fields, backends as `"Asio"` / `"Wasapi"`; a request's `inputChannels` is one
 //! pick per slot, and one `inputChannel` instead sets both; an `OpenError` is its text, or
 //! `{"RateChange":{…}}` for a refusal).
+//!
+//! The commands that carry it are `mode.rs`'s `engine_*`: `engine_send` is a synchronous batch (IPC
+//! order holds); `engine_feed` subscribes a Tauri `Channel`, one subscriber at a time (a new one
+//! replaces it), and its first frame is a `reset`.
 
 use lf_engine::dsp::fx::{FxKind, FxParam};
 use lf_engine::grid::Frame;
@@ -196,7 +200,7 @@ mod instrument {
     }
 }
 
-/// The TS `FxKind` keys, in `FxKind::ALL` order (`FX_META` in `src/audio/fx/metadata.ts`).
+/// The TS `FxKind` keys, in `FxKind::ALL` order (`FX_META` in `src/ui/state/fx-metadata.ts`).
 const FX_KIND_KEYS: [&str; 5] = ["filter", "pitch", "stutter", "delay", "reverb"];
 
 /// An `FxKind` as its TS key.

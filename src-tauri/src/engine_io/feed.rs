@@ -1,4 +1,4 @@
-//! OWNS: the feed (`docs/plans/native-engine.md` § Stage 5, Wire): what the UI reads back from the
+//! OWNS: the feed (its frame: `wire.rs`): what the UI reads back from the
 //! engine, built on its own non-RT thread about 60 times a second ([`FeedFrame`]). Each tick drains the
 //! engine's events and the device's, and reads the device status, the clock anchor, the input meter
 //! and the lanes' waveforms; a frame goes out when any of them changed, and at least every `REFRESH`

@@ -19,6 +19,16 @@
 //! lf-engine builds at opt-level 3 in the dev profile too, but the Stage 3 load mixes in this file,
 //! which the dev profile leaves unoptimized: take the numbers from `--release`. The one test that is
 //! not ignored runs the Stage 3 load for a second under `assert_no_alloc`.
+//!
+//! What a change is compared against (dev PC, release, five runs): the Stage 2 bar reads 3.8 to 4.0 %
+//! (0.33 % before the Stage 3 sound was wired: Blink renders a connected node whether or not it sounds,
+//! and the port does the same, split about evenly between the bypassed chains with the idle reverb bus
+//! and the six silent instruments). The Stage 3 load reads a mean of 24.7 to 25.0 % of the 1333 µs
+//! block, the engine's share 18.2 to 18.4 %; the synths and FX compute whole 128-frame quanta, so every
+//! other 64-frame block carries their work (47.8 to 48.4 %, the worst of the load's own cycle 51.9 to
+//! 52.6 %). Its p99.9 (79 to 80 %) and worst block (89 to 127 %) are preemption on a busy desktop at
+//! normal priority. A Stage 3 mean near 33 % instead of 25 % is the codegen split `src-tauri/Cargo.toml`
+//! guards against.
 
 mod common;
 

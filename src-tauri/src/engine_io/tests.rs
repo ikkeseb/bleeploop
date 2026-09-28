@@ -23,7 +23,7 @@ const PATIENCE: Duration = Duration::from_secs(20);
 const RATE: Frame = 48_000;
 
 /// One fake device renders at a time: each runs faster than real time, and a dozen at once starve the
-/// other tests' threads (the VST3 restart fixture's reader drops hop-1 frames). It also keeps
+/// other tests' threads. It also keeps
 /// `rt_allocs`, a process-wide counter, to one test's callbacks.
 static SERIAL: Mutex<()> = Mutex::new(());
 

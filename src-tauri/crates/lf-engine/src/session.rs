@@ -1,5 +1,5 @@
-//! OWNS: saving and loading a session through the engine (`docs/plans/native-engine.md` § Stage 5,
-//! Session): the host's [`SessionPort`], a [`Snapshot`] copied out of the committed lanes a budget per
+//! OWNS: saving and loading a session through the engine (the bytes and the host side:
+//! `src-tauri/src/engine_io/session.rs`): the host's [`SessionPort`], a [`Snapshot`] copied out of the committed lanes a budget per
 //! rendered frame, and a [`Load`] swapped into an all-EMPTY looper. Neither allocates, frees or waits on
 //! the audio thread: the host hands over every buffer (a snapshot's destination; a load's lane buffers
 //! and their peaks, built off the audio thread) and takes each back, a load's with the engine's old lane

@@ -1,4 +1,4 @@
-//! Stage 1 silent-share probe (`docs/plans/native-engine.md` § Stage 1, criterion S1).
+//! Stage 1 silent-share probe (`docs/ARCHITECTURE.md` § Measured premise, criterion S1).
 //!
 //! `app.exe --probe-share <open|mute|vol0|zeros|dual|all>` (DEV, debug build, exits before Tauri).
 //! The parent spawns a child `app.exe --probe-share-child <mode>` that renders a tone on the

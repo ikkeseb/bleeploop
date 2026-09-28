@@ -1,5 +1,6 @@
-//! The per-track FX chain, ported from `src/audio/fx/fx.ts` (`FxChain` and its five nodes) and its
-//! pure metadata `src/audio/fx/metadata.ts`, as Tone 15.1.22 builds it on Blink:
+//! The per-track FX chain, ported from `fx/fx.ts` (`FxChain` and its five nodes; the export's offline
+//! render keeps a copy, `src/session/offline-fx.ts`) and its pure metadata (now
+//! `src/ui/state/fx-metadata.ts`), as Tone 15.1.22 builds it on Blink:
 //!
 //! ```text
 //! input → Filter → Pitch → Stutter → Delay → out

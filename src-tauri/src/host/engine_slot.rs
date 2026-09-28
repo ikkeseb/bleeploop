@@ -1,4 +1,4 @@
-//! OWNS: the engine-mode plugin slot (`docs/plans/native-engine.md` § Stage 4): the load API that
+//! OWNS: the engine-mode plugin slot (threads and gotchas: `src-tauri/AGENTS.md`): the load API that
 //! spawns one owner thread per slot, and the handle a caller drives it through. The owner loads a
 //! CLAP or VST3 plugin, activates it at the engine's rate and installs its processor into the engine
 //! as an `lf_engine::SlotProcessor` unit (`clap_engine`, `vst3_engine`), so the plugin renders inside
@@ -337,7 +337,7 @@ impl EngineSlotHandle {
     }
 
     /// Set a parameter the plugin listed: the unit applies it at the start of the next block it
-    /// renders, and a VST3 edit controller is told as well (`src-tauri/AGENTS.md` § P11,
+    /// renders, and a VST3 edit controller is told as well (`src-tauri/AGENTS.md` § Plugin hosting,
     /// "Host-set VST3 params go to BOTH halves"). Err for an id the plugin never listed (an unknown
     /// id can crash a plugin) or a full ring; the controller only hears what the processor got.
     pub(crate) fn set_param(&self, id: u32, value: f64) -> Result<(), String> {
@@ -434,8 +434,8 @@ impl Drop for EngineSlotHandle {
 }
 
 /// Test-only: the engine-mode tests run one at a time. Each builds whole engines (every page
-/// touched) and a device thread; many at once starved the live restart tests' hop-1 reader on a
-/// loaded machine.
+/// touched) and a device thread; many at once starved the (since deleted) restart tests' reader
+/// threads on a loaded machine.
 #[cfg(test)]
 pub(super) fn one_engine_test_at_a_time() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: Mutex<()> = Mutex::new(());
@@ -443,8 +443,7 @@ pub(super) fn one_engine_test_at_a_time() -> std::sync::MutexGuard<'static, ()> 
 }
 
 /// Test-only: the allocations `f` makes on this thread under the RT alloc guard. The counter is
-/// process-wide and a live producer test resets it after its warmup, so a window it went backwards
-/// in is measured again.
+/// process-wide; a window it went backwards in (a reset) is measured again.
 #[cfg(all(test, debug_assertions))]
 pub(super) fn rt_allocations(mut f: impl FnMut()) -> u64 {
     use super::super::rt_alloc::{guard, RT_ALLOCS};

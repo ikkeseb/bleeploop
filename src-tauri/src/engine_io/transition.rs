@@ -43,7 +43,7 @@ pub(crate) fn steps(engine: Option<u32>, running: bool, healthy: bool, target: O
 /// The buffer an ASIO open asks the driver for: `requested` when the driver takes it (`min..=max`), else
 /// the power of two inside the range nearest to it, else `min` (a driver fixed at, say, 480 frames).
 /// cpal refuses a fixed size outside the range, and a driver whose buffer is set in its own control
-/// panel offers exactly one size. `src/audio/audio-settings.ts` mirrors it for the Buffer select.
+/// panel offers exactly one size. `src/ui/state/audio-settings.ts` mirrors it for the Buffer select.
 pub(crate) fn asio_block(requested: u32, min: u32, max: u32) -> u32 {
     if (min..=max).contains(&requested) {
         return requested;

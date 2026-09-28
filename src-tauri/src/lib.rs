@@ -7,7 +7,7 @@ mod audio_input;
 // Native audio output devices, the backend type and the ASIO driver cache the engine opens from.
 #[cfg(windows)]
 mod audio_output;
-// The native engine's device side (docs/plans/native-engine.md § Stage 4): engine mode
+// The native engine's device side (briefing: `engine_io/mod.rs`): engine mode
 // (`engine_io::mode`) runs it; a DEV probe drives it too.
 #[cfg(windows)]
 #[allow(dead_code)]
@@ -15,7 +15,7 @@ mod engine_io;
 // DEV: the loopback chirp analysis the spike and the engine probe share.
 #[cfg(all(windows, debug_assertions))]
 mod chirp_lag;
-// Stage 1 silent-share probe (docs/plans/native-engine.md § Stage 1, S1).
+// Stage 1 silent-share probe (docs/ARCHITECTURE.md § Measured premise, S1).
 #[cfg(all(windows, debug_assertions))]
 mod share_probe;
 
@@ -172,7 +172,7 @@ pub fn run() {
     #[cfg(windows)]
     {
         let args: Vec<String> = std::env::args().collect();
-        // Native-engine Stage 1 premise spike (`docs/plans/native-engine.md`).
+        // Native-engine Stage 1 premise spike (`docs/ARCHITECTURE.md` § Measured premise).
         #[cfg(debug_assertions)]
         if let Some(pos) = args.iter().position(|a| a == "--probe-engine-spike") {
             match host::engine_spike_run(&args[pos + 1..]) {
@@ -183,7 +183,7 @@ pub fn run() {
                 }
             }
         }
-        // Native-engine Stage 4 rig probe (`docs/plans/native-engine.md` § Stage 4).
+        // The native engine's rig probe (`engine_io/probe.rs`).
         #[cfg(debug_assertions)]
         if let Some(pos) = args.iter().position(|a| a == "--probe-engine") {
             match engine_io::probe::run(&args[pos + 1..]) {
@@ -316,7 +316,7 @@ pub fn run() {
             host::plugin_asio_probe,
             host::plugin_asio_switch,
             host::plugin_asio_drivers,
-            // Engine mode (docs/plans/native-engine.md § Stage 5).
+            // The native engine (`engine_io/mode.rs`).
             #[cfg(windows)]
             engine_io::mode::engine_open,
             #[cfg(windows)]
