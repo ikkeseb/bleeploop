@@ -1,7 +1,8 @@
 //! DEV-only global-allocator shim (invariant #5: "no allocation in the RT path"). It is a thin
 //! wrapper over `System` that, when a thread-local `rt_guard` is set, bumps `RT_ALLOCS`. The
-//! producer sets the guard around its per-block body, so any steady-state heap allocation on the
-//! RT thread is *measured* (not asserted) and surfaced in the gate line. Const-initialised
+//! engine's device callback sets the guard around its body (`engine_io::callback::guarded`), so any
+//! steady-state heap allocation on the RT thread is *measured* (not asserted) and counted in its
+//! `rt_allocs`; the unit and pipe tests assert zero. Const-initialised
 //! thread-local → no lazy alloc/registration inside `alloc()` (safe to read there). Debug builds
 //! only; `tauri dev` is a debug build, so the gate sees real numbers.
 

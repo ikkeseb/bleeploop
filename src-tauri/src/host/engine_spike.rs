@@ -176,13 +176,13 @@ struct PluginHold {
     activation: Activation,
 }
 
-/// Load the bundle's first audio-effect class and activate it at the device rate, as `vst3_owner_main` does
-/// (no controller: the spike never opens an editor or moves a parameter).
+/// Load the bundle's first audio-effect class and activate it at the device rate, as the web path's
+/// VST3 owner did (no controller: the spike never opens an editor or moves a parameter).
 fn load_plugin(path: &str) -> Result<(PluginUnit, PluginHold), String> {
     let binary = super::super::super::scan::resolve_vst3_binary(std::path::Path::new(path))
         .ok_or_else(|| format!("no loadable VST3 binary inside {path}"))?;
     let wide: Vec<u16> = binary.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
-    // SAFETY: FFI module load + raw FUnknown COM, the same sequence as `vst3_owner_main`; every
+    // SAFETY: FFI module load + raw FUnknown COM, the web path's VST3 load sequence; every
     // pointer is valid for its call and every failure after `initialize` goes through `teardown`.
     unsafe {
         let module = Vst3Module::load(PCWSTR(wide.as_ptr()))?;

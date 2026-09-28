@@ -1,16 +1,13 @@
-//! OWNS: engine mode (`docs/plans/native-engine.md` § Stage 5, Toggle): the toggle file, the process's
-//! [`EngineApp`] with its one [`EngineHost`], its feed and its plugin slots (`plugins`), the `engine_*`
-//! Tauri commands, and the shutdown on exit.
+//! OWNS: engine mode (`docs/plans/native-engine.md` § Stage 5): the process's [`EngineApp`] with its
+//! one [`EngineHost`], its feed and its plugin slots (`plugins`), the `engine_*` Tauri commands, and
+//! the shutdown on exit.
 //!
-//! The toggle is a file in the app-local data folder, read once at setup and applied on the next
-//! launch, never live (ASIO allows one client). Engine mode is the default: only `off` in the file (the
-//! Audio Settings switch writes `on` or `off`) runs the web audio path, the live line; there every
-//! `engine_*` command but `engine_mode`, `engine_set_mode` and `engine_status` answers an error. On, the engine
-//! owns the audio device: it claims the ASIO duplex holder, and the live line's `plugin_*` commands route
-//! to the engine's slots or refuse (`engine()`). Blocking work (an open waits up to 15 s) runs off the
+//! The app always runs on the engine: setup starts the host (its device owner; no device opens until
+//! the UI asks) and the feed once per launch. If either does not start, the launch has no audio: every
+//! `engine_*` command but `engine_status` answers an error, and so do the `plugin_*` commands that
+//! route to the engine's slots (`engine()`). Blocking work (an open waits up to 15 s) runs off the
 //! IPC thread.
 
-use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
@@ -24,13 +21,8 @@ use crate::host::tone::{ToneHandoff, ToneStore};
 use super::wire::{FeedFrame, WireCommand};
 use super::{DeviceRequest, DeviceStatus, EngineHost, HostConfig, OpenError};
 
-/// The toggle file in the app-local data folder: `off` runs this app on the web audio path; anything
-/// else, or no file, on the engine.
-const TOGGLE_FILE: &str = "engine-mode";
 /// The tone store's folder in the app-local data folder (`host/tone.rs`).
 const TONES_DIR: &str = "tones";
-/// The engine's claim on `audio_output`'s ASIO duplex holder (the live line's slots are 0 and 1).
-const ASIO_HOLDER: u8 = 2;
 
 /// Set once, at setup.
 static APP: OnceLock<EngineApp> = OnceLock::new();
@@ -38,29 +30,23 @@ static APP: OnceLock<EngineApp> = OnceLock::new();
 /// How long the exit waits for the engine's shutdown (the plugins' unloads, then the device's close).
 const SHUTDOWN_WAIT: Duration = Duration::from_secs(8);
 
-/// This launch's engine, when it runs on the engine: the live line's `plugin_*` commands route to it.
-pub fn engine() -> Option<&'static EngineApp> {
-    APP.get().filter(|app| app.engine.is_some())
+/// This launch's engine; an error when it did not start (the log says why).
+pub fn engine() -> Result<&'static EngineApp, String> {
+    APP.get().filter(|app| app.engine.is_some()).ok_or_else(|| "the native engine is not running".to_string())
 }
 
-/// Whether this launch runs on the engine.
-pub fn active() -> bool {
-    engine().is_some()
-}
-
-/// Engine mode's ASIO driver switch: `switch` (`audio_output::switch_asio_driver`) runs on the device
-/// owner (`EngineHost::switch_asio`), which closes its ASIO run first and reopens it after. Nothing else
-/// can hold the driver: the engine's claim on the duplex holder keeps the live line's slots off it.
+/// The ASIO driver switch: `switch` (`audio_output::switch_asio_driver`) runs on the device owner
+/// (`EngineHost::switch_asio`), which closes its ASIO run first and reopens it after, so nothing holds
+/// the driver while it is replaced.
 pub fn switch_asio(
     switch: impl FnOnce() -> Result<crate::asio_startup::AsioStatusReport, String> + Send + 'static,
 ) -> Result<crate::asio_startup::AsioStatusReport, String> {
-    engine().ok_or("engine mode is off")?.host()?.switch_asio(switch)
+    engine()?.host()?.switch_asio(switch)
 }
 
-/// Engine mode's state: the toggle, and the host, its feed, its plugin slots and the tone store while
-/// it is on.
+/// Engine mode's state: the host, its feed, its plugin slots and the tone store.
 pub struct EngineApp {
-    toggle: Option<PathBuf>,
+    /// `None` when the engine did not start this launch.
     engine: Option<(EngineHost, FeedThread)>,
     pub(super) slots: Mutex<[EngineSlot; SLOT_COUNT]>,
     /// `None` without an app-local data folder: plugins then load at their defaults and keep nothing.
@@ -70,8 +56,8 @@ pub struct EngineApp {
 }
 
 impl EngineApp {
-    /// Read the toggle and, unless it is off, start the host (its device owner; no device opens until
-    /// the UI asks) and the feed. Once per process.
+    /// Start the host (its device owner; no device opens until the UI asks) and the feed. Once per
+    /// process.
     pub fn setup(app: &AppHandle) {
         if APP.set(EngineApp::start(app)).is_err() {
             log::error!("[engine_io] engine mode was set up twice; the second is ignored");
@@ -79,47 +65,35 @@ impl EngineApp {
     }
 
     fn start(app: &AppHandle) -> EngineApp {
-        let data = match app.path().app_local_data_dir() {
-            Ok(dir) => Some(dir),
+        let tones = match app.path().app_local_data_dir() {
+            Ok(dir) => Some(ToneStore::new(dir.join(TONES_DIR))),
             Err(e) => {
-                log::warn!("[engine_io] no app-local data dir ({e}); the engine toggle cannot be read or saved, and no tone is kept");
+                log::warn!("[engine_io] no app-local data dir ({e}); no tone is kept");
                 None
             }
         };
-        let toggle = data.as_ref().map(|dir| dir.join(TOGGLE_FILE));
-        let tones = data.map(|dir| ToneStore::new(dir.join(TONES_DIR)));
-        let off = |toggle| EngineApp {
-            toggle,
-            engine: None,
-            slots: Mutex::new(std::array::from_fn(|_| EngineSlot::Empty)),
-            tones: None,
-            reload_tones: Mutex::default(),
-        };
-        if toggle.as_ref().is_some_and(|path| toggled_off(path)) {
-            log::info!("[engine_io] web audio mode: the engine toggle is off");
-            return off(toggle);
-        }
-        if !crate::audio_output::try_acquire_asio_holder(ASIO_HOLDER) {
-            log::error!("[engine_io] the ASIO duplex holder is taken before setup; engine mode stays off");
-            return off(toggle);
-        }
         let host = EngineHost::new(HostConfig::default());
-        match FeedThread::spawn(host.clone()) {
+        let engine = match FeedThread::spawn(host.clone()) {
             Ok(feed) => {
                 log::info!("[engine_io] engine mode: the native engine owns the audio device");
-                EngineApp { engine: Some((host, feed)), tones, ..off(toggle) }
+                Some((host, feed))
             }
             Err(e) => {
-                log::error!("[engine_io] the feed thread did not start ({e}); engine mode stays off");
+                log::error!("[engine_io] the feed thread did not start ({e}); this launch has no audio engine");
                 host.shutdown();
-                crate::audio_output::release_asio_holder(ASIO_HOLDER);
-                off(toggle)
+                None
             }
+        };
+        EngineApp {
+            engine,
+            slots: Mutex::new(std::array::from_fn(|_| EngineSlot::Empty)),
+            tones,
+            reload_tones: Mutex::default(),
         }
     }
 
     pub(super) fn host(&self) -> Result<EngineHost, String> {
-        self.engine.as_ref().map(|(host, _)| host.clone()).ok_or_else(|| "engine mode is off".to_string())
+        self.engine.as_ref().map(|(host, _)| host.clone()).ok_or_else(|| "the native engine is not running".to_string())
     }
 
     /// On exit: stop the feed, save every slot's tone (`save_tones_on_exit`, bounded on its own), unload
@@ -127,7 +101,7 @@ impl EngineApp {
     /// the engine on its owner thread. Waits at most `SHUTDOWN_WAIT`: a plugin that hangs in its save or
     /// its teardown is left to the process's exit rather than holding the app open.
     pub fn shutdown() {
-        let Some(app) = engine() else { return };
+        let Ok(app) = engine() else { return };
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         let spawned = std::thread::Builder::new().name("lf-engine-shutdown".into()).spawn(move || {
             if let Some((host, feed)) = &app.engine {
@@ -149,29 +123,6 @@ impl EngineApp {
 /// The app's one state, for a command.
 fn app() -> Result<&'static EngineApp, String> {
     APP.get().ok_or_else(|| "engine mode is not set up".to_string())
-}
-
-/// The toggle file says `off`. No file, or one that cannot be read, leaves the engine on.
-fn toggled_off(path: &std::path::Path) -> bool {
-    std::fs::read_to_string(path).is_ok_and(|text| text.trim() == "off")
-}
-
-/// Whether this launch runs on the engine.
-#[tauri::command]
-pub fn engine_mode() -> bool {
-    active()
-}
-
-/// Write the toggle for the next launch.
-#[tauri::command]
-pub async fn engine_set_mode(enabled: bool) -> Result<(), String> {
-    let path = app()?.toggle.clone().ok_or("no app-local data folder for the engine toggle")?;
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| format!("engine toggle: {e}"))?;
-    }
-    std::fs::write(&path, if enabled { "on\n" } else { "off\n" }).map_err(|e| format!("engine toggle: {e}"))?;
-    log::info!("[engine_io] engine mode {} from the next launch", if enabled { "on" } else { "off" });
-    Ok(())
 }
 
 /// Open the device, or switch to another; resolves with the device that runs. A switch to another rate
@@ -246,27 +197,7 @@ pub async fn engine_load_session(request: tauri::ipc::Request<'_>) -> Result<(),
 /// Subscribe `channel` to the feed (replacing the last subscriber); its first frame is a reset.
 #[tauri::command]
 pub async fn engine_feed(channel: Channel<FeedFrame>) -> Result<(), String> {
-    let (_, feed) = app()?.engine.as_ref().ok_or("engine mode is off")?;
+    let (_, feed) = app()?.engine.as_ref().ok_or("the native engine is not running")?;
     feed.subscribe(move |frame| channel.send(frame).is_ok());
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn only_an_off_in_the_toggle_file_turns_the_engine_off() {
-        let dir = std::env::temp_dir().join(format!("lf-engine-toggle-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join(TOGGLE_FILE);
-        let _ = std::fs::remove_file(&path);
-        assert!(!toggled_off(&path), "no file: the engine");
-        for (text, off) in [("off\n", true), ("off", true), ("on\n", false), ("", false), ("OFF", false)] {
-            std::fs::write(&path, text).unwrap();
-            assert_eq!(toggled_off(&path), off, "{text:?}");
-        }
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
 }

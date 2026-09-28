@@ -2,10 +2,9 @@
 //! as an `lf_engine::SlotProcessor`) and the engine-mode owner thread that loads, activates,
 //! restarts, re-activates after an eviction and tears it down (`engine_slot` holds the API), keeping
 //! the plugin's tone as `engine_slot` describes: the component's and the edit controller's states in
-//! one container (`save_state`, `restore_state`). It follows `vst3_owner_main` minus the RT thread,
-//! the hop-1 ring and the device; the Stage 1 spike's `PluginUnit` was the unit's prototype. The load
-//! sequence and the teardown are copied from the live owner rather than shared: nothing but a
-//! window-bound owner and a real DLL exercise those. Unlike the live owner's, this load creates the
+//! one container (`save_state`, `restore_state`). It followed the web path's VST3 owner (deleted in
+//! Stage 6) minus the RT thread, the hop-1 ring and the device; the Stage 1 spike's `PluginUnit` was
+//! the unit's prototype. Unlike that owner's, this load creates the
 //! edit controller and sets its component handler before the component activates, the SDK host's
 //! order, so a stored tone reaches both halves before anything processes; a component that refuses the
 //! tone is torn down and created again from the same module (`load`).
@@ -266,7 +265,11 @@ impl Drop for Vst3Plugin {
                     let _ = ctl.terminate();
                 }
             }
-            let _ = self.component.setActive(0);
+            // VST3 call sequence: never deactivate an inactive component (after a failed restart).
+            if self.active {
+                let _ = self.component.setActive(0);
+                self.active = false;
+            }
             let _ = self.component.terminate();
         }
     }
@@ -448,9 +451,9 @@ pub(in super::super) fn run(ctx: OwnerCtx, path: String, id: &str) -> Result<(),
 type Loaded = (Vst3Plugin, Box<Vst3Unit>, String, u32, Option<ToneRestore>);
 
 /// Create class `target` (`id`) from the factory, initialise it, create its edit controller and give it
-/// the load's component `handler`. Copied from `vst3_owner_main`'s setup, with the controller before the
-/// activation. The plugin takes the module and the factory; every error after the component exists
-/// tears it down (`Vst3Plugin`), and one before it drops the factory, then the module.
+/// the load's component `handler`, with the controller before the activation. The plugin takes the
+/// module and the factory; every error after the component exists tears it down (`Vst3Plugin`), and
+/// one before it drops the factory, then the module.
 fn create(
     opened: Opened,
     target: &TUID,
@@ -684,13 +687,6 @@ pub(super) fn run_with(
                     }
                 }
                 OwnerRequest::Wake => {}
-                // The engine owns the device; an engine handle never sends these.
-                OwnerRequest::ArmInput(_, _, _, reply) | OwnerRequest::ArmMonitor(_, _, reply) => {
-                    let _ = reply.send(Err("an engine slot has no device of its own".to_string()));
-                }
-                OwnerRequest::DisarmInput(_, reply) | OwnerRequest::DisarmMonitor(_, reply) => {
-                    let _ = reply.send(Ok(()));
-                }
             }
         }
         if tone.poll(Instant::now()) {

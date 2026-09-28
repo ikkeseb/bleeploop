@@ -1,15 +1,11 @@
 //! A VST3 component implemented in Rust through the real `IComponent` + `IAudioProcessor` vtables
-//! (the `vst3` crate's `ComWrapper`), with counting lifecycle methods, activated by the production
-//! `activate_component` and driven by the production RT producer (`vst3_producer_loop`) against a
-//! plain heap ring in place of the WebView2 SharedBuffer. Proves the plugin-initiated restart
-//! cycle: `setProcessing(0)` on the RT thread → `setActive(0)` → `setupProcessing` → `setActive(1)`
-//! on the owner → RT resumed, with the layout re-queried and nothing dropped. The engine-mode tests
-//! at the end create the same component through an in-process factory and load it with
-//! `engine_slot` into a test device's engine. No DLL, audio device or GUI required.
-use super::super::super::transport::HOP1_HEADER_BYTES;
+//! (the `vst3` crate's `ComWrapper`), with counting lifecycle methods, and the host `MemStream`
+//! tests. The engine-mode tests create the component through an in-process factory and load it with
+//! `engine_slot` into a test device's engine, where the production `activate_component` activates it
+//! and a plugin-requested restart cycles it on the owner. No DLL, audio device or GUI required.
 use super::*;
 use rtrb::RingBuffer;
-use std::sync::atomic::{AtomicU64, AtomicUsize};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize};
 use std::thread::ThreadId;
 use vst3::Steinberg::Vst::{IoMode, MediaType, RoutingInfo, SpeakerArrangement};
 use vst3::Steinberg::{IBStream, TBool};
@@ -38,10 +34,6 @@ struct FixtureComponent {
     /// activations to stand in for a `kIoChanged` / `kLatencyChanged` the host must re-query.
     out_channels: AtomicI32,
     latency: AtomicU32,
-    /// A plugin that reports a restart from inside `setActive(1)` (a `kLatencyChanged` once its
-    /// buffers exist is common). The cycle must consume it, not schedule another cycle.
-    raise_on_activate: Option<Arc<RestartFlags>>,
-    reject_processing_start: bool,
     main_thread_calls: Mutex<Vec<ThreadId>>,
     /// A separated edit controller's class (the engine-mode factory's); `None` = no controller.
     controller_cid: Option<TUID>,
@@ -69,6 +61,8 @@ struct FixtureComponent {
     terminate_seq: AtomicUsize,
     /// The component's state: what `getState` writes and `setState` replaces (the tone tests).
     state: Mutex<Vec<u8>>,
+    /// `setProcessing(1)` answers `kResultFalse` (a plugin that refuses to start processing).
+    reject_processing_start: AtomicBool,
     /// `setState` refuses whatever it is given.
     refuse_state: AtomicBool,
     /// `setState` applies what it is given, then refuses: a plugin that takes the fields it knows
@@ -80,7 +74,7 @@ struct FixtureComponent {
 }
 
 impl FixtureComponent {
-    fn new(raise_on_activate: Option<Arc<RestartFlags>>, reject_processing_start: bool) -> Self {
+    fn new() -> Self {
         Self {
             owner: std::thread::current().id(),
             active: AtomicBool::new(false),
@@ -94,8 +88,6 @@ impl FixtureComponent {
             contract_violation: AtomicBool::new(false),
             out_channels: AtomicI32::new(2),
             latency: AtomicU32::new(0),
-            raise_on_activate,
-            reject_processing_start,
             main_thread_calls: Mutex::new(Vec::new()),
             controller_cid: None,
             inputs: AtomicI32::new(0),
@@ -115,6 +107,7 @@ impl FixtureComponent {
             deactivate_seq: AtomicUsize::new(0),
             terminate_seq: AtomicUsize::new(0),
             state: Mutex::new(Vec::new()),
+            reject_processing_start: AtomicBool::new(false),
             refuse_state: AtomicBool::new(false),
             half_apply_state: AtomicBool::new(false),
             set_states: AtomicUsize::new(0),
@@ -208,9 +201,6 @@ impl IComponentTrait for FixtureComponent {
         if state != 0 {
             self.violate_if(self.active.swap(true, Relaxed));
             self.activations.fetch_add(1, Relaxed);
-            if let Some(flags) = &self.raise_on_activate {
-                flags.raise(RestartFlags_::kLatencyChanged);
-            }
         } else {
             self.violate_if(!self.active.swap(false, Relaxed) || self.processing.load(Relaxed));
             self.tick(&self.deactivate_seq);
@@ -397,7 +387,7 @@ impl IAudioProcessorTrait for FixtureComponent {
         self.off_device();
         if state != 0 {
             self.starts.fetch_add(1, Relaxed);
-            if self.reject_processing_start {
+            if self.reject_processing_start.load(Relaxed) {
                 return kResultFalse;
             }
             self.violate_if(self.processing.swap(true, Relaxed));
@@ -467,48 +457,6 @@ impl IAudioProcessorTrait for FixtureComponent {
     }
 }
 
-/// Stands in for the JS consumer (the worklet) for the rest of a test: a thread keeps the hop-1 read
-/// cursor (header word [1]) caught up with the write cursor ([0]), through the restart too. Like the
-/// worklet's render thread it runs at audio priority (MMCSS Pro Audio, as the producer does), so the
-/// test threads beside it cannot starve it, and it spins (`yield_now`): a 1 ms sleep can round up to
-/// the 15.6 ms timer tick Windows grants, past the ring's slack. Stops and joins on drop, so it never
-/// outlives the ring it reads.
-struct Drain {
-    stop: Arc<AtomicBool>,
-    join: Option<std::thread::JoinHandle<()>>,
-}
-
-impl Drain {
-    /// SAFETY: `header` points at the ring's two 4-byte-aligned cursor words, which outlive the
-    /// `Drain` (drop it before the ring); the RT thread is the sole writer of [0] and the sole reader
-    /// of [1], mirroring the WebView2 contract.
-    unsafe fn start(header: *mut u32) -> Drain {
-        let addr = header as usize;
-        let stop = Arc::new(AtomicBool::new(false));
-        let stopped = stop.clone();
-        let join = std::thread::spawn(move || {
-            crate::engine_io::promote_pro_audio();
-            let header = addr as *mut u32;
-            // SAFETY: the caller's contract above.
-            let (write_idx, read_idx) = unsafe { (AtomicU32::from_ptr(header), AtomicU32::from_ptr(header.add(1))) };
-            while !stopped.load(Acquire) {
-                read_idx.store(write_idx.load(Acquire), Release);
-                std::thread::yield_now();
-            }
-        });
-        Drain { stop, join: Some(join) }
-    }
-}
-
-impl Drop for Drain {
-    fn drop(&mut self) {
-        self.stop.store(true, Release);
-        if let Some(join) = self.join.take() {
-            let _ = join.join();
-        }
-    }
-}
-
 /// Spin until `pred` holds or `ms` elapse; returns whether it held.
 fn wait_for(ms: u64, pred: impl Fn() -> bool) -> bool {
     let deadline = Instant::now() + Duration::from_millis(ms);
@@ -519,350 +467,6 @@ fn wait_for(ms: u64, pred: impl Fn() -> bool) -> bool {
         std::thread::sleep(Duration::from_millis(1));
     }
     pred()
-}
-
-#[test]
-fn plugin_requested_restart_cycles_activation_on_the_owner_without_reload() {
-    const CAP_FRAMES: u32 = 1024; // power of two (the hop-1 ring masks)
-    const MAX_FRAMES: u32 = 512;
-    const RATE: f64 = 48_000.0;
-
-    let restart = Arc::new(RestartFlags::default());
-    let fixture = ComWrapper::new(FixtureComponent::new(Some(restart.clone()), false));
-    let s: &FixtureComponent = &fixture;
-    let component = fixture.to_com_ptr::<IComponent>().unwrap();
-    // The production host reaches the processor the same way: a cast on the component.
-    let processor = component.cast::<IAudioProcessor>().unwrap();
-
-    // A plain heap ring stands in for the WebView2 SharedBuffer: header + f32 data, 4-byte aligned.
-    let mut ring = vec![0u32; HOP1_HEADER_BYTES / 4 + CAP_FRAMES as usize];
-    let cfg = Vst3RtConfig {
-        slot: 0,
-        shared_ptr: ring.as_mut_ptr() as usize,
-        cap_frames: CAP_FRAMES,
-        max_frames: MAX_FRAMES,
-        sample_rate: RATE,
-        device_rate: RATE,
-    };
-    let diag = Arc::new(ProducerDiag::new());
-    diag.init(RATE, RATE, MAX_FRAMES, 2, CAP_FRAMES as usize, 256, 1);
-
-    // Load: the one activation sequence.
-    let mut activation =
-        unsafe { activate_component(&component, &processor, RATE, MAX_FRAMES) }.unwrap();
-    assert_eq!(
-        activation,
-        Activation {
-            out_channels: 2,
-            in_channels: 0,
-            latency_frames: 0
-        }
-    );
-    assert_eq!(s.setups.load(Relaxed), 1);
-    assert_eq!(s.activations.load(Relaxed), 1);
-    // A plugin reporting from inside setActive(1) at LOAD is drained by the owner loop's first turn
-    // like any other request; here the test stands in for that turn.
-    assert_eq!(restart.take(), RestartFlags_::kLatencyChanged);
-
-    let (_event_tx, event_rx) = RingBuffer::<PluginEvent>::new(16);
-    let (_in_tx, in_rx) = RingBuffer::<f32>::new(16);
-    let (mon_tx, _mon_rx) = RingBuffer::<f32>::new(16);
-    let mut rt_guard = Some(
-        spawn_vst3_rt(
-            &cfg,
-            processor,
-            RtRings {
-                event_rx,
-                in_rx,
-                mon_tx,
-            },
-            activation,
-            128,
-            super::super::BLOCK_CONFIG_GEN.load(Acquire),
-            0.0,
-            diag.clone(),
-        )
-        .unwrap(),
-    );
-    assert!(
-        wait_for(2000, || s.processes.load(Relaxed) > 4),
-        "the production RT loop must process the fixture"
-    );
-    assert_eq!(s.starts.load(Relaxed), 1, "setProcessing(1) ran once, on the RT thread");
-
-    // The JS consumer, kept caught up from here to the end: the producer runs well past one ring
-    // capacity first, so a restart that forgot the cursor would wrap `used` and drop every block
-    // (the 2026-09-10 CLAP runtime finding).
-    // SAFETY: the ring outlives `drain` (dropped before it at the end); see `Drain::start`.
-    let drain = unsafe { Drain::start(ring.as_mut_ptr()) };
-    // SAFETY: header word [0], 4-byte aligned; this thread only reads it.
-    let write_idx = unsafe { AtomicU32::from_ptr(ring.as_mut_ptr()) };
-    assert!(
-        wait_for(4000, || write_idx.load(Acquire) > CAP_FRAMES * 2),
-        "the producer must publish past one ring capacity with a draining reader"
-    );
-    let written_before_restart = write_idx.load(Acquire);
-    let dropped_before_restart = diag.frames_dropped.load(Relaxed);
-
-    // The request arrives from a foreign thread (a plugin ignoring the main-thread rule) and must
-    // allocate nothing under the RT alloc guard: the handler body is `RestartFlags::raise`.
-    let raiser = restart.clone();
-    std::thread::spawn(move || {
-        #[cfg(debug_assertions)]
-        let allocations_before = super::super::super::rt_alloc::RT_ALLOCS.load(Relaxed);
-        {
-            #[cfg(debug_assertions)]
-            let _guard = super::super::super::rt_alloc::guard();
-            raiser.raise(RestartFlags_::kIoChanged);
-            raiser.raise(RestartFlags_::kLatencyChanged);
-        }
-        #[cfg(debug_assertions)]
-        assert_eq!(
-            super::super::super::rt_alloc::RT_ALLOCS.load(Relaxed),
-            allocations_before,
-            "raising a restart must allocate nothing"
-        );
-    })
-    .join()
-    .unwrap();
-    assert_eq!(
-        s.deactivations.load(Relaxed),
-        0,
-        "the request itself must not run lifecycle code inline"
-    );
-
-    // Owner turn: the burst drains once, OR-ed, and the cycle runs. Meanwhile the plugin changed
-    // what it reports (mono out, 64 frames latency) — the cycle must re-query, not reuse.
-    let flags = restart.take();
-    assert_eq!(flags, RestartFlags_::kIoChanged | RestartFlags_::kLatencyChanged);
-    assert_eq!(restart.take(), 0, "a burst coalesces into one cycle");
-    s.out_channels.store(1, Relaxed);
-    s.latency.store(64, Relaxed);
-    let processed_before = s.processes.load(Relaxed);
-    service_vst3_restart(
-        flags,
-        &component,
-        &mut rt_guard,
-        &cfg,
-        &mut activation,
-        &restart,
-        &diag,
-    )
-    .unwrap();
-    assert!(rt_guard.is_some(), "a fresh RT producer replaces the joined one");
-    assert_eq!(s.stops.load(Relaxed), 1, "setProcessing(0) ran on the RT thread before setActive(0)");
-    assert_eq!(s.deactivations.load(Relaxed), 1);
-    assert_eq!(s.setups.load(Relaxed), 2, "setupProcessing ran again while inactive");
-    assert_eq!(s.activations.load(Relaxed), 2, "setActive(1) ran again on the same component");
-    assert_eq!(
-        activation,
-        Activation {
-            out_channels: 1,
-            in_channels: 0,
-            latency_frames: 64
-        },
-        "the cycle re-queried the layout the plugin now reports"
-    );
-    assert_eq!(
-        restart.take(),
-        0,
-        "the kLatencyChanged the plugin raised from inside setActive(1) was consumed by the cycle, not queued as another"
-    );
-    assert!(
-        wait_for(2000, || s.starts.load(Relaxed) == 2
-            && s.processes.load(Relaxed) > processed_before + 4),
-        "the respawned RT producer must resume processing"
-    );
-    // The hop-1 write cursor continues from where the joined producer left it (the JS reader is
-    // still at its old position), and — with the reader kept caught up — nothing is dropped.
-    assert!(
-        wait_for(2000, || write_idx.load(Acquire) > written_before_restart + CAP_FRAMES),
-        "the respawned producer must continue the published write cursor, not restart it at 0"
-    );
-    assert_eq!(
-        diag.frames_dropped.load(Relaxed),
-        dropped_before_restart,
-        "no hop-1 frame may be dropped across the restart while the reader keeps up"
-    );
-
-    // Unload path: the same guard handshake, then deactivate on the owner (as `teardown` does).
-    let exit = rt_guard.take().unwrap().stop_and_join().unwrap();
-    assert_eq!(exit.period_frames, 128, "the respawn continued at the reconciled block");
-    unsafe {
-        assert_eq!(component.setActive(0), kResultOk);
-    }
-    drop(exit);
-    assert_eq!(s.stops.load(Relaxed), 2);
-    assert_eq!(s.deactivations.load(Relaxed), 2);
-    assert!(
-        !s.contract_violation.load(Relaxed),
-        "setActive/setupProcessing on the owner thread only, setProcessing/process on the RT thread only, never process while inactive, never setActive(0) while processing"
-    );
-    let owner = std::thread::current().id();
-    assert!(
-        s.main_thread_calls.lock().unwrap().iter().all(|t| *t == owner),
-        "every setActive/setupProcessing happened on the owner thread"
-    );
-    assert_eq!(diag.rt_faults.load(Relaxed), 0, "no RT fault was latched across the cycle");
-    drop(component);
-    drop(drain);
-    drop(ring);
-}
-
-#[test]
-fn a_failed_reactivation_leaves_the_slot_silent_but_serviceable() {
-    const CAP_FRAMES: u32 = 1024;
-    const MAX_FRAMES: u32 = 512;
-    const RATE: f64 = 48_000.0;
-
-    let restart = Arc::new(RestartFlags::default());
-    let fixture = ComWrapper::new(FixtureComponent::new(None, false));
-    let s: &FixtureComponent = &fixture;
-    let component = fixture.to_com_ptr::<IComponent>().unwrap();
-    let processor = component.cast::<IAudioProcessor>().unwrap();
-    let mut ring = vec![0u32; HOP1_HEADER_BYTES / 4 + CAP_FRAMES as usize];
-    let cfg = Vst3RtConfig {
-        slot: 1,
-        shared_ptr: ring.as_mut_ptr() as usize,
-        cap_frames: CAP_FRAMES,
-        max_frames: MAX_FRAMES,
-        sample_rate: RATE,
-        device_rate: RATE,
-    };
-    let diag = Arc::new(ProducerDiag::new());
-    diag.init(RATE, RATE, MAX_FRAMES, 2, CAP_FRAMES as usize, 256, 1);
-    let mut activation =
-        unsafe { activate_component(&component, &processor, RATE, MAX_FRAMES) }.unwrap();
-    let (_event_tx, event_rx) = RingBuffer::<PluginEvent>::new(16);
-    let (_in_tx, in_rx) = RingBuffer::<f32>::new(16);
-    let (mon_tx, _mon_rx) = RingBuffer::<f32>::new(16);
-    let mut rt_guard = Some(
-        spawn_vst3_rt(
-            &cfg,
-            processor,
-            RtRings {
-                event_rx,
-                in_rx,
-                mon_tx,
-            },
-            activation,
-            128,
-            super::super::BLOCK_CONFIG_GEN.load(Acquire),
-            0.0,
-            diag.clone(),
-        )
-        .unwrap(),
-    );
-    assert!(wait_for(2000, || s.processes.load(Relaxed) > 4));
-
-    // The plugin now reports an output channel count the host refuses (0 channels), so the
-    // re-activation fails after setActive(0): the slot goes silent, the component stays inactive.
-    s.out_channels.store(0, Relaxed);
-    let err = service_vst3_restart(
-        RestartFlags_::kIoChanged,
-        &component,
-        &mut rt_guard,
-        &cfg,
-        &mut activation,
-        &restart,
-        &diag,
-    )
-    .unwrap_err();
-    assert!(err.contains("VST3 output bus 0"), "{err}");
-    assert!(rt_guard.is_none(), "no producer runs after a failed re-activation");
-    assert_eq!(s.stops.load(Relaxed), 1);
-    assert_eq!(s.deactivations.load(Relaxed), 1);
-    assert_eq!(s.activations.load(Relaxed), 1, "setActive(1) never ran on the refused layout");
-    assert_eq!(activation.out_channels, 2, "the last good activation is kept for the log");
-    // A second request has nothing to restart and says so; unload's setActive(0) is harmless.
-    let err = service_vst3_restart(
-        RestartFlags_::kIoChanged,
-        &component,
-        &mut rt_guard,
-        &cfg,
-        &mut activation,
-        &restart,
-        &diag,
-    )
-    .unwrap_err();
-    assert!(err.contains("no RT producer"), "{err}");
-    assert!(!s.contract_violation.load(Relaxed));
-    drop(component);
-    drop(ring);
-}
-
-#[test]
-fn rejected_processing_start_never_enters_process_and_latches_the_fault() {
-    const CAP_FRAMES: u32 = 1024;
-    const MAX_FRAMES: u32 = 512;
-    const RATE: f64 = 48_000.0;
-
-    let fixture = ComWrapper::new(FixtureComponent::new(None, true));
-    let s: &FixtureComponent = &fixture;
-    let component = fixture.to_com_ptr::<IComponent>().unwrap();
-    let processor = component.cast::<IAudioProcessor>().unwrap();
-    let mut ring = vec![0u32; HOP1_HEADER_BYTES / 4 + CAP_FRAMES as usize];
-    let cfg = Vst3RtConfig {
-        slot: 0,
-        shared_ptr: ring.as_mut_ptr() as usize,
-        cap_frames: CAP_FRAMES,
-        max_frames: MAX_FRAMES,
-        sample_rate: RATE,
-        device_rate: RATE,
-    };
-    let diag = Arc::new(ProducerDiag::new());
-    diag.init(RATE, RATE, MAX_FRAMES, 2, CAP_FRAMES as usize, 256, 1);
-    let activation =
-        unsafe { activate_component(&component, &processor, RATE, MAX_FRAMES) }.unwrap();
-    let (_event_tx, event_rx) = RingBuffer::<PluginEvent>::new(16);
-    let (_in_tx, in_rx) = RingBuffer::<f32>::new(16);
-    let (mon_tx, _mon_rx) = RingBuffer::<f32>::new(16);
-    let guard = spawn_vst3_rt(
-        &cfg,
-        processor,
-        RtRings {
-            event_rx,
-            in_rx,
-            mon_tx,
-        },
-        activation,
-        128,
-        super::super::BLOCK_CONFIG_GEN.load(Acquire),
-        0.0,
-        diag.clone(),
-    )
-    .unwrap();
-
-    // The RT thread returns before its loop, so the join alone is deterministic here.
-    let exit = guard.stop_and_join().unwrap();
-    assert_eq!(
-        s.starts.load(Relaxed),
-        1,
-        "setProcessing(1) was attempted once"
-    );
-    assert_eq!(
-        s.processes.load(Relaxed),
-        0,
-        "process must not run after setProcessing(1) failed"
-    );
-    assert_eq!(
-        s.stops.load(Relaxed),
-        0,
-        "a processor that never started must not be stopped"
-    );
-    assert_ne!(
-        diag.rt_faults.load(Relaxed) & RtFault::Vst3Process as u32,
-        0,
-        "the rejected start must latch the VST3 process fault"
-    );
-    unsafe {
-        assert_eq!(component.setActive(0), kResultOk);
-    }
-    drop(exit);
-    assert_eq!(s.deactivations.load(Relaxed), 1);
-    assert!(!s.contract_violation.load(Relaxed));
-    drop(component);
-    drop(ring);
 }
 
 // ── engine mode: the same component as a unit inside a test device's engine (`engine_slot`) ─────
@@ -926,6 +530,8 @@ mod engine {
         inputs: i32,
         /// What every component it makes does with a `setState`.
         answer: StateAnswer,
+        /// Every component it makes refuses `setProcessing(1)`.
+        reject_start: bool,
     }
 
     impl Class for FixtureFactory {
@@ -957,13 +563,14 @@ mod engine {
             // SAFETY: a class id is 16 bytes; `obj` is the host's out-pointer.
             let cid = *(cid as *const TUID);
             if cid == COMPONENT_CID {
-                let mut component = FixtureComponent::new(None, false);
+                let mut component = FixtureComponent::new();
                 component.controller_cid = Some(CONTROLLER_CID);
                 component.latency.store(self.latency, Relaxed);
                 component.output_level.store(self.output_level.to_bits(), Relaxed);
                 component.inputs.store(self.inputs, Relaxed);
                 component.refuse_state.store(self.answer == StateAnswer::Refuses, Relaxed);
                 component.half_apply_state.store(self.answer == StateAnswer::HalfAppliesThenRefuses, Relaxed);
+                component.reject_processing_start.store(self.reject_start, Relaxed);
                 let wrapper = ComWrapper::new(component);
                 *obj = wrapper.to_com_ptr::<IComponent>().unwrap().into_raw().cast();
                 *self.made.component.lock().unwrap() = Some(wrapper);
@@ -1020,6 +627,23 @@ mod engine {
         tone: Option<ToneBinding>,
         answer: StateAnswer,
     ) -> (EngineSlotHandle, Arc<Made>, Arc<Mutex<Vec<EngineSlotEvent>>>) {
+        load_factory(device, slot, tone, move |made| FixtureFactory {
+            made,
+            latency,
+            output_level,
+            inputs,
+            answer,
+            reject_start: false,
+        })
+    }
+
+    /// Load through the engine-mode owner with the factory `make` builds (on the owner thread).
+    fn load_factory(
+        device: &TestDevice,
+        slot: usize,
+        tone: Option<ToneBinding>,
+        make: impl FnOnce(Arc<Made>) -> FixtureFactory + Send + 'static,
+    ) -> (EngineSlotHandle, Arc<Made>, Arc<Mutex<Vec<EngineSlotEvent>>>) {
         let made = Arc::new(Made::default());
         let seen = Arc::new(Mutex::new(Vec::new()));
         let (factory_made, sink_seen) = (made.clone(), seen.clone());
@@ -1032,8 +656,7 @@ mod engine {
             move |ctx| {
                 let id = super::super::super::super::scan::tuid_to_hex(&COMPONENT_CID);
                 super::super::engine::run_with(ctx, &id, move || {
-                    let factory =
-                        ComWrapper::new(FixtureFactory { made: factory_made, latency, output_level, inputs, answer });
+                    let factory = ComWrapper::new(make(factory_made));
                     Ok((None, factory.to_com_ptr::<IPluginFactory>().ok_or("factory COM failed")?))
                 })
             },
@@ -1142,6 +765,108 @@ mod engine {
         assert!(owner.iter().all(|t| *t == owner[0]) && owner[0] != std::thread::current().id());
         assert_eq!(installed(&device, 0), Some((SlotKind::Instrument, 64)), "reinstalled at the latency it reports now");
         handle.unload().unwrap();
+    }
+
+    /// A restart into a layout the host refuses (0 output channels, `activate_component`'s channel
+    /// check): the cycle fails after `setActive(0)`, the slot stays bypassed and silent with the
+    /// component inactive, and the unload still tears it down in order.
+    #[test]
+    fn a_restart_into_a_refused_layout_leaves_the_slot_bypassed_and_unloadable() {
+        let _one = engine_slot::one_engine_test_at_a_time();
+        let device = device(48_000);
+        let (handle, made, _) = load(&device, 0, 0, 0.25);
+        let s = made.component();
+        assert!(wait_for(2000, || s.processes.load(Relaxed) > 8 && !rendered_near(&device, 0.0)), "it plays");
+
+        s.out_channels.store(0, Relaxed);
+        let reporter = plugin_side_handler(&made);
+        std::thread::spawn(move || {
+            // SAFETY: the handler is alive (held by the controller and this clone).
+            assert_eq!(unsafe { reporter.restartComponent(RestartFlags_::kIoChanged) }, kResultOk);
+        })
+        .join()
+        .unwrap();
+        assert!(
+            wait_for(2000, || s.deactivations.load(Relaxed) == 1 && rendered_near(&device, 0.0)),
+            "the cycle ran setActive(0) and the slot went silent"
+        );
+        // The cycle runs on the owner in one turn; past it, a reactivation would have shown by now.
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(rendered_near(&device, 0.0), "still silent");
+        assert_eq!(installed(&device, 0), None, "the refused unit stays out of the engine");
+        assert_eq!(s.activations.load(Relaxed), 1, "setActive(1) never ran on the refused layout");
+        assert_eq!(s.setups.load(Relaxed), 1, "refused at the bus read-back, before setupProcessing");
+        assert!(!s.active.load(Relaxed), "the component is left inactive");
+        assert!(!s.contract_violation.load(Relaxed), "the failed cycle kept the call sequence");
+
+        handle.unload().expect("a bypassed slot still unloads");
+        assert_eq!(s.deactivations.load(Relaxed), 1, "the unload sends no setActive(0) to an inactive component");
+        assert!(s.terminate_seq.load(Relaxed) > 0, "terminated");
+        assert!(!s.contract_violation.load(Relaxed), "and the unload kept the call sequence");
+    }
+
+    /// A plugin that refuses `setProcessing(1)` in the engine: asked once, never processed, silent,
+    /// and never sent a `setProcessing(0)` it did not start; it still unloads in order.
+    #[test]
+    fn a_refused_processing_start_leaves_the_installed_slot_silent_and_unloadable() {
+        let _one = engine_slot::one_engine_test_at_a_time();
+        let device = device(48_000);
+        let (handle, made, _) = load_refusing_start(&device, 0);
+        let s = made.component();
+        assert!(wait_for(2000, || s.starts.load(Relaxed) == 1), "the engine asks it to start");
+        let blocks = device.blocks.load(Relaxed);
+        assert!(wait_for(2000, || device.blocks.load(Relaxed) > blocks + 8), "the device keeps rendering");
+        assert_eq!(s.starts.load(Relaxed), 1, "asked once, not every block");
+        assert_eq!(s.processes.load(Relaxed), 0, "process never runs after the refusal");
+        assert!(rendered_near(&device, 0.0), "the slot is silent");
+        assert_eq!(installed(&device, 0), Some((SlotKind::Instrument, 0)), "it stays installed until reinstalled");
+
+        handle.unload().expect("it unloads");
+        assert_eq!(s.stops.load(Relaxed), 0, "a processor that never started is not stopped");
+        assert_eq!(s.deactivations.load(Relaxed), 1);
+        assert!(!s.contract_violation.load(Relaxed));
+    }
+
+    /// A full parameter queue: the set is refused and the edit controller never hears the value the
+    /// processor did not get. A plugin that refuses to start keeps the unit from draining the ring.
+    #[test]
+    fn a_param_set_into_a_full_queue_is_refused_and_never_reaches_the_controller() {
+        let _one = engine_slot::one_engine_test_at_a_time();
+        let device = device(48_000);
+        let (handle, made, _) = load_refusing_start(&device, 0);
+        let s = made.component();
+        assert!(wait_for(2000, || s.starts.load(Relaxed) == 1), "installed; the ring is never drained now");
+        let capacity = super::super::super::EVENT_RING_CAP;
+        for i in 0..capacity {
+            handle.set_param(1001, i as f64 / capacity as f64).expect("the queue has room");
+        }
+        let err = handle.set_param(1001, 0.999).expect_err("the queue is full");
+        assert!(err.contains("event queue is full"), "{err}");
+        let controller = made.controller();
+        assert!(
+            wait_for(5000, || controller.set_normalized.lock().unwrap().len() == capacity),
+            "the controller hears every value the queue took"
+        );
+        std::thread::sleep(Duration::from_millis(100)); // a few more owner turns
+        let heard = controller.set_normalized.lock().unwrap().clone();
+        assert_eq!(heard.len(), capacity, "and nothing more");
+        assert!(heard.iter().all(|&(_, value)| value != 0.999), "the refused value never reaches it");
+        handle.unload().unwrap();
+    }
+
+    /// `load` with a component that refuses `setProcessing(1)` (output 0.25, were it to play).
+    fn load_refusing_start(
+        device: &TestDevice,
+        slot: usize,
+    ) -> (EngineSlotHandle, Arc<Made>, Arc<Mutex<Vec<EngineSlotEvent>>>) {
+        load_factory(device, slot, None, |made| FixtureFactory {
+            made,
+            latency: 0,
+            output_level: 0.25,
+            inputs: 0,
+            answer: StateAnswer::Takes,
+            reject_start: true,
+        })
     }
 
     #[test]
@@ -1355,6 +1080,47 @@ mod engine {
     }
 }
 
+/// The unit on its own, with a plugin that refuses `setProcessing(1)`: the refusal latches
+/// `FAULT_START` (what the owner reports), the unit stays silent without asking again or entering
+/// `process`, and its stop sends no `setProcessing(0)`.
+#[test]
+fn a_unit_whose_plugin_refuses_to_start_latches_the_fault_and_stays_silent() {
+    use super::engine::Vst3Unit;
+    use lf_engine::SlotProcessor;
+
+    let fixture = ComWrapper::new(FixtureComponent::new());
+    let s: &FixtureComponent = &fixture;
+    s.output_level.store(0.5f32.to_bits(), Relaxed);
+    s.reject_processing_start.store(true, Relaxed);
+    let component = fixture.to_com_ptr::<IComponent>().unwrap();
+    let processor = component.cast::<IAudioProcessor>().unwrap();
+    let activation = unsafe { activate_component(&component, &processor, 48_000.0, 64) }.unwrap();
+    let (_params, ring) = RingBuffer::<PluginEvent>::new(8);
+    let faults = Arc::new(AtomicU32::new(0));
+    let unit = Vst3Unit::new(processor, activation, 64, ring, faults.clone()).unwrap();
+    let unit = std::thread::spawn(move || {
+        let mut unit = unit;
+        let (input, mut out) = ([0.0f32; 64], [1.0f32; 64]);
+        for frame in 0..3 {
+            unit.process(frame * 64, &input, &[], &mut out);
+            assert!(out.iter().all(|&x| x == 0.0), "silent");
+        }
+        unit.stop();
+        unit
+    })
+    .join()
+    .unwrap();
+    assert_eq!(faults.load(Relaxed), super::super::engine_slot::FAULT_START, "the refusal is latched");
+    assert_eq!(s.starts.load(Relaxed), 1, "asked once");
+    assert_eq!(s.processes.load(Relaxed), 0);
+    assert_eq!(s.stops.load(Relaxed), 0, "never started, never stopped");
+    drop(unit);
+    unsafe {
+        assert_eq!(component.setActive(0), kResultOk);
+    }
+    assert!(!s.contract_violation.load(Relaxed));
+}
+
 /// The unit on its own: a call longer than the plugin's max frames goes in slices, each note lands
 /// in its slice at its offset there, ring params go into the first, the outputs are summed to mono,
 /// and nothing allocates once processing has started.
@@ -1364,7 +1130,7 @@ fn a_unit_slices_a_long_call_places_each_event_and_allocates_nothing() {
     use super::engine::Vst3Unit;
     use lf_engine::{SlotEvent, SlotEventKind, SlotProcessor};
 
-    let fixture = ComWrapper::new(FixtureComponent::new(None, false));
+    let fixture = ComWrapper::new(FixtureComponent::new());
     let s: &FixtureComponent = &fixture;
     s.output_level.store(0.5f32.to_bits(), Relaxed);
     let component = fixture.to_com_ptr::<IComponent>().unwrap();
