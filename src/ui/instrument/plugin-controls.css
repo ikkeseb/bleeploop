@@ -53,23 +53,13 @@
 }
 /* GO LIVE at rest: the row's primary action (hearing yourself through the effect), so it carries the
    play colour before it is armed — armed lights the face + dot via the shared `.on-green`. */
-.tgl.live:not(.on-green, .is-degraded) {
+.tgl.live:not(.on-green) {
   color: color-mix(in srgb, var(--play) 80%, var(--dim));
   border-color: color-mix(in srgb, var(--play) 35%, transparent);
 }
-.tgl.live:not(.on-green, .is-degraded):hover:not(:disabled) {
+.tgl.live:not(.on-green):hover:not(:disabled) {
   color: var(--play);
   border-color: color-mix(in srgb, var(--play) 60%, transparent);
-}
-/* WEB MONITOR fallback: still live, but the native low-latency monitor was lost — so it must NOT wear
-   the healthy `.on-green`. It takes the --dub warning legend, and the live dot turns amber with it. */
-.tgl.live.is-degraded {
-  color: var(--dub);
-  border-color: color-mix(in srgb, var(--dub) 45%, transparent);
-}
-.tgl.live.is-degraded .tgl__dot {
-  background: var(--dub);
-  box-shadow: 0 0 6px var(--dub);
 }
 /* the PARAMS drawer-disclosure pill — a caret that flips when open */
 .slot__params {

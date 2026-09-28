@@ -562,23 +562,6 @@
   }
 }
 
-/* ---- looper-unavailable warning (crossOriginIsolated false) ---- */
-.lp__unavailable {
-  flex: 0 0 auto;
-  margin: 0 0 8px;
-  padding: 10px 14px;
-  border: 1px solid var(--dub);
-  border-radius: 10px;
-  background: color-mix(in srgb, var(--dub) 14%, transparent);
-  color: var(--text);
-  font-size: 12px;
-  line-height: 1.5;
-}
-.lp__unavailable code {
-  font-family: var(--mono);
-  color: var(--dub);
-}
-
 /* ---- the FX drawer: docked directly UNDER its owning lane (the lane's own drawer) ----
    A panel inserted as a flex sibling right after the selected lane, so it reads as that lane's
    drawer; the five lanes (flex 1 1 0) share the remaining height while it's open. It sizes to its

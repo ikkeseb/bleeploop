@@ -1,90 +1,28 @@
-import { engine } from '../audio/engine';
-import { initAudioDeviceSettings, refreshAndPruneDevices } from '../audio/audio-devices';
-import { availablePlugins, restorePlugin, resyncNativeSlots, scanForPlugins } from '../audio/instrument';
-import { recallRig } from '../audio/rig-recall';
-import { setNativeHostReady } from '../audio/instrument-slots';
-import { pluginBridge, type PluginBufferMeta } from '../audio/plugin-bridge';
-import { warm as warmCapture } from '../audio/looper/capture';
+import { initAudioDeviceSettings, refreshAndPruneDevices } from '../ui/state/audio-devices';
+import { availablePlugins, restorePlugin, resyncNativeSlots, scanForPlugins } from '../ui/state/instrument';
+import { recallRig } from '../ui/state/rig-recall';
+import { setNativeHostReady } from '../ui/state/instrument-slots';
 import { notifyError } from '../notify';
-import { engineMode, platform, registerPluginBufferSink, releasePluginBuffer } from '../platform';
+import { platform } from '../platform';
 import { CONFIRM_WINDOW_MS } from '../ui/looper/shared';
 import { refusalText, refuseOnLane } from '../ui/looper/gates';
 import { onEngineEvent, openEngineDevice, restoreEngineShare, startEngineStore, whenDevice } from '../ui/state/engine-store';
 import { session } from '../ui/state/audio';
-import { autosave } from '../audio/autosave';
+import { autosave } from '../session/autosave';
 
 /**
- * Native plugin-host boot chain (Tauri/WebView2 only — `available` is false in the browser build, so
- * this is a no-op there and the UI surfaces only the six built-in synths). Prepare the audio bridge
- * (adopt the shared ctx + load the source worklet), register the WebView2 SharedBuffer sink
- * (→ plugin-bridge), tell Rust the engine sample rate, then scan installed CLAP/VST3 plugins so the
- * slot picker can list them, and reload each slot's plugin from the last run (`rig-recall.ts`). The
- * picker drives load/editor/param from there.
- *
- * Returns a dispose fn (removes the first-gesture resume listener if it never fired). In engine mode
- * it runs `bootEngine` instead.
+ * The boot chain: subscribe to the engine's feed (its reset frame brings the engine's settings), put an
+ * engine refusal on its lane, start the ASIO driver when it is the saved choice and open the saved
+ * device. Everything that needs a running engine waits for the first device: Share output, local
+ * recovery (its restore loads into an engine at the device's rate) and the plugin host, activated at
+ * the device's rate: it resyncs the slots a WebView reload stranded, scans the installed CLAP/VST3
+ * plugins for the slot picker and reloads each slot's plugin from the last run (`rig-recall.ts`). So a
+ * launch whose device does not open never recalls the rig, and cannot forget it on the loads that
+ * would fail. The browser build has no engine (unless a DEV probe forces the fake on): it boots nothing
+ * and stays silent. Returns the dispose fn.
  */
-export function bootPluginHost(): () => void {
-  if (engineMode()) return bootEngine();
-  if (!platform.pluginHost.available) return () => {};
-  setNativeHostReady(false);
-  void (async () => {
-    try {
-      await pluginBridge.init(engine.ctx, {
-        release: releasePluginBuffer,
-        onPluginConnected: warmCapture,
-      });
-      registerPluginBufferSink(
-        (ab, meta) =>
-          void pluginBridge
-            .acceptPluginBuffer(ab, meta as PluginBufferMeta)
-            // The sink is fire-and-forget (the WebView2 sharedbufferreceived handler's sync
-            // try/catch can't see this async rejection). Catch it so a post-await wiring failure
-            // is logged, not an unhandled rejection. acceptPluginBuffer releases the buffer itself
-            // on failure.
-            .catch((err) => console.error('[app] acceptPluginBuffer failed', err)),
-      );
-      await platform.pluginHost.init(engine.ctx.sampleRate);
-      // Frontend-reload wedge fix: unload any native slot the host still holds after a WebView
-      // reload/crash-recovery (frontend reset to defaults, native slots stranded), before the
-      // user can load. Idempotent + cheap on a clean cold start (host reports nothing loaded).
-      await resyncNativeSlots();
-      await initAudioDeviceSettings();
-      // Enumerate native devices + prune any stale persisted device id up front, so the first Arm
-      // uses a valid device (or the default) without waiting for the settings popover to open.
-      await refreshAndPruneDevices();
-      // Publish selectable plugins only after driver, buffer and device preferences are ready.
-      setNativeHostReady(true);
-      await scanForPlugins();
-      // Rig recall: each slot's last plugin comes back through the normal load path, never armed.
-      await recallRig(availablePlugins(), restorePlugin);
-    } catch (e) {
-      // Never let a host-init failure become an unhandled rejection on startup; the picker just
-      // stays empty (chip reads "0 found"). The built-in synths remain fully playable.
-      console.error('[app] plugin host init failed', e);
-      notifyError('Plugin host failed to start', e);
-    }
-  })();
-  // Resume the suspended AudioContext on the first user gesture so a loaded plugin becomes
-  // audible without first having to play a built-in synth.
-  const resume = () => {
-    void engine.start();
-    window.removeEventListener('pointerdown', resume);
-  };
-  window.addEventListener('pointerdown', resume);
-  return () => window.removeEventListener('pointerdown', resume);
-}
-
-/**
- * Engine mode's boot chain: subscribe to the engine's feed (its reset frame brings the engine's
- * settings), put an engine refusal on its lane, start the ASIO driver when it is the saved choice and
- * open the saved device. Everything that needs a running engine waits for the first device: Share
- * output, local recovery (its restore loads into an engine at the device's rate) and the plugin host,
- * as in the web chain minus the SharedBuffer bridge and the Web Audio context, activated at the device's
- * rate. So a launch whose device does not open never recalls the rig, and cannot forget it on the loads
- * that would fail. Returns the dispose fn.
- */
-function bootEngine(): () => void {
+export function bootEngine(): () => void {
+  if (!platform.engine.available) return () => {};
   const stopFeed = startEngineStore();
   const stopRefusals = onEngineEvent((ev) => {
     if (ev.type !== 'Refused') return;

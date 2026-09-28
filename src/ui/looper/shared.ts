@@ -1,6 +1,6 @@
 import { createSignal, onCleanup, onMount } from 'solid-js';
 import { looper, type TrackState } from '../state/audio';
-import { framesPerBar } from '../../audio/quantize';
+import { framesPerBar } from '../state/quantize';
 
 /**
  * OWNS: the looper-UI helpers that the lanes (`Looper.tsx`, `Trim.tsx`), the waveform renderer

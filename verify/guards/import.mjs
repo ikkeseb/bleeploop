@@ -1,4 +1,4 @@
-// verify/guards/import.mjs — deterministic guard for src/audio/export/session-schema.ts (validateSession,
+// verify/guards/import.mjs — deterministic guard for src/session/session-schema.ts (validateSession,
 // and validateSessionPlugins: the slot tones engine mode's export names).
 // Imports the REAL session validator from the PURE schema module (Node TS type-stripping — import.ts
 // itself statically imports engine/looper and is browser-only) so it cannot drift from the source.
@@ -8,8 +8,8 @@
 // shapes reject. This is what SESSION IMPORT relies on to never hand looper.loadSession a payload that
 // could corrupt the master grid.
 // Run: node verify/guards/import.mjs
-import { validateSession, validateSessionPlugins } from '../../src/audio/export/session-schema.ts';
-import { framesPerBar } from '../../src/audio/quantize.ts';
+import { validateSession, validateSessionPlugins } from '../../src/session/session-schema.ts';
+import { framesPerBar } from '../../src/ui/state/quantize.ts';
 
 let fails = 0,
   checks = 0;

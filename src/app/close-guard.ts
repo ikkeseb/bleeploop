@@ -1,5 +1,5 @@
-import { autosave } from '../audio/autosave';
-import { rigRecallOnClose } from '../audio/rig-recall';
+import { autosave } from '../session/autosave';
+import { rigRecallOnClose } from '../ui/state/rig-recall';
 import { notifyError } from '../notify';
 import { confirmNativeClose, onNativeCloseRequested, platform } from '../platform';
 import { looper } from '../ui/state/audio';

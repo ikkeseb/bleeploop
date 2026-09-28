@@ -42,7 +42,7 @@ export function installCmdFit(bar: HTMLElement): () => void {
     // bar is never taller than two rows, so the stage below never jumps when a loop readout appears.
     // Third rung: TAP and END STOP (`.transport__pair`) hold row 1 only while it still fits without the
     // tools; otherwise they join the modes. Last rung: if row 1 still overflows with all three on row 2
-    // (engine mode's FADE and IN FX at 960 and 1100 px), the brand folds to its dot (app.css). Every rung
+    // (FADE and IN FX at 960 and 1100 px), the brand folds to its dot (app.css). Every rung
     // measures intrinsic widths (the folded brand reports its unfolded scrollWidth), so none can see its
     // own effect.
     const row1 = need - modes - gap;

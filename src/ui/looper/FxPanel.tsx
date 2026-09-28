@@ -1,8 +1,7 @@
 import { For, Show } from 'solid-js';
 import { looper } from '../state/audio';
 import { engineDubFeedback } from '../state/engine-store';
-import { engineMode } from '../../platform';
-import { FX_META, FX_PARAM_DEFS, type FxParamDef } from '../../audio/fx/fx';
+import { FX_META, FX_PARAM_DEFS, type FxParamDef } from '../state/fx-metadata';
 import './fxpanel.css';
 
 /**
@@ -10,7 +9,7 @@ import './fxpanel.css';
  * toggle plus its params (sliders for continuous params, a select for tempo-synced divisions).
  * All edits go through the looper's imperative setFx* API, which applies them click-free to the
  * live chain and bumps a reactive version so this panel re-reads state. No audio runs here.
- * In engine mode a last module holds the lane's DUB FEEDBACK: not an effect on what plays, but what
+ * A last module holds the lane's DUB FEEDBACK: not an effect on what plays, but what
  * an overdub keeps of the layers under it (`lf_engine::looper`), so a heading instead of a bypass key.
  */
 
@@ -127,9 +126,7 @@ export function FxPanel(props: { index: number }) {
           );
         }}
       </For>
-      <Show when={engineMode()}>
-        <DubFeedback index={props.index} />
-      </Show>
+      <DubFeedback index={props.index} />
     </div>
   );
 }

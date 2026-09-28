@@ -12,15 +12,15 @@ import {
   slotOff,
   slotPendingCounts,
   slotPlugins,
-} from '../../audio/instrument';
-import { inputArmed } from '../../audio/native-io';
+} from '../state/instrument';
+import { inputArmed } from '../state/native-io';
 import {
   pluginDescriptorKey,
   pluginPickerLabel,
   samePluginDescriptor,
-} from '../../audio/plugin-descriptor';
-import { SYNTHS } from '../../audio/synths';
-import { engineMode, platform } from '../../platform';
+} from '../state/plugin-descriptor';
+import { SYNTHS } from '../state/instruments';
+import { platform } from '../../platform';
 import { engineDevice, engineOpenFailure } from '../state/engine-store';
 import { PluginBar, PluginParams } from './PluginControls';
 import { InputPick, LiveButton, SlotVolume } from './SlotControls';
@@ -28,7 +28,7 @@ import { liveShown } from './live';
 
 /**
  * One instrument slot (A / B) — a compact card. Its header: the A/B identity button, the source picker
- * (Off in engine mode, the built-in synths, the scanned plugins), the slot's volume, and the source's
+ * (Off, the built-in instruments, the scanned plugins), the slot's volume, and the source's
  * own controls — the input pick and GO LIVE of a source that takes input, the plugin's EDITOR / PARAMS —
  * on a second line, or beside the picker when the card is wide. Below it, the plugin params drawer.
  * app.tsx's renderInstrument mounts two of these (slot 0 / slot 1). The per-slot `paramsOpen` disclosure
@@ -97,8 +97,8 @@ export function InstrumentSlot(props: { slot: 0 | 1 }) {
         >
           {letter}
         </button>
-        {/* The source picker: Off first (engine mode: no notes; GO LIVE passes the slot's input dry),
-            the built-in synths, then the native plugins (Tauri only; ONE list scales to any count). */}
+        {/* The source picker: Off first (no notes; GO LIVE passes the slot's input dry),
+            the built-in instruments, then the native plugins (Tauri only; ONE list scales to any count). */}
         <select
           class="slot__source"
           aria-label={`Source for slot ${slotIdx + 1}`}
@@ -114,11 +114,9 @@ export function InstrumentSlot(props: { slot: 0 | 1 }) {
           <option value="" hidden selected={source() === ''}>
             Updating…
           </option>
-          <Show when={engineMode()}>
-            <option value="off" selected={source() === 'off'}>
-              Off
-            </option>
-          </Show>
+          <option value="off" selected={source() === 'off'}>
+            Off
+          </option>
           <optgroup label="Built-in">
             <For each={SYNTHS}>
               {(s) => (
@@ -146,7 +144,7 @@ export function InstrumentSlot(props: { slot: 0 | 1 }) {
         {/* The source's own controls. `keyed` on the plugin so a swap remounts them (resets editor/live). */}
         <Show when={liveShown(slotIdx) || plugin()}>
           <div class="slot__acts" onClick={(e) => e.stopPropagation()}>
-            <Show when={engineMode() && liveShown(slotIdx)}>
+            <Show when={liveShown(slotIdx)}>
               <InputPick slot={slotIdx} />
             </Show>
             <Show when={liveShown(slotIdx)}>
@@ -172,7 +170,7 @@ export function InstrumentSlot(props: { slot: 0 | 1 }) {
         <span class="slot__plugin-note" role="note">
           {scanning()
             ? 'scanning plugins…'
-            : engineMode() && !engineDevice() && engineOpenFailure()
+            : !engineDevice() && engineOpenFailure()
               ? 'No audio device open — see Audio Settings'
               : 'No plugins found · CLAP in %COMMONPROGRAMFILES%\\CLAP, VST3 in %COMMONPROGRAMFILES%\\VST3 · rescan ⟳ in the command bar'}
         </span>

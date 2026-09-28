@@ -9,15 +9,6 @@ const tauriDevHost = process.env.TAURI_DEV_HOST;
 // Help's "About this build" and its copied diagnostics name the version and the commit a tester runs.
 const appVersion: string = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8')).version;
 
-// COOP/COEP make `self.crossOriginIsolated === true`, which unlocks SharedArrayBuffer +
-// Atomics — required by the looper's lock-free capture ring buffer (ringbuf.js). Set here
-// from day one (P0) and mirrored on the Tauri asset protocol later (P7). All assets are
-// local/offline, so COEP:require-corp has no downside here.
-const crossOriginIsolation = {
-  'Cross-Origin-Opener-Policy': 'same-origin',
-  'Cross-Origin-Embedder-Policy': 'require-corp',
-} as const;
-
 export default defineConfig({
   plugins: [solid()],
   // Declared in src/env.d.ts.
@@ -32,7 +23,6 @@ export default defineConfig({
     port: 1420,
     strictPort: true,
     host: tauriDevHost || false,
-    headers: { ...crossOriginIsolation },
     hmr: tauriDevHost ? { protocol: 'ws', host: tauriDevHost, port: 1421 } : undefined,
     // src-tauri/ = Rust output; .claude/ holds agent worktrees (full repo copies — a file
     // change there must never reload the live app); logs/ = runtime-gate logs.
@@ -44,7 +34,6 @@ export default defineConfig({
     // A probe run directly (without `pnpm probe`) targets localhost:1420, so a moved preview would
     // measure a stale build with no error.
     strictPort: true,
-    headers: { ...crossOriginIsolation },
   },
   // Vite matches env prefixes with startsWith — there is NO globbing, so 'TAURI_ENV_*' would never
   // match. Keep the intent (expose Tauri env vars to the frontend) with the correct literal prefix.

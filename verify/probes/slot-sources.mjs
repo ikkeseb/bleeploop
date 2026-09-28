@@ -6,8 +6,8 @@
  * - boot: a saved global input channel (from before the per-slot pick) seeds both slots: the device
  *   opens with it for each, and each slot's input pick shows it; the first reset frame sends every
  *   synth's level;
- * - engine mode has no MIC button and no input channel select in Audio Settings (the input device
- *   select stays); the web path keeps MIC and offers no Off;
+ * - there is no MIC button and no input channel select in Audio Settings (the input device select
+ *   stays);
  * - the source picker lists Off, then the Built-in synths, then the Plugins; Off on the active slot sends
  *   `SelectInstrument "Off"` and a later note goes to that target (the engine plays nothing there);
  * - both slots Off and live at once on different inputs: each input pick switches its slot's channel, and
@@ -59,8 +59,8 @@ async function boot(page) {
   await page.waitForFunction(() => window.__lf.native.opened.length >= 1, undefined, { timeout: 5000 });
   await page.evaluate(async ({ AMP, RATE, empty }) => {
     const { platform } = await import('/src/platform/index.ts');
-    const instrument = await import('/src/audio/instrument.ts');
-    const devices = await import('/src/audio/audio-devices.ts');
+    const instrument = await import('/src/ui/state/instrument.ts');
+    const devices = await import('/src/ui/state/audio-devices.ts');
     const deadline = Date.now() + 10000;
     while (!instrument.nativeHostReady() || instrument.scanning()) {
       if (Date.now() > deadline) throw new Error('native host boot did not finish');
@@ -159,7 +159,7 @@ await probe(async ({ browser, open }) => {
   const liveSent = await sent();
   assert.deepEqual(liveSent.filter((c) => c.startsWith('{"SetSlotLive"')), ['{"SetSlotLive":[0,true]}', '{"SetSlotLive":[1,true]}'],
     'going live on slot B leaves slot A live');
-  assert.deepEqual(await page.evaluate(async () => (await import('/src/audio/native-io.ts')).inputArmed()), [true, true]);
+  assert.deepEqual(await page.evaluate(async () => (await import('/src/ui/state/native-io.ts')).inputArmed()), [true, true]);
 
   // The volume per source kind.
   await clearSent();
@@ -198,13 +198,6 @@ await probe(async ({ browser, open }) => {
     assert.ok(resent.includes(JSON.stringify(c)), `the reset sends ${JSON.stringify(c)}: ${resent}`);
   }
   assert.deepEqual(consoleErrors, [], 'no console errors');
-
-  // ── The web path: MIC stays, and the picker has no Off ──────────────────────────────────────────────
-  const web = await open({ viewport: { width: 1280, height: 800 } });
-  await web.page.getByRole('button', { name: 'Mic / line input' }).waitFor();
-  const webOptions = await web.page.getByRole('combobox', { name: 'Source for slot 1', exact: true })
-    .evaluate((select) => [...select.options].filter((o) => !o.hidden).map((o) => o.value));
-  assert.deepEqual(webOptions, ['lead', 'bass', 'pad', 'piano', 'organ', 'drum'], 'the web picker lists the synths, no Off');
 
   // ── Review fixes, in a fresh profile ───────────────────────────────────────────────────────────────
   {
@@ -257,8 +250,8 @@ await probe(async ({ browser, open }) => {
     await p.evaluate(() => window.__lf.ui.closeSettings());
     // 1d. The prune (startup, Audio Settings): a pick past the saved device's inputs, then a vanished device.
     const pruned = await p.evaluate(async () => {
-      const devices = await import('/src/audio/audio-devices.ts');
-      const { writeAudioDeviceSettings, readAudioDeviceSettings } = await import('/src/audio/audio-settings.ts');
+      const devices = await import('/src/ui/state/audio-devices.ts');
+      const { writeAudioDeviceSettings, readAudioDeviceSettings } = await import('/src/ui/state/audio-settings.ts');
       writeAudioDeviceSettings({ inputDeviceId: 'other' });
       devices.saveSlotInputChannels(['3', '1']);
       await devices.refreshAndPruneDevices();
@@ -278,8 +271,8 @@ await probe(async ({ browser, open }) => {
     await p.getByRole('button', { name: 'Stop live input for slot 1', exact: true }).waitFor();
     const duringReload = (presses) => p.evaluate(async (presses) => {
       const { platform } = await import('/src/platform/index.ts');
-      const instrument = await import('/src/audio/instrument.ts');
-      const io = await import('/src/audio/native-io.ts');
+      const instrument = await import('/src/ui/state/instrument.ts');
+      const io = await import('/src/ui/state/native-io.ts');
       const { runAction } = await import('/src/app/actions.ts');
       const host = platform.pluginHost;
       const load = host.loadPlugin;
@@ -322,8 +315,8 @@ await probe(async ({ browser, open }) => {
     // 4. A pick whose unload fails is not saved; one that unloads is.
     const failedPick = await p.evaluate(async () => {
       const { platform } = await import('/src/platform/index.ts');
-      const instrument = await import('/src/audio/instrument.ts');
-      const slots = await import('/src/audio/instrument-slots.ts');
+      const instrument = await import('/src/ui/state/instrument.ts');
+      const slots = await import('/src/ui/state/instrument-slots.ts');
       const idle = async () => { while (slots.slotPendingCounts().some((n) => n > 0)) await new Promise((r) => setTimeout(r, 5)); };
       const host = platform.pluginHost;
       const unload = host.unloadPlugin;
@@ -348,7 +341,7 @@ await probe(async ({ browser, open }) => {
     await p.waitForFunction(() => '__lf' in window);
     await boot(p);
     await clear();
-    await p.evaluate(async (AMP) => (await import('/src/audio/instrument.ts')).restorePlugin(0, AMP), AMP);
+    await p.evaluate(async (AMP) => (await import('/src/ui/state/instrument.ts')).restorePlugin(0, AMP), AMP);
     assert.ok((await sentNow()).includes('{"SetSlotGain":[0,0.8]}'), `the recalled plugin comes back at its level: ${await sentNow()}`);
     const unexpected = errors.filter((e) => !e.startsWith('[instrument] plugin unload failed'));
     assert.deepEqual(unexpected, [], 'no console errors beyond the injected unload failures');

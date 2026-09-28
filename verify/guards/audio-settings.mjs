@@ -1,4 +1,4 @@
-// verify/guards/audio-settings.mjs — deterministic guard for src/audio/audio-settings.ts persistence validators.
+// verify/guards/audio-settings.mjs — deterministic guard for src/ui/state/audio-settings.ts persistence validators.
 //
 // Imports the REAL source (Node TS type-stripping), NOT a port, so it cannot drift. The source is
 // import-free and touches `localStorage` only at call-time (never at module load), so a tiny in-memory
@@ -38,7 +38,7 @@ globalThis.localStorage = {
 };
 
 const { readAudioDeviceSettings, writeAudioDeviceSettings, BUFFER_FRAMES_OPTIONS, DEFAULT_BUFFER_FRAMES, asioBlock, asioBufferChoice } =
-  await import('../../src/audio/audio-settings.ts');
+  await import('../../src/ui/state/audio-settings.ts');
 
 const KEY = 'lf.audioDevices';
 const DEFAULTS = {

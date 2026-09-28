@@ -1,7 +1,6 @@
 /**
  * DEV probe: the UI on the native engine, in the real app (`docs/plans/native-engine.md` § Stage 5).
- * `pnpm native:engine-smoke` launches the ASIO dev app in its own profile with engine mode on (the
- * runner writes the toggle file there), and this page drives the same facades the lanes and the command
+ * `pnpm native:engine-smoke` launches the ASIO dev app in its own profile, and this page drives the same facades the lanes and the command
  * bar use, reading back through the feed and the DOM:
  *
  *   device    boot opened the saved ASIO device; the probe switches it to its buffer (default 128)
@@ -24,12 +23,12 @@
  *                           `Pro-Q:vst3` (default: none)
  */
 import { getContext } from 'tone';
-import { framesPerBar } from '../audio/quantize';
-import { setBufferSize, usingAsio } from '../audio/audio-devices';
-import type { BufferFrames } from '../audio/audio-settings';
-import { availablePlugins, nativeHostReady, selectPlugin, slotPlugins } from '../audio/instrument';
-import { goLive, inputArmed } from '../audio/native-io';
-import { engineMode, type EngineEvent } from '../platform';
+import { framesPerBar } from '../ui/state/quantize';
+import { setBufferSize, usingAsio } from '../ui/state/audio-devices';
+import type { BufferFrames } from '../ui/state/audio-settings';
+import { availablePlugins, nativeHostReady, selectPlugin, slotPlugins } from '../ui/state/instrument';
+import { goLive, inputArmed } from '../ui/state/native-io';
+import { platform, type EngineEvent } from '../platform';
 import { clock, looper } from '../ui/state/audio';
 import { engineDevice, onEngineEvent, openEngineDevice } from '../ui/state/engine-store';
 
@@ -85,7 +84,7 @@ export async function runEngineSmoke(): Promise<void> {
 }
 
 async function run(): Promise<void> {
-  check(engineMode(), 'engine mode is off in this profile (the runner writes its toggle file)');
+  check(platform.engine.available, 'this platform has no engine');
   log(`tone context at start: ${toneContext()}`);
   const events: EngineEvent[] = [];
   onEngineEvent((ev) => events.push(ev));

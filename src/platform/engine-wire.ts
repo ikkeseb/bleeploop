@@ -7,7 +7,7 @@
  * Serde's external tagging with the Rust variant names (`src-tauri/crates/lf-engine/src/api.rs`): a
  * unit variant is its name (`"PlayAll"`), a newtype `{"RecDub":0}`, a tuple `{"SetVolume":[0,0.8]}`, a
  * struct variant an object with camelCase fields. `FxParam`/`FxKind` travel as the TS keys
- * (`src/audio/fx/metadata.ts`), an `InputSend`/`InputSendParam` as its key (`api.rs`), an `Instrument`
+ * (`src/ui/state/fx-metadata.ts`), an `InputSend`/`InputSendParam` as its key (`api.rs`), an `Instrument`
  * as its id, a `Frame` (i64) as a JSON number.
  *
  * Commands go out as the typed values below (Tauri serialises them). Everything that comes back passes
@@ -56,7 +56,7 @@ export type EngineAction =
   | { Hold: number }
   | { Release: number }
   | 'FadeAll';
-/** The built-in instruments by id (`src/audio/synths/index.ts`). */
+/** The built-in instruments by id (`src/ui/state/instruments.ts`). */
 export type InstrumentId = 'lead' | 'pad' | 'piano' | 'organ' | 'bass' | 'drum';
 export type FxKindId = 'filter' | 'pitch' | 'stutter' | 'delay' | 'reverb';
 export type FxParamId = 'cutoff' | 'q' | 'semitones' | 'rate' | 'time' | 'feedback' | 'mix' | 'amount';
@@ -697,7 +697,7 @@ export function decodeDeviceRequest(raw: unknown): DeviceRequest {
 //
 // `[u32 LE headerLen][headerLen bytes of UTF-8 JSON][f32 LE mono PCM per header track, in header order]`,
 // no padding; each block holds `frames` samples. The PCM is in PLAY order (what is heard from loop
-// position 0, as the web looper stores it); `reversed` says the lane plays its recording backwards.
+// position 0); `reversed` says the lane plays its recording backwards.
 // PCM moves as whole typed-array copies in the platform's byte order: little-endian on every target.
 
 /** One lane in a snapshot: committed lanes only. */

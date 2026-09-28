@@ -1,7 +1,7 @@
 /**
  * DEV probe: tone recall on the engine (`src-tauri/src/host/tone.rs`) — a plugin's settings survive a
  * restart and ride in a session export. `pnpm native:tone-recall` launches the WASAPI dev app in a
- * profile of its own (engine mode on) once per phase, in this order:
+ * profile of its own once per phase, in this order:
  *   save   starts from empty slots (a record an earlier failed run left is unloaded, which forgets it,
  *          and the phase fails: run again); loads the two plugins into slots A and B through
  *          `selectPlugin`, moves the first parameters of each through the host's set_param, unloads
@@ -18,7 +18,7 @@
  *          app.exe, as a crash would
  *   after  the relaunch brings both back at w2 (the debounced save, no exit path); unloads both, which
  *          forgets the record so the next run starts empty, and closes
- * The record lives under this probe's own keys (`src/audio/rig-recall.ts`), never the owner's, and the
+ * The record lives under this probe's own keys (`src/ui/state/rig-recall.ts`), never the owner's, and the
  * tones in this profile's own store. It hears nothing, and it cannot reach a plugin's own editor: an
  * edit made there is the Rust fixtures' (`clap_restart_fixture.rs`, `vst3_restart_fixture.rs`).
  * Each launch mutes the master (for that launch only), so the take's count-in and the live slot stay
@@ -31,17 +31,17 @@
  *                            same plugin twice checks that each slot keeps a tone of its own)
  *   `VITE_LF_PROBE_EXPECT`   what the previous phase set, handed over by the runner (JSON)
  */
-import { autosave } from '../audio/autosave';
-import { buildExportBundle } from '../audio/export/export';
-import { importSession } from '../audio/export/import';
-import { parseZip } from '../audio/export/unzip';
-import { availablePlugins, clearPlugin, nativeHostReady, selectPlugin, slotPendingCounts, slotPlugins } from '../audio/instrument';
-import { goLive, inputArmed } from '../audio/native-io';
-import { pluginDescriptorKey } from '../audio/plugin-descriptor';
-import { rigRecallDone } from '../audio/rig-recall';
-import { restoreSessionTones } from '../audio/slot-tones';
+import { autosave } from '../session/autosave';
+import { buildExportBundle } from '../session/export';
+import { importSession } from '../session/import';
+import { parseZip } from '../session/unzip';
+import { availablePlugins, clearPlugin, nativeHostReady, selectPlugin, slotPendingCounts, slotPlugins } from '../ui/state/instrument';
+import { goLive, inputArmed } from '../ui/state/native-io';
+import { pluginDescriptorKey } from '../ui/state/plugin-descriptor';
+import { rigRecallDone } from '../ui/state/rig-recall';
+import { restoreSessionTones } from '../ui/state/slot-tones';
 import { toasts } from '../notify';
-import { confirmNativeClose, engineMode, platform, type PluginDescriptor, type PluginInfo } from '../platform';
+import { confirmNativeClose, platform, type PluginDescriptor, type PluginInfo } from '../platform';
 import { clock, looper, master, session } from '../ui/state/audio';
 import { engineDevice } from '../ui/state/engine-store';
 
@@ -305,7 +305,7 @@ export async function runToneRecall(): Promise<void> {
   // Every phase but check (the runner kills it) closes itself, on any verdict.
   const closes = phase !== 'check';
   try {
-    check(engineMode(), 'engine mode is off in this profile (the runner writes its toggle file)');
+    check(platform.engine.available, 'this platform has no engine');
     await until('the engine device', () => engineDevice() !== null, 90);
     // Nothing needs to be heard: the master mute (not stored) keeps the take's count-in and a live
     // slot off the speakers.

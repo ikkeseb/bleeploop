@@ -13,7 +13,6 @@ memory or upstream docs. Versions are the ones actually resolved in this repo
 |---|---|---|---|
 | [solid-js](https://github.com/solidjs/solid) | 1.9.13 | MIT | UI reactivity runtime |
 | [tone](https://github.com/Tonejs/Tone.js) | 15.1.22 | MIT | Web Audio synth/transport layer |
-| [ringbuf.js](https://github.com/padenot/ringbuf.js) | 0.4.0 | **MPL-2.0** | see below |
 | [@tauri-apps/api](https://github.com/tauri-apps/tauri) | 2.11.0 | Apache-2.0 OR MIT | Tauri JS bindings |
 
 ### Geist and Geist Mono — SIL Open Font License 1.1
@@ -23,16 +22,6 @@ basement.studio), are vendored unmodified as variable WOFF2 files from the `geis
 in `src/assets/fonts/` and bundled into the app. They are licensed under the SIL Open Font License
 1.1, not the repository's MIT licence. The licence text is `licenses/OFL-1.1-Geist.txt`; the installer
 puts it beside the exe. Upstream: <https://github.com/vercel/geist-font>.
-
-### ringbuf.js — MPL-2.0 (file-level copyleft)
-
-`ringbuf.js` is licensed under the Mozilla Public License 2.0. MPL-2.0 is a *file-level*
-copyleft: it requires that modifications to MPL-covered files be made available under MPL-2.0,
-but does not extend that requirement to the rest of the codebase that merely uses the library.
-BleepLoop vendors/imports `ringbuf.js` **unmodified** as a dependency; no MPL-covered source in
-this repo has been altered. Upstream source is available at
-<https://github.com/padenot/ringbuf.js>. The licence text is `licenses/MPL-2.0.txt`; the installer
-puts it, and this file, beside the exe.
 
 ## Rust / native dependencies (`src-tauri/`)
 

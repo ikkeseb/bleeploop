@@ -2,7 +2,7 @@
  * Engine mode's recovery keeps a jam the engine lost without the player clearing it, on the web engine
  * fake (`src/platform/host.web.ts`; `window.__lfEngineFakeRate` sets the rate its device runs at). The
  * probe scripts the lanes on the feed and the snapshot the engine answers, and reads the recovery's
- * IndexedDB keys (`src/audio/autosave.ts`: `latest`, and `kept-<rate>` for each other rate's jam):
+ * IndexedDB keys (`src/session/autosave.ts`: `latest`, and `kept-<rate>` for each other rate's jam):
  *
  * - reset: a reset frame that blanks every lane (a new engine: another rate, a fault) keeps the saved
  *   jam, through the close guard's flush and a CLEAR ALL on the empty lanes;
@@ -91,8 +91,8 @@ const init = (p) =>
         });
         db.close();
         if (!record) return null;
-        const { parseZip } = await import('/src/audio/export/unzip.ts');
-        const { decodeWav } = await import('/src/audio/export/wav.ts');
+        const { parseZip } = await import('/src/session/unzip.ts');
+        const { decodeWav } = await import('/src/session/wav.ts');
         const entries = parseZip(new Uint8Array(record.bytes));
         const session = JSON.parse(new TextDecoder().decode(entries.find((e) => e.name.endsWith('-session.json')).data));
         const stems = session.tracks.map((t) => sig(decodeWav(entries.find((e) => e.name === t.file).data).channels[0]));

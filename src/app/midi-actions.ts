@@ -1,11 +1,11 @@
 import { createSignal } from 'solid-js';
-import { releaseController, setMidiConsumer } from '../audio/midi';
-import { ACTION_LABELS, isLaneAction, isTrack, pressHold, releaseHold, runAction, targetLane, type ActionId, type Target } from './actions';
+import { releaseController, setMidiConsumer } from '../ui/state/midi';
+import { ACTION_LABELS, isLaneAction, isTrack, pressHold, releaseHold, runAction, type ActionId, type Target } from './actions';
 
 /**
  * OWNS: MIDI learn. A learned CC or note, on one input port and channel, runs a named action
  * (`actions.ts`), a lane action on its target track, and is consumed before the play path through
- * `setMidiConsumer` (`src/audio/midi.ts`): a CC learned onto 64 does not sustain (a pedal held while it
+ * `setMidiConsumer` (`src/ui/state/midi.ts`): a CC learned onto 64 does not sustain (a pedal held while it
  * was learned is let go), and a learned note does not sound (its note-off is consumed too). Unlearned
  * traffic reaches the play path exactly as before. The bindings persist in localStorage. A port is keyed
  * by its Web MIDI input id, which the spec asks browsers to keep across restarts and replugs; its name
@@ -117,9 +117,9 @@ function endWait(b: MidiBinding): void {
   if (awaitingRelease() === b) setAwaitingRelease(null);
 }
 
-// Each HOLD press, by its control, until its release ends the capture there: its target, the lane the
-// web path acted on (the engine resolves its own), and the number the engine knows the control by.
-const held = new Map<string, { target: Target; lane: number; control: number }>();
+// Each HOLD press, by its control, until its release ends the capture there: its target and the number
+// the engine knows the control by (the engine resolves the lane).
+const held = new Map<string, { target: Target; control: number }>();
 const controlKey = (b: MidiBinding) => `${b.port}\n${b.channel}\n${b.kind}\n${b.number}`;
 
 /** The number HOLD's press on control `key` goes to the engine with, which its release repeats: the one
@@ -227,7 +227,7 @@ function consume(port: string, portName: string, status: number, data1: number, 
     if (b.hold) {
       const key = controlKey(b);
       const control = holdControl(key);
-      held.set(key, { target: b.target, lane: targetLane(b.target), control });
+      held.set(key, { target: b.target, control });
       pressHold(b.target, control);
     } else {
       runAction(b.action, b.target);
@@ -235,7 +235,7 @@ function consume(port: string, portName: string, status: number, data1: number, 
   } else {
     const press = held.get(controlKey(b));
     held.delete(controlKey(b));
-    if (press) releaseHold(press.target, press.lane, press.control);
+    if (press) releaseHold(press.target, press.control);
   }
   return true;
 }

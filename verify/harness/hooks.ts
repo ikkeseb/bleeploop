@@ -1,8 +1,7 @@
 /**
  * Module hooks that let plain Node load the real `src/` modules the way Vite does in the app.
  *
- * - `tone` resolves to `fake-tone.ts`; `*?worker&url` to a data module whose default export is the
- *   worklet's file URL (the fake `audioWorklet.addModule` imports it); `*?worker` to an empty class.
+ * - `*?worker` resolves to an empty class.
  * - Extensionless relative imports under `src/` get `.ts` (or `/index.ts`), as Vite resolves them.
  * - `solid-js` resolves with the `browser` condition: the server build never runs effects.
  * - `import.meta.env` in `src/` reads as `{ DEV: false }`, the production build, unless a guard sets
@@ -14,7 +13,6 @@
 import { registerHooks, stripTypeScriptTypes } from 'node:module';
 
 const srcRoot = new URL('../../src/', import.meta.url).href;
-const fakeTone = new URL('./fake-tone.ts', import.meta.url).href;
 const GEN = /\?g=\d+$/;
 
 interface Resolved {
@@ -39,12 +37,7 @@ function resolveUncached(
   context: { parentURL?: string; conditions?: string[] },
   next: NextResolve,
 ): Resolved {
-  if (specifier === 'tone') return { url: fakeTone, shortCircuit: true };
   const parent = context.parentURL?.replace(GEN, '');
-  if (specifier.endsWith('?worker&url')) {
-    const file = new URL(specifier.slice(0, -'?worker&url'.length), parent).href;
-    return dataModule(`export default ${JSON.stringify(file)};`);
-  }
   if (specifier.endsWith('?worker')) return dataModule('export default class {}');
   if (specifier === 'solid-js' || specifier.startsWith('solid-js/')) {
     return { ...next(specifier, { ...context, conditions: ['browser', 'import', 'default'] }), shortCircuit: true };

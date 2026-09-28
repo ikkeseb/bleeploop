@@ -1,12 +1,9 @@
-import { getTransport } from 'tone';
-import * as audioDeviceSettings from '../audio/audio-settings';
-import { asioStatus, probeAsio, setAsioEnabled, setBufferSize } from '../audio/audio-devices';
-import { autosave } from '../audio/autosave';
-import { clock } from '../audio/clock';
-import { engine } from '../audio/engine';
-import { buildExportBundle } from '../audio/export/export';
-import { importSession } from '../audio/export/import';
-import { inputRouter } from '../audio/input-router';
+import * as audioDeviceSettings from '../ui/state/audio-settings';
+import { asioStatus, probeAsio, setAsioEnabled, setBufferSize } from '../ui/state/audio-devices';
+import { autosave } from '../session/autosave';
+import { buildExportBundle } from '../session/export';
+import { importSession } from '../session/import';
+import { inputRouter } from '../ui/state/input-router';
 import {
   activeSlot,
   availablePlugins,
@@ -15,26 +12,23 @@ import {
   selectPlugin,
   selectSynth,
   setActiveSlot,
+  setPluginGain,
   slotIds,
   slotPlugins,
-} from '../audio/instrument';
-import { looper } from '../audio/looper/looper';
-import { master } from '../audio/master';
-import * as midi from '../audio/midi';
-import { injectRecordLossForTest, pluginBridge } from '../audio/plugin-bridge';
-import { recordLatency } from '../audio/record-latency';
+} from '../ui/state/instrument';
+import * as midi from '../ui/state/midi';
+import { clock, looper, master } from '../ui/state/audio';
 import { dismissToast, notifyError, toasts } from '../notify';
 import { engineFake, platform, reportDiagnostics } from '../platform';
 import * as layoutStore from '../ui/layout/layout-store';
 
 /**
  * The DEV debug surface (`window.__lf`) for automated (Playwright) verification + by-ear/by-eye
- * gates — `verify/probes/golden-jam.mjs` and every probe in `docs/VERIFY.md` drive the app through it, so
+ * gates — the browser probes in `verify/probes/` and `docs/VERIFY.md` drive the app through it, so
  * its shape is a CONTRACT: add keys freely, never rename or drop one without updating those.
  * Installed only under `import.meta.env.DEV` (app.tsx); a release build never carries it.
  */
 export interface LfDebug {
-  engine: typeof engine;
   inputRouter: typeof inputRouter;
   ensureActive: typeof ensureActive;
   selectSynth: typeof selectSynth;
@@ -45,6 +39,7 @@ export interface LfDebug {
   activeSlot: typeof activeSlot;
   availablePlugins: typeof availablePlugins;
   scanForPlugins: typeof scanForPlugins;
+  /** The engine store's `looper`, `clock` and `master` (`src/ui/state/audio.ts`). */
   clock: typeof clock;
   looper: typeof looper;
   master: typeof master;
@@ -56,27 +51,17 @@ export interface LfDebug {
   asioStatus: typeof asioStatus;
   probeAsio: typeof probeAsio;
   midi: typeof midi;
-  /** Raw Tone transport handle for timing diagnostics (engine.ctx is already touched by the time
-   * audio is running, so getTransport() is safe here). */
-  transport: () => ReturnType<typeof getTransport>;
-  /** Native bridge handles + the record-loss fault injector the golden jam uses. */
-  pluginBridge: typeof pluginBridge & { injectRecordLossForTest: typeof injectRecordLossForTest };
   platform: typeof platform;
-  /** The web engine fake (`src/platform/host.web.ts`): the commands the UI sent and `emit(frame)` to
-   * script the feed. Engine mode on it needs `window.__lfEngineFake = true` before the app loads
-   * (`verify/probes/engine-seam.mjs`). Null under Tauri. */
+  /** The browser's engine fake (`src/platform/host.web.ts`): the commands the UI sent and `emit(frame)` to
+   * script the feed. The browser build has an engine only with `window.__lfEngineFake = true` set
+   * before the app loads (`verify/probes/engine-seam.mjs`). Null under Tauri. */
   native: typeof engineFake;
-  /** Record-latency compensation levers: `lastCompensation()` shows the last C breakdown;
-   * `setEnabled(false)` A/Bs the whole thing off by ear; `setOffsetMs(ms)` is the hidden trim;
-   * `setFloorEnabled(false)` A/Bs just the clickOut floor. */
-  recordLatency: typeof recordLatency;
-  /** Single-clock test helper: setMasterMute(true) must silence the speakers (proves no second
-   * cpal clock); (false) restores. Routes through `master` so the UI mute + slider stay consistent. */
+  /** Mute the master (true) or unmute it; routes through `master` so the UI mute + slider stay
+   * consistent. */
   setMasterMute: (on: boolean) => void;
-  /** Live-tune a slot's plugin output level (it starts conservative to spare your ears). */
+  /** Live-tune a slot's plugin output level, the engine's slot gain (it starts conservative to spare
+   * your ears). */
   setPluginGain: (v: number, slot?: number) => void;
-  pluginNoteOn: (note: number, velocity?: number, slot?: number) => Promise<void>;
-  pluginNoteOff: (note: number, slot?: number) => Promise<void>;
   pluginSetParam: (paramId: number, value: number, slot?: number) => Promise<void>;
   pluginListParams: (slot?: number) => ReturnType<typeof platform.pluginHost.listParams>;
   /** Subscribe to editor-originated param changes (returns an unsubscribe fn). By-ear:
@@ -113,7 +98,6 @@ export function installLfDebug(ui: LfDebug['ui']): void {
   // Report WebView2-internal facts to `tauri dev` stdout (no Playwright into WebView2).
   if (platform.kind === 'tauri') void reportDiagnostics();
   window.__lf = {
-    engine,
     inputRouter,
     ensureActive,
     selectSynth,
@@ -134,18 +118,12 @@ export function installLfDebug(ui: LfDebug['ui']): void {
     asioStatus,
     probeAsio,
     midi,
-    transport: () => getTransport(),
-    pluginBridge: { ...pluginBridge, injectRecordLossForTest },
     platform,
     native: engineFake,
-    recordLatency,
     setMasterMute: (on) => {
       master.setMuted(on);
     },
-    setPluginGain: (v, slot = 0) => pluginBridge.setGain(slot, v),
-    pluginNoteOn: (note, velocity = 0.7, slot = 0) =>
-      platform.pluginHost.noteOn(slot as 0 | 1, note, velocity),
-    pluginNoteOff: (note, slot = 0) => platform.pluginHost.noteOff(slot as 0 | 1, note),
+    setPluginGain: (v, slot = 0) => setPluginGain(slot as 0 | 1, v),
     pluginSetParam: (paramId, value, slot = 0) =>
       platform.pluginHost.setParameter(slot as 0 | 1, paramId, value),
     pluginListParams: (slot = 0) => platform.pluginHost.listParams(slot as 0 | 1),

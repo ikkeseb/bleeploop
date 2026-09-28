@@ -1,5 +1,4 @@
 import { render } from 'solid-js/web';
-import { resolveEngineMode } from './platform';
 import './app.css';
 
 const root = document.getElementById('root');
@@ -10,8 +9,9 @@ const mount = root;
  * Hide the AudioContext constructors while the app's modules load; returns the undo. Tone builds its
  * default AudioContext the moment its module loads (`var Transport = getContext().transport`), and
  * WebView2 starts it running: an output stream on the Windows default device beside the engine's. With
- * no constructor in sight Tone keeps its inert dummy context. Engine mode plays nothing through Web
- * Audio, so nothing asks for one later.
+ * no constructor in sight Tone keeps its inert dummy context. The app plays nothing through Web Audio
+ * (the engine plays everything; an export's wet master renders on an OfflineContext), so nothing asks
+ * for one later.
  */
 function hideAudioContext(): () => void {
   const global = window as unknown as Record<string, unknown>;
@@ -22,10 +22,8 @@ function hideAudioContext(): () => void {
   };
 }
 
-// The engine toggle is read once, before the app loads: every audio path branches on it (`engineMode()`),
-// and it never changes while the app runs. Engine mode loads the app with Web Audio hidden.
-void resolveEngineMode().then(async (engine) => {
-  const restore = engine ? hideAudioContext() : null;
-  const { App } = await import('./app.tsx').finally(() => restore?.());
-  render(() => <App />, mount);
-});
+// The app's modules load with Web Audio hidden (Tone among them).
+const restore = hideAudioContext();
+void import('./app.tsx')
+  .finally(restore)
+  .then(({ App }) => render(() => <App />, mount));

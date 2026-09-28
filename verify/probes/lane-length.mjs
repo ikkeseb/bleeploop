@@ -12,8 +12,7 @@
  * - Halve (`halveTrack`, `src/app/actions.ts`): sends the engine's `Halve` (on the engine's own selection,
  *   or `ActionOn` a named track), never a `Trim` with bars the UI counted: the engine judges the lane and
  *   the loop's bars as they stand when the press lands (lf-engine `tests/actions.rs`). Its refusal, from
- *   the feed, lands on its lane; MIDI learn lists it. In web mode (a second page, no engine) it says
- *   "needs the native engine" and no TRIM pill shows.
+ *   the feed, lands on its lane; MIDI learn lists it.
  * - E10: a free later take (FIXED off) runs until the press, so its record head sweeps the loops it has
  *   reached (1.5 loops in: three quarters of a lane two loops wide), never a close at the loop's end.
  *
@@ -228,20 +227,4 @@ await probe(async ({ open }) => {
   assert.ok(await headAfter(1, 0.5, 1), 'half a loop in, the lane spans the loop');
   assert.ok(await headAfter(2, 1.5, 2), '1.5 loops in, the lane spans two loops: the take runs on');
   assert.deepEqual(consoleErrors, [], 'no console errors');
-
-  // ── Web mode: no TRIM, and halve says why ─────────────────────────────────────────────────────────
-  const web = await open({ viewport: { width: 1600, height: 900 } });
-  await web.page.evaluate(async () => {
-    const lf = window.__lf;
-    const { defaultFxStates } = await import('/src/audio/fx/fx.ts');
-    lf.looper.init();
-    const frames = Math.round(lf.engine.ctx.sampleRate * 2 * 4);
-    const pcm = new Float32Array(frames).map((_, f) => 0.2 * Math.sin(f / 40));
-    await lf.looper.loadSession({ bpm: 120, bars: 4, masterLengthFrames: frames, tracks: [{ index: 0, pcm, volume: 1, muted: false, reversed: false, state: 'PLAYING', fx: defaultFxStates() }] });
-  });
-  await web.page.waitForFunction(() => window.__lf.looper.stateOf(0) === 'PLAYING');
-  assert.equal(await web.page.locator('.lp-pb--trim').count(), 0, 'web mode shows no TRIM');
-  await web.page.evaluate(() => import('/src/app/actions.ts').then((m) => m.runAction('halveTrack')));
-  assert.match(await web.page.locator('.lp-lane').nth(0).locator('.lp-lane__wellmsg').textContent(), /needs the native engine/);
-  assert.deepEqual(web.consoleErrors, [], 'no console errors in web mode');
 });

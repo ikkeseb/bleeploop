@@ -1,6 +1,6 @@
-import { activeSlot, slotOff, slotPlugins } from '../audio/instrument';
-import { liveInPlay } from '../audio/native-io';
-import { engineMode, sendEngine, type EngineAction, type InputSendId } from '../platform';
+import { activeSlot, slotOff, slotPlugins } from '../ui/state/instrument';
+import { liveInPlay } from '../ui/state/native-io';
+import { sendEngine, type EngineAction, type InputSendId } from '../platform';
 import { pressGoLive } from '../ui/instrument/live';
 import { toggleStage } from '../ui/stage/stage-store';
 import { clock, looper } from '../ui/state/audio';
@@ -13,7 +13,6 @@ import {
   dismissLaneCue,
   fadeGate,
   fixedGate,
-  inputFxGate,
   muteGate,
   playStopGate,
   recDubGate,
@@ -125,7 +124,7 @@ const LANE: Readonly<Record<LaneActionId, LaneRow>> = {
   reverse: { gate: reverseGate, act: (i) => looper.reverse(i), engine: 'Reverse' },
   copy: { gate: copyGate, act: (i) => void looper.copy(i), engine: 'Copy' },
   // TRIM to the first half of the loop's bars, rounded down (one UNDO away): the engine's `Halve` judges
-  // the bars as the loop stands when the press lands. The web path has no TRIM: its gate refuses.
+  // the bars as the loop stands when the press lands.
   halveTrack: { gate: trimGate, act: () => {}, engine: 'Halve' },
 };
 
@@ -138,11 +137,6 @@ export function isTrack(v: unknown): v is number {
   return Number.isInteger(v) && (v as number) >= 0 && (v as number) < looper.trackCount;
 }
 
-/** The lane a press on `target` acts on now. */
-export function targetLane(target: Target): number {
-  return target ?? looper.selectedTrack();
-}
-
 /** Step the selected track by `d`, wrapping at both ends. */
 const step = (d: number) => (): void =>
   looper.selectTrack((looper.selectedTrack() + d + looper.trackCount) % looper.trackCount);
@@ -150,7 +144,7 @@ const step = (d: number) => (): void =>
 /** GO LIVE's slot: the active one, unless only the other slot has GO LIVE in play (`liveInPlay`: a tone
  * reload holds it live while its plugin is briefly gone, or a press waits for its op) or a source made
  * for input — an effect plugin (the amp-sim a guitarist goes live on while the active slot plays a synth
- * layer) or, in engine mode, Off (raw input; the web path's MIC is its own control). */
+ * layer) or Off (raw input). */
 function goLiveSlot(): 0 | 1 {
   const active = activeSlot();
   const other = active === 0 ? 1 : 0;
@@ -175,7 +169,7 @@ const GLOBAL: Readonly<Record<GlobalActionId, () => void>> = {
   prevTrack: step(-1),
   playAll: () => looper.playAll(),
   stopAll: () => looper.stopAll(),
-  // Engine mode sends the engine's FADE (ENGINE_GLOBAL); here, in web mode, the gate says why not.
+  // The engine runs FADE as its own action (ENGINE_GLOBAL); this row is its UI path.
   fadeAll: gated(fadeGate, () => engineFade.fadeAll()),
   goLive: () => void pressGoLive(goLiveSlot()),
   stageView: toggleStage,
@@ -183,9 +177,9 @@ const GLOBAL: Readonly<Record<GlobalActionId, () => void>> = {
   clickToggle: () => clock.setMetronome(!clock.metronomeOn()),
   endStopToggle: () => looper.setLoopEndStopEnabled(!looper.loopEndStopEnabled()),
   fixedToggle: gated(fixedGate, () => looper.setFixedLengthEnabled(!looper.fixedLengthEnabled())),
-  inFxEcho: gated(inputFxGate, toggleSend('echo')),
-  inFxReverb: gated(inputFxGate, toggleSend('reverb')),
-  inFxRing: gated(inputFxGate, toggleSend('ring')),
+  inFxEcho: toggleSend('echo'),
+  inFxReverb: toggleSend('reverb'),
+  inFxRing: toggleSend('ring'),
 };
 
 /** The global rows the engine runs as its own hands-free actions. */
@@ -208,7 +202,7 @@ function onPress(id?: ActionId): void {
  * rather than reading its own selection. */
 function runOnLane(id: LaneActionId, i: number, named: boolean): void {
   const row = LANE[id];
-  if (engineMode() && row.engine) {
+  if (row.engine) {
     sendEngine(named ? { ActionOn: [i, row.engine] } : { Action: row.engine });
     return;
   }
@@ -218,8 +212,7 @@ function runOnLane(id: LaneActionId, i: number, named: boolean): void {
 }
 
 /** Run action `id`, a lane action on `target`. Toggling the stage view is not a looper press: a pending
- * CLEAR and a lane cue outlive it, in engine mode (whose engine never hears the toggle) and web mode
- * alike. */
+ * CLEAR and a lane cue outlive it (the engine never hears the toggle). */
 export function runAction(id: ActionId, target: Target = null): void {
   if (id !== 'stageView') onPress(id);
   if (isLaneAction(id)) {
@@ -231,20 +224,20 @@ export function runAction(id: ActionId, target: Target = null): void {
     runOnLane(id, target, true);
     return;
   }
-  const action = engineMode() ? ENGINE_GLOBAL[id] : undefined;
+  const action = ENGINE_GLOBAL[id];
   if (action) {
     sendEngine({ Action: action });
     return;
   }
-  if (engineMode() && id !== 'stageView') sendEngine('Press');
+  if (id !== 'stageView') sendEngine('Press');
   GLOBAL[id]();
 }
 
-/** HOLD's press (`midi-actions.ts`): REC/DUB on `target`. On the selected track in engine mode it is the
+/** HOLD's press (`midi-actions.ts`): REC/DUB on `target`. On the selected track it is the
  * engine's `Hold` by `control`, the pedal's number while it is down: the engine remembers the lane an
  * accepted press acted on for that control's release, and nothing for a refused one. */
 export function pressHold(target: Target, control: number): void {
-  if (!engineMode() || target !== null) {
+  if (target !== null) {
     runAction('recDub', target);
     return;
   }
@@ -255,16 +248,9 @@ export function pressHold(target: Target, control: number): void {
 /** HOLD's release: end the capture its press started, while that lane still captures. A take that closed
  * itself meanwhile (FIXED) stays closed instead of starting an overdub. The engine judges it on its own
  * state, where its press landed (`target`: the named track, or the lane the engine's `Hold` by `control`
- * acted on); the web path on lane `lane`, where its press acted. */
-export function releaseHold(target: Target, lane: number, control: number): void {
-  if (engineMode()) {
-    sendEngine(target === null ? { Action: { Release: control } } : { ActionOn: [target, { Release: control }] });
-    return;
-  }
-  const s = looper.track(lane)().state;
-  if (s !== 'RECORDING' && s !== 'OVERDUBBING') return;
-  onPress('recDub');
-  runOnLane('recDub', lane, true);
+ * acted on). */
+export function releaseHold(target: Target, control: number): void {
+  sendEngine(target === null ? { Action: { Release: control } } : { ActionOn: [target, { Release: control }] });
 }
 
 /** Select track `i` outright (the digit keys). Not a table row, since it names its track, but a looper

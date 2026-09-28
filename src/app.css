@@ -228,8 +228,8 @@ option {
   visibility: hidden;
 }
 
-/* system lamp — the at-a-glance aggregate of host/isolated/plugin/midi (detail in its title + the
-   Audio Settings diagnostics block). Green ok, amber when crossOriginIsolated is false. */
+/* system lamp — the at-a-glance aggregate of host/engine/plugin/midi (detail in its title + the
+   Audio Settings diagnostics block). Green ok, amber when the engine could not open an audio device. */
 .cmd__lamp {
   width: 8px;
   height: 8px;

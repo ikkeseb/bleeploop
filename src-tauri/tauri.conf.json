@@ -34,11 +34,7 @@
         "object-src": "'none'",
         "base-uri": "'self'"
       },
-      "dangerousDisableAssetCspModification": ["style-src"],
-      "headers": {
-        "Cross-Origin-Opener-Policy": "same-origin",
-        "Cross-Origin-Embedder-Policy": "require-corp"
-      }
+      "dangerousDisableAssetCspModification": ["style-src"]
     }
   },
   "bundle": {

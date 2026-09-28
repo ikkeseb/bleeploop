@@ -20,8 +20,8 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { probe } from '../harness/probe.ts';
-import { parseZip } from '../../src/audio/export/unzip.ts';
-import { decodeWav } from '../../src/audio/export/wav.ts';
+import { parseZip } from '../../src/session/unzip.ts';
+import { decodeWav } from '../../src/session/wav.ts';
 
 const RATE = 48000;
 const MASTER = 2 * RATE; // one bar at 120 BPM

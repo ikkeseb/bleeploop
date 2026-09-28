@@ -9,9 +9,8 @@
  *   `VITE_LF_PROBE_FILTER`  comma-separated name substrings; only matching plugins are surveyed
  *   `VITE_LF_PROBE_SETTLE`  ms to wait after each parameter's three sets (default 0 = fast pass)
  */
-import { engine } from '../audio/engine';
-import { availablePlugins, clearPlugin, selectPlugin } from '../audio/instrument';
-import { nativeHostReady, slotPlugins } from '../audio/instrument-slots';
+import { availablePlugins, clearPlugin, selectPlugin } from '../ui/state/instrument';
+import { nativeHostReady, slotPlugins } from '../ui/state/instrument-slots';
 import { platform } from '../platform';
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -32,8 +31,6 @@ export async function runRestartSurvey(): Promise<void> {
     log('no plugins to survey (scan empty or filter matched nothing)');
     return;
   }
-  // Resume the ctx so the JS side drains the ring — the plugin then processes like it does live.
-  await engine.start();
   log(`start: ${list.length} plugin(s), settle=${settle} ms`);
   for (const desc of list) {
     const tag = `${desc.name} [${desc.format}]`;

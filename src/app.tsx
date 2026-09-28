@@ -1,7 +1,6 @@
 import { Show, createEffect, createSignal, onCleanup, onMount } from 'solid-js';
-import { activeIsDrum, availablePlugins, nativeHostReady, scanForPlugins, scanning } from './audio/instrument';
-import * as midi from './audio/midi';
-import { autosave } from './audio/autosave';
+import { activeIsDrum, availablePlugins, nativeHostReady, scanForPlugins, scanning } from './ui/state/instrument';
+import * as midi from './ui/state/midi';
 import { Keyboard } from './ui/keyboard/Keyboard';
 import { Looper } from './ui/looper/Looper';
 import { Transport } from './ui/transport/Transport';
@@ -14,10 +13,10 @@ import { Toasts } from './ui/toast/Toasts';
 import { StageView } from './ui/stage/StageView';
 import { setStageOpen, stageOpen, toggleStage } from './ui/stage/stage-store';
 import * as layoutStore from './ui/layout/layout-store';
-import { engineMode, installFrontendLogPipe, platform } from './platform';
-import { master, session } from './ui/state/audio';
+import { installFrontendLogPipe, platform } from './platform';
+import { master } from './ui/state/audio';
 import { engineDevice, engineOpenFailure } from './ui/state/engine-store';
-import { bootPluginHost } from './app/boot';
+import { bootEngine } from './app/boot';
 import { installCloseGuard } from './app/close-guard';
 import { installCmdFit } from './app/cmd-fit';
 import { cancelLearn, installMidiActions } from './app/midi-actions';
@@ -25,7 +24,6 @@ import { installTransportKeys, type TransportKeys } from './app/transport-keys';
 import { installLfDebug } from './debug/lf';
 
 export function App() {
-  const [crossOriginIsolated, setCrossOriginIsolated] = createSignal(false);
   const [settingsOpen, setSettingsOpen] = createSignal(false);
   const [helpOpen, setHelpOpen] = createSignal(false);
   // The two command-bar popovers share one anchor (top-right), so opening one closes the other — they can
@@ -79,9 +77,6 @@ export function App() {
     // First: pipe console.error + uncaught errors into the native log, so even a plugin-host init
     // failure below is captured in a release build (no visible WebView2 console otherwise).
     installFrontendLogPipe();
-    // Local recovery of the jam. Engine mode starts it once its device runs (`src/app/boot.ts`).
-    if (!engineMode()) onCleanup(autosave.start(session));
-    setCrossOriginIsolated(self.crossOriginIsolated === true);
     // Keyboard transport (the named actions of `src/app/actions.ts`, plus 1–5) + the Escape popover
     // close + the pointer-blur discipline: `src/app/transport-keys.ts`. Window-level, so it never
     // depends on what is focused or mounted.
@@ -97,17 +92,15 @@ export function App() {
     onCleanup(transportKeys.dispose);
     // Close guard + local recovery (native confirm / web beforeunload): `src/app/close-guard.ts`.
     onCleanup(installCloseGuard());
-    // Sync masterGain to the persisted master volume (no-op at unity default; restores a saved level
-    // on reload). Creates the AudioContext suspended — matches the engine's lazy pattern. In engine mode
-    // it sends the level to the engine instead.
+    // Send the persisted master volume to the engine (restores a saved level on reload).
     master.init();
     // MIDI learn claims learned messages before the play path: `src/app/midi-actions.ts`. Then attempt
     // MIDI on mount — graceful if unavailable.
     onCleanup(installMidiActions());
     void midi.start();
-    // Native plugin host boot chain (no-op in the browser build), or the engine's in engine mode:
-    // `src/app/boot.ts`.
-    onCleanup(bootPluginHost());
+    // The engine's boot chain — its device, local recovery of the jam, the plugin host (a no-op in the
+    // browser build, which has no engine): `src/app/boot.ts`.
+    onCleanup(bootEngine());
 
     if (import.meta.env.DEV) {
       // Debug surface for automated (Playwright) verification + by-ear/by-eye gates: `src/debug/lf.ts`.
@@ -120,8 +113,8 @@ export function App() {
       });
       // Env-triggered native probes (DEV, PC only): `src/debug/restart-survey.ts`,
       // `src/debug/editor-smoke.ts`, `src/debug/swap-stress.ts`, `src/debug/recall-restart.ts`,
-      // `src/debug/loopback-sync.ts`, `src/debug/engine-smoke.ts`, `src/debug/engine-recovery.ts`,
-      // `src/debug/engine-loopback.ts`, `src/debug/tone-recall.ts`.
+      // `src/debug/engine-smoke.ts`, `src/debug/engine-recovery.ts`, `src/debug/engine-loopback.ts`,
+      // `src/debug/tone-recall.ts`.
       if (import.meta.env.VITE_LF_PROBE === 'restart-survey') {
         void import('./debug/restart-survey').then((m) => m.runRestartSurvey());
       } else if (import.meta.env.VITE_LF_PROBE === 'editor-smoke') {
@@ -130,8 +123,6 @@ export function App() {
         void import('./debug/swap-stress').then((m) => m.runSwapStress());
       } else if (import.meta.env.VITE_LF_PROBE === 'recall-restart') {
         void import('./debug/recall-restart').then((m) => m.runRecallRestart());
-      } else if (import.meta.env.VITE_LF_PROBE === 'loopback-sync') {
-        void import('./debug/loopback-sync').then((m) => m.runLoopbackSync());
       } else if (import.meta.env.VITE_LF_PROBE === 'engine-smoke') {
         void import('./debug/engine-smoke').then((m) => m.runEngineSmoke());
       } else if (import.meta.env.VITE_LF_PROBE === 'engine-recovery') {
@@ -144,10 +135,10 @@ export function App() {
     }
   });
 
-  // Drum-aware chrome: when the active slot's synth is the GM drum kit (and not overridden by a
+  // Drum-aware chrome: when the active slot's instrument is the GM drum kit (and not overridden by a
   // loaded plugin, which always plays chromatically), the keyboard IS a pad grid — so the command-bar
   // toggle + the keyboard pane label say "drums" instead of "keyboard". `activeIsDrum` is the ONE shared
-  // predicate (audio/instrument.ts); Keyboard.tsx's drumActive memo reads the same accessor.
+  // predicate (ui/state/instrument.ts); Keyboard.tsx's drumActive memo reads the same accessor.
   const keyboardNoun = () => (activeIsDrum() ? 'drums' : 'keyboard');
 
   // ----- stage regions -----
@@ -215,11 +206,13 @@ export function App() {
     }
   };
 
-  // System-status aggregate for the command-bar lamp. Per-item detail (host/isolated/plugin/midi) lives
-  // in the Audio Settings diagnostics block; this lamp is the at-a-glance rollup. Amber when
-  // crossOriginIsolated is false — the one condition that actually breaks the looper (no SharedArrayBuffer
-  // capture ring); the title lists all four states so the detail is a hover away in every build.
-  const systemWarn = () => !crossOriginIsolated();
+  // System-status aggregate for the command-bar lamp. Per-item detail (host/engine/plugin/midi) lives
+  // in the Audio Settings diagnostics block; this lamp is the at-a-glance rollup. Amber when the engine
+  // could not open an audio device — the one condition that stops the looper and the plugin host; the
+  // title lists all four states so the detail is a hover away in every build.
+  const systemWarn = () => !engineDevice() && !!engineOpenFailure();
+  const engineState = () =>
+    !platform.engine.available ? 'unavailable' : engineDevice() ? 'running' : engineOpenFailure() ? 'no device open' : 'starting';
   const systemStatusTitle = () => {
     const pluginState = platform.pluginHost.available
       ? scanning()
@@ -229,7 +222,7 @@ export function App() {
     const midiStatus = midi.midiStatus() === 'connected' ? midi.midiDevices().join(', ') : midi.midiStatus();
     return [
       `host: ${platform.kind}`,
-      `isolated: ${crossOriginIsolated() ? 'yes' : 'no'}`,
+      `engine: ${engineState()}`,
       `plugin: ${pluginState}`,
       `midi: ${midiStatus}`,
     ].join('\n');
@@ -239,7 +232,7 @@ export function App() {
     <div class="app" classList={{ 'app--staged': stageOpen() }}>
       {/* Command bar — ONE card combining brand, system lamp, transport, and tool icons. Left→right:
           brand · system lamp · (Transport fragment: BPM · TAP · CLICK/FIXED · loop ring-dial · END STOP · ■/✕ ALL ·
-          MIC · spacer · master) · tool icons. Host/isolated/plugin/midi detail lives in the Audio
+          IN FX · spacer · master) · tool icons. Host/engine/plugin/midi detail lives in the Audio
           Settings diagnostics block; the lamp is their at-a-glance aggregate and its title lists all
           four. */}
       <header class="cmd" inert={stageOpen()} ref={(el) => onCleanup(installCmdFit(el))}>
@@ -297,7 +290,7 @@ export function App() {
               title={
                 nativeHostReady() || scanning()
                   ? 'Rescan plugins'
-                  : engineMode() && !engineDevice() && engineOpenFailure()
+                  : !engineDevice() && engineOpenFailure()
                     ? 'Rescan plugins: no audio device is open, so the plugin host has not started (see Audio Settings)'
                     : 'Rescan plugins: the plugin host is still starting'
               }

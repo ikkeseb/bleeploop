@@ -1,11 +1,11 @@
-// verify/guards/wav-decode.mjs — deterministic guard for decodeWav in src/audio/export/wav.ts.
+// verify/guards/wav-decode.mjs — deterministic guard for decodeWav in src/session/wav.ts.
 // Imports the REAL encoder + decoder (Node TS type-stripping) so it cannot drift from the source.
 // Asserts: (A) decode(encode(x)) ≈ x within one PCM16 step, mono + stereo, incl. out-of-range inputs;
 // (B) encode(decode(bytes)) is BYTE-IDENTICAL for a synthetic file over the full int16 edge set +
 // seeded-PRNG samples; (C) malformed inputs throw 'unsupported WAV: …' (or a bounds error); (D) the
 // chunk walk skips an unknown chunk (LIST) before 'data' and still decodes.
 // Run: node verify/guards/wav-decode.mjs
-import { encodeWav, decodeWav, floatToPcm16 } from '../../src/audio/export/wav.ts';
+import { encodeWav, decodeWav, floatToPcm16 } from '../../src/session/wav.ts';
 
 let fails = 0, checks = 0;
 function ok(name, cond, detail = '') {

@@ -1,5 +1,5 @@
 /**
- * DEV probe: engine mode's session paths in the real app — export, import and local recovery through
+ * DEV probe: the session paths in the real app — export, import and local recovery through
  * the engine's snapshot and session load (`src/ui/state/engine-store.ts` `engineSession`).
  * `pnpm native:engine-recovery` runs the ASIO dev app in engine-smoke's own profile, twice:
  *
@@ -18,11 +18,11 @@
  *   `VITE_LF_PROBE_PHASE`   `save` | `restore` (set by the runner)
  *   `VITE_LF_PROBE_EXPECT`  what `save` measured, handed over by the runner (JSON)
  */
-import { autosave } from '../audio/autosave';
-import { buildExportBundle } from '../audio/export/export';
-import { importSession } from '../audio/export/import';
-import { parseZip } from '../audio/export/unzip';
-import { engineMode } from '../platform';
+import { autosave } from '../session/autosave';
+import { buildExportBundle } from '../session/export';
+import { importSession } from '../session/import';
+import { parseZip } from '../session/unzip';
+import { platform } from '../platform';
 import { clock, looper, session } from '../ui/state/audio';
 import { engineDevice } from '../ui/state/engine-store';
 
@@ -62,7 +62,7 @@ async function measure(): Promise<string> {
 
 export async function runEngineRecovery(): Promise<void> {
   try {
-    check(engineMode(), 'engine mode is off in this profile (the runner writes its toggle file)');
+    check(platform.engine.available, 'this platform has no engine');
     await until('the engine device', () => engineDevice() !== null, 90);
     if (import.meta.env.VITE_LF_PROBE_PHASE === 'restore') await restore();
     else await save();

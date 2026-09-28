@@ -1,6 +1,5 @@
 import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount, type JSX } from 'solid-js';
 import { clock, looper, sampleRate, type TrackState } from '../state/audio';
-import { engineMode } from '../../platform';
 import { registerLane, unregisterLane } from './waveform';
 import { createTwoStepConfirm, masterBars, volumeDb } from './shared';
 import { announceLooper, liveMsg, playStopGate, recDubGate } from './gates';
@@ -408,7 +407,7 @@ function TrackLane(props: {
             </button>
           </Show>
 
-          {/* ✂ TRIM (engine mode) — keep the first N bars, repeated across the loop; one UNDO away. */}
+          {/* ✂ TRIM — keep the first N bars, repeated across the loop; one UNDO away. */}
           <Trim index={props.index} returnFocus={props.returnFocus} />
         </div>
 
@@ -443,11 +442,6 @@ export function Looper(props: { returnFocus?: (el: HTMLElement | undefined) => v
     const i = fxTrack();
     if (i !== null && looper.track(i)().state === 'EMPTY') setFxTrack(null);
   });
-
-  // The capture ring needs SharedArrayBuffer, which needs crossOriginIsolated (COOP/COEP). Without it
-  // looper.init() bails and every looper button is silently dead — so say so loudly instead. The native
-  // engine records without it.
-  const looperUnavailable = !engineMode() && self.crossOriginIsolated !== true;
 
   // Screen-reader status line: operational transitions are otherwise silent to AT. A polite live region
   // announces record/arm/overdub starts + the master-loop resolution, diffed so it fires on transitions.
@@ -499,14 +493,6 @@ export function Looper(props: { returnFocus?: (el: HTMLElement | undefined) => v
 
   return (
     <div class="lp">
-      <Show when={looperUnavailable}>
-        <div class="lp__unavailable" role="alert">
-          ⚠ Looper disabled. This browser isn’t <code>crossOriginIsolated</code> (no SharedArrayBuffer).
-          Synths still work, but recording won’t. Try Chrome/Edge, hard-reload, and check that COOP/COEP
-          headers are served (the system lamp in the command bar reads amber when isolation is missing).
-        </div>
-      </Show>
-
       {/* Visually-hidden status line for screen readers — looper transitions are otherwise silent. */}
       <div class="lp__sr-status" role="status" aria-live="polite">
         {liveMsg()}
