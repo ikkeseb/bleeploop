@@ -28,7 +28,14 @@ import { AUTO_RECORD_DEFAULT_SENSITIVITY } from '../../audio/looper/auto-record'
 import { averageInterval, clampBars, framesPerBar, maxWholeBars } from '../../audio/quantize';
 import { readStoredNumber, writeStoredNumber } from '../../audio/persist';
 import { readAudioDeviceSettings, writeAudioDeviceSettings, type AudioDeviceSettings } from '../../audio/audio-settings';
-import { setAsioEnabled, setBufferSize, switchAsioDriver, usingAsio } from '../../audio/audio-devices';
+import {
+  saveSlotInputChannels,
+  setAsioEnabled,
+  setBufferSize,
+  slotInputChannels,
+  switchAsioDriver,
+  usingAsio,
+} from '../../audio/audio-devices';
 import { autosave } from '../../audio/autosave';
 import { engineResync } from '../../audio/instrument';
 import { withAt } from '../../audio/instrument-slots';
@@ -589,7 +596,14 @@ function applyFrameNow(f: FeedFrame): void {
   }
   // The device and its clock first: the anchor is read after the frame's events, so a take the events
   // start snaps to the grid it carries.
-  if (f.status !== undefined) setDevice(f.status);
+  if (f.status !== undefined) {
+    const before = device();
+    setDevice(f.status);
+    // The owner reopened on its own (a lost device back, a fallback): check the picks against it. A
+    // status of the same device may be older than a channel switch, so it is not read for this.
+    const moved = !before || before.backend !== f.status?.backend || before.inputName !== f.status.inputName;
+    if (f.status && moved) dropLackingPicks(slotInputChannels().map(channelOf), f.status.inputChannels);
+  }
   if (f.anchor) plain.clock = f.anchor;
   if (f.reset) adoptSettings(f.settings ?? []);
   tookLoop = false;
@@ -1126,7 +1140,10 @@ function deviceLabel(s: DeviceStatus): string {
 let openTail: Promise<unknown> = Promise.resolve();
 
 /** The saved picks that name a device. */
-type DevicePicks = Pick<AudioDeviceSettings, 'inputDeviceId' | 'inputChannel' | 'outputDeviceId' | 'bufferFrames' | 'asioEnabled'>;
+type DevicePicks = Pick<
+  AudioDeviceSettings,
+  'inputDeviceId' | 'inputChannel' | 'slotInputChannels' | 'outputDeviceId' | 'bufferFrames' | 'asioEnabled'
+>;
 
 /** A device as this store asks for it: the request, and the picks that named it. */
 interface DeviceChoice {
@@ -1144,6 +1161,34 @@ let opened: DeviceChoice | null = null;
 /** A saved channel pick as the engine takes it: null = auto. */
 const channelOf = (pick: string): number | null => (pick === '' ? null : Number(pick));
 
+/** `choice` with each slot's channel pick `picks` (switched in place, or dropped as lacking). */
+function withSlotPicks(choice: DeviceChoice, picks: readonly [string, string]): DeviceChoice {
+  const { backend, input, output, buffer } = choice.request;
+  return {
+    request: { backend, input, output, buffer, inputChannels: [channelOf(picks[0]), channelOf(picks[1])] },
+    picks: { ...choice.picks, slotInputChannels: [picks[0], picks[1]] },
+  };
+}
+
+/**
+ * Reset to Auto each slot's saved pick the device does not give that slot: `asked` is the channel each
+ * slot asked for (null = auto), `inUse` what the device's status says each slot reads (a device without
+ * the pick reads auto). So a slot's input never names a channel it does not read.
+ */
+function dropLackingPicks(asked: readonly (number | null)[], inUse: readonly number[] | undefined): void {
+  if (!inUse) return;
+  const picks = slotInputChannels();
+  const lacking = (s: 0 | 1) => picks[s] !== '' && asked[s] === Number(picks[s]) && inUse[s] !== asked[s];
+  if (!lacking(0) && !lacking(1)) return;
+  const kept: [string, string] = [lacking(0) ? '' : picks[0], lacking(1) ? '' : picks[1]];
+  saveSlotInputChannels(kept); // the device side logs the fallback
+  if (opened) opened = withSlotPicks(opened, kept);
+}
+
+/** The channel each slot of `request` asks for. */
+const askedChannels = (request: DeviceRequest): (number | null)[] =>
+  'inputChannels' in request ? request.inputChannels : [request.inputChannel, request.inputChannel];
+
 /** The device the saved picks name. */
 function picked(): DeviceChoice {
   const s = readAudioDeviceSettings();
@@ -1159,6 +1204,7 @@ function picked(): DeviceChoice {
     picks: {
       inputDeviceId: s.inputDeviceId,
       inputChannel: s.inputChannel,
+      slotInputChannels: s.slotInputChannels,
       outputDeviceId: s.outputDeviceId,
       bufferFrames: s.bufferFrames,
       asioEnabled: s.asioEnabled,
@@ -1210,6 +1256,7 @@ async function openPicked(restore?: () => Promise<void>): Promise<{ status: Devi
     setOpenFailure(null);
     setDevice(runs.status);
     opened = { request: runs.request, picks: runs.picks };
+    dropLackingPicks(askedChannels(runs.request), runs.status.inputChannels);
     return { status: runs.status, declined: false };
   } catch (err) {
     console.error('[engine] device open failed', err);
@@ -1262,8 +1309,9 @@ export function switchEngineAsioDriver(driver: string): Promise<DeviceStatus | n
 /** Save the picks of the device that runs again (a declined switch): Audio Settings shows them. */
 function putBackPicks(): void {
   if (!opened) return;
-  const { bufferFrames, asioEnabled, ...ids } = opened.picks;
+  const { bufferFrames, asioEnabled, slotInputChannels: slots, ...ids } = opened.picks;
   writeAudioDeviceSettings(ids);
+  saveSlotInputChannels(slots);
   void setBufferSize(bufferFrames);
   void setAsioEnabled(asioEnabled);
 }
@@ -1321,31 +1369,34 @@ export function restoreEngineShare(): void {
   if (share()) void setEngineShare(share());
 }
 
-// Each slot's capture channel ('' = auto), saved with the device picks; a device open takes both.
-const [slotInputChannels, setSlotInputChannelsSignal] = createSignal(readAudioDeviceSettings().slotInputChannels);
-
-/** Each slot's capture channel pick ('' = auto, else 0-based). */
+/** Each slot's capture channel pick ('' = auto, else 0-based; `audio-devices.ts` keeps it). */
 export const engineSlotInputChannels = slotInputChannels;
 
-/** Switch slot `slot`'s capture channel ('' = auto) without reopening the device, and keep the pick for
- * the next open. A channel the running device refuses puts the previous pick back. */
-export function setEngineSlotInputChannel(slot: 0 | 1, channel: string): void {
-  const before = slotInputChannels();
-  const next = withAt(before, slot, channel);
-  setSlotInputChannelsSignal(next);
-  writeAudioDeviceSettings({ slotInputChannels: next });
-  if (!device()) return; // the next open takes it
-  platform.engine.setSlotInputChannel(slot, channelOf(channel)).catch((err: unknown) => {
-    setSlotInputChannelsSignal((now) => withAt(now, slot, before[slot]));
-    writeAudioDeviceSettings({ slotInputChannels: withAt(readAudioDeviceSettings().slotInputChannels, slot, before[slot]) });
-    console.error('[engine] input channel switch failed', err);
-    notifyError("Couldn't switch the input channel", err);
+/**
+ * Switch slot `slot`'s capture channel ('' = auto) without reopening the device, and keep the pick for
+ * the next open. On the open queue, so a switch never races an open: an open asked before it runs on
+ * the old pick and the switch then applies in place; one asked after it reads the new pick. A channel
+ * the running device refuses puts the previous pick back.
+ */
+export function setEngineSlotInputChannel(slot: 0 | 1, channel: string): Promise<void> {
+  return serialize(async () => {
+    const before = slotInputChannels()[slot];
+    saveSlotInputChannels(withAt(slotInputChannels(), slot, channel));
+    if (!device()) return; // the next open takes it
+    try {
+      await platform.engine.setSlotInputChannel(slot, channelOf(channel));
+      if (opened) opened = withSlotPicks(opened, slotInputChannels());
+    } catch (err) {
+      saveSlotInputChannels(withAt(slotInputChannels(), slot, before));
+      console.error('[engine] input channel switch failed', err);
+      notifyError("Couldn't switch the input channel", err);
+    }
   });
 }
 
 /** Both slots' capture channel at once (the native loopback probe's pick, `src/debug/engine-loopback.ts`). */
 export function setEngineInputChannel(channel: string): void {
-  for (const slot of [0, 1] as const) setEngineSlotInputChannel(slot, channel);
+  for (const slot of [0, 1] as const) void setEngineSlotInputChannel(slot, channel);
 }
 
 /** Subscribe to the feed; its first frame is a reset (`adoptSettings`). Returns the unsubscribe. */

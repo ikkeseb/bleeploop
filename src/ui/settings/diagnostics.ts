@@ -4,10 +4,11 @@ import {
   bufferFrames,
   inputDevices,
   outputDevices,
+  slotInputChannels,
   usingAsio,
 } from '../../audio/audio-devices';
 import { readAudioDeviceSettings } from '../../audio/audio-settings';
-import { slotIds, slotPlugins } from '../../audio/instrument';
+import { slotIds, slotOff, slotPlugins } from '../../audio/instrument';
 import { engineMode, platform } from '../../platform';
 import { notifyError, notifyInfo } from '../../notify';
 import { sampleRate } from '../state/audio';
@@ -40,8 +41,22 @@ export function logFolder(): Promise<string | null> {
 
 function slotLine(slot: 0 | 1): string {
   const plugin = slotPlugins()[slot];
-  const what = plugin ? `${plugin.name} (${plugin.format.toUpperCase()})` : `built-in synth (${slotIds()[slot]})`;
+  const what = plugin
+    ? `${plugin.name} (${plugin.format.toUpperCase()})`
+    : slotOff()[slot]
+      ? 'off (input only)'
+      : `built-in synth (${slotIds()[slot]})`;
   return `Slot ${slot === 0 ? 'A' : 'B'}: ${what}`;
+}
+
+/** Engine mode: each slot's input pick, and the input it reads while a device runs ("auto (2)"). */
+function slotChannelsLine(inUse: readonly number[] | undefined): string {
+  const one = (slot: 0 | 1): string => {
+    const pick = slotInputChannels()[slot];
+    const reads = inUse ? ` (${inUse[slot] + 1})` : '';
+    return `${slot === 0 ? 'A' : 'B'} ${pick === '' ? `auto${reads}` : Number(pick) + 1}`;
+  };
+  return `Input channels: ${one(0)}, ${one(1)}`;
 }
 
 /** Engine mode reads the device that runs; the web path reads the saved picks its next GO LIVE opens. */
@@ -50,14 +65,14 @@ function audioLines(): string[] {
   const channelLine = `Input channel: ${saved.inputChannel === '' ? 'auto' : Number(saved.inputChannel) + 1}`;
   if (engineMode()) {
     const d = engineDevice();
-    if (!d) return ['Audio: native engine', 'Device: none open', channelLine];
+    if (!d) return ['Audio: native engine', 'Device: none open', slotChannelsLine(undefined)];
     return [
       'Audio: native engine',
       `Backend: ${d.backend === 'Asio' ? 'ASIO' : 'WASAPI'}`,
       `Device: ${d.inputOpen ? d.inputName : 'no input'} → ${d.outputName}`,
       `Sample rate: ${d.sampleRate} Hz`,
       `Buffer: ${d.block} frames`,
-      channelLine,
+      slotChannelsLine(d.inputChannels),
     ];
   }
   if (!platform.pluginHost.available) return ['Audio: web path (browser build)', `Sample rate: ${sampleRate()} Hz`];

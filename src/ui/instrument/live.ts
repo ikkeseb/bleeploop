@@ -1,7 +1,7 @@
 import { createSignal } from 'solid-js';
 import { slotPendingCounts, slotTakesInput } from '../../audio/instrument';
-import { withAt } from '../../audio/instrument-slots';
-import { goLive, inputArmed, stopLive } from '../../audio/native-io';
+import { serializeSlot, withAt } from '../../audio/instrument-slots';
+import { goLive, inputArmed, intendLive, liveIntended, stopLive, takeLiveIntent } from '../../audio/native-io';
 import { readAudioDeviceSettings } from '../../audio/audio-settings';
 import { usingAsio } from '../../audio/audio-devices';
 import { engineMode, platform } from '../../platform';
@@ -67,11 +67,27 @@ export async function toggleLive(slot: 0 | 1, quiet = false): Promise<void> {
 }
 
 /**
- * Press slot `slot`'s GO LIVE / INPUT LIVE cap, exactly as a click would. False when that slot shows no
- * enabled cap: a source that takes no input, no host to feed it, or a source change or arm in flight.
+ * Press slot `slot`'s GO LIVE / INPUT LIVE cap, as a click would (the named action's; a pedal can press
+ * while the cap is locked). While a source op holds the slot (a load, a session's tone reload) the press
+ * is the player's latest intent, toggled from what the slot will be once the op settles and applied
+ * then; a reload that would resume GO LIVE yields to a stop. False when there is nothing to press: a
+ * source that takes no input, no host to feed it, or an arm or stop in flight.
  */
 export function pressGoLive(slot: 0 | 1): boolean {
-  if (!liveShown(slot) || slotPendingCounts()[slot] > 0 || busy()[slot]) return false;
+  if (busy()[slot]) return false;
+  if (slotPendingCounts()[slot] > 0) {
+    if (intendLive(slot, !liveIntended(slot))) void applyLiveIntent(slot);
+    return true;
+  }
+  if (!liveShown(slot)) return false;
   void toggleLive(slot);
   return true;
+}
+
+/** Apply the press recorded while a source op held `slot`, once it (and what queued behind it) ran. */
+async function applyLiveIntent(slot: 0 | 1): Promise<void> {
+  await serializeSlot(slot, async () => {});
+  const on = takeLiveIntent(slot);
+  if (on === null || on === inputArmed()[slot] || !liveShown(slot)) return;
+  await toggleLive(slot);
 }

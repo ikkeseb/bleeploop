@@ -16,6 +16,7 @@ import {
   outputDevices,
   refreshAndPruneDevices,
   refreshAsioDrivers,
+  saveSlotInputChannels,
   applyWebOutput,
   setAsioEnabled,
   setBufferSize,
@@ -243,6 +244,7 @@ export function AudioSettings() {
             setSelectedDevice(v);
             setSelectedChannel(''); // channel index is device-specific → reset to auto on swap
             writeAudioDeviceSettings({ inputDeviceId: v, inputChannel: '' });
+            saveSlotInputChannels(['', '']); // the slots' picks too (a declined switch puts them back)
             reopenEngine(syncPicks);
           }}
           aria-label="Audio input device"

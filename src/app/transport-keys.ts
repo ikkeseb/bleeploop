@@ -121,7 +121,7 @@ export function installTransportKeys(opts: TransportKeysOptions): TransportKeys 
   // the window transport handler owns the keys again. Delegated at the window so it covers every
   // button (lanes, transport, tools) including ones mounted later. CAPTURE phase is load-bearing:
   // Solid delegates 'click' at document (below window in the bubble chain) and several buttons'
-  // onClick call e.stopPropagation() (slot A/B, synth pills, plugin controls) — a bubble-phase window
+  // onClick call e.stopPropagation() (slot A/B, the slot's source controls) — a bubble-phase window
   // listener would never see those. Capture runs top-down before any bubble handler, and e.target is
   // still the deepest clicked node, so closest() resolves. Safe for the popover triggers: the panels
   // manage their own focus (focusPanel moves INTO the panel via microtask, which runs after this

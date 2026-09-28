@@ -1,4 +1,5 @@
 import { activeSlot, slotOff, slotPlugins } from '../audio/instrument';
+import { liveInPlay } from '../audio/native-io';
 import { engineMode, sendEngine, type EngineAction, type InputSendId } from '../platform';
 import { pressGoLive } from '../ui/instrument/live';
 import { toggleStage } from '../ui/stage/stage-store';
@@ -144,13 +145,15 @@ export function targetLane(target: Target): number {
 const step = (d: number) => (): void =>
   looper.selectTrack((looper.selectedTrack() + d + looper.trackCount) % looper.trackCount);
 
-/** GO LIVE's slot: the active one, unless only the other slot's source is made for input — an effect
- * plugin (the amp-sim a guitarist goes live on while the active slot plays a synth layer) or, in engine
- * mode, Off (raw input; the web path's MIC is its own control). */
+/** GO LIVE's slot: the active one, unless only the other slot has GO LIVE in play (`liveInPlay`: a tone
+ * reload holds it live while its plugin is briefly gone, or a press waits for its op) or a source made
+ * for input — an effect plugin (the amp-sim a guitarist goes live on while the active slot plays a synth
+ * layer) or, in engine mode, Off (raw input; the web path's MIC is its own control). */
 function goLiveSlot(): 0 | 1 {
   const active = activeSlot();
   const other = active === 0 ? 1 : 0;
-  const takesInput = (s: 0 | 1) => (slotPlugins()[s] ? slotPlugins()[s]?.isEffect === true : slotOff()[s]);
+  const takesInput = (s: 0 | 1) =>
+    liveInPlay(s) || (slotPlugins()[s] ? slotPlugins()[s]?.isEffect === true : slotOff()[s]);
   return !takesInput(active) && takesInput(other) ? other : active;
 }
 

@@ -48,6 +48,25 @@ const [asioDrivers, setAsioDrivers] = createSignal<string[]>([]);
 const [asioEnabled, setAsioEnabledSig] = createSignal<boolean>(readAudioDeviceSettings().asioEnabled);
 export const usingAsio = () => asioAvailable() && asioEnabled();
 
+// Engine mode: each slot's capture channel pick ('' = auto), saved with the device picks. A pick is
+// device-bound: an input device change or prune resets both, and a device without it resets that one.
+const [slotInputChannels, setSlotInputChannelsSig] = createSignal(readAudioDeviceSettings().slotInputChannels);
+
+/** Save and show each slot's capture channel pick. */
+export function saveSlotInputChannels(picks: readonly [string, string]): void {
+  if (picks[0] === slotInputChannels()[0] && picks[1] === slotInputChannels()[1]) return;
+  setSlotInputChannelsSig([picks[0], picks[1]]);
+  writeAudioDeviceSettings({ slotInputChannels: [picks[0], picks[1]] });
+}
+
+/** The input channels the saved (or cached ASIO) input device has; 0 = unknown (the default WASAPI
+ * device, or a list not read yet). */
+function savedInputChannelCount(): number {
+  if (usingAsio()) return asioDeviceInfo()?.inputChannels ?? 0;
+  const id = readAudioDeviceSettings().inputDeviceId;
+  return id ? (inputDevices().find((d) => d.id === id)?.channels ?? 0) : 0;
+}
+
 let configurationTail: Promise<void> = Promise.resolve();
 function configure(op: () => Promise<void>): Promise<void> {
   const run = configurationTail.then(op);
@@ -91,7 +110,8 @@ export async function refreshOutputDevices(): Promise<boolean> {
 /**
  * Refresh BOTH native device lists and prune any persisted device id no longer present (an interface
  * unplugged since it was last picked), resetting it to '' so a later arm falls back to the default
- * device instead of failing on a stale id. Called once at startup — so pruning happens before the user
+ * device instead of failing on a stale id; and each slot's channel pick the device lacks, or both with
+ * a pruned input device. Called once at startup — so pruning happens before the user
  * can arm — and again whenever the Audio Settings popover opens (to catch a mid-session unplug). No-op
  * in the web build.
  */
@@ -107,6 +127,16 @@ export async function refreshAndPruneDevices(): Promise<void> {
   ) {
     // This endpoint belongs to WASAPI. Its disappearance cannot invalidate the cached ASIO channel.
     writeAudioDeviceSettings({ inputDeviceId: '', ...(usingAsio() ? {} : { inputChannel: '' }) });
+    if (!usingAsio()) saveSlotInputChannels(['', '']);
+  }
+  // A slot pick past the device's inputs (saved on a device with more) is not what the slot reads.
+  const inputs = savedInputChannelCount();
+  if (inputs > 0) {
+    const picks = slotInputChannels();
+    saveSlotInputChannels([
+      picks[0] !== '' && Number(picks[0]) >= inputs ? '' : picks[0],
+      picks[1] !== '' && Number(picks[1]) >= inputs ? '' : picks[1],
+    ]);
   }
   if (
     outputRefreshSucceeded &&
@@ -326,8 +356,8 @@ export async function initAudioDeviceSettings(): Promise<void> {
   }
 }
 
-/** Read-only reactive accessors: native capture + output devices. */
-export { inputDevices, outputDevices };
+/** Read-only reactive accessors: native capture + output devices, each slot's capture channel pick. */
+export { inputDevices, outputDevices, slotInputChannels };
 
 /** Read-only reactive accessor: the global RT buffer size (frames) for the settings readout. */
 export { bufferFrames };

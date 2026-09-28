@@ -38,6 +38,7 @@ import {
 import {
   disarmInputInternal,
   disarmMonitorInternal,
+  holdEngineLive,
   inputArmed,
   resendEngineLive,
   resumeEngineLive,
@@ -46,7 +47,7 @@ import {
 import { readStoredNumber, writeStoredNumber } from './persist';
 import { forgetSlotPlugin, rememberSlotPlugin } from './rig-recall';
 import { warm as warmCapture } from './looper/capture';
-import { reconcilePluginDescriptors, samePluginDescriptor } from './plugin-descriptor';
+import { pluginDescriptorKey, reconcilePluginDescriptors, samePluginDescriptor } from './plugin-descriptor';
 
 /**
  * Two-slot instrument host. Each slot holds EITHER a built-in synth (a selectable id + a lazily-built
@@ -87,11 +88,18 @@ export const slotSourceGeneration = (slot: 0 | 1): number => sourceOps[slot];
 export const SLOT_GAIN_MAX = 1.5;
 
 // Kept for the next launch: each slot's source without its plugin (a synth id, or 'off' in engine
-// mode; a plugin over it comes back through the rig recall), each slot's input level and each synth's
-// level (engine mode's; the web synths have none).
+// mode; a plugin over it comes back through the rig recall), each slot's input level, each synth's
+// level and each plugin's level per slot (engine mode's; the web path has none of the levels, and its
+// plugin bridge picks a plugin's).
 const sourceKey = (slot: 0 | 1) => `lf.slotSource.${slot}`;
 const inputGainKey = (slot: 0 | 1) => `lf.slotInputGain.${slot}`;
 const synthGainKey = (id: string) => `lf.synthGain.${id}`;
+const pluginGainKey = (slot: 0 | 1, desc: PluginDescriptor) => `lf.pluginGain.${slot}.${pluginDescriptorKey(desc)}`;
+
+/** Engine mode: the level `desc` last had in `slot`, else its kind's default (an unclassified plugin at
+ * the quieter synth level). */
+const savedPluginLevel = (slot: 0 | 1, desc: PluginDescriptor): number =>
+  readStoredNumber(pluginGainKey(slot, desc), desc.isEffect === true ? FX_DEFAULT_GAIN : SYNTH_DEFAULT_GAIN, 0, SLOT_GAIN_MAX);
 
 function writeSource(slot: 0 | 1, source: string): void {
   try {
@@ -269,7 +277,6 @@ export function selectSynth(slotIndex: 0 | 1, id: string): void {
   chosenSource[slotIndex] = true;
   setSlotIds((prev) => withAt(prev, slotIndex, id)); // immediate UI highlight
   setSlotOff((prev) => withAt(prev, slotIndex, false));
-  writeSource(slotIndex, id);
   // Serialize the routing work on the SAME per-slot chain as selectPlugin/clearPlugin, so a synth
   // pick made while a plugin load is in flight isn't clobbered by that load's continuation: the load
   // completes, then this op clears it and reverts to the chosen synth (last action wins).
@@ -294,6 +301,7 @@ export function selectSynth(slotIndex: 0 | 1, id: string): void {
         buildSlot(slotIndex);
       }
     }
+    writeSource(slotIndex, id); // saved once it is the slot's source (a failed unload kept the plugin)
     activateSlot(slotIndex);
   });
 }
@@ -308,12 +316,13 @@ export function selectOff(slotIndex: 0 | 1): void {
   if (!engineMode()) return; // the web path has no Off target
   chosenSource[slotIndex] = true;
   setSlotOff((prev) => withAt(prev, slotIndex, true));
-  writeSource(slotIndex, 'off');
   void serializeSlot(slotIndex, async () => {
     if (slotPlugins()[slotIndex]) {
       await doClearPlugin(slotIndex); // routes an active slot to Off once the plugin is gone
+      if (!slotPlugins()[slotIndex]) writeSource(slotIndex, 'off'); // a failed unload kept the plugin
       return;
     }
+    writeSource(slotIndex, 'off');
     forgetSlotPlugin(slotIndex);
     await disarmInputInternal(slotIndex);
     if (activeSlot() === slotIndex) applyActiveRouting();
@@ -414,9 +423,9 @@ async function doSelectPlugin(
   // Engine mode restored the plugin's stored tone inside the load; one it could not restore (the host
   // logged why) leaves the plugin at its defaults, and the player should know.
   if (tone === 'failed') notifyError(`${desc.name}: saved settings could not be restored; it loaded with its defaults`);
-  // Engine mode has no bridge to pick the gain default: take the scan's kind, an unclassified plugin
-  // at the quieter synth level.
-  if (engineMode()) setEngineGain(slot, desc.isEffect === true ? FX_DEFAULT_GAIN : SYNTH_DEFAULT_GAIN);
+  // Engine mode has no bridge to pick the gain default: the level this plugin last had in this slot,
+  // else the scan's kind's default.
+  if (engineMode()) setEngineGain(slot, savedPluginLevel(slot, desc));
   // Route to the plugin FIRST (drops the live synth-engine ref), THEN dispose the engine — so the
   // router never holds a reference to a disposed SynthEngine. If the slot isn't active the router
   // doesn't reference this engine anyway, so disposing it is safe regardless. An instrument plugin
@@ -453,12 +462,17 @@ export function reloadPlugin(
     if (!desc || sourceOps[slot] !== since || !samePluginDescriptor(desc, expected)) return 'moved';
     const wasLive = inputArmed()[slot];
     const gain = pluginGain()[slot];
-    if (!(await unloadSlotPlugin(slot, desc, 'swap'))) return 'failed';
-    await doSelectPlugin(slot, desc, () => false, toneToken);
-    if (!samePluginDescriptor(slotPlugins()[slot], desc)) return 'failed';
-    if (gain !== null) setPluginGain(slot, gain);
-    if (wasLive) resumeEngineLive(slot);
-    return 'reloaded';
+    holdEngineLive(slot, wasLive); // live meanwhile, to a GO LIVE pressed during the reload
+    try {
+      if (!(await unloadSlotPlugin(slot, desc, 'swap'))) return 'failed';
+      await doSelectPlugin(slot, desc, () => false, toneToken);
+      if (!samePluginDescriptor(slotPlugins()[slot], desc)) return 'failed';
+      if (gain !== null) setPluginGain(slot, gain);
+      if (wasLive) resumeEngineLive(slot);
+      return 'reloaded';
+    } finally {
+      holdEngineLive(slot, false);
+    }
   });
 }
 
@@ -477,6 +491,7 @@ async function unloadSlotPlugin(slot: 0 | 1, outgoing: PluginDescriptor, path: '
   pluginBridge.teardownPluginSlot(slot); // stop the audio drain + release the hop-1 buffer (sync)
   // The slot reads empty at once, but the engine keeps the outgoing gain until the unload is done: the
   // plugin plays out its removal fade (and any tail) at the level the player set, not at unity.
+  const outgoingGain = engineGains()[slot];
   if (engineMode()) setEngineGain(slot, null, false);
   setSlotPlugins((prev) => withAt(prev, slot, null));
   // Both calls flush held notes: the next plugin reuses the SAME stable PLUGIN_SINKS ref, so a later
@@ -491,7 +506,7 @@ async function unloadSlotPlugin(slot: 0 | 1, outgoing: PluginDescriptor, path: '
     console.error(`[instrument] plugin unload${path === 'swap' ? ' (swap)' : ''} failed`, e);
     notifyError('Plugin unload failed', 'The plugin stays in the slot but is silent. Choose none or another plugin to retry.');
     setSlotPlugins((prev) => withAt(prev, slot, outgoing));
-    if (engineMode()) setEngineGain(slot, outgoing.isEffect === true ? FX_DEFAULT_GAIN : SYNTH_DEFAULT_GAIN);
+    if (engineMode()) setEngineGain(slot, outgoingGain ?? savedPluginLevel(slot, outgoing));
     // Route to the restored plugin FIRST (drops any synth-engine ref), THEN dispose the engine built
     // while the slot read empty, so no idle SynthEngine lives beside the plugin.
     if (activeSlot() === slot) applyActiveRouting();
@@ -628,9 +643,11 @@ export function slotLevel(slot: 0 | 1): number | null {
  * for the next launch. */
 export function setSlotLevel(slot: 0 | 1, value: number): void {
   const v = Math.max(0, Math.min(SLOT_GAIN_MAX, value));
-  if (slotPlugins()[slot]) {
+  const plugin = slotPlugins()[slot];
+  if (plugin) {
     setPluginGain(slot, v); // web wet level (record + web monitor), or the engine's slot gain
     void setMonitorGain(slot, v); // the web path's native monitor, kept level with it
+    if (engineMode()) writeStoredNumber(pluginGainKey(slot, plugin), v);
     return;
   }
   if (!engineMode()) return;

@@ -15,6 +15,14 @@
  * - the slot volume sends what its source needs: an Off slot's input level (`SetSlotGain`), a synth's
  *   level (`SetInstrumentGain`), a plugin's output (`SetSlotGain`); the Off source, the input picks and
  *   the Off and synth levels survive a reload and are sent to the engine again;
+ * - a slot's input names only a channel the slot reads: an open whose status reads auto for a pick the
+ *   device lacks, a status from a device the owner reopened on, an input device change and a prune (a
+ *   vanished device, a pick past the device's inputs) reset that pick to Auto, in storage and on screen;
+ * - GO LIVE pressed (the named action, as a pedal) while a tone reload holds a live slot: one press stops
+ *   it (the reload does not resume it), two leave it live;
+ * - a source pick whose plugin unload fails is not saved for the next launch; one that unloads is;
+ * - a plugin's level is kept per slot and plugin: loaded again, and loaded by the rig recall's load after
+ *   a reload, it comes back at that level (not its type default);
  * - the header at 1280×800 and 1000×700 (slot A Off and live on In 2, slot B the amp-sim): no control
  *   leaves its card, the source's own controls stay on one line, and at 1280 the header has at most two.
  *   `--shots=<dir>` saves those two screenshots there (else `logs/slot-sources/`).
@@ -197,6 +205,155 @@ await probe(async ({ browser, open }) => {
   const webOptions = await web.page.getByRole('combobox', { name: 'Source for slot 1', exact: true })
     .evaluate((select) => [...select.options].filter((o) => !o.hidden).map((o) => o.value));
   assert.deepEqual(webOptions, ['lead', 'bass', 'pad', 'piano', 'organ', 'drum'], 'the web picker lists the synths, no Off');
+
+  // ── Review fixes, in a fresh profile ───────────────────────────────────────────────────────────────
+  {
+    const context = await browser.newContext();
+    const { page: p, consoleErrors: errors } = await open({ context, viewport: { width: 1280, height: 800 }, init: (pg) => engineInit(pg) });
+    await boot(p);
+    const pk = (slot) => p.getByRole('combobox', { name: `Source for slot ${slot}`, exact: true });
+    const inp = (slot) => p.getByRole('combobox', { name: `Input for slot ${slot}`, exact: true });
+    const saved = () => p.evaluate(() => JSON.parse(localStorage.getItem('lf.audioDevices') ?? '{}').slotInputChannels ?? null);
+    const sentNow = () => p.evaluate(() => window.__lf.native.sent.map((c) => JSON.stringify(c)));
+    const clear = () => p.evaluate(() => void (window.__lf.native.sent.length = 0));
+    await pk(1).selectOption('off');
+    await pk(2).selectOption('off');
+    await inp(1).selectOption('3');
+    await inp(2).selectOption('1');
+    await p.waitForFunction(() => window.__lf.native.slotInputChannels.length === 2);
+    assert.deepEqual(await saved(), ['3', '1']);
+
+    // 1a. A reopen whose status says slot A reads input 2: the device lacks input 4.
+    await p.evaluate(async () => {
+      const native = window.__lf.native;
+      const real = native.open;
+      native.open = async (request, force) => ({ ...(await real.call(native, request, force)), inputChannels: [1, 1] });
+      await (await import('/src/ui/state/engine-store.ts')).openEngineDevice();
+      native.open = real;
+    });
+    assert.deepEqual(await saved(), ['', '1'], 'a pick the device lacks is saved as Auto; the other stays');
+    assert.equal(await inp(1).inputValue(), '', 'and the slot shows Auto');
+    // 1b. The owner reopened on another device (a fallback) whose status reads input 1 for slot B.
+    await p.evaluate(() => window.__lf.native.emit({ seq: 2, reset: false, events: [], status: {
+      backend: 'Wasapi', sampleRate: 48000, block: 256, inputName: 'Small input', outputName: 'Fake output',
+      alignFrames: 0, inputFrames: 0, inputOpen: true, inputChannels: [0, 0] } }));
+    assert.deepEqual(await saved(), ['', ''], "a device the owner reopened on without slot B's pick resets it");
+    assert.equal(await inp(2).inputValue(), '');
+    // 1c. An input device change in Audio Settings resets both picks (back on the four-input device first).
+    await p.evaluate(() => window.__lf.native.emit({ seq: 3, reset: false, events: [], status: {
+      backend: 'Wasapi', sampleRate: 48000, block: 256, inputName: 'Fake input', outputName: 'Fake output',
+      alignFrames: 0, inputFrames: 0, inputOpen: true, inputChannels: [1, 1] } }));
+    await inp(1).selectOption('2');
+    await p.evaluate(async () => {
+      const { platform } = await import('/src/platform/index.ts');
+      platform.pluginHost.listInputDevices = async () => [{ id: 'fake-in', name: 'Fake input', channels: 4 }, { id: 'other', name: 'Other input', channels: 2 }];
+      window.__lf.ui.openSettings();
+    });
+    await p.waitForFunction(() => document.querySelectorAll('[aria-label="Audio input device"] option').length === 3);
+    await p.getByRole('combobox', { name: 'Audio input device', exact: true }).selectOption('other');
+    await p.waitForFunction(() => window.__lf.native.opened.length >= 3);
+    assert.deepEqual(await saved(), ['', ''], 'an input device change resets both picks');
+    assert.deepEqual((await p.evaluate(() => window.__lf.native.opened.at(-1))).inputChannels, [null, null], 'and the reopen asks for auto');
+    await p.evaluate(() => window.__lf.ui.closeSettings());
+    // 1d. The prune (startup, Audio Settings): a pick past the saved device's inputs, then a vanished device.
+    const pruned = await p.evaluate(async () => {
+      const devices = await import('/src/audio/audio-devices.ts');
+      const { writeAudioDeviceSettings, readAudioDeviceSettings } = await import('/src/audio/audio-settings.ts');
+      writeAudioDeviceSettings({ inputDeviceId: 'other' });
+      devices.saveSlotInputChannels(['3', '1']);
+      await devices.refreshAndPruneDevices();
+      const past = readAudioDeviceSettings().slotInputChannels;
+      devices.saveSlotInputChannels(['1', '0']);
+      const { platform } = await import('/src/platform/index.ts');
+      platform.pluginHost.listInputDevices = async () => [{ id: 'fake-in', name: 'Fake input', channels: 4 }];
+      await devices.refreshAndPruneDevices();
+      return { past, vanished: readAudioDeviceSettings().slotInputChannels, shown: devices.slotInputChannels() };
+    });
+    assert.deepEqual(pruned, { past: ['', '1'], vanished: ['', ''], shown: ['', ''] }, 'the prune drops a pick past the inputs, and both with a vanished device');
+
+    // 2. GO LIVE pressed (the named action) while a tone reload holds live slot A. Under the amp, A plays
+    // a synth, and B is Off (takes input): the press must still reach A, whose plugin the reload removed.
+    await pk(1).selectOption('lead');
+    await pk(1).selectOption({ label: 'Probe Amp Sim (vst3)' });
+    await p.getByRole('button', { name: 'Stop live input for slot 1', exact: true }).waitFor();
+    const duringReload = (presses) => p.evaluate(async (presses) => {
+      const { platform } = await import('/src/platform/index.ts');
+      const instrument = await import('/src/audio/instrument.ts');
+      const io = await import('/src/audio/native-io.ts');
+      const { runAction } = await import('/src/app/actions.ts');
+      const host = platform.pluginHost;
+      const load = host.loadPlugin;
+      let release;
+      host.loadPlugin = (...args) => new Promise((resolve) => { release = () => resolve(load(...args)); });
+      window.__lf.native.sent.length = 0;
+      const reload = instrument.reloadPlugin(0, instrument.slotPlugins()[0], instrument.slotSourceGeneration(0), 7);
+      while (!release) await new Promise((r) => setTimeout(r, 5));
+      for (let i = 0; i < presses; i++) runAction('goLive');
+      release();
+      const result = await reload;
+      host.loadPlugin = load;
+      await new Promise((r) => setTimeout(r, 50));
+      return { result, live: io.inputArmed()[0], sent: window.__lf.native.sent.filter((c) => c.SetSlotLive).map((c) => JSON.stringify(c)) };
+    }, presses);
+    const stopped = await duringReload(1);
+    console.log('one press during the reload', JSON.stringify(stopped));
+    assert.deepEqual(stopped, { result: 'reloaded', live: false, sent: ['{"SetSlotLive":[0,false]}'] },
+      'a stop pressed during the reload wins: the reload does not resume GO LIVE');
+    await p.getByRole('button', { name: 'Go live for slot 1', exact: true }).click();
+    await p.getByRole('button', { name: 'Stop live input for slot 1', exact: true }).waitFor();
+    const twice = await duringReload(2);
+    console.log('two presses during the reload', JSON.stringify(twice));
+    assert.equal(twice.live, true, 'stop then go during the reload leaves the slot live');
+    assert.deepEqual(twice.sent, ['{"SetSlotLive":[0,false]}', '{"SetSlotLive":[0,true]}']);
+
+    // 5. The plugin's level is kept per slot and plugin.
+    await clear();
+    await p.getByRole('slider', { name: 'Volume for slot 1', exact: true }).fill('0.8');
+    await p.waitForTimeout(60);
+    const levelKey = `lf.pluginGain.0.${JSON.stringify(['vst3', AMP.path, AMP.id])}`;
+    assert.equal(await p.evaluate((k) => localStorage.getItem(k), levelKey), '0.8', 'the plugin level is saved per slot and plugin');
+    await pk(1).selectOption('lead');
+    await p.waitForFunction(() => !window.__lf.slotPlugins()[0]);
+    await clear();
+    await pk(1).selectOption({ label: 'Probe Amp Sim (vst3)' });
+    await p.getByRole('button', { name: 'Stop live input for slot 1', exact: true }).waitFor();
+    assert.ok((await sentNow()).includes('{"SetSlotGain":[0,0.8]}'), `loaded again, it comes back at its level: ${await sentNow()}`);
+
+    // 4. A pick whose unload fails is not saved; one that unloads is.
+    const failedPick = await p.evaluate(async () => {
+      const { platform } = await import('/src/platform/index.ts');
+      const instrument = await import('/src/audio/instrument.ts');
+      const slots = await import('/src/audio/instrument-slots.ts');
+      const idle = async () => { while (slots.slotPendingCounts().some((n) => n > 0)) await new Promise((r) => setTimeout(r, 5)); };
+      const host = platform.pluginHost;
+      const unload = host.unloadPlugin;
+      const before = localStorage.getItem('lf.slotSource.0');
+      host.unloadPlugin = async () => { throw new Error('injected unload failure'); };
+      instrument.selectOff(0);
+      await idle();
+      instrument.selectSynth(0, 'pad');
+      await idle();
+      const failed = { before, after: localStorage.getItem('lf.slotSource.0'), plugin: instrument.slotPlugins()[0]?.id ?? null };
+      host.unloadPlugin = unload;
+      instrument.selectOff(0);
+      await idle();
+      return { ...failed, unloaded: localStorage.getItem('lf.slotSource.0'), pluginAfter: instrument.slotPlugins()[0]?.id ?? null };
+    });
+    console.log('pick over a failed unload', JSON.stringify(failedPick));
+    assert.deepEqual(failedPick, { before: 'lead', after: 'lead', plugin: AMP.id, unloaded: 'off', pluginAfter: null },
+      'Off and a synth are saved only once the plugin unloaded');
+
+    // 5, at the next launch: the rig recall's load brings the plugin back at its level.
+    await p.reload();
+    await p.waitForFunction(() => '__lf' in window);
+    await boot(p);
+    await clear();
+    await p.evaluate(async (AMP) => (await import('/src/audio/instrument.ts')).restorePlugin(0, AMP), AMP);
+    assert.ok((await sentNow()).includes('{"SetSlotGain":[0,0.8]}'), `the recalled plugin comes back at its level: ${await sentNow()}`);
+    const unexpected = errors.filter((e) => !e.startsWith('[instrument] plugin unload failed'));
+    assert.deepEqual(unexpected, [], 'no console errors beyond the injected unload failures');
+    await context.close();
+  }
 
   // ── The header at two window sizes: A Off and live on In 2, B the amp-sim ──────────────────────────
   await mkdir(shotsDir, { recursive: true });

@@ -49,13 +49,51 @@ function setEngineLive(slot: 0 | 1, on: boolean): void {
   setMonitorArmed((prev) => withAt(prev, slot, on));
 }
 
+// A tone reload of a live slot, from its unload to its resume: the slot counts as live meanwhile.
+const reloading: [boolean, boolean] = [false, false];
+// The player's latest GO LIVE press on a slot a source op holds (null = none): applied once the op
+// settles (`src/ui/instrument/live.ts`); a reload's resume yields to a stop.
+const liveIntent: [boolean | null, boolean | null] = [null, null];
+
+/** Engine mode: a tone reload of live `slot` begins (`on`) or ends (`instrument.ts`). */
+export function holdEngineLive(slot: 0 | 1, on: boolean): void {
+  reloading[slot] = on;
+}
+
 /**
  * Engine mode, inside `slot`'s serialized op (a tone reload, `instrument.ts`): make `slot` live again
- * once its plugin is back. The player's GO LIVE and stop on this slot queue behind the reload, and the
- * other slot's live state is its own.
+ * once its plugin is back, unless the player pressed GO LIVE to stop it meanwhile (the latest press
+ * wins). The other slot's live state is its own.
  */
 export function resumeEngineLive(slot: 0 | 1): void {
-  if (engineMode() && slotPlugins()[slot]) setEngineLive(slot, true);
+  if (engineMode() && slotPlugins()[slot] && liveIntent[slot] !== false) setEngineLive(slot, true);
+}
+
+/** Whether `slot` is live, or will be once the source op holding it settles: the player's latest press
+ * on it, else a reload's resume, else its state. */
+export function liveIntended(slot: 0 | 1): boolean {
+  return liveIntent[slot] ?? (reloading[slot] || inputArmed()[slot]);
+}
+
+/** Whether GO LIVE is in play on `slot`: live, held live by a reload, or pressed while an op holds it
+ * (the named action keeps pressing that slot). */
+export function liveInPlay(slot: 0 | 1): boolean {
+  return liveIntent[slot] !== null || reloading[slot] || inputArmed()[slot];
+}
+
+/** Record the player's GO LIVE press on `slot` while a source op holds it. True for the first since the
+ * last `takeLiveIntent`: the caller queues one apply behind the op. */
+export function intendLive(slot: 0 | 1, on: boolean): boolean {
+  const first = liveIntent[slot] === null;
+  liveIntent[slot] = on;
+  return first;
+}
+
+/** The recorded press, taken to apply it (null = none). */
+export function takeLiveIntent(slot: 0 | 1): boolean | null {
+  const on = liveIntent[slot];
+  liveIntent[slot] = null;
+  return on;
 }
 
 /** Engine mode's MIC: whether the device input runs dry through a live slot without a plugin. */
