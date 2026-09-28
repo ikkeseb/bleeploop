@@ -248,15 +248,25 @@ export interface PluginHost {
   /** The startup coordinator's status (`src-tauri/src/asio_startup.rs`). Never touches the driver. */
   asioStatus(): Promise<AsioStatusReport>;
   /**
-   * Request the one-per-process ASIO driver probe. The frontend calls this AFTER the window is up, at
-   * boot only when the saved preference is on (`explicit=false`), and from the Audio Settings
-   * toggle / Retry (`explicit=true`, which may proceed past a blocked or failed earlier attempt).
+   * Request the ASIO driver probe (`src-tauri/src/asio_startup.rs`). The frontend calls this AFTER the
+   * window is up, at boot only when the saved preference is on (`explicit=false`), and from the Audio
+   * Settings toggle / Retry (`explicit=true`, which may proceed past a blocked or failed earlier attempt).
+   * `driver` is the saved driver pick ('' = automatic; a name no longer installed falls back to it).
    * Resolves with the resulting status; `ready` means `asioAvailable()` is now true. Bounded by the
    * native probe deadline (a hung driver yields `timed-out`, never a hang here).
    */
-  asioProbe(explicit: boolean): Promise<AsioStatusReport>;
-  /** Cached default ASIO driver and its actual channel counts; null without an ASIO device. */
-  asioDeviceInfo(): Promise<{ name: string; inputChannels: number; outputChannels: number } | null>;
+  asioProbe(explicit: boolean, driver: string): Promise<AsioStatusReport>;
+  /**
+   * Switch to another ASIO driver without a restart ('' = automatic): the host drops the cached driver
+   * and probes `driver` in its place, as `asioProbe(true, driver)` would. Rejects, changing nothing,
+   * while anything still holds the driver (engine mode's device on ASIO: close it first). A timed-out
+   * probe answers `timed-out` and needs a restart, as at startup.
+   */
+  asioSwitch(driver: string): Promise<AsioStatusReport>;
+  /** The installed ASIO drivers' names, read from the registry without loading any. Empty without ASIO. */
+  asioDrivers(): Promise<string[]>;
+  /** The cached ASIO driver, its actual channel counts and buffer range; null without an ASIO device. */
+  asioDeviceInfo(): Promise<AsioDeviceInfo | null>;
   /**
    * Set the ASIO-tier preference. When enabled (and available) the native capture + monitor use ASIO
    * for low latency; disabled forces WASAPI-shared. Takes effect on the NEXT arm — a live stream keeps
@@ -286,6 +296,17 @@ export interface AsioStatusReport {
   status: AsioStartupStatus;
   /** Human-readable reason for `failed` / `blocked` / `timed-out`; empty otherwise. */
   detail: string;
+}
+
+/** The cached ASIO driver (`plugin_asio_device_info`). */
+export interface AsioDeviceInfo {
+  name: string;
+  inputChannels: number;
+  outputChannels: number;
+  /** The buffer sizes the driver takes, in frames; null when it did not say. Equal: one size only, set
+   * in the driver's own control panel. */
+  bufferMin: number | null;
+  bufferMax: number | null;
 }
 
 /** A live audio input, delivered as an AudioNode on the caller's shared AudioContext. */

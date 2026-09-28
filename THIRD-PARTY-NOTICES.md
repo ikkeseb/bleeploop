@@ -48,6 +48,7 @@ All versions below are as pinned/resolved in `src-tauri/Cargo.lock`.
 | clack-host | 0.1.0 | MIT OR Apache-2.0 |
 | clack-extensions | 0.1.0 | MIT OR Apache-2.0 |
 | cpal | 0.18.1 | Apache-2.0 (single license, not dual) |
+| asio-sys | 0.3.0 | Apache-2.0 — ASIO builds only (`--features asio`); cpal's own ASIO binding, used directly for the driver list |
 | rtrb | 0.3.4 | MIT OR Apache-2.0 |
 | rubato | 3.0.0 | MIT |
 | rustfft | 6.4.1 | MIT OR Apache-2.0 |
@@ -59,9 +60,9 @@ All versions below are as pinned/resolved in `src-tauri/Cargo.lock`.
 
 ### Steinberg ASIO SDK — not included; ASIO-enabled binaries are GPLv3
 
-The `asio` Cargo feature (`--features asio`, gating `cpal/asio`) compiles against Steinberg's ASIO
-SDK. **The SDK is not included in this repository and is not redistributed by this project.** A
-local build supplies it through `CPAL_ASIO_DIR`; the `build-exe` workflow downloads a pinned
+The `asio` Cargo feature (`--features asio`, gating `cpal/asio` and `asio-sys`) compiles against
+Steinberg's ASIO SDK. **The SDK is not included in this repository and is not redistributed by this
+project.** A local build supplies it through `CPAL_ASIO_DIR`; the `build-exe` workflow downloads a pinned
 version from Steinberg at build time. A plain `cargo build` needs no SDK and produces the WASAPI
 tier under this repo's MIT licence.
 

@@ -26,7 +26,9 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 # ASIO SDK via the CPAL_ASIO_DIR env var. Build with `--features asio` once that's set up. ASIO drivers
 # are per-device + user-installed (Focusrite/Scarlett ships one), so WASAPI stays the universal default
 # and ASIO is the opt-in low-latency tier — this flag keeps the normal build green without the SDK.
-asio = ["cpal/asio"]
+# asio-sys rides along for its driver-name list (the Audio Settings driver picker), which reads the
+# registry without loading a driver; cpal's device list loads every driver it names.
+asio = ["cpal/asio", "dep:asio-sys"]
 
 [build-dependencies]
 tauri-build = { version = "2.6.2", features = [] }
@@ -101,6 +103,9 @@ clack-extensions = { version = "=0.1.0", features = ["params", "state", "audio-p
 # (docs/plans/native-engine.md § Stage 4); 0.18.2 moves to asio-sys 0.4.0 and windows 0.62 and needs
 # its own A1 rerun first.
 cpal             = { version = "=0.18.1", default-features = false }
+# The asio-sys cpal 0.18.1 builds on (the same crate, so one driver registry and one loaded driver);
+# pinned with cpal. Only under the `asio` feature.
+asio-sys         = { version = "=0.3.0", optional = true }
 rtrb             = "0.3.4"                  # wait-free SPSC ring, host side (backs the WebView2 buffer)
 rubato           = "3.0.0"                  # P9.4 producer-side fractional resampler (Async + FixedAsync::Input)
 walkdir          = "2"                      # CLAP-file + VST3-dir scan (no clack-finder)

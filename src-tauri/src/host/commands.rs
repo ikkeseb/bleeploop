@@ -709,25 +709,33 @@ pub fn plugin_asio_status() -> crate::asio_startup::AsioStatusReport {
     }
 }
 
+/// The ASIO probe's attempt-in-progress marker, in the app's local data dir (`asio_startup.rs`).
+#[cfg(windows)]
+fn asio_sentinel(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    use tauri::Manager;
+    let dir = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|e| format!("app_local_data_dir: {e}"))?;
+    Ok(dir.join("asio-probe-in-progress"))
+}
+
 /// The one-per-process ASIO probe (`asio_startup.rs`). The frontend calls this AFTER the window is up:
 /// at boot with `explicit=false` only when the saved preference is on, and from the Audio Settings
-/// toggle/Retry with `explicit=true`. Runs on a blocking runtime thread for at most the probe deadline;
-/// the returned report is also logged so a `tauri dev` grep sees the decision.
+/// toggle/Retry with `explicit=true`. `driver` is the saved driver pick (`None` = automatic). Runs on
+/// a blocking runtime thread for at most the probe deadline; the returned report is also logged so a
+/// `tauri dev` grep sees the decision.
 #[tauri::command]
 pub async fn plugin_asio_probe(
     app: tauri::AppHandle,
     explicit: bool,
+    driver: Option<String>,
 ) -> Result<crate::asio_startup::AsioStatusReport, String> {
     #[cfg(windows)]
     {
-        use tauri::Manager;
-        let dir = app
-            .path()
-            .app_local_data_dir()
-            .map_err(|e| format!("app_local_data_dir: {e}"))?;
-        let sentinel = dir.join("asio-probe-in-progress");
+        let sentinel = asio_sentinel(&app)?;
         let report = tauri::async_runtime::spawn_blocking(move || {
-            crate::audio_output::probe_asio_startup(&sentinel, explicit)
+            crate::audio_output::probe_asio_driver(&sentinel, explicit, driver)
         })
         .await
         .map_err(|e| format!("asio probe task: {e}"))?;
@@ -740,20 +748,84 @@ pub async fn plugin_asio_probe(
     }
     #[cfg(not(windows))]
     {
-        let _ = (app, explicit);
+        let _ = (app, explicit, driver);
         Ok(plugin_asio_status())
     }
 }
 
+/// Switch the ASIO driver without a restart (`driver`: `None` = automatic): the cached driver is dropped
+/// and the new one probed. Refused while anything holds the driver: engine mode's device on ASIO (the
+/// frontend closes it first and reopens it after), or a live slot's retained ASIO streams.
+#[tauri::command]
+pub async fn plugin_asio_switch(
+    app: tauri::AppHandle,
+    driver: Option<String>,
+) -> Result<crate::asio_startup::AsioStatusReport, String> {
+    #[cfg(windows)]
+    {
+        let sentinel = asio_sentinel(&app)?;
+        log::info!("[asio] driver switch requested: {driver:?}");
+        let busy = || {
+            if crate::engine_io::mode::active() {
+                crate::engine_io::mode::asio_device_open().then(|| "the audio device still holds the ASIO driver".to_string())
+            } else {
+                crate::audio_output::asio_holder()
+                    .map(|_| "a plugin slot holds the ASIO driver until its plugin unloads".to_string())
+            }
+        };
+        let report = tauri::async_runtime::spawn_blocking(move || {
+            crate::audio_output::switch_asio_driver(&sentinel, driver, busy)
+        })
+        .await
+        .map_err(|e| format!("asio switch task: {e}"))??;
+        log::info!("[asio] driver switch result: {:?} {}", report.status, report.detail);
+        Ok(report)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (app, driver);
+        Ok(plugin_asio_status())
+    }
+}
+
+/// The installed ASIO drivers' names (the SDK's registry list; no driver is loaded). Empty without ASIO.
+#[tauri::command]
+pub async fn plugin_asio_drivers() -> Result<Vec<String>, String> {
+    #[cfg(windows)]
+    {
+        tauri::async_runtime::spawn_blocking(crate::audio_output::asio_driver_names)
+            .await
+            .map_err(|e| format!("asio driver list task: {e}"))
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(Vec::new())
+    }
+}
+
+/// `AsioDeviceInfo` plus the buffer sizes the driver takes (`null` when it did not say).
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AsioDriverInfo {
+    #[serde(flatten)]
+    device: super::state::AsioDeviceInfo,
+    buffer_min: Option<u32>,
+    buffer_max: Option<u32>,
+}
+
 /// Read cached metadata only; never enumerate or reopen an ASIO driver held by a live stream.
 #[tauri::command]
-pub fn plugin_asio_device_info() -> Option<super::state::AsioDeviceInfo> {
+pub fn plugin_asio_device_info() -> Option<AsioDriverInfo> {
     #[cfg(all(windows, feature = "asio"))]
     {
-        crate::audio_output::asio_cache().map(|cache| super::state::AsioDeviceInfo {
-            name: cache.name.clone(),
-            input_channels: cache.in_cfg.channels as u32,
-            output_channels: cache.out_cfg.channels as u32,
+        crate::audio_output::asio_cache().map(|cache| AsioDriverInfo {
+            device: super::state::AsioDeviceInfo {
+                name: cache.name.clone(),
+                input_channels: cache.in_cfg.channels as u32,
+                output_channels: cache.out_cfg.channels as u32,
+            },
+            buffer_min: cache.buffer_range.map(|(min, _)| min),
+            buffer_max: cache.buffer_range.map(|(_, max)| max),
         })
     }
     #[cfg(not(all(windows, feature = "asio")))]

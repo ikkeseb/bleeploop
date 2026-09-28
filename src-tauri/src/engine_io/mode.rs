@@ -48,6 +48,17 @@ pub fn active() -> bool {
     engine().is_some()
 }
 
+/// The engine's device may hold the ASIO driver: it runs on ASIO, or a start is in flight (`Core::running`
+/// is up before its status exists). A driver switch waits for the close. The engine's claim on the
+/// duplex holder lasts the whole launch, so it cannot say this.
+pub fn asio_device_open() -> bool {
+    let Some(host) = engine().and_then(|app| app.host().ok()) else { return false };
+    match host.status() {
+        Some(status) => status.backend.is_asio(),
+        None => host.core.running.load(std::sync::atomic::Ordering::Acquire),
+    }
+}
+
 /// Engine mode's state: the toggle, and the host, its feed, its plugin slots and the tone store while
 /// it is on.
 pub struct EngineApp {

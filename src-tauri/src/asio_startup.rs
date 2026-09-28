@@ -1,5 +1,5 @@
-//! ASIO startup coordinator: ONE driver probe per process, requested by the frontend AFTER the UI is
-//! up, never from `run()`.
+//! ASIO startup coordinator: one driver probe at a time (at startup, again only for a driver switch),
+//! requested by the frontend AFTER the UI is up, never from `run()`.
 //!
 //! Why this exists: resolving the ASIO device loads and initialises a third-party driver DLL in-process
 //! (`CoCreateInstance` + `ASIOInit`, holding asio-sys' global driver lock). A broken driver hangs or
@@ -9,7 +9,9 @@
 //! (3) a sentinel file marks an attempt in progress, and an attempt that did not complete blocks the
 //! automatic probe on the next launch until the user explicitly retries; (4) after a timed-out attempt
 //! the process never retries (the driver thread is still inside the DLL) — a restart is required;
-//! (5) `--disable-asio` is a launch policy no preference can override.
+//! (5) `--disable-asio` is a launch policy no preference can override; (6) a driver switch
+//! ([`Coordinator::switch`]) replaces the payload only while nothing holds the driver, and never after a
+//! timeout.
 //!
 //! Platform-agnostic and free of cpal so `cargo test` covers the state machine on every build; the
 //! ASIO resolver itself lives in `audio_output.rs`.
@@ -17,7 +19,7 @@
 use serde::Serialize;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
-use std::sync::{mpsc, Mutex, OnceLock};
+use std::sync::{mpsc, Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 /// Mirrors `AsioStartupStatus` in `src/platform/host.ts` (kebab-case over IPC).
@@ -56,12 +58,14 @@ struct Phase {
     detail: String,
 }
 
-/// The coordinator. `T` is the resolved payload (the ASIO cache); tests use a plain integer.
+/// The coordinator. `T` is the resolved payload (the ASIO cache); tests use a plain integer. The payload
+/// is replaced by a driver switch, so readers take a clone of its `Arc` and a stream built on it keeps
+/// the one it was built with.
 pub struct Coordinator<T> {
     compiled: bool,
     disabled_by_flag: AtomicBool,
     phase: Mutex<Phase>,
-    payload: OnceLock<T>,
+    payload: Mutex<Option<Arc<T>>>,
 }
 
 impl<T: Send + Sync + 'static> Coordinator<T> {
@@ -70,7 +74,7 @@ impl<T: Send + Sync + 'static> Coordinator<T> {
             compiled,
             disabled_by_flag: AtomicBool::new(false),
             phase: Mutex::new(Phase { status: AsioStartupStatus::Unprobed, detail: String::new() }),
-            payload: OnceLock::new(),
+            payload: Mutex::new(None),
         }
     }
 
@@ -79,9 +83,10 @@ impl<T: Send + Sync + 'static> Coordinator<T> {
         self.disabled_by_flag.store(true, Relaxed);
     }
 
-    /// The published payload (None until a probe succeeded). Never touches the driver.
-    pub fn payload(&self) -> Option<&T> {
-        self.payload.get()
+    /// The published payload (None until a probe succeeded, and while a switch replaces it). Never
+    /// touches the driver.
+    pub fn payload(&self) -> Option<Arc<T>> {
+        self.payload.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /// Current status. Never touches the driver.
@@ -115,12 +120,64 @@ impl<T: Send + Sync + 'static> Coordinator<T> {
     where
         F: FnOnce() -> Result<T, String> + Send + 'static,
     {
-        use AsioStartupStatus::*;
         if !self.compiled || self.disabled_by_flag.load(Relaxed) {
             return self.status();
         }
+        let p = self.phase.lock().unwrap_or_else(|e| e.into_inner());
+        self.run(p, sentinel, explicit, resolver, timeout)
+    }
+
+    /// A driver switch: drop the published payload and probe again (explicitly) with `resolver`, which
+    /// names the new driver. `busy` says who still holds the driver (a live stream, an open engine
+    /// device); while it answers `Some`, or a probe runs, the switch is refused with that reason and
+    /// the payload stays. After a timeout it changes nothing (the hung driver thread may still be inside
+    /// the DLL): the report stays `TimedOut`.
+    pub fn switch<F>(
+        &'static self,
+        sentinel: &Path,
+        busy: impl FnOnce() -> Option<String>,
+        resolver: F,
+        timeout: Duration,
+    ) -> Result<AsioStatusReport, String>
+    where
+        F: FnOnce() -> Result<T, String> + Send + 'static,
+    {
+        use AsioStartupStatus::*;
+        if !self.compiled || self.disabled_by_flag.load(Relaxed) {
+            return Ok(self.status());
+        }
+        let mut p = self.phase.lock().unwrap_or_else(|e| e.into_inner());
+        match p.status {
+            TimedOut => return Ok(AsioStatusReport { status: p.status, detail: p.detail.clone() }),
+            Probing => return Err("the ASIO driver is starting; try again when it has".to_string()),
+            _ => {}
+        }
+        // Checked under the phase lock, so no probe starts between the check and the drop.
+        if let Some(holder) = busy() {
+            log::info!("[asio] driver switch refused: {holder}");
+            return Err(holder);
+        }
+        *self.payload.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        p.status = Unprobed;
+        p.detail.clear();
+        log::info!("[asio] driver switch: the cached driver is dropped");
+        Ok(self.run(p, sentinel, true, resolver, timeout))
+    }
+
+    /// The probe from the state machine's check on, entered with the phase lock held.
+    fn run<F>(
+        &'static self,
+        mut p: MutexGuard<'_, Phase>,
+        sentinel: &Path,
+        explicit: bool,
+        resolver: F,
+        timeout: Duration,
+    ) -> AsioStatusReport
+    where
+        F: FnOnce() -> Result<T, String> + Send + 'static,
+    {
+        use AsioStartupStatus::*;
         {
-            let mut p = self.phase.lock().unwrap_or_else(|e| e.into_inner());
             // Report from the held guard: `self.status()` would re-lock `phase` (std Mutex is not
             // reentrant) — that self-deadlock hung the first test run of this file.
             let current = AsioStatusReport { status: p.status, detail: p.detail.clone() };
@@ -148,6 +205,7 @@ impl<T: Send + Sync + 'static> Coordinator<T> {
             p.status = Probing;
             p.detail.clear();
         }
+        drop(p);
         log::info!("[asio] probe starting (explicit={explicit}); sentinel {}", sentinel.display());
         let (done_tx, done_rx) = mpsc::channel::<()>();
         let sentinel_owned = sentinel.to_path_buf();
@@ -164,7 +222,7 @@ impl<T: Send + Sync + 'static> Coordinator<T> {
             }
             match result {
                 Ok(v) => {
-                    let _ = self.payload.set(v);
+                    *self.payload.lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(v));
                     p.status = Ready;
                     log::info!("[asio] probe ready");
                 }
@@ -223,7 +281,7 @@ mod tests {
         let s = temp_sentinel("ok");
         let r = c.probe(&s, false, || Ok(7), Duration::from_secs(2));
         assert_eq!(r.status, AsioStartupStatus::Ready);
-        assert_eq!(c.payload(), Some(&7));
+        assert_eq!(c.payload().as_deref(), Some(&7));
         assert!(!s.exists(), "sentinel must be removed after a published result");
         // A second request is a no-op that does not run the resolver.
         let r2 = c.probe(&s, true, || panic!("must not run"), Duration::from_secs(2));
@@ -242,7 +300,7 @@ mod tests {
         assert_eq!(r.status, AsioStartupStatus::Failed);
         let r = c.probe(&s, true, || Ok(1), Duration::from_secs(2));
         assert_eq!(r.status, AsioStartupStatus::Ready);
-        assert_eq!(c.payload(), Some(&1));
+        assert_eq!(c.payload().as_deref(), Some(&1));
     }
 
     #[test]
@@ -276,7 +334,7 @@ mod tests {
         );
         assert_eq!(r.status, AsioStartupStatus::TimedOut);
         assert!(s.exists(), "a timed-out attempt must leave the sentinel so the next launch is blocked");
-        assert_eq!(c.payload(), None);
+        assert_eq!(c.payload().as_deref(), None);
         // The driver thread eventually returns: its result must never be published.
         release_tx.send(()).unwrap();
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
@@ -284,7 +342,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         std::thread::sleep(Duration::from_millis(50));
-        assert_eq!(c.payload(), None, "late result after timeout must be discarded");
+        assert_eq!(c.payload().as_deref(), None, "late result after timeout must be discarded");
         assert_eq!(c.status().status, AsioStartupStatus::TimedOut);
         assert!(s.exists(), "late thread must not clear the sentinel after a timeout");
         // And no retry in this process, even explicit.
@@ -329,6 +387,72 @@ mod tests {
         assert_eq!(second.status, AsioStartupStatus::Probing);
         release_tx.send(()).unwrap();
         assert_eq!(first.join().unwrap().status, AsioStartupStatus::Ready);
-        assert_eq!(c.payload(), Some(&5));
+        assert_eq!(c.payload().as_deref(), Some(&5));
+    }
+    #[test]
+    fn a_switch_drops_the_payload_and_publishes_the_new_driver() {
+        let c = fresh();
+        let s = temp_sentinel("switch");
+        assert_eq!(c.probe(&s, false, || Ok(1), Duration::from_secs(2)).status, AsioStartupStatus::Ready);
+        let held_by_a_stream = c.payload().unwrap();
+        let r = c.switch(&s, || None, || Ok(2), Duration::from_secs(2)).expect("nothing holds the driver");
+        assert_eq!(r.status, AsioStartupStatus::Ready);
+        assert_eq!(c.payload().as_deref(), Some(&2), "the switch publishes the new driver");
+        assert_eq!(*held_by_a_stream, 1, "a reader keeps the driver it took");
+        assert!(!s.exists());
+    }
+
+    #[test]
+    fn a_switch_is_refused_while_the_driver_is_held_and_keeps_the_payload() {
+        let c = fresh();
+        let s = temp_sentinel("switch-held");
+        c.probe(&s, false, || Ok(1), Duration::from_secs(2));
+        let r = c.switch(&s, || Some("the engine's device is open".to_string()), || panic!("a held driver must not be probed"), Duration::from_secs(1));
+        assert_eq!(r, Err("the engine's device is open".to_string()));
+        assert_eq!(c.payload().as_deref(), Some(&1));
+        assert_eq!(c.status().status, AsioStartupStatus::Ready);
+    }
+
+    #[test]
+    fn a_failed_switch_leaves_no_driver_and_a_retry_can_publish_one() {
+        let c = fresh();
+        let s = temp_sentinel("switch-fail");
+        c.probe(&s, false, || Ok(1), Duration::from_secs(2));
+        let r = c.switch(&s, || None, || Err("the ASIO driver \"B\" did not start".into()), Duration::from_secs(2)).unwrap();
+        assert_eq!(r.status, AsioStartupStatus::Failed);
+        assert_eq!(c.payload().as_deref(), None, "the old driver is not silently kept");
+        let r = c.switch(&s, || None, || Ok(3), Duration::from_secs(2)).unwrap();
+        assert_eq!(r.status, AsioStartupStatus::Ready);
+        assert_eq!(c.payload().as_deref(), Some(&3));
+    }
+
+    #[test]
+    fn a_timed_out_probe_still_blocks_a_switch() {
+        let c = fresh();
+        let s = temp_sentinel("switch-hang");
+        let (release_tx, release_rx) = channel::<()>();
+        let r = c.probe(&s, false, move || { release_rx.recv().ok(); Ok(9) }, Duration::from_millis(80));
+        assert_eq!(r.status, AsioStartupStatus::TimedOut);
+        let r = c.switch(&s, || panic!("no holder check after a timeout"), || panic!("no switch after a timeout"), Duration::from_secs(1));
+        assert_eq!(r.map(|r| r.status), Ok(AsioStartupStatus::TimedOut));
+        release_tx.send(()).unwrap();
+    }
+
+    #[test]
+    fn a_switch_while_a_probe_runs_is_refused() {
+        let c = fresh();
+        let s = temp_sentinel("switch-probing");
+        let s_for_thread = s.clone();
+        let (release_tx, release_rx) = channel::<()>();
+        let first = std::thread::spawn(move || {
+            c.probe(&s_for_thread, false, move || { release_rx.recv().ok(); Ok(5) }, Duration::from_secs(5))
+        });
+        while c.status().status != AsioStartupStatus::Probing {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(c.switch(&s, || None, || panic!("second resolver must not run"), Duration::from_secs(1)).is_err());
+        release_tx.send(()).unwrap();
+        assert_eq!(first.join().unwrap().status, AsioStartupStatus::Ready);
+        assert_eq!(c.payload().as_deref(), Some(&5));
     }
 }

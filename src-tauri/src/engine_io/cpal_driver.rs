@@ -6,6 +6,9 @@
 //! one would hand a new run the last run's stream state), and first opens the driver at another block
 //! size and destroys it (`preopen`): opened again at the size it last ran, the rig's driver delivers
 //! about two periods later than it reports (`docs/plans/native-engine.md` § Stage 1, "Cause and fix").
+//! Every size asked of an ASIO driver lies inside the range it reported to the probe (cpal refuses any
+//! other): a request outside it opens at `transition::asio_block`'s pick, and a driver with one size
+//! only gets no preopen.
 //! A cpal ASIO driver lives as long as a stream holds it: dropping a run's streams stops it, disposes
 //! its buffers and exits it (asio-sys's `Driver` drop).
 //!
@@ -22,6 +25,8 @@ use cpal::{SampleFormat, StreamConfig};
 use super::callback::{Side, Tap};
 use super::driver::{Driver, Mirror, Share, Spec, Started, Streams, Wiring};
 use super::share::{ShareOutput, ShareTap};
+#[cfg(feature = "asio")]
+use super::transition;
 use super::{Core, DeviceRequest, IoCounters};
 use crate::audio_output::AudioBackend;
 
@@ -43,6 +48,8 @@ pub(crate) struct CpalDevice {
     output: cpal::Device,
     out_config: StreamConfig,
     out_format: SampleFormat,
+    /// ASIO: the buffer sizes the driver takes (the probe's `AsioCache::buffer_range`); WASAPI: `None`.
+    buffer_range: Option<(u32, u32)>,
 }
 
 impl Driver for CpalDriver {
@@ -181,12 +188,23 @@ fn output_stream(device: &CpalDevice, spec: &Spec, wiring: &mut Wiring) -> Resul
 }
 
 /// ASIO: the cached duplex driver, both directions on it; `DeviceRequest::buffer` becomes a fixed
-/// buffer size.
+/// buffer size, the nearest the driver takes when it does not take that one (`transition::asio_block`).
+/// The request keeps the player's size, so a driver that takes it again later gets it back.
 #[cfg(feature = "asio")]
 fn resolve_asio(request: &DeviceRequest) -> Result<(Spec, CpalDevice), String> {
     let cache = crate::audio_output::asio_cache().ok_or("no ASIO driver is cached (the startup probe has not found one)")?;
     let (mut in_config, mut out_config) = (cache.in_cfg, cache.out_cfg);
-    if let Some(frames) = request.buffer {
+    let block = request.buffer.map(|asked| match cache.buffer_range {
+        Some((min, max)) => {
+            let block = transition::asio_block(asked, min, max);
+            if block != asked {
+                log::info!("[engine_io] the ASIO driver \"{}\" takes {min}..={max}-frame buffers: opening at {block} frames, not the {asked} asked for", cache.name);
+            }
+            block
+        }
+        None => asked,
+    });
+    if let Some(frames) = block {
         in_config.buffer_size = cpal::BufferSize::Fixed(frames);
         out_config.buffer_size = cpal::BufferSize::Fixed(frames);
     }
@@ -199,7 +217,7 @@ fn resolve_asio(request: &DeviceRequest) -> Result<(Spec, CpalDevice), String> {
         in_rate: in_config.sample_rate,
         in_channels: in_config.channels as usize,
         out_channels: out_config.channels as usize,
-        block: request.buffer.unwrap_or(0),
+        block: block.unwrap_or(0),
         input_name: cache.name.clone(),
         output_name: cache.name.clone(),
     };
@@ -210,6 +228,7 @@ fn resolve_asio(request: &DeviceRequest) -> Result<(Spec, CpalDevice), String> {
         output: cache.device.clone(),
         out_config,
         out_format: cache.out_fmt,
+        buffer_range: cache.buffer_range,
     };
     Ok((spec, device))
 }
@@ -220,12 +239,18 @@ fn resolve_asio(_: &DeviceRequest) -> Result<(Spec, CpalDevice), String> {
 }
 
 /// ASIO: the device a run builds on, its driver opened at another block size and destroyed first when
-/// the run asks for a size (`preopen`; a preopen that fails is logged and the run goes on).
+/// the run asks for a size (`preopen`; a preopen that fails is logged and the run goes on, and a driver
+/// that takes no other size gets none).
 #[cfg(feature = "asio")]
 fn asio_run(device: CpalDevice, spec: &Spec, preopen: bool) -> Result<CpalDevice, String> {
     if preopen && spec.block > 0 {
-        if let Err(error) = preopen_asio(&device, spec) {
-            log::warn!("[engine_io] the ASIO preopen failed ({error}); opening at {} frames anyway", spec.block);
+        match transition::preopen_block(spec.block, device.buffer_range) {
+            Some(other) => {
+                if let Err(error) = preopen_asio(&device, spec, other) {
+                    log::warn!("[engine_io] the ASIO preopen failed ({error}); opening at {} frames anyway", spec.block);
+                }
+            }
+            None => log::info!("[engine_io] no ASIO preopen: the driver takes only {} frames", spec.block),
         }
     }
     let fresh = find_asio(&spec.output_name)?;
@@ -249,13 +274,12 @@ fn find_asio(name: &str) -> Result<cpal::Device, String> {
         .ok_or_else(|| format!("the ASIO driver \"{name}\" did not load"))
 }
 
-/// Open the driver at a block size other than the run's, play it silent for `PREOPEN_RUN` and drop it
-/// (both streams, then the device): the driver is stopped, its buffers disposed and it exits, so the
-/// run's open is its first at the run's size.
+/// Open the driver at `other`, a block size other than the run's, play it silent for `PREOPEN_RUN` and
+/// drop it (both streams, then the device): the driver is stopped, its buffers disposed and it exits,
+/// so the run's open is its first at the run's size.
 #[cfg(feature = "asio")]
-fn preopen_asio(device: &CpalDevice, spec: &Spec) -> Result<(), String> {
+fn preopen_asio(device: &CpalDevice, spec: &Spec, other: u32) -> Result<(), String> {
     let began = Instant::now();
-    let other = other_block(device, spec.block);
     let fresh = find_asio(&spec.output_name)?;
     let (mut in_config, mut out_config) = (device.in_config, device.out_config);
     in_config.buffer_size = cpal::BufferSize::Fixed(other);
@@ -275,16 +299,6 @@ fn preopen_asio(device: &CpalDevice, spec: &Spec) -> Result<(), String> {
     drop(fresh);
     log::info!("[engine_io] ASIO preopen at {other} frames before the {}-frame open: {} ms", spec.block, began.elapsed().as_millis());
     Ok(())
-}
-
-/// A block size the driver takes that is not `block`.
-#[cfg(feature = "asio")]
-fn other_block(device: &CpalDevice, block: u32) -> u32 {
-    let (min, max) = match device.output.default_output_config().map(|c| *c.buffer_size()) {
-        Ok(cpal::SupportedBufferSize::Range { min, max }) => (min, max),
-        _ => (0, u32::MAX),
-    };
-    [256, 128, 512, 64, 1024].into_iter().find(|&b| b != block && (min..=max).contains(&b)).unwrap_or(if block == 256 { 128 } else { 256 })
 }
 
 /// WASAPI shared mode: the picked (or default) endpoints at their mix formats; the period is the
@@ -324,5 +338,5 @@ fn resolve_wasapi(request: &DeviceRequest) -> Result<(Spec, CpalDevice), String>
         output_name: name(&output, "Unknown output"),
     };
     let in_format = input.as_ref().map_or(out_format, |(_, supported)| supported.sample_format());
-    Ok((spec, CpalDevice { input: input.map(|(d, _)| d), in_config, in_format, output, out_config, out_format }))
+    Ok((spec, CpalDevice { input: input.map(|(d, _)| d), in_config, in_format, output, out_config, out_format, buffer_range: None }))
 }

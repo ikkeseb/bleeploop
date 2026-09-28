@@ -2,6 +2,7 @@ import { createSignal } from 'solid-js';
 import {
   engineMode,
   platform,
+  type AsioDeviceInfo,
   type AsioStatusReport,
   type AudioInputDevice,
   type AudioOutputDevice,
@@ -38,10 +39,12 @@ const [bufferFrames, setBufferFramesSig] = createSignal<BufferFrames>(
 // toggle's enabled state) and whether the tier is preferred (init from persisted; pushed to the host
 // at startup so a saved "off" is honored). The driver is contacted ONLY through `probeAsio` — at boot
 // when the saved preference is on, or from an explicit user action — never by the native startup
-// path (`src-tauri/src/asio_startup.rs` owns the one-per-process rules; `asioStatus` mirrors them).
+// path (`src-tauri/src/asio_startup.rs` owns the probe rules; `asioStatus` mirrors them).
 const [asioAvailable, setAsioAvailableSig] = createSignal(false);
 const [asioStatus, setAsioStatus] = createSignal<AsioStatusReport>({ status: 'not-compiled', detail: '' });
-const [asioDeviceInfo, setAsioDeviceInfo] = createSignal<Awaited<ReturnType<typeof platform.pluginHost.asioDeviceInfo>>>(null);
+const [asioDeviceInfo, setAsioDeviceInfo] = createSignal<AsioDeviceInfo | null>(null);
+// The installed ASIO drivers' names for the driver picker (read from the registry; no driver loads).
+const [asioDrivers, setAsioDrivers] = createSignal<string[]>([]);
 const [asioEnabled, setAsioEnabledSig] = createSignal<boolean>(readAudioDeviceSettings().asioEnabled);
 export const usingAsio = () => asioAvailable() && asioEnabled();
 
@@ -212,7 +215,7 @@ export async function probeAsio(explicit: boolean): Promise<AsioStatusReport> {
   try {
     await configure(async () => {
       setAsioStatus({ status: 'probing', detail: '' });
-      report = await platform.pluginHost.asioProbe(explicit);
+      report = await platform.pluginHost.asioProbe(explicit, readAudioDeviceSettings().asioDriver);
       await applyAsioReport(report);
     });
   } catch (e) {
@@ -222,6 +225,39 @@ export async function probeAsio(explicit: boolean): Promise<AsioStatusReport> {
     setAsioStatus(report);
   }
   return report;
+}
+
+/**
+ * Replace the ASIO driver with `driver` ('' = automatic) without a restart: the host drops the cached
+ * driver and probes this one. The pick is saved once the host took it. Nothing may hold the driver:
+ * engine mode's device closes first (`switchEngineAsioDriver` in `src/ui/state/engine-store.ts` runs the
+ * whole switch). Rejects when the host refuses, with the status as it was.
+ */
+export async function switchAsioDriver(driver: string): Promise<AsioStatusReport> {
+  let report = asioStatus();
+  await configure(async () => {
+    const before = asioStatus();
+    setAsioStatus({ status: 'probing', detail: '' });
+    try {
+      report = await platform.pluginHost.asioSwitch(driver);
+    } catch (e) {
+      setAsioStatus(before);
+      throw e;
+    }
+    writeAudioDeviceSettings({ asioDriver: driver });
+    await applyAsioReport(report);
+  });
+  return report;
+}
+
+/** Refresh the installed ASIO drivers' names (the driver picker, when Audio Settings opens). */
+export async function refreshAsioDrivers(): Promise<void> {
+  try {
+    setAsioDrivers(await platform.pluginHost.asioDrivers());
+  } catch (e) {
+    console.error('[instrument] list ASIO drivers failed', e);
+    notifyError('Could not list the ASIO drivers', e);
+  }
 }
 
 /** Whether the ASIO row should offer a control at all (the binary can do ASIO and it was not disabled at launch). */
@@ -295,5 +331,6 @@ export { inputDevices, outputDevices };
 /** Read-only reactive accessor: the global RT buffer size (frames) for the settings readout. */
 export { bufferFrames };
 
-/** Read-only reactive accessors: ASIO tier availability, startup status + preference (the settings toggle). */
-export { asioAvailable, asioEnabled, asioDeviceInfo, asioStatus };
+/** Read-only reactive accessors: ASIO tier availability, startup status + preference (the settings toggle),
+ * the cached driver and the installed ones (the driver picker). */
+export { asioAvailable, asioEnabled, asioDeviceInfo, asioDrivers, asioStatus };

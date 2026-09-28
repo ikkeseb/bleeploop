@@ -122,6 +122,12 @@ const webPluginHost: PluginHost = {
   async asioProbe() {
     return { status: 'not-compiled' as const, detail: '' };
   },
+  async asioSwitch() {
+    return { status: 'not-compiled' as const, detail: '' };
+  },
+  async asioDrivers() {
+    return [];
+  },
   async asioDeviceInfo() {
     return null;
   },

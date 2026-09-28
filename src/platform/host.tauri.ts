@@ -1,6 +1,7 @@
 import { Channel, invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type {
+  AsioDeviceInfo,
   AsioStatusReport,
   AudioInputDevice,
   AudioOutputDevice,
@@ -151,13 +152,19 @@ const tauriPluginHost: PluginHost = {
     return invoke<boolean>('plugin_asio_available');
   },
   asioDeviceInfo() {
-    return invoke('plugin_asio_device_info');
+    return invoke<AsioDeviceInfo | null>('plugin_asio_device_info');
   },
   asioStatus() {
     return invoke<AsioStatusReport>('plugin_asio_status');
   },
-  asioProbe(explicit) {
-    return invoke<AsioStatusReport>('plugin_asio_probe', { explicit });
+  asioProbe(explicit, driver) {
+    return invoke<AsioStatusReport>('plugin_asio_probe', { explicit, driver: driver || null });
+  },
+  asioSwitch(driver) {
+    return invoke<AsioStatusReport>('plugin_asio_switch', { driver: driver || null });
+  },
+  asioDrivers() {
+    return invoke<string[]>('plugin_asio_drivers');
   },
   async setAsioEnabled(enabled) {
     await invoke('plugin_set_asio_enabled', { enabled });

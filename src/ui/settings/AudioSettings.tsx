@@ -4,6 +4,7 @@ import { availablePlugins, scanning } from '../../audio/instrument';
 import {
   asioAvailable,
   asioDeviceInfo,
+  asioDrivers,
   asioEnabled,
   asioOffered,
   asioRetryable,
@@ -14,6 +15,7 @@ import {
   inputDevices,
   outputDevices,
   refreshAndPruneDevices,
+  refreshAsioDrivers,
   applyWebOutput,
   setAsioEnabled,
   setBufferSize,
@@ -36,13 +38,22 @@ import {
 import { engineMode, platform } from '../../platform';
 import {
   BUFFER_FRAMES_OPTIONS,
+  asioBufferChoice,
   readAudioDeviceSettings,
   writeAudioDeviceSettings,
   type BufferFrames,
 } from '../../audio/audio-settings';
 import { offsetMs, RECORD_TRIM_MAX_MS, setOffsetMs } from '../../audio/record-latency';
 import { looper, sampleRate } from '../state/audio';
-import { engineDevice, engineShare, openEngineDevice, setEngineInputChannel, setEngineShare } from '../state/engine-store';
+import {
+  engineDevice,
+  engineOpenFailure,
+  engineShare,
+  openEngineDevice,
+  setEngineInputChannel,
+  setEngineShare,
+  switchEngineAsioDriver,
+} from '../state/engine-store';
 import './audio-settings.css';
 
 /**
@@ -55,8 +66,9 @@ import './audio-settings.css';
  *
  * The engine row writes the engine-mode toggle for the next launch. In engine mode a device, buffer or
  * driver pick reopens the engine's device at once, a channel pick switches it in place, the share row
- * picks Share output's device, and the rows that belong to the web path (rec align, the bridge readout)
- * are gone.
+ * picks Share output's device, the ASIO driver row switches the driver live and the Buffer select offers
+ * only the sizes that driver takes, and the rows that belong to the web path (rec align, the bridge
+ * readout) are gone.
  */
 
 /** Processing-block duration, not an input-to-output latency estimate. */
@@ -95,6 +107,7 @@ export function AudioSettings() {
   const [selectedDevice, setSelectedDevice] = createSignal(persisted.inputDeviceId);
   const [selectedChannel, setSelectedChannel] = createSignal(persisted.inputChannel);
   const [selectedOutput, setSelectedOutput] = createSignal(persisted.outputDeviceId);
+  const [selectedDriver, setSelectedDriver] = createSignal(persisted.asioDriver);
   // The by-ear record-alignment trim (`lf.recordOffsetMs`, persisted). Not a reactive signal in
   // record-latency.ts, but this popover remounts on every open, so a local signal seeded from the live
   // value is enough to mirror it (same pattern as the persisted device settings above).
@@ -118,7 +131,7 @@ export function AudioSettings() {
   };
   const engineReadout = () => {
     const d = engineDevice();
-    if (!d) return 'no device open';
+    if (!d) return engineOpenFailure() ? `no device open: ${engineOpenFailure()}` : 'no device open';
     const input = d.inputOpen ? d.inputName : 'no input';
     return `${d.backend === 'Asio' ? 'ASIO' : 'WASAPI'} · ${input} → ${d.outputName} · ${d.block} frames · ${d.alignFrames} frames round trip`;
   };
@@ -144,6 +157,25 @@ export function AudioSettings() {
     setSelectedDevice(s.inputDeviceId);
     setSelectedChannel(s.inputChannel);
     setSelectedOutput(s.outputDeviceId);
+    setSelectedDriver(s.asioDriver);
+  };
+
+  // Engine mode under ASIO: only the sizes the driver takes, showing the one it runs at
+  // (`asioBufferChoice`); otherwise every option, showing the saved one.
+  const bufferChoice = createMemo(() => {
+    if (!engineMode() || !usingAsio()) return { options: [...BUFFER_FRAMES_OPTIONS] as number[], shown: bufferFrames() as number, fixed: false };
+    const info = asioDeviceInfo();
+    const range = info?.bufferMin != null && info.bufferMax != null ? { min: info.bufferMin, max: info.bufferMax } : null;
+    const running = engineDevice();
+    return asioBufferChoice(bufferFrames(), range, running?.backend === 'Asio' ? running.block : null);
+  });
+
+  // The driver picker: the installed drivers, plus a saved pick that is no longer installed (the probe
+  // took the automatic choice instead).
+  const driverOptions = () => {
+    const names = asioDrivers();
+    const saved = selectedDriver();
+    return saved && !names.includes(saved) ? [...names, saved] : names;
   };
 
   onMount(async () => {
@@ -152,6 +184,7 @@ export function AudioSettings() {
     // settings — catches a device unplugged since this popover last opened. No-op in the web build.
     await refreshAndPruneDevices();
     syncPicks();
+    if (engineMode() && asioOffered()) await refreshAsioDrivers();
   });
 
   // Bridge health readout (native only): 2 Hz poll of pluginBridge.stats per slot while open.
@@ -301,27 +334,34 @@ export function AudioSettings() {
         <span class="audio-settings__label">{engineMode() ? 'buffer' : 'plugin buffer'}</span>
         <select
           class="audio-settings__select"
-          value={String(bufferFrames())}
+          value={String(bufferChoice().shown)}
           onChange={(e) => {
-            const v = Number(e.currentTarget.value) as BufferFrames;
+            const v = Number(e.currentTarget.value);
             const select = e.currentTarget;
-            void setBufferSize(v).then(() => {
-              select.value = String(bufferFrames());
+            // A size outside the list is the driver's own, shown because it runs: nothing to save.
+            if (!(BUFFER_FRAMES_OPTIONS as readonly number[]).includes(v)) {
+              select.value = String(bufferChoice().shown);
+              return;
+            }
+            void setBufferSize(v as BufferFrames).then(() => {
+              select.value = String(bufferChoice().shown);
               reopenEngine(syncPicks);
             });
           }}
           aria-label="Buffer size in frames"
         >
-          <For each={BUFFER_FRAMES_OPTIONS}>
-            {(f) => <option value={String(f)}>{f} frames</option>}
+          <For each={bufferChoice().options}>
+            {(f) => <option value={String(f)} selected={f === bufferChoice().shown}>{f} frames</option>}
           </For>
         </select>
-        <span class="audio-settings__readout">{bufferMs(bufferFrames())}</span>
+        <span class="audio-settings__readout">{bufferMs(bufferChoice().shown)}</span>
       </div>
       <div class="audio-settings__hint audio-settings__hint--info" role="note">
-        {engineMode()
-          ? 'Frames per device callback: smaller is lower latency, larger is safer.'
-          : 'The block plugins process in. The audio driver sets its own device buffer.'}
+        {bufferChoice().fixed
+          ? "Set by the driver: change it in the driver's control panel."
+          : engineMode()
+            ? 'Frames per device callback: smaller is lower latency, larger is safer.'
+            : 'The block plugins process in. The audio driver sets its own device buffer.'}
       </div>
 
       {/* Record-alignment trim — the RELEASE-BUILD surface for the by-ear record-latency offset; a shipped
@@ -402,6 +442,35 @@ export function AudioSettings() {
           </label>
         </Show>
       </div>
+      {/* The ASIO driver (engine mode): picking one switches live — the device closes, the driver
+          starts, the device reopens (`switchEngineAsioDriver`). Automatic names the driver it took. */}
+      <Show when={engineMode() && asioOffered() && asioEnabled()}>
+        <div class="audio-settings__row" title="The ASIO driver the engine opens. Automatic takes the first one that starts.">
+          <span class="audio-settings__label">driver</span>
+          <select
+            class="audio-settings__select"
+            value={selectedDriver()}
+            disabled={asioStatus().status === 'probing' || asioStatus().status === 'timed-out'}
+            onChange={(e) => {
+              const v = e.currentTarget.value;
+              setSelectedDriver(v);
+              void switchEngineAsioDriver(v).then(syncPicks);
+            }}
+            aria-label="ASIO driver"
+          >
+            <option value="" selected={selectedDriver() === ''}>
+              {selectedDriver() === '' && asioDeviceInfo() ? `Automatic (${asioDeviceInfo()?.name})` : 'Automatic'}
+            </option>
+            <For each={driverOptions()}>
+              {(name) => (
+                <option value={name} selected={name === selectedDriver()}>
+                  {asioDrivers().length === 0 || asioDrivers().includes(name) ? name : `${name} (not installed)`}
+                </option>
+              )}
+            </For>
+          </select>
+        </div>
+      </Show>
       <Show when={asioOffered() && asioEnabled() && !asioAvailable() && asioStatus().status !== 'probing'}>
         <div class="audio-settings__hint audio-settings__hint--asio" role="status">
           <span>

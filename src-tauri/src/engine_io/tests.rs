@@ -212,6 +212,26 @@ impl SlotProcessor for Unit {
 }
 
 #[test]
+fn an_asio_request_outside_the_drivers_buffer_range_opens_at_a_size_the_driver_takes() {
+    let h = Harness::new();
+    let range = |r| h.fake.asio.lock().unwrap().as_mut().unwrap().buffer_range = Some(r);
+    // A driver whose buffer is set in its own control panel takes that one size; the fake, as cpal does,
+    // refuses to start at any other, so the open succeeds only at the size the driver takes.
+    range((512, 512));
+    let status = h.open(asio(Some(64)));
+    assert_eq!(status.block, 512, "the block reports the size opened, not the one asked for");
+    h.play(RATE / 10);
+    assert!(h.starts()[0].windows(2).all(|w| w[1] - w[0] == 512), "it runs 512-frame blocks");
+    assert_eq!(h.host.status().map(|s| s.block), Some(512));
+    h.host.close().unwrap();
+
+    range((128, 2048));
+    assert_eq!(h.open(asio(Some(64))).block, 128, "too small: the nearest size in range");
+    h.host.close().unwrap();
+    assert_eq!(h.open(asio(Some(256))).block, 256, "in range: the size asked for");
+}
+
+#[test]
 fn a_loop_resumes_in_place_across_a_switch_and_the_close_stops_the_device() {
     let mut h = Harness::new();
     h.fake.set_input(tone);

@@ -52,6 +52,9 @@ rest is the map.
   calls them. `tauri dev` watches all of `src-tauri/`, so an engine edit relaunches a running dev app.
 - **An engine ASIO open opens the driver at another block size first** (`engine_io/cpal_driver.rs`,
   ~500 ms): opened again at the size it last ran, the rig's Focusrite driver lands two periods late.
+- **An ASIO driver is never asked for a buffer outside the range it reported to the probe** (cpal
+  refuses it): a request outside opens at `engine_io::transition::asio_block`'s pick, `DeviceStatus.block`
+  says what opened, and a one-size driver (set in its own control panel) gets no preopen.
 - **Parallel worktrees need their own `CARGO_TARGET_DIR`.** Sharing one, every worktree links the same
   `app_lib-<hash>` test binary and cargo judges path crates fresh by mtime, so one worktree can run
   another's build of `app` or `lf-engine` (seen 2026-09-25).
@@ -217,9 +220,11 @@ existing P9 ring → looper record tap (lag-tolerant, records wet "for free").
   rt_alloc guard (a one-shot non-perf-moment alloc, absorbed by the ~30ms bridge queue).
 - **ASIO tier** (`--features asio`): routes BOTH capture + monitor through ONE full-duplex driver, ONE clock.
   cpal ASIO = ONE driver per device: once a stream holds it, cpal can't re-resolve the device or re-query
-  configs → the duplex Device + configs are resolved ONCE per process (`audio_output::resolve_asio_cache`
-  behind the `asio_startup.rs` coordinator; `cpal::Device` is Send+Sync, so the cache is a static).
-  Both streams build from the cache. **Never call the resolver from `run()`:** it loads the driver DLL
+  configs → the duplex Device + configs are resolved once per driver pick (`audio_output::resolve_asio_cache`
+  behind the `asio_startup.rs` coordinator; `cpal::Device` is Send+Sync, so the cache is a static `Arc`
+  a stream build clones). Only a driver switch (`plugin_asio_switch`) replaces it, while nothing holds
+  the driver: engine mode's device closed, no live slot holding `ASIO_DUPLEX_HOLDER`. Both streams build
+  from the cache. **Never call the resolver from `run()`:** it loads the driver DLL
   in-process; the frontend requests it after the UI is up (the **ASIO startup** paragraph in `docs/ARCHITECTURE.md` § Audio architecture). **ASIO `Stream::drop` only removes
   callbacks** (never `driver.stop`, never tears down `asio_streams`) → `host::native_io::NativeIo` keeps
   both streams alive across disarm (output plays silence → no drone; re-arm makes ZERO cpal calls → no
@@ -228,8 +233,9 @@ existing P9 ring → looper record tap (lag-tolerant, records wet "for free").
   `ASIO_DUPLEX_HOLDER`, then rebuilds on the requested backend. Rearming a retained input updates its
   channel selection under the capture-producer mutex before publishing `input_gen`; callback selection
   reads belong inside the same lock. Channel changes preserve the driver streams.
-  ASIO uses the cached default driver, not the WASAPI device IDs. Settings display its cached name and
-  channel counts; Windows device picks remain saved for WASAPI.
+  ASIO uses the cached driver (the saved pick, else automatic: the default output's), not the WASAPI
+  device IDs. Settings display its cached name and channel counts; Windows device picks remain saved
+  for WASAPI.
 - **ASIO timestamps:** retain cpal's per-package `overflow-checks=false` in Cargo.toml for its wrapped
   epoch conversion. Output latency uses the checked playback-minus-callback duration from the SAME
   callback, never the absolute epoch.
@@ -244,7 +250,8 @@ existing P9 ring → looper record tap (lag-tolerant, records wet "for free").
   probe. Read `plugin_asio_device_info` for cached metadata and confirm the opened backend through the
   goLive log. Boot applies saved buffer and ASIO preferences, then awaits the probe, before enabling
   plugin selection or scanning (the load-time block cap keys on `asio_available()`). The DEV
-  `--probe-asio` CLI DOES load every driver (cpal enumeration initialises them): not a harmless check.
+  `--probe-asio` CLI DOES load every driver (cpal enumeration initialises them): not a harmless check;
+  `plugin_asio_drivers` (asio-sys' registry list) loads none.
 - **Audio Settings + buffer size:** a global Audio Settings popover (topbar gear) holds the input/channel/
   output device pickers (arm toggles stay per-slot) + a live buffer-size dropdown (64/128/256/512/1024). The
   CLAP+VST3 RT loops watch process-global `BLOCK_CONFIG_GEN` and re-pace to the new D-block with NO plugin

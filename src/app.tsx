@@ -16,6 +16,7 @@ import { setStageOpen, stageOpen, toggleStage } from './ui/stage/stage-store';
 import * as layoutStore from './ui/layout/layout-store';
 import { engineMode, installFrontendLogPipe, platform } from './platform';
 import { master, session } from './ui/state/audio';
+import { engineDevice, engineOpenFailure } from './ui/state/engine-store';
 import { bootPluginHost } from './app/boot';
 import { installCloseGuard } from './app/close-guard';
 import { installCmdFit } from './app/cmd-fit';
@@ -293,7 +294,13 @@ export function App() {
               class="tool tool--rescan"
               classList={{ scanning: scanning() }}
               aria-label="Rescan plugins"
-              title="Rescan plugins"
+              title={
+                nativeHostReady() || scanning()
+                  ? 'Rescan plugins'
+                  : engineMode() && !engineDevice() && engineOpenFailure()
+                    ? 'Rescan plugins: no audio device is open, so the plugin host has not started (see Audio Settings)'
+                    : 'Rescan plugins: the plugin host is still starting'
+              }
               aria-busy={scanning()}
               disabled={scanning() || !nativeHostReady()}
               onClick={() => void scanForPlugins({ force: true })}

@@ -28,7 +28,7 @@ import { AUTO_RECORD_DEFAULT_SENSITIVITY } from '../../audio/looper/auto-record'
 import { averageInterval, clampBars, framesPerBar, maxWholeBars } from '../../audio/quantize';
 import { readStoredNumber, writeStoredNumber } from '../../audio/persist';
 import { readAudioDeviceSettings, writeAudioDeviceSettings, type AudioDeviceSettings } from '../../audio/audio-settings';
-import { setAsioEnabled, setBufferSize, usingAsio } from '../../audio/audio-devices';
+import { setAsioEnabled, setBufferSize, switchAsioDriver, usingAsio } from '../../audio/audio-devices';
 import { autosave } from '../../audio/autosave';
 import { engineResync } from '../../audio/instrument';
 import { engineInputLive, toggleEngineInput } from '../../audio/native-io';
@@ -1076,6 +1076,14 @@ export const engineMaster = {
 /** The device that runs, or null. */
 export const engineDevice = device;
 
+// Why the last open failed (its error text), until an open succeeds. While no device runs, Audio
+// Settings, the plugin slots and the rescan button say so instead of reading as "no plugins".
+const [openFailure, setOpenFailure] = createSignal<string | null>(null);
+
+/** The last failed open's reason, null once an open succeeded. Read it with `engineDevice()`: a failed
+ * switch can leave the device that ran running. */
+export const engineOpenFailure = openFailure;
+
 /** The running device's rate; 48 kHz until one runs (nothing is on the grid before then). */
 export function engineSampleRate(): number {
   return device()?.sampleRate ?? 48000;
@@ -1141,36 +1149,85 @@ function picked(): DeviceChoice {
  * (which resolves); confirmed, the loops go to the recovery first (`switchDroppingLoops`).
  */
 export function openEngineDevice(): Promise<DeviceStatus | null> {
-  const run = openTail.then(async () => {
-    const wanted = picked();
-    try {
-      let runs: Running;
-      try {
-        runs = { ...wanted, status: await platform.engine.open(wanted.request) };
-      } catch (err) {
-        const refused = decodeOpenError(err);
-        if (refused.type !== 'RateChange') throw err;
-        const ask =
-          `${refused.device} runs at ${kHz(refused.to)}. Your loops were recorded at ${kHz(refused.from)} and ` +
-          `cannot play there. They stay in recovery and come back the next time BleepLoop starts at ` +
-          `${kHz(refused.from)}.\n\nSwitch anyway?`;
-        if (!window.confirm(ask)) {
-          putBackPicks();
-          return device();
-        }
-        runs = await switchDroppingLoops(wanted);
-      }
-      setDevice(runs.status);
-      opened = { request: runs.request, picks: runs.picks };
-      return runs.status;
-    } catch (err) {
-      console.error('[engine] device open failed', err);
-      notifyError("Couldn't open the audio device", err);
-      return null;
-    }
-  });
-  openTail = run;
+  return serialize(async () => (await openPicked()).status);
+}
+
+/** Run `op` after every open queued before it (a failed one does not stop the queue). */
+function serialize<T>(op: () => Promise<T>): Promise<T> {
+  const run = openTail.then(op);
+  openTail = run.catch(() => undefined);
   return run;
+}
+
+/** `openEngineDevice`'s open, inside the queue. `declined`: the player kept the device that runs. */
+async function openPicked(): Promise<{ status: DeviceStatus | null; declined: boolean }> {
+  const wanted = picked();
+  try {
+    let runs: Running;
+    try {
+      runs = { ...wanted, status: await platform.engine.open(wanted.request) };
+    } catch (err) {
+      const refused = decodeOpenError(err);
+      if (refused.type !== 'RateChange') throw err;
+      const ask =
+        `${refused.device} runs at ${kHz(refused.to)}. Your loops were recorded at ${kHz(refused.from)} and ` +
+        `cannot play there. They stay in recovery and come back the next time BleepLoop starts at ` +
+        `${kHz(refused.from)}.\n\nSwitch anyway?`;
+      if (!window.confirm(ask)) {
+        putBackPicks();
+        return { status: device(), declined: true };
+      }
+      runs = await switchDroppingLoops(wanted);
+    }
+    setOpenFailure(null);
+    setDevice(runs.status);
+    opened = { request: runs.request, picks: runs.picks };
+    return { status: runs.status, declined: false };
+  } catch (err) {
+    console.error('[engine] device open failed', err);
+    notifyError("Couldn't open the audio device", err);
+    setOpenFailure(errorText(err));
+    return { status: null, declined: false };
+  }
+}
+
+/** An open's error as one short line (the toast keeps the whole text). */
+function errorText(err: unknown): string {
+  const text = (err instanceof Error ? err.message : String(err)).split('\n')[0].trim();
+  return text.length > 120 ? `${text.slice(0, 119)}…` : text || 'unknown error';
+}
+
+/**
+ * Switch the ASIO driver live ('' = automatic): the device closes when it runs on ASIO (nothing may
+ * hold the driver while it is replaced), the host drops the cached driver and starts this one, and the
+ * saved picks open again on it. A driver that does not start leaves ASIO off, so the picks open on
+ * WASAPI and Audio Settings says why. A refused switch reopens what ran. A switch the player declines
+ * because the new driver runs at another rate goes back to the driver that ran.
+ */
+export function switchEngineAsioDriver(driver: string): Promise<DeviceStatus | null> {
+  return serialize(async () => {
+    const previous = readAudioDeviceSettings().asioDriver;
+    try {
+      if (device()?.backend === 'Asio') {
+        await platform.engine.close();
+        setDevice(null);
+      }
+      await switchAsioDriver(driver);
+    } catch (err) {
+      console.error('[engine] ASIO driver switch failed', err);
+      notifyError("Couldn't switch the ASIO driver", err);
+      return (await openPicked()).status;
+    }
+    const reopened = await openPicked();
+    if (!reopened.declined || previous === driver) return reopened.status;
+    try {
+      await switchAsioDriver(previous);
+    } catch (err) {
+      console.error('[engine] ASIO driver switch back failed', err);
+      notifyError("Couldn't switch back to the previous ASIO driver", err);
+    }
+    return (await openPicked()).status;
+  });
 }
 
 /** Save the picks of the device that runs again (a declined switch): Audio Settings shows them. */

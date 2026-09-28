@@ -18,7 +18,8 @@ import {
   samePluginDescriptor,
 } from '../../audio/plugin-descriptor';
 import { SYNTHS } from '../../audio/synths';
-import { platform } from '../../platform';
+import { engineMode, platform } from '../../platform';
+import { engineDevice, engineOpenFailure } from '../state/engine-store';
 import { PluginBar, PluginParams } from './PluginControls';
 
 /**
@@ -170,7 +171,9 @@ export function InstrumentSlot(props: { slot: 0 | 1 }) {
         <span class="slot__plugin-note" role="note">
           {scanning()
             ? 'scanning plugins…'
-            : 'No plugins found · CLAP in %COMMONPROGRAMFILES%\\CLAP, VST3 in %COMMONPROGRAMFILES%\\VST3 · rescan ⟳ in the command bar'}
+            : engineMode() && !engineDevice() && engineOpenFailure()
+              ? 'No audio device open — see Audio Settings'
+              : 'No plugins found · CLAP in %COMMONPROGRAMFILES%\\CLAP, VST3 in %COMMONPROGRAMFILES%\\VST3 · rescan ⟳ in the command bar'}
         </span>
       </Show>
       {/* Params drawer (accordion). Mounted whenever a plugin is loaded (so onParamChanged tracks live

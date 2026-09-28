@@ -42,11 +42,14 @@ pub(crate) struct FakeDevice {
     /// What the driver reports for each callback, in frames.
     pub(crate) in_latency: u32,
     pub(crate) out_latency: u32,
+    /// ASIO: the buffer sizes the driver takes (min, max frames; `None` = any). As cpal's does, the fake
+    /// refuses to start at a size outside it, and resolves a request outside it as `cpal_driver` does.
+    pub(crate) buffer_range: Option<(u32, u32)>,
 }
 
 impl FakeDevice {
     pub(crate) fn new(name: &str, rate: u32, block: u32) -> FakeDevice {
-        FakeDevice { name: name.to_string(), rate, block, in_channels: 2, out_channels: 2, in_latency: 32, out_latency: 48 }
+        FakeDevice { name: name.to_string(), rate, block, in_channels: 2, out_channels: 2, in_latency: 32, out_latency: 48, buffer_range: None }
     }
 }
 
@@ -146,7 +149,7 @@ impl Driver for FakeDriver {
             AudioBackend::Asio => {
                 let mut device = self.0.asio.lock().unwrap().clone().ok_or("fake: no ASIO driver")?;
                 if let Some(block) = request.buffer {
-                    device.block = block;
+                    device.block = device.buffer_range.map_or(block, |(min, max)| super::transition::asio_block(block, min, max));
                 }
                 (device.clone(), device)
             }
@@ -184,6 +187,11 @@ impl Driver for FakeDriver {
         if self.0.fail_starts.load(Acquire) > 0 {
             self.0.fail_starts.fetch_sub(1, Release);
             return Err("fake: the device did not start".to_string());
+        }
+        if let Some((min, max)) = device.output.buffer_range.filter(|_| spec.backend.is_asio()) {
+            if !(min..=max).contains(&spec.block) {
+                return Err(format!("fake: buffer size {} is not in the supported range {min}..={max}", spec.block));
+            }
         }
         // An endpoint with no input channels plays output only, as a PC with no capture device.
         let capture = if spec.in_channels > 0 { Some(wiring.capture(spec)?) } else { None };

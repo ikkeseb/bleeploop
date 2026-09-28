@@ -1,8 +1,9 @@
 //! OWNS: the device owner's decisions, as pure functions (the kernel `host/native_io.rs`'s
 //! `transition_action` is for the live line): what reaching a device takes from where the owner stands
 //! ([`steps`]), when a request only changes the channel ([`same_device`]), where a lost device falls back
-//! to ([`fallbacks`]), and which capture channel a request selects ([`input_channel`]). `owner.rs` carries
-//! them out.
+//! to ([`fallbacks`]), which capture channel a request selects ([`input_channel`]), and which buffer an
+//! ASIO open and its preopen ask the driver for ([`asio_block`], [`preopen_block`]). `owner.rs` carries
+//! out the first four, `cpal_driver.rs` the last two.
 
 use super::DeviceRequest;
 use crate::audio_output::AudioBackend;
@@ -36,6 +37,29 @@ pub(crate) fn steps(engine: Option<u32>, running: bool, healthy: bool, target: O
             start: true,
         },
     }
+}
+
+/// The buffer an ASIO open asks the driver for: `requested` when the driver takes it (`min..=max`), else
+/// the power of two inside the range nearest to it, else `min` (a driver fixed at, say, 480 frames).
+/// cpal refuses a fixed size outside the range, and a driver whose buffer is set in its own control
+/// panel offers exactly one size. `src/audio/audio-settings.ts` mirrors it for the Buffer select.
+pub(crate) fn asio_block(requested: u32, min: u32, max: u32) -> u32 {
+    if (min..=max).contains(&requested) {
+        return requested;
+    }
+    (0..32)
+        .map(|k| 1u32 << k)
+        .filter(|b| (min..=max).contains(b))
+        .min_by_key(|&b| b.abs_diff(requested))
+        .unwrap_or(min)
+}
+
+/// The block the ASIO preopen runs the driver at before an open at `block` (`cpal_driver`): another size
+/// the driver takes (`range`; `None` = not known, any), or none when it takes only `block`: the preopen
+/// is then skipped rather than asked for a size the driver refuses.
+pub(crate) fn preopen_block(block: u32, range: Option<(u32, u32)>) -> Option<u32> {
+    let (min, max) = range.unwrap_or((1, u32::MAX));
+    [256, 128, 512, 64, 1024, min, max].into_iter().find(|&b| b != block && b > 0 && (min..=max).contains(&b))
 }
 
 /// `next` asks for the device that runs, at most with another capture channel: the owner changes the
@@ -151,6 +175,34 @@ mod tests {
         assert_eq!(fallbacks(&lost, false, true), vec![wasapi(Some("in"), None)], "the lost output goes to the default");
         assert_eq!(fallbacks(&lost, true, false), vec![wasapi(None, Some("out"))], "the lost input goes to the default");
         assert_eq!(fallbacks(&wasapi(None, None), true, true), vec![wasapi(None, None)], "the default is tried again");
+    }
+
+    #[test]
+    fn an_asio_open_never_asks_for_a_buffer_outside_the_drivers_range() {
+        // (requested, min, max) → the block asked for
+        let table = [
+            ((64, 512, 512), 512, "a driver fixed in its control panel takes its one size"),
+            ((64, 128, 2048), 128, "too small: the nearest power of two in range"),
+            ((2048, 32, 1024), 1024, "too large: the nearest power of two in range"),
+            ((256, 32, 1024), 256, "in range: the request"),
+            ((64, 480, 480), 480, "no power of two in range: the minimum"),
+            ((1024, 100, 300), 256, "the nearest power of two, not the bound"),
+        ];
+        for ((requested, min, max), want, why) in table {
+            assert_eq!(asio_block(requested, min, max), want, "{why}");
+        }
+    }
+
+    #[test]
+    fn the_preopen_takes_another_size_the_driver_accepts_or_none() {
+        assert_eq!(preopen_block(512, Some((512, 512))), None, "a one-size driver has no other size");
+        assert_eq!(preopen_block(480, Some((480, 480))), None);
+        assert_eq!(preopen_block(256, Some((64, 2048))), Some(128));
+        assert_eq!(preopen_block(128, Some((64, 2048))), Some(256));
+        assert_eq!(preopen_block(512, Some((512, 1024))), Some(1024));
+        assert_eq!(preopen_block(128, Some((100, 200))), Some(100), "no listed size in range: a bound");
+        assert_eq!(preopen_block(256, None), Some(128), "an unknown range: as before");
+        assert_eq!(preopen_block(64, None), Some(256));
     }
 
     #[test]

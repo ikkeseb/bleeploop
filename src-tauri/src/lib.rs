@@ -372,6 +372,8 @@ pub fn run() {
             host::plugin_asio_device_info,
             host::plugin_asio_status,
             host::plugin_asio_probe,
+            host::plugin_asio_switch,
+            host::plugin_asio_drivers,
             // Engine mode (docs/plans/native-engine.md § Stage 5).
             #[cfg(windows)]
             engine_io::mode::engine_mode,
