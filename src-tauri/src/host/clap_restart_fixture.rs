@@ -1,11 +1,9 @@
 //! A raw CLAP plugin with real activate/process callbacks, loaded by clack with the production
-//! `LfHost` and driven by the production RT producer (`producer_loop`) against a plain heap ring in
-//! place of the WebView2 SharedBuffer. Proves the plugin-initiated paths: `host.request_restart`
-//! (deactivate → activate → RT resumed, on the right threads) and `clap_host_params.rescan`; and,
-//! through its `clap.params` extension, that a malformed parameter count is refused. The engine-mode
-//! tests at the end load the same plugin through `engine_slot` into a test device's engine.
-//! No audio device or GUI required.
-use super::super::transport::HOP1_HEADER_BYTES;
+//! `LfHost`. Proves `clap_host_params.rescan` reaches the owner and, through its `clap.params`
+//! extension, that a malformed parameter count is refused. The engine-mode tests load the same plugin
+//! through `engine_slot` into a test device's engine, where a `host.request_restart` cycles it
+//! (deactivate → activate → processing resumed, on the right threads). No audio device or GUI
+//! required.
 use super::*;
 use clap_sys::{
     entry::clap_plugin_entry,
@@ -31,6 +29,7 @@ use clap_sys::{
 };
 use std::cell::RefCell;
 use std::ffi::{c_char, c_void, CStr};
+use rtrb::RingBuffer;
 use std::sync::atomic::{AtomicI32, AtomicPtr, AtomicU64, AtomicUsize};
 use std::sync::Mutex;
 use std::thread::ThreadId;
@@ -638,48 +637,6 @@ fn fixture_instance() -> PluginInstance<LfHost> {
     .unwrap()
 }
 
-/// Stands in for the JS consumer (the worklet) for the rest of a test: a thread keeps the hop-1 read
-/// cursor (header word [1]) caught up with the write cursor ([0]), through the restart too. Like the
-/// worklet's render thread it runs at audio priority (MMCSS Pro Audio, as the producer does), so the
-/// test threads beside it cannot starve it, and it spins (`yield_now`): a 1 ms sleep can round up to
-/// the 15.6 ms timer tick Windows grants, past the ring's slack. Stops and joins on drop, so it never
-/// outlives the ring it reads.
-struct Drain {
-    stop: Arc<AtomicBool>,
-    join: Option<std::thread::JoinHandle<()>>,
-}
-
-impl Drain {
-    /// SAFETY: `header` points at the ring's two 4-byte-aligned cursor words, which outlive the
-    /// `Drain` (drop it before the ring); the RT thread is the sole writer of [0] and the sole reader
-    /// of [1], mirroring the WebView2 contract.
-    unsafe fn start(header: *mut u32) -> Drain {
-        let addr = header as usize;
-        let stop = Arc::new(AtomicBool::new(false));
-        let stopped = stop.clone();
-        let join = std::thread::spawn(move || {
-            crate::engine_io::promote_pro_audio();
-            let header = addr as *mut u32;
-            // SAFETY: the caller's contract above.
-            let (write_idx, read_idx) = unsafe { (AtomicU32::from_ptr(header), AtomicU32::from_ptr(header.add(1))) };
-            while !stopped.load(Acquire) {
-                read_idx.store(write_idx.load(Acquire), Release);
-                std::thread::yield_now();
-            }
-        });
-        Drain { stop, join: Some(join) }
-    }
-}
-
-impl Drop for Drain {
-    fn drop(&mut self) {
-        self.stop.store(true, Release);
-        if let Some(join) = self.join.take() {
-            let _ = join.join();
-        }
-    }
-}
-
 /// Spin until `pred` holds or `ms` elapse; returns whether it held.
 fn wait_for(ms: u64, pred: impl Fn() -> bool) -> bool {
     let deadline = Instant::now() + Duration::from_millis(ms);
@@ -690,145 +647,6 @@ fn wait_for(ms: u64, pred: impl Fn() -> bool) -> bool {
         std::thread::sleep(Duration::from_millis(1));
     }
     pred()
-}
-
-#[test]
-fn plugin_requested_restart_cycles_activation_on_the_owner_without_reload() {
-    const CAP_FRAMES: u32 = 1024; // power of two (the hop-1 ring masks)
-    const MAX_FRAMES: u32 = 512;
-    const RATE: f64 = 48_000.0;
-
-    let mut instance = fixture_instance();
-    let plugin = instance.raw_instance() as *const clap_plugin;
-    let s = unsafe { state(plugin) };
-
-    // A plain heap ring stands in for the WebView2 SharedBuffer: header + f32 data, 4-byte aligned.
-    let mut ring = vec![0u32; HOP1_HEADER_BYTES / 4 + CAP_FRAMES as usize];
-    let cfg = RtConfig {
-        slot: 0,
-        shared_ptr: ring.as_mut_ptr() as usize,
-        cap_frames: CAP_FRAMES,
-        out_channels: 2,
-        in_channels: 0,
-        max_frames: MAX_FRAMES,
-        sample_rate: RATE,
-        device_rate: RATE,
-    };
-    let diag = Arc::new(ProducerDiag::new());
-    diag.init(RATE, RATE, MAX_FRAMES, 2, CAP_FRAMES as usize, 256, 1);
-
-    let stopped = instance.activate(|_, _| (), cfg.audio_configuration()).unwrap();
-    let (_event_tx, event_rx) = RingBuffer::<PluginEvent>::new(16);
-    let (_in_tx, in_rx) = RingBuffer::<f32>::new(16);
-    let (mon_tx, _mon_rx) = RingBuffer::<f32>::new(16);
-    let mut rt_guard = Some(
-        spawn_rt(
-            &cfg,
-            stopped,
-            RtRings {
-                event_rx,
-                in_rx,
-                mon_tx,
-            },
-            128,
-            BLOCK_CONFIG_GEN.load(Acquire),
-            0.0,
-            diag.clone(),
-        )
-        .unwrap(),
-    );
-    assert!(
-        wait_for(2000, || s.processes.load(Relaxed) > 4),
-        "the production RT loop must process the fixture"
-    );
-    assert_eq!(s.activations.load(Relaxed), 1);
-    assert_eq!(s.starts.load(Relaxed), 1);
-
-    // The JS consumer, kept caught up from here to the end: the producer runs well past one ring
-    // capacity first, so a restart that forgot the cursor would wrap `used` and drop every block
-    // (the 2026-09-10 runtime finding).
-    // SAFETY: the ring outlives `drain` (dropped before it at the end); see `Drain::start`.
-    let drain = unsafe { Drain::start(ring.as_mut_ptr()) };
-    // SAFETY: header word [0], 4-byte aligned; this thread only reads it.
-    let write_idx = unsafe { AtomicU32::from_ptr(ring.as_mut_ptr()) };
-    assert!(
-        wait_for(4000, || write_idx.load(Acquire) > CAP_FRAMES * 2),
-        "the producer must publish past one ring capacity with a draining reader"
-    );
-    let written_before_restart = write_idx.load(Acquire);
-    let dropped_before_restart = diag.frames_dropped.load(Relaxed);
-
-    // The request comes in through the real host ABI from a foreign thread (a plugin's worker or
-    // audio thread), and must allocate nothing under the RT alloc guard.
-    let host = unsafe { *s.host };
-    std::thread::spawn(move || {
-        #[cfg(debug_assertions)]
-        let allocations_before = super::super::rt_alloc::RT_ALLOCS.load(Relaxed);
-        {
-            #[cfg(debug_assertions)]
-            let _guard = super::super::rt_alloc::guard();
-            unsafe { (host.request_restart.unwrap())(&host) };
-        }
-        #[cfg(debug_assertions)]
-        assert_eq!(
-            super::super::rt_alloc::RT_ALLOCS.load(Relaxed),
-            allocations_before,
-            "request_restart through the real host ABI must allocate nothing"
-        );
-    })
-    .join()
-    .unwrap();
-    assert_eq!(
-        s.deactivations.load(Relaxed),
-        0,
-        "the request itself must not run foreign lifecycle code inline"
-    );
-
-    // Owner turn: the flag drains exactly once, and the cycle runs.
-    assert!(instance.access_shared_handler(|sh| sh.restart_requested.swap(false, Acquire)));
-    assert!(!instance.access_shared_handler(|sh| sh.restart_requested.swap(false, Acquire)));
-    let processed_before = s.processes.load(Relaxed);
-    service_restart(&mut instance, &mut rt_guard, &cfg, &diag).unwrap();
-    assert!(rt_guard.is_some(), "a fresh RT producer replaces the joined one");
-    assert_eq!(s.stops.load(Relaxed), 1, "the RT thread stopped processing before deactivate");
-    assert_eq!(s.deactivations.load(Relaxed), 1);
-    assert_eq!(s.activations.load(Relaxed), 2, "activate ran again on the same instance");
-    assert!(
-        wait_for(2000, || s.starts.load(Relaxed) == 2
-            && s.processes.load(Relaxed) > processed_before + 4),
-        "the respawned RT producer must resume processing"
-    );
-    assert!(instance.is_active());
-    // The hop-1 write cursor continues from where the joined producer left it (the JS reader is
-    // still at its old position), and — with the reader kept caught up — nothing is dropped.
-    assert!(
-        wait_for(2000, || write_idx.load(Acquire) > written_before_restart + CAP_FRAMES),
-        "the respawned producer must continue the published write cursor, not restart it at 0"
-    );
-    assert_eq!(
-        diag.frames_dropped.load(Relaxed),
-        dropped_before_restart,
-        "no hop-1 frame may be dropped across the restart while the reader keeps up"
-    );
-
-    // Unload path: the same guard handshake, then deactivate on the owner.
-    let exit = rt_guard.take().unwrap().stop_and_join().unwrap();
-    assert_eq!(exit.period_frames, 128, "the respawn continued at the reconciled block");
-    instance.deactivate(exit.stopped);
-    assert_eq!(s.stops.load(Relaxed), 2);
-    assert_eq!(s.deactivations.load(Relaxed), 2);
-    assert!(
-        !s.contract_violation.load(Relaxed),
-        "activate/deactivate on the owner thread only, start/stop/process on the RT thread only, and never process while inactive"
-    );
-    let owner = std::thread::current().id();
-    assert!(
-        s.main_thread_calls.lock().unwrap().iter().all(|t| *t == owner),
-        "every activate/deactivate happened on the owner thread"
-    );
-    assert_eq!(diag.rt_faults.load(Relaxed), 0, "no RT fault was latched across the cycle");
-    drop(drain);
-    drop(ring);
 }
 
 #[test]

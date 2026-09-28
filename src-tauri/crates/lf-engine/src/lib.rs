@@ -1,8 +1,7 @@
 //! lf-engine: BleepLoop's native audio engine, a pure crate (docs/plans/native-engine.md § Stage 2).
 //! This doc is the crate's briefing.
 //!
-//! The app runs it in engine mode, the default (`src-tauri/src/engine_io`); the web audio path stays
-//! behind the toggle until the plan's Stage 6 deletes it. No host, device or plugin crate may enter its
+//! The app always runs it (`src-tauri/src/engine_io`). No host, device or plugin crate may enter its
 //! dependency tree (`scripts/engine-deny.mjs`).
 //!
 //! # Module map

@@ -3,8 +3,8 @@
 //! controller trimming the ratio so the ring holds its setpoint. The WASAPI join (input → engine) and
 //! Share output (engine → mirror endpoint) both run on it.
 //!
-//! Reshaped from `host/transport.rs`'s `InPipe`/`OutMonitorPipe`/`DriftController`, which stay where
-//! they are for the live line until Stage 6 deletes them with the WebView bridge.
+//! Reshaped from the web path's `InPipe`/`OutMonitorPipe`/`DriftController` (`host/transport.rs`,
+//! deleted with the WebView bridge in Stage 6).
 //!
 //! Shape: the pusher writes interleaved f32 into an rtrb ring; each `pull` steps the drift controller
 //! once on the ring's fill, then resamples exactly the frames asked for (rubato `Async` poly-cubic,
@@ -44,7 +44,7 @@ pub(crate) struct PipeConfig {
     pub(crate) max_pull: usize,
 }
 
-// PI gains: ωn = √KI = 0.1 rad/s, ζ = KP / (2ωn) = 0.7. Faster than `host/transport.rs`'s
+// PI gains: ωn = √KI = 0.1 rad/s, ζ = KP / (2ωn) = 0.7. Faster than the web path's
 // `DriftController` (ωn 0.04): a pipe that starts with its drift unknown must not dip into a starve
 // while it learns it, and at 0.04 rad/s a 10 ms ↔ 10 ms WASAPI join at −400 ppm ran short in its first
 // minute (the matrix test below).
@@ -140,7 +140,7 @@ pub(crate) fn pipe(config: PipeConfig) -> Result<(PushEnd, PullPipe), String> {
         return Err(format!("pipe: the setpoint does not fit the ring ({config:?})"));
     }
     // Poly cubic, not sinc: the ratio moves every pull and sinc would recompute its anti-alias
-    // filters on each change (transport.rs's reasoning for `Hop1Pipe`).
+    // filters on each change (the web path's reasoning for its `Hop1Pipe`).
     let rs = Async::<f32>::new_poly(
         out_rate as f64 / in_rate as f64,
         MAX_RATIO_RELATIVE,

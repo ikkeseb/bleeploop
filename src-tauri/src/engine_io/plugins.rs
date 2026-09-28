@@ -1,6 +1,6 @@
-//! OWNS: engine mode's plugin slots (`docs/plans/native-engine.md` § Stage 5, Plugins): the live line's
+//! OWNS: engine mode's plugin slots (`docs/plans/native-engine.md` § Stage 5, Plugins): the
 //! `plugin_*` load, unload, list, parameter and editor commands, routed to the engine slot owners
-//! (`host/engine_slot.rs`) under the same names, payloads and window events (`plugin:param-changed`,
+//! (`host/engine_slot.rs`) with their window events (`plugin:param-changed`,
 //! `plugin:params-changed`, `plugin:editor-closed`), and tone recall's commands (`host/tone.rs`): every
 //! load restores the plugin's stored tone, a session export takes a slot's tone fresh, an import stores
 //! one (checked against the plugin session.json names; every load of that plugin from before it stops
@@ -11,7 +11,7 @@
 //!
 //! A slot is reserved while it loads, for the WebView document that asked (its `frontendEpoch`): a
 //! reload's unload cancels the reservation, and a load that finishes for a replaced document unloads
-//! again, as on the live line. Commands clone a loaded slot's handle out of the lock, so a slow owner
+//! again. Commands clone a loaded slot's handle out of the lock, so a slow owner
 //! round trip on one slot holds up nobody else.
 
 use std::sync::atomic::Ordering::Relaxed;
@@ -39,7 +39,7 @@ pub(crate) enum EngineSlot {
     Loaded { handle: Arc<EngineSlotHandle>, info: PluginInfo },
 }
 
-/// The `plugin:param-changed` payload (the live VST3 host's).
+/// The `plugin:param-changed` payload.
 #[derive(Clone, serde::Serialize)]
 struct ParamChanged {
     slot: u8,
@@ -132,7 +132,7 @@ impl EngineApp {
             name: handle.name().to_string(),
             format: if vst3 { "vst3" } else { "clap" }.to_string(),
             path,
-            // As the live load answers: the frontend keeps the scan's descriptor for gain staging.
+            // The frontend keeps the scan's descriptor for gain staging.
             is_effect: None,
         };
         let info = PluginInfo { slot, descriptor, tone: handle.tone() };
@@ -213,7 +213,7 @@ impl EngineApp {
             .collect())
     }
 
-    /// `plugin_set_param`: an empty slot is a no-op, as on the live line (a set racing an unload).
+    /// `plugin_set_param`: an empty slot is a no-op (a set racing an unload).
     pub(crate) fn plugin_set_param(&self, slot: u8, id: u32, value: f64) -> Result<(), String> {
         match self.handle(slot) {
             Ok(handle) => handle.set_param(id, value),
@@ -273,7 +273,7 @@ impl EngineApp {
         self.handle(slot)?.open_editor()
     }
 
-    /// Idempotent, as on the live line.
+    /// Idempotent.
     pub(crate) fn plugin_close_editor(&self, slot: u8) -> Result<(), String> {
         match self.handle(slot) {
             Ok(handle) => handle.close_editor(),

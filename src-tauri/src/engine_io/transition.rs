@@ -1,5 +1,4 @@
-//! OWNS: the device owner's decisions, as pure functions (the kernel `host/native_io.rs`'s
-//! `transition_action` is for the live line): what reaching a device takes from where the owner stands
+//! OWNS: the device owner's decisions, as pure functions (the kernel): what reaching a device takes from where the owner stands
 //! ([`steps`]), when a request only changes the channel ([`same_device`]), where a lost device falls back
 //! to ([`fallbacks`]), which capture channel a request selects for each slot ([`open_channels`]), and
 //! which buffer an ASIO open and its preopen ask the driver for ([`asio_block`], [`preopen_block`]).

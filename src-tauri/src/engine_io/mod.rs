@@ -1,7 +1,6 @@
-//! engine_io: the device side of the native engine (`docs/plans/native-engine.md` § Stage 4). Engine
-//! mode runs it, the default unless the toggle says `off` (`mode`; the UI drives it over `wire` and the
-//! feed), a DEV probe drives it headless, and the web audio path never calls it. This doc is the
-//! module's briefing.
+//! engine_io: the device side of the native engine (`docs/plans/native-engine.md` § Stage 4). The app
+//! always runs it (`mode`; the UI drives it over `wire` and the feed), and a DEV probe drives it
+//! headless. This doc is the module's briefing.
 //!
 //! [`EngineHost`] is the process-wide handle: one device owner thread serializes every device
 //! transition (open, backend switch, a slot's channel change, an ASIO driver switch, loss, close); the
@@ -24,8 +23,8 @@
 //! | `frame_clock` | [`FrameClock`]: the callback's (time, frame) stamp and a press's frame |
 //! | `pipes` | [`pipes::PullPipe`]: frames pushed on one clock, pulled resampled on another (the WASAPI join, Share output) |
 //! | `feed` | the feed: what the UI reads back (events, device, status, anchor, meter, waveforms), on its own thread |
-//! | `mode` | engine mode: the toggle, the managed host, the tone store's folder, the `engine_*` Tauri commands, shutdown on exit |
-//! | `plugins` | engine mode's plugin slots: the live line's `plugin_*` commands routed to the engine slot owners, and tone recall's (`host/tone.rs`) |
+//! | `mode` | engine mode: the managed host, the tone store's folder, the `engine_*` Tauri commands, shutdown on exit |
+//! | `plugins` | engine mode's plugin slots: the `plugin_*` commands routed to the engine slot owners, and tone recall's (`host/tone.rs`) |
 //! | `session` | a session's bytes to and from the engine: the snapshot the UI saves, the load it imports |
 //! | `settings` | the last value of every setting command, replayed into each new engine |
 //! | `share` | Share output: the post-limiter master mirrored to a WASAPI endpoint while ASIO plays |
