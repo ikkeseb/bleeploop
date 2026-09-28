@@ -53,6 +53,79 @@ fn the_selected_instrument_sounds_on_the_bus_and_a_switch_releases_it() {
     assert!(peak(&rig.bus) > 0.01, "the pad sounds: {}", peak(&rig.bus));
 }
 
+/// `NoteTarget::Off`: a note sounds nothing, and switching to it releases the note held (an organ
+/// holds while its key is down: the same run without the switch still sounds).
+#[test]
+fn off_sounds_no_note_and_switching_to_it_releases_the_held_one() {
+    let mut rig = Rig::new();
+    rig.set(Command::SelectInstrument(NoteTarget::Off));
+    rig.keep_output();
+    rig.press(Command::NoteOn(60, 0.8));
+    rig.advance(4800);
+    assert_eq!(peak(&rig.bus), 0.0, "off: a note sounds nothing");
+
+    let held = |off: bool| {
+        let mut rig = Rig::new();
+        rig.set(Command::SelectInstrument(NoteTarget::Builtin(Instrument::Organ)));
+        rig.press(Command::NoteOn(60, 0.8));
+        rig.advance(rig.seconds(0.5));
+        if off {
+            rig.set(Command::SelectInstrument(NoteTarget::Off));
+        }
+        rig.advance(rig.seconds(3.0));
+        rig.keep_output();
+        rig.advance(4800);
+        peak(&rig.bus)
+    };
+    assert!(held(false) > 0.01, "the organ holds its note: {}", held(false));
+    assert!(held(true) < 1e-4, "off released it: {}", held(true));
+}
+
+/// A built-in instrument's level (`SetInstrumentGain`) on a held organ note, against the same run at
+/// unity: it glides down without a jump and scales what is heard and what is recorded alike; set
+/// while another instrument is the target, it reaches the organ still, and it stays with the organ
+/// across a switch away and back.
+#[test]
+fn an_instruments_level_glides_scales_heard_and_recorded_and_stays_with_it() {
+    let run = |levels: bool| {
+        let mut rig = Rig::new();
+        let set = |rig: &mut Rig, gain: f32| {
+            if levels {
+                rig.press(Command::SetInstrumentGain(Instrument::Organ, gain));
+            } else {
+                rig.advance(1);
+            }
+        };
+        rig.set(Command::SelectInstrument(NoteTarget::Builtin(Instrument::Organ)));
+        rig.press(Command::NoteOn(60, 0.8));
+        rig.advance(4800);
+        rig.keep_output();
+        set(&mut rig, 0.5);
+        rig.advance(9600);
+        let glide = (std::mem::take(&mut rig.bus), std::mem::take(&mut rig.record));
+        rig.set(Command::SelectInstrument(NoteTarget::Builtin(Instrument::Lead)));
+        set(&mut rig, 0.25);
+        rig.advance(9600);
+        rig.set(Command::SelectInstrument(NoteTarget::Builtin(Instrument::Organ)));
+        rig.keep_output();
+        rig.press(Command::NoteOn(64, 0.8));
+        rig.advance(9600);
+        (glide, rig.bus.clone())
+    };
+    let ((bus, record), back) = run(true);
+    let ((bus_ref, record_ref), back_ref) = run(false);
+    let ratios = |x: &[f32], reference: &[f32]| -> Vec<f32> { x.iter().zip(reference).filter(|(_, r)| r.abs() > 1e-3).map(|(a, r)| a / r).collect() };
+    let glide = ratios(&bus, &bus_ref);
+    assert!(glide.len() > 1000, "the organ sounds");
+    assert!(glide[0] > 0.99, "no jump: {}", glide[0]);
+    assert!(glide.windows(2).all(|w| w[1] <= w[0] + 1e-4), "the level glides down");
+    assert!((glide[glide.len() - 1] - 0.5).abs() < 1e-3, "to the level: {}", glide[glide.len() - 1]);
+    let recorded = ratios(&record[4800..], &record_ref[4800..]);
+    assert!(!recorded.is_empty() && recorded.iter().all(|r| (r - 0.5).abs() < 1e-3), "recorded at the level too");
+    let after = ratios(&back, &back_ref);
+    assert!(after.len() > 1000 && after.iter().all(|r| (r - 0.25).abs() < 1e-3), "the level set away from the organ holds once it is back");
+}
+
 #[test]
 fn the_drum_kit_is_stereo_and_a_pitch_wheel_moves_the_synth() {
     let mut rig = Rig::new();

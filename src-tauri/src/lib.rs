@@ -384,7 +384,7 @@ pub fn run() {
             #[cfg(windows)]
             engine_io::mode::engine_status,
             #[cfg(windows)]
-            engine_io::mode::engine_set_input_channel,
+            engine_io::mode::engine_set_slot_input_channel,
             #[cfg(windows)]
             engine_io::mode::engine_send,
             #[cfg(windows)]

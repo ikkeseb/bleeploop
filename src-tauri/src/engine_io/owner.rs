@@ -1,4 +1,4 @@
-//! OWNS: the device owner thread: every device transition (open, switch, close, a channel change,
+//! OWNS: the device owner thread: every device transition (open, switch, close, a slot's channel change,
 //! Share output, a loss and its fallback, shutdown) runs here, one at a time, over a request channel
 //! with one-shot replies. The decisions are `transition.rs`'s; this carries them out.
 //!
@@ -146,7 +146,7 @@ pub(crate) enum Request {
     /// up never runs.
     Open(DeviceRequest, bool, Arc<AtomicBool>, SyncSender<Result<DeviceStatus, OpenError>>),
     Close(Reply<()>),
-    SetInputChannel(Option<u32>, Reply<()>),
+    SetSlotInputChannel(usize, Option<u32>, Reply<()>),
     SetShare(Option<String>, Reply<()>),
     Shutdown(SyncSender<()>),
 }
@@ -159,7 +159,7 @@ pub(crate) struct OwnerLink {
 
 /// Who opens: the player (`EngineHost::open`; `force` lets a switch drop the loops at another rate), or
 /// the owner on its own (a loss's recovery or fallback, the device a failed switch or a replaced engine
-/// reopens), which takes auto where the new input lacks the channel and never refuses.
+/// reopens), which takes auto where the new input lacks a slot's channel and never refuses.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum By {
     Player { force: bool },
@@ -256,8 +256,8 @@ impl<D: Driver> Owner<D> {
                 self.stop(true);
                 let _ = reply.send(Ok(()));
             }
-            Request::SetInputChannel(channel, reply) => {
-                let _ = reply.send(self.set_input_channel(channel));
+            Request::SetSlotInputChannel(slot, channel, reply) => {
+                let _ = reply.send(self.set_slot_input_channel(slot, channel));
             }
             Request::SetShare(endpoint, reply) => {
                 let _ = reply.send(self.set_share(endpoint));
@@ -282,21 +282,21 @@ impl<D: Driver> Owner<D> {
         }
     }
 
-    /// Open `request`, or switch to it. A request for the device that runs only changes its channel.
+    /// Open `request`, or switch to it. A request for the device that runs only changes its channels.
     /// The player's open (`By::Player`) is refused, before anything stops, when it would build an engine
     /// at another rate while this one holds audio, unless forced; a switch of the player's that fails to
     /// start reopens the device it replaced. The owner's (`By::Owner`) takes auto where the new input
-    /// lacks the channel.
+    /// lacks a slot's channel.
     fn open(&mut self, request: DeviceRequest, by: By) -> Result<DeviceStatus, OpenError> {
         if let Some(active) = self.active.as_ref().filter(|a| !a.run.faulted()) {
             if transition::same_device(&active.request, &request) {
-                self.set_input_channel(request.input_channel)?;
+                self.set_input_channels(request.input_channels)?;
                 return Ok(self.status().ok_or_else(|| "the device stopped".to_string())?);
             }
         }
         let (spec, device) = self.driver.resolve(&request)?;
         // An output-only device takes any channel pick: it captures nothing.
-        let channel = transition::input_channel(spec.in_channels, request.input_channel, by == By::Owner || spec.in_channels == 0)?;
+        let channels = transition::input_channels(spec.in_channels, request.input_channels, by == By::Owner || spec.in_channels == 0)?;
         let previous = self.active.as_ref().map(|a| a.request.clone());
         let healthy = self.active.as_ref().is_some_and(|a| !a.run.faulted());
         let steps = transition::steps(self.core.rate(), self.active.is_some(), healthy, Some(spec.rate));
@@ -312,7 +312,7 @@ impl<D: Driver> Owner<D> {
         if steps.build {
             self.build(spec.rate, steps.evict);
         }
-        match self.start(request, spec, device, channel) {
+        match self.start(request, spec, device, channels) {
             Ok(status) => Ok(status),
             Err(error) => {
                 log::error!("[engine_io] the device did not start: {error}");
@@ -353,8 +353,8 @@ impl<D: Driver> Owner<D> {
     }
 
     /// Start `spec`'s streams on the engine, wait for its first callbacks, then report it.
-    fn start(&mut self, request: DeviceRequest, spec: Spec, device: D::Device, channel: u32) -> Result<DeviceStatus, String> {
-        let run = Arc::new(Run::new(channel));
+    fn start(&mut self, request: DeviceRequest, spec: Spec, device: D::Device, channels: [u32; SLOT_COUNT]) -> Result<DeviceStatus, String> {
+        let run = Arc::new(Run::new(channels));
         {
             let mut rt = rt(&self.core);
             rt.handoff_len = 0;
@@ -368,7 +368,8 @@ impl<D: Driver> Owner<D> {
             AudioBackend::Wasapi => Some(pipes::pipe(PipeConfig {
                 in_rate: spec.in_rate,
                 out_rate: spec.rate,
-                channels: 1,
+                // One stream per slot, interleaved.
+                channels: SLOT_COUNT,
                 capacity: (spec.in_rate as f64 * JOIN_CAPACITY_SECONDS).ceil() as usize,
                 setpoint: JOIN_SETPOINT_SECONDS,
                 max_pull: MAX_DEVICE_BLOCK,
@@ -423,8 +424,8 @@ impl<D: Driver> Owner<D> {
         self.active = Some(Active { request, spec, run, streams: started.streams, block });
         if let Some(s) = self.status() {
             log::info!(
-                "[engine_io] {:?} running: {} Hz, {block}-frame blocks, in \"{}\" channel {}, out \"{}\", align {} frames (input {})",
-                s.backend, s.sample_rate, s.input_name, channel + 1, s.output_name, s.align_frames, s.input_frames
+                "[engine_io] {:?} running: {} Hz, {block}-frame blocks, in \"{}\" channels {:?} (per slot), out \"{}\", align {} frames (input {})",
+                s.backend, s.sample_rate, s.input_name, channels.map(|c| c + 1), s.output_name, s.align_frames, s.input_frames
             );
         }
         if let Some(endpoint) = self.share.clone() {
@@ -559,11 +560,24 @@ impl<D: Driver> Owner<D> {
         log::error!("[engine_io] no fallback device opened; the engine waits for the next open");
     }
 
-    fn set_input_channel(&mut self, channel: Option<u32>) -> Result<(), String> {
+    /// Every slot's capture channel, in place: all or none (a pick the device lacks changes nothing).
+    fn set_input_channels(&mut self, channels: [Option<u32>; SLOT_COUNT]) -> Result<(), String> {
         let active = self.active.as_mut().ok_or("no audio device is open")?;
-        let resolved = transition::input_channel(active.spec.in_channels, channel, active.spec.in_channels == 0)?;
-        active.run.channel.store(resolved, Relaxed);
-        active.request.input_channel = channel;
+        let resolved = transition::input_channels(active.spec.in_channels, channels, active.spec.in_channels == 0)?;
+        for (pick, channel) in active.run.slot_channels.iter().zip(resolved) {
+            pick.store(channel, Relaxed);
+        }
+        active.request.input_channels = channels;
+        Ok(())
+    }
+
+    /// One slot's capture channel, in place; the other slot's stays, whatever it holds (an owner's
+    /// reopen may have taken auto for a pick the device lacks).
+    fn set_slot_input_channel(&mut self, slot: usize, channel: Option<u32>) -> Result<(), String> {
+        let active = self.active.as_mut().ok_or("no audio device is open")?;
+        let pick = active.run.slot_channels.get(slot).ok_or_else(|| format!("no slot {slot}"))?;
+        pick.store(transition::input_channel(active.spec.in_channels, channel, active.spec.in_channels == 0)?, Relaxed);
+        active.request.input_channels[slot] = channel;
         Ok(())
     }
 

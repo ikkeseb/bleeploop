@@ -90,6 +90,8 @@ pub struct Rig {
     /// Of the driver's report, the input side (`ProcessContext::input_frames`).
     pub input_latency: Frame,
     input: Box<dyn Fn(Frame) -> f32>,
+    /// Slot 1's own input ([`Rig::set_inputs`]); `None`: both slots read `input`.
+    input_b: Option<Box<dyn Fn(Frame) -> f32>>,
     pub events: Vec<Event>,
     /// From `keep_output`, what the looper plays before the limiter: the lanes before their FX, the
     /// click and the monitor (`Taps::looper` + `Taps::monitor`), and the frame it starts at.
@@ -105,6 +107,7 @@ pub struct Rig {
     pub record: Vec<f32>,
     gap_next: bool,
     in_buf: Vec<f32>,
+    in_buf_b: Vec<f32>,
     left: Vec<f32>,
     right: Vec<f32>,
 }
@@ -146,6 +149,7 @@ impl Rig {
             align: o.align,
             input_latency: 0,
             input: Box::new(|_| 0.0),
+            input_b: None,
             events: Vec::new(),
             output: None,
             heard: Vec::new(),
@@ -156,6 +160,7 @@ impl Rig {
             record: Vec::new(),
             gap_next: false,
             in_buf: vec![0.0; 4096],
+            in_buf_b: vec![0.0; 4096],
             left: vec![0.0; 4096],
             right: vec![0.0; 4096],
         }
@@ -163,10 +168,18 @@ impl Rig {
 
     pub fn set_input(&mut self, signal: impl Fn(Frame) -> f32 + 'static) {
         self.input = Box::new(signal);
+        self.input_b = None;
     }
 
     pub fn set_level(&mut self, level: f32) {
         self.input = Box::new(move |_| level);
+        self.input_b = None;
+    }
+
+    /// Each slot its own input, as two capture channels: slot 0 reads `a`, slot 1 `b`.
+    pub fn set_inputs(&mut self, a: impl Fn(Frame) -> f32 + 'static, b: impl Fn(Frame) -> f32 + 'static) {
+        self.input = Box::new(a);
+        self.input_b = Some(Box::new(b));
     }
 
     pub fn keep_output(&mut self) {
@@ -266,11 +279,17 @@ impl Rig {
         for k in 0..n {
             self.in_buf[k] = (self.input)(self.frame + k as Frame);
         }
+        if let Some(b) = self.input_b.as_ref() {
+            for k in 0..n {
+                self.in_buf_b[k] = b(self.frame + k as Frame);
+            }
+        }
         let ctx = ProcessContext { frame: self.frame, xrun: std::mem::take(&mut self.gap_next), align_frames: self.align - self.engine.limiter_latency(), input_frames: self.input_latency };
         let violations = violation_count();
         let engine = &mut self.engine;
         let (input, left, right) = (&self.in_buf[..n], &mut self.left[..n], &mut self.right[..n]);
-        assert_no_alloc(|| engine.process(&ctx, input, left, right));
+        let input_b = if self.input_b.is_some() { &self.in_buf_b[..n] } else { input };
+        assert_no_alloc(|| engine.process_inputs(&ctx, [input, input_b], left, right));
         assert_eq!(violation_count(), violations, "process allocated at frame {}", self.frame);
         if let Some((_, out)) = self.output.as_mut() {
             let taps = self.engine.taps();

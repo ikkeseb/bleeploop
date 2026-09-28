@@ -1,8 +1,10 @@
 //! OWNS: the device owner's decisions, as pure functions (the kernel `host/native_io.rs`'s
 //! `transition_action` is for the live line): what reaching a device takes from where the owner stands
 //! ([`steps`]), when a request only changes the channel ([`same_device`]), where a lost device falls back
-//! to ([`fallbacks`]), and which capture channel a request selects ([`input_channel`]). `owner.rs` carries
-//! them out.
+//! to ([`fallbacks`]), and which capture channel a request selects for each slot ([`input_channels`]).
+//! `owner.rs` carries them out.
+
+use lf_engine::SLOT_COUNT;
 
 use super::DeviceRequest;
 use crate::audio_output::AudioBackend;
@@ -38,8 +40,8 @@ pub(crate) fn steps(engine: Option<u32>, running: bool, healthy: bool, target: O
     }
 }
 
-/// `next` asks for the device that runs, at most with another capture channel: the owner changes the
-/// channel in place instead (a rebuilt ASIO input would register after the output and add a block).
+/// `next` asks for the device that runs, at most with other capture channels: the owner changes the
+/// channels in place instead (a rebuilt ASIO input would register after the output and add a block).
 /// ASIO ignores the WASAPI ids (one cached duplex driver); WASAPI ignores the buffer (the audio engine's
 /// period).
 pub(crate) fn same_device(running: &DeviceRequest, next: &DeviceRequest) -> bool {
@@ -81,6 +83,15 @@ pub(crate) fn input_channel(channels: usize, requested: Option<u32>, lenient: bo
     }
 }
 
+/// [`input_channel`] for each slot's pick: every one, or the first refusal.
+pub(crate) fn input_channels(channels: usize, requested: [Option<u32>; SLOT_COUNT], lenient: bool) -> Result<[u32; SLOT_COUNT], String> {
+    let mut picks = [0; SLOT_COUNT];
+    for (pick, requested) in picks.iter_mut().zip(requested) {
+        *pick = input_channel(channels, requested, lenient)?;
+    }
+    Ok(picks)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -90,13 +101,13 @@ mod tests {
             backend: AudioBackend::Wasapi,
             input: input.map(str::to_string),
             output: output.map(str::to_string),
-            input_channel: Some(0),
+            input_channels: [Some(0); SLOT_COUNT],
             buffer: None,
         }
     }
 
     fn asio(buffer: Option<u32>) -> DeviceRequest {
-        DeviceRequest { backend: AudioBackend::Asio, input: None, output: None, input_channel: Some(1), buffer }
+        DeviceRequest { backend: AudioBackend::Asio, input: None, output: None, input_channels: [Some(1), None], buffer }
     }
 
     #[test]
@@ -126,7 +137,7 @@ mod tests {
     #[test]
     fn a_channel_change_is_not_a_new_device() {
         let mut other_channel = wasapi(Some("in"), Some("out"));
-        other_channel.input_channel = Some(1);
+        other_channel.input_channels = [Some(0), Some(1)];
         assert!(same_device(&wasapi(Some("in"), Some("out")), &other_channel));
         assert!(!same_device(&wasapi(Some("in"), Some("out")), &wasapi(Some("in"), None)), "another output");
         assert!(!same_device(&wasapi(Some("in"), None), &wasapi(None, None)), "another input");
@@ -144,7 +155,7 @@ mod tests {
         let lost = asio(Some(128));
         let tried = fallbacks(&lost, true, true);
         assert_eq!(tried[0], lost, "ASIO first rebuilds from the cache");
-        assert_eq!(tried[1], DeviceRequest { backend: AudioBackend::Wasapi, input: None, output: None, input_channel: Some(1), buffer: None });
+        assert_eq!(tried[1], DeviceRequest { backend: AudioBackend::Wasapi, input: None, output: None, input_channels: [Some(1), None], buffer: None });
         assert_eq!(tried.len(), 2);
 
         let lost = wasapi(Some("in"), Some("out"));
@@ -161,5 +172,14 @@ mod tests {
         assert!(input_channel(2, Some(2), false).is_err());
         assert_eq!(input_channel(2, Some(2), true), Ok(1));
         assert_eq!(input_channel(0, None, false), Ok(0), "a device reporting no channels still reads one");
+    }
+
+    #[test]
+    fn each_slot_takes_its_own_channel_with_auto_per_slot() {
+        assert_eq!(input_channels(4, [Some(0), Some(3)], false), Ok([0, 3]));
+        assert_eq!(input_channels(2, [None, Some(0)], false), Ok([1, 0]), "auto is input 2 for each slot on its own");
+        assert_eq!(input_channels(1, [None, None], false), Ok([0, 0]));
+        assert!(input_channels(2, [Some(0), Some(2)], false).is_err(), "one slot's missing channel refuses the request");
+        assert_eq!(input_channels(2, [Some(0), Some(2)], true), Ok([0, 1]), "a fallback takes auto for that slot alone");
     }
 }

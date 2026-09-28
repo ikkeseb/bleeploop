@@ -1,14 +1,15 @@
-//! OWNS: the six built-in instruments, which one plays, the performance wheels, and the instruments'
-//! record path. Ported from `src/audio/synths/index.ts` and the synth side of
+//! OWNS: the six built-in instruments, which one plays (or none), each one's level, the performance
+//! wheels, and the instruments' record path. Ported from `src/audio/synths/index.ts` and the synth side of
 //! `src/audio/input-router.ts`; the router's sustain and its per-source note ownership stay with the
 //! sender.
 //!
 //! All six are built in [`Instruments::new`] and render every block, so a switch never allocates and a
 //! released note rings out after one, as each slot's synth does in the web app when the player
 //! switches slots. (Picking another synth for the same slot disposed the web synth and cut its tail;
-//! here it rings out.) Notes go to the selected one; a switch releases the held notes and hands the
-//! instrument the wheels, also when it picks the instrument already selected. A note outside 0..127
-//! does nothing, as the web router drops it.
+//! here it rings out.) Notes go to the selected one, and nowhere while none is; a switch releases the
+//! held notes and hands the instrument the wheels, also when it picks the instrument already selected.
+//! A note outside 0..127 does nothing, as the web router drops it. Each instrument has its own level,
+//! smoothed as a plugin slot's gain, on what is heard and what is recorded, selected or not.
 //!
 //! They run on the DSP clock of `effects` (the device frame less the frames the device skipped);
 //! methods take device frames and [`Instruments::set_offset`] keeps the difference.
@@ -46,6 +47,47 @@ const DRUM_SEED: u32 = 1;
 pub const LEAD: Frame = QUANTUM as Frame;
 /// The longest record-path delay: a second of input and plugin latency.
 const MAX_RECORD_DELAY_SECONDS: usize = 1;
+/// Level smoothing, as a plugin slot's gain.
+const GAIN_TAU_SECONDS: f64 = 0.012;
+
+/// An instrument's level, smoothed toward its target frame by frame.
+#[derive(Clone, Copy)]
+struct Level {
+    target: f64,
+    gain: f64,
+}
+
+impl Level {
+    /// Untouched at a steady unity level, so a default render stays bit for bit what it was.
+    fn unity(&self) -> bool {
+        self.gain == 1.0 && self.target == 1.0
+    }
+
+    fn step(&mut self, coef: f64) -> f64 {
+        self.gain = self.target + (self.gain - self.target) * coef;
+        self.gain
+    }
+
+    fn apply(&mut self, coef: f64, x: &mut [f32]) {
+        if self.unity() {
+            return;
+        }
+        for s in x {
+            *s = (self.step(coef) * *s as f64) as f32;
+        }
+    }
+
+    fn apply_stereo(&mut self, coef: f64, left: &mut [f32], right: &mut [f32]) {
+        if self.unity() {
+            return;
+        }
+        for (l, r) in left.iter_mut().zip(right.iter_mut()) {
+            let g = self.step(coef);
+            *l = (g * *l as f64) as f32;
+            *r = (g * *r as f64) as f32;
+        }
+    }
+}
 
 pub struct Instruments {
     sample_rate: f32,
@@ -54,6 +96,9 @@ pub struct Instruments {
     bass: Box<Bass>,
     drums: DrumKit,
     selected: Option<Instrument>,
+    /// Each instrument's level, by `Instrument as usize`.
+    levels: [Level; 6],
+    gain_coef: f64,
     /// Device frames the DSP clock is behind.
     offset: Frame,
     bend: f64,
@@ -75,6 +120,8 @@ impl Instruments {
             bass: Box::new(Bass::new(sr, 0.0, 0)),
             drums: DrumKit::new(sr, white, pink, Mulberry32::new(DRUM_SEED), 0.0, 0),
             selected: None,
+            levels: [Level { target: 1.0, gain: 1.0 }; 6],
+            gain_coef: (-1.0 / (GAIN_TAU_SECONDS * sample_rate as f64)).exp(),
             offset: 0,
             bend: 0.0,
             modulation: 0.0,
@@ -86,6 +133,11 @@ impl Instruments {
 
     pub fn selected(&self) -> Option<Instrument> {
         self.selected
+    }
+
+    /// `instrument`'s level (linear, 0..): it glides there from the frame it is set.
+    pub fn set_gain(&mut self, instrument: Instrument, gain: f32) {
+        self.levels[instrument as usize].target = if gain.is_finite() { gain.max(0.0) as f64 } else { 0.0 };
     }
 
     pub fn set_offset(&mut self, offset: Frame) {
@@ -178,21 +230,27 @@ impl Instruments {
         }
     }
 
-    /// Render frames `frame..frame + left.len()` of all six into `left`/`right` (overwritten), and the
-    /// record path's frames into `record` (added): the mono sum `delay` less [`LEAD`] frames late.
+    /// Render frames `frame..frame + left.len()` of all six, each at its level, into `left`/`right`
+    /// (overwritten), and the record path's frames into `record` (added): the mono sum `delay` less
+    /// [`LEAD`] frames late.
     pub fn render(&mut self, frame: Frame, delay: Frame, left: &mut [f32], right: &mut [f32], record: &mut [f32]) {
         let n = left.len();
         let f = self.at(frame).1;
+        let coef = self.gain_coef;
         self.drums.render(f, left, right);
+        self.levels[Instrument::Drums as usize].apply_stereo(coef, left, right);
         let mono = &mut self.mono[..n];
-        for synth in self.poly.iter_mut() {
+        // `poly` holds Lead, Pad, Piano and Organ: the first four levels.
+        for (synth, level) in self.poly.iter_mut().zip(self.levels.iter_mut()) {
             synth.render(f, mono);
+            level.apply(coef, mono);
             for ((l, r), &x) in left.iter_mut().zip(right.iter_mut()).zip(mono.iter()) {
                 *l += x;
                 *r += x;
             }
         }
         self.bass.render(f, mono);
+        self.levels[Instrument::Bass as usize].apply(coef, mono);
         for ((l, r), &x) in left.iter_mut().zip(right.iter_mut()).zip(mono.iter()) {
             *l += x;
             *r += x;

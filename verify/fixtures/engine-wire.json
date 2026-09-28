@@ -52,6 +52,7 @@
     { "SetFxBypass": [4, "reverb", true] },
     { "SelectInstrument": { "Builtin": "lead" } },
     { "SelectInstrument": { "Slot": 1 } },
+    { "SelectInstrument": "Off" },
     { "NoteOn": [60, 0.75] },
     { "NoteOff": 60 },
     { "PitchBend": -2 },
@@ -59,6 +60,7 @@
     "AllNotesOff",
     { "SetSlotLive": [0, true] },
     { "SetSlotGain": [1, 0.5] },
+    { "SetInstrumentGain": ["pad", 0.5] },
     { "SetInputSend": ["echo", true] },
     { "SetInputSend": ["reverb", false] },
     { "SetInputSendParam": ["echoTime", 2] },
@@ -179,12 +181,12 @@
     "the device did not start"
   ],
   "deviceRequests": [
-    { "backend": "Asio", "input": null, "output": null, "inputChannel": 1, "buffer": 128 },
+    { "backend": "Asio", "input": null, "output": null, "inputChannels": [0, 3], "buffer": 128 },
     {
       "backend": "Wasapi",
       "input": "{0.0.1.00000000}.{8d4d5e1a-3c7b-4f0e-9d2a-5b6c7d8e9f01}",
       "output": null,
-      "inputChannel": null,
+      "inputChannels": [null, 1],
       "buffer": null
     }
   ],

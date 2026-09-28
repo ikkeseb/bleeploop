@@ -1232,9 +1232,10 @@ export function restoreEngineShare(): void {
   if (share()) void setEngineShare(share());
 }
 
-/** Switch the capture channel without reopening the device ('' = auto). */
+/** Switch both slots' capture channel without reopening the device ('' = auto). */
 export function setEngineInputChannel(channel: string): void {
-  platform.engine.setInputChannel(channel === '' ? null : Number(channel)).catch((err: unknown) => {
+  const pick = channel === '' ? null : Number(channel);
+  Promise.all([0, 1].map((slot) => platform.engine.setSlotInputChannel(slot, pick))).catch((err: unknown) => {
     console.error('[engine] input channel switch failed', err);
     notifyError("Couldn't switch the input channel", err);
   });

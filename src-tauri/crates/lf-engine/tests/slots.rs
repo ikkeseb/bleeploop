@@ -767,6 +767,88 @@ fn a_slot_passes_the_input_only_while_live() {
     assert!(probe.input_peak() > 0.4, "live, it gets the input");
 }
 
+// ── Each slot its own input ──────────────────────────────────────────────────────────────────────────
+
+/// Two capture channels, one per live slot (distinct levels, so a slot reading the other's, or both
+/// reading one, shows): each slot takes only its own, and both are heard and recorded, each once.
+#[test]
+fn two_live_slots_each_monitor_and_record_only_their_own_input() {
+    let mut rig = Rig::new();
+    rig.set_inputs(|_| 0.25, |_| 0.5);
+    rig.set(Command::SetSlotLive(1, true));
+    rig.keep_output();
+    rig.advance(1000);
+    assert_bits(&rig.monitor, |_| 0.75, "both live: each input heard once");
+    rig.set(Command::SetSlotLive(0, false));
+    rig.keep_output();
+    rig.advance(1000);
+    assert_bits(&rig.monitor, |_| 0.5, "slot 1 alone: its own input");
+    rig.set(Command::SetSlotLive(0, true));
+    rig.set(Command::SetSlotLive(1, false));
+    rig.keep_output();
+    rig.advance(1000);
+    assert_bits(&rig.monitor, |_| 0.25, "slot 0 alone: its own input");
+
+    rig.set(Command::SetSlotLive(1, true));
+    rig.set(Command::SetFixedLength(true));
+    rig.set(Command::SetFixedBars(1.0));
+    rig.press(Command::RecDub(0));
+    rig.advance_to(rig.end_frame() + 1);
+    assert_eq!(rig.state(0), LaneState::Playing);
+    assert!(rig.pcm(0).iter().all(|&x| (x - 0.75).abs() < 1e-6), "recorded: both inputs, each once");
+
+    let (a, b) = (Probe::new(), Probe::new());
+    rig.install(0, Fake::effect(0.0, 1.0, &a));
+    rig.install(1, Fake::effect(0.0, 1.0, &b));
+    rig.advance(1024);
+    assert_eq!((a.input_peak(), b.input_peak()), (0.25, 0.5), "each effect takes its own slot's input");
+}
+
+/// A dry slot and a live effect with latency, each on its own input, played at once (on the heard
+/// downbeat): each is heard as soon as it can be, the dry one at once and the effect its latency
+/// later, and both land together on the take's first frame.
+#[test]
+fn a_dry_and_a_latent_live_slot_land_together_in_the_take() {
+    let mut rig = Rig::with(Opts { align: PHYS + LIMITER, ..Default::default() });
+    rig.install(0, Box::new(Delay::new(PLUGIN)));
+    rig.set(Command::SetSlotLive(1, true));
+    rig.set(Command::SetFixedLength(true));
+    rig.set(Command::SetFixedBars(1.0));
+    let mark = rig.events.len();
+    rig.press(Command::RecDub(0));
+    let downbeat = rig.count_one(mark) + 4 * 24_000;
+    let played = downbeat + LIMITER + PHYS;
+    rig.set_inputs(move |f| if f == played { 1.0 } else { 0.0 }, move |f| if f == played { 0.5 } else { 0.0 });
+    assert_eq!(rig.start_frame() - downbeat, PHYS + PLUGIN + LIMITER, "the live effect's latency joins the alignment");
+    rig.keep_output();
+    let from = rig.frame;
+    rig.advance_to(rig.end_frame() + 1);
+    let heard: Vec<(Frame, f32)> = rig.monitor.iter().enumerate().filter(|(_, &x)| x != 0.0).map(|(k, &x)| (from + k as Frame, x)).collect();
+    assert_eq!(heard, [(played, 0.5), (played + PLUGIN, 1.0)], "heard: the dry note at once, the effect's its latency later");
+    assert_eq!(rig.state(0), LaneState::Playing);
+    let pcm = rig.pcm(0);
+    let hits: Vec<(usize, f32)> = pcm.iter().enumerate().filter(|(_, &x)| x != 0.0).map(|(k, &x)| (k, x)).collect();
+    assert_eq!(hits, [(0, 1.5)], "recorded: both notes, together, on the loop's frame 0");
+}
+
+/// `NoteTarget::Off` takes a slot's notes nowhere: switching to it releases what the slot holds, and a
+/// note after it reaches no slot.
+#[test]
+fn off_releases_a_slots_held_note_and_sends_it_no_more() {
+    let probe = Probe::new();
+    let mut rig = Rig::new();
+    rig.install(1, Fake::instrument(0.0, 0, &probe));
+    rig.set(Command::SelectInstrument(NoteTarget::Slot(1)));
+    rig.press(Command::NoteOn(60, 1.0));
+    rig.press(Command::SelectInstrument(NoteTarget::Off));
+    rig.keep_output();
+    rig.press(Command::NoteOn(62, 1.0));
+    rig.press(Command::NoteOff(60));
+    rig.advance(1024);
+    assert_eq!(probe.keys(), vec![(true, 60), (false, 60)], "the held note released at the switch, nothing after it");
+    assert!(rig.bus.iter().all(|&x| x == 0.0), "no note sounds");
+}
+
 // ── With no device running ────────────────────────────────────────────────────────────────────────────
 
 #[test]

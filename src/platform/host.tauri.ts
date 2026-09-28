@@ -186,8 +186,8 @@ const tauriEngineHost: EngineHost = {
     const status = await invoke<unknown>('engine_status');
     return status == null ? null : decodeDeviceStatus(status);
   },
-  async setInputChannel(channel) {
-    await invoke('engine_set_input_channel', { channel });
+  async setSlotInputChannel(slot, channel) {
+    await invoke('engine_set_slot_input_channel', { slot, channel });
   },
   async send(commands) {
     await invoke('engine_send', { commands });

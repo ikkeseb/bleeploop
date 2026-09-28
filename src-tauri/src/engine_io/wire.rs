@@ -7,12 +7,14 @@
 //! Serde's external tagging with the Rust variant names: a unit variant is its name (`"PlayAll"`), a
 //! newtype `{"RecDub":0}`, a tuple `{"SetVolume":[0,0.8]}`, a struct variant an object with camelCase
 //! fields. `FxParam`/`FxKind` travel as the TS keys (`src/audio/fx/metadata.ts`), an `InputSend` and an
-//! `InputSendParam` as their `key()`, an `Instrument` as its id, a `NoteTarget` as `{"Builtin":"lead"}` / `{"Slot":0}`, a `Frame` (i64) as a JSON number. The
+//! `InputSendParam` as their `key()`, an `Instrument` as its id, a `NoteTarget` as `{"Builtin":"lead"}` /
+//! `{"Slot":0}` / `"Off"`, a `Frame` (i64) as a JSON number. The
 //! mirrors are serde `remote` derives: a variant or field lf-engine adds fails to compile here until it
 //! is mirrored.
 //!
 //! `DeviceRequest`, `DeviceStatus`, `DeviceEvent`, `OpenError` and `AudioBackend` derive serde where they
-//! are defined (camelCase fields, backends as `"Asio"` / `"Wasapi"`; an `OpenError` is its text, or
+//! are defined (camelCase fields, backends as `"Asio"` / `"Wasapi"`; a request's `inputChannels` is one
+//! pick per slot, and one `inputChannel` instead sets both; an `OpenError` is its text, or
 //! `{"RateChange":{…}}` for a refusal).
 
 use lf_engine::dsp::fx::{FxKind, FxParam};
@@ -75,6 +77,7 @@ enum CommandDef {
     AllNotesOff,
     SetSlotLive(u8, bool),
     SetSlotGain(u8, f32),
+    SetInstrumentGain(#[serde(with = "instrument")] Instrument, f32),
     SetInputSend(#[serde(with = "input_send")] InputSend, bool),
     SetInputSendParam(#[serde(with = "input_send_param")] InputSendParam, f64),
 }
@@ -104,6 +107,7 @@ enum ActionDef {
 enum NoteTargetDef {
     Builtin(#[serde(with = "instrument")] Instrument),
     Slot(u8),
+    Off,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -269,8 +273,8 @@ pub struct ClockAnchor {
     pub grid: Frame,
 }
 
-/// The device input (the capture channel the engine takes, before any plugin) since the last frame:
-/// its linear peak, and whether a sample reached full scale.
+/// The device input (the capture channels the slots take, before any plugin) since the last frame: the
+/// louder one's linear peak, and whether a sample reached full scale.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Meter {
     pub peak: f32,
@@ -343,7 +347,7 @@ mod tests {
 
     /// Every `Command` variant, by position: a new variant fails to compile here until it has a
     /// number (bump `COMMANDS`) and an example in the fixture.
-    const COMMANDS: usize = 42;
+    const COMMANDS: usize = 43;
     fn command_index(c: &Command) -> usize {
         use Command::*;
         match c {
@@ -389,6 +393,7 @@ mod tests {
             Press => 39,
             SetDubFeedback(..) => 40,
             SetFadeBars(_) => 41,
+            SetInstrumentGain(..) => 42,
         }
     }
 
@@ -513,6 +518,13 @@ mod tests {
             _ => None,
         });
         covers("commands (their actions)", actions, ACTIONS);
+        let targets = commands.iter().filter_map(|c| match c.0 {
+            Command::SelectInstrument(NoteTarget::Builtin(_)) => Some(0),
+            Command::SelectInstrument(NoteTarget::Slot(_)) => Some(1),
+            Command::SelectInstrument(NoteTarget::Off) => Some(2),
+            _ => None,
+        });
+        covers("commands (their note targets)", targets, 3);
     }
 
     #[test]
@@ -544,7 +556,14 @@ mod tests {
     #[test]
     fn requests_statuses_and_feed_frames_round_trip_through_the_fixture() {
         let requests: Vec<DeviceRequest> = round_trip("deviceRequests");
-        assert!(requests.iter().any(|r| r.input_channel.is_none()) && requests.iter().any(|r| r.buffer.is_some()), "null and set fields");
+        let picks = requests.iter().flat_map(|r| r.input_channels);
+        assert!(picks.clone().any(|c| c.is_none()) && picks.clone().any(|c| c.is_some()), "auto and picked channels");
+        assert!(requests.iter().any(|r| r.input_channels[0] != r.input_channels[1]), "each slot its own");
+        assert!(requests.iter().any(|r| r.buffer.is_some()), "null and set fields");
+        let one: DeviceRequest = serde_json::from_str(r#"{"backend":"Asio","input":null,"output":null,"inputChannel":3,"buffer":null}"#).unwrap();
+        assert_eq!(one.input_channels, [Some(3), Some(3)], "one inputChannel sets both slots");
+        let auto: DeviceRequest = serde_json::from_str(r#"{"backend":"Wasapi","input":null,"output":null,"inputChannel":null,"buffer":null}"#).unwrap();
+        assert_eq!(auto.input_channels, [None, None]);
         let _: Vec<DeviceStatus> = round_trip("deviceStatuses");
         let frames: Vec<FeedFrame> = round_trip("feed");
         assert!(frames.iter().any(|f| f.reset && matches!(f.status, Some(Some(_)))), "a reset frame with a status");
@@ -568,6 +587,9 @@ mod tests {
         assert!(command(r#"{"SetFadeBars":2.5}"#).is_err(), "a fade's bars are a whole number");
         assert_eq!(command(r#"{"Action":"FadeAll"}"#).unwrap(), Command::Action(Action::FadeAll));
         assert_eq!(command(r#"{"SetDubFeedback":[2,0.5]}"#).unwrap(), Command::SetDubFeedback(2, 0.5));
+        assert_eq!(command(r#"{"SelectInstrument":"Off"}"#).unwrap(), Command::SelectInstrument(NoteTarget::Off));
+        assert_eq!(command(r#"{"SetInstrumentGain":["bass",0.5]}"#).unwrap(), Command::SetInstrumentGain(Instrument::Bass, 0.5));
+        assert!(command(r#"{"SetInstrumentGain":["Bass",0.5]}"#).is_err(), "an instrument is its id");
         for param in InputSendParam::ALL {
             let json = serde_json::to_value(WireCommand(Command::SetInputSendParam(param, param.range().2))).unwrap();
             assert_eq!(json["SetInputSendParam"][0], Value::from(param.key()));

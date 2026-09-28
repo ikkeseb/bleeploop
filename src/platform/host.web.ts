@@ -247,6 +247,8 @@ export interface EngineFake extends EngineHost {
   readonly loadedSessions: Uint8Array[];
   /** Every Share endpoint `setShare()` received. */
   readonly shares: (string | null)[];
+  /** Every `setSlotInputChannel()` pick, in order: [slot, channel]. */
+  readonly slotInputChannels: [number, number | null][];
   /**
    * Decode `raw` as a feed frame (the real decoder) and hand it to the subscribers, as the native feed
    * would. Only probes call it, through `__lf.native`.
@@ -284,6 +286,7 @@ export const webEngineFake: EngineFake = {
   snapshotBytes: null,
   loadedSessions: [],
   shares: [],
+  slotInputChannels: [],
   async mode() {
     return engineForced();
   },
@@ -313,8 +316,9 @@ export const webEngineFake: EngineFake = {
   async status() {
     return fakeStatus;
   },
-  async setInputChannel() {
+  async setSlotInputChannel(slot, channel) {
     if (!engineForced()) throw new Error(NO_ENGINE);
+    webEngineFake.slotInputChannels.push([slot, channel]);
   },
   async send(commands) {
     if (!engineForced()) throw new Error(NO_ENGINE);

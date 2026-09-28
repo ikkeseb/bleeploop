@@ -6,15 +6,15 @@
 //! launch, never live (ASIO allows one client). Engine mode is the default: only `off` in the file (the
 //! Audio Settings switch writes `on` or `off`) runs the web audio path, the live line; there every
 //! `engine_*` command but `engine_mode`, `engine_set_mode` and `engine_status` answers an error. On, the engine
-//! owns the audio device: it claims the ASIO duplex holder, the live line's `plugin_*` commands route to
-//! the engine's slots or refuse (`engine()`), and one plugin slot is live at a time. Blocking work (an
-//! open waits up to 15 s) runs off the IPC thread.
+//! owns the audio device: it claims the ASIO duplex holder, and the live line's `plugin_*` commands route
+//! to the engine's slots or refuse (`engine()`). Blocking work (an open waits up to 15 s) runs off the
+//! IPC thread.
 
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
-use lf_engine::{Command, TimedCommand, SLOT_COUNT};
+use lf_engine::{TimedCommand, SLOT_COUNT};
 use tauri::ipc::Channel;
 use tauri::{AppHandle, Manager};
 
@@ -187,33 +187,24 @@ pub async fn engine_status() -> Result<Option<DeviceStatus>, String> {
     Ok(app().ok().and_then(|app| app.host().ok()).and_then(|host| host.status()))
 }
 
-/// The capture channel (0-based; `null` = auto), switched without rebuilding a stream.
+/// A plugin slot's capture channel (0-based; `null` = auto), switched without rebuilding a stream.
 #[tauri::command]
-pub async fn engine_set_input_channel(channel: Option<u32>) -> Result<(), String> {
+pub async fn engine_set_slot_input_channel(slot: u8, channel: Option<u32>) -> Result<(), String> {
     let host = app()?.host()?;
-    tauri::async_runtime::spawn_blocking(move || host.set_input_channel(channel)).await.map_err(|e| format!("engine_set_input_channel: {e}"))?
+    tauri::async_runtime::spawn_blocking(move || host.set_slot_input_channel(slot as usize, channel))
+        .await
+        .map_err(|e| format!("engine_set_slot_input_channel: {e}"))?
 }
 
 /// A batch of commands, in order, at the next block. Fire-and-forget: what the engine refuses comes
-/// back on the feed; an error means the rest of the batch did not reach it. A slot going live takes the
-/// other slot off first: one is live at a time (two would sum the dry input twice). Synchronous: it
-/// runs on the main thread, where the IPC hands requests over in order, so two batches cannot swap
-/// (an async command runs on the runtime's pool); it only takes two brief locks.
+/// back on the feed; an error means the rest of the batch did not reach it. Each slot reads its own
+/// input, so several may be live at once: which are is the UI's call (`src/audio/native-io.ts`).
+/// Synchronous: it runs on the main thread, where the IPC hands requests over in order, so two batches
+/// cannot swap (an async command runs on the runtime's pool); it only takes two brief locks.
 #[tauri::command]
 pub fn engine_send(commands: Vec<WireCommand>) -> Result<(), String> {
     let host = app()?.host()?;
-    host.send_all(one_live(commands.into_iter().map(|c| c.0)).map(|command| TimedCommand { frame: None, command }))
-}
-
-/// `SetSlotLive(i, true)` preceded by every other slot's `SetSlotLive(j, false)`.
-fn one_live(commands: impl Iterator<Item = Command>) -> impl Iterator<Item = Command> {
-    commands.flat_map(|command| {
-        let others = match command {
-            Command::SetSlotLive(i, true) => (0..SLOT_COUNT as u8).filter(|&j| j != i).collect(),
-            _ => Vec::new(),
-        };
-        others.into_iter().map(|j| Command::SetSlotLive(j, false)).chain([command])
-    })
+    host.send_all(commands.into_iter().map(|c| TimedCommand { frame: None, command: c.0 }))
 }
 
 /// Share output's WASAPI render endpoint, or `null` for off.
@@ -269,9 +260,4 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[test]
-    fn a_slot_going_live_takes_the_other_off_first() {
-        let sent: Vec<Command> = one_live([Command::SetSlotLive(1, true), Command::PlayAll, Command::SetSlotLive(0, false)].into_iter()).collect();
-        assert_eq!(sent, [Command::SetSlotLive(0, false), Command::SetSlotLive(1, true), Command::PlayAll, Command::SetSlotLive(0, false)]);
-    }
 }

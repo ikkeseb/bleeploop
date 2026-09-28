@@ -4,8 +4,8 @@
 //!
 //! A setting is a command that sets a value (the tempo, the click, the master, the input sends, the
 //! looper's modes and FADE's length, a lane's volume, mute, DUB FEEDBACK and FX, the note target, the
-//! wheels, a plugin slot's live flag and gain, the selected lane); everything else (the looper's gestures,
-//! notes) acts once and is not kept. What the engine resets, the memory forgets, as the feed reads it
+//! wheels, a built-in instrument's level, a plugin slot's live flag and gain, the selected lane);
+//! everything else (the looper's gestures, notes) acts once and is not kept. What the engine resets, the memory forgets, as the feed reads it
 //! happen: a cleared lane's volume, mute, DUB FEEDBACK and FX (`cleared`, on the engine's `Cleared`
 //! event: CLEAR, a pedal's CLEAR, CLEAR ALL), and a COPY hands the
 //! destination the source's (`copy_lane`, on `Copied`, whose DUB FEEDBACK is the value the engine copied,
@@ -46,6 +46,8 @@ enum Key {
     FxBypass(u8, usize),
     /// A lane's FX param, by `FxKind::index * MAX_PARAMS + FxParam::index`.
     FxParam(u8, usize),
+    /// A built-in instrument's level, by `Instrument as usize`.
+    InstrumentGain(usize),
     Instrument,
     PitchBend,
     Modulation,
@@ -87,6 +89,7 @@ fn key(command: &Command) -> Option<Key> {
         Command::SetDubFeedback(i, _) => Key::DubFeedback(lane(i)?),
         Command::SetFxBypass(i, kind, _) => Key::FxBypass(lane(i)?, kind.index()),
         Command::SetFxParam(i, param, _) => Key::FxParam(lane(i)?, param.kind().index() * MAX_PARAMS + param.index()),
+        Command::SetInstrumentGain(i, _) => Key::InstrumentGain(i as usize),
         Command::SelectInstrument(_) => Key::Instrument,
         Command::PitchBend(_) => Key::PitchBend,
         Command::Modulation(_) => Key::Modulation,
@@ -208,6 +211,9 @@ mod tests {
         assert!(s.record(&Command::SetInputSendParam(InputSendParam::EchoLevel, 0.2)));
         assert!(s.record(&Command::SetInputSendParam(InputSendParam::EchoLevel, 0.6)));
         assert!(s.record(&Command::SetFadeBars(4)));
+        assert!(s.record(&Command::SetInstrumentGain(Instrument::Bass, 0.3)));
+        assert!(s.record(&Command::SetInstrumentGain(Instrument::Lead, 0.5)));
+        assert!(s.record(&Command::SetInstrumentGain(Instrument::Bass, 0.4)));
         assert_eq!(
             replay(&s),
             [
@@ -215,6 +221,8 @@ mod tests {
                 Command::SetInputSendParam(InputSendParam::EchoLevel, 0.6),
                 Command::SetInputSend(InputSend::Echo, true),
                 Command::SetFadeBars(4),
+                Command::SetInstrumentGain(Instrument::Lead, 0.5),
+                Command::SetInstrumentGain(Instrument::Bass, 0.4),
                 Command::SelectInstrument(NoteTarget::Builtin(Instrument::Pad)),
                 Command::PitchBend(1.0)
             ],
