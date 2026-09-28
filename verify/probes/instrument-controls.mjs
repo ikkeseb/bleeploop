@@ -1,8 +1,8 @@
 /**
  * Rendered regression coverage for session keyboard state, plugin controls and MIDI startup status:
  * a denied Web MIDI request logs and lands in `denied`, concurrent retries share one request, both
- * empty native slots show the install hint, the keyboard octave survives a placement remount, plugin
- * output-gain keyboard steps and slider input honor the unity detent, and a native monitor stream
+ * empty native slots show the install hint, the keyboard octave survives a placement remount, the slot
+ * volume (a plugin's output gain) honors the unity detent under keyboard steps and slider input, and a native monitor stream
  * fault falls the slot back to the web monitor with the right label/title. No native/hardware claims
  * (the plugin host and MIDI access are simulated in the page). Run: pnpm probe instrument-controls
  */
@@ -126,7 +126,7 @@ await probe(async ({ open }) => {
 
   const paramsButton = page.getByRole('button', { name: /Plugin parameters for slot 1/ });
   await paramsButton.click();
-  const output = page.getByRole('slider', { name: 'Plugin output gain for slot 1', exact: true });
+  const output = page.getByRole('slider', { name: 'Volume for slot 1', exact: true });
   await page.evaluate(() => window.__lf.setPluginGain(1, 0));
   await page.waitForFunction(() => window.__lf.pluginBridge.gains()[0] === 1);
   await output.focus();

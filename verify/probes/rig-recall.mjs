@@ -131,7 +131,8 @@ await probe(async ({ open }) => {
   }
 
   const pick = async (slot, desc) => {
-    await page.locator('.slot__select').nth(slot).selectOption(desc ? keyOf(desc) : '');
+    // No plugin: the slot's default synth (the picker's built-in entry).
+    await page.getByRole('combobox', { name: `Source for slot ${slot + 1}`, exact: true }).selectOption(desc ? keyOf(desc) : ['lead', 'bass'][slot]);
     await page.waitForFunction(() => window.__recallProbe.slots.slotPendingCounts().every((n) => n === 0));
   };
   /** The close button, as the OS sends it: the close guard runs and approves (an empty jam asks nothing). */
@@ -249,7 +250,7 @@ await probe(async ({ open }) => {
   // it; the other slot's instrument is restored without taking MIDI. The next launch restores only
   // that instrument, which then takes MIDI again.
   const held = await launch({ scan: ALL, holdScan: true });
-  await page.getByRole('button', { name: 'Pad for slot 1' }).click();
+  await page.getByRole('combobox', { name: 'Source for slot 1', exact: true }).selectOption('pad');
   await page.waitForFunction(() => window.__recallProbe.slots.slotPendingCounts().every((n) => n === 0));
   await page.evaluate(() => window.__recallProbe.releaseScan());
   s = await settle(held);

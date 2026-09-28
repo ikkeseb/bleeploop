@@ -1,16 +1,46 @@
-/* PluginControls ("Instrument"). The compact-row controls (live / editor / gain readout) reuse the
-   shared matte key-face `.tgl` rules in app.css; this file styles the bits specific to the plugin slot:
-   the bar container + gain-disclosure trimmings, and the accordion drawer body (PluginParams) — an
-   OUTPUT gain slider + a preview grid of the plugin's first params, all on the one `.lf-range` skin. */
+/* The slot header's controls ("Instrument": `SlotControls.tsx`, `PluginControls.tsx`). The caps reuse
+   the shared matte key-face `.tgl` rules in app.css; this file styles the bits specific to a slot: GO
+   LIVE, the PARAMS disclosure, the slot volume, and the accordion drawer body (PluginParams) — a
+   preview grid of the plugin's first params, all on the one `.lf-range` skin. */
 
-/* ---- PluginBar — the right-cluster controls on the compact slot row ---- */
-.slot__plug {
+/* ---- the slot volume — the lane fader's parts at header size: a unity tick and a dB read-out ---- */
+.slot__vol {
+  grid-area: vol;
   display: flex;
   align-items: center;
-  gap: 6px;
-  min-width: 0;
-  flex-wrap: wrap;
-  justify-content: flex-end;
+  gap: 8px;
+}
+.slot__vbar-wrap {
+  position: relative;
+  width: clamp(64px, 8vw, 104px);
+  display: flex;
+  align-items: center;
+}
+.slot__vbar {
+  position: relative; /* over the absolute unity tick so the thumb reads on top of it */
+  width: 100%;
+  margin: 2px; /* pinned: the unity tick's travel calc folds it in (as `.lp-vbar`) */
+  height: 16px;
+}
+/* unity (1.0 of 1.5) at 66.7% of the thumb's travel; see `.lp-vbar__unity` for the calc */
+.slot__vbar-unity {
+  position: absolute;
+  left: calc(66.667% - 3px);
+  top: 50%;
+  transform: translateY(-50%);
+  width: 1px;
+  height: 11px;
+  background: var(--faint);
+  pointer-events: none;
+}
+.slot__vdb {
+  flex: 0 0 auto;
+  min-width: 52px;
+  text-align: right;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--dim);
+  font-variant-numeric: tabular-nums;
 }
 /* live monitor "on" dot — the only steady colour in the row, and only while armed */
 .tgl__dot {
@@ -41,34 +71,18 @@
   background: var(--dub);
   box-shadow: 0 0 6px var(--dub);
 }
-/* the PARAMS drawer-disclosure pill — a dim gain readout (mono numerals) + a caret that flips when open */
-.slot__gain {
+/* the PARAMS drawer-disclosure pill — a caret that flips when open */
+.slot__params {
   gap: 5px;
   display: inline-flex;
   align-items: center;
-}
-/* fixed-width, right-aligned tabular readout: the pill never changes width as the gain moves
-   ("−40.0 dB" is the longest string gainDb makes). Tone, never an opacity fade. */
-.slot__gainval {
-  display: inline-block;
-  min-width: 8ch;
-  text-align: right;
-  font-family: var(--mono);
-  font-variant-numeric: tabular-nums;
-  font-size: 10.5px;
-  font-weight: 500;
-  color: var(--faint);
-}
-.slot__gain:hover:not(:disabled) .slot__gainval,
-.slot__gain.on .slot__gainval {
-  color: var(--dim);
 }
 .slot__caret {
   display: inline-block;
   font-size: 9px;
   transition: transform 0.18s;
 }
-.slot__gain.on .slot__caret {
+.slot__params.on .slot__caret {
   transform: rotate(180deg);
 }
 .pc__err {
@@ -108,8 +122,8 @@
   grid-template-columns: 1fr 1fr;
   gap: 9px 18px;
 }
-/* the OUTPUT gain row spans the full drawer width (the primary control) */
-.param--gain {
+/* a note in place of the params spans the full drawer width */
+.param--wide {
   grid-column: 1 / -1;
 }
 .param {
@@ -131,13 +145,6 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.param--gain .param__name {
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  font-size: 9.5px;
-  font-weight: 600;
-  color: var(--dim);
-}
 .param__val {
   font-family: var(--mono);
   font-variant-numeric: tabular-nums;
@@ -150,8 +157,6 @@
   width: 100%;
   height: 14px;
 }
-/* the OUTPUT gain cap wears the plain `.lf-range` --text cap like every other fader (cyan is kept for
-   focus / LISTEN / key-down only) */
 
 /* a readout of the plugin's last edited param (name + value) — a quiet mono read-out, not a sound state */
 .pc__lastedit {

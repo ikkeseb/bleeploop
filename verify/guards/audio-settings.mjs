@@ -10,7 +10,9 @@
 // writeAudioDeviceSettings's partial-merge + best-effort (swallow-throw) contract. These validators run on
 // every launch and are easy to silently break; they had zero coverage before this guard. Also the ASIO
 // Buffer select's sizes (asioBlock, the mirror of Rust's `transition::asio_block`, and asioBufferChoice):
-// a driver fixed at one size, a wide range, and a running block outside the options list.
+// a driver fixed at one size, a wide range, and a running block outside the options list. And engine
+// mode's per-slot input channels: a saved pair is kept, and settings from before the per-slot pick (or a
+// malformed pair) start both slots on the saved global channel.
 
 import assert from 'node:assert';
 
@@ -42,6 +44,7 @@ const KEY = 'lf.audioDevices';
 const DEFAULTS = {
   inputDeviceId: '',
   inputChannel: '',
+  slotInputChannels: ['', ''],
   outputDeviceId: '',
   bufferFrames: DEFAULT_BUFFER_FRAMES,
   asioEnabled: true,
@@ -85,6 +88,7 @@ reset();
 const full = {
   inputDeviceId: 'in-1',
   inputChannel: '2',
+  slotInputChannels: ['0', '3'],
   outputDeviceId: 'out-9',
   bufferFrames: 128,
   asioEnabled: false,
@@ -128,6 +132,39 @@ check('non-boolean asioEnabled -> true', () => assert.strictEqual(readAudioDevic
 reset();
 store.set(KEY, JSON.stringify({ asioEnabled: false }));
 check('asioEnabled false preserved', () => assert.strictEqual(readAudioDeviceSettings().asioEnabled, false));
+
+// ---------------------------------------------------------------------------
+// 4b. Per-slot input channels: the migration from the one global channel, and their validation.
+// ---------------------------------------------------------------------------
+reset();
+store.set(KEY, JSON.stringify({ inputChannel: '1' }));
+check('no per-slot channels saved -> both slots start on the global channel', () =>
+  assert.deepStrictEqual(readAudioDeviceSettings().slotInputChannels, ['1', '1']));
+for (const bad of [['1'], ['1', '2', '3'], [1, 2], ['x', '1'], ['-1', ''], 'ab', null, {}]) {
+  reset();
+  store.set(KEY, JSON.stringify({ inputChannel: '2', slotInputChannels: bad }));
+  check(`slotInputChannels ${JSON.stringify(bad)} -> the global channel for both`, () =>
+    assert.deepStrictEqual(readAudioDeviceSettings().slotInputChannels, ['2', '2']));
+}
+reset();
+store.set(KEY, JSON.stringify({ inputChannel: 'junk' }));
+check('a malformed global channel seeds auto', () => assert.deepStrictEqual(readAudioDeviceSettings().slotInputChannels, ['', '']));
+reset();
+store.set(KEY, JSON.stringify({ inputChannel: '1', slotInputChannels: ['', '5'] }));
+check('a saved pair wins over the global channel', () =>
+  assert.deepStrictEqual(readAudioDeviceSettings().slotInputChannels, ['', '5']));
+reset();
+store.set(KEY, JSON.stringify({ inputChannel: '1' }));
+writeAudioDeviceSettings({ bufferFrames: 128 });
+check('the first write keeps the migrated pair', () => {
+  store.set(KEY, JSON.stringify({ ...JSON.parse(store.get(KEY)), inputChannel: '' }));
+  assert.deepStrictEqual(readAudioDeviceSettings().slotInputChannels, ['1', '1']);
+});
+reset();
+check('the defaults hand out a fresh pair each read', () => {
+  readAudioDeviceSettings().slotInputChannels[0] = '7';
+  assert.deepStrictEqual(readAudioDeviceSettings().slotInputChannels, ['', '']);
+});
 
 // ---------------------------------------------------------------------------
 // 5. writeAudioDeviceSettings: partial merge over the existing record, no clobber.

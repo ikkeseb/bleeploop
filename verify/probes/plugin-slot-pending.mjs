@@ -74,11 +74,11 @@ await probe(async ({ open }) => {
   });
   const { keys } = setup;
   assert.deepEqual({ slot0: setup.slot0, pending: setup.pending }, { slot0: 'a', pending: [0, 0] });
-  await page.waitForSelector('.slot__select');
+  await page.waitForSelector('.slot__source');
 
   // The host identity is (format, path, id), not id alone. Both installed copies must render as
   // distinct choices, and choosing the second copy must perform a real swap to its path.
-  const duplicateOptions = await page.locator('.slot__select').first().locator('option').evaluateAll(
+  const duplicateOptions = await page.locator('.slot__source').first().locator('option').evaluateAll(
     (options) => options
       .filter((option) => option.textContent?.includes('Probe A'))
       .map((option) => ({ value: option.value, text: option.textContent, title: option.title })),
@@ -88,14 +88,14 @@ await probe(async ({ open }) => {
     'Probe A (vst3) · probe',
     'Probe A (vst3) · vendor',
   ]);
-  await page.locator('.slot__select').first().selectOption(keys[4]);
+  await page.locator('.slot__source').first().selectOption(keys[4]);
   await page.waitForFunction(() => window.__slotPendingProbe.slots.slotPendingCounts()[0] === 0);
-  assert.equal(await page.locator('.slot__select').first().inputValue(), keys[4]);
+  assert.equal(await page.locator('.slot__source').first().inputValue(), keys[4]);
   assert.equal(
     await page.evaluate(() => window.__slotPendingProbe.loadCalls.at(-1)?.path),
     'C:\\probe\\vendor\\a.vst3',
   );
-  await page.locator('.slot__select').first().selectOption(keys[0]);
+  await page.locator('.slot__source').first().selectOption(keys[0]);
   await page.waitForFunction(() => window.__slotPendingProbe.slots.slotPendingCounts()[0] === 0);
 
   const deferNext = async (kind) => page.evaluate((operation) => {
@@ -110,33 +110,32 @@ await probe(async ({ open }) => {
   }, { methodName: method, result: value });
   const slotUi = async (slot) => page.locator('.slot').nth(slot).evaluate((el) => ({
     busy: el.getAttribute('aria-busy'),
-    source: el.querySelector('.slot__k')?.textContent?.trim(),
-    name: el.querySelector('.slot__name')?.textContent?.trim(),
-    pickerDisabled: el.querySelector('.slot__select')?.disabled,
-    enabledSourceButtons: [...el.querySelectorAll('.seg button')].filter((button) => !button.disabled).length,
+    name: el.querySelector('.slot__source')?.selectedOptions[0]?.textContent?.trim(),
+    pickerDisabled: el.querySelector('.slot__source')?.disabled,
+    enabledSourceButtons: [...el.querySelectorAll('.slot__acts button')].filter((button) => !button.disabled).length,
   }));
 
   // Deferred swap: the outgoing descriptor disappears before native unload resolves, but the slot
   // stays honestly labelled and none of its source controls can enqueue another user action.
   await deferNext('unloadPlugin');
-  await page.locator('.slot__select').first().selectOption(keys[1], { noWaitAfter: true });
+  await page.locator('.slot__source').first().selectOption(keys[1], { noWaitAfter: true });
   await page.waitForFunction(() => window.__slotPendingProbe.slots.slotPendingCounts()[0] === 1);
   assert.deepEqual(await slotUi(0), {
-    busy: 'true', source: 'Source', name: 'Updating…',
+    busy: 'true', name: 'Updating…',
     pickerDisabled: true, enabledSourceButtons: 0,
   });
   assert.equal((await slotUi(1)).pickerDisabled, false, 'the other slot must remain usable');
-  assert.equal(await page.locator('.slot__name').first().evaluate(el => el.scrollWidth <= el.clientWidth),
-    true, 'pending label must remain readable at the default window size');
+  assert.ok(await page.locator('.slot__source').first().evaluate((el) => el.getBoundingClientRect().width >= 120),
+    'pending label must remain readable at the default window size');
   if (screenshot) await page.screenshot({ path: screenshot, fullPage: true });
   await release('resolve');
   await page.waitForFunction(() => window.__slotPendingProbe.slots.slotPendingCounts()[0] === 0);
   assert.equal((await slotUi(0)).pickerDisabled, false);
-  assert.equal(await page.locator('.slot__select').first().inputValue(), keys[1]);
+  assert.equal(await page.locator('.slot__source').first().inputValue(), keys[1]);
 
   // Deferred unload to synth uses the same pending surface and unlocks after completion.
   await deferNext('unloadPlugin');
-  await page.locator('.slot__select').first().selectOption('', { noWaitAfter: true });
+  await page.locator('.slot__source').first().selectOption('lead', { noWaitAfter: true });
   await page.waitForFunction(() => window.__slotPendingProbe.slots.slotPendingCounts()[0] === 1);
   assert.equal((await slotUi(0)).pickerDisabled, true);
   await release('resolve');
@@ -145,7 +144,7 @@ await probe(async ({ open }) => {
 
   // A rejected operation must decrement in finally and restore interaction.
   await deferNext('loadPlugin');
-  await page.locator('.slot__select').first().selectOption(keys[0], { noWaitAfter: true });
+  await page.locator('.slot__source').first().selectOption(keys[0], { noWaitAfter: true });
   await page.waitForFunction(() => window.__slotPendingProbe.slots.slotPendingCounts()[0] === 1);
   await release('reject', 'injected load failure');
   await page.waitForFunction(() => window.__slotPendingProbe.slots.slotPendingCounts()[0] === 0);
@@ -196,7 +195,7 @@ await probe(async ({ open }) => {
     probe.platform.pluginHost.setMonitorGain = async () => {};
     probe.platform.pluginHost.openEditor = async () => { probe.autoEditorOpened = true; };
   });
-  await page.locator('.slot__select').first().selectOption(keys[3], { noWaitAfter: true });
+  await page.locator('.slot__source').first().selectOption(keys[3], { noWaitAfter: true });
   await page.waitForFunction(() => !!window.__slotPendingProbe.loadRelease);
   assert.equal((await slotUi(0)).pickerDisabled, true);
   await page.evaluate(() => window.__slotPendingProbe.loadRelease());

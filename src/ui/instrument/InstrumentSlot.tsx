@@ -2,12 +2,14 @@ import { For, Show, createSignal } from 'solid-js';
 import {
   activeSlot,
   availablePlugins,
-  clearPlugin,
+  selectOff,
   selectPlugin,
   selectSynth,
   scanning,
   setActiveSlot,
   slotIds,
+  slotLevel,
+  slotOff,
   slotPendingCounts,
   slotPlugins,
 } from '../../audio/instrument';
@@ -21,32 +23,56 @@ import { SYNTHS } from '../../audio/synths';
 import { engineMode, platform } from '../../platform';
 import { engineDevice, engineOpenFailure } from '../state/engine-store';
 import { PluginBar, PluginParams } from './PluginControls';
+import { InputPick, LiveButton, SlotVolume } from './SlotControls';
+import { liveShown } from './live';
 
 /**
- * One instrument slot (A / B) — a compact card: the A/B identity button, the
- * source label, the six synth segment pills OR the native plugin controls, the native-plugin picker,
- * and the params drawer. app.tsx's renderInstrument mounts two of these
- * (slot 0 / slot 1). The per-slot `paramsOpen` disclosure is state LOCAL to each instance (created once
- * per mount) so opening one slot's params never touches the other — and it is a SIBLING of the looper
- * region, so opening it never remounts the looper's RAF canvases.
+ * One instrument slot (A / B) — a compact card. Its header: the A/B identity button, the source picker
+ * (Off in engine mode, the built-in synths, the scanned plugins), the slot's volume, and the source's
+ * own controls — the input pick and GO LIVE of a source that takes input, the plugin's EDITOR / PARAMS —
+ * on a second line, or beside the picker when the card is wide. Below it, the plugin params drawer.
+ * app.tsx's renderInstrument mounts two of these (slot 0 / slot 1). The per-slot `paramsOpen` disclosure
+ * is state LOCAL to each instance (created once per mount) so opening one slot's params never touches
+ * the other — and it is a SIBLING of the looper region, so opening it never remounts the looper's RAF
+ * canvases.
  */
 export function InstrumentSlot(props: { slot: 0 | 1 }) {
   const slotIdx = props.slot;
   const isActive = () => activeSlot() === slotIdx;
   const plugin = () => slotPlugins()[slotIdx];
   const pending = () => slotPendingCounts()[slotIdx] > 0;
-  const synthName = () => SYNTHS.find((s) => s.id === slotIds()[slotIdx])?.name ?? '';
   const letter = String.fromCharCode(65 + slotIdx); // A / B
   const drawerId = `slot-${slotIdx}-params`;
+  const showPlugins = () => platform.pluginHost.available && availablePlugins().length > 0;
   // Per-slot accordion disclosure for the plugin params drawer. Created once (the component mounts once
   // per slot); a sibling of the looper region, so opening it never remounts the looper.
   const [paramsOpen, setParamsOpen] = createSignal(false);
-  // One-shot: the descriptor key the user just picked in the dropdown. The PluginBar that mounts for it auto-starts
-  // (live + editor) and clears this; a reload resync never sets it, so it never reopens windows. Plain
-  // variable — it is read once at PluginBar mount, nothing renders from it.
+  // One-shot: the descriptor key the user just picked in the picker. The PluginBar that mounts for it
+  // auto-starts (live + editor) and clears this; a reload resync never sets it, so it never reopens
+  // windows. Plain variable — it is read once at PluginBar mount, nothing renders from it.
   let freshPickKey: string | null = null;
-  // Active state colour: cyan = engaged/selection; a live plugin lifts it to play-green.
+  // Active state colour: cyan = engaged/selection; a live slot lifts it to play-green.
   const sc = () => (inputArmed()[slotIdx] ? 'var(--play)' : 'var(--cyan)');
+  // The picker's value: '' (its hidden "Updating…" entry) while a source change is queued.
+  const source = () =>
+    pending() ? '' : plugin() ? pluginDescriptorKey(plugin()!) : slotOff()[slotIdx] ? 'off' : slotIds()[slotIdx];
+  const pick = (value: string) => {
+    if (value === 'off' || SYNTHS.some((s) => s.id === value)) {
+      freshPickKey = null;
+      // selectSynth activates the slot itself once its queued work lands (not when a failed unload
+      // keeps the plugin); Off leaves the MIDI slot where it is.
+      if (value === 'off') selectOff(slotIdx);
+      else selectSynth(slotIdx, value);
+      return;
+    }
+    const desc = availablePlugins().find((p) => pluginDescriptorKey(p) === value);
+    if (!desc) return;
+    freshPickKey = value;
+    // A failed load mounts no PluginBar — drop the flag so a later resync can't inherit it.
+    void selectPlugin(slotIdx, desc).then(() => {
+      if (!samePluginDescriptor(slotPlugins()[slotIdx], desc)) freshPickKey = null;
+    });
+  };
   return (
     // Presentational group (not itself a button — it holds buttons). Whole-card onClick is a mouse
     // convenience; the keyboard/SR activation control is the A/B identity button.
@@ -71,46 +97,61 @@ export function InstrumentSlot(props: { slot: 0 | 1 }) {
         >
           {letter}
         </button>
-        <div class="slot__meta">
-          <span class="slot__k">Source{pending() ? '' : ` · ${plugin() ? 'Plugin' : 'Synth'}`}</span>
-          <span class="slot__name">
-            {pending() ? 'Updating…' : plugin() ? plugin()!.name : synthName()}
-            <Show when={plugin() && !pending()}>
-              <small>{plugin()!.format}</small>
+        {/* The source picker: Off first (engine mode: no notes; GO LIVE passes the slot's input dry),
+            the built-in synths, then the native plugins (Tauri only; ONE list scales to any count). */}
+        <select
+          class="slot__source"
+          aria-label={`Source for slot ${slotIdx + 1}`}
+          aria-busy={pending()}
+          disabled={pending()}
+          value={source()}
+          onClick={(e) => e.stopPropagation()}
+          onChange={(e) => {
+            e.stopPropagation();
+            pick(e.currentTarget.value);
+          }}
+        >
+          <option value="" hidden selected={source() === ''}>
+            Updating…
+          </option>
+          <Show when={engineMode()}>
+            <option value="off" selected={source() === 'off'}>
+              Off
+            </option>
+          </Show>
+          <optgroup label="Built-in">
+            <For each={SYNTHS}>
+              {(s) => (
+                <option value={s.id} selected={source() === s.id}>
+                  {s.name}
+                </option>
+              )}
+            </For>
+          </optgroup>
+          <Show when={showPlugins()}>
+            <optgroup label="Plugins">
+              <For each={availablePlugins()}>
+                {(p) => (
+                  <option value={pluginDescriptorKey(p)} title={p.path} selected={source() === pluginDescriptorKey(p)}>
+                    {pluginPickerLabel(p, availablePlugins())}
+                  </option>
+                )}
+              </For>
+            </optgroup>
+          </Show>
+        </select>
+        <Show when={slotLevel(slotIdx) !== null}>
+          <SlotVolume slot={slotIdx} />
+        </Show>
+        {/* The source's own controls. `keyed` on the plugin so a swap remounts them (resets editor/live). */}
+        <Show when={liveShown(slotIdx) || plugin()}>
+          <div class="slot__acts" onClick={(e) => e.stopPropagation()}>
+            <Show when={engineMode() && liveShown(slotIdx)}>
+              <InputPick slot={slotIdx} />
             </Show>
-          </span>
-        </div>
-        <div class="slot__acts">
-          {/* Right cluster: the six synth segment pills when in synth mode; the native plugin controls
-              (live monitor + editor + gain/params disclosure) when a plugin is loaded. `keyed` so a
-              plugin swap re-mounts (resets editor/live). */}
-          <Show
-            when={plugin()}
-            fallback={
-              <div class="seg" role="group" aria-label={`Synth for slot ${slotIdx + 1}`}>
-                <For each={SYNTHS}>
-                  {(s) => (
-                    <button
-                      type="button"
-                      class="tgl"
-                      classList={{ on: !pending() && !plugin() && slotIds()[slotIdx] === s.id }}
-                      aria-pressed={!pending() && !plugin() && slotIds()[slotIdx] === s.id}
-                      aria-label={`${s.name} for slot ${slotIdx + 1}`}
-                      disabled={pending()}
-                      onClick={(e) => {
-                        // selectSynth activates the slot itself once its queued work lands (not when a
-                        // failed unload keeps the plugin), so the card click must not activate it first.
-                        e.stopPropagation();
-                        selectSynth(slotIdx, s.id);
-                      }}
-                    >
-                      {s.name}
-                    </button>
-                  )}
-                </For>
-              </div>
-            }
-          >
+            <Show when={liveShown(slotIdx)}>
+              <LiveButton slot={slotIdx} />
+            </Show>
             <Show keyed when={slotPlugins()[slotIdx]}>
               {(desc) => (
                 <PluginBar
@@ -124,48 +165,8 @@ export function InstrumentSlot(props: { slot: 0 | 1 }) {
                 />
               )}
             </Show>
-          </Show>
-          {/* Native plugins (Tauri only) collapse into ONE dropdown per slot — scales to any plugin
-              count. The empty option reads "Load amp / plugin…" while the slot plays its synth and
-              "— none —" (back to the synth) once a plugin is loaded. Present whether or not a plugin
-              is loaded (it's how you load one), so it sits after the synth pills / plugin controls. */}
-          <Show when={platform.pluginHost.available && availablePlugins().length > 0}>
-            <select
-              class="slot__select"
-              classList={{ 'is-loaded': !!plugin() }}
-              aria-label={`Native plugin for slot ${slotIdx + 1}`}
-              aria-busy={pending()}
-              disabled={pending()}
-              value={pending() || !plugin() ? '' : pluginDescriptorKey(plugin()!)}
-              onClick={(e) => e.stopPropagation()}
-              onChange={(e) => {
-                e.stopPropagation();
-                const key = e.currentTarget.value;
-                if (!key) {
-                  freshPickKey = null;
-                  void clearPlugin(slotIdx); // "— none —" → back to the slot's synth
-                  return;
-                }
-                const desc = availablePlugins().find((p) => pluginDescriptorKey(p) === key);
-                if (!desc) return;
-                freshPickKey = key;
-                // A failed load mounts no PluginBar — drop the flag so a later resync can't inherit it.
-                void selectPlugin(slotIdx, desc).then(() => {
-                  if (!samePluginDescriptor(slotPlugins()[slotIdx], desc)) freshPickKey = null;
-                });
-              }}
-            >
-              <option value="">{pending() ? 'Updating…' : plugin() ? '— none —' : 'Load amp / plugin…'}</option>
-              <For each={availablePlugins()}>
-                {(p) => (
-                  <option value={pluginDescriptorKey(p)} title={p.path}>
-                    {pluginPickerLabel(p, availablePlugins())}
-                  </option>
-                )}
-              </For>
-            </select>
-          </Show>
-        </div>
+          </div>
+        </Show>
       </div>
       <Show when={platform.pluginHost.available && availablePlugins().length === 0}>
         <span class="slot__plugin-note" role="note">

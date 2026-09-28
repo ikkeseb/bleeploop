@@ -9,7 +9,9 @@ import type { PluginDescriptor } from '../platform';
  * re-exports; the setters exist for those two owner modules only.
  *
  * Slot defaults: 0 = 'lead', 1 = 'bass' (both synths). A slot is in plugin mode while
- * `slotPlugins()[i]` is non-null and reverts to its synth id when a synth is re-selected.
+ * `slotPlugins()[i]` is non-null; without one it plays its synth id, or nothing while `slotOff()[i]`
+ * (engine mode only: an Off slot's notes go nowhere and GO LIVE passes its input dry). A loaded plugin
+ * sits over either, and an unload goes back to it.
  */
 
 export const DEFAULT_IDS: [string, string] = ['lead', 'bass'];
@@ -17,12 +19,14 @@ export const DEFAULT_IDS: [string, string] = ['lead', 'bass'];
 // Boot opens native selection only after stale slots and persisted audio settings are reconciled.
 export const [nativeHostReady, setNativeHostReady] = createSignal(false);
 
-// Reactive state: synth id per slot, the loaded plugin per slot (null = synth mode), active slot.
+// Reactive state: synth id per slot, the loaded plugin per slot (null = synth mode), active slot, and
+// whether a slot without a plugin is Off.
 export const [slotIds, setSlotIds] = createSignal<[string, string]>([...DEFAULT_IDS]);
 export const [slotPlugins, setSlotPlugins] = createSignal<
   [PluginDescriptor | null, PluginDescriptor | null]
 >([null, null]);
 export const [activeSlot, setActiveSlotSignal] = createSignal<0 | 1>(0);
+export const [slotOff, setSlotOff] = createSignal<[boolean, boolean]>([false, false]);
 
 // Number of source operations either running or queued for each slot. Incrementing when an operation
 // is enqueued (rather than when it starts) keeps the UI continuously pending between chained swaps.

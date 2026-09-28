@@ -50,22 +50,22 @@ import {
   engineOpenFailure,
   engineShare,
   openEngineDevice,
-  setEngineInputChannel,
   setEngineShare,
   switchEngineAsioDriver,
 } from '../state/engine-store';
 import './audio-settings.css';
 
 /**
- * Global Audio Settings popover: consolidates the native input device + channel, the monitor
+ * Global Audio Settings popover: consolidates the native input device (+ the web path's channel), the monitor
  * (cpal-out) output device, the live RT buffer-size control, the ASIO low-latency tier toggle (when
- * an ASIO device is available) and the MIDI learn row — all GLOBAL last-used preferences. The per-slot
- * Arm toggles stay in PluginControls and read the device choice persisted here. Mounted inside a `<Show>` in app.tsx, so it
+ * an ASIO device is available) and the MIDI learn row — all GLOBAL last-used preferences. Each slot's
+ * GO LIVE (`src/ui/instrument/live.ts`) reads the device choice persisted here. Mounted inside a `<Show>` in app.tsx, so it
  * re-reads persisted state each time it opens (persisted localStorage is the source of truth; these
  * local signals mirror it). The sample-rate row is a disabled placeholder for increment C2.
  *
  * The engine row writes the engine-mode toggle for the next launch. In engine mode a device, buffer or
- * driver pick reopens the engine's device at once, a channel pick switches it in place, the share row
+ * driver pick reopens the engine's device at once, the input channel is each slot's own pick (the slot
+ * header, `src/ui/instrument/SlotControls.tsx`), the share row
  * picks Share output's device, the ASIO driver row switches the driver live and the Buffer select offers
  * only the sizes that driver takes, and the rows that belong to the web path (rec align, the bridge
  * readout) are gone.
@@ -252,7 +252,7 @@ export function AudioSettings() {
             {(d) => <option value={d.id} selected={!usingAsio() && d.id === selectedDevice()}>{d.name}</option>}
           </For>
         </select>
-        <Show when={deviceChannels() >= 2}>
+        <Show when={!engineMode() && deviceChannels() >= 2}>
           <select
             class="audio-settings__select audio-settings__select--channel"
             value={selectedChannel()}
@@ -260,7 +260,6 @@ export function AudioSettings() {
               const v = e.currentTarget.value;
               setSelectedChannel(v);
               writeAudioDeviceSettings({ inputChannel: v });
-              if (engineMode()) setEngineInputChannel(v);
             }}
             aria-label="Input channel"
           >

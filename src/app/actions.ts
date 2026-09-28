@@ -1,6 +1,6 @@
-import { activeSlot, slotPlugins } from '../audio/instrument';
+import { activeSlot, slotOff, slotPlugins } from '../audio/instrument';
 import { engineMode, sendEngine, type EngineAction, type InputSendId } from '../platform';
-import { pressGoLive } from '../ui/instrument/PluginControls';
+import { pressGoLive } from '../ui/instrument/live';
 import { toggleStage } from '../ui/stage/stage-store';
 import { clock, looper } from '../ui/state/audio';
 import { engineFade, engineInputSends } from '../ui/state/engine-store';
@@ -144,13 +144,14 @@ export function targetLane(target: Target): number {
 const step = (d: number) => (): void =>
   looper.selectTrack((looper.selectedTrack() + d + looper.trackCount) % looper.trackCount);
 
-/** GO LIVE's slot: the active one, unless only the other slot holds an effect plugin (the amp-sim a
- * guitarist goes live on while the active slot plays a synth layer). */
+/** GO LIVE's slot: the active one, unless only the other slot's source is made for input — an effect
+ * plugin (the amp-sim a guitarist goes live on while the active slot plays a synth layer) or, in engine
+ * mode, Off (raw input; the web path's MIC is its own control). */
 function goLiveSlot(): 0 | 1 {
   const active = activeSlot();
   const other = active === 0 ? 1 : 0;
-  const isFx = (s: 0 | 1) => slotPlugins()[s]?.isEffect === true;
-  return !isFx(active) && isFx(other) ? other : active;
+  const takesInput = (s: 0 | 1) => (slotPlugins()[s] ? slotPlugins()[s]?.isEffect === true : slotOff()[s]);
+  return !takesInput(active) && takesInput(other) ? other : active;
 }
 
 /** Run `act` when `gate` lets a global press through, else say why on the selected lane. */

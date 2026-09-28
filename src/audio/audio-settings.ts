@@ -1,6 +1,7 @@
 /**
- * Persisted audio device selections — the native plugin-input device, the shared input channel
- * (native plugin GO LIVE + web MIC LIVE), and the monitor (cpal-out) output device. Survives a
+ * Persisted audio device selections — the native plugin-input device, the input channel (the web
+ * path's one channel for native plugin GO LIVE + MIC LIVE; engine mode's pick per slot), and the
+ * monitor (cpal-out) output device. Survives a
  * reload/restart in BOTH the browser build and WebView2 (both have localStorage), so you don't re-pick
  * your interface every launch. These are global, last-used preferences. Best-effort — localStorage can
  * throw (private mode / disabled) → fall back to defaults.
@@ -22,8 +23,11 @@ export const DEFAULT_BUFFER_FRAMES: BufferFrames = 256;
 export interface AudioDeviceSettings {
   /** Native cpal input device id; '' = default input. Not a getUserMedia MediaDeviceInfo.deviceId. */
   inputDeviceId: string;
-  /** 0-based input channel shared by native plugin input and MIC LIVE; '' = auto-pick/sum. */
+  /** The web path's 0-based input channel, shared by native plugin input and MIC LIVE; '' = auto-pick/sum. */
   inputChannel: string;
+  /** Engine mode: each slot's 0-based capture channel, in the same form. Saved settings from before
+   * the per-slot pick start both slots on `inputChannel`. */
+  slotInputChannels: [string, string];
   /** cpal output (monitor) device id; '' = default output. */
   outputDeviceId: string;
   /** RT block size in frames; one of BUFFER_FRAMES_OPTIONS (live buffer control). */
@@ -37,9 +41,13 @@ export interface AudioDeviceSettings {
   shareDeviceId: string;
 }
 
+/** A saved channel: '' (auto) or a 0-based index. */
+const isChannel = (v: unknown): v is string => typeof v === 'string' && (v === '' || /^\d{1,3}$/.test(v));
+
 const DEFAULTS: AudioDeviceSettings = {
   inputDeviceId: '',
   inputChannel: '',
+  slotInputChannels: ['', ''],
   outputDeviceId: '',
   bufferFrames: DEFAULT_BUFFER_FRAMES,
   asioEnabled: true,
@@ -51,11 +59,16 @@ const DEFAULTS: AudioDeviceSettings = {
 export function readAudioDeviceSettings(): AudioDeviceSettings {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return { ...DEFAULTS };
+    if (!raw) return { ...DEFAULTS, slotInputChannels: ['', ''] };
     const p = JSON.parse(raw) as Partial<AudioDeviceSettings>;
+    const inputChannel = typeof p.inputChannel === 'string' ? p.inputChannel : '';
+    const slots = p.slotInputChannels;
+    const seed = isChannel(inputChannel) ? inputChannel : '';
     return {
       inputDeviceId: typeof p.inputDeviceId === 'string' ? p.inputDeviceId : '',
-      inputChannel: typeof p.inputChannel === 'string' ? p.inputChannel : '',
+      inputChannel,
+      slotInputChannels:
+        Array.isArray(slots) && slots.length === 2 && slots.every(isChannel) ? [slots[0], slots[1]] : [seed, seed],
       outputDeviceId: typeof p.outputDeviceId === 'string' ? p.outputDeviceId : '',
       bufferFrames: (BUFFER_FRAMES_OPTIONS as readonly number[]).includes(p.bufferFrames as number)
         ? (p.bufferFrames as BufferFrames)
@@ -65,7 +78,7 @@ export function readAudioDeviceSettings(): AudioDeviceSettings {
       shareDeviceId: typeof p.shareDeviceId === 'string' ? p.shareDeviceId : '',
     };
   } catch {
-    return { ...DEFAULTS };
+    return { ...DEFAULTS, slotInputChannels: ['', ''] };
   }
 }
 

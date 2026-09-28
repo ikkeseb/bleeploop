@@ -3,8 +3,8 @@
  * pills, no plugin host). Scenes 8-10 are the Windows app's guitar-first screen, in a second fresh
  * context whose platform host is substituted (the plugin-slot-pending pattern): `available` on, a scan
  * that finds one amp-sim (an effect whose input arm succeeds, standing in for an input bus), and stubbed
- * load/arm/editor replies. 8-native-first-launch = the host booted, nothing loaded (slot A offers
- * "Load amp / plugin…"); 9-amp-sim-live = the amp-sim picked in slot A's dropdown, which auto-starts
+ * load/arm/editor replies. 8-native-first-launch = the host booted, nothing loaded (slot A's source
+ * picker offers the amp-sim under Plugins); 9-amp-sim-live = the amp-sim picked in slot A's picker, which auto-starts
  * GO LIVE and the editor (INPUT LIVE); 10-amp-sim-idle = the same after stopping live input. Those
  * scenes prove the frontend's rendering of a native host's answers, never the native side.
  * 11-engine-in-fx is engine mode on the web engine fake (the engine-seam pattern: `__lfEngineFake` set
@@ -216,12 +216,12 @@ await probe(async ({ browser, open }) => {
         host.openEditor = async () => {};
         await instrument.scanForPlugins();
       });
-      await page.getByRole('combobox', { name: 'Native plugin for slot 1', exact: true }).waitFor();
+      await page.getByRole('combobox', { name: 'Source for slot 1', exact: true }).locator('option', { hasText: 'Probe Amp Sim' }).waitFor({ state: 'attached' });
       await page.waitForTimeout(200);
       await shoot(scene);
 
       scene = '9-amp-sim-live';
-      await page.getByRole('combobox', { name: 'Native plugin for slot 1', exact: true }).selectOption({ label: 'Probe Amp Sim (vst3)' });
+      await page.getByRole('combobox', { name: 'Source for slot 1', exact: true }).selectOption({ label: 'Probe Amp Sim (vst3)' });
       await page.getByRole('button', { name: 'Stop live input for slot 1', exact: true }).waitFor();
       await page.getByRole('button', { name: 'Close editor for slot 1', exact: true }).waitFor();
       await page.waitForTimeout(250);

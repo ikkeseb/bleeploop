@@ -8,7 +8,8 @@
  *   engine has; no AudioContext is ever built (Tone's import-time default context included:
  *   `src/main.tsx` loads the app with the constructors hidden);
  * - gesture → command: BPM +, CLICK, the lane core (its pointerdown selects), Space (the engine's
- *   hands-free `Action`), a lane volume, MIC (an empty slot goes live), a PC key (NoteOn, NoteOff), the
+ *   hands-free `Action`), a lane volume, no MIC (a slot set to Off goes live instead: `slot-sources.mjs`),
+ *   a PC key (NoteOn, NoteOff), the
  *   FIXED stepper over a committed loop (a bar at a time up to the loop, whole loops past it: F14), IN FX
  *   (the input sends: ECHO on, its level and division, kept in localStorage; the pill reads engaged);
  * - frame → DOM: a count-in (ARMED, the numeral, the beat LED, the BPM lock), a beat LED shown when the
@@ -83,7 +84,7 @@ await probe(async ({ open }) => {
   await page.waitForFunction(() => window.__lf.native.opened.length === 1, undefined, { timeout: 5000 });
   const opened = await page.evaluate(() => window.__lf.native.opened);
   console.log('opened', JSON.stringify(opened));
-  assert.deepEqual(opened, [{ backend: 'Wasapi', input: null, output: null, inputChannel: null, buffer: 256 }]);
+  assert.deepEqual(opened, [{ backend: 'Wasapi', input: null, output: null, inputChannels: [null, null], buffer: 256 }]);
   assert.deepEqual(await sent(), [], 'nothing is sent before the feed says what the engine has');
 
   // The reset frame a subscribe starts with, from a fresh engine: every lane EMPTY, no master, the device
@@ -192,11 +193,8 @@ await probe(async ({ open }) => {
   assert.equal(await page.getByRole('slider', { name: 'Track 2 volume' }).inputValue(), '100', 'Cleared resets the mix');
   assert.deepEqual(await sent(), [], 'the engine reset its own mix: nothing is sent');
 
-  // ── MIC and the play path ─────────────────────────────────────────────────────────────────────
-  await clearSent();
-  await page.getByRole('button', { name: 'Mic / line input' }).click();
-  assert.deepEqual(await sentAtLeast(1), [{ SetSlotLive: [0, true] }], 'MIC takes the empty active slot live');
-  assert.match(await page.getByRole('button', { name: 'Mic / line input' }).textContent(), /MIC LIVE/);
+  // ── No MIC, and the play path ─────────────────────────────────────────────────────────────────
+  assert.equal(await page.getByRole('button', { name: 'Mic / line input' }).count(), 0, 'engine mode has no MIC button');
 
   await blur();
   await clearSent();

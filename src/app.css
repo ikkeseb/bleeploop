@@ -397,6 +397,7 @@ option {
   flex-direction: column;
   cursor: pointer;
   --sc: var(--cyan); /* per-slot state colour — one token, precedence set in JS (live→play-green) */
+  container: slot / inline-size; /* the header's one-line form keys on the card's width */
   transition: background 0.2s, box-shadow 0.2s, border-color 0.2s;
 }
 .slot:hover {
@@ -406,18 +407,32 @@ option {
 .slot--active {
   border-color: rgba(244, 239, 230, 0.2);
 }
-/* the compact row: identity · source label + name · right cluster */
+/* the header: identity · source picker · volume, and the source's own controls (input, GO LIVE,
+   EDITOR, PARAMS) on a second line under the picker, or between picker and volume on a card wide
+   enough for one line */
 .slot__row {
-  display: flex;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-areas: 'id source vol';
   align-items: center;
-  gap: 14px;
+  column-gap: 12px;
+  row-gap: 8px;
   padding: 10px 18px;
   min-width: 0;
   flex-shrink: 0; /* the header never compresses — only the drawer below it scrolls */
 }
+.slot__row:has(> .slot__acts) {
+  grid-template-areas: 'id source vol' '. acts acts';
+}
+@container slot (min-width: 760px) {
+  .slot__row:has(> .slot__acts) {
+    grid-template-columns: auto minmax(0, 1fr) auto auto;
+    grid-template-areas: 'id source acts vol';
+  }
+}
 /* A / B identity — lit warm-white when active; also the keyboard/SR activation control */
 .slot__id {
-  flex: 0 0 auto;
+  grid-area: id;
   font-size: 20px;
   font-weight: 700;
   line-height: 1;
@@ -438,57 +453,14 @@ option {
   outline-offset: 3px;
   border-radius: 4px;
 }
-.slot__meta {
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-  min-width: 0;
-}
-.slot[aria-busy="true"] .slot__meta {
-  flex-shrink: 0;
-}
-.slot__k {
-  font-size: 9.5px;
-  line-height: 11px;
-  font-weight: 500;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  color: var(--faint);
-  white-space: nowrap;
-}
-.slot__name {
-  font-size: 14px;
-  line-height: 16px;
-  font-weight: 600;
-  letter-spacing: -0.01em;
-  color: var(--text);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.slot__name small {
-  color: var(--dim);
-  font-weight: 500;
-  font-size: 9.5px;
-  margin-left: 7px;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-}
+/* the source's own controls: they wrap inside their line rather than push the card wider */
 .slot__acts {
+  grid-area: acts;
   display: flex;
   align-items: center;
   gap: 6px;
-  margin-left: auto;
   min-width: 0;
   flex-wrap: wrap;
-  justify-content: flex-end;
-}
-/* the six synth segment pills */
-.seg {
-  display: flex;
-  gap: 4px;
-  flex-wrap: wrap;
-  justify-content: flex-end;
 }
 
 /* toggle pill — a matte key face without an outline; engaged = the legend lights warm-white and the
@@ -508,13 +480,6 @@ option {
   cursor: pointer;
   white-space: nowrap;
   transition: color 0.15s, background-color 0.15s, border-color 0.15s;
-}
-.seg .tgl {
-  padding: 6px 10px;
-  font-size: 12px;
-  line-height: 12px;
-  font-weight: 500;
-  letter-spacing: 0.01em;
 }
 .tgl:hover:not(:disabled) {
   color: var(--text);
@@ -600,13 +565,12 @@ option {
   box-shadow: 0 0 8px -2px rgba(238, 241, 248, 0.5);
 }
 
-/* plugin <select> — a flat control (Tauri only). ONE dropdown per slot scales to any plugin
-   count; its empty option reverts the slot to its synth. Explicit background-color so no UA face shows. */
-.slot__select {
-  flex: 0 1 auto;
-  min-width: 96px;
-  max-width: 190px;
+/* the source picker and the input pick — flat selects on the control face. The picker names the slot's
+   source, so it reads at the slot name's size and weight. Explicit background-color so no UA face shows. */
+.slot__source,
+.slot__in {
   height: 30px;
+  min-width: 0;
   appearance: none;
   -webkit-appearance: none;
   color-scheme: dark;
@@ -614,9 +578,7 @@ option {
   border-radius: 8px;
   border: 1px solid transparent;
   box-shadow: inset 0 1px 0 var(--hair);
-  color: var(--dim);
-  font-size: 11px;
-  font-weight: 500;
+  font-family: inherit;
   cursor: pointer;
   background-image: var(--caret-svg);
   background-color: var(--surf-2);
@@ -625,25 +587,46 @@ option {
   background-size: 12px 12px;
   transition: color 0.15s, border-color 0.15s, box-shadow 0.15s;
 }
-.slot__select:hover {
+.slot__source {
+  grid-area: source;
+  justify-self: start;
+  width: 100%;
+  max-width: 300px;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--text);
+  text-overflow: ellipsis;
+}
+.slot__in {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  color: var(--dim);
+}
+.slot__source:hover:not(:disabled),
+.slot__in:hover {
   color: var(--text);
   background-color: var(--surf-3);
 }
-.slot__select:focus-visible {
+.slot__source:disabled {
+  cursor: default;
+  color: var(--faint);
+}
+.slot__source:focus-visible,
+.slot__in:focus-visible {
   outline-offset: 1px;
 }
-.slot__select option {
+.slot__source option,
+.slot__in option {
   background: #14171d;
   color: var(--text);
+  font-weight: 500;
 }
-.slot__select option:checked {
+.slot__source option:checked,
+.slot__in option:checked {
   background: #2a2d35;
   color: #fff;
-}
-/* loaded = the lit warm-white rim of an engaged control */
-.slot__select.is-loaded {
-  color: var(--text);
-  border-color: rgba(244, 239, 230, 0.28);
 }
 
 /* the params drawer (accordion) — a sub-panel that expands the slot card downward. Rendered

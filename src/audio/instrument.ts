@@ -1,7 +1,8 @@
 /**
- * OWNS: what is in each of the two slots — the synth id / loaded plugin, the load + unload + swap chains
- * (and the in-place reload a session's tone asks for), the plugin scan, editor affinity, and which slot
- * is active (input routing). Native input/monitor arm: `native-io.ts`; device lists, buffer size, ASIO
+ * OWNS: what is in each of the two slots — the synth id / Off / loaded plugin, the load + unload + swap
+ * chains (and the in-place reload a session's tone asks for), the plugin scan, editor affinity, which slot
+ * is active (input routing), each slot's level (its synth's, its plugin's or its input's) and the source
+ * and levels kept for the next launch. Native input/monitor arm: `native-io.ts`; device lists, buffer size, ASIO
  * tier: `audio-devices.ts`; the slot state cell + per-slot op chain: `instrument-slots.ts`; tones in a
  * session: `slot-tones.ts`.
  */
@@ -26,8 +27,10 @@ import {
   serializeSlot,
   setActiveSlotSignal,
   setSlotIds,
+  setSlotOff,
   setSlotPlugins,
   slotIds,
+  slotOff,
   slotPendingCounts,
   slotPlugins,
   withAt,
@@ -36,19 +39,21 @@ import {
   disarmInputInternal,
   disarmMonitorInternal,
   inputArmed,
-  liveChoiceCount,
   resendEngineLive,
   resumeEngineLive,
+  setMonitorGain,
 } from './native-io';
+import { readStoredNumber, writeStoredNumber } from './persist';
 import { forgetSlotPlugin, rememberSlotPlugin } from './rig-recall';
 import { warm as warmCapture } from './looper/capture';
 import { reconcilePluginDescriptors, samePluginDescriptor } from './plugin-descriptor';
 
 /**
  * Two-slot instrument host. Each slot holds EITHER a built-in synth (a selectable id + a lazily-built
- * SynthEngine) OR a native plugin (a loaded CLAP/VST3 descriptor). Only one slot is "active" at a
- * time; keyboard/MIDI input routes to that slot's instrument through `inputRouter` —
- * `applyActiveRouting()` picks the synth engine or the plugin note-sink based on the slot's kind.
+ * SynthEngine), Off (engine mode: nothing plays, GO LIVE passes the slot's input dry) OR a native plugin
+ * (a loaded CLAP/VST3 descriptor). Only one slot is "active" at a time; keyboard/MIDI input routes to
+ * that slot's instrument through `inputRouter` — `applyActiveRouting()` picks the synth engine or the
+ * plugin note-sink based on the slot's kind.
  *
  * This module owns WHAT is in each slot (synth id / plugin, the load + unload + swap chains, the
  * plugin scan, editor affinity). The slot state cell + per-slot op chain live in
@@ -77,6 +82,45 @@ const sourceOps: [number, number] = [0, 0];
 
 /** Which instance `slot` holds: read before a session import asks the host, for its reload. */
 export const slotSourceGeneration = (slot: 0 | 1): number => sourceOps[slot];
+
+/** A slot's volume range (the lane faders' and the plugin output's): unity at 1. */
+export const SLOT_GAIN_MAX = 1.5;
+
+// Kept for the next launch: each slot's source without its plugin (a synth id, or 'off' in engine
+// mode; a plugin over it comes back through the rig recall), each slot's input level and each synth's
+// level (engine mode's; the web synths have none).
+const sourceKey = (slot: 0 | 1) => `lf.slotSource.${slot}`;
+const inputGainKey = (slot: 0 | 1) => `lf.slotInputGain.${slot}`;
+const synthGainKey = (id: string) => `lf.synthGain.${id}`;
+
+function writeSource(slot: 0 | 1, source: string): void {
+  try {
+    localStorage.setItem(sourceKey(slot), source);
+  } catch {
+    /* persistence is best-effort */
+  }
+}
+
+for (const slot of [0, 1] as const) {
+  let saved: string | null = null;
+  try {
+    saved = localStorage.getItem(sourceKey(slot));
+  } catch {
+    /* unreadable: the default synth */
+  }
+  if (saved === 'off' && engineMode()) setSlotOff((prev) => withAt(prev, slot, true));
+  else if (saved !== null && SYNTHS.some((s) => s.id === saved)) setSlotIds((prev) => withAt(prev, slot, saved));
+}
+
+// Engine mode: each slot's input level (what an Off slot's live input is heard and recorded at: the
+// engine's slot gain while no plugin is loaded) and each built-in synth's level.
+const [inputGains, setInputGains] = createSignal<[number, number]>([
+  readStoredNumber(inputGainKey(0), 1, 0, SLOT_GAIN_MAX),
+  readStoredNumber(inputGainKey(1), 1, 0, SLOT_GAIN_MAX),
+]);
+const [synthGains, setSynthGains] = createSignal<Readonly<Record<string, number>>>(
+  Object.fromEntries(SYNTHS.map((s) => [s.id, readStoredNumber(synthGainKey(s.id), 1, 0, SLOT_GAIN_MAX)])),
+);
 
 /**
  * Stable per-slot note sinks routing to the native plugin in that slot. STABLE refs (built once) so
@@ -112,7 +156,11 @@ const ENGINE_SINK: PluginNoteSink = {
 let engineTarget = '';
 
 function routeEngine(i: 0 | 1): void {
-  const target: NoteTarget = slotPlugins()[i] ? { Slot: i } : { Builtin: slotIds()[i] as InstrumentId };
+  const target: NoteTarget = slotPlugins()[i]
+    ? { Slot: i }
+    : slotOff()[i]
+      ? 'Off'
+      : { Builtin: slotIds()[i] as InstrumentId };
   const key = `${i}:${JSON.stringify(target)}`;
   if (key !== engineTarget) {
     engineTarget = key;
@@ -127,25 +175,26 @@ function routeEngine(i: 0 | 1): void {
 // Engine mode's per-slot plugin gain (the web path keeps it on the plugin bridge); null = no plugin.
 const [engineGains, setEngineGains] = createSignal<[number | null, number | null]>([null, null]);
 
-/** An empty slot passes the input at unity (MIC), as a new engine starts it: an unload must not leave
- * the outgoing plugin's gain on the slot MIC records through. */
-const EMPTY_SLOT_GAIN = 1;
+/** The engine's gain for `slot`: its plugin's, else its input level (an unload must not leave the
+ * outgoing plugin's gain on the input an Off slot records). */
+const slotEngineGain = (slot: 0 | 1): number => engineGains()[slot] ?? inputGains()[slot];
 
 function setEngineGain(slot: 0 | 1, gain: number | null, send = true): void {
   setEngineGains((prev) => withAt(prev, slot, gain));
-  if (send) sendEngine({ SetSlotGain: [slot, gain ?? EMPTY_SLOT_GAIN] });
+  if (send) sendEngine({ SetSlotGain: [slot, slotEngineGain(slot)] });
 }
 
 /**
  * Engine mode: send what this module and `native-io.ts` keep to an engine that may not have it (a new
- * engine, a WebView reload): the note target, the slot gains and the live slot. Held notes are released
- * and the wheels seeded again.
+ * engine, a WebView reload): the note target, the slot gains, the synth levels and the live slots. Held
+ * notes are released and the wheels seeded again.
  */
 export function engineResync(): void {
   engineTarget = '';
   inputRouter.setActivePlugin(null);
   applyActiveRouting();
-  engineGains().forEach((gain, slot) => sendEngine({ SetSlotGain: [slot, gain ?? EMPTY_SLOT_GAIN] }));
+  for (const slot of [0, 1] as const) sendEngine({ SetSlotGain: [slot, slotEngineGain(slot)] });
+  for (const { id } of SYNTHS) sendEngine({ SetInstrumentGain: [id as InstrumentId, synthGains()[id]] });
   resendEngineLive();
 }
 
@@ -213,11 +262,14 @@ function activateSlot(i: 0 | 1): void {
  * Assign synth `id` to slot `slotIndex` and make that slot the active (MIDI/keys) slot — picking a
  * source is picking what you play. If the slot was in plugin mode, the plugin is unloaded and the slot
  * reverts to this synth; a failed unload keeps the plugin and leaves the active slot where it was. If
- * the synth engine was already live it is disposed and rebuilt.
+ * the synth engine was already live it is disposed and rebuilt. A synth takes no input: a slot that
+ * was live stops (every source change ends GO LIVE).
  */
 export function selectSynth(slotIndex: 0 | 1, id: string): void {
   chosenSource[slotIndex] = true;
   setSlotIds((prev) => withAt(prev, slotIndex, id)); // immediate UI highlight
+  setSlotOff((prev) => withAt(prev, slotIndex, false));
+  writeSource(slotIndex, id);
   // Serialize the routing work on the SAME per-slot chain as selectPlugin/clearPlugin, so a synth
   // pick made while a plugin load is in flight isn't clobbered by that load's continuation: the load
   // completes, then this op clears it and reverts to the chosen synth (last action wins).
@@ -228,8 +280,9 @@ export function selectSynth(slotIndex: 0 | 1, id: string): void {
       if (slotPlugins()[slotIndex]) return;
     } else {
       // No plugin to unload, but the rig recall may still remember one for this slot (picked before
-      // the recall reached it): the synth is the slot's source now.
+      // the recall reached it): the synth is the slot's source now. An Off slot's input stops.
       forgetSlotPlugin(slotIndex);
+      await disarmInputInternal(slotIndex);
       if (engines[slotIndex]) {
         // Route the OLD engine away (flushing it while it's still live) BEFORE buildSlot disposes it,
         // so the router never holds a reference to a disposed SynthEngine — the same
@@ -242,6 +295,28 @@ export function selectSynth(slotIndex: 0 | 1, id: string): void {
       }
     }
     activateSlot(slotIndex);
+  });
+}
+
+/**
+ * Engine mode: set slot `slotIndex` to Off. Its notes go nowhere (the `Off` target while it is the
+ * active slot) and GO LIVE passes its own input dry, heard and recorded at its input level. A plugin in
+ * it unloads (a failed unload keeps it); the slot's GO LIVE ends, as at every source change. The active
+ * slot stays where it is: nothing plays here to move MIDI to (as an effect load leaves it).
+ */
+export function selectOff(slotIndex: 0 | 1): void {
+  if (!engineMode()) return; // the web path has no Off target
+  chosenSource[slotIndex] = true;
+  setSlotOff((prev) => withAt(prev, slotIndex, true));
+  writeSource(slotIndex, 'off');
+  void serializeSlot(slotIndex, async () => {
+    if (slotPlugins()[slotIndex]) {
+      await doClearPlugin(slotIndex); // routes an active slot to Off once the plugin is gone
+      return;
+    }
+    forgetSlotPlugin(slotIndex);
+    await disarmInputInternal(slotIndex);
+    if (activeSlot() === slotIndex) applyActiveRouting();
   });
 }
 
@@ -312,6 +387,8 @@ async function doSelectPlugin(
   // unload aborts the swap — the native host may still hold the old plugin, so a load would only fail
   // on "slot already loaded" while the UI showed the new one.
   if (outgoing && !(await unloadSlotPlugin(slot, outgoing, 'swap'))) return;
+  // An Off slot's live input stops before a plugin takes the slot (an effect's pick goes live again).
+  if (!outgoing) await disarmInputInternal(slot);
   // Tell the bridge this slot's plugin kind BEFORE the load, so acceptPluginBuffer picks the right
   // output-gain default (FX ~unity / synth conservative) from the scan category, not the input bus.
   const loadToken = pluginBridge.beginPluginLoad(slot, desc.isEffect);
@@ -361,9 +438,9 @@ async function doSelectPlugin(
  * plugin or none meanwhile, or loaded again, is left alone (`moved`). The load passes `toneToken`, the
  * import's reload token, so it restores the tone the host parked for it. The unload ends the slot's GO
  * LIVE (an empty live slot would pass the input dry), so a slot that was live goes live again once its
- * plugin is back, unless the player chose a live slot after the reload began (the newer choice
- * stands); its output level is kept, and MIDI stays where it was. One op on the slot's chain, so
- * nothing the player does to the slot interleaves with it. Engine mode's (the web path keeps no tones).
+ * plugin is back (the other slot's live state is its own); its output level is kept, and MIDI stays
+ * where it was. One op on the slot's chain, so nothing the player does to the slot interleaves with it.
+ * Engine mode's (the web path keeps no tones).
  */
 export function reloadPlugin(
   slot: 0 | 1,
@@ -376,14 +453,11 @@ export function reloadPlugin(
     if (!desc || sourceOps[slot] !== since || !samePluginDescriptor(desc, expected)) return 'moved';
     const wasLive = inputArmed()[slot];
     const gain = pluginGain()[slot];
-    // Read before the unload, whose own disarm counts as no choice: another slot the player makes live
-    // while this one unloads keeps GO LIVE.
-    const liveSince = liveChoiceCount();
     if (!(await unloadSlotPlugin(slot, desc, 'swap'))) return 'failed';
     await doSelectPlugin(slot, desc, () => false, toneToken);
     if (!samePluginDescriptor(slotPlugins()[slot], desc)) return 'failed';
     if (gain !== null) setPluginGain(slot, gain);
-    if (wasLive) resumeEngineLive(slot, liveSince);
+    if (wasLive) resumeEngineLive(slot);
     return 'reloaded';
   });
 }
@@ -427,14 +501,14 @@ async function unloadSlotPlugin(slot: 0 | 1, outgoing: PluginDescriptor, path: '
     }
     return false;
   }
-  if (engineMode() && engineGains()[slot] === null) sendEngine({ SetSlotGain: [slot, EMPTY_SLOT_GAIN] });
+  if (engineMode() && engineGains()[slot] === null) sendEngine({ SetSlotGain: [slot, inputGains()[slot]] });
   forgetSlotPlugin(slot);
   releaseEditorAffinity(outgoing.path);
   return true;
 }
 
 /**
- * Unload the plugin in `slot` and revert it to its synth. Tears down the audio bridge synchronously
+ * Unload the plugin in `slot` and revert it to what it held before (its synth, or Off). Tears down the audio bridge synchronously
  * + reverts routing optimistically (so the slot is silent immediately), then awaits the native
  * unload; a failed unload restores the plugin (see `unloadSlotPlugin`). No-op if the slot holds no
  * plugin. Serialized per slot (see `serializeSlot`).
@@ -538,9 +612,52 @@ export function setPluginGain(slot: 0 | 1, value: number): void {
 export const pluginGain = (): readonly [number | null, number | null] =>
   engineMode() ? engineGains() : pluginBridge.gains();
 
-/** Read-only reactive accessors: the synth id per slot, the loaded plugin per slot (null = synth
- * mode), the active slot index. (Owned by `instrument-slots.ts`; re-exported as the UI's one path.) */
-export { slotIds, slotPendingCounts, slotPlugins, activeSlot };
+/**
+ * Slot `slot`'s level, the one volume its header shows (0..SLOT_GAIN_MAX): its plugin's output gain
+ * while one is loaded (null until it is wired), else in engine mode an Off slot's input level or its
+ * synth's level (kept per synth, so two slots holding one synth share it). Null for a web synth, which
+ * has none.
+ */
+export function slotLevel(slot: 0 | 1): number | null {
+  if (slotPlugins()[slot]) return pluginGain()[slot];
+  if (!engineMode()) return null;
+  return slotOff()[slot] ? inputGains()[slot] : (synthGains()[slotIds()[slot]] ?? 1);
+}
+
+/** Set slot `slot`'s level (`slotLevel`), heard and recorded; an Off slot's and a synth's are kept
+ * for the next launch. */
+export function setSlotLevel(slot: 0 | 1, value: number): void {
+  const v = Math.max(0, Math.min(SLOT_GAIN_MAX, value));
+  if (slotPlugins()[slot]) {
+    setPluginGain(slot, v); // web wet level (record + web monitor), or the engine's slot gain
+    void setMonitorGain(slot, v); // the web path's native monitor, kept level with it
+    return;
+  }
+  if (!engineMode()) return;
+  if (slotOff()[slot]) {
+    setInputGains((prev) => withAt(prev, slot, v));
+    writeStoredNumber(inputGainKey(slot), v);
+    sendEngine({ SetSlotGain: [slot, v] });
+    return;
+  }
+  const id = slotIds()[slot];
+  setSynthGains((prev) => ({ ...prev, [id]: v }));
+  writeStoredNumber(synthGainKey(id), v);
+  sendEngine({ SetInstrumentGain: [id as InstrumentId, v] });
+}
+
+/** Whether slot `slot`'s source takes its input, so the slot offers GO LIVE: a plugin (in engine mode
+ * not a known instrument, which takes none), or engine mode's Off. */
+export function slotTakesInput(slot: 0 | 1): boolean {
+  const plugin = slotPlugins()[slot];
+  if (plugin) return !engineMode() || plugin.isEffect !== false;
+  return engineMode() && slotOff()[slot];
+}
+
+/** Read-only reactive accessors: the synth id per slot, whether a slot is Off, the loaded plugin per
+ * slot (null = synth or Off), the active slot index. (Owned by `instrument-slots.ts`; re-exported as
+ * the UI's one path.) */
+export { slotIds, slotOff, slotPendingCounts, slotPlugins, activeSlot };
 
 /**
  * Derived predicate: is the ACTIVE slot playing the built-in GM drum kit (synth id 'drum' AND not
@@ -549,7 +666,8 @@ export { slotIds, slotPendingCounts, slotPlugins, activeSlot };
  * yield) and Keyboard.tsx (pad-vs-piano layout) so the two can never disagree.
  */
 export function activeIsDrum(): boolean {
-  return !slotPlugins()[activeSlot()] && slotIds()[activeSlot()] === 'drum';
+  const i = activeSlot();
+  return !slotPlugins()[i] && !slotOff()[i] && slotIds()[i] === 'drum';
 }
 
 /** Read-only reactive accessors: scanned plugins + scan-in-progress flag (the picker). */

@@ -15,7 +15,8 @@ import './transport.css';
  * flex items of the `.cmd` header in app.tsx — the internal `.grow` spacer then pushes master + the
  * app.tsx tool icons to the far right. Left→right: BPM group (34px numeral + steppers + beat dots) ·
  * CLICK / FIXED-N / AUTO / TAP / END STOP toggles · loop ring-dial readout · ■/▶ ALL + FADE and its bars (engine
- * mode only) + ✕ ALL (two-step) + MIC LIVE · IN FX (engine mode only: `InputFx.tsx`) · spacer · master mute +
+ * mode only) + ✕ ALL (two-step) + the record level + MIC LIVE (the web path's; in engine mode raw input is a
+ * slot set to Off and live) · IN FX (engine mode only: `InputFx.tsx`) · spacer · master mute +
  * slider + value. EXPORT / IMPORT are icon tools in app.tsx's `.tools`
  * cluster (`SessionTools.tsx`).
  *
@@ -435,8 +436,8 @@ export function Transport(props: { returnFocus?: (el: HTMLElement | undefined) =
         </div>
       </div>
 
-      {/* Global transport: ■/▶ ALL · FADE + its bars (engine mode) · ✕ ALL (two-step) · MIC LIVE · IN FX (the
-          input sends, engine mode). */}
+      {/* Global transport: ■/▶ ALL · FADE + its bars (engine mode) · ✕ ALL (two-step) · record level · MIC
+          LIVE (web path) · IN FX (the input sends, engine mode). */}
       <div class="transport__global">
         <button
           class="transport__tgl"
@@ -494,7 +495,7 @@ export function Transport(props: { returnFocus?: (el: HTMLElement | undefined) =
         >
           {clearAll.armed() ? '✕ SURE?' : '✕ ALL'}
         </button>
-        {/* Record level — what the looper hears at recordTap (synths, plugins, an armed mic): "am I too
+        {/* Record level — what the looper hears at recordTap (synths, plugins, a live input): "am I too
             quiet?" before the take. Peak-held in capture.ts, drawn by the waveform rAF loop (no signal).
             With AUTO on, a cyan tick marks the detector's RMS threshold on the same dB scale — the
             sensitivity number gets a scale, and "why hasn't it started" answers itself. */}
@@ -505,7 +506,7 @@ export function Transport(props: { returnFocus?: (el: HTMLElement | undefined) =
           aria-valuemin="0"
           aria-valuemax="1"
           aria-valuenow="0"
-          title="Record level: what the looper hears (synths, plugins, an armed mic); with AUTO on, the cyan tick is the trigger level"
+          title="Record level: what the looper hears (synths, plugins, a live input); with AUTO on, the cyan tick is the trigger level"
           ref={(el) => {
             registerInputMeter(el);
             onCleanup(unregisterInputMeter);
@@ -515,16 +516,20 @@ export function Transport(props: { returnFocus?: (el: HTMLElement | undefined) =
             });
           }}
         />
-        <button
-          class="transport__tgl"
-          classList={{ 'is-on-green': looper.inputArmed() }}
-          onClick={onToggleMic}
-          aria-label="Mic / line input"
-          aria-pressed={looper.inputArmed()}
-          title="Synths are always recorded; this arms mic / line input"
-        >
-          {looper.inputArmed() ? '● MIC LIVE' : 'MIC'}
-        </button>
+        {/* The web path's mic / line input. Engine mode has none: a slot set to Off goes live on its own
+            input instead (the slot header). */}
+        <Show when={!engineMode()}>
+          <button
+            class="transport__tgl"
+            classList={{ 'is-on-green': looper.inputArmed() }}
+            onClick={onToggleMic}
+            aria-label="Mic / line input"
+            aria-pressed={looper.inputArmed()}
+            title="Synths are always recorded; this arms mic / line input"
+          >
+            {looper.inputArmed() ? '● MIC LIVE' : 'MIC'}
+          </button>
+        </Show>
         <InputFx returnFocus={props.returnFocus} />
       </div>
 

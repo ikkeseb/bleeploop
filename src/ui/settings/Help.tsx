@@ -5,7 +5,7 @@ import { DRUM_KIT } from '../../audio/synths/drum';
 import { ACTION_LABELS, type ActionId } from '../../app/actions';
 import { KEY_ACTIONS } from '../../app/transport-keys';
 import { COMPUTER_MAP } from '../keyboard/Keyboard';
-import { platform } from '../../platform';
+import { engineMode, platform } from '../../platform';
 import { BUILD_LABEL, copyDiagnostics, logFolder, openLogFolder } from './diagnostics';
 import './help.css';
 
@@ -58,11 +58,22 @@ export function Help() {
 
       <section class="help__sec">
         <h3 class="help__h">Guitar <span class="help__tag">the main way to play</span></h3>
-        <ul class="help__list">
-          <li>Load an amp plugin and use <span class="help__note">GO LIVE</span>. <span class="help__note">INPUT LIVE</span> means that slot receives the selected input and monitors it natively. Choose the input channel in Audio Settings</li>
-          <li>ASIO supports one live slot. To use another amp slot, <span class="help__note">UNLOAD</span> the first plugin. Turning INPUT LIVE off keeps its driver reserved</li>
-          <li><span class="help__note">MIC</span> is a separate mic / line path. Leave it off when playing guitar through a live plugin. Synths and plugins feed the looper directly; the bar beside MIC shows record level</li>
-        </ul>
+        <Show
+          when={engineMode()}
+          fallback={
+            <ul class="help__list">
+              <li>Load an amp plugin and use <span class="help__note">GO LIVE</span>. <span class="help__note">INPUT LIVE</span> means that slot receives the selected input and monitors it natively. Choose the input channel in Audio Settings</li>
+              <li>ASIO supports one live slot. To use another amp slot, <span class="help__note">UNLOAD</span> the first plugin. Turning INPUT LIVE off keeps its driver reserved</li>
+              <li><span class="help__note">MIC</span> is a separate mic / line path. Leave it off when playing guitar through a live plugin. Synths and plugins feed the looper directly; the bar beside MIC shows record level</li>
+            </ul>
+          }
+        >
+          <ul class="help__list">
+            <li>Pick an amp plugin as a slot's source, pick its input (<span class="help__note">In 1</span>, <span class="help__note">In 2</span>…) and use <span class="help__note">GO LIVE</span>. <span class="help__note">INPUT LIVE</span> means that slot hears its input and monitors it natively</li>
+            <li>Raw input (a hardware synth, a mic): set a slot's source to <span class="help__note">Off</span>, pick its input and use GO LIVE. It is heard and recorded dry, and an Off slot plays no notes. Both slots can be live at once, each on its own input</li>
+            <li>Each slot's volume sets its synth, plugin or input level. Synths and plugins feed the looper directly; the bar beside IN FX shows record level</li>
+          </ul>
+        </Show>
       </section>
 
       <section class="help__sec">

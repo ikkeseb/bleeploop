@@ -4,11 +4,12 @@
  * the host at load from taking down every later launch. Only the plugin's identity is kept here, and
  * never an arm, so GO LIVE stays one press. Its tone comes back with it on the engine: the native host
  * keeps each plugin's state in its tone store and restores it inside every load
- * (`src-tauri/src/host/tone.rs`; the web audio path keeps none). The guitar input channel is not here:
- * it is the one global Audio Settings choice, already persisted by `audio-settings.ts`.
+ * (`src-tauri/src/host/tone.rs`; the web audio path keeps none). What the slot plays without its plugin
+ * (a synth, or Off) and the slot levels are kept by `instrument.ts`; each slot's input channel by
+ * `audio-settings.ts`.
  *
  * The record follows the slot: `instrument.ts` remembers a plugin when its load succeeds and forgets
- * it when the slot's plugin unloads, a load into the slot fails or a synth is picked for it. A WebView
+ * it when the slot's plugin unloads, a load into the slot fails or a synth or Off is picked for it. A WebView
  * reload keeps the record (`resyncNativeSlots` unloads the stranded plugins without forgetting them),
  * so the recall brings them back.
  */
@@ -75,7 +76,7 @@ export function rememberSlotPlugin(slot: 0 | 1, desc: PluginDescriptor): void {
   writeRig(withAt(readRig(), slot, { format, path, id, name }));
 }
 
-/** Forget slot `slot`'s plugin (it unloaded, a load into the slot failed, or a synth was picked for it). */
+/** Forget slot `slot`'s plugin (it unloaded, a load into the slot failed, or a synth or Off was picked for it). */
 export function forgetSlotPlugin(slot: 0 | 1): void {
   const rig = readRig();
   if (rig[slot]) writeRig(withAt(rig, slot, null));

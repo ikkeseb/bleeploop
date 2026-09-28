@@ -31,6 +31,7 @@ import { readAudioDeviceSettings, writeAudioDeviceSettings, type AudioDeviceSett
 import { setAsioEnabled, setBufferSize, switchAsioDriver, usingAsio } from '../../audio/audio-devices';
 import { autosave } from '../../audio/autosave';
 import { engineResync } from '../../audio/instrument';
+import { withAt } from '../../audio/instrument-slots';
 import { engineInputLive, toggleEngineInput } from '../../audio/native-io';
 import { notifyError, notifyInfo } from '../../notify';
 
@@ -879,7 +880,8 @@ export const engineLooper = {
   track: (i: number): Accessor<TrackView> => lanes[i][0],
   trackInfo: (i: number): TrackView => lanes[i][0](),
   masterLengthFrames: masterFrames,
-  /** MIC: the device input through an empty plugin slot (`toggleEngineInput`). */
+  /** MIC, reached here only by the native probes (the player sets a slot to Off and goes live): the
+   * device input dry through a slot without a plugin (`toggleEngineInput`). */
   inputArmed: engineInputLive,
   toggleInput: async (): Promise<boolean> => toggleEngineInput(),
   inputArmRequested: (): boolean => false,
@@ -1139,6 +1141,9 @@ type Running = DeviceChoice & { status: DeviceStatus };
  * save fails, puts its picks back. */
 let opened: DeviceChoice | null = null;
 
+/** A saved channel pick as the engine takes it: null = auto. */
+const channelOf = (pick: string): number | null => (pick === '' ? null : Number(pick));
+
 /** The device the saved picks name. */
 function picked(): DeviceChoice {
   const s = readAudioDeviceSettings();
@@ -1148,7 +1153,7 @@ function picked(): DeviceChoice {
       backend: asio ? 'Asio' : 'Wasapi',
       input: asio ? null : s.inputDeviceId || null,
       output: asio ? null : s.outputDeviceId || null,
-      inputChannel: s.inputChannel === '' ? null : Number(s.inputChannel),
+      inputChannels: [channelOf(s.slotInputChannels[0]), channelOf(s.slotInputChannels[1])],
       buffer: s.bufferFrames,
     },
     picks: {
@@ -1311,13 +1316,31 @@ export function restoreEngineShare(): void {
   if (share()) void setEngineShare(share());
 }
 
-/** Switch both slots' capture channel without reopening the device ('' = auto). */
-export function setEngineInputChannel(channel: string): void {
-  const pick = channel === '' ? null : Number(channel);
-  Promise.all([0, 1].map((slot) => platform.engine.setSlotInputChannel(slot, pick))).catch((err: unknown) => {
+// Each slot's capture channel ('' = auto), saved with the device picks; a device open takes both.
+const [slotInputChannels, setSlotInputChannelsSignal] = createSignal(readAudioDeviceSettings().slotInputChannels);
+
+/** Each slot's capture channel pick ('' = auto, else 0-based). */
+export const engineSlotInputChannels = slotInputChannels;
+
+/** Switch slot `slot`'s capture channel ('' = auto) without reopening the device, and keep the pick for
+ * the next open. A channel the running device refuses puts the previous pick back. */
+export function setEngineSlotInputChannel(slot: 0 | 1, channel: string): void {
+  const before = slotInputChannels();
+  const next = withAt(before, slot, channel);
+  setSlotInputChannelsSignal(next);
+  writeAudioDeviceSettings({ slotInputChannels: next });
+  if (!device()) return; // the next open takes it
+  platform.engine.setSlotInputChannel(slot, channelOf(channel)).catch((err: unknown) => {
+    setSlotInputChannelsSignal((now) => withAt(now, slot, before[slot]));
+    writeAudioDeviceSettings({ slotInputChannels: withAt(readAudioDeviceSettings().slotInputChannels, slot, before[slot]) });
     console.error('[engine] input channel switch failed', err);
     notifyError("Couldn't switch the input channel", err);
   });
+}
+
+/** Both slots' capture channel at once (the native loopback probe's pick, `src/debug/engine-loopback.ts`). */
+export function setEngineInputChannel(channel: string): void {
+  for (const slot of [0, 1] as const) setEngineSlotInputChannel(slot, channel);
 }
 
 /** Subscribe to the feed; its first frame is a reset (`adoptSettings`). Returns the unsubscribe. */

@@ -7,8 +7,8 @@
  * host is handed the plugin session.json names with each tone (it refuses a tone of another plugin). A
  * reload is skipped when the player picked another plugin for the slot while the import was in flight, or
  * the same plugin again (another instance), and its parked tone is handed back; the reload's load passes
- * the reload token the import answered. GO LIVE comes back only if the player chose no other live slot
- * after the reload began, its unload included. An archive whose tone
+ * the reload token the import answered. GO LIVE comes back after the reload, and the other slot going
+ * live meanwhile (its unload included) stays live beside it: both slots may be live. An archive whose tone
  * entry is past the tone limit is refused before anything is handed to the host. The plugin host is a
  * stand-in that records its calls and treats a tone as opaque bytes, as the frontend does. Cannot see
  * the native store, a real plugin or the Rust side: `pnpm native:tone-recall` does.
@@ -228,7 +228,7 @@ await probe(async ({ open }) => {
         newToasts: toasts().map((t) => t.message).filter((m) => !toastsBefore.has(m)),
       };
 
-      // ── The player makes slot B live while slot A reloads: the newer choice stands ──────────────────
+      // ── The player makes slot B live while slot A reloads: both are live after it ───────────────────
       await instrument.selectPlugin(0, amp);
       await nativeIo.goLive(0);
       feed('Empty');
@@ -244,7 +244,7 @@ await probe(async ({ open }) => {
       loadGate = null;
       const liveChoice = { calls: calls.slice(), liveMidReload, live: nativeIo.inputArmed().slice() };
 
-      // ── The player makes slot B live while slot A's reload unloads: the newer choice stands ─────────
+      // ── The player makes slot B live while slot A's reload unloads: both are live after it ──────────
       await nativeIo.goLive(0);
       feed('Empty');
       await pause(50);
@@ -374,13 +374,13 @@ await probe(async ({ open }) => {
 
   assert.deepEqual(out.liveChoice.liveMidReload, [false, true], 'slot B went live while slot A reloaded');
   assert.ok(out.liveChoice.calls.includes('load 0 amp'), `slot A reloaded: ${out.liveChoice.calls.join(', ')}`);
-  assert.deepEqual(out.liveChoice.live, [false, true], 'the reload does not take GO LIVE back from the newer choice');
+  assert.deepEqual(out.liveChoice.live, [true, true], 'slot A is live again after its reload, and slot B stays live');
   assert.deepEqual(out.afterFirst.tokens.passed, out.afterFirst.tokens.answered, 'each reload passes the token its import answered');
   assert.equal(out.afterFirst.tokens.answered.length, 2);
 
   assert.deepEqual(out.liveDuringUnload.liveMidUnload, [false, true], 'slot B went live while slot A unloaded');
   assert.ok(out.liveDuringUnload.calls.includes('load 0 amp'), `slot A reloaded: ${out.liveDuringUnload.calls.join(', ')}`);
-  assert.deepEqual(out.liveDuringUnload.live, [false, true], 'a choice made during the reload’s unload stands too');
+  assert.deepEqual(out.liveDuringUnload.live, [true, true], 'a slot made live during the reload’s unload stays live beside it');
 
   assert.ok(
     !out.sameAgain.after.some((c) => c.startsWith('unload 0') || c.startsWith('load 0')),
