@@ -579,7 +579,7 @@ test and `verify/guards/engine-wire.mjs`:
 
 - Tauri commands: `engine_mode` / `engine_set_mode(enabled)`; `engine_open(request)` →
   `DeviceStatus` (also switches; blocking work off the IPC thread); `engine_close`; `engine_status`;
-  `engine_set_input_channel(channel)`; `engine_send(commands)` (a batch, synchronous so batches keep
+  `engine_set_slot_input_channel(slot, channel)`; `engine_send(commands)` (a batch, synchronous so batches keep
   IPC order; before any engine exists it keeps the settings, drops note-offs and refuses other actions);
   `engine_set_share(endpoint)`; `engine_feed(channel)` subscribes a Tauri Channel; `engine_snapshot` /
   `engine_load_session` (Session, below). `DeviceStatus.inputOpen` is false when WASAPI runs output-only
@@ -607,8 +607,9 @@ test and `verify/guards/engine-wire.mjs`:
 parameter commands route to the engine slot owners (`host/engine_slot.rs`) under the same names and
 events; a plugin loads into an open device's engine. GO LIVE becomes `SetSlotLive`, the plugin gain
 `SetSlotGain` (`plugin_set_monitor_gain` maps to it), notes go through `engine_send` (the live note
-commands refuse). One slot is live at a time (two would sum the dry input twice): `engine_send` takes
-the other off first. Scan and the ASIO status calls are unchanged.
+commands refuse). Which slots are live is the frontend's call (`src/audio/native-io.ts`), not
+`engine_send`'s; two live slots sum the dry input twice only when both read the same channel. Scan and
+the ASIO status calls are unchanged.
 
 **UI side:** `Platform.engine` in `src/platform/host.ts`; an engine store behind the same facade the UI
 already reads (`looper`, `clock`, `master`), so components change only their import. Invariant 6

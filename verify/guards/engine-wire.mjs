@@ -208,6 +208,11 @@ const refused = {
     delete s.inputOpen;
     decodeDeviceStatus(s);
   },
+  "a status with a third slot's channel": () => {
+    const s = structuredClone(fixture.deviceStatuses[0]);
+    s.inputChannels = [0, 1, 2];
+    decodeDeviceStatus(s);
+  },
   'an anchor without its grid': () => {
     const f = structuredClone(fixture.feed.find((x) => x.anchor));
     delete f.anchor.grid;

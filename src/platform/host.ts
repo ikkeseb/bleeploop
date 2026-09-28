@@ -258,9 +258,11 @@ export interface PluginHost {
   asioProbe(explicit: boolean, driver: string): Promise<AsioStatusReport>;
   /**
    * Switch to another ASIO driver without a restart ('' = automatic): the host drops the cached driver
-   * and probes `driver` in its place, as `asioProbe(true, driver)` would. Rejects, changing nothing,
-   * while anything still holds the driver (engine mode's device on ASIO: close it first). A timed-out
-   * probe answers `timed-out` and needs a restart, as at startup.
+   * and probes `driver` in its place, as `asioProbe(true, driver)` would. In engine mode the device
+   * owner runs it: a device on ASIO closes first and opens again after, on the new driver (unless that
+   * one runs at another rate while the engine holds loops: the next `open` asks). On the web path it
+   * rejects, changing nothing, while a live slot holds the driver. A timed-out probe answers `timed-out`
+   * and needs a restart, as at startup.
    */
   asioSwitch(driver: string): Promise<AsioStatusReport>;
   /** The installed ASIO drivers' names, read from the registry without loading any. Empty without ASIO. */

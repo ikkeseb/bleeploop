@@ -195,6 +195,10 @@ export interface DeviceStatus {
   /** False when WASAPI opened output only (no capture device, or its stream failed): the engine's
    * input is silence. Always true on ASIO. */
   inputOpen: boolean;
+  /** The capture channel each plugin slot reads (0-based): its pick, or auto (input 2 on a device with
+   * two or more) where it has none or the device lacks it. The native engine always sends it; a
+   * scripted probe frame may leave it out. */
+  inputChannels?: [number, number];
 }
 
 /** Rust `lf_engine::LaneInfo` (the TS `TrackPublic`). */
@@ -444,7 +448,13 @@ export function decodeDeviceStatus(raw: unknown): DeviceStatus {
     alignFrames: int(o.alignFrames, 'DeviceStatus.alignFrames'),
     inputFrames: int(o.inputFrames, 'DeviceStatus.inputFrames'),
     inputOpen: bool(o.inputOpen, 'DeviceStatus.inputOpen'),
+    ...(o.inputChannels === undefined ? {} : { inputChannels: slotChannels(o.inputChannels) }),
   };
+}
+
+function slotChannels(v: unknown): [number, number] {
+  const [a, b] = array(v, 'DeviceStatus.inputChannels', ENGINE_SLOTS);
+  return [int(a, 'DeviceStatus.inputChannels[0]'), int(b, 'DeviceStatus.inputChannels[1]')];
 }
 
 export function decodeDeviceEvent(raw: unknown): DeviceEvent {

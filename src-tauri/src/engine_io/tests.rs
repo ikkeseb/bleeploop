@@ -14,6 +14,7 @@ use super::callback::Side;
 use super::fake_driver::{Fake, FakeDevice, FakeDriver};
 use super::owner::Request;
 use super::{DeviceEvent, DeviceRequest, DeviceStatus, EngineHost, HostConfig, OpenError};
+use crate::asio_startup::{AsioStartupStatus, AsioStatusReport};
 use crate::audio_output::AudioBackend;
 
 /// The longest any wait here takes: the fake plays faster than real time, so a wait that runs this long
@@ -229,6 +230,107 @@ fn an_asio_request_outside_the_drivers_buffer_range_opens_at_a_size_the_driver_t
     assert_eq!(h.open(asio(Some(64))).block, 128, "too small: the nearest size in range");
     h.host.close().unwrap();
     assert_eq!(h.open(asio(Some(256))).block, 256, "in range: the size asked for");
+}
+
+/// A driver whose sizes come in steps (min 96, step 64) refuses 128 and 256, though both lie inside the
+/// range the probe reported (cpal checks the step; the probe sees only min and max): the open goes ahead
+/// at the driver's own size, and the status reports the size the callbacks deliver.
+#[test]
+fn a_size_a_stepped_driver_refuses_opens_at_the_drivers_own_size() {
+    let h = Harness::new();
+    {
+        let mut cached = h.fake.asio.lock().unwrap();
+        let driver = cached.as_mut().unwrap();
+        driver.buffer_range = Some((96, 4096));
+        driver.buffer_step = Some(64);
+        driver.block = 160;
+    }
+    let status = h.open(asio(Some(128)));
+    assert_eq!(status.block, 160, "the driver's own size, not the 128 asked for");
+    h.play(RATE / 10);
+    assert!(h.starts()[0].windows(2).all(|w| w[1] - w[0] == 160), "the callbacks deliver 160 frames");
+    assert_eq!(h.host.status().map(|s| s.block), Some(160));
+    h.open(asio(Some(128)));
+    assert_eq!(h.fake.started.load(SeqCst), 1, "asking for 128 again is the device that runs");
+    h.host.close().unwrap();
+    assert_eq!(h.open(asio(Some(256))).block, 160, "256 lies between the steps too");
+    h.host.close().unwrap();
+    assert_eq!(h.open(asio(Some(224))).block, 224, "a size on the steps opens as asked");
+}
+
+fn ready() -> AsioStatusReport {
+    AsioStatusReport { status: AsioStartupStatus::Ready, detail: String::new() }
+}
+
+/// A driver switch sent while the owner reopens the old driver on its own (a loss's recovery; the switch
+/// arrives from inside that reopen's start, the old driver already resolved) waits for the reopen, then
+/// closes it: the device ends on the new driver, never the old one.
+#[test]
+fn a_driver_switch_during_an_owner_reopen_ends_on_the_new_driver() {
+    let h = Harness::new();
+    h.open(asio(Some(256)));
+    let (sent_tx, sent_rx) = std::sync::mpsc::channel();
+    let (host, fake) = (h.host.clone(), h.fake.clone());
+    *h.fake.on_start.lock().unwrap() = Some(Box::new(move || {
+        let seen = host.clone();
+        let switch = std::thread::spawn(move || {
+            host.switch_asio(move || {
+                // What the switch found when it ran: no device open, and how many had started.
+                let found = (seen.status().map(|s| s.output_name), fake.started.load(SeqCst));
+                *fake.asio.lock().unwrap() = Some(FakeDevice::new("B", 48_000, 256));
+                let mut report = ready();
+                report.detail = format!("{found:?}");
+                Ok(report)
+            })
+        });
+        sent_tx.send(switch).unwrap();
+        // The switch's own thread has every chance to run it now, midway through this reopen.
+        std::thread::sleep(Duration::from_millis(100));
+    }));
+    h.fake.fatal.store(Side::Output as u8, SeqCst);
+    let switch = sent_rx.recv_timeout(PATIENCE).expect("the recovery starts");
+    let report = switch.join().unwrap().expect("the switch runs");
+    assert_eq!(report.detail, "(None, 2)", "the switch ran after the recovery started, with its run closed");
+    let events = h.device_events(2);
+    assert!(matches!(&events[1], DeviceEvent::Recovered(s) if s.output_name == "Fake ASIO"), "{events:?}");
+    let status = h.host.status().expect("the device runs");
+    assert_eq!((status.backend, status.output_name.as_str()), (AudioBackend::Asio, "B"));
+    assert_eq!(h.fake.started.load(SeqCst), 3, "the first run, the recovery, the reopen on the new driver");
+    h.play(RATE / 10);
+    h.open(asio(Some(256)));
+    assert_eq!(h.fake.started.load(SeqCst), 3, "the player's open of the same request is the device that runs");
+    assert_eq!(h.host.status().map(|s| s.output_name), Some("B".to_string()));
+}
+
+/// Behind the switch's own close: a running device is not the one an ASIO request names once another
+/// driver is cached, so an open of the request that runs reopens on the driver cached now.
+#[test]
+fn an_asio_open_after_the_cached_driver_changed_reopens_on_the_new_driver() {
+    let h = Harness::new();
+    h.open(asio(Some(256)));
+    *h.fake.asio.lock().unwrap() = Some(FakeDevice::new("B", 48_000, 256));
+    let status = h.open(asio(Some(256)));
+    assert_eq!(status.output_name, "B");
+    assert_eq!(h.fake.started.load(SeqCst), 2, "a new stream pair, not a channel change");
+}
+
+#[test]
+fn a_driver_switch_to_another_rate_waits_for_the_player_while_the_engine_holds_loops() {
+    let mut h = Harness::new();
+    h.fake.set_input(tone);
+    h.open(asio(Some(256)));
+    h.record_loop();
+    let fake = h.fake.clone();
+    let report = h.host.switch_asio(move || {
+        *fake.asio.lock().unwrap() = Some(FakeDevice::new("B", 44_100, 256));
+        Ok(ready())
+    });
+    assert_eq!(report.map(|r| r.status), Ok(AsioStartupStatus::Ready));
+    assert_eq!(h.host.status(), None, "the reopen at 44.1 kHz is refused: the device stays closed");
+    assert_eq!(h.host.rate(), Some(48_000), "the engine and its loops stay");
+    assert!(matches!(h.host.open(asio(Some(256)), false), Err(OpenError::RateChange { from: 48_000, to: 44_100, .. })));
+    let status = h.host.open(asio(Some(256)), true).expect("forced, it opens");
+    assert_eq!((status.output_name.as_str(), status.sample_rate), ("B", 44_100));
 }
 
 #[test]
@@ -853,10 +955,10 @@ fn each_slot_reads_its_own_capture_channel_on_asio_and_wasapi() {
 }
 
 #[test]
-fn auto_is_input_two_for_each_slot_and_a_missing_channel_is_refused_per_slot() {
+fn auto_is_input_two_for_each_slot_an_open_takes_auto_for_a_missing_channel_and_a_change_to_one_is_refused() {
     let h = Harness::new();
     h.fake.set_input(|_| 0.125);
-    h.open(asio(Some(256)));
+    assert_eq!(h.open(asio(Some(256))).input_channels, [1, 1]);
     h.send(Command::SetSlotLive(0, true));
     h.send(Command::SetSlotLive(1, true));
     assert!(all_near(&heard_after(&h, 0.1), 0.25 + 0.25), "auto: input 2 for each slot");
@@ -864,10 +966,36 @@ fn auto_is_input_two_for_each_slot_and_a_missing_channel_is_refused_per_slot() {
     assert!(all_near(&heard_after(&h, 0.1), 0.25 + 0.125), "slot 1 moves to input 1, slot 0 stays on auto");
     assert!(h.host.set_slot_input_channel(0, Some(2)).is_err(), "the fake has two inputs");
     assert!(h.host.set_slot_input_channel(2, Some(0)).is_err(), "and there are two slots");
-    let refused = DeviceRequest { input_channels: [Some(0), Some(2)], ..asio(Some(256)) };
-    assert!(h.host.open(refused, false).is_err(), "an open with one slot's channel missing is refused");
-    assert!(all_near(&heard_after(&h, 0.1), 0.375), "a refused pick changes neither slot");
+    assert!(all_near(&heard_after(&h, 0.1), 0.375), "a refused change moves neither slot");
+    assert_eq!(h.host.status().map(|s| s.input_channels), Some([1, 0]), "the status says what each slot reads");
+    // A pick saved on a driver with more inputs: the open goes ahead, that slot on auto.
+    let stale = DeviceRequest { input_channels: [Some(0), Some(2)], ..asio(Some(256)) };
+    assert_eq!(h.open(stale).input_channels, [0, 1]);
+    assert!(all_near(&heard_after(&h, 0.1), 0.125 + 0.25), "slot 0 on input 1, slot 1 on auto");
     assert_eq!(h.fake.started.load(SeqCst), 1, "one stream pair throughout");
+}
+
+/// A driver switch to one with fewer inputs: the reopen of a request whose pick the new driver lacks
+/// opens anyway, that slot on auto, and the status says so; the request keeps the pick, so a driver
+/// that has it again reads it again.
+#[test]
+fn a_reopen_on_a_driver_with_fewer_inputs_takes_auto_for_the_pick_it_lacks() {
+    let h = Harness::new();
+    h.fake.asio.lock().unwrap().as_mut().unwrap().in_channels = 4;
+    let status = h.open(DeviceRequest { input_channels: [Some(3), Some(0)], ..asio(Some(256)) });
+    assert_eq!(status.input_channels, [3, 0]);
+    let switch_to = |name: &str, inputs: usize| {
+        let (fake, name) = (h.fake.clone(), name.to_string());
+        h.host
+            .switch_asio(move || {
+                *fake.asio.lock().unwrap() = Some(FakeDevice { in_channels: inputs, ..FakeDevice::new(&name, 48_000, 256) });
+                Ok(ready())
+            })
+            .unwrap();
+        h.host.status().map(|s| (s.output_name, s.input_channels))
+    };
+    assert_eq!(switch_to("Two inputs", 2), Some(("Two inputs".to_string(), [1, 0])), "input 4 is gone: slot 0 reads auto");
+    assert_eq!(switch_to("Four inputs", 4), Some(("Four inputs".to_string(), [3, 0])), "the pick comes back with the inputs");
 }
 
 #[test]

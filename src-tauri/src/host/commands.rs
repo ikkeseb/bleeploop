@@ -754,8 +754,9 @@ pub async fn plugin_asio_probe(
 }
 
 /// Switch the ASIO driver without a restart (`driver`: `None` = automatic): the cached driver is dropped
-/// and the new one probed. Refused while anything holds the driver: engine mode's device on ASIO (the
-/// frontend closes it first and reopens it after), or a live slot's retained ASIO streams.
+/// and the new one probed. Engine mode runs it on its device owner, which closes an ASIO run first and
+/// reopens it after (`engine_io::mode::switch_asio`); the web path refuses it while a live slot's
+/// retained ASIO streams hold the driver.
 #[tauri::command]
 pub async fn plugin_asio_switch(
     app: tauri::AppHandle,
@@ -765,16 +766,15 @@ pub async fn plugin_asio_switch(
     {
         let sentinel = asio_sentinel(&app)?;
         log::info!("[asio] driver switch requested: {driver:?}");
-        let busy = || {
-            if crate::engine_io::mode::active() {
-                crate::engine_io::mode::asio_device_open().then(|| "the audio device still holds the ASIO driver".to_string())
-            } else {
-                crate::audio_output::asio_holder()
-                    .map(|_| "a plugin slot holds the ASIO driver until its plugin unloads".to_string())
-            }
-        };
         let report = tauri::async_runtime::spawn_blocking(move || {
-            crate::audio_output::switch_asio_driver(&sentinel, driver, busy)
+            if crate::engine_io::mode::active() {
+                crate::engine_io::mode::switch_asio(move || crate::audio_output::switch_asio_driver(&sentinel, driver, || None))
+            } else {
+                crate::audio_output::switch_asio_driver(&sentinel, driver, || {
+                    crate::audio_output::asio_holder()
+                        .map(|_| "a plugin slot holds the ASIO driver until its plugin unloads".to_string())
+                })
+            }
         })
         .await
         .map_err(|e| format!("asio switch task: {e}"))??;

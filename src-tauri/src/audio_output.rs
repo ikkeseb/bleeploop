@@ -227,8 +227,9 @@ pub fn probe_asio_driver(
 }
 
 /// Switch to another ASIO driver (`None` = automatic) without a restart: the cached driver is dropped
-/// and `driver` probed in its place. Refused while `busy` names a holder (the caller's view of who
-/// still has the driver open); a probe that times out leaves ASIO off until a restart, as at startup.
+/// and `driver` probed in its place. Refused while `busy` names a holder (the web path's live slots;
+/// engine mode calls this on its device owner with its ASIO run closed, `engine_io::mode::switch_asio`);
+/// a probe that times out leaves ASIO off until a restart, as at startup.
 pub fn switch_asio_driver(
     sentinel: &std::path::Path,
     driver: Option<String>,

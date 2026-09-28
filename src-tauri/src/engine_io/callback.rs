@@ -11,7 +11,7 @@
 
 use std::cell::Cell;
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicU8, Ordering::{Acquire, Relaxed, Release}};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, AtomicU8, Ordering::{Acquire, Relaxed, Release}};
 use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 use std::time::{Duration, Instant};
 
@@ -94,6 +94,9 @@ pub(crate) struct Run {
     out_latency: AtomicI64,
     /// Output callbacks this run.
     pub(crate) callbacks: AtomicU64,
+    /// Frames in the latest output callback: the size the device delivers, which the status reports on
+    /// ASIO (a driver may run another size than the one asked for).
+    pub(crate) block: AtomicU32,
 }
 
 impl Run {
@@ -108,6 +111,7 @@ impl Run {
             in_latency: AtomicI64::new(0),
             out_latency: AtomicI64::new(0),
             callbacks: AtomicU64::new(0),
+            block: AtomicU32::new(0),
         }
     }
 
@@ -447,6 +451,7 @@ impl Render {
         counters.callbacks.fetch_add(1, Relaxed);
         self.run.callbacks.fetch_add(1, Relaxed);
         let n = data.len() / self.channels;
+        self.run.block.store(n as u32, Relaxed);
 
         #[cfg(debug_assertions)]
         trace::output(self.last, entry, n, latency, self.rate, self.run.callbacks.load(Relaxed));

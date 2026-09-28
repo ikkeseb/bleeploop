@@ -103,10 +103,10 @@ that plugin in that slot stores over it.
 in-process (asio-sys → `CoCreateInstance` + `ASIOInit`), and a broken driver hangs or crashes there
 with no in-process remedy (a timeout bounds only the waiter; the driver keeps asio-sys' global lock
 and possibly the loader lock). So `run()` never contacts the driver. `src-tauri/src/asio_startup.rs`
-owns ONE probe per process, requested by the frontend after the window is up
-(`initAudioDeviceSettings` → `plugin_asio_probe`) and only when the saved preference is on; a saved
-"off" never asks. A sentinel file in the app's local data dir marks an attempt in progress; found at
-the next launch it blocks the automatic probe until the user presses RETRY ASIO in Audio Settings. A
+probes the driver at startup, requested by the frontend after the window is up
+(`initAudioDeviceSettings` → `plugin_asio_probe`) and only when the saved preference is on, and again
+only for a driver switch while nothing holds the driver; a saved "off" never asks. A sentinel file in
+the app's local data dir marks an attempt in progress; found at the next launch it blocks the automatic probe until the user presses RETRY ASIO in Audio Settings. A
 timed-out probe is never retried in the same process (restart). `app.exe --disable-asio` skips it for
 that launch whatever the preference says. What this does NOT promise: that the app survives a driver
 that crashes when the user later starts it, and the same in-process load happens again at the first

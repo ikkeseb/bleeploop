@@ -1181,8 +1181,9 @@ function serialize<T>(op: () => Promise<T>): Promise<T> {
   return run;
 }
 
-/** `openEngineDevice`'s open, inside the queue. `declined`: the player kept the device that runs. */
-async function openPicked(): Promise<{ status: DeviceStatus | null; declined: boolean }> {
+/** `openEngineDevice`'s open, inside the queue. `declined`: the player kept the device that runs.
+ * `restore` (a driver switch's) puts the driver that ran back when a recovery save fails. */
+async function openPicked(restore?: () => Promise<void>): Promise<{ status: DeviceStatus | null; declined: boolean }> {
   const wanted = picked();
   try {
     let runs: Running;
@@ -1199,7 +1200,7 @@ async function openPicked(): Promise<{ status: DeviceStatus | null; declined: bo
         putBackPicks();
         return { status: device(), declined: true };
       }
-      runs = await switchDroppingLoops(wanted);
+      runs = await switchDroppingLoops(wanted, restore);
     }
     setOpenFailure(null);
     setDevice(runs.status);
@@ -1220,34 +1221,35 @@ function errorText(err: unknown): string {
 }
 
 /**
- * Switch the ASIO driver live ('' = automatic): the device closes when it runs on ASIO (nothing may
- * hold the driver while it is replaced), the host drops the cached driver and starts this one, and the
- * saved picks open again on it. A driver that does not start leaves ASIO off, so the picks open on
- * WASAPI and Audio Settings says why. A refused switch reopens what ran. A switch the player declines
- * because the new driver runs at another rate goes back to the driver that ran.
+ * Switch the ASIO driver live ('' = automatic): the host's device owner closes a device running on
+ * ASIO (nothing may hold the driver while it is replaced), drops the cached driver, starts this one and
+ * opens the device again on it; then the saved picks open. A driver that does not start leaves ASIO off,
+ * so the picks open on WASAPI and Audio Settings says why. A refused switch reopens what ran. A switch
+ * the player declines because the new driver runs at another rate, or whose recovery save fails, goes
+ * back to the driver that ran.
  */
 export function switchEngineAsioDriver(driver: string): Promise<DeviceStatus | null> {
   return serialize(async () => {
     const previous = readAudioDeviceSettings().asioDriver;
-    try {
-      if (device()?.backend === 'Asio') {
-        await platform.engine.close();
-        setDevice(null);
+    const switchBack = async () => {
+      try {
+        await switchAsioDriver(previous);
+      } catch (err) {
+        console.error('[engine] ASIO driver switch back failed', err);
+        notifyError("Couldn't switch back to the previous ASIO driver", err);
       }
+    };
+    try {
       await switchAsioDriver(driver);
     } catch (err) {
       console.error('[engine] ASIO driver switch failed', err);
       notifyError("Couldn't switch the ASIO driver", err);
       return (await openPicked()).status;
     }
-    const reopened = await openPicked();
-    if (!reopened.declined || previous === driver) return reopened.status;
-    try {
-      await switchAsioDriver(previous);
-    } catch (err) {
-      console.error('[engine] ASIO driver switch back failed', err);
-      notifyError("Couldn't switch back to the previous ASIO driver", err);
-    }
+    if (previous === driver) return (await openPicked()).status;
+    const reopened = await openPicked(switchBack);
+    if (!reopened.declined) return reopened.status;
+    await switchBack();
     return (await openPicked()).status;
   });
 }
@@ -1266,9 +1268,11 @@ function putBackPicks(): void {
  * or layer in flight punches out and commits (STATUS E3); the recovery saves the engine's snapshot, read
  * now, whatever the lanes here still show (the commit's feed frame may not be in yet); only then does
  * the switch go ahead, forced. A save that fails reopens the device that ran instead, so the switch never
- * loses loops the recovery does not hold. Resolves with the device that runs, as it was asked for.
+ * loses loops the recovery does not hold; a driver switch's `restore` first puts the driver that ran back,
+ * or its request would open on the new driver and be refused again. Resolves with the device that runs,
+ * as it was asked for.
  */
-async function switchDroppingLoops(wanted: DeviceChoice): Promise<Running> {
+async function switchDroppingLoops(wanted: DeviceChoice, restore?: () => Promise<void>): Promise<Running> {
   await platform.engine.close();
   try {
     await autosave.saveNow();
@@ -1278,6 +1282,7 @@ async function switchDroppingLoops(wanted: DeviceChoice): Promise<Running> {
     if (!opened) throw err;
     const ran = opened;
     putBackPicks();
+    await restore?.();
     return { ...ran, status: await platform.engine.open(ran.request) };
   }
   return { ...wanted, status: await platform.engine.open(wanted.request, true) };

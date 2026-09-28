@@ -17,7 +17,7 @@ use cpal::{FromSample, Sample, SizedSample};
 use lf_engine::grid::Frame;
 
 use super::callback::{Capture, Render, Side, Tap};
-use super::driver::{Driver, Mirror, Share, Spec, Started, Streams, Wiring};
+use super::driver::{Driver, Mirror, Share, Spec, StartError, Started, Streams, Wiring};
 use super::{Core, DeviceRequest, IoCounters};
 use crate::audio_output::AudioBackend;
 
@@ -45,11 +45,14 @@ pub(crate) struct FakeDevice {
     /// ASIO: the buffer sizes the driver takes (min, max frames; `None` = any). As cpal's does, the fake
     /// refuses to start at a size outside it, and resolves a request outside it as `cpal_driver` does.
     pub(crate) buffer_range: Option<(u32, u32)>,
+    /// ASIO: the sizes inside the range come in steps from its min (`min + k·step`), which the range
+    /// does not show; the fake refuses a size between them, as cpal does. `None` = every size.
+    pub(crate) buffer_step: Option<u32>,
 }
 
 impl FakeDevice {
     pub(crate) fn new(name: &str, rate: u32, block: u32) -> FakeDevice {
-        FakeDevice { name: name.to_string(), rate, block, in_channels: 2, out_channels: 2, in_latency: 32, out_latency: 48, buffer_range: None }
+        FakeDevice { name: name.to_string(), rate, block, in_channels: 2, out_channels: 2, in_latency: 32, out_latency: 48, buffer_range: None, buffer_step: None }
     }
 }
 
@@ -145,12 +148,13 @@ impl Driver for FakeDriver {
     type Device = FakePair;
 
     fn resolve(&mut self, request: &DeviceRequest) -> Result<(Spec, FakePair), String> {
+        // ASIO, as `cpal_driver`: a request's buffer fitted into the range, none asked = 0 (the driver's
+        // own size, which only its callbacks tell).
+        let mut asked = None;
         let (input, output) = match request.backend {
             AudioBackend::Asio => {
-                let mut device = self.0.asio.lock().unwrap().clone().ok_or("fake: no ASIO driver")?;
-                if let Some(block) = request.buffer {
-                    device.block = device.buffer_range.map_or(block, |(min, max)| super::transition::asio_block(block, min, max));
-                }
+                let device = self.0.asio.lock().unwrap().clone().ok_or("fake: no ASIO driver")?;
+                asked = Some(request.buffer.map_or(0, |block| device.buffer_range.map_or(block, |(min, max)| super::transition::asio_block(block, min, max))));
                 (device.clone(), device)
             }
             AudioBackend::Wasapi => {
@@ -172,25 +176,33 @@ impl Driver for FakeDriver {
             in_rate: input.rate,
             in_channels: input.in_channels,
             out_channels: output.out_channels,
-            block: output.block,
+            block: asked.unwrap_or(output.block),
             input_name: input.name.clone(),
             output_name: output.name.clone(),
         };
         Ok((spec, FakePair { input, output }))
     }
 
-    fn start(&mut self, device: FakePair, spec: &Spec, mut wiring: Wiring) -> Result<Started, String> {
+    fn asio_driver(&self) -> Option<String> {
+        self.0.asio.lock().unwrap().as_ref().map(|d| d.name.clone())
+    }
+
+    fn start(&mut self, device: FakePair, spec: &Spec, mut wiring: Wiring) -> Result<Started, StartError> {
         let hook = self.0.on_start.lock().unwrap().take();
         if let Some(hook) = hook {
             hook();
         }
         if self.0.fail_starts.load(Acquire) > 0 {
             self.0.fail_starts.fetch_sub(1, Release);
-            return Err("fake: the device did not start".to_string());
+            return Err("fake: the device did not start".to_string().into());
         }
-        if let Some((min, max)) = device.output.buffer_range.filter(|_| spec.backend.is_asio()) {
+        // cpal's check of a fixed size (`check_config`): inside the range, and on its steps.
+        if let Some((min, max)) = device.output.buffer_range.filter(|_| spec.backend.is_asio() && spec.block > 0) {
             if !(min..=max).contains(&spec.block) {
-                return Err(format!("fake: buffer size {} is not in the supported range {min}..={max}", spec.block));
+                return Err(StartError::Buffer(format!("fake: Buffer size {} is not in the supported range {min}..={max}", spec.block)));
+            }
+            if let Some(step) = device.output.buffer_step.filter(|&step| step > 0 && (spec.block - min) % step != 0) {
+                return Err(StartError::Buffer(format!("fake: Buffer size {} is not valid; sizes must start at {min} and increment by {step}", spec.block)));
             }
         }
         // An endpoint with no input channels plays output only, as a PC with no capture device.
@@ -260,7 +272,9 @@ impl Play {
         EI: FnMut(cpal::Error),
         EO: FnMut(cpal::Error),
     {
-        let (rate, block) = (self.spec.rate, self.spec.block.max(1) as usize);
+        // 0: the driver's own size (an ASIO open that asked for none).
+        let block = if self.spec.block > 0 { self.spec.block } else { self.device.output.block };
+        let (rate, block) = (self.spec.rate, block.max(1) as usize);
         let asio = self.spec.backend.is_asio();
         // WASAPI: the endpoint buffer and the frames queued in it.
         let buffer = if asio { block } else { (block as f64 * WASAPI_BUFFER_PERIODS) as usize };
