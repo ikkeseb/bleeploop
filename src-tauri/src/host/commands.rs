@@ -63,21 +63,18 @@ pub async fn plugin_scan(app: tauri::AppHandle, force: bool) -> Result<Vec<Plugi
     }
 }
 /// Load plugin `id` from `path` into the engine's `slot` (≤ 15 s) for the document with
-/// `frontend_epoch` (`engine_io::plugins`). `load_token` is the frontend's own load counter, unused
-/// here; `tone_token` is the reload token a session import answered, when this load is that reload.
+/// `frontend_epoch` (`engine_io::plugins`); `tone_token` is the reload token a session import answered, when this load is that reload.
 #[tauri::command]
 pub async fn plugin_load(
     slot: u8,
     path: String,
     id: String,
     frontend_epoch: u32,
-    load_token: u32,
     tone_token: Option<u32>,
     window: tauri::WebviewWindow,
     state: tauri::State<'_, PluginHostState>,
 ) -> Result<PluginInfo, String> {
     validate_slot(slot)?;
-    let _ = load_token;
     #[cfg(windows)]
     {
         engine()?.plugin_load(&state, &window, slot, path, id, frontend_epoch, tone_token)
@@ -279,33 +276,6 @@ pub async fn plugin_list_output_devices() -> Result<Vec<AudioOutputDevice>, Stri
     #[cfg(not(windows))]
     {
         Ok(Vec::new())
-    }
-}
-/// Set the slot's plugin level (linear): the engine's `SetSlotGain` for that slot.
-#[tauri::command]
-pub async fn plugin_set_monitor_gain(slot: u8, gain: f32) -> Result<(), String> {
-    validate_slot(slot)?;
-    #[cfg(windows)]
-    {
-        engine()?.plugin_gain(slot, gain)
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = gain;
-        Ok(())
-    }
-}
-/// Whether an ASIO low-latency device is available to select (the `asio` feature is compiled AND
-/// the probe cached a device). False in a WASAPI-only / web build.
-#[tauri::command]
-pub fn plugin_asio_available() -> bool {
-    #[cfg(windows)]
-    {
-        crate::audio_output::asio_available()
-    }
-    #[cfg(not(windows))]
-    {
-        false
     }
 }
 

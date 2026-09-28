@@ -56,9 +56,9 @@ const tauriPluginHost: PluginHost = {
   scanPlugins(force = false) {
     return invoke<PluginDescriptor[]>('plugin_scan', { force });
   },
-  loadPlugin(slot, path, id, loadToken, toneToken) {
+  loadPlugin(slot, path, id, toneToken) {
     if (frontendEpoch === 0) throw new Error('plugin host not initialized');
-    return invoke<PluginInfo>('plugin_load', { slot, path, id, frontendEpoch, loadToken, toneToken: toneToken ?? null });
+    return invoke<PluginInfo>('plugin_load', { slot, path, id, frontendEpoch, toneToken: toneToken ?? null });
   },
   async unloadPlugin(slot) {
     await invoke('plugin_unload', { slot });

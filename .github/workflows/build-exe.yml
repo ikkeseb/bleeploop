@@ -107,7 +107,7 @@ jobs:
         run: |
           New-Item -ItemType Directory release | Out-Null
           Copy-Item src-tauri/target/release/bundle/nsis/*-setup.exe release/
-          Copy-Item licenses/GPL-3.0.txt, licenses/MPL-2.0.txt, licenses/SOURCE.txt, THIRD-PARTY-NOTICES.md release/
+          Copy-Item licenses/GPL-3.0.txt, licenses/SOURCE.txt, THIRD-PARTY-NOTICES.md release/
           $setup = Get-Item release/*-setup.exe
           $sha = (Get-FileHash $setup -Algorithm SHA256).Hash.ToLower()
           "$sha  $($setup.Name)" | Out-File release/SHA256SUMS.txt -Encoding ascii
@@ -150,11 +150,11 @@ jobs:
           cat > notes.md <<EOF
           BleepLoop $RELEASE_TAG for Windows 10/11 (x64). Download \`$setup\`. The installer fetches the WebView2 runtime if the machine lacks it.
 
-          BleepLoop runs on its native audio engine: the looper, click, synths, FX and your plugin run inside the audio driver's callback, and takes land on the grid from the driver's reported latency, with no latency setting. Play through your interface's ASIO driver. WASAPI works as a fallback, but Windows and some drivers add latency they do not report, so WASAPI takes can land late (about 215 ms on the developer's Focusrite). The earlier audio path is still there as a fallback: Audio Settings → the engine switch, then restart.
+          BleepLoop runs on its native audio engine: the looper, click, synths, FX and your plugin run inside the audio driver's callback, and takes land on the grid from the driver's reported latency, with no latency setting. Play through your interface's ASIO driver. WASAPI works as a fallback, but Windows and some drivers add latency they do not report, so WASAPI takes can land late (about 215 ms on the developer's Focusrite).
 
           The build is not code-signed, so Windows SmartScreen warns on first run: choose "More info", then "Run anyway". Check the download against \`SHA256SUMS.txt\` first.
 
-          This binary links the Steinberg ASIO SDK and is licensed GPLv3 (\`GPL-3.0.txt\`). The source is MIT-licensed; this build was made from $SOURCE_URL. \`THIRD-PARTY-NOTICES.md\` lists every dependency, including ringbuf.js (MPL-2.0, unmodified, https://github.com/padenot/ringbuf.js).
+          This binary links the Steinberg ASIO SDK and is licensed GPLv3 (\`GPL-3.0.txt\`). The source is MIT-licensed; this build was made from $SOURCE_URL. \`THIRD-PARTY-NOTICES.md\` lists every dependency.
 
           <img src="$LOGO_URL" alt="ASIO Compatible" width="72" />
 

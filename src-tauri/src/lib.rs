@@ -310,9 +310,7 @@ pub fn run() {
             // Device pickers (native devices; the engine opens them).
             host::plugin_list_input_devices,
             host::plugin_list_output_devices,
-            host::plugin_set_monitor_gain,
             // The ASIO tier: availability, cached driver, startup probe and driver switch.
-            host::plugin_asio_available,
             host::plugin_asio_device_info,
             host::plugin_asio_status,
             host::plugin_asio_probe,

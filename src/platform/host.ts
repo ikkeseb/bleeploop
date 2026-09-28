@@ -103,7 +103,7 @@ export interface PluginHost {
    * `PluginDescriptor.id` from `scanPlugins()` to pick the exact one. `toneToken`: the session import's
    * reload token (`ToneImport.reloadToken`) when this load is that reload.
    */
-  loadPlugin(slot: PluginSlot, path: string, id: string, loadToken: number, toneToken?: number): Promise<PluginInfo>;
+  loadPlugin(slot: PluginSlot, path: string, id: string, toneToken?: number): Promise<PluginInfo>;
   unloadPlugin(slot: PluginSlot): Promise<void>;
   /**
    * List the plugins currently loaded in the native slots (frontend-reload wedge resync). A WebView

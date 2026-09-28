@@ -23,7 +23,7 @@ const webPluginHost: PluginHost = {
   async scanPlugins() {
     return [];
   },
-  async loadPlugin(_slot, _path, _id, _loadToken, _toneToken) {
+  async loadPlugin(_slot, _path, _id, _toneToken) {
     throw new Error(NO_NATIVE_HOST);
   },
   async unloadPlugin() {

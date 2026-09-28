@@ -664,6 +664,44 @@ timbre against today.
 
 *Owner: v0.1.0 is published (2026-09-28); the engine lap decides when the web path goes.*
 
+**Progress on the local branch `stage-6` (2026-09-29; not pushed, not merged; merging waits on the
+engine lap).** Done: the Rust and the TypeScript deletions (commit messages list what went and what
+moved); `pnpm rust:check`, typecheck, lint, `pnpm build` and the ten engine-fake probes green. Three
+corrections to the list below, checked against the code: export, import, recovery and autosave run in
+engine mode and moved to `src/session/`; the export's wet master still renders on Tone's OfflineContext,
+so `tone` stays until that render is ported to lf-engine; MIDI keeps Web MIDI (§ Stage 5: the native
+`MidiHost` stays off), so the WebView2 MIDI grant stays. Left, in order:
+
+1. **The probe sweep.** Per assertion: UI behavior is rebased on the engine fake; TypeScript that still
+   runs (input router, Web MIDI, recovery worker, the offline export render) keeps executing; engine
+   behavior is retired only to a named lf-engine test. Groups, one writer each: (a) ui — asio-startup,
+   contact-sheet, diagnostics, input-controls, layout-reachability, stage-view, transport-auto-layout,
+   transport-focus, transport-start, ui-state-carriers, first-session, and golden-jam (its keyboard
+   assertions — selection wrap, CLEAR's confirm cue, an interrupted confirm, the timeout — move to a
+   fake probe; then it and `.github/workflows/golden-jam.yml` go); (b) instrument — instrument-controls,
+   instrument-routing, midi-learn, midi-note-ownership, synth-note-ownership, plugin-slot-pending,
+   plugin-load-buffer-generation, rig-recall, monitor-generation, mic-arm-race, audio-settings-startup;
+   (c) export and FX — export-context (keeps the real offline render), export-refs, tone-refs, fx-grid,
+   fx-pitch-cost, master-latency, session-state-roundtrip; (d) recovery — the seven recovery-* probes,
+   plus `scripts/native-probe.mjs` and `scripts/release-smoke.mjs` (the dead engine toggle file,
+   loopback-sync, the crossOriginIsolated readout). (e) capture-clock, capture-loss, click-sync,
+   loop-end-stop, overdub-timers, overdub-window, playback-restart, record-stop-window, render-clock and
+   render-cursor drove only deleted code: of their 62 assertions 34 map to lf-engine tests and 17 went
+   with their modules, but two are UI (loop-end-stop's pending-lane cue and its stop-now click: move to a
+   fake probe) and nine have no lf-engine test yet (add one each before deleting): an input gap then
+   PLAY/STOP ends STOPPED and silent; with the click off, loops play with no click; the rendered click
+   onset against a loop marker; rendered PCM on both sides of the END STOP frame; CLEAR and refill while
+   END STOP is pending, past the old deadline; two lanes stopped together on one frame; STOP ALL with a
+   playing lane and an overdub as one gesture; STOP ALL, a second STOP and CLEAR punching out an overdub
+   aligned; a live-phase join beside a muted lane with END STOP pending.
+2. **Docs** (the docs guard is red only on text naming removed paths): the invariants below, the
+   briefings, `verify/README.md`, `docs/VERIFY.md`, STATUS, README; `src-tauri/AGENTS.md` still
+   describes the deleted host threads.
+3. **Checks nothing here ran:** the `native:*` probes (their scripts changed), the app, WebView2 without
+   COOP/COEP, and the ear.
+4. `main` still has a bug fixed only here: a VST3 unit's unload after a failed restart sends
+   `setActive(0)` to an inactive component (`host/vst3_engine.rs`, `Vst3Plugin::drop`).
+
 Native became the default for v0.1.0, with the web path behind the Audio Settings switch. Whether it
 stays one more release depends on the engine lap (owner's call). Then delete:
 

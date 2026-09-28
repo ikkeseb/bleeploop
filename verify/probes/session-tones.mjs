@@ -83,7 +83,7 @@ await probe(async ({ open }) => {
       const answered = [];
       const loadTokens = [];
       const host = platform.pluginHost;
-      host.loadPlugin = async (slot, _path, id, _loadToken, toneToken) => {
+      host.loadPlugin = async (slot, _path, id, toneToken) => {
         calls.push(`load ${slot} ${id}`);
         loadTokens.push(toneToken ?? null);
         if (loadGate?.slot === slot) await loadGate.closed;

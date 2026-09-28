@@ -71,9 +71,6 @@ export const SLOT_GAIN_MAX = 1.5;
 const FX_DEFAULT_GAIN = 0.9;
 const SYNTH_DEFAULT_GAIN = 0.1;
 
-// Per slot, the token of its latest plugin load (the host's `loadToken`).
-const loadTokens: [number, number] = [0, 0];
-
 // Kept for the next launch: each slot's source without its plugin (an instrument id, or 'off'; a plugin
 // over it comes back through the rig recall), each slot's input level, each instrument's level and each
 // plugin's level per slot.
@@ -318,12 +315,11 @@ async function doSelectPlugin(
   if (outgoing && !(await unloadSlotPlugin(slot, outgoing, 'swap'))) return;
   // An Off slot's live input stops before a plugin takes the slot (an effect's pick goes live again).
   if (!outgoing) await disarmInputInternal(slot);
-  const loadToken = ++loadTokens[slot];
   let tone: PluginInfo['tone'];
   sourceOps[slot]++;
   try {
     // `?.`: a browser probe's stand-in host may answer nothing (the tone is optional anyway).
-    tone = (await platform.pluginHost.loadPlugin(slot, desc.path, desc.id, loadToken, toneToken))?.tone;
+    tone = (await platform.pluginHost.loadPlugin(slot, desc.path, desc.id, toneToken))?.tone;
   } catch (e) {
     console.error('[instrument] plugin load failed', e);
     notifyError('Plugin load failed', e);
