@@ -149,7 +149,8 @@ option {
    cannot see the contextual sliders). Row 1 keeps brand · lamp · BPM · TAP · loop dial · END STOP ·
    ALL/MIC · master · tools; the modes cluster (transport.css) drops to row 2, left-aligned under BPM.
    The ::after element is the forced line break between the two `order` bands (its own zero-height
-   line, so the row gap counts twice). The narrower rungs stay in transport.css ("Narrow-width ladder"). */
+   line, so the row gap counts twice). The narrower rungs stay in transport.css ("Narrow-width ladder");
+   the last one, the brand's fold, sits with the brand below. */
 .cmd--stack {
   flex-wrap: wrap;
   row-gap: 3px;
@@ -216,6 +217,15 @@ option {
     var(--rec)
   );
   box-shadow: 0 0 10px -2px rgba(127, 107, 255, 0.8);
+}
+/* Last rung (app/cmd-fit.ts): when row 1 still overflows with everything movable on row 2, the wordmark
+   folds and the dot stays. The brand collapses to the dot while the hidden wordmark keeps its box, so the
+   brand's scrollWidth still reports the unfolded width and the measurement cannot see its own effect. */
+.cmd--stack-brand .brand {
+  width: 11px;
+}
+.cmd--stack-brand .brand__word {
+  visibility: hidden;
 }
 
 /* system lamp — the at-a-glance aggregate of host/isolated/plugin/midi (detail in its title + the

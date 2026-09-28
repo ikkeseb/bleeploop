@@ -381,7 +381,8 @@
    including the contextual CLICK / FIXED controls and reserved AUTO width) the bar carries
    `.cmd--stack` and the CLICK / FIXED / RETAKE / AUTO cluster takes a second row under BPM; TAP and
    END STOP (`.transport__pair`) follow it there only when row 1 is still full without the tool icons
-   (`.cmd--stack-pair`: TAP lands under BPM, END STOP after AUTO). `order` moves them visually only —
+   (`.cmd--stack-pair`: TAP lands under BPM, END STOP after AUTO); past that the brand folds to its dot
+   (`.cmd--stack-brand`, app.css). `order` moves them visually only —
    DOM/tab order is unchanged. The width stays intrinsic (no flex-basis: 100%) so the measurement
    cannot see its own effect. */
 .cmd--stack .transport__modes,

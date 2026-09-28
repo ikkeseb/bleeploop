@@ -245,7 +245,7 @@ export function App() {
       <header class="cmd" inert={stageOpen()} ref={(el) => onCleanup(installCmdFit(el))}>
         <span class="brand">
           <i class="brand__dot" aria-hidden="true" />
-          <span>
+          <span class="brand__word">
             BLEEP<b>LOOP</b>
           </span>
         </span>

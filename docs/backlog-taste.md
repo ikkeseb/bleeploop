@@ -16,7 +16,10 @@ not here.
   row 2 at the Tauri default 1280); the ⬇/⬆ EXPORT/IMPORT icons in the tool cluster; the 4 px record-level
   meter left of MIC (−60..0 dBFS, green, red within 1 dB of full, a cyan tick at the AUTO trigger
   level while AUTO is on) — big enough? right place? AUTO reserves its sensitivity control's width
-  so toggling it or changing the value keeps the stage in place.
+  so toggling it or changing the value keeps the stage in place. Engine mode at 960 and 1100 px
+  (2026-09-28): the wordmark folds to its dot so the master stays on row 1. Still three rows in the app
+  (its extra tool icons): CLICK on at ≤ 1000 px, CLICK + FIXED at ≤ 1100 px — two rows there need about
+  150 px less on row 2 (the tool icons behind one menu?).
 - **Count-in numeral (2026-09-02):** the big red 4-3-2-1 in the armed lane's well over "COUNT-IN" —
   size, colour, and whether a later take's "WAITING FOR DOWNBEAT" should count beats to the boundary too.
 - **Error toasts:** bottom-right stack — placement, copy, feel; may overlap the bottom lane's right

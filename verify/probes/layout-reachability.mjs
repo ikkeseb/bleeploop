@@ -2,7 +2,8 @@
  * (1400x900): measures rendered control access and canvas identity (a lane's canvas must survive a
  * keyboard-placement/FX-drawer change, not remount) across five keyboard placement/FX-drawer
  * combinations, plus the drum-pad ribbon, the two-row command-bar cap and the muted-lane readout with
- * a loop present. At 960x600, 1000x700 and 1280x820 (the Tauri default; the bar stacks into two rows
+ * a loop present. The two-row cap and the bar's own controls are also measured in engine mode (the web
+ * engine fake, a loop present, idle modes) from 960 to 1600 px wide. At 960x600, 1000x700 and 1280x820 (the Tauri default; the bar stacks into two rows
  * at all three) the open Help and Audio Settings popovers must not overlap the command bar's rendered
  * box and must stay inside the window, also with a spacer one window tall planted in the panel body
  * (native-only rows the browser tier never renders), whose last row must then scroll into reach.
@@ -143,6 +144,50 @@ await probe(async ({ open }) => {
     if (!drumOk) failures.push(drumName);
     results.push({ name: drumName, ...drums });
     console.log(JSON.stringify({ name: drumName, ...drums, ok: drumOk }));
+    await page.close();
+  }
+  // Engine mode on the web engine fake (`window.__lfEngineFake`, see fade-dub.mjs): FADE and IN FX widen
+  // row 1, which once put the master volume on a third row at 960 and 1100 px. With a loop present the
+  // bar must stay within two rows and every control in it must be reachable, at the Tauri minimum, the
+  // default and the widths between.
+  const engineInit = async (page) => {
+    await page.addInitScript(() => void (window.__lfEngineFake = true));
+    await init?.(page);
+  };
+  const idleLane = (state, length = 0) => ({ state, length, armed: false, autoArmed: false, canUndo: false,
+    canReverse: length > 0, reversed: false, stopAt: null, fading: false, retakePass: 0 });
+  for (const [width, height] of [[960, 600], [1000, 700], [1100, 700], [1280, 820], [1600, 900]]) {
+    const { page } = await open({ viewport: { width, height }, init: engineInit });
+    await page.waitForFunction(() => window.__lf.native.opened.length === 1, undefined, { timeout: 5000 });
+    const rate = 48000, master = 4 * rate;
+    await page.evaluate((f) => window.__lf.native.emit(f), { seq: 1, reset: true, settings: [], events: [
+      { Transport: { frame: 0, master, bpm: 120, locked: true } },
+      { Lane: { frame: 0, lane: 0, info: idleLane('Playing', master) } },
+      ...[1, 2, 3, 4].map((lane) => ({ Lane: { frame: 0, lane, info: idleLane('Empty') } })),
+      { Selected: { frame: 0, lane: 0 } }],
+      anchor: { frame: 0, atMs: Date.now(), rate, grid: 0 }, meter: { peak: 0, clip: false } });
+    await page.waitForTimeout(250);
+    const bar = await page.evaluate(() => {
+      const cmd = document.querySelector('.cmd');
+      const rows = new Set([...cmd.children].filter(el => !el.classList.contains('cmd__sr')).map(el => el.getBoundingClientRect())
+        .filter(r => r.width > 0 && r.height > 0).map(r => Math.round((r.top + r.bottom) / 2 / 14))).size;
+      const unreachable = [];
+      for (const el of cmd.querySelectorAll('button, input, select')) {
+        const r = el.getBoundingClientRect();
+        if (!r.width || getComputedStyle(el).visibility === 'hidden') continue;
+        const c = cmd.getBoundingClientRect();
+        const inside = r.left >= c.left - 0.5 && r.right <= c.right + 0.5 && r.top >= c.top - 0.5 && r.bottom <= c.bottom + 0.5;
+        const hit = document.elementFromPoint((r.left + r.right) / 2, (r.top + r.bottom) / 2);
+        if (!inside || !hit || !(hit === el || el.contains(hit))) unreachable.push(el.getAttribute('aria-label') ?? el.textContent.trim());
+      }
+      return { rows, cmdHeight: cmd.getBoundingClientRect().height, classes: cmd.className, unreachable };
+    });
+    const name = `${label}-${width}x${height}-engine`;
+    await page.locator('.cmd').screenshot({ path: `logs/layout/${name}.png` });
+    const ok = bar.rows <= 2 && !bar.unreachable.length;
+    if (!ok) failures.push(name);
+    results.push({ name, ok, ...bar });
+    console.log(JSON.stringify({ name, ok, ...bar }));
     await page.close();
   }
   // Popovers hang under the command bar's real bottom edge (a fixed offset once covered the bar's

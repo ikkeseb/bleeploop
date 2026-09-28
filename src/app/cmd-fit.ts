@@ -19,12 +19,18 @@ export function installCmdFit(bar: HTMLElement): () => void {
     let need = parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight);
     let modes = 0;
     let tools = 0;
+    let pair = 0;
     let n = 0;
     for (const child of Array.from(bar.children) as HTMLElement[]) {
       if (child.classList.contains('cmd__sr')) continue; // visually-hidden live region (absolute)
-      const w = child.classList.contains('transport__grow') ? SPACER_MIN_PX : child.getBoundingClientRect().width;
+      const w = child.classList.contains('transport__grow')
+        ? SPACER_MIN_PX
+        : child.classList.contains('brand')
+          ? child.scrollWidth // unfolded, also while folded; one reading in both states, so the fold cannot flicker
+          : child.getBoundingClientRect().width;
       if (child.classList.contains('transport__modes')) modes = w;
       if (child.classList.contains('tools')) tools = w;
+      if (child.classList.contains('transport__pair')) pair += w + gap;
       need += w;
       n++;
     }
@@ -35,14 +41,18 @@ export function installCmdFit(bar: HTMLElement): () => void {
     // joins the modes on row 2 (right-aligned) instead of wrapping onto a third row of its own — the
     // bar is never taller than two rows, so the stage below never jumps when a loop readout appears.
     // Third rung: TAP and END STOP (`.transport__pair`) hold row 1 only while it still fits without the
-    // tools; otherwise they join the modes. Every rung measures intrinsic widths, so none can see its
+    // tools; otherwise they join the modes. Last rung: if row 1 still overflows with all three on row 2
+    // (engine mode's FADE and IN FX at 960 and 1100 px), the brand folds to its dot (app.css). Every rung
+    // measures intrinsic widths (the folded brand reports its unfolded scrollWidth), so none can see its
     // own effect.
     const row1 = need - modes - gap;
     const stackTools = stack && row1 > width;
     const stackPair = stackTools && row1 - tools - gap > width;
+    const stackBrand = stackPair && row1 - tools - gap - pair > width;
     bar.classList.toggle('cmd--stack', stack);
     bar.classList.toggle('cmd--stack-tools', stackTools);
     bar.classList.toggle('cmd--stack-pair', stackPair);
+    bar.classList.toggle('cmd--stack-brand', stackBrand);
   };
   let raf = 0;
   const schedule = (): void => {
