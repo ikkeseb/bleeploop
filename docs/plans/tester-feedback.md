@@ -1,6 +1,6 @@
 # First external tester feedback (OPEN)
 
-Owner-requested behavior and tester reports collected from 2026-09-19 (F13–F16: 2026-09-24), with local fixes and
+Owner-requested behavior and tester reports collected from 2026-09-19 (F13–F16: 2026-09-24; F17: 2026-09-28), with local fixes and
 verification recorded below. Testing is ongoing; fold new feedback into the
 matching item. When resolved, move enduring decisions to their owning briefings and delete this plan.
 
@@ -35,6 +35,7 @@ All items remain open until the tester confirms. § Code reading records what th
 | F14 | A one-bar first take locks every later track to one bar. | A later track longer than the master: extend the loop, keeping the one-bar track repeating across it (an RC-505-style multiply). Built on the engine (§ Landed). |
 | F15 | No effects (delay, reverb) before recording into a track. | An elegant pre-record FX. Built on the engine (§ Landed). |
 | F16 | No control over a recorded track's bar count after the fact. | Adjust the length of a committed track. Built on the engine (§ Landed): TRIM keeps the track's first N bars, repeated across the loop, one UNDO away. |
+| F17 | The tester plugs instruments with their own synths/amps straight in and wants to play them clean, but a slot cannot be set to nothing: it always holds a built-in synth or a plugin (`src/audio/instrument-slots.ts`). The tester also suggests listing the built-in synths in the plugin dropdown. | A slot that makes no sound. Agents' suggestion, not an approved design: one picker per slot, `Off` first, then a Built-in group (the six synths) and a Plugins group, replacing the synth chip row; `Off` leaves MIDI into that slot silent. Raw DI stays on MIC, which already monitors and records the input unprocessed; whether MIC should move into the slot is open. Whether the tester's MIDI keyboard (SV-2 in the diagnostics) doubled a DI take through the slot's synth is unknown. |
 
 ## Code reading at `d17c777`
 
