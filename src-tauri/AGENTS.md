@@ -57,9 +57,11 @@ rest is the map.
   driver (set in its own control panel) gets no preopen. A size inside the range that the driver still
   refuses (sizes in steps, `min + k·step`, which the probe cannot see) opens once more at the driver's
   own size, with no preopen; `DeviceStatus.block` is the size the callbacks deliver.
-- **Parallel worktrees need their own `CARGO_TARGET_DIR`.** Sharing one, every worktree links the same
-  `app_lib-<hash>` test binary and cargo judges path crates fresh by mtime, so one worktree can run
-  another's build of `app` or `lf-engine` (seen 2026-09-25).
+- **Parallel worktrees must not share a target dir.** Each checkout's default `src-tauri/target` is
+  already its own: never point two worktrees at one `CARGO_TARGET_DIR`. Sharing one, every worktree
+  links the same `app_lib-<hash>` test binary and cargo judges path crates fresh by mtime, so one
+  worktree can run another's build of `app` or `lf-engine` (seen 2026-09-25). From WSL, Windows cargo
+  does not see a `CARGO_TARGET_DIR` exported in bash (WSLENV does not pass it).
 - **ASIO is a cargo OPT-IN feature** carried by the npm scripts (`pnpm dev:asio`, `pnpm build:app`);
   a plain `cargo build` must work without the LLVM/ASIO SDK, and `tauri dev` forces
   `--no-default-features` anyway.
