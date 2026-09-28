@@ -1,6 +1,6 @@
 # First external tester feedback (OPEN)
 
-Owner-requested behavior and tester reports collected from 2026-09-19 (F13–F16: 2026-09-24; F17: 2026-09-28), with local fixes and
+Owner-requested behavior and tester reports collected from 2026-09-19 (F13–F16: 2026-09-24; F17–F25: 2026-09-28), with local fixes and
 verification recorded below. Testing is ongoing; fold new feedback into the
 matching item. When resolved, move enduring decisions to their owning briefings and delete this plan.
 
@@ -35,7 +35,15 @@ All items remain open until the tester confirms. § Code reading records what th
 | F14 | A one-bar first take locks every later track to one bar. | A later track longer than the master: extend the loop, keeping the one-bar track repeating across it (an RC-505-style multiply). Built on the engine (§ Landed). |
 | F15 | No effects (delay, reverb) before recording into a track. | An elegant pre-record FX. Built on the engine (§ Landed). |
 | F16 | No control over a recorded track's bar count after the fact. | Adjust the length of a committed track. Built on the engine (§ Landed): TRIM keeps the track's first N bars, repeated across the loop, one UNDO away. |
-| F17 | The tester plugs instruments with their own synths/amps straight in and wants to play them clean, but a slot cannot be set to nothing: it always holds a built-in synth or a plugin (`src/audio/instrument-slots.ts`). The tester also suggests listing the built-in synths in the plugin dropdown. | A slot that makes no sound. Agents' suggestion, not an approved design: one picker per slot, `Off` first, then a Built-in group (the six synths) and a Plugins group, replacing the synth chip row; `Off` leaves MIDI into that slot silent. Raw DI stays on MIC, which already monitors and records the input unprocessed; whether MIC should move into the slot is open. Whether the tester's MIDI keyboard (SV-2 in the diagnostics) doubled a DI take through the slot's synth is unknown. |
+| F17 | The tester plugs instruments with their own synths/amps straight in and wants to play them clean, but a slot cannot be set to nothing: it always holds a built-in synth or a plugin. The tester also suggests listing the built-in synths in the plugin dropdown, and choosing input channels rather than one MIC. | A slot that makes no sound and takes its own input. Built on the engine (§ Landed); the owner chose to drop MIC in engine mode. Stereo input stays open. |
+| F18 | The tester's Yamaha Steinberg USB ASIO driver opened only at 512 frames (its control-panel size); at 64/128 the app showed no device, 0 plugins and "No plugins found". | Open any driver at a size it takes and say why when none opens. Built (§ Landed). |
+| F19 | With ASIO4ALL installed, the app silently took it (the first registered driver) and routed to the wrong hardware. | Pick the ASIO driver. Built (§ Landed). |
+| F20 | The lane waveform jitters while recording, maybe with 1–2 tracks, maybe always (owner, by eye). | A steady waveform while recording. Built (§ Landed). |
+| F21 | No volume control for the built-in synths or a loaded plugin. | A level per slot. Built (§ Landed). |
+| F22 | With Share output on the interface the player also listens on, the player hears their loops twice ("doubled wet"), slightly late; the Share list showed one device because the others were disabled in Windows. | Say what Share is for and warn when its target is the same physical interface as the ASIO device. Whether the call app can capture a virtual cable instead is outside this repo. Not built. |
+| F23 | Crackle on the owner's Focusrite Scarlett when ASIO runs while a call uses the same interface through Windows audio; everything at 44.1 kHz, buffer 64. | Cause unknown; a larger buffer (128) is the first thing to try. Not built. |
+| F24 | A ring modulator would be a great effect to have. | A wish, not ranked. |
+| F25 | Automatic updates, so players keep up with frequent releases. | Wanted in time (owner); needs an updater signing key the owner creates. Not built. |
 
 ## Code reading at `d17c777`
 
@@ -93,7 +101,7 @@ Proven in the browser tier only (`pnpm check`, `pnpm build`, `pnpm verify:jam`, 
   across it with no seam (`src-tauri/crates/lf-engine/tests/multiply.rs`). FIXED off, a later take runs
   until the press and grows the loop to the nearest whole number of loops (E10, 2026-09-27). Proven headless, in the browser tier and through the loopback cable in the
   running app (`pnpm native:engine-loopback`, phases E and F); unheard.
-- **F15 (engine mode, 2026-09-26):** IN FX after MIC: an ECHO and a REVERB on the guitar (after the
+- **F15 (engine mode, 2026-09-26):** IN FX: an ECHO and a REVERB on the guitar (after the
   amp-sim), heard and recorded, the dry sound and the take's timing untouched
   (`src-tauri/crates/lf-engine/tests/input_fx.rs`). Through the loopback cable in the running app
   (`pnpm native:engine-loopback --echo=1`, ASIO 128): each click's echo one sixteenth later within
@@ -104,6 +112,22 @@ Proven in the browser tier only (`pnpm check`, `pnpm build`, `pnpm verify:jam`, 
   Proven headless (`src-tauri/crates/lf-engine/tests/trim.rs`), in the browser tier
   (`verify/probes/lane-length.mjs`) and through the loopback cable in the running app
   (`pnpm native:engine-loopback`, phase H); unheard.
+- **F17 + F21 (engine mode, 2026-09-28):** each slot's header is one picker (Off, the six built-in
+  synths, the plugins), an input pick with GO LIVE for Off or an effect plugin, and one level slider
+  (the synth's, the plugin's output, or an Off slot's input level), all remembered across restarts. Off
+  is silent to MIDI; Off + an input + GO LIVE is the raw input, heard and recorded dry. Both slots can
+  be live on different inputs, each monitoring and recording only its own, aligned in the take
+  (`src-tauri/crates/lf-engine/tests/slots.rs`, `verify/probes/slot-sources.mjs`). MIC is gone in
+  engine mode. Proven headless and in the browser tier; not run on hardware, unheard.
+- **F18 + F19 (2026-09-28):** an ASIO open asks only for a size the driver takes (the player's pick
+  when it fits, else the nearest in range, else the driver's own); Audio Settings offers only those
+  sizes and names the driver's control panel when it takes one. A Driver row lists the registered
+  drivers without loading any and switches live, on the engine owner. With no device open the slot
+  says so and Diagnostics names the reason. Proven on the fake driver and in the browser tier
+  (`verify/probes/asio-driver.mjs`); a real fixed-size driver and a live switch are unverified.
+- **F20 (2026-09-28):** a recording lane's peak bins sit at their frame over one span the record head
+  shares, so the drawn take holds still as bins arrive (`verify/probes/wave-steady.mjs`: within 1 px
+  per span; red against the old placement). Not eye-checked in WebView2.
 - **F3/F12 follow-up:** Help → About this build shows the version and commit, copies a diagnostics
   block and opens the log folder; the repo has a bug-report form asking for both.
 

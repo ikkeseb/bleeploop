@@ -76,8 +76,10 @@ keyboard fill the other layers; the computer keyboard is the fallback.
 ## Play it
 
 1. Plug the guitar into your audio interface and start BleepLoop (the installed app, or
-   `pnpm dev:asio` from source). In Audio Settings pick ASIO, the buffer size and the input channel.
-2. Load your amp-sim plugin (CLAP or VST3) into a slot and press GO LIVE.
+   `pnpm dev:asio` from source). In Audio Settings pick ASIO (and its driver, if you have more than
+   one) and the buffer size.
+2. Load your amp-sim plugin (CLAP or VST3) into a slot, pick the slot's input and press GO LIVE. For an
+   instrument with its own sound, set the other slot to Off, pick its input and GO LIVE: it plays dry.
 3. Select a track with 1–5 and press Space to record. The first take gets a one-bar count-in; come in on "1".
 4. Space again closes the take; after that, Space overdubs the selected track and Enter plays or stops it.
 5. Help (the ? in the command bar) lists the rest.

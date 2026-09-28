@@ -33,9 +33,9 @@ ALL; END STOP unclear (`docs/backlog-taste.md`).
 
 ## Play first
 
-Install v0.1.0 from GitHub → Releases (published 2026-09-28; the first CI-built exe on the rig, whose
-ASIO SDK is 2.3.4 where local builds use 2.3.3), or `pnpm dev:asio`. Audio
-Settings: ASIO, buffer 128, the guitar's input channel. Load the amp-sim, GO LIVE, play a real jam
+Install the latest release from GitHub → Releases (CI-built, ASIO SDK 2.3.4 where local builds use
+2.3.3), or `pnpm dev:asio`. Audio Settings: ASIO, buffer 128. Load the amp-sim, pick the guitar's
+input on its slot, GO LIVE, play a real jam
 **before reading further**, write the opinion down. If it feels off, that outranks every green check:
 say what felt wrong and re-scope.
 With a MIDI footswitch plugged: learn REC/DUB onto it (Audio Settings → midi learn, one tap) and take
@@ -50,7 +50,7 @@ A stop dies when it passes; past 10 stops, consolidate or flag it (AGENTS.md). D
 1. **ASIO 128 · amp-sim live — feel and the first take.** GO LIVE (VST3, Petrucci): the guitar through
    the amp feels immediate; master fader scales the wet, not the recorded level. Loop against the
    click with no trim: first take, overdub and FIXED 4 keep their attacks and endings on the click.
-   IN FX (after MIC): ECHO and REVERB on the guitar still feel immediate, the echo sits on the tempo,
+   IN FX: ECHO and REVERB on the guitar still feel immediate, the echo sits on the tempo,
    and a take recorded with them sounds as it did live.
 2. **Same rig · buffer 256, then 64.** The take still lands on the click at each size; the switch
    gap is short; loading a plugin while loops play crossfades in without a click.
@@ -129,7 +129,7 @@ E2 is built as its default (Share output to a user-picked endpoint).
 
 **Answered 2026-09-18:**
 
-- **D2 / D7 — no:** guitar records through the native input, never the mic/line path; no L3 wizard; more input channels maybe later.
+- **D2 / D7 — no:** guitar records through the native input, never the mic/line path; no L3 wizard. Per-slot input channels landed 2026-09-28 (`docs/plans/tester-feedback.md` F17).
 - **D3 — built:** the per-take `[rec-comp]` line logs in release too (`record-latency.ts`); the snapshot line is DEV-only.
 - **D4 — stays disabled** (empty-lane right cluster).
 - **D6 — (b):** teach the slot swap in UI/copy (line in `docs/backlog-taste.md`).

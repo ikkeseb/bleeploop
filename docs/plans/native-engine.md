@@ -496,8 +496,8 @@ Smaller, after the release: a parked unit never retried on a device change; `kNo
 `setProcessing` read as refusal; slot/lane/master gain left subnormal after 0 (snap to target);
 `tests/slots.rs:382` `<=` for `==`; each ASIO overload counted twice in `xruns`; an output lock miss
 reads as a duplex fault; the panic hook allocates on the audio thread; a MIDI port back within one
-1 s poll keeps a dead connection. Two live slots sum the dry input (+6 dB): whether more than one may
-be live is a Stage 5 question. The plugin probes reran clean the same day (smoke 30 of 30; survey 32
+1 s poll keeps a dead connection. Two live slots on the same input sum it (+6 dB); since 2026-09-28 each slot
+picks its own input and both may be live. The plugin probes reran clean the same day (smoke 30 of 30; survey 32
 `restartComponent`, all latency, as the baseline; swap 24 of 24 at 55–584 ms; recall 5 phases), and
 the plugin fixtures pass in `pnpm rust:check`.
 
