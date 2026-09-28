@@ -1,22 +1,32 @@
 /** Rendered controls and source labels at the native minimum (960x600) and a normal desktop size
- * (1400x900): measures rendered control access and canvas identity (a lane's canvas must survive a
- * keyboard-placement/FX-drawer change, not remount) across five keyboard placement/FX-drawer
- * combinations, plus the drum-pad ribbon, the two-row command-bar cap and the muted-lane readout with
- * a loop present. The two-row cap and the bar's own controls are also measured in engine mode (the web
- * engine fake, a loop present, idle modes) from 960 to 1600 px wide. At 960x600, 1000x700 and 1280x820 (the Tauri default; the bar stacks into two rows
- * at all three) the open Help and Audio Settings popovers must not overlap the command bar's rendered
- * box and must stay inside the window, also with a spacer one window tall planted in the panel body
- * (native-only rows the browser tier never renders), whose last row must then scroll into reach.
- * At 960x600 (reduced motion) and 1000x700 with lane 1's FX drawer open, so the lane stack scrolls,
- * each ArrowDown and digit must bring the selected lane wholly into the stack's view from the nearer
- * edge and leave a lane already in view unscrolled; a pointer press on a half-hidden lane must land
- * and scroll nothing. At 1000x700 (smooth) a second select inside a reveal's first frames must end in
- * view, and a pointer press on a lane must stop a reveal still running where the press found it.
- * "Unreachable" means clipped below 98% visible OR the element under its own centre
- * point is not itself (something else intercepts the click). `--plugin-source` substitutes
- * `src/platform/host.web.ts` to simulate a live native plugin slot instead of the browser-tier
- * fallback. `--label=<name>` tags screenshots and `logs/layout/<name>.json`, for comparing two runs
- * (e.g. before/after a layout change). Measures the DOM only: no native chrome, no WebView2.
+ * (1400x900), in engine mode on the web engine fake (`src/platform/host.web.ts`, the engine-seam
+ * pattern: an init script sets `window.__lfEngineFake`, the probe scripts the feed through `__lf.native`
+ * and answers the selection commands the UI sends as the engine would, with a `Selected` frame):
+ *
+ * - access and canvas identity: with a stopped one-bar loop on the feed, every control and source label
+ *   is reachable, and a lane's canvas survives a keyboard-placement/FX-drawer change (never remounts),
+ *   across five keyboard placement/FX-drawer combinations; then the drum-pad ribbon, the two-row
+ *   command-bar cap and the muted-lane readout with the loop present;
+ * - the command bar with a playing loop, idle modes, from 960 to 1600 px wide: two rows at most, every
+ *   control inside the bar and under its own centre point;
+ * - at 960x600, 1000x700 and 1280x820 (the Tauri default; the bar stacks into two rows at all three) the
+ *   open Help and Audio Settings popovers do not overlap the command bar's rendered box and stay inside
+ *   the window, also with a spacer one window tall planted in the panel body (native-only rows this
+ *   tier never renders), whose last row must then scroll into reach;
+ * - at 960x600 (reduced motion) and 1000x700 with lane 1's FX drawer open, so the lane stack scrolls:
+ *   each ArrowDown and digit sends its command, and the engine's `Selected` brings the selected lane
+ *   wholly into the stack's view from the nearer edge and leaves a lane already in view unscrolled
+ *   (under reduced motion inside the frame's own dispatch); a pointer press on a half-hidden lane's PLAY
+ *   lands (sends `PlayStop`) and scrolls nothing. At 1000x700 (smooth) a second select arriving inside a
+ *   reveal's first frames ends in view, and a pointer press on a lane stops a reveal still running where
+ *   the press found it.
+ *
+ * "Unreachable" means clipped below 98% visible OR the element under its own centre point is not itself
+ * (something else intercepts the click). `--plugin-source` serves `src/platform/host.web.ts` with the
+ * plugin host available (the native chrome) and a plugin in slot A instead of the built-in synths.
+ * `--label=<name>` tags screenshots and `logs/layout/<name>.json`, for comparing two runs (e.g.
+ * before/after a layout change). Measures the DOM only: no native chrome beyond the stand-in, no
+ * WebView2, no engine (every lane state and selection here was scripted).
  * Run: pnpm probe layout-reachability [--label=<name>] [--plugin-source]
  */
 import { mkdir, writeFile } from 'node:fs/promises';
@@ -29,36 +39,49 @@ await probe(async ({ open }) => {
   await mkdir('logs/layout', { recursive: true });
   const results = [];
   const failures = [];
-  const init = pluginSource ? async (page) => {
+  // Every page boots on the engine fake; `--plugin-source` also serves the plugin host available.
+  const init = async (page) => {
+    await page.addInitScript(() => void (window.__lfEngineFake = true));
+    if (!pluginSource) return;
     await page.route('**/src/platform/host.web.ts*', async route => {
       const response = await route.fetch();
       const body = await response.text();
       if (!body.includes('available: false')) throw new Error('Could not enable simulated native chrome');
       await route.fulfill({ response, body: body.replace('available: false', 'available: true') });
     });
-  } : undefined;
+  };
+  const RATE = 48000, BAR = 2 * RATE; // one 4/4 bar at 120 BPM
+  const laneInfo = (state, length = 0) => ({ state, length, armed: false, autoArmed: false, canUndo: false,
+    canReverse: length > 0, reversed: false, stopAt: null, fading: false, retakePass: 0 });
+  let seq = 0;
+  const emit = (page, frame) => page.evaluate((f) => window.__lf.native.emit(f), { seq: ++seq, reset: false, events: [], ...frame });
+  /** Wait for the device the app opens, then the engine's reset frame: `states[i]` on lane i over a
+   * master of `master` frames, lane 1 selected. */
+  const boot = async (page, states, master = BAR) => {
+    await page.waitForFunction(() => window.__lf.native.opened.length === 1, undefined, { timeout: 5000 });
+    const loop = states.some((s) => s !== 'Empty');
+    await emit(page, { reset: true, settings: [], events: [
+      { Transport: { frame: 0, master: loop ? master : 0, bpm: 120, locked: loop } },
+      ...states.map((state, lane) => ({ Lane: { frame: 0, lane, info: laneInfo(state, state === 'Empty' ? 0 : master) } })),
+      { Selected: { frame: 0, lane: 0 } }],
+      anchor: { frame: 0, atMs: Date.now(), rate: RATE, grid: 0 }, meter: { peak: 0, clip: false },
+      peaks: states.flatMap((state, lane) => state === 'Empty' ? [] : [{ lane, start: 0, count: 4, min: [-0.2, -0.5, -0.3, -0.1], max: [0.2, 0.5, 0.3, 0.1] }]) });
+  };
   for (const [width, height] of [[960, 600], [1400, 900]]) {
     const { page } = await open({ viewport: { width, height }, init });
     if (pluginSource) {
       await page.waitForFunction(() => document.querySelector('[aria-label="Rescan plugins"]')?.disabled === false);
       await page.evaluate(async () => {
-      const slots = await import('/src/audio/instrument-slots.ts');
+      const slots = await import('/src/ui/state/instrument-slots.ts');
       slots.setSlotPlugins([{ id: 'layout-fixture', name: 'Archetype Petrucci', format: 'VST3', path: 'layout-fixture', isEffect: true }, null]);
       if (window.__lf.slotPlugins()[0]?.id !== 'layout-fixture') throw new Error('Restart Vite to avoid duplicate HMR module state');
       });
       await page.getByRole('button', { name: 'Go live for slot 1', exact: true }).waitFor();
     }
-    await page.evaluate(async () => {
-      const lf = window.__lf;
-      const { defaultFxStates } = await import('/src/audio/fx/fx.ts');
-      await lf.looper.init();
-      const frames = lf.engine.ctx.sampleRate * 2;
-      await lf.looper.loadSession({ bpm: 120, bars: 1, masterLengthFrames: frames,
-        tracks: [{ index: 0, pcm: new Float32Array(frames), volume: 1, muted: false,
-          reversed: false, fx: defaultFxStates() }] });
-      lf.looper.stopAll();
-      window.__layoutCanvases = [...document.querySelectorAll('.lp-lane canvas')];
-    });
+    // A one-bar loop on lane 1, stopped (the engine's lanes after a load and ■ ALL).
+    await boot(page, ['Stopped', 'Empty', 'Empty', 'Empty', 'Empty']);
+    await page.locator('.lp-lane').first().and(page.locator('[data-state="stop"]')).waitFor({ timeout: 5000 });
+    await page.evaluate(() => { window.__layoutCanvases = [...document.querySelectorAll('.lp-lane canvas')]; });
     for (const [placement, drawer] of [['bottom', false], ['hidden', false], ['top', false], ['bottom', true], ['hidden', true]]) {
       await page.evaluate(value => window.__lf.layoutStore.setKeyboardPlacement(value), placement);
       const fx = page.getByRole('button', { name: 'Track 1 FX', exact: true });
@@ -146,26 +169,12 @@ await probe(async ({ open }) => {
     console.log(JSON.stringify({ name: drumName, ...drums, ok: drumOk }));
     await page.close();
   }
-  // Engine mode on the web engine fake (`window.__lfEngineFake`, see fade-dub.mjs): FADE and IN FX widen
-  // row 1, which once put the master volume on a third row at 960 and 1100 px. With a loop present the
+  // FADE and IN FX widen row 1, which once put the master volume on a third row at 960 and 1100 px. With a loop present the
   // bar must stay within two rows and every control in it must be reachable, at the Tauri minimum, the
   // default and the widths between.
-  const engineInit = async (page) => {
-    await page.addInitScript(() => void (window.__lfEngineFake = true));
-    await init?.(page);
-  };
-  const idleLane = (state, length = 0) => ({ state, length, armed: false, autoArmed: false, canUndo: false,
-    canReverse: length > 0, reversed: false, stopAt: null, fading: false, retakePass: 0 });
   for (const [width, height] of [[960, 600], [1000, 700], [1100, 700], [1280, 820], [1600, 900]]) {
-    const { page } = await open({ viewport: { width, height }, init: engineInit });
-    await page.waitForFunction(() => window.__lf.native.opened.length === 1, undefined, { timeout: 5000 });
-    const rate = 48000, master = 4 * rate;
-    await page.evaluate((f) => window.__lf.native.emit(f), { seq: 1, reset: true, settings: [], events: [
-      { Transport: { frame: 0, master, bpm: 120, locked: true } },
-      { Lane: { frame: 0, lane: 0, info: idleLane('Playing', master) } },
-      ...[1, 2, 3, 4].map((lane) => ({ Lane: { frame: 0, lane, info: idleLane('Empty') } })),
-      { Selected: { frame: 0, lane: 0 } }],
-      anchor: { frame: 0, atMs: Date.now(), rate, grid: 0 }, meter: { peak: 0, clip: false } });
+    const { page } = await open({ viewport: { width, height }, init });
+    await boot(page, ['Playing', 'Empty', 'Empty', 'Empty', 'Empty'], 2 * BAR);
     await page.waitForTimeout(250);
     const bar = await page.evaluate(() => {
       const cmd = document.querySelector('.cmd');
@@ -195,6 +204,7 @@ await probe(async ({ open }) => {
   // Audio Settings that this tier cannot render, so a planted spacer stands in for them.
   for (const [width, height] of [[960, 600], [1000, 700], [1280, 820]]) {
     const { page } = await open({ viewport: { width, height }, init });
+    await boot(page, ['Empty', 'Empty', 'Empty', 'Empty', 'Empty']);
     for (const [id, show, hide] of [['lf-help-popover', 'openHelp', 'closeHelp'], ['lf-audio-popover', 'openSettings', 'closeSettings']]) {
       await page.evaluate(fn => window.__lf.ui[fn](), show);
       await page.locator(`#${id}`).waitFor();
@@ -228,23 +238,15 @@ await probe(async ({ open }) => {
   }
   // The selected lane follows the transport keys into view. With lane 1's FX drawer open the lane stack
   // scrolls at both sizes, and a lane the arrows or a digit selected below its fold stayed hidden, its
-  // refusal cue with it. After each press the selected lane must lie wholly inside the stack's visible
-  // rect, scrolled there from the nearer edge and not at all when it already showed; under reduced
-  // motion already inside the key's own dispatch (no smooth scroll). A pointer press on a half-hidden
-  // lane's PLAY must land and scroll nothing: the lane is under the pointer.
+  // refusal cue with it. A key sends its command; the engine's `Selected` (answered here, as the engine
+  // would) moves the selection. After each answer the selected lane must lie wholly inside the stack's
+  // visible rect, scrolled there from the nearer edge and not at all when it already showed; under
+  // reduced motion already inside the frame's own dispatch (no smooth scroll). A pointer press on a
+  // half-hidden lane's PLAY must land and scroll nothing: the lane is under the pointer.
   for (const [width, height, motion] of [[960, 600, 'reduce'], [1000, 700, 'no-preference']]) {
     const { page } = await open({ viewport: { width, height }, init });
     await page.emulateMedia({ reducedMotion: motion });
-    await page.evaluate(async () => {
-      const lf = window.__lf;
-      const { defaultFxStates } = await import('/src/audio/fx/fx.ts');
-      await lf.looper.init();
-      const frames = lf.engine.ctx.sampleRate * 2;
-      await lf.looper.loadSession({ bpm: 120, bars: 1, masterLengthFrames: frames,
-        tracks: [0, 1, 2, 3, 4].map(index => ({ index, pcm: new Float32Array(frames), volume: 1, muted: false,
-          reversed: false, fx: defaultFxStates() })) });
-      lf.looper.stopAll();
-    });
+    await boot(page, ['Stopped', 'Stopped', 'Stopped', 'Stopped', 'Stopped']);
     await page.getByRole('button', { name: 'Track 1 FX', exact: true }).click();
     await page.evaluate(() => {
       document.activeElement?.blur();
@@ -261,14 +263,35 @@ await probe(async ({ open }) => {
         return { selected: window.__lf.looper.selectedTrack(), scrollTop: stack.scrollTop, viewHeight: v.bottom - v.top,
           overflow: stack.scrollHeight - stack.clientHeight, top: r.top - v.top, bottom: v.bottom - r.bottom };
       };
-      // Registered after the app's transport handler, so it samples the lane right after that handler ran.
-      window.addEventListener('keydown', () => { window.__atKey = window.__laneView(window.__lf.looper.selectedTrack()); });
       // Capture phase, so it samples the stack before the lane's own handler runs.
       window.addEventListener('pointerdown', (e) => {
         const lane = e.target.closest?.('.lp-lane');
         window.__atPointer = { lane: [...document.querySelectorAll('.lp-lane')].indexOf(lane), scrollTop: stack.scrollTop };
       }, true);
     });
+    const sentCount = () => page.evaluate(() => window.__lf.native.sent.length);
+    /** Wait for the commands sent after `from`, then answer them as the engine does: `SelectTrack` and
+     * `NextTrack` move the selection, `PlayStop` plays the lane. Each answer is its own feed frame; the
+     * lane the selection lands on is sampled inside that frame's dispatch (`at`). */
+    const answer = async (from, count = 1) => {
+      await page.waitForFunction(([n, c]) => window.__lf.native.sent.length >= n + c, [from, count], { timeout: 5000 });
+      return page.evaluate(([n, s]) => {
+        const commands = window.__lf.native.sent.slice(n);
+        let at = null, seq = s;
+        for (const c of commands) {
+          const sel = window.__lf.looper.selectedTrack();
+          const events = c.SelectTrack !== undefined ? [{ Selected: { frame: 0, lane: c.SelectTrack } }]
+            : c.Action === 'NextTrack' ? [{ Selected: { frame: 0, lane: (sel + 1) % 5 } }]
+            : c.PlayStop !== undefined ? [{ Lane: { frame: 0, lane: c.PlayStop, info: { state: 'Playing', length: 96000, armed: false,
+              autoArmed: false, canUndo: false, canReverse: true, reversed: false, stopAt: null, fading: false, retakePass: 0 } } }]
+            : [];
+          if (!events.length) continue;
+          window.__lf.native.emit({ seq: ++seq, reset: false, events });
+          at = window.__laneView(window.__lf.looper.selectedTrack());
+        }
+        return { commands, at, seq };
+      }, [from, seq]).then((r) => { seq = r.seq; return r; });
+    };
     // Smooth scrolling ends when scrollTop holds still for 8 frames.
     const settle = () => page.evaluate(() => new Promise(resolve => {
       const stack = document.querySelector('.lp__lanes');
@@ -291,27 +314,31 @@ await probe(async ({ open }) => {
     for (const key of ['ArrowDown', 'ArrowDown', 'ArrowDown', 'ArrowDown', 'ArrowDown', '5', '3', '1']) {
       const target = key === 'ArrowDown' ? (selected + 1) % 5 : Number(key) - 1;
       const before = await page.evaluate(i => window.__laneView(i), target);
+      const from = await sentCount();
       await page.keyboard.press(key);
+      const { commands, at } = await answer(from);
       if (motion !== 'reduce') await settle();
-      const { at, after } = await page.evaluate(() => ({ at: window.__atKey, after: window.__laneView(window.__lf.looper.selectedTrack()) }));
+      const after = await page.evaluate(() => window.__laneView(window.__lf.looper.selectedTrack()));
       const moved = after.scrollTop - before.scrollTop;
+      const command = key === 'ArrowDown' ? { Action: 'NextTrack' } : { SelectTrack: target };
       // Nearer edge: the lane ends flush with the edge it came in from, give or take the whole pixel the
       // reveal rounds past it; the far edge would leave the stack's height minus the lane's.
-      const stepOk = after.selected === target && inside(after, 1)
+      const stepOk = JSON.stringify(commands) === JSON.stringify([command])
+        && after.selected === target && inside(after, 1)
         && (inside(before) ? moved === 0 : true)
         && (moved > 0 ? after.bottom < 1 : moved < 0 ? after.top < 1 : true)
         && (motion === 'reduce' ? inside(at, 1) && at.scrollTop === after.scrollTop : true);
       if (moved !== 0) scrolled++;
       ok &&= stepOk;
       selected = target;
-      steps.push({ key, target: target + 1, stepOk, before, after, at });
+      steps.push({ key, target: target + 1, stepOk, commands, before, after, at });
     }
     ok &&= scrolled >= 3;
     // A reveal still running stops at the next select. Two digit keydowns in one task (a footswitch or
-    // MIDI double-send): lane 1 still shows when the second is measured, and the reveal of lane 5 must
-    // not carry it off. Then '5' and a real press on lane 1's waveform (no handler of its own: the press
-    // only selects) while that reveal runs: the stack must stop where the press found it, before the
-    // reveal landed at the bottom.
+    // MIDI double-send), answered by two feed frames a frame apart: lane 1 still shows when the second
+    // is measured, and the reveal of lane 5 must not carry it off. Then '5' and a real press on lane 1's
+    // waveform (no handler of its own: the press only selects) while that reveal runs: the stack must
+    // stop where the press found it, before the reveal landed at the bottom.
     let rapid = null;
     if (motion !== 'reduce') {
       // Each case starts from the top, lane 1 selected (the steps above ended on '1').
@@ -320,9 +347,18 @@ await probe(async ({ open }) => {
         await settle();
       };
       await toTop();
+      let from = await sentCount();
       await page.evaluate(() => {
         for (const key of ['5', '1']) window.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true }));
       });
+      await page.waitForFunction((n) => window.__lf.native.sent.length >= n + 2, from, { timeout: 5000 });
+      const doubleSent = await page.evaluate((n) => window.__lf.native.sent.slice(n), from);
+      seq = await page.evaluate(async (s) => {
+        window.__lf.native.emit({ seq: ++s, reset: false, events: [{ Selected: { frame: 0, lane: 4 } }] });
+        await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        window.__lf.native.emit({ seq: ++s, reset: false, events: [{ Selected: { frame: 0, lane: 0 } }] });
+        return s;
+      }, seq);
       await settle();
       const doubled = await page.evaluate(() => window.__laneView(0));
       await toTop();
@@ -330,15 +366,21 @@ await probe(async ({ open }) => {
         const r = document.querySelectorAll('.lp-lane')[0].querySelector('canvas').getBoundingClientRect();
         return { x: (r.left + r.right) / 2, y: (r.top + r.bottom) / 2 };
       });
+      from = await sentCount();
       await page.keyboard.press('5');
+      await answer(from);
+      from = await sentCount();
       await page.mouse.click(aim.x, aim.y);
+      const pointerSent = (await answer(from)).commands;
       await settle();
       const held = await page.evaluate(() => ({ at: window.__atPointer, after: window.__laneView(0) }));
-      const rapidOk = doubled.selected === 0 && inside(doubled, 1)
+      const rapidOk = JSON.stringify(doubleSent) === JSON.stringify([{ SelectTrack: 4 }, { SelectTrack: 0 }])
+        && doubled.selected === 0 && inside(doubled, 1)
+        && JSON.stringify(pointerSent) === JSON.stringify([{ SelectTrack: 0 }])
         && held.at.lane === 0 && held.at.scrollTop < held.after.overflow
         && held.after.selected === 0 && held.after.scrollTop === held.at.scrollTop;
       ok &&= rapidOk;
-      rapid = { rapidOk, doubled, aim, held };
+      rapid = { rapidOk, doubleSent, doubled, aim, pointerSent, held };
     }
     // Half of lane 5 below the fold, then a real pointer click on its PLAY (page.mouse: a locator click
     // would scroll the button into view itself).
@@ -350,17 +392,20 @@ await probe(async ({ open }) => {
       return { scrollTop: stack.scrollTop, x: (play.left + play.right) / 2, y: (play.top + play.bottom) / 2,
         playVisible: play.bottom <= window.__stackView().bottom, lane: window.__laneView(4) };
     });
+    const from = await sentCount();
     await page.mouse.click(press.x, press.y);
+    const pressSent = (await answer(from, 2)).commands;
     if (motion !== 'reduce') await settle();
     await page.waitForTimeout(150);
     const pressed = await page.evaluate(() => ({ state: window.__lf.looper.stateOf(4), view: window.__laneView(4) }));
-    const pointerOk = press.playVisible && !inside(press.lane) && pressed.view.selected === 4
-      && pressed.state === 'PLAYING' && pressed.view.scrollTop === press.scrollTop;
+    const pointerOk = press.playVisible && !inside(press.lane)
+      && JSON.stringify(pressSent) === JSON.stringify([{ SelectTrack: 4 }, { PlayStop: 4 }])
+      && pressed.view.selected === 4 && pressed.state === 'PLAYING' && pressed.view.scrollTop === press.scrollTop;
     ok &&= pointerOk;
     await page.screenshot({ path: `logs/layout/${name}.png` });
-    console.log(JSON.stringify({ name, ok, scrolled, rapid, pointerOk, press, pressed, steps }));
+    console.log(JSON.stringify({ name, ok, scrolled, rapid, pointerOk, press, pressSent, pressed, steps }));
     if (!ok) failures.push(name);
-    results.push({ name, ok, scrolled, rapid, pointerOk, press, pressed, steps });
+    results.push({ name, ok, scrolled, rapid, pointerOk, press, pressSent, pressed, steps });
     await page.close();
   }
   await writeFile(`logs/layout/${label}.json`, JSON.stringify(results, null, 2));
