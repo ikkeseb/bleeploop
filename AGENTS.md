@@ -22,7 +22,7 @@ Harness auto-load of nested files is not reliable: open the briefing yourself.
 | Any runtime verification (browser probe, `__lf`, `tauri dev`, Mac-vs-PC) | `docs/VERIFY.md` |
 | Any non-trivial work; `engine.ts`, bus wiring | `docs/ARCHITECTURE.md` |
 | Planning or performing a by-ear/eye/rig session; gate-adjacent code; latency | `STATUS.md` |
-| Releases, licences, workflow hardening | `docs/plans/release-prep.md` |
+| Releases, licences | `.github/workflows/build-exe.yml` (header), `THIRD-PARTY-NOTICES.md` |
 | The native audio engine: the decided direction, its stages, gates and owner decisions | `docs/plans/native-engine.md` |
 | The hands-free looper (landed) and what is explicitly not built | `docs/plans/pedalboard.md` |
 
@@ -65,6 +65,9 @@ Harness auto-load of nested files is not reliable: open the briefing yourself.
   asio/no-asio, CI; plus `pnpm verify:jam` after looper/capture/state-machine changes (off the push
   gate; scheduling it is the owner's call). Never push red. The open by-ear/eye/rig gates live ON
   `main`.
+- **Every workflow runs with `permissions: contents: read`** (a job that must write widens only
+  itself), pins each action by commit sha with the major tag as a trailing comment (bump both
+  together), and checks out with `persist-credentials: false`.
 - **Tracked files are impersonal and secret-free:** roles ("the owner"), never a person's name,
   verbatim speech or an email address. Development happens on a Mac (no Rust toolchain) and a
   Windows PC, and agent memory does not sync: a durable fact goes in a tracked file.

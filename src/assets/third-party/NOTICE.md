@@ -12,6 +12,12 @@ Two variants of the ASIO Compatible Logo, copied unaltered from Steinberg's ASIO
 They are Steinberg's trademark, not part of this project, and **not covered by the repository's MIT
 licence**. They are here because Steinberg's ASIO Usage Guidelines require the logo where a product
 built with the SDK shows the word "ASIO" (1b web pages, 1e/1f the About box when ASIO is on by
-default). Never edit, recolour or crop them.
+default). Never edit, recolour or crop them. The SDK licence is silent on redistributing the artwork;
+it is committed by the owner's decision.
+
+Usage (Steinberg Usage Guidelines 1b/1c/1e/1f/14/15): the app shows the logo in Help only, and only
+when the build can offer ASIO, kept small with the trademark line as text beside it; the README and
+the release notes carry the JPG. Write "ASIO®" on first use. "ASIO" is never part of the product
+name.
 
 ASIO is a registered trademark of Steinberg Media Technologies GmbH.

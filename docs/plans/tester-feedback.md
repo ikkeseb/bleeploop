@@ -30,7 +30,7 @@ All items remain open until the tester confirms. § Code reading records what th
 | F9 | A toast reported inability to start live input because the plugin has no audio input bus and a synth cannot be armed. No subsequent bug was reported. | Make unsupported live-input actions clear and avoid confusing failure feedback. Determine what action triggered the toast; GO LIVE was only an agent hypothesis. The repeated screenshot adds no separate incident. |
 | F10 | AUTO 50 is an unclear name. | Use wording that explains the mode and what the number controls. Final label is undecided. |
 | F11 | The owner wants the click audible whenever armed and CLICK is enabled. | Include the armed waiting state in audible-click behavior. This is a requested change to the current transport-mode policy described in STATUS Stop 3, not implemented behavior. Check recording arm/wait states, including AUTO; preserve a clear distinction from native input GO LIVE. |
-| F12 | The owner asks about downloadable releases, possibly ASIO and non-ASIO variants, after the tester built the app manually. | Supply ready-to-run Windows downloads. Existing distribution decision is an ASIO build with WASAPI fallback, owned by docs/plans/release-prep.md. Two separate downloads are a question, not an approved change. A reported successful manual build is not independent verification of the clean-machine README path. |
+| F12 | The owner asks about downloadable releases, possibly ASIO and non-ASIO variants, after the tester built the app manually. | Supply ready-to-run Windows downloads. Existing distribution decision is an ASIO build with WASAPI fallback, owned by the `.github/workflows/build-exe.yml` header; v0.1.0 was published 2026-09-28. Two separate downloads are a question, not an approved change. A reported successful manual build is not independent verification of the clean-machine README path. |
 | F13 | Audio Settings' output reads "System default" every time it reopens; the tester wants to route the sound to a chosen output, as Ableton does. Screenshot: WASAPI, input Line (MG-XU), output list open. | One output pick routes everything. Reproduced on the dev PC: the pick was saved but the dropdown lost it (input too), and the pick steered only the plugin's native monitor while loops, synths and click followed the Windows default. |
 | F14 | A one-bar first take locks every later track to one bar. | A later track longer than the master: extend the loop, keeping the one-bar track repeating across it (an RC-505-style multiply). Built on the engine (§ Landed). |
 | F15 | No effects (delay, reverb) before recording into a track. | An elegant pre-record FX. Built on the engine (§ Landed). |
@@ -152,7 +152,7 @@ Proven in the browser tier only (`pnpm check`, `pnpm build`, `pnpm verify:jam`, 
      mic the click could trigger the take.
 3. **F8: answered 2026-09-24** by the native engine (plugins and MIDI in the device callback,
    `docs/plans/native-engine.md` Stage 4); nothing on the shipping line. F12 is the plan's Stage 0
-   (the first published release, `docs/plans/release-prep.md`).
+   (the first published release: v0.1.0, 2026-09-28).
 
 Preserve the complete intake while fixing one issue at a time. The tester's machine remains the
 final confirmation for its reported failures.

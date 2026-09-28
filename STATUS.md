@@ -25,23 +25,22 @@ echo checked on every click (one of two launches failed drift by 0.004 ms/min af
 inside take A; the relaunch passed).
 Driver latency reports are not guitar latency; after a relevant change, rerun only the affected check.
 
-**Last play: 2026-09-24** (web path, `pnpm dev:asio`, jam, two–three tracks, no pedal): the click too
-quiet at full volume (built: twice the level); loops audibly out of sync with the click, worse after
-STOP → PLAY ALL; END STOP unclear (`docs/backlog-taste.md`); no stop walked. The engine has not been
-played by ear yet.
+**Last play: 2026-09-28** (engine, a local release build, ASIO; a second player on a WASAPI build
+of their own): worked well overall, no issue found; the WASAPI player heard delay on DI monitoring
+(`docs/plans/tester-feedback.md` F8); no stop marked. Before that, **2026-09-24** (web path): the
+click too quiet (built: twice the level); loops out of sync with the click, worse after STOP → PLAY
+ALL; END STOP unclear (`docs/backlog-taste.md`).
 
 ## Play first
 
-Install the v0.1.0 draft (GitHub → Releases → the draft's installer), or `pnpm dev:asio`. Audio
+Install v0.1.0 from GitHub → Releases (published 2026-09-28; the first CI-built exe on the rig, whose
+ASIO SDK is 2.3.4 where local builds use 2.3.3), or `pnpm dev:asio`. Audio
 Settings: ASIO, buffer 128, the guitar's input channel. Load the amp-sim, GO LIVE, play a real jam
 **before reading further**, write the opinion down. If it feels off, that outranks every green check:
-say what felt wrong and re-scope. If it feels right, publish the draft.
+say what felt wrong and re-scope.
 With a MIDI footswitch plugged: learn REC/DUB onto it (Audio Settings → midi learn, one tap) and take
 the jam's records with the foot. One press, one action? Still learned after the next restart? Then
 switch it to HOLD and hold it through one overdub.
-The draft is v0.1.0; what landed after it (multiply, the free take that grows the loop, TRIM, IN FX, stage view, the foot
-vocabulary, Help's diagnostics) runs from
-`pnpm dev:asio` and is folded into Stops 1 and 3 below.
 
 ## The rig lap — in plug order, each stop a yes/no
 

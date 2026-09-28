@@ -20,14 +20,8 @@ runtime (already true in the release build); the wet master shareable to OBS, br
 
 ## Stage 0 — ship today's architecture
 
-*Owner: plays one jam on the installed draft, then clicks publish (STATUS E1).*
-
-Close the two open items in `docs/plans/release-prep.md` first: the artifact job is gated on its exact
-SHA (`pnpm check`, the Rust tests, the no-ASIO check), and the first CI-built exe is heard on the rig.
-Then tag `v0.1.0`; `build-exe.yml` builds the ASIO+WASAPI installer and stages the draft. Testers stop
-building from source (LLVM and the ASIO SDK are build-machine needs only). Known limit, said in the
-release notes and `README.md`: takes land late until Audio Settings → rec align is set by ear (+69 ms
-on the dev rig; other rigs differ); the engine removes the setting (STATUS E7).
+Lapsed (Stage 5's release cut): v0.1.0 shipped on the engine, published 2026-09-28. Testers download
+the installer instead of building from source (LLVM and the ASIO SDK are build-machine needs only).
 
 ## Stage 1 — premise spike (days; beyond the OWNER zone, it stops the plan)
 
@@ -565,7 +559,7 @@ join's rates (`trace` in `src-tauri/src/engine_io/callback.rs`).
 *Owner: turns the engine toggle on and walks the engine lap.*
 
 **Release cut (owner, 2026-09-26):** the repo's first public release runs on the engine, soon; small
-bugs are acceptable. v0.1.0 is not published, so Stage 0, E1, E5, E7 and the v0.1.0 import fixtures
+bugs are acceptable. v0.1.0 was not yet published, so Stage 0, E1, E5, E7 and the v0.1.0 import fixtures
 lapse. The release gates on the guitar path (device, transport, 5 tracks, click and count-in, lane FX,
 a plugin slot live, waveforms and meters) and Share output; the rest of the parity checklist can follow
 in point releases. Stage 6's deletion follows the release: until then the web path stays behind the
@@ -667,7 +661,7 @@ timbre against today.
 
 ## Stage 6 — flip and delete
 
-*Owner: publishes v0.1.0 (the first release; see Stage 5's release cut).*
+*Owner: v0.1.0 is published (2026-09-28); the engine lap decides when the web path goes.*
 
 Native became the default for v0.1.0, with the web path behind the Audio Settings switch. Whether it
 stays one more release depends on the engine lap (owner's call). Then delete:

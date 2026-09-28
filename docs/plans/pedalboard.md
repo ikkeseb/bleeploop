@@ -47,4 +47,4 @@ settings come back with it at every load and ride in a session export (`src-taur
 ## Open questions that would change this plan
 
 - Whether the owner plays with a footswitch or MIDI foot controller, and what it sends. None → the
-  pick moves to the first downloadable release (`docs/plans/release-prep.md`).
+  pick moves to the first downloadable release (v0.1.0, published 2026-09-28).

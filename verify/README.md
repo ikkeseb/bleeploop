@@ -37,7 +37,8 @@ Each guard runs the real source; none carries a hand-ported copy of it. There ar
   state re-runs (`verify/guards/layout-store.mjs`). Worklet processors load with a `registerProcessor` shim
   (`verify/guards/capture-packets.mjs`, `verify/guards/worklet-pop.mjs`).
 
-`verify/guards/docs.mjs` is the docs guard: cited paths exist, cited shas resolve, the `STATUS.md` rig
+`verify/guards/docs.mjs` is the docs guard: cited paths exist, cited shas resolve (the repo
+started from one squashed commit, so no doc may cite an earlier sha), the `STATUS.md` rig
 lap has ≤ 10 stops. A dead path a doc keeps on purpose says so on the same line — "(now `…`)",
 "not yet built", "upstream" — and the guard skips it.
 

@@ -11,7 +11,8 @@ name: build-exe
 # build time and never committed or attached to a release. `tauri.release.conf.json` adds what a
 # GPLv3 binary must carry: the licence page in the installer and the licence texts, third-party
 # notices and a source pointer installed beside the exe. The installer downloads the WebView2
-# runtime when a machine lacks it (Tauri's default `downloadBootstrapper`).
+# runtime when a machine lacks it (Tauri's default `downloadBootstrapper`). The build is unsigned, so
+# SmartScreen warns on first run (said in the release notes); code signing is not planned.
 
 on:
   push:
