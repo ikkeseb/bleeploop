@@ -1,9 +1,12 @@
-/** Measures the real per-track FX graph's pitch stage offline: unused pitch allocates no delay lines,
- * bypassed/reset output preserves the dry signal, enabling it mid-render costs no discontinuity and
- * reuses its delay lines across repeated enable/bypass/reset, and a live chain in the running graph
- * applies its stored pitch on first enable without dropping an audio block. `--baseline` reads a
- * reviewer-saved copy at logs/fx-baseline.ts and reports its resource cost instead, for comparison.
- * Timings are offline DSP render work, not whole-app CPU or physical output latency.
+/** The pitch stage of the export's offline FX chain (`src/session/offline-fx.ts`, Tone's OfflineContext),
+ * rendered offline: an unused pitch allocates no delay lines, a bypassed chain and one reset to the
+ * defaults keep the dry signal, a pitch enabled mid-render adds no discontinuity and sounds its stored
+ * +12 semitones each time it is enabled, and repeated enable/bypass/reset reuses its delay lines.
+ * `--baseline` reads a reviewer-saved copy at logs/fx-baseline.ts and reports its resource cost instead,
+ * for comparison. Timings are offline DSP render work.
+ *
+ * Cannot see the live lanes' pitch (the engine's: lf-engine `tests/fx_delay_pitch.rs`), whole-app CPU,
+ * device latency or anything audible.
  * Run: pnpm probe fx-pitch-cost [--baseline]
  */
 import assert from 'node:assert/strict';
@@ -14,10 +17,10 @@ const baseline = flag('baseline');
 await probe(async ({ open }) => {
   const { page } = await open();
   const results = await page.evaluate(async (baseline) => {
-    await window.__lf.engine.start();
-    const path = baseline ? '/logs/fx-baseline.ts' : '/src/audio/fx/fx.ts';
-    const { FxChain, defaultFxStates } = await import(path);
-    const transformed = await (await fetch('/src/audio/fx/fx.ts')).text();
+    const path = baseline ? '/logs/fx-baseline.ts' : '/src/session/offline-fx.ts';
+    const { FxChain } = await import(path);
+    const { defaultFxStates } = await import('/src/ui/state/fx-metadata.ts');
+    const transformed = await (await fetch('/src/session/offline-fx.ts')).text();
     const tonePath = transformed.match(/from\s+["']([^"']*\/tone[^"']*)["']/)?.[1];
     if (!tonePath) throw new Error('Could not resolve application Tone module');
     const { OfflineContext, Gain } = await import(tonePath);
@@ -90,6 +93,7 @@ await probe(async ({ open }) => {
     return results;
   }, baseline);
   console.log(JSON.stringify({ baseline, results }));
+  assert.equal(results.length, 5);
   for (const result of results) {
     // Tone's CrossFade uses a 1024-point abs() waveshaper that misses the exact dry endpoint.
     // The original chain already deviates by 0.000614 at input peak 0.1. Preserve it within 1%.
@@ -106,83 +110,4 @@ await probe(async ({ open }) => {
       assert.equal(result.resetPitch, 0, 'CLEAR/import reset must retain the default pitch parameter');
     }
   }
-  const live = await page.evaluate(async (baseline) => {
-    const lf = window.__lf;
-    const ctx = lf.engine.ctx;
-    const { FxChain, defaultFxStates } = await import(baseline ? '/logs/fx-baseline.ts' : '/src/audio/fx/fx.ts');
-    const states = defaultFxStates();
-    states[1].params.semitones = 12;
-    lf.master.setMuted(true);
-    const chain = new FxChain(states);
-    const raw = (node) => node.output ? raw(node.output) : node;
-    const input = (node) => node.input ? input(node.input) : node;
-    const source = ctx.createOscillator();
-    source.frequency.value = 220;
-    const gain = ctx.createGain(); gain.gain.value = 0.1;
-    source.connect(gain); gain.connect(input(chain.input)); source.start();
-    const moduleUrl = URL.createObjectURL(new Blob([`
-      class Capture extends AudioWorkletProcessor {
-        next = -1; // Chromium can repeat a quantum's currentFrame (capture-processor.ts); a real input never repeats
-        constructor(options) {
-          super(); this.first = options.processorOptions.first;
-          this.samples = new Float32Array(options.processorOptions.frames); this.sent = false;
-        }
-        process(inputs) {
-          if (this.sent) return false;
-          const base = Math.max(currentFrame, this.next);
-          this.next = base + 128;
-          const channel = inputs[0]?.[0];
-          for (let k = 0; k < 128; k++) {
-            const index = base + k - this.first;
-            if (index >= 0 && index < this.samples.length) this.samples[index] = channel?.[k] ?? 0;
-          }
-          if (base + 128 >= this.first + this.samples.length) {
-            this.sent = true; this.port.postMessage(this.samples, [this.samples.buffer]);
-          }
-          return true;
-        }
-      }
-      registerProcessor('pitch-live-capture', Capture);
-    `], { type: 'text/javascript' }));
-    await ctx.audioWorklet.addModule(moduleUrl); URL.revokeObjectURL(moduleUrl);
-    const first = Math.ceil((ctx.currentTime + 0.15) * ctx.sampleRate);
-    const meter = new AudioWorkletNode(ctx, 'pitch-live-capture', {
-      processorOptions: { first, frames: Math.ceil(1.8 * ctx.sampleRate) },
-    });
-    raw(chain.nodes[1].output).connect(meter); meter.connect(ctx.destination); // Recorder output is silence.
-    const captured = new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('Live pitch capture timed out')), 5000);
-      meter.port.onmessage = ({ data }) => { clearTimeout(timer); resolve(data); };
-    });
-    const until = async (seconds) => {
-      while (ctx.currentTime < first / ctx.sampleRate + seconds) await new Promise((resolve) => setTimeout(resolve, 2));
-    };
-    await until(0.4);
-    const start = performance.now(); chain.nodes[1].setBypass(false);
-    const enableMs = performance.now() - start;
-    await until(1.05); chain.setState(defaultFxStates());
-    const pcm = await captured;
-    let silentRun = 0, maxSilentRun = 0, maxJump = 0;
-    for (let k = 1; k < pcm.length; k++) {
-      silentRun = Math.abs(pcm[k]) < 1e-7 ? silentRun + 1 : 0;
-      maxSilentRun = Math.max(maxSilentRun, silentRun);
-      maxJump = Math.max(maxJump, Math.abs(pcm[k] - pcm[k - 1]));
-    }
-    const frequency = (a, b) => {
-      let crossings = 0;
-      for (let k = Math.ceil(a * ctx.sampleRate); k < Math.floor(b * ctx.sampleRate); k++) {
-        if (pcm[k] <= 0 && pcm[k + 1] > 0) crossings++;
-      }
-      return crossings / (b - a);
-    };
-    const result = { enableMs, maxSilentRun, maxJump,
-      beforeHz: frequency(0.1, 0.3), pitchHz: frequency(0.75, 0.95), resetHz: frequency(1.4, 1.7) };
-    source.stop(); source.disconnect(); gain.disconnect(); meter.disconnect(); chain.dispose();
-    return result;
-  }, baseline);
-  console.log(JSON.stringify({ live }));
-  assert.ok(live.maxSilentRun < 8, 'live first-enable and reset must not drop an audio block');
-  assert.ok(live.maxJump < 0.03, 'live switching must retain smooth ramps');
-  assert.ok(Math.abs(live.beforeHz - 220) < 10 && Math.abs(live.resetHz - 220) < 10);
-  assert.ok(Math.abs(live.pitchHz - 440) < 10, 'first enable must apply the stored pitch');
 });

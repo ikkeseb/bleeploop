@@ -1,7 +1,7 @@
 import { createMemo, createSignal } from 'solid-js';
-import { exportLoops } from '../../audio/export/export';
-import { importSession, maxImportArchiveBytes } from '../../audio/export/import';
-import { restoreSessionTones } from '../../audio/slot-tones';
+import { exportLoops } from '../../session/export';
+import { importSession, maxImportArchiveBytes } from '../../session/import';
+import { restoreSessionTones } from '../state/slot-tones';
 import { notifyError, notifyInfo } from '../../notify';
 import { clock, looper, sampleRate, session } from '../state/audio';
 import { anyTrackIn, masterBars } from '../looper/shared';
@@ -11,10 +11,10 @@ import { anyTrackIn, masterBars } from '../looper/shared';
  * They are file operations, not transport, and as labelled pills they pushed the bar past the viewport
  * at every width below 1600 (the Tauri default is 1280).
  *
- * Export every committed track (mono WAV) + the wet stereo master + session.json, and on the engine each
+ * Export every committed track (mono WAV) + the wet stereo master + session.json, and each
  * loaded plugin slot's tone. Import a previous export into an EMPTY looper — import never overwrites, so
  * it is enabled only while no master loop exists (the inverse of EXPORT) — then store the tones it
- * carries (`slot-tones.ts`). Both go through the mode's `session` (the web looper or the engine).
+ * carries (`slot-tones.ts`). Both go through `session` (`src/ui/state/audio.ts`).
  */
 export function SessionTools() {
   const hasMaster = () => looper.masterLengthFrames() > 0;

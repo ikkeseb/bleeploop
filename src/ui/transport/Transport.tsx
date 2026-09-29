@@ -1,12 +1,10 @@
 import { For, Show, createEffect, createMemo, createSignal, onCleanup } from 'solid-js';
-import { notifyError } from '../../notify';
 import { clock, looper, master, sampleRate } from '../state/audio';
 import { FADE_BARS, engineFade, laterTakeBars } from '../state/engine-store';
-import { engineMode } from '../../platform';
 import { anyTrackIn, createTwoStepConfirm, masterBars } from '../looper/shared';
 import { fadeGate, fixedGate, tapGate } from '../looper/gates';
 import { meterFrac, registerInputMeter, registerPhaseDial, unregisterInputMeter, unregisterPhaseDial } from '../looper/waveform';
-import { autoRecordThreshold } from '../../audio/looper/auto-record';
+import { autoRecordThreshold } from '../state/auto-record';
 import { InputFx } from './InputFx';
 import './transport.css';
 
@@ -14,13 +12,12 @@ import './transport.css';
  * Command-bar transport cluster. Renders as a Fragment so its children become direct
  * flex items of the `.cmd` header in app.tsx — the internal `.grow` spacer then pushes master + the
  * app.tsx tool icons to the far right. Left→right: BPM group (34px numeral + steppers + beat dots) · TAP ·
- * CLICK / FIXED-N / RETAKE / AUTO toggles · loop ring-dial readout · END STOP · ■/▶ ALL + FADE and its bars (engine
- * mode only) + ✕ ALL (two-step) + the record level + MIC LIVE (the web path's; in engine mode raw input is a
- * slot set to Off and live) · IN FX (engine mode only: `InputFx.tsx`) · spacer · master mute +
- * slider + value. EXPORT / IMPORT are icon tools in app.tsx's `.tools`
+ * CLICK / FIXED-N / RETAKE / AUTO toggles · loop ring-dial readout · END STOP · ■/▶ ALL + FADE and its bars
+ * + ✕ ALL (two-step) + the record level (raw input is a slot set to Off and live) · IN FX (`InputFx.tsx`) ·
+ * spacer · master mute + slider + value. EXPORT / IMPORT are icon tools in app.tsx's `.tools`
  * cluster (`SessionTools.tsx`).
  *
- * The ALL / MIC / loop-readout / master controls live here alone — this command-bar cluster is their
+ * The ALL / loop-readout / master controls live here alone — this command-bar cluster is their
  * single home (the looper zone has no head row).
  */
 export function Transport(props: { returnFocus?: (el: HTMLElement | undefined) => void }) {
@@ -90,17 +87,17 @@ export function Transport(props: { returnFocus?: (el: HTMLElement | undefined) =
   // driven by the waveform rAF loop (registerPhaseDial), not a signal — invariant 6.
   const DIAL_C = 2 * Math.PI * 16;
 
-  // ----- global transport (■/▶ ALL, FADE, ✕ ALL two-step, MIC) wired to the shared looper store -----
+  // ----- global transport (■/▶ ALL, FADE, ✕ ALL two-step) wired to the shared looper store -----
   // Memoized so each five-lane scan runs once per state change, not once per consuming control per render.
   const anyLive = createMemo(() => anyTrackIn('PLAYING', 'OVERDUBBING', 'RECORDING'));
   const anyCapturing = createMemo(() => anyTrackIn('RECORDING', 'OVERDUBBING'));
 
   // ----- FIXED length, shown as what the next take will actually record -----
   // Up to the loop's bar count a later take is that many bars and repeats across the loop; past it the
-  // loop grows to it in whole loops (engine mode's multiply), so the stepper moves a bar at a time up to
-  // the loop and a whole loop at a time above it. FIXED off, an engine-mode take runs until the press and
-  // may grow the loop too (E10: the stop picks the nearest whole number of loops). `nextTakeMaxBars()` bounds it: 32 before a loop, then
-  // the longest take the looper records (the web looper: the loop itself). The label and the stepper
+  // loop grows to it in whole loops (multiply), so the stepper moves a bar at a time up to the loop and a
+  // whole loop at a time above it. FIXED off, a take runs until the press and may grow the loop too (E10:
+  // the stop picks the nearest whole number of loops). `nextTakeMaxBars()` bounds it: 32 before a loop,
+  // then the longest take the looper records. The label and the stepper
   // show the EFFECTIVE value so the UI never promises a take the looper will not record; the signal
   // itself is left alone, so a longer loop restores the user's choice.
   const maxTakeBars = createMemo(() => Math.max(1, Math.floor(looper.nextTakeMaxBars())));
@@ -127,7 +124,7 @@ export function Transport(props: { returnFocus?: (el: HTMLElement | undefined) =
           ? 'Length of the next take, in bars (at most the loop). A shorter take repeats across the loop'
           : 'Length of the first take, in bars (count-in + auto-stop on the downbeat)';
 
-  // ----- FADE (engine mode): every playing lane fades out over FADE's bars and stops on the bar line; a
+  // ----- FADE: every playing lane fades out over FADE's bars and stops on the bar line; a
   // second press while they fade stops them at once. Its bars step through FADE_BARS, read at the press.
   const fadeState = createMemo(() => fadeGate());
   const fadeBars = () => engineFade.bars();
@@ -147,26 +144,6 @@ export function Transport(props: { returnFocus?: (el: HTMLElement | undefined) =
   const onClearAll = () => {
     if (!hasMaster() && !anyLive()) return;
     clearAll.trigger();
-  };
-
-  // Toggle mic/line input. toggleInput() resolves false in three cases — a successful DISARM, an ARM
-  // cancelled by a later disarm while the device was still opening, and a failed ARM (no device:
-  // armInput returns false with only a console.warn) — so we branch on the armed state captured BEFORE
-  // the toggle AND on whether the user still wants the input on: a false result while arming, with the
-  // request still standing, means "no input available". A rejected promise is getUserMedia
-  // denying/failing. Both must surface as a toast — console-only would stay invisible in a release
-  // build. The underlying console.warn/error still feed the release log.
-  const onToggleMic = () => {
-    const wasArmed = looper.inputArmed();
-    looper.toggleInput().then(
-      (armed) => {
-        if (!wasArmed && !armed && looper.inputArmRequested()) notifyError('No audio input available to arm');
-      },
-      (err) => {
-        console.error('[transport] mic arm failed', err);
-        notifyError("Couldn't arm the mic/line input", err);
-      },
-    );
   };
 
   onCleanup(() => clearTimeout(pulseTimer));
@@ -270,7 +247,7 @@ export function Transport(props: { returnFocus?: (el: HTMLElement | undefined) =
       </button>
 
       {/* Record modes (how the next take records) take the wrapping row, leaving global transport beside
-          the loop dial. Every toggle here, TAP / END STOP, MIC and master mute keep ONE aria-label and say
+          the loop dial. Every toggle here, TAP / END STOP and master mute keep ONE aria-label and say
           on/off through aria-pressed alone; a label that flips as well reads "Click off, pressed". */}
       <div class="transport__modes">
         <div class="transport__click" role="group" aria-label="Metronome">
@@ -303,7 +280,7 @@ export function Transport(props: { returnFocus?: (el: HTMLElement | undefined) =
 
         {/* Fixed-length record — the length of the NEXT take in bars. Before a loop exists that is the
             first take (count-in, then auto-stop on the downbeat); after it, the next take — a shorter take
-            repeats across the loop, a longer one (engine mode) grows the loop in whole loops. Read at arm,
+            repeats across the loop, a longer one grows the loop in whole loops. Read at arm,
             so the controls stay usable after the BPM lock and are locked only while a capture is live, or
             while RETAKE (whose passes are master-length) overrides them. */}
         <div class="transport__fixed" role="group" aria-label="Take length in bars">
@@ -439,8 +416,8 @@ export function Transport(props: { returnFocus?: (el: HTMLElement | undefined) =
         END STOP
       </button>
 
-      {/* Global transport: ■/▶ ALL · FADE + its bars (engine mode) · ✕ ALL (two-step) · record level · MIC
-          LIVE (web path) · IN FX (the input sends, engine mode). */}
+      {/* Global transport: ■/▶ ALL · FADE + its bars · ✕ ALL (two-step) · record level · IN FX (the
+          input sends). */}
       <div class="transport__global">
         <button
           class="transport__tgl"
@@ -452,42 +429,40 @@ export function Transport(props: { returnFocus?: (el: HTMLElement | undefined) =
         >
           {anyStopping() ? '■ NOW' : anyLive() ? '■ ALL' : '▶ ALL'}
         </button>
-        <Show when={engineMode()}>
-          <div class="transport__fade" role="group" aria-label="Fade out">
+        <div class="transport__fade" role="group" aria-label="Fade out">
+          <button
+            class="transport__tgl"
+            classList={{ 'is-armed': engineFade.fading() }}
+            disabled={!fadeState().ok}
+            onClick={() => engineFade.fadeAll()}
+            aria-label={engineFade.fading() ? 'Stop the fade now' : 'Fade out all tracks'}
+            title={fadeTitle()}
+          >
+            {engineFade.fading() ? 'FADING' : 'FADE'}
+          </button>
+          <div class="transport__bars" role="group" aria-label="Fade length in bars">
             <button
-              class="transport__tgl"
-              classList={{ 'is-armed': engineFade.fading() }}
-              disabled={!fadeState().ok}
-              onClick={() => engineFade.fadeAll()}
-              aria-label={engineFade.fading() ? 'Stop the fade now' : 'Fade out all tracks'}
-              title={fadeTitle()}
+              class="transport__step"
+              aria-label="Shorter fade"
+              disabled={fadeBars() <= FADE_BARS[0]}
+              onClick={() => stepFadeBars(-1)}
             >
-              {engineFade.fading() ? 'FADING' : 'FADE'}
+              −
             </button>
-            <div class="transport__bars" role="group" aria-label="Fade length in bars">
-              <button
-                class="transport__step"
-                aria-label="Shorter fade"
-                disabled={fadeBars() <= FADE_BARS[0]}
-                onClick={() => stepFadeBars(-1)}
-              >
-                −
-              </button>
-              <span class="transport__bars-val">
-                {fadeBars()}
-                <span class="transport__bars-unit">{fadeBars() === 1 ? 'bar' : 'bars'}</span>
-              </span>
-              <button
-                class="transport__step"
-                aria-label="Longer fade"
-                disabled={fadeBars() >= FADE_BARS[FADE_BARS.length - 1]}
-                onClick={() => stepFadeBars(1)}
-              >
-                +
-              </button>
-            </div>
+            <span class="transport__bars-val">
+              {fadeBars()}
+              <span class="transport__bars-unit">{fadeBars() === 1 ? 'bar' : 'bars'}</span>
+            </span>
+            <button
+              class="transport__step"
+              aria-label="Longer fade"
+              disabled={fadeBars() >= FADE_BARS[FADE_BARS.length - 1]}
+              onClick={() => stepFadeBars(1)}
+            >
+              +
+            </button>
           </div>
-        </Show>
+        </div>
         <button
           class="transport__tgl"
           classList={{ 'is-armed': clearAll.armed() }}
@@ -519,20 +494,6 @@ export function Transport(props: { returnFocus?: (el: HTMLElement | undefined) =
             });
           }}
         />
-        {/* The web path's mic / line input. Engine mode has none: a slot set to Off goes live on its own
-            input instead (the slot header). */}
-        <Show when={!engineMode()}>
-          <button
-            class="transport__tgl"
-            classList={{ 'is-on-green': looper.inputArmed() }}
-            onClick={onToggleMic}
-            aria-label="Mic / line input"
-            aria-pressed={looper.inputArmed()}
-            title="Synths are always recorded; this arms mic / line input"
-          >
-            {looper.inputArmed() ? '● MIC LIVE' : 'MIC'}
-          </button>
-        </Show>
         <InputFx returnFocus={props.returnFocus} />
       </div>
 

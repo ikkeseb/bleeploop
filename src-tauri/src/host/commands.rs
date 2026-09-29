@@ -1,12 +1,12 @@
 //! The `#[tauri::command]` IPC surface for the `PluginHost` capability boundary
-//! (`src/platform/host.ts`), plus the `--scan-one` child entry point and the DEV render-rate-mode
-//! startup log.
+//! (`src/platform/host.ts`), plus the `--scan-one` child entry point. The plugin commands route to
+//! the native engine's slots (`engine_io::plugins`).
 //!
 //! Contract notes mirrored from `host.ts`:
 //!   - `slot` is 0 | 1 (two native slots); we take it as `u8` and validate.
 //!   - `loadPlugin` REQUIRES `id`: one `.clap` bundle can export several descriptors, so
 //!     `(slot, path)` alone would silently load `descriptor[0]`.
-//!   - a tone (engine mode) is a tone file's bytes (`host/tone.rs`), raw both ways: JS sees an
+//!   - a tone is a tone file's bytes (`host/tone.rs`), raw both ways: JS sees an
 //!     ArrayBuffer and sends a Uint8Array.
 //!   - every command returns `Result<_, String>` so a stub/error surfaces as a rejected JS promise
 //!     rather than a panic across the IPC boundary.
@@ -20,113 +20,21 @@ fn validate_slot(slot: u8) -> Result<(), String> {
     }
 }
 
-/// In engine mode the engine owns the audio device and routes the notes: the live line's device arms
-/// and note commands are refused (GO LIVE is the engine's `SetSlotLive`, notes go through
-/// `engine_send`). The plugin commands route to the engine's slots (`engine_io::plugins`).
+/// The native engine's slots (`engine_io::plugins`); an error when the engine did not start.
 #[cfg(windows)]
-fn refuse_in_engine_mode(command: &str) -> Result<(), String> {
-    if crate::engine_io::mode::active() {
-        return Err(format!("{command}: engine mode owns the audio device"));
-    }
-    Ok(())
-}
+use crate::engine_io::mode::engine;
 
-fn validate_note_event(note: u16, velocity: Option<f64>) -> Result<(), String> {
-    if note > 127 {
-        return Err(format!("invalid MIDI note {note} (expected 0..=127)"));
-    }
-    if let Some(velocity) = velocity {
-        if !velocity.is_finite() || !(0.0..=1.0).contains(&velocity) {
-            return Err(format!(
-                "invalid MIDI note-on velocity {velocity} (expected finite 0.0..=1.0)"
-            ));
-        }
-    }
-    Ok(())
-}
-
-#[cfg(test)]
-mod note_validation_tests {
-    use super::validate_note_event;
-
-    #[test]
-    fn midi_note_and_note_on_velocity_stay_inside_the_protocol_domain() {
-        assert!(validate_note_event(0, Some(0.0)).is_ok());
-        assert!(validate_note_event(127, None).is_ok());
-        assert!(validate_note_event(128, None).is_err());
-        assert!(validate_note_event(127, Some(f64::INFINITY)).is_err());
-        assert!(validate_note_event(127, Some(f64::NAN)).is_err());
-        assert!(validate_note_event(127, Some(-0.1)).is_err());
-        assert!(validate_note_event(127, Some(1.0)).is_ok());
-        assert!(validate_note_event(127, Some(1.1)).is_err());
-    }
-}
-/// The sample rates `host_init` accepts. Every real `AudioContext` rate sits inside; outside it
-/// the RT pacing math (`Duration::from_secs_f64` of a block period) can panic or degenerate.
-const SAMPLE_RATE_RANGE: std::ops::RangeInclusive<f64> = 8_000.0..=384_000.0;
-
-fn validate_sample_rate(sample_rate: f64) -> Result<(), String> {
-    if sample_rate.is_finite() && SAMPLE_RATE_RANGE.contains(&sample_rate) {
-        Ok(())
-    } else {
-        Err(format!(
-            "unsupported sample rate {sample_rate} Hz (expected {}..={} Hz)",
-            SAMPLE_RATE_RANGE.start(),
-            SAMPLE_RATE_RANGE.end()
-        ))
-    }
-}
-
-#[cfg(test)]
-mod sample_rate_tests {
-    use super::validate_sample_rate;
-
-    #[test]
-    fn host_init_sample_rate_is_bounded_to_real_audio_rates() {
-        for ok in [8_000.0, 44_100.0, 48_000.0, 96_000.0, 384_000.0] {
-            assert!(validate_sample_rate(ok).is_ok(), "{ok} must be accepted");
-        }
-        for bad in [
-            0.0,
-            -48_000.0,
-            1e-300,
-            f64::MIN_POSITIVE,
-            7_999.0,
-            384_001.0,
-            1e12,
-            f64::INFINITY,
-            f64::NAN,
-        ] {
-            assert!(validate_sample_rate(bad).is_err(), "{bad} must be refused");
-        }
-    }
-}
-
-/// JS owns the `AudioContext`; it hands Rust the sample rate at startup so a later `loadPlugin`
-/// can `activate()` the plugin at the right rate (P9.2). Persists it into shared state.
+/// One call per WebView document: begins its session and answers its `frontendEpoch`, which every
+/// `plugin_load` presents so a load from a replaced document cannot park a slot
+/// (`engine_io::plugins`). `sample_rate` is the document's `AudioContext` rate, logged only.
 #[tauri::command]
 pub async fn host_init(
     sample_rate: f64,
     state: tauri::State<'_, PluginHostState>,
 ) -> Result<u32, String> {
-    validate_sample_rate(sample_rate)?;
-    #[cfg(windows)]
-    let frontend_epoch = super::clap::begin_frontend_session(&state)?;
-    state
-        .sample_rate
-        .store(sample_rate.to_bits(), std::sync::atomic::Ordering::Relaxed);
-    #[cfg(windows)]
-    {
-        log::info!(
-            "[plugin_host] host_init: sample_rate={sample_rate} frontend_epoch={frontend_epoch}"
-        );
-        Ok(frontend_epoch)
-    }
-    #[cfg(not(windows))]
-    {
-        log::info!("[plugin_host] host_init: sample_rate={sample_rate}");
-        Ok(0)
-    }
+    let frontend_epoch = state.begin_frontend_session();
+    log::info!("[plugin_host] host_init: sample_rate={sample_rate} frontend_epoch={frontend_epoch}");
+    Ok(frontend_epoch)
 }
 /// P9.1: hand-rolled out-of-process `walkdir` scan of the CLAP + VST3 search paths. Each bundle is
 /// loaded in a short-lived `--scan-one` child process (foreign entry-init code can crash and
@@ -154,18 +62,14 @@ pub async fn plugin_scan(app: tauri::AppHandle, force: bool) -> Result<Vec<Plugi
         Ok(Vec::new())
     }
 }
-/// P9.2/P9.3: `PluginEntry::load` → `PluginInstance::new` → `activate`, then drive `process()` on a
-/// device-less high-priority RT thread that sums L+R→mono and writes the hop-1 WebView2 SharedBuffer
-/// ring. The `!Send` instance lives on a dedicated owner thread (clack's "main thread"); only the
-/// Send `Stopped` processor crosses to the RT thread (and back, for `deactivate`, at unload). The
-/// SharedBuffer is created on the UI thread (`window`) and posted to JS once per load.
+/// Load plugin `id` from `path` into the engine's `slot` (≤ 15 s) for the document with
+/// `frontend_epoch` (`engine_io::plugins`); `tone_token` is the reload token a session import answered, when this load is that reload.
 #[tauri::command]
 pub async fn plugin_load(
     slot: u8,
     path: String,
     id: String,
     frontend_epoch: u32,
-    load_token: u32,
     tone_token: Option<u32>,
     window: tauri::WebviewWindow,
     state: tauri::State<'_, PluginHostState>,
@@ -173,162 +77,75 @@ pub async fn plugin_load(
     validate_slot(slot)?;
     #[cfg(windows)]
     {
-        // Dispatch by bundle extension: `.vst3` (file or folder bundle) → the VST3 host; everything
-        // else (`.clap`) → the CLAP host. The control plane downstream (event ring, shared buffer,
-        // gate) is identical; only the upstream render differs.
-        if let Some(engine) = crate::engine_io::mode::engine() {
-            let _ = load_token; // the live load's token for its posted buffer; an engine slot posts none
-            return engine.plugin_load(&state, &window, slot, path, id, frontend_epoch, tone_token);
-        }
-        let _ = tone_token; // the web audio path keeps no tones
-        if path.to_ascii_lowercase().ends_with(".vst3") {
-            super::clap::vst3_load(&state, &window, slot, path, id, frontend_epoch, load_token)
-        } else {
-            super::clap::load(&state, &window, slot, path, id, frontend_epoch, load_token)
-        }
+        engine()?.plugin_load(&state, &window, slot, path, id, frontend_epoch, tone_token)
     }
     #[cfg(not(windows))]
     {
-        let _ = (&state, &window, &path, &id, frontend_epoch, load_token, tone_token);
+        let _ = (&state, &window, &path, &id, frontend_epoch, tone_token);
         Err(format!("plugin_load is Windows-only (slot={slot})"))
     }
 }
-/// P9.2/P9.3: signal the producer to stop, join the owner thread (which `stop_processing()`s on the
-/// RT thread, ships the `Stopped` back, and `deactivate`s on the owner/main thread), then `Close()`
-/// the WebView2 SharedBuffer on the UI thread and drop the slot. JS releases its own view first
-/// (`plugin-bridge.teardown` → `chrome.webview.releaseBuffer`) before invoking this.
+/// Unload the slot's plugin: it crossfades out of the engine, then its owner tears it down.
 #[tauri::command]
-pub async fn plugin_unload(
-    slot: u8,
-    window: tauri::WebviewWindow,
-    state: tauri::State<'_, PluginHostState>,
-) -> Result<(), String> {
+pub async fn plugin_unload(slot: u8) -> Result<(), String> {
     validate_slot(slot)?;
     #[cfg(windows)]
     {
-        if let Some(engine) = crate::engine_io::mode::engine() {
-            return engine.plugin_unload(slot);
-        }
-        super::clap::unload(&state, &window, slot)
+        engine()?.plugin_unload(slot)
     }
     #[cfg(not(windows))]
     {
-        let _ = (&state, &window);
         Ok(())
     }
 }
 /// Frontend-reload wedge resync (2026-07-06): list the plugins currently loaded in the native slots
 /// so the frontend can detect slots stranded by a WebView reload (frontend reset to synth defaults
 /// while the native slots stayed loaded) and unload them before the next load hits "slot N already
-/// has a plugin loaded". Reads shared state only (no owner hop, no loaded plugin needed); `[]` in the
-/// web build.
+/// has a plugin loaded". `[]` in the web build.
 #[tauri::command]
-pub async fn plugin_list_loaded(
-    state: tauri::State<'_, PluginHostState>,
-) -> Result<Vec<PluginInfo>, String> {
+pub async fn plugin_list_loaded() -> Result<Vec<PluginInfo>, String> {
     #[cfg(windows)]
     {
-        if let Some(engine) = crate::engine_io::mode::engine() {
-            return engine.plugin_list_loaded();
-        }
-        super::clap::list_loaded(&state)
+        engine()?.plugin_list_loaded()
     }
     #[cfg(not(windows))]
     {
-        let _ = &state;
         Ok(Vec::new())
     }
 }
-/// P9.5: route a note-on to the plugin. Enqueues a `NoteOnEvent` onto the slot's main→audio rtrb
-/// event ring; the RT producer drains it into the next block's `InputEvents`. `velocity` is the CLAP
-/// 0..1 normalised form (the JS sink divides MIDI velocity by 127). Note events never touch a
-/// main-thread plugin call — they ride the standard process-input event queue (CLAP-correct).
+/// P9.5: set a parameter. `param_id` must be one the plugin listed (`listParams`) — an unknown id is
+/// an `Err` here and never reaches the plugin, because a plugin may crash on it.
 #[tauri::command]
-pub async fn plugin_note_on(
-    slot: u8,
-    note: u16,
-    velocity: f64,
-    state: tauri::State<'_, PluginHostState>,
-) -> Result<(), String> {
-    validate_slot(slot)?;
-    validate_note_event(note, Some(velocity))?;
-    #[cfg(windows)]
-    {
-        refuse_in_engine_mode("plugin_note_on (notes go through engine_send)")?;
-        super::clap::enqueue_event(&state, slot, super::clap::PluginEvent::NoteOn { key: note, velocity })
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = (&state, note, velocity);
-        Ok(())
-    }
-}
-/// P9.5: route a note-off to the plugin. Enqueues a `NoteOffEvent` (matched by key, wildcard
-/// note_id) onto the slot's event ring. A full ring is an `Err` (the note would otherwise stick
-/// silently); the push waits on nothing but the producer Mutex.
-#[tauri::command]
-pub async fn plugin_note_off(
-    slot: u8,
-    note: u16,
-    state: tauri::State<'_, PluginHostState>,
-) -> Result<(), String> {
-    validate_slot(slot)?;
-    validate_note_event(note, None)?;
-    #[cfg(windows)]
-    {
-        refuse_in_engine_mode("plugin_note_off (notes go through engine_send)")?;
-        super::clap::enqueue_event(&state, slot, super::clap::PluginEvent::NoteOff { key: note })
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = (&state, note);
-        Ok(())
-    }
-}
-/// P9.5: enqueue a `ParamValueEvent` onto the main→audio rtrb event ring (params are set on the
-/// audio thread via the process-input queue, never a direct main-thread setter). `param_id` must
-/// be one the plugin listed (`listParams`) — an unknown id is an `Err` here and never reaches the
-/// ring, because a plugin may crash on it. A full ring is an `Err` too.
-#[tauri::command]
-pub async fn plugin_set_param(
-    slot: u8,
-    param_id: u32,
-    value: f64,
-    state: tauri::State<'_, PluginHostState>,
-) -> Result<(), String> {
+pub async fn plugin_set_param(slot: u8, param_id: u32, value: f64) -> Result<(), String> {
     validate_slot(slot)?;
     #[cfg(windows)]
     {
-        if let Some(engine) = crate::engine_io::mode::engine() {
-            return engine.plugin_set_param(slot, param_id, value);
-        }
-        super::clap::set_param(&state, slot, param_id, value)
+        engine()?.plugin_set_param(slot, param_id, value)
     }
     #[cfg(not(windows))]
     {
-        let _ = (&state, param_id, value);
+        let _ = (param_id, value);
         Ok(())
     }
 }
-/// Engine mode's tone recall (`host/tone.rs`): save the slot's plugin tone now, through its owner, into
-/// the store, and answer the tone file's bytes as the raw response (empty: the plugin keeps no state).
-/// A session export takes each loaded slot's tone this way. The web audio path keeps no tones.
+/// Tone recall (`host/tone.rs`): save the slot's plugin tone now, through its owner, into the store,
+/// and answer the tone file's bytes as the raw response (empty: the plugin keeps no state). A session
+/// export takes each loaded slot's tone this way.
 #[tauri::command]
 pub async fn plugin_tone_take(slot: u8) -> Result<tauri::ipc::Response, String> {
     validate_slot(slot)?;
     #[cfg(windows)]
     {
-        let engine = crate::engine_io::mode::engine().ok_or(TONES_ON_THE_ENGINE_ONLY)?;
-        Ok(tauri::ipc::Response::new(engine.plugin_tone_take(slot)?))
+        Ok(tauri::ipc::Response::new(engine()?.plugin_tone_take(slot)?))
     }
     #[cfg(not(windows))]
     {
         Err(format!("plugin_tone_take is Windows-only (slot={slot})"))
     }
 }
-/// Engine mode: store a session import's tone for a slot. The raw request body is the tone file's
-/// bytes, the `slot` header names the slot and the `plugin` header the plugin session.json names for
-/// it (`{ format, path, id }` as JSON, ASCII with `\u` escapes; a tone file of another plugin is
+/// Store a session import's tone for a slot. The raw request body is the tone file's bytes, the
+/// `slot` header names the slot and the `plugin` header the plugin session.json names for it
+/// (`{ format, path, id }` as JSON, ASCII with `\u` escapes; a tone file of another plugin is
 /// refused). The answer names the plugin the tone belongs to and, when the slot holds it now, the token
 /// of the reload that hears it; nothing is loaded or swapped here (`EngineApp::plugin_tone_import`).
 #[tauri::command]
@@ -351,8 +168,7 @@ pub async fn plugin_tone_import(request: tauri::ipc::Request<'_>) -> Result<Tone
             .and_then(|v| v.to_str().ok())
             .and_then(|v| serde_json::from_str(v).ok())
             .ok_or("plugin_tone_import needs the plugin the session names (a plugin header)")?;
-        let engine = crate::engine_io::mode::engine().ok_or(TONES_ON_THE_ENGINE_ONLY)?;
-        engine.plugin_tone_import(slot, bytes, &expected)
+        engine()?.plugin_tone_import(slot, bytes, &expected)
     }
     #[cfg(not(windows))]
     {
@@ -360,15 +176,14 @@ pub async fn plugin_tone_import(request: tauri::ipc::Request<'_>) -> Result<Tone
         Err(format!("plugin_tone_import is Windows-only (slot={slot})"))
     }
 }
-/// Engine mode: the reload a session import answered `token` for did not happen (the slot moved while
-/// the import ran): drop the tone parked for it (`EngineApp::plugin_tone_forget`).
+/// The reload a session import answered `token` for did not happen (the slot moved while the import
+/// ran): drop the tone parked for it (`EngineApp::plugin_tone_forget`).
 #[tauri::command]
 pub async fn plugin_tone_forget(slot: u8, token: u32) -> Result<(), String> {
     validate_slot(slot)?;
     #[cfg(windows)]
     {
-        let engine = crate::engine_io::mode::engine().ok_or(TONES_ON_THE_ENGINE_ONLY)?;
-        engine.plugin_tone_forget(slot, token)
+        engine()?.plugin_tone_forget(slot, token)
     }
     #[cfg(not(windows))]
     {
@@ -376,85 +191,55 @@ pub async fn plugin_tone_forget(slot: u8, token: u32) -> Result<(), String> {
         Err(format!("plugin_tone_forget is Windows-only (slot={slot})"))
     }
 }
-/// Tone recall's commands answer this on the web audio path, which keeps no tones.
-#[cfg(windows)]
-const TONES_ON_THE_ENGINE_ONLY: &str = "tone recall runs on the native engine only";
-/// P9.5: enumerate the loaded plugin's parameters (stable ids + ranges). Drives the future param UI
-/// and lets a caller pick a real param id to `setParameter` (a CLAP main-thread `params` query).
+/// P9.5: enumerate the loaded plugin's parameters (stable ids + ranges + live values), so a caller
+/// can set a real param id (an owner-thread query).
 #[tauri::command]
-pub async fn plugin_list_params(
-    slot: u8,
-    state: tauri::State<'_, PluginHostState>,
-) -> Result<Vec<ParamDesc>, String> {
+pub async fn plugin_list_params(slot: u8) -> Result<Vec<ParamDesc>, String> {
     validate_slot(slot)?;
     #[cfg(windows)]
     {
-        if let Some(engine) = crate::engine_io::mode::engine() {
-            return engine.plugin_list_params(slot);
-        }
-        super::clap::list_params(&state, slot)
+        engine()?.plugin_list_params(slot)
     }
     #[cfg(not(windows))]
     {
-        let _ = &state;
         Ok(Vec::new())
     }
 }
-/// P10.0: open the slot's plugin editor in a floating OS window (CLAP `gui` ext). In floating mode the
-/// plugin owns + pumps its own window; the host only negotiates WIN32/floating, calls `create`, pins
-/// it transient to the main window, and `show`s it — all on the owner/main thread via the
-/// `OwnerRequest` channel. `mode` is accepted for forward-compat; P10.0 is floating-only (the
-/// embedded path + silent fallback is P10.3).
+/// P10.0: open the slot's plugin editor, on its owner thread: a plugin-owned floating window, else
+/// one embedded in a host window (`clap::editor_open`, `vst3_host::vst3_editor_open`). `mode` is
+/// accepted for forward-compat and ignored.
 #[tauri::command]
-pub async fn plugin_open_editor(
-    slot: u8,
-    mode: String,
-    state: tauri::State<'_, PluginHostState>,
-) -> Result<(), String> {
+pub async fn plugin_open_editor(slot: u8, mode: String) -> Result<(), String> {
     validate_slot(slot)?;
+    let _ = mode;
     #[cfg(windows)]
     {
-        let _ = mode; // P10.0: always floating
-        if let Some(engine) = crate::engine_io::mode::engine() {
-            return engine.plugin_open_editor(slot);
-        }
-        super::clap::open_editor(&state, slot)
+        engine()?.plugin_open_editor(slot)
     }
     #[cfg(not(windows))]
     {
-        let _ = (&state, mode);
         Err(format!("plugin_open_editor is Windows-only (slot={slot})"))
     }
 }
-/// P10.0: hide + destroy the slot's plugin editor (owner/main thread). Idempotent — closing a
+/// P10.0: hide + destroy the slot's plugin editor (owner thread). Idempotent — closing a
 /// non-open editor is a harmless no-op.
 #[tauri::command]
-pub async fn plugin_close_editor(
-    slot: u8,
-    state: tauri::State<'_, PluginHostState>,
-) -> Result<(), String> {
+pub async fn plugin_close_editor(slot: u8) -> Result<(), String> {
     validate_slot(slot)?;
     #[cfg(windows)]
     {
-        if let Some(engine) = crate::engine_io::mode::engine() {
-            return engine.plugin_close_editor(slot);
-        }
-        super::clap::close_editor(&state, slot)
+        engine()?.plugin_close_editor(slot)
     }
     #[cfg(not(windows))]
     {
-        let _ = &state;
         Ok(())
     }
 }
 /// P11.0: enumerate native (cpal/WASAPI-shared) capture devices for the input-device picker. Opens
-/// no stream, so it runs directly on the command thread — no owner-thread hop or loaded plugin
-/// needed. The web build returns `[]` (the boundary stub); this is the native answer.
+/// no stream, so it runs directly on the command thread. The web build returns `[]` (the boundary
+/// stub); this is the native answer.
 #[tauri::command]
-pub async fn plugin_list_input_devices(
-    state: tauri::State<'_, PluginHostState>,
-) -> Result<Vec<AudioInputDevice>, String> {
-    let _ = &state;
+pub async fn plugin_list_input_devices() -> Result<Vec<AudioInputDevice>, String> {
     #[cfg(windows)]
     {
         let devs = crate::audio_input::list_input_devices()?;
@@ -472,58 +257,10 @@ pub async fn plugin_list_input_devices(
         Ok(Vec::new())
     }
 }
-/// P11.0: arm a hardware input on the slot's plugin — open a cpal capture stream on `device_id`
-/// (None = default), isolating `channel` (None = auto), and feed it into the plugin's audio input
-/// bus. The `!Send` cpal `Stream` lives on the owner thread (like the editor window), so this rides
-/// the `OwnerRequest` channel. Errors cleanly if the slot's plugin has no audio input bus (a synth)
-/// — the slot is left disarmed.
+/// P11.3: enumerate native output devices for the output picker. Opens no stream → runs on the
+/// command thread. The web build returns `[]` (boundary stub).
 #[tauri::command]
-pub async fn plugin_arm_input(
-    slot: u8,
-    device_id: Option<String>,
-    channel: Option<u32>,
-    state: tauri::State<'_, PluginHostState>,
-) -> Result<(), String> {
-    validate_slot(slot)?;
-    #[cfg(windows)]
-    {
-        refuse_in_engine_mode("plugin_arm_input")?;
-        super::clap::arm_input(&state, slot, device_id, channel)
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = (&state, device_id, channel);
-        Err(format!("plugin_arm_input is Windows-only (slot={slot})"))
-    }
-}
-/// P11.0: disarm the slot's hardware input (drop the cpal stream). Idempotent — disarming an
-/// unarmed slot is a benign no-op (the RT loop just keeps draining an empty input ring → silence).
-#[tauri::command]
-pub async fn plugin_disarm_input(
-    slot: u8,
-    state: tauri::State<'_, PluginHostState>,
-) -> Result<(), String> {
-    validate_slot(slot)?;
-    #[cfg(windows)]
-    {
-        if crate::engine_io::mode::active() {
-            return Ok(()); // nothing is armed on the live line in engine mode
-        }
-        super::clap::disarm_input(&state, slot)
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = &state;
-        Ok(())
-    }
-}
-/// P11.3: enumerate native output devices for the monitor picker. Opens no stream → runs on the
-/// command thread (no owner hop / loaded plugin needed). The web build returns `[]` (boundary stub).
-#[tauri::command]
-pub async fn plugin_list_output_devices(
-    state: tauri::State<'_, PluginHostState>,
-) -> Result<Vec<AudioOutputDevice>, String> {
-    let _ = &state;
+pub async fn plugin_list_output_devices() -> Result<Vec<AudioOutputDevice>, String> {
     #[cfg(windows)]
     {
         let devs = crate::audio_output::list_output_devices()?;
@@ -539,154 +276,6 @@ pub async fn plugin_list_output_devices(
     #[cfg(not(windows))]
     {
         Ok(Vec::new())
-    }
-}
-/// P11.3: arm the native low-latency monitor on the slot — open a cpal OUTPUT stream on `device_id`
-/// (None = default output) fed the wet plugin signal (branch-1), bypassing the WebView2 round-trip.
-/// The `!Send` cpal `Stream` lives on the owner thread, so this rides the `OwnerRequest` channel.
-#[tauri::command]
-pub async fn plugin_arm_monitor(
-    slot: u8,
-    device_id: Option<String>,
-    state: tauri::State<'_, PluginHostState>,
-) -> Result<(), String> {
-    validate_slot(slot)?;
-    #[cfg(windows)]
-    {
-        refuse_in_engine_mode("plugin_arm_monitor")?;
-        super::clap::arm_monitor(&state, slot, device_id)
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = (&state, device_id);
-        Err(format!("plugin_arm_monitor is Windows-only (slot={slot})"))
-    }
-}
-/// P11.3: disarm the slot's native monitor (drop the cpal output stream). Idempotent.
-#[tauri::command]
-pub async fn plugin_disarm_monitor(
-    slot: u8,
-    state: tauri::State<'_, PluginHostState>,
-) -> Result<(), String> {
-    validate_slot(slot)?;
-    #[cfg(windows)]
-    {
-        if crate::engine_io::mode::active() {
-            return Ok(()); // nothing is armed on the live line in engine mode
-        }
-        super::clap::disarm_monitor(&state, slot)
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = &state;
-        Ok(())
-    }
-}
-/// P11.3: set the slot's native-monitor output gain (linear; the JS output slider drives this when the
-/// native monitor is armed, so the heard level tracks the slider even though the web monitor is muted).
-/// Stored directly into the slot's `monitor_gain` atomic (no owner hop). No-ops in the web build.
-#[tauri::command]
-pub async fn plugin_set_monitor_gain(
-    slot: u8,
-    gain: f32,
-    state: tauri::State<'_, PluginHostState>,
-) -> Result<(), String> {
-    validate_slot(slot)?;
-    #[cfg(windows)]
-    {
-        if let Some(engine) = crate::engine_io::mode::engine() {
-            return engine.plugin_gain(slot, gain);
-        }
-        super::clap::set_monitor_gain(&state, slot, gain)
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = (&state, gain);
-        Ok(())
-    }
-}
-/// P11.3: set the process-wide master factor for the native wet-monitor path (linear, 0..1).
-/// Stored directly into the output callback's atomic; it never touches the Web Audio record tap.
-#[tauri::command]
-pub async fn plugin_set_master_gain(gain: f32) -> Result<(), String> {
-    #[cfg(windows)]
-    {
-        crate::audio_output::set_master_gain(gain);
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = gain;
-    }
-    Ok(())
-}
-/// P11.3 record-latency: the slot's native-monitor output ("cpal_out") latency in SECONDS, read by the
-/// looper's automatic record-latency compensation at record-arm time (cached per arm). 0.0 in the web
-/// build / when the slot's monitor is disarmed. See `clap::monitor_latency_seconds`.
-#[tauri::command]
-pub async fn plugin_monitor_latency(
-    slot: u8,
-    state: tauri::State<'_, PluginHostState>,
-) -> Result<f64, String> {
-    validate_slot(slot)?;
-    #[cfg(windows)]
-    {
-        if crate::engine_io::mode::active() {
-            return Ok(0.0); // the engine aligns takes itself: no record compensation
-        }
-        super::clap::monitor_latency_seconds(&state, slot)
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = &state;
-        Ok(0.0)
-    }
-}
-/// P11.3: set the global RT buffer size (frames) — the dominant native monitor-latency knob. One
-/// process-wide value that re-paces both producer loops without a plugin reload. Validated against the
-/// allowed set (mirrors JS `BUFFER_FRAMES_OPTIONS`). No-ops in the web build.
-#[tauri::command]
-pub async fn plugin_set_buffer_size(frames: u32) -> Result<(), String> {
-    const ALLOWED: [u32; 5] = [64, 128, 256, 512, 1024];
-    if !ALLOWED.contains(&frames) {
-        return Err(format!("invalid buffer size {frames}"));
-    }
-    #[cfg(windows)]
-    {
-        super::clap::set_buffer_size(frames);
-        Ok(())
-    }
-    #[cfg(not(windows))]
-    {
-        Ok(())
-    }
-}
-/// P11.3 ASIO-default: set the runtime preference for the ASIO low-latency tier (the Audio Settings
-/// toggle). When ON and an ASIO device is present, capture + monitor use ASIO; OFF forces WASAPI.
-/// Next-arm effect (a live stream keeps the host it was opened with). Backed by a process-global atomic,
-/// so no `state` is needed. No-ops without the `asio` feature / on a non-Windows build.
-#[tauri::command]
-pub fn plugin_set_asio_enabled(enabled: bool) {
-    #[cfg(windows)]
-    {
-        crate::audio_output::set_asio_enabled(enabled);
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = enabled;
-    }
-}
-/// P11.3 ASIO-default: whether an ASIO low-latency device is available to select (the `asio` feature is
-/// compiled AND a device was cached at startup). The Audio Settings toggle reads this to enable itself;
-/// false in a WASAPI-only / web build.
-#[tauri::command]
-pub fn plugin_asio_available() -> bool {
-    #[cfg(windows)]
-    {
-        crate::audio_output::asio_available()
-    }
-    #[cfg(not(windows))]
-    {
-        false
     }
 }
 
@@ -754,9 +343,8 @@ pub async fn plugin_asio_probe(
 }
 
 /// Switch the ASIO driver without a restart (`driver`: `None` = automatic): the cached driver is dropped
-/// and the new one probed. Engine mode runs it on its device owner, which closes an ASIO run first and
-/// reopens it after (`engine_io::mode::switch_asio`); the web path refuses it while a live slot's
-/// retained ASIO streams hold the driver.
+/// and the new one probed, on the engine's device owner, which closes an ASIO run first and reopens it
+/// after (`engine_io::mode::switch_asio`).
 #[tauri::command]
 pub async fn plugin_asio_switch(
     app: tauri::AppHandle,
@@ -767,14 +355,7 @@ pub async fn plugin_asio_switch(
         let sentinel = asio_sentinel(&app)?;
         log::info!("[asio] driver switch requested: {driver:?}");
         let report = tauri::async_runtime::spawn_blocking(move || {
-            if crate::engine_io::mode::active() {
-                crate::engine_io::mode::switch_asio(move || crate::audio_output::switch_asio_driver(&sentinel, driver, || None))
-            } else {
-                crate::audio_output::switch_asio_driver(&sentinel, driver, || {
-                    crate::audio_output::asio_holder()
-                        .map(|_| "a plugin slot holds the ASIO driver until its plugin unloads".to_string())
-                })
-            }
+            crate::engine_io::mode::switch_asio(move || crate::audio_output::switch_asio_driver(&sentinel, driver))
         })
         .await
         .map_err(|e| format!("asio switch task: {e}"))??;
@@ -858,11 +439,4 @@ pub fn scan_one_main(path: &str) -> i32 {
             2
         }
     }
-}
-/// DEV startup diagnostic: trigger the one-shot render-rate-mode log (native vs `LF_FORCE_48K`=48k)
-/// so a `tauri dev` shows the mode immediately in stdout, without waiting for a plugin load. Idempotent
-/// (the value is cached in a `OnceLock`); called once from `run()`'s setup after the logger is up.
-#[cfg(windows)]
-pub fn log_render_rate_mode() {
-    let _ = super::transport::lf_force_48k();
 }

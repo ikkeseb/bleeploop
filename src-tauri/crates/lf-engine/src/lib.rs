@@ -1,9 +1,18 @@
-//! lf-engine: BleepLoop's native audio engine, a pure crate (docs/plans/native-engine.md § Stage 2).
-//! This doc is the crate's briefing.
+//! lf-engine: BleepLoop's native audio engine, a pure crate: one owner of every piece of musical state
+//! (click, looper, synths, FX, mixer, limiter, the plugin slots), clocked by the audio device. This doc
+//! is the crate's briefing.
 //!
-//! The app runs it in engine mode, the default (`src-tauri/src/engine_io`); the web audio path stays
-//! behind the toggle until the plan's Stage 6 deletes it. No host, device or plugin crate may enter its
-//! dependency tree (`scripts/engine-deny.mjs`).
+//! The app always runs it (`src-tauri/src/engine_io`). No host, device or plugin crate may enter its
+//! dependency tree: `scripts/engine-deny.mjs` fails the tree on the tauri and clack families, cpal,
+//! windows, windows-core, clap-sys and vst3 (`pnpm rust:check` runs it, and `ci.yml`'s `engine` job with
+//! `cargo test -p lf-engine` on Linux). Its dependencies are `rtrb` (and `libm` if one is ever
+//! needed); dev-only `assert_no_alloc`, `proptest` (without its fork feature) and `hound`. It builds as
+//! one codegen unit (`src-tauri/Cargo.toml` says why).
+//!
+//! The "Ported from" column and the modules' headers name the Web Audio TypeScript each port copied by
+//! its path under `src/audio` (`engine.ts`, `looper/machine.ts`), deleted in Stage 6; git history keeps
+//! it (`git log --diff-filter=D -- 'src/audio/*'`). A path from the repo root (`src/ui/…`) is a file
+//! that runs today.
 //!
 //! # Module map
 //!
@@ -57,7 +66,15 @@
 //!   commands render bit-identical output at any block size (the golden jam, the gesture property tests,
 //!   `tests/sound.rs` and `tests/slots.rs` assert it). A note sounds one quantum after its frame ([`instruments::LEAD`]);
 //!   a wheel or an FX change (a lane's or an input send's) sounds from the next 128-frame quantum
-//!   boundary, as a live Web Audio call with no look-ahead does.
+//!   boundary, as a live Web Audio call with no look-ahead does. Every control-rate step (the 128-frame
+//!   k-rate quanta, the compressor's 32-frame divisions, LFO and envelope ticks) is anchored to the frame
+//!   count, never to a block start. A UI gesture lands at the next block start (jitter: IPC plus one
+//!   block, inside the quarter-beat free-stop grace); a pedal carries its press frame. No audio FIFO.
+//! - **Decided while porting** (each test file's header names what it changes): the count-in and an
+//!   idle PLAY start on the press frame, with no scheduling lead; undo and reverse on a playing lane
+//!   switch on the next loop boundary; STOP on an overdubbing lane discards the whole layer; an input gap
+//!   damages only the RETAKE pass it falls in and resets AUTO's listening history; a jump in the device
+//!   frame drops the beats it skipped, and count-in beats fire late as one click.
 //! - **`process` never allocates, locks or waits.** Buffers are allocated (and their pages touched) in
 //!   `Engine::new`; commands and events cross on rtrb rings; a full event ring drops and counts.
 //! - **No loop-sized work in one callback.** Tiling, the undo copy, a discarded layer's restore, COPY,
@@ -101,14 +118,26 @@
 //! `tests/trim.rs` the TRIM, `tests/dub_feedback.rs` DUB FEEDBACK, `tests/fade.rs` FADE, `tests/input_fx.rs`
 //! the input sends. `tests/perf.rs` holds the ignored cost
 //! bars (Stage 2 and 3, the input sends, a multiply's burst, a TRIM's) and the Stage 3 load's alloc
-//! check.
+//! check. `tests/golden_jam.rs` runs the golden jam at 44.1 and 48 kHz, bit-identical across block
+//! sizes 1, 32, 64, 127, 128, 480 and 1024; `tests/gestures.rs` runs proptest gesture scripts (one
+//! recorder; a whole-bar master; every lane one master long; undo twice is identity; undo after an
+//! N-cycle dub gives back the pre-dub loop; finite output) at two block sizes, bit-identical, with
+//! commands landing mid-block. The Stage 3 ports' references and tolerance classes: [`dsp`].
+//!
+//! cargo-mutants runs on [`grid`] and [`looper`] whenever either changes (the planted-bug rule of
+//! `verify/README.md`, automated; no scheduled workflow). Six survivors are equivalent mutants, named
+//! here so a rerun can tell them from new ones: the keep-last `written` and the commit's `raw` minimum
+//! (the committed length does not move), an empty fill job at `lo == master`, a restore offset at
+//! exactly the span's end, `plan_later_stop`'s bar clamp (the window end bounds it), and `pair`'s
+//! ordering (guarded by `assert_ne`).
 //!
 //! # Beside this crate, and not built yet
 //!
 //! The device side (streams, MIDI, Share output) is `src-tauri/src/engine_io`; the CLAP/VST3 units and
-//! their engine-mode owners are `src-tauri/src/host/engine_slot.rs` and its siblings; the feed that
-//! carries the events and the [`overview`] to the UI is `src-tauri/src/engine_io/feed.rs`. Not built:
-//! nothing of Stage 5.
+//! their owners are `src-tauri/src/host/engine_slot.rs` and its siblings; the feed that carries the
+//! events and the [`overview`] to the UI is `src-tauri/src/engine_io/feed.rs`. Not built here: the
+//! export's wet master, which the UI still renders on Tone's OfflineContext (`src/session/render.ts`),
+//! so its FX may sound unlike the engine's.
 
 #![forbid(unsafe_code)]
 

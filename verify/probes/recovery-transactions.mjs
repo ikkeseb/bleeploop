@@ -1,24 +1,55 @@
 /**
- * Real IndexedDB recovery writes and rollback, with failures injected at transaction/request
- * boundaries: an aborted put after apparent success, a QuotaExceededError at put, an aborted delete
- * after apparent success, an aborted read transaction, and an automatic retry once a later state
- * change gives the failed save a fresh fingerprint. The quota case injects the error at put(), not
- * actual disk exhaustion; no worker replacement, so every save encodes its production recovery
- * archive.
+ * Real IndexedDB recovery writes and rollback (`src/session/autosave.ts`), with failures injected at
+ * transaction/request boundaries: an aborted put after apparent success, a QuotaExceededError at put,
+ * an aborted delete after apparent success (the player's CLEAR ALL), an aborted read transaction, and an
+ * automatic retry once a later state change (a lane's volume) gives the failed save a fresh fingerprint.
+ * The loops come from the web engine fake (`src/platform/host.web.ts`): the probe scripts each commit on
+ * the feed and the snapshot the engine answers. The quota case injects the error at put(), not actual
+ * disk exhaustion; no worker replacement, so every save encodes its production recovery archive.
+ *
+ * Cannot see the native engine, its snapshot over Tauri IPC, native storage limits or WebView2.
  * Run: pnpm probe recovery-transactions
  */
 import assert from 'node:assert/strict';
 import { probe } from '../harness/probe.ts';
 
 await probe(async ({ open }) => {
-  const { page } = await open();
+  const { page } = await open({ init: (p) => p.addInitScript(() => void (window.__lfEngineFake = true)) });
+  await page.waitForFunction(() => window.__lf.native.opened.length >= 1, undefined, { timeout: 10000 });
   const result = await page.evaluate(async () => {
     const lf = window.__lf;
     await lf.autosave.ready();
     lf.autosave.start()(); // Explicit writes until the final automatic retry scenario.
-    await lf.looper.init();
-    const { parseZip } = await import('/src/audio/export/unzip.ts');
-    const { decodeWav } = await import('/src/audio/export/wav.ts');
+    const { session } = await import('/src/ui/state/audio.ts');
+    const { encodeSessionBytes } = await import('/src/platform/engine-wire.ts');
+    const { parseZip } = await import('/src/session/unzip.ts');
+    const { decodeWav } = await import('/src/session/wav.ts');
+    const RATE = 48000;
+    const frames = 2 * RATE; // one bar at 120 BPM
+    let seq = 0;
+    const emit = (frame) => lf.native.emit({ seq: ++seq, reset: false, events: [], ...frame });
+    const lane = (state, length) => ({ state, length, armed: false, autoArmed: false, canUndo: false,
+      canReverse: false, reversed: false, stopAt: null, fading: false, retakePass: 0 });
+    emit({ reset: true, settings: [], anchor: { frame: 0, atMs: Date.now(), rate: RATE, grid: 0 },
+      events: [{ Transport: { frame: 0, master: 0, bpm: 120, locked: false } },
+        ...[0, 1, 2, 3, 4].map((i) => ({ Lane: { frame: 0, lane: i, info: lane('Empty', 0) } }))] });
+    /** The engine commits a loop on lane 1 whose sample 17 is `sample`; its snapshot answers that loop. */
+    const load = (sample) => {
+      const pcm = new Float32Array(frames);
+      pcm[17] = sample;
+      lf.native.snapshotBytes = encodeSessionBytes({ rate: RATE, masterLengthFrames: frames, bpm: 120,
+        tracks: [{ index: 0, frames, reversed: false, state: 'Playing' }] }, [pcm]).buffer;
+      emit({ events: [{ Transport: { frame: 0, master: frames, bpm: 120, locked: true } },
+        { Lane: { frame: 0, lane: 0, info: lane('Playing', frames) } }],
+      peaks: [{ lane: 0, start: 0, count: 1, min: [-sample], max: [sample] }] });
+    };
+    /** The engine's CLEAR ALL: `Cleared` before each lane's own event; its snapshot is empty. */
+    const clearAll = () => {
+      lf.native.snapshotBytes = null;
+      emit({ events: [...[0, 1, 2, 3, 4].flatMap((i) => [{ Cleared: { frame: 0, lane: i } },
+        { Lane: { frame: 0, lane: i, info: lane('Empty', 0) } }]),
+      { Transport: { frame: 0, master: 0, bpm: 120, locked: false } }] });
+    };
     const unhandled = [];
     const onUnhandled = (event) => { unhandled.push(String(event.reason)); event.preventDefault(); };
     window.addEventListener('unhandledrejection', onUnhandled);
@@ -46,20 +77,13 @@ await probe(async ({ open }) => {
       const metadata = JSON.parse(new TextDecoder().decode(entries.find((entry) => entry.name.endsWith('-session.json')).data));
       return { sample: decodeWav(stem.data).channels[0][17], volume: metadata.tracks[0].volume };
     };
-    const load = async (sample) => {
-      lf.looper.clearAll();
-      const pcm = new Float32Array(lf.engine.ctx.sampleRate * 2);
-      pcm[17] = sample;
-      await lf.looper.loadSession({ bpm: 120, bars: 1, masterLengthFrames: pcm.length,
-        tracks: [{ index: 0, pcm, volume: 0.5, muted: true, reversed: false, fx: lf.looper.fxState(0) }] });
-    };
     const cases = [];
     try {
       for (const mode of ['abort-put-after-success', 'quota-put', 'abort-delete-after-success']) {
-        await load(1.75);
+        load(1.75);
         await lf.autosave.flush();
-        if (mode.startsWith('abort-delete')) lf.looper.clearAll();
-        else await load(0.375);
+        if (mode.startsWith('abort-delete')) clearAll();
+        else load(0.375);
         let injected = 0;
         IDBObjectStore.prototype.put = function (...args) {
           if (!target(this)) return nativePut.apply(this, args);
@@ -92,7 +116,7 @@ await probe(async ({ open }) => {
           pass: injected === 1 && error !== '' && prior?.sample === 1.75 && (next?.sample ?? null) === expected });
       }
 
-      await load(1.75);
+      load(1.75);
       await lf.autosave.flush();
       IDBObjectStore.prototype.get = function (...args) {
         const request = nativeGet.apply(this, args);
@@ -116,8 +140,8 @@ await probe(async ({ open }) => {
         }
         return request;
       };
-      await load(0.625);
-      const stop = lf.autosave.start();
+      load(0.625);
+      const stop = lf.autosave.start(session); // The timer again, as boot starts it.
       const deadline = performance.now() + 15000;
       while (autoAborts === 0 && performance.now() < deadline) await wait(100);
       await wait(100);

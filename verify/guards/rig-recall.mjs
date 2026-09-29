@@ -1,4 +1,4 @@
-// verify/guards/rig-recall.mjs — the REAL src/audio/rig-recall.ts under the verify hooks: which build
+// verify/guards/rig-recall.mjs — the REAL src/ui/state/rig-recall.ts under the verify hooks: which build
 // recalls, and from which keys. The owner's build (no `VITE_LF_PROBE`) uses the `lf.` keys; the
 // recall's own native probes (`recall-restart`, `tone-recall`) keys of their own, never the owner's nor
 // each other's; every other DEV native probe neither restores nor stores, so a run killed with a
@@ -29,7 +29,7 @@ async function launch(probe, seed) {
   store.clear();
   for (const [k, v] of Object.entries(seed)) store.set(k, v);
   globalThis.__importMetaEnv = probe === undefined ? { DEV: true } : { DEV: true, VITE_LF_PROBE: probe };
-  const m = await import(`../../src/audio/rig-recall.ts?g=${++generation}`);
+  const m = await import(`../../src/ui/state/rig-recall.ts?g=${++generation}`);
   const loads = [];
   await m.recallRig([FX, SYN], async (slot, d) => void loads.push([slot, d.id]));
   return { m, loads };

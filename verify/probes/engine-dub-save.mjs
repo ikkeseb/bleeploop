@@ -11,7 +11,7 @@
  * - it stays one: the layer's waveform and the other lane's take move nothing the recovery holds;
  * - the layer's commit is the next save, with the layer in it.
  *
- * Counts every write to the recovery's `latest` slot (`src/audio/autosave.ts`). Cannot see the native
+ * Counts every write to the recovery's `latest` slot (`src/session/autosave.ts`). Cannot see the native
  * engine or the save's cost on the rig.
  * Run: pnpm probe engine-dub-save
  */
@@ -94,8 +94,8 @@ await probe(async ({ browser, open }) => {
         r.onerror = () => reject(r.error);
       });
       db.close();
-      const { parseZip } = await import('/src/audio/export/unzip.ts');
-      const { decodeWav } = await import('/src/audio/export/wav.ts');
+      const { parseZip } = await import('/src/session/unzip.ts');
+      const { decodeWav } = await import('/src/session/wav.ts');
       const entries = parseZip(new Uint8Array(record.bytes));
       const session = JSON.parse(new TextDecoder().decode(entries.find((e) => e.name.endsWith('-session.json')).data));
       return session.tracks.map((t) => ({ track: t.track, state: t.state, head: Array.from(decodeWav(entries.find((e) => e.name === t.file).data).channels[0].slice(0, 64)) }));

@@ -1,9 +1,7 @@
 import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount } from 'solid-js';
-import { engine } from '../../audio/engine';
-import { inputRouter } from '../../audio/input-router';
-import { activeIsDrum, activeSlot, ensureActive, slotIds, slotPlugins } from '../../audio/instrument';
-import { DRUM_KIT } from '../../audio/synths/drum';
-import { engineMode } from '../../platform';
+import { inputRouter } from '../state/input-router';
+import { activeIsDrum, activeSlot, ensureActive, slotIds, slotPlugins } from '../state/instrument';
+import { DRUM_KIT } from '../state/drum-kit';
 import type { KeyboardPlacement } from '../layout/layout-store';
 import { stageOpen } from '../stage/stage-store';
 import { isBlackKey, noteName, octaveBase } from './notes';
@@ -32,8 +30,8 @@ export const COMPUTER_MAP: Readonly<Record<string, number>> = {
  * Drum-pad layout. When the active slot's synth is the Drum machine, the chromatic piano is
  * useless — the drum voices only the GM percussion notes, which the default keyboard octave
  * (MIDI 60+) never reaches. So we swap in a 4×4 grid of labelled pads instead. The kit is defined
- * once in DRUM_KIT (audio/synths/drum.ts) — note, label, and pad key — and both this UI and the
- * synth's note dispatch read it, so they can't drift. The pads emit the exact same GM NoteEvents
+ * once in DRUM_KIT (state/drum-kit.ts) — note, label, and pad key — so the pads, the PC keys and Help
+ * can't drift. The pads emit the exact same GM NoteEvents
  * an external MIDI controller would, so the MIDI path is unchanged — pads are a second producer.
  */
 const PAD_VELOCITY = 110;
@@ -60,7 +58,7 @@ export function Keyboard(props: KeyboardProps = {}) {
 
   // The active slot's synth — drum gets the pad layout, everything else the piano. A slot in plugin
   // mode is always played chromatically (piano), never the GM pad grid, even if its underlying synth
-  // id is still 'drum'. Memoized over the ONE shared `activeIsDrum` predicate (audio/instrument.ts),
+  // id is still 'drum'. Memoized over the ONE shared `activeIsDrum` predicate (state/instrument.ts),
   // which app.tsx's chrome + the digit-select yield in src/app/transport-keys.ts also read — so the
   // pad-vs-piano decision can't diverge.
   const drumActive = createMemo(() => activeIsDrum());
@@ -88,15 +86,7 @@ export function Keyboard(props: KeyboardProps = {}) {
   onCleanup(inputRouter.onHeldChange(setDownNotes));
 
   // --- shared press/release ---
-  async function startHold(hold: Hold, velocity: number) {
-    try {
-      // Engine mode plays in the native engine: no AudioContext to resume.
-      if (!engineMode()) await engine.start();
-    } catch (err) {
-      hold.active = false;
-      console.error('[Keyboard] audio start failed', err);
-      return;
-    }
+  function startHold(hold: Hold, velocity: number) {
     if (!hold.active) return;
     ensureActive();
     hold.sounding = true;
@@ -121,7 +111,7 @@ export function Keyboard(props: KeyboardProps = {}) {
     el.setPointerCapture(e.pointerId);
     const hold: Hold = { note, source: 'pointer', owner: `pointer:${e.pointerId}`, active: true, sounding: false };
     pointerNotes.set(e.pointerId, hold);
-    void startHold(hold, velocityFromPointer(e, el));
+    startHold(hold, velocityFromPointer(e, el));
   }
   // Drum pads fire at a fixed velocity (they're one-shots, not a velocity-sensitive key surface).
   function onPadPointerDown(e: PointerEvent, note: number) {
@@ -129,7 +119,7 @@ export function Keyboard(props: KeyboardProps = {}) {
     el.setPointerCapture(e.pointerId);
     const hold: Hold = { note, source: 'pointer', owner: `pointer:${e.pointerId}`, active: true, sounding: false };
     pointerNotes.set(e.pointerId, hold);
-    void startHold(hold, PAD_VELOCITY);
+    startHold(hold, PAD_VELOCITY);
   }
   function onPointerUp(e: PointerEvent) {
     const hold = pointerNotes.get(e.pointerId);
@@ -176,7 +166,7 @@ export function Keyboard(props: KeyboardProps = {}) {
       e.preventDefault();
       const hold: Hold = { note: pad.note, source: 'computer', owner: `key:${k}`, active: true, sounding: false };
       heldKeyNote.set(k, hold);
-      void startHold(hold, PAD_VELOCITY);
+      startHold(hold, PAD_VELOCITY);
       return;
     }
     if (k === 'z') {
@@ -195,7 +185,7 @@ export function Keyboard(props: KeyboardProps = {}) {
     // router must keep it sounding (and lit) until the last of them lifts.
     const hold: Hold = { note, source: 'computer', owner: `key:${k}`, active: true, sounding: false };
     heldKeyNote.set(k, hold);
-    void startHold(hold, 100);
+    startHold(hold, 100);
   }
   function onKeyUp(e: KeyboardEvent) {
     // No focus guard here (deliberate): a key held while focus moves into a field must still release

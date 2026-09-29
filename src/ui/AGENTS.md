@@ -26,10 +26,9 @@ is a one-line adapter). UI-only edits are safe while the dev app runs.
 - **Invariant 6 lives here:** the 60 fps canvas draw loop reads a plain mutable object, never a
   signal (`looper/waveform.ts` reads non-reactive looper getters). Measured cost + the fix
   pattern: `docs/ARCHITECTURE.md` invariant 6.
-- **Engine mode:** components take `looper`, `clock`, `master` and `sampleRate` from
-  `state/audio.ts`, which picks the web or the engine implementation; a direct import from
-  `src/audio/` bypasses engine mode without an error at runtime. `verify/guards/audio-facade.mjs`
-  fails it; its exceptions are the web-only paths, each with its reason.
+- **The engine's names:** components take `looper`, `clock`, `master`, `session` and `sampleRate`
+  from `state/audio.ts` (the engine store behind them: `state/engine-store.ts`). A gesture sends a
+  command and the feed shows the outcome (invariant 3).
 - **One lane derivation:** a lane's display state, word, well message and count-in come from
   `looper/lane-state.ts`; the looper lanes and the stage view (`src/ui/stage/`) both read it, so a new
   state lands there once.

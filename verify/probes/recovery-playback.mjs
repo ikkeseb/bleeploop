@@ -1,44 +1,46 @@
 /**
- * Main-thread continuity during real recovery writes: measures the worst setInterval tick gap and any
- * long-task duration while `autosave.flush()` encodes and writes 1- and 5-track sessions, and confirms
- * a parallel AudioWorklet meter on the live master bus never observes energy drop to silence. Does not
- * measure native bridge audio or WebView2 timing.
+ * Main-thread continuity during real recovery writes (`src/session/autosave.ts`, the encode in its
+ * worker): measures the worst setInterval tick gap and any long-task duration while `autosave.flush()`
+ * snapshots, encodes and writes a 1-track 1-bar and a 5-track 30-bar session, on the web engine fake
+ * (`src/platform/host.web.ts`) whose snapshot answers those loops; the UI's controls must not stall.
+ *
+ * Cannot see the native engine or its audio during a save (the engine renders on its own thread), the
+ * snapshot's cost over Tauri IPC (the fake hands back a copy of bytes already in the page) or WebView2
+ * timing.
  * Run: pnpm probe recovery-playback
  */
 import assert from 'node:assert/strict';
 import { probe } from '../harness/probe.ts';
 
 await probe(async ({ open }) => {
-  const { page } = await open({ viewport: { width: 1280, height: 820 } });
+  const { page } = await open({ viewport: { width: 1280, height: 820 }, init: (p) => p.addInitScript(() => void (window.__lfEngineFake = true)) });
+  await page.waitForFunction(() => window.__lf.native.opened.length >= 1, undefined, { timeout: 10000 });
   await page.evaluate(() => window.__lf.autosave.ready());
   const results = await page.evaluate(async () => {
     const lf = window.__lf;
-    await lf.looper.init();
+    lf.autosave.start()(); // Boot started it: only the measured flush writes.
+    const { encodeSessionBytes } = await import('/src/platform/engine-wire.ts');
+    const sr = 48000;
+    let seq = 0;
+    const emit = (frame) => lf.native.emit({ seq: ++seq, reset: false, events: [], ...frame });
+    const lane = (state, length) => ({ state, length, armed: false, autoArmed: false, canUndo: false,
+      canReverse: false, reversed: false, stopAt: null, fading: false, retakePass: 0 });
     const results = [];
     for (const [count, bars] of [[1, 1], [5, 30]]) {
-      lf.looper.clearAll();
-      const sr = lf.engine.ctx.sampleRate;
+      // A new engine (a reset frame), then its loops committed and playing; the snapshot answers them.
+      emit({ reset: true, settings: [], anchor: { frame: 0, atMs: Date.now(), rate: sr, grid: 0 },
+        events: [{ Transport: { frame: 0, master: 0, bpm: 120, locked: false } },
+          ...[0, 1, 2, 3, 4].map((i) => ({ Lane: { frame: 0, lane: i, info: lane('Empty', 0) } }))] });
       const frames = sr * bars * 2;
-      const fx = lf.looper.fxState(0);
-      const tracks = Array.from({ length: count }, (_, index) => ({
-        index, pcm: Float32Array.from({ length: frames }, (_, f) => 0.01 * Math.sin(2 * Math.PI * 220 * f / sr)),
-        volume: 0.5, muted: false, reversed: false, fx,
-      }));
-      await lf.looper.loadSession({ bpm: 120, bars, masterLengthFrames: frames, tracks });
-      await new Promise(r => setTimeout(r, 500));
-      const code = `class Continuity extends AudioWorkletProcessor {
-        constructor() { super(); this.quanta = 0; this.silent = 0; this.port.onmessage = () => this.port.postMessage({quanta:this.quanta,silent:this.silent}); }
-        process(inputs) { const ch = inputs[0]?.[0]; if(ch) { let energy=0; for(let i=0;i<ch.length;i++) energy+=ch[i]*ch[i]; this.quanta++; if(energy/ch.length<1e-8) this.silent++; } return true; }
-      } registerProcessor('continuity-${count}', Continuity);`;
-      const url = URL.createObjectURL(new Blob([code], { type: 'application/javascript' }));
-      // Each case uses a distinct module/name in the same context.
-      await lf.engine.ctx.audioWorklet.addModule(url);
-      URL.revokeObjectURL(url);
-      const meter = new AudioWorkletNode(lf.engine.ctx, `continuity-${count}`);
-      lf.engine.masterGain.connect(meter);
-      meter.connect(lf.engine.ctx.destination); // processor writes silence, no duplicate audible route
+      const pcm = Array.from({ length: count }, () =>
+        Float32Array.from({ length: frames }, (_, f) => 0.01 * Math.sin(2 * Math.PI * 220 * f / sr)));
+      lf.native.snapshotBytes = encodeSessionBytes({ rate: sr, masterLengthFrames: frames, bpm: 120,
+        tracks: pcm.map((_, index) => ({ index, frames, reversed: false, state: 'Playing' })) }, pcm).buffer;
+      emit({ events: [{ Transport: { frame: 0, master: frames, bpm: 120, locked: true } },
+        ...pcm.map((_, i) => ({ Lane: { frame: 0, lane: i, info: lane('Playing', frames) } }))] });
+      await new Promise((r) => setTimeout(r, 500));
       const longTasks = [];
-      const observer = new PerformanceObserver(list => {
+      const observer = new PerformanceObserver((list) => {
         for (const entry of list.getEntries()) longTasks.push(entry.duration);
       });
       observer.observe({ type: 'longtask' });
@@ -49,26 +51,28 @@ await probe(async ({ open }) => {
         maxTickGap = Math.max(maxTickGap, now - previous);
         previous = now;
       }, 5);
+      let puts = 0;
+      const put = IDBObjectStore.prototype.put;
+      IDBObjectStore.prototype.put = function (...args) {
+        if (this.name === 'recovery') puts++;
+        return put.apply(this, args);
+      };
       const start = performance.now();
-      await lf.autosave.flush();
+      await lf.autosave.flush().finally(() => (IDBObjectStore.prototype.put = put));
       const elapsed = performance.now() - start;
-      await new Promise(r => setTimeout(r, 100));
-      const continuity = await new Promise(resolve => { meter.port.onmessage = e => resolve(e.data); meter.port.postMessage('read'); });
-      lf.engine.masterGain.disconnect(meter);
-      meter.disconnect();
+      await new Promise((r) => setTimeout(r, 100));
       clearInterval(timer);
       observer.disconnect();
-      results.push({ count, seconds: bars * 2, elapsedMs: elapsed, maxTickGapMs: maxTickGap, longTasksMs: longTasks, continuity });
+      results.push({ count, seconds: bars * 2, elapsedMs: elapsed, maxTickGapMs: maxTickGap, longTasksMs: longTasks, puts });
     }
     return results;
   });
+  console.log(JSON.stringify(results));
   assert.equal(results.length, 2);
   for (const result of results) {
-    assert.ok(result.continuity.quanta > 0);
-    assert.equal(result.continuity.silent, 0, 'Web Audio playback must stay continuous during save');
+    assert.ok(result.puts >= 1, 'the flush wrote the jam');
     // A local performance regression guard, with headroom for scheduling jitter. The old full-size
     // synchronous encoder blocked this machine for 257 ms; worker runs were below 80 ms.
     assert.ok(result.maxTickGapMs < 100, `Recovery blocked controls for ${result.maxTickGapMs} ms`);
   }
-  console.log(JSON.stringify(results));
 });

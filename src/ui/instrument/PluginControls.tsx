@@ -1,7 +1,7 @@
 import { For, Show, createMemo, createSignal, onCleanup, onMount } from 'solid-js';
 import { createStore } from 'solid-js/store';
 import { platform, type PluginDescriptor, type PluginParamDesc } from '../../platform';
-import { editorAffinityBlocker, noteEditorOpened, slotPendingCounts } from '../../audio/instrument';
+import { editorAffinityBlocker, noteEditorOpened, slotPendingCounts } from '../state/instrument';
 import { notifyError } from '../../notify';
 import { liveShown, toggleLive } from './live';
 import './plugin-controls.css';

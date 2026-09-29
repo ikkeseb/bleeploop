@@ -1,4 +1,4 @@
-//! Block jobs (plan § Memory: no loop-sized work in one callback): they are spread over frames, they run
+//! Block jobs (the lf-engine briefing: no loop-sized work in one callback): they are spread over frames, they run
 //! ahead of every head that reads or writes what they touch (checked on the rendered output from the
 //! very frame they start), only the commands that would collide with a job wait for it, and a jump in the
 //! device frame counter moves their schedule instead of making the work it skipped fall due at once (an

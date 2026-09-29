@@ -1,7 +1,7 @@
 //! OWNS: the pure grid arithmetic, in device frames: bar length, the whole-bar clamps, the commit and
 //! stop plans that turn a raw take into a master loop, a later take's bar count (a multiply past the
 //! master), the beat grid the click and the beat LED read, and the later-take tiling map. Ported from
-//! `src/audio/quantize.ts` and `src/audio/looper/grid-math.ts`; the multiply is the engine's own (F14).
+//! `quantize.ts` and `looper/grid-math.ts`; the multiply is the engine's own (F14).
 //!
 //! Every time here is an integer device frame; the only fractional quantity is a beat period, which a
 //! [`Grid`] carries as an exact ratio so a beat never drifts off the loop it belongs to.

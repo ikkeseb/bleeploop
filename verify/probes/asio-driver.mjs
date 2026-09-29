@@ -81,9 +81,9 @@ await probe(async ({ open }) => {
   // 2. An ASIO host appears (scripted): the probe, then the saved device opens on it.
   const running = await page.evaluate(async (drivers) => {
     const { platform } = await import('/src/platform/index.ts');
-    const settings = await import('/src/audio/audio-devices.ts');
+    const settings = await import('/src/ui/state/audio-devices.ts');
     const store = await import('/src/ui/state/engine-store.ts');
-    const { asioBlock } = await import('/src/audio/audio-settings.ts');
+    const { asioBlock } = await import('/src/ui/state/audio-settings.ts');
     const host = platform.pluginHost;
     const engine = platform.engine;
     const asio = { cached: null, refuseNext: false };
@@ -215,7 +215,7 @@ await probe(async ({ open }) => {
   // save fails, so the loops stay and the device must run again on the driver that ran. The store
   // switches back first; reopening the old request on the new driver would be refused again (silence).
   await page.evaluate(async () => {
-    const { autosave } = await import('/src/audio/autosave.ts');
+    const { autosave } = await import('/src/session/autosave.ts');
     window.__saveNow = autosave.saveNow;
     autosave.saveNow = async () => {
       throw new Error('injected: the recovery save failed');
@@ -245,7 +245,7 @@ await probe(async ({ open }) => {
   );
   assert.ok(afterSave.toasts.includes('The device did not switch'), 'the failed save toasts');
   await page.evaluate(async () => {
-    const { autosave } = await import('/src/audio/autosave.ts');
+    const { autosave } = await import('/src/session/autosave.ts');
     autosave.saveNow = window.__saveNow;
   });
 

@@ -1,7 +1,7 @@
 {
   "name": "bleeploop",
   "private": true,
-  "version": "0.1.2",
+  "version": "0.2.0",
   "type": "module",
   "description": "BleepLoop — instant musical jamming: instrument host (VST + built-in synths) over an RC-505-style 5-track looper.",
   "packageManager": "pnpm@10.33.0",
@@ -19,14 +19,13 @@
     "check:boundary": "node scripts/check-boundary.mjs",
     "lint": "oxlint --deny-warnings src verify scripts",
     "verify": "node verify/run-guards.mjs",
+    "test:engine": "node scripts/engine-test.mjs",
     "check": "pnpm typecheck && pnpm lint && pnpm check:boundary && pnpm verify",
-    "verify:jam": "node verify/run-probes.mjs golden-jam",
     "probe": "node verify/run-probes.mjs",
     "native:smoke": "node scripts/native-probe.mjs editor-smoke",
     "native:survey": "node scripts/native-probe.mjs restart-survey",
     "native:swap": "node scripts/native-probe.mjs swap-stress",
     "native:recall": "node scripts/native-probe.mjs recall-restart",
-    "native:loopback": "node scripts/native-probe.mjs loopback-sync --asio",
     "native:engine-smoke": "node scripts/native-probe.mjs engine-smoke --asio",
     "native:engine-recovery": "node scripts/native-probe.mjs engine-recovery --asio",
     "native:engine-loopback": "node scripts/native-probe.mjs engine-loopback --asio",
@@ -43,7 +42,6 @@
   },
   "dependencies": {
     "@tauri-apps/api": "^2.11.1",
-    "ringbuf.js": "^0.4.0",
     "solid-js": "^1.9.15",
     "tone": "^15.1.22"
   },

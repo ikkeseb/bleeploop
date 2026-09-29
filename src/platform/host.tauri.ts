@@ -17,9 +17,8 @@ import type {
 } from './host';
 import { webPlatform } from './host.web';
 import { decodeDeviceStatus, decodeFeedFrame } from './engine-wire';
-// notify.ts is a ROOT-level module (src/notify.ts), NOT under ../audio or ../ui, so importing it from
-// a platform/ file is boundary-clean: check-boundary.mjs's leak regex only flags ../audio/ + ../ui/
-// imports. It's the one user-visible error surface, imported here so a native transport failure below
+// notify.ts is a ROOT-level module (src/notify.ts), not an app layer, so importing it from a platform/
+// file is boundary-clean: check-boundary.mjs's leak regex flags only the app layers above platform/. It's the one user-visible error surface, imported here so a native transport failure below
 // reaches the user (not just console.error → the release log).
 import { notifyError } from '../notify';
 
@@ -43,10 +42,9 @@ function subscribe<T>(event: string, handler: (payload: T) => void): () => void 
 }
 
 /**
- * Native CLAP + VST3 host over Tauri IPC. Each method maps to a `plugin_host::*` command in
- * Rust. `window`/`state` command args are injected by Tauri — JS passes only the domain args. Audio
- * never crosses as PCM here: the plugin's samples arrive out-of-band via a WebView2 SharedBuffer that
- * the `sharedbufferreceived` listener (below) forwards to `src/audio/plugin-bridge.ts` as an AudioNode.
+ * Native CLAP + VST3 host over Tauri IPC. Each method maps to a `plugin_*` command in Rust.
+ * `window`/`state` command args are injected by Tauri — JS passes only the domain args. Audio never
+ * crosses as PCM here: a plugin plays inside the engine's callback.
  */
 let frontendEpoch = 0;
 
@@ -58,21 +56,15 @@ const tauriPluginHost: PluginHost = {
   scanPlugins(force = false) {
     return invoke<PluginDescriptor[]>('plugin_scan', { force });
   },
-  loadPlugin(slot, path, id, loadToken, toneToken) {
+  loadPlugin(slot, path, id, toneToken) {
     if (frontendEpoch === 0) throw new Error('plugin host not initialized');
-    return invoke<PluginInfo>('plugin_load', { slot, path, id, frontendEpoch, loadToken, toneToken: toneToken ?? null });
+    return invoke<PluginInfo>('plugin_load', { slot, path, id, frontendEpoch, toneToken: toneToken ?? null });
   },
   async unloadPlugin(slot) {
     await invoke('plugin_unload', { slot });
   },
   listLoaded() {
     return invoke<PluginInfo[]>('plugin_list_loaded');
-  },
-  async noteOn(slot, note, velocity) {
-    await invoke('plugin_note_on', { slot, note, velocity });
-  },
-  async noteOff(slot, note) {
-    await invoke('plugin_note_off', { slot, note });
   },
   async openEditor(slot, mode) {
     await invoke('plugin_open_editor', { slot, mode });
@@ -95,9 +87,6 @@ const tauriPluginHost: PluginHost = {
   onEditorClosed(cb) {
     return subscribe<PluginSlot>('plugin:editor-closed', (slot) => cb(slot));
   },
-  onStreamFault(cb) {
-    return subscribe<{ slot: PluginSlot; kind: 'input' | 'output' }>('plugin:stream-fault', cb);
-  },
   // A tone moves as raw bytes both ways, as a session does (`engine_snapshot`).
   async takeTone(slot) {
     const bytes = await invoke<ArrayBuffer>('plugin_tone_take', { slot });
@@ -117,39 +106,8 @@ const tauriPluginHost: PluginHost = {
   listInputDevices() {
     return invoke<AudioInputDevice[]>('plugin_list_input_devices');
   },
-  async armInput(slot, deviceId, channel) {
-    await invoke('plugin_arm_input', {
-      slot,
-      deviceId: deviceId ?? null,
-      channel: channel ?? null,
-    });
-  },
-  async disarmInput(slot) {
-    await invoke('plugin_disarm_input', { slot });
-  },
   listOutputDevices() {
     return invoke<AudioOutputDevice[]>('plugin_list_output_devices');
-  },
-  async armMonitor(slot, deviceId) {
-    await invoke('plugin_arm_monitor', { slot, deviceId: deviceId ?? null });
-  },
-  async disarmMonitor(slot) {
-    await invoke('plugin_disarm_monitor', { slot });
-  },
-  async setMonitorGain(slot, gain) {
-    await invoke('plugin_set_monitor_gain', { slot, gain });
-  },
-  async setMasterGain(gain) {
-    await invoke('plugin_set_master_gain', { gain });
-  },
-  async monitorLatencySeconds(slot) {
-    return invoke<number>('plugin_monitor_latency', { slot });
-  },
-  async setBufferSize(frames) {
-    await invoke('plugin_set_buffer_size', { frames });
-  },
-  asioAvailable() {
-    return invoke<boolean>('plugin_asio_available');
   },
   asioDeviceInfo() {
     return invoke<AsioDeviceInfo | null>('plugin_asio_device_info');
@@ -166,9 +124,6 @@ const tauriPluginHost: PluginHost = {
   asioDrivers() {
     return invoke<string[]>('plugin_asio_drivers');
   },
-  async setAsioEnabled(enabled) {
-    await invoke('plugin_set_asio_enabled', { enabled });
-  },
 };
 
 /**
@@ -177,12 +132,6 @@ const tauriPluginHost: PluginHost = {
  */
 const tauriEngineHost: EngineHost = {
   available: true,
-  mode() {
-    return invoke<boolean>('engine_mode');
-  },
-  async setMode(enabled) {
-    await invoke('engine_set_mode', { enabled });
-  },
   async open(request, force = false) {
     return decodeDeviceStatus(await invoke<unknown>('engine_open', { request, force }));
   },
@@ -248,9 +197,8 @@ const tauriLogFolder: LogFolder = {
 };
 
 /**
- * Tauri platform. Reuses the web getUserMedia/Web-MIDI capabilities (both work inside
- * WebView2 v149) and swaps in the native CLAP/VST3 `pluginHost`, the native `engine` and the
- * release log's folder (`logs`).
+ * Tauri platform. Reuses the web Web-MIDI capability (it works inside WebView2 v149) and swaps in the
+ * native CLAP/VST3 `pluginHost`, the native `engine` and the release log's folder (`logs`).
  */
 export const tauriPlatform: Platform = {
   ...webPlatform,
@@ -276,47 +224,6 @@ export function tauriConfirmClose(): Promise<void> {
   return invoke('app_confirm_close');
 }
 
-// ── Plugin audio transport: the WebView2 SharedBuffer ↔ audio bridge glue ───────────────────────
-
-let bufferSink: ((ab: ArrayBuffer, meta: unknown) => void) | null = null;
-let sinkRegistered = false;
-
-/**
- * Register the audio sink for posted plugin SharedBuffers. The `chrome.webview` event stays in the
- * platform layer (WebView2-specific); the sink (`src/audio/plugin-bridge.ts`) receives only a plain
- * ArrayBuffer + the parsed `additionalData` meta, keeping `src/audio/` WebView2-agnostic.
- */
-export function setPluginBufferSink(sink: (ab: ArrayBuffer, meta: unknown) => void): void {
-  bufferSink = sink;
-  if (sinkRegistered) return;
-  const wv = window.chrome?.webview;
-  if (!wv) return; // plain browser / Playwright: no native host, nothing to receive
-  wv.addEventListener('sharedbufferreceived', (e) => {
-    try {
-      const ab = e.getBuffer();
-      const meta = e.additionalData as { frontendEpoch?: unknown };
-      if (meta.frontendEpoch !== frontendEpoch) {
-        releasePluginBuffer(ab);
-        return;
-      }
-      bufferSink?.(ab, meta);
-    } catch (err) {
-      console.error('[host.tauri] sharedbufferreceived handler failed', err);
-      notifyError('Plugin audio hit a problem — reload the plugin if sound stops', err);
-    }
-  });
-  sinkRegistered = true;
-}
-
-/** Detach + free a plugin SharedBuffer's JS view (the JS counterpart to the host's `Close()`). */
-export function releasePluginBuffer(ab: ArrayBuffer): void {
-  try {
-    window.chrome?.webview?.releaseBuffer(ab);
-  } catch {
-    /* best-effort */
-  }
-}
-
 // ── DEV diagnostics (Tauri only; reported to `tauri dev` stdout — no Playwright into WebView2) ────
 
 /**
@@ -328,9 +235,6 @@ export function releasePluginBuffer(ab: ArrayBuffer): void {
 export async function reportTauriDiagnostics(): Promise<void> {
   const report: Record<string, unknown> = {
     host: 'tauri',
-    crossOriginIsolated: self.crossOriginIsolated === true,
-    sharedArrayBuffer: typeof SharedArrayBuffer !== 'undefined',
-    getUserMedia: !!navigator.mediaDevices?.getUserMedia,
     secureContext: self.isSecureContext === true,
     userAgent: navigator.userAgent,
   };

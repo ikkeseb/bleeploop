@@ -33,7 +33,7 @@ export const DATA_STATE: Readonly<Record<DisplayState, string>> = {
   STOPPED: 'stop',
 };
 
-/** The word a lane reads as: its display state, unless a fade (FADING, engine mode), a pending loop-end
+/** The word a lane reads as: its display state, unless a fade (FADING), a pending loop-end
  * stop (ENDING), a mute over a take that is not capturing (MUTED) or a rolling RETAKE (TAKE, with
  * `retakePass`) outranks it. */
 export type LaneWord = DisplayState | 'FADING' | 'ENDING' | 'MUTED' | 'TAKE';

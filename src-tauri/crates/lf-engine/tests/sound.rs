@@ -2,13 +2,15 @@
 //! the bus and in the record tap, on the guitar's grid; each lane through its FX chain into the stereo
 //! bus, with a reverb tail; CLEAR and COPY on a lane's FX (`machine.ts` `clear`, `copy`); the rhythmic
 //! FX on the looper's grid; and the whole wired sound bit-identical at any block size. The ports
-//! themselves are held to Tone in `synth.rs`, `fx_*.rs` and `limiter.rs`.
+//! themselves are held to Tone in `synth.rs`, `fx_*.rs` and `limiter.rs`. The Web Audio probes
+//! fx-grid.mjs (two lanes' stutters, a delay after a new tempo) and fx-pitch-cost.mjs (a live pitch
+//! switch) are here on a lane's rendered output.
 
 mod common;
 
 use common::{Delay, Opts, Rig};
-use lf_engine::dsp::fx::{default_fx_states, FxKind, FxParam};
-use lf_engine::grid::Frame;
+use lf_engine::dsp::fx::{default_fx_states, division_beats, FxKind, FxParam};
+use lf_engine::grid::{frames_per_bar, Frame};
 use lf_engine::{Command, Instrument, LaneState, NoteTarget};
 
 fn peak(x: &[f32]) -> f32 {
@@ -393,4 +395,195 @@ fn an_fx_parameter_is_clamped_to_its_range_and_a_note_past_127_does_nothing() {
     rig.press(Command::NoteOn(200, 1.0));
     rig.advance(4800);
     assert_eq!(peak(&rig.bus), 0.0);
+}
+
+/// fx-grid.mjs's two chains, on two lanes: lane `heard` plays a constant 0.2 loop and the other a silent
+/// one (its chain adds exactly nothing to the bus), both through a STUTTER switched on 93 ms apart, and
+/// each division set on lane 0 and 38 frames later on lane 1. Per division: the bus over max(0.6 s, two
+/// periods) from its start frame; and the beat grid's origin.
+fn stutter_pair(bpm: u32, heard: usize) -> (Vec<(Frame, Vec<f32>)>, Frame) {
+    let mut rig = Rig::new();
+    rig.set(Command::SetBpm(bpm as f64));
+    let level = |lane: usize| if lane == heard { 0.2 } else { 0.0 };
+    rig.set_level(level(0));
+    let master = rig.record_first_take(0, 1, 2400);
+    rig.set_level(level(1));
+    rig.press(Command::RecDub(1));
+    rig.advance_to(rig.start_frame() + master * 13 / 10); // one loop, committed at once (E10)
+    rig.press(Command::RecDub(1));
+    rig.set_level(0.0);
+    rig.idle();
+    assert!(rig.state(0) == LaneState::Playing && rig.state(1) == LaneState::Playing);
+    rig.set(Command::SetFxBypass(0, FxKind::Stutter, false));
+    rig.advance(rig.seconds(0.093));
+    rig.set(Command::SetFxBypass(1, FxKind::Stutter, false));
+    rig.advance(4800); // past the bypass crossfades
+    let beat = frames_per_bar(bpm as f64, rig.sr) as f64 / 4.0;
+    let mut out = Vec::new();
+    for division in 0..4 {
+        rig.set(Command::SetFxParam(0, FxParam::Rate, division as f64));
+        rig.advance(37);
+        rig.set(Command::SetFxParam(1, FxParam::Rate, division as f64));
+        rig.advance(4800);
+        rig.keep_output();
+        let start = rig.frame;
+        rig.advance(rig.seconds(0.6).max((2.0 * beat * division_beats(division)).ceil() as Frame));
+        out.push((start, rig.bus.clone()));
+    }
+    (out, rig.engine.looper().grid_origin())
+}
+
+#[test]
+fn two_lanes_stutters_on_one_division_open_and_close_on_the_same_frames() {
+    // The bus of the session with lane 0 heard is lane 0's gate, with lane 1 heard lane 1's: the engine
+    // is deterministic and a gate does not depend on what passes through it.
+    for bpm in [120u32, 137] {
+        let ((a, origin), (b, other)) = (stutter_pair(bpm, 0), stutter_pair(bpm, 1));
+        assert_eq!(origin, other);
+        let beat = frames_per_bar(bpm as f64, 48_000) as f64 / 4.0;
+        let open = |v: &[f32]| v.iter().map(|&x| x > 0.1).collect::<Vec<bool>>();
+        let edges = |v: &[bool]| (1..v.len()).filter(|&k| v[k] != v[k - 1]).collect::<Vec<usize>>();
+        for (division, ((start, x), (_, y))) in a.iter().zip(&b).enumerate() {
+            let (on_a, on_b) = (open(x), open(y));
+            let (edges_a, edges_b) = (edges(&on_a), edges(&on_b));
+            assert!(edges_a.len() >= 3, "{bpm} BPM, division {division}: the gate moves ({} edges)", edges_a.len());
+            assert_eq!(edges_a, edges_b, "{bpm} BPM, division {division}: both gates open and close on the same frames");
+            // The probe's grid check: open for the first half of each division from the grid's origin,
+            // 3 ms either side of an edge left out, under 0.5 % of the frames wrong.
+            let period = beat * division_beats(division);
+            let margin = 0.003 * 48_000.0;
+            let (mut checked, mut wrong) = (0, 0);
+            for (k, &on) in on_a.iter().enumerate() {
+                let phase = ((start + k as Frame - origin) as f64).rem_euclid(period);
+                if phase.min((phase - period / 2.0).abs()).min(period - phase) < margin {
+                    continue;
+                }
+                checked += 1;
+                wrong += usize::from(on != (phase < period / 2.0));
+            }
+            let apart = x.iter().zip(y).map(|(p, q)| (p - q).abs()).fold(0.0f32, f32::max);
+            println!("{bpm} BPM, division {division}: {} edges, {wrong} of {checked} frames off the grid, the two gates at most {apart:e} apart", edges_a.len());
+            assert!(checked > 1000 && (wrong as f64) < 0.005 * checked as f64, "{bpm} BPM, division {division}: {wrong} of {checked} off the grid");
+            // Not bit for bit: each bypassed DELAY still mixes its echoes in at -56 dB, and those hold each
+            // lane's own switch-on moments, dying away at its feedback.
+            assert!(apart < 1e-3, "{bpm} BPM, division {division}: the two lanes' outputs {apart} apart");
+        }
+    }
+}
+
+/// A one-bar first take at `bpm` on lane 0 whose loop is silent but for 0.5 on its frame 0.
+fn impulse_loop(rig: &mut Rig, bpm: u32) {
+    rig.set(Command::SetBpm(bpm as f64));
+    let mark = rig.events.len();
+    rig.press(Command::RecDub(0));
+    let downbeat = rig.count_one(mark) + (4.0 * 60.0 / bpm as f64 * rig.sr as f64).round() as Frame;
+    rig.set_input(move |f| if f == downbeat { 0.5 } else { 0.0 });
+    rig.advance_to(downbeat + rig.fpb() + 2400);
+    rig.press(Command::RecDub(0));
+    rig.set_level(0.0);
+    rig.idle();
+    assert!(rig.state(0) == LaneState::Playing && rig.pcm(0)[0] == 0.5);
+}
+
+/// Lane 0's DELAY on at its defaults (1/8, time untouched): frames from a loop start to the first echo.
+fn first_echo(rig: &mut Rig) -> Frame {
+    rig.set(Command::SetFxBypass(0, FxKind::Delay, false));
+    rig.advance(4800);
+    let boundary = rig.next_boundary();
+    rig.advance_to(boundary);
+    rig.keep_output();
+    rig.advance(rig.seconds(0.4));
+    let bus = &rig.bus;
+    assert!(bus[0] > 0.1, "the loop's impulse is on the boundary: {}", bus[0]);
+    let peak = (1..bus.len()).max_by(|&i, &j| bus[i].abs().total_cmp(&bus[j].abs())).unwrap();
+    peak as Frame
+}
+
+#[test]
+fn a_lanes_delay_takes_the_new_tempo_after_clear_all_and_a_first_take_at_another() {
+    // fx-grid.mjs's reused lane: built at 120 BPM, CLEAR ALL, a new first take at 240 BPM, the delay
+    // switched on without touching its time: its eighth is 125 ms.
+    let mut rig = Rig::new();
+    impulse_loop(&mut rig, 120);
+    assert_eq!(first_echo(&mut rig), 12_000, "an eighth at 120 BPM: 250 ms");
+    rig.press(Command::ClearAll);
+    rig.advance(4800);
+    impulse_loop(&mut rig, 240);
+    assert_eq!(rig.bpm(), 240);
+    assert_eq!(first_echo(&mut rig), 6_000, "an eighth at 240 BPM: 125 ms");
+}
+
+#[test]
+fn a_live_pitch_enable_and_reset_on_a_playing_lane_add_no_step() {
+    // fx-pitch-cost.mjs's dynamic render, on a lane: +12 semitones stored while bypassed, then enable,
+    // bypass, enable again and reset (bypassed, 0 semitones, as a state reset) live, on a 220 Hz sine at
+    // 0.1. The probe's bounds: no sample-to-sample step of 0.03 or more, no dropped block, and the
+    // stored pitch sounding on each enable. At 44.1 kHz, as the probe ran.
+    let sr = 44_100;
+    let mut rig = Rig::at(sr);
+    let mark = rig.events.len();
+    rig.press(Command::RecDub(0));
+    let downbeat = rig.count_one(mark) + 2 * sr as Frame; // four beats at 120 BPM
+    // One bar at 120 BPM is 2 s: 440 whole cycles, so the loop is seamless.
+    rig.set_input(move |f| 0.1 * (std::f64::consts::TAU * 220.0 * (f - downbeat) as f64 / sr as f64).sin() as f32);
+    rig.advance_to(downbeat + rig.fpb() + 2400);
+    rig.press(Command::RecDub(0));
+    rig.set_level(0.0);
+    rig.idle();
+    assert_eq!(rig.master(), 2 * sr as Frame);
+    rig.set(Command::SetFxParam(0, FxParam::Semitones, 12.0));
+    rig.advance(4410);
+    rig.keep_output();
+    let t0 = rig.frame;
+    let at = |s: f64| t0 + (s * sr as f64).round() as Frame;
+    rig.send_at(at(0.4), Command::SetFxBypass(0, FxKind::Pitch, false));
+    rig.send_at(at(0.95), Command::SetFxBypass(0, FxKind::Pitch, true));
+    rig.send_at(at(1.4), Command::SetFxBypass(0, FxKind::Pitch, false));
+    rig.send_at(at(1.9), Command::SetFxBypass(0, FxKind::Pitch, true));
+    rig.send_at(at(1.9), Command::SetFxParam(0, FxParam::Semitones, 0.0));
+    rig.advance_to(at(2.4));
+    let bus = &rig.bus;
+    let jump = bus.windows(2).map(|w| (w[1] - w[0]).abs()).fold(0.0f32, f32::max);
+    let (mut run, mut silent) = (0, 0);
+    for &x in bus {
+        run = if x.abs() < 1e-7 { run + 1 } else { 0 };
+        silent = silent.max(run);
+    }
+    let hz = |a: f64, b: f64| {
+        let (i, j) = ((a * sr as f64).ceil() as usize, (b * sr as f64).floor() as usize);
+        (i..j).filter(|&k| bus[k] <= 0.0 && bus[k + 1] > 0.0).count() as f64 / (b - a)
+    };
+    let heard = [hz(0.1, 0.35), hz(0.7, 0.9), hz(1.15, 1.35), hz(1.65, 1.85), hz(2.15, 2.35)];
+    println!("pitch on a playing lane: largest step {jump:.5}, longest silent run {silent}, Hz dry/on/off/on/reset {heard:.1?}");
+    assert!(jump < 0.03, "the pitch's enable, bypass or reset stepped the output by {jump}");
+    assert!(silent < 8, "a dropped block: {silent} silent frames");
+    for (k, want) in [220.0, 440.0, 220.0, 440.0, 220.0].into_iter().enumerate() {
+        assert!((heard[k] - want).abs() < 10.0, "window {k}: {} Hz, want {want}", heard[k]);
+    }
+}
+
+#[test]
+fn a_note_to_each_selected_built_in_instrument_sounds_on_the_bus() {
+    // instrument-routing.mjs's synth pick: a MIDI note sounds on the picked engine, its RMS over the
+    // probe's analyser window (4096 frames, ending 150 ms after the note) above 0.01. A2 as the probe
+    // played it; on the drum kit, its kick. Each pick renders its own sound: no two picks sound alike,
+    // so a pick routed to the wrong instrument fails.
+    let mut renders: Vec<(Instrument, Vec<f32>)> = Vec::new();
+    for instrument in Instrument::ALL {
+        let mut rig = Rig::new();
+        rig.set(Command::SelectInstrument(NoteTarget::Builtin(instrument)));
+        rig.keep_output();
+        rig.press(Command::NoteOn(if instrument == Instrument::Drums { 36 } else { 45 }, 110.0 / 127.0));
+        rig.advance(rig.seconds(0.15));
+        let window = &rig.bus[rig.bus.len() - 4096..];
+        let rms = (window.iter().map(|&x| x as f64 * x as f64).sum::<f64>() / window.len() as f64).sqrt();
+        println!("{instrument:?}: rms {rms:.4}, peak {:.4}", peak(&rig.bus));
+        assert!(rms > 0.01, "{instrument:?} sounds on the bus: rms {rms}");
+        renders.push((instrument, rig.bus.clone()));
+    }
+    for (i, (a, x)) in renders.iter().enumerate() {
+        for (b, y) in &renders[i + 1..] {
+            assert!(x != y, "{a:?} and {b:?} render the same sound");
+        }
+    }
 }

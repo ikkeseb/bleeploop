@@ -2,7 +2,7 @@
 //! overdub), every EMPTY → RECORDING → PLAYING ⇄ OVERDUBBING (+ STOPPED) transition, the master loop
 //! (its length and grid anchor, and the multiply that grows it), TRIM, DUB FEEDBACK, FADE, the action
 //! gates with their refusals, and the block jobs that move loop-sized data. Ported from
-//! `src/audio/looper/{machine,state,capture,playback,mixer}.ts` and `src/ui/looper/gates.ts`.
+//! `looper/{machine,state,capture,playback,mixer}.ts` and `src/ui/looper/gates.ts`.
 //!
 //! One clock: input frame `x` is captured at device frame `x`, and a lane plays loop position
 //! `(f - anchor) mod master` at device frame `f`. A take starts `align` frames after its downbeat (the
@@ -919,7 +919,7 @@ impl Looper {
 
     /// A hands-free press on lane `i` (the selected one when pressed, or a named one): the UI's gates,
     /// spoken as refusals. Every press but CLEAR disarms a pending CLEAR; HOLD's release only when it ends
-    /// a capture (a release that does nothing is not a press, as in the web path). An accepted HOLD press
+    /// a capture (a release that does nothing is not a press, as in the Web Audio looper). An accepted HOLD press
     /// remembers lane `i` for its control's release; a refused one leaves that release nothing to end.
     pub fn action(&mut self, cx: &mut Cx, i: usize, action: Action) -> Applied {
         if !matches!(action, Action::Clear | Action::Release(_)) {

@@ -1,24 +1,57 @@
-/** Accessibility and non-colour state carriers against the rendered app: transport, meter, lamp,
- * looper-announcement and toast state carriers, plus the looper refusal gates (a refused lane
- * core's title/label reason, and a refused Space/Enter announcing that reason without reaching its
- * action, counted by a stub on the looper's REC/DUB and PLAY/STOP entries).
- * Toggles: each toggle it presses (the Transport toggles except END STOP, lane 1's MUTE and REV) keeps
- * ONE accessible name in both states and carries its state in aria-pressed alone; the lane core, whose
- * name says the action, carries no aria-pressed. Not pressed here: END STOP, lane FX and the keyboard
- * show/hide cap (which still flips its name). The mic toggle arms through a substituted device open, so
- * it says nothing about a real input device.
+/**
+ * Accessibility and non-colour state carriers against the rendered app, in engine mode on the web engine
+ * fake (`src/platform/host.web.ts`, the `engine-seam` pattern: `window.__lfEngineFake` set before the app
+ * loads, lane states scripted on the feed through `__lf.native.emit`, the commands the UI sends read from
+ * `__lf.native.sent`):
+ *
+ * - transport, meter, lamp, looper-announcement and toast state carriers: ■ ALL during a first take, the
+ *   record meter's dBFS text, the lamp's role, "Track 2 take recorded" on the live region, a focused
+ *   toast outliving its auto-dismiss;
+ * - the refusal carriers: a STOPPED lane core's title/label reason; the transport keys send the engine's
+ *   action (the engine gates it now: lf-engine `tests/actions.rs`) and an engine refusal is announced on
+ *   the looper status line with its lane and reason; while a lane records, another lane's core is
+ *   disabled and its hover and label say why;
+ * - toggles: each toggle it presses (CLICK, FIXED, RETAKE, AUTO, the master mute, lane 1's MUTE and REV)
+ *   keeps ONE accessible name in both states and carries its state in aria-pressed alone; the lane core,
+ *   whose name says the action, carries no aria-pressed. REV's state is the engine's: the probe echoes it
+ *   on the feed as the engine would. Not pressed here: END STOP, lane FX and the keyboard show/hide cap
+ *   (which still flips its name).
+ *
+ * Cannot see the native engine (its gates, what a take records, the meter's source): the fake answers no
+ * command by itself, so every state the DOM shows was scripted.
  * Run: pnpm probe ui-state-carriers
  */
 import assert from 'node:assert/strict';
 import { probe } from '../harness/probe.ts';
 
+const RATE = 48000;
+const BAR = 2 * RATE; // one 4/4 bar at 120 BPM
+
+const lane = (state, extra = {}) => ({
+  state,
+  length: 0,
+  armed: false,
+  autoArmed: false,
+  canUndo: false,
+  canReverse: false,
+  reversed: false,
+  stopAt: null,
+  fading: false,
+  retakePass: 0,
+  ...extra,
+});
+const committed = (state, extra = {}) => lane(state, { length: BAR, canReverse: true, ...extra });
+const laneEvent = (i, info) => ({ Lane: { frame: 0, lane: i, info } });
+const transport = (master, locked) => ({ Transport: { frame: 0, master, bpm: 120, locked } });
+
 /**
  * Presses the toggle named `name` twice with real clicks and returns each step: how many buttons carry
  * that exact name, the state it drives (`state`, an expression read through __lf, never the DOM) and
- * its aria-pressed. A stable toggle shows one button in every step, aria-pressed equal to the state,
- * and a state that flips and flips back.
+ * its aria-pressed. `echo(on)` scripts the engine's answer to a press when the state is the engine's. A
+ * stable toggle shows one button in every step, aria-pressed equal to the state, and a state that flips
+ * and flips back.
  */
-async function pressToggle(page, name, state) {
+async function pressToggle(page, name, state, echo) {
   const button = page.getByRole('button', { name, exact: true });
   const steps = [];
   for (let press = 0; press <= 2; press++) {
@@ -27,6 +60,7 @@ async function pressToggle(page, name, state) {
       const before = await page.evaluate(state);
       const clicked = await button.click({ timeout: 3000 }).then(() => true, () => false);
       if (!clicked) break;
+      if (echo) await echo(!before);
       await page.waitForFunction(`(${state}) !== ${before}`, undefined, { timeout: 3000 }).catch(() => {});
     }
     const count = await button.count();
@@ -39,59 +73,48 @@ async function pressToggle(page, name, state) {
 }
 
 await probe(async ({ open }) => {
-  const { page } = await open({ viewport: { width: 1280, height: 820 } });
+  const { page, consoleErrors } = await open({
+    viewport: { width: 1280, height: 820 },
+    init: (p) => p.addInitScript(() => void (window.__lfEngineFake = true)),
+  });
+  let seq = 0;
+  const emit = (frame) => page.evaluate((f) => window.__lf.native.emit(f), { seq: ++seq, reset: false, events: [], ...frame });
+  const sent = () => page.evaluate(() => window.__lf.native.sent.slice());
+  const clearSent = () => page.evaluate(() => void (window.__lf.native.sent.length = 0));
+  const actions = async () => (await sent()).filter((c) => c.Action !== undefined).map((c) => c.Action);
+  await page.waitForFunction(() => window.__lf.native.opened.length === 1, undefined, { timeout: 5000 });
+  await emit({
+    reset: true,
+    settings: [],
+    events: [...[0, 1, 2, 3, 4].map((i) => laneEvent(i, lane('Empty'))), transport(0, false), { Selected: { frame: 0, lane: 0 } }],
+    anchor: { frame: 0, atMs: Date.now(), rate: RATE, grid: 0 },
+    meter: { peak: 0, clip: false },
+  });
 
-  const firstTakeTransport = await page.evaluate(async () => {
-    const lf = window.__lf;
-    await lf.looper.init();
-    await lf.looper.recDub(0);
+  // ■ ALL during a first take (its count-in).
+  await emit({ events: [laneEvent(0, lane('Recording', { armed: true }))] });
+  const firstTakeTransport = await page.evaluate(() => {
     const button = document.querySelector('button[aria-label="Stop all tracks"]');
-    return {
-      state: lf.looper.stateOf(0),
-      disabled: button?.disabled,
-      text: button?.textContent?.trim(),
-    };
+    return { state: window.__lf.looper.stateOf(0), disabled: button?.disabled, text: button?.textContent?.trim() };
   });
   assert.equal(firstTakeTransport.state, 'RECORDING');
   assert.equal(firstTakeTransport.disabled, false);
   assert.equal(firstTakeTransport.text, '■ ALL');
+  await emit({ events: [laneEvent(0, lane('Empty'))] });
 
-  await page.evaluate(() => window.__lf.looper.stop(0));
-  await page.waitForFunction(() => window.__lf.looper.stateOf(0) === 'EMPTY');
-
-  await page.evaluate(async () => {
-    const lf = window.__lf;
-    const { defaultFxStates } = await import('/src/audio/fx/fx.ts');
-    const frames = Math.round(lf.engine.ctx.sampleRate * 0.8); // one bar at 300 BPM
-    const tracks = [0, 2].map((index) => ({
-      index,
-      pcm: new Float32Array(frames).fill((index + 1) * 0.05),
-      volume: 1,
-      muted: false,
-      reversed: false,
-      state: index === 0 ? 'PLAYING' : 'STOPPED',
-      fx: defaultFxStates(),
-    }));
-    lf.looper.setFixedLengthEnabled(false);
-    lf.looper.setRetakeEnabled(false);
-    lf.looper.setLoopEndStopEnabled(false);
-    await lf.looper.loadSession({ bpm: 300, bars: 1, masterLengthFrames: frames, tracks });
-    await lf.looper.recDub(1);
-  });
+  // A loop on lanes 1 and 3; a later take on lane 2 commits and is announced.
+  await emit({ events: [transport(BAR, true), laneEvent(0, committed('Playing')), laneEvent(2, committed('Stopped'))] });
+  await emit({ events: [laneEvent(1, lane('Recording'))] });
+  await emit({ events: [laneEvent(1, committed('Playing'))] });
   await page.waitForFunction(() => window.__lf.looper.stateOf(1) === 'PLAYING', undefined, { timeout: 6000 });
   const liveText = await page.locator('.lp [aria-live]').textContent();
   assert.match(liveText ?? '', /Track 2 take recorded/);
 
-  await page.evaluate(async () => {
-    const lf = window.__lf;
-    await lf.ensureActive();
-    lf.inputRouter.handle({ type: 'on', note: 60, velocity: 100, source: 'probe' });
-  });
+  // The record meter carries its level as text.
+  await emit({ meter: { peak: 0.5, clip: false } });
   await page.waitForTimeout(300);
   assert.match(await page.locator('[role="meter"]').getAttribute('aria-valuetext'), /-?\d+ dBFS/);
-  await page.evaluate(() =>
-    window.__lf.inputRouter.handle({ type: 'off', note: 60, velocity: 0, source: 'probe' }),
-  );
+  await emit({ meter: { peak: 0, clip: false } });
 
   assert.equal(await page.locator('.cmd__lamp').getAttribute('role'), 'img');
 
@@ -112,48 +135,49 @@ await probe(async ({ open }) => {
     setAutoDismissMsForProbe(8000);
   });
 
-  await page.evaluate(() => window.__lf.looper.playStop(0));
+  await emit({ events: [laneEvent(0, committed('Stopped'))] });
   await page.waitForFunction(() => window.__lf.looper.stateOf(0) === 'STOPPED');
   const stoppedCore = page.locator('.lp-lane[aria-label="Track 1"] .lp-core');
   assert.match(await stoppedCore.getAttribute('aria-label'), /play first to overdub/);
   assert.equal(await stoppedCore.getAttribute('title'), 'play first to overdub');
 
-  // Refusal gate (src/ui/looper/gates.ts): a refused Space/Enter says the lane button's reason on the
-  // looper status line instead of a silent no-op, and never reaches the action. The engine also ignores
-  // REC/DUB on a STOPPED lane and PLAY/STOP on an EMPTY one, so the lane's state cannot tell a refusal
-  // from a press that got through: stubs that only count stand in for the looper's REC/DUB and
-  // PLAY/STOP entries instead. An accepted Space and Enter on PLAYING track 2 first prove the stubs sit
-  // on the keys' path.
+  // The transport keys send the engine's action on its selection; the engine gates it and names a
+  // refusal on the feed, which the looper status line says with its lane.
   const live = page.locator('.lp__sr-status');
-  await page.evaluate(() => {
-    const looper = window.__lf.looper;
-    const real = { recDub: looper.recDub, playStop: looper.playStop };
-    window.__presses = { recDub: 0, playStop: 0 };
-    looper.recDub = async () => void window.__presses.recDub++;
-    looper.playStop = () => void window.__presses.playStop++;
-    window.__restorePresses = () => Object.assign(looper, real);
-    document.activeElement?.blur?.();
-  });
-  const presses = () => page.evaluate(() => ({ ...window.__presses }));
+  await page.evaluate(() => document.activeElement?.blur?.());
+  await clearSent();
   await page.keyboard.press('2');
+  await emit({ events: [{ Selected: { frame: 0, lane: 1 } }] });
   await page.keyboard.press('Space');
   await page.keyboard.press('Enter');
-  assert.deepEqual(await presses(), { recDub: 1, playStop: 1 }, 'accepted Space/Enter on track 2 must reach the stubs');
+  await page.waitForTimeout(100);
+  assert.ok((await sent()).some((c) => c.SelectTrack === 1), '2 selects track 2');
+  assert.deepEqual(await actions(), ['RecDub', 'PlayStop'], 'Space/Enter on track 2 send the engine actions');
+  await clearSent();
   await page.keyboard.press('1');
+  await emit({ events: [{ Selected: { frame: 0, lane: 0 } }] });
   await page.keyboard.press('Space');
-  assert.deepEqual(await presses(), { recDub: 1, playStop: 1 }, 'refused Space must not reach REC/DUB');
+  await page.waitForTimeout(100);
+  assert.deepEqual(await actions(), ['RecDub'], 'Space on track 1 goes to the engine, which gates it');
+  await emit({ events: [{ Refused: { frame: 0, lane: 0, reason: 'PlayFirst' } }] });
   assert.equal((await live.textContent())?.trim(), 'Track 1: play first to overdub');
 
-  // A refused Enter on an EMPTY lane (nothing to play) says so, and never reaches PLAY/STOP.
-  await page.evaluate(() => window.__lf.looper.clearAll());
+  // A refused Enter on an EMPTY lane (nothing to play) says so.
+  await clearSent();
+  await emit({ events: [transport(0, false), ...[0, 1, 2, 3, 4].map((i) => ({ Cleared: { frame: 0, lane: i } })), ...[0, 1, 2, 3, 4].map((i) => laneEvent(i, lane('Empty')))] });
   await page.waitForFunction(() => [0, 1, 2, 3, 4].every((i) => window.__lf.looper.stateOf(i) === 'EMPTY'));
   await page.keyboard.press('Enter');
-  assert.deepEqual(await presses(), { recDub: 1, playStop: 1 }, 'refused Enter must not reach PLAY/STOP');
+  await page.waitForTimeout(100);
+  assert.deepEqual(await actions(), ['PlayStop'], 'Enter on an EMPTY lane goes to the engine, which gates it');
+  await emit({ events: [{ Refused: { frame: 0, lane: 0, reason: 'Empty' } }] });
   assert.equal((await live.textContent())?.trim(), 'Track 1: nothing to play, record first');
-  await page.evaluate(() => window.__restorePresses());
 
-  // Gate ok: an EMPTY selected lane still arms on Space.
+  // An EMPTY selected lane arms on Space.
+  await clearSent();
   await page.keyboard.press('Space');
+  await page.waitForTimeout(100);
+  assert.deepEqual(await actions(), ['RecDub'], 'Space on an EMPTY lane sends REC/DUB');
+  await emit({ events: [laneEvent(0, lane('Recording'))] });
   await page.waitForFunction(() => window.__lf.looper.stateOf(0) === 'RECORDING', undefined, { timeout: 3000 });
 
   // While lane 1 records, lane 2's core is refused, and its hover and label say why.
@@ -164,40 +188,35 @@ await probe(async ({ open }) => {
   // The core's name says the action ("Track 1 stop recording"), so a pressed state would contradict it.
   const recordingCorePressed = await page.locator('.lp-lane[aria-label="Track 1"] .lp-core').getAttribute('aria-pressed');
   console.log(JSON.stringify({ recordingCorePressed }));
-  await page.evaluate(() => window.__lf.looper.stop(0));
+  await emit({ events: [laneEvent(0, lane('Empty'))] });
   await page.waitForFunction(() => window.__lf.looper.stateOf(0) === 'EMPTY');
 
   // Toggles: one stable name, state in aria-pressed (the END STOP pattern). No loop yet, so the tempo
   // is unlocked and AUTO REC is enabled.
   assert.equal(await page.evaluate(() => window.__lf.clock.bpmLocked()), false);
-  await page.evaluate(() => {
-    const lf = window.__lf;
-    window.__realInputOpen = lf.platform.audioInput.open;
-    lf.platform.audioInput.open = async () => ({ node: lf.engine.ctx.createGain(), sampleRate: lf.engine.ctx.sampleRate, close() {} });
-  });
   const unstable = [];
   for (const [name, state] of [
     ['Metronome click', 'window.__lf.clock.metronomeOn()'],
     ['Fixed take length', 'window.__lf.looper.fixedLengthEnabled()'],
     ['Retake', 'window.__lf.looper.retakeEnabled()'],
     ['Auto record', 'window.__lf.looper.autoRecordEnabled()'],
-    ['Mic / line input', 'window.__lf.looper.inputArmed()'],
     ['Mute master', 'window.__lf.master.muted()'],
   ]) if (!(await pressToggle(page, name, state))) unstable.push(name);
-  await page.evaluate(() => { window.__lf.platform.audioInput.open = window.__realInputOpen; });
 
-  await page.evaluate(async () => {
-    const lf = window.__lf;
-    const { defaultFxStates } = await import('/src/audio/fx/fx.ts');
-    const frames = Math.round(lf.engine.ctx.sampleRate * 0.8);
-    await lf.looper.loadSession({ bpm: 300, bars: 1, masterLengthFrames: frames, tracks: [{ index: 0,
-      pcm: new Float32Array(frames).fill(0.05), volume: 1, muted: false, reversed: false, state: 'STOPPED', fx: defaultFxStates() }] });
-  });
+  await emit({ events: [transport(BAR, true), laneEvent(0, committed('Stopped'))] });
   await page.waitForFunction(() => window.__lf.looper.stateOf(0) === 'STOPPED');
-  for (const [name, state] of [
+  // REV's state is the engine's: echo the lane as the engine reports it after a Reverse.
+  const echoReverse = (on) => emit({ events: [laneEvent(0, committed('Stopped', { reversed: on }))] });
+  await clearSent();
+  for (const [name, state, echo] of [
     ['Track 1 mute', 'window.__lf.looper.trackMuted(0)'],
-    ['Track 1 reverse', 'window.__lf.looper.trackInfo(0).reversed'],
-  ]) if (!(await pressToggle(page, name, state))) unstable.push(name);
+    ['Track 1 reverse', 'window.__lf.looper.trackInfo(0).reversed', echoReverse],
+  ]) if (!(await pressToggle(page, name, state, echo))) unstable.push(name);
+  const laneSent = await sent();
+  console.log('lane toggles sent', JSON.stringify(laneSent));
+  assert.equal(laneSent.filter((c) => c.SetMute?.[0] === 0).length, 2, 'MUTE sends SetMute on each press');
+  assert.equal(laneSent.filter((c) => c.Reverse === 0 || c.ActionOn?.[1] === 'Reverse').length, 2, 'REV sends the reverse on each press');
   assert.deepEqual(unstable, [], 'these toggles change their name with their state or lose aria-pressed');
   assert.equal(recordingCorePressed, null, 'the lane core names its action; it must not also claim a pressed state');
+  assert.deepEqual(consoleErrors, [], 'no console errors');
 });

@@ -1,4 +1,4 @@
-// verify/guards/quantize.mjs — deterministic guard for src/audio/quantize.ts timing helpers.
+// verify/guards/quantize.mjs — deterministic guard for src/ui/state/quantize.ts timing helpers.
 //
 // Imports the REAL source (Node TS type-stripping), not a port, so it cannot drift.
 // Run: node verify/guards/quantize.mjs
@@ -14,7 +14,7 @@ import {
   maxWholeBars,
   clampBars,
   averageInterval,
-} from '../../src/audio/quantize.ts';
+} from '../../src/ui/state/quantize.ts';
 
 let passed = 0;
 let failed = 0;

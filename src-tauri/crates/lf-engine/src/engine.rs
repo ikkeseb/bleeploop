@@ -8,8 +8,8 @@
 //! in and plugin) and the click sum on the stereo master bus: master volume, then the master limiter
 //! (`dsp::compressor`) → stereo out. The wet signal and the sends' output (the monitor) join the output
 //! after the limiter, under the same master volume: the played instrument is heard without the
-//! limiter's pre-delay, as the native monitor is today, and like it is not limited; the sends are heard
-//! on the frame they are recorded. Ported from `src/audio/engine.ts` and `src/audio/master.ts`.
+//! limiter's pre-delay, as the old native monitor was, and like it is not limited; the sends are heard
+//! on the frame they are recorded. Ported from `engine.ts` and `master.ts`.
 //!
 //! The limiter delays everything it carries by its pre-delay, the click included, so a take's alignment
 //! is `align_frames` + the largest live effect's latency + the limiter's. The sends add no term: the dry

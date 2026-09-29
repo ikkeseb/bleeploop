@@ -1,27 +1,21 @@
 mod host;
 // ASIO startup coordinator (one probe per process, requested by the frontend after the UI is up).
 mod asio_startup;
-// P11.0: native audio-input capture (cpal, WASAPI-shared). Windows-only; the wet signal returns to
-// Web Audio via the unchanged P9 hop-1 path, so no boundary change.
+// Native audio input devices (cpal, WASAPI-shared): the picker's list and the engine's WASAPI pick.
 #[cfg(windows)]
 mod audio_input;
-// P11.3: native audio-output monitor (cpal, WASAPI-shared). Windows-only; the low-latency live
-// monitor for the wet plugin signal (branch-1 of the split). No boundary change (cpal is Rust-internal).
+// Native audio output devices, the backend type and the ASIO driver cache the engine opens from.
 #[cfg(windows)]
 mod audio_output;
-// The native engine's device side (docs/plans/native-engine.md § Stage 4): engine mode, the default
-// (`engine_io::mode`), runs it; a DEV probe drives it too.
+// The native engine's device side (briefing: `engine_io/mod.rs`): engine mode
+// (`engine_io::mode`) runs it; a DEV probe drives it too.
 #[cfg(windows)]
 #[allow(dead_code)]
 mod engine_io;
-#[cfg(all(windows, debug_assertions))]
-mod audio_latency_probe;
 // DEV: the loopback chirp analysis the spike and the engine probe share.
 #[cfg(all(windows, debug_assertions))]
 mod chirp_lag;
-#[cfg(all(windows, debug_assertions))]
-mod marker_probe;
-// Stage 1 silent-share probe (docs/plans/native-engine.md § Stage 1, S1).
+// Stage 1 silent-share probe (docs/ARCHITECTURE.md § Measured premise, S1).
 #[cfg(all(windows, debug_assertions))]
 mod share_probe;
 
@@ -116,18 +110,18 @@ fn app_open_log_dir(app: tauri::AppHandle) -> Result<(), String> {
     })
 }
 
-/// Windows: auto-grant the WebView2 permission requests the app itself makes (Web MIDI, microphone)
-/// so navigator.requestMIDIAccess / getUserMedia resolve without a prompt — the desktop-app-native
-/// behaviour (P8). WebView2 v149 supports Web MIDI natively, so no midir bridge is needed; only the
-/// permission needs granting. Non-sysex Web MIDI surfaces as UNKNOWN_PERMISSION and sysex as
-/// MIDI_SYSTEM_EXCLUSIVE_MESSAGES, and the exact kind varies by runtime, so both are granted.
+/// Windows: auto-grant the WebView2 permission request the app itself makes (Web MIDI) so
+/// navigator.requestMIDIAccess resolves without a prompt — the desktop-app-native behaviour (P8).
+/// WebView2 v149 supports Web MIDI natively, and engine mode's MIDI still arrives through it (the
+/// native MidiHost stays off: WinMM ports are exclusive); only the permission needs granting.
+/// Non-sysex Web MIDI surfaces as UNKNOWN_PERMISSION and sysex as MIDI_SYSTEM_EXCLUSIVE_MESSAGES, and
+/// the exact kind varies by runtime, so both are granted.
 /// Anything else (camera, geolocation, notifications, …) and any request from a foreign origin keeps
 /// WebView2's default handling.
 #[cfg(windows)]
 fn register_permission_autogrant(window: &tauri::WebviewWindow) {
     use webview2_com::Microsoft::Web::WebView2::Win32::{
-        COREWEBVIEW2_PERMISSION_KIND, COREWEBVIEW2_PERMISSION_KIND_MICROPHONE,
-        COREWEBVIEW2_PERMISSION_KIND_MIDI_SYSTEM_EXCLUSIVE_MESSAGES,
+        COREWEBVIEW2_PERMISSION_KIND, COREWEBVIEW2_PERMISSION_KIND_MIDI_SYSTEM_EXCLUSIVE_MESSAGES,
         COREWEBVIEW2_PERMISSION_KIND_UNKNOWN_PERMISSION, COREWEBVIEW2_PERMISSION_STATE_ALLOW,
     };
     use webview2_com::PermissionRequestedEventHandler;
@@ -153,7 +147,6 @@ fn register_permission_autogrant(window: &tauri::WebviewWindow) {
                         .iter()
                         .any(|o| uri == *o || uri.starts_with(&format!("{o}/")));
                     let wanted = kind == COREWEBVIEW2_PERMISSION_KIND_UNKNOWN_PERMISSION
-                        || kind == COREWEBVIEW2_PERMISSION_KIND_MICROPHONE
                         || kind == COREWEBVIEW2_PERMISSION_KIND_MIDI_SYSTEM_EXCLUSIVE_MESSAGES;
                     if own_origin && wanted {
                         args.SetState(COREWEBVIEW2_PERMISSION_STATE_ALLOW)?;
@@ -179,17 +172,7 @@ pub fn run() {
     #[cfg(windows)]
     {
         let args: Vec<String> = std::env::args().collect();
-        #[cfg(debug_assertions)]
-        if let Some(pos) = args.iter().position(|a| a == "--probe-output-latency") {
-            match audio_latency_probe::run(&args[pos + 1..]) {
-                Ok(()) => std::process::exit(0),
-                Err(error) => {
-                    eprintln!("[output-latency-probe] {error}");
-                    std::process::exit(1);
-                }
-            }
-        }
-        // Native-engine Stage 1 premise spike (`docs/plans/native-engine.md`).
+        // Native-engine Stage 1 premise spike (`docs/ARCHITECTURE.md` § Measured premise).
         #[cfg(debug_assertions)]
         if let Some(pos) = args.iter().position(|a| a == "--probe-engine-spike") {
             match host::engine_spike_run(&args[pos + 1..]) {
@@ -200,7 +183,7 @@ pub fn run() {
                 }
             }
         }
-        // Native-engine Stage 4 rig probe (`docs/plans/native-engine.md` § Stage 4).
+        // The native engine's rig probe (`engine_io/probe.rs`).
         #[cfg(debug_assertions)]
         if let Some(pos) = args.iter().position(|a| a == "--probe-engine") {
             match engine_io::probe::run(&args[pos + 1..]) {
@@ -225,19 +208,6 @@ pub fn run() {
             let path = args.get(pos + 1).map(String::as_str).unwrap_or_default();
             std::process::exit(host::scan_one_main(path));
         }
-        // P11.3 de-risk: `app.exe --probe-asio` enumerates the ASIO host's devices (proves the cpal
-        // `asio` feature compiled + the machine's ASIO drivers are visible), then exits before Tauri.
-        if args.iter().any(|a| a == "--probe-asio") {
-            audio_input::probe_asio();
-            std::process::exit(0);
-        }
-        // P11.3 ASIO de-risk #2: can cpal build + run an ASIO INPUT and OUTPUT stream on the same
-        // full-duplex device simultaneously? (The single ASIO driver can't be re-enumerated while one
-        // direction holds it — this tests building both before play.) Runs standalone, then exits.
-        if args.iter().any(|a| a == "--probe-asio-duplex") {
-            audio_input::probe_asio_duplex();
-            std::process::exit(0);
-        }
         // P11.3 ASIO tier: the duplex device + configs are resolved ONCE per process while the driver
         // is free (once a stream holds it, cpal can't re-resolve or re-query), but NOT here: resolving
         // loads the third-party driver DLL in-process, and a broken driver would hang or crash the app
@@ -250,9 +220,7 @@ pub fn run() {
     }
 
     tauri::Builder::default()
-        // P9.2: shared host state — JS-provided sample rate + the per-slot RT producer handles.
-        // The !Send PluginInstance never lives here (State must be Send+Sync); only Send control
-        // handles (Arc atomics + the owner-thread JoinHandle) do.
+        // Shared host state: the WebView document epoch (`host_init`).
         .manage(host::PluginHostState::default())
         .setup(|app| {
             // Field debuggability: register the log plugin UNCONDITIONALLY, not just
@@ -302,13 +270,10 @@ pub fn run() {
             #[cfg(windows)]
             {
                 use tauri::Manager;
-                // DEV by-ear diagnostic: log whether the RT loop renders at the native rate
-                // (prod-realistic, default) or the forced 48k P9.4 drift-gate rate (LF_FORCE_48K=1).
-                host::log_render_rate_mode();
                 if let Some(window) = app.get_webview_window("main") {
                     register_permission_autogrant(&window);
                 }
-                // Engine mode, read from its toggle once per launch.
+                // The native engine: its device owner and feed, once per launch.
                 engine_io::mode::EngineApp::setup(app.handle());
             }
             Ok(())
@@ -323,14 +288,6 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
-            #[cfg(all(windows, debug_assertions))]
-            marker_probe::marker_probe_clock,
-            #[cfg(all(windows, debug_assertions))]
-            marker_probe::marker_probe_begin,
-            #[cfg(all(windows, debug_assertions))]
-            marker_probe::marker_probe_cancel,
-            #[cfg(all(windows, debug_assertions))]
-            marker_probe::marker_probe_result,
             #[cfg(debug_assertions)]
             diag,
             frontend_log,
@@ -342,43 +299,24 @@ pub fn run() {
             host::plugin_load,
             host::plugin_unload,
             host::plugin_list_loaded,
-            host::plugin_note_on,
-            host::plugin_note_off,
             host::plugin_set_param,
             host::plugin_list_params,
-            // Engine mode's tone recall (host/tone.rs): a session export's and import's tones.
+            // Tone recall (host/tone.rs): a session export's and import's tones.
             host::plugin_tone_take,
             host::plugin_tone_import,
             host::plugin_tone_forget,
             host::plugin_open_editor,
             host::plugin_close_editor,
-            // P11.0 native audio-input path (guitar → plugin → wet monitor/record).
+            // Device pickers (native devices; the engine opens them).
             host::plugin_list_input_devices,
-            host::plugin_arm_input,
-            host::plugin_disarm_input,
-            // P11.3 native low-latency monitor (wet → cpal output, same device).
             host::plugin_list_output_devices,
-            host::plugin_arm_monitor,
-            host::plugin_disarm_monitor,
-            host::plugin_set_monitor_gain,
-            host::plugin_set_master_gain,
-            // P11.3 record-latency: cpal_out latency readout for the looper's auto record compensation.
-            host::plugin_monitor_latency,
-            // P11.3 live buffer-size control (global RT block).
-            host::plugin_set_buffer_size,
-            // P11.3 ASIO-default: runtime host-tier toggle + availability query (Audio Settings).
-            host::plugin_set_asio_enabled,
-            host::plugin_asio_available,
+            // The ASIO tier: availability, cached driver, startup probe and driver switch.
             host::plugin_asio_device_info,
             host::plugin_asio_status,
             host::plugin_asio_probe,
             host::plugin_asio_switch,
             host::plugin_asio_drivers,
-            // Engine mode (docs/plans/native-engine.md § Stage 5).
-            #[cfg(windows)]
-            engine_io::mode::engine_mode,
-            #[cfg(windows)]
-            engine_io::mode::engine_set_mode,
+            // The native engine (`engine_io/mode.rs`).
             #[cfg(windows)]
             engine_io::mode::engine_open,
             #[cfg(windows)]

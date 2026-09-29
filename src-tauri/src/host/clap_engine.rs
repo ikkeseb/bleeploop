@@ -2,9 +2,8 @@
 //! `lf_engine::SlotProcessor`) and the engine-mode owner thread that loads, activates, restarts,
 //! re-activates after an eviction and tears it down (`engine_slot` holds the API), keeping the
 //! plugin's tone as `engine_slot` describes (the `state` extension's blob, captured under the tone
-//! limit: `CappedState`). It follows `owner_main`
-//! minus the RT thread, the hop-1 ring and the device; the load sequence is copied from there rather
-//! than shared, because nothing but a window-bound owner exercises that one.
+//! limit: `CappedState`). It followed the WebView bridge's CLAP owner (deleted in Stage 6) minus its RT
+//! thread, its hop-1 ring and the device.
 
 use super::engine_slot::{
     keep_tone, report_faults, restore_tone, EngineSlotEvent, OwnerCtx, Ready, Restore, FAULT_PARAM,
@@ -380,7 +379,7 @@ fn cycle(
     }
 }
 
-/// Instantiate `id` from `entry` with the production host handlers. Copied from `owner_main`'s setup.
+/// Instantiate `id` from `entry` with the production host handlers.
 fn instantiate(
     entry: &PluginEntry,
     id: &str,
@@ -600,8 +599,7 @@ pub(super) fn run(
                 OwnerRequest::SaveTone(reply) => {
                     let _ = reply.send(keep_tone(&mut tone, index, "asked", &name, || save_state(&mut instance)));
                 }
-                // Params as the live owner serves them; a device request never comes from an engine
-                // handle and is answered as misrouted.
+                // Params, the VST3-only mirror and a wake: the shared handler.
                 other => handle_owner_request(other, &mut instance, &param_ids),
             }
         }

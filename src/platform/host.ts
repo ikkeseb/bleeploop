@@ -2,25 +2,23 @@
  * THE CAPABILITY BOUNDARY.
  *
  * `src/platform/` is the ONLY place in the app permitted to import `@tauri-apps/*`
- * (enforced by `scripts/check-boundary.mjs`). Everything in `audio/` and `ui/` depends
- * on these interfaces, never on Tauri directly — so the entire frontend builds and runs
- * standalone in a browser via `pnpm dev`, and gains native capabilities under Tauri later
- * with zero rewrite.
+ * (enforced by `scripts/check-boundary.mjs`). Everything in `ui/`, `session/` and `app/` depends
+ * on these interfaces, never on Tauri directly — so the entire frontend builds and renders
+ * standalone in a browser via `pnpm dev` (silent: the browser build has no engine).
  *
- * Five capabilities are DECLARED here, but only THREE of them actually differ per platform:
+ * Four capabilities are DECLARED here, but only THREE of them actually differ per platform:
  *   - PluginHost      — native VST/CLAP hosting (web: stub; tauri: invoke/listen). The real seam.
- *   - EngineHost      — the native audio engine behind the engine-mode toggle (Stage 5 of
- *                        `docs/plans/native-engine.md`; web: a scriptable fake for probes).
+ *   - EngineHost      — the native audio engine (`docs/ARCHITECTURE.md`; web: a scriptable fake
+ *                        for probes).
  *   - LogFolder       — the release log's folder, for Help's diagnostics (web: none).
- *   - AudioInputSource — mic/line. getUserMedia works inside WebView2, so tauri reuses the web one
- *                        verbatim (`tauriPlatform = { ...webPlatform, kind, pluginHost, engine, logs }`).
  *   - MidiBackend      — W3C Web MIDI. WebView2 v149 ships it natively and `lib.rs` auto-grants the
- *                        permission, so tauri reuses the web one verbatim too. The engine's native
- *                        MIDI (midir, `src-tauri/src/engine_io/midi`) stays off for the release: WinMM
- *                        ports are exclusive, and Web MIDI keeps the controller.
+ *                        permission, so tauri reuses the web one verbatim (`tauriPlatform = { ...webPlatform,
+ *                        kind, pluginHost, engine, logs }`). The engine's native MIDI (midir,
+ *                        `src-tauri/src/engine_io/midi`) stays off: WinMM ports are exclusive, and Web MIDI
+ *                        keeps the controller.
  *
- * Audio buffers NEVER cross this boundary as PCM — native audio reaches the Web Audio
- * graph only as an AudioNode (MediaStream / SharedArrayBuffer ring).
+ * Live audio NEVER crosses this boundary as PCM; a session save's snapshot does, once, off the RT path
+ * (`EngineHost.snapshot` / `loadSession`).
  */
 import type { DeviceRequest, DeviceStatus, EngineCommand, FeedFrame } from './engine-wire';
 
@@ -42,8 +40,8 @@ export interface PluginDescriptor {
 export interface PluginInfo {
   slot: PluginSlot;
   descriptor: PluginDescriptor;
-  /** Engine mode's load answer: what the load did with the plugin's stored tone (`src-tauri/src/host/
-   * tone.rs`). Absent: nothing was stored, or the web audio path loaded it (it keeps no tones). */
+  /** The load's answer: what it did with the plugin's stored tone (`src-tauri/src/host/tone.rs`).
+   * Absent: nothing was stored. */
   tone?: 'restored' | 'failed';
 }
 
@@ -89,9 +87,8 @@ export interface PluginHost {
   /** False in the browser build — UI then surfaces the six built-in synths in both slots. */
   readonly available: boolean;
   /**
-   * Tell the native host the engine's AudioContext sample rate, so it `activate()`s plugins at the
-   * matching rate (the drift controller resamples the residual). Call once at startup before the
-   * first `loadPlugin`. No-op in the web build.
+   * Tell the native host the engine device's sample rate, so it `activate()`s plugins at the matching
+   * rate. Call once a device runs, before the first `loadPlugin`. No-op in the web build.
    */
   init(sampleRate: number): Promise<void>;
   /**
@@ -104,9 +101,9 @@ export interface PluginHost {
    * `id` is required, not optional: a single `.clap`/`.vst3` bundle can export multiple plugin
    * descriptors, so `(slot, path)` alone would silently load `descriptor[0]`. Pass the
    * `PluginDescriptor.id` from `scanPlugins()` to pick the exact one. `toneToken`: the session import's
-   * reload token (`ToneImport.reloadToken`) when this load is that reload (engine mode).
+   * reload token (`ToneImport.reloadToken`) when this load is that reload.
    */
-  loadPlugin(slot: PluginSlot, path: string, id: string, loadToken: number, toneToken?: number): Promise<PluginInfo>;
+  loadPlugin(slot: PluginSlot, path: string, id: string, toneToken?: number): Promise<PluginInfo>;
   unloadPlugin(slot: PluginSlot): Promise<void>;
   /**
    * List the plugins currently loaded in the native slots (frontend-reload wedge resync). A WebView
@@ -116,13 +113,6 @@ export interface PluginHost {
    * build.
    */
   listLoaded(): Promise<PluginInfo[]>;
-  /**
-   * Route a live note to the plugin. `velocity` is the CLAP-normalised 0..1 form (the input
-   * router divides MIDI velocity by 127). The note rides the plugin's process-input event queue on
-   * the audio thread via a main→audio ring — never a main-thread call.
-   */
-  noteOn(slot: PluginSlot, note: number, velocity: number): Promise<void>;
-  noteOff(slot: PluginSlot, note: number): Promise<void>;
   openEditor(slot: PluginSlot, mode: EditorMode): Promise<void>;
   closeEditor(slot: PluginSlot): Promise<void>;
   setParameter(slot: PluginSlot, paramId: number, value: number): Promise<void>;
@@ -149,24 +139,14 @@ export interface PluginHost {
    */
   onEditorClosed(cb: (slot: PluginSlot) => void): () => void;
   /**
-   * Subscribe to a TERMINAL native stream fault: the slot's cpal capture (`kind: 'input'`) or
-   * low-latency monitor (`kind: 'output'`) stream died — interface unplugged, ASIO driver reset. cpal's
-   * error callback ends that stream for good, so by the time this fires the native side has ALREADY
-   * dropped the stream and cleared the RT state that fed it; the JS side only reconciles its OWN state
-   * (fall back to the web monitor path, clear the armed flag + the record-latency registration). Never
-   * fires for a user-initiated disarm, and never for a recoverable underrun/overrun. Returns an
-   * unsubscribe fn. No-op in the web build.
-   */
-  onStreamFault(cb: (e: { slot: PluginSlot; kind: 'input' | 'output' }) => void): () => void;
-  /**
-   * Tone recall, engine mode only (`src-tauri/src/host/tone.rs`): every load restores the plugin's
+   * Tone recall (`src-tauri/src/host/tone.rs`): every load restores the plugin's
    * stored tone by itself (`PluginInfo.tone`). `takeTone` saves the slot's tone now, through its
    * owner (the store gets it as from any save), and hands back the tone file's bytes (a session
    * export's), or null when the plugin keeps no state. `importTone` stores a session's tone under
    * `plugin`, the plugin session.json names for it (the host refuses a tone file of any other plugin),
    * and says whether `slot` holds that plugin now; it loads and swaps nothing. `forgetTone` drops the
-   * tone an import parked under `reloadToken` for a reload that did not happen. All three reject on the
-   * web audio path and in the browser build.
+   * tone an import parked under `reloadToken` for a reload that did not happen. All three reject in the
+   * browser build.
    */
   takeTone(slot: PluginSlot): Promise<Uint8Array | null>;
   importTone(
@@ -176,75 +156,13 @@ export interface PluginHost {
   ): Promise<ToneImport>;
   forgetTone(slot: PluginSlot, reloadToken: number): Promise<void>;
 
-  // ── Native audio INPUT ──────────────────────────────────────────────────────────────────
-  // Route a hardware guitar/line signal INTO the slot's loaded plugin so an FX plugin (amp-sim)
-  // processes a live signal and the "wet" output can be monitored. cpal-native: PCM never crosses
-  // this boundary — the wet signal still returns via the SharedBuffer path as an AudioNode. Web
-  // build: `listInputDevices` is empty, `armInput` rejects, `disarmInput` no-ops.
-  /** Enumerate native capture devices (cpal). Empty in the web build. */
+  // ── Devices: the engine opens one input and one output (`EngineHost.open`); these list them ─────────
+  /** Enumerate native capture devices. Empty in the web build. */
   listInputDevices(): Promise<AudioInputDevice[]>;
-  /**
-   * Feed `deviceId`'s capture stream (or the default input when omitted/null) INTO the plugin in
-   * `slot`, isolating one input `channel` (0-based; omitted/null = auto-pick). A multi-input
-   * interface exposes all its inputs as one interleaved stream, so the channel pick selects which one
-   * reaches the plugin. Rejects if the slot holds no plugin or the plugin exposes no audio-input bus
-   * (a pure synth) — the caller surfaces that to the UI.
-   */
-  armInput(slot: PluginSlot, deviceId?: string | null, channel?: number | null): Promise<void>;
-  /** Stop feeding input to the slot's plugin. Idempotent; no-op in the web build. */
-  disarmInput(slot: PluginSlot): Promise<void>;
-
-  // ── Native low-latency monitor ─────────────────────────────────────────────────────────
-  // A cpal OUTPUT stream on the same physical device as the capture (one crystal) plays the slot's
-  // wet plugin signal LIVE, bypassing the WebView2 round-trip (branch-2, which stays the looper
-  // record tap). No PCM crosses this boundary — cpal is Rust-internal. The web build returns `[]`,
-  // and arm/disarm/setMonitorGain are no-ops. The caller is responsible for muting the web monitor
-  // while the native one is armed (else the wet doubles → flam).
-  /** Enumerate native output devices (cpal/WASAPI-shared). Empty in the web build. */
+  /** Enumerate native output devices (the output and Share output pickers). Empty in the web build. */
   listOutputDevices(): Promise<AudioOutputDevice[]>;
-  /**
-   * Arm the native low-latency monitor on `slot`: open a cpal OUTPUT stream on `deviceId` (or the
-   * default output when omitted/null) fed the slot's wet plugin output. Rejects if the slot holds no
-   * plugin or the stream can't open. Independent of input arming (a synth OR an FX can be monitored).
-   */
-  armMonitor(slot: PluginSlot, deviceId?: string | null): Promise<void>;
-  /** Drop the slot's native monitor stream. Idempotent; no-op in the web build. */
-  disarmMonitor(slot: PluginSlot): Promise<void>;
-  /**
-   * Set the slot's native-monitor output gain (linear, 0..1.5 like the web output gain). Stored
-   * directly into a Rust atomic (no IPC round-trip on the audio thread). No-op in the web build.
-   */
-  setMonitorGain(slot: PluginSlot, gain: number): Promise<void>;
-  /**
-   * Set the user-facing master factor for every native monitor stream (linear, 0..1). This scales
-   * only the cpal audible path; the plugin signal feeding `recordTap` stays full. No-op in the web
-   * build.
-   */
-  setMasterGain(gain: number): Promise<void>;
-  /**
-   * The slot's native-monitor output latency ("cpal_out") in SECONDS — the time from the RT producer
-   * emitting a wet sample to the player hearing it through the cpal output stream. Read once per record
-   * arm by the looper's automatic record-latency compensation (it SUBTRACTS this; the player aligns their
-   * natively-monitored guitar to the heard click, self-correcting for it). 0 when the monitor is disarmed
-   * or in the web build (no native monitor ⇒ no compensation).
-   */
-  monitorLatencySeconds(slot: PluginSlot): Promise<number>;
-
-  // ── Global RT buffer size ───────────────────────────────────────────────────────────────
-  /**
-   * Set the global RT block size (frames; one of audio-settings `BUFFER_FRAMES_OPTIONS`). The dominant
-   * latency knob — smaller = lower monitor latency, higher underrun risk. Re-paces BOTH slots' producer
-   * loops at the new block WITHOUT reloading the plugins (params/editor/state preserved); a brief
-   * audible gap during the rebuild. No PCM crosses the boundary; no-op in the web build.
-   */
-  setBufferSize(frames: number): Promise<void>;
 
   // ── ASIO low-latency tier ───────────────────────────────────────────────────────────────────────
-  /**
-   * Whether an ASIO low-latency device is available (the native build compiled the ASIO host AND the
-   * startup probe published a device). Always false in the web build.
-   */
-  asioAvailable(): Promise<boolean>;
   /** The startup coordinator's status (`src-tauri/src/asio_startup.rs`). Never touches the driver. */
   asioStatus(): Promise<AsioStatusReport>;
   /**
@@ -252,30 +170,22 @@ export interface PluginHost {
    * window is up, at boot only when the saved preference is on (`explicit=false`), and from the Audio
    * Settings toggle / Retry (`explicit=true`, which may proceed past a blocked or failed earlier attempt).
    * `driver` is the saved driver pick ('' = automatic; a name no longer installed falls back to it).
-   * Resolves with the resulting status; `ready` means `asioAvailable()` is now true. Bounded by the
+   * Resolves with the resulting status; `ready` means an ASIO device is available. Bounded by the
    * native probe deadline (a hung driver yields `timed-out`, never a hang here).
    */
   asioProbe(explicit: boolean, driver: string): Promise<AsioStatusReport>;
   /**
    * Switch to another ASIO driver without a restart ('' = automatic): the host drops the cached driver
-   * and probes `driver` in its place, as `asioProbe(true, driver)` would. In engine mode the device
-   * owner runs it: a device on ASIO closes first and opens again after, on the new driver (unless that
-   * one runs at another rate while the engine holds loops: the next `open` asks). On the web path it
-   * rejects, changing nothing, while a live slot holds the driver. A timed-out probe answers `timed-out`
-   * and needs a restart, as at startup.
+   * and probes `driver` in its place, as `asioProbe(true, driver)` would. The device owner runs it: a
+   * device on ASIO closes first and opens again after, on the new driver (unless that one runs at
+   * another rate while the engine holds loops: the next `open` asks). A timed-out probe answers
+   * `timed-out` and needs a restart, as at startup.
    */
   asioSwitch(driver: string): Promise<AsioStatusReport>;
   /** The installed ASIO drivers' names, read from the registry without loading any. Empty without ASIO. */
   asioDrivers(): Promise<string[]>;
   /** The cached ASIO driver, its actual channel counts and buffer range; null without an ASIO device. */
   asioDeviceInfo(): Promise<AsioDeviceInfo | null>;
-  /**
-   * Set the ASIO-tier preference. When enabled (and available) the native capture + monitor use ASIO
-   * for low latency; disabled forces WASAPI-shared. Takes effect on the NEXT arm — a live stream keeps
-   * the host it was opened with (same "applies on next arm" rule as the device/buffer pickers). No-op
-   * in the web build.
-   */
-  setAsioEnabled(enabled: boolean): Promise<void>;
 }
 
 /**
@@ -311,47 +221,6 @@ export interface AsioDeviceInfo {
   bufferMax: number | null;
 }
 
-/** A live audio input, delivered as an AudioNode on the caller's shared AudioContext. */
-export interface OpenedInput {
-  node: AudioNode;
-  sampleRate: number;
-  /** Releases the underlying device/stream. */
-  close(): void;
-}
-
-export interface AudioInputOpenOptions {
-  /**
-   * Isolate one physical input channel before returning the node (0-based). Explicit picks request
-   * enough channels to keep the interface lanes discrete, then route only this ChannelSplitter
-   * output. Omitted/null keeps the legacy auto path, which accepts the browser's mono preference and
-   * lets capture.ts centre/sum whatever the interface actually returns.
-   */
-  channel?: number | null;
-  /** Reports the opened device dying while live. See AudioInputSource.open. */
-  onLost?: () => void;
-}
-
-export interface AudioInputSource {
-  /**
-   * Opens the input on the given context. Three outcomes, and callers distinguish all three:
-   * - resolves an OpenedInput on success;
-   * - resolves null when the capability is absent (e.g. no getUserMedia) — surfaced as "no input available";
-   * - REJECTS on denial/open failure (permission denied, device busy, NotFoundError) — surfaced as an
-   *   arm-failure error toast (see ui/transport/Transport.tsx onToggleMic + audio/looper/capture.ts armInput).
-   * Implementers must NOT collapse denial into null.
-   *
-   * `options.onLost` reports the device DYING while open (interface unplugged, device disabled) — at
-   * most once per opened input, and never for the caller's own `close()`. The handle is dead when it
-   * fires: the graph stays wired to a source that now yields only silence, so the caller must run its
-   * full disarm path. Implementers that cannot detect loss simply never call it.
-   *
-   * Device selection is deliberately not accepted here yet. Audio Settings stores a native cpal
-   * endpoint id, while getUserMedia requires an origin-specific MediaDeviceInfo.deviceId; treating
-   * those strings as interchangeable would make an explicit selection fail or open the wrong device.
-   */
-  open(ctx: AudioContext, options?: AudioInputOpenOptions): Promise<OpenedInput | null>;
-}
-
 export interface MidiBackend {
   /**
    * W3C Web MIDI via navigator.requestMIDIAccess — Chromium/Edge natively, and WebView2 v149
@@ -365,16 +234,11 @@ export interface MidiBackend {
 /**
  * The native audio engine (`src-tauri/src/engine_io`): one device, the looper, synths, FX, mixer and
  * plugin slots in the audio callback. The UI sends commands and reads the feed; no PCM crosses. The
- * payloads are `engine-wire.ts`. The engine runs only in engine mode, a toggle the host reads at
- * startup (applied on restart, never live).
+ * payloads are `engine-wire.ts`.
  */
 export interface EngineHost {
   /** False in the browser build (unless a DEV probe forces the web fake on, `host.web.ts`). */
   readonly available: boolean;
-  /** Whether this launch runs on the engine. */
-  mode(): Promise<boolean>;
-  /** Write the toggle for the next launch. */
-  setMode(enabled: boolean): Promise<void>;
   /** Open the device, or switch to another; resolves with the device that runs. Rejects with the wire's
    * `OpenError` (`decodeOpenError`): a switch to another rate while the engine holds audio is refused
    * unless `force` (the player confirmed dropping the loops from the engine). */
@@ -422,6 +286,5 @@ export interface Platform {
   readonly pluginHost: PluginHost;
   readonly engine: EngineHost;
   readonly logs: LogFolder;
-  readonly audioInput: AudioInputSource;
   readonly midi: MidiBackend;
 }

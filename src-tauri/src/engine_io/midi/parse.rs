@@ -1,7 +1,7 @@
 //! OWNS: raw MIDI bytes to the messages the play path and MIDI learn read, ported from
-//! `src/audio/midi.ts` (`parseMidiMessage`). Only 3-byte channel messages count: note on and off,
+//! `src/ui/state/midi.ts` (`parseMidiMessage`). Only 3-byte channel messages count: note on and off,
 //! control change and pitch bend. Everything else falls out here, as it does on the web: realtime and
-//! other short messages (clock, program change, channel pressure; the audio clock is the only tempo
+//! other short messages (clock, program change, channel pressure; the engine's device clock is the only tempo
 //! authority, invariant 1), poly aftertouch, and system messages including SysEx.
 
 /// A channel message, channel 0..15.

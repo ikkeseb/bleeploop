@@ -1,15 +1,13 @@
-//! OWNS: the engine-mode plugin slot (`docs/plans/native-engine.md` § Stage 4): the load API that
+//! OWNS: the engine-mode plugin slot (threads and gotchas: `src-tauri/AGENTS.md`): the load API that
 //! spawns one owner thread per slot, and the handle a caller drives it through. The owner loads a
-//! CLAP or VST3 plugin as the live owners do, activates it at the engine's rate and installs its
-//! processor into the engine as an `lf_engine::SlotProcessor` unit (`clap_engine`, `vst3_engine`),
-//! so the plugin renders inside the device callback instead of on its own RT thread. Engine mode's
-//! `plugin_*` commands drive it (`engine_io/plugins.rs`); the live owners (`owner_main`,
-//! `vst3_owner_main`) and everything they drive are the web audio path's, untouched.
+//! CLAP or VST3 plugin, activates it at the engine's rate and installs its processor into the engine
+//! as an `lf_engine::SlotProcessor` unit (`clap_engine`, `vst3_engine`), so the plugin renders inside
+//! the device callback. The `plugin_*` commands drive it (`engine_io/plugins.rs`).
 //!
-//! An owner services what the live owner does, less the device (the engine owns it): params (the
+//! An owner services, less the device (the engine owns it): params (the
 //! unit drains the slot's event ring; a VST3 set reaches the edit controller too), editors, plugin
 //! callbacks and params rescans, the thread's Win32 messages on every turn, a bounded batch each (a
-//! live owner pumps only while an editor is open; a JUCE plugin's message thread is this one), a
+//! JUCE plugin's message thread is this one), a
 //! plugin-requested restart and an eviction (the
 //! unit comes back → deactivate → activate at the engine's current rate and block → reinstall; the
 //! slot is bypassed meanwhile and the engine never waits), and the ordered teardown. It also keeps the
@@ -68,10 +66,10 @@ pub(crate) type EventSink = Arc<dyn Fn(EngineSlotEvent) + Send + Sync>;
 pub(super) const REMOVE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// The owner's poll while no hosted editor is open: plugin callbacks, restarts and evictions are
-/// serviced within this (the live CLAP owner's `CALLBACK_POLL_INTERVAL`).
+/// serviced within this.
 pub(super) const OWNER_POLL: Duration = Duration::from_millis(20);
 
-/// How long `load` waits for the owner's report, as the live load does.
+/// How long `load` waits for the owner's report.
 const LOAD_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// The fault bits a unit latches on the audio thread; the owner reports each once per load.
@@ -229,7 +227,7 @@ pub(crate) fn load(
         PluginFormat::Clap => spawn(format, slot, editor_parent, sink, tone, move |ctx| {
             super::clap_engine::run(ctx, &id, move || {
                 // SAFETY: PluginEntry::load runs the bundle's foreign entry-init code; the
-                // out-of-process scan vetted the bundle, as for the live load.
+                // out-of-process scan vetted the bundle.
                 unsafe { PluginEntry::load(&path) }.map_err(|e| format!("load failed: {e}"))
             })
         }),
@@ -339,7 +337,7 @@ impl EngineSlotHandle {
     }
 
     /// Set a parameter the plugin listed: the unit applies it at the start of the next block it
-    /// renders, and a VST3 edit controller is told as well (`src-tauri/AGENTS.md` § P11,
+    /// renders, and a VST3 edit controller is told as well (`src-tauri/AGENTS.md` § Plugin hosting,
     /// "Host-set VST3 params go to BOTH halves"). Err for an id the plugin never listed (an unknown
     /// id can crash a plugin) or a full ring; the controller only hears what the processor got.
     pub(crate) fn set_param(&self, id: u32, value: f64) -> Result<(), String> {
@@ -436,8 +434,8 @@ impl Drop for EngineSlotHandle {
 }
 
 /// Test-only: the engine-mode tests run one at a time. Each builds whole engines (every page
-/// touched) and a device thread; many at once starved the live restart tests' hop-1 reader on a
-/// loaded machine.
+/// touched) and a device thread; many at once starved the (since deleted) restart tests' reader
+/// threads on a loaded machine.
 #[cfg(test)]
 pub(super) fn one_engine_test_at_a_time() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: Mutex<()> = Mutex::new(());
@@ -445,8 +443,7 @@ pub(super) fn one_engine_test_at_a_time() -> std::sync::MutexGuard<'static, ()> 
 }
 
 /// Test-only: the allocations `f` makes on this thread under the RT alloc guard. The counter is
-/// process-wide and a live producer test resets it after its warmup, so a window it went backwards
-/// in is measured again.
+/// process-wide; a window it went backwards in (a reset) is measured again.
 #[cfg(all(test, debug_assertions))]
 pub(super) fn rt_allocations(mut f: impl FnMut()) -> u64 {
     use super::super::rt_alloc::{guard, RT_ALLOCS};

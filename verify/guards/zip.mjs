@@ -1,4 +1,4 @@
-// verify/guards/zip.mjs — deterministic guard for src/audio/export/zip.ts.
+// verify/guards/zip.mjs — deterministic guard for src/session/zip.ts.
 // Imports the REAL store-only ZIP writer (Node TS type-stripping) so it cannot drift from the source.
 // Asserts CRC-32 against a known vector, the ZIP signatures/offsets, and — the load-bearing property —
 // that every entry in the GENERATED archive decodes back to its source payload the way an unzip would:
@@ -9,7 +9,7 @@
 // This is what the WAV-export single-download fix relies on: one valid archive == one download gesture.
 // Run: node verify/guards/zip.mjs
 import { inflateRawSync } from 'node:zlib';
-import { crc32, makeZip } from '../../src/audio/export/zip.ts';
+import { crc32, makeZip } from '../../src/session/zip.ts';
 
 let fails = 0,
   checks = 0;

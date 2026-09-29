@@ -7,10 +7,10 @@ import {
   slotOff,
   slotPendingCounts,
   slotPlugins,
-} from '../../audio/instrument';
-import { inputArmed, monitorArmed } from '../../audio/native-io';
-import { asioDeviceInfo, inputDevices, usingAsio } from '../../audio/audio-devices';
-import { SYNTHS } from '../../audio/synths';
+} from '../state/instrument';
+import { inputArmed } from '../state/native-io';
+import { asioDeviceInfo, inputDevices, usingAsio } from '../state/audio-devices';
+import { SYNTHS } from '../state/instruments';
 import { volumeDb } from '../looper/shared';
 import { engineDevice, engineSlotInputChannels, setEngineSlotInputChannel } from '../state/engine-store';
 import { clearLiveError, liveBusy, liveError, toggleLive } from './live';
@@ -30,7 +30,7 @@ function inputChannelCount(): number {
   return inputDevices().find((x) => x.name === d.inputName)?.channels ?? 0;
 }
 
-/** Engine mode: the slot's capture channel ("In 1".."In N", or Auto), switched in place. */
+/** The slot's capture channel ("In 1".."In N", or Auto), switched in place. */
 export function InputPick(props: { slot: 0 | 1 }) {
   const pick = () => engineSlotInputChannels()[props.slot];
   const channels = createMemo(() => {
@@ -56,31 +56,20 @@ export function InputPick(props: { slot: 0 | 1 }) {
 
 /**
  * GO LIVE / INPUT LIVE: the slot hears its own input, through its effect or dry while it is Off, and
- * the engine (or the web path's native monitor) plays it at low latency. The web path's native monitor
- * can fall back to the web one (INPUT LIVE · WEB MONITOR).
+ * the engine plays it at low latency.
  */
 export function LiveButton(props: { slot: 0 | 1 }) {
   const slot = props.slot;
-  // Input stays armed after an output-stream fault so the web path can take over. Keep that degraded
-  // state visible after the fault toast disappears.
   const live = () => inputArmed()[slot];
-  const webMonitor = () => live() && !monitorArmed()[slot];
   onCleanup(() => clearLiveError(slot));
   return (
     <>
       <button
         type="button"
         class="tgl live"
-        classList={{ 'on-green': live() && !webMonitor(), 'is-degraded': webMonitor() }}
+        classList={{ 'on-green': live() }}
         aria-pressed={live()}
-        aria-label={
-          webMonitor()
-            ? 'Input live, monitoring through the web path; click to stop'
-            : live()
-              ? `Stop live input for slot ${slot + 1}`
-              : `Go live for slot ${slot + 1}`
-        }
-        title={webMonitor() ? 'native monitor lost; go live again to restore low-latency monitoring' : undefined}
+        aria-label={live() ? `Stop live input for slot ${slot + 1}` : `Go live for slot ${slot + 1}`}
         disabled={slotPendingCounts()[slot] > 0 || liveBusy(slot)}
         onClick={(e) => {
           e.stopPropagation();
@@ -90,7 +79,7 @@ export function LiveButton(props: { slot: 0 | 1 }) {
         <Show when={live()}>
           <i class="tgl__dot" aria-hidden="true" />
         </Show>
-        {webMonitor() ? 'INPUT LIVE · WEB MONITOR' : live() ? 'INPUT LIVE' : 'GO LIVE'}
+        {live() ? 'INPUT LIVE' : 'GO LIVE'}
       </button>
       <Show when={liveError(slot)}>
         <span class="pc__err">{liveError(slot)}</span>

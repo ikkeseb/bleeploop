@@ -1,4 +1,4 @@
-//! DEV Stage 1 premise spike (`docs/plans/native-engine.md` § Stage 1): does ONE native callback
+//! DEV Stage 1 premise spike (`docs/ARCHITECTURE.md` § Measured premise): does ONE native callback
 //! give calibration-free alignment, a low round trip with a plugin in the callback, and an
 //! explainable WASAPI round trip? Standalone: `app.exe --probe-engine-spike …` exits before Tauri
 //! starts and touches no production path. A child module of `vst3.rs` so it reaches the VST3 host's
@@ -176,13 +176,13 @@ struct PluginHold {
     activation: Activation,
 }
 
-/// Load the bundle's first audio-effect class and activate it at the device rate, as `vst3_owner_main` does
-/// (no controller: the spike never opens an editor or moves a parameter).
+/// Load the bundle's first audio-effect class and activate it at the device rate, as the WebView bridge's
+/// VST3 owner did (no controller: the spike never opens an editor or moves a parameter).
 fn load_plugin(path: &str) -> Result<(PluginUnit, PluginHold), String> {
     let binary = super::super::super::scan::resolve_vst3_binary(std::path::Path::new(path))
         .ok_or_else(|| format!("no loadable VST3 binary inside {path}"))?;
     let wide: Vec<u16> = binary.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
-    // SAFETY: FFI module load + raw FUnknown COM, the same sequence as `vst3_owner_main`; every
+    // SAFETY: FFI module load + raw FUnknown COM, that owner's VST3 load sequence; every
     // pointer is valid for its call and every failure after `initialize` goes through `teardown`.
     unsafe {
         let module = Vst3Module::load(PCWSTR(wide.as_ptr()))?;

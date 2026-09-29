@@ -1,6 +1,6 @@
 [package]
 name = "app"
-version = "0.1.2"
+version = "0.2.0"
 description = "BleepLoop — instrument host (native CLAP/VST3 + built-in synths) over an RC-505-style 5-track looper"
 authors = ["ikkeseb"]
 license = "MIT"
@@ -11,7 +11,7 @@ rust-version = "1.85"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
-# The native audio engine grows beside the app as a pure crate (docs/plans/native-engine.md § Stage 2).
+# The native audio engine is a pure crate beside the app (briefing: crates/lf-engine/src/lib.rs).
 # Profiles below apply to every member. scripts/engine-deny.mjs keeps the host crates out of its tree.
 [workspace]
 members = [".", "crates/lf-engine"]
@@ -21,7 +21,7 @@ name = "app_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [features]
-# P11.3 (native low-latency monitor): the cpal ASIO backend. OFF by default because it needs a build
+# P11.3: the cpal ASIO backend, the engine's low-latency tier. OFF by default because it needs a build
 # toolchain the normal dev/build path doesn't: libclang (cpal's asio-sys runs bindgen) + the Steinberg
 # ASIO SDK via the CPAL_ASIO_DIR env var. Build with `--features asio` once that's set up. ASIO drivers
 # are per-device + user-installed (Focusrite/Scarlett ships one), so WASAPI stays the universal default
@@ -44,19 +44,16 @@ log = "0.4"
 tauri = { version = "2.11.2", features = [] }
 tauri-plugin-log = "2"
 
-# Windows-only deps. The native CLAP host (P9) is inherently Windows-gated: the cross-process
-# audio transport rides WebView2's CreateSharedBuffer/PostSharedBufferToScript, and the dev/build
-# target is Tauri/WebView2. So clack/cpal/rubato/rtrb/walkdir live here too — they're cross-platform
+# Windows-only deps. The app is a Windows desktop instrument (Tauri/WebView2), so the native engine's
+# device side and plugin host (clack/cpal/rubato/rtrb/walkdir) live here too — they're cross-platform
 # crates but we only ever compile + use them on Windows, alongside the WebView2 COM bindings.
 [target.'cfg(windows)'.dependencies]
 # auto-grant WebView2 permissions (Web MIDI) — already transitive via tauri; pinned to the resolved
-# versions so the ICoreWebView2 types unify with Tauri's. Also the P9 shared-buffer transport
-# (ICoreWebView2Environment12::CreateSharedBuffer + ICoreWebView2_17::PostSharedBufferToScript).
+# versions so the ICoreWebView2 types unify with Tauri's.
 webview2-com = "0.38.2"
-# P9.2 adds Win32_System_Com (CoInitializeEx/CoCreateInstance for the WASAPI device-period query),
-# Win32_Media_Audio (IMMDeviceEnumerator → GetDefaultAudioEndpoint → IAudioClient::GetDevicePeriod),
-# and Win32_System_Threading (AvSetMmThreadCharacteristicsW/AvRevertMmThreadCharacteristics — promote
-# the device-less producer to "Pro Audio" MMCSS ourselves, so cpal's `realtime` feature stays off).
+# Win32_System_Com + Win32_Media_Audio: the DEV engine and share probes' raw WASAPI endpoint queries;
+# Win32_System_Threading: AvSetMmThreadCharacteristicsW — promote the device callbacks to "Pro Audio"
+# MMCSS ourselves, so cpal's `realtime` feature stays off.
 windows = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_System_Com",
@@ -93,23 +90,22 @@ clack-host       = "=0.1.0"
 # NOT needed for floating — `gui::Window::from_win32_hwnd` is safe + ungated (verified vs the 0.1.0
 # crate source); only embedded would want it. So: just "gui".
 clack-extensions = { version = "=0.1.0", features = ["params", "state", "audio-ports", "note-ports", "clack-host", "gui"] }
-# cpal is the WASAPI device-period query / slaved producer; it must NEVER drive the speakers
-# (single-clock invariant). Its `realtime` feature is just `dep:audio_thread_priority` under the
-# hood (confirmed in cpal 0.18.1's manifest) — not something to carry blindly. We
-# run a device-less RT thread and promote it ourselves via the windows crate
+# cpal opens the native engine's devices (engine_io::cpal_driver). Its `realtime` feature is just
+# `dep:audio_thread_priority` under the hood (confirmed in cpal 0.18.1's manifest) — not something to
+# carry blindly. The engine promotes its callback threads itself via the windows crate
 # (AvSetMmThreadCharacteristicsW, "Pro Audio"), so we take cpal WITHOUT realtime — no extra
 # windows-version surface from audio_thread_priority.
 # Pinned exactly: the native engine's ASIO duplex relies on the callback order asio-sys 0.3.0 gives
-# (docs/plans/native-engine.md § Stage 4); 0.18.2 moves to asio-sys 0.4.0 and windows 0.62 and needs
+# (src/engine_io/mod.rs, the cpal pin); 0.18.2 moves to asio-sys 0.4.0 and windows 0.62 and needs
 # its own A1 rerun first.
 cpal             = { version = "=0.18.1", default-features = false }
 # The asio-sys cpal 0.18.1 builds on (the same crate, so one driver registry and one loaded driver);
 # pinned with cpal. Only under the `asio` feature.
 asio-sys         = { version = "=0.3.0", optional = true }
-rtrb             = "0.3.4"                  # wait-free SPSC ring, host side (backs the WebView2 buffer)
-rubato           = "3.0.0"                  # P9.4 producer-side fractional resampler (Async + FixedAsync::Input)
+rtrb             = "0.3.4"                  # wait-free SPSC rings (engine commands, plugin events, the pipes)
+rubato           = "3.0.0"                  # the engine pipes' fractional resampler (engine_io::pipes)
 walkdir          = "2"                      # CLAP-file + VST3-dir scan (no clack-finder)
-# The native engine (docs/plans/native-engine.md): pure, driven by `engine_io`.
+# The native engine (briefing: crates/lf-engine/src/lib.rs): pure, driven by `engine_io`.
 lf-engine        = { path = "crates/lf-engine" }
 # Native MIDI input for the engine (engine_io::midi; WinMM on Windows). 0.11 accepts windows
 # >=0.59,<=0.62; the lock holds it on 0.61 with the rest of the graph (see windows-core above).
@@ -125,9 +121,8 @@ vst3             = "0.3"
 # sinc-resampling + its num-*/realfft/rustfft math deps, cpal, the clack/vst3 host glue, and rtrb.
 # This deliberately does NOT optimize our own `app`/`app_lib` crate — it stays at the profile default
 # (opt-level=0) so editing app code keeps compiling fast. Cost is a longer ONE-TIME cold dependency
-# build; incremental app rebuilds (the real dev loop) are unaffected. Together with the native-rate
-# default (LF_FORCE_48K off, in plugin_host.rs) this is what makes a `tauri dev` by-ear trustworthy
-# vs a true release build — the 2026-06-17 ASIO "crackling" hunt showed dev-build by-ear was untrustworthy.
+# build; incremental app rebuilds (the real dev loop) are unaffected. This is what makes a `tauri dev`
+# by-ear trustworthy vs a true release build — the 2026-06-17 ASIO "crackling" hunt showed dev-build by-ear was untrustworthy.
 [profile.dev.package."*"]
 opt-level = 3
 

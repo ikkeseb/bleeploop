@@ -21,7 +21,7 @@
  *          would
  *   skip   nothing restored, in either slot or the host, and one "Plugins not restored" toast; closes
  *   after  a clean launch: nothing restored, no toast; closes
- * The record lives under this probe's own keys (`src/audio/rig-recall.ts`), never the owner's.
+ * The record lives under this probe's own keys (`src/ui/state/rig-recall.ts`), never the owner's.
  * `[recall]` lines go through `console.error` (→ the same log as the Rust host); the runner counts
  * each phase's `[rig-recall]` lines itself.
  *
@@ -31,12 +31,12 @@
  *                            `Surge XT Effects:clap,Surge XT:vst3`: an effect and an instrument)
  *   `VITE_LF_PROBE_EXPECT`   what `save` picked, handed over by the runner (JSON)
  */
-import { autosave } from '../audio/autosave';
-import { availablePlugins, clearPlugin, selectPlugin, slotPendingCounts, slotPlugins } from '../audio/instrument';
-import { inputArmed, monitorArmed } from '../audio/native-io';
-import { readAudioDeviceSettings, writeAudioDeviceSettings } from '../audio/audio-settings';
-import { pluginDescriptorKey } from '../audio/plugin-descriptor';
-import { recallInFlight, rigRecallDone } from '../audio/rig-recall';
+import { autosave } from '../session/autosave';
+import { availablePlugins, clearPlugin, selectPlugin, slotPendingCounts, slotPlugins } from '../ui/state/instrument';
+import { inputArmed } from '../ui/state/native-io';
+import { readAudioDeviceSettings, writeAudioDeviceSettings } from '../ui/state/audio-settings';
+import { pluginDescriptorKey } from '../ui/state/plugin-descriptor';
+import { recallInFlight, rigRecallDone } from '../ui/state/rig-recall';
 import { toasts } from '../notify';
 import { confirmNativeClose, onNativeCloseRequested, platform, type PluginDescriptor } from '../platform';
 
@@ -64,16 +64,18 @@ interface Expect {
   channel: string;
 }
 
-/** Arm and editor calls made from this module's load on, so a recall that arms shows up. */
+/** GO LIVE and editor calls made from this module's load on, so a recall that arms shows up. */
 const calls: string[] = [];
 function spy(): void {
   const host = platform.pluginHost;
-  const armInput = host.armInput.bind(host);
-  const armMonitor = host.armMonitor.bind(host);
+  const engine = platform.engine;
   const openEditor = host.openEditor.bind(host);
-  host.armInput = (slot, ...rest) => (calls.push(`armInput ${slot}`), armInput(slot, ...rest));
-  host.armMonitor = (slot, ...rest) => (calls.push(`armMonitor ${slot}`), armMonitor(slot, ...rest));
+  const send = engine.send.bind(engine);
   host.openEditor = (slot, mode) => (calls.push(`openEditor ${slot}`), openEditor(slot, mode));
+  engine.send = (commands) => {
+    for (const c of commands) if (typeof c === 'object' && 'SetSlotLive' in c && c.SetSlotLive[1]) calls.push(`SetSlotLive ${c.SetSlotLive[0]}`);
+    return send(commands);
+  };
 }
 
 async function recallFinished(): Promise<boolean> {
@@ -131,15 +133,13 @@ async function save(): Promise<void> {
 /** What is wrong with a restored rig: both slots, in the frontend and the host, unarmed, no toast. */
 async function restoreProblems(expect: Expect): Promise<string[]> {
   const now = await loaded();
-  const armed = [...inputArmed(), ...monitorArmed()];
-  const monitorLatency = [await platform.pluginHost.monitorLatencySeconds(0), await platform.pluginHost.monitorLatencySeconds(1)];
+  const armed = inputArmed();
   const shown = toasts().map((t) => t.message);
   const want = [expect.slot0, expect.slot1].join();
   return [
     now.frontend.join() !== want && `frontend slots ${JSON.stringify(now.frontend)}`,
     now.host.join() !== want && `host slots ${JSON.stringify(now.host)}`,
     armed.some(Boolean) && `armed ${JSON.stringify(armed)}`,
-    monitorLatency.some((s) => s !== 0) && `monitor latency ${JSON.stringify(monitorLatency)}`,
     calls.length > 0 && `calls ${calls.join(', ')}`,
     shown.length > 0 && `toasts ${JSON.stringify(shown)}`,
   ].filter((p): p is string => typeof p === 'string');

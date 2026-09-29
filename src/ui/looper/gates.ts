@@ -1,16 +1,15 @@
 import { createSignal } from 'solid-js';
 import { clock, looper, sampleRate } from '../state/audio';
-import { framesPerBar } from '../../audio/quantize';
-import { engineMode, type Refusal } from '../../platform';
+import { framesPerBar } from '../state/quantize';
+import type { Refusal } from '../../platform';
 
 /**
  * OWNS: the looper UI's refusal gates, its screen-reader announcement line and the sighted lane cue.
  * One predicate per lane gesture (and per command-bar toggle a pedal reaches), returning WHY a press is
  * refused, so the control's disabled state, its title, its ARIA label and a key's or pedal's refusal
  * (`src/app/actions.ts`) all speak one vocabulary. The engine
- * keeps its own self-protection (machine.ts recDub/playStop); these mirror it for the UI, they do not
- * replace it. In engine mode a hands-free press is gated by the engine, which names its reason by the
- * same vocabulary (`refusalText`, `lf_engine::Refusal::text`).
+ * keeps its own self-protection; these mirror it for the UI, they do not replace it. A hands-free press is
+ * gated by the engine, which names its reason by the same vocabulary (`refusalText`, `lf_engine::Refusal::text`).
  *
  * Reactive: the gates read the looper's public track signals, so call them from JSX, memos or an event
  * handler — never from the 60 fps draw loop (invariant 6).
@@ -38,10 +37,8 @@ const REFUSAL = {
   tempoLocked: refuse('tempo locked to the loop, clear all to retap'),
   fixedCapturing: refuse('a take is recording, FIXED changes after it'),
   fixedRetake: refuse('RETAKE is on, so FIXED is ignored'),
-  noInputFx: refuse('input effects need the native engine'),
   capturing: refuse('this track is recording, stop it first'),
   noTrim: refuse('nothing to trim, the loop needs two bars or more'),
-  needsEngine: refuse('needs the native engine'),
   fading: refuse('fading out, wait or stop now'),
   noFade: refuse('nothing is playing to fade'),
 } as const;
@@ -145,10 +142,9 @@ export function loopWholeBars(): number {
 }
 
 /** May TRIM (the lane's ✂ TRIM, the halve pedal) act on lane `i`? The engine's own check
- * (`Looper::trim`), in its order: engine mode only, not while the lane captures, only a committed loop of
+ * (`Looper::trim`), in its order: not while the lane captures, only a committed loop of
  * two whole bars or more, and not while it stops (at the loop end, or where a fade ends). */
 export function trimGate(i: number): Gate {
-  if (!engineMode()) return REFUSAL.needsEngine;
   const t = looper.track(i)();
   if (t.state === 'RECORDING' || t.state === 'OVERDUBBING') return REFUSAL.capturing;
   if (t.state === 'EMPTY' || loopWholeBars() < 2) return REFUSAL.noTrim;
@@ -192,20 +188,13 @@ export function fixedGate(): Gate {
   return OK;
 }
 
-/** May FADE act? The engine's own check (`Looper::fade_all`), in its order: engine mode only; a fade
- * running is stopped at once by a second press; not while a lane records or overdubs; only with a lane
+/** May FADE act? The engine's own check (`Looper::fade_all`), in its order: a fade running is stopped at once by a second press; not while a lane records or overdubs; only with a lane
  * playing. */
 export function fadeGate(): Gate {
-  if (!engineMode()) return REFUSAL.needsEngine;
   const tracks = Array.from({ length: looper.trackCount }, (_, j) => looper.track(j)());
   if (tracks.some((t) => t.fading)) return OK;
   if (tracks.some((t) => t.state === 'RECORDING' || t.state === 'OVERDUBBING')) return REFUSAL.capturing;
   return tracks.some((t) => t.state === 'PLAYING') ? OK : REFUSAL.noFade;
-}
-
-/** May an IN FX send be switched? Only the native engine has input sends. */
-export function inputFxGate(): Gate {
-  return engineMode() ? OK : REFUSAL.noInputFx;
 }
 
 // The looper's polite live-region text (rendered by Looper.tsx). `equals: false` so the same refusal

@@ -4,8 +4,7 @@
 //   pnpm native:survey  restart survey  (src/debug/restart-survey.ts)
 //   pnpm native:swap    swap stress     (src/debug/swap-stress.ts)
 //   pnpm native:recall  recall restart  (src/debug/recall-restart.ts): one launch per phase
-//   pnpm native:loopback  loopback sync (src/debug/loopback-sync.ts): needs an output cabled into input 1
-//   pnpm native:engine-smoke  the UI on the native engine (src/debug/engine-smoke.ts), engine mode on
+//   pnpm native:engine-smoke  the UI on the native engine (src/debug/engine-smoke.ts)
 //   pnpm native:engine-recovery  export, import and recovery on the engine (src/debug/engine-recovery.ts)
 //   pnpm native:engine-loopback  where takes land against the click on the engine
 //     (src/debug/engine-loopback.ts): needs an output cabled into input 2 (`--channel=` is 0-based)
@@ -24,34 +23,29 @@
 // full log lands in logs/native-<probe>.log. Windows node only: the app windows open on the PC desktop.
 
 import { execFileSync, spawn } from 'node:child_process';
-import { createWriteStream, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { createWriteStream, mkdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { appRunning, assertWindows, closeAppWindow, killNative, nativeRunning } from './native-kill.mjs';
 
 // Every probe runs in a profile of its own: `config` is a Tauri config overlay whose identifier gives the
 // run its own WebView2 profile and app-local data folder, so the owner's jam, recovery, settings and
-// engine toggle are never read or written. `engine` goes into that folder's toggle file before launch
-// (`src-tauri/src/engine_io/mode.rs`: engine mode unless it says `off`): the classic probes test the web
-// audio path, the engine probes the engine.
+// plugin tones are never read or written.
 const CLASSIC = 'scripts/classic-probe.tauri.json';
 const PROBES = {
-  'editor-smoke': { tag: 'smoke', end: /^(complete: .*|no plugins.*)$/, pass: /^complete: \d+ opened, 0 failed/, config: CLASSIC, engine: 'off' },
-  'restart-survey': { tag: 'survey', end: /^(complete|no plugins.*)$/, pass: /^complete$/, config: CLASSIC, engine: 'off' },
+  'editor-smoke': { tag: 'smoke', end: /^(complete: .*|no plugins.*)$/, pass: /^complete: \d+ opened, 0 failed/, config: CLASSIC },
+  'restart-survey': { tag: 'survey', end: /^(complete|no plugins.*)$/, pass: /^complete$/, config: CLASSIC },
   'swap-stress': {
     tag: 'swap',
     end: /^(complete: .*|TIMEOUT .*|ABORTED.*|need at least .*)$/,
     pass: /^complete: \d+ swapped, 0 failed/,
     config: CLASSIC,
-    engine: 'off',
   },
-  'loopback-sync': { tag: 'loopback', end: /^(result: .*|FAIL.*)$/, pass: /^result: /, config: 'scripts/loopback-probe.tauri.json', engine: 'off' },
   // One launch, closed through its window as the close button does; any other frontend `console.error`
   // line fails it.
   'engine-smoke': {
     tag: 'engine-smoke',
     config: 'scripts/engine-probe.tauri.json',
-    engine: 'on',
     cleanLog: true,
     phases: [{ name: 'smoke', end: /^(complete: .*|FAIL.*)$/, pass: /^complete: /, exit: 'os-close' }],
   },
@@ -60,7 +54,6 @@ const PROBES = {
   'engine-recovery': {
     tag: 'engine-recovery',
     config: 'scripts/engine-probe.tauri.json',
-    engine: 'on',
     cleanLog: true,
     phases: [
       { name: 'save', end: /^(saved: .*|FAIL.*)$/, pass: /^saved: /, exit: 'crash' },
@@ -71,7 +64,6 @@ const PROBES = {
   'engine-loopback': {
     tag: 'engine-loopback',
     config: 'scripts/engine-probe.tauri.json',
-    engine: 'on',
     cleanLog: true,
     phases: [{ name: 'loopback', end: /^(complete: .*|FAIL.*)$/, pass: /^complete: /, exit: 'os-close' }],
   },
@@ -80,7 +72,6 @@ const PROBES = {
   'tone-recall': {
     tag: 'tone',
     config: 'scripts/tone-probe.tauri.json',
-    engine: 'on',
     cleanLog: true,
     phases: [
       { name: 'save', end: /^(saved: .*|FAIL.*)$/, pass: /^saved: /, exit: 'close' },
@@ -92,7 +83,6 @@ const PROBES = {
   'recall-restart': {
     tag: 'recall',
     config: CLASSIC,
-    engine: 'off',
     phases: [
       { name: 'save', end: /^(saved: .*|FAIL.*)$/, pass: /^saved: /, exit: 'close', recallLines: 0 },
       { name: 'check', end: /^(restored: .*|FAIL.*)$/, pass: /^restored: /, exit: 'os-close', recallLines: 0 },
@@ -134,16 +124,13 @@ if (busy.length) {
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 
-// The engine toggle in the probe's own profile: Tauri's app-local data folder on Windows is
-// %LOCALAPPDATA%\<identifier>. The default identifier is the owner's profile: never written.
+// The probe's own profile: its identifier names the app-local data folder (%LOCALAPPDATA%\<identifier>
+// on Windows). The default identifier is the owner's profile: never used.
 const identifier = JSON.parse(readFileSync(join(root, spec.config), 'utf8')).identifier;
 if (!identifier || identifier === 'com.bleeploop.app') {
   console.error(`native probe ${name}: ${spec.config} must name a probe profile of its own`);
   process.exit(1);
 }
-const profile = join(process.env.LOCALAPPDATA ?? '', identifier);
-mkdirSync(profile, { recursive: true });
-writeFileSync(join(profile, 'engine-mode'), spec.engine);
 const logPath = join(root, 'logs', `native-${name}.log`);
 mkdirSync(dirname(logPath), { recursive: true });
 const log = createWriteStream(logPath);
@@ -284,9 +271,10 @@ process.exit(ok ? 0 : 1);
 function surveySummary() {
   const text = readFileSync(logPath, 'utf8');
   const flags = new Map();
-  for (const m of text.matchAll(/VST3 restartComponent\(([^)]*)\)/g)) flags.set(m[1], (flags.get(m[1]) ?? 0) + 1);
+  // The engine's plugin owners' lines (`host/vst3_engine.rs`, `host/clap_engine.rs`).
+  for (const m of text.matchAll(/engine slot \d+ restartComponent\(([^)]*)\)/g)) flags.set(m[1], (flags.get(m[1]) ?? 0) + 1);
   const vst3 = [...flags.values()].reduce((a, b) => a + b, 0);
-  const clap = (text.match(/request_restart/g) ?? []).length;
+  const clap = (text.match(/engine slot \d+ restart at the plugin's request/g) ?? []).length;
   const failed = (text.match(/\[survey\] LOAD FAILED/g) ?? []).length;
   const byFlag = [...flags].map(([f, n]) => `${f} ${n}`).join(', ');
   return `${vst3} VST3 restartComponent${byFlag ? ` (${byFlag})` : ''}, ${clap} CLAP request_restart line(s), ${failed} load failure(s)`;

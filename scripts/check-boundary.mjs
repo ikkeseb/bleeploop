@@ -4,10 +4,10 @@
  *   1. `@tauri-apps/*` may only be imported INSIDE `src/platform/`. Keeps the frontend
  *      buildable/runnable in a plain browser (no Tauri/Rust dependency).
  *   2. Files outside `src/platform/` may only import its public seam, not implementation modules.
- *   3. `src/platform/` may NOT import from `src/audio/` or `src/ui/`. The boundary serves those
- *      layers; it must not depend on them. Without this, a `node.connect(engine.looperInputBus)`
- *      inside `host.tauri.ts` would regress the architecture invisibly — P9 keeps all AudioNode
- *      wiring in `src/audio/plugin-bridge.ts` instead, with `ctx` injected into the host.
+ *   3. `src/platform/` may NOT import from the app layers above it: `src/ui/`, `src/session/`,
+ *      `src/app/` or `src/debug/` (root-level `src/notify.ts` is not a layer). The boundary serves
+ *      those layers; it must not depend on them, or a store or the session code reached from
+ *      `host.tauri.ts` would regress the architecture invisibly.
  *
  * Run via `pnpm check:boundary`.
  *
@@ -32,16 +32,16 @@ export const TAURI_IMPORT = /['"`]@tauri-apps\//;
 // deeper into platform/ is private automatically, including modules added after this guard.
 export const PLATFORM_PRIVATE_IMPORT =
   /['"`](?:\.\.?\/)+(?:[^'"`/]+\/)*platform\/[^'"`]+['"`]/;
-// A relative import from inside platform/ reaching up into src/audio/ or src/ui/ (any nesting
-// depth). Matches the specifier string, so static, side-effect, re-export and dynamic forms are
-// all caught — and so are type-only imports (`import type … from '../audio/…'`), which are still
+// A relative import from inside platform/ reaching up into an app layer — src/ui/, src/session/,
+// src/app/ or src/debug/ (any nesting depth). Matches the specifier string, so static, side-effect, re-export and dynamic forms are
+// all caught — and so are type-only imports (`import type … from '../ui/…'`), which are still
 // an architectural coupling even though they erase at compile time.
-export const PLATFORM_LEAK = /['"`](?:\.\.\/)+(?:audio|ui)\//;
+export const PLATFORM_LEAK = /['"`](?:\.\.\/)+(?:app|debug|session|ui)\//;
 
 /**
  * True if `fullPath` lies inside `src/platform/` (the only place @tauri-apps is allowed) — the
  * `platform/` segment must sit immediately under `src/`. A nested `platform/` dir elsewhere (e.g.
- * `src/ui/platform/`, `src/audio/platform/`) or a repo path with a `platform` ancestor dir does NOT
+ * `src/ui/platform/`, `src/session/platform/`) or a repo path with a `platform` ancestor dir does NOT
  * count — only the real boundary layer is exempt.
  */
 export function isInPlatform(fullPath) {
@@ -52,7 +52,7 @@ export function isInPlatform(fullPath) {
  * Classify one source file by path + contents. Returns:
  *   'tauri' — a `@tauri-apps/*` import in a file OUTSIDE `src/platform/`,
  *   'impl'  — a file outside `src/platform/` importing a private platform implementation,
- *   'leak'  — a `src/platform/` file importing up into `src/audio/` or `src/ui/`,
+ *   'leak'  — a `src/platform/` file importing up into an app layer (`PLATFORM_LEAK`),
  *   null    — clean.
  * Pure: no filesystem, no process exit. The single source of truth for both the CLI walk and the
  * self-test guard.
@@ -103,13 +103,13 @@ function main() {
   }
   if (leakViolations.length > 0) {
     failed = true;
-    console.error('x  boundary violation: src/platform/ imported from src/audio/ or src/ui/:');
+    console.error('x  boundary violation: src/platform/ imported from an app layer (ui/, session/, app/, debug/):');
     for (const v of leakViolations) console.error('     ' + v);
   }
   if (failed) process.exit(1);
 
   console.log(
-    'ok boundary: no @tauri-apps or private platform modules outside src/platform/; no platform/ → audio|ui imports',
+    'ok boundary: no @tauri-apps or private platform modules outside src/platform/; no platform/ → app-layer imports',
   );
 }
 

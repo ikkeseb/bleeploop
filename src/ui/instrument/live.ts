@@ -1,10 +1,7 @@
 import { createSignal } from 'solid-js';
-import { slotPendingCounts, slotTakesInput } from '../../audio/instrument';
-import { serializeSlot, withAt } from '../../audio/instrument-slots';
-import { goLive, inputArmed, intendLive, liveIntended, stopLive, takeLiveIntent } from '../../audio/native-io';
-import { readAudioDeviceSettings } from '../../audio/audio-settings';
-import { usingAsio } from '../../audio/audio-devices';
-import { engineMode, platform } from '../../platform';
+import { slotPendingCounts, slotTakesInput } from '../state/instrument';
+import { serializeSlot, withAt } from '../state/instrument-slots';
+import { goLive, inputArmed, intendLive, liveIntended, stopLive, takeLiveIntent } from '../state/native-io';
 import { notifyError } from '../../notify';
 
 /**
@@ -26,10 +23,9 @@ export function clearLiveError(slot: 0 | 1): void {
   setError((prev) => withAt(prev, slot, null));
 }
 
-/** Whether slot `slot` shows a GO LIVE cap: its source takes input, and something can feed it (the
- * engine, or the web path's native plugin host). */
+/** Whether slot `slot` shows a GO LIVE cap: its source takes input. */
 export function liveShown(slot: 0 | 1): boolean {
-  return slotTakesInput(slot) && (engineMode() || platform.pluginHost.available);
+  return slotTakesInput(slot);
 }
 
 /**
@@ -44,19 +40,11 @@ export async function toggleLive(slot: 0 | 1, quiet = false): Promise<void> {
   setBusy((prev) => withAt(prev, slot, true));
   clearLiveError(slot);
   try {
-    if (wantLive) {
-      // The web path reads the capture device/channel + monitor output device chosen in Audio Settings
-      // (persisted) at arm time; goLive arms input THEN monitor as one unit and mutes the web path.
-      // ASIO uses the cached driver; the persisted Windows device IDs apply only to WASAPI. Engine mode
-      // ignores all three: its device is open, and the slot's channel is the slot's own pick.
-      const s = readAudioDeviceSettings();
-      const ch = s.inputChannel === '' ? null : Number(s.inputChannel);
-      await goLive(slot, usingAsio() ? null : s.inputDeviceId || null, ch, usingAsio() ? null : s.outputDeviceId || null);
-    } else await stopLive(slot);
+    // The engine's device is open and the slot's channel is the slot's own pick: going live only routes.
+    if (wantLive) await goLive(slot);
+    else await stopLive(slot);
   } catch (e) {
-    // The worth-surfacing failure is going live on a plugin with no audio-input bus (a pure synth in
-    // the slot) — goLive rejects at the input-arm step. A cpal monitor-open failure also lands here
-    // (goLive rolled the input back). A stop failure is rare; report generically.
+    // Rare (the slot's op chain failed); report generically.
     console.error('[PluginControls] go-live toggle failed', e);
     if (quiet) return;
     setError((prev) => withAt(prev, slot, wantLive ? 'input failed' : 'stop failed'));

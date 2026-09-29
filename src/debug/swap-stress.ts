@@ -11,9 +11,8 @@
  *   `VITE_LF_PROBE_FILTER`  comma-separated name substrings; only matching plugins are probed
  *   `VITE_LF_PROBE_PARAMS`  how many params to sweep before a swap (default 8)
  */
-import { engine } from '../audio/engine';
-import { availablePlugins, clearPlugin, selectPlugin } from '../audio/instrument';
-import { nativeHostReady, slotPlugins } from '../audio/instrument-slots';
+import { availablePlugins, clearPlugin, selectPlugin } from '../ui/state/instrument';
+import { nativeHostReady, slotPlugins } from '../ui/state/instrument-slots';
 import { platform, type PluginDescriptor } from '../platform';
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -63,7 +62,6 @@ export async function runSwapStress(): Promise<void> {
     log(`need at least 2 plugins, got ${list.length} (scan empty or filter too narrow)`);
     return;
   }
-  await engine.start();
   const tagOf = (d: PluginDescriptor) => `${d.name} [${d.format}]`;
   log(`start: ${list.length} plugin(s), ${list.length * (list.length - 1) * 2} swap(s)`);
   let swaps = 0;

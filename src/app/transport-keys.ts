@@ -1,5 +1,5 @@
-import { activeIsDrum } from '../audio/instrument';
-import { DRUM_KIT } from '../audio/synths/drum';
+import { activeIsDrum } from '../ui/state/instrument';
+import { DRUM_KIT } from '../ui/state/drum-kit';
 import * as layoutStore from '../ui/layout/layout-store';
 import { stageOpen } from '../ui/stage/stage-store';
 import { runAction, selectTrack, type ActionId } from './actions';
@@ -99,7 +99,7 @@ export function installTransportKeys(opts: TransportKeysOptions): TransportKeys 
     // pending CLEAR and takes the lane cue down, as an arrow does). Collision precedence: in drum mode the pad grid owns 1–4
     // (Crash/Ride/Cowbell/Tamb, DRUM_KIT) — note-play wins — so digit-select yields those; '5' is
     // never a pad key and always selects. In piano mode all of 1–5 select. (activeIsDrum() is the
-    // shared predicate from audio/instrument.ts, the same one Keyboard.tsx's drumActive reads.) The
+    // shared predicate from ui/state/instrument.ts, the same one Keyboard.tsx's drumActive reads.) The
     // yield only applies while the keyboard pane is VISIBLE: the pad key handler lives in Keyboard.tsx
     // and unmounts with the pane, so with it hidden the digits would otherwise go entirely dead in
     // drum mode. The stage view hides the keyboard too (it stays mounted underneath, its key handler

@@ -1,12 +1,12 @@
-// verify/guards/wav-export.mjs — deterministic guard for src/audio/export/wav.ts.
+// verify/guards/wav-export.mjs — deterministic guard for src/session/wav.ts.
 // Imports the REAL encoder (Node TS type-stripping) so it cannot drift from the source. Asserts the
 // canonical 44-byte RIFF/WAVE/fmt/data header byte-for-byte, PCM16 quantization + clamping, the
 // mono/stereo channel layout + interleave order, mixMono's track/master gains + hard-clamp, the wet
 // master's generalized final-period slice, and the pure enabled-FX warm-up plan. The OfflineAudioContext
 // graph itself is browser-only — its runtime gate is the Playwright export probe, not this guard.
 // Run: node verify/guards/wav-export.mjs
-import { warmupPassesForFx } from '../../src/audio/export/render-plan.ts';
-import { encodeWav, finalPeriod, floatToPcm16, mixMono } from '../../src/audio/export/wav.ts';
+import { warmupPassesForFx } from '../../src/session/render-plan.ts';
+import { encodeWav, finalPeriod, floatToPcm16, mixMono } from '../../src/session/wav.ts';
 
 let fails = 0, checks = 0;
 function ok(name, cond, detail = '') {

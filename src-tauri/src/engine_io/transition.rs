@@ -1,5 +1,4 @@
-//! OWNS: the device owner's decisions, as pure functions (the kernel `host/native_io.rs`'s
-//! `transition_action` is for the live line): what reaching a device takes from where the owner stands
+//! OWNS: the device owner's decisions, as pure functions (the kernel): what reaching a device takes from where the owner stands
 //! ([`steps`]), when a request only changes the channel ([`same_device`]), where a lost device falls back
 //! to ([`fallbacks`]), which capture channel a request selects for each slot ([`open_channels`]), and
 //! which buffer an ASIO open and its preopen ask the driver for ([`asio_block`], [`preopen_block`]).
@@ -44,7 +43,7 @@ pub(crate) fn steps(engine: Option<u32>, running: bool, healthy: bool, target: O
 /// The buffer an ASIO open asks the driver for: `requested` when the driver takes it (`min..=max`), else
 /// the power of two inside the range nearest to it, else `min` (a driver fixed at, say, 480 frames).
 /// cpal refuses a fixed size outside the range, and a driver whose buffer is set in its own control
-/// panel offers exactly one size. `src/audio/audio-settings.ts` mirrors it for the Buffer select.
+/// panel offers exactly one size. `src/ui/state/audio-settings.ts` mirrors it for the Buffer select.
 pub(crate) fn asio_block(requested: u32, min: u32, max: u32) -> u32 {
     if (min..=max).contains(&requested) {
         return requested;

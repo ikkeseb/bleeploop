@@ -1,5 +1,5 @@
 /**
- * Session tones on the engine fake (`src/audio/slot-tones.ts`): engine mode's export carries each loaded
+ * Session tones on the engine fake (`src/ui/state/slot-tones.ts`): engine mode's export carries each loaded
  * slot's tone, taken fresh through the host, and names its plugin in session.json; an import hands each
  * tone to the host (`importTone`), reloads a slot that holds that plugin through the normal unload and
  * load, keeping its level and GO LIVE, and leaves a slot that holds another plugin or none alone, with
@@ -39,14 +39,14 @@ await probe(async ({ open }) => {
   const out = await page.evaluate(
     async ({ RATE, MASTER }) => {
       const { platform, encodeSessionBytes } = await import('/src/platform/index.ts');
-      const instrument = await import('/src/audio/instrument.ts');
-      const slots = await import('/src/audio/instrument-slots.ts');
-      const nativeIo = await import('/src/audio/native-io.ts');
-      const { buildExportBundle } = await import('/src/audio/export/export.ts');
-      const { importSession } = await import('/src/audio/export/import.ts');
-      const { parseZip } = await import('/src/audio/export/unzip.ts');
-      const { makeZip } = await import('/src/audio/export/zip.ts');
-      const { restoreSessionTones } = await import('/src/audio/slot-tones.ts');
+      const instrument = await import('/src/ui/state/instrument.ts');
+      const slots = await import('/src/ui/state/instrument-slots.ts');
+      const nativeIo = await import('/src/ui/state/native-io.ts');
+      const { buildExportBundle } = await import('/src/session/export.ts');
+      const { importSession } = await import('/src/session/import.ts');
+      const { parseZip } = await import('/src/session/unzip.ts');
+      const { makeZip } = await import('/src/session/zip.ts');
+      const { restoreSessionTones } = await import('/src/ui/state/slot-tones.ts');
       const { toasts } = await import('/src/notify.ts');
       const { session } = await import('/src/ui/state/audio.ts');
       const native = window.__lf.native;
@@ -83,7 +83,7 @@ await probe(async ({ open }) => {
       const answered = [];
       const loadTokens = [];
       const host = platform.pluginHost;
-      host.loadPlugin = async (slot, _path, id, _loadToken, toneToken) => {
+      host.loadPlugin = async (slot, _path, id, toneToken) => {
         calls.push(`load ${slot} ${id}`);
         loadTokens.push(toneToken ?? null);
         if (loadGate?.slot === slot) await loadGate.closed;

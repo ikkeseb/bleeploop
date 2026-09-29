@@ -1,4 +1,4 @@
-// scripts/native-engine.mjs — the native-engine Stage 4 rig run (docs/plans/native-engine.md § Stage 4):
+// scripts/native-engine.mjs — the native engine's rig run (the bar: src-tauri/src/engine_io/probe.rs):
 // builds the debug app with ASIO and runs one `--probe-engine` process: open the device, load the amp-sim
 // and Pro-Q into the engine's two slots, record a loop, soak, then backend/buffer switches and plugin
 // swaps while the loop plays. Relays the probe's lines and exits with its code (0 = every check passed).

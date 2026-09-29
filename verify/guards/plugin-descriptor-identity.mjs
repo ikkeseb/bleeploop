@@ -8,7 +8,7 @@ import {
   pluginPickerLabel,
   reconcilePluginDescriptors,
   samePluginDescriptor,
-} from '../../src/audio/plugin-descriptor.ts';
+} from '../../src/ui/state/plugin-descriptor.ts';
 
 let passed = 0;
 let failed = 0;

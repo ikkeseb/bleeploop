@@ -5,10 +5,10 @@
  * wired call site keeps its existing `console.error` (`src/platform/logging.ts` pipes those into the
  * release log file — load-bearing diagnostics), and adds ONE `notifyError` alongside it.
  *
- * BOUNDARY: this file lives at `src/` ROOT — deliberately NOT under `src/audio/`, `src/ui/`, nor
- * `src/platform/` — so BOTH `src/audio/` and `src/platform/` may import it without tripping the
- * capability-boundary guard (`scripts/check-boundary.mjs`): platform/ may not import ../audio or
- * ../ui, and this module is neither. It imports ONLY `solid-js` — no audio/ui/platform deps — so it
+ * BOUNDARY: this file lives at `src/` ROOT — deliberately NOT under an app layer (`src/ui/`,
+ * `src/session/`, …) nor `src/platform/` — so every layer, `src/platform/` too, may import it without
+ * tripping the capability-boundary guard (`scripts/check-boundary.mjs`): platform/ may not import the
+ * app layers, and this module is none. It imports ONLY `solid-js` — no ui/session/platform deps — so it
  * stays a leaf every layer can safely depend on. `<Toasts>` (in `src/ui/`) renders the signal.
  */
 import { createSignal } from 'solid-js';

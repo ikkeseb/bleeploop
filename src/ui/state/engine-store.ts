@@ -19,15 +19,14 @@ import {
   type LaneInfo,
   type LaneState,
 } from '../../platform';
-import { firstTakeSpan, openingSpan, type PeakView, type TrackState } from '../../audio/looper/looper';
-import { FX_META, FX_PARAM_DEFS, validateFxStates, type FxParamDef, type FxState } from '../../audio/fx/metadata';
-import type { ClearToken, SessionSource } from '../../audio/export/session-source';
-import type { StemSnapshot } from '../../audio/export/stem-archive';
-import type { LoadSessionPayload } from '../../audio/looper/session';
-import { AUTO_RECORD_DEFAULT_SENSITIVITY } from '../../audio/looper/auto-record';
-import { averageInterval, clampBars, framesPerBar, maxWholeBars } from '../../audio/quantize';
-import { readStoredNumber, writeStoredNumber } from '../../audio/persist';
-import { readAudioDeviceSettings, writeAudioDeviceSettings, type AudioDeviceSettings } from '../../audio/audio-settings';
+import { firstTakeSpan, openingSpan, type LoadSessionPayload, type PeakView, type TrackState } from './looper-types';
+import { FX_META, FX_PARAM_DEFS, validateFxStates, type FxParamDef, type FxState } from './fx-metadata';
+import type { ClearToken, SessionSource } from '../../session/session-source';
+import type { StemSnapshot } from '../../session/stem-archive';
+import { AUTO_RECORD_DEFAULT_SENSITIVITY } from './auto-record';
+import { averageInterval, clampBars, framesPerBar, maxWholeBars } from './quantize';
+import { readStoredNumber, writeStoredNumber } from './persist';
+import { readAudioDeviceSettings, writeAudioDeviceSettings, type AudioDeviceSettings } from './audio-settings';
 import {
   saveSlotInputChannels,
   setAsioEnabled,
@@ -35,18 +34,17 @@ import {
   slotInputChannels,
   switchAsioDriver,
   usingAsio,
-} from '../../audio/audio-devices';
-import { autosave } from '../../audio/autosave';
-import { engineResync } from '../../audio/instrument';
-import { withAt } from '../../audio/instrument-slots';
-import { engineInputLive, toggleEngineInput } from '../../audio/native-io';
+} from './audio-devices';
+import { autosave } from '../../session/autosave';
+import { engineResync } from './instrument';
+import { withAt } from './instrument-slots';
+import { engineInputLive, toggleEngineInput } from './native-io';
 import { notifyError, notifyInfo } from '../../notify';
 
 /**
- * OWNS: engine mode's view of the native engine (`docs/plans/native-engine.md` § Stage 5, UI side): the
- * feed reducer, the device that runs, and the `looper` / `clock` / `master` shapes the UI reads, built on
- * engine commands and the feed. `audio.ts` beside this file picks these or the web modules by mode, so
- * the components change only their import.
+ * OWNS: the UI's view of the native engine (invariants 3 and 6): the feed reducer, the device that
+ * runs, and the `looper` / `clock` / `master` shapes the UI reads (through `audio.ts` beside this
+ * file), built on engine commands and the feed.
  *
  * The engine owns the musical state: lanes, the transport (master, BPM and its lock), the beat and the
  * selection arrive on the feed, and nothing here predicts them. It does not echo settings, so this store
@@ -64,7 +62,7 @@ import { notifyError, notifyInfo } from '../../notify';
  * plain mirror (`plain`) and extrapolates the playhead from the feed's clock anchor.
  */
 
-/** The web looper's public track shape (`TrackPublic`), filled from the feed's `LaneInfo`. */
+/** A lane's public shape, filled from the feed's `LaneInfo`. */
 interface TrackView {
   readonly state: TrackState;
   readonly lengthFrames: number;
@@ -73,8 +71,8 @@ interface TrackView {
   readonly canUndo: boolean;
   readonly canReverse: boolean;
   readonly reversed: boolean;
-  /** The frame of a pending stop, at the loop end or where a fade ends (the web holds a ctx time; the UI
-   * tests only for null). */
+  /** The frame of a pending stop, at the loop end or where a fade ends (the UI tests only for
+   * null). */
   readonly stopAt: number | null;
   /** FADE: the lane fades out and stops at `stopAt`. */
   readonly fading: boolean;
@@ -143,7 +141,7 @@ const [device, setDeviceSignal] = createSignal<DeviceStatus | null>(null);
 
 // ── The settings this store keeps (the engine does not echo them) ──────────────────────────────────
 
-const MAX_FIXED_BARS = 32; // the web looper's bar selector bound (`state.ts`), the engine's `MAX_FIXED_BARS`
+const MAX_FIXED_BARS = 32; // the bar selector bound, the engine's `MAX_FIXED_BARS`
 /** The engine's lane buffer: the host builds every engine with `HostConfig { max_loop_seconds: 60.0 }`
  * (`src-tauri/src/engine_io/mod.rs`). It bounds a multiply (`nextTakeMaxBars`). */
 const LANE_BUFFER_SECONDS = 60;
@@ -233,7 +231,7 @@ function adoptInputSendParam(key: InputSendParamId, value: number): void {
   writeStoredNumber(inputSendKey(key), applied);
 }
 
-/** Engine mode's input sends, for the command bar's IN FX control (the web path has none). */
+/** The input sends, for the command bar's IN FX control. */
 export const engineInputSends = {
   params: INPUT_SEND_PARAMS,
   on: (id: InputSendId): boolean => inputSendOn[id][0](),
@@ -650,7 +648,7 @@ function laneCommands(lane: number): EngineCommand[] {
   ];
 }
 
-/** The engine cleared the lane: its mix is back to the defaults there (the web's `clear()`), so here too. */
+/** The engine cleared the lane: its mix is back to the defaults there, so here too. */
 function clearLaneMix(lane: number): void {
   volumes[lane][1](1);
   setMutePlain(lane, false);
@@ -839,8 +837,7 @@ export function trimLane(i: number, bars: number): void {
   sendEngine({ Trim: [clampLane(i), Math.max(1, Math.round(bars))] });
 }
 
-/** Engine mode's FADE, the command bar's (the web looper has none). The engine judges a press and names a
- * refusal on the feed. */
+/** FADE, the command bar's. The engine judges a press and names a refusal on the feed. */
 export const engineFade = {
   /** FADE's length in bars (one of `FADE_BARS`). */
   bars: fadeBars,
@@ -854,7 +851,7 @@ export const engineFade = {
   fading: (): boolean => lanes.some(([track]) => track().fading),
 };
 
-/** Engine mode's DUB FEEDBACK per lane, the FX drawer's (the web looper only sums). */
+/** DUB FEEDBACK per lane, the FX drawer's. */
 export const engineDubFeedback = {
   value: (i: number): number => dubFeedbacks[i][0](),
   set: setDubFeedback,
@@ -865,7 +862,7 @@ function firstEmptyLane(): number {
   return plain.state.findIndex((s) => s === 'EMPTY');
 }
 
-/** Engine mode's `looper`: the facade the UI reads (`src/audio/looper/looper.ts` has the web one). */
+/** The `looper` the UI reads (`audio.ts`). */
 export const engineLooper = {
   trackCount: ENGINE_LANES as typeof ENGINE_LANES,
   recDub: async (i: number): Promise<void> => sendEngine({ RecDub: i }),
@@ -946,7 +943,7 @@ export const engineLooper = {
   },
 };
 
-// ── Session: export, recovery and import (`src/audio/export/session-source.ts`) ─────────────────────
+// ── Session: export, recovery and import (`src/session/session-source.ts`) ─────────────────────────
 
 const FROM_SNAPSHOT = { Playing: 'PLAYING', Stopped: 'STOPPED', Overdubbing: 'OVERDUBBING' } as const;
 const TO_LOAD = { PLAYING: 'Playing', STOPPED: 'Stopped' } as const;
@@ -972,8 +969,8 @@ async function exportSnapshot(): Promise<StemSnapshot> {
 
 /**
  * Load a session into an all-empty engine: the loops go to the engine (which sets and locks the tempo
- * and starts the PLAYING lanes together), then their mix to the engine and this store. Checks what the
- * web looper's `loadSession` checks before sending anything; the engine checks again.
+ * and starts the PLAYING lanes together), then their mix to the engine and this store. Checks the payload
+ * before sending anything; the engine checks again.
  */
 async function loadSession(payload: LoadSessionPayload): Promise<void> {
   const rate = device()?.sampleRate;
@@ -1052,7 +1049,7 @@ function setBpm(n: number): void {
   if (clamped !== bpm()) sendEngine({ SetBpm: clamped });
 }
 
-// Tap tempo stays in the UI (`docs/plans/native-engine.md` § Stage 2): the web clock's window rules.
+// Tap tempo stays in the UI: it averages the taps and sends SetBpm.
 const TAP_RESET_MS = 2000;
 const TAP_MAX_HISTORY = 8;
 let tapTimes: number[] = [];
@@ -1069,7 +1066,7 @@ function tap(now?: number): number {
   return bpm();
 }
 
-/** Engine mode's `clock` (`src/audio/clock.ts` has the web one). */
+/** The `clock` the UI reads (`audio.ts`). */
 export const engineClock = {
   bpm,
   setBpm,
@@ -1093,7 +1090,7 @@ export const engineClock = {
   },
 };
 
-/** Engine mode's `master` (`src/audio/master.ts` has the web one). */
+/** The `master` the UI reads (`audio.ts`). */
 export const engineMaster = {
   volume: masterVolume,
   setVolume: (v: number): void => {

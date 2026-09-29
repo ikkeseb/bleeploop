@@ -33,8 +33,8 @@ pub struct PluginDescriptor {
 pub struct PluginInfo {
     pub slot: u8,
     pub descriptor: PluginDescriptor,
-    /// Engine mode's load answer: what it did with the plugin's stored tone (`host/tone.rs`). `None`:
-    /// nothing was stored, or the web audio path loaded it (it keeps no tones).
+    /// The load's answer: what it did with the plugin's stored tone (`host/tone.rs`). `None`: nothing
+    /// was stored.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tone: Option<ToneRestore>,
 }
@@ -59,41 +59,6 @@ pub enum ToneRestore {
     Restored,
     /// The file was unreadable or the plugin refused it: the plugin runs at its defaults.
     Failed,
-}
-
-/// Native slot lifecycle. `Loading` is a real reservation: a WebView reload can cancel it before
-/// the foreign plugin finishes setup, and the old command can then only tear its result down — it
-/// can never park invisibly behind the new document's synth state.
-#[cfg(windows)]
-pub(crate) enum SlotState {
-    Empty,
-    Loading {
-        load_gen: u32,
-        frontend_epoch: u32,
-        running: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    },
-    Loaded(super::clap::SlotHandle),
-}
-
-#[cfg(windows)]
-impl SlotState {
-    pub(crate) fn loaded(&self) -> Option<&super::clap::SlotHandle> {
-        match self {
-            Self::Loaded(handle) => Some(handle),
-            Self::Empty | Self::Loading { .. } => None,
-        }
-    }
-
-    pub(crate) fn owns_load(&self, load_gen: u32, frontend_epoch: u32) -> bool {
-        matches!(
-            self,
-            Self::Loading {
-                load_gen: current,
-                frontend_epoch: current_epoch,
-                ..
-            } if *current == load_gen && *current_epoch == frontend_epoch
-        )
-    }
 }
 
 /// One plugin parameter's metadata (P9.5). Mirrors `PluginParamDesc` in `src/platform/host.ts`.
@@ -131,27 +96,60 @@ pub struct AudioOutputDevice {
     pub channels: u32,
 }
 
-/// Shared host state managed by Tauri (`.manage()` in `lib.rs`). Holds only `Send + Sync` things:
-/// the JS-provided sample rate (f64 bits) and the per-slot control handles. The `!Send`
-/// `PluginInstance` is NOT here — it lives pinned on its owner thread (see `clap`).
+/// Shared host state managed by Tauri (`.manage()` in `lib.rs`): the WebView document epoch. The
+/// plugin slots themselves live in engine mode's state (`engine_io::plugins`).
+#[derive(Default)]
 pub struct PluginHostState {
-    pub(crate) sample_rate: std::sync::atomic::AtomicU64,
     /// Bumped by every `host_init` (one call per WebView document). Loads must present the current
     /// epoch, so an IPC request from a document being replaced cannot reserve or park a slot later.
-    #[cfg(windows)]
     pub(crate) frontend_epoch: std::sync::atomic::AtomicU32,
-    #[cfg(windows)]
-    pub(crate) slots: std::sync::Mutex<[SlotState; 2]>,
 }
 
-impl Default for PluginHostState {
-    fn default() -> Self {
-        Self {
-            sample_rate: std::sync::atomic::AtomicU64::new(0),
-            #[cfg(windows)]
-            frontend_epoch: std::sync::atomic::AtomicU32::new(0),
-            #[cfg(windows)]
-            slots: std::sync::Mutex::new([SlotState::Empty, SlotState::Empty]),
+impl PluginHostState {
+    /// Begin one WebView document's session: the next epoch (never 0). A load still running for the
+    /// old document finds the epoch moved and unloads what it made (`engine_io::plugins`). One atomic
+    /// read-modify-write, so two overlapping `host_init`s never get the same epoch.
+    pub(crate) fn begin_frontend_session(&self) -> u32 {
+        use std::sync::atomic::Ordering::Relaxed;
+        let next = |epoch: u32| epoch.wrapping_add(1).max(1);
+        let previous = self.frontend_epoch.fetch_update(Relaxed, Relaxed, |epoch| Some(next(epoch)));
+        next(previous.unwrap_or_else(|epoch| epoch))
+    }
+}
+
+#[cfg(test)]
+mod frontend_epoch_tests {
+    use super::PluginHostState;
+    use std::sync::atomic::Ordering::Relaxed;
+
+    #[test]
+    fn a_session_epoch_is_never_zero_and_steps_up_across_the_wrap() {
+        let state = PluginHostState::default();
+        assert_eq!(state.begin_frontend_session(), 1, "the first document's epoch");
+        assert_eq!(state.begin_frontend_session(), 2);
+        state.frontend_epoch.store(u32::MAX - 1, Relaxed);
+        assert_eq!(state.begin_frontend_session(), u32::MAX);
+        assert_eq!(state.begin_frontend_session(), 1, "the wrap skips 0 (no document has epoch 0)");
+        assert_eq!(state.begin_frontend_session(), 2);
+    }
+
+    #[test]
+    fn overlapping_sessions_each_get_their_own_epoch() {
+        let state = std::sync::Arc::new(PluginHostState::default());
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                let state = state.clone();
+                std::thread::spawn(move || (0..1000).map(|_| state.begin_frontend_session()).collect::<Vec<_>>())
+            })
+            .collect();
+        let mut all = Vec::new();
+        for thread in threads {
+            let epochs = thread.join().unwrap();
+            assert!(epochs.windows(2).all(|w| w[0] < w[1]), "each caller sees its epochs rise");
+            all.extend(epochs);
         }
+        all.sort_unstable();
+        assert_eq!(all, (1..=8000).collect::<Vec<u32>>(), "8000 sessions, 8000 distinct epochs, none 0");
+        assert_eq!(state.frontend_epoch.load(Relaxed), 8000);
     }
 }

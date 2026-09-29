@@ -1,6 +1,5 @@
 import { Show, createEffect, createSignal } from 'solid-js';
 import { Portal } from 'solid-js/web';
-import { engineMode } from '../../platform';
 import { trimLane } from '../state/engine-store';
 import { looper } from '../state/audio';
 import { stageOpen } from '../stage/stage-store';
@@ -116,11 +115,11 @@ function TrimControl(props: { index: number; disabled: boolean; returnFocus?: (e
   );
 }
 
-/** The lane's ✂ TRIM pill and its popover, in engine mode over a committed loop of two whole bars or
- * more; nothing otherwise. Disabled while the lane stops at the loop end (as ↶ UNDO and ↺ REV are). */
+/** The lane's ✂ TRIM pill and its popover, over a committed loop of two whole bars or more; nothing
+ * otherwise. Disabled while the lane stops at the loop end (as ↶ UNDO and ↺ REV are). */
 export function Trim(props: { index: number; returnFocus?: (el: HTMLElement | undefined) => void }) {
   const track = looper.track(props.index);
-  const shown = () => engineMode() && track().canReverse && loopWholeBars() >= 2;
+  const shown = () => track().canReverse && loopWholeBars() >= 2;
   return (
     <Show when={shown()}>
       <TrimControl index={props.index} disabled={!trimGate(props.index).ok} returnFocus={props.returnFocus} />

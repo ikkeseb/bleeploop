@@ -1,5 +1,5 @@
 //! OWNS: the AUTO REC onset detector, where a first take starts on a level trigger instead of a count-in
-//! (`src/audio/looper/auto-record.ts`). Every buffer is allocated in `new`; `scan` allocates nothing.
+//! (`looper/auto-record.ts`). Every buffer is allocated in `new`; `scan` allocates nothing.
 
 pub const DEFAULT_SENSITIVITY: f64 = 50.0;
 pub const MIN_SENSITIVITY: f64 = 1.0;

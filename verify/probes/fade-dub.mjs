@@ -10,9 +10,8 @@
  *   FADING and a press stops the fade; an engine refusal (`Fading`) lands on its lane. A reset frame's
  *   remembered bars are adopted. The bars persist: across launches of one browser profile, a fresh
  *   engine gets the bars last chosen, and an engine's remembered bars win and are kept.
- * - `fadeAll` ('Fade out all', `src/app/actions.ts`): in MIDI learn's picker; in engine mode it sends the
- *   engine's action; in web mode (a second page) it says why not on the lane, and no FADE or DUB FEEDBACK
- *   control shows.
+ * - `fadeAll` ('Fade out all', `src/app/actions.ts`): in MIDI learn's picker; it sends the engine's
+ *   action.
  * - DUB FEEDBACK (the lane's FX drawer, `src/ui/looper/FxPanel.tsx`): the slider starts at 100 %, sends
  *   `SetDubFeedback` as a fraction, reads REPLACE at 0; a reset frame's value is adopted, COPY hands the
  *   copy the value the engine's `Copied` says it copied (the source may have moved since), and CLEAR
@@ -241,23 +240,4 @@ await probe(async ({ browser, open }) => {
   assert.equal(await fourth.bars(), '4 bars', 'the adopted bars are kept for the next launch');
   for (const app of [first, second, third, fourth]) assert.deepEqual(app.consoleErrors, [], 'no console errors across the launches');
   await profile.close();
-
-  // ── Web mode: no FADE, no DUB FEEDBACK, and the pedal says why ────────────────────────────────────
-  const web = await open({ viewport: { width: 1600, height: 900 } });
-  await web.page.evaluate(async () => {
-    const lf = window.__lf;
-    const { defaultFxStates } = await import('/src/audio/fx/fx.ts');
-    lf.looper.init();
-    const frames = Math.round(lf.engine.ctx.sampleRate * 2 * 4);
-    const pcm = new Float32Array(frames).map((_, f) => 0.2 * Math.sin(f / 40));
-    await lf.looper.loadSession({ bpm: 120, bars: 4, masterLengthFrames: frames, tracks: [{ index: 0, pcm, volume: 1, muted: false, reversed: false, state: 'PLAYING', fx: defaultFxStates() }] });
-  });
-  await web.page.waitForFunction(() => window.__lf.looper.stateOf(0) === 'PLAYING');
-  assert.equal(await web.page.locator('.transport__fade').count(), 0, 'web mode shows no FADE');
-  await web.page.locator('.lp-lane').nth(0).getByRole('button', { name: 'Track 1 FX', exact: true }).click();
-  await web.page.locator('.lp-drawer').waitFor();
-  assert.equal(await web.page.locator('.fxp-dub').count(), 0, 'web mode shows no DUB FEEDBACK');
-  await web.page.evaluate(() => import('/src/app/actions.ts').then((m) => m.runAction('fadeAll')));
-  assert.match(await web.page.locator('.lp-lane').nth(0).locator('.lp-lane__wellmsg').textContent(), /needs the native engine/);
-  assert.deepEqual(web.consoleErrors, [], 'no console errors in web mode');
 });

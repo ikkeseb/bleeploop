@@ -10,9 +10,8 @@
  *   `VITE_LF_PROBE_FILTER`  comma-separated name substrings; only matching plugins are probed
  *   `VITE_LF_PROBE_HOLD`    ms the editor stays open (default 1500)
  */
-import { engine } from '../audio/engine';
-import { availablePlugins, clearPlugin, selectPlugin } from '../audio/instrument';
-import { nativeHostReady, slotPlugins } from '../audio/instrument-slots';
+import { availablePlugins, clearPlugin, selectPlugin } from '../ui/state/instrument';
+import { nativeHostReady, slotPlugins } from '../ui/state/instrument-slots';
 import { platform } from '../platform';
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -32,7 +31,6 @@ export async function runEditorSmoke(): Promise<void> {
     log('no plugins to probe (scan empty or filter matched nothing)');
     return;
   }
-  await engine.start();
   log(`start: ${list.length} plugin(s), hold=${hold} ms`);
   let opened = 0;
   let failed = 0;

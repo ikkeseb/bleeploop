@@ -1,11 +1,11 @@
-// verify/guards/unzip.mjs — deterministic guard for src/audio/export/unzip.ts.
+// verify/guards/unzip.mjs — deterministic guard for src/session/unzip.ts.
 // Imports the REAL store-only ZIP reader AND writer (Node TS type-stripping) so neither can drift from source.
 // Proves the load-bearing property: makeZip → parseZip is lossless (identical names + byte-identical data),
 // and that every hard-validation path (bad signature, corrupt data via CRC, truncation, non-store method)
 // THROWS rather than returning garbage or hanging. Pure Node — no browser, AudioContext, or hardware.
 // Run: node verify/guards/unzip.mjs
-import { parseZip } from '../../src/audio/export/unzip.ts';
-import { makeZip, crc32 } from '../../src/audio/export/zip.ts';
+import { parseZip } from '../../src/session/unzip.ts';
+import { makeZip, crc32 } from '../../src/session/zip.ts';
 
 let fails = 0,
   checks = 0;

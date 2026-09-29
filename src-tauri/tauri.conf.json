@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "BleepLoop",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "identifier": "com.bleeploop.app",
   "build": {
     "frontendDist": "../dist",
@@ -34,11 +34,7 @@
         "object-src": "'none'",
         "base-uri": "'self'"
       },
-      "dangerousDisableAssetCspModification": ["style-src"],
-      "headers": {
-        "Cross-Origin-Opener-Policy": "same-origin",
-        "Cross-Origin-Embedder-Policy": "require-corp"
-      }
+      "dangerousDisableAssetCspModification": ["style-src"]
     }
   },
   "bundle": {

@@ -1,6 +1,6 @@
 import { For, Show, createEffect, createSignal } from 'solid-js';
 import { Portal } from 'solid-js/web';
-import { engineMode, type InputSendId } from '../../platform';
+import type { InputSendId } from '../../platform';
 import { engineInputSends, type InputSendParamDef } from '../state/engine-store';
 import { stageOpen } from '../stage/stage-store';
 import { EscapeCloses } from '../looper/shared';
@@ -9,9 +9,9 @@ import './input-fx.css';
 
 /**
  * IN FX: the input sends, ECHO, REVERB and RING MOD on the live input (the amp-sim's output, or the dry
- * input on MIC). What they add is heard and recorded on the same frame; the dry signal never passes
+ * input of an Off slot). What they add is heard and recorded on the same frame; the dry signal never passes
  * through them (`src-tauri/crates/lf-engine/src/input_fx.rs`). A rig setting, kept in localStorage by the
- * engine store. Engine mode only: the web path has no input sends, so nothing renders there.
+ * engine store.
  *
  * The command-bar pill opens a small popover under itself with the three sends as FxPanel's modules (the
  * same key-face toggle, sliders and division select); the pill reads engaged (warm white) while any
@@ -145,12 +145,8 @@ function InputFxControl(props: { returnFocus?: (el: HTMLElement | undefined) => 
   );
 }
 
-/** The IN FX pill and its popover, in engine mode; nothing in web mode. `returnFocus` is the transport
- * keys' (app.tsx), for a keyboard close. */
+/** The IN FX pill and its popover. `returnFocus` is the transport keys' (app.tsx), for a keyboard
+ * close. */
 export function InputFx(props: { returnFocus?: (el: HTMLElement | undefined) => void }) {
-  return (
-    <Show when={engineMode()}>
-      <InputFxControl returnFocus={props.returnFocus} />
-    </Show>
-  );
+  return <InputFxControl returnFocus={props.returnFocus} />;
 }

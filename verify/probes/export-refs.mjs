@@ -1,21 +1,24 @@
-/** Captures the v0.1.0 session files the native engine's Stage 5 must import
- * (`docs/plans/native-engine.md` § Stage 3 and § Stage 5): the export zip exactly as the user downloads
+/** Captures the v0.1.0 session files the native engine must import (read by
+ * `src-tauri/crates/lf-engine/tests/v0_1_0_exports.rs`): the export zip exactly as the user downloads
  * it, and the recovery archive exactly as autosave stores it in IndexedDB. A sibling of `tone-refs`
  * rather than part of it: this drives the app's UI, download and IndexedDB in a fresh profile, not Tone
  * OfflineContexts, and its compare has to see past timestamps. The two probes share one budget: their
  * fixtures together stay ≤ 10 MB, and each checks the sum.
  *
- * The session: 48 kHz (the probe pins the live AudioContext's rate), 240 BPM, one bar, two lanes of synthesized PCM loaded through `looper.loadSession` (the
- * import core, so the content is deterministic). Track 1 is muted at volume 0.6 and carries samples
- * past ±1 and a 1e-7 (the editable-headroom cases); track 2 plays at volume 1.2 through the filter and
- * the delay. The export is the Export button's real download; the recovery record is what
- * `autosave.flush()` wrote, read back from IndexedDB.
+ * The engine side is the web engine fake (`src/platform/host.web.ts`, the `engine-seam` pattern): the
+ * session is loaded as an import loads it (`session.loadSession`: the store takes the mix, the fake the
+ * bytes), the probe scripts the feed's two PLAYING lanes and the snapshot the engine would answer, and
+ * the real export, offline wet render (`src/session/render.ts`), autosave and recovery archive run on
+ * them. 48 kHz (the fake's rate), 240 BPM, one bar, two lanes of synthesized PCM. Track 1 is muted at
+ * volume 0.6 and carries samples past ±1 and a 1e-7 (the editable-headroom cases); track 2 plays at
+ * volume 1.2 through the filter and the delay. The export is the Export button's real download; the
+ * recovery record is what `autosave.flush()` wrote, read back from IndexedDB.
  *
  * Without `--write` it captures again and compares with the committed files, normalizing what a
  * capture cannot hold still: the timestamped base name, the zip's DOS time, session.json's `exported`
- * and the record's `savedAt`. Stems and session fields must match exactly; the PCM16 master may move
- * by 1 LSB (Blink sums a node's inputs in no fixed order). With `--write` it replaces the fixtures and
- * the manifest.
+ * and the record's `savedAt`. Stems and every session field the fixtures hold must match exactly (a
+ * field added since is not a difference); the PCM16 master may move by 1 LSB (Blink sums a node's
+ * inputs in no fixed order). With `--write` it replaces the fixtures and the manifest. Cannot see the native engine, WebView2's download or anything audible.
  * @no-ci capture tool for committed fixtures; CI's Chromium may differ from the capture's
  * Run: pnpm probe export-refs [--write]
  */
@@ -25,8 +28,8 @@ import { execSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { flag, probe } from '../harness/probe.ts';
-import { parseZip } from '../../src/audio/export/unzip.ts';
-import { decodeWav } from '../../src/audio/export/wav.ts';
+import { parseZip } from '../../src/session/unzip.ts';
+import { decodeWav } from '../../src/session/wav.ts';
 
 const write = flag('write');
 const FIXTURES = join(import.meta.dirname, '../../src-tauri/crates/lf-engine/tests/fixtures');
@@ -45,10 +48,11 @@ const dirBytes = (dir) => existsSync(dir)
 async function buildSession({ bpm, bars }) {
   const lf = window.__lf;
   await lf.autosave.ready();
-  await lf.looper.init();
-  const { defaultFxStates } = await import('/src/audio/fx/fx.ts');
-  const { framesPerBar } = await import('/src/audio/quantize.ts');
-  const sr = lf.engine.ctx.sampleRate;
+  const { session } = await import('/src/ui/state/audio.ts');
+  const { defaultFxStates } = await import('/src/ui/state/fx-metadata.ts');
+  const { framesPerBar } = await import('/src/ui/state/quantize.ts');
+  const { encodeSessionBytes } = await import('/src/platform/engine-wire.ts');
+  const sr = session.sampleRate();
   const frames = bars * framesPerBar(bpm, sr);
   // Track 1: a quiet sine, then samples an editable stem must keep exactly (past ±1, and tiny).
   const one = Float32Array.from({ length: frames }, (_, n) => 0.5 * Math.sin((2 * Math.PI * 220 * n) / sr));
@@ -63,10 +67,13 @@ async function buildSession({ bpm, bars }) {
   const fx = defaultFxStates();
   fx[0] = { bypassed: false, params: { cutoff: 900, q: 3 } };
   fx[3] = { bypassed: false, params: { time: 2, feedback: 0.5, mix: 0.4 } };
-  await lf.looper.loadSession({ bpm, bars, masterLengthFrames: frames, tracks: [
+  await session.loadSession({ bpm, bars, masterLengthFrames: frames, tracks: [
     { index: 0, pcm: one, volume: 0.6, muted: true, reversed: false, state: 'PLAYING', fx: defaultFxStates() },
     { index: 1, pcm: two, volume: 1.2, muted: false, reversed: false, state: 'PLAYING', fx },
   ] });
+  // What the engine answers once it plays them.
+  lf.native.snapshotBytes = encodeSessionBytes({ rate: sr, masterLengthFrames: frames, bpm,
+    tracks: [0, 1].map((index) => ({ index, frames, reversed: false, state: 'Playing' })) }, [one, two]).buffer;
   return { sampleRate: sr, frames };
 }
 
@@ -100,6 +107,16 @@ function entriesOf(zip) {
   return { byName, session: new TextDecoder().decode(byName.get('-session.json')).replaceAll(base, '') };
 }
 
+/** `now` cut down to the keys `then` holds, recursively: a field added since the capture is not a
+ * difference (the fixtures stay v0.1.0's files, which a newer app must still import); a changed or
+ * dropped one is. */
+function asCaptured(then, now) {
+  if (Array.isArray(then) && Array.isArray(now)) return now.map((v, i) => asCaptured(then[i], v));
+  const isRecord = (o) => o !== null && typeof o === 'object' && !Array.isArray(o);
+  if (!isRecord(then) || !isRecord(now)) return now;
+  return Object.fromEntries(Object.keys(then).filter((k) => k in now).map((k) => [k, asCaptured(then[k], now[k])]));
+}
+
 /** Differences between two archives, [] when they match up to the normalized fields. */
 function compareArchives(label, committed, fresh) {
   const [a, b] = [committed, fresh].map(entriesOf);
@@ -110,8 +127,16 @@ function compareArchives(label, committed, fresh) {
   for (const [name, old] of a.byName) {
     const now = b.byName.get(name);
     if (name === '-session.json') {
-      const [x, y] = [a, b].map((m) => JSON.stringify({ ...JSON.parse(m.session), exported: null }));
-      if (x !== y) out.push(`${label}${name}: session fields differ`);
+      const [was, is] = [a, b].map((m) => ({ ...JSON.parse(m.session), exported: null }));
+      const [x, y] = [was, asCaptured(was, is)].map((o) => JSON.stringify(o));
+      if (x !== y) {
+        // Name what differs, so a red run says which fields moved.
+        const [p, q] = [x, y].map((t) => JSON.parse(t));
+        const fields = [...new Set([...Object.keys(p), ...Object.keys(q)])].filter((k) => JSON.stringify(p[k]) !== JSON.stringify(q[k]));
+        const trackFields = [...new Set((p.tracks ?? []).flatMap((t, k) => [...new Set([...Object.keys(t), ...Object.keys(q.tracks?.[k] ?? {})])]
+          .filter((f) => JSON.stringify(t[f]) !== JSON.stringify(q.tracks?.[k]?.[f]))))];
+        out.push(`${label}${name}: session fields differ (${fields.join(', ')}${trackFields.length ? `; tracks[].${trackFields.join(', tracks[].')}` : ''})`);
+      }
     } else if (name === '-master.wav') {
       const [x, y] = [old, now].map((d) => decodeWav(d).channels);
       let lsb = 0;
@@ -128,14 +153,24 @@ function compareArchives(label, committed, fresh) {
 await probe(async ({ open, browser }) => {
   // A fresh profile: no earlier recovery record, and downloads land where the probe can read them.
   const context = await browser.newContext({ viewport: { width: 1280, height: 820 }, acceptDownloads: true });
-  // The live context runs at the output device's rate; pin 48 k (the engine's rate) so the capture is
-  // the same on every machine.
-  const init = (page) => page.addInitScript(() => {
-    const Native = window.AudioContext;
-    window.AudioContext = class extends Native { constructor(options = {}) { super({ ...options, sampleRate: 48000 }); } };
-  });
+  const init = (page) => page.addInitScript(() => void (window.__lfEngineFake = true));
   const { page, consoleErrors } = await open({ context, init });
+  await page.waitForFunction(() => window.__lf.native.opened.length === 1, undefined, { timeout: 10000 });
+  let seq = 0;
+  const emit = (frame) => page.evaluate((f) => window.__lf.native.emit(f), { seq: ++seq, reset: false, events: [], ...frame });
+  const lane = (state, length) => ({ state, length, armed: false, autoArmed: false, canUndo: false,
+    canReverse: state === 'Playing', reversed: false, stopAt: null, fading: false, retakePass: 0 });
+  const lanes = (master, states) => states.map((state, i) => ({ Lane: { frame: 0, lane: i, info: lane(state, state === 'Empty' ? 0 : master) } }));
+  await emit({
+    reset: true,
+    settings: [],
+    events: [{ Transport: { frame: 0, master: 0, bpm: BPM, locked: false } }, ...lanes(0, Array(5).fill('Empty')), { Selected: { frame: 0, lane: 0 } }],
+    anchor: { frame: 0, atMs: Date.now(), rate: 48000, grid: 0 },
+    meter: { peak: 0, clip: false },
+  });
   const session = await page.evaluate(buildSession, { bpm: BPM, bars: BARS });
+  await emit({ events: [{ Transport: { frame: 0, master: session.frames, bpm: BPM, locked: true } },
+    ...lanes(session.frames, ['Playing', 'Playing', 'Empty', 'Empty', 'Empty'])] });
   const downloading = page.waitForEvent('download');
   await page.getByRole('button', { name: 'Export loops as a zip of WAV files' }).click();
   const download = await downloading;

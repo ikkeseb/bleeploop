@@ -1,5 +1,5 @@
 // Recovery must preserve Float32 PCM, including overdub headroom and samples below one PCM16 step.
-import { encodeWav, decodeWav } from '../../src/audio/export/wav.ts';
+import { encodeWav, decodeWav } from '../../src/session/wav.ts';
 
 let checks = 0;
 let fails = 0;

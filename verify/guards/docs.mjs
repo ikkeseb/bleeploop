@@ -65,7 +65,6 @@ const OWNER_TIER = new Set([
   'docs/VERIFY.md',
   'verify/README.md',
   'src-tauri/AGENTS.md',
-  'src/audio/AGENTS.md',
   'src/ui/AGENTS.md',
 ]);
 
@@ -79,8 +78,10 @@ function check(ok, msg) {
   }
 }
 
-const mdFiles = git('ls-files', '-z', '*.md', '**/*.md').split('\0').filter(Boolean);
-const trackedSet = new Set(git('ls-files', '-z').split('\0').filter(Boolean));
+// Tracked files as the working tree has them: a deletion not yet committed is gone already.
+const onDisk = (f) => existsSync(resolve(ROOT, f));
+const mdFiles = git('ls-files', '-z', '*.md', '**/*.md').split('\0').filter(Boolean).filter(onDisk);
+const trackedSet = new Set(git('ls-files', '-z').split('\0').filter(Boolean).filter(onDisk));
 const TOP_DIRS = new Set([...trackedSet].map((t) => t.split('/')[0]).filter((d) => !d.includes('.')));
 
 // ── 1. backtick paths ──────────────────────────────────────────────────────────────────────

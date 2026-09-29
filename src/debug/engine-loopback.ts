@@ -1,14 +1,13 @@
 /**
  * DEV probe: where takes land against the click on the native engine, in the real running app, through
  * a physical loopback cable (an interface output wired into an input). The cable is a player who hits
- * every click exactly as it leaves the interface. The web path's version is `src/debug/loopback-sync.ts`;
- * the bar it serves is `docs/plans/native-engine.md` § Stage 5, "Parity checklist".
+ * every click exactly as it leaves the interface. Its bars: `docs/VERIFY.md`, native:engine-loopback.
  *
  * The engine starts a take the driver's input + output latency, the live effect's latency and the master
  * limiter's pre-delay after its downbeat (`ProcessContext::align_frames`, lf-engine `api.rs`), so a
  * correctly aligned take puts the cable's click ON its beat. Every offset here is the recorded click's
  * onset minus its beat frame in the committed lane PCM (`engine_snapshot`: play order, loop position 0 =
- * the master downbeat), + = late; nothing is fitted. The onset is loopback-sync's (the window's peak,
+ * the master downbeat), + = late; nothing is fitted. The onset is the removed web loopback probe's (the window's peak,
  * then the first 30 % crossing, each beat searched from half a beat early, the loop read circularly so
  * an early downbeat is found at the loop's end). The engine's click rises over 2 ms, so the crossing
  * lags the click's first frame even on the ideal click: that lag, measured by the same detector on the
@@ -67,12 +66,12 @@
  *                            unloaded before MIC takes that slot, so the MIC takes' peak gain shows what
  *                            the unload left on the slot (compare it with a run without this knob)
  */
-import { framesPerBar } from '../audio/quantize';
-import { setBufferSize, usingAsio } from '../audio/audio-devices';
-import { BUFFER_FRAMES_OPTIONS, writeAudioDeviceSettings, type BufferFrames } from '../audio/audio-settings';
-import { availablePlugins, clearPlugin, nativeHostReady, pluginGain, selectPlugin, slotPlugins } from '../audio/instrument';
-import { goLive, inputArmed, stopLive } from '../audio/native-io';
-import { engineMode, type DeviceStatus, type PluginDescriptor } from '../platform';
+import { framesPerBar } from '../ui/state/quantize';
+import { setBufferSize, usingAsio } from '../ui/state/audio-devices';
+import { BUFFER_FRAMES_OPTIONS, writeAudioDeviceSettings, type BufferFrames } from '../ui/state/audio-settings';
+import { availablePlugins, clearPlugin, nativeHostReady, pluginGain, selectPlugin, slotPlugins } from '../ui/state/instrument';
+import { goLive, inputArmed, stopLive } from '../ui/state/native-io';
+import { platform, type DeviceStatus, type PluginDescriptor } from '../platform';
 import { clock, looper, master, session } from '../ui/state/audio';
 import { engineDevice, engineFade, engineInputSends, onEngineEvent, openEngineDevice, setEngineInputChannel, trimLane } from '../ui/state/engine-store';
 
@@ -84,7 +83,7 @@ const BEATS_PER_BAR = 4;
 /** The engine's default click volume: the accent peaks at 0.7, under the limiter's −1 dB threshold. */
 const CLICK_VOLUME = 0.7;
 /** A beat's peak must stand this far above the take's median |x| (the noise floor) to count as a click:
- * loopback-sync's 8 would let a noise peak cross 30 % of a weak click; 20 keeps 0.3 × peak above it. */
+ * The web loopback probe's 8 would let a noise peak cross 30 % of a weak click; 20 keeps 0.3 × peak above it. */
 const FLOOR_FACTOR = 20;
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -486,7 +485,7 @@ async function loadInSlot1(name: string, format: string | undefined): Promise<Pl
 }
 
 async function run(): Promise<void> {
-  check(engineMode(), 'engine mode is off in this profile (the runner writes its toggle file)');
+  check(platform.engine.available, 'this platform has no engine');
   const channel = Number(import.meta.env.VITE_LF_PROBE_CHANNEL ?? 1);
   check(Number.isInteger(channel) && channel >= 0, `CHANNEL must be a 0-based channel, got ${import.meta.env.VITE_LF_PROBE_CHANNEL}`);
   const buffers = String(import.meta.env.VITE_LF_PROBE_BUFFERS ?? '64,128,256')

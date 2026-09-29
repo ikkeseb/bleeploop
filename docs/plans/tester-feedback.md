@@ -78,24 +78,16 @@ Proven in the browser tier only (`pnpm check`, `pnpm build`, `pnpm verify:jam`, 
 - **F6:** the PARAMS preview takes the first 12 NAMED params; unnamed ones count toward "+N more".
 - **F9:** the auto go-live after a fresh pick is quiet (log line kept); a clicked GO LIVE still reports.
 - **F2 + F1 + F5:** short later takes tile across the master (early stop or FIXED), FIXED stays usable
-  after the BPM lock, and PLAY on an idle transport starts from the top. `pnpm verify:jam` drives it
-  through the real dispatchers (Windows browser run, 2026-09-21: 91/91).
-  `verify/probes/playback-restart.mjs` separately captures rendered lane PCM: single/ALL idle restarts
-  begin at source frame zero, ALL lanes share a start frame, and live joins keep phase beside a
-  muted lane pending END STOP. A deliberately wrong 100 ms source offset fails all three cases.
+  after the BPM lock, and PLAY on an idle transport starts from the top. On the engine, lf-engine's
+  tests render it: idle restarts from the top and live joins, also beside a muted lane pending END
+  STOP (`phase_preserve.rs`), ALL lanes on one frame (`golden_jam.rs`).
   By ear, unheard: the tile seams, a 3-over-8 cut, reverse on a tiled track, and the downbeat click
   on a from-the-top start.
 - **F10:** the button reads `AUTO REC · SENS n` with an explanatory tooltip. Wording is the owner's eye.
-- **F13:** the dropdowns show the saved pick, and the WebView's output follows the output pick by
-  endpoint name (`applyWebOutput` in `src/audio/audio-devices.ts`, the match in
-  `src/audio/output-match.ts`); under ASIO it stays on the system default. Verified in the Tauri app on
-  the dev PC with a throwaway probe: the saved pick shows on reopen and the context's sink follows it.
-  The tester's first build toasted "Loops and synths stay on the previous output" for a USB headset. Two
-  causes, both fixed: WebView2 hides device labels until the session holds a mic grant (measured in a
-  fresh profile: every label empty, and the grant does not survive a relaunch), and Chromium appends
-  ` (vid:pid)` to a USB-class device's label. The dev PC's Focusrite runs a vendor driver and gets no
-  suffix, which is why it passed. Re-verified in a fresh profile: labels hidden, and the sink still
-  followed the pick. Unverified: the tester's machine, and a switch between two physical devices.
+- **F13:** the dropdowns show the saved pick, and the engine opens the picked output itself. The
+  tester's toast ("Loops and synths stay on the previous output") came from the web path's output
+  follow, which went with that path. Unverified: the tester's machine, and a switch between two
+  physical devices.
 
 - **F14 (engine mode, 2026-09-26):** FIXED past the loop is the multiply: over a loop of m bars, FIXED
   N > m records the largest multiple of m within N and the loop grows to it; the other tracks repeat
@@ -143,7 +135,7 @@ Proven in the browser tier only (`pnpm check`, `pnpm build`, `pnpm verify:jam`, 
   times a sine carrier (Freq 20–1500 Hz, default 440; Level 0–1, default 0.5), heard and recorded, the
   dry signal untouched; a pedal action `inFxRing`. lf-engine `tests/input_fx.rs` proves the carrier,
   the sum and difference tones (the input's own frequency 171 dB down), the dry bits, block-split
-  identity, the off ramp and the frequency ramp; the defaults are not heard. Engine only.
+  identity, the off ramp and the frequency ramp; the defaults are not heard. Engine only. In v0.2.0.
 - **F3/F12 follow-up:** Help → About this build shows the version and commit, copies a diagnostics
   block and opens the log folder; the repo has a bug-report form asking for both.
 
@@ -191,9 +183,9 @@ Proven in the browser tier only (`pnpm check`, `pnpm build`, `pnpm verify:jam`, 
    - **F11: no code change.** Ordinary ARMED already clicks (`state.ts` `publish`). AUTO listening
      stays silent: AUTO exists only for the first take, so no grid exists to click on, and through a
      mic the click could trigger the take.
-3. **F8: answered 2026-09-24** by the native engine (plugins and MIDI in the device callback,
-   `docs/plans/native-engine.md` Stage 4); nothing on the shipping line. F12 is the plan's Stage 0
-   (the first published release: v0.1.0, 2026-09-28).
+3. **F8: answered 2026-09-24** by the native engine (plugins in the device callback,
+   `docs/ARCHITECTURE.md` § Decided: one native audio engine). F12 is the first published release:
+   v0.1.0, 2026-09-28.
 
 Preserve the complete intake while fixing one issue at a time. The tester's machine remains the
 final confirmation for its reported failures.

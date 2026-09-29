@@ -1,6 +1,6 @@
 //! OWNS: each lane's FX chain and the shared reverb bus they send to, the grid the chains' rhythmic
-//! effects follow, and what CLEAR and COPY do to a lane's FX. Ported from `src/audio/fx/fx.ts` and the
-//! FX side of `src/audio/looper/{playback,machine}.ts`.
+//! effects follow, and what CLEAR and COPY do to a lane's FX. Ported from `fx/fx.ts` and the
+//! FX side of `looper/{playback,machine}.ts`.
 //!
 //! A lane plays through its chain (lane volume first, as the web's gain feeds the chain); the chain's
 //! output goes to the master bus and its reverb send into the one [`ReverbBus`], whose stereo output

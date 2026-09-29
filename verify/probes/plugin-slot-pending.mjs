@@ -1,11 +1,17 @@
 /**
- * Plugin slot pending UI: deferred swap/unload/load keep the slot's busy label honest and its
- * source controls locked while the other slot stays usable; a rejected operation still decrements
- * the pending count and restores interaction; programmatic queue callers count at enqueue time (no
- * enabled frame between operations) and slot independence holds; an error thrown inside the queued
- * operation itself still releases its pending count; and an effect's automatic GO LIVE stays queued
- * behind its source load without disabling the internal auto-start. Drives the production slot queue
- * and rendered controls with deferred host replies; it makes no native teardown or timing claim.
+ * Plugin slot pending UI, on the web engine fake (`src/platform/host.web.ts`, the engine-seam pattern)
+ * with the native slot chrome on (host.web.ts served with `available: true`) and deferred host replies:
+ * a deferred swap/unload/load keeps the slot's busy label honest and its source controls locked while
+ * the other slot stays usable; two installed copies of one plugin (same id, other path) are two choices
+ * and picking the second swaps to its path; a rejected operation still decrements the pending count and
+ * restores interaction; programmatic queue callers count at enqueue time (no enabled frame between
+ * operations) and slot independence holds; an error thrown inside the queued operation itself still
+ * releases its pending count; a load the host rejects leaves the slot empty and a retry after it lands
+ * its own plugin; and an effect's automatic GO LIVE runs only once its source load is back
+ * (`SetSlotLive` to the engine), then its editor opens and the picker unlocks.
+ *
+ * Cannot see the native host's teardown or any timing; the engine answers nothing (GO LIVE there is one
+ * command, so it no longer holds the slot pending the way the web path's arm did).
  * Run: pnpm probe plugin-slot-pending [--screenshot=<path>]
  */
 import assert from 'node:assert/strict';
@@ -16,20 +22,28 @@ const screenshot = arg('screenshot');
 await probe(async ({ open }) => {
   const { page } = await open({
     viewport: { width: 1280, height: 820 },
-    // Render the real native-only slot chrome in the browser tier. The host methods themselves are
-    // replaced below before any operation is driven.
-    init: (p) => p.route('**/src/platform/host.web.ts', async (route) => {
-      const response = await route.fetch();
-      const body = (await response.text()).replace('available: false', 'available: true');
-      await route.fulfill({ response, body });
-    }),
+    // Render the real native-only slot chrome in the browser tier, in engine mode. The host methods
+    // themselves are replaced below before any operation is driven.
+    init: async (p) => {
+      await p.route('**/src/platform/host.web.ts', async (route) => {
+        const response = await route.fetch();
+        const body = (await response.text()).replace('available: false', 'available: true');
+        await route.fulfill({ response, body });
+      });
+      await p.addInitScript(() => void (window.__lfEngineFake = true));
+    },
   });
 
   const setup = await page.evaluate(async () => {
     const { platform } = await import('/src/platform/index.ts');
-    const instrument = await import('/src/audio/instrument.ts');
-    const slots = await import('/src/audio/instrument-slots.ts');
-    const descriptorIdentity = await import('/src/audio/plugin-descriptor.ts');
+    const instrument = await import('/src/ui/state/instrument.ts');
+    const slots = await import('/src/ui/state/instrument-slots.ts');
+    const descriptorIdentity = await import('/src/ui/state/plugin-descriptor.ts');
+    const deadline = Date.now() + 10000;
+    while (!instrument.nativeHostReady() || instrument.scanning()) {
+      if (Date.now() > deadline) throw new Error('native host boot did not finish');
+      await new Promise((r) => setTimeout(r, 20));
+    }
     const descriptors = ['a', 'b', 'c', 'fx'].map((id) => ({
       id,
       name: `Probe ${id.toUpperCase()}`,
@@ -42,7 +56,6 @@ await probe(async ({ open }) => {
       path: 'C:\\probe\\vendor\\a.vst3',
     });
 
-    platform.pluginHost.available = true;
     platform.pluginHost.scanPlugins = async () => descriptors;
     const loadCalls = [];
     platform.pluginHost.loadPlugin = async (slot, path, id) => {
@@ -53,7 +66,6 @@ await probe(async ({ open }) => {
     platform.pluginHost.openEditor = async () => {};
     platform.pluginHost.closeEditor = async () => {};
     platform.pluginHost.listParams = async () => [];
-    slots.setNativeHostReady(true);
     await instrument.scanForPlugins();
     await instrument.selectPlugin(0, descriptors[0]);
 
@@ -181,34 +193,56 @@ await probe(async ({ open }) => {
   });
   assert.deepEqual(thrown, { error: 'queue failure', next: [0, 1], after: [0, 0] });
 
+  // A load the host rejects leaves the slot empty; a retry into the same slot after it lands its own
+  // plugin (slot 1, so slot 0's state above and below is untouched).
+  const loadStates = await page.evaluate(async () => {
+    const { platform, instrument } = window.__slotPendingProbe;
+    const desc = (id) => ({ id, name: `Probe ${id}`, path: `C:\\probe\\${id}.vst3`, format: 'vst3', isEffect: false });
+    const waitFor = async (read) => {
+      for (let i = 0; i < 100 && !read(); i++) await new Promise((resolve) => setTimeout(resolve, 0));
+      if (!read()) throw new Error('instrumented load was not called');
+    };
+    const load = platform.pluginHost.loadPlugin;
+    let rejectLoad;
+    platform.pluginHost.loadPlugin = () => new Promise((_, reject) => { rejectLoad = reject; });
+    const failedPick = instrument.selectPlugin(1, desc('failed-a'));
+    await waitFor(() => rejectLoad);
+    rejectLoad(new Error('injected native load timeout'));
+    await failedPick;
+    const afterFailedLoad = instrument.slotPlugins()[1]?.id ?? null;
+    let resolveRetry;
+    platform.pluginHost.loadPlugin = (slot, _path, id) =>
+      new Promise((resolve) => { resolveRetry = () => resolve({ slot, descriptor: desc(id) }); });
+    const retry = instrument.selectPlugin(1, desc('retry-b'));
+    await waitFor(() => resolveRetry);
+    resolveRetry();
+    await retry;
+    const afterRetry = instrument.slotPlugins()[1]?.id ?? null;
+    platform.pluginHost.loadPlugin = load;
+    await instrument.clearPlugin(1);
+    return { afterFailedLoad, afterRetry };
+  });
+  assert.deepEqual(loadStates, { afterFailedLoad: null, afterRetry: 'retry-b' },
+    'a failed load leaves the slot empty, and a retry after it lands its own plugin');
+
   // An effect's automatic GO LIVE is deliberately queued from PluginBar.onMount behind its source
-  // load. It must keep the same pending surface alive without disabling the internal auto-start.
+  // load: it goes live only once the load is back, then the editor opens and the picker unlocks.
   await page.evaluate(() => {
     const probe = window.__slotPendingProbe;
-    probe.platform.pluginHost.loadPlugin = () => new Promise((resolve) => {
-      probe.loadRelease = resolve;
+    probe.platform.pluginHost.loadPlugin = (slot, path, id) => new Promise((resolve) => {
+      probe.loadRelease = () => resolve({ slot, descriptor: probe.descriptors.find((d) => d.path === path && d.id === id) });
     });
-    probe.platform.pluginHost.armInput = () => new Promise((resolve) => {
-      probe.armRelease = resolve;
-    });
-    probe.platform.pluginHost.armMonitor = async () => {};
-    probe.platform.pluginHost.setMonitorGain = async () => {};
     probe.platform.pluginHost.openEditor = async () => { probe.autoEditorOpened = true; };
+    window.__lf.native.sent.length = 0;
   });
   await page.locator('.slot__source').first().selectOption(keys[3], { noWaitAfter: true });
   await page.waitForFunction(() => !!window.__slotPendingProbe.loadRelease);
   assert.equal((await slotUi(0)).pickerDisabled, true);
+  const liveSent = () => page.evaluate(() => window.__lf.native.sent.filter((c) => c.SetSlotLive).map((c) => c.SetSlotLive));
+  assert.deepEqual(await liveSent(), [], 'no GO LIVE while the source load runs');
   await page.evaluate(() => window.__slotPendingProbe.loadRelease());
-  await page.waitForFunction(() => !!window.__slotPendingProbe.armRelease);
-  assert.equal(
-    await page.evaluate(() => window.__slotPendingProbe.slots.slotPendingCounts()[0]),
-    1,
-    'auto GO LIVE must remain pending after its source load leaves the queue',
-  );
-  assert.equal((await slotUi(0)).pickerDisabled, true);
-  await page.evaluate(() => window.__slotPendingProbe.armRelease());
+  await page.waitForFunction(() => window.__slotPendingProbe.autoEditorOpened === true);
+  assert.deepEqual(await liveSent(), [[0, true]], 'the effect goes live once its load is back');
   await page.waitForFunction(() => window.__slotPendingProbe.slots.slotPendingCounts()[0] === 0);
   assert.equal((await slotUi(0)).pickerDisabled, false);
-
-  await page.waitForFunction(() => window.__slotPendingProbe.autoEditorOpened === true);
 }, { launch: {} });

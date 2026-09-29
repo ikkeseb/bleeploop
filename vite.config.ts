@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { defineConfig } from 'vite';
+import { defineConfig, type Plugin } from 'vite';
 import solid from 'vite-plugin-solid';
 import { buildCommit } from './scripts/build-commit.mjs';
 
@@ -9,17 +9,25 @@ const tauriDevHost = process.env.TAURI_DEV_HOST;
 // Help's "About this build" and its copied diagnostics name the version and the commit a tester runs.
 const appVersion: string = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8')).version;
 
-// COOP/COEP make `self.crossOriginIsolated === true`, which unlocks SharedArrayBuffer +
-// Atomics — required by the looper's lock-free capture ring buffer (ringbuf.js). Set here
-// from day one (P0) and mirrored on the Tauri asset protocol later (P7). All assets are
-// local/offline, so COEP:require-corp has no downside here.
-const crossOriginIsolation = {
-  'Cross-Origin-Opener-Policy': 'same-origin',
-  'Cross-Origin-Embedder-Policy': 'require-corp',
-} as const;
+/**
+ * The dev document always answers 200, never 304. Until Stage 6 the dev server sent COOP/COEP, and a
+ * browser profile that loaded the app then keeps them on its cached document through every 304 (a 304
+ * updates the headers it carries and removes none): the page stays cross-origin isolated and refuses
+ * the recovery worker, whose script carries no COEP, so autosave fails. One full answer replaces the
+ * cached entry. The release build's assets come fresh through Tauri's protocol and need none of this.
+ */
+const freshDocument: Plugin = {
+  name: 'fresh-document',
+  configureServer(server) {
+    server.middlewares.use((req, _res, next) => {
+      if (req.headers.accept?.includes('text/html')) delete req.headers['if-none-match'];
+      next();
+    });
+  },
+};
 
 export default defineConfig({
-  plugins: [solid()],
+  plugins: [solid(), freshDocument],
   // Declared in src/env.d.ts.
   define: {
     __APP_VERSION__: JSON.stringify(appVersion),
@@ -32,7 +40,6 @@ export default defineConfig({
     port: 1420,
     strictPort: true,
     host: tauriDevHost || false,
-    headers: { ...crossOriginIsolation },
     hmr: tauriDevHost ? { protocol: 'ws', host: tauriDevHost, port: 1421 } : undefined,
     // src-tauri/ = Rust output; .claude/ holds agent worktrees (full repo copies — a file
     // change there must never reload the live app); logs/ = runtime-gate logs.
@@ -44,7 +51,6 @@ export default defineConfig({
     // A probe run directly (without `pnpm probe`) targets localhost:1420, so a moved preview would
     // measure a stale build with no error.
     strictPort: true,
-    headers: { ...crossOriginIsolation },
   },
   // Vite matches env prefixes with startsWith — there is NO globbing, so 'TAURI_ENV_*' would never
   // match. Keep the intent (expose Tauri env vars to the frontend) with the correct literal prefix.

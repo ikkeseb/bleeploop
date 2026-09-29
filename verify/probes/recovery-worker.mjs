@@ -1,23 +1,29 @@
 /**
- * Recovery encoding through the real worker: transfer ownership of the copied PCM, non-finite sample
- * rejection, a worker startup failure followed by a successful retry, and a malformed reply from the
- * worker. Then the same failure behaviour through the production autosave path: a failed flush leaves
- * the previous archive restorable, a live edit made while an encode is pending cannot mutate the
- * snapshot the worker already copied, and two overlapping flushes leave recovery cleared rather than
- * resurrecting an older save. Cannot see native storage limits or WebView2.
+ * Recovery encoding through the real worker (`src/session/recovery-encode.ts`): transfer ownership of
+ * the copied PCM, non-finite sample rejection, a worker startup failure followed by a successful retry,
+ * and a malformed reply from the worker. Then the same failure behaviour through the production autosave
+ * path (`src/session/autosave.ts`) on the web engine fake (`src/platform/host.web.ts`), whose snapshot
+ * the probe scripts as the engine would answer it: a failed flush leaves the previous archive
+ * restorable, a later commit while an encode is pending cannot reach the archive the worker already
+ * holds, and a flush in flight with the player's CLEAR ALL behind it leaves recovery cleared rather than
+ * resurrecting the older save. A restore is read back from the session the fake engine was asked to
+ * load.
+ *
+ * Cannot see the native engine, its snapshot over Tauri IPC, native storage limits or WebView2.
  * Run: pnpm probe recovery-worker
  */
 import assert from 'node:assert/strict';
 import { probe } from '../harness/probe.ts';
 
 await probe(async ({ open }) => {
-  // After the app booted (`__lf`): it loads its modules after the page (`src/main.tsx`), and their own
+  // After the app booted (`__lf`): its modules load after the page (`src/main.tsx`), and their own
   // workers must not count as the encoder's.
-  const { page } = await open();
+  const { page } = await open({ init: (p) => p.addInitScript(() => void (window.__lfEngineFake = true)) });
+  await page.waitForFunction(() => window.__lf.native.opened.length >= 1, undefined, { timeout: 10000 });
   const result = await page.evaluate(async () => {
-    const { encodeRecovery } = await import('/src/audio/export/recovery-encode.ts');
-    const { parseZip } = await import('/src/audio/export/unzip.ts');
-    const { decodeWav } = await import('/src/audio/export/wav.ts');
+    const { encodeRecovery } = await import('/src/session/recovery-encode.ts');
+    const { parseZip } = await import('/src/session/unzip.ts');
+    const { decodeWav } = await import('/src/session/wav.ts');
     const request = (sample) => ({
       snapshot: {
         sampleRate: 48000, masterLengthFrames: 4,
@@ -68,36 +74,61 @@ await probe(async ({ open }) => {
   assert.equal(result.terminated, 4);
   console.log(JSON.stringify(result));
 
-  await page.waitForFunction(() => !!window.__lf);
   const recovery = await page.evaluate(async () => {
     const lf = window.__lf;
+    const { encodeSessionBytes, splitSessionBytes } = await import('/src/platform/engine-wire.ts');
     await lf.autosave.ready();
-    lf.autosave.start()(); // Keep this probe's writes explicit.
-    await lf.looper.init();
-    const frames = lf.engine.ctx.sampleRate * 2;
-    const load = async (value) => {
-      lf.looper.clearAll();
+    lf.autosave.start()(); // Boot started it: stop its timer, so this probe's writes stay explicit.
+    const RATE = 48000;
+    const frames = 2 * RATE; // one bar at 120 BPM
+    let seq = 0;
+    const emit = (frame) => lf.native.emit({ seq: ++seq, reset: false, events: [], ...frame });
+    const lane = (state, length) => ({ state, length, armed: false, autoArmed: false, canUndo: false,
+      canReverse: false, reversed: false, stopAt: null, fading: false, retakePass: 0 });
+    /** A new engine's first frame (a reset): every lane EMPTY, which is not the player's clear. */
+    const blank = () => emit({ reset: true, settings: [], anchor: { frame: 0, atMs: Date.now(), rate: RATE, grid: 0 },
+      events: [{ Transport: { frame: 0, master: 0, bpm: 120, locked: false } },
+        ...[0, 1, 2, 3, 4].map((i) => ({ Lane: { frame: 0, lane: i, info: lane('Empty', 0) } }))] });
+    /** The engine commits a loop on lane 1 whose sample 17 is `value`; its snapshot answers that loop. */
+    const load = (value) => {
       const pcm = new Float32Array(frames);
       pcm[17] = value;
-      await lf.looper.loadSession({ bpm: 120, bars: 1, masterLengthFrames: frames, tracks: [{
-        index: 0, pcm, volume: 0.6, muted: true, reversed: false, fx: lf.looper.fxState(0),
-      }] });
+      lf.native.snapshotBytes = encodeSessionBytes({ rate: RATE, masterLengthFrames: frames, bpm: 120,
+        tracks: [{ index: 0, frames, reversed: false, state: 'Playing' }] }, [pcm]).buffer;
+      emit({ events: [{ Transport: { frame: 0, master: frames, bpm: 120, locked: true } },
+        { Lane: { frame: 0, lane: 0, info: lane('Playing', frames) } }],
+      peaks: [{ lane: 0, start: 0, count: 1, min: [-Math.abs(value)], max: [Math.abs(value)] }] });
     };
+    /** The engine's CLEAR ALL: `Cleared` before each lane's own event; its snapshot is empty. */
+    const clearAll = () => {
+      lf.native.snapshotBytes = null;
+      emit({ events: [...[0, 1, 2, 3, 4].flatMap((i) => [{ Cleared: { frame: 0, lane: i } },
+        { Lane: { frame: 0, lane: i, info: lane('Empty', 0) } }]),
+      { Transport: { frame: 0, master: 0, bpm: 120, locked: false } }] });
+    };
+    /** Restore into a blank engine: whether it restored, and whether the one loaded lane holds `value`
+     * at frame 17 and silence elsewhere. */
+    const restores = async (value) => {
+      blank();
+      const loads = lf.native.loadedSessions.length;
+      const restored = await lf.autosave.restoreLatest();
+      if (lf.native.loadedSessions.length !== loads + 1) return { restored, exact: false };
+      const { pcm } = splitSessionBytes(lf.native.loadedSessions.at(-1).slice().buffer);
+      return { restored, exact: pcm.length === 1 && pcm[0].every((v, i) => v === (i === 17 ? Math.fround(value) : 0)) };
+    };
+    blank();
     const originalWorker = window.Worker;
     try {
-      await load(1.75);
+      load(1.75);
       await lf.autosave.flush();
-      await load(0.5);
+      load(0.5);
       window.Worker = class { constructor() { throw new Error('Injected worker startup failure'); } };
       let rejected = false;
       try { await lf.autosave.flush(); } catch { rejected = true; }
       window.Worker = originalWorker;
-      lf.looper.clearAll();
-      const restoredPrevious = await lf.autosave.restoreLatest();
-      const oldPcm = lf.looper.exportSnapshot().tracks[0].pcm;
-      const previousExact = oldPcm.every((v, i) => v === (i === 17 ? 1.75 : 0));
+      const previous = await restores(1.75);
 
-      // Pause at transfer, after the coherent snapshot has been copied but before encoding returns.
+      // Pause at transfer, after the snapshot has been copied but before encoding returns.
       let transferred;
       let started;
       const observeTransfer = () => {
@@ -106,31 +137,30 @@ await probe(async ({ open }) => {
           postMessage(...args) { super.postMessage(...args); transferred(); }
         };
       };
-      await load(0.375);
+      load(0.375);
       observeTransfer();
       const saving = lf.autosave.flush();
       await started;
-      await load(-0.25); // Later live edits must not mutate the snapshot in the worker.
+      load(-0.25); // A later commit must not reach the snapshot in the worker.
       await saving;
       window.Worker = originalWorker;
-      lf.looper.clearAll();
-      const restoredSnapshot = await lf.autosave.restoreLatest();
-      const snapshotPcm = lf.looper.exportSnapshot().tracks[0].pcm;
-      const snapshotExact = snapshotPcm.every((v, i) => v === (i === 17 ? 0.375 : 0));
+      const snapshot = await restores(0.375);
 
+      load(0.625);
       observeTransfer();
       const olderSave = lf.autosave.flush();
       await started;
-      lf.looper.clearAll();
+      clearAll();
       const clearFlush = lf.autosave.flush();
       await Promise.all([olderSave, clearFlush]);
-      return { rejected, restoredPrevious, previousExact, restoredSnapshot, snapshotExact,
+      return { rejected, restoredPrevious: previous.restored, previousExact: previous.exact,
+        restoredSnapshot: snapshot.restored, snapshotExact: snapshot.exact,
         clearedAfterSave: !(await lf.autosave.hasSaved()) };
     } finally {
       window.Worker = originalWorker;
     }
   });
+  console.log(JSON.stringify(recovery));
   assert.deepEqual(recovery, { rejected: true, restoredPrevious: true, previousExact: true,
     restoredSnapshot: true, snapshotExact: true, clearedAfterSave: true });
-  console.log(JSON.stringify(recovery));
 });

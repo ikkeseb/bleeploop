@@ -20,11 +20,10 @@ import { masterBars } from './shared';
  *
  * The bar grid is derived from `masterBars()` (the shared bar-math in `shared.ts`) so it can
  * never disagree with the spoken loop length. That is the ONLY place Solid signals are read
- * (`clock.bpm()`, and in engine mode the device's rate behind `sampleRate()`), and it is gated to a
+ * (`clock.bpm()`, and the device's rate behind `sampleRate()`), and it is gated to a
  * master-length change (a rare structural event; BPM is locked for the life of a committed master)
- * inside the cached-bitmap path — never in the per-frame steady state. (The web looper's
- * `recSpanFrames` reads its tempo once per take for a first take's opening span; engine mode's store
- * takes it as the take starts, off the draw loop.)
+ * inside the cached-bitmap path — never in the per-frame steady state. (A first take's opening span
+ * reads the tempo once per take: the engine store takes it as the take starts, off the draw loop.)
  *
  * Solid only ever creates/destroys the <canvas> elements (the Looper and StageView components) and calls
  * `registerLane` / `unregisterLane`; all drawing lives here in plain TS.

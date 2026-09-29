@@ -351,10 +351,9 @@ await probe(async ({ open }) => {
   console.log(`beat shown ${shownAfter} ms after its frame arrived (heard 400 ms later)`);
   assert.ok(shownAfter > 250 && shownAfter < 700, `the beat LED waited for the heard time (${shownAfter} ms)`);
 
-  // Engine mode never builds the web audio path, nor Tone's default context (`src/main.tsx`).
+  // The app never builds an AudioContext, nor Tone's default context (`src/main.tsx`).
   const contexts = await page.evaluate(() => window.__audioContexts);
   for (const stack of contexts) console.log(stack);
-  assert.equal(await page.evaluate(() => window.__lf.engine._ctx), undefined, "the web engine's AudioContext was never built");
   assert.equal(contexts.length, 0, 'no AudioContext was constructed');
   assert.equal(await page.evaluate(() => typeof window.AudioContext), 'function', 'the constructor is back after the app loaded');
   assert.deepEqual(consoleErrors, [], 'no console errors');

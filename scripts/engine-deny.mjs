@@ -1,5 +1,5 @@
 // scripts/engine-deny.mjs — keep lf-engine pure: its normal and build dependency tree, on every target,
-// may not contain a host, device or plugin crate (docs/plans/native-engine.md § Stage 2).
+// may not contain a host, device or plugin crate (the crate briefing: src-tauri/crates/lf-engine/src/lib.rs).
 //
 //   node scripts/engine-deny.mjs
 //
