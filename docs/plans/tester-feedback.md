@@ -141,8 +141,10 @@ Proven in the browser tier only (`pnpm check`, `pnpm build`, `pnpm verify:jam`, 
   and "Update ready" at the top of Help with the release notes. UPDATE AND RESTART asks first during a
   jam, saves it for recovery, downloads and verifies the signed installer, shuts the engine down as an
   exit does and runs the installer, which reopens the app. `verify/probes/app-update.mjs` proves the UI
-  half on a scripted updater (red with the jam ask removed). The native half is unproven until a release
-  updates a release. In v0.3.0.
+  half on a scripted updater (red with the jam ask removed). On the dev PC (2026-09-29) an installed
+  v0.3.0 with a jam in recovery found v0.3.1 at launch, asked, downloaded and verified it, shut the
+  engine down and ran the installer; v0.3.1 was up about 4 s after the press, with the rig and the jam
+  back and no second offer. In v0.3.0.
 - **F3/F12 follow-up:** Help → About this build shows the version and commit, copies a diagnostics
   block and opens the log folder; the repo has a bug-report form asking for both.
 
