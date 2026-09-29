@@ -16,9 +16,9 @@
  *
  * Without `--write` it captures again and compares with the committed files, normalizing what a
  * capture cannot hold still: the timestamped base name, the zip's DOS time, session.json's `exported`
- * and the record's `savedAt`. Stems and session fields must match exactly; the PCM16 master may move
- * by 1 LSB (Blink sums a node's inputs in no fixed order). With `--write` it replaces the fixtures and
- * the manifest. Cannot see the native engine, WebView2's download or anything audible.
+ * and the record's `savedAt`. Stems and every session field the fixtures hold must match exactly (a
+ * field added since is not a difference); the PCM16 master may move by 1 LSB (Blink sums a node's
+ * inputs in no fixed order). With `--write` it replaces the fixtures and the manifest. Cannot see the native engine, WebView2's download or anything audible.
  * @no-ci capture tool for committed fixtures; CI's Chromium may differ from the capture's
  * Run: pnpm probe export-refs [--write]
  */
@@ -107,6 +107,16 @@ function entriesOf(zip) {
   return { byName, session: new TextDecoder().decode(byName.get('-session.json')).replaceAll(base, '') };
 }
 
+/** `now` cut down to the keys `then` holds, recursively: a field added since the capture is not a
+ * difference (the fixtures stay v0.1.0's files, which a newer app must still import); a changed or
+ * dropped one is. */
+function asCaptured(then, now) {
+  if (Array.isArray(then) && Array.isArray(now)) return now.map((v, i) => asCaptured(then[i], v));
+  const isRecord = (o) => o !== null && typeof o === 'object' && !Array.isArray(o);
+  if (!isRecord(then) || !isRecord(now)) return now;
+  return Object.fromEntries(Object.keys(then).filter((k) => k in now).map((k) => [k, asCaptured(then[k], now[k])]));
+}
+
 /** Differences between two archives, [] when they match up to the normalized fields. */
 function compareArchives(label, committed, fresh) {
   const [a, b] = [committed, fresh].map(entriesOf);
@@ -117,7 +127,8 @@ function compareArchives(label, committed, fresh) {
   for (const [name, old] of a.byName) {
     const now = b.byName.get(name);
     if (name === '-session.json') {
-      const [x, y] = [a, b].map((m) => JSON.stringify({ ...JSON.parse(m.session), exported: null }));
+      const [was, is] = [a, b].map((m) => ({ ...JSON.parse(m.session), exported: null }));
+      const [x, y] = [was, asCaptured(was, is)].map((o) => JSON.stringify(o));
       if (x !== y) {
         // Name what differs, so a red run says which fields moved.
         const [p, q] = [x, y].map((t) => JSON.parse(t));
