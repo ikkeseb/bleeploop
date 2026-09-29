@@ -1,7 +1,7 @@
 //! Ports verify/guards/overdub.mjs, undo.mjs and reverse.mjs: the overdub layer, the one-level UNDO/REDO
 //! toggle and per-lane REVERSE.
 //!
-//! The engine sums an overdub in place (plan § Memory), so there is no working copy, no boundary swap
+//! The engine sums an overdub in place, so there is no working copy, no boundary swap
 //! and no swap timer. overdub.mjs's timer checks (one pending swap per lane, early fire, a stalled
 //! re-arm, a swap that throws) guard machinery that no longer exists and are not ported; what they
 //! protected is asserted on the loop and on the rendered output: every captured frame summed exactly
