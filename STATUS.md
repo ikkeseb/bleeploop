@@ -25,6 +25,10 @@ inside take A; the relaunch passed). On 2026-09-28, after the per-slot input, th
 the record-compensation latch: `pnpm rust:check` (562 tests), the browser probes 53/53, and on the rig
 `native:engine-loopback` 20/20 at 64 and 256 and 18/20 at 128 (a detector reading v0.1.0 repeats,
 `docs/VERIFY.md`), and `release:smoke` 6/6 in a fresh profile with the input taken on an Off slot.
+On 2026-09-29, with the Web Audio path deleted (Stage 6): `pnpm check` (15 guards, 353 lf-engine
+tests), `pnpm build`, `pnpm rust:check` (569 tests) and the browser probes 40/40 on the engine fake.
+Not run since: every `native:*` probe (smoke, survey, swap and recall now run on the engine),
+`release:smoke`, the app itself and WebView2 without COOP/COEP.
 Driver latency reports are not guitar latency; after a relevant change, rerun only the affected check.
 
 **Last play: 2026-09-28** (engine, a local release build, ASIO; a second player on a WASAPI build
@@ -77,7 +81,8 @@ A stop dies when it passes; past 10 stops, consolidate or flag it (AGENTS.md). D
    one GO LIVE re-arms. Editor in front; close → reopen, no hang. FabFilter editor open: a drawer
    slider moves its knob and back; the editor's own size menu → the host window follows.
 6. **Fault injection.** Yank the interface while loops play → a toast, the loops and the plugin stay;
-   reconnect → the same device comes back (or WASAPI takes over) and the loops play on.
+   reconnect → the same device comes back (or WASAPI takes over) and the loops play on. When an
+   open fails and no device runs, the command bar's lamp reads amber (never seen): clear enough?
 7. **Inputs + AUTO REC.** A slot on In 1 records only physical input 1, In 2 only input 2; both slots
    live at once, each on its own input, both heard and recorded.
    AUTO REC: a muted-guitar noise floor must not arm, a real attack must (sensitivity, onset, feel).
