@@ -5,7 +5,8 @@
 //! Its section E (the Web Audio source's start offset, advanced by a late start) has no engine
 //! counterpart: a lane reads loop position `(frame - anchor) mod master` on every frame, so there is no
 //! start offset to clamp. What E protected, playback on the grid, is asserted here on the rendered
-//! output itself (R, G), which the rig guards could not see.
+//! output itself (R, G), which the rig guards could not see. So is the Web Audio probe
+//! playback-restart.mjs's join beside a muted lane stopping at the loop end.
 
 mod common;
 
@@ -183,4 +184,35 @@ fn play_beside_an_armed_lane_joins_and_idle_play_beats_the_master_grid() {
     let beats = rig.beats_since(mark);
     let grid = Grid::master(press, master, 2);
     assert!(beats.len() >= 8 && beats.iter().enumerate().all(|(n, b)| b.0 == grid.beat_frame(n as u64)), "8 beats a loop");
+}
+
+#[test]
+fn a_join_beside_a_muted_lane_stopping_at_the_loop_end_keeps_the_live_phase() {
+    // verify/probes/playback-restart.mjs's live join: a muted lane waiting for its loop-end stop still
+    // holds the transport, so a lane started beside it joins the running phase (no re-anchor, not from
+    // its top) and plays on past that lane's stop.
+    let (mut rig, _, master) = committed_take(120, 48000, 2, 0.05);
+    rig.press(Command::Copy(0));
+    rig.idle();
+    rig.press(Command::PlayStop(1));
+    rig.press(Command::SetMute(0, true));
+    rig.advance(master); // the muted lane's gain has glided to silence
+    rig.advance_to(rig.next_boundary() + master / 5);
+    let anchor = rig.anchor();
+    rig.set(Command::SetLoopEndStop(true));
+    rig.press(Command::PlayStop(0));
+    let end = rig.lane(0).stop_at.expect("END STOP pending");
+    assert!(rig.state(0) == LaneState::Playing && rig.engine.looper().volume(0).1 && rig.state(1) == LaneState::Stopped);
+    rig.keep_output();
+    let join = rig.frame;
+    rig.press(Command::PlayStop(1));
+    assert_eq!(rig.state(1), LaneState::Playing);
+    assert_eq!(rig.anchor(), anchor, "a join beside a stopping lane never moves the grid");
+    rig.advance_to(end + master / 2);
+    assert!(rig.state(0) == LaneState::Stopped && rig.state(1) == LaneState::Playing, "lane 1 plays on past lane 0's stop");
+    let pcm = rig.pcm(1);
+    plays_on_grid(&rig, &[pcm.clone()], join);
+    let pos = (join - anchor).rem_euclid(master) as usize;
+    let first = rig.output.as_ref().unwrap().1[0];
+    assert!(pos > master as usize / 10 && first == pcm[pos] && first != pcm[0], "from the press, at the live phase {pos}, not the top");
 }

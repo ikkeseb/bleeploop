@@ -2,10 +2,13 @@
 //! loops in play order, copied a budget per rendered frame, and a load into an empty engine that plays
 //! them back sample-exact on a fresh grid. Every `process` runs under the rig's `assert_no_alloc`, so the
 //! engine side of both allocates nothing; the buffers are the test's (the host's), built outside it.
+//! A snapshot in flight leaves the rendered output bit for bit as it was (the Web Audio probe
+//! recovery-playback.mjs's continuity).
 
 mod common;
 
 use common::{code, Rig};
+use lf_engine::dsp::fx::FxKind;
 use lf_engine::grid::{frames_per_bar, Frame};
 use lf_engine::overview::PEAK_FRAMES;
 use lf_engine::session::SNAPSHOT_RATE;
@@ -192,4 +195,99 @@ fn a_load_needs_an_empty_engine_and_a_session_that_fits_it() {
     assert_eq!(fresh.master(), 0);
     let SessionJob::Load(load) = run(&mut fresh, SessionJob::Load(load_of(&s, capacity - 1, 1))) else { unreachable!() };
     assert!(matches!(load.result, Some(Err(SessionError::Invalid(_)))), "a buffer that is not the engine's capacity");
+}
+
+/// Five lanes of one eight-bar loop at 120 BPM (768000 frames each): lane 0 the frame code with its
+/// DELAY on, lanes 1 to 4 its copies, lane 1 reversed and lane 2 stopped; the click on.
+fn five_long_lanes() -> Rig {
+    let mut rig = Rig::new();
+    rig.set_input(code);
+    rig.record_first_take(0, 8, 2400);
+    rig.set_level(0.0);
+    rig.idle();
+    for _ in 1..5 {
+        rig.press(Command::Copy(0));
+        rig.idle();
+    }
+    rig.press(Command::Reverse(1));
+    rig.press(Command::PlayStop(2));
+    rig.set(Command::SetFxBypass(0, FxKind::Delay, false));
+    rig.set(Command::SetMetronome(true));
+    rig.idle();
+    rig
+}
+
+#[test]
+fn the_output_is_bit_identical_while_a_snapshot_copies_out() {
+    // verify/probes/recovery-playback.mjs: a save never disturbs playback. The same session twice, one
+    // with a snapshot copying out over ~30 blocks and a lane resumed while it copies.
+    let (mut with, mut without) = (five_long_lanes(), five_long_lanes());
+    let master = with.master();
+    let mut pcm = Vec::with_capacity(5 * master as usize);
+    pcm.resize(5 * master as usize, 0.0f32);
+    with.keep_output();
+    without.keep_output();
+    assert!(with.session().send(Box::new(SessionJob::Snapshot(Snapshot::new(pcm)))).is_ok());
+    let copy = 5 * master / SNAPSHOT_RATE;
+    assert!(copy > 20 * with.block as Frame, "the copy spans many blocks: {copy} frames");
+    for rig in [&mut with, &mut without] {
+        rig.advance(copy / 2);
+    }
+    assert!(with.session().returned().is_none(), "the snapshot is still copying");
+    for rig in [&mut with, &mut without] {
+        rig.press(Command::PlayStop(2));
+        rig.advance(copy);
+    }
+    let Some(job) = with.session().returned() else { panic!("the snapshot never came back") };
+    let SessionJob::Snapshot(s) = *job else { unreachable!() };
+    assert_eq!((s.result, s.count), (Some(Ok(())), 5));
+    assert_eq!(with.state(2), LaneState::Playing);
+    let (looper_with, looper_without) = (&with.output.as_ref().unwrap().1, &without.output.as_ref().unwrap().1);
+    for (tap, a, b) in [("left", &with.heard, &without.heard), ("right", &with.heard_right, &without.heard_right), ("looper", looper_with, looper_without)] {
+        assert_eq!(a.len(), b.len());
+        let first = a.iter().zip(b).position(|(x, y)| x.to_bits() != y.to_bits());
+        assert_eq!(first, None, "the {tap} output differs while the snapshot copies");
+    }
+    assert!(with.heard.iter().any(|&x| x != 0.0));
+}
+
+#[test]
+fn a_later_take_armed_and_aborted_on_a_loaded_session_leaves_its_grid_and_lanes() {
+    // golden-jam.mjs's stop arm, on a load rather than a recorded master.
+    let mut rig = three_lanes();
+    let master = rig.master();
+    let s = snapshot(&mut rig, 5 * master as usize);
+    let capacity = rig.engine.looper().capacity() as usize;
+    let bars = master / frames_per_bar(120.0, 48_000);
+    let loaded = |s: &Snapshot| {
+        let mut fresh = Rig::new();
+        fresh.advance(4800);
+        let SessionJob::Load(load) = run(&mut fresh, SessionJob::Load(load_of(s, capacity, bars))) else { unreachable!() };
+        assert_eq!(load.result, Some(Ok(())));
+        fresh
+    };
+    // A later take armed on lane 3 and stopped before its boundary.
+    let mut fresh = loaded(&s);
+    let (anchor, lanes) = (fresh.anchor(), (0..3).map(|i| (fresh.lane(i), fresh.pcm(i))).collect::<Vec<_>>());
+    fresh.press(Command::RecDub(3));
+    assert!(fresh.lane(3).armed, "armed for the next boundary");
+    fresh.press(Command::Stop(3));
+    fresh.advance(master);
+    assert_eq!(fresh.state(3), LaneState::Empty);
+    assert_eq!((fresh.master(), fresh.anchor(), fresh.locked()), (master, anchor, true), "the loaded grid is untouched");
+    for (i, (info, pcm)) in lanes.iter().enumerate() {
+        assert!(fresh.lane(i) == *info && fresh.pcm(i) == *pcm, "loaded lane {i} is untouched");
+    }
+    // The probe's own sequence: lane 1 left the only loop, a later take armed on lane 0, lane 1 cleared
+    // while the arm is live: the loaded grid holds; the arm's STOP then leaves a blank session.
+    let mut fresh = loaded(&s);
+    let anchor = fresh.anchor();
+    fresh.press(Command::Clear(0));
+    fresh.press(Command::Clear(2));
+    fresh.press(Command::RecDub(0));
+    assert!(fresh.lane(0).armed);
+    fresh.press(Command::Clear(1));
+    assert_eq!((fresh.master(), fresh.anchor(), fresh.locked()), (master, anchor, true), "the loaded grid survives while the arm is live");
+    fresh.press(Command::Stop(0));
+    assert!(fresh.master() == 0 && !fresh.locked() && (0..5).all(|i| fresh.state(i) == LaneState::Empty), "the aborted arm leaves a blank session");
 }
