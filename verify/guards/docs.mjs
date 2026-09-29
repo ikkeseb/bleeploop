@@ -37,8 +37,7 @@ const UNTRACKED_OK = [
   /^node_modules\//,
   /^\.playwright/,
   /^\.git\//,
-  /^target\//,
-  /^src-tauri\/target\//,
+  /^(src-tauri\/)?target(\/|$)/, // the build dir, cited bare too (a candidate path loses its trailing slash)
   /^session\.json$/,
   /^tauri\.conf\.json$/, // cited bare from src-tauri/AGENTS.md
   /\.exe$/,
