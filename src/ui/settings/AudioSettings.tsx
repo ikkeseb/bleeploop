@@ -334,7 +334,12 @@ export function AudioSettings() {
             <button
               type="button"
               class="audio-settings__btn"
-              onClick={() => void probeAsio(true)}
+              onClick={() =>
+                void probeAsio(true).then((report) => {
+                  // The device runs on WASAPI meanwhile: a driver that starts takes over at once.
+                  if (report.status === 'ready') reopenEngine(syncPicks);
+                })
+              }
               aria-label="Retry starting the ASIO driver"
             >
               RETRY ASIO

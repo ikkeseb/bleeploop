@@ -11,7 +11,7 @@
  *   then disabled and names the ASIO device. The host records each change of the saved preference in the
  *   call log and what the saved preference reads when each probe is called;
  * - saved "on" probes at boot, before the device opens and before plugins become selectable (the scan);
- *   a blocked probe offers RETRY and an explicit retry can publish;
+ *   a blocked probe offers RETRY, and a retry that starts the driver opens the device on ASIO;
  * - timed-out offers no retry and says to restart;
  * - failed offers RETRY; turning the toggle off saves "off" and never probes, on again saves "on" and
  *   then probes explicitly;
@@ -172,7 +172,7 @@ await probe(async ({ open }) => {
   assert.deepEqual(b.before.toggle, { checked: true, disabled: false, text: 'WASAPI until the driver starts' });
   assert.match(b.before.hint ?? '', /previous ASIO start did not complete/);
   assert.equal(b.before.retry, true);
-  assert.deepEqual(b.calls.filter((c) => c.startsWith('probe:')), ['probe:true']);
+  assert.deepEqual(b.calls, ['probe:true', 'open:Asio'], 'a RETRY that starts the driver opens the device on ASIO');
   assert.deepEqual(b.savedAtProbe, [true, true], 'the boot probe and RETRY run with "on" saved');
   assert.equal(b.after.status, 'ready');
   assert.equal(b.after.retry, false);
