@@ -122,15 +122,15 @@ Proven in the browser tier only (`pnpm check`, `pnpm build`, `pnpm verify:jam`, 
   shares, so the drawn take holds still as bins arrive (`verify/probes/wave-steady.mjs`: within 1 px
   per span; red against the old placement). Not eye-checked in WebView2.
 - **F22 (2026-09-28):** the Share row's note says to pick a device the player does not listen on, such
-  as a virtual cable. A warning when Share targets the ASIO interface is not built. In v0.1.2.
+  as a virtual cable. A warning when Share targets the ASIO interface is not built. In v0.2.0.
 - **F23 (2026-09-28):** the device owner logs `[engine_io] audio glitch: <counter>=<n> (block time p50…
   p99.9… max…), <backend> <frames> frames` for each second in which a fault counter moved (`GlitchWatch`,
   `src-tauri/src/engine_io/owner.rs`; unit test in `engine_io/tests.rs`). An xrun while every block
   stayed well under its period points away from the engine. A clean `native:engine-smoke` run (ASIO 128)
-  logged none; no real glitch has fired it yet. In v0.1.2.
+  logged none; no real glitch has fired it yet. In v0.2.0.
 - **F26 (2026-09-28):** the export's master mixes every committed track, STOPPED included; MUTE leaves
   one out (`buildExportBundle`). `verify/probes/export-context.mjs` renders a stopped track (peak 0.54)
-  and a muted stopped one (silent); red on the old code. Not run in the Tauri app. In v0.1.2.
+  and a muted stopped one (silent); red on the old code. Not run in the Tauri app. In v0.2.0.
 - **F24 (2026-09-29):** IN FX gains RING MOD, a third wet-only send beside ECHO and REVERB: the input
   times a sine carrier (Freq 20–1500 Hz, default 440; Level 0–1, default 0.5), heard and recorded, the
   dry signal untouched; a pedal action `inFxRing`. lf-engine `tests/input_fx.rs` proves the carrier,

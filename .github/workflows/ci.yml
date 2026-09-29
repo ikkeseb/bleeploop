@@ -5,7 +5,7 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
-  # build-exe.yml calls this for the exact commit it builds; a draft release waits for it.
+  # build-exe.yml calls this for the exact commit it builds; the release waits for it.
   workflow_call: {}
 
 # Least privilege: nothing here writes to the repo.

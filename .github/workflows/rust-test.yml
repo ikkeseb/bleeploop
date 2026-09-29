@@ -14,7 +14,7 @@ on:
     branches: [main]
     paths: ['src-tauri/**', '.github/workflows/rust-test.yml']
   workflow_dispatch: {}
-  # build-exe.yml calls this for the exact commit it builds; a draft release waits for it.
+  # build-exe.yml calls this for the exact commit it builds; the release waits for it.
   workflow_call: {}
 
 # Least privilege: nothing here writes to the repo.

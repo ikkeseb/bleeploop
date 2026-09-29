@@ -1,11 +1,16 @@
 name: build-exe
 
 # The shippable Windows build, made on a clean runner: the NSIS installer plus the bare exe, kept as a
-# run artifact. On demand (Actions tab) and on a `v*` tag push; never on a plain main push (a release
-# build is ~15-20 min of Windows runner). A tag push, or a dispatch with `release_tag` set, also
-# stages a DRAFT GitHub Release - publishing it stays a manual click. Release by pushing the tag: a
-# dispatch's draft has no tag yet, so publishing it creates one, that tag's push starts this workflow
-# again, and its `gh release create` collides with the release that now exists.
+# run artifact. On demand (Actions tab: build only) and on a `v*` tag push; never on a plain main push
+# (a release build is ~15-20 min of Windows runner). A tag push also PUBLISHES the GitHub Release once
+# the exe and this commit's `ci` and `rust-test` are green; a red gate publishes nothing.
+#
+# To release (agents, end to end): on a main whose CI is green, bump the version in package.json,
+# src-tauri/tauri.conf.json and src-tauri/Cargo.toml (and its Cargo.lock entry), commit
+# "Release prep: vX.Y.Z", push, then `git tag -a vX.Y.Z -F <notes>` on that commit and push the tag.
+# The notes file is `BleepLoop vX.Y.Z`, a blank line, then one bullet per player-visible change since
+# the previous release; it becomes the release's "What's new". No line may start with `#`: git
+# strips those as comments. A failed run publishes nothing: fix, move the tag, push it again.
 #
 # Built with `--features asio`: ASIO is the low-latency tier, WASAPI stays selectable in the app. The
 # Steinberg ASIO SDK is dual-licensed (proprietary or GPLv3 - its own LICENSE.txt); this build takes
@@ -19,12 +24,7 @@ name: build-exe
 on:
   push:
     tags: ['v*']
-  workflow_dispatch:
-    inputs:
-      release_tag:
-        description: 'Stage a draft release under this tag (e.g. v0.1.0). Empty = build only.'
-        required: false
-        default: ''
+  workflow_dispatch: {}
 
 # Least privilege: only the `release` job below widens this.
 permissions:
@@ -35,12 +35,12 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.release_tag }}
+  RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || '' }}
 
 jobs:
   # The push gates, rerun on this exact commit: a green run on another commit does not cover the
   # download. `ci` is `pnpm check` + the vite build + the no-ASIO `cargo check`; `rust-test` is
-  # `cargo test`. They run beside `exe`, and only the draft release waits for them.
+  # `cargo test`. They run beside `exe`, and only the release waits for them.
   ci:
     uses: ./.github/workflows/ci.yml
 
@@ -124,11 +124,11 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-  # The only job with write access, and it runs no repo code: it attaches the files built above to a
-  # draft release through the runner's preinstalled `gh`.
+  # The only job with write access, and it runs no repo code: it publishes the files built above as
+  # the tag's release through the runner's preinstalled `gh`, with the annotated tag's notes.
   release:
     needs: [ci, rust-test, exe]
-    if: github.event_name == 'push' || inputs.release_tag != ''
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -138,7 +138,7 @@ jobs:
         with:
           name: BleepLoop-asio-${{ github.sha }}
 
-      - name: Stage the draft release
+      - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -147,9 +147,16 @@ jobs:
           LOGO_URL: ${{ github.server_url }}/${{ github.repository }}/raw/${{ github.sha }}/src/assets/third-party/ASIO-compatible-logo-Steinberg-TM-BW.jpg
         run: |
           setup=$(basename release/*-setup.exe)
-          cat > notes.md <<EOF
-          BleepLoop $RELEASE_TAG for Windows 10/11 (x64). Download \`$setup\`. The installer fetches the WebView2 runtime if the machine lacks it.
-
+          # The annotated tag's message past its first paragraph is the "What's new" (none for a
+          # lightweight tag).
+          tag=$(gh api "repos/$GH_REPO/git/ref/tags/$RELEASE_TAG" --jq 'select(.object.type == "tag") | .object.sha')
+          news=$(if [ -n "$tag" ]; then gh api "repos/$GH_REPO/git/tags/$tag" --jq .message | sed '1,/^$/d'; fi)
+          {
+            echo "BleepLoop $RELEASE_TAG for Windows 10/11 (x64). Download \`$setup\`. The installer fetches the WebView2 runtime if the machine lacks it."
+            echo
+            if [ -n "$news" ]; then printf "## What's new in %s\n\n%s\n\n" "$RELEASE_TAG" "$news"; fi
+          } > notes.md
+          cat >> notes.md <<EOF
           BleepLoop runs on its native audio engine: the looper, click, synths, FX and your plugin run inside the audio driver's callback, and takes land on the grid from the driver's reported latency, with no latency setting. Play through your interface's ASIO driver. WASAPI works as a fallback, but Windows and some drivers add latency they do not report, so WASAPI takes can land late (about 215 ms on the developer's Focusrite).
 
           The build is not code-signed, so Windows SmartScreen warns on first run: choose "More info", then "Run anyway". Check the download against \`SHA256SUMS.txt\` first.
@@ -160,4 +167,4 @@ jobs:
 
           ASIO is a registered trademark of Steinberg Media Technologies GmbH.
           EOF
-          gh release create "$RELEASE_TAG" release/* --draft --target "$GITHUB_SHA" --title "BleepLoop $RELEASE_TAG" --notes-file notes.md
+          gh release create "$RELEASE_TAG" release/* --verify-tag --title "BleepLoop $RELEASE_TAG" --notes-file notes.md

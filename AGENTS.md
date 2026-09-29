@@ -68,6 +68,10 @@ Harness auto-load of nested files is not reliable: open the briefing yourself.
 - **Every workflow runs with `permissions: contents: read`** (a job that must write widens only
   itself), pins each action by commit sha with the major tag as a trailing comment (bump both
   together), and checks out with `persist-credentials: false`.
+- **Releases and repo housekeeping are the agents' job, end to end:** version, tag and publish
+  (procedure: the `.github/workflows/build-exe.yml` header), stale drafts, branches and worktrees, doc
+  markers. Do them; never hand them to the owner. The owner and a few testers play the published
+  release, so a release waits for green gates, not for the rig lap.
 - **Tracked files are impersonal and secret-free:** roles ("the owner"), never a person's name,
   verbatim speech or an email address. Development happens on a Mac (no Rust toolchain) and a
   Windows PC, and agent memory does not sync: a durable fact goes in a tracked file.

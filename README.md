@@ -137,9 +137,9 @@ pnpm dev:asio     # full app, ASIO + native sample rate
 | `pnpm native:smoke` · `native:survey` · `native:swap` · `native:recall` | Launch the full app with a DEV plugin probe, print its verdict and stop (Windows, installed plugins) |
 
 The `build-exe` workflow builds the ASIO installer and exe on a clean Windows runner and keeps them
-as a run artifact for 30 days. Run it from the Actions tab. A `v*` tag also stages a draft GitHub
-Release with the installer, its sha256 and the licence texts. That binary is GPLv3, see the
-third-party notices.
+as a run artifact for 30 days. Run it from the Actions tab. A `v*` tag also publishes the GitHub
+Release with the installer, its sha256 and the licence texts once the build and its gates are green.
+That binary is GPLv3, see the third-party notices.
 
 ## Architecture
 
