@@ -6,12 +6,15 @@
  * Each scenario is a fresh page with a saved preference:
  *
  * - saved "off" never asks for the driver at boot (status only); turning the toggle on saves the
- *   preference, runs the explicit probe and then opens the device on ASIO; the input select is then
- *   disabled and names the ASIO device;
+ *   preference BEFORE the explicit probe runs (a driver that crashes the app mid-probe leaves "on" saved,
+ *   so the next launch meets the native sentinel), then opens the device on ASIO; the input select is
+ *   then disabled and names the ASIO device. The host records each change of the saved preference in the
+ *   call log and what the saved preference reads when each probe is called;
  * - saved "on" probes at boot, before the device opens and before plugins become selectable (the scan);
  *   a blocked probe offers RETRY and an explicit retry can publish;
  * - timed-out offers no retry and says to restart;
- * - failed offers RETRY; turning the toggle off never probes, on again probes explicitly;
+ * - failed offers RETRY; turning the toggle off saves "off" and never probes, on again saves "on" and
+ *   then probes explicitly;
  * - not-compiled / disabled-by-flag hide the toggle (an explanatory word instead) and never probe;
  *   About this build shows the ASIO lines for every build that links the SDK.
  *
@@ -49,6 +52,19 @@ await probe(async ({ open }) => {
             window.__lfEngineFake = true;
             localStorage.setItem('lf.audioDevices', JSON.stringify(saved));
             const calls = (window.__calls = []);
+            // Each change of the saved ASIO preference lands in the call log where it happens (`asio:<on>`),
+            // so its order against the host's probe is on record.
+            const savedOn = () => JSON.parse(localStorage.getItem('lf.audioDevices') ?? '{}').asioEnabled === true;
+            let lastSaved = savedOn();
+            const setItem = Storage.prototype.setItem;
+            Storage.prototype.setItem = function (key, value) {
+              setItem.call(this, key, value);
+              if (key !== 'lf.audioDevices' || savedOn() === lastSaved) return;
+              lastSaved = savedOn();
+              calls.push(`asio:${lastSaved}`);
+            };
+            // What the saved preference read when each probe was called.
+            const savedAtProbe = (window.__savedAtProbe = []);
             window.__lfHostScript = (host, engine) => {
               let status = { status: initial, detail: '' };
               host.init = async () => void calls.push('init');
@@ -62,6 +78,7 @@ await probe(async ({ open }) => {
               };
               host.asioProbe = async (explicit) => {
                 calls.push(`probe:${explicit}`);
+                savedAtProbe.push(savedOn());
                 const next = plan.shift();
                 status = { status: next, detail: detail[next] ?? '' };
                 return status;
@@ -88,6 +105,7 @@ await probe(async ({ open }) => {
       const settings = await import('/src/ui/state/audio-devices.ts');
       const calls = window.__calls;
       const startup = [...calls];
+      const savedAtProbe = window.__savedAtProbe;
       const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
       const savedOn = () => JSON.parse(localStorage.getItem('lf.audioDevices') ?? '{}').asioEnabled;
       window.__lf.ui.openSettings();
@@ -121,7 +139,7 @@ await probe(async ({ open }) => {
     q('[aria-label="Use ASIO low-latency audio"]').click();
     await wait(200);
     const after = read();
-    return { startup, before, after, calls: calls.slice(startup.length) };
+    return { startup, before, after, calls: calls.slice(startup.length), savedAtProbe };
   `);
   assert.ok(!a.startup.includes('probe:false') && !a.startup.includes('probe:true'), 'saved OFF must never request the driver at boot');
   assert.ok(a.startup.includes('status'), 'boot reads the status');
@@ -131,7 +149,8 @@ await probe(async ({ open }) => {
   assert.equal(a.before.retry, false, 'no retry line while the preference is off');
   assert.equal(a.before.aboutBuild, true, 'About this build shows whenever ASIO is compiled in');
   assert.equal(a.after.saved, true, 'turning ASIO on saves the preference');
-  assert.deepEqual(a.calls, ['probe:true', 'open:Asio'], 'turning ASIO on = the explicit probe, then the device opens on ASIO');
+  assert.deepEqual(a.calls, ['asio:true', 'probe:true', 'open:Asio'], 'turning ASIO on = the preference saved, then the explicit probe, then the device opens on ASIO');
+  assert.deepEqual(a.savedAtProbe, [true], 'the explicit probe runs with "on" already saved');
   assert.equal(a.after.status, 'ready');
   assert.equal(a.after.available, true);
   assert.deepEqual(a.after.toggle, { checked: true, disabled: false, text: 'low-latency' });
@@ -144,7 +163,7 @@ await probe(async ({ open }) => {
     q('[aria-label="Retry starting the ASIO driver"]').click();
     await wait(200);
     const after = read();
-    return { startup, before, after, calls: calls.slice(startup.length) };
+    return { startup, before, after, calls: calls.slice(startup.length), savedAtProbe };
   `);
   const bootProbe = b.startup.indexOf('probe:false');
   assert.ok(bootProbe >= 0 && bootProbe < b.startup.indexOf('scan'), 'saved ON probes at boot, before plugins become selectable');
@@ -154,6 +173,7 @@ await probe(async ({ open }) => {
   assert.match(b.before.hint ?? '', /previous ASIO start did not complete/);
   assert.equal(b.before.retry, true);
   assert.deepEqual(b.calls.filter((c) => c.startsWith('probe:')), ['probe:true']);
+  assert.deepEqual(b.savedAtProbe, [true, true], 'the boot probe and RETRY run with "on" saved');
   assert.equal(b.after.status, 'ready');
   assert.equal(b.after.retry, false);
   assert.deepEqual(b.after.toggle, { checked: true, disabled: false, text: 'low-latency' });
@@ -176,7 +196,7 @@ await probe(async ({ open }) => {
     q('[aria-label="Use ASIO low-latency audio"]').click(); // on again → explicit probe
     await wait(200);
     const after = read();
-    return { before, off, offCalls, after, calls: calls.slice(startup.length) };
+    return { before, off, offCalls, after, calls: calls.slice(startup.length), savedAtProbe };
   `);
   assert.equal(d.before.status, 'failed');
   assert.match(d.before.hint ?? '', /no usable ASIO driver found/);
@@ -185,7 +205,12 @@ await probe(async ({ open }) => {
   assert.equal(d.off.saved, false, 'turning ASIO off saves the preference');
   assert.ok(!d.offCalls.some((call) => call.startsWith('probe:')), 'turning ASIO off never touches the driver');
   assert.equal(d.after.saved, true);
-  assert.deepEqual(d.calls.filter((call) => call.startsWith('probe:')), ['probe:true'], 'on again runs the explicit probe');
+  assert.deepEqual(
+    d.calls.filter((call) => call.startsWith('asio:') || call.startsWith('probe:')),
+    ['asio:false', 'asio:true', 'probe:true'],
+    'off saves "off" and never probes; on again saves "on" before the explicit probe',
+  );
+  assert.deepEqual(d.savedAtProbe, [true, true], 'the boot probe and the explicit one run with "on" saved');
   assert.equal(d.calls.at(-1), 'open:Asio', 'then the device opens on ASIO');
   assert.equal(d.after.status, 'ready');
 
