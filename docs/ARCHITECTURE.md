@@ -87,8 +87,9 @@ latency measurement. The live wet signal joins after the limiter and is not limi
 **Session files** (`src/session/`): export writes a zip of Float32 WAV stems, a PCM16 wet master and
 `session.json`; import takes one back while every lane is EMPTY. The PCM comes from `engine_snapshot`
 and goes back through `engine_load_session` (the bytes: `src/platform/engine-wire.ts`). The wet master
-is rendered offline on Tone (above), with an explicit `OfflineContext` passed to every FX node, never
-Tone's global context swapped across an async operation.
+is rendered offline on Tone (above), with its own `OfflineContext` passed to every node; since the app
+loads Tone with no live context, the offline one stands in as Tone's global while it renders (the
+header of `src/session/render.ts`).
 
 **Session recovery:** committed track audio, mix settings and PLAYING/STOPPED state round-trip through
 the archive. Legacy missing state and OVERDUBBING restore as PLAYING. Autosave saves once the committed
