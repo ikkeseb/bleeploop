@@ -152,7 +152,9 @@ blocks until the verdict, so an agent harness should run it in the background.
     on either input): 20/20 bars at 64 and 256; at 128, in two launches, B and D (re-recorded, peak
     gain 0.106) each read one beat 147–250 ms early, near its window's start (once take A too), which
     fails spread and drift while every other beat sits within 0.005 ms. v0.1.0's code on the same rig
-    reads the same in B and D, so it predates the change (cause unknown).
+    reads the same in B and D, so it predates the change (cause unknown). On the engine-only app
+    (2026-09-29, the same rig): the same B and D reading at 128; one launch at 64 read 149× the floor
+    bar past the fade's bar line in I, its relaunch 0.302 (cause unknown).
   - `native:smoke` after any change to `editor_window.rs` or either host's editor open/close path.
     Baseline (2026-09-23, WASAPI, the app mostly on the default ~15 ms timer tick): `complete: 30
     opened, 0 failed, of 30`, each close 110–250 ms. Windows grants the app a 1 ms tick only some of

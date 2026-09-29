@@ -25,10 +25,12 @@ inside take A; the relaunch passed). On 2026-09-28, after the per-slot input, th
 the record-compensation latch: `pnpm rust:check` (562 tests), the browser probes 53/53, and on the rig
 `native:engine-loopback` 20/20 at 64 and 256 and 18/20 at 128 (a detector reading v0.1.0 repeats,
 `docs/VERIFY.md`), and `release:smoke` 6/6 in a fresh profile with the input taken on an Off slot.
-On 2026-09-29, with the Web Audio path deleted (Stage 6): `pnpm check` (15 guards, 353 lf-engine
-tests), `pnpm build`, `pnpm rust:check` (569 tests) and the browser probes 40/40 on the engine fake.
-Not run since: every `native:*` probe (smoke, survey, swap and recall now run on the engine),
-`release:smoke`, the app itself and WebView2 without COOP/COEP.
+On 2026-09-29, with the Web Audio path deleted (Stage 6): `pnpm check` (15 guards), `pnpm build`,
+`pnpm rust:check` (569 tests) and the browser probes 40/40 on the engine fake; on the rig
+`native:smoke` 30/30, `native:survey`, `native:swap` (the baseline's three), `native:recall`,
+`native:tone-recall`, `native:engine-smoke` with Pro-Q, `native:engine-recovery`,
+`native:engine-loopback` 20/20 at 64 (on a relaunch) and 256 and 18/20 at 128 (the same detector
+reading), and `release:smoke` 6/6 in a fresh profile and in one that ran a COOP/COEP build before.
 Driver latency reports are not guitar latency; after a relevant change, rerun only the affected check.
 
 **Last play: 2026-09-28** (engine, a local release build, ASIO; a second player on a WASAPI build
