@@ -4,10 +4,12 @@
 //! The Web Audio waker (a 25 ms timer over a 100 ms lookahead) is gone: beats fire on their frame. Its
 //! "stalled waker" cases map onto a jump in the device frame counter, the one way the engine can find
 //! beats behind it. Clock-only cases drive `Clock` directly, as the rig guards drove `clock.ts`.
+//! The Web Audio probe click-sync.mjs's rendered half is here too: no click with the metronome off, and
+//! the click's onset on the loop's rendered downbeat marker.
 
 mod common;
 
-use common::Rig;
+use common::{code, Rig};
 use lf_engine::clock::{Beat, Clock};
 use lf_engine::grid::{frames_per_bar, Frame, Grid, COUNT_IN_BEATS};
 use lf_engine::{Command, LaneState};
@@ -362,4 +364,106 @@ fn a_capture_ending_with_play_stop_clicks_through_its_tail_only_as_a_first_take(
     rig.press(Command::PlayStop(0));
     rig.advance_to(rig.end_frame());
     assert!(!rig.clicks_since(mark).is_empty());
+}
+
+/// The kept output is lane 0's loop at the grid phase, frame for frame, and nothing else.
+fn plays_the_loop_alone(rig: &Rig) -> bool {
+    let (start, out) = rig.output.as_ref().unwrap();
+    let (pcm, anchor, master) = (rig.pcm(0), rig.anchor(), rig.master());
+    out.iter().enumerate().all(|(k, &y)| y == pcm[(start + k as Frame - anchor).rem_euclid(master) as usize])
+}
+
+#[test]
+fn with_the_click_off_playing_loops_render_no_click() {
+    // verify/probes/click-sync.mjs's calibration. The click is on first, so the output can show one.
+    let mut rig = Rig::new();
+    rig.set(Command::SetMetronome(true));
+    rig.set(Command::SetClickVolume(1.0));
+    rig.set_input(code);
+    let master = rig.record_first_take(0, 1, 2400);
+    rig.set_level(0.0);
+    rig.idle();
+    let boundary = rig.next_boundary();
+    rig.advance_to(boundary - 100);
+    rig.keep_output();
+    rig.advance_to(boundary + 4800);
+    assert!(!plays_the_loop_alone(&rig), "with the click on, the boundary carries it");
+    // Off between two beats, past the last blip's 70 ms: three loops of nothing but the loop.
+    rig.advance(rig.seconds(0.1));
+    rig.set(Command::SetMetronome(false));
+    rig.keep_output();
+    let mark = rig.events.len();
+    rig.advance(3 * master);
+    let beats = rig.beats_since(mark);
+    assert!(beats.len() >= 12 && beats.iter().all(|b| !b.3), "the beats go on, none clicks");
+    assert!(plays_the_loop_alone(&rig), "the output is the loop alone, boundaries included");
+}
+
+/// click-sync.mjs's session: lane 0's loop is a 64-frame marker at its frame 0 (a one-bar take at 120
+/// bpm), the click at full volume on or off; PLAY ALL and 20.5 s of steady play, then STOP ALL and PLAY
+/// ALL after each pause (the probe's normal restarts, 200 to 900 ms), 4.6 s each. The output is kept
+/// from the first PLAY ALL.
+fn marker_session(metronome: bool) -> Rig {
+    let mut rig = Rig::new();
+    rig.set(Command::SetClickVolume(1.0));
+    let mark = rig.events.len();
+    rig.press(Command::RecDub(0));
+    let downbeat = rig.count_one(mark) + 4 * 24_000;
+    rig.set_input(move |f| if (downbeat..downbeat + 64).contains(&f) { 0.3 } else { 0.0 });
+    rig.advance_to(downbeat + rig.fpb() + 2400);
+    rig.press(Command::RecDub(0));
+    rig.set_level(0.0);
+    rig.idle();
+    rig.press(Command::StopAll);
+    rig.set(Command::SetMetronome(metronome));
+    rig.advance(rig.seconds(0.3));
+    rig.keep_output();
+    rig.press(Command::PlayAll);
+    rig.advance(rig.seconds(20.5));
+    for pause in [0.2, 0.347, 0.512, 0.689, 0.9] {
+        rig.press(Command::StopAll);
+        rig.advance(rig.seconds(pause));
+        rig.press(Command::PlayAll);
+        rig.advance(rig.seconds(4.6));
+    }
+    rig
+}
+
+/// The first index over `threshold` after at least `gap` quieter frames (the probe's onset finder).
+fn onsets(x: &[f32], threshold: f32, gap: usize) -> Vec<usize> {
+    let mut out = Vec::new();
+    let mut quiet = gap;
+    for (i, &v) in x.iter().enumerate() {
+        if v.abs() > threshold {
+            if quiet >= gap {
+                out.push(i);
+            }
+            quiet = 0;
+        } else {
+            quiet += 1;
+        }
+    }
+    out
+}
+
+#[test]
+fn the_click_onset_meets_the_rendered_loop_marker_on_every_downbeat() {
+    // verify/probes/click-sync.mjs's measurement, on the rendered output: the same session with the
+    // click on and off (the engine is deterministic), so the click alone is their difference and the
+    // loop marker is the second's onsets. Within the probe's 0.1 ms on every downbeat of the steady run
+    // and of each restart.
+    let (with, without) = (marker_session(true), marker_session(false));
+    let lanes = &without.output.as_ref().unwrap().1;
+    let click: Vec<f32> = with.output.as_ref().unwrap().1.iter().zip(lanes).map(|(y, l)| y - l).collect();
+    let markers = onsets(lanes, 0.1, SR as usize / 2);
+    let clicks = onsets(&click, 1e-3, SR as usize * 8 / 100);
+    assert_eq!(markers.len(), 11 + 5 * 3, "every loop start: 11 in the steady run, 3 after each restart");
+    let tolerance = (0.0001 * SR as f64) as i64;
+    let mut deltas = Vec::new();
+    for &m in &markers {
+        let nearest = clicks.iter().map(|&c| c as i64 - m as i64).min_by_key(|d| d.abs()).expect("no click at all");
+        assert!(nearest.abs() <= tolerance, "marker at output frame {m}: the nearest click onset is {nearest} frames off");
+        deltas.push(nearest);
+    }
+    println!("click onset minus marker, frames, per downbeat: {deltas:?} ({} clicks)", clicks.len());
 }

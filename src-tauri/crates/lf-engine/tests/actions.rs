@@ -396,3 +396,46 @@ fn every_looper_press_disarms_a_pending_clear_and_a_setting_alone_does_not() {
     assert!(clears_past(&[Command::SetDubFeedback(0, 0.5), Command::SetFadeBars(4)]), "DUB FEEDBACK and FADE's bars are settings");
     assert!(clears_past(&[]));
 }
+
+#[test]
+fn a_pedals_clear_confirms_per_lane() {
+    // verify/probes/midi-learn.mjs's clearPerTarget: two CLEAR pedals bound to lanes 1 and 2. One press
+    // on each clears nothing (the second arms its own lane); lane 2's second press clears lane 2 only.
+    let mut rig = two_lanes(1);
+    rig.press(Command::Copy(0));
+    rig.idle();
+    assert_eq!(rig.state(2), LaneState::Playing);
+    let mark = rig.events.len();
+    rig.press(Command::ActionOn(1, Action::Clear));
+    rig.press(Command::ActionOn(2, Action::Clear));
+    assert_eq!((rig.state(1), rig.state(2)), (LaneState::Playing, LaneState::Playing), "one press on each clears nothing");
+    assert_eq!(refusals_since(&rig, mark), [(1, Refusal::ConfirmClear), (2, Refusal::ConfirmClear)], "each asks to confirm");
+    rig.press(Command::ActionOn(2, Action::Clear));
+    assert_eq!(rig.state(2), LaneState::Empty, "lane 2's second press clears it");
+    assert_eq!((rig.state(0), rig.state(1)), (LaneState::Playing, LaneState::Playing), "and nothing else");
+}
+
+#[test]
+fn a_pedal_bound_to_a_lane_plays_stops_reverses_and_copies_that_lane_not_the_selected_one() {
+    // verify/probes/midi-learn.mjs's per-target bindings: PLAY/STOP, REVERSE and COPY bound to lanes 1
+    // and 2 while lane 0 is selected.
+    let mut rig = two_lanes(1);
+    rig.press(Command::Copy(0));
+    rig.idle();
+    rig.press(Command::SelectTrack(0));
+    let before = rig.pcm(0);
+    rig.press(Command::ActionOn(1, Action::PlayStop));
+    assert_eq!((rig.state(0), rig.state(1)), (LaneState::Playing, LaneState::Stopped), "PLAY/STOP stops lane 1");
+    rig.press(Command::ActionOn(2, Action::Reverse));
+    rig.advance_to(rig.next_boundary() + 1);
+    assert_eq!((rig.lane(0).reversed, rig.lane(2).reversed), (false, true), "REVERSE flips lane 2");
+    let mark = rig.events.len();
+    rig.press(Command::ActionOn(1, Action::Copy));
+    rig.idle();
+    assert!(rig.events[mark..].iter().any(|e| matches!(e, Event::Copied { from: 1, to: 3, .. })), "COPY copies lane 1");
+    assert_eq!(rig.state(3), LaneState::Stopped, "a stopped source's copy lands stopped");
+    rig.press(Command::ActionOn(1, Action::PlayStop));
+    assert_eq!(rig.state(1), LaneState::Playing, "a second PLAY/STOP plays lane 1 again");
+    assert_eq!(rig.engine.looper().selected(), 0, "the selection never moved");
+    assert!(rig.state(0) == LaneState::Playing && !rig.lane(0).reversed && rig.pcm(0) == before, "the selected lane is untouched");
+}

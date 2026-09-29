@@ -7,7 +7,8 @@
 //! protected is asserted on the loop and on the rendered output: every captured frame summed exactly
 //! once, heard on the grid. undo.mjs's "summing leaves the loop alone until the boundary" becomes "the
 //! undo target keeps the pre-session loop while the layer sums in". reverse.mjs A's peak check is
-//! `tests/peaks.rs`.
+//! `tests/peaks.rs`. Two overdub rows of the Web Audio probes are here on the rendered output too:
+//! capture-loss.mjs's damaged layer ended by PLAY/STOP, and overdub-window.mjs's aligned punch-outs.
 
 mod common;
 
@@ -249,6 +250,82 @@ fn undo_e_a_layer_with_an_input_gap_restores_the_loop_and_the_previous_undo_targ
     assert_eq!(rig.engine.looper().undo_pcm(0).unwrap(), take, "undo still targets the loop before the kept layer");
     rig.press(Command::Undo(0));
     assert_eq!(rig.pcm(0), take);
+}
+
+#[test]
+fn a_layer_with_an_input_gap_ended_by_play_stop_lands_stopped_and_silent() {
+    // verify/probes/capture-loss.mjs's overdub row: the rejection keeps the press's STOP.
+    for align in [0, 4800] {
+        let (mut rig, master) = playing_loop();
+        let take = rig.pcm(0);
+        overdub_session(&mut rig, master, 0, DUB);
+        let first = rig.pcm(0);
+        rig.advance(master / JOB_RATE + 2);
+        rig.align = align;
+        rig.set_level(DUB);
+        rig.advance_to(rig.next_boundary() - master / 2);
+        rig.press(Command::RecDub(0));
+        rig.advance(master / 3);
+        rig.gap();
+        rig.advance(master / 3);
+        rig.set_level(0.0);
+        rig.keep_output();
+        rig.press(Command::PlayStop(0));
+        rig.advance(2 * master);
+        assert_eq!(rig.state(0), LaneState::Stopped, "align={align}");
+        assert!(rig.events.iter().any(|e| matches!(e, Event::TakeRejected { overdub: true, .. })));
+        assert!(rig.output.as_ref().unwrap().1.iter().all(|&y| y == 0.0), "align={align}: silent from the press");
+        assert_eq!(rig.pcm(0), first, "align={align}: the pre-layer loop is back");
+        assert_eq!(rig.engine.looper().undo_pcm(0).unwrap(), take, "align={align}: and the undo target before it");
+    }
+}
+
+#[test]
+fn stop_all_a_second_stop_and_clear_punch_out_an_aligned_overdub() {
+    // verify/probes/overdub-window.mjs's stopAll, doubleStop and clear modes: impulses played just
+    // outside and inside each punch edge (their wet arrives ALIGN later, one inside the window only after
+    // the press) are kept exactly inside the window, at their grid position, and playback is silent from
+    // the press while the tail comes in.
+    const ALIGN: Frame = 7200;
+    for gesture in ["stop all", "second stop", "clear"] {
+        let (mut rig, master) = playing_loop();
+        rig.align = ALIGN;
+        rig.advance_to(rig.next_boundary() + 2400);
+        let pre = rig.pcm(0);
+        let punch = rig.frame;
+        let stop = punch + 1 + master / 4;
+        let played: Vec<(Frame, f32)> =
+            [punch - 1920, punch - 1, punch, punch + 1920, stop - 960, stop - 1, stop, stop + 1920].iter().enumerate().map(|(k, &f)| (f, (k + 1) as f32 / 32.0)).collect();
+        let wet = played.clone();
+        rig.set_input(move |f| wet.iter().find(|p| p.0 + ALIGN == f).map_or(0.0, |p| p.1));
+        rig.press(Command::RecDub(0));
+        rig.advance_to(stop);
+        rig.keep_output();
+        match gesture {
+            "stop all" => rig.press(Command::StopAll),
+            "second stop" => {
+                rig.press(Command::PlayStop(0));
+                rig.advance(ALIGN / 2);
+                rig.press(Command::PlayStop(0));
+            }
+            _ => rig.press(Command::Clear(0)),
+        }
+        rig.advance(2 * master);
+        let out = &rig.output.as_ref().unwrap().1;
+        assert!(out.iter().zip(&rig.monitor).all(|(y, m)| y == m), "{gesture}: playback silent from the press, only the monitor");
+        assert!(rig.window().is_none(), "{gesture}: the recorder is free");
+        if gesture == "clear" {
+            assert!(rig.state(0) == LaneState::Empty && rig.lane(0).length == 0 && rig.master() == 0, "{gesture}: nothing kept");
+            continue;
+        }
+        assert!(rig.state(0) == LaneState::Stopped && rig.lane(0).can_undo, "{gesture}");
+        let anchor = rig.anchor();
+        let mut want = pre.clone();
+        for &(f, v) in played.iter().filter(|p| (punch..stop).contains(&p.0)) {
+            want[(f - anchor).rem_euclid(master) as usize] += v;
+        }
+        assert_eq!(rig.pcm(0), want, "{gesture}: exactly the musical punch window, on the grid");
+    }
 }
 
 #[test]
