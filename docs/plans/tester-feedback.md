@@ -135,7 +135,7 @@ Proven in the browser tier only (`pnpm check`, `pnpm build`, `pnpm verify:jam`, 
   times a sine carrier (Freq 20–1500 Hz, default 440; Level 0–1, default 0.5), heard and recorded, the
   dry signal untouched; a pedal action `inFxRing`. lf-engine `tests/input_fx.rs` proves the carrier,
   the sum and difference tones (the input's own frequency 171 dB down), the dry bits, block-split
-  identity, the off ramp and the frequency ramp; the defaults are not heard. Engine only.
+  identity, the off ramp and the frequency ramp; the defaults are not heard. Engine only. In v0.2.0.
 - **F3/F12 follow-up:** Help → About this build shows the version and commit, copies a diagnostics
   block and opens the log folder; the repo has a bug-report form asking for both.
 
