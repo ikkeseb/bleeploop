@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { defineConfig } from 'vite';
+import { defineConfig, type Plugin } from 'vite';
 import solid from 'vite-plugin-solid';
 import { buildCommit } from './scripts/build-commit.mjs';
 
@@ -9,8 +9,25 @@ const tauriDevHost = process.env.TAURI_DEV_HOST;
 // Help's "About this build" and its copied diagnostics name the version and the commit a tester runs.
 const appVersion: string = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8')).version;
 
+/**
+ * The dev document always answers 200, never 304. Until Stage 6 the dev server sent COOP/COEP, and a
+ * browser profile that loaded the app then keeps them on its cached document through every 304 (a 304
+ * updates the headers it carries and removes none): the page stays cross-origin isolated and refuses
+ * the recovery worker, whose script carries no COEP, so autosave fails. One full answer replaces the
+ * cached entry. The release build's assets come fresh through Tauri's protocol and need none of this.
+ */
+const freshDocument: Plugin = {
+  name: 'fresh-document',
+  configureServer(server) {
+    server.middlewares.use((req, _res, next) => {
+      if (req.headers.accept?.includes('text/html')) delete req.headers['if-none-match'];
+      next();
+    });
+  },
+};
+
 export default defineConfig({
-  plugins: [solid()],
+  plugins: [solid(), freshDocument],
   // Declared in src/env.d.ts.
   define: {
     __APP_VERSION__: JSON.stringify(appVersion),
