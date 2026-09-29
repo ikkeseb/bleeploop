@@ -295,6 +295,20 @@ option {
 .tool--gear:hover svg {
   transform: rotate(35deg);
 }
+/* something waits inside (Help: an update is ready) = a warm-white dot on the cap's corner */
+.tool--badge {
+  position: relative;
+}
+.tool--badge::after {
+  content: '';
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--engaged);
+}
 /* tool engaged (e.g. the keyboard toggle while the keyboard is shown) = lit legend + a face */
 .tool--on {
   color: var(--engaged);

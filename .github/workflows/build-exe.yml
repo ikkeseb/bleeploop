@@ -20,6 +20,13 @@ name: build-exe
 # notices and a source pointer installed beside the exe. The installer downloads the WebView2
 # runtime when a machine lacks it (Tauri's default `downloadBootstrapper`). The build is unsigned, so
 # SmartScreen warns on first run (said in the release notes); code signing is not planned.
+#
+# The app updates itself (`src-tauri/src/update.rs`): the build signs the installer with the updater's
+# minisign key (secrets TAURI_SIGNING_PRIVATE_KEY and TAURI_SIGNING_PRIVATE_KEY_PASSWORD; the owner
+# keeps the backup), and the release carries `latest.json`, which every installed build reads from
+# `releases/latest/download/`. A draft or prerelease is never "latest". Without those secrets the build
+# fails. A new key needs a new `pubkey` in tauri.conf.json, and builds carrying the old one never take
+# an update signed with the new: their players install once by hand.
 
 on:
   push:
@@ -100,13 +107,19 @@ jobs:
           "BleepLoop source for this build:`n$($env:GITHUB_SERVER_URL)/$($env:GITHUB_REPOSITORY)/tree/$($env:GITHUB_SHA)" |
             Out-File licenses/SOURCE.txt -Encoding utf8
 
+      # `createUpdaterArtifacts` (tauri.release.conf.json) signs the installer for the app's updater with
+      # the key these secrets hold; tauri.conf.json's `plugins.updater.pubkey` is its public half.
       - run: pnpm exec tauri build --bundles nsis --features asio --config src-tauri/tauri.release.conf.json
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
       - name: Stage + fingerprint the release files
         shell: pwsh
         run: |
-          New-Item -ItemType Directory release | Out-Null
+          New-Item -ItemType Directory release, updater | Out-Null
           Copy-Item src-tauri/target/release/bundle/nsis/*-setup.exe release/
+          Copy-Item src-tauri/target/release/bundle/nsis/*-setup.exe.sig updater/
           Copy-Item licenses/GPL-3.0.txt, licenses/SOURCE.txt, THIRD-PARTY-NOTICES.md release/
           $setup = Get-Item release/*-setup.exe
           $sha = (Get-FileHash $setup -Algorithm SHA256).Hash.ToLower()
@@ -120,6 +133,7 @@ jobs:
           name: BleepLoop-asio-${{ github.sha }}
           path: |
             release/
+            updater/
             BleepLoop-asio-*.exe
           if-no-files-found: error
           retention-days: 30
@@ -167,4 +181,12 @@ jobs:
 
           ASIO is a registered trademark of Steinberg Media Technologies GmbH.
           EOF
+          # The updater's manifest (`src-tauri/src/update.rs`): every installed build asks for the latest
+          # release's latest.json at launch and offers this installer when its version is newer. The
+          # signature stays out of the assets; the manifest carries it.
+          jq -n --arg version "${RELEASE_TAG#v}" --arg notes "$news" --arg pub_date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg url "$GITHUB_SERVER_URL/$GH_REPO/releases/download/$RELEASE_TAG/$setup" \
+            --arg signature "$(cat "updater/$setup.sig")" \
+            '{version: $version, notes: $notes, pub_date: $pub_date, platforms: {"windows-x86_64": {signature: $signature, url: $url}}}' \
+            > release/latest.json
           gh release create "$RELEASE_TAG" release/* --verify-tag --title "BleepLoop $RELEASE_TAG" --notes-file notes.md

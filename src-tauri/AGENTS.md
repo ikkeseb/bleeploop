@@ -24,7 +24,7 @@ Who runs where and what each thread owns. The rules are in bold below the table.
 | **Share output** (a cpal WASAPI callback, `engine_io/share.rs`) | The mirror endpoint's stream, while ASIO plays | Pulls the post-limiter master from its pipe; never takes the engine lock |
 | **Feed** (`lf-engine-feed`, `engine_io/feed.rs`) | The only reader of the engine's event ring and the device events; the mirror of lanes and transport a reload resyncs from | ~60 frames/s over a Tauri `Channel`; never PCM |
 | **Plugin owner, per slot** (`lf-clap-engine-{slot}` / `lf-vst3-engine-{slot}`, `host/engine_slot.rs`) | The `!Send` plugin instance (clack main thread / VST3 component + controller), its editor host window and Win32 pump, its tone saves, restarts and re-activation after an eviction, the ordered teardown | `OwnerRequest`s (polled every 20 ms, `OWNER_POLL`); the unit enters and leaves the engine through its `SlotHost`; params through the slot's event ring; the unit's fault bits, reported once per load |
-| **Shutdown** (`lf-engine-shutdown`, on exit) | Stops the feed, saves every tone, unloads the plugins while the device plays, closes the device | Bounded at 8 s (`SHUTDOWN_WAIT`): a stuck plugin is left to process exit |
+| **Shutdown** (`lf-engine-shutdown`, on exit, and before the updater's installer: `update.rs`) | Stops the feed, saves every tone, unloads the plugins while the device plays, closes the device | Bounded at 8 s (`SHUTDOWN_WAIT`): a stuck plugin is left to process exit |
 | **ASIO probe** (`lf-asio-probe`, `asio_startup.rs`) | The one driver-resolving probe per process, requested by the frontend after the UI is up | Its status report |
 | **Scan children** (`app.exe --scan-one <path>`) | One process per bundle in a kill-on-close Job Object, 20 s timeout; two reader threads per child drain stdout/stderr with caps | Descriptor JSON |
 | **Plugin GUI threads** | A floating CLAP editor runs the plugin's own window thread and only sets flags (`HostGuiImpl` → `EditorClosed`) the owner acks; a hosted editor embeds into the owner's host window and is pumped there. VST3 `performEdit`/`restartComponent` (ONE component handler per load, set at load) touch only the event ring, the window event and the `RestartFlags` atom the owner drains each turn; CLAP `params.rescan` sets a flag the owner drains | Flags / events |
@@ -84,7 +84,8 @@ Who runs where and what each thread owns. The rules are in bold below the table.
 - **Release IPC surface:** `capabilities/default.json` grants only event listen/unlisten. `diag` is
   registered only under `debug_assertions`; keep the handler cfg and frontend `import.meta.env.DEV`
   surface in lockstep. Help's `app_log_dir` / `app_open_log_dir` (`lib.rs`) ship in release and take
-  nothing from the WebView; so do tone recall's `plugin_tone_take` / `plugin_tone_import` (raw bytes
+  nothing from the WebView, and so do the updater's `app_update_check` / `app_update_install`
+  (`update.rs`: the release channel is `plugins.updater` in `tauri.conf.json`); so do tone recall's `plugin_tone_take` / `plugin_tone_import` (raw bytes
   both ways) and `plugin_tone_forget`.
 - **Sample-rate selector "C2" — DECIDED (owner), NOT BUILT:** swappable 44.1/48k, default device
   native. The engine already rebuilds at another rate (`OpenError::RateChange`); the pick is unbuilt.

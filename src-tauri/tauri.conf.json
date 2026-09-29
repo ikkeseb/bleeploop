@@ -47,5 +47,16 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDIwOEYwNEM3NTg0OUZGOEQKUldTTi8wbFl4d1NQSUROc1M5SncwTGFBL21KZkFIMXhaSUtaVnppMkZ5Wmw2MTJBS1EvN1ZQREEK",
+      "endpoints": [
+        "https://github.com/ikkeseb/bleeploop/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }

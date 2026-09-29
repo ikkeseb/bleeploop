@@ -77,6 +77,9 @@ not here.
   the stepper visible?
 - **DUB FEEDBACK (2026-09-27, built, unheard/unseen):** the lane FX drawer's last module, slider OLD
   from 100 % down to REPLACE at 0. Clear, right place? What does 50 % continuous dubbing sound like?
+- **Update ready (2026-09-29, built, unseen):** a warm-white dot on the Help cap, one toast ("BleepLoop
+  vX is ready: open Help (?) to update") and an "Update ready" section above Help's reference with the
+  release notes and UPDATE AND RESTART. Visible enough, or a cap of its own in the command bar?
 - **CLEAR's confirm (2026-09-27):** in engine mode every pedal press between two CLEAR presses makes
   the second ask again; an on-screen click in between does not (web mode alike). Keep?
 - **↶ UNDO (2026-09-27):** was ↶ DUB; it undoes an overdub or a TRIM, and the pedal action reads

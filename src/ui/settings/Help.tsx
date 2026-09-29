@@ -7,11 +7,13 @@ import { KEY_ACTIONS } from '../../app/transport-keys';
 import { COMPUTER_MAP } from '../keyboard/Keyboard';
 import { platform } from '../../platform';
 import { BUILD_LABEL, copyDiagnostics, logFolder, openLogFolder } from './diagnostics';
+import { installUpdate, updateInstalling, updateNoteLines, updateOffered } from '../../app/update';
 import './help.css';
 
 /**
- * Help / quick-reference popover, ordered by the promise: the first screen is guitar, the looper keys
- * and the pedals (every looper action by foot); then the looper + transport controls, the other layers
+ * Help / quick-reference popover, ordered by the promise (an update the updater offers sits above it):
+ * the first screen is guitar, the looper keys and the pedals (every looper action by foot); then the
+ * looper + transport controls, the other layers
  * (a MIDI controller, computer keys as a fallback), the play map, and the layout move/hide/resize
  * affordances. The keyboard is the fallback play path, so its sections come last. Same popover
  * pattern as AudioSettings (a command-bar `.tool` cap → a `<Show>`-mounted panel). The drum-pad rows
@@ -55,6 +57,24 @@ export function Help() {
   return (
     <div class="help" role="group" aria-label="Quick reference">
       <div class="help__title">Quick reference</div>
+
+      {/* A newer release the updater found at launch (`src/app/update.ts`); the Help cap wears a dot. */}
+      <Show when={updateOffered()}>
+        {(update) => (
+          <section class="help__sec help__update">
+            <h3 class="help__h">Update ready <span class="help__tag">v{update().version}</span></h3>
+            <ul class="help__list">
+              <For each={updateNoteLines(update().notes)}>{(line) => <li>{line}</li>}</For>
+            </ul>
+            <p class="help__sub">BleepLoop closes, installs it and opens again. Your committed loops come back.</p>
+            <div class="help__actions">
+              <button type="button" class="help__btn" disabled={updateInstalling()} onClick={() => void installUpdate()}>
+                {updateInstalling() ? 'Updating…' : 'Update and restart'}
+              </button>
+            </div>
+          </section>
+        )}
+      </Show>
 
       <section class="help__sec">
         <h3 class="help__h">Guitar <span class="help__tag">the main way to play</span></h3>

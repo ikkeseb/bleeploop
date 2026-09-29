@@ -43,6 +43,8 @@ serde = { version = "1.0", features = ["derive"] }
 log = "0.4"
 tauri = { version = "2.11.2", features = [] }
 tauri-plugin-log = "2"
+# The app updater (`src/update.rs`). 2.13 wants tauri 2.12; `zip` is only for the macOS/Linux bundles.
+tauri-plugin-updater = { version = "~2.12", default-features = false, features = ["rustls-tls", "system-proxy"] }
 
 # Windows-only deps. The app is a Windows desktop instrument (Tauri/WebView2), so the native engine's
 # device side and plugin host (clack/cpal/rubato/rtrb/walkdir) live here too — they're cross-platform

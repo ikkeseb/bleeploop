@@ -18,6 +18,8 @@ mod chirp_lag;
 // Stage 1 silent-share probe (docs/ARCHITECTURE.md § Measured premise, S1).
 #[cfg(all(windows, debug_assertions))]
 mod share_probe;
+// The app updater's check and install (`update.rs`).
+mod update;
 
 /// A diagnostic sink the frontend invokes once on startup (DEV only) so headless verification can
 /// read WebView2-internal facts (crossOriginIsolated, getUserMedia, MIDI, host kind) from
@@ -222,6 +224,8 @@ pub fn run() {
     tauri::Builder::default()
         // Shared host state: the WebView document epoch (`host_init`).
         .manage(host::PluginHostState::default())
+        // The updater's manifest and public key: `plugins.updater` in `tauri.conf.json`.
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             // Field debuggability: register the log plugin UNCONDITIONALLY, not just
             // in debug builds — a release build previously produced ZERO logs, so any "it
@@ -294,6 +298,8 @@ pub fn run() {
             app_log_dir,
             app_open_log_dir,
             app_confirm_close,
+            update::app_update_check,
+            update::app_update_install,
             host::host_init,
             host::plugin_scan,
             host::plugin_load,

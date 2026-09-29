@@ -18,6 +18,7 @@ import { master } from './ui/state/audio';
 import { engineDevice, engineOpenFailure } from './ui/state/engine-store';
 import { bootEngine } from './app/boot';
 import { installCloseGuard } from './app/close-guard';
+import { checkForUpdate, updateOffered } from './app/update';
 import { installCmdFit } from './app/cmd-fit';
 import { cancelLearn, installMidiActions } from './app/midi-actions';
 import { installTransportKeys, type TransportKeys } from './app/transport-keys';
@@ -101,6 +102,8 @@ export function App() {
     // The engine's boot chain — its device, local recovery of the jam, the plugin host (a no-op in the
     // browser build, which has no engine): `src/app/boot.ts`.
     onCleanup(bootEngine());
+    // A release build asks once whether a newer version is out (`src/app/update.ts`).
+    void checkForUpdate();
 
     if (import.meta.env.DEV) {
       // Debug surface for automated (Playwright) verification + by-ear/by-eye gates: `src/debug/lf.ts`.
@@ -326,12 +329,12 @@ export function App() {
           <button
             type="button"
             class="tool tool--help"
-            classList={{ 'tool--on': helpOpen() }}
-            aria-label="Keyboard & layout help"
+            classList={{ 'tool--on': helpOpen(), 'tool--badge': updateOffered() !== null }}
+            aria-label={updateOffered() ? 'Keyboard & layout help, update ready' : 'Keyboard & layout help'}
             aria-expanded={helpOpen()}
             aria-controls="lf-help-popover"
             ref={helpBtn}
-            title="Keyboard & layout help"
+            title={updateOffered() ? 'Help: an update is ready' : 'Keyboard & layout help'}
             onClick={openHelp}
           >
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">

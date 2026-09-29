@@ -6,11 +6,12 @@
  * on these interfaces, never on Tauri directly — so the entire frontend builds and renders
  * standalone in a browser via `pnpm dev` (silent: the browser build has no engine).
  *
- * Four capabilities are DECLARED here, but only THREE of them actually differ per platform:
+ * Five capabilities are DECLARED here, but only FOUR of them actually differ per platform:
  *   - PluginHost      — native VST/CLAP hosting (web: stub; tauri: invoke/listen). The real seam.
  *   - EngineHost      — the native audio engine (`docs/ARCHITECTURE.md`; web: a scriptable fake
  *                        for probes).
  *   - LogFolder       — the release log's folder, for Help's diagnostics (web: none).
+ *   - AppUpdates      — the app updater, release builds only (web: none, or a probe's script).
  *   - MidiBackend      — W3C Web MIDI. WebView2 v149 ships it natively and `lib.rs` auto-grants the
  *                        permission, so tauri reuses the web one verbatim (`tauriPlatform = { ...webPlatform,
  *                        kind, pluginHost, engine, logs }`). The engine's native MIDI (midir,
@@ -279,6 +280,30 @@ export interface LogFolder {
   open(): Promise<void>;
 }
 
+/** A newer release the updater offers. */
+export interface AppUpdate {
+  version: string;
+  /** The release's "What's new": one `- ` bullet per change, as the release tag's notes carry them. */
+  notes: string;
+}
+
+/**
+ * The app updater (`src-tauri/src/update.rs`): the signed installer and `latest.json` the release
+ * workflow publishes on GitHub Releases.
+ */
+export interface AppUpdates {
+  /** False in the browser build and in DEV (`tauri dev` never checks). */
+  readonly available: boolean;
+  /** A newer release, or null when this build is the latest. Rejects when the check fails (offline). */
+  check(): Promise<AppUpdate | null>;
+  /**
+   * Download the offered update and verify its signature, shut the engine down and start the
+   * installer, which quits the app and opens the new version. Never resolves once the installer runs;
+   * rejects when a step fails.
+   */
+  install(): Promise<void>;
+}
+
 export type PlatformKind = 'web' | 'tauri';
 
 export interface Platform {
@@ -286,5 +311,6 @@ export interface Platform {
   readonly pluginHost: PluginHost;
   readonly engine: EngineHost;
   readonly logs: LogFolder;
+  readonly updates: AppUpdates;
   readonly midi: MidiBackend;
 }

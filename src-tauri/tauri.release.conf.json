@@ -1,5 +1,6 @@
 {
   "bundle": {
+    "createUpdaterArtifacts": true,
     "licenseFile": "../licenses/GPL-3.0.txt",
     "resources": {
       "../licenses/": "licenses/",

@@ -1,6 +1,8 @@
 import { Channel, invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type {
+  AppUpdate,
+  AppUpdates,
   AsioDeviceInfo,
   AsioStatusReport,
   AudioInputDevice,
@@ -196,9 +198,22 @@ const tauriLogFolder: LogFolder = {
   },
 };
 
+/** The updater over Tauri IPC: `app_update_check` / `app_update_install` in `update.rs`. A `tauri dev`
+ * build never checks: its version is the next release's, and the probes launch it many times. */
+const tauriUpdates: AppUpdates = {
+  available: !import.meta.env.DEV,
+  check() {
+    return invoke<AppUpdate | null>('app_update_check');
+  },
+  async install() {
+    await invoke('app_update_install');
+  },
+};
+
 /**
  * Tauri platform. Reuses the web Web-MIDI capability (it works inside WebView2 v149) and swaps in the
- * native CLAP/VST3 `pluginHost`, the native `engine` and the release log's folder (`logs`).
+ * native CLAP/VST3 `pluginHost`, the native `engine`, the release log's folder (`logs`) and the
+ * updater (`updates`).
  */
 export const tauriPlatform: Platform = {
   ...webPlatform,
@@ -206,6 +221,7 @@ export const tauriPlatform: Platform = {
   pluginHost: tauriPluginHost,
   engine: tauriEngineHost,
   logs: tauriLogFolder,
+  updates: tauriUpdates,
 };
 
 // ── Close guard: Rust vetoes CloseRequested and forwards it as an event ────────────────────────

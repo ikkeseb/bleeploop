@@ -2,7 +2,7 @@
  * Browser implementation of the capability boundary. Zero Tauri/Rust dependency.
  * This is what `pnpm dev` runs against.
  */
-import type { EngineHost, LogFolder, MidiBackend, Platform, PluginHost } from './host';
+import type { AppUpdate, AppUpdates, EngineHost, LogFolder, MidiBackend, Platform, PluginHost } from './host';
 import {
   decodeFeedFrame,
   encodeSessionBytes,
@@ -103,6 +103,39 @@ const webLogFolder: LogFolder = {
   },
   async open() {
     throw new Error(NO_LOG_FILE);
+  },
+};
+
+/** A DEV probe's scripted updater (`verify/probes/app-update.mjs`), set by an init script as
+ * `window.__lfUpdateFake` before the app loads. */
+interface UpdateScript {
+  /** What `check()` answers. */
+  update: AppUpdate | null;
+  /** Counts `install()` calls. */
+  installs: number;
+  /** Set: `install()` rejects with it. */
+  fail?: string;
+}
+
+/** Read when asked, never at module load: Node guards import this file without Vite's env. */
+function updateScript(): UpdateScript | null {
+  if (!import.meta.env.DEV) return null;
+  return (globalThis as { __lfUpdateFake?: UpdateScript }).__lfUpdateFake ?? null;
+}
+
+/** The browser build has no updater; a DEV probe's script stands in for one. */
+const webUpdates: AppUpdates = {
+  get available() {
+    return updateScript() !== null;
+  },
+  async check() {
+    return updateScript()?.update ?? null;
+  },
+  async install() {
+    const script = updateScript();
+    if (!script) throw new Error('The browser build has no updater.');
+    script.installs++;
+    if (script.fail) throw new Error(script.fail);
   },
 };
 
@@ -226,5 +259,6 @@ export const webPlatform: Platform = {
   pluginHost: webPluginHost,
   engine: webEngineFake,
   logs: webLogFolder,
+  updates: webUpdates,
   midi: webMidi,
 };

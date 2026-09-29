@@ -20,7 +20,8 @@ keyboard fill the other layers; the computer keyboard is the fallback.
 - Not cross-platform: Windows only.
 
 > Early release, Windows only: the installer is on the
-> [Releases](https://github.com/ikkeseb/bleeploop/releases) page. Play through your interface's
+> [Releases](https://github.com/ikkeseb/bleeploop/releases) page. From v0.3.0 on, the app says when a
+> newer version is out and updates itself from Help. Play through your interface's
 > ASIO® driver. WASAPI works as a fallback, but Windows and some drivers add latency they do not
 > report, so WASAPI takes can land late (about 215 ms on the developer's Focusrite). Building from
 > source needs Steinberg's SDK for the ASIO tier, see
@@ -138,7 +139,8 @@ pnpm dev:asio     # full app, ASIO + native sample rate
 
 The `build-exe` workflow builds the ASIO installer and exe on a clean Windows runner and keeps them
 as a run artifact for 30 days. Run it from the Actions tab. A `v*` tag also publishes the GitHub
-Release with the installer, its sha256 and the licence texts once the build and its gates are green.
+Release with the installer, its sha256, the licence texts and the updater's manifest (latest.json) once the
+build and its gates are green.
 That binary is GPLv3, see the third-party notices.
 
 ## Architecture

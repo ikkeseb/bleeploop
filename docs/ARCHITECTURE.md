@@ -26,6 +26,7 @@ its interfaces, never the reverse (`src/platform/host.ts`):
 | `PluginHost` | stub: `available=false` | `invoke()`/`listen()` → the CLAP/VST3 hosts |
 | `MidiBackend` | `navigator.requestMIDIAccess` | **the same web impl, reused verbatim** |
 | `LogFolder` | none | the release log's folder (Help's diagnostics) |
+| `AppUpdates` | none, or a probe's script | the updater (`src-tauri/src/update.rs`), release builds only |
 
 MIDI arrives through Web MIDI: WebView2 has it natively (`lib.rs` auto-grants the MIDI permission to
 the app's own origin). The engine's native MIDI (midir, `engine_io/midi`) is built and off: WinMM
