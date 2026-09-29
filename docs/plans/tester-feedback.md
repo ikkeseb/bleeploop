@@ -142,7 +142,7 @@ Proven in the browser tier only (`pnpm check`, `pnpm build`, `pnpm verify:jam`, 
   jam, saves it for recovery, downloads and verifies the signed installer, shuts the engine down as an
   exit does and runs the installer, which reopens the app. `verify/probes/app-update.mjs` proves the UI
   half on a scripted updater (red with the jam ask removed). The native half is unproven until a release
-  updates a release.
+  updates a release. In v0.3.0.
 - **F3/F12 follow-up:** Help → About this build shows the version and commit, copies a diagnostics
   block and opens the log folder; the repo has a bug-report form asking for both.
 
