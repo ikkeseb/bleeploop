@@ -129,7 +129,7 @@ pnpm dev:asio     # full app, ASIO + native sample rate
 | `pnpm dev:wasapi` | Full app, WASAPI (no ASIO SDK needed) |
 | `pnpm build` | `tsc --noEmit && vite build`, which the Tauri bundle depends on |
 | `pnpm build:app` | Standalone release exe with ASIO (`tauri build --no-bundle --features asio`) |
-| `pnpm check` | Typecheck, oxlint, the capability-boundary check, the `verify/` guards and the engine's tests (skipped without cargo). Also the pre-push hook |
+| `pnpm check` | Typecheck, oxlint, the capability-boundary check, and the `verify/` guards. Also the pre-push hook |
 | `pnpm verify` | Deterministic guards for the frontend's pure logic, file formats, the engine wire and the docs; no browser or hardware |
 | `pnpm test:engine` | The engine's tests (`cargo test -p lf-engine`): looper, click, grid, synths and FX rendered offline, frame by frame |
 | `pnpm probe <name>` | One browser probe against the real app on its own Vite server; `--ci` runs every CI probe, `--list` names them |
@@ -156,7 +156,7 @@ Live project state and open threads: [`STATUS.md`](STATUS.md).
 
 There is no JS unit-test runner. Three layers:
 
-- `cargo test -p lf-engine` (`pnpm test:engine`, part of `pnpm check`) renders the engine offline:
+- `cargo test -p lf-engine` (`pnpm test:engine`; CI runs it on every push) renders the engine offline:
   every looper transition, the click and grid, a golden-jam port and property tests, bit-identical
   across block sizes, and the synths and FX null-tested against reference renders of the Tone code
   they replaced.

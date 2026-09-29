@@ -62,10 +62,9 @@ Harness auto-load of nested files is not reliable: open the briefing yourself.
   (the jam is lost), and hot reload of the engine glue under a running jam is unverified.
 - **Verify by driving the running app and measuring** — a typecheck, a code read or a subagent's
   self-report is a claim: run the runtime probe yourself (`docs/VERIFY.md`).
-- **`main` is the live dev line.** Commit and push whenever the gates are green: `pnpm check` (also the pre-push hook; it runs
-  `cargo test -p lf-engine` and skips it where cargo is absent), `pnpm build`, `pnpm rust:check`
-  (cargo check asio/no-asio + tests), CI. Never push red. The open by-ear/eye/rig gates live ON
-  `main`.
+- **`main` is the live dev line.** Commit and push whenever the gates are green: `pnpm check` (also
+  the pre-push hook), `pnpm build`, `pnpm rust:check` (cargo check asio/no-asio + tests), CI. Never
+  push red. The open by-ear/eye/rig gates live ON `main`.
 - **Every workflow runs with `permissions: contents: read`** (a job that must write widens only
   itself), pins each action by commit sha with the major tag as a trailing comment (bump both
   together), and checks out with `persist-credentials: false`.

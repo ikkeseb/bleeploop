@@ -20,7 +20,7 @@
     "lint": "oxlint --deny-warnings src verify scripts",
     "verify": "node verify/run-guards.mjs",
     "test:engine": "node scripts/engine-test.mjs",
-    "check": "pnpm typecheck && pnpm lint && pnpm check:boundary && pnpm verify && pnpm test:engine",
+    "check": "pnpm typecheck && pnpm lint && pnpm check:boundary && pnpm verify",
     "probe": "node verify/run-probes.mjs",
     "native:smoke": "node scripts/native-probe.mjs editor-smoke",
     "native:survey": "node scripts/native-probe.mjs restart-survey",

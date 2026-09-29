@@ -2,7 +2,7 @@
 
 Two categories of JS-side check, one directory each. The engine's behaviour (the looper, click, grid,
 capture, synths, FX, the device side on a fake driver) is `cargo test`: `pnpm test:engine` (`cargo
-test -p lf-engine`, part of `pnpm check`; skipped where cargo is absent) and `pnpm rust:check` (the
+test -p lf-engine`; skipped where cargo is absent) and `pnpm rust:check` (the
 whole workspace; `.github/workflows/rust-test.yml` on native-code changes, `ci.yml`'s `engine` job on
 ubuntu). Neither directory reaches the native half, WebView2, real rig latency or anything audible;
 those are verified by running the app and measuring it (`docs/VERIFY.md`, `STATUS.md`).

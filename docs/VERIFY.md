@@ -5,7 +5,7 @@
 The app is verified by **driving it and measuring**, not by reading code or trusting a typecheck.
 Subagent "typecheck green" self-reports are NOT sufficient — always run the runtime probe yourself.
 Static gates first (`pnpm check`, `pnpm build`), then the runtime probe below. The engine's
-behaviour is `cargo test -p lf-engine` (`pnpm test:engine`, in `pnpm check`); the frontend's
+behaviour is `cargo test -p lf-engine` (`pnpm test:engine`; CI runs it on every push); the frontend's
 deterministic guards and browser probes live in `verify/` (see `verify/README.md`).
 
 Git hooks are local checkout state. Before relying on the push gate, inspect the file returned by

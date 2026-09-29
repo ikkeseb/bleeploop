@@ -1,7 +1,7 @@
-// scripts/engine-test.mjs — the engine's tests in the local gate: `cargo test -p lf-engine
-// --no-default-features` from src-tauri/ (the pure engine crate, no device, no SDK). Part of
-// `pnpm check`, so the pre-push hook runs them. Where cargo is absent (the Mac has no Rust toolchain)
-// it warns and skips; CI's engine job runs them there.
+// scripts/engine-test.mjs — the engine's tests on demand: `cargo test -p lf-engine
+// --no-default-features` from src-tauri/ (the pure engine crate, no device, no SDK). Not in
+// `pnpm check`: ~5 min on Windows even warm, so the pre-push hook leaves them to CI's engine job, which
+// runs them on every push. Where cargo is absent (the Mac has no Rust toolchain) it warns and skips.
 //
 //   pnpm test:engine
 
