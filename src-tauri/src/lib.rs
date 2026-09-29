@@ -237,6 +237,9 @@ pub fn run() {
             app.handle().plugin(
                 tauri_plugin_log::Builder::default()
                     .level(log::LevelFilter::Info)
+                    // The updater logs a failed check (offline, no release yet) as ERROR, and hands it
+                    // back too; `update.rs` logs every outcome itself, so an ERROR stays a real fault.
+                    .level_for("tauri_plugin_updater", log::LevelFilter::Off)
                     .max_file_size(2_000_000) // ~2 MB per file before rotation
                     .rotation_strategy(tauri_plugin_log::RotationStrategy::KeepAll)
                     .targets([

@@ -11,9 +11,9 @@ memory or upstream docs. Versions are the ones actually resolved in this repo
 
 | Package | Version | License | Notes |
 |---|---|---|---|
-| [solid-js](https://github.com/solidjs/solid) | 1.9.13 | MIT | UI reactivity runtime |
+| [solid-js](https://github.com/solidjs/solid) | 1.9.15 | MIT | UI reactivity runtime |
 | [tone](https://github.com/Tonejs/Tone.js) | 15.1.22 | MIT | the export's offline wet-master render |
-| [@tauri-apps/api](https://github.com/tauri-apps/tauri) | 2.11.0 | Apache-2.0 OR MIT | Tauri JS bindings |
+| [@tauri-apps/api](https://github.com/tauri-apps/tauri) | 2.11.1 | Apache-2.0 OR MIT | Tauri JS bindings |
 
 ### Geist and Geist Mono — SIL Open Font License 1.1
 
@@ -29,17 +29,17 @@ All versions below are as pinned/resolved in `src-tauri/Cargo.lock`.
 
 | Crate | Version | License (as declared in the crate's own `Cargo.toml`) |
 |---|---|---|
-| tauri | 2.11.2 | Apache-2.0 OR MIT |
-| tauri-plugin-log | 2.8.0 | Apache-2.0 OR MIT |
+| tauri | 2.11.5 | Apache-2.0 OR MIT |
+| tauri-plugin-log | 2.9.1 | Apache-2.0 OR MIT |
 | tauri-plugin-updater | 2.12.0 | Apache-2.0 OR MIT |
-| serde | 1.0.228 | MIT OR Apache-2.0 |
-| serde_json | 1.0.150 | MIT OR Apache-2.0 |
-| log | 0.4.32 | MIT OR Apache-2.0 |
+| serde | 1.0.229 | MIT OR Apache-2.0 |
+| serde_json | 1.0.151 | MIT OR Apache-2.0 |
+| log | 0.4.34 | MIT OR Apache-2.0 |
 | clack-host | 0.1.0 | MIT OR Apache-2.0 |
 | clack-extensions | 0.1.0 | MIT OR Apache-2.0 |
 | cpal | 0.18.1 | Apache-2.0 (single license, not dual) |
 | asio-sys | 0.3.0 | Apache-2.0 — ASIO builds only (`--features asio`); cpal's own ASIO binding, used directly for the driver list |
-| rtrb | 0.3.4 | MIT OR Apache-2.0 |
+| rtrb | 0.3.5 | MIT OR Apache-2.0 |
 | rubato | 3.0.0 | MIT |
 | rustfft | 6.4.1 | MIT OR Apache-2.0 |
 | walkdir | 2.5.0 | `Unlicense/MIT` (crate's own non-SPDX-normalized string; effectively dual Unlicense-or-MIT) |
