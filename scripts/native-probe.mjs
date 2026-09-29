@@ -271,9 +271,10 @@ process.exit(ok ? 0 : 1);
 function surveySummary() {
   const text = readFileSync(logPath, 'utf8');
   const flags = new Map();
-  for (const m of text.matchAll(/VST3 restartComponent\(([^)]*)\)/g)) flags.set(m[1], (flags.get(m[1]) ?? 0) + 1);
+  // The engine's plugin owners' lines (`host/vst3_engine.rs`, `host/clap_engine.rs`).
+  for (const m of text.matchAll(/engine slot \d+ restartComponent\(([^)]*)\)/g)) flags.set(m[1], (flags.get(m[1]) ?? 0) + 1);
   const vst3 = [...flags.values()].reduce((a, b) => a + b, 0);
-  const clap = (text.match(/request_restart/g) ?? []).length;
+  const clap = (text.match(/engine slot \d+ restart at the plugin's request/g) ?? []).length;
   const failed = (text.match(/\[survey\] LOAD FAILED/g) ?? []).length;
   const byFlag = [...flags].map(([f, n]) => `${f} ${n}`).join(', ');
   return `${vst3} VST3 restartComponent${byFlag ? ` (${byFlag})` : ''}, ${clap} CLAP request_restart line(s), ${failed} load failure(s)`;
