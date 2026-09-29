@@ -194,7 +194,7 @@ pub fn limiter_input(s: &Scenario) -> [Vec<f32>; 2] {
     [l, r]
 }
 
-/// Tolerance classes (plan § Stage 3). N: the null residual is at or below −60 dB of the reference
+/// Tolerance classes. N: the null residual is at or below −60 dB of the reference
 /// RMS. S: long-term STFT band energies within ±1 dB and the 10 ms RMS envelope within ±0.5 dB.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Class {

@@ -1,5 +1,5 @@
-/** Captures the v0.1.0 session files the native engine's Stage 5 must import
- * (`docs/plans/native-engine.md` § Stage 3 and § Stage 5): the export zip exactly as the user downloads
+/** Captures the v0.1.0 session files the native engine must import (read by
+ * `src-tauri/crates/lf-engine/tests/v0_1_0_exports.rs`): the export zip exactly as the user downloads
  * it, and the recovery archive exactly as autosave stores it in IndexedDB. A sibling of `tone-refs`
  * rather than part of it: this drives the app's UI, download and IndexedDB in a fresh profile, not Tone
  * OfflineContexts, and its compare has to see past timestamps. The two probes share one budget: their

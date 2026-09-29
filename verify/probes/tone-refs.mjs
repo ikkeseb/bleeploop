@@ -1,14 +1,15 @@
 /** Checks that the export's offline wet render still produces the Tone references the engine's FX ports
- * are tested against (`src-tauri/crates/lf-engine/tests/fixtures/tone`, `docs/plans/native-engine.md`
- * § Stage 3). It re-renders the manifest's fx, limiter and IR scenarios in Tone OfflineContexts through
- * the production modules the export uses (`FxChain`, `makeReverbBus` and `makeMasterLimiter` from
- * `src/session/offline-fx.ts`), with `Math.random` replaced by the seeded mulberry32 each scenario was
- * captured with (seed 1000 + its index in the manifest), encodes each render as float32 WAV through the
- * real `encodeWav`, and compares every sample with the committed file (1e-6: two renders differ by up to
- * ~1.2e-7, Blink sums a node's inputs in no fixed order). It also regenerates the noise tables from their
- * seed and asserts Tone's own buffers equal that regeneration and the manifest's hashes (the reverb IR
- * draws on the white table), that the fixtures stay within their 10 MB budget with export-refs's v0.1.0
- * files, and that the files on disk are the manifest's.
+ * are tested against (`src-tauri/crates/lf-engine/tests/fixtures/tone`; the harness and its tolerance
+ * classes: `src-tauri/crates/lf-engine/tests/common/refs.rs`). It re-renders the manifest's fx,
+ * limiter and IR scenarios in Tone OfflineContexts through the production modules the export uses
+ * (`FxChain`, `makeReverbBus` and `makeMasterLimiter` from `src/session/offline-fx.ts`), with
+ * `Math.random` replaced by the seeded mulberry32 each scenario was captured with (seed 1000 + its
+ * index in the manifest), encodes each render as float32 WAV through the real `encodeWav`, and
+ * compares every sample with the committed file (1e-6: two renders differ by up to ~1.2e-7, Blink sums
+ * a node's inputs in no fixed order). It also regenerates the noise tables from their seed and asserts
+ * Tone's own buffers equal that regeneration and the manifest's hashes (the reverb IR draws on the
+ * white table), that the fixtures stay within their 10 MB budget with export-refs's v0.1.0 files, and
+ * that the files on disk are the manifest's.
  *
  * The fixtures are frozen: the synth scenarios' Tone voices went with `src/audio/synths` (the engine's
  * ports replay them in lf-engine `tests/synth.rs` and `tests/voices.rs`), so the set can no longer be

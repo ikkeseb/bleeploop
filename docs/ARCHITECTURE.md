@@ -214,7 +214,7 @@ top-most within its window (the "airspace" problem), so a child plugin HWND z-fi
 into a host-owned top-level window; VST3 embeds into a host-owned top-level window. This is not a
 panel inside the WebView. Editor requests run on the per-slot owner thread, which also pumps hosted
 window messages. Native thread ownership is defined in `src-tauri/AGENTS.md`:
-"Only the owner thread touches the instance, the cpal streams and the editor."
+"Only a slot's owner thread touches its plugin instance and editor."
 
 Other notable risks: no turn-key VST3 host crate in Rust (lead with CLAP via `clack-host`,
 which has a working reference host; VST3 via `coupler-rs/vst3` is hand-written unsafe COM —

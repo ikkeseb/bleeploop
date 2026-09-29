@@ -78,11 +78,9 @@ Proven in the browser tier only (`pnpm check`, `pnpm build`, `pnpm verify:jam`, 
 - **F6:** the PARAMS preview takes the first 12 NAMED params; unnamed ones count toward "+N more".
 - **F9:** the auto go-live after a fresh pick is quiet (log line kept); a clicked GO LIVE still reports.
 - **F2 + F1 + F5:** short later takes tile across the master (early stop or FIXED), FIXED stays usable
-  after the BPM lock, and PLAY on an idle transport starts from the top. `pnpm verify:jam` drives it
-  through the real dispatchers (Windows browser run, 2026-09-21: 91/91).
-  `verify/probes/playback-restart.mjs` separately captures rendered lane PCM: single/ALL idle restarts
-  begin at source frame zero, ALL lanes share a start frame, and live joins keep phase beside a
-  muted lane pending END STOP. A deliberately wrong 100 ms source offset fails all three cases.
+  after the BPM lock, and PLAY on an idle transport starts from the top. On the engine, lf-engine's
+  tests render it: idle restarts from the top and live joins, also beside a muted lane pending END
+  STOP (`phase_preserve.rs`), ALL lanes on one frame (`golden_jam.rs`).
   By ear, unheard: the tile seams, a 3-over-8 cut, reverse on a tiled track, and the downbeat click
   on a from-the-top start.
 - **F10:** the button reads `AUTO REC · SENS n` with an explanatory tooltip. Wording is the owner's eye.
