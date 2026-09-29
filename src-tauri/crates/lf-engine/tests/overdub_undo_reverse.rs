@@ -287,7 +287,7 @@ fn stop_all_a_second_stop_and_clear_punch_out_an_aligned_overdub() {
     // the press) are kept exactly inside the window, at their grid position, and playback is silent from
     // the press while the tail comes in.
     const ALIGN: Frame = 7200;
-    for gesture in ["stop all", "second stop", "clear"] {
+    for gesture in ["stop all", "second stop", "second stop at once", "clear"] {
         let (mut rig, master) = playing_loop();
         rig.align = ALIGN;
         rig.advance_to(rig.next_boundary() + 2400);
@@ -307,6 +307,11 @@ fn stop_all_a_second_stop_and_clear_punch_out_an_aligned_overdub() {
                 rig.press(Command::PlayStop(0));
                 rig.advance(ALIGN / 2);
                 rig.press(Command::PlayStop(0));
+            }
+            "second stop at once" => {
+                rig.send_at(rig.frame, Command::PlayStop(0));
+                rig.send_at(rig.frame, Command::PlayStop(0));
+                rig.advance(1);
             }
             _ => rig.press(Command::Clear(0)),
         }

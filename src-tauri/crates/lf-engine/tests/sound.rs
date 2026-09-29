@@ -566,7 +566,9 @@ fn a_live_pitch_enable_and_reset_on_a_playing_lane_add_no_step() {
 fn a_note_to_each_selected_built_in_instrument_sounds_on_the_bus() {
     // instrument-routing.mjs's synth pick: a MIDI note sounds on the picked engine, its RMS over the
     // probe's analyser window (4096 frames, ending 150 ms after the note) above 0.01. A2 as the probe
-    // played it; on the drum kit, its kick.
+    // played it; on the drum kit, its kick. Each pick renders its own sound: no two picks sound alike,
+    // so a pick routed to the wrong instrument fails.
+    let mut renders: Vec<(Instrument, Vec<f32>)> = Vec::new();
     for instrument in Instrument::ALL {
         let mut rig = Rig::new();
         rig.set(Command::SelectInstrument(NoteTarget::Builtin(instrument)));
@@ -577,5 +579,11 @@ fn a_note_to_each_selected_built_in_instrument_sounds_on_the_bus() {
         let rms = (window.iter().map(|&x| x as f64 * x as f64).sum::<f64>() / window.len() as f64).sqrt();
         println!("{instrument:?}: rms {rms:.4}, peak {:.4}", peak(&rig.bus));
         assert!(rms > 0.01, "{instrument:?} sounds on the bus: rms {rms}");
+        renders.push((instrument, rig.bus.clone()));
+    }
+    for (i, (a, x)) in renders.iter().enumerate() {
+        for (b, y) in &renders[i + 1..] {
+            assert!(x != y, "{a:?} and {b:?} render the same sound");
+        }
     }
 }
