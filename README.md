@@ -2,34 +2,34 @@
 
 [![CI](https://github.com/ikkeseb/bleeploop/actions/workflows/ci.yml/badge.svg)](https://github.com/ikkeseb/bleeploop/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Platform: Windows](https://img.shields.io/badge/platform-Windows-0078D6.svg)](#getting-started)
+[![Platform: Windows](https://img.shields.io/badge/platform-Windows-0078D6.svg)](#play-it)
 
 BleepLoop is a Windows looper you play with a guitar. Load your own amp-sim plugin (CLAP or VST3),
 hear it through ASIO, and loop and overdub on five RC-505 MK II–style tracks. One native audio
 engine runs the looper, click, synths, FX and your plugin inside the audio driver's callback, so
-every take lands on the grid by itself: there is no latency setting. Six built-in synths and a MIDI
-keyboard fill the other layers; the computer keyboard is the fallback.
+every take lands on the grid by itself: there is no latency setting.
 
-**What BleepLoop is not**
+[![Download for Windows](https://img.shields.io/github/v/release/ikkeseb/bleeploop?label=Download%20for%20Windows&logo=windows&style=for-the-badge&color=2ea043)](https://github.com/ikkeseb/bleeploop/releases/latest)
 
-- Not a DAW: no timeline or arrangement. The mix is per-track volume, mute and FX.
-- Not an amp sim: bring your own plugin.
-- Not a low-latency MIDI host: MIDI arrives through WebView2's Web MIDI, a few milliseconds behind
-  what a DAW would see.
-- Not a web app: the browser build is a silent verification rig.
-- Not cross-platform: Windows only.
+![A jam built track by track: a count-in, three two-bar takes over each other, then the stage view](docs/media/bleeploop-demo.webp)
 
-> Early release, Windows only: the installer is on the
-> [Releases](https://github.com/ikkeseb/bleeploop/releases) page. From v0.3.0 on, the app says when a
-> newer version is out and updates itself from Help. Play through your interface's
-> ASIO® driver. WASAPI works as a fallback, but Windows and some drivers add latency they do not
-> report, so WASAPI takes can land late (about 215 ms on the developer's Focusrite). Building from
-> source needs Steinberg's SDK for the ASIO tier, see
-> [Third-party notices](#license-and-third-party-notices).
+## Highlights
 
-![BleepLoop](docs/media/bleeploop.png)
+- **Your amp sim, live.** Load your plugin, pick the guitar's input and press GO LIVE. The round trip
+  is 8 ms at ASIO 64 and 15 ms at 128 on the developer's interface.
+- **Takes land on the beat.** The engine places every take from the driver's reported latency, and
+  the click is locked to the loop grid, so the click and the loops cannot drift apart.
+- **Hands stay on the guitar.** Learn any looper control onto a MIDI footswitch. The stage view (B)
+  shows the bar, the beat and every track, large enough to read from where you stand.
+- **Nothing gets lost.** Your loops save as you play and come back when you reopen. Export a jam as
+  one zip: a WAV stem per track, a mix and each plugin's settings.
+- **More than guitar.** Six built-in synths, one of them a drum kit, and a MIDI keyboard fill the
+  other layers.
 
-## Features
+The installed app tells you when a newer version is out and updates itself from Help.
+
+<details>
+<summary><b>Everything it does</b></summary>
 
 - 5-track looper with overdub and one-level undo, per-track reverse, mute and volume, a one-bar
   record count-in and fixed-length record. The metronome is phase-locked to the loop grid, so the
@@ -74,7 +74,23 @@ keyboard fill the other layers; the computer keyboard is the fallback.
 - Help → About this build names the version and commit, copies a diagnostics block for a bug report
   and opens the log folder.
 
+</details>
+
+**What BleepLoop is not**
+
+- Not a DAW: no timeline or arrangement. The mix is per-track volume, mute and FX.
+- Not an amp sim: bring your own plugin.
+- Not a low-latency MIDI host: MIDI arrives through WebView2's Web MIDI, a few milliseconds behind
+  what a DAW would see.
+- Not a web app: the browser build is a silent verification rig.
+- Not cross-platform: Windows only.
+
 ## Play it
+
+This is an early release. Get the installer from
+[Releases](https://github.com/ikkeseb/bleeploop/releases/latest) and play through your interface's
+ASIO® driver. WASAPI works as a fallback, but Windows and some drivers add latency they do not
+report, so WASAPI takes can land late (about 215 ms on the developer's Focusrite).
 
 1. Plug the guitar into your audio interface and start BleepLoop (the installed app, or
    `pnpm dev:asio` from source). In Audio Settings pick ASIO (and its driver, if you have more than
@@ -85,7 +101,9 @@ keyboard fill the other layers; the computer keyboard is the fallback.
 4. Space again closes the take; after that, Space overdubs the selected track and Enter plays or stops it.
 5. Help (the ? in the command bar) lists the rest.
 
-## Getting started
+![BleepLoop with two tracks playing and a third recording](docs/media/bleeploop.png)
+
+## Build from source
 
 The frontend renders on its own in a browser with no native dependencies, silent: the sound, plugin
 hosting and audio I/O are the native engine's, in the Tauri shell around it.
