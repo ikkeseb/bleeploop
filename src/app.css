@@ -25,6 +25,9 @@
   --card: linear-gradient(180deg, #14161b, #111317 70%); /* card fill: a faint top-lit tone ramp */
   --hair: rgba(255, 255, 255, 0.055); /* the top edge light */
   --panel: rgba(16, 18, 22, 0.97); /* floating panel (popovers, toasts) */
+  --panel-drop: 0 20px 48px -14px rgba(0, 0, 0, 0.72); /* the one drop shadow: a floating panel over the lanes */
+  --pressed: inset 0 1px 2px rgba(0, 0, 0, 0.6); /* :active — the control face sinks into --sunk */
+  --option: #14171d; /* a themed <select>'s open option list */
   --edge: rgba(255, 255, 255, 0.07); /* card + control border */
   --line-2: rgba(255, 255, 255, 0.12); /* hover border */
   --well: var(--sunk);
@@ -511,7 +514,7 @@ option {
 }
 .tgl:active:not(:disabled) {
   background: var(--sunk);
-  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.6);
+  box-shadow: var(--pressed);
 }
 .tgl:disabled {
   cursor: default;
@@ -539,11 +542,14 @@ option {
    `.lf-range`: a 3px flat track with an optional --fill left portion + an 11px round --text cap.
    Consumers set only width / hit-area height / margin (and drive --fill if they show a filled part).
    `:where` = zero specificity, so a consumer's own `.x { height }` always wins regardless of CSS order
-   (app.css loads AFTER the component sheets). */
+   (app.css loads AFTER the component sheets). The box is the hit area: 24px tall (WCAG 2.2 target size)
+   folded into the 16px margin box a 12px input with the UA's 2px margin took, so the track (centred in
+   the box) sits where it did. A consumer that sets its own height/margin keeps its margin-box height. */
 :where(.lf-range) {
   -webkit-appearance: none;
   appearance: none;
-  height: 12px;
+  height: 24px;
+  margin-block: -4px;
   background: transparent;
   cursor: pointer;
   --fill: 0%;
@@ -643,7 +649,7 @@ option {
 }
 .slot__source option,
 .slot__in option {
-  background: #14171d;
+  background: var(--option);
   color: var(--text);
   font-weight: 500;
 }

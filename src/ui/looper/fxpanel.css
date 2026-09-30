@@ -59,7 +59,7 @@
 }
 .fxp-mod__toggle:active {
   background: var(--sunk);
-  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.6);
+  box-shadow: var(--pressed);
 }
 .fxp-mod__toggle--on {
   background: var(--surf-3);
@@ -144,6 +144,6 @@
   outline-offset: 1px;
 }
 .fxp-param__select option {
-  background: #14171d;
+  background: var(--option);
   color: var(--text);
 }

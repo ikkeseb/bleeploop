@@ -19,8 +19,8 @@
 .slot__vbar {
   position: relative; /* over the absolute unity tick so the thumb reads on top of it */
   width: 100%;
-  margin: 2px; /* pinned: the unity tick's travel calc folds it in (as `.lp-vbar`) */
-  height: 16px;
+  margin: -2px 2px; /* inline: pinned, the unity tick's travel calc folds it in (as `.lp-vbar`) */
+  height: 24px; /* the hit area; a 20px margin box, as before */
 }
 /* unity (1.0 of 1.5) at 66.7% of the thumb's travel; see `.lp-vbar__unity` for the calc */
 .slot__vbar-unity {
@@ -88,9 +88,8 @@
   overflow: hidden;
   color: var(--faint);
   font-family: var(--mono);
-  font-size: clamp(6.5px, 0.55vw, 8.5px);
+  font-size: 9.5px; /* the app's smallest secondary mono size (.pc__more); it wraps rather than shrink */
   line-height: 1.2;
-  white-space: nowrap;
 }
 /* The note is a whole extra row per slot. Below the 600 px window floor that row pushes the drum pads
  * off screen (`verify/probes/layout-reachability.mjs --plugin-source`), so the hint yields to reachability. */
@@ -145,7 +144,8 @@
 /* the param range wears the app-wide `.lf-range` skin (app.css); a taller hit area for dense lists */
 .param__range {
   width: 100%;
-  height: 14px;
+  height: 24px;
+  margin-block: -3px; /* the 18px margin box a 14px input with the UA's 2px margin took */
 }
 
 /* a readout of the plugin's last edited param (name + value) — a quiet mono read-out, not a sound state */
