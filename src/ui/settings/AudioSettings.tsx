@@ -226,8 +226,8 @@ export function AudioSettings() {
       <Show when={shareOnAsioInterface()}>
         {(name) => (
           <div class="audio-settings__hint" role="note">
-            {name()} looks like the interface ASIO plays on: you will hear the master twice. Pick a virtual
-            cable or a device you don't listen on.
+            {name()} looks like the interface ASIO plays on: if you listen there, you will hear the master
+            twice. Pick a virtual cable or a device you don't listen on.
           </div>
         )}
       </Show>

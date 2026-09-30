@@ -23,8 +23,12 @@ function tokens(name: string): string[] {
     .filter((t) => t.length >= 3 && !/^\d+$/.test(t) && !GENERIC.has(t));
 }
 
-/** True when any distinguishing word of the ASIO driver's name appears in the Share device's name. */
+/** True when any distinguishing word of the ASIO driver's name appears in the Share device's name. A
+ * virtual ASIO driver (VoiceMeeter's "Voicemeeter Insert Virtual ASIO") routes through software whose
+ * Windows endpoints carry the same brand, so a match there would say nothing about the hardware. */
 export function sharesInterface(asioName: string, shareName: string): boolean {
+  const asio = tokens(asioName);
+  if (asio.includes('virtual')) return false;
   const share = new Set(tokens(shareName));
-  return tokens(asioName).some((t) => share.has(t));
+  return asio.some((t) => share.has(t));
 }

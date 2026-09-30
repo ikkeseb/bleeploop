@@ -137,9 +137,9 @@ export function Help() {
       <section class="help__sec">
         <h3 class="help__h">Whole song <span class="help__tag">every track at once</span></h3>
         <ul class="help__list">
-          <li><span class="help__note">▶ ALL</span> starts every stopped track together &middot; <span class="help__note">■ ALL</span> stops them all; a recording or overdub commits its take and stops at once</li>
-          <li><span class="help__note">END STOP</span> on: a track's stop and ■ ALL wait for the end of the loop; recording and overdub still stop at once. While tracks wait, ■ ALL reads <span class="help__note">■ NOW</span>, and a second stop lands right away</li>
-          <li><span class="help__note">FADE</span> fades every playing track out over its bars (1, 2, 4 or 8, from the stepper beside it) and stops them on the bar line; press it again while <span class="help__note">FADING</span> to stop now. Volumes never move, so ▶ ALL brings the tracks back</li>
+          <li><span class="help__note">▶ ALL</span> starts every stopped track together &middot; <span class="help__note">■ ALL</span> stops them all; a take being recorded or overdubbed ends as its own stop would end it</li>
+          <li><span class="help__note">END STOP</span> on: a track's stop and ■ ALL wait for the end of the loop; it never delays a recording or overdub. While tracks wait, ■ ALL reads <span class="help__note">■ NOW</span>, and a second stop lands right away</li>
+          <li><span class="help__note">FADE</span> fades every playing track out over its bars (1, 2, 4 or 8, from the stepper beside it) and stops them on the first bar line after; press it again while <span class="help__note">FADING</span> to stop now. Volumes never move, so ▶ ALL brings the tracks back</li>
           <li><span class="help__note">✕ ALL</span> clears every track and resets the loop length, which unlocks the tempo (press twice to confirm)</li>
         </ul>
       </section>

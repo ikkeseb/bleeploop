@@ -4,8 +4,8 @@
 // Audio Settings popover warns that Share output targets the interface ASIO plays on (tester report
 // F22: the master heard twice). Covers the driver-vs-endpoint name pairs the warning must catch
 // (Focusrite, a "2-" Windows suffix, Steinberg/Yamaha, Realtek, Behringer UMC), the pairs it must stay
-// quiet on (a virtual cable, ASIO4ALL wrapping anything, a different brand, empty names) and that
-// matching is by word, not substring. Run: node verify/guards/share-target.mjs
+// quiet on (a virtual cable, ASIO4ALL wrapping anything, a virtual ASIO driver, a different brand,
+// empty names) and that matching is by word, not substring. Run: node verify/guards/share-target.mjs
 
 import assert from 'node:assert';
 
@@ -31,6 +31,7 @@ const CASES = [
   ['UMC ASIO Driver', 'Speakers (Behringer UMC 204HD)', true],
   ['Focusrite USB ASIO', 'CABLE Input (VB-Audio Virtual Cable)', false],
   ['ASIO4ALL v2', 'Speakers (Realtek(R) Audio)', false],
+  ['Voicemeeter Insert Virtual ASIO', 'Voicemeeter Input (VB-Audio Voicemeeter VAIO)', false],
   ['Focusrite USB ASIO', 'Speakers (Realtek(R) Audio)', false],
   ['', 'Speakers (Realtek(R) Audio)', false],
   ['Focusrite USB ASIO', '', false],

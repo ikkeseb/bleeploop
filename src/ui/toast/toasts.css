@@ -110,11 +110,16 @@
   cursor: pointer;
   transition: color 0.15s, background-color 0.15s;
 }
-/* the 20px face stays; the hit area is 24x24 (WCAG 2.2 target size) */
+/* the 20px face stays; the hit area is a 24x24 square centred on it (WCAG 2.2 target size; an `inset`
+   would count from the padding box, inside the 1px border) */
 .toast__close::before {
   content: '';
   position: absolute;
-  inset: -2px;
+  top: 50%;
+  left: 50%;
+  width: 24px;
+  height: 24px;
+  transform: translate(-50%, -50%);
 }
 .toast__close:hover {
   color: var(--text);
