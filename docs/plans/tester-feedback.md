@@ -68,8 +68,8 @@ to be re-checked before they steer a change.
 
 ## Landed in code, awaiting the tester's machine
 
-Proven in the browser tier only (`pnpm check`, `pnpm build`, `pnpm verify:jam`, `first-session`,
-`midi-note-ownership`); nothing here was run in the Tauri app or on the tester's machine.
+Each item names its own proof (browser tier, lf-engine tests, the loopback cable or a release on the
+dev PC); none of it ran on the tester's machine.
 
 - **F4:** the on-screen keys mirror the router's held set (`inputRouter.onHeldChange`), so MIDI lights
   keys and GM pads. Computer keys now own their note per physical key.

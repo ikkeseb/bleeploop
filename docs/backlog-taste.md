@@ -14,7 +14,7 @@ not here.
 
 - **Command bar (2026-09-02):** the two-row form whenever one row cannot fit (CLICK/FIXED/AUTO/TAP on
   row 2 at the Tauri default 1280); the ⬇/⬆ EXPORT/IMPORT icons in the tool cluster; the 4 px record-level
-  meter left of MIC (−60..0 dBFS, green, red within 1 dB of full, a cyan tick at the AUTO trigger
+  meter left of IN FX (−60..0 dBFS, green, red within 1 dB of full, a cyan tick at the AUTO trigger
   level while AUTO is on) — big enough? right place? AUTO reserves its sensitivity control's width
   so toggling it or changing the value keeps the stage in place. Engine mode at 960 and 1100 px
   (2026-09-28): the wordmark folds to its dot so the master stays on row 1. Still three rows in the app
@@ -23,19 +23,16 @@ not here.
 - **Count-in numeral (2026-09-02):** the big red 4-3-2-1 in the armed lane's well over "COUNT-IN" —
   size, colour, and whether a later take's "WAITING FOR DOWNBEAT" should count beats to the boundary too.
 - **Error toasts:** bottom-right stack — placement, copy, feel; may overlap the bottom lane's right
-  cluster when full. The failure toasts: "Monitor device lost — switched to the backup path",
-  "Guitar/line input device lost", "Input device lost — mic disarmed", "MIDI device disconnected —
-  <name>", "Track N: the take failed to start", "Track N: playback failed to restart", the dual-slot
-  editor refusal, import-of-a-bad-file.
-- **Help popover:** wording + section order (guitar GO LIVE, ASIO slot swap, separate MIC path,
-  COPY, REV, CLICK/FIXED/AUTO REC, volume-detent line, Session and Pedals sections, the Looper keys
+  cluster when full. The device toasts: "Audio device lost", "Switched to another audio device",
+  "Audio device back", "The audio input did not open", "MIDI device disconnected — <name>"; the
+  dual-slot editor refusal, import-of-a-bad-file.
+- **Help popover:** wording + section order (guitar GO LIVE, an Off slot for raw input, COPY, REV, CLICK/FIXED/AUTO REC, volume-detent line, Session and Pedals sections, the Looper keys
   as a chip row). Overdub is "OVERDUB" (lane word) / "overdubs" (Help) / "Overdubbing" (screen
   reader) across three surfaces — one word?
 - **Play-path signals from 1.5 m (2026-09-23):** nothing in the looper zone says the amp-sim is live
   (only the slot's pill); the 4×22 px record meter is the only clipping cue; the BPM lock pulse fires
   mid-count-in beside the big "4", which is rec-red inside an amber ARMED lane.
-- **Audio Settings:** the "rec align" trim row after the buffer row — placement + wording; status chips
-  moved into the diagnostics block (unratified).
+- **Audio Settings:** status chips moved into the diagnostics block (unratified).
 - **MIDI learn row (2026-09-23, extended 2026-09-27, built, unseen):** above diagnostics — an action
   picker grouped into track and global actions, an ON TRACK row for a track action (the selected track
   or 1–5), LEARN (a cyan LISTENING while it waits, then "Let go of the pedal, and try it once this line
@@ -43,8 +40,8 @@ not here.
   channel, a momentary/latching switch, HOLD on a record pedal, the port on hover, ✕ forgets). Right
   place and words? Is "latching" clear to a guitarist? A long list makes the popover tall.
 - **Refused global pedal presses (2026-09-27, built, unseen):** TAP while the tempo is locked, FIXED
-  while recording or under RETAKE, IN FX on the web path say why in the selected lane's well: the right
-  place for a global reason?
+  while recording or under RETAKE say why in the selected lane's well: the right place for a global
+  reason?
 - **Lanes:** the selected-lane warm-white edge (no rail, owner 2026-09-23) — strong enough under
   PLAYING? the ARMED amber dashed-ring pulse; the 10 px state word with its LED; from 1.5 m little
   carries (state word, REC core, four 5 px beat dots) — the stage view (B) is built for that; undo/reverse cap placement (a per-track
@@ -55,8 +52,8 @@ not here.
   The PC keyboard's note keys are silent inside it (so drum-mode 1–4 select lanes): right, or should
   notes play? BAR n / N (2026-09-27) sits between LOOP and the beat bar, the total at half size, dim:
   readable at 1.5–3 m, total too small?
-- **IN FX (2026-09-26, built, unheard):** the pill after MIC and its ECHO/REVERB popover (engine
-  mode). Defaults are an agent's pick: echo 1/8, feedback 0.4, level 0.5; reverb 0.5. The echo's level
+- **IN FX (2026-09-26, built, unheard):** the pill after the record meter and its ECHO/REVERB/RING MOD
+  popover. Defaults are an agent's pick: echo 1/8, feedback 0.4, level 0.5; reverb 0.5. The echo's level
   is scaled so its repeats carry the input's energy (at feedback 0.95 the first echo is ~⅓ of the level):
   does high feedback still feel like it should? The reverb is summed to mono as ½(L+R).
 - **FIXED past the loop (2026-09-26, built, unseen):** over a loop, + steps a bar at a time up to the
@@ -115,7 +112,6 @@ not here.
 - **Failed plugin bundles (2026-09-10):** a bundle whose scan child failed (timeout, crash, unparsable)
   is remembered as failed and simply missing from the picker; only the log says why. Show it greyed
   with the reason, or keep the picker clean and leave it to the log?
-- **Minimum window:** at 960 × 600 with the keyboard visible, lane controls are vertically clipped. Improve minimum-height layout while keeping the normal five-lane proportions.
 - **Non-hue state cues (2026-09-22, built, unseen):** toast severity glyph (⚠ error / ✓ done) in a
   16 px accent column beside the stripe; the system lamp's warn ring; the record meter's 1 px ring at
   clipping and the 3 px AUTO notch. Right size, right weight?
@@ -127,8 +123,8 @@ not here.
 - **Empty plugin scan note (2026-09-22, built):** one muted mono line per slot, "No plugins found ·
   CLAP in … · rescan ⟳ in the command bar", hidden below 640 px window height so the drum pads stay
   reachable. Wording, and should it live in the picker's place instead of its own row?
-- **Fallback copy (2026-09-22, built):** "INPUT LIVE · WEB MONITOR" after a native monitor fault; the
-  STOPPED lane core's "play first to overdub"; slots read A/B on screen but "slot 1/2" in ARIA labels.
+- **Fallback copy (2026-09-22, built):** the STOPPED lane core's "play first to overdub"; slots read A/B
+  on screen but "slot 1/2" in ARIA labels.
 
 ## By ear, when convenient
 
@@ -136,20 +132,17 @@ not here.
   default. Synth presets (DEPRIORITIZED — a re-listen left it unsure they are off-key).
 - MIDI feel: mod-wheel vibrato rate/depth (5.5 Hz, 0..0.35), pitch-bend, CC64 sustain; vibrato is
   bypassed at depth 0 (wheel engage from rest must not click).
-- Four product calls from the first code review, each open to reversal:
+- Three product calls from the first code review, each open to reversal:
   pointer-clicked buttons blur so Space/Enter always drive the selected track; sustain-pedal state
-  survives a slot/synth swap; export master excludes STOPPED tracks; vibrato bypass at depth 0.
-- Open polish: SR spoken output; mic-arm flow; the ~530 ms beat-LED resync at commit; the free-run
+  survives a slot/synth swap; vibrato bypass at depth 0.
+- Open polish: SR spoken output; the ~530 ms beat-LED resync at commit; the free-run
   metronome "1" anchored to an arbitrary wall moment + the REC accent-jump (a "stable downbeat" job).
-- **ASIO slot swap (D6 answered (b)):** Help now explains that another amp slot needs UNLOAD of the
-  first plugin, even after INPUT LIVE is turned off. Check whether that is discoverable enough.
 - **Click default (2026-09-18 jam):** should the click be ON by default while recording?
-- Fixed auto-commit enters playback ~C+drain (~137 ms) late on pass 1 only.
 
 ## Parked ideas (for the long run)
 
 - Looper aesthetic forks: ring/state colour = state vs track-identity; Day/Night.
-- Undo as visible history (layer count on ↶ DUB); scenes/snapshots switched on the loop boundary;
+- Undo as visible history (layer count on ↶ UNDO); scenes/snapshots switched on the loop boundary;
   songs as chained scenes; click "01" to name a track; piano hidden by default; synth pills gone once a
   plugin is loaded.
 - A visualizer in the stage view (a tester's idea, 2026-09-30): each track drawn as something that

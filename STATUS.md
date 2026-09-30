@@ -143,7 +143,7 @@ E2 is built as its default (Share output to a user-picked endpoint).
 - **D2 / D7 — no:** guitar records through the native input, never the mic/line path; no L3 wizard. Per-slot input channels landed 2026-09-28 (`docs/plans/tester-feedback.md` F17).
 - **D3 — gone with the web path's record compensation** (the per-take `[rec-comp]` line).
 - **D4 — stays disabled** (empty-lane right cluster).
-- **D6 — (b):** teach the slot swap in UI/copy (line in `docs/backlog-taste.md`).
+- **D6 — (b), then moot:** the slot swap is gone; both slots can be live at once, each on its own input (F17).
 - **D9 — struck** (what was off: unknown).
 - **D10 — COPY built**: the lane to the first EMPTY lane, in phase; not seen or heard.
 - **D11 — dropped:** all LOW, none hit in normal use.
