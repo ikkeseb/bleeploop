@@ -51,8 +51,8 @@ The installed app tells you when a newer version is out and updates itself from 
   the app with a jam in progress asks first.
 - Per-track FX: filter, pitch shift, tempo-synced stutter, feedback delay and a shared reverb send.
   Each one bypasses without a click.
-- IN FX: a tempo-synced echo and a reverb on the live input, heard and recorded, while the dry signal
-  and a take's timing stay untouched.
+- IN FX: a tempo-synced echo, a reverb and a ring modulator on the live input, heard and recorded,
+  while the dry signal and a take's timing stay untouched.
 - Stage view (B, or a learned pedal): each track's state, the bar and the beat, and the count-in,
   large enough to read from where you stand with the guitar.
 - Six built-in synths, one of them a 16-voice GM drum kit.
