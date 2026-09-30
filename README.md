@@ -173,6 +173,11 @@ Feel, the native half and real rig latency are verified by running the app and m
 reading code or trusting a typecheck. [`docs/VERIFY.md`](docs/VERIFY.md) explains how: the browser
 harness, the `window.__lf` debug hook, audio measurement and the `tauri dev` routine on the PC.
 
+## Thanks
+
+To [@MARTINWOBBLE](https://github.com/MARTINWOBBLE), who has tested BleepLoop more than anyone and
+keeps sending bug reports, feedback and ideas.
+
 ## License and third-party notices
 
 The source is MIT, see [`LICENSE`](LICENSE). A binary built with `--features asio` links the

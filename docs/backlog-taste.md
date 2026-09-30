@@ -152,6 +152,11 @@ not here.
 - Undo as visible history (layer count on ↶ DUB); scenes/snapshots switched on the loop boundary;
   songs as chained scenes; click "01" to name a track; piano hidden by default; synth pills gone once a
   plugin is loaded.
+- A visualizer in the stage view (a tester's idea, 2026-09-30): each track drawn as something that
+  moves with its own sound. The look is open; BleepLoop builds its own and shares no code with other
+  projects. The UI already holds each lane's waveform bins and playhead, so a wave-style view needs no
+  engine change. A spectrum needs per-lane band levels in the feed. Neither sees lane FX or the live
+  input.
 
 ## Craft — `pnpm check` + screenshots, no ear
 

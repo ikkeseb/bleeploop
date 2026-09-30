@@ -73,7 +73,8 @@ Harness auto-load of nested files is not reliable: open the briefing yourself.
   markers. Do them; never hand them to the owner. The owner and a few testers play the published
   release, so a release waits for green gates, not for the rig lap.
 - **Tracked files are impersonal and secret-free:** roles ("the owner"), never a person's name,
-  verbatim speech or an email address. Development happens on a Mac (no Rust toolchain) and a
+  verbatim speech or an email address. One exception: `README.md` § Thanks credits a contributor by
+  GitHub handle. Development happens on a Mac (no Rust toolchain) and a
   Windows PC, and agent memory does not sync: a durable fact goes in a tracked file.
 - **Keep this file a router.** Rules are written BARE — provenance lives in the owner doc. A
   LANDED feature becomes a one-line pointer; keep only what is still active or a recurring gotcha;
