@@ -49,6 +49,7 @@ import {
   setEngineShare,
   switchEngineAsioDriver,
 } from '../state/engine-store';
+import { sharesInterface } from './share-target';
 import './audio-settings.css';
 
 /**
@@ -129,6 +130,13 @@ export function AudioSettings() {
     const saved = selectedDriver();
     return saved && !names.includes(saved) ? [...names, saved] : names;
   };
+
+  // The Share device's name when ASIO runs and it looks like the ASIO interface; null otherwise.
+  const shareOnAsioInterface = createMemo(() => {
+    if (!usingAsio()) return null;
+    const name = outputDevices().find((d) => d.id === engineShare())?.name;
+    return name && sharesInterface(asioDeviceInfo()?.name ?? '', name) ? name : null;
+  });
 
   onMount(async () => {
     // Refresh the device lists + prune any persisted id no longer present (shared with the startup
@@ -212,6 +220,17 @@ export function AudioSettings() {
         cable: on the interface in your ears, you hear everything twice. On WASAPI, capture BleepLoop's own
         output instead.
       </div>
+      {/* F22's other half: the Share pick looks like the interface ASIO plays on (`sharesInterface`, a
+          brand/model-word match: it cannot see the hardware). A caution in the amber note, never a
+          block: the pick stays. */}
+      <Show when={shareOnAsioInterface()}>
+        {(name) => (
+          <div class="audio-settings__hint" role="note">
+            {name()} looks like the interface ASIO plays on: you will hear the master twice. Pick a virtual
+            cable or a device you don't listen on.
+          </div>
+        )}
+      </Show>
       <Show when={usingAsio()}>
         <div class="audio-settings__hint audio-settings__hint--info" role="note">ASIO drives both input and output. Turn ASIO off to pick Windows devices.</div>
       </Show>
