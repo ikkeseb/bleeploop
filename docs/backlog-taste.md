@@ -27,7 +27,7 @@ not here.
   "Audio device back", "The audio input did not open", "MIDI device disconnected — <name>"; the
   dual-slot editor refusal, import-of-a-bad-file.
 - **Help popover:** wording + section order (guitar GO LIVE, an Off slot for raw input, COPY, REV, CLICK/FIXED/AUTO REC, volume-detent line, Session and Pedals sections, the Looper keys
-  as a chip row). Overdub is "OVERDUB" (lane word) / "overdubs" (Help) / "Overdubbing" (screen
+  as a chip row, the "Whole song" section: its heading is an agent's word). Overdub is "OVERDUB" (lane word) / "overdubs" (Help) / "Overdubbing" (screen
   reader) across three surfaces — one word?
 - **Play-path signals from 1.5 m (2026-09-23):** nothing in the looper zone says the amp-sim is live
   (only the slot's pill); the 4×22 px record meter is the only clipping cue; the BPM lock pulse fires
@@ -117,12 +117,13 @@ not here.
   clipping and the 3 px AUTO notch. Right size, right weight?
 - **"On" pills (2026-09-23 restyle):** engaged CLICK / FIXED / AUTO REC / RETAKE / END STOP is a
   warm-white legend on a lifted face with an edge, no hue — reads as ON at a glance, or add `● CLICK`?
-- **Hit targets under 24 px (2026-09-22):** `transport__step` 22 px, `toast__close` 20 px, the `lf-range`
-  12 px band.
+- **Slider focus ring (2026-09-30):** every slider's hit area is 24 px tall now, and a
+  keyboard-focused slider's ring wraps that box, 12 px taller than before. Fine, or tighten it?
 - **Audio Settings popover (2026-09-22):** non-modal for the keyboard yet modal for the pointer.
-- **Empty plugin scan note (2026-09-22, built):** one muted mono line per slot, "No plugins found ·
-  CLAP in … · rescan ⟳ in the command bar", hidden below 640 px window height so the drum pads stay
-  reachable. Wording, and should it live in the picker's place instead of its own row?
+- **Empty plugin scan note (2026-09-22, built):** a muted mono note per slot, "No plugins found · CLAP
+  in … · rescan ⟳ in the command bar", hidden below 640 px window height so the drum pads stay
+  reachable; 9.5 px and wrapping to two lines since 2026-09-30 (it computed to 7 px). Wording, and
+  should it live in the picker's place instead of its own row?
 - **Fallback copy (2026-09-22, built):** the STOPPED lane core's "play first to overdub"; slots read A/B
   on screen but "slot 1/2" in ARIA labels.
 
@@ -157,24 +158,14 @@ not here.
 
 ## Craft — `pnpm check` + screenshots, no ear
 
-- **Help and vocabulary:** `Help.tsx` never mentions RETAKE, END STOP, ▶/■ ALL or ✕ ALL, and its
-  trigger in `app.tsx` is named "Keyboard & layout help" though it is the only product guide; one
-  feature, several words: END STOP / ENDING / STOPPING AT LOOP END / ■ NOW, AUTO REC / LISTEN /
-  WAITING FOR INPUT, track vs lane vs take in COPY's aria/title/Help (`Looper.tsx`, `Transport.tsx`);
-  the tempo numeral's `aria-label="BPM"` hides the value and its locked title says "loop length"
-  (`Transport.tsx`). [verified: Help, trigger; reader: words, tempo]
-- **Accessibility:** the keyboard show/hide cap (`app.tsx`) and GO LIVE / EDITOR
-  (`PluginControls.tsx`) still flip their label AND set `aria-pressed` ("Hide keyboard, pressed"); 30
-  tab stops reach lane 1, 14 of them synth pills (a roving-tabindex `radiogroup` per slot removes 10);
-  the `transport__beats` div carries an `aria-label` with no role. [reader]
+- **Vocabulary:** one feature, several words: END STOP / ENDING / STOPPING AT LOOP END / ■ NOW,
+  AUTO REC / LISTEN / WAITING FOR INPUT, track vs lane vs take in COPY's aria/title/Help (`Looper.tsx`,
+  `Transport.tsx`). Help itself now covers every control (2026-09-30). [reader]
 - **CSS discipline:** four pill implementations disagree on padding, radius and engaged alpha
   (`.tgl`, `.transport__tgl`, `.lp-pb`, `.fxp-mod__toggle`), plus two steppers (22 vs 24 px), three
-  button resets and three visually-hidden copies; colour literals bypass tokens in `src/app.css` (the
-  baked `%2346d4e8` caret without the other caret's INVARIANT note, `#14171d` ×4,
-  `rgba(148,168,215,.15)` ×5, `#6b7387` ×2, the popover shadow ×3); 18 font sizes and no type tokens,
-  the empty-plugin-scan note computing to 6.5–7 px at ≤1280 (`plugin-controls.css`); synth pills
-  render mixed case through the spec's uppercase `.tgl`, not a listed delta in `src/ui/AGENTS.md`.
-  [reader]
+  button resets and three visually-hidden copies; 18 font sizes and no type tokens; a few one-off
+  colour literals near a token (`#f6f1e7` on the tempo numeral, `--text`/`--engaged` at an alpha in
+  two glows and the splitter grip). [reader]
 - **Component seams:** `hasMaster`/`loopBars`/`anyTrackIn` are re-derived in three components;
   `Transport.tsx` rebuilds `toggleInput()`'s three false-cases from booleans [verified]; two effects
   write signals where a memo or JSX binding would do (`Looper.tsx`, `Transport.tsx`), and COPY's
