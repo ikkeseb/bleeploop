@@ -23,8 +23,9 @@
  * to it and takes a screenshot, so the clip keeps the tempo however slow the capture runs. The still is
  * the same jam at device scale 2 without the pointer or the camera, taken mid third take. The waveforms
  * and the meter come from seeded envelopes (strums, a muted riff, a lead line), not audio: the clip is
- * silent, as the browser build is. ffmpeg (with libwebp) encodes the frames at 15 fps, quality 35: the
- * camera moves change every pixel, and the clip stays under 3.5 MB. The frames stay in logs/readme-media/.
+ * silent, as the browser build is. ffmpeg (with libwebp) encodes the frames at 15 fps, quality 90 (about
+ * 7.5 MB): the camera moves change every pixel, and quality 35 smeared the text there. The frames stay
+ * in logs/readme-media/, so a re-encode needs no re-render.
  *
  * Asserts only that the page logged no console error. After a UI change, rerun it and look at the result.
  * `--until=<seconds>` renders the clip's frames up to there and skips the still and the encode.
@@ -38,7 +39,7 @@ import { arg, probe } from '../harness/probe.ts';
 
 const VIEWPORT = { width: 1280, height: 820 };
 const FPS = 20; // captured
-const CLIP_FPS = 15; // encoded: the camera moves change every pixel, and the clip must stay under 3.5 MB
+const CLIP_FPS = 15; // encoded: every camera-move frame is a whole new picture, so each one costs size
 const RATE = 48000;
 const BPM = 140;
 const PEAK_FRAMES = 1024; // the engine's waveform bin (`lf-engine/src/overview.rs`)
@@ -510,7 +511,7 @@ await probe(async ({ browser, open }) => {
   await still.context.close();
 
   execFileSync('ffmpeg', ['-y', '-loglevel', 'error', '-framerate', String(FPS), '-i', `${framesDir}/f%04d.png`,
-    '-vf', `fps=${CLIP_FPS},scale=1280:820:flags=area`, '-c:v', 'libwebp_anim', '-loop', '0', '-quality', '35', '-compression_level', '6', CLIP],
+    '-vf', `fps=${CLIP_FPS},scale=1280:820:flags=area`, '-c:v', 'libwebp_anim', '-loop', '0', '-quality', '90', '-compression_level', '6', CLIP],
     { stdio: 'inherit' });
   console.log(`wrote ${CLIP} and ${STILL}`);
   assert.deepEqual(errors, [], 'no console error or uncaught page error');

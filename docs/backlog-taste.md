@@ -152,8 +152,8 @@ not here.
   engine change. A spectrum needs per-lane band levels in the feed. Neither sees lane FX or the live
   input.
 - The README clip, second round (2026-09-30, built, unseen): a pointer clicks through the jam (IN FX
-  ECHO, DELAY on track 1, an amp-sim swap) under eased zooms; 37 s at 15 fps, quality 35, 3.5 MB.
-  Text a little soft at that quality; the pointer stays over the stage view. Keep, trim, or retune?
+  ECHO, DELAY on track 1, an amp-sim swap) under eased zooms; 37 s at 15 fps, quality 90 (7.5 MB,
+  after quality 35 looked blocky). The pointer stays over the stage view: keep, or park it off-screen?
 
 ## Craft — `pnpm check` + screenshots, no ear
 
