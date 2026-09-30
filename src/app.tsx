@@ -266,12 +266,14 @@ export function App() {
         <div class="tools">
           <SessionTools />
           {/* Keyboard show/hide — always available (the keyboard exists in every build), so this is the
-              restore affordance when the on-screen keyboard is hidden. Engaged = visible. */}
+              restore affordance when the on-screen keyboard is hidden. Engaged = visible. One accessible
+              name, the state through aria-pressed (a name that flips reads "Hide keyboard, pressed"); the
+              title still says the action. */}
           <button
             type="button"
             class="tool tool--kbd"
             classList={{ 'tool--on': layoutStore.keyboardVisible() }}
-            aria-label={layoutStore.keyboardVisible() ? `Hide ${keyboardNoun()}` : `Show ${keyboardNoun()}`}
+            aria-label={`On-screen ${keyboardNoun()}`}
             aria-pressed={layoutStore.keyboardVisible()}
             title={layoutStore.keyboardVisible() ? `Hide ${keyboardNoun()}` : `Show ${keyboardNoun()}`}
             onClick={layoutStore.toggleKeyboardHidden}
@@ -330,11 +332,11 @@ export function App() {
             type="button"
             class="tool tool--help"
             classList={{ 'tool--on': helpOpen(), 'tool--badge': updateOffered() !== null }}
-            aria-label={updateOffered() ? 'Keyboard & layout help, update ready' : 'Keyboard & layout help'}
+            aria-label={updateOffered() ? 'Help, update ready' : 'Help'}
             aria-expanded={helpOpen()}
             aria-controls="lf-help-popover"
             ref={helpBtn}
-            title={updateOffered() ? 'Help: an update is ready' : 'Keyboard & layout help'}
+            title={updateOffered() ? 'Help: an update is ready' : 'Help'}
             onClick={openHelp}
           >
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
@@ -391,7 +393,7 @@ export function App() {
             class="settings-popover"
             id="lf-help-popover"
             role="dialog"
-            aria-label="Keyboard & layout help"
+            aria-label="Help"
             tabindex={-1}
             ref={focusPanel}
             onClick={(e) => e.stopPropagation()}

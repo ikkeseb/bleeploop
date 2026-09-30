@@ -13,13 +13,13 @@ import './help.css';
 /**
  * Help / quick-reference popover, ordered by the promise (an update the updater offers sits above it):
  * the first screen is guitar, the looper keys and the pedals (every looper action by foot); then the
- * looper + transport controls, the other layers
+ * looper, the song-level controls (▶/■ ALL, END STOP, FADE, ✕ ALL), the transport, the other layers
  * (a MIDI controller, computer keys as a fallback), the play map, and the layout move/hide/resize
- * affordances. The keyboard is the fallback play path, so its sections come last. Same popover
+ * affordances (the stage view among them). The keyboard is the fallback play path, so its sections come last. Same popover
  * pattern as AudioSettings (a command-bar `.tool` cap → a `<Show>`-mounted panel). The drum-pad rows
  * read from DRUM_KIT, the piano legend from COMPUTER_MAP and the looper keys from KEY_ACTIONS, so none
- * can drift from the real controls. The looper/transport copy mirrors the controls in Looper.tsx +
- * Transport.tsx.
+ * can drift from the real controls. The looper/transport copy mirrors the controls in Looper.tsx,
+ * Transport.tsx, InputFx.tsx and FxPanel.tsx: a control's behaviour changes there first, then here.
  */
 
 const PITCH_NAMES = ['C', 'C♯', 'D', 'D♯', 'E', 'F', 'F♯', 'G', 'G♯', 'A', 'A♯', 'B'] as const;
@@ -82,6 +82,7 @@ export function Help() {
           <li>Pick an amp plugin as a slot's source, pick its input (<span class="help__note">In 1</span>, <span class="help__note">In 2</span>…) and use <span class="help__note">GO LIVE</span>. <span class="help__note">INPUT LIVE</span> means that slot hears its input and monitors it natively</li>
           <li>Raw input (a hardware synth, a mic): set a slot's source to <span class="help__note">Off</span>, pick its input and use GO LIVE. It is heard and recorded dry, and an Off slot plays no notes. Both slots can be live at once, each on its own input</li>
           <li>Each slot's volume sets its synth, plugin or input level. Synths and plugins feed the looper directly; the bar beside IN FX shows record level</li>
+          <li><span class="help__note">IN FX</span> puts <span class="help__note">ECHO</span>, <span class="help__note">REVERB</span> and <span class="help__note">RING MOD</span> on the live input, before the looper: what they add is heard and recorded, the dry sound stays untouched. The pill lights while any of them is on</li>
         </ul>
       </section>
 
@@ -123,6 +124,7 @@ export function Help() {
           <li><span class="help__note">▶ / ■</span> plays or stops a track &middot; <span class="help__note">CLR</span> clears it (press twice to confirm)</li>
           <li><span class="help__note">↶ UNDO</span> undoes the last overdub layer or trim (press again to redo)</li>
           <li><span class="help__note">FX</span> opens a track's effects &middot; <span class="help__note">MUTE</span> silences it &middot; the volume slider has a 0 dB detent at 1.0</li>
+          <li><span class="help__note">DUB FEEDBACK</span>, last in the FX drawer, is what an overdub keeps of the layers under it: 100 % keeps them all, 0 % replaces them, and in between the old layers fade pass by pass</li>
           <li><span class="help__note">↺ REV</span> reverses a track in place. Overdub is blocked while reversed</li>
           <li><span class="help__note">⧉ COPY</span> copies a take to the first empty track</li>
           <li><span class="help__note">✂ TRIM</span> keeps a track's first bars and repeats them across the loop. The loop keeps its length</li>
@@ -133,11 +135,22 @@ export function Help() {
       </section>
 
       <section class="help__sec">
+        <h3 class="help__h">Whole song <span class="help__tag">every track at once</span></h3>
+        <ul class="help__list">
+          <li><span class="help__note">▶ ALL</span> starts every stopped track together &middot; <span class="help__note">■ ALL</span> stops them all; a recording or overdub commits its take and stops at once</li>
+          <li><span class="help__note">END STOP</span> on: a track's stop and ■ ALL wait for the end of the loop; recording and overdub still stop at once. While tracks wait, ■ ALL reads <span class="help__note">■ NOW</span>, and a second stop lands right away</li>
+          <li><span class="help__note">FADE</span> fades every playing track out over its bars (1, 2, 4 or 8, from the stepper beside it) and stops them on the bar line; press it again while <span class="help__note">FADING</span> to stop now. Volumes never move, so ▶ ALL brings the tracks back</li>
+          <li><span class="help__note">✕ ALL</span> clears every track and resets the loop length, which unlocks the tempo (press twice to confirm)</li>
+        </ul>
+      </section>
+
+      <section class="help__sec">
         <h3 class="help__h">Transport &amp; tempo</h3>
         <ul class="help__list">
           <li>A 1-bar count-in (four clicks) leads the first recording. You come in on the counted "1", not the button press</li>
           <li><span class="help__note">CLICK</span> toggles the metronome (its own volume, never recorded, silent while nothing runs)</li>
           <li><span class="help__note">FIXED N</span> records exactly N bars and auto-stops on the downbeat. Off, every take runs until you stop it</li>
+          <li><span class="help__note">RETAKE</span> keeps recording round the loop until you stop; STOP, REC/DUB or REC on another track keeps the last complete pass. The first track needs FIXED; on later takes FIXED is ignored while RETAKE is on</li>
           <li><span class="help__note">AUTO REC · SENS</span> replaces the first count-in: arm the track, then playing starts the take. Raise sensitivity for quieter input; the cyan tick on the record level is the trigger</li>
           <li>Click the <span class="help__note">BPM</span> to type it, or <span class="help__note">TAP</span> a tempo. Tempo locks to the first loop (clear all to change)</li>
         </ul>
@@ -208,14 +221,15 @@ export function Help() {
         <ul class="help__list">
           <li>Drag any divider to resize &middot; double-click it to reset</li>
           <li>Keyboard bar: move it above / below the looper, or hide it</li>
-          <li>Restore a hidden keyboard from the keyboard icon at the far right of the command bar</li>
+          <li>The keyboard icon among the command bar's tools shows a hidden keyboard again</li>
+          <li><span class="help__note">Stage view</span> (<kbd class="help__kbd">B</kbd>, the stage icon, or a learned pedal) fills the window with each track's state, the bar and the beat, readable from across the room. The looper keys stay live; B, Esc or <span class="help__note">EXIT</span> leaves it</li>
         </ul>
       </section>
 
       <section class="help__sec">
         <h3 class="help__h">Session</h3>
         <ul class="help__list">
-          <li><span class="help__note">⬇</span> (far right) exports every track + a master mix as WAV, with a session.json, in one zip</li>
+          <li><span class="help__note">⬇</span> (the export icon among the command bar's tools) exports every track + a master mix as WAV, with a session.json and each loaded plugin's settings, in one zip</li>
           <li><span class="help__note">⬆</span> imports such a zip, only while the looper is empty; the loops are restored locally on reopen anyway</li>
         </ul>
       </section>

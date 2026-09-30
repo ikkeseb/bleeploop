@@ -42,7 +42,7 @@ await probe(async ({ open }) => {
 
   const initialBpm = await page.evaluate(() => window.__lf.clock.bpm());
   const edit = async value => {
-    await page.getByRole('button', { name: 'BPM', exact: true }).click();
+    await page.getByRole('button', { name: /^\d+ BPM$/ }).click();
     await page.locator('.transport__bpm-input').fill(String(value));
   };
   await clearSent();

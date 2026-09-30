@@ -33,7 +33,7 @@ await probe(async ({ browser, open }) => {
 
   /** Open Help, bring About this build into view and return its section. */
   const openAbout = async (page) => {
-    await page.getByRole('button', { name: 'Keyboard & layout help' }).click();
+    await page.getByRole('button', { name: 'Help', exact: true }).click();
     const about = page.locator('#lf-help-popover .help__sec', { has: page.getByRole('heading', { name: 'About this build' }) });
     await about.scrollIntoViewIfNeeded();
     return about;

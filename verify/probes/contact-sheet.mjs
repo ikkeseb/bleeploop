@@ -267,14 +267,14 @@ await probe(async ({ browser, open }) => {
 
       scene = '9-amp-sim-live';
       await page.getByRole('combobox', { name: 'Source for slot 1', exact: true }).selectOption({ label: 'Probe Amp Sim (vst3)' });
-      await page.getByRole('button', { name: 'Stop live input for slot 1', exact: true }).waitFor();
-      await page.getByRole('button', { name: 'Close editor for slot 1', exact: true }).waitFor();
+      await page.getByRole('button', { name: 'Live input for slot 1', exact: true, pressed: true }).waitFor();
+      await page.getByRole('button', { name: 'Editor for slot 1', exact: true, pressed: true }).waitFor();
       await page.waitForTimeout(250);
       await shoot(scene);
 
       scene = '10-amp-sim-idle';
-      await page.getByRole('button', { name: 'Stop live input for slot 1', exact: true }).click();
-      await page.getByRole('button', { name: 'Go live for slot 1', exact: true }).waitFor();
+      await page.getByRole('button', { name: 'Live input for slot 1', exact: true, pressed: true }).click();
+      await page.getByRole('button', { name: 'Live input for slot 1', exact: true, pressed: false }).waitFor();
       await page.waitForTimeout(250);
       await shoot(scene);
 

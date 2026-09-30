@@ -56,7 +56,7 @@ export function InputPick(props: { slot: 0 | 1 }) {
 
 /**
  * GO LIVE / INPUT LIVE: the slot hears its own input, through its effect or dry while it is Off, and
- * the engine plays it at low latency.
+ * the engine plays it at low latency. One accessible name; aria-pressed carries the state.
  */
 export function LiveButton(props: { slot: 0 | 1 }) {
   const slot = props.slot;
@@ -69,7 +69,7 @@ export function LiveButton(props: { slot: 0 | 1 }) {
         class="tgl live"
         classList={{ 'on-green': live() }}
         aria-pressed={live()}
-        aria-label={live() ? `Stop live input for slot ${slot + 1}` : `Go live for slot ${slot + 1}`}
+        aria-label={`Live input for slot ${slot + 1}`}
         disabled={slotPendingCounts()[slot] > 0 || liveBusy(slot)}
         onClick={(e) => {
           e.stopPropagation();

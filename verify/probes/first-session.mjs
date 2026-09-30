@@ -105,7 +105,7 @@ await probe(async ({ open, browser }) => {
   await emptyEngine(page);
   assert.equal(await page.getByRole('button', { name: 'Export loops as a zip of WAV files' }).isDisabled(), true, 'nothing to export');
   assert.equal(await page.getByRole('button', { name: 'Import a session zip' }).isEnabled(), true, 'an empty looper imports');
-  await page.getByRole('button', { name: 'Keyboard & layout help' }).click();
+  await page.getByRole('button', { name: 'Help', exact: true }).click();
   assert.match(await page.locator('#lf-help-popover').innerText(), /Session/);
   await page.keyboard.press('Escape');
 

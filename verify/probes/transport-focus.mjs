@@ -58,7 +58,7 @@ await probe(async ({ open }) => {
   const sent = () => page.evaluate(() => window.__lf.native.sent.slice());
   const clearSent = () => page.evaluate(() => void (window.__lf.native.sent.length = 0));
   const recDubs = async () => (await sent()).filter((c) => c.Action === 'RecDub').length;
-  const helpBtn = page.getByRole('button', { name: 'Keyboard & layout help' });
+  const helpBtn = page.getByRole('button', { name: 'Help', exact: true });
   const helpPanel = page.locator('#lf-help-popover');
 
   // 1. Pointer-open Help, Escape closes it, Space arms REC (not a popover re-open via the returned focus).
@@ -92,7 +92,7 @@ await probe(async ({ open }) => {
   // 3. Real controls keep the key: Space in the BPM field does not arm; Tab to BPM plus + Enter
   //    activates that button, not PLAY/STOP.
   await clearSent();
-  await page.getByRole('button', { name: 'BPM', exact: true }).click();
+  await page.getByRole('button', { name: /^\d+ BPM$/ }).click();
   // The field takes focus one task after it mounts (Transport.tsx startEditFocused): wait for the
   // focus, not the element, or Space lands on <body> and arms lane 1 — a race no hand can win.
   await page.locator('.transport__bpm-input').waitFor();

@@ -197,10 +197,10 @@ export function Transport(props: { returnFocus?: (el: HTMLElement | undefined) =
         ) : (
           <button
             class="transport__bpm-num"
-            aria-label="BPM"
+            aria-label={`${clock.bpm()} BPM${clock.bpmLocked() ? ', locked' : ''}`}
             disabled={clock.bpmLocked()}
             onClick={() => !clock.bpmLocked() && startEditFocused()}
-            title={clock.bpmLocked() ? 'Clear all to change loop length' : 'Click to edit BPM'}
+            title={clock.bpmLocked() ? 'Tempo locked to the loop. Clear all to change' : 'Click to edit BPM'}
           >
             {clock.bpm()}
           </button>
@@ -219,6 +219,7 @@ export function Transport(props: { returnFocus?: (el: HTMLElement | undefined) =
           <span class="transport__bpm-unit">BPM</span>
           <div
             class="transport__beats"
+            role="img"
             aria-label={clock.running() ? `Beat ${clock.beat() + 1}` : 'Transport idle'}
           >
             <For each={[0, 1, 2, 3]}>

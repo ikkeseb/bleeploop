@@ -113,13 +113,13 @@ export function PluginBar(props: {
 
   return (
     <>
-      {/* editor toggle (open = the lit warm-white `.on` legend) */}
+      {/* editor toggle (open = the lit warm-white `.on` legend; one accessible name, the state in aria-pressed) */}
       <button
         type="button"
         class="tgl"
         classList={{ on: editorOpen() }}
         aria-pressed={editorOpen()}
-        aria-label={editorOpen() ? `Close editor for slot ${props.slot + 1}` : `Open editor for slot ${props.slot + 1}`}
+        aria-label={`Editor for slot ${props.slot + 1}`}
         disabled={sourcePending() || editorBusy()}
         onClick={() => void toggleEditor()}
       >
