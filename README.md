@@ -11,7 +11,7 @@ every take lands on the grid by itself: there is no latency setting.
 
 [![Download for Windows](https://img.shields.io/github/v/release/ikkeseb/bleeploop?label=Download%20for%20Windows&logo=windows&style=for-the-badge&color=2ea043)](https://github.com/ikkeseb/bleeploop/releases/latest)
 
-![A jam built track by track: a count-in, three two-bar takes over each other, then the stage view](docs/media/bleeploop-demo.webp)
+![A jam clicked through track by track: three two-bar takes over each other, ECHO on the guitar in IN FX, DELAY on track 1, an amp-sim swap in slot A, then the stage view](docs/media/bleeploop-demo.webp)
 
 ## Highlights
 

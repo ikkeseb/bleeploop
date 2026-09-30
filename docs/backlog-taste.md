@@ -151,10 +151,9 @@ not here.
   projects. The UI already holds each lane's waveform bins and playhead, so a wave-style view needs no
   engine change. A spectrum needs per-lane band levels in the feed. Neither sees lane FX or the live
   input.
-- The README clip, next round (owner, 2026-09-30): a pointer that clicks through a jam as a player
-  would (a lane's FX, a plugin swap, IN FX), and slow pans and zooms onto what changes.
-  `verify/probes/readme-media.mjs` steps frames on a paused clock, so Playwright's recorded cursor
-  does not apply: draw the pointer in the page, and compose the camera over the captured frames.
+- The README clip, second round (2026-09-30, built, unseen): a pointer clicks through the jam (IN FX
+  ECHO, DELAY on track 1, an amp-sim swap) under eased zooms; 37 s at 15 fps, quality 35, 3.5 MB.
+  Text a little soft at that quality; the pointer stays over the stage view. Keep, trim, or retune?
 
 ## Craft — `pnpm check` + screenshots, no ear
 
