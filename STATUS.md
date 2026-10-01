@@ -5,33 +5,13 @@ The owner's ear, eye or decision on the PC: ONE ordered lap plus the decisions t
 `docs/plans/tester-feedback.md` (not rig stops; machine proofs do not close them). The app runs one
 native audio engine (`docs/ARCHITECTURE.md`); this is the engine lap.
 
-**Machine verification, Windows, 2026-09-26 (engine mode):** `pnpm rust:check` 4/4 (438 tests), `pnpm check`
-(40 guards) and `pnpm build` green; the browser probes 43/43 (`pnpm probe --ci`); on the rig (Scarlett
-2i2, ASIO 128, loopback cable) `native:engine-smoke` with Pro-Q, `native:engine-recovery` (export,
-import, recovery after a kill, real audio) and three same-size relaunches landing within 0.1 ms of
-the driver's report; the web path's `native:smoke` in its own profile. Later that day:
-`native:engine-loopback` (six launches, ASIO 64/128/256) and the release build on the engine,
-`release:smoke`, in a fresh profile. In the evening, after multiply, IN FX, the stage view and
-Help's diagnostics landed: `pnpm rust:check` (462 tests), `pnpm check`, `pnpm build`, the browser
-probes 45/45; on the rig `native:engine-smoke` with Pro-Q and `native:engine-loopback` with its
-multiply phases (three launches, 30/30 bars at 64/128/256) and IN FX's echo (`--echo=1`, 12/12 at 128),
-and MIC's gain after a plugin unload measured through the cable. On 2026-09-27, after the free
-multiply (E10) and TRIM (F16): `pnpm rust:check` (473 tests), the browser probes 46/46, and on the rig
-`native:engine-loopback` with its new phases G and H, 16/16 bars at 64/128/256. After the engine
-review fixes, FADE and DUB FEEDBACK: `pnpm rust:check` (533 tests), `pnpm verify:jam`, and on the rig
-`native:engine-loopback` with phase I (FADE), 20/20 bars at 64/128/256, and `--echo=1` at 128 with the
-echo checked on every click (one of two launches failed drift by 0.004 ms/min after a one-frame step
-inside take A; the relaunch passed). On 2026-09-28, after the per-slot input, the ASIO driver work and
-the record-compensation latch: `pnpm rust:check` (562 tests), the browser probes 53/53, and on the rig
-`native:engine-loopback` 20/20 at 64 and 256 and 18/20 at 128 (a detector reading v0.1.0 repeats,
-`docs/VERIFY.md`), and `release:smoke` 6/6 in a fresh profile with the input taken on an Off slot.
-On 2026-09-29, with the Web Audio path deleted (Stage 6): `pnpm check` (15 guards), `pnpm build`,
-`pnpm rust:check` (569 tests) and the browser probes 40/40 on the engine fake; on the rig
-`native:smoke` 30/30, `native:survey`, `native:swap` (the baseline's three), `native:recall`,
-`native:tone-recall`, `native:engine-smoke` with Pro-Q, `native:engine-recovery`,
-`native:engine-loopback` 20/20 at 64 (on a relaunch) and 256 and 18/20 at 128 (the same detector
-reading), and `release:smoke` 6/6 in a fresh profile and in one that ran a COOP/COEP build before.
-Driver latency reports are not guitar latency; after a relevant change, rerun only the affected check.
+**Machine verification (Windows):** the push gates are `AGENTS.md`'s. The rig probes, when to run
+each, and their baselines and latest readings: `docs/VERIFY.md` § When to run the plugin probes. Last rig pass, 2026-09-29 (the
+engine-only app): `native:smoke`, `survey`, `swap`, `recall`, `tone-recall`, `engine-smoke`,
+`engine-recovery` and `release:smoke` green; `native:engine-loopback` 20/20 at 64 and 256, 18/20 at
+128 (a detector reading v0.1.0 repeats). Since then: `native:export-master` (2026-10-01, WASAPI) for
+the export's engine-rendered master. Driver latency reports are not guitar latency; after a relevant
+change, rerun only the affected check.
 
 **Last play: 2026-09-28** (engine, a local release build, ASIO; a second player on a WASAPI build
 of their own): worked well overall, no issue found; the WASAPI player heard delay on DI monitoring
