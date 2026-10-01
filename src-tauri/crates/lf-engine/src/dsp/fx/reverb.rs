@@ -22,8 +22,8 @@ use crate::dsp::convolver::Convolver;
 use crate::dsp::crossfade::CrossFade;
 use crate::dsp::param::{AudioParam, Rate, ToneParam, Units, QUANTUM};
 
-/// The bus reverb's decay and pre-delay in seconds (`REVERB_DECAY_SECONDS`,
-/// `REVERB_PRE_DELAY_SECONDS` in `src/ui/state/fx-metadata.ts`).
+/// The bus reverb's decay and pre-delay in seconds: the values the UI built Tone's `Reverb` with
+/// (`makeReverbBus`) when Tone rendered the FX; the engine owns them now.
 pub const REVERB_DECAY: f64 = 2.6;
 pub const REVERB_PRE_DELAY: f64 = 0.02;
 

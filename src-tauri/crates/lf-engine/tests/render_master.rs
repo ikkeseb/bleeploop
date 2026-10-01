@@ -1,16 +1,16 @@
 //! The export's wet master rendered by the engine ([`lf_engine::render`]), which replaced the Tone
-//! render (`src/session/render.ts`, removed): its length, its alignment with the stems (frame 0 is loop position
-//! 0: the limiter's pre-delay is compensated, which the Tone export did not), a reversed lane, every lane
-//! playing (a STOPPED one too), the mix settings, a delay's echo wrapping to the head, the warm-up's
-//! steady state, no click and no instrument whatever the settings say, the same bits at any block size,
-//! and every refusal an `Err`.
+//! render (`src/session/render.ts`, removed): its length, its alignment with the stems (frame 0 is loop
+//! position 0: the limiter's pre-delay is compensated, which the Tone export did not), a reversed lane,
+//! every lane playing (a STOPPED one too), the mix settings, a delay's echo wrapping to the head, the
+//! warm-up's steady state (a delay with the reverb after it, a delay at full feedback), no click and no
+//! instrument whatever the settings say, the same bits at any block size, and every refusal an `Err`.
 
 mod common;
 
 use lf_engine::dsp::compressor::Compressor;
-use lf_engine::dsp::fx::{FxKind, FxParam};
+use lf_engine::dsp::fx::{FxKind, FxParam, MAX_FEEDBACK};
 use lf_engine::grid::{frames_per_bar, Frame};
-use lf_engine::render::{wet_master, wet_master_with, RenderOptions, WetMaster};
+use lf_engine::render::{wet_master, wet_master_with, RenderOptions, WetMaster, TAIL_THRESHOLD};
 use lf_engine::{Command, InputSend, Instrument, Load, LoadTrack, NoteTarget};
 
 const RATE: u32 = 48_000;
@@ -202,14 +202,50 @@ fn a_delay_echo_past_the_loop_end_rings_at_the_head() {
 fn one_more_warm_up_pass_moves_the_master_by_less_than_the_threshold() {
     let settings = delay_and_reverb(0.6);
     let out = render(vec![busy_lane(0)], &settings);
-    // 0.6 feedback: 19 echoes of 0.25 s, past the reverb's 2.62 s, over 2 s passes.
-    assert_eq!(out.warmup, 3);
+    // 0.6 feedback: 19 echoes of 0.25 s and a quantum (4.8 s), then the reverb's 2.62 s on the last of
+    // them (the lane's reverb send follows its delay): 7.42 s over 2 s passes. The longer of the two
+    // alone is 3 passes.
+    assert_eq!(out.warmup, 4);
     let more = wet_master_with(RATE, load(vec![busy_lane(0)]), &settings, RenderOptions { extra_warmup: 1, ..RenderOptions::default() }).unwrap();
     let diff = max_diff(&out.left, &more.left).max(max_diff(&out.right, &more.right));
     assert!(diff < 1e-4, "the kept pass moved by {diff}");
     // The tails are in it: the end of the loop rings with the delay and the reverb.
     assert!(peak(&out.left[MASTER - 10_000..]) > 1e-3, "a tail at the loop's end");
     assert!(out.left != out.right, "the reverb's stereo");
+}
+
+// f2)
+#[test]
+fn a_delay_at_full_feedback_warms_for_every_echo_with_its_quantum() {
+    // 23 bars at 300 BPM and 8 kHz: an 18.4 s loop. The 4n delay (0.2 s, the longest division) at the
+    // maximum feedback takes 180 recurrences to fall below the threshold, each its division plus the
+    // 128-frame quantum its feedback is late (16 ms here): 38.9 s, 2.11 passes, so 3. Counted without the
+    // quantum the tail is 36 s, 1.96 passes: 2, and the kept pass misses an echo above the threshold.
+    let (rate, bpm, bars) = (8_000, 300, 23);
+    let master = bars * frames_per_bar(bpm as f64, rate);
+    // One impulse at the loop's end: its echoes reach furthest into the passes after it.
+    let session = || {
+        let mut buf = vec![0.0f32; master as usize];
+        buf[master as usize - 1] = A;
+        Load { bpm, bars, master, tracks: vec![LoadTrack { index: 0, buf, peaks: Vec::new(), reversed: false, playing: true }], result: None }
+    };
+    let delay = |feedback: f64| {
+        [
+            Command::SetFxParam(0, FxParam::Time, 0.0),
+            Command::SetFxParam(0, FxParam::Feedback, feedback),
+            Command::SetFxParam(0, FxParam::Mix, 1.0),
+            Command::SetFxBypass(0, FxKind::Delay, false),
+        ]
+    };
+    // The first echo's level in the master: the one the threshold is relative to.
+    let echo = peak(&wet_master(rate, session(), &delay(0.0)).unwrap().left);
+    assert!(echo > 0.3 * A, "the echo is there: {echo}");
+    let out = wet_master(rate, session(), &delay(MAX_FEEDBACK)).unwrap();
+    assert_eq!(out.warmup, 3);
+    let more = wet_master_with(rate, session(), &delay(MAX_FEEDBACK), RenderOptions { extra_warmup: 1, ..RenderOptions::default() }).unwrap();
+    let diff = max_diff(&out.left, &more.left).max(max_diff(&out.right, &more.right));
+    let relative = diff / echo;
+    assert!(relative < TAIL_THRESHOLD as f32, "one more pass moved the kept pass by {relative} of the echo");
 }
 
 // g)

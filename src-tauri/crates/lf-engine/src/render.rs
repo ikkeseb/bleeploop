@@ -12,17 +12,27 @@
 //! so the render has no click, no instrument, no input sends, no plugin unit and a silent input. It
 //! renders contiguous blocks on one clock from frame 0, so the output is the same at any block size.
 //!
-//! Warm-up: whole loop passes until each enabled delay's echoes fall below [`TAIL_THRESHOLD`] and the
-//! reverb's tail (its decay plus pre-delay) has passed, at least one (the Tone render's
-//! `warmupPassesForFx`), read from the FX state the engine applied. The pass kept after them starts the
+//! Warm-up: whole loop passes, at least one, that cover the longest lane's tail: its enabled delay's
+//! echoes until they fall below [`TAIL_THRESHOLD`], each a division plus one render quantum after the
+//! last, and when its reverb send is on too, the reverb's decay plus pre-delay after the last echo
+//! (`warmup_passes`), read from the FX state the engine applied. The pass kept after them starts the
 //! limiter's pre-delay late, so the master's frame 0 is loop position 0, lined up with the stems (the
 //! Tone export kept whole passes, the pre-delay late).
+//!
+//! Known limits:
+//! - A rhythmic FX whose pattern spans several loops (a dotted stutter over one-bar loops) keeps one
+//!   phase of it, from a grid origin at loop position 0 (as the Tone render's), which can differ from live.
+//! - A transient playback state (a FADE in progress, a pending END STOP) is not rendered: every lane
+//!   plays at its stored mix.
+//! - A COPY destination's mix is the source's at the copy's event, not its command (the host's settings
+//!   memory, `copy_lane` in `src-tauri/src/engine_io/settings.rs`): a source moved between shows in it.
 //!
 //! Not the audio thread: this allocates (an engine, a load's buffers, the output) and may take seconds.
 //! Every refusal is an `Err` with a sentence; nothing here panics on a caller's input.
 
 use crate::api::{Command, ProcessContext};
 use crate::dsp::fx::{division_beats, FxKind, FxState, DIVISIONS, REVERB_DECAY, REVERB_PRE_DELAY};
+use crate::dsp::param::QUANTUM;
 use crate::engine::{Engine, EngineConfig};
 use crate::grid::{frames_per_bar, Frame, MAX_BPM, MIN_BPM};
 use crate::session::{Load, SessionJob};
@@ -139,7 +149,7 @@ pub fn wet_master_with(rate: u32, mut load: Load, settings: &[Command], options:
     let states: Vec<[FxState; 5]> = lanes.iter().filter(|&&i| i < crate::api::TRACK_COUNT).map(|&i| engine.fx().chain(i).get_state()).collect();
     let bpm = engine.clock().bpm();
     let beat_seconds = frames_per_bar(bpm as f64, rate) as f64 / 4.0 / rate as f64;
-    let warmup = warmup_passes(&states, beat_seconds, master as f64 / rate as f64)
+    let warmup = warmup_passes(&states, beat_seconds, master as f64 / rate as f64, rate)
         .checked_add(options.extra_warmup)
         .ok_or("export render: too many warm-up passes")?;
 
@@ -181,22 +191,28 @@ fn is_mix(command: &Command) -> bool {
     )
 }
 
-/// Whole loop passes (at least one) for each enabled delay's echoes to fall below [`TAIL_THRESHOLD`] and
-/// the reverb's tail to pass (the Tone render's `warmupPassesForFx`, on the engine's beat).
-fn warmup_passes(lanes: &[[FxState; 5]], beat_seconds: f64, loop_seconds: f64) -> u32 {
+/// Whole loop passes (at least one) that cover the session's longest tail: on each lane, its enabled
+/// delay's echoes until they fall below [`TAIL_THRESHOLD`] and, when its reverb send is on too, the
+/// reverb's tail (its decay plus pre-delay) after the last of them: the send follows the delay in the
+/// lane's chain (`FxChain::process`), so the reverb rings on the echoes. Each echo recurs a division
+/// plus one render quantum after the last: the feedback reaches the delay a quantum late
+/// (`dsp/fx/delay.rs`). An echo's level is the feedback to the power of the recurrences before it.
+fn warmup_passes(lanes: &[[FxState; 5]], beat_seconds: f64, loop_seconds: f64, rate: u32) -> u32 {
+    let quantum = QUANTUM as f64 / rate as f64;
     let mut tail: f64 = 0.0;
     for fx in lanes {
         let delay = fx[FxKind::Delay.index()];
         let [time, feedback, mix] = delay.params;
-        if !delay.bypassed && mix > 0.0 {
-            let delay_seconds = division_beats((time.max(0.0) as usize).min(DIVISIONS.len() - 1)) * beat_seconds;
+        let echoes = if !delay.bypassed && mix > 0.0 {
+            let recurrence = division_beats((time.max(0.0) as usize).min(DIVISIONS.len() - 1)) * beat_seconds + quantum;
             let repeats = if feedback > 0.0 { (TAIL_THRESHOLD.ln() / feedback.ln()).ceil().max(1.0) } else { 1.0 };
-            tail = tail.max(delay_seconds * repeats);
-        }
+            recurrence * repeats
+        } else {
+            0.0
+        };
         let reverb = fx[FxKind::Reverb.index()];
-        if !reverb.bypassed && reverb.params[0] > 0.0 {
-            tail = tail.max(REVERB_DECAY + REVERB_PRE_DELAY);
-        }
+        let decay = if !reverb.bypassed && reverb.params[0] > 0.0 { REVERB_DECAY + REVERB_PRE_DELAY } else { 0.0 };
+        tail = tail.max(echoes + decay);
     }
     (tail / loop_seconds).ceil().max(1.0) as u32
 }

@@ -949,8 +949,15 @@ const FROM_SNAPSHOT = { Playing: 'PLAYING', Stopped: 'STOPPED', Overdubbing: 'OV
 const TO_LOAD = { PLAYING: 'Playing', STOPPED: 'Stopped' } as const;
 
 /** The committed lanes: the engine's PCM (play order) with this store's mix; with `master`, the engine's
- * wet master too (or why it has none). */
+ * wet master too (or why it has none). The mix is read as the snapshot is asked for, the moment the
+ * engine renders its master from: a fader moved while the render runs (seconds) changes neither. */
 async function exportSnapshot(options: { master?: boolean } = {}): Promise<StemSnapshot> {
+  const mix = Array.from({ length: ENGINE_LANES }, (_, i) => ({
+    volume: volumes[i][0](),
+    muted: mutes[i][0](),
+    fx: fx[i].map((s) => ({ bypassed: s.bypassed, params: { ...s.params } })),
+    dubFeedback: dubFeedbacks[i][0](),
+  }));
   const { header, pcm, master } = decodeSnapshot(await platform.engine.snapshot(options.master === true));
   return {
     ...(master ? { master } : {}),
@@ -960,11 +967,11 @@ async function exportSnapshot(options: { master?: boolean } = {}): Promise<StemS
     tracks: header.tracks.map((t, k) => ({
       index: t.index,
       pcm: pcm[k],
-      volume: volumes[t.index][0](),
-      muted: mutes[t.index][0](),
+      volume: mix[t.index].volume,
+      muted: mix[t.index].muted,
       reversed: t.reversed,
-      fx: fx[t.index].map((s) => ({ bypassed: s.bypassed, params: { ...s.params } })),
-      dubFeedback: dubFeedbacks[t.index][0](),
+      fx: mix[t.index].fx,
+      dubFeedback: mix[t.index].dubFeedback,
       state: FROM_SNAPSHOT[t.state],
     })),
   };

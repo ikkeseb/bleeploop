@@ -162,6 +162,9 @@ export interface EngineFake extends EngineHost {
   masterError: string | null;
   /** Every `snapshot()`'s `master` flag, in order: an export asks for the master, a recovery never. */
   readonly snapshots: boolean[];
+  /** A probe-scripted render in progress: while set, `snapshot()` reads its answer when asked and hands
+   * it back once this settles, as the engine's snapshot returns only after its master render. */
+  snapshotHold: Promise<void> | null;
   /** Every session `loadSession()` received. */
   readonly loadedSessions: Uint8Array[];
   /** Every Share endpoint `setShare()` received. */
@@ -206,6 +209,17 @@ function fakeMaster(header: SnapshotHeader, pcm: readonly Float32Array[], sent: 
   return out;
 }
 
+/** What the fake's `snapshot(master)` answers, read from its state when asked. */
+function snapshotAnswer(master: boolean): ArrayBuffer {
+  const bytes = webEngineFake.snapshotBytes?.slice(0) ?? encodeSessionBytes({ rate: fakeRate(), masterLengthFrames: 0, bpm: 120, tracks: [] }, []).buffer;
+  if (!master || !webEngineFake.snapshotBytes) return bytes;
+  const { header, pcm } = splitSessionBytes(bytes);
+  const stems = header as SnapshotHeader;
+  if (webEngineFake.masterError !== null) return encodeSessionBytes({ ...stems, masterError: webEngineFake.masterError }, pcm).buffer;
+  const mono = fakeMaster(stems, pcm, webEngineFake.sent);
+  return encodeSessionBytes({ ...stems, master: { frames: stems.masterLengthFrames } }, pcm, { left: mono, right: mono.slice() }).buffer;
+}
+
 /** Forced on only by a DEV probe's init script (`verify/probes/engine-seam.mjs`), before the app loads.
  * Read when asked, never at module load: Node guards import this file without Vite's env. */
 function engineForced(): boolean {
@@ -233,6 +247,7 @@ export const webEngineFake: EngineFake = {
   snapshotBytes: null,
   masterError: null,
   snapshots: [],
+  snapshotHold: null,
   loadedSessions: [],
   shares: [],
   slotInputChannels: [],
@@ -277,13 +292,10 @@ export const webEngineFake: EngineFake = {
   async snapshot(master) {
     if (!engineForced()) throw new Error(NO_ENGINE);
     webEngineFake.snapshots.push(master);
-    const bytes = webEngineFake.snapshotBytes?.slice(0) ?? encodeSessionBytes({ rate: fakeRate(), masterLengthFrames: 0, bpm: 120, tracks: [] }, []).buffer;
-    if (!master || !webEngineFake.snapshotBytes) return bytes;
-    const { header, pcm } = splitSessionBytes(bytes);
-    const stems = header as SnapshotHeader;
-    if (webEngineFake.masterError !== null) return encodeSessionBytes({ ...stems, masterError: webEngineFake.masterError }, pcm).buffer;
-    const mono = fakeMaster(stems, pcm, webEngineFake.sent);
-    return encodeSessionBytes({ ...stems, master: { frames: stems.masterLengthFrames } }, pcm, { left: mono, right: mono.slice() }).buffer;
+    const answer = snapshotAnswer(master);
+    const hold = webEngineFake.snapshotHold;
+    if (hold) await hold;
+    return answer;
   },
   async loadSession(bytes) {
     if (!engineForced()) throw new Error(NO_ENGINE);

@@ -43,7 +43,8 @@ export interface BuildExportOptions {
  * stereo master mix, packed into a single timestamped .zip — everything exportLoops does EXCEPT the
  * download itself (the seam that lets a headless probe byte-parse the archive without touching
  * <a download>).
- * bpm/bars are passed in from the UI (the clock authority lives there). Per-track WAVs are the RAW
+ * bpm/bars are the session's tempo and length as the UI read them from the engine's feed, for
+ * session.json (the engine's device-frame clock is the authority). Per-track WAVs are the RAW
  * capture (unity, pre-volume/pre-mute/pre-limiter/pre-FX) — EVERY committed track (incl. STOPPED)
  * exports its stem, so no audio is ever lost. When included, the master (session.json `master.kind`
  * 'wet-engine') is the engine's own: the snapshot asks for it, and lf-engine renders it offline from the
@@ -73,6 +74,9 @@ export async function buildExportBundle(
   // Each track carries the state it had as its PCM was read (the engine reads both in one snapshot), so
   // they can't disagree; session.json keeps it for the import.
   const withMaster = options.includeMaster !== false;
+  // The master level as the snapshot is asked for, as the lanes' mix is (`exportSnapshot`): the moment
+  // the engine renders the master from, not after its render.
+  const masterLevel = source.masterLevel();
   const snap = await source.exportSnapshot({ master: withMaster });
   if (snap.masterLengthFrames <= 0 || snap.tracks.length === 0) return null; // button should already guard this
   const base = exportBase();
@@ -83,7 +87,6 @@ export async function buildExportBundle(
     // The engine's wet master; the dry mixdown as the fallback so one render failure can't lose the
     // whole export. Both mix every committed track, STOPPED included; mute and volume apply as heard.
     // Recovery snapshots skip this whole branch: their job is preserving editable stems, not a mix.
-    const masterLevel = source.masterLevel();
     let masterChannels: Float32Array[];
     let masterKind: Exclude<SessionMasterKind, 'wet-v1'>;
     if (snap.master) {

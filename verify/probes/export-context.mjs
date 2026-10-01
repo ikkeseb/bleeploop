@@ -10,6 +10,8 @@
  *   the dry mixdown (`master.kind` 'dry-fallback'), its console.error naming the engine's error. Import
  *   refuses an archive over its size cap and a small archive whose central directory repeats one payload
  *   128 times (entry cap 9).
+ * - A lane's volume and the master's moved while the engine renders the master (the fake holds its
+ *   snapshot answer) land in neither: session.json keeps the mix from when the export asked.
  *
  * The master here is the fake's stand-in (a dry sum under volume and mute), NOT the engine's sound: what
  * the master holds (FX, a STOPPED lane in it, a muted one out, alignment) is lf-engine's
@@ -172,6 +174,37 @@ await probe(async ({ open }) => {
       fallbackKind, fallbackShape, oversizedRejected, cap, repeatedPayloadRejected, rejectionMs,
       pass: fallbackKind === 'dry-fallback' && JSON.stringify(fallbackShape) === JSON.stringify([96000, 96000])
         && oversizedRejected && repeatedPayloadRejected };
+  }));
+
+  // ── A fader moved while the master renders ────────────────────────────────────────────────────────
+  await engineHolds(editable, 'Playing');
+  results.push(await page.evaluate(async () => {
+    const lf = window.__lf;
+    const { session } = await import('/src/ui/state/audio.ts');
+    const { parseZip } = await import('/src/session/unzip.ts');
+    const volume = session.trackVolume(0);
+    const level = session.masterLevel();
+    let release = () => {};
+    lf.native.snapshotHold = new Promise((resolve) => (release = resolve));
+    let meta;
+    try {
+      const asked = lf.native.snapshots.length;
+      const pending = lf.buildExportBundle({ bpm: 120, bars: 1 }, {}, session);
+      // The engine has the request and renders: the player moves lane 1's fader and the master's.
+      while (lf.native.snapshots.length === asked) await new Promise((resolve) => setTimeout(resolve, 5));
+      lf.looper.setVolume(0, volume / 2);
+      lf.master.setVolume(level / 2);
+      release();
+      const entries = parseZip((await pending).zipBytes);
+      meta = JSON.parse(new TextDecoder().decode(entries.find((entry) => entry.name.endsWith('-session.json')).data));
+    } finally {
+      lf.native.snapshotHold = null;
+      release();
+    }
+    const kept = { volume: meta.tracks[0].volume, level: meta.master.level };
+    const moved = { volume: session.trackVolume(0), level: session.masterLevel() };
+    return { name: 'A fader moved while the master renders stays out of session.json', before: { volume, level }, kept, moved,
+      pass: kept.volume === volume && kept.level === level && moved.volume !== volume && moved.level !== level };
   }));
 
   console.log(JSON.stringify(results, null, 2));
