@@ -6,12 +6,14 @@ The owner's ear, eye or decision on the PC: ONE ordered lap plus the decisions t
 native audio engine (`docs/ARCHITECTURE.md`); this is the engine lap.
 
 **Machine verification (Windows):** the push gates are `AGENTS.md`'s. The rig probes, when to run
-each, and their baselines and latest readings: `docs/VERIFY.md` § When to run the plugin probes. Last rig pass, 2026-09-29 (the
-engine-only app): `native:smoke`, `survey`, `swap`, `recall`, `tone-recall`, `engine-smoke`,
-`engine-recovery` and `release:smoke` green; `native:engine-loopback` 20/20 at 64 and 256, 18/20 at
-128 (a detector reading v0.1.0 repeats). Since then: `native:export-master` (2026-10-01, WASAPI) for
-the export's engine-rendered master. Driver latency reports are not guitar latency; after a relevant
-change, rerun only the affected check.
+each, and their baselines and latest readings: `docs/VERIFY.md` § When to run the plugin probes.
+Last rig pass, 2026-09-29 (the engine-only app): `native:smoke`, `survey`, `swap`, `recall`,
+`tone-recall`, `engine-smoke`, `engine-recovery` and `release:smoke` green; `native:engine-loopback`
+20/20 at 64 and 256, 18/20 at 128 (a detector reading v0.1.0 repeats). Since then (2026-10-01):
+`native:export-master` (WASAPI) for the export's engine-rendered master; the sample-rate pick on
+ASIO, `native:engine-smoke` at 48 and 44.1 kHz and `native:engine` after the switches. Owed once the
+loopback cable is in: `native:engine-loopback --rate=48000` (alignment at 48 kHz). Driver latency
+reports are not guitar latency; after a relevant change, rerun only the affected check.
 
 **Last play: 2026-09-28** (engine, a local release build, ASIO; a second player on a WASAPI build
 of their own): worked well overall, no issue found; the WASAPI player heard delay on DI monitoring
