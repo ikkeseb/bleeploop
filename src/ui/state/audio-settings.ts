@@ -139,14 +139,17 @@ export function asioBufferChoice(
  * The Sample rate select: the picks on offer (null = the device's own rate), the one it shows, and
  * whether the device sets the rate alone. `runs`: the pickable rates the device runs (under ASIO the
  * driver's, `AsioDeviceInfo.sampleRates`; under WASAPI none: the endpoint's own rate runs, set in
- * Windows' Sound settings). Shown: `saved` when the device runs it, else the device's own, which is
- * what an open runs (`transition::open_rate` in `src-tauri/src/engine_io/transition.rs`). `saved` stays
- * the player's pick, so a driver that runs it later gets it.
+ * Windows' Sound settings). `running`: the rate the running device runs at, null while none runs.
+ * Shown: `saved` when the device runs it (and, while one runs, runs at it), else the device's own, which
+ * is what an open runs (`transition::open_rate` in `src-tauri/src/engine_io/transition.rs`). `saved`
+ * stays the player's pick, so a driver that runs it later gets it.
  */
 export function rateChoice(
   saved: SampleRate | null,
   runs: readonly number[],
+  running: number | null,
 ): { options: (SampleRate | null)[]; shown: SampleRate | null; fixed: boolean } {
   const offered = SAMPLE_RATE_OPTIONS.filter((r) => runs.includes(r));
-  return { options: [null, ...offered], shown: saved !== null && offered.includes(saved) ? saved : null, fixed: offered.length === 0 };
+  const shown = saved !== null && offered.includes(saved) && (running === null || running === saved) ? saved : null;
+  return { options: [null, ...offered], shown, fixed: offered.length === 0 };
 }

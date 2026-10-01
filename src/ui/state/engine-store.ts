@@ -1274,6 +1274,8 @@ async function openPicked(restore?: () => Promise<void>): Promise<{ status: Devi
     console.error('[engine] device open failed', err);
     notifyError("Couldn't open the audio device", err);
     setOpenFailure(errorText(err));
+    // The owner reopens the device that ran (`Owner::open`, `src-tauri/src/engine_io/owner.rs`): its rate pick goes back, saved and shown.
+    if (opened && opened.picks.sampleRate !== wanted.picks.sampleRate) void setSampleRatePick(opened.picks.sampleRate);
     return { status: null, declined: false };
   }
 }

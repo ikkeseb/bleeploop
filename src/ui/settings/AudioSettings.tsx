@@ -130,8 +130,16 @@ export function AudioSettings() {
     return asioBufferChoice(bufferFrames(), range, running?.backend === 'Asio' ? running.block : null);
   });
 
-  // Under ASIO: the rates the driver runs; under WASAPI the endpoint's own alone (`rateChoice`).
-  const rates = createMemo(() => rateChoice(sampleRatePick(), usingAsio() ? (asioDeviceInfo()?.sampleRates ?? []) : []));
+  // What runs, or with no device running the saved preference: under ASIO the rates the driver runs,
+  // under WASAPI the endpoint's own alone (`rateChoice`). A fallback the owner made on its own (ASIO
+  // lost, WASAPI runs) shows WASAPI's; the saved pick stays for the next ASIO open.
+  const rateOnAsio = () => {
+    const running = engineDevice();
+    return running ? running.backend === 'Asio' : usingAsio();
+  };
+  const rates = createMemo(() =>
+    rateChoice(sampleRatePick(), rateOnAsio() ? (asioDeviceInfo()?.sampleRates ?? []) : [], engineDevice()?.sampleRate ?? null),
+  );
   const rateValue = (rate: SampleRate | null) => (rate === null ? '' : String(rate));
   // "Device (48 kHz)" while the device's own rate runs; "Device" while none runs or a pick does.
   const deviceRateLabel = () => {
@@ -310,7 +318,7 @@ export function AudioSettings() {
       <div class="audio-settings__hint audio-settings__hint--info" role="note">
         {!rates().fixed
           ? "The engine's rate. Loops recorded at one rate wait in recovery at another."
-          : usingAsio()
+          : rateOnAsio()
             ? "Set by the driver: change it in the driver's control panel."
             : "Set by Windows: change it in the device's Sound settings, or use ASIO to pick one here."}
       </div>

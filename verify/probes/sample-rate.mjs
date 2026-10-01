@@ -9,6 +9,9 @@
  *   appears; declined, the pick goes back to the device's rate; accepted, the forced open runs at 48 kHz
  *   and the row shows it;
  * - the pick survives a reload: the first open asks for it and the row shows it;
+ * - a pick whose open fails (the native owner reopens the device that ran): the pick that ran goes back;
+ * - a fallback the owner made on its own (ASIO lost, WASAPI at its endpoint's rate, scripted on the
+ *   feed): the row shows what runs, and the pick stays saved for the next ASIO open;
  * - a driver that runs only 44.1 kHz: no 48 kHz option, the saved pick kept, the device's rate shown;
  * - WASAPI: the device's rate alone, and the hint says Windows sets it.
  *
@@ -53,7 +56,13 @@ const serveHost = (p) =>
       `
 Object.assign(webPluginHost, window.__rateHost ?? {});
 const __probeOpen = webEngineFake.open;
-webEngineFake.open = (request, force) => {
+webEngineFake.open = async (request, force) => {
+  if (window.__driver.fail) {
+    // As the native owner answers a device that did not start: an error, the device that ran reopened.
+    webEngineFake.opened.push(request);
+    webEngineFake.forced.push(force ?? false);
+    throw window.__driver.fail;
+  }
   const rate = window.__rateFor(request);
   const running = globalThis.__lfEngineFakeRate ?? 48000;
   webEngineFake.refusal = window.__driver.holdsLoops && rate !== running ? { device: 'Probe ASIO', from: running, to: rate } : null;
@@ -171,7 +180,29 @@ await probe(async ({ open }) => {
   console.log('reloaded', JSON.stringify(reloaded));
   assert.deepEqual({ value: reloaded.value, saved: reloaded.saved, runs: reloaded.runs }, { value: '48000', saved: 48000, runs: 48000 });
 
-  // 4. A driver that runs only 44.1 kHz (probed again): no 48 kHz option; the device's rate runs and
+  // 4. A pick whose open fails: the native owner reopens the device that ran (`owner.rs` `open`), so the
+  // pick that ran goes back, saved and shown.
+  await page.evaluate(() => (window.__driver.fail = 'the device did not start'));
+  const failed = await pickRate(page, '44100');
+  await page.evaluate(() => (window.__driver.fail = null));
+  assert.deepEqual(failed[0], { sampleRate: 44100, backend: 'Asio', forced: false }, 'the pick asks for 44.1 kHz');
+  const restored = await readRow(page);
+  console.log('failed open', JSON.stringify(restored));
+  assert.deepEqual({ value: restored.value, saved: restored.saved, runs: restored.runs }, { value: '48000', saved: 48000, runs: 48000 }, 'the pick that ran goes back');
+
+  // 5. ASIO lost, the owner fell back to WASAPI at its endpoint's 44.1 kHz on its own (the feed's
+  // status + Fallback): the row shows what runs, and the 48 kHz pick stays saved for the next ASIO open.
+  await page.evaluate(() => {
+    const status = { backend: 'Wasapi', sampleRate: 44100, block: 256, inputName: 'Fake input', outputName: 'Fake output', alignFrames: 0, inputFrames: 0, inputOpen: true, inputChannels: [1, 1] };
+    window.__lf.native.emit({ seq: 1000, reset: false, events: [], status, device: [{ Fallback: status }] });
+  });
+  const fellBack = await readRow(page);
+  console.log('fallback', JSON.stringify(fellBack));
+  assert.deepEqual(fellBack.options, [['', 'Device (44.1 kHz)']], 'WASAPI runs: its rate alone');
+  assert.deepEqual({ value: fellBack.value, saved: fellBack.saved }, { value: '', saved: 48000 });
+  assert.match(fellBack.hint ?? '', /^Set by Windows/);
+
+  // 6. A driver that runs only 44.1 kHz (probed again): no 48 kHz option; the device's rate runs and
   // shows, and the player's pick stays saved for a driver that runs it.
   await page.evaluate(async () => {
     window.__driver.rates = [44100];
@@ -185,7 +216,7 @@ await probe(async ({ open }) => {
   assert.deepEqual(narrow.options, [['', 'Device (44.1 kHz)'], ['44100', '44.1 kHz']], 'no 48 kHz option');
   assert.deepEqual({ value: narrow.value, saved: narrow.saved, runs: narrow.runs }, { value: '', saved: 48000, runs: 44100 });
 
-  // 5. WASAPI: the endpoint's rate alone, set in Windows.
+  // 7. WASAPI: the endpoint's rate alone, set in Windows.
   await page.evaluate(async () => {
     const settings = await import('/src/ui/state/audio-devices.ts');
     const { openEngineDevice } = await import('/src/ui/state/engine-store.ts');
