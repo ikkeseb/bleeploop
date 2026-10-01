@@ -1,12 +1,12 @@
 //! OWNS: the device owner's decisions, as pure functions (the kernel): what reaching a device takes from where the owner stands
 //! ([`steps`]), when a request only changes the channel ([`same_device`]), where a lost device falls back
-//! to ([`fallbacks`]), which capture channel a request selects for each slot ([`open_channels`]), and
-//! which buffer an ASIO open and its preopen ask the driver for ([`asio_block`], [`preopen_block`]).
-//! `owner.rs` carries out the first four, `cpal_driver.rs` the last two.
+//! to ([`fallbacks`]), which capture channel a request selects for each slot ([`open_channels`]),
+//! which buffer an ASIO open and its preopen ask the driver for ([`asio_block`], [`preopen_block`]), and
+//! the rate it runs at ([`open_rate`]). `owner.rs` carries out the first four, `cpal_driver.rs` the rest.
 
 use lf_engine::SLOT_COUNT;
 
-use super::DeviceRequest;
+use super::{DeviceRequest, SAMPLE_RATES};
 use crate::audio_output::AudioBackend;
 
 /// What a transition does, in this order.
@@ -63,15 +63,22 @@ pub(crate) fn preopen_block(block: u32, range: Option<(u32, u32)>) -> Option<u32
     [256, 128, 512, 64, 1024, min, max].into_iter().find(|&b| b != block && b > 0 && (min..=max).contains(&b))
 }
 
+/// The rate an ASIO open runs the driver at: the pick when it is one of [`SAMPLE_RATES`] and the driver
+/// runs it (`runs`, the probe's `AsioCache::sample_rates`), else the driver's own `rate` (`None` = no
+/// pick). Never an error: a pick the driver cannot take opens at its own rate (the caller logs why).
+pub(crate) fn open_rate(pick: Option<u32>, rate: u32, runs: &[u32]) -> u32 {
+    pick.filter(|r| SAMPLE_RATES.contains(r) && runs.contains(r)).unwrap_or(rate)
+}
+
 /// `next` asks for the device that runs, at most with other capture channels: the owner changes the
 /// channels in place instead (a rebuilt ASIO input would register after the output and add a block).
 /// ASIO ignores the WASAPI ids (one cached duplex driver) but not the driver: `drivers` is the one the
 /// device runs on and the one a resolve would take now, which a driver switch replaced. WASAPI ignores
-/// the buffer (the audio engine's period).
+/// the buffer (the audio engine's period) and the rate pick (the endpoint's own runs: `open_rate`).
 pub(crate) fn same_device(running: &DeviceRequest, next: &DeviceRequest, drivers: (&str, Option<&str>)) -> bool {
     running.backend == next.backend
         && match next.backend {
-            AudioBackend::Asio => running.buffer == next.buffer && Some(drivers.0) == drivers.1,
+            AudioBackend::Asio => running.buffer == next.buffer && running.sample_rate == next.sample_rate && Some(drivers.0) == drivers.1,
             AudioBackend::Wasapi => running.input == next.input && running.output == next.output,
         }
 }
@@ -131,11 +138,12 @@ mod tests {
             output: output.map(str::to_string),
             input_channels: [Some(0); SLOT_COUNT],
             buffer: None,
+            sample_rate: None,
         }
     }
 
     fn asio(buffer: Option<u32>) -> DeviceRequest {
-        DeviceRequest { backend: AudioBackend::Asio, input: None, output: None, input_channels: [Some(1), None], buffer }
+        DeviceRequest { backend: AudioBackend::Asio, input: None, output: None, input_channels: [Some(1), None], buffer, sample_rate: None }
     }
 
     #[test]
@@ -180,6 +188,28 @@ mod tests {
         assert!(same_device(&wasapi(None, None), &wasapi(None, None), ("Speakers", Some("B"))), "WASAPI ignores the ASIO driver");
         let sized = DeviceRequest { buffer: Some(128), ..wasapi(Some("in"), Some("out")) };
         assert!(same_device(&wasapi(Some("in"), Some("out")), &sized, a), "WASAPI ignores the buffer");
+        let rated = |rate| DeviceRequest { sample_rate: rate, ..asio(Some(256)) };
+        assert!(!same_device(&rated(None), &rated(Some(44_100)), a), "a rate pick on ASIO");
+        assert!(!same_device(&rated(Some(48_000)), &rated(Some(44_100)), a), "another rate pick on ASIO");
+        let picked = DeviceRequest { sample_rate: Some(44_100), ..wasapi(Some("in"), Some("out")) };
+        assert!(same_device(&wasapi(Some("in"), Some("out")), &picked, a), "WASAPI ignores the rate pick");
+    }
+
+    #[test]
+    fn an_asio_open_runs_the_pick_only_where_the_driver_runs_it() {
+        let both = [44_100, 48_000];
+        // (pick, the driver's rate, the rates it runs) → the rate opened
+        let table = [
+            ((None, 48_000, &both[..]), 48_000, "no pick: the driver's own"),
+            ((Some(44_100), 48_000, &both[..]), 44_100, "a pick the driver runs"),
+            ((Some(48_000), 44_100, &both[..]), 48_000, "the other way"),
+            ((Some(48_000), 44_100, &[44_100][..]), 44_100, "a pick the driver cannot run: its own"),
+            ((Some(44_100), 96_000, &[][..]), 96_000, "a driver that runs neither: its own"),
+            ((Some(96_000), 48_000, &[48_000, 96_000][..]), 48_000, "a rate no player can pick: its own"),
+        ];
+        for ((pick, rate, runs), want, why) in table {
+            assert_eq!(open_rate(pick, rate, runs), want, "{why}");
+        }
     }
 
     #[test]
@@ -187,7 +217,9 @@ mod tests {
         let lost = asio(Some(128));
         let tried = fallbacks(&lost, true, true);
         assert_eq!(tried[0], lost, "ASIO first rebuilds from the cache");
-        assert_eq!(tried[1], DeviceRequest { backend: AudioBackend::Wasapi, input: None, output: None, input_channels: [Some(1), None], buffer: None });
+        assert_eq!(tried[1], DeviceRequest { backend: AudioBackend::Wasapi, input: None, output: None, input_channels: [Some(1), None], buffer: None, sample_rate: None });
+        let picked = DeviceRequest { sample_rate: Some(44_100), ..lost.clone() };
+        assert_eq!(fallbacks(&picked, true, true)[1].sample_rate, Some(44_100), "the fallback keeps the pick");
         assert_eq!(tried.len(), 2);
 
         let lost = wasapi(Some("in"), Some("out"));

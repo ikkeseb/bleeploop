@@ -11,6 +11,7 @@ import {
   probeAsio,
   usingAsio,
   bufferFrames,
+  sampleRatePick,
   inputDevices,
   outputDevices,
   refreshAndPruneDevices,
@@ -18,6 +19,7 @@ import {
   saveSlotInputChannels,
   setAsioEnabled,
   setBufferSize,
+  setSampleRatePick,
 } from '../state/audio-devices';
 import { midiDevices, midiStatus } from '../state/midi';
 import { ACTION_LABELS, isLaneAction, type ActionId, type Target } from '../../app/actions';
@@ -36,9 +38,11 @@ import { platform } from '../../platform';
 import {
   BUFFER_FRAMES_OPTIONS,
   asioBufferChoice,
+  rateChoice,
   readAudioDeviceSettings,
   writeAudioDeviceSettings,
   type BufferFrames,
+  type SampleRate,
 } from '../state/audio-settings';
 import { looper, sampleRate } from '../state/audio';
 import {
@@ -54,20 +58,23 @@ import './audio-settings.css';
 
 /**
  * Global Audio Settings popover: the engine's input and output device, Share output, the buffer size,
- * the ASIO low-latency tier and its driver, the MIDI learn row and the diagnostics — all GLOBAL
- * last-used preferences. Mounted inside a `<Show>` in app.tsx, so it re-reads persisted state each time
- * it opens (persisted localStorage is the source of truth; these local signals mirror it). The
- * sample-rate row is a read-out.
+ * the sample rate, the ASIO low-latency tier and its driver, the MIDI learn row and the diagnostics — all
+ * GLOBAL last-used preferences. Mounted inside a `<Show>` in app.tsx, so it re-reads persisted state each
+ * time it opens (persisted localStorage is the source of truth; these local signals mirror it).
  *
- * A device, buffer or driver pick reopens the engine's device at once; the input channel is each
- * slot's own pick (the slot header, `src/ui/instrument/SlotControls.tsx`); the ASIO driver row switches
- * the driver live and the Buffer select offers only the sizes that driver takes.
+ * A device, buffer, rate or driver pick reopens the engine's device at once (a rate the loops were not
+ * recorded at asks first: `openEngineDevice`); the input channel is each slot's own pick (the slot
+ * header, `src/ui/instrument/SlotControls.tsx`); the ASIO driver row switches the driver live, and the
+ * Buffer and Sample rate selects offer only the sizes and rates that driver takes.
  */
 
 /** Processing-block duration, not an input-to-output latency estimate. */
 function bufferMs(frames: number): string {
   return `~${((frames / sampleRate()) * 1000).toFixed(1)} ms/block`;
 }
+
+/** A rate as the Sample rate select names it: "44.1 kHz", "48 kHz". */
+const kHz = (hz: number): string => `${hz / 1000} kHz`;
 
 /** Reopen the engine's device on the saved picks, then `synced`: a switch the player declines puts back
  * the picks of the device that runs. */
@@ -122,6 +129,15 @@ export function AudioSettings() {
     const running = engineDevice();
     return asioBufferChoice(bufferFrames(), range, running?.backend === 'Asio' ? running.block : null);
   });
+
+  // Under ASIO: the rates the driver runs; under WASAPI the endpoint's own alone (`rateChoice`).
+  const rates = createMemo(() => rateChoice(sampleRatePick(), usingAsio() ? (asioDeviceInfo()?.sampleRates ?? []) : []));
+  const rateValue = (rate: SampleRate | null) => (rate === null ? '' : String(rate));
+  // "Device (48 kHz)" while the device's own rate runs; "Device" while none runs or a pick does.
+  const deviceRateLabel = () => {
+    const running = engineDevice();
+    return running && rates().shown === null ? `Device (${kHz(running.sampleRate)})` : 'Device';
+  };
 
   // The driver picker: the installed drivers, plus a saved pick that is no longer installed (the probe
   // took the automatic choice instead).
@@ -267,6 +283,38 @@ export function AudioSettings() {
           : 'Frames per device callback: smaller is lower latency, larger is safer.'}
       </div>
 
+      <div class="audio-settings__row">
+        <span class="audio-settings__label">sample rate</span>
+        <select
+          class="audio-settings__select"
+          value={rateValue(rates().shown)}
+          onChange={(e) => {
+            const select = e.currentTarget;
+            const rate = select.value === '' ? null : (Number(select.value) as SampleRate);
+            void setSampleRatePick(rate).then(() => {
+              select.value = rateValue(rates().shown);
+              reopenEngine(syncPicks);
+            });
+          }}
+          aria-label="Sample rate"
+        >
+          <For each={rates().options}>
+            {(rate) => (
+              <option value={rateValue(rate)} selected={rate === rates().shown}>
+                {rate === null ? deviceRateLabel() : kHz(rate)}
+              </option>
+            )}
+          </For>
+        </select>
+      </div>
+      <div class="audio-settings__hint audio-settings__hint--info" role="note">
+        {!rates().fixed
+          ? "The engine's rate. Loops recorded at one rate wait in recovery at another."
+          : usingAsio()
+            ? "Set by the driver: change it in the driver's control panel."
+            : "Set by Windows: change it in the device's Sound settings, or use ASIO to pick one here."}
+      </div>
+
       {/* The ASIO row shows the toggle whenever the binary can do ASIO; the driver itself is contacted
           only by the startup probe (saved preference on) or by turning the toggle on / Retry. The
           status line under it says why ASIO is not in use (`AsioStartupStatus` in host.ts). */}
@@ -366,12 +414,6 @@ export function AudioSettings() {
           </Show>
         </div>
       </Show>
-      {/* Read-only: the engine runs at the device's rate; a rate selector is not built. */}
-      <div class="audio-settings__row" title="BleepLoop runs at the audio device's sample rate.">
-        <span class="audio-settings__label">sample rate</span>
-        <span class="audio-settings__readout">{(sampleRate() / 1000).toFixed(1)} kHz</span>
-        <span class="audio-settings__soon">set by the audio device</span>
-      </div>
 
       {/* MIDI learn: pick an action (a track action also its track), LEARN, and the next CC or note-on from
           any port runs it from then on (a second click or Esc cancels). A learned message never reaches

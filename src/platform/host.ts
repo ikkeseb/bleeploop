@@ -185,7 +185,7 @@ export interface PluginHost {
   asioSwitch(driver: string): Promise<AsioStatusReport>;
   /** The installed ASIO drivers' names, read from the registry without loading any. Empty without ASIO. */
   asioDrivers(): Promise<string[]>;
-  /** The cached ASIO driver, its actual channel counts and buffer range; null without an ASIO device. */
+  /** The cached ASIO driver, its actual channel counts, buffer range and rates; null without an ASIO device. */
   asioDeviceInfo(): Promise<AsioDeviceInfo | null>;
 }
 
@@ -220,6 +220,9 @@ export interface AsioDeviceInfo {
    * in the driver's own control panel. */
   bufferMin: number | null;
   bufferMax: number | null;
+  /** The pickable rates (44100, 48000) the driver runs, read by the startup probe. The native host
+   * always sends it; a scripted probe may leave it out (read as none). */
+  sampleRates?: number[];
 }
 
 export interface MidiBackend {

@@ -48,6 +48,14 @@
 //!   mono stream per slot, from the picks in `Run` (atomics, changed in place): ASIO copies each slot's channel into its own handoff,
 //!   WASAPI pushes them interleaved through the one join pipe. The engine hands each slot its own
 //!   (`Engine::process_inputs`); the meter takes the louder.
+//! - **The rate pick (`DeviceRequest::sample_rate`, one of [`SAMPLE_RATES`]; `None` = the device's
+//!   own) never fails an open either.** ASIO runs it when the driver can (`AsioCache::sample_rates`, read
+//!   by the startup probe; cpal sets the driver's rate at the stream build), else the driver's own,
+//!   logged (`transition::open_rate`). WASAPI opens at the output endpoint's own rate whatever the pick:
+//!   cpal 0.18.1 refuses an output format the endpoint does not run natively (an `IsFormatSupported`
+//!   check ahead of its AUTOCONVERTPCM init; 0.18.2 drops it), so Windows' Sound settings set it. A
+//!   pick at another rate than the engine's is a new engine, refused while it holds audio (below);
+//!   Share output resamples from whatever rate runs. `DeviceStatus::sample_rate` is what runs.
 //! - **The frame counter pauses across a switch.** A backend switch or a fallback continues the
 //!   counter where the last callback left it, so loops resume in place. It counts the frames the
 //!   device took: a late wake is no loss. Only a WASAPI buffer found empty jumps it, by what the device
@@ -160,7 +168,14 @@ pub struct DeviceRequest {
     pub input_channels: [Option<u32>; SLOT_COUNT],
     /// Frames per device callback; `None` = the driver's default.
     pub buffer: Option<u32>,
+    /// The engine's sample rate, one of [`SAMPLE_RATES`]; `None` = the device's own. Applies where the
+    /// device runs it (`transition::open_rate`); `DeviceStatus::sample_rate` says what runs. On the wire
+    /// `sampleRate`; a request without it asks for the device's own.
+    pub sample_rate: Option<u32>,
 }
+
+/// The rates a player can pick (`DeviceRequest::sample_rate`).
+pub const SAMPLE_RATES: [u32; 2] = [44_100, 48_000];
 
 /// A [`DeviceRequest`] as it arrives: each slot's channel, or one channel for both.
 #[derive(Deserialize)]
@@ -174,12 +189,14 @@ struct RequestWire {
     #[serde(default)]
     input_channel: Option<u32>,
     buffer: Option<u32>,
+    #[serde(default)]
+    sample_rate: Option<u32>,
 }
 
 impl From<RequestWire> for DeviceRequest {
     fn from(w: RequestWire) -> DeviceRequest {
         let input_channels = w.input_channels.unwrap_or([w.input_channel; SLOT_COUNT]);
-        DeviceRequest { backend: w.backend, input: w.input, output: w.output, input_channels, buffer: w.buffer }
+        DeviceRequest { backend: w.backend, input: w.input, output: w.output, input_channels, buffer: w.buffer, sample_rate: w.sample_rate }
     }
 }
 

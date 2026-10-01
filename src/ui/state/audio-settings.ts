@@ -18,6 +18,10 @@ export const BUFFER_FRAMES_OPTIONS = [64, 128, 256, 512, 1024] as const;
 export type BufferFrames = (typeof BUFFER_FRAMES_OPTIONS)[number];
 export const DEFAULT_BUFFER_FRAMES: BufferFrames = 256;
 
+/** The engine rates a player can pick (Hz); Rust `engine_io::SAMPLE_RATES`. */
+export const SAMPLE_RATE_OPTIONS = [44100, 48000] as const;
+export type SampleRate = (typeof SAMPLE_RATE_OPTIONS)[number];
+
 export interface AudioDeviceSettings {
   /** Native cpal input device id; '' = default input. Not a getUserMedia MediaDeviceInfo.deviceId. */
   inputDeviceId: string;
@@ -30,6 +34,8 @@ export interface AudioDeviceSettings {
   outputDeviceId: string;
   /** RT block size in frames; one of BUFFER_FRAMES_OPTIONS (live buffer control). */
   bufferFrames: BufferFrames;
+  /** The engine's rate pick, one of SAMPLE_RATE_OPTIONS; null = the device's own. */
+  sampleRate: SampleRate | null;
   /** Prefer the ASIO low-latency tier (vs WASAPI-shared). Default true; ignored
    * unless the native build offers ASIO and a device is present. Applies on the next arm. */
   asioEnabled: boolean;
@@ -48,6 +54,7 @@ const DEFAULTS: AudioDeviceSettings = {
   slotInputChannels: ['', ''],
   outputDeviceId: '',
   bufferFrames: DEFAULT_BUFFER_FRAMES,
+  sampleRate: null,
   asioEnabled: true,
   asioDriver: '',
   shareDeviceId: '',
@@ -71,6 +78,7 @@ export function readAudioDeviceSettings(): AudioDeviceSettings {
       bufferFrames: (BUFFER_FRAMES_OPTIONS as readonly number[]).includes(p.bufferFrames as number)
         ? (p.bufferFrames as BufferFrames)
         : DEFAULT_BUFFER_FRAMES,
+      sampleRate: (SAMPLE_RATE_OPTIONS as readonly number[]).includes(p.sampleRate as number) ? (p.sampleRate as SampleRate) : null,
       asioEnabled: typeof p.asioEnabled === 'boolean' ? p.asioEnabled : true,
       asioDriver: typeof p.asioDriver === 'string' ? p.asioDriver : '',
       shareDeviceId: typeof p.shareDeviceId === 'string' ? p.shareDeviceId : '',
@@ -125,4 +133,20 @@ export function asioBufferChoice(
   const options: number[] = BUFFER_FRAMES_OPTIONS.filter((f) => f >= range.min && f <= range.max);
   if (!options.includes(shown)) options.push(shown);
   return { options: options.sort((a, b) => a - b), shown, fixed: range.min === range.max };
+}
+
+/**
+ * The Sample rate select: the picks on offer (null = the device's own rate), the one it shows, and
+ * whether the device sets the rate alone. `runs`: the pickable rates the device runs (under ASIO the
+ * driver's, `AsioDeviceInfo.sampleRates`; under WASAPI none: the endpoint's own rate runs, set in
+ * Windows' Sound settings). Shown: `saved` when the device runs it, else the device's own, which is
+ * what an open runs (`transition::open_rate` in `src-tauri/src/engine_io/transition.rs`). `saved` stays
+ * the player's pick, so a driver that runs it later gets it.
+ */
+export function rateChoice(
+  saved: SampleRate | null,
+  runs: readonly number[],
+): { options: (SampleRate | null)[]; shown: SampleRate | null; fixed: boolean } {
+  const offered = SAMPLE_RATE_OPTIONS.filter((r) => runs.includes(r));
+  return { options: [null, ...offered], shown: saved !== null && offered.includes(saved) ? saved : null, fixed: offered.length === 0 };
 }

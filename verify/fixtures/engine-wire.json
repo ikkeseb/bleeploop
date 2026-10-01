@@ -185,13 +185,14 @@
     "the device did not start"
   ],
   "deviceRequests": [
-    { "backend": "Asio", "input": null, "output": null, "inputChannels": [0, 3], "buffer": 128 },
+    { "backend": "Asio", "input": null, "output": null, "inputChannels": [0, 3], "buffer": 128, "sampleRate": 44100 },
     {
       "backend": "Wasapi",
       "input": "{0.0.1.00000000}.{8d4d5e1a-3c7b-4f0e-9d2a-5b6c7d8e9f01}",
       "output": null,
       "inputChannels": [null, 1],
-      "buffer": null
+      "buffer": null,
+      "sampleRate": null
     }
   ],
   "deviceStatuses": [

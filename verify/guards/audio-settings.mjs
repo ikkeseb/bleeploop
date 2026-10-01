@@ -12,7 +12,9 @@
 // Buffer select's sizes (asioBlock, the mirror of Rust's `transition::asio_block`, and asioBufferChoice):
 // a driver fixed at one size, a wide range, and a running block outside the options list. And engine
 // mode's per-slot input channels: a saved pair is kept, and settings from before the per-slot pick (or a
-// malformed pair) start both slots on the saved global channel.
+// malformed pair) start both slots on the saved global channel. And the rate pick: only 44.1/48 kHz is
+// kept (anything else, or settings from before it, is the device's own), and the Sample rate select
+// (rateChoice): the picks the device runs, the saved one shown only where it runs.
 
 import assert from 'node:assert';
 
@@ -37,7 +39,7 @@ globalThis.localStorage = {
   },
 };
 
-const { readAudioDeviceSettings, writeAudioDeviceSettings, BUFFER_FRAMES_OPTIONS, DEFAULT_BUFFER_FRAMES, asioBlock, asioBufferChoice } =
+const { readAudioDeviceSettings, writeAudioDeviceSettings, BUFFER_FRAMES_OPTIONS, DEFAULT_BUFFER_FRAMES, asioBlock, asioBufferChoice, rateChoice } =
   await import('../../src/ui/state/audio-settings.ts');
 
 const KEY = 'lf.audioDevices';
@@ -47,6 +49,7 @@ const DEFAULTS = {
   slotInputChannels: ['', ''],
   outputDeviceId: '',
   bufferFrames: DEFAULT_BUFFER_FRAMES,
+  sampleRate: null,
   asioEnabled: true,
   asioDriver: '',
   shareDeviceId: '',
@@ -91,6 +94,7 @@ const full = {
   slotInputChannels: ['0', '3'],
   outputDeviceId: 'out-9',
   bufferFrames: 128,
+  sampleRate: 44100,
   asioEnabled: false,
   asioDriver: 'Yamaha Steinberg USB ASIO',
   shareDeviceId: 'share-3',
@@ -229,6 +233,31 @@ check('the saved pick is an input only: the choice never writes it', () => {
   asioBufferChoice(readAudioDeviceSettings().bufferFrames, { min: 512, max: 512 }, 512);
   assert.strictEqual(readAudioDeviceSettings().bufferFrames, 64);
 });
+
+// ---------------------------------------------------------------------------
+// 8. The rate pick and the Sample rate select.
+// ---------------------------------------------------------------------------
+for (const rate of [44100, 48000]) {
+  reset();
+  store.set(KEY, JSON.stringify({ sampleRate: rate }));
+  check(`sampleRate ${rate} preserved`, () => assert.strictEqual(readAudioDeviceSettings().sampleRate, rate));
+}
+for (const bad of [96000, 44100.5, '48000', 0, -1, true, {}]) {
+  reset();
+  store.set(KEY, JSON.stringify({ sampleRate: bad }));
+  check(`sampleRate ${JSON.stringify(bad)} -> the device's own (null)`, () => assert.strictEqual(readAudioDeviceSettings().sampleRate, null));
+}
+reset();
+store.set(KEY, JSON.stringify({ bufferFrames: 128, asioEnabled: true }));
+check('settings from before the rate pick: the device rate', () => assert.strictEqual(readAudioDeviceSettings().sampleRate, null));
+check('a driver that runs both: Device and both, the saved pick shown', () =>
+  assert.deepStrictEqual(rateChoice(48000, [44100, 48000]), { options: [null, 44100, 48000], shown: 48000, fixed: false }));
+check('a driver that runs only 44.1 kHz: no 48, a saved 48 shows the device rate', () =>
+  assert.deepStrictEqual(rateChoice(48000, [44100]), { options: [null, 44100], shown: null, fixed: false }));
+check('a driver that runs neither (or WASAPI): the device rate alone, set elsewhere', () =>
+  assert.deepStrictEqual(rateChoice(44100, []), { options: [null], shown: null, fixed: true }));
+check('a rate no player can pick is never offered', () =>
+  assert.deepStrictEqual(rateChoice(null, [48000, 96000]), { options: [null, 48000], shown: null, fixed: false }));
 
 console.log(`\n=== RESULT: ${passed}/${passed + failed} checks passed, ${failed} failed ===`);
 process.exit(failed === 0 ? 0 : 1);

@@ -8,6 +8,10 @@ not here.
 
 ## One eye-lap, `pnpm dev:asio`, screen by screen
 
+- **Sample rate row (built 2026-10-01, unseen):** Audio Settings' select under Buffer, "Device (44.1
+  kHz)" / "44.1 kHz" / "48 kHz" (under ASIO only the rates the driver runs; under WASAPI the device's
+  alone, with a hint that Windows sets it). Clear enough beside Buffer, and is its hint useful?
+
 - **END STOP reads as a record control (by ear, 2026-09-24):** with END STOP on and FIXED off, a stopped
   free take kept every whole bar, which is as built (END STOP only stops playback); the name suggested
   otherwise. The owner asks other players before deciding on wording or behaviour.

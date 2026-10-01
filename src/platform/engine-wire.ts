@@ -180,6 +180,10 @@ export type DeviceRequest = {
   output: string | null;
   /** Frames per device callback; null = the driver's default. */
   buffer: number | null;
+  /** The engine's rate, 44100 or 48000; null = the device's own. ASIO runs it when the driver can, else
+   * its own; WASAPI runs the endpoint's own (`DeviceStatus.sampleRate` says what runs). A request
+   * without it asks for the device's own. */
+  sampleRate: number | null;
 } & ({ inputChannels: [number | null, number | null] } | { inputChannel: number | null });
 
 /** Rust `engine_io::DeviceStatus`: the device that runs. */
@@ -685,6 +689,8 @@ export function decodeDeviceRequest(raw: unknown): DeviceRequest {
     input: nullable(o.input, (v) => str(v, 'DeviceRequest.input')),
     output: nullable(o.output, (v) => str(v, 'DeviceRequest.output')),
     buffer: nullable(o.buffer, (v) => int(v, 'DeviceRequest.buffer', 1)),
+    // Absent (a request from before the pick): the device's own rate, as the Rust side reads it.
+    sampleRate: o.sampleRate === undefined ? null : nullable(o.sampleRate, (v) => int(v, 'DeviceRequest.sampleRate', 1)),
   };
   const channel = (v: unknown, what: string) => nullable(v, (c) => int(c, what));
   if (o.inputChannels === undefined) return { ...base, inputChannel: channel(o.inputChannel, 'DeviceRequest.inputChannel') };

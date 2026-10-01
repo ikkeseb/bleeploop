@@ -48,11 +48,25 @@ pub(crate) struct FakeDevice {
     /// ASIO: the sizes inside the range come in steps from its min (`min + k·step`), which the range
     /// does not show; the fake refuses a size between them, as cpal does. `None` = every size.
     pub(crate) buffer_step: Option<u32>,
+    /// ASIO: the picked rates the driver runs (`AsioCache::sample_rates`); a request's pick resolves as
+    /// `cpal_driver` resolves it (`transition::open_rate`). WASAPI runs `rate` whatever the pick.
+    pub(crate) sample_rates: Vec<u32>,
 }
 
 impl FakeDevice {
     pub(crate) fn new(name: &str, rate: u32, block: u32) -> FakeDevice {
-        FakeDevice { name: name.to_string(), rate, block, in_channels: 2, out_channels: 2, in_latency: 32, out_latency: 48, buffer_range: None, buffer_step: None }
+        FakeDevice {
+            name: name.to_string(),
+            rate,
+            block,
+            in_channels: 2,
+            out_channels: 2,
+            in_latency: 32,
+            out_latency: 48,
+            buffer_range: None,
+            buffer_step: None,
+            sample_rates: super::SAMPLE_RATES.to_vec(),
+        }
     }
 }
 
@@ -149,12 +163,13 @@ impl Driver for FakeDriver {
 
     fn resolve(&mut self, request: &DeviceRequest) -> Result<(Spec, FakePair), String> {
         // ASIO, as `cpal_driver`: a request's buffer fitted into the range, none asked = 0 (the driver's
-        // own size, which only its callbacks tell).
+        // own size, which only its callbacks tell); the pick's rate where the driver runs it.
         let mut asked = None;
         let (input, output) = match request.backend {
             AudioBackend::Asio => {
-                let device = self.0.asio.lock().unwrap().clone().ok_or("fake: no ASIO driver")?;
+                let mut device = self.0.asio.lock().unwrap().clone().ok_or("fake: no ASIO driver")?;
                 asked = Some(request.buffer.map_or(0, |block| device.buffer_range.map_or(block, |(min, max)| super::transition::asio_block(block, min, max))));
+                device.rate = super::transition::open_rate(request.sample_rate, device.rate, &device.sample_rates);
                 (device.clone(), device)
             }
             AudioBackend::Wasapi => {

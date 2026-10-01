@@ -6,14 +6,14 @@ import {
   type AudioInputDevice,
   type AudioOutputDevice,
 } from '../../platform';
-import { readAudioDeviceSettings, writeAudioDeviceSettings, type BufferFrames } from './audio-settings';
+import { readAudioDeviceSettings, writeAudioDeviceSettings, type BufferFrames, type SampleRate } from './audio-settings';
 import { notifyError } from '../../notify';
 
 /**
  * OWNS: the process-wide native audio configuration the Audio Settings panel edits — the enumerated
- * capture/output devices (+ pruning of a persisted id that vanished), the buffer size, and the ASIO
- * tier preference and driver. None of it is per-slot, so nothing here rides the per-slot op chain.
- * The buffer and the tier are saved choices the engine's device open reads (`engine-store.ts`); the
+ * capture/output devices (+ pruning of a persisted id that vanished), the buffer size, the rate pick,
+ * and the ASIO tier preference and driver. None of it is per-slot, so nothing here rides the per-slot op
+ * chain. The buffer, the rate and the tier are saved choices the engine's device open reads (`engine-store.ts`); the
  * ASIO probe and driver switch are serialized here. Everything is a no-op / empty / persisted-default
  * in the browser build.
  */
@@ -28,6 +28,9 @@ const [outputDevices, setOutputDevices] = createSignal<AudioOutputDevice[]>([]);
 const [bufferFrames, setBufferFramesSig] = createSignal<BufferFrames>(
   readAudioDeviceSettings().bufferFrames,
 );
+
+// The rate pick (null = the device's own), init from the persisted setting; the engine's device open reads it.
+const [sampleRatePick, setSampleRatePickSig] = createSignal<SampleRate | null>(readAudioDeviceSettings().sampleRate);
 
 // ASIO low-latency tier: whether the native build offers an ASIO device (drives the Audio Settings
 // toggle's enabled state) and whether the tier is preferred (init from persisted). The driver is contacted ONLY through `probeAsio` — at boot
@@ -146,6 +149,13 @@ export async function setBufferSize(frames: BufferFrames): Promise<void> {
   writeAudioDeviceSettings({ bufferFrames: frames });
 }
 
+/** Save and show the rate pick (null = the device's own); the engine's next device open takes it (Audio
+ * Settings reopens). */
+export async function setSampleRatePick(rate: SampleRate | null): Promise<void> {
+  setSampleRatePickSig(rate);
+  writeAudioDeviceSettings({ sampleRate: rate });
+}
+
 // ---------------------------------------------------------------------------
 // ASIO low-latency tier — runtime host preference
 // ---------------------------------------------------------------------------
@@ -245,6 +255,7 @@ export async function initAudioDeviceSettings(): Promise<void> {
   if (!platform.pluginHost.available) return;
   const saved = readAudioDeviceSettings();
   setBufferFramesSig(saved.bufferFrames);
+  setSampleRatePickSig(saved.sampleRate);
   setAsioEnabledSig(saved.asioEnabled);
   try {
     const status = await platform.pluginHost.asioStatus();
@@ -260,8 +271,8 @@ export async function initAudioDeviceSettings(): Promise<void> {
 /** Read-only reactive accessors: native capture + output devices, each slot's capture channel pick. */
 export { inputDevices, outputDevices, slotInputChannels };
 
-/** Read-only reactive accessor: the buffer size (frames) for the settings readout. */
-export { bufferFrames };
+/** Read-only reactive accessors: the buffer size (frames) and the rate pick, for the settings selects. */
+export { bufferFrames, sampleRatePick };
 
 /** Read-only reactive accessors: ASIO tier availability, startup status + preference (the settings toggle),
  * the cached driver and the installed ones (the driver picker). */

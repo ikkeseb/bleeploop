@@ -41,8 +41,10 @@ A stop dies when it passes; past 10 stops, consolidate or flag it (AGENTS.md). D
    IN FX: ECHO and REVERB on the guitar still feel immediate, the echo sits on the tempo,
    and a take recorded with them sounds as it did live. RING MOD (F24, never heard): its Freq range
    20–1500 Hz and 440 Hz default are an agent's pick — keep, or name what to change.
-2. **Same rig · buffer 256, then 64.** The take still lands on the click at each size; the switch
-   gap is short; loading a plugin while loops play crossfades in without a click.
+2. **Same rig · buffer 256, then 64, then 48 kHz.** The take still lands on the click at each size;
+   the switch gap is short; loading a plugin while loops play crossfades in without a click. Sample
+   rate → 48 kHz with loops playing: the confirm asks, the driver reopens at 48 kHz (the select says
+   so), and a new take there lands on the click and sounds as clean as at 44.1.
 3. **The take itself, at 128.** Count-in feels right (1 bar, accent on 1, no dead air). FIXED 2
    stops on the downbeat after exactly 2 bars. Free record: stop ~on the downbeat after N bars → "N
    bars"; try an early and a mid-bar stop. Click: silent when idle, stops with stop-all, count-in still

@@ -215,8 +215,10 @@ fn output_stream(device: &CpalDevice, spec: &Spec, wiring: &mut Wiring) -> Resul
 }
 
 /// ASIO: the cached duplex driver, both directions on it; `DeviceRequest::buffer` becomes a fixed
-/// buffer size, the nearest the driver takes when it does not take that one (`transition::asio_block`).
-/// The request keeps the player's size, so a driver that takes it again later gets it back.
+/// buffer size, the nearest the driver takes when it does not take that one (`transition::asio_block`),
+/// and `DeviceRequest::sample_rate` the rate both streams ask for when the driver runs it, else the
+/// driver's own (`transition::open_rate`; cpal sets the driver's rate at the build). The request keeps
+/// the player's picks, so a driver that takes them again later gets them back.
 #[cfg(feature = "asio")]
 fn resolve_asio(request: &DeviceRequest) -> Result<(Spec, CpalDevice), String> {
     let cache = crate::audio_output::asio_cache().ok_or("no ASIO driver is cached (the startup probe has not found one)")?;
@@ -238,6 +240,16 @@ fn resolve_asio(request: &DeviceRequest) -> Result<(Spec, CpalDevice), String> {
     if in_config.sample_rate != out_config.sample_rate {
         return Err(format!("the ASIO driver reports input {} Hz and output {} Hz", in_config.sample_rate, out_config.sample_rate));
     }
+    let rate = transition::open_rate(request.sample_rate, out_config.sample_rate, &cache.sample_rates);
+    if let Some(asked) = request.sample_rate.filter(|&asked| asked != rate) {
+        log::info!(
+            "[engine_io] the ASIO driver \"{}\" runs {:?} Hz of the rates on offer: opening at its {rate} Hz, not the {asked} Hz asked for",
+            cache.name,
+            cache.sample_rates
+        );
+    }
+    in_config.sample_rate = rate;
+    out_config.sample_rate = rate;
     let spec = Spec {
         backend: AudioBackend::Asio,
         rate: out_config.sample_rate,
@@ -329,7 +341,9 @@ fn preopen_asio(device: &CpalDevice, spec: &Spec, other: u32) -> Result<(), Stri
 }
 
 /// WASAPI shared mode: the picked (or default) endpoints at their mix formats; the period is the
-/// audio engine's, so `DeviceRequest::buffer` does not apply. With no default capture endpoint (or one
+/// audio engine's, so `DeviceRequest::buffer` does not apply, and neither does `sample_rate`: cpal
+/// 0.18.1 builds an output only in a format the endpoint runs natively (`IsFormatSupported` before its
+/// AUTOCONVERTPCM init), so the endpoint's rate runs (logged). With no default capture endpoint (or one
 /// that reports no format) it plays output only; a picked input that is gone is an error.
 fn resolve_wasapi(request: &DeviceRequest) -> Result<(Spec, CpalDevice), String> {
     let output = crate::audio_output::pick_output_device(request.output.as_deref())?;
@@ -354,6 +368,13 @@ fn resolve_wasapi(request: &DeviceRequest) -> Result<(Spec, CpalDevice), String>
         return Err("a WASAPI endpoint reports a zero sample rate".to_string());
     }
     let name = |d: &cpal::Device, fallback: &str| d.description().map(|x| x.to_string()).unwrap_or_else(|_| fallback.to_string());
+    if let Some(asked) = request.sample_rate.filter(|&asked| asked != out_config.sample_rate) {
+        log::info!(
+            "[engine_io] WASAPI opens \"{}\" at its own {} Hz, not the {asked} Hz asked for: its rate is set in Windows' Sound settings",
+            name(&output, "Unknown output"),
+            out_config.sample_rate
+        );
+    }
     let spec = Spec {
         backend: AudioBackend::Wasapi,
         rate: out_config.sample_rate,

@@ -65,6 +65,10 @@ pub struct AsioCache {
     /// The buffer sizes the driver accepts (min, max frames); `None` when it did not say. cpal refuses a
     /// fixed size outside it, so the engine never asks for one (`engine_io::transition::asio_block`).
     pub buffer_range: Option<(u32, u32)>,
+    /// The rates a player can pick (`engine_io::SAMPLE_RATES`) that the driver runs, input and output
+    /// both (cpal lists the rates its `ASIOCanSampleRate` accepts); an open asks only for one of these
+    /// (`engine_io::transition::open_rate`).
+    pub sample_rates: Vec<u32>,
 }
 /// The ONE startup coordinator: owns the probe state machine (`asio_startup.rs`) and publishes the
 /// cache. Present in every build so status/probe commands answer uniformly; `compiled` tells the
@@ -239,6 +243,16 @@ fn resolve_asio_cache(driver: Option<&str>) -> Result<AsioCache, String> {
                 cpal::SupportedBufferSize::Range { min, max } if min > 0 && min <= max => Some((min, max)),
                 _ => None,
             };
+            let rates = |configs: Result<Vec<cpal::SupportedStreamConfigRange>, cpal::Error>| -> Vec<u32> {
+                let configs = configs.unwrap_or_default();
+                crate::engine_io::SAMPLE_RATES
+                    .into_iter()
+                    .filter(|&r| configs.iter().any(|c| (c.min_sample_rate()..=c.max_sample_rate()).contains(&r)))
+                    .collect()
+            };
+            let outputs = rates(d.supported_output_configs().map(Iterator::collect));
+            let inputs = rates(d.supported_input_configs().map(Iterator::collect));
+            let sample_rates: Vec<u32> = outputs.into_iter().filter(|r| inputs.contains(r)).collect();
             let cache = AsioCache {
                 name: name.clone(),
                 in_cfg: StreamConfig {
@@ -254,15 +268,17 @@ fn resolve_asio_cache(driver: Option<&str>) -> Result<AsioCache, String> {
                 },
                 out_fmt: oc.sample_format(),
                 buffer_range,
+                sample_rates,
                 device: d,
             };
             log::info!(
-                "[audio_output] cached ASIO \"{name}\": in {:?} {:?} / out {:?} {:?}, buffers {:?}",
+                "[audio_output] cached ASIO \"{name}\": in {:?} {:?} / out {:?} {:?}, buffers {:?}, picks it runs {:?} Hz",
                 cache.in_cfg,
                 cache.in_fmt,
                 cache.out_cfg,
                 cache.out_fmt,
-                cache.buffer_range
+                cache.buffer_range,
+                cache.sample_rates
             );
             Ok(cache)
         }

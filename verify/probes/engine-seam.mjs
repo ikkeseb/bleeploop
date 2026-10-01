@@ -83,7 +83,7 @@ await probe(async ({ open }) => {
   await page.waitForFunction(() => window.__lf.native.opened.length === 1, undefined, { timeout: 5000 });
   const opened = await page.evaluate(() => window.__lf.native.opened);
   console.log('opened', JSON.stringify(opened));
-  assert.deepEqual(opened, [{ backend: 'Wasapi', input: null, output: null, inputChannels: [null, null], buffer: 256 }]);
+  assert.deepEqual(opened, [{ backend: 'Wasapi', input: null, output: null, inputChannels: [null, null], buffer: 256, sampleRate: null }]);
   assert.deepEqual(await sent(), [], 'nothing is sent before the feed says what the engine has');
 
   // The reset frame a subscribe starts with, from a fresh engine: every lane EMPTY, no master, the device

@@ -14,7 +14,8 @@
 //!
 //! `DeviceRequest`, `DeviceStatus`, `DeviceEvent`, `OpenError` and `AudioBackend` derive serde where they
 //! are defined (camelCase fields, backends as `"Asio"` / `"Wasapi"`; a request's `inputChannels` is one
-//! pick per slot, and one `inputChannel` instead sets both; an `OpenError` is its text, or
+//! pick per slot, and one `inputChannel` instead sets both; a request without `sampleRate` asks for the
+//! device's own rate; an `OpenError` is its text, or
 //! `{"RateChange":{…}}` for a refusal).
 //!
 //! The commands that carry it are `mode.rs`'s `engine_*`: `engine_send` is a synchronous batch (IPC
@@ -564,10 +565,12 @@ mod tests {
         assert!(picks.clone().any(|c| c.is_none()) && picks.clone().any(|c| c.is_some()), "auto and picked channels");
         assert!(requests.iter().any(|r| r.input_channels[0] != r.input_channels[1]), "each slot its own");
         assert!(requests.iter().any(|r| r.buffer.is_some()), "null and set fields");
+        assert!(requests.iter().any(|r| r.sample_rate.is_some()) && requests.iter().any(|r| r.sample_rate.is_none()), "a rate pick and none");
         let one: DeviceRequest = serde_json::from_str(r#"{"backend":"Asio","input":null,"output":null,"inputChannel":3,"buffer":null}"#).unwrap();
         assert_eq!(one.input_channels, [Some(3), Some(3)], "one inputChannel sets both slots");
         let auto: DeviceRequest = serde_json::from_str(r#"{"backend":"Wasapi","input":null,"output":null,"inputChannel":null,"buffer":null}"#).unwrap();
         assert_eq!(auto.input_channels, [None, None]);
+        assert_eq!(auto.sample_rate, None, "a request from before the rate pick asks for the device's own");
         let _: Vec<DeviceStatus> = round_trip("deviceStatuses");
         let frames: Vec<FeedFrame> = round_trip("feed");
         assert!(frames.iter().any(|f| f.reset && matches!(f.status, Some(Some(_)))), "a reset frame with a status");

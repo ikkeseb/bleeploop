@@ -178,17 +178,18 @@ mod tests {
     }
 
     /// The engine at 48 kHz in 256-frame ASIO blocks, the mirror at 44.1 kHz in wandering WASAPI-sized
-    /// callbacks (436–456 frames), its clock 400 ppm off the engine's, 10 simulated minutes.
+    /// callbacks (436–456 frames), its clock 400 ppm off the engine's, 10 simulated minutes; and the other
+    /// way round (an engine at a picked 44.1 kHz, the mirror's endpoint at 48 kHz).
     #[test]
     fn the_mirror_follows_the_engine_through_a_skewed_clock_without_starving() {
-        for skew in [400.0, -400.0] {
+        for (engine_rate, mirror_rate, skew) in [(48_000, 44_100, 400.0), (48_000, 44_100, -400.0), (44_100, 48_000, 400.0), (44_100, 48_000, -400.0)] {
             let counters = IoCounters::default();
-            let (mut tap, pipe) = share_pipe(48_000, 44_100, 256).unwrap();
+            let (mut tap, pipe) = share_pipe(engine_rate, mirror_rate, 256).unwrap();
             let mut mirror = Mirror::new(pipe, 2);
             let (left, right) = (vec![0.5f32; 256], vec![-0.25f32; 256]);
             let mut data = vec![0i16; 2 * 1024];
             let mut size = wandering();
-            let engine_period = 256.0 / (48_000.0 * (1.0 + skew * 1e-6));
+            let engine_period = 256.0 / (engine_rate as f64 * (1.0 + skew * 1e-6));
             let (mut t_engine, mut t_mirror, mut i) = (0.0f64, 0.0f64, 0u64);
             while t_mirror < 600.0 {
                 if t_engine <= t_mirror {
@@ -196,14 +197,15 @@ mod tests {
                     t_engine += engine_period;
                     continue;
                 }
-                let n = size(i) - 34;
+                // WASAPI-sized at the mirror's rate (the rig's 436–456 frames at 44.1 kHz).
+                let n = (size(i) - 34) * mirror_rate as usize / 44_100;
                 mirror.render(&mut data[..2 * n], &counters);
                 if t_mirror >= 60.0 {
                     // Left on channel 0, right on 1, as i16 (the cubic may round a constant by an LSB).
                     let (l, r) = (i16::from_sample(0.5f32), i16::from_sample(-0.25f32));
                     assert!((data[0] - l).abs() <= 1 && (data[1] - r).abs() <= 1, "{:?}", &data[..2]);
                 }
-                t_mirror += n as f64 / 44_100.0;
+                t_mirror += n as f64 / mirror_rate as f64;
                 i += 1;
             }
             // Not one starve or overrun, the startup included: the drift is learned inside the margin.
@@ -211,7 +213,7 @@ mod tests {
             let drift = mirror.pipe.drift_ppm();
             assert!((drift - skew).abs() < 0.1 * skew.abs(), "{skew:+} ppm: learned {drift}");
             // What the ring holds after a pull: under the 20 ms setpoint plus one engine block.
-            let fill_ms = mirror.pipe.fill() as f64 / 48.0;
+            let fill_ms = mirror.pipe.fill() as f64 / (engine_rate as f64 / 1000.0);
             assert!(fill_ms < 20.0 + 5.4, "{skew:+} ppm: fill {fill_ms} ms");
         }
     }

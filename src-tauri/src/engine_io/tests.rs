@@ -28,7 +28,7 @@ const RATE: Frame = 48_000;
 static SERIAL: Mutex<()> = Mutex::new(());
 
 fn asio(buffer: Option<u32>) -> DeviceRequest {
-    DeviceRequest { backend: AudioBackend::Asio, input: None, output: None, input_channels: [None; SLOT_COUNT], buffer }
+    DeviceRequest { backend: AudioBackend::Asio, input: None, output: None, input_channels: [None; SLOT_COUNT], buffer, sample_rate: None }
 }
 
 fn wasapi(input: Option<&str>, output: Option<&str>) -> DeviceRequest {
@@ -38,7 +38,13 @@ fn wasapi(input: Option<&str>, output: Option<&str>) -> DeviceRequest {
         output: output.map(str::to_string),
         input_channels: [None; SLOT_COUNT],
         buffer: None,
+        sample_rate: None,
     }
+}
+
+/// `request` with the rate pick `rate`.
+fn at(rate: u32, request: DeviceRequest) -> DeviceRequest {
+    DeviceRequest { sample_rate: Some(rate), ..request }
 }
 
 /// An engine host on the fake driver; shut down on drop, even when a test fails.
@@ -256,6 +262,56 @@ fn a_size_a_stepped_driver_refuses_opens_at_the_drivers_own_size() {
     assert_eq!(h.open(asio(Some(256))).block, 160, "256 lies between the steps too");
     h.host.close().unwrap();
     assert_eq!(h.open(asio(Some(224))).block, 224, "a size on the steps opens as asked");
+}
+
+/// The rate pick: an ASIO driver at 48 kHz that runs 44.1 kHz too opens at the pick and the engine is
+/// built there; no pick is the driver's own rate; a pick the driver cannot run opens at its own. WASAPI
+/// runs its endpoint's rate whatever the pick (cpal 0.18.1: `cpal_driver::resolve_wasapi`).
+#[test]
+fn a_rate_pick_builds_the_engine_at_that_rate_where_the_device_runs_it() {
+    let h = Harness::new();
+    let status = h.open(at(44_100, asio(Some(256))));
+    assert_eq!(status.sample_rate, 44_100, "the pick runs");
+    assert_eq!(h.host.rate(), Some(44_100), "the engine is built at the pick");
+    h.play(44_100 / 10);
+    h.open(at(44_100, asio(Some(256))));
+    assert_eq!(h.fake.started.load(SeqCst), 1, "the same pick again is the device that runs");
+    assert_eq!(h.open(asio(Some(256))).sample_rate, 48_000, "no pick: the driver's own rate");
+    assert_eq!(h.host.rate(), Some(48_000), "a new engine there");
+    assert_eq!(h.fake.started.load(SeqCst), 2);
+
+    h.fake.asio.lock().unwrap().as_mut().unwrap().sample_rates = vec![48_000];
+    h.host.close().unwrap();
+    assert_eq!(h.open(at(44_100, asio(Some(256)))).sample_rate, 48_000, "a pick the driver cannot run opens at its own");
+    assert_eq!(h.host.rate(), Some(48_000));
+    assert_eq!(h.open(at(44_100, wasapi(None, None))).sample_rate, 48_000, "WASAPI runs its endpoint's rate");
+}
+
+/// A pick at another rate than the engine's while a lane holds a loop is the player's to confirm
+/// (`OpenError::RateChange`, nothing stops); forced, the engine is rebuilt at the pick. A pick at the
+/// rate that runs keeps the loops.
+#[test]
+fn a_rate_pick_while_a_lane_holds_a_loop_waits_for_force_then_rebuilds_at_the_pick() {
+    let mut h = Harness::new();
+    h.fake.set_input(tone);
+    h.open(asio(Some(256)));
+    let length = h.record_loop();
+    h.play(length);
+    assert_eq!(h.open(at(48_000, asio(Some(256)))).sample_rate, 48_000);
+    assert!(h.host.core.holds_audio(), "a pick at the engine's rate keeps the loops");
+    let started = h.fake.started.load(SeqCst);
+
+    let refused = h.host.open(at(44_100, asio(Some(256))), false);
+    assert_eq!(refused, Err(OpenError::RateChange { device: "Fake ASIO".into(), from: 48_000, to: 44_100 }));
+    assert_eq!(h.host.status().map(|s| s.sample_rate), Some(48_000), "the device that ran still runs");
+    assert_eq!(h.fake.started.load(SeqCst), started, "nothing stopped or started");
+    assert!(h.host.core.holds_audio(), "the loop stays");
+
+    let forced = h.host.open(at(44_100, asio(Some(256))), true).expect("forced, the pick goes ahead");
+    assert_eq!((forced.sample_rate, h.host.rate()), (44_100, Some(44_100)), "the engine is rebuilt at the pick");
+    assert!(!h.host.core.holds_audio(), "the loops went with the old engine");
+    h.play(44_100 / 10);
+    assert_eq!(h.host.status().map(|s| s.sample_rate), Some(44_100));
 }
 
 fn ready() -> AsioStatusReport {

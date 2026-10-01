@@ -87,8 +87,9 @@ Who runs where and what each thread owns. The rules are in bold below the table.
   `app_update_check` / `app_update_install` (`update.rs`; the release channel is `plugins.updater` in
   `tauri.conf.json`) ship in release and take nothing from the WebView; so do tone recall's
   `plugin_tone_take` / `plugin_tone_import` (raw bytes both ways) and `plugin_tone_forget`.
-- **Sample-rate selector "C2" — DECIDED (owner), NOT BUILT:** swappable 44.1/48k, default device
-  native. The engine already rebuilds at another rate (`OpenError::RateChange`); the pick is unbuilt.
+- **Sample-rate pick "C2" — built:** 44.1/48 kHz or the device's own (Audio Settings); the rules,
+  and why WASAPI keeps its endpoint's rate on cpal 0.18.1, live in the engine_io briefing
+  (`src/engine_io/mod.rs` § Rules).
 - **Editor-hang Win32 gotcha (recurring):** a host window Win32-OWNED across threads deadlocks on
   close (sync cross-thread activation `SendMessage` vs a stopped pump). Fix lives in
   `host/editor_window.rs`: owner-LESS window + `drain_after_editor_teardown()` +

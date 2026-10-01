@@ -31,6 +31,7 @@ import {
   saveSlotInputChannels,
   setAsioEnabled,
   setBufferSize,
+  setSampleRatePick,
   slotInputChannels,
   switchAsioDriver,
   usingAsio,
@@ -1151,7 +1152,7 @@ let openTail: Promise<unknown> = Promise.resolve();
 /** The saved picks that name a device. */
 type DevicePicks = Pick<
   AudioDeviceSettings,
-  'inputDeviceId' | 'inputChannel' | 'slotInputChannels' | 'outputDeviceId' | 'bufferFrames' | 'asioEnabled'
+  'inputDeviceId' | 'inputChannel' | 'slotInputChannels' | 'outputDeviceId' | 'bufferFrames' | 'sampleRate' | 'asioEnabled'
 >;
 
 /** A device as this store asks for it: the request, and the picks that named it. */
@@ -1172,9 +1173,9 @@ const channelOf = (pick: string): number | null => (pick === '' ? null : Number(
 
 /** `choice` with each slot's channel pick `picks` (switched in place, or dropped as lacking). */
 function withSlotPicks(choice: DeviceChoice, picks: readonly [string, string]): DeviceChoice {
-  const { backend, input, output, buffer } = choice.request;
+  const { backend, input, output, buffer, sampleRate } = choice.request;
   return {
-    request: { backend, input, output, buffer, inputChannels: [channelOf(picks[0]), channelOf(picks[1])] },
+    request: { backend, input, output, buffer, sampleRate, inputChannels: [channelOf(picks[0]), channelOf(picks[1])] },
     picks: { ...choice.picks, slotInputChannels: [picks[0], picks[1]] },
   };
 }
@@ -1209,6 +1210,7 @@ function picked(): DeviceChoice {
       output: asio ? null : s.outputDeviceId || null,
       inputChannels: [channelOf(s.slotInputChannels[0]), channelOf(s.slotInputChannels[1])],
       buffer: s.bufferFrames,
+      sampleRate: s.sampleRate,
     },
     picks: {
       inputDeviceId: s.inputDeviceId,
@@ -1216,6 +1218,7 @@ function picked(): DeviceChoice {
       slotInputChannels: s.slotInputChannels,
       outputDeviceId: s.outputDeviceId,
       bufferFrames: s.bufferFrames,
+      sampleRate: s.sampleRate,
       asioEnabled: s.asioEnabled,
     },
   };
@@ -1223,7 +1226,7 @@ function picked(): DeviceChoice {
 
 /**
  * Open (or switch to) the device Audio Settings names: ASIO's cached driver when the ASIO tier is in
- * use, else the saved WASAPI endpoints; the saved channel and buffer either way. Serialized, so rapid
+ * use, else the saved WASAPI endpoints; the saved channel, buffer and rate pick either way. Serialized, so rapid
  * picks land in order. Resolves null (and toasts) when the device did not open.
  *
  * A device at another rate than the engine's while it holds audio is refused (`OpenError::RateChange`):
@@ -1318,10 +1321,11 @@ export function switchEngineAsioDriver(driver: string): Promise<DeviceStatus | n
 /** Save the picks of the device that runs again (a declined switch): Audio Settings shows them. */
 function putBackPicks(): void {
   if (!opened) return;
-  const { bufferFrames, asioEnabled, slotInputChannels: slots, ...ids } = opened.picks;
+  const { bufferFrames, sampleRate, asioEnabled, slotInputChannels: slots, ...ids } = opened.picks;
   writeAudioDeviceSettings(ids);
   saveSlotInputChannels(slots);
   void setBufferSize(bufferFrames);
+  void setSampleRatePick(sampleRate);
   void setAsioEnabled(asioEnabled);
 }
 

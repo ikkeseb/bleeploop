@@ -384,7 +384,8 @@ pub async fn plugin_asio_drivers() -> Result<Vec<String>, String> {
     }
 }
 
-/// `AsioDeviceInfo` plus the buffer sizes the driver takes (`null` when it did not say).
+/// `AsioDeviceInfo` plus the buffer sizes the driver takes (`null` when it did not say) and the rates
+/// on offer it runs (`AsioCache::sample_rates`).
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AsioDriverInfo {
@@ -392,6 +393,7 @@ pub struct AsioDriverInfo {
     device: super::state::AsioDeviceInfo,
     buffer_min: Option<u32>,
     buffer_max: Option<u32>,
+    sample_rates: Vec<u32>,
 }
 
 /// Read cached metadata only; never enumerate or reopen an ASIO driver held by a live stream.
@@ -407,6 +409,7 @@ pub fn plugin_asio_device_info() -> Option<AsioDriverInfo> {
             },
             buffer_min: cache.buffer_range.map(|(min, _)| min),
             buffer_max: cache.buffer_range.map(|(_, max)| max),
+            sample_rates: cache.sample_rates.clone(),
         })
     }
     #[cfg(not(all(windows, feature = "asio")))]

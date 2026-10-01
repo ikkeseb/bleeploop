@@ -129,8 +129,12 @@ for (const r of fixture.deviceRequests) {
   check(`device request ${JSON.stringify(r)}`, () => assert.deepEqual(decodeDeviceRequest(structuredClone(r)), r));
 }
 check('a device request with one channel for both slots reads as sent (the Rust side sets both)', () => {
-  const one = { backend: 'Asio', input: null, output: null, inputChannel: 2, buffer: null };
+  const one = { backend: 'Asio', input: null, output: null, inputChannel: 2, buffer: null, sampleRate: null };
   assert.deepEqual(decodeDeviceRequest(structuredClone(one)), one);
+});
+check('a device request from before the rate pick asks for the device rate (null, as Rust reads it)', () => {
+  const old = { backend: 'Wasapi', input: null, output: null, inputChannels: [null, 1], buffer: 256 };
+  assert.deepEqual(decodeDeviceRequest(structuredClone(old)), { ...old, sampleRate: null });
 });
 for (const s of fixture.deviceStatuses) {
   check(`device status ${s.backend}`, () => assert.deepEqual(decodeDeviceStatus(structuredClone(s)), s));
@@ -200,6 +204,8 @@ const refused = {
   'an unknown note target': () => decodeCommand({ SelectInstrument: 'None' }),
   'an Off target with a payload': () => decodeCommand({ SelectInstrument: { Off: 0 } }),
   'an instrument level by the Rust name': () => decodeCommand({ SetInstrumentGain: ['Pad', 0.5] }),
+  'a device request with a fractional rate': () =>
+    decodeDeviceRequest({ backend: 'Asio', input: null, output: null, inputChannels: [0, 1], buffer: null, sampleRate: 44100.5 }),
   'a device request with a third slot': () =>
     decodeDeviceRequest({ backend: 'Asio', input: null, output: null, inputChannels: [0, 1, 2], buffer: null }),
   'an unknown action': () => decodeCommand({ Action: 'Panic' }),

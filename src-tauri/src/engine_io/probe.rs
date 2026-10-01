@@ -253,7 +253,7 @@ impl Devices {
             AudioBackend::Wasapi => (self.wasapi_in.clone(), self.wasapi_out.clone()),
         };
         let buffer = buffer.filter(|_| backend.is_asio());
-        DeviceRequest { backend, input, output, input_channels: [Some(self.channel); SLOT_COUNT], buffer }
+        DeviceRequest { backend, input, output, input_channels: [Some(self.channel); SLOT_COUNT], buffer, sample_rate: None }
     }
 
     /// The switches' round: every other ASIO buffer and WASAPI, then back to `start`.
