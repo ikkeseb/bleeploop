@@ -32,5 +32,9 @@ is a one-line adapter). UI-only edits are safe while the dev app runs.
 - **One lane derivation:** a lane's display state, word, well message and count-in come from
   `looper/lane-state.ts`; the looper lanes and the stage view (`src/ui/stage/`) both read it, so a new
   state lands there once.
+- **Every looper action is reachable by foot.** The looper's controls are the named actions of
+  `src/app/actions.ts`; the keys (`src/app/transport-keys.ts`, which a keystroke footswitch sends)
+  and learned MIDI (`src/app/midi-actions.ts`, behind `state/midi.ts`'s consume-first hook) reach
+  them only through it. A new looper control gets an action, so a pedal can learn it.
 - **Error toasts** (`toast/Toasts.tsx` renders `src/notify.ts`) sit ADDITIVELY beside the
   `console.error` sites, which feed the release log — keep both.

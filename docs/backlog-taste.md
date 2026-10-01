@@ -142,6 +142,13 @@ not here.
 
 ## Parked ideas (for the long run)
 
+- **Not built on purpose** (no owner or tester ask; each would add its own lap): a FREE tempo-setting
+  first take and 3/4 or 6/8 (`beatsPerBar = 4` runs through the grid math, the click and the count-in:
+  gate-adjacent timing code); panel drag; more built-in synths (they fill layers, they do not compete
+  with plugins); a recent-jams shelf (keep the last N recovery archives on ✕ ALL and close, offered in
+  IMPORT, M); per-lane pan and resampling on import or recovery (S each; no pan exists); one `.pill`
+  primitive with type tokens (§ Craft); a rhythm guide, three GM-kit grooves on the master pulse
+  instead of the click (M, ear-gated).
 - Looper aesthetic forks: ring/state colour = state vs track-identity; Day/Night.
 - Undo as visible history (layer count on ↶ UNDO); scenes/snapshots switched on the loop boundary;
   songs as chained scenes; click "01" to name a track; piano hidden by default; synth pills gone once a

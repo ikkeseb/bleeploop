@@ -16,14 +16,13 @@ Harness auto-load of nested files is not reliable: open the briefing yourself.
 | Before touching… | Read |
 |---|---|
 | `src-tauri/crates/lf-engine/` — the engine: clock, click, timing, looper, capture, synths, FX, limiter | its briefing, `src-tauri/crates/lf-engine/src/lib.rs` |
-| Any frontend or looper-UI work: `src/ui/`, `src/app.css`, `src/app.tsx` | `src/ui/AGENTS.md` |
+| Any frontend or looper-UI work: `src/ui/`, `src/app/`, `src/app.css`, `src/app.tsx` | `src/ui/AGENTS.md` |
 | `src-tauri/` — anything Rust/native, ASIO, plugin hosting, Cargo dependency/lockfile updates | `src-tauri/AGENTS.md` |
 | Verification code, the verify rig, interpreting a gate result, a docs-guard failure | `verify/README.md` |
 | Any runtime verification (browser probe, `__lf`, `tauri dev`, Mac-vs-PC) | `docs/VERIFY.md` |
 | Any non-trivial work; the bus topology, the platform boundary, session files | `docs/ARCHITECTURE.md` |
 | Planning or performing a by-ear/eye/rig session; gate-adjacent code; latency | `STATUS.md` |
 | Releases, licences | `.github/workflows/build-exe.yml` (header), `THIRD-PARTY-NOTICES.md` |
-| The hands-free looper (landed) and what is explicitly not built | `docs/plans/pedalboard.md` |
 
 ## Standing rules
 
@@ -46,7 +45,7 @@ Harness auto-load of nested files is not reliable: open the briefing yourself.
   looper is the instrument. MIDI controller → synth/plugin is the second path, for the other layers;
   its MIDI arrives through the WebView (Web MIDI); PC-keyboard→MIDI is its fallback. By-ear sessions happen on
   guitar. The on-screen keyboard stays available, but it is not the first-screen hero. The promise
-  heads `README.md`; the not-built list lives in `docs/plans/pedalboard.md`.
+  heads `README.md`; what is not built on purpose: `docs/backlog-taste.md` § Parked ideas.
 - **One native audio engine; there is no Web Audio path.** Audio behaviour is built in lf-engine; the
   WebView is UI, settings, MIDI input and session files. The export's wet master still renders on
   Tone's OfflineContext (`src/session/render.ts`) and may sound unlike the engine: fixes only there
