@@ -160,10 +160,19 @@ export function PluginParams(props: { slot: 0 | 1 }) {
   const sourcePending = () => slotPendingCounts()[props.slot] > 0;
   const nameById = new Map<number, string>();
   const renderedIds = new Set<number>();
+  // Which write last touched each slider: a token per slider drag or editor-originated change, cleared
+  // by `refresh`. A refused `setParameter` snaps its slider back only while its own token is still the
+  // newest, so a refusal never overrides newer state. `alive` covers an unmount (a plugin swap remounts).
+  const touched = new Map<number, number>();
+  let touchTick = 0;
+  let alive = true;
+  onCleanup(() => (alive = false));
 
   // (Re)list the plugin's params and seed every rendered slider from its LIVE value — on mount, and
-  // again whenever the plugin reports a wholesale change (preset loaded in its own GUI).
+  // again whenever the plugin reports a wholesale change (preset loaded in its own GUI). A slider
+  // touched while the list was in flight keeps its value and its token: the list predates it.
   async function refresh() {
+    const since = touchTick;
     let ps: PluginParamDesc[] = [];
     try {
       ps = await platform.pluginHost.listParams(props.slot);
@@ -179,9 +188,13 @@ export function PluginParams(props: { slot: 0 | 1 }) {
     // editor and count toward "+N more".
     const preview = ps.filter((p) => p.name.trim() !== '').slice(0, PARAM_PREVIEW_COUNT);
     const init: Record<number, number> = {};
+    const newer = new Map([...touched].filter(([, token]) => token > since));
+    touched.clear();
     renderedIds.clear();
     for (const p of preview) {
-      init[p.id] = p.value;
+      const token = newer.get(p.id);
+      if (token === undefined) init[p.id] = p.value;
+      else touched.set(p.id, token);
       renderedIds.add(p.id);
     }
     setValues(init);
@@ -199,14 +212,35 @@ export function PluginParams(props: { slot: 0 | 1 }) {
   const offParam = platform.pluginHost.onParamChanged((e) => {
     if (e.slot !== props.slot) return;
     setLastEdit({ name: nameById.get(e.id) ?? `#${e.id}`, value: e.value });
-    if (renderedIds.has(e.id)) setValues(e.id, e.value);
+    if (renderedIds.has(e.id)) {
+      touched.set(e.id, ++touchTick);
+      setValues(e.id, e.value);
+    }
   });
   onCleanup(offParam);
 
   function onSlider(p: PluginParamDesc, raw: string) {
     const v = Number(raw);
+    const token = ++touchTick;
+    touched.set(p.id, token);
     setValues(p.id, v);
-    void platform.pluginHost.setParameter(props.slot, p.id, v);
+    platform.pluginHost.setParameter(props.slot, p.id, v).catch((e) => {
+      console.error(`[PluginControls] setParameter refused (slot ${props.slot + 1}, param ${p.id})`, e);
+      void snapBack(p.id, token);
+    });
+  }
+
+  // The host refused a slider's value: show the plugin's real one again, unless the slider was touched
+  // since (or the drawer remounted) while the live value was being read.
+  async function snapBack(id: number, token: number) {
+    const current = () => alive && touched.get(id) === token;
+    if (!current()) return;
+    try {
+      const live = (await platform.pluginHost.listParams(props.slot)).find((q) => q.id === id);
+      if (live && current()) setValues(id, live.value);
+    } catch (e) {
+      console.error(`[PluginControls] reading the live value failed (slot ${props.slot + 1}, param ${id})`, e);
+    }
   }
 
   const hidden = createMemo(() => Math.max(0, totalParams() - params().length));

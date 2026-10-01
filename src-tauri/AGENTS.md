@@ -221,8 +221,6 @@ plugin-GUI work.
   import of P into S under its write lock). A disk write that hangs therefore stalls that owner, and an
   unload joins it without a timeout (the app's exit is bounded). Other tones' writes never block it; a
   store worker doing the file I/O would remove the wait.
-- `plugin_set_param` answers `Err` on a full event ring or an unlisted param id; a UI reaction (the
-  slider snaps back to the plugin's value) is unbuilt.
 - `clap_engine.rs` and `vst3_engine.rs` each carry the whole owner choreography (load, restart,
   eviction, teardown): one shared owner would keep B1/B11 from returning. Not built.
 - A unit whose restart failed stays parked, bypassed, until the plugin's next restart request; a device
