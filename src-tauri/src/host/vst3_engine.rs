@@ -143,13 +143,9 @@ impl SlotProcessor for Vst3Unit {
             self.events.clear();
             self.changes.clear();
             if at == 0 {
-                // Params from the ring apply at the block start; more than the cap wait in the ring.
-                for _ in 0..MAX_EVENTS_PER_BLOCK {
-                    let Ok(event) = self.params.pop() else { break };
-                    if let PluginEvent::Param { id, value } = event {
-                        self.changes.push_param(id as ParamID, value);
-                    }
-                }
+                // Params from the ring apply at the block start; more than the cap, or a new id
+                // past the queue pool, wait in the ring.
+                drain_params(&mut self.params, &self.changes, MAX_EVENTS_PER_BLOCK);
             }
             while let Some(e) = events.get(next).filter(|e| (e.offset as usize) < at + len) {
                 let note = match e.kind {

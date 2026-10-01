@@ -380,7 +380,8 @@ fn a_unit_that_panics_is_never_dropped_by_the_unwind() {
     rig.advance(256);
     rig.remove(0);
     let blocks = (0..FADE / 128 + 2).take_while(|_| guarded_block(&mut rig)).count();
-    assert!(blocks <= FADE / 128, "stop() panicked once the fade reached bypass");
+    // The removal starts with the first block; the fade reaches bypass in block FADE.div_ceil(128).
+    assert_eq!(blocks, FADE.div_ceil(128) - 1, "stop() panicked once the fade reached bypass, not before");
     assert_eq!(drops.load(SeqCst), 0, "the unwind dropped nothing");
     assert!(rig.returned(0).is_none() && rig.engine.slot(0).is_some(), "the unit stays in its slot");
     drop(rig); // the engine's drop, off the audio thread

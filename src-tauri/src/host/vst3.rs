@@ -591,8 +591,9 @@ impl IEventListTrait for RtEventList {
 }
 
 /// Max distinct params carried into one `process()` block (one `IParamValueQueue` each). A
-/// single editor + a human dragging knobs touches ~1/block; 64 is a generous ceiling. Bounds
-/// the pre-grown queue pool so the RT path is alloc-free (invariant #5).
+/// single editor + a human dragging knobs touches ~1/block; 64 is a generous ceiling, and a new
+/// id past it waits in the ring for a later block (`drain_params`). Bounds the pre-grown queue
+/// pool so the RT path is alloc-free (invariant #5).
 const MAX_PARAM_QUEUES: usize = 64;
 
 /// Interior-mutable storage for ONE param's pending change, shared (`Rc`) between the unit
@@ -695,20 +696,41 @@ impl ParamChangesInner {
         self.count.set(0);
     }
     /// Queue one param change (alloc-free). Coalesces per id (last value wins) so the plugin
-    /// never sees two queues for the same id in a block; overflow past the pool is dropped.
-    fn push_param(&self, id: ParamID, value: ParamValue) {
+    /// never sees two queues for the same id in a block. False, and nothing queued, when the id
+    /// is new and the pool is full: the caller keeps the change for the next block.
+    fn push_param(&self, id: ParamID, value: ParamValue) -> bool {
         let n = self.count.get();
         for q in &self.inners[..n] {
             if q.id.get() == id {
                 q.value.set(value);
-                return;
+                return true;
             }
         }
-        if n < self.inners.len() {
-            self.inners[n].id.set(id);
-            self.inners[n].value.set(value);
-            self.count.set(n + 1);
+        if n == self.inners.len() {
+            return false;
         }
+        self.inners[n].id.set(id);
+        self.inners[n].value.set(value);
+        self.count.set(n + 1);
+        true
+    }
+}
+
+/// RT: move up to `cap` events from the slot's ring into this block's `changes`, in ring order.
+/// Nothing is dropped: a param whose id is new once the pool is full stays at the ring's head, and
+/// the drain stops there, so it and every change behind it go out from the next block on, in order (a
+/// change ahead of it to an id already queued coalesces; one behind it waits, even to such an id,
+/// or it would overtake the waiting one). Notes do not ride this ring (`process` takes them from
+/// its `events`); any that did are popped and ignored, as before.
+fn drain_params(ring: &mut Consumer<PluginEvent>, changes: &ParamChangesInner, cap: usize) {
+    for _ in 0..cap {
+        let Ok(&event) = ring.peek() else { break };
+        if let PluginEvent::Param { id, value } = event {
+            if !changes.push_param(id as ParamID, value) {
+                break;
+            }
+        }
+        let _ = ring.pop();
     }
 }
 
@@ -1341,5 +1363,77 @@ mod restart_flag_tests {
         );
         assert_ne!(notices & RestartFlags::RELIST, 0);
         assert_eq!((restart.take(), restart.take_notify()), (0, 0), "drained once");
+    }
+}
+
+/// The param drain (`drain_params`): a change whose id would need a queue past the pool waits in
+/// the ring for the next block, in order, and none is lost. Read back through the host
+/// `IParameterChanges` the plugin is handed, as a plugin reads it.
+#[cfg(test)]
+mod param_drain_tests {
+    use super::*;
+    use rtrb::RingBuffer;
+
+    /// One block's `IParameterChanges` as the plugin reads it: each queue's (id, value).
+    fn block(ring: &mut Consumer<PluginEvent>, changes: &Rc<ParamChangesInner>) -> Vec<(ParamID, ParamValue)> {
+        let com = ComWrapper::new(RtParamChanges { inner: changes.clone() });
+        let list = com.to_com_ptr::<IParameterChanges>().expect("the changes list");
+        changes.clear();
+        drain_params(ring, changes, MAX_EVENTS_PER_BLOCK);
+        // SAFETY: the list and its pooled queues live for the calls, as during `process`.
+        unsafe {
+            (0..list.getParameterCount())
+                .map(|i| {
+                    let queue = ComRef::from_raw(list.getParameterData(i)).expect("a queue");
+                    assert_eq!(queue.getPointCount(), 1);
+                    let (mut offset, mut value) = (-1, -1.0);
+                    assert_eq!(queue.getPoint(0, &mut offset, &mut value), kResultOk);
+                    assert_eq!(offset, 0);
+                    (queue.getParameterId(), value)
+                })
+                .collect()
+        }
+    }
+
+    fn setup(events: &[(u32, f64)]) -> (Consumer<PluginEvent>, Rc<ParamChangesInner>) {
+        let (mut tx, rx) = RingBuffer::new(1024);
+        for &(id, value) in events {
+            tx.push(PluginEvent::Param { id, value }).unwrap();
+        }
+        (rx, Rc::new(ParamChangesInner::new(MAX_PARAM_QUEUES).expect("the queue pool")))
+    }
+
+    fn value(id: u32) -> f64 {
+        id as f64 / 1000.0
+    }
+
+    #[test]
+    fn a_new_id_past_the_pool_waits_for_the_next_block() {
+        let ids = 0..MAX_PARAM_QUEUES as u32 + 1;
+        let (mut ring, changes) = setup(&ids.clone().map(|id| (id, value(id))).collect::<Vec<_>>());
+        let first = block(&mut ring, &changes);
+        assert_eq!(first.len(), MAX_PARAM_QUEUES, "the first block carries a full pool");
+        assert_eq!(first, ids.clone().take(MAX_PARAM_QUEUES).map(|id| (id, value(id))).collect::<Vec<_>>());
+        let last = MAX_PARAM_QUEUES as u32;
+        assert_eq!(block(&mut ring, &changes), vec![(last, value(last))], "the 65th, next block");
+        assert!(ring.is_empty());
+        assert!(block(&mut ring, &changes).is_empty(), "nothing left over");
+    }
+
+    /// With the pool full: a change to an id already queued, ahead of a new id, coalesces into this
+    /// block (last value wins); the new id waits, and so does everything behind it, a change to a
+    /// queued id included, so no change overtakes one pushed before it.
+    #[test]
+    fn a_change_ahead_of_the_waiting_id_coalesces_and_one_behind_it_waits() {
+        let mut events: Vec<(u32, f64)> = (0..MAX_PARAM_QUEUES as u32).map(|id| (id, value(id))).collect();
+        let new = MAX_PARAM_QUEUES as u32;
+        events.extend([(5, 0.5), (new, value(new)), (5, 0.25), (7, 0.75)]);
+        let (mut ring, changes) = setup(&events);
+        let first = block(&mut ring, &changes);
+        assert_eq!(first.len(), MAX_PARAM_QUEUES);
+        assert_eq!(first[5], (5, 0.5), "coalesced: the change ahead of the waiting id");
+        assert_eq!(first[7], (7, value(7)), "the change behind it waits");
+        assert_eq!(block(&mut ring, &changes), vec![(new, value(new)), (5, 0.25), (7, 0.75)], "next block, in order");
+        assert!(ring.is_empty());
     }
 }

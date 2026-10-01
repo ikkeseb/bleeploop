@@ -1790,7 +1790,7 @@ impl Looper {
             let playing = t.state == LaneState::Playing || (t.state == LaneState::Overdubbing && silent_lane != Some(i));
             if !playing {
                 for _ in 0..out.len() {
-                    t.gain = target + (t.gain - target) * self.gain_coef;
+                    t.gain = crate::glide(t.gain, target, self.gain_coef);
                 }
                 continue;
             }
@@ -1814,7 +1814,7 @@ impl Looper {
                     fade[k] = (r * r) as f32;
                 }
                 *sample = (g * data[idx as usize] as f64) as f32;
-                t.gain = target + (t.gain - target) * self.gain_coef;
+                t.gain = crate::glide(t.gain, target, self.gain_coef);
                 pos += 1;
                 if pos == master {
                     pos = 0;

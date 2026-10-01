@@ -160,3 +160,23 @@ pub use engine::{Diag, Engine, EngineConfig, EngineHandle, Taps};
 pub use overview::{LaneView, Overview};
 pub use session::{Load, LoadTrack, SessionError, SessionJob, SessionPort, Snapshot, SnapshotTrack};
 pub use slots::SlotPort;
+
+/// Within this of its target a gain glide takes the target itself: -120 dB of full scale, a step far
+/// under any converter's noise floor, reached about 14 time constants into a glide from 1 (some 170 ms
+/// at 12 ms). Without it a glide never lands: one to 0 decays into f64's subnormals and stalls there (an
+/// x86 slow path on every frame), and one to another target sits a hair off it (keeping a slot's and an
+/// instrument's unity fast paths off) until it rounds onto it some 37 time constants in.
+const GLIDE_SNAP: f64 = 1e-6;
+
+/// One frame of a one-pole gain glide (a lane's volume and mute, a slot's gain, an instrument's level,
+/// the master volume): today's `target + (gain - target) * coef` until it is within [`GLIDE_SNAP`] of
+/// the target, then the target exactly. Per frame, so it lands on the same frame at any block size.
+#[inline]
+pub(crate) fn glide(gain: f64, target: f64, coef: f64) -> f64 {
+    let g = target + (gain - target) * coef;
+    if (g - target).abs() < GLIDE_SNAP {
+        target
+    } else {
+        g
+    }
+}

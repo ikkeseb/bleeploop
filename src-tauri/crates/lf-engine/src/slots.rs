@@ -471,7 +471,7 @@ impl Rack {
                 } else if !s.engaged && s.fade > 0 {
                     s.fade -= 1;
                 }
-                s.gain = s.gain_target + (s.gain - s.gain_target) * self.gain_coef;
+                s.gain = crate::glide(s.gain, s.gain_target, self.gain_coef);
                 let y = if s.gain == 1.0 { y } else { (s.gain * y as f64) as f32 };
                 if instrument && !gone {
                     bus[k] += y;

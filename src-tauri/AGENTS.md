@@ -223,7 +223,6 @@ plugin-GUI work.
   store worker doing the file I/O would remove the wait.
 - `plugin_set_param` answers `Err` on a full event ring or an unlisted param id; a UI reaction (the
   slider snaps back to the plugin's value) is unbuilt.
-- A VST3 unit drops a param past 64 distinct ids in one block without a fault bit (`MAX_PARAM_QUEUES`).
 - `clap_engine.rs` and `vst3_engine.rs` each carry the whole owner choreography (load, restart,
   eviction, teardown): one shared owner would keep B1/B11 from returning. Not built.
 - A unit whose restart failed stays parked, bypassed, until the plugin's next restart request; a device
@@ -231,8 +230,6 @@ plugin-GUI work.
 - Each ASIO overload counts twice in `xruns` (both streams' error callbacks count it), and an output
   callback that misses the engine lock reads as a duplex fault.
 - The panic hook (`lib.rs`) allocates and logs on whatever thread panicked, the audio thread included.
-- A slot, lane or master gain ramping to 0 is not snapped to its target and can sit subnormal.
-- `crates/lf-engine/tests/slots.rs` checks a removal's fade with `<=` where `==` is meant.
 - The dry signal steps without a ramp on a live toggle and on an instrument installed into a live slot.
 - Two live slots on the same capture channel sum it (+6 dB).
 - An ASIO period the driver drops without its overload report is not flagged (input and output stay in

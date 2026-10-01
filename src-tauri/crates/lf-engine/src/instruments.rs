@@ -64,7 +64,7 @@ impl Level {
     }
 
     fn step(&mut self, coef: f64) -> f64 {
-        self.gain = self.target + (self.gain - self.target) * coef;
+        self.gain = crate::glide(self.gain, self.target, coef);
         self.gain
     }
 

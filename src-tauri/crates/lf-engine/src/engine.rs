@@ -516,7 +516,7 @@ impl Engine {
                     *o += (g * y as f64) as f32;
                 }
                 *m = (g * *m as f64) as f32;
-                self.master_gain = target + (self.master_gain - target) * self.master_coef;
+                self.master_gain = crate::glide(self.master_gain, target, self.master_coef);
             }
             f = next;
         }
