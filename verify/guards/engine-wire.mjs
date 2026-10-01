@@ -1,4 +1,6 @@
-// verify/guards/engine-wire.mjs — the TS half of the engine wire's fixture check.
+// verify/guards/engine-wire.mjs — the TS half of the engine wire's fixture check, and the session
+// bytes' TS codec (`engine_snapshot`'s stems and an export's master: `src-tauri/src/engine_io/session.rs`
+// owns the layout; its engine_io tests read the Rust half).
 //
 // `verify/fixtures/engine-wire.json` holds one example of every command, engine event and device event,
 // plus device requests, statuses and feed frames; `src-tauri/src/engine_io/wire.rs`'s cargo test parses
@@ -18,6 +20,9 @@ import {
   decodeEvent,
   decodeFeedFrame,
   decodeOpenError,
+  decodeSnapshot,
+  encodeSessionBytes,
+  splitSessionBytes,
 } from '../../src/platform/engine-wire.ts';
 
 const fixture = JSON.parse(readFileSync(new URL('../fixtures/engine-wire.json', import.meta.url), 'utf8'));
@@ -220,6 +225,65 @@ const refused = {
   },
 };
 for (const [name, fn] of Object.entries(refused)) check(`refuses ${name}`, () => assert.throws(fn));
+
+// ── Session bytes: a snapshot's stems, an export's master after them, or the render's error ──────────
+{
+  const header = (extra = {}) => ({
+    rate: 48000,
+    masterLengthFrames: 4,
+    bpm: 120,
+    tracks: [
+      { index: 0, frames: 4, reversed: false, state: 'Playing' },
+      { index: 3, frames: 4, reversed: true, state: 'Stopped' },
+    ],
+    ...extra,
+  });
+  const stems = [Float32Array.from([0.1, 0.2, 0.3, 0.4]), Float32Array.from([-1, 0, 1, 2])];
+  const master = { left: Float32Array.from([1, 2, 3, 4]), right: Float32Array.from([5, 6, 7, 8]) };
+  const bytes = (h, m) => encodeSessionBytes(h, stems, m).buffer;
+  check('a snapshot without a master decodes to its stems', () => {
+    const s = decodeSnapshot(bytes(header()));
+    assert.deepEqual(s.pcm.map((b) => Array.from(b)), stems.map((b) => Array.from(b)));
+    assert.equal(s.master, null);
+    assert.deepEqual(Object.keys(s.header).sort(), ['bpm', 'masterLengthFrames', 'rate', 'tracks']);
+  });
+  check("an export's snapshot carries its master after the stems, left then right", () => {
+    const raw = bytes(header({ master: { frames: 4 } }), master);
+    const s = decodeSnapshot(raw);
+    assert.deepEqual(s.pcm.map((b) => Array.from(b)), stems.map((b) => Array.from(b)));
+    assert.deepEqual([Array.from(s.master.left), Array.from(s.master.right)], [[1, 2, 3, 4], [5, 6, 7, 8]]);
+    assert.deepEqual(s.header.master, { frames: 4 });
+    const tail = new Float32Array(raw.slice(raw.byteLength - 32));
+    assert.deepEqual(Array.from(tail), [1, 2, 3, 4, 5, 6, 7, 8], 'the master is the last 2 × frames samples');
+    assert.equal(splitSessionBytes(raw).master.left.length, 4);
+  });
+  check("a failed render's snapshot carries its error and the stems alone", () => {
+    const s = decodeSnapshot(bytes(header({ masterError: 'export render: no' })));
+    assert.equal(s.master, null);
+    assert.equal(s.header.masterError, 'export render: no');
+    assert.equal(s.pcm.length, 2);
+  });
+  const refusedSession = {
+    'a master the bytes do not hold': () => {
+      const raw = bytes(header({ master: { frames: 4 } }), master);
+      decodeSnapshot(raw.slice(0, raw.byteLength - 4));
+    },
+    'master PCM the header does not name': () => {
+      const raw = new Uint8Array(bytes(header({ master: { frames: 4 } }), master));
+      const json = new TextEncoder().encode(JSON.stringify(header()));
+      const out = new Uint8Array(4 + json.length + (raw.byteLength - 4 - new DataView(raw.buffer).getUint32(0, true)));
+      new DataView(out.buffer).setUint32(0, json.length, true);
+      out.set(json, 4);
+      out.set(raw.subarray(raw.byteLength - (out.length - 4 - json.length)), 4 + json.length);
+      decodeSnapshot(out.buffer);
+    },
+    'a master that is not one loop long': () => decodeSnapshot(encodeSessionBytes(header({ master: { frames: 3 } }), stems, { left: new Float32Array(3), right: new Float32Array(3) }).buffer),
+    'a master and its error at once': () => decodeSnapshot(bytes(header({ master: { frames: 4 }, masterError: 'x' }), master)),
+    'a non-string master error': () => decodeSnapshot(bytes(header({ masterError: 7 }))),
+    'an encode with master PCM and no master in the header': () => encodeSessionBytes(header(), stems, master),
+  };
+  for (const [name, fn] of Object.entries(refusedSession)) check(`refuses ${name}`, () => assert.throws(fn));
+}
 
 console.log(`=== RESULT: ${passed}/${passed + failed} checks passed, ${failed} failed ===`);
 process.exit(failed === 0 ? 0 : 1);

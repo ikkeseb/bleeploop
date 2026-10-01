@@ -1,4 +1,5 @@
-//! The Tone reference fixtures themselves (verify/probes/tone-refs.mjs): every file reads at its
+//! The Tone reference fixtures themselves (captured from Tone 15.1.22; their generator,
+//! verify/probes/tone-refs.mjs, is in git history at 167430ba): every file reads at its
 //! manifest length, the seeded inputs regenerate bit for bit, the noise tables regenerate from their
 //! seed, and the classes score a reference against itself and against a known error.
 

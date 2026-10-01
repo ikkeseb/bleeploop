@@ -28,6 +28,7 @@
 //! | [`instruments`] | the six built-in instruments, the selected one (or none), each one's level, the wheels, their record path | `synths/index.ts`, `input-router.ts` |
 //! | [`overview`] | what the UI draws, for a reader off the audio thread: the grid anchor, each lane's state, buffer, orientation and frames, each buffer's waveform peaks | `looper/peaks.ts` |
 //! | [`session`] | saving and loading a session: a snapshot copied out a budget per frame, a load swapped into an empty looper, the host's port | `looper/session.ts`, `export/*` |
+//! | [`render`] | the export's wet master, offline: a fresh engine the session's size, every lane playing, the mix settings, the warm-up passes, the kept pass lined up with the stems | `session/render.ts`, `session/render-plan.ts` (Tone, removed) |
 //! | [`slots`] | the two plugin slots: install and removal through their ports, bypass crossfades, notes, live and gain, each slot's own input, where each output goes | `plugin-bridge.ts`, `instrument-slots.ts` |
 //! | [`api`] | commands, events, the process context, the plugin seam ([`SlotProcessor`]) | — |
 //! | [`dsp`] | Stage 3 sound: the Tone/Blink building blocks, the six built-in synths, the per-track FX chain and the reverb bus, the limiter | Tone.js on Blink's Web Audio |
@@ -114,7 +115,7 @@
 //! before their FX (a bypassed chain is not bit-transparent, as in Tone); `tests/sound.rs` holds the
 //! wired sound. `tests/slots.rs` holds the plugin slots, with fake units that record what they saw in
 //! preallocated buffers (never allocating in `process`) and are handed back to the test to drop;
-//! `tests/punch_out.rs` holds the punch-out, `tests/multiply.rs` the multiply (a free take's too),
+//! `tests/punch_out.rs` holds the punch-out, `tests/render_master.rs` the export's wet master, `tests/multiply.rs` the multiply (a free take's too),
 //! `tests/trim.rs` the TRIM, `tests/dub_feedback.rs` DUB FEEDBACK, `tests/fade.rs` FADE, `tests/input_fx.rs`
 //! the input sends. `tests/perf.rs` holds the ignored cost
 //! bars (Stage 2 and 3, the input sends, a multiply's burst, a TRIM's) and the Stage 3 load's alloc
@@ -135,9 +136,8 @@
 //!
 //! The device side (streams, MIDI, Share output) is `src-tauri/src/engine_io`; the CLAP/VST3 units and
 //! their owners are `src-tauri/src/host/engine_slot.rs` and its siblings; the feed that carries the
-//! events and the [`overview`] to the UI is `src-tauri/src/engine_io/feed.rs`. Not built here: the
-//! export's wet master, which the UI still renders on Tone's OfflineContext (`src/session/render.ts`),
-//! so its FX may sound unlike the engine's.
+//! events and the [`overview`] to the UI is `src-tauri/src/engine_io/feed.rs`, and the export's snapshot
+//! that carries the [`render`]ed wet master is `src-tauri/src/engine_io/session.rs`.
 
 #![forbid(unsafe_code)]
 
@@ -152,12 +152,14 @@ pub mod input_fx;
 pub mod instruments;
 pub mod looper;
 pub mod overview;
+pub mod render;
 pub mod session;
 pub mod slots;
 
 pub use api::*;
 pub use engine::{Diag, Engine, EngineConfig, EngineHandle, Taps};
 pub use overview::{LaneView, Overview};
+pub use render::{wet_master, wet_master_with, RenderOptions, WetMaster};
 pub use session::{Load, LoadTrack, SessionError, SessionJob, SessionPort, Snapshot, SnapshotTrack};
 pub use slots::SlotPort;
 

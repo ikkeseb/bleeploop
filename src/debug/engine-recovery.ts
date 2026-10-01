@@ -101,7 +101,7 @@ async function save(): Promise<void> {
   const entries = parseZip(bundle!.zipBytes);
   const sessionJson = JSON.parse(new TextDecoder().decode(entries.find((e) => e.name.endsWith('-session.json'))!.data));
   log(`exported: ${entries.map((e) => e.name.replace(/^bleeploop-[\d-]+-/, '')).join(', ')}; master ${sessionJson.master.kind}`);
-  check(sessionJson.tracks.length === 2 && sessionJson.master.kind === 'wet-v1', 'the export lacks a stem or the wet master');
+  check(sessionJson.tracks.length === 2 && sessionJson.master.kind === 'wet-engine', "the export lacks a stem or the engine's wet master");
   looper.clearAll();
   await until('an empty looper after CLEAR ALL', () => allEmpty() && looper.masterLengthFrames() === 0, 5);
   await importSession(bundle!.zipBytes, session);

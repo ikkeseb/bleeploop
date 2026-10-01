@@ -175,11 +175,12 @@ pub async fn engine_set_share(endpoint: Option<String>) -> Result<(), String> {
 }
 
 /// The committed loops as raw bytes (`session.rs`'s layout): JS gets an ArrayBuffer, not a JSON array.
-/// Off the IPC thread: a snapshot copies for up to about a second and a half.
+/// With `master` (an export's), the wet master rendered offline from them too. Off the IPC thread: a
+/// snapshot copies for up to about a second and a half, and a master's render can take longer.
 #[tauri::command]
-pub async fn engine_snapshot() -> Result<tauri::ipc::Response, String> {
+pub async fn engine_snapshot(master: bool) -> Result<tauri::ipc::Response, String> {
     let host = app()?.host()?;
-    let bytes = tauri::async_runtime::spawn_blocking(move || host.snapshot()).await.map_err(|e| format!("engine_snapshot: {e}"))??;
+    let bytes = tauri::async_runtime::spawn_blocking(move || host.snapshot(master)).await.map_err(|e| format!("engine_snapshot: {e}"))??;
     Ok(tauri::ipc::Response::new(bytes))
 }
 

@@ -1,5 +1,5 @@
 {
- "note": "Written by verify/probes/tone-refs.mjs --write. Regenerate only with a stated reason; each port records its tolerance class against these bytes.",
+ "note": "Captured from Tone 15.1.22 by verify/probes/tone-refs.mjs --write; Tone and that generator have left the repo (git history keeps it at 167430ba), so these bytes are fixed. Each port records its tolerance class against them.",
  "capture": {
   "commit": "7e131e525747f48c2182f0316dab48d313202f41",
   "dirty": true,

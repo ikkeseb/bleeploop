@@ -1,6 +1,7 @@
 //! Stage 3: the synths, the FX and the limiter, ported literally from what Tone.js 15.1.22 builds on
 //! Blink's Web Audio nodes (Chromium 153). Each port is tested against the Tone reference renders in
-//! `tests/fixtures/tone` (`verify/probes/tone-refs.mjs`) and holds the tightest tolerance class it
+//! `tests/fixtures/tone`, captured from Tone 15.1.22 (Tone has left the repo; git history keeps the
+//! generator, `verify/probes/tone-refs.mjs`, last at 167430ba), and holds the tightest tolerance class it
 //! passes, recorded in its test (the classes and the harness: `tests/common/refs.rs`). The engine plays
 //! them through [`crate::effects`] and [`crate::instruments`], and the limiter on its master bus. The
 //! Blink ports are BSD-3 (`THIRD-PARTY-NOTICES.md`).

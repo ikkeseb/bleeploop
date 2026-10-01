@@ -5,8 +5,7 @@
  *
  * - boot: the saved device opens once (WASAPI in the browser, the saved buffer); the first reset frame
  *   gets what the UI persists and owns (master and click level, the note target), not defaults the
- *   engine has; no AudioContext is ever built (Tone's import-time default context included:
- *   `src/main.tsx` loads the app with the constructors hidden);
+ *   engine has; no AudioContext is ever built (the app has no Web Audio path);
  * - gesture → command: BPM +, CLICK, the lane core (its pointerdown selects), Space (the engine's
  *   hands-free `Action`), a lane volume, no MIC (a slot set to Off goes live instead: `slot-sources.mjs`),
  *   a PC key (NoteOn, NoteOff), the
@@ -351,10 +350,9 @@ await probe(async ({ open }) => {
   console.log(`beat shown ${shownAfter} ms after its frame arrived (heard 400 ms later)`);
   assert.ok(shownAfter > 250 && shownAfter < 700, `the beat LED waited for the heard time (${shownAfter} ms)`);
 
-  // The app never builds an AudioContext, nor Tone's default context (`src/main.tsx`).
+  // The app never builds an AudioContext: the engine plays everything.
   const contexts = await page.evaluate(() => window.__audioContexts);
   for (const stack of contexts) console.log(stack);
   assert.equal(contexts.length, 0, 'no AudioContext was constructed');
-  assert.equal(await page.evaluate(() => typeof window.AudioContext), 'function', 'the constructor is back after the app loaded');
   assert.deepEqual(consoleErrors, [], 'no console errors');
 });

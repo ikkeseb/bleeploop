@@ -1,14 +1,16 @@
 // src/session/export.ts
 // WAV-export coordinator: pulls a read-only snapshot of the committed looper tracks and drops
 // ONE .zip (per-track mono WAVs + a stereo master mix + session.json, and each loaded plugin slot's
-// tone, `src/ui/state/slot-tones.ts`) via blob + <a download>.
+// tone, `src/ui/state/slot-tones.ts`) via blob + <a download>. The master is the engine's: the same
+// snapshot carries it, rendered offline by lf-engine from those loops and the engine's mix (no Web Audio
+// render remains); a dry mixdown stands in when that render fails (`buildExportBundle`).
 // Everything is bundled into a single archive on purpose: browsers (and WebView2) gate more than one
 // programmatic download per user gesture, so firing a separate <a>.click() per file silently delivers
 // only the first — one zip is one gesture, so the whole export always reaches the user (see zip.ts).
 // Boundary-clean (no @tauri-apps/* import, no src/platform/ seam) so it builds and verifies on the Mac
 // half; the actual file-drop behavior under WebView2 is a PC gate.
 import { notifyError } from '../notify';
-import { renderWetMaster } from './render';
+import type { SessionMasterKind } from './session-schema';
 import type { SessionSource } from './session-source';
 import { encodeWav, mixMono } from './wav';
 import { makeZip } from './zip';
@@ -29,7 +31,8 @@ function download(bytes: Uint8Array<ArrayBuffer> | string, filename: string, mim
 }
 
 export interface BuildExportOptions {
-  /** False for recovery snapshots: stems + session.json only, with no expensive offline render. */
+  /** False for recovery snapshots: stems + session.json only; the snapshot never asks the engine for
+   *  its (expensive) master render. */
   includeMaster?: boolean;
   /** Float32 for lossless local recovery; downloads also preserve editable stem headroom. */
   stemFormat?: 'pcm16' | 'float32';
@@ -42,17 +45,17 @@ export interface BuildExportOptions {
  * <a download>).
  * bpm/bars are passed in from the UI (the clock authority lives there). Per-track WAVs are the RAW
  * capture (unity, pre-volume/pre-mute/pre-limiter/pre-FX) — EVERY committed track (incl. STOPPED)
- * exports its stem, so no audio is ever lost. When included, the master (v1) is a WET stereo render:
- * each track through its real FX chain + the shared reverb + the master limiter in an
- * OfflineAudioContext (render.ts): the mix as it sounds with every track playing. A STOPPED track is
- * IN the master (the owner exported a stopped session and got silence, tester-feedback F26); only
- * MUTE leaves a track out. If that render fails, the export still completes with the v0 DRY
- * volume/mute dual-mono mixdown (flagged in session.json as master.kind = 'dry-fallback') — a
- * degraded master beats a lost take. Returns null when nothing is committed.
- * A wet export requires a finished take so its snapshot cannot contain an unfinished layer.
- * Recovery snapshots pass `includeMaster:false` and remain available during capture. `source` is the
- * looper to read (`session-source.ts`). The wet master is a Web Audio render of the stems and their FX
- * (`render.ts`; an OfflineAudioContext opens no device), so its FX may sound unlike the engine's own.
+ * exports its stem, so no audio is ever lost. When included, the master (session.json `master.kind`
+ * 'wet-engine') is the engine's own: the snapshot asks for it, and lf-engine renders it offline from the
+ * same loops with the mix the engine holds (lane volume, mute and FX, the reverb bus, master volume and
+ * mute, the limiter: `src-tauri/crates/lf-engine/src/render.rs`), every track playing, frame 0 lined up
+ * with the stems. A STOPPED track is IN the master (the owner exported a stopped session and got
+ * silence, tester-feedback F26); only MUTE leaves a track out. If the engine's render fails, the export
+ * still completes with the DRY volume/mute dual-mono mixdown (master.kind 'dry-fallback') — a degraded
+ * master beats a lost take. Returns null when nothing is committed.
+ * An export with the master requires a finished take so its snapshot cannot contain an unfinished layer.
+ * Recovery snapshots pass `includeMaster:false`: they never ask the engine for a master and remain
+ * available during capture. `source` is the looper to read (`session-source.ts`).
  */
 export async function buildExportBundle(
   meta: { bpm: number; bars: number },
@@ -69,25 +72,25 @@ export async function buildExportBundle(
   }
   // Each track carries the state it had as its PCM was read (the engine reads both in one snapshot), so
   // they can't disagree; session.json keeps it for the import.
-  const snap = await source.exportSnapshot();
+  const withMaster = options.includeMaster !== false;
+  const snap = await source.exportSnapshot({ master: withMaster });
   if (snap.masterLengthFrames <= 0 || snap.tracks.length === 0) return null; // button should already guard this
   const base = exportBase();
   const sr = snap.sampleRate;
   const { entries, session } = prepareStemArchive(snap, meta, base, options.stemFormat ?? 'float32');
 
-  if (options.includeMaster !== false) {
-    // v1 wet master; v0 dry mixdown as the fallback so one render bug can't lose the whole export.
-    // Both mix every committed track, STOPPED included; mute and volume apply as heard. Recovery
-    // snapshots skip this whole branch: their job is preserving editable stems, not rendering a mix.
+  if (withMaster) {
+    // The engine's wet master; the dry mixdown as the fallback so one render failure can't lose the
+    // whole export. Both mix every committed track, STOPPED included; mute and volume apply as heard.
+    // Recovery snapshots skip this whole branch: their job is preserving editable stems, not a mix.
     const masterLevel = source.masterLevel();
     let masterChannels: Float32Array[];
-    let masterKind: 'wet-v1' | 'dry-fallback';
-    try {
-      const wet = await renderWetMaster(snap, meta.bpm, masterLevel);
-      masterChannels = [wet.left, wet.right];
-      masterKind = 'wet-v1';
-    } catch (err) {
-      console.error('[export] wet master render failed — falling back to the dry mixdown', err);
+    let masterKind: Exclude<SessionMasterKind, 'wet-v1'>;
+    if (snap.master) {
+      masterChannels = [snap.master.left, snap.master.right];
+      masterKind = 'wet-engine';
+    } else {
+      console.error('[export] the engine rendered no wet master — falling back to the dry mixdown', snap.masterError ?? 'no reason given');
       notifyError('Wet master render failed — exported a dry mixdown instead');
       const mono = mixMono(snap.tracks, snap.masterLengthFrames, masterLevel);
       masterChannels = [mono, mono];
@@ -98,10 +101,11 @@ export async function buildExportBundle(
     Object.assign(session, {
       master: {
         file: masterFile,
-        // 'wet-v1': stereo render through per-track FX + reverb + master limiter (as heard).
-        // 'dry-fallback': v0 volume/mute dual-mono mixdown (render failed; see the error toast/log).
+        // 'wet-engine' or 'dry-fallback' (the render failed; see the error toast/log):
+        // `SessionMasterKind` documents them.
         kind: masterKind,
-        // Effective live master gain applied before the limiter/clamp (mute is recorded as 0).
+        // Effective live master gain (mute is recorded as 0): in the wet master already; the fallback
+        // applies it to its mixdown.
         level: masterLevel,
       },
     });

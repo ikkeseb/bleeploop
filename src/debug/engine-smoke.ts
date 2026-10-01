@@ -13,8 +13,7 @@
  *   plugin    (`VITE_LF_PROBE_PLUGIN` set) that plugin loads into slot 1, GO LIVE takes it live and the
  *             input meter moves
  *
- * It also reports the state of the AudioContext Tone builds when it loads. It ends with every lane empty,
- * so the runner's window close meets no jam question. `[engine-smoke]` lines go through `console.error`
+ * It ends with every lane empty, so the runner's window close meets no jam question. `[engine-smoke]` lines go through `console.error`
  * (→ the same log as the Rust host); the runner fails the run on any other `console.error` line.
  *
  * Trigger: `VITE_LF_PROBE=engine-smoke` at Vite start (DEV only). Knobs:
@@ -22,7 +21,6 @@
  *   `VITE_LF_PROBE_PLUGIN`  `<name substring>[:<format>]` to load into slot 1 and go live on, e.g.
  *                           `Pro-Q:vst3` (default: none)
  */
-import { getContext } from 'tone';
 import { framesPerBar } from '../ui/state/quantize';
 import { setBufferSize, usingAsio } from '../ui/state/audio-devices';
 import type { BufferFrames } from '../ui/state/audio-settings';
@@ -50,12 +48,6 @@ function check(ok: boolean, what: string): void {
 
 const lane = (i: number) => looper.track(i)();
 const allEmpty = () => Array.from({ length: looper.trackCount }, (_, i) => lane(i).state).every((s) => s === 'EMPTY');
-
-/** The Tone context's state: Tone builds its default AudioContext when its module loads. */
-function toneContext(): string {
-  const raw = getContext().rawContext as { state?: unknown; baseLatency?: unknown };
-  return typeof raw.state === 'string' ? raw.state : 'none (Tone holds no AudioContext)';
-}
 
 /** What the lanes and the command bar show while a take runs, sampled every 20 ms. */
 function watchDom(laneIndex: number) {
@@ -85,7 +77,6 @@ export async function runEngineSmoke(): Promise<void> {
 
 async function run(): Promise<void> {
   check(platform.engine.available, 'this platform has no engine');
-  log(`tone context at start: ${toneContext()}`);
   const events: EngineEvent[] = [];
   onEngineEvent((ev) => events.push(ev));
 
@@ -192,6 +183,5 @@ async function run(): Promise<void> {
   looper.clearAll();
   await until('an empty looper at the end', () => allEmpty() && looper.masterLengthFrames() === 0, 5);
   clock.setMetronome(false);
-  log(`tone context at the end: ${toneContext()}`);
   log(`complete: ${rate} Hz, ${device!.block} frames, one bar = ${bar} frames`);
 }

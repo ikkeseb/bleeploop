@@ -6,10 +6,12 @@
  * answer, then drives the real UI:
  *
  * - export: the Export button's download holds both stems exactly as the snapshot's PCM (play order), the
- *   store's mix (DUB FEEDBACK included, set in the lane's FX drawer), the lane states, and a wet master
- *   rendered offline (no AudioContext is built);
- * - recovery: autosave saves the jam, and a reloaded page (a fresh engine) loads it back into the engine
- *   and sends the loaded lanes' mix, DUB FEEDBACK included;
+ *   store's mix (DUB FEEDBACK included, set in the lane's FX drawer), the lane states, and the master the
+ *   snapshot carries (`master.kind` 'wet-engine'; here the fake's stand-in, a dry sum under the mix the
+ *   UI sent, NOT the engine's sound: this proves the plumbing, never the master's sound); no
+ *   AudioContext is built;
+ * - recovery: autosave saves the jam without asking for the master, and a reloaded page (a fresh engine)
+ *   loads it back into the engine and sends the loaded lanes' mix, DUB FEEDBACK included;
  * - import: the exported zip goes to the engine as one session (header, PCM, orientation), and the store
  *   sends the loaded lanes' mix;
  * - Share output: the saved pick reaches the engine at boot, and ShareLost clears it with a toast.
@@ -129,16 +131,26 @@ await probe(async ({ browser, open }) => {
     const stem = decodeWav(entries.find((e) => e.name === t.file).data).channels[0];
     assert.deepEqual(Array.from(stem), pcm[k].map((x) => Math.fround(x)), `stem ${t.track} is the snapshot's PCM`);
   }
-  assert.equal(session.master.kind, 'wet-v1', 'the wet master rendered offline');
+  assert.equal(session.master.kind, 'wet-engine', "the snapshot's master");
   const master = decodeWav(entries.find((e) => e.name === session.master.file).data);
   assert.equal(master.channels.length, 2);
-  assert.ok(master.channels[0].some((x) => Math.abs(x) > 0.01), 'the wet master carries lane 1');
+  // The fake's stand-in is 0.8 × lane 1 + lane 2 (the volumes the UI sent): the PCM16 WAV holds it as
+  // sent, clipped at full scale.
+  const standIn = pcm[0].map((a, i) => Math.max(-1, Math.min(1, 0.8 * a + pcm[1][i])));
+  for (const channel of master.channels) {
+    assert.equal(channel.length, MASTER);
+    const off = channel.reduce((m, x, i) => Math.max(m, Math.abs(x - standIn[i])), 0);
+    assert.ok(off < 1e-4, `the master WAV is the snapshot's master (off by ${off})`);
+  }
 
   // ── Recovery: autosave keeps the jam; a fresh page loads it back into the engine ─────────────────
   for (let t0 = Date.now(); !(await page.evaluate(() => window.__lf.autosave.hasSaved())); ) {
     assert.ok(Date.now() - t0 < 15000, 'autosave saved the jam within 15 s');
     await page.waitForTimeout(250);
   }
+  const asked = await page.evaluate(() => window.__lf.native.snapshots.slice());
+  console.log('snapshots asked with the master', JSON.stringify(asked));
+  assert.ok(asked.length >= 2 && asked.filter(Boolean).length === 1, 'the export asked for the master once, autosave never');
   await page.reload();
   await page.waitForFunction(() => '__lf' in window && window.__lf.native.loadedSessions.length === 1, undefined, { timeout: 15000 });
   const recovered = await page.evaluate(async () => {
@@ -178,7 +190,7 @@ await probe(async ({ browser, open }) => {
   await page.getByText('Share output stopped').waitFor({ timeout: 3000 });
   assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem('lf.audioDevices')).shareDeviceId), '');
 
-  assert.equal(await page.evaluate(() => window.__audioContexts), 0, 'no AudioContext was built (the master renders offline)');
+  assert.equal(await page.evaluate(() => window.__audioContexts), 0, 'no AudioContext was built (the engine plays everything)');
   const expected = ['[engine] share output lost: the Share output endpoint stopped'];
   assert.deepEqual(consoleErrors, expected, 'no other console errors');
   await context.close();

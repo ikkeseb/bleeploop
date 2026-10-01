@@ -1,12 +1,10 @@
 // verify/guards/wav-export.mjs — deterministic guard for src/session/wav.ts.
 // Imports the REAL encoder (Node TS type-stripping) so it cannot drift from the source. Asserts the
 // canonical 44-byte RIFF/WAVE/fmt/data header byte-for-byte, PCM16 quantization + clamping, the
-// mono/stereo channel layout + interleave order, mixMono's track/master gains + hard-clamp, the wet
-// master's generalized final-period slice, and the pure enabled-FX warm-up plan. The OfflineAudioContext
-// graph itself is browser-only — its runtime gate is the Playwright export probe, not this guard.
+// mono/stereo channel layout + interleave order, and mixMono's track/master gains + hard-clamp (the
+// export's dry fallback). The wet master is the engine's (lf-engine `tests/render_master.rs`).
 // Run: node verify/guards/wav-export.mjs
-import { warmupPassesForFx } from '../../src/session/render-plan.ts';
-import { encodeWav, finalPeriod, floatToPcm16, mixMono } from '../../src/session/wav.ts';
+import { encodeWav, floatToPcm16, mixMono } from '../../src/session/wav.ts';
 
 let fails = 0, checks = 0;
 function ok(name, cond, detail = '') {
@@ -119,66 +117,6 @@ ok('A.floatToPcm16(0.5) == 16384 (round 16383.5)', floatToPcm16(0.5) === 16384, 
 
   const padded = mixMono([{ pcm: Float32Array.from([0.5]), volume: 1, muted: false }], 3, 1);
   ok('D.shorter pcm zero-padded past end', padded[0] === 0.5 && padded[1] === 0 && padded[2] === 0, JSON.stringify(Array.from(padded)));
-}
-
-// ---- E. finalPeriod: retain the final pass after a variable number of warm-up periods ----
-{
-  const frames = 4;
-  const rendered = Float32Array.from([
-    0, 0, 0, 0,
-    0.125, 0.125, 0.125, 0.125,
-    0.25, 0.25, 0.25, 0.25,
-    0.5, 0.625, 0.75, 0.875,
-    0, 0,
-  ]);
-  const out = finalPeriod(rendered, frames, 3);
-  ok('E.slice is exactly [warmup*frames, (warmup+1)*frames)', out.length === 4 && out[0] === 0.5 && out[3] === 0.875,
-     JSON.stringify(Array.from(out)));
-  ok('E.slice is a copy (mutating it leaves the render intact)', (out[0] = 9, rendered[12] === 0.5),
-     String(rendered[12]));
-  ok('E.exact multi-pass render (no padding) still slices', finalPeriod(new Float32Array(16), 4, 3).length === 4);
-  let threw = false;
-  try { finalPeriod(new Float32Array(15), 4, 3); } catch { threw = true; }
-  ok('E.short render throws loudly (never a truncated master)', threw);
-  let badPassesThrew = false;
-  try { finalPeriod(new Float32Array(8), 4, 1.5); } catch { badPassesThrew = true; }
-  ok('E.non-integer warmup count rejects', badPassesThrew);
-}
-
-// ---- F. enabled FX tails derive warm-up passes from the real serialized state ----
-{
-  const fx5 = () => [
-    { bypassed: true, params: { cutoff: 1200, q: 2 } },
-    { bypassed: true, params: { semitones: 0 } },
-    { bypassed: true, params: { rate: 1 } },
-    { bypassed: true, params: { time: 1, feedback: 0.4, mix: 0.3 } },
-    { bypassed: true, params: { amount: 0.3 } },
-  ];
-
-  ok('F.no enabled tail keeps one priming pass', warmupPassesForFx([{ fx: fx5() }], 120, 0.8) === 1);
-
-  const reverb = fx5();
-  reverb[4].bypassed = false;
-  ok('F.2.62s reverb over a 0.8s loop needs 4 warm-up passes',
-    warmupPassesForFx([{ fx: reverb }], 300, 0.8) === 4);
-
-  const dryReverb = fx5();
-  dryReverb[4] = { bypassed: false, params: { amount: 0 } };
-  ok('F.zero reverb send has no audible tail', warmupPassesForFx([{ fx: dryReverb }], 300, 0.8) === 1);
-
-  const longDelay = fx5();
-  longDelay[3] = { bypassed: false, params: { time: 0, feedback: 0.95, mix: 0.3 } };
-  ok('F.quarter delay @300/0.95 reaches 1e-4 after 45 one-bar warm-ups',
-    warmupPassesForFx([{ fx: longDelay }], 300, 0.8) === 45);
-
-  const oneEcho = fx5();
-  oneEcho[3] = { bypassed: false, params: { time: 2, feedback: 0, mix: 0.3 } };
-  ok('F.actual dotted-eighth delay choice drives the tail duration',
-    warmupPassesForFx([{ fx: oneEcho }], 120, 0.2) === 2);
-
-  const dryDelay = fx5();
-  dryDelay[3] = { bypassed: false, params: { time: 0, feedback: 0.95, mix: 0 } };
-  ok('F.zero delay mix has no audible tail', warmupPassesForFx([{ fx: dryDelay }], 300, 0.8) === 1);
 }
 
 console.log(`\n=== RESULT: ${checks - fails}/${checks} checks passed, ${fails} failed ===`);

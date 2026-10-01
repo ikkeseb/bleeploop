@@ -257,8 +257,9 @@ export interface EngineHost {
   /** Share output's endpoint (a WASAPI render id, as `listOutputDevices` lists them), or null for off.
    * The mirror runs while the device is ASIO. */
   setShare(endpoint: string | null): Promise<void>;
-  /** The committed lanes' PCM and what they are (`engine-wire.ts` § Session bytes). */
-  snapshot(): Promise<ArrayBuffer>;
+  /** The committed lanes' PCM and what they are (`engine-wire.ts` § Session bytes); with `master` (an
+   * export's), the engine's wet master rendered from them too, or the render's error. */
+  snapshot(master: boolean): Promise<ArrayBuffer>;
   /** Load a session into an all-empty engine (`engine-wire.ts` § Session bytes). */
   loadSession(bytes: Uint8Array<ArrayBuffer>): Promise<void>;
   /** Subscribe to the feed (~60 frames/s while something changes); the first frame has `reset`.

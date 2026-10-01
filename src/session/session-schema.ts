@@ -36,6 +36,19 @@ export interface ParsedSession {
   tracks: ParsedSessionTrack[];
 }
 
+/**
+ * session.json's `master.kind`. An export's `master` is `{ file, kind, level }`: `file` the stereo PCM16
+ * WAV entry, `level` the master gain as heard when exported (0 while muted); a recovery archive has no
+ * master, and import reads none of it (the stems are the session).
+ * - 'wet-engine': the engine's own render (lf-engine's `render`, asked through the export's snapshot):
+ *   every track playing through its FX chain, the reverb bus, master volume and mute, the limiter, frame
+ *   0 at loop position 0 like the stems.
+ * - 'wet-v1': the same mix rendered on Tone.js in the WebView, by exports before the engine rendered it
+ *   (v0.1.0's fixtures hold one); it lags the stems by the limiter's pre-delay.
+ * - 'dry-fallback': the volume/mute dual-mono mixdown, written when the wet render failed.
+ */
+export type SessionMasterKind = 'wet-engine' | 'wet-v1' | 'dry-fallback';
+
 /** One plugin slot in session.json's optional `plugins` list: which plugin the
  * slot held, and the archive entry holding its tone (a tone file, `src-tauri/src/host/tone.rs`). */
 export interface ParsedSessionPlugin {

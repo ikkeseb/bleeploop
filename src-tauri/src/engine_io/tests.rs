@@ -598,20 +598,20 @@ fn a_snapshot_taken_during_a_long_overdub_holds_the_loop_before_the_layer() {
     h.fake.set_input(tone);
     h.open(asio(Some(256)));
     let length = h.record_loop();
-    let (_, before) = session_parts(&h.host.snapshot().expect("a snapshot of the committed take"));
+    let (_, before) = session_parts(&h.host.snapshot(false).expect("a snapshot of the committed take"));
     h.fake.set_input(|frame| 0.1 * (frame as f32 * 0.002_3).sin());
     h.send(Command::SetSlotLive(0, true));
     h.send(Command::RecDub(0));
     h.wait_lane("the overdub runs", 0, |i| i.state == LaneState::Overdubbing);
     for pass in 0..3 {
         h.play(length * 2 / 3);
-        let (header, pcm) = session_parts(&h.host.snapshot().expect("a snapshot while the layer sums"));
+        let (header, pcm) = session_parts(&h.host.snapshot(false).expect("a snapshot while the layer sums"));
         assert_eq!(header["tracks"][0]["state"], "Overdubbing", "pass {pass}");
         assert!(pcm == before, "pass {pass}: the loop before the layer, never a part of it");
     }
     h.send(Command::RecDub(0));
     h.wait_lane("the layer commits", 0, |i| i.state == LaneState::Playing);
-    let (_, after) = session_parts(&h.host.snapshot().expect("a snapshot of the committed layer"));
+    let (_, after) = session_parts(&h.host.snapshot(false).expect("a snapshot of the committed layer"));
     assert!(max_diff(&after, &before) > 0.05, "the committed layer is in the next snapshot");
 }
 
@@ -1383,7 +1383,7 @@ fn a_session_saves_and_loads_back_through_its_bytes_with_a_device_running_or_not
     let length = h.record_loop();
     h.send(Command::Reverse(0));
     h.play(RATE / 10);
-    let (header, pcm) = session_parts(&h.host.snapshot().expect("a snapshot while the device plays"));
+    let (header, pcm) = session_parts(&h.host.snapshot(false).expect("a snapshot while the device plays"));
     assert_eq!(header["rate"], 48_000);
     assert_eq!(header["bpm"], 240);
     assert_eq!(header["masterLengthFrames"], length);
@@ -1397,17 +1397,96 @@ fn a_session_saves_and_loads_back_through_its_bytes_with_a_device_running_or_not
     h.send(Command::ClearAll);
     h.wait_lane("the lane clears", 0, |i| i.state == LaneState::Empty);
     h.host.load_session(&session_bytes(&load, &pcm)).expect("a load into the emptied engine");
-    let (again, back) = session_parts(&h.host.snapshot().unwrap());
+    let (again, back) = session_parts(&h.host.snapshot(false).unwrap());
     assert_eq!(again["tracks"], header["tracks"]);
     assert_eq!(back, pcm, "the loop comes back sample-exact, reversed flag and all");
 
     h.host.close().unwrap();
-    let (closed, idle) = session_parts(&h.host.snapshot().expect("a snapshot with no device running"));
+    let (closed, idle) = session_parts(&h.host.snapshot(false).expect("a snapshot with no device running"));
     assert_eq!((closed["tracks"].clone(), idle), (header["tracks"].clone(), pcm.clone()));
     let wrong = serde_json::json!({ "bpm": 120, "bars": 1, "masterLengthFrames": length, "tracks": header["tracks"] });
     assert!(h.host.load_session(&session_bytes(&wrong, &pcm)).is_err(), "a tempo that disagrees with the length");
     let diag = h.host.diag();
     assert_eq!((diag.rt_allocs, diag.lock_misses, diag.panics), (0, 0, 0), "the engine side allocated nothing and the callback never missed");
+}
+
+/// A snapshot with its master: the header, the stems' PCM and the master's two channels.
+fn session_with_master(bytes: &[u8]) -> (serde_json::Value, Vec<f32>, [Vec<f32>; 2]) {
+    let (header, mut pcm) = session_parts(bytes);
+    let frames = header["master"]["frames"].as_u64().expect("the header names the master") as usize;
+    assert_eq!(frames as u64, header["masterLengthFrames"].as_u64().unwrap(), "the master is one loop long");
+    assert!(pcm.len() >= 2 * frames, "the master's PCM follows the stems'");
+    let right = pcm.split_off(pcm.len() - frames);
+    let left = pcm.split_off(pcm.len() - frames);
+    (header, pcm, [left, right])
+}
+
+/// `master` is `stem` times one gain (the limiter's makeup, under its threshold): that gain, and the
+/// largest residue beside it, relative to the stem's peak.
+fn fit(master: &[f32], stem: &[f32]) -> (f32, f32) {
+    let (ms, ss) = master.iter().zip(stem).fold((0.0f64, 0.0f64), |(ms, ss), (&m, &s)| (ms + m as f64 * s as f64, ss + s as f64 * s as f64));
+    let g = (ms / ss) as f32;
+    let peak = stem.iter().fold(0.0f32, |p, x| p.max(x.abs()));
+    (g, max_diff(master, &stem.iter().map(|x| g * x).collect::<Vec<_>>()) / peak)
+}
+
+/// A sawtooth that rises: backwards it falls, so a loop reversed twice shows.
+fn saw(frame: Frame) -> f32 {
+    0.15 * ((frame % 4_801) as f32 / 4_801.0) - 0.075
+}
+
+#[test]
+fn an_export_snapshot_carries_the_engines_wet_master_in_play_order_with_the_kept_mix() {
+    let mut h = Harness::new();
+    h.fake.set_input(saw);
+    h.open(asio(Some(256)));
+    let length = h.record_loop();
+    h.send(Command::Reverse(0));
+    h.play(RATE / 10);
+
+    let (header, stems, [left, right]) = session_with_master(&h.host.snapshot(true).expect("an export's snapshot"));
+    assert_eq!(header["tracks"], serde_json::json!([{ "index": 0, "frames": length, "reversed": true, "state": "Playing" }]));
+    assert_eq!(header["master"], serde_json::json!({ "frames": length }));
+    assert!(header.get("masterError").is_none(), "{header}");
+    assert_eq!((stems.len(), left.len(), right.len()), (length as usize, length as usize, length as usize));
+    let (plain_header, plain) = session_parts(&h.host.snapshot(false).unwrap());
+    assert!(plain_header.get("master").is_none() && plain == stems, "a recovery's snapshot has the stems alone");
+    // The reversed lane's master is heard as its stem is: in play order, reversed once, not twice.
+    for (side, channel) in [("left", &left), ("right", &right)] {
+        let (g, residue) = fit(channel, &stems);
+        let backwards: Vec<f32> = stems.iter().rev().copied().collect();
+        let (_, twice) = fit(channel, &backwards);
+        println!("{side}: gain {g}, residue {residue}, against the stem backwards {twice}");
+        assert!(g > 0.5 && g < 2.0, "{side}: the master holds the stem at the limiter's gain ({g})");
+        assert!(residue < 0.02, "{side}: the master is the stem in play order (residue {residue})");
+        assert!(twice > 0.2, "{side}: and not the stem backwards ({twice})");
+    }
+
+    // A lane the kept mix mutes is out of the master, as it is out of what plays.
+    h.send(Command::SetMute(0, true));
+    let (_, muted_stems, [ml, mr]) = session_with_master(&h.host.snapshot(true).unwrap());
+    assert_eq!(muted_stems, stems, "a mute leaves the stem as it is");
+    let loudest = ml.iter().chain(&mr).fold(0.0f32, |p, x| p.max(x.abs()));
+    assert!(loudest < 1e-6, "the muted lane is silent in the master ({loudest})");
+    let diag = h.host.diag();
+    assert_eq!((diag.rt_allocs, diag.panics), (0, 0), "the render ran beside the device, not in it");
+}
+
+#[test]
+fn a_master_that_fails_to_render_still_answers_the_stems_with_its_error() {
+    let mut h = Harness::new();
+    h.fake.set_input(tone);
+    h.open(asio(Some(256)));
+    let length = h.record_loop();
+    let (_, stems) = session_parts(&h.host.snapshot(false).unwrap());
+    super::session::FAIL_RENDER.with(|f| f.set(true));
+    let answer = h.host.snapshot(true);
+    super::session::FAIL_RENDER.with(|f| f.set(false));
+    let (header, pcm) = session_parts(&answer.expect("the stems come back without their master"));
+    assert!(header.get("master").is_none(), "{header}");
+    assert_eq!(header["masterError"], "a test planted this render failure");
+    assert_eq!(header["masterLengthFrames"], length);
+    assert_eq!(pcm, stems, "the stems, and nothing after them");
 }
 
 #[test]

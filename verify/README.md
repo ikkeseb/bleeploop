@@ -13,7 +13,7 @@ those are verified by running the app and measuring it (`docs/VERIFY.md`, `STATU
 | Command | `pnpm verify` (part of `pnpm check`, the pre-push hook) | `pnpm probe <name>` · `--all` · `--ci` · `--list` |
 | CI | `ci.yml` | `browser-lifecycle.yml` runs `pnpm probe --ci` |
 | Speed | a few seconds for all | seconds to minutes each |
-| Sees | the real source's logic, file formats, the engine wire, repository contracts | the running UI through `window.__lf` and the DOM: the commands a gesture sends, the screen a feed frame draws, IndexedDB, the export's offline render, rendered layout |
+| Sees | the real source's logic, file formats, the engine wire, repository contracts | the running UI through `window.__lf` and the DOM: the commands a gesture sends, the screen a feed frame draws, IndexedDB, the export's archive, rendered layout |
 | Documented in | the header of each guard | the header of each probe: what it drives, what it proves, what it cannot see |
 
 `harness/` holds what both share: the module hooks for guards (`hooks.ts`) and the probe module
@@ -59,7 +59,9 @@ command the UI sends (`__lf.native.sent`) and hands the feed frames the probe sc
 (`__lf.native.emit`) to the UI. Nothing answers a command, so a probe proves gesture → command and
 frame → screen, never the engine (`verify/probes/engine-seam.mjs` is the pattern). What still runs for
 real in the page: the input router, Web MIDI parsing and learn, the recovery worker and IndexedDB, the
-export's offline Tone render. Where a probe needs another native answer (plugin host, ASIO, device
+export's archive. The export's master is the engine's; asked with the master, the fake answers a dry
+sum under the volume and mute the UI sent (NOT the engine's sound: no probe tests the master's sound).
+Where a probe needs another native answer (plugin host, ASIO, device
 lists), it substitutes the platform host in the page, so it proves the frontend's handling of that
 answer, never the native side. It sees Chromium, not WebView2 on the rig.
 

@@ -10,6 +10,8 @@
 //     (src/debug/engine-loopback.ts): needs an output cabled into input 2 (`--channel=` is 0-based)
 //   pnpm native:tone-recall  a plugin's tone across a restart, a session export and import, and a kill
 //     (src/debug/tone-recall.ts): one launch per phase, on WASAPI
+//   pnpm native:export-master  the export's wet master rendered by the engine, beside its stem
+//     (src/debug/export-master.ts): one launch, on WASAPI
 //
 // Options: `--asio` launches `pnpm dev:asio` instead of `pnpm dev:wasapi`; `--<knob>=<value>` becomes
 // `VITE_LF_PROBE_<KNOB>` (`--filter=Pro-Q,Saturn`, `--hold=`, `--settle=`, `--params=`, `--plugins=`:
@@ -78,6 +80,13 @@ const PROBES = {
       { name: 'check', end: /^(set: .*|FAIL.*)$/, pass: /^set: /, exit: 'crash' },
       { name: 'after', end: /^(restored: .*|FAIL.*)$/, pass: /^restored: /, exit: 'close' },
     ],
+  },
+  // A profile of its own (its output moves to the virtual cable); one launch, closed through its window.
+  'export-master': {
+    tag: 'export-master',
+    config: 'scripts/export-probe.tauri.json',
+    cleanLog: true,
+    phases: [{ name: 'export', end: /^(complete: .*|FAIL.*)$/, pass: /^complete: /, exit: 'os-close' }],
   },
   // `recallLines`: how many `[rig-recall]` log lines the phase must print.
   'recall-restart': {

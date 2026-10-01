@@ -57,7 +57,7 @@ const golden = () => ({
     { track: 1, file: 'lf-track1.wav', volume: 1, muted: false, reversed: true, frames: MASTER, fx: fx5() },
     { track: 3, file: 'lf-track3.wav', volume: 0.5, muted: true, reversed: false, frames: MASTER, fx: fx5() },
   ],
-  master: { file: 'lf-master.wav', kind: 'wet-v1', level: 0.75 },
+  master: { file: 'lf-master.wav', kind: 'wet-engine', level: 0.75 },
 });
 
 /** Rewrite the three grid fields + per-track frame declarations as one internally-consistent grid. */

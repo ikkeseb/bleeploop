@@ -32,9 +32,9 @@ MIDI arrives through Web MIDI: WebView2 has it natively (`lib.rs` auto-grants th
 the app's own origin). The engine's native MIDI (midir, `engine_io/midi`) is built and off: WinMM
 input ports are exclusive, so Web MIDI and native MIDI cannot hold one controller at once.
 
-The browser build (`pnpm dev`) renders the whole UI and is silent: with no engine behind it,
-`src/main.tsx` hides the AudioContext constructors while the app loads (Tone would otherwise open an
-output stream). The DEV engine fake (`window.__lfEngineFake`) is the seam every browser probe drives.
+The browser build (`pnpm dev`) renders the whole UI and is silent: no engine is behind it, and nothing
+in the app builds an AudioContext. The DEV engine fake (`window.__lfEngineFake`) is the seam every
+browser probe drives.
 
 **Live audio NEVER crosses this boundary as PCM.** A session save's snapshot does, once, off the RT
 path (`EngineHost.snapshot` / `loadSession`).
@@ -48,9 +48,6 @@ path (`EngineHost.snapshot` / `loadSession`).
 - **Rust:** lf-engine (rtrb rings; the synths, FX, reverb and limiter ported from Tone 15.1.22 on
   Blink and null-tested against its renders, `src-tauri/crates/lf-engine/src/dsp/mod.rs`; RustFFT),
   cpal 0.18.1 (pinned; ASIO a cargo opt-in feature), clack-host for CLAP and `vst3` for VST3.
-- **Tone.js 15.1.22** renders only the export's wet master, on an `OfflineContext`
-  (`src/session/render.ts`, `offline-fx.ts`), until that render is ported to lf-engine: its FX may
-  sound unlike the engine's.
 
 ## Audio architecture
 
@@ -88,9 +85,11 @@ latency measurement. The live wet signal joins after the limiter and is not limi
 **Session files** (`src/session/`): export writes a zip of Float32 WAV stems, a PCM16 wet master and
 `session.json`; import takes one back while every lane is EMPTY. The PCM comes from `engine_snapshot`
 and goes back through `engine_load_session` (the bytes: `src/platform/engine-wire.ts`). The wet master
-is rendered offline on Tone (above), with its own `OfflineContext` passed to every node; since the app
-loads Tone with no live context, the offline one stands in as Tone's global while it renders (the
-header of `src/session/render.ts`).
+is the engine's: an export's snapshot asks for it, and the host renders it right after the copy, off
+the audio thread, in a fresh engine the session's size (`src-tauri/crates/lf-engine/src/render.rs`)
+from those same loops and the mix the host keeps (lane volume, mute and FX, master volume and mute),
+every lane playing, frame 0 lined up with the stems. A failed render still exports, with a dry
+mixdown (`master.kind` 'dry-fallback'); recovery autosaves never ask for a master.
 
 **Session recovery:** committed track audio, mix settings and PLAYING/STOPPED state round-trip through
 the archive. Legacy missing state and OVERDUBBING restore as PLAYING. Autosave saves once the committed

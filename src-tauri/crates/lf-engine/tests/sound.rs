@@ -2,9 +2,9 @@
 //! the bus and in the record tap, on the guitar's grid; each lane through its FX chain into the stereo
 //! bus, with a reverb tail; CLEAR and COPY on a lane's FX (`machine.ts` `clear`, `copy`); the rhythmic
 //! FX on the looper's grid; and the whole wired sound bit-identical at any block size. The ports
-//! themselves are held to Tone in `synth.rs`, `fx_*.rs` and `limiter.rs`. The Web Audio probes
-//! fx-grid.mjs (two lanes' stutters, a delay after a new tempo) and fx-pitch-cost.mjs (a live pitch
-//! switch) are here on a lane's rendered output.
+//! themselves are held to Tone in `synth.rs`, `fx_*.rs` and `limiter.rs`. What the removed Web Audio
+//! probes fx-grid.mjs (two lanes' stutters, a delay after a new tempo) and fx-pitch-cost.mjs (a live
+//! pitch switch) checked is here on a lane's rendered output.
 
 mod common;
 

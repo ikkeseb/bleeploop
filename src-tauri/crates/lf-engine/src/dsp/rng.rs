@@ -1,6 +1,6 @@
-//! The engine's random source: mulberry32, the PRNG `verify/probes/tone-refs.mjs` puts in place of
-//! `Math.random`, so a port replays exactly the draws Tone made (noise tables, noise start offsets,
-//! the reverb IR).
+//! The engine's random source: mulberry32, the PRNG the Tone reference captures put in place of
+//! `Math.random` (their generator, `verify/probes/tone-refs.mjs`, is in git history at 167430ba), so a
+//! port replays exactly the draws Tone made (noise tables, noise start offsets, the reverb IR).
 
 /// mulberry32, as a JS double in [0, 1).
 #[derive(Clone, Debug)]

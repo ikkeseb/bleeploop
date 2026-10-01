@@ -1,15 +1,14 @@
 /** Captures the v0.1.0 session files the native engine must import (read by
  * `src-tauri/crates/lf-engine/tests/v0_1_0_exports.rs`): the export zip exactly as the user downloads
- * it, and the recovery archive exactly as autosave stores it in IndexedDB. A sibling of `tone-refs`
- * rather than part of it: this drives the app's UI, download and IndexedDB in a fresh profile, not Tone
- * OfflineContexts, and its compare has to see past timestamps. The two probes share one budget: their
- * fixtures together stay ≤ 10 MB, and each checks the sum.
+ * it, and the recovery archive exactly as autosave stores it in IndexedDB. These fixtures and the Tone
+ * reference fixtures (`tests/fixtures/tone`, captured from Tone 15.1.22 by a generator git history keeps
+ * at 167430ba) share one budget: together they stay ≤ 10 MB, and this probe checks the sum.
  *
  * The engine side is the web engine fake (`src/platform/host.web.ts`, the `engine-seam` pattern): the
  * session is loaded as an import loads it (`session.loadSession`: the store takes the mix, the fake the
  * bytes), the probe scripts the feed's two PLAYING lanes and the snapshot the engine would answer, and
- * the real export, offline wet render (`src/session/render.ts`), autosave and recovery archive run on
- * them. 48 kHz (the fake's rate), 240 BPM, one bar, two lanes of synthesized PCM. Track 1 is muted at
+ * the real export, autosave and recovery archive run on them; the export's master is the fake's
+ * stand-in (`master.kind` 'wet-engine', a dry sum), where v0.1.0's was Tone's wet render. 48 kHz (the fake's rate), 240 BPM, one bar, two lanes of synthesized PCM. Track 1 is muted at
  * volume 0.6 and carries samples past ±1 and a 1e-7 (the editable-headroom cases); track 2 plays at
  * volume 1.2 through the filter and the delay. The export is the Export button's real download; the
  * recovery record is what `autosave.flush()` wrote, read back from IndexedDB.
@@ -17,8 +16,9 @@
  * Without `--write` it captures again and compares with the committed files, normalizing what a
  * capture cannot hold still: the timestamped base name, the zip's DOS time, session.json's `exported`
  * and the record's `savedAt`. Stems and every session field the fixtures hold must match exactly (a
- * field added since is not a difference); the PCM16 master may move by 1 LSB (Blink sums a node's
- * inputs in no fixed order). With `--write` it replaces the fixtures and the manifest. Cannot see the native engine, WebView2's download or anything audible.
+ * field added since is not a difference). The master can no longer be captured again (its Tone render
+ * is gone): the compare holds its length and leaves out its samples and `master.kind`. With `--write` it
+ * replaces the fixtures and the manifest, master and all, so a write is no longer v0.1.0's capture. Cannot see the native engine, WebView2's download or anything audible.
  * @no-ci capture tool for committed fixtures; CI's Chromium may differ from the capture's
  * Run: pnpm probe export-refs [--write]
  */
@@ -127,7 +127,11 @@ function compareArchives(label, committed, fresh) {
   for (const [name, old] of a.byName) {
     const now = b.byName.get(name);
     if (name === '-session.json') {
-      const [was, is] = [a, b].map((m) => ({ ...JSON.parse(m.session), exported: null }));
+      // `master.kind`: v0.1.0 wrote 'wet-v1' (Tone's render), this capture 'wet-engine' (the fake's).
+      const [was, is] = [a, b].map((m) => {
+        const json = JSON.parse(m.session);
+        return { ...json, exported: null, ...(json.master ? { master: { ...json.master, kind: null } } : {}) };
+      });
       const [x, y] = [was, asCaptured(was, is)].map((o) => JSON.stringify(o));
       if (x !== y) {
         // Name what differs, so a red run says which fields moved.
@@ -139,9 +143,7 @@ function compareArchives(label, committed, fresh) {
       }
     } else if (name === '-master.wav') {
       const [x, y] = [old, now].map((d) => decodeWav(d).channels);
-      let lsb = 0;
-      x.forEach((c, k) => c.forEach((v, i) => { lsb = Math.max(lsb, Math.round(Math.abs(v - y[k][i]) * 32767)); }));
-      if (x[0].length !== y[0].length || lsb > 1) out.push(`${label}${name}: master moved ${lsb} LSB`);
+      if (x.length !== y.length || x[0].length !== y[0].length) out.push(`${label}${name}: the master's shape changed`);
     } else if (!Buffer.from(old).equals(Buffer.from(now))) {
       out.push(`${label}${name}: bytes differ`);
     }
@@ -187,11 +189,11 @@ await probe(async ({ open, browser }) => {
   assert.deepEqual([...exported.byName.keys()], ['-track1.wav', '-track2.wav', '-master.wav', '-session.json']);
   assert.deepEqual([...recovered.byName.keys()], ['-track1.wav', '-track2.wav', '-session.json']);
   const master = JSON.parse(exported.session).master;
-  assert.equal(master.kind, 'wet-v1', 'the wet master render fell back');
+  assert.equal(master.kind, 'wet-engine', 'the export fell back to the dry master');
 
   const files = [
     { file: 'export.zip', bytes: exportBytes,
-      what: 'The session export as downloaded: float32 mono stems, a PCM16 stereo wet master, session.json. Store-only zip.',
+      what: 'The session export as downloaded: float32 mono stems, a PCM16 stereo master, session.json. Store-only zip.',
       how: `The Export button's download (buildExportBundle → makeZip), suggested name ${exportName}.` },
     { file: 'recovery.zip', bytes: recoveryBytes,
       what: 'The recovery archive: float32 mono stems and session.json, no master. Store-only zip.',

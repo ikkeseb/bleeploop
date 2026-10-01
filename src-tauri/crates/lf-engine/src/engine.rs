@@ -322,6 +322,21 @@ impl Engine {
         self.looper.publish(&mut cx);
     }
 
+    /// While no device runs and the caller holds the engine: apply `command` at once, at the frame the
+    /// next block would start, as `process` would there (the offline render's mix and click:
+    /// [`crate::render`]). False when it would wait for a block job: nothing was applied.
+    pub(crate) fn apply_idle(&mut self, command: Command) -> bool {
+        let mut cx = Cx { now: self.next_frame, align: 0, clock: &mut self.clock, feed: &mut self.feed, fx: &mut self.fx };
+        let mut at = Apply {
+            instruments: &mut self.instruments,
+            rack: &mut self.rack,
+            input_fx: &mut self.input_fx,
+            master_volume: &mut self.master_volume,
+            master_muted: &mut self.master_muted,
+        };
+        apply(&mut self.looper, &mut cx, &mut at, command) == Applied::Done
+    }
+
     /// While no device runs: stop every unit, an install still waiting on its port included, and hand
     /// it back on its port (a sample-rate change; the host re-activates each at the new rate and
     /// installs it into the new engine).

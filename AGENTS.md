@@ -47,9 +47,7 @@ Harness auto-load of nested files is not reliable: open the briefing yourself.
   guitar. The on-screen keyboard stays available, but it is not the first-screen hero. The promise
   heads `README.md`; what is not built on purpose: `docs/backlog-taste.md` § Parked ideas.
 - **One native audio engine; there is no Web Audio path.** Audio behaviour is built in lf-engine; the
-  WebView is UI, settings, MIDI input and session files. The export's wet master still renders on
-  Tone's OfflineContext (`src/session/render.ts`) and may sound unlike the engine: fixes only there
-  until it is ported to lf-engine.
+  WebView is UI, settings, MIDI input and session files.
 - **The browser tier is a VERIFICATION RIG, not a product:** the browser build is silent, its UI
   driven by a scriptable engine fake. BleepLoop ships as a standalone Windows app with native drivers
   and zero-latency monitoring.
@@ -108,8 +106,7 @@ through `src/ui/state/audio.ts`. Live audio never crosses that boundary as PCM; 
 snapshot does, once, off the RT path. Export, import, recovery and autosave live in `src/session/`;
 MIDI arrives through Web MIDI (`src/ui/state/midi.ts`). Frontend `console.error` + uncaught errors
 feed the release log (`src/platform/logging.ts`): keep every `console.error` site. Stack: SolidJS +
-TypeScript + Vite 8 (rolldown/oxc — esbuild is gone), Rust + cpal + the CLAP/VST3 hosts; Tone.js only
-for the export's offline wet master.
+TypeScript + Vite 8 (rolldown/oxc — esbuild is gone), Rust + cpal + the CLAP/VST3 hosts.
 
 ## Invariants — titles only; `docs/ARCHITECTURE.md` owns the text
 

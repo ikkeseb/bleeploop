@@ -25,7 +25,7 @@
 //! | `feed` | the feed: what the UI reads back (events, device, status, anchor, meter, waveforms), on its own thread |
 //! | `mode` | engine mode: the managed host, the tone store's folder, the `engine_*` Tauri commands, shutdown on exit |
 //! | `plugins` | engine mode's plugin slots: the `plugin_*` commands routed to the engine slot owners, and tone recall's (`host/tone.rs`) |
-//! | `session` | a session's bytes to and from the engine: the snapshot the UI saves, the load it imports |
+//! | `session` | a session's bytes to and from the engine: the snapshot the UI saves (an export's with the wet master, rendered offline from the snapshot and the kept mix), the load it imports |
 //! | `settings` | the last value of every setting command, replayed into each new engine |
 //! | `share` | Share output: the post-limiter master mirrored to a WASAPI endpoint while ASIO plays |
 //! | `midi` | native MIDI (built, never started by the app): ports, hot-plug, parse, the MIDI-learn bindings, notes and pedal actions |

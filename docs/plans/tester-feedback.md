@@ -132,8 +132,10 @@ dev PC); none of it ran on the tester's machine.
   stayed well under its period points away from the engine. A clean `native:engine-smoke` run (ASIO 128)
   logged none; no real glitch has fired it yet. In v0.2.0.
 - **F26 (2026-09-28):** the export's master mixes every committed track, STOPPED included; MUTE leaves
-  one out (`buildExportBundle`). `verify/probes/export-context.mjs` renders a stopped track (peak 0.54)
-  and a muted stopped one (silent); red on the old code. Not run in the Tauri app. In v0.2.0.
+  one out. In v0.2.0 on the WebView's offline render, proven then in a browser probe; since the engine
+  renders the master, `src-tauri/crates/lf-engine/tests/render_master.rs` holds it (a STOPPED lane in
+  the master, a muted one silent) and engine_io's snapshot test the host's kept mute. Not run in the
+  Tauri app.
 - **F24 (2026-09-29):** IN FX gains RING MOD, a third wet-only send beside ECHO and REVERB: the input
   times a sine carrier (Freq 20–1500 Hz, default 440; Level 0–1, default 0.5), heard and recorded, the
   dry signal untouched; a pedal action `inFxRing`. lf-engine `tests/input_fx.rs` proves the carrier,

@@ -1,5 +1,5 @@
-//! The per-track FX chain, ported from `fx/fx.ts` (`FxChain` and its five nodes; the export's offline
-//! render keeps a copy, `src/session/offline-fx.ts`) and its pure metadata (now
+//! The per-track FX chain, ported from `fx/fx.ts` (`FxChain` and its five nodes; the export's master is
+//! rendered by this chain too, [`crate::render`]) and its pure metadata (now
 //! `src/ui/state/fx-metadata.ts`), as Tone 15.1.22 builds it on Blink:
 //!
 //! ```text

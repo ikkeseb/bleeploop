@@ -696,7 +696,10 @@ export function decodeDeviceRequest(raw: unknown): DeviceRequest {
 //
 // `[u32 LE headerLen][headerLen bytes of UTF-8 JSON][f32 LE mono PCM per header track, in header order]`,
 // no padding; each block holds `frames` samples. The PCM is in PLAY order (what is heard from loop
-// position 0); `reversed` says the lane plays its recording backwards.
+// position 0); `reversed` says the lane plays its recording backwards. A snapshot asked with the master
+// (an export's) whose render succeeded names it in `master` and appends its left block, then its right,
+// `master.frames` samples each, frame 0 at loop position 0; one whose render failed carries
+// `masterError` instead (`src-tauri/src/engine_io/session.rs` owns the layout).
 // PCM moves as whole typed-array copies in the platform's byte order: little-endian on every target.
 
 /** One lane in a snapshot: committed lanes only. */
@@ -713,6 +716,10 @@ export interface SnapshotHeader {
   masterLengthFrames: number;
   bpm: number;
   tracks: SnapshotTrack[];
+  /** The wet master's two blocks follow the tracks' (a snapshot asked with the master). */
+  master?: { frames: number };
+  /** Why a snapshot asked with the master carries none: the render's error. */
+  masterError?: string;
 }
 
 /** `engine_load_session`'s header: into an all-empty engine at the device's rate. */
@@ -723,12 +730,26 @@ export interface LoadHeader {
   tracks: { index: number; frames: number; reversed: boolean; state: 'Playing' | 'Stopped' }[];
 }
 
-/** Pack a header and its PCM blocks (one per header track, in order). */
-export function encodeSessionBytes(header: LoadHeader | SnapshotHeader, pcm: readonly Float32Array[]): Uint8Array<ArrayBuffer> {
+/** A stereo master's two channels. */
+export interface StereoPcm {
+  left: Float32Array;
+  right: Float32Array;
+}
+
+/** Pack a header and its PCM blocks (one per header track, in order), and a snapshot header's master. */
+export function encodeSessionBytes(
+  header: LoadHeader | SnapshotHeader,
+  pcm: readonly Float32Array[],
+  master?: StereoPcm,
+): Uint8Array<ArrayBuffer> {
   if (pcm.length !== header.tracks.length) fail('one PCM block per header track', { tracks: header.tracks.length, blocks: pcm.length });
+  const masterFrames = 'master' in header && header.master ? header.master.frames : null;
+  if ((masterFrames === null) !== (master === undefined)) fail('a master block pair exactly when the header names one', masterFrames);
+  const blocks = master ? [...pcm, master.left, master.right] : pcm;
   const json = new TextEncoder().encode(JSON.stringify(header));
-  const samples = pcm.reduce((n, block, k) => {
-    if (block.length !== header.tracks[k].frames) fail(`track ${header.tracks[k].index}'s block holds ${block.length} samples`, header.tracks[k].frames);
+  const samples = blocks.reduce((n, block, k) => {
+    const want = k < header.tracks.length ? header.tracks[k].frames : masterFrames;
+    if (block.length !== want) fail(`session block ${k} holds ${block.length} samples`, want);
     return n + block.length;
   }, 0);
   const bytes = new Uint8Array(4 + json.length + samples * 4);
@@ -736,38 +757,45 @@ export function encodeSessionBytes(header: LoadHeader | SnapshotHeader, pcm: rea
   view.setUint32(0, json.length, true);
   bytes.set(json, 4);
   let at = 4 + json.length;
-  for (const block of pcm) {
+  for (const block of blocks) {
     bytes.set(new Uint8Array(block.buffer, block.byteOffset, block.byteLength), at);
     at += block.byteLength;
   }
   return bytes;
 }
 
-/** Split session bytes into their JSON header and one PCM block per header track. */
-export function splitSessionBytes(buffer: ArrayBuffer): { header: unknown; pcm: Float32Array[] } {
+/** Split session bytes into their JSON header, one PCM block per header track, and the master's two
+ * blocks when the header names one (null otherwise). */
+export function splitSessionBytes(buffer: ArrayBuffer): { header: unknown; pcm: Float32Array[]; master: StereoPcm | null } {
   const view = new DataView(buffer);
   if (buffer.byteLength < 4) fail('session bytes too short for a header length', buffer.byteLength);
   const headerLen = view.getUint32(0, true);
   if (4 + headerLen > buffer.byteLength) fail('session header runs past the bytes', { headerLen, bytes: buffer.byteLength });
   const header: unknown = JSON.parse(new TextDecoder().decode(new Uint8Array(buffer, 4, headerLen)));
-  const tracks = array(obj(header, 'session header').tracks, 'session header.tracks');
-  const pcm: Float32Array[] = [];
+  const o = obj(header, 'session header');
+  const tracks = array(o.tracks, 'session header.tracks');
   let at = 4 + headerLen;
-  for (const t of tracks) {
-    const frames = int(obj(t, 'session track').frames, 'session track.frames');
+  const block = (frames: number) => {
     if (at + frames * 4 > buffer.byteLength) fail('session PCM runs past the bytes', { at, frames, bytes: buffer.byteLength });
-    pcm.push(new Float32Array(buffer.slice(at, at + frames * 4)));
+    const out = new Float32Array(buffer.slice(at, at + frames * 4));
     at += frames * 4;
+    return out;
+  };
+  const pcm = tracks.map((t) => block(int(obj(t, 'session track').frames, 'session track.frames')));
+  let master: StereoPcm | null = null;
+  if (o.master !== undefined) {
+    const frames = int(obj(o.master, 'session master').frames, 'session master.frames');
+    master = { left: block(frames), right: block(frames) };
   }
   if (at !== buffer.byteLength) fail('session bytes carry more than their header lists', { end: at, bytes: buffer.byteLength });
-  return { header, pcm };
+  return { header, pcm, master };
 }
 
-/** Read `engine_snapshot`'s bytes. */
-export function decodeSnapshot(buffer: ArrayBuffer): { header: SnapshotHeader; pcm: Float32Array[] } {
-  const { header, pcm } = splitSessionBytes(buffer);
+/** Read `engine_snapshot`'s bytes: the stems, and the wet master when the snapshot carries one. */
+export function decodeSnapshot(buffer: ArrayBuffer): { header: SnapshotHeader; pcm: Float32Array[]; master: StereoPcm | null } {
+  const { header, pcm, master } = splitSessionBytes(buffer);
   const o = obj(header, 'snapshot header');
-  const master = int(o.masterLengthFrames, 'snapshot.masterLengthFrames');
+  const length = int(o.masterLengthFrames, 'snapshot.masterLengthFrames');
   const tracks = array(o.tracks, 'snapshot.tracks').map((raw): SnapshotTrack => {
     const t = obj(raw, 'snapshot track');
     const track: SnapshotTrack = {
@@ -776,11 +804,17 @@ export function decodeSnapshot(buffer: ArrayBuffer): { header: SnapshotHeader; p
       reversed: bool(t.reversed, 'snapshot track.reversed'),
       state: oneOf(t.state, ['Playing', 'Stopped', 'Overdubbing'] as const, 'snapshot track.state'),
     };
-    if (track.frames !== master) fail(`snapshot track ${track.index} is not one master long`, track.frames);
+    if (track.frames !== length) fail(`snapshot track ${track.index} is not one master long`, track.frames);
     return track;
   });
-  return {
-    header: { rate: int(o.rate, 'snapshot.rate', 1), masterLengthFrames: master, bpm: int(o.bpm, 'snapshot.bpm', 1), tracks },
-    pcm,
-  };
+  const decoded: SnapshotHeader = { rate: int(o.rate, 'snapshot.rate', 1), masterLengthFrames: length, bpm: int(o.bpm, 'snapshot.bpm', 1), tracks };
+  if (master) {
+    if (master.left.length !== length) fail('the snapshot master is not one master long', master.left.length);
+    decoded.master = { frames: length };
+  }
+  if (o.masterError !== undefined) {
+    if (master) fail('a snapshot carries a master and its error', o.masterError);
+    decoded.masterError = str(o.masterError, 'snapshot.masterError');
+  }
+  return { header: decoded, pcm, master };
 }

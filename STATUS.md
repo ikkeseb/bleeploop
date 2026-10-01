@@ -89,9 +89,9 @@ A stop dies when it passes; past 10 stops, consolidate or flag it (AGENTS.md). D
    live at once, each on its own input, both heard and recorded.
    AUTO REC: a muted-guitar noise floor must not arm, a real attack must (sensitivity, onset, feel).
 8. **Session files + Share output.** Export, CLEAR ALL, import the zip: the loops come back on the
-   grid and the amp-sim sounds as it did at the export (a slot holding another plugin gets a toast); open a stem and the master in a DAW (the master's FX come from the export's offline Tone render:
-   close enough?). Kill the app mid-jam → relaunch restores it. Share output → OBS, Chrome and Discord hear
-   the master.
+   grid and the amp-sim sounds as it did at the export (a slot holding another plugin gets a toast);
+   open a stem and the master in a DAW. Kill the app mid-jam → relaunch restores it. Share output →
+   OBS, Chrome and Discord hear the master.
 9. **Synths, FX and WASAPI.** The six synths and the lane FX against the web path of a v0.1.x
    release (Audio Settings → engine → web audio, restart): same character? Then WASAPI: how much worse is the latency by ear
    (takes land late there by design, `README.md`)?

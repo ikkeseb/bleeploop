@@ -6,10 +6,12 @@ import type { AppUpdate, AppUpdates, EngineHost, LogFolder, MidiBackend, Platfor
 import {
   decodeFeedFrame,
   encodeSessionBytes,
+  splitSessionBytes,
   type DeviceRequest,
   type DeviceStatus,
   type EngineCommand,
   type FeedFrame,
+  type SnapshotHeader,
 } from './engine-wire.ts'; // explicit .ts: Node guards import this file
 
 const NO_NATIVE_HOST =
@@ -152,8 +154,14 @@ export interface EngineFake extends EngineHost {
    * `open()` answers is `window.__lfEngineFakeRate` (48 kHz unless an init script or a probe sets it).
    */
   refusal: { device: string; from: number; to: number } | null;
-  /** What `snapshot()` answers (a probe sets it; null answers an empty engine). */
+  /** What `snapshot()` answers (a probe sets it; null answers an empty engine). Asked with the master,
+   * the fake adds its stand-in (`fakeMaster`) to these stems, or `masterError` when set. */
   snapshotBytes: ArrayBuffer | null;
+  /** A probe-scripted master render failure: while set, a snapshot asked with the master carries this
+   * error instead of one, as the engine's does when its render fails. */
+  masterError: string | null;
+  /** Every `snapshot()`'s `master` flag, in order: an export asks for the master, a recovery never. */
+  readonly snapshots: boolean[];
   /** Every session `loadSession()` received. */
   readonly loadedSessions: Uint8Array[];
   /** Every Share endpoint `setShare()` received. */
@@ -169,6 +177,34 @@ export interface EngineFake extends EngineHost {
 }
 
 const NO_ENGINE = 'The native engine is unavailable in the browser build.';
+
+/**
+ * The fake's stand-in for the engine's wet master: the stems summed dry under the lane volumes and
+ * mutes and the master volume and mute the UI last sent (`sent`, as the engine host keeps them). NOT the
+ * engine's sound (no FX, no reverb, no limiter); it only lets the browser tier's export run, so no probe
+ * may claim to test the master's sound with it.
+ */
+function fakeMaster(header: SnapshotHeader, pcm: readonly Float32Array[], sent: readonly EngineCommand[]): Float32Array {
+  const volume = new Map<number, number>();
+  const muted = new Map<number, boolean>();
+  let master = 1;
+  let masterMuted = false;
+  for (const c of sent) {
+    if (typeof c !== 'object') continue;
+    if ('SetVolume' in c) volume.set(c.SetVolume[0], c.SetVolume[1]);
+    else if ('SetMute' in c) muted.set(c.SetMute[0], c.SetMute[1]);
+    else if ('SetMasterVolume' in c) master = c.SetMasterVolume;
+    else if ('SetMasterMute' in c) masterMuted = c.SetMasterMute;
+  }
+  const out = new Float32Array(header.masterLengthFrames);
+  if (masterMuted) return out;
+  header.tracks.forEach((t, k) => {
+    if (muted.get(t.index)) return;
+    const gain = (volume.get(t.index) ?? 1) * master;
+    pcm[k].forEach((x, i) => (out[i] += gain * x));
+  });
+  return out;
+}
 
 /** Forced on only by a DEV probe's init script (`verify/probes/engine-seam.mjs`), before the app loads.
  * Read when asked, never at module load: Node guards import this file without Vite's env. */
@@ -195,6 +231,8 @@ export const webEngineFake: EngineFake = {
   forced: [],
   refusal: null,
   snapshotBytes: null,
+  masterError: null,
+  snapshots: [],
   loadedSessions: [],
   shares: [],
   slotInputChannels: [],
@@ -236,9 +274,16 @@ export const webEngineFake: EngineFake = {
     if (!engineForced()) throw new Error(NO_ENGINE);
     webEngineFake.shares.push(endpoint);
   },
-  async snapshot() {
+  async snapshot(master) {
     if (!engineForced()) throw new Error(NO_ENGINE);
-    return webEngineFake.snapshotBytes?.slice(0) ?? encodeSessionBytes({ rate: fakeRate(), masterLengthFrames: 0, bpm: 120, tracks: [] }, []).buffer;
+    webEngineFake.snapshots.push(master);
+    const bytes = webEngineFake.snapshotBytes?.slice(0) ?? encodeSessionBytes({ rate: fakeRate(), masterLengthFrames: 0, bpm: 120, tracks: [] }, []).buffer;
+    if (!master || !webEngineFake.snapshotBytes) return bytes;
+    const { header, pcm } = splitSessionBytes(bytes);
+    const stems = header as SnapshotHeader;
+    if (webEngineFake.masterError !== null) return encodeSessionBytes({ ...stems, masterError: webEngineFake.masterError }, pcm).buffer;
+    const mono = fakeMaster(stems, pcm, webEngineFake.sent);
+    return encodeSessionBytes({ ...stems, master: { frames: stems.masterLengthFrames } }, pcm, { left: mono, right: mono.slice() }).buffer;
   },
   async loadSession(bytes) {
     if (!engineForced()) throw new Error(NO_ENGINE);

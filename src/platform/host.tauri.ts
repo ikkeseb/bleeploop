@@ -155,8 +155,8 @@ const tauriEngineHost: EngineHost = {
   },
   // The session moves as raw bytes both ways: a JSON number array of a minute of five lanes would be
   // tens of megabytes of text.
-  snapshot() {
-    return invoke<ArrayBuffer>('engine_snapshot');
+  snapshot(master) {
+    return invoke<ArrayBuffer>('engine_snapshot', { master });
   },
   async loadSession(bytes) {
     await invoke('engine_load_session', bytes);

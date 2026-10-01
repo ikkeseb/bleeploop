@@ -21,10 +21,6 @@ export interface FxState {
   params: Record<string, number>;
 }
 
-export const FX_DIVISIONS = ['4n', '8n', '8n.', '16n'] as const;
-/** Shared reverb timing — the offline FxChain and the export tail planning must stay identical. */
-export const REVERB_DECAY_SECONDS = 2.6;
-export const REVERB_PRE_DELAY_SECONDS = 0.02;
 const DIVISION_LABELS = ['1/4', '1/8', '1/8.', '1/16'] as const;
 
 const FILTER_PARAMS: readonly FxParamDef[] = [

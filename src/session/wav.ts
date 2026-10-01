@@ -155,26 +155,6 @@ export function decodeWav(bytes: Uint8Array): { sampleRate: number; channels: Fl
 }
 
 /**
- * Extract the final `frames`-long period after `warmupPasses` complete priming periods. The tail that
- * would spill past the loop end is already present at the retained loop head, exactly like live looped
- * playback. Throws if the render is too short (a duration bug should fail loudly, not truncate).
- */
-export function finalPeriod(
-  rendered: Float32Array,
-  frames: number,
-  warmupPasses: number,
-): Float32Array {
-  if (!Number.isInteger(warmupPasses) || warmupPasses < 0) {
-    throw new Error(`finalPeriod: warmupPasses must be a non-negative integer, got ${warmupPasses}`);
-  }
-  const end = (warmupPasses + 1) * frames;
-  if (rendered.length < end) {
-    throw new Error(`finalPeriod: rendered ${rendered.length} < ${warmupPasses + 1}×${frames} frames`);
-  }
-  return rendered.slice(warmupPasses * frames, end);
-}
-
-/**
  * Sum mono tracks into a single mono master, applying per-track volume, skipping muted tracks.
  * HARD-CLAMPS the per-sample sum to [-1,1] AFTER summing (chosen over normalization so the export is
  * deterministic and matches what the limiter would tame at playback; a v1 could add peak-normalize).

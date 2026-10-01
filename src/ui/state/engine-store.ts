@@ -948,10 +948,13 @@ export const engineLooper = {
 const FROM_SNAPSHOT = { Playing: 'PLAYING', Stopped: 'STOPPED', Overdubbing: 'OVERDUBBING' } as const;
 const TO_LOAD = { PLAYING: 'Playing', STOPPED: 'Stopped' } as const;
 
-/** The committed lanes: the engine's PCM (play order) with this store's mix. */
-async function exportSnapshot(): Promise<StemSnapshot> {
-  const { header, pcm } = decodeSnapshot(await platform.engine.snapshot());
+/** The committed lanes: the engine's PCM (play order) with this store's mix; with `master`, the engine's
+ * wet master too (or why it has none). */
+async function exportSnapshot(options: { master?: boolean } = {}): Promise<StemSnapshot> {
+  const { header, pcm, master } = decodeSnapshot(await platform.engine.snapshot(options.master === true));
   return {
+    ...(master ? { master } : {}),
+    ...(header.masterError !== undefined ? { masterError: header.masterError } : {}),
     sampleRate: header.rate,
     masterLengthFrames: header.masterLengthFrames,
     tracks: header.tracks.map((t, k) => ({

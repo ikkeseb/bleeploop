@@ -1,6 +1,5 @@
 //! Blink's DynamicsCompressorNode, and the master limiter the Web Audio path built from it
-//! (`makeMasterLimiter` in `engine.ts`, which the export still renders from
-//! `src/session/offline-fx.ts`: threshold −1 dB, knee 0, ratio 20, attack 3 ms,
+//! (`makeMasterLimiter` in `engine.ts`, gone with Tone: threshold −1 dB, knee 0, ratio 20, attack 3 ms,
 //! release 50 ms). Ports `modules/webaudio/dynamics_compressor_handler.cc`,
 //! `platform/audio/dynamics_compressor.{h,cc}` and the helpers they call in
 //! `platform/audio/audio_utilities.cc` and `third_party/fdlibm/ieee754.cc`, at Chromium 153.0.8010.12.

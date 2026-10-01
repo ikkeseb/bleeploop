@@ -1,4 +1,5 @@
-//! The Tone reference fixtures (`tests/fixtures/tone`, written by `verify/probes/tone-refs.mjs --write`)
+//! The Tone reference fixtures (`tests/fixtures/tone`, captured from Tone 15.1.22 by
+//! `verify/probes/tone-refs.mjs --write`, which left with Tone: git history keeps it at 167430ba)
 //! and the tolerance classes a Stage 3 port is judged by ([`Class`]; which port holds which, and its
 //! residual: `src/dsp/mod.rs`).
 //!
@@ -9,9 +10,9 @@
 //! IR; 48 kHz plus a 44.1 kHz spot set, float32 WAVs through the app's `encodeWav`, with `manifest.json`
 //! (scenario scripts, frame-stamped events, every random draw, input hashes, capture commit and
 //! versions; regenerated whole). The noise tables are not stored: `dsp::noise` regenerates them from
-//! their seed. Without `--write` the probe re-renders and compares (two renders differ by ≤ 1.8e-7:
-//! Blink sums a node's inputs in no fixed order). The probe and its sibling `export-refs.mjs` (the
-//! v0.1.0 import fixtures, `tests/fixtures/v0.1.0`) hold the fixtures together to 10 MB.
+//! their seed. Without `--write` the generator re-rendered and compared (two renders differed by ≤
+//! 1.8e-7: Blink sums a node's inputs in no fixed order). `verify/probes/export-refs.mjs` (the v0.1.0
+//! import fixtures, `tests/fixtures/v0.1.0`) holds these and its own to 10 MB together.
 //!
 //! A port test replays a scenario's setup and events from the manifest, renders the same number of
 //! frames and channels, and calls [`assert_class`] with the tightest class it passes. A failure writes
@@ -142,7 +143,7 @@ pub fn assert_sha256(what: &str, channels: &[&[f32]], expected: &str) {
     assert_eq!(sha256_f32(channels), expected, "{what} is not the probe's bit-exact data");
 }
 
-/// The FX scenarios' input (tone-refs.mjs `fxInput`): a 110→440 Hz sawtooth chirp plus a seeded
+/// The FX scenarios' input (the generator's `fxInput`): a 110→440 Hz sawtooth chirp plus a seeded
 /// noise burst every quarter second, silent after `active` seconds. Checked against the manifest.
 pub fn fx_input(s: &Scenario) -> Vec<f32> {
     let rate = s.rate as f64;
@@ -164,7 +165,7 @@ pub fn fx_input(s: &Scenario) -> Vec<f32> {
     x
 }
 
-/// The limiter scenarios' stereo input (tone-refs.mjs `limiterInput`): 220 / 330 Hz triangles, an
+/// The limiter scenarios' stereo input (the generator's `limiterInput`): 220 / 330 Hz triangles, an
 /// amplitude ramp from 0.1 to 4.0 over `ramp` seconds, then 50 ms bursts at 3.0 with 150 ms gaps.
 pub fn limiter_input(s: &Scenario) -> [Vec<f32>; 2] {
     let rate = s.rate as f64;

@@ -6,6 +6,10 @@ import type { ZipEntry } from './zip';
 export interface StemSnapshot extends Omit<ExportSnapshot, 'tracks'> {
   /** `dubFeedback`: the lane's DUB FEEDBACK (0..1); saved as 1 when absent. */
   tracks: (ExportSnapshot['tracks'][number] & { state: TrackState; dubFeedback?: number })[];
+  /** The engine's wet master of these tracks, frame 0 at loop position 0 (an export's snapshot). */
+  master?: { left: Float32Array; right: Float32Array };
+  /** Why a snapshot asked with the master carries none: the engine's render error. */
+  masterError?: string;
 }
 
 /** Local timestamp yyyy-MM-dd-HHmm for the archive and its entries. */
