@@ -1164,8 +1164,8 @@ interface DeviceChoice {
 /** A device choice that runs. */
 type Running = DeviceChoice & { status: DeviceStatus };
 
-/** The device that runs, as this store opened it. A switch the player declines, or one whose recovery
- * save fails, puts its picks back. */
+/** The device that runs, as this store opened it. A switch the player declines, one whose recovery save
+ * fails, or one that fails to open puts its picks back. */
 let opened: DeviceChoice | null = null;
 
 /** A saved channel pick as the engine takes it: null = auto. */
@@ -1227,7 +1227,8 @@ function picked(): DeviceChoice {
 /**
  * Open (or switch to) the device Audio Settings names: ASIO's cached driver when the ASIO tier is in
  * use, else the saved WASAPI endpoints; the saved channel, buffer and rate pick either way. Serialized, so rapid
- * picks land in order. Resolves null (and toasts) when the device did not open.
+ * picks land in order. Resolves null (and toasts) when the device did not open; the picks go back to
+ * the device that runs.
  *
  * A device at another rate than the engine's while it holds audio is refused (`OpenError::RateChange`):
  * the loops cannot play there. The player confirms; declined, the picks go back to the device that runs
@@ -1274,8 +1275,9 @@ async function openPicked(restore?: () => Promise<void>): Promise<{ status: Devi
     console.error('[engine] device open failed', err);
     notifyError("Couldn't open the audio device", err);
     setOpenFailure(errorText(err));
-    // The owner reopens the device that ran (`Owner::open`, `src-tauri/src/engine_io/owner.rs`): its rate pick goes back, saved and shown.
-    if (opened && opened.picks.sampleRate !== wanted.picks.sampleRate) void setSampleRatePick(opened.picks.sampleRate);
+    // The device that ran keeps running, or the owner reopens it (`Owner::open`,
+    // `src-tauri/src/engine_io/owner.rs`): its picks go back, saved and shown.
+    putBackPicks();
     return { status: null, declined: false };
   }
 }
@@ -1320,7 +1322,7 @@ export function switchEngineAsioDriver(driver: string): Promise<DeviceStatus | n
   });
 }
 
-/** Save the picks of the device that runs again (a declined switch): Audio Settings shows them. */
+/** Save the picks of the device that runs again (a declined or failed switch): Audio Settings shows them. */
 function putBackPicks(): void {
   if (!opened) return;
   const { bufferFrames, sampleRate, asioEnabled, slotInputChannels: slots, ...ids } = opened.picks;

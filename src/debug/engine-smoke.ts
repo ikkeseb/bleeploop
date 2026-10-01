@@ -3,10 +3,12 @@
  * `pnpm native:engine-smoke` launches the ASIO dev app in its own profile, and this page drives the same facades the lanes and the command
  * bar use, reading back through the feed and the DOM:
  *
- *   device    boot opened the saved ASIO device; the probe switches it to its buffer (default 128)
+ *   device    boot opened the saved ASIO device; the probe switches it to its buffer (default 128) and
+ *             its rate pick (default none: the driver's own) through the Audio Settings path, and checks
+ *             that the device then runs that rate
  *   take A    lane 1, a FIXED 1-bar first take at 120 BPM with the click: the count-in's beats (4-3-2-1,
  *             clicked) on the feed and on screen (the lane's numeral, the beat LEDs), then PLAYING with
- *             a loop of exactly one bar at the device's rate
+ *             a loop of exactly one bar at the rate that runs
  *   take B    lane 2, a later take over that master: ARMED, recording, PLAYING at the master's length
  *   dub       an overdub on lane 1 commits (UNDO offered), and UNDO is taken without a refusal
  *   transport STOP ALL stops both lanes, PLAY ALL restarts them, CLEAR and CLEAR ALL empty them
@@ -18,12 +20,13 @@
  *
  * Trigger: `VITE_LF_PROBE=engine-smoke` at Vite start (DEV only). Knobs:
  *   `VITE_LF_PROBE_BUFFER`  the ASIO buffer in frames (default 128)
+ *   `VITE_LF_PROBE_RATE`    the rate pick, 44100 or 48000 (default: none, the driver's own rate)
  *   `VITE_LF_PROBE_PLUGIN`  `<name substring>[:<format>]` to load into slot 1 and go live on, e.g.
  *                           `Pro-Q:vst3` (default: none)
  */
 import { framesPerBar } from '../ui/state/quantize';
-import { setBufferSize, usingAsio } from '../ui/state/audio-devices';
-import type { BufferFrames } from '../ui/state/audio-settings';
+import { sampleRatePick, setBufferSize, setSampleRatePick, usingAsio } from '../ui/state/audio-devices';
+import { SAMPLE_RATE_OPTIONS, type BufferFrames, type SampleRate } from '../ui/state/audio-settings';
 import { availablePlugins, nativeHostReady, selectPlugin, slotPlugins } from '../ui/state/instrument';
 import { goLive, inputArmed } from '../ui/state/native-io';
 import { platform, type EngineEvent } from '../platform';
@@ -64,6 +67,27 @@ function watchDom(laneIndex: number) {
   return { seen, stop: () => clearInterval(timer) };
 }
 
+/** The rate pick `VITE_LF_PROBE_RATE` names (null: none, the driver's own rate). */
+export function probeRate(): SampleRate | null {
+  const knob = import.meta.env.VITE_LF_PROBE_RATE;
+  if (!knob) return null;
+  const rate = Number(knob) as SampleRate;
+  check(SAMPLE_RATE_OPTIONS.includes(rate), `VITE_LF_PROBE_RATE=${knob}: pick one of ${SAMPLE_RATE_OPTIONS.join(', ')}`);
+  return rate;
+}
+
+/**
+ * Reopen the device at `buffer` and the rate pick `rate` as Audio Settings does (save the picks, open
+ * them), unless it runs them already. Resolves whether it reopened.
+ */
+export async function pickDevice(buffer: BufferFrames, rate: SampleRate | null): Promise<boolean> {
+  if (engineDevice()?.block === buffer && sampleRatePick() === rate) return false;
+  await setBufferSize(buffer);
+  await setSampleRatePick(rate);
+  check((await openEngineDevice())?.block === buffer, `the device did not reopen at ${buffer} frames${rate ? ` and ${rate} Hz` : ''}`);
+  return true;
+}
+
 export async function runEngineSmoke(): Promise<void> {
   try {
     await run();
@@ -83,19 +107,18 @@ async function run(): Promise<void> {
   // ── Device ──────────────────────────────────────────────────────────────────────────────────────
   await until('the engine device', () => engineDevice() !== null, 90);
   check(usingAsio(), 'ASIO is not in use: this probe runs on the ASIO driver');
+  // A profile of its own, but an earlier run may have left loops in the engine if it died; they would
+  // make a rate pick ask first.
+  looper.clearAll();
+  await until('an empty looper', () => allEmpty() && looper.masterLengthFrames() === 0 && !clock.bpmLocked(), 5);
   const buffer = Number(import.meta.env.VITE_LF_PROBE_BUFFER ?? 128) as BufferFrames;
-  if (engineDevice()?.block !== buffer) {
-    await setBufferSize(buffer);
-    check((await openEngineDevice())?.block === buffer, `the device did not reopen at ${buffer} frames`);
-  }
+  const pick = probeRate();
+  await pickDevice(buffer, pick);
   const device = engineDevice();
   check(device !== null && device.backend === 'Asio', 'no ASIO device runs');
   const rate = device!.sampleRate;
-  log(`device: ${device!.backend} ${device!.inputName} → ${device!.outputName}, ${rate} Hz, ${device!.block} frames, align ${device!.alignFrames} (input ${device!.inputFrames})`);
-
-  // A profile of its own, but an earlier run may have left loops in the engine if it died.
-  looper.clearAll();
-  await until('an empty looper', () => allEmpty() && looper.masterLengthFrames() === 0 && !clock.bpmLocked(), 5);
+  check(pick === null || rate === pick, `the device runs at ${rate} Hz, not the ${pick} Hz picked`);
+  log(`device: ${device!.backend} ${device!.inputName} → ${device!.outputName}, ${rate} Hz (pick: ${pick ?? "the driver's own"}), ${device!.block} frames, the driver's latency in ${device!.inputFrames} + out ${device!.alignFrames - device!.inputFrames} = align ${device!.alignFrames} frames`);
   clock.setBpm(120);
   await until('120 BPM on the feed', () => clock.bpm() === 120, 5);
   clock.setMetronome(true);

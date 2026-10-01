@@ -13,7 +13,8 @@
  * lags the click's first frame even on the ideal click: that lag, measured by the same detector on the
  * engine's own formula (`referenceClick`, lf-engine `clock.rs`), is subtracted ("net"; "raw" keeps it).
  *
- * For each buffer size in BUFFERS (the device reopened as Audio Settings does), lanes cleared, 120 BPM:
+ * For each buffer size in BUFFERS (the device reopened as Audio Settings does, at the RATE pick), lanes
+ * cleared, 120 BPM:
  *   A  lane 1, a FIXED first take of BARS bars, click on → clickX_A, its spread and drift
  *   B  lane 2, a later take, click off, lane 1 playing: its recorded clicks go out through the cable
  *      → loopX_B, ≈ 2·clickX_A when the record alignment is the only error
@@ -52,6 +53,8 @@
  * Trigger: `VITE_LF_PROBE=engine-loopback` at Vite start (DEV only). Knobs:
  *   `VITE_LF_PROBE_CHANNEL`  0-based input channel of the cable (default `1` = input 2)
  *   `VITE_LF_PROBE_BUFFERS`  ASIO buffer sizes, in order (default `64,128,256`)
+ *   `VITE_LF_PROBE_RATE`     the rate pick, 44100 or 48000 (default: none, the driver's own rate), picked
+ *                            with the first buffer; every buffer must then run at it
  *   `VITE_LF_PROBE_BARS`     take length in bars at 120 BPM (default 8)
  *   `VITE_LF_PROBE_PLUGIN`   `<name substring>[:<format>]` loaded into slot 1 and taken live (default
  *                            `Pro-Q:vst3`); empty or `none`: MIC, the input dry through an empty live slot
@@ -67,13 +70,14 @@
  *                            the unload left on the slot (compare it with a run without this knob)
  */
 import { framesPerBar } from '../ui/state/quantize';
-import { setBufferSize, usingAsio } from '../ui/state/audio-devices';
-import { BUFFER_FRAMES_OPTIONS, writeAudioDeviceSettings, type BufferFrames } from '../ui/state/audio-settings';
+import { usingAsio } from '../ui/state/audio-devices';
+import { BUFFER_FRAMES_OPTIONS, writeAudioDeviceSettings, type BufferFrames, type SampleRate } from '../ui/state/audio-settings';
 import { availablePlugins, clearPlugin, nativeHostReady, pluginGain, selectPlugin, slotPlugins } from '../ui/state/instrument';
 import { goLive, inputArmed, stopLive } from '../ui/state/native-io';
 import { platform, type DeviceStatus, type PluginDescriptor } from '../platform';
 import { clock, looper, master, session } from '../ui/state/audio';
-import { engineDevice, engineFade, engineInputSends, onEngineEvent, openEngineDevice, setEngineInputChannel, trimLane } from '../ui/state/engine-store';
+import { engineDevice, engineFade, engineInputSends, onEngineEvent, setEngineInputChannel, trimLane } from '../ui/state/engine-store';
+import { pickDevice, probeRate } from './engine-smoke';
 
 const TAG = '[engine-loopback]';
 const BPM = 120;
@@ -493,6 +497,7 @@ async function run(): Promise<void> {
     .map((s) => Number(s.trim()));
   for (const b of buffers) check((BUFFER_FRAMES_OPTIONS as readonly number[]).includes(b), `BUFFERS: ${b} is not one of ${BUFFER_FRAMES_OPTIONS.join(',')}`);
   const bars = Number(import.meta.env.VITE_LF_PROBE_BARS ?? 8) || 8;
+  const pick = probeRate();
   const pluginKnob = String(import.meta.env.VITE_LF_PROBE_PLUGIN ?? 'Pro-Q:vst3').trim().toLowerCase();
   const [want, format] = pluginKnob === 'none' ? [''] : pluginKnob.split(':');
   const rejected: string[] = [];
@@ -541,7 +546,7 @@ async function run(): Promise<void> {
 
   const results: BufferResult[] = [];
   const withEcho = !['', '0'].includes(String(import.meta.env.VITE_LF_PROBE_ECHO ?? '').trim());
-  for (const buffer of buffers) results.push(await runBuffer(buffer as BufferFrames, bars, channel, rejected, withEcho));
+  for (const buffer of buffers) results.push(await runBuffer(buffer as BufferFrames, pick, bars, channel, rejected, withEcho));
 
   if (liveSlot !== null) await stopLive(liveSlot);
   liveSlot = null;
@@ -553,7 +558,7 @@ async function run(): Promise<void> {
     .map((r) => {
       const passed = r.bars.filter((b) => b.ok).length;
       const w = (s: TakeStats) => (s.max - s.min).toFixed(2);
-      return `b${r.device.block} align ${r.device.alignFrames}/${r.device.inputFrames}: A ${f(r.a.x)} (w ${w(r.a)}, drift ${f(r.a.drift)}) B ${f(r.b.x)} (w ${w(r.b)}) C ${f(r.c.x)} (w ${w(r.c)}) D ${f(r.d.x)} (w ${w(r.d)}) gain ${r.a.gain.toFixed(2)}, bars ${passed}/${r.bars.length}`;
+      return `b${r.device.block} ${r.device.sampleRate} Hz align ${r.device.alignFrames}/${r.device.inputFrames}: A ${f(r.a.x)} (w ${w(r.a)}, drift ${f(r.a.drift)}) B ${f(r.b.x)} (w ${w(r.b)}) C ${f(r.c.x)} (w ${w(r.c)}) D ${f(r.d.x)} (w ${w(r.d)}) gain ${r.a.gain.toFixed(2)}, bars ${passed}/${r.bars.length}`;
     })
     .join(' | ');
   const failed = results.flatMap((r) => r.bars.filter((b) => !b.ok).map((b) => `b${r.device.block} ${b.name}: ${b.value}`));
@@ -641,18 +646,17 @@ async function fadePhase(grown: number, rate: number): Promise<{ fade: FadeStats
   }
 }
 
-async function runBuffer(buffer: BufferFrames, bars: number, channel: number, rejected: string[], withEcho: boolean): Promise<BufferResult> {
-  // ── Switch the device, as Audio Settings' buffer picker does ───────────────────────────────────────
-  if (engineDevice()?.block !== buffer) {
-    const t0 = performance.now();
-    await setBufferSize(buffer);
-    check((await openEngineDevice())?.block === buffer, `the device did not reopen at ${buffer} frames`);
-    log(`  switched to ${buffer} frames in ${Math.round(performance.now() - t0)} ms`);
+async function runBuffer(buffer: BufferFrames, pick: SampleRate | null, bars: number, channel: number, rejected: string[], withEcho: boolean): Promise<BufferResult> {
+  // ── Switch the device, as Audio Settings' buffer and rate pickers do ───────────────────────────────
+  const t0 = performance.now();
+  if (await pickDevice(buffer, pick)) {
+    log(`  switched to ${buffer} frames${pick ? `, ${pick} Hz` : ''} in ${Math.round(performance.now() - t0)} ms`);
     await sleep(1500);
   }
   const device = engineDevice()!;
   check(device.backend === 'Asio' && device.block === buffer, `the device runs ${device.backend} at ${device.block} frames`);
   const rate = device.sampleRate;
+  check(pick === null || rate === pick, `the device runs at ${rate} Hz, not the ${pick} Hz picked`);
   const ref = reference(rate);
   log(
     `b${buffer}: ${device.inputName} → ${device.outputName}, ${rate} Hz, block ${device.block}, alignFrames ${device.alignFrames} (${toMs(device.alignFrames, rate).toFixed(2)} ms), inputFrames ${device.inputFrames}; detector lag on the ideal click ${toMs(ref.accent.onset, rate).toFixed(3)} ms accent, ${toMs(ref.plain.onset, rate).toFixed(3)} ms plain`,

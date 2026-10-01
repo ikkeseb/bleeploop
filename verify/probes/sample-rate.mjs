@@ -9,7 +9,8 @@
  *   appears; declined, the pick goes back to the device's rate; accepted, the forced open runs at 48 kHz
  *   and the row shows it;
  * - the pick survives a reload: the first open asks for it and the row shows it;
- * - a pick whose open fails (the native owner reopens the device that ran): the pick that ran goes back;
+ * - a rate, buffer, ASIO on/off or output device pick whose open fails (the device that ran keeps
+ *   running, or the native owner reopens it): every pick that ran goes back, saved and shown;
  * - a fallback the owner made on its own (ASIO lost, WASAPI at its endpoint's rate, scripted on the
  *   feed): the row shows what runs, and the pick stays saved for the next ASIO open;
  * - a driver that runs only 44.1 kHz: no 48 kHz option, the saved pick kept, the device's rate shown;
@@ -32,6 +33,10 @@ function installDriver() {
     asioStatus: async () => ({ status: 'ready', detail: '' }),
     asioProbe: async () => ({ status: 'ready', detail: '' }),
     asioDrivers: async () => ['Probe ASIO'],
+    listOutputDevices: async () => [
+      { id: 'out-a', name: 'Probe Output A', channels: 2 },
+      { id: 'out-b', name: 'Probe Output B', channels: 2 },
+    ],
     asioDeviceInfo: async () => ({
       name: 'Probe ASIO',
       inputChannels: 2,
@@ -91,23 +96,51 @@ const readRow = (page) =>
     return out;
   });
 
-/** Pick `value` in the Sample rate select; resolves once the open it queued finished. */
-const pickRate = (page, value) =>
-  page.evaluate(async (v) => {
+/** Pick `value` in the select (or set the checkbox) labelled `label`; resolves once the open it queued
+ * finished. */
+const pick = (page, label, value) =>
+  page.evaluate(async ([l, v]) => {
     window.__lf.ui.openSettings();
     await new Promise((resolve) => setTimeout(resolve, 80));
     const before = window.__lf.native.opened.length;
-    const select = document.querySelector('[aria-label="Sample rate"]');
-    select.value = v;
-    select.dispatchEvent(new Event('change', { bubbles: true }));
+    const control = document.querySelector(`[aria-label="${l}"]`);
+    if (control.type === 'checkbox') control.checked = v;
+    else control.value = v;
+    control.dispatchEvent(new Event('change', { bubbles: true }));
     const { openEngineDevice } = await import('/src/ui/state/engine-store.ts');
     while (window.__lf.native.opened.length === before) await new Promise((resolve) => setTimeout(resolve, 10));
     await openEngineDevice(); // queued behind the pick's open: resolves once it finished
     const opened = window.__lf.native.opened.slice(before);
     const forced = window.__lf.native.forced.slice(before);
     window.__lf.ui.closeSettings();
-    return opened.map((r, i) => ({ sampleRate: r.sampleRate, backend: r.backend, forced: forced[i] }));
-  }, value);
+    return opened.map((r, i) => ({ sampleRate: r.sampleRate, backend: r.backend, buffer: r.buffer, output: r.output, forced: forced[i] }));
+  }, [label, value]);
+const pickRate = async (page, value) =>
+  (await pick(page, 'Sample rate', value)).map(({ sampleRate, backend, forced }) => ({ sampleRate, backend, forced }));
+
+/** The control labelled `label` and the saved setting `key`, as the panel shows them. */
+const readPick = (page, label, key) =>
+  page.evaluate(async ([l, k]) => {
+    window.__lf.ui.openSettings();
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    const control = document.querySelector(`[aria-label="${l}"]`);
+    const { readAudioDeviceSettings } = await import('/src/ui/state/audio-settings.ts');
+    const out = { shown: control.type === 'checkbox' ? control.checked : control.value, saved: readAudioDeviceSettings()[k] };
+    window.__lf.ui.closeSettings();
+    return out;
+  }, [label, key]);
+
+/** Pick `value` in `label` while the device fails to open: every pick that ran goes back. */
+async function failedPick(page, label, key, value, asked) {
+  const before = await readPick(page, label, key);
+  await page.evaluate(() => (window.__driver.fail = 'the device did not start'));
+  const opens = await pick(page, label, value);
+  await page.evaluate(() => (window.__driver.fail = null));
+  const after = await readPick(page, label, key);
+  console.log(`failed ${label}`, JSON.stringify({ before, opens, after }));
+  assert.deepEqual(Object.fromEntries(Object.keys(asked).map((k) => [k, opens[0][k]])), asked, `the ${label} pick asks for ${value}`);
+  assert.deepEqual(after, before, `a failed ${label} pick goes back, saved and shown`);
+}
 
 await probe(async ({ open }) => {
   const { page } = await open({
@@ -189,6 +222,9 @@ await probe(async ({ open }) => {
   const restored = await readRow(page);
   console.log('failed open', JSON.stringify(restored));
   assert.deepEqual({ value: restored.value, saved: restored.saved, runs: restored.runs }, { value: '48000', saved: 48000, runs: 48000 }, 'the pick that ran goes back');
+  // The same for a buffer pick and ASIO off: the size and the toggle that ran go back.
+  await failedPick(page, 'Buffer size in frames', 'bufferFrames', '64', { buffer: 64, backend: 'Asio' });
+  await failedPick(page, 'Use ASIO low-latency audio', 'asioEnabled', false, { backend: 'Wasapi' });
 
   // 5. ASIO lost, the owner fell back to WASAPI at its endpoint's 44.1 kHz on its own (the feed's
   // status + Fallback): the row shows what runs, and the 48 kHz pick stays saved for the next ASIO open.
@@ -227,4 +263,7 @@ await probe(async ({ open }) => {
   console.log('wasapi', JSON.stringify(wasapi));
   assert.deepEqual(wasapi.options, [['', 'Device (44.1 kHz)']]);
   assert.match(wasapi.hint ?? '', /^Set by Windows/);
+
+  // 8. An output device pick whose open fails: the endpoint that ran goes back, saved and shown.
+  await failedPick(page, 'Output device', 'outputDeviceId', 'out-b', { output: 'out-b', backend: 'Wasapi' });
 });
