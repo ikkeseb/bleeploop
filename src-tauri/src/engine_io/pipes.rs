@@ -19,6 +19,9 @@
 //! the setpoint again (the puller stalled while the pusher kept on: a WASAPI render glitch) is trimmed
 //! back to it the same way, counted ([`PullPipe::take_trims`]): the ±1 % controller would take seconds
 //! to drain it, and the pipe's delay would sit that far past [`PullPipe::delay_frames`] meanwhile.
+//! A pusher that finds the ring full drops what does not fit (an overrun): the seam lies within what
+//! the ring holds when the next pull sees it, and every pull until that is taken says so
+//! ([`PullPipe::take_seam`]), however many trimmed pulls lie between.
 //!
 //! Measured limit (WASAPI on the rig's Scarlett, a browser call holding the microphone): the input
 //! pushed 0.87 % more frames than the output pulled, past what the controller (sized for ±400 ppm)
@@ -26,6 +29,9 @@
 //! soak). Whether those frames are real time (a faster controller fixes it) or an artefact (resampling
 //! them shifts the pitch 15 cents): unknown. With nothing else on the microphone, input and output ran
 //! at 44 100.7 Hz against QPC and every counter stayed 0.
+
+use std::sync::atomic::{AtomicBool, Ordering::{Acquire, Release}};
+use std::sync::Arc;
 
 use rtrb::{Consumer, Producer, RingBuffer};
 use rubato::audioadapter_buffers::direct::InterleavedSlice;
@@ -100,6 +106,8 @@ impl DriftController {
 pub(crate) struct PushEnd {
     ring: Producer<f32>,
     channels: usize,
+    /// Set after a push dropped frames, once the frames before them are in the ring.
+    overran: Arc<AtomicBool>,
 }
 
 impl PushEnd {
@@ -109,6 +117,9 @@ impl PushEnd {
         // Whole frames only, so the ring always holds a multiple of `channels` samples.
         let fit = (self.ring.slots() / self.channels).min(offered);
         let _ = self.ring.push_partial_slice(&frames[..fit * self.channels]);
+        if fit < offered {
+            self.overran.store(true, Release);
+        }
         offered - fit
     }
 }
@@ -133,6 +144,13 @@ pub(crate) struct PullPipe {
     started: bool,
     /// Over-full rings trimmed back to the setpoint since the last [`PullPipe::take_trims`].
     trims: u64,
+    overran: Arc<AtomicBool>,
+    /// Frames taken from the ring so far: pulled, dropped to the setpoint, skipped.
+    taken: u64,
+    /// The last overrun's seam lies before this many frames taken: the ring's end when a pull saw it.
+    seam: u64,
+    /// A pull since the last [`PullPipe::take_seam`] began before the seam's bound.
+    seamed: bool,
 }
 
 /// Build a pipe (allocates: off the audio thread).
@@ -161,8 +179,9 @@ pub(crate) fn pipe(config: PipeConfig) -> Result<(PushEnd, PullPipe), String> {
     // chunk plus the interpolator's slack). `pull_piece` still checks: a miss is silence, not a panic.
     let scratch = vec![0.0f32; rs.input_frames_max() * channels];
     let (producer, consumer) = RingBuffer::new(capacity * channels);
+    let overran = Arc::new(AtomicBool::new(false));
     Ok((
-        PushEnd { ring: producer, channels },
+        PushEnd { ring: producer, channels, overran: overran.clone() },
         PullPipe {
             ring: consumer,
             rs,
@@ -177,6 +196,10 @@ pub(crate) fn pipe(config: PipeConfig) -> Result<(PushEnd, PullPipe), String> {
             primed: false,
             started: false,
             trims: 0,
+            overran,
+            taken: 0,
+            seam: 0,
+            seamed: false,
         },
     ))
 }
@@ -195,6 +218,10 @@ impl PullPipe {
         let ch = self.channels;
         let whole = out.len() / ch * ch;
         out[whole..].fill(0.0);
+        if self.overran.swap(false, Acquire) {
+            self.seam = self.taken + self.fill() as u64;
+        }
+        self.seamed |= self.taken < self.seam;
         let mut short = 0;
         for piece in out[..whole].chunks_mut(self.max_pull * ch) {
             short += self.pull_piece(piece);
@@ -250,13 +277,13 @@ impl PullPipe {
         if k > 0 && need * ch <= self.scratch.len() {
             let input = &mut self.scratch[..need * ch];
             let produced = match self.ring.pop_entire_slice(input) {
-                Ok(()) => match (
-                    InterleavedSlice::new(&input[..], ch, need),
-                    InterleavedSlice::new_mut(&mut out[..k * ch], ch, k),
-                ) {
-                    (Ok(i), Ok(mut o)) => self.rs.process_into_buffer(&i, &mut o, None).map_or(0, |(_, p)| p),
-                    _ => 0,
-                },
+                Ok(()) => {
+                    self.taken += need as u64;
+                    match (InterleavedSlice::new(&input[..], ch, need), InterleavedSlice::new_mut(&mut out[..k * ch], ch, k)) {
+                        (Ok(i), Ok(mut o)) => self.rs.process_into_buffer(&i, &mut o, None).map_or(0, |(_, p)| p),
+                        _ => 0,
+                    }
+                }
                 Err(_) => 0,
             };
             k = produced.min(k);
@@ -271,6 +298,7 @@ impl PullPipe {
     fn drop_to_target(&mut self, fill: usize) {
         if let Ok(backlog) = self.ring.read_chunk((fill - self.target) * self.channels) {
             backlog.commit_all();
+            self.taken += (fill - self.target) as u64;
         }
     }
 
@@ -281,6 +309,7 @@ impl PullPipe {
         if k > 0 {
             if let Ok(chunk) = self.ring.read_chunk(k * self.channels) {
                 chunk.commit_all();
+                self.taken += k as u64;
             }
         }
     }
@@ -289,6 +318,12 @@ impl PullPipe {
     /// counts the zero-filled pulls `pull` returns); each one skipped the excess, a jump in what plays.
     pub(crate) fn take_trims(&mut self) -> u64 {
         std::mem::take(&mut self.trims)
+    }
+
+    /// Whether a pull since the last call began before an overrun's seam was surely taken (the pusher
+    /// counts the overruns): what it played may join the input on either side of the frames dropped.
+    pub(crate) fn take_seam(&mut self) -> bool {
+        std::mem::take(&mut self.seamed)
     }
 
     /// What the pipe delays a frame by once settled, in frames at `out_rate`: the setpoint plus the

@@ -363,7 +363,7 @@ impl Drop for Panicky {
 /// One block as the device callback renders it: under `catch_unwind`, its guard. False on a panic.
 fn guarded_block(rig: &mut Rig) -> bool {
     let n = rig.block;
-    let ctx = ProcessContext { frame: rig.frame, xrun: false, align_frames: rig.align - rig.engine.limiter_latency(), input_frames: 0 };
+    let ctx = ProcessContext { frame: rig.frame, xrun: false, damaged: false, align_frames: rig.align - rig.engine.limiter_latency(), input_frames: 0 };
     let (input, mut left, mut right) = (vec![0.0; n], vec![0.0; n], vec![0.0; n]);
     let engine = &mut rig.engine;
     let ok = catch_unwind(AssertUnwindSafe(|| engine.process(&ctx, &input, &mut left, &mut right))).is_ok();

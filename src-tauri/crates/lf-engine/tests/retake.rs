@@ -3,11 +3,12 @@
 //! is an ordinary stop with nothing kept. The pure stop rule (section A) is tested with the grid
 //! (`src/grid.rs`).
 //!
-//! One rule changes with the engine: an input gap lands on an exact frame, so it damages only the pass
-//! it falls in. The Web Audio looper sampled losses per drain and could not place one on either side
-//! of a pass edge, so it also tainted the next pass; a stop in that tainted pass rejected the take.
-//! Here that next pass is clean: it is kept, or an ordinary stop commits it. The product rule stays: a
-//! damaged pass drops the older kept pass too.
+//! One rule changes with the engine: an input gap lands on exact frames, so it damages only the passes
+//! it overlaps. A point xrun falls in one pass; a jump or a damaged block can span a pass edge and drop
+//! both passes it cut. The Web Audio looper sampled losses per drain and could not place one on either
+//! side of a pass edge, so it also tainted the next pass; a stop in that tainted pass rejected the take.
+//! Here a pass the gap does not reach is clean: it is kept, or an ordinary stop commits it. The product
+//! rule stays: a damaged pass drops the older kept pass too.
 //!
 //! The engine's own: a FIXED first take's click follows the roll, re-anchored on each pass's downbeat,
 //! so a pass played to the click commits on its own bar lines however many passes came before (`h_`).
@@ -147,6 +148,42 @@ fn f_a_damaged_pass_is_dropped_with_the_kept_pass_and_only_that_pass() {
     assert!(pcm[kept..].iter().all(|&x| x == 0.0), "padded to one bar");
 }
 
+#[test]
+fn f_a_jump_across_a_pass_edge_drops_both_passes_it_cut() {
+    let mut r = rolling_first_take(48000, 120, 1.0, 0);
+    r.rig.advance_to(r.pass_start(3) - 64);
+    r.rig.skip(128); // pass 2 loses its last 64 frames, pass 3 its first 64
+    r.rig.advance_to(r.pass_start(4) + r.len / 4);
+    let dropped: Vec<u32> = r.rig.events.iter().filter_map(|e| if let Event::PassDropped { pass, .. } = *e { Some(pass) } else { None }).collect();
+    assert_eq!(dropped, [2, 3], "both passes the jump cut are dropped");
+    // Nothing is kept now, so REC on another lane is ignored.
+    r.rig.press(Command::RecDub(1));
+    assert!(r.rig.state(1) == LaneState::Empty && r.rig.state(0) == LaneState::Recording);
+    r.rig.advance_to(r.pass_start(5) + r.len / 4);
+    r.rig.press(Command::RecDub(0));
+    assert!(r.rig.master() == r.len && r.rig.rejected() == 0);
+    assert_eq!(mismatches(&r.rig.pcm(0), r.pass_start(4)), 0, "the clean pass after the jump is kept");
+}
+
+#[test]
+fn f_a_jump_over_many_passes_then_another_gap_keeps_none_of_them() {
+    let mut r = rolling_first_take(48000, 120, 1.0, 0);
+    r.rig.advance_to(r.pass_start(3) - 64);
+    r.rig.skip(r.pass_start(12) + 64 - r.rig.frame); // passes 3 to 11 never arrive, nor pass 12's first 64 frames
+    r.rig.advance(64);
+    r.rig.gap(); // another xrun while the roll still catches up on the passes the jump skipped
+    r.rig.advance(r.len / 4);
+    let dropped: Vec<u32> = r.rig.events.iter().filter_map(|e| if let Event::PassDropped { pass, .. } = *e { Some(pass) } else { None }).collect();
+    assert_eq!(dropped, (2..=11).collect::<Vec<u32>>(), "every pass the jump cut is dropped");
+    // Nothing is kept, so REC on another lane is ignored and the roll goes on.
+    r.rig.press(Command::RecDub(1));
+    assert!(r.rig.state(1) == LaneState::Empty && r.rig.state(0) == LaneState::Recording && r.rig.master() == 0);
+    r.rig.advance_to(r.pass_start(14) + r.len / 4);
+    r.rig.press(Command::RecDub(0));
+    assert!(r.rig.master() == r.len && r.rig.rejected() == 0);
+    assert_eq!(mismatches(&r.rig.pcm(0), r.pass_start(13)), 0, "the first clean pass after the jump is kept");
+}
+
 /// A two-bar first take on lane 0, then a RETAKE rolling on lane 1 in pass 3.
 fn rolling_later_take(fixed: bool) -> (Rig, Frame, Frame) {
     let mut rig = Rig::new();
@@ -190,6 +227,20 @@ fn g_rec_on_another_lane_approves_a_later_roll_and_records_next() {
     rig.advance_to(s1 + 3 * master + fpb / 4);
     assert!(rig.state(1) == LaneState::Playing && rig.window().is_none());
     assert_eq!(mismatches(&rig.pcm(1), s1 + 2 * master), 0, "commits the pass in flight (3)");
+}
+
+#[test]
+fn h_a_jump_from_the_handoff_seam_damages_the_take_that_starts_there() {
+    let (mut rig, master, s1) = rolling_later_take(false);
+    let edge = s1 + 3 * master;
+    rig.advance_to(edge - rig.fpb() / 32);
+    rig.press(Command::RecDub(2)); // inside the grace: lane 1 finishes pass 3, lane 2 records from its edge
+    rig.advance_to(edge);
+    rig.skip(128); // pass 3 is whole; lane 2's first 128 frames never arrive
+    rig.advance_to(edge + master + master / 2);
+    assert!(rig.state(1) == LaneState::Playing && rig.rejected() == 0);
+    assert_eq!(mismatches(&rig.pcm(1), s1 + 2 * master), 0, "lane 1 holds the whole pass 3");
+    assert!(rig.events.iter().any(|e| matches!(e, Event::PassDropped { lane: 2, pass: 1, .. })), "lane 2's cut first pass is dropped");
 }
 
 #[test]

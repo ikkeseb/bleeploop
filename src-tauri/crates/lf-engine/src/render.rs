@@ -164,7 +164,7 @@ pub fn wet_master_with(rate: u32, mut load: Load, settings: &[Command], options:
     let mut f: Frame = 0;
     while f < total {
         let n = (options.block as Frame).min(total - f) as usize;
-        let ctx = ProcessContext { frame: f, xrun: false, align_frames: 0, input_frames: 0 };
+        let ctx = ProcessContext { frame: f, xrun: false, damaged: false, align_frames: 0, input_frames: 0 };
         let [bl, br] = &mut block;
         engine.process(&ctx, &silent[..n], &mut bl[..n], &mut br[..n]);
         // Keep what falls in [keep_from, total).

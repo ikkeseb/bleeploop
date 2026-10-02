@@ -89,7 +89,7 @@ fn time_blocks(rig: &mut Rig, blocks: usize) -> (f64, f64, f64) {
     let started = Instant::now();
     for _ in 0..blocks {
         let t = Instant::now();
-        let ctx = ProcessContext { frame, xrun: false, align_frames: 0, input_frames: 0 };
+        let ctx = ProcessContext { frame, xrun: false, damaged: false, align_frames: 0, input_frames: 0 };
         rig.engine.process(&ctx, &input, &mut left, &mut right);
         let dt = t.elapsed().as_secs_f64();
         worst = worst.max(dt);
@@ -152,7 +152,7 @@ fn a_multiply_burst_costs_under_a_tenth_of_the_block_more() {
     let (mut left, mut right) = (vec![0.0f32; BLOCK], vec![0.0f32; BLOCK]);
     let mut frame = rig.frame;
     let mut block = |engine: &mut lf_engine::Engine| {
-        let ctx = ProcessContext { frame, xrun: false, align_frames: 0, input_frames: 0 };
+        let ctx = ProcessContext { frame, xrun: false, damaged: false, align_frames: 0, input_frames: 0 };
         let t = Instant::now();
         engine.process(&ctx, &input, &mut left, &mut right);
         frame += BLOCK as Frame;
@@ -203,7 +203,7 @@ fn a_trim_of_the_longest_loop_costs_under_a_tenth_of_the_block_more() {
     rig.send_at(rig.frame, Command::Trim(0, 16));
     let mut frame = rig.frame;
     let mut block = |engine: &mut lf_engine::Engine| {
-        let ctx = ProcessContext { frame, xrun: false, align_frames: 0, input_frames: 0 };
+        let ctx = ProcessContext { frame, xrun: false, damaged: false, align_frames: 0, input_frames: 0 };
         let t = Instant::now();
         engine.process(&ctx, &input, &mut left, &mut right);
         frame += BLOCK as Frame;
@@ -370,7 +370,7 @@ impl Stage3 {
                 self.rig.send_at(at, Command::NoteOn(note, 1.0));
             }
         }
-        let ctx = ProcessContext { frame: at, xrun: false, align_frames: 0, input_frames: 0 };
+        let ctx = ProcessContext { frame: at, xrun: false, damaged: false, align_frames: 0, input_frames: 0 };
         self.rig.engine.process(&ctx, &self.engine_input, l, r);
         lap(0);
 

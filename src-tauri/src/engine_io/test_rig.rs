@@ -61,7 +61,7 @@ impl TestDevice {
                         match core.rt.try_lock() {
                             Ok(mut rt) => {
                                 if let Some(engine) = rt.engine.as_mut() {
-                                    let ctx = ProcessContext { frame, xrun: false, align_frames: 0, input_frames: 0 };
+                                    let ctx = ProcessContext { frame, xrun: false, damaged: false, align_frames: 0, input_frames: 0 };
                                     engine.process(&ctx, &x, &mut l, &mut r);
                                 }
                             }

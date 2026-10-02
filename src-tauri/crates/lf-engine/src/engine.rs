@@ -372,6 +372,8 @@ impl Engine {
         let start = ctx.frame;
         let end = start + n as Frame;
         let first = !self.started;
+        // The input frames an xrun lost before this block: the ones a jump skipped, else a point gap.
+        let lost_from = if first { start } else { self.next_frame.min(start) };
         if !self.started {
             self.started = true;
             self.clock.ensure_running(start);
@@ -385,9 +387,10 @@ impl Engine {
         self.fx.set_offset(self.skipped);
         self.input_fx.set_offset(self.skipped);
         self.instruments.set_offset(self.skipped);
-        if ctx.xrun {
+        if ctx.xrun || ctx.damaged {
             self.xruns += 1;
-            self.looper.input_gap(start);
+            // A damaged block's own input frames are lost too.
+            self.looper.input_gap(lost_from, if ctx.damaged { end } else { start });
         }
         // Take no more than the table holds: the rest waits in the ring for the next block, late but
         // never dropped (a lost NoteOff would hang its note).

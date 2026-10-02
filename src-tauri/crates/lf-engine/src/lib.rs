@@ -74,8 +74,8 @@
 //! - **Decided while porting** (each test file's header names what it changes): the count-in and an
 //!   idle PLAY start on the press frame, with no scheduling lead; undo and reverse on a playing lane
 //!   switch on the next loop boundary; STOP on an overdubbing lane discards the whole layer; an input gap
-//!   damages only the RETAKE pass it falls in and resets AUTO's listening history; a jump in the device
-//!   frame drops the beats it skipped, and count-in beats fire late as one click.
+//!   damages only the capture windows (RETAKE passes) it overlaps, and resets AUTO's listening history;
+//!   a jump in the device frame drops the beats it skipped, and count-in beats fire late as one click.
 //! - **`process` never allocates, locks or waits.** Buffers are allocated (and their pages touched) in
 //!   `Engine::new`; commands and events cross on rtrb rings; a full event ring drops and counts.
 //! - **No loop-sized work in one callback.** Tiling, the undo copy, a discarded layer's restore, COPY,
@@ -131,6 +131,15 @@
 //! (the committed length does not move), an empty fill job at `lo == master`, a restore offset at
 //! exactly the span's end, `plan_later_stop`'s bar clamp (the window end bounds it), and `pair`'s
 //! ordering (guarded by `assert_ne`).
+//!
+//! # Open threads
+//!
+//! - **A gap the live plugin's latency carries into a window is missed.** The tap carries input frame
+//!   `x` at `x + live latency`, but `input_gap` gets the device frames, which must stay (a jump in a
+//!   window's closing tail loses those tap frames): a silent block just before a layer commits it clean.
+//!   Next check: pass the looper both intervals, then un-ignore
+//!   `a_silent_block_damages_the_layer_its_frames_reach_through_a_live_plugin` beside
+//!   `a_jump_in_a_layers_closing_tail_rejects_it_through_a_live_plugin` (`tests/overdub_undo_reverse.rs`).
 //!
 //! # Beside this crate, and not built yet
 //!

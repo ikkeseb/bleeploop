@@ -625,7 +625,7 @@ fn render_stopped(h: &Harness, frame: &mut Frame, blocks: usize) -> LaneInfo {
     let engine = rt.engine.as_mut().unwrap();
     for _ in 0..blocks {
         let input: [f32; 64] = std::array::from_fn(|k| tone(*frame + k as Frame));
-        engine.process(&ProcessContext { frame: *frame, xrun: false, align_frames: 0, input_frames: 0 }, &input, &mut l, &mut r);
+        engine.process(&ProcessContext { frame: *frame, xrun: false, damaged: false, align_frames: 0, input_frames: 0 }, &input, &mut l, &mut r);
         *frame += 64;
     }
     engine.looper().info(0)
@@ -873,6 +873,9 @@ fn a_held_engine_lock_plays_silence_counts_misses_and_flags_the_input_gap() {
     h.play(RATE / 20);
     let diag = h.host.diag();
     assert!(diag.lock_misses >= 3, "{diag:?}");
+    // Whether the misses also cost a cycle's input (a duplex fault) depends on where the lock fell
+    // between the callbacks; either way that lands on the same block, one input gap
+    // (`callback::tests::a_lock_held_across_cycles_is_one_input_gap_whichever_input_it_costs`).
     assert_eq!(diag.engine.xruns, 1, "the block after the misses follows an input gap");
     assert!(!h.host.core.rt.is_poisoned());
 }
@@ -951,7 +954,81 @@ fn an_input_missing_from_its_cycle_is_one_duplex_fault() {
     h.play(RATE / 20);
     h.fake.skip_input.store(true, SeqCst);
     h.play(RATE / 10);
-    assert_eq!(h.host.diag().duplex_faults, 1, "counted once, then back in step");
+    let diag = h.host.diag();
+    assert_eq!(diag.duplex_faults, 1, "counted once, then back in step");
+    assert_eq!(diag.engine.xruns, 1, "its silent block is one input gap");
+}
+
+/// A first take on lane 0 that `glitch` runs into midway, then a stop: whether the engine rejected it.
+fn a_take_through(h: &mut Harness, glitch: impl FnOnce(&Harness)) -> bool {
+    h.send(Command::SetBpm(240.0));
+    h.send(Command::SetSlotLive(0, true));
+    h.send(Command::RecDub(0));
+    h.wait_lane("the take starts", 0, |i| i.state == LaneState::Recording && !i.armed);
+    h.play(RATE / 2);
+    glitch(h);
+    h.play(RATE / 2);
+    h.send(Command::RecDub(0));
+    h.wait_event("the take ends", |e| match e {
+        Event::TakeRejected { lane: 0, overdub: false, .. } => Some(true),
+        Event::Lane { lane: 0, info, .. } if info.state == LaneState::Playing => Some(false),
+        _ => None,
+    })
+}
+
+/// The ASIO input callback misses its next cycle (a duplex fault: the output renders silence for it).
+fn miss_an_input_cycle(h: &Harness) {
+    h.fake.skip_input.store(true, SeqCst);
+    until("the input misses a cycle", || !h.fake.skip_input.load(SeqCst));
+}
+
+#[test]
+fn an_input_missing_from_its_cycle_rejects_the_take_or_layer_it_falls_in() {
+    let mut h = Harness::new();
+    h.fake.set_input(tone);
+    h.open(asio(Some(256)));
+    assert!(a_take_through(&mut h, miss_an_input_cycle), "a take with a cycle of silence is rejected");
+    assert_eq!(h.host.diag().duplex_faults, 1);
+    drop(h); // one fake device at a time (`SERIAL`)
+
+    let mut h = Harness::new();
+    h.fake.set_input(tone);
+    h.open(asio(Some(256)));
+    let length = h.record_loop();
+    let (_, before) = session_parts(&h.host.snapshot(false).expect("a snapshot of the committed take"));
+    h.send(Command::SetSlotLive(0, true));
+    h.send(Command::RecDub(0));
+    h.wait_lane("the overdub runs", 0, |i| i.state == LaneState::Overdubbing);
+    h.play(length / 3);
+    miss_an_input_cycle(&h);
+    h.play(length / 3);
+    h.send(Command::RecDub(0));
+    h.wait_event("the layer is rejected", |e| matches!(e, Event::TakeRejected { lane: 0, overdub: true, .. }).then_some(()));
+    h.wait_lane("the loop plays on", 0, |i| i.state == LaneState::Playing);
+    h.play(RATE / 4);
+    let (_, after) = session_parts(&h.host.snapshot(false).expect("a snapshot after the rejection"));
+    assert!(after == before, "the loop before the layer, bit for bit");
+}
+
+#[test]
+fn a_wasapi_join_that_starves_or_trims_rejects_the_take() {
+    // Past the drift controller's ±1 % either way: the join runs short (a starve) or over (a trim)
+    // every second or so, after the startup priming.
+    for (skew, trims) in [(-30_000.0, false), (30_000.0, true)] {
+        let mut h = Harness::new();
+        h.fake.set_input(tone);
+        *h.fake.skew_ppm.lock().unwrap() = skew;
+        h.open(wasapi(None, None));
+        let count = move |h: &Harness| {
+            let diag = h.host.diag();
+            if trims { diag.join_trims } else { diag.join_starves }
+        };
+        let rejected = a_take_through(&mut h, |h| {
+            let before = count(h);
+            until("the join glitches", || count(h) > before);
+        });
+        assert!(rejected, "a take the join {} is rejected", if trims { "trimmed" } else { "starved" });
+    }
 }
 
 #[test]

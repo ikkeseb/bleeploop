@@ -106,6 +106,7 @@ pub struct Rig {
     /// The record tap over the same frames (`Taps::record`).
     pub record: Vec<f32>,
     gap_next: bool,
+    damaged_next: bool,
     in_buf: Vec<f32>,
     in_buf_b: Vec<f32>,
     left: Vec<f32>,
@@ -159,6 +160,7 @@ impl Rig {
             monitor: Vec::new(),
             record: Vec::new(),
             gap_next: false,
+            damaged_next: false,
             in_buf: vec![0.0; 4096],
             in_buf_b: vec![0.0; 4096],
             left: vec![0.0; 4096],
@@ -195,6 +197,12 @@ impl Rig {
     /// The next rendered block starts after an input gap (an xrun).
     pub fn gap(&mut self) {
         self.gap_next = true;
+    }
+
+    /// The next rendered block's input never wholly reached the engine (`ProcessContext::damaged`: the
+    /// device side rendered silence or a splice in its place).
+    pub fn damage(&mut self) {
+        self.damaged_next = true;
     }
 
     /// The device never delivers the next `frames`: the frame counter jumps and the input has a gap.
@@ -284,7 +292,7 @@ impl Rig {
                 self.in_buf_b[k] = b(self.frame + k as Frame);
             }
         }
-        let ctx = ProcessContext { frame: self.frame, xrun: std::mem::take(&mut self.gap_next), align_frames: self.align - self.engine.limiter_latency(), input_frames: self.input_latency };
+        let ctx = ProcessContext { frame: self.frame, xrun: std::mem::take(&mut self.gap_next), damaged: std::mem::take(&mut self.damaged_next), align_frames: self.align - self.engine.limiter_latency(), input_frames: self.input_latency };
         let violations = violation_count();
         let engine = &mut self.engine;
         let (input, left, right) = (&self.in_buf[..n], &mut self.left[..n], &mut self.right[..n]);

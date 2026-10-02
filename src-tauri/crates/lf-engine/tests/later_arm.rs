@@ -222,3 +222,49 @@ fn a_gap_on_a_window_edge_damages_nothing() {
         assert!(rig.state(1) == LaneState::Playing && rig.rejected() == 0, "a gap on the {} edge", if at_end { "end" } else { "start" });
     }
 }
+
+#[test]
+fn a_jump_across_a_window_edge_rejects_the_take() {
+    // The frames the device skipped overlap the window although the block after them starts outside it.
+    for at_end in [false, true] {
+        let mut rig = Rig::new();
+        rig.set_level(0.5);
+        let master = rig.record_first_take(0, 2, 2400);
+        rig.set_input(code);
+        rig.set(Command::SetFixedLength(true));
+        rig.set(Command::SetFixedBars(2.0));
+        rig.press(Command::RecDub(1));
+        let edge = if at_end { rig.end_frame() } else { rig.start_frame() };
+        rig.advance_to(edge - 64);
+        rig.skip(128);
+        rig.advance(master + 4800);
+        let side = if at_end { "end" } else { "start" };
+        assert!(rig.state(1) == LaneState::Empty && rig.lane(1).length == 0, "a jump across the {side}: never committed");
+        assert_eq!(rig.rejected(), 1, "a jump across the {side}: rejected once");
+        assert!(rig.state(0) == LaneState::Playing && rig.master() == master);
+    }
+}
+
+#[test]
+fn a_take_armed_inside_a_damaged_block_whose_window_opens_there_is_rejected() {
+    // The block's damage reaches the looper before the press in it does: the window it opens there must
+    // still see it.
+    let mut rig = Rig::new();
+    rig.set_level(0.5);
+    let master = rig.record_first_take(0, 2, 2400);
+    rig.set_input(code);
+    rig.set(Command::SetFixedLength(true));
+    rig.set(Command::SetFixedBars(2.0));
+    let boundary = rig.next_boundary();
+    rig.advance_to(boundary - 100);
+    rig.block = 1024;
+    rig.send_at(boundary - 100, Command::RecDub(1)); // its window opens on the boundary, inside the block
+    rig.damage(); // the block [boundary - 100, boundary + 924) renders from silence
+    rig.advance(1024);
+    assert_eq!(rig.start_frame(), boundary);
+    rig.block = 128;
+    rig.advance(master + 4800);
+    assert!(rig.state(1) == LaneState::Empty && rig.lane(1).length == 0, "never committed");
+    assert_eq!(rig.rejected(), 1);
+    assert!(rig.state(0) == LaneState::Playing && rig.master() == master);
+}

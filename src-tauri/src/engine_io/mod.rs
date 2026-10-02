@@ -59,7 +59,11 @@
 //! - **The frame counter pauses across a switch.** A backend switch or a fallback continues the
 //!   counter where the last callback left it, so loops resume in place. It counts the frames the
 //!   device took: a late wake is no loss. Only a WASAPI buffer found empty jumps it, by what the device
-//!   played dry (the join drops as much input); that and every xrun flag `ProcessContext::xrun`.
+//!   played dry (the join drops as much input); that, every xrun and the block after a lock miss flag
+//!   `ProcessContext::xrun`. A block whose input did not wholly reach the engine flags
+//!   `ProcessContext::damaged`: a duplex fault's, and on the join a starve or trim after its startup
+//!   priming and every pull until an overrun's seam is surely played (`pipes`), each with the block
+//!   after it (the resampler carries a few frames over). The take or layer the gap overlaps is rejected.
 //! - **Every stop fades and punches out.** A switch or close ramps the output to silence (10 ms, then
 //!   two silent callbacks: a dropped ASIO stream leaves the driver playing its last two buffers), drops
 //!   the output then the input, and punches out a take in flight (STATUS E3). A loss drops at once. A

@@ -186,6 +186,12 @@ struct Recorder {
 }
 
 impl Recorder {
+    /// The device lost input frames `[from, to)` (`from == to`: a point xrun just before `to`): whether
+    /// they fall inside the window.
+    fn hit(&self, (from, to): (Frame, Frame)) -> bool {
+        self.start.is_some_and(|s| to > s) && self.end.is_none_or(|e| from < e)
+    }
+
     fn new(lane: usize, kind: Kind, align: Frame) -> Self {
         Recorder {
             lane,
@@ -325,6 +331,9 @@ pub struct Looper {
     job_step_max: Frame,
     /// Every buffer position the block jobs have moved.
     job_work: Frame,
+    /// The input gaps a window not yet checked may still overlap (`Looper::input_gap`): a window whose
+    /// edge runs after them may lie in them.
+    gap: (Frame, Frame),
     detector: Detector,
     gain_coef: f64,
     loop_end_stop: bool,
@@ -367,6 +376,7 @@ impl Looper {
             jobs: [None; MAX_JOBS],
             job_step_max: 0,
             job_work: 0,
+            gap: (Frame::MIN, Frame::MIN),
             detector: Detector::new(sample_rate),
             gain_coef: (-1.0 / (GAIN_TAU_SECONDS * sample_rate as f64)).exp(),
             loop_end_stop: false,
@@ -1085,6 +1095,7 @@ impl Looper {
         }
         self.rec = Some(rec);
         self.configure_end(cx);
+        self.damage_from_gap();
     }
 
     /// Bound the take at the FIXED bar count or the buffer; RETAKE rolls a known length (the master once
@@ -1326,6 +1337,7 @@ impl Looper {
         t.audible = t.logical();
         t.written = 0;
         self.rec = Some(rec);
+        self.damage_from_gap();
     }
 
     /// AUTO: the onset retained in `live[..copied]` began at input frame `onset`. The grid anchors where
@@ -1339,6 +1351,7 @@ impl Looper {
         self.lanes[rec.lane].auto_armed = false;
         cx.clock.set_locked(true);
         self.configure_end(cx);
+        self.damage_from_gap();
         cx.clock.start_auto_record(downbeat, cx.now);
     }
 
@@ -1420,6 +1433,7 @@ impl Looper {
         rec.start = Some(cx.now + rec.align);
         rec.first_pos = first_pos;
         self.rec = Some(rec);
+        self.damage_from_gap();
         self.push_job(cx.now, i, JobKind::Copy { src, dst }, Visit { lo: 0, span: master, off: first_pos, modulus: master });
     }
 
@@ -1715,13 +1729,28 @@ impl Looper {
 
     // ── Audio ──────────────────────────────────────────────────────────────────────────────────────
 
-    /// An input gap just before `frame`: a capture whose window it falls inside is damaged; AUTO drops
-    /// the history it can no longer join.
-    pub fn input_gap(&mut self, frame: Frame) {
-        let Some(rec) = self.rec.as_mut() else { return };
+    /// The device lost input frames `[from, to)` (a point xrun: `from == to`, a gap just before `to`):
+    /// a capture whose window they fall inside is damaged; AUTO drops the history it can no longer join.
+    /// Every window checks the last gap as it opens, so a gap past a window's end damages the windows
+    /// that follow too (a RETAKE pass, a handoff's take), and a press in a damaged block damages the
+    /// window it opens there. A recorder still behind the last gap (a jump skipped RETAKE passes,
+    /// and `events` catches up four edges at a time) has windows left to check against it: the new gap
+    /// joins it, so a later xrun never makes a skipped pass clean. The frames between the two count as
+    /// lost too, which only matters to a window wholly between them that the recorder has not reached.
+    pub fn input_gap(&mut self, from: Frame, to: Frame) {
+        let behind = self.rec.is_some_and(|r| r.end.is_some_and(|e| e < self.gap.1));
+        self.gap = (if behind { self.gap.0 } else { from }, to);
+        let Some(rec) = self.rec else { return };
         if self.lanes[rec.lane].auto_armed {
             self.detector.reset();
-        } else if rec.start.is_some_and(|s| frame > s) && rec.end.is_none_or(|e| frame < e) {
+        } else {
+            self.damage_from_gap();
+        }
+    }
+
+    fn damage_from_gap(&mut self) {
+        let gap = self.gap;
+        if let Some(rec) = self.rec.as_mut().filter(|r| r.hit(gap)) {
             rec.damaged = true;
         }
     }

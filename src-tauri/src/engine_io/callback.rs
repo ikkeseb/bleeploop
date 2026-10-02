@@ -400,6 +400,9 @@ pub(crate) struct Render {
     cap: usize,
     /// The previous block never reached the engine (a lock miss): this one follows an input gap.
     missed: bool,
+    /// WASAPI: the join spliced the previous block's input (a starve, a trim, an overrun's seam), and
+    /// the resampler carries a few of those frames into this one: its input is damaged too.
+    spliced: bool,
     gain: f32,
     step: f32,
     silent: u32,
@@ -433,6 +436,7 @@ impl Render {
             last: None,
             cap: 0,
             missed: false,
+            spliced: false,
             gain: 0.0,
             step: (1.0 / (FADE_SECONDS * rate as f64).max(1.0)) as f32,
             silent: 0,
@@ -472,6 +476,9 @@ impl Render {
             self.run.out_latency.store(frames, Relaxed);
         }
         // The join pipe is this callback's own: pull even when the engine is locked, so its fill holds.
+        // A starve or a trim after the startup priming splices the input, and a pull may hold an
+        // overrun's seam until it is surely played (`PullPipe::take_seam`): the block's input is damaged.
+        let mut spliced = false;
         let avail = match &mut self.source {
             Source::Duplex => 0,
             Source::Join { pipe, x, xs, joined, .. } => {
@@ -496,12 +503,15 @@ impl Render {
                     *joined = true;
                 } else if *joined {
                     counters.join_starves.fetch_add(1, Relaxed);
+                    spliced = true;
                 }
+                spliced |= (trims > 0) | pipe.take_seam();
                 m
             }
         };
         let frame = core.frame.load(Relaxed) + lost;
         let xrun = (lost > 0) | std::mem::take(&mut self.missed) | self.run.xrun.swap(false, Acquire);
+        let damaged = spliced | std::mem::replace(&mut self.spliced, spliced);
         let (align, input_frames) = self.alignment();
         core.align_frames.store(align, Relaxed);
         core.input_frames.store(input_frames, Relaxed);
@@ -513,7 +523,7 @@ impl Render {
         match try_rt(&core) {
             Some(mut rt) => {
                 let rt = &mut *rt;
-                let ctx = ProcessContext { frame, xrun, align_frames: align, input_frames };
+                let ctx = ProcessContext { frame, xrun, damaged, align_frames: align, input_frames };
                 let ok = guarded(counters, || self.block(rt, data, n, avail, ctx, fading));
                 if !ok {
                     core.latch_fault(rt);
@@ -549,6 +559,7 @@ impl Render {
     fn block<T: SizedSample + FromSample<f32>>(&mut self, rt: &mut Rt, data: &mut [T], n: usize, avail: usize, ctx: ProcessContext, fading: bool) {
         rt.poll_tap();
         let counters = &self.core.counters;
+        let mut damaged = ctx.damaged;
         let avail = match self.source {
             Source::Duplex => {
                 // A run's first output callback takes the input's count: the input starts playing just
@@ -556,9 +567,11 @@ impl Render {
                 rt.out_cycles = if rt.out_cycles == 0 { rt.in_cycles } else { rt.out_cycles + 1 };
                 let same = rt.in_cycles == rt.out_cycles && rt.handoff_len == n && n <= MAX_DEVICE_BLOCK;
                 if !same && rt.out_cycles > 0 {
-                    // Out of step: count it once and resync, as the Stage 1 spike does.
+                    // Out of step: count it once and resync, as the Stage 1 spike does. The block renders
+                    // from silence: its input is damaged.
                     counters.duplex_faults.fetch_add(1, Relaxed);
                     rt.out_cycles = rt.in_cycles;
+                    damaged = true;
                 }
                 if same { n } else { 0 }
             }
@@ -590,7 +603,7 @@ impl Render {
             let (left, right) = (&mut self.left[..m], &mut self.right[..m]);
             match engine.as_deref_mut() {
                 Some(engine) => {
-                    let ctx = ProcessContext { frame: ctx.frame + off as Frame, xrun: ctx.xrun && off == 0, ..ctx };
+                    let ctx = ProcessContext { frame: ctx.frame + off as Frame, xrun: ctx.xrun && off == 0, damaged, ..ctx };
                     engine.process_inputs(&ctx, x, left, right);
                 }
                 None => {
@@ -845,6 +858,217 @@ mod tests {
         run.set_slot_channels([u32::MAX, 0]);
         assert_eq!(run.slot_channels(), [u32::MAX, 0], "a swap lands whole");
         assert_eq!(run.picks(2), [1, 0], "a pick past the device's channels reads its last");
+    }
+
+    const RATE: u32 = 48_000;
+    /// A WASAPI period at `RATE`: 10 ms.
+    const N: usize = 480;
+
+    /// The input's frame code: every frame its own value, never silence.
+    fn code(frame: Frame) -> f32 {
+        0.25 + (frame % 4096) as f32 / 16384.0
+    }
+
+    /// WASAPI's join by hand, on synthetic time: [`JoinInput`] pushes 10 ms periods of [`code`] and
+    /// [`Render`] pulls 10 ms blocks through the join pipe into an engine.
+    struct Join {
+        core: Arc<Core>,
+        input: JoinInput,
+        render: Render,
+        handle: lf_engine::EngineHandle,
+        pushed: Frame,
+        entry: Instant,
+        events: Vec<lf_engine::Event>,
+    }
+
+    /// The device side's shared state with an engine at `RATE` in its lock, and the engine's handle.
+    fn engine_core() -> (Arc<Core>, lf_engine::EngineHandle) {
+        let core = Arc::new(Core::new());
+        let config = lf_engine::EngineConfig { max_loop_seconds: 4.0, ..lf_engine::EngineConfig::new(RATE) };
+        let (engine, handle) = lf_engine::Engine::new(config);
+        core.rt.lock().unwrap().engine = Some(engine);
+        core.rate.store(RATE, Relaxed);
+        core.max_block.store(config.max_block as u32, Relaxed);
+        (core, handle)
+    }
+
+    impl Join {
+        fn new() -> Join {
+            use super::super::pipes::{pipe, PipeConfig};
+            let (core, handle) = engine_core();
+            let run = Arc::new(Run::new([0, 0]));
+            // The device owner's join (`owner.rs`): 500 ms of ring, a 25 ms setpoint.
+            let join = PipeConfig { in_rate: RATE, out_rate: RATE, channels: SLOT_COUNT, capacity: RATE as usize / 2, setpoint: 0.025, max_pull: MAX_DEVICE_BLOCK };
+            let (push, pull) = pipe(join).unwrap();
+            let input = JoinInput::new(core.clone(), run.clone(), 1, RATE, push);
+            let render = Render::join(core.clone(), run, 2, RATE, pull);
+            Join { core, input, render, handle, pushed: 0, entry: Instant::now(), events: Vec::new() }
+        }
+
+        /// `periods` input periods at once, then one output block, on time.
+        fn cycle(&mut self, periods: usize) {
+            for _ in 0..periods {
+                let data: Vec<f32> = (0..N as Frame).map(|k| code(self.pushed + k)).collect();
+                self.input.capture(&data, None);
+                self.pushed += N as Frame;
+            }
+            let mut out = [0.0f32; 2 * N];
+            self.render.render(&mut out, self.entry, None);
+            self.entry += Duration::from_millis(10);
+            while let Ok(e) = self.handle.events.pop() {
+                self.events.push(e);
+            }
+        }
+
+        fn send(&mut self, frame: Frame, command: lf_engine::Command) {
+            self.handle.commands.push(lf_engine::TimedCommand { frame: Some(frame), command }).expect("command ring full");
+        }
+
+        fn frame(&self) -> Frame {
+            self.core.frame.load(Relaxed)
+        }
+
+        fn engine<R>(&self, f: impl FnOnce(&lf_engine::Engine) -> R) -> R {
+            f(self.core.rt.lock().unwrap().engine.as_ref().unwrap())
+        }
+
+        /// On time up to frame `trim`, then the output stalls while the input runs on (half a second of
+        /// input arrives at once): the ring fills, the input past it is dropped, and the next pull trims
+        /// the ring back to its 25 ms. Its last 1200 frames before the drop play over that block and the
+        /// next, and the seam falls 240 frames into the third.
+        fn overrun_at(&mut self, trim: Frame) {
+            while self.frame() < trim {
+                self.cycle(1);
+            }
+            assert_eq!(self.frame(), trim);
+            self.cycle(50);
+            assert!(self.core.counters.join_overruns.load(Relaxed) > 0, "the ring ran over");
+            assert_eq!(self.core.counters.join_trims.load(Relaxed), 1);
+        }
+    }
+
+    #[test]
+    fn a_join_overrun_rejects_the_take_its_seam_falls_in() {
+        use lf_engine::{Command, Event};
+        let mut j = Join::new();
+        for _ in 0..20 {
+            j.cycle(1);
+        }
+        let now = j.frame();
+        for command in [Command::SetBpm(120.0), Command::SetSlotLive(0, true), Command::SetFixedLength(true), Command::SetFixedBars(1.0)] {
+            j.send(now, command);
+        }
+        j.cycle(1);
+        // A first take of one bar: its window opens a bar of count-in (4 x 24000 frames) plus the
+        // alignment after the press. Press so that it opens 100 frames into a block.
+        let k = 4 * 24_000 + j.core.align_frames.load(Relaxed) + j.engine(|e| e.limiter_latency());
+        let press = j.frame() + 480 + (100 - k).rem_euclid(N as Frame);
+        j.send(press, Command::RecDub(0));
+        j.cycle(1);
+        j.cycle(1);
+        let start = press + k;
+        assert_eq!(j.engine(|e| e.looper().recorder()), Some((0, Some(start), Some(start + 96_000))), "the window");
+        // The take opens 100 frames into the block the seam falls in, before the seam.
+        j.overrun_at(start - 100 - 2 * N as Frame);
+        while j.frame() < start + 96_000 + 4 * N as Frame {
+            j.cycle(1);
+        }
+        assert!(j.events.iter().any(|e| matches!(e, Event::TakeRejected { lane: 0, overdub: false, .. })), "the spliced take is rejected");
+    }
+
+    #[test]
+    fn a_join_overrun_rejects_the_layer_its_seam_falls_in_and_keeps_the_loop() {
+        use lf_engine::{Command, Event};
+        let mut j = Join::new();
+        for _ in 0..20 {
+            j.cycle(1);
+        }
+        let now = j.frame();
+        for command in [Command::SetBpm(120.0), Command::SetSlotLive(0, true), Command::SetFixedLength(true), Command::SetFixedBars(1.0), Command::SetDubFeedback(0, 0.5)] {
+            j.send(now, command);
+        }
+        j.cycle(1);
+        let now = j.frame();
+        j.send(now, Command::RecDub(0));
+        while j.engine(|e| e.looper().master() == 0 || e.looper().recorder().is_some()) {
+            j.cycle(1);
+        }
+        let before = j.engine(|e| e.looper().loop_pcm(0));
+        assert!(before.iter().all(|&x| x != 0.0), "a clean one-bar loop");
+        // The layer opens 100 frames into the block the seam falls in, after the trimmed pull's two
+        // blocks, and is armed well before them.
+        let k = j.core.align_frames.load(Relaxed) + j.engine(|e| e.limiter_latency());
+        let start = j.frame() + 8 * N as Frame + 100;
+        let trim = start - 100 - 2 * N as Frame;
+        assert!(start - k < trim, "the press lands before the stall");
+        j.send(start - k, Command::RecDub(0));
+        while j.frame() < trim {
+            j.cycle(1);
+        }
+        assert_eq!(j.engine(|e| e.looper().recorder()), Some((0, Some(start), None)), "the layer's window");
+        j.overrun_at(trim);
+        while j.frame() < start + 48_000 {
+            j.cycle(1);
+        }
+        let now = j.frame();
+        j.send(now, Command::RecDub(0));
+        while j.engine(|e| e.looper().recorder().is_some() || e.looper().busy()) {
+            j.cycle(1);
+        }
+        assert!(j.events.iter().any(|e| matches!(e, Event::TakeRejected { lane: 0, overdub: true, .. })), "the spliced layer is rejected");
+        assert!(j.engine(|e| e.looper().loop_pcm(0)) == before, "the loop before the layer, bit for bit");
+    }
+
+    #[test]
+    fn a_lock_held_across_cycles_is_one_input_gap_whichever_input_it_costs() {
+        // ASIO by hand: the engine lock taken just before or after a cycle's input, and given back just
+        // before or after another's. The first output that takes it again follows the misses, and when
+        // its input is out of step it is a duplex fault too: one block, one input gap.
+        const B: usize = 256;
+        for (after_input, before_input) in [(false, false), (false, true), (true, false), (true, true)] {
+            let (core, _handle) = engine_core();
+            let run = Arc::new(Run::new([0, 0]));
+            let mut input = DuplexInput::new(core.clone(), run.clone(), 1, RATE);
+            let mut render = Render::duplex(core.clone(), run, 2, RATE);
+            let x = [0.25f32; B];
+            let mut out = [0.0f32; 2 * B];
+            let mut output = |render: &mut Render| render.render(&mut out, Instant::now(), None);
+            for _ in 0..4 {
+                input.capture(&x, None);
+                output(&mut render);
+            }
+            if after_input {
+                input.capture(&x, None);
+            }
+            let held = core.rt.lock().unwrap();
+            if !after_input {
+                input.capture(&x, None);
+            }
+            output(&mut render);
+            for _ in 0..3 {
+                input.capture(&x, None);
+                output(&mut render);
+            }
+            if !before_input {
+                input.capture(&x, None);
+            }
+            drop(held);
+            if before_input {
+                input.capture(&x, None);
+            }
+            output(&mut render);
+            for _ in 0..4 {
+                input.capture(&x, None);
+                output(&mut render);
+            }
+            let case = format!("taken {} an input, given back {} one", if after_input { "after" } else { "before" }, if before_input { "before" } else { "after" });
+            let counters = &core.counters;
+            assert_eq!(counters.lock_misses.load(Relaxed), 7 + u64::from(!after_input) + u64::from(!before_input), "{case}");
+            let faults = counters.duplex_faults.load(Relaxed);
+            assert_eq!(faults, u64::from(after_input == before_input), "{case}: the resumed output's input is out of step");
+            let xruns = core.rt.lock().unwrap().engine.as_ref().unwrap().diag().xruns;
+            assert_eq!(xruns, 1, "{case}: one input gap");
+        }
     }
 
     #[test]
