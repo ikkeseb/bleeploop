@@ -255,11 +255,10 @@ plugin-GUI work.
   well). The device owner logs `[engine_io] audio glitch: …` for each second a fault counter moves
   (`GlitchWatch`, `engine_io/owner.rs`); no real glitch has fired it yet.
 - Plugin-host gaps a source review found (2026-10-02; read from source, none reproduced), ranked by
-  exposure on the owner's plugins. First: a plugin that declares a sidechain or a second output bus
-  gets only bus 0 (FabFilter Pro-C 2, Pro-MB, Pro-G and Pro-DS take a sidechain; a processor that
-  reads the missing bus can crash; next check: a two-bus fixture per format, then `native:swap` with
-  one of them); a tone saved by an export or an unload before the next block has consumed an accepted
-  parameter edit loses that edit; two concurrent edits can leave a VST3's processor and controller at
+  exposure on the owner's plugins. First: VST3 omits trailing inactive aux buses (the SDK's
+  `activateBus` rule permits it) and passes short `setBusArrangements` arrays whose result is read
+  back, not checked; a tone saved by an export or an unload before the next block has consumed an
+  accepted parameter edit loses that edit; two concurrent edits can leave a VST3's processor and controller at
   different values. Then: two slots loading one VST3 DLL run its init unserialized; a failed VST3 editor
   attach drops the frame before the view; a CLAP restart can deliver a removed parameter id; a
   non-discardable VST3 module is unloaded. Lower: kReloadComponent only reactivates; a MIDI-only CLAP

@@ -40,8 +40,11 @@ pub(super) struct ClapUnit {
     max_frames: usize,
     params: Consumer<PluginEvent>,
     events: EventBuffer,
-    in_bufs: Vec<Vec<f32>>,
-    out_bufs: Vec<Vec<f32>>,
+    /// One buffer set per declared port, in port order (port → channel → frames): input port 0
+    /// carries the live input and the others stay silent; output port 0 is the slot's wet signal and
+    /// the others are scratch the unit never reads.
+    in_bufs: Vec<Vec<Vec<f32>>>,
+    out_bufs: Vec<Vec<Vec<f32>>>,
     in_ports: AudioPorts,
     out_ports: AudioPorts,
     steady: u64,
@@ -74,8 +77,9 @@ pub(super) struct Terms {
     /// The engine rate it activated at (`SlotHost::install` checks it).
     pub(super) rate: u32,
     pub(super) max_frames: u32,
-    pub(super) in_channels: u32,
-    pub(super) out_channels: u32,
+    /// The plugin's audio ports per direction, as channel counts in port order (`query_ports`).
+    pub(super) inputs: Vec<u32>,
+    pub(super) outputs: Vec<u32>,
     pub(super) latency: u32,
 }
 
@@ -112,16 +116,25 @@ impl ClapUnit {
 
     /// Owner thread: take a freshly activated processor and size everything to its terms.
     fn rearm(&mut self, stopped: StoppedPluginAudioProcessor<LfHost>, terms: &Terms) {
-        let (inputs, outputs) = (terms.in_channels as usize, terms.out_channels.max(1) as usize);
         self.processor = Some(Processor::Stopped(stopped));
         self.refused = false;
-        self.kind = if inputs > 0 { SlotKind::Effect } else { SlotKind::Instrument };
+        let live_input = terms.inputs.first().is_some_and(|&channels| channels > 0);
+        self.kind = if live_input { SlotKind::Effect } else { SlotKind::Instrument };
         self.latency = terms.latency as Frame;
         self.max_frames = (terms.max_frames as usize).max(1);
-        self.in_bufs = vec![vec![0.0; self.max_frames]; inputs];
-        self.out_bufs = vec![vec![0.0; self.max_frames]; outputs];
-        self.in_ports = AudioPorts::with_capacity(inputs.max(1), 1);
-        self.out_ports = AudioPorts::with_capacity(outputs, 1);
+        let frames = self.max_frames;
+        let sets = |ports: &[u32]| -> Vec<Vec<Vec<f32>>> {
+            ports.iter().map(|&channels| vec![vec![0.0; frames]; channels as usize]).collect()
+        };
+        // Zeroed once: an input port past 0 is never written again, and CLAP makes input buffers
+        // read-only to the plugin (`process.h`), so it stays silent across calls.
+        self.in_bufs = sets(&terms.inputs);
+        self.out_bufs = sets(&terms.outputs);
+        // Sized to the whole layout, so clack's `with_*_buffers` never grows them on the audio thread
+        // (its pointer rewrite after a growth is also only right for a single port).
+        let channels = |ports: &[u32]| ports.iter().map(|&c| c as usize).sum::<usize>().max(1);
+        self.in_ports = AudioPorts::with_capacity(channels(&terms.inputs), terms.inputs.len().max(1));
+        self.out_ports = AudioPorts::with_capacity(channels(&terms.outputs), terms.outputs.len().max(1));
     }
 
     /// Owner thread: the stopped processor, for `deactivate`. The engine stops a unit before it
@@ -182,7 +195,6 @@ impl SlotProcessor for ClapUnit {
         let Some(Processor::Started(started)) = processor.as_mut() else {
             return;
         };
-        let chans = out_bufs.len();
         let n = out.len();
         let (mut at, mut next) = (0, 0);
         // A call longer than the plugin's max frames goes in slices; each note lands in its own.
@@ -219,38 +231,38 @@ impl SlotProcessor for ClapUnit {
                 }
                 next += 1;
             }
-            for ch in in_bufs.iter_mut() {
+            // Port 0 carries the live input; port 0's outputs are what the slot plays.
+            for ch in in_bufs.iter_mut().take(1).flatten() {
                 ch[..len].copy_from_slice(&input[at..at + len]);
             }
             // A plugin may report silence by leaving its outputs untouched.
-            for ch in out_bufs.iter_mut() {
+            for ch in out_bufs.iter_mut().take(1).flatten() {
                 ch[..len].fill(0.0);
             }
             let status = {
-                // `InputChannel::variable`, never `constant`: a live input varies sample to sample.
-                let input_audio = if in_bufs.is_empty() {
-                    InputAudioBuffers::empty()
-                } else {
-                    in_ports.with_input_buffers([AudioPortBuffer {
-                        latency: 0,
-                        channels: AudioPortBufferType::f32_input_only(
-                            in_bufs.iter_mut().map(|c| InputChannel::variable(&mut c[..len])),
-                        ),
-                    }])
-                };
+                // Every declared port, in port order. `InputChannel::variable`, never `constant`: a
+                // live input varies sample to sample.
+                let input_audio = in_ports.with_input_buffers(in_bufs.iter_mut().map(move |port| AudioPortBuffer {
+                    latency: 0,
+                    channels: AudioPortBufferType::f32_input_only(
+                        port.iter_mut().map(move |c| InputChannel::variable(&mut c[..len])),
+                    ),
+                }));
                 let input_events = InputEvents::from_buffer(buf);
                 let mut output_events = OutputEvents::from_buffer(edits);
-                let mut output_audio = out_ports.with_output_buffers([AudioPortBuffer {
+                let mut output_audio = out_ports.with_output_buffers(out_bufs.iter_mut().map(move |port| AudioPortBuffer {
                     latency: 0,
-                    channels: AudioPortBufferType::f32_output_only(out_bufs.iter_mut().map(|c| &mut c[..len])),
-                }]);
+                    channels: AudioPortBufferType::f32_output_only(port.iter_mut().map(move |c| &mut c[..len])),
+                }));
                 let steady_time = Some(*steady);
                 started.process(&input_audio, &mut output_audio, &input_events, &mut output_events, steady_time, None)
             };
             if status.is_err() {
+                // CLAP discards a failed call's output: the slice stays silent.
                 faults.fetch_or(FAULT_PROCESS, Relaxed);
+            } else if let Some(main) = out_bufs.first() {
+                sum_to_mono(main, &mut out[at..at + len], len, main.len());
             }
-            sum_to_mono(out_bufs, &mut out[at..at + len], len, chans);
             *steady = steady.wrapping_add(len as u64);
             at += len;
         }
@@ -310,13 +322,13 @@ fn activate(
 ) -> Result<(StoppedPluginAudioProcessor<LfHost>, Terms), String> {
     let rate = slot.rate().ok_or_else(|| "no audio device is open".to_string())?;
     let max_frames = slot.max_block().max(1) as u32;
-    let out_channels = query_out_channels(instance)?;
-    let in_channels = query_in_channels(instance)?;
+    let outputs = query_ports(instance, false)?;
+    let inputs = query_ports(instance, true)?;
     let config =
         PluginAudioConfiguration { sample_rate: rate as f64, min_frames_count: 1, max_frames_count: max_frames };
     let stopped = instance.activate(|_, _| (), config).map_err(|e| format!("activate failed: {e}"))?;
     let latency = reported_latency(instance);
-    Ok((stopped, Terms { rate, max_frames, in_channels, out_channels, latency }))
+    Ok((stopped, Terms { rate, max_frames, inputs, outputs, latency }))
 }
 
 /// Deactivate what the unit holds, activate again at the engine's current terms and install it.

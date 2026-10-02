@@ -23,7 +23,7 @@ use clap_sys::{
     host::clap_host,
     id::{clap_id, CLAP_INVALID_ID},
     plugin::{clap_plugin, clap_plugin_descriptor},
-    process::{clap_process, clap_process_status, CLAP_PROCESS_CONTINUE},
+    process::{clap_process, clap_process_status, CLAP_PROCESS_CONTINUE, CLAP_PROCESS_ERROR},
     string_sizes::{CLAP_NAME_SIZE, CLAP_PATH_SIZE},
     version::CLAP_VERSION,
 };
@@ -100,6 +100,17 @@ struct Observed {
     /// The input port's channel count (`clap.audio-ports`); 0 = no input port, an instrument. With
     /// an input the plugin is an effect that echoes each input channel to its output.
     inputs: AtomicU32,
+    /// Two ports each way instead (`TWO_PORT_*`): a stereo main and a mono sidechain in, a stereo
+    /// main and a mono aux out. `process` echoes the main input, writes `AUX_MARKER` to the aux
+    /// output and records whether the sidechain carried anything.
+    two_ports: AtomicBool,
+    /// The port counts the last `process` call received, per direction.
+    seen_inputs: AtomicU32,
+    seen_outputs: AtomicU32,
+    /// A `process` call found a sample other than 0 on the sidechain.
+    sidechain_heard: AtomicBool,
+    /// `process` writes its outputs as usual, then returns `CLAP_PROCESS_ERROR`.
+    fail_process: AtomicBool,
     /// The last activation's sample rate (f64 bits) and max frame count.
     activated_rate: AtomicU64,
     activated_max_frames: AtomicU32,
@@ -279,6 +290,21 @@ unsafe extern "C" fn process(
                 push(out, &edit.header);
             }
         }
+        s.seen_inputs.store(p.audio_inputs_count, Relaxed);
+        s.seen_outputs.store(p.audio_outputs_count, Relaxed);
+        // Only past both counts: a host that passes fewer ports is recorded above, never read past.
+        if s.two_ports.load(Relaxed) && p.audio_inputs_count >= 2 && p.audio_outputs_count >= 2 {
+            let (sidechain, aux) = (&*p.audio_inputs.add(1), &*p.audio_outputs.add(1));
+            for c in 0..sidechain.channel_count as usize {
+                let samples = std::slice::from_raw_parts(*sidechain.data32.add(c), p.frames_count as usize);
+                if samples.iter().any(|&x| x != 0.0) {
+                    s.sidechain_heard.store(true, Relaxed);
+                }
+            }
+            for c in 0..aux.channel_count as usize {
+                std::slice::from_raw_parts_mut(*aux.data32.add(c), p.frames_count as usize).fill(AUX_MARKER);
+            }
+        }
         let level = f32::from_bits(s.output_level.load(Relaxed));
         if p.audio_inputs_count > 0 && p.audio_outputs_count > 0 {
             let (input, output) = (&*p.audio_inputs, &*p.audio_outputs);
@@ -297,7 +323,7 @@ unsafe extern "C" fn process(
         }
     }
     s.processes.fetch_add(1, Relaxed);
-    CLAP_PROCESS_CONTINUE
+    if s.fail_process.load(Relaxed) { CLAP_PROCESS_ERROR } else { CLAP_PROCESS_CONTINUE }
 }
 
 unsafe extern "C" fn reset(_: *const clap_plugin) {}
@@ -485,9 +511,18 @@ unsafe extern "C" fn latency(plugin: *const clap_plugin) -> u32 {
 
 static LATENCY: clap_plugin_latency = clap_plugin_latency { get: Some(latency) };
 
+/// The two-port layout's channel counts, per port (`Observed::two_ports`).
+const TWO_PORT_INPUTS: [u32; 2] = [2, 1];
+const TWO_PORT_OUTPUTS: [u32; 2] = [2, 1];
+/// What the two-port layout writes to its aux output.
+const AUX_MARKER: f32 = 0.25;
+
 unsafe extern "C" fn port_count(plugin: *const clap_plugin, is_input: bool) -> u32 {
-    if is_input {
-        (unsafe { state(plugin) }.inputs.load(Relaxed) > 0) as u32
+    let s = unsafe { state(plugin) };
+    if s.two_ports.load(Relaxed) {
+        2
+    } else if is_input {
+        (s.inputs.load(Relaxed) > 0) as u32
     } else {
         1
     }
@@ -499,17 +534,28 @@ unsafe extern "C" fn port_get(
     is_input: bool,
     info: *mut clap_audio_port_info,
 ) -> bool {
-    let inputs = unsafe { state(plugin) }.inputs.load(Relaxed);
-    if index != 0 || (is_input && inputs == 0) {
+    let s = unsafe { state(plugin) };
+    let inputs = s.inputs.load(Relaxed);
+    let channel_count = if s.two_ports.load(Relaxed) {
+        let layout = if is_input { TWO_PORT_INPUTS } else { TWO_PORT_OUTPUTS };
+        match layout.get(index as usize) {
+            Some(&channels) => channels,
+            None => return false,
+        }
+    } else if index != 0 || (is_input && inputs == 0) {
         return false;
-    }
+    } else if is_input {
+        inputs
+    } else {
+        2
+    };
     // SAFETY: the host passes a writable clap_audio_port_info; every field is written.
     unsafe {
         info.write(clap_audio_port_info {
-            id: is_input as u32,
+            id: 2 * index + is_input as u32,
             name: [0; CLAP_NAME_SIZE],
             flags: 0,
-            channel_count: if is_input { inputs } else { 2 },
+            channel_count,
             port_type: std::ptr::null(),
             in_place_pair: CLAP_INVALID_ID,
         });
@@ -884,6 +930,47 @@ mod engine {
         handle.unload().unwrap();
     }
 
+    #[test]
+    fn a_plugin_with_a_sidechain_and_an_aux_output_gets_every_port_and_the_slot_plays_its_main() {
+        let _one = engine_slot::one_engine_test_at_a_time();
+        let device = device(48_000);
+        let obs = Arc::new(Observed::default());
+        obs.two_ports.store(true, Relaxed);
+        let (handle, _) = load(&device, 0, &obs);
+        assert_eq!(handle.kind(), SlotKind::Effect, "a main input: an effect");
+        send(&device, Command::SetSlotLive(0, true));
+        assert!(
+            wait_for(2000, || obs.processes.load(Relaxed) > 8 && rendered_near(&device, 0.1)),
+            "live: the main input echoed; the aux output's marker never plays"
+        );
+        assert_eq!(
+            (obs.seen_inputs.load(Relaxed), obs.seen_outputs.load(Relaxed)),
+            (2, 2),
+            "every declared port, both directions"
+        );
+        assert!(!obs.sidechain_heard.load(Relaxed), "the sidechain is silent");
+        handle.unload().unwrap();
+        assert!(!obs.contract_violation.load(Relaxed));
+    }
+
+    #[test]
+    fn a_failed_process_call_plays_nothing_in_the_engine() {
+        let _one = engine_slot::one_engine_test_at_a_time();
+        let device = device(48_000);
+        let obs = Arc::new(Observed::default());
+        obs.output_level.store(0.25f32.to_bits(), Relaxed);
+        obs.fail_process.store(true, Relaxed);
+        let (handle, _) = load(&device, 0, &obs);
+        assert!(wait_for(2000, || obs.processes.load(Relaxed) > 8));
+        assert!(
+            wait_for(2000, || rendered_near(&device, 0.0)),
+            "the output of a failed call is discarded, though the plugin wrote it"
+        );
+        obs.fail_process.store(false, Relaxed);
+        assert!(wait_for(2000, || rendered_above(&device, 0.2)), "the same output plays once the calls succeed");
+        handle.unload().unwrap();
+    }
+
     fn identity() -> ToneIdentity {
         ToneIdentity { format: "clap".into(), path: r"C:\fixture.clap".into(), id: "bleeploop.restart-fixture".into() }
     }
@@ -1124,7 +1211,7 @@ fn a_unit_slices_a_long_call_places_each_event_and_allocates_nothing() {
     let stopped = instance.activate(|_, _| (), config).unwrap();
     let (mut params, ring) = RingBuffer::<PluginEvent>::new(8);
     let faults = Arc::new(AtomicU32::new(0));
-    let terms = Terms { rate: 48_000, max_frames: 64, in_channels: 0, out_channels: 2, latency: 0 };
+    let terms = Terms { rate: 48_000, max_frames: 64, inputs: vec![], outputs: vec![2], latency: 0 };
     let unit = ClapUnit::new(stopped, &terms, ring, faults.clone(), Arc::new(AtomicBool::new(false)));
     let (mut unit, runs) = std::thread::spawn(move || {
         let mut unit = unit;
@@ -1157,6 +1244,87 @@ fn a_unit_slices_a_long_call_places_each_event_and_allocates_nothing() {
     );
     assert_eq!(s.param_values.load(Relaxed), 1, "the ring's param once, in the first slice");
     assert_eq!(faults.load(Relaxed), 0);
+    instance.deactivate(unit.take_stopped().unwrap());
+    assert!(!s.contract_violation.load(Relaxed));
+}
+
+/// The fixture as a unit on its own at 48 kHz and 64 max frames, its ports read by the production
+/// query (`query_ports`), as a load reads them.
+fn bare_unit(instance: &mut PluginInstance<LfHost>, faults: &Arc<AtomicU32>) -> Box<super::clap_engine::ClapUnit> {
+    use super::clap_engine::{ClapUnit, Terms};
+    let (inputs, outputs) = (query_ports(instance, true).unwrap(), query_ports(instance, false).unwrap());
+    let config = PluginAudioConfiguration { sample_rate: 48_000.0, min_frames_count: 1, max_frames_count: 64 };
+    let stopped = instance.activate(|_, _| (), config).unwrap();
+    let terms = Terms { rate: 48_000, max_frames: 64, inputs, outputs, latency: 0 };
+    // No params in these tests: the ring's producer is dropped at once.
+    let (_, ring) = RingBuffer::<PluginEvent>::new(8);
+    ClapUnit::new(stopped, &terms, ring, faults.clone(), Arc::new(AtomicBool::new(false)))
+}
+
+/// A plugin with a sidechain input and an aux output gets every port it declares: the sidechain
+/// silent, the main input echoed to the slot, the aux output never played, and nothing allocates, on
+/// the first call (which starts processing) or on one sliced past the max frame count.
+#[cfg(debug_assertions)]
+#[test]
+fn a_unit_passes_every_declared_port_and_plays_only_the_main_output() {
+    use lf_engine::SlotProcessor;
+
+    let mut instance = fixture_instance();
+    let s = unsafe { state(instance.raw_instance() as *const clap_plugin) };
+    s.two_ports.store(true, Relaxed);
+    let faults = Arc::new(AtomicU32::new(0));
+    let unit = bare_unit(&mut instance, &faults);
+    let mut unit = std::thread::spawn(move || {
+        let mut unit = unit;
+        let input: [f32; 200] = std::array::from_fn(|i| (i + 1) as f32 / 1000.0);
+        let mut out = [1.0f32; 200];
+        let first = super::engine_slot::rt_allocations(|| unit.process(0, &input[..64], &[], &mut out[..64]));
+        assert_eq!(first, 0, "the first call allocates nothing");
+        assert_eq!(out[..64], input[..64], "the main input echoed; the aux marker never plays");
+        let sliced = super::engine_slot::rt_allocations(|| unit.process(64, &input, &[], &mut out));
+        assert_eq!(sliced, 0, "a sliced call allocates nothing");
+        assert_eq!(out, input, "across every slice");
+        unit.stop();
+        unit
+    })
+    .join()
+    .unwrap();
+    assert_eq!((s.seen_inputs.load(Relaxed), s.seen_outputs.load(Relaxed)), (2, 2), "every declared port, both directions");
+    assert!(!s.sidechain_heard.load(Relaxed), "the sidechain is silent");
+    assert_eq!(faults.load(Relaxed), 0);
+    instance.deactivate(unit.take_stopped().unwrap());
+    assert!(!s.contract_violation.load(Relaxed));
+}
+
+/// CLAP discards the output of a process call that returns an error: the unit plays nothing from
+/// that slice, though the plugin wrote it, and latches the fault.
+#[test]
+fn a_failed_process_call_plays_silence_and_latches_the_fault() {
+    use super::engine_slot::FAULT_PROCESS;
+    use lf_engine::SlotProcessor;
+
+    let mut instance = fixture_instance();
+    let s = unsafe { state(instance.raw_instance() as *const clap_plugin) };
+    s.output_level.store(0.5f32.to_bits(), Relaxed);
+    s.fail_process.store(true, Relaxed);
+    let faults = Arc::new(AtomicU32::new(0));
+    let unit = bare_unit(&mut instance, &faults);
+    let obs = s.obs.clone();
+    let mut unit = std::thread::spawn(move || {
+        let mut unit = unit;
+        let (input, mut out) = ([0.0f32; 64], [1.0f32; 64]);
+        unit.process(0, &input, &[], &mut out);
+        assert!(out.iter().all(|&x| x == 0.0), "the failed call's output is discarded");
+        obs.fail_process.store(false, Relaxed);
+        unit.process(64, &input, &[], &mut out);
+        assert!(out.iter().all(|&x| x == 0.5), "the next call that succeeds plays");
+        unit.stop();
+        unit
+    })
+    .join()
+    .unwrap();
+    assert_eq!(s.processes.load(Relaxed), 2);
+    assert_eq!(faults.load(Relaxed), FAULT_PROCESS, "the failure latched");
     instance.deactivate(unit.take_stopped().unwrap());
     assert!(!s.contract_violation.load(Relaxed));
 }

@@ -741,39 +741,36 @@ fn checked_plugin_count(
     }
 }
 
-/// Output channel count of port 0 (host-side `audio-ports` ext). Defaults to stereo if absent.
-fn query_out_channels(instance: &mut PluginInstance<LfHost>) -> Result<u32, String> {
-    let mut handle = instance.plugin_handle();
-    let count = match handle.get_extension::<PluginAudioPorts>() {
-        Some(ports) => {
-            let mut buf = AudioPortInfoBuffer::new();
-            match ports.get(&mut handle, 0, false, &mut buf) {
-                Some(info) => info.channel_count,
-                None => 2,
-            }
-        }
-        None => 2,
-    };
-    checked_plugin_channels(count as i64, "CLAP output port 0", false)
-}
+/// Ports per direction in a CLAP audio-port layout (each port's channels: [`MAX_PLUGIN_CHANNELS`]). A
+/// layout past either fails the load; it is never trimmed, as the process call must carry every
+/// declared port.
+const MAX_CLAP_PORTS: i64 = 8;
 
-/// P11.1: input channel count of port 0 (host-side `audio-ports` ext, `is_input=true`). Defaults
-/// to **0** (NOT stereo like the output) when there is no input bus — a synth must report 0 so the
-/// unit keeps `InputAudioBuffers::empty()`. Never `.max(1)`:
-/// 0 must stay 0 (same "don't assume, query" discipline as the Surge hash-param crash).
-fn query_in_channels(instance: &mut PluginInstance<LfHost>) -> Result<u32, String> {
+/// The plugin's audio ports in one direction (host-side `audio-ports` ext, `count()` then each
+/// `get(i)`), in port order as channel counts: the process call passes exactly these (CLAP
+/// `process.h`: its port counts equal `count()`, index for index). Without the extension: no input
+/// and one stereo output. An input port may have no channels (P11.1: a synth reports none and stays
+/// an instrument); an output port may not, and a plugin needs at least one.
+fn query_ports(instance: &mut PluginInstance<LfHost>, is_input: bool) -> Result<Vec<u32>, String> {
+    let direction = if is_input { "input" } else { "output" };
     let mut handle = instance.plugin_handle();
-    let count = match handle.get_extension::<PluginAudioPorts>() {
-        Some(ports) => {
-            let mut buf = AudioPortInfoBuffer::new();
-            match ports.get(&mut handle, 0, true, &mut buf) {
-                Some(info) => info.channel_count,
-                None => 0,
-            }
-        }
-        None => 0,
+    let Some(ports) = handle.get_extension::<PluginAudioPorts>() else {
+        return Ok(if is_input { Vec::new() } else { vec![2] });
     };
-    checked_plugin_channels(count as i64, "CLAP input port 0", true)
+    let minimum = if is_input { 0 } else { 1 };
+    let source = format!("CLAP audio-ports ({direction})");
+    let count = checked_plugin_count(ports.count(&mut handle, is_input) as i64, &source, "port", minimum, MAX_CLAP_PORTS)?;
+    let mut buf = AudioPortInfoBuffer::new();
+    (0..count as u32)
+        .map(|i| {
+            let channels = ports
+                .get(&mut handle, i, is_input, &mut buf)
+                .ok_or_else(|| format!("CLAP {direction} port {i} reports no info"))?
+                .channel_count;
+            let port = format!("CLAP {direction} port {i}");
+            checked_plugin_count(channels as i64, &port, "channel", minimum, MAX_PLUGIN_CHANNELS).map(|c| c as u32)
+        })
+        .collect()
 }
 
 fn sum_to_mono(out_bufs: &[Vec<f32>], mono: &mut [f32], block: usize, chans: usize) {

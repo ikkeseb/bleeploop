@@ -79,7 +79,7 @@ pub(super) const FAULT_PARAM: u32 = 1 << 2;
 
 const FAULT_MESSAGES: [(u32, &str); 3] = [
     (FAULT_START, "the plugin refused to start processing; the slot is silent until it is reinstalled"),
-    (FAULT_PROCESS, "a process call failed; that block's output may be incomplete"),
+    (FAULT_PROCESS, "a process call failed; that slice's output was discarded"),
     (FAULT_PARAM, "a parameter id the plugin cannot take was dropped"),
 ];
 
