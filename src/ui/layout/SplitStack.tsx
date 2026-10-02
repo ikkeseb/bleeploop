@@ -1,4 +1,4 @@
-import { For, Show, type JSX, createSignal } from 'solid-js';
+import { For, Show, type JSX, createSignal, onCleanup } from 'solid-js';
 import './splitstack.css';
 
 /**
@@ -88,6 +88,16 @@ export function SplitStack(props: {
         minB: number;
       } = null;
   let activePointerId: number | null = null;
+  // The divider holding pointer capture. If it unmounts mid-drag (the keyboard hidden or moved, so the
+  // panel list changes), its pointerup/pointercancel never arrive; its cleanup resets the drag instead,
+  // or the stale state blocks every later beginDrag and resizes on a buttonless hover.
+  let captureEl: HTMLElement | null = null;
+  const resetDrag = () => {
+    activePointerId = null;
+    captureEl = null;
+    cap = null;
+    setDragging(-1);
+  };
 
   const axisSize = (rect: DOMRect) => (vertical() ? rect.height : rect.width);
   const axisPos = (e: PointerEvent, rect: DOMRect) =>
@@ -154,7 +164,8 @@ export function SplitStack(props: {
       minA,
       minB,
     };
-    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    captureEl = e.currentTarget as HTMLElement;
+    captureEl.setPointerCapture(e.pointerId);
     activePointerId = e.pointerId;
     cap = nextCap;
     setDragging(k);
@@ -180,9 +191,7 @@ export function SplitStack(props: {
     if (e.pointerId !== activePointerId) return;
     const el = e.currentTarget as HTMLElement;
     if (el.hasPointerCapture(e.pointerId)) el.releasePointerCapture(e.pointerId);
-    activePointerId = null;
-    setDragging(-1);
-    cap = null;
+    resetDrag();
   };
 
   // Per-pane weight floor (in fr) for the pair at divider k, honoring BOTH the px min (minPx) and the
@@ -274,6 +283,7 @@ export function SplitStack(props: {
                 fallback={<div class="splitstack__gap" aria-hidden="true" />}
               >
               <div
+                ref={(el) => onCleanup(() => captureEl === el && resetDrag())}
                 class="splitstack__divider"
                 role="separator"
                 aria-orientation={vertical() ? 'horizontal' : 'vertical'}
