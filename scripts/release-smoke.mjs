@@ -440,9 +440,10 @@ try {
     await inputSel.waitFor({ state: 'visible', timeout: 10_000 });
     await inputSel.selectOption(String(opts.channel));
     const input = await inputSel.locator('option:checked').textContent();
-    const goLive = page.locator('button[aria-label="Go live for slot 1"]');
-    if ((await goLive.count()) === 1) await goLive.click();
-    await page.locator('button[aria-label="Stop live input for slot 1"][aria-pressed="true"]').waitFor({ timeout: 10_000 });
+    // GO LIVE keeps one name; aria-pressed carries its state.
+    const goLive = page.locator('button[aria-label="Live input for slot 1"]');
+    if ((await goLive.getAttribute('aria-pressed')) !== 'true') await goLive.click();
+    await page.locator('button[aria-label="Live input for slot 1"][aria-pressed="true"]').waitFor({ timeout: 10_000 });
     await sleep(3000); // the idle window: LEDs and the meter before any take
     const idle = await readSampler();
 
@@ -450,7 +451,7 @@ try {
     await page.locator('.lp-lane').nth(0).locator('.lp-core').click();
     await page.waitForFunction(() => document.querySelectorAll('.lp-lane')[0]?.getAttribute('data-state') === 'play', undefined, { timeout: 20_000 });
     const recMs = Date.now() - tRec;
-    await page.locator('button[aria-label="Stop live input for slot 1"]').click(); // input off: the loop plays on
+    await goLive.click(); // input off: the loop plays on
     await sleep(600);
     const inkA = await laneInk(0);
     await sleep(400);
