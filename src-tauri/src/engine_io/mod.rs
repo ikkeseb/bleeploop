@@ -767,9 +767,9 @@ impl EngineHost {
         self.core.device_events.lock().map(|mut events| std::mem::take(&mut *events)).unwrap_or_default()
     }
 
-    /// Queue a command for the engine. A setting is also kept and replayed into every new engine
-    /// (`settings`), so one sent before the first open is not lost. Err when the ring is full
-    /// (counted), or for an action while no engine exists yet.
+    /// Queue a command for the engine. A setting the ring takes is also kept and replayed into every new
+    /// engine (`settings`), as is one sent before the first open, so it is not lost. Err when the ring is
+    /// full (counted; the setting is not kept), or for an action while no engine exists yet.
     pub fn send(&self, command: TimedCommand) -> Result<(), String> {
         self.send_all([command])
     }
@@ -783,13 +783,17 @@ impl EngineHost {
         let mut ends = self.core.ends.lock().map_err(|_| "engine ends poisoned".to_string())?;
         let mut refused = false;
         for command in commands {
-            let setting = settings.record(&command.command);
             match ends.as_mut() {
-                Some(ends) => ends.commands.push(command).map_err(|_| {
-                    self.core.counters.commands_full.fetch_add(1, Relaxed);
-                    "the engine's command ring is full".to_string()
-                })?,
-                None => refused |= !setting && !matches!(command.command, Command::NoteOff(_) | Command::AllNotesOff | Command::Press),
+                Some(ends) => {
+                    // Kept once the ring took it: a setting the engine never got must not reach a rebuild
+                    // or an export either.
+                    ends.commands.push(command).map_err(|_| {
+                        self.core.counters.commands_full.fetch_add(1, Relaxed);
+                        "the engine's command ring is full".to_string()
+                    })?;
+                    settings.record(&command.command);
+                }
+                None => refused |= !settings.record(&command.command) && !matches!(command.command, Command::NoteOff(_) | Command::AllNotesOff | Command::Press),
             }
         }
         if refused { Err("no audio device is open".to_string()) } else { Ok(()) }

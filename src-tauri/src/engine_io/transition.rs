@@ -85,18 +85,23 @@ pub(crate) fn same_device(running: &DeviceRequest, next: &DeviceRequest, drivers
 
 /// Where a lost device falls back to, tried in order: ASIO rebuilds from the cache once, then falls back
 /// to the WASAPI defaults; a lost WASAPI endpoint falls back to the default endpoint (the side that kept
-/// playing keeps its pick). A fallback equal to `lost` is a recovery.
+/// playing keeps its pick), then both sides to the defaults (a yanked interface takes both endpoints,
+/// and one side's error callback may not have fired yet). A fallback equal to `lost` is a recovery.
 pub(crate) fn fallbacks(lost: &DeviceRequest, input_lost: bool, output_lost: bool) -> Vec<DeviceRequest> {
     match lost.backend {
         AudioBackend::Asio => vec![
             lost.clone(),
             DeviceRequest { backend: AudioBackend::Wasapi, input: None, output: None, buffer: None, ..lost.clone() },
         ],
-        AudioBackend::Wasapi => vec![DeviceRequest {
-            input: if input_lost { None } else { lost.input.clone() },
-            output: if output_lost { None } else { lost.output.clone() },
-            ..lost.clone()
-        }],
+        AudioBackend::Wasapi => {
+            let kept = DeviceRequest {
+                input: if input_lost { None } else { lost.input.clone() },
+                output: if output_lost { None } else { lost.output.clone() },
+                ..lost.clone()
+            };
+            let defaults = DeviceRequest { input: None, output: None, ..lost.clone() };
+            if kept == defaults { vec![kept] } else { vec![kept, defaults] }
+        }
     }
 }
 
@@ -223,8 +228,9 @@ mod tests {
         assert_eq!(tried.len(), 2);
 
         let lost = wasapi(Some("in"), Some("out"));
-        assert_eq!(fallbacks(&lost, false, true), vec![wasapi(Some("in"), None)], "the lost output goes to the default");
-        assert_eq!(fallbacks(&lost, true, false), vec![wasapi(None, Some("out"))], "the lost input goes to the default");
+        assert_eq!(fallbacks(&lost, false, true), vec![wasapi(Some("in"), None), wasapi(None, None)], "the lost output goes to the default, then both");
+        assert_eq!(fallbacks(&lost, true, false), vec![wasapi(None, Some("out")), wasapi(None, None)], "the lost input goes to the default, then both");
+        assert_eq!(fallbacks(&lost, true, true), vec![wasapi(None, None)], "both lost: the defaults, once");
         assert_eq!(fallbacks(&wasapi(None, None), true, true), vec![wasapi(None, None)], "the default is tried again");
     }
 

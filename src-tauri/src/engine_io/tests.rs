@@ -541,6 +541,22 @@ fn a_lost_wasapi_endpoint_falls_back_to_the_default_endpoint() {
 }
 
 #[test]
+fn a_yanked_wasapi_interface_falls_back_to_both_defaults_when_only_one_side_reported() {
+    let h = Harness::new();
+    h.fake.wasapi.lock().unwrap().push(("usb".into(), FakeDevice::new("USB interface", 48_000, 480)));
+    h.open(wasapi(Some("usb"), Some("usb")));
+    h.play(RATE / 10);
+    // Both endpoints are gone, but only the input's error callback has fired.
+    h.fake.wasapi.lock().unwrap().retain(|(id, _)| id != "usb");
+    h.fake.fatal.store(Side::Input as u8, SeqCst);
+    let events = h.device_events(2);
+    match events.get(1) {
+        Some(DeviceEvent::Fallback(status)) => assert_eq!((status.input_name.as_str(), status.output_name.as_str()), ("Fake WASAPI", "Fake WASAPI")),
+        other => panic!("expected a fallback, got {other:?}: {events:?}"),
+    }
+}
+
+#[test]
 fn a_new_rate_hands_the_units_to_their_owners_and_the_new_engine_takes_them_back() {
     let h = Harness::new();
     h.open(asio(Some(256)));
@@ -1237,6 +1253,23 @@ fn the_input_sends_are_kept_before_the_first_open_and_replayed_into_a_new_engine
     assert!(heard(&h).iter().all(|s| (s - 1.0).abs() < 1e-3), "a new engine gets the sends back");
     h.send(Command::SetInputSend(InputSend::Echo, false));
     assert!(heard(&h).iter().all(|s| (s - 0.5).abs() < 1e-3), "off, the dry input alone");
+}
+
+#[test]
+fn a_setting_the_full_command_ring_refuses_is_not_kept() {
+    let h = Harness::new();
+    h.open(asio(Some(256)));
+    h.send(Command::SetMasterMute(false));
+    h.host.close().expect("the device closes");
+    // No device runs, so nothing drains the ring: fill it with actions.
+    let mut sent = 0;
+    while h.host.send(TimedCommand { frame: None, command: Command::AllNotesOff }).is_ok() {
+        sent += 1;
+        assert!(sent < 1 << 20, "the ring fills");
+    }
+    assert!(h.host.send(TimedCommand { frame: None, command: Command::SetMasterMute(true) }).is_err(), "the full ring refuses it");
+    let kept = h.host.settings();
+    assert!(kept.contains(&Command::SetMasterMute(false)) && !kept.contains(&Command::SetMasterMute(true)), "the engine never got the mute, so a rebuild or an export must not either: {kept:?}");
 }
 
 /// Tick `feed` until it sends a frame `want` accepts; every frame sent meanwhile goes to `seen`.

@@ -101,13 +101,12 @@ impl SlotHost {
     /// `Ok(None)` when the slot holds none; `Err` when it does not come back within `timeout` (the
     /// unit stays the engine's, and a later `remove` or `take_evicted` can still recover it).
     pub fn remove(&self, timeout: Duration) -> Result<Option<Box<dyn SlotProcessor>>, String> {
-        if let Some(unit) = self.take_evicted() {
-            return Ok(Some(unit));
-        }
         {
             let mut port = self.core.ports[self.slot].lock().map_err(|_| "slot port poisoned".to_string())?;
             if self.core.holder[self.slot].load(Acquire) != self.token {
-                return Ok(None);
+                // Looked at under the port lock: a rebuild parks a unit with every port held, so an
+                // eviction is either done here or not begun.
+                return Ok(self.take_evicted());
             }
             let port = port.as_mut().ok_or_else(|| "no engine holds this slot".to_string())?;
             if !port.remove() {
@@ -258,6 +257,44 @@ mod tests {
         let back = back.into_any().downcast::<Constant>().expect("the host's own type");
         assert_eq!(back.level, 0.25);
         assert!(slot.remove(Duration::from_millis(10)).unwrap().is_none(), "nothing left in the slot");
+    }
+
+    #[test]
+    fn a_removal_that_races_a_rebuild_takes_its_unit_from_the_eviction_mailbox() {
+        let device = TestDevice::start(48_000, 256, Duration::from_millis(1), |_| 0.0);
+        let core = &device.host().core;
+        let slot = device.host().slot(0);
+        let stops = Arc::new(AtomicUsize::new(0));
+        let unit = Box::new(Constant { level: 0.5, calls: Arc::new(AtomicUsize::new(0)), stops: stops.clone() });
+        assert!(slot.install(unit, 48_000).is_ok());
+        assert!(device.wait_blocks(20, Duration::from_secs(5)));
+        let removed = std::thread::scope(|s| {
+            // Port 1 held: the rebuild takes port 0 and waits for port 1, so a removal that has already
+            // looked in the empty mailbox waits on port 0 until the rebuild has parked its unit.
+            let held = core.ports[1].lock().unwrap();
+            let rebuild = s.spawn(|| device.rebuild_at(44_100, 512));
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while core.ports[0].try_lock().is_ok() {
+                assert!(std::time::Instant::now() < deadline, "the rebuild takes port 0");
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            let removal = s.spawn(|| slot.remove(Duration::from_secs(2)));
+            std::thread::sleep(Duration::from_millis(100));
+            drop(held);
+            rebuild.join().unwrap();
+            removal.join().unwrap()
+        });
+        let back = removed.expect("the removal answers").expect("the removal gets the unit the rebuild evicted");
+        assert_eq!(back.into_any().downcast::<Constant>().expect("the host's own type").level, 0.5);
+        assert_eq!(stops.load(SeqCst), 1, "stopped once, as it was evicted");
+        assert!(core.evicted[0].lock().unwrap().is_none(), "no unit left parked");
+
+        // The slot works on: the next unit installs, and the next rebuild hands it back.
+        let unit = Box::new(Constant { level: 0.25, calls: Arc::new(AtomicUsize::new(0)), stops: stops.clone() });
+        assert!(slot.install(unit, 44_100).is_ok());
+        device.rebuild_at(48_000, 512);
+        let back = slot.take_evicted().expect("the next eviction reaches its owner");
+        assert_eq!(back.into_any().downcast::<Constant>().unwrap().level, 0.25);
     }
 
     #[test]

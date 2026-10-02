@@ -1,6 +1,7 @@
-//! OWNS: the last value of every setting command the UI sent, replayed into each new engine (the first,
-//! one at another sample rate, one that replaced a faulted engine), so the UI's settings survive a
-//! rebuild and a setting sent before the first open is kept.
+//! OWNS: the last value of every setting command the engine took (or the UI sent before the first open),
+//! replayed into each new engine (the first, one at another sample rate, one that replaced a faulted
+//! engine), so the UI's settings survive a rebuild and a setting sent before the first open is kept. A
+//! setting the full command ring refused is not kept (`EngineHost::send`).
 //!
 //! A setting is a command that sets a value (the tempo, the click, the master, the input sends, the
 //! looper's modes and FADE's length, a lane's volume, mute, DUB FEEDBACK and FX, the note target, the
