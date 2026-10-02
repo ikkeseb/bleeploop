@@ -149,9 +149,17 @@ blocks until the verdict, so an agent harness should run it in the background.
     on either input): 20/20 bars at 64 and 256; at 128, in two launches, B and D (re-recorded, peak
     gain 0.106) each read one beat 147–250 ms early, near its window's start (once take A too), which
     fails spread and drift while every other beat sits within 0.005 ms. v0.1.0's code on the same rig
-    reads the same in B and D, so it predates the change (cause unknown). On the engine-only app
-    (2026-09-29, the same rig): the same B and D reading at 128; one launch at 64 read 149× the floor
-    bar past the fade's bar line in I, its relaunch 0.302 (cause unknown).
+    reads the same in B and D, so it predates the change. On the engine-only app (2026-09-29, the same
+    rig): the same B and D reading at 128; one launch at 64 read 149× the floor bar past the fade's bar
+    line in I, its relaunch 0.302. Cause of the B and D reading (2026-10-02, 48 kHz, five launches,
+    every stray logged): sound that is not the click reaches the cable, about 200 Hz decaying over
+    ~1.4 s and a ~400 Hz tone repeating every 6.000 s, mostly in the first take after a device switch
+    (B and D replay A's lane), and the onset (the first 30 % crossing anywhere before the window's
+    peak) takes it for the click. Its source is unknown: other apps playing through the interface (its
+    driver mixes their audio into the same line outs; Signal Desktop and Focusrite Notifier run on this
+    PC) are the suspect. The I reading is likely the same (not re-observed). At 256 every bar passed; at
+    64 and 128 every bar but those the sound moved (spread, drift, once the accent), |A| at most
+    0.125 ms. Silence other apps' sound on the interface before a loopback run.
   - `native:smoke` after any change to `editor_window.rs` or either host's editor open/close path.
     Baseline (2026-09-23, WASAPI, the app mostly on the default ~15 ms timer tick): `complete: 30
     opened, 0 failed, of 30`, each close 110–250 ms. Windows grants the app a 1 ms tick only some of

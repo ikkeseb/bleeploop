@@ -11,13 +11,20 @@ Last rig pass, 2026-09-29 (the engine-only app): `native:smoke`, `survey`, `swap
 20/20 at 64 and 256, 18/20 at 128 (a detector reading v0.1.0 repeats). Since then (2026-10-01):
 `native:export-master` (WASAPI) for the export's engine-rendered master; the sample-rate pick on
 ASIO, `native:engine-smoke` at 48 and 44.1 kHz and `native:engine` after the switches. 2026-10-02, the
-cable in: `native:engine-loopback --rate=48000`, five launches, |A| at most 0.125 ms and every relative
-bar within 0.001 ms at 64, 128 and 256; 256 green; at 64 and 128 spread and drift failed on sound that
-is not the click (the early-beat reading of 09-28; explained, with a detector that names it, on branch
-agent/loopback-detector, which owes one green run before it lands). Owed on the rig before branch
-agent/host lands: `native:smoke`, `native:swap` (filtered), `native:recall`, `native:tone-recall`;
-before agent/capture: `native:engine-loopback`, `native:engine`. Driver latency reports are not guitar
-latency; after a relevant change, rerun only the affected check.
+loopback cable in: `native:engine-loopback --rate=48000`, five launches; the alignment holds at 64, 128
+and 256 (|A| at most 0.125 ms, every relative bar within 0.001 ms), and spread and drift fail at 64 and
+128 on sound that is not the click (`docs/VERIFY.md`, the loopback baseline). Driver latency reports are
+not guitar latency; after a relevant change, rerun only the affected check.
+
+**Owed on the rig before three pushed branches land** (an agent's rig run was refused by the harness's
+auto mode, so these wait for the PC):
+
+- agent/loopback-detector (the onset by the click's peak, stray sound fails by name):
+  `native:engine-loopback --rate=48000`.
+- agent/host (four plugin-host fixes): `native:smoke`, `native:swap` (filtered), `native:recall`,
+  `native:tone-recall`.
+- agent/capture (input gaps reject the take): `native:engine-loopback`, `native:engine`; a take wrongly
+  rejected on real hardware fails the first.
 
 **Last play: 2026-09-28** (engine, a local release build, ASIO; a second player on a WASAPI build
 of their own): worked well overall, no issue found; the WASAPI player heard delay on DI monitoring
@@ -91,5 +98,5 @@ nothing is said.
 |---|---|---|
 | D19 | A DUB pressed while a playing lane's UNDO, REVERSE or TRIM swap waits for its loop boundary makes the swap heard at once, mid-loop. Hold the DUB to the boundary (a held looper command also holds a STOP or punch-out behind it for up to a loop), keep it and write the exception into the engine briefing, or refuse the DUB with a reason (a wire change)? Red tests, ignored: `tests/overdub_undo_reverse.rs`, `tests/trim.rs`. | Keep it, as an exception. |
 | D20 | A plugin call that outputs NaN or an infinity is silenced. Should it also damage the running take or layer, as an input gap does (the layer is dropped)? Today a bad stretch leaves silence in it; with DUB FEEDBACK 0 that replaces the loop there. | No. |
-| D21 | Make the engine's applied state the one authority: the feed carries it whole, the snapshot and the load carry each lane's mix with its PCM, and the settings mirror and the UI's mix copies go (two reviews found the races the copies cause: COPY or CLEAR followed by a setting, a dropped event left unrepaired, an import heard at the old mix, an export whose master and session.json disagree). L each, wire changes, the fader's feel to re-check. All six reproduce (ignored red tests `d21_*` in `src-tauri/src/engine_io/tests.rs`; run with `-- --ignored`). The one a player meets often: an import or recovery plays a lane saved muted or quieter for ~90 ms at full level. Sending the mix before the load fixes that alone but lets a recovery that loses the race to a live take rewrite that take's mix (`recovery-import-failure`), so its fix is a load that carries its mix. A timed-out load that later plays, and a rate switch dropping a load, are a separate protocol question. | Not started. |
+| D21 | Make the engine's applied state the one authority: the feed carries it whole, the snapshot and the load carry each lane's mix with its PCM, and the settings mirror and the UI's mix copies go. L, wire changes, the fader's feel to re-check. The races it closes reproduce as ignored red tests (`d21_*` in `src-tauri/src/engine_io/tests.rs`, run with `-- --ignored`); the one a player meets: an import or recovery plays a lane saved muted or quieter for ~90 ms at full level. Sending the mix before the load alone lets a recovery that loses the race to a live take rewrite that take's mix (`recovery-import-failure`). A timed-out load that later plays and a rate switch that drops a load are a separate protocol question. | Not started. |
 | D22 | Remove the native MIDI stack (`src-tauri/src/engine_io/midi/`, about 1.8k lines with tests, and `midir`)? It is built and tested but never started; MIDI arrives through Web MIDI. | Keep it. |
