@@ -773,7 +773,7 @@ fn apply(looper: &mut Looper, cx: &mut Cx, at: &mut Apply, command: Command) -> 
             Applied::Done
         }
         Command::SetSlotLive(i, on) => {
-            at.rack.set_live(i as usize, on);
+            at.rack.set_live(i as usize, on, now);
             Applied::Done
         }
         Command::SetSlotGain(i, gain) => {

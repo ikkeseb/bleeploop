@@ -96,7 +96,8 @@ pub enum Command {
     AllNotesOff,
     /// GO LIVE: the slot's own input (its capture channel, picked on the device side) feeds the slot (an
     /// empty slot, or one holding an effect, passes it on as the wet signal; an instrument plugin takes
-    /// no input). Off, the slot gets silence. Both slots may be live at once.
+    /// no input). Off, the slot gets silence. A toggle ramps the slot's input over 5 ms from its frame
+    /// (STATUS D23); the effect's own output is never gated. Both slots may be live at once.
     SetSlotLive(u8, bool),
     /// The slot's output level (linear, 0..): the per-plugin gain staging (`plugin-bridge.ts`), on both
     /// what is heard and what is recorded; an empty live slot's is its input's level.
