@@ -39,7 +39,8 @@ list from § Not heard yet: at most five, and the docs guard counts them.
 
 1. **The amp-sim live, and takes on the click.** GO LIVE (VST3, Petrucci): does the guitar through the
    amp feel immediate? The first take, an overdub and FIXED 4 keep their attacks and endings on the
-   click; the master fader scales the wet, not the recorded level.
+   click; the master fader scales the wet, not the recorded level. Press GO LIVE once mid-note, and
+   punch a DUB in and out over a held note: does either click (D23)?
 2. **A MIDI footswitch, if one is plugged.** Learn REC/DUB onto it (Audio Settings → MIDI learn, one
    tap) and take the jam's records with the foot: one press, one action? Still learned after a
    restart? Then switch it to HOLD and hold it through one overdub.
@@ -58,7 +59,7 @@ Built, and proven by machine where a probe reaches, but never played. A line lea
 it.
 
 - Buffer 256 and 64: the take on the click at each size, a short switch gap, and a plugin loaded while
-  loops play crossfades in without a click.
+  loops play crossfades in without a click (machine: `tests/slots.rs`).
 - The count-in (1 bar, accent on 1, no dead air; the tempo locks mid-count-in); FIXED 2 stops on the
   downbeat after exactly 2 bars (an over-long FIXED pick records the largest whole-bar fit in 60 s); a
   free record stopped near the downbeat after N bars keeps N, an early or a mid-bar stop behaves, and a
@@ -101,5 +102,5 @@ nothing is said.
 | D20 | A plugin call that outputs NaN or an infinity is silenced. Should it also damage the running take or layer, as an input gap does (the layer is dropped)? Today a bad stretch leaves silence in it; with DUB FEEDBACK 0 that replaces the loop there. | No. |
 | D21 | Make the engine's applied state the one authority: the feed carries it whole, the snapshot and the load carry each lane's mix with its PCM, and the settings mirror and the UI's mix copies go. L, wire changes, the fader's feel to re-check. The races it closes reproduce as ignored red tests (`d21_*` in `src-tauri/src/engine_io/tests.rs`, run with `-- --ignored`); the one a player meets: an import or recovery plays a lane saved muted or quieter for ~90 ms at full level. Sending the mix before the load alone lets a recovery that loses the race to a live take rewrite that take's mix (`recovery-import-failure`). A timed-out load that later plays and a rate switch that drops a load are a separate protocol question. | Not started. |
 | D22 | Remove the native MIDI stack (`src-tauri/src/engine_io/midi/`, about 1.8k lines with tests, and `midir`)? It is built and tested but never started; MIDI arrives through Web MIDI. | Keep it. |
-| D23 | An overdub's punch-in and punch-out, an UNDO swap, and a lane's PLAY or STOP mid-loop cut hard: no ramp exists outside FADE, and a sustained note steps there 11 to 15 times its own slope (ignored red tests, `tests/seam_continuity.rs`). A design: a 5 ms linear ramp written at punch-in (DUB FEEDBACK ramps from 1 too), the last 5 ms tapered at punch-out from the samples the dub overwrote (no tail after the press), an UNDO/REDO swap crossfaded from a cached copy of the outgoing loop, and a lane's start and stop ramped the same 5 ms (not yet designed). It changes recorded audio at the edges (a gesture shorter than the ramps is softened) and the exact sums in about eight test files. Build it, and with what ramp? | Build it as designed, 5 ms linear, on a branch for the ear. |
+| D23 | The engine has no ramp at most of its edges, and a sustained note steps there 11 to 32 times its own slope (ignored red tests, `tests/seam_continuity.rs`, `tests/slots.rs`): an overdub's punch-in and punch-out, an UNDO swap, a lane's PLAY or STOP mid-loop, and GO LIVE on or off (the plugin's input, or an empty slot's dry signal, jumps in one frame; a plugin's load and removal do crossfade). A design for the looper's: a 5 ms linear ramp written at punch-in (DUB FEEDBACK ramps from 1 too), the last 5 ms tapered at punch-out from the samples the dub overwrote (no tail after the press), and an UNDO/REDO swap crossfaded from a cached copy of the outgoing loop; a lane's start and stop and the live gate ramped the same 5 ms (not yet designed). It changes recorded audio at the edges (a gesture shorter than the ramps is softened) and the exact sums in about eight test files. Build it, and with what ramp? | Build it as designed, 5 ms linear, on a branch for the ear. |
 | D24 | A REC/DUB press while a first take's aligned tail is in flight is swallowed: it counts as a repeated stop, which cannot lengthen the take (`tests/first_take.rs` free_d encodes this). Start one overdub on the commit frame instead, as REC to DUB does mid-take? The engine's held commands make it small (a recorder flag and a wait until the window's end). Red test, ignored: free_i in `tests/first_take.rs`. | Keep it a stop. |

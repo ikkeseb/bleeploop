@@ -6,9 +6,13 @@
 //!
 //! The fakes record what they saw in preallocated buffers and atomics, so every `process` still runs
 //! under the rig's `assert_no_alloc`.
+//!
+//! § Continuity under a sustained tone holds GO LIVE, an empty slot's live toggle, and an install and a
+//! removal to `tests/seam_continuity.rs`'s click criterion on what is heard.
 
 mod common;
 
+use std::f64::consts::PI;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering::SeqCst};
 use std::sync::{Arc, Mutex};
@@ -915,6 +919,143 @@ fn off_releases_a_slots_held_note_and_sends_it_no_more() {
     rig.advance(1024);
     assert_eq!(probe.keys(), vec![(true, 60), (false, 60)], "the held note released at the switch, nothing after it");
     assert!(rig.bus.iter().all(|&x| x == 0.0), "no note sounds");
+}
+
+// ── Continuity under a sustained tone ─────────────────────────────────────────────────────────────────
+
+// `tests/seam_continuity.rs`'s criterion on the heard output, the bus silent so it is the slots' wet
+// alone: within +-10 ms of a join, the largest |x[n] - x[n-1]| stays within `K` times the steady step
+// (the largest one away from every join: the tone's own slope) plus `EPS`, and the window's RMS shows the
+// tone is there. The tone is 240 Hz (200 frames a cycle), and every toggle and each install and removal
+// starts on its crest, so a cut there steps by the tone's whole amplitude; the fades' ends are
+// continuity windows only (the lifecycle tests above hold their frames). What this cannot see: a real plugin's answer to a step at
+// its input (an amp sim's gain magnifies it, its filters ring), and whether a step this size is audible
+// through one; it is a regression bound, as there.
+
+const TONE_HZ: f64 = 240.0;
+const TONE_AMP: f64 = 0.5;
+/// +-10 ms at 48 kHz.
+const SEAM_WINDOW: Frame = 480;
+const K: f64 = 2.0;
+const EPS: f64 = 1e-6;
+/// The window's RMS floor: the tone over half the window is about 0.25.
+const MIN_RMS: f64 = 0.1;
+
+/// The sustained tone at frame `f` (48 kHz).
+fn tone(f: Frame) -> f32 {
+    (TONE_AMP * (2.0 * PI * TONE_HZ * f as f64 / 48_000.0 + PI / 4.0).sin()) as f32
+}
+
+/// The first frame from `f` on the tone's crest: 25 frames into its 200-frame cycle.
+fn crest(f: Frame) -> Frame {
+    f + (25 - f).rem_euclid(200)
+}
+
+/// Each join's largest step and RMS over the heard output kept since `keep_output`, printed, against the
+/// steady step away from every join; a failure names each join over its limit.
+fn assert_seamless(rig: &Rig, joins: &[(&str, Frame)]) {
+    let start = rig.output.as_ref().expect("keep_output first").0;
+    let end = start + rig.heard.len() as Frame;
+    assert!(rig.bus.iter().all(|&x| x == 0.0), "the bus is silent: what is heard is the slots' wet alone");
+    let x = |f: Frame| rig.heard[(f - start) as usize] as f64;
+    let near = |f: Frame| joins.iter().any(|&(_, j)| (f - j).abs() <= SEAM_WINDOW);
+    let (mut steady, mut peak) = (0.0f64, 0.0f64);
+    for f in (start + 1..end).filter(|&f| !near(f)) {
+        steady = steady.max((x(f) - x(f - 1)).abs());
+        peak = peak.max(x(f).abs());
+    }
+    let slope = 2.0 * PI * TONE_HZ / rig.sr as f64 * peak;
+    assert!(steady > 0.0 && steady <= 1.05 * slope, "steady step {steady:.5} is the tone's (at most {slope:.5})");
+    let limit = K * steady + EPS;
+    let mut over = Vec::new();
+    for &(name, frame) in joins {
+        let (lo, hi) = (frame - SEAM_WINDOW, frame + SEAM_WINDOW);
+        assert!(lo > start && hi < end, "{name}: the window [{lo}, {hi}] lies in the kept output [{start}, {end})");
+        let (mut max_step, mut at, mut sum) = (0.0f64, lo, 0.0f64);
+        for f in lo..=hi {
+            let step = (x(f) - x(f - 1)).abs();
+            if step > max_step {
+                (max_step, at) = (step, f);
+            }
+            sum += x(f) * x(f);
+        }
+        let rms = (sum / (hi - lo + 1) as f64).sqrt();
+        println!("{name}: join frame {frame}, window [{lo}, {hi}], steady step {steady:.5}, window max step {max_step:.5} at frame {at} ({:+}), rms {rms:.3}, limit {limit:.5}", at - frame);
+        assert!(rms >= MIN_RMS, "{name}: the window's RMS {rms:.3} is the tone's");
+        if max_step > limit {
+            over.push(format!("{name}: a step of {max_step:.5} at frame {at} ({:+} from the join at {frame}) over the limit {limit:.5}", at - frame));
+        }
+    }
+    assert!(over.is_empty(), "{}", over.join("; "));
+}
+
+/// The tone on slot 0's input, the slot not live and holding `unit` (or nothing), then live on one crest
+/// and off on another 24 cycles later: the heard output across both toggles.
+fn toggled_live(unit: Option<Box<Fake>>) {
+    let mut rig = Rig::new();
+    if let Some(unit) = unit {
+        rig.install(0, unit);
+    }
+    rig.set(Command::SetSlotLive(0, false));
+    rig.set_input(tone);
+    rig.advance(1024);
+    rig.keep_output();
+    let on = crest(rig.frame + 2 * SEAM_WINDOW);
+    let off = on + 4800;
+    rig.send_at(on, Command::SetSlotLive(0, true));
+    rig.send_at(off, Command::SetSlotLive(0, false));
+    rig.advance_to(off + 2 * SEAM_WINDOW);
+    assert_seamless(&rig, &[("live on", on), ("live off", off)]);
+}
+
+/// GO LIVE on the amp sim while the guitar sustains (STATUS: the next jam opens with it). Red: the live
+/// flag gates the unit's input in one frame (`Slot::takes_input`), so the effect's output cuts in and out.
+#[test]
+#[ignore = "red, STATUS D23: GO LIVE gates an effect's input in one frame: on a 0.5 tone's crest, on steps 0.500 and off 0.500, over a limit of 0.031"]
+fn go_live_on_and_off_a_loaded_effect_mid_tone_is_click_free() {
+    let probe = Probe::new();
+    toggled_live(Some(Fake::effect(0.0, 1.0, &probe)));
+    assert!(probe.input_peak() > 0.49, "the effect took the tone while live");
+}
+
+/// An empty slot's live flag gates its dry pass-through. Red, as `src-tauri/AGENTS.md` § Open threads
+/// says: the dry signal steps without a ramp on a live toggle.
+#[test]
+#[ignore = "red, STATUS D23: an empty slot's live toggle gates its dry pass-through in one frame: on a 0.5 tone's crest, on steps 0.500 and off 0.500, over a limit of 0.031"]
+fn an_empty_slot_toggled_live_mid_tone_is_click_free() {
+    toggled_live(None);
+}
+
+/// A unit installed into a live slot while the tone sustains crossfades in from the dry input over
+/// `FADE`, and its removal crossfades back (`src/slots.rs`: lifecycle never stops the audio). The unit
+/// halves its input, so a cut in place of either fade steps by a quarter.
+#[test]
+fn an_effect_installed_and_removed_mid_tone_crossfades_click_free() {
+    let probe = Probe::new();
+    let mut rig = Rig::new();
+    rig.set_input(tone);
+    rig.advance(1024);
+    rig.keep_output();
+    let installed = crest(rig.frame + 2 * SEAM_WINDOW);
+    rig.advance_to(installed);
+    rig.install(0, Fake::effect(0.0, 0.5, &probe));
+    let removed = installed + 4800;
+    rig.advance_to(removed);
+    rig.remove(0);
+    rig.advance_to(removed + FADE as Frame + 2 * SEAM_WINDOW);
+    assert!(rig.returned(0).is_some(), "the unit came back");
+    assert_eq!(probe.calls().first().map(|c| c.0), Some(installed), "the install lands on the crest");
+    let fade = FADE as Frame;
+    assert_seamless(&rig, &[("install", installed), ("install engaged", installed + fade), ("removal", removed), ("removal done", removed + fade)]);
+    // The crossfades lead somewhere: the effect's half level is heard between them, the dry tone after.
+    let start = rig.output.as_ref().expect("keep_output first").0;
+    let heard = |f: Frame| rig.heard[(f - start) as usize];
+    for f in installed + fade + 1..removed {
+        assert!((heard(f) - 0.5 * tone(f)).abs() < 1e-6, "the effect is heard at {f}: {} for {}", heard(f), 0.5 * tone(f));
+    }
+    for f in removed + fade + 1..rig.frame {
+        assert!((heard(f) - tone(f)).abs() < 1e-6, "the dry tone again at {f}: {} for {}", heard(f), tone(f));
+    }
 }
 
 // ── With no device running ────────────────────────────────────────────────────────────────────────────

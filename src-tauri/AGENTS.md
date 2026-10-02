@@ -230,7 +230,8 @@ plugin-GUI work.
 - Each ASIO overload counts twice in `xruns` (both streams' error callbacks count it), and an output
   callback that misses the engine lock reads as a duplex fault.
 - The panic hook (`lib.rs`) allocates and logs on whatever thread panicked, the audio thread included.
-- The dry signal steps without a ramp on a live toggle and on an instrument installed into a live slot.
+- The dry signal steps without a ramp on an instrument installed into a live slot (a live toggle's step:
+  STATUS D23).
 - Two live slots on the same capture channel sum it (+6 dB).
 - The settings memory takes a COPY destination's mix from the source at the `Copied` event, not at
   the command (`settings.rs` `copy_lane`): a source moved in between reaches the destination's replay
