@@ -96,7 +96,7 @@ async function save(): Promise<void> {
   check((JSON.parse(recorded) as { sum: number }[]).every((t) => t.sum > 0), 'a recorded lane is silent: nothing reached the input');
 
   // Export → CLEAR ALL → import the same zip.
-  const bundle = await buildExportBundle({ bpm: 120, bars: 1 }, {}, session);
+  const bundle = await buildExportBundle(session);
   check(bundle !== null, 'the export had nothing to export');
   const entries = parseZip(bundle!.zipBytes);
   const sessionJson = JSON.parse(new TextDecoder().decode(entries.find((e) => e.name.endsWith('-session.json'))!.data));

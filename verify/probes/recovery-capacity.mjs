@@ -47,7 +47,7 @@ await probe(async ({ open }) => {
     const t0 = performance.now();
     await lf.autosave.flush();
     const saveMs = performance.now() - t0;
-    const bundle = await lf.buildExportBundle({ bpm: 120, bars: 30 }, { includeMaster: false, stemFormat: 'float32' }, session);
+    const bundle = await lf.buildExportBundle(session, { includeMaster: false, stemFormat: 'float32' });
     // The player's CLEAR ALL empties the engine; the import loads into it.
     lf.native.snapshotBytes = null;
     emit({ events: [...[0, 1, 2, 3, 4].flatMap((i) => [{ Cleared: { frame: 0, lane: i } },

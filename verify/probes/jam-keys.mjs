@@ -172,11 +172,11 @@ await probe(async ({ open }) => {
     const { session } = await import('/src/ui/state/audio.ts');
     let error = '';
     try {
-      await window.__lf.buildExportBundle({ bpm: 120, bars: 2 }, {}, session);
+      await window.__lf.buildExportBundle(session);
     } catch (e) {
       error = String(e);
     }
-    const recovery = await window.__lf.buildExportBundle({ bpm: 120, bars: 2 }, { includeMaster: false }, session);
+    const recovery = await window.__lf.buildExportBundle(session, { includeMaster: false });
     return { error, recovery: recovery !== null };
   });
   console.log('export during a dub', JSON.stringify(blocked));

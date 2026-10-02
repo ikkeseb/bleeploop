@@ -13,6 +13,10 @@
  *   moves it aside instead of overwriting it, and a launch at its rate restores it;
  * - rates: three rates keep three jams, and a launch at each restores its own;
  * - sweep: a player's clear at a rate deletes the jam kept at that rate too, so it never comes back;
+ * - offline: a clear whose device stopped before the recovery saw it deletes the engine's rate's jam,
+ *   never the one kept at another rate;
+ * - fallback: so does a clear whose frame already carries a fallback device at that other rate (the
+ *   feed reads the status after the old engine's events);
  * - confirm: a device pick the engine refuses (the rate differs while it holds loops) asks the player;
  *   declined, the pick goes back and nothing switches; confirmed, the jam is saved first, the switch is
  *   forced, and the new engine's empty lanes keep the recovery;
@@ -108,6 +112,38 @@ async function boot(browser, open, context = null) {
   await app.page.waitForFunction(() => window.__lf.native.opened.length >= 1, undefined, { timeout: 10000 });
   return { ...app, context: ctx };
 }
+
+/** The player's CLEAR of a 44.1 kHz jam in the frame that also carries `status`, beside a 48 kHz jam kept
+ * aside: the clear deletes only its own engine's jam. */
+async function clearAsTheDeviceMoves(browser, open, status, how) {
+    const first = await boot(browser, open);
+    const errors = [first.consoleErrors];
+    await emptyEngine(first.page, 48000);
+    const jamA = await commitJam(first.page, 48000, 18);
+    await saved(first.page, jamA, 'the 48 kHz jam');
+    const second = await relaunch(browser, open, first, 44100);
+    errors.push(second.consoleErrors);
+    await emptyEngine(second.page, 44100);
+    const jamB = await commitJam(second.page, 44100, 19);
+    await saved(second.page, jamB, 'the 44.1 kHz jam');
+
+    // The player clears the 44.1 kHz jam, and the device stops (or a fallback at 48 kHz opens) in the same
+    // feed frame: the clear is still the 44.1 kHz engine's, so the 48 kHz jam kept aside stays.
+    await second.page.evaluate(() => (window.__lf.native.snapshotBytes = null));
+    await emit(second.page, {
+      status,
+      events: [
+        ...[0, 1, 2, 3, 4].flatMap((i) => [{ Cleared: { frame: 0, lane: i } }, laneEvent(i, lane('Empty', 0))]),
+        { Transport: { frame: 0, master: 0, bpm: 120, locked: false } },
+      ],
+    });
+    await settle(second.page);
+    const held = await keys(second.page, ['latest', 'kept-48000', 'kept-44100']);
+    console.log(`after the clear ${how}`, JSON.stringify(held));
+    assert.deepEqual(held, { latest: null, 'kept-48000': jamA, 'kept-44100': null }, 'the clear deleted the 44.1 kHz jam, not the 48 kHz one');
+    assert.deepEqual(errors.flat(), [], 'no console errors');
+    await second.context.close();
+  }
 
 let seq = 0;
 const emit = (page, frame) => page.evaluate((f) => window.__lf.native.emit(f), { seq: ++seq, reset: false, events: [], device: [], peaks: [], anchor: null, meter: null, ...frame });
@@ -420,6 +456,9 @@ const cases = {
     assert.deepEqual(errors.flat(), [], 'no console errors');
     await third.context.close();
   },
+
+  offline: ({ browser, open }) => clearAsTheDeviceMoves(browser, open, null, 'with the device down'),
+  fallback: ({ browser, open }) => clearAsTheDeviceMoves(browser, open, fallback(48000), 'with a 48 kHz fallback in its frame'),
 
   async confirm({ browser, open }) {
     const { page, consoleErrors, context } = await boot(browser, open);

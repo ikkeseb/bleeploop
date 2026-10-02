@@ -32,17 +32,19 @@ export interface SessionSource {
   trackDubFeedback(i: number): number;
   fxState(i: number): FxState[];
   masterFramesValue(): number;
-  /** Copies of the committed lanes' PCM with their mix, each with the state it had as it was read; with
-   * `master` (an export's, never a recovery's), the engine's wet master of them too, or its error. */
+  /** Copies of the committed lanes' PCM with their mix, each with the state it had as it was read, and
+   * the grid they were read on; with `master` (an export's, never a recovery's), the engine's wet master
+   * of them too, or its error. */
   exportSnapshot(options?: { master?: boolean }): Promise<StemSnapshot>;
   /** Load a session into an all-empty looper; throws, changing nothing, otherwise. */
   loadSession(payload: LoadSessionPayload): Promise<void>;
-  bpm(): number;
   sampleRate(): number;
   /** The master gain as heard (0 while muted). */
   masterLevel(): number;
 }
 
 /** A player's clear that emptied the looper, as `SessionSource.clearToken` hands it out: compared by
- * identity. */
-export type ClearToken = object;
+ * identity. `rate`: the rate of the engine it emptied, whose jam it deletes. */
+export interface ClearToken {
+  readonly rate: number;
+}

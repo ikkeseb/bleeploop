@@ -48,6 +48,8 @@ export interface ExportTrack {
 export interface ExportSnapshot {
   sampleRate: number;
   masterLengthFrames: number;
+  /** The tempo the engine held as it read the snapshot: the loops' grid, with the rate and the length. */
+  bpm: number;
   tracks: ExportTrack[];
 }
 

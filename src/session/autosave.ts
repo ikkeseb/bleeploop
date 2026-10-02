@@ -11,7 +11,7 @@
  * - One jam is kept per sample rate. The engine cannot play loops at another rate (no resampling), so a
  *   jam waits for a launch at its own. `LATEST` holds the most recent jam, and each other rate's waits
  *   under its own key (`keptKey`). A save supersedes the jam kept at its rate and moves a latest at
- *   another rate to that rate's key; a player's clear deletes the running rate's jam from both places;
+ *   another rate to that rate's key; a player's clear deletes its engine's rate's jam from both places;
  *   a launch restores the running rate's jam from either, and it becomes the latest.
  */
 import { notifyError, notifyInfo } from '../notify';
@@ -253,12 +253,12 @@ function inspectJam(): JamFingerprint {
   return { value: `${committed ? master : '-'}|${parts.join('|')}`, blank, committed };
 }
 
-/** Nothing is committed. The player's clear that emptied the looper deletes the running rate's jam, once;
- * a looper that was replaced keeps it. */
+/** Nothing is committed. The player's clear that emptied the looper deletes the jam at the rate it emptied,
+ * once (its device may have stopped since); a looper that was replaced keeps it. */
 async function forgetJam(): Promise<void> {
   const token = jam().clearToken();
   if (token) {
-    await deleteJam(jam().sampleRate());
+    await deleteJam(token.rate);
     jam().spendClear(token);
   }
   failedRestoreFingerprint = '';
@@ -277,8 +277,7 @@ async function persistCurrent(snapshot = inspectJam()): Promise<void> {
 
 /** Save `committed` (it holds a loop) as the latest jam at its rate. */
 async function saveSnapshot(committed: StemSnapshot): Promise<void> {
-  // The tempo is locked while loops exist, so reading it beside the snapshot is safe.
-  const bpm = jam().bpm();
+  const bpm = committed.bpm;
   const masterFrames = committed.masterLengthFrames;
   const perBar = framesPerBar(bpm, committed.sampleRate);
   const bars = masterFrames / perBar;

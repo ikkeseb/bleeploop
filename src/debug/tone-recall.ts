@@ -238,7 +238,7 @@ async function checkPhase(expect: Expect): Promise<string> {
   looper.setFixedLengthBars(1);
   void looper.recDub(0);
   await until('lane 1 PLAYING', () => lane(0).state === 'PLAYING', 15);
-  const bundle = await buildExportBundle({ bpm: 120, bars: 1 }, {}, session);
+  const bundle = await buildExportBundle(session);
   check(bundle !== null, 'the export had nothing to export');
   const entries = parseZip(bundle!.zipBytes);
   const tones = entries.filter((e) => /-tone-slot-[ab]\.bin$/.test(e.name)).map((e) => e.name.slice(-10));

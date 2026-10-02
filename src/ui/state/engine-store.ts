@@ -303,8 +303,12 @@ const plain = {
   /** Per lane: a `Cleared` took its loop and its own `Lane` event has not arrived yet (a feed tick may
    * split them). */
   clearing: Array.from({ length: ENGINE_LANES }, () => false),
-  /** The player's clear that emptied the looper, in engine `gen` (`engineSession.clearToken`). */
-  clear: null as { gen: number } | null,
+  /** The engine's rate: its device's, kept while no device runs (a stopped device leaves the engine). Taken
+   * from an open's answer, and from a feed frame's status after the frame's events, which are still the
+   * engine's that ran before it (a new engine's come with its reset). */
+  rate: 48000,
+  /** The player's clear that emptied the looper, in engine `gen` at its `rate` (`engineSession.clearToken`). */
+  clear: null as { gen: number; rate: number } | null,
 };
 
 const capturing = (s: TrackState) => s === 'RECORDING' || s === 'OVERDUBBING';
@@ -570,7 +574,7 @@ function applyPeaks(lane: number, start: number, count: number, min: readonly nu
 function noteClear(): void {
   const loops = plain.state.some((s, i) => holdsLoop(s) && !plain.clearing[i]);
   if (loops) plain.clear = null;
-  else if (tookLoop) plain.clear = { gen: plain.resets };
+  else if (tookLoop) plain.clear = { gen: plain.resets, rate: plain.rate };
 }
 
 /**
@@ -622,6 +626,7 @@ function applyFrameNow(f: FeedFrame): void {
     if (!f.events.some((ev) => ev.type === 'Selected')) setSelectedTrack(0);
   }
   noteClear();
+  if (f.status) plain.rate = f.status.sampleRate;
   for (const d of f.device) applyDeviceEvent(d);
   // No meter: no device runs, so the input reads silent.
   plain.level = f.meter?.peak ?? 0;
@@ -965,6 +970,7 @@ async function exportSnapshot(options: { master?: boolean } = {}): Promise<StemS
     ...(header.masterError !== undefined ? { masterError: header.masterError } : {}),
     sampleRate: header.rate,
     masterLengthFrames: header.masterLengthFrames,
+    bpm: header.bpm,
     tracks: header.tracks.map((t, k) => ({
       index: t.index,
       pcm: pcm[k],
@@ -1044,7 +1050,6 @@ export const engineSession: SessionSource = {
   masterFramesValue: () => plain.master,
   exportSnapshot,
   loadSession,
-  bpm,
   sampleRate: () => engineSampleRate(),
   masterLevel: () => (masterMuted() ? 0 : masterVolume()),
 };
@@ -1268,6 +1273,7 @@ async function openPicked(restore?: () => Promise<void>): Promise<{ status: Devi
     }
     setOpenFailure(null);
     setDevice(runs.status);
+    plain.rate = runs.status.sampleRate;
     opened = { request: runs.request, picks: runs.picks };
     dropLackingPicks(askedChannels(runs.request), runs.status.inputChannels);
     return { status: runs.status, declined: false };

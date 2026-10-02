@@ -3,8 +3,8 @@ import { exportLoops } from '../../session/export';
 import { importSession, maxImportArchiveBytes } from '../../session/import';
 import { restoreSessionTones } from '../state/slot-tones';
 import { notifyError, notifyInfo } from '../../notify';
-import { clock, looper, sampleRate, session } from '../state/audio';
-import { anyTrackIn, masterBars } from '../looper/shared';
+import { looper, sampleRate, session } from '../state/audio';
+import { anyTrackIn } from '../looper/shared';
 
 /**
  * EXPORT / IMPORT as two icon tools in the command bar's far-right tool cluster (app.tsx `.tools`).
@@ -18,7 +18,6 @@ import { anyTrackIn, masterBars } from '../looper/shared';
  */
 export function SessionTools() {
   const hasMaster = () => looper.masterLengthFrames() > 0;
-  const loopBars = () => masterBars(looper.masterLengthFrames(), clock.bpm(), sampleRate());
   const anyLive = createMemo(() => anyTrackIn('PLAYING', 'OVERDUBBING', 'RECORDING'));
   const anyCapturing = createMemo(() => anyTrackIn('RECORDING', 'OVERDUBBING'));
   // EXPORT needs committed audio and an idle capture path. A bare master length isn't enough —
@@ -33,7 +32,7 @@ export function SessionTools() {
     if (exporting() || !anyCommitted() || anyCapturing()) return;
     setExporting(true);
     try {
-      const filename = await exportLoops({ bpm: clock.bpm(), bars: loopBars() }, session);
+      const filename = await exportLoops(session);
       if (filename) notifyInfo(`Exported ${filename}`, 'One .zip with every track + the master as WAV. Look in your Downloads folder.');
     } catch (err) {
       console.error('[transport] export failed', err);

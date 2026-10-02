@@ -16,6 +16,7 @@ import { encodeWav, mixMono } from './wav';
 import { makeZip } from './zip';
 import { prepareStemArchive, exportBase } from './stem-archive';
 import { slotLetter, takeSlotTones } from '../ui/state/slot-tones';
+import { framesPerBar } from '../ui/state/quantize';
 
 function download(bytes: Uint8Array<ArrayBuffer> | string, filename: string, mime: string): void {
   const blob = new Blob([bytes], { type: mime });
@@ -43,10 +44,10 @@ export interface BuildExportOptions {
  * stereo master mix, packed into a single timestamped .zip — everything exportLoops does EXCEPT the
  * download itself (the seam that lets a headless probe byte-parse the archive without touching
  * <a download>).
- * bpm/bars are the session's tempo and length as the UI read them from the engine's feed, for
- * session.json (the engine's device-frame clock is the authority). Per-track WAVs are the RAW
- * capture (unity, pre-volume/pre-mute/pre-limiter/pre-FX) — EVERY committed track (incl. STOPPED)
- * exports its stem, so no audio is ever lost. When included, the master (session.json `master.kind`
+ * session.json's tempo and bars are the snapshot's own (the engine's device-frame clock is the
+ * authority): a grid that changed while the export waited cannot pair with its loops. Per-track WAVs
+ * are the RAW capture (unity, pre-volume/pre-mute/pre-limiter/pre-FX): EVERY committed track (incl.
+ * STOPPED) exports its stem, so no audio is ever lost. When included, the master (session.json `master.kind`
  * 'wet-engine') is the engine's own: the snapshot asks for it, and lf-engine renders it offline from the
  * same loops with the mix the engine holds (lane volume, mute and FX, the reverb bus, master volume and
  * mute, the limiter: `src-tauri/crates/lf-engine/src/render.rs`), every track playing, frame 0 lined up
@@ -59,9 +60,8 @@ export interface BuildExportOptions {
  * available during capture. `source` is the looper to read (`session-source.ts`).
  */
 export async function buildExportBundle(
-  meta: { bpm: number; bars: number },
-  options: BuildExportOptions = {},
   source: SessionSource,
+  options: BuildExportOptions = {},
 ): Promise<{ zipBytes: Uint8Array<ArrayBuffer>; base: string } | null> {
   if (options.includeMaster !== false) {
     for (let i = 0; i < source.trackCount; i++) {
@@ -81,6 +81,7 @@ export async function buildExportBundle(
   if (snap.masterLengthFrames <= 0 || snap.tracks.length === 0) return null; // button should already guard this
   const base = exportBase();
   const sr = snap.sampleRate;
+  const meta = { bpm: snap.bpm, bars: Math.max(1, Math.round(snap.masterLengthFrames / framesPerBar(snap.bpm, sr))) };
   const { entries, session } = prepareStemArchive(snap, meta, base, options.stemFormat ?? 'float32');
 
   if (withMaster) {
@@ -129,11 +130,8 @@ export async function buildExportBundle(
 /** Export = build the bundle + drop it as ONE .zip download (one file, one gesture — see header).
  * Returns the archive's filename so the caller can name it to the user, or null when nothing was
  * exported. The download is handed to the WebView; where it lands is the WebView's call. */
-export async function exportLoops(
-  meta: { bpm: number; bars: number },
-  source: SessionSource,
-): Promise<string | null> {
-  const bundle = await buildExportBundle(meta, {}, source);
+export async function exportLoops(source: SessionSource): Promise<string | null> {
+  const bundle = await buildExportBundle(source);
   if (!bundle) return null; // nothing committed — button should already guard this
   const filename = `${bundle.base}.zip`;
   download(bundle.zipBytes, filename, 'application/zip');

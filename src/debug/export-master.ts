@@ -108,7 +108,7 @@ async function run(): Promise<void> {
 
   // ── The export: the engine's master beside the stem ─────────────────────────────────────────────
   const t0 = performance.now();
-  const bundle = await buildExportBundle({ bpm: 120, bars: 1 }, {}, session);
+  const bundle = await buildExportBundle(session);
   const ms = Math.round(performance.now() - t0);
   check(bundle !== null, 'the export had nothing to export');
   const entries = parseZip(bundle!.zipBytes);

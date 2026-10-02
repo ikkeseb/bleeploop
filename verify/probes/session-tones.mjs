@@ -162,7 +162,7 @@ await probe(async ({ open }) => {
 
       // ── Export ──────────────────────────────────────────────────────────────────────────────────────
       calls.length = 0;
-      const bundle = await buildExportBundle({ bpm: 120, bars: 1 }, {}, session);
+      const bundle = await buildExportBundle(session);
       const entries = parseZip(bundle.zipBytes);
       const text = (name) => new TextDecoder().decode(entries.find((e) => e.name.endsWith(name)).data);
       const exported = {

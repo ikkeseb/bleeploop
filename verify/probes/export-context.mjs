@@ -88,7 +88,7 @@ await probe(async ({ open }) => {
     const { parseZip } = await import('/src/session/unzip.ts');
     const { decodeWav } = await import('/src/session/wav.ts');
     const asked = lf.native.snapshots.length;
-    const bundle = await lf.buildExportBundle({ bpm: 120, bars: 1 }, {}, session);
+    const bundle = await lf.buildExportBundle(session);
     if (!bundle) throw new Error('No export bundle');
     window.__bundle = bundle.zipBytes;
     const entries = parseZip(bundle.zipBytes);
@@ -139,7 +139,7 @@ await probe(async ({ open }) => {
     let fallbackKind;
     let fallbackShape;
     try {
-      const fallback = await lf.buildExportBundle({ bpm: 120, bars: 1 }, {}, session);
+      const fallback = await lf.buildExportBundle(session);
       const entries = parseZip(fallback.zipBytes);
       const meta = JSON.parse(new TextDecoder().decode(entries.find((entry) => entry.name.endsWith('-session.json')).data));
       fallbackKind = meta.master.kind;
@@ -189,7 +189,7 @@ await probe(async ({ open }) => {
     let meta;
     try {
       const asked = lf.native.snapshots.length;
-      const pending = lf.buildExportBundle({ bpm: 120, bars: 1 }, {}, session);
+      const pending = lf.buildExportBundle(session);
       // The engine has the request and renders: the player moves lane 1's fader and the master's.
       while (lf.native.snapshots.length === asked) await new Promise((resolve) => setTimeout(resolve, 5));
       lf.looper.setVolume(0, volume / 2);
@@ -206,6 +206,48 @@ await probe(async ({ open }) => {
     return { name: 'A fader moved while the master renders stays out of session.json', before: { volume, level }, kept, moved,
       pass: kept.volume === volume && kept.level === level && moved.volume !== volume && moved.level !== level };
   }));
+
+  // ── The grid as the snapshot holds it ─────────────────────────────────────────────────────────────
+  // The feed shows two bars, but the engine halved the loop before the export's snapshot: the Export
+  // button's archive declares the snapshot's grid, and imports as it.
+  await engineHolds(editable, 'Playing');
+  await emit({ events: [transport(2 * MASTER), laneEvent(0, lane('Playing', { length: 2 * MASTER }))] });
+  results.push(await page.evaluate(async () => {
+    const { session } = await import('/src/ui/state/audio.ts');
+    const { parseZip } = await import('/src/session/unzip.ts');
+    const { validateSession } = await import('/src/session/session-schema.ts');
+    const blobs = [];
+    const createObjectURL = URL.createObjectURL;
+    URL.createObjectURL = (blob) => (blobs.push(blob), createObjectURL(blob));
+    try {
+      document.querySelector('.tool--export').click();
+      for (const t0 = Date.now(); blobs.length === 0 && Date.now() - t0 < 10000; ) await new Promise((resolve) => setTimeout(resolve, 20));
+    } finally {
+      URL.createObjectURL = createObjectURL;
+    }
+    if (blobs.length === 0) throw new Error('the Export button downloaded nothing');
+    const zip = new Uint8Array(await blobs[0].arrayBuffer());
+    const meta = JSON.parse(new TextDecoder().decode(parseZip(zip).find((entry) => entry.name.endsWith('-session.json')).data));
+    let validation = 'ok';
+    try { validateSession(meta); } catch (error) { validation = String(error); }
+    const grid = { bpm: meta.bpm, bars: meta.bars, masterLengthFrames: meta.masterLengthFrames, feedMaster: session.masterFramesValue() };
+    return { name: "The Export button's archive declares the snapshot's grid", grid, validation, zip: Array.from(zip),
+      pass: grid.bars === 1 && grid.bpm === 120 && grid.masterLengthFrames === 96000 && validation === 'ok' };
+  }));
+  const gridZip = results.at(-1).zip;
+  delete results.at(-1).zip;
+  // The engine empties: the archive imports with its own grid.
+  await emit({ events: [transport(0), laneEvent(0, lane('Empty'))] });
+  results.push(await page.evaluate(async (zip) => {
+    const lf = window.__lf;
+    const { session } = await import('/src/ui/state/audio.ts');
+    const { splitSessionBytes } = await import('/src/platform/engine-wire.ts');
+    let imported = 'ok';
+    try { await lf.importSession(Uint8Array.from(zip), session); } catch (error) { imported = String(error); }
+    const header = imported === 'ok' ? splitSessionBytes(lf.native.loadedSessions.at(-1).slice().buffer).header : null;
+    return { name: 'That archive round-trips with the snapshot grid', imported, header: header && { bpm: header.bpm, bars: header.bars, master: header.masterLengthFrames },
+      pass: imported === 'ok' && header?.bars === 1 && header?.masterLengthFrames === 96000 };
+  }, gridZip));
 
   console.log(JSON.stringify(results, null, 2));
   assert.ok(results.every((result) => result.pass), JSON.stringify(results));
