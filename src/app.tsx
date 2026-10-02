@@ -212,8 +212,8 @@ export function App() {
   };
 
   // System-status aggregate for the command-bar lamp. Per-item detail (host/engine/plugin/midi) lives
-  // in the Audio Settings diagnostics block; this lamp is the at-a-glance rollup. Amber when the engine
-  // could not open an audio device — the one condition that stops the looper and the plugin host; the
+  // in the Audio Settings diagnostics block; this lamp is the at-a-glance rollup. Amber when no audio
+  // device runs after one failed to open or was lost — the one condition that stops the looper; the
   // title lists all four states so the detail is a hover away in every build.
   const systemWarn = () => !engineDevice() && !!engineOpenFailure();
   const engineState = () =>

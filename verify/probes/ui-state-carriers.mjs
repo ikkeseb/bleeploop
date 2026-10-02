@@ -6,7 +6,8 @@
  *
  * - transport, meter, lamp, looper-announcement and toast state carriers: ■ ALL during a first take, the
  *   record meter's dBFS text, the lamp's role, "Track 2 take recorded" on the live region, a focused
- *   toast outliving its auto-dismiss;
+ *   toast outliving its auto-dismiss; the lamp across a lost device (amber and "no device open" while
+ *   none runs, neutral and "running" once one runs again);
  * - the refusal carriers: a STOPPED lane core's title/label reason; the transport keys send the engine's
  *   action (the engine gates it now: lf-engine `tests/actions.rs`) and an engine refusal is announced on
  *   the looper status line with its lane and reason; while a lane records, another lane's core is
@@ -117,6 +118,23 @@ await probe(async ({ open }) => {
   await emit({ meter: { peak: 0, clip: false } });
 
   assert.equal(await page.locator('.cmd__lamp').getAttribute('role'), 'img');
+
+  // The lamp across a lost device: amber with a truthful engine state while none runs, back to normal
+  // once one runs again. The interface yanked is a `status: null` frame plus the `Lost` device event.
+  const lampState = () => page.locator('.cmd__lamp').evaluate((el) => ({
+    warn: el.classList.contains('cmd__lamp--warn'),
+    engine: el.getAttribute('title')?.match(/^engine: (.*)$/m)?.[1],
+  }));
+  const STATUS = { backend: 'Wasapi', sampleRate: RATE, block: 256, inputName: 'Fake input', outputName: 'Fake output', alignFrames: 4800, inputFrames: 0, inputOpen: true };
+  await emit({ status: STATUS });
+  assert.deepEqual(await lampState(), { warn: false, engine: 'running' }, 'a running device: the lamp is neutral');
+  await emit({ status: null, device: [{ Lost: { backend: 'Wasapi', reason: 'the device was unplugged' } }] });
+  assert.deepEqual(await lampState(), { warn: true, engine: 'no device open' }, 'a lost device: the lamp is amber');
+  const lostLog = consoleErrors.findIndex((e) => e.includes('device lost'));
+  assert.ok(lostLog >= 0, 'the lost device is logged');
+  consoleErrors.splice(lostLog, 1);
+  await emit({ status: STATUS });
+  assert.deepEqual(await lampState(), { warn: false, engine: 'running' }, 'the device back: the lamp is neutral again');
 
   await page.evaluate(async () => {
     const { setAutoDismissMsForProbe } = await import('/src/notify.ts');

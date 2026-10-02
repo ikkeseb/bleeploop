@@ -495,6 +495,9 @@ function applyDeviceEvent(ev: DeviceEvent): void {
     case 'Lost':
       console.error(`[engine] ${ev.backend} device lost: ${ev.reason}`);
       notifyError('Audio device lost', ev.reason);
+      // Kept as why no device runs; every reader gates it on the device status, which a recovery or a
+      // fallback in the same or a later frame may already have filled.
+      setOpenFailure(ev.reason);
       break;
     case 'Recovered':
       notifyInfo('Audio device back', deviceLabel(ev.status));
@@ -1129,12 +1132,14 @@ export const engineMaster = {
 /** The device that runs, or null. */
 export const engineDevice = device;
 
-// Why the last open failed (its error text), until an open succeeds. While no device runs, Audio
-// Settings, the plugin slots and the rescan button say so instead of reading as "no plugins".
+// Why no device runs: the last failed open's error text, or the lost device's reason (the feed's
+// `Lost`), until an open succeeds. While no device runs, the command-bar lamp, Audio Settings, the
+// plugin slots and the rescan button say so instead of reading as "starting" or "no plugins".
 const [openFailure, setOpenFailure] = createSignal<string | null>(null);
 
-/** The last failed open's reason, null once an open succeeded. Read it with `engineDevice()`: a failed
- * switch can leave the device that ran running. */
+/** The last failed open's or lost device's reason, null once an open succeeded. Read it with
+ * `engineDevice()`: a failed switch, or the owner reopening a lost device on its own, leaves a device
+ * running with this still set. */
 export const engineOpenFailure = openFailure;
 
 /** The engine's rate, the UI's frame conversions read it: the running device's, else the one the engine
