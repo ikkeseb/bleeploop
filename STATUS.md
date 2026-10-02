@@ -10,9 +10,14 @@ Last rig pass, 2026-09-29 (the engine-only app): `native:smoke`, `survey`, `swap
 `tone-recall`, `engine-smoke`, `engine-recovery` and `release:smoke` green; `native:engine-loopback`
 20/20 at 64 and 256, 18/20 at 128 (a detector reading v0.1.0 repeats). Since then (2026-10-01):
 `native:export-master` (WASAPI) for the export's engine-rendered master; the sample-rate pick on
-ASIO, `native:engine-smoke` at 48 and 44.1 kHz and `native:engine` after the switches. Owed once the
-loopback cable is in: `native:engine-loopback --rate=48000` (alignment at 48 kHz). Driver latency
-reports are not guitar latency; after a relevant change, rerun only the affected check.
+ASIO, `native:engine-smoke` at 48 and 44.1 kHz and `native:engine` after the switches. 2026-10-02, the
+cable in: `native:engine-loopback --rate=48000`, five launches, |A| at most 0.125 ms and every relative
+bar within 0.001 ms at 64, 128 and 256; 256 green; at 64 and 128 spread and drift failed on sound that
+is not the click (the early-beat reading of 09-28; explained, with a detector that names it, on branch
+agent/loopback-detector, which owes one green run before it lands). Owed on the rig before branch
+agent/host lands: `native:smoke`, `native:swap` (filtered), `native:recall`, `native:tone-recall`;
+before agent/capture: `native:engine-loopback`, `native:engine`. Driver latency reports are not guitar
+latency; after a relevant change, rerun only the affected check.
 
 **Last play: 2026-09-28** (engine, a local release build, ASIO; a second player on a WASAPI build
 of their own): worked well overall, no issue found; the WASAPI player heard delay on DI monitoring
