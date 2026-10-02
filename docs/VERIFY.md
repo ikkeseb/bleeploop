@@ -127,7 +127,12 @@ blocks until the verdict, so an agent harness should run it in the background.
     Archetype while a second instance ran took 4.8 s, nearly all of it the plugin's own teardown, the
     slot dry meanwhile. On WASAPI with another app holding the microphone the input can run 0.87 %
     fast, past what the join's controller holds: `join_trims` every 3–6 s, each skipping ~25 ms of
-    input (real time or an artefact: unknown).
+    input (real time or an artefact: unknown). Since 2026-10-03 the counter check fails on WASAPI
+    alone: up to two in five WASAPI switch phases count `join_trims` (1–2) and sometimes
+    `join_starves` (2), on main (two runs of three) and on the input-gap branch (both of two) alike,
+    while the soak, every ASIO phase and the swaps stay 0 (cause unknown; nothing else held the
+    microphone knowingly). `engine.xruns` also counts a block whose input a starve or a trim damaged, so
+    such a phase reads about five xruns.
   - `native:engine-loopback` after a change to the engine's alignment, click, grid, device open or
     snapshot. Baseline (2026-09-26, Scarlett 2i2 3rd gen, 44.1 kHz, a cable from line out R into
     input 2; six launches, Pro-Q 3 and MIC): A −0.11..+0.09 ms at ASIO 64, 128 and 256, spread
@@ -160,7 +165,9 @@ blocks until the verdict, so an agent harness should run it in the background.
     into the same line outs; Signal Desktop and Focusrite Notifier run on this PC) are the suspect. The I
     reading is likely the same (not re-observed). At 256 every bar passed; at 64 and 128 every bar but
     those the sound moved (spread, drift, once the accent), |A| at most 0.125 ms. Silence other apps'
-    sound on the interface before a loopback run.
+    sound on the interface before a loopback run. With the stray bar and the input-gap rejection
+    (2026-10-03, 48 kHz, Pro-Q, one launch): 21/21 bars at 64, 128 and 256, no stray sound, no take
+    rejected, A +0.08 ms and B +0.17 ms at every size, spread at most 0.003 ms.
   - `native:smoke` after any change to `editor_window.rs` or either host's editor open/close path.
     Baseline (2026-09-23, WASAPI, the app mostly on the default ~15 ms timer tick): `complete: 30
     opened, 0 failed, of 30`, each close 110–250 ms. Windows grants the app a 1 ms tick only some of

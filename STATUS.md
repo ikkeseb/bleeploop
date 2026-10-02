@@ -10,21 +10,12 @@ Last rig pass, 2026-09-29 (the engine-only app): `native:smoke`, `survey`, `swap
 `tone-recall`, `engine-smoke`, `engine-recovery` and `release:smoke` green; `native:engine-loopback`
 20/20 at 64 and 256, 18/20 at 128 (a detector reading v0.1.0 repeats). Since then (2026-10-01):
 `native:export-master` (WASAPI) for the export's engine-rendered master; the sample-rate pick on
-ASIO, `native:engine-smoke` at 48 and 44.1 kHz and `native:engine` after the switches. 2026-10-02, the
-loopback cable in: `native:engine-loopback --rate=48000`, five launches; the alignment holds at 64, 128
-and 256 (|A| at most 0.125 ms, every relative bar within 0.001 ms), and spread and drift fail at 64 and
-128 on sound that is not the click (`docs/VERIFY.md`, the loopback baseline). Driver latency reports are
-not guitar latency; after a relevant change, rerun only the affected check.
-
-**Owed on the rig before three pushed branches land** (an agent's rig run was refused by the harness's
-auto mode, so these wait for the PC):
-
-- agent/loopback-detector (the onset by the click's peak, stray sound fails by name):
-  `native:engine-loopback --rate=48000`.
-- agent/host (four plugin-host fixes): `native:smoke`, `native:swap` (filtered), `native:recall`,
-  `native:tone-recall`.
-- agent/capture (input gaps reject the take): `native:engine-loopback`, `native:engine`; a take wrongly
-  rejected on real hardware fails the first.
+ASIO, `native:engine-smoke` at 48 and 44.1 kHz and `native:engine` after the switches. 2026-10-03, the
+loopback cable in, with the stray-sound bar, the input-gap rejection and four plugin-host fixes:
+`native:engine-loopback --rate=48000` 21/21 at 64, 128 and 256, no stray sound, no take rejected;
+`native:smoke`, `swap` (filtered), `recall` and `tone-recall` green; `native:engine` green but its
+counter check, which WASAPI's switch phases fail on main too (`docs/VERIFY.md`, its baseline). Driver
+latency reports are not guitar latency; after a relevant change, rerun only the affected check.
 
 **Last play: 2026-09-28** (engine, a local release build, ASIO; a second player on a WASAPI build
 of their own): worked well overall, no issue found; the WASAPI player heard delay on DI monitoring
