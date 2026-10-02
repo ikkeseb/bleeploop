@@ -113,7 +113,8 @@ pub struct Diag {
     pub xruns: u64,
     /// Notes a plugin slot could not queue (more than `slots::MAX_SLOT_EVENTS` between two renders).
     pub slot_events_dropped: u64,
-    /// Units installed into an occupied slot (handed back) or leaked because nothing read the port.
+    /// Units installed into an occupied slot (handed back) or leaked because nothing read the port, and
+    /// plugin calls the rack's render silenced because their output held a non-finite sample.
     pub slot_protocol_errors: u64,
 }
 

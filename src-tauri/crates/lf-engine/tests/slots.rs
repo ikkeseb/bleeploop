@@ -13,9 +13,9 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering::SeqCst};
 use std::sync::{Arc, Mutex};
 
-use common::{Delay, Opts, Rig};
+use common::{code, Delay, Opts, Rig};
 use lf_engine::grid::Frame;
-use lf_engine::{Command, Instrument, LaneState, NoteTarget, ProcessContext, SlotEvent, SlotEventKind, SlotKind, SlotProcessor};
+use lf_engine::{Command, InputSend, InputSendParam, Instrument, LaneState, NoteTarget, ProcessContext, SlotEvent, SlotEventKind, SlotKind, SlotProcessor};
 
 /// Frames of the bypass crossfade at 48 kHz: 10 ms.
 const FADE: usize = 480;
@@ -98,16 +98,23 @@ struct Fake {
     level: f32,
     through: f32,
     impulse: Option<Frame>,
+    /// Added to the last frame of every call (a value gone bad late in an otherwise sound block).
+    last: f32,
     probe: Probe,
 }
 
 impl Fake {
     fn effect(level: f32, through: f32, probe: &Probe) -> Box<Fake> {
-        Box::new(Fake { id: 0, kind: SlotKind::Effect, latency: 0, level, through, impulse: None, probe: probe.clone() })
+        Box::new(Fake { id: 0, kind: SlotKind::Effect, latency: 0, level, through, impulse: None, last: 0.0, probe: probe.clone() })
     }
 
     fn instrument(level: f32, latency: Frame, probe: &Probe) -> Box<Fake> {
-        Box::new(Fake { id: 0, kind: SlotKind::Instrument, latency, level, through: 0.0, impulse: None, probe: probe.clone() })
+        Box::new(Fake { id: 0, kind: SlotKind::Instrument, latency, level, through: 0.0, impulse: None, last: 0.0, probe: probe.clone() })
+    }
+
+    fn with_last(mut self: Box<Self>, last: f32) -> Box<Fake> {
+        self.last = last;
+        self
     }
 
     fn with_id(mut self: Box<Self>, id: u32) -> Box<Fake> {
@@ -142,6 +149,9 @@ impl SlotProcessor for Fake {
             }
             let hit = if self.impulse == Some(frame + k as Frame) { 1.0 } else { 0.0 };
             *y = self.level + self.through * x + hit;
+        }
+        if let Some(y) = out.last_mut() {
+            *y += self.last;
         }
     }
 
@@ -955,6 +965,103 @@ fn eviction_hands_every_unit_back_stopped_a_waiting_install_too() {
     assert_eq!(a.keys(), vec![(true, 60), (false, 60)], "the held note released before the stop");
     assert_eq!(a.seen().last(), Some(&Seen::Stop));
     assert_eq!((rig.engine.slot(0), rig.engine.slot(1)), (None, None));
+}
+
+// ── Non-finite output ────────────────────────────────────────────────────────────────────────────────
+
+const NON_FINITE: [f32; 3] = [f32::NAN, f32::INFINITY, f32::NEG_INFINITY];
+
+fn finite(x: &[f32], what: &str) {
+    assert_eq!(x.iter().position(|v| !v.is_finite()), None, "{what}: a non-finite frame");
+}
+
+/// A live effect that renders NaN or an infinity while lane 0 overdubs, with the ECHO send on: what is
+/// heard and recorded stays finite, the dub adds nothing to the loop, and once the unit is gone the echo
+/// and the loop play on finite.
+#[test]
+fn an_effects_non_finite_output_reaches_neither_the_mix_nor_the_echo_nor_a_loop() {
+    for bad in NON_FINITE {
+        let probe = Probe::new();
+        let mut rig = Rig::with(Opts { sr: 8000, start: 8000, ..Default::default() });
+        rig.set(Command::SetBpm(200.0));
+        rig.set_input(code);
+        let master = rig.record_first_take(0, 1, 240);
+        rig.set_level(0.0);
+        rig.idle();
+        // On from here, with nothing to echo: whatever the dub records is the unit's.
+        rig.set(Command::SetInputSendParam(InputSendParam::EchoLevel, 0.5));
+        rig.set(Command::SetInputSendParam(InputSendParam::EchoFeedback, 0.5));
+        rig.set(Command::SetInputSend(InputSend::Echo, true));
+        let before = rig.pcm(0);
+        rig.install(0, Fake::effect(bad, 0.0, &probe));
+        rig.advance(1000);
+        rig.keep_output();
+        rig.advance_to(rig.next_boundary() + master / 4);
+        rig.press(Command::RecDub(0));
+        assert_eq!(rig.state(0), LaneState::Overdubbing);
+        rig.advance(2 * master);
+        rig.press(Command::RecDub(0));
+        assert_eq!(rig.state(0), LaneState::Playing);
+        rig.idle();
+        for (x, what) in [(&rig.heard, "heard"), (&rig.heard_right, "heard right"), (&rig.monitor, "monitor"), (&rig.record, "record tap")] {
+            finite(x, &format!("{bad}: {what}"));
+        }
+        assert_eq!(rig.pcm(0), before, "{bad}: the dub adds nothing to the loop");
+        assert!(rig.engine.diag().slot_protocol_errors > 0, "{bad}: counted");
+
+        rig.remove(0);
+        rig.advance(1000);
+        assert!(rig.returned(0).is_some());
+        rig.set_level(0.25);
+        rig.keep_output();
+        rig.advance(master);
+        finite(&rig.heard, &format!("{bad}: heard after the unit left"));
+        assert!(peak(&rig.monitor) > 0.2, "{bad}: the dry input is heard again");
+        assert!(peak(&rig.heard) > 0.0, "{bad}: the loop plays on");
+    }
+}
+
+/// A live effect whose block is sound but for its last frame: that one frame is caught as the whole block
+/// would be, so the scan reads every sample, not the first.
+#[test]
+fn a_non_finite_frame_late_in_a_sound_block_is_caught_too() {
+    for bad in NON_FINITE {
+        let probe = Probe::new();
+        let mut rig = Rig::new();
+        rig.set_input(code);
+        rig.set_level(0.25);
+        rig.install(0, Fake::effect(0.0, 1.0, &probe).with_last(bad));
+        rig.advance(1000);
+        rig.keep_output();
+        rig.advance(4000);
+        for (x, what) in [(&rig.heard, "heard"), (&rig.monitor, "monitor"), (&rig.record, "record tap")] {
+            finite(x, &format!("{bad}: {what}"));
+        }
+        assert!(rig.engine.diag().slot_protocol_errors > 0, "{bad}: counted");
+    }
+}
+
+/// An instrument that renders NaN or an infinity into the master bus: the limiter and the output stay
+/// finite, and once the unit is gone the dry input is heard again.
+#[test]
+fn an_instruments_non_finite_output_never_reaches_the_bus_or_the_limiter() {
+    for bad in NON_FINITE {
+        let probe = Probe::new();
+        let mut rig = Rig::new();
+        rig.install(1, Fake::instrument(bad, 0, &probe));
+        rig.keep_output();
+        rig.advance(4800);
+        finite(&rig.bus, &format!("{bad}: bus"));
+        finite(&rig.heard, &format!("{bad}: heard"));
+        rig.remove(1);
+        rig.advance(1000);
+        assert!(rig.returned(1).is_some());
+        rig.set_level(0.25);
+        rig.keep_output();
+        rig.advance(4800);
+        finite(&rig.heard, &format!("{bad}: heard after the unit left"));
+        assert!(peak(&rig.heard) > 0.2, "{bad}: the dry input is heard again");
+    }
 }
 
 // ── Block-size independence ──────────────────────────────────────────────────────────────────────────

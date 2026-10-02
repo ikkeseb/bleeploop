@@ -26,7 +26,9 @@
 //! here drops a unit: an eviction hands back an install still waiting on a port too, and a unit's
 //! methods run only while its slot holds it, so a panic the callback's guard catches unwinds past no
 //! unit held as a local. Installing into an occupied slot is a protocol error: the new unit goes
-//! straight back, counted, never started or stopped.
+//! straight back, counted, never started or stopped. So is a call whose output holds a NaN or an
+//! infinity: that call's output is silenced, so nothing downstream (the mix, the input sends, the
+//! limiter, a capture) ever sees it.
 //!
 //! The engine renders the slots once per range, not per chunk: from where they stopped up to the next
 //! frame a slot command waits for (a note, the target, a slot's live flag or gain), so a plugin sees
@@ -449,6 +451,12 @@ impl Rack {
             }
             if let Some(unit) = s.unit.as_mut() {
                 unit.process(frame, x, &s.events, &mut s.out[..m]);
+                // A non-finite sample would stick in every filter, echo, limiter and loop after it: the
+                // whole call's output goes silent, counted.
+                if !s.out[..m].iter().all(|y| y.is_finite()) {
+                    s.out[..m].fill(0.0);
+                    self.protocol_errors += 1;
+                }
             }
             s.events.clear();
             let instrument = s.instrument();

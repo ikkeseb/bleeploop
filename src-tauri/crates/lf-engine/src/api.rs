@@ -465,7 +465,9 @@ pub trait SlotProcessor: Send {
     /// Render `out.len()` frames (= `input.len()`, at most the engine's `max_block`) from device frame
     /// `frame`. `input` is the slot's mono input while the slot is live and silence otherwise (always
     /// silence for an instrument); `events` are sorted by offset, every offset `< out.len()`. `out` is
-    /// overwritten with the slot's mono output. Never allocates, locks or waits. Called on the audio
+    /// overwritten with the slot's mono output, every sample finite (the rack's render silences and counts
+    /// a call that is not before routing it; the idle removal's one frame is not checked). Never
+    /// allocates, locks or waits. Called on the audio
     /// thread, except one silent frame carrying a removal's released notes while no device runs (on the
     /// thread that holds the engine, just before [`SlotProcessor::stop`]).
     fn process(&mut self, frame: Frame, input: &[f32], events: &[SlotEvent], out: &mut [f32]);
