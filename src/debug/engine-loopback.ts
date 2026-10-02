@@ -7,9 +7,14 @@
  * limiter's pre-delay after its downbeat (`ProcessContext::align_frames`, lf-engine `api.rs`), so a
  * correctly aligned take puts the cable's click ON its beat. Every offset here is the recorded click's
  * onset minus its beat frame in the committed lane PCM (`engine_snapshot`: play order, loop position 0 =
- * the master downbeat), + = late; nothing is fitted. The onset is the removed web loopback probe's (the window's peak,
- * then the first 30 % crossing, each beat searched from half a beat early, the loop read circularly so
- * an early downbeat is found at the loop's end). The engine's click rises over 2 ms, so the crossing
+ * the master downbeat), + = late; nothing is fitted. The onset is the window's peak, then the first 30 %
+ * crossing in the 10 ms before it, each beat searched from half a beat early, the loop read circularly so
+ * an early downbeat is found at the loop's end. The crossing stays by the peak because the cable has
+ * carried sound that is not the click (source unknown; other apps playing through the interface, whose
+ * driver mixes them into the same outputs, are the suspect): a chime 150 ms before a click crossed 30 %
+ * first and read as the beat 150 ms early. Such sound fails the run by name instead (`strayEvents`, the
+ * stray bar), at the sensitivity the old crossing had, so a doubled or early click from the engine still
+ * fails. The engine's click rises over 2 ms, so the crossing
  * lags the click's first frame even on the ideal click: that lag, measured by the same detector on the
  * engine's own formula (`referenceClick`, lf-engine `clock.rs`), is subtracted ("net"; "raw" keeps it).
  *
@@ -89,6 +94,9 @@ const CLICK_VOLUME = 0.7;
 /** A beat's peak must stand this far above the take's median |x| (the noise floor) to count as a click:
  * The web loopback probe's 8 would let a noise peak cross 30 % of a weak click; 20 keeps 0.3 × peak above it. */
 const FLOOR_FACTOR = 20;
+/** The loudest stray sound a take may hold, over its median click, before the run fails: the old
+ * detector's sensitivity (a sound past 30 % of the click before it moved the onset). */
+const STRAY_FAIL = 0.3;
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 const log = (msg: string) => console.error(`${TAG} ${msg}`);
@@ -186,10 +194,62 @@ function crossing(x: Float32Array, from: number, to: number, level: number): num
   return -1;
 }
 
-/** The detector on one window: its peak and the 30 % crossing before it. */
-function onsetOf(x: Float32Array): { onset: number; peak: number } {
+/** How far before its peak the detector looks for a click's 30 % crossing: 10 ms, five times the click's
+ * attack. */
+const onsetReach = (rate: number) => Math.round(0.01 * rate);
+
+/** The detector on one window: its peak and the 30 % crossing in the `reach` frames before it. */
+function onsetOf(x: Float32Array, reach: number): { onset: number; peak: number } {
   const p = peakIn(x, 0, x.length);
-  return { onset: p.at < 0 ? -1 : crossing(x, 0, p.at + 1, p.value * 0.3), peak: p.value };
+  return { onset: p.at < 0 ? -1 : crossing(x, Math.max(0, p.at - reach), p.at + 1, p.value * 0.3), peak: p.value };
+}
+
+/** The detector against a synthetic beat window: the ideal accent on its beat, after a 200 Hz chime at 0.4
+ * of its peak that ends 30 ms before it (the stray a run on the rig caught). The click's onset must come
+ * out as on the clean click, and a crossing searched over the whole window must land in the chime (or the
+ * test proves nothing). A detector that cannot tell fails the run. */
+function detectorSelfTest(rate: number): void {
+  const click = referenceClick(true, rate);
+  const half = Math.round((rate * 60) / BPM / 2);
+  const win = new Float32Array(2 * half);
+  const from = half - Math.round(0.24 * rate);
+  const to = half - Math.round(0.03 * rate);
+  for (let i = from; i < to; i++) {
+    const t = (i - from) / rate;
+    win[i] = 0.4 * 0.7 * Math.exp(-t / 0.08) * Math.sin(2 * Math.PI * 200 * t);
+  }
+  for (let i = 0; i < click.length && half + i < win.length; i++) win[half + i] += click[i];
+  const clean = onsetOf(click, onsetReach(rate)).onset;
+  const got = onsetOf(win, onsetReach(rate)).onset - half;
+  check(Math.abs(got - clean) < 1e-6, `the detector reads a click after a chime ${toMs(got - clean, rate).toFixed(3)} ms off its clean onset`);
+  const p = peakIn(win, 0, win.length);
+  const wide = crossing(win, 0, p.at + 1, p.value * 0.3);
+  check(wide >= 0 && wide < to, `the self-test's chime does not catch a whole-window crossing (${wide} of ${win.length}): it proves nothing`);
+
+  // The stray bar: a click played twice, at half level 150 ms before its beat, is a stray past the bar; a
+  // clean take holds none, and with ECHO's repeats a sixteenth on, an echoed take holds none either.
+  const beat = (rate * 60) / BPM;
+  const take = (ghost: boolean, echoes: boolean) => {
+    const pcm = new Float32Array(Math.round(8 * beat));
+    const put = (from: number, gain: number, accent: boolean) => {
+      const c = referenceClick(accent, rate);
+      for (let i = 0; i < c.length; i++) pcm[(Math.round(from) + i) % pcm.length] += gain * c[i];
+    };
+    for (let k = 0; k < 8; k++) {
+      put(k * beat, 1, k % BEATS_PER_BAR === 0);
+      if (echoes) put(k * beat + beat / 4, 0.5, k % BEATS_PER_BAR === 0);
+    }
+    if (ghost) put(3 * beat - 0.15 * rate, 0.5, false);
+    return pcm;
+  };
+  const loudest = (pcm: Float32Array, echoed: boolean) => {
+    const events = findStrays(pcm, rate, noiseFloor(pcm), echoed);
+    return events.length ? Math.max(...events.map((e) => e.peak)) / (0.56 * CLICK_VOLUME) : 0;
+  };
+  check(loudest(take(true, false), false) >= STRAY_FAIL, `the stray scan misses a click played twice: ${loudest(take(true, false), false).toFixed(3)}`);
+  check(loudest(take(false, false), false) === 0, `the stray scan finds sound in a clean take: ${loudest(take(false, false), false).toFixed(3)}`);
+  check(loudest(take(false, true), true) === 0, `the stray scan reads ECHO's repeats as stray: ${loudest(take(false, true), true).toFixed(3)}`);
+  check(loudest(take(false, true), false) > 0, "the self-test's echoes never reach the scan's window: the echo case proves nothing");
 }
 
 /** Least-squares slope of y over x. */
@@ -212,7 +272,7 @@ interface Reference {
 }
 
 function reference(rate: number): Reference {
-  return { accent: onsetOf(referenceClick(true, rate)), plain: onsetOf(referenceClick(false, rate)) };
+  return { accent: onsetOf(referenceClick(true, rate), onsetReach(rate)), plain: onsetOf(referenceClick(false, rate), onsetReach(rate)) };
 }
 
 interface TakeStats {
@@ -231,6 +291,8 @@ interface TakeStats {
   gain: number;
   /** Beats where the accent and beat 1 of the bar disagree: an accent off beat 1, or a beat 1 unaccented. */
   offBar: number[];
+  /** The loudest stray sound in the take over its median click (`strayEvents`), 0 with none. */
+  stray: number;
 }
 
 /** A take's noise floor, its median |x|, from every 64th sample: sorting the whole take would stall the
@@ -240,7 +302,7 @@ function noiseFloor(pcm: Float32Array): number {
 }
 
 /** Every beat's click in a committed lane, against its beat frame. */
-function analyse(name: string, laneIndex: number, pcm: Float32Array, rate: number, ref: Reference, channel: number): TakeStats {
+function analyse(name: string, laneIndex: number, pcm: Float32Array, rate: number, ref: Reference, channel: number, echoed = false, whole = pcm): TakeStats {
   const beat = (rate * 60) / BPM;
   const beats = Math.round(pcm.length / beat);
   const half = Math.round(beat / 2);
@@ -252,7 +314,7 @@ function analyse(name: string, laneIndex: number, pcm: Float32Array, rate: numbe
   for (let k = 0; k < beats; k++) {
     const start = Math.round(k * beat) - half;
     for (let i = 0; i < win.length; i++) win[i] = pcm[(((start + i) % n) + n) % n];
-    const { onset, peak } = onsetOf(win);
+    const { onset, peak } = onsetOf(win, onsetReach(rate));
     loudest = Math.max(loudest, peak);
     if (onset < 0 || peak < Math.max(floor * FLOOR_FACTOR, 1e-6)) continue;
     hits.push({ k, raw: onset - half, peak });
@@ -280,15 +342,88 @@ function analyse(name: string, laneIndex: number, pcm: Float32Array, rate: numbe
     drift: slope(minutes, netMs),
     gain,
     offBar: hits.filter((h) => accented(h) !== (h.k % BEATS_PER_BAR === 0)).map((h) => h.k),
+    stray: 0,
   };
   const accents = hits.filter(accented).length;
   log(
     `take ${name}: lane ${laneIndex + 1}, ${stats.found}/${beats} clicks (${accents} accented, ${stats.offBar.length ? `off beat 1 at ${stats.offBar.join(',')}` : 'all on beat 1'}), offset ${signed(stats.x, 3)} ms net (raw ${signed(stats.raw, 3)}), spread ${signed(stats.min, 3)}..${signed(stats.max, 3)} ms (${(stats.max - stats.min).toFixed(3)}), drift ${signed(stats.drift, 3)} ms/min, peak gain ${stats.gain.toFixed(3)}, floor ${floor.toExponential(2)}`,
   );
+  stats.stray = strayEvents(name, whole, rate, floor, mid, echoed);
+  for (let j = 0; j < hits.length; j++) {
+    if (Math.abs(netMs[j]) > 1) log(`  take ${name} off: beat ${hits[j].k} ${signed(netMs[j], 3)} ms, peak ${(hits[j].peak / mid).toFixed(3)} of the median click`);
+  }
   // Every eighth beat's offset, so a step inside the take shows.
   const every = Math.max(1, Math.floor(hits.length / 8));
   log(`  take ${name} beats: ${hits.filter((_, i) => i % every === 0).map((h, i) => `${h.k}:${signed(netMs[i * every], 3)}`).join(' ')}`);
   return stats;
+}
+
+/** The level a 1 ms bin must clear to count as stray sound: analyse's floor bar. */
+const strayBar = (floor: number) => Math.max(floor * FLOOR_FACTOR, 1e-6);
+
+interface Stray {
+  from: number;
+  to: number;
+  peak: number;
+  sum: number;
+  zc: number;
+}
+
+/** Sound in a take's silence between its clicks (100 ms after a beat to 5 ms before the next; with
+ * `echoed`, the take holds ECHO's repeats a sixteenth after each click, so 115..200 ms is theirs too),
+ * binned by 1 ms where a bin's peak clears the take's floor bar, and merged into events. */
+function findStrays(pcm: Float32Array, rate: number, floor: number, echoed: boolean): Stray[] {
+  const beat = (rate * 60) / BPM;
+  const bin = Math.round(rate / 1000);
+  const bar = strayBar(floor);
+  const events: Stray[] = [];
+  let open: Stray | null = null;
+  for (let s = 0; s + bin <= pcm.length; s += bin) {
+    const after = s % beat;
+    let peak = 0;
+    for (let i = s; i < s + bin; i++) peak = Math.max(peak, Math.abs(pcm[i]));
+    const echo = echoed && after >= 0.115 * rate && after < 0.2 * rate;
+    if (after < 0.1 * rate || after > beat - 0.005 * rate || echo || peak < bar) {
+      open = null;
+      continue;
+    }
+    if (!open) {
+      open = { from: s, to: s, peak: 0, sum: 0, zc: 0 };
+      events.push(open);
+    }
+    for (let i = s; i < s + bin; i++) {
+      open.sum += pcm[i];
+      if (i > 0 && pcm[i] >= 0 !== pcm[i - 1] >= 0) open.zc++;
+    }
+    open.peak = Math.max(open.peak, peak);
+    open.to = s + bin;
+  }
+  return events;
+}
+
+/** A take's stray sound (`findStrays`), the loudest eight logged with their loop frame, place after the
+ * beat, length, peak over the take's median click, signed mean and zero crossings per ms (the click shows
+ * 2 at 1 kHz, 3 accented at 1.5 kHz). Returns the loudest over `click`, 0 with none. Its source is
+ * unknown: on the rig the sounds matched other apps' through the interface (suspected), and a click the
+ * engine plays early or twice reads the same, which is why the stray bar fails the run. */
+function strayEvents(name: string, pcm: Float32Array, rate: number, floor: number, click: number, echoed = false): number {
+  if (strayBar(floor) > STRAY_FAIL * click) {
+    // A stray at the bar's share of this click would sit under the floor bar: the scan cannot see it.
+    log(`  take ${name} stray: the click stands ${(click / floor).toFixed(0)}x the floor, too weak for the stray scan to see ${STRAY_FAIL} of it`);
+    return Infinity;
+  }
+  const events = findStrays(pcm, rate, floor, echoed);
+  if (!events.length) return 0;
+  const loudest = Math.max(...events.map((e) => e.peak)) / click;
+  log(`  take ${name} stray: ${events.length} event(s) over the floor bar, the loudest ${loudest.toFixed(3)} of the median click (source unknown)`);
+  const beat = (rate * 60) / BPM;
+  for (const e of [...events].sort((a, b) => b.peak - a.peak).slice(0, 8)) {
+    const ms = toMs(e.to - e.from, rate);
+    log(
+      `    @${e.from} (beat ${Math.floor(e.from / beat)} +${toMs(e.from % beat, rate).toFixed(1)} ms): ${ms.toFixed(0)} ms, peak ${(e.peak / click).toFixed(3)} of the median click, mean ${(e.sum / (e.to - e.from)).toExponential(1)}, ${(e.zc / ms).toFixed(1)} zc/ms`,
+    );
+  }
+  return loudest;
 }
 
 /** IN FX's echo in a take of the click (ECHO at 1/16, no feedback), beat by beat. */
@@ -312,7 +447,8 @@ function echoIn(pcm: Float32Array, rate: number): EchoStats {
     const win = new Float32Array(2 * reach);
     const start = Math.round(from) - reach;
     for (let i = 0; i < win.length; i++) win[i] = pcm[(((start + i) % pcm.length) + pcm.length) % pcm.length];
-    const o = onsetOf(win);
+    // The whole window, as before: an extra click between a click and its echo must move the echo's onset.
+    const o = onsetOf(win, win.length);
     return { onset: o.onset < 0 || o.peak < clear ? NaN : start + o.onset, peak: o.peak };
   };
   const stats: EchoStats = { clicks: 0, missing: [], delays: [], ratios: [] };
@@ -375,7 +511,7 @@ function echoSelfTest(rate: number): void {
 
 /** Every beat's click in the first `beats` beats of a committed lane (the rest of the take is silent). */
 function analyseFirst(name: string, laneIndex: number, pcm: Float32Array, beats: number, rate: number, ref: Reference, channel: number): TakeStats {
-  return analyse(name, laneIndex, pcm.subarray(0, Math.round((beats * rate * 60) / BPM)), rate, ref, channel);
+  return analyse(name, laneIndex, pcm.subarray(0, Math.round((beats * rate * 60) / BPM)), rate, ref, channel, false, pcm);
 }
 
 /** How many samples of `got` differ from `pcm`'s first `frames` repeated out to `got`'s length (the
@@ -419,6 +555,8 @@ interface FadeStats {
   /** Lane 1's input-meter peak after PLAY ALL over before the fade, and whether its volume stayed. */
   back: number;
   volumeKept: boolean;
+  /** The loudest stray sound in take I over its first beat's click (`strayEvents`), 0 with none. */
+  stray: number;
 }
 
 /** A take's click peak at each of its first `beats` beats (half a beat either side). */
@@ -622,6 +760,7 @@ async function fadePhase(grown: number, rate: number): Promise<{ fade: FadeStats
     // Past the bar line: the loudest beat window over the bar a click must clear (analyse's floor × FLOOR_FACTOR).
     const floor = median(Array.from({ length: Math.floor(take.length / 64) }, (_, i) => Math.abs(take[i * 64])));
     const after = Math.max(...got.slice(fadeBeats)) / Math.max(floor * FLOOR_FACTOR, 1e-6);
+    const strayI = strayEvents('I', take, rate, floor, got[0]);
     log(`  take I: fade to frame ${end}, beat levels ${levels.map((l) => l.toFixed(3)).join(' ')}, after the bar line ${after.toFixed(3)} of the floor bar, floor ${floor.toExponential(2)}`);
 
     // The stop: every fading lane reported STOPPED on the fade's end, a downbeat the fade's bars after the
@@ -638,7 +777,7 @@ async function fadePhase(grown: number, rate: number): Promise<{ fade: FadeStats
     await until('lanes 1–3 PLAYING again', () => [0, 1, 2].every((i) => lane(i).state === 'PLAYING'), 5);
     await sleep(300);
     const after2 = await meterPeak(4200);
-    const fade: FadeStats = { levels, after, onBar, stops: stopsText, back: after2 / before, volumeKept: looper.trackVolume(0) === volume };
+    const fade: FadeStats = { levels, after, onBar, stops: stopsText, back: after2 / before, volumeKept: looper.trackVolume(0) === volume, stray: strayI };
     log(`  take I: meter peak ${before.toFixed(3)} before the fade, ${after2.toFixed(3)} after PLAY ALL; ${stopsText}`);
     return { fade, msI };
   } finally {
@@ -658,6 +797,7 @@ async function runBuffer(buffer: BufferFrames, pick: SampleRate | null, bars: nu
   const rate = device.sampleRate;
   check(pick === null || rate === pick, `the device runs at ${rate} Hz, not the ${pick} Hz picked`);
   const ref = reference(rate);
+  detectorSelfTest(rate);
   log(
     `b${buffer}: ${device.inputName} → ${device.outputName}, ${rate} Hz, block ${device.block}, alignFrames ${device.alignFrames} (${toMs(device.alignFrames, rate).toFixed(2)} ms), inputFrames ${device.inputFrames}; detector lag on the ideal click ${toMs(ref.accent.onset, rate).toFixed(3)} ms accent, ${toMs(ref.plain.onset, rate).toFixed(3)} ms plain`,
   );
@@ -687,7 +827,7 @@ async function runBuffer(buffer: BufferFrames, pick: SampleRate | null, bars: nu
     if (withEcho) engineInputSends.setOn('echo', false);
     check(looper.masterLengthFrames() === masterFrames, `the master is ${looper.masterLengthFrames()} frames, expected ${masterFrames}`);
     const pcmA = await committedPcm(0, masterFrames);
-    const a = analyse('A', 0, pcmA, rate, ref, channel);
+    const a = analyse('A', 0, pcmA, rate, ref, channel, withEcho);
     const echo = withEcho ? echoIn(pcmA, rate) : null;
     if (echo) {
       const range = (xs: number[], digits: number) => (xs.length ? `${signed(Math.min(...xs), digits)}..${signed(Math.max(...xs), digits)}` : 'none');
@@ -698,7 +838,7 @@ async function runBuffer(buffer: BufferFrames, pick: SampleRate | null, bars: nu
     // ── B: lane 1's clicks through the cable, click off ──────────────────────────────────────────────
     clock.setMetronome(false);
     const msB = await take(1, 'B', takeSeconds);
-    const b = analyse('B', 1, await committedPcm(1, masterFrames), rate, ref, channel);
+    const b = analyse('B', 1, await committedPcm(1, masterFrames), rate, ref, channel, withEcho);
 
     // ── STOP ALL → PLAY ALL: the idle transport restarts from the top ────────────────────────────────
     looper.stopAll();
@@ -719,7 +859,7 @@ async function runBuffer(buffer: BufferFrames, pick: SampleRate | null, bars: nu
     looper.setMute(2, true);
     looper.setMute(0, false);
     const msD = await take(3, 'D', takeSeconds);
-    const d = analyse('D', 3, await committedPcm(3, masterFrames), rate, ref, channel);
+    const d = analyse('D', 3, await committedPcm(3, masterFrames), rate, ref, channel, withEcho);
 
     // ── E: a multiply, FIXED at two loops, the click alone ───────────────────────────────────────────
     looper.setMute(0, true);
@@ -829,6 +969,13 @@ async function runBuffer(buffer: BufferFrames, pick: SampleRate | null, bars: nu
       },
       { name: 'I: silence from the bar line (no click over the floor bar)', ok: fade.after < 1, value: `${fade.after.toFixed(3)} of the floor bar` },
       { name: 'I: PLAY ALL brings lane 1 back at its level (meter 0.8..1.25, volume kept)', ok: fade.back >= 0.8 && fade.back <= 1.25 && fade.volumeKept, value: `${fade.back.toFixed(3)}, volume ${fade.volumeKept ? 'kept' : 'moved'}` },
+      // Sound between the clicks that is not theirs (source unknown: see `strayEvents`) fails by name, as
+      // the old onset's 30 % crossing failed it as timing.
+      {
+        name: `no stray sound >= ${STRAY_FAIL} of a click A-H, I`,
+        ok: [...takes.map((t) => t.stray), fade.stray].every((v) => v < STRAY_FAIL),
+        value: [...takes.map((t) => t.stray), fade.stray].map((v) => v.toFixed(3)).join(','),
+      },
       ...(echo ? echoBars(echo, a.found) : []),
     ];
     for (const bar of barList) log(`b${buffer} ${bar.ok ? 'PASS' : 'FAIL'} ${bar.name}: ${bar.value}`);
