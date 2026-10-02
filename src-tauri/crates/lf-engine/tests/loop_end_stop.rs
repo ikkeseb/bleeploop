@@ -13,6 +13,7 @@
 
 mod common;
 
+use common::dub::{pos_fn, ramp};
 use common::{code, Opts, Rig};
 use lf_engine::grid::Frame;
 use lf_engine::{Command, Event, LaneState};
@@ -194,11 +195,9 @@ fn stop_all_over_a_playing_lane_and_an_overdub_is_one_gesture() {
         assert!(rig.state(dub) == LaneState::Stopped && rig.lane(dub).can_undo && rig.window().is_none(), "dub on lane {dub}");
         assert_eq!(reported(&rig, dub as u8, LaneState::Stopped, press), Some(tail), "STOPPED once its aligned tail is in");
         let (anchor, master) = (rig.anchor(), rig.master());
-        let first = (punch - anchor).rem_euclid(master);
-        let layer: Vec<f32> = (0..master)
-            .map(|p| if (p - first).rem_euclid(master) < press - punch { pre[p as usize] + DUB } else { pre[p as usize] })
-            .collect();
-        assert_eq!(rig.pcm(dub), layer, "dub on lane {dub}: the layer is the loop positions through the press");
+        let mut layer = pre.clone();
+        common::dub::dub(&mut layer, (punch + ALIGN, press + ALIGN), ramp(rig.sr), 1.0, pos_fn(anchor, master, ALIGN), |_| DUB);
+        assert_eq!(rig.pcm(dub), layer, "dub on lane {dub}: the layer is the loop positions through the press, ramped (D23)");
         // The dub is silent from the press, the playing lane sounds up to the boundary.
         plays(&rig, press, end, &[play]);
         plays(&rig, end, rig.frame, &[]);

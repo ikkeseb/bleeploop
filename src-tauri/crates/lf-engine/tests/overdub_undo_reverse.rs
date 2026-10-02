@@ -9,9 +9,12 @@
 //! undo target keeps the pre-session loop while the layer sums in". reverse.mjs A's peak check is
 //! `tests/peaks.rs`. Two overdub rows of the Web Audio probes are here on the rendered output too:
 //! capture-loss.mjs's damaged layer ended by PLAY/STOP, and overdub-window.mjs's aligned punch-outs.
+//! A layer's first and last 5 ms are ramped in the stored loop (D23): a committed layer is held to
+//! `common::dub`'s reference over its exact window.
 
 mod common;
 
+use common::dub::{pos_fn, ramp};
 use common::{code, Rig};
 use lf_engine::grid::Frame;
 use lf_engine::looper::{job_frames, JOB_RATE};
@@ -64,28 +67,28 @@ fn overdub_every_captured_frame_sums_once_across_end_start_cycles() {
         let pre = rig.pcm(0);
         rig.set_level(DUB);
         rig.advance_to(rig.next_boundary() + 2400);
-        let mut captured = 0;
+        // Each press's frame: a start opens the window there (the rig's alignment is 0), a stop closes it.
+        let mut presses = Vec::new();
         for tap in 0..(1 + 2 * cycles) {
-            let at = rig.frame;
+            presses.push(rig.frame);
             rig.press(Command::RecDub(0));
             let want = if tap % 2 == 0 { LaneState::Overdubbing } else { LaneState::Playing };
             assert_eq!(rig.state(0), want);
             rig.advance(959);
-            if tap % 2 == 0 {
-                captured += rig.frame - at;
-            }
-            if tap % 2 == 1 {
-                captured -= rig.frame - at; // the end press's own frames were not captured
-            }
         }
-        let _ = captured;
         rig.advance_to(rig.next_boundary() + 5 * master);
+        presses.push(rig.frame);
         rig.press(Command::RecDub(0));
         rig.set_level(0.0);
         rig.advance(10);
         assert_eq!(rig.state(0), LaneState::Playing);
-        let added = layer_sum(&rig.pcm(0), &pre) / DUB as f64;
-        assert!(added >= master as f64 && added.fract() == 0.0, "cycles={cycles}: added {added} frames");
+        // Every captured frame written once, in capture order, each gesture ramped at its own edges.
+        let mut want = pre.clone();
+        let pos = pos_fn(rig.anchor(), master, 0);
+        for w in presses.chunks(2) {
+            common::dub::dub(&mut want, (w[0], w[1]), ramp(rig.sr), 1.0, &pos, |_| DUB);
+        }
+        assert_eq!(rig.pcm(0), want, "cycles={cycles}: every captured frame, once per pass");
         rig.keep_output();
         let from = rig.frame;
         rig.advance(master + 100);
@@ -108,6 +111,7 @@ fn overdub_play_stop_commits_the_layer_through_the_press_and_lands_stopped() {
         rig.press(Command::PlayStop(0));
         let stop = rig.frame - 1;
         let tail = stop + 1 + align;
+        let anchor = rig.anchor();
         rig.set_input(move |f| if f < tail { DUB } else { 0.0 });
         rig.keep_output();
         let from = rig.frame;
@@ -116,8 +120,9 @@ fn overdub_play_stop_commits_the_layer_through_the_press_and_lands_stopped() {
         let out = &rig.output.as_ref().unwrap().1;
         let monitor = |f: Frame| if f < tail { DUB } else { 0.0 };
         assert!(out.iter().enumerate().all(|(k, &y)| y == monitor(from + k as Frame)), "no lane playback after STOP, only the monitor");
-        let added = layer_sum(&rig.pcm(0), &pre) / DUB as f64;
-        assert_eq!(added, (stop - punch) as f64, "align={align}: the layer through the press");
+        let mut want = pre.clone();
+        common::dub::dub(&mut want, (punch + align, stop + align), ramp(rig.sr), 1.0, pos_fn(anchor, master, align), |_| DUB);
+        assert_eq!(rig.pcm(0), want, "align={align}: the layer through the press");
     }
 }
 
@@ -128,6 +133,7 @@ fn undo_a_the_snapshot_the_session_and_the_toggle() {
     let pre = rig.pcm(0);
     rig.set_level(DUB);
     rig.advance_to(rig.next_boundary() - master / 2);
+    let punch = rig.frame;
     rig.press(Command::RecDub(0));
     rig.advance(master / JOB_RATE + 1);
     assert_eq!(rig.engine.looper().undo_pcm(0).unwrap(), pre, "DUB snapshots the pre-dub loop");
@@ -136,11 +142,15 @@ fn undo_a_the_snapshot_the_session_and_the_toggle() {
     assert_ne!(rig.pcm(0), pre, "the layer sums in place");
     assert_eq!(rig.engine.looper().undo_pcm(0).unwrap(), pre, "the undo target keeps the pre-session loop");
     rig.advance_to(rig.next_boundary() - master / 2);
+    let out = rig.frame;
     rig.press(Command::RecDub(0));
     rig.set_level(0.0);
     rig.advance(480);
     let dubbed = rig.pcm(0);
-    assert_eq!(layer_sum(&dubbed, &pre), master as f64 * DUB as f64, "one period of layer");
+    assert_eq!(out - punch, master, "one period of layer");
+    let mut want = pre.clone();
+    common::dub::dub(&mut want, (punch, out), ramp(rig.sr), 1.0, pos_fn(rig.anchor(), master, 0), |_| DUB);
+    assert_eq!(dubbed, want, "one period of layer, ramped at its edges");
     assert!(rig.lane(0).can_undo);
     rig.advance_to(rig.next_boundary() + 480);
     rig.keep_output();
@@ -395,7 +405,8 @@ fn stop_all_a_second_stop_and_clear_punch_out_an_aligned_overdub() {
     // verify/probes/overdub-window.mjs's stopAll, doubleStop and clear modes: impulses played just
     // outside and inside each punch edge (their wet arrives ALIGN later, one inside the window only after
     // the press) are kept exactly inside the window, at their grid position, and playback is silent from
-    // the press while the tail comes in.
+    // the press while the tail comes in. Inside, the ramps weigh them (D23): the one on the punch frame
+    // is the punch-in's first frame (weight 0), the one just before the stop the punch-out's last (1/N).
     const ALIGN: Frame = 7200;
     for gesture in ["stop all", "second stop", "second stop at once", "clear"] {
         let (mut rig, master) = playing_loop();
@@ -436,10 +447,12 @@ fn stop_all_a_second_stop_and_clear_punch_out_an_aligned_overdub() {
         assert!(rig.state(0) == LaneState::Stopped && rig.lane(0).can_undo, "{gesture}");
         let anchor = rig.anchor();
         let mut want = pre.clone();
-        for &(f, v) in played.iter().filter(|p| (punch..stop).contains(&p.0)) {
-            want[(f - anchor).rem_euclid(master) as usize] += v;
-        }
+        let wet = |f: Frame| played.iter().find(|p| p.0 + ALIGN == f).map_or(0.0, |p| p.1);
+        common::dub::dub(&mut want, (punch + ALIGN, stop + ALIGN), ramp(rig.sr), 1.0, pos_fn(anchor, master, ALIGN), wet);
         assert_eq!(rig.pcm(0), want, "{gesture}: exactly the musical punch window, on the grid");
+        let at = |f: Frame| (f - anchor).rem_euclid(master) as usize;
+        assert_eq!(want[at(punch)], pre[at(punch)], "{gesture}: the punch frame's impulse is the ramp's first frame");
+        assert_eq!(want[at(punch + 1920)], pre[at(punch + 1920)] + 4.0 / 32.0, "{gesture}: inside, at full");
     }
 }
 
@@ -618,13 +631,17 @@ fn a_punch_out_never_waits_for_the_undo_copy() {
     rig.set_level(0.0);
     let pre = rig.pcm(0);
     rig.set_level(DUB);
+    let punch = rig.frame;
     rig.press(Command::RecDub(0));
     rig.advance(99);
     assert!(rig.engine.looper().busy(), "the undo copy is still running");
     rig.press(Command::RecDub(0)); // punch out on this frame, not when the copy is done
     rig.set_level(0.0);
     rig.idle();
-    assert_eq!(layer_sum(&rig.pcm(0), &pre), 100.0 * DUB as f64, "exactly the 100 frames played");
+    // Shorter than one ramp: both ramps weigh every one of the 100 frames (D23).
+    let mut want = pre.clone();
+    common::dub::dub(&mut want, (punch, punch + 100), ramp(rig.sr), 1.0, pos_fn(rig.anchor(), master, 0), |_| DUB);
+    assert_eq!(rig.pcm(0), want, "exactly the 100 frames played");
     assert!(master > 0);
 }
 

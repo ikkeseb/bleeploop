@@ -5,6 +5,7 @@
 
 mod common;
 
+use common::dub::{pos_fn, ramp};
 use common::{code, Opts, Rig};
 use lf_engine::grid::Frame;
 use lf_engine::{Command, Event, LaneInfo, LaneState, TRACK_COUNT};
@@ -296,12 +297,12 @@ fn an_overdub_layer_ends_at_the_punch_out_and_is_kept() {
     rig.punch_out();
     assert_eq!(rig.state(0), LaneState::Playing);
     assert!(rig.window().is_none() && rig.lane(0).can_undo);
+    // The punch-out ramp lands on the frames it retained, with no frame rendered after it (D23).
+    let mut want = before.clone();
+    common::dub::dub(&mut want, (first, now), ramp(rig.sr), 1.0, pos_fn(rig.anchor(), master, 0), |_| DUB);
+    assert_eq!(rig.pcm(0), want, "the layer through the last rendered frame, ramped at both ends");
     rig.idle();
-    let (anchor, pcm) = (rig.anchor(), rig.pcm(0));
-    for (p, (&x, &was)) in pcm.iter().zip(&before).enumerate() {
-        let dubbed = (p as Frame - (first - anchor)).rem_euclid(master) < now - first;
-        assert_eq!(x, if dubbed { was + DUB } else { was }, "position {p}");
-    }
+    assert_eq!(rig.pcm(0), want);
     assert_eq!(rig.engine.looper().undo_pcm(0), Some(before), "the undo target is the loop before it");
     plays_on_in_place(&mut rig);
 }

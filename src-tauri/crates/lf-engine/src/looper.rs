@@ -25,9 +25,11 @@
 //!
 //! An overdub writes `input + feedback * old` at each position it passes (DUB FEEDBACK, a lane setting:
 //! 1 sums, as ever; 0 replaces), so continuous dubbing lets the older layers fade pass by pass; its undo
-//! target is still the loop before it. FADE is a pending stop with a ramp: every playing lane stops on a
-//! bar line and fades down to it under its volume, which never moves, its FX returns with it (`fade_all`,
-//! `render`).
+//! target is still the loop before it. Its first and last 5 ms are ramped in the stored loop (D23): the
+//! layer fades in from its window start as it is written (`punch_in`), and a clean end fades its last
+//! writes back toward what they overwrote (`fade_tail`). FADE is a pending stop with a ramp: every
+//! playing lane stops on a bar line and fades down to it under its volume, which never moves, its FX
+//! returns with it (`fade_all`, `render`).
 
 use std::sync::Arc;
 
@@ -95,7 +97,7 @@ struct Lane {
     fade_from: Option<Frame>,
     volume: f32,
     muted: bool,
-    /// DUB FEEDBACK, 0..1: an overdub writes `input + feedback * old`.
+    /// DUB FEEDBACK, 0..1: an overdub writes `input + feedback * old` (ramped at its edges: `punch_in`).
     feedback: f32,
     gain: f64,
 }
@@ -211,6 +213,39 @@ impl Recorder {
             prev_spare_reversed: false,
         }
     }
+}
+
+/// One overdub write, kept for the punch-out (`Looper::fade_tail`): its input frame, the loop position
+/// it wrote, the sample there before it and the sample it left.
+#[derive(Clone, Copy, Debug, Default)]
+struct DubWrite {
+    frame: Frame,
+    pos: usize,
+    old: f32,
+    new: f32,
+}
+
+/// What an overdub writes over `old` from input `x`, `d` frames into its window of punch ramp `n` (D23):
+/// from the ramp's end on, today's `x + fb * old` (at a feedback of 1 the plain sum, bit for bit); at the
+/// window's first frame `old` itself; between, the input faded in and the old layer faded from 1 down to
+/// the feedback, `a * x + (1 + a * (fb - 1)) * old` with `a = d / n` (at a feedback of 1 the old
+/// layer's factor is exactly 1).
+#[inline]
+fn punch_in(old: f32, x: f32, fb: f32, d: Frame, n: Frame) -> f32 {
+    if d >= n {
+        x + fb * old
+    } else if d <= 0 {
+        old
+    } else {
+        let a = d as f32 / n as f32;
+        a * x + (1.0 + a * (fb - 1.0)) * old
+    }
+}
+
+/// The punch ramp at `sample_rate`: 5 ms of frames, rounded half up, at least one (240 at 48 kHz, 221 at
+/// 44.1 kHz).
+fn punch_frames(sample_rate: u32) -> Frame {
+    ((sample_rate as Frame + 100) / 200).max(1)
 }
 
 /// Buffer positions a job visits, in order: `(lo + (off + s) % span) % modulus` for `s` in `0..span`.
@@ -350,6 +385,14 @@ pub struct Looper {
     published: [Option<LaneInfo>; TRACK_COUNT],
     published_transport: Option<(Frame, u32, bool)>,
     overview: Arc<Overview>,
+    /// D23's punch ramp (`punch_frames`): an overdub fades in over its first this many frames and out
+    /// over its last.
+    punch: Frame,
+    /// The overdub's last `punch` writes, a ring: `tail_len` of them, the oldest `tail_len` slots behind
+    /// `tail_next`. Reset when an overdub starts; its punch-out reads them (`fade_tail`).
+    tail: Vec<DubWrite>,
+    tail_next: usize,
+    tail_len: usize,
 }
 
 impl Looper {
@@ -392,6 +435,10 @@ impl Looper {
             published: [None; TRACK_COUNT],
             published_transport: None,
             overview: Arc::new(Overview::new(2 * TRACK_COUNT + 1, capacity as usize)),
+            punch: punch_frames(sample_rate),
+            tail: vec![DubWrite::default(); punch_frames(sample_rate) as usize],
+            tail_next: 0,
+            tail_len: 0,
         }
     }
 
@@ -1187,6 +1234,7 @@ impl Looper {
         if rec.damaged {
             self.reject(cx, i, &rec);
         } else if rec.kind == Kind::Overdub {
+            self.fade_tail(i, rec.end.unwrap());
             self.lanes[i].state = if rec.stop_playback { LaneState::Stopped } else { LaneState::Playing };
         } else {
             self.commit_take(cx, i, &rec);
@@ -1432,9 +1480,56 @@ impl Looper {
         let (src, dst) = (t.live, t.spare);
         rec.start = Some(cx.now + rec.align);
         rec.first_pos = first_pos;
+        // The punch-out's writes are distinct positions, and rewritten before the read head reaches them
+        // again (`fade_tail`), only on a loop longer than the ramp and the alignment: a master is at least
+        // one bar.
+        debug_assert!(master > self.punch + rec.align, "a loop of {master} frames under the punch ramp and alignment");
+        self.tail_next = 0;
+        self.tail_len = 0;
         self.rec = Some(rec);
         self.damage_from_gap();
         self.push_job(cx.now, i, JobKind::Copy { src, dst }, Visit { lo: 0, span: master, off: first_pos, modulus: master });
+    }
+
+    /// D23's punch-out of a clean overdub whose window ended at input frame `end`: each of its writes in
+    /// the ramp's last frames before `end` (input frame `f`) becomes `old + b * (new - old)`, with
+    /// `b = (end - f) / punch` (the last write keeps `1 / punch` of its change; nothing past `end` was
+    /// written and nothing is). `old` is the sample that write overwrote, earlier passes of the same dub
+    /// included, not the undo target. A rejected or discarded layer never gets here: its restore puts the
+    /// loop before it back bit for bit.
+    ///
+    /// The writes are distinct loop positions (`start_overdub` checks the loop outlasts the ramp), so the
+    /// buffer still holds each one's `new`. The rewrite lands before any of them plays again: it runs at
+    /// frame `end`, before that frame renders, and the writer runs `align` frames behind the read head,
+    /// so the read head is `align + 1` positions past the last write and reaches the earliest rewritten
+    /// one `master - (punch - 1 + align)` frames later. A device's punch-out (`punch_out`) runs it at
+    /// once on the writes it retained, its `end` the next frame no device rendered.
+    fn fade_tail(&mut self, i: usize, end: Frame) {
+        let (n, cap) = (self.punch, self.tail.len());
+        let buf = self.lanes[i].live;
+        let data = &mut self.bufs[buf];
+        let oldest = (self.tail_next + cap - self.tail_len) % cap;
+        let mut faded: Option<(usize, usize)> = None;
+        for k in 0..self.tail_len {
+            let w = self.tail[(oldest + k) % cap];
+            let to_end = end - w.frame;
+            if to_end >= n {
+                continue;
+            }
+            debug_assert_eq!(data[w.pos].to_bits(), w.new.to_bits(), "a punch-out write was overwritten in its own ramp");
+            faded = Some(faded.map_or((w.pos, 1), |(p, c)| (p, c + 1)));
+            if w.new != w.old {
+                let b = to_end as f32 / n as f32;
+                data[w.pos] = w.old + b * (w.new - w.old);
+            }
+        }
+        // One touch per run of positions (two across the loop point): peaks and a snapshot's write count.
+        let Some((first, count)) = faded else { return };
+        let (data, master) = (&self.bufs[buf], self.master as usize);
+        self.overview.touch(buf, data, first, (first + count).min(master), master);
+        if first + count > master {
+            self.overview.touch(buf, data, 0, first + count - master, master);
+        }
     }
 
     /// Put the loop back as it was before the overdub, and the undo target from before it.
@@ -1801,11 +1896,18 @@ impl Looper {
                 let master = self.master;
                 let first = loop_pos(lo - rec.align, self.anchor, master);
                 let mut pos = first;
-                // DUB FEEDBACK: at 1 this is `old + x` bit for bit (a product by 1 is exact, a sum commutes).
-                let fb = lane.feedback;
-                for &x in &input[(lo - f0) as usize..(hi - f0) as usize] {
-                    let old = &mut data[pos as usize];
-                    *old = x + fb * *old;
+                // DUB FEEDBACK past the punch ramp: at 1 this is `old + x` bit for bit (a product by 1 is
+                // exact, a sum commutes). The ramp's age is the input frame's distance from the window
+                // start, whatever the block or the pass (`punch_in`); every write is kept for the
+                // punch-out (`fade_tail`).
+                let (fb, n, cap) = (lane.feedback, self.punch, self.tail.len());
+                for (f, &x) in (lo..hi).zip(&input[(lo - f0) as usize..(hi - f0) as usize]) {
+                    let old = data[pos as usize];
+                    let new = punch_in(old, x, fb, f - start, n);
+                    data[pos as usize] = new;
+                    self.tail[self.tail_next] = DubWrite { frame: f, pos: pos as usize, old, new };
+                    self.tail_next = (self.tail_next + 1) % cap;
+                    self.tail_len = (self.tail_len + 1).min(cap);
                     pos += 1;
                     if pos == master {
                         pos = 0;

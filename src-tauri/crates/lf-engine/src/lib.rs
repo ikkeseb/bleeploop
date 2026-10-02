@@ -43,7 +43,10 @@
 //!   lane's first bars repeat across the loop (F16), heard from the next boundary (a second TRIM before
 //!   it waits for it, and is heard there instead).
 //! - **An overdub writes `input + feedback * old`** (DUB FEEDBACK, a lane setting beside its volume: 1 is
-//!   the plain sum, bit for bit; 0 replaces). The undo target is still the loop at dub start.
+//!   the plain sum, bit for bit; 0 replaces) past its first and before its last 5 ms, which are linear
+//!   ramps stored in the loop (D23, `looper`'s `punch_in` and `fade_tail`): the layer fades in from its
+//!   window start, and a clean end fades its last writes back toward what each overwrote (a rejected or
+//!   discarded layer is restored as it was). The undo target is still the loop at dub start.
 //! - **FADE is a pending stop with a ramp:** every playing lane stops on a bar line (the click's grid), its
 //!   level ramped down to it over the stored volume, which never moves; what a loop-end stop refuses, a
 //!   fading lane refuses too (`Refusal::Fading`). The ramp is on the lane before its FX and on its delay's
@@ -116,7 +119,8 @@
 //! wired sound. `tests/slots.rs` holds the plugin slots, with fake units that record what they saw in
 //! preallocated buffers (never allocating in `process`) and are handed back to the test to drop;
 //! `tests/punch_out.rs` holds the punch-out, `tests/render_master.rs` the export's wet master, `tests/multiply.rs` the multiply (a free take's too),
-//! `tests/trim.rs` the TRIM, `tests/dub_feedback.rs` DUB FEEDBACK, `tests/fade.rs` FADE, `tests/input_fx.rs`
+//! `tests/trim.rs` the TRIM, `tests/dub_feedback.rs` DUB FEEDBACK, `tests/punch_ramps.rs` an overdub's punch
+//! ramps (its reference: `tests/common/dub.rs`), `tests/fade.rs` FADE, `tests/input_fx.rs`
 //! the input sends. `tests/perf.rs` holds the ignored cost
 //! bars (Stage 2 and 3, the input sends, a multiply's burst, a TRIM's) and the Stage 3 load's alloc
 //! check. `tests/golden_jam.rs` runs the golden jam at 44.1 and 48 kHz, bit-identical across block

@@ -1,13 +1,16 @@
 //! DUB FEEDBACK (the owner's night brief, 2026-09-27): a lane setting, 0..1, default 1. While the lane
 //! overdubs, each position the dub writes becomes `input + feedback * old`; a lane that does not
 //! overdub never changes. 1 is today's sum, bit for bit; 0 replaces what the dub passes over; between,
-//! continuous dubbing fades the older layers pass by pass. UNDO still gives back the loop before the dub
+//! continuous dubbing fades the older layers pass by pass. The layer's first and last 5 ms are ramped
+//! (D23): the references here compute them with `common::dub`, and hold the positions no ramp wrote to
+//! the plain `input + feedback * old`. UNDO still gives back the loop before the dub
 //! (its target is taken at dub start), and a second UNDO the faded result. COPY hands the setting on
 //! and CLEAR resets it, as they do a lane's volume. The session carries it on the UI side
 //! (`session.json`); no web guard precedes this: the Web Audio looper only ever summed.
 
 mod common;
 
+use common::dub::{pos_fn, ramp};
 use common::{code, Opts, Rig};
 use lf_engine::grid::Frame;
 use lf_engine::{Command, Event, LaneState};
@@ -50,9 +53,15 @@ fn dub(rig: &mut Rig, passes: Frame, at: usize) -> Frame {
     from
 }
 
-/// What a dub pass leaves at each position: `input + fb * old`, in the engine's f32 arithmetic.
-fn pass(old: &[f32], fb: f32, input: impl Fn(usize) -> f32) -> Vec<f32> {
-    old.iter().enumerate().map(|(p, &o)| input(p) + fb * o).collect()
+/// The positions a ramp wrote in a layer over input frames `[from, to)` (rig alignment 0): the
+/// punch-in's first `n` frames and the punch-out's last `n - 1`.
+fn ramped(rig: &Rig, (from, to): (Frame, Frame)) -> Vec<bool> {
+    let n = ramp(SR);
+    let mut edge = vec![false; rig.master() as usize];
+    for f in (from..to).filter(|&f| f - from < n || to - f < n) {
+        edge[pos_of(rig, f)] = true;
+    }
+    edge
 }
 
 #[test]
@@ -60,7 +69,8 @@ fn full_feedback_is_todays_overdub_bit_for_bit() {
     // The web looper's overdub, computed here without the engine: each position the dub passes becomes
     // `old + x` in f32, in capture order. Rounding-sensitive input (a full mantissa over the take's small
     // codes) and several passes, so a sum in another order or precision, or a feedback a hair off 1,
-    // lands on other bits somewhere. The default and an explicit 1 both match it.
+    // lands on other bits somewhere. The default and an explicit 1 both match it wherever no ramp wrote,
+    // and the ramped reference (`common::dub`) everywhere.
     let input = |f: Frame| ((f as f64 * 0.7373).sin() * 0.3 + 1.0 / 3.0) as f32;
     let mut plain = looping();
     let mut set = looping();
@@ -87,9 +97,16 @@ fn full_feedback_is_todays_overdub_bit_for_bit() {
             legacy[p] += input(f);
             exact[p] += input(f) as f64;
         }
+        let mut want = before.clone();
+        common::dub::dub(&mut want, (from, to), ramp(SR), 1.0, pos_fn(rig.anchor(), rig.master(), 0), input);
         let got = rig.pcm(0);
-        let wrong = (0..got.len()).filter(|&p| got[p].to_bits() != legacy[p].to_bits()).count();
-        assert_eq!(wrong, 0, "{name}: positions off the plain f32 sum, of {}", got.len());
+        let wrong = (0..got.len()).filter(|&p| got[p].to_bits() != want[p].to_bits()).count();
+        assert_eq!(wrong, 0, "{name}: positions off the ramped reference, of {}", got.len());
+        // Where no ramp wrote, the layer is the plain f32 sum in capture order.
+        let edge = ramped(rig, (from, to));
+        let wrong = (0..got.len()).filter(|&p| !edge[p] && got[p].to_bits() != legacy[p].to_bits()).count();
+        assert_eq!(wrong, 0, "{name}: positions past the ramps off the plain f32 sum, of {}", got.len());
+        assert!(edge.iter().filter(|&&e| e).count() < got.len() / 50, "{name}: the ramps are the layer's edges only");
         let rounded = (0..got.len()).filter(|&p| got[p] as f64 != exact[p]).count();
         assert!(rounded > got.len() / 2, "{name}: the sums round ({rounded} positions), so the check sees their order");
     }
@@ -102,10 +119,20 @@ fn half_feedback_halves_the_old_layer_each_pass_and_keeps_the_new_one_at_full() 
     let master = rig.master() as usize;
     let at = master / 2 + 3;
     rig.set(Command::SetDubFeedback(0, 0.5));
-    dub(&mut rig, 1, at);
+    // The layer over its window, the impulse in its first pass, computed with the ramps.
+    let layer = |rig: &Rig, from: Frame, passes: Frame| {
+        let (anchor, m) = (rig.anchor(), rig.master());
+        let pos = pos_fn(anchor, m, 0);
+        let mut want = old.clone();
+        common::dub::dub(&mut want, (from, from + passes * m), ramp(SR), 0.5, &pos, |f| if f < from + m && pos(f) == at { 1.0 } else { 0.0 });
+        (want, ramped(rig, (from, from + passes * m)))
+    };
+    let from = dub(&mut rig, 1, at);
     let one = rig.pcm(0);
-    assert_eq!(one, pass(&old, 0.5, |p| if p == at { 1.0 } else { 0.0 }));
-    for p in (0..master).filter(|&p| p != at) {
+    let (want, edge) = layer(&rig, from, 1);
+    assert_eq!(one, want, "one pass, ramped at its edges");
+    assert!(!edge[at], "the impulse lies between the ramps");
+    for p in (0..master).filter(|&p| p != at && !edge[p]) {
         assert_eq!(one[p], old[p] / 2.0, "one pass: the old layer at half (position {p})");
     }
     assert_eq!(one[at], 1.0 + old[at] / 2.0, "the new impulse at full");
@@ -113,10 +140,11 @@ fn half_feedback_halves_the_old_layer_each_pass_and_keeps_the_new_one_at_full() 
     // Two passes of continuous dub: the old layer at a quarter, the first pass's impulse at half.
     let mut rig = looping();
     rig.set(Command::SetDubFeedback(0, 0.5));
-    dub(&mut rig, 2, at);
+    let from = dub(&mut rig, 2, at);
     let two = rig.pcm(0);
-    assert_eq!(two, pass(&one, 0.5, |_| 0.0));
-    for p in (0..master).filter(|&p| p != at) {
+    let (want, edge) = layer(&rig, from, 2);
+    assert_eq!(two, want, "two passes, ramped at the layer's edges");
+    for p in (0..master).filter(|&p| p != at && !edge[p]) {
         assert_eq!(two[p], old[p] / 4.0, "two passes: the old layer at a quarter (position {p})");
     }
     assert_eq!(two[at], (1.0 + old[at] / 2.0) / 2.0);
@@ -136,13 +164,16 @@ fn zero_feedback_replaces_what_the_dub_passed_over_and_keeps_the_rest() {
     rig.press(Command::RecDub(0));
     rig.set_level(0.0);
     rig.idle();
+    let (n, to) = (ramp(SR), from + master / 2);
     let mut want = old.clone();
-    for f in from..from + master / 2 {
-        want[pos_of(&rig, f)] = -code(f);
-    }
+    common::dub::dub(&mut want, (from, to), n, 0.0, pos_fn(rig.anchor(), master, 0), |f| -code(f));
     let got = rig.pcm(0);
-    assert_eq!(got, want, "the dub's half holds the new material alone, the other half the old");
-    assert_eq!(got.iter().zip(&old).filter(|(g, o)| g == o).count(), (master - master / 2) as usize);
+    assert_eq!(got, want, "the dub's half holds the new material alone, ramped at its edges, the other half the old");
+    for f in from + n..=to - n {
+        assert_eq!(got[pos_of(&rig, f)], -code(f), "between the ramps the new material alone (frame {f})");
+    }
+    // The punch-in's first frame keeps the old sample too (its input weight is 0).
+    assert_eq!(got.iter().zip(&old).filter(|(g, o)| g == o).count(), (master - master / 2) as usize + 1);
 }
 
 #[test]
@@ -209,11 +240,17 @@ fn copy_hands_the_setting_on_clear_resets_it_and_it_is_clamped() {
     let old = rig.pcm(1);
     let master = rig.master();
     rig.advance_to(rig.next_boundary() + master / 4);
+    let from = rig.frame;
     rig.press(Command::RecDub(1));
     rig.advance(master - 1);
     rig.press(Command::RecDub(1));
     rig.idle();
-    assert_eq!(rig.pcm(1), old.iter().map(|x| x / 2.0).collect::<Vec<_>>());
+    let mut want = old.clone();
+    common::dub::dub(&mut want, (from, from + master), ramp(SR), 0.5, pos_fn(rig.anchor(), master, 0), |_| 0.0);
+    let got = rig.pcm(1);
+    assert_eq!(got, want);
+    let edge = ramped(&rig, (from, from + master));
+    assert!((0..master as usize).filter(|&p| !edge[p]).all(|p| got[p] == old[p] / 2.0), "between the ramps the old layer at half");
     rig.press(Command::Clear(1));
     assert_eq!(rig.engine.looper().dub_feedback(1), 1.0, "CLEAR resets it, as it resets the volume");
     for (sent, kept) in [(-0.5, 0.0), (1.5, 1.0), (f32::NAN, 1.0), (0.3, 0.3)] {
