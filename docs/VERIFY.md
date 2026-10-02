@@ -3,7 +3,6 @@
 **This file is the playbook**, for every harness; the root `AGENTS.md` routes here.
 
 The app is verified by **driving it and measuring**, not by reading code or trusting a typecheck.
-Subagent "typecheck green" self-reports are NOT sufficient — always run the runtime probe yourself.
 Static gates first (`pnpm check`, `pnpm build`), then the runtime probe below. The engine's
 behaviour is `cargo test -p lf-engine` (`pnpm test:engine`; CI runs it on every push); the frontend's
 deterministic guards and browser probes live in `verify/` (see `verify/README.md`).
@@ -15,23 +14,20 @@ package's prepare script installed hooks in this checkout.
 
 ## Browser harness (web build, `pnpm dev` on http://localhost:1420: the UI, silent)
 
-- **Playwright, NOT claude-in-chrome.** claude-in-chrome is blocked on `localhost:1420` by an
-  enterprise Chrome policy; Playwright launches its own browser (no extensions). Use
-  whichever driver the session has: **playwright-cli** when present (proven 2026-07-10; async work =
-  `eval "(async () => {…})()"`), else the **Playwright MCP** (`browser_evaluate` takes a `() => {…}`
-  function — wrap async in an IIFE; screenshot: OMIT `filename` so it lands in `.playwright-mcp/`,
-  or read the inline image), else a plain `node` Playwright script on `verify/harness/probe.ts` (what
-  every probe in `verify/probes/` does).
+- **Drive the browser with Playwright,** which launches its own browser (claude-in-chrome does not
+  run from WSL): **playwright-cli** when the session has it (async work =
+  `eval "(async () => {…})()"`), else a plain `node` Playwright script on `verify/harness/probe.ts`
+  (what every probe in `verify/probes/` does).
 - **From WSL on the PC:** the `pnpm` wrapper hands a `/mnt/c` checkout to Windows `pnpm.exe`, so
   every `pnpm` command, including the native ones below, runs on Windows node, Windows `cargo` and
   the Windows Playwright browsers. That is the working lane. Vite then listens on Windows localhost
   only: `curl` from WSL hangs, and Linux node cannot drive it. A `pnpm install` that wants to rebuild
-  `node_modules` aborts without a TTY — pass `--config.confirmModulesPurge=false`. An ad-hoc
+  `node_modules` aborts without a TTY: pass `--config.confirmModulesPurge=false`. An ad-hoc
   `tauri dev` from WSL takes env through `WSLENV=A:B`. Only the by-ear gates need a person at the PC.
 - The browser build has no engine. For looper UI, turn on the engine fake (an init script setting
   `window.__lfEngineFake = true` before the app loads), script feed frames with `__lf.native.emit`
   and read what the UI sent in `__lf.native.sent` (pattern: `verify/probes/engine-seam.mjs`), then
-  assert via DOM reads + screenshot. The web build hides Tauri-only chrome (settings gear) — drive
+  assert via DOM reads + screenshot. The web build hides Tauri-only chrome (settings gear); drive
   the reactive state directly instead. If a probe needs a missing handle, add it to `__lf` and keep
   it so the next probe can reuse it.
 
@@ -54,16 +50,16 @@ quiet and looks like a gain bug; it isn't).
 
 ## Recurring web-verify gotchas
 
-- **Web MIDI shows `unsupported` under Playwright's Chromium** — expected (real Chrome/Edge has it;
+- **Web MIDI shows `unsupported` under Playwright's Chromium**, as expected (real Chrome/Edge has it;
   WebView2 has the native path). Not a bug.
 - `getComputedStyle` right after a manual `classList` mutation in a Playwright `evaluate` returns
   STALE values → **verify rendered CSS by screenshot, not getComputedStyle**.
-- **playwright-cli specifics (2026-07-02):** `fill` alone does NOT fire Solid's `onChange` (native
-  `change` fires on blur/Enter — follow with `playwright-cli press Enter`); a leading-minus value
-  parses as a CLI flag (pass it after `--`); `screenshot --filename` lands in the CLI's cwd (repo
-  root — move it out), bare `screenshot` lands in `.playwright-cli/`; the `default` session is
-  SHARED across concurrent Claude sessions on this machine — use a named session
-  (`playwright-cli -s=lf …`) so a parallel session can't hijack the tab mid-probe.
+- **playwright-cli specifics:** `fill` alone does NOT fire Solid's `onChange` (native `change` fires
+  on blur/Enter: follow with `playwright-cli press Enter`); a leading-minus value parses as a CLI flag
+  (pass it after `--`); `screenshot --filename` lands in the CLI's cwd (the repo root: move it out),
+  bare `screenshot` lands in `.playwright-cli/`; the `default` session is SHARED across concurrent
+  agent sessions on this machine, so take a named one (`playwright-cli -s=lf …`) that a parallel
+  session cannot hijack mid-probe.
 - `file://` is BLOCKED in Playwright (mockups need `python3 -m http.server 8765`).
 
 ## Native / Tauri verification (PC only)
@@ -105,19 +101,19 @@ blocks until the verdict, so an agent harness should run it in the background.
   vite-forwarded `[console.error]`; plain `console.log` from WebView2 does NOT.**
 - The committed `native:*` probes (table above) runtime-gate the paths they name. For any other
   native path, temp-wire a probe that drives the PRODUCTION fns, grep, then revert.
-- `tauri dev` does NOT self-terminate — stop it with `pnpm native:kill`. **Never kill all node: the
+- `tauri dev` does NOT self-terminate: stop it with `pnpm native:kill`. **Never kill all node: the
   agent session may be a node process.**
 - Screenshot the native window by its handle: `PrintWindow(hwnd, 3)` (client only + full content)
   from a DPI-aware process captures it without focus. Never grab the screen (`CopyFromScreen`
   after `SetForegroundWindow`): it captures whatever window is on top, including the owner's.
 - Runtime-gate logs go under gitignored `logs/` (e.g. `logs/dev-asio.log`), not the repo root.
-- `tauri dev` watches ALL of `src-tauri/` — a doc edit there (`AGENTS.md` included) rebuilds and
+- `tauri dev` watches ALL of `src-tauri/`: a doc edit there (`AGENTS.md` included) rebuilds and
   relaunches the app mid-probe. Write docs after the run, or outside `src-tauri/`.
 - Background the dev run and poll the log until it prints the line you want, rather than blocking on
   it. (*Claude Code specifics:* background via the PowerShell `run_in_background` tool, poll with a
-  Bash `run_in_background` `until grep -q … ; do sleep 2; done` loop — foreground `sleep` and
-  PowerShell `Start-Sleep`+chaining are blocked by that harness.)
-- The plugin scan works WITHOUT the full app (`--scan-one`) — see `src-tauri/AGENTS.md`
+  Bash `run_in_background` `until grep -q … ; do sleep 2; done` loop; that harness blocks foreground
+  `sleep` and PowerShell `Start-Sleep`+chaining.)
+- The plugin scan works WITHOUT the full app (`--scan-one`): see `src-tauri/AGENTS.md`
   "Native-host verify ops".
 - **When to run the plugin probes, and their baselines** (the verdict alone doesn't say this). Narrow
   `smoke`, `survey` and `swap` to `--filter="Surge XT Effects,Pro-Q,Gojira"` (CLAP and VST3, a
@@ -179,10 +175,3 @@ blocks until the verdict, so an agent harness should run it in the background.
     100–180 ms after the marker's line, and the next launch still found the marker. A run that fails
     midway can leave the probe's record behind: the next run's save phase unloads it and fails once
     ("run again").
-
-
-## Mac vs PC split
-
-On the Mac there is no Rust toolchain — `src-tauri/` is unverifiable (no `cargo`, `cfg(windows)`
-paths). On Mac: verify the TS half (`pnpm check` / `build`), drive the web build via Playwright, and
-adversarial-review any Rust by reading; defer `cargo check` + the runtime gate to the PC.

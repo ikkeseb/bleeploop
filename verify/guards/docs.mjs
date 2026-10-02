@@ -1,6 +1,6 @@
-// verify/guards/docs.mjs — docs drift guard: every backtick path in a tracked .md exists, every cited
+// verify/guards/docs.mjs: docs drift guard. Every backtick path in a tracked .md exists, every cited
 // 7-hex commit sha resolves, the invariant titles in AGENTS.md and docs/ARCHITECTURE.md match by number,
-// and the STATUS gate index has not grown past its cap.
+// the STATUS gate index has not grown past its cap, and no tracked .md holds an em dash.
 //
 // Until 2026-09 doc drift was measured by hand, once per audit (28 dangling refs found on 09-01, 20 of
 // them the pre-split `plugin_host.rs`). This makes it a `pnpm check` gate. Paths are checked against the
@@ -201,6 +201,15 @@ check(
   stops.length <= RIG_LAP_STOP_CAP,
   `STATUS.md rig lap has ${stops.length} stops, cap is ${RIG_LAP_STOP_CAP} — consolidate related stops or flag it to the owner (AGENTS.md)`,
 );
+
+// ── 5. no em dashes in tracked docs ─────────────────────────────────────────────────────────
+// An em dash reads as machine-written prose; a period, a comma or a colon does the same job.
+const EM_DASH = '\u2014';
+for (const md of mdFiles) {
+  const lines = readFileSync(resolve(ROOT, md), 'utf8').split('\n');
+  const hits = lines.flatMap((l, i) => (l.includes(EM_DASH) ? [i + 1] : []));
+  check(hits.length === 0, `${md}:${hits.join(',')} has an em dash: write a period, a comma or a colon`);
+}
 
 console.log(`docs: ${mdFiles.length} tracked .md, ${shaCites.size} shas, ${stops.length}/${RIG_LAP_STOP_CAP} rig-lap stops`);
 console.log(`\n=== RESULT: ${checks - fails}/${checks} checks passed, ${fails} failed ===`);

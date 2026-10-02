@@ -1,4 +1,4 @@
-# `verify/` — guards and probes
+# `verify/`: guards and probes
 
 Two categories of JS-side check, one directory each. The engine's behaviour (the looper, click, grid,
 capture, synths, FX, the device side on a fake driver) is `cargo test`: `pnpm test:engine` (`cargo
@@ -30,9 +30,10 @@ Each guard runs the real source; none carries a hand-ported copy of it. There ar
   state re-runs (`verify/guards/layout-store.mjs`).
 
 `verify/guards/docs.mjs` is the docs guard: cited paths exist, cited shas resolve (the repo
-started from one squashed commit, so no doc may cite an earlier sha), the `STATUS.md` rig
-lap has ≤ 10 stops. A dead path a doc keeps on purpose says so on the same line — "(now `…`)",
-"not yet built", "upstream" — and the guard skips it.
+started from one squashed commit, so no doc may cite an earlier sha), the invariant titles in
+`AGENTS.md` and `docs/ARCHITECTURE.md` match, the `STATUS.md` rig lap has ≤ 10 stops, and no tracked
+`.md` holds an em dash. A dead path a doc keeps on purpose says so on the same line ("(now `…`)",
+"not yet built", "upstream"), and the guard skips it.
 
 A guard counts only once it went red on a deliberately planted bug in the code it claims to cover. A
 bug no public path can reveal is an equivalent mutant; name it in the commit message. The engine's

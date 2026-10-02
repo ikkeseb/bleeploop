@@ -1,9 +1,9 @@
 # Third-Party Notices
 
 BleepLoop is MIT-licensed (see `LICENSE`). It depends on the third-party packages and crates
-listed below. Every license string here was read directly from the locally installed package —
-`node_modules/<pkg>/package.json` for JS dependencies, and the crate's own `Cargo.toml` under
-`~/.cargo/registry/src/index.crates.io-*/<crate>-<version>/` for Rust dependencies — not from
+listed below. Every license string here was read directly from the locally installed package
+(`node_modules/<pkg>/package.json` for JS dependencies, and the crate's own `Cargo.toml` under
+`~/.cargo/registry/src/index.crates.io-*/<crate>-<version>/` for Rust dependencies), not from
 memory or upstream docs. Versions are the ones actually resolved in this repo
 (`package.json`/`pnpm-lock.yaml`, `src-tauri/Cargo.lock`) at the time of writing.
 
@@ -14,7 +14,7 @@ memory or upstream docs. Versions are the ones actually resolved in this repo
 | [solid-js](https://github.com/solidjs/solid) | 1.9.15 | MIT | UI reactivity runtime |
 | [@tauri-apps/api](https://github.com/tauri-apps/tauri) | 2.11.1 | Apache-2.0 OR MIT | Tauri JS bindings |
 
-### Geist and Geist Mono — SIL Open Font License 1.1
+### Geist and Geist Mono: SIL Open Font License 1.1
 
 The UI typefaces, Geist and Geist Mono (Copyright (c) 2023 Vercel, in collaboration with
 basement.studio), are vendored unmodified as variable WOFF2 files from the `geist` npm package 1.7.2
@@ -37,17 +37,17 @@ All versions below are as pinned/resolved in `src-tauri/Cargo.lock`.
 | clack-host | 0.1.0 | MIT OR Apache-2.0 |
 | clack-extensions | 0.1.0 | MIT OR Apache-2.0 |
 | cpal | 0.18.1 | Apache-2.0 (single license, not dual) |
-| asio-sys | 0.3.0 | Apache-2.0 — ASIO builds only (`--features asio`); cpal's own ASIO binding, used directly for the driver list |
+| asio-sys | 0.3.0 | Apache-2.0; ASIO builds only (`--features asio`); cpal's own ASIO binding, used directly for the driver list |
 | rtrb | 0.3.5 | MIT OR Apache-2.0 |
 | rubato | 3.0.0 | MIT |
 | rustfft | 6.4.1 | MIT OR Apache-2.0 |
 | walkdir | 2.5.0 | `Unlicense/MIT` (crate's own non-SPDX-normalized string; effectively dual Unlicense-or-MIT) |
-| vst3 | 0.3.0 | MIT OR Apache-2.0 — see the separate VST3-hosting note below |
+| vst3 | 0.3.0 | MIT OR Apache-2.0; see the separate VST3-hosting note below |
 | webview2-com | 0.38.2 | MIT |
 | windows | 0.61.3 | MIT OR Apache-2.0 |
 | windows-core | 0.61.2 | MIT OR Apache-2.0 |
 
-### Steinberg ASIO SDK — not included; ASIO-enabled binaries are GPLv3
+### Steinberg ASIO SDK: not included, ASIO-enabled binaries are GPLv3
 
 The `asio` Cargo feature (`--features asio`, gating `cpal/asio` and `asio-sys`) compiles against
 Steinberg's ASIO SDK. **The SDK is not included in this repository and is not redistributed by this
@@ -75,9 +75,9 @@ Steinberg's VST 3 SDK is MIT-licensed since version 3.8
 "VST" name or logo is optional and, if used, subject to Steinberg's trademark rules. BleepLoop
 hosts VST3 through the `vst3` crate (coupler-rs, MIT OR Apache-2.0), which since 0.3.0 ships
 pre-generated bindings and needs no SDK at build time. Which SDK version those bindings were
-generated from is not stated by the crate — unknown here. BleepLoop uses no VST logo.
+generated from is not stated by the crate: unknown here. BleepLoop uses no VST logo.
 
-### Ported code in `lf-engine` — Chromium (BSD-3-Clause) and fdlibm
+### Ported code in `lf-engine`: Chromium (BSD-3-Clause) and fdlibm
 
 The native engine crate (`src-tauri/crates/lf-engine`, the app's default audio engine) holds
 Rust ports of Chromium's Blink Web Audio code (`src-tauri/crates/lf-engine/src/dsp`), so its sound matches what the app renders

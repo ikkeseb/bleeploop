@@ -1,15 +1,14 @@
-# src-tauri/ — native host briefing (Windows / Rust)
+# src-tauri/: native host briefing (Windows / Rust)
 
 Everything Rust/native lives here: the native audio engine (`crates/lf-engine`) and its device side
 (`src/engine_io`), the CLAP/VST3 plugin host, the ASIO tier, plugin editor windows. The root
-`AGENTS.md` routes here — read this before any work in this subtree (`CLAUDE.md` beside it is a
+`AGENTS.md` routes here: read this before any work in this subtree (`CLAUDE.md` beside it is a
 one-line adapter). It holds the router-level gotchas and operational bits; the engine's rules live in
 its two briefings (the crate doc of `crates/lf-engine/src/lib.rs`, the module doc of
-`src/engine_io/mod.rs`). **The Mac has NO Rust toolchain:** `cargo check` + every runtime gate are
-PC-only; on Mac, adversarial-review Rust by reading. On the PC the gate is `pnpm rust:check`, which
-also runs from WSL; `tauri dev`, the `native:*` probes and `native:kill` are in `docs/VERIFY.md` §
-Native / Tauri verification. Only the by-ear gates need a person at the PC. Both
-`cargo check --features asio` and no-asio must stay green (CI runs the no-asio half).
+`src/engine_io/mod.rs`). The gate is `pnpm rust:check` (Windows, also from WSL); `tauri dev`, the
+`native:*` probes and `native:kill` are in `docs/VERIFY.md` § Native / Tauri verification. Only the
+by-ear gates need a person at the PC. Both `cargo check --features asio` and no-asio must stay green
+(CI runs the no-asio half).
 
 ## Thread & ownership map
 
@@ -28,7 +27,7 @@ Who runs where and what each thread owns. The rules are in bold below the table.
 | **ASIO probe** (`lf-asio-probe`, `asio_startup.rs`) | The one driver-resolving probe per process, requested by the frontend after the UI is up | Its status report |
 | **Scan children** (`app.exe --scan-one <path>`) | One process per bundle in a kill-on-close Job Object, 20 s timeout; two reader threads per child drain stdout/stderr with caps | Descriptor JSON |
 | **Plugin GUI threads** | A floating CLAP editor runs the plugin's own window thread and only sets flags (`HostGuiImpl` → `EditorClosed`) the owner acks; a hosted editor embeds into the owner's host window and is pumped there. VST3 `performEdit`/`restartComponent` (ONE component handler per load, set at load) touch only the event ring, the window event and the `RestartFlags` atom the owner drains each turn; CLAP `params.rescan` sets a flag the owner drains | Flags / events |
-| **Native MIDI** (`lf-midi-ports`, `engine_io/midi`) | Built and tested, **never started by the app**: MIDI arrives through the WebView's Web MIDI, and WinMM input ports are exclusive, so the two cannot share a controller | — |
+| **Native MIDI** (`lf-midi-ports`, `engine_io/midi`) | Built and tested, **never started by the app**: MIDI arrives through the WebView's Web MIDI, and WinMM input ports are exclusive, so the two cannot share a controller | none |
 
 - **Only a slot's owner thread touches its plugin instance and editor.** Commands reach it through
   `OwnerRequest`; the audio thread only through the unit it installed (rings + atomics). Never
@@ -73,10 +72,10 @@ Who runs where and what each thread owns. The rules are in bold below the table.
   `--no-default-features` anyway. `[profile.dev.package."*"]` and lf-engine build at opt-level 3;
   `app`/`app_lib` stay opt-level 0.
 - **ASIO SDK env** (`LIBCLANG_PATH`, `CPAL_ASIO_DIR`) is set PERMANENTLY in the User-scope env on
-  the dev PC — a fresh shell inherits it, no inline setting needed (`pnpm dev:asio` just works).
+  the dev PC: a fresh shell inherits it, no inline setting needed (`pnpm dev:asio` just works).
   `CPAL_ASIO_DIR` must hold an EXTRACTED SDK with `common/` and `host/pc/` directly under it; `asio-sys`
   only rebuilds when its fingerprint changes (a `cargo update`, a crate bump), so a green
-  `cargo check --features asio` can be a stale `target/` cache over a missing SDK — `pnpm rust:check`
+  `cargo check --features asio` can be a stale `target/` cache over a missing SDK; `pnpm rust:check`
   confirms the SDK directory before its asio step. cpal stays pinned at `=0.18.1` (why: the
   engine_io briefing).
 - **PROD-EXE recipe:** raw `cargo build --release` = a DEV-mode binary (wants devUrl). The real exe
@@ -87,7 +86,7 @@ Who runs where and what each thread owns. The rules are in bold below the table.
   `app_update_check` / `app_update_install` (`update.rs`; the release channel is `plugins.updater` in
   `tauri.conf.json`) ship in release and take nothing from the WebView; so do tone recall's
   `plugin_tone_take` / `plugin_tone_import` (raw bytes both ways) and `plugin_tone_forget`.
-- **Sample-rate pick "C2" — built:** 44.1/48 kHz or the device's own (Audio Settings); the rules,
+- **Sample-rate pick:** 44.1/48 kHz or the device's own (Audio Settings); the rules,
   and why WASAPI keeps its endpoint's rate on cpal 0.18.1, live in the engine_io briefing
   (`src/engine_io/mod.rs` § Rules).
 - **Editor-hang Win32 gotcha (recurring):** a host window Win32-OWNED across threads deadlocks on
@@ -101,7 +100,7 @@ Who runs where and what each thread owns. The rules are in bold below the table.
 - **Release logging:** `tauri-plugin-log` registers UNCONDITIONALLY → Stdout (the dev grep
   convention) + a rotated file at `%LOCALAPPDATA%\com.bleeploop.app\logs\bleeploop.log` (2 MB,
   KeepAll). The Rust panic hook chains the default hook and logs location+payload.
-- **The CSP (`tauri.conf.json` `security.csp`) applies to BUILT apps only** — `tauri dev` serves from
+- **The CSP (`tauri.conf.json` `security.csp`) applies to BUILT apps only.** `tauri dev` serves from
   vite and is not covered, so a new asset origin, a CDN font or an `eval` breaks in release alone.
   Violations reach the release log as `[csp]` lines (`src/platform/logging.ts`); after adding a new
   kind of resource, run `pnpm build:app` once and grep that log. `style-src` is exempt from Tauri's
@@ -109,11 +108,11 @@ Who runs where and what each thread owns. The rules are in bold below the table.
 
 ## Native-host verify ops
 
-The out-of-process plugin scan is testable WITHOUT the full app — `cargo build` then
+The out-of-process plugin scan is testable WITHOUT the full app: `cargo build`, then
 `target/debug/app.exe --scan-one "<plugin path>"` prints the descriptor JSON and exits (the
 `--scan-one` dispatch runs before Tauri starts). The scan spawns one child per `.clap`/`.vst3` for
-crash + hang isolation (**20s per-child timeout** — a heavy/licensed VST3 like Neural DSP can hang
-on load in the headless child) — but only for bundles whose binary size/mtime changed since the
+crash + hang isolation (**20s per-child timeout**: a heavy/licensed VST3 like Neural DSP can hang
+on load in the headless child), but only for bundles whose binary size/mtime changed since the
 cache (plugin-scan.json beside the release log dir under %LOCALAPPDATA%) last saw them (a launch spawns
 nothing; a remembered failure is retried only by the picker's rescan button = `plugin_scan`
 `force`). Delete that file to force a cold scan from outside the app. Pipe retention is capped at 1 MiB
@@ -121,7 +120,8 @@ stdout / 64 KiB stderr, and each child process tree sits in a kill-on-close Job 
 the debug `app.exe`, each exiting before Tauri starts: `--probe-engine` (`pnpm native:engine`, the
 device side on the rig: `engine_io/probe.rs`), `--probe-engine-spike` and `--probe-share` (`pnpm
 native:spike`: the premise numbers in `docs/ARCHITECTURE.md` § Measured premise).
-Stale `<old-path>\rc500\…` build path on dev start → `rm -rf src-tauri/target/debug/build`.
+A dev start that names a build path from an old checkout location (a moved or renamed clone) →
+`rm -rf src-tauri/target/debug/build`.
 (Driving and grepping a running `tauri dev`, and stopping it: `docs/VERIFY.md`.)
 
 ## Plugin hosting (CLAP + VST3)
@@ -141,7 +141,7 @@ plugin-GUI work.
   Effects); scan walks `%COMMONPROGRAMFILES%\CLAP`, `%LOCALAPPDATA%\Programs\Common\CLAP`, `CLAP_PATH`.
   Loader is `clack_host::entry::PluginEntry::load` (unsafe), NOT `PluginBundle`.
 - **Plugin editors embed into a host-owned top-level Win32 window** (`CreateWindowExW`, owned by the main
-  window — NOT reparented into the WebView2 surface). An owner pumps its thread's Win32 messages every
+  window, NOT reparented into the WebView2 surface). An owner pumps its thread's Win32 messages every
   turn, editor or not: a JUCE plugin (Neural DSP) runs its message thread there, and unpumped, a
   host-set parameter never reached its saved state (measured with `pnpm native:tone-recall`, Archetype
   Petrucci). Each pump call is bounded (64 messages or 2 ms, `editor_window::pump_thread_messages`), so
@@ -149,7 +149,7 @@ plugin-GUI work.
   GUI calls go via the owner channel, NOT `run_on_main_thread`.
 - **Editor size is the plugin's, measured not computed:** `editor_window::set_client_size` sizes the
   CLIENT area by measuring the real frame (DPI-correct), at creation and on every plugin-initiated
-  resize — VST3 `IPlugFrame::resizeView` (then `onSize` with the granted size) and hosted-CLAP
+  resize: VST3 `IPlugFrame::resizeView` (then `onSize` with the granted size) and hosted-CLAP
   `request_resize` both land there. Never answer a resize `kResultOk`/`Ok` without resizing; the view
   lays out for the size you confirm. Fixtures: `host/vst3_resize_fixture.rs`, `clap::resize_tests`.
 - **Crate `vst3` 0.3.0** (coupler-rs; only dep `com-scrape-types`, no `windows`/`windows-core` conflict).
@@ -160,7 +160,7 @@ plugin-GUI work.
   engine (`setProcessing(0)` on the audio thread) → a separated controller disconnects and terminates →
   `setActive(0)`, only on an active component (a failed restart leaves it inactive) → `terminate` →
   the COM objects drop → `Vst3Module` LAST. Its RAII drop pairs successful `InitDll` with `ExitDll`,
-  then calls `FreeLibrary` (any plugin-DLL `ComPtr` must drop first — its vtbl lives in the module).
+  then calls `FreeLibrary` (any plugin-DLL `ComPtr` must drop first: its vtbl lives in the module).
 - **Surge XT VST3 is SEPARATED-component** (`component.cast::<IEditController>()` is None) → `obtain_controller`
   (`getControllerClassId`→`createInstance`→`initialize`); a JUCE separated controller's `createView` returns
   null until it gets the in-process `AudioProcessor` pointer over a connection-point `notify(IMessage)` (host
@@ -171,7 +171,7 @@ plugin-GUI work.
   owners are child mods the same way.
 - **VST3 buses:** query `getBusInfo` AFTER `setBusArrangements`, size buffers to the reported channel count,
   don't assume the requested arrangement (same crash class as the Surge hash-param id). Guard zero-input
-  plugins (synths). `activate_component` (`host/vst3.rs`) is the ONE owner of that sequence — load and
+  plugins (synths). `activate_component` (`host/vst3.rs`) is the ONE owner of that sequence: load and
   every restart run it, and each install takes the `Activation` it produced, so a `kIoChanged` that
   changes a count resizes the unit's buffers; the unit's kind (effect with an input bus, instrument
   without) follows each activation.
@@ -179,12 +179,12 @@ plugin-GUI work.
   `OwnerRequest::SetParamNormalized` feeds the edit controller on the owner thread
   (`EngineSlotHandle::set_param` is the one entry; the controller hears only what the ring took).
   The controller is what the plugin GUI shows and what raises a controller-decided `restartComponent`
-  (FabFilter latency modes) — drop the mirror and no drawer change can ever restart a plugin again.
+  (FabFilter latency modes). Without the mirror, no drawer change can ever restart a plugin again.
   `performEdit` (GUI → host) is never mirrored back. A 30-plugin restart survey backs this: FabFilter
   raises `kLatencyChanged`, Neural DSP and Surge never do.
 - **Tone recall (briefing: `host/tone.rs`):** a load restores the plugin's stored state before it
-  activates — CLAP `state.load`; VST3 `IComponent::setState`, then the controller's
-  `setComponentState` and `setState`, through the host `MemStream` (`vst3.rs`) — and the owner saves it
+  activates (CLAP `state.load`; VST3 `IComponent::setState`, then the controller's
+  `setComponentState` and `setState`, through the host `MemStream` in `vst3.rs`), and the owner saves it
   on its own thread. No request pushes state into a running plugin. The VST3 load creates the
   controller and sets its handler BEFORE activation (the SDK host's order). A plugin that refuses its
   tone is discarded and created again before it activates (it may have taken half the state); a
@@ -242,3 +242,13 @@ plugin-GUI work.
   with a real unit, and the CLAP restart fixture's thread check would flag it.
 - Native MIDI (never started): a pedal binding's port occurrence is recounted on every hot-plug, so two
   same-named controllers can swap bindings; a port back within one 1 s poll keeps a dead connection.
+- Archetype Plini (VST3) once stalled 4–14 s in 5 of 20 unloads, editor closed, and has not repeated
+  since (cause unknown). The VST3 teardown and the unload log per-step timing in release too, so the
+  next occurrence names its step.
+- Crackle on the owner's Scarlett at ASIO 64 while a call used the same interface through Windows
+  audio, every 5–10 minutes, heard by the call's far end too (cause unknown; reportedly at 256 as
+  well). The device owner logs `[engine_io] audio glitch: …` for each second a fault counter moves
+  (`GlitchWatch`, `engine_io/owner.rs`); no real glitch has fired it yet.
+- A tester on WASAPI heard delay on DI monitoring (the engine build); the affected path is unknown.
+  WASAPI's late takes are the accepted fallback (`docs/ARCHITECTURE.md` § Measured premise), which
+  says nothing about monitoring delay.

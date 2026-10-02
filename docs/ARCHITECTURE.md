@@ -1,4 +1,4 @@
-# BleepLoop — Architecture
+# BleepLoop architecture
 
 A standalone Windows desktop app for instant musical jamming: an **instrument host** (two native
 plugin slots + six built-in synths) sitting over an **RC-505 MK II–style 5-track looper**, all in
@@ -64,7 +64,8 @@ crate briefing (`src-tauri/crates/lf-engine/src/lib.rs`); the device side's are
 
 - **One clock, no trim:** a lane plays loop position `(f - anchor) mod master` at device frame `f`;
   a take starts the driver's reported input + output latency (+ the largest live effect's latency +
-  the limiter's pre-delay) after its downbeat. There is no user-facing record trim (D18).
+  the limiter's pre-delay) after its downbeat. There is no user-facing record trim and no loopback
+  calibration wizard (D18).
 - **Frame-identical lanes by construction:** every committed lane is one master long, in integer
   frames; a later take longer than the master multiplies it and the other lanes tile out to it. State
   per lane: EMPTY → RECORDING → PLAYING ⇄ OVERDUBBING, plus STOPPED.
@@ -126,7 +127,7 @@ indeterminate value.
 ## Cross-cutting invariants (do not violate)
 
 **This numbered list is THE numbering.** Source comments cite these by number ("invariant 6"), and
-`AGENTS.md` carries the same titles in the same order — if the two diverge, every in-code citation
+`AGENTS.md` carries the same titles in the same order. If the two diverge, every in-code citation
 silently points at the wrong rule. `verify/guards/docs.mjs` fails when they do.
 
 1. **The engine's device-frame clock is the single tempo/quantization authority.** Every grid-timed
@@ -148,12 +149,12 @@ silently points at the wrong rule. `verify/guards/docs.mjs` fails when they do.
    allocated and touched before the first callback; failures latch counters and fault bits that a
    non-RT thread reports. Tests run every `process` under `assert_no_alloc`; in DEV builds the device
    callback counts any allocation (`src-tauri/src/host/rt_alloc.rs`).
-6. **No Solid signal WRITES from audio-path timers, and no signal READS in the 60 fps draw loop** —
+6. **No Solid signal WRITES from audio-path timers, and no signal READS in the 60 fps draw loop.**
    rAF + a plain mutable object only. A capture drain writing a fresh object into a track signal 40×/s
    once cost ~200 full-document layout events per 5 s of recording. The pattern: the feed handler
    writes one plain mirror and writes a signal only when its value changed; the waveform rAF reads the
    mirror (`src/ui/state/engine-store.ts`).
-7. **All `@tauri-apps/*` confined to `src/platform/`** — CI-guarded.
+7. **All `@tauri-apps/*` confined to `src/platform/`.** CI-guarded.
 
 ## Decided: one native audio engine (2026-09-24)
 
@@ -190,26 +191,26 @@ cannot stand in: it measures Windows' buffering, not the driver's report.
 | Bar | Result on the rig |
 |---|---|
 | One callback (ASIO): input and output in one bufferSwitch on every cycle | holds at 64/128/256 |
-| The driver's report alone puts a take on the grid: \|lag − (inLat + outLat)\| ≤ 1 ms, dry input | within 0.1 ms at 64/128/256 — once the driver is opened at another block size first: reopened at the size it last ran, it lands about two periods late (`src-tauri/src/engine_io/cpal_driver.rs`) |
+| The driver's report alone puts a take on the grid: \|lag − (inLat + outLat)\| ≤ 1 ms, dry input | within 0.1 ms at 64/128/256, once the driver is opened at another block size first; reopened at the size it last ran, it lands about two periods late (`src-tauri/src/engine_io/cpal_driver.rs`) |
 | One clock, stable across launches: spread ≤ 1 frame per run | holds; between sessions the landing moved 5 frames at 128 |
 | Nothing drifts inside a take: ≤ 1 frame over 10 min | 0.000 at 128 and 256, +0.9 frames at 64 |
 | No hidden buffering on the in-callback plugin path: round trip = lag + plugin latency | holds (Pro-Q 3, zero-latency mode) |
 | Round trip at most half the Web Audio path's 44.4 ms at 256 | 8.1 ms at 64, 15.1 ms at 128, 26.8 ms at 256 (fails at 256 on this driver's report; accepted by the owner: 256 is the everyday DAW setting) |
 | An amp-sim leaves room: 120 s at 128 and 256, 0 gaps, 0 xruns, 0 allocs, block p99.9 ≤ 50 % | Archetype Petrucci X: p99.9 21 % and 19 %, max 28 % and 21 % of the period |
-| WASAPI takes align from timestamps | no: on the Focusrite WDM driver takes land +211 to +229 ms late against the engine's align. ~35–44 ms is an endpoint clock term cpal's stamps miss; the rest sits in the driver, which reports none of it, and a per-device constant would miss by ±9 ms between launches. WASAPI takes are documented as unaligned on such drivers; ASIO is the play path (STATUS E9) |
-| A muted mirror is capturable (Share output) | no: process loopback captures after the session's mute and volume, so Share output goes to a user-picked endpoint (STATUS E2) |
+| WASAPI takes align from timestamps | no: on the Focusrite WDM driver takes land +211 to +229 ms late against the engine's align. ~35–44 ms is an endpoint clock term cpal's stamps miss; the rest sits in the driver, which reports none of it, and a per-device constant would miss by ±9 ms between launches. WASAPI takes are documented as unaligned on such drivers; ASIO is the play path (decision E9) |
+| A muted mirror is capturable (Share output) | no: process loopback captures after the session's mute and volume, so Share output goes to a user-picked endpoint (decision E2) |
 
 **The measurement gate.** Replacing native monitoring or changing its buffering targets requires
 both, before and after the change:
 
-- **L1 — the rig protocol:** the alignment, spread and drift bars above at 64/128/256 (no trim).
-- **L2 — a physical loopback measurement:** play the click out, capture it through the working
+- **L1, the rig protocol:** the alignment, spread and drift bars above at 64/128/256 (no trim).
+- **L2, a physical loopback measurement:** play the click out, capture it through the working
   guitar input, cross-correlate scheduled against heard: the premise spike, and `pnpm
   native:engine-loopback` for a take in the running app (baseline: `docs/VERIFY.md`).
 
-## Known fragile piece (matches the brief's caveat)
+## Known fragile piece: plugin editors
 
-Plugin **GUI embedding** inside the WebView2 window is genuinely hard: WebView2 is always
+Plugin **GUI embedding** inside the WebView2 window is hard: WebView2 is always
 top-most within its window (the "airspace" problem), so a child plugin HWND z-fights it.
 **Editors use separate top-level OS windows.** CLAP can use a plugin-owned floating window or embed
 into a host-owned top-level window; VST3 embeds into a host-owned top-level window. This is not a
@@ -217,6 +218,5 @@ panel inside the WebView. Editor requests run on the per-slot owner thread, whic
 window messages. Native thread ownership is defined in `src-tauri/AGENTS.md`:
 "Only a slot's owner thread touches its plugin instance and editor."
 
-Other notable risks: no turn-key VST3 host crate in Rust (lead with CLAP via `clack-host`,
-which has a working reference host; VST3 via `coupler-rs/vst3` is hand-written unsafe COM —
-last, P10). VST2 is dead (`vst-rs` archived).
+VST3 hosting is hand-written unsafe COM over `coupler-rs/vst3` (Rust has no turn-key VST3 host
+crate); CLAP goes through `clack-host`. VST2 is not hosted (`vst-rs` is archived).

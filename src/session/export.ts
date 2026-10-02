@@ -51,7 +51,7 @@ export interface BuildExportOptions {
  * same loops with the mix the engine holds (lane volume, mute and FX, the reverb bus, master volume and
  * mute, the limiter: `src-tauri/crates/lf-engine/src/render.rs`), every track playing, frame 0 lined up
  * with the stems. A STOPPED track is IN the master (the owner exported a stopped session and got
- * silence, tester-feedback F26); only MUTE leaves a track out. If the engine's render fails, the export
+ * silence, tester report F26); only MUTE leaves a track out. If the engine's render fails, the export
  * still completes with the DRY volume/mute dual-mono mixdown (master.kind 'dry-fallback') — a degraded
  * master beats a lost take. Returns null when nothing is committed.
  * An export with the master requires a finished take so its snapshot cannot contain an unfinished layer.
