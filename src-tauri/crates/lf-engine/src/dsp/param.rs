@@ -28,9 +28,10 @@
 //! throw in JS; here they are debug assertions.
 //!
 //! Scheduling never allocates: both timelines are vectors with fixed capacity. Blink's timeline holds
-//! [`EVENT_CAPACITY`] live events (it prunes past events on every insert; an insert past capacity is
-//! dropped, which no production schedule reaches) and Tone's mirror keeps Tone's memory of
-//! [`TONE_MEMORY`] events, dropping the oldest as Tone does.
+//! [`EVENT_CAPACITY`] live events (it prunes past events on every insert; past capacity, which a burst
+//! of notes on one voice or of same-frame ramps reaches, an insert drops the earliest pending event, so
+//! the newest schedule lands, at the cost of that burst's first anchors) and Tone's mirror keeps Tone's
+//! memory of [`TONE_MEMORY`] events, dropping the oldest as Tone does.
 //!
 //! Ported from Chromium (Blink), Copyright The Chromium Authors, BSD-3-Clause.
 
@@ -363,11 +364,16 @@ impl AudioParam {
         self.push_event(at, event);
     }
 
-    fn push_event(&mut self, at: usize, event: Event) {
-        debug_assert!(self.events.len() < EVENT_CAPACITY, "param timeline full");
-        if self.events.len() < EVENT_CAPACITY {
-            self.events.insert(at, event);
+    fn push_event(&mut self, mut at: usize, event: Event) {
+        if self.events.len() == EVENT_CAPACITY {
+            // A burst of notes on one voice: drop the earliest pending event (the one after the event
+            // in force), so the newest schedule (the last note, its release) always lands.
+            self.events.remove(1);
+            if at > 1 {
+                at -= 1;
+            }
         }
+        self.events.insert(at, event);
     }
 
     fn remove_old_events(&mut self, count: usize) {

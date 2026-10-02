@@ -367,6 +367,46 @@ fn a_burst_of_notes_is_never_dropped() {
     assert!(peak(&rig.bus) < 1e-4, "a note hangs: {}", peak(&rig.bus));
 }
 
+/// Positive-going zero crossings per second: a sustained tone's pitch.
+fn pitch(x: &[f32], sr: f64) -> f64 {
+    let crossings = x.windows(2).filter(|w| w[0] <= 0.0 && w[1] > 0.0).count();
+    crossings as f64 * sr / x.len() as f64
+}
+
+/// A burst of attacks in one frame on the mono bass (every attack in one voice, nudged a sample apart)
+/// outgrows no param timeline, at any block size: the last note sounds at its pitch, a burst of
+/// note-offs that retriggers every held note in turn still ends in the release, and nothing hangs.
+#[test]
+fn a_burst_of_attacks_on_the_bass_keeps_the_last_note_and_its_release() {
+    let violations = common::violation_count();
+    for block in [128, 4096] {
+        for repeated in [false, true] {
+            let mut rig = Rig::with(Opts { block, ..Default::default() });
+            rig.set(Command::SelectInstrument(NoteTarget::Builtin(Instrument::Bass)));
+            // 64 attacks, the last on A2 (110 Hz).
+            let notes: Vec<u8> = if repeated { vec![45; 64] } else { (45..=108).rev().collect() };
+            for &note in &notes {
+                rig.send_at(rig.frame, Command::NoteOn(note, 0.8));
+            }
+            rig.advance(rig.seconds(0.2));
+            rig.keep_output();
+            rig.advance(rig.seconds(0.5));
+            let heard = pitch(&rig.bus, 48000.0);
+            assert!((heard - 110.0).abs() < 2.0, "block {block}, repeated {repeated}: the last note sounds at {heard} Hz");
+            // The sounding note's off first: each off retriggers the next held note, the last releases.
+            for &note in notes.iter().rev() {
+                rig.send_at(rig.frame, Command::NoteOff(note));
+            }
+            rig.advance(rig.seconds(3.0));
+            rig.keep_output();
+            rig.advance(4096);
+            assert!(peak(&rig.bus) < 1e-4, "block {block}, repeated {repeated}: a note hangs: {}", peak(&rig.bus));
+            assert_eq!(rig.engine.diag().commands_dropped, 0);
+        }
+    }
+    assert_eq!(common::violation_count(), violations, "the burst allocated on the audio path");
+}
+
 /// Two slots may hold the same synth: switching between them releases the held notes, as switching
 /// between two web synths did, though the pick does not change.
 #[test]
