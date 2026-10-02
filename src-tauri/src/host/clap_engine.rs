@@ -402,6 +402,7 @@ fn instantiate(
         move |_| LfShared {
             editor_closed: ec,
             hosted_hwnd: hh,
+            pending_resize: AtomicU64::new(NO_RESIZE),
             callback_requested: AtomicBool::new(false),
             restart_requested: AtomicBool::new(false),
             keeps_tone: true,
@@ -557,6 +558,7 @@ pub(super) fn run(
         // saved meanwhile is stale. A hosted editor's window needs it too, and reports its close here.
         pump_thread_messages();
         if matches!(editor, EditorSlot::Hosted(_)) {
+            deliver_pending_resize(&mut instance);
             if matches!(&editor, EditorSlot::Hosted(window) if window.close_requested()) {
                 editor_teardown(&mut instance, &mut editor, &hosted_hwnd);
                 sink(EngineSlotEvent::EditorClosed);

@@ -152,7 +152,10 @@ plugin-GUI work.
   CLIENT area by measuring the real frame (DPI-correct), at creation and on every plugin-initiated
   resize: VST3 `IPlugFrame::resizeView` (then `onSize` with the granted size) and hosted-CLAP
   `request_resize` both land there. Never answer a resize `kResultOk`/`Ok` without resizing; the view
-  lays out for the size you confirm. Fixtures: `host/vst3_resize_fixture.rs`, `clap::resize_tests`.
+  lays out for the size you confirm. The one exception is a CLAP `request_resize` from a thread other
+  than the window's (a cross-thread `SetWindowPos` would wait for the owner): it is acknowledged and
+  queued, the owner applies the latest on its turn or reverts the plugin with `set_size`, and a resize
+  on the window's own thread drops what was queued before it. Fixtures: `host/vst3_resize_fixture.rs`, `clap::resize_tests`.
 - **Crate `vst3` 0.3.0** (coupler-rs; only dep `com-scrape-types`, no `windows`/`windows-core` conflict).
   `ComPtr<IAudioProcessor>` is already `Send+Sync`. Source-verify against the crate source
   (`~/.cargo/registry/src/index.crates.io-*/vst3-0.3.0/src/bindings.rs`), NOT web docs; methods are

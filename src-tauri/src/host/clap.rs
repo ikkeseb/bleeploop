@@ -12,7 +12,7 @@ use super::state::ParamDesc;
 
 use std::ffi::CString;
 use std::sync::atomic::{
-    AtomicBool, AtomicIsize, AtomicU32,
+    AtomicBool, AtomicIsize, AtomicU32, AtomicU64,
     Ordering::{Acquire, Relaxed, Release},
 };
 use std::sync::Arc;
@@ -39,7 +39,8 @@ use rtrb::Consumer;
 
 use windows::core::w;
 use windows::Win32::Foundation::{HANDLE, HWND};
-use windows::Win32::System::Threading::AvSetMmThreadCharacteristicsW;
+use windows::Win32::System::Threading::{AvSetMmThreadCharacteristicsW, GetCurrentThreadId};
+use windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
 
 // ---- P9.5 control plane: main→audio event ring + main→owner state requests -----------------
 
@@ -336,7 +337,9 @@ fn editor_open(
         return Err(format!("gui.show(embedded): {e}"));
     }
     show_host_window_front(host_win.hwnd);
-    // From here the plugin's `request_resize` has a window to resize.
+    // From here the plugin's `request_resize` has a window to resize; one left from an earlier
+    // editor is forgotten first.
+    instance.access_shared_handler(|s| s.pending_resize.store(NO_RESIZE, Release));
     hosted_hwnd.store(host_win.hwnd.0 as isize, Release);
     log::info!(
         "[plugin_host] editor embedded into host window ({}x{})",
@@ -389,6 +392,9 @@ struct LfShared {
     /// The host window a HOSTED editor is embedded in (0 = none / floating). Set by `editor_open`,
     /// cleared by `editor_teardown`; `request_resize` resizes it. Shared with the owner loop.
     hosted_hwnd: Arc<AtomicIsize>,
+    /// The latest size a plugin asked for off the window's thread (`width << 32 | height`,
+    /// `NO_RESIZE` = none), which the owner applies on its turn (`deliver_pending_resize`).
+    pending_resize: AtomicU64,
     callback_requested: AtomicBool,
     /// Set by `request_restart` (any thread), drained by the owner loop into ONE restart cycle.
     restart_requested: AtomicBool,
@@ -397,6 +403,50 @@ struct LfShared {
     /// hosts without it.
     keeps_tone: bool,
 }
+/// `LfShared::pending_resize` when no request waits.
+const NO_RESIZE: u64 = u64::MAX;
+
+impl LfShared {
+    /// Owner turn: resize the hosted window to the size a plugin asked for off its thread, if any.
+    /// Returns the size the window kept when it could not take the request, which the plugin must be
+    /// told (CLAP's revert of an acknowledged request).
+    fn apply_pending_resize(&self) -> Option<(u32, u32)> {
+        let packed = self.pending_resize.swap(NO_RESIZE, Acquire);
+        let hwnd = self.hosted_hwnd.load(Acquire);
+        if packed == NO_RESIZE || hwnd == 0 {
+            return None;
+        }
+        let hwnd = HWND(hwnd as *mut core::ffi::c_void);
+        let before = super::editor_window::client_size(hwnd);
+        resize_hosted(hwnd, (packed >> 32) as u32, packed as u32).err().map(|_| before)
+    }
+}
+
+/// Resize a hosted editor's window on the window's own thread. CLAP's `true` means "the client area
+/// IS width×height now", so a size the screen clamps is refused and the window put back: the plugin
+/// keeps laying out for the size it has.
+fn resize_hosted(hwnd: HWND, width: u32, height: u32) -> Result<(), &'static str> {
+    let before = super::editor_window::client_size(hwnd);
+    match set_client_size(hwnd, width, height) {
+        Some(got) if got == (width, height) => Ok(()),
+        Some(_) => {
+            let _ = set_client_size(hwnd, before.0, before.1);
+            Err("requested editor size does not fit the screen")
+        }
+        None => Err("host window resize failed"),
+    }
+}
+
+/// Owner turn, hosted editor open: apply a resize the plugin asked for off this thread, and tell the
+/// plugin the size it has when the window could not take it.
+fn deliver_pending_resize(instance: &mut PluginInstance<LfHost>) {
+    let Some((width, height)) = instance.access_shared_handler(|s| s.apply_pending_resize()) else { return };
+    let mut handle = instance.plugin_handle();
+    if let Some(gui) = handle.get_extension::<PluginGui>() {
+        let _ = gui.set_size(&mut handle, GuiSize { width, height });
+    }
+}
+
 impl<'a> SharedHandler<'a> for LfShared {
     /// [thread-safe] The plugin needs a deactivate → activate cycle (its latency, ports or internal
     /// buffers changed). Flag only — never foreign code, allocation or a lock here; the owner loop
@@ -479,6 +529,7 @@ mod resize_tests {
         LfShared {
             editor_closed: Arc::new(EditorClosed::default()),
             hosted_hwnd: hosted_hwnd.clone(),
+            pending_resize: AtomicU64::new(NO_RESIZE),
             callback_requested: AtomicBool::new(false),
             restart_requested: AtomicBool::new(false),
             keeps_tone: false,
@@ -506,34 +557,83 @@ mod resize_tests {
         assert!(shared.request_resize(size(800, 600)).is_err(), "after teardown → refused");
         assert_eq!(client_size(win.hwnd), (320, 200), "window untouched by the refused call");
     }
+
+    /// A request from a thread other than the window's (the plugin's audio or worker thread) returns
+    /// while the owner is not pumping, and resizes nothing there.
+    #[test]
+    fn a_request_from_another_thread_never_waits_for_the_owner() {
+        let hosted_hwnd = Arc::new(AtomicIsize::new(0));
+        let shared = Arc::new(shared(&hosted_hwnd));
+        let win = create_host_window(400, 300, None).expect("host window");
+        hosted_hwnd.store(win.hwnd.0 as isize, Release);
+        let ask = |width, height| {
+            let shared = shared.clone();
+            let (tx, rx) = std::sync::mpsc::channel();
+            let caller = std::thread::spawn(move || {
+                let _ = tx.send(shared.request_resize(GuiSize { width, height }).is_ok());
+            });
+            // This thread does not pump: a request that waits for it never answers.
+            let answered = rx.recv_timeout(Duration::from_millis(500));
+            while !caller.is_finished() {
+                pump_thread_messages(); // release a caller that did wait, so the test fails, not hangs
+            }
+            caller.join().unwrap();
+            answered.expect("request_resize waited for the window's thread")
+        };
+        assert!(ask(640, 480), "acknowledged");
+        assert!(ask(500, 400), "acknowledged");
+        assert_eq!(client_size(win.hwnd), (400, 300), "nothing resized off the window's thread");
+        assert_eq!(shared.apply_pending_resize(), None, "the owner's turn takes it");
+        assert_eq!(client_size(win.hwnd), (500, 400), "the latest request wins");
+        assert_eq!(shared.apply_pending_resize(), None, "nothing left");
+        assert_eq!(client_size(win.hwnd), (500, 400));
+
+        assert!(ask(100_000, 100_000), "acknowledged, though no screen fits it");
+        assert_eq!(shared.apply_pending_resize(), Some((500, 400)), "the plugin is told the size it has");
+        assert_eq!(client_size(win.hwnd), (500, 400), "and the window put back");
+
+        // A request on the window's own thread after a queued one is the newer: the owner's turn must
+        // not put the queued size over it.
+        assert!(ask(640, 480));
+        assert!(shared.request_resize(GuiSize { width: 360, height: 240 }).is_ok(), "the window's thread resizes at once");
+        assert_eq!(shared.apply_pending_resize(), None);
+        assert_eq!(client_size(win.hwnd), (360, 240), "the newer request stays");
+
+        assert!(ask(320, 200));
+        hosted_hwnd.store(0, Release); // the editor closed before the owner's turn
+        assert_eq!(shared.apply_pending_resize(), None, "dropped");
+        assert_eq!(client_size(win.hwnd), (360, 240));
+    }
 }
 /// Host side of the CLAP `gui` extension (P10.0). For a floating editor the plugin manages its own
 /// window, so the only callback that matters is `closed` (user-dismiss → re-sync) and the
 /// resize/show/hide requests don't apply. For a HOSTED editor `request_resize` is real: the plugin
-/// wants our window's client area at a new size (its size menu / zoom) and, per the CLAP contract,
-/// a `true` answer means the host resized and need not call `set_size` back.
+/// wants our window's client area at a new size (its size menu / zoom). On the window's thread a
+/// `true` answer means the host resized and need not call `set_size` back; from another thread it
+/// acknowledges a request the owner applies on its turn, or reverts with `set_size` (CLAP's gui.h
+/// allows that asynchronous answer).
 impl HostGuiImpl for LfShared {
     fn resize_hints_changed(&self) {}
-    /// [thread-safe] Resize the hosted editor's window client area. `set_client_size` is a plain
-    /// `SetWindowPos` (Win32 marshals it to the window's thread), so no lock, allocation or
-    /// plugin call happens here whichever thread the plugin used.
+    /// [thread-safe] Resize the hosted editor's window client area. On the window's thread (the
+    /// owner, CLAP's main thread) it resizes at once. From any other thread (the audio thread
+    /// included) it only records the size and acknowledges: a cross-thread `SetWindowPos` waits for
+    /// the owner to pump, so the owner applies it on its turn (`deliver_pending_resize`), the latest
+    /// request winning, and reverts the plugin with `set_size` if the window cannot take it.
     fn request_resize(&self, new_size: GuiSize) -> Result<(), HostError> {
         let hwnd = self.hosted_hwnd.load(Acquire);
         if hwnd == 0 {
             return Err(HostError::Message("resize not supported for a floating editor"));
         }
-        // CLAP's `true` means "the client area IS width×height now", so a size the screen clamps
-        // is refused and the window put back — the plugin keeps laying out for the size it has.
         let hwnd = HWND(hwnd as *mut core::ffi::c_void);
-        let before = super::editor_window::client_size(hwnd);
-        match set_client_size(hwnd, new_size.width, new_size.height) {
-            Some(got) if got == (new_size.width, new_size.height) => Ok(()),
-            Some(_) => {
-                let _ = set_client_size(hwnd, before.0, before.1);
-                Err(HostError::Message("requested editor size does not fit the screen"))
-            }
-            None => Err(HostError::Message("host window resize failed")),
+        // SAFETY: plain thread-id queries; a dead handle answers 0, which is no thread.
+        if unsafe { GetWindowThreadProcessId(hwnd, None) != GetCurrentThreadId() } {
+            let packed = (new_size.width as u64) << 32 | new_size.height as u64;
+            self.pending_resize.store(packed, Release);
+            return Ok(());
         }
+        // Newer than any size another thread queued: that one must not land over this one later.
+        self.pending_resize.store(NO_RESIZE, Release);
+        resize_hosted(hwnd, new_size.width, new_size.height).map_err(HostError::Message)
     }
     fn request_show(&self) -> Result<(), HostError> {
         Ok(())

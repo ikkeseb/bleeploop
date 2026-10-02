@@ -42,7 +42,8 @@ pub(super) struct Vst3Unit {
     out_bufs: Vec<Vec<f32>>,
     in_ptrs: Vec<*mut f32>,
     out_ptrs: Vec<*mut f32>,
-    /// `setProcessing(1)` succeeded and `setProcessing(0)` has not run since.
+    /// `setProcessing(1)` was accepted (`kResultOk` or `kNotImplemented`) and `setProcessing(0)` has
+    /// not run since.
     processing: bool,
     /// `setProcessing(1)` failed: silent until the owner re-activates and reinstalls it.
     refused: bool,
@@ -126,8 +127,10 @@ impl SlotProcessor for Vst3Unit {
                 return;
             }
             // SAFETY: the processor is active (the owner activated it before the install);
-            // setProcessing runs on the thread that processes, as the Stage 1 spike does.
-            if unsafe { self.processor.setProcessing(1) } != kResultOk {
+            // setProcessing runs on the thread that processes, as the Stage 1 spike does. It is an
+            // optional notification: the SDK's AudioEffect answers kNotImplemented and processes.
+            let started = unsafe { self.processor.setProcessing(1) };
+            if started != kResultOk && started != kNotImplemented {
                 self.refused = true;
                 self.faults.fetch_or(FAULT_START, Relaxed);
                 return;
@@ -357,6 +360,29 @@ fn restore_state(plugin: &Vst3Plugin, state: &[u8], slot: usize) -> Result<(), S
     Ok(())
 }
 
+/// Tell a separated edit controller the component's state, as the SDK host does once it connects the
+/// halves: without it the editor and the listed values start at the controller's own defaults, not at
+/// what the processor plays. A restored tone already did it (`restore_state`); a single component is
+/// its own controller. A plugin that refuses only leaves its editor behind the sound, which is logged.
+/// Owner thread, before the component activates.
+fn sync_controller(plugin: &Vst3Plugin, slot: usize) -> Result<(), String> {
+    let Some(ctl) = plugin.controller.as_ref().filter(|_| plugin.separated) else { return Ok(()) };
+    let (state, ptr) = stream(&[])?;
+    // SAFETY: owner thread; the component is initialised and inactive; the stream outlives the call.
+    let r = unsafe { plugin.component.getState(ptr.as_ptr()) };
+    if r != kResultOk {
+        log::warn!("[plugin_host] engine slot {slot}: IComponent::getState → {r:#x}; the edit controller keeps its own defaults");
+        return Ok(());
+    }
+    let (_keep, ptr) = stream(&state.bytes())?;
+    // SAFETY: owner thread; live controller; the stream outlives the call.
+    let r = unsafe { ctl.setComponentState(ptr.as_ptr()) };
+    if r != kResultOk && r != kNotImplemented {
+        log::warn!("[plugin_host] engine slot {slot}: the edit controller refused the component state ({r:#x}); its editor may show stale values");
+    }
+    Ok(())
+}
+
 /// Re-activate the unit at the engine's current terms and install it. A restart report the plugin
 /// raises from inside the cycle (a `kLatencyChanged` from `setActive(1)`) describes the state just
 /// activated and is consumed, as the live cycle does. On failure the unit comes back to the caller.
@@ -448,8 +474,8 @@ type Loaded = (Vst3Plugin, Box<Vst3Unit>, String, u32, Option<ToneRestore>);
 
 /// Create class `target` (`id`) from the factory, initialise it, create its edit controller and give it
 /// the load's component `handler`, with the controller before the activation. The plugin takes the
-/// module and the factory; every error after the component exists tears it down (`Vst3Plugin`), and
-/// one before it drops the factory, then the module.
+/// module and the factory; every error after the component initialised tears it down (`Vst3Plugin`),
+/// and one before it releases what exists, then the factory, then the module.
 fn create(
     opened: Opened,
     target: &TUID,
@@ -478,6 +504,11 @@ fn create(
         let component = component.ok_or_else(|| format!("class {id} not found / createInstance failed"))?;
         let hostapp = ComWrapper::new(LfHostApp);
         let host_ctx = hostapp.to_com_ptr::<FUnknown>().ok_or_else(|| "host app FUnknown failed".to_string())?;
+        // IPluginBase: a component whose initialize failed is released, never terminated. The locals
+        // drop in reverse order, the component before the factory and the module.
+        if component.initialize(host_ctx.as_ptr()) != kResultOk {
+            return Err("component.initialize failed".to_string());
+        }
         // From here every early return drops `plugin`: setActive(0) → terminate → release → module.
         let mut plugin = Vst3Plugin {
             component,
@@ -489,9 +520,6 @@ fn create(
             _module: module,
             active: false,
         };
-        if plugin.component.initialize(plugin.host_ctx.as_ptr()) != kResultOk {
-            return Err("component.initialize failed".to_string());
-        }
         let processor = plugin
             .component
             .cast::<IAudioProcessor>()
@@ -510,8 +538,9 @@ fn create(
 
 /// Create the plugin (`create`), restore the stored tone, activate, and build its unit. A component
 /// that refuses its tone may have taken part of it: it is torn down and created again, without a tone,
-/// from the same module, so the plugin runs at the defaults the player is told it loaded with. The
-/// handler outlives the plugin (the caller's).
+/// from the same module, so the plugin runs at the defaults the player is told it loaded with. A
+/// controller no tone reached learns the component's state (`sync_controller`). The handler outlives
+/// the plugin (the caller's).
 fn load(
     id: &str,
     open: impl FnOnce() -> Result<Opened, String>,
@@ -532,6 +561,9 @@ fn load(
         drop(processor);
         drop(plugin);
         (plugin, processor, _) = create(opened, &target, id, handler)?;
+    }
+    if restored != Restore::Restored {
+        sync_controller(&plugin, slot.slot())?;
     }
     let (activation, max_frames, rate) = plugin.activate(&processor, slot)?;
     // A restart or a re-list the restore or the activation raised describes the state just

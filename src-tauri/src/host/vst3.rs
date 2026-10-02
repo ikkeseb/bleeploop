@@ -970,8 +970,7 @@ fn vst3_editor_close(ed: &mut Vst3Editor) {
 /// plugins (JUCE/Surge VST3) host it as a distinct class — `getControllerClassId` → factory
 /// `createInstance` → `initialize`. Returns `(controller, separated)`; `separated` drives the
 /// extra `terminate()` at teardown. Any failure → `(None, false)` (the editor replies a clear
-/// Err). P10.2 wires controller CREATION only; the connection-point relay + `setComponentState`
-/// sync (needed for the editor's knobs to move the processor's sound) are P10.3.
+/// Err). The caller syncs a separated controller from the component's state (`setComponentState`).
 unsafe fn obtain_controller(
     factory: &ComPtr<IPluginFactory>,
     component: &ComPtr<IComponent>,
@@ -996,8 +995,8 @@ unsafe fn obtain_controller(
         Some(c) => c,
         None => return (None, false),
     };
+    // IPluginBase: a controller whose initialize failed is released, never terminated.
     if controller.initialize(host_ctx.as_ptr()) != kResultOk {
-        let _ = controller.terminate();
         return (None, false);
     }
     // Cross-connect the component's and controller's connection points so JUCE can hand the

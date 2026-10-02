@@ -8,7 +8,7 @@ use rtrb::RingBuffer;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize};
 use std::thread::ThreadId;
 use vst3::Steinberg::Vst::{IoMode, MediaType, RoutingInfo, SpeakerArrangement};
-use vst3::Steinberg::{IBStream, TBool};
+use vst3::Steinberg::{kNotImplemented, IBStream, TBool};
 
 /// The thread every engine-mode test renders on (`engine_io::test_rig`).
 const TEST_DEVICE_THREAD: &str = "lf-test-device";
@@ -71,6 +71,11 @@ struct FixtureComponent {
     set_states: AtomicUsize,
     /// A `setState` arrived while the component was active: a tone must go in before activation.
     state_set_while_active: AtomicBool,
+    /// `initialize` fails (a plugin whose licence check fails); it must then never be terminated.
+    refuse_init: AtomicBool,
+    /// `setProcessing` answers `kNotImplemented`, the SDK `AudioEffect`'s default for a plugin that
+    /// does not override it, while it processes as usual.
+    processing_not_implemented: AtomicBool,
 }
 
 impl FixtureComponent {
@@ -112,6 +117,8 @@ impl FixtureComponent {
             half_apply_state: AtomicBool::new(false),
             set_states: AtomicUsize::new(0),
             state_set_while_active: AtomicBool::new(false),
+            refuse_init: AtomicBool::new(false),
+            processing_not_implemented: AtomicBool::new(false),
         }
     }
     fn tick(&self, at: &AtomicUsize) {
@@ -138,7 +145,7 @@ impl Class for FixtureComponent {
 
 impl IPluginBaseTrait for FixtureComponent {
     unsafe fn initialize(&self, _context: *mut FUnknown) -> tresult {
-        kResultOk
+        if self.refuse_init.load(Relaxed) { kResultFalse } else { kResultOk }
     }
     unsafe fn terminate(&self) -> tresult {
         self.tick(&self.terminate_seq);
@@ -396,7 +403,7 @@ impl IAudioProcessorTrait for FixtureComponent {
             self.tick(&self.stop_seq);
             self.stops.fetch_add(1, Relaxed);
         }
-        kResultOk
+        if self.processing_not_implemented.load(Relaxed) { kNotImplemented } else { kResultOk }
     }
     unsafe fn process(&self, data: *mut ProcessData) -> tresult {
         self.violate_if(
@@ -532,6 +539,28 @@ mod engine {
         answer: StateAnswer,
         /// Every component it makes refuses `setProcessing(1)`.
         reject_start: bool,
+        /// Every component, or every controller, it makes fails `initialize`.
+        component_init_fails: bool,
+        controller_init_fails: bool,
+        /// The state every component it makes starts with (its defaults).
+        component_state: &'static [u8],
+    }
+
+    impl FixtureFactory {
+        /// An instrument with no latency, silent, that takes its tone and starts processing.
+        fn new(made: Arc<Made>) -> Self {
+            Self {
+                made,
+                latency: 0,
+                output_level: 0.0,
+                inputs: 0,
+                answer: StateAnswer::Takes,
+                reject_start: false,
+                component_init_fails: false,
+                controller_init_fails: false,
+                component_state: b"",
+            }
+        }
     }
 
     impl Class for FixtureFactory {
@@ -571,13 +600,17 @@ mod engine {
                 component.refuse_state.store(self.answer == StateAnswer::Refuses, Relaxed);
                 component.half_apply_state.store(self.answer == StateAnswer::HalfAppliesThenRefuses, Relaxed);
                 component.reject_processing_start.store(self.reject_start, Relaxed);
+                component.refuse_init.store(self.component_init_fails, Relaxed);
+                *component.state.lock().unwrap() = self.component_state.to_vec();
                 let wrapper = ComWrapper::new(component);
                 *obj = wrapper.to_com_ptr::<IComponent>().unwrap().into_raw().cast();
                 *self.made.component.lock().unwrap() = Some(wrapper);
                 self.made.components.fetch_add(1, Relaxed);
                 kResultOk
             } else if cid == CONTROLLER_CID {
-                let wrapper = ComWrapper::new(FixtureController::new(2));
+                let controller = FixtureController::new(2);
+                controller.refuse_init.store(self.controller_init_fails, Relaxed);
+                let wrapper = ComWrapper::new(controller);
                 *obj = wrapper.to_com_ptr::<IEditController>().unwrap().into_raw().cast();
                 *self.made.controller.lock().unwrap() = Some(wrapper);
                 kResultOk
@@ -628,12 +661,11 @@ mod engine {
         answer: StateAnswer,
     ) -> (EngineSlotHandle, Arc<Made>, Arc<Mutex<Vec<EngineSlotEvent>>>) {
         load_factory(device, slot, tone, move |made| FixtureFactory {
-            made,
             latency,
             output_level,
             inputs,
             answer,
-            reject_start: false,
+            ..FixtureFactory::new(made)
         })
     }
 
@@ -644,6 +676,17 @@ mod engine {
         tone: Option<ToneBinding>,
         make: impl FnOnce(Arc<Made>) -> FixtureFactory + Send + 'static,
     ) -> (EngineSlotHandle, Arc<Made>, Arc<Mutex<Vec<EngineSlotEvent>>>) {
+        let (handle, made, seen) = try_load_factory(device, slot, tone, make);
+        (handle.expect("the fixture loads into the engine"), made, seen)
+    }
+
+    /// `load_factory`, with the load's own result.
+    fn try_load_factory(
+        device: &TestDevice,
+        slot: usize,
+        tone: Option<ToneBinding>,
+        make: impl FnOnce(Arc<Made>) -> FixtureFactory + Send + 'static,
+    ) -> (Result<EngineSlotHandle, String>, Arc<Made>, Arc<Mutex<Vec<EngineSlotEvent>>>) {
         let made = Arc::new(Made::default());
         let seen = Arc::new(Mutex::new(Vec::new()));
         let (factory_made, sink_seen) = (made.clone(), seen.clone());
@@ -660,8 +703,7 @@ mod engine {
                     Ok((None, factory.to_com_ptr::<IPluginFactory>().ok_or("factory COM failed")?))
                 })
             },
-        )
-        .expect("the fixture loads into the engine");
+        );
         (handle, made, seen)
     }
 
@@ -860,13 +902,57 @@ mod engine {
         slot: usize,
     ) -> (EngineSlotHandle, Arc<Made>, Arc<Mutex<Vec<EngineSlotEvent>>>) {
         load_factory(device, slot, None, |made| FixtureFactory {
-            made,
-            latency: 0,
             output_level: 0.25,
-            inputs: 0,
-            answer: StateAnswer::Takes,
             reject_start: true,
+            ..FixtureFactory::new(made)
         })
+    }
+
+    /// IPluginBase: an object whose `initialize` failed is released, never terminated. A component
+    /// that fails fails the load; a separated controller that fails leaves the plugin without one.
+    /// One that initialised is terminated once at the unload.
+    #[test]
+    fn a_half_that_fails_to_initialise_is_never_terminated() {
+        let _one = engine_slot::one_engine_test_at_a_time();
+        let device = device(48_000);
+        let (handle, made, _) = load(&device, 0, 0, 0.0);
+        handle.unload().unwrap();
+        assert_eq!(made.controller().terminates.load(Relaxed), 1, "an initialised controller is terminated");
+
+        let (loaded, made, _) =
+            try_load_factory(&device, 0, None, |made| FixtureFactory { component_init_fails: true, ..FixtureFactory::new(made) });
+        let err = loaded.err().expect("a component that fails initialize fails the load");
+        assert!(err.contains("initialize"), "{err}");
+        assert_eq!(made.component().terminate_seq.load(Relaxed), 0, "the failed component was never terminated");
+        assert_eq!(installed(&device, 0), None);
+
+        let (handle, made, _) =
+            load_factory(&device, 0, None, |made| FixtureFactory { controller_init_fails: true, ..FixtureFactory::new(made) });
+        let s = made.component();
+        assert!(wait_for(2000, || s.processes.load(Relaxed) > 4), "the component plays without a controller");
+        handle.unload().unwrap();
+        assert_eq!(made.controller().terminates.load(Relaxed), 0, "the failed controller was never terminated");
+        assert!(s.terminate_seq.load(Relaxed) > 0, "the component still terminates");
+        assert!(!s.contract_violation.load(Relaxed));
+    }
+
+    /// A fresh separated controller learns the processor's state before the load is reported (the SDK
+    /// host's `setComponentState` after it connects the halves): with no tone, the editor and the
+    /// listed values start from what the processor plays, not from the controller's own defaults.
+    #[test]
+    fn a_fresh_controller_hears_the_component_state_without_a_tone() {
+        let _one = engine_slot::one_engine_test_at_a_time();
+        let device = device(48_000);
+        let (handle, made, _) =
+            load_factory(&device, 0, None, |made| FixtureFactory { component_state: b"defaults", ..FixtureFactory::new(made) });
+        assert_eq!(handle.tone(), None, "no tone");
+        assert_eq!(
+            *made.controller().state_calls.lock().unwrap(),
+            [("setComponentState", framed(b"defaults"))],
+            "the controller heard the component's state once, before the load was reported"
+        );
+        handle.unload().unwrap();
+        assert!(!made.component().contract_violation.load(Relaxed));
     }
 
     #[test]
@@ -1031,7 +1117,11 @@ mod engine {
         assert_eq!(made.components.load(Relaxed), 2, "the instance that took part of the tone was discarded");
         let s = made.component();
         assert!(s.state.lock().unwrap().is_empty(), "the running component is at its true defaults");
-        assert!(made.controller().state_calls.lock().unwrap().is_empty(), "and so is its controller");
+        assert_eq!(
+            *made.controller().state_calls.lock().unwrap(),
+            [("setComponentState", framed(b""))],
+            "and its controller heard only those"
+        );
         assert!(wait_for(2000, || s.processes.load(Relaxed) > 4), "and it runs");
         handle.unload().unwrap();
         assert_eq!(stored(&dir), Some((framed(b"component v"), b"controller v".to_vec())), "the stored tone stays");
@@ -1114,6 +1204,45 @@ fn a_unit_whose_plugin_refuses_to_start_latches_the_fault_and_stays_silent() {
     assert_eq!(s.starts.load(Relaxed), 1, "asked once");
     assert_eq!(s.processes.load(Relaxed), 0);
     assert_eq!(s.stops.load(Relaxed), 0, "never started, never stopped");
+    drop(unit);
+    unsafe {
+        assert_eq!(component.setActive(0), kResultOk);
+    }
+    assert!(!s.contract_violation.load(Relaxed));
+}
+
+/// The unit on its own, with a plugin that keeps the SDK `AudioEffect`'s `setProcessing`
+/// (`kNotImplemented`, an optional notification): it is processed and heard, nothing is latched, and
+/// its stop still pairs the start.
+#[test]
+fn a_unit_whose_plugin_does_not_implement_set_processing_plays() {
+    use super::engine::Vst3Unit;
+    use lf_engine::SlotProcessor;
+
+    let fixture = ComWrapper::new(FixtureComponent::new());
+    let s: &FixtureComponent = &fixture;
+    s.output_level.store(0.5f32.to_bits(), Relaxed);
+    s.processing_not_implemented.store(true, Relaxed);
+    let component = fixture.to_com_ptr::<IComponent>().unwrap();
+    let processor = component.cast::<IAudioProcessor>().unwrap();
+    let activation = unsafe { activate_component(&component, &processor, 48_000.0, 64) }.unwrap();
+    let (_params, ring) = RingBuffer::<PluginEvent>::new(8);
+    let faults = Arc::new(AtomicU32::new(0));
+    let unit = Vst3Unit::new(processor, activation, 64, ring, faults.clone()).unwrap();
+    let unit = std::thread::spawn(move || {
+        let mut unit = unit;
+        let (input, mut out) = ([0.0f32; 64], [0.0f32; 64]);
+        for frame in 0..3 {
+            unit.process(frame * 64, &input, &[], &mut out);
+            assert!(out.iter().all(|&x| x == 0.5), "heard");
+        }
+        unit.stop();
+        unit
+    })
+    .join()
+    .unwrap();
+    assert_eq!(faults.load(Relaxed), 0, "nothing latched");
+    assert_eq!((s.starts.load(Relaxed), s.processes.load(Relaxed), s.stops.load(Relaxed)), (1, 3, 1));
     drop(unit);
     unsafe {
         assert_eq!(component.setActive(0), kResultOk);

@@ -625,6 +625,7 @@ fn fixture_instance() -> PluginInstance<LfHost> {
         |_| LfShared {
             editor_closed: Arc::new(EditorClosed::default()),
             hosted_hwnd: Arc::new(AtomicIsize::new(0)),
+            pending_resize: AtomicU64::new(NO_RESIZE),
             callback_requested: AtomicBool::new(false),
             restart_requested: AtomicBool::new(false),
             keeps_tone: false,

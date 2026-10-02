@@ -4,7 +4,7 @@
 //! count is an error rather than a process abort, and that an editor open never replaces the
 //! load-time component handler. No DLL or plugin GUI required; no window is shown.
 use super::*;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 use vst3::Steinberg::{char16, int16, IBStream, TBool};
 
 pub(super) struct FixtureController {
@@ -18,6 +18,9 @@ pub(super) struct FixtureController {
     /// every state call in order, with what it read.
     pub(super) state: Mutex<Vec<u8>>,
     pub(super) state_calls: Mutex<Vec<(&'static str, Vec<u8>)>>,
+    /// `initialize` fails; a controller that failed it must never be terminated.
+    pub(super) refuse_init: AtomicBool,
+    pub(super) terminates: AtomicUsize,
 }
 
 impl FixtureController {
@@ -29,6 +32,8 @@ impl FixtureController {
             set_normalized: Mutex::new(Vec::new()),
             state: Mutex::new(Vec::new()),
             state_calls: Mutex::new(Vec::new()),
+            refuse_init: AtomicBool::new(false),
+            terminates: AtomicUsize::new(0),
         }
     }
     fn held_handler(&self) -> Option<usize> {
@@ -42,9 +47,10 @@ impl Class for FixtureController {
 
 impl IPluginBaseTrait for FixtureController {
     unsafe fn initialize(&self, _context: *mut FUnknown) -> tresult {
-        kResultOk
+        if self.refuse_init.load(Relaxed) { kResultFalse } else { kResultOk }
     }
     unsafe fn terminate(&self) -> tresult {
+        self.terminates.fetch_add(1, Relaxed);
         kResultOk
     }
 }
