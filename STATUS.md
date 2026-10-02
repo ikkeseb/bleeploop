@@ -62,7 +62,7 @@ it.
 - The count-in (1 bar, accent on 1, no dead air; the tempo locks mid-count-in); FIXED 2 stops on the
   downbeat after exactly 2 bars (an over-long FIXED pick records the largest whole-bar fit in 60 s); a
   free record stopped near the downbeat after N bars keeps N, an early or a mid-bar stop behaves, and a
-  press while the take's tail is in flight is honoured after the commit.
+  PLAY/STOP press while the take's tail is in flight commits it stopped (a REC/DUB press there: D24).
 - The click: silent when idle, stops with STOP ALL, and the count-in still clicks with CLICK off.
 - A later track starts at master phase with no seam; reverse's flip adds no step (machine:
   `tests/seam_continuity.rs`), but does its turn of direction click?
@@ -71,8 +71,9 @@ it.
 - TRIM: halve an 8-bar lane while it plays (its first 4 bars from the next loop start); ↶ UNDO brings
   the 8 back; no click at either swap.
 - DUB FEEDBACK 50 %, two passes: the old layers fade; 0 % replaces; ↶ UNDO brings the loop back.
-- 10+ minutes: loops and click stay tight, no LED hop at a commit, no flam on the commit beat's click;
-  a free record past 60 s auto-closes on a bar (fine?).
+- 10+ minutes: loops and click stay tight, no LED hop at a commit, no flam on the commit beat's click.
+  A free record past 60 s closes at the 60 s cap, not on a bar line (at 137 BPM a quarter bar past bar
+  34's; the 34-bar loop comes in there, mid-bar): fine, or close on the last bar line?
 - Editors: in front; close → reopen with no hang; with FabFilter's editor open, a drawer slider moves
   its knob, and the editor's own size menu resizes the host window.
 - Yank the interface while loops play: a toast, the loops and the plugin stay; reconnect: the same
@@ -100,4 +101,5 @@ nothing is said.
 | D20 | A plugin call that outputs NaN or an infinity is silenced. Should it also damage the running take or layer, as an input gap does (the layer is dropped)? Today a bad stretch leaves silence in it; with DUB FEEDBACK 0 that replaces the loop there. | No. |
 | D21 | Make the engine's applied state the one authority: the feed carries it whole, the snapshot and the load carry each lane's mix with its PCM, and the settings mirror and the UI's mix copies go. L, wire changes, the fader's feel to re-check. The races it closes reproduce as ignored red tests (`d21_*` in `src-tauri/src/engine_io/tests.rs`, run with `-- --ignored`); the one a player meets: an import or recovery plays a lane saved muted or quieter for ~90 ms at full level. Sending the mix before the load alone lets a recovery that loses the race to a live take rewrite that take's mix (`recovery-import-failure`). A timed-out load that later plays and a rate switch that drops a load are a separate protocol question. | Not started. |
 | D22 | Remove the native MIDI stack (`src-tauri/src/engine_io/midi/`, about 1.8k lines with tests, and `midir`)? It is built and tested but never started; MIDI arrives through Web MIDI. | Keep it. |
-| D23 | An overdub's punch-in and punch-out and an UNDO swap cut hard: no ramp exists, and a sustained note steps there 11 to 13 times its own slope (ignored red tests, `tests/seam_continuity.rs`). A design: a 5 ms linear ramp written at punch-in (DUB FEEDBACK ramps from 1 too), the last 5 ms tapered at punch-out from the samples the dub overwrote (no tail after the press), and an UNDO/REDO swap crossfaded from a cached copy of the outgoing loop. It changes recorded audio at the edges (a gesture shorter than the ramps is softened) and the exact sums in about eight test files. Build it, and with what ramp? | Build it as designed, 5 ms linear, on a branch for the ear. |
+| D23 | An overdub's punch-in and punch-out, an UNDO swap, and a lane's PLAY or STOP mid-loop cut hard: no ramp exists outside FADE, and a sustained note steps there 11 to 15 times its own slope (ignored red tests, `tests/seam_continuity.rs`). A design: a 5 ms linear ramp written at punch-in (DUB FEEDBACK ramps from 1 too), the last 5 ms tapered at punch-out from the samples the dub overwrote (no tail after the press), an UNDO/REDO swap crossfaded from a cached copy of the outgoing loop, and a lane's start and stop ramped the same 5 ms (not yet designed). It changes recorded audio at the edges (a gesture shorter than the ramps is softened) and the exact sums in about eight test files. Build it, and with what ramp? | Build it as designed, 5 ms linear, on a branch for the ear. |
+| D24 | A REC/DUB press while a first take's aligned tail is in flight is swallowed: it counts as a repeated stop, which cannot lengthen the take (`tests/first_take.rs` free_d encodes this). Start one overdub on the commit frame instead, as REC to DUB does mid-take? The engine's held commands make it small (a recorder flag and a wait until the window's end). Red test, ignored: free_i in `tests/first_take.rs`. | Keep it a stop. |

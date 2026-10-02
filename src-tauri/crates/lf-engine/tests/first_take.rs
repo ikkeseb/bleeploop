@@ -7,6 +7,11 @@
 //! frames after its downbeat and its tail arrives that much after the press. The drain regimes become
 //! block sizes. Two checks change meaning: an aborted take leaves no loop (`length` 0) but its buffer is
 //! not zeroed, since the next take writes over it and a commit pads what it did not reach.
+//!
+//! Beyond the ports, two STATUS § Not heard yet claims: a press while the aligned tail is in flight
+//! (`free_h`: PLAY/STOP commits the take STOPPED; `free_i`, ignored red: REC/DUB is swallowed as a
+//! repeated stop, no overdub follows the commit) and where a free take held past the buffer closes
+//! (`cap_b`: on the capacity, a quarter bar past a bar line at 137 bpm).
 
 mod common;
 
@@ -283,4 +288,106 @@ fn fixed_j_a_later_fixed_take_selects_its_bars_retake_keeps_the_master() {
     assert_eq!(window(true, 12.0, false), master);
     assert_eq!(window(false, 3.0, false), master);
     assert_eq!(window(true, 3.0, true), master);
+}
+
+/// A free take stopped just after its 4th bar line with a 100 ms alignment, then `second` pressed halfway
+/// through the tail still in flight. Returns the rig, the take's start, its window end (the commit frame)
+/// and the second press's frame; the rig has rendered the commit frame and nothing after it.
+fn second_press_in_the_tail(second: Command) -> (Rig, Frame, Frame, Frame) {
+    let align = 4800;
+    let (mut rig, downbeat, start) = start_take(120, 48000, align);
+    let fpb = rig.fpb();
+    rig.advance_to(downbeat + 4 * fpb + rig.seconds(0.01));
+    rig.press(Command::RecDub(0));
+    let end = rig.end_frame();
+    assert_eq!(end, start + 4 * fpb);
+    rig.advance_to((rig.frame + end) / 2);
+    let press = rig.frame;
+    rig.send_at(press, second);
+    rig.advance_to(end);
+    assert!(rig.master() == 0 && rig.state(0) == LaneState::Recording, "the tail is in flight up to its end");
+    rig.advance(1);
+    let pcm = rig.pcm(0);
+    assert_eq!(rig.master(), 4 * fpb, "the take commits on its window end, its 4 bars");
+    assert_eq!((pcm[0], pcm[(4 * fpb - 1) as usize]), (code(start), code(start + 4 * fpb - 1)), "unchanged");
+    println!("{second:?}: stop at {}, second press at {press} ({} frames before the commit at {end})", downbeat + 4 * fpb + rig.seconds(0.01), end - press);
+    (rig, start, end, press)
+}
+
+#[test]
+fn free_h_a_play_stop_in_the_tail_commits_the_take_stopped() {
+    for second in [Command::PlayStop(0), Command::Action(lf_engine::Action::PlayStop)] {
+        let (mut rig, _, end, _) = second_press_in_the_tail(second);
+        assert_eq!(rig.state(0), LaneState::Stopped, "{second:?} is honoured at the commit on {end}");
+        rig.advance(rig.seconds(1.0));
+        assert_eq!(rig.state(0), LaneState::Stopped, "and stays STOPPED");
+    }
+}
+
+#[test]
+#[ignore = "red, STATUS D24: a REC/DUB press in the tail is swallowed: the take commits PLAYING and no overdub begins in the 2 s after"]
+fn free_i_a_rec_dub_in_the_tail_starts_one_overdub_at_the_commit() {
+    let mut wrong = Vec::new();
+    for second in [Command::RecDub(0), Command::Action(lf_engine::Action::RecDub)] {
+        let (mut rig, _, end, _) = second_press_in_the_tail(second);
+        let first = (rig.state(0), rig.window());
+        let mut dubs = Vec::new();
+        let mut was = first.0;
+        if was == LaneState::Overdubbing {
+            dubs.push(end);
+        }
+        for _ in 0..rig.seconds(2.0) {
+            let f = rig.frame;
+            rig.advance(1);
+            if rig.state(0) == LaneState::Overdubbing && was != LaneState::Overdubbing {
+                dubs.push(f);
+            }
+            was = rig.state(0);
+        }
+        println!("{second:?}: at the commit {end}: {:?}, recorder {:?}; overdubs begun in the 2 s after at {dubs:?}", first.0, first.1);
+        // Exactly one overdub, begun on the commit frame, recording from the commit plus the alignment.
+        if dubs != vec![end] || first.1 != Some((0, Some(end + rig.align), None)) {
+            wrong.push(format!("{second:?}: {:?} at the commit, overdubs begun at {dubs:?}", first.0));
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("; "));
+}
+
+/// STATUS § Not heard yet: "a free record past 60 s auto-closes on a bar (fine?)". It closes on the
+/// capacity, which at 137 bpm and 48 kHz is 34.25 bars, so a quarter bar past bar 34's line: today's
+/// behaviour, pinned. The loop keeps bars 1 to 34 on the counted grid (the anchor a whole loop after the
+/// downbeat), and the lane first sounds at the closure, a quarter bar into its second pass: the quarter
+/// bar played past bar 34's line is dropped, and the loop's own first quarter bar is not heard until the
+/// third pass. Whether the take should rather close on bar 34's line is the owner's call.
+#[test]
+fn cap_b_a_free_take_held_past_the_buffer_closes_a_quarter_bar_past_a_bar_line() {
+    let align = 4800;
+    let (mut rig, downbeat, start) = start_take(137, 48000, align);
+    let (fpb, cap) = (rig.fpb(), rig.engine.looper().capacity());
+    let end = rig.end_frame();
+    assert_eq!(end, start + cap, "the window is the capacity");
+    rig.advance_to(end);
+    assert_eq!(rig.state(0), LaneState::Recording);
+    rig.advance(1);
+    assert!(committed(&rig));
+    let (master, anchor) = (rig.master(), rig.anchor());
+    let closure = end - align - downbeat; // musical time from the downbeat
+    let pos = (end - anchor).rem_euclid(master);
+    println!(
+        "fpb {fpb}, capacity {cap} ({:.4} bars), closure {closure} frames after the downbeat: bar line + {} frames ({:.4} bar, {:.1} ms); master {} bars; anchor = downbeat + {}; the lane first sounds at loop position {pos} ({:.4} bar after the alignment)",
+        cap as f64 / fpb as f64,
+        closure.rem_euclid(fpb),
+        closure.rem_euclid(fpb) as f64 / fpb as f64,
+        closure.rem_euclid(fpb) as f64 * 1000.0 / 48000.0,
+        master / fpb,
+        anchor - downbeat,
+        (pos - align) as f64 / fpb as f64
+    );
+    assert_eq!((fpb, master), (84_088, 34 * fpb));
+    assert_eq!(closure.rem_euclid(fpb), 21_008, "the closure is a quarter bar past bar 34's line, not on it");
+    assert_eq!(anchor, downbeat + master, "the grid is the counted one: bar lines stay where the click put them");
+    // Where the loop is when it starts playing, from the anchor (the render reading that position is
+    // inferred from `render`, not measured here), and the take's first pass stored there.
+    assert_eq!(pos, align + cap - master, "it enters mid-loop, a quarter bar (plus the alignment) in");
+    assert_eq!(rig.pcm(0)[pos as usize], code(start + pos), "the take's first pass is stored there");
 }

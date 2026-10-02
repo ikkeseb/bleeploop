@@ -1,6 +1,6 @@
 //! The looper's sample-level joins under a SUSTAINED tone (STATUS § Not heard yet: "punching out of a
 //! sustained note leaves a clean layer seam; the undo swap and reverse are click-free", "TRIM ... no click
-//! at either swap"). No web guard precedes this: the other looper tests prove each join lands on its exact
+//! at either swap", "a later track starts at master phase with no seam"). No web guard precedes this: the other looper tests prove each join lands on its exact
 //! frame with the frame code, which says nothing about the audio's continuity across it.
 //!
 //! The criterion: an audible click is a sample step far above the tone's own slope. Within +-10 ms of a
@@ -16,8 +16,13 @@
 //!
 //! What is measured: the rig's kept output (the lanes before their FX plus the click and the monitor) over
 //! passes where the input is silent, and the test asserts the monitor is silent there, so it is the loop
-//! alone. The tone is a whole number of cycles per bar at 120 bpm and 48 kHz (220 Hz in bar 1, 330 Hz in
-//! a second bar), its phase pi/4 at every bar line, so the content itself is seamless (a kink at most) at
+//! alone. A later take's commit (`f`) is measured over the loop and the monitor together
+//! (`measure_heard`): the input sounds up to the commit frame and is silent from it, so a seamless join is
+//! the lane carrying on the player's tone. `g` plays one lane over another sustained loop with the input
+//! silent and STOPs and PLAYs it mid-loop; a player still sounding past a later take's commit would hear
+//! the lane enter the same way, by addition (inferred, not measured here). The tone is a whole number of
+//! cycles per bar at 120 bpm and 48 kHz (220 Hz in bar 1, 330 Hz in a second bar), its phase pi/4 at
+//! every bar line, so the content itself is seamless (a kink at most) at
 //! every bar line and loop point: a step measured at a join is the engine's. What this cannot see: a real
 //! note's phase where a loop wraps (the engine has no crossfade at a wrap or a swap, so a tone not whole
 //! cycles long steps at its loop point by its own phase jump), and a slope reversal (reverse's flip is a
@@ -114,9 +119,14 @@ struct Seam {
 /// The joins over the kept output: the steady step away from every bar line and `joins` frame, then each
 /// window's largest step and RMS, printed.
 fn measure(rig: &Rig, joins: &[(&'static str, Frame)]) -> Vec<Seam> {
+    assert!(rig.monitor.iter().all(|&m| m == 0.0), "the input is silent: the output is the loop alone");
+    measure_heard(rig, joins)
+}
+
+/// [`measure`] over the loop and the monitor together: where a later take takes over from the player.
+fn measure_heard(rig: &Rig, joins: &[(&'static str, Frame)]) -> Vec<Seam> {
     let (start, out) = rig.output.as_ref().expect("keep_output first");
     let (start, end) = (*start, start + out.len() as Frame);
-    assert!(rig.monitor.iter().all(|&m| m == 0.0), "the input is silent: the output is the loop alone");
     let (anchor, fpb) = (rig.anchor(), rig.fpb());
     let x = |f: Frame| out[(f - start) as usize] as f64;
     let near_join = |f: Frame| {
@@ -243,4 +253,60 @@ fn d_trim_and_its_undo_swap_without_a_step() {
     rig.idle();
     assert_eq!(rig.pcm(0), before, "UNDO gives back both bars");
     assert_clean(&measure(&rig, &[("trim swap", trim), ("trimmed bar's repeat", trim + fpb), ("trim's undo swap", undo)]));
+}
+
+/// Over lane 0's 1-bar tone loop, lane 1 records a later free take of the same tone, armed on a boundary
+/// and stopped 2400 frames past its first pass, which keeps one loop and commits at once: the lane's
+/// first playback frame is the press, mid-loop. The input is the tone up to the press and silent from it,
+/// so what was heard (lane 0 and the monitor) continues as lane 0 and lane 1 if the commit joins the take
+/// on its phase. Returns the rig (kept from half a loop before the commit) and the commit frame.
+fn later_take_committed_mid_loop() -> (Rig, Frame) {
+    let (mut rig, downbeat) = sustained_loop(1);
+    let (sr, fpb, master) = (rig.sr, rig.fpb(), rig.master());
+    rig.advance_to(rig.next_boundary() + master / 3);
+    let arm = rig.next_boundary();
+    let commit = arm + master + 2400;
+    rig.set_input(move |f| if f < commit { tone(f - downbeat, fpb, 1, sr) } else { 0.0 });
+    rig.press(Command::RecDub(1));
+    assert_eq!(rig.start_frame(), arm);
+    rig.advance_to(commit - master / 2);
+    rig.keep_output();
+    rig.advance_to(commit);
+    rig.press(Command::RecDub(1));
+    assert!(rig.state(1) == LaneState::Playing && rig.lane(1).length == master, "lane 1 commits at the press");
+    assert_eq!(rig.pcm(1), rig.pcm(0), "the take is the tone, on its phase");
+    (rig, commit)
+}
+
+/// The first frame from `from` where lane `i` plays at least 0.9 of the tone's amplitude: a start or a
+/// stop there cannot fall on a near-zero sample, where a cut steps by little.
+fn loud(rig: &Rig, i: usize, from: Frame) -> Frame {
+    let (pcm, anchor, master) = (rig.pcm(i), rig.anchor(), rig.master());
+    (from..from + master).find(|&f| pcm[(f - anchor).rem_euclid(master) as usize].abs() as f64 >= 0.9 * AMP).unwrap()
+}
+
+#[test]
+fn f_a_later_take_joins_the_player_at_its_commit_without_a_step() {
+    let (mut rig, commit) = later_take_committed_mid_loop();
+    rig.advance_to(commit + rig.master() / 2);
+    assert_clean(&measure_heard(&rig, &[("later take's commit mid-loop", commit)]));
+}
+
+#[test]
+#[ignore = "red, STATUS D23: STOP and PLAY mid-loop cut the lane hard: steps of 0.440 and 0.459, over a limit of 0.058"]
+fn g_a_lane_stopped_and_played_mid_loop_while_another_plays_joins_without_a_step() {
+    let (mut rig, _) = later_take_committed_mid_loop();
+    let master = rig.master();
+    rig.advance_to(rig.next_boundary() + master / 8);
+    rig.keep_output();
+    rig.advance_to(loud(&rig, 1, rig.next_boundary() + master * 3 / 10));
+    let stop = rig.frame;
+    rig.press(Command::PlayStop(1));
+    assert_eq!(rig.state(1), LaneState::Stopped, "STOP takes effect at the press (LOOP END STOP is off)");
+    rig.advance_to(loud(&rig, 1, rig.next_boundary() + master * 6 / 10));
+    let play = rig.frame;
+    rig.press(Command::PlayStop(1));
+    assert_eq!(rig.state(1), LaneState::Playing, "PLAY joins the running loop at the press");
+    rig.advance_to(play + master / 4);
+    assert_clean(&measure(&rig, &[("STOP mid-loop", stop), ("PLAY mid-loop", play)]));
 }
