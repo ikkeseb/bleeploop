@@ -382,6 +382,7 @@ await probe(async ({ browser, open }) => {
       };
     }));
     console.log(`${width}x${height} header`, JSON.stringify(layout));
+    assert.equal(layout.length, 2, `${width}: both slot cards measured`);
     for (const [i, slot] of layout.entries()) {
       assert.equal(slot.outside, 0, `${width}: slot ${i + 1}'s controls stay inside its card`);
       assert.equal(slot.actsLines, 1, `${width}: slot ${i + 1}'s own controls stay on one line`);

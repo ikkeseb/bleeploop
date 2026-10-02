@@ -128,6 +128,7 @@ await probe(async ({ open }) => {
   });
   const checkWords = async (scene, sel) => {
     const ls = await lanes();
+    assert.equal(ls.length, 5, `${scene}: the stage view shows five lanes`);
     console.log(JSON.stringify({ scene, lanes: ls.map(({ lane, state, word, expected, selected }) => ({ lane, state, word, expected, selected })) }));
     for (const l of ls) assert.equal(l.word, l.expected, `${scene}: lane ${l.lane} (${l.state}) reads ${l.word}, want ${l.expected}`);
     assert.equal(await page.evaluate(() => window.__lf.looper.selectedTrack()), sel, `${scene}: the feed selected lane ${sel + 1}`);
@@ -294,6 +295,7 @@ await probe(async ({ open }) => {
     await page.setViewportSize({ width, height });
     await page.waitForTimeout(300);
     const m = await measure();
+    assert.equal(m.words.length, 5, `${vp}: five lanes measured`);
     legibility[vp] = m;
     console.log(JSON.stringify({ vp, beatBarPx: m.beatBarPx, beatBoxes: m.beatBoxes, barFontPx: m.barFontPx, word: m.words[0], problems: m.problems }));
     assert.deepEqual(m.problems, [], `${vp}: nothing clips or overlaps`);

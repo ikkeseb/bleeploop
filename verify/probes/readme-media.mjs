@@ -501,7 +501,7 @@ await probe(async ({ browser, open }) => {
   const last = dir.state();
   await clip.context.close();
   console.log(`${count} frames at ${FPS} fps (${(count / FPS).toFixed(1)} s) in ${framesDir}`);
-  if (until) return;
+  if (until) return assert.deepEqual(errors, [], 'no console error or uncaught page error');
   assert.deepEqual(last, { pointer: REST, cam: { x: 640, y: 410, z: 1 } }, 'the last frame is framed as the first');
 
   const still = await openJam(2);

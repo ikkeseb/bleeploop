@@ -117,7 +117,13 @@ await probe(async ({ open }) => {
         const failures = [];
         for (const el of document.querySelectorAll('button, input, select, .slot__k, .slot__name, .kb__title, .kb__hint, .kb__key, .kb__pad')) {
           if (getComputedStyle(el).visibility === 'hidden') continue;
-          if (!el.getBoundingClientRect().width) continue;
+          // Not rendered (display: none and the like) is fine; rendered but squashed to nothing is not.
+          if (!el.checkVisibility()) continue;
+          const box = el.getBoundingClientRect();
+          if (!box.width || !box.height) {
+            failures.push({ name: el.getAttribute('aria-label') ?? el.textContent.trim(), fraction: 0 });
+            continue;
+          }
           el.scrollIntoView({ block: 'nearest', inline: 'nearest' });
           if (!el.disabled) el.focus();
           const r = el.getBoundingClientRect();

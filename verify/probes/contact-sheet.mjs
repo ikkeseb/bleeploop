@@ -14,7 +14,8 @@
  * slot A's picker, which auto-starts GO LIVE and the editor (INPUT LIVE); 10-amp-sim-idle = the same after
  * stopping live input. Writes logs/contact-sheet/<viewport>-<kbd>-<scene>.png plus a tiling index.html
  * unconditionally, before any FAIL is raised, so a red run still leaves the sheet for the eye lap.
- * Asserts: with FX open every lane's clear button is fully visible (audit A4); an ARMED later take draws
+ * Asserts: with FX open every lane's clear button is present, and fully visible wherever five lanes fit
+ * (audit A4; at 1000x700 with the keyboard shown the lanes scroll by design); an ARMED later take draws
  * no rec-red in its canvas while waiting (audit A3); no scene logs console.error or an uncaught page error
  * (tagged with the scene it happened in). Sees only the rendered DOM/canvas of scripted states: never the
  * native engine, a real plugin host or WebView2; a human still judges the screenshots.
