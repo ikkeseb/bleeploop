@@ -159,27 +159,30 @@ export function PluginParams(props: { slot: 0 | 1 }) {
   const [lastEdit, setLastEdit] = createSignal<{ name: string; value: number } | null>(null);
   const sourcePending = () => slotPendingCounts()[props.slot] > 0;
   const nameById = new Map<number, string>();
-  const renderedIds = new Set<number>();
-  // Which write last touched each slider: a token per slider drag or editor-originated change, cleared
+  // Which write last touched each param: a token per slider drag or editor-originated change, cleared
   // by `refresh`. A refused `setParameter` snaps its slider back only while its own token is still the
   // newest, so a refusal never overrides newer state. `alive` covers an unmount (a plugin swap remounts).
   const touched = new Map<number, number>();
   let touchTick = 0;
+  let listing = 0; // the newest `refresh`: an older listing that lands after it is stale
   let alive = true;
   onCleanup(() => (alive = false));
 
   // (Re)list the plugin's params and seed every rendered slider from its LIVE value — on mount, and
   // again whenever the plugin reports a wholesale change (preset loaded in its own GUI). A slider
-  // touched while the list was in flight keeps its value and its token: the list predates it.
+  // touched while the list was in flight keeps its value and its token: the list predates it. Listings
+  // can overlap (mount, then a preset load; two quick preset loads): only the newest one writes.
   async function refresh() {
     const since = touchTick;
+    const mine = ++listing;
     let ps: PluginParamDesc[] = [];
     try {
       ps = await platform.pluginHost.listParams(props.slot);
     } catch (e) {
       console.error('[PluginControls] listParams failed', e);
-      notifyError("Couldn't load the plugin's controls", e);
+      if (alive && mine === listing) notifyError("Couldn't load the plugin's controls", e);
     }
+    if (!alive || mine !== listing) return;
     setTotalParams(ps.length);
     nameById.clear();
     for (const p of ps) nameById.set(p.id, p.name);
@@ -190,12 +193,10 @@ export function PluginParams(props: { slot: 0 | 1 }) {
     const init: Record<number, number> = {};
     const newer = new Map([...touched].filter(([, token]) => token > since));
     touched.clear();
-    renderedIds.clear();
     for (const p of preview) {
       const token = newer.get(p.id);
       if (token === undefined) init[p.id] = p.value;
       else touched.set(p.id, token);
-      renderedIds.add(p.id);
     }
     setValues(init);
     setParams(preview);
@@ -207,15 +208,14 @@ export function PluginParams(props: { slot: 0 | 1 }) {
   onCleanup(offParams);
 
   // Editor-originated param changes (a knob drag in the plugin's own GUI): reposition the matching
-  // rendered slider, and always surface a last-edited readout so the link is visible even when the
-  // changed param isn't in the preview slice.
+  // slider, and always surface a last-edited readout so the link is visible even when the changed param
+  // isn't in the preview slice. Every change is recorded, even before the first listing lands or for a
+  // param not shown yet: a listing in flight predates it, so `refresh` keeps it (`setValues(init)` merges).
   const offParam = platform.pluginHost.onParamChanged((e) => {
     if (e.slot !== props.slot) return;
     setLastEdit({ name: nameById.get(e.id) ?? `#${e.id}`, value: e.value });
-    if (renderedIds.has(e.id)) {
-      touched.set(e.id, ++touchTick);
-      setValues(e.id, e.value);
-    }
+    touched.set(e.id, ++touchTick);
+    setValues(e.id, e.value);
   });
   onCleanup(offParam);
 
