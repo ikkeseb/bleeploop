@@ -13,7 +13,7 @@
  * is and however many bins arrived (before, the bins stretched to the head, or across the lane on a first
  * take, and the burst moved with every update), and it sits where its frame falls in the span. It moves
  * only when the span grows: a first take's window doubles (4 bars at the tempo: 8 s at 120 BPM), a free
- * later take spans the loops it has reached.
+ * later take spans the loops it has reached. Every span needs 4 samples; a run too slow to take them fails.
  *
  * Cannot see the native engine's real feed cadence, the web looper's own takes, WebView2 or the eye.
  * Run: pnpm probe wave-steady
@@ -123,7 +123,8 @@ await probe(async ({ open }) => {
       const counts = new Set(steady.map((s) => s.count));
       const expected = Math.ceil(((burstAt * PEAK_FRAMES) / run[0].span) * run[0].width);
       console.log(`${name}: span ${run[0].span} frames, ${steady.length} samples over ${counts.size} bin counts, burst at ${[...new Set(edges)].join('/')} px (its frame: ${expected})`);
-      if (steady.length < 4) continue;
+      // A span sampled too thinly proves nothing about it: a slow run fails here, it never passes unchecked.
+      assert.ok(steady.length >= 4, `${name}: only ${steady.length} samples over the span ${run[0].span} (needs 4)`);
       assert.ok(counts.size >= 4, `${name}: the bins kept arriving within the span ${run[0].span}`);
       assert.ok(Math.max(...edges) - Math.min(...edges) <= 1, `${name}: the burst holds within 1 px over the span ${run[0].span} (${edges.join(' ')})`);
       assert.ok(edges.every((e) => Math.abs(e - expected) <= 1), `${name}: the burst sits at its frame in the span ${run[0].span}`);
