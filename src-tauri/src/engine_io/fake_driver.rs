@@ -107,6 +107,9 @@ pub(crate) struct Fake {
     pub(crate) lead_in: AtomicU32,
     /// One-shot, run by the next start before it starts: a test's way into an open midway.
     pub(crate) on_start: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// One-shot, run by the next output stream's drop before its callbacks stop (the fade-out done,
+    /// the device still rendering): a test's way into a stop midway.
+    pub(crate) on_stop: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     /// The device input: channel `c` carries `input(frame) * (c + 1)`.
     input: Mutex<Arc<dyn Fn(Frame) -> f32 + Send + Sync>>,
     /// The left channel played, by device frame (NaN where nothing played).
@@ -132,6 +135,7 @@ impl Fake {
             fatal: AtomicU8::new(0),
             lead_in: AtomicU32::new(0),
             on_start: Mutex::new(None),
+            on_stop: Mutex::new(None),
             input: Mutex::new(Arc::new(|_| 0.0)),
             tape: Mutex::new(Vec::new()),
             starts: Mutex::new(Vec::new()),
@@ -241,7 +245,7 @@ impl Driver for FakeDriver {
             .map_err(|e| e.to_string())?;
         self.0.started.fetch_add(1, Relaxed);
         let input_open = spec.in_channels > 0;
-        Ok(Started { streams: Streams::new(input_open.then(|| Box::new(()) as Box<dyn Send>), Box::new(Running { stop, join: Some(join) })), block: spec.block, input_open })
+        Ok(Started { streams: Streams::new(input_open.then(|| Box::new(()) as Box<dyn Send>), Box::new(Running { fake: self.0.clone(), stop, join: Some(join) })), block: spec.block, input_open })
     }
 
     fn open_share(&mut self, endpoint: &str, _rate: u32, _block: u32, _core: &Arc<Core>) -> Result<Share, String> {
@@ -256,12 +260,17 @@ impl Driver for FakeDriver {
 
 /// A started fake: dropping it stops and joins its thread, so no callback runs after the drop.
 struct Running {
+    fake: Arc<Fake>,
     stop: Arc<AtomicBool>,
     join: Option<JoinHandle<()>>,
 }
 
 impl Drop for Running {
     fn drop(&mut self) {
+        let hook = self.fake.on_stop.lock().unwrap().take();
+        if let Some(hook) = hook {
+            hook();
+        }
         self.stop.store(true, Release);
         if let Some(join) = self.join.take() {
             let _ = join.join();

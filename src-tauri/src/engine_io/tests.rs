@@ -1604,3 +1604,188 @@ fn the_glitch_watch_logs_a_span_only_when_a_fault_counter_moved_in_it() {
     let again = IoDiag { xruns: 3, ..glitch };
     assert_eq!(watch.tick(t0 + 4 * GLITCH_EVERY, || (again, histogram.snapshot())).as_deref(), Some("xruns=1 (block time none)"));
 }
+
+// ── D21: the races the UI's and the settings mirror's copies of the lane mix leave open ─────────────
+// Each red test below reproduces a review finding on the current code and stays ignored until the owner
+// decides D21 (`STATUS.md` § Decisions); `cargo test --no-default-features -p app d21 -- --ignored` runs them.
+
+/// A session's load bytes for the loop on lane 0, with lane 0 then cleared: the engine is all EMPTY and
+/// silent.
+fn saved_then_cleared(h: &mut Harness, length: Frame) -> Vec<u8> {
+    let (header, pcm) = session_parts(&h.host.snapshot(false).expect("a snapshot"));
+    h.send(Command::ClearAll);
+    h.wait_lane("the lane clears", 0, |i| i.state == LaneState::Empty);
+    until("the overview says EMPTY", || !h.host.core.holds_audio());
+    // The record's tail decays under 1e-4 (the bar the import tests hear by).
+    h.play(RATE / 2);
+    let load = serde_json::json!({ "bpm": 240, "bars": 1, "masterLengthFrames": length, "tracks": header["tracks"] });
+    session_bytes(&load, &pcm)
+}
+
+/// The RMS of what played (NaN, nothing played, left out).
+fn rms(heard: &[f32]) -> f32 {
+    let played: Vec<f32> = heard.iter().copied().filter(|x| !x.is_nan()).collect();
+    (played.iter().map(|x| x * x).sum::<f32>() / played.len().max(1) as f32).sqrt()
+}
+
+/// What the device played over its last `length` frames, and the export's wet master (left), as RMS:
+/// the engine's mix heard against the mix the export renders from (the settings mirror).
+fn heard_and_exported(h: &Harness, length: Frame) -> (f32, f32) {
+    let now = h.frame();
+    let heard = rms(&h.fake.heard(now - length..now));
+    let (_, _, [left, _]) = session_with_master(&h.host.snapshot(true).expect("an export's snapshot"));
+    (heard, rms(&left))
+}
+
+#[test]
+#[ignore = "red: D21, an owner decision (STATUS.md)"]
+fn d21_an_imported_lane_saved_muted_is_never_heard() {
+    let mut h = Harness::new();
+    h.fake.set_input(tone);
+    h.open(asio(Some(256)));
+    let length = h.record_loop();
+    let bytes = saved_then_cleared(&mut h, length);
+    let from = h.frame();
+    // `engine-store.ts` `loadSession`: the loops first, the saved mix after the load answers.
+    h.host.load_session(&bytes).expect("the load");
+    h.send(Command::SetMute(0, true));
+    h.play(RATE / 5);
+    let heard = h.fake.heard(from..h.frame());
+    let loud = heard.iter().filter(|x| x.abs() > 1e-4).count();
+    let loudest = heard.iter().filter(|x| !x.is_nan()).fold(0.0f32, |p, x| p.max(x.abs()));
+    assert_eq!(loud, 0, "a lane saved muted played {loud} frames (peak {loudest}) before its saved mute arrived");
+}
+
+#[test]
+fn a_mix_sent_to_an_empty_lane_holds_through_a_load() {
+    let mut h = Harness::new();
+    h.fake.set_input(tone);
+    h.open(asio(Some(256)));
+    let length = h.record_loop();
+    let bytes = saved_then_cleared(&mut h, length);
+    h.send(Command::SetMute(0, true));
+    h.play(RATE / 10);
+    let from = h.frame();
+    h.host.load_session(&bytes).expect("the load");
+    h.play(RATE / 5);
+    let loudest = h.fake.heard(from..h.frame()).iter().filter(|x| !x.is_nan()).fold(0.0f32, |p, x| p.max(x.abs()));
+    assert!(loudest < 1e-4, "the load keeps the EMPTY lane's mute ({loudest})");
+    assert!(h.host.core.holds_audio(), "and the loop is in");
+}
+
+#[test]
+#[ignore = "red: D21, an owner decision (STATUS.md)"]
+fn d21_an_export_masters_the_mix_it_was_asked_with() {
+    let mut h = Harness::new();
+    h.fake.set_input(saw);
+    h.open(asio(Some(256)));
+    h.record_loop();
+    let (_, stems, [before, _]) = session_with_master(&h.host.snapshot(true).expect("an export"));
+    // The callbacks stall, so the export's copy is still in flight when the fader moves.
+    let held = h.host.core.rt.lock().unwrap();
+    let export = {
+        let host = h.host.clone();
+        std::thread::spawn(move || host.snapshot(true))
+    };
+    until("the export holds the session port", || h.host.core.ends.lock().unwrap().as_ref().is_some_and(|e| e.session.is_none()));
+    h.send(Command::SetVolume(0, 0.25));
+    drop(held);
+    let (_, raced, [after, _]) = session_with_master(&export.join().unwrap().expect("the raced export"));
+    assert_eq!(raced, stems, "the stems are the same loop");
+    let (g, _) = fit(&after, &before);
+    assert!((g - 1.0).abs() < 0.05, "the master holds the mix the export was asked with (session.json's), not a fader moved since: gain {g}");
+}
+
+#[test]
+#[ignore = "red: D21, an owner decision (STATUS.md)"]
+fn d21_a_load_that_timed_out_never_applies_later() {
+    let mut h = Harness::new();
+    h.fake.set_input(tone);
+    h.open(asio(Some(256)));
+    let length = h.record_loop();
+    let bytes = saved_then_cleared(&mut h, length);
+    let err = {
+        // The callbacks stall past the load's wait (10 s).
+        let _held = h.host.core.rt.lock().unwrap();
+        h.host.load_session(&bytes).expect_err("the stalled engine never takes the load")
+    };
+    assert!(err.contains("did not finish"), "{err}");
+    h.play(RATE / 5);
+    assert!(!h.host.core.holds_audio(), "a load that answered \"{err}\" must not start playing once the callbacks resume");
+}
+
+#[test]
+#[ignore = "red: D21, an owner decision (STATUS.md)"]
+fn d21_a_load_that_lands_while_an_unforced_rate_switch_stops_is_not_dropped_unasked() {
+    let mut h = Harness::new();
+    h.fake.set_input(tone);
+    h.open(asio(Some(256)));
+    let length = h.record_loop();
+    let bytes = saved_then_cleared(&mut h, length);
+    let loaded = Arc::new(Mutex::new(None));
+    {
+        let (host, loaded) = (h.host.clone(), loaded.clone());
+        // The switch saw EMPTY lanes; the import lands while its fade-out ends, the old device still rendering.
+        *h.fake.on_stop.lock().unwrap() = Some(Box::new(move || *loaded.lock().unwrap() = Some(host.load_session(&bytes))));
+    }
+    let switched = h.host.open(at(44_100, asio(Some(256))), false);
+    let loaded = loaded.lock().unwrap().take().expect("the load ran inside the stop");
+    let events = h.device_events(1);
+    println!("load {loaded:?}, switch {switched:?}, device events {events:?}, the engine holds audio: {}", h.host.core.holds_audio());
+    assert!(loaded.is_ok(), "the load took: {loaded:?}");
+    assert!(
+        matches!(switched, Err(OpenError::RateChange { .. })) || h.host.core.holds_audio(),
+        "the import the load answered Ok is gone: the switch went ahead unasked ({switched:?}) and said nothing ({events:?})"
+    );
+}
+
+#[test]
+#[ignore = "red: D21, an owner decision (STATUS.md)"]
+fn d21_a_fader_moved_while_a_copy_runs_leaves_the_copys_level_as_the_engine_gave_it() {
+    use super::feed::Feed;
+    let mut h = Harness::new();
+    h.fake.set_input(saw);
+    h.open(asio(Some(256)));
+    let length = h.record_loop();
+    h.play(length + RATE / 10);
+    let (heard0, exported0) = heard_and_exported(&h, length);
+    let mut feed = Feed::new(h.host.clone());
+    // COPY lane 0 at 1.0 into lane 1, then lane 0's fader moves before the copy is done.
+    let at_once = |command| TimedCommand { frame: None, command };
+    h.host.send_all([at_once(Command::Copy(0)), at_once(Command::SetVolume(0, 0.25))]).unwrap();
+    let mut seen = Vec::new();
+    feed_until(&mut feed, &mut seen, "the copy is done", |f| f.events.iter().any(|e| matches!(e.0, Event::Copied { to: 1, .. })));
+    // Lane 1 alone: the copy plays.
+    h.send(Command::SetMute(0, true));
+    h.play(length + RATE / 10);
+    let (heard1, exported1) = heard_and_exported(&h, length);
+    let (heard, exported) = (heard1 / heard0, exported1 / exported0);
+    println!("lane 1 against lane 0 at 1.0: heard {heard}, exported {exported}; kept {:?}", h.host.settings());
+    assert!(heard > 0.5, "the copy plays ({heard})");
+    assert!((exported / heard - 1.0).abs() < 0.1, "the export renders the copy at the level it plays: heard {heard}, exported {exported}");
+}
+
+#[test]
+#[ignore = "red: D21, an owner decision (STATUS.md)"]
+fn d21_a_setting_sent_just_after_a_clear_is_what_the_lane_plays_and_exports() {
+    use super::feed::Feed;
+    let mut h = Harness::new();
+    h.fake.set_input(saw);
+    h.open(asio(Some(256)));
+    let length = h.record_loop();
+    h.play(length + RATE / 10);
+    let (heard0, exported0) = heard_and_exported(&h, length);
+    let mut feed = Feed::new(h.host.clone());
+    let at_once = |command| TimedCommand { frame: None, command };
+    h.host.send_all([at_once(Command::Clear(0)), at_once(Command::SetVolume(0, 0.4))]).unwrap();
+    let mut seen = Vec::new();
+    feed_until(&mut feed, &mut seen, "the clear", |f| f.events.iter().any(|e| matches!(e.0, Event::Cleared { lane: 0, .. })));
+    drop(feed);
+    // A new take on the cleared lane plays at the volume the engine took after the clear.
+    let length = h.record_loop();
+    h.play(length + RATE / 10);
+    let (heard1, exported1) = heard_and_exported(&h, length);
+    let (heard, exported) = (heard1 / heard0, exported1 / exported0);
+    println!("the new take against the first: heard {heard}, exported {exported}; kept {:?}", h.host.settings());
+    assert!((exported / heard - 1.0).abs() < 0.1, "the export renders the lane at the level it plays: heard {heard}, exported {exported}");
+}
