@@ -20,7 +20,7 @@ Harness auto-load of nested files is not reliable: open the briefing yourself.
 | Verification code, the verify rig, interpreting a gate result, a docs-guard failure | `verify/README.md` |
 | Any runtime verification (browser probe, `__lf`, `tauri dev`) | `docs/VERIFY.md` |
 | Any non-trivial work; the bus topology, the platform boundary, session files | `docs/ARCHITECTURE.md` |
-| Planning or performing a by-ear/eye/rig session; gate-adjacent code; latency | `STATUS.md` |
+| Planning a jam or anything the owner's ear must check; gate-adjacent code; latency | `STATUS.md` |
 | Releases, licences | `.github/workflows/build-exe.yml` (header), `THIRD-PARTY-NOTICES.md` |
 
 ## Standing rules
@@ -28,13 +28,14 @@ Harness auto-load of nested files is not reliable: open the briefing yourself.
 - ⚠ **A by-ear "this is off" outranks every green check in this repo.** Re-scope the work instead
   of defending the gates. The headless proofs settle neither the looper↔click question nor
   guitar-through-ASIO-into-a-loop.
-- **`STATUS.md` is ONE ordered rig lap + a decision table,** short enough for one sitting; agents
-  leave those stops to the owner. Past 10 stops the docs guard goes red: consolidate related stops
-  or flag it to the owner rather than appending. An audit finding lands as a machine-verified
-  commit or as one line in `docs/backlog-taste.md` (taste, not a gate); one that truly needs the
-  rig merges into an existing stop. A `D<n>`/`E<n>` tag in a comment is an owner decision from that
-  table, `F<n>` a tester report (the log `docs/plans/tester-feedback.md` is removed); git history on
-  `STATUS.md` and that path holds their text.
+- **`STATUS.md` holds what the owner's ear still owes:** at most five checks for the next jam (the
+  docs guard counts), one line per built feature no jam has heard yet, and the decisions that block
+  work. The owner's jam answers them; agents note what it tried and refill the list. A finding lands
+  as a machine-verified commit, as an open thread in the area briefing with its next diagnostic check
+  (a defect not yet understood), as one line in `docs/backlog-taste.md` (taste, not a gate), or as a
+  not-heard line when only the owner's ear can settle it. A `D<n>`/`E<n>` tag in a comment is an
+  owner decision (once in `STATUS.md` § Decisions), `F<n>` a tester report (the log
+  `docs/plans/tester-feedback.md` is removed); git history on both holds their text.
 - **This is a public repo: keep working documents few and short-lived.** A plan or spec may live
   under `docs/` while the work is open. When it lands, fold what still binds into a briefing,
   `docs/ARCHITECTURE.md`, `STATUS.md`, `docs/backlog-taste.md` or a comment at the call site, and
@@ -58,27 +59,23 @@ Harness auto-load of nested files is not reliable: open the briefing yourself.
 - **Before editing `src-tauri/`, `src/platform/` or `src/ui/state/`, check for the dev app (`app`
   process)**; if it runs, ask for it to be closed and wait: a `src-tauri/` edit relaunches `tauri dev`
   (the jam is lost), and hot reload of the engine glue under a running jam is unverified.
-- **Verify by driving the running app and measuring.** A typecheck, a code read or a subagent's
-  self-report is a claim: run the runtime probe yourself (`docs/VERIFY.md`).
+- **The running app is the surface a change is verified on:** drive it and measure
+  (`docs/VERIFY.md`).
 - **`main` is the live dev line.** Commit and push whenever the gates are green: `pnpm check` (also
   the pre-push hook), `pnpm build`, `pnpm rust:check` (cargo check asio/no-asio + tests), CI. Never
-  push red. The open by-ear/eye/rig gates live ON `main`.
+  push red. The owner's open checks (`STATUS.md`) live ON `main`.
 - **Every workflow runs with `permissions: contents: read`** (a job that must write widens only
   itself), pins each action by commit sha with the major tag as a trailing comment (bump both
   together), and checks out with `persist-credentials: false`.
 - **Releases and repo housekeeping are the agents' job, end to end:** version, tag and publish
   (procedure: the `.github/workflows/build-exe.yml` header), stale drafts, branches and worktrees, doc
   markers. Do them; never hand them to the owner. The owner and a few testers play the published
-  release, so a release waits for green gates, not for the rig lap.
-- **Tracked files are impersonal and secret-free:** roles ("the owner"), never a person's name,
+  release, so a release waits for green gates and a green `release:smoke`, not for the owner's ear.
+- **Tracked files are impersonal:** roles ("the owner"), never a person's name,
   verbatim speech or an email address. Two exceptions name a GitHub handle: `README.md` § Thanks
   credits a contributor, and `LICENSE` and `src-tauri/Cargo.toml` `authors` name the owner as
-  copyright holder. Agent memory does not carry across machines or harnesses: a durable fact goes in a
-  tracked file.
-- **Keep this file a router.** Rules are written BARE; provenance lives in the owner doc. A
-  LANDED feature becomes a one-line pointer; keep only what is still active or a recurring gotcha;
-  area detail goes in the area briefing. A cut that
-  claims "owned elsewhere" quotes the owner line in its commit message.
+  copyright holder.
+- **Keep this file a router:** a landed feature becomes at most a one-line pointer here.
 
 ## Commands: what `package.json` does not say
 

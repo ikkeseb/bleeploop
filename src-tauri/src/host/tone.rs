@@ -23,8 +23,9 @@
 //!   under a reload token in a [`ToneHandoff`]), not the file another load may have written since.
 //!
 //! An owner's turn reads the import count without waiting on any lock held across disk I/O
-//! (`ToneKeeper::poll`): a write stalled in the file system holds up the saves of its own slot's tone,
-//! never an owner's requests, editor pump or unload.
+//! (`ToneKeeper::poll`), and another tone's write never holds up its save. A save of the same tone
+//! takes that tone's write lock on the owner thread (`engine_slot::keep_tone`), so an import of it
+//! stalled in the file system stalls that owner until the write returns.
 
 use std::collections::HashMap;
 use std::io::Write;

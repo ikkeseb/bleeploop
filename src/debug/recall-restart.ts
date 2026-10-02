@@ -11,7 +11,7 @@
  *          survived, nothing is armed and no arm or editor call was made; then the same again after
  *          a WebView reload, judged once the recalled loads are back while the marker is still
  *          stored; puts the channel back (the owner's Audio Settings share this dev origin). The
- *          runner then closes the app the way its close button does (STATUS Stop 5's close inside
+ *          runner then closes the app the way its close button does (a player's close inside
  *          the settle window), and this page notes whether the marker was still stored when that
  *          close arrived. The close guard's jam question is answered OK and its recovery save
  *          skipped (on any verdict): this dev origin may hold the owner's recovery
@@ -159,7 +159,7 @@ async function settleWindow(): Promise<boolean> {
 }
 
 /**
- * After the restart, then once more after a WebView reload in the same launch (STATUS Stop 5's path:
+ * After the restart, then once more after a WebView reload in the same launch (a player's reload path:
  * `resyncNativeSlots` unloads the stranded plugins, the recall loads them again), judged inside the
  * settle window so the runner's close lands there. `early` = the probe was running before this
  * document's recall finished, so its spy saw every call.

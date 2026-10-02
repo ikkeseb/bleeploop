@@ -7,7 +7,9 @@ name: build-exe
 #
 # To release (agents, end to end): on a main whose CI is green, bump the version in package.json,
 # src-tauri/tauri.conf.json and src-tauri/Cargo.toml (and its Cargo.lock entry), commit
-# "Release prep: vX.Y.Z", push, then `git tag -a vX.Y.Z -F <notes>` on that commit and push the tag.
+# "Release prep: vX.Y.Z", push, run `pnpm release:smoke` on a local release build of that commit
+# (docs/VERIFY.md; a red run is fixed first), then `git tag -a vX.Y.Z -F <notes>` on that commit and
+# push the tag.
 # The notes file is `BleepLoop vX.Y.Z`, a blank line, then one bullet per player-visible change since
 # the previous release; it becomes the release's "What's new". No line may start with `#`: git
 # strips those as comments. A failed run publishes nothing: fix, move the tag, push it again.

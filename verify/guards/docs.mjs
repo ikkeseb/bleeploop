@@ -1,6 +1,6 @@
 // verify/guards/docs.mjs: docs drift guard. Every backtick path in a tracked .md exists, every cited
 // 7-hex commit sha resolves, the invariant titles in AGENTS.md and docs/ARCHITECTURE.md match by number,
-// the STATUS gate index has not grown past its cap, and no tracked .md holds an em dash.
+// the STATUS next-jam list has not grown past its cap, and no tracked .md holds an em dash.
 //
 // Until 2026-09 doc drift was measured by hand, once per audit (28 dangling refs found on 09-01, 20 of
 // them the pre-split `plugin_host.rs`). This makes it a `pnpm check` gate. Paths are checked against the
@@ -10,9 +10,9 @@
 // .md only for slashed paths, since its bare names are often upstream crate files. A line
 // may keep a deliberately dead path by saying so (`(now \`…\`)`, "not yet built", "upstream", "e.g.",
 // … — see DELIBERATE). Shas: 7–10 hex WITH at least one letter (an all-digit run is a number, e.g. a
-// VST3 param id). The stop cap flags a STATUS.md rig lap that has outgrown one sitting (the
-// numbered items under "## The rig lap"): consolidate related stops or flag it to the owner (AGENTS.md).
-// Raising RIG_LAP_STOP_CAP is the owner's call.
+// VST3 param id). The cap keeps STATUS.md's next jam (the numbered items under "## Next jam") a list
+// one ordinary jam can cover; the rest waits under "## Not heard yet". Raising NEXT_JAM_CAP is the
+// owner's call.
 // Run: node verify/guards/docs.mjs
 //
 // Reads the tracked docs + git and asserts against the tree.
@@ -25,8 +25,8 @@ import { fileURLToPath } from 'node:url';
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const git = (...args) => execFileSync('git', args, { cwd: ROOT, encoding: 'utf8' });
 
-/** Numbered stops under STATUS.md "## The rig lap" — the audit 2026-09-01 § 1 ceiling. */
-const RIG_LAP_STOP_CAP = 10;
+/** Numbered items under STATUS.md "## Next jam". */
+const NEXT_JAM_CAP = 5;
 
 /** Runtime artifacts + placeholders that are legitimately cited but never tracked. */
 const UNTRACKED_OK = [
@@ -190,16 +190,16 @@ if (agentsTitles && archTitles) {
   }
 }
 
-// ── 4. STATUS rig-lap stop cap ─────────────────────────────────────────────────────────────
+// ── 4. STATUS next-jam cap ──────────────────────────────────────────────────────────────────
 const status = readFileSync(resolve(ROOT, 'STATUS.md'), 'utf8');
-const start = status.indexOf('\n## The rig lap');
-check(start !== -1, 'STATUS.md has no "## The rig lap" section');
+const start = status.indexOf('\n## Next jam');
+check(start !== -1, 'STATUS.md has no "## Next jam" section');
 const end = status.indexOf('\n## ', start + 1);
 const section = status.slice(start, end === -1 ? undefined : end);
-const stops = section.split('\n').filter((l) => /^\d+\. /.test(l));
+const jam = section.split('\n').filter((l) => /^\d+\. /.test(l));
 check(
-  stops.length <= RIG_LAP_STOP_CAP,
-  `STATUS.md rig lap has ${stops.length} stops, cap is ${RIG_LAP_STOP_CAP} — consolidate related stops or flag it to the owner (AGENTS.md)`,
+  jam.length <= NEXT_JAM_CAP,
+  `STATUS.md's next jam has ${jam.length} items, cap is ${NEXT_JAM_CAP}: move the rest under "## Not heard yet" (AGENTS.md)`,
 );
 
 // ── 5. no em dashes in tracked docs ─────────────────────────────────────────────────────────
@@ -211,6 +211,6 @@ for (const md of mdFiles) {
   check(hits.length === 0, `${md}:${hits.join(',')} has an em dash: write a period, a comma or a colon`);
 }
 
-console.log(`docs: ${mdFiles.length} tracked .md, ${shaCites.size} shas, ${stops.length}/${RIG_LAP_STOP_CAP} rig-lap stops`);
+console.log(`docs: ${mdFiles.length} tracked .md, ${shaCites.size} shas, ${jam.length}/${NEXT_JAM_CAP} next-jam items`);
 console.log(`\n=== RESULT: ${checks - fails}/${checks} checks passed, ${fails} failed ===`);
 process.exit(fails === 0 ? 0 : 1);

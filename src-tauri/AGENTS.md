@@ -92,7 +92,8 @@ Who runs where and what each thread owns. The rules are in bold below the table.
 - **Editor-hang Win32 gotcha (recurring):** a host window Win32-OWNED across threads deadlocks on
   close (sync cross-thread activation `SendMessage` vs a stopped pump). Fix lives in
   `host/editor_window.rs`: owner-LESS window + `drain_after_editor_teardown()` +
-  `show_host_window_front()` one-shot `HWND_TOP` (no `WS_EX_TOPMOST`).
+  `show_host_window_front()` one-shot `HWND_TOP` (no `WS_EX_TOPMOST`), so an editor that drops
+  behind after a click into BleepLoop is intended.
 - **Timed Win32 waits round up to the timer tick Windows grants the process**, and that tick can be
   15.6 ms while the global resolution reads 1 ms. Bound a wait loop by a deadline, never a round count
   (`drain_after_editor_teardown`). A plugin's own waits stretch the same way; the measured numbers sit
@@ -140,8 +141,8 @@ plugin-GUI work.
 - Test plugin **Surge XT** (`winget install SurgeSynth.SurgeXT` → `…\CLAP\Surge Synth Team\`, + Surge XT
   Effects); scan walks `%COMMONPROGRAMFILES%\CLAP`, `%LOCALAPPDATA%\Programs\Common\CLAP`, `CLAP_PATH`.
   Loader is `clack_host::entry::PluginEntry::load` (unsafe), NOT `PluginBundle`.
-- **Plugin editors embed into a host-owned top-level Win32 window** (`CreateWindowExW`, owned by the main
-  window, NOT reparented into the WebView2 surface). An owner pumps its thread's Win32 messages every
+- **Plugin editors embed into a host-created top-level Win32 window** (`CreateWindowExW`, OWNER-LESS
+  as the editor-hang gotcha above says, NOT reparented into the WebView2 surface). An owner pumps its thread's Win32 messages every
   turn, editor or not: a JUCE plugin (Neural DSP) runs its message thread there, and unpumped, a
   host-set parameter never reached its saved state (measured with `pnpm native:tone-recall`, Archetype
   Petrucci). Each pump call is bounded (64 messages or 2 ms, `editor_window::pump_thread_messages`), so
@@ -190,8 +191,8 @@ plugin-GUI work.
   tone is discarded and created again before it activates (it may have taken half the state); a
   session import goes through its tone's write lock in the store (`ToneStore::import`), never an owner
   request, and its bytes reach only the reload's load that passes the import's reload token
-  (`ToneHandoff`). An owner's turn never waits on a lock held across disk I/O. Why a save skips the
-  store: `tone.rs`.
+  (`ToneHandoff`). An owner's poll never waits on a lock held across disk I/O; its save of a tone
+  waits on that tone's own in-flight import (§ Open threads). Why a save skips the store: `tone.rs`.
 
 ## ASIO tier
 

@@ -2,7 +2,7 @@
 
 Feel, wording and placement questions for the owner, answered with the app open: yes, no or change,
 and the line leaves. Nothing here blocks a build, a release or a rig stop. Agents add one line per
-finding (an audit's taste finding lands here, never as a `STATUS.md` stop), keep the list short
+finding (an audit's taste finding lands here, never in `STATUS.md`), keep the list short
 enough for one sitting, and never re-rank the owner's answers. Provenance lives in the commit that
 added a line.
 

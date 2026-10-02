@@ -31,7 +31,7 @@ Each guard runs the real source; none carries a hand-ported copy of it. There ar
 
 `verify/guards/docs.mjs` is the docs guard: cited paths exist, cited shas resolve (the repo
 started from one squashed commit, so no doc may cite an earlier sha), the invariant titles in
-`AGENTS.md` and `docs/ARCHITECTURE.md` match, the `STATUS.md` rig lap has ≤ 10 stops, and no tracked
+`AGENTS.md` and `docs/ARCHITECTURE.md` match, `STATUS.md`'s next jam has ≤ 5 items, and no tracked
 `.md` holds an em dash. A dead path a doc keeps on purpose says so on the same line ("(now `…`)",
 "not yet built", "upstream"), and the guard skips it.
 
