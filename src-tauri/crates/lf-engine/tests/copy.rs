@@ -1,6 +1,7 @@
 //! COPY (`machine.ts` copy): the whole lane into the first EMPTY lane, never the recorder's, as a block
-//! job; the copy plays when its source played on, else it lands STOPPED. The golden jam copies a
-//! playing lane; these are the guards around it.
+//! job; the copy plays when its source played on, else it lands STOPPED, as it does when a STOP or a
+//! STOP ALL reaches it before it is done. The golden jam copies a playing lane; these are the guards
+//! around it.
 
 mod common;
 
@@ -89,4 +90,28 @@ fn stop_all_with_the_loop_end_stop_on_stops_at_the_loop_end() {
     assert!(rig.lane(0).stop_at.is_some());
     rig.press(Command::StopAll);
     assert_eq!(rig.state(0), LaneState::Stopped, "a second STOP ALL stops now");
+}
+
+#[test]
+fn a_stop_while_a_copy_runs_keeps_the_copy_stopped() {
+    for (gesture, end_stop) in [("stop", false), ("stop all", false), ("stop all", true)] {
+        let tag = format!("{gesture}, END STOP {end_stop}");
+        let mut rig = looping();
+        rig.set(Command::SetLoopEndStop(end_stop));
+        rig.press(Command::Copy(0));
+        assert!(rig.engine.looper().busy() && rig.state(1) == LaneState::Stopped, "{tag}: the copy still runs");
+        rig.press(if gesture == "stop" { Command::Stop(1) } else { Command::StopAll });
+        rig.idle();
+        assert_eq!(copies(&rig), 1, "{tag}");
+        assert_eq!(rig.pcm(1), rig.pcm(0), "{tag}: the copy is whole");
+        assert_eq!(rig.state(1), LaneState::Stopped, "{tag}: the stopped copy is not played on");
+        if gesture == "stop" {
+            continue;
+        }
+        rig.advance_to(rig.next_boundary() + 1);
+        assert!((0..5).all(|i| rig.state(i) != LaneState::Playing), "{tag}: every lane stopped");
+        rig.keep_output();
+        rig.advance(rig.master());
+        assert!(rig.output.as_ref().unwrap().1.iter().all(|&y| y == 0.0), "{tag}: silent");
+    }
 }

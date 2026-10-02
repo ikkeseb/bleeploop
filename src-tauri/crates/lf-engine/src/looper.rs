@@ -256,8 +256,8 @@ enum JobKind {
     Copy { src: usize, dst: usize },
     /// A discarded overdub layer: copy the pre-layer loop back, then return the previous undo target.
     Restore { src: usize, dst: usize, prev_undo_valid: bool, prev_spare_reversed: bool },
-    /// COPY into lane `dst`: done, it becomes STOPPED, or PLAYING when its source played; `feedback` is
-    /// the DUB FEEDBACK it copied, which `Event::Copied` reports.
+    /// COPY into lane `dst`: done, it becomes STOPPED, or PLAYING when its source played and no stop
+    /// reached the copy meanwhile; `feedback` is the DUB FEEDBACK it copied, which `Event::Copied` reports.
     LaneCopy { src: usize, dst: usize, from: usize, to: usize, resume: bool, feedback: f32 },
     /// TRIM: `dst` becomes `src` as `fill` maps it, in heard order: the job's positions are loop
     /// positions as heard, which a `reversed` pair of buffers holds backwards ([`trim_run`]).
@@ -827,8 +827,10 @@ impl Looper {
         Applied::Done
     }
 
-    /// Stop every live lane: PLAYING honours the loop-end stop, captures commit and stop at once.
+    /// Stop every live lane: PLAYING honours the loop-end stop, captures commit and stop at once, and a
+    /// COPY still running lands STOPPED.
     pub fn stop_all(&mut self, cx: &mut Cx) -> Applied {
+        self.keep_copy_stopped(None);
         let when = self.loop_end_stop.then(|| next_boundary(self.anchor, self.master, cx.now));
         let force_now = self.lanes.iter().any(|t| t.stop_at.is_some());
         for i in 0..TRACK_COUNT {
@@ -1453,6 +1455,7 @@ impl Looper {
         }
         self.lanes[i].stop_at = None;
         self.lanes[i].fade_from = None;
+        self.keep_copy_stopped(Some(i));
         let discard = t.state == LaneState::Recording; // a take in flight never has a loop yet
         if self.capturing(i) {
             // An aborted first take leaves a blank session, whose reset below hands the count-in pulse
@@ -1472,6 +1475,18 @@ impl Looper {
         t.state = if t.length > 0 { LaneState::Stopped } else { LaneState::Empty };
         if discard {
             self.reset_master_if_blank(cx);
+        }
+    }
+
+    /// A stop reaching a COPY still running into `lane` (every lane: `None`) cancels its resume: the copy
+    /// finishes and stays STOPPED.
+    fn keep_copy_stopped(&mut self, lane: Option<usize>) {
+        for job in self.jobs.iter_mut().flatten() {
+            if let JobKind::LaneCopy { to, resume, .. } = &mut job.kind {
+                if lane.is_none_or(|l| l == *to) {
+                    *resume = false;
+                }
+            }
         }
     }
 

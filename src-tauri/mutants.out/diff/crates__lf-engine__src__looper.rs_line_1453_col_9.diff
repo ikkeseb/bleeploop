@@ -1,0 +1,47 @@
+--- crates/lf-engine/src/looper.rs
++++ replace Looper::stop with ()
+@@ -1445,43 +1445,17 @@
+         t.spare_reversed = spare_reversed;
+     }
+ 
+     // ── Stop, resume, reset ────────────────────────────────────────────────────────────────────────
+ 
+     /// Silence the lane now and keep its loop. A capture is aborted: an uncommitted take is dropped,
+     /// an overdub layer discarded, a first-take count-in hands the pulse back to free-run.
+     fn stop(&mut self, cx: &mut Cx, i: usize) {
+-        let t = self.lanes[i];
+-        if t.state == LaneState::Empty {
+-            return;
+-        }
+-        self.lanes[i].stop_at = None;
+-        self.lanes[i].fade_from = None;
+-        self.keep_copy_stopped(Some(i));
+-        let discard = t.state == LaneState::Recording; // a take in flight never has a loop yet
+-        if self.capturing(i) {
+-            // An aborted first take leaves a blank session, whose reset below hands the count-in pulse
+-            // back to free-run.
+-            self.lanes[i].armed = false;
+-            if let Some(rec) = self.rec.filter(|r| r.kind == Kind::Overdub) {
+-                self.discard_layer(cx, i, &rec);
+-            }
+-            self.release_recorder(cx, i);
+-        }
+-        let t = &mut self.lanes[i];
+-        if discard {
+-            t.written = 0;
+-        }
+-        t.audible = t.logical();
+-        t.switch_at = None;
+-        t.state = if t.length > 0 { LaneState::Stopped } else { LaneState::Empty };
+-        if discard {
+-            self.reset_master_if_blank(cx);
+-        }
++        () /* ~ changed by cargo-mutants ~ */
+     }
+ 
+     /// A stop reaching a COPY still running into `lane` (every lane: `None`) cancels its resume: the copy
+     /// finishes and stays STOPPED.
+     fn keep_copy_stopped(&mut self, lane: Option<usize>) {
+         for job in self.jobs.iter_mut().flatten() {
+             if let JobKind::LaneCopy { to, resume, .. } = &mut job.kind {
+                 if lane.is_none_or(|l| l == *to) {

@@ -1,0 +1,334 @@
+{
+  "outcomes": [
+    {
+      "scenario": "Baseline",
+      "summary": "Success",
+      "log_path": "log/baseline.log",
+      "diff_path": null,
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 125.2735639,
+          "process_status": "Success",
+          "argv": [
+            "C:\\Users\\Seb\\.rustup\\toolchains\\1.96.0-x86_64-pc-windows-msvc\\bin\\cargo.exe",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=lf-engine@0.1.0",
+            "--no-default-features"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 104.8286576,
+          "process_status": "Success",
+          "argv": [
+            "C:\\Users\\Seb\\.rustup\\toolchains\\1.96.0-x86_64-pc-windows-msvc\\bin\\cargo.exe",
+            "test",
+            "--verbose",
+            "--package=lf-engine@0.1.0",
+            "--no-default-features",
+            "--test",
+            "copy",
+            "--test",
+            "overdub_undo_reverse",
+            "--test",
+            "trim",
+            "--test",
+            "gestures"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/lf-engine/src/looper.rs:834:9: replace Looper::stop_all -> Applied with Default::default()",
+          "package": "lf-engine",
+          "file": "crates/lf-engine/src/looper.rs",
+          "function": {
+            "function_name": "Looper::stop_all",
+            "return_type": "-> Applied",
+            "span": {
+              "start": {
+                "line": 831,
+                "column": 5
+              },
+              "end": {
+                "line": 850,
+                "column": 6
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 834,
+              "column": 9
+            },
+            "end": {
+              "line": 849,
+              "column": 22
+            }
+          },
+          "replacement": "Default::default()",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "Unviable",
+      "log_path": "log/crates__lf-engine__src__looper.rs_line_834_col_9.log",
+      "diff_path": "diff/crates__lf-engine__src__looper.rs_line_834_col_9.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.555278,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "C:\\Users\\Seb\\.rustup\\toolchains\\1.96.0-x86_64-pc-windows-msvc\\bin\\cargo.exe",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=lf-engine@0.1.0",
+            "--no-default-features"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/lf-engine/src/looper.rs:1453:9: replace Looper::stop with ()",
+          "package": "lf-engine",
+          "file": "crates/lf-engine/src/looper.rs",
+          "function": {
+            "function_name": "Looper::stop",
+            "return_type": "",
+            "span": {
+              "start": {
+                "line": 1450,
+                "column": 5
+              },
+              "end": {
+                "line": 1480,
+                "column": 6
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 1453,
+              "column": 9
+            },
+            "end": {
+              "line": 1479,
+              "column": 10
+            }
+          },
+          "replacement": "()",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__lf-engine__src__looper.rs_line_1453_col_9.log",
+      "diff_path": "diff/crates__lf-engine__src__looper.rs_line_1453_col_9.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 54.1013079,
+          "process_status": "Success",
+          "argv": [
+            "C:\\Users\\Seb\\.rustup\\toolchains\\1.96.0-x86_64-pc-windows-msvc\\bin\\cargo.exe",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=lf-engine@0.1.0",
+            "--no-default-features"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.9070606,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "C:\\Users\\Seb\\.rustup\\toolchains\\1.96.0-x86_64-pc-windows-msvc\\bin\\cargo.exe",
+            "test",
+            "--verbose",
+            "--package=lf-engine@0.1.0",
+            "--no-default-features",
+            "--test",
+            "copy",
+            "--test",
+            "overdub_undo_reverse",
+            "--test",
+            "trim",
+            "--test",
+            "gestures"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/lf-engine/src/looper.rs:1485:9: replace Looper::keep_copy_stopped with ()",
+          "package": "lf-engine",
+          "file": "crates/lf-engine/src/looper.rs",
+          "function": {
+            "function_name": "Looper::keep_copy_stopped",
+            "return_type": "",
+            "span": {
+              "start": {
+                "line": 1482,
+                "column": 5
+              },
+              "end": {
+                "line": 1492,
+                "column": 6
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 1485,
+              "column": 9
+            },
+            "end": {
+              "line": 1491,
+              "column": 10
+            }
+          },
+          "replacement": "()",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__lf-engine__src__looper.rs_line_1485_col_9.log",
+      "diff_path": "diff/crates__lf-engine__src__looper.rs_line_1485_col_9.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 50.1678831,
+          "process_status": "Success",
+          "argv": [
+            "C:\\Users\\Seb\\.rustup\\toolchains\\1.96.0-x86_64-pc-windows-msvc\\bin\\cargo.exe",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=lf-engine@0.1.0",
+            "--no-default-features"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 1.0081024,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "C:\\Users\\Seb\\.rustup\\toolchains\\1.96.0-x86_64-pc-windows-msvc\\bin\\cargo.exe",
+            "test",
+            "--verbose",
+            "--package=lf-engine@0.1.0",
+            "--no-default-features",
+            "--test",
+            "copy",
+            "--test",
+            "overdub_undo_reverse",
+            "--test",
+            "trim",
+            "--test",
+            "gestures"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/lf-engine/src/looper.rs:1487:42: replace == with != in Looper::keep_copy_stopped",
+          "package": "lf-engine",
+          "file": "crates/lf-engine/src/looper.rs",
+          "function": {
+            "function_name": "Looper::keep_copy_stopped",
+            "return_type": "",
+            "span": {
+              "start": {
+                "line": 1482,
+                "column": 5
+              },
+              "end": {
+                "line": 1492,
+                "column": 6
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 1487,
+              "column": 42
+            },
+            "end": {
+              "line": 1487,
+              "column": 44
+            }
+          },
+          "replacement": "!=",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__lf-engine__src__looper.rs_line_1487_col_42.log",
+      "diff_path": "diff/crates__lf-engine__src__looper.rs_line_1487_col_42.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 55.2930162,
+          "process_status": "Success",
+          "argv": [
+            "C:\\Users\\Seb\\.rustup\\toolchains\\1.96.0-x86_64-pc-windows-msvc\\bin\\cargo.exe",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=lf-engine@0.1.0",
+            "--no-default-features"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 1.2125852,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "C:\\Users\\Seb\\.rustup\\toolchains\\1.96.0-x86_64-pc-windows-msvc\\bin\\cargo.exe",
+            "test",
+            "--verbose",
+            "--package=lf-engine@0.1.0",
+            "--no-default-features",
+            "--test",
+            "copy",
+            "--test",
+            "overdub_undo_reverse",
+            "--test",
+            "trim",
+            "--test",
+            "gestures"
+          ]
+        }
+      ]
+    }
+  ],
+  "total_mutants": 4,
+  "missed": 0,
+  "caught": 3,
+  "timeout": 0,
+  "unviable": 1,
+  "success": 0,
+  "start_time": "2026-10-02T13:55:34.4707316Z",
+  "end_time": "2026-10-02T14:02:08.4414286Z",
+  "cargo_mutants_version": "27.1.0"
+}

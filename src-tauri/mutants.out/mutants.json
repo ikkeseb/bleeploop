@@ -1,0 +1,130 @@
+[
+  {
+    "diff": "--- crates/lf-engine/src/looper.rs\n+++ replace Looper::stop_all -> Applied with Default::default()\n@@ -826,32 +826,17 @@\n             }\n         }\n         Applied::Done\n     }\n \n     /// Stop every live lane: PLAYING honours the loop-end stop, captures commit and stop at once, and a\n     /// COPY still running lands STOPPED.\n     pub fn stop_all(&mut self, cx: &mut Cx) -> Applied {\n-        self.keep_copy_stopped(None);\n-        let when = self.loop_end_stop.then(|| next_boundary(self.anchor, self.master, cx.now));\n-        let force_now = self.lanes.iter().any(|t| t.stop_at.is_some());\n-        for i in 0..TRACK_COUNT {\n-            match self.lanes[i].state {\n-                LaneState::Playing => match when {\n-                    Some(at) if !force_now => self.lanes[i].stop_at = Some(at),\n-                    _ => self.stop(cx, i),\n-                },\n-                LaneState::Recording | LaneState::Overdubbing => {\n-                    self.play_stop(cx, i);\n-                }\n-                _ => {}\n-            }\n-        }\n-        Applied::Done\n+        Default::default() /* ~ changed by cargo-mutants ~ */\n     }\n \n     /// FADE (all): every PLAYING lane fades from the press to silence on a bar line, the first at or\n     /// after `fade_bars` bars from the press (on the click's grid), and stops there: a pending stop, as\n     /// END STOP's, whose ramp `render` applies over the volume (the stored volume never moves, so PLAY ALL\n     /// brings a faded lane back at its level). A fading lane takes what a stopping lane takes: PLAY/STOP\n     /// or STOP ALL stops it at once, a REC/DUB, UNDO, REVERSE or TRIM is refused, a COPY of it lands\n     /// STOPPED. A second press while lanes fade stops them at once; a lane started meanwhile plays on.\n",
+    "file": "crates/lf-engine/src/looper.rs",
+    "function": {
+      "function_name": "Looper::stop_all",
+      "return_type": "-> Applied",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 850
+        },
+        "start": {
+          "column": 5,
+          "line": 831
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/lf-engine/src/looper.rs:834:9: replace Looper::stop_all -> Applied with Default::default()",
+    "package": "lf-engine",
+    "replacement": "Default::default()",
+    "span": {
+      "end": {
+        "column": 22,
+        "line": 849
+      },
+      "start": {
+        "column": 9,
+        "line": 834
+      }
+    }
+  },
+  {
+    "diff": "--- crates/lf-engine/src/looper.rs\n+++ replace Looper::stop with ()\n@@ -1445,43 +1445,17 @@\n         t.spare_reversed = spare_reversed;\n     }\n \n     // ── Stop, resume, reset ────────────────────────────────────────────────────────────────────────\n \n     /// Silence the lane now and keep its loop. A capture is aborted: an uncommitted take is dropped,\n     /// an overdub layer discarded, a first-take count-in hands the pulse back to free-run.\n     fn stop(&mut self, cx: &mut Cx, i: usize) {\n-        let t = self.lanes[i];\n-        if t.state == LaneState::Empty {\n-            return;\n-        }\n-        self.lanes[i].stop_at = None;\n-        self.lanes[i].fade_from = None;\n-        self.keep_copy_stopped(Some(i));\n-        let discard = t.state == LaneState::Recording; // a take in flight never has a loop yet\n-        if self.capturing(i) {\n-            // An aborted first take leaves a blank session, whose reset below hands the count-in pulse\n-            // back to free-run.\n-            self.lanes[i].armed = false;\n-            if let Some(rec) = self.rec.filter(|r| r.kind == Kind::Overdub) {\n-                self.discard_layer(cx, i, &rec);\n-            }\n-            self.release_recorder(cx, i);\n-        }\n-        let t = &mut self.lanes[i];\n-        if discard {\n-            t.written = 0;\n-        }\n-        t.audible = t.logical();\n-        t.switch_at = None;\n-        t.state = if t.length > 0 { LaneState::Stopped } else { LaneState::Empty };\n-        if discard {\n-            self.reset_master_if_blank(cx);\n-        }\n+        () /* ~ changed by cargo-mutants ~ */\n     }\n \n     /// A stop reaching a COPY still running into `lane` (every lane: `None`) cancels its resume: the copy\n     /// finishes and stays STOPPED.\n     fn keep_copy_stopped(&mut self, lane: Option<usize>) {\n         for job in self.jobs.iter_mut().flatten() {\n             if let JobKind::LaneCopy { to, resume, .. } = &mut job.kind {\n                 if lane.is_none_or(|l| l == *to) {\n",
+    "file": "crates/lf-engine/src/looper.rs",
+    "function": {
+      "function_name": "Looper::stop",
+      "return_type": "",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 1480
+        },
+        "start": {
+          "column": 5,
+          "line": 1450
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/lf-engine/src/looper.rs:1453:9: replace Looper::stop with ()",
+    "package": "lf-engine",
+    "replacement": "()",
+    "span": {
+      "end": {
+        "column": 10,
+        "line": 1479
+      },
+      "start": {
+        "column": 9,
+        "line": 1453
+      }
+    }
+  },
+  {
+    "diff": "--- crates/lf-engine/src/looper.rs\n+++ replace Looper::keep_copy_stopped with ()\n@@ -1477,23 +1477,17 @@\n         if discard {\n             self.reset_master_if_blank(cx);\n         }\n     }\n \n     /// A stop reaching a COPY still running into `lane` (every lane: `None`) cancels its resume: the copy\n     /// finishes and stays STOPPED.\n     fn keep_copy_stopped(&mut self, lane: Option<usize>) {\n-        for job in self.jobs.iter_mut().flatten() {\n-            if let JobKind::LaneCopy { to, resume, .. } = &mut job.kind {\n-                if lane.is_none_or(|l| l == *to) {\n-                    *resume = false;\n-                }\n-            }\n-        }\n+        () /* ~ changed by cargo-mutants ~ */\n     }\n \n     /// An idle transport (a master, nothing playing or recording) restarts from the top: the grid\n     /// re-anchors at the press and the pulse with it.\n     fn restart_if_idle(&mut self, cx: &mut Cx) -> Option<Frame> {\n         if self.master == 0 || self.rec.is_some() || self.lanes.iter().any(|t| t.state == LaneState::Playing) {\n             return None;\n         }\n",
+    "file": "crates/lf-engine/src/looper.rs",
+    "function": {
+      "function_name": "Looper::keep_copy_stopped",
+      "return_type": "",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 1492
+        },
+        "start": {
+          "column": 5,
+          "line": 1482
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/lf-engine/src/looper.rs:1485:9: replace Looper::keep_copy_stopped with ()",
+    "package": "lf-engine",
+    "replacement": "()",
+    "span": {
+      "end": {
+        "column": 10,
+        "line": 1491
+      },
+      "start": {
+        "column": 9,
+        "line": 1485
+      }
+    }
+  },
+  {
+    "diff": "--- crates/lf-engine/src/looper.rs\n+++ replace == with != in Looper::keep_copy_stopped\n@@ -1479,17 +1479,17 @@\n         }\n     }\n \n     /// A stop reaching a COPY still running into `lane` (every lane: `None`) cancels its resume: the copy\n     /// finishes and stays STOPPED.\n     fn keep_copy_stopped(&mut self, lane: Option<usize>) {\n         for job in self.jobs.iter_mut().flatten() {\n             if let JobKind::LaneCopy { to, resume, .. } = &mut job.kind {\n-                if lane.is_none_or(|l| l == *to) {\n+                if lane.is_none_or(|l| l != /* ~ changed by cargo-mutants ~ */ *to) {\n                     *resume = false;\n                 }\n             }\n         }\n     }\n \n     /// An idle transport (a master, nothing playing or recording) restarts from the top: the grid\n     /// re-anchors at the press and the pulse with it.\n",
+    "file": "crates/lf-engine/src/looper.rs",
+    "function": {
+      "function_name": "Looper::keep_copy_stopped",
+      "return_type": "",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 1492
+        },
+        "start": {
+          "column": 5,
+          "line": 1482
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "crates/lf-engine/src/looper.rs:1487:42: replace == with != in Looper::keep_copy_stopped",
+    "package": "lf-engine",
+    "replacement": "!=",
+    "span": {
+      "end": {
+        "column": 44,
+        "line": 1487
+      },
+      "start": {
+        "column": 42,
+        "line": 1487
+      }
+    }
+  }
+]

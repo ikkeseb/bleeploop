@@ -1,0 +1,36 @@
+--- crates/lf-engine/src/looper.rs
++++ replace Looper::stop_all -> Applied with Default::default()
+@@ -826,32 +826,17 @@
+             }
+         }
+         Applied::Done
+     }
+ 
+     /// Stop every live lane: PLAYING honours the loop-end stop, captures commit and stop at once, and a
+     /// COPY still running lands STOPPED.
+     pub fn stop_all(&mut self, cx: &mut Cx) -> Applied {
+-        self.keep_copy_stopped(None);
+-        let when = self.loop_end_stop.then(|| next_boundary(self.anchor, self.master, cx.now));
+-        let force_now = self.lanes.iter().any(|t| t.stop_at.is_some());
+-        for i in 0..TRACK_COUNT {
+-            match self.lanes[i].state {
+-                LaneState::Playing => match when {
+-                    Some(at) if !force_now => self.lanes[i].stop_at = Some(at),
+-                    _ => self.stop(cx, i),
+-                },
+-                LaneState::Recording | LaneState::Overdubbing => {
+-                    self.play_stop(cx, i);
+-                }
+-                _ => {}
+-            }
+-        }
+-        Applied::Done
++        Default::default() /* ~ changed by cargo-mutants ~ */
+     }
+ 
+     /// FADE (all): every PLAYING lane fades from the press to silence on a bar line, the first at or
+     /// after `fade_bars` bars from the press (on the click's grid), and stops there: a pending stop, as
+     /// END STOP's, whose ramp `render` applies over the volume (the stored volume never moves, so PLAY ALL
+     /// brings a faded lane back at its level). A fading lane takes what a stopping lane takes: PLAY/STOP
+     /// or STOP ALL stops it at once, a REC/DUB, UNDO, REVERSE or TRIM is refused, a COPY of it lands
+     /// STOPPED. A second press while lanes fade stops them at once; a lane started meanwhile plays on.

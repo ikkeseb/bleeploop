@@ -1,0 +1,27 @@
+--- crates/lf-engine/src/looper.rs
++++ replace Looper::keep_copy_stopped with ()
+@@ -1477,23 +1477,17 @@
+         if discard {
+             self.reset_master_if_blank(cx);
+         }
+     }
+ 
+     /// A stop reaching a COPY still running into `lane` (every lane: `None`) cancels its resume: the copy
+     /// finishes and stays STOPPED.
+     fn keep_copy_stopped(&mut self, lane: Option<usize>) {
+-        for job in self.jobs.iter_mut().flatten() {
+-            if let JobKind::LaneCopy { to, resume, .. } = &mut job.kind {
+-                if lane.is_none_or(|l| l == *to) {
+-                    *resume = false;
+-                }
+-            }
+-        }
++        () /* ~ changed by cargo-mutants ~ */
+     }
+ 
+     /// An idle transport (a master, nothing playing or recording) restarts from the top: the grid
+     /// re-anchors at the press and the pulse with it.
+     fn restart_if_idle(&mut self, cx: &mut Cx) -> Option<Frame> {
+         if self.master == 0 || self.rec.is_some() || self.lanes.iter().any(|t| t.state == LaneState::Playing) {
+             return None;
+         }
