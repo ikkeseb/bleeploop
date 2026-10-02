@@ -233,24 +233,24 @@ export function runAction(id: ActionId, target: Target = null): void {
   GLOBAL[id]();
 }
 
-/** HOLD's press (`midi-actions.ts`): REC/DUB on `target`. On the selected track it is the
- * engine's `Hold` by `control`, the pedal's number while it is down: the engine remembers the lane an
- * accepted press acted on for that control's release, and nothing for a refused one. */
+/** HOLD's press (`midi-actions.ts`): REC/DUB on `target`, as the engine's `Hold` by `control`, the
+ * pedal's number while it is down: the engine remembers the lane an accepted press acted on for that
+ * control's release, and nothing for a refused one. A named track is selected, as REC/DUB selects it. */
 export function pressHold(target: Target, control: number): void {
-  if (target !== null) {
-    runAction('recDub', target);
+  onPress('recDub');
+  if (target === null) {
+    sendEngine({ Action: { Hold: control } });
     return;
   }
-  onPress('recDub');
-  sendEngine({ Action: { Hold: control } });
+  looper.selectTrack(target);
+  sendEngine({ ActionOn: [target, { Hold: control }] });
 }
 
 /** HOLD's release: end the capture its press started, while that lane still captures. A take that closed
  * itself meanwhile (FIXED) stays closed instead of starting an overdub. The engine judges it on its own
- * state, where its press landed (`target`: the named track, or the lane the engine's `Hold` by `control`
- * acted on). */
-export function releaseHold(target: Target, control: number): void {
-  sendEngine(target === null ? { Action: { Release: control } } : { ActionOn: [target, { Release: control }] });
+ * state, on the lane its `Hold` by `control` acted on (none after a refused press). */
+export function releaseHold(control: number): void {
+  sendEngine({ Action: { Release: control } });
 }
 
 /** Select track `i` outright (the digit keys). Not a table row, since it names its track, but a looper

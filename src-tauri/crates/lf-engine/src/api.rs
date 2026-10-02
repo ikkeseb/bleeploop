@@ -282,11 +282,11 @@ pub enum Action {
     /// TRIM to the first half of the loop's whole bars, rounded down, as the loop stands when the press
     /// applies; refused as [`Command::Trim`] is.
     Halve,
-    /// HOLD's press on the selected lane, by the control (pedal) the UI numbers it with: REC/DUB, and once
-    /// the press is accepted, that lane is where the same control's [`Action::Release`] without a lane
-    /// acts. A refused press remembers nothing for its control and never touches another control's lane
-    /// (a press on a named lane sends REC/DUB and a release on that lane instead). A control number past
-    /// [`HOLD_CONTROLS`] is remembered nowhere: its release does nothing.
+    /// HOLD's press on the selected lane (`Command::Action`) or a named one (`Command::ActionOn`), by the
+    /// control (pedal) the UI numbers it with: REC/DUB, and once the press is accepted, that lane is where
+    /// the same control's [`Action::Release`] without a lane acts. A refused press remembers nothing for
+    /// its control and never touches another control's lane. A control number past [`HOLD_CONTROLS`] is
+    /// remembered nowhere: its release does nothing.
     Hold(u8),
     /// HOLD's release, by the control whose press it answers: ends the capture on its lane (a count-in, a
     /// boundary arm or AUTO listening is cancelled, as REC/DUB's stop cancels it), and does nothing once

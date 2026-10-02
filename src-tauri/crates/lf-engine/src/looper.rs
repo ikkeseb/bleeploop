@@ -336,8 +336,7 @@ pub struct Looper {
     auto_sensitivity: f64,
     selected: usize,
     clear_armed: Option<(usize, Frame)>,
-    /// Per HOLD control: the lane its last accepted press on the selected lane acted on, until its
-    /// release.
+    /// Per HOLD control: the lane its last accepted press acted on, until its release.
     holds: [Option<usize>; HOLD_CONTROLS],
     published: [Option<LaneInfo>; TRACK_COUNT],
     published_transport: Option<(Frame, u32, bool)>,

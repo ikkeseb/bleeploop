@@ -21,8 +21,11 @@
  * refusal of it shows on its lane. On a second page, a track action sends the engine's action (`Action`
  * on the engine's own selection, `ActionOn` a named track: MUTE, REV, COPY and HALVE too; only REC/DUB
  * selects its track), a global toggle sends `Press` then its control's command, and HOLD's press and
- * release send the engine's REC/DUB or `Hold` and `Release` whatever the feed shows, two selected-track
- * HOLD pedals down at once by two control numbers; an engine refusal (NO MUTE) lands on its lane.
+ * release send the engine's `Hold` (`ActionOn` a named track) and `Release` whatever the feed shows, two
+ * HOLD pedals down at once by two control numbers; a port unplugged with a HOLD pedal down releases that
+ * press and no other port's, and a HOLD binding switched off, to latching, relearned or forgotten while
+ * down releases its press once (its pedal's own release then runs nothing, and a latching pedal's next
+ * press runs the action); an engine refusal (NO MUTE) lands on its lane.
  * logs/midi-learn/bindings.png shows the row and a long list for the eye. It cannot see a real
  * controller, whether WebView2 keeps a port's id across a restart or replug, a real foot against the
  * learn read, or the native engine answering (lf-engine `tests/actions.rs` owns what a press does to
@@ -562,7 +565,12 @@ await probe(async ({ open }) => {
       await ep.click(LEARN);
       await ep.evaluate((c) => window.__send('a', [[0xb0, c, 127], [0xb0, c, 0]]), cc);
     }
-    for (const cc of holds) {
+    // A HOLD pedal on port b, for the unplug of port a.
+    await ep.selectOption(PICK, 'recDub', { timeout: 3000 });
+    await ep.selectOption(TARGET, '', { timeout: 3000 });
+    await ep.click(LEARN);
+    await ep.evaluate(() => window.__send('b', [[0xb0, 32, 127], [0xb0, 32, 0]]));
+    for (const cc of [...holds, 32]) {
       await ep.locator('.audio-settings__binding', { hasText: `CC ${cc} · ch 1` }).getByRole('button', { name: /^Hold to record/ }).click({ timeout: 3000 });
     }
     await ep.evaluate(() => window.__lf.ui.closeSettings());
@@ -602,10 +610,60 @@ await probe(async ({ open }) => {
       await holdStep(30, 0),
       await holdStep(29, 0),
     ];
+    // What `body` (run in the page) sent the engine.
+    const sentDuring = async (body, arg) => {
+      await ep.evaluate(() => void (window.__lf.native.sent.length = 0));
+      await ep.evaluate(body, arg);
+      await ep.waitForTimeout(60);
+      return ep.evaluate(() => window.__lf.native.sent.slice());
+    };
+    const cc = ([port, c, v]) => window.__send(port, [[0xb0, c, v]]);
+    // Port a unplugs with a HOLD pedal down on it and one down on port b: a's press is released, b's
+    // waits for its own release; a's release after a replug has nothing left to end.
+    const unplug = (gone) => {
+      window.__probeMidi.inputs.get('a').state = gone ? 'disconnected' : 'connected';
+      window.__probeMidi.onstatechange();
+    };
+    const holdGone = [
+      await sentDuring(cc, ['a', 29, 127]),
+      await sentDuring(cc, ['b', 32, 127]),
+      (await sentDuring(unplug, true)).filter((c) => c.Action || c.ActionOn), // the router's resets: midi-note-ownership
+      await sentDuring(cc, ['b', 32, 0]),
+      await sentDuring(unplug, false),
+      await sentDuring(cc, ['a', 29, 0]),
+    ];
+    // A HOLD binding changed while its pedal is down releases that press, once: HOLD off, latching, a
+    // relearn (a press of that pedal again, its release lost) and forgetting it. Then the pedal's release.
+    const edit = async ([n, how]) => {
+      const m = await import('/src/app/midi-actions.ts');
+      const b = m.bindings().find((x) => x.port === 'a' && x.number === n);
+      if (how === 'hold') m.setHold(b, false);
+      else if (how === 'latching') m.setMomentary(b, false);
+      else if (how === 'forget') m.forget(b);
+      else if (how === 'learn') {
+        m.learn('playStop');
+        window.__send('a', [[0xb0, n, 127]]);
+      } else {
+        // Back to a momentary HOLD pedal (an edit replaces the binding).
+        m.setMomentary(b, true);
+        m.setHold(m.bindings().find((x) => x.port === 'a' && x.number === n), true);
+      }
+    };
+    const edits = {};
+    for (const how of ['hold', 'latching']) {
+      edits[how] = [await sentDuring(cc, ['a', 30, 127]), await sentDuring(edit, [30, how]), await sentDuring(cc, ['a', 30, 0])];
+      // Latching: the release the edit spent runs nothing, the next press runs the action.
+      if (how === 'latching') edits[how].push(await sentDuring(cc, ['a', 30, 127]));
+      await sentDuring(edit, [30, 'restore']);
+    }
+    edits.relearn = [await sentDuring(cc, ['a', 30, 127]), await sentDuring(edit, [30, 'learn']), await sentDuring(cc, ['a', 30, 0])];
+    edits.forget = [await sentDuring(cc, ['a', 29, 127]), await sentDuring(edit, [29, 'forget']), await sentDuring(cc, ['a', 29, 0])];
     const pressed = (name) => ep.evaluate((n) => document.querySelector(`[aria-label="${n}"]`)?.getAttribute('aria-pressed') ?? null, name);
     return {
       hold,
       holdSelected,
+      holdGone,
+      edits,
       sent: sentBy,
       controls: {
         click: await pressed('Metronome click'),
@@ -750,10 +808,10 @@ await probe(async ({ open }) => {
   }, "a binding saved without a target loads as the selected track's"));
   check(() => assert.deepEqual(out.engine, {
     hold: [
-      [{ SelectTrack: 0 }, { ActionOn: [0, 'RecDub'] }],
-      [{ ActionOn: [0, { Release: 0 }] }],
-      [{ SelectTrack: 0 }, { ActionOn: [0, 'RecDub'] }],
-      [{ ActionOn: [0, { Release: 0 }] }],
+      [{ SelectTrack: 0 }, { ActionOn: [0, { Hold: 0 }] }],
+      [{ Action: { Release: 0 } }],
+      [{ SelectTrack: 0 }, { ActionOn: [0, { Hold: 0 }] }],
+      [{ Action: { Release: 0 } }],
     ],
     holdSelected: [
       [{ Action: { Hold: 0 } }],
@@ -763,6 +821,20 @@ await probe(async ({ open }) => {
       [{ Action: { Release: 1 } }],
       [{ Action: { Release: 0 } }],
     ],
+    holdGone: [
+      [{ Action: { Hold: 0 } }],
+      [{ Action: { Hold: 1 } }],
+      [{ Action: { Release: 0 } }],
+      [{ Action: { Release: 1 } }],
+      [],
+      [],
+    ],
+    edits: {
+      hold: [[{ Action: { Hold: 0 } }], [{ Action: { Release: 0 } }], []],
+      latching: [[{ Action: { Hold: 0 } }], [{ Action: { Release: 0 } }], [], [{ Action: 'RecDub' }]],
+      relearn: [[{ Action: { Hold: 0 } }], [{ Action: { Release: 0 } }], []],
+      forget: [[{ Action: { Hold: 0 } }], [{ Action: { Release: 0 } }], []],
+    },
     sent: {
       10: [{ SelectTrack: 2 }, { ActionOn: [2, 'RecDub'] }],
       11: [{ ActionOn: [1, 'PlayStop'] }],

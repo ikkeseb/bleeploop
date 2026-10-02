@@ -117,9 +117,9 @@ function endWait(b: MidiBinding): void {
   if (awaitingRelease() === b) setAwaitingRelease(null);
 }
 
-// Each HOLD press, by its control, until its release ends the capture there: its target and the number
-// the engine knows the control by (the engine resolves the lane).
-const held = new Map<string, { target: Target; control: number }>();
+// Each HOLD press, by its control, until its release ends the capture there: the number the engine knows
+// the control by (the engine resolves the lane).
+const held = new Map<string, number>();
 const controlKey = (b: MidiBinding) => `${b.port}\n${b.channel}\n${b.kind}\n${b.number}`;
 
 /** The number HOLD's press on control `key` goes to the engine with, which its release repeats: the one
@@ -127,11 +127,24 @@ const controlKey = (b: MidiBinding) => `${b.port}\n${b.channel}\n${b.kind}\n${b.
  * pedals down at once are two controls to the engine and each release ends its own press. */
 function holdControl(key: string): number {
   const own = held.get(key);
-  if (own) return own.control;
-  const taken = new Set([...held.values()].map((h) => h.control));
+  if (own !== undefined) return own;
+  const taken = new Set(held.values());
   let n = 0;
   while (taken.has(n)) n++;
   return n;
+}
+
+// Controls whose HOLD press an edit released while the pedal was down: the pedal's own release still
+// comes, and is spent on nothing (as latching it would run the action again).
+const spent = new Set<string>();
+
+/** Release the HOLD press control `key` holds, if any: on its pedal's release, or once that release can
+ * no longer reach it (the binding changed, or the port is gone). */
+function releaseHeld(key: string): void {
+  const control = held.get(key);
+  if (control === undefined) return;
+  held.delete(key);
+  releaseHold(control);
 }
 
 function save(list: readonly MidiBinding[]): void {
@@ -146,7 +159,9 @@ function save(list: readonly MidiBinding[]): void {
 /** Replace binding `b` with `next`, in place. A wait for `b`'s release ends: its kind is settled. */
 function update(b: MidiBinding, next: MidiBinding): void {
   endWait(b);
-  held.delete(controlKey(b));
+  const key = controlKey(b);
+  if (held.has(key)) spent.add(key);
+  releaseHeld(key);
   save(bindings().map((x) => (x === b ? next : x)));
 }
 
@@ -166,7 +181,7 @@ export function cancelLearn(): boolean {
 /** Drop binding `b`: its messages reach the play path again. */
 export function forget(b: MidiBinding): void {
   endWait(b);
-  held.delete(controlKey(b));
+  releaseHeld(controlKey(b));
   save(bindings().filter((x) => x !== b));
 }
 
@@ -212,7 +227,7 @@ function consume(port: string, portName: string, status: number, data1: number, 
     const others = bindings().filter(
       (x) => !(x.port === port && x.channel === channel && x.kind === kind && x.number === data1),
     );
-    held.delete(controlKey(binding));
+    releaseHeld(controlKey(binding));
     save([...others, binding]);
     if (kind === 'cc') releaseController(port, channel, data1);
     setLearning(null);
@@ -221,28 +236,33 @@ function consume(port: string, portName: string, status: number, data1: number, 
   }
 
   if (!b) return false;
+  // The first message after an edit released this pedal's press: its release is spent, a press runs.
+  if (spent.delete(controlKey(b)) && high !== b.pressHigh) return true;
   if (!b.momentary) {
     runAction(b.action, b.target);
   } else if (high === b.pressHigh) {
     if (b.hold) {
       const key = controlKey(b);
       const control = holdControl(key);
-      held.set(key, { target: b.target, control });
+      held.set(key, control);
       pressHold(b.target, control);
     } else {
       runAction(b.action, b.target);
     }
   } else {
-    const press = held.get(controlKey(b));
-    held.delete(controlKey(b));
-    if (press) releaseHold(press.target, press.control);
+    releaseHeld(controlKey(b));
   }
   return true;
 }
 
+/** Input `port` is gone: release each HOLD press on it, as its pedal's release never comes. */
+function portGone(port: string): void {
+  for (const b of bindings()) if (b.port === port) releaseHeld(controlKey(b));
+}
+
 /** Put MIDI learn in front of the play path. Returns the uninstall. */
 export function installMidiActions(): () => void {
-  setMidiConsumer(consume);
+  setMidiConsumer({ message: consume, portGone });
   return () => {
     setMidiConsumer(null);
     cancelLearn();

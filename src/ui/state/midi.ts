@@ -30,12 +30,16 @@ const PITCH_BEND_RANGE_SEMITONES = 2;
 function midiOwner(port: string, channel: number): string { return JSON.stringify([port, channel]); }
 
 /**
- * Sees every 3-byte channel message before the play path and returns true to claim it; a claimed message
- * reaches nothing below (no note, no CC64/1/123 branch, no bend). `port` is the input's id, `portName` its
- * display name. MIDI learn installs it from the app layer (`src/app/midi-actions.ts`): `src/ui/state/`
- * never imports `src/app/`, so the action table stays out of this file.
+ * `message` sees every 3-byte channel message before the play path and returns true to claim it; a claimed
+ * message reaches nothing below (no note, no CC64/1/123 branch, no bend). `port` is the input's id,
+ * `portName` its display name. `portGone` hears that an input disconnected, so what its claimed messages
+ * hold down is let go there too. MIDI learn installs it from the app layer (`src/app/midi-actions.ts`):
+ * `src/ui/state/` never imports `src/app/`, so the action table stays out of this file.
  */
-type MidiConsumer = (port: string, portName: string, status: number, data1: number, data2: number) => boolean;
+interface MidiConsumer {
+  message: (port: string, portName: string, status: number, data1: number, data2: number) => boolean;
+  portGone: (port: string) => void;
+}
 
 let consumer: MidiConsumer | null = null;
 
@@ -65,7 +69,7 @@ function parseMidiMessage(ev: Event, port: string, portName: string): void {
   // keeps the tempo, so external MIDI clock is not tracked.
   if (data.length < 3) return;
 
-  if (consumer?.(port, portName, data[0], data[1], data[2])) return;
+  if (consumer?.message(port, portName, data[0], data[1], data[2])) return;
 
   const status = data[0];
   const note   = data[1];
@@ -112,9 +116,9 @@ function parseMidiMessage(ev: Event, port: string, portName: string): void {
 /**
  * The input ports we currently listen on, port id → display name. A device unplugged mid-note sends no
  * note-offs, so its voices ring forever; comparing this map against the live port list on every
- * statechange releases that port's notes/controllers and shows a named toast. A disconnected port may either vanish
- * from `access.inputs` or linger there with `state === 'disconnected'` (the spec allows both) — both
- * count as gone.
+ * statechange releases that port's notes/controllers (and, through the consumer, its HOLD presses) and
+ * shows a named toast. A disconnected port may either vanish from `access.inputs` or linger there with
+ * `state === 'disconnected'` (the spec allows both): both count as gone.
  */
 const attachedInputs = new Map<string, string>();
 
@@ -137,6 +141,7 @@ function attachInputs(access: MIDIAccess): void {
     if (present.has(id)) continue;
     attachedInputs.delete(id);
     for (let channel = 0; channel < 16; channel++) inputRouter.releaseSource(midiOwner(id, channel), true);
+    consumer?.portGone(id);
     gone.push(name);
   }
   if (gone.length > 0) {

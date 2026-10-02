@@ -303,13 +303,33 @@ fn a_hold_release_acts_where_its_press_did_whatever_the_selection_since() {
     rig.press(Command::SelectTrack(1));
     rig.press(Command::Action(Action::Release(0)));
     assert_eq!(rig.state(1), LaneState::Playing);
-    // A named HOLD presses REC/DUB there and releases there.
+    // A named HOLD presses there and its release ends what that press started, the selection elsewhere.
     rig.set_level(0.25);
-    rig.press(Command::ActionOn(0, Action::RecDub));
+    rig.press(Command::ActionOn(0, Action::Hold(0)));
     assert_eq!(rig.state(0), LaneState::Overdubbing);
-    rig.press(Command::ActionOn(0, Action::Release(0)));
+    rig.press(Command::Action(Action::Release(0)));
     rig.set_level(0.0);
     assert_eq!(rig.state(0), LaneState::Playing);
+}
+
+#[test]
+fn a_refused_named_hold_press_leaves_its_release_nothing_to_end() {
+    // A named HOLD pressed on a stopped lane is refused; that lane plays and overdubs from the screen
+    // while the pedal stays down. Its release leaves that layer be.
+    let mut rig = two_lanes(1);
+    rig.press(Command::PlayStop(0));
+    assert_eq!(rig.state(0), LaneState::Stopped);
+    let mark = rig.events.len();
+    rig.press(Command::ActionOn(0, Action::Hold(0)));
+    assert_eq!(refusals_since(&rig, mark), [(0, Refusal::PlayFirst)]);
+    rig.press(Command::PlayStop(0));
+    rig.advance_to(rig.next_boundary() + 1);
+    assert_eq!(rig.state(0), LaneState::Playing);
+    rig.set_level(0.25);
+    rig.press(Command::RecDub(0));
+    assert_eq!(rig.state(0), LaneState::Overdubbing, "an on-screen overdub");
+    rig.press(Command::Action(Action::Release(0)));
+    assert_eq!(rig.state(0), LaneState::Overdubbing, "the refused press's release ends nothing");
 }
 
 #[test]
