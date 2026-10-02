@@ -142,6 +142,8 @@ export function Keyboard(props: KeyboardProps = {}) {
   });
 
   // --- computer keyboard ---
+  // Held notes by physical key (e.code): a modifier pressed mid-hold changes the release's e.key (Shift+1
+  // releases as '!'), and the press's e.key picks the note.
   const heldKeyNote = new Map<string, Hold>();
   function onKeyDown(e: KeyboardEvent) {
     if (e.repeat || e.metaKey || e.ctrlKey || e.altKey) return;
@@ -162,10 +164,10 @@ export function Keyboard(props: KeyboardProps = {}) {
     // Drum mode: pad keys map straight to the GM drum voices; octave shift is meaningless.
     if (drumActive()) {
       const pad = DRUM_KIT.find((p) => p.key === k);
-      if (pad === undefined || heldKeyNote.has(k)) return;
+      if (pad === undefined || heldKeyNote.has(e.code)) return;
       e.preventDefault();
-      const hold: Hold = { note: pad.note, source: 'computer', owner: `key:${k}`, active: true, sounding: false };
-      heldKeyNote.set(k, hold);
+      const hold: Hold = { note: pad.note, source: 'computer', owner: `key:${e.code}`, active: true, sounding: false };
+      heldKeyNote.set(e.code, hold);
       startHold(hold, PAD_VELOCITY);
       return;
     }
@@ -178,22 +180,21 @@ export function Keyboard(props: KeyboardProps = {}) {
       return;
     }
     const offset = COMPUTER_MAP[k];
-    if (offset === undefined || heldKeyNote.has(k)) return;
+    if (offset === undefined || heldKeyNote.has(e.code)) return;
     e.preventDefault();
     const note = octaveBase(keyboardOctave()) + offset;
     // Owner per physical key: after an octave shift two held keys can land on the SAME note, and the
     // router must keep it sounding (and lit) until the last of them lifts.
-    const hold: Hold = { note, source: 'computer', owner: `key:${k}`, active: true, sounding: false };
-    heldKeyNote.set(k, hold);
+    const hold: Hold = { note, source: 'computer', owner: `key:${e.code}`, active: true, sounding: false };
+    heldKeyNote.set(e.code, hold);
     startHold(hold, 100);
   }
   function onKeyUp(e: KeyboardEvent) {
     // No focus guard here (deliberate): a key held while focus moves into a field must still release
     // its note — the release is keyed off heldKeyNote, so it only fires for notes this handler started.
-    const k = e.key.toLowerCase();
-    const hold = heldKeyNote.get(k);
+    const hold = heldKeyNote.get(e.code);
     if (hold) {
-      heldKeyNote.delete(k);
+      heldKeyNote.delete(e.code);
       endHold(hold);
     }
   }
@@ -216,7 +217,7 @@ export function Keyboard(props: KeyboardProps = {}) {
   // slot's synth changing (e.g. pad <-> piano). The swap already flushes the audio voices
   // (instrument.ts -> inputRouter.setActiveEngine -> allNotesOff), so we only need to drop this
   // keyboard's stale bookkeeping: otherwise heldKeyNote keeps the old mapping, leaving the still-held
-  // computer key dead (guarded by `heldKeyNote.has(k)`) and the on-screen key visually stuck until
+  // computer key dead (guarded by `heldKeyNote.has(e.code)`, the physical key) and the on-screen key visually stuck until
   // it's physically released. No router traffic here — the audio side is already clean.
   const activeInstrumentKey = createMemo(
     () => `${activeSlot()}:${slotPlugins()[activeSlot()]?.id ?? slotIds()[activeSlot()]}`,

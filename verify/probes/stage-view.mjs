@@ -15,7 +15,9 @@
  *   aria-current follow the feed's selection; the lane boxes do not move with the states; reduced motion
  *   stops the beat transition;
  * - the view hides the keyboard: a held A lights no key and sends no `NoteOn` inside it (checked against
- *   the same key outside the view), and drum mode's 3 plays no pad inside it but selects lane 3;
+ *   the same key outside the view), and drum mode's 3 plays no pad inside it but selects lane 3; outside
+ *   it, a pad key released with Shift down (its key then reads '!') sends its `NoteOff`, unlights its pad
+ *   and plays again on the next press;
  * - the bar counter: — with no loop; on a 2- and a 4-bar loop at 240 BPM (a scripted clock anchor and a
  *   `Beat` a beat), the bar the loop phase is in, stepping one bar at a time across the loop boundary;
  * - legibility at 1280x820, 1920x1080 and 1000x700: the state word's cap height (Geist 'E' ascent) and the
@@ -370,6 +372,21 @@ await probe(async ({ open }) => {
   assert.equal(outside3.lit, true, 'control: outside the view, drum mode 3 plays the Cowbell pad');
   assert.ok(outside3.notes > 0, 'control: outside the view, drum mode 3 sends its pad note');
   assert.ok(!outside3.commands.some((c) => c.SelectTrack !== undefined), 'control: outside the view, drum mode 3 does not select');
+  // A pad key released with Shift down (its key reads '!') still releases its pad, and plays again.
+  // Named by code: Playwright then shifts the release's key as a keyboard does ('1' would not).
+  await clearSent();
+  await page.keyboard.down('Digit1');
+  await page.keyboard.down('Shift');
+  await page.keyboard.up('Digit1');
+  await page.keyboard.up('Shift');
+  await page.waitForTimeout(150);
+  const shifted = await sent();
+  const shiftedLit = await page.evaluate(() => document.querySelector('.kb__pad--down') !== null);
+  console.log(JSON.stringify({ scene: 'drum-shift-release', sent: shifted, lit: shiftedLit }));
+  assert.ok(shifted.some((c) => c.NoteOff === 49), 'a pad key released with Shift held sends its NoteOff');
+  assert.equal(shiftedLit, false, 'a pad key released with Shift held leaves its pad unlit');
+  const again1 = await hold('1', '.kb__pad--down');
+  assert.ok(again1.commands.some((c) => c.NoteOn?.[0] === 49), 'the next 1 after a shifted release plays the Crash pad');
   await page.keyboard.press('b');
   await expectOpen(true, 'B opens in drum mode');
   const inside3 = await hold('3', '.kb__pad--down');

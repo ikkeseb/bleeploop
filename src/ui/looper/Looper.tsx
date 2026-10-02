@@ -282,7 +282,12 @@ function TrackLane(props: {
         <button
           class="lp-core"
           disabled={!recGate().ok}
-          onClick={() => void looper.recDub(props.index)}
+          onClick={(e) => {
+            // A pointer press selected the lane on pointerdown; a keyboard one (detail 0) selects here,
+            // so the selected track's keys then act on the lane this take started on.
+            if (e.detail === 0) looper.selectTrack(props.index);
+            void looper.recDub(props.index);
+          }}
           aria-label={`Track ${props.index + 1} ${recDubLabel()}`}
           title={recDubLabel()}
         >
@@ -312,6 +317,7 @@ function TrackLane(props: {
             classList={{ 'is-armed': clr.armed() }}
             disabled={isEmpty()}
             onClick={clr.trigger}
+            onKeyDown={clr.onKeyDown}
             aria-label={
               clr.armed()
                 ? `Track ${props.index + 1} clear, press again to confirm`

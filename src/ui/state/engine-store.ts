@@ -139,6 +139,10 @@ const [selectedTrack, setSelectedTrack] = createSignal(0);
 const [beat, setBeat] = createSignal(0);
 const [countLeft, setCountLeft] = createSignal(0);
 const [device, setDeviceSignal] = createSignal<DeviceStatus | null>(null);
+/** The engine's rate: its device's, kept while no device runs (a stopped device leaves the engine). Taken
+ * from an open's answer, and from a feed frame's status after the frame's events, which are still the
+ * engine's that ran before it (a new engine's come with its reset). */
+const [engineRate, setEngineRate] = createSignal(48000);
 
 // ── The settings this store keeps (the engine does not echo them) ──────────────────────────────────
 
@@ -303,10 +307,6 @@ const plain = {
   /** Per lane: a `Cleared` took its loop and its own `Lane` event has not arrived yet (a feed tick may
    * split them). */
   clearing: Array.from({ length: ENGINE_LANES }, () => false),
-  /** The engine's rate: its device's, kept while no device runs (a stopped device leaves the engine). Taken
-   * from an open's answer, and from a feed frame's status after the frame's events, which are still the
-   * engine's that ran before it (a new engine's come with its reset). */
-  rate: 48000,
   /** The player's clear that emptied the looper, in engine `gen` at its `rate` (`engineSession.clearToken`). */
   clear: null as { gen: number; rate: number } | null,
 };
@@ -574,7 +574,7 @@ function applyPeaks(lane: number, start: number, count: number, min: readonly nu
 function noteClear(): void {
   const loops = plain.state.some((s, i) => holdsLoop(s) && !plain.clearing[i]);
   if (loops) plain.clear = null;
-  else if (tookLoop) plain.clear = { gen: plain.resets, rate: plain.rate };
+  else if (tookLoop) plain.clear = { gen: plain.resets, rate: engineRate() };
 }
 
 /**
@@ -626,7 +626,7 @@ function applyFrameNow(f: FeedFrame): void {
     if (!f.events.some((ev) => ev.type === 'Selected')) setSelectedTrack(0);
   }
   noteClear();
-  if (f.status) plain.rate = f.status.sampleRate;
+  if (f.status) setEngineRate(f.status.sampleRate);
   for (const d of f.device) applyDeviceEvent(d);
   // No meter: no device runs, so the input reads silent.
   plain.level = f.meter?.peak ?? 0;
@@ -1137,9 +1137,10 @@ const [openFailure, setOpenFailure] = createSignal<string | null>(null);
  * switch can leave the device that ran running. */
 export const engineOpenFailure = openFailure;
 
-/** The running device's rate; 48 kHz until one runs (nothing is on the grid before then). */
+/** The engine's rate, the UI's frame conversions read it: the running device's, else the one the engine
+ * kept when its device stopped; 48 kHz until one runs (nothing is on the grid before then). */
 export function engineSampleRate(): number {
-  return device()?.sampleRate ?? 48000;
+  return device()?.sampleRate ?? engineRate();
 }
 
 /** A sample rate as the player reads it: "44.1 kHz". */
@@ -1273,7 +1274,7 @@ async function openPicked(restore?: () => Promise<void>): Promise<{ status: Devi
     }
     setOpenFailure(null);
     setDevice(runs.status);
-    plain.rate = runs.status.sampleRate;
+    setEngineRate(runs.status.sampleRate);
     opened = { request: runs.request, picks: runs.picks };
     dropLackingPicks(askedChannels(runs.request), runs.status.inputChannels);
     return { status: runs.status, declined: false };

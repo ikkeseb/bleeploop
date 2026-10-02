@@ -47,7 +47,8 @@ export const CONFIRM_WINDOW_MS = 2500;
  * Two-step confirm latch. The first `trigger()` only ARMS (opens a `windowMs` window and returns); a
  * second within it runs `action` and disarms. The window auto-closes. Shared by the per-track CLR and
  * the command bar's ✕ ALL so "press twice to destroy a take" behaves identically — no blocking confirm.
- * Registers its own `onCleanup`, so call it during component setup.
+ * Its button takes `onKeyDown` too: a held Enter's key repeats would each click it, and a repeat is not
+ * a second press. Registers its own `onCleanup`, so call it during component setup.
  */
 export function createTwoStepConfirm(action: () => void, windowMs = CONFIRM_WINDOW_MS) {
   const [armed, setArmed] = createSignal(false);
@@ -62,8 +63,12 @@ export function createTwoStepConfirm(action: () => void, windowMs = CONFIRM_WIND
       timer = setTimeout(() => setArmed(false), windowMs);
     }
   };
+  const onKeyDown = (e: KeyboardEvent) => {
+    // Enter only: a held Tab must still move focus on past the button.
+    if (e.key === 'Enter' && e.repeat) e.preventDefault();
+  };
   onCleanup(() => clearTimeout(timer));
-  return { armed, trigger };
+  return { armed, trigger, onKeyDown };
 }
 
 /** Mounted while a popover is open (IN FX, a lane's TRIM): Escape closes it wherever focus is (a pointer

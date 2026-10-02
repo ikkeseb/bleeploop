@@ -11,7 +11,12 @@
  * - Help open: Space still sends REC/DUB with Help left open; 2 selects lane 2 (`SelectTrack`), which the
  *   lane shows once the feed says so;
  * - real controls keep the key: Space in the BPM field sends nothing; Tab to BPM plus and Enter steps
- *   the tempo (`SetBpm`), never a looper action.
+ *   the tempo (`SetBpm`), never a looper action;
+ * - Enter commits a typed BPM (`SetBpm`) with an AUTO REC arm on the feed, and drives no looper action
+ *   though the field unmounts under the key;
+ * - a held Enter on a lane's CLR and on ✕ ALL sends no clear (a key repeat is not the second press), and a
+ *   held Tab still moves on past them; a fresh Enter after the release sends it once;
+ * - Enter on a Tab-focused lane core sends `SelectTrack` before its `RecDub`, as a pointer press does.
  *
  * Cannot see the native engine (what it does with the press: lf-engine `tests/actions.rs`), MIDI or
  * hardware-key input: the fake answers no command by itself.
@@ -109,5 +114,69 @@ await probe(async ({ open }) => {
   console.log('sent after BPM field + Tab + Enter', JSON.stringify(afterEnter));
   assert.ok(afterEnter.some((c) => c.SetBpm === bpmBefore + 1), 'Enter on BPM plus did not step BPM');
   assert.ok(!afterEnter.some((c) => c.Action !== undefined || c.ActionOn !== undefined), 'Enter on a Tab-focused button drove the looper');
+
+  // 4. Enter commits a typed BPM and nothing else: the field unmounts under the key, and the window's
+  //    transport keys must not read that Enter as PLAY/STOP (with AUTO REC armed it would end the arm).
+  await page.evaluate((info) => window.__lf.native.emit({ seq: 3, reset: false, events: [{ Lane: { frame: 0, lane: 0, info } }] }),
+    { ...lane('Empty'), armed: true, autoArmed: true });
+  await clearSent();
+  await page.getByRole('button', { name: /^\d+ BPM$/ }).click();
+  await page.waitForFunction(() => document.activeElement?.classList.contains('transport__bpm-input'));
+  await page.keyboard.type('97');
+  await page.keyboard.press('Enter');
+  await page.waitForTimeout(150);
+  const afterCommit = await sent();
+  console.log('sent after typing 97 + Enter in the BPM field', JSON.stringify(afterCommit));
+  assert.ok(afterCommit.some((c) => c.SetBpm === 97), 'Enter in the BPM field did not set the typed BPM');
+  assert.ok(!afterCommit.some((c) => c.Action !== undefined || c.ActionOn !== undefined), 'Enter in the BPM field also drove the looper');
+
+  // 5. A held Enter on a CLEAR control confirms nothing: a key repeat is not a second press. A release
+  //    and a fresh press is, and sends the clear once.
+  const playing = { ...lane('Playing'), length: 96000, canReverse: true };
+  const holdsLoop = () => page.evaluate((info) => window.__lf.native.emit({
+    seq: 4, reset: false,
+    events: [{ Lane: { frame: 0, lane: 0, info } }, { Transport: { frame: 0, master: 96000, bpm: 120, locked: true } }],
+  }), playing);
+  await holdsLoop();
+  for (const [name, isClear] of [
+    ['Track 1 clear', (c) => c.Clear !== undefined],
+    ['Clear all tracks', (c) => c === 'ClearAll'],
+  ]) {
+    const control = page.getByRole('button', { name, exact: true });
+    await control.focus();
+    await clearSent();
+    await page.keyboard.down('Enter');
+    await page.keyboard.down('Enter'); // repeat: true
+    await page.keyboard.down('Enter');
+    await page.keyboard.up('Enter');
+    await page.waitForTimeout(100);
+    const held = await sent();
+    console.log(`sent after a held Enter on ${name}`, JSON.stringify(held));
+    assert.equal(held.filter(isClear).length, 0, `a held Enter on ${name} confirmed the clear`);
+    await page.keyboard.press('Enter');
+    await page.waitForTimeout(100);
+    assert.equal((await sent()).filter(isClear).length, 1, `a second Enter on ${name} did not clear once`);
+    // A held Tab that reaches it moves on past it (the guard is Enter's only): from the control before
+    // it, the first Tab lands on it and the repeat must leave.
+    await control.focus();
+    await page.keyboard.press('Shift+Tab');
+    await page.keyboard.down('Tab');
+    const landed = await control.evaluate((el) => document.activeElement === el);
+    await page.keyboard.down('Tab'); // repeat: true
+    await page.keyboard.up('Tab');
+    const left = await control.evaluate((el) => document.activeElement !== el);
+    assert.ok(landed && left, `a held Tab ${landed ? 'stays on' : 'never reached'} ${name}`);
+  }
+
+  // 6. A keyboard-activated lane core selects its lane before its REC/DUB, as a pointer press does, so a
+  //    later Space (the selected track's REC/DUB) ends that lane's take.
+  await page.evaluate(() => window.__lf.native.emit({ seq: 5, reset: false, events: [{ Selected: { frame: 0, lane: 0 } }] }));
+  await page.locator('.lp-lane').nth(1).locator('.lp-core').focus();
+  await clearSent();
+  await page.keyboard.press('Enter');
+  await page.waitForTimeout(100);
+  const coreSent = await sent();
+  console.log('sent after Enter on the Track 2 core', JSON.stringify(coreSent));
+  assert.deepEqual(coreSent, [{ SelectTrack: 1 }, { RecDub: 1 }], 'a keyboard-activated core did not select its lane, then REC/DUB');
   assert.deepEqual(consoleErrors, [], 'no console errors');
 });

@@ -42,7 +42,12 @@ export function Transport(props: { returnFocus?: (el: HTMLElement | undefined) =
   }
 
   function onBpmKeyDown(e: KeyboardEvent) {
-    if (e.key === 'Enter') commitEdit();
+    // The commit unmounts the focused field, so the window's transport keys would find focus on the
+    // body and read this Enter as PLAY/STOP: it stops here.
+    if (e.key === 'Enter') {
+      e.stopPropagation();
+      commitEdit();
+    }
     if (e.key === 'Escape') setEditing(false);
   }
 
@@ -469,6 +474,7 @@ export function Transport(props: { returnFocus?: (el: HTMLElement | undefined) =
           classList={{ 'is-armed': clearAll.armed() }}
           disabled={!hasMaster() && !anyLive()}
           onClick={onClearAll}
+          onKeyDown={clearAll.onKeyDown}
           aria-label={clearAll.armed() ? 'Clear all tracks, press again to confirm' : 'Clear all tracks'}
           title="Clear all tracks and reset loop length"
         >

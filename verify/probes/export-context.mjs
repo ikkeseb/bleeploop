@@ -12,6 +12,8 @@
  *   128 times (entry cap 9).
  * - A lane's volume and the master's moved while the engine renders the master (the fake holds its
  *   snapshot answer) land in neither: session.json keeps the mix from when the export asked.
+ * - A 44.1 kHz engine's eight-bar loop reads eight bars and 16 s in the command bar, and still does after
+ *   its device stops (a `status: null` frame: the engine stays at its rate).
  *
  * The master here is the fake's stand-in (a dry sum under volume and mute), NOT the engine's sound: what
  * the master holds (FX, a STOPPED lane in it, a muted one out, alignment) is lf-engine's
@@ -257,4 +259,33 @@ await probe(async ({ open }) => {
   assert.ok(fallbackLogs[0].includes('an injected failure'), `the log carries the engine's error: ${fallbackLogs[0]}`);
   const unexpected = consoleErrors.filter((text) => !text.includes('[export] the engine rendered no wet master'));
   assert.deepEqual(unexpected, [], 'no other console errors');
+
+  // ── A 44.1 kHz engine whose device stopped keeps its rate ─────────────────────────────────────────
+  // An eight-bar loop at 120 BPM and 44.1 kHz (705600 frames, 16 s): the loop readout reads it so while
+  // the device runs, and still after the device stops and the engine stays (a `status: null` frame).
+  const slow = await open({
+    init: (p) => p.addInitScript(() => {
+      window.__lfEngineFake = true;
+      globalThis.__lfEngineFakeRate = 44100;
+    }),
+  });
+  await slow.page.waitForFunction(() => window.__lf.native.opened.length === 1, undefined, { timeout: 10000 });
+  const EIGHT = 705600;
+  const slowEmit = (frame) => slow.page.evaluate((f) => window.__lf.native.emit(f), { seq: ++seq, reset: false, events: [], ...frame });
+  await slowEmit({
+    reset: true,
+    settings: [],
+    events: [transport(EIGHT), laneEvent(0, lane('Playing', { length: EIGHT })), ...[1, 2, 3, 4].map((i) => laneEvent(i, lane('Empty'))),
+      { Selected: { frame: 0, lane: 0 } }],
+    anchor: { frame: 0, atMs: Date.now(), rate: 44100, grid: 0 },
+    meter: { peak: 0, clip: false },
+  });
+  const readout = () => slow.page.locator('.transport__loop-v').textContent();
+  const running = await readout();
+  await slowEmit({ status: null });
+  const stopped = await readout();
+  console.log(JSON.stringify({ scene: '44.1 kHz loop readout', running, stopped }));
+  assert.match(running, /^8 BARS · 16\.0 s$/, 'a running 44.1 kHz device reads its eight-bar loop');
+  assert.match(stopped, /^8 BARS · 16\.0 s$/, 'the stopped device leaves the engine at 44.1 kHz: the loop still reads eight bars');
+  assert.deepEqual(slow.consoleErrors, [], 'no console errors at 44.1 kHz');
 });
