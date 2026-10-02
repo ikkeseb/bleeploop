@@ -64,8 +64,8 @@ it.
   free record stopped near the downbeat after N bars keeps N, an early or a mid-bar stop behaves, and a
   press while the take's tail is in flight is honoured after the commit.
 - The click: silent when idle, stops with STOP ALL, and the count-in still clicks with CLICK off.
-- A later track starts at master phase with no seam; punching out of a sustained note leaves a clean
-  layer seam; the undo swap and reverse are click-free.
+- A later track starts at master phase with no seam; reverse's flip adds no step (machine:
+  `tests/seam_continuity.rs`), but does its turn of direction click?
 - Multiply: over a 1-bar loop, FIXED 4 on another lane grows the loop to 4 bars with no seam. FIXED
   off: a take stopped ~1.6 loops in grows to two loops, ~1.3 keeps one.
 - TRIM: halve an 8-bar lane while it plays (its first 4 bars from the next loop start); ↶ UNDO brings
@@ -100,3 +100,4 @@ nothing is said.
 | D20 | A plugin call that outputs NaN or an infinity is silenced. Should it also damage the running take or layer, as an input gap does (the layer is dropped)? Today a bad stretch leaves silence in it; with DUB FEEDBACK 0 that replaces the loop there. | No. |
 | D21 | Make the engine's applied state the one authority: the feed carries it whole, the snapshot and the load carry each lane's mix with its PCM, and the settings mirror and the UI's mix copies go. L, wire changes, the fader's feel to re-check. The races it closes reproduce as ignored red tests (`d21_*` in `src-tauri/src/engine_io/tests.rs`, run with `-- --ignored`); the one a player meets: an import or recovery plays a lane saved muted or quieter for ~90 ms at full level. Sending the mix before the load alone lets a recovery that loses the race to a live take rewrite that take's mix (`recovery-import-failure`). A timed-out load that later plays and a rate switch that drops a load are a separate protocol question. | Not started. |
 | D22 | Remove the native MIDI stack (`src-tauri/src/engine_io/midi/`, about 1.8k lines with tests, and `midir`)? It is built and tested but never started; MIDI arrives through Web MIDI. | Keep it. |
+| D23 | An overdub's punch-in and punch-out and an UNDO swap cut hard: no ramp exists, and a sustained note steps there 11 to 13 times its own slope (ignored red tests, `tests/seam_continuity.rs`). A design: a 5 ms linear ramp written at punch-in (DUB FEEDBACK ramps from 1 too), the last 5 ms tapered at punch-out from the samples the dub overwrote (no tail after the press), and an UNDO/REDO swap crossfaded from a cached copy of the outgoing loop. It changes recorded audio at the edges (a gesture shorter than the ramps is softened) and the exact sums in about eight test files. Build it, and with what ramp? | Build it as designed, 5 ms linear, on a branch for the ear. |
