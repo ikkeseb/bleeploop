@@ -79,5 +79,12 @@ it.
 
 ## Decisions
 
-None open. When work blocks on an owner decision, add a table here: `#`, the question, and the
-default if nothing is said.
+When work blocks on an owner decision, it gets a row here: `#`, the question, and the default if
+nothing is said.
+
+| # | Question | Default |
+|---|---|---|
+| D19 | A DUB pressed while a playing lane's UNDO, REVERSE or TRIM swap waits for its loop boundary makes the swap heard at once, mid-loop. Hold the DUB to the boundary (a held looper command also holds a STOP or punch-out behind it for up to a loop), keep it and write the exception into the engine briefing, or refuse the DUB with a reason (a wire change)? Red tests, ignored: `tests/overdub_undo_reverse.rs`, `tests/trim.rs`. | Keep it, as an exception. |
+| D20 | A plugin call that outputs NaN or an infinity is silenced. Should it also damage the running take or layer, as an input gap does (the layer is dropped)? Today a bad stretch leaves silence in it; with DUB FEEDBACK 0 that replaces the loop there. | No. |
+| D21 | Make the engine's applied state the one authority: the feed carries it whole, the snapshot and the load carry each lane's mix with its PCM, and the settings mirror and the UI's mix copies go (two reviews found the races the copies cause: COPY or CLEAR followed by a setting, a dropped event left unrepaired, an import heard at the old mix, an export whose master and session.json disagree). L each, wire changes, the fader's feel to re-check. | Not started. |
+| D22 | Remove the native MIDI stack (`src-tauri/src/engine_io/midi/`, about 1.8k lines with tests, and `midir`)? It is built and tested but never started; MIDI arrives through Web MIDI. | Keep it. |
