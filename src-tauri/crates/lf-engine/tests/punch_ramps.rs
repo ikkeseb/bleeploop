@@ -9,7 +9,8 @@
 //! Held here: both edges at feedback 0, 0.5 and 1, aligned and not; gestures shorter than two ramps; a
 //! multi-pass dub whose punch-out returns to its last pass, not to the undo target; a stopped device's
 //! punch-out finishing the ramp on the frames it retained; a damaged layer restored bit for bit with its
-//! previous undo target; the peaks and a session snapshot after the punch-out; and block-size identity.
+//! previous undo target; the peaks and a session snapshot after the punch-out; an alignment past a whole
+//! loop; and block-size identity.
 //! What this cannot hear: whether 5 ms is enough on a real guitar layer (the owner's ear,
 //! `seam_continuity.rs` holds the tone's seam).
 
@@ -347,5 +348,43 @@ fn the_punch_edges_are_bit_identical_at_any_block_size() {
     for (block, p, o) in &runs[1..] {
         assert_eq!(off(p, pcm), Vec::<usize>::new(), "block {block}: the loop as at block 1");
         assert_eq!(off(o, out), Vec::<usize>::new(), "block {block}: the output as at block 1");
+    }
+}
+
+/// A total latency past a whole loop is accepted (a slow device plus a plugin's latency): the ramps land
+/// the same and a debug build faults nothing. At `2 * master - 100` the read head runs 100 positions
+/// behind the writer, modulo the loop, so the newest writes are heard once unfaded; the stored loop is
+/// the same.
+#[test]
+fn an_alignment_past_a_whole_loop_ramps_the_same_and_faults_nothing() {
+    let n = ramp(48000);
+    for align in [48_000, 2 * 38_400 - 100] {
+        // `looping` with a FIXED one-bar first take: a free take's stop lands `align` later, past a bar.
+        let mut rig = Rig::with(Opts { sr: 48000, start: 48000, align, ..Default::default() });
+        rig.set(Command::SetBpm(300.0));
+        rig.set(Command::SetFixedLength(true));
+        rig.set(Command::SetFixedBars(1.0));
+        rig.set_input(code);
+        rig.press(Command::RecDub(0));
+        rig.advance_to(rig.end_frame() + 1);
+        rig.set(Command::SetFixedLength(false));
+        rig.set_level(0.0);
+        rig.idle();
+        assert_eq!(rig.state(0), LaneState::Playing, "align {align}: the first take committed");
+        let master = rig.master();
+        assert_eq!(master, 38_400, "one bar at 300 BPM");
+        assert!(align > master + n);
+        let pre = rig.pcm(0);
+        let start = rig.next_boundary() + master / 2 + align + 17;
+        let end = start + master / 3;
+        rig.set_input(input);
+        dub_over(&mut rig, start, end);
+        rig.set_level(0.0);
+        rig.idle();
+        let pos = pos_fn(rig.anchor(), master, align);
+        let mut want = pre.clone();
+        common::dub::dub(&mut want, (start, end), n, 1.0, &pos, input);
+        assert_eq!(off(&rig.pcm(0), &want), Vec::<usize>::new(), "align {align}");
+        assert_eq!(rig.state(0), LaneState::Playing, "align {align}");
     }
 }

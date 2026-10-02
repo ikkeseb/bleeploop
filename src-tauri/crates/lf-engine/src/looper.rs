@@ -1480,10 +1480,6 @@ impl Looper {
         let (src, dst) = (t.live, t.spare);
         rec.start = Some(cx.now + rec.align);
         rec.first_pos = first_pos;
-        // The punch-out's writes are distinct positions, and rewritten before the read head reaches them
-        // again (`fade_tail`), only on a loop longer than the ramp and the alignment: a master is at least
-        // one bar.
-        debug_assert!(master > self.punch + rec.align, "a loop of {master} frames under the punch ramp and alignment");
         self.tail_next = 0;
         self.tail_len = 0;
         self.rec = Some(rec);
@@ -1498,12 +1494,16 @@ impl Looper {
     /// included, not the undo target. A rejected or discarded layer never gets here: its restore puts the
     /// loop before it back bit for bit.
     ///
-    /// The writes are distinct loop positions (`start_overdub` checks the loop outlasts the ramp), so the
-    /// buffer still holds each one's `new`. The rewrite lands before any of them plays again: it runs at
-    /// frame `end`, before that frame renders, and the writer runs `align` frames behind the read head,
-    /// so the read head is `align + 1` positions past the last write and reaches the earliest rewritten
-    /// one `master - (punch - 1 + align)` frames later. A device's punch-out (`punch_out`) runs it at
-    /// once on the writes it retained, its `end` the next frame no device rendered.
+    /// The writes are distinct loop positions (a master is at least a bar, far longer than the ramp); a
+    /// position that no longer holds the write's `new` is left as it is. The rewrite runs at frame `end`,
+    /// before that frame renders, and the writer runs `align` frames behind the read head, so the read
+    /// head reaches the earliest rewritten position `master - (punch - 1 + align % master)` frames later:
+    /// the rewrite lands before any of them plays again unless the alignment, modulo the loop, leaves
+    /// the read head less than the ramp ahead of the writer (a total latency within the ramp of a whole
+    /// number of loops), when the newest writes play once unfaded, on that pass only. Nothing asserts
+    /// it: a debug build would lose the engine on an accepted latency. A device's punch-out
+    /// (`punch_out`) runs it at once on the writes it retained, its `end` the next frame no device
+    /// rendered.
     fn fade_tail(&mut self, i: usize, end: Frame) {
         let (n, cap) = (self.punch, self.tail.len());
         let buf = self.lanes[i].live;
@@ -1516,9 +1516,8 @@ impl Looper {
             if to_end >= n {
                 continue;
             }
-            debug_assert_eq!(data[w.pos].to_bits(), w.new.to_bits(), "a punch-out write was overwritten in its own ramp");
             faded = Some(faded.map_or((w.pos, 1), |(p, c)| (p, c + 1)));
-            if w.new != w.old {
+            if w.new != w.old && data[w.pos].to_bits() == w.new.to_bits() {
                 let b = to_end as f32 / n as f32;
                 data[w.pos] = w.old + b * (w.new - w.old);
             }
