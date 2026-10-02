@@ -1,3 +1,0 @@
-crates/lf-engine/src/looper.rs:1453:9: replace Looper::stop with ()
-crates/lf-engine/src/looper.rs:1485:9: replace Looper::keep_copy_stopped with ()
-crates/lf-engine/src/looper.rs:1487:42: replace == with != in Looper::keep_copy_stopped

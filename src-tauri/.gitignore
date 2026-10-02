@@ -2,3 +2,6 @@
 # will have compiled files and executables
 /target/
 /gen/schemas
+
+# cargo-mutants' run output (it records the machine's user and host names)
+mutants.out*/
