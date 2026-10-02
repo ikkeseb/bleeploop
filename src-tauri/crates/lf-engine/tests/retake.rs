@@ -8,6 +8,11 @@
 //! of a pass edge, so it also tainted the next pass; a stop in that tainted pass rejected the take.
 //! Here that next pass is clean: it is kept, or an ordinary stop commits it. The product rule stays: a
 //! damaged pass drops the older kept pass too.
+//!
+//! The engine's own: a FIXED first take's click follows the roll, re-anchored on each pass's downbeat,
+//! so a pass played to the click commits on its own bar lines however many passes came before (`h_`).
+//! What it cannot see: pass 1 still runs on the count-in's exact-tempo grid, so pass 1's bars and the
+//! first pass edge's click sit up to 0.41 frames per bar early at 137 BPM (bounded, never accumulating).
 
 mod common;
 
@@ -195,4 +200,59 @@ fn a_free_first_take_never_rolls() {
     rig.press(Command::RecDub(0));
     rig.advance(rig.seconds(3.0));
     assert!(rig.state(0) == LaneState::Recording && rig.lane(0).retake_pass == 0, "no known length to roll around");
+}
+
+/// FIXED 8 at 137 BPM on lane 0, RETAKE on, the metronome on, `align` frames of input/output alignment,
+/// the input an impulse at each frame of `marks`. Every pass is checked to tile on from the last, whole
+/// bars long; a stop mid pass `APPROVED + 1` approves pass `APPROVED`. Returns the rig, that pass's
+/// window start and every accented click it heard.
+const APPROVED: u32 = 4;
+const BARS_137: Frame = 8;
+
+fn roll_played_to(align: Frame, marks: Vec<Frame>) -> (Rig, Frame, Vec<Frame>) {
+    let mut rig = Rig::with(common::Opts { sr: 48000, start: 48000, align, ..Default::default() });
+    rig.set(Command::SetBpm(137.0));
+    rig.set(Command::SetMetronome(true));
+    rig.set(Command::SetFixedLength(true));
+    rig.set(Command::SetFixedBars(BARS_137 as f64));
+    rig.set(Command::SetRetake(true));
+    rig.set_input(move |f| if marks.binary_search(&f).is_ok() { 1.0 } else { 0.0 });
+    let mark = rig.events.len();
+    rig.press(Command::RecDub(0));
+    let len = BARS_137 * rig.fpb();
+    let mut edge = rig.start_frame();
+    for p in 1..=APPROVED + 1 {
+        rig.advance_to(edge + len / 2);
+        let pass = (rig.lane(0).retake_pass, rig.start_frame(), rig.end_frame());
+        assert_eq!(pass, (p, edge, edge + len), "pass {p} starts where the last ended, whole bars long");
+        edge += len;
+    }
+    rig.press(Command::RecDub(0));
+    assert!(rig.state(0) == LaneState::Playing && rig.master() == len, "commits pass {APPROVED}");
+    let clicks = rig.clicks_since(mark).into_iter().filter(|c| c.1).map(|c| c.0).collect();
+    (rig, edge - 2 * len, clicks)
+}
+
+#[test]
+fn h_an_approved_pass_commits_on_the_click_however_many_passes_rolled() {
+    // 137 BPM at 48 kHz: the click's bar is 84087.59 frames, the window's 84088. A player plays an
+    // impulse on every accented click (heard `align` late, as the rig's input arrives) and approves
+    // pass 4; its marks must sit on the committed loop's own bar lines. A roll that slides by the
+    // rounded bar while the click keeps its exact one puts them 0.41 frames per elapsed bar early.
+    for align in [0, 1920] {
+        let (_, _, clicks) = roll_played_to(align, Vec::new());
+        let marks = clicks.iter().map(|c| c + align).collect();
+        let (rig, start, heard) = roll_played_to(align, marks);
+        assert_eq!(heard, clicks, "the input moves no click");
+        let fpb = rig.fpb();
+        assert_eq!((rig.anchor() - (start - align)).rem_euclid(rig.master()), 0, "loop frame 0 on the pass's downbeat");
+        let pcm = rig.pcm(0);
+        let offsets: Vec<Frame> = (0..pcm.len() as Frame)
+            .filter(|&k| pcm[k as usize] > 0.5)
+            .map(|k| k - (k + fpb / 2).div_euclid(fpb) * fpb)
+            .collect();
+        println!("align {align}: each mark's offset from its bar line in the approved pass: {offsets:?}");
+        assert_eq!(offsets.len(), BARS_137 as usize, "one mark per bar");
+        assert!(offsets.iter().all(|o| o.abs() <= 1), "align {align}: the marks sit off the loop's bar lines: {offsets:?}");
+    }
 }

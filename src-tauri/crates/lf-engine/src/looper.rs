@@ -1316,6 +1316,12 @@ impl Looper {
         rec.start = rec.end;
         rec.end = Some(rec.start.unwrap() + frames);
         rec.downbeat = rec.downbeat.map(|d| d + frames);
+        if let Some(downbeat) = rec.downbeat {
+            // A first take's pass is whole rounded bars, the tempo grid's bar the exact `60 * sr / bpm`
+            // beats: the click follows the roll as it follows a commit, re-anchored on the new pass's
+            // downbeat, so no pass starts off the click (a later roll is the master, on its grid already).
+            cx.clock.start_master(downbeat, frames, frames / self.fpb(cx), cx.now);
+        }
         let t = &mut self.lanes[i];
         t.audible = t.logical();
         t.written = 0;
