@@ -388,8 +388,9 @@ function drawPlayhead(lane: Lane, state: TrackState, waiting: boolean): void {
 
   if (state === 'RECORDING' && waiting) {
     // Armed for the downbeat: an amber (--dub, the lane's ARMED --sc) head rides the master phase in
-    // sync with the other lanes. Count-in / AUTO LISTEN have no master yet → no head at all.
-    if (looper.masterFramesValue() > 0) {
+    // sync with the other lanes. A count-in (a first take's, or a later take's from stopped loops, which
+    // restart from the top on its downbeat) and AUTO LISTEN have no phase to ride → no head at all.
+    if (looper.masterFramesValue() > 0 && !looper.countingValue()) {
       x = looper.phaseValue() * dw;
       color = lane.colors.overdubbing;
     }

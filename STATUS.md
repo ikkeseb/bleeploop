@@ -63,6 +63,9 @@ it.
 - The click: silent when idle, stops with STOP ALL, and the count-in still clicks with CLICK off.
 - A later track starts at master phase with no seam; reverse's flip adds no step (machine:
   `tests/seam_continuity.rs`), but does its turn of direction click?
+- A later take from stopped loops: REC on an empty track with every loop stopped clicks one bar of
+  count-in, then every track starts from the top on the "1" and the take records from there; a press
+  that cancels the count leaves the loops stopped and silent (machine: `tests/later_arm.rs`).
 - Multiply: over a 1-bar loop, FIXED 4 on another lane grows the loop to 4 bars with no seam. FIXED
   off: a take stopped ~1.6 loops in grows to two loops, ~1.3 keeps one.
 - TRIM: halve an 8-bar lane while it plays (its first 4 bars from the next loop start); ↶ UNDO brings

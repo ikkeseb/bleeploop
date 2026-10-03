@@ -158,6 +158,9 @@ const mutes = Array.from({ length: ENGINE_LANES }, () => createSignal(false));
 /** DUB FEEDBACK per lane, 0..1 (1: an overdub sums, as ever; 0: it replaces what it passes over). */
 const dubFeedbacks = Array.from({ length: ENGINE_LANES }, () => createSignal(1));
 const fxVersions = Array.from({ length: ENGINE_LANES }, () => createSignal(0));
+/** Per lane: it waits behind a count-in the engine runs (the reducer's, set as the events arrive:
+ * `applyEvent`'s `Beat`, `applyLane`, `endCount`). */
+const counted = Array.from({ length: ENGINE_LANES }, () => createSignal(false));
 const fx: FxState[][] = Array.from({ length: ENGINE_LANES }, defaultFx);
 const [loopEndStop, setLoopEndStopSignal] = createSignal(false);
 const [fixedLength, setFixedLengthSignal] = createSignal(false);
@@ -274,6 +277,9 @@ const plain = {
   waiting: Array.from({ length: ENGINE_LANES }, () => false),
   muted: Array.from({ length: ENGINE_LANES }, () => false),
   retakePass: Array.from({ length: ENGINE_LANES }, () => 0),
+  /** A count-in runs: from its first beat as it ARRIVES (one output latency before its numeral is
+   * shown) until the lane behind it leaves its waiting state (`endCount`). */
+  counting: false,
   /** The master boundary a later take started on (its record head counts from here). */
   takeStart: Array.from({ length: ENGINE_LANES }, () => 0),
   /** The frames the lane's record head sweeps: the loop, or a multiply window past it; 0 for a free
@@ -344,6 +350,19 @@ function heardAtMs(frame: number): number {
 /** The longest a beat waits to be shown: a stale anchor must not park it. */
 const MAX_BEAT_WAIT_MS = 1000;
 const beatTimers = new Set<ReturnType<typeof setTimeout>>();
+/** Bumped when a lane leaves its waiting state (`endCount`): a beat of the count it waited behind, still
+ * to be shown, writes no numeral (the next count's may already be up). */
+let countGen = 0;
+
+/** Lane `lane` left its waiting state (its take began, or the arm was cancelled): the count it waited
+ * behind is over, so the numeral reads 0 until the next count's first beat is heard, whatever beat is
+ * still to be shown. */
+function endCount(lane: number): void {
+  countGen++;
+  plain.counting = false;
+  counted[lane][1](false);
+  setCountLeft(0);
+}
 
 /** Run `show` when device frame `frame` is heard (the beat LED and the count-in numeral, as the playhead
  * is drawn): a beat arrives on the feed as the engine renders it, one output latency early. A few writes
@@ -430,6 +449,10 @@ function applyLane(lane: number, frame: number, info: LaneInfo): void {
     plain.span[lane] = 0;
   }
   if (capturing(prev) && !capturing(next)) plain.revision[lane]++;
+  // The press's count beat precedes the lane's own event on the feed, so a lane that starts waiting
+  // while a count runs is behind it; one that was waiting already is marked by the beat (`applyEvent`).
+  if (plain.waiting[lane] && !waiting) endCount(lane);
+  else if (!plain.waiting[lane] && waiting && plain.counting) counted[lane][1](true);
   plain.clearing[lane] = false;
   plain.state[lane] = next;
   plain.waiting[lane] = waiting;
@@ -450,9 +473,19 @@ function applyEvent(ev: EngineEvent): void {
       break;
     case 'Beat': {
       const { beatInBar, countLeft: left } = ev;
+      // A count runs from the frame its beat arrives, and every waiting lane is behind it; only the
+      // numeral waits to be heard.
+      if (left > 0) {
+        plain.counting = true;
+        for (let i = 0; i < ENGINE_LANES; i++) if (plain.waiting[i]) counted[i][1](true);
+      }
+      // A count's end with no lane waiting behind it (a reset frame replays the lanes first, the drained
+      // beats after them) is over here: no lane is left to end it (`endCount`).
+      else if (plain.counting && !plain.waiting.some(Boolean)) plain.counting = false;
+      const gen = countGen;
       whenHeard(ev.frame, () => {
         setBeat(beatInBar % 4);
-        setCountLeft(left);
+        if (gen === countGen) setCountLeft(left);
       });
       break;
     }
@@ -600,6 +633,8 @@ function applyFrameNow(f: FeedFrame): void {
     plain.clearing.fill(false);
     for (const timer of beatTimers) clearTimeout(timer);
     beatTimers.clear();
+    plain.counting = false;
+    for (const [, setCounted] of counted) setCounted(false);
     setCountLeft(0);
   }
   // The device and its clock first: the anchor is read after the frame's events, so a take the events
@@ -901,6 +936,8 @@ export const engineLooper = {
   selectTrack: (i: number): void => sendEngine({ SelectTrack: clampLane(i) }),
   track: (i: number): Accessor<TrackView> => lanes[i][0],
   trackInfo: (i: number): TrackView => lanes[i][0](),
+  /** Lane `i` waits behind a count-in the engine runs (reactive; the draw loop reads `countingValue`). */
+  trackCounted: (i: number): boolean => counted[i][0](),
   masterLengthFrames: masterFrames,
   /** MIC, reached here only by the native probes (the player sets a slot to Off and goes live): the
    * device input dry through a slot without a plugin (`toggleEngineInput`). */
@@ -913,6 +950,8 @@ export const engineLooper = {
   stateOf: (i: number): TrackState => plain.state[i] ?? 'EMPTY',
   mutedOf: (i: number): boolean => plain.muted[i] ?? false,
   waitingOf: (i: number): boolean => plain.waiting[i] ?? false,
+  /** A count-in runs (from its first beat's arrival), for the draw loop: no signal read. */
+  countingValue: (): boolean => plain.counting,
   recHeadFrac,
   recSpanFrames,
   masterFramesValue: (): number => plain.master,

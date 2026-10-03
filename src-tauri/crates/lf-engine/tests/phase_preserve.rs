@@ -167,11 +167,13 @@ fn g_later_takes_and_resumes_join_the_live_phase_idle_play_restarts_the_top() {
 #[test]
 fn play_beside_an_armed_lane_joins_and_idle_play_beats_the_master_grid() {
     let (mut rig, _, master) = committed_take(120, 48000, 2, 0.05);
-    rig.press(Command::PlayStop(0));
     rig.advance(master / 3);
-    rig.press(Command::RecDub(1)); // arms on the idle grid's next boundary
-    let anchor = rig.anchor();
+    rig.press(Command::RecDub(1)); // beside the playing loop: arms on its next boundary, with no count-in
     rig.press(Command::PlayStop(0));
+    let anchor = rig.anchor();
+    assert!(rig.state(0) == LaneState::Stopped && rig.lane(1).armed);
+    rig.press(Command::PlayStop(0));
+    assert_eq!(rig.state(0), LaneState::Playing);
     assert_eq!(rig.anchor(), anchor, "a PLAY while a lane is armed never moves its grid");
     rig.press(Command::Stop(1));
     rig.press(Command::PlayStop(0));

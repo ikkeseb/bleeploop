@@ -35,7 +35,8 @@ The installed app tells you when a newer version is out and updates itself from 
   record count-in and fixed-length record. The metronome is phase-locked to the loop grid, so the
   click and the loops cannot drift apart.
 - AUTO REC arms the first track and starts its take when you start playing, instead of the count-in.
-  Later tracks start on the loop grid either way.
+  Later tracks start on the loop grid either way; a take recorded with the loops stopped gets the
+  count-in too and starts every track from the top.
 - RETAKE keeps recording round the loop until you stop and keeps the last complete pass (the first
   track needs FIXED).
 - END STOP makes STOP wait for the loop end; a second STOP press stops at once. FADE ends a song

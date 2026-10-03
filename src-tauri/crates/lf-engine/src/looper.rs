@@ -169,6 +169,9 @@ struct Recorder {
     stop_playback: bool,
     /// A first take's counted downbeat: the grid the master is phase-locked to.
     downbeat: Option<Frame>,
+    /// A later take counted in on an idle transport: its count's downbeat, where the loops restart from
+    /// the top (`restart_from_top`). `None` once they have, and for every other take.
+    restart: Option<Frame>,
     roll: Option<Roll>,
     /// RETAKE: a stop in the grace ended the roll to let the pass in flight finish, while the last
     /// complete clean pass still sits in the free buffer (a punch-out before the edge commits it).
@@ -201,6 +204,7 @@ impl Recorder {
             align,
             stop_playback: false,
             downbeat: None,
+            restart: None,
             roll: None,
             finishing_kept: false,
             damaged: false,
@@ -609,7 +613,10 @@ impl Looper {
             return Applied::Done;
         }
         if !self.capturing(i) {
-            let wait = self.wait_for(Some(i), true);
+            // A take counted in from an idle transport restarts every loop on its downbeat, where nothing
+            // may wait: it waits for every block job here, and counts from the frame the last is done.
+            let counted = self.lanes[i].state == LaneState::Empty && self.idle();
+            let wait = self.wait_for(if counted { None } else { Some(i) }, true);
             if wait != Applied::Done {
                 return wait;
             }
@@ -639,6 +646,11 @@ impl Looper {
             return Applied::Done;
         }
         if self.lanes[i].state == LaneState::Stopped {
+            // During a later take's count-in the lanes start on its downbeat anyway, and a join now would
+            // be cut by the re-anchor there: the press is dropped.
+            if self.restart_pending() {
+                return Applied::Done;
+            }
             // Only a resume waits: playback would start reading where a job has not been yet.
             let wait = self.wait_for(Some(i), false);
             if wait != Applied::Done {
@@ -730,7 +742,8 @@ impl Looper {
     /// built in the spare buffer by a block job in heard order from loop position 0, so it stays ahead of
     /// the reader of either orientation, and a PLAYING lane hears it from the next loop boundary, where an
     /// undo or a reverse swaps in. Judged when pressed: refused with a reason on a lane that captures, has
-    /// nothing to keep or is stopping at the loop end; it waits for the lane's jobs (a multiply's
+    /// nothing to keep or is stopping at the loop end, and while a later take's count-in runs (no block
+    /// job may start before its downbeat: `restart_from_top`); it waits for the lane's jobs (a multiply's
     /// extension, a COPY into it), and for a swap still due at the boundary when the spare it writes is
     /// the buffer playing until then (an UNDO, or a TRIM, pressed in this loop): applied on the boundary,
     /// it is heard from there, so a second TRIM before the boundary is heard there instead of the first,
@@ -754,6 +767,9 @@ impl Looper {
         if master % fpb != 0 || bars < 1 || bars >= master / fpb {
             return refuse(cx, Refusal::NoTrim);
         }
+        if self.restart_pending() {
+            return refuse(cx, Refusal::OtherRecording);
+        }
         let wait = self.wait_for(Some(i), false);
         if wait != Applied::Done {
             return wait;
@@ -774,7 +790,9 @@ impl Looper {
 
     pub fn copy(&mut self, cx: &mut Cx, i: usize) -> Applied {
         let src = self.lanes[i];
-        if !src.committed() {
+        // During a later take's count-in no block job may start: the loops restart on its downbeat with
+        // no wait (`restart_from_top`).
+        if !src.committed() || self.restart_pending() {
             return Applied::Done;
         }
         let wait = self.wait_for(Some(i), false);
@@ -823,6 +841,10 @@ impl Looper {
     }
 
     pub fn play_all(&mut self, cx: &mut Cx) -> Applied {
+        // Dropped during a later take's count-in, as a lane's PLAY is (`play_stop`).
+        if self.restart_pending() {
+            return Applied::Done;
+        }
         let wait = self.wait_for(None, false);
         if wait != Applied::Done {
             return wait;
@@ -1008,6 +1030,8 @@ impl Looper {
                     refuse(cx, Refusal::NoCopy);
                 } else if self.lanes.iter().all(|t| t.state != LaneState::Empty) {
                     refuse(cx, Refusal::NoFreeLane);
+                } else if self.restart_pending() {
+                    refuse(cx, Refusal::OtherRecording);
                 } else {
                     return self.copy(cx, i);
                 }
@@ -1066,6 +1090,7 @@ impl Looper {
         if self.rec.is_some() {
             return;
         }
+        let idle = self.idle();
         let t = &mut self.lanes[i];
         t.written = 0;
         t.armed = false;
@@ -1087,6 +1112,16 @@ impl Looper {
             let downbeat = Grid::tempo(cx.now, 0, cx.clock.bpm(), self.sample_rate).beat_frame(COUNT_IN_BEATS);
             t.armed = true;
             rec.downbeat = Some(downbeat);
+            rec.start = Some(downbeat + rec.align);
+        } else if idle && seam.is_none() {
+            // A later take on an idle transport starts as the first take did: one bar of count-in from
+            // the press, and on its downbeat every stopped loop restarts from the top with the grid
+            // (`restart_from_top`), the take recording from there. The anchor stays until then, so a
+            // cancel leaves the grid where it was (`release_recorder`).
+            cx.clock.start_count_in(cx.now, COUNT_IN_BEATS, cx.now);
+            let downbeat = Grid::tempo(cx.now, 0, cx.clock.bpm(), self.sample_rate).beat_frame(COUNT_IN_BEATS);
+            t.armed = true;
+            rec.restart = Some(downbeat);
             rec.start = Some(downbeat + rec.align);
         } else {
             t.armed = true;
@@ -1467,7 +1502,8 @@ impl Looper {
     // ── Stop, resume, reset ────────────────────────────────────────────────────────────────────────
 
     /// Silence the lane now and keep its loop. A capture is aborted: an uncommitted take is dropped,
-    /// an overdub layer discarded, a first-take count-in hands the pulse back to free-run.
+    /// an overdub layer discarded, a first-take count-in hands the pulse back to free-run and a later
+    /// take's to the master grid (`release_recorder`).
     fn stop(&mut self, cx: &mut Cx, i: usize) {
         let t = self.lanes[i];
         if t.state == LaneState::Empty {
@@ -1510,10 +1546,19 @@ impl Looper {
         }
     }
 
-    /// An idle transport (a master, nothing playing or recording) restarts from the top: the grid
-    /// re-anchors at the press and the pulse with it.
+    /// An idle transport: a master, nothing playing or recording.
+    fn idle(&self) -> bool {
+        self.master > 0 && self.rec.is_none() && self.lanes.iter().all(|t| t.state != LaneState::Playing)
+    }
+
+    /// A later take's count-in runs: its downbeat, where the loops restart, lies ahead.
+    fn restart_pending(&self) -> bool {
+        self.rec.is_some_and(|r| r.restart.is_some())
+    }
+
+    /// An idle transport restarts from the top: the grid re-anchors at the press and the pulse with it.
     fn restart_if_idle(&mut self, cx: &mut Cx) -> Option<Frame> {
-        if self.master == 0 || self.rec.is_some() || self.lanes.iter().any(|t| t.state == LaneState::Playing) {
+        if !self.idle() {
             return None;
         }
         self.anchor = cx.now;
@@ -1521,6 +1566,35 @@ impl Looper {
         let bars = self.master / self.fpb(cx);
         cx.clock.start_master(cx.now, self.master, bars.max(1), cx.now);
         Some(cx.now)
+    }
+
+    /// The downbeat of a later take's count-in (`start_recording`): the transport restarts from the top
+    /// there, as an idle PLAY ALL does at its press. The grid re-anchors on `downbeat`, the pulse leaves
+    /// the count's tempo grid for the master's, and every STOPPED lane plays from loop position 0; from
+    /// here the take is an ordinary later take whose boundary is the new anchor. No block job runs: the
+    /// press waited for them all (`rec_dub`), a commit, a multiply and an overdub need the recorder the
+    /// count holds, and COPY and TRIM are refused meanwhile, so a resume here reads nothing a job has yet
+    /// to write, a reversed lane's included. Delivered late (the device frame jumped over the downbeat),
+    /// the grid still anchors on `downbeat`, and the count beats the jump skipped fire first, late and as
+    /// one click (the clock's rule): the count stays complete, and no beat of its tempo grid past it is
+    /// ever fired.
+    fn restart_from_top(&mut self, cx: &mut Cx, downbeat: Frame) {
+        while cx.clock.counting() {
+            let Some(beat) = cx.clock.fire_due(cx.now, self.transport_until()) else { break };
+            cx.feed.push(Event::Beat { frame: cx.now, beat_in_bar: beat.beat_in_bar, count_left: beat.count_left, clicked: beat.clicked });
+        }
+        self.anchor = downbeat;
+        self.origin = downbeat;
+        let bars = self.master / self.fpb(cx);
+        cx.clock.start_master(downbeat, self.master, bars.max(1), cx.now);
+        for i in 0..TRACK_COUNT {
+            if self.lanes[i].state == LaneState::Stopped {
+                self.resume(cx, i, Some(Some(downbeat)));
+            }
+        }
+        if let Some(rec) = self.rec.as_mut() {
+            rec.restart = None;
+        }
     }
 
     /// Resume a STOPPED lane: from the top on an idle transport, else joining the live phase.
@@ -1541,15 +1615,19 @@ impl Looper {
         true
     }
 
-    /// Release the single recorder slot if lane `i` owns it; a first take gives the tempo back.
+    /// Release the single recorder slot if lane `i` owns it; a first take gives the tempo back. A later
+    /// take's count-in cancelled before its downbeat gives the pulse back to the master grid, on the
+    /// anchor that never moved, so no count beat fires after the cancel; any other later take never took
+    /// the pulse, and its release leaves it alone.
     fn release_recorder(&mut self, cx: &mut Cx, i: usize) {
-        if self.rec.is_none_or(|r| r.lane != i) {
-            return;
-        }
+        let Some(rec) = self.rec.filter(|r| r.lane == i) else { return };
         self.rec = None;
         self.lanes[i].auto_armed = false;
         if self.master == 0 {
             cx.clock.set_locked(false);
+        } else if rec.restart.is_some() {
+            let bars = self.master / self.fpb(cx);
+            cx.clock.start_master(self.anchor, self.master, bars.max(1), cx.now);
         }
     }
 
@@ -1569,11 +1647,12 @@ impl Looper {
 
     // ── Time ───────────────────────────────────────────────────────────────────────────────────────
 
-    /// The earliest frame something is scheduled for (a window edge, a loop-end stop, a boundary swap,
-    /// a job completing); the caller skips what is not after the frame it renders.
+    /// The earliest frame something is scheduled for (a window edge, a counted-in later take's downbeat,
+    /// a loop-end stop, a boundary swap, a job completing); the caller skips what is not after the frame
+    /// it renders.
     pub fn next_event(&self) -> Option<Frame> {
         let lanes = self.lanes.iter().flat_map(|t| [t.stop_at, t.switch_at]).flatten();
-        let rec = self.rec.iter().flat_map(|r| [r.start.filter(|_| self.lanes[r.lane].armed), r.end]).flatten();
+        let rec = self.rec.iter().flat_map(|r| [r.restart, r.start.filter(|_| self.lanes[r.lane].armed), r.end]).flatten();
         let jobs = self.jobs.iter().flatten().map(Job::done_frame);
         lanes.chain(rec).chain(jobs).min()
     }
@@ -1596,6 +1675,11 @@ impl Looper {
                 self.jobs[k] = None;
                 self.complete_job(cx, job);
             }
+        }
+        // A later take's counted downbeat: the loops restart before its window opens (on this same frame
+        // with no alignment).
+        if let Some(downbeat) = self.rec.and_then(|r| r.restart).filter(|&d| d <= now) {
+            self.restart_from_top(cx, downbeat);
         }
         // A commit can hand the recorder on at the very same frame: loop until nothing is due.
         for _ in 0..4 {

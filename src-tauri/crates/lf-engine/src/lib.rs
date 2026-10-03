@@ -72,7 +72,9 @@
 //!   count, never to a block start. A UI gesture lands at the next block start (jitter: IPC plus one
 //!   block, inside the quarter-beat free-stop grace); a pedal carries its press frame. No audio FIFO.
 //! - **Decided while porting** (each test file's header names what it changes): the count-in and an
-//!   idle PLAY start on the press frame, with no scheduling lead; undo and reverse on a playing lane
+//!   idle PLAY start on the press frame, with no scheduling lead; a later take armed on an idle transport
+//!   counts in as the first did, restarts every loop from the top on the count's downbeat, and refuses
+//!   COPY and TRIM meanwhile; undo and reverse on a playing lane
 //!   switch on the next loop boundary; STOP on an overdubbing lane discards the whole layer; an input gap
 //!   damages only the capture windows (RETAKE passes) it overlaps, and resets AUTO's listening history;
 //!   a jump in the device frame drops the beats it skipped, and count-in beats fire late as one click.
@@ -126,11 +128,12 @@
 //! commands landing mid-block. The Stage 3 ports' references and tolerance classes: [`dsp`].
 //!
 //! cargo-mutants runs on [`grid`] and [`looper`] whenever either changes (the planted-bug rule of
-//! `verify/README.md`, automated; no scheduled workflow). Six survivors are equivalent mutants, named
+//! `verify/README.md`, automated; no scheduled workflow). Seven survivors are equivalent mutants, named
 //! here so a rerun can tell them from new ones: the keep-last `written` and the commit's `raw` minimum
 //! (the committed length does not move), an empty fill job at `lo == master`, a restore offset at
-//! exactly the span's end, `plan_later_stop`'s bar clamp (the window end bounds it), and `pair`'s
-//! ordering (guarded by `assert_ne`).
+//! exactly the span's end, `plan_later_stop`'s bar clamp (the window end bounds it), `pair`'s
+//! ordering (guarded by `assert_ne`), and `idle`'s `master > 0` as `>=` (with no master no lane is
+//! STOPPED, and `start_recording` tests `master == 0` first).
 //!
 //! # Open threads
 //!
