@@ -262,6 +262,41 @@ fn the_punch_out_redraws_the_peaks_and_a_snapshot_after_it_holds_the_faded_loop(
 }
 
 #[test]
+fn a_punch_out_across_the_loop_point_redraws_the_peaks_on_both_sides() {
+    let n = ramp(48000);
+    let mut rig = Rig::new();
+    rig.set(Command::SetBpm(200.0));
+    rig.set_level(0.0);
+    rig.record_first_take(0, 1, 240); // a silent loop
+    rig.idle();
+    let master = rig.master();
+    let buf = rig.engine.looper().overview().lane(0).buf;
+    // The layer ends 100 positions into the loop: its punch-out ramp runs from the last bin into bin 0.
+    let end = rig.next_boundary() + 100;
+    let start = end - 3000;
+    rig.set_level(0.5);
+    rig.send_at(start, Command::RecDub(0));
+    rig.send_at(end, Command::RecDub(0));
+    rig.advance_to(end);
+    let overview = rig.engine.looper().overview().clone();
+    overview.take_dirty(buf, |_| {});
+    assert_eq!(overview.bin(buf, 0), (0.0, 0.5), "the layer before its punch-out");
+    rig.advance(1);
+    let mut dirty = Vec::new();
+    overview.take_dirty(buf, |bin| dirty.push(bin));
+    dirty.sort();
+    let last = (master as usize - 1) / PEAK_FRAMES;
+    assert!((end - n - rig.anchor()).rem_euclid(master) as usize / PEAK_FRAMES == last, "the ramp starts in the last bin");
+    assert_eq!(dirty, [0, last], "the punch-out marks the bins it rewrote on both sides of the loop point");
+    let pcm = rig.pcm(0);
+    for (bin, frames) in pcm.chunks(PEAK_FRAMES).enumerate() {
+        let want = frames.iter().fold((0.0f32, 0.0f32), |(lo, hi), &x| (lo.min(x), hi.max(x)));
+        assert_eq!(overview.bin(buf, bin), want, "bin {bin}");
+    }
+    assert!(overview.bin(buf, 0).1 < 0.25, "the faded tail's top past the loop point: {:?}", overview.bin(buf, 0));
+}
+
+#[test]
 fn a_snapshot_spanning_a_punch_out_says_so_and_one_after_it_holds_the_faded_loop() {
     // The snapshot pins the loop while it plays; a layer begins and punches out while it copies. (While a
     // lane overdubs a snapshot pins its loop before the layer, and it pins the live loop again only once
