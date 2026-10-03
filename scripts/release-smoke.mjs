@@ -17,7 +17,21 @@
 //   take         with CLICK on, FIXED 1 bar and slot 1 set to Off on input `--channel=` (0-based, default
 //                1 = input 2) and live, as a user takes the input dry in the slot header, a press on
 //                lane 1's record core takes the lane armed → rec → play, and its waveform canvas is not
-//                flat (lane 3, empty, is the control)
+//                flat (lane 3, empty, is the control). A flat input take fails the run when this
+//                release must prove the input path again (D26, scripts/release-input-rule.mjs), judged
+//                against the last release: the nearest `v*` tag that is not this version's own
+//                (package.json), so a rerun on a commit that carries this version's tag, or after
+//                that tag was moved, is not compared with itself (a second tag for the same release
+//                under another name is not recognised); before the version bump that is the release
+//                before the last one. It must when there is no such tag, when git gives no answer, when the tree is
+//                not clean (git's diff misses an untracked file: commit first), when a path under
+//                src-tauri/src/engine_io/ or src-tauri/src/host/, audio_output.rs or asio_startup.rs
+//                changed (a moved file counts at its old path), when src-tauri/Cargo.toml differs
+//                beyond its [package] version line, or when a cpal or asio-sys entry of
+//                src-tauri/Cargo.lock differs, came or went (scripts/release-changes.mjs asks git).
+//                Otherwise the synth take stands in: lane 1 cleared, slot 1 set to the Organ, the PC
+//                key A held from before the record press until the lane plays, and the same bar for
+//                the waveform. The PASS line says which take passed
 //   feed         something on screen moves with the engine: the beat LEDs, the record-level meter, the
 //                lane-1 playhead. The meter reads the device input, and before the first take the
 //                click is silent (it sounds on a count-in or while the transport runs: lf-engine
@@ -29,8 +43,10 @@
 // What it cannot see: sound. A take that is not flat proves the input reached the loop, not that it
 // sounds right or sits on the grid (the ear, and `pnpm native:engine-loopback`, judge those). The take hears
 // the click only through a cable from an output into the picked input; without one it records the
-// input's noise floor and may read flat. Nothing before the CDP attach is watched live: early page
-// errors come from the CDP replay and the release log. Plugins are not loaded.
+// input's noise floor and may read flat. A synth take proves the release build's engine records sound
+// into a loop and the UI draws it, not the input path: that is proven only on a run with the cable in.
+// Nothing before the CDP attach is watched live: early page errors come from the CDP replay and the
+// release log. Plugins are not loaded.
 //
 // How: the exe is launched with WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=<port>
 // (`--port=`, default 9333). WebView2 appends it to the arguments wry sets itself; the browser
@@ -50,8 +66,12 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
 import { appRunning, assertWindows } from './native-kill.mjs';
+import { releaseChanges } from './release-changes.mjs';
+import { inputTakeRule } from './release-input-rule.mjs';
 
 const OWNER_ID = 'com.bleeploop.app';
+/** The synth take's source and its note: a sustained voice, so a held note fills the bar (C on the PC keys). */
+const SYNTH = { id: 'organ', name: 'Organ', key: 'a' };
 const EXIT_WAIT_MS = 60_000;
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -447,27 +467,94 @@ try {
     await sleep(3000); // the idle window: LEDs and the meter before any take
     const idle = await readSampler();
 
-    const tRec = Date.now();
-    await page.locator('.lp-lane').nth(0).locator('.lp-core').click();
-    await page.waitForFunction(() => document.querySelectorAll('.lp-lane')[0]?.getAttribute('data-state') === 'play', undefined, { timeout: 20_000 });
-    const recMs = Date.now() - tRec;
-    await goLive.click(); // input off: the loop plays on
-    await sleep(600);
-    const inkA = await laneInk(0);
-    await sleep(400);
-    const inkB = await laneInk(0);
-    await page.screenshot({ path: join(out, 'after-take.png') });
-    const seen = await readSampler();
-    const lane1 = seen.states[0];
-    const order = ['armed', 'rec', 'play'].map((s) => lane1.indexOf(s));
-    feedEvidence = { idle, seen, inkA, inkB };
-    must(order.every((k, i) => k >= 0 && (i === 0 || k > order[i - 1])), `lane 1 went ${lane1.join(' → ')}`);
-    must(inkA !== null && control !== null, 'a lane canvas could not be read');
-    must(inkA.max >= 0.15 * inkA.h && inkA.tall >= 4, `lane 1's waveform is flat: tallest column ${inkA.max}/${inkA.h} px, ${inkA.tall} columns ≥ 10 %`);
-    must(inkA.max > control.max, `lane 1 draws no more than the empty lane 3 (${inkA.max} vs ${control.max} px)`);
+    /** One take on lane 1: a press on its record core, `release` once the lane plays, then what the lane drew. */
+    const record = async (release) => {
+      const tRec = Date.now();
+      await page.locator('.lp-lane').nth(0).locator('.lp-core').click();
+      await page.waitForFunction(() => document.querySelectorAll('.lp-lane')[0]?.getAttribute('data-state') === 'play', undefined, { timeout: 20_000 });
+      const recMs = Date.now() - tRec;
+      await release();
+      await sleep(600);
+      const inkA = await laneInk(0);
+      await sleep(400);
+      const inkB = await laneInk(0);
+      await page.screenshot({ path: join(out, 'after-take.png') });
+      const seen = await readSampler();
+      const lane1 = seen.states[0];
+      const order = ['armed', 'rec', 'play'].map((s) => lane1.indexOf(s));
+      feedEvidence = { idle, seen, inkA, inkB };
+      must(order.every((k, i) => k >= 0 && (i === 0 || k > order[i - 1])), `lane 1 went ${lane1.join(' → ')}`);
+      must(inkA !== null && control !== null, 'a lane canvas could not be read');
+      return { recMs, inkA, seen, lane1 };
+    };
+    /** Why a take's waveform does not count, or null when it does. One bar for both takes. */
+    const flat = (inkA) =>
+      !(inkA.max >= 0.15 * inkA.h && inkA.tall >= 4)
+        ? `lane 1's waveform is flat: tallest column ${inkA.max}/${inkA.h} px, ${inkA.tall} columns ≥ 10 %`
+        : !(inkA.max > control.max)
+          ? `lane 1 draws no more than the empty lane 3 (${inkA.max} vs ${control.max} px)`
+          : null;
+    const waveform = (inkA) =>
+      `waveform: tallest column ${inkA.max}/${inkA.h} px, ${inkA.tall} columns ≥ 10 % of the height, ${inkA.distinct} distinct heights; empty lane 3: tallest ${control.max} px`;
+
+    const { recMs, inkA, seen, lane1 } = await record(() => goLive.click()); // input off: the loop plays on
+    const inputFlat = flat(inkA);
+    if (inputFlat === null) {
+      return [
+        `input take passed: lane 1 ${lane1.join(' → ')} in ${recMs} ms (count-in numerals ${seen.counts.join(',') || 'none'}), ${fixed}, CLICK on, slot 1 ${sourceWas} → Off on "${input}", live for the take`,
+        waveform(inkA),
+        `screenshot ${join(out, 'after-take.png')}`,
+      ];
+    }
+
+    // D26: a flat input take fails the release when it must prove the input path again.
+    const changes = releaseChanges(root);
+    const rule = inputTakeRule(changes);
+    must(
+      !rule.required,
+      `the input take is flat and this release must pass it${changes.base ? ` (compared with ${changes.base})` : ''}: ${rule.why.join('; ')}\n` +
+        `${inputFlat}\nplug the loopback cable from an output into "${input}" at a working level and run again`,
+    );
+
+    // The synth take: lane 1 cleared, slot 1 on a built-in synth, a note held across the whole take. The
+    // note is a PC key, down before the record press (a pointer held on an on-screen key could not also
+    // press the record core), so it sounds from before the downbeat wherever the downbeat falls.
+    await page.locator('button[aria-label="Track 1 clear"]').click();
+    await page.locator('button[aria-label="Track 1 clear, press again to confirm"]').click({ timeout: 3000 });
+    await page.waitForFunction(() => document.querySelectorAll('.lp-lane')[0]?.getAttribute('data-state') === 'empty', undefined, { timeout: 10_000 });
+    await source.selectOption(SYNTH.id);
+    await page.locator('button[aria-label="Activate slot 1"][aria-pressed="true"]').waitFor({ timeout: 10_000 });
+    must((await source.inputValue()) === SYNTH.id, `slot 1's source reads "${await source.inputValue()}", not ${SYNTH.id}`);
+    // The PC keys play only with the keyboard pane on screen and no field holding the focus.
+    const keysToggle = page.locator('button[aria-label="On-screen keyboard"]');
+    if ((await keysToggle.getAttribute('aria-pressed')) !== 'true') await keysToggle.click();
+    await page.locator('.kb__keys').waitFor({ state: 'visible', timeout: 5000 });
+    await page.evaluate(() => /** @type {HTMLElement | null} */ (document.activeElement)?.blur());
+    await startSampler();
+    const heldKey = page.locator('.kb__key--down');
+    let take;
+    try {
+      await page.keyboard.down(SYNTH.key);
+      await heldKey.first().waitFor({ state: 'visible', timeout: 3000 }).catch(() => must(false, `the PC key ${SYNTH.key.toUpperCase()} lit no on-screen key: the note did not reach the instrument`));
+      const note = await heldKey.first().getAttribute('data-note');
+      let held = 0;
+      take = {
+        ...(await record(async () => {
+          held = await heldKey.count();
+          await page.keyboard.up(SYNTH.key);
+        })),
+        note,
+      };
+      must(held === 1, `the held note was dropped before the lane played (${held} keys lit)`);
+    } finally {
+      await page.keyboard.up(SYNTH.key);
+    }
+    const synthFlat = flat(take.inkA);
+    must(synthFlat === null, `the synth take is flat too: the release build's engine recorded nothing from the ${SYNTH.name} (note ${take.note})\n${synthFlat}\ninput take: ${inputFlat}`);
     return [
-      `lane 1 ${lane1.join(' → ')} in ${recMs} ms (count-in numerals ${seen.counts.join(',') || 'none'}), ${fixed}, CLICK on, slot 1 ${sourceWas} → Off on "${input}", live for the take`,
-      `waveform: tallest column ${inkA.max}/${inkA.h} px, ${inkA.tall} columns ≥ 10 % of the height, ${inkA.distinct} distinct heights; empty lane 3: tallest ${control.max} px`,
+      `synth take passed (${SYNTH.name}, note ${take.note} held on the PC key ${SYNTH.key.toUpperCase()}): lane 1 ${take.lane1.join(' → ')} in ${take.recMs} ms (count-in numerals ${take.seen.counts.join(',') || 'none'}), ${fixed}, CLICK on`,
+      `the input take read flat on "${input}" (${inputFlat}); not required: a clean tree with no device-side change against ${changes.base}, so the input path stands as last proven with the cable, at or before that release`,
+      waveform(take.inkA),
       `screenshot ${join(out, 'after-take.png')}`,
     ];
   }));
