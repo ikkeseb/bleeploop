@@ -2,7 +2,7 @@ import { activeSlot, slotOff, slotPlugins } from '../ui/state/instrument';
 import { liveInPlay } from '../ui/state/native-io';
 import { sendEngine, type EngineAction, type InputSendId } from '../platform';
 import { pressGoLive } from '../ui/instrument/live';
-import { toggleStage } from '../ui/stage/stage-store';
+import { nextStageView, toggleStage } from '../ui/stage/stage-store';
 import { clock, looper } from '../ui/state/audio';
 import { engineFade, engineInputSends } from '../ui/state/engine-store';
 import { CONFIRM_WINDOW_MS } from '../ui/looper/shared';
@@ -31,7 +31,7 @@ import {
  * (`transport-keys.ts`) and MIDI learn (`midi-actions.ts`) dispatch through it. Each row runs the path
  * its on-screen control runs: the lane core, ▶/■, ↶ UNDO, CLR, MUTE, ↺ REV, ⧉ COPY and ✂ TRIM (halve:
  * the first half); the command bar's ▶/■ ALL, FADE, TAP, CLICK, END STOP, FIXED, RETAKE, AUTO REC and IN
- * FX's three sends; the slot's GO LIVE and the stage view's cap.
+ * FX's three sends; the slot's GO LIVE, the stage view's cap and its view switch.
  *
  * A lane action (`LANE`) acts on a `Target`: the SELECTED track, or a named one. A press on a named
  * track leaves the selection alone, except REC/DUB, which selects its track so the transport keys
@@ -53,6 +53,7 @@ type GlobalActionId =
   | 'fadeAll'
   | 'goLive'
   | 'stageView'
+  | 'stageNextView'
   | 'tapTempo'
   | 'clickToggle'
   | 'endStopToggle'
@@ -85,6 +86,7 @@ export const ACTION_LABELS: Readonly<Record<ActionId, string>> = {
   fadeAll: 'Fade out all',
   goLive: 'Go live',
   stageView: 'Stage view',
+  stageNextView: 'Stage view: next look',
   tapTempo: 'Tap tempo',
   clickToggle: 'Click on / off',
   endStopToggle: 'End stop on / off',
@@ -178,6 +180,8 @@ const GLOBAL: Readonly<Record<GlobalActionId, () => void>> = {
   fadeAll: gated(fadeGate, () => engineFade.fadeAll()),
   goLive: () => void pressGoLive(goLiveSlot()),
   stageView: toggleStage,
+  // Steps the stage view's look; does nothing while that view is closed (stage-store.ts).
+  stageNextView: nextStageView,
   tapTempo: gated(tapGate, () => clock.tap()),
   clickToggle: () => clock.setMetronome(!clock.metronomeOn()),
   endStopToggle: () => looper.setLoopEndStopEnabled(!looper.loopEndStopEnabled()),
@@ -197,6 +201,10 @@ const ENGINE_GLOBAL: Readonly<Partial<Record<GlobalActionId, EngineAction>>> = {
   stopAll: 'StopAll',
   fadeAll: 'FadeAll',
 };
+
+/** The stage view's own controls. Not looper presses: the engine never hears them, and a pending CLEAR
+ * and a lane cue outlive them. */
+const STAGE_ACTIONS: ReadonlySet<ActionId> = new Set<ActionId>(['stageView', 'stageNextView']);
 
 /** Every looper press passes here first: any press but CLEAR disarms a pending CLEAR, and every press
  * takes the last lane cue down (a newer press makes its reason stale). */
@@ -218,10 +226,11 @@ function runOnLane(id: LaneActionId, i: number, named: boolean): void {
   else refuseOnLane(i, g.reason);
 }
 
-/** Run action `id`, a lane action on `target`. Toggling the stage view is not a looper press: a pending
- * CLEAR and a lane cue outlive it (the engine never hears the toggle). */
+/** Run action `id`, a lane action on `target`. The stage view's own actions (`STAGE_ACTIONS`) are not
+ * looper presses. */
 export function runAction(id: ActionId, target: Target = null): void {
-  if (id !== 'stageView') onPress(id);
+  const press = !STAGE_ACTIONS.has(id);
+  if (press) onPress(id);
   if (isLaneAction(id)) {
     if (target === null) {
       runOnLane(id, looper.selectedTrack(), false);
@@ -236,7 +245,7 @@ export function runAction(id: ActionId, target: Target = null): void {
     sendEngine({ Action: action });
     return;
   }
-  if (id !== 'stageView') sendEngine('Press');
+  if (press) sendEngine('Press');
   GLOBAL[id]();
 }
 

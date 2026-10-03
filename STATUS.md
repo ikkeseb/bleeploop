@@ -89,6 +89,10 @@ it.
 - The six synths and the lane FX by ear.
 - A MIDI controller: unplugged mid-note gives a toast and releases the note; mod-wheel vibrato,
   pitch-bend and CC64 sustain feel.
+- The stage view's looks, Orbit and Strata (seen only on the engine fake, never over a jam): does the
+  light follow what is heard, does the count-in read from where you stand, does the learned pedal action
+  "Stage view: next look" feel right,
+  and does the app stay tight with it open on ASIO 128?
 - RETAKE and AUTO REC from a learned pedal: one press, one toggle; mid-take (and AUTO REC once a loop
   locks the tempo) the press is refused with its reason on the lane, as the greyed button is.
 

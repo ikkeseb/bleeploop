@@ -6,7 +6,8 @@
  * - FADE (the command bar, `src/ui/transport/Transport.tsx`): the pill beside ■ ALL sends the engine's
  *   `FadeAll` action; its bars stepper steps 1, 2, 4, 8 and sends `SetFadeBars`; it is disabled with its
  *   reason while nothing plays and while a lane records. Lanes the feed reports fading read FADING (the
- *   word where ENDING shows, the well's FADING OUT), in the looper and in the stage view; the pill reads
+ *   word where ENDING shows, the well's FADING OUT) in the looper, and in the stage view by their chips'
+ *   names and its message line; the pill reads
  *   FADING and a press stops the fade; an engine refusal (`Fading`) lands on its lane. A reset frame's
  *   remembered bars are adopted. The bars persist: across launches of one browser profile, a fresh
  *   engine gets the bars last chosen, and an engine's remembered bars win and are kept.
@@ -124,9 +125,11 @@ await probe(async ({ browser, open }) => {
   await page.evaluate(() => document.activeElement instanceof HTMLElement && document.activeElement.blur());
   await page.keyboard.press('b');
   await page.locator('.sv').waitFor();
-  const stageWords = await page.locator('.sv-word').allTextContents();
-  console.log('stage words', JSON.stringify(stageWords));
-  assert.deepEqual(stageWords.slice(0, 3), ['FADING', 'FADING', 'EMPTY'], 'the stage view reads FADING');
+  const stageChips = await page.locator('.sv-chip').evaluateAll((chips) => chips.map((c) => c.getAttribute('aria-label')));
+  const stageMsg = await page.locator('.sv-msg').textContent();
+  console.log('stage chips', JSON.stringify(stageChips), 'message', JSON.stringify(stageMsg));
+  assert.deepEqual(stageChips.slice(0, 3), ['Track 1, fading out', 'Track 2, fading out', 'Track 3, empty'], 'the stage view\'s chips say the lanes fade');
+  assert.match(stageMsg, /^[12] · FADING OUT$/, 'the stage view\'s message line reads FADING OUT');
   await page.screenshot({ path: `${outDir}/stage-fading.png` });
   await page.keyboard.press('b');
   await page.locator('.sv').waitFor({ state: 'detached' });

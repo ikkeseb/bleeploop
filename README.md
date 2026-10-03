@@ -20,7 +20,8 @@ every take lands on the grid by itself: there is no latency setting.
 - **Takes land on the beat.** The engine places every take from the driver's reported latency, and
   the click is locked to the loop grid, so the click and the loops cannot drift apart.
 - **Hands stay on the guitar.** Learn any looper control onto a MIDI footswitch. The stage view (B)
-  shows the bar, the beat and every track, large enough to read from where you stand.
+  turns the window into a visualizer of your loops, with the selected track, the bar, the beat and the
+  count-in still readable from where you stand.
 - **Nothing gets lost.** Your loops save as you play and come back when you reopen. Export a jam as
   one zip: a WAV stem per track, a mix and each plugin's settings.
 - **More than guitar.** Six built-in synths, one of them a drum kit, and a MIDI keyboard fill the
@@ -55,8 +56,11 @@ The installed app tells you when a newer version is out and updates itself from 
   Each one bypasses without a click.
 - IN FX: a tempo-synced echo, a reverb and a ring modulator on the live input, heard and recorded,
   while the dry signal and a take's timing stay untouched.
-- Stage view (B, or a learned pedal): each track's state, the bar and the beat, and the count-in,
-  large enough to read from where you stand with the guitar.
+- Stage view (B, or a learned pedal): a visualizer of the loops in two looks, switched with V. Orbit
+  wraps each track's loop into a ring around the live input; Strata scrolls five ribbons past a now
+  line. Each track's light follows its own loop's waveform and volume (not its FX or the amp sim) and
+  takes its state's colour; the selected track, the bar, the beat and the count-in stay readable from
+  where you stand with the guitar.
 - Six built-in synths, one of them a 16-voice GM drum kit.
 - Two native CLAP/VST3 plugin slots with floating plugin editors; each slot reloads its last plugin at
   launch with the settings you left it at, never armed, and an exported session carries each slot's
