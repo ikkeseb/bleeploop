@@ -4,7 +4,8 @@
 
 The app is verified by **driving it and measuring**, not by reading code or trusting a typecheck.
 Static gates first (`pnpm check`, `pnpm build`), then the runtime probe below. The engine's
-behaviour is `cargo test -p lf-engine` (`pnpm test:engine`; CI runs it on every push); the frontend's
+behaviour is `cargo test -p lf-engine` (`pnpm test:engine`; CI runs it on every push that is not
+docs-only); the frontend's
 deterministic guards and browser probes live in `verify/` (see `verify/README.md`).
 
 Git hooks are local checkout state. Before relying on the push gate, inspect the file returned by
@@ -96,7 +97,8 @@ no gesture is needed. It refuses to start while an app is running. `--<knob>=<va
 each probe's header lists its knobs), and the full log lands in `logs/native-<probe>.log`. It
 blocks until the verdict, so an agent harness should run it in the background.
 
-- **No Playwright into WebView2.** For Tauri/native verification: grep `tauri dev` stdout for
+- **No Playwright into WebView2,** `release:smoke`'s CDP attach to the release exe excepted (the table
+  above). For Tauri/native verification: grep `tauri dev` stdout for
   `[diag]`. **What reaches that stdout: only Rust `invoke('diag')`/`log::info!` lines +
   vite-forwarded `[console.error]`; plain `console.log` from WebView2 does NOT.**
 - The committed `native:*` probes (table above) runtime-gate the paths they name. For any other

@@ -1,7 +1,8 @@
 # src/ui/: frontend briefing
 
 The root `AGENTS.md` routes here: read this before any work in this subtree (`CLAUDE.md` beside it
-is a one-line adapter). UI-only edits are safe while the dev app runs.
+is a one-line adapter). UI-only edits are safe while the dev app runs,
+`state/` excepted (the root `AGENTS.md` rule).
 
 - **Type and tokens:** Geist for words, Geist Mono only for changing numeric read-outs (both vendored,
   `src/assets/fonts/`); no display or retro font. The surface language ("Instrument": matte tone steps,

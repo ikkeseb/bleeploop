@@ -34,10 +34,11 @@ The installed app tells you when a newer version is out and updates itself from 
 - 5-track looper with overdub and one-level undo, per-track reverse, mute and volume, a one-bar
   record count-in and fixed-length record. The metronome is phase-locked to the loop grid, so the
   click and the loops cannot drift apart.
-- AUTO REC arms a track and starts the take when you start playing, instead of the count-in.
+- AUTO REC arms the first track and starts its take when you start playing, instead of the count-in.
+  Later tracks start on the loop grid either way.
 - RETAKE keeps recording round the loop until you stop and keeps the last complete pass (the first
   track needs FIXED).
-- END STOP stops playing loops at the loop end; a second press stops them at once. FADE ends a song
+- END STOP makes STOP wait for the loop end; a second STOP press stops at once. FADE ends a song
   with a fade: every playing track fades out over 1, 2, 4 or 8 bars and stops on the bar line; the
   tracks keep their volumes, so PLAY ALL brings them back.
 - DUB FEEDBACK (a track's FX drawer): how much of the layers under an overdub it keeps, pass by pass,
@@ -94,7 +95,8 @@ report, so WASAPI takes can land late (about 215 ms on the developer's Focusrite
 
 1. Plug the guitar into your audio interface and start BleepLoop (the installed app, or
    `pnpm dev:asio` from source). In Audio Settings pick ASIO (and its driver, if you have more than
-   one) and the buffer size.
+   one), the buffer size and the sample rate: 44.1 kHz, 48 kHz or the device's own. On WASAPI,
+   Windows sets the rate.
 2. Load your amp-sim plugin (CLAP or VST3) into a slot, pick the slot's input and press GO LIVE. For an
    instrument with its own sound, set the other slot to Off, pick its input and GO LIVE: it plays dry.
 3. Select a track with 1–5 and press Space to record. The first take gets a one-bar count-in; come in on "1".
@@ -176,7 +178,8 @@ Live project state and open threads: [`STATUS.md`](STATUS.md).
 
 There is no JS unit-test runner. Three layers:
 
-- `cargo test -p lf-engine` (`pnpm test:engine`; CI runs it on every push) renders the engine offline:
+- `cargo test -p lf-engine` (`pnpm test:engine`; CI runs it on every push that is not docs-only)
+  renders the engine offline:
   every looper transition, the click and grid, a golden-jam port and property tests, bit-identical
   across block sizes, and the synths and FX null-tested against reference renders of the Tone code
   they replaced.
