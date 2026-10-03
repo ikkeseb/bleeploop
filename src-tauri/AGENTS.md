@@ -254,11 +254,10 @@ plugin-GUI work.
   well). The device owner logs `[engine_io] audio glitch: …` for each second a fault counter moves
   (`GlitchWatch`, `engine_io/owner.rs`); no real glitch has fired it yet.
 - Plugin-host gaps a source review found (2026-10-02; read from source, none reproduced), ranked by
-  exposure on the owner's plugins. First: a plugin that declares a sidechain or a second output bus
-  gets only bus 0 (FabFilter Pro-C 2, Pro-MB, Pro-G and Pro-DS take a sidechain; a processor that
-  reads the missing bus can crash; next check: a two-bus fixture per format, then `native:swap` with
-  one of them); a tone saved by an export or an unload before the next block has consumed an accepted
-  parameter edit loses that edit; two concurrent edits can leave a VST3's processor and controller at
+  exposure on the owner's plugins. First: VST3 omits trailing inactive aux buses (the SDK's
+  `activateBus` rule permits it) and passes short `setBusArrangements` arrays whose result is read
+  back, not checked; a tone saved by an export or an unload before the next block has consumed an
+  accepted parameter edit loses that edit; two concurrent edits can leave a VST3's processor and controller at
   different values. Then: two slots loading one VST3 DLL run its init unserialized; a failed VST3 editor
   attach drops the frame before the view; a CLAP restart can deliver a removed parameter id; a
   non-discardable VST3 module is unloaded. Lower: kReloadComponent only reactivates; a MIDI-only CLAP
@@ -268,3 +267,19 @@ plugin-GUI work.
 - A tester on WASAPI heard delay on DI monitoring (the engine build); the affected path is unknown.
   WASAPI's late takes are the accepted fallback (`docs/ARCHITECTURE.md` § Measured premise), which
   says nothing about monitoring delay.
+- After a WASAPI open the join can trim or starve within ~2.5 s, and a take that overlaps it is
+  rejected: 9 of 85 opens after ASIO had run in the process, 1 of 43 without (`docs/VERIFY.md`,
+  `native:engine`'s baseline). Traced (the join trace in `engine_io/callback.rs`): once the pipe has
+  primed, the capture side delivers one packet more than its time (about three opens in four, 0.2–1.1 s
+  in) and a render callback comes a period late without asking for more (four opens in five after ASIO,
+  one in ten without), so pulls find the ring up to two 10 ms periods over its 25 ms setpoint, just
+  under the trim line at twice the setpoint, for the ~10 s the controller takes to drain it. From there
+  a trim takes only a push and a pull swapping order on one tick, a render callback 20–30 ms late that
+  asks for two periods (the trim is judged on the fill before the pull: the ring is cut to the setpoint
+  and the pull leaves it a period short), or one more late render callback; a starve follows a trim
+  when a capture wake is late, or comes at the start when capture delivers its packets two at a time.
+  Empty plugin slots, `--mute` and a 3 s pause after the ASIO close do not remove it. Why the endpoints
+  start this way is unknown (the callbacks' timing was measured, not the device); Signal Desktop and
+  Focusrite Notifier ran throughout. By the pipe's own sizing rule (`PipeConfig::setpoint`) these pushes
+  and pulls ask for 33–43 ms. Next check: both series with the two applications closed; what to change
+  is STATUS D25.

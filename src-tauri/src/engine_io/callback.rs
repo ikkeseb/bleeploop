@@ -344,7 +344,7 @@ impl JoinInput {
     {
         promote_once();
         #[cfg(debug_assertions)]
-        trace::join_push(data.len() / self.channels);
+        trace::join_push(data.len() / self.channels, latency);
         if let Some(frames) = self.probe.observe(latency, self.rate) {
             self.run.in_latency.store(frames, Relaxed);
         }
@@ -419,6 +419,8 @@ impl Render {
     pub(crate) fn join(core: Arc<Core>, run: Arc<Run>, channels: usize, rate: u32, pipe: PullPipe) -> Render {
         let x = vec![0.0; MAX_DEVICE_BLOCK * SLOT_COUNT];
         let xs = std::array::from_fn(|_| vec![0.0; MAX_DEVICE_BLOCK]);
+        #[cfg(debug_assertions)]
+        trace::join_start();
         Render::new(core, run, channels, rate, Source::Join { pipe, x, xs, joined: false, delay: None })
     }
 
@@ -495,7 +497,7 @@ impl Render {
                 }
                 let trims = pipe.take_trims();
                 #[cfg(debug_assertions)]
-                trace::join_pull(self.run.callbacks.load(Relaxed), n, fill_before, trims > 0);
+                trace::join_pull(trace::Pull { callback: self.run.callbacks.load(Relaxed), entry, n, fill: fill_before, zeroed, trims, lost, latency, rate: self.rate, joined: *joined });
                 if trims > 0 {
                     counters.join_trims.fetch_add(trims, Relaxed);
                 }
@@ -666,13 +668,15 @@ fn dry_frames(elapsed: Duration, rate: u32, n: usize, cap: usize) -> Frame {
 }
 
 /// DEV: what the counters cannot say, for the rig probe (`probe.rs` prints it). Each run's first output
-/// callback (WASAPI: its buffer), each late wake (more than 1.5 periods after the previous) and the two
-/// callbacks after it (a late wake the device makes up, or a buffer run dry), each join trim with the fill it found, and every 1000th join output
-/// callback the frames the input pushed and the output pulled so far (their rates, against QPC).
+/// callback (WASAPI: its buffer), its first `LATE_RECORDS` late wakes (more than 1.5 periods after the
+/// previous) with the two callbacks after each (a late wake the device makes up, or a buffer run dry),
+/// each join trim and starve with the fill it found, and every 1000th join output callback the frames the
+/// input pushed and the output pulled so far (their rates, against QPC). A WASAPI run's first seconds
+/// go to a buffer of their own, every push and every pull on one clock ([`join_lines`]).
 #[cfg(debug_assertions)]
 pub(crate) mod trace {
     use std::cell::Cell;
-    use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering::Relaxed};
+    use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering::{Acquire, Relaxed, Release}};
     use std::sync::OnceLock;
     use std::time::{Duration, Instant};
 
@@ -682,6 +686,20 @@ pub(crate) mod trace {
     static IN_FRAMES: AtomicI64 = AtomicI64::new(0);
     static OUT_FRAMES: AtomicI64 = AtomicI64::new(0);
     static EPOCH: OnceLock<Instant> = OnceLock::new();
+    /// Late-wake records a run may still write: the rig's ASIO driver at 64 frames wakes 96, 15 and 81
+    /// frames apart, every period "late", and would fill the buffer before the first WASAPI run.
+    const LATE_RECORDS: i64 = 24;
+    static LATE_LEFT: AtomicI64 = AtomicI64::new(LATE_RECORDS);
+
+    /// A WASAPI run's pushes and pulls from its start, about ten seconds of 10 ms periods on both sides.
+    /// A record's first field is its tag (the run's number and the record's kind), stored last: the
+    /// probe reads while the callbacks write, and takes a record only once it is whole.
+    const JOIN_LEN: usize = 2048;
+    static JOIN: [[AtomicI64; 8]; JOIN_LEN] = [const { [const { AtomicI64::new(0) }; 8] }; JOIN_LEN];
+    static JOIN_NEXT: AtomicUsize = AtomicUsize::new(0);
+    static JOIN_RUN: AtomicI64 = AtomicI64::new(0);
+    /// The run's start, in µs on `EPOCH`.
+    static JOIN_FROM: AtomicI64 = AtomicI64::new(0);
 
     thread_local! {
         static AFTER: Cell<u8> = const { Cell::new(0) };
@@ -696,44 +714,97 @@ pub(crate) mod trace {
         }
     }
 
+    /// A push (`kind` 0) or a pull (1) of the run that plays.
+    fn put_join(kind: i64, r: [i64; 7]) {
+        let i = JOIN_NEXT.fetch_add(1, Relaxed);
+        if i < JOIN_LEN {
+            let [tag, fields @ ..] = &JOIN[i];
+            for (a, v) in fields.iter().zip(r) {
+                a.store(v, Relaxed);
+            }
+            tag.store(JOIN_RUN.load(Relaxed) * 2 + kind, Release);
+        }
+    }
+
+    /// `at` in µs on the trace's clock.
+    fn micros(at: Instant) -> i64 {
+        at.saturating_duration_since(*EPOCH.get_or_init(Instant::now)).as_micros() as i64
+    }
+
     /// An output callback of `n` frames, entered at `entry`, after `last` (the previous entry and its
     /// frames).
     pub(crate) fn output(last: Option<(Instant, usize)>, entry: Instant, n: usize, latency: Option<Duration>, rate: u32, callback: u64) {
         let (kind, elapsed, prev) = match last {
-            None => (0, -1, 0),
+            None => {
+                LATE_LEFT.store(LATE_RECORDS, Relaxed);
+                (0, -1, 0)
+            }
             Some((before, prev)) => {
                 let e = entry.saturating_duration_since(before).as_secs_f64() * rate as f64;
-                if prev > 0 && e > 1.5 * prev as f64 {
+                let kind = if prev > 0 && e > 1.5 * prev as f64 {
                     AFTER.set(2);
-                    (1, e.round() as i64, prev)
+                    1
                 } else if AFTER.get() > 0 {
                     AFTER.set(AFTER.get() - 1);
-                    (2, e.round() as i64, prev)
+                    2
                 } else {
                     return;
+                };
+                if LATE_LEFT.fetch_sub(1, Relaxed) <= 0 {
+                    return;
                 }
+                (kind, e.round() as i64, prev)
             }
         };
         let latency = latency.map_or(-1, |d| (d.as_secs_f64() * rate as f64).round() as i64);
         put([kind, callback as i64, elapsed, prev as i64, n as i64, latency]);
     }
 
-    /// A join output callback that pulled `n` frames from a ring holding `fill` (frames at the input's
-    /// rate), and whether that pull trimmed it.
-    pub(crate) fn join_pull(callback: u64, n: usize, fill: usize, trimmed: bool) {
-        let out = OUT_FRAMES.fetch_add(n as i64, Relaxed) + n as i64;
-        if trimmed {
-            put([3, callback as i64, 0, 0, n as i64, fill as i64]);
-        }
-        if callback % 1000 == 0 {
-            let ms = EPOCH.get_or_init(Instant::now).elapsed().as_millis() as i64;
-            put([4, callback as i64, ms, IN_FRAMES.load(Relaxed), out, fill as i64]);
-        }
+    /// A WASAPI run is wired (the owner thread, before either stream plays): its pushes and pulls start
+    /// the join buffer over.
+    pub(crate) fn join_start() {
+        JOIN_FROM.store(micros(Instant::now()), Relaxed);
+        JOIN_RUN.fetch_add(1, Relaxed);
+        JOIN_NEXT.store(0, Relaxed);
     }
 
-    /// A join input callback of `n` frames.
-    pub(crate) fn join_push(n: usize) {
+    /// One join output callback: `n` frames entered at `entry`, the `fill` its pull found (frames at the
+    /// input's rate, after the `lost` frames' skip), the frames it zero-filled, its trims, the playback
+    /// delay the stream reported, and whether a pull of this run has come back whole (`Source::Join`).
+    pub(crate) struct Pull {
+        pub(crate) callback: u64,
+        pub(crate) entry: Instant,
+        pub(crate) n: usize,
+        pub(crate) fill: usize,
+        pub(crate) zeroed: usize,
+        pub(crate) trims: u64,
+        pub(crate) lost: i64,
+        pub(crate) latency: Option<Duration>,
+        pub(crate) rate: u32,
+        pub(crate) joined: bool,
+    }
+
+    pub(crate) fn join_pull(p: Pull) {
+        let out = OUT_FRAMES.fetch_add(p.n as i64, Relaxed) + p.n as i64;
+        let (callback, n, fill) = (p.callback as i64, p.n as i64, p.fill as i64);
+        if p.trims > 0 {
+            put([3, callback, 0, 0, n, fill]);
+        }
+        if p.zeroed > 0 && p.joined {
+            put([5, callback, p.zeroed as i64, 0, n, fill]);
+        }
+        if p.callback % 1000 == 0 {
+            put([4, callback, micros(Instant::now()) / 1000, IN_FRAMES.load(Relaxed), out, fill]);
+        }
+        let latency = p.latency.map_or(-1, |d| (d.as_secs_f64() * p.rate as f64).round() as i64);
+        put_join(1, [micros(p.entry) - JOIN_FROM.load(Relaxed), n, fill, p.zeroed as i64, p.trims as i64, p.lost, latency]);
+    }
+
+    /// A join input callback of `n` frames, `age` after their capture.
+    pub(crate) fn join_push(n: usize, age: Option<Duration>) {
         IN_FRAMES.fetch_add(n as i64, Relaxed);
+        let age = age.map_or(-1, |d| d.as_micros() as i64);
+        put_join(0, [micros(Instant::now()) - JOIN_FROM.load(Relaxed), n as i64, age, 0, 0, 0, 0]);
     }
 
     /// The records so far, one line each.
@@ -745,8 +816,39 @@ pub(crate) mod trace {
                     0 => format!("first callback {cb}: n={c} latency={d}"),
                     1 | 2 => format!("{} callback {cb}: elapsed={a} prev={b} n={c} latency={d}", if kind == 1 { "LATE " } else { "after" }),
                     3 => format!("TRIM  callback {cb}: n={c} fill={d}"),
+                    5 => format!("STARVE callback {cb}: n={c} fill={d} zeroed={a}"),
                     _ => format!("join  callback {cb}: {a} ms, pushed {b}, pulled {c}, fill {d}"),
                 }
+            })
+            .collect()
+    }
+
+    /// The latest WASAPI run's pushes and pulls so far, in the order they were written, one line each:
+    /// the time since the run was wired (ms), then a push's frames, its age at the callback (ms) and the
+    /// frames pushed so far, or a pull's number, frames, the fill it found, the frames it zero-filled, its
+    /// trims, the frames the device played dry before it, the playback delay reported and the frames
+    /// asked for so far (a pull that primes takes none from the ring). The lines end before a record a
+    /// callback is still writing.
+    pub(crate) fn join_lines() -> Vec<String> {
+        let run = JOIN_RUN.load(Relaxed);
+        let (mut pushed, mut pulled, mut pulls) = (0, 0, 0);
+        (0..JOIN_NEXT.load(Relaxed).min(JOIN_LEN))
+            .map_while(|i| {
+                let [tag, fields @ ..] = &JOIN[i];
+                let tag = tag.load(Acquire);
+                if tag / 2 != run {
+                    return None;
+                }
+                let [t, n, a, b, c, d, e] = std::array::from_fn(|k| fields[k].load(Relaxed));
+                let ms = t as f64 / 1e3;
+                Some(if tag % 2 == 0 {
+                    pushed += n;
+                    format!("{ms:9.3} push n={n} age={:.2} pushed={pushed}", a as f64 / 1e3)
+                } else {
+                    (pulled, pulls) = (pulled + n, pulls + 1);
+                    let mark = if c > 0 { " TRIM" } else if b > 0 { " zero" } else { "" };
+                    format!("{ms:9.3} pull {pulls} n={n} fill={a} zeroed={b} trims={c} lost={d} latency={e} pulled={pulled}{mark}")
+                })
             })
             .collect()
     }

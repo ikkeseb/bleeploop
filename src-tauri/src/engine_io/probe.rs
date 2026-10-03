@@ -11,8 +11,17 @@
 //! its retry (`cpal_driver`'s `retry_on_asio`): expected, not a fault.
 //!
 //! `app.exe --probe-engine <asio|wasapi> <64|128|256|default> [--plugin <slot>=<file.vst3|.clap>]...
-//! [--seconds N] [--switches N] [--swaps N] [--in N] [--device <WASAPI name substring>] [--mute]
+//! [--seconds N] [--switches N] [--swaps N] [--cycle <asio64|asio128|asio256|wasapi>,...] [--hold S]
+//! [--pause MS] [--in N] [--device <WASAPI name substring>] [--mute]
 //! [--lag [--out N] [--no-preopen] [--split <out|in>]]`
+//!
+//! `--cycle` names the switches' round instead of the default one (every other ASIO buffer and WASAPI,
+//! then back to the start): `--cycle wasapi` on a WASAPI run closes and reopens WASAPI at every switch
+//! (an open of the device that runs is no reopen: the probe closes it first), the most WASAPI opens a
+//! minute. After every WASAPI phase the probe prints the join's pushes and pulls since that open
+//! (`callback.rs`'s trace). `--hold` is how long each switch plays before the probe looks (default 2 s);
+//! `--pause` closes the device and waits that long before every switch to WASAPI (does the endpoints'
+//! start depend on what ran just before).
 //!
 //! `--lag` runs only the lag phase instead (the Stage 1 A2 bar on the engine's own open path): a chirp
 //! leaves on output `--out` (0-based, default 1) every quarter second (WASAPI: every second) and comes
@@ -44,7 +53,7 @@ use crate::chirp_lag::{chirp, find_arrivals, median, slope, spread, CHIRP_LEN};
 use crate::audio_output::AudioBackend;
 use crate::host::engine_slot::{self, EngineSlotEvent, EngineSlotHandle, EventSink, PluginFormat};
 
-/// How long a switch or a swap plays before the probe looks again.
+/// How long a swap plays before the probe looks again, and a switch without `--hold`.
 const HOLD: Duration = Duration::from_secs(2);
 /// How long a plugin may take to come back into its slot after a switch.
 const SLOT_WAIT: Duration = Duration::from_secs(5);
@@ -101,6 +110,10 @@ struct Args {
     seconds: f64,
     switches: usize,
     swaps: usize,
+    /// `--cycle`: the switches' round, each a backend and its buffer.
+    cycle: Vec<(AudioBackend, Option<u32>)>,
+    hold: Duration,
+    pause: Option<Duration>,
     input: u32,
     device: Option<String>,
     mute: bool,
@@ -119,7 +132,8 @@ enum Split {
 
 fn parse_args(args: &[String]) -> Result<Args, String> {
     const USAGE: &str = "usage: --probe-engine <asio|wasapi> <64|128|256|default> [--plugin <slot>=<file.vst3|.clap>]... \
-        [--seconds N] [--switches N] [--swaps N] [--in N] [--device <WASAPI name substring>] [--mute] [--lag [--out N] [--no-preopen] [--split <out|in>]]";
+        [--seconds N] [--switches N] [--swaps N] [--cycle <asio64|asio128|asio256|wasapi>,...] [--hold S] [--pause MS] [--in N] [--device <WASAPI name substring>] [--mute] \
+        [--lag [--out N] [--no-preopen] [--split <out|in>]]";
     let backend = match args.first().map(String::as_str) {
         Some("asio") => AudioBackend::Asio,
         Some("wasapi") => AudioBackend::Wasapi,
@@ -140,6 +154,9 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
         seconds: 60.0,
         switches: 0,
         swaps: 0,
+        cycle: Vec::new(),
+        hold: HOLD,
+        pause: None,
         input: 0,
         device: None,
         mute: false,
@@ -165,6 +182,19 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
             "--seconds" => parsed.seconds = number(value()?)?,
             "--switches" => parsed.switches = number(value()?)? as usize,
             "--swaps" => parsed.swaps = number(value()?)? as usize,
+            "--cycle" => {
+                for item in value()?.split(',') {
+                    parsed.cycle.push(match item {
+                        "wasapi" => (AudioBackend::Wasapi, None),
+                        "asio64" => (AudioBackend::Asio, Some(64)),
+                        "asio128" => (AudioBackend::Asio, Some(128)),
+                        "asio256" => (AudioBackend::Asio, Some(256)),
+                        other => return Err(format!("--cycle {other}: expected asio64, asio128, asio256 or wasapi")),
+                    });
+                }
+            }
+            "--hold" => parsed.hold = Duration::try_from_secs_f64(number(value()?)?).map_err(|e| format!("--hold: {e}"))?,
+            "--pause" => parsed.pause = Some(Duration::try_from_secs_f64(number(value()?)? / 1e3).map_err(|e| format!("--pause: {e}"))?),
             "--in" => parsed.input = number(value()?)? as u32,
             "--device" => parsed.device = Some(value()?),
             "--mute" => parsed.mute = true,
@@ -305,6 +335,10 @@ struct Probe {
     beats: u64,
     rate: u32,
     mute: bool,
+    /// `--hold` and `--pause`, and whether `--cycle` named the round.
+    hold: Duration,
+    pause: Option<Duration>,
+    cycled: bool,
     fails: Vec<(&'static str, String)>,
 }
 
@@ -421,12 +455,12 @@ impl Probe {
         }
     }
 
-    /// The transport runs and the loop plays with its length, over `HOLD`.
-    fn expect_loop(&mut self, after: &str) {
+    /// The transport runs and the loop plays with its length, over `time`.
+    fn expect_loop(&mut self, after: &str, time: Duration) {
         let beats = self.beats;
-        self.hold(HOLD);
+        self.hold(time);
         if self.beats == beats {
-            self.fail("loop", format!("after {after}: no beat in {} s", HOLD.as_secs()));
+            self.fail("loop", format!("after {after}: no beat in {} s", time.as_secs_f64()));
         }
         let length = self.length;
         if !self.lane_is(|i| i.state == LaneState::Playing && i.length == length) {
@@ -467,6 +501,12 @@ impl Probe {
 
     fn switch(&mut self, next: &DeviceRequest) -> Result<(), String> {
         let mark = self.mark();
+        // A `--cycle` round may name the device that runs, and the owner would keep its streams: close
+        // them first. `--pause` closes before every switch to WASAPI.
+        if !next.backend.is_asio() && (self.pause.is_some() || (self.cycled && self.host.status().is_some_and(|s| s.backend == next.backend))) {
+            self.host.close()?;
+            std::thread::sleep(self.pause.unwrap_or_default());
+        }
         let began = Instant::now();
         // Forced: a switch to another rate drops the loop, which this phase then records again.
         match self.host.open(next.clone(), true) {
@@ -489,8 +529,11 @@ impl Probe {
             }
             Err(e) => self.fail("switch", format!("to {}: {e}", label(next))),
         }
-        self.expect_loop(&format!("the switch to {}", label(next)));
+        self.expect_loop(&format!("the switch to {}", label(next)), self.hold);
         self.phase(&format!("switch to {}", label(next)), &mark);
+        if !next.backend.is_asio() {
+            join_trace("switch");
+        }
         Ok(())
     }
 
@@ -501,7 +544,7 @@ impl Probe {
         self.unload_slot(k);
         self.load_slot(k, next);
         let slot = self.slots[k].slot;
-        self.expect_loop(&format!("the swap in slot {slot}"));
+        self.expect_loop(&format!("the swap in slot {slot}"), HOLD);
         self.phase(&format!("swap slot {slot}"), &mark);
     }
 
@@ -529,11 +572,18 @@ impl Probe {
             (Some(_), Some(_)) => self.fail("load", format!("soak block {}", load.text())),
             _ => self.fail("load", "no callback in the soak".to_string()),
         }
-        self.expect_loop("the soak");
+        self.expect_loop("the soak", HOLD);
+        if !start.backend.is_asio() {
+            join_trace("soak");
+        }
 
-        let cycle = devices.cycle(start, asio_available());
+        let cycle: Vec<DeviceRequest> = if a.cycle.is_empty() {
+            devices.cycle(start, asio_available())
+        } else {
+            a.cycle.iter().map(|&(backend, buffer)| devices.request(backend, buffer)).collect()
+        };
         if a.switches > 0 && cycle.len() == 1 {
-            say("no other device to switch to (no ASIO driver cached): every switch reopens the same one");
+            say("no other device to switch to (no ASIO driver cached): every switch opens the one that runs, which keeps its streams (`--cycle wasapi` reopens it)");
         }
         for i in 0..a.switches {
             self.switch(&cycle[i % cycle.len()])?;
@@ -542,6 +592,16 @@ impl Probe {
             self.swap(i % self.slots.len());
         }
         Ok(())
+    }
+}
+
+/// The latest WASAPI run's pushes and pulls from its open (`callback.rs`'s trace), one line each, under
+/// a line that says which phase they end.
+fn join_trace(after: &str) {
+    let lines = super::callback::trace::join_lines();
+    say(format!("join trace after the {after}: {} records", lines.len()));
+    for line in lines {
+        say(format!("j {line}"));
     }
 }
 
@@ -1121,7 +1181,7 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
     let devices = Devices::new(a.input, a.device.as_deref())?;
     let start = devices.request(a.backend, a.buffer);
     #[cfg(feature = "asio")]
-    if start.backend.is_asio() || a.switches > 0 {
+    if start.backend.is_asio() || (a.switches > 0 && (a.cycle.is_empty() || a.cycle.iter().any(|(backend, _)| backend.is_asio()))) {
         // A standalone DEV process: probe explicitly, with a throwaway sentinel (no app data dir here).
         let sentinel = std::env::temp_dir().join("bleeploop-engine-probe-asio");
         let report = crate::audio_output::probe_asio_startup(&sentinel, true);
@@ -1142,9 +1202,16 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
         beats: 0,
         rate: 0,
         mute: a.mute,
+        hold: a.hold,
+        pause: a.pause,
+        cycled: !a.cycle.is_empty(),
         fails: Vec::new(),
     };
     if let Err(e) = p.drive(&a, &devices, &start) {
+        // A run that stops early says what the join saw, when WASAPI was what ran.
+        if host.status().is_some_and(|s| !s.backend.is_asio()) {
+            join_trace("failed run");
+        }
         p.fail("run", e);
     }
     // The plugins leave the engine while the device still plays (crossfaded out), then it closes.
