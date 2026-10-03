@@ -3,14 +3,18 @@ name: build-exe
 # The shippable Windows build, made on a clean runner: the NSIS installer plus the bare exe, kept as a
 # run artifact. On demand (Actions tab: build only) and on a `v*` tag push; never on a plain main push
 # (a release build is ~15-20 min of Windows runner). A tag push also PUBLISHES the GitHub Release once
-# the exe and this commit's `ci` and `rust-test` are green; a red gate publishes nothing.
+# the exe and this commit's `ci` and `rust-test` are green; a red gate publishes nothing. Run by hand
+# with `smoke`, it builds the exe `pnpm release:smoke` drives instead: bare, unsigned, in the smoke's
+# own profile (`scripts/release-smoke.tauri.json`), with this job's toolchain and ASIO SDK, so the
+# release's gate needs no build on the PC.
 #
 # To release (agents, end to end): on a main whose CI is green, bump the version in package.json,
 # src-tauri/tauri.conf.json and src-tauri/Cargo.toml (and its Cargo.lock entry), commit
-# "Release prep: vX.Y.Z", push, run `pnpm release:smoke` on a local release build of that commit
-# (docs/VERIFY.md; a red run is fixed first: a flat input take's FAIL says when the loopback cable
-# must be in, and a PASS names the take that passed), then `git tag -a vX.Y.Z -F <notes>` on that
-# commit and push the tag.
+# "Release prep: vX.Y.Z", push, run `pnpm release:smoke` on a release build of main's head in the
+# smoke's profile (`gh workflow run build-exe.yml --ref main -f smoke=true`, then that run's
+# `BleepLoop-smoke-<sha>` artifact through `--exe=`: docs/VERIFY.md; a red run is fixed first: a flat
+# input take's FAIL says when the loopback cable must be in, and a PASS names the take that passed),
+# then `git tag -a vX.Y.Z -F <notes>` on that commit and push the tag.
 # The notes file is `BleepLoop vX.Y.Z`, a blank line, then one bullet per player-visible change since
 # the previous release; it becomes the release's "What's new". No line may start with `#`: git
 # strips those as comments. A failed run publishes nothing: fix, move the tag, push it again.
@@ -27,14 +31,19 @@ name: build-exe
 # The app updates itself (`src-tauri/src/update.rs`): the build signs the installer with the updater's
 # minisign key (secrets TAURI_SIGNING_PRIVATE_KEY and TAURI_SIGNING_PRIVATE_KEY_PASSWORD; the owner
 # keeps the backup), and the release carries `latest.json`, which every installed build reads from
-# `releases/latest/download/`. A draft or prerelease is never "latest". Without those secrets the build
-# fails. A new key needs a new `pubkey` in tauri.conf.json, and builds carrying the old one never take
+# `releases/latest/download/`. A draft or prerelease is never "latest". Without those secrets the
+# shippable build fails (a smoke build signs nothing). A new key needs a new `pubkey` in tauri.conf.json, and builds carrying the old one never take
 # an update signed with the new: their players install once by hand.
 
 on:
   push:
     tags: ['v*']
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      smoke:
+        description: "Build release:smoke's exe (bare, unsigned, the smoke's profile) instead of the shippable build"
+        type: boolean
+        default: false
 
 # Least privilege: only the `release` job below widens this.
 permissions:
@@ -46,15 +55,20 @@ concurrency:
 
 env:
   RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || '' }}
+  # Set on a manual run with `smoke` alone: a tag push never reads `inputs`.
+  SMOKE: ${{ github.event_name == 'workflow_dispatch' && inputs.smoke && 'yes' || '' }}
 
 jobs:
   # The push gates, rerun on this exact commit: a green run on another commit does not cover the
   # download. `ci` is `pnpm check` + the vite build + the no-ASIO `cargo check`; `rust-test` is
-  # `cargo test`. They run beside `exe`, and only the release waits for them.
+  # `cargo test`. They run beside `exe`, and only the release waits for them. A smoke build skips
+  # them: nothing is published from it, and the tag's run reruns both on the commit it ships.
   ci:
+    if: ${{ github.event_name != 'workflow_dispatch' || !inputs.smoke }}
     uses: ./.github/workflows/ci.yml
 
   rust-test:
+    if: ${{ github.event_name != 'workflow_dispatch' || !inputs.smoke }}
     uses: ./.github/workflows/rust-test.yml
 
   exe:
@@ -112,12 +126,28 @@ jobs:
 
       # `createUpdaterArtifacts` (tauri.release.conf.json) signs the installer for the app's updater with
       # the key these secrets hold; tauri.conf.json's `plugins.updater.pubkey` is its public half.
-      - run: pnpm exec tauri build --bundles nsis --features asio --config src-tauri/tauri.release.conf.json
+      - if: env.SMOKE == ''
+        run: pnpm exec tauri build --bundles nsis --features asio --config src-tauri/tauri.release.conf.json
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
+      # The smoke's exe: the command docs/VERIFY.md gives for a build on the PC. No bundle, so no
+      # updater artifact and no signing key; the release config only shapes the bundle.
+      - name: Build the smoke's exe
+        if: env.SMOKE != ''
+        run: pnpm exec tauri build --no-bundle --features asio --config scripts/release-smoke.tauri.json
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: env.SMOKE != ''
+        with:
+          name: BleepLoop-smoke-${{ github.sha }}
+          path: src-tauri/target/release/app.exe
+          if-no-files-found: error
+          retention-days: 7
+
       - name: Stage + fingerprint the release files
+        if: env.SMOKE == ''
         shell: pwsh
         run: |
           New-Item -ItemType Directory release, updater | Out-Null
@@ -132,6 +162,7 @@ jobs:
             Out-File -Append $env:GITHUB_STEP_SUMMARY
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: env.SMOKE == ''
         with:
           name: BleepLoop-asio-${{ github.sha }}
           path: |

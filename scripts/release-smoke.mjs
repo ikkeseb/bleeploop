@@ -3,6 +3,8 @@
 //
 //   pnpm exec tauri build --no-bundle --features asio --config scripts/release-smoke.tauri.json
 //   pnpm release:smoke [--exe=<path>] [--fresh]
+// For a release the exe comes from a runner instead: a manual `build-exe` run with `smoke` leaves it as
+// its `BleepLoop-smoke-<sha>` artifact, driven through `--exe=` (docs/VERIFY.md).
 //
 // What it proves, one PASS/FAIL line per check (exit 0 only when every check passes):
 //   boots        the window loads the app UI (five lanes, the command bar), with no uncaught error and
@@ -56,7 +58,7 @@
 //
 // Profiles: the exe's identifier (compiled in) picks its %LOCALAPPDATA% folder and WebView2 data. The
 // smoke build carries scripts/release-smoke.tauri.json's identifier; `--fresh` deletes that folder first.
-// A CI or `pnpm build:app` exe carries the owner's identifier (com.bleeploop.app): the run refuses it
+// A shipped or `pnpm build:app` exe carries the owner's identifier (com.bleeploop.app): the run refuses it
 // unless `--owner-profile` is passed, and `--fresh` never deletes the owner's folder. Refuses to start
 // while an `app` process runs. Stops only the app.exe it launched. Windows node only.
 
