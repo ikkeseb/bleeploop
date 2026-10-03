@@ -283,3 +283,19 @@ plugin-GUI work.
   Focusrite Notifier ran throughout. By the pipe's own sizing rule (`PipeConfig::setpoint`) these pushes
   and pulls ask for 33–43 ms. Next check: both series with the two applications closed; what to change
   is STATUS D25.
+- Briefing lines a read against the code found stale (2026-10-03), each confirmed and not yet
+  corrected. The lf-engine crate doc (`crates/lf-engine/src/lib.rs`): its dependency list names `hound`
+  and leaves out `rustfft`, `serde`, `serde_json` and `sha2`; "a pedal carries its press frame" holds
+  only for native MIDI, which is never started (every command from the WebView is unstamped,
+  `engine_io/mode.rs` `engine_send`); the heading "Beside this crate, and not built yet" stands over a
+  device side, plugin owners, a feed and a snapshot that are built. This file: § Plugin hosting says
+  editors embed into a host window, where a CLAP plugin that offers a floating window gets that first
+  (`host/clap.rs`, its "Preferred path"), and `native:smoke`'s row in `docs/VERIFY.md` says the same;
+  § ASIO tier's "resolved once per driver pick" is the cache's: every run and every preopen finds the
+  driver again by name as a new cpal device (`engine_io/cpal_driver.rs` `find_asio`). The same read
+  ran out before it had checked all of `docs/VERIFY.md`, this file and the two engine briefings. Next:
+  correct the crate doc under a `pnpm rust:check` once D23 has landed (its branch edits that doc), the
+  two lines here with it, and finish the read.
+- The release profile warns of four unused items in `app` (`Duration` in `host/vst3.rs`,
+  `promote_pro_audio` in `host/clap.rs`, `teardown` in `host/vst3.rs`, `asio_available` in
+  `audio_output.rs`); since when is unknown.
