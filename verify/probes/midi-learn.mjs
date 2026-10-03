@@ -14,8 +14,8 @@
  * slept) and clears the hint. The foot vocabulary (`src/app/actions.ts`): a learning press held 1.2 s
  * reads as momentary and fires once per tap after it, and so does one released only after the panel
  * closed or after LEARN was pressed again (that release is never the new learn's press); the line's kind
- * switch changes how it fires; tap tempo sends the tapped BPM, CLICK, END STOP and FIXED work their
- * controls, and a tap on a locked tempo is refused with a cue; bindings aimed at a named track read so in
+ * switch changes how it fires; tap tempo sends the tapped BPM, CLICK, END STOP, FIXED, RETAKE and AUTO REC
+ * work their controls, and a tap on a locked tempo is refused with a cue; bindings aimed at a named track read so in
  * the list; a latching pedal cannot HOLD; CLEAR on a named track sends the engine's CLEAR there; a
  * binding saved before targets loads as the selected track's (the engine's `Action`), and the engine's
  * refusal of it shows on its lane. On a second page, a track action sends the engine's action (`Action`
@@ -25,7 +25,9 @@
  * HOLD pedals down at once by two control numbers; a port unplugged with a HOLD pedal down releases that
  * press and no other port's, and a HOLD binding switched off, to latching, relearned or forgotten while
  * down releases its press once (its pedal's own release then runs nothing, and a latching pedal's next
- * press runs the action); an engine refusal (NO MUTE) lands on its lane.
+ * press runs the action); AUTO REC on the locked tempo and RETAKE while a lane records are refused with
+ * their cue and send only the `Press`, as their buttons are disabled; an engine refusal (NO MUTE) lands
+ * on its lane.
  * logs/midi-learn/bindings.png shows the row and a long list for the eye. It cannot see a real
  * controller, whether WebView2 keeps a port's id across a restart or replug, a real foot against the
  * learn read, or the native engine answering (lf-engine `tests/actions.rs` owns what a press does to
@@ -414,7 +416,7 @@ await probe(async ({ open }) => {
 
   // The global actions on an empty looper, each against its command-bar control.
   await scenario('globals', async () => {
-    for (const [cc, action] of [[80, 'tapTempo'], [81, 'clickToggle'], [82, 'endStopToggle'], [83, 'fixedToggle']]) {
+    for (const [cc, action] of [[80, 'tapTempo'], [81, 'clickToggle'], [82, 'endStopToggle'], [83, 'fixedToggle'], [84, 'retakeToggle'], [85, 'autoRecToggle']]) {
       await learnOn(action, null, 'a', [0xb0, cc, 127], [0xb0, cc, 0]);
     }
     const start = await mark();
@@ -424,15 +426,18 @@ await probe(async ({ open }) => {
     }
     const bpms = (await sentSince(start)).filter((c) => c.SetBpm !== undefined).map((c) => c.SetBpm);
     const toggles = {};
-    for (const [cc, name] of [[81, 'Metronome click'], [82, 'Stop playing loops at loop end'], [83, 'Fixed take length']]) {
+    const sent = {};
+    for (const [cc, name] of [[81, 'Metronome click'], [82, 'Stop playing loops at loop end'], [83, 'Fixed take length'], [84, 'Retake'], [85, 'Auto record']]) {
       const seen = [await pressedOf(name)];
+      const at = await mark();
       await tap(cc);
       seen.push(await pressedOf(name));
       await tap(cc);
       seen.push(await pressedOf(name));
       toggles[name] = seen;
+      if (cc >= 84) sent[name] = await sentSince(at);
     }
-    return { bpmSent: bpms.length > 0 && bpms.at(-1) >= 130 && bpms.at(-1) <= 165, toggles };
+    return { bpmSent: bpms.length > 0 && bpms.at(-1) >= 130 && bpms.at(-1) <= 165, toggles, sent };
   });
 
   // Two playing loops on tracks 1 and 2 with the tempo locked; bindings aimed at a named track read so in
@@ -557,6 +562,7 @@ await probe(async ({ open }) => {
       [19, 'inFxEcho', null], [20, 'inFxReverb', null], [21, 'mute', '3'], [22, 'recDub', '0'],
       [23, 'mute', ''], [24, 'reverse', ''], [25, 'copy', ''], [26, 'halveTrack', ''], [27, 'halveTrack', '2'],
       [28, 'tapTempo', null], [29, 'recDub', ''], [30, 'recDub', ''], [31, 'inFxRing', null],
+      [33, 'retakeToggle', null], [34, 'autoRecToggle', null],
     ];
     const holds = [22, 29, 30];
     for (const [cc, action, target] of bindings) {
@@ -575,14 +581,27 @@ await probe(async ({ open }) => {
     }
     await ep.evaluate(() => window.__lf.ui.closeSettings());
     const sentBy = {};
-    for (const [cc] of bindings.filter(([c]) => !holds.includes(c))) {
+    const cueAt = (i) => ep.evaluate((t) => document.querySelectorAll('.lp-lane')[t]?.querySelector('.lp-lane__wellmsg.is-cue')?.textContent.trim() ?? '', i);
+    // RETAKE (CC 33) waits for its own press below, while a lane records.
+    for (const [cc] of bindings.filter(([c]) => !holds.includes(c) && c !== 33)) {
       await ep.evaluate(() => void (window.__lf.native.sent.length = 0));
       await ep.evaluate((c) => window.__send('a', [[0xb0, c, 127], [0xb0, c, 0]]), cc);
       await ep.waitForTimeout(60);
       sentBy[cc] = await ep.evaluate(() => window.__lf.native.sent.slice());
     }
-    // The engine's refusal of the MUTE on EMPTY track 4 (CC 21), which the fake does not answer by itself.
+    // AUTO REC (CC 34, pressed last) on the locked tempo: refused on the selected lane, as its button is.
+    const refusedPress = { autoRec: { sent: sentBy[34], cue: await cueAt(0) } };
+    delete sentBy[34];
     let seq = 1;
+    // RETAKE while track 3 records: refused the same way, then track 3 is empty again.
+    const lane2 = (state) => ep.evaluate((f) => window.__lf.native.emit(f), { seq: ++seq, reset: false, events: [{ Lane: { frame: 0, lane: 2, info: info(state) } }] });
+    await lane2('Recording');
+    await ep.evaluate(() => void (window.__lf.native.sent.length = 0));
+    await ep.evaluate(() => window.__send('a', [[0xb0, 33, 127], [0xb0, 33, 0]]));
+    await ep.waitForTimeout(60);
+    refusedPress.retake = { sent: await ep.evaluate(() => window.__lf.native.sent.slice()), cue: await cueAt(0) };
+    await lane2('Empty');
+    // The engine's refusal of the MUTE on EMPTY track 4 (CC 21), which the fake does not answer by itself.
     await ep.evaluate((f) => window.__lf.native.emit(f), { seq: ++seq, reset: false, events: [{ Refused: { frame: 0, lane: 3, reason: 'NoMute' } }] });
     await ep.waitForTimeout(60);
     const cue4 = await ep.evaluate(() => document.querySelectorAll('.lp-lane')[3]?.querySelector('.lp-lane__wellmsg.is-cue')?.textContent.trim() ?? '');
@@ -665,6 +684,7 @@ await probe(async ({ open }) => {
       holdGone,
       edits,
       sent: sentBy,
+      refusedPress,
       controls: {
         click: await pressed('Metronome click'),
         endStop: await pressed('Stop playing loops at loop end'),
@@ -778,8 +798,14 @@ await probe(async ({ open }) => {
       'Metronome click': ['false', 'true', 'false'],
       'Stop playing loops at loop end': ['false', 'true', 'false'],
       'Fixed take length': ['false', 'true', 'false'],
+      Retake: ['false', 'true', 'false'],
+      'Auto record': ['false', 'true', 'false'],
     },
-  }, 'tap tempo sends the tapped BPM, CLICK / END STOP / FIXED toggle their controls'));
+    sent: {
+      Retake: ['Press', { SetRetake: true }, 'Press', { SetRetake: false }],
+      'Auto record': ['Press', { SetAutoRecord: true }, 'Press', { SetAutoRecord: false }],
+    },
+  }, 'tap tempo sends the tapped BPM, CLICK / END STOP / FIXED / RETAKE / AUTO REC toggle their controls, RETAKE and AUTO REC after a Press'));
   check(() => assert.deepEqual(out.targets, {
     lines: [
       'Record / overdub · Track 3 | CC 70 · ch 1 | momentary',
@@ -856,9 +882,13 @@ await probe(async ({ open }) => {
       28: ['Press'],
       31: ['Press', { SetInputSend: ['ring', true] }],
     },
+    refusedPress: {
+      autoRec: { sent: ['Press'], cue: 'AUTO REC starts a first take, clear all to use it' },
+      retake: { sent: ['Press'], cue: 'a take is recording, RETAKE changes after it' },
+    },
     controls: { click: 'true', endStop: 'true', fixed: 'true', inFx: true },
     cue4: 'nothing to mute, record first',
-  }, "engine mode: a track press sends the engine's action for the engine's selection or its named track, a global toggle Press then its control's command, HOLD the engine's press and release; an engine refusal says why on its lane"));
+  }, "engine mode: a track press sends the engine's action for the engine's selection or its named track, a global toggle Press then its control's command, HOLD the engine's press and release; AUTO REC on a locked tempo and RETAKE during a take are refused on the selected lane as their buttons are; an engine refusal says why on its lane"));
   for (const failure of failures) console.log(`FAIL ${failure}`);
   assert.equal(failures.length, 0, `${failures.length} of ${checks} checks failed`);
 });

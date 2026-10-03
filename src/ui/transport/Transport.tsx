@@ -2,7 +2,7 @@ import { For, Show, createEffect, createMemo, createSignal, onCleanup } from 'so
 import { clock, looper, master, sampleRate } from '../state/audio';
 import { FADE_BARS, engineFade, laterTakeBars } from '../state/engine-store';
 import { anyTrackIn, createTwoStepConfirm, masterBars } from '../looper/shared';
-import { fadeGate, fixedGate, tapGate } from '../looper/gates';
+import { autoRecGate, fadeGate, fixedGate, retakeGate, tapGate } from '../looper/gates';
 import { meterFrac, registerInputMeter, registerPhaseDial, unregisterInputMeter, unregisterPhaseDial } from '../looper/waveform';
 import { autoRecordThreshold } from '../state/auto-record';
 import { InputFx } from './InputFx';
@@ -95,7 +95,6 @@ export function Transport(props: { returnFocus?: (el: HTMLElement | undefined) =
   // ----- global transport (■/▶ ALL, FADE, ✕ ALL two-step) wired to the shared looper store -----
   // Memoized so each five-lane scan runs once per state change, not once per consuming control per render.
   const anyLive = createMemo(() => anyTrackIn('PLAYING', 'OVERDUBBING', 'RECORDING'));
-  const anyCapturing = createMemo(() => anyTrackIn('RECORDING', 'OVERDUBBING'));
 
   // ----- FIXED length, shown as what the next take will actually record -----
   // Up to the loop's bar count a later take is that many bars and repeats across the loop; past it the
@@ -120,6 +119,9 @@ export function Transport(props: { returnFocus?: (el: HTMLElement | undefined) =
   // RETAKE passes roll at master length whatever FIXED says, so the group is meaningless there.
   const fixedIgnored = createMemo(() => looper.retakeEnabled() && hasMaster());
   const fixedDisabled = createMemo(() => !fixedGate().ok);
+  // RETAKE and AUTO REC: the gates their pedal actions are refused by (`src/app/actions.ts`).
+  const retakeDisabled = createMemo(() => !retakeGate().ok);
+  const autoRecDisabled = createMemo(() => !autoRecGate().ok);
   const fixedTitle = () =>
     fixedIgnored()
       ? 'RETAKE takes roll at the full loop length, so FIXED is ignored while it is on'
@@ -335,7 +337,7 @@ export function Transport(props: { returnFocus?: (el: HTMLElement | undefined) =
           classList={{ 'is-on': looper.retakeEnabled() }}
           aria-label="Retake"
           aria-pressed={looper.retakeEnabled()}
-          disabled={anyCapturing()}
+          disabled={retakeDisabled()}
           onClick={() => looper.setRetakeEnabled(!looper.retakeEnabled())}
           title="Keep recording round the loop until you stop. STOP, REC/DUB or REC on another track keeps the last complete pass. First track needs FIXED."
         >
@@ -352,7 +354,7 @@ export function Transport(props: { returnFocus?: (el: HTMLElement | undefined) =
             classList={{ 'is-on': looper.autoRecordEnabled() }}
             aria-label="Auto record"
             aria-pressed={looper.autoRecordEnabled()}
-            disabled={clock.bpmLocked() || anyCapturing()}
+            disabled={autoRecDisabled()}
             onClick={() => looper.setAutoRecordEnabled(!looper.autoRecordEnabled())}
             title="Start recording when you start playing, instead of counting in (first track). SENS is how quiet a sound may be and still start it: higher = more sensitive."
           >

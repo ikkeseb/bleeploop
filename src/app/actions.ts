@@ -8,6 +8,7 @@ import { engineFade, engineInputSends } from '../ui/state/engine-store';
 import { CONFIRM_WINDOW_MS } from '../ui/looper/shared';
 import {
   CONFIRM_CLEAR_TEXT,
+  autoRecGate,
   clearGate,
   copyGate,
   dismissLaneCue,
@@ -17,6 +18,7 @@ import {
   playStopGate,
   recDubGate,
   refuseOnLane,
+  retakeGate,
   reverseGate,
   tapGate,
   trimGate,
@@ -28,9 +30,8 @@ import {
  * OWNS: the named actions a hands-free press can reach, in one table. The transport keys
  * (`transport-keys.ts`) and MIDI learn (`midi-actions.ts`) dispatch through it. Each row runs the path
  * its on-screen control runs: the lane core, ▶/■, ↶ UNDO, CLR, MUTE, ↺ REV, ⧉ COPY and ✂ TRIM (halve:
- * the first half); the command bar's
- * ▶/■ ALL, FADE, TAP, CLICK, END STOP, FIXED and IN FX's three sends; the slot's GO LIVE and the stage view's
- * cap.
+ * the first half); the command bar's ▶/■ ALL, FADE, TAP, CLICK, END STOP, FIXED, RETAKE, AUTO REC and IN
+ * FX's three sends; the slot's GO LIVE and the stage view's cap.
  *
  * A lane action (`LANE`) acts on a `Target`: the SELECTED track, or a named one. A press on a named
  * track leaves the selection alone, except REC/DUB, which selects its track so the transport keys
@@ -56,6 +57,8 @@ type GlobalActionId =
   | 'clickToggle'
   | 'endStopToggle'
   | 'fixedToggle'
+  | 'retakeToggle'
+  | 'autoRecToggle'
   | 'inFxEcho'
   | 'inFxReverb'
   | 'inFxRing';
@@ -86,6 +89,8 @@ export const ACTION_LABELS: Readonly<Record<ActionId, string>> = {
   clickToggle: 'Click on / off',
   endStopToggle: 'End stop on / off',
   fixedToggle: 'Fixed length on / off',
+  retakeToggle: 'Retake on / off',
+  autoRecToggle: 'Auto record on / off',
   inFxEcho: 'Input echo on / off',
   inFxReverb: 'Input reverb on / off',
   inFxRing: 'Input ring mod on / off',
@@ -177,6 +182,8 @@ const GLOBAL: Readonly<Record<GlobalActionId, () => void>> = {
   clickToggle: () => clock.setMetronome(!clock.metronomeOn()),
   endStopToggle: () => looper.setLoopEndStopEnabled(!looper.loopEndStopEnabled()),
   fixedToggle: gated(fixedGate, () => looper.setFixedLengthEnabled(!looper.fixedLengthEnabled())),
+  retakeToggle: gated(retakeGate, () => looper.setRetakeEnabled(!looper.retakeEnabled())),
+  autoRecToggle: gated(autoRecGate, () => looper.setAutoRecordEnabled(!looper.autoRecordEnabled())),
   inFxEcho: toggleSend('echo'),
   inFxReverb: toggleSend('reverb'),
   inFxRing: toggleSend('ring'),
