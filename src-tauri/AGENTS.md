@@ -268,9 +268,19 @@ plugin-GUI work.
 - A tester on WASAPI heard delay on DI monitoring (the engine build); the affected path is unknown.
   WASAPI's late takes are the accepted fallback (`docs/ARCHITECTURE.md` § Measured premise), which
   says nothing about monitoring delay.
-- `native:engine`'s WASAPI switch phases count join trims (1–2) and starves (2) in up to two of five
-  switches, on main as on the input-gap change, while its soak, every ASIO phase and the swaps stay 0
-  (`docs/VERIFY.md`, its baseline); since the input-gap rejection, a take in flight there is rejected.
-  Cause unknown. Next check: log the join's fill and the input/output callback times around each
-  starve and trim in the first seconds after a WASAPI open, then rerun with Signal Desktop and
-  Focusrite Notifier closed.
+- After a WASAPI open the join can trim or starve within ~2.5 s, and a take that overlaps it is
+  rejected: 9 of 85 opens after ASIO had run in the process, 1 of 43 without (`docs/VERIFY.md`,
+  `native:engine`'s baseline). Traced (the join trace in `engine_io/callback.rs`): once the pipe has
+  primed, the capture side delivers one packet more than its time (about three opens in four, 0.2–1.1 s
+  in) and a render callback comes a period late without asking for more (four opens in five after ASIO,
+  one in ten without), so pulls find the ring up to two 10 ms periods over its 25 ms setpoint, just
+  under the trim line at twice the setpoint, for the ~10 s the controller takes to drain it. From there
+  a trim takes only a push and a pull swapping order on one tick, a render callback 20–30 ms late that
+  asks for two periods (the trim is judged on the fill before the pull: the ring is cut to the setpoint
+  and the pull leaves it a period short), or one more late render callback; a starve follows a trim
+  when a capture wake is late, or comes at the start when capture delivers its packets two at a time.
+  Empty plugin slots, `--mute` and a 3 s pause after the ASIO close do not remove it. Why the endpoints
+  start this way is unknown (the callbacks' timing was measured, not the device); Signal Desktop and
+  Focusrite Notifier ran throughout. By the pipe's own sizing rule (`PipeConfig::setpoint`) these pushes
+  and pulls ask for 33–43 ms. Next check: both series with the two applications closed; what to change
+  is STATUS D25.
