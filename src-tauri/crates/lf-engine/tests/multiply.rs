@@ -405,18 +405,21 @@ fn g_a_copy_still_running_at_the_commit_ends_extended() {
     let resumed = |to: u8| rig.events.iter().find_map(|e| match *e { Event::Copied { frame, from: 0, to: t, .. } if t == to => Some(frame), _ => None }).unwrap();
     let (resumed2, resumed3) = (resumed(2), resumed(3));
     assert!(resumed2 > end && resumed3 > resumed2, "the first copy finished after the commit, the second after the extension");
-    // From the commit on, every lane at the new grid phase (a lane mid-extension reads through its loop).
-    let (anchor, len) = (rig.anchor(), rig.master());
+    // From the commit on, every lane at the new grid phase (a lane mid-extension reads through its loop),
+    // each copy fading in over 5 ms from its resume into the running loop (D23).
+    let (anchor, len, n) = (rig.anchor(), rig.master(), common::dub::ramp(rig.sr));
     let pcms: Vec<Vec<f32>> = (0..4).map(|i| rig.pcm(i)).collect();
     let out = &rig.output.as_ref().unwrap().1;
     for f in from..rig.frame {
         let pos = (f - anchor).rem_euclid(len) as usize;
         let mut want = 0.0f32;
         for (i, p) in pcms.iter().enumerate() {
-            let playing = i < 2 || (i == 2 && f >= resumed2) || (i == 3 && f >= resumed3);
-            if playing {
-                want += p[pos];
-            }
+            let resumed = [None, None, Some(resumed2), Some(resumed3)][i];
+            want += match resumed {
+                None => p[pos],
+                Some(r) if f >= r => common::edges::sample(1.0, common::edges::join(f - r, n), p[pos], 0.0),
+                Some(_) => 0.0,
+            };
         }
         assert_eq!(out[(f - from) as usize], want, "frame {f}");
     }

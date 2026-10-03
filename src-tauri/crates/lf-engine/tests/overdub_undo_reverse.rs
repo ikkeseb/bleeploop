@@ -15,6 +15,7 @@
 mod common;
 
 use common::dub::{pos_fn, ramp};
+use common::edges::{join, out, sample, tail};
 use common::{code, Rig};
 use lf_engine::grid::Frame;
 use lf_engine::looper::{job_frames, JOB_RATE};
@@ -119,7 +120,14 @@ fn overdub_play_stop_commits_the_layer_through_the_press_and_lands_stopped() {
         assert_eq!(rig.state(0), LaneState::Stopped);
         let out = &rig.output.as_ref().unwrap().1;
         let monitor = |f: Frame| if f < tail { DUB } else { 0.0 };
-        assert!(out.iter().enumerate().all(|(k, &y)| y == monitor(from + k as Frame)), "no lane playback after STOP, only the monitor");
+        // From the press the lane fades out over 5 ms (D23) as the layer's tail comes in: it plays the
+        // loop ahead of the read head, which the layer (behind it) never reached.
+        let n = ramp(rig.sr);
+        let lane = |f: Frame| if f < stop + n { sample(1.0, self::tail(f - stop, n), pre[(f - anchor).rem_euclid(master) as usize], 0.0) } else { 0.0 };
+        for (k, &y) in out.iter().enumerate() {
+            let f = from + k as Frame;
+            assert_eq!(y, lane(f) + monitor(f), "align={align}: frame {f}: the lane's tail, then only the monitor");
+        }
         let mut want = pre.clone();
         common::dub::dub(&mut want, (punch + align, stop + align), ramp(rig.sr), 1.0, pos_fn(anchor, master, align), |_| DUB);
         assert_eq!(rig.pcm(0), want, "align={align}: the layer through the press");
@@ -163,7 +171,11 @@ fn undo_a_the_snapshot_the_session_and_the_toggle() {
         assert!(rig.lane(0).length == master && rig.master() == master && rig.lane(0).can_undo);
         rig.advance_to(boundary + 480);
         plays(&rig, from, boundary, |p| before[p]);
-        plays(&rig, boundary, rig.frame, |p| want[p]);
+        // On the boundary (loop position 0) the loop heard crossfades into the one the toggle set over 5 ms
+        // (D23): loop position `p` is `p` frames into it.
+        let n = ramp(rig.sr);
+        plays(&rig, boundary, boundary + n, |p| sample(1.0, join(p as Frame, n), want[p], self::out(p as Frame, n) * before[p] as f64));
+        plays(&rig, boundary + n, rig.frame, |p| want[p]);
     }
 }
 
@@ -216,13 +228,20 @@ fn undo_d_stopped_undoes_in_place_play_plays_it_clear_drops_it() {
     let (mut rig, master) = playing_loop();
     let pre = rig.pcm(0);
     overdub_session(&mut rig, master, 1, DUB);
+    let (dubbed, stop, anchor) = (rig.pcm(0), rig.frame, rig.anchor());
     rig.press(Command::PlayStop(0));
     assert!(rig.state(0) == LaneState::Stopped && rig.lane(0).can_undo);
     rig.keep_output();
     rig.press(Command::Undo(0));
     assert_eq!(rig.pcm(0), pre);
     rig.advance(1000);
-    assert!(rig.output.as_ref().unwrap().1.iter().all(|&y| y == 0.0), "no playback from a STOPPED undo");
+    // Only the STOP's 5 ms tail (D23), of the loop heard at the press: the undo starts no playback.
+    let n = ramp(rig.sr);
+    for (k, &y) in rig.output.as_ref().unwrap().1.iter().enumerate() {
+        let f = stop + 1 + k as Frame;
+        let want = if f < stop + n { sample(1.0, tail(f - stop, n), dubbed[(f - anchor).rem_euclid(master) as usize], 0.0) } else { 0.0 };
+        assert_eq!(y, want, "no playback from a STOPPED undo: frame {f}");
+    }
     rig.press(Command::PlayStop(0));
     rig.keep_output();
     let from = rig.frame;
@@ -390,11 +409,20 @@ fn a_layer_with_an_input_gap_ended_by_play_stop_lands_stopped_and_silent() {
         rig.advance(master / 3);
         rig.set_level(0.0);
         rig.keep_output();
+        let (press, anchor) = (rig.frame, rig.anchor());
         rig.press(Command::PlayStop(0));
         rig.advance(2 * master);
         assert_eq!(rig.state(0), LaneState::Stopped, "align={align}");
         assert!(rig.events.iter().any(|e| matches!(e, Event::TakeRejected { overdub: true, .. })));
-        assert!(rig.output.as_ref().unwrap().1.iter().all(|&y| y == 0.0), "align={align}: silent from the press");
+        // Silent from the press but for its 5 ms tail (D23), of the loop ahead of the read head, which
+        // the layer never reached: whether the rejection's restore starts inside the tail (align 0) or
+        // after it.
+        let n = ramp(rig.sr);
+        for (k, &y) in rig.output.as_ref().unwrap().1.iter().enumerate() {
+            let f = press + k as Frame;
+            let want = if f < press + n { sample(1.0, tail(f - press, n), first[(f - anchor).rem_euclid(master) as usize], 0.0) } else { 0.0 };
+            assert_eq!(y, want, "align={align}: silent from the press but for its tail: frame {f}");
+        }
         assert_eq!(rig.pcm(0), first, "align={align}: the pre-layer loop is back");
         assert_eq!(rig.engine.looper().undo_pcm(0).unwrap(), take, "align={align}: and the undo target before it");
     }
@@ -404,8 +432,8 @@ fn a_layer_with_an_input_gap_ended_by_play_stop_lands_stopped_and_silent() {
 fn stop_all_a_second_stop_and_clear_punch_out_an_aligned_overdub() {
     // verify/probes/overdub-window.mjs's stopAll, doubleStop and clear modes: impulses played just
     // outside and inside each punch edge (their wet arrives ALIGN later, one inside the window only after
-    // the press) are kept exactly inside the window, at their grid position, and playback is silent from
-    // the press while the tail comes in. Inside, the ramps weigh them (D23): the one on the punch frame
+    // the press) are kept exactly inside the window, at their grid position, and playback fades out over
+    // 5 ms from the press (D23) while the tail comes in. Inside, the ramps weigh them (D23): the one on the punch frame
     // is the punch-in's first frame (weight 0), the one just before the stop the punch-out's last (1/N).
     const ALIGN: Frame = 7200;
     for gesture in ["stop all", "second stop", "second stop at once", "clear"] {
@@ -438,7 +466,14 @@ fn stop_all_a_second_stop_and_clear_punch_out_an_aligned_overdub() {
         }
         rig.advance(2 * master);
         let out = &rig.output.as_ref().unwrap().1;
-        assert!(out.iter().zip(&rig.monitor).all(|(y, m)| y == m), "{gesture}: playback silent from the press, only the monitor");
+        // A stop fades the lane out over 5 ms from its first press (D23), the loop ahead of the read head,
+        // which the layer never reaches; CLEAR silences it at once.
+        let (n, anchor) = (ramp(rig.sr), rig.anchor());
+        for (k, (&y, &m)) in out.iter().zip(&rig.monitor).enumerate() {
+            let f = stop + k as Frame;
+            let lane = if gesture != "clear" && f < stop + n { sample(1.0, tail(f - stop, n), pre[(f - anchor).rem_euclid(master) as usize], 0.0) } else { 0.0 };
+            assert_eq!(y, lane + m, "{gesture}: frame {f}: the lane's tail from the press, then only the monitor");
+        }
         assert!(rig.window().is_none(), "{gesture}: the recorder is free");
         if gesture == "clear" {
             assert!(rig.state(0) == LaneState::Empty && rig.lane(0).length == 0 && rig.master() == 0, "{gesture}: nothing kept");

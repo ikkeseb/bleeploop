@@ -5,6 +5,7 @@
 #![allow(dead_code)]
 
 pub mod dub;
+pub mod edges;
 pub mod fx;
 pub mod refs;
 
