@@ -21,8 +21,10 @@ is a one-line adapter). UI-only edits are safe while the dev app runs,
   (hiding the keyboard pauses it). Not built: free-form panel drag/move + inline VSTs that FILL a
   panel; `SplitStack` + `layout-store` is the seam.
 - **Invariant 6 lives here:** the 60 fps canvas draw loop reads a plain mutable object, never a
-  signal (`looper/waveform.ts` reads non-reactive looper getters). Measured cost + the fix
-  pattern: `docs/ARCHITECTURE.md` invariant 6.
+  signal (`looper/waveform.ts` reads non-reactive looper getters). One exception: the bar grid reads
+  the BPM and sample-rate signals only when the master loop's length changes, and caches the bar
+  count (`waveform.ts` `rasterise`). Measured cost + the fix pattern: `docs/ARCHITECTURE.md`
+  invariant 6.
 - **The engine's names:** components take `looper`, `clock`, `master`, `session` and `sampleRate`
   from `state/audio.ts` (the engine store behind them: `state/engine-store.ts`). A gesture sends a
   command and the feed shows the outcome (invariant 3).
