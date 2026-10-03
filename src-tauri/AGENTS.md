@@ -268,3 +268,9 @@ plugin-GUI work.
 - A tester on WASAPI heard delay on DI monitoring (the engine build); the affected path is unknown.
   WASAPI's late takes are the accepted fallback (`docs/ARCHITECTURE.md` § Measured premise), which
   says nothing about monitoring delay.
+- `native:engine`'s WASAPI switch phases count join trims (1–2) and starves (2) in up to two of five
+  switches, on main as on the input-gap change, while its soak, every ASIO phase and the swaps stay 0
+  (`docs/VERIFY.md`, its baseline); since the input-gap rejection, a take in flight there is rejected.
+  Cause unknown. Next check: log the join's fill and the input/output callback times around each
+  starve and trim in the first seconds after a WASAPI open, then rerun with Signal Desktop and
+  Focusrite Notifier closed.
