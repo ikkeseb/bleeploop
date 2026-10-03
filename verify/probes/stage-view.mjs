@@ -607,6 +607,23 @@ await probe(async ({ browser, open }) => {
     assert.equal(h.msg, '2 · WAITING FOR DOWNBEAT');
     assert.equal(h.tone, 'wait');
     assert.equal(h.count, '', 'an armed later take shows no numeral');
+    // A later take armed on stopped loops is counted in by the engine: the numeral and no message, and
+    // the loop held at its start (the downbeat restarts it), so once the beat's ripple is gone nothing
+    // on the canvas moves.
+    await boot(page);
+    await emit({ events: [transport(LOOP, true, 120), laneEvent(0, stopped(LOOP)), ...empties(1, 2, 3, 4), { Selected: { frame: 0, lane: 1 } }], anchor: anchorAt(3 * BAR), peaks: [wave(0, LOOP)] });
+    await emit({ events: [{ Beat: { frame: 3 * BAR, beatInBar: 1, countLeft: 3, clicked: true } }, laneEvent(1, lane('Recording', { armed: true }))] });
+    await page.waitForFunction(() => document.querySelector('.sv-count').textContent === '3');
+    // The line that was leaving (the wait above) takes 160 ms to empty: wait for it, then it must stay empty.
+    await page.waitForFunction(() => document.querySelector('.sv-msg').textContent === '', undefined, { timeout: 2000 })
+      .catch(() => assert.fail('a later take counted in from stopped loops shows the numeral, not a wait'));
+    await settle(300);
+    const counted = await hud();
+    assert.equal(counted.msg, '', `no message returns under that numeral (${counted.msg})`);
+    await settle(600);
+    const drift = await moved(250);
+    console.log(JSON.stringify({ countedLater: { count: counted.count, msg: counted.msg, movedPx: drift } }));
+    assert.ok(drift < 20, `under that count the loop is held at its start (${drift} px moved in 250 ms)`);
   });
 
   await group('cue', async () => {

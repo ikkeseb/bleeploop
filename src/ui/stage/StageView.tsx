@@ -53,12 +53,14 @@ export function StageView(props: { onExit: () => void }) {
   });
   /** The loop moves (`feed.moving`): otherwise the views show it cued at its start. */
   const moving = createMemo(() => {
-    const waitsOverLoop = looper.masterLengthFrames() > 0 && clock.countLeft() === 0;
+    const overLoop = looper.masterLengthFrames() > 0;
     let waits = false;
     for (const l of lanes) {
       const d = l.displayState();
       if (d === 'PLAYING' || d === 'OVERDUBBING' || d === 'RECORDING') return true;
-      if (d === 'ARMED' && waitsOverLoop) waits = true;
+      // An armed lane waiting for the loop's boundary rides its phase; one the engine counts in (a
+      // later take from stopped loops) waits at the loop's start, where its downbeat restarts it.
+      if (d === 'ARMED' && overLoop && !looper.trackCounted(l.i)) waits = true;
     }
     return waits;
   });
