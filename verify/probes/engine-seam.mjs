@@ -16,6 +16,12 @@
  *   loop (PLAYING, the loop readout, a moving ring dial from the clock anchor), the record meter, a
  *   refusal on its lane, the selection, a COPY carrying the lane's volume, a lane's mix kept when it only
  *   goes EMPTY and reset by `Cleared`, a multiply take's record head sweeping its window (the canvas),
+ *   a later take's wait as the engine's beats tell it (a count-in from stopped loops: COUNT-IN, the
+ *   numeral, no head on the canvas; an arm beside a playing loop: WAITING FOR DOWNBEAT, no numeral, the
+ *   amber head; a cancelled count leaving no numeral behind, a beat still to be shown included; a
+ *   cancel and a re-arm in one frame; COUNT-IN and no head from the frame the count's first beat
+ *   arrives, the numeral when it is heard; a cancelled count's late beat leaving a newer numeral up; a
+ *   reset frame's replayed count leaving the next arm uncounted),
  *   and a reload's reset frame whose remembered settings are adopted (the input sends it lacks are sent
  *   from what the UI kept).
  *
@@ -335,6 +341,93 @@ await probe(async ({ open }) => {
   await fixedToggle.click();
   assert.deepEqual(await sentAtLeast(1), [{ SetFixedLength: false }]);
 
+  // ── A later take's wait: counted in or not is the engine's to say (its beats' `countLeft`) ─────────
+  const count = (i) => lanes.nth(i).locator('.lp-lane__count');
+  const armed = lane('Recording', { armed: true });
+  const stopped = lane('Stopped', { length: BAR, canReverse: true });
+  const beat = (frame, countLeft) => ({ Beat: { frame, beatInBar: (4 - countLeft) % 4, countLeft, clicked: countLeft > 0 } });
+  /** The armed lane's amber head (--dub) on the canvas's top row, 0..1 across it; -1: none drawn. */
+  const amberHeadAt = (i) =>
+    lanes.nth(i).locator('canvas').evaluate((c) => {
+      const row = c.getContext('2d').getImageData(0, 0, c.width, 1).data;
+      const hits = [];
+      for (let x = 0; x < c.width; x++) {
+        const [r, g, b, a] = row.slice(4 * x, 4 * x + 4);
+        if (a > 200 && r > 200 && g > 120 && g < 220 && b < 110) hits.push(x);
+      }
+      return hits.length ? hits[hits.length >> 1] / c.width : -1;
+    });
+  /** Whether lane `i` draws an amber head in any of a few animation frames. */
+  const amberHeadSeen = async (i) => {
+    let seen = false;
+    for (let tries = 0; tries < 8; tries++) {
+      await page.waitForTimeout(40);
+      seen ||= (await amberHeadAt(i)) >= 0;
+    }
+    return seen;
+  };
+
+  // (a) Every loop stopped, REC on an empty lane: the engine counts in (the count's first beat precedes
+  // the lane's own event, as the engine emits them), and the lane reads as a first take's count-in does.
+  let at = 20 * BAR + 1000;
+  await emit({ events: [laneEvent(0, stopped, at)], anchor: anchorAt(at) });
+  await emit({ events: [beat(at, 4), laneEvent(1, armed, at)], anchor: anchorAt(at) });
+  console.log('counted in from stopped loops:', JSON.stringify(await well(1).textContent()));
+  assert.equal(await lanes.nth(1).getAttribute('data-state'), 'armed');
+  assert.match(await well(1).textContent(), /COUNT-IN/, 'a later take the engine counts in reads COUNT-IN');
+  assert.equal(await count(1).textContent(), '4');
+  assert.equal(await amberHeadSeen(1), false, 'no head rides the stopped loop during the count');
+  for (const left of [3, 2, 1]) {
+    at += BAR / 4;
+    await emit({ events: [beat(at, left)], anchor: anchorAt(at) });
+    assert.equal(await count(1).textContent(), String(left), `the count shows ${left}`);
+    assert.match(await well(1).textContent(), /COUNT-IN/);
+  }
+  // The downbeat: the loops restart and the count is over; the lane, still armed for its alignment,
+  // keeps the word it had and shows no numeral.
+  at += BAR / 4;
+  await emit({ events: [laneEvent(0, committed, at), beat(at, 0)], anchor: anchorAt(at) });
+  assert.match(await well(1).textContent(), /COUNT-IN/, 'counted in until the lane leaves ARMED');
+  assert.equal(await count(1).count(), 0, 'no numeral past the count');
+  await emit({ events: [laneEvent(1, lane('Empty'), at)] });
+
+  // (b) A loop plays, REC on an empty lane: the engine arms it for the loop boundary and counts nothing.
+  await emit({ events: [laneEvent(1, armed, at), beat(at + BAR / 4, 0)], anchor: anchorAt(at + BAR / 4) });
+  console.log('armed beside a playing loop:', JSON.stringify(await well(1).textContent()));
+  assert.equal(await lanes.nth(1).getAttribute('data-state'), 'armed');
+  assert.match(await well(1).textContent(), /WAITING FOR DOWNBEAT/, 'an arm beside a playing loop waits for the boundary');
+  assert.equal(await count(1).count(), 0, 'no numeral without a count');
+  assert.equal(await amberHeadSeen(1), true, 'the amber head rides the loop phase while it waits');
+  await emit({ events: [laneEvent(1, lane('Empty'), at)] });
+
+  // (c) A count cancelled mid-way, then, before any new beat, an ordinary arm beside a playing loop:
+  // the cancelled count's numeral is gone, so nothing reads as counted in.
+  at += 4 * BAR;
+  await emit({ events: [laneEvent(0, stopped, at)], anchor: anchorAt(at) });
+  await emit({ events: [beat(at, 4), laneEvent(1, armed, at)], anchor: anchorAt(at) });
+  await emit({ events: [beat(at + BAR / 4, 3)], anchor: anchorAt(at + BAR / 4) });
+  assert.equal(await count(1).textContent(), '3');
+  await emit({ events: [laneEvent(1, lane('Empty'), at + BAR / 4 + 100)] });
+  await emit({ events: [laneEvent(0, committed, at + BAR / 4 + 200), laneEvent(1, armed, at + BAR / 4 + 300)] });
+  console.log('armed after a cancelled count:', JSON.stringify(await well(1).textContent()));
+  assert.match(await well(1).textContent(), /WAITING FOR DOWNBEAT/, 'a cancelled count does not make the next arm read counted in');
+  assert.equal(await count(1).count(), 0, 'a cancelled count leaves no numeral behind');
+  assert.equal(await amberHeadSeen(1), true, 'the head rides the phase again once the count is cancelled');
+  await emit({ events: [laneEvent(1, lane('Empty'), at)] });
+
+  // (d) A counted arm cancelled and an ordinary arm beside a playing loop, all in ONE feed frame: the
+  // lane is ARMED before and after the frame, and still nothing of the cancelled count is left on it.
+  at += 4 * BAR;
+  await emit({ events: [laneEvent(0, stopped, at)], anchor: anchorAt(at) });
+  await emit({ events: [beat(at, 4), laneEvent(1, armed, at)], anchor: anchorAt(at) });
+  assert.equal(await count(1).textContent(), '4');
+  await emit({ events: [laneEvent(1, lane('Empty'), at + 100), laneEvent(0, committed, at + 200), laneEvent(1, armed, at + 300)] });
+  console.log('cancelled and re-armed in one frame:', JSON.stringify(await well(1).textContent()));
+  assert.equal(await lanes.nth(1).getAttribute('data-state'), 'armed');
+  assert.match(await well(1).textContent(), /WAITING FOR DOWNBEAT/, 'a cancel and a re-arm in one frame leave no count on the lane');
+  assert.equal(await count(1).count(), 0, 'a cancel and a re-arm in one frame leave no numeral');
+  await emit({ events: [laneEvent(1, lane('Empty'), at)] });
+
   // ── A beat is shown when it is heard: 0.3 s of frames ahead of the render clock, plus 0.1 s of output
   // latency, keeps the beat LED waiting ~0.4 s ───────────────────────────────────────────────────────
   const led = (k) => page.locator('.transport__beat').nth(k).evaluate((el) => el.classList.contains('on'));
@@ -349,6 +442,70 @@ await probe(async ({ open }) => {
   const shownAfter = Date.now() - t0;
   console.log(`beat shown ${shownAfter} ms after its frame arrived (heard 400 ms later)`);
   assert.ok(shownAfter > 250 && shownAfter < 700, `the beat LED waited for the heard time (${shownAfter} ms)`);
+
+  // A count beat still waiting to be heard when its count is cancelled shows no numeral afterwards: the
+  // arm that follows, beside a playing loop, never reads as counted in (0.4 s until the beat is shown).
+  at = 40 * BAR;
+  await emit({ events: [laneEvent(0, stopped, at), beat(at + 14400, 3), laneEvent(1, armed, at)], anchor: anchorAt(at) });
+  await emit({ events: [laneEvent(1, lane('Empty'), at + 100)] });
+  await emit({ events: [laneEvent(0, committed, at + 200), laneEvent(1, armed, at + 300)] });
+  await page.waitForTimeout(700);
+  console.log('armed after a cancelled count whose beat was still to be shown:', JSON.stringify(await well(1).textContent()));
+  assert.match(await well(1).textContent(), /WAITING FOR DOWNBEAT/, 'a cancelled count beat shown late starts no count');
+  assert.equal(await count(1).count(), 0, 'a cancelled count beat shown late shows no numeral');
+  await emit({ events: [laneEvent(1, lane('Empty'), at)] });
+
+  // (e) The count is known from the frame its first beat ARRIVES, 0.6 s before that beat is heard: the
+  // lane reads COUNT-IN and draws no head at once, and the numeral follows when the beat is heard.
+  at = 44 * BAR;
+  await emit({ events: [laneEvent(0, stopped, at), beat(at + 24000, 4), laneEvent(1, armed, at)], anchor: anchorAt(at) });
+  const e0 = Date.now();
+  const wellAtOnce = await well(1).textContent();
+  const numeralsAtOnce = await count(1).count();
+  const headBeforeNumeral = await amberHeadSeen(1);
+  console.log(`count beat received, not yet heard: ${JSON.stringify(wellAtOnce)}, ${numeralsAtOnce} numeral(s), amber head ${headBeforeNumeral} (${Date.now() - e0} ms in)`);
+  assert.match(wellAtOnce, /COUNT-IN/, 'COUNT-IN from the frame the count beat arrives');
+  assert.equal(numeralsAtOnce, 0, 'no numeral before the count beat is heard');
+  assert.equal(headBeforeNumeral, false, 'no head from the frame the count beat arrives');
+  await count(1).waitFor({ timeout: 2000 });
+  console.log(`numeral shown ${Date.now() - e0} ms after its beat arrived (heard 600 ms later)`);
+  assert.equal(await count(1).textContent(), '4', 'the numeral shows when the beat is heard');
+  await emit({ events: [laneEvent(1, lane('Empty'), at)] });
+
+  // (f) A cancelled count's beat, shown late, leaves a newer count's numeral alone: count A's beat is
+  // heard 0.6 s on, the arm is cancelled, and count B's first beat (already heard: its frame is one
+  // output latency behind the new anchor) puts up its numeral before A's beat is shown.
+  at = 48 * BAR;
+  await emit({ events: [beat(at + 24000, 3), laneEvent(1, armed, at)], anchor: anchorAt(at) });
+  await emit({ events: [laneEvent(1, lane('Empty'), at + 100)] });
+  await emit({ events: [beat(at, 4), laneEvent(1, armed, at + 4800)], anchor: anchorAt(at + 4800) });
+  assert.equal(await count(1).textContent(), '4', "the newer count's numeral is up before the cancelled beat is shown");
+  await page.waitForTimeout(900);
+  const numeralAfter = (await count(1).count()) ? await count(1).textContent() : '';
+  console.log("the newer count's numeral after the cancelled count's beat was shown:", JSON.stringify(numeralAfter));
+  assert.equal(numeralAfter, '4', "a cancelled count's late beat does not clear a newer count's numeral");
+  assert.match(await well(1).textContent(), /COUNT-IN/);
+  await emit({ events: [laneEvent(1, lane('Empty'), at)] });
+
+  // (g) A reload's reset frame replays the lanes as they are and the drained beats after them: a count's
+  // last beats arrive with its lane already recording, so no lane ends that count, and the ordinary arm
+  // that follows beside the playing loop must not read as counted in.
+  at = 52 * BAR;
+  await emit({
+    reset: true,
+    settings: [],
+    events: [laneEvent(1, lane('Recording'), at), laneEvent(0, committed, at), transport(BAR, true, 120), beat(at - BAR / 4, 1), beat(at, 0)],
+    anchor: anchorAt(at),
+    meter: { peak: 0, clip: false },
+  });
+  assert.equal(await lanes.nth(1).getAttribute('data-state'), 'rec');
+  await emit({ events: [laneEvent(2, armed, at + 4800)], anchor: anchorAt(at + 4800) });
+  console.log("armed after a reset frame carrying a count's last beats:", JSON.stringify(await well(2).textContent()));
+  assert.equal(await lanes.nth(2).getAttribute('data-state'), 'armed');
+  assert.match(await well(2).textContent(), /WAITING FOR DOWNBEAT/, "a reset frame's replayed count does not make the next arm read counted in");
+  assert.equal(await count(2).count(), 0, "no numeral after a reset frame's replayed count");
+  assert.equal(await amberHeadSeen(2), true, "the amber head rides the loop phase after a reset frame's replayed count");
+  await emit({ events: [laneEvent(1, lane('Empty'), at), laneEvent(2, lane('Empty'), at)] });
 
   // The app never builds an AudioContext: the engine plays everything.
   const contexts = await page.evaluate(() => window.__audioContexts);

@@ -147,7 +147,7 @@ export function Help() {
       <section class="help__sec">
         <h3 class="help__h">Transport &amp; tempo</h3>
         <ul class="help__list">
-          <li>A 1-bar count-in (four clicks) leads the first recording. You come in on the counted "1", not the button press</li>
+          <li>A 1-bar count-in (four clicks) leads the first recording. You come in on the counted "1", not the button press. A later take recorded with the loops stopped gets the count-in too, and every track starts from the top on its "1"</li>
           <li><span class="help__note">CLICK</span> toggles the metronome (its own volume, never recorded, silent while nothing runs)</li>
           <li><span class="help__note">FIXED N</span> records exactly N bars and auto-stops on the downbeat. Off, every take runs until you stop it</li>
           <li><span class="help__note">RETAKE</span> keeps recording round the loop until you stop; STOP, REC/DUB or REC on another track keeps the last complete pass. The first track needs FIXED; on later takes FIXED is ignored while RETAKE is on</li>
@@ -222,7 +222,7 @@ export function Help() {
           <li>Drag any divider to resize &middot; double-click it to reset</li>
           <li>Keyboard bar: move it above / below the looper, or hide it</li>
           <li>The keyboard icon among the command bar's tools shows a hidden keyboard again</li>
-          <li><span class="help__note">Stage view</span> (<kbd class="help__kbd">B</kbd>, the stage icon, or a learned pedal) fills the window with each track's state, the bar and the beat, readable from across the room. The looper keys stay live; B, Esc or <span class="help__note">EXIT</span> leaves it</li>
+          <li><span class="help__note">Stage view</span> (<kbd class="help__kbd">B</kbd>, the stage icon, or a learned pedal) fills the window with a visualizer of the loops: each track's light follows its own loop's waveform and volume (not its FX) and takes its state's colour, with the selected track, the bar, the beat and the count-in still readable from across the room. <kbd class="help__kbd">V</kbd> or its bottom-right button switches the look. The looper keys stay live; B, Esc or the ✕ button leaves it</li>
         </ul>
       </section>
 

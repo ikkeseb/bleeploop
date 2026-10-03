@@ -5,8 +5,8 @@
  * context: 1-empty, 4-count-in (lane 1 ARMED behind the count-in), 2-first-take-recording (a first take
  * one second in), 3-armed-waiting (a two-bar loop at 60 BPM playing, lane 2 an ARMED later take waiting
  * for the boundary), 5-fx-five-lanes (five stopped one-bar lanes, lane 1's FX drawer open), 6-help,
- * 7-audio-settings, 12-stage-view (five lanes, three playing, one muted, opened by its command-bar cap)
- * and 11-engine-in-fx (a reset frame with every input send on, the IN FX popover open). Scenes 8-10 are
+ * 7-audio-settings, 12-stage-<look> (the stage view opened by its command-bar cap over five lanes, three
+ * playing and one muted, once per look of `src/ui/stage/views.ts`, stepped with V) and 11-engine-in-fx (a reset frame with every input send on, the IN FX popover open). Scenes 8-10 are
  * the Windows app's guitar-first screen, in a second fresh context whose plugin host is served with
  * `available: true` (host.web.ts routed, the slot-sources pattern) and stubbed: a scan that finds one
  * amp-sim (an effect), stubbed load/editor replies. 8-native-first-launch = the host booted, nothing
@@ -28,7 +28,7 @@ const outDir = 'logs/contact-sheet';
 const viewports = [[1280, 820], [1920, 1080], [1000, 700]];
 const placements = ['bottom', 'hidden'];
 const scenes = ['1-empty', '2-first-take-recording', '3-armed-waiting', '4-count-in', '5-fx-five-lanes', '6-help', '7-audio-settings',
-  '8-native-first-launch', '9-amp-sim-live', '10-amp-sim-idle', '11-engine-in-fx', '12-stage-view'];
+  '8-native-first-launch', '9-amp-sim-live', '10-amp-sim-idle', '11-engine-in-fx'];
 const REC_PIXEL_LIMIT = 20; // anti-aliasing slack; a red playhead or tape is hundreds of pixels
 const RATE = 48000;
 const PEAK_FRAMES = 1024; // the engine's waveform bin (`lf-engine/src/overview.rs`)
@@ -222,13 +222,20 @@ await probe(async ({ browser, open }) => {
       await shoot(scene);
       await page.evaluate(() => window.__lf.ui.closeSettings());
 
-      scene = '12-stage-view';
+      scene = '12-stage';
       await emit(loopFrame({ count: 5, playing: [0, 2, 3] }));
       await page.evaluate(() => window.__lf.looper.setMute(3, true));
       await page.getByRole('button', { name: 'Stage view', exact: true }).click();
       await page.getByRole('dialog', { name: 'Stage view', exact: true }).waitFor();
-      await page.waitForTimeout(400);
-      await shoot(scene);
+      // One scene per look, in the order V steps them (a fresh context opens on the first).
+      const looks = await page.evaluate(() => import('/src/ui/stage/views.ts').then((m) => m.STAGE_VIEWS.map((v) => v.id)));
+      for (const look of looks) {
+        scene = `12-stage-${look}`;
+        await page.locator(`.sv[data-view="${look}"]`).waitFor();
+        await page.waitForTimeout(400);
+        await shoot(scene);
+        await page.keyboard.press('v');
+      }
       await page.keyboard.press('Escape');
       await page.getByRole('dialog', { name: 'Stage view', exact: true }).waitFor({ state: 'detached' });
 
@@ -284,7 +291,8 @@ await probe(async ({ browser, open }) => {
     }
   }
 
-  const order = (s) => scenes.indexOf(s.scene);
+  // The stage looks come last, in the order they were shot.
+  const order = (s) => (scenes.includes(s.scene) ? scenes.indexOf(s.scene) : scenes.length);
   const rows = viewports.flatMap(([w, h]) => placements.map((kbd) => {
     const cells = shots.filter((s) => s.viewport === `${w}x${h}` && s.kbd === kbd).sort((a, b) => order(a) - order(b))
       .map((s) => `<figure><a href="${s.file}"><img src="${s.file}" loading="lazy"></a><figcaption>${s.scene}</figcaption></figure>`).join('');

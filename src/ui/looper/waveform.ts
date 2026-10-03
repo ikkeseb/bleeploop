@@ -4,9 +4,8 @@ import { masterBars } from './shared';
 /**
  * Waveform + bar-grid + playhead renderer.
  *
- * OWNS: every looper canvas and the frame-driven chrome that rides the loop phase. A track may have
- * more than one canvas (its looper lane, and its stage-view lane while that view is open), so lanes
- * are keyed by canvas and each draws its track independently.
+ * OWNS: every looper canvas and the frame-driven chrome that rides the loop phase. Lanes are keyed by
+ * canvas and each draws its track independently. (The stage view draws itself: `src/ui/stage/`.)
  *
  * A SINGLE requestAnimationFrame loop drives every registered track canvas. It reads the looper's
  * pre-computed peak arrays through non-reactive getters (`looper.peaksInto` / `phaseValue` / `stateOf`
@@ -25,7 +24,7 @@ import { masterBars } from './shared';
  * inside the cached-bitmap path — never in the per-frame steady state. (A first take's opening span
  * reads the tempo once per take: the engine store takes it as the take starts, off the draw loop.)
  *
- * Solid only ever creates/destroys the <canvas> elements (the Looper and StageView components) and calls
+ * Solid only ever creates/destroys the <canvas> elements (the Looper component) and calls
  * `registerLane` / `unregisterLane`; all drawing lives here in plain TS.
  */
 
@@ -161,34 +160,8 @@ export function unregisterPhaseDial(): void {
   stopIfIdle();
 }
 
-/**
- * The stage view's loop-progress fill rides the loop too (StageView.tsx): its scaleX follows the plain
- * loop phase, from this frame rather than a signal (invariant 6). Empty while no master loop exists.
- */
-let progress: { el: HTMLElement; last: number } | null = null;
-
-function drawProgress(): void {
-  if (!progress) return;
-  const p = looper.masterFramesValue() > 0 ? looper.phaseValue() : 0;
-  if (Math.abs(p - progress.last) < 0.001) return;
-  progress.last = p;
-  progress.el.style.transform = `scaleX(${p.toFixed(4)})`;
-}
-
-/** Register the stage view's loop-progress fill. Starts the shared rAF loop if nothing else has. */
-export function registerLoopProgress(el: HTMLElement): void {
-  progress = { el, last: -1 };
-  if (rafId === 0) rafId = requestAnimationFrame(frame);
-}
-
-/** Unregister the loop-progress fill; stops the loop when nothing else is registered. */
-export function unregisterLoopProgress(): void {
-  progress = null;
-  stopIfIdle();
-}
-
 function stopIfIdle(): void {
-  if (lanes.size === 0 && dial === null && meter === null && progress === null && rafId !== 0) {
+  if (lanes.size === 0 && dial === null && meter === null && rafId !== 0) {
     cancelAnimationFrame(rafId);
     rafId = 0;
   }
@@ -388,8 +361,9 @@ function drawPlayhead(lane: Lane, state: TrackState, waiting: boolean): void {
 
   if (state === 'RECORDING' && waiting) {
     // Armed for the downbeat: an amber (--dub, the lane's ARMED --sc) head rides the master phase in
-    // sync with the other lanes. Count-in / AUTO LISTEN have no master yet → no head at all.
-    if (looper.masterFramesValue() > 0) {
+    // sync with the other lanes. A count-in (a first take's, or a later take's from stopped loops, which
+    // restart from the top on its downbeat) and AUTO LISTEN have no phase to ride → no head at all.
+    if (looper.masterFramesValue() > 0 && !looper.countingValue()) {
       x = looper.phaseValue() * dw;
       color = lane.colors.overdubbing;
     }
@@ -464,7 +438,6 @@ function frame(): void {
   }
   drawDial();
   drawMeter();
-  drawProgress();
   rafId = requestAnimationFrame(frame);
 }
 

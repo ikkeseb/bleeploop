@@ -30,8 +30,10 @@ export interface TransportKeys {
 /**
  * Transport key → named action (`actions.ts`), on the selected track. The arrows and PageUp/PageDown
  * are what page-turner footswitches send; Backspace/Delete are a keyboard's take-back keys (CLEAR
- * wants a second press, see actions.ts); B opens and closes the stage view. None is a note-play key, a
- * drum pad, Esc or a digit. A letter matches either case. Help's Looper keys section lists this table.
+ * wants a second press, see actions.ts); B opens and closes the stage view, and V steps its look while
+ * it is open. None is a note-play key, Esc or a digit; V alone is also a drum pad (Hi Tom, DRUM_KIT),
+ * so outside the stage view it is left to the pads (see the handler). A letter matches either case.
+ * Help's Looper keys section lists this table.
  */
 export const KEY_ACTIONS: Readonly<Record<string, ActionId>> = {
   ' ': 'recDub',
@@ -45,6 +47,7 @@ export const KEY_ACTIONS: Readonly<Record<string, ActionId>> = {
   ArrowLeft: 'prevTrack',
   PageUp: 'prevTrack',
   b: 'stageView',
+  v: 'stageNextView',
 };
 
 /**
@@ -88,8 +91,10 @@ export function installTransportKeys(opts: TransportKeysOptions): TransportKeys 
 
     // The transport keys run their named action (KEY_ACTIONS). preventDefault stops Space, the arrows
     // and PageUp/PageDown from scrolling. A refused action says why on the selected lane (actions.ts).
+    // V steps the stage view's look only inside that view: outside it the key belongs to the drum pads
+    // (the digits' `padsLive` rule below is the same idea), so it is neither run nor default-prevented.
     const action = KEY_ACTIONS[e.code === 'Space' ? ' ' : e.key.length === 1 ? e.key.toLowerCase() : e.key];
-    if (action) {
+    if (action && (action !== 'stageNextView' || stageOpen())) {
       e.preventDefault();
       runAction(action);
       return;

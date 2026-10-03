@@ -33,7 +33,7 @@ export function anyTrackIn(...states: TrackState[]): boolean {
 }
 
 /** A lane volume (0..1.5, unity 1.0) as its dB read-out: `+0.0 dB`, `−6.0 dB`, `−∞` at silence. Shared by
- * the lane fader (`Looper.tsx`) and the stage view's read-only indicator. */
+ * the lane fader (`Looper.tsx`) and the slot's level (`SlotControls.tsx`). */
 export function volumeDb(v: number): string {
   if (v <= 0.0001) return '−∞';
   const db = 20 * Math.log10(v);

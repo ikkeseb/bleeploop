@@ -13,11 +13,12 @@ import { laneCue } from './gates';
  */
 
 /**
- * Display states add 'ARMED' — a later track that pressed REC but is still waiting for the master
- * loop boundary before its take begins. The engine reports this as RECORDING + `armed`; surfacing it
- * as its own state stops the lane from reading "recording" (red) for up to a full loop while nothing
- * is actually being kept (UX: the single most-bitten gap on every overdub), so it gets its own amber
- * treatment (data-state="armed").
+ * Display states add 'ARMED' — a track that pressed REC but is still waiting for its downbeat before
+ * its take begins: the end of a count-in (a first take's, or a later take's armed while the loops are
+ * stopped), or the master loop boundary (a later take armed beside playing loops). The engine reports
+ * this as RECORDING + `armed`; surfacing it as its own state stops the lane from reading "recording"
+ * (red) for up to a full loop while nothing is actually being kept (UX: the single most-bitten gap on
+ * every overdub), so it gets its own amber treatment (data-state="armed").
  * LISTENING is the AUTO REC sibling: first-track REC is waiting for input rather than a known grid edge.
  */
 type DisplayState = TrackState | 'ARMED' | 'LISTENING';
@@ -50,7 +51,7 @@ interface LaneView {
   cue: Accessor<string>;
   /** The well's message: the cue, else the pending stop, the armed wait or the AUTO REC listen; else ''. */
   wellMsg: Accessor<string>;
-  /** The count-in numeral (4-3-2-1) of an armed FIRST take; 0 otherwise. */
+  /** The count-in numeral (4-3-2-1) of an armed take that is counted in; 0 otherwise. */
   wellCount: Accessor<number>;
 }
 
@@ -85,17 +86,22 @@ export function createLaneView(i: number): LaneView {
   });
   // Only ARMED/LISTENING and a pending stop carry a well message; EMPTY shows nothing (the lane's record
   // affordance already says "press to record"). A refusal cue outranks every message while it lasts.
-  // A FIRST take (no master yet) is armed behind the forced count-in → the well counts it down big
-  // (4-3-2-1, the numeral is clock.countLeft); a LATER take waits for the loop boundary → plain text.
+  // A take behind the forced count-in → the well counts it down big (4-3-2-1, the numeral is
+  // clock.countLeft); a take waiting for the loop boundary → plain text. Which one is the engine's to
+  // say: a FIRST take (no master yet) is always counted in, and a LATER take is counted in when the
+  // engine counts (armed while every loop is stopped), which the engine store's reducer notes per lane
+  // as the count's beats arrive (`looper.trackCounted`) and holds until the lane leaves its wait (the
+  // numeral reads 0 before the first count beat is heard, and between the last one and the take). Never
+  // guessed from which lanes play.
+  const countedIn = () => displayState() === 'ARMED' && (looper.masterLengthFrames() === 0 || looper.trackCounted(i));
   const wellMsg = () => {
     if (cue()) return cue();
     if (fading()) return 'FADING OUT';
     if (stopping()) return 'STOPPING AT LOOP END';
-    if (displayState() === 'ARMED') return looper.masterLengthFrames() > 0 ? 'WAITING FOR DOWNBEAT' : 'COUNT-IN';
+    if (displayState() === 'ARMED') return countedIn() ? 'COUNT-IN' : 'WAITING FOR DOWNBEAT';
     if (displayState() === 'LISTENING') return 'WAITING FOR INPUT';
     return '';
   };
-  const wellCount = () =>
-    !cue() && displayState() === 'ARMED' && looper.masterLengthFrames() === 0 ? clock.countLeft() : 0;
+  const wellCount = () => (!cue() && countedIn() ? clock.countLeft() : 0);
   return { displayState, word, stopping, fading, muted, cue, wellMsg, wellCount };
 }

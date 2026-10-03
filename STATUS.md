@@ -16,9 +16,8 @@ loopback cable in, with the stray-sound bar, the input-gap rejection and four pl
 `native:smoke`, `swap` (filtered), `recall` and `tone-recall` green; `native:engine` green but its
 counter check, which WASAPI's switch phases fail on main too (`docs/VERIFY.md`, its baseline). The
 CLAP port layout (every declared port, a failed call silent): `native:smoke` and `swap` with Surge XT and
-Pro-Q, and `engine-smoke` with Surge XT Effects (CLAP) live, green. v0.5.2 (that layout) is prepared on
-main and not tagged: its `release:smoke` ran with no loopback cable in and failed `take` on a flat lane
-(boots, engine, device and exit passed); it owes a rerun with the cable in before the tag (D26). Driver
+Pro-Q, and `engine-smoke` with Surge XT Effects (CLAP) live, green. v0.5.2 (that layout) is released: its
+`release:smoke` passed with the cable in once the line out was turned up (`docs/VERIFY.md`, its row). Driver
 latency reports are not guitar latency; after a relevant change, rerun only the affected check.
 
 **Last play: 2026-09-28** (engine, a local release build, ASIO; a second player on a WASAPI build
@@ -64,6 +63,9 @@ it.
 - The click: silent when idle, stops with STOP ALL, and the count-in still clicks with CLICK off.
 - A later track starts at master phase with no seam; reverse's flip adds no step (machine:
   `tests/seam_continuity.rs`), but does its turn of direction click?
+- A later take from stopped loops: REC on an empty track with every loop stopped clicks one bar of
+  count-in, then every track starts from the top on the "1" and the take records from there; a press
+  that cancels the count leaves the loops stopped and silent (machine: `tests/later_arm.rs`).
 - Multiply: over a 1-bar loop, FIXED 4 on another lane grows the loop to 4 bars with no seam. FIXED
   off: a take stopped ~1.6 loops in grows to two loops, ~1.3 keeps one.
 - TRIM: halve an 8-bar lane while it plays (its first 4 bars from the next loop start); ↶ UNDO brings
@@ -87,6 +89,10 @@ it.
 - The six synths and the lane FX by ear.
 - A MIDI controller: unplugged mid-note gives a toast and releases the note; mod-wheel vibrato,
   pitch-bend and CC64 sustain feel.
+- The stage view's looks, Orbit and Strata (seen only on the engine fake, never over a jam): does the
+  light follow what is heard, does the count-in read from where you stand, does the learned pedal action
+  "Stage view: next look" feel right,
+  and does the app stay tight with it open on ASIO 128?
 - RETAKE and AUTO REC from a learned pedal: one press, one toggle; mid-take (and AUTO REC once a loop
   locks the tempo) the press is refused with its reason on the lane, as the greyed button is.
 
@@ -101,7 +107,6 @@ nothing is said.
 | D20 | A plugin call that outputs NaN or an infinity is silenced. Should it also damage the running take or layer, as an input gap does (the layer is dropped)? Today a bad stretch leaves silence in it; with DUB FEEDBACK 0 that replaces the loop there. | No. |
 | D21 | Make the engine's applied state the one authority: the feed carries it whole, the snapshot and the load carry each lane's mix with its PCM, and the settings mirror and the UI's mix copies go. L, wire changes, the fader's feel to re-check. The races it closes reproduce as ignored red tests (`d21_*` in `src-tauri/src/engine_io/tests.rs`, run with `-- --ignored`); the one a player meets: an import or recovery plays a lane saved muted or quieter for ~90 ms at full level. Sending the mix before the load alone lets a recovery that loses the race to a live take rewrite that take's mix (`recovery-import-failure`). A timed-out load that later plays and a rate switch that drops a load are a separate protocol question. | Not started. |
 | D22 | Remove the native MIDI stack (`src-tauri/src/engine_io/midi/`, about 1.8k lines with tests, and `midir`)? It is built and tested but never started; MIDI arrives through Web MIDI. | Keep it. |
-| D23 | The engine had no ramp at most of its edges: a sustained note stepped there 11 to 32 times its own slope. Built on `agent/d23-ramps` (not main): an overdub's first and last 5 ms are stored linear ramps (DUB FEEDBACK ramps from 1 too; the punch-out fades back to what the dub overwrote, with no tail after the press) and GO LIVE ramps the slot's input over 5 ms (the plugin's tail rings out). Machine-proven: `seam_continuity` a and the two live tests in `tests/slots.rs` green, every exact-sum test re-derived, engine-smoke and the 48 kHz loopback green on the branch. It changes recorded audio at a dub's edges (an attack right on the punch-in is softened over 5 ms). `agent/d23-swaps`, stacked on it, crossfades an UNDO swap and ramps a lane's PLAY and STOP mid-loop over 5 ms (played audio only; a scheduled END STOP and a finished FADE still cut on their frame); `seam_continuity` b and g green, two cross-family reviews' findings fixed, engine-smoke and the loopback green on it. A STOP inside an undo crossfade fades the two loops on their own ramps (no step). The branch holds main as of the v0.5.2 prep and passes the push gates there (669 tests), so the jam plays the tree that would land; a read of the whole branch by a third model found nothing more. Land the branches after the jam hears them? | Land both if the jam hears no click and no dulled attack. |
+| D23 | The engine had no ramp at most of its edges: a sustained note stepped there 11 to 32 times its own slope. Built on `agent/d23-ramps` (not main): an overdub's first and last 5 ms are stored linear ramps (DUB FEEDBACK ramps from 1 too; the punch-out fades back to what the dub overwrote, with no tail after the press) and GO LIVE ramps the slot's input over 5 ms (the plugin's tail rings out). Machine-proven: `seam_continuity` a and the two live tests in `tests/slots.rs` green, every exact-sum test re-derived, engine-smoke and the 48 kHz loopback green on the branch. It changes recorded audio at a dub's edges (an attack right on the punch-in is softened over 5 ms). `agent/d23-swaps`, stacked on it, crossfades an UNDO swap and ramps a lane's PLAY and STOP mid-loop over 5 ms (played audio only; a scheduled END STOP and a finished FADE still cut on their frame); `seam_continuity` b and g green, two cross-family reviews' findings fixed, engine-smoke and the loopback green on it. A STOP inside an undo crossfade fades the two loops on their own ramps (no step). The branch holds main as of D28 (main has brought no Rust since the push gates passed there, 669 tests), so the jam plays the tree that would land; a read of the whole branch by a third model found nothing more. Land the branches after the jam hears them? | Land both if the jam hears no click and no dulled attack. |
 | D24 | A REC/DUB press while a first take's aligned tail is in flight is swallowed: it counts as a repeated stop, which cannot lengthen the take (`tests/first_take.rs` free_d encodes this). Start one overdub on the commit frame instead, as REC to DUB does mid-take? The engine's held commands make it small (a recorder flag and a wait until the window's end). Red test, ignored: free_i in `tests/first_take.rs`. | Keep it a stop. |
 | D25 | In the first ~2.5 s after a WASAPI open the input join can trim or starve (about one open in ten after ASIO ran in the process, one in 43 without), and a take that overlaps it is rejected; `native:engine`'s counter check fails on it (`src-tauri/AGENTS.md` § Open threads). First, with Signal Desktop and Focusrite Notifier closed by the owner, rerun the two rig series: is it this PC? Then: change the trim rule so a late double pull and a push and a pull swapping order no longer trim (no latency change; 6 of the 9 traced, by a reading of the traces: no replay of them through the pipe proves it yet), raise the setpoint to the pipe's own rule (33–43 ms: 8–18 ms more input latency on WASAPI, owing the L1+L2 measurements), or accept it on the fallback path and scope the counter check? | The rerun, then the trim rule; the setpoint stays. |
-| D26 | `release:smoke`'s take records input 2, so without the loopback cable it reads flat and a release waits for the owner to plug it (v0.5.2 did). When the input take reads flat, take a built-in synth note instead and print which one passed? The release build's input path is then proven only on a run with the cable in. | Keep the cable. |

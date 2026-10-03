@@ -599,10 +599,12 @@ fn a_tail_cached_as_a_fill_starts_plays_the_tiled_take() {
         rig.press(Command::Copy(0));
         rig.idle();
         rig.press(Command::Clear(1));
-        rig.press(Command::PlayStop(0));
         rig.set(Command::SetFixedLength(true));
         rig.set(Command::SetFixedBars(1.0));
+        // Armed beside the playing loop, which then stops: the take keeps the grid's next boundary (armed
+        // on an idle transport it would count in and restart the loops instead).
         rig.press(Command::RecDub(1));
+        rig.press(Command::PlayStop(0));
         let c = rig.start_frame() + fpb;
         rig.set_input(move |f| if f < c { -code(f) } else { 0.0 });
         let anchor = rig.anchor();

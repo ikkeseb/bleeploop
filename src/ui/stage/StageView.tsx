@@ -1,178 +1,300 @@
-import { For, Show, createMemo, onCleanup, onMount } from 'solid-js';
+import { For, Show, createEffect, createMemo, createSignal, on, onCleanup, onMount, untrack } from 'solid-js';
 import { clock, looper, sampleRate } from '../state/audio';
-import { registerLane, registerLoopProgress, unregisterLane, unregisterLoopProgress } from '../looper/waveform';
-import { masterBars, volumeDb } from '../looper/shared';
+import { masterBars } from '../looper/shared';
 import { DATA_STATE, createLaneView, type LaneWord } from '../looper/lane-state';
+import { feed, type LaneKind } from './stage-feed';
+import { startStage, type StageHandle } from './stage-loop';
+import { currentStageView, nextStageView } from './stage-store';
 import './stage.css';
 
 /**
- * The stage view: a full-window performance layer over the normal UI, readable from 1.5–3 m with a
- * guitar in hand. A header strip (BPM, the loop length, the bar of the loop that plays, a four-segment
- * beat bar, the loop's progress)
- * over five equal lanes, each a state pillar (lane number + a big state word on a tint of its state
- * colour) · the lane's waveform and playhead · read-only volume/MUTE/REV indicators. The selected lane
- * carries a warm-white edge; a pointer press on a lane selects it; the only control is EXIT.
+ * The stage view: a full-window performance layer over the normal UI, a visualizer first. One canvas
+ * holds the look (`views.ts`: each lane a form that carries its loop, lights where it sounds and takes
+ * its state's colour); a thin HUD at the edges keeps what a player with a guitar in hand must still
+ * read: the lane chips (state by colour, the selected one warm-white), the tempo with the beat and the
+ * bar, a message line (a refused press's reason, a wait, a pending stop) and the count-in numeral.
+ * Two ghost buttons (the view switch and exit) hide when the pointer rests.
  *
- * A presentation layer like the looper lanes: the lane words, well messages and count-in come from
- * `lane-state.ts` (the derivation `Looper.tsx` reads), the waveforms from the same rAF renderer
- * (`waveform.ts`, which also drives the progress fill — invariant 6), and every press still goes through
- * the transport keys and named actions, which stay live here. Mounted only while open
- * (`stage-store.ts`); the normal UI stays mounted underneath, inert and hidden (app.tsx).
+ * Solid lives here and only here: the lane derivation is `lane-state.ts` (the one the looper lanes
+ * read), and effects mirror it into the plain feed (`stage-feed.ts`) the draw loop reads (invariant 6).
+ * Every press still goes through the transport keys and named actions, which stay live. Mounted only
+ * while open (`stage-store.ts`); the normal UI stays mounted underneath, inert and hidden (app.tsx).
  */
 
-/** The stage word for each `LaneWord`: short, so the largest size fits the pillar. */
-const STAGE_WORD: Record<Exclude<LaneWord, 'TAKE'>, string> = {
-  EMPTY: 'EMPTY',
-  RECORDING: 'REC',
-  ARMED: 'ARMED',
-  LISTENING: 'LISTEN',
-  OVERDUBBING: 'DUB',
-  PLAYING: 'PLAY',
-  STOPPED: 'STOP',
-  FADING: 'FADING',
-  ENDING: 'ENDING',
-  MUTED: 'MUTED',
+/** How a chip names its lane's state to a screen reader. */
+const SPOKEN: Record<Exclude<LaneWord, 'TAKE'>, string> = {
+  EMPTY: 'empty',
+  RECORDING: 'recording',
+  ARMED: 'armed',
+  LISTENING: 'listening for input',
+  OVERDUBBING: 'overdubbing',
+  PLAYING: 'playing',
+  STOPPED: 'stopped',
+  FADING: 'fading out',
+  ENDING: 'stopping at the loop end',
+  MUTED: 'muted',
 };
 
-function StageLane(props: { index: number }) {
-  const track = looper.track(props.index);
-  const { displayState, word, stopping, muted, cue, wellMsg, wellCount } = createLaneView(props.index);
-  const text = () => {
-    const w = word();
-    return w === 'TAKE' ? `TAKE ${track().retakePass}` : STAGE_WORD[w];
-  };
-  const selected = () => looper.selectedTrack() === props.index;
+/** The message line's colour follows what it says. */
+type Tone = 'cue' | 'wait' | 'listen' | 'stop' | 'take';
 
-  // Drawn by waveform.ts like the looper lane's canvas: Solid only mounts and (de)registers it.
-  let canvasEl: HTMLCanvasElement | undefined;
-  onMount(() => {
-    if (canvasEl) registerLane(props.index, canvasEl);
-  });
-  onCleanup(() => {
-    if (canvasEl) unregisterLane(canvasEl);
-  });
-
-  return (
-    <div
-      class="sv-lane"
-      classList={{ 'is-selected': selected(), 'is-cued': cue() !== '', 'is-stopping': stopping() }}
-      data-state={DATA_STATE[displayState()]}
-      data-muted={muted() ? 'true' : undefined}
-      role="group"
-      aria-label={`Track ${props.index + 1}, ${text()}`}
-      aria-current={selected() ? 'true' : undefined}
-      onPointerDown={() => looper.selectTrack(props.index)}
-    >
-      <div class="sv-pillar">
-        <span class="sv-num">{props.index + 1}</span>
-        <span class="sv-word">{text()}</span>
-      </div>
-
-      <div class="sv-well">
-        <canvas ref={canvasEl} />
-        <Show when={wellMsg()}>
-          <div class="sv-msg" classList={{ 'is-cue': cue() !== '' }}>
-            <Show when={wellCount() > 0}>
-              <span class="sv-count" aria-hidden="true">
-                {wellCount()}
-              </span>
-            </Show>
-            <span class="sv-msg__text">{wellMsg()}</span>
-          </div>
-        </Show>
-      </div>
-
-      <div class="sv-ind">
-        <span class="sv-vol">
-          <span class="sv-label">VOL</span>
-          <span class="sv-vol__db">{volumeDb(looper.trackVolume(props.index))}</span>
-        </span>
-        <span class="sv-flags">
-          <span class="sv-flag" classList={{ 'is-on': muted() }}>
-            MUTE
-          </span>
-          <span class="sv-flag" classList={{ 'is-on': track().reversed }}>
-            REV
-          </span>
-        </span>
-      </div>
-    </div>
-  );
-}
+const HUD_LIT_MS = 2000; // the HUD brightens this long after a change
+const CONTROLS_MS = 3000; // the two buttons hide after this long without the pointer
 
 export function StageView(props: { onExit: () => void }) {
-  const masterFrames = () => looper.masterLengthFrames();
-  const bars = () => masterBars(masterFrames(), clock.bpm(), sampleRate());
-  // The bar of the loop that plays (1-based; 0 with no loop or no beat): re-read on each beat the beat
-  // bar lights, from the plain loop phase (invariant 6: the beat signal, never the draw loop). The phase
-  // is rounded to the nearest beat first, since a beat's signal and the phase are read a moment apart
-  // and a downbeat must not read as the bar before it.
+  const lanes = Array.from({ length: looper.trackCount }, (_, i) => ({ i, track: looper.track(i), ...createLaneView(i) }));
+  type Lane = (typeof lanes)[number];
+
+  const bars = createMemo(() => masterBars(looper.masterLengthFrames(), clock.bpm(), sampleRate()));
+  /** The count-in numeral: whichever lane counts in (a first take, or any lane the engine counts in). */
+  const count = createMemo(() => {
+    for (const l of lanes) if (l.wellCount() > 0) return l.wellCount();
+    return 0;
+  });
+  /** The loop moves (`feed.moving`): otherwise the views show it cued at its start. */
+  const moving = createMemo(() => {
+    const overLoop = looper.masterLengthFrames() > 0;
+    let waits = false;
+    for (const l of lanes) {
+      const d = l.displayState();
+      if (d === 'PLAYING' || d === 'OVERDUBBING' || d === 'RECORDING') return true;
+      // An armed lane waiting for the loop's boundary rides its phase; one the engine counts in (a
+      // later take from stopped loops) waits at the loop's start, where its downbeat restarts it.
+      if (d === 'ARMED' && overLoop && !looper.trackCounted(l.i)) waits = true;
+    }
+    return waits;
+  });
+  /** The beat is worth showing: the loop moves, or a count-in runs. */
+  const live = () => moving() || count() > 0;
+  // The bar of the loop that plays (1-based; 0 with no loop): re-read on each beat from the plain loop
+  // phase (invariant 6: the beat signal, never the draw loop). The phase is rounded to the nearest beat
+  // first, since a beat's signal and the phase are read a moment apart and a downbeat must not read as
+  // the bar before it. At rest the loop is cued at its start: bar 1.
   const loopBar = createMemo(() => {
     clock.beat();
     const beats = bars() * 4;
-    if (beats === 0 || !clock.running()) return 0;
+    if (beats === 0) return 0;
+    if (!moving()) return 1;
     return Math.floor((Math.round(looper.phaseValue() * beats) % beats) / 4) + 1;
   });
 
+  const spoken = (l: Lane): string => {
+    const w = l.word();
+    return w === 'TAKE' ? `recording, take ${l.track().retakePass}` : SPOKEN[w];
+  };
+  /** What lane `l` has to say, with its tone: a wait, a pending stop or a rolling RETAKE's pass. */
+  const said = (l: Lane): string => {
+    const msg = l.wellMsg();
+    if (msg) return `${l.fading() || l.stopping() ? 'stop' : l.displayState() === 'LISTENING' ? 'listen' : 'wait'}|${l.i + 1} · ${msg}`;
+    return l.word() === 'TAKE' ? `take|${l.i + 1} · TAKE ${l.track().retakePass}` : '';
+  };
+  // The message line, as "tone|text": a refused press's reason outranks everything; under a count-in
+  // numeral nothing else speaks; else the selected lane's message, else the first lane that has one.
+  const message = createMemo(() => {
+    for (const l of lanes) if (l.cue()) return `cue|${l.i + 1} · ${l.cue()}`;
+    if (count() > 0) return '';
+    const own = said(lanes[looper.selectedTrack()] ?? lanes[0]);
+    if (own) return own;
+    for (const l of lanes) if (said(l)) return said(l);
+    return '';
+  });
+  // The line leaves over 160 ms: its last text stays that long, then the element empties.
+  const [shown, setShown] = createSignal('');
+  const [leaving, setLeaving] = createSignal(false);
+  let leaveTimer: ReturnType<typeof setTimeout> | undefined;
+  createEffect(() => {
+    const m = message();
+    clearTimeout(leaveTimer);
+    if (m) {
+      setShown(m);
+      setLeaving(false);
+    } else if (untrack(shown)) {
+      setLeaving(true);
+      leaveTimer = setTimeout(() => {
+        setShown('');
+        setLeaving(false);
+      }, 160);
+    }
+  });
+  const tone = () => shown().slice(0, shown().indexOf('|')) as Tone | '';
+  const text = () => shown().slice(shown().indexOf('|') + 1);
+
+  // ── The plain feed: signals are read here, in effects, and written to what the draw loop reads ──
+  // A cue dismissed while the stage was closed does not flash on the next open.
+  feed.cueAt.fill(0);
+  for (const l of lanes) {
+    createEffect(() => {
+      feed.kind[l.i] = DATA_STATE[l.displayState()] as LaneKind;
+      feed.fading[l.i] = l.fading();
+      feed.stopping[l.i] = l.stopping();
+      feed.muted[l.i] = l.muted();
+      feed.volume[l.i] = looper.trackVolume(l.i);
+    });
+    createEffect(() => {
+      if (l.cue()) feed.cueAt[l.i] = performance.now();
+    });
+  }
+  createEffect(() => void (feed.selected = looper.selectedTrack()));
+  createEffect(() => void (feed.beatsPerLoop = bars() * 4));
+  createEffect(() => void (feed.running = clock.running()));
+  createEffect(() => void (feed.counting = count() > 0));
+  createEffect(() => void (feed.moving = moving()));
+  // Each beat the engine makes heard (and each step of a count-in), a few a second.
+  createEffect(
+    on(
+      [clock.beat, clock.countLeft],
+      ([beat]) => {
+        feed.beat = beat;
+        feed.beatSeq++;
+      },
+      { defer: true },
+    ),
+  );
+  feed.beat = clock.beat();
+  const reduced = matchMedia('(prefers-reduced-motion: reduce)');
+  const onReduced = (): void => void (feed.reduced = reduced.matches);
+  onReduced();
+  reduced.addEventListener('change', onReduced);
+  onCleanup(() => reduced.removeEventListener('change', onReduced));
+
+  // The HUD rests at 0.7 and brightens for a moment when what it says changes (never for the beat).
+  const [lit, setLit] = createSignal(false);
+  let litTimer: ReturnType<typeof setTimeout> | undefined;
+  createEffect(
+    on(
+      () => [looper.selectedTrack(), clock.bpm(), bars(), currentStageView().id, ...lanes.map((l) => l.word())].join('|'),
+      () => {
+        setLit(true);
+        clearTimeout(litTimer);
+        litTimer = setTimeout(() => setLit(false), HUD_LIT_MS);
+      },
+      { defer: true },
+    ),
+  );
+
+  // The two buttons (and the pointer) hide when the pointer rests; a move or any key brings them back.
+  const [idle, setIdle] = createSignal(false);
+  let idleTimer: ReturnType<typeof setTimeout> | undefined;
+  const wake = (): void => {
+    if (idle()) setIdle(false);
+    clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => setIdle(true), CONTROLS_MS);
+  };
+
   // A dialog over an inert page: focus moves into it (the root is a tabindex=-1 focus target, not a
-  // control, so the transport keys stay live — transport-keys.ts's yield rule).
+  // control, so the transport keys stay live: transport-keys.ts's yield rule).
   let root: HTMLDivElement | undefined;
-  let fill: HTMLElement | undefined;
+  let canvas: HTMLCanvasElement | undefined;
+  let stage: StageHandle | null = null;
   onMount(() => {
     queueMicrotask(() => root?.focus());
-    if (fill) registerLoopProgress(fill);
+    if (canvas && root) stage = startStage(canvas, root, currentStageView());
+    window.addEventListener('pointermove', wake);
+    window.addEventListener('pointerdown', wake);
+    window.addEventListener('keydown', wake);
+    wake();
   });
-  onCleanup(unregisterLoopProgress);
+  createEffect(() => stage?.setView(currentStageView()));
+  onCleanup(() => {
+    stage?.stop();
+    window.removeEventListener('pointermove', wake);
+    window.removeEventListener('pointerdown', wake);
+    window.removeEventListener('keydown', wake);
+    clearTimeout(idleTimer);
+    clearTimeout(litTimer);
+    clearTimeout(leaveTimer);
+  });
+
+  /** A pointer press on a lane's form selects it (the view's own hit test); the buttons keep theirs. */
+  const onPointerDown = (e: PointerEvent): void => {
+    if ((e.target as Element).closest('button')) return;
+    const i = stage?.hit(e.clientX, e.clientY) ?? -1;
+    if (i >= 0) looper.selectTrack(i);
+  };
 
   return (
-    <div class="sv" ref={root} role="dialog" aria-modal="true" aria-label="Stage view" tabindex={-1}>
-      <header class="sv-head">
-        <div class="sv-stat sv-stat--bpm">
-          <span class="sv-label">BPM</span>
-          <span class="sv-stat__val">{clock.bpm()}</span>
-        </div>
-        <div class="sv-stat sv-stat--loop">
-          <span class="sv-label">LOOP</span>
-          <Show when={masterFrames() > 0} fallback={<span class="sv-stat__val sv-stat__val--none">—</span>}>
-            <span class="sv-stat__val">
-              {bars()}
-              <span class="sv-unit">{bars() === 1 ? 'BAR' : 'BARS'}</span>
-              <span class="sv-secs">{(masterFrames() / sampleRate()).toFixed(1)} s</span>
-            </span>
-          </Show>
-        </div>
-        <div class="sv-stat sv-stat--bar">
-          <span class="sv-label">BAR</span>
-          <Show when={loopBar() > 0} fallback={<span class="sv-stat__val sv-stat__val--none">—</span>}>
-            <span class="sv-stat__val">
-              {loopBar()}
-              <span class="sv-unit">/ {bars()}</span>
-            </span>
-          </Show>
-        </div>
-        <div class="sv-beats" role="img" aria-label={clock.running() ? `Beat ${clock.beat() + 1}` : 'Transport idle'}>
-          <For each={[0, 1, 2, 3]}>
-            {(b) => (
-              <i class="sv-beat" classList={{ 'sv-beat--one': b === 0, 'is-on': clock.running() && clock.beat() === b }}>
-                {b + 1}
-              </i>
+    <div
+      class="sv"
+      classList={{ 'is-idle': idle() }}
+      ref={root}
+      role="dialog"
+      aria-modal="true"
+      aria-label="Stage view"
+      tabindex={-1}
+      data-view={currentStageView().id}
+      style={{ '--sv-beat': `${(60 / Math.max(20, clock.bpm())).toFixed(3)}s` }}
+      onPointerDown={onPointerDown}
+    >
+      <canvas class="sv-canvas" ref={canvas} aria-hidden="true" />
+
+      <div class="sv-hud" classList={{ 'is-lit': lit() }}>
+        <div class="sv-chips" role="list" aria-label="Tracks">
+          <For each={lanes}>
+            {(l) => (
+              <span
+                class="sv-chip"
+                classList={{ 'is-selected': looper.selectedTrack() === l.i, 'is-stopping': l.stopping() }}
+                role="listitem"
+                data-state={DATA_STATE[l.displayState()]}
+                data-muted={l.word() === 'MUTED' ? 'true' : undefined}
+                aria-label={`Track ${l.i + 1}, ${spoken(l)}`}
+                aria-current={looper.selectedTrack() === l.i ? 'true' : undefined}
+              >
+                {l.i + 1}
+              </span>
             )}
           </For>
         </div>
-        <button type="button" class="sv-exit" tabindex="-1" aria-label="Exit stage view" title="Exit stage view (B or Esc)" onClick={props.onExit}>
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-            <path d="M6 6l12 12M18 6L6 18" stroke-linecap="round" />
-          </svg>
-        </button>
-      </header>
 
-      {/* The loop's progress: the fill's scaleX is set per frame by waveform.ts; the ticks mark the bars. */}
-      <div class="sv-progress" style={{ '--bars': String(Math.max(1, bars())) }} aria-hidden="true">
-        <i class="sv-progress__fill" ref={fill} />
-      </div>
+        <div class="sv-tempo">
+          <span class="sv-bpm" aria-label={`${Math.round(clock.bpm())} BPM`}>
+            {Math.round(clock.bpm())}
+          </span>
+          <Show when={live() || bars() > 0}>
+            <span class="sv-dots" role="img" aria-label={live() ? `Beat ${clock.beat() + 1}` : 'Transport idle'}>
+              <For each={[0, 1, 2, 3]}>
+                {(b) => <i class="sv-dot" classList={{ 'sv-dot--one': b === 0, 'is-on': live() && clock.beat() === b }} />}
+              </For>
+            </span>
+          </Show>
+          <Show when={bars() > 0}>
+            <span class="sv-bar" aria-label={`Bar ${loopBar()} of ${bars()}`}>
+              {loopBar()}
+              <span class="sv-bar__of"> / {bars()}</span>
+            </span>
+          </Show>
+        </div>
 
-      <div class="sv-lanes">
-        <For each={Array.from({ length: looper.trackCount }, (_, i) => i)}>{(i) => <StageLane index={i} />}</For>
+        <div class="sv-count" aria-live="assertive">
+          <Show when={count()} keyed>
+            {(n) => <span class="sv-count__n">{n}</span>}
+          </Show>
+        </div>
+
+        <div class="sv-msg" classList={{ 'is-leaving': leaving() }} data-tone={tone() || undefined} role="status" aria-live="polite">
+          {text()}
+        </div>
+
+        <div class="sv-ctl" classList={{ 'is-idle': idle() }}>
+          <button
+            type="button"
+            class="sv-btn sv-btn--view"
+            tabindex="-1"
+            aria-label={`Stage look: ${currentStageView().name.toLowerCase()}. Next look`}
+            title="Next stage view (V)"
+            onClick={nextStageView}
+          >
+            <span class="sv-btn__name">{currentStageView().name}</span>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+              <path d="M9 6l6 6-6 6" stroke-linecap="round" stroke-linejoin="round" />
+            </svg>
+          </button>
+          <button type="button" class="sv-btn sv-btn--exit" tabindex="-1" aria-label="Exit stage view" title="Exit stage view (B or Esc)" onClick={props.onExit}>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+              <path d="M6 6l12 12M18 6L6 18" stroke-linecap="round" />
+            </svg>
+          </button>
+        </div>
       </div>
     </div>
   );
