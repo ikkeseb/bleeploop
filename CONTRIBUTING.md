@@ -8,7 +8,8 @@ interface X at buffer Y") and pull requests are welcome.
 1. Fork, branch from `main`, open the PR against `main`.
 2. `pnpm install`, then make `pnpm check` pass (typecheck, lint, the capability-boundary guard and the
    deterministic `verify/` guards). It is also the pre-push hook. The engine's tests are
-   `pnpm test:engine` (`cargo test -p lf-engine`); CI runs them on every push.
+   `pnpm test:engine` (`cargo test -p lf-engine`); CI runs them on every push that is not
+   docs-only.
 3. CI runs the browser probes (`pnpm probe --ci`); `pnpm probe <name>` runs one locally. Both need
    `pnpm exec playwright install chromium` once.
 4. If you touched `src-tauri/`, run `cargo check` in `src-tauri/` (Windows). The ASIO feature is

@@ -25,8 +25,8 @@ Each guard runs the real source; none carries a hand-ported copy of it. There ar
 
 - **Pure imports.** Modules with no DOM or timer dependency load directly via Node's TS type-stripping
   (`verify/guards/quantize.mjs` imports `src/ui/state/quantize.ts`).
-- **Modules under the hooks.** A guard that imports `verify/harness/hooks.ts` can load any `src/` module
-  (Solid, `import.meta.env`, extensionless imports) and gets a fresh copy per `?g=N` query, so module-load
+- **Modules under the hooks.** A guard that imports `verify/harness/hooks.ts` can load any `.ts` module
+  under `src/` (Solid, `import.meta.env`, extensionless imports) and gets a fresh copy per `?g=N` query, so module-load
   state re-runs (`verify/guards/layout-store.mjs`).
 
 `verify/guards/docs.mjs` is the docs guard: cited paths exist, cited shas resolve (the repo
