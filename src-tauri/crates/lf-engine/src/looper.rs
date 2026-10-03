@@ -785,10 +785,13 @@ impl Looper {
             LaneState::Empty => {}
             LaneState::Recording | LaneState::Overdubbing => {
                 // An overdub's lane fades out from the press while its capture runs on to the window's
-                // end, which starts no second tail (D23).
+                // end, which starts no second tail (D23). That capture keeps writing the loop the tail
+                // reads, ahead of the read head under an alignment near a whole loop: the tail is cached
+                // at the press.
                 if self.sounds(i) {
                     let src = self.lanes[i].audible;
                     self.ramp_level(i, cx.now, 0.0, src);
+                    self.cache_outgoing(i, cx.now, src, false);
                 }
                 if let Some(rec) = self.rec.as_mut() {
                     rec.stop_playback = true;
@@ -1684,27 +1687,26 @@ impl Looper {
     /// STOPPED on this frame; with `tail` (every stop but one scheduled: END STOP's boundary, a FADE's
     /// end) what it was playing fades out over the punch ramp's N frames from here, from the level heard
     /// (a FADE's attenuation included), and plays on from the loop heard at the press (D23, `Voice`);
-    /// a discarded layer's restore caches it first (`protect`).
+    /// a discarded layer's restore caches it first (`protect`). Without `tail` every edge ends on this
+    /// frame, an undo's outgoing loop switching on it too: the lane is silent from it.
     fn stop(&mut self, cx: &mut Cx, i: usize, tail: bool) {
         let t = self.lanes[i];
         if t.state == LaneState::Empty {
             return;
         }
-        if self.sounds(i) {
-            if tail {
-                // The FADE's ramp ends with its flags below: its level at the press carries into the tail.
-                let r2 = t.fade_from.zip(t.stop_at).map_or(1.0, |(from, to)| {
-                    let r = ((to - cx.now) as f64 * (1.0 / (to - from).max(1) as f64)).clamp(0.0, 1.0);
-                    r * r
-                });
-                self.ramp_level(i, cx.now, 0.0, t.audible);
-                self.lanes[i].voice.from_level *= r2;
-                if r2 != 1.0 {
-                    let n = self.punch as usize;
-                    self.cache[i * n..(i + 1) * n].iter_mut().for_each(|y| *y *= r2);
-                }
-            } else {
-                self.lanes[i].voice.from = SETTLED;
+        if !tail {
+            self.lanes[i].voice = Voice::settled(t.audible);
+        } else if self.sounds(i) {
+            // The FADE's ramp ends with its flags below: its level at the press carries into the tail.
+            let r2 = t.fade_from.zip(t.stop_at).map_or(1.0, |(from, to)| {
+                let r = ((to - cx.now) as f64 * (1.0 / (to - from).max(1) as f64)).clamp(0.0, 1.0);
+                r * r
+            });
+            self.ramp_level(i, cx.now, 0.0, t.audible);
+            self.lanes[i].voice.from_level *= r2;
+            if r2 != 1.0 {
+                let n = self.punch as usize;
+                self.cache[i * n..(i + 1) * n].iter_mut().for_each(|y| *y *= r2);
             }
         }
         self.lanes[i].stop_at = None;
@@ -1952,7 +1954,8 @@ impl Looper {
     /// D23: lane `i`'s outgoing cache (`Voice`) restarts at `now`, keeping what it still held for the
     /// frames from `now` on, and takes in what the lane's level ramp plays from `src` over the next N
     /// frames, as the ramp goes on (a tail falls to 0 on its own frames), and, `fade_out`, faded out over
-    /// them too (an undo's outgoing loop: the lane fades the new one in over the same frames). The ramp
+    /// them too, what it still held included (an undo's outgoing loop: the lane fades the new one in over
+    /// the same frames, so identical loops sum to the loop through any overlap of switches). The ramp
     /// then rests on the lane's state. Each sample is read at its grid phase in heard order (the source's
     /// orientation, a multiply's extension read through the old loop), and what a block job has still to
     /// write there is taken from the job's source (`Job::ahead`): the cache never depends on how far a
@@ -1964,6 +1967,12 @@ impl Looper {
         let cache = &mut self.cache[row..row + n];
         cache.copy_within(shift.., 0);
         cache[n - shift..].fill(0.0);
+        if fade_out {
+            // What the cache still held was heard too: it fades out with the rest.
+            for (k, y) in cache.iter_mut().enumerate() {
+                *y *= 1.0 - k as f64 / n as f64;
+            }
+        }
         if master > 0 {
             let extending = if self.lanes[i].extending > 0 { self.lanes[i].extending } else { Frame::MAX };
             let mut pos = loop_pos(now, anchor, master);

@@ -750,3 +750,130 @@ fn a_five_lane_burst_of_edges_allocates_nothing() {
     assert_eq!(common::violation_count(), before, "the burst allocated");
     assert!((0..5).all(|i| rig.state(i) == LaneState::Playing) && rig.anchor() == b + n / 2 + 10);
 }
+
+#[test]
+fn a_scheduled_stop_on_an_undos_switch_is_silent_from_its_frame() {
+    // An UNDO switching on the boundary a scheduled stop lands on (END STOP's, then a FADE's end): the
+    // stop retires every edge on that frame, the undo's outgoing loop too, so the lane is silent from it.
+    let (mut rig, master) = code_loop(128, 2);
+    let (n, fpb) = (ramp(rig.sr), rig.fpb());
+    let (pre, layered) = dubbed(&mut rig);
+    let anchor = rig.anchor();
+    let p = |f: Frame| pos_at(anchor, master, f);
+    rig.advance_to(rig.next_boundary() + fpb / 3);
+    rig.keep_output();
+    let from = rig.frame;
+    let b = rig.next_boundary();
+    rig.press(Command::Undo(0));
+    rig.set(Command::SetLoopEndStop(true));
+    rig.press(Command::PlayStop(0));
+    assert_eq!(rig.state(0), LaneState::Playing, "END STOP waits for the boundary");
+    rig.advance_to(b + n + 100);
+    assert_eq!(reported(&rig, 0, LaneState::Stopped, from), Some(b));
+    assert_eq!(rig.pcm(0), pre, "the undo took");
+    heard(&rig, from, b, |f| layered[p(f)], "END STOP: the loop heard up to the boundary");
+    heard(&rig, b, rig.frame, |_| 0.0, "END STOP: silent from the boundary");
+
+    // FADE: an UNDO (the redo) and a one-bar FADE pressed in the loop's first bar both land on its end.
+    rig.set(Command::SetLoopEndStop(false));
+    rig.set(Command::SetFadeBars(1));
+    rig.press(Command::PlayStop(0));
+    let anchor = rig.anchor();
+    let p = |f: Frame| pos_at(anchor, master, f);
+    rig.advance_to(anchor + fpb / 3);
+    rig.keep_output();
+    let from = rig.frame;
+    let b = anchor + master;
+    rig.press(Command::Undo(0));
+    let press = rig.frame;
+    rig.press(Command::Action(lf_engine::Action::FadeAll));
+    rig.advance_to(b + n + 100);
+    assert_eq!(reported(&rig, 0, LaneState::Stopped, from), Some(b), "the FADE ends on the loop boundary");
+    assert_eq!(rig.pcm(0), layered, "the redo took");
+    let faded = |f: Frame| {
+        let r = ((b - f) as f64 * (1.0 / (b - press) as f64)).clamp(0.0, 1.0);
+        (r * r * pre[p(f)] as f64) as f32
+    };
+    heard(&rig, from, press, |f| pre[p(f)], "FADE: the loop heard up to the press");
+    heard(&rig, press, b, faded, "FADE: the loop heard, faded");
+    heard(&rig, b, rig.frame, |_| 0.0, "FADE: silent from its end");
+}
+
+#[test]
+fn play_stop_closing_a_dub_caches_its_tail_before_the_capture_running_on_reaches_it() {
+    // An accepted alignment of a loop less 100 frames: from the press PLAY/STOP closing a dub fades the
+    // lane out while the capture writes 100 positions ahead of the read head until its aligned end. The
+    // tail plays the loop as it stood at the press, at any block size.
+    const ALIGN: Frame = 38_400 - 100;
+    let n = ramp(48000);
+    let mut kept = Vec::new();
+    for block in [1, 128] {
+        let mut rig = Rig::with(Opts { sr: 48000, start: 48000, align: ALIGN, ..Default::default() });
+        rig.set(Command::SetBpm(300.0));
+        rig.set(Command::SetFixedLength(true));
+        rig.set(Command::SetFixedBars(1.0));
+        rig.set_input(code);
+        rig.press(Command::RecDub(0));
+        rig.advance_to(rig.end_frame() + 1);
+        rig.set(Command::SetFixedLength(false));
+        rig.set_level(0.0);
+        rig.idle();
+        assert_eq!(rig.state(0), LaneState::Playing, "block {block}: the first take committed");
+        let master = rig.master();
+        assert_eq!(master, 38_400, "one bar at 300 BPM");
+        let anchor = rig.anchor();
+        let p = |f: Frame| pos_at(anchor, master, f);
+        rig.set(Command::SetDubFeedback(0, 0.0));
+        rig.set_level(0.5);
+        rig.advance_to(rig.next_boundary() + master / 4);
+        let d = rig.frame;
+        rig.press(Command::RecDub(0));
+        let t = d + ALIGN + master / 2;
+        rig.advance_to(t - 1000);
+        rig.block = block;
+        rig.advance_to(t);
+        assert_eq!(rig.state(0), LaneState::Overdubbing);
+        let before = rig.engine.looper().live_buffer(0)[..master as usize].to_vec();
+        assert!((t..t + n).all(|f| before[p(f)] != -0.5), "block {block}: no position the tail reads holds what the capture writes after the press");
+        rig.set_level(-0.5);
+        rig.keep_output();
+        rig.press(Command::PlayStop(0));
+        rig.advance_to(t + n + 100);
+        let start = rig.output.as_ref().unwrap().0;
+        let monitor = rig.monitor.clone();
+        heard(&rig, t, t + n, |f| sample(1.0, tail(f - t, n), before[p(f)], 0.0) + monitor[(f - start) as usize], &format!("block {block}: the tail is the loop at the press"));
+        heard(&rig, t + n, rig.frame, |f| monitor[(f - start) as usize], &format!("block {block}: then the monitor alone"));
+        kept.push(rig.output.take().unwrap().1);
+    }
+    assert_eq!(kept[0], kept[1], "block 1 and block 128 hear the same");
+}
+
+#[test]
+fn an_undo_forced_back_inside_its_crossfade_keeps_identical_loops_at_unity() {
+    // The loop and its undo target hold the same samples (a silent dub over a constant take). An UNDO
+    // crossfades on its boundary; 60 frames in, UNDO and a DUB force the redo's switch (D19), a second
+    // crossfade over the first. Every overlap fades out all it heard: the lane plays the level throughout.
+    const LEVEL: f32 = 0.25;
+    let mut rig = rig_at(128);
+    rig.set_level(LEVEL);
+    let master = rig.record_first_take(0, 1, 2400);
+    rig.set_level(0.0);
+    rig.idle();
+    rig.advance_to(rig.next_boundary() + master / 4);
+    rig.press(Command::RecDub(0));
+    rig.advance(master / 2);
+    rig.press(Command::RecDub(0));
+    rig.idle();
+    assert!(rig.pcm(0).iter().all(|&x| x == LEVEL), "the silent dub leaves the loop");
+    assert!(rig.engine.looper().undo_pcm(0).unwrap().iter().all(|&x| x == LEVEL), "the undo target is the same loop");
+    rig.advance_to(rig.next_boundary() + master / 3);
+    let b = rig.next_boundary();
+    rig.press(Command::Undo(0));
+    rig.advance_to(b - 100);
+    rig.keep_output();
+    rig.send_at(b + 60, Command::Undo(0));
+    rig.send_at(b + 60, Command::RecDub(0));
+    rig.advance_to(b + 60 + 2 * ramp(rig.sr));
+    assert_eq!(rig.state(0), LaneState::Overdubbing, "the DUB forced the redo's switch");
+    heard(&rig, b - 100, rig.frame, |_| LEVEL, "the level through both crossfades");
+}

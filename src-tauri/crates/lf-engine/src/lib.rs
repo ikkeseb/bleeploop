@@ -54,10 +54,11 @@
 //!   dub) fades out from the press, from the level heard, a FADE's included. A reversal inside a ramp turns
 //!   from the level reached. The state, its events, the grid and the transport change on the press frame
 //!   as before: a tail is no playing lane, so the click stops with it. A scheduled stop (END STOP's
-//!   boundary, a FADE's end), an idle PLAY from the top with no tail of its own, a fresh take, a load and a
-//!   REVERSE's or TRIM's swap stay cuts. What fades out is cached once, N samples a lane allocated with
-//!   the looper, wherever a later write (a restore, a TRIM, a reused buffer) or a restarted grid could
-//!   reach it; no stored loop changes.
+//!   boundary, a FADE's end; an undo's crossfade switching on it ends there too), an idle PLAY from the
+//!   top with no tail of its own, a fresh take, a load and a REVERSE's or TRIM's swap stay cuts. What
+//!   fades out is cached once, N samples a lane allocated with the looper, wherever a later write (a
+//!   restore, a TRIM, a reused buffer, a closed dub's capture running on) or a restarted grid could reach
+//!   it; a second fade-out inside the first fades both. No stored loop changes.
 //! - **FADE is a pending stop with a ramp:** every playing lane stops on a bar line (the click's grid), its
 //!   level ramped down to it over the stored volume, which never moves; what a loop-end stop refuses, a
 //!   fading lane refuses too (`Refusal::Fading`). The ramp is on the lane before its FX and on its delay's
