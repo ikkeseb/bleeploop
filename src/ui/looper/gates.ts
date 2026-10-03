@@ -37,6 +37,9 @@ const REFUSAL = {
   tempoLocked: refuse('tempo locked to the loop, clear all to retap'),
   fixedCapturing: refuse('a take is recording, FIXED changes after it'),
   fixedRetake: refuse('RETAKE is on, so FIXED is ignored'),
+  retakeCapturing: refuse('a take is recording, RETAKE changes after it'),
+  autoRecCapturing: refuse('a take is recording, AUTO REC changes after it'),
+  autoRecLocked: refuse('AUTO REC starts a first take, clear all to use it'),
   capturing: refuse('this track is recording, stop it first'),
   noTrim: refuse('nothing to trim, the loop needs two bars or more'),
   fading: refuse('fading out, wait or stop now'),
@@ -185,6 +188,19 @@ export function tapGate(): Gate {
 export function fixedGate(): Gate {
   if (otherCapturing()) return REFUSAL.fixedCapturing;
   if (looper.retakeEnabled() && looper.masterLengthFrames() > 0) return REFUSAL.fixedRetake;
+  return OK;
+}
+
+/** May RETAKE be switched? Not while a capture reads it (it is read at arm). */
+export function retakeGate(): Gate {
+  return otherCapturing() ? REFUSAL.retakeCapturing : OK;
+}
+
+/** May AUTO REC be switched? Not while a capture reads it, nor once a loop has locked the tempo (it only
+ * starts a first take). */
+export function autoRecGate(): Gate {
+  if (otherCapturing()) return REFUSAL.autoRecCapturing;
+  if (clock.bpmLocked()) return REFUSAL.autoRecLocked;
   return OK;
 }
 
