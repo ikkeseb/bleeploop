@@ -240,7 +240,7 @@ plugin-GUI work.
 - Two live slots on the same capture channel sum it (+6 dB).
 - The settings memory takes a COPY destination's mix from the source at the `Copied` event, not at
   the command (`settings.rs` `copy_lane`): a source moved in between reaches the destination's replay
-  (an engine rebuild, an export's master) but not the engine itself.
+  (an engine rebuild) but not the engine itself.
 - An ASIO period the driver drops without its overload report is not flagged (input and output stay in
   step; the take is spliced there).
 - A punch-out inside a take's last quarter-beat commits the whole bars before it, where a stop there

@@ -32,9 +32,10 @@ export interface SessionSource {
   trackDubFeedback(i: number): number;
   fxState(i: number): FxState[];
   masterFramesValue(): number;
-  /** Copies of the committed lanes' PCM with their mix, each with the state it had as it was read, and
-   * the grid they were read on; with `master` (an export's, never a recovery's), the engine's wet master
-   * of them too, or its error. */
+  /** Copies of the committed lanes' PCM with their mix as the engine applied it where the snapshot
+   * pinned them, each with the state it had as it was read, and the grid they were read on; with
+   * `master` (an export's, never a recovery's), the engine's wet master of them with that mix too, or its
+   * error. */
   exportSnapshot(options?: { master?: boolean }): Promise<StemSnapshot>;
   /** Load a session into an all-empty looper; throws, changing nothing, otherwise. */
   loadSession(payload: LoadSessionPayload): Promise<void>;

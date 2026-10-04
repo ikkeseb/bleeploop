@@ -12,6 +12,9 @@
 //! mirrors are serde `remote` derives: a variant or field lf-engine adds fails to compile here until it
 //! is mirrored.
 //!
+//! A snapshot's lane mix ([`WireLaneMix`]) travels in session.json's track shape, inside the session
+//! bytes' header (`session.rs`); the fixture's `snapshotHeaders` hold one.
+//!
 //! `DeviceRequest`, `DeviceStatus`, `DeviceEvent`, `OpenError` and `AudioBackend` derive serde where they
 //! are defined (camelCase fields, backends as `"Asio"` / `"Wasapi"`; a request's `inputChannels` is one
 //! pick per slot, and one `inputChannel` instead sets both; a request without `sampleRate` asks for the
@@ -22,9 +25,11 @@
 //! order holds); `engine_feed` subscribes a Tauri `Channel`, one subscriber at a time (a new one
 //! replaces it), and its first frame is a `reset`.
 
-use lf_engine::dsp::fx::{FxKind, FxParam};
+use std::collections::BTreeMap;
+
+use lf_engine::dsp::fx::{FxKind, FxParam, FxState, MAX_PARAMS};
 use lf_engine::grid::Frame;
-use lf_engine::{Action, Command, Event, InputSend, InputSendParam, Instrument, LaneInfo, LaneState, NoteTarget, Refusal};
+use lf_engine::{Action, Command, Event, InputSend, InputSendParam, Instrument, LaneInfo, LaneMix, LaneState, NoteTarget, Refusal};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::{DeviceEvent, DeviceStatus};
@@ -326,6 +331,73 @@ pub struct FeedFrame {
     pub settings: Option<Vec<WireCommand>>,
 }
 
+/// A lane's mix as a snapshot's track carries it, in session.json's track shape
+/// (`src/session/session-schema.ts`): `{"volume","muted","dubFeedback","fx"}`, `fx` the five effects in
+/// chain order, each `{"bypassed","params"}` with its params by their TS keys (`validateFxStates` reads
+/// the same). A missing or unknown key, or a value that is no number, is refused.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "MixJson", into = "MixJson")]
+pub struct WireLaneMix(pub LaneMix);
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct MixJson {
+    volume: f32,
+    muted: bool,
+    dub_feedback: f32,
+    fx: Vec<FxJson>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FxJson {
+    bypassed: bool,
+    params: BTreeMap<String, f64>,
+}
+
+impl From<WireLaneMix> for MixJson {
+    fn from(WireLaneMix(m): WireLaneMix) -> MixJson {
+        let fx = FxKind::ALL
+            .iter()
+            .map(|kind| {
+                let state = m.fx[kind.index()];
+                let params = kind.params().iter().zip(state.params).map(|(def, v)| (def.key.to_string(), v)).collect();
+                FxJson { bypassed: state.bypassed, params }
+            })
+            .collect();
+        MixJson { volume: m.volume, muted: m.muted, dub_feedback: m.dub_feedback, fx }
+    }
+}
+
+impl TryFrom<MixJson> for WireLaneMix {
+    type Error = String;
+
+    fn try_from(j: MixJson) -> Result<WireLaneMix, String> {
+        if !j.volume.is_finite() || !j.dub_feedback.is_finite() {
+            return Err("a mix's volume and dubFeedback are numbers".to_string());
+        }
+        if j.fx.len() != FxKind::ALL.len() {
+            return Err(format!("a mix holds {} effects, not {}", j.fx.len(), FxKind::ALL.len()));
+        }
+        let mut fx = [FxState { bypassed: true, params: [0.0; MAX_PARAMS] }; 5];
+        for (kind, entry) in FxKind::ALL.into_iter().zip(j.fx) {
+            let defs = kind.params();
+            if entry.params.len() != defs.len() {
+                return Err(format!("the {kind:?} effect's params are not {}", defs.len()));
+            }
+            let state = &mut fx[kind.index()];
+            state.bypassed = entry.bypassed;
+            for (slot, def) in state.params.iter_mut().zip(defs) {
+                match entry.params.get(def.key) {
+                    Some(v) if v.is_finite() => *slot = *v,
+                    _ => return Err(format!("the {kind:?} effect's \"{}\" is missing or no number", def.key)),
+                }
+            }
+        }
+        Ok(WireLaneMix(LaneMix { volume: j.volume, muted: j.muted, dub_feedback: j.dub_feedback, fx }))
+    }
+}
+
 /// A field that may be absent (`None`), `null` (`Some(None)`) or a value.
 mod present {
     use super::*;
@@ -577,6 +649,27 @@ mod tests {
         assert!(frames.iter().any(|f| f.status == Some(None)), "a frame whose device stopped (status null)");
         assert!(frames.iter().any(|f| f.status.is_none()), "a frame with no status change (status absent)");
         assert!(frames.iter().all(|f| f.settings.is_some() == f.reset), "settings on the reset frames only");
+    }
+
+    #[test]
+    fn a_snapshot_header_round_trips_through_the_fixture_with_each_tracks_mix() {
+        let _: Vec<super::super::session::SnapshotHeader> = round_trip("snapshotHeaders");
+        let entry = &fixture()["snapshotHeaders"][0]["tracks"][0]["mix"];
+        let WireLaneMix(mix) = serde_json::from_value(entry.clone()).unwrap();
+        assert_eq!((mix.volume, mix.muted, mix.dub_feedback), (0.5, true, 0.25));
+        assert_eq!(mix.fx[FxKind::Delay.index()], FxState { bypassed: false, params: [2.0, 0.95, 0.75] }, "the params by their keys, in def order");
+        let louder = serde_json::to_value(WireLaneMix(LaneMix { volume: 1.5, ..LaneMix::default() })).unwrap();
+        assert!(same(&louder, &fixture()["snapshotHeaders"][0]["tracks"][1]["mix"]), "the engine's defaults write as the fixture's: {louder}");
+        let refused = |edit: fn(&mut Value)| {
+            let mut bad = entry.clone();
+            edit(&mut bad);
+            serde_json::from_value::<WireLaneMix>(bad).is_err()
+        };
+        assert!(refused(|m| m["fx"].as_array_mut().unwrap().truncate(4)), "five effects");
+        assert!(refused(|m| _ = m["fx"][0]["params"].as_object_mut().unwrap().remove("q")), "a missing param");
+        assert!(refused(|m| m["fx"][0]["params"]["Q"] = Value::from(2)), "an unknown param");
+        assert!(refused(|m| m["fx"][1]["params"]["semitones"] = Value::from("-5")), "a param that is no number");
+        assert!(refused(|m| m["dub_feedback"] = Value::from(1)), "camelCase fields");
     }
 
     #[test]

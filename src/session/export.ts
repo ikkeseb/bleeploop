@@ -49,9 +49,10 @@ export interface BuildExportOptions {
  * are the RAW capture (unity, pre-volume/pre-mute/pre-limiter/pre-FX): EVERY committed track (incl.
  * STOPPED) exports its stem, so no audio is ever lost. When included, the master (session.json `master.kind`
  * 'wet-engine') is the engine's own: the snapshot asks for it, and lf-engine renders it offline from the
- * same loops with the mix the engine holds (lane volume, mute and FX, the reverb bus, master volume and
- * mute, the limiter: `src-tauri/crates/lf-engine/src/render.rs`), every track playing, frame 0 lined up
- * with the stems. A STOPPED track is IN the master (the owner exported a stopped session and got
+ * same loops with the mix each track carries in session.json (the engine's, where the snapshot pinned
+ * the loops: lane volume, mute and FX) and the engine host's master volume and mute, through the reverb
+ * bus and the limiter (`src-tauri/crates/lf-engine/src/render.rs`), every track playing, frame 0 lined
+ * up with the stems. A STOPPED track is IN the master (the owner exported a stopped session and got
  * silence, tester report F26); only MUTE leaves a track out. If the engine's render fails, the export
  * still completes with the DRY volume/mute dual-mono mixdown (master.kind 'dry-fallback') — a degraded
  * master beats a lost take. Returns null when nothing is committed.
@@ -74,8 +75,8 @@ export async function buildExportBundle(
   // Each track carries the state it had as its PCM was read (the engine reads both in one snapshot), so
   // they can't disagree; session.json keeps it for the import.
   const withMaster = options.includeMaster !== false;
-  // The master level as the snapshot is asked for, as the lanes' mix is (`exportSnapshot`): the moment
-  // the engine renders the master from, not after its render.
+  // The master level as the snapshot is asked for, not after its render (the lanes' mix is the
+  // snapshot's own, as the engine applied it where the snapshot pinned the loops: `exportSnapshot`).
   const masterLevel = source.masterLevel();
   const snap = await source.exportSnapshot({ master: withMaster });
   if (snap.masterLengthFrames <= 0 || snap.tracks.length === 0) return null; // button should already guard this

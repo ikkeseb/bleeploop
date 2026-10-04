@@ -6,11 +6,12 @@
 //!
 //! [`wet_master`] loads the session through the engine's own session path while no device runs
 //! ([`Engine::service_session_idle`]) with every lane PLAYING (a lane saved STOPPED is in the master; a
-//! muted one is out through its mute), then applies the mix settings at the load's frame: lane volume and
-//! mute, the FX params and bypasses, master volume and mute. Every other command is skipped (the click,
-//! the instruments, the input sends, the plugin slots, the looper's modes), and the click is switched off,
-//! so the render has no click, no instrument, no input sends, no plugin unit and a silent input. It
-//! renders contiguous blocks on one clock from frame 0, so the output is the same at any block size.
+//! muted one is out through its mute), then applies at the load's frame each lane's [`LaneMix`] (its
+//! volume, mute and FX, as the snapshot took them at its pin) and, from the host's settings, the master's
+//! volume and mute. Every other setting is skipped (a lane's mix there included, the click, the
+//! instruments, the input sends, the plugin slots, the looper's modes), and the click is switched off, so
+//! the render has no click, no instrument, no input sends, no plugin unit and a silent input. It renders
+//! contiguous blocks on one clock from frame 0, so the output is the same at any block size.
 //!
 //! Warm-up: whole loop passes, at least one, that cover the longest lane's tail: its enabled delay's
 //! echoes until they fall below [`TAIL_THRESHOLD`], each a division plus one render quantum after the
@@ -24,14 +25,12 @@
 //!   phase of it, from a grid origin at loop position 0 (as the Tone render's), which can differ from live.
 //! - A transient playback state (a FADE in progress, a pending END STOP) is not rendered: every lane
 //!   plays at its stored mix.
-//! - A COPY destination's mix is the source's at the copy's event, not its command (the host's settings
-//!   memory, `copy_lane` in `src-tauri/src/engine_io/settings.rs`): a source moved between shows in it.
 //!
 //! Not the audio thread: this allocates (an engine, a load's buffers, the output) and may take seconds.
 //! Every refusal is an `Err` with a sentence; nothing here panics on a caller's input.
 
-use crate::api::{Command, ProcessContext};
-use crate::dsp::fx::{division_beats, FxKind, FxState, DIVISIONS, REVERB_DECAY, REVERB_PRE_DELAY};
+use crate::api::{Command, LaneMix, ProcessContext};
+use crate::dsp::fx::{division_beats, FxKind, FxParam, FxState, DIVISIONS, REVERB_DECAY, REVERB_PRE_DELAY};
 use crate::dsp::param::QUANTUM;
 use crate::engine::{Engine, EngineConfig};
 use crate::grid::{frames_per_bar, Frame, MAX_BPM, MIN_BPM};
@@ -75,18 +74,19 @@ impl Default for RenderOptions {
     }
 }
 
-/// Render `load`'s wet stereo master at `rate` with the mix in `settings` ([`wet_master_with`] at the
-/// default options).
-pub fn wet_master(rate: u32, load: Load, settings: &[Command]) -> Result<WetMaster, String> {
-    wet_master_with(rate, load, settings, RenderOptions::default())
+/// Render `load`'s wet stereo master at `rate` with each lane's mix in `mixes` and the master's in
+/// `settings` ([`wet_master_with`] at the default options).
+pub fn wet_master(rate: u32, load: Load, mixes: &[LaneMix], settings: &[Command]) -> Result<WetMaster, String> {
+    wet_master_with(rate, load, mixes, settings, RenderOptions::default())
 }
 
 /// Render `load`'s wet stereo master at `rate`. `load` is the session as the host's load builds it: each
 /// lane's loop in the first `master` samples of its buffer, in buffer order (a reversed lane's play-order
 /// PCM reversed back); a buffer only has to hold `master` samples, and `playing` is ignored (every lane
-/// plays). `settings` are the commands the host keeps (its settings replay): only the mix ones apply
-/// (the module doc).
-pub fn wet_master_with(rate: u32, mut load: Load, settings: &[Command], options: RenderOptions) -> Result<WetMaster, String> {
+/// plays). `mixes` holds one mix per load track, in its order (a snapshot's tracks'). `settings` are the
+/// commands the host keeps (its settings replay): only the master's volume and mute apply (the module
+/// doc).
+pub fn wet_master_with(rate: u32, mut load: Load, mixes: &[LaneMix], settings: &[Command], options: RenderOptions) -> Result<WetMaster, String> {
     if !(MIN_RATE..=MAX_RATE).contains(&rate) {
         return Err(format!("export render: the sample rate {rate} Hz is outside {MIN_RATE} to {MAX_RATE} Hz"));
     }
@@ -102,6 +102,9 @@ pub fn wet_master_with(rate: u32, mut load: Load, settings: &[Command], options:
     }
     if load.bars.checked_mul(frames_per_bar(load.bpm as f64, rate)) != Some(master) {
         return Err(format!("export render: {} bars at {} BPM are not {master} frames at {rate} Hz", load.bars, load.bpm));
+    }
+    if mixes.len() != load.tracks.len() {
+        return Err(format!("export render: {} mixes for {} tracks", mixes.len(), load.tracks.len()));
     }
     let samples = master as usize;
     for track in &load.tracks {
@@ -136,8 +139,10 @@ pub fn wet_master_with(rate: u32, mut load: Load, settings: &[Command], options:
         _ => return Err("export render: the load came back unfinished".to_string()),
     }
 
-    // The mix, after the load (which keeps a lane's mix but swaps its buffer), on the load's frame.
-    for &command in settings.iter().filter(|c| is_mix(c)) {
+    // The mix, after the load (which keeps a lane's mix but swaps its buffer), on the load's frame: each
+    // lane's from `mixes`, the master's from the settings.
+    let lane_mixes = lanes.iter().zip(mixes).flat_map(|(&i, mix)| lane_commands(i as u8, mix));
+    for command in lane_mixes.chain(settings.iter().copied().filter(is_master_mix)) {
         if !engine.apply_idle(command) {
             return Err(format!("export render: the setting {command:?} did not apply"));
         }
@@ -183,12 +188,23 @@ pub fn wet_master_with(rate: u32, mut load: Load, settings: &[Command], options:
     Ok(WetMaster { left, right, warmup })
 }
 
-/// A command the render applies: the lanes' and the master's mix.
-fn is_mix(command: &Command) -> bool {
-    matches!(
-        command,
-        Command::SetVolume(..) | Command::SetMute(..) | Command::SetFxParam(..) | Command::SetFxBypass(..) | Command::SetMasterVolume(_) | Command::SetMasterMute(_)
-    )
+/// A setting the render applies: the master's volume and mute (a lane's mix is the snapshot's).
+fn is_master_mix(command: &Command) -> bool {
+    matches!(command, Command::SetMasterVolume(_) | Command::SetMasterMute(_))
+}
+
+/// The commands that give lane `lane` the mix `mix`: its volume and mute, then each effect's params and
+/// its bypass, in chain order (as `FxChain::set_state` sets them). DUB FEEDBACK writes nothing here.
+fn lane_commands(lane: u8, mix: &LaneMix) -> Vec<Command> {
+    let mut out = vec![Command::SetVolume(lane, mix.volume), Command::SetMute(lane, mix.muted)];
+    for kind in FxKind::ALL {
+        let state = mix.fx[kind.index()];
+        for (def, &value) in kind.params().iter().zip(&state.params) {
+            out.extend(FxParam::from_key(kind, def.key).map(|param| Command::SetFxParam(lane, param, value)));
+        }
+        out.push(Command::SetFxBypass(lane, kind, state.bypassed));
+    }
+    out
 }
 
 /// Whole loop passes (at least one) that cover the session's longest tail: on each lane, its enabled

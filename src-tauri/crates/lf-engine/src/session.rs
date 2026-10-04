@@ -6,12 +6,13 @@
 //! buffers in them, to free it.
 //!
 //! A snapshot is the committed loops as they stood on the frame it began (it waits for the looper's
-//! block jobs first): an OVERDUBBING lane gives its loop as committed before the layer in flight (its
-//! undo buffer), and every loop comes out in play order (a reversed lane's buffer read backwards). It
-//! copies `SNAPSHOT_RATE` positions per rendered frame, about 1.4 s of copying for five 60-second lanes
-//! at 48 kHz, so a write to a buffer it copies from (a new overdub, a clear and a new take) can land
-//! meanwhile: it then answers [`SessionError::Changed`] and the host tries again. While no device runs
-//! the host services the port itself, all at once ([`crate::Engine::service_session_idle`]).
+//! block jobs first), each with its lane's mix as the engine applied it on that frame: an OVERDUBBING
+//! lane gives its loop as committed before the layer in flight (its undo buffer), and every loop comes
+//! out in play order (a reversed lane's buffer read backwards). It copies `SNAPSHOT_RATE` positions per
+//! rendered frame, about 1.4 s of copying for five 60-second lanes at 48 kHz, so a write to a buffer it
+//! copies from (a new overdub, a clear and a new take) can land meanwhile: it then answers
+//! [`SessionError::Changed`] and the host tries again. While no device runs the host services the port
+//! itself, all at once ([`crate::Engine::service_session_idle`]).
 //!
 //! A load applies at a block start into an all-EMPTY looper with no take in flight: each lane's buffer
 //! is swapped for the host's, the tempo set and locked, the master grid anchored on that frame, and the
@@ -20,7 +21,7 @@
 
 use rtrb::{Consumer, Producer, RingBuffer};
 
-use crate::api::{LaneState, TRACK_COUNT};
+use crate::api::{LaneMix, LaneState, TRACK_COUNT};
 use crate::grid::Frame;
 
 /// Loop positions a snapshot copies per rendered frame (as a block job moves).
@@ -51,12 +52,17 @@ impl SessionError {
 }
 
 /// A committed lane in a snapshot.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SnapshotTrack {
     pub index: u8,
     pub state: LaneState,
     /// The lane plays its loop backwards: its PCM is in play order all the same.
     pub reversed: bool,
+    /// The lane's mix as the engine applied it on the frame the snapshot pinned its loop, a block start
+    /// once no block job runs: not necessarily the mix when the snapshot was asked for. A change applied
+    /// before that frame is in it; one the same block applies (a command that reached the engine with
+    /// the request included) and one applied while it copies are not.
+    pub mix: LaneMix,
 }
 
 /// What a snapshot copies for one lane: which buffer, read which way, and the buffer's write count
@@ -171,7 +177,7 @@ impl SessionEnd {
         }
         match self.job.as_deref_mut() {
             Some(SessionJob::Load(load)) if load.result.is_none() => load.result = Some(looper.load(cx, load)),
-            Some(SessionJob::Snapshot(s)) if !s.started && !looper.busy() => looper.snapshot_begin(s, cx.clock.bpm(), rate),
+            Some(SessionJob::Snapshot(s)) if !s.started && !looper.busy() => looper.snapshot_begin(s, cx.fx, cx.clock.bpm(), rate),
             Some(SessionJob::Snapshot(s)) if !s.started && idle => s.result = Some(Err(SessionError::Changed)),
             _ => {}
         }

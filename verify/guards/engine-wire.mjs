@@ -3,8 +3,9 @@
 // owns the layout; its engine_io tests read the Rust half).
 //
 // `verify/fixtures/engine-wire.json` holds one example of every command, engine event and device event,
-// plus device requests, statuses and feed frames; `src-tauri/src/engine_io/wire.rs`'s cargo test parses
-// each entry and writes it back unchanged. This guard runs the REAL TS decoders
+// plus device requests, statuses, feed frames and snapshot headers (each track's mix in session.json's
+// track shape); `src-tauri/src/engine_io/wire.rs`'s cargo test parses each entry and writes it back
+// unchanged. This guard runs the REAL TS decoders
 // (`src/platform/engine-wire.ts`) over the same entries: every entry parses, every field the Rust side
 // writes is one the TS side reads (a field TS would ignore fails here), every variant is covered, and a
 // drifted name (snake_case, a wrong case, an unknown variant) is refused. It cannot see Tauri's IPC or
@@ -24,6 +25,8 @@ import {
   encodeSessionBytes,
   splitSessionBytes,
 } from '../../src/platform/engine-wire.ts';
+import { FX_PARAM_RANGES, defaultLaneMix, fakeMixModel } from '../../src/platform/host.web.ts';
+import { FX_PARAM_DEFS, defaultFxStates, validateFxStates } from '../../src/ui/state/fx-metadata.ts';
 
 const fixture = JSON.parse(readFileSync(new URL('../fixtures/engine-wire.json', import.meta.url), 'utf8'));
 
@@ -233,14 +236,85 @@ const refused = {
 for (const [name, fn] of Object.entries(refused)) check(`refuses ${name}`, () => assert.throws(fn));
 
 // ── Session bytes: a snapshot's stems, an export's master after them, or the render's error ──────────
+// The fixture's snapshot headers: every field the Rust side writes is read, each track's mix included.
+for (const entry of fixture.snapshotHeaders) {
+  check(`snapshot header ${JSON.stringify(entry).slice(0, 60)}… reads every field`, () => {
+    const frames = entry.masterLengthFrames;
+    const stems = entry.tracks.map(() => new Float32Array(frames));
+    const master = entry.master ? { left: new Float32Array(frames), right: new Float32Array(frames) } : undefined;
+    const { header } = decodeSnapshot(encodeSessionBytes(structuredClone(entry), stems, master).buffer);
+    assert.deepEqual(header, entry);
+    for (const t of header.tracks) validateFxStates(t.mix.fx, `track ${t.index}`);
+  });
+}
+check('the fixture has a snapshot with its master and one with its error', () => {
+  assert.ok(fixture.snapshotHeaders.some((h) => h.master) && fixture.snapshotHeaders.some((h) => h.masterError));
+});
+check("the engine's default mix (the fixture's, written by Rust) is the UI's and the browser fake's", () => {
+  const written = fixture.snapshotHeaders[0].tracks[1].mix;
+  assert.deepEqual(written.fx, defaultFxStates());
+  assert.deepEqual({ ...written, volume: 1 }, defaultLaneMix());
+});
+check("the browser fake's FX ranges are the UI's (the engine's)", () => {
+  const ui = Object.fromEntries(Object.values(FX_PARAM_DEFS).flat().map((d) => [d.key, { min: d.min, max: d.max, integer: d.integer === true }]));
+  assert.deepEqual(FX_PARAM_RANGES, ui);
+});
+// The fake's mix model: a reset frame starts it from the defaults, then the commands and events below.
 {
+  const frame = (events, extra = {}) => fakeMixModel.frame({ reset: false, events, ...extra });
+  check("the browser fake's COPY gives the destination the source's mix as the COPY latched it", () => {
+    frame([], { reset: true, settings: [] });
+    fakeMixModel.command({ SetVolume: [0, 0.5] });
+    fakeMixModel.command({ SetFxBypass: [0, 'delay', false] });
+    fakeMixModel.command({ Copy: 0 });
+    fakeMixModel.command({ SetVolume: [0, 0.2] });
+    fakeMixModel.command({ SetFxBypass: [0, 'delay', true] });
+    frame([{ type: 'Copied', frame: 0, from: 0, to: 1, feedback: 0.7 }]);
+    const copied = fakeMixModel.lane(1);
+    assert.equal(copied.volume, 0.5);
+    assert.equal(copied.fx[3].bypassed, false);
+    assert.equal(copied.dubFeedback, 0.7, "the DUB FEEDBACK the engine says it copied");
+    assert.equal(fakeMixModel.lane(0).volume, 0.2, 'the source keeps its move');
+  });
+  check("the browser fake stores a mix value as the engine clamps and rounds it", () => {
+    frame([], { reset: true, settings: [] });
+    fakeMixModel.command({ SetVolume: [0, 4] });
+    fakeMixModel.command({ SetDubFeedback: [0, -1] });
+    fakeMixModel.command({ SetFxParam: [0, 'semitones', 0.5] });
+    fakeMixModel.command({ SetFxParam: [0, 'time', 7] });
+    fakeMixModel.command({ SetFxParam: [0, 'feedback', 1] });
+    const m = fakeMixModel.lane(0);
+    assert.deepEqual([m.volume, m.dubFeedback, m.fx[1].params.semitones, m.fx[3].params.time, m.fx[3].params.feedback], [1.5, 0, 1, 3, 0.95]);
+    validateFxStates(m.fx, 'the clamped mix');
+  });
+}
+{
+  const mixed = fixture.snapshotHeaders[0];
+  const track = (edit) => {
+    const h = structuredClone(mixed);
+    edit(h.tracks[0]);
+    return () => decodeSnapshot(encodeSessionBytes(h, h.tracks.map(() => new Float32Array(h.masterLengthFrames))).buffer);
+  };
+  const refusedMix = {
+    'a track without its mix': track((t) => delete t.mix),
+    'a mix with an unknown field': track((t) => (t.mix.pan = 0)),
+    'a mix of four effects': track((t) => t.mix.fx.pop()),
+    'an effect missing a param': track((t) => delete t.mix.fx[3].params.mix),
+    'an effect with another kind\'s param': track((t) => (t.mix.fx[0].params = { cutoff: 800, amount: 1 })),
+    'a param that is no number': track((t) => (t.mix.fx[1].params.semitones = '-5')),
+    'a mute that is no boolean': track((t) => (t.mix.muted = 1)),
+  };
+  for (const [name, fn] of Object.entries(refusedMix)) check(`refuses ${name}`, () => assert.throws(fn));
+}
+{
+  const mix = defaultLaneMix();
   const header = (extra = {}) => ({
     rate: 48000,
     masterLengthFrames: 4,
     bpm: 120,
     tracks: [
-      { index: 0, frames: 4, reversed: false, state: 'Playing' },
-      { index: 3, frames: 4, reversed: true, state: 'Stopped' },
+      { index: 0, frames: 4, reversed: false, state: 'Playing', mix },
+      { index: 3, frames: 4, reversed: true, state: 'Stopped', mix },
     ],
     ...extra,
   });

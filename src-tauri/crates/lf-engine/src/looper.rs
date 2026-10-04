@@ -38,7 +38,7 @@
 
 use std::sync::Arc;
 
-use crate::api::{Action, Command, Event, LaneInfo, LaneState, Refusal, HOLD_CONTROLS, TRACK_COUNT};
+use crate::api::{Action, Command, Event, LaneInfo, LaneMix, LaneState, Refusal, HOLD_CONTROLS, TRACK_COUNT};
 use crate::autorec::{self, Detector};
 use crate::clock::Clock;
 use crate::effects::LaneFx;
@@ -593,6 +593,13 @@ impl Looper {
     /// Lane `i`'s DUB FEEDBACK.
     pub fn dub_feedback(&self, i: usize) -> f32 {
         self.lanes[i].feedback
+    }
+
+    /// Lane `i`'s mix as applied: its stored volume, mute and DUB FEEDBACK (a FADE's ramp never moves
+    /// them), and its chain's FX targets in `fx`.
+    pub fn mix(&self, i: usize, fx: &LaneFx) -> LaneMix {
+        let t = &self.lanes[i];
+        LaneMix { volume: t.volume, muted: t.muted, dub_feedback: t.feedback, fx: fx.chain(i).get_state() }
     }
 
     /// The committed loop of lane `i` as it plays forward: its logical buffer, read through its
@@ -2390,8 +2397,9 @@ impl Looper {
     // ── Session ────────────────────────────────────────────────────────────────────────────────────
 
     /// A snapshot begins (no block job runs): pin each committed lane's loop (an OVERDUBBING lane's
-    /// undo buffer, its loop before the layer in flight) with its buffer's write count.
-    pub(crate) fn snapshot_begin(&self, s: &mut Snapshot, bpm: u32, rate: u32) {
+    /// undo buffer, its loop before the layer in flight) with its buffer's write count, and take its mix
+    /// as applied now.
+    pub(crate) fn snapshot_begin(&self, s: &mut Snapshot, fx: &LaneFx, bpm: u32, rate: u32) {
         s.started = true;
         (s.rate, s.master, s.bpm, s.count, s.done) = (rate, self.master, bpm, 0, 0);
         for (i, t) in self.lanes.iter().enumerate() {
@@ -2402,7 +2410,7 @@ impl Looper {
                 _ => continue,
             };
             s.pins[s.count] = Some(Pin { writes: self.overview.writes(pin.buf), ..pin });
-            s.tracks[s.count] = Some(SnapshotTrack { index: i as u8, state: t.state, reversed: t.reversed });
+            s.tracks[s.count] = Some(SnapshotTrack { index: i as u8, state: t.state, reversed: t.reversed, mix: self.mix(i, fx) });
             s.count += 1;
         }
         let need = s.count * self.master as usize;

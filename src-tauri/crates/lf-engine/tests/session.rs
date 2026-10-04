@@ -3,16 +3,18 @@
 //! them back sample-exact on a fresh grid. Every `process` runs under the rig's `assert_no_alloc`, so the
 //! engine side of both allocates nothing; the buffers are the test's (the host's), built outside it.
 //! A snapshot in flight leaves the rendered output bit for bit as it was (the Web Audio probe
-//! recovery-playback.mjs's continuity).
+//! recovery-playback.mjs's continuity). Each track carries its lane's mix as the engine applied it at the
+//! pin (STATUS D21), and the export's wet master renders with that mix, not the host's settings.
 
 mod common;
 
 use common::{code, Rig};
-use lf_engine::dsp::fx::FxKind;
+use lf_engine::dsp::fx::{FxKind, FxParam, FxState};
 use lf_engine::grid::{frames_per_bar, Frame};
 use lf_engine::overview::PEAK_FRAMES;
+use lf_engine::render::wet_master;
 use lf_engine::session::SNAPSHOT_RATE;
-use lf_engine::{Command, LaneState, Load, LoadTrack, SessionError, SessionJob, Snapshot};
+use lf_engine::{Command, LaneMix, LaneState, Load, LoadTrack, SessionError, SessionJob, Snapshot};
 
 /// Hand `job` to the engine and render until it comes back.
 fn run(rig: &mut Rig, job: SessionJob) -> SessionJob {
@@ -290,4 +292,151 @@ fn a_later_take_armed_and_aborted_on_a_loaded_session_leaves_its_grid_and_lanes(
     assert_eq!((fresh.master(), fresh.anchor(), fresh.locked()), (master, anchor, true), "the loaded grid survives while the arm is live");
     fresh.press(Command::Stop(0));
     assert!(fresh.master() == 0 && !fresh.locked() && (0..5).all(|i| fresh.state(i) == LaneState::Empty), "the aborted arm leaves a blank session");
+}
+
+/// Lane 0's and lane 1's mix moved from the defaults: volume, mute, DUB FEEDBACK and FX.
+fn mix_lanes(rig: &mut Rig) -> [LaneMix; 2] {
+    for command in [
+        Command::SetVolume(0, 0.5),
+        Command::SetMute(0, true),
+        Command::SetDubFeedback(0, 0.25),
+        Command::SetFxParam(0, FxParam::Cutoff, 800.0),
+        Command::SetFxBypass(0, FxKind::Filter, false),
+        Command::SetFxParam(0, FxParam::Feedback, 0.6),
+        Command::SetFxBypass(0, FxKind::Delay, false),
+        Command::SetVolume(1, 1.25),
+        Command::SetFxParam(1, FxParam::Semitones, -5.0),
+        Command::SetFxBypass(1, FxKind::Pitch, false),
+        Command::SetFxParam(1, FxParam::Amount, 0.75),
+        Command::SetFxBypass(1, FxKind::Reverb, false),
+    ] {
+        rig.set(command);
+    }
+    let mut zero = LaneMix { volume: 0.5, muted: true, dub_feedback: 0.25, ..LaneMix::default() };
+    zero.fx[FxKind::Filter.index()] = FxState { bypassed: false, params: [800.0, 2.0, 0.0] };
+    zero.fx[FxKind::Delay.index()] = FxState { bypassed: false, params: [1.0, 0.6, 0.3] };
+    let mut one = LaneMix { volume: 1.25, ..LaneMix::default() };
+    one.fx[FxKind::Pitch.index()] = FxState { bypassed: false, params: [-5.0, 0.0, 0.0] };
+    one.fx[FxKind::Reverb.index()] = FxState { bypassed: false, params: [0.75, 0.0, 0.0] };
+    [zero, one]
+}
+
+/// The mix each committed lane of `s` carries, by lane.
+fn mixes(s: &Snapshot) -> Vec<(u8, LaneMix)> {
+    s.tracks.iter().flatten().map(|t| (t.index, t.mix)).collect()
+}
+
+#[test]
+fn a_snapshot_carries_each_lanes_mix_as_the_engine_applied_it() {
+    let mut rig = three_lanes();
+    let master = rig.master();
+    let [zero, one] = mix_lanes(&mut rig);
+    let s = snapshot(&mut rig, 5 * master as usize);
+    assert_eq!(s.result, Some(Ok(())));
+    assert_eq!(mixes(&s), [(0, zero), (1, one), (2, LaneMix::default())], "volume, mute, DUB FEEDBACK and FX, lane by lane");
+    for (i, mix) in mixes(&s) {
+        assert_eq!(rig.engine.looper().mix(i as usize, rig.engine.fx()), mix, "lane {i}: the engine's applied mix");
+    }
+}
+
+#[test]
+fn an_integer_fx_param_set_fractional_reaches_the_snapshot_whole() {
+    // session.json's schema (`validateFxStates`) refuses a fractional semitone or division index, so the
+    // engine rounds them as the UI does (half up), within their ranges.
+    let mut rig = three_lanes();
+    let master = rig.master();
+    for command in [
+        Command::SetFxParam(0, FxParam::Semitones, 0.5),
+        Command::SetFxParam(0, FxParam::Rate, 2.4),
+        Command::SetFxParam(0, FxParam::Time, 2.6),
+        Command::SetFxParam(1, FxParam::Semitones, -2.5),
+        Command::SetFxParam(1, FxParam::Time, 3.7),
+        Command::SetFxParam(1, FxParam::Q, 0.55),
+    ] {
+        rig.set(command);
+    }
+    let s = snapshot(&mut rig, 5 * master as usize);
+    assert_eq!(s.result, Some(Ok(())));
+    let fx = |lane: usize, kind: FxKind| s.tracks.iter().flatten().find(|t| t.index as usize == lane).unwrap().mix.fx[kind.index()].params;
+    assert_eq!(fx(0, FxKind::Pitch)[0], 1.0);
+    assert_eq!(fx(0, FxKind::Stutter)[0], 2.0);
+    assert_eq!(fx(0, FxKind::Delay)[0], 3.0);
+    assert_eq!(fx(1, FxKind::Pitch)[0], -2.0, "half up, as Math.round");
+    assert_eq!(fx(1, FxKind::Delay)[0], 3.0, "rounded, then within 0..3");
+    assert_eq!(fx(1, FxKind::Filter)[1], 0.55, "a continuous param keeps its fraction");
+}
+
+#[test]
+fn a_mix_moved_while_a_snapshot_copies_leaves_the_mix_at_its_pin() {
+    // A loop long enough to copy over many blocks, its mix set before the snapshot pins it.
+    let mut rig = Rig::new();
+    rig.set(Command::SetBpm(60.0));
+    rig.set_input(code);
+    let master = rig.record_first_take(0, 2, 2400);
+    rig.press(Command::Copy(0));
+    rig.set_level(0.0);
+    rig.idle();
+    assert_eq!(rig.state(1), LaneState::Playing);
+    assert!(2 * master > 4 * rig.block as Frame * SNAPSHOT_RATE, "the copy spans several blocks");
+    let [zero, one] = mix_lanes(&mut rig);
+    let mut pcm = Vec::with_capacity(2 * master as usize);
+    pcm.resize(2 * master as usize, 0.0f32);
+    assert!(rig.session().send(Box::new(SessionJob::Snapshot(Snapshot::new(pcm)))).is_ok());
+    // The next block start pins the loops and takes their mix; then the faders, the mutes and the FX move.
+    rig.advance(rig.block as Frame);
+    for command in [
+        Command::SetVolume(0, 0.1),
+        Command::SetMute(0, false),
+        Command::SetFxBypass(0, FxKind::Filter, true),
+        Command::SetFxParam(0, FxParam::Cutoff, 5000.0),
+        Command::SetMute(1, true),
+        Command::SetVolume(1, 0.2),
+        Command::SetFxParam(1, FxParam::Amount, 0.1),
+    ] {
+        rig.set(command);
+    }
+    assert!(rig.session().returned().is_none(), "the snapshot is still copying when the mix moves");
+    let s = loop {
+        rig.advance(rig.block as Frame);
+        if let Some(job) = rig.session().returned() {
+            let SessionJob::Snapshot(s) = *job else { unreachable!() };
+            break s;
+        }
+    };
+    assert_eq!(s.result, Some(Ok(())), "a mix change writes no loop");
+    assert_eq!(mixes(&s), [(0, zero), (1, one)], "the mix at the pin, not at the snapshot's end");
+    let now = rig.engine.looper().mix(0, rig.engine.fx());
+    assert!(now.volume == 0.1 && !now.muted && now.fx[FxKind::Filter.index()].bypassed, "the engine took the moves: {now:?}");
+}
+
+/// The wet master of `s` with the snapshot's own mix, the host's `settings` beside it.
+fn master_of(s: &Snapshot, capacity: usize, bars: Frame, settings: &[Command]) -> Vec<f32> {
+    let mixes: Vec<LaneMix> = s.tracks.iter().flatten().map(|t| t.mix).collect();
+    wet_master(s.rate, load_of(s, capacity, bars), &mixes, settings).expect("the render").left
+}
+
+#[test]
+fn a_wet_master_rendered_from_a_snapshot_takes_the_snapshots_mix_not_the_settings() {
+    let mut rig = Rig::new();
+    rig.set(Command::SetBpm(120.0));
+    rig.set_input(|f| 0.1 * (f as f32 * 0.01).sin());
+    let master = rig.record_first_take(0, 1, 2400);
+    rig.set_level(0.0);
+    rig.idle();
+    let capacity = rig.engine.looper().capacity() as usize;
+    let bars = master / frames_per_bar(120.0, 48_000);
+    let peak = |x: &[f32]| x.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+    // The settings say the lane plays at unity: the snapshot muted it, so the master is silent.
+    rig.set(Command::SetMute(0, true));
+    let muted = snapshot(&mut rig, master as usize);
+    let silent = peak(&master_of(&muted, capacity, bars, &[Command::SetMute(0, false), Command::SetVolume(0, 1.0)]));
+    assert!(silent < 1e-6, "a lane muted at the pin is out of the master ({silent})");
+    // And the reverse: the snapshot plays it at half, whatever the settings say.
+    rig.set(Command::SetMute(0, false));
+    let unity = peak(&master_of(&snapshot(&mut rig, master as usize), capacity, bars, &[]));
+    rig.set(Command::SetVolume(0, 0.5));
+    let half = snapshot(&mut rig, master as usize);
+    let heard = peak(&master_of(&half, capacity, bars, &[Command::SetMute(0, true), Command::SetVolume(0, 1.0)]));
+    assert!(unity > 0.05, "the lane is in the master ({unity})");
+    assert!((heard / unity - 0.5).abs() < 0.01, "the lane at the snapshot's half volume: {heard} against {unity}");
 }

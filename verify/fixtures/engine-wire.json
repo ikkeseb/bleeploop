@@ -351,5 +351,77 @@
       "meter": null,
       "peaks": []
     }
+  ],
+  "snapshotHeaders": [
+    {
+      "rate": 48000,
+      "masterLengthFrames": 96000,
+      "bpm": 120,
+      "tracks": [
+        {
+          "index": 0,
+          "frames": 96000,
+          "reversed": false,
+          "state": "Playing",
+          "mix": {
+            "volume": 0.5,
+            "muted": true,
+            "dubFeedback": 0.25,
+            "fx": [
+              { "bypassed": false, "params": { "cutoff": 800, "q": 4.5 } },
+              { "bypassed": false, "params": { "semitones": -5 } },
+              { "bypassed": true, "params": { "rate": 3 } },
+              { "bypassed": false, "params": { "time": 2, "feedback": 0.95, "mix": 0.75 } },
+              { "bypassed": true, "params": { "amount": 0 } }
+            ]
+          }
+        },
+        {
+          "index": 3,
+          "frames": 96000,
+          "reversed": true,
+          "state": "Overdubbing",
+          "mix": {
+            "volume": 1.5,
+            "muted": false,
+            "dubFeedback": 1,
+            "fx": [
+              { "bypassed": true, "params": { "cutoff": 1200, "q": 2 } },
+              { "bypassed": true, "params": { "semitones": 0 } },
+              { "bypassed": true, "params": { "rate": 1 } },
+              { "bypassed": true, "params": { "time": 1, "feedback": 0.4, "mix": 0.3 } },
+              { "bypassed": true, "params": { "amount": 0.3 } }
+            ]
+          }
+        }
+      ],
+      "master": { "frames": 96000 }
+    },
+    {
+      "rate": 44100,
+      "masterLengthFrames": 88200,
+      "bpm": 60,
+      "tracks": [
+        {
+          "index": 4,
+          "frames": 88200,
+          "reversed": false,
+          "state": "Stopped",
+          "mix": {
+            "volume": 0,
+            "muted": false,
+            "dubFeedback": 0,
+            "fx": [
+              { "bypassed": true, "params": { "cutoff": 1200, "q": 2 } },
+              { "bypassed": true, "params": { "semitones": 0 } },
+              { "bypassed": true, "params": { "rate": 1 } },
+              { "bypassed": true, "params": { "time": 1, "feedback": 0.4, "mix": 0.3 } },
+              { "bypassed": true, "params": { "amount": 0.3 } }
+            ]
+          }
+        }
+      ],
+      "masterError": "export render: the render panicked"
+    }
   ]
 }

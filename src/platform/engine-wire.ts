@@ -106,6 +106,8 @@ const ACTIONS: readonly Extract<EngineAction, string>[] = [
 const INSTRUMENTS: readonly InstrumentId[] = ['lead', 'pad', 'piano', 'organ', 'bass', 'drum'];
 const FX_KINDS: readonly FxKindId[] = ['filter', 'pitch', 'stutter', 'delay', 'reverb'];
 const FX_PARAMS: readonly FxParamId[] = ['cutoff', 'q', 'semitones', 'rate', 'time', 'feedback', 'mix', 'amount'];
+/** Each effect's params, in `FX_KINDS` (chain) order and its defs' order (`FX_PARAM_DEFS`). */
+const FX_KIND_PARAMS: readonly (readonly FxParamId[])[] = [['cutoff', 'q'], ['semitones'], ['rate'], ['time', 'feedback', 'mix'], ['amount']];
 const INPUT_SENDS: readonly InputSendId[] = ['echo', 'reverb', 'ring'];
 const INPUT_SEND_PARAMS: readonly InputSendParamId[] = ['echoTime', 'echoFeedback', 'echoLevel', 'reverbLevel', 'ringFreq', 'ringLevel'];
 const BACKENDS: readonly AudioBackend[] = ['Wasapi', 'Asio'];
@@ -702,11 +704,27 @@ export function decodeDeviceRequest(raw: unknown): DeviceRequest {
 //
 // `[u32 LE headerLen][headerLen bytes of UTF-8 JSON][f32 LE mono PCM per header track, in header order]`,
 // no padding; each block holds `frames` samples. The PCM is in PLAY order (what is heard from loop
-// position 0); `reversed` says the lane plays its recording backwards. A snapshot asked with the master
-// (an export's) whose render succeeded names it in `master` and appends its left block, then its right,
-// `master.frames` samples each, frame 0 at loop position 0; one whose render failed carries
-// `masterError` instead (`src-tauri/src/engine_io/session.rs` owns the layout).
+// position 0); `reversed` says the lane plays its recording backwards. A snapshot's track carries its
+// lane's `mix` as the engine applied it where the snapshot pinned the loops, in session.json's track
+// shape. A snapshot asked with the master (an export's) whose render succeeded names it in `master` and
+// appends its left block, then its right, `master.frames` samples each, frame 0 at loop position 0,
+// rendered with those mixes; one whose render failed carries `masterError` instead
+// (`src-tauri/src/engine_io/session.rs` owns the layout).
 // PCM moves as whole typed-array copies in the platform's byte order: little-endian on every target.
+
+/** One effect of a lane's mix: session.json's FX shape (`FxState`, `src/ui/state/fx-metadata.ts`). */
+export interface WireFxState {
+  bypassed: boolean;
+  params: Record<string, number>;
+}
+
+/** A lane's mix as the engine applied it (lf-engine's `LaneMix`): `fx` the five effects in chain order. */
+export interface LaneMix {
+  volume: number;
+  muted: boolean;
+  dubFeedback: number;
+  fx: WireFxState[];
+}
 
 /** One lane in a snapshot: committed lanes only. */
 export interface SnapshotTrack {
@@ -714,6 +732,8 @@ export interface SnapshotTrack {
   frames: number;
   reversed: boolean;
   state: 'Playing' | 'Stopped' | 'Overdubbing';
+  /** Its mix on the frame the snapshot pinned the loops (not necessarily when it was asked for). */
+  mix: LaneMix;
 }
 
 /** `engine_snapshot`'s header. */
@@ -797,6 +817,24 @@ export function splitSessionBytes(buffer: ArrayBuffer): { header: unknown; pcm: 
   return { header, pcm, master };
 }
 
+/** A snapshot track's mix: exact fields, each effect's params by their keys (their ranges:
+ * `validateFxStates`, where the UI takes it). */
+function decodeLaneMix(raw: unknown, what: string): LaneMix {
+  const o = obj(raw, what);
+  const extra = Object.keys(o).filter((k) => !['volume', 'muted', 'dubFeedback', 'fx'].includes(k));
+  if (extra.length > 0) fail(`${what} has unknown fields`, extra);
+  const fx = array(o.fx, `${what}.fx`, FX_KINDS.length).map((e, k): WireFxState => {
+    const entry = obj(e, `${what}.fx[${k}]`);
+    const params = obj(entry.params, `${what}.fx[${k}].params`);
+    const keys = FX_KIND_PARAMS[k];
+    if (Object.keys(params).length !== keys.length) fail(`${what}.fx[${k}].params must be ${keys.join(', ')}`, params);
+    const out: Record<string, number> = {};
+    for (const key of keys) out[key] = num(params[key], `${what}.fx[${k}].params.${key}`);
+    return { bypassed: bool(entry.bypassed, `${what}.fx[${k}].bypassed`), params: out };
+  });
+  return { volume: num(o.volume, `${what}.volume`), muted: bool(o.muted, `${what}.muted`), dubFeedback: num(o.dubFeedback, `${what}.dubFeedback`), fx };
+}
+
 /** Read `engine_snapshot`'s bytes: the stems, and the wet master when the snapshot carries one. */
 export function decodeSnapshot(buffer: ArrayBuffer): { header: SnapshotHeader; pcm: Float32Array[]; master: StereoPcm | null } {
   const { header, pcm, master } = splitSessionBytes(buffer);
@@ -809,6 +847,7 @@ export function decodeSnapshot(buffer: ArrayBuffer): { header: SnapshotHeader; p
       frames: int(t.frames, 'snapshot track.frames'),
       reversed: bool(t.reversed, 'snapshot track.reversed'),
       state: oneOf(t.state, ['Playing', 'Stopped', 'Overdubbing'] as const, 'snapshot track.state'),
+      mix: decodeLaneMix(t.mix, 'snapshot track.mix'),
     };
     if (track.frames !== length) fail(`snapshot track ${track.index} is not one master long`, track.frames);
     return track;

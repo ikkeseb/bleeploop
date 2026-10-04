@@ -88,8 +88,9 @@ latency measurement. The live wet signal joins after the limiter and is not limi
 and goes back through `engine_load_session` (the bytes: `src/platform/engine-wire.ts`). The wet master
 is the engine's: an export's snapshot asks for it, and the host renders it right after the copy, off
 the audio thread, in a fresh engine the session's size (`src-tauri/crates/lf-engine/src/render.rs`)
-from those same loops and the mix the host keeps (lane volume, mute and FX, master volume and mute),
-every lane playing, frame 0 lined up with the stems. A failed render still exports, with a dry
+from those same loops, each with the mix the engine applied where the snapshot pinned it (lane volume,
+mute and FX; session.json and recovery save that same mix), and the master volume and mute the host
+keeps, every lane playing, frame 0 lined up with the stems. A failed render still exports, with a dry
 mixdown (`master.kind` 'dry-fallback'); recovery autosaves never ask for a master.
 
 **Session recovery:** committed track audio, mix settings and PLAYING/STOPPED state round-trip through

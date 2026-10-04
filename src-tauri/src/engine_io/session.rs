@@ -8,18 +8,20 @@
 //! Both directions: `[u32 LE header length][UTF-8 JSON header][f32 LE mono PCM]`, one block of
 //! `masterLengthFrames` samples per header track, in header order, in play order (a reversed lane's
 //! loop as it is heard; `reversed` is its flag). A snapshot's header:
-//! `{"rate","masterLengthFrames","bpm","tracks":[{"index","frames","reversed","state"}]}`, the committed
-//! lanes ascending, `state` `"Playing"` | `"Stopped"` | `"Overdubbing"` (an overdubbing lane gives its
-//! loop as committed before the layer in flight). A load's: `{"bpm","bars","masterLengthFrames","tracks"}`
-//! with `state` `"Playing"` | `"Stopped"`, into an engine whose lanes are all EMPTY; `bpm` is an integer
-//! 40..300 and `masterLengthFrames` is `bars` bars of it at the engine's rate.
+//! `{"rate","masterLengthFrames","bpm","tracks":[{"index","frames","reversed","state","mix"}]}`, the
+//! committed lanes ascending, `state` `"Playing"` | `"Stopped"` | `"Overdubbing"` (an overdubbing lane
+//! gives its loop as committed before the layer in flight), `mix` the lane's volume, mute, DUB FEEDBACK
+//! and FX as the engine applied them on the frame the snapshot pinned the loops (`wire::WireLaneMix`).
+//! A load's: `{"bpm","bars","masterLengthFrames","tracks"}` with `state` `"Playing"` | `"Stopped"` (a
+//! track's `mix` is not applied: the UI sends the mix after the load), into an engine whose lanes are all
+//! EMPTY; `bpm` is an integer 40..300 and `masterLengthFrames` is `bars` bars of it at the engine's rate.
 //!
 //! A snapshot asked WITH the master (an export; a recovery autosave never asks) also carries the wet
-//! stereo master, rendered offline from those same loops by `lf_engine::render` with the mix this host
-//! keeps (`settings`): the header gains `"master":{"frames"}` (`frames` = `masterLengthFrames`) and the
-//! PCM gains its left block then its right block, after the tracks', frame 0 at loop position 0 like the
-//! stems. A render that fails leaves the stems as they are: no `master`, and `"masterError"` holds its
-//! sentence instead.
+//! stereo master, rendered offline from those same loops by `lf_engine::render` with the tracks' `mix`
+//! and the master volume and mute this host keeps (`settings`): the header gains `"master":{"frames"}`
+//! (`frames` = `masterLengthFrames`) and the PCM gains its left block then its right block, after the
+//! tracks', frame 0 at loop position 0 like the stems. A render that fails leaves the stems as they are:
+//! no `master`, and `"masterError"` holds its sentence instead.
 //!
 //! Only the loops cross here, once per save and off the RT path (invariant 3). Settings, rig recall and
 //! MIDI bindings stay in the UI's storage; each plugin's tone lives natively (`host/tone.rs`) and
@@ -34,6 +36,7 @@ use lf_engine::overview::PEAK_FRAMES;
 use lf_engine::{LaneState, Load, LoadTrack, SessionError, SessionJob, SessionPort, Snapshot, WetMaster, TRACK_COUNT};
 use serde::{Deserialize, Serialize};
 
+use super::wire::WireLaneMix;
 use super::EngineHost;
 
 /// How long a snapshot or a load may take: a snapshot of five 60-second lanes copies for about 1.4 s
@@ -52,28 +55,31 @@ enum TrackState {
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct TrackHeader {
+pub(super) struct TrackHeader {
     index: u8,
     frames: Frame,
     reversed: bool,
     state: TrackState,
+    /// A snapshot's: always there. A load's: not applied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mix: Option<WireLaneMix>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct SnapshotHeader {
+pub(super) struct SnapshotHeader {
     rate: u32,
     master_length_frames: Frame,
     bpm: u32,
     tracks: Vec<TrackHeader>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     master: Option<MasterHeader>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     master_error: Option<String>,
 }
 
 /// The wet master's PCM after the tracks': two blocks (left, right) of `frames` samples.
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 struct MasterHeader {
     frames: Frame,
 }
@@ -120,8 +126,9 @@ impl EngineHost {
         Err("the loops kept changing while the snapshot copied them; try again".to_string())
     }
 
-    /// The wet master of snapshot `s`, with the mix this host keeps: the loops go in as a load does
-    /// (`load_track`), on this thread, off the engine's lock.
+    /// The wet master of snapshot `s`, with each track's mix from its pin and the master volume and mute
+    /// this host keeps: the loops go in as a load does (`load_track`), on this thread, off the engine's
+    /// lock.
     fn render_master(&self, s: &Snapshot) -> Result<WetMaster, String> {
         #[cfg(test)]
         if FAIL_RENDER.with(|f| f.get()) {
@@ -141,11 +148,12 @@ impl EngineHost {
             .enumerate()
             .map(|(k, t)| load_track(t.index, s.pcm[k * samples..(k + 1) * samples].iter().copied(), samples, t.reversed, true))
             .collect();
+        let mixes: Vec<_> = s.tracks[..s.count].iter().flatten().map(|t| t.mix).collect();
         let load = Load { bpm: s.bpm, bars: s.master / fpb, master: s.master, tracks, result: None };
         let started = Instant::now();
         let settings = self.settings();
         // A panic is a failed render too: the stems still go out.
-        let wet = catch_unwind(AssertUnwindSafe(|| lf_engine::wet_master(s.rate, load, &settings)))
+        let wet = catch_unwind(AssertUnwindSafe(|| lf_engine::wet_master(s.rate, load, &mixes, &settings)))
             .unwrap_or_else(|_| Err("export render: the render panicked".to_string()));
         match &wet {
             Ok(m) => log::info!("[engine_io] export master rendered: {} frames, {} warm-up passes, {} ms", s.master, m.warmup, started.elapsed().as_millis()),
@@ -248,8 +256,12 @@ impl EngineHost {
             }
             if *stale == 0 {
                 if let Some(next) = job.take() {
-                    if let Err(back) = port.send(Box::new(next)) {
-                        job = Some(*back);
+                    match port.send(Box::new(next)) {
+                        Err(back) => job = Some(*back),
+                        Ok(()) => {
+                            #[cfg(test)]
+                            self.core.session_sent.fetch_add(1, Relaxed);
+                        }
                     }
                 }
             }
@@ -329,6 +341,7 @@ fn snapshot_bytes(s: &Snapshot, wet: Option<Result<WetMaster, String>>) -> Vec<u
                 LaneState::Overdubbing => TrackState::Overdubbing,
                 _ => TrackState::Playing,
             },
+            mix: Some(WireLaneMix(t.mix)),
         })
         .collect();
     let (wet, master_error) = match wet {

@@ -1541,6 +1541,11 @@ fn session_bytes(header: &serde_json::Value, pcm: &[f32]) -> Vec<u8> {
     out
 }
 
+/// A track's mix at the engine's defaults, as the snapshot header writes it.
+fn unity_mix() -> serde_json::Value {
+    serde_json::to_value(super::wire::WireLaneMix(lf_engine::LaneMix::default())).unwrap()
+}
+
 #[test]
 fn a_session_saves_and_loads_back_through_its_bytes_with_a_device_running_or_not() {
     let mut h = Harness::new();
@@ -1553,7 +1558,8 @@ fn a_session_saves_and_loads_back_through_its_bytes_with_a_device_running_or_not
     assert_eq!(header["rate"], 48_000);
     assert_eq!(header["bpm"], 240);
     assert_eq!(header["masterLengthFrames"], length);
-    assert_eq!(header["tracks"], serde_json::json!([{ "index": 0, "frames": length, "reversed": true, "state": "Playing" }]));
+    let mix = unity_mix();
+    assert_eq!(header["tracks"], serde_json::json!([{ "index": 0, "frames": length, "reversed": true, "state": "Playing", "mix": mix }]));
     assert_eq!(pcm.len(), length as usize);
     assert!(pcm.iter().any(|&x| x.abs() > 0.1), "the loop holds the tone");
 
@@ -1611,7 +1617,8 @@ fn an_export_snapshot_carries_the_engines_wet_master_in_play_order_with_the_kept
     h.play(RATE / 10);
 
     let (header, stems, [left, right]) = session_with_master(&h.host.snapshot(true).expect("an export's snapshot"));
-    assert_eq!(header["tracks"], serde_json::json!([{ "index": 0, "frames": length, "reversed": true, "state": "Playing" }]));
+    let mix = unity_mix();
+    assert_eq!(header["tracks"], serde_json::json!([{ "index": 0, "frames": length, "reversed": true, "state": "Playing", "mix": mix }]));
     assert_eq!(header["master"], serde_json::json!({ "frames": length }));
     assert!(header.get("masterError").is_none(), "{header}");
     assert_eq!((stems.len(), left.len(), right.len()), (length as usize, length as usize, length as usize));
@@ -1628,9 +1635,12 @@ fn an_export_snapshot_carries_the_engines_wet_master_in_play_order_with_the_kept
         assert!(twice > 0.2, "{side}: and not the stem backwards ({twice})");
     }
 
-    // A lane the kept mix mutes is out of the master, as it is out of what plays.
+    // A lane muted before the export (applied before its pin) is out of the master, as it is out of
+    // what plays, and its track says so.
     h.send(Command::SetMute(0, true));
-    let (_, muted_stems, [ml, mr]) = session_with_master(&h.host.snapshot(true).unwrap());
+    h.play(RATE / 100);
+    let (muted_header, muted_stems, [ml, mr]) = session_with_master(&h.host.snapshot(true).unwrap());
+    assert_eq!(muted_header["tracks"][0]["mix"]["muted"], true);
     assert_eq!(muted_stems, stems, "a mute leaves the stem as it is");
     let loudest = ml.iter().chain(&mr).fold(0.0f32, |p, x| p.max(x.abs()));
     assert!(loudest < 1e-6, "the muted lane is silent in the master ({loudest})");
@@ -1683,8 +1693,9 @@ fn the_glitch_watch_logs_a_span_only_when_a_fault_counter_moved_in_it() {
 }
 
 // ── D21: the races the UI's and the settings mirror's copies of the lane mix leave open ─────────────
-// Each red test below reproduces a review finding on the current code and stays ignored until the owner
-// decides D21 (`STATUS.md` § Decisions); `cargo test --no-default-features -p app d21 -- --ignored` runs them.
+// Each test below reproduces a review finding; an ignored one is still red and stays ignored until its
+// part of D21 lands (`STATUS.md` § Decisions); `cargo test --no-default-features -p app d21 -- --ignored`
+// runs them.
 
 /// A session's load bytes for the loop on lane 0, with lane 0 then cleared: the engine is all EMPTY and
 /// silent.
@@ -1751,7 +1762,6 @@ fn a_mix_sent_to_an_empty_lane_holds_through_a_load() {
 }
 
 #[test]
-#[ignore = "red: D21, an owner decision (STATUS.md)"]
 fn d21_an_export_masters_the_mix_it_was_asked_with() {
     let mut h = Harness::new();
     h.fake.set_input(saw);
@@ -1760,17 +1770,29 @@ fn d21_an_export_masters_the_mix_it_was_asked_with() {
     let (_, stems, [before, _]) = session_with_master(&h.host.snapshot(true).expect("an export"));
     // The callbacks stall, so the export's copy is still in flight when the fader moves.
     let held = h.host.core.rt.lock().unwrap();
+    let sent = h.host.core.session_sent.load(SeqCst);
     let export = {
         let host = h.host.clone();
         std::thread::spawn(move || host.snapshot(true))
     };
-    until("the export holds the session port", || h.host.core.ends.lock().unwrap().as_ref().is_some_and(|e| e.session.is_none()));
+    // Enqueued, not just the port taken: no callback runs until `held` drops, so the job waits in the
+    // ring and the next block pins it before the fader command.
+    until("the export's snapshot is enqueued", || h.host.core.session_sent.load(SeqCst) > sent);
     h.send(Command::SetVolume(0, 0.25));
     drop(held);
-    let (_, raced, [after, _]) = session_with_master(&export.join().unwrap().expect("the raced export"));
+    let (header, raced, [after, _]) = session_with_master(&export.join().unwrap().expect("the raced export"));
     assert_eq!(raced, stems, "the stems are the same loop");
+    // The snapshot pins the loops and their mix at the block start before that block's commands, so the
+    // fader moved in the stall comes after it: the track says 1, and the master renders that mix (no
+    // longer the host's settings, which hold 0.25 by then).
+    assert_eq!(header["tracks"][0]["mix"]["volume"].as_f64(), Some(1.0), "the mix at the pin: {header}");
     let (g, _) = fit(&after, &before);
-    assert!((g - 1.0).abs() < 0.05, "the master holds the mix the export was asked with (session.json's), not a fader moved since: gain {g}");
+    assert!((g - 1.0).abs() < 0.05, "the master holds the snapshot's mix (session.json's), not a fader moved since: gain {g}");
+    // A fader moved before the next export is in its track and its master alike.
+    let (header, _, [quieter, _]) = session_with_master(&h.host.snapshot(true).expect("the next export"));
+    assert_eq!(header["tracks"][0]["mix"]["volume"].as_f64(), Some(0.25));
+    let (g, _) = fit(&quieter, &before);
+    assert!((g - 0.25).abs() < 0.02, "the master at the track's volume: gain {g}");
 }
 
 #[test]

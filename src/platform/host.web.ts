@@ -4,6 +4,7 @@
  */
 import type { AppUpdate, AppUpdates, EngineHost, LogFolder, MidiBackend, Platform, PluginHost } from './host';
 import {
+  ENGINE_LANES,
   decodeFeedFrame,
   encodeSessionBytes,
   splitSessionBytes,
@@ -11,7 +12,9 @@ import {
   type DeviceStatus,
   type EngineCommand,
   type FeedFrame,
+  type LaneMix,
   type SnapshotHeader,
+  type SnapshotTrack,
 } from './engine-wire.ts'; // explicit .ts: Node guards import this file
 
 const NO_NATIVE_HOST =
@@ -154,8 +157,10 @@ export interface EngineFake extends EngineHost {
    * `open()` answers is `window.__lfEngineFakeRate` (48 kHz unless an init script or a probe sets it).
    */
   refusal: { device: string; from: number; to: number } | null;
-  /** What `snapshot()` answers (a probe sets it; null answers an empty engine). Asked with the master,
-   * the fake adds its stand-in (`fakeMaster`) to these stems, or `masterError` when set. */
+  /** What `snapshot()` answers (a probe sets it; null answers an empty engine). A track without its
+   * `mix` gets the lane's as the fake's commands and events left it (`fakeMixes`), read when asked; a
+   * probe that scripts one keeps it. Asked with the master, the fake adds its stand-in (`fakeMaster`) to
+   * these stems, or `masterError` when set. */
   snapshotBytes: ArrayBuffer | null;
   /** A probe-scripted master render failure: while set, a snapshot asked with the master carries this
    * error instead of one, as the engine's does when its render fails. */
@@ -182,39 +187,142 @@ export interface EngineFake extends EngineHost {
 const NO_ENGINE = 'The native engine is unavailable in the browser build.';
 
 /**
- * The fake's stand-in for the engine's wet master: the stems summed dry under the lane volumes and
- * mutes and the master volume and mute the UI last sent (`sent`, as the engine host keeps them). NOT the
- * engine's sound (no FX, no reverb, no limiter); it only lets the browser tier's export run, so no probe
- * may claim to test the master's sound with it.
+ * A fresh or cleared lane's mix, as the engine's (`LaneMix::default`): unity, unmuted, a plain sum, every
+ * effect bypassed at its defaults (the defaults of `FX_PARAM_DEFS`, `src/ui/state/fx-metadata.ts`, which
+ * this file may not import; the engine-wire guard holds them equal).
+ */
+export function defaultLaneMix(): LaneMix {
+  return {
+    volume: 1,
+    muted: false,
+    dubFeedback: 1,
+    fx: [
+      { bypassed: true, params: { cutoff: 1200, q: 2 } },
+      { bypassed: true, params: { semitones: 0 } },
+      { bypassed: true, params: { rate: 1 } },
+      { bypassed: true, params: { time: 1, feedback: 0.4, mix: 0.3 } },
+      { bypassed: true, params: { amount: 0.3 } },
+    ],
+  };
+}
+
+const FX_ORDER = ['filter', 'pitch', 'stutter', 'delay', 'reverb'] as const;
+const copyMix = (m: LaneMix): LaneMix => ({ ...m, fx: m.fx.map((f) => ({ bypassed: f.bypassed, params: { ...f.params } })) });
+
+/**
+ * Each FX param's range as the engine applies it (`lf_engine::dsp::fx::FX_PARAM_DEFS`): clamped, and an
+ * `integer` one rounded half up. The UI's `FX_PARAM_DEFS` holds the same; the engine-wire guard holds
+ * them equal.
+ */
+export const FX_PARAM_RANGES: Readonly<Record<string, { min: number; max: number; integer: boolean }>> = {
+  cutoff: { min: 120, max: 14000, integer: false },
+  q: { min: 0.1, max: 14, integer: false },
+  semitones: { min: -12, max: 12, integer: true },
+  rate: { min: 0, max: 3, integer: true },
+  time: { min: 0, max: 3, integer: true },
+  feedback: { min: 0, max: 0.95, integer: false },
+  mix: { min: 0, max: 1, integer: false },
+  amount: { min: 0, max: 1, integer: false },
+};
+
+const clamp = (v: number, min: number, max: number) => Math.max(min, Math.min(max, v));
+
+/** Each lane's mix as the fake engine holds it: what the commands sent and the events emitted set, as
+ * the engine applies them (a reset frame's settings, a mix command, CLEAR, COPY, a pedal's MUTE). */
+const fakeMixes: LaneMix[] = Array.from({ length: ENGINE_LANES }, defaultLaneMix);
+/** Per source lane, the mix its last COPY command latched: the engine copies the source's mix when the
+ * COPY applies, and its Copied comes only when the PCM job ends. A COPY the engine drops (no EMPTY lane)
+ * leaves its latch to the next one. `Action` COPY acts on the engine's selected lane, which the fake
+ * does not know: its Copied takes the source's mix then. */
+const copyLatches: (LaneMix | null)[] = Array.from({ length: ENGINE_LANES }, () => null);
+
+function applyMixCommand(c: EngineCommand): void {
+  if (typeof c !== 'object') return;
+  const at = (lane: number) => fakeMixes[lane] as LaneMix | undefined;
+  if ('SetVolume' in c) {
+    const m = at(c.SetVolume[0]);
+    const v = c.SetVolume[1];
+    if (m) m.volume = Number.isFinite(v) ? clamp(v, 0, 1.5) : 0;
+  } else if ('SetMute' in c) {
+    const m = at(c.SetMute[0]);
+    if (m) m.muted = c.SetMute[1];
+  } else if ('SetDubFeedback' in c) {
+    const m = at(c.SetDubFeedback[0]);
+    const v = c.SetDubFeedback[1];
+    if (m) m.dubFeedback = Number.isFinite(v) ? clamp(v, 0, 1) : 1;
+  } else if ('SetFxBypass' in c) {
+    const [lane, kind, bypassed] = c.SetFxBypass;
+    const fx = at(lane)?.fx[FX_ORDER.indexOf(kind)];
+    if (fx) fx.bypassed = bypassed;
+  } else if ('SetFxParam' in c) {
+    const [lane, key, value] = c.SetFxParam;
+    const fx = at(lane)?.fx.find((f) => key in f.params);
+    const range = FX_PARAM_RANGES[key];
+    if (!fx || !range || !Number.isFinite(value)) return;
+    fx.params[key] = clamp(range.integer ? Math.round(value) : value, range.min, range.max);
+  } else if ('Copy' in c) {
+    if (fakeMixes[c.Copy]) copyLatches[c.Copy] = copyMix(fakeMixes[c.Copy]);
+  } else if ('ActionOn' in c && c.ActionOn[1] === 'Copy') {
+    const lane = c.ActionOn[0];
+    if (fakeMixes[lane]) copyLatches[lane] = copyMix(fakeMixes[lane]);
+  }
+}
+
+function applyMixFrame(frame: Pick<FeedFrame, 'reset' | 'settings' | 'events'>): void {
+  if (frame.reset) {
+    fakeMixes.forEach((_, i) => (fakeMixes[i] = defaultLaneMix()));
+    copyLatches.fill(null);
+    frame.settings?.forEach(applyMixCommand);
+  }
+  for (const ev of frame.events) {
+    if (ev.type === 'Cleared') fakeMixes[ev.lane] = defaultLaneMix();
+    else if (ev.type === 'Copied') {
+      fakeMixes[ev.to] = { ...(copyLatches[ev.from] ?? copyMix(fakeMixes[ev.from])), dubFeedback: ev.feedback };
+      copyLatches[ev.from] = null;
+    } else if (ev.type === 'Muted') fakeMixes[ev.lane].muted = ev.on;
+  }
+}
+
+/** The fake's per-lane mix model, for the engine-wire guard (Node cannot reach `webEngineFake.send`).
+ * @public */
+export const fakeMixModel = {
+  command: applyMixCommand,
+  frame: applyMixFrame,
+  lane: (i: number): LaneMix => copyMix(fakeMixes[i]),
+};
+
+/**
+ * The fake's stand-in for the engine's wet master: the stems summed dry under each track's volume and
+ * mute (its snapshot mix) and the master volume and mute the UI last sent (`sent`, as the engine host
+ * keeps them). NOT the engine's sound (no FX, no reverb, no limiter); it only lets the browser tier's
+ * export run, so no probe may claim to test the master's sound with it.
  */
 function fakeMaster(header: SnapshotHeader, pcm: readonly Float32Array[], sent: readonly EngineCommand[]): Float32Array {
-  const volume = new Map<number, number>();
-  const muted = new Map<number, boolean>();
   let master = 1;
   let masterMuted = false;
   for (const c of sent) {
     if (typeof c !== 'object') continue;
-    if ('SetVolume' in c) volume.set(c.SetVolume[0], c.SetVolume[1]);
-    else if ('SetMute' in c) muted.set(c.SetMute[0], c.SetMute[1]);
-    else if ('SetMasterVolume' in c) master = c.SetMasterVolume;
+    if ('SetMasterVolume' in c) master = c.SetMasterVolume;
     else if ('SetMasterMute' in c) masterMuted = c.SetMasterMute;
   }
   const out = new Float32Array(header.masterLengthFrames);
   if (masterMuted) return out;
   header.tracks.forEach((t, k) => {
-    if (muted.get(t.index)) return;
-    const gain = (volume.get(t.index) ?? 1) * master;
+    if (t.mix.muted) return;
+    const gain = t.mix.volume * master;
     pcm[k].forEach((x, i) => (out[i] += gain * x));
   });
   return out;
 }
 
-/** What the fake's `snapshot(master)` answers, read from its state when asked. */
+/** What the fake's `snapshot(master)` answers, read from its state when asked: the probe's scripted
+ * stems, each track with its mix. */
 function snapshotAnswer(master: boolean): ArrayBuffer {
-  const bytes = webEngineFake.snapshotBytes?.slice(0) ?? encodeSessionBytes({ rate: fakeRate(), masterLengthFrames: 0, bpm: 120, tracks: [] }, []).buffer;
-  if (!master || !webEngineFake.snapshotBytes) return bytes;
-  const { header, pcm } = splitSessionBytes(bytes);
-  const stems = header as SnapshotHeader;
+  if (!webEngineFake.snapshotBytes) return encodeSessionBytes({ rate: fakeRate(), masterLengthFrames: 0, bpm: 120, tracks: [] }, []).buffer;
+  const { header, pcm } = splitSessionBytes(webEngineFake.snapshotBytes.slice(0));
+  const scripted = header as Omit<SnapshotHeader, 'tracks'> & { tracks: (Omit<SnapshotTrack, 'mix'> & { mix?: LaneMix })[] };
+  const stems: SnapshotHeader = { ...scripted, tracks: scripted.tracks.map((t) => ({ ...t, mix: t.mix ?? copyMix(fakeMixes[t.index]) })) };
+  if (!master) return encodeSessionBytes(stems, pcm).buffer;
   if (webEngineFake.masterError !== null) return encodeSessionBytes({ ...stems, masterError: webEngineFake.masterError }, pcm).buffer;
   const mono = fakeMaster(stems, pcm, webEngineFake.sent);
   return encodeSessionBytes({ ...stems, master: { frames: stems.masterLengthFrames } }, pcm, { left: mono, right: mono.slice() }).buffer;
@@ -284,6 +392,7 @@ export const webEngineFake: EngineFake = {
   async send(commands) {
     if (!engineForced()) throw new Error(NO_ENGINE);
     webEngineFake.sent.push(...commands);
+    commands.forEach(applyMixCommand);
   },
   async setShare(endpoint) {
     if (!engineForced()) throw new Error(NO_ENGINE);
@@ -307,6 +416,7 @@ export const webEngineFake: EngineFake = {
   },
   emit(raw) {
     const frame = decodeFeedFrame(raw);
+    applyMixFrame(frame);
     for (const onFrame of engineSubscribers) onFrame(frame);
   },
 };

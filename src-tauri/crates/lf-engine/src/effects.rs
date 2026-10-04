@@ -91,9 +91,12 @@ impl LaneFx {
         &self.chains[lane]
     }
 
+    /// Clamped to the param's range; an integer param (semitones, a division index) rounds half up, as
+    /// the UI's `Math.round` does, so a mix read back (`Looper::mix`) is one session.json's schema accepts.
     pub fn set_param(&mut self, lane: usize, param: FxParam, value: f64, frame: Frame) {
         if value.is_finite() {
             let (def, ctl) = (param.def(), self.ctl(frame));
+            let value = if def.integer { (value + 0.5).floor() } else { value };
             self.chains[lane].set_param(param, value.clamp(def.min, def.max), ctl);
         }
     }

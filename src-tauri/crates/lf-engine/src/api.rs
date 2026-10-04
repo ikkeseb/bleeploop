@@ -5,7 +5,7 @@
 
 use std::any::Any;
 
-use crate::dsp::fx::{FxKind, FxParam};
+use crate::dsp::fx::{default_fx_states, FxKind, FxParam, FxState};
 use crate::grid::Frame;
 
 pub const TRACK_COUNT: usize = 5;
@@ -328,6 +328,24 @@ pub struct LaneInfo {
     pub fading: bool,
     /// RETAKE: the 1-based pass in flight, 0 when the lane is not rolling.
     pub retake_pass: u32,
+}
+
+/// A lane's mix as the engine applied it: its volume, mute and DUB FEEDBACK, and its FX chain's targets
+/// in [`FxKind::ALL`] order (filter, pitch, stutter, delay, reverb). A snapshot carries one per lane
+/// ([`crate::SnapshotTrack`]), and the export's wet master renders with it ([`crate::render`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LaneMix {
+    pub volume: f32,
+    pub muted: bool,
+    pub dub_feedback: f32,
+    pub fx: [FxState; 5],
+}
+
+impl Default for LaneMix {
+    /// A fresh or cleared lane's: unity, unmuted, a plain sum, every effect bypassed at its defaults.
+    fn default() -> Self {
+        LaneMix { volume: 1.0, muted: false, dub_feedback: 1.0, fx: default_fx_states() }
+    }
 }
 
 /// Why a hands-free press did nothing (`src/ui/looper/gates.ts`).

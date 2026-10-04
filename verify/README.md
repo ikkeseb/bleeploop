@@ -60,8 +60,10 @@ command the UI sends (`__lf.native.sent`) and hands the feed frames the probe sc
 (`__lf.native.emit`) to the UI. Nothing answers a command, so a probe proves gesture → command and
 frame → screen, never the engine (`verify/probes/engine-seam.mjs` is the pattern). What still runs for
 real in the page: the input router, Web MIDI parsing and learn, the recovery worker and IndexedDB, the
-export's archive. The export's master is the engine's; asked with the master, the fake answers a dry
-sum under the volume and mute the UI sent (NOT the engine's sound: no probe tests the master's sound).
+export's archive. A snapshot's track carries the lane's mix as the fake's commands and events left it
+(or the one a probe scripts). The export's master is the engine's; asked with the master, the fake
+answers a dry sum under those tracks' volume and mute and the master's the UI sent (NOT the engine's
+sound: no probe tests the master's sound).
 Where a probe needs another native answer (plugin host, ASIO, device
 lists), it substitutes the platform host in the page, so it proves the frontend's handling of that
 answer, never the native side. It sees Chromium, not WebView2 on the rig.

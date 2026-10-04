@@ -54,7 +54,8 @@ import { notifyError, notifyInfo } from '../../notify';
  * mirrors the engine's CLEAR (`Cleared`: the lane's mix resets), COPY (`Copied`) and a pedal's MUTE
  * (`Muted`), and on a `reset` frame takes the settings the engine remembers, so the screen shows what
  * the engine plays. `engineSession` is the
- * engine as export, recovery and import see it: the engine's PCM with this store's mix, and the token of
+ * engine as export, recovery and import see it: the engine's PCM with each lane's mix as the engine
+ * applied it (the snapshot's; an import sends its saved mix after the load), and the token of
  * the player's clear that emptied the looper (recovery deletes the jam for it, and keeps it for a new
  * engine's empty lanes). `openEngineDevice` turns the engine's refusal of a switch to another rate into
  * the player's confirm.
@@ -996,16 +997,11 @@ export const engineLooper = {
 const FROM_SNAPSHOT = { Playing: 'PLAYING', Stopped: 'STOPPED', Overdubbing: 'OVERDUBBING' } as const;
 const TO_LOAD = { PLAYING: 'Playing', STOPPED: 'Stopped' } as const;
 
-/** The committed lanes: the engine's PCM (play order) with this store's mix; with `master`, the engine's
- * wet master too (or why it has none). The mix is read as the snapshot is asked for, the moment the
- * engine renders its master from: a fader moved while the render runs (seconds) changes neither. */
+/** The committed lanes: the engine's PCM (play order), each with its mix as the engine applied it where
+ * the snapshot pinned the loops (the mix the wet master renders with); with `master`, the engine's wet
+ * master too (or why it has none). A fader moved after the pin (the copy and the render take seconds)
+ * changes neither. */
 async function exportSnapshot(options: { master?: boolean } = {}): Promise<StemSnapshot> {
-  const mix = Array.from({ length: ENGINE_LANES }, (_, i) => ({
-    volume: volumes[i][0](),
-    muted: mutes[i][0](),
-    fx: fx[i].map((s) => ({ bypassed: s.bypassed, params: { ...s.params } })),
-    dubFeedback: dubFeedbacks[i][0](),
-  }));
   const { header, pcm, master } = decodeSnapshot(await platform.engine.snapshot(options.master === true));
   return {
     ...(master ? { master } : {}),
@@ -1016,11 +1012,11 @@ async function exportSnapshot(options: { master?: boolean } = {}): Promise<StemS
     tracks: header.tracks.map((t, k) => ({
       index: t.index,
       pcm: pcm[k],
-      volume: mix[t.index].volume,
-      muted: mix[t.index].muted,
+      volume: t.mix.volume,
+      muted: t.mix.muted,
       reversed: t.reversed,
-      fx: mix[t.index].fx,
-      dubFeedback: mix[t.index].dubFeedback,
+      fx: validateFxStates(t.mix.fx, `snapshot: track ${t.index + 1}`),
+      dubFeedback: t.mix.dubFeedback,
       state: FROM_SNAPSHOT[t.state],
     })),
   };
