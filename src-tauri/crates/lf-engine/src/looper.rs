@@ -25,9 +25,16 @@
 //!
 //! An overdub writes `input + feedback * old` at each position it passes (DUB FEEDBACK, a lane setting:
 //! 1 sums, as ever; 0 replaces), so continuous dubbing lets the older layers fade pass by pass; its undo
-//! target is still the loop before it. FADE is a pending stop with a ramp: every playing lane stops on a
-//! bar line and fades down to it under its volume, which never moves, its FX returns with it (`fade_all`,
-//! `render`).
+//! target is still the loop before it. Its first and last 5 ms are ramped in the stored loop (D23): the
+//! layer fades in from its window start as it is written (`punch_in`), and a clean end fades its last
+//! writes back toward what they overwrote (`fade_tail`). FADE is a pending stop with a ramp: every
+//! playing lane stops on a bar line and fades down to it under its volume, which never moves, its FX
+//! returns with it (`fade_all`, `render`).
+//!
+//! Undo, PLAY and an immediate STOP are edged in playback only (D23, `Voice`): an undo's audible switch
+//! crossfades the loop heard into the one it gives back over the same 5 ms, a lane joining a running loop
+//! fades in over them at its phase, and an immediate STOP fades out over them from the press. The stored
+//! loops, the lane's state, its events and the transport change on the same frames as before.
 
 use std::sync::Arc;
 
@@ -62,11 +69,42 @@ pub const DEFAULT_FADE_BARS: u64 = 2;
 
 /// What the lane's playback reads: a buffer and its orientation. It follows the lane's logical
 /// buffer at once while stopped, and at the next loop boundary while playing (an undo or reverse swaps
-/// there, as the Web Audio source swap did).
+/// there, as the Web Audio source swap did; an undo's swap crossfades, `Voice`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Audible {
     buf: usize,
     reversed: bool,
+}
+
+/// A voice frame no edge reaches: nothing ramps or is cached.
+const SETTLED: Frame = Frame::MIN / 2;
+
+/// D23's playback edges on one lane, over the punch ramp's N frames (`Looper::punch`); none of them
+/// touches a stored loop. Two parts, summed under the lane's volume:
+///
+/// - The level ramp: from `from_level` at frame `from` linearly to `to` at `from + N` (1: a PLAY joining
+///   a running loop; 0: an immediate STOP's tail), reading `src` at the grid phase. From `from + N` on
+///   the lane plays as its state says, today's arithmetic bit for bit. A new edge inside the ramp turns
+///   from the level reached, and a tail keeps the source heard at the press whatever the lane's audible
+///   becomes meanwhile.
+/// - The outgoing cache: `Looper::cache`'s row for the lane holds what fades out over frames
+///   `[cached, cached + N)`, its gain already applied: an undo's outgoing loop (crossfaded against the
+///   level ramp from 0 to 1), or a tail whose loop is about to be rewritten or whose phase moves
+///   (`Looper::cache_outgoing`). Its samples are read once, when it is cached, so nothing that writes
+///   the buffer afterwards reaches it.
+#[derive(Clone, Copy, Debug)]
+struct Voice {
+    src: Audible,
+    from: Frame,
+    from_level: f64,
+    to: f64,
+    cached: Frame,
+}
+
+impl Voice {
+    fn settled(src: Audible) -> Self {
+        Voice { src, from: SETTLED, from_level: 0.0, to: 0.0, cached: SETTLED }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -87,6 +125,10 @@ struct Lane {
     spare_reversed: bool,
     audible: Audible,
     switch_at: Option<Frame>,
+    /// An UNDO is among what the pending switch brings in: a switch that changes the buffer crossfades
+    /// (D23); a REVERSE's or a TRIM's alone does not.
+    switch_undo: bool,
+    voice: Voice,
     stop_at: Option<Frame>,
     /// A multiply extends this lane from a loop of this many frames (0: none): until its jobs are done,
     /// playback reads a position at or past it through the old loop (`render`).
@@ -95,7 +137,7 @@ struct Lane {
     fade_from: Option<Frame>,
     volume: f32,
     muted: bool,
-    /// DUB FEEDBACK, 0..1: an overdub writes `input + feedback * old`.
+    /// DUB FEEDBACK, 0..1: an overdub writes `input + feedback * old` (ramped at its edges: `punch_in`).
     feedback: f32,
     gain: f64,
 }
@@ -115,6 +157,8 @@ impl Lane {
             spare_reversed: false,
             audible: Audible { buf: live, reversed: false },
             switch_at: None,
+            switch_undo: false,
+            voice: Voice::settled(Audible { buf: live, reversed: false }),
             stop_at: None,
             extending: 0,
             fade_from: None,
@@ -165,7 +209,8 @@ struct Recorder {
     end: Option<Frame>,
     /// Input frames a take starts after its downbeat (sampled at the arm).
     align: Frame,
-    /// PLAY/STOP ended the capture: the lane lands STOPPED and is silent meanwhile.
+    /// PLAY/STOP ended the capture: the lane lands STOPPED, and meanwhile plays only the tail its press
+    /// started (D23, `Voice`).
     stop_playback: bool,
     /// A first take's counted downbeat: the grid the master is phase-locked to.
     downbeat: Option<Frame>,
@@ -215,6 +260,39 @@ impl Recorder {
             prev_spare_reversed: false,
         }
     }
+}
+
+/// One overdub write, kept for the punch-out (`Looper::fade_tail`): its input frame, the loop position
+/// it wrote, the sample there before it and the sample it left.
+#[derive(Clone, Copy, Debug, Default)]
+struct DubWrite {
+    frame: Frame,
+    pos: usize,
+    old: f32,
+    new: f32,
+}
+
+/// What an overdub writes over `old` from input `x`, `d` frames into its window of punch ramp `n` (D23):
+/// from the ramp's end on, today's `x + fb * old` (at a feedback of 1 the plain sum, bit for bit); at the
+/// window's first frame `old` itself; between, the input faded in and the old layer faded from 1 down to
+/// the feedback, `a * x + (1 + a * (fb - 1)) * old` with `a = d / n` (at a feedback of 1 the old
+/// layer's factor is exactly 1).
+#[inline]
+fn punch_in(old: f32, x: f32, fb: f32, d: Frame, n: Frame) -> f32 {
+    if d >= n {
+        x + fb * old
+    } else if d <= 0 {
+        old
+    } else {
+        let a = d as f32 / n as f32;
+        a * x + (1.0 + a * (fb - 1.0)) * old
+    }
+}
+
+/// The punch ramp at `sample_rate`: 5 ms of frames, rounded half up, at least one (240 at 48 kHz, 221 at
+/// 44.1 kHz).
+fn punch_frames(sample_rate: u32) -> Frame {
+    ((sample_rate as Frame + 100) / 200).max(1)
 }
 
 /// Buffer positions a job visits, in order: `(lo + (off + s) % span) % modulus` for `s` in `0..span`.
@@ -289,6 +367,43 @@ impl Job {
     fn done_frame(&self) -> Frame {
         self.start + job_frames(self.visit.span)
     }
+
+    /// The buffer the job writes.
+    fn writes(&self) -> usize {
+        match self.kind {
+            JobKind::Fill { buf, .. } => buf,
+            JobKind::Copy { dst, .. } | JobKind::Restore { dst, .. } | JobKind::LaneCopy { dst, .. } | JobKind::Trim { dst, .. } => dst,
+        }
+    }
+
+    /// The sample the job will write at position `idx` of buffer `buf`, when it writes there and has not
+    /// yet: what `run_job` puts there, read from its source as it stands. Every source holds its final
+    /// samples: a fill's own kept positions (below `TakeFill::untouched`, never rewritten), a copy's or a
+    /// restore's buffer (an undo copy runs ahead of the writer, and a lane's commands wait for the jobs
+    /// on it), a TRIM's undo target.
+    fn ahead(&self, bufs: &[Vec<f32>], buf: usize, idx: usize) -> Option<f32> {
+        if self.writes() != buf {
+            return None;
+        }
+        let v = self.visit;
+        // A reversed TRIM's steps are heard positions, which its buffers hold backwards.
+        let heard = match self.kind {
+            JobKind::Trim { reversed: true, .. } => v.modulus - 1 - idx as Frame,
+            _ => idx as Frame,
+        };
+        let q = (heard - v.lo).rem_euclid(v.modulus);
+        if q >= v.span || (q - v.off).rem_euclid(v.span) < self.progress {
+            return None;
+        }
+        Some(match self.kind {
+            JobKind::Fill { buf, fill } => fill.source(idx as Frame).map_or(0.0, |s| bufs[buf][s as usize]),
+            JobKind::Copy { src, .. } | JobKind::Restore { src, .. } | JobKind::LaneCopy { src, .. } => bufs[src][idx],
+            JobKind::Trim { src, fill, reversed, .. } => {
+                let s = fill.source(heard).unwrap_or(0);
+                bufs[src][if reversed { fill.master - 1 - s } else { s } as usize]
+            }
+        })
+    }
 }
 
 /// Rendered frames a block job over `span` buffer positions takes: `JOB_RATE` positions a frame.
@@ -354,6 +469,17 @@ pub struct Looper {
     published: [Option<LaneInfo>; TRACK_COUNT],
     published_transport: Option<(Frame, u32, bool)>,
     overview: Arc<Overview>,
+    /// D23's punch ramp (`punch_frames`): an overdub fades in over its first this many frames and out
+    /// over its last.
+    punch: Frame,
+    /// The overdub's last `punch` writes, a ring: `tail_len` of them, the oldest `tail_len` slots behind
+    /// `tail_next`. Reset when an overdub starts; its punch-out reads them (`fade_tail`).
+    tail: Vec<DubWrite>,
+    tail_next: usize,
+    tail_len: usize,
+    /// Each lane's outgoing cache (`Voice`): `punch` samples a lane, lane `i` at `[i * punch, (i + 1) *
+    /// punch)`.
+    cache: Vec<f64>,
 }
 
 impl Looper {
@@ -396,6 +522,11 @@ impl Looper {
             published: [None; TRACK_COUNT],
             published_transport: None,
             overview: Arc::new(Overview::new(2 * TRACK_COUNT + 1, capacity as usize)),
+            punch: punch_frames(sample_rate),
+            tail: vec![DubWrite::default(); punch_frames(sample_rate) as usize],
+            tail_next: 0,
+            tail_len: 0,
+            cache: vec![0.0; TRACK_COUNT * punch_frames(sample_rate) as usize],
         }
     }
 
@@ -658,13 +789,22 @@ impl Looper {
             }
         }
         if self.lanes[i].stop_at.is_some() {
-            // A second press silences now.
-            self.stop(cx, i);
+            // A second press stops now (its tail from here, D23).
+            self.stop(cx, i, true);
             return Applied::Done;
         }
         match self.lanes[i].state {
             LaneState::Empty => {}
             LaneState::Recording | LaneState::Overdubbing => {
+                // An overdub's lane fades out from the press while its capture runs on to the window's
+                // end, which starts no second tail (D23). That capture keeps writing the loop the tail
+                // reads, ahead of the read head under an alignment near a whole loop: the tail is cached
+                // at the press.
+                if self.sounds(i) {
+                    let src = self.lanes[i].audible;
+                    self.ramp_level(i, cx.now, 0.0, src);
+                    self.cache_outgoing(i, cx.now, src, false);
+                }
                 if let Some(rec) = self.rec.as_mut() {
                     rec.stop_playback = true;
                 }
@@ -675,7 +815,7 @@ impl Looper {
                     let when = next_boundary(self.anchor, self.master, cx.now);
                     self.lanes[i].stop_at = Some(when);
                 } else {
-                    self.stop(cx, i);
+                    self.stop(cx, i, true);
                 }
             }
             LaneState::Stopped => {
@@ -686,9 +826,9 @@ impl Looper {
     }
 
     /// The Stop command: abort whatever the lane captures (nothing is kept but a committed loop) and
-    /// silence it now. Silence never waits for a block job.
+    /// stop it now (its 5 ms tail, D23). A stop never waits for a block job.
     pub fn stop_command(&mut self, cx: &mut Cx, i: usize) -> Applied {
-        self.stop(cx, i);
+        self.stop(cx, i, true);
         Applied::Done
     }
 
@@ -704,7 +844,7 @@ impl Looper {
         let t = &mut self.lanes[i];
         std::mem::swap(&mut t.live, &mut t.spare);
         std::mem::swap(&mut t.reversed, &mut t.spare_reversed);
-        self.follow_logical(cx.now, i);
+        self.follow_logical(cx.now, i, true);
         Applied::Done
     }
 
@@ -719,19 +859,45 @@ impl Looper {
         }
         let t = &mut self.lanes[i];
         t.reversed = !t.reversed;
-        self.follow_logical(cx.now, i);
+        self.follow_logical(cx.now, i, false);
         Applied::Done
     }
 
-    /// Playback follows the lane's logical buffer: now when stopped, on the next boundary when playing.
-    fn follow_logical(&mut self, now: Frame, i: usize) {
+    /// Playback follows the lane's logical buffer: now when stopped (a tail sounding plays on from the
+    /// loop it started on), on the next boundary when playing, crossfaded there when `undo` brings it in
+    /// (`switch_audible`).
+    fn follow_logical(&mut self, now: Frame, i: usize, undo: bool) {
         let t = &mut self.lanes[i];
         if t.state == LaneState::Playing {
             t.switch_at = Some(next_boundary(self.anchor, self.master, now));
+            t.switch_undo |= undo;
         } else {
             t.audible = t.logical();
             t.switch_at = None;
+            t.switch_undo = false;
         }
+    }
+
+    /// The pending switch lands (its boundary, or a DUB starting before it: D19): playback takes the
+    /// lane's logical buffer at `now`. When an UNDO brings in another buffer, the loop heard so far is
+    /// cached fading out over the punch ramp's N frames and the loop it gives back fades in over them, both
+    /// at the grid phase (D23); two UNDOs that land back on the buffer heard switch nothing, and a
+    /// REVERSE's or a TRIM's switch alone stays a cut on the boundary, as ever.
+    fn switch_audible(&mut self, i: usize, now: Frame) {
+        let t = self.lanes[i];
+        let new = t.logical();
+        if t.switch_undo && new.buf != t.audible.buf && self.sounds(i) {
+            self.cache_outgoing(i, now, t.audible, true);
+            let v = &mut self.lanes[i].voice;
+            (v.src, v.from, v.from_level, v.to) = (new, now, 0.0, 1.0);
+        } else if now - t.voice.from < self.punch {
+            // A PLAY's fade-in reads what the lane plays.
+            self.lanes[i].voice.src = new;
+        }
+        let t = &mut self.lanes[i];
+        t.audible = new;
+        t.switch_at = None;
+        t.switch_undo = false;
     }
 
     /// F16 TRIM: lane `i` keeps its first `bars` bars AS HEARD (on a reversed lane, the first bars of its
@@ -783,8 +949,8 @@ impl Looper {
         t.spare_reversed = t.reversed;
         t.undo_valid = true;
         let kind = JobKind::Trim { src: t.spare, dst: t.live, fill: TakeFill::later(bars * fpb, fpb, master), reversed: t.reversed };
-        self.follow_logical(cx.now, i);
-        self.push_job(cx.now, i, kind, Visit { lo: 0, span: master, off: 0, modulus: master });
+        self.follow_logical(cx.now, i, false);
+        self.push_job(cx.now, cx.now, i, kind, Visit { lo: 0, span: master, off: 0, modulus: master });
         Applied::Done
     }
 
@@ -815,7 +981,7 @@ impl Looper {
         cx.fx.copy(i, j, cx.now);
         let resume = src.state == LaneState::Playing && src.stop_at.is_none();
         let kind = JobKind::LaneCopy { src: src.live, dst: dst.live, from: i, to: j, resume, feedback: src.feedback };
-        self.push_job(cx.now, j, kind, Visit { lo: 0, span: self.master, off: 0, modulus: self.master });
+        self.push_job(cx.now, cx.now, j, kind, Visit { lo: 0, span: self.master, off: 0, modulus: self.master });
         Applied::Done
     }
 
@@ -869,7 +1035,7 @@ impl Looper {
             match self.lanes[i].state {
                 LaneState::Playing => match when {
                     Some(at) if !force_now => self.lanes[i].stop_at = Some(at),
-                    _ => self.stop(cx, i),
+                    _ => self.stop(cx, i, true),
                 },
                 LaneState::Recording | LaneState::Overdubbing => {
                     self.play_stop(cx, i);
@@ -894,7 +1060,7 @@ impl Looper {
         if self.lanes.iter().any(|t| t.fade_from.is_some()) {
             for k in 0..TRACK_COUNT {
                 if self.lanes[k].fade_from.is_some() {
-                    self.stop(cx, k);
+                    self.stop(cx, k, true);
                 }
             }
             return Applied::Done;
@@ -1169,7 +1335,7 @@ impl Looper {
     fn stop_capture(&mut self, cx: &mut Cx, i: usize) {
         let t = self.lanes[i];
         if t.auto_armed || t.armed {
-            self.stop(cx, i); // nothing retained yet: cancel the count-in, the boundary arm or AUTO
+            self.stop(cx, i, true); // nothing retained yet: cancel the count-in, the boundary arm or AUTO
             return;
         }
         let Some(mut rec) = self.rec.filter(|r| r.lane == i) else { return };
@@ -1222,6 +1388,7 @@ impl Looper {
         if rec.damaged {
             self.reject(cx, i, &rec);
         } else if rec.kind == Kind::Overdub {
+            self.fade_tail(i, rec.end.unwrap());
             self.lanes[i].state = if rec.stop_playback { LaneState::Stopped } else { LaneState::Playing };
         } else {
             self.commit_take(cx, i, &rec);
@@ -1264,13 +1431,15 @@ impl Looper {
         t.written = master;
         t.armed = false;
         t.audible = t.logical();
+        // A fresh take starts settled: no D23 edge on its first frame.
+        t.voice = Voice::settled(t.audible);
         t.state = if rec.stop_playback { LaneState::Stopped } else { LaneState::Playing };
         let lo = fill.untouched();
         if lo < master {
             // Start where playback reads next, so the fill stays ahead of it.
             let off = if reader >= lo { reader - lo } else { 0 };
             let buf = t.live;
-            self.push_job(cx.now, i, JobKind::Fill { buf, fill }, Visit { lo, span: master - lo, off, modulus: master });
+            self.push_job(cx.now, cx.now, i, JobKind::Fill { buf, fill }, Visit { lo, span: master - lo, off, modulus: master });
         }
     }
 
@@ -1319,7 +1488,7 @@ impl Looper {
             let bufs = [Some(t.live), t.undo_valid.then_some(t.spare)];
             for buf in bufs.into_iter().flatten() {
                 // In buffer order: playback reads through the old loop until the whole extension is done.
-                self.push_job(start, k, JobKind::Fill { buf, fill }, Visit { lo: old, span: new - old, off: 0, modulus: new });
+                self.push_job(cx.now, start, k, JobKind::Fill { buf, fill }, Visit { lo: old, span: new - old, off: 0, modulus: new });
                 start += job_frames(new - old);
             }
             next = start;
@@ -1404,7 +1573,7 @@ impl Looper {
         let Some(mut rec) = self.rec else { return };
         let i = rec.lane;
         if self.lanes[i].armed || self.lanes[i].auto_armed {
-            self.stop(cx, i);
+            self.stop(cx, i, true);
             return;
         }
         if rec.kind == Kind::Overdub && rec.start.is_some_and(|s| s >= cx.now) {
@@ -1453,9 +1622,10 @@ impl Looper {
         let master = self.master;
         let first_pos = loop_pos(cx.now, self.anchor, master);
         let mut rec = Recorder::new(i, Kind::Overdub, cx.align);
+        // D19: a switch still pending lands now, so the layer sums onto the loop heard from here (an
+        // undo's crossfades from here, cached before the buffers change hands below).
+        self.switch_audible(i, cx.now);
         let t = &mut self.lanes[i];
-        t.audible = t.logical();
-        t.switch_at = None;
         rec.prev_undo_valid = t.undo_valid;
         rec.prev_spare_reversed = t.spare_reversed;
         // The previous undo target waits in the free buffer until the layer commits or is discarded;
@@ -1467,9 +1637,55 @@ impl Looper {
         let (src, dst) = (t.live, t.spare);
         rec.start = Some(cx.now + rec.align);
         rec.first_pos = first_pos;
+        self.tail_next = 0;
+        self.tail_len = 0;
         self.rec = Some(rec);
         self.damage_from_gap();
-        self.push_job(cx.now, i, JobKind::Copy { src, dst }, Visit { lo: 0, span: master, off: first_pos, modulus: master });
+        self.push_job(cx.now, cx.now, i, JobKind::Copy { src, dst }, Visit { lo: 0, span: master, off: first_pos, modulus: master });
+    }
+
+    /// D23's punch-out of a clean overdub whose window ended at input frame `end`: each of its writes in
+    /// the ramp's last frames before `end` (input frame `f`) becomes `old + b * (new - old)`, with
+    /// `b = (end - f) / punch` (the last write keeps `1 / punch` of its change; nothing past `end` was
+    /// written and nothing is). `old` is the sample that write overwrote, earlier passes of the same dub
+    /// included, not the undo target. A rejected or discarded layer never gets here: its restore puts the
+    /// loop before it back bit for bit.
+    ///
+    /// The writes are distinct loop positions (a master is at least a bar, far longer than the ramp); a
+    /// position that no longer holds the write's `new` is left as it is. The rewrite runs at frame `end`,
+    /// before that frame renders, and the writer runs `align` frames behind the read head, so the read
+    /// head reaches the earliest rewritten position `master - (punch - 1 + align % master)` frames later:
+    /// the rewrite lands before any of them plays again unless the alignment, modulo the loop, leaves
+    /// the read head less than the ramp ahead of the writer (a total latency within the ramp of a whole
+    /// number of loops), when the newest writes play once unfaded, on that pass only. Nothing asserts
+    /// it: a debug build would lose the engine on an accepted latency. A device's punch-out
+    /// (`punch_out`) runs it at once on the writes it retained, its `end` the next frame no device
+    /// rendered.
+    fn fade_tail(&mut self, i: usize, end: Frame) {
+        let (n, cap) = (self.punch, self.tail.len());
+        let buf = self.lanes[i].live;
+        let data = &mut self.bufs[buf];
+        let oldest = (self.tail_next + cap - self.tail_len) % cap;
+        let mut faded: Option<(usize, usize)> = None;
+        for k in 0..self.tail_len {
+            let w = self.tail[(oldest + k) % cap];
+            let to_end = end - w.frame;
+            if to_end >= n {
+                continue;
+            }
+            faded = Some(faded.map_or((w.pos, 1), |(p, c)| (p, c + 1)));
+            if w.new != w.old && data[w.pos].to_bits() == w.new.to_bits() {
+                let b = to_end as f32 / n as f32;
+                data[w.pos] = w.old + b * (w.new - w.old);
+            }
+        }
+        // One touch per run of positions (two across the loop point): peaks and a snapshot's write count.
+        let Some((first, count)) = faded else { return };
+        let (data, master) = (&self.bufs[buf], self.master as usize);
+        self.overview.touch(buf, data, first, (first + count).min(master), master);
+        if first + count > master {
+            self.overview.touch(buf, data, 0, first + count - master, master);
+        }
     }
 
     /// Put the loop back as it was before the overdub, and the undo target from before it.
@@ -1488,7 +1704,7 @@ impl Looper {
         let off = if into < span { into } else { 0 };
         let kind = JobKind::Restore { src: t.spare, dst: t.live, prev_undo_valid: rec.prev_undo_valid, prev_spare_reversed: rec.prev_spare_reversed };
         self.lanes[i].undo_valid = rec.prev_undo_valid;
-        self.push_job(cx.now, i, kind, Visit { lo: rec.first_pos, span, off, modulus: master });
+        self.push_job(cx.now, cx.now, i, kind, Visit { lo: rec.first_pos, span, off, modulus: master });
     }
 
     /// Hand the previous undo target back from the free buffer.
@@ -1501,13 +1717,33 @@ impl Looper {
 
     // ── Stop, resume, reset ────────────────────────────────────────────────────────────────────────
 
-    /// Silence the lane now and keep its loop. A capture is aborted: an uncommitted take is dropped,
+    /// Stop the lane now and keep its loop. A capture is aborted: an uncommitted take is dropped,
     /// an overdub layer discarded, a first-take count-in hands the pulse back to free-run and a later
-    /// take's to the master grid (`release_recorder`).
-    fn stop(&mut self, cx: &mut Cx, i: usize) {
+    /// take's to the master grid (`release_recorder`). The lane is
+    /// STOPPED on this frame; with `tail` (every stop but one scheduled: END STOP's boundary, a FADE's
+    /// end) what it was playing fades out over the punch ramp's N frames from here, from the level heard
+    /// (a FADE's attenuation included), and plays on from the loop heard at the press (D23, `Voice`);
+    /// a discarded layer's restore caches it first (`protect`). Without `tail` every edge ends on this
+    /// frame, an undo's outgoing loop switching on it too: the lane is silent from it.
+    fn stop(&mut self, cx: &mut Cx, i: usize, tail: bool) {
         let t = self.lanes[i];
         if t.state == LaneState::Empty {
             return;
+        }
+        if !tail {
+            self.lanes[i].voice = Voice::settled(t.audible);
+        } else if self.sounds(i) {
+            // The FADE's ramp ends with its flags below: its level at the press carries into the tail.
+            let r2 = t.fade_from.zip(t.stop_at).map_or(1.0, |(from, to)| {
+                let r = ((to - cx.now) as f64 * (1.0 / (to - from).max(1) as f64)).clamp(0.0, 1.0);
+                r * r
+            });
+            self.ramp_level(i, cx.now, 0.0, t.audible);
+            self.lanes[i].voice.from_level *= r2;
+            if r2 != 1.0 {
+                let n = self.punch as usize;
+                self.cache[i * n..(i + 1) * n].iter_mut().for_each(|y| *y *= r2);
+            }
         }
         self.lanes[i].stop_at = None;
         self.lanes[i].fade_from = None;
@@ -1528,6 +1764,7 @@ impl Looper {
         }
         t.audible = t.logical();
         t.switch_at = None;
+        t.switch_undo = false;
         t.state = if t.length > 0 { LaneState::Stopped } else { LaneState::Empty };
         if discard {
             self.reset_master_if_blank(cx);
@@ -1556,11 +1793,23 @@ impl Looper {
         self.rec.is_some_and(|r| r.restart.is_some())
     }
 
-    /// An idle transport restarts from the top: the grid re-anchors at the press and the pulse with it.
+    /// A tail still sounding (D23) keeps the phase it started on: it is cached before the grid moves.
+    fn keep_tails(&mut self, now: Frame) {
+        for k in 0..TRACK_COUNT {
+            let v = self.lanes[k].voice;
+            if now - v.from < self.punch {
+                self.cache_outgoing(k, now, v.src, false);
+            }
+        }
+    }
+
+    /// An idle transport restarts from the top: the grid re-anchors at the press and the pulse with it,
+    /// after the tails still sounding are kept (`keep_tails`).
     fn restart_if_idle(&mut self, cx: &mut Cx) -> Option<Frame> {
         if !self.idle() {
             return None;
         }
+        self.keep_tails(cx.now);
         self.anchor = cx.now;
         self.origin = cx.now;
         let bars = self.master / self.fpb(cx);
@@ -1577,12 +1826,14 @@ impl Looper {
     /// to write, a reversed lane's included. Delivered late (the device frame jumped over the downbeat),
     /// the grid still anchors on `downbeat`, and the count beats the jump skipped fire first, late and as
     /// one click (the clock's rule): the count stays complete, and no beat of its tempo grid past it is
-    /// ever fired.
+    /// ever fired. As at an idle PLAY ALL (D23), a tail still sounding is kept before the grid moves, and
+    /// a lane with none starts at once, with no ramp (`resume`).
     fn restart_from_top(&mut self, cx: &mut Cx, downbeat: Frame) {
         while cx.clock.counting() {
             let Some(beat) = cx.clock.fire_due(cx.now, self.transport_until()) else { break };
             cx.feed.push(Event::Beat { frame: cx.now, beat_in_bar: beat.beat_in_bar, count_left: beat.count_left, clicked: beat.clicked });
         }
+        self.keep_tails(cx.now);
         self.anchor = downbeat;
         self.origin = downbeat;
         let bars = self.master / self.fpb(cx);
@@ -1599,18 +1850,42 @@ impl Looper {
 
     /// Resume a STOPPED lane: from the top on an idle transport, else joining the live phase.
     /// `restart`: the fan-out's shared decision (PLAY ALL); `None` decides here.
+    ///
+    /// D23: joining the live phase fades the lane in over the punch ramp's N frames from the press; over
+    /// its own tail of the same loop the level turns back up from where the tail had it. A tail of
+    /// another loop or phase (its audible changed while it stopped, its layer was discarded, the grid
+    /// restarted) fades out from the cache as the lane fades in. From the top with no tail of its own
+    /// sounding, it starts at once, as ever.
     fn resume(&mut self, cx: &mut Cx, i: usize, restart: Option<Option<Frame>>) -> bool {
         if self.lanes[i].length == 0 {
             return false;
         }
-        if restart.is_none() {
-            self.restart_if_idle(cx);
+        let restarted = match restart {
+            Some(r) => r,
+            None => self.restart_if_idle(cx),
+        };
+        let now = cx.now;
+        let (new, v) = (self.lanes[i].logical(), self.lanes[i].voice);
+        let tail = now - v.from < self.punch;
+        if tail && v.src == new && restarted.is_none() {
+            self.ramp_level(i, now, 1.0, new);
+        } else {
+            if tail {
+                self.cache_outgoing(i, now, v.src, false);
+            }
+            let v = &mut self.lanes[i].voice;
+            if restarted.is_some() && now - v.cached >= self.punch {
+                *v = Voice::settled(new);
+            } else {
+                (v.src, v.from, v.from_level, v.to) = (new, now, 0.0, 1.0);
+            }
         }
         let t = &mut self.lanes[i];
         t.stop_at = None;
         t.fade_from = None;
         t.audible = t.logical();
         t.switch_at = None;
+        t.switch_undo = false;
         t.state = LaneState::Playing;
         true
     }
@@ -1661,13 +1936,11 @@ impl Looper {
     pub fn events(&mut self, cx: &mut Cx) {
         let now = cx.now;
         for i in 0..TRACK_COUNT {
-            let t = &mut self.lanes[i];
-            if t.switch_at.is_some_and(|at| at <= now) {
-                t.audible = t.logical();
-                t.switch_at = None;
+            if self.lanes[i].switch_at.is_some_and(|at| at <= now) {
+                self.switch_audible(i, now);
             }
-            if t.stop_at.is_some_and(|at| at <= now) {
-                self.stop(cx, i);
+            if self.lanes[i].stop_at.is_some_and(|at| at <= now) {
+                self.stop(cx, i, false);
             }
         }
         for k in 0..MAX_JOBS {
@@ -1717,10 +1990,110 @@ impl Looper {
         }
     }
 
-    /// A job on `lane` from frame `start` (now, or where a job it depends on is done).
-    fn push_job(&mut self, start: Frame, lane: usize, kind: JobKind, visit: Visit) {
+    /// A job on `lane` pushed at frame `now`, from frame `start` (now, or where a job it depends on is
+    /// done).
+    fn push_job(&mut self, now: Frame, start: Frame, lane: usize, kind: JobKind, visit: Visit) {
+        let job = Job { kind, lane, visit, start, progress: 0 };
+        self.protect(now, job.writes());
         let slot = self.jobs.iter_mut().find(|j| j.is_none()).expect("block job slots exhausted");
-        *slot = Some(Job { kind, lane, visit, start, progress: 0 });
+        *slot = Some(job);
+    }
+
+    /// D23: a job about to write buffer `buf` from `now`. A tail still reading it (an immediate STOP's,
+    /// `Voice`) is cached first, so it plays out the loop heard at its press: a discarded layer's
+    /// restore, a TRIM after an UNDO on the stopped lane or a multiply's extension rewrites it.
+    fn protect(&mut self, now: Frame, buf: usize) {
+        for i in 0..TRACK_COUNT {
+            let v = self.lanes[i].voice;
+            if now - v.from < self.punch && v.to == 0.0 && v.src.buf == buf {
+                self.cache_outgoing(i, now, v.src, false);
+            }
+        }
+    }
+
+    /// D23: lane `i`'s level turns at `now` from the level it has there toward `to` (1: PLAY; 0: a
+    /// STOP's tail), reaching it N frames later, playing `src`. Called before the lane's state changes.
+    fn ramp_level(&mut self, i: usize, now: Frame, to: f64, src: Audible) {
+        let from_level = self.level(i, now);
+        let v = &mut self.lanes[i].voice;
+        (v.src, v.from, v.from_level, v.to) = (src, now, from_level, to);
+    }
+
+    /// Lane `i`'s level ramp at frame `f` (D23, `Voice`): linear from `from_level` to `to` over N
+    /// frames, then what its state says (1 while it sounds).
+    fn level(&self, i: usize, f: Frame) -> f64 {
+        let v = self.lanes[i].voice;
+        let d = f - v.from;
+        if d >= self.punch {
+            if self.sounds(i) { 1.0 } else { 0.0 }
+        } else if d <= 0 {
+            v.from_level
+        } else {
+            v.from_level + (v.to - v.from_level) * (d as f64 / self.punch as f64)
+        }
+    }
+
+    /// Lane `i` plays: PLAYING, or OVERDUBBING unless PLAY/STOP has ended its capture.
+    fn sounds(&self, i: usize) -> bool {
+        match self.lanes[i].state {
+            LaneState::Playing => true,
+            LaneState::Overdubbing => !self.rec.is_some_and(|r| r.lane == i && r.stop_playback),
+            _ => false,
+        }
+    }
+
+    /// D23: lane `i`'s outgoing cache (`Voice`) restarts at `now`, keeping what it still held for the
+    /// frames from `now` on, and takes in what the lane's level ramp plays from `src` over the next N
+    /// frames, as the ramp goes on (a tail falls to 0 on its own frames), and, `fade_out`, faded out over
+    /// them too, what it still held included (an undo's outgoing loop: the lane fades the new one in over
+    /// the same frames, so identical loops sum to the loop through any overlap of switches). The ramp
+    /// then rests on the lane's state. Each sample is read at its grid phase in heard order (the source's
+    /// orientation, a multiply's extension read through the old loop), and what a block job has still to
+    /// write there is taken from the job's source (`Job::ahead`): the cache never depends on how far a
+    /// callback rendered. N reads and a scan of the job table each: no loop-sized work.
+    fn cache_outgoing(&mut self, i: usize, now: Frame, src: Audible, fade_out: bool) {
+        let n = self.punch as usize;
+        let (master, anchor, row) = (self.master, self.anchor, i * n);
+        let shift = (now - self.lanes[i].voice.cached).clamp(0, n as Frame) as usize;
+        let cache = &mut self.cache[row..row + n];
+        cache.copy_within(shift.., 0);
+        cache[n - shift..].fill(0.0);
+        if fade_out {
+            // What the cache still held was heard too: it fades out with the rest.
+            for (k, y) in cache.iter_mut().enumerate() {
+                *y *= 1.0 - k as f64 / n as f64;
+            }
+        }
+        if master > 0 {
+            let extending = if self.lanes[i].extending > 0 { self.lanes[i].extending } else { Frame::MAX };
+            let mut pos = loop_pos(now, anchor, master);
+            for k in 0..n {
+                let mut w = self.level(i, now + k as Frame);
+                if fade_out {
+                    w *= 1.0 - k as f64 / n as f64;
+                }
+                if w != 0.0 {
+                    let mut idx = if src.reversed { master - 1 - pos } else { pos };
+                    if idx >= extending {
+                        idx %= extending;
+                    }
+                    let x = self.settled_sample(src.buf, idx as usize);
+                    self.cache[row + k] += w * x as f64;
+                }
+                pos += 1;
+                if pos == master {
+                    pos = 0;
+                }
+            }
+        }
+        let v = &mut self.lanes[i].voice;
+        v.cached = now;
+        v.from = SETTLED;
+    }
+
+    /// Buffer `buf`'s sample at `idx` once the block jobs writing it are past it (`Job::ahead`).
+    fn settled_sample(&self, buf: usize, idx: usize) -> f32 {
+        self.jobs.iter().flatten().find_map(|j| j.ahead(&self.bufs, buf, idx)).unwrap_or(self.bufs[buf][idx])
     }
 
     fn complete_job(&mut self, cx: &mut Cx, job: Job) {
@@ -1885,11 +2258,18 @@ impl Looper {
                 let master = self.master;
                 let first = loop_pos(lo - rec.align, self.anchor, master);
                 let mut pos = first;
-                // DUB FEEDBACK: at 1 this is `old + x` bit for bit (a product by 1 is exact, a sum commutes).
-                let fb = lane.feedback;
-                for &x in &input[(lo - f0) as usize..(hi - f0) as usize] {
-                    let old = &mut data[pos as usize];
-                    *old = x + fb * *old;
+                // DUB FEEDBACK past the punch ramp: at 1 this is `old + x` bit for bit (a product by 1 is
+                // exact, a sum commutes). The ramp's age is the input frame's distance from the window
+                // start, whatever the block or the pass (`punch_in`); every write is kept for the
+                // punch-out (`fade_tail`).
+                let (fb, n, cap) = (lane.feedback, self.punch, self.tail.len());
+                for (f, &x) in (lo..hi).zip(&input[(lo - f0) as usize..(hi - f0) as usize]) {
+                    let old = data[pos as usize];
+                    let new = punch_in(old, x, fb, f - start, n);
+                    data[pos as usize] = new;
+                    self.tail[self.tail_next] = DubWrite { frame: f, pos: pos as usize, old, new };
+                    self.tail_next = (self.tail_next + 1) % cap;
+                    self.tail_len = (self.tail_len + 1).min(cap);
                     pos += 1;
                     if pos == master {
                         pos = 0;
@@ -1909,9 +2289,10 @@ impl Looper {
     /// it does not play), and a fading lane's ramp over those frames into `fades[i][..n]`; returns which
     /// lanes fade. The ramp is on the lane before its FX, so everything its FX return (the delay, the
     /// reverb send) is fed the fading loop, and the FX take it for the delay's feedback too
-    /// (`LaneFx::render`).
+    /// (`LaneFx::render`). D23's edges (`Voice`) sum in over their N frames: the level ramp on what the
+    /// lane plays and the outgoing cache; a lane past both plays as it always has, bit for bit.
     pub fn render<const Q: usize>(&mut self, f0: Frame, n: usize, out: &mut [[f32; Q]; TRACK_COUNT], fades: &mut [[f32; Q]; TRACK_COUNT]) -> [bool; TRACK_COUNT] {
-        let master = self.master;
+        let (master, ramp_n) = (self.master, self.punch);
         let silent_lane = self.rec.filter(|r| r.stop_playback).map(|r| r.lane);
         let mut fading = [false; TRACK_COUNT];
         for (i, (out, fade)) in out.iter_mut().zip(fades.iter_mut()).enumerate() {
@@ -1921,7 +2302,11 @@ impl Looper {
             let target = if t.muted { 0.0 } else { t.volume as f64 };
             // Only a committed lane plays, and a lane commits only onto a master.
             let playing = t.state == LaneState::Playing || (t.state == LaneState::Overdubbing && silent_lane != Some(i));
-            if !playing {
+            // Frames before `edge` may lie on the level ramp or in the outgoing cache.
+            let v = t.voice;
+            let (ramp_end, cache_end) = (v.from + ramp_n, v.cached + ramp_n);
+            let edge = if master > 0 { ramp_end.max(cache_end) } else { Frame::MIN };
+            if !playing && f0 >= edge {
                 for _ in 0..out.len() {
                     t.gain = crate::glide(t.gain, target, self.gain_coef);
                 }
@@ -1935,18 +2320,63 @@ impl Looper {
             // over the volume (half-way down it is at -12 dB).
             let ramp = t.fade_from.zip(t.stop_at).map(|(from, to)| (to, 1.0 / (to - from).max(1) as f64));
             fading[i] = ramp.is_some();
-            for (k, sample) in out.iter_mut().enumerate() {
-                let mut idx = if t.audible.reversed { master - 1 - pos } else { pos };
-                if idx >= extending {
-                    idx %= extending;
+            if f0 >= edge {
+                for (k, sample) in out.iter_mut().enumerate() {
+                    let mut idx = if t.audible.reversed { master - 1 - pos } else { pos };
+                    if idx >= extending {
+                        idx %= extending;
+                    }
+                    let mut g = t.gain;
+                    if let Some((to, inv)) = ramp {
+                        let r = ((to - f0 - k as Frame) as f64 * inv).clamp(0.0, 1.0);
+                        g *= r * r;
+                        fade[k] = (r * r) as f32;
+                    }
+                    *sample = (g * data[idx as usize] as f64) as f32;
+                    t.gain = crate::glide(t.gain, target, self.gain_coef);
+                    pos += 1;
+                    if pos == master {
+                        pos = 0;
+                    }
                 }
+                continue;
+            }
+            // D23's edge, frame by frame: what each frame takes depends only on its frame, so a frame past
+            // both parts is the loop above's, whichever slice it falls in.
+            let (src_data, cache) = (&self.bufs[v.src.buf], &self.cache[i * ramp_n as usize..(i + 1) * ramp_n as usize]);
+            for (k, sample) in out.iter_mut().enumerate() {
+                let f = f0 + k as Frame;
                 let mut g = t.gain;
                 if let Some((to, inv)) = ramp {
-                    let r = ((to - f0 - k as Frame) as f64 * inv).clamp(0.0, 1.0);
+                    let r = ((to - f) as f64 * inv).clamp(0.0, 1.0);
                     g *= r * r;
                     fade[k] = (r * r) as f32;
                 }
-                *sample = (g * data[idx as usize] as f64) as f32;
+                let d = f - v.from;
+                let (level, src, data) = if d < ramp_n {
+                    let level = if d <= 0 { v.from_level } else { v.from_level + (v.to - v.from_level) * (d as f64 / ramp_n as f64) };
+                    (level, v.src, src_data)
+                } else {
+                    (if playing { 1.0 } else { 0.0 }, t.audible, data)
+                };
+                let x = if level != 0.0 {
+                    let mut idx = if src.reversed { master - 1 - pos } else { pos };
+                    if idx >= extending {
+                        idx %= extending;
+                    }
+                    data[idx as usize] as f64
+                } else {
+                    0.0
+                };
+                *sample = if f < cache_end {
+                    (g * (level * x + cache[(f - v.cached) as usize])) as f32
+                } else if d < ramp_n {
+                    (g * (level * x)) as f32
+                } else if playing {
+                    (g * x) as f32
+                } else {
+                    0.0
+                };
                 t.gain = crate::glide(t.gain, target, self.gain_coef);
                 pos += 1;
                 if pos == master {
@@ -2042,6 +2472,9 @@ impl Looper {
             t.undo_valid = false;
             t.audible = t.logical();
             t.switch_at = None;
+            t.switch_undo = false;
+            // A load starts settled: no D23 edge.
+            t.voice = Voice::settled(t.audible);
             t.stop_at = None;
             t.state = if track.playing { LaneState::Playing } else { LaneState::Stopped };
         }

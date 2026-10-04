@@ -4,7 +4,9 @@
 //! implements [`SlotProcessor`] for CLAP and VST3).
 //!
 //! Each slot has its own input (the device side picks its capture channel). A slot holding an effect
-//! (or nothing) passes its input on while it is live and gets silence otherwise; its output is the wet
+//! (or nothing) passes its input on while it is live and gets silence otherwise, through its live gate:
+//! a linear ramp over the frames of `LIVE_SECONDS` from the command's frame (STATUS D23), on the input
+//! alone, so an effect's own tail rings out after it goes off. Its output is the wet
 //! signal, which the engine hears after the limiter at once and records at the take's alignment: the
 //! largest live effect's latency, so a live slot with less (an empty one, a quicker effect) reaches the
 //! record tap that much later and two live inputs land together. That record compensation is latched
@@ -34,7 +36,7 @@
 //! frame a slot command waits for (a note, the target, a slot's live flag or gain), so a plugin sees
 //! one call per device block unless a stamped slot command splits it. Those commands therefore apply
 //! at the start of a render call (every event offset is 0 in practice); an install or removal applies
-//! at the next block start.
+//! at the next block start. A live ramp's end splits nothing: the gate is evaluated per frame.
 
 use rtrb::{Consumer, Producer, PushError, RingBuffer};
 
@@ -43,6 +45,8 @@ use crate::grid::Frame;
 
 /// The crossfade into and out of bypass: 10 ms, the web monitor's declick (`audio_output.rs`).
 const FADE_SECONDS: f64 = 0.010;
+/// The live gate's ramp: 5 ms (STATUS D23).
+const LIVE_SECONDS: f64 = 0.005;
 /// Slot gain smoothing, as the master volume's.
 const GAIN_TAU_SECONDS: f64 = 0.012;
 /// Note events one slot queues between two render calls; more are dropped and counted.
@@ -114,7 +118,14 @@ struct Slot {
     removing: bool,
     /// Units stopped and waiting for room on the return ring, oldest first.
     parked: [Option<Box<dyn SlotProcessor>>; 2],
+    /// GO LIVE as asked: the live gate's target, and what the record latency follows.
     live: bool,
+    /// The live gate ramps linearly from `live_gain` at frame `live_end - Rack::live_frames` to the
+    /// target (1 live, 0 off), which it holds exactly from `live_end` on (`Frame::MIN`: settled).
+    live_end: Frame,
+    live_gain: f32,
+    /// The gated input over a render call that a ramp touches.
+    gated: Vec<f32>,
     gain_target: f64,
     gain: f64,
     /// The notes this slot's unit holds (bit per key).
@@ -130,11 +141,19 @@ struct Slot {
     write: usize,
 }
 
-impl Slot {
-    fn takes_input(&self) -> bool {
-        self.live && !(self.unit.is_some() && self.kind == SlotKind::Instrument)
+/// The live gate at frame `f` heading for `live` (1 or 0), its ramp of `n` frames ending at `end` from
+/// `from`: `from + (to - from) * u`, `u = (f - (end - n)) / n` from integer frames, so it lands on the
+/// same frame at any block size; from `end` on, the target exactly.
+fn live_gate(live: bool, end: Frame, from: f32, f: Frame, n: Frame) -> f32 {
+    let to = if live { 1.0 } else { 0.0 };
+    if f >= end {
+        return to;
     }
+    let u = (f - (end - n)).max(0) as f32 / n as f32;
+    from + (to - from) * u
+}
 
+impl Slot {
     fn instrument(&self) -> bool {
         self.unit.is_some() && self.kind == SlotKind::Instrument
     }
@@ -186,6 +205,10 @@ pub(crate) struct Rack {
     slots: [Slot; SLOT_COUNT],
     zeros: Vec<f32>,
     fade_frames: u32,
+    /// The live gate's ramp in frames: `LIVE_SECONDS` at the rate, at least 1.
+    live_frames: Frame,
+    /// A render call has run: from here a live toggle ramps (before it, it sets the starting state).
+    rendered: bool,
     gain_coef: f64,
     /// The slot that takes the notes, if a slot is the note target.
     target: Option<usize>,
@@ -215,6 +238,9 @@ impl Rack {
                 removing: false,
                 parked: [None, None],
                 live: false,
+                live_end: Frame::MIN,
+                live_gain: 0.0,
+                gated: vec![0.0; max_block.max(1)],
                 gain_target: 1.0,
                 gain: 1.0,
                 held: [0; 2],
@@ -234,6 +260,8 @@ impl Rack {
             slots,
             zeros: vec![0.0; max_block.max(1)],
             fade_frames: (FADE_SECONDS * sample_rate as f64).round().max(1.0) as u32,
+            live_frames: (LIVE_SECONDS * sample_rate as f64).round().max(1.0) as Frame,
+            rendered: false,
             gain_coef: (-1.0 / (GAIN_TAU_SECONDS * sample_rate as f64)).exp(),
             target: None,
             record_latency: 0,
@@ -413,10 +441,19 @@ impl Rack {
         }
     }
 
-    pub(crate) fn set_live(&mut self, slot: usize, live: bool) {
-        if let Some(s) = self.slots.get_mut(slot) {
-            s.live = live;
+    /// GO LIVE on or off at frame `now`: the live gate ramps from where it is to the new target over
+    /// `live_frames` from `now` (a reversal mid-ramp from the gain it reached). The same target again
+    /// changes nothing. Before the first rendered frame it sets the starting state, settled.
+    pub(crate) fn set_live(&mut self, slot: usize, live: bool, now: Frame) {
+        let (n, rendered) = (self.live_frames, self.rendered);
+        let Some(s) = self.slots.get_mut(slot) else { return };
+        if s.live == live {
+            return;
         }
+        let from = live_gate(s.live, s.live_end, s.live_gain, now, n);
+        s.live = live;
+        let to = if live { 1.0 } else { 0.0 };
+        (s.live_end, s.live_gain) = if !rendered || from == to { (Frame::MIN, to) } else { (now + n, from) };
     }
 
     pub(crate) fn set_gain(&mut self, slot: usize, gain: f32) {
@@ -436,13 +473,35 @@ impl Rack {
         aligned.fill(0.0);
         bus.fill(0.0);
         record.fill(0.0);
-        let (frame, fade_frames) = (self.cursor, self.fade_frames);
+        let (frame, fade_frames, n) = (self.cursor, self.fade_frames, self.live_frames);
+        self.rendered |= m > 0;
         for (s, input) in self.slots.iter_mut().zip(inputs) {
             let input = &input[..m];
-            let x = if s.takes_input() { input } else { &self.zeros[..m] };
-            // A removal completes on the frame its fade reaches bypass, whatever the call's bounds: from
-            // there the slot is empty and passes what an empty slot does.
-            let empty = if s.live { input } else { &self.zeros[..m] };
+            // The live gate: settled, the input itself or silence; mid-ramp, the input times the gate,
+            // frame by frame, into `gated`. It feeds an effect and an empty slot alike, and it is the
+            // dry side of the bypass crossfade; an effect's output is never gated, so its tail rings.
+            let (live, end, from) = (s.live, s.live_end, s.live_gain);
+            if frame < end {
+                for (k, (g, &x)) in s.gated.iter_mut().zip(input).enumerate() {
+                    let f = frame + k as Frame;
+                    *g = if f < end {
+                        x * live_gate(live, end, from, f, n)
+                    } else if live {
+                        x
+                    } else {
+                        0.0
+                    };
+                }
+            }
+            let gated = if frame < end {
+                &s.gated[..m]
+            } else if live {
+                input
+            } else {
+                &self.zeros[..m]
+            };
+            // An instrument takes no input.
+            let x = if s.instrument() { &self.zeros[..m] } else { gated };
             let has = s.unit.is_some();
             // An event stamped past this call (never, while slot commands bound the ranges) plays late
             // on its last frame rather than breaking the offset contract.
@@ -463,8 +522,10 @@ impl Rack {
             let len = s.line.len();
             let (d, dw) = ((delay - s.latency).clamp(0, (len - 1) as Frame) as usize, s.dw);
             for k in 0..m {
+                // A removal completes on the frame its fade reaches bypass, whatever the call's bounds:
+                // from there the slot is empty and passes what an empty slot does.
                 let gone = s.removing && s.fade == 0;
-                let b = if gone { empty[k] } else { x[k] };
+                let b = if gone { gated[k] } else { x[k] };
                 // Read only mid-fade, which a gone slot never is.
                 let o = if has { s.out[k] } else { b };
                 let y = if s.fade == fade_frames {

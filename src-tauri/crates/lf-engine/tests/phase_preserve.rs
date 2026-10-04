@@ -6,10 +6,13 @@
 //! counterpart: a lane reads loop position `(frame - anchor) mod master` on every frame, so there is no
 //! start offset to clamp. What E protected, playback on the grid, is asserted here on the rendered
 //! output itself (R, G), which the rig guards could not see. So is the Web Audio probe
-//! playback-restart.mjs's join beside a muted lane stopping at the loop end.
+//! playback-restart.mjs's join beside a muted lane stopping at the loop end. A resume into the running
+//! loop fades in over D23's 5 ms at the live phase (`joins_on_grid`); an idle PLAY still starts at once.
 
 mod common;
 
+use common::dub::ramp;
+use common::edges::{self, sample};
 use common::{code, Rig};
 use lf_engine::grid::{commit_anchor, frames_per_bar, plan_commit, Frame, Grid};
 use lf_engine::{Command, LaneState};
@@ -107,6 +110,25 @@ fn plays_on_grid(rig: &Rig, pcms: &[Vec<f32>], from: Frame) {
     }
 }
 
+/// [`plays_on_grid`] with `pcms[lane]` joining at frame `join` (D23): it fades in over the punch ramp's N
+/// frames from there (`common::edges`), at the grid phase.
+fn joins_on_grid(rig: &Rig, pcms: &[Vec<f32>], from: Frame, (lane, join): (usize, Frame)) {
+    let (start, out) = rig.output.as_ref().unwrap();
+    let (anchor, master, n) = (rig.anchor(), rig.master(), ramp(rig.sr));
+    for (k, &y) in out.iter().enumerate() {
+        let f = start + k as Frame;
+        if f < from {
+            continue;
+        }
+        let pos = (f - anchor).rem_euclid(master) as usize;
+        let mut want = 0.0f32;
+        for (i, p) in pcms.iter().enumerate() {
+            want += if i == lane && f < join + n { sample(1.0, edges::join(f - join, n), p[pos], 0.0) } else { p[pos] };
+        }
+        assert_eq!(y, want, "frame {f}: pos {pos}");
+    }
+}
+
 #[test]
 fn r_a_real_first_take_plays_on_its_counted_downbeat() {
     for (bpm, sr, bars, stop_after) in [(120u32, 48000u32, 2, 0.04), (137, 44100, 1, 0.09), (90, 48000, 3, 0.2), (200, 48000, 4, 0.01)] {
@@ -139,14 +161,16 @@ fn g_later_takes_and_resumes_join_the_live_phase_idle_play_restarts_the_top() {
         let from = rig.frame;
         rig.advance(master / 3);
         plays_on_grid(&rig, &[rig.pcm(0), rig.pcm(1)], from);
-        // Lane 2 stops and resumes while lane 1 keeps the transport running.
+        // Lane 2 stops and resumes while lane 1 keeps the transport running: it fades in from the press
+        // (D23), at the live phase.
         rig.press(Command::PlayStop(1));
         rig.advance(master * 77 / 100);
+        let join = rig.frame;
         rig.press(Command::PlayStop(1));
         rig.keep_output();
         let from = rig.frame;
         rig.advance(master / 2);
-        plays_on_grid(&rig, &[rig.pcm(0), rig.pcm(1)], from);
+        joins_on_grid(&rig, &[rig.pcm(0), rig.pcm(1)], from, (1, join));
         assert_eq!(rig.anchor(), anchor, "a live join never moves the grid");
         // Both stopped: PLAY re-anchors at the press and starts from the top.
         rig.press(Command::PlayStop(0));
@@ -213,8 +237,10 @@ fn a_join_beside_a_muted_lane_stopping_at_the_loop_end_keeps_the_live_phase() {
     rig.advance_to(end + master / 2);
     assert!(rig.state(0) == LaneState::Stopped && rig.state(1) == LaneState::Playing, "lane 1 plays on past lane 0's stop");
     let pcm = rig.pcm(1);
-    plays_on_grid(&rig, &[pcm.clone()], join);
+    joins_on_grid(&rig, &[pcm.clone()], join, (0, join));
+    // Its fade-in (D23) over, it plays the live phase, not its top.
+    let n = ramp(rig.sr) as usize;
     let pos = (join - anchor).rem_euclid(master) as usize;
-    let first = rig.output.as_ref().unwrap().1[0];
-    assert!(pos > master as usize / 10 && first == pcm[pos] && first != pcm[0], "from the press, at the live phase {pos}, not the top");
+    let settled = rig.output.as_ref().unwrap().1[n];
+    assert!(pos > master as usize / 10 && settled == pcm[pos + n] && settled != pcm[n], "from the press, at the live phase {pos}, not the top");
 }

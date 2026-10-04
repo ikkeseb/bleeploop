@@ -4,6 +4,8 @@
 //! The Rust twin of `verify/harness/rig.ts`.
 #![allow(dead_code)]
 
+pub mod dub;
+pub mod edges;
 pub mod fx;
 pub mod refs;
 

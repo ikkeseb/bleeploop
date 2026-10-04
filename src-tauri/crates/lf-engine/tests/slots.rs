@@ -23,6 +23,8 @@ use lf_engine::{Command, InputSend, InputSendParam, Instrument, LaneState, NoteT
 
 /// Frames of the bypass crossfade at 48 kHz: 10 ms.
 const FADE: usize = 480;
+/// Frames of the live gate's ramp at 48 kHz: 5 ms (STATUS D23).
+const LIVE: Frame = 240;
 /// What a fake logs before it stops logging (a long run at block size 1 would outgrow it).
 const LOG: usize = 1 << 16;
 
@@ -196,6 +198,48 @@ fn faded(bypass: f32, unit: f32, fade: usize) -> f32 {
         FADE => unit,
         k => bypass + (k as f32 / FADE as f32) * (unit - bypass),
     }
+}
+
+/// A live gate's ramp in frames at `sr`: 5 ms, rounded, at least one.
+fn live_frames(sr: u32) -> Frame {
+    ((sr as f64 * 0.005).round() as Frame).max(1)
+}
+
+/// The live gate as STATUS D23 specifies it, at frame `f`: settled at `initial` before the first toggle,
+/// then each `(frame, on)` toggle in order. A toggle to the state it heads for already changes nothing;
+/// any other ramps linearly over `n` frames from the gain reached at its frame, `from + (to - from) * u`
+/// with `u = (f - frame) / n`, and from `frame + n` on the gate is settled. The gain, or `None` once
+/// settled (on: the input itself; off: silence).
+fn gate_at(initial: bool, toggles: &[(Frame, bool)], n: Frame, f: Frame) -> (bool, Option<f32>) {
+    let level = |on: bool| if on { 1.0f32 } else { 0.0 };
+    let gain = |on: bool, ramp: Option<(Frame, f32)>, t: Frame| match ramp {
+        Some((at, from)) if t - at < n => Some(from + (level(on) - from) * ((t - at) as f32 / n as f32)),
+        _ => None,
+    };
+    let (mut on, mut ramp) = (initial, None);
+    for &(at, to) in toggles.iter().filter(|&&(at, _)| at <= f) {
+        if to == on {
+            continue;
+        }
+        let from = gain(on, ramp, at).unwrap_or(level(on));
+        on = to;
+        ramp = if from == level(to) { None } else { Some((at, from)) };
+    }
+    (on, gain(on, ramp, f))
+}
+
+/// `x` through a live gate in `state` ([`gate_at`]).
+fn through(x: f32, state: (bool, Option<f32>)) -> f32 {
+    match state {
+        (_, Some(g)) => x * g,
+        (true, None) => x,
+        (false, None) => 0.0,
+    }
+}
+
+/// `x` through the live gate at frame `f` ([`gate_at`] at 48 kHz).
+fn live(x: f32, initial: bool, toggles: &[(Frame, bool)], f: Frame) -> f32 {
+    through(x, gate_at(initial, toggles, LIVE, f))
 }
 
 // ── Install and removal ──────────────────────────────────────────────────────────────────────────────
@@ -768,10 +812,14 @@ fn a_slot_passes_the_input_only_while_live() {
     let start = rig.output.as_ref().unwrap().0;
     assert_bits(&rig.monitor, |k| input(start + k as Frame), "empty and live: dry");
 
+    let off = rig.frame;
     rig.set(Command::SetSlotLive(0, false));
     rig.keep_output();
     rig.advance(1000);
-    assert!(rig.monitor.iter().all(|&x| x == 0.0), "empty and not live: silent");
+    let start = rig.output.as_ref().unwrap().0;
+    // The mix sums from silence: `0.0 +` keeps a gated -0.0 as the mix has it.
+    assert_bits(&rig.monitor, |k| 0.0 + live(input(start + k as Frame), true, &[(off, false)], start + k as Frame), "empty and going off: ramped out");
+    assert!(rig.monitor[(off + LIVE - start) as usize..].iter().all(|&x| x.to_bits() == 0), "empty and not live: silent once the ramp ends");
 
     let probe = Probe::new();
     rig.install(0, Fake::effect(0.0, 1.0, &probe));
@@ -794,15 +842,28 @@ fn two_live_slots_each_monitor_and_record_only_their_own_input() {
     rig.keep_output();
     rig.advance(1000);
     assert_bits(&rig.monitor, |_| 0.75, "both live: each input heard once");
+    // Each toggle ramps its own slot's input from the command's frame (`live`), the other slot's
+    // untouched: the mix is slot 0's gated input plus slot 1's, summed from silence.
+    let off0 = rig.frame;
     rig.set(Command::SetSlotLive(0, false));
     rig.keep_output();
     rig.advance(1000);
-    assert_bits(&rig.monitor, |_| 0.5, "slot 1 alone: its own input");
+    let start = rig.output.as_ref().unwrap().0;
+    assert_bits(&rig.monitor, |k| 0.0 + live(0.25, true, &[(off0, false)], start + k as Frame) + 0.5, "slot 0 ramping out, slot 1 its own input");
+    assert_bits(&rig.monitor[(off0 + LIVE - start) as usize..], |_| 0.5, "slot 1 alone: its own input");
+    let on0 = rig.frame;
     rig.set(Command::SetSlotLive(0, true));
+    let off1 = rig.frame;
     rig.set(Command::SetSlotLive(1, false));
     rig.keep_output();
     rig.advance(1000);
-    assert_bits(&rig.monitor, |_| 0.25, "slot 0 alone: its own input");
+    let start = rig.output.as_ref().unwrap().0;
+    let both = |k: usize| {
+        let f = start + k as Frame;
+        0.0 + live(0.25, false, &[(on0, true)], f) + live(0.5, true, &[(off1, false)], f)
+    };
+    assert_bits(&rig.monitor, both, "slot 0 ramping in, slot 1 out, each from its own command's frame");
+    assert_bits(&rig.monitor[(off1 + LIVE - start) as usize..], |_| 0.25, "slot 0 alone: its own input");
 
     rig.set(Command::SetSlotLive(1, true));
     rig.set(Command::SetFixedLength(true));
@@ -893,12 +954,14 @@ fn take_through(effect_live: bool, change: MidTake, fx: f32, expected: impl Fn(F
 fn the_record_compensation_holds_through_a_take_whatever_the_slots_do_mid_take() {
     const L: Frame = 480;
     let code = common::code;
-    // Latched with the effect live: both voices L late, the effect's until its input stopped at `at`.
-    take_through(true, MidTake::EffectLive(false), 2.0, |t, at| code(t - L) + if t - L < at { 2.0 * code(t - L) } else { 0.0 });
-    // Latched with it off: the dry voice stays on time, the effect's lands L late from its input's start.
-    take_through(false, MidTake::EffectLive(true), 2.0, |t, at| code(t) + if t - L >= at { 2.0 * code(t - L) } else { 0.0 });
-    // The dry slot off: what was on its way (L frames) still lands, then silence.
-    take_through(true, MidTake::DryOff, 2.0, |t, at| 2.0 * code(t - L) + if t - L < at { code(t - L) } else { 0.0 });
+    // Each voice is its input gated at its own input frame (the ramp from `at`, `live`), then delayed as
+    // its latch puts it.
+    // Latched with the effect live: both voices L late, the effect's ramped out from its input at `at`.
+    take_through(true, MidTake::EffectLive(false), 2.0, |t, at| code(t - L) + live(2.0 * code(t - L), true, &[(at, false)], t - L));
+    // Latched with it off: the dry voice stays on time, the effect's lands L late, ramped in from `at`.
+    take_through(false, MidTake::EffectLive(true), 2.0, |t, at| code(t) + live(2.0 * code(t - L), false, &[(at, true)], t - L));
+    // The dry slot off: what was on its way (L frames) still lands, ramped out from its input at `at`.
+    take_through(true, MidTake::DryOff, 2.0, |t, at| 2.0 * code(t - L) + live(code(t - L), true, &[(at, false)], t - L));
     // The effect leaves: the dry voice keeps its delay.
     take_through(true, MidTake::RemoveEffect, 0.0, |t, _| code(t - L));
 }
@@ -1008,20 +1071,17 @@ fn toggled_live(unit: Option<Box<Fake>>) {
     assert_seamless(&rig, &[("live on", on), ("live off", off)]);
 }
 
-/// GO LIVE on the amp sim while the guitar sustains (STATUS: the next jam opens with it). Red: the live
-/// flag gates the unit's input in one frame (`Slot::takes_input`), so the effect's output cuts in and out.
+/// GO LIVE on the amp sim while the guitar sustains (STATUS: the next jam opens with it): the live gate
+/// ramps the unit's input over 5 ms (STATUS D23), so the effect's output follows it in and out.
 #[test]
-#[ignore = "red, STATUS D23: GO LIVE gates an effect's input in one frame: on a 0.5 tone's crest, on steps 0.500 and off 0.500, over a limit of 0.031"]
 fn go_live_on_and_off_a_loaded_effect_mid_tone_is_click_free() {
     let probe = Probe::new();
     toggled_live(Some(Fake::effect(0.0, 1.0, &probe)));
     assert!(probe.input_peak() > 0.49, "the effect took the tone while live");
 }
 
-/// An empty slot's live flag gates its dry pass-through. Red, as `src-tauri/AGENTS.md` § Open threads
-/// says: the dry signal steps without a ramp on a live toggle.
+/// An empty slot's live flag gates its dry pass-through through the same 5 ms ramp.
 #[test]
-#[ignore = "red, STATUS D23: an empty slot's live toggle gates its dry pass-through in one frame: on a 0.5 tone's crest, on steps 0.500 and off 0.500, over a limit of 0.031"]
 fn an_empty_slot_toggled_live_mid_tone_is_click_free() {
     toggled_live(None);
 }
@@ -1056,6 +1116,217 @@ fn an_effect_installed_and_removed_mid_tone_crossfades_click_free() {
     for f in removed + fade + 1..rig.frame {
         assert!((heard(f) - tone(f)).abs() < 1e-6, "the dry tone again at {f}: {} for {}", heard(f), tone(f));
     }
+}
+
+// ── GO LIVE's ramp ───────────────────────────────────────────────────────────────────────────────────
+
+/// GO LIVE reversed twice inside its ramp and sent again: each reversal ramps from the gain the gate had
+/// reached, over a whole ramp, and a repeat restarts nothing. Slot 0 (input 1.0, so what is heard is its
+/// gate) and then slot 1 (input 0.5), at 48 and 44.1 kHz (240 and 221 frames) and block sizes 1, 128 and
+/// 1024, bit for bit against [`gate_at`]; no frame steps more than one ramp frame's worth.
+#[test]
+fn a_live_toggle_reversed_mid_ramp_turns_from_the_gain_it_reached_and_a_repeat_restarts_nothing() {
+    for sr in [48_000, 44_100] {
+        let n = live_frames(sr);
+        for block in [1usize, 128, 1024] {
+            let mut rig = Rig::with(Opts { sr, start: sr as Frame, block, ..Default::default() });
+            rig.set_inputs(|_| 1.0, |_| 0.5);
+            rig.advance(1000);
+            let a = rig.frame + 7;
+            let slot0 = [(a, false), (a + 100, true), (a + 150, false), (a + 160, false)];
+            let b = a + 1000;
+            let slot1 = [(b, true), (b + 70, true), (b + 100, false), (b + 130, true)];
+            for (at, on) in slot0 {
+                rig.send_at(at, Command::SetSlotLive(0, on));
+            }
+            for (at, on) in slot1 {
+                rig.send_at(at, Command::SetSlotLive(1, on));
+            }
+            rig.keep_output();
+            let start = rig.frame;
+            rig.advance_to(b + 1000);
+            let what = format!("{sr} Hz, block {block}");
+            let want = |k: usize| {
+                let f = start + k as Frame;
+                0.0 + through(1.0, gate_at(true, &slot0, n, f)) + through(0.5, gate_at(false, &slot1, n, f))
+            };
+            assert_bits(&rig.monitor, want, &what);
+            let heard = |f: Frame| rig.monitor[(f - start) as usize];
+            let step = rig.monitor.windows(2).map(|w| (w[1] - w[0]).abs()).fold(0.0, f32::max);
+            assert!(step <= 1.0 / n as f32 + 1e-6, "{what}: a step of {step}, over one ramp frame's");
+            assert_eq!(heard(a), 1.0, "{what}: the ramp's first frame is the outgoing state");
+            assert!(heard(a + 100) < heard(a + 99) && heard(a + 101) > heard(a + 100), "{what}: the reversal turns where the gate was");
+            assert!(heard(a + 150 + n - 1) > 0.0 && heard(a + 150 + n).to_bits() == 0, "{what}: the repeat at +160 restarted nothing");
+            assert!(heard(b + 130 + n - 1) < 0.5 && heard(b + 130 + n) == 0.5, "{what}: slot 1 settles a ramp after its last reversal");
+        }
+    }
+}
+
+/// A stateful effect: it logs each input sample with its frame (into a preallocated log) and rings, its
+/// output its state, which decays by [`DECAY`] a frame and takes the input.
+struct Ringing {
+    log: Arc<Mutex<Vec<(Frame, f32)>>>,
+    state: f32,
+}
+
+const DECAY: f32 = 0.99;
+
+impl SlotProcessor for Ringing {
+    fn kind(&self) -> SlotKind {
+        SlotKind::Effect
+    }
+
+    fn latency(&self) -> Frame {
+        0
+    }
+
+    fn process(&mut self, frame: Frame, input: &[f32], _events: &[SlotEvent], out: &mut [f32]) {
+        let mut log = self.log.lock().unwrap();
+        for (k, (y, &x)) in out.iter_mut().zip(input).enumerate() {
+            if log.len() < LOG {
+                log.push((frame + k as Frame, x));
+            }
+            *y = self.state;
+            self.state = self.state * DECAY + x;
+        }
+    }
+
+    fn stop(&mut self) {}
+
+    fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send> {
+        self
+    }
+}
+
+/// GO LIVE off gates an effect's input, never its output: the effect is fed its input ramped down and
+/// then exact silence from a ramp after the command's frame, and what it was ringing with rings on,
+/// decaying by its own law.
+#[test]
+fn going_off_live_ramps_an_effects_input_to_silence_and_leaves_its_tail_ringing() {
+    for block in [1usize, 128] {
+        let log = Arc::new(Mutex::new(Vec::with_capacity(LOG)));
+        let mut rig = Rig::with(Opts { block, ..Default::default() });
+        rig.set_level(0.01);
+        rig.install(0, Box::new(Ringing { log: log.clone(), state: 0.0 }));
+        rig.advance(4800);
+        let off = rig.frame + 3;
+        rig.send_at(off, Command::SetSlotLive(0, false));
+        rig.keep_output();
+        let start = rig.frame;
+        rig.advance(2000);
+        let fed: Vec<(Frame, f32)> = log.lock().unwrap().iter().copied().filter(|&(f, _)| f >= start).collect();
+        assert_eq!(fed.len(), 2000, "block {block}: every frame reached the effect once");
+        for (f, x) in fed {
+            let want = live(0.01, true, &[(off, false)], f);
+            assert_eq!(x.to_bits(), want.to_bits(), "block {block}: the effect's input at {f}: {x} for {want}");
+            if f >= off + LIVE {
+                assert_eq!(x.to_bits(), 0, "block {block}: exact silence from the ramp's end");
+            }
+        }
+        let heard = |f: Frame| rig.monitor[(f - start) as usize];
+        for f in off + LIVE + 1..start + 2000 {
+            assert_eq!(heard(f).to_bits(), (heard(f - 1) * DECAY).to_bits(), "block {block}: the tail decays by its own law at {f}");
+        }
+        assert!(heard(off + LIVE + 500) > 1e-3, "block {block}: the tail still rings: {}", heard(off + LIVE + 500));
+    }
+}
+
+/// A live toggle inside each 10 ms bypass crossfade: the crossfade runs its frames as ever, its dry side
+/// the gated input, and the gate splits the plugin's calls only at the commands, never where a ramp
+/// ends. The removal completes as ever.
+#[test]
+fn a_live_toggle_inside_each_bypass_crossfade_composes_with_it_and_adds_no_plugin_call() {
+    let probe = Probe::new();
+    let mut rig = Rig::new();
+    rig.set_level(1.0);
+    rig.advance(256);
+    let installed = rig.frame;
+    rig.install(0, Fake::effect(0.25, 0.0, &probe));
+    let off = installed + 100;
+    rig.send_at(off, Command::SetSlotLive(0, false));
+    rig.keep_output();
+    rig.advance(1024);
+    let toggles = [(off, false), (installed + 1024 + 50, true)];
+    let dry = |f: Frame| live(1.0, true, &toggles, f);
+    assert_bits(&rig.monitor, |k| faded(dry(installed + k as Frame), 0.25, k.min(FADE)), "fading in, the dry side ramping out");
+
+    let removed = rig.frame;
+    assert_eq!(removed + 50, toggles[1].0);
+    rig.remove(0);
+    rig.send_at(toggles[1].0, Command::SetSlotLive(0, true));
+    rig.keep_output();
+    rig.advance(1024);
+    assert_bits(&rig.monitor, |k| faded(dry(removed + k as Frame), 0.25, FADE.saturating_sub(k)), "fading out, the dry side ramping in");
+    assert!(rig.returned(0).is_some(), "the unit came back");
+    assert_eq!(probe.stops(), 1, "stopped once");
+
+    let splits = [off, toggles[1].0];
+    let mut want = Vec::new();
+    let mut at = installed;
+    while at < removed + FADE as Frame {
+        let end = at + 128;
+        let mut from = at;
+        for &x in splits.iter().filter(|&&x| x > at && x < end) {
+            want.push((from, (x - from) as usize));
+            from = x;
+        }
+        want.push((from, (end - from) as usize));
+        at = end;
+    }
+    assert_eq!(probe.calls(), want, "one call per block, split at each command alone");
+}
+
+/// GO LIVE off on a dry slot mid-take, beside a latent live effect: heard, the ramp is on its own
+/// frames; recorded, it is the input gated at its input frame and delayed by the latched latency.
+#[test]
+fn a_live_ramp_in_a_take_is_heard_on_its_frames_and_recorded_at_its_latched_delay() {
+    const L: Frame = 480;
+    let mut rig = Rig::with(Opts { align: PHYS + LIMITER, ..Default::default() });
+    rig.install(0, Box::new(Delay::new(L)));
+    rig.set(Command::SetSlotLive(1, true));
+    rig.set_inputs(|_| 0.0, code);
+    rig.set(Command::SetFixedLength(true));
+    rig.set(Command::SetFixedBars(1.0));
+    rig.press(Command::RecDub(0));
+    let start = rig.start_frame();
+    rig.advance_to(start + 1000);
+    let off = rig.frame + 3;
+    rig.send_at(off, Command::SetSlotLive(1, false));
+    rig.keep_output();
+    let from = rig.frame;
+    rig.advance_to(rig.end_frame() + 1);
+    assert_eq!(rig.state(0), LaneState::Playing);
+    let toggles = [(off, false)];
+    assert_bits(&rig.monitor, |k| 0.0 + live(code(from + k as Frame), true, &toggles, from + k as Frame), "heard: the dry slot gated on its own frames");
+    let pcm = rig.pcm(0);
+    assert_bits(&pcm, |k| 0.0 + live(code(start + k as Frame - L), true, &toggles, start + k as Frame - L), "recorded: gated at the input frame, then L late");
+    assert!(pcm[(off + L - start) as usize] > 0.0 && pcm[(off + L + LIVE - start) as usize] == 0.0, "the ramp lands L late in the take");
+}
+
+/// GO LIVE sent before the engine renders its first frame sets the starting state, settled; from the
+/// first rendered frame on a toggle ramps, one inside the first block too. Block sizes 1 and 1024.
+#[test]
+fn a_live_state_set_before_the_first_frame_is_settled_and_a_toggle_in_the_first_block_ramps() {
+    let mut runs = Vec::new();
+    for block in [1usize, 1024] {
+        let mut rig = Rig::with(Opts { block, ..Default::default() });
+        let t = rig.frame;
+        rig.set_inputs(|_| 1.0, |_| 0.5);
+        rig.send_at(t, Command::SetSlotLive(1, true));
+        rig.send_at(t + 10, Command::SetSlotLive(0, false));
+        rig.send_at(t + 500, Command::SetSlotLive(1, false));
+        rig.keep_output();
+        rig.advance(1024);
+        assert_eq!(rig.monitor[0], 1.5, "block {block}: both slots live from the first frame");
+        assert_eq!((rig.monitor[10], rig.monitor[10 + LIVE as usize]), (1.5, 0.5), "block {block}: slot 0 ramps out from frame 10");
+        let want = |k: usize| {
+            let f = t + k as Frame;
+            0.0 + live(1.0, true, &[(t + 10, false)], f) + live(0.5, true, &[(t + 500, false)], f)
+        };
+        assert_bits(&rig.monitor, want, &format!("block {block}"));
+        runs.push(std::mem::take(&mut rig.monitor));
+    }
+    assert!(runs[0].iter().zip(&runs[1]).all(|(a, b)| a.to_bits() == b.to_bits()));
 }
 
 // ── With no device running ────────────────────────────────────────────────────────────────────────────
@@ -1208,7 +1479,9 @@ fn an_instruments_non_finite_output_never_reaches_the_bus_or_the_limiter() {
 // ── Block-size independence ──────────────────────────────────────────────────────────────────────────
 
 /// An effect (the rig's Delay) and an instrument fake installed and removed mid-run, notes and the
-/// slots' live flags and gains stamped mid-block: the output, bit for bit.
+/// slots' live flags and gains stamped mid-block: the output, bit for bit. The live toggles ramp: one
+/// inside the effect's install fade, one inside the instrument's removal fade that the slot's emptying
+/// crosses, and one reversed twice inside its ramp.
 fn session(block: usize) -> [Vec<f32>; 2] {
     let probe = Probe::new();
     let mut rig = Rig::with(Opts { block, ..Default::default() });
@@ -1221,10 +1494,15 @@ fn session(block: usize) -> [Vec<f32>; 2] {
         (9_000, Command::NoteOff(60)),
         (12_345, Command::SetSlotGain(0, 0.7)),
         (13_579, Command::SetSlotGain(1, 1.5)),
+        (5_101, Command::SetSlotLive(0, false)),
+        (5_299, Command::SetSlotLive(0, true)),
         (21_011, Command::NoteOn(64, 1.0)),
         (30_011, Command::SetSlotLive(0, false)),
         (30_500, Command::SetSlotLive(1, true)),
+        (35_300, Command::SetSlotLive(1, false)),
         (40_009, Command::SetSlotLive(0, true)),
+        (40_100, Command::SetSlotLive(0, false)),
+        (40_157, Command::SetSlotLive(0, true)),
     ];
     for (at, command) in script {
         rig.send_at(t + at, command);

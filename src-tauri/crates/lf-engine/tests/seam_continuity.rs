@@ -8,8 +8,9 @@
 //! (the largest one on the same output away from every bar line and punch), plus `EPS` for f32 rounding.
 //! `K` = 2: a seamless join has at most the steady step (a repeated sample, as reverse's flip plays, has
 //! none), and 2 tolerates a one-frame slip of the tone (a skipped sample doubles its step) on purpose: it
-//! is a regression bound, not an audibility proof. The layer cuts measured here step 11 to 13 times the
-//! steady step. Each join prints its frame, window, steady step, the window's largest step and where it
+//! is a regression bound, not an audibility proof. A layer's hard cuts stepped 11 to 13 times the steady
+//! step before D23's punch ramps, and the undo swap and a mid-loop STOP and PLAY 11 to 16 times before its
+//! playback edges. Each join prints its frame, window, steady step, the window's largest step and where it
 //! falls, and asserts the window's RMS, so a window that missed the tone cannot pass. The RMS proves the
 //! tone is there, not that the swap happened in the window: the frame-code tests
 //! (`overdub_undo_reverse.rs`, `trim.rs`) hold each swap's timing.
@@ -24,8 +25,8 @@
 //! cycles per bar at 120 bpm and 48 kHz (220 Hz in bar 1, 330 Hz in a second bar), its phase pi/4 at
 //! every bar line, so the content itself is seamless (a kink at most) at
 //! every bar line and loop point: a step measured at a join is the engine's. What this cannot see: a real
-//! note's phase where a loop wraps (the engine has no crossfade at a wrap or a swap, so a tone not whole
-//! cycles long steps at its loop point by its own phase jump), and a slope reversal (reverse's flip is a
+//! note's phase where a loop wraps (the engine has no crossfade at a wrap or a REVERSE or TRIM swap, so a
+//! tone not whole cycles long steps at its loop point by its own phase jump), and a slope reversal (reverse's flip is a
 //! kink, no step).
 
 mod common;
@@ -95,14 +96,21 @@ fn dubbed_across_the_loop_point() -> (Rig, Vec<f32>, Frame, Frame) {
     rig.set_level(0.0);
     rig.idle();
     assert_eq!(rig.state(0), LaneState::Playing);
-    // The layer sounds at both punches: not on a zero crossing, where a cut would step by nothing.
-    let layer = |f: Frame| {
-        let pos = (f - rig.anchor()).rem_euclid(master) as usize;
-        rig.pcm(0)[pos] - pre[pos]
-    };
+    // The tone sounds at both punches: not on a zero crossing, where a cut would step by nothing. The
+    // stored layer is ramped there (D23), so it is the input that must be loud at the edges, and the
+    // layer itself the input in full between them.
     for f in [punch_in, punch_out - 1] {
-        assert!(layer(f).abs() as f64 >= 0.3 * AMP, "the layer at frame {f} is {}", layer(f));
+        let x = tone(f - downbeat, fpb, 1, sr);
+        assert!(x.abs() as f64 >= 0.3 * AMP, "the input at frame {f} is {x}");
     }
+    let (pcm, n) = (rig.pcm(0), common::dub::ramp(sr));
+    let mut loudest = 0.0f32;
+    for f in punch_in + n..punch_out - n {
+        let (pos, x) = ((f - rig.anchor()).rem_euclid(master) as usize, tone(f - downbeat, fpb, 1, sr));
+        assert!((pcm[pos] - pre[pos] - x).abs() <= 1e-6, "the layer at frame {f} is {}, the input {x}", pcm[pos] - pre[pos]);
+        loudest = loudest.max(x.abs());
+    }
+    assert!(loudest as f64 >= 0.9 * AMP, "the layer between the ramps is the tone: {loudest}");
     (rig, pre, punch_in, punch_out)
 }
 
@@ -193,7 +201,6 @@ fn e_the_first_takes_loop_point_wraps_without_a_step() {
 }
 
 #[test]
-#[ignore = "red, STATUS D23: a layer's edges are hard cuts: its start steps 0.364 and the punch-out 0.333, over a limit of 0.058"]
 fn a_punching_out_of_a_sustained_note_leaves_a_clean_layer_seam() {
     let (mut rig, _, punch_in, punch_out) = dubbed_across_the_loop_point();
     let master = rig.master();
@@ -205,7 +212,6 @@ fn a_punching_out_of_a_sustained_note_leaves_a_clean_layer_seam() {
 }
 
 #[test]
-#[ignore = "red, STATUS D23: the undo swap cuts a layer sounding at the loop point: a step of 0.333, over a limit of 0.058"]
 fn b_the_undo_swap_is_click_free() {
     let (mut rig, pre, _, _) = dubbed_across_the_loop_point();
     let master = rig.master();
@@ -293,7 +299,6 @@ fn f_a_later_take_joins_the_player_at_its_commit_without_a_step() {
 }
 
 #[test]
-#[ignore = "red, STATUS D23: STOP and PLAY mid-loop cut the lane hard: steps of 0.440 and 0.459, over a limit of 0.058"]
 fn g_a_lane_stopped_and_played_mid_loop_while_another_plays_joins_without_a_step() {
     let (mut rig, _) = later_take_committed_mid_loop();
     let master = rig.master();

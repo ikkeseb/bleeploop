@@ -43,7 +43,22 @@
 //!   lane's first bars repeat across the loop (F16), heard from the next boundary (a second TRIM before
 //!   it waits for it, and is heard there instead).
 //! - **An overdub writes `input + feedback * old`** (DUB FEEDBACK, a lane setting beside its volume: 1 is
-//!   the plain sum, bit for bit; 0 replaces). The undo target is still the loop at dub start.
+//!   the plain sum, bit for bit; 0 replaces) past its first and before its last 5 ms, which are linear
+//!   ramps stored in the loop (D23, `looper`'s `punch_in` and `fade_tail`): the layer fades in from its
+//!   window start, and a clean end fades its last writes back toward what each overwrote (a rejected or
+//!   discarded layer is restored as it was). The undo target is still the loop at dub start.
+//! - **Undo, PLAY and an immediate STOP are edged in playback only** (D23, `looper`'s `Voice`), over the
+//!   same 5 ms: an undo's audible switch (on its boundary, or where a DUB forces it) crossfades the loop
+//!   heard into the one it gives back, in heard order; a lane PLAYed into a running loop fades in at its
+//!   phase; an immediate STOP (a lane's, STOP ALL's, a second END STOP or FADE press, PLAY/STOP closing a
+//!   dub) fades out from the press, from the level heard, a FADE's included. A reversal inside a ramp turns
+//!   from the level reached. The state, its events, the grid and the transport change on the press frame
+//!   as before: a tail is no playing lane, so the click stops with it. A scheduled stop (END STOP's
+//!   boundary, a FADE's end; an undo's crossfade switching on it ends there too), an idle PLAY from the
+//!   top with no tail of its own, a fresh take, a load and a REVERSE's or TRIM's swap stay cuts. What
+//!   fades out is cached once, N samples a lane allocated with the looper, wherever a later write (a
+//!   restore, a TRIM, a reused buffer, a closed dub's capture running on) or a restarted grid could reach
+//!   it; a second fade-out inside the first fades both. No stored loop changes.
 //! - **FADE is a pending stop with a ramp:** every playing lane stops on a bar line (the click's grid), its
 //!   level ramped down to it over the stored volume, which never moves; what a loop-end stop refuses, a
 //!   fading lane refuses too (`Refusal::Fading`). The ramp is on the lane before its FX and on its delay's
@@ -75,7 +90,8 @@
 //!   idle PLAY start on the press frame, with no scheduling lead; a later take armed on an idle transport
 //!   counts in as the first did, restarts every loop from the top on the count's downbeat, and refuses
 //!   COPY and TRIM meanwhile; undo and reverse on a playing lane
-//!   switch on the next loop boundary; STOP on an overdubbing lane discards the whole layer; an input gap
+//!   switch on the next loop boundary (an undo's switch crossfades there, D23); STOP on an overdubbing
+//!   lane discards the whole layer (its tail plays the layer as heard); an input gap
 //!   damages only the capture windows (RETAKE passes) it overlaps, and resets AUTO's listening history;
 //!   a jump in the device frame drops the beats it skipped, and count-in beats fire late as one click.
 //! - **`process` never allocates, locks or waits.** Buffers are allocated (and their pages touched) in
@@ -118,7 +134,9 @@
 //! wired sound. `tests/slots.rs` holds the plugin slots, with fake units that record what they saw in
 //! preallocated buffers (never allocating in `process`) and are handed back to the test to drop;
 //! `tests/punch_out.rs` holds the punch-out, `tests/render_master.rs` the export's wet master, `tests/multiply.rs` the multiply (a free take's too),
-//! `tests/trim.rs` the TRIM, `tests/dub_feedback.rs` DUB FEEDBACK, `tests/fade.rs` FADE, `tests/input_fx.rs`
+//! `tests/trim.rs` the TRIM, `tests/dub_feedback.rs` DUB FEEDBACK, `tests/punch_ramps.rs` an overdub's punch
+//! ramps (its reference: `tests/common/dub.rs`), `tests/playback_edges.rs` the undo, PLAY and STOP edges
+//! (its reference: `tests/common/edges.rs`), `tests/fade.rs` FADE, `tests/input_fx.rs`
 //! the input sends. `tests/perf.rs` holds the ignored cost
 //! bars (Stage 2 and 3, the input sends, a multiply's burst, a TRIM's) and the Stage 3 load's alloc
 //! check. `tests/golden_jam.rs` runs the golden jam at 44.1 and 48 kHz, bit-identical across block

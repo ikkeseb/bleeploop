@@ -2,7 +2,8 @@
 //! each fades to silence and stops on a bar line: the first at or after the fade's bars (1, 2, 4 or 8;
 //! default 2) from the press, on the click's grid. The fade is its own gain over the lane's volume,
 //! which never moves, so PLAY ALL brings the lanes back at their level. A second press stops the
-//! fading lanes at once; so do STOP ALL and a lane's PLAY/STOP, as for a loop-end stop. Refused while a
+//! fading lanes at once; so do STOP ALL and a lane's PLAY/STOP, as for a loop-end stop (each lane's 5 ms
+//! tail, D23, starting at the level the fade had reached). Refused while a
 //! lane captures and with nothing playing. The lane's FX returns fall with it (its delay's feedback takes
 //! the ramp): on the final output, past the bar line only the tail of the faded loop rings on, far below
 //! what a plain stop there leaves; a stop at once leaves them ringing as STOP ALL does, and a lane
@@ -11,6 +12,8 @@
 
 mod common;
 
+use common::dub::ramp;
+use common::edges::{level, sample};
 use common::{Opts, Rig};
 use lf_engine::dsp::fx::{FxKind, FxParam};
 use lf_engine::grid::Frame;
@@ -154,10 +157,26 @@ fn a_press_between_bar_lines_ends_on_the_bar_line_the_fades_bars_after_the_next_
     assert_eq!(rig.lane(1).stop_at, Some(bar + 8 * fpb), "a press on a bar line: exactly the fade's bars");
 }
 
+/// The FADE's `r` at frame `f`, for a fade pressed at `from` that ends at `to`: the lane plays at `r²`.
+fn fade_r(from: Frame, to: Frame, f: Frame) -> f64 {
+    ((to - f) as f64 * (1.0 / (to - from).max(1) as f64)).clamp(0.0, 1.0)
+}
+
+/// A lane at `volume` stopped at `stop` while it faded (pressed at `from`, ending at `to`), at frame `f`
+/// (D23): its 5 ms tail starts at the level the fade had reached, `r²`, and falls to silence.
+fn tail_from_fade(volume: f64, (from, to): (Frame, Frame), stop: Frame, f: Frame) -> f32 {
+    let (n, r) = (ramp(SR), fade_r(from, to, stop));
+    if f >= stop + n { 0.0 } else { sample(volume, level(r * r, 0.0, f - stop, n), LEVEL, 0.0) }
+}
+
 #[test]
 fn a_second_press_stop_all_or_a_lanes_stop_ends_the_fade_at_once() {
+    // At once: STOPPED on the press, from where each lane's 5 ms tail (D23) starts at the level the fade
+    // had reached, never back at full.
     let mut rig = two_lanes(128);
+    let pressed = rig.frame;
     fade(&mut rig);
+    let fading = (pressed, rig.lane(0).stop_at.unwrap());
     rig.advance(rig.fpb() / 2);
     rig.keep_output();
     let second = rig.frame;
@@ -166,24 +185,45 @@ fn a_second_press_stop_all_or_a_lanes_stop_ends_the_fade_at_once() {
     for i in 0..2u8 {
         assert_eq!(reported(&rig, i, LaneState::Stopped, second), Some(second), "lane {i}: the second press stops it at once");
     }
-    assert!(heard(&rig, second, rig.frame).iter().all(|&y| y == 0.0));
+    let r = fade_r(fading.0, fading.1, second);
+    assert!(r > 0.6 && r < 0.9, "half a bar into a two-bar fade: {r}");
+    for (k, &y) in heard(&rig, second, rig.frame).iter().enumerate() {
+        let f = second + k as Frame;
+        assert_eq!(y, tail_from_fade(1.0, fading, second, f) + tail_from_fade(0.5, fading, second, f), "the second press: frame {f}");
+    }
 
     // With the loop-end stop on, STOP ALL during a fade stops at once, as its second press does.
     rig.set(Command::SetLoopEndStop(true));
     rig.press(Command::PlayAll);
+    let pressed = rig.frame;
     fade(&mut rig);
+    let fading = (pressed, rig.lane(0).stop_at.unwrap());
     let now = rig.frame;
     rig.press(Command::StopAll);
+    rig.advance(100);
     assert_eq!(reported(&rig, 0, LaneState::Stopped, now), Some(now));
     assert_eq!(reported(&rig, 1, LaneState::Stopped, now), Some(now));
+    for (k, &y) in heard(&rig, now, rig.frame).iter().enumerate() {
+        let f = now + k as Frame;
+        assert_eq!(y, tail_from_fade(1.0, fading, now, f) + tail_from_fade(0.5, fading, now, f), "STOP ALL: frame {f}");
+    }
 
     // A lane's PLAY/STOP stops that lane at once; the other fades on.
     rig.press(Command::PlayAll);
+    let pressed = rig.frame;
     fade(&mut rig);
+    let fading = (pressed, rig.lane(0).stop_at.unwrap());
     let now = rig.frame;
     rig.press(Command::PlayStop(1));
+    rig.advance(100);
     assert_eq!(reported(&rig, 1, LaneState::Stopped, now), Some(now));
     assert!(rig.lane(0).fading && rig.state(0) == LaneState::Playing);
+    for (k, &y) in heard(&rig, now, rig.frame).iter().enumerate() {
+        let f = now + k as Frame;
+        let r = fade_r(fading.0, fading.1, f);
+        let lane0 = ((r * r) * LEVEL as f64) as f32;
+        assert_eq!(y, lane0 + tail_from_fade(0.5, fading, now, f), "lane 1's STOP: frame {f}");
+    }
 }
 
 #[test]

@@ -3,7 +3,8 @@
 //! boundary and is silent from it, at any block size; a lane cleared and refilled while its stop is
 //! pending plays on past the old deadline; two lanes stopped together stop on one frame; STOP ALL over a
 //! playing lane and an overdub is one gesture, the dub punching out at once (aligned) while the playing
-//! lane waits for the boundary.
+//! lane waits for the boundary. D23's 5 ms edges (`common::edges`) are no END STOP's: an immediate stop
+//! fades out from its press, a resume into the running loop fades in.
 //!
 //! The probe's blocked main thread and its retiring reversed source have no engine counterpart: a stop
 //! is a frame the engine renders, not a timer, and a lane reads one buffer. What the rest of the probe
@@ -13,6 +14,8 @@
 
 mod common;
 
+use common::dub::{pos_fn, ramp};
+use common::edges::{join, sample, tail};
 use common::{code, Opts, Rig};
 use lf_engine::grid::Frame;
 use lf_engine::{Command, Event, LaneState};
@@ -52,6 +55,23 @@ fn plays(rig: &Rig, a: Frame, b: Frame, lanes: &[usize]) {
         let pos = (f - anchor).rem_euclid(master) as usize;
         let want = pcms.iter().map(|p| p[pos]).sum::<f32>() + rig.monitor[k];
         assert_eq!(out[k], want, "frame {f} (loop position {pos}): lanes {lanes:?}");
+    }
+}
+
+/// [`plays`] with D23's edges: `edge(lane, frame)` is lane `lane`'s level there, on its loop at the grid
+/// phase (1 or 0 outside its edges), the lanes summed in lane order, plus the monitor.
+fn plays_edged(rig: &Rig, a: Frame, b: Frame, lanes: &[usize], edge: impl Fn(usize, Frame) -> f64) {
+    let (start, out) = rig.output.as_ref().unwrap();
+    let pcms: Vec<Vec<f32>> = lanes.iter().map(|&i| rig.pcm(i)).collect();
+    let (anchor, master) = (rig.anchor(), rig.master());
+    for f in a..b {
+        let k = (f - start) as usize;
+        let pos = (f - anchor).rem_euclid(master) as usize;
+        let mut want = 0.0f32;
+        for (&i, p) in lanes.iter().zip(&pcms) {
+            want += sample(1.0, edge(i, f), p[pos], 0.0);
+        }
+        assert_eq!(out[k], want + rig.monitor[k], "frame {f} (loop position {pos}): lanes {lanes:?}");
     }
 }
 
@@ -107,12 +127,16 @@ fn a_lane_cleared_and_refilled_while_its_stop_is_pending_plays_on_past_the_old_d
     rig.idle();
     assert!(rig.state(0) == LaneState::Playing && rig.lane(0).stop_at.is_none(), "lane 0 refilled, playing");
     assert!(rig.frame < old, "the refill plays before the old deadline");
+    // The copy resumes lane 0 into the running loop, fading in over 5 ms from there (D23).
+    let resumed = rig.events.iter().rev().find_map(|e| match *e { Event::Copied { frame, to: 0, .. } => Some(frame), _ => None }).unwrap();
+    let n = ramp(rig.sr);
     rig.keep_output();
     let from = rig.frame;
+    assert!(from < resumed + n, "the fade-in is in the kept output");
     rig.advance_to(old + rig.master() + 4800);
     assert!(rig.state(0) == LaneState::Playing && rig.lane(0).stop_at.is_none(), "the old deadline stopped nothing");
     assert_eq!(reported(&rig, 0, LaneState::Stopped, from), None);
-    plays(&rig, from, rig.frame, &[0, 1]);
+    plays_edged(&rig, from, rig.frame, &[0, 1], |i, f| if i == 0 { join(f - resumed, n) } else { 1.0 });
 
     // Refilled on a fresh grid: the only lane cleared (the session blanks), a new first take recorded
     // across the old deadline, then played past it.
@@ -194,13 +218,13 @@ fn stop_all_over_a_playing_lane_and_an_overdub_is_one_gesture() {
         assert!(rig.state(dub) == LaneState::Stopped && rig.lane(dub).can_undo && rig.window().is_none(), "dub on lane {dub}");
         assert_eq!(reported(&rig, dub as u8, LaneState::Stopped, press), Some(tail), "STOPPED once its aligned tail is in");
         let (anchor, master) = (rig.anchor(), rig.master());
-        let first = (punch - anchor).rem_euclid(master);
-        let layer: Vec<f32> = (0..master)
-            .map(|p| if (p - first).rem_euclid(master) < press - punch { pre[p as usize] + DUB } else { pre[p as usize] })
-            .collect();
-        assert_eq!(rig.pcm(dub), layer, "dub on lane {dub}: the layer is the loop positions through the press");
-        // The dub is silent from the press, the playing lane sounds up to the boundary.
-        plays(&rig, press, end, &[play]);
+        let mut layer = pre.clone();
+        common::dub::dub(&mut layer, (punch + ALIGN, press + ALIGN), ramp(rig.sr), 1.0, pos_fn(anchor, master, ALIGN), |_| DUB);
+        assert_eq!(rig.pcm(dub), layer, "dub on lane {dub}: the layer is the loop positions through the press, ramped (D23)");
+        // The dub fades out over 5 ms from the press (D23), the loop ahead of the read head, where the
+        // layer never reaches; the playing lane sounds up to the boundary.
+        let n = ramp(rig.sr);
+        plays_edged(&rig, press, end, &[0, 1], |i, f| if i == play { 1.0 } else { self::tail(f - press, n) });
         plays(&rig, end, rig.frame, &[]);
         assert_eq!(reported(&rig, play as u8, LaneState::Stopped, press), Some(end));
     }
