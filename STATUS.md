@@ -46,11 +46,15 @@ list from § Not heard yet: at most five, and the docs guard counts them.
 2. **A MIDI footswitch, if one is plugged.** Learn REC/DUB onto it (Audio Settings → MIDI learn, one
    tap) and take the jam's records with the foot: one press, one action? Still learned after a
    restart? Then switch it to HOLD and hold it through one overdub.
-3. **48 kHz.** Sample rate → 48 kHz with loops playing: the confirm asks, the driver reopens at 48 kHz
-   (the select says so), and a new take lands on the click and sounds as clean as at 44.1.
-4. **IN FX on the guitar.** ECHO and REVERB still feel immediate, the echo sits on the tempo, and a take
-   recorded with them sounds as it did live. RING MOD (never heard): its Freq range 20–1500 Hz and
-   440 Hz default are an agent's pick: keep, or name what to change.
+3. **A later take from stopped loops.** Stop every loop (■ ALL), then REC on an empty track: one bar of
+   count-in clicks (4-3-2-1), then every track starts from the top on the downbeat after it and the
+   take records from there. Does it feel like the first take's count-in, and do the old loops and the
+   new take sit together? A press that cancels the count leaves the loops stopped and silent (machine:
+   `tests/later_arm.rs`; no rig probe arms it, so this is its first run on a real device).
+4. **The stage view over the jam.** B opens it, V switches Orbit and Strata (seen only on the engine
+   fake): does the light follow what is heard, does the count-in read from where you stand, does the
+   learned pedal action "Stage view: next look" feel right, and does the app stay tight with it open on
+   ASIO 128?
 5. **End with FADE, then reopen.** FADE (2 bars) while three lanes play: the level falls smoothly to
    the bar line and the lanes stop there. Close and reopen the app: the loops and the plugin come back
    (not live), the amp-sim's knobs where you left them, and one GO LIVE re-arms.
@@ -69,9 +73,11 @@ it.
 - The click: silent when idle, stops with STOP ALL, and the count-in still clicks with CLICK off.
 - A later track starts at master phase with no seam; reverse's flip adds no step (machine:
   `tests/seam_continuity.rs`), but does its turn of direction click?
-- A later take from stopped loops: REC on an empty track with every loop stopped clicks one bar of
-  count-in, then every track starts from the top on the "1" and the take records from there; a press
-  that cancels the count leaves the loops stopped and silent (machine: `tests/later_arm.rs`).
+- 48 kHz: Sample rate → 48 kHz with loops playing: the confirm asks, the driver reopens at 48 kHz (the
+  select says so), and a new take lands on the click and sounds as clean as at 44.1.
+- IN FX on the guitar: ECHO and REVERB still feel immediate, the echo sits on the tempo, and a take
+  recorded with them sounds as it did live. RING MOD (never heard): its Freq range 20–1500 Hz and
+  440 Hz default are an agent's pick: keep, or name what to change.
 - Multiply: over a 1-bar loop, FIXED 4 on another lane grows the loop to 4 bars with no seam. FIXED
   off: a take stopped ~1.6 loops in grows to two loops, ~1.3 keeps one.
 - TRIM: halve an 8-bar lane while it plays (its first 4 bars from the next loop start); ↶ UNDO brings
@@ -95,10 +101,6 @@ it.
 - The six synths and the lane FX by ear.
 - A MIDI controller: unplugged mid-note gives a toast and releases the note; mod-wheel vibrato,
   pitch-bend and CC64 sustain feel.
-- The stage view's looks, Orbit and Strata (seen only on the engine fake, never over a jam): does the
-  light follow what is heard, does the count-in read from where you stand, does the learned pedal action
-  "Stage view: next look" feel right,
-  and does the app stay tight with it open on ASIO 128?
 - RETAKE and AUTO REC from a learned pedal: one press, one toggle; mid-take (and AUTO REC once a loop
   locks the tempo) the press is refused with its reason on the lane, as the greyed button is.
 
