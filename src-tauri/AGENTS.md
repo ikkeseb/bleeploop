@@ -258,8 +258,9 @@ plugin-GUI work.
   well). The device owner logs `[engine_io] audio glitch: …` for each second a fault counter moves
   (`GlitchWatch`, `engine_io/owner.rs`); no real glitch has fired it yet. The owner's headset has also
   crackled heavily twice while agents built on the PC: once with BleepLoop closed, once under
-  `pnpm rust:check`'s cargo tests (about 560 s of full CPU), so the app need not run for it. Cause
-  unknown: that build load triggers it is untested, and whether it stops with the build is not known.
+  `pnpm rust:check`'s cargo tests (about 560 s of full CPU), so the app need not run for it. The
+  owner's impression (unmeasured): it persists while many agents run and load the CPU. Cause unknown;
+  that CPU load triggers it is untested.
 - Plugin-host gaps a source review found (2026-10-02; read from source, none reproduced), ranked by
   exposure on the owner's plugins. First: VST3 omits trailing inactive aux buses (the SDK's
   `activateBus` rule permits it) and passes short `setBusArrangements` arrays whose result is read
@@ -271,9 +272,6 @@ plugin-GUI work.
   note port gets CLAP notes; CLAP editor edits never reach the drawer; an editor open that succeeds at
   its timeout stays open; CLAP visibility and connection-loss callbacks do nothing; the scanner caches
   factories that forbid it.
-- A tester on WASAPI heard delay on DI monitoring (the engine build); the affected path is unknown.
-  WASAPI's late takes are the accepted fallback (`docs/ARCHITECTURE.md` § Measured premise), which
-  says nothing about monitoring delay.
 - After a WASAPI open the join can trim or starve within ~2.5 s, and a take that overlaps it is
   rejected: 9 of 85 opens after ASIO had run in the process, 1 of 43 without (`docs/VERIFY.md`,
   `native:engine`'s baseline). Traced (the join trace in `engine_io/callback.rs`): once the pipe has

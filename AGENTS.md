@@ -40,9 +40,10 @@ Harness auto-load of nested files is not reliable: open the briefing yourself.
   under `docs/` while the work is open. When it lands, fold what still binds into a briefing,
   `docs/ARCHITECTURE.md`, `STATUS.md`, `docs/backlog-taste.md` or a comment at the call site, and
   delete the document. Audits are not kept in the tree; their findings land as described above.
-- **Ear-gated work drains slowly, so design around it.** Prefer work a machine gate or a probe can
-  settle. Rank unbuilt work by provenance: the owner's ear > the owner's stated roadmap > an agent's
-  tier list.
+- **Unheard never blocks.** Land machine-verified work as it is built; the owner's ear checks it when
+  it can (`STATUS.md` § Not heard yet), and a later "this is off" reopens it. Prefer work a machine
+  gate or a probe can settle. Rank unbuilt work by provenance: the owner's ear > the owner's stated
+  roadmap > an agent's tier list.
 - **The play path is guitar → amp-sim plugin (native monitor) → play/loop/dub at low latency.** The
   looper is the instrument. MIDI controller → synth/plugin is the second path, for the other layers;
   its MIDI arrives through the WebView (Web MIDI); PC-keyboard→MIDI is its fallback. By-ear sessions happen on

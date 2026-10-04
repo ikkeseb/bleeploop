@@ -22,7 +22,8 @@ every take lands on the grid by itself: there is no latency setting.
 - **Hands stay on the guitar.** Learn any looper control onto a MIDI footswitch. The stage view (B)
   turns the window into a visualizer of your loops, with the selected track, the bar, the beat and the
   count-in still readable from where you stand.
-- **Nothing gets lost.** Your loops save as you play and come back when you reopen. Export a jam as
+- **Your loops come back.** They save once they have held still for two seconds and come back when
+  you reopen; a crash before that save loses the last change. Export a jam as
   one zip: a WAV stem per track, a mix and each plugin's settings.
 - **More than guitar.** Six built-in synths, one of them a drum kit, and a MIDI keyboard fill the
   other layers.

@@ -4,33 +4,18 @@ The owner's ear, eye or decision on the PC: the next jam's checks, what no jam h
 decisions that block work. Taste: `docs/backlog-taste.md` (not a gate). Non-gate threads: `AGENTS.md`
 § Open threads.
 
-**Machine verification (Windows):** the push gates are `AGENTS.md`'s. The rig probes, when to run
-each, and their baselines and latest readings: `docs/VERIFY.md` § When to run the plugin probes.
-Last rig pass, 2026-09-29 (the engine-only app): `native:smoke`, `survey`, `swap`, `recall`,
-`tone-recall`, `engine-smoke`, `engine-recovery` and `release:smoke` green; `native:engine-loopback`
-20/20 at 64 and 256, 18/20 at 128 (a detector reading v0.1.0 repeats). Since then (2026-10-01):
-`native:export-master` (WASAPI) for the export's engine-rendered master; the sample-rate pick on
-ASIO, `native:engine-smoke` at 48 and 44.1 kHz and `native:engine` after the switches. 2026-10-03, the
-loopback cable in, with the stray-sound bar, the input-gap rejection and four plugin-host fixes:
-`native:engine-loopback --rate=48000` 21/21 at 64, 128 and 256, no stray sound, no take rejected;
-`native:smoke`, `swap` (filtered), `recall` and `tone-recall` green; `native:engine` green but its
-counter check, which WASAPI's switch phases fail on main too (`docs/VERIFY.md`, its baseline). The
-CLAP port layout (every declared port, a failed call silent): `native:smoke` and `swap` with Surge XT and
-Pro-Q, and `engine-smoke` with Surge XT Effects (CLAP) live, green. v0.5.2 (that layout) passed its
-`release:smoke` with the cable in once the line out was turned up (`docs/VERIFY.md`, its row). v0.6.0
-(the counted later take, the stage view's two looks, RETAKE and AUTO REC as pedal actions) is released:
-its `release:smoke` drove an exe a runner built (`build-exe` run by hand with `smoke`), with no cable,
-and passed 6/6 on the synth take, that take's first run against a release build; the input path stands
-as v0.5.2's cable proved it. 2026-10-04: the smoke checks that the exe was built from the checkout's
-HEAD, and its synth take holds a four-note chord. On a runner build of `main` it passed 7/7 with no
-cable (the Organ chord drew 47 of 69 px, where one note had drawn 13), and it refused v0.6.0's own
-smoke exe at that later commit. No rig probe arms a take from stopped loops, so the jam is the counted
-later take's first run on a real device. Driver latency reports are not guitar latency; after a relevant change, rerun only the affected
-check.
+**Machine verification (Windows):** the push gates are `AGENTS.md`'s; the rig probes, when to run
+each, and their baselines: `docs/VERIFY.md` § When to run the plugin probes. Where the rig stands: every
+rig probe passed on the engine-only app between 2026-09-29 and 10-03, except `native:engine`'s counter
+check, which fails in WASAPI's first ~2.5 s (D25); the loopback cable was last in on 2026-10-03
+(`native:engine-loopback --rate=48000` 21/21 at 64, 128 and 256). `release:smoke` last passed 7/7 on
+2026-10-04 on a runner build of main, with no cable: the input path stands as v0.5.2's cable run
+proved it. Driver latency reports are not guitar latency; after
+a relevant change, rerun only the affected check.
 
 **Last play: 2026-09-28** (engine, a local release build, ASIO; a second player on a WASAPI build
 of their own): worked well overall, no issue found; the WASAPI player heard delay on DI monitoring
-(`src-tauri/AGENTS.md` § Open threads).
+(they play on ASIO since; the owner counts it resolved).
 
 ## Next jam
 
