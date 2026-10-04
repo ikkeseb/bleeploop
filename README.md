@@ -58,9 +58,9 @@ The installed app tells you when a newer version is out and updates itself from 
   while the dry signal and a take's timing stay untouched.
 - Stage view (B, or a learned pedal): a visualizer of the loops in two looks, switched with V. Orbit
   wraps each track's loop into a ring around the live input; Strata scrolls five ribbons past a now
-  line. Each track's light follows its own loop's waveform and volume (not its FX or the amp sim) and
-  takes its state's colour; the selected track, the bar, the beat and the count-in stay readable from
-  where you stand with the guitar.
+  line. Each track's light follows its own loop's waveform and volume (not its FX) and takes its
+  state's colour; the selected track, the bar, the beat and the count-in stay readable from where you
+  stand with the guitar.
 - Six built-in synths, one of them a 16-voice GM drum kit.
 - Two native CLAP/VST3 plugin slots with floating plugin editors; each slot reloads its last plugin at
   launch with the settings you left it at, never armed, and an exported session carries each slot's
@@ -104,7 +104,8 @@ report, so WASAPI takes can land late (about 215 ms on the developer's Focusrite
    Windows sets the rate.
 2. Load your amp-sim plugin (CLAP or VST3) into a slot, pick the slot's input and press GO LIVE. For an
    instrument with its own sound, set the other slot to Off, pick its input and GO LIVE: it plays dry.
-3. Select a track with 1–5 and press Space to record. The first take gets a one-bar count-in; come in on "1".
+3. Select a track with 1–5 and press Space to record. The first take gets a one-bar count-in, shown
+   4-3-2-1; come in on the downbeat after it.
 4. Space again closes the take; after that, Space overdubs the selected track and Enter plays or stops it.
 5. Help (the ? in the command bar) lists the rest.
 

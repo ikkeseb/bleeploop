@@ -147,7 +147,7 @@ export function Help() {
       <section class="help__sec">
         <h3 class="help__h">Transport &amp; tempo</h3>
         <ul class="help__list">
-          <li>A 1-bar count-in (four clicks) leads the first recording. You come in on the counted "1", not the button press. A later take recorded with the loops stopped gets the count-in too, and every track starts from the top on its "1"</li>
+          <li>A 1-bar count-in (four clicks, shown 4-3-2-1) leads the first recording. You come in on the downbeat after the count, not the button press. A later take recorded with the loops stopped gets the count-in too, and every track starts from the top on that downbeat</li>
           <li><span class="help__note">CLICK</span> toggles the metronome (its own volume, never recorded, silent while nothing runs)</li>
           <li><span class="help__note">FIXED N</span> records exactly N bars and auto-stops on the downbeat. Off, every take runs until you stop it</li>
           <li><span class="help__note">RETAKE</span> keeps recording round the loop until you stop; STOP, REC/DUB or REC on another track keeps the last complete pass. The first track needs FIXED; on later takes FIXED is ignored while RETAKE is on</li>
