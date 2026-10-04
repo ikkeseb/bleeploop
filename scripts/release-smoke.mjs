@@ -1,16 +1,20 @@
 // scripts/release-smoke.mjs — drive an unmodified RELEASE build of BleepLoop from outside and prove it
-// boots on the native engine and records a take.
+// names the checkout's HEAD, boots on the native engine and records a take.
 //
 //   pnpm exec tauri build --no-bundle --features asio --config scripts/release-smoke.tauri.json
 //   pnpm release:smoke [--exe=<path>] [--fresh]
 // For a release the exe comes from a runner instead: a manual `build-exe` run with `smoke` leaves it as
-// its `BleepLoop-smoke-<sha>` artifact, driven through `--exe=` (docs/VERIFY.md).
+// its `BleepLoop-smoke-<sha>` artifact, driven through `--exe=` (docs/VERIFY.md). Both that exe and the
+// default at src-tauri/target/release/app.exe must name the checkout's HEAD as their build commit.
 //
 // What it proves, one PASS/FAIL line per check (exit 0 only when every check passes):
 //   boots        the window loads the app UI (five lanes, the command bar), with no uncaught error and
 //                no CSP violation: not in the page (replayed over CDP from before the attach) and not in
 //                the release log (`[csp]`, `[window.error]`, `[unhandledrejection]` lines,
 //                src/platform/logging.ts)
+//   build        the exe names the checkout's HEAD as its build commit in Help → About this build;
+//                a build of another commit, of a tree with uncommitted changes, or one made without
+//                git fails before the engine checks (scripts/release-exe-rule.mjs)
 //   engine       Audio Settings' engine row names a running device; the log says the engine owns the
 //                device. The device a launch opens by itself is printed, not judged (a `--fresh` run
 //                shows a new user's first launch)
@@ -32,8 +36,8 @@
 //                beyond its [package] version line, or when a cpal or asio-sys entry of
 //                src-tauri/Cargo.lock differs, came or went (scripts/release-changes.mjs asks git).
 //                Otherwise the synth take stands in: lane 1 cleared, slot 1 set to the Organ, the PC
-//                key A held from before the record press until the lane plays, and the same bar for
-//                the waveform. The PASS line says which take passed
+//                keys A, D, G and K (a C major chord) held from before the record press until the lane
+//                plays, and the same bar for the waveform. The PASS line says which take passed
 //   feed         something on screen moves with the engine: the beat LEDs, the record-level meter, the
 //                lane-1 playhead. The meter reads the device input, and before the first take the
 //                click is silent (it sounds on a count-in or while the transport runs: lf-engine
@@ -49,6 +53,8 @@
 // into a loop and the UI draws it, not the input path: that is proven only on a run with the cable in.
 // Nothing before the CDP attach is watched live: early page errors come from the CDP replay and the
 // release log. Plugins are not loaded.
+// The build line is the frontend bundle's (vite.config.ts), and the documented build compiles the exe
+// around that bundle in one command, which this check trusts.
 //
 // How: the exe is launched with WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=<port>
 // (`--port=`, default 9333). WebView2 appends it to the arguments wry sets itself; the browser
@@ -70,10 +76,12 @@ import { chromium } from 'playwright';
 import { appRunning, assertWindows } from './native-kill.mjs';
 import { releaseChanges } from './release-changes.mjs';
 import { inputTakeRule } from './release-input-rule.mjs';
+import { exeBuildRule } from './release-exe-rule.mjs';
 
 const OWNER_ID = 'com.bleeploop.app';
-/** The synth take's source and its note: a sustained voice, so a held note fills the bar (C on the PC keys). */
-const SYNTH = { id: 'organ', name: 'Organ', key: 'a' };
+/** The synth take's source and its chord: a sustained voice, so held notes fill the bar. Four of them (C
+ * major on the PC keys; the voices sum) draw clear of the flat bar, where one note drew 13 of 69 px. */
+const SYNTH = { id: 'organ', name: 'Organ', keys: ['a', 'd', 'g', 'k'] };
 const EXIT_WAIT_MS = 60_000;
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -379,8 +387,26 @@ try {
     ];
   });
 
+  // ── build ─────────────────────────────────────────────────────────────────────────────────────
+  const built = booted && (await check('build', async () => {
+    await page.locator('button[aria-controls="lf-help-popover"]').click();
+    await page.locator('#lf-help-popover').waitFor({ state: 'visible', timeout: 5000 });
+    const label = await page.evaluate(() => document.querySelector('#lf-help-popover .help__about')?.textContent?.trim() ?? null);
+    await page.keyboard.press('Escape');
+    await page.locator('#lf-help-popover').waitFor({ state: 'hidden', timeout: 5000 });
+    let head = null;
+    try {
+      head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    } catch {
+      // No answer from git: the rule fails closed.
+    }
+    const rule = exeBuildRule({ label, head });
+    must(rule.ok, rule.why);
+    return [`Help's build line ${JSON.stringify(label)}: ${rule.why}`];
+  }));
+
   // ── engine ────────────────────────────────────────────────────────────────────────────────────
-  const engined = booted && (await check('engine', async () => {
+  const engined = built && (await check('engine', async () => {
     await openSettings();
     await page.waitForFunction(() => {
       const row = [...document.querySelectorAll('.audio-settings__diag-row')].find((r) => r.querySelector('span')?.textContent === 'engine');
@@ -518,9 +544,9 @@ try {
         `${inputFlat}\nplug the loopback cable from an output into "${input}" at a working level and run again`,
     );
 
-    // The synth take: lane 1 cleared, slot 1 on a built-in synth, a note held across the whole take. The
-    // note is a PC key, down before the record press (a pointer held on an on-screen key could not also
-    // press the record core), so it sounds from before the downbeat wherever the downbeat falls.
+    // The synth take: lane 1 cleared, slot 1 on a built-in synth, a chord held across the whole take. Its
+    // notes are PC keys, down before the record press (a pointer held on an on-screen key could not also
+    // press the record core), so they sound from before the downbeat wherever the downbeat falls.
     await page.locator('button[aria-label="Track 1 clear"]').click();
     await page.locator('button[aria-label="Track 1 clear, press again to confirm"]').click({ timeout: 3000 });
     await page.waitForFunction(() => document.querySelectorAll('.lp-lane')[0]?.getAttribute('data-state') === 'empty', undefined, { timeout: 10_000 });
@@ -533,28 +559,34 @@ try {
     await page.locator('.kb__keys').waitFor({ state: 'visible', timeout: 5000 });
     await page.evaluate(() => /** @type {HTMLElement | null} */ (document.activeElement)?.blur());
     await startSampler();
-    const heldKey = page.locator('.kb__key--down');
+    const heldKeys = page.locator('.kb__key--down');
+    const keyNames = SYNTH.keys.map((k) => k.toUpperCase()).join(', ');
+    const keysUp = async () => {
+      for (const key of SYNTH.keys) await page.keyboard.up(key);
+    };
     let take;
     try {
-      await page.keyboard.down(SYNTH.key);
-      await heldKey.first().waitFor({ state: 'visible', timeout: 3000 }).catch(() => must(false, `the PC key ${SYNTH.key.toUpperCase()} lit no on-screen key: the note did not reach the instrument`));
-      const note = await heldKey.first().getAttribute('data-note');
+      for (const key of SYNTH.keys) await page.keyboard.down(key);
+      await page
+        .waitForFunction((n) => document.querySelectorAll('.kb__key--down').length === n, SYNTH.keys.length, { timeout: 3000 })
+        .catch(async () => must(false, `the PC keys ${keyNames} lit ${await heldKeys.count()} of ${SYNTH.keys.length} on-screen keys: the chord did not reach the instrument`));
+      const notes = (await heldKeys.evaluateAll((keys) => keys.map((k) => k.getAttribute('data-note')))).join(', ');
       let held = 0;
       take = {
         ...(await record(async () => {
-          held = await heldKey.count();
-          await page.keyboard.up(SYNTH.key);
+          held = await heldKeys.count();
+          await keysUp();
         })),
-        note,
+        notes,
       };
-      must(held === 1, `the held note was dropped before the lane played (${held} keys lit)`);
+      must(held === SYNTH.keys.length, `a held note was dropped before the lane played (${held} of ${SYNTH.keys.length} keys lit)`);
     } finally {
-      await page.keyboard.up(SYNTH.key);
+      await keysUp();
     }
     const synthFlat = flat(take.inkA);
-    must(synthFlat === null, `the synth take is flat too: the release build's engine recorded nothing from the ${SYNTH.name} (note ${take.note})\n${synthFlat}\ninput take: ${inputFlat}`);
+    must(synthFlat === null, `the synth take is flat too: the release build's engine recorded nothing from the ${SYNTH.name} (notes ${take.notes})\n${synthFlat}\ninput take: ${inputFlat}`);
     return [
-      `synth take passed (${SYNTH.name}, note ${take.note} held on the PC key ${SYNTH.key.toUpperCase()}): lane 1 ${take.lane1.join(' → ')} in ${take.recMs} ms (count-in numerals ${take.seen.counts.join(',') || 'none'}), ${fixed}, CLICK on`,
+      `synth take passed (${SYNTH.name}, notes ${take.notes} held on the PC keys ${keyNames}): lane 1 ${take.lane1.join(' → ')} in ${take.recMs} ms (count-in numerals ${take.seen.counts.join(',') || 'none'}), ${fixed}, CLICK on`,
       `the input take read flat on "${input}" (${inputFlat}); not required: a clean tree with no device-side change against ${changes.base}, so the input path stands as last proven with the cable, at or before that release`,
       waveform(take.inkA),
       `screenshot ${join(out, 'after-take.png')}`,
@@ -629,6 +661,6 @@ try {
   console.log(`  this run's release log: ${join(out, 'release.log')} (${logFile}, from line ${linesBefore + 1})`);
 }
 
-const ok = results.length > 0 && results.every((r) => r.ok) && ['boots', 'engine', 'device', 'take', 'feed', 'exit'].every((n) => results.some((r) => r.name === n));
+const ok = results.length > 0 && results.every((r) => r.ok) && ['boots', 'build', 'engine', 'device', 'take', 'feed', 'exit'].every((n) => results.some((r) => r.name === n));
 console.log(`\n=== release-smoke: ${ok ? 'PASS' : 'FAIL'}: ${results.filter((r) => r.ok).length}/${results.length} checks passed (${Math.round((Date.now() - t0) / 1000)} s) ===`);
 process.exit(ok ? 0 : 1);
