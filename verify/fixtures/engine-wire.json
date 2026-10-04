@@ -423,5 +423,50 @@
       ],
       "masterError": "export render: the render panicked"
     }
+  ],
+  "loadHeaders": [
+    {
+      "bpm": 120,
+      "bars": 2,
+      "masterLengthFrames": 192000,
+      "tracks": [
+        {
+          "index": 0,
+          "frames": 192000,
+          "reversed": false,
+          "state": "Playing",
+          "mix": {
+            "volume": 0.25,
+            "muted": true,
+            "dubFeedback": 0.5,
+            "fx": [
+              { "bypassed": false, "params": { "cutoff": 800, "q": 4.5 } },
+              { "bypassed": true, "params": { "semitones": 0 } },
+              { "bypassed": false, "params": { "rate": 2 } },
+              { "bypassed": true, "params": { "time": 1, "feedback": 0.4, "mix": 0.3 } },
+              { "bypassed": false, "params": { "amount": 0.75 } }
+            ]
+          }
+        },
+        {
+          "index": 2,
+          "frames": 192000,
+          "reversed": true,
+          "state": "Stopped",
+          "mix": {
+            "volume": 1,
+            "muted": false,
+            "dubFeedback": 1,
+            "fx": [
+              { "bypassed": true, "params": { "cutoff": 1200, "q": 2 } },
+              { "bypassed": true, "params": { "semitones": 0 } },
+              { "bypassed": true, "params": { "rate": 1 } },
+              { "bypassed": true, "params": { "time": 1, "feedback": 0.4, "mix": 0.3 } },
+              { "bypassed": true, "params": { "amount": 0.3 } }
+            ]
+          }
+        }
+      ]
+    }
   ]
 }

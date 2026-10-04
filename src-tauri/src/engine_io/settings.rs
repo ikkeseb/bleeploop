@@ -12,12 +12,13 @@
 //! destination the source's (`copy_lane`, on `Copied`, whose DUB FEEDBACK is the value the engine copied,
 //! not the source's as the memory holds it by then). A setting for a lane sent in the moment between
 //! its clear and the feed reading it (a block and a feed tick) is forgotten with it. What the engine sets
-//! itself, the memory keeps as if the UI had sent it: a pedal's MUTE (`Muted`, as `SetMute`).
+//! itself, the memory keeps as if the UI had sent it: a pedal's MUTE (`Muted`, as `SetMute`), and a
+//! loaded lane's mix (`loaded`, once the load answers: `session.rs`).
 
 use std::collections::BTreeMap;
 
-use lf_engine::dsp::fx::MAX_PARAMS;
-use lf_engine::{Command, SLOT_COUNT, TRACK_COUNT};
+use lf_engine::dsp::fx::{FxKind, FxParam, MAX_PARAMS};
+use lf_engine::{Command, LaneMix, SLOT_COUNT, TRACK_COUNT};
 
 /// What a setting sets; replayed in this order (the note target before the wheels it hands over).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -170,6 +171,23 @@ impl Settings {
             .collect();
         self.last.extend(copied);
         self.record(&Command::SetDubFeedback(to, feedback));
+    }
+
+    /// A load set lane `lane`'s mix: kept as the commands that set it, replacing what the lane had.
+    pub(crate) fn loaded(&mut self, lane: u8, mix: &LaneMix) {
+        self.forget_lane(lane);
+        self.record(&Command::SetVolume(lane, mix.volume));
+        self.record(&Command::SetMute(lane, mix.muted));
+        self.record(&Command::SetDubFeedback(lane, mix.dub_feedback));
+        for kind in FxKind::ALL {
+            let state = &mix.fx[kind.index()];
+            for (def, &value) in kind.params().iter().zip(&state.params) {
+                if let Some(param) = FxParam::from_key(kind, def.key) {
+                    self.record(&Command::SetFxParam(lane, param, value));
+                }
+            }
+            self.record(&Command::SetFxBypass(lane, kind, state.bypassed));
+        }
     }
 
     /// The engine cleared lane `lane`: its volume, mute, DUB FEEDBACK and FX are back at their defaults.

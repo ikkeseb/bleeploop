@@ -105,6 +105,13 @@ impl PitchShift {
         self.frequency.param.set_value(factor * (1.2 / WINDOW_SIZE), now, frame);
     }
 
+    /// From frame `k` of the current quantum on, the three delay lines hold silence before it.
+    fn clear(&mut self, k: usize) {
+        self.delay_a.clear(k);
+        self.delay_b.clear(k);
+        self.feedback_delay.clear(k);
+    }
+
     /// The control values of the quantum at `q`: the LFOs, the delay times and the fades.
     fn begin_quantum(&mut self, q: u64) {
         let PitchShift { frequency, lfo_a, lfo_b, fade_lfo, delay_a, delay_b, cross_fade, feedback_delay, dry_wet } = self;
@@ -177,6 +184,15 @@ impl PitchFx {
 
     pub fn get_state(&self) -> FxState {
         FxState { bypassed: self.bypassed, params: [self.semitones, 0.0, 0.0] }
+    }
+
+    /// [`super::FxChain::clear_history`] from frame `k` of the current quantum: the PitchShift's lines. One
+    /// that has not rendered yet (in this quantum, or the last one at its boundary) has never been
+    /// written: it holds silence already, and its first quantum is all its own.
+    pub(super) fn clear_history(&mut self, k: usize) {
+        if self.running {
+            self.shift.clear(k);
+        }
     }
 
     pub(super) fn begin_quantum(&mut self, quantum_start: u64) {

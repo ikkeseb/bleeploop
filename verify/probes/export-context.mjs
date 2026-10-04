@@ -116,16 +116,19 @@ await probe(async ({ open }) => {
     const { session } = await import('/src/ui/state/audio.ts');
     const { splitSessionBytes } = await import('/src/platform/engine-wire.ts');
     const before = lf.native.loadedSessions.length;
+    const sentBefore = lf.native.sent.length;
     await lf.importSession(window.__bundle, session);
     const loads = lf.native.loadedSessions.length - before;
-    const restored = splitSessionBytes(lf.native.loadedSessions.at(-1).slice().buffer).pcm[0];
+    const { header, pcm: [restored] } = splitSessionBytes(lf.native.loadedSessions.at(-1).slice().buffer);
     const want = Float32Array.from(pcm);
     const errors = exported.stemErrors + want.reduce((n, x, k) => n + Number(restored[k] !== x), 0);
     const volume = session.trackVolume(0);
-    const volumeSent = lf.native.sent.some((c) => JSON.stringify(c) === JSON.stringify({ SetVolume: [0, 0.25] }));
+    // The saved volume rides in the load header (the engine sets it with the loop); no lane setting follows.
+    const headerVolume = header.tracks[0].mix.volume;
+    const mixSent = lf.native.sent.slice(sentBefore).filter((c) => ['SetVolume', 'SetMute', 'SetDubFeedback', 'SetFxParam', 'SetFxBypass'].some((k) => k in c));
     return { name: 'Download bundle preserves editable overdub headroom and quiet samples', loads, errors,
-      stemSamples: exported.stemSamples, samples: Array.from(restored.slice(1024, 1027)), volume, volumeSent,
-      pass: loads === 1 && errors === 0 && volume === 0.25 && volumeSent };
+      stemSamples: exported.stemSamples, samples: Array.from(restored.slice(1024, 1027)), volume, headerVolume, mixSent,
+      pass: loads === 1 && errors === 0 && volume === 0.25 && headerVolume === 0.25 && mixSent.length === 0 };
   }, [editable, exported]));
 
   // ── The dry fallback, and the import caps ─────────────────────────────────────────────────────────

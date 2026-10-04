@@ -3,8 +3,8 @@
 // owns the layout; its engine_io tests read the Rust half).
 //
 // `verify/fixtures/engine-wire.json` holds one example of every command, engine event and device event,
-// plus device requests, statuses, feed frames and snapshot headers (each track's mix in session.json's
-// track shape); `src-tauri/src/engine_io/wire.rs`'s cargo test parses each entry and writes it back
+// plus device requests, statuses, feed frames, snapshot headers and load headers (each track's mix in
+// session.json's track shape); `src-tauri/src/engine_io/wire.rs`'s cargo test parses each entry and writes it back
 // unchanged. This guard runs the REAL TS decoders
 // (`src/platform/engine-wire.ts`) over the same entries: every entry parses, every field the Rust side
 // writes is one the TS side reads (a field TS would ignore fails here), every variant is covered, and a
@@ -20,6 +20,7 @@ import {
   decodeDeviceStatus,
   decodeEvent,
   decodeFeedFrame,
+  decodeLoadSession,
   decodeOpenError,
   decodeSnapshot,
   encodeSessionBytes,
@@ -305,6 +306,44 @@ check("the browser fake's FX ranges are the UI's (the engine's)", () => {
     'a mute that is no boolean': track((t) => (t.mix.muted = 1)),
   };
   for (const [name, fn] of Object.entries(refusedMix)) check(`refuses ${name}`, () => assert.throws(fn));
+}
+// The fixture's load headers (the UI writes them, the Rust host reads them): every field is read, each
+// track's mix included, and the fake's load sets each loaded lane's mix over what was sent before.
+for (const entry of fixture.loadHeaders) {
+  check(`load header ${JSON.stringify(entry).slice(0, 60)}… reads every field`, () => {
+    const pcm = entry.tracks.map(() => new Float32Array(entry.masterLengthFrames));
+    const { header } = decodeLoadSession(encodeSessionBytes(structuredClone(entry), pcm).buffer);
+    assert.deepEqual(header, entry);
+    for (const t of header.tracks) validateFxStates(t.mix.fx, `track ${t.index}`);
+  });
+}
+check("the browser fake's load sets each loaded lane's mix, clamped as the engine's", () => {
+  fakeMixModel.frame({ reset: true, settings: [], events: [] });
+  fakeMixModel.command({ SetVolume: [0, 0.9] });
+  fakeMixModel.command({ SetFxBypass: [0, 'delay', false] });
+  const header = structuredClone(fixture.loadHeaders[0]);
+  header.tracks[0].mix.volume = 4;
+  fakeMixModel.load(header);
+  assert.deepEqual(fakeMixModel.lane(0), { ...fixture.loadHeaders[0].tracks[0].mix, volume: 1.5 });
+  assert.deepEqual(fakeMixModel.lane(2), fixture.loadHeaders[0].tracks[1].mix);
+});
+{
+  const loaded = fixture.loadHeaders[0];
+  const track = (edit) => {
+    const h = structuredClone(loaded);
+    edit(h.tracks[0], h);
+    return () => decodeLoadSession(encodeSessionBytes(h, h.tracks.map(() => new Float32Array(h.masterLengthFrames))).buffer);
+  };
+  const refusedLoad = {
+    'a load track without its mix': track((t) => delete t.mix),
+    'a load mix of four effects': track((t) => t.mix.fx.pop()),
+    'a load mix with an unknown field': track((t) => (t.mix.pan = 0)),
+    'a load track that overdubs': track((t) => (t.state = 'Overdubbing')),
+    'a load track with an unknown field': track((t) => (t.gain = 1)),
+    'a load track listed twice': track((t, h) => h.tracks.push(structuredClone(t))),
+    'a load header with an unknown field': track((_, h) => (h.rate = 48000)),
+  };
+  for (const [name, fn] of Object.entries(refusedLoad)) check(`refuses ${name}`, () => assert.throws(fn));
 }
 {
   const mix = defaultLaneMix();

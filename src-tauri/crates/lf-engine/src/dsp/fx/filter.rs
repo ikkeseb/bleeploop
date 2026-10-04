@@ -60,6 +60,11 @@ impl FilterFx {
         FxState { bypassed: self.bypassed, params: [self.cutoff, self.q, 0.0] }
     }
 
+    /// [`super::FxChain::clear_history`]: the filter's memory.
+    pub(super) fn clear_history(&mut self) {
+        self.filter.clear_memory();
+    }
+
     pub(super) fn begin_quantum(&mut self, quantum_start: u64) {
         self.filter.begin_quantum(quantum_start);
         self.xfade.begin_quantum(quantum_start);

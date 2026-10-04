@@ -1,8 +1,9 @@
 //! The FX chain (`dsp::fx`) with its feedback delay and its pitch shift against the Tone references:
 //! the fx-delay-* and fx-pitch-* scenarios replayed from the manifest through the whole chain, the other
 //! effects bypassed as the probe leaves them. Also: the same bits at any block size, a pitch enabled
-//! live mid-block (the PitchShift connects on the enable's context frame and stays), and no allocation
-//! while rendering or taking a control.
+//! live mid-block (the PitchShift connects on the enable's context frame and stays), a chain's history
+//! cleared mid-quantum (the engine's CLEAR and load: from that frame it renders what a chain that heard
+//! only silence renders), and no allocation while rendering or taking a control.
 //!
 //! How close each lands: fx-delay-default renders Blink's bits. fx-delay-hot differs only where
 //! Blink's audio thread flushes denormals to zero (its 0.95 feedback decays the bypassed filter's
@@ -17,7 +18,7 @@ use assert_no_alloc::assert_no_alloc;
 use common::fx::{bits, render, Schedule, BLOCKS};
 use common::refs::{self, Class};
 use common::violation_count;
-use lf_engine::dsp::fx::{default_fx_states, Ctl, FxChain, FxKind, FxParam, FxTiming};
+use lf_engine::dsp::fx::{default_fx_states, Ctl, FxChain, FxKind, FxParam, FxState, FxTiming, MAX_FEEDBACK};
 use lf_engine::dsp::param::QUANTUM;
 
 /// Each scenario with the tightest class it passes (null residual when ported, in dB).
@@ -107,6 +108,61 @@ fn a_live_enable_connects_the_pitch_shift_on_its_context_frame_and_keeps_it() {
     assert!(leak > 0.0 && leak < 2.5e-3, "{leak}");
     for block in BLOCKS {
         assert!(bits(&render_live_pitch(block, -5.0, Some(enable), Some(disable))) == bits(&live), "block {block} differs");
+    }
+}
+
+/// A chain with every effect that holds audio on (the filter, the pitch, the delay at its top feedback
+/// and full mix), `block` frames per call: a noise burst until `clear` when `heard`, silence after, an
+/// impulse at `pulse`; `clear` silences its history there (`FxChain::clear_history`).
+fn render_cleared(block: usize, heard: bool, clear: Option<usize>, pulse: usize, frames: usize) -> Vec<f32> {
+    let rate = 48000.0f32;
+    let start = Ctl { now: 0.0, frame: 0 };
+    let mut states = default_fx_states();
+    states[FxKind::Filter.index()] = FxState { bypassed: false, params: [2000.0, 8.0, 0.0] };
+    states[FxKind::Pitch.index()] = FxState { bypassed: false, params: [7.0, 0.0, 0.0] };
+    states[FxKind::Delay.index()] = FxState { bypassed: false, params: [1.0, MAX_FEEDBACK, 1.0] };
+    let mut chain = FxChain::new(rate, Some(&states), start);
+    chain.set_timing(FxTiming { anchor: 0.0, beat_period: 0.5 }, start).expect("a valid timing");
+    let until = clear.unwrap_or(frames);
+    let x: Vec<f32> = (0..frames)
+        .map(|k| match k {
+            k if k == pulse => 0.5,
+            k if heard && k < until => ((k * 37 % 101) as f32 / 50.0 - 1.0) * 0.5,
+            _ => 0.0,
+        })
+        .collect();
+    let (mut out, mut send) = (vec![0.0f32; frames], vec![0.0f32; frames]);
+    let violations = violation_count();
+    let mut at = 0;
+    while at < frames {
+        let end = (at + block).min(frames);
+        let end = clear.filter(|&c| c > at).map_or(end, |c| end.min(c));
+        let (o, sd) = (&mut out[at..end], &mut send[at..end]);
+        assert_no_alloc(|| chain.process(at as u64, &x[at..end], o, sd));
+        at = end;
+        if clear == Some(at) {
+            assert_no_alloc(|| chain.clear_history(at as u64));
+        }
+    }
+    assert_eq!(violation_count(), violations, "the chain allocated while rendering or clearing");
+    out
+}
+
+#[test]
+fn a_cleared_chain_renders_what_a_chain_that_heard_only_silence_renders() {
+    // Mid-quantum, a second in: the delay line, its feedback, the filter and the PitchShift full of noise.
+    let (clear, pulse, frames) = (48_037, 60_005, 96_000);
+    let fresh = render_cleared(128, false, None, pulse, frames);
+    let stale = render_cleared(128, true, None, pulse, frames);
+    let heard = stale[clear..pulse].iter().fold(0.0f32, |m, x| m.max(x.abs()));
+    assert!(heard > 0.05, "uncleared, the noise echoes on past the clear's frame ({heard})");
+    // A plain new chain: the impulse's echoes at the 1/8 delay (12 000 frames at 120 BPM), pitched.
+    let echo = fresh[pulse + 12_000..pulse + 14_000].iter().fold(0.0f32, |m, x| m.max(x.abs()));
+    assert!(echo > 0.05, "the new delay echoes ({echo})");
+    for block in BLOCKS {
+        let cleared = render_cleared(block, true, Some(clear), pulse, frames);
+        assert!(cleared[..clear] == stale[..clear], "block {block}: the clear changes nothing before its frame");
+        assert!(bits(&cleared[clear..]) == bits(&fresh[clear..]), "block {block}: from the clear on, nothing heard before it");
     }
 }
 

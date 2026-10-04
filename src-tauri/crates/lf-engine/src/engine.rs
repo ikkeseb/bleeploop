@@ -392,12 +392,7 @@ impl Engine {
             // A damaged block's own input frames are lost too.
             self.looper.input_gap(lost_from, if ctx.damaged { end } else { start });
         }
-        // Take no more than the table holds: the rest waits in the ring for the next block, late but
-        // never dropped (a lost NoteOff would hang its note).
-        while self.pending.iter().any(Option::is_none) {
-            let Ok(cmd) = self.commands.pop() else { break };
-            self.hold(cmd.frame.unwrap_or(start).max(start), cmd.command);
-        }
+        self.take_commands(start);
         self.rack.begin_block(start, first);
         // A capture's alignment is fixed from its arm (AUTO's, from its onset) to its end: the record
         // compensation holds with it, so no live flag or plugin latency changed meanwhile moves what it
@@ -406,10 +401,6 @@ impl Engine {
         self.rack.latch_record(open);
         let live_latency = self.rack.record_latency();
         let align = ctx.align_frames + live_latency + self.limiter.latency() as Frame;
-        {
-            let mut cx = Cx { now: start, align, clock: &mut self.clock, feed: &mut self.feed, fx: &mut self.fx };
-            self.session.begin(&mut self.looper, &mut cx, self.config.sample_rate, false);
-        }
         let record_delay = ctx.input_frames + live_latency;
         self.rendered = n;
         self.slots_done = 0;
@@ -423,22 +414,18 @@ impl Engine {
         while f < end {
             let mut cx = Cx { now: f, align, clock: &mut self.clock, feed: &mut self.feed, fx: &mut self.fx };
             self.looper.events(&mut cx);
-            while let Some(k) = due(&self.pending, f) {
-                let p = self.pending[k].take().unwrap();
-                let mut at = Apply {
-                    instruments: &mut self.instruments,
-                    rack: &mut self.rack,
-                    input_fx: &mut self.input_fx,
-                    master_volume: &mut self.master_volume,
-                    master_muted: &mut self.master_muted,
-                };
-                match apply(&mut self.looper, &mut cx, &mut at, p.command) {
-                    Applied::WaitUntil(at) => insert(&mut self.pending, &mut self.commands_dropped, Pending { frame: at.max(f + 1), held: true, ..p }),
-                    Applied::Held(at, command) => {
-                        insert(&mut self.pending, &mut self.commands_dropped, Pending { frame: at.max(f + 1), command, held: true, ..p })
-                    }
-                    Applied::Done => {}
-                }
+            let mut at = Apply {
+                instruments: &mut self.instruments,
+                rack: &mut self.rack,
+                input_fx: &mut self.input_fx,
+                master_volume: &mut self.master_volume,
+                master_muted: &mut self.master_muted,
+            };
+            apply_due(&mut self.pending, &mut self.commands_dropped, &mut self.looper, &mut cx, &mut at);
+            if f == start {
+                // The session job after the commands due on the block's first frame: a setting sent
+                // before a snapshot or a load is ordered before it (a load's mix overrides it).
+                self.session.begin(&mut self.looper, &mut cx, self.config.sample_rate, false);
                 self.looper.events(&mut cx);
             }
             while let Some(beat) = cx.clock.fire_due(f, self.looper.transport_until()) {
@@ -549,9 +536,34 @@ impl Engine {
         }
     }
 
+    /// Move the ring's commands into the table, an unstamped or late one due at `now`. Take no more than
+    /// the table holds: the rest waits in the ring for the next block, late but never dropped (a lost
+    /// NoteOff would hang its note).
+    fn take_commands(&mut self, now: Frame) {
+        while self.pending.iter().any(Option::is_none) {
+            let Ok(cmd) = self.commands.pop() else { break };
+            self.hold(cmd.frame.unwrap_or(now).max(now), cmd.command);
+        }
+    }
+
     fn hold(&mut self, frame: Frame, command: Command) {
         self.seq += 1;
         insert(&mut self.pending, &mut self.commands_dropped, Pending { frame, seq: self.seq, command, held: false });
+    }
+}
+
+/// Apply the commands due at `cx.now` in [`due`]'s order, the looper's events after each; one that waits
+/// for a block job goes back in, held from the next frame on.
+fn apply_due(pending: &mut [Option<Pending>; MAX_PENDING], dropped: &mut u64, looper: &mut Looper, cx: &mut Cx, at: &mut Apply) {
+    let f = cx.now;
+    while let Some(k) = due(pending, f) {
+        let p = pending[k].take().unwrap();
+        match apply(looper, cx, at, p.command) {
+            Applied::WaitUntil(when) => insert(pending, dropped, Pending { frame: when.max(f + 1), held: true, ..p }),
+            Applied::Held(when, command) => insert(pending, dropped, Pending { frame: when.max(f + 1), command, held: true, ..p }),
+            Applied::Done => {}
+        }
+        looper.events(cx);
     }
 }
 
@@ -791,6 +803,61 @@ fn apply(looper: &mut Looper, cx: &mut Cx, at: &mut Apply, command: Command) -> 
         Command::SetInputSendParam(param, value) => {
             at.input_fx.set_param(param, value, now);
             Applied::Done
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::LaneMix;
+    use crate::dsp::fx::{FxKind, FxParam, FxState, MAX_FEEDBACK};
+    use crate::grid::frames_per_bar;
+    use crate::session::{Load, LoadTrack};
+
+    /// The load's own `LaneFx::clear_history`, alone: every engine path that takes a lane that played
+    /// back to EMPTY is a CLEAR, which clears the chain itself, so lane 0's chain is fed here directly.
+    #[test]
+    fn a_load_silences_a_chain_that_heard_audio_with_no_clear_before_it() {
+        let (mut e, _handle) = Engine::new(EngineConfig::new(48_000));
+        e.fx.set_bypass(0, FxKind::Delay, false, 0);
+        e.fx.set_param(0, FxParam::Feedback, MAX_FEEDBACK, 0);
+        e.fx.set_param(0, FxParam::Mix, 1.0, 0);
+        let q = QUANTUM as Frame;
+        let (mut l, mut r) = ([0.0f32; QUANTUM], [0.0f32; QUANTUM]);
+        let render = |e: &mut Engine, f: Frame, heard: bool, l: &mut [f32; QUANTUM], r: &mut [f32; QUANTUM]| {
+            if heard {
+                for (k, x) in e.lanes[0].iter_mut().enumerate() {
+                    *x = (((f as usize + k) * 37 % 101) as f32 / 50.0 - 1.0) * 0.5;
+                }
+            } else {
+                let fading = e.looper.render(f, QUANTUM, &mut e.lanes, &mut e.fades);
+                assert_eq!(fading, [false; TRACK_COUNT]);
+            }
+            l.fill(0.0);
+            r.fill(0.0);
+            e.fx.render(f, &e.lanes, [false; TRACK_COUNT], &e.fades, l, r);
+        };
+        // Half a second of noise, then silence: the delay rings on up to the load.
+        let loaded = 375 * q;
+        let mut ringing = 0.0f32;
+        for f in (0..loaded).step_by(QUANTUM) {
+            render(&mut e, f, f < loaded / 2, &mut l, &mut r);
+            ringing = ringing.max(l.iter().fold(0.0, |m, x| m.max(x.abs())));
+        }
+        assert!(ringing > 0.1, "the delay rings before the load ({ringing})");
+
+        let master = frames_per_bar(120.0, 48_000);
+        let mut mix = LaneMix::default();
+        mix.fx[FxKind::Delay.index()] = FxState { bypassed: false, params: [1.0, MAX_FEEDBACK, 1.0] };
+        let track = LoadTrack { index: 0, buf: vec![0.0; e.looper.capacity() as usize], peaks: Vec::new(), reversed: false, playing: true, mix };
+        let mut load = Load { bpm: 120, bars: 1, master, tracks: vec![track], result: None };
+        let mut cx = Cx { now: loaded, align: 0, clock: &mut e.clock, feed: &mut e.feed, fx: &mut e.fx };
+        assert_eq!(e.looper.load(&mut cx, &mut load), Ok(()));
+        for f in (loaded..loaded + 2 * master).step_by(QUANTUM) {
+            render(&mut e, f, false, &mut l, &mut r);
+            let first = l.iter().chain(r.iter()).position(|&x| x != 0.0);
+            assert_eq!(first, None, "post-FX output from the load on, quantum at {f}");
         }
     }
 }

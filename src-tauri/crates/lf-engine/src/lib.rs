@@ -28,7 +28,7 @@
 //! | [`input_fx`] | the input sends: ECHO, REVERB and RING MOD on the wet signal, wet only, into the record tap and the monitor | — (engine only) |
 //! | [`instruments`] | the six built-in instruments, the selected one (or none), each one's level, the wheels, their record path | `synths/index.ts`, `input-router.ts` |
 //! | [`overview`] | what the UI draws, for a reader off the audio thread: the grid anchor, each lane's state, buffer, orientation and frames, each buffer's waveform peaks | `looper/peaks.ts` |
-//! | [`session`] | saving and loading a session: a snapshot copied out a budget per frame, each lane with its mix at the pin, a load swapped into an empty looper, the host's port | `looper/session.ts`, `export/*` |
+//! | [`session`] | saving and loading a session: a snapshot copied out a budget per frame, each lane with its mix at the pin, a load swapped into an empty looper with each lane's mix, both after the commands due on their block's first frame, the host's port | `looper/session.ts`, `export/*` |
 //! | [`render`] | the export's wet master, offline: a fresh engine the session's size, every lane playing at its snapshot's mix, the master's settings, the warm-up passes, the kept pass lined up with the stems | `session/render.ts`, `session/render-plan.ts` (Tone, removed) |
 //! | [`slots`] | the two plugin slots: install and removal through their ports, bypass crossfades, notes, live and gain, each slot's own input, where each output goes | `plugin-bridge.ts`, `instrument-slots.ts` |
 //! | [`api`] | commands, events, the process context, the plugin seam ([`SlotProcessor`]) | — |
@@ -164,6 +164,12 @@
 //!   Next check: pass the looper both intervals, then un-ignore
 //!   `a_silent_block_damages_the_layer_its_frames_reach_through_a_live_plugin` beside
 //!   `a_jump_in_a_layers_closing_tail_rejects_it_through_a_live_plugin` (`tests/overdub_undo_reverse.rs`).
+//! - **With no device running, a session job is served before the commands queued ahead of it.**
+//!   `service_session_idle` runs the job at once, so a setting or a take sent before a load applies after
+//!   it on resume. Applying them in idle is wrong: a capture latches alignment 0, and the 64-entry pending
+//!   table can fill while earlier commands still wait in the ring. Next check: a fix that orders them
+//!   without applying captures in idle, made green by the two ignored `with_no_device_*` tests
+//!   (`tests/session.rs`).
 //!
 //! # Beside this crate
 //!

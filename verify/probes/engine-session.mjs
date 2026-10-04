@@ -159,19 +159,20 @@ await probe(async ({ browser, open }) => {
     return { header, pcm: pcm.map((block) => Array.from(block)), sent: window.__lf.native.sent.slice() };
   });
   console.log('recovered', JSON.stringify(recovered.header));
-  assert.deepEqual(recovered.header, {
-    bpm: 120,
-    bars: 1,
-    masterLengthFrames: MASTER,
-    tracks: [
+  const { tracks: recoveredTracks, ...recoveredRest } = recovered.header;
+  assert.deepEqual(recoveredRest, { bpm: 120, bars: 1, masterLengthFrames: MASTER });
+  assert.deepEqual(
+    recoveredTracks.map((t) => ({ index: t.index, frames: t.frames, reversed: t.reversed, state: t.state })),
+    [
       { index: 0, frames: MASTER, reversed: false, state: 'Playing' },
       { index: 1, frames: MASTER, reversed: true, state: 'Stopped' },
     ],
-  });
+  );
   assert.deepEqual(recovered.pcm, pcm.map((block) => block.map((x) => Math.fround(x))), 'the recovered PCM is the snapshot');
-  assert.ok(recovered.sent.some((c) => JSON.stringify(c) === JSON.stringify({ SetVolume: [0, 0.8] })), 'the recovered mix is sent');
-  assert.ok(recovered.sent.some((c) => JSON.stringify(c) === JSON.stringify({ SetDubFeedback: [0, 0.4] })), 'with its DUB FEEDBACK');
-  assert.ok(recovered.sent.some((c) => JSON.stringify(c) === JSON.stringify({ SetDubFeedback: [1, 1] })), 'a lane left at 100 % gets 100 %');
+  // The recovered mix rides in the load header (the engine sets it with the loops), not sent after it.
+  assert.deepEqual(recoveredTracks.map((t) => [t.mix.volume, t.mix.muted, t.mix.dubFeedback]), [[0.8, false, 0.4], [1, false, 1]],
+    'the recovered mix, DUB FEEDBACK too (a lane left at 100 % gets 100 %)');
+  assert.ok(!recovered.sent.some((c) => JSON.stringify(c) === JSON.stringify({ SetVolume: [0, 0.8] })), 'no mix is sent after the load');
 
   // ── Import: the exported zip into the (still empty) engine ────────────────────────────────────────
   await page.locator('input[type="file"]').setInputFiles({ name: download.suggestedFilename(), mimeType: 'application/zip', buffer: zip });

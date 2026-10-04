@@ -706,7 +706,7 @@ export function decodeDeviceRequest(raw: unknown): DeviceRequest {
 // no padding; each block holds `frames` samples. The PCM is in PLAY order (what is heard from loop
 // position 0); `reversed` says the lane plays its recording backwards. A snapshot's track carries its
 // lane's `mix` as the engine applied it where the snapshot pinned the loops, in session.json's track
-// shape. A snapshot asked with the master (an export's) whose render succeeded names it in `master` and
+// shape; a load's track carries the mix the engine sets on the frame the loops go in (required). A snapshot asked with the master (an export's) whose render succeeded names it in `master` and
 // appends its left block, then its right, `master.frames` samples each, frame 0 at loop position 0,
 // rendered with those mixes; one whose render failed carries `masterError` instead
 // (`src-tauri/src/engine_io/session.rs` owns the layout).
@@ -748,12 +748,22 @@ export interface SnapshotHeader {
   masterError?: string;
 }
 
+/** One lane in a load. */
+export interface LoadTrack {
+  index: number;
+  frames: number;
+  reversed: boolean;
+  state: 'Playing' | 'Stopped';
+  /** The lane's mix from the load's frame: its first loaded sample plays at it. */
+  mix: LaneMix;
+}
+
 /** `engine_load_session`'s header: into an all-empty engine at the device's rate. */
 export interface LoadHeader {
   bpm: number;
   bars: number;
   masterLengthFrames: number;
-  tracks: { index: number; frames: number; reversed: boolean; state: 'Playing' | 'Stopped' }[];
+  tracks: LoadTrack[];
 }
 
 /** A stereo master's two channels. */
@@ -817,7 +827,7 @@ export function splitSessionBytes(buffer: ArrayBuffer): { header: unknown; pcm: 
   return { header, pcm, master };
 }
 
-/** A snapshot track's mix: exact fields, each effect's params by their keys (their ranges:
+/** A track's mix (a snapshot's or a load's): exact fields, each effect's params by their keys (their ranges:
  * `validateFxStates`, where the UI takes it). */
 function decodeLaneMix(raw: unknown, what: string): LaneMix {
   const o = obj(raw, what);
@@ -833,6 +843,35 @@ function decodeLaneMix(raw: unknown, what: string): LaneMix {
     return { bypassed: bool(entry.bypassed, `${what}.fx[${k}].bypassed`), params: out };
   });
   return { volume: num(o.volume, `${what}.volume`), muted: bool(o.muted, `${what}.muted`), dubFeedback: num(o.dubFeedback, `${what}.dubFeedback`), fx };
+}
+
+/** Read `engine_load_session`'s bytes as the engine host does (every track one master long with its
+ * mix, at most one track per lane), refusing a field it would ignore. */
+export function decodeLoadSession(buffer: ArrayBuffer): { header: LoadHeader; pcm: Float32Array[] } {
+  const { header, pcm, master } = splitSessionBytes(buffer);
+  if (master) fail('a load carries no master', header);
+  const o = obj(header, 'load header');
+  const extra = Object.keys(o).filter((k) => !['bpm', 'bars', 'masterLengthFrames', 'tracks'].includes(k));
+  if (extra.length > 0) fail('load header has unknown fields', extra);
+  const length = int(o.masterLengthFrames, 'load.masterLengthFrames', 1);
+  const seen = new Set<number>();
+  const tracks = array(o.tracks, 'load.tracks').map((raw): LoadTrack => {
+    const t = obj(raw, 'load track');
+    const unknown = Object.keys(t).filter((k) => !['index', 'frames', 'reversed', 'state', 'mix'].includes(k));
+    if (unknown.length > 0) fail('load track has unknown fields', unknown);
+    const track: LoadTrack = {
+      index: lane(t.index, 'load track.index'),
+      frames: int(t.frames, 'load track.frames'),
+      reversed: bool(t.reversed, 'load track.reversed'),
+      state: oneOf(t.state, ['Playing', 'Stopped'] as const, 'load track.state'),
+      mix: decodeLaneMix(t.mix, 'load track.mix'),
+    };
+    if (track.frames !== length) fail(`load track ${track.index} is not one master long`, track.frames);
+    if (seen.has(track.index)) fail(`load track ${track.index} is listed twice`, track.index);
+    seen.add(track.index);
+    return track;
+  });
+  return { header: { bpm: int(o.bpm, 'load.bpm', 1), bars: int(o.bars, 'load.bars', 1), masterLengthFrames: length, tracks }, pcm };
 }
 
 /** Read `engine_snapshot`'s bytes: the stems, and the wet master when the snapshot carries one. */

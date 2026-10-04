@@ -20,6 +20,12 @@
 //! (the node's tail); this one keeps writing zeros instead, which reads the same, since everything
 //! within reach of the read head is zero by then. Mono; allocation happens only in [`Delay::new`].
 //!
+//! [`Delay::clear`] (no Blink counterpart: the engine's session boundary, `fx::FxChain::clear_history`)
+//! silences everything written before it in O(1): until the buffer has been written over once, a read
+//! of a frame older than the clear reads 0. Zeroing the buffers instead writes them whole in one
+//! callback: a 2 s line is 96 128 floats at 48 kHz (384 128 at 192 kHz), and a five-lane load or CLEAR
+//! ALL clears twenty lines (each lane's delay and the PitchShift's three).
+//!
 //! Ported from Chromium (Blink), Copyright The Chromium Authors, BSD-3-Clause.
 
 use super::param::{time_to_sample_frame, AudioParam, Rate, Rounding, ToneParam, Units, QUANTUM};
@@ -32,6 +38,9 @@ pub struct Delay {
     write_index: usize,
     max_delay_time: f32,
     sample_rate: f32,
+    /// Frames written since the last [`Delay::clear`] before the current quantum's first frame, negative
+    /// for a clear inside the quantum, up to the buffer's length: from there no frame in it is older.
+    fresh: i64,
 }
 
 impl Delay {
@@ -39,12 +48,25 @@ impl Delay {
         assert!(max_delay_time > 0.0 && max_delay_time.is_finite(), "a positive maximum delay");
         // `BufferLengthForDelay`.
         let length = Q + time_to_sample_frame(max_delay_time, sample_rate as f64, Rounding::Up) as usize;
-        Delay { buffer: vec![0.0; length], write_index: 0, max_delay_time: max_delay_time as f32, sample_rate }
+        Delay { buffer: vec![0.0; length], write_index: 0, max_delay_time: max_delay_time as f32, sample_rate, fresh: length as i64 }
     }
 
     pub fn reset(&mut self) {
         self.buffer.fill(0.0);
         self.write_index = 0;
+        self.fresh = self.buffer.len() as i64;
+    }
+
+    /// From frame `k` of the current quantum on (frames 0 to `k - 1` written), every frame written
+    /// before reads as 0. O(1): no frame of the buffer is touched.
+    pub fn clear(&mut self, k: usize) {
+        self.fresh = -(k as i64);
+    }
+
+    /// The quantum's last frame is written: the write position moves on a quantum.
+    fn end_quantum(&mut self) {
+        self.write_index = self.wrap(self.write_index + Q);
+        self.fresh = (self.fresh + Q as i64).min(self.buffer.len() as i64);
     }
 
     pub fn max_delay_time(&self) -> f32 {
@@ -73,7 +95,7 @@ impl Delay {
         for (k, (d, &t)) in destination.iter_mut().zip(delay_times).enumerate() {
             *d = self.read(k, t);
         }
-        self.write_index = self.wrap(self.write_index + Q);
+        self.end_quantum();
     }
 
     /// Frame `k` of `ProcessARate`: write `input`, read `delay_time` seconds back; after frame 127 the
@@ -85,7 +107,7 @@ impl Delay {
         self.buffer[w] = input;
         let y = self.read(k, delay_time);
         if k == Q - 1 {
-            self.write_index = self.wrap(self.write_index + Q);
+            self.end_quantum();
         }
         y
     }
@@ -105,7 +127,7 @@ impl Delay {
         let w = self.wrap(self.write_index + k);
         self.buffer[w] = input;
         if k == Q - 1 {
-            self.write_index = self.wrap(self.write_index + Q);
+            self.end_quantum();
         }
     }
 
@@ -124,7 +146,19 @@ impl Delay {
         let read_index1 = self.wrap(read_position as i32 as usize);
         let read_index2 = self.wrap(read_index1 + 1);
         let interpolation_factor = read_position - read_index1 as f32;
-        let (sample1, sample2) = (self.buffer[read_index1], self.buffer[read_index2]);
+        let (mut sample1, mut sample2) = (self.buffer[read_index1], self.buffer[read_index2]);
+        let length = self.buffer.len();
+        if self.fresh < length as i64 {
+            // Since the clear: frames 0 to `fresh + k` back from frame `k`'s write position.
+            let w = self.wrap(self.write_index + k);
+            let back = |i: usize| (if w >= i { w - i } else { w + length - i }) as i64;
+            if back(read_index1) > self.fresh + k as i64 {
+                sample1 = 0.0;
+            }
+            if back(read_index2) > self.fresh + k as i64 {
+                sample2 = 0.0;
+            }
+        }
         sample1 + interpolation_factor * (sample2 - sample1)
     }
 }
@@ -176,8 +210,77 @@ impl DelayNode {
         self.delay.write_frame(k, input);
     }
 
+    /// From frame `k` of the current quantum on, what was written before reads as 0 ([`Delay::clear`]).
+    pub fn clear(&mut self, k: usize) {
+        self.delay.clear(k);
+    }
+
     /// The last quantum [`DelayNode::process`] rendered.
     pub fn output(&self) -> &[f32; Q] {
         &self.out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const RATE: f32 = 48_000.0;
+    const CLEAR: usize = 30_037;
+
+    /// A 1 s line, frame by frame at `time(f)` seconds: noise until `clear` when `heard`, then silence
+    /// with an impulse at each of `pulses`; `clear` clears it there ([`Delay::clear`]). The output and
+    /// the line.
+    fn run(heard: bool, clear: Option<usize>, pulses: &[usize], time: impl Fn(usize) -> f32, frames: usize) -> (Vec<f32>, Delay) {
+        let mut d = Delay::new(1.0, RATE);
+        let until = clear.unwrap_or(frames);
+        let out = (0..frames)
+            .map(|f| {
+                let k = f % Q;
+                if clear == Some(f) {
+                    d.clear(k);
+                }
+                let x = match f {
+                    f if pulses.contains(&f) => 1.0,
+                    f if heard && f < until => ((f * 37 % 101) as f32 / 50.0 - 1.0) * 0.5,
+                    _ => 0.0,
+                };
+                d.process_frame(k, x, time(f))
+            })
+            .collect();
+        (out, d)
+    }
+
+    #[test]
+    fn a_clear_stops_masking_once_the_line_is_written_over() {
+        // A pulse while the clear still masks, one after the line has been written over whole.
+        let (length, frames) = (Q + 48_000, 150_000);
+        let late = CLEAR + length + 1000;
+        let pulses = [CLEAR + 10_000, late];
+        let time = |_| 0.25;
+        let (stale, _) = run(true, None, &pulses, time, frames);
+        assert!(stale[CLEAR..CLEAR + 12_000].iter().any(|&x| x != 0.0), "uncleared, the noise echoes on");
+        let (fresh, _) = run(false, None, &pulses, time, frames);
+        let (cleared, line) = run(true, Some(CLEAR), &pulses, time, frames);
+        assert_eq!(line.fresh, length as i64, "the counter saturates at the line's length");
+        assert!(cleared[CLEAR..] == fresh[CLEAR..], "from the clear on, a line that heard only silence");
+        assert_eq!(cleared[late + 12_000], 1.0, "the late pulse echoes unmasked");
+        assert_eq!(cleared[CLEAR + 22_000], 1.0, "the early pulse echoes under the mask");
+    }
+
+    #[test]
+    fn a_delay_time_changed_after_a_clear_reads_nothing_from_before_it() {
+        // 62.5 ms (3000 frames), then from 4000 frames on (after the pulse's echo) a ramp to 0.9 s over
+        // 1000 frames: the read sweeps back across the clear's frame into the noise before it, at
+        // fractional positions.
+        let time = |f: usize| 0.0625 + 0.8375 * ((f.saturating_sub(CLEAR + 4000)) as f32 / 1000.0).min(1.0);
+        let pulses = [CLEAR + 100];
+        let frames = CLEAR + 60_000;
+        let (stale, _) = run(true, None, &pulses, time, frames);
+        assert!(stale[CLEAR + 4000..CLEAR + 40_000].iter().any(|&x| x != 0.0), "uncleared, the long read finds the noise");
+        let (fresh, _) = run(false, None, &pulses, time, frames);
+        let (cleared, _) = run(true, Some(CLEAR), &pulses, time, frames);
+        assert!(cleared[CLEAR..] == fresh[CLEAR..], "from the clear on, a line that heard only silence");
+        assert_eq!(cleared[CLEAR + 100 + 3000], 1.0, "the pulse after the clear echoes at 62.5 ms");
     }
 }

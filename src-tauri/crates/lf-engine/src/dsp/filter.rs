@@ -81,6 +81,13 @@ impl Filter {
         }
     }
 
+    /// Clear every stage's memory: the next frame filters as if the input before it were silence.
+    pub fn clear_memory(&mut self) {
+        for s in self.stages.iter_mut() {
+            s.clear_memory();
+        }
+    }
+
     /// Filter frames `at..at + source.len()` of the current quantum through the cascade.
     pub fn process(&mut self, at: usize, source: &[f32], dest: &mut [f32]) {
         let n = source.len();

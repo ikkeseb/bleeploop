@@ -12,9 +12,11 @@
 //! committed lanes ascending, `state` `"Playing"` | `"Stopped"` | `"Overdubbing"` (an overdubbing lane
 //! gives its loop as committed before the layer in flight), `mix` the lane's volume, mute, DUB FEEDBACK
 //! and FX as the engine applied them on the frame the snapshot pinned the loops (`wire::WireLaneMix`).
-//! A load's: `{"bpm","bars","masterLengthFrames","tracks"}` with `state` `"Playing"` | `"Stopped"` (a
-//! track's `mix` is not applied: the UI sends the mix after the load), into an engine whose lanes are all
-//! EMPTY; `bpm` is an integer 40..300 and `masterLengthFrames` is `bars` bars of it at the engine's rate.
+//! A load's: `{"bpm","bars","masterLengthFrames","tracks"}` with `state` `"Playing"` | `"Stopped"` and
+//! every track's `mix` (refused without one), into an engine whose lanes are all EMPTY; `bpm` is an
+//! integer 40..300 and `masterLengthFrames` is `bars` bars of it at the engine's rate. The engine sets
+//! each lane's mix on the frame its loop goes in, so the first loaded sample plays at it, and this host
+//! keeps it as the settings it replays (`settings`), as if the UI had sent it.
 //!
 //! A snapshot asked WITH the master (an export; a recovery autosave never asks) also carries the wet
 //! stereo master, rendered offline from those same loops by `lf_engine::render` with the tracks' `mix`
@@ -33,7 +35,7 @@ use std::time::{Duration, Instant};
 
 use lf_engine::grid::{frames_per_bar, Frame};
 use lf_engine::overview::PEAK_FRAMES;
-use lf_engine::{LaneState, Load, LoadTrack, SessionError, SessionJob, SessionPort, Snapshot, WetMaster, TRACK_COUNT};
+use lf_engine::{LaneMix, LaneState, Load, LoadTrack, SessionError, SessionJob, SessionPort, Snapshot, WetMaster, TRACK_COUNT};
 use serde::{Deserialize, Serialize};
 
 use super::wire::WireLaneMix;
@@ -60,9 +62,8 @@ pub(super) struct TrackHeader {
     frames: Frame,
     reversed: bool,
     state: TrackState,
-    /// A snapshot's: always there. A load's: not applied.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    mix: Option<WireLaneMix>,
+    /// A snapshot's as applied at its pin; a load's to set (a load without it is refused).
+    mix: WireLaneMix,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -84,9 +85,9 @@ struct MasterHeader {
     frames: Frame,
 }
 
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct LoadHeader {
+pub(super) struct LoadHeader {
     bpm: u32,
     bars: Frame,
     master_length_frames: Frame,
@@ -146,7 +147,7 @@ impl EngineHost {
             .iter()
             .flatten()
             .enumerate()
-            .map(|(k, t)| load_track(t.index, s.pcm[k * samples..(k + 1) * samples].iter().copied(), samples, t.reversed, true))
+            .map(|(k, t)| load_track(t.index, s.pcm[k * samples..(k + 1) * samples].iter().copied(), samples, t.reversed, true, t.mix))
             .collect();
         let mixes: Vec<_> = s.tracks[..s.count].iter().flatten().map(|t| t.mix).collect();
         let load = Load { bpm: s.bpm, bars: s.master / fpb, master: s.master, tracks, result: None };
@@ -163,8 +164,8 @@ impl EngineHost {
     }
 
     /// Load a session's bytes (the module doc's layout) into the engine, whose lanes must all be
-    /// EMPTY. The PLAYING lanes start together from loop position 0; volume, mute and FX are the UI's
-    /// to send after.
+    /// EMPTY. The PLAYING lanes start together from loop position 0, each lane at its track's mix, which
+    /// the kept settings then hold.
     pub fn load_session(&self, bytes: &[u8]) -> Result<(), String> {
         let mut stale = self.core.session_busy.lock().unwrap_or_else(|e| e.into_inner());
         let (header, pcm) = split(bytes)?;
@@ -191,7 +192,7 @@ impl EngineHost {
                 return Err(format!("session: track {} does not fit", t.index));
             }
             let play = pcm[k * samples * 4..(k + 1) * samples * 4].chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]));
-            tracks.push(load_track(t.index, play, capacity, t.reversed, t.state == TrackState::Playing));
+            tracks.push(load_track(t.index, play, capacity, t.reversed, t.state == TrackState::Playing, t.mix.0));
         }
         let load = Load { bpm: header.bpm, bars: header.bars, master, tracks, result: None };
         let SessionJob::Load(load) = self.session_job(&mut stale, SessionJob::Load(load))? else {
@@ -200,6 +201,13 @@ impl EngineHost {
         // `load.tracks` now holds the engine's old buffers: they are freed here.
         match load.result {
             Some(Ok(())) => {
+                // The engine applied each lane's mix as if the UI had sent it: a rebuild, a reset frame
+                // and the export's master read it from the kept settings.
+                if let Ok(mut settings) = self.core.settings.lock() {
+                    for t in &header.tracks {
+                        settings.loaded(t.index, &t.mix.0);
+                    }
+                }
                 log::info!("[engine_io] session loaded: {} tracks, {master} frames at {} BPM", load.tracks.len(), header.bpm);
                 Ok(())
             }
@@ -304,9 +312,9 @@ thread_local! {
 
 /// One lane of a load from its loop in play order (`play`, the loop's samples): a buffer `capacity`
 /// long holding it in buffer order (the engine reads a reversed lane's buffer backwards, so its play
-/// order goes back reversed), and its peaks. The one place that turns a saved loop into a lane: the
-/// import's load and the export's render both take it.
-fn load_track(index: u8, play: impl ExactSizeIterator<Item = f32>, capacity: usize, reversed: bool, playing: bool) -> LoadTrack {
+/// order goes back reversed), and its peaks, with its `mix`. The one place that turns a saved loop into
+/// a lane: the import's load and the export's render both take it.
+fn load_track(index: u8, play: impl ExactSizeIterator<Item = f32>, capacity: usize, reversed: bool, playing: bool, mix: LaneMix) -> LoadTrack {
     let samples = play.len().min(capacity);
     let mut buf = Vec::with_capacity(capacity);
     buf.resize(capacity, 0.0f32);
@@ -317,7 +325,7 @@ fn load_track(index: u8, play: impl ExactSizeIterator<Item = f32>, capacity: usi
         buf[..samples].reverse();
     }
     let peaks = buf[..samples].chunks(PEAK_FRAMES).map(|c| c.iter().fold((0.0f32, 0.0f32), |(lo, hi), &x| (lo.min(x), hi.max(x)))).collect();
-    LoadTrack { index, buf, peaks, reversed, playing }
+    LoadTrack { index, buf, peaks, reversed, playing, mix }
 }
 
 /// `[u32 LE length][header][rest]`.
@@ -341,7 +349,7 @@ fn snapshot_bytes(s: &Snapshot, wet: Option<Result<WetMaster, String>>) -> Vec<u
                 LaneState::Overdubbing => TrackState::Overdubbing,
                 _ => TrackState::Playing,
             },
-            mix: Some(WireLaneMix(t.mix)),
+            mix: WireLaneMix(t.mix),
         })
         .collect();
     let (wet, master_error) = match wet {

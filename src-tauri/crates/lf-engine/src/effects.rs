@@ -19,17 +19,27 @@
 //! multiply re-anchors the loop, not the beat grid (`Looper::grid_origin`): a stutter's dotted gate keeps
 //! its phase across it. (A device gap moves the origin on the DSP clock while lanes play; the re-timed
 //! grid keeps the device-frame phase.) CLEAR resets the lane's FX to the
-//! defaults, COPY gives the copy the source's FX (`machine.ts` `clear`, `copy`). A parameter is clamped
+//! defaults, COPY gives the copy the source's FX (`machine.ts` `clear`, `copy`), and a load each loaded
+//! lane its session's ([`LaneFx::set_state`]). CLEAR and a load also silence the lane's chain history
+//! at their frame (the delay line and its feedback, the filter's memory, the PitchShift's lines;
+//! [`LaneFx::clear_history`], no web counterpart): a CLEAR cuts its loop's echoes there as it cuts the
+//! loop, and nothing from before either comes back through a delay turned on later. A parameter is clamped
 //! to its def's range; a change sounds from the next quantum boundary, as a live Web Audio param does.
 
 use std::sync::Arc;
 
 use crate::api::TRACK_COUNT;
 use crate::dsp::buffer_source::AudioBuffer;
-use crate::dsp::fx::{default_fx_states, Ctl, FxChain, FxKind, FxParam, FxTiming, ReverbBus, REVERB_DECAY, REVERB_PRE_DELAY};
+use crate::dsp::fx::{default_fx_states, Ctl, FxChain, FxKind, FxParam, FxParamDef, FxState, FxTiming, ReverbBus, REVERB_DECAY, REVERB_PRE_DELAY};
 use crate::dsp::param::QUANTUM;
 use crate::dsp::reverb_ir;
 use crate::grid::{frames_per_bar, Frame};
+
+/// `value` within `def`'s range, an integer param rounded half up first.
+fn clamped(def: &FxParamDef, value: f64) -> f64 {
+    let value = if def.integer { (value + 0.5).floor() } else { value };
+    value.clamp(def.min, def.max)
+}
 
 /// The reverb IR's two draws (`makeReverbBus`'s `Math.random` calls). Fixed, so a render repeats.
 const IR_DRAWS: [f64; 2] = [0.25, 0.75];
@@ -95,10 +105,24 @@ impl LaneFx {
     /// the UI's `Math.round` does, so a mix read back (`Looper::mix`) is one session.json's schema accepts.
     pub fn set_param(&mut self, lane: usize, param: FxParam, value: f64, frame: Frame) {
         if value.is_finite() {
-            let (def, ctl) = (param.def(), self.ctl(frame));
-            let value = if def.integer { (value + 0.5).floor() } else { value };
-            self.chains[lane].set_param(param, value.clamp(def.min, def.max), ctl);
+            let ctl = self.ctl(frame);
+            self.chains[lane].set_param(param, clamped(param.def(), value), ctl);
         }
+    }
+
+    /// A load: lane `lane` takes `states` whole, each param as [`LaneFx::set_param`] takes it (one that
+    /// is no number keeps the chain's). Ramped as a CLEAR's and a COPY's are (`FxChain::set_state`).
+    pub fn set_state(&mut self, lane: usize, states: &[FxState; 5], frame: Frame) {
+        let mut states = *states;
+        let current = self.chains[lane].get_state();
+        for kind in FxKind::ALL {
+            let (state, now) = (&mut states[kind.index()], &current[kind.index()]);
+            for ((v, def), &old) in state.params.iter_mut().zip(kind.params()).zip(&now.params) {
+                *v = if v.is_finite() { clamped(def, *v) } else { old };
+            }
+        }
+        let ctl = self.ctl(frame);
+        self.chains[lane].set_state(&states, ctl);
     }
 
     pub fn set_bypass(&mut self, lane: usize, kind: FxKind, bypassed: bool, frame: Frame) {
@@ -106,10 +130,18 @@ impl LaneFx {
         self.chains[lane].set_bypass(kind, bypassed, ctl);
     }
 
-    /// CLEAR: the lane's FX back to the defaults.
+    /// CLEAR: the lane's FX back to the defaults, its chain's history silenced ([`LaneFx::clear_history`]).
     pub fn reset(&mut self, lane: usize, frame: Frame) {
         let ctl = self.ctl(frame);
         self.chains[lane].set_state(&default_fx_states(), ctl);
+        self.clear_history(lane, frame);
+    }
+
+    /// From `frame` on, lane `lane`'s chain holds nothing of what it heard before (`FxChain::clear_history`):
+    /// the erased loop's echoes never come back through a delay turned on or a feedback raised later.
+    pub fn clear_history(&mut self, lane: usize, frame: Frame) {
+        let f = self.dsp(frame);
+        self.chains[lane].clear_history(f);
     }
 
     /// COPY: lane `to` takes lane `from`'s FX.

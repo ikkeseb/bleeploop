@@ -5,6 +5,10 @@
 //! and their peaks, built off the audio thread) and takes each back, a load's with the engine's old lane
 //! buffers in them, to free it.
 //!
+//! A session job runs at a block start, after the commands due on that frame, so a setting sent before
+//! the job is ordered before it. With no device running it runs at once, ahead of the commands still
+//! queued ([`crate::Engine::service_session_idle`]; an open thread, the crate briefing).
+//!
 //! A snapshot is the committed loops as they stood on the frame it began (it waits for the looper's
 //! block jobs first), each with its lane's mix as the engine applied it on that frame: an OVERDUBBING
 //! lane gives its loop as committed before the layer in flight (its undo buffer), and every loop comes
@@ -15,9 +19,11 @@
 //! itself, all at once ([`crate::Engine::service_session_idle`]).
 //!
 //! A load applies at a block start into an all-EMPTY looper with no take in flight: each lane's buffer
-//! is swapped for the host's, the tempo set and locked, the master grid anchored on that frame, and the
-//! PLAYING lanes play loop position 0 there together (the web `loadSession`); the lanes and the
-//! transport reach the feed at the next publish, as a commit's do.
+//! is swapped for the host's and its mix set from the load (overriding a mix sent to the EMPTY lane
+//! before), the tempo set and locked, the master grid anchored on that frame, and the PLAYING lanes play
+//! loop position 0 there together (the web `loadSession`), each at its loaded level from its first
+//! sample, through an FX chain that holds nothing from before it (`effects::LaneFx::clear_history`);
+//! the lanes and the transport reach the feed at the next publish, as a commit's do.
 
 use rtrb::{Consumer, Producer, RingBuffer};
 
@@ -60,8 +66,8 @@ pub struct SnapshotTrack {
     pub reversed: bool,
     /// The lane's mix as the engine applied it on the frame the snapshot pinned its loop, a block start
     /// once no block job runs: not necessarily the mix when the snapshot was asked for. A change applied
-    /// before that frame is in it; one the same block applies (a command that reached the engine with
-    /// the request included) and one applied while it copies are not.
+    /// up to that frame is in it (a command due on it included, one that reached the engine with the
+    /// request too); one applied while it copies is not.
     pub mix: LaneMix,
 }
 
@@ -111,6 +117,8 @@ pub struct LoadTrack {
     pub reversed: bool,
     /// PLAYING from the grid anchor; else STOPPED.
     pub playing: bool,
+    /// The lane's volume, mute, DUB FEEDBACK and FX from the load's frame.
+    pub mix: LaneMix,
 }
 
 pub struct Load {
@@ -168,9 +176,10 @@ pub(crate) fn channel() -> (SessionPort, SessionEnd) {
 }
 
 impl SessionEnd {
-    /// At a block start: take a job the host sent (only while the return ring has room, so it can
-    /// always go back), apply a load, begin a snapshot once no block job runs. `idle`: no device runs,
-    /// so a block job cannot finish either and a snapshot waiting for one answers `Changed`.
+    /// At a block start, after the commands due on its frame: take a job the host sent (only while the
+    /// return ring has room, so it can always go back), apply a load, begin a snapshot once no block job
+    /// runs. `idle`: no device runs, so a block job cannot finish either and a snapshot waiting for one
+    /// answers `Changed`.
     pub(crate) fn begin(&mut self, looper: &mut crate::looper::Looper, cx: &mut crate::looper::Cx, rate: u32, idle: bool) {
         if self.job.is_none() && self.tx.slots() > 0 {
             self.job = self.rx.pop().ok();

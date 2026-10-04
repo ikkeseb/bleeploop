@@ -213,6 +213,12 @@ impl BiquadFilterNode {
         self.kind
     }
 
+    /// Clear the filter memory, keeping the coefficients (no Blink counterpart: the engine's session
+    /// boundary, `fx::FxChain::clear_history`).
+    pub fn clear_memory(&mut self) {
+        self.biquad.reset();
+    }
+
     /// The `type` setter: a new type clears the filter memory and snaps the coefficients.
     pub fn set_kind(&mut self, kind: FilterType) {
         if kind != self.kind {

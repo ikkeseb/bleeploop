@@ -2449,9 +2449,9 @@ impl Looper {
     }
 
     /// Load a session at `cx.now` into an all-EMPTY looper with no take in flight: swap each lane's
-    /// buffer for the load's, lock the tempo, anchor the master grid on `cx.now` and play the PLAYING
-    /// lanes from loop position 0 there (the web `loadSession`). The engine's old buffers go back in
-    /// the load for the host to free. Checks everything before it changes anything.
+    /// buffer for the load's and set its mix, lock the tempo, anchor the master grid on `cx.now` and play
+    /// the PLAYING lanes from loop position 0 there (the web `loadSession`). The engine's old buffers go
+    /// back in the load for the host to free. Checks everything before it changes anything.
     pub(crate) fn load(&mut self, cx: &mut Cx, load: &mut Load) -> Result<(), SessionError> {
         if self.rec.is_some() || self.master != 0 || self.lanes.iter().any(|t| t.state != LaneState::Empty) {
             return Err(SessionError::NotEmpty);
@@ -2485,6 +2485,20 @@ impl Looper {
             t.voice = Voice::settled(t.audible);
             t.stop_at = None;
             t.state = if track.playing { LaneState::Playing } else { LaneState::Stopped };
+            let i = track.index as usize;
+            let mix = track.mix;
+            self.set_volume(i, mix.volume);
+            self.set_mute(i, mix.muted);
+            self.set_dub_feedback(i, mix.dub_feedback);
+            // No glide in from the EMPTY lane's level: the first loaded sample plays at the loaded one.
+            let t = &mut self.lanes[i];
+            t.gain = if t.muted { 0.0 } else { t.volume as f64 };
+            // The FX targets ramp in from the EMPTY lane's (`LaneFx::set_state`, as a CLEAR's do), over a
+            // chain that holds nothing from before the load (`LaneFx::clear_history`): a bypassed delay
+            // still recirculates and leaks its echoes at -56 dB, and a delay the load turns on would
+            // bring them back. The shared reverb bus rings on as it was.
+            cx.fx.set_state(i, &mix.fx, cx.now);
+            cx.fx.clear_history(i, cx.now);
         }
         self.master = master;
         self.anchor = cx.now;

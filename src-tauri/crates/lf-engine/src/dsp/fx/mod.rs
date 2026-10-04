@@ -342,6 +342,18 @@ impl FxChain {
         Ok(())
     }
 
+    /// Silence what the chain holds of its input before `frame` (a DSP frame; the next one it renders):
+    /// the filter's memory, the PitchShift's lines, the delay line and its feedback. The stutter holds no
+    /// audio (its gate is a control signal) and the reverb send none (the shared bus rings on). O(1)
+    /// ([`crate::dsp::delay::Delay::clear`]), so the RT path can call it. No Tone counterpart: the
+    /// engine's CLEAR and load (`effects::LaneFx::clear_history`).
+    pub fn clear_history(&mut self, frame: u64) {
+        let k = (frame % QUANTUM as u64) as usize;
+        self.filter.clear_history();
+        self.pitch.clear_history(k);
+        self.delay.clear_history(k);
+    }
+
     /// The send is silent in the quantum last rendered (its gain is 0). A quantum in which every
     /// chain's send is silent reaches the [`ReverbBus`] as `None`.
     pub fn send_silent(&self) -> bool {

@@ -148,8 +148,21 @@ await probe(async ({ open, browser }) => {
     ).buffer;
     return Array.from(pcm);
   }, BAR);
+  // A load header carries each track's mix (the engine sets it with the loop): here the take's, at unity.
+  const unity = {
+    volume: 1,
+    muted: false,
+    dubFeedback: 1,
+    fx: [
+      { bypassed: true, params: { cutoff: 1200, q: 2 } },
+      { bypassed: true, params: { semitones: 0 } },
+      { bypassed: true, params: { rate: 1 } },
+      { bypassed: true, params: { time: 1, feedback: 0.4, mix: 0.3 } },
+      { bypassed: true, params: { amount: 0.3 } },
+    ],
+  };
   const recorded = {
-    header: { bpm: 120, bars: 1, masterLengthFrames: BAR, tracks: [{ index: 0, frames: BAR, reversed: false, state: 'Playing' }] },
+    header: { bpm: 120, bars: 1, masterLengthFrames: BAR, tracks: [{ index: 0, frames: BAR, reversed: false, state: 'Playing', mix: unity }] },
     hashes: [hash(take)],
   };
   await emit(page, {

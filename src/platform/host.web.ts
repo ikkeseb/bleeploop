@@ -6,13 +6,16 @@ import type { AppUpdate, AppUpdates, EngineHost, LogFolder, MidiBackend, Platfor
 import {
   ENGINE_LANES,
   decodeFeedFrame,
+  decodeLoadSession,
   encodeSessionBytes,
   splitSessionBytes,
   type DeviceRequest,
   type DeviceStatus,
   type EngineCommand,
   type FeedFrame,
+  type FxParamId,
   type LaneMix,
+  type LoadHeader,
   type SnapshotHeader,
   type SnapshotTrack,
 } from './engine-wire.ts'; // explicit .ts: Node guards import this file
@@ -283,11 +286,28 @@ function applyMixFrame(frame: Pick<FeedFrame, 'reset' | 'settings' | 'events'>):
   }
 }
 
+/** A load sets each loaded lane's mix whole, as the engine clamps it (over a mix sent to the EMPTY
+ * lane before). */
+function applyMixLoad(header: LoadHeader): void {
+  for (const { index: lane, mix } of header.tracks) {
+    if (!fakeMixes[lane]) continue;
+    fakeMixes[lane] = defaultLaneMix();
+    applyMixCommand({ SetVolume: [lane, mix.volume] });
+    applyMixCommand({ SetMute: [lane, mix.muted] });
+    applyMixCommand({ SetDubFeedback: [lane, mix.dubFeedback] });
+    mix.fx.forEach((f, k) => {
+      applyMixCommand({ SetFxBypass: [lane, FX_ORDER[k], f.bypassed] });
+      for (const [key, value] of Object.entries(f.params)) applyMixCommand({ SetFxParam: [lane, key as FxParamId, value] });
+    });
+  }
+}
+
 /** The fake's per-lane mix model, for the engine-wire guard (Node cannot reach `webEngineFake.send`).
  * @public */
 export const fakeMixModel = {
   command: applyMixCommand,
   frame: applyMixFrame,
+  load: applyMixLoad,
   lane: (i: number): LaneMix => copyMix(fakeMixes[i]),
 };
 
@@ -409,6 +429,8 @@ export const webEngineFake: EngineFake = {
   async loadSession(bytes) {
     if (!engineForced()) throw new Error(NO_ENGINE);
     webEngineFake.loadedSessions.push(bytes.slice());
+    // The engine refuses a header it cannot read, and sets each lane's mix with its loop.
+    applyMixLoad(decodeLoadSession(bytes.slice().buffer).header);
   },
   subscribe(onFrame) {
     engineSubscribers.add(onFrame);

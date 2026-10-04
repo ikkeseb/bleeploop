@@ -17,6 +17,7 @@ import {
   type InputSendParamId,
   type LoadHeader,
   type LaneInfo,
+  type LaneMix,
   type LaneState,
 } from '../../platform';
 import { firstTakeSpan, openingSpan, type LoadSessionPayload, type PeakView, type TrackState } from './looper-types';
@@ -55,7 +56,8 @@ import { notifyError, notifyInfo } from '../../notify';
  * (`Muted`), and on a `reset` frame takes the settings the engine remembers, so the screen shows what
  * the engine plays. `engineSession` is the
  * engine as export, recovery and import see it: the engine's PCM with each lane's mix as the engine
- * applied it (the snapshot's; an import sends its saved mix after the load), and the token of
+ * applied it (the snapshot's; an import's load carries its saved mix, which the engine applies with the
+ * loops), and the token of
  * the player's clear that emptied the looper (recovery deletes the jam for it, and keeps it for a new
  * engine's empty lanes). `openEngineDevice` turns the engine's refusal of a switch to another rate into
  * the player's confirm.
@@ -675,22 +677,13 @@ function applyFrameNow(f: FeedFrame): void {
 
 // ── The mix and the modes this store keeps ────────────────────────────────────────────────────────
 
-function fxCommands(lane: number, states: readonly FxState[]): EngineCommand[] {
-  const out: EngineCommand[] = [];
-  FX_META.forEach((meta, k) => {
-    out.push({ SetFxBypass: [lane, meta.kind, states[k].bypassed] });
-    for (const def of FX_PARAM_DEFS[meta.kind]) out.push({ SetFxParam: [lane, def.key as FxParamId, states[k].params[def.key]] });
-  });
-  return out;
-}
-
-function laneCommands(lane: number): EngineCommand[] {
-  return [
-    { SetVolume: [lane, volumes[lane][0]()] },
-    { SetMute: [lane, mutes[lane][0]()] },
-    { SetDubFeedback: [lane, dubFeedbacks[lane][0]()] },
-    ...fxCommands(lane, fx[lane]),
-  ];
+/** A lane's mix in the wire's shape (`LaneMix`): each effect's params exactly its defs' keys. */
+function wireMix(volume: number, muted: boolean, dubFeedback: number, states: readonly FxState[]): LaneMix {
+  const wireFx = FX_META.map((meta, k) => ({
+    bypassed: states[k].bypassed,
+    params: Object.fromEntries(FX_PARAM_DEFS[meta.kind].map((def) => [def.key, states[k].params[def.key]])),
+  }));
+  return { volume, muted, dubFeedback, fx: wireFx };
 }
 
 /** The engine cleared the lane: its mix is back to the defaults there, so here too. */
@@ -1023,9 +1016,10 @@ async function exportSnapshot(options: { master?: boolean } = {}): Promise<StemS
 }
 
 /**
- * Load a session into an all-empty engine: the loops go to the engine (which sets and locks the tempo
- * and starts the PLAYING lanes together), then their mix to the engine and this store. Checks the payload
- * before sending anything; the engine checks again.
+ * Load a session into an all-empty engine: the loops and each lane's mix go to the engine in one load
+ * (which sets and locks the tempo, sets each lane's mix and starts the PLAYING lanes together, so the
+ * first loaded sample plays at its saved level), then, once the engine took it, the mix to this store.
+ * Checks the payload before sending anything; the engine checks again.
  */
 async function loadSession(payload: LoadSessionPayload): Promise<void> {
   const rate = device()?.sampleRate;
@@ -1047,23 +1041,25 @@ async function loadSession(payload: LoadSessionPayload): Promise<void> {
     if (t.pcm.length !== master) throw new Error(`loadSession: track ${t.index + 1} pcm is ${t.pcm.length} frames, expected ${master}`);
     const state = t.state ?? 'PLAYING';
     if (state !== 'PLAYING' && state !== 'STOPPED') throw new Error(`loadSession: track ${t.index + 1} state must be PLAYING or STOPPED`);
-    return { ...t, state, fx: validateFxStates(t.fx, `loadSession: track ${t.index + 1}`) };
+    const states = validateFxStates(t.fx, `loadSession: track ${t.index + 1}`);
+    // A session saved before DUB FEEDBACK sums, as it did.
+    const mix = wireMix(Math.max(0, Math.min(1.5, t.volume)), t.muted, Math.max(0, Math.min(1, t.dubFeedback ?? 1)), states);
+    return { index: t.index, pcm: t.pcm, reversed: t.reversed, state, fx: states, mix };
   });
   const header: LoadHeader = {
     bpm,
     bars,
     masterLengthFrames: master,
-    tracks: loaded.map((t) => ({ index: t.index, frames: master, reversed: t.reversed, state: TO_LOAD[t.state] })),
+    tracks: loaded.map((t) => ({ index: t.index, frames: master, reversed: t.reversed, state: TO_LOAD[t.state], mix: t.mix })),
   };
   await platform.engine.loadSession(encodeSessionBytes(header, loaded.map((t) => t.pcm)));
+  // The engine applied the mix with the loops: the faders show it (a refused load adopts nothing).
   for (const t of loaded) {
-    volumes[t.index][1](Math.max(0, Math.min(1.5, t.volume)));
-    setMutePlain(t.index, t.muted);
-    // A session saved before DUB FEEDBACK sums, as it did.
-    dubFeedbacks[t.index][1](Math.max(0, Math.min(1, t.dubFeedback ?? 1)));
+    volumes[t.index][1](t.mix.volume);
+    setMutePlain(t.index, t.mix.muted);
+    dubFeedbacks[t.index][1](t.mix.dubFeedback);
     fx[t.index] = t.fx;
     fxVersions[t.index][1]((v) => v + 1);
-    sendEngine(...laneCommands(t.index));
   }
 }
 

@@ -126,6 +126,14 @@ impl DelayFx {
         self.delay.delay_time.set_value_at_time(self.beat_period * division_beats(self.time), now, ctl.frame);
     }
 
+    /// [`super::FxChain::clear_history`] from frame `k` of the current quantum: the delay line and the
+    /// returns the feedback reads.
+    pub(super) fn clear_history(&mut self, k: usize) {
+        self.delay.clear(k);
+        self.returned = [0.0; QUANTUM];
+        self.previous = [0.0; QUANTUM];
+    }
+
     pub(super) fn begin_quantum(&mut self, quantum_start: u64) {
         self.dry_wet.begin_quantum(quantum_start);
         self.delay.begin_quantum(quantum_start, None);

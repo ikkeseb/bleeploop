@@ -248,6 +248,11 @@ impl Rig {
         self.handle.commands.push(TimedCommand { frame: Some(frame), command }).expect("command ring full");
     }
 
+    /// Send `command` unstamped, as the host sends a UI gesture: due at the next block start.
+    pub fn queue(&mut self, command: Command) {
+        self.handle.commands.push(TimedCommand { frame: None, command }).expect("command ring full");
+    }
+
     /// Apply `command` at the current frame, then render that one frame.
     pub fn press(&mut self, command: Command) {
         self.send_at(self.frame, command);

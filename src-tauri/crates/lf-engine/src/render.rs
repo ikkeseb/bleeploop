@@ -139,8 +139,8 @@ pub fn wet_master_with(rate: u32, mut load: Load, mixes: &[LaneMix], settings: &
         _ => return Err("export render: the load came back unfinished".to_string()),
     }
 
-    // The mix, after the load (which keeps a lane's mix but swaps its buffer), on the load's frame: each
-    // lane's from `mixes`, the master's from the settings.
+    // The mix, on the load's frame after it (which set each lane's from its track): each lane's from
+    // `mixes`, which wins, the master's from the settings.
     let lane_mixes = lanes.iter().zip(mixes).flat_map(|(&i, mix)| lane_commands(i as u8, mix));
     for command in lane_mixes.chain(settings.iter().copied().filter(is_master_mix)) {
         if !engine.apply_idle(command) {

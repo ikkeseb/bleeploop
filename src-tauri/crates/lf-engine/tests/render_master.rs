@@ -28,7 +28,7 @@ fn lane(index: u8, impulses: &[(usize, f32)]) -> LoadTrack {
     for &(p, a) in impulses {
         buf[p] = a;
     }
-    LoadTrack { index, buf, peaks: Vec::new(), reversed: false, playing: true }
+    LoadTrack { index, buf, peaks: Vec::new(), reversed: false, playing: true, mix: LaneMix::default() }
 }
 
 /// A one-bar session at 120 BPM.
@@ -138,7 +138,7 @@ fn the_master_is_exactly_the_loop_long_on_both_channels() {
         (0..2u8)
             .map(|i| {
                 let buf = (0..master).map(|k| ((k as f32 * 0.01 * (i + 1) as f32).sin()) * 0.1).collect();
-                LoadTrack { index: i * 2, buf, peaks: Vec::new(), reversed: false, playing: true }
+                LoadTrack { index: i * 2, buf, peaks: Vec::new(), reversed: false, playing: true, mix: LaneMix::default() }
             })
             .collect::<Vec<_>>()
     };
@@ -250,7 +250,7 @@ fn a_delay_at_full_feedback_warms_for_every_echo_with_its_quantum() {
     let session = || {
         let mut buf = vec![0.0f32; master as usize];
         buf[master as usize - 1] = A;
-        Load { bpm, bars, master, tracks: vec![LoadTrack { index: 0, buf, peaks: Vec::new(), reversed: false, playing: true }], result: None }
+        Load { bpm, bars, master, tracks: vec![LoadTrack { index: 0, buf, peaks: Vec::new(), reversed: false, playing: true, mix: LaneMix::default() }], result: None }
     };
     let quarter = |feedback: f64| [delay(0.0, feedback, 1.0)];
     // The first echo's level in the master: the one the threshold is relative to.

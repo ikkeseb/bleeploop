@@ -1700,7 +1700,13 @@ fn the_glitch_watch_logs_a_span_only_when_a_fault_counter_moved_in_it() {
 /// A session's load bytes for the loop on lane 0, with lane 0 then cleared: the engine is all EMPTY and
 /// silent.
 fn saved_then_cleared(h: &mut Harness, length: Frame) -> Vec<u8> {
-    let (header, pcm) = session_parts(&h.host.snapshot(false).expect("a snapshot"));
+    saved_then_cleared_with(h, length, |_| {})
+}
+
+/// As [`saved_then_cleared`], the saved track's mix edited by `mix`.
+fn saved_then_cleared_with(h: &mut Harness, length: Frame, mix: impl FnOnce(&mut serde_json::Value)) -> Vec<u8> {
+    let (mut header, pcm) = session_parts(&h.host.snapshot(false).expect("a snapshot"));
+    mix(&mut header["tracks"][0]["mix"]);
     h.send(Command::ClearAll);
     h.wait_lane("the lane clears", 0, |i| i.state == LaneState::Empty);
     until("the overview says EMPTY", || !h.host.core.holds_audio());
@@ -1726,17 +1732,15 @@ fn heard_and_exported(h: &Harness, length: Frame) -> (f32, f32) {
 }
 
 #[test]
-#[ignore = "red: D21, an owner decision (STATUS.md)"]
 fn d21_an_imported_lane_saved_muted_is_never_heard() {
     let mut h = Harness::new();
     h.fake.set_input(tone);
     h.open(asio(Some(256)));
     let length = h.record_loop();
-    let bytes = saved_then_cleared(&mut h, length);
+    let bytes = saved_then_cleared_with(&mut h, length, |mix| mix["muted"] = true.into());
     let from = h.frame();
-    // `engine-store.ts` `loadSession`: the loops first, the saved mix after the load answers.
+    // `engine-store.ts` `loadSession`: the saved mix rides in the load header; nothing is sent after.
     h.host.load_session(&bytes).expect("the load");
-    h.send(Command::SetMute(0, true));
     h.play(RATE / 5);
     let heard = h.fake.heard(from..h.frame());
     let loud = heard.iter().filter(|x| x.abs() > 1e-4).count();
@@ -1745,7 +1749,10 @@ fn d21_an_imported_lane_saved_muted_is_never_heard() {
 }
 
 #[test]
-fn a_mix_sent_to_an_empty_lane_holds_through_a_load() {
+fn a_load_sets_its_mix_over_one_sent_to_the_empty_lane() {
+    // Once the UI sent the saved mix after the load, so a mix sent to the EMPTY lane held through it.
+    // Now every load header carries each track's mix and the engine sets it with the loop: the load's
+    // mix wins, here the saved unmuted one over the EMPTY lane's mute.
     let mut h = Harness::new();
     h.fake.set_input(tone);
     h.open(asio(Some(256)));
@@ -1757,8 +1764,46 @@ fn a_mix_sent_to_an_empty_lane_holds_through_a_load() {
     h.host.load_session(&bytes).expect("the load");
     h.play(RATE / 5);
     let loudest = h.fake.heard(from..h.frame()).iter().filter(|x| !x.is_nan()).fold(0.0f32, |p, x| p.max(x.abs()));
-    assert!(loudest < 1e-4, "the load keeps the EMPTY lane's mute ({loudest})");
+    assert!(loudest > 0.05, "the load's unmuted mix plays over the EMPTY lane's mute ({loudest})");
     assert!(h.host.core.holds_audio(), "and the loop is in");
+    assert!(h.host.settings().contains(&Command::SetMute(0, false)), "the kept settings follow: {:?}", h.host.settings());
+}
+
+#[test]
+fn a_load_keeps_its_mix_as_the_settings_it_replays_and_a_refused_one_keeps_nothing() {
+    use lf_engine::dsp::fx::{FxKind, FxParam};
+    let mut h = Harness::new();
+    h.fake.set_input(tone);
+    h.open(asio(Some(256)));
+    let length = h.record_loop();
+    let bytes = saved_then_cleared_with(&mut h, length, |mix| {
+        mix["volume"] = 0.5.into();
+        mix["dubFeedback"] = 0.25.into();
+        mix["fx"][0] = serde_json::json!({ "bypassed": false, "params": { "cutoff": 800.0, "q": 4.5 } });
+    });
+    h.send(Command::SetVolume(0, 0.9));
+    h.send(Command::SetFxBypass(0, FxKind::Reverb, false));
+    // A header without a track's mix is refused before the engine sees it.
+    let (mut bare, pcm) = session_parts(&bytes);
+    bare["tracks"][0].as_object_mut().unwrap().remove("mix");
+    let err = h.host.load_session(&session_bytes(&bare, &pcm)).expect_err("a load without its mix");
+    assert!(err.contains("missing field `mix`"), "{err}");
+    assert!(!h.host.core.holds_audio());
+    assert!(h.host.settings().contains(&Command::SetVolume(0, 0.9)), "a refused load keeps nothing");
+    h.host.load_session(&bytes).expect("the load");
+    let kept = h.host.settings();
+    for command in [
+        Command::SetVolume(0, 0.5),
+        Command::SetMute(0, false),
+        Command::SetDubFeedback(0, 0.25),
+        Command::SetFxBypass(0, FxKind::Filter, false),
+        Command::SetFxParam(0, FxParam::Cutoff, 800.0),
+        Command::SetFxParam(0, FxParam::Q, 4.5),
+        Command::SetFxBypass(0, FxKind::Reverb, true),
+    ] {
+        assert!(kept.contains(&command), "the replay carries {command:?}: {kept:?}");
+    }
+    assert!(!kept.contains(&Command::SetVolume(0, 0.9)), "the EMPTY lane's fader is replaced: {kept:?}");
 }
 
 #[test]
@@ -1768,7 +1813,7 @@ fn d21_an_export_masters_the_mix_it_was_asked_with() {
     h.open(asio(Some(256)));
     h.record_loop();
     let (_, stems, [before, _]) = session_with_master(&h.host.snapshot(true).expect("an export"));
-    // The callbacks stall, so the export's copy is still in flight when the fader moves.
+    // The callbacks stall, so the fader and the export's snapshot reach the engine in one block.
     let held = h.host.core.rt.lock().unwrap();
     let sent = h.host.core.session_sent.load(SeqCst);
     let export = {
@@ -1776,23 +1821,25 @@ fn d21_an_export_masters_the_mix_it_was_asked_with() {
         std::thread::spawn(move || host.snapshot(true))
     };
     // Enqueued, not just the port taken: no callback runs until `held` drops, so the job waits in the
-    // ring and the next block pins it before the fader command.
+    // ring and the next block takes it with the fader command.
     until("the export's snapshot is enqueued", || h.host.core.session_sent.load(SeqCst) > sent);
     h.send(Command::SetVolume(0, 0.25));
     drop(held);
     let (header, raced, [after, _]) = session_with_master(&export.join().unwrap().expect("the raced export"));
     assert_eq!(raced, stems, "the stems are the same loop");
-    // The snapshot pins the loops and their mix at the block start before that block's commands, so the
-    // fader moved in the stall comes after it: the track says 1, and the master renders that mix (no
-    // longer the host's settings, which hold 0.25 by then).
-    assert_eq!(header["tracks"][0]["mix"]["volume"].as_f64(), Some(1.0), "the mix at the pin: {header}");
+    // A block applies the commands due on its first frame before its session job: the fader that
+    // reached the engine with the request is in the track and in the master rendered from it.
+    assert_eq!(header["tracks"][0]["mix"]["volume"].as_f64(), Some(0.25), "the mix at the pin: {header}");
     let (g, _) = fit(&after, &before);
-    assert!((g - 1.0).abs() < 0.05, "the master holds the snapshot's mix (session.json's), not a fader moved since: gain {g}");
-    // A fader moved before the next export is in its track and its master alike.
-    let (header, _, [quieter, _]) = session_with_master(&h.host.snapshot(true).expect("the next export"));
-    assert_eq!(header["tracks"][0]["mix"]["volume"].as_f64(), Some(0.25));
-    let (g, _) = fit(&quieter, &before);
     assert!((g - 0.25).abs() < 0.02, "the master at the track's volume: gain {g}");
+    // A fader the host keeps before the engine applies it (due seconds on) is in neither: the master
+    // renders the track's mix (session.json's), not the kept settings.
+    h.host.send(TimedCommand { frame: Some(h.frame() + 8 * RATE), command: Command::SetVolume(0, 1.0) }).unwrap();
+    assert!(h.host.settings().contains(&Command::SetVolume(0, 1.0)));
+    let (header, _, [later, _]) = session_with_master(&h.host.snapshot(true).expect("the next export"));
+    assert_eq!(header["tracks"][0]["mix"]["volume"].as_f64(), Some(0.25));
+    let (g, _) = fit(&later, &before);
+    assert!((g - 0.25).abs() < 0.02, "the master holds the snapshot's mix, not the kept fader: gain {g}");
 }
 
 #[test]
@@ -1838,8 +1885,9 @@ fn d21_a_load_that_lands_while_an_unforced_rate_switch_stops_is_not_dropped_unas
     );
 }
 
+/// The export renders each lane at the mix its snapshot took from the engine, so a COPY's level is the
+/// one the engine gave it, not the settings memory's (which takes the source's at `Copied`).
 #[test]
-#[ignore = "red: D21, an owner decision (STATUS.md)"]
 fn d21_a_fader_moved_while_a_copy_runs_leaves_the_copys_level_as_the_engine_gave_it() {
     use super::feed::Feed;
     let mut h = Harness::new();
@@ -1864,8 +1912,9 @@ fn d21_a_fader_moved_while_a_copy_runs_leaves_the_copys_level_as_the_engine_gave
     assert!((exported / heard - 1.0).abs() < 0.1, "the export renders the copy at the level it plays: heard {heard}, exported {exported}");
 }
 
+/// The export renders each lane at the mix its snapshot took from the engine, so a setting the engine
+/// took just after a CLEAR is in it, though the settings memory forgot it at `Cleared`.
 #[test]
-#[ignore = "red: D21, an owner decision (STATUS.md)"]
 fn d21_a_setting_sent_just_after_a_clear_is_what_the_lane_plays_and_exports() {
     use super::feed::Feed;
     let mut h = Harness::new();

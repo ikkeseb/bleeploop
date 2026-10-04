@@ -12,8 +12,9 @@
 //! mirrors are serde `remote` derives: a variant or field lf-engine adds fails to compile here until it
 //! is mirrored.
 //!
-//! A snapshot's lane mix ([`WireLaneMix`]) travels in session.json's track shape, inside the session
-//! bytes' header (`session.rs`); the fixture's `snapshotHeaders` hold one.
+//! A lane's mix ([`WireLaneMix`]) travels in session.json's track shape, inside the session bytes'
+//! header (`session.rs`): a snapshot's track as the engine applied it, a load's (required) to set; the
+//! fixture's `snapshotHeaders` and `loadHeaders` hold them.
 //!
 //! `DeviceRequest`, `DeviceStatus`, `DeviceEvent`, `OpenError` and `AudioBackend` derive serde where they
 //! are defined (camelCase fields, backends as `"Asio"` / `"Wasapi"`; a request's `inputChannels` is one
@@ -670,6 +671,18 @@ mod tests {
         assert!(refused(|m| m["fx"][0]["params"]["Q"] = Value::from(2)), "an unknown param");
         assert!(refused(|m| m["fx"][1]["params"]["semitones"] = Value::from("-5")), "a param that is no number");
         assert!(refused(|m| m["dub_feedback"] = Value::from(1)), "camelCase fields");
+    }
+
+    #[test]
+    fn a_load_header_round_trips_through_the_fixture_and_a_track_without_its_mix_is_refused() {
+        let _: Vec<super::super::session::LoadHeader> = round_trip("loadHeaders");
+        let entry = &fixture()["loadHeaders"][0];
+        let WireLaneMix(mix) = serde_json::from_value(entry["tracks"][0]["mix"].clone()).unwrap();
+        assert_eq!((mix.volume, mix.muted, mix.dub_feedback), (0.25, true, 0.5));
+        assert_eq!(mix.fx[FxKind::Reverb.index()], FxState { bypassed: false, params: [0.75, 0.0, 0.0] });
+        let mut bare = entry.clone();
+        bare["tracks"][1].as_object_mut().unwrap().remove("mix");
+        assert!(serde_json::from_value::<super::super::session::LoadHeader>(bare).is_err(), "every load track carries its mix");
     }
 
     #[test]
