@@ -39,6 +39,12 @@ export function InputPick(props: { slot: 0 | 1 }) {
     if (pick() !== '' && !list.includes(pick())) list.push(pick());
     return list;
   });
+  // Auto names the input the engine reads for the slot (its status), so a guitar on the other jack shows.
+  const auto = () => {
+    const d = engineDevice();
+    const read = pick() === '' && d?.inputOpen ? d.inputChannels?.[props.slot] : undefined;
+    return read === undefined ? 'Auto' : `Auto · In ${read + 1}`;
+  };
   return (
     <select
       class="slot__in"
@@ -48,7 +54,7 @@ export function InputPick(props: { slot: 0 | 1 }) {
       onClick={(e) => e.stopPropagation()}
       onChange={(e) => setEngineSlotInputChannel(props.slot, e.currentTarget.value)}
     >
-      <option value="">Auto</option>
+      <option value="">{auto()}</option>
       <For each={channels()}>{(c) => <option value={c}>In {Number(c) + 1}</option>}</For>
     </select>
   );

@@ -226,12 +226,18 @@ await probe(async ({ browser, open }) => {
     });
     assert.deepEqual(await saved(), ['', '1'], 'a pick the device lacks is saved as Auto; the other stays');
     assert.equal(await inp(1).inputValue(), '', 'and the slot shows Auto');
+    const autoText = (slot, text) => p.waitForFunction(([s, t]) =>
+      document.querySelector(`[aria-label="Input for slot ${s}"] option[value=""]`)?.textContent === t, [slot, text], { timeout: 2000 })
+      .then(() => true, () => false);
+    assert.ok(await autoText(1, 'Auto · In 2'), "Auto names the input the engine reads for the slot (its status)");
+    assert.ok(await autoText(2, 'Auto'), "a slot with a pick of its own keeps Auto plain: the status reads the pick's channel");
     // 1b. The owner reopened on another device (a fallback) whose status reads input 1 for slot B.
     await p.evaluate(() => window.__lf.native.emit({ seq: 2, reset: false, events: [], status: {
       backend: 'Wasapi', sampleRate: 48000, block: 256, inputName: 'Small input', outputName: 'Fake output',
       alignFrames: 0, inputFrames: 0, inputOpen: true, inputChannels: [0, 0] } }));
     assert.deepEqual(await saved(), ['', ''], "a device the owner reopened on without slot B's pick resets it");
     assert.equal(await inp(2).inputValue(), '');
+    assert.ok(await autoText(2, 'Auto · In 1'), 'on a device whose status reads input 1, Auto says so');
     // 1c. An input device change in Audio Settings resets both picks (back on the four-input device first).
     await p.evaluate(() => window.__lf.native.emit({ seq: 3, reset: false, events: [], status: {
       backend: 'Wasapi', sampleRate: 48000, block: 256, inputName: 'Fake input', outputName: 'Fake output',
