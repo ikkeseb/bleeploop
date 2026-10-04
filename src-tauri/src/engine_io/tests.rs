@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use lf_engine::grid::Frame;
-use lf_engine::{Command, Event, LaneInfo, LaneState, ProcessContext, SlotEvent, SlotKind, SlotProcessor, TimedCommand, SLOT_COUNT};
+use lf_engine::{Command, CompactMix, Event, LaneInfo, LaneState, ProcessContext, SlotEvent, SlotKind, SlotProcessor, TimedCommand, SLOT_COUNT};
 
 use super::callback::Side;
 use super::fake_driver::{Fake, FakeDevice, FakeDriver};
@@ -99,6 +99,14 @@ impl Harness {
             assert!(Instant::now() < deadline, "no event: {what}");
             std::thread::sleep(Duration::from_millis(2));
         }
+    }
+
+    /// Wait for the next `Event::Mix` of `lane` that `want` accepts (the settings memory has it then).
+    fn wait_mix(&mut self, what: &str, lane: u8, want: impl Fn(&CompactMix) -> bool) -> CompactMix {
+        self.wait_event(what, |e| match e {
+            Event::Mix { lane: l, mix, .. } if *l == lane && want(mix) => Some(*mix),
+            _ => None,
+        })
     }
 
     fn wait_lane(&mut self, what: &str, lane: u8, want: impl Fn(&LaneInfo) -> bool) -> LaneInfo {
@@ -1525,6 +1533,159 @@ fn a_lane_the_engine_clears_forgets_its_kept_mix() {
     assert_eq!(kept, Some(vec![Command::SetMasterVolume(0.7)]), "lane 3's volume and mute went with the clear");
 }
 
+/// The settings memory keeps a lane's mix as the engine applied it (`Event::Mix`), not as the feed's
+/// `Copied`, `Cleared` and `Muted` would patch it: a COPY's level is the one the engine gave the copy
+/// though the source's fader moved in the same batch.
+#[test]
+fn d21_a_reset_after_copy_clear_and_a_pedal_mute_carries_the_applied_mix() {
+    use super::feed::Feed;
+    use lf_engine::Action;
+    let mut h = Harness::new();
+    h.fake.set_input(saw);
+    h.open(asio(Some(256)));
+    h.record_loop();
+    h.send(Command::SetVolume(0, 0.5));
+    h.send(Command::SetDubFeedback(0, 0.25));
+    h.wait_mix("lane 0's mix", 0, |m| m.volume == 0.5 && m.dub_feedback == 0.25);
+    let mut feed = Feed::new(h.host.clone());
+    let at_once = |command| TimedCommand { frame: None, command };
+    h.host.send_all([at_once(Command::Copy(0)), at_once(Command::SetVolume(0, 0.25))]).unwrap();
+    let mut seen = Vec::new();
+    let mix_of = |f: &super::wire::FeedFrame, lane: u8| {
+        f.events.iter().rev().find_map(|e| match e.0 {
+            Event::Mix { lane: l, mix, .. } if l == lane => Some(mix),
+            _ => None,
+        })
+    };
+    feed_until(&mut feed, &mut seen, "the copy's mix", |f| mix_of(f, 1).is_some_and(|m| m.dub_feedback == 0.25));
+    h.send(Command::ActionOn(1, Action::Mute));
+    feed_until(&mut feed, &mut seen, "the pedal's MUTE", |f| mix_of(f, 1).is_some_and(|m| m.muted));
+    h.send(Command::Clear(0));
+    feed_until(&mut feed, &mut seen, "the CLEAR", |f| mix_of(f, 0).is_some_and(|m| m.volume == 1.0 && m.dub_feedback == 1.0));
+    let copy = seen_mix(&seen, 1).unwrap();
+    assert_eq!((copy.volume, copy.muted, copy.dub_feedback), (0.5, true, 0.25), "the copy as the engine gave it, then muted");
+    let reset = feed.tick(true).expect("a reset frame");
+    let kept: Vec<Command> = reset.settings.expect("its settings").into_iter().map(|c| c.0).collect();
+    for command in [Command::SetVolume(1, 0.5), Command::SetMute(1, true), Command::SetDubFeedback(1, 0.25)] {
+        assert!(kept.contains(&command), "{command:?} in {kept:?}");
+    }
+    assert!(!kept.iter().any(|c| matches!(c, Command::SetVolume(0, _) | Command::SetMute(0, _) | Command::SetDubFeedback(0, _))), "lane 0 is cleared: {kept:?}");
+    let mixes: Vec<(u8, CompactMix)> = reset
+        .events
+        .iter()
+        .filter_map(|e| match e.0 {
+            Event::Mix { lane, mix, .. } => Some((lane, mix)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(mixes.len(), 5, "every lane's last Mix: {mixes:?}");
+    assert_eq!(mixes[1], (1, copy));
+    assert_eq!(mixes[0], (0, CompactMix::from(&lf_engine::LaneMix::default())));
+}
+
+/// The last `Event::Mix` of `lane` among the frames `seen`.
+fn seen_mix(seen: &[super::wire::FeedFrame], lane: u8) -> Option<CompactMix> {
+    seen.iter().flat_map(|f| &f.events).rev().find_map(|e| match e.0 {
+        Event::Mix { lane: l, mix, .. } if l == lane => Some(mix),
+        _ => None,
+    })
+}
+
+#[test]
+fn d21_a_rebuild_keeps_a_mix_still_in_the_old_engines_ring() {
+    let mut h = Harness::new();
+    h.open(asio(Some(256)));
+    h.wait_mix("the engine reports lane 2", 2, |_| true);
+    h.send(Command::SetVolume(2, 0.3));
+    // Applied and published, never drained: the Mix waits in the ring when the engine is replaced.
+    h.play(RATE / 10);
+    h.fake.asio.lock().unwrap().as_mut().unwrap().rate = 44_100;
+    h.open(asio(Some(128)));
+    assert!(h.host.settings().contains(&Command::SetVolume(2, 0.3)), "the old ring's Mix is kept: {:?}", h.host.settings());
+    let first = h.wait_mix("the new engine reports lane 2", 2, |_| true);
+    assert_eq!(first.volume, 0.3, "the replay into the new engine carried it");
+}
+
+/// A mix change the full event ring refused, then a rebuild before the ring drains (the stop's punch-out
+/// publish meets the full ring too): the replay is the mix the old engine applied, read from it.
+#[test]
+fn d21_a_rebuild_keeps_a_mix_the_full_event_ring_refused() {
+    rebuild_after_a_refused_mix(false);
+}
+
+/// The same when a unit panics on its way out of the old engine and the engine is leaked (`evict`).
+#[test]
+fn d21_a_rebuild_that_leaks_the_old_engine_keeps_a_mix_the_full_event_ring_refused() {
+    rebuild_after_a_refused_mix(true);
+}
+
+fn rebuild_after_a_refused_mix(leak: bool) {
+    let mut h = Harness::new();
+    h.open(asio(Some(256)));
+    h.wait_mix("the engine reports lane 2", 2, |_| true);
+    if leak {
+        let (mut unit, calls, _) = Unit::new(0.1);
+        unit.panic_on_stop = true;
+        assert!(h.host.slot(0).install(unit, RATE as u32).is_ok());
+        until("the unit renders", || calls.load(SeqCst) > 0);
+    }
+    // Nobody reads the event ring from here: a SELECT is one event each, and they fill it.
+    let select = |i: usize| TimedCommand { frame: None, command: Command::SelectTrack((i % 5) as u8) };
+    for _ in 0..40 {
+        if h.host.diag().engine.events_dropped > 0 {
+            break;
+        }
+        h.host.send_all((0..400).map(select)).expect("the command ring takes them");
+        h.play(RATE / 10);
+    }
+    let refused = h.host.diag().engine.events_dropped;
+    assert!(refused > 0, "the event ring is full");
+    h.send(Command::SetVolume(2, 0.3));
+    h.play(RATE / 10);
+    assert!(h.host.diag().engine.events_dropped > refused, "and refuses what comes next");
+    assert!(!h.host.settings().contains(&Command::SetVolume(2, 0.3)), "no Mix carried it to the settings memory");
+    h.fake.asio.lock().unwrap().as_mut().unwrap().rate = 44_100;
+    h.open(asio(Some(128)));
+    assert_eq!(h.host.diag().panics, u64::from(leak), "a leaked old engine: its unit's stop panicked");
+    assert!(h.host.settings().contains(&Command::SetVolume(2, 0.3)), "read from the old engine: {:?}", h.host.settings());
+    let first = h.wait_mix("the new engine reports lane 2", 2, |_| true);
+    assert_eq!(first.volume, 0.3, "the replay into the new engine carried it");
+}
+
+/// An engine whose device never ran a block holds its settings replay unapplied: an idle snapshot on it
+/// sends no lane's mix (the defaults it would show), so the bootstrap reaches the next engine.
+#[test]
+fn d21_an_idle_snapshot_on_an_engine_that_never_ran_keeps_the_bootstrap() {
+    let mut h = Harness::new();
+    h.send(Command::SetVolume(3, 0.4));
+    h.fake.fail_starts.store(1, SeqCst);
+    assert!(h.host.open(asio(Some(256)), false).is_err(), "the first start fails: an engine that never ran");
+    h.host.snapshot(false).expect("a snapshot served on the idle engine");
+    h.fake.asio.lock().unwrap().as_mut().unwrap().rate = 44_100;
+    h.open(asio(Some(256)));
+    assert_eq!(h.host.status().map(|s| s.sample_rate), Some(44_100), "a rebuild at another rate");
+    let mix = h.wait_mix("the new engine reports lane 3", 3, |_| true);
+    assert_eq!(mix.volume, 0.4, "the bootstrap reached the new engine");
+}
+
+#[test]
+fn d21_a_setting_sent_before_the_first_open_reaches_the_first_engine() {
+    use lf_engine::dsp::fx::FxKind;
+    let mut h = Harness::new();
+    for command in [Command::SetVolume(3, 0.4), Command::SetFxBypass(3, FxKind::Delay, false)] {
+        assert!(h.host.send(TimedCommand { frame: None, command }).is_ok(), "a setting is kept while no engine exists");
+    }
+    assert!(h.host.mixes().is_empty(), "no engine has reported a lane");
+    h.open(asio(Some(256)));
+    let mix = h.wait_mix("the first engine reports lane 3", 3, |_| true);
+    assert_eq!((mix.volume, mix.fx[FxKind::Delay.index()].bypassed), (0.4, false), "the bootstrap reached the engine");
+    let kept = h.host.settings();
+    assert!(kept.contains(&Command::SetVolume(3, 0.4)) && kept.contains(&Command::SetFxBypass(3, FxKind::Delay, false)), "now as the engine applied it: {kept:?}");
+    // From here the lane's mix is the engine's: a command it has not applied is not kept.
+    h.host.send(TimedCommand { frame: Some(h.frame() + 8 * RATE), command: Command::SetVolume(3, 0.9) }).unwrap();
+    assert!(!h.host.settings().contains(&Command::SetVolume(3, 0.9)));
+}
+
 /// A snapshot's bytes: its header as JSON and its PCM.
 fn session_parts(bytes: &[u8]) -> (serde_json::Value, Vec<f32>) {
     let len = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
@@ -1766,7 +1927,8 @@ fn a_load_sets_its_mix_over_one_sent_to_the_empty_lane() {
     let loudest = h.fake.heard(from..h.frame()).iter().filter(|x| !x.is_nan()).fold(0.0f32, |p, x| p.max(x.abs()));
     assert!(loudest > 0.05, "the load's unmuted mix plays over the EMPTY lane's mute ({loudest})");
     assert!(h.host.core.holds_audio(), "and the loop is in");
-    assert!(h.host.settings().contains(&Command::SetMute(0, false)), "the kept settings follow: {:?}", h.host.settings());
+    h.wait_mix("the load's mix", 0, |m| !m.muted);
+    assert!(!h.host.settings().contains(&Command::SetMute(0, true)), "the kept settings follow: {:?}", h.host.settings());
 }
 
 #[test]
@@ -1783,6 +1945,7 @@ fn a_load_keeps_its_mix_as_the_settings_it_replays_and_a_refused_one_keeps_nothi
     });
     h.send(Command::SetVolume(0, 0.9));
     h.send(Command::SetFxBypass(0, FxKind::Reverb, false));
+    h.wait_mix("the EMPTY lane's mix", 0, |m| m.volume == 0.9 && !m.fx[FxKind::Reverb.index()].bypassed);
     // A header without a track's mix is refused before the engine sees it.
     let (mut bare, pcm) = session_parts(&bytes);
     bare["tracks"][0].as_object_mut().unwrap().remove("mix");
@@ -1791,19 +1954,19 @@ fn a_load_keeps_its_mix_as_the_settings_it_replays_and_a_refused_one_keeps_nothi
     assert!(!h.host.core.holds_audio());
     assert!(h.host.settings().contains(&Command::SetVolume(0, 0.9)), "a refused load keeps nothing");
     h.host.load_session(&bytes).expect("the load");
+    h.wait_mix("the load's mix", 0, |m| m.volume == 0.5);
     let kept = h.host.settings();
     for command in [
         Command::SetVolume(0, 0.5),
-        Command::SetMute(0, false),
         Command::SetDubFeedback(0, 0.25),
         Command::SetFxBypass(0, FxKind::Filter, false),
         Command::SetFxParam(0, FxParam::Cutoff, 800.0),
         Command::SetFxParam(0, FxParam::Q, 4.5),
-        Command::SetFxBypass(0, FxKind::Reverb, true),
     ] {
         assert!(kept.contains(&command), "the replay carries {command:?}: {kept:?}");
     }
     assert!(!kept.contains(&Command::SetVolume(0, 0.9)), "the EMPTY lane's fader is replaced: {kept:?}");
+    assert!(!kept.contains(&Command::SetFxBypass(0, FxKind::Reverb, false)), "and its reverb, back at a fresh lane's: {kept:?}");
 }
 
 #[test]
@@ -1832,10 +1995,11 @@ fn d21_an_export_masters_the_mix_it_was_asked_with() {
     assert_eq!(header["tracks"][0]["mix"]["volume"].as_f64(), Some(0.25), "the mix at the pin: {header}");
     let (g, _) = fit(&after, &before);
     assert!((g - 0.25).abs() < 0.02, "the master at the track's volume: gain {g}");
-    // A fader the host keeps before the engine applies it (due seconds on) is in neither: the master
-    // renders the track's mix (session.json's), not the kept settings.
+    // A fader the engine has not applied yet (due seconds on) is in neither the kept settings nor the
+    // export: the master renders the track's mix (session.json's).
+    h.wait_mix("the raced fader", 0, |m| m.volume == 0.25);
     h.host.send(TimedCommand { frame: Some(h.frame() + 8 * RATE), command: Command::SetVolume(0, 1.0) }).unwrap();
-    assert!(h.host.settings().contains(&Command::SetVolume(0, 1.0)));
+    assert!(h.host.settings().contains(&Command::SetVolume(0, 0.25)), "the kept fader is the applied one: {:?}", h.host.settings());
     let (header, _, [later, _]) = session_with_master(&h.host.snapshot(true).expect("the next export"));
     assert_eq!(header["tracks"][0]["mix"]["volume"].as_f64(), Some(0.25));
     let (g, _) = fit(&later, &before);
@@ -1886,7 +2050,7 @@ fn d21_a_load_that_lands_while_an_unforced_rate_switch_stops_is_not_dropped_unas
 }
 
 /// The export renders each lane at the mix its snapshot took from the engine, so a COPY's level is the
-/// one the engine gave it, not the settings memory's (which takes the source's at `Copied`).
+/// one the engine gave it, though the source's fader moved before the copy was done.
 #[test]
 fn d21_a_fader_moved_while_a_copy_runs_leaves_the_copys_level_as_the_engine_gave_it() {
     use super::feed::Feed;
@@ -1913,7 +2077,7 @@ fn d21_a_fader_moved_while_a_copy_runs_leaves_the_copys_level_as_the_engine_gave
 }
 
 /// The export renders each lane at the mix its snapshot took from the engine, so a setting the engine
-/// took just after a CLEAR is in it, though the settings memory forgot it at `Cleared`.
+/// took just after a CLEAR is in it.
 #[test]
 fn d21_a_setting_sent_just_after_a_clear_is_what_the_lane_plays_and_exports() {
     use super::feed::Feed;

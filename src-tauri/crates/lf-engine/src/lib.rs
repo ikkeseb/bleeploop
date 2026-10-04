@@ -98,7 +98,12 @@
 //!   damages only the capture windows (RETAKE passes) it overlaps, and resets AUTO's listening history;
 //!   a jump in the device frame drops the beats it skipped, and count-in beats fire late as one click.
 //! - **`process` never allocates, locks or waits.** Buffers are allocated (and their pages touched) in
-//!   `Engine::new`; commands and events cross on rtrb rings; a full event ring drops and counts.
+//!   `Engine::new`; commands and events cross on rtrb rings; a full event ring refuses and counts. A
+//!   one-off event is lost there; each lane's state and mix ([`Event::Mix`], on change only) and the
+//!   transport are marked delivered only once the ring takes them, so the next publish offers them again.
+//!   An engine sends no lane's mix until the commands queued ahead of its first block (a new engine's
+//!   settings replay, which can outrun one block's take) are all taken: an idle session job before
+//!   then reports the lanes' infos only.
 //! - **No loop-sized work in one callback.** Tiling, the undo copy, a discarded layer's restore, COPY,
 //!   a multiply's extension of the other loops and a TRIM are block jobs of `looper::JOB_RATE` positions
 //!   per rendered frame, started where a read or write head touches next so they stay ahead of it (a lane
@@ -140,7 +145,7 @@
 //! `tests/trim.rs` the TRIM, `tests/dub_feedback.rs` DUB FEEDBACK, `tests/punch_ramps.rs` an overdub's punch
 //! ramps (its reference: `tests/common/dub.rs`), `tests/playback_edges.rs` the undo, PLAY and STOP edges
 //! (its reference: `tests/common/edges.rs`), `tests/fade.rs` FADE, `tests/input_fx.rs`
-//! the input sends. `tests/perf.rs` holds the ignored cost
+//! the input sends, `tests/mix_feed.rs` a lane's mix on the feed and the event ring's delivery. `tests/perf.rs` holds the ignored cost
 //! bars (Stage 2 and 3, the input sends, a multiply's burst, a TRIM's) and the Stage 3 load's alloc
 //! check. `tests/golden_jam.rs` runs the golden jam at 44.1 and 48 kHz, bit-identical across block
 //! sizes 1, 32, 64, 127, 128, 480 and 1024; `tests/gestures.rs` runs proptest gesture scripts (one

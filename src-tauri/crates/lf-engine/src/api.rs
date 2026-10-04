@@ -1,11 +1,12 @@
 //! OWNS: what crosses the RT boundary: the commands the UI (and, from Stage 4, native MIDI) sends, the
 //! events the engine answers with, the per-callback context and I/O, and the plugin seam
-//! ([`SlotProcessor`]). Commands and events travel only over rtrb rings; a full event ring drops the
-//! event and counts it, nothing blocks.
+//! ([`SlotProcessor`]). Commands and events travel only over rtrb rings; a full event ring refuses the
+//! event and counts it, nothing blocks: a one-off event is lost, a lane's state and mix are offered
+//! again at the next publish (`Looper::publish`).
 
 use std::any::Any;
 
-use crate::dsp::fx::{default_fx_states, FxKind, FxParam, FxState};
+use crate::dsp::fx::{default_fx_states, FxKind, FxParam, FxState, MAX_PARAMS};
 use crate::grid::Frame;
 
 pub const TRACK_COUNT: usize = 5;
@@ -348,6 +349,51 @@ impl Default for LaneMix {
     }
 }
 
+/// A [`LaneMix`] as [`Event::Mix`] carries it: the FX params as f32, so an event stays under twice the
+/// size it has without one (a whole `LaneMix` would make every slot of the event ring three times
+/// larger). Equal compact mixes are the same mix to the feed: a change within an f32's precision is
+/// not sent.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CompactMix {
+    pub volume: f32,
+    pub muted: bool,
+    pub dub_feedback: f32,
+    pub fx: [CompactFx; 5],
+}
+
+/// One effect of a [`CompactMix`]: [`FxState`] with its params as f32.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CompactFx {
+    pub bypassed: bool,
+    pub params: [f32; MAX_PARAMS],
+}
+
+impl From<&LaneMix> for CompactMix {
+    fn from(m: &LaneMix) -> Self {
+        CompactMix {
+            volume: m.volume,
+            muted: m.muted,
+            dub_feedback: m.dub_feedback,
+            fx: m.fx.map(|s| CompactFx { bypassed: s.bypassed, params: s.params.map(|p| p as f32) }),
+        }
+    }
+}
+
+impl CompactMix {
+    /// The mix at full width, each FX param as its f32 prints (the shortest decimal that reads back as
+    /// it), so a value sent with up to seven significant digits comes back as it was sent. Not for the
+    /// audio thread: it formats.
+    pub fn widen(&self) -> LaneMix {
+        let wide = |p: f32| p.to_string().parse::<f64>().unwrap_or(p as f64);
+        LaneMix {
+            volume: self.volume,
+            muted: self.muted,
+            dub_feedback: self.dub_feedback,
+            fx: self.fx.map(|s| FxState { bypassed: s.bypassed, params: s.params.map(wide) }),
+        }
+    }
+}
+
 /// Why a hands-free press did nothing (`src/ui/looper/gates.ts`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Refusal {
@@ -415,15 +461,20 @@ pub enum Event {
     /// A RETAKE pass saw an input gap: it is dropped, and the kept pass before it with it.
     PassDropped { frame: Frame, lane: u8, pass: u32 },
     /// COPY into lane `to` is done. `feedback` is the DUB FEEDBACK it copied, the source's when COPY
-    /// applied (the source's may have moved since): the UI and the host's settings memory take it.
+    /// applied (the source's may have moved since): the UI takes it.
     Copied { frame: Frame, from: u8, to: u8, feedback: f32 },
     /// The lane was cleared: its loop gone, its volume, mute and FX back to their defaults (CLEAR, a
     /// pedal's confirmed CLEAR, and every lane at CLEAR ALL, an empty one included). A lane that goes
     /// EMPTY any other way (a cancelled count-in, a stopped or rejected first take) keeps its mix.
     Cleared { frame: Frame, lane: u8 },
-    /// A hands-free MUTE ([`Action::Mute`]) switched the lane's mute: the UI and the host's settings
-    /// memory, which keep the lane's mix, follow it.
+    /// A hands-free MUTE ([`Action::Mute`]) switched the lane's mute: the UI, which keeps the lane's
+    /// mix, follows it.
     Muted { frame: Frame, lane: u8, on: bool },
+    /// The lane's mix as the engine applies it ([`crate::Looper::mix`]), sent when it differs from the
+    /// last one the ring took for the lane (a new engine sends every lane's once): a setting, a COPY, a
+    /// CLEAR, a pedal's MUTE and a load all reach the feed this way. The host's settings memory keeps
+    /// the last one per lane as the mix it replays into a new engine.
+    Mix { frame: Frame, lane: u8, mix: CompactMix },
 }
 
 /// The callback's view of the device.

@@ -146,7 +146,25 @@
     { "PassDropped": { "frame": 99400, "lane": 1, "pass": 3 } },
     { "Copied": { "frame": 99500, "from": 0, "to": 3, "feedback": 0.25 } },
     { "Cleared": { "frame": 99600, "lane": 4 } },
-    { "Muted": { "frame": 99700, "lane": 2, "on": true } }
+    { "Muted": { "frame": 99700, "lane": 2, "on": true } },
+    {
+      "Mix": {
+        "frame": 99800,
+        "lane": 1,
+        "mix": {
+          "volume": 0.7,
+          "muted": true,
+          "dubFeedback": 0.3,
+          "fx": [
+            { "bypassed": false, "params": { "cutoff": 1234.5, "q": 0.7 } },
+            { "bypassed": true, "params": { "semitones": -7 } },
+            { "bypassed": true, "params": { "rate": 2 } },
+            { "bypassed": false, "params": { "time": 3, "feedback": 0.3, "mix": 0.45 } },
+            { "bypassed": false, "params": { "amount": 0.25 } }
+          ]
+        }
+      }
+    }
   ],
   "deviceEvents": [
     { "Lost": { "backend": "Asio", "reason": "the stream stopped" } },
@@ -301,6 +319,24 @@
               "stopAt": null,
               "fading": false,
               "retakePass": 0
+            }
+          }
+        },
+        {
+          "Mix": {
+            "frame": 96000,
+            "lane": 0,
+            "mix": {
+              "volume": 0.5,
+              "muted": false,
+              "dubFeedback": 1,
+              "fx": [
+                { "bypassed": false, "params": { "cutoff": 900, "q": 1 } },
+                { "bypassed": true, "params": { "semitones": 0 } },
+                { "bypassed": true, "params": { "rate": 1 } },
+                { "bypassed": true, "params": { "time": 1, "feedback": 0.4, "mix": 0.3 } },
+                { "bypassed": true, "params": { "amount": 0.3 } }
+              ]
             }
           }
         },

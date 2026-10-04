@@ -38,7 +38,7 @@
 
 use std::sync::Arc;
 
-use crate::api::{Action, Command, Event, LaneInfo, LaneMix, LaneState, Refusal, HOLD_CONTROLS, TRACK_COUNT};
+use crate::api::{Action, Command, CompactMix, Event, LaneInfo, LaneMix, LaneState, Refusal, HOLD_CONTROLS, TRACK_COUNT};
 use crate::autorec::{self, Detector};
 use crate::clock::Clock;
 use crate::effects::LaneFx;
@@ -466,7 +466,9 @@ pub struct Looper {
     clear_armed: Option<(usize, Frame)>,
     /// Per HOLD control: the lane its last accepted press acted on, until its release.
     holds: [Option<usize>; HOLD_CONTROLS],
+    /// What the event ring last took ([`Looper::publish`]): each lane's info and mix, and the transport.
     published: [Option<LaneInfo>; TRACK_COUNT],
+    published_mix: [Option<CompactMix>; TRACK_COUNT],
     published_transport: Option<(Frame, u32, bool)>,
     overview: Arc<Overview>,
     /// D23's punch ramp (`punch_frames`): an overdub fades in over its first this many frames and out
@@ -520,6 +522,7 @@ impl Looper {
             clear_armed: None,
             holds: [None; HOLD_CONTROLS],
             published: [None; TRACK_COUNT],
+            published_mix: [None; TRACK_COUNT],
             published_transport: None,
             overview: Arc::new(Overview::new(2 * TRACK_COUNT + 1, capacity as usize)),
             punch: punch_frames(sample_rate),
@@ -1072,7 +1075,7 @@ impl Looper {
             }
             return Applied::Done;
         }
-        let refuse = |cx: &mut Cx, lane: usize, reason: Refusal| cx.feed.push(Event::Refused { frame: cx.now, lane: lane as u8, reason });
+        let refuse = |cx: &mut Cx, lane: usize, reason: Refusal| _ = cx.feed.push(Event::Refused { frame: cx.now, lane: lane as u8, reason });
         if let Some(k) = (0..TRACK_COUNT).find(|&k| self.capturing(k)) {
             refuse(cx, k, Refusal::Capturing);
             return Applied::Done;
@@ -1131,7 +1134,7 @@ impl Looper {
         if !matches!(action, Action::Clear | Action::Release(_)) {
             self.clear_armed = None;
         }
-        let refuse = |cx: &mut Cx, reason: Refusal| cx.feed.push(Event::Refused { frame: cx.now, lane: i as u8, reason });
+        let refuse = |cx: &mut Cx, reason: Refusal| _ = cx.feed.push(Event::Refused { frame: cx.now, lane: i as u8, reason });
         match action {
             // A HOLD press is REC/DUB, whose lane its control's release ends.
             Action::RecDub | Action::Hold(_) => {
@@ -2512,13 +2515,22 @@ impl Looper {
 
     // ── Feed ───────────────────────────────────────────────────────────────────────────────────────
 
-    /// Emit what changed since the last publish: lane infos and the transport; and store the overview.
-    pub fn publish(&mut self, cx: &mut Cx) {
+    /// Emit what differs from what the event ring last took: each lane's info and mix, and the
+    /// transport; and store the overview. Each is marked delivered only once the ring takes it, so one a
+    /// full ring refused goes out at a later publish, whether or not anything changes again. It runs at
+    /// every split of a block: a change goes out once, from the publish after it. `mixes` false (an
+    /// engine whose commands queued ahead of its first block are not all taken yet: `Engine::replayed`)
+    /// holds every lane's mix back: that replay is not all applied, so the mix would not be the one it
+    /// sets.
+    pub fn publish(&mut self, cx: &mut Cx, mixes: bool) {
         for i in 0..TRACK_COUNT {
             let info = self.info(i);
-            if self.published[i] != Some(info) {
+            if self.published[i] != Some(info) && cx.feed.push(Event::Lane { frame: cx.now, lane: i as u8, info }) {
                 self.published[i] = Some(info);
-                cx.feed.push(Event::Lane { frame: cx.now, lane: i as u8, info });
+            }
+            let mix = CompactMix::from(&self.mix(i, cx.fx));
+            if mixes && self.published_mix[i] != Some(mix) && cx.feed.push(Event::Mix { frame: cx.now, lane: i as u8, mix }) {
+                self.published_mix[i] = Some(mix);
             }
             let t = &self.lanes[i];
             let frames = match t.state {
@@ -2530,9 +2542,8 @@ impl Looper {
         }
         self.overview.set_grid(self.anchor);
         let transport = (self.master, cx.clock.bpm(), cx.clock.locked());
-        if self.published_transport != Some(transport) {
+        if self.published_transport != Some(transport) && cx.feed.push(Event::Transport { frame: cx.now, master: transport.0, bpm: transport.1, locked: transport.2 }) {
             self.published_transport = Some(transport);
-            cx.feed.push(Event::Transport { frame: cx.now, master: transport.0, bpm: transport.1, locked: transport.2 });
         }
     }
 }

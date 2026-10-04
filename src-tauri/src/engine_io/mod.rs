@@ -26,7 +26,7 @@
 //! | `mode` | engine mode: the managed host, the tone store's folder, the `engine_*` Tauri commands, shutdown on exit |
 //! | `plugins` | engine mode's plugin slots: the `plugin_*` commands routed to the engine slot owners, and tone recall's (`host/tone.rs`) |
 //! | `session` | a session's bytes to and from the engine: the snapshot the UI saves (an export's with the wet master, rendered offline from the snapshot, its lanes' mix and the kept master volume and mute), the load it imports (each lane with its mix) |
-//! | `settings` | the last value of every setting command, replayed into each new engine |
+//! | `settings` | the last value of every setting, replayed into each new engine; a lane's mix as the engine applied it (its `Event::Mix`) |
 //! | `share` | Share output: the post-limiter master mirrored to a WASAPI endpoint while ASIO plays |
 //! | `midi` | native MIDI (built, never started by the app): ports, hot-plug, parse, the MIDI-learn bindings, notes and pedal actions |
 //! | `probe` | DEV: `app.exe --probe-engine`, the device side on real hardware (soak, switches, plugin swaps) |
@@ -479,7 +479,8 @@ pub(crate) struct Core {
     /// The callback only `try_lock`s it.
     pub(crate) rt: Mutex<Rt>,
     pub(crate) ends: Mutex<Option<Ends>>,
-    /// The last value of every setting command, replayed into each new engine. Taken before `ends`.
+    /// The last value of every setting, replayed into each new engine; a lane's mix as the engine
+    /// applied it (`settings`). Taken before `ends`.
     pub(crate) settings: Mutex<settings::Settings>,
     /// Bumped whenever the engine is replaced or dropped (the feed resyncs the UI).
     pub(crate) engine_gen: AtomicU64,
@@ -529,6 +530,18 @@ pub(crate) struct Core {
     pub(crate) device_events: Mutex<Vec<DeviceEvent>>,
     /// The device owner (`None` for a core without one: the test device).
     pub(crate) owner: Mutex<Option<OwnerLink>>,
+}
+
+/// Pop the event ring of the engine of generation `gen` into `each`. A lane's `Mix` is also the settings
+/// memory's projection of it: drained under `settings`, then `ends` (the order every taker keeps), so no
+/// rebuild's replay lands between the pop and the projection.
+pub(crate) fn drain(settings: &mut settings::Settings, events: &mut Consumer<Event>, gen: u64, mut each: impl FnMut(Event)) {
+    while let Ok(event) = events.pop() {
+        if let Event::Mix { frame, lane, mix } = event {
+            settings.mixed(gen, frame, lane, &mix);
+        }
+        each(event);
+    }
 }
 
 impl Core {
@@ -777,8 +790,9 @@ impl EngineHost {
     }
 
     /// Queue a command for the engine. A setting the ring takes is also kept and replayed into every new
-    /// engine (`settings`), as is one sent before the first open, so it is not lost. Err when the ring is
-    /// full (counted; the setting is not kept), or for an action while no engine exists yet.
+    /// engine (`settings`), as is one sent before the first open, so it is not lost; a lane's mix is kept
+    /// once the engine reports it applied (`Event::Mix`). Err when the ring is full (counted; the setting
+    /// is not kept), or for an action while no engine exists yet.
     pub fn send(&self, command: TimedCommand) -> Result<(), String> {
         self.send_all([command])
     }
@@ -808,54 +822,30 @@ impl EngineHost {
         if refused { Err("no audio device is open".to_string()) } else { Ok(()) }
     }
 
-    /// Lane `to` took lane `from`'s mixer and FX, and the DUB FEEDBACK `feedback` (the engine's `Copied`
-    /// event): the kept settings follow.
-    pub(crate) fn copied(&self, from: u8, to: u8, feedback: f32) {
-        if let Ok(mut settings) = self.core.settings.lock() {
-            settings.copy_lane(from, to, feedback);
-        }
-    }
-
-    /// The engine cleared `lane` (its `Cleared` event): the kept settings forget its mixer and FX.
-    pub(crate) fn cleared(&self, lane: u8) {
-        if let Ok(mut settings) = self.core.settings.lock() {
-            settings.cleared(lane);
-        }
-    }
-
-    /// A pedal's MUTE switched `lane` (the engine's `Muted` event): kept as the UI's `SetMute` would be.
-    pub(crate) fn muted(&self, lane: u8, on: bool) {
-        if let Ok(mut settings) = self.core.settings.lock() {
-            settings.record(&Command::SetMute(lane, on));
-        }
-    }
-
     /// The kept settings, in replay order (a reset frame hands them to the UI).
     pub(crate) fn settings(&self) -> Vec<lf_engine::Command> {
         self.core.settings.lock().map(|s| s.replay().collect()).unwrap_or_default()
     }
 
+    /// Each lane's mix as the engine last reported it (`Event::Mix`), for the lanes it has reported.
+    pub(crate) fn mixes(&self) -> Vec<Event> {
+        self.core.settings.lock().map(|s| s.mixes().collect()).unwrap_or_default()
+    }
+
     /// Move the engine's events into `out`, as `drain_events`; with the generation of the engine they
     /// came from and its overview (`None` while no engine exists), read under the same lock.
     pub(crate) fn drain_feed(&self, out: &mut Vec<Event>) -> (u64, Option<Arc<Overview>>) {
+        let mut settings = self.core.settings.lock().unwrap_or_else(|e| e.into_inner());
         let Ok(mut ends) = self.core.ends.lock() else { return (self.core.engine_gen.load(Acquire), None) };
         let gen = self.core.engine_gen.load(Acquire);
         let Some(ends) = ends.as_mut() else { return (gen, None) };
-        while let Ok(e) = ends.events.pop() {
-            out.push(e);
-        }
+        drain(&mut settings, &mut ends.events, gen, |e| out.push(e));
         (gen, Some(ends.overview.clone()))
     }
 
-    /// Move the engine's events into `out`.
+    /// Move the engine's events into `out` (a lane's `Mix` reaches the settings memory on the way).
     pub fn drain_events(&self, out: &mut Vec<Event>) {
-        if let Ok(mut ends) = self.core.ends.lock() {
-            if let Some(ends) = ends.as_mut() {
-                while let Ok(e) = ends.events.pop() {
-                    out.push(e);
-                }
-            }
-        }
+        self.drain_feed(out);
     }
 
     /// The input meter since the last call: the louder slot input's linear peak, and whether a sample

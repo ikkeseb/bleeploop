@@ -15,8 +15,8 @@
 //! A load's: `{"bpm","bars","masterLengthFrames","tracks"}` with `state` `"Playing"` | `"Stopped"` and
 //! every track's `mix` (refused without one), into an engine whose lanes are all EMPTY; `bpm` is an
 //! integer 40..300 and `masterLengthFrames` is `bars` bars of it at the engine's rate. The engine sets
-//! each lane's mix on the frame its loop goes in, so the first loaded sample plays at it, and this host
-//! keeps it as the settings it replays (`settings`), as if the UI had sent it.
+//! each lane's mix on the frame its loop goes in, so the first loaded sample plays at it; the feed
+//! hears it as the lane's `Event::Mix`, which the settings memory keeps (`settings`).
 //!
 //! A snapshot asked WITH the master (an export; a recovery autosave never asks) also carries the wet
 //! stereo master, rendered offline from those same loops by `lf_engine::render` with the tracks' `mix`
@@ -164,8 +164,7 @@ impl EngineHost {
     }
 
     /// Load a session's bytes (the module doc's layout) into the engine, whose lanes must all be
-    /// EMPTY. The PLAYING lanes start together from loop position 0, each lane at its track's mix, which
-    /// the kept settings then hold.
+    /// EMPTY. The PLAYING lanes start together from loop position 0, each lane at its track's mix.
     pub fn load_session(&self, bytes: &[u8]) -> Result<(), String> {
         let mut stale = self.core.session_busy.lock().unwrap_or_else(|e| e.into_inner());
         let (header, pcm) = split(bytes)?;
@@ -201,13 +200,7 @@ impl EngineHost {
         // `load.tracks` now holds the engine's old buffers: they are freed here.
         match load.result {
             Some(Ok(())) => {
-                // The engine applied each lane's mix as if the UI had sent it: a rebuild, a reset frame
-                // and the export's master read it from the kept settings.
-                if let Ok(mut settings) = self.core.settings.lock() {
-                    for t in &header.tracks {
-                        settings.loaded(t.index, &t.mix.0);
-                    }
-                }
+                // Each lane's mix reaches the kept settings as any applied mix does: its `Event::Mix`.
                 log::info!("[engine_io] session loaded: {} tracks, {master} frames at {} BPM", load.tracks.len(), header.bpm);
                 Ok(())
             }

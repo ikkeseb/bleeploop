@@ -239,7 +239,11 @@ export type EngineEvent =
    * mute and FX are back to their defaults. Before the lane's Lane event in the same frame. */
   | { type: 'Cleared'; frame: Frame; lane: number }
   /** A pedal's MUTE switched the lane's mute (the UI keeps the lane's mix, so it follows). */
-  | { type: 'Muted'; frame: Frame; lane: number; on: boolean };
+  | { type: 'Muted'; frame: Frame; lane: number; on: boolean }
+  /** The lane's mix as the engine applied it, sent when it differs from the last one delivered (each
+   * lane once from a new engine); a reset frame carries the last one the host read, per lane. The FX params
+   * crossed as f32, so a value sent with more than seven significant digits comes back rounded. */
+  | { type: 'Mix'; frame: Frame; lane: number; mix: LaneMix };
 
 /** Rust `engine_io::DeviceEvent`, decoded to a `type`-tagged union. */
 export type DeviceEvent =
@@ -297,8 +301,9 @@ export interface FeedFrame {
   seq: number;
   /** The first frame after a subscribe or a new engine: the UI replaces its state with this one. */
   reset: boolean;
-  /** Reset frames only: the settings the engine remembers, in replay order, as the UI sent them. A
-   * setting missing from it is at the engine's default. */
+  /** Reset frames only: the settings the engine remembers, in replay order, as the UI sent them; a
+   * lane's mix as the engine last applied it (its `Mix`, also among the reset's events), or as sent
+   * while no engine has reported the lane yet. A setting missing from it is at the engine's default. */
   settings?: EngineCommand[];
   events: EngineEvent[];
   device: DeviceEvent[];
@@ -438,6 +443,8 @@ export function decodeEvent(raw: unknown): EngineEvent {
       return { type: 'Cleared', frame: at, lane: lane(o.lane, 'Cleared.lane') };
     case 'Muted':
       return { type: 'Muted', frame: at, lane: lane(o.lane, 'Muted.lane'), on: bool(o.on, 'Muted.on') };
+    case 'Mix':
+      return { type: 'Mix', frame: at, lane: lane(o.lane, 'Mix.lane'), mix: decodeLaneMix(o.mix, 'Mix.mix') };
     default:
       return fail('unknown Event variant', raw);
   }

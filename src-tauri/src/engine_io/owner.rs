@@ -63,22 +63,38 @@ pub(crate) fn swap_engine(core: &Core, engine: Engine, handle: EngineHandle, con
         rt.engine.replace(engine)
     };
     core.rt.clear_poison();
+    // Read before `evict`, which leaks the engine when a unit panics on its way out.
+    let applied = old.as_ref().and_then(Engine::applied_mixes);
     let old = old.and_then(|old| evict(core, &mut ports, old));
     for (port, new) in ports.iter_mut().zip(slots) {
         **port = Some(new);
     }
     {
         // The kept settings go in first, in order: they apply at the new engine's first block. Taken
-        // before `ends`, as a sender takes them, so no batch splits around the replay.
-        let settings = core.settings.lock().unwrap_or_else(|e| e.into_inner());
+        // before `ends`, as a sender takes them, so no batch splits around the replay. The old engine's
+        // last mixes join them first, so the replay is the mix it applied: what its event ring still
+        // holds, then each lane's mix read from the engine itself (off the audio thread now), which a
+        // full ring may have refused (read before `evict`, so a leaked engine's counts too). One that
+        // has not taken all the commands queued ahead of its first block reads as nothing (its replay
+        // is not all applied). Its other events go with it, as its loops do.
+        let mut settings = core.settings.lock().unwrap_or_else(|e| e.into_inner());
         let mut ends = core.ends.lock().unwrap_or_else(|e| e.into_inner());
+        let gen = core.engine_gen.load(Acquire);
+        if let Some(ends) = ends.as_mut() {
+            super::drain(&mut settings, &mut ends.events, gen, |_| {});
+        }
+        if let Some((frame, mixes)) = applied {
+            for (lane, mix) in mixes.iter().enumerate() {
+                settings.mixed(gen, frame, lane as u8, mix);
+            }
+        }
         let ends = ends.insert(Ends { commands, events, overview, session: Some(session) });
         for command in settings.replay() {
             if ends.commands.push(TimedCommand { frame: None, command }).is_err() {
                 core.counters.commands_full.fetch_add(1, Relaxed);
             }
         }
-        core.engine_gen.fetch_add(1, Release);
+        settings.follow(core.engine_gen.fetch_add(1, Release) + 1);
     }
     old
 }

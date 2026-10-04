@@ -14,7 +14,8 @@
 //!
 //! A lane's mix ([`WireLaneMix`]) travels in session.json's track shape, inside the session bytes'
 //! header (`session.rs`): a snapshot's track as the engine applied it, a load's (required) to set; the
-//! fixture's `snapshotHeaders` and `loadHeaders` hold them.
+//! fixture's `snapshotHeaders` and `loadHeaders` hold them. An `Event::Mix` carries one in the same
+//! shape, its FX params written as their f32 prints (`CompactMix::widen`).
 //!
 //! `DeviceRequest`, `DeviceStatus`, `DeviceEvent`, `OpenError` and `AudioBackend` derive serde where they
 //! are defined (camelCase fields, backends as `"Asio"` / `"Wasapi"`; a request's `inputChannels` is one
@@ -30,7 +31,7 @@ use std::collections::BTreeMap;
 
 use lf_engine::dsp::fx::{FxKind, FxParam, FxState, MAX_PARAMS};
 use lf_engine::grid::Frame;
-use lf_engine::{Action, Command, Event, InputSend, InputSendParam, Instrument, LaneInfo, LaneMix, LaneState, NoteTarget, Refusal};
+use lf_engine::{Action, Command, CompactMix, Event, InputSend, InputSendParam, Instrument, LaneInfo, LaneMix, LaneState, NoteTarget, Refusal};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::{DeviceEvent, DeviceStatus};
@@ -144,6 +145,25 @@ enum EventDef {
     Copied { frame: Frame, from: u8, to: u8, feedback: f32 },
     Cleared { frame: Frame, lane: u8 },
     Muted { frame: Frame, lane: u8, on: bool },
+    Mix {
+        frame: Frame,
+        lane: u8,
+        #[serde(with = "compact_mix")]
+        mix: CompactMix,
+    },
+}
+
+/// A [`CompactMix`] in the track shape of [`WireLaneMix`].
+mod compact_mix {
+    use super::*;
+
+    pub fn serialize<S: Serializer>(m: &CompactMix, s: S) -> Result<S::Ok, S::Error> {
+        WireLaneMix(m.widen()).serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<CompactMix, D::Error> {
+        WireLaneMix::deserialize(d).map(|WireLaneMix(m)| CompactMix::from(&m))
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -313,7 +333,7 @@ pub struct FeedFrame {
     pub seq: u64,
     /// The first frame after a subscribe or a new engine: the UI replaces its state with this one. It
     /// carries every lane, the transport and the selected lane (a lane or transport a new engine has
-    /// not reported yet is at its default: EMPTY, no master).
+    /// not reported yet is at its default: EMPTY, no master), and each lane's last `Mix` the host kept.
     pub reset: bool,
     pub events: Vec<WireEvent>,
     pub device: Vec<DeviceEvent>,
@@ -326,8 +346,9 @@ pub struct FeedFrame {
     pub meter: Option<Meter>,
     pub peaks: Vec<PeakUpdate>,
     /// Reset frames only (absent otherwise): the settings the host keeps and replays into every new
-    /// engine (`settings.rs`), in replay order and as the UI sends them. A setting never sent, or one a
-    /// lane's clear forgot, is at the engine's default.
+    /// engine (`settings.rs`), in replay order and as the UI sends them; a lane's mix as the engine last
+    /// applied it, where it differs from a fresh lane's. A setting missing from it is at the engine's
+    /// default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settings: Option<Vec<WireCommand>>,
 }
@@ -520,7 +541,7 @@ mod tests {
         }
     }
 
-    const EVENTS: usize = 10;
+    const EVENTS: usize = 11;
     fn event_index(e: &Event) -> usize {
         match e {
             Event::Lane { .. } => 0,
@@ -533,6 +554,7 @@ mod tests {
             Event::Copied { .. } => 7,
             Event::Cleared { .. } => 8,
             Event::Muted { .. } => 9,
+            Event::Mix { .. } => 10,
         }
     }
 

@@ -1,24 +1,30 @@
-//! OWNS: the last value of every setting command the engine took (or the UI sent before the first open),
-//! replayed into each new engine (the first, one at another sample rate, one that replaced a faulted
-//! engine), so the UI's settings survive a rebuild and a setting sent before the first open is kept. A
-//! setting the full command ring refused is not kept (`EngineHost::send`).
+//! OWNS: the last value of every setting, replayed into each new engine (the first, one at another
+//! sample rate, one that replaced a faulted engine), so the settings survive a rebuild and a setting sent
+//! before the first open is kept; a reset frame hands them to the UI.
 //!
 //! A setting is a command that sets a value (the tempo, the click, the master, the input sends, the
 //! looper's modes and FADE's length, a lane's volume, mute, DUB FEEDBACK and FX, the note target, the
 //! wheels, a built-in instrument's level, a plugin slot's live flag and gain, the selected lane);
-//! everything else (the looper's gestures, notes) acts once and is not kept. What the engine resets, the memory forgets, as the feed reads it
-//! happen: a cleared lane's volume, mute, DUB FEEDBACK and FX (`cleared`, on the engine's `Cleared`
-//! event: CLEAR, a pedal's CLEAR, CLEAR ALL), and a COPY hands the
-//! destination the source's (`copy_lane`, on `Copied`, whose DUB FEEDBACK is the value the engine copied,
-//! not the source's as the memory holds it by then). A setting for a lane sent in the moment between
-//! its clear and the feed reading it (a block and a feed tick) is forgotten with it. What the engine sets
-//! itself, the memory keeps as if the UI had sent it: a pedal's MUTE (`Muted`, as `SetMute`), and a
-//! loaded lane's mix (`loaded`, once the load answers: `session.rs`).
+//! everything else (the looper's gestures, notes) acts once and is not kept. Every setting but a lane's
+//! mix is kept as the command the engine's ring took (or the UI sent before the first open); one the
+//! full ring refused is not kept (`EngineHost::send`).
+//!
+//! A lane's mix is a projection of what the engine applied: its last `Event::Mix` the feed drained
+//! (`mixed`), from the engine generation it follows (`follow`), kept as the commands that set it where
+//! it differs from a fresh lane's. So a COPY, a CLEAR, a pedal's MUTE and a load reach it as the engine
+//! applied them, and a command the engine has not applied yet is not in it. Until a lane's first `Mix`
+//! (before the first engine, or under one that has not taken all the commands queued ahead of its
+//! first block) the commands sent for it are kept
+//! instead, as bootstrap: replayed into the next engine, then replaced by its first `Mix` for the lane.
+//! A rebuild projects the replaced engine's last mixes before its replay (`owner.rs` `swap_engine`):
+//! what its event ring still holds, then each lane's mix read from the engine itself
+//! (`Engine::applied_mixes`), so a mix the full ring refused is not lost.
 
 use std::collections::BTreeMap;
 
 use lf_engine::dsp::fx::{FxKind, FxParam, MAX_PARAMS};
-use lf_engine::{Command, LaneMix, SLOT_COUNT, TRACK_COUNT};
+use lf_engine::grid::Frame;
+use lf_engine::{Command, CompactMix, Event, LaneMix, SLOT_COUNT, TRACK_COUNT};
 
 /// What a setting sets; replayed in this order (the note target before the wheels it hands over).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -117,91 +123,84 @@ fn key(command: &Command) -> Option<Key> {
     })
 }
 
-/// `command`, moved to lane `to`.
-fn on_lane(command: Command, to: u8) -> Command {
-    match command {
-        Command::SetVolume(_, v) => Command::SetVolume(to, v),
-        Command::SetMute(_, m) => Command::SetMute(to, m),
-        Command::SetDubFeedback(_, v) => Command::SetDubFeedback(to, v),
-        Command::SetFxBypass(_, kind, b) => Command::SetFxBypass(to, kind, b),
-        Command::SetFxParam(_, param, v) => Command::SetFxParam(to, param, v),
-        other => other,
-    }
-}
-
-#[derive(Default)]
 pub(crate) struct Settings {
     last: BTreeMap<Key, Command>,
+    /// Each lane's last `Mix` and its frame; `None` until one arrives (the lane's entries in `last` are
+    /// then bootstrap).
+    applied: [Option<(Frame, CompactMix)>; TRACK_COUNT],
+    /// The engine generation (`Core::engine_gen`) whose `Mix` events the projection takes.
+    gen: u64,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Settings { last: BTreeMap::new(), applied: [None; TRACK_COUNT], gen: 0 }
+    }
 }
 
 impl Settings {
-    /// Keep `command` if it is a setting (true).
+    /// Whether `command` is a setting; kept unless it sets the mix of a lane the engine has reported.
     pub(crate) fn record(&mut self, command: &Command) -> bool {
-        match key(command) {
-            Some(key) => {
-                self.last.insert(key, *command);
-                true
-            }
-            None => false,
+        let Some(key) = key(command) else { return false };
+        if key.lane().is_none_or(|lane| self.applied[usize::from(lane)].is_none()) {
+            self.last.insert(key, *command);
         }
+        true
     }
 
-    /// Lane `to` took lane `from`'s mixer and FX, and the DUB FEEDBACK `feedback` (the engine's COPY,
-    /// whose `Copied` says what it copied: the source's may have moved before the copy was done).
-    pub(crate) fn copy_lane(&mut self, from: u8, to: u8, feedback: f32) {
-        if from == to {
-            return;
+    /// The engine of generation `gen` applied `mix` to lane `lane` (its `Event::Mix`): the lane's mix is
+    /// that one from here on. False, and nothing kept, for an engine this memory no longer follows.
+    pub(crate) fn mixed(&mut self, gen: u64, frame: Frame, lane: u8, mix: &CompactMix) -> bool {
+        if gen != self.gen || usize::from(lane) >= TRACK_COUNT {
+            return false;
         }
-        self.forget_lane(to);
-        let copied: Vec<(Key, Command)> = self
-            .last
-            .iter()
-            .filter(|(k, _)| k.lane() == Some(from))
-            .map(|(k, c)| {
-                let key = match *k {
-                    Key::Volume(_) => Key::Volume(to),
-                    Key::Mute(_) => Key::Mute(to),
-                    Key::DubFeedback(_) => Key::DubFeedback(to),
-                    Key::FxBypass(_, x) => Key::FxBypass(to, x),
-                    Key::FxParam(_, x) => Key::FxParam(to, x),
-                    other => other,
-                };
-                (key, on_lane(*c, to))
-            })
-            .collect();
-        self.last.extend(copied);
-        self.record(&Command::SetDubFeedback(to, feedback));
-    }
-
-    /// A load set lane `lane`'s mix: kept as the commands that set it, replacing what the lane had.
-    pub(crate) fn loaded(&mut self, lane: u8, mix: &LaneMix) {
-        self.forget_lane(lane);
-        self.record(&Command::SetVolume(lane, mix.volume));
-        self.record(&Command::SetMute(lane, mix.muted));
-        self.record(&Command::SetDubFeedback(lane, mix.dub_feedback));
+        self.applied[usize::from(lane)] = Some((frame, *mix));
+        self.last.retain(|k, _| k.lane() != Some(lane));
+        let fresh = CompactMix::from(&LaneMix::default());
+        let wide = mix.widen();
+        if mix.volume != fresh.volume {
+            self.insert(Command::SetVolume(lane, mix.volume));
+        }
+        if mix.muted != fresh.muted {
+            self.insert(Command::SetMute(lane, mix.muted));
+        }
+        if mix.dub_feedback != fresh.dub_feedback {
+            self.insert(Command::SetDubFeedback(lane, mix.dub_feedback));
+        }
         for kind in FxKind::ALL {
-            let state = &mix.fx[kind.index()];
-            for (def, &value) in kind.params().iter().zip(&state.params) {
-                if let Some(param) = FxParam::from_key(kind, def.key) {
-                    self.record(&Command::SetFxParam(lane, param, value));
+            let (now, was) = (&mix.fx[kind.index()], &fresh.fx[kind.index()]);
+            for (i, def) in kind.params().iter().enumerate() {
+                if let Some(param) = FxParam::from_key(kind, def.key).filter(|_| now.params[i] != was.params[i]) {
+                    self.insert(Command::SetFxParam(lane, param, wide.fx[kind.index()].params[i]));
                 }
             }
-            self.record(&Command::SetFxBypass(lane, kind, state.bypassed));
+            if now.bypassed != was.bypassed {
+                self.insert(Command::SetFxBypass(lane, kind, now.bypassed));
+            }
+        }
+        true
+    }
+
+    fn insert(&mut self, command: Command) {
+        if let Some(key) = key(&command) {
+            self.last.insert(key, command);
         }
     }
 
-    /// The engine cleared lane `lane`: its volume, mute, DUB FEEDBACK and FX are back at their defaults.
-    pub(crate) fn cleared(&mut self, lane: u8) {
-        self.forget_lane(lane);
-    }
-
-    fn forget_lane(&mut self, lane: u8) {
-        self.last.retain(|k, _| k.lane() != Some(lane));
+    /// A new engine of generation `gen` was replayed this memory: only its `Mix` events count from here
+    /// on, each lane keeping the mix it has until the new engine's first `Mix` for it.
+    pub(crate) fn follow(&mut self, gen: u64) {
+        self.gen = gen;
     }
 
     /// Every kept setting, in replay order.
     pub(crate) fn replay(&self) -> impl Iterator<Item = Command> + '_ {
         self.last.values().copied()
+    }
+
+    /// Each lane's last `Mix`, for a lane that has had one (a reset frame carries them).
+    pub(crate) fn mixes(&self) -> impl Iterator<Item = Event> + '_ {
+        self.applied.iter().enumerate().filter_map(|(lane, a)| a.map(|(frame, mix)| Event::Mix { frame, lane: lane as u8, mix }))
     }
 }
 
@@ -249,35 +248,72 @@ mod tests {
         );
     }
 
+    /// Lane `lane`'s mix as an `Event::Mix` carries it, from a fresh lane's with `edit` applied.
+    fn mix(edit: impl FnOnce(&mut LaneMix)) -> CompactMix {
+        let mut m = LaneMix::default();
+        edit(&mut m);
+        CompactMix::from(&m)
+    }
+
     #[test]
-    fn a_cleared_lane_forgets_what_the_engine_resets_and_copy_hands_it_on() {
+    fn a_lanes_mix_is_the_bootstrap_until_the_engine_reports_it_then_what_the_engine_applied() {
         let mut s = Settings::default();
         s.record(&Command::SetVolume(0, 0.5));
-        s.record(&Command::SetFxParam(0, FxParam::Cutoff, 900.0));
-        s.record(&Command::SetFxBypass(0, FxKind::Delay, false));
         s.record(&Command::SetMute(1, true));
-        s.record(&Command::SetDubFeedback(0, 0.25));
         s.record(&Command::SetMasterVolume(0.7));
-        s.record(&Command::SetInputSend(InputSend::Reverb, true));
-        s.copy_lane(0, 3, 0.25);
-        assert!(replay(&s).contains(&Command::SetFxParam(3, FxParam::Cutoff, 900.0)));
-        assert!(replay(&s).contains(&Command::SetVolume(3, 0.5)));
-        assert!(replay(&s).contains(&Command::SetDubFeedback(3, 0.25)), "COPY hands DUB FEEDBACK on");
-        // The source moved on before the copy was done: the copy keeps the value the engine copied.
-        s.record(&Command::SetDubFeedback(0, 0.75));
-        s.copy_lane(0, 4, 0.25);
-        assert!(replay(&s).contains(&Command::SetDubFeedback(4, 0.25)), "the copied value, not the source's since");
-        assert!(replay(&s).contains(&Command::SetDubFeedback(0, 0.75)));
-        assert!(!s.record(&Command::Clear(0)), "a CLEAR is an action: the engine's Cleared event is what forgets");
-        assert!(replay(&s).contains(&Command::SetVolume(0, 0.5)));
-        s.cleared(0);
-        assert!(!replay(&s).iter().any(|c| matches!(c, Command::SetVolume(0, _) | Command::SetDubFeedback(0, _) | Command::SetFxParam(0, ..) | Command::SetFxBypass(0, ..))));
-        assert!(replay(&s).contains(&Command::SetMute(1, true)));
-        (0..TRACK_COUNT as u8).for_each(|i| s.cleared(i));
+        assert_eq!(replay(&s), [Command::SetMasterVolume(0.7), Command::SetVolume(0, 0.5), Command::SetMute(1, true)], "kept as sent before any engine");
+        assert!(s.mixed(0, 100, 0, &mix(|m| m.volume = 0.25)));
+        assert!(s.record(&Command::SetVolume(0, 0.9)), "still a setting");
+        assert!(s.record(&Command::SetFxBypass(0, FxKind::Delay, false)));
         assert_eq!(
             replay(&s),
-            [Command::SetMasterVolume(0.7), Command::SetInputSend(InputSend::Reverb, true)],
-            "CLEAR ALL clears every lane, not the master nor the input sends"
+            [Command::SetMasterVolume(0.7), Command::SetVolume(0, 0.25), Command::SetMute(1, true)],
+            "lane 0 is what the engine applied, not what was sent since; lane 1 waits for its first Mix"
         );
+        // A COPY, CLEAR or pedal MUTE reaches the memory as the lane's next Mix: a fresh lane's keeps nothing.
+        assert!(s.mixed(0, 200, 1, &CompactMix::from(&LaneMix::default())));
+        assert!(s.mixed(0, 200, 0, &mix(|m| {
+            m.muted = true;
+            m.dub_feedback = 0.25;
+            m.fx[FxKind::Delay.index()].bypassed = false;
+        })));
+        assert_eq!(
+            replay(&s),
+            [
+                Command::SetMasterVolume(0.7),
+                Command::SetMute(0, true),
+                Command::SetDubFeedback(0, 0.25),
+                Command::SetFxBypass(0, FxKind::Delay, false),
+            ],
+            "only what differs from a fresh lane"
+        );
+        let mixes: Vec<Event> = s.mixes().collect();
+        assert_eq!(mixes.len(), 2, "the two lanes the engine reported: {mixes:?}");
+        assert!(matches!(mixes[0], Event::Mix { frame: 200, lane: 0, mix } if mix.muted));
+    }
+
+    #[test]
+    fn a_mix_from_an_engine_the_memory_no_longer_follows_is_refused() {
+        let mut s = Settings::default();
+        s.follow(1);
+        assert!(s.mixed(1, 0, 2, &mix(|m| m.volume = 0.5)));
+        s.follow(2);
+        assert!(!s.mixed(1, 10, 2, &mix(|m| m.volume = 0.1)), "the replaced engine's late Mix");
+        assert_eq!(replay(&s), [Command::SetVolume(2, 0.5)], "the new engine's replay stands");
+        assert!(s.mixed(2, 20, 2, &mix(|m| m.volume = 0.75)));
+        assert_eq!(replay(&s), [Command::SetVolume(2, 0.75)]);
+    }
+
+    #[test]
+    fn an_fx_param_with_up_to_seven_digits_comes_back_as_it_was_sent() {
+        let mut s = Settings::default();
+        assert!(s.mixed(0, 0, 3, &mix(|m| {
+            m.fx[FxKind::Filter.index()].params = [1234.5, 0.3, 0.0];
+            m.fx[FxKind::Delay.index()].params[1] = 0.95;
+        })));
+        let kept = replay(&s);
+        for command in [Command::SetFxParam(3, FxParam::Cutoff, 1234.5), Command::SetFxParam(3, FxParam::Q, 0.3), Command::SetFxParam(3, FxParam::Feedback, 0.95)] {
+            assert!(kept.contains(&command), "{command:?} in {kept:?}");
+        }
     }
 }

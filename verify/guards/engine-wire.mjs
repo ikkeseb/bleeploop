@@ -64,7 +64,7 @@ const REFUSALS = [
   'Stopping', 'PlayFirst', 'Reversed', 'OtherRecording', 'Empty', 'NoUndo', 'NoClear', 'ConfirmClear', 'Capturing', 'NoTrim',
   'NoMute', 'NoReverse', 'NoCopy', 'NoFreeLane', 'Fading', 'NoFade',
 ];
-const EVENTS = ['Lane', 'Transport', 'Beat', 'Selected', 'Refused', 'TakeRejected', 'PassDropped', 'Copied', 'Cleared', 'Muted'];
+const EVENTS = ['Lane', 'Transport', 'Beat', 'Selected', 'Refused', 'TakeRejected', 'PassDropped', 'Copied', 'Cleared', 'Muted', 'Mix'];
 const DEVICE_EVENTS = ['Lost', 'Recovered', 'Fallback', 'ShareLost', 'EngineFaulted', 'LoopsDropped'];
 
 // ── Commands: the TS side sends these; each fixture example is one the TS types accept as is ────────

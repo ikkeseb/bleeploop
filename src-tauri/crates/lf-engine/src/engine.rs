@@ -26,7 +26,7 @@ use std::sync::Arc;
 
 use rtrb::{Consumer, Producer, RingBuffer};
 
-use crate::api::{Command, Event, NoteTarget, ProcessContext, SlotKind, TimedCommand, SLOT_COUNT, TRACK_COUNT};
+use crate::api::{Command, CompactMix, Event, NoteTarget, ProcessContext, SlotKind, TimedCommand, SLOT_COUNT, TRACK_COUNT};
 use crate::clock::Clock;
 use crate::dsp::buffer_source::AudioBuffer;
 use crate::dsp::compressor::Compressor;
@@ -77,17 +77,21 @@ pub struct EngineHandle {
     pub session: SessionPort,
 }
 
-/// The event ring's producer. A full ring drops the event and counts it: the audio never waits.
+/// The event ring's producer. A full ring refuses the event and counts it: the audio never waits.
 pub struct Feed {
     tx: Producer<Event>,
     dropped: u64,
 }
 
 impl Feed {
-    pub fn push(&mut self, event: Event) {
-        if self.tx.push(event).is_err() {
+    /// Whether the ring took `event`: a state the caller offers again when refused ([`Looper::publish`])
+    /// is marked delivered only then.
+    pub fn push(&mut self, event: Event) -> bool {
+        let took = self.tx.push(event).is_ok();
+        if !took {
             self.dropped += 1;
         }
+        took
     }
 }
 
@@ -178,6 +182,11 @@ pub struct Engine {
     master_gain: f64,
     master_coef: f64,
     started: bool,
+    /// The commands queued ahead of the first block (a new engine's settings replay) are all taken: the
+    /// ring was empty after a block's take ([`Engine::take_commands`] takes at most `MAX_PENDING`). Until
+    /// then no lane's mix is published ([`Looper::publish`]) or read ([`Engine::applied_mixes`]): the
+    /// replay is not all applied, so the mix would not be the one it sets.
+    replayed: bool,
     /// The frame the next block should start at, and the device frames skipped so far (the DSP clock's
     /// offset: see `effects`).
     next_frame: Frame,
@@ -237,6 +246,7 @@ impl Engine {
             master_gain: 1.0,
             master_coef: (-1.0 / (MASTER_TAU_SECONDS * config.sample_rate as f64)).exp(),
             started: false,
+            replayed: false,
             next_frame: 0,
             skipped: 0,
             commands_dropped: 0,
@@ -314,13 +324,22 @@ impl Engine {
     }
 
     /// While no device runs and the host holds the engine: run a session job on the port at once (a load
-    /// at the frame the next block would start, a snapshot copied whole).
+    /// at the frame the next block would start, a snapshot copied whole). It publishes no lane's mix
+    /// until the commands queued ahead of the first block are all taken (`replayed`).
     pub fn service_session_idle(&mut self) {
         let mut cx = Cx { now: self.next_frame, align: 0, clock: &mut self.clock, feed: &mut self.feed, fx: &mut self.fx };
         self.session.begin(&mut self.looper, &mut cx, self.config.sample_rate, true);
         self.session.advance(&self.looper, Frame::MAX / crate::session::SNAPSHOT_RATE);
         let mut cx = Cx { now: self.next_frame, align: 0, clock: &mut self.clock, feed: &mut self.feed, fx: &mut self.fx };
-        self.looper.publish(&mut cx);
+        self.looper.publish(&mut cx, self.replayed);
+    }
+
+    /// Each lane's mix as the engine applies it ([`Looper::mix`], as its [`Event::Mix`] carries it) and
+    /// the frame the next block would start at; `None` until the commands queued ahead of the first
+    /// block are all taken (`replayed`). The host reads it from an engine it replaced (`owner.rs` `swap_engine`): a
+    /// mix the full event ring refused is in it. Not for the audio thread.
+    pub fn applied_mixes(&self) -> Option<(Frame, [CompactMix; TRACK_COUNT])> {
+        self.replayed.then(|| (self.next_frame, std::array::from_fn(|i| CompactMix::from(&self.looper.mix(i, &self.fx)))))
     }
 
     /// While no device runs and the caller holds the engine: apply `command` at once, at the frame the
@@ -356,7 +375,7 @@ impl Engine {
         // Nothing a punch-out does starts a capture, the only reader of the alignment.
         let mut cx = Cx { now: self.next_frame, align: 0, clock: &mut self.clock, feed: &mut self.feed, fx: &mut self.fx };
         self.looper.punch_out(&mut cx);
-        self.looper.publish(&mut cx);
+        self.looper.publish(&mut cx, self.replayed);
     }
 
     /// Render one block with every slot reading `input`, the mono device input: [`Engine::process_inputs`].
@@ -393,6 +412,9 @@ impl Engine {
             self.looper.input_gap(lost_from, if ctx.damaged { end } else { start });
         }
         self.take_commands(start);
+        // Taken commands with no stamp are due at `start`, so all of them apply before this block's
+        // first publish. An atomic read.
+        self.replayed |= self.commands.is_empty();
         self.rack.begin_block(start, first);
         // A capture's alignment is fixed from its arm (AUTO's, from its onset) to its end: the record
         // compensation holds with it, so no live flag or plugin latency changed meanwhile moves what it
@@ -431,7 +453,7 @@ impl Engine {
             while let Some(beat) = cx.clock.fire_due(f, self.looper.transport_until()) {
                 cx.feed.push(Event::Beat { frame: f, beat_in_bar: beat.beat_in_bar, count_left: beat.count_left, clicked: beat.clicked });
             }
-            self.looper.publish(&mut cx);
+            self.looper.publish(&mut cx, self.replayed);
             self.fx.follow_grid(self.looper.grid_origin(), self.looper.master(), self.clock.bpm(), f);
             self.input_fx.follow_tempo(self.clock.bpm(), f);
 

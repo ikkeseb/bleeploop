@@ -95,6 +95,9 @@ pub struct Rig {
     /// Slot 1's own input ([`Rig::set_inputs`]); `None`: both slots read `input`.
     input_b: Option<Box<dyn Fn(Frame) -> f32>>,
     pub events: Vec<Event>,
+    /// The events stay in the ring after each block (a feed that stopped reading) until
+    /// [`Rig::read_events`].
+    pub hold_events: bool,
     /// From `keep_output`, what the looper plays before the limiter: the lanes before their FX, the
     /// click and the monitor (`Taps::looper` + `Taps::monitor`), and the frame it starts at.
     pub output: Option<(Frame, Vec<f32>)>,
@@ -139,7 +142,13 @@ impl Rig {
     }
 
     pub fn with(o: Opts) -> Rig {
-        let config = EngineConfig { max_loop_seconds: o.loop_seconds, ..EngineConfig::new(o.sr) };
+        let capacity = EngineConfig::new(o.sr).event_capacity;
+        Rig::with_event_capacity(o, capacity)
+    }
+
+    /// [`Rig::with`], its event ring `capacity` events long.
+    pub fn with_event_capacity(o: Opts, capacity: usize) -> Rig {
+        let config = EngineConfig { max_loop_seconds: o.loop_seconds, event_capacity: capacity, ..EngineConfig::new(o.sr) };
         let (engine, mut handle) = Engine::new(config);
         // Slot 0 is live and empty: the input is the wet signal, as a dry GO LIVE.
         handle.commands.push(TimedCommand { frame: None, command: Command::SetSlotLive(0, true) }).expect("command ring full");
@@ -154,6 +163,7 @@ impl Rig {
             input: Box::new(|_| 0.0),
             input_b: None,
             events: Vec::new(),
+            hold_events: false,
             output: None,
             heard: Vec::new(),
             heard_right: Vec::new(),
@@ -317,6 +327,13 @@ impl Rig {
             self.record.extend_from_slice(taps.record);
         }
         self.frame += n as Frame;
+        if !self.hold_events {
+            self.read_events();
+        }
+    }
+
+    /// Move what the event ring holds into `events`.
+    pub fn read_events(&mut self) {
         while let Ok(e) = self.handle.events.pop() {
             self.events.push(e);
         }

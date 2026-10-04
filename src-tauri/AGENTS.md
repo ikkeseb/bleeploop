@@ -21,7 +21,7 @@ Who runs where and what each thread owns. The rules are in bold below the table.
 | **Device owner** (`lf-engine-owner`, `engine_io/owner.rs`) | Every device transition, one at a time; the cpal streams (Send: ownership is for ordering); building engines; the engine lock, only while no stream runs | A request channel with one-shot replies; polls what the callbacks latched and logs the glitch counters |
 | **Device callbacks** (cpal driver threads) | Nothing: ASIO runs input then output in one bufferSwitch; WASAPI's output callback is the clock and its input callback feeds the join pipe. Each promotes itself to MMCSS Pro Audio on first entry | `try_lock` on the engine (a miss plays silence and counts); atomics and rings; faults latch for the owner |
 | **Share output** (a cpal WASAPI callback, `engine_io/share.rs`) | The mirror endpoint's stream, while ASIO plays | Pulls the post-limiter master from its pipe; never takes the engine lock |
-| **Feed** (`lf-engine-feed`, `engine_io/feed.rs`) | The only reader of the engine's event ring and the device events; the mirror of lanes and transport a reload resyncs from | ~60 frames/s over a Tauri `Channel`; never PCM |
+| **Feed** (`lf-engine-feed`, `engine_io/feed.rs`) | The only reader of the engine's event ring (but for a rebuild, which drains the replaced engine's: `swap_engine`) and the device events; the mirror of lanes and transport a reload resyncs from | ~60 frames/s over a Tauri `Channel`; never PCM |
 | **Plugin owner, per slot** (`lf-clap-engine-{slot}` / `lf-vst3-engine-{slot}`, `host/engine_slot.rs`) | The `!Send` plugin instance (clack main thread / VST3 component + controller), its editor host window and Win32 pump, its tone saves, restarts and re-activation after an eviction, the ordered teardown | `OwnerRequest`s (polled every 20 ms, `OWNER_POLL`); the unit enters and leaves the engine through its `SlotHost`; params through the slot's event ring; the unit's fault bits, reported once per load |
 | **Shutdown** (`lf-engine-shutdown`, on exit, and before the updater's installer: `update.rs`) | Stops the feed, saves every tone, unloads the plugins while the device plays, closes the device | Bounded at 8 s (`SHUTDOWN_WAIT`): a stuck plugin is left to process exit |
 | **ASIO probe** (`lf-asio-probe`, `asio_startup.rs`) | One driver-resolving probe at a time, requested by the frontend after the UI is up (a retry after a failure and a driver switch probe again) | Its status report |
@@ -238,9 +238,6 @@ plugin-GUI work.
 - The panic hook (`lib.rs`) allocates and logs on whatever thread panicked, the audio thread included.
 - The dry signal steps without a ramp on an instrument installed into a live slot.
 - Two live slots on the same capture channel sum it (+6 dB).
-- The settings memory takes a COPY destination's mix from the source at the `Copied` event, not at
-  the command (`settings.rs` `copy_lane`): a source moved in between reaches the destination's replay
-  (an engine rebuild) but not the engine itself.
 - An ASIO period the driver drops without its overload report is not flagged (input and output stay in
   step; the take is spliced there).
 - A punch-out inside a take's last quarter-beat commits the whole bars before it, where a stop there

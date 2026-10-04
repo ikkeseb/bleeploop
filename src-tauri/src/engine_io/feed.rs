@@ -4,12 +4,12 @@
 //! and the lanes' waveforms; a frame goes out when any of them changed, and at least every `REFRESH`
 //! while a device runs (the UI extrapolates its playhead from the anchor between frames). Never PCM.
 //!
-//! The feed is the only reader of the engine's event ring and of the device events, so it keeps a
-//! mirror of the lanes, the transport and the selection: a new subscriber (a WebView reload) and a
-//! new engine (another sample rate, a fault) get a `reset` frame that carries all of it, with the
-//! settings the host keeps (`settings.rs`), so the UI adopts them. It also tells the settings memory
-//! what the engine reset (`Cleared`), copied (`Copied`) or muted itself (`Muted`). The thread drains while nobody subscribes,
-//! so the event ring never fills.
+//! The feed is the only reader of the engine's event ring and of the device events, but for a rebuild,
+//! which drains the replaced engine's ring into the settings memory (`owner.rs` `swap_engine`). So it
+//! keeps a mirror of the lanes, the transport and the selection: a new subscriber (a WebView reload) and
+//! a new engine (another sample rate, a fault) get a `reset` frame that carries all of it, with the
+//! settings the host keeps and each lane's last `Mix` (`settings.rs`, which every drain feeds), so the
+//! UI adopts them. The thread drains while nobody subscribes, so the event ring never fills.
 
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use std::sync::{Arc, Mutex};
@@ -108,9 +108,6 @@ impl Feed {
                 Event::Lane { frame, lane, info } if usize::from(lane) < TRACK_COUNT => self.lanes[usize::from(lane)] = Some((frame, info)),
                 Event::Transport { .. } => self.transport = Some(*event),
                 Event::Selected { frame, lane } => self.selected = (frame, lane),
-                Event::Copied { from, to, feedback, .. } => self.host.copied(from, to, feedback),
-                Event::Cleared { lane, .. } => self.host.cleared(lane),
-                Event::Muted { lane, on, .. } => self.host.muted(lane, on),
                 _ => {}
             }
         }
@@ -213,16 +210,17 @@ impl Feed {
         Some(ClockAnchor { frame, at_ms, rate, grid })
     }
 
-    /// A reset frame's events: the transport (once an engine reported it), every lane, the selected
-    /// lane, then what else this tick drained (a beat, a refusal, a copy).
+    /// A reset frame's events: the transport (once an engine reported it), every lane, each lane's last
+    /// `Mix` the host kept (a lane no engine has reported has none), the selected lane, then what else this
+    /// tick drained (a beat, a refusal, a copy).
     fn state_events(&self) -> Vec<WireEvent> {
         let lanes = self.lanes.iter().enumerate().map(|(i, lane)| {
             let (frame, info) = lane.unwrap_or((0, EMPTY_LANE));
             Event::Lane { frame, lane: i as u8, info }
         });
         let selected = Event::Selected { frame: self.selected.0, lane: self.selected.1 };
-        let rest = self.drained.iter().copied().filter(|e| !matches!(e, Event::Lane { .. } | Event::Transport { .. } | Event::Selected { .. }));
-        self.transport.into_iter().chain(lanes).chain([selected]).chain(rest).map(WireEvent).collect()
+        let rest = self.drained.iter().copied().filter(|e| !matches!(e, Event::Lane { .. } | Event::Transport { .. } | Event::Selected { .. } | Event::Mix { .. }));
+        self.transport.into_iter().chain(lanes).chain(self.host.mixes()).chain([selected]).chain(rest).map(WireEvent).collect()
     }
 }
 
