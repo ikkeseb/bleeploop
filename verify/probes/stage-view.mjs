@@ -334,6 +334,24 @@ await probe(async ({ browser, open }) => {
     }
     return { ...out, warmDist: Math.round(dist / Math.max(1, out.warm) / scale), warmY: Math.round(height / Math.max(1, out.warm) / scale) };
   });
+  /** Wait until no lane's slow light can move a pixel any more, and return the shown phase. `light.slow`
+   * is a 400 ms follower Strata rounds into a ribbon's height (`rowH * (0.84 + 0.16 * slow)`): a stopped
+   * lane's ribbon takes its last pixel step about a second after the stop, later on a slow runner, and
+   * that step is not the loop moving. `rowH * 0.84` is a multiple of 1/25, so the last step comes at
+   * `slow >= 0.125 / rowH`: under 1e-4 no ribbon lower than 1250 px has one left. Only lanes that do
+   * not sound fall, so a fixture with a sounding lane never gets here. */
+  const lightAtRest = async () => {
+    // Polled from here: `waitForFunction` takes a predicate's promise as truthy and would not wait.
+    const read = () => page.evaluate(() => import('/src/ui/stage/visual.ts').then(({ light }) => ({ phase: light.phase, move: light.move, slow: Math.max(...light.slow) })));
+    const t0 = Date.now();
+    let l = await read();
+    while (l.slow >= 1e-4) {
+      assert.ok(Date.now() - t0 < 15_000, `the stage's light never came to rest: ${JSON.stringify(l)}`);
+      await settle(50);
+      l = await read();
+    }
+    return { ...l, waitedMs: Date.now() - t0 };
+  };
   /** Pixels that differ between the canvas now and `ms` later. */
   const moved = (ms) => page.evaluate(async (wait) => {
     const c = document.querySelector('.sv-canvas');
@@ -531,6 +549,7 @@ await probe(async ({ browser, open }) => {
         await new Promise((r) => setTimeout(r, 300));
         return [a, window.__lf.looper.phaseValue()];
       });
+      await lightAtRest();
       const restMoved = await moved(300);
       await loops(1, 'Playing');
       await settle(300);
@@ -608,8 +627,8 @@ await probe(async ({ browser, open }) => {
     assert.equal(h.tone, 'wait');
     assert.equal(h.count, '', 'an armed later take shows no numeral');
     // A later take armed on stopped loops is counted in by the engine: the numeral and no message, and
-    // the loop held at its start (the downbeat restarts it), so once the beat's ripple is gone nothing
-    // on the canvas moves.
+    // the loop held at its start (the downbeat restarts it), so once the beat's ripple is gone and the
+    // stopped lane's light has fallen, nothing on the canvas moves.
     await boot(page);
     await emit({ events: [transport(LOOP, true, 120), laneEvent(0, stopped(LOOP)), ...empties(1, 2, 3, 4), { Selected: { frame: 0, lane: 1 } }], anchor: anchorAt(3 * BAR), peaks: [wave(0, LOOP)] });
     await emit({ events: [{ Beat: { frame: 3 * BAR, beatInBar: 1, countLeft: 3, clicked: true } }, laneEvent(1, lane('Recording', { armed: true }))] });
@@ -621,8 +640,9 @@ await probe(async ({ browser, open }) => {
     const counted = await hud();
     assert.equal(counted.msg, '', `no message returns under that numeral (${counted.msg})`);
     await settle(600);
+    const rest = await lightAtRest();
     const drift = await moved(250);
-    console.log(JSON.stringify({ countedLater: { count: counted.count, msg: counted.msg, movedPx: drift } }));
+    console.log(JSON.stringify({ countedLater: { count: counted.count, msg: counted.msg, movedPx: drift, ...rest } }));
     assert.ok(drift < 20, `under that count the loop is held at its start (${drift} px moved in 250 ms)`);
   });
 
