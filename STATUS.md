@@ -20,10 +20,12 @@ Pro-Q, and `engine-smoke` with Surge XT Effects (CLAP) live, green. v0.5.2 (that
 `release:smoke` with the cable in once the line out was turned up (`docs/VERIFY.md`, its row). v0.6.0
 (the counted later take, the stage view's two looks, RETAKE and AUTO REC as pedal actions) is released:
 its `release:smoke` drove an exe a runner built (`build-exe` run by hand with `smoke`), with no cable,
-and passed 6/6 on the synth take, that take's first run against a release build (the Organ's waveform
-13 of 69 px, over the 15 % bar by 3 px); the input path stands as v0.5.2's cable proved it. No rig
-probe arms a take from stopped loops, so the jam is the counted later take's first run on a real
-device. Driver latency reports are not guitar latency; after a relevant change, rerun only the affected
+and passed 6/6 on the synth take, that take's first run against a release build; the input path stands
+as v0.5.2's cable proved it. 2026-10-04: the smoke checks that the exe was built from the checkout's
+HEAD, and its synth take holds a four-note chord. On a runner build of `main` it passed 7/7 with no
+cable (the Organ chord drew 47 of 69 px, where one note had drawn 13), and it refused v0.6.0's own
+smoke exe at that later commit. No rig probe arms a take from stopped loops, so the jam is the counted
+later take's first run on a real device. Driver latency reports are not guitar latency; after a relevant change, rerun only the affected
 check.
 
 **Last play: 2026-09-28** (engine, a local release build, ASIO; a second player on a WASAPI build
