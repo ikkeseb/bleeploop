@@ -84,3 +84,13 @@ prints the reasons.
    run's log is evidence.
 3. Write the header: what it drives, what it proves, what it cannot see, how to run it.
 4. Break the covered code once and watch the probe go red, as for a guard.
+
+## Open threads
+
+- `stage-view`'s last `count` check (a later take counted in from stopped loops: nothing on the canvas
+  moves) went red once on CI: 1165 px moved in 250 ms against its bar of 20, on a commit whose rerun
+  passed, with nothing under `src/` or `verify/probes/` changed since the last green run. Cause unknown.
+  A reading of the source suspects a cosmetic tail in Strata sampled late (the armed hairline, a lane's
+  falling light), not the loop itself: a loop left moving read 34029 px. Next check: have the probe's
+  `moved()` print the loop phase and `src/ui/stage/visual.ts`'s light state beside each grab; a steady
+  phase there clears the loop. Until then a lone red on that line is rerun before the diff is read.
