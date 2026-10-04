@@ -35,6 +35,7 @@ is a one-line adapter). UI-only edits are safe while the dev app runs,
 - **Every looper action is reachable by foot.** The looper's controls are the named actions of
   `src/app/actions.ts`; the keys (`src/app/transport-keys.ts`, which a keystroke footswitch sends)
   and learned MIDI (`src/app/midi-actions.ts`, behind `state/midi.ts`'s consume-first hook) reach
-  them only through it. A new looper control gets an action, so a pedal can learn it.
+  them only through it. A new looper control gets an action, so a pedal can learn it. Not yet: CLEAR
+  ALL, a TRIM other than half, and the continuous settings (volumes, FX).
 - **Error toasts** (`toast/Toasts.tsx` renders `src/notify.ts`) sit ADDITIVELY beside the
   `console.error` sites, which feed the release log. Keep both.

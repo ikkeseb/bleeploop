@@ -5,8 +5,9 @@
 //! The app always runs it (`src-tauri/src/engine_io`). No host, device or plugin crate may enter its
 //! dependency tree: `scripts/engine-deny.mjs` fails the tree on the tauri and clack families, cpal,
 //! windows, windows-core, clap-sys and vst3 (`pnpm rust:check` runs it, and `ci.yml`'s `engine` job with
-//! `cargo test -p lf-engine` on Linux). Its dependencies are `rtrb` (and `libm` if one is ever
-//! needed); dev-only `assert_no_alloc`, `proptest` (without its fork feature) and `hound`. It builds as
+//! `cargo test -p lf-engine` on Linux). Its dependencies are `rtrb` and `rustfft` (the convolution
+//! reverb); dev-only `assert_no_alloc`, `proptest` (without its fork feature), and `serde`,
+//! `serde_json` and `sha2` for the reference fixtures. It builds as
 //! one codegen unit (`src-tauri/Cargo.toml` says why).
 //!
 //! The "Ported from" column and the modules' headers name the Web Audio TypeScript each port copied by
@@ -85,12 +86,14 @@
 //!   boundary, as a live Web Audio call with no look-ahead does. Every control-rate step (the 128-frame
 //!   k-rate quanta, the compressor's 32-frame divisions, LFO and envelope ticks) is anchored to the frame
 //!   count, never to a block start. A UI gesture lands at the next block start (jitter: IPC plus one
-//!   block, inside the quarter-beat free-stop grace); a pedal carries its press frame. No audio FIFO.
+//!   block, inside the quarter-beat free-stop grace); a Web MIDI pedal lands there too (only the dormant
+//!   native MIDI path, D22, stamps its press frame). No audio FIFO.
 //! - **Decided while porting** (each test file's header names what it changes): the count-in and an
 //!   idle PLAY start on the press frame, with no scheduling lead; a later take armed on an idle transport
 //!   counts in as the first did, restarts every loop from the top on the count's downbeat, and refuses
 //!   COPY and TRIM meanwhile; undo and reverse on a playing lane
-//!   switch on the next loop boundary (an undo's switch crossfades there, D23); STOP on an overdubbing
+//!   switch on the next loop boundary (an undo's switch crossfades there, D23), and a DUB pressed before it
+//!   makes the switch heard at once (D19); STOP on an overdubbing
 //!   lane discards the whole layer (its tail plays the layer as heard); an input gap
 //!   damages only the capture windows (RETAKE passes) it overlaps, and resets AUTO's listening history;
 //!   a jump in the device frame drops the beats it skipped, and count-in beats fire late as one click.
@@ -145,8 +148,8 @@
 //! N-cycle dub gives back the pre-dub loop; finite output) at two block sizes, bit-identical, with
 //! commands landing mid-block. The Stage 3 ports' references and tolerance classes: [`dsp`].
 //!
-//! cargo-mutants runs on [`grid`] and [`looper`] whenever either changes (the planted-bug rule of
-//! `verify/README.md`, automated; no scheduled workflow). Seven survivors are equivalent mutants, named
+//! Run cargo-mutants on [`grid`] and [`looper`] whenever either changes (the planted-bug rule of
+//! `verify/README.md`; no workflow runs it). Seven survivors are equivalent mutants, named
 //! here so a rerun can tell them from new ones: the keep-last `written` and the commit's `raw` minimum
 //! (the committed length does not move), an empty fill job at `lo == master`, a restore offset at
 //! exactly the span's end, `plan_later_stop`'s bar clamp (the window end bounds it), `pair`'s
@@ -162,7 +165,7 @@
 //!   `a_silent_block_damages_the_layer_its_frames_reach_through_a_live_plugin` beside
 //!   `a_jump_in_a_layers_closing_tail_rejects_it_through_a_live_plugin` (`tests/overdub_undo_reverse.rs`).
 //!
-//! # Beside this crate, and not built yet
+//! # Beside this crate
 //!
 //! The device side (streams, MIDI, Share output) is `src-tauri/src/engine_io`; the CLAP/VST3 units and
 //! their owners are `src-tauri/src/host/engine_slot.rs` and its siblings; the feed that carries the

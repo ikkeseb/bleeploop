@@ -29,7 +29,7 @@ Each guard runs the real source; none carries a hand-ported copy of it. There ar
   under `src/` (Solid, `import.meta.env`, extensionless imports) and gets a fresh copy per `?g=N` query, so module-load
   state re-runs (`verify/guards/layout-store.mjs`).
 
-`verify/guards/docs.mjs` is the docs guard: cited paths exist, cited shas resolve (the repo
+`verify/guards/docs.mjs` is the docs guard: cited paths exist, cited shas resolve (a backticked 7–10 hex characters with a letter; skipped in a shallow clone; the repo
 started from one squashed commit, so no doc may cite an earlier sha), the invariant titles in
 `AGENTS.md` and `docs/ARCHITECTURE.md` match, `STATUS.md`'s next jam has ≤ 5 items, and no tracked
 `.md` holds an em dash. A dead path a doc keeps on purpose says so on the same line ("(now `…`)",
@@ -47,7 +47,7 @@ tests hold to the same rule (the lf-engine briefing, `src-tauri/crates/lf-engine
    dependencies, extract it into a pure module the source calls with the live values, and import that.
    Never copy source logic into a guard.
 3. Track checks with a `passed`/`failed` counter, print `=== RESULT: N/N checks passed, M failed ===`
-   and `process.exit(failed === 0 ? 0 : 1)`. The runner fails a guard with no RESULT line or 0 checks.
+   and `process.exit(failed === 0 ? 0 : 1)`. The runner fails a guard that exits non-zero or prints no positive `N/N checks passed` count.
 4. Plant realistic bugs in the covered code; each must turn the guard red. Revert them.
 5. Run `pnpm verify`. One guard alone: `node verify/guards/<name>.mjs`.
 

@@ -24,7 +24,7 @@ Who runs where and what each thread owns. The rules are in bold below the table.
 | **Feed** (`lf-engine-feed`, `engine_io/feed.rs`) | The only reader of the engine's event ring and the device events; the mirror of lanes and transport a reload resyncs from | ~60 frames/s over a Tauri `Channel`; never PCM |
 | **Plugin owner, per slot** (`lf-clap-engine-{slot}` / `lf-vst3-engine-{slot}`, `host/engine_slot.rs`) | The `!Send` plugin instance (clack main thread / VST3 component + controller), its editor host window and Win32 pump, its tone saves, restarts and re-activation after an eviction, the ordered teardown | `OwnerRequest`s (polled every 20 ms, `OWNER_POLL`); the unit enters and leaves the engine through its `SlotHost`; params through the slot's event ring; the unit's fault bits, reported once per load |
 | **Shutdown** (`lf-engine-shutdown`, on exit, and before the updater's installer: `update.rs`) | Stops the feed, saves every tone, unloads the plugins while the device plays, closes the device | Bounded at 8 s (`SHUTDOWN_WAIT`): a stuck plugin is left to process exit |
-| **ASIO probe** (`lf-asio-probe`, `asio_startup.rs`) | The one driver-resolving probe per process, requested by the frontend after the UI is up | Its status report |
+| **ASIO probe** (`lf-asio-probe`, `asio_startup.rs`) | One driver-resolving probe at a time, requested by the frontend after the UI is up (a retry after a failure and a driver switch probe again) | Its status report |
 | **Scan children** (`app.exe --scan-one <path>`) | One process per bundle in a kill-on-close Job Object, 20 s timeout; two reader threads per child drain stdout/stderr with caps | Descriptor JSON |
 | **Plugin GUI threads** | A floating CLAP editor runs the plugin's own window thread and only sets flags (`HostGuiImpl` → `EditorClosed`) the owner acks; a hosted editor embeds into the owner's host window and is pumped there. VST3 `performEdit`/`restartComponent` (ONE component handler per load, set at load) touch only the event ring, the window event and the `RestartFlags` atom the owner drains each turn; CLAP `params.rescan` sets a flag the owner drains | Flags / events |
 | **Native MIDI** (`lf-midi-ports`, `engine_io/midi`) | Built and tested, **never started by the app**: MIDI arrives through the WebView's Web MIDI, and WinMM input ports are exclusive, so the two cannot share a controller | none |
@@ -142,7 +142,8 @@ plugin-GUI work.
   Effects); scan walks `%COMMONPROGRAMFILES%\CLAP`, `%LOCALAPPDATA%\Programs\Common\CLAP`, `CLAP_PATH`.
   Loader is `clack_host::entry::PluginEntry::load` (unsafe), NOT `PluginBundle`.
 - **Plugin editors embed into a host-created top-level Win32 window** (`CreateWindowExW`, OWNER-LESS
-  as the editor-hang gotcha above says, NOT reparented into the WebView2 surface). An owner pumps its thread's Win32 messages every
+  as the editor-hang gotcha above says, NOT reparented into the WebView2 surface), except a CLAP
+  plugin that offers its own floating window, which gets that first (`host/clap.rs`, "Preferred path"). An owner pumps its thread's Win32 messages every
   turn, editor or not: a JUCE plugin (Neural DSP) runs its message thread there, and unpumped, a
   host-set parameter never reached its saved state (measured with `pnpm native:tone-recall`, Archetype
   Petrucci). Each pump call is bounded (64 messages or 2 ms, `editor_window::pump_thread_messages`), so
@@ -199,7 +200,8 @@ plugin-GUI work.
 
 ## ASIO tier
 
-- **cpal ASIO = ONE driver per device, resolved once per driver pick:** once a stream holds it, cpal
+- **cpal ASIO = ONE driver per device, its metadata resolved once per driver pick** (each run and
+  preopen finds the driver again by name as a new cpal device, `engine_io/cpal_driver.rs` `find_asio`): once a stream holds it, cpal
   can't re-resolve the device or re-query configs, so the duplex Device + configs are cached
   (`audio_output::resolve_asio_cache` behind the `asio_startup.rs` coordinator; a static `Arc`, as
   `cpal::Device` is Send+Sync). Only a driver switch (`plugin_asio_switch`) replaces it, on the device
@@ -215,8 +217,9 @@ plugin-GUI work.
   epoch conversion. Every latency is a delta within ONE stream (input: callback − capture; output:
   playback − callback), never the absolute epoch and never across streams (each has its own time base).
 - **Test-rig gotcha:** the ASIO probe is a frontend-requested command, so a `tauri dev` log shows
-  `[asio] probe starting` → `cached ASIO "…"` → `[asio] probe result … Ready` AFTER `host_init`, and
-  nothing ASIO-related before it; `pnpm dev:asio -- -- --disable-asio` shows `DisabledByFlag` and no
+  `[asio] probe starting` → `cached ASIO "…"` → `[asio] probe result … Ready` once the UI is up: before
+  the engine device opens and `host_init` runs when ASIO is the saved pick (`src/ui/state/audio-devices.ts`,
+  `initAudioDeviceSettings`), never from `run()`; `pnpm dev:asio -- -- --disable-asio` shows `DisabledByFlag` and no
   probe. Read `plugin_asio_device_info` for the cached metadata and `engine_status` (or the
   `[engine_io]` open lines) for the backend that opened.
 
@@ -287,19 +290,6 @@ plugin-GUI work.
   Focusrite Notifier ran throughout. By the pipe's own sizing rule (`PipeConfig::setpoint`) these pushes
   and pulls ask for 33–43 ms. Next check: both series with the two applications closed; what to change
   is STATUS D25.
-- Briefing lines a read against the code found stale (2026-10-03), each confirmed and not yet
-  corrected. The lf-engine crate doc (`crates/lf-engine/src/lib.rs`): its dependency list names `hound`
-  and leaves out `rustfft`, `serde`, `serde_json` and `sha2`; "a pedal carries its press frame" holds
-  only for native MIDI, which is never started (every command from the WebView is unstamped,
-  `engine_io/mode.rs` `engine_send`); the heading "Beside this crate, and not built yet" stands over a
-  device side, plugin owners, a feed and a snapshot that are built. This file: § Plugin hosting says
-  editors embed into a host window, where a CLAP plugin that offers a floating window gets that first
-  (`host/clap.rs`, its "Preferred path"), and `native:smoke`'s row in `docs/VERIFY.md` says the same;
-  § ASIO tier's "resolved once per driver pick" is the cache's: every run and every preopen finds the
-  driver again by name as a new cpal device (`engine_io/cpal_driver.rs` `find_asio`). The same read
-  ran out before it had checked all of `docs/VERIFY.md`, this file and the two engine briefings. Next:
-  correct the crate doc under a `pnpm rust:check` once D23 has landed (its branch edits that doc), the
-  two lines here with it, and finish the read.
 - The release profile warns of four unused items in `app` (`Duration` in `host/vst3.rs`,
   `promote_pro_audio` in `host/clap.rs`, `teardown` in `host/vst3.rs`, `asio_available` in
   `audio_output.rs`); since when is unknown.
