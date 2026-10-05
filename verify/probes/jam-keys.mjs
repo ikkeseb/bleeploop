@@ -17,13 +17,14 @@
  *   sends `SetAutoRecord`); a rolling RETAKE first take reads TAKE 3, and an EMPTY lane's core stays
  *   pressable as the approve gesture (while a plain take records, it is refused); `TakeRejected` and
  *   `PassDropped` each reach the player (a toast naming the lane) and the release log (one console.error);
- *   the store mirrors `Copied` (the copy gets the source's volume, mute and FX, sharing no FX object) and
- *   `Cleared` (volume, mute and every FX entry back to their defaults, on that lane only).
+ *   a `Copied` and a `Cleared` reach the store as the lane's `Mix`, which the fake reports as the engine
+ *   does (the copy gets the source's volume, mute and FX, sharing no FX object; CLEAR puts volume, mute
+ *   and every FX entry back to their defaults, on that lane only).
  * - EXPORT (`src/session/export.ts`): while a lane overdubs, the Export button is disabled and a wet export
  *   refuses ("Finish the active recording"), while a recovery snapshot (`includeMaster: false`) still builds.
  *
- * Cannot see the native engine, Tauri IPC or any timing: the fake answers no command by itself, so every
- * state, selection, refusal and rejection the DOM shows was scripted; whether the engine wraps, confirms,
+ * Cannot see the native engine, Tauri IPC or any timing: the fake answers no command by itself but a
+ * lane's mix, so every state, selection, refusal and rejection the DOM shows was scripted; whether the engine wraps, confirms,
  * clears or rejects as scripted is lf-engine's (`tests/golden_jam.rs`, `tests/actions.rs`).
  * Run: pnpm probe jam-keys
  */
@@ -185,23 +186,26 @@ await probe(async ({ open }) => {
   assert.equal(blocked.recovery, true, 'a recovery snapshot still builds during capture');
 
   // ── FEED → STORE: COPY carries the lane's mix and FX, CLEAR resets them all ───────────────────────
-  // The engine copies and clears (lf-engine tests/sound.rs); the store mirrors its `Copied` and `Cleared`
-  // for the lane controls and the FX drawer. Two effects dirtied, in both flag and value.
+  // The engine copies and clears (lf-engine tests/sound.rs) and reports each lane's mix after (`Mix`);
+  // the lane controls and the FX drawer read it. Two effects dirtied, in both flag and value.
   await emit({ events: [laneEvent(0, looping('Playing', { canUndo: true }))] });
-  const mixed = await page.evaluate(() => {
+  const pristine = await page.evaluate(() => {
     const L = window.__lf.looper;
-    const fxOf = (i) => JSON.stringify(L.fxState(i));
-    const pristine = fxOf(0);
+    const fx = JSON.stringify(L.fxState(0));
     L.setVolume(0, 0.4);
     L.setMute(0, true);
     L.setFxBypass(0, 0, false); // filter
     L.setFxBypass(0, 3, false); // delay
     L.setFxParam(0, 0, 'cutoff', 500);
     L.setFxParam(0, 3, 'feedback', 0.9);
-    return { pristine, dirty: fxOf(0) };
+    return fx;
   });
+  // The lane's mix is the engine's: it changes when the fake reports it (`Mix`).
+  await page.waitForFunction(() => window.__lf.looper.trackMuted(0) && window.__lf.looper.fxState(0)[3].params.feedback !== 0.4, undefined, { timeout: 5000 });
+  const mixed = { pristine, dirty: await page.evaluate(() => JSON.stringify(window.__lf.looper.fxState(0))) };
   assert.notEqual(mixed.dirty, mixed.pristine, 'the lane was actually dirtied first');
   await emit({ events: [{ Copied: { frame: BAR, from: 0, to: 3, feedback: 1 } }, laneEvent(3, looping('Playing'))] });
+  await page.waitForFunction(() => window.__lf.looper.trackMuted(3), undefined, { timeout: 5000 });
   const copied = await page.evaluate(() => {
     const L = window.__lf.looper;
     return {
@@ -215,6 +219,7 @@ await probe(async ({ open }) => {
   assert.equal(copied.fx, mixed.dirty, 'FX followed the copy');
   assert.equal(copied.shared, false, 'the copy shares no FX state with its source');
   await emit({ events: [{ Cleared: { frame: BAR, lane: 0 } }, laneEvent(0, lane('Empty'))] });
+  await page.waitForFunction(() => !window.__lf.looper.trackMuted(0), undefined, { timeout: 5000 });
   const cleared = await page.evaluate(() => {
     const L = window.__lf.looper;
     return { vol: L.trackVolume(0), muted: L.trackMuted(0), fx: JSON.stringify(L.fxState(0)), bypassed: L.fxState(0).every((s) => s.bypassed), copy: JSON.stringify(L.fxState(3)) };

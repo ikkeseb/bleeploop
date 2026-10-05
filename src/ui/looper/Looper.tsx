@@ -5,6 +5,7 @@ import { createTwoStepConfirm, masterBars, volumeDb } from './shared';
 import { announceLooper, liveMsg, playStopGate, recDubGate } from './gates';
 import { DATA_STATE, createLaneView, type LaneWord } from './lane-state';
 import { FxPanel } from './FxPanel';
+import { mixGesture } from './mix-gesture';
 import { Trim } from './Trim';
 import './looper.css';
 
@@ -61,7 +62,9 @@ function Fader(props: { index: number; disabled: boolean }) {
   // Production volume runs 0..1.5; preserve the 1.5 ceiling + 0 dB detent at 1.0.
   // A styled native <input type=range> (same idiom as the command bar's master/click sliders) over a
   // 0..150 integer domain (= vol × 100); the unity tick + dB read-out are the per-track additions.
-  const vol = () => looper.trackVolume(props.index);
+  // It shows its gesture's value until the engine has it (`mixGesture`), and builds on what it shows.
+  const vol = () => looper.mixShown(props.index, 'volume');
+  const gesture = mixGesture(props.index, 'volume');
   const frac = () => Math.max(0, Math.min(1, vol() / 1.5));
   const dbStr = () => volumeDb(vol());
 
@@ -70,13 +73,14 @@ function Fader(props: { index: number; disabled: boolean }) {
     let v = Number(input.value) / 100;
     if (Math.abs(v - 1.0) < 0.05) v = 1.0; // 0 dB detent
     looper.setVolume(props.index, v);
-    // Resync the DOM to the STORED value: inside the detent zone the snapped 1.0 equals the already-
-    // stored signal value, so Solid re-renders nothing and the native thumb would drift from the
-    // fill/dB readout for the rest of the drag. Writing it back also makes the detent read as a
-    // magnetic snap on the thumb itself.
-    input.value = String(Math.round(looper.trackVolume(props.index) * 100));
+    // Resync the DOM to the SHOWN value: inside the detent zone the snapped 1.0 equals the value already
+    // shown, so Solid re-renders nothing and the native thumb would drift from the fill/dB readout for
+    // the rest of the drag. Writing it back also makes the detent read as a magnetic snap on the thumb
+    // itself.
+    input.value = String(Math.round(vol() * 100));
   };
   const onKeyDown = (e: KeyboardEvent) => {
+    gesture.onKeyDown();
     if (props.disabled) return;
     // Coarser 0.05 keyboard step (the native step is fine for drag) — Right/Up raise, Left/Down lower.
     if (e.key === 'ArrowRight' || e.key === 'ArrowUp') {
@@ -106,6 +110,10 @@ function Fader(props: { index: number; disabled: boolean }) {
           aria-valuetext={dbStr()}
           onInput={onInput}
           onKeyDown={onKeyDown}
+          onKeyUp={gesture.onKeyUp}
+          onPointerDown={gesture.onPointerDown}
+          onLostPointerCapture={gesture.onLostPointerCapture}
+          onBlur={gesture.onBlur}
         />
       </div>
       <span class="lp-vdb">{dbStr()}</span>
@@ -361,7 +369,7 @@ function TrackLane(props: {
             class="lp-pb lp-pb--mute"
             classList={{ 'is-on': looper.trackMuted(props.index) }}
             disabled={isEmpty()}
-            onClick={() => looper.setMute(props.index, !looper.trackMuted(props.index))}
+            onClick={() => looper.toggleMute(props.index)}
             aria-label={`Track ${props.index + 1} mute`}
             aria-pressed={looper.trackMuted(props.index)}
           >

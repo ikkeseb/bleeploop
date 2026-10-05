@@ -4,43 +4,11 @@ A working document: each section is a reviewed spec a writer can build from. Whe
 fold what still binds into the briefings and delete the section; delete the file when it is empty.
 Line numbers are as of commit `a43e9bc4` and move.
 
-Order: D21 slice 3b, then pan (it rests on D21's `LaneMix`). D25 touches no D21 file and runs
-beside them in its own worktree. Delayed COPY waits on the owner (STATUS D29). Slice 3a landed: the
-feed's `Event::Mix` and the host's projection (rules: `src-tauri/src/engine_io/settings.rs` header,
-the lf-engine briefing).
-
-## D21 slice 3b: the UI follows the applied mix
-
-Revised after a second model family's read of the first draft (release-clearing snapped back;
-equality during a drag ended its protection; toggles read a stale base; autosave could keep an
-A-B-A fingerprint).
-
-1. `src/ui/state/engine-store.ts` keeps an authoritative per-lane mix, written only from the feed
-   (`Event::Mix`, and a reset frame: its settings for lanes it has no Mix for, then its Mix events).
-   `copyLaneMix`, `clearLaneMix`, mix-from-`Muted` and the import's local write of the loaded mix go;
-   `Cleared` keeps its recovery bookkeeping (the clear token).
-2. Every UI-set mix value but MUTE (volume, DUB FEEDBACK, FX bypass, FX params) shows an overlay when
-   one is set, else the authoritative value. A gesture (pointer, keyboard, a select's change, a
-   bypass press) writes the overlay from the shown value and sends. The overlay holds through the
-   whole gesture. After the gesture it stays until a Mix whose value equals it (both sides
-   normalised: the setters' clamps, `Math.fround`), a send failure of that gesture's own command
-   (tagged, so an older failure never clears a newer overlay), or a cancel: the lane's `Cleared`, a
-   `Copied` into it, an import or recovery load, a reset frame, the lane going EMPTY, the control's
-   disposal. Only the UI writes these values, so an equal echo is a safe acknowledgement. No timeout.
-3. MUTE sends the engine's toggle (`ActionOn(lane, Mute)`, as a pedal does) and shows the
-   authoritative value: two quick presses are two toggles.
-4. The `SessionSource` mix getters (and the plain mirrors, the stage view) read the authoritative
-   values. Autosave records as saved the fingerprint of the snapshot it persisted (its mix), not the
-   one it inspected before, so A, then B pinned, then A again stays dirty.
-5. The browser fake (`src/platform/host.web.ts`) echoes a Mix after it applies a mix command or a
-   scripted COPY, CLEAR or MUTE, asynchronously, from an immutable copy. Two probe seams: hold the
-   echoes (applied, unreported) and hold or refuse the application (unapplied). Probe cases: a
-   refused gesture returns to the applied value; an equal echo during a drag keeps the drag's
-   protection; an unequal Mix during a drag does not move the fader; release before the echo shows
-   no snap-back; two quick MUTE presses; the A-B-A autosave case. `verify/probes/engine-seam.mjs`'s
-   COPY-derived volume moves to the Mix model.
-6. After 3b, D21's row leaves STATUS (the fader's feel is a not-heard line); the two load-protocol
-   races stay ignored as their own question.
+Order: pan's part 2 (session file, the dry fallback export, autosave, the control); its part 1
+(engine and wire) is built. D25 is built on a branch and waits on the owner (STATUS D25). Delayed
+COPY waits on the owner (STATUS D29). D21 landed whole: the rules live in
+`src-tauri/src/engine_io/settings.rs`'s header, the lf-engine briefing and
+`src/ui/state/engine-store.ts`.
 
 ## Per-lane pan (the owner's idea, 2026-09-18; the owner said build it)
 

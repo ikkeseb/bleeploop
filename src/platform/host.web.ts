@@ -180,6 +180,18 @@ export interface EngineFake extends EngineHost {
   /** Every `setSlotInputChannel()` pick, in order: [slot, channel]. */
   readonly slotInputChannels: [number, number | null][];
   /**
+   * Probe seam, the engine's report: while set, the `Mix` each application owes waits (applied, not yet
+   * reported), queued in order, one per changed lane per application (a lane going A, B, A owes three);
+   * cleared, the queue is reported in order. A reset frame drops it.
+   */
+  holdEcho: boolean;
+  /** Probe seam, the engine's application: while set, the commands a batch carries wait unapplied (and
+   * unreported); cleared, they apply in order and their `Mix` follows. */
+  holdApply: boolean;
+  /** Probe seam: while set, a batch that carries a mix command is refused (`send` rejects, as a host
+   * that could not take it): nothing in it applies. */
+  refuseMix: boolean;
+  /**
    * Decode `raw` as a feed frame (the real decoder) and hand it to the subscribers, as the native feed
    * would. Only probes call it, through `__lf.native`.
    * @public
@@ -268,8 +280,17 @@ function applyMixCommand(c: EngineCommand): void {
   } else if ('ActionOn' in c && c.ActionOn[1] === 'Copy') {
     const lane = c.ActionOn[0];
     if (fakeMixes[lane]) copyLatches[lane] = copyMix(fakeMixes[lane]);
+  } else if ('ActionOn' in c && c.ActionOn[1] === 'Mute') {
+    // MUTE's toggle (the engine's refuses an EMPTY lane, which the fake does not know).
+    const m = at(c.ActionOn[0]);
+    if (m) m.muted = !m.muted;
   }
 }
+
+/** The commands `applyMixCommand` changes a lane's mix or a COPY latch with. */
+const MIX_COMMANDS = ['SetVolume', 'SetMute', 'SetDubFeedback', 'SetFxBypass', 'SetFxParam'] as const;
+const isMixCommand = (c: EngineCommand): boolean =>
+  typeof c === 'object' && (MIX_COMMANDS.some((k) => k in c) || ('ActionOn' in c && c.ActionOn[1] === 'Mute'));
 
 function applyMixFrame(frame: Pick<FeedFrame, 'reset' | 'settings' | 'events'>): void {
   if (frame.reset) {
@@ -283,6 +304,72 @@ function applyMixFrame(frame: Pick<FeedFrame, 'reset' | 'settings' | 'events'>):
       fakeMixes[ev.to] = { ...(copyLatches[ev.from] ?? copyMix(fakeMixes[ev.from])), dubFeedback: ev.feedback };
       copyLatches[ev.from] = null;
     } else if (ev.type === 'Muted') fakeMixes[ev.lane].muted = ev.on;
+    // A scripted report (a stale or foreign one): the UI last heard it, and the fake reports its own mix
+    // again when that differs (`echoChanges`).
+    else if (ev.type === 'Mix' && reported[ev.lane]) reported[ev.lane] = copyMix(ev.mix);
+  }
+  // A reset frame reports every lane's mix as it leaves it: what an engine before it owed is gone.
+  if (frame.reset) {
+    echoQueue.length = 0;
+    fakeMixes.forEach((m, i) => (reported[i] = copyMix(m)));
+  }
+}
+
+// ── The fake's `Mix`: each change of a lane's mix reported once, as the engine's feed does ─────────────
+
+/** Each lane's mix as the fake last reported it. */
+const reported: LaneMix[] = Array.from({ length: ENGINE_LANES }, defaultLaneMix);
+/** The reports owed, in the order the changes were applied: each a copy of its lane's mix as that
+ * application left it. */
+const echoQueue: { readonly lane: number; readonly mix: LaneMix }[] = [];
+let echoScheduled = false;
+let echoHeld = false;
+let applyHeld = false;
+/** The commands `holdApply` keeps unapplied, in order. */
+const heldCommands: EngineCommand[] = [];
+/** The last meter a frame carried: a report repeats it (a frame without one reads the input silent). */
+let lastMeter: FeedFrame['meter'] = null;
+
+const sameLaneMix = (a: LaneMix, b: LaneMix): boolean => JSON.stringify(a) === JSON.stringify(b);
+
+/** The last report lane `lane` owes, else the last one it gave. */
+function lastOwed(lane: number): LaneMix {
+  for (let i = echoQueue.length - 1; i >= 0; i--) if (echoQueue[i].lane === lane) return echoQueue[i].mix;
+  return reported[lane];
+}
+
+/** After one application (a batch, a load, a scripted frame, the held commands' release): owe a report
+ * for each lane whose mix now differs from the last one owed (or reported), and give them a microtask
+ * later: never inside the call that changed the mix. Changes within one application coalesce into one
+ * report per lane; separate applications queue separate reports (a lane going A, B, A owes three). */
+function echoChanges(): void {
+  fakeMixes.forEach((m, lane) => {
+    if (!sameLaneMix(m, lastOwed(lane))) echoQueue.push({ lane, mix: copyMix(m) });
+  });
+  if (echoScheduled || echoHeld || echoQueue.length === 0) return;
+  echoScheduled = true;
+  queueMicrotask(() => {
+    echoScheduled = false;
+    if (!echoHeld) flushEchoes();
+  });
+}
+
+/** Report each owed lane mix, in order, that differs from the last reported: one frame per report. */
+function flushEchoes(): void {
+  const owed = echoQueue.splice(0);
+  for (const { lane, mix } of owed) {
+    if (sameLaneMix(mix, reported[lane])) continue;
+    reported[lane] = mix;
+    const frame: FeedFrame = {
+      seq: 0,
+      reset: false,
+      events: [{ type: 'Mix', frame: 0, lane, mix: copyMix(mix) }],
+      device: [],
+      anchor: null,
+      meter: lastMeter,
+      peaks: [],
+    };
+    for (const onFrame of engineSubscribers) onFrame(frame);
   }
 }
 
@@ -361,8 +448,9 @@ const fakeRate = () => (globalThis as { __lfEngineFakeRate?: number }).__lfEngin
 /**
  * The engine host's browser stand-in: the browser build has no engine (`available` false) unless a DEV
  * probe forces this fake on. Forced on, it answers `open()` with a canned device, records every batch in `sent` and hands a
- * probe-scripted frame from `emit()` to the subscribers. Not a second looper: nothing answers a command
- * by itself, so a probe asserts gesture → command and frame → DOM.
+ * probe-scripted frame from `emit()` to the subscribers. Not a second looper: the one thing it answers
+ * by itself is a lane's mix, reported as the engine's `Mix` once it changes (a mix command, a scripted
+ * COPY, CLEAR or MUTE, a load); every other state a probe asserts on is scripted.
  */
 export const webEngineFake: EngineFake = {
   get available() {
@@ -379,6 +467,23 @@ export const webEngineFake: EngineFake = {
   loadedSessions: [],
   shares: [],
   slotInputChannels: [],
+  get holdEcho() {
+    return echoHeld;
+  },
+  set holdEcho(on: boolean) {
+    echoHeld = on;
+    if (!on) echoChanges();
+  },
+  get holdApply() {
+    return applyHeld;
+  },
+  set holdApply(on: boolean) {
+    applyHeld = on;
+    if (on) return;
+    heldCommands.splice(0).forEach(applyMixCommand);
+    echoChanges();
+  },
+  refuseMix: false,
   async open(request, force = false) {
     if (!engineForced()) throw new Error(NO_ENGINE);
     webEngineFake.opened.push(request);
@@ -412,7 +517,10 @@ export const webEngineFake: EngineFake = {
   async send(commands) {
     if (!engineForced()) throw new Error(NO_ENGINE);
     webEngineFake.sent.push(...commands);
-    commands.forEach(applyMixCommand);
+    if (webEngineFake.refuseMix && commands.some(isMixCommand)) throw new Error('The fake engine refused the batch (refuseMix)');
+    if (applyHeld) heldCommands.push(...commands);
+    else commands.forEach(applyMixCommand);
+    echoChanges();
   },
   async setShare(endpoint) {
     if (!engineForced()) throw new Error(NO_ENGINE);
@@ -431,6 +539,7 @@ export const webEngineFake: EngineFake = {
     webEngineFake.loadedSessions.push(bytes.slice());
     // The engine refuses a header it cannot read, and sets each lane's mix with its loop.
     applyMixLoad(decodeLoadSession(bytes.slice().buffer).header);
+    echoChanges();
   },
   subscribe(onFrame) {
     engineSubscribers.add(onFrame);
@@ -439,7 +548,10 @@ export const webEngineFake: EngineFake = {
   emit(raw) {
     const frame = decodeFeedFrame(raw);
     applyMixFrame(frame);
+    if (frame.meter) lastMeter = frame.meter;
     for (const onFrame of engineSubscribers) onFrame(frame);
+    // A scripted COPY, CLEAR or pedal MUTE changed a lane's mix: its report follows, as the engine's.
+    echoChanges();
   },
 };
 

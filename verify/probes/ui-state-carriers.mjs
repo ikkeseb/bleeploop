@@ -14,8 +14,9 @@
  *   disabled and its hover and label say why;
  * - toggles: each toggle it presses (CLICK, FIXED, RETAKE, AUTO, the master mute, lane 1's MUTE and REV)
  *   keeps ONE accessible name in both states and carries its state in aria-pressed alone; the lane core,
- *   whose name says the action, carries no aria-pressed. REV's state is the engine's: the probe echoes it
- *   on the feed as the engine would. Not pressed here: END STOP, lane FX and the keyboard show/hide cap
+ *   whose name says the action, carries no aria-pressed. REV's and MUTE's states are the engine's: the
+ *   probe echoes REV on the feed as the engine would, and the fake reports MUTE's toggle as the lane's
+ *   `Mix`. Not pressed here: END STOP, lane FX and the keyboard show/hide cap
  *   (which still flips its name).
  *
  * Cannot see the native engine (its gates, what a take records, the meter's source): the fake answers no
@@ -232,7 +233,7 @@ await probe(async ({ open }) => {
   ]) if (!(await pressToggle(page, name, state, echo))) unstable.push(name);
   const laneSent = await sent();
   console.log('lane toggles sent', JSON.stringify(laneSent));
-  assert.equal(laneSent.filter((c) => c.SetMute?.[0] === 0).length, 2, 'MUTE sends SetMute on each press');
+  assert.equal(laneSent.filter((c) => c.ActionOn?.[0] === 0 && c.ActionOn[1] === 'Mute').length, 2, "MUTE sends the engine's toggle on each press");
   assert.equal(laneSent.filter((c) => c.Reverse === 0 || c.ActionOn?.[1] === 'Reverse').length, 2, 'REV sends the reverse on each press');
   assert.deepEqual(unstable, [], 'these toggles change their name with their state or lose aria-pressed');
   assert.equal(recordingCorePressed, null, 'the lane core names its action; it must not also claim a pressed state');

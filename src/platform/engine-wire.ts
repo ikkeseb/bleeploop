@@ -238,7 +238,8 @@ export type EngineEvent =
   /** The engine cleared the lane (CLEAR, a pedal's confirmed CLEAR, every lane on CLEAR ALL): its volume,
    * mute and FX are back to their defaults. Before the lane's Lane event in the same frame. */
   | { type: 'Cleared'; frame: Frame; lane: number }
-  /** A pedal's MUTE switched the lane's mute (the UI keeps the lane's mix, so it follows). */
+  /** The engine's MUTE toggle (a pedal's, the MUTE button's) switched the lane's mute; the lane's `Mix`
+   * follows, and the UI reads the mute from that. */
   | { type: 'Muted'; frame: Frame; lane: number; on: boolean }
   /** The lane's mix as the engine applied it, sent when it differs from the last one delivered (each
    * lane once from a new engine); a reset frame carries the last one the host read, per lane. The FX params

@@ -51,26 +51,42 @@ export const confirmNativeClose: () => Promise<void> = underTauri
 // ── The engine's command queue ─────────────────────────────────────────────────────────────────────
 
 let outbox: EngineCommand[] = [];
+/** The outbox's batch: whether the host took it, once it is flushed. */
+let submitted: Promise<boolean> = Promise.resolve(true);
 
 /**
  * Queue commands for the engine. What one task sends leaves as ONE ordered `engine_send` batch a
- * microtask later, so a gesture's commands reach the same block together. Fire-and-forget: a batch the
- * host could not take is logged and toasted. Nothing is sent while the platform has no engine (the
- * browser build without the DEV fake).
+ * microtask later, so a gesture's commands reach the same block together. A batch the host could not take
+ * is logged and toasted. Nothing is sent while the platform has no engine (the browser build without the
+ * DEV fake).
+ *
+ * Resolves with the SUBMISSION of the batch these commands left in: true once the host took all of it,
+ * false when it did not wholly take it (or there is no engine). False is no per-command answer: the
+ * native host pushes a batch command by command and stops at the first it refuses, keeping the prefix it
+ * took, so a command of a failed batch may still reach the engine. Never an acknowledgement either: the
+ * engine applies a command later, and its outcome arrives on the feed. Most callers ignore it; a mix
+ * gesture drops its overlay on false, and a command the engine did take brings the value back through
+ * its lane's `Mix` (`engine-store.ts`).
  */
-export function sendEngine(...commands: EngineCommand[]): void {
-  if (!platform.engine.available || commands.length === 0) return;
-  if (outbox.length === 0) queueMicrotask(flushEngine);
+export function sendEngine(...commands: EngineCommand[]): Promise<boolean> {
+  if (!platform.engine.available) return Promise.resolve(false);
+  if (commands.length === 0) return Promise.resolve(true);
+  if (outbox.length === 0) submitted = new Promise((resolve) => queueMicrotask(() => resolve(flushEngine())));
   outbox.push(...commands);
+  return submitted;
 }
 
-function flushEngine(): void {
+async function flushEngine(): Promise<boolean> {
   const batch = outbox;
   outbox = [];
-  platform.engine.send(batch).catch((err: unknown) => {
+  try {
+    await platform.engine.send(batch);
+    return true;
+  } catch (err) {
     console.error('[platform] engine command batch failed', err);
     notifyError('The audio engine did not take a command', err);
-  });
+    return false;
+  }
 }
 
 /** The web engine fake a probe scripts through `__lf.native`; null under Tauri. */

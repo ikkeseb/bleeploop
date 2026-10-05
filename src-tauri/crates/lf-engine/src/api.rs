@@ -276,7 +276,7 @@ pub enum Action {
     PrevTrack,
     PlayAll,
     StopAll,
-    /// MUTE on or off (answered by [`Event::Muted`]: the UI keeps the lane's mix).
+    /// MUTE on or off (answered by [`Event::Muted`]; the UI follows the lane's [`Event::Mix`]).
     Mute,
     Reverse,
     /// COPY into the first EMPTY lane.
@@ -461,14 +461,15 @@ pub enum Event {
     /// A RETAKE pass saw an input gap: it is dropped, and the kept pass before it with it.
     PassDropped { frame: Frame, lane: u8, pass: u32 },
     /// COPY into lane `to` is done. `feedback` is the DUB FEEDBACK it copied, the source's when COPY
-    /// applied (the source's may have moved since): the UI takes it.
+    /// applied (the source's may have moved since). The destination's whole mix follows as its
+    /// `Mix`, which the UI and the host's settings memory read.
     Copied { frame: Frame, from: u8, to: u8, feedback: f32 },
     /// The lane was cleared: its loop gone, its volume, mute and FX back to their defaults (CLEAR, a
     /// pedal's confirmed CLEAR, and every lane at CLEAR ALL, an empty one included). A lane that goes
     /// EMPTY any other way (a cancelled count-in, a stopped or rejected first take) keeps its mix.
     Cleared { frame: Frame, lane: u8 },
-    /// A hands-free MUTE ([`Action::Mute`]) switched the lane's mute: the UI, which keeps the lane's
-    /// mix, follows it.
+    /// A MUTE action ([`Action::Mute`]) switched the lane's mute. The UI shows the mute from the lane's
+    /// [`Event::Mix`], not from this event.
     Muted { frame: Frame, lane: u8, on: bool },
     /// The lane's mix as the engine applies it ([`crate::Looper::mix`]), sent when it differs from the
     /// last one the ring took for the lane (a new engine sends every lane's once): a setting, a COPY, a

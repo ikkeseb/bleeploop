@@ -57,8 +57,10 @@ A probe drives the real frontend in headless Chromium through `window.__lf`, the
 `import('/src/…')` of the app's own modules. The engine is the DEV fake in `src/platform/host.web.ts`,
 on when an init script sets `window.__lfEngineFake = true` before the app loads: it records every
 command the UI sends (`__lf.native.sent`) and hands the feed frames the probe scripts
-(`__lf.native.emit`) to the UI. Nothing answers a command, so a probe proves gesture → command and
-frame → screen, never the engine (`verify/probes/engine-seam.mjs` is the pattern). What still runs for
+(`__lf.native.emit`) to the UI. Nothing answers a command but a lane's mix, which the fake reports as
+the engine's `Mix` once it changes (its seams `holdEcho`, `holdApply` and `refuseMix` hold or refuse that),
+so a probe proves gesture → command and frame → screen, never the engine
+(`verify/probes/engine-seam.mjs` is the pattern). What still runs for
 real in the page: the input router, Web MIDI parsing and learn, the recovery worker and IndexedDB, the
 export's archive. A snapshot's track carries the lane's mix as the fake's commands and events left it
 (or the one a probe scripts). The export's master is the engine's; asked with the master, the fake

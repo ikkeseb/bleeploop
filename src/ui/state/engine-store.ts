@@ -49,15 +49,15 @@ import { notifyError, notifyInfo } from '../../notify';
  * file), built on engine commands and the feed.
  *
  * The engine owns the musical state: lanes, the transport (master, BPM and its lock), the beat and the
- * selection arrive on the feed, and nothing here predicts them. It does not echo settings, so this store
- * keeps them (lane volume, mute, DUB FEEDBACK and FX, the take modes and FADE's bars, click, master, the
- * input sends; FADE's bars, click, master and the sends across a restart too): it sends each change,
- * mirrors the engine's CLEAR (`Cleared`: the lane's mix resets), COPY (`Copied`) and a pedal's MUTE
- * (`Muted`), and on a `reset` frame takes the settings the engine remembers, so the screen shows what
- * the engine plays. `engineSession` is the
+ * selection arrive on the feed, and nothing here predicts them. Each lane's mix (volume, MUTE, DUB
+ * FEEDBACK, FX) arrives too, as the engine applied it (`Mix`); a mix control shows its gesture's value
+ * until the engine has it (the lane mix section below). The other settings the engine does not echo, so
+ * this store keeps them (the take modes and FADE's bars, click, master, the input sends; FADE's bars,
+ * click, master and the sends across a restart too): it sends each change, and on a `reset` frame takes
+ * the settings the engine remembers, so the screen shows what the engine plays. `engineSession` is the
  * engine as export, recovery and import see it: the engine's PCM with each lane's mix as the engine
  * applied it (the snapshot's; an import's load carries its saved mix, which the engine applies with the
- * loops), and the token of
+ * loops and reports as each lane's `Mix`), and the token of
  * the player's clear that emptied the looper (recovery deletes the jam for it, and keeps it for a new
  * engine's empty lanes). `openEngineDevice` turns the engine's refusal of a switch to another rate into
  * the player's confirm.
@@ -156,15 +156,9 @@ const LANE_BUFFER_SECONDS = 60;
 const MASTER_KEY = 'lf.masterVolume'; // shared with `master.ts`: one saved level for both paths
 const CLICK_KEY = 'lf.clickVolume'; // shared with `clock.ts`
 
-const volumes = Array.from({ length: ENGINE_LANES }, () => createSignal(1));
-const mutes = Array.from({ length: ENGINE_LANES }, () => createSignal(false));
-/** DUB FEEDBACK per lane, 0..1 (1: an overdub sums, as ever; 0: it replaces what it passes over). */
-const dubFeedbacks = Array.from({ length: ENGINE_LANES }, () => createSignal(1));
-const fxVersions = Array.from({ length: ENGINE_LANES }, () => createSignal(0));
 /** Per lane: it waits behind a count-in the engine runs (the reducer's, set as the events arrive:
  * `applyEvent`'s `Beat`, `applyLane`, `endCount`). */
 const counted = Array.from({ length: ENGINE_LANES }, () => createSignal(false));
-const fx: FxState[][] = Array.from({ length: ENGINE_LANES }, defaultFx);
 const [loopEndStop, setLoopEndStopSignal] = createSignal(false);
 const [fixedLength, setFixedLengthSignal] = createSignal(false);
 const [fixedBars, setFixedBarsSignal] = createSignal(4);
@@ -456,6 +450,7 @@ function applyLane(lane: number, frame: number, info: LaneInfo): void {
   // while a count runs is behind it; one that was waiting already is marked by the beat (`applyEvent`).
   if (plain.waiting[lane] && !waiting) endCount(lane);
   else if (!plain.waiting[lane] && waiting && plain.counting) counted[lane][1](true);
+  if (next === 'EMPTY') cancelOverlays(lane);
   plain.clearing[lane] = false;
   plain.state[lane] = next;
   plain.waiting[lane] = waiting;
@@ -509,8 +504,10 @@ function applyEvent(ev: EngineEvent): void {
         'The audio input dropped out during it, so it was not kept, nor the take before it.',
       );
       break;
+    // COPY, CLEAR and a pedal's MUTE reach the lane's mix as its next `Mix`; a pending gesture on the lane
+    // they replace is over.
     case 'Copied':
-      copyLaneMix(ev.from, ev.to, ev.feedback);
+      cancelOverlays(ev.to);
       break;
     case 'Cleared':
       // Before the lane's own Lane event: its state is still the one the clear ended.
@@ -518,10 +515,10 @@ function applyEvent(ev: EngineEvent): void {
         plain.clearing[ev.lane] = true;
         tookLoop = true;
       }
-      clearLaneMix(ev.lane);
+      cancelOverlays(ev.lane);
       break;
-    case 'Muted':
-      setMutePlain(ev.lane, ev.on);
+    case 'Mix':
+      applyMix(ev.lane, ev.mix);
       break;
   }
 }
@@ -639,6 +636,7 @@ function applyFrameNow(f: FeedFrame): void {
     plain.counting = false;
     for (const [, setCounted] of counted) setCounted(false);
     setCountLeft(0);
+    for (let i = 0; i < ENGINE_LANES; i++) cancelOverlays(i);
   }
   // The device and its clock first: the anchor is read after the frame's events, so a take the events
   // start snaps to the grid it carries.
@@ -686,34 +684,188 @@ function wireMix(volume: number, muted: boolean, dubFeedback: number, states: re
   return { volume, muted, dubFeedback, fx: wireFx };
 }
 
-/** The engine cleared the lane: its mix is back to the defaults there, so here too. */
-function clearLaneMix(lane: number): void {
-  volumes[lane][1](1);
-  setMutePlain(lane, false);
-  dubFeedbacks[lane][1](1);
-  fx[lane] = defaultFx();
-  fxVersions[lane][1]((v) => v + 1);
+// ── The lane mix: the engine's, and what a mix control shows until the engine has it ──────────────────
+//
+// A lane's mix (volume, MUTE, DUB FEEDBACK, the five effects) is the one the engine applied, written only
+// from the feed: its `Mix` (sent whenever the applied mix changes: a command, COPY, CLEAR, a pedal's MUTE,
+// a load) and a reset frame. Every reader reads it but a mix control, which shows its OVERLAY while one is
+// set: a gesture (a drag, a held key, a select's change, a bypass press) writes the overlay from the value
+// the control shows and sends the command. The overlay holds through the gesture whatever Mix arrives;
+// after it, it holds until a Mix whose value equals it (both sides normalised, `sameMixValue`), the failed
+// submission of its own latest command, or a cancel: the lane's `Cleared`, a `Copied` into it, an import's
+// or recovery's load, a reset frame, the lane going EMPTY, the control's disposal. Only the UI writes these
+// values (COPY, CLEAR, a load and a reset are the cancels), so an equal Mix is a safe acknowledgement and
+// no timeout is needed. MUTE has no overlay: it sends the engine's toggle, as a pedal does, and shows the
+// engine's mute.
+
+/** A lane's mix as this store holds it: the wire's `LaneMix`, its effects as the FX drawer reads them. */
+interface MixView {
+  readonly volume: number;
+  readonly muted: boolean;
+  readonly dubFeedback: number;
+  readonly fx: readonly FxState[];
 }
 
-/** The engine copied lane `from` whole into `to` (its volume, mute and FX with it, and the DUB FEEDBACK
- * `feedback` its `Copied` says it copied, which the source's may have moved on from): mirror that. */
-function copyLaneMix(from: number, to: number, feedback: number): void {
-  volumes[to][1](volumes[from][0]());
-  setMutePlain(to, mutes[from][0]());
-  dubFeedbacks[to][1](feedback);
-  fx[to] = fx[from].map((s) => ({ bypassed: s.bypassed, params: { ...s.params } }));
-  fxVersions[to][1]((v) => v + 1);
+const defaultMix = (): MixView => ({ volume: 1, muted: false, dubFeedback: 1, fx: defaultFx() });
+
+function sameMix(a: MixView, b: MixView): boolean {
+  return (
+    a.volume === b.volume &&
+    a.muted === b.muted &&
+    a.dubFeedback === b.dubFeedback &&
+    a.fx.every((s, k) => {
+      const t = b.fx[k];
+      const keys = Object.keys(s.params);
+      return s.bypassed === t.bypassed && keys.length === Object.keys(t.params).length && keys.every((key) => s.params[key] === t.params[key]);
+    })
+  );
 }
 
-function setMutePlain(lane: number, on: boolean): void {
-  mutes[lane][1](on);
-  plain.muted[lane] = on;
+/** Each lane's mix as the engine applied it (the feed's). */
+const mixes = Array.from({ length: ENGINE_LANES }, () => createSignal<MixView>(defaultMix(), { equals: sameMix }));
+
+/** Take the engine's mix of `lane`: its own copy (an FX state is never shared with another lane's). */
+function adoptMix(lane: number, mix: LaneMix | MixView): void {
+  mixes[lane][1]({
+    volume: mix.volume,
+    muted: mix.muted,
+    dubFeedback: mix.dubFeedback,
+    fx: mix.fx.map((s) => ({ bypassed: s.bypassed, params: { ...s.params } })),
+  });
+  plain.muted[lane] = mix.muted;
+}
+
+/** A mix control's key among its lane's overlays: the volume, DUB FEEDBACK, effect `k`'s bypass
+ * (`fx<k>`) or one of its params (`fx<k>.<param>`). */
+export type MixKey = 'volume' | 'dubFeedback' | `fx${number}` | `fx${number}.${string}`;
+
+/** A control's overlay: the value its last gesture asked for, and that write's revision. */
+interface Overlay {
+  readonly value: number | boolean;
+  readonly rev: number;
+}
+
+type Overlays = Readonly<Partial<Record<MixKey, Overlay>>>;
+
+const overlays = Array.from({ length: ENGINE_LANES }, () => createSignal<Overlays>({}));
+/** Per lane, the controls whose gesture runs (a pointer down, a key held): no Mix ends their overlay. */
+const holding = Array.from({ length: ENGINE_LANES }, () => new Set<MixKey>());
+let overlayRev = 0;
+
+/** The effect index of an `fx…` key and the param it names (none for its bypass). */
+function fxKeyOf(key: MixKey): { k: number; param: string | null } | null {
+  const m = /^fx(\d+)(?:\.(.+))?$/.exec(key);
+  return m ? { k: Number(m[1]), param: m[2] ?? null } : null;
+}
+
+/** `key`'s value in `mix`. */
+function mixValue(mix: MixView, key: MixKey): number | boolean {
+  if (key === 'volume') return mix.volume;
+  if (key === 'dubFeedback') return mix.dubFeedback;
+  const at = fxKeyOf(key);
+  const state = at ? mix.fx[at.k] : undefined;
+  if (!at || !state) return NaN;
+  return at.param === null ? state.bypassed : (state.params[at.param] ?? NaN);
+}
+
+/** The value a setter sends for `key`: the engine's clamp (a value that is no number: the volume and DUB
+ * FEEDBACK at unity, an effect param refused, null), an integer param rounded. */
+function clampMix(key: MixKey, v: number): number | null {
+  if (key === 'volume') return Math.max(0, Math.min(1.5, Number.isFinite(v) ? v : 1));
+  if (key === 'dubFeedback') return Math.max(0, Math.min(1, Number.isFinite(v) ? v : 1));
+  const at = fxKeyOf(key);
+  const meta = at && FX_META[at.k];
+  const def = meta && at.param !== null ? FX_PARAM_DEFS[meta.kind].find((d) => d.key === at.param) : undefined;
+  if (!def || !Number.isFinite(v)) return null;
+  const bounded = Math.max(def.min, Math.min(def.max, v));
+  return def.integer ? Math.round(bounded) : bounded;
+}
+
+/** An overlay's value and a Mix's are one value: each through the setter's clamp, then as the engine's
+ * f32 holds it (a Mix's numbers crossed as f32). */
+function sameMixValue(key: MixKey, a: number | boolean, b: number | boolean): boolean {
+  if (typeof a === 'boolean' || typeof b === 'boolean') return a === b;
+  const norm = (v: number) => {
+    const c = clampMix(key, v);
+    return c === null ? NaN : Math.fround(c);
+  };
+  return norm(a) === norm(b);
+}
+
+/** What lane `i`'s control `key` shows: its overlay, else the engine's value. */
+function shownMix(i: number, key: MixKey): number | boolean {
+  const o = overlays[i][0]()[key];
+  return o ? o.value : mixValue(mixes[i][0](), key);
+}
+
+/** Drop `key`'s overlay on lane `i`: only the one revision `rev` wrote, when given. */
+function dropOverlay(i: number, key: MixKey, rev?: number): void {
+  const cur = overlays[i][0]();
+  const o = cur[key];
+  if (!o || (rev !== undefined && o.rev !== rev)) return;
+  const next = { ...cur };
+  delete next[key];
+  overlays[i][1](next);
+}
+
+/** A cancel: lane `lane`'s overlays go, and its controls show the engine's mix. */
+function cancelOverlays(lane: number): void {
+  if (Object.keys(overlays[lane][0]()).length > 0) overlays[lane][1]({});
+}
+
+/** A gesture on lane `i`'s control `key`: show `value` and send `command`. Its own failed submission
+ * drops the overlay, unless a newer write replaced it. */
+function writeMix(i: number, key: MixKey, value: number | boolean, command: EngineCommand): void {
+  const rev = ++overlayRev;
+  overlays[i][1]((cur) => ({ ...cur, [key]: { value, rev } }));
+  // `took` false: the batch was not wholly taken (the native host pushes it command by command and stops
+  // at the first refused, keeping the accepted prefix), so this command may still have reached the
+  // engine. The overlay goes anyway: if the engine did take it, its Mix brings the value back.
+  void sendEngine(command).then((took) => {
+    if (!took) dropOverlay(i, key, rev);
+  });
+}
+
+/** The engine's `Mix` for `lane`: it becomes the lane's mix, and ends each overlay it equals whose
+ * gesture is over. */
+function applyMix(lane: number, mix: LaneMix): void {
+  adoptMix(lane, mix);
+  const applied = mixes[lane][0]();
+  const cur = overlays[lane][0]();
+  const met = (Object.keys(cur) as MixKey[]).filter((key) => {
+    const o = cur[key];
+    return o !== undefined && !holding[lane].has(key) && sameMixValue(key, o.value, mixValue(applied, key));
+  });
+  if (met.length === 0) return;
+  const next = { ...cur };
+  for (const key of met) delete next[key];
+  overlays[lane][1](next);
+}
+
+/** The mix controls' side of a gesture on lane `i`'s control `key`: it starts (`on`, a pointer down or a
+ * key held) or ends. At its end an overlay the engine's mix already equals goes at once: its equal Mix
+ * arrived while the gesture held it. */
+function holdMix(i: number, key: MixKey, on: boolean): void {
+  if (on) {
+    holding[i].add(key);
+    return;
+  }
+  holding[i].delete(key);
+  const o = overlays[i][0]()[key];
+  if (o && sameMixValue(key, o.value, mixValue(mixes[i][0](), key))) dropOverlay(i, key, o.rev);
+}
+
+/** Lane `i`'s control `key` was disposed: its gesture and overlay end with it. */
+function dropMix(i: number, key: MixKey): void {
+  holding[i].delete(key);
+  dropOverlay(i, key);
 }
 
 /**
  * A reset frame: take over the settings the engine remembers (one missing from `settings` is at the
  * engine's default, which is the UI's) instead of pushing the UI's, so a WebView reload keeps a
- * playing session's mix and modes. The UI still sends what it persists and the engine lacks (the master
+ * playing session's mix and modes. A lane's mix from here stands only where the frame has no `Mix` for
+ * the lane: its Mix events, applied after this, are the mix the engine last applied. The UI still sends what it persists and the engine lacks (the master
  * and click volumes, FADE's bars and the input sends on a first launch) and what it owns: the note
  * target, the slot gains and the live slot (`engineResync`).
  */
@@ -726,7 +878,8 @@ function adoptSettings(settings: readonly EngineCommand[]): void {
   setRetakeSignal(false);
   setAutoRecordSignal(false);
   setAutoSensitivitySignal(AUTO_RECORD_DEFAULT_SENSITIVITY);
-  for (let i = 0; i < ENGINE_LANES; i++) clearLaneMix(i);
+  // A lane's mix from the settings, for a lane the reset frame has no `Mix` for (its Mix events follow).
+  const laneMixes = Array.from({ length: ENGINE_LANES }, () => ({ volume: 1, muted: false, dubFeedback: 1, fx: defaultFx() }));
   let masterKnown = false;
   let clickKnown = false;
   let fadeKnown = false;
@@ -759,22 +912,21 @@ function adoptSettings(settings: readonly EngineCommand[]): void {
     else if ('SetRetake' in c) setRetakeSignal(c.SetRetake);
     else if ('SetAutoRecord' in c) setAutoRecordSignal(c.SetAutoRecord);
     else if ('SetAutoSensitivity' in c) setAutoSensitivitySignal(c.SetAutoSensitivity);
-    else if ('SetVolume' in c) volumes[c.SetVolume[0]][1](c.SetVolume[1]);
-    else if ('SetMute' in c) setMutePlain(c.SetMute[0], c.SetMute[1]);
-    else if ('SetDubFeedback' in c) dubFeedbacks[c.SetDubFeedback[0]][1](c.SetDubFeedback[1]);
+    else if ('SetVolume' in c) laneMixes[c.SetVolume[0]].volume = c.SetVolume[1];
+    else if ('SetMute' in c) laneMixes[c.SetMute[0]].muted = c.SetMute[1];
+    else if ('SetDubFeedback' in c) laneMixes[c.SetDubFeedback[0]].dubFeedback = c.SetDubFeedback[1];
     else if ('SetFxBypass' in c) {
       const [l, kind, bypassed] = c.SetFxBypass;
       const k = FX_META.findIndex((m) => m.kind === kind);
-      fx[l][k] = { ...fx[l][k], bypassed };
-      fxVersions[l][1]((v) => v + 1);
+      laneMixes[l].fx[k].bypassed = bypassed;
     } else if ('SetFxParam' in c) {
       const [l, key, value] = c.SetFxParam;
       const k = FX_META.findIndex((m) => FX_PARAM_DEFS[m.kind].some((d) => d.key === key));
-      fx[l][k] = { ...fx[l][k], params: { ...fx[l][k].params, [key]: value } };
-      fxVersions[l][1]((v) => v + 1);
+      laneMixes[l].fx[k].params[key] = value;
     }
     // The tempo and the selection arrive as events; the note target and the slots are the UI's.
   }
+  laneMixes.forEach((m, i) => adoptMix(i, m));
   const lacking: EngineCommand[] = [];
   if (!masterKnown) lacking.push({ SetMasterVolume: masterVolume() });
   if (!clickKnown) lacking.push({ SetClickVolume: clickVolume() });
@@ -792,42 +944,29 @@ function adoptSettings(settings: readonly EngineCommand[]): void {
 
 const clampLane = (i: number) => Math.max(0, Math.min(ENGINE_LANES - 1, Math.trunc(i)));
 
+/** The volume fader of lane `i` (0..1.5). */
 function setVolume(i: number, v: number): void {
-  const clamped = Math.max(0, Math.min(1.5, Number.isFinite(v) ? v : 1));
-  volumes[i][1](clamped);
-  sendEngine({ SetVolume: [i, clamped] });
-}
-
-function setMute(i: number, on: boolean): void {
-  setMutePlain(i, on);
-  sendEngine({ SetMute: [i, on] });
+  const value = clampMix('volume', v) ?? 1;
+  writeMix(i, 'volume', value, { SetVolume: [i, value] });
 }
 
 /** DUB FEEDBACK of lane `i`, clamped to 0..1 as the engine clamps it. */
 function setDubFeedback(i: number, v: number): void {
-  const clamped = Math.max(0, Math.min(1, Number.isFinite(v) ? v : 1));
-  dubFeedbacks[i][1](clamped);
-  sendEngine({ SetDubFeedback: [i, clamped] });
+  const value = clampMix('dubFeedback', v) ?? 1;
+  writeMix(i, 'dubFeedback', value, { SetDubFeedback: [i, value] });
 }
 
 function setFxBypass(i: number, fxIndex: number, bypassed: boolean): void {
   const meta = FX_META[fxIndex];
   if (!meta) return;
-  fx[i][fxIndex] = { ...fx[i][fxIndex], bypassed };
-  fxVersions[i][1]((v) => v + 1);
-  sendEngine({ SetFxBypass: [i, meta.kind, bypassed] });
+  writeMix(i, `fx${fxIndex}`, bypassed, { SetFxBypass: [i, meta.kind, bypassed] });
 }
 
 function setFxParam(i: number, fxIndex: number, key: string, value: number): void {
-  const meta = FX_META[fxIndex];
-  const def = meta && FX_PARAM_DEFS[meta.kind].find((d) => d.key === key);
-  if (!def || !Number.isFinite(value)) return;
-  const bounded = Math.max(def.min, Math.min(def.max, value));
-  const applied = def.integer ? Math.round(bounded) : bounded;
-  const prev = fx[i][fxIndex];
-  fx[i][fxIndex] = { ...prev, params: { ...prev.params, [key]: applied } };
-  fxVersions[i][1]((v) => v + 1);
-  sendEngine({ SetFxParam: [i, key as FxParamId, applied] });
+  const mixKey: MixKey = `fx${fxIndex}.${key}`;
+  const applied = clampMix(mixKey, value);
+  if (applied === null) return;
+  writeMix(i, mixKey, applied, { SetFxParam: [i, key as FxParamId, applied] });
 }
 
 /**
@@ -884,14 +1023,14 @@ export const engineFade = {
     sendEngine({ SetFadeBars: fadeBars() });
   },
   /** Every playing lane fades out over the bars and stops on the bar line; a second press stops them now. */
-  fadeAll: (): void => sendEngine({ Action: 'FadeAll' }),
+  fadeAll: (): void => void sendEngine({ Action: 'FadeAll' }),
   /** Some lane is fading. */
   fading: (): boolean => lanes.some(([track]) => track().fading),
 };
 
-/** DUB FEEDBACK per lane, the FX drawer's. */
+/** DUB FEEDBACK per lane, the FX drawer's control: what it shows (`shownMix`) and its gesture. */
 export const engineDubFeedback = {
-  value: (i: number): number => dubFeedbacks[i][0](),
+  value: (i: number): number => shownMix(i, 'dubFeedback') as number,
   set: setDubFeedback,
 };
 
@@ -903,19 +1042,19 @@ function firstEmptyLane(): number {
 /** The `looper` the UI reads (`audio.ts`). */
 export const engineLooper = {
   trackCount: ENGINE_LANES as typeof ENGINE_LANES,
-  recDub: async (i: number): Promise<void> => sendEngine({ RecDub: i }),
-  playStop: (i: number): void => sendEngine({ PlayStop: i }),
-  stop: (i: number): void => sendEngine({ Stop: i }),
-  undoLastOverdub: (i: number): void => sendEngine({ Undo: i }),
-  reverse: (i: number): void => sendEngine({ Reverse: i }),
+  recDub: async (i: number): Promise<void> => void sendEngine({ RecDub: i }),
+  playStop: (i: number): void => void sendEngine({ PlayStop: i }),
+  stop: (i: number): void => void sendEngine({ Stop: i }),
+  undoLastOverdub: (i: number): void => void sendEngine({ Undo: i }),
+  reverse: (i: number): void => void sendEngine({ Reverse: i }),
   copy: (i: number): number => {
     sendEngine({ Copy: i });
     return firstEmptyLane();
   },
-  clear: (i: number): void => sendEngine({ Clear: i }),
-  stopAll: (): void => sendEngine('StopAll'),
-  playAll: (): void => sendEngine('PlayAll'),
-  clearAll: (): void => sendEngine('ClearAll'),
+  clear: (i: number): void => void sendEngine({ Clear: i }),
+  stopAll: (): void => void sendEngine('StopAll'),
+  playAll: (): void => void sendEngine('PlayAll'),
+  clearAll: (): void => void sendEngine('ClearAll'),
   loopEndStopEnabled: loopEndStop,
   setLoopEndStopEnabled: (on: boolean): void => {
     setLoopEndStopSignal(on);
@@ -927,7 +1066,7 @@ export const engineLooper = {
     sendEngine({ SetRetake: on });
   },
   selectedTrack,
-  selectTrack: (i: number): void => sendEngine({ SelectTrack: clampLane(i) }),
+  selectTrack: (i: number): void => void sendEngine({ SelectTrack: clampLane(i) }),
   track: (i: number): Accessor<TrackView> => lanes[i][0],
   trackInfo: (i: number): TrackView => lanes[i][0](),
   /** Lane `i` waits behind a count-in the engine runs (reactive; the draw loop reads `countingValue`). */
@@ -949,16 +1088,25 @@ export const engineLooper = {
   recHeadFrac,
   recSpanFrames,
   masterFramesValue: (): number => plain.master,
-  fxState: (i: number): FxState[] => {
-    fxVersions[i][0]();
-    return fx[i];
-  },
+  /** Lane `i`'s effects as the engine applied them. */
+  fxState: (i: number): readonly FxState[] => mixes[i][0]().fx,
   setFxBypass,
   setFxParam,
   setVolume,
-  setMute,
-  trackVolume: (i: number): number => volumes[i][0](),
-  trackMuted: (i: number): boolean => mutes[i][0](),
+  /** MUTE's press: the engine's toggle, as a pedal's (the engine refuses it on an EMPTY lane). */
+  toggleMute: (i: number): void => void sendEngine({ ActionOn: [i, 'Mute'] }),
+  /** Mute lane `i` or not, outright: for scripts (the native probes), not a control. */
+  setMute: (i: number, on: boolean): void => void sendEngine({ SetMute: [i, on] }),
+  /** Lane `i`'s volume and mute as the engine applied them. */
+  trackVolume: (i: number): number => mixes[i][0]().volume,
+  trackMuted: (i: number): boolean => mixes[i][0]().muted,
+  /** What lane `i`'s mix control `key` shows (the volume, DUB FEEDBACK, an effect's param): its
+   * gesture's overlay, else the engine's value. */
+  mixShown: (i: number, key: 'volume' | 'dubFeedback' | `fx${number}.${string}`): number => shownMix(i, key) as number,
+  /** What effect `k`'s bypass key on lane `i` shows, as `mixShown`. */
+  fxBypassShown: (i: number, k: number): boolean => shownMix(i, `fx${k}`) as boolean,
+  holdMix,
+  dropMix,
   fixedLengthEnabled: fixedLength,
   setFixedLengthEnabled: (on: boolean): void => {
     setFixedLengthSignal(on);
@@ -1053,14 +1201,9 @@ async function loadSession(payload: LoadSessionPayload): Promise<void> {
     tracks: loaded.map((t) => ({ index: t.index, frames: master, reversed: t.reversed, state: TO_LOAD[t.state], mix: t.mix })),
   };
   await platform.engine.loadSession(encodeSessionBytes(header, loaded.map((t) => t.pcm)));
-  // The engine applied the mix with the loops: the faders show it (a refused load adopts nothing).
-  for (const t of loaded) {
-    volumes[t.index][1](t.mix.volume);
-    setMutePlain(t.index, t.mix.muted);
-    dubFeedbacks[t.index][1](t.mix.dubFeedback);
-    fx[t.index] = t.fx;
-    fxVersions[t.index][1]((v) => v + 1);
-  }
+  // The engine applied the mix with the loops, and each loaded lane's `Mix` shows it; a control's pending
+  // gesture is over (a refused load changes nothing).
+  for (let i = 0; i < ENGINE_LANES; i++) cancelOverlays(i);
 }
 
 /** The engine as export, recovery and import read and write it. */
@@ -1074,13 +1217,10 @@ export const engineSession: SessionSource = {
   spendClear: (token) => {
     if (plain.clear === token) plain.clear = null;
   },
-  trackVolume: (i) => volumes[i][0](),
-  trackMuted: (i) => mutes[i][0](),
-  trackDubFeedback: (i) => dubFeedbacks[i][0](),
-  fxState: (i) => {
-    fxVersions[i][0]();
-    return fx[i];
-  },
+  trackVolume: (i) => mixes[i][0]().volume,
+  trackMuted: (i) => mixes[i][0]().muted,
+  trackDubFeedback: (i) => mixes[i][0]().dubFeedback,
+  fxState: (i) => mixes[i][0]().fx,
   masterFramesValue: () => plain.master,
   exportSnapshot,
   loadSession,

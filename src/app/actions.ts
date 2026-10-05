@@ -127,7 +127,7 @@ const LANE: Readonly<Record<LaneActionId, LaneRow>> = {
   playStop: { gate: playStopGate, act: (i) => looper.playStop(i), engine: 'PlayStop' },
   undo: { gate: undoGate, act: (i) => looper.undoLastOverdub(i), engine: 'Undo' }, // a second press redoes, as ↶ UNDO does
   clear: { gate: clearGate, act: clearTrack, engine: 'Clear' },
-  mute: { gate: muteGate, act: (i) => looper.setMute(i, !looper.trackMuted(i)), engine: 'Mute' },
+  mute: { gate: muteGate, act: (i) => looper.toggleMute(i), engine: 'Mute' },
   reverse: { gate: reverseGate, act: (i) => looper.reverse(i), engine: 'Reverse' },
   copy: { gate: copyGate, act: (i) => void looper.copy(i), engine: 'Copy' },
   // TRIM to the first half of the loop's bars, rounded down (one UNDO away): the engine's `Halve` judges

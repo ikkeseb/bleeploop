@@ -28,7 +28,9 @@ is a one-line adapter). UI-only edits are safe while the dev app runs,
   Measured cost + the fix pattern: `docs/ARCHITECTURE.md` invariant 6.
 - **The engine's names:** components take `looper`, `clock`, `master`, `session` and `sampleRate`
   from `state/audio.ts` (the engine store behind them: `state/engine-store.ts`). A gesture sends a
-  command and the feed shows the outcome (invariant 3).
+  command and the feed shows the outcome (invariant 3). A lane mix control (volume, DUB FEEDBACK, FX)
+  shows its gesture's value until the feed's `Mix` has it, and MUTE sends the engine's toggle; the rule
+  lives in `state/engine-store.ts` (the lane mix section), the controls' side in `looper/mix-gesture.ts`.
 - **One lane derivation:** a lane's display state, word, well message and count-in come from
   `looper/lane-state.ts`; the looper lanes and the stage view (`src/ui/stage/`) both read it, so a new
   state lands there once.

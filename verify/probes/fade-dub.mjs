@@ -16,11 +16,12 @@
  * - DUB FEEDBACK (the lane's FX drawer, `src/ui/looper/FxPanel.tsx`): the slider starts at 100 %, sends
  *   `SetDubFeedback` as a fraction, reads REPLACE at 0; a reset frame's value is adopted, COPY hands the
  *   copy the value the engine's `Copied` says it copied (the source may have moved since), and CLEAR
- *   resets it (`Cleared`).
+ *   resets it (`Cleared`), each as the lane's `Mix` the fake reports after it.
  *
  * Cannot see the native engine (lf-engine `tests/fade.rs` and `tests/dub_feedback.rs` hold the audio),
- * Tauri IPC or any timing: the fake answers no command by itself, so every state the DOM shows was
- * scripted. Screenshots of the command bar and the FX drawer land in logs/fade-dub/ for the eye.
+ * Tauri IPC or any timing: the fake answers no command by itself but a lane's mix, so every state the
+ * DOM shows was scripted. Screenshots of the command bar and the FX drawer land in logs/fade-dub/ for
+ * the eye.
  * Run: pnpm probe fade-dub
  */
 import assert from 'node:assert/strict';
@@ -184,10 +185,15 @@ await probe(async ({ browser, open }) => {
   await dub(0).fill('40');
   // COPY took 40 %; the source moves to 75 % before the copy's Copied lands, which carries what it copied.
   await dub(0).fill('75');
+  // The copy's DUB FEEDBACK arrives as its lane's `Mix`, which the fake reports as the engine does.
+  const dubSettles = (i, pct) =>
+    page.waitForFunction(([i, pct]) => document.querySelector(`[aria-label="Track ${i + 1} dub feedback"]`)?.value === pct, [i, pct], { timeout: 5000 }).catch(() => {});
   await emit({ events: [{ Copied: { frame: BAR, from: 0, to: 2, feedback: 0.4 } }, laneEvent(2, playing())] });
   await openFx(2);
+  await dubSettles(2, '40');
   assert.equal(await dub(2).inputValue(), '40', "COPY hands the copy the DUB FEEDBACK the engine copied, not the source's later one");
   await emit({ events: [{ Cleared: { frame: BAR, lane: 2 } }, laneEvent(2, playing())] });
+  await dubSettles(2, '100');
   assert.equal(await dub(2).inputValue(), '100', 'CLEAR resets it');
 
   // ── A reload's reset frame: the engine's remembered bars and feedback are adopted ─────────────────

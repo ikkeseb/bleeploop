@@ -285,8 +285,9 @@ plugin-GUI work.
   Empty plugin slots, `--mute` and a 3 s pause after the ASIO close do not remove it. Why the endpoints
   start this way is unknown (the callbacks' timing was measured, not the device); Signal Desktop and
   Focusrite Notifier ran throughout. By the pipe's own sizing rule (`PipeConfig::setpoint`) these pushes
-  and pulls ask for 33–43 ms. Next check: both series with the two applications closed; what to change
-  is STATUS D25.
+  and pulls ask for 33–43 ms. A trim rule that tolerates these is built and replayed against the
+  traces on the branch `d25-trim-rule` (it keeps 27 to 29 ms more input queued for up to 3.5 s);
+  whether to land it is STATUS D25.
 - The release profile warns of four unused items in `app` (`Duration` in `host/vst3.rs`,
   `promote_pro_audio` in `host/clap.rs`, `teardown` in `host/vst3.rs`, `asio_available` in
   `audio_output.rs`); since when is unknown.

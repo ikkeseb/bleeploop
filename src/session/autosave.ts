@@ -19,6 +19,7 @@ import { encodeRecovery } from './recovery-encode';
 import { exportBase, type StemSnapshot } from './stem-archive';
 import { importSession } from './import';
 import type { SessionSource } from './session-source';
+import type { FxState } from '../ui/state/fx-metadata';
 import { parseZip } from './unzip';
 import { framesPerBar } from '../ui/state/quantize';
 
@@ -47,6 +48,39 @@ interface JamFingerprint {
   blank: boolean;
   /** Some lane holds a committed loop. */
   committed: boolean;
+  /** `value` without the lanes' mixes: a save records its snapshot's mix in them (`persistedFingerprint`). */
+  parts: FingerprintParts;
+}
+
+/** A fingerprint's master, and each lane's part before its mix (`loop`: the lane holds one, so a mix
+ * follows). */
+interface FingerprintParts {
+  master: string;
+  lanes: { index: number; head: string; loop: boolean }[];
+}
+
+/** A lane's mix in a fingerprint: each effect's params in key order, whatever order they were built in,
+ * and every number as an f32 holds it (a `Mix` prints an FX param's f32, a snapshot the value it was sent
+ * as: one mix must give one part). */
+function mixPart(volume: number, muted: boolean, dubFeedback: number, fx: readonly FxState[]): string {
+  const effects = fx.map((s) => [s.bypassed, ...Object.keys(s.params).sort().map((key) => Math.fround(s.params[key]))]);
+  return `${Math.fround(volume)}:${Number(muted)}:${Math.fround(dubFeedback)}:${JSON.stringify(effects)}`;
+}
+
+function joinFingerprint(parts: FingerprintParts, mixOf: (i: number) => string): string {
+  return `${parts.master}|${parts.lanes.map((l) => (l.loop ? `${l.head}:${mixOf(l.index)}` : l.head)).join('|')}`;
+}
+
+/**
+ * What a save of `snapshot` records as saved: the inspection it was taken for, with each lane's mix as
+ * the snapshot carries it (the engine's where it pinned the loops), not the mix inspected before. A mix
+ * that changed between the two (A inspected, B pinned) then leaves the jam dirty when it is back at A.
+ */
+function persistedFingerprint(inspected: JamFingerprint, snapshot: StemSnapshot): string {
+  return joinFingerprint(inspected.parts, (i) => {
+    const t = snapshot.tracks.find((track) => track.index === i);
+    return t ? mixPart(t.volume, t.muted, t.dubFeedback ?? 1, t.fx) : 'none';
+  });
 }
 
 /** The outcome of the startup restore; `keptAt`: the latest jam's rate when it is not this device's. */
@@ -232,25 +266,26 @@ function inspectJam(): JamFingerprint {
   const master = jam().masterFramesValue();
   let blank = master === 0;
   let committed = false;
-  const parts: string[] = [];
+  const lanes: FingerprintParts['lanes'] = [];
 
   for (let i = 0; i < jam().trackCount; i++) {
     const state = jam().stateOf(i);
     const revision = jam().revision(i);
     if (state !== 'EMPTY') blank = false;
     if (state === 'EMPTY' || state === 'RECORDING') {
-      parts.push(`${i}:-:${revision}`);
+      lanes.push({ index: i, head: `${i}:-:${revision}`, loop: false });
       continue;
     }
     committed = true;
-    parts.push(
-      `${i}:${state === 'OVERDUBBING' ? 'PLAYING' : state}:${jam().trackInfo(i).lengthFrames}:${revision}:` +
-        `${jam().trackVolume(i)}:${Number(jam().trackMuted(i))}:${jam().trackDubFeedback(i)}:` +
-        JSON.stringify(jam().fxState(i)),
-    );
+    const head = `${i}:${state === 'OVERDUBBING' ? 'PLAYING' : state}:${jam().trackInfo(i).lengthFrames}:${revision}`;
+    lanes.push({ index: i, head, loop: true });
   }
 
-  return { value: `${committed ? master : '-'}|${parts.join('|')}`, blank, committed };
+  const parts = { master: committed ? String(master) : '-', lanes };
+  const value = joinFingerprint(parts, (i) =>
+    mixPart(jam().trackVolume(i), jam().trackMuted(i), jam().trackDubFeedback(i), jam().fxState(i)),
+  );
+  return { value, blank, committed, parts };
 }
 
 /** Nothing is committed. The player's clear that emptied the looper deletes the jam at the rate it emptied,
@@ -264,15 +299,24 @@ async function forgetJam(): Promise<void> {
   failedRestoreFingerprint = '';
 }
 
-async function persistCurrent(snapshot = inspectJam()): Promise<void> {
-  if (failedRestoreFingerprint && snapshot.value === failedRestoreFingerprint) return;
+/** Persist the jam `snapshot` inspected; resolves with the fingerprint that now counts as saved: the
+ * saved snapshot's (`persistedFingerprint`), else the inspected one. */
+async function persistCurrent(snapshot = inspectJam()): Promise<string> {
+  if (failedRestoreFingerprint && snapshot.value === failedRestoreFingerprint) return snapshot.value;
   // "Nothing committed" is decided BEFORE the grid is validated. A first take in flight has no loop and
   // the master grid is still 0 frames: the whole-bar check below would reject that as a save failure and
   // the close guard would warn about losing loops that never existed.
-  if (!snapshot.committed) return forgetJam();
+  if (!snapshot.committed) {
+    await forgetJam();
+    return snapshot.value;
+  }
   const committed = await jam().exportSnapshot();
-  if (committed.tracks.length === 0) return forgetJam();
+  if (committed.tracks.length === 0) {
+    await forgetJam();
+    return snapshot.value;
+  }
   await saveSnapshot(committed);
+  return persistedFingerprint(snapshot, committed);
 }
 
 /** Save `committed` (it holds a loop) as the latest jam at its rate. */
@@ -384,8 +428,8 @@ function start(from: SessionSource): () => void {
         saving = true;
         const fingerprint = current.value;
         void serialized(() => persistCurrent(current))
-          .then(() => {
-            saved = fingerprint;
+          .then((persisted) => {
+            saved = persisted;
             failedFingerprint = '';
           })
           .catch((error) => {
@@ -414,7 +458,7 @@ function start(from: SessionSource): () => void {
 async function flush(): Promise<void> {
   if (!started) return;
   await readyPromise;
-  await serialized(() => persistCurrent());
+  await serialized(async () => void (await persistCurrent()));
 }
 
 /**

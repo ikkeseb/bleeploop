@@ -14,8 +14,9 @@
  * - frame → DOM: a count-in (ARMED, the numeral, the beat LED, the BPM lock), a beat LED shown when the
  *   beat is heard (its frame and the output latency against the clock anchor), a live take, a committed
  *   loop (PLAYING, the loop readout, a moving ring dial from the clock anchor), the record meter, a
- *   refusal on its lane, the selection, a COPY carrying the lane's volume, a lane's mix kept when it only
- *   goes EMPTY and reset by `Cleared`, a multiply take's record head sweeping its window (the canvas),
+ *   refusal on its lane, the selection, a COPY carrying the lane's volume (the copy's `Mix`, which the
+ *   fake reports as the engine does), a lane's mix kept when it only goes EMPTY and reset by `Cleared`'s
+ *   `Mix`, a multiply take's record head sweeping its window (the canvas),
  *   a later take's wait as the engine's beats tell it (a count-in from stopped loops: COUNT-IN, the
  *   numeral, no head on the canvas; an arm beside a playing loop: WAITING FOR DOWNBEAT, no numeral, the
  *   amber head; a cancelled count leaving no numeral behind, a beat still to be shown included; a
@@ -26,7 +27,7 @@
  *   from what the UI kept).
  *
  * Cannot see the native engine, the Rust mirror of the wire, Tauri IPC or any timing: the fake answers
- * no command by itself, so every state the DOM shows here was scripted.
+ * no command by itself but a lane's mix (its `Mix`), so every other state the DOM shows here was scripted.
  * Run: pnpm probe engine-seam
  */
 import assert from 'node:assert/strict';
@@ -184,18 +185,26 @@ await probe(async ({ open }) => {
   await emit({ events: [{ Selected: { frame: BAR, lane: 2 } }] });
   assert.equal(await lanes.nth(2).getAttribute('aria-current'), 'true');
 
-  // ── The mix this store keeps: a volume, and COPY carrying it ──────────────────────────────────
+  // ── The lane mix is the engine's: a volume, and COPY carrying it as the copy's `Mix` ─────────────
+  // The fake reports a lane's mix as the engine does (`Mix`, once it changes); the fader shows its
+  // gesture's value until then (`verify/probes/lane-mix.mjs` holds the overlay's rules).
+  const volumeOf = (i) => page.getByRole('slider', { name: `Track ${i + 1} volume` }).inputValue();
+  const engineVolume = (i) => page.evaluate((l) => window.__lf.looper.trackVolume(l), i);
   await clearSent();
   await page.getByRole('slider', { name: 'Track 1 volume' }).fill('80');
   assert.deepEqual(await sentAtLeast(1), [{ SetVolume: [0, 0.8] }], 'the fader sends SetVolume');
+  await page.waitForFunction(() => window.__lf.looper.trackVolume(0) === 0.8, undefined, { timeout: 5000 });
   await emit({ events: [{ Copied: { frame: BAR, from: 0, to: 1, feedback: 1 } }, laneEvent(1, committed)] });
-  assert.equal(await page.getByRole('slider', { name: 'Track 2 volume' }).inputValue(), '80', 'COPY carries the volume');
+  await page.waitForFunction(() => window.__lf.looper.trackVolume(1) === 0.8, undefined, { timeout: 5000 });
+  assert.equal(await volumeOf(1), '80', "COPY's Mix carries the volume");
   // A lane going EMPTY keeps its mix (an aborted take); only the engine's CLEAR resets it.
   await clearSent();
   await emit({ events: [laneEvent(1, lane('Empty'))] });
-  assert.equal(await page.getByRole('slider', { name: 'Track 2 volume' }).inputValue(), '80', 'EMPTY alone keeps the mix');
+  assert.equal(await volumeOf(1), '80', 'EMPTY alone keeps the mix');
   await emit({ events: [{ Cleared: { frame: BAR, lane: 1 } }] });
-  assert.equal(await page.getByRole('slider', { name: 'Track 2 volume' }).inputValue(), '100', 'Cleared resets the mix');
+  await page.waitForFunction(() => window.__lf.looper.trackVolume(1) === 1, undefined, { timeout: 5000 });
+  assert.equal(await volumeOf(1), '100', "Cleared's Mix resets the mix");
+  assert.equal(await engineVolume(0), 0.8, 'the source keeps its own');
   assert.deepEqual(await sent(), [], 'the engine reset its own mix: nothing is sent');
 
   // ── No MIC, and the play path ─────────────────────────────────────────────────────────────────
