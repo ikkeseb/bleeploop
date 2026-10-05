@@ -50,7 +50,7 @@ import { notifyError, notifyInfo } from '../../notify';
  *
  * The engine owns the musical state: lanes, the transport (master, BPM and its lock), the beat and the
  * selection arrive on the feed, and nothing here predicts them. Each lane's mix (volume, MUTE, DUB
- * FEEDBACK, FX) arrives too, as the engine applied it (`Mix`); a mix control shows its gesture's value
+ * FEEDBACK, pan, FX) arrives too, as the engine applied it (`Mix`); a mix control shows its gesture's value
  * until the engine has it (the lane mix section below). The other settings the engine does not echo, so
  * this store keeps them (the take modes and FADE's bars, click, master, the input sends; FADE's bars,
  * click, master and the sends across a restart too): it sends each change, and on a `reset` frame takes
@@ -675,18 +675,19 @@ function applyFrameNow(f: FeedFrame): void {
 
 // ── The mix and the modes this store keeps ────────────────────────────────────────────────────────
 
-/** A lane's mix in the wire's shape (`LaneMix`): each effect's params exactly its defs' keys. */
-function wireMix(volume: number, muted: boolean, dubFeedback: number, states: readonly FxState[]): LaneMix {
+/** A lane's mix in the wire's shape (`LaneMix`): each effect's params exactly its defs' keys, the pan
+ * only off the centre (as the engine writes it). */
+function wireMix(volume: number, muted: boolean, dubFeedback: number, pan: number, states: readonly FxState[]): LaneMix {
   const wireFx = FX_META.map((meta, k) => ({
     bypassed: states[k].bypassed,
     params: Object.fromEntries(FX_PARAM_DEFS[meta.kind].map((def) => [def.key, states[k].params[def.key]])),
   }));
-  return { volume, muted, dubFeedback, fx: wireFx };
+  return { volume, muted, dubFeedback, ...(pan === 0 ? {} : { pan }), fx: wireFx };
 }
 
 // ── The lane mix: the engine's, and what a mix control shows until the engine has it ──────────────────
 //
-// A lane's mix (volume, MUTE, DUB FEEDBACK, the five effects) is the one the engine applied, written only
+// A lane's mix (volume, MUTE, DUB FEEDBACK, pan, the five effects) is the one the engine applied, written only
 // from the feed: its `Mix` (sent whenever the applied mix changes: a command, COPY, CLEAR, a pedal's MUTE,
 // a load) and a reset frame. Every reader reads it but a mix control, which shows its OVERLAY while one is
 // set: a gesture (a drag, a held key, a select's change, a bypass press) writes the overlay from the value
@@ -703,16 +704,19 @@ interface MixView {
   readonly volume: number;
   readonly muted: boolean;
   readonly dubFeedback: number;
+  /** -1 (hard left) to 1 (hard right); a wire mix without one is centred (0). */
+  readonly pan: number;
   readonly fx: readonly FxState[];
 }
 
-const defaultMix = (): MixView => ({ volume: 1, muted: false, dubFeedback: 1, fx: defaultFx() });
+const defaultMix = (): MixView => ({ volume: 1, muted: false, dubFeedback: 1, pan: 0, fx: defaultFx() });
 
 function sameMix(a: MixView, b: MixView): boolean {
   return (
     a.volume === b.volume &&
     a.muted === b.muted &&
     a.dubFeedback === b.dubFeedback &&
+    a.pan === b.pan &&
     a.fx.every((s, k) => {
       const t = b.fx[k];
       const keys = Object.keys(s.params);
@@ -730,14 +734,15 @@ function adoptMix(lane: number, mix: LaneMix | MixView): void {
     volume: mix.volume,
     muted: mix.muted,
     dubFeedback: mix.dubFeedback,
+    pan: mix.pan ?? 0,
     fx: mix.fx.map((s) => ({ bypassed: s.bypassed, params: { ...s.params } })),
   });
   plain.muted[lane] = mix.muted;
 }
 
-/** A mix control's key among its lane's overlays: the volume, DUB FEEDBACK, effect `k`'s bypass
+/** A mix control's key among its lane's overlays: the volume, DUB FEEDBACK, the pan, effect `k`'s bypass
  * (`fx<k>`) or one of its params (`fx<k>.<param>`). */
-export type MixKey = 'volume' | 'dubFeedback' | `fx${number}` | `fx${number}.${string}`;
+export type MixKey = 'volume' | 'dubFeedback' | 'pan' | `fx${number}` | `fx${number}.${string}`;
 
 /** A control's overlay: the value its last gesture asked for, and that write's revision. */
 interface Overlay {
@@ -762,6 +767,7 @@ function fxKeyOf(key: MixKey): { k: number; param: string | null } | null {
 function mixValue(mix: MixView, key: MixKey): number | boolean {
   if (key === 'volume') return mix.volume;
   if (key === 'dubFeedback') return mix.dubFeedback;
+  if (key === 'pan') return mix.pan;
   const at = fxKeyOf(key);
   const state = at ? mix.fx[at.k] : undefined;
   if (!at || !state) return NaN;
@@ -769,10 +775,12 @@ function mixValue(mix: MixView, key: MixKey): number | boolean {
 }
 
 /** The value a setter sends for `key`: the engine's clamp (a value that is no number: the volume and DUB
- * FEEDBACK at unity, an effect param refused, null), an integer param rounded. */
+ * FEEDBACK at unity, the pan centred, an effect param refused, null), an integer param rounded. */
 function clampMix(key: MixKey, v: number): number | null {
   if (key === 'volume') return Math.max(0, Math.min(1.5, Number.isFinite(v) ? v : 1));
   if (key === 'dubFeedback') return Math.max(0, Math.min(1, Number.isFinite(v) ? v : 1));
+  if (key === 'pan') return Number.isFinite(v) ? Math.max(-1, Math.min(1, v)) + 0 : 0; // -0 as 0
+
   const at = fxKeyOf(key);
   const meta = at && FX_META[at.k];
   const def = meta && at.param !== null ? FX_PARAM_DEFS[meta.kind].find((d) => d.key === at.param) : undefined;
@@ -879,7 +887,7 @@ function adoptSettings(settings: readonly EngineCommand[]): void {
   setAutoRecordSignal(false);
   setAutoSensitivitySignal(AUTO_RECORD_DEFAULT_SENSITIVITY);
   // A lane's mix from the settings, for a lane the reset frame has no `Mix` for (its Mix events follow).
-  const laneMixes = Array.from({ length: ENGINE_LANES }, () => ({ volume: 1, muted: false, dubFeedback: 1, fx: defaultFx() }));
+  const laneMixes = Array.from({ length: ENGINE_LANES }, () => ({ volume: 1, muted: false, dubFeedback: 1, pan: 0, fx: defaultFx() }));
   let masterKnown = false;
   let clickKnown = false;
   let fadeKnown = false;
@@ -915,6 +923,7 @@ function adoptSettings(settings: readonly EngineCommand[]): void {
     else if ('SetVolume' in c) laneMixes[c.SetVolume[0]].volume = c.SetVolume[1];
     else if ('SetMute' in c) laneMixes[c.SetMute[0]].muted = c.SetMute[1];
     else if ('SetDubFeedback' in c) laneMixes[c.SetDubFeedback[0]].dubFeedback = c.SetDubFeedback[1];
+    else if ('SetPan' in c) laneMixes[c.SetPan[0]].pan = c.SetPan[1];
     else if ('SetFxBypass' in c) {
       const [l, kind, bypassed] = c.SetFxBypass;
       const k = FX_META.findIndex((m) => m.kind === kind);
@@ -954,6 +963,13 @@ function setVolume(i: number, v: number): void {
 function setDubFeedback(i: number, v: number): void {
   const value = clampMix('dubFeedback', v) ?? 1;
   writeMix(i, 'dubFeedback', value, { SetDubFeedback: [i, value] });
+}
+
+/** The pan of lane `i`, -1 (hard left) to 1 (hard right), clamped as the engine clamps it (a value that
+ * is no number centres it). */
+function setPan(i: number, v: number): void {
+  const value = clampMix('pan', v) ?? 0;
+  writeMix(i, 'pan', value, { SetPan: [i, value] });
 }
 
 function setFxBypass(i: number, fxIndex: number, bypassed: boolean): void {
@@ -1093,16 +1109,18 @@ export const engineLooper = {
   setFxBypass,
   setFxParam,
   setVolume,
+  setPan,
   /** MUTE's press: the engine's toggle, as a pedal's (the engine refuses it on an EMPTY lane). */
   toggleMute: (i: number): void => void sendEngine({ ActionOn: [i, 'Mute'] }),
   /** Mute lane `i` or not, outright: for scripts (the native probes), not a control. */
   setMute: (i: number, on: boolean): void => void sendEngine({ SetMute: [i, on] }),
-  /** Lane `i`'s volume and mute as the engine applied them. */
+  /** Lane `i`'s volume, mute and pan as the engine applied them. */
   trackVolume: (i: number): number => mixes[i][0]().volume,
   trackMuted: (i: number): boolean => mixes[i][0]().muted,
-  /** What lane `i`'s mix control `key` shows (the volume, DUB FEEDBACK, an effect's param): its
+  trackPan: (i: number): number => mixes[i][0]().pan,
+  /** What lane `i`'s mix control `key` shows (the volume, DUB FEEDBACK, the pan, an effect's param): its
    * gesture's overlay, else the engine's value. */
-  mixShown: (i: number, key: 'volume' | 'dubFeedback' | `fx${number}.${string}`): number => shownMix(i, key) as number,
+  mixShown: (i: number, key: 'volume' | 'dubFeedback' | 'pan' | `fx${number}.${string}`): number => shownMix(i, key) as number,
   /** What effect `k`'s bypass key on lane `i` shows, as `mixShown`. */
   fxBypassShown: (i: number, k: number): boolean => shownMix(i, `fx${k}`) as boolean,
   holdMix,
@@ -1158,6 +1176,7 @@ async function exportSnapshot(options: { master?: boolean } = {}): Promise<StemS
       reversed: t.reversed,
       fx: validateFxStates(t.mix.fx, `snapshot: track ${t.index + 1}`),
       dubFeedback: t.mix.dubFeedback,
+      pan: t.mix.pan ?? 0,
       state: FROM_SNAPSHOT[t.state],
     })),
   };
@@ -1190,8 +1209,9 @@ async function loadSession(payload: LoadSessionPayload): Promise<void> {
     const state = t.state ?? 'PLAYING';
     if (state !== 'PLAYING' && state !== 'STOPPED') throw new Error(`loadSession: track ${t.index + 1} state must be PLAYING or STOPPED`);
     const states = validateFxStates(t.fx, `loadSession: track ${t.index + 1}`);
-    // A session saved before DUB FEEDBACK sums, as it did.
-    const mix = wireMix(Math.max(0, Math.min(1.5, t.volume)), t.muted, Math.max(0, Math.min(1, t.dubFeedback ?? 1)), states);
+    // A session saved before DUB FEEDBACK sums, as it did; one saved before pan is centred.
+    const pan = clampMix('pan', t.pan ?? 0) ?? 0;
+    const mix = wireMix(Math.max(0, Math.min(1.5, t.volume)), t.muted, Math.max(0, Math.min(1, t.dubFeedback ?? 1)), pan, states);
     return { index: t.index, pcm: t.pcm, reversed: t.reversed, state, fx: states, mix };
   });
   const header: LoadHeader = {
@@ -1220,6 +1240,7 @@ export const engineSession: SessionSource = {
   trackVolume: (i) => mixes[i][0]().volume,
   trackMuted: (i) => mixes[i][0]().muted,
   trackDubFeedback: (i) => mixes[i][0]().dubFeedback,
+  trackPan: (i) => mixes[i][0]().pan,
   fxState: (i) => mixes[i][0]().fx,
   masterFramesValue: () => plain.master,
   exportSnapshot,

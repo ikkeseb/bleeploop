@@ -12,7 +12,7 @@
 import { notifyError } from '../notify';
 import type { SessionMasterKind } from './session-schema';
 import type { SessionSource } from './session-source';
-import { encodeWav, mixMono } from './wav';
+import { encodeWav, mixStereo } from './wav';
 import { makeZip } from './zip';
 import { prepareStemArchive, exportBase } from './stem-archive';
 import { slotLetter, takeSlotTones } from '../ui/state/slot-tones';
@@ -54,7 +54,7 @@ export interface BuildExportOptions {
  * bus and the limiter (`src-tauri/crates/lf-engine/src/render.rs`), every track playing, frame 0 lined
  * up with the stems. A STOPPED track is IN the master (the owner exported a stopped session and got
  * silence, tester report F26); only MUTE leaves a track out. If the engine's render fails, the export
- * still completes with the DRY volume/mute dual-mono mixdown (master.kind 'dry-fallback') — a degraded
+ * still completes with the DRY volume/mute/pan stereo mixdown (master.kind 'dry-fallback') — a degraded
  * master beats a lost take. Returns null when nothing is committed.
  * An export with the master requires a finished take so its snapshot cannot contain an unfinished layer.
  * Recovery snapshots pass `includeMaster:false`: they never ask the engine for a master and remain
@@ -87,7 +87,7 @@ export async function buildExportBundle(
 
   if (withMaster) {
     // The engine's wet master; the dry mixdown as the fallback so one render failure can't lose the
-    // whole export. Both mix every committed track, STOPPED included; mute and volume apply as heard.
+    // whole export. Both mix every committed track, STOPPED included; mute, volume and pan apply as heard.
     // Recovery snapshots skip this whole branch: their job is preserving editable stems, not a mix.
     let masterChannels: Float32Array[];
     let masterKind: Exclude<SessionMasterKind, 'wet-v1'>;
@@ -97,8 +97,7 @@ export async function buildExportBundle(
     } else {
       console.error('[export] the engine rendered no wet master — falling back to the dry mixdown', snap.masterError ?? 'no reason given');
       notifyError('Wet master render failed — exported a dry mixdown instead');
-      const mono = mixMono(snap.tracks, snap.masterLengthFrames, masterLevel);
-      masterChannels = [mono, mono];
+      masterChannels = mixStereo(snap.tracks, snap.masterLengthFrames, masterLevel);
       masterKind = 'dry-fallback';
     }
     const masterFile = `${base}-master.wav`;

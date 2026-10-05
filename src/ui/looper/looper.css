@@ -448,10 +448,10 @@
   }
 }
 
-/* ---- right cluster: FX/MUTE/undo/reverse pills over the horizontal volume slider ---- */
+/* ---- right cluster: FX/MUTE/undo/reverse pills over the mix row (volume slider and pan) ---- */
 .lp-lane__right {
   flex: 0 0 auto;
-  width: clamp(178px, 17vw, 208px);
+  width: clamp(240px, 20vw, 264px);
   display: flex;
   flex-direction: column;
   justify-content: center;
@@ -460,9 +460,9 @@
   z-index: 1;
 }
 /* Empty-lane dimming is applied per element, not on this container — see the .lp-pb:disabled block
-   above for why. The volume fader is the only child of the right cluster that is not a pill, so it
-   carries the cluster's 0.7 directly (0.5 and below read grey-on-grey). */
-.lp-lane[data-state='empty'] .lp-lane__vol {
+   above for why. The volume fader and the pan are the right cluster's only children that are not
+   pills, so they carry the dimming directly (0.5 and below read grey-on-grey). */
+.lp-lane[data-state='empty'] .lp-lane__mix {
   opacity: 0.55;
 }
 .lp-lane__mods {
@@ -480,8 +480,16 @@
   display: none;
 }
 
+/* the mix row: the volume fader takes what the pan (a fixed 44px range and its read-out) leaves */
+.lp-lane__mix {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
 /* horizontal volume slider — native range styled to match the command bar's .transport__volume */
 .lp-lane__vol {
+  flex: 1 1 auto;
+  min-width: 0;
   display: flex;
   align-items: center;
   gap: 9px;
@@ -523,6 +531,42 @@
   color: var(--dim);
   font-variant-numeric: tabular-nums;
 }
+/* the pan: a 44x24 range over -100..100 with a centre tick, and its L / C / R read-out */
+.lp-lane__pan {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+.lp-pan-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+.lp-pan {
+  position: relative; /* over the centre tick */
+  width: 44px;
+  height: 24px;
+  margin: -2px 0; /* no inline margin: the thumb's centre at the middle of travel is the box's centre */
+}
+.lp-pan__centre {
+  position: absolute;
+  left: calc(50% - 0.5px);
+  top: 50%;
+  transform: translateY(-50%);
+  width: 1px;
+  height: 11px;
+  background: var(--faint);
+  pointer-events: none;
+}
+.lp-pan__val {
+  flex: 0 0 auto;
+  min-width: 5ch; /* `L 100` */
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--dim);
+  font-variant-numeric: tabular-nums;
+}
 
 /* ---- SHORT regime: the splitter shrinks the lanes-area (the container), so these track it ---- */
 @container lp (max-height: 400px) {
@@ -547,8 +591,9 @@
   .lp-lane__state {
     font-size: 8.5px;
   }
-  .lp-vdb {
-    display: none; /* drop the dB read-out when the lanes are very short */
+  .lp-vdb,
+  .lp-pan__val {
+    display: none; /* drop the dB and pan read-outs when the lanes are very short */
   }
 }
 

@@ -14,7 +14,7 @@ import './looper.css';
  * `src/ui/AGENTS.md`). Each lane, left→right: an identity box
  * (mono track number + state word), the round core REC/DUB gesture, a stacked PLAY-STOP/CLR pair,
  * the recessed wave well (holding the waveform canvas + its playhead), and a right cluster of
- * FX/MUTE/undo/reverse/copy/trim pills over a horizontal volume slider.
+ * FX/MUTE/undo/reverse/copy/trim pills over a mix row (a horizontal volume slider and the pan).
  *
  * The audio engine, the waveform.ts rAF renderer (which draws each <canvas> by reading non-reactive
  * looper getters), and the per-track state machine are UNCHANGED — this is a presentation layer.
@@ -117,6 +117,100 @@ function Fader(props: { index: number; disabled: boolean }) {
         />
       </div>
       <span class="lp-vdb">{dbStr()}</span>
+    </div>
+  );
+}
+
+/** A pan as its read-out says it: `L 30`, `C` or `R 30` (percent of the way to that side). */
+function panText(pan: number): string {
+  const pct = Math.round(pan * 100);
+  if (pct === 0) return 'C';
+  return pct < 0 ? `L ${-pct}` : `R ${pct}`;
+}
+
+/** The pointer's detent around the centre, in percent: a drag inside it lands on the centre. The keys
+ * step across it. */
+const PAN_DETENT = 2;
+
+/**
+ * The lane's pan beside its volume fader: a native range over -100..100 (percent of the way to a side).
+ * A drag snaps to the centre inside the detent; the arrow keys step by 1 and Page Up/Down by 10 (no
+ * detent), Home and End go hard left and right, and 0 (while focused), a double-click or an Alt-click
+ * centre it. It shows its gesture's value until the engine has it (`mixGesture`), as the fader does.
+ */
+function Pan(props: { index: number; disabled: boolean }) {
+  const pan = () => looper.mixShown(props.index, 'pan');
+  const gesture = mixGesture(props.index, 'pan');
+  const pct = () => Math.round(pan() * 100);
+  /** A pointer is down on it: only its drag snaps inside the detent. */
+  let pointerHeld = false;
+  /** An Alt-press centres, and its drag stays there until the pointer lets go. */
+  let altHeld = false;
+  const release = () => (pointerHeld = altHeld = false);
+
+  const set = (v: number, input: HTMLInputElement) => {
+    looper.setPan(props.index, v / 100);
+    // Resync the DOM to the SHOWN value (inside the detent the thumb would drift from it), as the fader.
+    input.value = String(pct());
+  };
+  const onInput = (e: Event) => {
+    const input = e.target as HTMLInputElement;
+    const v = Number(input.value);
+    set(altHeld || (pointerHeld && Math.abs(v) <= PAN_DETENT) ? 0 : v, input);
+  };
+  const onPointerDown = (e: PointerEvent) => {
+    gesture.onPointerDown();
+    pointerHeld = true;
+    altHeld = e.altKey;
+    if (altHeld && !props.disabled) set(0, e.currentTarget as HTMLInputElement);
+  };
+  const onKeyDown = (e: KeyboardEvent) => {
+    gesture.onKeyDown();
+    if (props.disabled) return;
+    const step: Record<string, number> = { ArrowRight: 1, ArrowUp: 1, ArrowLeft: -1, ArrowDown: -1, PageUp: 10, PageDown: -10 };
+    let v: number;
+    if (e.key in step) v = Math.max(-100, Math.min(100, pct() + step[e.key]));
+    else if (e.key === 'Home') v = -100;
+    else if (e.key === 'End') v = 100;
+    else if (e.key === '0') v = 0;
+    else return;
+    e.preventDefault();
+    set(v, e.currentTarget as HTMLInputElement);
+  };
+
+  return (
+    <div class="lp-lane__pan">
+      <div class="lp-pan-wrap">
+        {/* the centre tick sits behind the thumb (declared first), as the fader's unity tick */}
+        <div class="lp-pan__centre" />
+        <input
+          class="lf-range lp-pan"
+          type="range"
+          min="-100"
+          max="100"
+          step="1"
+          value={pct()}
+          disabled={props.disabled}
+          aria-label={`Track ${props.index + 1} pan`}
+          aria-valuetext={panText(pan())}
+          onInput={onInput}
+          onKeyDown={onKeyDown}
+          onKeyUp={gesture.onKeyUp}
+          onPointerDown={onPointerDown}
+          onPointerUp={release}
+          onPointerCancel={release}
+          onLostPointerCapture={() => {
+            release();
+            gesture.onLostPointerCapture();
+          }}
+          onDblClick={(e) => !props.disabled && set(0, e.currentTarget)}
+          onBlur={() => {
+            release();
+            gesture.onBlur();
+          }}
+        />
+      </div>
+      <span class="lp-pan__val">{panText(pan())}</span>
     </div>
   );
 }
@@ -352,7 +446,7 @@ function TrackLane(props: {
         </Show>
       </div>
 
-      {/* right cluster: FX / MUTE / undo / reverse pills over the horizontal volume slider. */}
+      {/* right cluster: FX / MUTE / undo / reverse pills over the mix row (volume and pan). */}
       <div class="lp-lane__right">
         <div class="lp-lane__mods">
           <button
@@ -425,7 +519,11 @@ function TrackLane(props: {
           <Trim index={props.index} returnFocus={props.returnFocus} />
         </div>
 
-        <Fader index={props.index} disabled={isEmpty()} />
+        {/* the mix row: the volume fader and the pan */}
+        <div class="lp-lane__mix">
+          <Fader index={props.index} disabled={isEmpty()} />
+          <Pan index={props.index} disabled={isEmpty()} />
+        </div>
       </div>
     </div>
   );

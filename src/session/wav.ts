@@ -155,27 +155,50 @@ export function decodeWav(bytes: Uint8Array): { sampleRate: number; channels: Fl
 }
 
 /**
- * Sum mono tracks into a single mono master, applying per-track volume, skipping muted tracks.
- * HARD-CLAMPS the per-sample sum to [-1,1] AFTER summing (chosen over normalization so the export is
- * deterministic and matches what the limiter would tame at playback; a v1 could add peak-normalize).
+ * The pan law: the left and right gains at pan `p` (-1 hard left, 0 centre, 1 hard right), the engine's
+ * (`pan_gains`, `src-tauri/crates/lf-engine/src/effects.rs`): `L = sqrt(2) cos(t)`, `R = sqrt(2) sin(t)`,
+ * `t = (p + 1) pi / 4`. Exactly `[1, 1]` at the centre and `[sqrt(2), 0]` / `[0, sqrt(2)]` at the ends; a
+ * pan past an end is taken at it.
+ */
+export function panGains(p: number): [number, number] {
+  if (p === 0) return [1, 1];
+  if (p >= 1) return [0, Math.SQRT2];
+  if (p <= -1) return [Math.SQRT2, 0];
+  const t = ((p + 1) * Math.PI) / 4;
+  return [Math.SQRT2 * Math.cos(t), Math.SQRT2 * Math.sin(t)];
+}
+
+/**
+ * Sum mono tracks into a stereo master, applying per-track volume and pan (`panGains`), skipping muted
+ * tracks. HARD-CLAMPS each channel's per-sample sum to [-1,1] AFTER summing and the master level (chosen
+ * over normalization so the export is deterministic and matches what the limiter would tame at
+ * playback). A track with no pan is centred, where both channels are exactly the mono mix this fallback
+ * wrote before pan, bit for bit (`verify/guards/wav-export.mjs` holds it).
  * `frames` = masterLengthFrames; tracks shorter than that are treated as zero past their end.
  */
-export function mixMono(
-  tracks: { pcm: Float32Array; volume: number; muted: boolean }[],
+export function mixStereo(
+  tracks: { pcm: Float32Array; volume: number; muted: boolean; pan?: number }[],
   frames: number,
   masterLevel: number,
-): Float32Array {
-  const out = new Float32Array(frames);
+): [Float32Array, Float32Array] {
+  const channels: [Float32Array, Float32Array] = [new Float32Array(frames), new Float32Array(frames)];
   for (const t of tracks) {
     if (t.muted || t.volume === 0) continue;
+    const gains = panGains(t.pan ?? 0);
     const n = Math.min(frames, t.pcm.length);
-    for (let i = 0; i < n; i++) out[i] += t.pcm[i] * t.volume;
+    channels.forEach((out, c) => {
+      if (gains[c] === 0) return; // a hard pan: this side stays exactly silent
+      const gain = t.volume * gains[c]; // the volume itself at the centre (gain 1)
+      for (let i = 0; i < n; i++) out[i] += t.pcm[i] * gain;
+    });
   }
-  for (let i = 0; i < frames; i++) {
-    const sample = out[i] * masterLevel;
-    if (sample > 1) out[i] = 1;
-    else if (sample < -1) out[i] = -1;
-    else out[i] = sample;
+  for (const out of channels) {
+    for (let i = 0; i < frames; i++) {
+      const sample = out[i] * masterLevel;
+      if (sample > 1) out[i] = 1;
+      else if (sample < -1) out[i] = -1;
+      else out[i] = sample;
+    }
   }
-  return out;
+  return channels;
 }

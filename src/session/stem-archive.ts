@@ -31,7 +31,7 @@ export function prepareStemArchive(
     entries.push({ name: file, data: encodeWav([t.pcm], snap.sampleRate, format) });
     return {
       track, file, volume: t.volume, muted: t.muted, reversed: t.reversed,
-      frames: t.pcm.length, state: t.state, fx: t.fx, dubFeedback: t.dubFeedback ?? 1,
+      frames: t.pcm.length, state: t.state, fx: t.fx, dubFeedback: t.dubFeedback ?? 1, pan: t.pan ?? 0,
     };
   });
   return {

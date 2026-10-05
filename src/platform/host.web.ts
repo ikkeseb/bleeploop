@@ -265,6 +265,13 @@ function applyMixCommand(c: EngineCommand): void {
     const m = at(c.SetDubFeedback[0]);
     const v = c.SetDubFeedback[1];
     if (m) m.dubFeedback = Number.isFinite(v) ? clamp(v, 0, 1) : 1;
+  } else if ('SetPan' in c) {
+    const m = at(c.SetPan[0]);
+    const v = c.SetPan[1];
+    const pan = Number.isFinite(v) ? clamp(v, -1, 1) : 0;
+    // As the engine's mix carries it: the pan only off the centre.
+    if (m && pan !== 0) m.pan = pan;
+    else if (m) delete m.pan;
   } else if ('SetFxBypass' in c) {
     const [lane, kind, bypassed] = c.SetFxBypass;
     const fx = at(lane)?.fx[FX_ORDER.indexOf(kind)];
@@ -288,7 +295,7 @@ function applyMixCommand(c: EngineCommand): void {
 }
 
 /** The commands `applyMixCommand` changes a lane's mix or a COPY latch with. */
-const MIX_COMMANDS = ['SetVolume', 'SetMute', 'SetDubFeedback', 'SetFxBypass', 'SetFxParam'] as const;
+const MIX_COMMANDS = ['SetVolume', 'SetMute', 'SetDubFeedback', 'SetPan', 'SetFxBypass', 'SetFxParam'] as const;
 const isMixCommand = (c: EngineCommand): boolean =>
   typeof c === 'object' && (MIX_COMMANDS.some((k) => k in c) || ('ActionOn' in c && c.ActionOn[1] === 'Mute'));
 
@@ -382,6 +389,7 @@ function applyMixLoad(header: LoadHeader): void {
     applyMixCommand({ SetVolume: [lane, mix.volume] });
     applyMixCommand({ SetMute: [lane, mix.muted] });
     applyMixCommand({ SetDubFeedback: [lane, mix.dubFeedback] });
+    applyMixCommand({ SetPan: [lane, mix.pan ?? 0] });
     mix.fx.forEach((f, k) => {
       applyMixCommand({ SetFxBypass: [lane, FX_ORDER[k], f.bypassed] });
       for (const [key, value] of Object.entries(f.params)) applyMixCommand({ SetFxParam: [lane, key as FxParamId, value] });

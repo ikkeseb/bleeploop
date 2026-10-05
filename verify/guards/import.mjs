@@ -4,8 +4,8 @@
 // itself statically imports engine/looper and is browser-only) so it cannot drift from the source.
 // Asserts the export.ts session.json schema gate: a golden session round-trips, the formatVersion gate
 // (missing = legacy v1, ===1 accepted, newer rejected), every malformed shape throws descriptively, and
-// volume clamp + legacy muted/state values normalize (a missing dubFeedback reads as 1), while invalid
-// shapes reject. This is what SESSION IMPORT relies on to never hand looper.loadSession a payload that
+// volume clamp + legacy muted/state values normalize (a missing dubFeedback reads as 1, a missing pan as
+// the centre), while invalid shapes reject. This is what SESSION IMPORT relies on to never hand looper.loadSession a payload that
 // could corrupt the master grid.
 // Run: node verify/guards/import.mjs
 import { validateSession, validateSessionPlugins } from '../../src/session/session-schema.ts';
@@ -426,6 +426,31 @@ throws('I.dubFeedback mis-typed rejects', () => {
   s.tracks[0].dubFeedback = 'half';
   validateSession(s);
 }, 'dubFeedback must be a number');
+
+// ── J: pan (engine mode's lane setting, formatVersion 1 unchanged): missing = 0 (every export before it,
+// the centre), clamps to -1..1, a non-number rejects ──
+{
+  const out = validateSession(golden());
+  ok('J.missing pan reads as 0 (the centre: a legacy session imports centred)', out.tracks.every((t) => Object.is(t.pan, 0)), JSON.stringify(out.tracks.map((t) => t.pan)));
+  const s = golden();
+  s.tracks[0].pan = -0.3;
+  s.tracks[1].pan = 1;
+  const kept = validateSession(s);
+  ok('J.pan round-trips', kept.tracks[0].pan === -0.3 && kept.tracks[1].pan === 1, JSON.stringify(kept.tracks.map((t) => t.pan)));
+  s.tracks[0].pan = -4;
+  s.tracks[1].pan = 2.5;
+  const clamped = validateSession(s);
+  ok('J.pan clamps to -1..1', clamped.tracks[0].pan === -1 && clamped.tracks[1].pan === 1, JSON.stringify(clamped.tracks.map((t) => t.pan)));
+  s.tracks[0].pan = -0;
+  ok('J.a pan of -0 reads as the centre, 0', Object.is(validateSession(s).tracks[0].pan, 0));
+}
+for (const [what, bad] of [['a string', '-0.3'], ['null', null], ['a boolean', true], ['an object', { pan: 0 }]]) {
+  throws(`J.pan as ${what} rejects`, () => {
+    const s = golden();
+    s.tracks[1].pan = bad;
+    validateSession(s);
+  }, 'pan must be a number');
+}
 
 console.log(`\n=== RESULT: ${checks - fails}/${checks} checks passed, ${fails} failed ===`);
 if (fails) process.exit(1);
