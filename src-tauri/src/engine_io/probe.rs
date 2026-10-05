@@ -3,7 +3,8 @@
 //! a plugin into each slot asked for, records a loop on lane 0, soaks, then switches backend and buffer
 //! size and swaps the plugins while the loop plays, printing each phase's counters. It fails when a
 //! counter moved, the device reported an event, the loop stopped at an unchanged rate, a plugin did not
-//! come back, an error was logged, or the soak missed the block-load bar.
+//! come back, an error was logged, or the soak missed the block-load bar. A WASAPI open's first 3 s may
+//! trim or starve the input join (D25): the counter check forgives those there (`forgivable`).
 //!
 //! The rig's clean run to compare against (ASIO 128, Archetype Petrucci X and Pro-Q 3, a 600 s soak,
 //! 20 switches, 4 swaps): every counter 0 over ~225 000 callbacks, soak block time p99.9 < 33 % and
@@ -61,6 +62,9 @@ const WAIT: Duration = Duration::from_secs(10);
 /// The soak's block-load bar, in whole percent of the period.
 const P999_BAR: usize = 50;
 const MAX_BAR: usize = 90;
+/// How long from a WASAPI open's start the counter check forgives the join's trims and starves (D25:
+/// the endpoints' start, `src-tauri/AGENTS.md` § Open threads).
+const GRACE: Duration = Duration::from_secs(3);
 
 /// Every check, in report order, with its bar.
 const CHECKS: [(&str, &str); 8] = [
@@ -69,7 +73,7 @@ const CHECKS: [(&str, &str); 8] = [
     ("slots", "every plugin loads, is back in its slot after each switch, reloads on a swap and unloads"),
     ("loop", "the loop plays through every phase at an unchanged rate; no take or pass rejected"),
     ("events", "no device event (loss, fallback, engine fault)"),
-    ("counters", "every IoDiag counter but callbacks stays 0"),
+    ("counters", "every IoDiag counter but callbacks stays 0 (a WASAPI open's first 3 s may trim or starve the join)"),
     ("load", "soak: block time p99.9 < 50 %, max < 90 % of the period"),
     ("log", "no error logged"),
 ];
@@ -317,6 +321,28 @@ fn moved(now: &IoDiag, before: &IoDiag) -> String {
     now.moved_since(before).unwrap_or_else(|| "all 0".to_string())
 }
 
+/// What a grace window forgives, as it moved from `before` to `now`: the join's trims and starves, and
+/// the engine xruns that count the blocks they damaged. Every other cause of an engine xrun moves a
+/// counter of its own (gaps, xruns, lock_misses, join_overruns), which no window forgives.
+fn forgivable(now: &IoDiag, before: &IoDiag) -> IoDiag {
+    IoDiag {
+        join_trims: now.join_trims - before.join_trims,
+        join_starves: now.join_starves - before.join_starves,
+        engine: lf_engine::Diag { xruns: now.engine.xruns.saturating_sub(before.engine.xruns), ..Default::default() },
+        ..Default::default()
+    }
+}
+
+/// The run's counters less what the grace windows forgave: the counter check's.
+fn unforgiven(total: &IoDiag, forgiven: &IoDiag) -> IoDiag {
+    IoDiag {
+        join_trims: total.join_trims.saturating_sub(forgiven.join_trims),
+        join_starves: total.join_starves.saturating_sub(forgiven.join_starves),
+        engine: lf_engine::Diag { xruns: total.engine.xruns.saturating_sub(forgiven.engine.xruns), ..total.engine },
+        ..*total
+    }
+}
+
 /// Where a phase started.
 struct Mark {
     diag: IoDiag,
@@ -339,6 +365,11 @@ struct Probe {
     hold: Duration,
     pause: Option<Duration>,
     cycled: bool,
+    /// The WASAPI open whose grace window runs: the counters just before it, and when the window ends.
+    /// Anything that ends the device or stops the pump lets the window run out first (`finish_grace`).
+    grace: Option<(IoDiag, Instant)>,
+    /// What the grace windows forgave.
+    forgiven: IoDiag,
     fails: Vec<(&'static str, String)>,
 }
 
@@ -380,6 +411,32 @@ impl Probe {
         self.events = events;
         for event in self.host.take_device_events() {
             self.fail("events", format!("{event:?}"));
+        }
+        self.settle();
+    }
+
+    /// End the grace window once it has run its time, forgiving what it moved that a WASAPI open may.
+    fn settle(&mut self) {
+        let Some((before, until)) = self.grace else { return };
+        if Instant::now() < until {
+            return;
+        }
+        self.grace = None;
+        let f = forgivable(&self.host.diag(), &before);
+        if let Some(text) = f.moved_since(&IoDiag::default()) {
+            say(format!("forgiven in the WASAPI open's first {} s: {text}", GRACE.as_secs()));
+        }
+        self.forgiven.join_trims += f.join_trims;
+        self.forgiven.join_starves += f.join_starves;
+        self.forgiven.engine.xruns += f.engine.xruns;
+    }
+
+    /// Let a running grace window run out before a switch or work that does not pump (a plugin load or
+    /// unload can block for seconds): a settle then neither cuts the window short nor forgives past it.
+    fn finish_grace(&mut self) {
+        if let Some((_, until)) = self.grace {
+            self.hold(until.saturating_duration_since(Instant::now()));
+            self.settle();
         }
     }
 
@@ -424,6 +481,7 @@ impl Probe {
     }
 
     fn load_slot(&mut self, k: usize, plugin: usize) {
+        self.finish_grace();
         let (index, spec) = (self.slots[k].slot, self.plugins[plugin].clone());
         let sink: EventSink = Arc::new(move |event: EngineSlotEvent| say(format!("slot {index}: {event:?}")));
         let began = Instant::now();
@@ -438,6 +496,7 @@ impl Probe {
     }
 
     fn unload_slot(&mut self, k: usize) {
+        self.finish_grace();
         let Some(handle) = self.slots[k].handle.take() else { return };
         let began = Instant::now();
         match handle.unload() {
@@ -500,18 +559,34 @@ impl Probe {
     }
 
     fn switch(&mut self, next: &DeviceRequest) -> Result<(), String> {
+        self.finish_grace();
         let mark = self.mark();
         // A `--cycle` round may name the device that runs, and the owner would keep its streams: close
         // them first. `--pause` closes before every switch to WASAPI.
-        if !next.backend.is_asio() && (self.pause.is_some() || (self.cycled && self.host.status().is_some_and(|s| s.backend == next.backend))) {
+        let running = self.host.status().map(|s| s.backend);
+        let close = !next.backend.is_asio() && (self.pause.is_some() || (self.cycled && running == Some(next.backend)));
+        if close {
             self.host.close()?;
             std::thread::sleep(self.pause.unwrap_or_default());
         }
-        let began = Instant::now();
+        // Only a WASAPI open that starts streams gets a grace window: the owner keeps the streams of the
+        // device that runs.
+        let opens = !next.backend.is_asio() && (close || running != Some(next.backend));
+        let (began, before) = (Instant::now(), self.host.diag());
         // Forced: a switch to another rate drops the loop, which this phase then records again.
         match self.host.open(next.clone(), true) {
             Ok(status) => {
                 let rebuilt = status.sample_rate != self.rate;
+                if rebuilt {
+                    // Another rate builds a new engine, whose counters start from 0: the run's total
+                    // holds its xruns alone, so the old engine's forgiven ones leave too.
+                    self.forgiven.engine.xruns = 0;
+                }
+                // An open that outlasts the window gets none: what moved in it stays counted.
+                if opens && began.elapsed() < GRACE {
+                    let before = if rebuilt { IoDiag { engine: Default::default(), ..before } } else { before };
+                    self.grace = Some((before, began + GRACE));
+                }
                 say(format!(
                     "switch to {} in {} ms: {}{}",
                     label(next),
@@ -551,6 +626,9 @@ impl Probe {
     fn drive(&mut self, a: &Args, devices: &Devices, start: &DeviceRequest) -> Result<(), String> {
         let mark = self.mark();
         let status = self.host.open(start.clone(), false)?;
+        if !start.backend.is_asio() && mark.at.elapsed() < GRACE {
+            self.grace = Some((mark.diag, mark.at + GRACE));
+        }
         self.silence()?;
         self.rate = status.sample_rate;
         say(format!("open {}: {}", label(start), describe(&status)));
@@ -1205,6 +1283,8 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
         hold: a.hold,
         pause: a.pause,
         cycled: !a.cycle.is_empty(),
+        grace: None,
+        forgiven: IoDiag::default(),
         fails: Vec::new(),
     };
     if let Err(e) = p.drive(&a, &devices, &start) {
@@ -1214,6 +1294,7 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
         }
         p.fail("run", e);
     }
+    p.finish_grace();
     // The plugins leave the engine while the device still plays (crossfaded out), then it closes.
     for k in 0..p.slots.len() {
         p.unload_slot(k);
@@ -1229,8 +1310,12 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
         say(format!("trace {line}"));
     }
     say(format!("total: callbacks {}, counters {}", total.callbacks, moved(&total, &IoDiag::default())));
-    if total.faults().iter().any(|(_, n)| *n > 0) {
-        p.fails.push(("counters", moved(&total, &IoDiag::default())));
+    if let Some(text) = p.forgiven.moved_since(&IoDiag::default()) {
+        say(format!("forgiven in WASAPI opens' first {} s: {text}", GRACE.as_secs()));
+    }
+    let counted = unforgiven(&total, &p.forgiven);
+    if counted.faults().iter().any(|(_, n)| *n > 0) {
+        p.fails.push(("counters", moved(&counted, &IoDiag::default())));
     }
     let errors = LOG.errors.load(Relaxed);
     if errors > 0 {
@@ -1256,6 +1341,22 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_grace_window_forgives_only_the_joins_trims_and_starves_and_their_xruns() {
+        let before = IoDiag { join_trims: 1, gaps: 2, ..Default::default() };
+        let engine = lf_engine::Diag { xruns: 4, commands_dropped: 1, ..Default::default() };
+        let now = IoDiag { join_trims: 3, join_starves: 1, gaps: 3, xruns: 1, join_overruns: 1, engine, ..before };
+        let f = forgivable(&now, &before);
+        assert_eq!(f.moved_since(&IoDiag::default()).as_deref(), Some("join_starves=1 join_trims=2 engine.xruns=4"));
+        // The trim before the window, the gaps, the stream's xrun, the overrun and the dropped command stay.
+        assert_eq!(
+            unforgiven(&now, &f).moved_since(&IoDiag::default()).as_deref(),
+            Some("gaps=3 xruns=1 join_overruns=1 join_trims=1 engine.commands_dropped=1")
+        );
+        // A window that moved nothing forgives nothing.
+        assert_eq!(forgivable(&now, &now), IoDiag::default());
+    }
 
     /// A rig whose input holds each chirp `lag` frames after it left.
     fn looped(period: usize, lag: usize) -> LagRig {

@@ -131,13 +131,16 @@ blocks until the verdict, so an agent harness should run it in the background.
     Archetype while a second instance ran took 4.8 s, nearly all of it the plugin's own teardown, the
     slot dry meanwhile. On WASAPI with another app holding the microphone the input can run 0.87 %
     fast, past what the join's controller holds: `join_trims` every 3–6 s, each skipping ~25 ms of
-    input (real time or an artefact: unknown). Since 2026-10-03 the counter check fails on WASAPI
-    alone, in the first ~2.5 s after an open: `join_trims` (1–2) or `join_starves` (2) in 9 of 85
-    WASAPI opens after ASIO had run in the process (`--cycle=asio64,wasapi`) and in 1 of 43 with no
-    ASIO in it (`--backend=wasapi --buffer=default --cycle=wasapi`), on the Scarlett at 48 kHz with
-    Signal Desktop and Focusrite Notifier running, while the soak, every ASIO phase and the swaps stay
-    0. The mechanism and what is open: `src-tauri/AGENTS.md` § Open threads. `engine.xruns` also counts
-    a block whose input a starve or a trim damaged, so such a phase reads two to five xruns.
+    input (real time or an artefact: unknown). In the first ~2.5 s after a WASAPI open the join can
+    trim (1–2) or starve (2–4): 9 of 85 WASAPI opens after ASIO had run in the process
+    (`--cycle=asio64,wasapi`) and 1 of 43 with no ASIO in it (`--backend=wasapi --buffer=default
+    --cycle=wasapi`) on the Scarlett at 48 kHz with Signal Desktop and Focusrite Notifier running
+    (2026-10-03); 17 of 100 after ASIO and 2 of 31 without, with both plugins and 2 swaps, at 44.1 kHz
+    with Focusrite Notifier alone (2026-10-05), while the soak, every ASIO phase and the swaps stay 0.
+    `engine.xruns` also counts a block whose input a starve or a trim damaged, and the block after it,
+    so such an open reads two to seven xruns. The counter check forgives the join's trims and starves
+    and their engine xruns in an open's first 3 s (D25) and prints what it forgave (`forgiven in …`);
+    a take that overlaps one still fails `loop`. The mechanism: `src-tauri/AGENTS.md` § Open threads.
   - `native:engine-loopback` after a change to the engine's alignment, click, grid, device open or
     snapshot. Baseline (2026-09-26, Scarlett 2i2 3rd gen, 44.1 kHz, a cable from line out R into
     input 2; six launches, Pro-Q 3 and MIC): A −0.11..+0.09 ms at ASIO 64, 128 and 256, spread

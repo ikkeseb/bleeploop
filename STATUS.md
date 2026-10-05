@@ -6,8 +6,8 @@ decisions that block work. Taste: `docs/backlog-taste.md` (not a gate). Non-gate
 
 **Machine verification (Windows):** the push gates are `AGENTS.md`'s; the rig probes, when to run
 each, and their baselines: `docs/VERIFY.md` § When to run the plugin probes. Where the rig stands: every
-rig probe passed on the engine-only app between 2026-09-29 and 10-03, except `native:engine`'s counter
-check, which fails in WASAPI's first ~2.5 s (D25); the loopback cable was last in on 2026-10-03
+rig probe passed on the engine-only app between 2026-09-29 and 10-05 (`native:engine`'s counter check
+forgives the join's trims and starves in a WASAPI open's first 3 s: D25); the loopback cable was last in on 2026-10-03
 (`native:engine-loopback --rate=48000` 21/21 at 64, 128 and 256). `release:smoke` last passed 7/7 on
 2026-10-04 on a runner build of main, with no cable: the input path stands as v0.5.2's cable run
 proved it. Driver latency reports are not guitar latency; after
@@ -111,5 +111,4 @@ nothing is said.
 | D20 | A plugin call that outputs NaN or an infinity is silenced. Should it also damage the running take or layer, as an input gap does (the layer is dropped)? Today a bad stretch leaves silence in it; with DUB FEEDBACK 0 that replaces the loop there. | No. |
 | D22 | Remove the native MIDI stack (`src-tauri/src/engine_io/midi/`, about 1.8k lines with tests, and `midir`)? It is built and tested but never started; MIDI arrives through Web MIDI. | Keep it. |
 | D24 | A REC/DUB press while a first take's aligned tail is in flight is swallowed: it counts as a repeated stop, which cannot lengthen the take (`tests/first_take.rs` free_d encodes this). Start one overdub on the commit frame instead, as REC to DUB does mid-take? The engine's held commands make it small (a recorder flag and a wait until the window's end). Red test, ignored: free_i in `tests/first_take.rs`. | Keep it a stop. |
-| D25 | After a WASAPI open the input join can trim or starve within ~2.5 s (about one open in ten after ASIO ran in the process, one in 43 without), and a take that overlaps it is rejected; `native:engine`'s counter check fails on it. The trim rule you chose (trim only above twice the setpoint plus the pull's own frames) is built on the branch `d25-trim-rule`, not on main: replaying the nine traced opens through the real pipe, it removes all 8 trims and 2 of 9 starves, but the audio the old rule dropped stays queued, 27 to 29 ms more input latency after each burst, draining over 0.3 to 3.5 s; a take in that window would land late by that (inferred; the join aligns by the setpoint). Land it anyway, keep the trims (they realign the input to the output's lost time) and let the counter check tolerate a trim in a WASAPI open's first seconds, or raise the setpoint (33 to 43 ms, owing the L1+L2 measurements)? | Keep the trims; the counter check tolerates them in the first 3 s of a WASAPI open. |
-| D29 | COPY with a delay offset (the owner's idea, 2026-09-18): is it a copy that plays shifted in time behind its source, an echo or a canon of it? Which offsets? Spec of the rest: `docs/plans/next-builds.md`. | Shifted copies at 1/16, 1/8, 1/4 and 1/2 bar. |
+| D29 | COPY with a delay offset (the owner's idea, 2026-09-18): is it a copy that plays shifted in time behind its source, an echo or a canon of it? Which offsets? | Shifted copies at 1/16, 1/8, 1/4 and 1/2 bar. |

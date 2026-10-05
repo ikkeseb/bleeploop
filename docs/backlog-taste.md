@@ -68,8 +68,8 @@ added a line.
 ## Parked ideas (for the long run)
 
 - **The owner's own ideas, not scheduled:** full panel drag, with plugin editors inline, each filling
-  its panel (the layout vision of 2026-06-17; the movable, hideable keyboard is built). Per-lane pan
-  and COPY with a delay offset (2026-09-18) are scheduled: `docs/plans/next-builds.md`, STATUS D29.
+  its panel (the layout vision of 2026-06-17; the movable, hideable keyboard is built). COPY with a
+  delay offset (2026-09-18) waits on STATUS D29.
 - **Not built on purpose** (no owner or tester ask; each would add its own lap): a FREE tempo-setting
   first take and 3/4 or 6/8 (`beatsPerBar = 4` runs through the grid math, the click and the count-in:
   gate-adjacent timing code); more built-in synths (they fill layers, they do not compete with
