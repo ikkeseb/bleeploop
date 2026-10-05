@@ -154,6 +154,8 @@ export type EngineCommand =
   | { SetMute: [number, boolean] }
   /** DUB FEEDBACK, 0..1: what an overdub keeps of the loop it passes over (0 replaces it). */
   | { SetDubFeedback: [number, number] }
+  /** A lane's pan, -1 (hard left) to 1 (hard right), 0 the centre; the engine clamps it and glides there. */
+  | { SetPan: [number, number] }
   | { SetFxParam: [number, FxParamId, number] }
   | { SetFxBypass: [number, FxKindId, boolean] }
   | { SelectInstrument: NoteTarget }
@@ -614,6 +616,12 @@ export function decodeCommand(raw: unknown): EngineCommand {
         num(v, 'SetDubFeedback.feedback');
         break;
       }
+      case 'SetPan': {
+        const [l, v] = pair('(lane, pan)');
+        lane(l, 'SetPan.lane');
+        num(v, 'SetPan.pan');
+        break;
+      }
       case 'SetMute': {
         const [l, v] = pair('(lane, muted)');
         lane(l, 'SetMute.lane');
@@ -730,6 +738,9 @@ export interface LaneMix {
   volume: number;
   muted: boolean;
   dubFeedback: number;
+  /** -1 (hard left) to 1 (hard right). Absent: the centre, 0 (the engine writes it only off the centre,
+   * and reads a mix without it as centred). */
+  pan?: number;
   fx: WireFxState[];
 }
 
@@ -834,11 +845,12 @@ export function splitSessionBytes(buffer: ArrayBuffer): { header: unknown; pcm: 
   return { header, pcm, master };
 }
 
-/** A track's mix (a snapshot's or a load's): exact fields, each effect's params by their keys (their ranges:
- * `validateFxStates`, where the UI takes it). */
+/** A lane's mix (a snapshot's or a load's track's, a `Mix` event's): exact fields, `pan` optional (absent
+ * is the centre and stays absent), each effect's params by their keys (their ranges: `validateFxStates`,
+ * where the UI takes it). */
 function decodeLaneMix(raw: unknown, what: string): LaneMix {
   const o = obj(raw, what);
-  const extra = Object.keys(o).filter((k) => !['volume', 'muted', 'dubFeedback', 'fx'].includes(k));
+  const extra = Object.keys(o).filter((k) => !['volume', 'muted', 'dubFeedback', 'pan', 'fx'].includes(k));
   if (extra.length > 0) fail(`${what} has unknown fields`, extra);
   const fx = array(o.fx, `${what}.fx`, FX_KINDS.length).map((e, k): WireFxState => {
     const entry = obj(e, `${what}.fx[${k}]`);
@@ -849,7 +861,13 @@ function decodeLaneMix(raw: unknown, what: string): LaneMix {
     for (const key of keys) out[key] = num(params[key], `${what}.fx[${k}].params.${key}`);
     return { bypassed: bool(entry.bypassed, `${what}.fx[${k}].bypassed`), params: out };
   });
-  return { volume: num(o.volume, `${what}.volume`), muted: bool(o.muted, `${what}.muted`), dubFeedback: num(o.dubFeedback, `${what}.dubFeedback`), fx };
+  return {
+    volume: num(o.volume, `${what}.volume`),
+    muted: bool(o.muted, `${what}.muted`),
+    dubFeedback: num(o.dubFeedback, `${what}.dubFeedback`),
+    ...(o.pan === undefined ? {} : { pan: num(o.pan, `${what}.pan`) }),
+    fx,
+  };
 }
 
 /** Read `engine_load_session`'s bytes as the engine host does (every track one master long with its

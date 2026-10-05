@@ -11,6 +11,8 @@
 //!   the other synths beside it (below), under 50 %.
 //! - The input sends (F15, F24): what ECHO, REVERB and RING MOD on the live input add to the Stage 2 engine, printed
 //!   beside it (no bar of their own; the Stage 3 bar carries them).
+//! - A lane's pan: the Stage 2 engine with every lane centred, then every lane panned and resting, then
+//!   every lane's pan always moving, printed side by side (no bar of its own).
 //! - A multiply burst (F14): the eight extension jobs of the worst multiply add under 10 % to the blocks
 //!   they run in.
 //! - A TRIM (F16) of the longest loop (32 bars, the whole 60 s buffer): its job adds under 10 % to the
@@ -248,6 +250,49 @@ fn the_input_sends_cost() {
         worst * 100.0,
         (on - off) * period * 1e6,
         (on - off) * 100.0
+    );
+}
+
+/// What a lane's pan costs: the Stage 2 engine timed with every lane centred, then with every lane
+/// panned and resting, then with every lane's pan moving all the time (a glide across most of the range
+/// restarted every 32 blocks, about four time constants), 20 s each, in one run.
+#[test]
+#[ignore]
+fn the_lanes_pan_cost() {
+    let (mut rig, _) = five_lanes_one_overdubbing();
+    let blocks = 48000 * 20 / BLOCK;
+    let period = BLOCK as f64 / 48000.0;
+    let (centre, ..) = time_blocks(&mut rig, blocks);
+    for (lane, pan) in [-0.7, -0.3, 0.1, 0.5, 0.9].into_iter().enumerate() {
+        rig.set(Command::SetPan(lane as u8, pan));
+    }
+    time_blocks(&mut rig, 48000 / BLOCK);
+    assert!((0..5).all(|lane| rig.engine.fx().pan_position(lane) == rig.engine.fx().pan(lane) as f64), "every pan rests");
+    let (resting, ..) = time_blocks(&mut rig, blocks);
+    let (mut moving, mut worst) = (0.0, 0.0f64);
+    let rounds = blocks / 32;
+    for round in 0..rounds {
+        let side = if round % 2 == 0 { -0.9 } else { 0.9 };
+        for lane in 0..5u8 {
+            rig.send_at(rig.frame, Command::SetPan(lane, side));
+        }
+        let (mean, _, w) = time_blocks(&mut rig, 32);
+        moving += mean / rounds as f64;
+        worst = worst.max(w);
+        assert!((0..5).all(|lane| rig.engine.fx().pan_position(lane) != side as f64), "every pan is still moving");
+    }
+    let pct = |x: f64| x * 100.0;
+    println!(
+        "stage 2 engine, {blocks} blocks of {BLOCK} at 48 k: centred mean {:.1} µs ({:.2} %); panned, resting {:.1} µs ({:.2} %); moving {:.1} µs ({:.2} %, worst block {:.1} %); resting adds {:.2} %, moving {:.2} %",
+        centre * period * 1e6,
+        pct(centre),
+        resting * period * 1e6,
+        pct(resting),
+        moving * period * 1e6,
+        pct(moving),
+        pct(worst),
+        pct(resting - centre),
+        pct(moving - centre)
     );
 }
 

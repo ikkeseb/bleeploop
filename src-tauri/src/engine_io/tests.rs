@@ -1641,15 +1641,45 @@ fn rebuild_after_a_refused_mix(leak: bool) {
     let refused = h.host.diag().engine.events_dropped;
     assert!(refused > 0, "the event ring is full");
     h.send(Command::SetVolume(2, 0.3));
+    h.send(Command::SetPan(2, -0.25));
     h.play(RATE / 10);
     assert!(h.host.diag().engine.events_dropped > refused, "and refuses what comes next");
     assert!(!h.host.settings().contains(&Command::SetVolume(2, 0.3)), "no Mix carried it to the settings memory");
+    assert!(!h.host.settings().contains(&Command::SetPan(2, -0.25)), "nor the pan");
     h.fake.asio.lock().unwrap().as_mut().unwrap().rate = 44_100;
     h.open(asio(Some(128)));
     assert_eq!(h.host.diag().panics, u64::from(leak), "a leaked old engine: its unit's stop panicked");
-    assert!(h.host.settings().contains(&Command::SetVolume(2, 0.3)), "read from the old engine: {:?}", h.host.settings());
+    for command in [Command::SetVolume(2, 0.3), Command::SetPan(2, -0.25)] {
+        assert!(h.host.settings().contains(&command), "{command:?} read from the old engine: {:?}", h.host.settings());
+    }
     let first = h.wait_mix("the new engine reports lane 2", 2, |_| true);
-    assert_eq!(first.volume, 0.3, "the replay into the new engine carried it");
+    assert_eq!((first.volume, first.pan), (0.3, -0.25), "the replay into the new engine carried them");
+}
+
+/// A lane's pan reaches the settings memory as the engine applied it (its target, from the lane's
+/// `Event::Mix`), rides every reset frame as a setting and in the lane's Mix, and survives a rebuild.
+#[test]
+fn a_lanes_pan_is_kept_as_applied_survives_a_rebuild_and_rides_the_reset_frame() {
+    use super::feed::Feed;
+    let mut h = Harness::new();
+    h.open(asio(Some(256)));
+    h.wait_mix("the engine reports lane 2", 2, |_| true);
+    h.send(Command::SetPan(2, 0.5));
+    let applied = h.wait_mix("lane 2's pan", 2, |m| m.pan != 0.0);
+    assert_eq!(applied.pan, 0.5, "the target, from the first Mix after the command");
+    assert!(h.host.settings().contains(&Command::SetPan(2, 0.5)), "{:?}", h.host.settings());
+    let mut feed = Feed::new(h.host.clone());
+    let reset = feed.tick(true).expect("a reset frame");
+    assert!(reset.settings.expect("its settings").iter().any(|c| c.0 == Command::SetPan(2, 0.5)), "the reset frame's settings");
+    assert!(reset.events.iter().any(|e| matches!(e.0, Event::Mix { lane: 2, mix, .. } if mix.pan == 0.5)), "and lane 2's Mix");
+    h.fake.asio.lock().unwrap().as_mut().unwrap().rate = 44_100;
+    h.open(asio(Some(128)));
+    assert!(h.host.settings().contains(&Command::SetPan(2, 0.5)), "kept across the rebuild: {:?}", h.host.settings());
+    let first = h.wait_mix("the new engine reports lane 2", 2, |_| true);
+    assert_eq!(first.pan, 0.5, "the replay into the new engine carried it");
+    h.send(Command::SetPan(2, 0.0));
+    h.wait_mix("lane 2 back on the centre", 2, |m| m.pan == 0.0);
+    assert!(!h.host.settings().iter().any(|c| matches!(c, Command::SetPan(..))), "a centred lane keeps no pan: {:?}", h.host.settings());
 }
 
 /// An engine whose device never ran a block holds its settings replay unapplied: an idle snapshot on it
@@ -2004,6 +2034,43 @@ fn d21_an_export_masters_the_mix_it_was_asked_with() {
     assert_eq!(header["tracks"][0]["mix"]["volume"].as_f64(), Some(0.25));
     let (g, _) = fit(&later, &before);
     assert!((g - 0.25).abs() < 0.02, "the master holds the snapshot's mix, not the kept fader: gain {g}");
+}
+
+/// A lane's pan reaches an export's track and its wet master, and a load sets it from the header; a
+/// header from before pan (no `pan` in its mix) loads the lane centred.
+#[test]
+fn a_lanes_pan_reaches_the_export_and_a_load_and_a_mix_without_it_is_centred() {
+    let mut h = Harness::new();
+    h.fake.set_input(saw);
+    h.open(asio(Some(256)));
+    let length = h.record_loop();
+    let (_, _, [centre, _]) = session_with_master(&h.host.snapshot(true).expect("an export at the centre"));
+    h.send(Command::SetPan(0, -1.0));
+    h.wait_mix("lane 0 hard left", 0, |m| m.pan == -1.0);
+    let (header, stems, [left, right]) = session_with_master(&h.host.snapshot(true).expect("an export hard left"));
+    assert_eq!(header["tracks"][0]["mix"]["pan"].as_f64(), Some(-1.0), "the track carries its pan: {header}");
+    // Under -120 dB, not exactly 0 (about 6e-11 when written): a trace of what no pan moves, the shared
+    // reverb bus by elimination (the engine's own test hears an exact 0 on a bypassed lane's far side).
+    let (rpeak, lpeak) = (right.iter().fold(0.0f32, |m, x| m.max(x.abs())), left.iter().fold(0.0f32, |m, x| m.max(x.abs())));
+    assert!(lpeak > 0.1 && rpeak < lpeak * 1e-6, "hard left: the master's right is silent ({rpeak} against {lpeak})");
+    let (g, residue) = fit(&left, &centre);
+    assert!((g - std::f32::consts::SQRT_2).abs() < 0.01 && residue < 0.01, "and its left the centre's, 3 dB up: gain {g}, residue {residue}");
+    assert!(stems.iter().any(|x| x.abs() > 0.01), "the stem is the loop, unpanned");
+
+    let bytes = saved_then_cleared(&mut h, length);
+    h.host.load_session(&bytes).expect("the load");
+    h.wait_mix("the load's pan", 0, |m| m.pan == -1.0);
+    assert!(h.host.settings().contains(&Command::SetPan(0, -1.0)), "the replay carries it: {:?}", h.host.settings());
+    let (mut legacy, pcm) = session_parts(&bytes);
+    legacy["tracks"][0]["mix"].as_object_mut().unwrap().remove("pan").expect("the saved mix had a pan");
+    h.send(Command::ClearAll);
+    h.wait_lane("the lane clears", 0, |i| i.state == LaneState::Empty);
+    until("the overview says EMPTY", || !h.host.core.holds_audio());
+    h.send(Command::SetPan(0, 0.75));
+    h.wait_mix("the EMPTY lane's pan", 0, |m| m.pan == 0.75);
+    h.host.load_session(&session_bytes(&legacy, &pcm)).expect("a load from before pan");
+    h.wait_mix("the legacy load's centre", 0, |m| m.pan == 0.0);
+    assert!(!h.host.settings().iter().any(|c| matches!(c, Command::SetPan(0, _))), "centred, over the EMPTY lane's pan: {:?}", h.host.settings());
 }
 
 #[test]

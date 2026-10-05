@@ -76,6 +76,9 @@ pub enum Command {
     /// A lane's DUB FEEDBACK (0..1, default 1): what an overdub keeps of the loop it writes over, pass by
     /// pass (`input + feedback * old`); 0 replaces it.
     SetDubFeedback(u8, f32),
+    /// A lane's pan, -1 (hard left) to 1 (hard right), default 0 (centre); clamped, and a value that is no
+    /// number centres it. It glides there (`effects`); only this command glides a lane's pan.
+    SetPan(u8, f32),
     /// A lane's FX parameter, in its def's units (`src/ui/state/fx-metadata.ts`).
     SetFxParam(u8, FxParam, f64),
     SetFxBypass(u8, FxKind, bool),
@@ -331,21 +334,25 @@ pub struct LaneInfo {
     pub retake_pass: u32,
 }
 
-/// A lane's mix as the engine applied it: its volume, mute and DUB FEEDBACK, and its FX chain's targets
-/// in [`FxKind::ALL`] order (filter, pitch, stutter, delay, reverb). A snapshot carries one per lane
-/// ([`crate::SnapshotTrack`]), and the export's wet master renders with it ([`crate::render`]).
+/// A lane's mix as the engine applied it: its volume, mute, DUB FEEDBACK and pan (its target, not where a
+/// glide toward it has got to), and its FX chain's targets in [`FxKind::ALL`] order (filter, pitch,
+/// stutter, delay, reverb). A snapshot carries one per lane ([`crate::SnapshotTrack`]), and the export's
+/// wet master renders with it ([`crate::render`]).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LaneMix {
     pub volume: f32,
     pub muted: bool,
     pub dub_feedback: f32,
+    /// -1 (hard left) to 1 (hard right); 0 is the centre, where the lane plays as it did before pan.
+    pub pan: f32,
     pub fx: [FxState; 5],
 }
 
 impl Default for LaneMix {
-    /// A fresh or cleared lane's: unity, unmuted, a plain sum, every effect bypassed at its defaults.
+    /// A fresh or cleared lane's: unity, unmuted, a plain sum, centred, every effect bypassed at its
+    /// defaults.
     fn default() -> Self {
-        LaneMix { volume: 1.0, muted: false, dub_feedback: 1.0, fx: default_fx_states() }
+        LaneMix { volume: 1.0, muted: false, dub_feedback: 1.0, pan: 0.0, fx: default_fx_states() }
     }
 }
 
@@ -358,6 +365,7 @@ pub struct CompactMix {
     pub volume: f32,
     pub muted: bool,
     pub dub_feedback: f32,
+    pub pan: f32,
     pub fx: [CompactFx; 5],
 }
 
@@ -374,6 +382,7 @@ impl From<&LaneMix> for CompactMix {
             volume: m.volume,
             muted: m.muted,
             dub_feedback: m.dub_feedback,
+            pan: m.pan,
             fx: m.fx.map(|s| CompactFx { bypassed: s.bypassed, params: s.params.map(|p| p as f32) }),
         }
     }
@@ -389,6 +398,7 @@ impl CompactMix {
             volume: self.volume,
             muted: self.muted,
             dub_feedback: self.dub_feedback,
+            pan: self.pan,
             fx: self.fx.map(|s| FxState { bypassed: s.bypassed, params: s.params.map(wide) }),
         }
     }
@@ -463,7 +473,7 @@ pub enum Event {
     /// COPY into lane `to` is done. `feedback` is the DUB FEEDBACK it copied, the source's when COPY
     /// applied (the source's may have moved since): the UI takes it.
     Copied { frame: Frame, from: u8, to: u8, feedback: f32 },
-    /// The lane was cleared: its loop gone, its volume, mute and FX back to their defaults (CLEAR, a
+    /// The lane was cleared: its loop gone, its volume, mute, pan and FX back to their defaults (CLEAR, a
     /// pedal's confirmed CLEAR, and every lane at CLEAR ALL, an empty one included). A lane that goes
     /// EMPTY any other way (a cancelled count-in, a stopped or rejected first take) keeps its mix.
     Cleared { frame: Frame, lane: u8 },
@@ -472,8 +482,8 @@ pub enum Event {
     Muted { frame: Frame, lane: u8, on: bool },
     /// The lane's mix as the engine applies it ([`crate::Looper::mix`]), sent when it differs from the
     /// last one the ring took for the lane (a new engine sends every lane's once): a setting, a COPY, a
-    /// CLEAR, a pedal's MUTE and a load all reach the feed this way. The host's settings memory keeps
-    /// the last one per lane as the mix it replays into a new engine.
+    /// CLEAR, a pedal's MUTE and a load all reach the feed this way; a pan's glide sends one, its target.
+    /// The host's settings memory keeps the last one per lane as the mix it replays into a new engine.
     Mix { frame: Frame, lane: u8, mix: CompactMix },
 }
 

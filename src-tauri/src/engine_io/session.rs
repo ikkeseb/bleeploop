@@ -10,8 +10,9 @@
 //! loop as it is heard; `reversed` is its flag). A snapshot's header:
 //! `{"rate","masterLengthFrames","bpm","tracks":[{"index","frames","reversed","state","mix"}]}`, the
 //! committed lanes ascending, `state` `"Playing"` | `"Stopped"` | `"Overdubbing"` (an overdubbing lane
-//! gives its loop as committed before the layer in flight), `mix` the lane's volume, mute, DUB FEEDBACK
-//! and FX as the engine applied them on the frame the snapshot pinned the loops (`wire::WireLaneMix`).
+//! gives its loop as committed before the layer in flight), `mix` the lane's volume, mute, DUB FEEDBACK,
+//! pan and FX as the engine applied them on the frame the snapshot pinned the loops (`wire::WireLaneMix`;
+//! a load's `mix` may leave `pan` out: centred).
 //! A load's: `{"bpm","bars","masterLengthFrames","tracks"}` with `state` `"Playing"` | `"Stopped"` and
 //! every track's `mix` (refused without one), into an engine whose lanes are all EMPTY; `bpm` is an
 //! integer 40..300 and `masterLengthFrames` is `bars` bars of it at the engine's rate. The engine sets

@@ -761,6 +761,12 @@ fn apply(looper: &mut Looper, cx: &mut Cx, at: &mut Apply, command: Command) -> 
             }
             Applied::Done
         }
+        Command::SetPan(i, pan) => {
+            if let Some(i) = lane(i) {
+                cx.fx.set_pan(i, pan);
+            }
+            Applied::Done
+        }
         Command::SetFxParam(i, param, value) => {
             if let Some(i) = lane(i) {
                 cx.fx.set_param(i, param, value, now);
