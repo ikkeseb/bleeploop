@@ -62,9 +62,9 @@ interface FingerprintParts {
 /** A lane's mix in a fingerprint: each effect's params in key order, whatever order they were built in,
  * and every number as an f32 holds it (a `Mix` prints an FX param's f32, a snapshot the value it was sent
  * as: one mix must give one part). */
-function mixPart(volume: number, muted: boolean, dubFeedback: number, fx: readonly FxState[]): string {
+function mixPart(volume: number, muted: boolean, dubFeedback: number, pan: number, fx: readonly FxState[]): string {
   const effects = fx.map((s) => [s.bypassed, ...Object.keys(s.params).sort().map((key) => Math.fround(s.params[key]))]);
-  return `${Math.fround(volume)}:${Number(muted)}:${Math.fround(dubFeedback)}:${JSON.stringify(effects)}`;
+  return `${Math.fround(volume)}:${Number(muted)}:${Math.fround(dubFeedback)}:${Math.fround(pan)}:${JSON.stringify(effects)}`;
 }
 
 function joinFingerprint(parts: FingerprintParts, mixOf: (i: number) => string): string {
@@ -79,7 +79,7 @@ function joinFingerprint(parts: FingerprintParts, mixOf: (i: number) => string):
 function persistedFingerprint(inspected: JamFingerprint, snapshot: StemSnapshot): string {
   return joinFingerprint(inspected.parts, (i) => {
     const t = snapshot.tracks.find((track) => track.index === i);
-    return t ? mixPart(t.volume, t.muted, t.dubFeedback ?? 1, t.fx) : 'none';
+    return t ? mixPart(t.volume, t.muted, t.dubFeedback ?? 1, t.pan ?? 0, t.fx) : 'none';
   });
 }
 
@@ -283,7 +283,7 @@ function inspectJam(): JamFingerprint {
 
   const parts = { master: committed ? String(master) : '-', lanes };
   const value = joinFingerprint(parts, (i) =>
-    mixPart(jam().trackVolume(i), jam().trackMuted(i), jam().trackDubFeedback(i), jam().fxState(i)),
+    mixPart(jam().trackVolume(i), jam().trackMuted(i), jam().trackDubFeedback(i), jam().trackPan(i), jam().fxState(i)),
   );
   return { value, blank, committed, parts };
 }

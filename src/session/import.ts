@@ -123,6 +123,7 @@ export async function importSession(bytes: Uint8Array | ArrayBuffer, source: Ses
       state: st.state,
       fx: st.fx,
       dubFeedback: st.dubFeedback,
+      pan: st.pan,
     };
   });
 

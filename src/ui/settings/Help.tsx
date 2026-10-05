@@ -123,7 +123,7 @@ export function Help() {
           <li>The big ring records a track, then overdubs (layers) onto it once it has a take</li>
           <li><span class="help__note">▶ / ■</span> plays or stops a track &middot; <span class="help__note">CLR</span> clears it (press twice to confirm)</li>
           <li><span class="help__note">↶ UNDO</span> undoes the last overdub layer or trim (press again to redo)</li>
-          <li><span class="help__note">FX</span> opens a track's effects &middot; <span class="help__note">MUTE</span> silences it &middot; the volume slider has a 0 dB detent at 1.0</li>
+          <li><span class="help__note">FX</span> opens a track's effects &middot; <span class="help__note">MUTE</span> silences it &middot; the volume slider has a 0 dB detent at 1.0 &middot; the pan beside it (L / C / R) centres on a double-click, Alt-click or 0</li>
           <li><span class="help__note">DUB FEEDBACK</span>, last in the FX drawer, is what an overdub keeps of the layers under it: 100 % keeps them all, 0 % replaces them, and in between the old layers fade pass by pass</li>
           <li><span class="help__note">↺ REV</span> reverses a track in place. Overdub is blocked while reversed</li>
           <li><span class="help__note">⧉ COPY</span> copies a take to the first empty track</li>

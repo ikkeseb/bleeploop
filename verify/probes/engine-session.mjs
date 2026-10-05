@@ -6,14 +6,16 @@
  * answer, then drives the real UI:
  *
  * - export: the Export button's download holds both stems exactly as the snapshot's PCM (play order), the
- *   store's mix (DUB FEEDBACK included, set in the lane's FX drawer), the lane states, and the master the
+ *   store's mix (DUB FEEDBACK included, set in the lane's FX drawer; the pan, set on the lane's pan control,
+ *   and a centred lane's 0), the lane states, and the master the
  *   snapshot carries (`master.kind` 'wet-engine'; here the fake's stand-in, a dry sum under the mix the
  *   UI sent, NOT the engine's sound: this proves the plumbing, never the master's sound); no
  *   AudioContext is built;
  * - recovery: autosave saves the jam without asking for the master, and a reloaded page (a fresh engine)
- *   loads it back into the engine and sends the loaded lanes' mix, DUB FEEDBACK included;
+ *   loads it back into the engine and sends the loaded lanes' mix, DUB FEEDBACK and pan included;
  * - import: the exported zip goes to the engine as one session (header, PCM, orientation), and the store
- *   sends the loaded lanes' mix;
+ *   sends the loaded lanes' mix; the same zip with its session.json written before pan (no `pan`) loads
+ *   every lane centred;
  * - Share output: the saved pick reaches the engine at boot, and ShareLost clears it with a toast.
  *
  * Cannot see the native engine, the Rust side of the bytes or Tauri's raw IPC: the fake records them.
@@ -24,6 +26,7 @@ import { readFileSync } from 'node:fs';
 import { probe } from '../harness/probe.ts';
 import { parseZip } from '../../src/session/unzip.ts';
 import { decodeWav } from '../../src/session/wav.ts';
+import { makeZip } from '../../src/session/zip.ts';
 
 const RATE = 48000;
 const MASTER = 2 * RATE; // one bar at 120 BPM
@@ -105,6 +108,8 @@ await probe(async ({ browser, open }) => {
   await page.getByRole('button', { name: 'Track 1 FX', exact: true }).click();
   await page.getByRole('slider', { name: 'Track 1 dub feedback', exact: true }).fill('40');
   await page.getByRole('button', { name: 'Close FX panel' }).click();
+  await page.getByRole('slider', { name: 'Track 1 pan', exact: true }).fill('-30');
+  await page.waitForFunction(() => window.__lf.looper.trackPan(0) === -0.3, undefined, { timeout: 5000 });
 
   // ── Export: the button's download ─────────────────────────────────────────────────────────────────
   const downloading = page.waitForEvent('download');
@@ -121,12 +126,13 @@ await probe(async ({ browser, open }) => {
   assert.equal(session.bpm, 120);
   assert.equal(session.bars, 1);
   assert.deepEqual(
-    session.tracks.map((t) => [t.track, t.volume, t.muted, t.reversed, t.state, t.dubFeedback]),
+    session.tracks.map((t) => [t.track, t.volume, t.muted, t.reversed, t.state, t.dubFeedback, t.pan]),
     [
-      [1, 0.8, false, false, 'PLAYING', 0.4],
-      [2, 1, false, true, 'STOPPED', 1],
+      [1, 0.8, false, false, 'PLAYING', 0.4, -0.3],
+      [2, 1, false, true, 'STOPPED', 1, 0],
     ],
   );
+  assert.equal(session.formatVersion, 1, 'a pan leaves the format at 1');
   for (const [k, t] of session.tracks.entries()) {
     const stem = decodeWav(entries.find((e) => e.name === t.file).data).channels[0];
     assert.deepEqual(Array.from(stem), pcm[k].map((x) => Math.fround(x)), `stem ${t.track} is the snapshot's PCM`);
@@ -170,8 +176,8 @@ await probe(async ({ browser, open }) => {
   );
   assert.deepEqual(recovered.pcm, pcm.map((block) => block.map((x) => Math.fround(x))), 'the recovered PCM is the snapshot');
   // The recovered mix rides in the load header (the engine sets it with the loops), not sent after it.
-  assert.deepEqual(recoveredTracks.map((t) => [t.mix.volume, t.mix.muted, t.mix.dubFeedback]), [[0.8, false, 0.4], [1, false, 1]],
-    'the recovered mix, DUB FEEDBACK too (a lane left at 100 % gets 100 %)');
+  assert.deepEqual(recoveredTracks.map((t) => [t.mix.volume, t.mix.muted, t.mix.dubFeedback, t.mix.pan]), [[0.8, false, 0.4, -0.3], [1, false, 1, undefined]],
+    'the recovered mix, DUB FEEDBACK too (a lane left at 100 % gets 100 %), and the pan (a centred lane carries none, as the engine writes it)');
   assert.ok(!recovered.sent.some((c) => JSON.stringify(c) === JSON.stringify({ SetVolume: [0, 0.8] })), 'no mix is sent after the load');
 
   // ── Import: the exported zip into the (still empty) engine ────────────────────────────────────────
@@ -184,6 +190,26 @@ await probe(async ({ browser, open }) => {
   });
   assert.deepEqual(imported.header, recovered.header, 'import sends the session the export holds');
   assert.deepEqual(imported.pcm, recovered.pcm);
+  await page.waitForFunction(() => window.__lf.looper.trackPan(0) === -0.3, undefined, { timeout: 5000 });
+
+  // ── A legacy session: the same zip, its session.json from before pan, loads every lane centred ──────
+  const legacySession = structuredClone(session);
+  for (const t of legacySession.tracks) delete t.pan;
+  const legacyZip = makeZip(entries.map((e) => (e.name.endsWith('-session.json') ? { name: e.name, data: new TextEncoder().encode(JSON.stringify(legacySession)) } : e)));
+  await page.locator('input[type="file"]').setInputFiles({ name: 'legacy.zip', mimeType: 'application/zip', buffer: Buffer.from(legacyZip) });
+  await page.waitForFunction(() => window.__lf.native.loadedSessions.length === 3, undefined, { timeout: 10000 });
+  const legacy = await page.evaluate(async () => {
+    const { splitSessionBytes } = await import('/src/platform/engine-wire.ts');
+    return splitSessionBytes(window.__lf.native.loadedSessions[2].slice().buffer).header;
+  });
+  await page.waitForFunction(() => window.__lf.looper.trackPan(0) === 0, undefined, { timeout: 5000 });
+  console.log('legacy', JSON.stringify(legacy.tracks.map((t) => t.mix.pan)));
+  assert.ok(legacy.tracks.every((t) => !('pan' in t.mix)), 'a session from before pan loads centred lanes');
+  assert.deepEqual(
+    legacy.tracks.map((t) => [t.index, t.mix.volume, t.mix.dubFeedback]),
+    recovered.header.tracks.map((t) => [t.index, t.mix.volume, t.mix.dubFeedback]),
+    'and the rest of its mix as saved',
+  );
 
   // ── ShareLost: a toast, and the pick is forgotten ────────────────────────────────────────────────
   assert.deepEqual(await page.evaluate(() => window.__lf.native.shares), ['probe-endpoint'], 'the reloaded page sent the saved pick');

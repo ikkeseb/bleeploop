@@ -289,6 +289,36 @@ check("the browser fake's FX ranges are the UI's (the engine's)", () => {
     const m = fakeMixModel.lane(0);
     assert.deepEqual([m.volume, m.dubFeedback, m.fx[1].params.semitones, m.fx[3].params.time, m.fx[3].params.feedback], [1.5, 0, 1, 3, 0.95]);
     validateFxStates(m.fx, 'the clamped mix');
+  });  check("the browser fake's pan: clamped, a value that is no number centred, the centre left out as the engine writes it", () => {
+    frame([], { reset: true, settings: [] });
+    const pans = [];
+    for (const v of [0.25, 3, -7, Number.NaN, -0.5, 0, -0]) {
+      fakeMixModel.command({ SetPan: [0, v] });
+      pans.push(fakeMixModel.lane(0).pan);
+    }
+    assert.deepEqual(pans, [0.25, 1, -1, undefined, -0.5, undefined, undefined]);
+    assert.ok(!('pan' in fakeMixModel.lane(0)), 'a centred lane carries no pan field');
+  });
+  check("the browser fake's COPY carries the pan, its CLEAR and a reset frame centre it, and a load seeds it", () => {
+    frame([], { reset: true, settings: [] });
+    fakeMixModel.command({ SetPan: [0, -0.75] });
+    fakeMixModel.command({ Copy: 0 });
+    frame([{ type: 'Copied', frame: 0, from: 0, to: 1, feedback: 1 }]);
+    assert.equal(fakeMixModel.lane(1).pan, -0.75, 'the copy');
+    frame([{ type: 'Cleared', frame: 0, lane: 0 }]);
+    assert.equal(fakeMixModel.lane(0).pan, undefined, 'the clear');
+    frame([], { reset: true, settings: [{ SetPan: [2, 0.4] }] });
+    assert.deepEqual([fakeMixModel.lane(1).pan, fakeMixModel.lane(2).pan], [undefined, 0.4], "a reset frame's settings");
+    const panned = structuredClone(fixture.loadHeaders.find((h) => h.tracks.some((t) => t.mix.pan === 0.5)));
+    const at = panned.tracks.find((t) => t.mix.pan === 0.5).index;
+    fakeMixModel.command({ SetPan: [at, -1] });
+    fakeMixModel.load(panned);
+    assert.equal(fakeMixModel.lane(at).pan, 0.5, "a load's pan");
+    fakeMixModel.command({ SetPan: [at, -1] });
+    const legacy = structuredClone(panned);
+    for (const t of legacy.tracks) delete t.mix.pan;
+    fakeMixModel.load(legacy);
+    assert.equal(fakeMixModel.lane(at).pan, undefined, 'a load without a pan centres the lane');
   });
 }
 {

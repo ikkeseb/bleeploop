@@ -7,7 +7,8 @@
  *   hands the engine that PCM exactly and restores the lane's volume. The export asks the snapshot for
  *   the master, and its master is the snapshot's (`master.kind` 'wet-engine').
  * - A snapshot whose master render failed (the fake's `masterError`) still completes the export, with
- *   the dry mixdown (`master.kind` 'dry-fallback'), its console.error naming the engine's error. Import
+ *   the dry mixdown (`master.kind` 'dry-fallback'), its console.error naming the engine's error; a lane
+ *   panned hard right reaches it with its pan (the left channel exactly silent). Import
  *   refuses an archive over its size cap and a small archive whose central directory repeats one payload
  *   128 times (entry cap 9).
  * - A lane's volume and the master's moved while the engine renders the master (the fake holds its
@@ -140,17 +141,28 @@ await probe(async ({ open }) => {
     const { parseZip } = await import('/src/session/unzip.ts');
     const { makeZip } = await import('/src/session/zip.ts');
     const { decodeWav } = await import('/src/session/wav.ts');
+    const panned = (v) => new Promise((resolve, reject) => {
+      lf.looper.setPan(0, v);
+      const until = performance.now() + 5000;
+      const poll = () => (lf.looper.trackPan(0) === v ? resolve() : performance.now() > until ? reject(new Error(`no pan ${v}`)) : setTimeout(poll, 20));
+      poll();
+    });
+    await panned(1);
     lf.native.masterError = 'export render: an injected failure';
     let fallbackKind;
     let fallbackShape;
+    let fallbackSides;
     try {
       const fallback = await lf.buildExportBundle(session);
       const entries = parseZip(fallback.zipBytes);
       const meta = JSON.parse(new TextDecoder().decode(entries.find((entry) => entry.name.endsWith('-session.json')).data));
       fallbackKind = meta.master.kind;
-      fallbackShape = decodeWav(entries.find((entry) => entry.name === meta.master.file).data).channels.map((c) => c.length);
+      const channels = decodeWav(entries.find((entry) => entry.name === meta.master.file).data).channels;
+      fallbackShape = channels.map((c) => c.length);
+      fallbackSides = { pan: meta.tracks[0].pan, leftSilent: channels[0].every((x) => x === 0), rightPeak: channels[1].reduce((m, x) => Math.max(m, Math.abs(x)), 0) };
     } finally {
       lf.native.masterError = null;
+      await panned(0);
     }
     const cap = maxImportArchiveBytes(48000);
     let oversizedRejected = false;
@@ -175,9 +187,10 @@ await probe(async ({ open }) => {
     try { await lf.importSession(hostile, session); }
     catch (error) { repeatedPayloadRejected = String(error).includes('128 entries; maximum is 9'); }
     const rejectionMs = performance.now() - began;
-    return { name: 'A snapshot without its master exports a dry master; import refuses oversized and repeated-payload archives',
-      fallbackKind, fallbackShape, oversizedRejected, cap, repeatedPayloadRejected, rejectionMs,
+    return { name: 'A snapshot without its master exports a dry master with each lane\'s pan; import refuses oversized and repeated-payload archives',
+      fallbackKind, fallbackShape, fallbackSides, oversizedRejected, cap, repeatedPayloadRejected, rejectionMs,
       pass: fallbackKind === 'dry-fallback' && JSON.stringify(fallbackShape) === JSON.stringify([96000, 96000])
+        && fallbackSides.pan === 1 && fallbackSides.leftSilent && fallbackSides.rightPeak > 0
         && oversizedRejected && repeatedPayloadRejected };
   }));
 

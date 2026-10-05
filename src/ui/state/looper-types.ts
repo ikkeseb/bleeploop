@@ -44,6 +44,8 @@ export interface ExportTrack {
   /** Deep copy of the five per-track FX states (chain order) — drives the v1 offline master render
    *  and lands in session.json. Plain JSON-serializable data. */
   fx: FxState[];
+  /** Pan, -1 (hard left) to 1 (hard right); missing reads as 0, the centre. */
+  pan?: number;
 }
 export interface ExportSnapshot {
   sampleRate: number;
@@ -85,6 +87,8 @@ export interface LoadSessionTrack {
   fx: FxState[];
   /** DUB FEEDBACK (0..1). Missing reads as 1. */
   dubFeedback?: number;
+  /** Pan (-1..1). Missing reads as 0, the centre. */
+  pan?: number;
 }
 export interface LoadSessionPayload {
   bpm: number;

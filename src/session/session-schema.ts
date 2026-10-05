@@ -27,6 +27,9 @@ export interface ParsedSessionTrack {
   fx: FxState[];
   /** DUB FEEDBACK, clamped to [0, 1]; missing (every export before it) normalizes to 1, a plain sum. */
   dubFeedback: number;
+  /** Pan, -1 (hard left) to 1 (hard right), clamped; missing (every export before it) normalizes to 0,
+   * the centre, where the lane plays as it did before pan. */
+  pan: number;
 }
 export interface ParsedSession {
   bpm: number;
@@ -45,7 +48,8 @@ export interface ParsedSession {
  *   0 at loop position 0 like the stems.
  * - 'wet-v1': the same mix rendered on Tone.js in the WebView, by exports before the engine rendered it
  *   (v0.1.0's fixtures hold one); it lags the stems by the limiter's pre-delay.
- * - 'dry-fallback': the volume/mute dual-mono mixdown, written when the wet render failed.
+ * - 'dry-fallback': the volume/mute/pan stereo mixdown (dual mono before pan), written when the wet
+ *   render failed.
  */
 export type SessionMasterKind = 'wet-engine' | 'wet-v1' | 'dry-fallback';
 
@@ -109,7 +113,8 @@ export function validateSessionPlugins(json: unknown, trackFiles: readonly strin
  * exactly match the five-effect key/range contract. Two fields normalize instead of rejecting: volume
  * clamps into [0, 1.5]; muted accepts legacy 0/1 and missing-as-false; reversed is optional and
  * missing-as-false for legacy format-v1 exports; dubFeedback is optional, clamps into [0, 1] and reads
- * missing as 1. Per-track state preserves STOPPED; PLAYING stays
+ * missing as 1; pan is optional, clamps into [-1, 1] and reads missing as 0 (the centre).
+ * Per-track state preserves STOPPED; PLAYING stays
  * PLAYING; missing state and OVERDUBBING normalize to PLAYING because legacy archives omitted state
  * and an export taken during overdub contains only the last committed loop, not the unfinished layer.
  * Other states are rejected rather than reviving an impossible capture state.
@@ -220,7 +225,12 @@ export function validateSession(json: unknown): ParsedSession {
     else if (t.dubFeedback !== undefined) {
       throw new Error(`session.json: track ${trackNo} dubFeedback must be a number, got ${JSON.stringify(t.dubFeedback)}`);
     }
-    return { track: trackNo, file: t.file, volume, muted, reversed, state, frames: master, fx, dubFeedback };
+    let pan = 0;
+    if (typeof t.pan === 'number' && Number.isFinite(t.pan)) pan = Math.max(-1, Math.min(1, t.pan)) + 0; // -0 as 0
+    else if (t.pan !== undefined) {
+      throw new Error(`session.json: track ${trackNo} pan must be a number, got ${JSON.stringify(t.pan)}`);
+    }
+    return { track: trackNo, file: t.file, volume, muted, reversed, state, frames: master, fx, dubFeedback, pan };
   });
   return { bpm, bars, masterLengthFrames: master, sampleRate, tracks };
 }

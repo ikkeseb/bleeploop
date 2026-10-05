@@ -27,10 +27,11 @@ export interface SessionSource {
   /** The recovery deleted the jam `token` let it delete. */
   spendClear(token: ClearToken): void;
   /** Lane `i`'s mix as the engine applied it (the feed's), never a control's pending gesture: its volume,
-   * mute, DUB FEEDBACK (0..1) and effects. */
+   * mute, DUB FEEDBACK (0..1), pan (-1..1) and effects. */
   trackVolume(i: number): number;
   trackMuted(i: number): boolean;
   trackDubFeedback(i: number): number;
+  trackPan(i: number): number;
   fxState(i: number): readonly FxState[];
   masterFramesValue(): number;
   /** Copies of the committed lanes' PCM with their mix as the engine applied it where the snapshot
