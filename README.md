@@ -33,7 +33,7 @@ The installed app tells you when a newer version is out and updates itself from 
 <details>
 <summary><b>Everything it does</b></summary>
 
-- 5-track looper with overdub and one-level undo, per-track reverse, mute and volume, a one-bar
+- 5-track looper with overdub and one-level undo, per-track reverse, mute, volume and pan, a one-bar
   record count-in and fixed-length record. The metronome is phase-locked to the loop grid, so the
   click and the loops cannot drift apart.
 - AUTO REC arms the first track and starts its take when you start playing, instead of the count-in.
@@ -46,7 +46,7 @@ The installed app tells you when a newer version is out and updates itself from 
   tracks keep their volumes, so PLAY ALL brings them back.
 - DUB FEEDBACK (a track's FX drawer): how much of the layers under an overdub it keeps, pass by pass,
   so a loop can evolve instead of only piling up; 0 % replaces them.
-- COPY duplicates a track, with its FX, volume and mute, into the first empty track.
+- COPY duplicates a track, with its FX, volume, pan and mute, into the first empty track.
 - A later take shorter than the loop repeats (tiles) across it, so every track has the loop's exact
   length. Keep playing past the loop, or set FIXED longer than it, and the take grows the loop in whole
   loops instead (multiply), and the other tracks repeat across it. TRIM keeps a track's first bars and
@@ -85,7 +85,7 @@ The installed app tells you when a newer version is out and updates itself from 
 
 **What BleepLoop is not**
 
-- Not a DAW: no timeline or arrangement. The mix is per-track volume, mute and FX.
+- Not a DAW: no timeline or arrangement. The mix is per-track volume, pan, mute and FX.
 - Not an amp sim: bring your own plugin.
 - Not a low-latency MIDI host: MIDI arrives through WebView2's Web MIDI, a few milliseconds behind
   what a DAW would see.

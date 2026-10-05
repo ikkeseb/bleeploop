@@ -82,6 +82,10 @@ it.
   go stays where it was left, with no jump back; MUTE now toggles in the engine, so two quick presses
   are two toggles, and an on-screen MUTE cancels a pedal's armed CLEAR. An import or recovery plays
   each lane at its saved mix from its first sample.
+- Pan per lane: the small slider beside each volume fader. Hard left or right is +3 dB on that side
+  and silence on the other (the reverb stays in the middle); a move glides with no zipper noise; a
+  session saved before pan opens centred and sounds as before. The lane's right cluster is wider for
+  it (240 to 264 px), so the waveform is a little narrower: still fine at 1000 px wide?
 - CLEAR stops a lane's delay echo at the press (it faded over 20 ms before), so a CLEAR or an import
   never brings back the echoes of what was cleared.
 - Two slots live at once on In 1 and In 2: each heard, each recording only its own input.
