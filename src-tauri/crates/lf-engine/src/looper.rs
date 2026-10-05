@@ -599,10 +599,10 @@ impl Looper {
     }
 
     /// Lane `i`'s mix as applied: its stored volume, mute and DUB FEEDBACK (a FADE's ramp never moves
-    /// them), and its chain's FX targets in `fx`.
+    /// them), and its pan target and chain's FX targets in `fx`.
     pub fn mix(&self, i: usize, fx: &LaneFx) -> LaneMix {
         let t = &self.lanes[i];
-        LaneMix { volume: t.volume, muted: t.muted, dub_feedback: t.feedback, fx: fx.chain(i).get_state() }
+        LaneMix { volume: t.volume, muted: t.muted, dub_feedback: t.feedback, pan: fx.pan(i), fx: fx.chain(i).get_state() }
     }
 
     /// The committed loop of lane `i` as it plays forward: its logical buffer, read through its
@@ -2493,9 +2493,10 @@ impl Looper {
             self.set_volume(i, mix.volume);
             self.set_mute(i, mix.muted);
             self.set_dub_feedback(i, mix.dub_feedback);
-            // No glide in from the EMPTY lane's level: the first loaded sample plays at the loaded one.
+            // No glide in from the EMPTY lane's level or pan: the first loaded sample plays at the loaded ones.
             let t = &mut self.lanes[i];
             t.gain = if t.muted { 0.0 } else { t.volume as f64 };
+            cx.fx.seed_pan(i, mix.pan);
             // The FX targets ramp in from the EMPTY lane's (`LaneFx::set_state`, as a CLEAR's do), over a
             // chain that holds nothing from before the load (`LaneFx::clear_history`): a bypassed delay
             // still recirculates and leaks its echoes at -56 dB, and a delay the load turns on would

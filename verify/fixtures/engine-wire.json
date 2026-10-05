@@ -46,6 +46,7 @@
     { "SetVolume": [0, 0.8] },
     { "SetMute": [1, true] },
     { "SetDubFeedback": [2, 0.5] },
+    { "SetPan": [3, -0.5] },
     { "SetFxParam": [0, "cutoff", 2400] },
     { "SetFxParam": [3, "feedback", 0.55] },
     { "SetFxBypass": [0, "filter", false] },
@@ -155,6 +156,7 @@
           "volume": 0.7,
           "muted": true,
           "dubFeedback": 0.3,
+          "pan": 0.25,
           "fx": [
             { "bypassed": false, "params": { "cutoff": 1234.5, "q": 0.7 } },
             { "bypassed": true, "params": { "semitones": -7 } },
@@ -330,6 +332,7 @@
               "volume": 0.5,
               "muted": false,
               "dubFeedback": 1,
+              "pan": -0.75,
               "fx": [
                 { "bypassed": false, "params": { "cutoff": 900, "q": 1 } },
                 { "bypassed": true, "params": { "semitones": 0 } },
@@ -362,6 +365,7 @@
         { "SetMasterVolume": 0.8 },
         { "SetFixedBars": 2 },
         { "SetVolume": [0, 0.5] },
+        { "SetPan": [0, -0.75] },
         { "SetFxBypass": [0, "filter", false] },
         { "SetFxParam": [0, "cutoff", 900] },
         { "SelectInstrument": { "Builtin": "pad" } },
@@ -403,6 +407,7 @@
             "volume": 0.5,
             "muted": true,
             "dubFeedback": 0.25,
+            "pan": -1,
             "fx": [
               { "bypassed": false, "params": { "cutoff": 800, "q": 4.5 } },
               { "bypassed": false, "params": { "semitones": -5 } },
@@ -493,6 +498,32 @@
             "volume": 1,
             "muted": false,
             "dubFeedback": 1,
+            "fx": [
+              { "bypassed": true, "params": { "cutoff": 1200, "q": 2 } },
+              { "bypassed": true, "params": { "semitones": 0 } },
+              { "bypassed": true, "params": { "rate": 1 } },
+              { "bypassed": true, "params": { "time": 1, "feedback": 0.4, "mix": 0.3 } },
+              { "bypassed": true, "params": { "amount": 0.3 } }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "bpm": 90,
+      "bars": 1,
+      "masterLengthFrames": 128000,
+      "tracks": [
+        {
+          "index": 1,
+          "frames": 128000,
+          "reversed": false,
+          "state": "Playing",
+          "mix": {
+            "volume": 1,
+            "muted": false,
+            "dubFeedback": 1,
+            "pan": 0.5,
             "fx": [
               { "bypassed": true, "params": { "cutoff": 1200, "q": 2 } },
               { "bypassed": true, "params": { "semitones": 0 } },

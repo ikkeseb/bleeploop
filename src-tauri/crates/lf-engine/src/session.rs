@@ -117,7 +117,8 @@ pub struct LoadTrack {
     pub reversed: bool,
     /// PLAYING from the grid anchor; else STOPPED.
     pub playing: bool,
-    /// The lane's volume, mute, DUB FEEDBACK and FX from the load's frame.
+    /// The lane's volume, mute, DUB FEEDBACK, pan and FX from the load's frame (its pan and level with no
+    /// glide in).
     pub mix: LaneMix,
 }
 

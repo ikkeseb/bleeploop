@@ -186,10 +186,15 @@ fn the_applied_mixes_read_from_the_engine_are_none_before_its_first_block_then_t
     assert_eq!((applied[0].volume, applied[4].dub_feedback), (0.25, 0.5));
 }
 
-/// Sixteen settings for `lane`: every field of its mix away from a fresh lane's.
+/// Seventeen settings for `lane`: every field of its mix away from a fresh lane's.
 fn settings(lane: u8) -> Vec<Command> {
     let x = lane as f64 * 0.01;
-    let mut out = vec![Command::SetVolume(lane, 0.5 + x as f32), Command::SetMute(lane, true), Command::SetDubFeedback(lane, 0.25 + x as f32)];
+    let mut out = vec![
+        Command::SetVolume(lane, 0.5 + x as f32),
+        Command::SetMute(lane, true),
+        Command::SetDubFeedback(lane, 0.25 + x as f32),
+        Command::SetPan(lane, -0.5 + x as f32),
+    ];
     out.extend(FxKind::ALL.map(|kind| Command::SetFxBypass(lane, kind, false)));
     for (param, value) in [
         (FxParam::Cutoff, 1234.0),
@@ -208,7 +213,7 @@ fn settings(lane: u8) -> Vec<Command> {
 
 #[test]
 fn a_replay_longer_than_one_blocks_take_sends_no_mix_until_it_is_all_taken() {
-    // Each lane's mix once its sixteen settings are applied, a lane a block on a reference engine.
+    // Each lane's mix once its seventeen settings are applied, a lane a block on a reference engine.
     let mut reference = Rig::new();
     reference.advance(128);
     let expected: Vec<CompactMix> = (0..5)
@@ -220,7 +225,8 @@ fn a_replay_longer_than_one_blocks_take_sends_no_mix_until_it_is_all_taken() {
             applied(&reference, lane as usize)
         })
         .collect();
-    // Eighty settings (the rig's own first command ahead of them) wait for the first block, which takes 64.
+    // Eighty-five settings (the rig's own first command ahead of them) wait for the first block, which
+    // takes 64.
     let mut rig = Rig::new();
     for lane in 0..5 {
         for command in settings(lane) {

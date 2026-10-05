@@ -53,7 +53,7 @@ const COMMANDS = [
   'RecDub', 'PlayStop', 'Stop', 'Undo', 'Reverse', 'Copy', 'Trim', 'Clear', 'PlayAll', 'StopAll', 'ClearAll', 'Action',
   'ActionOn', 'SelectTrack', 'SetBpm', 'SetMetronome', 'SetClickVolume', 'SetMasterVolume', 'SetMasterMute',
   'SetLoopEndStop', 'SetFadeBars', 'SetFixedLength', 'SetFixedBars', 'SetRetake', 'SetAutoRecord', 'SetAutoSensitivity',
-  'SetVolume', 'SetMute', 'SetDubFeedback', 'SetFxParam', 'SetFxBypass', 'SelectInstrument', 'NoteOn', 'NoteOff', 'PitchBend', 'Modulation',
+  'SetVolume', 'SetMute', 'SetDubFeedback', 'SetPan', 'SetFxParam', 'SetFxBypass', 'SelectInstrument', 'NoteOn', 'NoteOff', 'PitchBend', 'Modulation',
   'AllNotesOff', 'SetSlotLive', 'SetSlotGain', 'SetInstrumentGain', 'SetInputSend', 'SetInputSendParam', 'Press',
 ];
 const ACTIONS = [
@@ -208,6 +208,8 @@ const refused = {
   'an unknown note target': () => decodeCommand({ SelectInstrument: 'None' }),
   'an Off target with a payload': () => decodeCommand({ SelectInstrument: { Off: 0 } }),
   'an instrument level by the Rust name': () => decodeCommand({ SetInstrumentGain: ['Pad', 0.5] }),
+  'a pan that is no number': () => decodeCommand({ SetPan: [0, '0.5'] }),
+  'a pan past the fifth lane': () => decodeCommand({ SetPan: [5, 0] }),
   'a device request with a fractional rate': () =>
     decodeDeviceRequest({ backend: 'Asio', input: null, output: null, inputChannels: [0, 1], buffer: null, sampleRate: 44100.5 }),
   'a device request with a third slot': () =>
@@ -293,12 +295,17 @@ check("the browser fake's FX ranges are the UI's (the engine's)", () => {
   const mixed = fixture.snapshotHeaders[0];
   const track = (edit) => {
     const h = structuredClone(mixed);
+    // Without its master: the bytes are whole, so only the edited mix can make the decode throw.
+    delete h.master;
     edit(h.tracks[0]);
     return () => decodeSnapshot(encodeSessionBytes(h, h.tracks.map(() => new Float32Array(h.masterLengthFrames))).buffer);
   };
+  check('the unedited mix decodes (so each refusal below is its edit)', () => track(() => {})());
   const refusedMix = {
     'a track without its mix': track((t) => delete t.mix),
-    'a mix with an unknown field': track((t) => (t.mix.pan = 0)),
+    'a mix with an unknown field': track((t) => (t.mix.width = 0)),
+    'a mix whose pan is no number': track((t) => (t.mix.pan = '-1')),
+    'a mix whose pan is null': track((t) => (t.mix.pan = null)),
     'a mix of four effects': track((t) => t.mix.fx.pop()),
     'an effect missing a param': track((t) => delete t.mix.fx[3].params.mix),
     'an effect with another kind\'s param': track((t) => (t.mix.fx[0].params = { cutoff: 800, amount: 1 })),
@@ -317,6 +324,28 @@ for (const entry of fixture.loadHeaders) {
     for (const t of header.tracks) validateFxStates(t.mix.fx, `track ${t.index}`);
   });
 }
+check('a mix carries its pan off the centre and leaves it out at the centre, as the engine writes it', () => {
+  const pans = (mixes) => mixes.map((m) => m.pan);
+  const snapshot = fixture.snapshotHeaders[0];
+  const frames = snapshot.masterLengthFrames;
+  const master = { left: new Float32Array(frames), right: new Float32Array(frames) };
+  const { header } = decodeSnapshot(encodeSessionBytes(structuredClone(snapshot), snapshot.tracks.map(() => new Float32Array(frames)), master).buffer);
+  assert.deepEqual(pans(header.tracks.map((t) => t.mix)), [-1, undefined]);
+  const mixEvent = decodeEvent(structuredClone(fixture.events.find((e) => tag(e)[0] === 'Mix')));
+  assert.equal(mixEvent.mix.pan, 0.25);
+});
+check('a load header from before pan (no pan in its mixes) reads as centred lanes', () => {
+  const legacy = fixture.loadHeaders[0];
+  assert.ok(legacy.tracks.every((t) => !('pan' in t.mix)), 'the fixture keeps a load header without pan');
+  const pcm = legacy.tracks.map(() => new Float32Array(legacy.masterLengthFrames));
+  const { header } = decodeLoadSession(encodeSessionBytes(structuredClone(legacy), pcm).buffer);
+  assert.ok(header.tracks.every((t) => (t.mix.pan ?? 0) === 0));
+  assert.ok(fixture.loadHeaders.some((h) => h.tracks.some((t) => t.mix.pan === 0.5)), 'and one with a pan');
+});
+check('a reset frame that replays a pan reads it', () => {
+  const reset = fixture.feed.find((f) => f.reset);
+  assert.ok(decodeFeedFrame(structuredClone(reset)).settings.some((c) => c.SetPan !== undefined));
+});
 check("the browser fake's load sets each loaded lane's mix, clamped as the engine's", () => {
   fakeMixModel.frame({ reset: true, settings: [], events: [] });
   fakeMixModel.command({ SetVolume: [0, 0.9] });
@@ -337,7 +366,8 @@ check("the browser fake's load sets each loaded lane's mix, clamped as the engin
   const refusedLoad = {
     'a load track without its mix': track((t) => delete t.mix),
     'a load mix of four effects': track((t) => t.mix.fx.pop()),
-    'a load mix with an unknown field': track((t) => (t.mix.pan = 0)),
+    'a load mix with an unknown field': track((t) => (t.mix.width = 0)),
+    'a load mix whose pan is no number': track((t) => (t.mix.pan = '0.5')),
     'a load track that overdubs': track((t) => (t.state = 'Overdubbing')),
     'a load track with an unknown field': track((t) => (t.gain = 1)),
     'a load track listed twice': track((t, h) => h.tracks.push(structuredClone(t))),

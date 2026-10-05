@@ -24,7 +24,7 @@
 //! | [`looper`] | lanes and buffers, the recorder, every transition, the multiply, TRIM, DUB FEEDBACK, FADE, gates and refusals, block jobs | `looper/{machine,state,capture,playback,mixer}.ts`, `ui/looper/gates.ts` |
 //! | [`autorec`] | the AUTO REC onset detector | `looper/auto-record.ts` |
 //! | [`engine`] | the callback: rings, the block split, the bus topology, master volume | `engine.ts`, `master.ts` |
-//! | [`effects`] | each lane's FX chain, the shared reverb bus, their grid, CLEAR and COPY on a lane's FX | `fx/fx.ts`, `looper/{playback,machine}.ts` |
+//! | [`effects`] | each lane's FX chain and its pan, the shared reverb bus, their grid, CLEAR and COPY on a lane's FX and pan | `fx/fx.ts`, `looper/{playback,machine}.ts` (the pan: the engine's own) |
 //! | [`input_fx`] | the input sends: ECHO, REVERB and RING MOD on the wet signal, wet only, into the record tap and the monitor | — (engine only) |
 //! | [`instruments`] | the six built-in instruments, the selected one (or none), each one's level, the wheels, their record path | `synths/index.ts`, `input-router.ts` |
 //! | [`overview`] | what the UI draws, for a reader off the audio thread: the grid anchor, each lane's state, buffer, orientation and frames, each buffer's waveform peaks | `looper/peaks.ts` |
@@ -145,9 +145,10 @@
 //! `tests/trim.rs` the TRIM, `tests/dub_feedback.rs` DUB FEEDBACK, `tests/punch_ramps.rs` an overdub's punch
 //! ramps (its reference: `tests/common/dub.rs`), `tests/playback_edges.rs` the undo, PLAY and STOP edges
 //! (its reference: `tests/common/edges.rs`), `tests/fade.rs` FADE, `tests/input_fx.rs`
-//! the input sends, `tests/mix_feed.rs` a lane's mix on the feed and the event ring's delivery. `tests/perf.rs` holds the ignored cost
-//! bars (Stage 2 and 3, the input sends, a multiply's burst, a TRIM's) and the Stage 3 load's alloc
-//! check. `tests/golden_jam.rs` runs the golden jam at 44.1 and 48 kHz, bit-identical across block
+//! the input sends, `tests/mix_feed.rs` a lane's mix on the feed and the event ring's delivery, `tests/pan.rs`
+//! a lane's pan (the centre's bits against the render before pan: `effects`' unit test). `tests/perf.rs`
+//! holds the ignored cost bars (Stage 2 and 3, the input sends, the lanes' pan, a multiply's burst, a
+//! TRIM's) and the Stage 3 load's alloc check. `tests/golden_jam.rs` runs the golden jam at 44.1 and 48 kHz, bit-identical across block
 //! sizes 1, 32, 64, 127, 128, 480 and 1024; `tests/gestures.rs` runs proptest gesture scripts (one
 //! recorder; a whole-bar master; every lane one master long; undo twice is identity; undo after an
 //! N-cycle dub gives back the pre-dub loop; finite output) at two block sizes, bit-identical, with
@@ -209,13 +210,13 @@ pub use slots::SlotPort;
 
 /// Within this of its target a gain glide takes the target itself: -120 dB of full scale, a step far
 /// under any converter's noise floor, reached about 14 time constants into a glide from 1 (some 170 ms
-/// at 12 ms). Without it a glide never lands: one to 0 decays into f64's subnormals and stalls there (an
+/// at 12 ms). A lane's pan glides its position with it: a step of at most 1.2e-6 in either gain. Without it a glide never lands: one to 0 decays into f64's subnormals and stalls there (an
 /// x86 slow path on every frame), and one to another target sits a hair off it (keeping a slot's and an
 /// instrument's unity fast paths off) until it rounds onto it some 37 time constants in.
 const GLIDE_SNAP: f64 = 1e-6;
 
-/// One frame of a one-pole gain glide (a lane's volume and mute, a slot's gain, an instrument's level,
-/// the master volume): today's `target + (gain - target) * coef` until it is within [`GLIDE_SNAP`] of
+/// One frame of a one-pole gain glide (a lane's volume and mute, a lane's pan position, a slot's gain,
+/// an instrument's level, the master volume): today's `target + (gain - target) * coef` until it is within [`GLIDE_SNAP`] of
 /// the target, then the target exactly. Per frame, so it lands on the same frame at any block size.
 #[inline]
 pub(crate) fn glide(gain: f64, target: f64, coef: f64) -> f64 {

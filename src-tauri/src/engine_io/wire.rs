@@ -79,6 +79,7 @@ enum CommandDef {
     SetVolume(u8, f32),
     SetMute(u8, bool),
     SetDubFeedback(u8, f32),
+    SetPan(u8, f32),
     SetFxParam(u8, #[serde(with = "fx_param")] FxParam, f64),
     SetFxBypass(u8, #[serde(with = "fx_kind")] FxKind, bool),
     SelectInstrument(#[serde(with = "NoteTargetDef")] NoteTarget),
@@ -354,9 +355,11 @@ pub struct FeedFrame {
 }
 
 /// A lane's mix as a snapshot's track carries it, in session.json's track shape
-/// (`src/session/session-schema.ts`): `{"volume","muted","dubFeedback","fx"}`, `fx` the five effects in
-/// chain order, each `{"bypassed","params"}` with its params by their TS keys (`validateFxStates` reads
-/// the same). A missing or unknown key, or a value that is no number, is refused.
+/// (`src/session/session-schema.ts`): `{"volume","muted","dubFeedback","pan","fx"}`, `fx` the five
+/// effects in chain order, each `{"bypassed","params"}` with its params by their TS keys
+/// (`validateFxStates` reads the same). `pan` is optional: written only off the centre, and a mix
+/// without it (a load header from before pan) is centred. Any other missing or unknown key, or a value
+/// that is no number, is refused.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(try_from = "MixJson", into = "MixJson")]
 pub struct WireLaneMix(pub LaneMix);
@@ -367,7 +370,13 @@ struct MixJson {
     volume: f32,
     muted: bool,
     dub_feedback: f32,
+    #[serde(default, skip_serializing_if = "centred")]
+    pan: f32,
     fx: Vec<FxJson>,
+}
+
+fn centred(pan: &f32) -> bool {
+    *pan == 0.0
 }
 
 #[derive(Serialize, Deserialize)]
@@ -387,7 +396,7 @@ impl From<WireLaneMix> for MixJson {
                 FxJson { bypassed: state.bypassed, params }
             })
             .collect();
-        MixJson { volume: m.volume, muted: m.muted, dub_feedback: m.dub_feedback, fx }
+        MixJson { volume: m.volume, muted: m.muted, dub_feedback: m.dub_feedback, pan: m.pan, fx }
     }
 }
 
@@ -395,8 +404,8 @@ impl TryFrom<MixJson> for WireLaneMix {
     type Error = String;
 
     fn try_from(j: MixJson) -> Result<WireLaneMix, String> {
-        if !j.volume.is_finite() || !j.dub_feedback.is_finite() {
-            return Err("a mix's volume and dubFeedback are numbers".to_string());
+        if !j.volume.is_finite() || !j.dub_feedback.is_finite() || !j.pan.is_finite() {
+            return Err("a mix's volume, dubFeedback and pan are numbers".to_string());
         }
         if j.fx.len() != FxKind::ALL.len() {
             return Err(format!("a mix holds {} effects, not {}", j.fx.len(), FxKind::ALL.len()));
@@ -416,7 +425,7 @@ impl TryFrom<MixJson> for WireLaneMix {
                 }
             }
         }
-        Ok(WireLaneMix(LaneMix { volume: j.volume, muted: j.muted, dub_feedback: j.dub_feedback, fx }))
+        Ok(WireLaneMix(LaneMix { volume: j.volume, muted: j.muted, dub_feedback: j.dub_feedback, pan: j.pan, fx }))
     }
 }
 
@@ -446,7 +455,7 @@ mod tests {
 
     /// Every `Command` variant, by position: a new variant fails to compile here until it has a
     /// number (bump `COMMANDS`) and an example in the fixture.
-    const COMMANDS: usize = 43;
+    const COMMANDS: usize = 44;
     fn command_index(c: &Command) -> usize {
         use Command::*;
         match c {
@@ -493,6 +502,7 @@ mod tests {
             SetDubFeedback(..) => 40,
             SetFadeBars(_) => 41,
             SetInstrumentGain(..) => 42,
+            SetPan(..) => 43,
         }
     }
 
@@ -679,7 +689,7 @@ mod tests {
         let _: Vec<super::super::session::SnapshotHeader> = round_trip("snapshotHeaders");
         let entry = &fixture()["snapshotHeaders"][0]["tracks"][0]["mix"];
         let WireLaneMix(mix) = serde_json::from_value(entry.clone()).unwrap();
-        assert_eq!((mix.volume, mix.muted, mix.dub_feedback), (0.5, true, 0.25));
+        assert_eq!((mix.volume, mix.muted, mix.dub_feedback, mix.pan), (0.5, true, 0.25, -1.0));
         assert_eq!(mix.fx[FxKind::Delay.index()], FxState { bypassed: false, params: [2.0, 0.95, 0.75] }, "the params by their keys, in def order");
         let louder = serde_json::to_value(WireLaneMix(LaneMix { volume: 1.5, ..LaneMix::default() })).unwrap();
         assert!(same(&louder, &fixture()["snapshotHeaders"][0]["tracks"][1]["mix"]), "the engine's defaults write as the fixture's: {louder}");
@@ -693,6 +703,25 @@ mod tests {
         assert!(refused(|m| m["fx"][0]["params"]["Q"] = Value::from(2)), "an unknown param");
         assert!(refused(|m| m["fx"][1]["params"]["semitones"] = Value::from("-5")), "a param that is no number");
         assert!(refused(|m| m["dub_feedback"] = Value::from(1)), "camelCase fields");
+        assert!(refused(|m| m["pan"] = Value::from("-1")), "a pan that is no number");
+        assert!(refused(|m| m["pan"] = Value::Null), "a null pan");
+        assert!(refused(|m| m["width"] = Value::from(0)), "an unknown field");
+    }
+
+    #[test]
+    fn a_mix_writes_its_pan_off_the_centre_only_and_reads_a_mix_without_one_as_centred() {
+        let centred = serde_json::to_value(WireLaneMix(LaneMix::default())).unwrap();
+        assert!(centred.get("pan").is_none(), "the centre is left out, as a mix from before pan: {centred}");
+        let panned = serde_json::to_value(WireLaneMix(LaneMix { pan: 0.5, ..LaneMix::default() })).unwrap();
+        assert_eq!(panned["pan"], Value::from(0.5));
+        let WireLaneMix(back) = serde_json::from_value(panned).unwrap();
+        assert_eq!(back.pan, 0.5);
+        let WireLaneMix(legacy) = serde_json::from_value(centred).unwrap();
+        assert_eq!(legacy, LaneMix::default(), "no pan reads as the centre");
+        let event = WireEvent(Event::Mix { frame: 0, lane: 1, mix: CompactMix::from(&LaneMix { pan: -0.25, ..LaneMix::default() }) });
+        let json = serde_json::to_value(event).unwrap();
+        assert_eq!(json["Mix"]["mix"]["pan"], Value::from(-0.25), "a Mix event carries it: {json}");
+        assert_eq!(serde_json::from_value::<WireEvent>(json).unwrap(), event);
     }
 
     #[test]
@@ -700,7 +729,9 @@ mod tests {
         let _: Vec<super::super::session::LoadHeader> = round_trip("loadHeaders");
         let entry = &fixture()["loadHeaders"][0];
         let WireLaneMix(mix) = serde_json::from_value(entry["tracks"][0]["mix"].clone()).unwrap();
-        assert_eq!((mix.volume, mix.muted, mix.dub_feedback), (0.25, true, 0.5));
+        assert_eq!((mix.volume, mix.muted, mix.dub_feedback, mix.pan), (0.25, true, 0.5, 0.0), "a load mix from before pan is centred");
+        let WireLaneMix(panned) = serde_json::from_value(fixture()["loadHeaders"][1]["tracks"][0]["mix"].clone()).unwrap();
+        assert_eq!(panned.pan, 0.5);
         assert_eq!(mix.fx[FxKind::Reverb.index()], FxState { bypassed: false, params: [0.75, 0.0, 0.0] });
         let mut bare = entry.clone();
         bare["tracks"][1].as_object_mut().unwrap().remove("mix");
@@ -736,6 +767,8 @@ mod tests {
         assert!(command(r#"{"SetFadeBars":2.5}"#).is_err(), "a fade's bars are a whole number");
         assert_eq!(command(r#"{"Action":"FadeAll"}"#).unwrap(), Command::Action(Action::FadeAll));
         assert_eq!(command(r#"{"SetDubFeedback":[2,0.5]}"#).unwrap(), Command::SetDubFeedback(2, 0.5));
+        assert_eq!(command(r#"{"SetPan":[3,-0.5]}"#).unwrap(), Command::SetPan(3, -0.5));
+        assert!(command(r#"{"SetPan":[3,"left"]}"#).is_err(), "a pan is a number");
         assert_eq!(command(r#"{"SelectInstrument":"Off"}"#).unwrap(), Command::SelectInstrument(NoteTarget::Off));
         assert_eq!(command(r#"{"SetInstrumentGain":["bass",0.5]}"#).unwrap(), Command::SetInstrumentGain(Instrument::Bass, 0.5));
         assert!(command(r#"{"SetInstrumentGain":["Bass",0.5]}"#).is_err(), "an instrument is its id");

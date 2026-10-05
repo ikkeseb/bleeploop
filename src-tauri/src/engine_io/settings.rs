@@ -3,7 +3,7 @@
 //! before the first open is kept; a reset frame hands them to the UI.
 //!
 //! A setting is a command that sets a value (the tempo, the click, the master, the input sends, the
-//! looper's modes and FADE's length, a lane's volume, mute, DUB FEEDBACK and FX, the note target, the
+//! looper's modes and FADE's length, a lane's volume, mute, DUB FEEDBACK, pan and FX, the note target, the
 //! wheels, a built-in instrument's level, a plugin slot's live flag and gain, the selected lane);
 //! everything else (the looper's gestures, notes) acts once and is not kept. Every setting but a lane's
 //! mix is kept as the command the engine's ring took (or the UI sent before the first open); one the
@@ -50,6 +50,7 @@ enum Key {
     Volume(u8),
     Mute(u8),
     DubFeedback(u8),
+    Pan(u8),
     /// A lane's effect, by `FxKind::index`.
     FxBypass(u8, usize),
     /// A lane's FX param, by `FxKind::index * MAX_PARAMS + FxParam::index`.
@@ -66,7 +67,7 @@ enum Key {
 impl Key {
     fn lane(self) -> Option<u8> {
         match self {
-            Key::Volume(i) | Key::Mute(i) | Key::DubFeedback(i) | Key::FxBypass(i, _) | Key::FxParam(i, _) => Some(i),
+            Key::Volume(i) | Key::Mute(i) | Key::DubFeedback(i) | Key::Pan(i) | Key::FxBypass(i, _) | Key::FxParam(i, _) => Some(i),
             _ => None,
         }
     }
@@ -95,6 +96,7 @@ fn key(command: &Command) -> Option<Key> {
         Command::SetVolume(i, _) => Key::Volume(lane(i)?),
         Command::SetMute(i, _) => Key::Mute(lane(i)?),
         Command::SetDubFeedback(i, _) => Key::DubFeedback(lane(i)?),
+        Command::SetPan(i, _) => Key::Pan(lane(i)?),
         Command::SetFxBypass(i, kind, _) => Key::FxBypass(lane(i)?, kind.index()),
         Command::SetFxParam(i, param, _) => Key::FxParam(lane(i)?, param.kind().index() * MAX_PARAMS + param.index()),
         Command::SetInstrumentGain(i, _) => Key::InstrumentGain(i as usize),
@@ -166,6 +168,9 @@ impl Settings {
         }
         if mix.dub_feedback != fresh.dub_feedback {
             self.insert(Command::SetDubFeedback(lane, mix.dub_feedback));
+        }
+        if mix.pan != fresh.pan {
+            self.insert(Command::SetPan(lane, mix.pan));
         }
         for kind in FxKind::ALL {
             let (now, was) = (&mix.fx[kind.index()], &fresh.fx[kind.index()]);
@@ -302,6 +307,24 @@ mod tests {
         assert_eq!(replay(&s), [Command::SetVolume(2, 0.5)], "the new engine's replay stands");
         assert!(s.mixed(2, 20, 2, &mix(|m| m.volume = 0.75)));
         assert_eq!(replay(&s), [Command::SetVolume(2, 0.75)]);
+    }
+
+    #[test]
+    fn a_lanes_pan_is_a_lane_setting_kept_off_the_centre() {
+        let mut s = Settings::default();
+        assert!(s.record(&Command::SetPan(1, 0.5)), "a setting");
+        assert!(!s.record(&Command::SetPan(5, 0.5)), "a lane out of range is not");
+        s.record(&Command::SetFxBypass(1, FxKind::Delay, false));
+        s.record(&Command::SetVolume(1, 0.25));
+        assert_eq!(
+            replay(&s),
+            [Command::SetVolume(1, 0.25), Command::SetPan(1, 0.5), Command::SetFxBypass(1, FxKind::Delay, false)],
+            "bootstrap, with the lane's other settings"
+        );
+        assert!(s.mixed(0, 10, 1, &mix(|m| m.pan = -0.25)));
+        assert_eq!(replay(&s), [Command::SetPan(1, -0.25)], "what the engine applied");
+        assert!(s.mixed(0, 20, 1, &mix(|_| {})));
+        assert!(replay(&s).is_empty(), "a centred lane keeps no pan");
     }
 
     #[test]

@@ -7,7 +7,7 @@
 //! [`wet_master`] loads the session through the engine's own session path while no device runs
 //! ([`Engine::service_session_idle`]) with every lane PLAYING (a lane saved STOPPED is in the master; a
 //! muted one is out through its mute), then applies at the load's frame each lane's [`LaneMix`] (its
-//! volume, mute and FX, as the snapshot took them at its pin) and, from the host's settings, the master's
+//! volume, mute, pan and FX, as the snapshot took them at its pin) and, from the host's settings, the master's
 //! volume and mute. Every other setting is skipped (a lane's mix there included, the click, the
 //! instruments, the input sends, the plugin slots, the looper's modes), and the click is switched off, so
 //! the render has no click, no instrument, no input sends, no plugin unit and a silent input. It renders
@@ -193,10 +193,10 @@ fn is_master_mix(command: &Command) -> bool {
     matches!(command, Command::SetMasterVolume(_) | Command::SetMasterMute(_))
 }
 
-/// The commands that give lane `lane` the mix `mix`: its volume and mute, then each effect's params and
-/// its bypass, in chain order (as `FxChain::set_state` sets them). DUB FEEDBACK writes nothing here.
+/// The commands that give lane `lane` the mix `mix`: its volume, mute and pan, then each effect's params
+/// and its bypass, in chain order (as `FxChain::set_state` sets them). DUB FEEDBACK writes nothing here.
 fn lane_commands(lane: u8, mix: &LaneMix) -> Vec<Command> {
-    let mut out = vec![Command::SetVolume(lane, mix.volume), Command::SetMute(lane, mix.muted)];
+    let mut out = vec![Command::SetVolume(lane, mix.volume), Command::SetMute(lane, mix.muted), Command::SetPan(lane, mix.pan)];
     for kind in FxKind::ALL {
         let state = mix.fx[kind.index()];
         for (def, &value) in kind.params().iter().zip(&state.params) {
