@@ -325,8 +325,8 @@ mod tests {
     use super::*;
     use crate::engine_io::test_rig::TestDevice;
 
-    /// A load is refused before it reserves its slot when its path names no format, and a VST2 load
-    /// (no owner yet) frees the slot it reserved: the next load reaches its loader either way.
+    /// A load is refused before it reserves its slot when its path names no format, and a load whose
+    /// own loader fails frees the slot it reserved: the next load reaches its loader either way.
     #[test]
     fn a_load_this_host_cannot_start_leaves_the_slot_free_for_the_next() {
         let device = TestDevice::start(48_000, 256, Duration::from_millis(5), |_| 0.0);
@@ -346,10 +346,10 @@ mod tests {
         assert!(load(r"C:\plugins\no-extension").is_err());
         assert!(free());
 
-        assert_eq!(load(r"C:\plugins\Thing.DLL").unwrap_err(), "VST2 hosting is not built yet");
-        assert!(free(), "the refused VST2 load gave its reservation back");
-
-        // The slot takes a load again: this one gets as far as its own loader, which finds no file.
+        // Each format gets as far as its own loader, which finds no file, and the slot takes a load again.
+        let missing = load(r"C:\no-such-folder\Missing.DLL").unwrap_err();
+        assert!(missing.starts_with("LoadLibraryW"), "{missing}");
+        assert!(free(), "the failed VST2 load gave its reservation back");
         let missing = load(r"C:\no-such-folder\Missing.clap").unwrap_err();
         assert!(missing.starts_with("load failed"), "{missing}");
         assert!(free());

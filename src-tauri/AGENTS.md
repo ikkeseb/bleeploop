@@ -1,7 +1,7 @@
 # src-tauri/: native host briefing (Windows / Rust)
 
 Everything Rust/native lives here: the native audio engine (`crates/lf-engine`) and its device side
-(`src/engine_io`), the CLAP/VST3 plugin host, the ASIO tier, plugin editor windows. The root
+(`src/engine_io`), the CLAP/VST3/VST2 plugin host, the ASIO tier, plugin editor windows. The root
 `AGENTS.md` routes here: read this before any work in this subtree (`CLAUDE.md` beside it is a
 one-line adapter). It holds the router-level gotchas and operational bits; the engine's rules live in
 its two briefings (the crate doc of `crates/lf-engine/src/lib.rs`, the module doc of
@@ -22,11 +22,11 @@ Who runs where and what each thread owns. The rules are in bold below the table.
 | **Device callbacks** (cpal driver threads) | Nothing: ASIO runs input then output in one bufferSwitch; WASAPI's output callback is the clock and its input callback feeds the join pipe. Each promotes itself to MMCSS Pro Audio on first entry | `try_lock` on the engine (a miss plays silence and counts); atomics and rings; faults latch for the owner |
 | **Share output** (a cpal WASAPI callback, `engine_io/share.rs`) | The mirror endpoint's stream, while ASIO plays | Pulls the post-limiter master from its pipe; never takes the engine lock |
 | **Feed** (`lf-engine-feed`, `engine_io/feed.rs`) | The only reader of the engine's event ring (but for a rebuild, which drains the replaced engine's: `swap_engine`) and the device events; the mirror of lanes and transport a reload resyncs from | ~60 frames/s over a Tauri `Channel`; never PCM |
-| **Plugin owner, per slot** (`lf-clap-engine-{slot}` / `lf-vst3-engine-{slot}`, `host/engine_slot.rs`) | The `!Send` plugin instance (clack main thread / VST3 component + controller), its editor host window and Win32 pump, its tone saves, restarts and re-activation after an eviction, the ordered teardown | `OwnerRequest`s (polled every 20 ms, `OWNER_POLL`); the unit enters and leaves the engine through its `SlotHost`; params through the slot's event ring; the unit's fault bits, reported once per load |
+| **Plugin owner, per slot** (`lf-clap-engine-{slot}` / `lf-vst3-engine-{slot}` / `lf-vst2-engine-{slot}`, `host/engine_slot.rs`) | The `!Send` plugin instance (clack main thread / VST3 component + controller / VST2 effect, with its `effStartProcess` and `effStopProcess`), its editor host window and Win32 pump, its tone saves, restarts and re-activation after an eviction, the ordered teardown | `OwnerRequest`s (polled every 20 ms, `OWNER_POLL`); the unit enters and leaves the engine through its `SlotHost`; params through the slot's event ring; the unit's fault bits, reported once per load |
 | **Shutdown** (`lf-engine-shutdown`, on exit, and before the updater's installer: `update.rs`) | Stops the feed, saves every tone, unloads the plugins while the device plays, closes the device | Bounded at 8 s (`SHUTDOWN_WAIT`): a stuck plugin is left to process exit |
 | **ASIO probe** (`lf-asio-probe`, `asio_startup.rs`) | One driver-resolving probe at a time, requested by the frontend after the UI is up (a retry after a failure and a driver switch probe again) | Its status report |
 | **Scan children** (`app.exe --scan-one <path>`) | One process per bundle in a kill-on-close Job Object, 20 s timeout; two reader threads per child drain stdout/stderr with caps | Descriptor JSON |
-| **Plugin GUI threads** | A floating CLAP editor runs the plugin's own window thread and only sets flags (`HostGuiImpl` → `EditorClosed`) the owner acks; a hosted editor embeds into the owner's host window and is pumped there. VST3 `performEdit`/`restartComponent` (ONE component handler per load, set at load) touch only the event ring, the window event and the `RestartFlags` atom the owner drains each turn; CLAP `params.rescan` sets a flag the owner drains | Flags / events |
+| **Plugin GUI threads** | A floating CLAP editor runs the plugin's own window thread and only sets flags (`HostGuiImpl` → `EditorClosed`) the owner acks; a hosted editor embeds into the owner's host window and is pumped there. VST3 `performEdit`/`restartComponent` (ONE component handler per load, set at load) touch only the event ring, the window event and the `RestartFlags` atom the owner drains each turn; CLAP `params.rescan` sets a flag the owner drains; a VST2 plugin's host callback, from any thread, sets latches in its `HostContext` the owner drains each turn | Flags / events |
 | **Native MIDI** (`lf-midi-ports`, `engine_io/midi`) | Built and tested, **never started by the app**: MIDI arrives through the WebView's Web MIDI, and WinMM input ports are exclusive, so the two cannot share a controller | none |
 
 - **Only a slot's owner thread touches its plugin instance and editor.** Commands reach it through
@@ -38,15 +38,17 @@ Who runs where and what each thread owns. The rules are in bold below the table.
   command thread with that owner it would be the editor-hang deadlock below.
 - **The audio path never logs, locks (beyond `try_lock`), allocates or waits** (invariant 5): the
   engine callback, the Share callback and every plugin `process`. A unit latches fault bits
-  (`FAULT_START`/`FAULT_PROCESS`/`FAULT_PARAM`) and the owner reports each once per load; add a new
+  (`FAULT_START`/`FAULT_PROCESS`/`FAULT_PARAM`/`FAULT_EVENTS`) and the owner reports each once per load; add a new
   RT failure path to that latch, not `log::*`. DEV builds count RT allocations (`host/rt_alloc.rs`).
 - **Plugin lifecycle runs on its owner with the slot bypassed** (invariant 4): load, activate, a
-  plugin-requested restart (CLAP `request_restart`, VST3 `restartComponent`) and teardown; an FX slot
+  plugin-requested restart (CLAP `request_restart`, VST3 `restartComponent`, VST2
+  `audioMasterIOChanged`) and teardown; an FX slot
   passes dry, an instrument slot is silent, loops and click never wait.
 - **Unload order is load-bearing:** `running=false` → `OwnerRequest::Wake` → join the owner, which
   removes the unit from the engine (crossfade to bypass, `stop` on the audio thread; ≤2 s,
   `REMOVE_TIMEOUT`) → deactivate → terminate → the module unloads LAST. A unit the engine does not hand
-  back leaves the plugin loaded (leaked), never unloaded under a running processor. Both halves log
+  back leaves the plugin loaded (leaked), never unloaded under a running processor (VST2's own order:
+  § Plugin hosting). Both halves log
   their timing (`engine slot N VST3 teardown: remove=… release+deactivate+terminate+module=… ms`,
   `owner joined in … ms`), in release too; a plugin's own release can take seconds (Archetype: ~4.8 s,
   the slot dry meanwhile).
@@ -55,8 +57,9 @@ Who runs where and what each thread owns. The rules are in bold below the table.
 
 - **`crates/lf-engine` is the pure engine** (briefing: its `src/lib.rs`); `src/engine_io` is its
   device side (briefing: its `mod.rs`); the plugin units and owners are `host/engine_slot.rs`,
-  `host/clap_engine.rs`, `host/vst3_engine.rs`, which `engine_io/plugins.rs` routes the `plugin_*`
-  commands to. `tauri dev` watches all of `src-tauri/`, so an engine edit relaunches a running dev app.
+  `host/clap_engine.rs`, `host/vst3_engine.rs`, `src/host/vst2_engine.rs`, which
+  `engine_io/plugins.rs` routes the `plugin_*` commands to. `tauri dev` watches all of `src-tauri/`,
+  so an engine edit relaunches a running dev app.
 - **An engine ASIO open opens the driver at another block size first** (`engine_io/cpal_driver.rs`,
   ~500 ms): opened again at the size it last ran, the rig's Focusrite driver lands two periods late.
 - **An ASIO driver is never asked for a buffer outside the range it reported to the probe** (cpal
@@ -118,8 +121,11 @@ The out-of-process plugin scan is testable WITHOUT the full app: `cargo build`, 
 `--scan-one` dispatch runs before Tauri starts). The scan walks its built-in roots, then the
 player's own folders (plugin-folders.json beside the cache: user data, so an unreadable one is an
 error to the folder commands, is never overwritten, and the scan logs it and walks the built-in
-roots alone; `src/host/folders.rs`), one scan at a time in the process. It spawns one child per `.clap`/`.vst3` for
-crash + hang isolation (**20s per-child timeout**: a heavy/licensed VST3 like Neural DSP can hang
+roots alone; `src/host/folders.rs`), one scan at a time in the process. It spawns one child per `.clap`/`.vst3`
+and per `.dll` the VST2 pre-filter lets through (`src/host/pe.rs` reads each one's headers and export
+names without loading it: a 64-bit DLL that names `VSTPluginMain` or `main` gets a child, a 32-bit
+one is reported as unsupported with no child, any other DLL is ignored, and one it cannot read goes to
+the child), for crash + hang isolation (**20s per-child timeout**: a heavy/licensed VST3 like Neural DSP can hang
 on load in the headless child), but only for bundles whose binary size/mtime changed since the
 cache (plugin-scan.json beside the release log dir under %LOCALAPPDATA%) last saw them (a launch spawns
 nothing; a remembered failure is retried only by the picker's rescan button = `plugin_scan`
@@ -132,23 +138,26 @@ A dev start that names a build path from an old checkout location (a moved or re
 `rm -rf src-tauri/target/debug/build`.
 (Driving and grepping a running `tauri dev`, and stopping it: `docs/VERIFY.md`.)
 
-## Plugin hosting (CLAP + VST3)
+## Plugin hosting (CLAP + VST3 + VST2)
 
 All in `src-tauri/src/host/`. The known-fragile area: read this whole section before any plugin or
 plugin-GUI work.
 - **Every WebView document gets a `frontendEpoch` from `host_init`** (one atomic step, never 0). A
   slot is reserved for the document that asked before foreign setup; a reload cancels the
   reservation, and a load that finishes for a replaced document unloads again (`engine_io/plugins.rs`).
-- **The `!Send` instance (clack `PluginInstance`, the VST3 component) lives on its owner thread**, NOT
-  `tauri::State`; only the `Send` unit (`ClapUnit`, `Vst3Unit`: the processor with its buffers and
-  lists) enters the engine, which never drops one (a drop frees memory and calls into the DLL).
+- **The `!Send` instance (clack `PluginInstance`, the VST3 component, the VST2 effect) lives on its
+  owner thread**, NOT `tauri::State`; only the `Send` unit (`ClapUnit`, `Vst3Unit`, `Vst2Unit`: the
+  processor with its buffers and lists) enters the engine, which never drops one (a drop frees memory and calls into the DLL).
 - **Surge param ids are hash-like, NOT 0-based** (`first=825615485`); sending an unknown id CRASHES the
   plugin → always enumerate via `listParams`, never invent an id (`plugin_set_param` refuses an id the
   plugin never listed).
 - Test plugin **Surge XT** (`winget install SurgeSynth.SurgeXT` → `…\CLAP\Surge Synth Team\`, + Surge XT
   Effects); scan walks `%COMMONPROGRAMFILES%\CLAP`, `%LOCALAPPDATA%\Programs\Common\CLAP`, `CLAP_PATH`,
-  the same three for VST3, then the folders the player added in Audio Settings (`src/host/folders.rs`). A
-  built-in root yields its own format, a player's folder every format. A plugin reached twice keeps the
+  the same three for VST3, then VST2's (`%ProgramFiles%\VSTPlugins`, `%ProgramFiles%\Steinberg\VSTPlugins`,
+  `%COMMONPROGRAMFILES%\VST2`, `%COMMONPROGRAMFILES%\Steinberg\VST2`, the registry's `VSTPluginsPath`,
+  `VST_PATH`), then the folders the player added in Audio Settings (`src/host/folders.rs`). A
+  built-in root yields its own format, a player's folder every format. A 32-bit VST2 and a VST2 shell
+  (several plugins in one file) are listed as unsupported, with why, and never hosted. A plugin reached twice keeps the
   FIRST spelling met, and no path is canonicalised on its way into a descriptor: the tone store and
   the frontend hash `(format, path, id)` byte for byte, so a respelled path orphans its saved tone.
   Loader is `clack_host::entry::PluginEntry::load` (unsafe), NOT `PluginBundle`.
@@ -162,12 +171,16 @@ plugin-GUI work.
   GUI calls go via the owner channel, NOT `run_on_main_thread`.
 - **Editor size is the plugin's, measured not computed:** `editor_window::set_client_size` sizes the
   CLIENT area by measuring the real frame (DPI-correct), at creation and on every plugin-initiated
-  resize: VST3 `IPlugFrame::resizeView` (then `onSize` with the granted size) and hosted-CLAP
-  `request_resize` both land there. Never answer a resize `kResultOk`/`Ok` without resizing; the view
+  resize: VST3 `IPlugFrame::resizeView` (then `onSize` with the granted size), hosted-CLAP
+  `request_resize` and VST2 `audioMasterSizeWindow` all land there. Never answer a resize `kResultOk`/`Ok` without resizing; the view
   lays out for the size you confirm. The one exception is a CLAP `request_resize` from a thread other
   than the window's (a cross-thread `SetWindowPos` would wait for the owner): it is acknowledged and
   queued, the owner applies the latest on its turn or reverts the plugin with `set_size`, and a resize
-  on the window's own thread drops what was queued before it. Fixtures: `host/vst3_resize_fixture.rs`, `clap::resize_tests`.
+  on the window's own thread drops what was queued before it. VST2 does the same with its answer:
+  on the owner thread the window is resized at once and the answer is 1 only for the exact size
+  (a clamped window goes back to the size it had), from any other thread the size is latched and the
+  answer is 0. Fixtures: `host/vst3_resize_fixture.rs`, `clap::resize_tests`,
+  `src/host/vst2_engine_tests.rs`.
 - **Crate `vst3` 0.3.0** (coupler-rs; only dep `com-scrape-types`, no `windows`/`windows-core` conflict).
   `ComPtr<IAudioProcessor>` is already `Send+Sync`. Source-verify against the crate source
   (`~/.cargo/registry/src/index.crates.io-*/vst3-0.3.0/src/bindings.rs`), NOT web docs; methods are
@@ -199,12 +212,43 @@ plugin-GUI work.
   (FabFilter latency modes). Without the mirror, no drawer change can ever restart a plugin again.
   `performEdit` (GUI → host) is never mirrored back. A 30-plugin restart survey backs this: FabFilter
   raises `kLatencyChanged`, Neural DSP and Surge never do.
+- **VST2 (64-bit only; `src/host/vst2_abi.rs` declares the interface, `host/vst2.rs` the loader and the
+  host callback, `src/host/vst2_engine.rs` the unit and the owner).** What must not be got wrong:
+  - **The host callback is called from ANY thread** (the plugin's GUI thread, a thread of its own, the
+    audio thread from inside `setParameter` or a process call), so it is RT-safe by construction: it
+    only stores into its instance's `HostContext` (atomics and the automation latch) and reads
+    const-initialised thread-locals. The owner drains the latches each turn. A reported parameter
+    change reaches the UI with the value the plugin gave; it is never fetched with `getParameter` and
+    never sent back with `setParameter`. Only on the owner thread, outside a process call, does
+    `audioMasterIdle` pump messages and `audioMasterSizeWindow` touch the editor's window.
+  - **Both pointer arrays of a process call ALWAYS hold 64 entries** (the bound `validate` accepts):
+    a row per declared pin, every other entry at a scratch row, so a plugin that grows its pin count
+    never reads or writes past an array. After `audioMasterIOChanged` the unit makes NO plugin call
+    (`HostContext::halted`) until the owner has cycled the plugin and rebuilt the rows.
+  - **`effStartProcess`/`effStopProcess` and `effMainsChanged` run on the OWNER**, never the audio
+    thread (unlike VST3's `setProcessing`); the unit's `stop` calls nothing. The audio thread sends
+    one dispatcher opcode, `effProcessEvents`. A dispatcher's return is its opcode's own: 0 from
+    `effOpen`, `effMainsChanged`, `effStartProcess`, `effStopProcess` or `effSetChunk` is no failure.
+  - **Teardown:** the unit leaves the engine → `effStopProcess` → `effMainsChanged(0)` → the editor
+    closes → the tone is saved if it changed → `effClose` → the `HostContext` → the module LAST.
+    **After `effClose` the `AEffect` pointer is dead:** never read it, never clear its `resvd1`.
+  - **A unit the engine does not hand back leaks TOGETHER with its effect, its `HostContext` and its
+    module** (`mem::forget`): the unit may still be inside the plugin, and the plugin still calls the
+    host. An effect `open_effect` refuses was never called, so it is never closed: its module and
+    context stay loaded too.
+  - The slot is mono: the input feeds the first two inputs, the output is the mean of the FIRST
+    stereo pair (never of all pins: a multi-output instrument's auxiliaries would dilute it).
+    Parameter ids are indices `0..numParams`, values 0..1.
 - **Tone recall (briefing: `host/tone.rs`):** a load restores the plugin's stored state before it
   activates (CLAP `state.load`; VST3 `IComponent::setState`, then the controller's
-  `setComponentState` and `setState`, through the host `MemStream` in `vst3.rs`), and the owner saves it
+  `setComponentState` and `setState`, through the host `MemStream` in `vst3.rs`; VST2 `effSetChunk`
+  with its bank chunk and no program selected after it, or, for a plugin without chunks,
+  `effSetProgram` first and then every parameter), and the owner saves it
   on its own thread. No request pushes state into a running plugin. The VST3 load creates the
   controller and sets its handler BEFORE activation (the SDK host's order). A plugin that refuses its
-  tone is discarded and created again before it activates (it may have taken half the state); a
+  tone is discarded and created again before it activates (it may have taken half the state; a VST2
+  tone is checked against the plugin before its first call, and its calls answer no verdict, so that
+  instance is never discarded); a
   session import goes through its tone's write lock in the store (`ToneStore::import`), never an owner
   request, and its bytes reach only the reload's load that passes the import's reload token
   (`ToneHandoff`). An owner's poll never waits on a lock held across disk I/O; its save of a tone
@@ -241,8 +285,18 @@ plugin-GUI work.
   import of P into S under its write lock). A disk write that hangs therefore stalls that owner, and an
   unload joins it without a timeout (the app's exit is bounded). Other tones' writes never block it; a
   store worker doing the file I/O would remove the wait.
-- `clap_engine.rs` and `vst3_engine.rs` each carry the whole owner choreography (load, restart,
-  eviction, teardown): one shared owner would keep B1/B11 from returning. Not built.
+- `clap_engine.rs`, `vst3_engine.rs` and `src/host/vst2_engine.rs` each carry the whole owner
+  choreography (load, restart, eviction, teardown): one shared owner would keep B1/B11 from returning. Not built.
+- VST2 host gaps (read from source, none reproduced; no real plugin has been loaded into a slot yet):
+  a restart whose unit the engine does not hand back within 2 s leaves the unit silent until the
+  plugin's next `audioMasterIOChanged`; a parameter count that grows in a restart is listed, but
+  the plugin's reports for the new indices are dropped (the automation latch is sized at open);
+  `effSetChunk` answers no verdict, so a chunk the plugin could not use is reported as restored;
+  `effIdle` is sent once per `audioMasterNeedIdle`, not until it answers 0; a program is selected
+  without `effBeginSetProgram`/`effEndSetProgram`; the plugin gets notes only (no CC, pitch bend
+  or SysEx) and a time info without transport; `FAULT_PROCESS` has no VST2 site (its process call
+  answers nothing); the owner loop's editor requests and its close box are untested by fixture (the
+  editor itself is, on a hidden window).
 - A unit whose restart failed stays parked, bypassed, until the plugin's next restart request; a device
   change does not retry it.
 - Each ASIO overload counts twice in `xruns` (both streams' error callbacks count it), and an output

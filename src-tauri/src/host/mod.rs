@@ -18,8 +18,8 @@
 //! `PluginHostState`), `commands.rs` (the `#[tauri::command]` surface), `scan.rs` (out-of-process
 //! plugin scan), `folders.rs` (the player's own scan folders), `rt_alloc.rs` (DEV global-allocator shim), `editor_window.rs` (format-agnostic host
 //! editor window), `clap.rs` (the shared CLAP host plumbing, plus the VST3 second format as its
-//! `vst3.rs` child module and the engine slots), `vst2_abi.rs` + `vst2.rs` (the VST2 binary
-//! interface, module loader and host callback) and `pe.rs` (which `.dll` is a VST2 plugin, read
+//! `vst3.rs` child module and the engine slots, `vst2_engine.rs` among them), `vst2_abi.rs` +
+//! `vst2.rs` (the VST2 binary interface, module loader and host callback) and `pe.rs` (which `.dll` is a VST2 plugin, read
 //! from its headers).
 
 #[cfg(windows)]
@@ -38,10 +38,9 @@ mod scan;
 mod state;
 #[cfg(windows)]
 pub(crate) mod tone;
-// The scan opens a VST2 effect to describe it; the rest is what an engine slot's owner and unit use.
 #[cfg(windows)]
-#[allow(dead_code)]
 mod vst2;
+// The interface as the format defines it, with the opcodes this host does not send yet.
 #[cfg(windows)]
 #[allow(dead_code)]
 mod vst2_abi;

@@ -286,6 +286,77 @@ mod tests {
         assert_eq!(offset_of!(VstTimeInfo, flags), 84);
     }
 
+    /// Production and the fixture share these constants, so a wrong number would pass every
+    /// behavioural test: each is stated here as the literal the format defines.
+    #[test]
+    fn every_opcode_flag_and_code_has_its_number() {
+        let dispatcher = [
+            (EFF_OPEN, 0),
+            (EFF_CLOSE, 1),
+            (EFF_SET_PROGRAM, 2),
+            (EFF_GET_PROGRAM, 3),
+            (EFF_GET_PARAM_LABEL, 6),
+            (EFF_GET_PARAM_DISPLAY, 7),
+            (EFF_GET_PARAM_NAME, 8),
+            (EFF_SET_SAMPLE_RATE, 10),
+            (EFF_SET_BLOCK_SIZE, 11),
+            (EFF_MAINS_CHANGED, 12),
+            (EFF_EDIT_GET_RECT, 13),
+            (EFF_EDIT_OPEN, 14),
+            (EFF_EDIT_CLOSE, 15),
+            (EFF_EDIT_IDLE, 19),
+            (EFF_GET_CHUNK, 23),
+            (EFF_SET_CHUNK, 24),
+            (EFF_PROCESS_EVENTS, 25),
+            (EFF_GET_PLUG_CATEGORY, 35),
+            (EFF_GET_EFFECT_NAME, 45),
+            (EFF_GET_VENDOR_STRING, 47),
+            (EFF_GET_PRODUCT_STRING, 48),
+            (EFF_CAN_DO, 51),
+            (EFF_IDLE, 53),
+            (EFF_SHELL_GET_NEXT_PLUGIN, 70),
+            (EFF_START_PROCESS, 71),
+            (EFF_STOP_PROCESS, 72),
+        ];
+        let callback = [
+            (AUDIO_MASTER_AUTOMATE, 0),
+            (AUDIO_MASTER_VERSION, 1),
+            (AUDIO_MASTER_CURRENT_ID, 2),
+            (AUDIO_MASTER_IDLE, 3),
+            (AUDIO_MASTER_WANT_MIDI, 6),
+            (AUDIO_MASTER_GET_TIME, 7),
+            (AUDIO_MASTER_IO_CHANGED, 13),
+            (AUDIO_MASTER_NEED_IDLE, 14),
+            (AUDIO_MASTER_SIZE_WINDOW, 15),
+            (AUDIO_MASTER_GET_SAMPLE_RATE, 16),
+            (AUDIO_MASTER_GET_BLOCK_SIZE, 17),
+            (AUDIO_MASTER_GET_CURRENT_PROCESS_LEVEL, 23),
+            (AUDIO_MASTER_GET_VENDOR_STRING, 32),
+            (AUDIO_MASTER_GET_PRODUCT_STRING, 33),
+            (AUDIO_MASTER_GET_VENDOR_VERSION, 34),
+            (AUDIO_MASTER_CAN_DO, 37),
+            (AUDIO_MASTER_UPDATE_DISPLAY, 42),
+            (AUDIO_MASTER_BEGIN_EDIT, 43),
+            (AUDIO_MASTER_END_EDIT, 44),
+        ];
+        let flags = [
+            (EFF_FLAGS_HAS_EDITOR, 1),
+            (EFF_FLAGS_CAN_REPLACING, 16),
+            (EFF_FLAGS_PROGRAM_CHUNKS, 32),
+            (EFF_FLAGS_IS_SYNTH, 256),
+        ];
+        for (name, table) in [("dispatcher opcode", &dispatcher[..]), ("callback opcode", &callback), ("flag", &flags)] {
+            for (index, (constant, number)) in table.iter().enumerate() {
+                assert_eq!(constant, number, "{name} #{index}");
+            }
+        }
+        assert_eq!(PLUG_CATEGORY_SHELL, 10);
+        assert_eq!(VST_MIDI_TYPE, 1);
+        assert_eq!((PROCESS_LEVEL_USER, PROCESS_LEVEL_REALTIME), (1, 2));
+        assert_eq!(VST_VERSION_2_4, 2400);
+        assert_eq!(EFFECT_MAGIC, 0x5673_7450);
+    }
+
     #[test]
     fn the_editor_rect_is_top_left_bottom_right() {
         assert_eq!(size_of::<ERect>(), 8);

@@ -859,6 +859,32 @@ mod tests {
         let e = scan_one(r"C:\Plugins\readme.txt").unwrap_err();
         assert!(e.contains("not a .clap, .vst3 or .dll plugin"), "{e}");
         assert!(scan_one(r"C:\Plugins\no-extension").is_err());
+        // Each format reaches its OWN scanner, whatever the extension's case: told apart by what each
+        // says of something that is no plugin. A system DLL exports no CLAP entry and no VST2 entry;
+        // a `.vst3` folder with nothing inside holds no binary.
+        let scratch = Scratch::new("route");
+        let system_dll = Path::new(&std::env::var("SystemRoot").unwrap()).join("System32").join("version.dll");
+        let scan = |name: &str| {
+            let path = scratch.0.join(name);
+            if PluginFormat::of_path(&path) == Some(PluginFormat::Vst3) {
+                std::fs::create_dir(&path).unwrap();
+            } else {
+                std::fs::copy(&system_dll, &path).unwrap();
+            }
+            scan_one(&path.to_string_lossy()).unwrap_err()
+        };
+        for name in ["thing.clap", "THING2.CLAP"] {
+            let e = scan(name);
+            assert!(e.starts_with("load failed"), "{name}: {e}");
+        }
+        for name in ["thing.vst3", "THING2.VST3"] {
+            let e = scan(name);
+            assert!(e.starts_with("no loadable VST3 binary inside"), "{name}: {e}");
+        }
+        for name in ["thing.dll", "THING2.DLL"] {
+            let e = scan(name);
+            assert!(e.starts_with("no VST2 entry"), "{name}: {e}");
+        }
         // The outcome a child prints, and the parent reads back.
         let printed = serde_json::to_value(ScanOutcome::plugins(Vec::new())).unwrap();
         assert_eq!(printed, serde_json::json!({ "plugins": [], "unsupported": null }));
@@ -1210,7 +1236,7 @@ unsafe fn describe_vst2(
     ctx: &std::sync::Arc<super::vst2::HostContext>,
     path: &str,
 ) -> Result<ScanOutcome, String> {
-    use super::vst2_abi::{EFF_GET_EFFECT_NAME, EFF_GET_PLUG_CATEGORY, EFF_GET_PRODUCT_STRING, PLUG_CATEGORY_SHELL};
+    use super::vst2_abi::{EFF_GET_PLUG_CATEGORY, PLUG_CATEGORY_SHELL};
     // SAFETY: the caller's contract.
     let effect = unsafe { super::vst2::open_effect(entry, ctx) }.map_err(|e| e.to_string())?;
     let info = *effect.info();
@@ -1218,7 +1244,7 @@ unsafe fn describe_vst2(
     // `Vst2Effect::string` provides.
     let (category, name) = unsafe {
         let category = effect.dispatch(EFF_GET_PLUG_CATEGORY, 0, 0, std::ptr::null_mut(), 0.0);
-        let name = effect.string(EFF_GET_EFFECT_NAME, 0).or_else(|| effect.string(EFF_GET_PRODUCT_STRING, 0));
+        let name = effect.name();
         effect.close();
         (category, name)
     };

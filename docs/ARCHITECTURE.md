@@ -23,7 +23,7 @@ its interfaces, never the reverse (`src/platform/host.ts`):
 | Interface | Web impl | Tauri impl |
 |---|---|---|
 | `EngineHost` | a scriptable fake: records every send, emits the frames a probe scripts; not a second looper | `invoke()` + a Tauri Channel → the engine host |
-| `PluginHost` | stub: `available=false` | `invoke()`/`listen()` → the CLAP/VST3 hosts |
+| `PluginHost` | stub: `available=false` | `invoke()`/`listen()` → the CLAP, VST3 and VST2 hosts |
 | `MidiBackend` | `navigator.requestMIDIAccess` | **the same web impl, reused verbatim** |
 | `LogFolder` | none | the release log's folder (Help's diagnostics) |
 | `AppUpdates` | none, or a probe's script | the updater (`src-tauri/src/update.rs`), release builds only |
@@ -47,7 +47,8 @@ path (`EngineHost.snapshot` / `loadSession`).
   reserved for low-frequency chrome (transport mode, track LEDs, tempo, FX labels).
 - **Rust:** lf-engine (rtrb rings; the synths, FX, reverb and limiter ported from Tone 15.1.22 on
   Blink and null-tested against its renders, `src-tauri/crates/lf-engine/src/dsp/mod.rs`; RustFFT),
-  cpal 0.18.1 (pinned; ASIO a cargo opt-in feature), clack-host for CLAP and `vst3` for VST3.
+  cpal 0.18.1 (pinned; ASIO a cargo opt-in feature), clack-host for CLAP, `vst3` for VST3 and the
+  project's own interface declarations for VST2.
 
 ## Audio architecture
 
@@ -218,10 +219,16 @@ both, before and after the change:
 Plugin **GUI embedding** inside the WebView2 window is hard: WebView2 is always
 top-most within its window (the "airspace" problem), so a child plugin HWND z-fights it.
 **Editors use separate top-level OS windows.** CLAP can use a plugin-owned floating window or embed
-into a host-owned top-level window; VST3 embeds into a host-owned top-level window. This is not a
+into a host-owned top-level window; VST3 and VST2 embed into a host-owned top-level window. This is not a
 panel inside the WebView. Editor requests run on the per-slot owner thread, which also pumps hosted
 window messages. Native thread ownership is defined in `src-tauri/AGENTS.md`:
 "Only a slot's owner thread touches its plugin instance and editor."
 
 VST3 hosting is hand-written unsafe COM over `coupler-rs/vst3` (Rust has no turn-key VST3 host
-crate); CLAP goes through `clack-host`. VST2 is not hosted (`vst-rs` is archived).
+crate); CLAP goes through `clack-host`. VST2 is hosted for 64-bit plugins through the project's own
+declarations of its binary interface (`src-tauri/src/host/vst2_abi.rs`: written from the layout, no
+SDK header; `vst-rs` is archived). Its whole lifecycle, `effStartProcess` and `effStopProcess`
+included, runs on the slot's owner thread; the plugin calls the host from any thread, and that
+callback only sets latches the owner drains (`src-tauri/src/host/vst2.rs`). Its tone is its bank
+chunk, or its parameter values when it keeps no chunk (`src-tauri/src/host/vst2_engine.rs`). A 32-bit
+VST2 and a shell are recognised and reported, not hosted.

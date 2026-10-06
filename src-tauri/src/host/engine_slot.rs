@@ -1,8 +1,8 @@
 //! OWNS: the engine-mode plugin slot (threads and gotchas: `src-tauri/AGENTS.md`): the load API that
 //! spawns one owner thread per slot, and the handle a caller drives it through. The owner loads a
-//! CLAP or VST3 plugin, activates it at the engine's rate and installs its processor into the engine
-//! as an `lf_engine::SlotProcessor` unit (`clap_engine`, `vst3_engine`), so the plugin renders inside
-//! the device callback. The `plugin_*` commands drive it (`engine_io/plugins.rs`).
+//! CLAP, VST3 or VST2 plugin, activates it at the engine's rate and installs its processor into the
+//! engine as an `lf_engine::SlotProcessor` unit (`clap_engine`, `vst3_engine`, `vst2_engine`), so the
+//! plugin renders inside the device callback. The `plugin_*` commands drive it (`engine_io/plugins.rs`).
 //!
 //! An owner services, less the device (the engine owns it): params (the
 //! unit drains the slot's event ring; a VST3 set reaches the edit controller too), editors, plugin
@@ -113,11 +113,13 @@ const LOAD_TIMEOUT: Duration = Duration::from_secs(15);
 pub(super) const FAULT_START: u32 = 1 << 0;
 pub(super) const FAULT_PROCESS: u32 = 1 << 1;
 pub(super) const FAULT_PARAM: u32 = 1 << 2;
+pub(super) const FAULT_EVENTS: u32 = 1 << 3;
 
-const FAULT_MESSAGES: [(u32, &str); 3] = [
+const FAULT_MESSAGES: [(u32, &str); 4] = [
     (FAULT_START, "the plugin refused to start processing; the slot is silent until it is reinstalled"),
     (FAULT_PROCESS, "a process call failed; that slice's output was discarded"),
     (FAULT_PARAM, "a parameter id the plugin cannot take was dropped"),
+    (FAULT_EVENTS, "more notes than one block's event list holds; the rest were dropped"),
 ];
 
 /// Owner-thread drain for a unit's latched faults: each category reaches the log once per load.
@@ -247,7 +249,7 @@ pub(super) fn keep_tone(
 }
 
 /// Load plugin `id` from `path` into the engine slot `slot`: spawn its owner thread
-/// (`lf-clap-engine-{slot}` / `lf-vst3-engine-{slot}`) and wait (≤ 15 s) until the unit is in the
+/// (`lf-clap-engine-{slot}` / `lf-vst3-engine-{slot}` / `lf-vst2-engine-{slot}`) and wait (≤ 15 s) until the unit is in the
 /// engine, with the plugin's tone restored from `tone` (`None`: no store, nothing kept). Err when no
 /// device has opened yet (`SlotHost::rate` is `None`), the slot already holds a unit, or the plugin
 /// fails to load or activate; never because of its tone.
@@ -271,8 +273,9 @@ pub(crate) fn load(
         PluginFormat::Vst3 => spawn(format, slot, editor_parent, sink, tone, move |ctx| {
             super::vst3_host::engine::run(ctx, path, &id)
         }),
-        // The scan lists VST2 plugins (`host/vst2.rs`); their owner and unit are not here yet.
-        PluginFormat::Vst2 => Err("VST2 hosting is not built yet".to_string()),
+        PluginFormat::Vst2 => spawn(format, slot, editor_parent, sink, tone, move |ctx| {
+            super::vst2_engine::run(ctx, path, &id)
+        }),
     }
 }
 

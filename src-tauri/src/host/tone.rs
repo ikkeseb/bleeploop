@@ -1,12 +1,13 @@
-//! OWNS: tone recall's pure half (engine mode): the tone file, the store, the VST3 state container and
-//! the save debounce. A TONE is a plugin's saved state: a CLAP plugin's `state` blob, or a VST3 plugin's
-//! component and edit-controller states in one container (`encode_vst3`). The tone belongs to the slot
+//! OWNS: tone recall's pure half (engine mode): the tone file, the store, the VST3 and VST2 state
+//! containers and the save debounce. A TONE is a plugin's saved state: a CLAP plugin's `state` blob, a
+//! VST3 plugin's component and edit-controller states in one container (`encode_vst3`), or a VST2
+//! plugin's bank chunk or parameter values (`encode_vst2`). The tone belongs to the slot
 //! AND the plugin: the store keeps one file per slot and plugin identity (format, path, id) in the
 //! app-local data folder's `tones/`, named by the slot and a stable FNV-1a hash of that identity and
 //! replaced atomically. So the same plugin in both slots keeps two tones, and a slot that swaps its
 //! plugin and back gets its tone back. The same file is what a session export carries per slot.
 //!
-//! Nothing here touches a plugin. The engine-mode owners (`clap_engine`, `vst3_engine`) restore a tone
+//! Nothing here touches a plugin. The engine-mode owners (`clap_engine`, `vst3_engine`, `vst2_engine`) restore a tone
 //! only inside their load sequence, before the plugin activates, and save one only on their own thread,
 //! through a [`ToneKeeper`]: debounced after the last change, when the editor closes, before an unload,
 //! and when a session export or the app's exit asks. Every save hands the tone back; whether it also
@@ -60,6 +61,17 @@ const VERSION: u16 = 1;
 const VST3_MAGIC: [u8; 4] = *b"LFV3";
 const VST3_VERSION: u16 = 1;
 
+/// The VST2 container inside a tone's state: `VST2_MAGIC`, its version (u16), a kind byte, the
+/// current program's index (i32), then the payload: the bank chunk, length-prefixed (u32), or the
+/// parameter count (u32) and that many values (f32).
+const VST2_MAGIC: [u8; 4] = *b"LFV2";
+const VST2_VERSION: u16 = 1;
+const VST2_KIND_CHUNK: u8 = 1;
+const VST2_KIND_PARAMS: u8 = 2;
+
+/// The largest chunk a VST2 tone holds: what the container leaves of `MAX_STATE_BYTES`.
+pub(crate) const VST2_MAX_CHUNK: usize = MAX_STATE_BYTES - 15;
+
 /// FNV-1a 64: stable across Rust versions and runs, unlike `DefaultHasher`.
 fn fnv1a64(parts: &[&[u8]]) -> u64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
@@ -72,7 +84,7 @@ fn fnv1a64(parts: &[&[u8]]) -> u64 {
     hash
 }
 
-/// Which plugin a tone belongs to: the scan descriptor's format (`clap` | `vst3`), bundle path and
+/// Which plugin a tone belongs to: the scan descriptor's format (`clap` | `vst3` | `vst2`), bundle path and
 /// plugin id.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct ToneIdentity {
@@ -138,9 +150,13 @@ impl<'a> Reader<'a> {
         Ok(u16::from_le_bytes([b[0], b[1]]))
     }
 
-    fn sized(&mut self, max: usize, what: &str) -> Result<&'a [u8], String> {
+    fn u32(&mut self, what: &str) -> Result<u32, String> {
         let b = self.take(4, what)?;
-        let len = u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize;
+        Ok(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+    }
+
+    fn sized(&mut self, max: usize, what: &str) -> Result<&'a [u8], String> {
+        let len = self.u32(what)? as usize;
         if len > max {
             return Err(format!("{what} is {len} bytes, more than {max}"));
         }
@@ -212,6 +228,70 @@ pub(crate) fn decode_vst3(bytes: &[u8]) -> Result<(&[u8], &[u8]), String> {
         return Err(format!("{} bytes after the controller state", bytes.len() - r.at));
     }
     Ok((component, controller))
+}
+
+/// A VST2 tone's state. A plugin that keeps its state as an opaque chunk (`effFlagsProgramChunks`)
+/// is saved as its bank chunk, which restores its own program; any other as every parameter's value.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Vst2State {
+    Chunk { program: i32, chunk: Vec<u8> },
+    Params { program: i32, values: Vec<f32> },
+}
+
+/// A VST2 tone's state as bytes. A chunk past `VST2_MAX_CHUNK` is the caller's bug: an owner checks
+/// the plugin's length before it copies anything.
+pub(crate) fn encode_vst2(state: &Vst2State) -> Vec<u8> {
+    let (kind, program, payload) = match state {
+        Vst2State::Chunk { program, chunk } => (VST2_KIND_CHUNK, *program, chunk.len()),
+        Vst2State::Params { program, values } => (VST2_KIND_PARAMS, *program, values.len() * 4),
+    };
+    let mut out = Vec::with_capacity(15 + payload);
+    out.extend_from_slice(&VST2_MAGIC);
+    out.extend_from_slice(&VST2_VERSION.to_le_bytes());
+    out.push(kind);
+    out.extend_from_slice(&program.to_le_bytes());
+    match state {
+        Vst2State::Chunk { chunk, .. } => put_bytes(&mut out, chunk),
+        Vst2State::Params { values, .. } => {
+            out.extend_from_slice(&(values.len() as u32).to_le_bytes());
+            for value in values {
+                out.extend_from_slice(&value.to_le_bytes());
+            }
+        }
+    }
+    out
+}
+
+/// Read a VST2 tone's state. Refuses a wrong magic, another version, an unknown kind, a truncated
+/// payload and trailing bytes; nothing is sized from a length the bytes do not hold.
+pub(crate) fn decode_vst2(bytes: &[u8]) -> Result<Vst2State, String> {
+    let mut r = Reader { bytes, at: 0 };
+    if r.take(4, "VST2 magic")? != VST2_MAGIC {
+        return Err("not a VST2 tone".to_string());
+    }
+    let version = r.u16("VST2 version")?;
+    if version != VST2_VERSION {
+        return Err(format!("VST2 tone version {version}; this build reads {VST2_VERSION}"));
+    }
+    let kind = r.take(1, "VST2 kind")?[0];
+    let program = r.u32("program index")? as i32;
+    let state = match kind {
+        VST2_KIND_CHUNK => Vst2State::Chunk { program, chunk: r.sized(VST2_MAX_CHUNK, "chunk")?.to_vec() },
+        VST2_KIND_PARAMS => {
+            let count = r.u32("parameter count")? as usize;
+            let len = count.checked_mul(4).ok_or_else(|| format!("{count} parameters"))?;
+            let values = r.take(len, "parameter values")?;
+            Vst2State::Params {
+                program,
+                values: values.chunks_exact(4).map(|v| f32::from_le_bytes([v[0], v[1], v[2], v[3]])).collect(),
+            }
+        }
+        other => return Err(format!("unknown VST2 tone kind {other}")),
+    };
+    if r.at != bytes.len() {
+        return Err(format!("{} bytes after the VST2 state", bytes.len() - r.at));
+    }
+    Ok(state)
 }
 
 /// The tone store: `tones/` in the app-local data folder (a probe's run has a profile of its own), and
@@ -692,6 +772,39 @@ mod tests {
         let mut long = bytes.clone();
         long.push(7);
         assert!(decode_vst3(&long).is_err(), "trailing bytes");
+    }
+
+    #[test]
+    fn a_vst2_container_round_trips_both_kinds_and_refuses_garbage() {
+        let chunk = Vst2State::Chunk { program: 3, chunk: b"a bank chunk".to_vec() };
+        let bytes = encode_vst2(&chunk);
+        assert_eq!(&bytes[..4], b"LFV2");
+        assert_eq!(bytes.len(), 15 + 12, "the overhead `VST2_MAX_CHUNK` leaves room for");
+        assert_eq!(decode_vst2(&bytes).unwrap(), chunk);
+        let params = Vst2State::Params { program: -1, values: vec![0.0, 0.25, 1.0, f32::MIN_POSITIVE] };
+        let param_bytes = encode_vst2(&params);
+        assert_eq!(decode_vst2(&param_bytes).unwrap(), params);
+        let none = Vst2State::Params { program: 0, values: Vec::new() };
+        assert_eq!(decode_vst2(&encode_vst2(&none)).unwrap(), none, "a plugin without parameters");
+        for whole in [&bytes, &param_bytes] {
+            for cut in 0..whole.len() {
+                assert!(decode_vst2(&whole[..cut]).is_err(), "truncated at {cut}");
+            }
+            let mut long = whole.clone();
+            long.push(7);
+            assert!(decode_vst2(&long).is_err(), "trailing bytes");
+        }
+        assert!(decode_vst2(&encode_vst3(b"component", b"")).is_err(), "another format's container");
+        let mut kind = bytes.clone();
+        kind[6] = 9;
+        assert!(decode_vst2(&kind).unwrap_err().contains("kind 9"));
+        // A count the bytes do not hold is refused before anything is sized from it.
+        let mut huge = param_bytes.clone();
+        huge[11..15].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(decode_vst2(&huge).is_err());
+        let mut long_chunk = bytes.clone();
+        long_chunk[11..15].copy_from_slice(&(VST2_MAX_CHUNK as u32 + 1).to_le_bytes());
+        assert!(decode_vst2(&long_chunk).unwrap_err().contains("more than"));
     }
 
     #[test]

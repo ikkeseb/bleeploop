@@ -10,7 +10,9 @@
 //! for the owner is a latch in the instance's `HostContext`, which the owner drains on its own turn.
 //! Three thread-locals carry what a call cannot: the instance being created (its `AEffect` does not
 //! point at its context yet), the processing unit's time info, and each other thread's own snapshot
-//! of the time, so no thread ever reads a time info another thread writes.
+//! of the time, so no thread ever reads a time info another thread writes. Two requests are served
+//! at once when the caller is the instance's owner thread and not inside a unit's plugin call
+//! (`owner_idle`, `owner_size_window`): only that thread may pump messages or touch a window.
 
 use std::cell::{Cell, UnsafeCell};
 use std::ffi::c_void;
@@ -23,10 +25,12 @@ use std::sync::atomic::{
 use std::sync::{Arc, OnceLock};
 
 use windows::core::{s, PCWSTR};
-use windows::Win32::Foundation::{FreeLibrary, HMODULE};
+use windows::Win32::Foundation::{FreeLibrary, HMODULE, HWND};
 use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
+use windows::Win32::System::Threading::GetCurrentThreadId;
 
 use super::clap::{checked_plugin_channels, checked_plugin_params};
+use super::editor_window::{client_size, pump_thread_messages, set_client_size};
 use super::vst2_abi::*;
 
 /// What `audioMasterGetVendorString` and `audioMasterGetProductString` answer. A plugin's buffer
@@ -170,6 +174,12 @@ pub(crate) struct HostContext {
     /// reads one request's width with another's height.
     resize: AtomicU64,
     automation: OnceLock<AutomationLatch>,
+    /// The Win32 id of the instance's owner thread (`0`: none yet, as in the scan's child).
+    owner_thread: AtomicU32,
+    /// The open editor's host window (`0`: no editor is open). Written by the owner thread only.
+    editor_window: AtomicIsize,
+    /// The owner thread is inside `audioMasterIdle`'s pump: a nested request is not served.
+    idling: AtomicBool,
 }
 
 impl HostContext {
@@ -185,6 +195,9 @@ impl HostContext {
             need_idle: AtomicBool::new(false),
             resize: AtomicU64::new(0),
             automation: OnceLock::new(),
+            owner_thread: AtomicU32::new(0),
+            editor_window: AtomicIsize::new(0),
+            idling: AtomicBool::new(false),
         };
         ctx.set_rate(sample_rate, block_size)?;
         Ok(Arc::new(ctx))
@@ -250,6 +263,24 @@ impl HostContext {
             0 => None,
             word => Some(((word >> 32) as i32, word as u32 as i32)),
         }
+    }
+
+    /// The calling thread becomes the instance's owner: the one thread on which
+    /// `audioMasterIdle` pumps messages and `audioMasterSizeWindow` resizes the editor's window.
+    pub(crate) fn bind_owner(&self) {
+        // SAFETY: a plain query of the calling thread's id.
+        self.owner_thread.store(unsafe { GetCurrentThreadId() }, Release);
+    }
+
+    /// Owner thread: the host window the open editor is embedded in (`0` once it closes).
+    pub(crate) fn set_editor_window(&self, hwnd: isize) {
+        self.editor_window.store(hwnd, Release);
+    }
+
+    /// Whether the caller is the owner thread. Never true before `bind_owner`: a thread id is not 0.
+    fn on_owner_thread(&self) -> bool {
+        // SAFETY: a plain query of the calling thread's id; it allocates, locks and waits on nothing.
+        self.owner_thread.load(Acquire) == unsafe { GetCurrentThreadId() }
     }
 
     /// The automation the plugin reported; `None` until `open_effect` accepted the effect.
@@ -379,20 +410,43 @@ unsafe fn c_str_is(text: *const u8, name: &[u8]) -> bool {
 }
 
 /// `audioMasterIdle`: the plugin asks the host to run its idle work now (a modal loop of its own
-/// is waiting on it). THE OWNER'S HOOK: only the owner thread may pump messages or call `effIdle`,
-/// bounded and guarded against recursion; from any other thread, and until an owner services it,
-/// the answer is 0 and nothing happens.
-fn owner_idle(_ctx: &HostContext) -> isize {
-    0
+/// is waiting on it). Called on the owner thread, outside a unit's plugin call, it runs one bounded
+/// batch of that thread's Win32 messages and answers 1; a request from inside that batch is not
+/// served again, and no owner request is serviced from here. From any other thread, from the
+/// processing thread (the owner's own included, while it renders an idle engine's block), and
+/// without an owner, the answer is 0 and nothing happens.
+fn owner_idle(ctx: &HostContext, in_process: bool) -> isize {
+    if in_process || !ctx.on_owner_thread() || ctx.idling.swap(true, AcqRel) {
+        return 0;
+    }
+    pump_thread_messages();
+    ctx.idling.store(false, Release);
+    1
 }
 
-/// `audioMasterSizeWindow`: latch the size for the owner (`HostContext::take_resize`) and answer 0,
-/// "not resized yet". THE OWNER'S HOOK: called on the owner thread, the window can be resized here
-/// and now and the answer becomes 1; no window function may be called from any other thread.
-fn owner_size_window(ctx: &HostContext, width: i32, height: isize) -> isize {
-    if let (Ok(width @ 1..), Ok(height @ 1..)) = (u32::try_from(width), i32::try_from(height)) {
+/// `audioMasterSizeWindow`: the plugin's editor wants a new size. Called on the owner thread,
+/// outside a unit's plugin call, with an editor open, the host window is resized here and now and
+/// the answer is 1 only when the client area became exactly what was asked (Windows clamps a window
+/// to the screen; one it clamped goes back to the size it had, so a refusal changes nothing); a size
+/// queued earlier is dropped. From any other thread, and from the
+/// processing thread, the size is latched for the owner (`HostContext::take_resize`) and the answer
+/// is 0, "not resized yet": no window function is called there.
+fn owner_size_window(ctx: &HostContext, width: i32, height: isize, in_process: bool) -> isize {
+    let (Ok(width @ 1..), Ok(height @ 1..)) = (u32::try_from(width), i32::try_from(height)) else {
+        return 0;
+    };
+    let window = ctx.editor_window.load(Acquire);
+    if in_process || window == 0 || !ctx.on_owner_thread() {
         ctx.resize.store(u64::from(width) << 32 | u64::from(height as u32), Release);
+        return 0;
     }
+    ctx.resize.store(0, Release);
+    let window = HWND(window as *mut c_void);
+    let before = client_size(window);
+    if set_client_size(window, width, height as u32) == Some((width, height as u32)) {
+        return 1;
+    }
+    let _ = set_client_size(window, before.0, before.1);
     0
 }
 
@@ -425,7 +479,7 @@ pub(crate) unsafe extern "C" fn host_callback(
             }
             0
         }
-        AUDIO_MASTER_IDLE => owner_idle(ctx),
+        AUDIO_MASTER_IDLE => owner_idle(ctx, in_process),
         AUDIO_MASTER_WANT_MIDI => 1,
         // The processing thread reads the time info its unit writes; every other thread gets its
         // own snapshot, so no thread reads what another writes.
@@ -444,7 +498,7 @@ pub(crate) unsafe extern "C" fn host_callback(
             ctx.need_idle.store(true, Release);
             1
         }
-        AUDIO_MASTER_SIZE_WINDOW => owner_size_window(ctx, index, value),
+        AUDIO_MASTER_SIZE_WINDOW => owner_size_window(ctx, index, value, in_process),
         AUDIO_MASTER_GET_SAMPLE_RATE => ctx.sample_rate().round() as isize,
         AUDIO_MASTER_GET_BLOCK_SIZE => ctx.block_size() as isize,
         AUDIO_MASTER_GET_CURRENT_PROCESS_LEVEL if in_process => PROCESS_LEVEL_REALTIME,
@@ -614,6 +668,16 @@ impl Vst2Effect {
         let end = buffer[..255].iter().position(|&b| b == 0).unwrap_or(255);
         let text = String::from_utf8_lossy(&buffer[..end]).trim().to_string();
         (!text.is_empty()).then_some(text)
+    }
+
+    /// The plugin's own name: `effGetEffectName`, else `effGetProductString`; `None` when it gives
+    /// neither (the caller falls back to the file's stem).
+    ///
+    /// # Safety
+    /// On the thread that opened the effect.
+    pub(crate) unsafe fn name(&self) -> Option<String> {
+        // SAFETY: the caller's contract; both opcodes take a string buffer.
+        unsafe { self.string(EFF_GET_EFFECT_NAME, 0).or_else(|| self.string(EFF_GET_PRODUCT_STRING, 0)) }
     }
 
     /// `effClose`: the plugin frees its instance. Its context and its module must still be there.
@@ -858,6 +922,74 @@ mod tests {
         assert_eq!(fixture::parameter_calls(), 0);
         // SAFETY: the opening thread; the producers have joined.
         unsafe { effect.close() };
+    }
+
+    /// Every producer reports EVERY parameter while the owner drains, so each value and each bitmap
+    /// word is fought over. Whatever the drain hands over is a value some thread reported for that
+    /// parameter, and once all of them have stopped, one last report per parameter (still against
+    /// the running drain) is what the owner ends up holding: a later report is never lost to an
+    /// earlier one's delivery.
+    #[test]
+    fn automation_shared_between_threads_ends_on_the_value_reported_last() {
+        const THREADS: usize = 6;
+        const PARAMS: usize = 130; // Three bitmap words, the last one partly used.
+        const ROUNDS: usize = 2_000;
+        // A value names its parameter and who reported it; 7 is no thread: the last report.
+        let value_of = |param: usize, reporter: usize| (param * 8 + reporter) as f32;
+        let (ctx, opened) = open(Shape { params: PARAMS as i32, ..Shape::default() }, 48_000.0);
+        let effect = opened.unwrap();
+        let raw = effect.raw() as usize;
+        let report = move |param: usize, reporter: usize| {
+            // SAFETY: the effect stays open for the scope below; automate reads no pointer.
+            unsafe { host_callback(raw as *mut AEffect, AUDIO_MASTER_AUTOMATE, param as i32, 0, NULL, value_of(param, reporter)) };
+        };
+        let all_reported = Barrier::new(THREADS);
+        let mut seen = vec![f32::NAN; PARAMS];
+        let mut deliveries = 0usize;
+        std::thread::scope(|scope| {
+            let all_reported = &all_reported;
+            let producers: Vec<_> = (0..THREADS)
+                .map(|thread| {
+                    scope.spawn(move || {
+                        for _ in 0..ROUNDS {
+                            for param in 0..PARAMS {
+                                report(param, thread);
+                            }
+                        }
+                        // Every shared report is in: each parameter now gets its last one, from
+                        // the thread it falls to.
+                        all_reported.wait();
+                        for param in (thread..PARAMS).step_by(THREADS) {
+                            report(param, 7);
+                        }
+                    })
+                })
+                .collect();
+            let latch = ctx.automation().unwrap();
+            let drain = |seen: &mut Vec<f32>, deliveries: &mut usize| {
+                latch.drain(|index, value| {
+                    let (param, reporter) = (value as usize / 8, value as usize % 8);
+                    assert!(param == index && (reporter < THREADS || reporter == 7), "parameter {index} was handed {value}");
+                    seen[index] = value;
+                    *deliveries += 1;
+                })
+            };
+            while producers.iter().any(|p| !p.is_finished()) {
+                drain(&mut seen, &mut deliveries);
+            }
+            drain(&mut seen, &mut deliveries);
+        });
+        for (param, value) in seen.iter().enumerate() {
+            assert_eq!(*value, value_of(param, 7), "parameter {param} ends on its last report");
+        }
+        assert!(deliveries >= PARAMS);
+        let mut pending = 0;
+        ctx.automation().unwrap().drain(|_, _| pending += 1);
+        assert_eq!(pending, 0, "nothing is delivered twice");
+        // SAFETY: the opening thread; the producers have joined.
+        unsafe { effect.close() };
+        fixture::take_seen();
+        fixture::take_calls();
     }
 
     #[test]

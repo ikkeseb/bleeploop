@@ -73,6 +73,9 @@ it.
   34's; the 34-bar loop comes in there, mid-bar): fine, or close on the last bar line?
 - Editors: in front; close → reopen with no hang; with FabFilter's editor open, a drawer slider moves
   its knob, and the editor's own size menu resizes the host window.
+- A 64-bit VST2 plugin in a slot (machine: `src-tauri/src/host/vst2_engine_tests.rs`, a fixture; no
+  real plugin has run in a slot): it plays live with no click on load, its editor opens and resizes, a
+  knob moved there moves the drawer's slider, and it comes back at its settings after a restart.
 - Yank the interface while loops play: a toast, the loops and the plugin stay; reconnect: the same
   device comes back (or WASAPI takes over) and the loops play on (proven only on the fake driver). If
   the WASAPI default runs at another rate than ASIO, the loops come back from recovery after a

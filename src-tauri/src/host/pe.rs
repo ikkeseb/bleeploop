@@ -189,6 +189,11 @@ pub(crate) fn classify_image(image: &mut (impl Read + Seek), image_len: u64) -> 
         let Some(name) = Some(NAME_READ.min(available)).filter(|len| *len > 0).and_then(|len| bytes_at(name_rva, len)) else {
             return inconclusive("an export name outside the file");
         };
+        // A name cut short by the end of its section must end inside it: one that runs to the end
+        // with no terminator cannot be told from an entry's name.
+        if name.len() < NAME_READ && !name.contains(&0) {
+            return inconclusive("an export name without a terminator");
+        }
         if ENTRY_NAMES.iter().any(|entry_name| name.starts_with(entry_name)) {
             return if machine == MACHINE_AMD64 { Class::Candidate } else { Class::PossiblyVst32 };
         }
@@ -361,6 +366,23 @@ mod tests {
             assert!(inconclusive(&good.bytes[..cut]), "cut at {cut}: {:?}", class(&good.bytes[..cut]));
         }
         assert_eq!(class(&good.bytes), Class::Candidate);
+    }
+
+    /// The last name is `main` with no NUL, and both the file and the section's declared size end
+    /// right after it: every byte the image claims is there, and the name still cannot be read.
+    #[test]
+    fn a_name_that_runs_to_the_end_of_its_section_unterminated_is_inconclusive() {
+        for names in [&["alpha", "main"][..], &["alpha", "VSTPluginMain"], &["alpha", "zeta"]] {
+            let mut cut = image(AMD64, names);
+            cut.bytes.pop();
+            let (section, size) = (cut.section, (cut.bytes.len() - cut.directory) as u32);
+            put32(&mut cut, section + 8, size);
+            put32(&mut cut, section + 16, size);
+            assert!(inconclusive(&cut.bytes), "{names:?}: {:?}", class(&cut.bytes));
+        }
+        // The same image with its terminator is read as what it is.
+        assert_eq!(class(&image(AMD64, &["alpha", "main"]).bytes), Class::Candidate);
+        assert_eq!(class(&image(AMD64, &["alpha", "zeta"]).bytes), Class::NotAPlugin);
     }
 
     #[test]

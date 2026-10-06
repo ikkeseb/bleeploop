@@ -807,5 +807,7 @@ pub(crate) mod engine_slot;
 #[allow(dead_code)]
 #[path = "clap_engine.rs"]
 mod clap_engine;
+#[path = "vst2_engine.rs"]
+mod vst2_engine;
 #[cfg(debug_assertions)]
 pub(crate) use vst3_host::engine_spike_run;

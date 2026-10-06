@@ -4,7 +4,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Platform: Windows](https://img.shields.io/badge/platform-Windows-0078D6.svg)](#play-it)
 
-BleepLoop is a Windows looper you play with a guitar. Load your own amp-sim plugin (CLAP or VST3),
+BleepLoop is a Windows looper you play with a guitar. Load your own amp-sim plugin (CLAP, VST3 or VST2),
 hear it through ASIO, and loop and overdub on five RC-505 MK II–style tracks. One native audio
 engine runs the looper, click, synths, FX and your plugin inside the audio driver's callback, so
 every take lands on the grid by itself: there is no latency setting.
@@ -63,10 +63,11 @@ The installed app tells you when a newer version is out and updates itself from 
   state's colour; the selected track, the bar, the beat and the count-in stay readable from where you
   stand with the guitar.
 - Six built-in synths, one of them a 16-voice GM drum kit.
-- Two native CLAP/VST3 plugin slots with floating plugin editors; each slot reloads its last plugin at
-  launch with the settings you left it at, never armed, and an exported session carries each slot's
-  settings.
-- Plugins are found in the standard CLAP and VST3 folders and in any folder you add in Audio Settings.
+- Two native CLAP/VST3/VST2 plugin slots with floating plugin editors; each slot reloads its last
+  plugin at launch with the settings you left it at, never armed, and an exported session carries each
+  slot's settings.
+- Plugins are found in the standard CLAP, VST3 and VST2 folders and in any folder you add in Audio
+  Settings. VST2 means 64-bit: a 32-bit one is recognised and listed there as not supported, not hosted.
 - Guitar or line input monitored through your plugin inside the engine's callback: an 8 ms round
   trip at ASIO 64 and 15 ms at 128 on the developer's interface. Takes are placed from the driver's
   reported latency.
@@ -104,7 +105,7 @@ report, so WASAPI takes can land late (about 215 ms on the developer's Focusrite
    `pnpm dev:asio` from source). In Audio Settings pick ASIO (and its driver, if you have more than
    one), the buffer size and the sample rate: 44.1 kHz, 48 kHz or the device's own. On WASAPI,
    Windows sets the rate.
-2. Load your amp-sim plugin (CLAP or VST3) into a slot, pick the slot's input and press GO LIVE. For an
+2. Load your amp-sim plugin (CLAP, VST3 or VST2) into a slot, pick the slot's input and press GO LIVE. For an
    instrument with its own sound, set the other slot to Off, pick its input and GO LIVE: it plays dry.
 3. Select a track with 1–5 and press Space to record. The first take gets a one-bar count-in, shown
    4-3-2-1; come in on the downbeat after it.
