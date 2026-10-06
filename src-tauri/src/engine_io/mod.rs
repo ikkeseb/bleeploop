@@ -284,14 +284,16 @@ impl From<OpenError> for String {
     }
 }
 
-/// Counters the callbacks and pipes bump; every one stays 0 in a clean run (the Stage 4 soak).
+/// Counters the callbacks and pipes bump. The faults (`IoDiag::faults`) stay 0 in a clean run (the
+/// Stage 4 soak); the glitch diagnostics after them only tell one kind of glitch from another.
 #[derive(Default)]
 pub struct IoCounters {
     pub callbacks: AtomicU64,
     /// WASAPI: the output buffer ran dry; the frame counter skipped what the device played dry, the
     /// join as much input (`callback::dry_frames`). On ASIO the only report is the driver's overload, an xrun.
     pub gaps: AtomicU64,
-    /// cpal's non-fatal `Xrun` reports (an ASIO overload, a WASAPI glitch).
+    /// cpal's non-fatal `Xrun` reports: a WASAPI glitch, an ASIO overload once whichever stream reported
+    /// it (`callback::Run::stream_error`).
     pub xruns: AtomicU64,
     /// The callback found the engine locked and played silence.
     pub lock_misses: AtomicU64,
@@ -316,6 +318,12 @@ pub struct IoCounters {
     pub rt_allocs: AtomicU64,
     /// How long each output callback took (`EngineHost::block_load`).
     pub block_load: LoadHistogram,
+    /// Diagnostics. ASIO: runs of output callbacks more than a period behind the run's best phase
+    /// (`callback::LateWakes`), and the furthest behind one came, in frames (divide by the block).
+    pub asio_late_wakes: AtomicU64,
+    pub asio_late_max: AtomicU64,
+    /// Output callbacks that handed the device a sample past full scale.
+    pub clipped_blocks: AtomicU64,
 }
 
 /// Bins of the block-load histogram: bin k counts the output callbacks that took k % up to (k + 1) %
@@ -407,6 +415,9 @@ pub struct IoDiag {
     pub panics: u64,
     pub rt_allocs: u64,
     pub engine: lf_engine::Diag,
+    pub asio_late_wakes: u64,
+    pub asio_late_max: u64,
+    pub clipped_blocks: u64,
 }
 
 impl IoDiag {
@@ -434,15 +445,26 @@ impl IoDiag {
         ]
     }
 
-    /// The fault counters that moved since `before`, as `name=delta`, or `None` when none did.
+    /// The glitch diagnostics that count, by name: not faults (no probe fails on them), but the release
+    /// log and the probe show them beside the faults.
+    fn diagnostics(&self) -> [(&'static str, u64); 2] {
+        [("asio_late_wakes", self.asio_late_wakes), ("clipped_blocks", self.clipped_blocks)]
+    }
+
+    /// The fault counters, then the diagnostics, that moved since `before`, as `name=delta`, with
+    /// `asio_late_max` as its new value when it rose; `None` when none did.
     pub(crate) fn moved_since(&self, before: &IoDiag) -> Option<String> {
-        let moved: Vec<String> = self
+        let mut moved: Vec<String> = self
             .faults()
-            .iter()
-            .zip(before.faults().iter())
+            .into_iter()
+            .zip(before.faults())
+            .chain(self.diagnostics().into_iter().zip(before.diagnostics()))
             .filter(|(n, b)| n.1 > b.1)
             .map(|(n, b)| format!("{}={}", n.0, n.1 - b.1))
             .collect();
+        if self.asio_late_max > before.asio_late_max {
+            moved.push(format!("asio_late_max={}", self.asio_late_max));
+        }
         (!moved.is_empty()).then(|| moved.join(" "))
     }
 }
@@ -626,6 +648,9 @@ impl Core {
             panics: c.panics.load(Relaxed),
             rt_allocs: c.rt_allocs.load(Relaxed),
             engine: self.engine_diag.load(),
+            asio_late_wakes: c.asio_late_wakes.load(Relaxed),
+            asio_late_max: c.asio_late_max.load(Relaxed),
+            clipped_blocks: c.clipped_blocks.load(Relaxed),
         }
     }
 }

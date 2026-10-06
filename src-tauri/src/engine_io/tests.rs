@@ -889,16 +889,33 @@ fn a_held_engine_lock_plays_silence_counts_misses_and_flags_the_input_gap() {
 }
 
 #[test]
-fn a_late_asio_wake_loses_nothing() {
+fn a_late_asio_wake_loses_nothing_and_counts_one_late_wake() {
     let h = Harness::new();
     h.open(asio(Some(256)));
-    h.play(RATE / 20);
+    // Past the start, which counts no late wake.
+    h.play(RATE);
     h.fake.gap.store(2, SeqCst);
-    h.play(RATE / 20);
+    // Long enough for the floor to catch up with the new phase: the wakes behind it until then are one.
+    h.play(2 * RATE);
     let diag = h.host.diag();
     assert_eq!((diag.gaps, diag.engine.xruns), (0, 0), "{diag:?}");
+    assert_eq!((diag.asio_late_wakes, diag.asio_late_max), (1, 512), "two periods behind, once: {diag:?}");
     let run = &h.starts()[0];
     assert!(run.windows(2).all(|w| w[1] - w[0] == 256), "every bufferSwitch is one period on the frame counter");
+}
+
+#[test]
+fn an_asio_wake_late_by_less_than_a_period_and_made_up_is_no_late_wake_and_one_past_a_period_is() {
+    let h = Harness::new();
+    h.open(asio(Some(256)));
+    h.play(RATE);
+    h.fake.wake_late.store(200, SeqCst);
+    h.play(RATE / 2);
+    assert_eq!(h.host.diag().asio_late_wakes, 0, "{:?}", h.host.diag());
+    h.fake.wake_late.store(300, SeqCst);
+    h.play(RATE / 2);
+    let diag = h.host.diag();
+    assert_eq!((diag.asio_late_wakes, diag.asio_late_max, diag.engine.xruns), (1, 300, 0), "{diag:?}");
 }
 
 #[test]
@@ -948,11 +965,48 @@ fn a_cpal_xrun_is_counted_and_flags_the_next_block() {
     let h = Harness::new();
     h.open(asio(Some(256)));
     h.play(RATE / 20);
+    // An ASIO overload reaches both streams' error callbacks: one xrun.
     h.fake.xrun.store(true, SeqCst);
     h.play(RATE / 20);
     let diag = h.host.diag();
     assert_eq!((diag.xruns, diag.engine.xruns, diag.gaps), (1, 1, 0));
     assert_eq!(h.host.status().map(|s| s.backend), Some(AudioBackend::Asio), "an xrun is not a loss");
+}
+
+#[test]
+fn an_asio_overload_whose_report_one_stream_lost_still_counts_once_and_flags_the_next_block() {
+    for dropped in [Side::Output, Side::Input] {
+        let h = Harness::new();
+        h.open(asio(Some(256)));
+        h.play(RATE / 20);
+        h.fake.xrun_dropped.store(dropped as u8, SeqCst);
+        h.fake.xrun.store(true, SeqCst);
+        h.play(RATE / 20);
+        let diag = h.host.diag();
+        assert_eq!((diag.xruns, diag.engine.xruns), (1, 1), "{dropped:?}'s report lost: {diag:?}");
+        // The next overload reaches both: the side that lost a report does not swallow it.
+        h.fake.xrun.store(true, SeqCst);
+        h.play(RATE / 20);
+        let diag = h.host.diag();
+        assert_eq!((diag.xruns, diag.engine.xruns), (2, 2), "after {dropped:?}'s lost report: {diag:?}");
+    }
+}
+
+#[test]
+fn an_output_past_full_scale_counts_clipped_blocks_and_a_normal_one_none() {
+    let h = Harness::new();
+    // The monitor joins the master after the limiter, and two live slots on input 2 sum it: input 2 at
+    // 0.4 plays at 0.8, at 0.6 at 1.2 (the device's input itself stays under full scale).
+    h.fake.set_input(|_| 0.2);
+    h.open(asio(Some(256)));
+    h.send(Command::SetSlotLive(0, true));
+    h.send(Command::SetSlotLive(1, true));
+    assert!(all_near(&heard_after(&h, 0.5), 0.8), "the monitor is heard");
+    assert_eq!(h.host.diag().clipped_blocks, 0);
+    h.fake.set_input(|_| 0.3);
+    h.play(RATE / 2);
+    let diag = h.host.diag();
+    assert!(diag.clipped_blocks > 0, "{diag:?}");
 }
 
 #[test]

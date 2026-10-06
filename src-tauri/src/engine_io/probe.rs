@@ -75,7 +75,7 @@ const CHECKS: [(&str, &str); 8] = [
     ("slots", "every plugin loads, is back in its slot after each switch, reloads on a swap and unloads"),
     ("loop", "the loop plays through every phase at an unchanged rate; no take or pass rejected"),
     ("events", "no device event (loss, fallback, engine fault)"),
-    ("counters", "every IoDiag counter but callbacks stays 0 (a WASAPI open's first 3 s may trim or starve the join)"),
+    ("counters", "every fault counter (IoDiag::faults) stays 0 (a WASAPI open's first 3 s may trim or starve the join)"),
     ("load", "soak: block time p99.9 < 50 %, max < 90 % of the period"),
     ("log", "no error logged"),
 ];
@@ -546,11 +546,23 @@ impl Probe {
         let began = Instant::now();
         let end = began + Duration::from_secs_f64(seconds);
         let (start, mut note) = (self.host.diag(), began + Duration::from_secs(60));
+        // Each minute's own block time and diagnostics, so a spike in a long soak has a time.
+        let (mut minute, mut load) = (start, self.host.block_load());
         while Instant::now() < end {
             self.pump();
             if Instant::now() >= note {
-                let diag = self.host.diag();
-                say(format!("soak {:.0} s: callbacks {}, counters {}", began.elapsed().as_secs_f64(), diag.callbacks - start.callbacks, moved(&diag, &start)));
+                let (diag, now) = (self.host.diag(), self.host.block_load());
+                say(format!(
+                    "soak {:.0} s: callbacks {}, counters {}; this minute: block {}, asio_late_wakes {}, clipped_blocks {}; asio_late_max so far {}",
+                    began.elapsed().as_secs_f64(),
+                    diag.callbacks - start.callbacks,
+                    moved(&diag, &start),
+                    now.since(&load).text(),
+                    diag.asio_late_wakes - minute.asio_late_wakes,
+                    diag.clipped_blocks - minute.clipped_blocks,
+                    diag.asio_late_max
+                ));
+                (minute, load) = (diag, now);
                 note += Duration::from_secs(60);
             }
             std::thread::sleep(Duration::from_millis(20));

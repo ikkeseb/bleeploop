@@ -38,6 +38,9 @@ pub(crate) const LATENCY_SAMPLES: usize = 16;
 const CLIP_LEVEL: f32 = 0.999;
 /// Frames the WASAPI input callback converts at a time.
 const SCRATCH_FRAMES: usize = 1024;
+/// ASIO late wakes ([`LateWakes`]): the span of each of the floor's two buckets, and of a run's start
+/// that counts nothing, in seconds of delivered frames.
+const WAKE_BUCKET_SECONDS: f64 = 0.5;
 
 /// Share output's end in the callback (`share::ShareTap`; a fake in tests): fed the rendered stereo
 /// master every block. Never blocks or allocates.
@@ -89,6 +92,12 @@ pub(crate) struct Run {
     pub(crate) error: Mutex<Option<cpal::Error>>,
     /// cpal reported an xrun: the next block follows an input gap.
     xrun: AtomicBool,
+    /// ASIO: cpal hands each overload to both streams' error callbacks, but its `try_emit_error` can drop
+    /// either under contention. Each side's reports this run, and the overloads counted from them: the
+    /// larger side, so an overload counts once and a lone report still counts.
+    duplex: AtomicBool,
+    overloads: [AtomicU64; 2],
+    overloads_counted: AtomicU64,
     /// Each side's latency in frames at the engine rate: a running median, frozen after
     /// `LATENCY_SAMPLES` reports.
     in_latency: AtomicI64,
@@ -109,6 +118,9 @@ impl Run {
             fault: AtomicU8::new(0),
             error: Mutex::new(None),
             xrun: AtomicBool::new(false),
+            duplex: AtomicBool::new(false),
+            overloads: [AtomicU64::new(0), AtomicU64::new(0)],
+            overloads_counted: AtomicU64::new(0),
             in_latency: AtomicI64::new(0),
             out_latency: AtomicI64::new(0),
             callbacks: AtomicU64::new(0),
@@ -116,14 +128,28 @@ impl Run {
         }
     }
 
-    /// A stream's error callback. An xrun is counted and flags the next block. cpal 0.18.1 documents a
+    /// A stream's error callback. An xrun is counted (on ASIO, once per overload) and flags the next
+    /// block, whichever side reported it. cpal 0.18.1 documents a
     /// default-device change (the stream stays on its device) and a refused thread priority as
     /// non-fatal; any other error ends the stream: latched for the owner, which drops the run and falls
     /// back. Never blocks (an xrun can arrive on the driver's thread).
     pub(crate) fn stream_error(&self, side: Side, error: cpal::Error, counters: &IoCounters) {
         match error.kind() {
             cpal::ErrorKind::Xrun => {
-                counters.xruns.fetch_add(1, Relaxed);
+                if self.duplex.load(Relaxed) {
+                    let [input, output] = &self.overloads;
+                    let (mine, other) = match side {
+                        Side::Input => (input, output),
+                        Side::Output => (output, input),
+                    };
+                    // Each report sees its own side's exact count, so the last one leaves the larger side
+                    // counted, whichever way the two race.
+                    let seen = (mine.fetch_add(1, Relaxed) + 1).max(other.load(Relaxed));
+                    let counted = self.overloads_counted.fetch_max(seen, Relaxed);
+                    counters.xruns.fetch_add(seen.saturating_sub(counted), Relaxed);
+                } else {
+                    counters.xruns.fetch_add(1, Relaxed);
+                }
                 self.xrun.store(true, Release);
             }
             cpal::ErrorKind::DeviceChanged | cpal::ErrorKind::RealtimeDenied => {}
@@ -199,6 +225,65 @@ impl Probe {
         let s = &mut sorted[..self.count];
         s.sort_unstable();
         Some((s[(self.count - 1) / 2] + s[self.count / 2]) / 2)
+    }
+}
+
+/// ASIO: how far each output callback came behind the run's best phase. asio-sys drops the driver's
+/// sample position and the rig's driver's system time is not monotonic, so the only clock is the host's
+/// at callback entry. A wake's offset is the time since the first wake, in frames, less the frames
+/// delivered since; its floor is the smallest offset over the last two buckets (counted in delivered
+/// frames, so the fake's synthetic time works too), which follows a drifting clock. A wake more than a
+/// period above the floor came late, and consecutive late wakes are one event. A late wake the next
+/// makes up stays under a period (the rig's driver at 64 frames woke 98, 78 and 8 frames apart). This
+/// names a callback behind its phase, which a dropped period and a missed deadline both produce; it
+/// cannot tell them apart. A new block size starts over, and a start counts nothing.
+struct LateWakes {
+    /// The first wake at this block size, and the frames delivered since.
+    first: Option<Instant>,
+    block: usize,
+    delivered: u64,
+    /// The smallest offset in the current bucket and in the one before, and the frames in the current.
+    floor: f64,
+    floor_before: f64,
+    bucket: u64,
+    /// The previous wake came late.
+    late: bool,
+}
+
+impl LateWakes {
+    const fn new() -> LateWakes {
+        LateWakes { first: None, block: 0, delivered: 0, floor: f64::INFINITY, floor_before: f64::INFINITY, bucket: 0, late: false }
+    }
+
+    /// One output callback of `n` frames entered at `entry`: how far behind the floor it came, in
+    /// frames, when that is more than a period, and whether it starts an event. `None` on time and
+    /// through the start.
+    fn wake(&mut self, entry: Instant, n: usize, rate: u32) -> Option<(u64, bool)> {
+        if n == 0 || rate == 0 {
+            return None;
+        }
+        let first = match self.first {
+            Some(first) if self.block == n => first,
+            _ => {
+                *self = LateWakes { first: Some(entry), block: n, ..LateWakes::new() };
+                entry
+            }
+        };
+        let offset = entry.saturating_duration_since(first).as_secs_f64() * rate as f64 - self.delivered as f64;
+        self.floor = self.floor.min(offset);
+        let behind = offset - self.floor.min(self.floor_before);
+        let span = (WAKE_BUCKET_SECONDS * rate as f64) as u64;
+        let started = self.delivered >= span;
+        self.delivered += n as u64;
+        self.bucket += n as u64;
+        if self.bucket >= span {
+            self.floor_before = std::mem::replace(&mut self.floor, f64::INFINITY);
+            self.bucket = 0;
+        }
+        let late = behind > n as f64;
+        let was = std::mem::replace(&mut self.late, late);
+        let starts = late && !was;
+        (late && started).then(|| (behind.round() as u64, starts))
     }
 }
 
@@ -399,6 +484,8 @@ pub(crate) struct Render {
     zeros: Vec<f32>,
     /// The previous callback's entry and frames (WASAPI's dry buffer, the DEV trace).
     last: Option<(Instant, usize)>,
+    /// ASIO: wakes behind the run's best phase (a diagnostic; the frame counter ignores them).
+    wakes: LateWakes,
     /// WASAPI: the endpoint buffer, the largest callback this run (the first finds it empty).
     cap: usize,
     /// The previous block never reached the engine (a lock miss): this one follows an input gap.
@@ -415,6 +502,7 @@ pub(crate) struct Render {
 impl Render {
     /// ASIO's output callback. Allocates: build it on the owner thread, after the engine exists.
     pub(crate) fn duplex(core: Arc<Core>, run: Arc<Run>, channels: usize, rate: u32) -> Render {
+        run.duplex.store(true, Relaxed);
         Render::new(core, run, channels, rate, Source::Duplex)
     }
 
@@ -439,6 +527,7 @@ impl Render {
             right: vec![0.0; max_block],
             zeros: vec![0.0; max_block],
             last: None,
+            wakes: LateWakes::new(),
             cap: 0,
             missed: false,
             spliced: false,
@@ -466,15 +555,20 @@ impl Render {
         #[cfg(debug_assertions)]
         trace::output(self.last, entry, n, latency, self.rate, self.run.callbacks.load(Relaxed));
         // The frames the device played that this run never rendered. Only WASAPI can say (`dry_frames`).
-        // ASIO infers nothing from timing: each bufferSwitch carries one period in and out, so the
-        // counter counts what the device took, and a late wake the driver makes up loses nothing (at 64
+        // ASIO's counter infers nothing from timing: each bufferSwitch carries one period in and out, so
+        // it counts what the device took, and a late wake the driver makes up loses nothing (at 64
         // frames the rig's driver woke 98, 78 and 8 frames apart). A period the driver drops arrives
-        // as its overload report, a cpal Xrun.
+        // as its overload report, a cpal Xrun, when cpal delivers it; a wake more than a period behind
+        // is counted beside it, for the log only (`LateWakes`).
         self.cap = self.cap.max(n);
         let lost = match (self.last.replace((entry, n)), &self.source) {
             (Some((before, _)), Source::Join { .. }) => dry_frames(entry.saturating_duration_since(before), self.rate, n, self.cap),
             _ => 0,
         };
+        if let (Source::Duplex, Some((behind, starts))) = (&self.source, self.wakes.wake(entry, n, self.rate)) {
+            counters.asio_late_wakes.fetch_add(u64::from(starts), Relaxed);
+            counters.asio_late_max.fetch_max(behind, Relaxed);
+        }
         if lost > 0 {
             counters.gaps.fetch_add(1, Relaxed);
         }
@@ -602,7 +696,7 @@ impl Render {
         let mut engine = engine.as_mut().filter(|_| !*faulted);
         let max_block = self.left.len();
         let target = if fading { 0.0 } else { 1.0 };
-        let mut off = 0;
+        let (mut off, mut clipped) = (0, false);
         while off < n {
             let m = (n - off).min(max_block);
             let x = inputs.map(|input| if off + m <= avail { &input[off..off + m] } else { &self.zeros[..m] });
@@ -625,8 +719,11 @@ impl Render {
             if let Some(tap) = tap.as_mut() {
                 tap.push(left, right, counters);
             }
-            write(&mut data[off * self.channels..(off + m) * self.channels], self.channels, left, right);
+            clipped |= write(&mut data[off * self.channels..(off + m) * self.channels], self.channels, left, right);
             off += m;
+        }
+        if clipped {
+            counters.clipped_blocks.fetch_add(1, Relaxed);
         }
         if let Some(engine) = engine {
             self.core.engine_diag.store(&engine.diag());
@@ -875,12 +972,19 @@ fn fade(gain: &mut f32, step: f32, target: f32, left: &mut [f32], right: &mut [f
 }
 
 /// Stereo out: left and right on the device's first two channels, any others silent; a mono device
-/// gets their mean.
-fn write<T: SizedSample + FromSample<f32>>(data: &mut [T], channels: usize, left: &[f32], right: &[f32]) {
+/// gets their mean. Whether a value it converted was past full scale: the monitor joins the master
+/// after the limiter, so nothing upstream bounds the sum.
+fn write<T: SizedSample + FromSample<f32>>(data: &mut [T], channels: usize, left: &[f32], right: &[f32]) -> bool {
+    let mut peak = 0.0f32;
     for ((frame, &l), &r) in data.chunks_exact_mut(channels).zip(left).zip(right) {
         match frame {
-            [mono] => *mono = T::from_sample(0.5 * (l + r)),
+            [mono] => {
+                let m = 0.5 * (l + r);
+                peak = peak.max(m.abs());
+                *mono = T::from_sample(m);
+            }
             [a, b, rest @ ..] => {
+                peak = peak.max(l.abs()).max(r.abs());
                 *a = T::from_sample(l);
                 *b = T::from_sample(r);
                 rest.fill(T::EQUILIBRIUM);
@@ -888,6 +992,7 @@ fn write<T: SizedSample + FromSample<f32>>(data: &mut [T], channels: usize, left
             [] => {}
         }
     }
+    peak > 1.0
 }
 
 fn silence<T: Sample>(data: &mut [T]) {
@@ -922,6 +1027,54 @@ mod tests {
         assert_eq!(dry_frames(frames(1_300.0), 48_000, 882, 970), 0, "late, but frames were still queued");
         assert_eq!(dry_frames(frames(960.0), 48_000, 970, 970), 0, "empty just as it came");
         assert_eq!(dry_frames(frames(1_323.0), 48_000, 970, 970), 353, "dry for what played past the buffer");
+    }
+
+    /// Feed `wakes` the callbacks `blocks` gives (how many frames after its ideal entry each enters, and
+    /// its frames), from `at` frames on a clock running `ppm` fast: the late events and the furthest
+    /// behind.
+    fn late_wakes(wakes: &mut LateWakes, at: &mut f64, ppm: f64, blocks: impl IntoIterator<Item = (f64, usize)>) -> (u64, u64) {
+        const RATE: u32 = 48_000;
+        let base = *BASE;
+        let (mut events, mut max) = (0, 0);
+        for (late, n) in blocks {
+            let entry = base + Duration::from_secs_f64((*at + late) * (1.0 + ppm / 1e6) / RATE as f64);
+            if let Some((behind, starts)) = wakes.wake(entry, n, RATE) {
+                events += u64::from(starts);
+                max = max.max(behind);
+            }
+            *at += n as f64;
+        }
+        (events, max)
+    }
+
+    static BASE: std::sync::LazyLock<Instant> = std::sync::LazyLock::new(Instant::now);
+
+    #[test]
+    fn a_clock_drifting_100_ppm_and_the_rigs_made_up_wakes_are_no_late_wake() {
+        for ppm in [100.0, -100.0] {
+            let (mut wakes, mut at) = (LateWakes::new(), 0.0);
+            // Three minutes at 64 frames.
+            let blocks = (0..3 * 60 * 750).map(|_| (0.0, 64));
+            assert_eq!(late_wakes(&mut wakes, &mut at, ppm, blocks), (0, 0), "{ppm} ppm");
+        }
+        // The rig's driver at 64 frames: wakes 98, 78 and 8 frames apart, then on time again.
+        let (mut wakes, mut at) = (LateWakes::new(), 0.0);
+        let blocks = (0..60 * 750).map(|k| (match k % 100 { 51 => 34.0, 52 => 48.0, 53 => -8.0, _ => 0.0 }, 64));
+        assert_eq!(late_wakes(&mut wakes, &mut at, 100.0, blocks), (0, 0));
+    }
+
+    #[test]
+    fn a_new_block_size_and_a_runs_start_count_no_late_wake_and_one_after_them_does() {
+        let (mut wakes, mut at) = (LateWakes::new(), 0.0);
+        // Two periods behind in the first half second: the start.
+        let start = (0..90).map(|k| (if k > 40 { 512.0 } else { 0.0 }, 256));
+        assert_eq!(late_wakes(&mut wakes, &mut at, 0.0, start), (0, 0));
+        // The driver resets to 64 frames, a 256-frame period later.
+        at += 256.0;
+        assert_eq!(late_wakes(&mut wakes, &mut at, 0.0, (0..750).map(|_| (0.0, 64))), (0, 0));
+        // Two periods behind for good, past the new size's start: one event while the floor catches up.
+        let behind = (0..750).map(|_| (128.0, 64));
+        assert_eq!(late_wakes(&mut wakes, &mut at, 0.0, behind), (1, 128));
     }
 
     #[test]

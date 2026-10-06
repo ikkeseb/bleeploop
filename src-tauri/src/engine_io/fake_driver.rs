@@ -98,11 +98,16 @@ pub(crate) struct Fake {
     pub(crate) started: AtomicU32,
     /// One-shot, taken by the running device's next cycle: periods its wake comes late (ASIO: the
     /// bufferSwitches it skips; WASAPI: the input runs on, the output buffer drains), a cpal xrun
-    /// report, an input callback that does not run, a fatal error on these streams (`Side` bits).
+    /// report (ASIO: to both streams' error callbacks, as cpal broadcasts an overload, less the sides
+    /// in `xrun_dropped`, as its `try_emit_error` can drop one), an input callback that does not run,
+    /// a fatal error on these streams (`Side` bits).
     pub(crate) gap: AtomicU32,
     pub(crate) xrun: AtomicBool,
+    pub(crate) xrun_dropped: AtomicU8,
     pub(crate) skip_input: AtomicBool,
     pub(crate) fatal: AtomicU8,
+    /// One-shot, ASIO: frames the next wake enters late, made up by the one after (it enters on time).
+    pub(crate) wake_late: AtomicU32,
     /// One-shot, taken by the next ASIO start: input cycles before the output's first.
     pub(crate) lead_in: AtomicU32,
     /// One-shot, run by the next start before it starts: a test's way into an open midway.
@@ -131,6 +136,8 @@ impl Fake {
             started: AtomicU32::new(0),
             gap: AtomicU32::new(0),
             xrun: AtomicBool::new(false),
+            xrun_dropped: AtomicU8::new(0),
+            wake_late: AtomicU32::new(0),
             skip_input: AtomicBool::new(false),
             fatal: AtomicU8::new(0),
             lead_in: AtomicU32::new(0),
@@ -334,7 +341,13 @@ impl Play {
                     break;
                 }
                 if self.fake.xrun.swap(false, Relaxed) {
-                    output_error(cpal::Error::new(cpal::ErrorKind::Xrun));
+                    let dropped = self.fake.xrun_dropped.swap(0, Relaxed);
+                    if asio && dropped & Side::Input as u8 == 0 {
+                        input_error(cpal::Error::new(cpal::ErrorKind::Xrun));
+                    }
+                    if dropped & Side::Output as u8 == 0 {
+                        output_error(cpal::Error::new(cpal::ErrorKind::Xrun));
+                    }
                 }
                 let late = self.fake.gap.swap(0, Relaxed) as usize;
                 t += (late * block) as u64;
@@ -360,7 +373,8 @@ impl Play {
                     Some(q) => buffer - q.saturating_sub((1 + late) * block),
                 };
                 queued = (!asio).then_some(buffer);
-                let entry = begun + Duration::from_secs_f64(t as f64 / rate as f64);
+                let wake_late = if asio { self.fake.wake_late.swap(0, Relaxed) as u64 } else { 0 };
+                let entry = begun + Duration::from_secs_f64((t + wake_late) as f64 / rate as f64);
                 self.render.render(&mut data_out[..n * out_ch], entry, out_latency);
                 let frame = self.core.frame.load(Relaxed) - n as Frame;
                 self.keep(frame, &data_out[..n * out_ch], out_ch);

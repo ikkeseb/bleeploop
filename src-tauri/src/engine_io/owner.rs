@@ -5,7 +5,7 @@
 //! The owner takes the engine lock only while no stream runs, and builds engines here, never on a
 //! callback (`Engine::new` allocates every buffer: ~130 MB and ~100 ms at 60-second lanes). Between
 //! requests it polls every `POLL` for what the callbacks latched: a dead stream, a dead Share mirror;
-//! and once a `GLITCH_EVERY` it logs the fault counters that moved ([`GlitchWatch`]).
+//! and once a `GLITCH_EVERY` it logs the fault counters and glitch diagnostics that moved ([`GlitchWatch`]).
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, Ordering::{AcqRel, Acquire, Relaxed, Release}};
@@ -202,7 +202,8 @@ struct Active {
 }
 
 /// The release log's view of the callbacks, which cannot log: once a `GLITCH_EVERY`, the fault counters
-/// that moved in that span (`IoDiag::faults`), with the output callbacks' block times over the same span.
+/// and glitch diagnostics that moved in that span (`IoDiag::moved_since`), with the output callbacks'
+/// block times over the same span.
 /// A crackle heard at a time then has a line to match. An xrun while every block stayed well inside its
 /// period points away from the engine (the driver, USB, the system); blocks near 100 % point at it.
 pub(crate) struct GlitchWatch {
