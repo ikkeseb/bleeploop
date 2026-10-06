@@ -889,33 +889,35 @@ fn a_held_engine_lock_plays_silence_counts_misses_and_flags_the_input_gap() {
 }
 
 #[test]
-fn a_late_asio_wake_loses_nothing_and_counts_one_late_wake() {
+fn a_late_asio_wake_loses_nothing_and_counts_one_phase_slip() {
     let h = Harness::new();
     h.open(asio(Some(256)));
-    // Past the start, which counts no late wake.
+    // Past the start, which is no baseline.
     h.play(RATE);
     h.fake.gap.store(2, SeqCst);
-    // Long enough for the floor to catch up with the new phase: the wakes behind it until then are one.
+    // Long enough for the window after the gap's to close: the phase stays two periods later.
     h.play(2 * RATE);
     let diag = h.host.diag();
     assert_eq!((diag.gaps, diag.engine.xruns), (0, 0), "{diag:?}");
-    assert_eq!((diag.asio_late_wakes, diag.asio_late_max), (1, 512), "two periods behind, once: {diag:?}");
+    assert_eq!((diag.asio_phase_slips, diag.asio_late_max), (1, 512), "two periods later, once: {diag:?}");
     let run = &h.starts()[0];
     assert!(run.windows(2).all(|w| w[1] - w[0] == 256), "every bufferSwitch is one period on the frame counter");
 }
 
 #[test]
-fn an_asio_wake_late_by_less_than_a_period_and_made_up_is_no_late_wake_and_one_past_a_period_is() {
+fn an_asio_wake_late_by_more_than_a_period_and_made_up_is_no_phase_slip() {
     let h = Harness::new();
     h.open(asio(Some(256)));
     h.play(RATE);
     h.fake.wake_late.store(200, SeqCst);
     h.play(RATE / 2);
-    assert_eq!(h.host.diag().asio_late_wakes, 0, "{:?}", h.host.diag());
-    h.fake.wake_late.store(300, SeqCst);
-    h.play(RATE / 2);
     let diag = h.host.diag();
-    assert_eq!((diag.asio_late_wakes, diag.asio_late_max, diag.engine.xruns), (1, 300, 0), "{diag:?}");
+    assert_eq!((diag.asio_phase_slips, diag.asio_late_max), (0, 0), "under a period late: {diag:?}");
+    // Past a period late, then on time: the phase holds.
+    h.fake.wake_late.store(300, SeqCst);
+    h.play(RATE);
+    let diag = h.host.diag();
+    assert_eq!((diag.asio_phase_slips, diag.asio_late_max, diag.engine.xruns), (0, 300, 0), "{diag:?}");
 }
 
 #[test]

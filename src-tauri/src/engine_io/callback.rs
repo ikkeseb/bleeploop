@@ -38,9 +38,9 @@ pub(crate) const LATENCY_SAMPLES: usize = 16;
 const CLIP_LEVEL: f32 = 0.999;
 /// Frames the WASAPI input callback converts at a time.
 const SCRATCH_FRAMES: usize = 1024;
-/// ASIO late wakes ([`LateWakes`]): the span of each of the floor's two buckets, and of a run's start
-/// that counts nothing, in seconds of delivered frames.
-const WAKE_BUCKET_SECONDS: f64 = 0.5;
+/// ASIO phase slips ([`PhaseSlips`]): the span of each window, and of a run's start that is no
+/// baseline, in seconds of delivered frames.
+const SLIP_WINDOW_SECONDS: f64 = 0.5;
 
 /// Share output's end in the callback (`share::ShareTap`; a fake in tests): fed the rendered stereo
 /// master every block. Never blocks or allocates.
@@ -229,36 +229,39 @@ impl Probe {
     }
 }
 
-/// ASIO: how far each output callback came behind the run's best phase. asio-sys drops the driver's
-/// sample position and the rig's driver's system time is not monotonic, so the only clock is the host's
-/// at callback entry. A wake's offset is the time since the first wake, in frames, less the frames
-/// delivered since; its floor is the smallest offset over the last two buckets (counted in delivered
-/// frames, so the fake's synthetic time works too), which follows a drifting clock. A wake more than a
-/// period above the floor came late, and consecutive late wakes are one event. A late wake the next
-/// makes up stays under a period (the rig's driver at 64 frames woke 98, 78 and 8 frames apart). This
-/// names a callback behind its phase, which a dropped period and a missed deadline both produce; it
-/// cannot tell them apart. A new block size starts over, and a start counts nothing.
-struct LateWakes {
+/// ASIO: output callbacks whose phase moved later for good. asio-sys drops the driver's sample position
+/// and the rig's driver's system time is not monotonic, so the only clock is the host's at callback
+/// entry. A wake's offset is the time since the first wake, in frames, less the frames delivered since;
+/// a window's floor is its smallest offset (windows counted in delivered frames, so the fake's synthetic
+/// time works too). A single wake says nothing: the rig's USB driver wakes on a ~1 ms cadence, so at 64
+/// frames its wakes spread over more than a period with every fault counter 0. A floor half a period or
+/// more above the window before's is one slip: a window holds hundreds of on-time wakes, so jitter and
+/// a late wake the driver makes up leave its floor in place, and a drifting clock moves it a few frames.
+/// A slip cannot tell a dropped period from a lasting move of the driver's phase, nor from a stall the
+/// driver makes up only over more than a window; one wake half a period earlier than the rest would
+/// read as one too (unmeasured). A falling floor counts nothing. A new block size starts over, and the
+/// start's floor is no baseline.
+struct PhaseSlips {
     /// The first wake at this block size, and the frames delivered since.
     first: Option<Instant>,
     block: usize,
     delivered: u64,
-    /// The smallest offset in the current bucket and in the one before, and the frames in the current.
+    /// The smallest offset in this window and in the one before, the frames in this one, and the
+    /// windows closed at this block size.
     floor: f64,
     floor_before: f64,
-    bucket: u64,
-    /// The previous wake came late.
-    late: bool,
+    window: u64,
+    windows: u64,
 }
 
-impl LateWakes {
-    const fn new() -> LateWakes {
-        LateWakes { first: None, block: 0, delivered: 0, floor: f64::INFINITY, floor_before: f64::INFINITY, bucket: 0, late: false }
+impl PhaseSlips {
+    const fn new() -> PhaseSlips {
+        PhaseSlips { first: None, block: 0, delivered: 0, floor: f64::INFINITY, floor_before: f64::INFINITY, window: 0, windows: 0 }
     }
 
     /// One output callback of `n` frames entered at `entry`: how far behind the floor it came, in
-    /// frames, when that is more than a period, and whether it starts an event. `None` on time and
-    /// through the start.
+    /// frames, when that is more than a period (else 0, so a clean run's log stays quiet), and whether it
+    /// closed a window that slipped. `None` through the start.
     fn wake(&mut self, entry: Instant, n: usize, rate: u32) -> Option<(u64, bool)> {
         if n == 0 || rate == 0 {
             return None;
@@ -266,25 +269,26 @@ impl LateWakes {
         let first = match self.first {
             Some(first) if self.block == n => first,
             _ => {
-                *self = LateWakes { first: Some(entry), block: n, ..LateWakes::new() };
+                *self = PhaseSlips { first: Some(entry), block: n, ..PhaseSlips::new() };
                 entry
             }
         };
         let offset = entry.saturating_duration_since(first).as_secs_f64() * rate as f64 - self.delivered as f64;
         self.floor = self.floor.min(offset);
         let behind = offset - self.floor.min(self.floor_before);
-        let span = (WAKE_BUCKET_SECONDS * rate as f64) as u64;
-        let started = self.delivered >= span;
+        let started = self.windows > 0;
         self.delivered += n as u64;
-        self.bucket += n as u64;
-        if self.bucket >= span {
+        self.window += n as u64;
+        let mut slipped = false;
+        if self.window >= (SLIP_WINDOW_SECONDS * rate as f64) as u64 {
+            // From the third window on: the start's floor is no baseline.
+            slipped = self.windows > 1 && self.floor - self.floor_before >= n as f64 / 2.0;
             self.floor_before = std::mem::replace(&mut self.floor, f64::INFINITY);
-            self.bucket = 0;
+            self.window = 0;
+            self.windows += 1;
         }
-        let late = behind > n as f64;
-        let was = std::mem::replace(&mut self.late, late);
-        let starts = late && !was;
-        (late && started).then(|| (behind.round() as u64, starts))
+        let late = if behind > n as f64 { behind.round() as u64 } else { 0 };
+        started.then_some((late, slipped))
     }
 }
 
@@ -485,8 +489,8 @@ pub(crate) struct Render {
     zeros: Vec<f32>,
     /// The previous callback's entry and frames (WASAPI's dry buffer, the DEV trace).
     last: Option<(Instant, usize)>,
-    /// ASIO: wakes behind the run's best phase (a diagnostic; the frame counter ignores them).
-    wakes: LateWakes,
+    /// ASIO: lasting slips of the wakes' phase (a diagnostic; the frame counter ignores them).
+    slips: PhaseSlips,
     /// WASAPI: the endpoint buffer, the largest callback this run (the first finds it empty).
     cap: usize,
     /// The previous block never reached the engine (a lock miss): this one follows an input gap.
@@ -528,7 +532,7 @@ impl Render {
             right: vec![0.0; max_block],
             zeros: vec![0.0; max_block],
             last: None,
-            wakes: LateWakes::new(),
+            slips: PhaseSlips::new(),
             cap: 0,
             missed: false,
             spliced: false,
@@ -559,16 +563,16 @@ impl Render {
         // ASIO's counter infers nothing from timing: each bufferSwitch carries one period in and out, so
         // it counts what the device took, and a late wake the driver makes up loses nothing (at 64
         // frames the rig's driver woke 98, 78 and 8 frames apart). A period the driver drops arrives
-        // as its overload report, a cpal Xrun, when cpal delivers it; a wake more than a period behind
-        // is counted beside it, for the log only (`LateWakes`).
+        // as its overload report, a cpal Xrun, when cpal delivers it; a lasting slip of the wakes' phase
+        // is counted beside it, for the log only (`PhaseSlips`).
         self.cap = self.cap.max(n);
         let lost = match (self.last.replace((entry, n)), &self.source) {
             (Some((before, _)), Source::Join { .. }) => dry_frames(entry.saturating_duration_since(before), self.rate, n, self.cap),
             _ => 0,
         };
-        if let (Source::Duplex, Some((behind, starts))) = (&self.source, self.wakes.wake(entry, n, self.rate)) {
-            counters.asio_late_wakes.fetch_add(u64::from(starts), Relaxed);
-            counters.asio_late_max.fetch_max(behind, Relaxed);
+        if let (Source::Duplex, Some((late, slipped))) = (&self.source, self.slips.wake(entry, n, self.rate)) {
+            counters.asio_phase_slips.fetch_add(u64::from(slipped), Relaxed);
+            counters.asio_late_max.fetch_max(late, Relaxed);
         }
         if lost > 0 {
             counters.gaps.fetch_add(1, Relaxed);
@@ -1030,52 +1034,106 @@ mod tests {
         assert_eq!(dry_frames(frames(1_323.0), 48_000, 970, 970), 353, "dry for what played past the buffer");
     }
 
-    /// Feed `wakes` the callbacks `blocks` gives (how many frames after its ideal entry each enters, and
-    /// its frames), from `at` frames on a clock running `ppm` fast: the late events and the furthest
-    /// behind.
-    fn late_wakes(wakes: &mut LateWakes, at: &mut f64, ppm: f64, blocks: impl IntoIterator<Item = (f64, usize)>) -> (u64, u64) {
+    /// Feed `slips` the callbacks `blocks` gives (how many frames after its ideal entry each enters, and
+    /// its frames), from `at` frames on a clock running `ppm` fast: the slips, the furthest a wake came
+    /// more than a period behind the floor, and what the old rule counted (runs of such wakes).
+    fn phase_slips(slips: &mut PhaseSlips, at: &mut f64, ppm: f64, blocks: impl IntoIterator<Item = (f64, usize)>) -> (u64, u64, u64) {
         const RATE: u32 = 48_000;
         let base = *BASE;
-        let (mut events, mut max) = (0, 0);
-        for (late, n) in blocks {
-            let entry = base + Duration::from_secs_f64((*at + late) * (1.0 + ppm / 1e6) / RATE as f64);
-            if let Some((behind, starts)) = wakes.wake(entry, n, RATE) {
-                events += u64::from(starts);
+        let (mut count, mut max, mut late_runs, mut late) = (0, 0, 0, false);
+        for (offset, n) in blocks {
+            // A second's lead, so an early first wake stays after `BASE`.
+            let entry = base + Duration::from_secs_f64((RATE as f64 + *at + offset) * (1.0 + ppm / 1e6) / RATE as f64);
+            if let Some((behind, slipped)) = slips.wake(entry, n, RATE) {
+                count += u64::from(slipped);
                 max = max.max(behind);
+                late_runs += u64::from(behind > 0 && !late);
+                late = behind > 0;
             }
             *at += n as f64;
         }
-        (events, max)
+        (count, max, late_runs)
     }
 
     static BASE: std::sync::LazyLock<Instant> = std::sync::LazyLock::new(Instant::now);
 
-    #[test]
-    fn a_clock_drifting_100_ppm_and_the_rigs_made_up_wakes_are_no_late_wake() {
-        for ppm in [100.0, -100.0] {
-            let (mut wakes, mut at) = (LateWakes::new(), 0.0);
-            // Three minutes at 64 frames.
-            let blocks = (0..3 * 60 * 750).map(|_| (0.0, 64));
-            assert_eq!(late_wakes(&mut wakes, &mut at, ppm, blocks), (0, 0), "{ppm} ppm");
+    /// The rig's driver at 64 frames: each wake's offset from its ideal entry, uniform over [-44, 48]
+    /// frames (a fixed xorshift sequence).
+    fn spread(seed: u64) -> impl FnMut() -> f64 {
+        let mut x = seed;
+        move || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            -44.0 + 92.0 * (x >> 11) as f64 / (1u64 << 53) as f64
         }
-        // The rig's driver at 64 frames: wakes 98, 78 and 8 frames apart, then on time again.
-        let (mut wakes, mut at) = (LateWakes::new(), 0.0);
-        let blocks = (0..60 * 750).map(|k| (match k % 100 { 51 => 34.0, 52 => 48.0, 53 => -8.0, _ => 0.0 }, 64));
-        assert_eq!(late_wakes(&mut wakes, &mut at, 100.0, blocks), (0, 0));
+    }
+
+    /// At 64 frames and 48 kHz a window is 375 wakes: wake 1_125 opens the fourth.
+    const WINDOW_END: usize = 1_124;
+
+    #[test]
+    fn the_rigs_spread_wakes_on_a_clock_drifting_100_ppm_are_no_slip_where_the_old_rule_counted_thousands() {
+        for ppm in [100.0, -100.0] {
+            let (mut slips, mut at, mut wake) = (PhaseSlips::new(), 0.0, spread(7));
+            // Three minutes at 64 frames.
+            let blocks = (0..3 * 60 * 750).map(|_| (wake(), 64));
+            let (count, max, late_runs) = phase_slips(&mut slips, &mut at, ppm, blocks);
+            assert_eq!(count, 0, "{ppm} ppm");
+            assert!(late_runs > 1_000, "the old rule: {late_runs} at {ppm} ppm");
+            assert!((85..=100).contains(&max), "the spread, behind the floor: {max} at {ppm} ppm");
+        }
     }
 
     #[test]
-    fn a_new_block_size_and_a_runs_start_count_no_late_wake_and_one_after_them_does() {
-        let (mut wakes, mut at) = (LateWakes::new(), 0.0);
-        // Two periods behind in the first half second: the start.
-        let start = (0..90).map(|k| (if k > 40 { 512.0 } else { 0.0 }, 256));
-        assert_eq!(late_wakes(&mut wakes, &mut at, 0.0, start), (0, 0));
-        // The driver resets to 64 frames, a 256-frame period later.
-        at += 256.0;
-        assert_eq!(late_wakes(&mut wakes, &mut at, 0.0, (0..750).map(|_| (0.0, 64))), (0, 0));
-        // Two periods behind for good, past the new size's start: one event while the floor catches up.
-        let behind = (0..750).map(|_| (128.0, 64));
-        assert_eq!(late_wakes(&mut wakes, &mut at, 0.0, behind), (1, 128));
+    fn a_lasting_move_of_half_a_period_or_more_is_one_slip_and_a_smaller_one_none() {
+        // (frames the phase moves later, the wake it moves at, slips): mid-window, on a window's last
+        // wake and on the next one's first.
+        let cases = [(128.0, 1_000, 1), (128.0, WINDOW_END, 1), (128.0, WINDOW_END + 1, 1), (64.0, 1_000, 1), (19.2, 1_000, 0)];
+        for (jump, from, slips) in cases {
+            let (mut phase, mut at, mut wake) = (PhaseSlips::new(), 0.0, spread(11));
+            let blocks = (0..20 * 750).map(|k| (wake() + if k >= from { jump } else { 0.0 }, 64));
+            assert_eq!(phase_slips(&mut phase, &mut at, 100.0, blocks).0, slips, "{jump} frames from wake {from}");
+        }
+    }
+
+    #[test]
+    fn a_stall_the_driver_makes_up_within_a_window_is_no_slip() {
+        // Two periods late, then back to back: three wakes enter at once, mid-window and across a
+        // window's end.
+        for stall in [1_000, WINDOW_END - 1, WINDOW_END] {
+            let (mut slips, mut at) = (PhaseSlips::new(), 0.0);
+            let blocks = (0..20 * 750).map(|k| (if k == stall { 128.0 } else if k == stall + 1 { 64.0 } else { 0.0 }, 64));
+            assert_eq!(phase_slips(&mut slips, &mut at, 0.0, blocks), (0, 128, 1), "from wake {stall}");
+        }
+    }
+
+    #[test]
+    fn a_runs_start_and_a_new_block_size_are_no_slip_and_a_move_after_them_is_one() {
+        let (mut slips, mut at) = (PhaseSlips::new(), 0.0);
+        // Two periods later for good from the start's middle (a window is 94 wakes at 256 frames).
+        let start = (0..375).map(|k| (if k >= 50 { 512.0 } else { 0.0 }, 256));
+        assert_eq!(phase_slips(&mut slips, &mut at, 0.0, start).0, 0);
+        // The driver resets to 64 frames, six 256-frame periods later.
+        at += 1_536.0;
+        assert_eq!(phase_slips(&mut slips, &mut at, 0.0, (0..1_500).map(|_| (0.0, 64))).0, 0);
+        // Two periods later for good, past the new size's start.
+        assert_eq!(phase_slips(&mut slips, &mut at, 0.0, (0..1_500).map(|_| (128.0, 64))).0, 1);
+    }
+
+    #[test]
+    fn a_falling_floor_and_entries_that_stand_still_or_run_back_are_no_slip() {
+        // Two periods earlier for good.
+        let (mut slips, mut at) = (PhaseSlips::new(), 0.0);
+        let blocks = (0..20 * 750).map(|k| (if k >= 1_000 { -128.0 } else { 0.0 }, 64));
+        assert_eq!(phase_slips(&mut slips, &mut at, 0.0, blocks).0, 0);
+        // Every wake at one instant, then each further before the first.
+        let mut slips = PhaseSlips::new();
+        let now = *BASE + Duration::from_secs(10);
+        for k in 0..10_000u64 {
+            let entry = if k < 5_000 { now } else { now - Duration::from_micros(k) };
+            assert!(!slips.wake(entry, 64, 48_000).is_some_and(|(_, slipped)| slipped), "wake {k}");
+        }
     }
 
     #[test]

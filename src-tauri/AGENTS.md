@@ -310,9 +310,11 @@ plugin-GUI work.
 - The dry signal steps without a ramp on an instrument installed into a live slot.
 - Two live slots on the same capture channel sum it (+6 dB).
 - An ASIO period the driver drops without its overload report is not flagged as damage (input and
-  output stay in step; the take is spliced there). `asio_late_wakes` counts it in the log only, beside a
-  missed deadline, which the host clock cannot tell from a drop (asio-sys drops the driver's sample
-  position; `callback::LateWakes`).
+  output stay in step; the take is spliced there). `asio_phase_slips` counts it in the log only, beside
+  a lasting move of the driver's phase, which the host clock cannot tell from a drop (asio-sys drops
+  the driver's sample position; `callback::PhaseSlips`). A single late wake is no signal: on the rig's
+  USB driver at 64 frames, wakes more than a period behind the best phase came ~180 times a second
+  with every fault counter 0 (2026-10-07).
 - A punch-out inside a take's last quarter-beat commits the whole bars before it, where a stop there
   rounds up (owner's call).
 - The feed's reset mirror carries no count: a WebView reload during a count-in shows no numeral until

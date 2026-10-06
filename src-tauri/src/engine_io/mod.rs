@@ -318,9 +318,11 @@ pub struct IoCounters {
     pub rt_allocs: AtomicU64,
     /// How long each output callback took (`EngineHost::block_load`).
     pub block_load: LoadHistogram,
-    /// Diagnostics. ASIO: runs of output callbacks more than a period behind the run's best phase
-    /// (`callback::LateWakes`), and the furthest behind one came, in frames (divide by the block).
-    pub asio_late_wakes: AtomicU64,
+    /// Diagnostics. ASIO: half-second windows whose earliest wake came half a period or more later
+    /// than the window before's, a lasting slip of the driver's phase (`callback::PhaseSlips`), and
+    /// the furthest past a period behind that floor a single wake came, in frames (informational: the
+    /// rig's USB driver spreads its wakes over more than a period at 64 frames).
+    pub asio_phase_slips: AtomicU64,
     pub asio_late_max: AtomicU64,
     /// Output callbacks that handed the device a sample past full scale.
     pub clipped_blocks: AtomicU64,
@@ -415,7 +417,7 @@ pub struct IoDiag {
     pub panics: u64,
     pub rt_allocs: u64,
     pub engine: lf_engine::Diag,
-    pub asio_late_wakes: u64,
+    pub asio_phase_slips: u64,
     pub asio_late_max: u64,
     pub clipped_blocks: u64,
 }
@@ -448,7 +450,7 @@ impl IoDiag {
     /// The glitch diagnostics that count, by name: not faults (no probe fails on them), but the release
     /// log and the probe show them beside the faults.
     fn diagnostics(&self) -> [(&'static str, u64); 2] {
-        [("asio_late_wakes", self.asio_late_wakes), ("clipped_blocks", self.clipped_blocks)]
+        [("asio_phase_slips", self.asio_phase_slips), ("clipped_blocks", self.clipped_blocks)]
     }
 
     /// The fault counters, then the diagnostics, that moved since `before`, as `name=delta`, with
@@ -648,7 +650,7 @@ impl Core {
             panics: c.panics.load(Relaxed),
             rt_allocs: c.rt_allocs.load(Relaxed),
             engine: self.engine_diag.load(),
-            asio_late_wakes: c.asio_late_wakes.load(Relaxed),
+            asio_phase_slips: c.asio_phase_slips.load(Relaxed),
             asio_late_max: c.asio_late_max.load(Relaxed),
             clipped_blocks: c.clipped_blocks.load(Relaxed),
         }

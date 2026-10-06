@@ -553,12 +553,12 @@ impl Probe {
             if Instant::now() >= note {
                 let (diag, now) = (self.host.diag(), self.host.block_load());
                 say(format!(
-                    "soak {:.0} s: callbacks {}, counters {}; this minute: block {}, asio_late_wakes {}, clipped_blocks {}; asio_late_max so far {}",
+                    "soak {:.0} s: callbacks {}, counters {}; this minute: block {}, asio_phase_slips {}, clipped_blocks {}; asio_late_max so far {}",
                     began.elapsed().as_secs_f64(),
                     diag.callbacks - start.callbacks,
                     moved(&diag, &start),
                     now.since(&load).text(),
-                    diag.asio_late_wakes - minute.asio_late_wakes,
+                    diag.asio_phase_slips - minute.asio_phase_slips,
                     diag.clipped_blocks - minute.clipped_blocks,
                     diag.asio_late_max
                 ));

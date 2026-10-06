@@ -144,7 +144,7 @@ blocks until the verdict, so an agent harness should run it in the background.
     0 over 26 minutes at the 40 ms setpoint; at 20 ms, 37 `share_starves` and 2 trims in two bursts
     10 min 48 s apart, so soak 25 minutes or more (a shorter run can sit between two bursts).
     Each soak minute's line carries that minute's block time and the glitch diagnostics
-    (`asio_late_wakes`, `clipped_blocks`), which no check fails on: they time a spike.
+    (`asio_phase_slips`, `clipped_blocks`), which no check fails on: they time a spike.
     On WASAPI with another app holding the microphone the input can run 0.87 %
     fast, past what the join's controller holds: `join_trims` every 3–6 s, each skipping ~25 ms of
     input (real time or an artefact: unknown). In the first ~2.5 s after a WASAPI open the join can
