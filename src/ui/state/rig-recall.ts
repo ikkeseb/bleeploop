@@ -16,6 +16,7 @@
 import type { PluginDescriptor } from '../../platform';
 import { notifyError } from '../../notify';
 import { samePluginDescriptor } from './plugin-descriptor';
+import { isPluginFormat } from './plugin-format';
 import { withAt } from './instrument-slots';
 
 // Where the record and the marker live; null turns rig recall off. A DEV native probe (`VITE_LF_PROBE`)
@@ -38,7 +39,7 @@ function isSavedPlugin(v: unknown): v is SavedPlugin {
   if (typeof v !== 'object' || v === null) return false;
   const p = v as Partial<Record<keyof SavedPlugin, unknown>>;
   return (
-    (p.format === 'clap' || p.format === 'vst3') &&
+    isPluginFormat(p.format) &&
     typeof p.path === 'string' &&
     typeof p.id === 'string' &&
     typeof p.name === 'string'

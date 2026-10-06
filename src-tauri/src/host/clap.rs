@@ -714,14 +714,15 @@ const MAX_PLUGIN_CHANNELS: i64 = 64;
 /// ones excluded); the ceiling leaves wide room above that and bounds one listing to a few MB.
 const MAX_PLUGIN_PARAMS: i64 = 1 << 16;
 
-/// A plugin-reported channel count, checked before it sizes a buffer (CLAP ports, VST3 buses).
-fn checked_plugin_channels(count: i64, bus: &str, allow_zero: bool) -> Result<u32, String> {
+/// A plugin-reported channel count, checked before it sizes a buffer (CLAP ports, VST3 buses, VST2
+/// inputs and outputs).
+pub(super) fn checked_plugin_channels(count: i64, bus: &str, allow_zero: bool) -> Result<u32, String> {
     let minimum = if allow_zero { 0 } else { 1 };
     checked_plugin_count(count, bus, "channel", minimum, MAX_PLUGIN_CHANNELS).map(|c| c as u32)
 }
 
-/// A plugin-reported parameter count, checked before it sizes a listing (CLAP and VST3).
-fn checked_plugin_params(count: i64, source: &str) -> Result<usize, String> {
+/// A plugin-reported parameter count, checked before it sizes a listing (every format).
+pub(super) fn checked_plugin_params(count: i64, source: &str) -> Result<usize, String> {
     checked_plugin_count(count, source, "parameter", 0, MAX_PLUGIN_PARAMS).map(|c| c as usize)
 }
 

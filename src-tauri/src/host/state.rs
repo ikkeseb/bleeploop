@@ -17,13 +17,14 @@ pub struct AsioDeviceInfo {
 pub struct PluginDescriptor {
     pub id: String,
     pub name: String,
-    /// "clap" | "vst3" — VST3 is P10; P9 only ever emits "clap".
+    /// "clap" | "vst3" | "vst2" (`PluginFormat::as_str`).
     pub format: String,
     pub path: String,
     /// P11 output-gain: `Some(true)` = audio EFFECT (amp-sim/FX → near-unity default), `Some(false)`
     /// = INSTRUMENT (synth → conservative default), `None` = unclassified (JS falls back to the input
-    /// bus count). Read at scan from CLAP `features()` / VST3 `subCategories` — the robust, portable
-    /// discriminator (input-bus presence alone misclassifies synths that declare an audio-in bus).
+    /// bus count). Read at scan from CLAP `features()` / VST3 `subCategories` / VST2's synth flag — the
+    /// robust, portable discriminator (input-bus presence alone misclassifies synths that declare an
+    /// audio-in bus).
     pub is_effect: Option<bool>,
 }
 
@@ -106,19 +107,30 @@ pub struct PluginFolder {
     pub exists: bool,
 }
 
-/// The scan's folders (`host/folders.rs`). Mirrors `PluginFolders` in `src/platform/host.ts`:
-/// `builtin` is every root the scan walks by itself (the fixed CLAP and VST3 roots, then the
-/// `CLAP_PATH`/`VST3_PATH` entries), read-only; `user` is the player's own list.
+/// A plugin file the scan found and this build cannot host, with why (a 32-bit plugin, a VST2
+/// shell). It is not a failed scan and is never listed in the picker.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct UnsupportedPlugin {
+    pub path: String,
+    pub reason: String,
+}
+
+/// The scan's folders (`host/folders.rs`): `builtin` is every root the scan walks by itself (the
+/// fixed CLAP and VST3 roots with the `CLAP_PATH`/`VST3_PATH` entries, then the VST2 roots),
+/// read-only; `user` is the player's own list; `unsupported` is what the last scan in this run
+/// found in them and cannot host (empty before the first scan). `src/platform/host.ts` mirrors it.
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct PluginFolders {
     pub builtin: Vec<PluginFolder>,
     pub user: Vec<PluginFolder>,
+    pub unsupported: Vec<UnsupportedPlugin>,
 }
 
-/// Shared host state managed by Tauri (`.manage()` in `lib.rs`): the WebView document epoch and the
-/// plugin folder list's locks. The plugin slots themselves live in engine mode's state
-/// (`engine_io::plugins`).
+/// Shared host state managed by Tauri (`.manage()` in `lib.rs`): the WebView document epoch, the
+/// plugin folder list's locks and the last scan's unsupported plugins. The plugin slots themselves
+/// live in engine mode's state (`engine_io::plugins`).
 #[derive(Default)]
 pub struct PluginHostState {
     /// Bumped by every `host_init` (one call per WebView document). Loads must present the current
@@ -129,6 +141,9 @@ pub struct PluginHostState {
     pub(crate) folders_write: std::sync::Mutex<()>,
     /// Up while the folder dialog is open: a second `plugin_folder_add` opens no second dialog.
     pub(crate) folder_dialog_open: std::sync::atomic::AtomicBool,
+    /// The plugins the last scan found and cannot host. Each scan replaces the list whole, while it
+    /// still holds the scan lock (`scan::scan_all`); `plugin_folders` reads it.
+    pub(crate) scan_unsupported: std::sync::Mutex<Vec<UnsupportedPlugin>>,
 }
 
 impl PluginHostState {

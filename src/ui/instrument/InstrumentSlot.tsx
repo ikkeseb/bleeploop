@@ -172,7 +172,7 @@ export function InstrumentSlot(props: { slot: 0 | 1 }) {
             ? 'scanning plugins…'
             : !engineDevice() && engineOpenFailure()
               ? 'No audio device open — see Audio Settings'
-              : 'No plugins found · the standard CLAP and VST3 folders are scanned · add your own in Audio Settings · rescan ⟳ in the command bar'}
+              : 'No plugins found · the standard CLAP, VST3 and VST2 folders are scanned · add your own in Audio Settings · rescan ⟳ in the command bar'}
         </span>
       </Show>
       {/* Params drawer (accordion). Mounted whenever a plugin is loaded (so onParamChanged tracks live

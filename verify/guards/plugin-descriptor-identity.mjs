@@ -40,6 +40,18 @@ check('same class id at distinct paths has distinct picker identities', () => {
   assert.strictEqual(samePluginDescriptor(rootCopy, vendorCopy), false);
 });
 
+check('a vst2 and a vst3 descriptor with the same path stem and id are different identities', () => {
+  const vst2 = { ...rootCopy, format: 'vst2', path: 'C:\\Program Files\\VSTPlugins\\Archetype Petrucci X.dll' };
+  const sameStem = { ...rootCopy, format: 'vst2', path: rootCopy.path.replace(/\.vst3$/, '.dll') };
+  for (const other of [vst2, sameStem]) {
+    assert.notStrictEqual(pluginDescriptorKey(rootCopy), pluginDescriptorKey(other));
+    assert.strictEqual(samePluginDescriptor(rootCopy, other), false);
+    assert.deepStrictEqual(reconcilePluginDescriptors([rootCopy, other], []), [rootCopy, other]);
+  }
+  assert.strictEqual(pluginPickerLabel(sameStem, [rootCopy, sameStem]), 'Archetype Petrucci X (vst2)');
+  assert.strictEqual(pluginPickerLabel(rootCopy, [rootCopy, sameStem]), 'Archetype Petrucci X (vst3)');
+});
+
 check('exact scan repeats collapse while distinct paths survive', () => {
   assert.deepStrictEqual(
     reconcilePluginDescriptors([rootCopy, rootCopy, vendorCopy], []),

@@ -5,6 +5,8 @@
 // here must stay PURE + Node-importable — no engine/looper/Tone/Tauri/Web Audio.
 import { validateFxStates, type FxState } from '../ui/state/fx-metadata.ts';
 import { framesPerBar } from '../ui/state/quantize.ts';
+import { isPluginFormat } from '../ui/state/plugin-format.ts';
+import type { PluginFormat } from '../platform';
 
 export type ParsedSessionTrackState = 'PLAYING' | 'STOPPED';
 
@@ -58,7 +60,7 @@ export type SessionMasterKind = 'wet-engine' | 'wet-v1' | 'dry-fallback';
 export interface ParsedSessionPlugin {
   /** 0 = slot A, 1 = slot B (session.json writes the letter). */
   slot: 0 | 1;
-  format: 'clap' | 'vst3';
+  format: PluginFormat;
   path: string;
   id: string;
   name: string;
@@ -71,7 +73,7 @@ export interface ParsedSessionPlugin {
  * slot's plugin and its tone entry. Missing means none (an export from before tone recall, a recovery,
  * a v0.1.0 web-path export). PURE — safe under Node. Throws a descriptive Error on a list that is not an
  * array, an entry that is not an object, a slot other than "A"/"B" or repeated, a format other than
- * clap/vst3, an empty or non-string path, id, name or file, and a file a track or another slot uses.
+ * clap/vst3/vst2, an empty or non-string path, id, name or file, and a file a track or another slot uses.
  * `trackFiles` are the stems' entry names (validateSession's). Unknown keys are ignored.
  */
 export function validateSessionPlugins(json: unknown, trackFiles: readonly string[] = []): ParsedSessionPlugin[] {
@@ -89,8 +91,8 @@ export function validateSessionPlugins(json: unknown, trackFiles: readonly strin
     const slot = p.slot === 'A' ? 0 : 1;
     if (slots.has(slot)) throw new Error(`session.json: slot ${p.slot} is listed twice in plugins`);
     slots.add(slot);
-    if (p.format !== 'clap' && p.format !== 'vst3') {
-      throw new Error(`session.json: plugins[${i}].format must be "clap" or "vst3", got ${JSON.stringify(p.format)}`);
+    if (!isPluginFormat(p.format)) {
+      throw new Error(`session.json: plugins[${i}].format must be "clap", "vst3" or "vst2", got ${JSON.stringify(p.format)}`);
     }
     const text = (key: 'path' | 'id' | 'name' | 'file'): string => {
       const v = p[key];

@@ -20,6 +20,7 @@ globalThis.setTimeout = (fn, _ms, ...args) => realSetTimeout(fn, 0, ...args);
 
 const FX = { id: 'probe.fx', name: 'Probe Amp', format: 'clap', path: 'C:\\probe\\amp.clap', isEffect: true };
 const SYN = { id: 'probe.syn', name: 'Probe Synth', format: 'vst3', path: 'C:\\probe\\synth.vst3', isEffect: false };
+const OLD = { id: 'probe.old', name: 'Probe Legacy', format: 'vst2', path: 'C:\\probe\\legacy.dll', isEffect: true };
 const saved = (p) => p && { format: p.format, path: p.path, id: p.id, name: p.name };
 const record = (a, b) => JSON.stringify([saved(a), saved(b)]);
 
@@ -31,7 +32,7 @@ async function launch(probe, seed) {
   globalThis.__importMetaEnv = probe === undefined ? { DEV: true } : { DEV: true, VITE_LF_PROBE: probe };
   const m = await import(`../../src/ui/state/rig-recall.ts?g=${++generation}`);
   const loads = [];
-  await m.recallRig([FX, SYN], async (slot, d) => void loads.push([slot, d.id]));
+  await m.recallRig([FX, SYN, OLD], async (slot, d) => void loads.push([slot, d.id]));
   return { m, loads };
 }
 
@@ -54,6 +55,13 @@ await check("the owner's build restores from the lf. keys", async () => {
   m.rememberSlotPlugin(1, SYN);
   assert.equal(JSON.parse(store.get('lf.rigRecall'))[1].id, 'probe.syn');
   assert.equal(store.get('lf.probe.recall-restart.rigRecall'), record(null, SYN), "the probe's record is untouched");
+});
+
+await check('a saved vst2 plugin is restored, a saved format nobody knows is not', async () => {
+  const { loads } = await launch(undefined, { 'lf.rigRecall': record(OLD, FX) });
+  assert.deepEqual(loads, [[0, 'probe.old'], [1, 'probe.fx']]);
+  const unknown = await launch(undefined, { 'lf.rigRecall': JSON.stringify([{ ...saved(OLD), format: 'au' }, saved(FX)]) });
+  assert.deepEqual(unknown.loads, [[1, 'probe.fx']], 'the entry with an unknown format is dropped, the other stays');
 });
 
 for (const [probe, other] of [['recall-restart', 'tone-recall'], ['tone-recall', 'recall-restart']]) {

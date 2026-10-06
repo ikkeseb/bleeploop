@@ -1,13 +1,19 @@
-//! P9.1 CLAP scan. `scan_one` runs in the child process (loads one bundle via clack-host's
+//! P9.1 plugin scan. `scan_one` runs in the child process (a `.clap` loads via clack-host's
 //! `PluginEntry::load` — API verified vs docs.rs/clack-host 0.1.0: the loader is `PluginEntry`, NOT
 //! `PluginBundle`, and factory enumeration needs no `Host`). `scan_all` is the parent: it walks the
-//! CLAP + VST3 search dirs, then the player's own folders (`folders.rs`), and spawns one child per bundle, so a crashy bundle can't take down the
+//! CLAP, VST3 and VST2 search dirs, then the player's own folders (`folders.rs`), and spawns one child per bundle, so a crashy bundle can't take down the
 //! host — but only for bundles whose binary changed since the last scan: `ScanCache` remembers each
-//! bundle's descriptors (or its failure) under a size + mtime fingerprint, so a launch spawns no
+//! bundle's outcome (or its failure) under a size + mtime fingerprint, so a launch spawns no
 //! foreign code at all until a plugin is installed or updated, and a hung bundle costs its 20 s
 //! timeout once, not once per launch. The picker's rescan button forces a fresh scan.
+//!
+//! A VST2 plugin is a `.dll` among other DLLs: the walk reads each one's headers (`pe.rs`, no code
+//! runs) and only a file that exports a VST2 entry becomes a bundle. A plugin this build cannot
+//! host (32-bit, a shell) is reported as unsupported, with why, beside the descriptors.
 
-use super::state::PluginDescriptor;
+use super::engine_slot::PluginFormat;
+use super::pe;
+use super::state::{PluginDescriptor, UnsupportedPlugin};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
@@ -118,7 +124,7 @@ struct Fingerprint {
 
 impl Fingerprint {
     fn of(outer: &Path) -> Option<Self> {
-        let binary = if is_vst3(outer) {
+        let binary = if PluginFormat::of_path(outer) == Some(PluginFormat::Vst3) {
             resolve_vst3_binary(outer)?
         } else {
             outer.to_path_buf()
@@ -138,17 +144,36 @@ impl Fingerprint {
     }
 }
 
+/// What a `--scan-one` child learned from one bundle, and prints as JSON: its descriptors (possibly
+/// none: a module with no loadable class), and, for a plugin this build cannot host, why not.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+pub struct ScanOutcome {
+    pub plugins: Vec<PluginDescriptor>,
+    pub unsupported: Option<String>,
+}
+
+impl ScanOutcome {
+    fn plugins(plugins: Vec<PluginDescriptor>) -> Self {
+        Self { plugins, unsupported: None }
+    }
+}
+
+/// Why a 32-bit VST2 plugin is not listed (`pe::Class::PossiblyVst32`; the walk says so, no child runs).
+pub(crate) const UNSUPPORTED_32_BIT: &str = "32-bit plugin: this build hosts 64-bit plugins only";
+/// Why a VST2 shell is not listed (the scan child says so).
+pub(crate) const UNSUPPORTED_SHELL: &str = "shell plugin (several plugins in one file) is not supported";
+
 /// What the last scan learned about one bundle at one fingerprint.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 struct CacheEntry {
     fingerprint: Fingerprint,
-    /// `Ok` = its descriptors (possibly none: a module with no loadable class); `Err` = the
-    /// bundle-side failure the scan hit. A forced rescan retries the latter.
-    outcome: Result<Vec<PluginDescriptor>, String>,
+    /// `Ok` = what its child reported; `Err` = the bundle-side failure the scan hit. A forced
+    /// rescan retries the latter.
+    outcome: Result<ScanOutcome, String>,
 }
 
 /// Bump when the entry shape or the descriptor fields change: an old file is discarded whole.
-const SCAN_CACHE_VERSION: u32 = 1;
+const SCAN_CACHE_VERSION: u32 = 2;
 
 /// The on-disk scan memory, keyed by the bundle's outer path (what the descriptor carries). Only
 /// bundles present in the current walk are written back, so removed plugins prune themselves.
@@ -205,6 +230,23 @@ struct ScanStats {
     failed: Vec<String>,
 }
 
+/// What one scan found: the plugins to list, and the files that are plugins this build cannot
+/// host, each with why.
+#[derive(Default, Debug, PartialEq, Eq)]
+struct Scanned {
+    plugins: Vec<PluginDescriptor>,
+    unsupported: Vec<UnsupportedPlugin>,
+}
+
+impl Scanned {
+    fn take(&mut self, path: &str, outcome: &ScanOutcome) {
+        self.plugins.extend(outcome.plugins.iter().cloned());
+        if let Some(reason) = &outcome.unsupported {
+            self.unsupported.push(UnsupportedPlugin { path: path.to_string(), reason: reason.clone() });
+        }
+    }
+}
+
 /// The cache-aware core of `scan_all`, with the child runner injected so the cache logic is testable
 /// without a plugin. `previous` is consulted unless `force`; the returned cache holds exactly the
 /// bundles in `files` (reused or freshly scanned), ready to be written back.
@@ -212,9 +254,9 @@ fn scan_bundles(
     files: &[PathBuf],
     previous: &ScanCache,
     force: bool,
-    mut scan: impl FnMut(&Path) -> Result<Vec<PluginDescriptor>, ScanError>,
-) -> (Vec<PluginDescriptor>, ScanCache, ScanStats) {
-    let mut ok: Vec<PluginDescriptor> = Vec::new();
+    mut scan: impl FnMut(&Path) -> Result<ScanOutcome, ScanError>,
+) -> (Scanned, ScanCache, ScanStats) {
+    let mut found = Scanned::default();
     let mut next = ScanCache {
         version: SCAN_CACHE_VERSION,
         bundles: BTreeMap::new(),
@@ -242,7 +284,7 @@ fn scan_bundles(
             None => {
                 stats.fresh += 1;
                 let outcome = match scan(path) {
-                    Ok(descs) => Ok(descs),
+                    Ok(outcome) => Ok(outcome),
                     Err(ScanError::Bundle(e)) => {
                         log::warn!("[scan] child failed for {key}: {e}");
                         Err(e)
@@ -262,7 +304,7 @@ fn scan_bundles(
                     None => {
                         // Unstat-able bundle: use the outcome, do not remember it.
                         match outcome {
-                            Ok(mut descs) => ok.append(&mut descs),
+                            Ok(outcome) => found.take(&key, &outcome),
                             Err(_) => stats.failed.push(key.clone()),
                         }
                         continue;
@@ -271,12 +313,27 @@ fn scan_bundles(
             }
         };
         match &entry.outcome {
-            Ok(descs) => ok.extend(descs.iter().cloned()),
+            Ok(outcome) => found.take(&key, outcome),
             Err(_) => stats.failed.push(key.clone()),
         }
         next.bundles.insert(key, entry);
     }
-    (ok, next, stats)
+    (found, next, stats)
+}
+
+/// One scan over `roots`: the walk, then `scan_bundles` over what it found. The walk's own verdicts
+/// (a 32-bit plugin) are made again on every scan, as a header read is all they cost; a child's
+/// (a shell) come from the cache with the bundle's entry. A root that is gone takes both with it.
+fn scan_roots(
+    roots: &[Root],
+    previous: &ScanCache,
+    force: bool,
+    scan: impl FnMut(&Path) -> Result<ScanOutcome, ScanError>,
+) -> (Scanned, ScanCache, ScanStats) {
+    let walked = find_bundles(roots);
+    let (mut found, next, stats) = scan_bundles(&walked.bundles, previous, force, scan);
+    found.unsupported.splice(0..0, walked.unsupported);
+    (found, next, stats)
 }
 
 #[cfg(test)]
@@ -457,7 +514,7 @@ mod tests {
     fn user(path: &Path) -> Root {
         Root { path: path.to_path_buf(), only: None }
     }
-    fn builtin(path: &Path, format: Format) -> Root {
+    fn builtin(path: &Path, format: PluginFormat) -> Root {
         Root { path: path.to_path_buf(), only: Some(format) }
     }
     fn sorted(mut paths: Vec<PathBuf>) -> Vec<PathBuf> {
@@ -480,7 +537,8 @@ mod tests {
         let nested_clap = scratch.file("mixed/Folder.clap/Real.clap");
 
         let found = find_bundles(&[user(&scratch.0.join("mixed"))]);
-        assert_eq!(sorted(found), sorted(vec![clap, bundle, single, nested_clap]));
+        assert_eq!(sorted(found.bundles), sorted(vec![clap, bundle, single, nested_clap]));
+        assert_eq!(found.unsupported, vec![]);
     }
 
     #[test]
@@ -490,13 +548,13 @@ mod tests {
         let single = scratch.file("root/B.vst3");
         let bundle = scratch.vst3_bundle("root/C.vst3");
         let root = scratch.0.join("root");
-        assert_eq!(find_bundles(&[builtin(&root, Format::Clap)]), vec![clap.clone()]);
+        assert_eq!(find_bundles(&[builtin(&root, PluginFormat::Clap)]).bundles, vec![clap.clone()]);
         assert_eq!(
-            sorted(find_bundles(&[builtin(&root, Format::Vst3)])),
+            sorted(find_bundles(&[builtin(&root, PluginFormat::Vst3)]).bundles),
             sorted(vec![single.clone(), bundle.clone()])
         );
         // The CLAP roots are walked first, as the scan always listed them.
-        let both = find_bundles(&[builtin(&root, Format::Clap), builtin(&root, Format::Vst3)]);
+        let both = find_bundles(&[builtin(&root, PluginFormat::Clap), builtin(&root, PluginFormat::Vst3)]).bundles;
         assert_eq!(both[0], clap);
         assert_eq!(both.len(), 3);
     }
@@ -511,14 +569,14 @@ mod tests {
         let shouted = PathBuf::from(root.to_string_lossy().to_uppercase());
         let inner = root.join("Sub");
         let roots = [
-            builtin(&root, Format::Clap),
-            builtin(&root, Format::Vst3),
+            builtin(&root, PluginFormat::Clap),
+            builtin(&root, PluginFormat::Vst3),
             user(&shouted),
             user(&inner),
         ];
-        assert_eq!(find_bundles(&roots), vec![clap.clone(), bundle.clone()]);
+        assert_eq!(find_bundles(&roots).bundles, vec![clap.clone(), bundle.clone()]);
         // First seen wins, whichever root that is.
-        let found = find_bundles(&[user(&shouted), builtin(&root, Format::Clap)]);
+        let found = find_bundles(&[user(&shouted), builtin(&root, PluginFormat::Clap)]).bundles;
         assert_eq!(found.len(), 2);
         assert!(found.iter().all(|p| p.starts_with(&shouted)), "{found:?}");
         assert!(!found.contains(&clap));
@@ -536,10 +594,10 @@ mod tests {
             user(&scratch.0.join("never-made")),
             user(&scratch.0.join("good")),
         ];
-        assert_eq!(find_bundles(&roots), vec![good]);
+        assert_eq!(find_bundles(&roots).bundles, vec![good]);
         // The bundle itself as a root is that one plugin (what a `VST3_PATH` entry naming a bundle
         // always found).
-        assert_eq!(find_bundles(&[user(&bundle)]), vec![bundle]);
+        assert_eq!(find_bundles(&[user(&bundle)]).bundles, vec![bundle]);
     }
 
     /// A directory junction: a link Windows makes without the privilege a symlink needs.
@@ -562,23 +620,252 @@ mod tests {
         let bundle_dir = scratch.0.join("real").join("Bundle.vst3");
         let alias = scratch.0.join("Alias.vst3");
         junction(&alias, &bundle_dir);
-        assert_eq!(find_bundles(&[user(&alias)]), vec![alias.clone()]);
+        assert_eq!(find_bundles(&[user(&alias)]).bundles, vec![alias.clone()]);
         // A root whose spelling hides that it lies inside a bundle.
         let inside = scratch.0.join("Inside");
         junction(&inside, &bundle_dir.join("Contents").join("x86_64-win"));
-        assert_eq!(find_bundles(&[user(&inside)]), Vec::<PathBuf>::new());
+        assert_eq!(find_bundles(&[user(&inside)]).bundles, Vec::<PathBuf>::new());
     }
 
     #[test]
     fn the_builtin_roots_are_each_formats_own_in_scan_order() {
         let roots = builtin_roots();
-        let first_vst3 = roots.iter().position(|r| r.only == Some(Format::Vst3)).unwrap();
+        let first_vst3 = roots.iter().position(|r| r.only == Some(PluginFormat::Vst3)).unwrap();
+        let first_vst2 = roots.iter().position(|r| r.only == Some(PluginFormat::Vst2)).unwrap();
         assert!(first_vst3 > 0, "the CLAP roots come first");
-        assert!(roots[..first_vst3].iter().all(|r| r.only == Some(Format::Clap)));
-        assert!(roots[first_vst3..].iter().all(|r| r.only == Some(Format::Vst3)));
+        assert!(first_vst2 > first_vst3, "the VST2 roots come last");
+        assert!(roots[..first_vst3].iter().all(|r| r.only == Some(PluginFormat::Clap)));
+        assert!(roots[first_vst3..first_vst2].iter().all(|r| r.only == Some(PluginFormat::Vst3)));
+        assert!(roots[first_vst2..].iter().all(|r| r.only == Some(PluginFormat::Vst2)));
         let common = std::env::var("CommonProgramFiles").unwrap();
         assert_eq!(roots[0].path, Path::new(&common).join("CLAP"));
         assert_eq!(roots[first_vst3].path, Path::new(&common).join("VST3"));
+        // The four fixed VST2 folders, in order, then what the registry and `VST_PATH` add.
+        let programs = std::env::var("ProgramFiles").unwrap();
+        let fixed = [
+            Path::new(&programs).join("VSTPlugins"),
+            Path::new(&programs).join("Steinberg").join("VSTPlugins"),
+            Path::new(&common).join("VST2"),
+            Path::new(&common).join("Steinberg").join("VST2"),
+        ];
+        let vst2: Vec<PathBuf> = roots[first_vst2..].iter().map(|r| r.path.clone()).collect();
+        assert_eq!(vst2[..4], fixed);
+    }
+
+    #[test]
+    fn the_registrys_vst2_folder_follows_the_fixed_ones_and_is_listed_once() {
+        let programs = std::env::var("ProgramFiles").unwrap();
+        let fixed = vst2_roots(None);
+        let added = vst2_roots(Some(r"D:\Audio\VstPlugins".to_string()));
+        assert_eq!(added[..4], fixed[..4]);
+        assert_eq!(added[4], Path::new(r"D:\Audio\VstPlugins"));
+        assert_eq!(added.len(), fixed.len() + 1);
+        // The registry naming a folder the scan walks anyway, in another case.
+        let same = Path::new(&programs).join("vstplugins").to_string_lossy().into_owned();
+        assert_eq!(vst2_roots(Some(same)), fixed);
+    }
+
+    /// A DLL the pre-filter reads as `machine`'s, exporting `names`; its path as the walk spells it.
+    fn dll(scratch: &Scratch, rel: &str, machine: u16, names: &[&str]) -> PathBuf {
+        std::fs::write(scratch.file(rel), pe::fixture::image(machine, names).bytes).unwrap();
+        rel.split('/').fold(scratch.0.clone(), |path, part| path.join(part))
+    }
+
+    fn unsupported(path: &Path, reason: &str) -> UnsupportedPlugin {
+        UnsupportedPlugin { path: path.to_string_lossy().into_owned(), reason: reason.to_string() }
+    }
+
+    #[test]
+    fn a_vst2_root_yields_only_dlls_and_only_those_that_export_an_entry() {
+        use pe::fixture::{AMD64, I386};
+        let scratch = Scratch::new("walk-vst2");
+        let plugin = dll(&scratch, "root/Vendor/Synth.dll", AMD64, &["VSTPluginMain"]);
+        let old = dll(&scratch, "root/Old.DLL", AMD64, &["main"]);
+        let narrow = dll(&scratch, "root/Narrow.dll", I386, &["VSTPluginMain"]);
+        dll(&scratch, "root/helper.dll", AMD64, &["DllGetClassObject"]);
+        dll(&scratch, "root/helper32.dll", I386, &["DllGetClassObject"]);
+        scratch.file("root/notes.dll"); // Not a PE image at all.
+        // A PE image cut short: its exports cannot be read, so its scan child decides.
+        let cut = dll(&scratch, "root/Cut.dll", AMD64, &["VSTPluginMain"]);
+        let whole = std::fs::read(&cut).unwrap();
+        std::fs::write(&cut, &whole[..whole.len() - 4]).unwrap();
+        // Other formats in a VST2 root are not this root's.
+        scratch.file("root/Other.clap");
+        scratch.file("root/Other.vst3");
+        // A directory that only looks like a DLL holds one.
+        let nested = dll(&scratch, "root/Folder.dll/Real.dll", AMD64, &["VSTPluginMain"]);
+        // A bundle's inner files are never visited, a plugin DLL among them included.
+        scratch.vst3_bundle("root/Bundle.vst3");
+        dll(&scratch, "root/Bundle.vst3/Contents/x86_64-win/Inside.dll", AMD64, &["VSTPluginMain"]);
+        dll(&scratch, "root/Bundle.vst3/Contents/Resources/Inside32.dll", I386, &["VSTPluginMain"]);
+
+        let root = scratch.0.join("root");
+        let found = find_bundles(&[builtin(&root, PluginFormat::Vst2)]);
+        assert_eq!(sorted(found.bundles), sorted(vec![plugin.clone(), old.clone(), cut.clone(), nested.clone()]));
+        assert_eq!(found.unsupported, vec![unsupported(&narrow, UNSUPPORTED_32_BIT)]);
+        // The other formats' roots never yield a DLL.
+        let others = find_bundles(&[builtin(&root, PluginFormat::Clap), builtin(&root, PluginFormat::Vst3)]);
+        assert!(others.bundles.iter().all(|p| PluginFormat::of_path(p) != Some(PluginFormat::Vst2)), "{others:?}");
+        assert_eq!(others.bundles.len(), 3);
+        assert_eq!(others.unsupported, vec![]);
+    }
+
+    #[test]
+    fn a_user_folder_yields_vst2_plugins_beside_the_other_formats() {
+        use pe::fixture::{AMD64, I386};
+        let scratch = Scratch::new("walk-user-vst2");
+        let clap = scratch.file("mine/Synth.clap");
+        let bundle = scratch.vst3_bundle("mine/Bundle.vst3");
+        let plugin = dll(&scratch, "mine/Amp.dll", AMD64, &["VSTPluginMain"]);
+        let narrow = dll(&scratch, "mine/Sub/Amp32.dll", I386, &["main"]);
+        dll(&scratch, "mine/runtime.dll", AMD64, &["malloc", "free"]);
+        dll(&scratch, "mine/Bundle.vst3/Contents/x86_64-win/Inside.dll", AMD64, &["VSTPluginMain"]);
+        let mine = scratch.0.join("mine");
+        let found = find_bundles(&[user(&mine)]);
+        assert_eq!(sorted(found.bundles), sorted(vec![clap, bundle, plugin.clone()]));
+        assert_eq!(found.unsupported, vec![unsupported(&narrow, UNSUPPORTED_32_BIT)]);
+        // A plugin (and a 32-bit one) a built-in root already met is not met again in the folder.
+        let twice = find_bundles(&[builtin(&mine, PluginFormat::Vst2), user(&mine)]);
+        assert_eq!(twice.bundles.iter().filter(|p| **p == plugin).count(), 1);
+        assert_eq!(twice.unsupported.len(), 1);
+    }
+
+    #[test]
+    fn an_unsupported_outcome_round_trips_cold_cached_and_forced() {
+        use pe::fixture::{AMD64, I386};
+        let scratch = Scratch::new("unsupported");
+        let good = dll(&scratch, "root/Good.dll", AMD64, &["VSTPluginMain"]);
+        let shell = dll(&scratch, "root/Shell.dll", AMD64, &["VSTPluginMain"]);
+        let narrow = dll(&scratch, "root/Narrow.dll", I386, &["VSTPluginMain"]);
+        let roots = [builtin(&scratch.0.join("root"), PluginFormat::Vst2)];
+        let children = AtomicUsize::new(0);
+        let scan = |p: &Path| {
+            children.fetch_add(1, Ordering::Relaxed);
+            Ok(if p == shell {
+                ScanOutcome { plugins: Vec::new(), unsupported: Some(UNSUPPORTED_SHELL.to_string()) }
+            } else {
+                ScanOutcome::plugins(vec![desc(p, "Good")])
+            })
+        };
+        // The walk's verdict first, then the children's.
+        let expected = vec![unsupported(&narrow, UNSUPPORTED_32_BIT), unsupported(&shell, UNSUPPORTED_SHELL)];
+
+        // Cold: the 32-bit file gets no child; the shell's child says what it is.
+        let (cold, cache, stats) = scan_roots(&roots, &ScanCache::default(), false, scan);
+        assert_eq!(cold.plugins, vec![desc(&good, "Good")]);
+        assert_eq!(cold.unsupported, expected);
+        assert_eq!(children.load(Ordering::Relaxed), 2);
+        assert!(stats.failed.is_empty(), "an unsupported plugin is not a failed scan");
+        assert!(!cache.bundles.contains_key(&narrow.to_string_lossy().to_string()), "the walk's verdict is not cached");
+
+        // Cached, through the file: no child, the same two reasons.
+        let file = scratch.0.join("plugin-scan.json");
+        cache.save(&file).unwrap();
+        let (cached, cache2, stats2) = scan_roots(&roots, &ScanCache::load(&file), false, scan);
+        assert_eq!(children.load(Ordering::Relaxed), 2, "a cached outcome spawns no child");
+        assert_eq!((stats2.cached, stats2.fresh), (2, 0));
+        assert_eq!(cached, cold);
+
+        // Forced: both children run again and say the same.
+        let (forced, _, stats3) = scan_roots(&roots, &cache2, true, scan);
+        assert_eq!(children.load(Ordering::Relaxed), 4);
+        assert_eq!((stats3.cached, stats3.fresh), (0, 2));
+        assert_eq!(forced, cold);
+    }
+
+    #[test]
+    fn a_removed_root_takes_its_unsupported_plugins_with_it() {
+        use pe::fixture::{AMD64, I386};
+        let scratch = Scratch::new("removed-root");
+        let kept = dll(&scratch, "kept/Good.dll", AMD64, &["VSTPluginMain"]);
+        let kept_narrow = dll(&scratch, "kept/Narrow.dll", I386, &["main"]);
+        let shell = dll(&scratch, "gone/Shell.dll", AMD64, &["VSTPluginMain"]);
+        let narrow = dll(&scratch, "gone/Narrow.dll", I386, &["VSTPluginMain"]);
+        let both = [user(&scratch.0.join("kept")), user(&scratch.0.join("gone"))];
+        let scan = |p: &Path| {
+            Ok(if p == shell {
+                ScanOutcome { plugins: Vec::new(), unsupported: Some(UNSUPPORTED_SHELL.to_string()) }
+            } else {
+                ScanOutcome::plugins(vec![desc(p, "Good")])
+            })
+        };
+        let (before, cache, _) = scan_roots(&both, &ScanCache::default(), false, scan);
+        assert_eq!(
+            before.unsupported,
+            vec![
+                unsupported(&kept_narrow, UNSUPPORTED_32_BIT),
+                unsupported(&narrow, UNSUPPORTED_32_BIT),
+                unsupported(&shell, UNSUPPORTED_SHELL),
+            ]
+        );
+        // The player removed the folder: the next scan knows neither of its two any more.
+        let (after, cache2, _) = scan_roots(&both[..1], &cache, false, scan);
+        assert_eq!(after.plugins, vec![desc(&kept, "Good")]);
+        assert_eq!(after.unsupported, vec![unsupported(&kept_narrow, UNSUPPORTED_32_BIT)]);
+        assert_eq!(cache2.bundles.len(), 1, "the shell's cached outcome went with its root");
+    }
+
+    #[test]
+    fn a_vst2_effect_is_described_by_its_names_its_id_and_its_kind() {
+        use super::super::vst2::fixture::{self, Shape};
+        use super::super::vst2::HostContext;
+        use super::super::vst2_abi::{EFF_FLAGS_CAN_REPLACING, EFF_FLAGS_IS_SYNTH, PLUG_CATEGORY_SHELL};
+        let path = r"C:\Plugins\Some Amp.dll";
+        let describe = |shape: Shape| {
+            let ctx = HostContext::new(VST2_SCAN_RATE, VST2_SCAN_BLOCK).unwrap();
+            // SAFETY: the fixture's entry is in this process and `ctx` outlives the call.
+            let outcome = fixture::with_shape(shape, || unsafe { describe_vst2(fixture::entry, &ctx, path) });
+            // What the constructor was told, and the calls the effect got.
+            (outcome, fixture::take_seen(), fixture::take_calls())
+        };
+        let vst2 = |id: &str, name: &str, is_effect: bool| PluginDescriptor {
+            id: id.to_string(),
+            name: name.to_string(),
+            format: "vst2".to_string(),
+            path: path.to_string(),
+            is_effect: Some(is_effect),
+        };
+
+        let (effect, seen, calls) = describe(Shape { unique_id: 0x0000_beef, ..Shape::default() });
+        assert_eq!(effect, Ok(ScanOutcome::plugins(vec![vst2("0000beef", "Fixture", true)])));
+        assert_eq!(seen, vec![48_000, 48_000, 512, 512], "the scan's fixed rate and block, no device");
+        assert_eq!(calls.first().map(|c| c.0), Some(0), "effOpen first");
+        assert_eq!(calls.last().map(|c| c.0), Some(1), "effClose last");
+
+        // An instrument, a high unique id, and the two name fallbacks.
+        let synth = Shape {
+            flags: EFF_FLAGS_CAN_REPLACING | EFF_FLAGS_IS_SYNTH,
+            unique_id: 0xfedc_ba98_u32 as i32,
+            effect_name: "",
+            ..Shape::default()
+        };
+        assert_eq!(describe(synth).0, Ok(ScanOutcome::plugins(vec![vst2("fedcba98", "Fixture Product", false)])));
+        let nameless = Shape { effect_name: "", product: "", unique_id: 1, ..Shape::default() };
+        assert_eq!(describe(nameless).0, Ok(ScanOutcome::plugins(vec![vst2("00000001", "Some Amp", true)])));
+
+        // A shell: no descriptor, the reason, and it is closed like any other.
+        let (shell, _, calls) = describe(Shape { category: PLUG_CATEGORY_SHELL, ..Shape::default() });
+        assert_eq!(shell, Ok(ScanOutcome { plugins: Vec::new(), unsupported: Some(UNSUPPORTED_SHELL.to_string()) }));
+        assert_eq!(calls.last().map(|c| c.0), Some(1));
+
+        // An effect the host refuses is a scan error, and nothing of it was called.
+        let (refused, _, calls) = describe(Shape { outputs: 0, ..Shape::default() });
+        assert!(refused.unwrap_err().contains("channel count 0"));
+        assert_eq!(calls, vec![]);
+    }
+
+    #[test]
+    fn a_scan_child_routes_by_format_and_refuses_any_other_file() {
+        let e = scan_one(r"C:\Plugins\readme.txt").unwrap_err();
+        assert!(e.contains("not a .clap, .vst3 or .dll plugin"), "{e}");
+        assert!(scan_one(r"C:\Plugins\no-extension").is_err());
+        // The outcome a child prints, and the parent reads back.
+        let printed = serde_json::to_value(ScanOutcome::plugins(Vec::new())).unwrap();
+        assert_eq!(printed, serde_json::json!({ "plugins": [], "unsupported": null }));
+        let shell = ScanOutcome { plugins: Vec::new(), unsupported: Some(UNSUPPORTED_SHELL.to_string()) };
+        let printed = serde_json::to_string(&shell).unwrap();
+        assert_eq!(printed, r#"{"plugins":[],"unsupported":"shell plugin (several plugins in one file) is not supported"}"#);
+        assert_eq!(serde_json::from_str::<ScanOutcome>(&printed).unwrap(), shell);
     }
 
     #[test]
@@ -593,12 +880,13 @@ mod tests {
             if p == bad {
                 Err(ScanError::Bundle("timed out".into()))
             } else {
-                Ok(vec![desc(p, "Good")])
+                Ok(ScanOutcome::plugins(vec![desc(p, "Good")]))
             }
         };
 
         // First launch: everything is scanned, the failure is remembered too.
-        let (descs, cache, stats) = scan_bundles(&files, &ScanCache::default(), false, scan);
+        let (found, cache, stats) = scan_bundles(&files, &ScanCache::default(), false, scan);
+        let descs = found.plugins;
         assert_eq!(descs.len(), 1);
         assert_eq!(children.load(Ordering::Relaxed), 2);
         assert_eq!(stats.cached, 0);
@@ -607,8 +895,8 @@ mod tests {
         assert!(cache.bundles[&bad.to_string_lossy().to_string()].outcome.is_err());
 
         // Second launch: no child runs; the same descriptors and the same failure come from memory.
-        let (descs2, cache2, stats2) = scan_bundles(&files, &cache, false, scan);
-        assert_eq!(descs2, descs);
+        let (found2, cache2, stats2) = scan_bundles(&files, &cache, false, scan);
+        assert_eq!(found2.plugins, descs);
         assert_eq!(children.load(Ordering::Relaxed), 2, "an unchanged bundle spawns no child");
         assert_eq!(stats2.cached, 2);
         assert_eq!(stats2.fresh, 0);
@@ -618,7 +906,7 @@ mod tests {
         std::fs::write(&bad, b"v2-fixed").unwrap();
         let (_, cache3, stats3) = scan_bundles(&files, &cache2, false, |p: &Path| {
             children.fetch_add(1, Ordering::Relaxed);
-            Ok(vec![desc(p, "Fixed")])
+            Ok(ScanOutcome::plugins(vec![desc(p, "Fixed")]))
         });
         assert_eq!(children.load(Ordering::Relaxed), 3);
         assert_eq!((stats3.cached, stats3.fresh), (1, 1));
@@ -628,7 +916,7 @@ mod tests {
         // The rescan button: everything is scanned again regardless of fingerprints.
         let (_, _, stats4) = scan_bundles(&files, &cache3, true, |p: &Path| {
             children.fetch_add(1, Ordering::Relaxed);
-            Ok(vec![desc(p, "Forced")])
+            Ok(ScanOutcome::plugins(vec![desc(p, "Forced")]))
         });
         assert_eq!(children.load(Ordering::Relaxed), 5);
         assert_eq!((stats4.cached, stats4.fresh), (0, 2));
@@ -639,22 +927,22 @@ mod tests {
         let scratch = Scratch::new("host");
         let a = scratch.bundle("a.clap", b"a");
         let b = scratch.bundle("b.clap", b"b");
-        let (descs, cache, stats) =
+        let (found, cache, stats) =
             scan_bundles(&[a.clone(), b.clone()], &ScanCache::default(), false, |p: &Path| {
                 if p == a {
                     Err(ScanError::Host("spawn: exe missing".into()))
                 } else {
-                    Ok(vec![desc(p, "B")])
+                    Ok(ScanOutcome::plugins(vec![desc(p, "B")]))
                 }
             });
-        assert_eq!(descs.len(), 1);
+        assert_eq!(found.plugins.len(), 1);
         assert_eq!(stats.failed, vec![a.to_string_lossy().to_string()]);
         assert!(
             !cache.bundles.contains_key(&a.to_string_lossy().to_string()),
             "a host-side failure must be retried next launch"
         );
         // `b` uninstalled: the written-back cache holds only what the walk found.
-        let (_, cache2, _) = scan_bundles(&[a.clone()], &cache, false, |p: &Path| Ok(vec![desc(p, "A")]));
+        let (_, cache2, _) = scan_bundles(&[a.clone()], &cache, false, |p: &Path| Ok(ScanOutcome::plugins(vec![desc(p, "A")])));
         assert_eq!(cache2.bundles.len(), 1);
         assert!(cache2.bundles.contains_key(&a.to_string_lossy().to_string()));
     }
@@ -665,7 +953,7 @@ mod tests {
         let bundle = scratch.bundle("x.clap", b"x");
         let path = scratch.0.join("plugin-scan.json");
         let (_, cache, _) = scan_bundles(&[bundle.clone()], &ScanCache::default(), false, |p: &Path| {
-            Ok(vec![desc(p, "X")])
+            Ok(ScanOutcome::plugins(vec![desc(p, "X")]))
         });
         cache.save(&path).unwrap();
         let loaded = ScanCache::load(&path);
@@ -688,61 +976,22 @@ mod tests {
     }
 }
 
-/// `.vst3` by extension (either form); everything else scans as CLAP.
-fn is_vst3(path: &Path) -> bool {
-    Format::of(path) == Some(Format::Vst3)
-}
-
-/// A plugin format the scan finds, by its bundle's extension. A new format is one more variant
-/// here (its extension, its standard folder and its search-path variable) and a candidate rule in
-/// `find_bundles`.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum Format {
-    Clap,
-    Vst3,
-}
-
-impl Format {
-    /// In scan order: the picker lists CLAP before VST3.
-    const ALL: [Format; 2] = [Format::Clap, Format::Vst3];
-
-    fn extension(self) -> &'static str {
-        match self {
-            Format::Clap => "clap",
-            Format::Vst3 => "vst3",
-        }
-    }
-
-    /// The format's folder under the two common-files dirs, and its `;`-separated search-path
-    /// variable.
-    fn standard_dir(self) -> (&'static str, &'static str) {
-        match self {
-            Format::Clap => ("CLAP", "CLAP_PATH"),
-            Format::Vst3 => ("VST3", "VST3_PATH"),
-        }
-    }
-
-    fn of(path: &Path) -> Option<Format> {
-        let extension = path.extension()?;
-        Format::ALL.into_iter().find(|f| extension.eq_ignore_ascii_case(f.extension()))
-    }
-}
-
 /// One folder the scan walks. `only`: the one format a built-in root yields; `None` is a folder
 /// the player added (`folders.rs`), which yields every format.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Root {
     pub(crate) path: PathBuf,
-    pub(crate) only: Option<Format>,
+    pub(crate) only: Option<PluginFormat>,
 }
 
-/// The roots the scan walks by itself, in scan order: per format, `%COMMONPROGRAMFILES%\<FORMAT>`,
+/// The roots the scan walks by itself, in scan order. CLAP, then VST3: `%COMMONPROGRAMFILES%\<FORMAT>`,
 /// `%LOCALAPPDATA%\Programs\Common\<FORMAT>`, then every `;`-separated entry of `CLAP_PATH` /
-/// `VST3_PATH`. The player's own folders come after these (`scan_all`).
+/// `VST3_PATH`. Then VST2, which has no one standard folder (`vst2_roots`). The player's own folders
+/// come after these (`scan_all`). A new format is one more variant of `PluginFormat`, its roots here
+/// and a candidate rule in `find_bundles`.
 pub(crate) fn builtin_roots() -> Vec<Root> {
     let mut roots = Vec::new();
-    for format in Format::ALL {
-        let (dir, path_var) = format.standard_dir();
+    for (format, dir, path_var) in [(PluginFormat::Clap, "CLAP", "CLAP_PATH"), (PluginFormat::Vst3, "VST3", "VST3_PATH")] {
         let mut push = |path: PathBuf| roots.push(Root { path, only: Some(format) });
         if let Ok(cpf) = std::env::var("CommonProgramFiles") {
             push(Path::new(&cpf).join(dir));
@@ -756,7 +1005,75 @@ pub(crate) fn builtin_roots() -> Vec<Root> {
             }
         }
     }
+    roots.extend(vst2_roots(registry_vst2_path()).into_iter().map(|path| Root { path, only: Some(PluginFormat::Vst2) }));
     roots
+}
+
+/// The folders VST2 installers use, in scan order: `%ProgramFiles%\VSTPlugins`,
+/// `%ProgramFiles%\Steinberg\VSTPlugins`, `%CommonProgramFiles%\VST2`,
+/// `%CommonProgramFiles%\Steinberg\VST2`, the folder the registry names (`registry`), then every
+/// `;`-separated entry of `VST_PATH`. The registry and `VST_PATH` often name one of the others: a
+/// folder is listed once.
+fn vst2_roots(registry: Option<String>) -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = Vec::new();
+    let mut push = |path: PathBuf| {
+        if !roots.iter().any(|known| known.as_os_str().eq_ignore_ascii_case(path.as_os_str())) {
+            roots.push(path);
+        }
+    };
+    if let Ok(pf) = std::env::var("ProgramFiles") {
+        push(Path::new(&pf).join("VSTPlugins"));
+        push(Path::new(&pf).join("Steinberg").join("VSTPlugins"));
+    }
+    if let Ok(cpf) = std::env::var("CommonProgramFiles") {
+        push(Path::new(&cpf).join("VST2"));
+        push(Path::new(&cpf).join("Steinberg").join("VST2"));
+    }
+    if let Some(folder) = registry {
+        push(PathBuf::from(folder));
+    }
+    if let Ok(paths) = std::env::var("VST_PATH") {
+        for p in paths.split(';').filter(|s| !s.is_empty()) {
+            push(PathBuf::from(p));
+        }
+    }
+    roots
+}
+
+/// `HKLM\SOFTWARE\VST` → `VSTPluginsPath`: the VST2 folder installers register and read. `None`
+/// when the value is not there (or is not a string).
+fn registry_vst2_path() -> Option<String> {
+    use windows::core::w;
+    use windows::Win32::System::Registry::{RegGetValueW, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ};
+    let mut buffer = [0u16; 1024];
+    let mut bytes = std::mem::size_of_val(&buffer) as u32;
+    // SAFETY: the key and value names are NUL-terminated literals; `buffer` is writable for the
+    // `bytes` passed with it, and both outlive the call.
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_LOCAL_MACHINE,
+            w!("SOFTWARE\\VST"),
+            w!("VSTPluginsPath"),
+            RRF_RT_REG_SZ,
+            None,
+            Some(buffer.as_mut_ptr().cast()),
+            Some(&mut bytes),
+        )
+    };
+    if status.is_err() {
+        return None;
+    }
+    let written = &buffer[..(bytes as usize / 2).min(buffer.len())];
+    let folder = String::from_utf16_lossy(written);
+    let folder = folder.trim_end_matches('\0').trim();
+    (!folder.is_empty()).then(|| folder.to_string())
+}
+
+/// What a walk found: the bundles to scan, and the files it already knows this build cannot host.
+#[derive(Default, Debug, PartialEq, Eq)]
+struct Walked {
+    bundles: Vec<PathBuf>,
+    unsupported: Vec<UnsupportedPlugin>,
 }
 
 /// Walk `roots` in order and collect each plugin's OUTER path, spelled as the walk met it: that
@@ -772,9 +1089,15 @@ pub(crate) fn builtin_roots() -> Vec<Root> {
 /// (e.g. Neural DSP); both yield their outer path (`resolve_vst3_binary` finds the DLL later) and
 /// the walk never descends into a bundle, whose inner DLL ends `.vst3` too. A root that lies inside
 /// a bundle yields nothing, also when it is a link into one.
-fn find_bundles(roots: &[Root]) -> Vec<PathBuf> {
-    let mut found = Vec::new();
+///
+/// A `.dll` is a VST2 candidate only by what its headers say (`pe::classify`, which loads nothing):
+/// one that exports a VST2 entry is a bundle, and so is one whose exports cannot be read (the scan
+/// child, isolated, finds out); a 32-bit one is unsupported; any other DLL is not a plugin and is
+/// passed over in silence. A DLL inside a `.vst3` bundle is never reached.
+fn find_bundles(roots: &[Root]) -> Walked {
+    let mut found = Walked::default();
     let mut seen = std::collections::HashSet::new();
+    let is_vst3 = |p: &Path| PluginFormat::of_path(p) == Some(PluginFormat::Vst3);
     for root in roots {
         // Where the root really is decides whether it lies inside a bundle: a link's own spelling
         // can hide that. Only the check uses the resolved path; what is walked and yielded stays
@@ -787,19 +1110,35 @@ fn find_bundles(roots: &[Root]) -> Vec<PathBuf> {
         while let Some(entry) = walk.next() {
             let Ok(entry) = entry else { continue };
             let path = entry.path();
-            let Some(format) = Format::of(path) else { continue };
+            let Some(format) = PluginFormat::of_path(path) else { continue };
             // The walk follows a ROOT that is a link (and reports it as a link, not a directory);
             // a link met further down is never followed, so there is nothing to skip there.
-            if format == Format::Vst3 && (entry.file_type().is_dir() || (entry.depth() == 0 && path.is_dir())) {
+            if format == PluginFormat::Vst3 && (entry.file_type().is_dir() || (entry.depth() == 0 && path.is_dir())) {
                 walk.skip_current_dir();
             }
             let wanted = root.only.is_none_or(|only| only == format);
             let candidate = match format {
-                Format::Clap => path.is_file(),
-                Format::Vst3 => true,
+                PluginFormat::Clap | PluginFormat::Vst2 => path.is_file(),
+                PluginFormat::Vst3 => true,
             };
-            if wanted && candidate && seen.insert(super::folders::path_key(path)) {
-                found.push(path.to_path_buf());
+            if !(wanted && candidate && seen.insert(super::folders::path_key(path))) {
+                continue;
+            }
+            if format != PluginFormat::Vst2 {
+                found.bundles.push(path.to_path_buf());
+                continue;
+            }
+            match pe::classify(path) {
+                pe::Class::Candidate => found.bundles.push(path.to_path_buf()),
+                pe::Class::Inconclusive(why) => {
+                    log::info!("[scan] {}: {why}; left to its scan child", path.display());
+                    found.bundles.push(path.to_path_buf());
+                }
+                pe::Class::PossiblyVst32 => found.unsupported.push(UnsupportedPlugin {
+                    path: path.to_string_lossy().into_owned(),
+                    reason: UNSUPPORTED_32_BIT.to_string(),
+                }),
+                pe::Class::NotAPlugin => {}
             }
         }
     }
@@ -818,11 +1157,7 @@ pub fn resolve_vst3_binary(path: &Path) -> Option<PathBuf> {
         if arch_dir.is_dir() {
             for entry in std::fs::read_dir(&arch_dir).ok()?.filter_map(|e| e.ok()) {
                 let p = entry.path();
-                let is_vst3 = p
-                    .extension()
-                    .map(|e| e.eq_ignore_ascii_case("vst3"))
-                    .unwrap_or(false);
-                if is_vst3 && p.is_file() {
+                if PluginFormat::of_path(&p) == Some(PluginFormat::Vst3) && p.is_file() {
                     return Some(p);
                 }
             }
@@ -831,14 +1166,73 @@ pub fn resolve_vst3_binary(path: &Path) -> Option<PathBuf> {
     None
 }
 
-/// CHILD side: load ONE plugin (`.clap` OR `.vst3`) and return its exported descriptors. Routes
-/// by extension; both forms run in the throwaway `--scan-one` child process for crash isolation.
-pub fn scan_one(path: &str) -> Result<Vec<PluginDescriptor>, String> {
-    if is_vst3(Path::new(path)) {
-        scan_one_vst3(path)
-    } else {
-        scan_one_clap(path)
+/// CHILD side: load ONE plugin (`.clap`, `.vst3` or a VST2 `.dll`) and return what it holds. Routes
+/// by format (`PluginFormat::of_path`); every one runs in the throwaway `--scan-one` child process
+/// for crash isolation.
+pub fn scan_one(path: &str) -> Result<ScanOutcome, String> {
+    match PluginFormat::of_path(Path::new(path)) {
+        Some(PluginFormat::Clap) => scan_one_clap(path).map(ScanOutcome::plugins),
+        Some(PluginFormat::Vst3) => scan_one_vst3(path).map(ScanOutcome::plugins),
+        Some(PluginFormat::Vst2) => scan_one_vst2(path),
+        None => Err(format!("{path}: not a .clap, .vst3 or .dll plugin")),
     }
+}
+
+/// What the scan tells a VST2 plugin its host runs at: no device is open, and none is needed.
+const VST2_SCAN_RATE: f64 = 48_000.0;
+const VST2_SCAN_BLOCK: i32 = 512;
+
+/// CHILD side: load ONE VST2 `.dll`, open its effect and describe it. No `FreeLibrary` and the
+/// host context is never freed: the child process exits right after printing, and a plugin that
+/// started a thread of its own may still call the host.
+fn scan_one_vst2(path: &str) -> Result<ScanOutcome, String> {
+    use super::vst2::{HostContext, Vst2Module};
+    let module = Vst2Module::load(Path::new(path))?;
+    let ctx = HostContext::new(VST2_SCAN_RATE, VST2_SCAN_BLOCK)?;
+    // SAFETY: the entry of the module just loaded, which is leaked below with the context. It runs
+    // the plugin's foreign code: accepted because this is the throwaway `--scan-one` child process
+    // (same isolation as the CLAP and VST3 scans).
+    let outcome = unsafe { describe_vst2(module.entry(), &ctx, path) };
+    module.leak();
+    std::mem::forget(ctx);
+    outcome
+}
+
+/// Open one effect through `entry` and describe it: its name from `effGetEffectName`, else
+/// `effGetProductString`, else the file's stem; its `id` the effect's unique id as 8 hex digits. A
+/// shell (one file, several plugins) yields no descriptor and says so. The effect is closed again.
+///
+/// # Safety
+/// As `vst2::open_effect`: `entry` is a VST2 entry whose module stays loaded, and the caller keeps
+/// `ctx` alive for as long as the plugin may call the host.
+unsafe fn describe_vst2(
+    entry: super::vst2_abi::EntryFn,
+    ctx: &std::sync::Arc<super::vst2::HostContext>,
+    path: &str,
+) -> Result<ScanOutcome, String> {
+    use super::vst2_abi::{EFF_GET_EFFECT_NAME, EFF_GET_PLUG_CATEGORY, EFF_GET_PRODUCT_STRING, PLUG_CATEGORY_SHELL};
+    // SAFETY: the caller's contract.
+    let effect = unsafe { super::vst2::open_effect(entry, ctx) }.map_err(|e| e.to_string())?;
+    let info = *effect.info();
+    // SAFETY: the thread that opened the effect; the category takes no pointer, the names a buffer
+    // `Vst2Effect::string` provides.
+    let (category, name) = unsafe {
+        let category = effect.dispatch(EFF_GET_PLUG_CATEGORY, 0, 0, std::ptr::null_mut(), 0.0);
+        let name = effect.string(EFF_GET_EFFECT_NAME, 0).or_else(|| effect.string(EFF_GET_PRODUCT_STRING, 0));
+        effect.close();
+        (category, name)
+    };
+    if category == PLUG_CATEGORY_SHELL {
+        return Ok(ScanOutcome { plugins: Vec::new(), unsupported: Some(UNSUPPORTED_SHELL.to_string()) });
+    }
+    let stem = || Path::new(path).file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    Ok(ScanOutcome::plugins(vec![PluginDescriptor {
+        id: format!("{:08x}", info.unique_id as u32),
+        name: name.unwrap_or_else(stem),
+        format: PluginFormat::Vst2.as_str().to_string(),
+        path: path.to_string(),
+        is_effect: Some(!info.is_synth()),
+    }]))
 }
 
 /// CHILD side: load ONE `.clap` and return its exported descriptors.
@@ -876,7 +1270,7 @@ fn scan_one_clap(path: &str) -> Result<Vec<PluginDescriptor>, String> {
             PluginDescriptor {
                 id: cstr_owned(d.id()),
                 name: cstr_owned(d.name()),
-                format: "clap".to_string(),
+                format: PluginFormat::Clap.as_str().to_string(),
                 path: path.to_string(),
                 is_effect,
             }
@@ -979,7 +1373,7 @@ fn scan_one_vst3(path: &str) -> Result<Vec<PluginDescriptor>, String> {
             out.push(PluginDescriptor {
                 id: tuid_to_hex(&cid),
                 name,
-                format: "vst3".to_string(),
+                format: PluginFormat::Vst3.as_str().to_string(),
                 path: path.to_string(),
                 is_effect,
             });
@@ -1138,12 +1532,15 @@ static SCAN_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// (unless `force`), spawn `app.exe --scan-one <path>` for the rest, aggregate, write the cache
 /// back. A bundle whose child exits non-zero (handled error OR hard crash), times out, or whose
 /// stdout doesn't parse is logged as `failed` and remembered as such; the parent always survives.
-/// `cache_path` None (no app data dir) = scan everything, remember nothing. Emits the P9.1 gate
-/// diag in debug builds.
+/// `cache_path` None (no app data dir) = scan everything, remember nothing. The plugins this build
+/// cannot host (path and why) replace `unsupported`, the host state's list, before the scan gives
+/// way to the next one: the descriptors returned and that list are one scan's, published together.
+/// Emits the P9.1 gate diag in debug builds.
 pub fn scan_all(
     cache_path: Option<&Path>,
     folders_path: Option<&Path>,
     force: bool,
+    unsupported: &std::sync::Mutex<Vec<UnsupportedPlugin>>,
 ) -> Result<Vec<PluginDescriptor>, String> {
     let _scan = SCAN_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let started = Instant::now();
@@ -1155,15 +1552,13 @@ pub fn scan_all(
         Some(Err(e)) => log::warn!("[scan] plugin folder list unusable ({e}); scanning the built-in folders only"),
         None => {}
     }
-    let files = find_bundles(&roots);
     let previous = match cache_path {
         Some(p) if !force => ScanCache::load(p),
         _ => ScanCache::default(),
     };
-    let (ok, next, stats) = scan_bundles(&files, &previous, force, |path| {
+    let (found, next, stats) = scan_roots(&roots, &previous, force, |path| {
         let stdout = scan_one_child(&exe, path, SCAN_CHILD_TIMEOUT)?;
-        serde_json::from_slice::<Vec<PluginDescriptor>>(&stdout)
-            .map_err(|e| ScanError::Bundle(format!("parse failed: {e}")))
+        serde_json::from_slice::<ScanOutcome>(&stdout).map_err(|e| ScanError::Bundle(format!("parse failed: {e}")))
     });
     if let Some(p) = cache_path {
         if let Err(e) = next.save(p) {
@@ -1172,19 +1567,23 @@ pub fn scan_all(
     }
     let elapsed_ms = started.elapsed().as_millis();
     log::info!(
-        "[scan] {} bundle(s): {} from cache, {} scanned{}, {} failed, {} plugin(s), {elapsed_ms} ms",
+        "[scan] {} bundle(s): {} from cache, {} scanned{}, {} failed, {} unsupported, {} plugin(s), {elapsed_ms} ms",
         stats.scanned,
         stats.cached,
         stats.fresh,
         if force { " (forced)" } else { "" },
         stats.failed.len(),
-        ok.len()
+        found.unsupported.len(),
+        found.plugins.len()
     );
     if !stats.failed.is_empty() {
         log::warn!(
             "[scan] not listed (rescan from the picker to retry): {}",
             stats.failed.join("; ")
         );
+    }
+    for plugin in &found.unsupported {
+        log::info!("[scan] not listed: {}: {}", plugin.path, plugin.reason);
     }
     if cfg!(debug_assertions) {
         let diag = serde_json::json!({
@@ -1194,10 +1593,13 @@ pub fn scan_all(
             "fresh": stats.fresh,
             "forced": force,
             "elapsed_ms": elapsed_ms as u64,
-            "ok": ok.len(),
+            "ok": found.plugins.len(),
             "failed": stats.failed,
+            "unsupported": found.unsupported.len(),
         });
         println!("[diag] {diag}");
     }
-    Ok(ok)
+    // Still under the scan lock: a later scan cannot publish before this one.
+    *unsupported.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = found.unsupported;
+    Ok(found.plugins)
 }

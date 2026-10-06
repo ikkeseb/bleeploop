@@ -73,7 +73,7 @@ await probe(async ({ open }) => {
       await page.waitForFunction(() => document.querySelector('[aria-label="Rescan plugins"]')?.disabled === false);
       await page.evaluate(async () => {
       const slots = await import('/src/ui/state/instrument-slots.ts');
-      slots.setSlotPlugins([{ id: 'layout-fixture', name: 'Archetype Petrucci', format: 'VST3', path: 'layout-fixture', isEffect: true }, null]);
+      slots.setSlotPlugins([{ id: 'layout-fixture', name: 'Archetype Petrucci', format: 'vst3', path: 'layout-fixture', isEffect: true }, null]);
       if (window.__lf.slotPlugins()[0]?.id !== 'layout-fixture') throw new Error('Restart Vite to avoid duplicate HMR module state');
       });
       await page.getByRole('button', { name: 'Live input for slot 1', exact: true, pressed: false }).waitFor();

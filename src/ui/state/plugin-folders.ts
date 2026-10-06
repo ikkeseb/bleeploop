@@ -9,7 +9,7 @@ import { platform, type PluginFolders } from '../../platform';
 import { notifyError } from '../../notify';
 import { scanForPlugins } from './instrument';
 
-const [pluginFolders, setPluginFolders] = createSignal<PluginFolders>({ builtin: [], user: [] });
+const [pluginFolders, setPluginFolders] = createSignal<PluginFolders>({ builtin: [], user: [], unsupported: [] });
 // An add (its dialog open) or a remove in flight: the section's buttons wait for it.
 const [pluginFoldersBusy, setPluginFoldersBusy] = createSignal(false);
 

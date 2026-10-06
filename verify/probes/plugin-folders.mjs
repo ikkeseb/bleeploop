@@ -12,6 +12,10 @@
  * - a remove sends the folder's exact path, shows the answered list and scans again;
  * - a cancelled dialog (the host answers null) changes nothing and scans nothing;
  * - a refused add shows a toast and logs the error; the list stays;
+ * - the plugins the last scan found and cannot host (`unsupported`): none renders nothing; two show the
+ *   summary line `2 plugins found but not supported`, each file name and reason, the full path as the
+ *   line's title, without widening the panel; the list is read again after each scan that ends (a forced
+ *   rescan here), so one entry says `1 plugin`, and an empty answer removes the block;
  * - while a scan runs, `Add folder…` is disabled; an add that still completes during a scan held open
  *   (the scan walked the folders it started with) is followed by ONE more scan, and the picker ends
  *   on that scan's result.
@@ -38,6 +42,8 @@ const LONG = { path: `D:\\${'A very long folder name\\'.repeat(14)}Plugins`, exi
 const ADDED = { path: 'E:\\Amp Sims', exists: true };
 const LATE_FOLDER = { path: 'F:\\Late', exists: true };
 const STALE_FOLDER = { path: 'G:\\Stale', exists: true };
+const OLD_DLL = { path: 'C:\\Program Files\\VSTPlugins\\Old Amp.dll', reason: 'a 32-bit plugin: this build hosts 64-bit only' };
+const SHELL_DLL = { path: 'D:\\Plugins\\Waves\\WaveShell1-VST 14.0_x64.dll', reason: `a shell plugin that bundles many: ${'it lists several sub-plugins, '.repeat(8)}`.trim() };
 const empty = { state: 'Empty', length: 0, armed: false, autoArmed: false, canUndo: false, canReverse: false, reversed: false, stopAt: null, fading: false, retakePass: 0 };
 
 /** The engine fake on, and a plugin host that is there (its replies scripted in `boot`). */
@@ -53,7 +59,7 @@ async function engineInit(page) {
 
 /**
  * Wait for the engine boot, then script the host (`window.__folders`): `lists` is what it holds,
- * `plugins` what a scan finds (read when the scan STARTS), `nextAdd` what the dialog's add does (a
+ * `plugins` what a scan finds (read when the scan STARTS), `unsupportedAfterScan` what the host's list says once a scan ends (undefined: unchanged), `nextAdd` what the dialog's add does (a
  * folder, null for cancel, a string for a refusal), `gate` a promise a scan waits on before it
  * answers, `calls` everything the page asked for.
  */
@@ -92,6 +98,7 @@ async function boot(page, script) {
       state.calls.push(`scan:${force}`);
       const found = [...state.plugins]; // what the folders held when this scan started
       if (state.gate) await state.gate;
+      if (state.unsupportedAfterScan) state.lists = { ...state.lists, unsupported: state.unsupportedAfterScan };
       return found;
     };
     await instrument.scanForPlugins();
@@ -110,7 +117,7 @@ async function boot(page, script) {
 
 await probe(async ({ open }) => {
   const { page, consoleErrors } = await open({ viewport: { width: 1280, height: 800 }, init: engineInit });
-  await boot(page, { lists: { builtin: BUILTIN, user: [OWN, LONG] }, plugins: [AMP] });
+  await boot(page, { lists: { builtin: BUILTIN, user: [OWN, LONG], unsupported: [] }, plugins: [AMP] });
 
   const section = page.getByRole('group', { name: 'Plugin folders', exact: true });
   const addButton = section.getByRole('button', { name: 'Add folder…', exact: true });
@@ -177,7 +184,7 @@ await probe(async ({ open }) => {
   await idle();
   console.log('add', JSON.stringify(await calls()));
   assert.deepEqual(await rows(), listed([OWN, LONG, ADDED]), 'the added folder is listed');
-  assert.deepEqual(await calls(), ['add(0)', 'scan:false'], 'the add passes no path, and one scan (not forced) follows');
+  assert.deepEqual(await calls(), ['add(0)', 'scan:false', 'folders'], 'the add passes no path, one scan (not forced) follows, and its end reads the folders again');
   assert.deepEqual(await picker(), ['Probe Amp Sim (vst3)', 'Found In Folder (clap)'], 'the picker lists what the scan found there');
 
   // ── Remove ──────────────────────────────────────────────────────────────────────────────────────────
@@ -187,7 +194,7 @@ await probe(async ({ open }) => {
   await idle();
   console.log('remove', JSON.stringify(await calls()));
   assert.deepEqual(await rows(), listed([OWN, LONG]), 'the removed folder is gone from the list');
-  assert.deepEqual(await calls(), [`remove:${ADDED.path}`, 'scan:false'], 'the remove names the exact path, and one scan follows');
+  assert.deepEqual(await calls(), [`remove:${ADDED.path}`, 'scan:false', 'folders'], 'the remove names the exact path, and one scan follows (then the read of the folders)');
   assert.deepEqual(await picker(), ['Probe Amp Sim (vst3)'], 'the picker drops what was only in that folder');
 
   // ── Cancel: the dialog answers nothing ──────────────────────────────────────────────────────────────
@@ -244,7 +251,7 @@ await probe(async ({ open }) => {
   assert.deepEqual(during.waiting.calls, ['scan:false', 'add(0)'], 'no second scan starts while the first runs');
   assert.ok(during.waiting.scanning);
   assert.ok(during.waiting.listed.includes(LATE_FOLDER.path), 'the folder is listed as soon as the host answers');
-  assert.deepEqual(during.calls, ['scan:false', 'add(0)', 'scan:false'], 'ONE follow-up scan runs once the held one ends');
+  assert.deepEqual(during.calls, ['scan:false', 'add(0)', 'scan:false', 'folders'], 'ONE follow-up scan runs once the held one ends, and the folders are read once after both');
   assert.equal(during.scanning, false);
   assert.deepEqual(during.found, ['Probe Amp Sim', 'Late Arrival'], 'the result is the scan that started after the add');
   assert.deepEqual(await picker(), ['Probe Amp Sim (vst3)', 'Late Arrival (vst3)'], 'and the picker shows it');
@@ -257,17 +264,23 @@ await probe(async ({ open }) => {
     const { platform } = await import('/src/platform/index.ts');
     const folders = await import('/src/ui/state/plugin-folders.ts');
     const read = platform.pluginHost.pluginFolders;
-    let answer;
+    const answers = []; // the scan the add starts reads the folders at its end too
     platform.pluginHost.pluginFolders = async () => {
       const old = state.lists; // what the list was when the read was made
-      await new Promise((resolve) => (answer = resolve));
+      await new Promise((resolve) => answers.push(resolve));
       return old;
     };
     const reading = folders.refreshPluginFolders();
     state.nextAdd = { folder: STALE_FOLDER, plugins: state.plugins };
     await folders.addPluginFolder();
-    answer();
+    // The newer reads answer first and the old one LAST: answered in the order they were asked, a
+    // newer read would land after it and hide a stale answer that got through.
+    await new Promise((r) => setTimeout(r, 30));
+    for (const answer of answers.slice(1)) answer();
+    await new Promise((r) => setTimeout(r, 30));
+    answers[0]();
     await reading;
+    await new Promise((r) => setTimeout(r, 30));
     platform.pluginHost.pluginFolders = read;
     return folders.pluginFolders().user.map((f) => f.path);
   }, { STALE_FOLDER });
@@ -289,7 +302,58 @@ await probe(async ({ open }) => {
     return [...state.calls];
   });
   console.log('burst', JSON.stringify(burst));
-  assert.deepEqual(burst, ['scan:false', 'scan:true'], 'three requests during a scan: one follow-up, forced');
+  assert.deepEqual(burst, ['scan:false', 'scan:true', 'folders'], 'three requests during a scan: one follow-up, forced (and one read of the folders at the end)');
+
+  // ── The plugins the scan cannot host ────────────────────────────────────────────────────────────────
+  const unsupported = section.locator('.audio-settings__unsupported');
+  const summary = unsupported.locator('.audio-settings__unsupported-summary');
+  const shown = () => unsupported.locator('.audio-settings__unsupported-item').evaluateAll((items) => items.map((li) => ({
+    file: li.querySelector('.audio-settings__unsupported-file').textContent,
+    reason: li.querySelector('.audio-settings__unsupported-reason').textContent,
+    title: li.title,
+  })));
+  const rescan = async (answer) => {
+    await page.evaluate((answer) => (window.__folders.unsupportedAfterScan = answer), answer);
+    await clearCalls();
+    // The command bar's rescan sits behind the settings backdrop: the state module takes its request.
+    await page.evaluate(async () => (await import('/src/ui/state/instrument.ts')).scanForPlugins({ force: true }));
+    await idle();
+  };
+  assert.equal(await unsupported.count(), 0, 'an empty list renders nothing');
+  assert.ok(!(await section.textContent()).includes('not supported'), 'not even the summary');
+
+  await rescan([OLD_DLL, SHELL_DLL]);
+  await summary.waitFor();
+  console.log('unsupported', JSON.stringify({ summary: await summary.textContent(), items: await shown(), calls: await calls() }));
+  assert.equal(await summary.textContent(), '2 plugins found but not supported', 'the scan that ended refreshed the list');
+  assert.ok((await calls()).includes('folders'), 'by reading the folders again');
+  assert.deepEqual(await shown(), [OLD_DLL, SHELL_DLL].map((u) => ({ file: u.path.split('\\').pop(), reason: u.reason, title: u.path })), 'file name, reason, full path as the title');
+  const wide = await section.evaluate((group) => {
+    const panel = group.closest('.audio-settings');
+    const width = () => Math.round(panel.getBoundingClientRect().width);
+    const box = panel.getBoundingClientRect();
+    const reasons = [...group.querySelectorAll('.audio-settings__unsupported-reason')];
+    const shown = { panel: width(), cut: reasons.some((r) => r.scrollWidth > r.clientWidth), inside: reasons.every((r) => r.getBoundingClientRect().right <= box.right) };
+    const block = group.querySelector('.audio-settings__unsupported');
+    block.style.display = 'none';
+    const without = width();
+    block.style.display = '';
+    return { ...shown, without };
+  });
+  console.log('unsupported fit', JSON.stringify(wide));
+  assert.ok(wide.cut && wide.inside, 'a long reason is cut inside the panel');
+  assert.equal(wide.panel, wide.without, 'and does not widen it');
+  await section.screenshot({ path: 'logs/plugin-folders/unsupported.png' });
+
+  await rescan([OLD_DLL]);
+  await page.waitForFunction(() => document.querySelectorAll('.audio-settings__unsupported-item').length === 1);
+  assert.equal(await summary.textContent(), '1 plugin found but not supported', 'one entry says plugin, not plugins');
+  assert.deepEqual((await shown()).map((u) => u.file), ['Old Amp.dll']);
+
+  await rescan([]);
+  await unsupported.waitFor({ state: 'detached' });
+  assert.ok(!(await section.textContent()).includes('not supported'), 'an empty answer removes the block');
+  assert.deepEqual(await rows(), listed([OWN, LONG, LATE_FOLDER, STALE_FOLDER]), 'the folder rows are as they were');
 
   assert.equal(consoleErrors.length, 1, 'no console errors beyond the refused add');
 });

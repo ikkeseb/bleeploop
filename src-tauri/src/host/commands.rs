@@ -39,13 +39,15 @@ pub async fn host_init(
     log::info!("[plugin_host] host_init: sample_rate={sample_rate} frontend_epoch={frontend_epoch}");
     Ok(frontend_epoch)
 }
-/// P9.1: hand-rolled out-of-process `walkdir` scan of the CLAP + VST3 search paths and the player's
-/// own folders (`plugin-folders.json`, `host/folders.rs`). Each bundle is
+/// P9.1: hand-rolled out-of-process `walkdir` scan of the CLAP, VST3 and VST2 search paths and the
+/// player's own folders (`plugin-folders.json`, `host/folders.rs`). Each bundle is
 /// loaded in a short-lived `--scan-one` child process (foreign entry-init code can crash and
 /// `catch_unwind` can't contain a C abort — only a process boundary makes a bad bundle survivable),
 /// unless the scan cache under the app's local data dir (`plugin-scan.json`) already knows that
 /// binary; `force` (the picker's rescan button) bypasses and rewrites it. One scan runs at a time
-/// (`scan::scan_all`), on a blocking thread. Emits the gate diag in debug builds.
+/// (`scan::scan_all`), on a blocking thread. The plugins it found and cannot host (32-bit, a VST2
+/// shell) go to the host state with the scan, for the next `plugin_folders`. Emits the gate diag in
+/// debug builds.
 #[tauri::command]
 pub async fn plugin_scan(app: tauri::AppHandle, force: bool) -> Result<Vec<PluginDescriptor>, String> {
     #[cfg(windows)]
@@ -61,7 +63,8 @@ pub async fn plugin_scan(app: tauri::AppHandle, force: bool) -> Result<Vec<Plugi
         tauri::async_runtime::spawn_blocking(move || {
             let cache_path = data_dir.as_ref().map(|dir| dir.join("plugin-scan.json"));
             let folders_path = data_dir.as_ref().map(|dir| dir.join(FOLDERS_FILE));
-            super::scan::scan_all(cache_path.as_deref(), folders_path.as_deref(), force)
+            let state = app.state::<PluginHostState>();
+            super::scan::scan_all(cache_path.as_deref(), folders_path.as_deref(), force, &state.scan_unsupported)
         })
         .await
         .map_err(|e| format!("plugin scan task: {e}"))?
@@ -87,18 +90,30 @@ fn folders_file(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
     Ok(dir.join(FOLDERS_FILE))
 }
 
+/// The folder list as Audio Settings shows it, with what the last scan could not host.
+#[cfg(windows)]
+fn folders_view(state: &PluginHostState, user: &[String]) -> PluginFolders {
+    let unsupported = state.scan_unsupported.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+    super::folders::view(user, unsupported)
+}
+
 /// The folders the scan walks: its built-in roots (read-only) and the player's own
-/// (`host/folders.rs`). An `Err` when the stored list cannot be read; it is then left as it is.
+/// (`host/folders.rs`), and the plugins the last scan found in them and cannot host, each with why:
+/// one call after a `plugin_scan` describes that scan. An `Err` when the stored list cannot be read;
+/// it is then left as it is.
 #[tauri::command]
-pub async fn plugin_folders(app: tauri::AppHandle) -> Result<PluginFolders, String> {
+pub async fn plugin_folders(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, PluginHostState>,
+) -> Result<PluginFolders, String> {
     #[cfg(windows)]
     {
         let user = super::folders::load(&folders_file(&app)?)?;
-        Ok(super::folders::view(&user))
+        Ok(folders_view(&state, &user))
     }
     #[cfg(not(windows))]
     {
-        let _ = app;
+        let _ = (app, state);
         Err("plugin_folders is Windows-only".to_string())
     }
 }
@@ -138,7 +153,7 @@ pub async fn plugin_folder_add(
         let Some(folder) = picked? else { return Ok(None) };
         let user = super::folders::add(&state.folders_write, &file, &folder)?;
         log::info!("[scan] plugin folder added: {folder}");
-        Ok(Some(super::folders::view(&user)))
+        Ok(Some(folders_view(&state, &user)))
     }
     #[cfg(not(windows))]
     {
@@ -158,7 +173,7 @@ pub async fn plugin_folder_remove(
     {
         let user = super::folders::remove(&state.folders_write, &folders_file(&app)?, &path)?;
         log::info!("[scan] plugin folder removed: {path}");
-        Ok(super::folders::view(&user))
+        Ok(folders_view(&state, &user))
     }
     #[cfg(not(windows))]
     {
@@ -519,10 +534,12 @@ pub fn plugin_asio_device_info() -> Option<AsioDriverInfo> {
     #[cfg(not(all(windows, feature = "asio")))]
     None
 }
-/// Entry point for the `--scan-one <path>` child process (P9.1). Loads ONE bundle, prints its
-/// descriptors as a JSON array on stdout, and exits 0. A handled error → stderr + non-zero exit; a
-/// hard crash in the bundle's foreign code dies here (the child), never the host. Windows-only —
-/// `lib.rs::run()` dispatches `--scan-one` to this before Tauri ever starts.
+/// Entry point for the `--scan-one <path>` child process (P9.1). Loads ONE bundle of any format,
+/// prints its outcome as one JSON object on stdout (`scan::ScanOutcome`: `plugins`, its
+/// descriptors, and `unsupported`, null or why this build cannot host it), and exits 0. A handled
+/// error → stderr + non-zero exit; a hard crash in the bundle's foreign code dies here (the child),
+/// never the host. Windows-only — `lib.rs::run()` dispatches `--scan-one` to this before Tauri ever
+/// starts.
 #[cfg(windows)]
 pub fn scan_one_main(path: &str) -> i32 {
     // Wait until the parent has this process in its kill-on-close Job (no gate when run by hand).
@@ -531,7 +548,7 @@ pub fn scan_one_main(path: &str) -> i32 {
         return 3;
     }
     match super::scan::scan_one(path) {
-        Ok(descs) => match serde_json::to_string(&descs) {
+        Ok(outcome) => match serde_json::to_string(&outcome) {
             Ok(j) => {
                 println!("{j}");
                 0

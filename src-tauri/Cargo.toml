@@ -74,6 +74,8 @@ windows = { version = "0.61", features = [
     # The plugin folder dialog (host/folders.rs): IFileOpenDialog.
     "Win32_UI_Shell",
     "Win32_UI_Shell_Common",
+    # The VST2 scan root an installer registered (host/scan.rs): HKLM\SOFTWARE\VST, VSTPluginsPath.
+    "Win32_System_Registry",
 ] }
 # Pin windows-core to 0.61 to unify the graph. cpal 0.18.1 accepts windows + windows-core in the
 # range ">=0.61,<=0.62"; left alone, cargo greedily picks windows-core 0.62 for cpal's *direct* dep

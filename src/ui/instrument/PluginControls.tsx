@@ -54,8 +54,8 @@ export function PluginBar(props: {
     const wantOpen = !editorOpen();
     // Same plugin FILE in both slots shares one GUI runtime whose message thread binds to the FIRST
     // slot that opens an editor — a second open from the other slot (concurrent OR after close) wedges
-    // inside the plugin, and killing the frozen window kills the app. Refuse it up front. (Mixed
-    // CLAP+VST3 of the same plugin = two modules = fine.)
+    // inside the plugin, and killing the frozen window kills the app. Refuse it up front. (Another
+    // format of the plugin, e.g. CLAP and VST3, = two modules = fine.)
     if (wantOpen) {
       const owner = editorAffinityBlocker(props.slot, props.descriptor.path);
       if (owner) {
@@ -64,7 +64,7 @@ export function PluginBar(props: {
         notifyError(
           'Same plugin file in both slots',
           `Its GUI can only serve one slot's editor per load. ${owner} opened it first. ` +
-            'Load the plugin’s other format (CLAP vs VST3) in this slot for a second editor.',
+            'Load another format of the plugin in this slot for a second editor.',
         );
         return;
       }

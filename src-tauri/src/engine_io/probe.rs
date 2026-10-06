@@ -238,15 +238,8 @@ struct PluginSpec {
 
 impl PluginSpec {
     fn scan(path: &str) -> Result<PluginSpec, String> {
-        let lower = path.to_ascii_lowercase();
-        let format = if lower.ends_with(".vst3") {
-            PluginFormat::Vst3
-        } else if lower.ends_with(".clap") {
-            PluginFormat::Clap
-        } else {
-            return Err(format!("{path}: not a .vst3 or .clap"));
-        };
-        let first = crate::host::scan_one(path)?.into_iter().next().ok_or_else(|| format!("{path}: no plugin inside"))?;
+        let format = PluginFormat::of_path(std::path::Path::new(path)).ok_or_else(|| format!("{path}: not a .clap, .vst3 or .dll"))?;
+        let first = crate::host::scan_one(path)?.plugins.into_iter().next().ok_or_else(|| format!("{path}: no plugin inside"))?;
         Ok(PluginSpec { path: path.to_string(), format, id: first.id, name: first.name })
     }
 }

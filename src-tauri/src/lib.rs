@@ -167,10 +167,10 @@ fn register_permission_autogrant(window: &tauri::WebviewWindow) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // P9.1: out-of-process CLAP scan child mode. `app.exe --scan-one <path>` loads ONE bundle,
-    // prints its descriptors as JSON, and exits BEFORE Tauri starts — so a crashy plugin bundle
-    // takes down only this throwaway child, never the host. The parent's plugin_scan command
-    // spawns it per `.clap`.
+    // P9.1: out-of-process plugin scan child mode. `app.exe --scan-one <path>` loads ONE bundle
+    // (CLAP, VST3 or VST2), prints what it holds as JSON, and exits BEFORE Tauri starts — so a
+    // crashy plugin bundle takes down only this throwaway child, never the host. The parent's
+    // plugin_scan command spawns it per bundle.
     #[cfg(windows)]
     {
         let args: Vec<String> = std::env::args().collect();

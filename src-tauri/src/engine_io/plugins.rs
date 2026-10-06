@@ -15,15 +15,16 @@
 //! round trip on one slot holds up nobody else.
 
 use std::sync::atomic::Ordering::Relaxed;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use lf_engine::{Command, TimedCommand};
 use tauri::Emitter;
 
 use super::mode::EngineApp;
+use super::EngineHost;
 use crate::host::engine_slot::{self, EngineSlotEvent, EngineSlotHandle, EventSink, PluginFormat};
-use crate::host::tone::{ToneBinding, ToneHandoff, ToneIdentity};
+use crate::host::tone::{ToneBinding, ToneHandoff, ToneIdentity, ToneStore};
 use crate::host::{ParamDesc, PluginDescriptor, PluginHostState, PluginInfo, ToneImport};
 
 /// How long an unload waits for a command still using the slot's handle (an owner round trip is ≤ 5 s).
@@ -47,14 +48,95 @@ struct ParamChanged {
     value: f64,
 }
 
+/// Where a load lands and what it reports through: the app's slots, tone store and engine, with the
+/// window's events (`EngineApp::plugin_load`).
+struct LoadTarget<'a> {
+    slots: &'a Mutex<[EngineSlot; lf_engine::SLOT_COUNT]>,
+    reload_tones: &'a Mutex<ToneHandoff<{ lf_engine::SLOT_COUNT }>>,
+    tones: Option<ToneStore>,
+    host: &'a EngineHost,
+    /// The main window's HWND (0 = none).
+    parent: usize,
+    sink: EventSink,
+}
+
+impl LoadTarget<'_> {
+    fn slots(&self) -> Result<MutexGuard<'_, [EngineSlot; lf_engine::SLOT_COUNT]>, String> {
+        self.slots.lock().map_err(|_| "engine slots poisoned".to_string())
+    }
+
+    fn load(
+        self,
+        state: &PluginHostState,
+        slot: u8,
+        path: String,
+        id: String,
+        frontend_epoch: u32,
+        tone_token: Option<u32>,
+    ) -> Result<PluginInfo, String> {
+        // Before the reservation: a path that names no format must leave the slot as it was.
+        let format = PluginFormat::of_path(std::path::Path::new(&path))
+            .ok_or_else(|| format!("{path}: not a .clap, .vst3 or .dll plugin"))?;
+        {
+            let mut slots = self.slots()?;
+            let current = state.frontend_epoch.load(Relaxed);
+            if frontend_epoch != current {
+                return Err(format!("stale frontend epoch {frontend_epoch} (current {current})"));
+            }
+            match slots[usize::from(slot)] {
+                EngineSlot::Empty => slots[usize::from(slot)] = EngineSlot::Loading { epoch: frontend_epoch },
+                EngineSlot::Loading { .. } => return Err(format!("slot {slot} is already loading a plugin")),
+                EngineSlot::Loaded { .. } => return Err(format!("slot {slot} already has a plugin loaded")),
+            }
+        }
+        let identity = ToneIdentity { format: format.as_str().to_string(), path: path.clone(), id: id.clone() };
+        // Past the reservation, so nothing below may return early: a poisoned lock just hands nothing over.
+        let imported = self.reload_tones.lock().ok().and_then(|mut tones| tones.take(usize::from(slot), tone_token, &identity));
+        let tone = self.tones.clone().map(|store| ToneBinding { store, slot: usize::from(slot), identity, imported });
+        let began = Instant::now();
+        let loaded = engine_slot::load(format, path.clone(), id.clone(), self.host.slot(usize::from(slot)), self.parent, self.sink.clone(), tone);
+        let mut slots = self.slots()?;
+        let owns = matches!(slots[usize::from(slot)], EngineSlot::Loading { epoch } if epoch == frontend_epoch)
+            && state.frontend_epoch.load(Relaxed) == frontend_epoch;
+        let handle = match loaded {
+            Ok(handle) => handle,
+            Err(e) => {
+                if owns {
+                    slots[usize::from(slot)] = EngineSlot::Empty;
+                }
+                return Err(e);
+            }
+        };
+        if !owns {
+            drop(slots);
+            if let Err(e) = handle.unload() {
+                log::error!("[plugin_host] engine slot {slot}: unloading a superseded load: {e}");
+            }
+            return Err(format!("plugin load for slot {slot} was superseded by a frontend reload"));
+        }
+        let descriptor = PluginDescriptor {
+            id,
+            name: handle.name().to_string(),
+            format: format.as_str().to_string(),
+            path,
+            // The frontend keeps the scan's descriptor for gain staging.
+            is_effect: None,
+        };
+        let info = PluginInfo { slot, descriptor, tone: handle.tone() };
+        log::info!("[plugin_host] engine slot {slot}: {} ({:?}) loaded in {} ms", info.descriptor.name, handle.kind(), began.elapsed().as_millis());
+        slots[usize::from(slot)] = EngineSlot::Loaded { handle: Arc::new(handle), info: info.clone() };
+        Ok(info)
+    }
+}
+
 impl EngineApp {
-    fn slots(&self) -> Result<std::sync::MutexGuard<'_, [EngineSlot; lf_engine::SLOT_COUNT]>, String> {
+    fn slots(&self) -> Result<MutexGuard<'_, [EngineSlot; lf_engine::SLOT_COUNT]>, String> {
         self.slots.lock().map_err(|_| "engine slots poisoned".to_string())
     }
 
     /// Per slot: the tone a session import stored for the plugin the slot held, parked for the reload
     /// that follows (`ToneHandoff`). Taken after `slots` when both are held.
-    fn reload_tones(&self) -> Result<std::sync::MutexGuard<'_, ToneHandoff<{ lf_engine::SLOT_COUNT }>>, String> {
+    fn reload_tones(&self) -> Result<MutexGuard<'_, ToneHandoff<{ lf_engine::SLOT_COUNT }>>, String> {
         self.reload_tones.lock().map_err(|_| "engine reload tones poisoned".to_string())
     }
 
@@ -79,20 +161,6 @@ impl EngineApp {
         tone_token: Option<u32>,
     ) -> Result<PluginInfo, String> {
         let host = self.host()?;
-        {
-            let mut slots = self.slots()?;
-            let current = state.frontend_epoch.load(Relaxed);
-            if frontend_epoch != current {
-                return Err(format!("stale frontend epoch {frontend_epoch} (current {current})"));
-            }
-            match slots[usize::from(slot)] {
-                EngineSlot::Empty => slots[usize::from(slot)] = EngineSlot::Loading { epoch: frontend_epoch },
-                EngineSlot::Loading { .. } => return Err(format!("slot {slot} is already loading a plugin")),
-                EngineSlot::Loaded { .. } => return Err(format!("slot {slot} already has a plugin loaded")),
-            }
-        }
-        let vst3 = path.to_ascii_lowercase().ends_with(".vst3");
-        let format = if vst3 { PluginFormat::Vst3 } else { PluginFormat::Clap };
         let events = window.clone();
         let sink: EventSink = Arc::new(move |event| {
             let _ = match event {
@@ -102,43 +170,8 @@ impl EngineApp {
             };
         });
         let parent = window.hwnd().map(|h| h.0 as usize).unwrap_or(0);
-        let identity = ToneIdentity { format: if vst3 { "vst3" } else { "clap" }.to_string(), path: path.clone(), id: id.clone() };
-        // Past the reservation, so nothing below may return early: a poisoned lock just hands nothing over.
-        let imported = self.reload_tones().ok().and_then(|mut tones| tones.take(usize::from(slot), tone_token, &identity));
-        let tone = self.tones.clone().map(|store| ToneBinding { store, slot: usize::from(slot), identity, imported });
-        let began = Instant::now();
-        let loaded = engine_slot::load(format, path.clone(), id.clone(), host.slot(usize::from(slot)), parent, sink, tone);
-        let mut slots = self.slots()?;
-        let owns = matches!(slots[usize::from(slot)], EngineSlot::Loading { epoch } if epoch == frontend_epoch)
-            && state.frontend_epoch.load(Relaxed) == frontend_epoch;
-        let handle = match loaded {
-            Ok(handle) => handle,
-            Err(e) => {
-                if owns {
-                    slots[usize::from(slot)] = EngineSlot::Empty;
-                }
-                return Err(e);
-            }
-        };
-        if !owns {
-            drop(slots);
-            if let Err(e) = handle.unload() {
-                log::error!("[plugin_host] engine slot {slot}: unloading a superseded load: {e}");
-            }
-            return Err(format!("plugin load for slot {slot} was superseded by a frontend reload"));
-        }
-        let descriptor = PluginDescriptor {
-            id,
-            name: handle.name().to_string(),
-            format: if vst3 { "vst3" } else { "clap" }.to_string(),
-            path,
-            // The frontend keeps the scan's descriptor for gain staging.
-            is_effect: None,
-        };
-        let info = PluginInfo { slot, descriptor, tone: handle.tone() };
-        log::info!("[plugin_host] engine slot {slot}: {} ({:?}) loaded in {} ms", info.descriptor.name, handle.kind(), began.elapsed().as_millis());
-        slots[usize::from(slot)] = EngineSlot::Loaded { handle: Arc::new(handle), info: info.clone() };
-        Ok(info)
+        let target = LoadTarget { slots: &self.slots, reload_tones: &self.reload_tones, tones: self.tones.clone(), host: &host, parent, sink };
+        target.load(state, slot, path, id, frontend_epoch, tone_token)
     }
 
     /// `plugin_unload`: take the plugin out of the engine and unload it; a load still running for the
@@ -284,5 +317,44 @@ impl EngineApp {
     /// `plugin_set_monitor_gain`: the slot's output level, the engine's `SetSlotGain`.
     pub(crate) fn plugin_gain(&self, slot: u8, gain: f32) -> Result<(), String> {
         self.host()?.send(TimedCommand { frame: None, command: Command::SetSlotGain(slot, gain) })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine_io::test_rig::TestDevice;
+
+    /// A load is refused before it reserves its slot when its path names no format, and a VST2 load
+    /// (no owner yet) frees the slot it reserved: the next load reaches its loader either way.
+    #[test]
+    fn a_load_this_host_cannot_start_leaves_the_slot_free_for_the_next() {
+        let device = TestDevice::start(48_000, 256, Duration::from_millis(5), |_| 0.0);
+        let state = PluginHostState::default();
+        let epoch = state.begin_frontend_session();
+        let slots = Mutex::new(std::array::from_fn(|_| EngineSlot::Empty));
+        let reload_tones = Mutex::default();
+        let load = |path: &str| {
+            let target = LoadTarget { slots: &slots, reload_tones: &reload_tones, tones: None, host: device.host(), parent: 0, sink: Arc::new(|_| {}) };
+            target.load(&state, 0, path.to_string(), "some.id".to_string(), epoch, None).map(|info| info.descriptor.name)
+        };
+        let free = || matches!(slots.lock().unwrap()[0], EngineSlot::Empty);
+
+        let unknown = load(r"C:\plugins\Thing.txt").unwrap_err();
+        assert!(unknown.contains("not a .clap, .vst3 or .dll plugin"), "{unknown}");
+        assert!(free(), "an unknown extension reserves nothing");
+        assert!(load(r"C:\plugins\no-extension").is_err());
+        assert!(free());
+
+        assert_eq!(load(r"C:\plugins\Thing.DLL").unwrap_err(), "VST2 hosting is not built yet");
+        assert!(free(), "the refused VST2 load gave its reservation back");
+
+        // The slot takes a load again: this one gets as far as its own loader, which finds no file.
+        let missing = load(r"C:\no-such-folder\Missing.clap").unwrap_err();
+        assert!(missing.starts_with("load failed"), "{missing}");
+        assert!(free());
+        let missing = load(r"C:\no-such-folder\Missing.vst3").unwrap_err();
+        assert!(!missing.contains("already") && !missing.contains("not a .clap"), "{missing}");
+        assert!(free());
     }
 }

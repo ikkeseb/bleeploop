@@ -9,7 +9,7 @@
 //! lock (the rename is atomic). The lock is never held while the dialog is open or a scan child runs.
 
 use super::scan::builtin_roots;
-use super::state::{PluginFolder, PluginFolders};
+use super::state::{PluginFolder, PluginFolders, UnsupportedPlugin};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::{Mutex, PoisonError};
@@ -91,8 +91,8 @@ pub(crate) fn remove(write: &Mutex<()>, file: &Path, folder: &str) -> Result<Vec
 }
 
 /// What Audio Settings lists: the scan's built-in roots (read-only) and the stored `user` folders,
-/// each with whether it is there now.
-pub(crate) fn view(user: &[String]) -> PluginFolders {
+/// each with whether it is there now, and `unsupported`, what the last scan found and cannot host.
+pub(crate) fn view(user: &[String], unsupported: Vec<UnsupportedPlugin>) -> PluginFolders {
     let folder = |path: String| PluginFolder {
         exists: Path::new(&path).is_dir(),
         path,
@@ -103,6 +103,7 @@ pub(crate) fn view(user: &[String]) -> PluginFolders {
             .map(|root| folder(root.path.to_string_lossy().into_owned()))
             .collect(),
         user: user.iter().cloned().map(folder).collect(),
+        unsupported,
     }
 }
 
@@ -291,8 +292,16 @@ mod tests {
         let scratch = Scratch::new("view");
         let here = scratch.folder("here");
         let gone = scratch.0.join("gone").to_string_lossy().into_owned();
-        let view = view(&[here.clone(), gone.clone()]);
-        let user: Vec<(String, bool)> = view.user.into_iter().map(|f| (f.path, f.exists)).collect();
+        let narrow = UnsupportedPlugin { path: r"C:\VST\Old.dll".into(), reason: "32-bit".into() };
+        let view = view(&[here.clone(), gone.clone()], vec![narrow.clone()]);
+        let user: Vec<(String, bool)> = view.user.iter().map(|f| (f.path.clone(), f.exists)).collect();
         assert_eq!(user, vec![(here, true), (gone, false)]);
+        assert_eq!(view.unsupported, vec![narrow]);
+        // The built-in list ends with the VST2 roots, and the wire names are camelCase.
+        let programs = std::env::var("ProgramFiles").unwrap();
+        let vst2 = Path::new(&programs).join("VSTPlugins").to_string_lossy().into_owned();
+        assert!(view.builtin.iter().any(|f| f.path == vst2));
+        let wire = serde_json::to_value(&view).unwrap();
+        assert_eq!(wire["unsupported"], serde_json::json!([{ "path": r"C:\VST\Old.dll", "reason": "32-bit" }]));
     }
 }

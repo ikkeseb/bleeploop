@@ -7,7 +7,7 @@
  * standalone in a browser via `pnpm dev` (silent: the browser build has no engine).
  *
  * Five capabilities are DECLARED here, but only FOUR of them actually differ per platform:
- *   - PluginHost      — native VST/CLAP hosting (web: stub; tauri: invoke/listen). The real seam.
+ *   - PluginHost      — native CLAP, VST3 and VST2 hosting (web: stub; tauri: invoke/listen). The real seam.
  *   - EngineHost      — the native audio engine (`docs/ARCHITECTURE.md`; web: a scriptable fake
  *                        for probes).
  *   - LogFolder       — the release log's folder, for Help's diagnostics (web: none).
@@ -24,7 +24,7 @@
 import type { DeviceRequest, DeviceStatus, EngineCommand, FeedFrame } from './engine-wire';
 
 export type PluginSlot = 0 | 1;
-export type PluginFormat = 'clap' | 'vst3';
+export type PluginFormat = 'clap' | 'vst3' | 'vst2';
 export type EditorMode = 'floating' | 'embedded';
 
 export interface PluginDescriptor {
@@ -90,12 +90,21 @@ export interface PluginFolder {
   exists: boolean;
 }
 
+/** A plugin file the last scan found and this build cannot host (a 32-bit VST2, a shell): its full
+ * path and why, as the native host words it. */
+export interface UnsupportedPlugin {
+  path: string;
+  reason: string;
+}
+
 /** The plugin scan's folders (`src-tauri/src/host/folders.rs`): `builtin` is what the scan walks by
- * itself (the standard CLAP and VST3 folders, then `CLAP_PATH`/`VST3_PATH`), read-only; `user` is the
- * player's own list, kept in `plugin-folders.json`. */
+ * itself (the standard CLAP, VST3 and VST2 folders, then `CLAP_PATH`/`VST3_PATH`), read-only; `user` is
+ * the player's own list, kept in `plugin-folders.json`; `unsupported` is what the last scan in this run
+ * found and cannot host. */
 export interface PluginFolders {
   builtin: PluginFolder[];
   user: PluginFolder[];
+  unsupported: UnsupportedPlugin[];
 }
 
 export interface PluginHost {

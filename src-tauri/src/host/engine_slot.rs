@@ -39,11 +39,48 @@ use super::{
 };
 use crate::engine_io::SlotHost;
 
-/// The formats an engine slot hosts.
+/// The plugin formats this host knows, and the ONE place a format is told from a path or a stored
+/// name: the scan, the load, the tone store and the probes all ask here.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PluginFormat {
     Clap,
     Vst3,
+    Vst2,
+}
+
+impl PluginFormat {
+    /// In scan order: the picker lists CLAP, then VST3, then VST2.
+    pub(crate) const ALL: [PluginFormat; 3] = [PluginFormat::Clap, PluginFormat::Vst3, PluginFormat::Vst2];
+
+    /// The extension a plugin of this format has on Windows. A VST2 plugin has none of its own:
+    /// it is a `.dll` among other DLLs (`host/pe.rs` tells them apart).
+    pub(crate) fn extension(self) -> &'static str {
+        match self {
+            PluginFormat::Clap => "clap",
+            PluginFormat::Vst3 => "vst3",
+            PluginFormat::Vst2 => "dll",
+        }
+    }
+
+    /// The format a path's extension names, whatever its case; `None` for any other extension.
+    pub(crate) fn of_path(path: &std::path::Path) -> Option<Self> {
+        let extension = path.extension()?;
+        Self::ALL.into_iter().find(|f| extension.eq_ignore_ascii_case(f.extension()))
+    }
+
+    /// The format a stored name is (`as_str`): a descriptor's `format`, a tone's.
+    pub(crate) fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|f| f.as_str() == name)
+    }
+
+    /// The format's name in descriptors, tones and thread names.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            PluginFormat::Clap => "clap",
+            PluginFormat::Vst3 => "vst3",
+            PluginFormat::Vst2 => "vst2",
+        }
+    }
 }
 
 /// What an owner tells its caller (the window at Stage 5; a probe or a test before that).
@@ -234,6 +271,8 @@ pub(crate) fn load(
         PluginFormat::Vst3 => spawn(format, slot, editor_parent, sink, tone, move |ctx| {
             super::vst3_host::engine::run(ctx, path, &id)
         }),
+        // The scan lists VST2 plugins (`host/vst2.rs`); their owner and unit are not here yet.
+        PluginFormat::Vst2 => Err("VST2 hosting is not built yet".to_string()),
     }
 }
 
@@ -267,12 +306,8 @@ pub(super) fn spawn(
         ready,
         tone: ToneKeeper::new(tone, edited.clone()),
     };
-    let tag = match format {
-        PluginFormat::Clap => "clap",
-        PluginFormat::Vst3 => "vst3",
-    };
     let owner = std::thread::Builder::new()
-        .name(format!("lf-{tag}-engine-{index}"))
+        .name(format!("lf-{}-engine-{index}", format.as_str()))
         .spawn(move || run(ctx))
         .map_err(|e| format!("spawn owner thread: {e}"))?;
     match ready_rx.recv_timeout(LOAD_TIMEOUT) {

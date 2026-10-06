@@ -45,7 +45,7 @@ function subscribe<T>(event: string, handler: (payload: T) => void): () => void 
 }
 
 /**
- * Native CLAP + VST3 host over Tauri IPC. Each method maps to a `plugin_*` command in Rust.
+ * Native CLAP, VST3 and VST2 host over Tauri IPC. Each method maps to a `plugin_*` command in Rust.
  * `window`/`state` command args are injected by Tauri — JS passes only the domain args. Audio never
  * crosses as PCM here: a plugin plays inside the engine's callback.
  */
@@ -222,7 +222,7 @@ const tauriUpdates: AppUpdates = {
 
 /**
  * Tauri platform. Reuses the web Web-MIDI capability (it works inside WebView2 v149) and swaps in the
- * native CLAP/VST3 `pluginHost`, the native `engine`, the release log's folder (`logs`) and the
+ * native CLAP/VST3/VST2 `pluginHost`, the native `engine`, the release log's folder (`logs`) and the
  * updater (`updates`).
  */
 export const tauriPlatform: Platform = {

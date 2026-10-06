@@ -1,4 +1,4 @@
-import { For, Show, createMemo, createSignal, onCleanup, onMount } from 'solid-js';
+import { For, Show, createEffect, createMemo, createSignal, on, onCleanup, onMount } from 'solid-js';
 import { availablePlugins, scanning } from '../state/instrument';
 import {
   asioAvailable,
@@ -168,6 +168,14 @@ export function AudioSettings() {
     const name = outputDevices().find((d) => d.id === engineShare())?.name;
     return name && sharesInterface(asioDeviceInfo()?.name ?? '', name) ? name : null;
   });
+
+  // The host's list of plugins it cannot host comes from the last scan: read the folders again each
+  // time a scan ends (an add or remove is followed by one; so is the command bar's rescan).
+  createEffect(
+    on(scanning, (now, was) => {
+      if (was && !now) void refreshPluginFolders();
+    }),
+  );
 
   onMount(async () => {
     void refreshPluginFolders();
@@ -534,7 +542,8 @@ export function AudioSettings() {
 
       {/* Plugin folders: what the scan walks. The host's own folders are read-only; the player's are
           added through the native folder dialog (the host opens it) and removed with ✕. Each change is
-          followed by a scan (`state/plugin-folders.ts`); a folder that is gone says so and is skipped. */}
+          followed by a scan (`state/plugin-folders.ts`); a folder that is gone says so and is skipped. Under
+          the folders, what the last scan found and cannot host (a 32-bit VST2, say), with why. */}
       <Show when={platform.pluginHost.available}>
         <div class="audio-settings__folders" role="group" aria-label="Plugin folders">
           <div class="audio-settings__row" title="The folders the plugin scan walks">
@@ -579,6 +588,25 @@ export function AudioSettings() {
               )}
             </For>
           </ul>
+          <Show when={pluginFolders().unsupported.length > 0}>
+            <div class="audio-settings__unsupported">
+              <div class="audio-settings__unsupported-summary">
+                {pluginFolders().unsupported.length === 1
+                  ? '1 plugin found but not supported'
+                  : `${pluginFolders().unsupported.length} plugins found but not supported`}
+              </div>
+              <ul class="audio-settings__unsupported-list">
+                <For each={pluginFolders().unsupported}>
+                  {(plugin) => (
+                    <li class="audio-settings__unsupported-item" title={plugin.path}>
+                      <span class="audio-settings__unsupported-file">{plugin.path.split(/[\\/]/).pop()}</span>
+                      <span class="audio-settings__unsupported-reason">{plugin.reason}</span>
+                    </li>
+                  )}
+                </For>
+              </ul>
+            </div>
+          </Show>
         </div>
       </Show>
 

@@ -15,7 +15,7 @@ import { autosave } from '../session/autosave';
  * engine refusal on its lane, start the ASIO driver when it is the saved choice and open the saved
  * device. Everything that needs a running engine waits for the first device: Share output, local
  * recovery (its restore loads into an engine at the device's rate) and the plugin host, activated at
- * the device's rate: it resyncs the slots a WebView reload stranded, scans the installed CLAP/VST3
+ * the device's rate: it resyncs the slots a WebView reload stranded, scans the installed CLAP/VST3/VST2
  * plugins for the slot picker and reloads each slot's plugin from the last run (`rig-recall.ts`). So a
  * launch whose device does not open never recalls the rig, and cannot forget it on the loads that
  * would fail. The browser build has no engine (unless a DEV probe forces the fake on): it boots nothing

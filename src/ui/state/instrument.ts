@@ -40,7 +40,7 @@ import { pluginDescriptorKey, reconcilePluginDescriptors, samePluginDescriptor }
 /**
  * Two-slot instrument host. Each slot holds EITHER a built-in instrument (a selectable id the engine
  * plays), Off (nothing plays, GO LIVE passes the slot's input dry) OR a native plugin (a loaded
- * CLAP/VST3 descriptor). Only one slot is "active" at a time; keyboard/MIDI input routes to that slot
+ * CLAP/VST3/VST2 descriptor). Only one slot is "active" at a time; keyboard/MIDI input routes to that slot
  * through `inputRouter` and the engine's note target (`routeEngine`).
  */
 

@@ -312,6 +312,50 @@
   color: var(--faint);
 }
 
+/* Plugins the last scan found and cannot host: under the folders in the same value column, quieter than
+   they are (--faint file names, --dim reasons, a size down). A long list scrolls inside its own box
+   instead of pushing the diagnostics down; a long name or reason is cut (the line's title has the path). */
+.audio-settings__unsupported {
+  padding: 4px 0 0 83px;
+  font-size: 10px;
+}
+.audio-settings__unsupported-summary {
+  color: var(--dim);
+}
+.audio-settings__unsupported-list {
+  margin: 2px 0 0;
+  padding: 0;
+  list-style: none;
+  max-height: 96px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.audio-settings__unsupported-item {
+  display: flex;
+  gap: 8px;
+  min-width: 0;
+  color: var(--faint);
+}
+.audio-settings__unsupported-file {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.audio-settings__unsupported-reason {
+  flex: 1 1 0;
+  width: 0; /* as the folder path: its text never sets the panel's width */
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dim);
+}
+
 /* a row that cannot act (ASIO unavailable) drops to the --faint legend: tone,
    never an opacity fade */
 .audio-settings__row--disabled .audio-settings__label,

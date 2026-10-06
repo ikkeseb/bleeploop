@@ -62,7 +62,7 @@ await probe(async ({ open }) => {
   assert.deepEqual(midiRetry, { calls: 1, status: 'no-devices' }, 'concurrent MIDI retries must share one request');
 
   const emptyPluginCopy =
-    'No plugins found · the standard CLAP and VST3 folders are scanned · add your own in Audio Settings · rescan ⟳ in the command bar';
+    'No plugins found · the standard CLAP, VST3 and VST2 folders are scanned · add your own in Audio Settings · rescan ⟳ in the command bar';
   await page.waitForFunction(
     (copy) => [...document.querySelectorAll('[role="note"]')].filter((element) => element.textContent?.trim() === copy).length === 2,
     emptyPluginCopy,

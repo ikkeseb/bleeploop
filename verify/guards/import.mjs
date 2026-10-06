@@ -400,7 +400,12 @@ ok('H.validateSession ignores plugins (an older build imports the loops)', valid
 throws('H.plugins not an array rejects', () => validateSessionPlugins(withPlugins({}), trackFiles), 'must be an array');
 throws('H.a slot other than A/B rejects', () => validateSessionPlugins(withPlugins([{ ...amp, slot: 0 }]), trackFiles), '"A" or "B"');
 throws('H.a slot listed twice rejects', () => validateSessionPlugins(withPlugins([amp, { ...amp, file: 'x.bin' }]), trackFiles), 'listed twice');
-throws('H.an unknown format rejects', () => validateSessionPlugins(withPlugins([{ ...amp, format: 'au' }]), trackFiles), '"clap" or "vst3"');
+{
+  const parsed = validateSessionPlugins(withPlugins([{ ...amp, format: 'vst2', path: 'C:\\VST2\\Amp.dll' }]), trackFiles);
+  ok('H.a vst2 plugin parses', parsed.length === 1 && parsed[0].format === 'vst2' && parsed[0].path === 'C:\\VST2\\Amp.dll');
+}
+throws('H.an unknown format rejects', () => validateSessionPlugins(withPlugins([{ ...amp, format: 'au' }]), trackFiles), '"clap", "vst3" or "vst2"');
+throws('H.vst2 spelled in capitals is not a format', () => validateSessionPlugins(withPlugins([{ ...amp, format: 'VST2' }]), trackFiles), '"clap", "vst3" or "vst2"');
 throws('H.a missing file rejects', () => validateSessionPlugins(withPlugins([{ ...amp, file: undefined }]), trackFiles), 'file missing');
 throws('H.an empty id rejects', () => validateSessionPlugins(withPlugins([{ ...amp, id: '' }]), trackFiles), 'id missing');
 throws('H.a tone file that is a stem rejects', () => validateSessionPlugins(withPlugins([{ ...amp, file: 'lf-track1.wav' }]), trackFiles), 'already another entry');

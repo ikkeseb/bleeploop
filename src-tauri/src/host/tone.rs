@@ -37,6 +37,8 @@ use std::sync::atomic::{
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
+use super::engine_slot::PluginFormat;
+
 /// How long a plugin must go without a change before its tone is saved. A kill loses at most this.
 pub(crate) const SAVE_QUIET: Duration = Duration::from_secs(2);
 
@@ -176,7 +178,8 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<Tone, String> {
     if sum != want.to_le_bytes() {
         return Err("checksum mismatch: the file is corrupt".to_string());
     }
-    if format != "clap" && format != "vst3" {
+    // The stored NAME says what the tone is for; its path is never asked.
+    if PluginFormat::from_name(&format).is_none() {
         return Err(format!("unknown plugin format {format:?}"));
     }
     Ok(Tone { identity: ToneIdentity { format, path, id }, name, state })
