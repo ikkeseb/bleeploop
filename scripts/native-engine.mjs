@@ -5,7 +5,7 @@
 //
 //   pnpm native:engine [--backend=asio] [--buffer=128] [--seconds=600] [--switches=20] [--swaps=4]
 //                      [--in=0] [--device=Focusrite] [--amp=<vst3>] [--proq=<vst3>] [--mute=1]
-//                      [--cycle=wasapi] [--hold=2] [--pause=<ms>] [--log=native-engine]
+//                      [--cycle=wasapi] [--hold=2] [--pause=<ms>] [--share=<endpoint id>] [--log=native-engine]
 //   pnpm native:engine --lag=1 --in=1 [--out=1] [--seconds=10] [--preopen=0]
 //
 // Needs no running `app` and no cable; `--amp=` or `--proq=` (empty) leaves that slot empty. The take
@@ -16,7 +16,8 @@
 // `--cycle=` names the switches' round (`asio64`, `asio128`, `asio256`, `wasapi`, comma-separated;
 // `--cycle=wasapi` with `--backend=wasapi --buffer=default` closes and reopens WASAPI at every switch, no ASIO).
 // `--hold=` is the seconds each switch plays; `--pause=` closes the device and waits that many ms before
-// every switch to WASAPI. The full log lands in logs/native-engine.log (`--log=<name>`: logs/<name>.log). Windows node only.
+// every switch to WASAPI. `--share=` turns Share output on, mirroring the master to that WASAPI render endpoint
+// (the id the release log names) while ASIO plays, so the soak counts the mirror too. The full log lands in logs/native-engine.log (`--log=<name>`: logs/<name>.log). Windows node only.
 
 import { execFileSync, spawn } from 'node:child_process';
 import { createWriteStream, mkdirSync } from 'node:fs';
@@ -44,6 +45,7 @@ const opt = {
   cycle: '',
   hold: '',
   pause: '',
+  share: '',
   log: 'native-engine',
 };
 for (const arg of process.argv.slice(2)) {
@@ -80,6 +82,7 @@ const args = opt.lag
       ...(opt.pause ? ['--pause', opt.pause] : []),
       ...(opt.device ? ['--device', opt.device] : []),
       ...(opt.mute ? ['--mute'] : []),
+      ...(opt.share ? ['--share', opt.share] : []),
     ];
 // The soak, ~15 s a switch, ~30 s a swap, and room for loads and the teardown.
 const timeoutS = Number(opt.seconds) + (15 + Number(opt.hold || 0) + Number(opt.pause || 0) / 1000) * Number(opt.switches) + 30 * Number(opt.swaps) + 300;

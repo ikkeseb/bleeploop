@@ -616,11 +616,11 @@ pub(crate) mod tests {
     }
 
     /// Share output's shape (`share.rs`): 256-frame engine pushes at 48 kHz, 436–456-frame pulls at
-    /// 44.1 kHz, the 20 ms setpoint, stereo. Its sawtooth never reads as a trim.
+    /// 44.1 kHz, the 40 ms setpoint, stereo. Its sawtooth never reads as a trim.
     #[test]
     fn share_shaped_pushes_never_trim() {
         for skew in [400.0, -400.0] {
-            let config = PipeConfig { channels: 2, setpoint: 0.020, ..config(48_000, 44_100) };
+            let config = PipeConfig { channels: 2, setpoint: 0.040, ..config(48_000, 44_100) };
             let clocks = Clocks { config, skew_ppm: skew, push: 256, head_start: 0.0, stall: None };
             let mut size = wandering();
             let (mut trims, mut shorts) = (0, 0);

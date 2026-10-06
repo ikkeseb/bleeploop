@@ -18,9 +18,15 @@ use lf_engine::grid::Frame;
 use super::pipes::{self, PipeConfig, PullPipe, PushEnd};
 use super::IoCounters;
 
-/// The mirror's fill setpoint (20 ms), raised to `PipeConfig::setpoint`'s floor when the
-/// engine block is large: one engine block, one ~10 ms WASAPI shared period, 3 ms.
-const SETPOINT: f64 = 0.020;
+/// The mirror's fill setpoint (40 ms), raised to `PipeConfig::setpoint`'s floor when the engine block
+/// is large: one engine block, the largest pull, 3 ms. The largest pull is taken as two ~10 ms WASAPI
+/// shared periods asked for at once (what an endpoint's callbacks do in a burst was not traced). At
+/// 20 ms (one period) the mirror into the rig's Scarlett, its own Windows endpoint while ASIO 64
+/// played, ran short in bursts about every 10.5 minutes on an idle machine (37 starves and 2 trims in
+/// a 25-minute soak, `--probe-engine … --share`), each a gap in what a stream or a call hears; at
+/// 40 ms the same soak counted nothing in 26 minutes. Nobody monitors through the mirror, so its
+/// delay costs nothing.
+const SETPOINT: f64 = 0.040;
 const WASAPI_PERIOD: f64 = 0.010;
 /// Headroom above the setpoint before the tap drops (a mirror that stalls or starts late).
 const HEADROOM: f64 = 0.100;
@@ -92,7 +98,7 @@ impl ShareOutput {
 /// `out_rate` (allocates: off the audio thread).
 fn share_pipe(engine_rate: u32, out_rate: u32, block: Frame) -> Result<(ShareTap, PullPipe), String> {
     let block = usize::try_from(block).ok().filter(|&b| b > 0).ok_or_else(|| format!("share output: bad block {block}"))?;
-    let setpoint = SETPOINT.max(block as f64 / engine_rate as f64 + WASAPI_PERIOD + 0.003);
+    let setpoint = SETPOINT.max(block as f64 / engine_rate as f64 + 2.0 * WASAPI_PERIOD + 0.003);
     let capacity = ((setpoint + HEADROOM) * engine_rate as f64).ceil() as usize + block;
     let (push, pipe) = pipes::pipe(PipeConfig { in_rate: engine_rate, out_rate, channels: 2, capacity, setpoint, max_pull: MAX_PULL })?;
     Ok((ShareTap { push, scratch: vec![0.0; 2 * block.min(MAX_PULL)] }, pipe))
@@ -212,9 +218,49 @@ mod tests {
             assert_eq!(counts(&counters), (0, 0, 0), "{skew:+} ppm: starves/overruns/trims");
             let drift = mirror.pipe.drift_ppm();
             assert!((drift - skew).abs() < 0.1 * skew.abs(), "{skew:+} ppm: learned {drift}");
-            // What the ring holds after a pull: under the 20 ms setpoint plus one engine block.
+            // What the ring holds after a pull: under the setpoint plus one engine block.
             let fill_ms = mirror.pipe.fill() as f64 / (engine_rate as f64 / 1000.0);
-            assert!(fill_ms < 20.0 + 5.4, "{skew:+} ppm: fill {fill_ms} ms");
+            assert!(fill_ms < SETPOINT * 1000.0 + 5.4, "{skew:+} ppm: fill {fill_ms} ms");
+        }
+    }
+
+    /// A render callback that asks for its next period at once (then none for a period), and one that
+    /// comes a period late and asks for two: the endpoint's callbacks around a period slip. Neither runs
+    /// the mirror short or over, at any engine block.
+    #[test]
+    fn a_period_pulled_early_or_late_is_covered() {
+        for block in [64usize, 128, 256] {
+            let counters = IoCounters::default();
+            let (mut tap, pipe) = share_pipe(44_100, 44_100, block as Frame).unwrap();
+            let mut mirror = Mirror::new(pipe, 2);
+            let (left, right) = (vec![0.5f32; block], vec![-0.25f32; block]);
+            let mut data = vec![0.0f32; 2 * 441];
+            let engine_period = block as f64 / 44_100.0;
+            let (mut t_engine, mut t_mirror, mut pulls, mut owed) = (0.0f64, 0.0f64, 0u64, false);
+            while t_mirror < 120.0 {
+                if t_engine <= t_mirror {
+                    tap.push(&left, &right, &counters);
+                    t_engine += engine_period;
+                    continue;
+                }
+                mirror.render(&mut data, &counters);
+                if std::mem::take(&mut owed) {
+                    mirror.render(&mut data, &counters);
+                }
+                pulls += 1;
+                // Once settled, every 3.01 s, by turns: the next period asked for at once and then no
+                // callback for a period, or no callback for a period and then two periods at once.
+                if t_mirror >= 30.0 && pulls % 301 == 0 {
+                    if (pulls / 301) % 2 == 0 {
+                        mirror.render(&mut data, &counters);
+                    } else {
+                        owed = true;
+                    }
+                    t_mirror += 0.010;
+                }
+                t_mirror += 0.010;
+            }
+            assert_eq!(counts(&counters), (0, 0, 0), "block {block}: starves/overruns/trims");
         }
     }
 
@@ -223,12 +269,12 @@ mod tests {
         let counters = IoCounters::default();
         let (mut tap, pipe) = share_pipe(48_000, 48_000, 256).unwrap();
         let block = vec![0.1f32; 256];
-        // Nobody pulls: the ring fills (~120 ms + a block), then every block drops and counts once.
+        // Nobody pulls: the ring fills (~140 ms + a block), then every block drops and counts once.
         for _ in 0..1000 {
             tap.push(&block, &block, &counters);
         }
         let capacity = pipe.fill();
-        assert!((5760..5760 + 2 * 256).contains(&capacity), "capacity {capacity}");
+        assert!((6720..6720 + 2 * 256).contains(&capacity), "capacity {capacity}");
         let full_blocks = 1000 - capacity / 256;
         assert!(counts(&counters).1 >= full_blocks as u64 - 1 && counts(&counters).1 <= full_blocks as u64);
     }
@@ -259,11 +305,11 @@ mod tests {
         let (mut tap, pipe) = share_pipe(48_000, 48_000, 256).unwrap();
         let mut mirror = Mirror::new(pipe, 2);
         let mut data = vec![0.0f32; 2 * 2048];
-        for _ in 0..4 {
+        for _ in 0..8 {
             tap.push(&[0.5; 256], &[0.5; 256], &counters);
         }
-        // Primes at the 20 ms setpoint (960 frames) and plays 480 of them: covered.
-        mirror.render(&mut data[..2 * 480], &counters);
+        // Primes at the 40 ms setpoint (1920 frames) and plays 1440 of them: covered.
+        mirror.render(&mut data[..2 * 1440], &counters);
         assert_eq!(counts(&counters).0, 0);
         // 2048 frames, pulled in two pieces, both short: one starve.
         mirror.render(&mut data, &counters);

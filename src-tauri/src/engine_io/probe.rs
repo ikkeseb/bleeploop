@@ -13,7 +13,7 @@
 //!
 //! `app.exe --probe-engine <asio|wasapi> <64|128|256|default> [--plugin <slot>=<file.vst3|.clap|.dll>]...
 //! [--seconds N] [--switches N] [--swaps N] [--cycle <asio64|asio128|asio256|wasapi>,...] [--hold S]
-//! [--pause MS] [--in N] [--device <WASAPI name substring>] [--mute]
+//! [--pause MS] [--in N] [--device <WASAPI name substring>] [--mute] [--share <endpoint id>]
 //! [--lag [--out N] [--no-preopen] [--split <out|in>]]`
 //!
 //! `--cycle` names the switches' round instead of the default one (every other ASIO buffer and WASAPI,
@@ -40,7 +40,9 @@
 //! keep that channel off a loopback cable, or the take's monitor feeds back through it. A swap puts the
 //! next plugin of the `--plugin` list into a slot (with one, the same plugin again). `--mute` mutes the
 //! master, the monitored input included: the device plays silence, so a WASAPI run can share the
-//! interface with other apps.
+//! interface with other apps. `--share` turns Share output on after the open, mirroring the master to
+//! that WASAPI render endpoint (the id the release log names, `wasapi:{…}.{…}`) while ASIO plays, so the
+//! soak counts the mirror's starves, overruns and trims too.
 
 use std::sync::atomic::{AtomicU64, Ordering::{Acquire, Relaxed}};
 use std::sync::Arc;
@@ -121,6 +123,8 @@ struct Args {
     input: u32,
     device: Option<String>,
     mute: bool,
+    /// `--share`: Share output's endpoint, switched on after the open.
+    share: Option<String>,
     lag: bool,
     out: usize,
     preopen: bool,
@@ -136,7 +140,7 @@ enum Split {
 
 fn parse_args(args: &[String]) -> Result<Args, String> {
     const USAGE: &str = "usage: --probe-engine <asio|wasapi> <64|128|256|default> [--plugin <slot>=<file.vst3|.clap|.dll>]... \
-        [--seconds N] [--switches N] [--swaps N] [--cycle <asio64|asio128|asio256|wasapi>,...] [--hold S] [--pause MS] [--in N] [--device <WASAPI name substring>] [--mute] \
+        [--seconds N] [--switches N] [--swaps N] [--cycle <asio64|asio128|asio256|wasapi>,...] [--hold S] [--pause MS] [--in N] [--device <WASAPI name substring>] [--mute] [--share <endpoint id>] \
         [--lag [--out N] [--no-preopen] [--split <out|in>]]";
     let backend = match args.first().map(String::as_str) {
         Some("asio") => AudioBackend::Asio,
@@ -164,6 +168,7 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
         input: 0,
         device: None,
         mute: false,
+        share: None,
         lag: false,
         out: 1,
         preopen: true,
@@ -202,6 +207,7 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
             "--in" => parsed.input = number(value()?)? as u32,
             "--device" => parsed.device = Some(value()?),
             "--mute" => parsed.mute = true,
+            "--share" => parsed.share = Some(value()?),
             "--lag" => parsed.lag = true,
             "--out" => parsed.out = number(value()?)? as usize,
             "--no-preopen" => parsed.preopen = false,
@@ -625,6 +631,10 @@ impl Probe {
         self.silence()?;
         self.rate = status.sample_rate;
         say(format!("open {}: {}", label(start), describe(&status)));
+        if let Some(endpoint) = &a.share {
+            self.host.set_share(Some(endpoint.clone()))?;
+            say(format!("share: the master is mirrored to {endpoint}"));
+        }
         for k in 0..self.slots.len() {
             let plugin = self.slots[k].plugin;
             self.load_slot(k, plugin);
