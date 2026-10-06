@@ -20,6 +20,7 @@
 //! | `callback` | the callback bodies (ASIO and WASAPI, input and output) and a run's shared state |
 //! | `driver` | the seam the owner opens streams through; `cpal_driver` is the real one, `fake_driver` (tests) the hardware-free one |
 //! | `slot_host` | [`SlotHost`]: a plugin owner's install/remove/eviction handshake with the engine |
+//! | `fpu` | the float mode every audio callback runs in: flush-to-zero and denormals-are-zero |
 //! | `frame_clock` | [`FrameClock`]: the callback's (time, frame) stamp and a press's frame |
 //! | `pipes` | [`pipes::PullPipe`]: frames pushed on one clock, pulled resampled on another (the WASAPI join, Share output) |
 //! | `feed` | the feed: what the UI reads back (events, device, status, anchor, meter, waveforms), on its own thread |
@@ -107,6 +108,7 @@ mod driver;
 #[cfg(test)]
 mod fake_driver;
 mod feed;
+mod fpu;
 pub mod frame_clock;
 pub mod midi;
 pub mod mode;

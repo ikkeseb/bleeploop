@@ -20,6 +20,7 @@ use lf_engine::grid::Frame;
 use lf_engine::{ProcessContext, SLOT_COUNT};
 use rtrb::{Consumer, Producer};
 
+use super::fpu::DenormalsOff;
 use super::pipes::{PullPipe, PushEnd};
 use super::{Core, IoCounters, Rt};
 
@@ -291,6 +292,7 @@ impl DuplexInput {
         f32: FromSample<T>,
     {
         promote_once();
+        let _ftz = DenormalsOff::new();
         if let Some(frames) = self.probe.observe(latency, self.rate) {
             self.run.in_latency.store(frames, Relaxed);
         }
@@ -343,6 +345,7 @@ impl JoinInput {
         f32: FromSample<T>,
     {
         promote_once();
+        let _ftz = DenormalsOff::new();
         #[cfg(debug_assertions)]
         trace::join_push(data.len() / self.channels, latency);
         if let Some(frames) = self.probe.observe(latency, self.rate) {
@@ -452,6 +455,7 @@ impl Render {
         // Its own clock, not `entry`: the fake driver's entries are synthetic.
         let began = Instant::now();
         promote_once();
+        let _ftz = DenormalsOff::new();
         let core = Arc::clone(&self.core);
         let counters = &core.counters;
         counters.callbacks.fetch_add(1, Relaxed);

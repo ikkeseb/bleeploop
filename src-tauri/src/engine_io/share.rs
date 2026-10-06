@@ -176,6 +176,7 @@ fn build<T: SizedSample + FromSample<f32>>(
                     promoted = true;
                     let _ = super::promote_pro_audio();
                 }
+                let _ftz = super::fpu::DenormalsOff::new();
                 mirror.render(data, &core.counters);
             },
             // Terminal by cpal's contract (the endpoint went away): latch it for the owner, who drops
