@@ -16,7 +16,7 @@ Who runs where and what each thread owns. The rules are in bold below the table.
 
 | Thread | Owns | Talks to others through |
 |---|---|---|
-| **UI (WebView2 / main)** | The Tauri window, every WebView2 COM call (`with_webview`: the Web MIDI permission auto-grant, `lib.rs`), the close guard (`lf://close-requested`), and the synchronous commands: `engine_send` (so batches keep IPC order), `plugin_asio_status`, `plugin_asio_device_info`, `lib.rs`'s own | IPC in; window events out (`plugin:param-changed`, `plugin:params-changed`, `plugin:editor-closed`) |
+| **UI (WebView2 / main)** | The Tauri window, every WebView2 COM call (`with_webview`: the Web MIDI permission auto-grant, `lib.rs`), the plugin folder dialog (modal over the main window, `src/host/folders.rs`), the close guard (`lf://close-requested`), and the synchronous commands: `engine_send` (so batches keep IPC order), `plugin_asio_status`, `plugin_asio_device_info`, `lib.rs`'s own | IPC in; window events out (`plugin:param-changed`, `plugin:params-changed`, `plugin:editor-closed`) |
 | **Command threads** (Tauri async runtime) | Nothing long-lived. Every other command in `host/commands.rs` and `engine_io/mode.rs` is `async fn`; blocking engine work (an open waits up to 15 s) goes to `spawn_blocking` | Device requests to the device owner; plugin requests to a slot owner (`owner_request_5s`, ≤5 s); a load spawns the owner and waits ≤15 s on its rendezvous (a result that arrives later is the owner's to undo); device lists enumerate cpal directly (no stream opens) |
 | **Device owner** (`lf-engine-owner`, `engine_io/owner.rs`) | Every device transition, one at a time; the cpal streams (Send: ownership is for ordering); building engines; the engine lock, only while no stream runs | A request channel with one-shot replies; polls what the callbacks latched and logs the glitch counters |
 | **Device callbacks** (cpal driver threads) | Nothing: ASIO runs input then output in one bufferSwitch; WASAPI's output callback is the clock and its input callback feeds the join pipe. Each promotes itself to MMCSS Pro Audio on first entry | `try_lock` on the engine (a miss plays silence and counts); atomics and rings; faults latch for the owner |
@@ -33,7 +33,9 @@ Who runs where and what each thread owns. The rules are in bold below the table.
   `OwnerRequest`; the audio thread only through the unit it installed (rings + atomics). Never
   `run_on_main_thread` a plugin call.
 - **Only the UI thread makes WebView2 COM calls** (`with_webview`); a non-UI caller recovers the
-  result over a channel.
+  result over a channel. The plugin folder dialog follows it: `plugin_folder_add` shows it through
+  `run_on_main_thread`, owned by the main window, and holds no lock while it is open. Shown from a
+  command thread with that owner it would be the editor-hang deadlock below.
 - **The audio path never logs, locks (beyond `try_lock`), allocates or waits** (invariant 5): the
   engine callback, the Share callback and every plugin `process`. A unit latches fault bits
   (`FAULT_START`/`FAULT_PROCESS`/`FAULT_PARAM`) and the owner reports each once per load; add a new
@@ -86,6 +88,8 @@ Who runs where and what each thread owns. The rules are in bold below the table.
   `app_update_check` / `app_update_install` (`update.rs`; the release channel is `plugins.updater` in
   `tauri.conf.json`) ship in release and take nothing from the WebView; so do tone recall's
   `plugin_tone_take` / `plugin_tone_import` (raw bytes both ways) and `plugin_tone_forget`.
+  `plugin_folder_add` takes its path from the native dialog alone; `plugin_folder_remove` takes one
+  only to match a stored entry.
 - **Sample-rate pick:** 44.1/48 kHz or the device's own (Audio Settings); the rules,
   and why WASAPI keeps its endpoint's rate on cpal 0.18.1, live in the engine_io briefing
   (`src/engine_io/mod.rs` § Rules).
@@ -111,7 +115,10 @@ Who runs where and what each thread owns. The rules are in bold below the table.
 
 The out-of-process plugin scan is testable WITHOUT the full app: `cargo build`, then
 `target/debug/app.exe --scan-one "<plugin path>"` prints the descriptor JSON and exits (the
-`--scan-one` dispatch runs before Tauri starts). The scan spawns one child per `.clap`/`.vst3` for
+`--scan-one` dispatch runs before Tauri starts). The scan walks its built-in roots, then the
+player's own folders (plugin-folders.json beside the cache: user data, so an unreadable one is an
+error to the folder commands, is never overwritten, and the scan logs it and walks the built-in
+roots alone; `src/host/folders.rs`), one scan at a time in the process. It spawns one child per `.clap`/`.vst3` for
 crash + hang isolation (**20s per-child timeout**: a heavy/licensed VST3 like Neural DSP can hang
 on load in the headless child), but only for bundles whose binary size/mtime changed since the
 cache (plugin-scan.json beside the release log dir under %LOCALAPPDATA%) last saw them (a launch spawns
@@ -139,7 +146,11 @@ plugin-GUI work.
   plugin → always enumerate via `listParams`, never invent an id (`plugin_set_param` refuses an id the
   plugin never listed).
 - Test plugin **Surge XT** (`winget install SurgeSynth.SurgeXT` → `…\CLAP\Surge Synth Team\`, + Surge XT
-  Effects); scan walks `%COMMONPROGRAMFILES%\CLAP`, `%LOCALAPPDATA%\Programs\Common\CLAP`, `CLAP_PATH`.
+  Effects); scan walks `%COMMONPROGRAMFILES%\CLAP`, `%LOCALAPPDATA%\Programs\Common\CLAP`, `CLAP_PATH`,
+  the same three for VST3, then the folders the player added in Audio Settings (`src/host/folders.rs`). A
+  built-in root yields its own format, a player's folder every format. A plugin reached twice keeps the
+  FIRST spelling met, and no path is canonicalised on its way into a descriptor: the tone store and
+  the frontend hash `(format, path, id)` byte for byte, so a respelled path orphans its saved tone.
   Loader is `clack_host::entry::PluginEntry::load` (unsafe), NOT `PluginBundle`.
 - **Plugin editors embed into a host-created top-level Win32 window** (`CreateWindowExW`, OWNER-LESS
   as the editor-hang gotcha above says, NOT reparented into the WebView2 surface), except a CLAP
@@ -170,7 +181,8 @@ plugin-GUI work.
   (`getControllerClassId`→`createInstance`→`initialize`); a JUCE separated controller's `createView` returns
   null until it gets the in-process `AudioProcessor` pointer over a connection-point `notify(IMessage)` (host
   `LfMessage`/`LfAttributeList` + `IConnectionPoint` cross-connect).
-- Scanner handles BOTH VST3 forms: single-file `.vst3` AND folder bundle `Contents/x86_64-win/<inner>.vst3`;
+- Scanner handles BOTH VST3 forms: single-file `.vst3` AND folder bundle `Contents/x86_64-win/<inner>.vst3`
+  (the walk yields the outer path and never enters a bundle);
   descriptor `id` = the class TUID hex. `host/vst3.rs` stays a child mod OF `host/clap.rs` (`#[path]` decl, so
   `vst3::Steinberg` imports don't collide with clack and `super::` keeps meaning); the engine units and
   owners are child mods the same way.

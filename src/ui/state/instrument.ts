@@ -47,6 +47,9 @@ import { pluginDescriptorKey, reconcilePluginDescriptors, samePluginDescriptor }
 // Scanned native plugins available to the picker (empty in the browser build).
 const [availablePlugins, setAvailablePlugins] = createSignal<PluginDescriptor[]>([]);
 const [scanning, setScanning] = createSignal(false);
+// The scan in flight, and the one asked for while it runs (`scanForPlugins`).
+let scanRun: Promise<void> | null = null;
+let scanAgain: { force: boolean } | null = null;
 
 // What the player chose this launch: a source per slot (a synth, a plugin or none) and the active
 // slot. The rig recall (`restorePlugin`) leaves a chosen slot alone and moves the MIDI slot only while
@@ -475,9 +478,11 @@ export async function resyncNativeSlots(): Promise<void> {
 
 /**
  * Scan installed native plugins into `availablePlugins` (no-op / empty in the browser build).
- * Re-entrancy-guarded: a rescan fired while one is in flight is DROPPED (not queued) — the picker's
- * rescan button is also `disabled` during a scan, but the guard additionally covers the startup scan
- * racing a fast manual click and any programmatic double-call via `__lf.scanForPlugins`. Only
+ * One scan runs at a time. A request made while one is in flight is remembered, and ONE more scan
+ * runs when that one ends (forced if any of the waiting requests was): what the running scan walks
+ * was fixed when it started, so a folder added meanwhile (`plugin-folders.ts`) would otherwise stay
+ * unscanned, and the picker ends on the scan that started after the last request. Such a request
+ * resolves when that follow-up is done; `scanning` stays up in between. Only
  * `availablePlugins` is refreshed; loaded slots (`slotPlugins`), routing and audio are untouched, so a
  * rescan never disturbs playback. A plugin still loaded in a slot but MISSING from the fresh scan
  * (e.g. its `--scan-one` child hit the 20s timeout this pass) is merged back into the list, so its
@@ -486,17 +491,36 @@ export async function resyncNativeSlots(): Promise<void> {
 export async function scanForPlugins(opts: { force?: boolean } = {}): Promise<void> {
   if (!platform.pluginHost.available) return;
   if (!nativeHostReady()) return;
-  if (scanning()) return;
-  setScanning(true);
-  try {
-    const scanned = await platform.pluginHost.scanPlugins(opts.force ?? false);
-    setAvailablePlugins(reconcilePluginDescriptors(scanned, slotPlugins()));
-  } catch (e) {
-    console.error('[instrument] plugin scan failed', e);
-    notifyError('Plugin scan failed', e);
-  } finally {
-    setScanning(false);
+  if (scanRun) {
+    scanAgain = { force: (scanAgain?.force ?? false) || (opts.force ?? false) };
+    return scanRun;
   }
+  setScanning(true);
+  scanRun = (async () => {
+    try {
+      for (let next: { force: boolean } | null = { force: opts.force ?? false }; next; next = takeScanAgain()) {
+        try {
+          const scanned = await platform.pluginHost.scanPlugins(next.force);
+          setAvailablePlugins(reconcilePluginDescriptors(scanned, slotPlugins()));
+        } catch (e) {
+          console.error('[instrument] plugin scan failed', e);
+          notifyError('Plugin scan failed', e);
+        }
+      }
+    } finally {
+      // In the same step that found nothing waiting, so no request can land on a finished run.
+      scanRun = null;
+      setScanning(false);
+    }
+  })();
+  return scanRun;
+}
+
+/** The scan asked for while one ran, taken (once). */
+function takeScanAgain(): { force: boolean } | null {
+  const again = scanAgain;
+  scanAgain = null;
+  return again;
 }
 
 // ---------------------------------------------------------------------------

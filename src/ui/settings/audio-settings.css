@@ -265,6 +265,53 @@
   background: var(--surf-2);
 }
 
+/* Plugin folders: the scan's folders, one line each in the value column under the Add folder key (as
+   the bindings sit under LEARN): the host's own in the --dim legend, the player's in --text with the
+   bindings' ✕. A long path is cut with an ellipsis (the line's title has it whole) and never widens
+   the panel; one of the player's that is gone gets the amber note. */
+.audio-settings__folders {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.audio-settings__folder-list {
+  margin: 0;
+  padding: 0 0 0 83px;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.audio-settings__folder {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  min-height: 24px;
+  font-size: 10.5px;
+  color: var(--text);
+}
+.audio-settings__folder--builtin {
+  color: var(--dim);
+}
+.audio-settings__folder-path {
+  flex: 1 1 0;
+  width: 0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.audio-settings__folder-missing {
+  flex: 0 0 auto;
+  font-size: 10px;
+  color: color-mix(in srgb, var(--dub) 55%, var(--dim));
+}
+/* a standard folder this PC does not have is no fault: quiet grey, as the standing hints */
+.audio-settings__folder--builtin .audio-settings__folder-missing {
+  color: var(--faint);
+}
+
 /* a row that cannot act (ASIO unavailable) drops to the --faint legend: tone,
    never an opacity fade */
 .audio-settings__row--disabled .audio-settings__label,

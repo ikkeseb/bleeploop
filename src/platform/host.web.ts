@@ -31,6 +31,15 @@ const webPluginHost: PluginHost = {
   async scanPlugins() {
     return [];
   },
+  async pluginFolders() {
+    return { builtin: [], user: [] };
+  },
+  async addPluginFolder() {
+    return null; // no native folder dialog in the browser build
+  },
+  async removePluginFolder() {
+    return { builtin: [], user: [] };
+  },
   async loadPlugin(_slot, _path, _id, _toneToken) {
     throw new Error(NO_NATIVE_HOST);
   },

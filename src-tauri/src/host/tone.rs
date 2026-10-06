@@ -366,8 +366,8 @@ impl ToneStore {
 
 /// Write `bytes` to a temporary file beside `path`, flush it to disk, then rename it over `path`: a
 /// reader sees the old file or the new one, never half of either. The temporary name is unique per
-/// write, and a failed write removes it.
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
+/// write, and a failed write removes it. The plugin folder list (`folders.rs`) is written this way too.
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let tmp = path.with_extension(format!("tmp-{}-{}", std::process::id(), NEXT.fetch_add(1, Relaxed)));
     let written = std::fs::File::create(&tmp).and_then(|mut file| {

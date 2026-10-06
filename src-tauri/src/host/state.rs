@@ -96,13 +96,39 @@ pub struct AudioOutputDevice {
     pub channels: u32,
 }
 
-/// Shared host state managed by Tauri (`.manage()` in `lib.rs`): the WebView document epoch. The
-/// plugin slots themselves live in engine mode's state (`engine_io::plugins`).
+/// One folder the plugin scan walks, as Audio Settings lists it. Mirrors `PluginFolder` in
+/// `src/platform/host.ts`.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginFolder {
+    pub path: String,
+    /// Whether the folder is there now (a missing one is skipped by the scan).
+    pub exists: bool,
+}
+
+/// The scan's folders (`host/folders.rs`). Mirrors `PluginFolders` in `src/platform/host.ts`:
+/// `builtin` is every root the scan walks by itself (the fixed CLAP and VST3 roots, then the
+/// `CLAP_PATH`/`VST3_PATH` entries), read-only; `user` is the player's own list.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginFolders {
+    pub builtin: Vec<PluginFolder>,
+    pub user: Vec<PluginFolder>,
+}
+
+/// Shared host state managed by Tauri (`.manage()` in `lib.rs`): the WebView document epoch and the
+/// plugin folder list's locks. The plugin slots themselves live in engine mode's state
+/// (`engine_io::plugins`).
 #[derive(Default)]
 pub struct PluginHostState {
     /// Bumped by every `host_init` (one call per WebView document). Loads must present the current
     /// epoch, so an IPC request from a document being replaced cannot reserve or park a slot later.
     pub(crate) frontend_epoch: std::sync::atomic::AtomicU32,
+    /// Held across each change of the plugin folder list, from its read to its rename
+    /// (`host/folders.rs`); never while the folder dialog is open or a scan child runs.
+    pub(crate) folders_write: std::sync::Mutex<()>,
+    /// Up while the folder dialog is open: a second `plugin_folder_add` opens no second dialog.
+    pub(crate) folder_dialog_open: std::sync::atomic::AtomicBool,
 }
 
 impl PluginHostState {

@@ -66,6 +66,7 @@ The installed app tells you when a newer version is out and updates itself from 
 - Two native CLAP/VST3 plugin slots with floating plugin editors; each slot reloads its last plugin at
   launch with the settings you left it at, never armed, and an exported session carries each slot's
   settings.
+- Plugins are found in the standard CLAP and VST3 folders and in any folder you add in Audio Settings.
 - Guitar or line input monitored through your plugin inside the engine's callback: an 8 ms round
   trip at ASIO 64 and 15 ms at 128 on the developer's interface. Takes are placed from the driver's
   reported latency.

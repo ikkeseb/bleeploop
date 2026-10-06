@@ -305,6 +305,10 @@ pub fn run() {
             update::app_update_install,
             host::host_init,
             host::plugin_scan,
+            // The player's own scan folders (host/folders.rs); the add opens the native dialog itself.
+            host::plugin_folders,
+            host::plugin_folder_add,
+            host::plugin_folder_remove,
             host::plugin_load,
             host::plugin_unload,
             host::plugin_list_loaded,

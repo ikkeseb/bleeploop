@@ -22,6 +22,13 @@ import {
   setSampleRatePick,
 } from '../state/audio-devices';
 import { midiDevices, midiStatus } from '../state/midi';
+import {
+  addPluginFolder,
+  pluginFolders,
+  pluginFoldersBusy,
+  refreshPluginFolders,
+  removePluginFolder,
+} from '../state/plugin-folders';
 import { ACTION_LABELS, isLaneAction, type ActionId, type Target } from '../../app/actions';
 import {
   awaitingRelease,
@@ -58,8 +65,8 @@ import './audio-settings.css';
 
 /**
  * Global Audio Settings popover: the engine's input and output device, Share output, the buffer size,
- * the sample rate, the ASIO low-latency tier and its driver, the MIDI learn row and the diagnostics — all
- * GLOBAL last-used preferences. Mounted inside a `<Show>` in app.tsx, so it re-reads persisted state each
+ * the sample rate, the ASIO low-latency tier and its driver, the MIDI learn row, the plugin folders and
+ * the diagnostics — all GLOBAL last-used preferences (the folder list is the native host's to keep). Mounted inside a `<Show>` in app.tsx, so it re-reads persisted state each
  * time it opens (persisted localStorage is the source of truth; these local signals mirror it).
  *
  * A device, buffer, rate or driver pick reopens the engine's device at once (a rate the loops were not
@@ -163,6 +170,7 @@ export function AudioSettings() {
   });
 
   onMount(async () => {
+    void refreshPluginFolders();
     // Refresh the device lists + prune any persisted id no longer present (shared with the startup
     // prune), then re-sync the local signals from the pruned persisted settings — catches a device
     // unplugged since this popover last opened. No-op in the web build.
@@ -522,6 +530,56 @@ export function AudioSettings() {
             )}
           </For>
         </ul>
+      </Show>
+
+      {/* Plugin folders: what the scan walks. The host's own folders are read-only; the player's are
+          added through the native folder dialog (the host opens it) and removed with ✕. Each change is
+          followed by a scan (`state/plugin-folders.ts`); a folder that is gone says so and is skipped. */}
+      <Show when={platform.pluginHost.available}>
+        <div class="audio-settings__folders" role="group" aria-label="Plugin folders">
+          <div class="audio-settings__row" title="The folders the plugin scan walks">
+            <span class="audio-settings__label">folders</span>
+            <button
+              type="button"
+              class="audio-settings__btn"
+              disabled={scanning() || pluginFoldersBusy()}
+              onClick={() => void addPluginFolder()}
+            >
+              Add folder…
+            </button>
+          </div>
+          <ul class="audio-settings__folder-list">
+            <For each={pluginFolders().builtin}>
+              {(folder) => (
+                <li class="audio-settings__folder audio-settings__folder--builtin" title={folder.path}>
+                  <span class="audio-settings__folder-path">{folder.path}</span>
+                  <Show when={!folder.exists}>
+                    <span class="audio-settings__folder-missing">missing</span>
+                  </Show>
+                </li>
+              )}
+            </For>
+            <For each={pluginFolders().user}>
+              {(folder) => (
+                <li class="audio-settings__folder" title={folder.path}>
+                  <span class="audio-settings__folder-path">{folder.path}</span>
+                  <Show when={!folder.exists}>
+                    <span class="audio-settings__folder-missing">missing</span>
+                  </Show>
+                  <button
+                    type="button"
+                    class="audio-settings__binding-clear"
+                    disabled={pluginFoldersBusy()}
+                    onClick={() => void removePluginFolder(folder.path)}
+                    aria-label={`Remove folder ${folder.path}`}
+                  >
+                    ✕
+                  </button>
+                </li>
+              )}
+            </For>
+          </ul>
+        </div>
       </Show>
 
       {/* Diagnostics: the read-only host/engine/plugin/midi status. The command-bar system lamp is

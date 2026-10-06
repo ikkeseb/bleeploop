@@ -84,6 +84,20 @@ export interface AudioOutputDevice {
   channels: number;
 }
 
+/** One folder the plugin scan walks, and whether it is there now (a missing one is skipped). */
+export interface PluginFolder {
+  path: string;
+  exists: boolean;
+}
+
+/** The plugin scan's folders (`src-tauri/src/host/folders.rs`): `builtin` is what the scan walks by
+ * itself (the standard CLAP and VST3 folders, then `CLAP_PATH`/`VST3_PATH`), read-only; `user` is the
+ * player's own list, kept in `plugin-folders.json`. */
+export interface PluginFolders {
+  builtin: PluginFolder[];
+  user: PluginFolder[];
+}
+
 export interface PluginHost {
   /** False in the browser build — UI then surfaces the six built-in synths in both slots. */
   readonly available: boolean;
@@ -98,6 +112,17 @@ export interface PluginHost {
    * rescan button) scans everything again, which is also how a previously failed bundle is retried.
    */
   scanPlugins(force?: boolean): Promise<PluginDescriptor[]>;
+  /** The folders the scan walks. Rejects when the stored list cannot be read (the host leaves that
+   * file as it is). Empty in the web build. */
+  pluginFolders(): Promise<PluginFolders>;
+  /**
+   * Add a folder to the player's own. The native host opens its folder dialog itself and takes the
+   * path from it: none is passed from here. Resolves with the new lists, or null when the player
+   * cancels (and in the web build). The next `scanPlugins` walks it.
+   */
+  addPluginFolder(): Promise<PluginFolders | null>;
+  /** Remove one of the player's folders, spelled as `pluginFolders` listed it; the new lists. */
+  removePluginFolder(path: string): Promise<PluginFolders>;
   /**
    * `id` is required, not optional: a single `.clap`/`.vst3` bundle can export multiple plugin
    * descriptors, so `(slot, path)` alone would silently load `descriptor[0]`. Pass the

@@ -11,6 +11,7 @@ import type {
   LogFolder,
   Platform,
   PluginDescriptor,
+  PluginFolders,
   PluginHost,
   PluginInfo,
   PluginParamDesc,
@@ -57,6 +58,15 @@ const tauriPluginHost: PluginHost = {
   },
   scanPlugins(force = false) {
     return invoke<PluginDescriptor[]>('plugin_scan', { force });
+  },
+  pluginFolders() {
+    return invoke<PluginFolders>('plugin_folders');
+  },
+  addPluginFolder() {
+    return invoke<PluginFolders | null>('plugin_folder_add');
+  },
+  removePluginFolder(path) {
+    return invoke<PluginFolders>('plugin_folder_remove', { path });
   },
   loadPlugin(slot, path, id, toneToken) {
     if (frontendEpoch === 0) throw new Error('plugin host not initialized');

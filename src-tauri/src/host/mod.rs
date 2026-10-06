@@ -16,7 +16,7 @@
 //!
 //! Split out of the original single-file `plugin_host.rs`: `state.rs` (shared IPC-mirrored types +
 //! `PluginHostState`), `commands.rs` (the `#[tauri::command]` surface), `scan.rs` (out-of-process
-//! plugin scan), `rt_alloc.rs` (DEV global-allocator shim), `editor_window.rs` (format-agnostic host
+//! plugin scan), `folders.rs` (the player's own scan folders), `rt_alloc.rs` (DEV global-allocator shim), `editor_window.rs` (format-agnostic host
 //! editor window), `clap.rs` (the shared CLAP host plumbing, plus the VST3 second format as its
 //! `vst3.rs` child module and the engine slots).
 
@@ -25,6 +25,8 @@ mod clap;
 mod commands;
 #[cfg(windows)]
 mod editor_window;
+#[cfg(windows)]
+mod folders;
 #[cfg(debug_assertions)]
 pub(crate) mod rt_alloc;
 #[cfg(windows)]

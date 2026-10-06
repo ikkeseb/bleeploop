@@ -1,7 +1,7 @@
 //! P9.1 CLAP scan. `scan_one` runs in the child process (loads one bundle via clack-host's
 //! `PluginEntry::load` — API verified vs docs.rs/clack-host 0.1.0: the loader is `PluginEntry`, NOT
 //! `PluginBundle`, and factory enumeration needs no `Host`). `scan_all` is the parent: it walks the
-//! CLAP + VST3 search dirs and spawns one child per bundle, so a crashy bundle can't take down the
+//! CLAP + VST3 search dirs, then the player's own folders (`folders.rs`), and spawns one child per bundle, so a crashy bundle can't take down the
 //! host — but only for bundles whose binary changed since the last scan: `ScanCache` remembers each
 //! bundle's descriptors (or its failure) under a size + mtime fingerprint, so a launch spawns no
 //! foreign code at all until a plugin is installed or updated, and a hung bundle costs its 20 s
@@ -437,6 +437,150 @@ mod tests {
         }
     }
 
+    impl Scratch {
+        /// A file at `rel` under the scratch dir (parents made), as a fake plugin binary.
+        fn file(&self, rel: &str) -> PathBuf {
+            let p = self.0.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, b"x").unwrap();
+            p
+        }
+        /// A VST3 folder bundle at `rel`, its inner DLL in place; answers the OUTER path.
+        fn vst3_bundle(&self, rel: &str) -> PathBuf {
+            let outer = self.0.join(rel);
+            let inner = outer.file_name().unwrap().to_string_lossy().into_owned();
+            self.file(&format!("{rel}/Contents/x86_64-win/{inner}"));
+            outer
+        }
+    }
+
+    fn user(path: &Path) -> Root {
+        Root { path: path.to_path_buf(), only: None }
+    }
+    fn builtin(path: &Path, format: Format) -> Root {
+        Root { path: path.to_path_buf(), only: Some(format) }
+    }
+    fn sorted(mut paths: Vec<PathBuf>) -> Vec<PathBuf> {
+        paths.sort();
+        paths
+    }
+
+    #[test]
+    fn a_user_folder_yields_every_format_and_a_bundle_is_never_entered() {
+        let scratch = Scratch::new("walk-user");
+        let clap = scratch.file("mixed/Vendor/Synth.clap");
+        let bundle = scratch.vst3_bundle("mixed/Vendor/Bundle.vst3");
+        let single = scratch.file("mixed/Single.VST3");
+        // Inside the bundle: a stray `.clap` and a second inner `.vst3`. Neither is a plugin.
+        scratch.file("mixed/Vendor/Bundle.vst3/Contents/Resources/stray.clap");
+        scratch.file("mixed/Vendor/Bundle.vst3/Contents/x86_64-win/Other.vst3");
+        // A directory that only looks like a CLAP, and a file of no format.
+        std::fs::create_dir_all(scratch.0.join("mixed/Folder.clap")).unwrap();
+        scratch.file("mixed/readme.txt");
+        let nested_clap = scratch.file("mixed/Folder.clap/Real.clap");
+
+        let found = find_bundles(&[user(&scratch.0.join("mixed"))]);
+        assert_eq!(sorted(found), sorted(vec![clap, bundle, single, nested_clap]));
+    }
+
+    #[test]
+    fn a_builtin_root_yields_only_its_own_format() {
+        let scratch = Scratch::new("walk-builtin");
+        let clap = scratch.file("root/A.clap");
+        let single = scratch.file("root/B.vst3");
+        let bundle = scratch.vst3_bundle("root/C.vst3");
+        let root = scratch.0.join("root");
+        assert_eq!(find_bundles(&[builtin(&root, Format::Clap)]), vec![clap.clone()]);
+        assert_eq!(
+            sorted(find_bundles(&[builtin(&root, Format::Vst3)])),
+            sorted(vec![single.clone(), bundle.clone()])
+        );
+        // The CLAP roots are walked first, as the scan always listed them.
+        let both = find_bundles(&[builtin(&root, Format::Clap), builtin(&root, Format::Vst3)]);
+        assert_eq!(both[0], clap);
+        assert_eq!(both.len(), 3);
+    }
+
+    #[test]
+    fn overlapping_roots_yield_a_plugin_once_in_the_first_spelling() {
+        let scratch = Scratch::new("walk-overlap");
+        let clap = scratch.file("Root/Sub/A.clap");
+        let bundle = scratch.vst3_bundle("Root/Sub/B.vst3");
+        let root = scratch.0.join("Root");
+        // The same folder in another case, and a folder inside it: every plugin was met already.
+        let shouted = PathBuf::from(root.to_string_lossy().to_uppercase());
+        let inner = root.join("Sub");
+        let roots = [
+            builtin(&root, Format::Clap),
+            builtin(&root, Format::Vst3),
+            user(&shouted),
+            user(&inner),
+        ];
+        assert_eq!(find_bundles(&roots), vec![clap.clone(), bundle.clone()]);
+        // First seen wins, whichever root that is.
+        let found = find_bundles(&[user(&shouted), builtin(&root, Format::Clap)]);
+        assert_eq!(found.len(), 2);
+        assert!(found.iter().all(|p| p.starts_with(&shouted)), "{found:?}");
+        assert!(!found.contains(&clap));
+    }
+
+    #[test]
+    fn a_root_inside_a_bundle_and_a_missing_root_yield_nothing() {
+        let scratch = Scratch::new("walk-edges");
+        let bundle = scratch.vst3_bundle("vst/Bundle.vst3");
+        scratch.file("vst/Bundle.vst3/Contents/Resources/stray.clap");
+        let good = scratch.file("good/A.clap");
+        let roots = [
+            user(&bundle.join("Contents")),
+            user(&bundle.join("Contents").join("x86_64-win")),
+            user(&scratch.0.join("never-made")),
+            user(&scratch.0.join("good")),
+        ];
+        assert_eq!(find_bundles(&roots), vec![good]);
+        // The bundle itself as a root is that one plugin (what a `VST3_PATH` entry naming a bundle
+        // always found).
+        assert_eq!(find_bundles(&[user(&bundle)]), vec![bundle]);
+    }
+
+    /// A directory junction: a link Windows makes without the privilege a symlink needs.
+    fn junction(link: &Path, target: &Path) {
+        let made = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .output()
+            .unwrap();
+        assert!(made.status.success(), "mklink /J: {}", String::from_utf8_lossy(&made.stderr));
+    }
+
+    #[test]
+    fn a_linked_bundle_is_one_plugin_and_a_link_into_a_bundle_yields_nothing() {
+        let scratch = Scratch::new("walk-links");
+        scratch.vst3_bundle("real/Bundle.vst3");
+        // A root that is a link to a bundle: the walk follows a root link, and must still stop there.
+        // (`cmd` reads a `/` in a path as a switch: the junction's target is spelled with `\\`.)
+        let bundle_dir = scratch.0.join("real").join("Bundle.vst3");
+        let alias = scratch.0.join("Alias.vst3");
+        junction(&alias, &bundle_dir);
+        assert_eq!(find_bundles(&[user(&alias)]), vec![alias.clone()]);
+        // A root whose spelling hides that it lies inside a bundle.
+        let inside = scratch.0.join("Inside");
+        junction(&inside, &bundle_dir.join("Contents").join("x86_64-win"));
+        assert_eq!(find_bundles(&[user(&inside)]), Vec::<PathBuf>::new());
+    }
+
+    #[test]
+    fn the_builtin_roots_are_each_formats_own_in_scan_order() {
+        let roots = builtin_roots();
+        let first_vst3 = roots.iter().position(|r| r.only == Some(Format::Vst3)).unwrap();
+        assert!(first_vst3 > 0, "the CLAP roots come first");
+        assert!(roots[..first_vst3].iter().all(|r| r.only == Some(Format::Clap)));
+        assert!(roots[first_vst3..].iter().all(|r| r.only == Some(Format::Vst3)));
+        let common = std::env::var("CommonProgramFiles").unwrap();
+        assert_eq!(roots[0].path, Path::new(&common).join("CLAP"));
+        assert_eq!(roots[first_vst3].path, Path::new(&common).join("VST3"));
+    }
+
     #[test]
     fn cache_reuses_unchanged_bundles_and_rescans_changed_or_forced_ones() {
         let scratch = Scratch::new("reuse");
@@ -546,98 +690,116 @@ mod tests {
 
 /// `.vst3` by extension (either form); everything else scans as CLAP.
 fn is_vst3(path: &Path) -> bool {
-    path.extension()
-        .map(|e| e.eq_ignore_ascii_case("vst3"))
-        .unwrap_or(false)
+    Format::of(path) == Some(Format::Vst3)
 }
 
-/// CLAP search paths (Windows): `%COMMONPROGRAMFILES%\CLAP`,
-/// `%LOCALAPPDATA%\Programs\Common\CLAP`, and every `;`-separated entry of `CLAP_PATH`.
-fn search_dirs() -> Vec<PathBuf> {
-    let mut dirs = Vec::new();
-    if let Ok(cpf) = std::env::var("CommonProgramFiles") {
-        dirs.push(Path::new(&cpf).join("CLAP"));
-    }
-    if let Ok(lad) = std::env::var("LOCALAPPDATA") {
-        dirs.push(Path::new(&lad).join("Programs").join("Common").join("CLAP"));
-    }
-    if let Ok(cp) = std::env::var("CLAP_PATH") {
-        for p in cp.split(';').filter(|s| !s.is_empty()) {
-            dirs.push(PathBuf::from(p));
-        }
-    }
-    dirs
+/// A plugin format the scan finds, by its bundle's extension. A new format is one more variant
+/// here (its extension, its standard folder and its search-path variable) and a candidate rule in
+/// `find_bundles`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Format {
+    Clap,
+    Vst3,
 }
 
-/// Recursively find every `*.clap` under the search dirs (Surge installs to a nested
-/// `CLAP\Surge Synth Team\` subdir, so the walk must recurse).
-fn find_clap_files() -> Vec<PathBuf> {
-    let mut found = Vec::new();
-    for dir in search_dirs() {
-        if !dir.is_dir() {
-            continue;
+impl Format {
+    /// In scan order: the picker lists CLAP before VST3.
+    const ALL: [Format; 2] = [Format::Clap, Format::Vst3];
+
+    fn extension(self) -> &'static str {
+        match self {
+            Format::Clap => "clap",
+            Format::Vst3 => "vst3",
         }
-        for entry in walkdir::WalkDir::new(&dir).into_iter().filter_map(|e| e.ok()) {
-            let p = entry.path();
-            if p.extension()
-                .map(|e| e.eq_ignore_ascii_case("clap"))
-                .unwrap_or(false)
-            {
-                found.push(p.to_path_buf());
+    }
+
+    /// The format's folder under the two common-files dirs, and its `;`-separated search-path
+    /// variable.
+    fn standard_dir(self) -> (&'static str, &'static str) {
+        match self {
+            Format::Clap => ("CLAP", "CLAP_PATH"),
+            Format::Vst3 => ("VST3", "VST3_PATH"),
+        }
+    }
+
+    fn of(path: &Path) -> Option<Format> {
+        let extension = path.extension()?;
+        Format::ALL.into_iter().find(|f| extension.eq_ignore_ascii_case(f.extension()))
+    }
+}
+
+/// One folder the scan walks. `only`: the one format a built-in root yields; `None` is a folder
+/// the player added (`folders.rs`), which yields every format.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Root {
+    pub(crate) path: PathBuf,
+    pub(crate) only: Option<Format>,
+}
+
+/// The roots the scan walks by itself, in scan order: per format, `%COMMONPROGRAMFILES%\<FORMAT>`,
+/// `%LOCALAPPDATA%\Programs\Common\<FORMAT>`, then every `;`-separated entry of `CLAP_PATH` /
+/// `VST3_PATH`. The player's own folders come after these (`scan_all`).
+pub(crate) fn builtin_roots() -> Vec<Root> {
+    let mut roots = Vec::new();
+    for format in Format::ALL {
+        let (dir, path_var) = format.standard_dir();
+        let mut push = |path: PathBuf| roots.push(Root { path, only: Some(format) });
+        if let Ok(cpf) = std::env::var("CommonProgramFiles") {
+            push(Path::new(&cpf).join(dir));
+        }
+        if let Ok(lad) = std::env::var("LOCALAPPDATA") {
+            push(Path::new(&lad).join("Programs").join("Common").join(dir));
+        }
+        if let Ok(paths) = std::env::var(path_var) {
+            for p in paths.split(';').filter(|s| !s.is_empty()) {
+                push(PathBuf::from(p));
             }
         }
     }
-    found
+    roots
 }
 
-/// VST3 search paths (Windows): `%COMMONPROGRAMFILES%\VST3`,
-/// `%LOCALAPPDATA%\Programs\Common\VST3`, and every `;`-separated entry of `VST3_PATH`.
-fn vst3_search_dirs() -> Vec<PathBuf> {
-    let mut dirs = Vec::new();
-    if let Ok(cpf) = std::env::var("CommonProgramFiles") {
-        dirs.push(Path::new(&cpf).join("VST3"));
-    }
-    if let Ok(lad) = std::env::var("LOCALAPPDATA") {
-        dirs.push(Path::new(&lad).join("Programs").join("Common").join("VST3"));
-    }
-    if let Ok(vp) = std::env::var("VST3_PATH") {
-        for p in vp.split(';').filter(|s| !s.is_empty()) {
-            dirs.push(PathBuf::from(p));
-        }
-    }
-    dirs
-}
-
-/// Find every `*.vst3` entry under the VST3 search dirs. On Windows a `.vst3` is EITHER a folder
-/// bundle (`Name.vst3/Contents/x86_64-win/Inner.vst3` — e.g. Surge XT, often under a vendor
-/// subdir) OR a single DLL file with a `.vst3` extension (e.g. Neural DSP, ~100 MB). We collect
-/// the OUTER path for both forms; `resolve_vst3_binary` later resolves the loadable DLL. We must
-/// NOT also yield the inner DLL inside a bundle (its path ends `.vst3` too) — so we drop any
-/// match that has a `.vst3` ancestor directory. Verified against the on-PC install layout.
-fn find_vst3_paths() -> Vec<PathBuf> {
+/// Walk `roots` in order and collect each plugin's OUTER path, spelled as the walk met it: that
+/// string becomes the descriptor's `path`, which the tone store and the frontend hash byte for
+/// byte, so it is never canonicalised (a changed spelling would orphan saved tones). A plugin
+/// reached twice (overlapping roots, one folder in two spellings) is kept once, in the FIRST
+/// spelling seen (`folders::path_key`); the built-in roots come first, so a folder the player adds
+/// never respells a plugin they already find. A missing root is skipped.
+///
+/// The walk recurses (Surge installs to a nested `CLAP\Surge Synth Team\`). A `.clap` candidate
+/// must be a file. On Windows a `.vst3` is EITHER a folder bundle
+/// (`Name.vst3/Contents/x86_64-win/Inner.vst3`, e.g. Surge XT) OR a single DLL with that extension
+/// (e.g. Neural DSP); both yield their outer path (`resolve_vst3_binary` finds the DLL later) and
+/// the walk never descends into a bundle, whose inner DLL ends `.vst3` too. A root that lies inside
+/// a bundle yields nothing, also when it is a link into one.
+fn find_bundles(roots: &[Root]) -> Vec<PathBuf> {
     let mut found = Vec::new();
-    for dir in vst3_search_dirs() {
-        if !dir.is_dir() {
+    let mut seen = std::collections::HashSet::new();
+    for root in roots {
+        // Where the root really is decides whether it lies inside a bundle: a link's own spelling
+        // can hide that. Only the check uses the resolved path; what is walked and yielded stays
+        // spelled as given.
+        let resolved = std::fs::canonicalize(&root.path).unwrap_or_else(|_| root.path.clone());
+        if !root.path.is_dir() || [&root.path, &resolved].iter().any(|p| p.ancestors().skip(1).any(is_vst3)) {
             continue;
         }
-        for entry in walkdir::WalkDir::new(&dir).into_iter().filter_map(|e| e.ok()) {
-            let p = entry.path();
-            let is_vst3 = p
-                .extension()
-                .map(|e| e.eq_ignore_ascii_case("vst3"))
-                .unwrap_or(false);
-            if !is_vst3 {
-                continue;
+        let mut walk = walkdir::WalkDir::new(&root.path).into_iter();
+        while let Some(entry) = walk.next() {
+            let Ok(entry) = entry else { continue };
+            let path = entry.path();
+            let Some(format) = Format::of(path) else { continue };
+            // The walk follows a ROOT that is a link (and reports it as a link, not a directory);
+            // a link met further down is never followed, so there is nothing to skip there.
+            if format == Format::Vst3 && (entry.file_type().is_dir() || (entry.depth() == 0 && path.is_dir())) {
+                walk.skip_current_dir();
             }
-            // Skip the inner DLL inside a bundle: an ancestor ending in `.vst3` means this entry
-            // is `<bundle>.vst3/Contents/x86_64-win/<inner>.vst3`, not a top-level plugin.
-            let inside_bundle = p.ancestors().skip(1).any(|a| {
-                a.extension()
-                    .map(|e| e.eq_ignore_ascii_case("vst3"))
-                    .unwrap_or(false)
-            });
-            if !inside_bundle {
-                found.push(p.to_path_buf());
+            let wanted = root.only.is_none_or(|only| only == format);
+            let candidate = match format {
+                Format::Clap => path.is_file(),
+                Format::Vst3 => true,
+            };
+            if wanted && candidate && seen.insert(super::folders::path_key(path)) {
+                found.push(path.to_path_buf());
             }
         }
     }
@@ -967,17 +1129,33 @@ fn run_gated_child(
     }
 }
 
-/// PARENT side: walk the search dirs, reuse the cache for every bundle whose binary is unchanged
+/// At most one `scan_all` runs in the process: two at once would spawn each bundle's child twice and
+/// race their cache writes. Held for the whole scan, so only ever taken on a blocking thread.
+static SCAN_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// PARENT side: walk the built-in roots and then the player's folders (`folders_path`, the list in
+/// `folders.rs`; None or unusable = the built-in roots only), reuse the cache for every bundle whose binary is unchanged
 /// (unless `force`), spawn `app.exe --scan-one <path>` for the rest, aggregate, write the cache
 /// back. A bundle whose child exits non-zero (handled error OR hard crash), times out, or whose
 /// stdout doesn't parse is logged as `failed` and remembered as such; the parent always survives.
 /// `cache_path` None (no app data dir) = scan everything, remember nothing. Emits the P9.1 gate
 /// diag in debug builds.
-pub fn scan_all(cache_path: Option<&Path>, force: bool) -> Result<Vec<PluginDescriptor>, String> {
+pub fn scan_all(
+    cache_path: Option<&Path>,
+    folders_path: Option<&Path>,
+    force: bool,
+) -> Result<Vec<PluginDescriptor>, String> {
+    let _scan = SCAN_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let started = Instant::now();
     let exe = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
-    let mut files = find_clap_files();
-    files.extend(find_vst3_paths());
+    // The roots as they are when this scan starts: a folder added while it runs is the next scan's.
+    let mut roots = builtin_roots();
+    match folders_path.map(super::folders::load) {
+        Some(Ok(folders)) => roots.extend(folders.into_iter().map(|f| Root { path: PathBuf::from(f), only: None })),
+        Some(Err(e)) => log::warn!("[scan] plugin folder list unusable ({e}); scanning the built-in folders only"),
+        None => {}
+    }
+    let files = find_bundles(&roots);
     let previous = match cache_path {
         Some(p) if !force => ScanCache::load(p),
         _ => ScanCache::default(),

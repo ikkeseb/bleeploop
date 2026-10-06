@@ -11,7 +11,10 @@
 //!   - every command returns `Result<_, String>` so a stub/error surfaces as a rejected JS promise
 //!     rather than a panic across the IPC boundary.
 
-use super::state::{AudioInputDevice, AudioOutputDevice, ParamDesc, PluginDescriptor, PluginHostState, PluginInfo, ToneImport};
+use super::state::{
+    AudioInputDevice, AudioOutputDevice, ParamDesc, PluginDescriptor, PluginFolders, PluginHostState, PluginInfo,
+    ToneImport,
+};
 
 fn validate_slot(slot: u8) -> Result<(), String> {
     match slot {
@@ -36,30 +39,131 @@ pub async fn host_init(
     log::info!("[plugin_host] host_init: sample_rate={sample_rate} frontend_epoch={frontend_epoch}");
     Ok(frontend_epoch)
 }
-/// P9.1: hand-rolled out-of-process `walkdir` scan of the CLAP + VST3 search paths. Each bundle is
+/// P9.1: hand-rolled out-of-process `walkdir` scan of the CLAP + VST3 search paths and the player's
+/// own folders (`plugin-folders.json`, `host/folders.rs`). Each bundle is
 /// loaded in a short-lived `--scan-one` child process (foreign entry-init code can crash and
 /// `catch_unwind` can't contain a C abort — only a process boundary makes a bad bundle survivable),
 /// unless the scan cache under the app's local data dir (`plugin-scan.json`) already knows that
-/// binary; `force` (the picker's rescan button) bypasses and rewrites it. Emits the gate diag in
-/// debug builds.
+/// binary; `force` (the picker's rescan button) bypasses and rewrites it. One scan runs at a time
+/// (`scan::scan_all`), on a blocking thread. Emits the gate diag in debug builds.
 #[tauri::command]
 pub async fn plugin_scan(app: tauri::AppHandle, force: bool) -> Result<Vec<PluginDescriptor>, String> {
     #[cfg(windows)]
     {
         use tauri::Manager;
-        let cache_path = match app.path().app_local_data_dir() {
-            Ok(dir) => Some(dir.join("plugin-scan.json")),
+        let data_dir = match app.path().app_local_data_dir() {
+            Ok(dir) => Some(dir),
             Err(e) => {
-                log::warn!("[scan] no app-local data dir ({e}); scanning without a cache");
+                log::warn!("[scan] no app-local data dir ({e}); scanning the built-in folders without a cache");
                 None
             }
         };
-        super::scan::scan_all(cache_path.as_deref(), force)
+        tauri::async_runtime::spawn_blocking(move || {
+            let cache_path = data_dir.as_ref().map(|dir| dir.join("plugin-scan.json"));
+            let folders_path = data_dir.as_ref().map(|dir| dir.join(FOLDERS_FILE));
+            super::scan::scan_all(cache_path.as_deref(), folders_path.as_deref(), force)
+        })
+        .await
+        .map_err(|e| format!("plugin scan task: {e}"))?
     }
     #[cfg(not(windows))]
     {
         let _ = (app, force);
         Ok(Vec::new())
+    }
+}
+
+/// The player's plugin folder list, beside the scan cache in the app's local data dir.
+#[cfg(windows)]
+const FOLDERS_FILE: &str = "plugin-folders.json";
+
+#[cfg(windows)]
+fn folders_file(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    use tauri::Manager;
+    let dir = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|e| format!("app_local_data_dir: {e}"))?;
+    Ok(dir.join(FOLDERS_FILE))
+}
+
+/// The folders the scan walks: its built-in roots (read-only) and the player's own
+/// (`host/folders.rs`). An `Err` when the stored list cannot be read; it is then left as it is.
+#[tauri::command]
+pub async fn plugin_folders(app: tauri::AppHandle) -> Result<PluginFolders, String> {
+    #[cfg(windows)]
+    {
+        let user = super::folders::load(&folders_file(&app)?)?;
+        Ok(super::folders::view(&user))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = app;
+        Err("plugin_folders is Windows-only".to_string())
+    }
+}
+
+/// Add a plugin folder the player picks in the native folder dialog; `Ok(None)` = cancelled. The
+/// path comes from the dialog alone: the WebView supplies none. The dialog runs on the UI thread,
+/// owned by the main window it belongs to (`folders::pick_folder`), and its answer comes back over a
+/// channel; no lock is held while it is open.
+#[tauri::command]
+pub async fn plugin_folder_add(
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, PluginHostState>,
+) -> Result<Option<PluginFolders>, String> {
+    #[cfg(windows)]
+    {
+        use std::sync::atomic::Ordering::SeqCst;
+        use tauri::Manager;
+        let file = folders_file(window.app_handle())?;
+        if state.folder_dialog_open.swap(true, SeqCst) {
+            return Err("the folder dialog is already open".to_string());
+        }
+        let (tx, mut rx) = tauri::async_runtime::channel(1);
+        let owner = window.clone();
+        let shown = window.run_on_main_thread(move || {
+            let picked = owner
+                .hwnd()
+                .map_err(|e| format!("main window handle: {e}"))
+                .and_then(super::folders::pick_folder);
+            let _ = tx.try_send(picked);
+        });
+        // A closure that never ran (the app is closing) drops its sender: `recv` answers None.
+        let picked = match shown {
+            Ok(()) => rx.recv().await.unwrap_or_else(|| Err("the folder dialog did not run".to_string())),
+            Err(e) => Err(format!("folder dialog: {e}")),
+        };
+        state.folder_dialog_open.store(false, SeqCst);
+        let Some(folder) = picked? else { return Ok(None) };
+        let user = super::folders::add(&state.folders_write, &file, &folder)?;
+        log::info!("[scan] plugin folder added: {folder}");
+        Ok(Some(super::folders::view(&user)))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (window, state);
+        Err("plugin_folder_add is Windows-only".to_string())
+    }
+}
+
+/// Remove `path` from the player's plugin folders: only an entry spelled exactly so is taken.
+#[tauri::command]
+pub async fn plugin_folder_remove(
+    path: String,
+    app: tauri::AppHandle,
+    state: tauri::State<'_, PluginHostState>,
+) -> Result<PluginFolders, String> {
+    #[cfg(windows)]
+    {
+        let user = super::folders::remove(&state.folders_write, &folders_file(&app)?, &path)?;
+        log::info!("[scan] plugin folder removed: {path}");
+        Ok(super::folders::view(&user))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (path, app, state);
+        Err("plugin_folder_remove is Windows-only".to_string())
     }
 }
 /// Load plugin `id` from `path` into the engine's `slot` (≤ 15 s) for the document with
