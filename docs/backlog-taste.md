@@ -69,10 +69,12 @@ added a line.
 
 - **The owner's own ideas, not scheduled:** full panel drag, with plugin editors inline, each filling
   its panel (the layout vision of 2026-06-17; the movable, hideable keyboard is built). COPY with a
-  delay offset (2026-09-18) waits on STATUS D29.
+  delay offset (2026-09-18) waits on STATUS D29. A time signature the player picks (3/4, 6/8 and so
+  on; 2026-10-06): `beatsPerBar = 4` runs through the grid math, the click and the count-in, which is
+  gate-adjacent timing code.
 - **Not built on purpose** (no owner or tester ask; each would add its own lap): a FREE tempo-setting
-  first take and 3/4 or 6/8 (`beatsPerBar = 4` runs through the grid math, the click and the count-in:
-  gate-adjacent timing code); more built-in synths (they fill layers, they do not compete with
+  first take (it meets the same `beatsPerBar = 4` code as the time signature above); more built-in
+  synths (they fill layers, they do not compete with
   plugins); a recent-jams shelf (keep the last N recovery archives on ✕ ALL and close, offered in
   IMPORT, M); resampling on import or recovery (S); one `.pill` primitive with type tokens; a rhythm
   guide, three GM-kit grooves on the master pulse instead of the click (M, ear-gated).
