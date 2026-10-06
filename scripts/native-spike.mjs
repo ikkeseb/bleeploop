@@ -12,6 +12,7 @@
 
 import { execFileSync, spawn } from 'node:child_process';
 import { createWriteStream, mkdirSync } from 'node:fs';
+import { setPriority, constants } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { appRunning, assertWindows } from './native-kill.mjs';
@@ -65,6 +66,12 @@ function probe(label, args, timeoutS) {
   return new Promise((resolve) => {
     say(`--- ${label}: app.exe ${args.join(' ')}`);
     const child = spawn(exe, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    // Launch at Normal like the owner's app; the rig's BelowNormal tmux shell passes its class on.
+    try {
+      setPriority(child.pid, constants.priority.PRIORITY_NORMAL);
+    } catch (e) {
+      say(`${label}: launch kept the shell's priority: ${e instanceof Error ? e.message : String(e)}`);
+    }
     const result = { label, json: [], verdicts: [], invalid: null, exit: null };
     const timer = setTimeout(() => {
       say(`${label}: TIMEOUT after ${timeoutS} s`);

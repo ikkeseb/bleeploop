@@ -120,11 +120,13 @@ blocks until the verdict, so an agent harness should run it in the background.
   it. (*Claude Code specifics:* background via the PowerShell `run_in_background` tool, poll with a
   Bash `run_in_background` `until grep -q … ; do sleep 2; done` loop; that harness blocks foreground
   `sleep` and PowerShell `Start-Sleep`+chaining.)
-- **A probe inherits its shell's priority class.** Windows processes started from the rig PC's logon
-  tmux session run at below-normal priority (the scheduled task's priority 7), so `cargo` and a
-  rig-launched app do too: the app's callback threads still sit at MMCSS 24–25, its other threads at
-  6 where a player's launch has 8. `cmd.exe /c start /normal /b /wait <exe> …` launches at normal.
-  Whether the class moves a result is not settled (`src-tauri/AGENTS.md` § Open threads, the join).
+- **The app runs at Normal priority class on the rig, as the owner's does.** Windows processes
+  started from the rig PC's logon tmux session run at below-normal priority (the scheduled task's
+  priority 7), `cargo` included. `native:engine`, `native:spike` and `release:smoke` raise the app
+  they spawn to Normal (MMCSS callback threads sit at 24–25 either way); `native:probe` launches
+  through `tauri dev` and keeps the shell's class, as does an exe started by hand:
+  `cmd.exe /c start /normal /b /wait <exe> …` launches at normal. Whether the class moves a result is
+  not settled (`src-tauri/AGENTS.md` § Open threads, the join).
 - The plugin scan works WITHOUT the full app (`--scan-one`): see `src-tauri/AGENTS.md`
   "Native-host verify ops".
 - **When to run the plugin probes, and their baselines** (the verdict alone doesn't say this). Narrow

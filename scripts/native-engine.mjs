@@ -21,6 +21,7 @@
 
 import { execFileSync, spawn } from 'node:child_process';
 import { createWriteStream, mkdirSync } from 'node:fs';
+import { setPriority, constants } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { appRunning, assertWindows } from './native-kill.mjs';
@@ -88,6 +89,14 @@ const args = opt.lag
 const timeoutS = Number(opt.seconds) + (15 + Number(opt.hold || 0) + Number(opt.pause || 0) / 1000) * Number(opt.switches) + 30 * Number(opt.swaps) + 300;
 log.write(`app.exe ${args.join(' ')}\n`);
 const child = spawn(exe, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+// Launch at Normal like the owner's app; the rig's BelowNormal tmux shell passes its class on.
+try {
+  setPriority(child.pid, constants.priority.PRIORITY_NORMAL);
+} catch (e) {
+  const line = `native:engine: launch kept the shell's priority: ${e instanceof Error ? e.message : String(e)}`;
+  console.log(line);
+  log.write(`${line}\n`);
+}
 const timer = setTimeout(() => {
   console.log(`native:engine: TIMEOUT after ${timeoutS} s`);
   child.kill();

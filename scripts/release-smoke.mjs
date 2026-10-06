@@ -70,6 +70,7 @@
 
 import { execFileSync, spawn } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { setPriority, constants } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
@@ -251,6 +252,12 @@ const child = spawn(opts.exe, [], {
 });
 child.unref();
 const pid = child.pid;
+// Launch at Normal like the owner's app; the rig's BelowNormal tmux shell passes its class on.
+try {
+  setPriority(child.pid, constants.priority.PRIORITY_NORMAL);
+} catch (e) {
+  console.log(`  launch kept the shell's priority: ${e instanceof Error ? e.message : String(e)}`);
+}
 console.log(`  launched pid ${pid}; CDP on ${cdpUrl}`);
 let browser = null;
 let exited = false;
