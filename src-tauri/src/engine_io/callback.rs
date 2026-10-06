@@ -235,12 +235,13 @@ impl Probe {
 /// a window's floor is its smallest offset (windows counted in delivered frames, so the fake's synthetic
 /// time works too). A single wake says nothing: the rig's USB driver wakes on a ~1 ms cadence, so at 64
 /// frames its wakes spread over more than a period with every fault counter 0. A floor half a period or
-/// more above the window before's is one slip: a window holds hundreds of on-time wakes, so jitter and
+/// more above the window before's is a slip: a window holds hundreds of on-time wakes, so jitter and
 /// a late wake the driver makes up leave its floor in place, and a drifting clock moves it a few frames.
+/// Windows that rise in a row are one slip: a move inside a window can lift its floor only partly.
 /// A slip cannot tell a dropped period from a lasting move of the driver's phase, nor from a stall the
 /// driver makes up only over more than a window; one wake half a period earlier than the rest would
-/// read as one too (unmeasured). A falling floor counts nothing. A new block size starts over, and the
-/// start's floor is no baseline.
+/// read as one too (unmeasured), and two moves in consecutive windows as one. A falling floor counts
+/// nothing. A new block size starts over, and a move in its first two windows (~1 s) counts nothing.
 struct PhaseSlips {
     /// The first wake at this block size, and the frames delivered since.
     first: Option<Instant>,
@@ -252,16 +253,19 @@ struct PhaseSlips {
     floor_before: f64,
     window: u64,
     windows: u64,
+    /// The window before rose: a rise now continues its slip.
+    rising: bool,
 }
 
 impl PhaseSlips {
     const fn new() -> PhaseSlips {
-        PhaseSlips { first: None, block: 0, delivered: 0, floor: f64::INFINITY, floor_before: f64::INFINITY, window: 0, windows: 0 }
+        PhaseSlips { first: None, block: 0, delivered: 0, floor: f64::INFINITY, floor_before: f64::INFINITY, window: 0, windows: 0, rising: false }
     }
 
     /// One output callback of `n` frames entered at `entry`: how far behind the floor it came, in
-    /// frames, when that is more than a period (else 0, so a clean run's log stays quiet), and whether it
-    /// closed a window that slipped. `None` through the start.
+    /// frames, when that is more than a period (else 0: the rig's jitter alone reaches 92 to 109 frames
+    /// at 64, so `asio_late_max` logs a rise past that), and whether it closed a window that started a
+    /// slip. `None` through the start.
     fn wake(&mut self, entry: Instant, n: usize, rate: u32) -> Option<(u64, bool)> {
         if n == 0 || rate == 0 {
             return None;
@@ -282,7 +286,9 @@ impl PhaseSlips {
         let mut slipped = false;
         if self.window >= (SLIP_WINDOW_SECONDS * rate as f64) as u64 {
             // From the third window on: the start's floor is no baseline.
-            slipped = self.windows > 1 && self.floor - self.floor_before >= n as f64 / 2.0;
+            let rose = self.windows > 1 && self.floor - self.floor_before >= n as f64 / 2.0;
+            slipped = rose && !self.rising;
+            self.rising = rose;
             self.floor_before = std::mem::replace(&mut self.floor, f64::INFINITY);
             self.window = 0;
             self.windows += 1;
@@ -1095,6 +1101,21 @@ mod tests {
             let blocks = (0..20 * 750).map(|k| (wake() + if k >= from { jump } else { 0.0 }, 64));
             assert_eq!(phase_slips(&mut phase, &mut at, 100.0, blocks).0, slips, "{jump} frames from wake {from}");
         }
+    }
+
+    #[test]
+    fn half_a_period_is_the_threshold_and_a_rise_split_over_two_windows_is_one_slip() {
+        for (jump, slips) in [(36.0, 1), (28.0, 0)] {
+            let (mut phase, mut at) = (PhaseSlips::new(), 0.0);
+            let blocks = (0..20 * 750).map(|k| (if k >= 1_000 { jump } else { 0.0 }, 64));
+            assert_eq!(phase_slips(&mut phase, &mut at, 0.0, blocks).0, slips, "{jump} frames");
+        }
+        // Jitter of -44, 0, 48, 0: a move one wake into a window leaves that window's floor at the
+        // first wake's, so the floor rises over two windows (by about 92, then 36 frames).
+        let (mut phase, mut at) = (PhaseSlips::new(), 0.0);
+        let jitter = [-44.0, 0.0, 48.0, 0.0];
+        let blocks = (0..20 * 750).map(|k| (jitter[k % 4] + if k >= 751 { 128.0 } else { 0.0 }, 64));
+        assert_eq!(phase_slips(&mut phase, &mut at, 0.0, blocks).0, 1);
     }
 
     #[test]
