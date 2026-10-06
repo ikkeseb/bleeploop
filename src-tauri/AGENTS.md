@@ -292,7 +292,9 @@ plugin-GUI work.
   store worker doing the file I/O would remove the wait.
 - `clap_engine.rs`, `vst3_engine.rs` and `src/host/vst2_engine.rs` each carry the whole owner
   choreography (load, restart, eviction, teardown): one shared owner would keep B1/B11 from returning. Not built.
-- VST2 host gaps (read from source, none reproduced; no real plugin has been loaded into a slot yet):
+- VST2 host gaps (read from source, none reproduced; the only real plugins tried are ReaJS and
+  ReaStream, which load, open their editors and swap, and whose `native:tone-recall` fails because
+  neither has a parameter that holds a value):
   a restart whose unit the engine does not hand back within 2 s leaves the unit silent until the
   plugin's next `audioMasterIOChanged`; `effSetChunk` answers no verdict, so a chunk the plugin
   could not use is reported as restored;
