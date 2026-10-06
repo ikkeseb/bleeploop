@@ -97,8 +97,8 @@ it.
 - Session files: export, CLEAR ALL, import: the loops come back on the grid and the amp-sim sounds as
   at the export; a stem and the master open in a DAW; the export's toast says where the zip went: is
   it there? Kill the app mid-jam: the relaunch restores it.
-- Share output: OBS, Chrome and Discord hear the master, and a call of 20 minutes or more hears no
-  dropout in it, also with the interface's own Windows output as the Share device (machine: a
+- Share output: OBS, Chrome and Discord hear the master with no stutter as Share turns on, and a
+  call of 20 minutes or more hears no dropout in it, also with the interface's own Windows output as the Share device (machine: a
   26-minute `native:engine --share` soak; the mirror's buffer went from 20 to 40 ms after it ran
   short in bursts about every 10.5 minutes there).
 - The six synths and the lane FX by ear.

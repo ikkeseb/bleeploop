@@ -19,7 +19,7 @@ Who runs where and what each thread owns. The rules are in bold below the table.
 | **UI (WebView2 / main)** | The Tauri window, every WebView2 COM call (`with_webview`: the Web MIDI permission auto-grant, `lib.rs`), the plugin folder dialog (modal over the main window, `src/host/folders.rs`), the close guard (`lf://close-requested`), and the synchronous commands: `engine_send` (so batches keep IPC order), `plugin_asio_status`, `plugin_asio_device_info`, `lib.rs`'s own | IPC in; window events out (`plugin:param-changed`, `plugin:params-changed`, `plugin:editor-closed`) |
 | **Command threads** (Tauri async runtime) | Nothing long-lived. Every other command in `host/commands.rs` and `engine_io/mode.rs` is `async fn`; blocking engine work (an open waits up to 15 s) goes to `spawn_blocking` | Device requests to the device owner; plugin requests to a slot owner (`owner_request_5s`, ≤5 s); a load spawns the owner and waits ≤15 s on its rendezvous (a result that arrives later is the owner's to undo); device lists enumerate cpal directly (no stream opens) |
 | **Device owner** (`lf-engine-owner`, `engine_io/owner.rs`) | Every device transition, one at a time; the cpal streams (Send: ownership is for ordering); building engines; the engine lock, only while no stream runs | A request channel with one-shot replies; polls what the callbacks latched and logs the glitch counters |
-| **Device callbacks** (cpal driver threads) | Nothing: ASIO runs input then output in one bufferSwitch; WASAPI's output callback is the clock and its input callback feeds the join pipe. Each promotes itself to MMCSS Pro Audio on first entry | `try_lock` on the engine (a miss plays silence and counts); atomics and rings; faults latch for the owner |
+| **Device callbacks** (cpal driver threads) | Nothing: ASIO runs input then output in one bufferSwitch; WASAPI's output callback is the clock and its input callback feeds the join pipe. Each promotes itself to MMCSS Pro Audio on first entry and runs with flush-to-zero on (`engine_io/fpu.rs`) | `try_lock` on the engine (a miss plays silence and counts); atomics and rings; faults latch for the owner |
 | **Share output** (a cpal WASAPI callback, `engine_io/share.rs`) | The mirror endpoint's stream, while ASIO plays | Pulls the post-limiter master from its pipe; never takes the engine lock |
 | **Feed** (`lf-engine-feed`, `engine_io/feed.rs`) | The only reader of the engine's event ring (but for a rebuild, which drains the replaced engine's: `swap_engine`) and the device events; the mirror of lanes and transport a reload resyncs from | ~60 frames/s over a Tauri `Channel`; never PCM. Held (`FeedThread::hold`, an RAII guard) while the plugin folder dialog is open, since the UI thread reads no frame then: it keeps ticking, so the event ring is drained and the mirror stays true, sends nothing, and the close resyncs the page with one `reset` frame |
 | **Plugin owner, per slot** (`lf-clap-engine-{slot}` / `lf-vst3-engine-{slot}` / `lf-vst2-engine-{slot}`, `host/engine_slot.rs`) | The `!Send` plugin instance (clack main thread / VST3 component + controller / VST2 effect, with its `effStartProcess` and `effStopProcess`), its editor host window and Win32 pump, its tone saves, restarts and re-activation after an eviction, the ordered teardown | `OwnerRequest`s (polled every 20 ms, `OWNER_POLL`); the unit enters and leaves the engine through its `SlotHost`; params through the slot's event ring; the unit's fault bits, reported once per load |
@@ -304,13 +304,15 @@ plugin-GUI work.
   answers nothing).
 - A unit whose restart failed stays parked, bypassed, until the plugin's next restart request; a device
   change does not retry it.
-- Each ASIO overload counts twice in `xruns` (both streams' error callbacks count it), and an output
-  callback that misses the engine lock reads as a duplex fault.
+- An output callback that misses the engine lock reads as a duplex fault. Two ASIO overloads each
+  reported to a different stream alone count once in `xruns` (`callback::Run::stream_error`).
 - The panic hook (`lib.rs`) allocates and logs on whatever thread panicked, the audio thread included.
 - The dry signal steps without a ramp on an instrument installed into a live slot.
 - Two live slots on the same capture channel sum it (+6 dB).
-- An ASIO period the driver drops without its overload report is not flagged (input and output stay in
-  step; the take is spliced there).
+- An ASIO period the driver drops without its overload report is not flagged as damage (input and
+  output stay in step; the take is spliced there). `asio_late_wakes` counts it in the log only, beside a
+  missed deadline, which the host clock cannot tell from a drop (asio-sys drops the driver's sample
+  position; `callback::LateWakes`).
 - A punch-out inside a take's last quarter-beat commits the whole bars before it, where a stop there
   rounds up (owner's call).
 - The feed's reset mirror carries no count: a WebView reload during a count-in shows no numeral until
@@ -333,7 +335,9 @@ plugin-GUI work.
   from 20 to 40 ms (`engine_io/share.rs`), and the same soak then counted nothing in 26 minutes (one
   run, other work on the machine at times). Whether this was the crackle the owner heard is the
   owner's ear's to say (`STATUS.md` § Not heard yet). Into the virtual cable at 256 the owner's log
-  has no starve in a three-hour session, only three or four at each mirror open (not looked into).
+  has no starve in a three-hour session. The three or four at some mirror opens were cpal's empty
+  start: the endpoint's first pull asks for its whole buffer, which ran the ring short; that first
+  pull now plays silence (`share.rs`, a test pins it; not yet soaked on the rig).
   **While agents build** (heavy, twice, once with BleepLoop closed): not reproduced, no ear was at
   the PC, but narrowed. ASIO 64 counted nothing in 20 minutes of soaks under 16 and 32 busy threads
   at normal priority, clean `cargo check`s at below-normal priority and a WSL-side load, nor in 70
@@ -346,8 +350,10 @@ plugin-GUI work.
   included; a WSL session opened from a terminal window has a normal-priority host (its children
   were not sampled). Which kind built when it crackled, and what was playing, is unknown. Next check:
   the owner's ear on music through the interface during a `pnpm rust:check` from a normal-priority
-  shell, then from the tmux session. Not measured: the `cargo test` run itself (the report's 560 s)
-  and memory pressure. A tester hears crackle at times too, less marked with a gate on his
+  shell, then from the tmux session. A full `pnpm rust:check` at normal priority beside a silent
+  ASIO 64 soak (2026-10-07, 15 min, `cargo test` 479 s of it): no counter moved, but one block took
+  151 % of its period, where idle soaks peak at 27–74 %; when is unknown (the probe's soak lines now
+  carry each minute's block time). Not measured: memory pressure. A tester hears crackle at times too, less marked with a gate on his
   interface, which puts some of it on the input side there; on WASAPI the join's bursts (below)
   would sound like that (his backend is unknown).
 - Plugin-host gaps a source review found (2026-10-02; read from source, none reproduced), ranked by

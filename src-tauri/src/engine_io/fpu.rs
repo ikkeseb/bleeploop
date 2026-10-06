@@ -7,7 +7,8 @@
 //!
 //! Per callback, not once per thread: the driver's thread gets its mode back on return, and a plugin
 //! or driver that changes the mode cannot leave it changed past one callback. lf-engine's offline
-//! renders (tests, the export) run without it; they differ only below the subnormal threshold.
+//! renders (tests, the export) run without it; they differ where an operand or a result is subnormal,
+//! which the callbacks read and write as zero.
 
 /// The callback's float mode, restored on drop. Two instructions each way: no alloc, lock or syscall.
 pub(crate) struct DenormalsOff {
@@ -54,7 +55,7 @@ mod mxcsr {
     pub(super) fn write(csr: u32) {
         // SAFETY: loads MXCSR from a local; callers pass a value read from MXCSR with only FTZ and DAZ
         // changed, so no reserved bit is set (which would fault).
-        unsafe { asm!("ldmxcsr [{}]", in(reg) &csr, options(nostack, preserves_flags, readonly)) };
+        unsafe { asm!("ldmxcsr [{}]", in(reg) &csr, options(nostack, readonly)) };
     }
 }
 

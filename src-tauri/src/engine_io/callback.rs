@@ -94,7 +94,8 @@ pub(crate) struct Run {
     xrun: AtomicBool,
     /// ASIO: cpal hands each overload to both streams' error callbacks, but its `try_emit_error` can drop
     /// either under contention. Each side's reports this run, and the overloads counted from them: the
-    /// larger side, so an overload counts once and a lone report still counts.
+    /// larger side, so an overload both sides heard counts once and a lone report still counts (two
+    /// overloads each heard by a different side alone count once).
     duplex: AtomicBool,
     overloads: [AtomicU64; 2],
     overloads_counted: AtomicU64,
@@ -128,7 +129,7 @@ impl Run {
         }
     }
 
-    /// A stream's error callback. An xrun is counted (on ASIO, once per overload) and flags the next
+    /// A stream's error callback. An xrun is counted (on ASIO, by the side that heard more) and flags the next
     /// block, whichever side reported it. cpal 0.18.1 documents a
     /// default-device change (the stream stays on its device) and a refused thread priority as
     /// non-fatal; any other error ends the stream: latched for the owner, which drops the run and falls

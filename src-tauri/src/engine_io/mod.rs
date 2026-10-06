@@ -292,8 +292,8 @@ pub struct IoCounters {
     /// WASAPI: the output buffer ran dry; the frame counter skipped what the device played dry, the
     /// join as much input (`callback::dry_frames`). On ASIO the only report is the driver's overload, an xrun.
     pub gaps: AtomicU64,
-    /// cpal's non-fatal `Xrun` reports: a WASAPI glitch, an ASIO overload once whichever stream reported
-    /// it (`callback::Run::stream_error`).
+    /// cpal's non-fatal `Xrun` reports: a WASAPI glitch, an ASIO overload once, by the stream that
+    /// reported more (`callback::Run::stream_error`).
     pub xruns: AtomicU64,
     /// The callback found the engine locked and played silence.
     pub lock_misses: AtomicU64,
