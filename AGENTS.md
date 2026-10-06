@@ -4,7 +4,7 @@ Rules and routers only. **Doc ownership:** AGENTS = what you must not violate ·
 VERIFY = how to prove it · `STATUS.md` = what is open. `CLAUDE.md` is a one-line adapter importing
 this file.
 
-**BleepLoop** is a Windows desktop instrument: an instrument host (two CLAP/VST3 slots + six
+**BleepLoop** is a Windows desktop instrument: an instrument host (two CLAP/VST3/VST2 slots + six
 built-in synths) over an RC-505 MK II–style 5-track looper, all in one native audio engine, shipped
 as a Tauri v2 app (Rust + WebView2).
 
@@ -104,7 +104,7 @@ through `src/ui/state/audio.ts`. Live audio never crosses that boundary as PCM; 
 snapshot does, once, off the RT path. Export, import, recovery and autosave live in `src/session/`;
 MIDI arrives through Web MIDI (`src/ui/state/midi.ts`). Frontend `console.error` + uncaught errors
 feed the release log (`src/platform/logging.ts`): keep every `console.error` site. Stack: SolidJS +
-TypeScript + Vite 8 (rolldown/oxc; esbuild is gone), Rust + cpal + the CLAP/VST3 hosts.
+TypeScript + Vite 8 (rolldown/oxc; esbuild is gone), Rust + cpal + the CLAP, VST3 and VST2 hosts.
 
 ## Invariants: titles only, `docs/ARCHITECTURE.md` owns the text
 

@@ -285,6 +285,13 @@ plugin-GUI work.
   import of P into S under its write lock). A disk write that hangs therefore stalls that owner, and an
   unload joins it without a timeout (the app's exit is bounded). Other tones' writes never block it; a
   store worker doing the file I/O would remove the wait.
+- While the plugin folder dialog is open no feed frame reaches the page: the dialog runs on the UI
+  thread, every frame sent meanwhile is held (60 a second, no bound) and all of them arrive in one
+  burst when it closes, about 10 ms of catch-up per second it was open (99 ms after 10 s, 612 ms after
+  60 s, no frame lost; measured 2026-10-06 on a debug build driven over CDP, nothing playing). The
+  window answers and commands complete meanwhile (`plugin_folders` in 3 ms). Not measured: a dialog
+  left open for hours, and a loop playing behind it. Holding the feed's sends while the dialog is open
+  and resyncing once when it closes would bound it. Not built.
 - `clap_engine.rs`, `vst3_engine.rs` and `src/host/vst2_engine.rs` each carry the whole owner
   choreography (load, restart, eviction, teardown): one shared owner would keep B1/B11 from returning. Not built.
 - VST2 host gaps (read from source, none reproduced; no real plugin has been loaded into a slot yet):
