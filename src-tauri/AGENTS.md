@@ -323,18 +323,33 @@ plugin-GUI work.
 - Archetype Plini (VST3) once stalled 4–14 s in 5 of 20 unloads, editor closed, and has not repeated
   since (cause unknown). The VST3 teardown and the unload log per-step timing in release too, so the
   next occurrence names its step.
-- Crackle on the owner's Scarlett at ASIO 64 while a call used the same interface through Windows
-  audio, every 5–10 minutes, heard by the call's far end too (cause unknown; reportedly at 256 as
-  well). The device owner logs `[engine_io] audio glitch: …` for each second a fault counter moves
-  (`GlitchWatch`, `engine_io/owner.rs`); no real glitch has fired it yet. The owner's headset has also
-  crackled heavily twice while agents built on the PC: once with BleepLoop closed, once under
-  `pnpm rust:check`'s cargo tests (about 560 s of full CPU), so the app need not run for it. The
-  owner's impression (unmeasured): it persists while many agents run and load the CPU. Cause unknown;
-  that CPU load triggers it is untested. The owner's hypothesis: a buffer running over or dry. A
-  tester hears it at times too, and a gate on his interface made it less marked, which would put some
-  of it on the input side there (whether it is the same fault is unknown). Next check: LatencyMon
-  through a `pnpm rust:check` with the app open, read against the `audio glitch` lines, to tell a
-  driver or DPC stall from the engine's own xruns.
+- Crackle, the owner's two reports, measured on the rig 2026-10-06 with silent `--probe-engine`
+  soaks (`docs/VERIFY.md`, `native:engine`). **In a call** (ASIO 64, a call on the same interface
+  through Windows audio, every 5–10 minutes, heard by the far end too; reportedly at 256 as well):
+  the release log of that day shows Share output mirroring into the Scarlett's own Windows endpoint.
+  Soaked that way on an idle machine, the mirror ran short in two bursts 10 min 48 s apart (15 events
+  of two or three short 10 ms callbacks each: 37 `share_starves`, 2 trims in 25 minutes), a gap each
+  for whoever hears the mirror, while the ASIO callbacks counted nothing. The mirror's setpoint went
+  from 20 to 40 ms (`engine_io/share.rs`), and the same soak then counted nothing in 26 minutes (one
+  run, other work on the machine at times). Whether this was the crackle the owner heard is the
+  owner's ear's to say (`STATUS.md` § Not heard yet). Into the virtual cable at 256 the owner's log
+  has no starve in a three-hour session, only three or four at each mirror open (not looked into).
+  **While agents build** (heavy, twice, once with BleepLoop closed): not reproduced, no ear was at
+  the PC, but narrowed. ASIO 64 counted nothing in 20 minutes of soaks under 16 and 32 busy threads
+  at normal priority, clean `cargo check`s at below-normal priority and a WSL-side load, nor in 70
+  minutes without a load of this session's making: a build breaks neither the engine nor the driver's
+  ASIO side. What a build does to another app follows its priority: a normal-priority thread doing
+  1 ms of work every 10 ms lost a third of its turns to 16 busy normal-priority threads and ran up
+  to 29 ms late beside a normal-priority `cargo check`; beside the same check at below-normal
+  priority and beside a WSL load it ran at most 6 ms late and lost none. Windows processes started
+  from the rig PC's logon tmux session run at below-normal priority (its scheduled task's), builds
+  included; a WSL session opened from a terminal window has a normal-priority host (its children
+  were not sampled). Which kind built when it crackled, and what was playing, is unknown. Next check:
+  the owner's ear on music through the interface during a `pnpm rust:check` from a normal-priority
+  shell, then from the tmux session. Not measured: the `cargo test` run itself (the report's 560 s)
+  and memory pressure. A tester hears crackle at times too, less marked with a gate on his
+  interface, which puts some of it on the input side there; on WASAPI the join's bursts (below)
+  would sound like that (his backend is unknown).
 - Plugin-host gaps a source review found (2026-10-02; read from source, none reproduced), ranked by
   exposure on the owner's plugins. First: VST3 omits trailing inactive aux buses (the SDK's
   `activateBus` rule permits it) and passes short `setBusArrangements` arrays whose result is read
@@ -365,6 +380,15 @@ plugin-GUI work.
   29 ms more input queued for up to 3.5 s after each burst, so it did not land. `native:engine`'s
   counter check forgives the join's trims and starves in a WASAPI open's first 3 s (`probe.rs`
   `GRACE`); a take that overlaps one is still rejected.
+  Past the open too (2026-10-06, 44.1 kHz, no plugins, `--mute`): the join starves in bursts minutes
+  into a run. Beside an ASIO 64 engine in a second process, on an idle machine: a starve about every
+  8 s for two minutes, twice, 10 min 28 s apart (62 `join_starves` in 20 minutes; the ASIO process
+  counted nothing), and after each burst two to three minutes with up to 16 % fewer render callbacks
+  and no counter moving. Alone: 18 starves 55–134 s after the open in one run (under CPU load, the
+  app at below-normal priority class), 2 at 129 s in a second, none in a third of 190 s at normal
+  class. Neighbour, load and class are not separated (four runs). Share output showed the same
+  rhythm into the same interface (the crackle thread above); the join's setpoint is monitoring
+  latency, so widening it is the owner's call (D25).
 - The release profile warns of four unused items in `app` (`Duration` in `host/vst3.rs`,
   `promote_pro_audio` in `host/clap.rs`, `teardown` in `host/vst3.rs`, `asio_available` in
   `audio_output.rs`); since when is unknown.
