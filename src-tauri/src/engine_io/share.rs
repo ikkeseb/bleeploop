@@ -109,17 +109,30 @@ struct Mirror {
     pipe: PullPipe,
     stereo: Vec<f32>,
     channels: usize,
+    /// The largest callback the setpoint is sized for: two WASAPI periods, in device frames.
+    largest_pull: usize,
+    /// No callback has run yet.
+    first: bool,
 }
 
 impl Mirror {
     fn new(pipe: PullPipe, channels: usize) -> Mirror {
-        Mirror { pipe, stereo: vec![0.0; 2 * MAX_PULL], channels: channels.max(1) }
+        let largest_pull = (2.0 * WASAPI_PERIOD * pipe.out_rate()).round() as usize;
+        Mirror { pipe, stereo: vec![0.0; 2 * MAX_PULL], channels: channels.max(1), largest_pull, first: true }
     }
 
     /// Fill one device callback: stereo on channels 0 and 1 (a mono endpoint gets (L + R) / 2), silence
     /// on the rest; a callback the ring could not cover counts one `share_starves`.
     fn render<T: SizedSample + FromSample<f32>>(&mut self, data: &mut [T], counters: &IoCounters) {
         let ch = self.channels;
+        // cpal starts the endpoint empty, so its first callback asks for the whole buffer, more than the
+        // setpoint holds: served, it would run the ring short at once and starve again while it
+        // primes. That one callback is the endpoint's prefill: silence. Only the first, so an endpoint
+        // whose every callback is larger still plays (and counts its starves).
+        if std::mem::take(&mut self.first) && data.len() / ch > self.largest_pull {
+            data.fill(T::EQUILIBRIUM);
+            return;
+        }
         let mut short = 0;
         for piece in data.chunks_mut(MAX_PULL * ch) {
             let frames = piece.len() / ch;
@@ -264,6 +277,64 @@ mod tests {
         }
     }
 
+    /// The mirror opens while the engine already plays: the ring is full when the endpoint's first
+    /// callback asks for its whole buffer (cpal starts WASAPI empty), then a period every 10 ms. The
+    /// first callback plays silence and the mirror starts on the next one, at any engine block, with
+    /// no starve; one just over two periods is startup silence as well.
+    #[test]
+    fn a_whole_buffer_first_pull_does_not_start_short() {
+        for block in [64usize, 128, 256] {
+            for first in [2048usize, 883] {
+                let counters = IoCounters::default();
+                let (mut tap, pipe) = share_pipe(44_100, 44_100, block as Frame).unwrap();
+                let mut mirror = Mirror::new(pipe, 2);
+                let (left, right) = (vec![0.5f32; block], vec![-0.25f32; block]);
+                let engine_period = block as f64 / 44_100.0;
+                // ~300 ms of engine blocks before the mirror's first callback: the ring runs full.
+                let mut t_engine = 0.0f64;
+                while t_engine < 0.300 {
+                    tap.push(&left, &right, &counters);
+                    t_engine += engine_period;
+                }
+                let mut data = vec![0.0f32; 2 * first];
+                mirror.render(&mut data, &counters);
+                let mut data = vec![0.0f32; 2 * 441];
+                let mut t_mirror = t_engine + 0.010;
+                let end = t_mirror + 10.0;
+                while t_mirror < end {
+                    if t_engine <= t_mirror {
+                        tap.push(&left, &right, &counters);
+                        t_engine += engine_period;
+                        continue;
+                    }
+                    mirror.render(&mut data, &counters);
+                    t_mirror += 0.010;
+                }
+                let (starves, _, trims) = counts(&counters);
+                assert_eq!((starves, trims), (0, 0), "block {block}, first pull {first}: starves/trims");
+                assert!((data[0] - 0.5).abs() < 1e-3 && (data[1] + 0.25).abs() < 1e-3, "block {block}, first pull {first}: {:?}", &data[..2]);
+            }
+        }
+    }
+
+    /// Only the first callback is the prefill: an endpoint whose every callback is over two periods
+    /// still plays from its second.
+    #[test]
+    fn only_the_first_large_pull_is_silence() {
+        let counters = IoCounters::default();
+        let (mut tap, pipe) = share_pipe(44_100, 44_100, 256).unwrap();
+        let mut mirror = Mirror::new(pipe, 2);
+        for _ in 0..40 {
+            tap.push(&[0.5; 256], &[-0.25; 256], &counters);
+        }
+        let mut data = vec![1.0f32; 2 * 1024];
+        mirror.render(&mut data, &counters);
+        assert!(data.iter().all(|&x| x == 0.0), "the first: silence");
+        mirror.render(&mut data, &counters);
+        let last = &data[data.len() - 2..];
+        assert!((last[0] - 0.5).abs() < 1e-3 && (last[1] + 0.25).abs() < 1e-3, "the second plays: {last:?}");
+    }
+
     #[test]
     fn a_full_ring_counts_one_overrun_per_block_and_never_blocks() {
         let counters = IoCounters::default();
@@ -308,8 +379,8 @@ mod tests {
         for _ in 0..8 {
             tap.push(&[0.5; 256], &[0.5; 256], &counters);
         }
-        // Primes at the 40 ms setpoint (1920 frames) and plays 1440 of them: covered.
-        mirror.render(&mut data[..2 * 1440], &counters);
+        // Primes at the 40 ms setpoint (1920 frames) and plays two periods (960) of them: covered.
+        mirror.render(&mut data[..2 * 960], &counters);
         assert_eq!(counts(&counters).0, 0);
         // 2048 frames, pulled in two pieces, both short: one starve.
         mirror.render(&mut data, &counters);

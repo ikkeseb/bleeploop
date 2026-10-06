@@ -344,6 +344,11 @@ impl PullPipe {
     pub(crate) fn fill(&self) -> usize {
         self.ring.slots() / self.channels
     }
+
+    /// The pulling side's rate, Hz.
+    pub(crate) fn out_rate(&self) -> f64 {
+        self.out_rate
+    }
 }
 
 #[cfg(test)]
