@@ -179,7 +179,7 @@
 //!
 //! # Beside this crate
 //!
-//! The device side (streams, MIDI, Share output) is `src-tauri/src/engine_io`; the CLAP/VST3 units and
+//! The device side (streams, MIDI, Share output) is `src-tauri/src/engine_io`; the CLAP, VST3 and VST2 units and
 //! their owners are `src-tauri/src/host/engine_slot.rs` and its siblings; the feed that carries the
 //! events and the [`overview`] to the UI is `src-tauri/src/engine_io/feed.rs`, and the export's snapshot
 //! that carries the [`render`]ed wet master is `src-tauri/src/engine_io/session.rs`.

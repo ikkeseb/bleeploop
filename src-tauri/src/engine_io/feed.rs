@@ -10,8 +10,20 @@
 //! a new engine (another sample rate, a fault) get a `reset` frame that carries all of it, with the
 //! settings the host keeps and each lane's last `Mix` (`settings.rs`, which every drain feeds), so the
 //! UI adopts them. The thread drains while nobody subscribes, so the event ring never fills.
+//!
+//! The feed can be HELD (`FeedThread::hold`): while the UI thread cannot read (the native folder
+//! dialog is modal on it), every frame sent would wait in the channel, with no bound, and arrive in
+//! one burst. A held feed keeps ticking, so the ring is drained and the mirror stays true, but builds
+//! and sends nothing; its first tick after the hold is one `reset` frame, which carries the whole
+//! state. `seq` counts frames built, so it does not move while held. The UI reads `seq` for nothing
+//! and replaces its view on a reset (`applyFrameNow`, `src/ui/state/engine-store.ts`), so the resync
+//! is no fault to it. What only an ordinary frame carries (a beat, a refusal) is not replayed, as
+//! for a WebView reload; device events are kept and go out with the reset.
 
-use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
+use std::sync::atomic::{
+    AtomicBool, AtomicUsize,
+    Ordering::{AcqRel, Acquire, Relaxed, Release},
+};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -21,7 +33,10 @@ use lf_engine::overview::PEAK_FRAMES;
 use lf_engine::{Event, LaneInfo, LaneState, Overview, TRACK_COUNT};
 
 use super::wire::{ClockAnchor, FeedFrame, Meter, PeakUpdate, WireCommand, WireEvent};
-use super::{DeviceStatus, EngineHost};
+use super::{DeviceEvent, DeviceStatus, EngineHost};
+
+/// The device events a held feed keeps for its reset frame; older ones go first.
+const HELD_DEVICE_EVENTS: usize = 64;
 
 /// The feed's period: about 60 frames a second.
 const TICK: Duration = Duration::from_micros(16_667);
@@ -68,6 +83,8 @@ pub(crate) struct Feed {
     /// Each lane's waveform as last sent (`None`: nothing yet, or a reset since).
     drawn: [Option<Drawn>; TRACK_COUNT],
     bins: Vec<u32>,
+    /// The device events taken while the feed was held: the next frame carries them first.
+    held_device: Vec<DeviceEvent>,
 }
 
 impl Feed {
@@ -86,17 +103,19 @@ impl Feed {
             drained: Vec::with_capacity(256),
             drawn: [None; TRACK_COUNT],
             bins: Vec::new(),
+            held_device: Vec::new(),
         }
     }
 
-    /// Read everything once; the frame to send, if anything changed or the anchor is due. `reset`: a
-    /// new subscriber, who gets the whole state.
-    pub(crate) fn tick(&mut self, mut reset: bool) -> Option<FeedFrame> {
+    /// Drain the engine's events into the mirror. True when another engine replaced the one the
+    /// mirror followed: the UI must reset.
+    fn drain(&mut self) -> bool {
+        let mut replaced = false;
         self.drained.clear();
         let (gen, overview) = self.host.drain_feed(&mut self.drained);
         if self.gen != Some(gen) {
             // A new engine (or none): what it reports starts from EMPTY lanes and no transport.
-            reset |= self.gen.is_some();
+            replaced = self.gen.is_some();
             self.gen = Some(gen);
             self.overview = overview;
             self.lanes = [None; TRACK_COUNT];
@@ -111,7 +130,26 @@ impl Feed {
                 _ => {}
             }
         }
-        let device = self.host.take_device_events();
+        replaced
+    }
+
+    /// A tick of a held feed: the ring is drained and the mirror follows it, the device events are
+    /// kept for the next frame (the latest `HELD_DEVICE_EVENTS`), and no frame is built (`seq` stays). The reset that ends the hold
+    /// reads the status, the meter and the waveforms afresh.
+    pub(crate) fn tick_held(&mut self) {
+        self.drain();
+        self.held_device.extend(self.host.take_device_events());
+        // A device that keeps failing behind a dialog left open: the latest are what the page needs.
+        let over = self.held_device.len().saturating_sub(HELD_DEVICE_EVENTS);
+        self.held_device.drain(..over);
+    }
+
+    /// Read everything once; the frame to send, if anything changed or the anchor is due. `reset`: a
+    /// new subscriber or the end of a hold: the frame carries the whole state.
+    pub(crate) fn tick(&mut self, mut reset: bool) -> Option<FeedFrame> {
+        reset |= self.drain();
+        let mut device = std::mem::take(&mut self.held_device);
+        device.extend(self.host.take_device_events());
         let now = self.host.status();
         let status = (reset || now != self.status).then(|| now.clone());
         self.status = now;
@@ -238,10 +276,56 @@ struct Subscriber {
     fresh: bool,
 }
 
+/// What holds the feed's sends: how many guards are out, and that one was dropped since the thread
+/// last sent (the UI missed frames, or could have: it gets a reset).
+#[derive(Default)]
+struct Hold {
+    holders: AtomicUsize,
+    resync: AtomicBool,
+}
+
+/// The feed sends nothing while one of these lives (`FeedThread::hold`). Its drop ends the hold on
+/// every path out of its scope, and the feed's next tick sends one reset frame.
+pub(crate) struct FeedHold(Arc<Hold>);
+
+impl FeedHold {
+    fn take(hold: &Arc<Hold>) -> FeedHold {
+        hold.holders.fetch_add(1, AcqRel);
+        FeedHold(hold.clone())
+    }
+}
+
+impl Drop for FeedHold {
+    fn drop(&mut self) {
+        // The resync first: a tick that sees no holder left always sees it.
+        self.0.resync.store(true, Release);
+        self.0.holders.fetch_sub(1, AcqRel);
+    }
+}
+
+/// One tick of the feed thread, under the subscriber's lock. Held: the feed ticks and nothing is
+/// sent, to a subscriber that came meanwhile neither (its reset waits for the hold's end). Else one
+/// frame at most goes out, a reset when the subscriber is new or a hold has ended since the last tick.
+fn turn(feed: &mut Feed, subscriber: &mut Option<Subscriber>, hold: &Hold) {
+    if hold.holders.load(Acquire) > 0 {
+        feed.tick_held();
+        return;
+    }
+    let resync = hold.resync.swap(false, AcqRel);
+    let fresh = subscriber.as_mut().is_some_and(|s| std::mem::take(&mut s.fresh));
+    if let (Some(frame), Some(s)) = (feed.tick(fresh || resync), subscriber.as_mut()) {
+        if !(s.send)(frame) {
+            log::warn!("[engine_io] the feed's subscriber is gone");
+            *subscriber = None;
+        }
+    }
+}
+
 /// The feed thread and its one subscriber: a new subscribe replaces the last (a WebView reload
 /// subscribes again; the old document's channel is gone with it).
 pub(crate) struct FeedThread {
     subscriber: Arc<Mutex<Option<Subscriber>>>,
+    hold: Arc<Hold>,
     stop: Arc<AtomicBool>,
     join: Mutex<Option<JoinHandle<()>>>,
 }
@@ -249,8 +333,9 @@ pub(crate) struct FeedThread {
 impl FeedThread {
     pub(crate) fn spawn(host: EngineHost) -> std::io::Result<FeedThread> {
         let subscriber: Arc<Mutex<Option<Subscriber>>> = Arc::new(Mutex::new(None));
+        let hold = Arc::new(Hold::default());
         let stop = Arc::new(AtomicBool::new(false));
-        let (sub, halt) = (subscriber.clone(), stop.clone());
+        let (sub, held, halt) = (subscriber.clone(), hold.clone(), stop.clone());
         let join = std::thread::Builder::new().name("lf-engine-feed".into()).spawn(move || {
             let mut feed = Feed::new(host);
             let mut next = Instant::now();
@@ -258,13 +343,7 @@ impl FeedThread {
                 {
                     // One lock for the tick and its send: a subscriber's first frame is its reset.
                     let mut sub = sub.lock().unwrap_or_else(|e| e.into_inner());
-                    let fresh = sub.as_mut().is_some_and(|s| std::mem::take(&mut s.fresh));
-                    if let (Some(frame), Some(s)) = (feed.tick(fresh), sub.as_mut()) {
-                        if !(s.send)(frame) {
-                            log::warn!("[engine_io] the feed's subscriber is gone");
-                            *sub = None;
-                        }
-                    }
+                    turn(&mut feed, &mut sub, &held);
                 }
                 next += TICK;
                 let now = Instant::now();
@@ -275,12 +354,20 @@ impl FeedThread {
                 }
             }
         })?;
-        Ok(FeedThread { subscriber, stop, join: Mutex::new(Some(join)) })
+        Ok(FeedThread { subscriber, hold, stop, join: Mutex::new(Some(join)) })
     }
 
     /// Send every frame to `send` from now on (its first is a reset), instead of the last subscriber.
     pub(crate) fn subscribe(&self, send: impl FnMut(FeedFrame) -> bool + Send + 'static) {
         *self.subscriber.lock().unwrap_or_else(|e| e.into_inner()) = Some(Subscriber { send: Box::new(send), fresh: true });
+    }
+
+    /// Hold the feed's sends until the guard drops (the module doc says why and what the UI gets
+    /// after). Taken under the subscriber's lock, which a tick holds through its send: once this
+    /// returns, no frame is on its way out. The thread keeps ticking, and `stop` still stops it.
+    pub(crate) fn hold(&self) -> FeedHold {
+        let _no_send_in_flight = self.subscriber.lock().unwrap_or_else(|e| e.into_inner());
+        FeedHold::take(&self.hold)
     }
 
     /// Stop the thread and wait for it.
@@ -289,5 +376,193 @@ impl FeedThread {
         if let Some(join) = self.join.lock().unwrap_or_else(|e| e.into_inner()).take() {
             let _ = join.join();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine_io::test_rig::TestDevice;
+    use lf_engine::{Command, TimedCommand};
+
+    type Sent = Arc<Mutex<Vec<FeedFrame>>>;
+
+    /// An engine a plain thread renders (no device, so the feed has no status, anchor or meter to
+    /// send: a frame goes out only for a reset or an engine event), once it has reported its start.
+    fn engine() -> TestDevice {
+        let device = TestDevice::start(48_000, 256, Duration::from_millis(1), |_| 0.0);
+        assert!(device.wait_blocks(4, Duration::from_secs(5)), "the engine renders");
+        device
+    }
+
+    /// A subscriber that has not had its reset, and the frames it is sent.
+    fn subscriber() -> (Option<Subscriber>, Sent) {
+        let sent = Sent::default();
+        let sink = sent.clone();
+        let send: Sink = Box::new(move |frame| {
+            sink.lock().unwrap().push(frame);
+            true
+        });
+        (Some(Subscriber { send, fresh: true }), sent)
+    }
+
+    /// Change the tempo and wait until the engine has run the command: its transport event is in the ring.
+    fn set_bpm(device: &TestDevice, bpm: f64) {
+        device.host().send(TimedCommand { frame: None, command: Command::SetBpm(bpm) }).unwrap();
+        assert!(device.wait_blocks(4, Duration::from_secs(5)), "the engine renders");
+    }
+
+    fn tempo(frame: &FeedFrame) -> Option<u32> {
+        frame.events.iter().find_map(|e| match e.0 {
+            Event::Transport { bpm, .. } => Some(bpm),
+            _ => None,
+        })
+    }
+
+    /// How many frames were sent, and how many of them were resets.
+    fn counts(sent: &Sent) -> (usize, usize) {
+        let sent = sent.lock().unwrap();
+        (sent.len(), sent.iter().filter(|frame| frame.reset).count())
+    }
+
+    #[test]
+    fn a_held_feed_sends_nothing_keeps_its_mirror_and_ends_with_one_reset() {
+        let device = engine();
+        let mut feed = Feed::new(device.host().clone());
+        let hold = Arc::new(Hold::default());
+        let (mut sub, sent) = subscriber();
+        turn(&mut feed, &mut sub, &hold);
+        assert_eq!(counts(&sent), (1, 1), "a subscriber's first frame is its reset");
+        // Not held: an engine event is a frame.
+        set_bpm(&device, 200.0);
+        turn(&mut feed, &mut sub, &hold);
+        assert_eq!(sent.lock().unwrap().last().map(|f| (f.seq, f.reset, tempo(f))), Some((1, false, Some(200))));
+
+        let guard = FeedHold::take(&hold);
+        set_bpm(&device, 240.0);
+        for _ in 0..500 {
+            turn(&mut feed, &mut sub, &hold);
+        }
+        assert_eq!(sent.lock().unwrap().len(), 2, "held: no frame, however many ticks pass");
+        // The held ticks took the event out of the engine's ring themselves: nothing is left for the
+        // tick that ends the hold to find there.
+        let mut left = Vec::new();
+        device.host().drain_feed(&mut left);
+        assert!(left.is_empty(), "the held ticks drained the ring: {} events were still in it", left.len());
+        // A document that subscribes meanwhile waits for its reset too.
+        let (mut sub, sent) = subscriber();
+        for _ in 0..500 {
+            turn(&mut feed, &mut sub, &hold);
+        }
+        assert_eq!(sent.lock().unwrap().len(), 0, "a subscriber that came while held gets nothing yet");
+
+        drop(guard);
+        turn(&mut feed, &mut sub, &hold);
+        {
+            let sent = sent.lock().unwrap();
+            assert_eq!(sent.len(), 1, "one frame ends the hold");
+            let frame = &sent[0];
+            assert!(frame.reset && frame.settings.is_some(), "a reset, as a fresh subscriber gets");
+            assert_eq!(frame.seq, 2, "the held ticks built no frame: the count goes on where it stopped");
+            assert_eq!(tempo(frame), Some(240), "the event drained while held is in the mirror the reset carries");
+        }
+        set_bpm(&device, 120.0);
+        for _ in 0..10 {
+            turn(&mut feed, &mut sub, &hold);
+        }
+        let sent = sent.lock().unwrap();
+        assert_eq!((sent.len(), sent.iter().filter(|f| f.reset).count()), (2, 1), "then ordinary frames again, and no second reset");
+        assert_eq!((sent[1].seq, tempo(&sent[1])), (3, Some(120)));
+    }
+
+    #[test]
+    fn a_hold_released_at_once_sends_exactly_one_reset() {
+        let device = engine();
+        let mut feed = Feed::new(device.host().clone());
+        let hold = Arc::new(Hold::default());
+        let (mut sub, sent) = subscriber();
+        turn(&mut feed, &mut sub, &hold);
+        assert_eq!(sent.lock().unwrap().len(), 1);
+        // Taken and dropped between two ticks: no tick ever saw the feed held.
+        drop(FeedHold::take(&hold));
+        for _ in 0..10 {
+            turn(&mut feed, &mut sub, &hold);
+        }
+        let sent = sent.lock().unwrap();
+        assert_eq!(sent.len(), 2, "one frame, and nothing after it while nothing changes");
+        assert!(sent[1].reset && sent[1].seq == 1);
+    }
+
+    /// Two overlapping holds end when the last one drops; a guard dropped by an early return (an
+    /// error on its way out with `?`) releases like any other.
+    #[test]
+    fn the_guard_releases_on_an_early_return_and_the_last_of_two_ends_the_hold() {
+        fn fails_while_holding(hold: &Arc<Hold>) -> Result<(), String> {
+            let _held = FeedHold::take(hold);
+            Err("the dialog did not run".to_string())?;
+            unreachable!("the error left through `?`")
+        }
+        let device = engine();
+        let mut feed = Feed::new(device.host().clone());
+        let hold = Arc::new(Hold::default());
+        let (mut sub, sent) = subscriber();
+        turn(&mut feed, &mut sub, &hold);
+
+        assert!(fails_while_holding(&hold).is_err());
+        assert_eq!(hold.holders.load(Acquire), 0, "the early return dropped the guard");
+        turn(&mut feed, &mut sub, &hold);
+        assert_eq!(counts(&sent), (2, 2), "and the feed resyncs");
+
+        let (first, second) = (FeedHold::take(&hold), FeedHold::take(&hold));
+        drop(first);
+        set_bpm(&device, 240.0);
+        turn(&mut feed, &mut sub, &hold);
+        assert_eq!(sent.lock().unwrap().len(), 2, "still held by the second");
+        drop(second);
+        turn(&mut feed, &mut sub, &hold);
+        assert_eq!(counts(&sent), (3, 3));
+    }
+
+    /// The thread itself: held, it sends nothing while the engine reports; released, its next frame
+    /// is a reset; and `stop` ends it while it is held.
+    #[test]
+    fn the_feed_thread_holds_resyncs_and_still_stops_while_held() {
+        let wait_for = |pred: &dyn Fn() -> bool| {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !pred() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            pred()
+        };
+        let device = engine();
+        let thread = FeedThread::spawn(device.host().clone()).unwrap();
+        let sent = Sent::default();
+        let sink = sent.clone();
+        thread.subscribe(move |frame| {
+            sink.lock().unwrap().push(frame);
+            true
+        });
+        assert!(wait_for(&|| sent.lock().unwrap().len() == 1), "the subscriber's reset");
+
+        let held = thread.hold();
+        set_bpm(&device, 240.0);
+        std::thread::sleep(TICK * 12);
+        assert_eq!(sent.lock().unwrap().len(), 1, "held: nothing is sent");
+        drop(held);
+        assert!(wait_for(&|| sent.lock().unwrap().len() == 2), "the hold's end sends a frame");
+        {
+            let sent = sent.lock().unwrap();
+            assert!(sent[1].reset && sent[1].seq == 1 && tempo(&sent[1]) == Some(240));
+        }
+
+        let _held = thread.hold();
+        let (done, stopped) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                thread.stop();
+                let _ = done.send(());
+            });
+            assert!(stopped.recv_timeout(Duration::from_secs(5)).is_ok(), "a held feed thread still stops");
+        });
     }
 }

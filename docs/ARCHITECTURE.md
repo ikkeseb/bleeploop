@@ -228,7 +228,10 @@ VST3 hosting is hand-written unsafe COM over `coupler-rs/vst3` (Rust has no turn
 crate); CLAP goes through `clack-host`. VST2 is hosted for 64-bit plugins through the project's own
 declarations of its binary interface (`src-tauri/src/host/vst2_abi.rs`: written from the layout, no
 SDK header; `vst-rs` is archived). Its whole lifecycle, `effStartProcess` and `effStopProcess`
-included, runs on the slot's owner thread; the plugin calls the host from any thread, and that
-callback only sets latches the owner drains (`src-tauri/src/host/vst2.rs`). Its tone is its bank
+included, runs on the slot's owner thread; the plugin calls the host from any thread, and from the
+processing thread and every foreign thread that callback only sets latches the owner drains. Only on
+the owner thread, outside a process call, does it act at once: an idle request pumps that thread's
+messages and an editor resize is applied (`src-tauri/src/host/vst2.rs`). Its tone is its bank
 chunk, or its parameter values when it keeps no chunk (`src-tauri/src/host/vst2_engine.rs`). A 32-bit
-VST2 and a shell are recognised and reported, not hosted.
+VST2 and a shell are recognised and reported by the scan, and a load refuses a shell too: neither is
+hosted.

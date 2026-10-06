@@ -15,7 +15,7 @@ use lf_engine::{TimedCommand, SLOT_COUNT};
 use tauri::ipc::Channel;
 use tauri::{AppHandle, Manager};
 
-use super::feed::FeedThread;
+use super::feed::{FeedHold, FeedThread};
 use super::plugins::EngineSlot;
 use crate::host::tone::{ToneHandoff, ToneStore};
 use super::wire::{FeedFrame, WireCommand};
@@ -90,6 +90,12 @@ impl EngineApp {
             tones,
             reload_tones: Mutex::default(),
         }
+    }
+
+    /// Hold the feed's sends until the guard drops (`FeedThread::hold`): for as long as the UI
+    /// thread cannot read them. `None` when the engine did not start (there is no feed).
+    pub(crate) fn hold_feed(&self) -> Option<FeedHold> {
+        self.engine.as_ref().map(|(_, feed)| feed.hold())
     }
 
     pub(super) fn host(&self) -> Result<EngineHost, String> {

@@ -121,7 +121,8 @@ pub async fn plugin_folders(
 /// Add a plugin folder the player picks in the native folder dialog; `Ok(None)` = cancelled. The
 /// path comes from the dialog alone: the WebView supplies none. The dialog runs on the UI thread,
 /// owned by the main window it belongs to (`folders::pick_folder`), and its answer comes back over a
-/// channel; no lock is held while it is open.
+/// channel; no lock is held while it is open. The feed is held for as long: the UI thread reads no
+/// frame while the dialog is modal on it, and the close resyncs it with one reset (`engine_io/feed.rs`).
 #[tauri::command]
 pub async fn plugin_folder_add(
     window: tauri::WebviewWindow,
@@ -137,6 +138,8 @@ pub async fn plugin_folder_add(
         }
         let (tx, mut rx) = tauri::async_runtime::channel(1);
         let owner = window.clone();
+        // From just before the dialog shows until its answer is back, on every path out of here.
+        let feed_held = engine().ok().and_then(|app| app.hold_feed());
         let shown = window.run_on_main_thread(move || {
             let picked = owner
                 .hwnd()
@@ -149,6 +152,7 @@ pub async fn plugin_folder_add(
             Ok(()) => rx.recv().await.unwrap_or_else(|| Err("the folder dialog did not run".to_string())),
             Err(e) => Err(format!("folder dialog: {e}")),
         };
+        drop(feed_held);
         state.folder_dialog_open.store(false, SeqCst);
         let Some(folder) = picked? else { return Ok(None) };
         let user = super::folders::add(&state.folders_write, &file, &folder)?;
@@ -325,7 +329,8 @@ pub async fn plugin_list_params(slot: u8) -> Result<Vec<ParamDesc>, String> {
     }
 }
 /// P10.0: open the slot's plugin editor, on its owner thread: a plugin-owned floating window, else
-/// one embedded in a host window (`clap::editor_open`, `vst3_host::vst3_editor_open`). `mode` is
+/// one embedded in a host window (`clap::editor_open`, `vst3_host::vst3_editor_open`, the VST2
+/// owner's `embed_editor`). `mode` is
 /// accepted for forward-compat and ignored.
 #[tauri::command]
 pub async fn plugin_open_editor(slot: u8, mode: String) -> Result<(), String> {

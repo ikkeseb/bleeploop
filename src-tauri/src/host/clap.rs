@@ -211,7 +211,7 @@ fn handle_owner_request(
     }
 }
 
-/// Owner-side PRE-START cancellation gate, shared by both owner loops (CLAP + VST3). `None` = the
+/// Owner-side PRE-START cancellation gate, shared by the owner loops (CLAP, VST3 and VST2). `None` = the
 /// caller's 5 s wait expired before the owner reached this request, so it must not run at all: the
 /// frontend has booked the operation as failed, and the reply drops with the request (an ignored
 /// send is already the norm here). A request that PASSES here can still be cancelled mid-call —
@@ -712,7 +712,7 @@ mod load_channel_tests {
 const MAX_PLUGIN_CHANNELS: i64 = 64;
 /// Parameters: the largest listing in the 30-plugin restart survey is 2855 (Surge XT VST3, hidden
 /// ones excluded); the ceiling leaves wide room above that and bounds one listing to a few MB.
-const MAX_PLUGIN_PARAMS: i64 = 1 << 16;
+pub(super) const MAX_PLUGIN_PARAMS: i64 = 1 << 16;
 
 /// A plugin-reported channel count, checked before it sizes a buffer (CLAP ports, VST3 buses, VST2
 /// inputs and outputs).

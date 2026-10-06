@@ -86,10 +86,11 @@ impl PluginFormat {
 /// What an owner tells its caller (the window at Stage 5; a probe or a test before that).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum EngineSlotEvent {
-    /// The plugin's own editor moved a parameter (VST3 `performEdit`); the processor has it too.
+    /// The plugin's own editor moved a parameter (VST3 `performEdit`, VST2 `audioMasterAutomate`);
+    /// the processor has it too.
     ParamChanged { id: u32, value: f64 },
     /// The plugin changed its parameters behind the host's back (CLAP `params.rescan`, VST3
-    /// `restartComponent` with a param flag): list them again.
+    /// `restartComponent` with a param flag, VST2 `audioMasterUpdateDisplay`): list them again.
     ParamsChanged,
     /// The user closed the plugin's editor.
     EditorClosed,

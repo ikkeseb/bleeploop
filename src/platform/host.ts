@@ -33,7 +33,7 @@ export interface PluginDescriptor {
   format: PluginFormat;
   path: string;
   /** Output-gain kind: `true` = audio effect (amp-sim/FX), `false` = instrument (synth), `null` =
-   * unclassified. Read at scan from CLAP `features()` / VST3 `subCategories`. The plugin bridge uses
+   * unclassified. Read at scan from CLAP `features()` / VST3 `subCategories` / VST2's synth flag. The plugin bridge uses
    * it to pick the per-slot output-gain default (falling back to the input-bus count when null). */
   isEffect: boolean | null;
 }
@@ -162,7 +162,7 @@ export interface PluginHost {
   onParamChanged(cb: (e: { slot: PluginSlot; id: number; value: number }) => void): () => void;
   /**
    * Subscribe to a WHOLESALE parameter change reported by the plugin itself — a preset loaded in its
-   * own GUI, a program change (CLAP `params.rescan`, VST3 `restartComponent(kParamValuesChanged)`).
+   * own GUI, a program change (CLAP `params.rescan`, VST3 `restartComponent(kParamValuesChanged)`, VST2 `audioMasterUpdateDisplay`).
    * The values the UI holds are stale after this; re-run `listParams`. Returns an unsubscribe fn. No-op
    * in the web build.
    */

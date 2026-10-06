@@ -11,7 +11,7 @@
 //! max < 52 % of the period, plugin loads 7–78 ms. Every ASIO re-open logs a BadMode input build and
 //! its retry (`cpal_driver`'s `retry_on_asio`): expected, not a fault.
 //!
-//! `app.exe --probe-engine <asio|wasapi> <64|128|256|default> [--plugin <slot>=<file.vst3|.clap>]...
+//! `app.exe --probe-engine <asio|wasapi> <64|128|256|default> [--plugin <slot>=<file.vst3|.clap|.dll>]...
 //! [--seconds N] [--switches N] [--swaps N] [--cycle <asio64|asio128|asio256|wasapi>,...] [--hold S]
 //! [--pause MS] [--in N] [--device <WASAPI name substring>] [--mute]
 //! [--lag [--out N] [--no-preopen] [--split <out|in>]]`
@@ -135,7 +135,7 @@ enum Split {
 }
 
 fn parse_args(args: &[String]) -> Result<Args, String> {
-    const USAGE: &str = "usage: --probe-engine <asio|wasapi> <64|128|256|default> [--plugin <slot>=<file.vst3|.clap>]... \
+    const USAGE: &str = "usage: --probe-engine <asio|wasapi> <64|128|256|default> [--plugin <slot>=<file.vst3|.clap|.dll>]... \
         [--seconds N] [--switches N] [--swaps N] [--cycle <asio64|asio128|asio256|wasapi>,...] [--hold S] [--pause MS] [--in N] [--device <WASAPI name substring>] [--mute] \
         [--lag [--out N] [--no-preopen] [--split <out|in>]]";
     let backend = match args.first().map(String::as_str) {

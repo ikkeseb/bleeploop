@@ -21,7 +21,7 @@ Who runs where and what each thread owns. The rules are in bold below the table.
 | **Device owner** (`lf-engine-owner`, `engine_io/owner.rs`) | Every device transition, one at a time; the cpal streams (Send: ownership is for ordering); building engines; the engine lock, only while no stream runs | A request channel with one-shot replies; polls what the callbacks latched and logs the glitch counters |
 | **Device callbacks** (cpal driver threads) | Nothing: ASIO runs input then output in one bufferSwitch; WASAPI's output callback is the clock and its input callback feeds the join pipe. Each promotes itself to MMCSS Pro Audio on first entry | `try_lock` on the engine (a miss plays silence and counts); atomics and rings; faults latch for the owner |
 | **Share output** (a cpal WASAPI callback, `engine_io/share.rs`) | The mirror endpoint's stream, while ASIO plays | Pulls the post-limiter master from its pipe; never takes the engine lock |
-| **Feed** (`lf-engine-feed`, `engine_io/feed.rs`) | The only reader of the engine's event ring (but for a rebuild, which drains the replaced engine's: `swap_engine`) and the device events; the mirror of lanes and transport a reload resyncs from | ~60 frames/s over a Tauri `Channel`; never PCM |
+| **Feed** (`lf-engine-feed`, `engine_io/feed.rs`) | The only reader of the engine's event ring (but for a rebuild, which drains the replaced engine's: `swap_engine`) and the device events; the mirror of lanes and transport a reload resyncs from | ~60 frames/s over a Tauri `Channel`; never PCM. Held (`FeedThread::hold`, an RAII guard) while the plugin folder dialog is open, since the UI thread reads no frame then: it keeps ticking, so the event ring is drained and the mirror stays true, sends nothing, and the close resyncs the page with one `reset` frame |
 | **Plugin owner, per slot** (`lf-clap-engine-{slot}` / `lf-vst3-engine-{slot}` / `lf-vst2-engine-{slot}`, `host/engine_slot.rs`) | The `!Send` plugin instance (clack main thread / VST3 component + controller / VST2 effect, with its `effStartProcess` and `effStopProcess`), its editor host window and Win32 pump, its tone saves, restarts and re-activation after an eviction, the ordered teardown | `OwnerRequest`s (polled every 20 ms, `OWNER_POLL`); the unit enters and leaves the engine through its `SlotHost`; params through the slot's event ring; the unit's fault bits, reported once per load |
 | **Shutdown** (`lf-engine-shutdown`, on exit, and before the updater's installer: `update.rs`) | Stops the feed, saves every tone, unloads the plugins while the device plays, closes the device | Bounded at 8 s (`SHUTDOWN_WAIT`): a stuck plugin is left to process exit |
 | **ASIO probe** (`lf-asio-probe`, `asio_startup.rs`) | One driver-resolving probe at a time, requested by the frontend after the UI is up (a retry after a failure and a driver switch probe again) | Its status report |
@@ -157,7 +157,8 @@ plugin-GUI work.
   `%COMMONPROGRAMFILES%\VST2`, `%COMMONPROGRAMFILES%\Steinberg\VST2`, the registry's `VSTPluginsPath`,
   `VST_PATH`), then the folders the player added in Audio Settings (`src/host/folders.rs`). A
   built-in root yields its own format, a player's folder every format. A 32-bit VST2 and a VST2 shell
-  (several plugins in one file) are listed as unsupported, with why, and never hosted. A plugin reached twice keeps the
+  (several plugins in one file) are listed as unsupported, with why, and never hosted (a load
+  refuses a shell too, by its category). A plugin reached twice keeps the
   FIRST spelling met, and no path is canonicalised on its way into a descriptor: the tone store and
   the frontend hash `(format, path, id)` byte for byte, so a respelled path orphans its saved tone.
   Loader is `clack_host::entry::PluginEntry::load` (unsafe), NOT `PluginBundle`.
@@ -224,7 +225,11 @@ plugin-GUI work.
   - **Both pointer arrays of a process call ALWAYS hold 64 entries** (the bound `validate` accepts):
     a row per declared pin, every other entry at a scratch row, so a plugin that grows its pin count
     never reads or writes past an array. After `audioMasterIOChanged` the unit makes NO plugin call
-    (`HostContext::halted`) until the owner has cycled the plugin and rebuilt the rows.
+    (`HostContext::halted`) until the owner has cycled the plugin and rebuilt the rows. The engine's
+    note-offs are discarded with the rest, so the unit keeps the keys it sent and releases them in
+    the first slice after the cycle. A resume consumes what the plugin reported from inside it
+    BEFORE it reads the layout: a report that lands after the read stays latched, and the unit goes
+    in halted until the owner's next turn cycles it.
   - **`effStartProcess`/`effStopProcess` and `effMainsChanged` run on the OWNER**, never the audio
     thread (unlike VST3's `setProcessing`); the unit's `stop` calls nothing. The audio thread sends
     one dispatcher opcode, `effProcessEvents`. A dispatcher's return is its opcode's own: 0 from
@@ -285,25 +290,16 @@ plugin-GUI work.
   import of P into S under its write lock). A disk write that hangs therefore stalls that owner, and an
   unload joins it without a timeout (the app's exit is bounded). Other tones' writes never block it; a
   store worker doing the file I/O would remove the wait.
-- While the plugin folder dialog is open no feed frame reaches the page: the dialog runs on the UI
-  thread, every frame sent meanwhile is held (60 a second, no bound) and all of them arrive in one
-  burst when it closes, about 10 ms of catch-up per second it was open (99 ms after 10 s, 612 ms after
-  60 s, no frame lost; measured 2026-10-06 on a debug build driven over CDP, nothing playing). The
-  window answers and commands complete meanwhile (`plugin_folders` in 3 ms). Not measured: a dialog
-  left open for hours, and a loop playing behind it. Holding the feed's sends while the dialog is open
-  and resyncing once when it closes would bound it. Not built.
 - `clap_engine.rs`, `vst3_engine.rs` and `src/host/vst2_engine.rs` each carry the whole owner
   choreography (load, restart, eviction, teardown): one shared owner would keep B1/B11 from returning. Not built.
 - VST2 host gaps (read from source, none reproduced; no real plugin has been loaded into a slot yet):
   a restart whose unit the engine does not hand back within 2 s leaves the unit silent until the
-  plugin's next `audioMasterIOChanged`; a parameter count that grows in a restart is listed, but
-  the plugin's reports for the new indices are dropped (the automation latch is sized at open);
-  `effSetChunk` answers no verdict, so a chunk the plugin could not use is reported as restored;
+  plugin's next `audioMasterIOChanged`; `effSetChunk` answers no verdict, so a chunk the plugin
+  could not use is reported as restored;
   `effIdle` is sent once per `audioMasterNeedIdle`, not until it answers 0; a program is selected
   without `effBeginSetProgram`/`effEndSetProgram`; the plugin gets notes only (no CC, pitch bend
   or SysEx) and a time info without transport; `FAULT_PROCESS` has no VST2 site (its process call
-  answers nothing); the owner loop's editor requests and its close box are untested by fixture (the
-  editor itself is, on a hidden window).
+  answers nothing).
 - A unit whose restart failed stays parked, bypassed, until the plugin's next restart request; a device
   change does not retry it.
 - Each ASIO overload counts twice in `xruns` (both streams' error callbacks count it), and an output
@@ -332,7 +328,11 @@ plugin-GUI work.
   crackled heavily twice while agents built on the PC: once with BleepLoop closed, once under
   `pnpm rust:check`'s cargo tests (about 560 s of full CPU), so the app need not run for it. The
   owner's impression (unmeasured): it persists while many agents run and load the CPU. Cause unknown;
-  that CPU load triggers it is untested.
+  that CPU load triggers it is untested. The owner's hypothesis: a buffer running over or dry. A
+  tester hears it at times too, and a gate on his interface made it less marked, which would put some
+  of it on the input side there (whether it is the same fault is unknown). Next check: LatencyMon
+  through a `pnpm rust:check` with the app open, read against the `audio glitch` lines, to tell a
+  driver or DPC stall from the engine's own xruns.
 - Plugin-host gaps a source review found (2026-10-02; read from source, none reproduced), ranked by
   exposure on the owner's plugins. First: VST3 omits trailing inactive aux buses (the SDK's
   `activateBus` rule permits it) and passes short `setBusArrangements` arrays whose result is read

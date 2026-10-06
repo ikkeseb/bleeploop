@@ -1,7 +1,7 @@
 [package]
 name = "app"
 version = "0.7.0"
-description = "BleepLoop — instrument host (native CLAP/VST3 + built-in synths) over an RC-505-style 5-track looper"
+description = "BleepLoop — instrument host (native CLAP/VST3/VST2 + built-in synths) over an RC-505-style 5-track looper"
 authors = ["ikkeseb"]
 license = "MIT"
 repository = "https://github.com/ikkeseb/bleeploop"
@@ -111,14 +111,14 @@ cpal             = { version = "=0.18.1", default-features = false }
 asio-sys         = { version = "=0.3.0", optional = true }
 rtrb             = "0.3.4"                  # wait-free SPSC rings (engine commands, plugin events, the pipes)
 rubato           = "3.0.0"                  # the engine pipes' fractional resampler (engine_io::pipes)
-walkdir          = "2"                      # CLAP-file + VST3-dir scan (no clack-finder)
+walkdir          = "2"                      # the plugin scan's folder walk: CLAP, VST3 and VST2 (no clack-finder)
 # The native engine (briefing: crates/lf-engine/src/lib.rs): pure, driven by `engine_io`.
 lf-engine        = { path = "crates/lf-engine" }
 # Native MIDI input for the engine (engine_io::midi; WinMM on Windows). 0.11 accepts windows
 # >=0.59,<=0.62; the lock holds it on 0.61 with the rest of the graph (see windows-core above).
 midir            = "0.11"
 # --- P10.1: native VST3 host ---
-# `vst3` 0.3.0 (coupler-rs / Micah Johnston): raw unsafe Steinberg FUnknown bindings. Only runtime
+# `vst3` 0.3.0 (coupler-rs): raw unsafe Steinberg FUnknown bindings. Only runtime
 # dep is `com-scrape-types` (NO windows/windows-core), so it cannot reconflict the pinned 0.61 graph
 # (confirm with `cargo tree -d`). VST3 "COM" is Steinberg's FUnknown ABI, not MS-COM — no apartments.
 vst3             = "0.3"

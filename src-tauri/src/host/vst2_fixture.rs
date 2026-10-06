@@ -78,6 +78,19 @@ impl Default for Shape {
 /// Parameters a probed instance keeps a value for.
 pub(crate) const PROBE_PARAMS: usize = 8;
 
+/// Events a probed instance keeps in its trace; later ones are counted and not kept.
+const EVENT_TRACE: usize = 1024;
+
+/// One event a probed instance got: the process call it came before (how many this instance had
+/// rendered by then), its offset in that slice, and its MIDI status and key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct TracedEvent {
+    pub(crate) slice: usize,
+    pub(crate) delta: i32,
+    pub(crate) status: u8,
+    pub(crate) key: u8,
+}
+
 /// One dispatcher call a probed instance got: the opcode, its `value`, the thread it came on, and
 /// whether that thread was the test device's (the audio thread).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -100,14 +113,32 @@ pub(crate) struct Probe {
     pub(crate) level: AtomicU32,
     /// How many outputs carry the level (0: all of them); the rest stay silent.
     pub(crate) signal_outputs: AtomicI32,
+    /// How far the first pair stands apart (`f32` bits): the first output plays the level plus
+    /// this, the second the level minus it.
+    pub(crate) spread: AtomicU32,
     /// `setParameter` reports half the value it was given through `audioMasterAutomate`.
     pub(crate) automate_in_set: AtomicBool,
     /// The next process call changes the output count to this and calls `audioMasterIOChanged`.
     pub(crate) grow_in_process: AtomicI32,
-    /// `effMainsChanged(0)` changes the output count to this (`-1`: it stays).
+    /// The next process call first raises its input and output counts to these (`inputs << 8 |
+    /// outputs`, 0: no growth), reads a sample from every input row it just declared and fills
+    /// every output row it just declared, renders, then calls `audioMasterIOChanged`.
+    pub(crate) grow_before_render: AtomicI32,
+    /// `effOpen` changes the parameter count to this (`-1`: it stays).
+    pub(crate) params_on_open: AtomicI32,
+    /// `effMainsChanged(0)` changes the output count, and the parameter count, to this (`-1`: it
+    /// stays).
     pub(crate) outputs_on_suspend: AtomicI32,
+    pub(crate) params_on_suspend: AtomicI32,
+    /// `effSetProgram` changes the parameter count to this (`-1`: it stays).
+    pub(crate) params_on_set_program: AtomicI32,
     /// `effMainsChanged(1)` calls `audioMasterIOChanged`, as a plugin that settles its pins there.
     pub(crate) io_changed_in_resume: AtomicBool,
+    /// The next `effMainsChanged(1)` changes the layout to this (inputs, outputs, latency) and
+    /// calls `audioMasterIOChanged`.
+    pub(crate) layout_on_resume: Mutex<Option<(i32, i32, i32)>>,
+    /// `effGetChunk` answers its length with no pointer.
+    pub(crate) chunk_null: AtomicBool,
     /// What `effGetChunk` answers as its length (0: the chunk's own).
     pub(crate) chunk_len: AtomicIsize,
     /// `effSetProgram` resets every parameter to 0 and clears the chunk, as selecting a program
@@ -129,7 +160,15 @@ pub(crate) struct Probe {
     pub(crate) values: [AtomicU32; PROBE_PARAMS],
     pub(crate) program: AtomicI32,
     pub(crate) chunk: Mutex<Vec<u8>>,
+    /// The bank `effGetChunk` last answered: the chunk, then one byte for the current program.
+    /// `effSetChunk` takes a bank apart the same way, so a bank restores its own program.
+    bank: Mutex<Vec<u8>>,
     editor_open: AtomicBool,
+    /// Between `effStartProcess` and `effStopProcess`, and how many process calls are in flight.
+    started: AtomicBool,
+    in_process: AtomicUsize,
+    /// An `effProcessEvents` no process call has followed yet.
+    events_pending: AtomicBool,
     /// Between an `audioMasterIOChanged` this instance raised and the `effMainsChanged(0)` that
     /// answers it.
     awaiting_cycle: AtomicBool,
@@ -147,6 +186,15 @@ pub(crate) struct Probe {
     pub(crate) calls_while_halted: AtomicUsize,
     /// Process and event calls on a thread other than the test device's.
     pub(crate) rt_calls_off_device: AtomicUsize,
+    /// Process calls that came while the plugin was not started, and lifecycle calls (stop, mains,
+    /// close, sample rate, block size, set chunk) that came while a process call was in flight.
+    pub(crate) renders_while_stopped: AtomicUsize,
+    pub(crate) lifecycle_in_process: AtomicUsize,
+    /// What `grow_before_render` found: the input rows it read, how many of them held anything
+    /// but silence, and the output rows it filled.
+    pub(crate) grown_inputs_read: AtomicUsize,
+    pub(crate) grown_inputs_loud: AtomicUsize,
+    pub(crate) grown_outputs_filled: AtomicUsize,
     /// Distinct row pointers among the declared inputs and outputs of the last process call, and
     /// whether all 64 entries of both arrays were non-null.
     pub(crate) distinct_inputs: AtomicUsize,
@@ -160,6 +208,13 @@ pub(crate) struct Probe {
     pub(crate) time_flags: AtomicI32,
     pub(crate) process_level: AtomicIsize,
     pub(crate) event_calls: AtomicUsize,
+    /// Process calls an `effProcessEvents` came before, and event calls that followed another with
+    /// no process call between them.
+    pub(crate) slices_after_events: AtomicUsize,
+    pub(crate) event_calls_unanswered: AtomicUsize,
+    /// Every event, in order (`TracedEvent`, packed), and how many came.
+    event_trace: Box<[AtomicU64]>,
+    events_traced: AtomicUsize,
     pub(crate) note_ons: AtomicUsize,
     pub(crate) note_offs: AtomicUsize,
     pub(crate) last_key: AtomicI32,
@@ -179,6 +234,9 @@ pub(crate) struct Probe {
     pub(crate) host_rate_at_resume: AtomicIsize,
     pub(crate) set_programs: AtomicUsize,
     pub(crate) set_chunks: AtomicUsize,
+    /// The `index` the last `effGetChunk` and `effSetChunk` came with (`-1`: none yet; 0 is the bank).
+    pub(crate) get_chunk_index: AtomicI32,
+    pub(crate) set_chunk_index: AtomicI32,
     pub(crate) edit_opens: AtomicUsize,
     pub(crate) edit_closes: AtomicUsize,
     pub(crate) edit_idles: AtomicUsize,
@@ -191,8 +249,11 @@ pub(crate) struct Probe {
 impl Probe {
     /// A probe for one plugin, alive for the rest of the test process.
     pub(crate) fn new() -> &'static Probe {
-        let probe = Probe::default();
-        probe.outputs_on_suspend.store(-1, Relaxed);
+        let mut probe = Probe::default();
+        probe.event_trace = (0..EVENT_TRACE).map(|_| AtomicU64::new(0)).collect();
+        for unset in [&probe.outputs_on_suspend, &probe.params_on_suspend, &probe.params_on_set_program, &probe.params_on_open, &probe.get_chunk_index, &probe.set_chunk_index] {
+            unset.store(-1, Relaxed);
+        }
         *probe.rect.lock().unwrap() = (400, 300);
         *probe.rect_open.lock().unwrap() = (400, 300);
         Box::leak(Box::new(probe))
@@ -230,6 +291,25 @@ impl Probe {
         unsafe { (*self.raw()).num_outputs = outputs };
     }
 
+    /// Every event the instance got, in order (the first `EVENT_TRACE` of them).
+    pub(crate) fn events(&self) -> Vec<TracedEvent> {
+        let kept = self.events_traced.load(Relaxed).min(EVENT_TRACE);
+        self.event_trace[..kept]
+            .iter()
+            .map(|packed| {
+                let packed = packed.load(Relaxed);
+                TracedEvent { slice: (packed >> 32) as usize, delta: i32::from((packed >> 16) as u16 as i16), status: (packed >> 8) as u8, key: packed as u8 }
+            })
+            .collect()
+    }
+
+    /// The `skip + 1`-th `validate` of the live instance from now is followed, before the host does
+    /// anything else, by what a thread of the plugin's own could do right then: the output count
+    /// becomes `outputs` and `audioMasterIOChanged` is called (`validated`).
+    pub(crate) fn io_change_after_validate(&'static self, skip: usize, outputs: i32) {
+        *AFTER_VALIDATE.lock().unwrap() = Some(AfterValidate { effect: self.raw() as usize, skip, outputs, probe: self });
+    }
+
     fn on_device() -> bool {
         std::thread::current().name() == Some(TEST_DEVICE_THREAD)
     }
@@ -239,6 +319,53 @@ impl Probe {
         if self.awaiting_cycle.load(SeqCst) {
             self.calls_while_halted.fetch_add(1, Relaxed);
         }
+    }
+}
+
+/// What `Probe::io_change_after_validate` armed.
+struct AfterValidate {
+    effect: usize,
+    skip: usize,
+    outputs: i32,
+    probe: &'static Probe,
+}
+
+static AFTER_VALIDATE: Mutex<Option<AfterValidate>> = Mutex::new(None);
+
+/// Called by `vst2::validate` once it has read `effect` (test builds only): the one point between
+/// two host steps that no plugin call reaches, where a plugin thread can still move.
+pub(crate) fn validated(effect: *const AEffect) {
+    let mut armed = AFTER_VALIDATE.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(hook) = armed.as_mut().filter(|hook| hook.effect == effect as usize) else { return };
+    if hook.skip > 0 {
+        hook.skip -= 1;
+        return;
+    }
+    let Some(hook) = armed.take() else { return };
+    drop(armed);
+    let effect = effect.cast_mut();
+    // SAFETY: the armed effect is this fixture's live instance, which changes its own layout and
+    // tells its host, as from a thread of its own; the opcode passes no pointer.
+    unsafe {
+        (*effect).num_outputs = hook.outputs;
+        hook.probe.awaiting_cycle.store(true, SeqCst);
+        call_host(effect, AUDIO_MASTER_IO_CHANGED, 0, 0, 0.0);
+    }
+}
+
+/// Counts a process call in flight for as long as it lives.
+struct InFlight<'a>(&'a AtomicUsize);
+
+impl<'a> InFlight<'a> {
+    fn enter(count: &'a AtomicUsize) -> Self {
+        count.fetch_add(1, SeqCst);
+        Self(count)
+    }
+}
+
+impl Drop for InFlight<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, SeqCst);
     }
 }
 
@@ -413,6 +540,10 @@ unsafe fn probed(probe: &Probe, effect: *mut AEffect, opcode: i32, index: i32, v
             probe.rt_calls_off_device.fetch_add(1, Relaxed);
         }
         probe.event_calls.fetch_add(1, Relaxed);
+        if probe.events_pending.swap(true, Relaxed) {
+            probe.event_calls_unanswered.fetch_add(1, Relaxed);
+        }
+        let slice = probe.processes.load(Relaxed) as u64;
         // SAFETY: the host's event list: `num_events` pointers to MIDI events after its header.
         unsafe {
             let list = ptr.cast::<VstEvents>();
@@ -429,6 +560,10 @@ unsafe fn probed(probe: &Probe, effect: *mut AEffect, opcode: i32, index: i32, v
                 probe.last_key.store(i32::from(key), Relaxed);
                 probe.last_velocity.store(i32::from(velocity), Relaxed);
                 probe.last_delta.store(event.delta_frames, Relaxed);
+                if let Some(entry) = probe.event_trace.get(probe.events_traced.fetch_add(1, Relaxed)) {
+                    let delta = u64::from(event.delta_frames as i16 as u16);
+                    entry.store(slice << 32 | delta << 16 | u64::from(status) << 8 | u64::from(key), Relaxed);
+                }
             }
         }
         return Some(1);
@@ -438,9 +573,28 @@ unsafe fn probed(probe: &Probe, effect: *mut AEffect, opcode: i32, index: i32, v
         return Some(0);
     }
     probe.calls.lock().unwrap().push(Call { opcode, value, thread: std::thread::current().id(), on_device: Probe::on_device() });
+    let lifecycle = matches!(opcode, EFF_STOP_PROCESS | EFF_MAINS_CHANGED | EFF_CLOSE | EFF_SET_SAMPLE_RATE | EFF_SET_BLOCK_SIZE | EFF_SET_CHUNK);
+    if lifecycle && probe.in_process.load(SeqCst) != 0 {
+        probe.lifecycle_in_process.fetch_add(1, Relaxed);
+    }
     // SAFETY: the instance is alive for every opcode handled below (`effClose` is not).
     let instance = unsafe { &mut *effect.cast::<Instance>() };
     match opcode {
+        EFF_OPEN => {
+            let params = probe.params_on_open.load(Relaxed);
+            if params >= 0 {
+                instance.effect.num_params = params;
+            }
+            None
+        }
+        EFF_START_PROCESS => {
+            probe.started.store(true, SeqCst);
+            Some(0)
+        }
+        EFF_STOP_PROCESS => {
+            probe.started.store(false, SeqCst);
+            Some(0)
+        }
         EFF_CLOSE => {
             probe.closes.fetch_add(1, Relaxed);
             probe.effect.store(std::ptr::null_mut(), SeqCst);
@@ -449,6 +603,10 @@ unsafe fn probed(probe: &Probe, effect: *mut AEffect, opcode: i32, index: i32, v
         EFF_SET_PROGRAM => {
             probe.set_programs.fetch_add(1, Relaxed);
             probe.program.store(value as i32, Relaxed);
+            let params = probe.params_on_set_program.swap(-1, Relaxed);
+            if params >= 0 {
+                instance.effect.num_params = params;
+            }
             if probe.program_resets.load(Relaxed) {
                 for stored in &probe.values {
                     stored.store(0f32.to_bits(), Relaxed);
@@ -478,14 +636,24 @@ unsafe fn probed(probe: &Probe, effect: *mut AEffect, opcode: i32, index: i32, v
             if outputs >= 0 {
                 instance.effect.num_outputs = outputs;
             }
+            let params = probe.params_on_suspend.swap(-1, Relaxed);
+            if params >= 0 {
+                instance.effect.num_params = params;
+            }
             probe.awaiting_cycle.store(false, SeqCst);
             Some(0)
         }
         EFF_MAINS_CHANGED => {
+            let layout = probe.layout_on_resume.lock().unwrap().take();
+            if let Some((inputs, outputs, delay)) = layout {
+                instance.effect.num_inputs = inputs;
+                instance.effect.num_outputs = outputs;
+                instance.effect.initial_delay = delay;
+            }
             // SAFETY: this live instance; the opcodes pass no pointer.
             unsafe {
                 probe.host_rate_at_resume.store(call_host(effect, AUDIO_MASTER_GET_SAMPLE_RATE, 0, 0, 0.0), Relaxed);
-                if probe.io_changed_in_resume.load(Relaxed) {
+                if layout.is_some() || probe.io_changed_in_resume.load(Relaxed) {
                     call_host(effect, AUDIO_MASTER_IO_CHANGED, 0, 0, 0.0);
                 }
             }
@@ -522,19 +690,32 @@ unsafe fn probed(probe: &Probe, effect: *mut AEffect, opcode: i32, index: i32, v
             Some(0)
         }
         EFF_GET_CHUNK => {
+            probe.get_chunk_index.store(index, Relaxed);
             let chunk = probe.chunk.lock().unwrap();
-            // SAFETY: the host passes where to write the pointer to the plugin's own chunk, which
-            // stays where it is until the next `effSetChunk` or `effSetProgram`.
-            unsafe { *ptr.cast::<*const u8>() = chunk.as_ptr() };
+            let mut bank = probe.bank.lock().unwrap();
+            bank.clear();
+            if !chunk.is_empty() {
+                bank.extend_from_slice(&chunk);
+                bank.push(probe.program.load(Relaxed) as u8);
+            }
+            let data = if probe.chunk_null.load(Relaxed) { std::ptr::null() } else { bank.as_ptr() };
+            // SAFETY: the host passes where to write the pointer to the plugin's own bank, which
+            // stays where it is until the next `effGetChunk`.
+            unsafe { *ptr.cast::<*const u8>() = data };
             Some(match probe.chunk_len.load(Relaxed) {
-                0 => chunk.len() as isize,
+                0 => bank.len() as isize,
                 lie => lie,
             })
         }
         EFF_SET_CHUNK => {
             probe.set_chunks.fetch_add(1, Relaxed);
+            probe.set_chunk_index.store(index, Relaxed);
             // SAFETY: the host passes `value` bytes at `ptr`.
-            *probe.chunk.lock().unwrap() = unsafe { std::slice::from_raw_parts(ptr.cast::<u8>(), value as usize) }.to_vec();
+            let bank = unsafe { std::slice::from_raw_parts(ptr.cast::<u8>(), value as usize) };
+            if let Some((&program, chunk)) = bank.split_last() {
+                probe.program.store(i32::from(program), Relaxed);
+                *probe.chunk.lock().unwrap() = chunk.to_vec();
+            }
             Some(0)
         }
         EFF_IDLE => {
@@ -572,14 +753,45 @@ unsafe fn render(effect: *mut AEffect, inputs: *mut *mut f32, outputs: *mut *mut
     if !Probe::on_device() {
         probe.rt_calls_off_device.fetch_add(1, Relaxed);
     }
-    // SAFETY: the live instance's own counts.
-    let (ins, outs) = unsafe { ((*effect).num_inputs.max(0) as usize, (*effect).num_outputs.max(0) as usize) };
+    if !probe.started.load(SeqCst) {
+        probe.renders_while_stopped.fetch_add(1, Relaxed);
+    }
+    let _in_flight = InFlight::enter(&probe.in_process);
+    if probe.events_pending.swap(false, Relaxed) {
+        probe.slices_after_events.fetch_add(1, Relaxed);
+    }
+    // SAFETY (each call): the live instance's own counts.
+    let declared = |effect: *mut AEffect| unsafe { ((*effect).num_inputs.max(0) as usize, (*effect).num_outputs.max(0) as usize) };
+    let before = declared(effect);
+    let grown = probe.grow_before_render.swap(0, Relaxed);
+    if grown != 0 {
+        // SAFETY: this live instance changes its own layout before it renders, as a plugin can.
+        unsafe {
+            (*effect).num_inputs = grown >> 8;
+            (*effect).num_outputs = grown & 0xff;
+        }
+    }
+    let (ins, outs) = declared(effect);
     // The host's arrays always hold 64 entries: every one is read here.
     // SAFETY: that contract.
     let (in_rows, out_rows) = unsafe { (std::slice::from_raw_parts(inputs, 64), std::slice::from_raw_parts(outputs, 64)) };
     if in_rows.iter().chain(out_rows).any(|row| row.is_null()) {
         probe.rows_missing.store(true, Relaxed);
         return;
+    }
+    if grown != 0 {
+        for &row in &in_rows[before.0.min(ins)..ins] {
+            probe.grown_inputs_read.fetch_add(1, Relaxed);
+            // SAFETY: the host's row for an input declared a moment ago: at least one frame.
+            if unsafe { *row } != 0.0 {
+                probe.grown_inputs_loud.fetch_add(1, Relaxed);
+            }
+        }
+        for &row in &out_rows[before.1.min(outs)..outs] {
+            // SAFETY: the host's row for an output declared a moment ago: `frames` frames.
+            unsafe { std::slice::from_raw_parts_mut(row, frames as usize) }.fill(1.0);
+            probe.grown_outputs_filled.fetch_add(1, Relaxed);
+        }
     }
     let distinct = |rows: &[*mut f32]| (0..rows.len()).filter(|&i| !rows[..i].contains(&rows[i])).count();
     probe.distinct_inputs.store(distinct(&in_rows[..ins.min(64)]), Relaxed);
@@ -596,7 +808,7 @@ unsafe fn render(effect: *mut AEffect, inputs: *mut *mut f32, outputs: *mut *mut
         }
         probe.process_level.store(call_host(effect, AUDIO_MASTER_GET_CURRENT_PROCESS_LEVEL, 0, 0, 0.0), Relaxed);
     }
-    let level = f32::from_bits(probe.level.load(Relaxed));
+    let (level, spread) = (f32::from_bits(probe.level.load(Relaxed)), f32::from_bits(probe.spread.load(Relaxed)));
     let loud = match probe.signal_outputs.load(Relaxed) {
         0 => usize::MAX,
         some => some as usize,
@@ -609,7 +821,11 @@ unsafe fn render(effect: *mut AEffect, inputs: *mut *mut f32, outputs: *mut *mut
                 // SAFETY: as above.
                 if index < ins { unsafe { *in_rows[index].add(i) } } else { 0.0 }
             } else if index < loud {
-                level
+                match index {
+                    0 => level + spread,
+                    1 => level - spread,
+                    _ => level,
+                }
             } else {
                 0.0
             };
@@ -619,11 +835,13 @@ unsafe fn render(effect: *mut AEffect, inputs: *mut *mut f32, outputs: *mut *mut
     probe.last_frames.store(frames, Relaxed);
     probe.processes.fetch_add(1, Relaxed);
     let grow = probe.grow_in_process.swap(0, Relaxed);
-    if grow != 0 {
+    if grow != 0 || grown != 0 {
         // SAFETY: this live instance changes its own layout and tells its host from inside the
         // process call, as a plugin does; the opcode passes no pointer.
         unsafe {
-            (*effect).num_outputs = grow;
+            if grow != 0 {
+                (*effect).num_outputs = grow;
+            }
             probe.awaiting_cycle.store(true, SeqCst);
             call_host(effect, AUDIO_MASTER_IO_CHANGED, 0, 0, 0.0);
         }

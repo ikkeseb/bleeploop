@@ -11,7 +11,9 @@
 //! - `effStartProcess`/`effStopProcess` and `effMainsChanged` run on the OWNER; the unit's `stop`
 //!   calls nothing. The only dispatcher opcode the audio thread sends is `effProcessEvents`.
 //! - After `audioMasterIOChanged` the unit makes no plugin call at all until the owner has cycled
-//!   the plugin (`HostContext::halted`).
+//!   the plugin (`HostContext::halted`). The note-offs the engine sends meanwhile are discarded with
+//!   everything else, so the unit keeps the keys it sent the plugin and releases them itself in the
+//!   first slice it processes after the cycle (`Vst2Unit::held`).
 //! - A dispatcher's return is its opcode's own: 0 from `effOpen`, `effMainsChanged`,
 //!   `effStartProcess`, `effStopProcess` or `effSetChunk` is no failure.
 //! - After `effClose` the `AEffect` is freed memory. A unit the engine does not hand back keeps the
@@ -55,6 +57,10 @@ use crate::engine_io::SlotHost;
 /// arrays ALWAYS hold this many, whatever the plugin declared.
 const PINS: usize = MAX_PLUGIN_CHANNELS as usize;
 
+/// Events one slice's list holds: the notes the engine queues between two renders, and beside them
+/// a note-off for every key, so the keys a halt left sounding never displace a slice's own notes.
+const EVENT_ROOM: usize = MAX_SLOT_EVENTS + 128;
+
 /// The editor's size until the plugin reports one (the other formats' fallback).
 const PROVISIONAL_EDITOR: (u32, u32) = (900, 600);
 
@@ -83,8 +89,12 @@ pub(super) struct Vst2Unit {
     in_ptrs: [*mut f32; PINS],
     out_ptrs: [*mut f32; PINS],
     /// The slice's notes as the plugin reads them: the list points into `midi`.
-    events: Box<VstEvents<MAX_SLOT_EVENTS>>,
-    midi: Box<[VstMidiEvent; MAX_SLOT_EVENTS]>,
+    events: Box<VstEvents<EVENT_ROOM>>,
+    midi: Box<[VstMidiEvent; EVENT_ROOM]>,
+    /// The keys the plugin holds, a bit each: set by every note-on sent, cleared by every note-off.
+    held: [u64; 2],
+    /// The keys the next slice processed releases before its own events (`rearm`).
+    release: [u64; 2],
     /// What `audioMasterGetTime` hands the plugin from inside a call this unit makes.
     time: Box<UnsafeCell<VstTimeInfo>>,
     /// Frames processed since the unit was built.
@@ -130,8 +140,10 @@ impl Vst2Unit {
             discard: Vec::new(),
             in_ptrs: [std::ptr::null_mut(); PINS],
             out_ptrs: [std::ptr::null_mut(); PINS],
-            events: Box::new(VstEvents { num_events: 0, reserved: 0, events: [std::ptr::null_mut(); MAX_SLOT_EVENTS] }),
-            midi: Box::new([VstMidiEvent::default(); MAX_SLOT_EVENTS]),
+            events: Box::new(VstEvents { num_events: 0, reserved: 0, events: [std::ptr::null_mut(); EVENT_ROOM] }),
+            midi: Box::new([VstMidiEvent::default(); EVENT_ROOM]),
+            held: [0; 2],
+            release: [0; 2],
             time: Box::new(UnsafeCell::new(time_info(0.0, 0.0))),
             position: 0,
             faults,
@@ -140,9 +152,14 @@ impl Vst2Unit {
         unit
     }
 
-    /// Owner thread: size the rows to what the plugin declares now (a restart can change the pin
-    /// counts, a device change the block) and take the calls it was validated with.
+    /// Owner thread, the unit out of the engine: size the rows to what the plugin declares now (a
+    /// restart can change the pin counts, a device change the block) and take the calls it was
+    /// validated with. The keys the plugin still holds go to `release`: the engine's own note-offs
+    /// for them may have come while the unit was halted, and it forgets its keys at every install.
     fn rearm(&mut self, info: &EffectInfo, max_frames: usize) {
+        for (release, held) in self.release.iter_mut().zip(self.held.iter_mut()) {
+            *release |= std::mem::take(held);
+        }
         self.dispatcher = info.dispatcher;
         self.process = info.process;
         self.replacing = info.replacing;
@@ -193,34 +210,51 @@ impl Vst2Unit {
         }
     }
 
-    /// Fill the event list with the notes of the slice `[at, at + len)` and return how many: note-on
-    /// and note-off on channel 0, each at its offset inside the slice. The list holds what the
-    /// engine queues between two renders (`MAX_SLOT_EVENTS`), so a note past it is a broken caller:
-    /// it is DROPPED and latched, never carried into a later slice, where it would sound late at an
-    /// offset that is no longer its own.
+    /// Fill the event list for the slice `[at, at + len)` and return how many events it holds: first
+    /// a note-off at offset 0 for every key in `release` (once: the set is emptied), then the
+    /// slice's notes, note-on and note-off on channel 0, each at its offset inside the slice. The
+    /// list has room for what the engine queues between two renders (`MAX_SLOT_EVENTS`) beside the
+    /// releases, so a note past that is a broken caller: it is DROPPED and latched, never carried
+    /// into a later slice, where it would sound late at an offset that is no longer its own.
     fn collect_notes(&mut self, events: &[SlotEvent], next: &mut usize, at: usize, len: usize) -> usize {
+        let event = |delta: usize, midi_data: [u8; 4]| VstMidiEvent {
+            event_type: VST_MIDI_TYPE,
+            byte_size: std::mem::size_of::<VstMidiEvent>() as i32,
+            delta_frames: delta as i32,
+            midi_data,
+            ..VstMidiEvent::default()
+        };
         let mut count = 0;
+        if self.release != [0; 2] {
+            for key in 0..128u8 {
+                if self.release[usize::from(key / 64)] & (1 << (key % 64)) != 0 {
+                    self.midi[count] = event(0, [0x80, key, 0, 0]);
+                    count += 1;
+                }
+            }
+            self.release = [0; 2];
+        }
+        let released = count;
         while let Some(e) = events.get(*next).filter(|e| (e.offset as usize) < at + len) {
             *next += 1;
-            if count == MAX_SLOT_EVENTS {
+            if count - released == MAX_SLOT_EVENTS {
                 self.faults.fetch_or(FAULT_EVENTS, Relaxed);
                 continue;
             }
             let midi_data = match e.kind {
                 SlotEventKind::NoteOn { key, velocity } => {
-                    let velocity = if velocity.is_finite() { velocity.clamp(0.0, 1.0) } else { 0.0 };
+                    let (key, velocity) = (key & 0x7f, if velocity.is_finite() { velocity.clamp(0.0, 1.0) } else { 0.0 });
+                    self.held[usize::from(key / 64)] |= 1 << (key % 64);
                     // A note-on with velocity 0 is a note-off: the quietest note is 1.
-                    [0x90, key & 0x7f, ((velocity * 127.0).round() as u8).clamp(1, 127), 0]
+                    [0x90, key, ((velocity * 127.0).round() as u8).clamp(1, 127), 0]
                 }
-                SlotEventKind::NoteOff { key } => [0x80, key & 0x7f, 0, 0],
+                SlotEventKind::NoteOff { key } => {
+                    let key = key & 0x7f;
+                    self.held[usize::from(key / 64)] &= !(1 << (key % 64));
+                    [0x80, key, 0, 0]
+                }
             };
-            self.midi[count] = VstMidiEvent {
-                event_type: VST_MIDI_TYPE,
-                byte_size: std::mem::size_of::<VstMidiEvent>() as i32,
-                delta_frames: (e.offset as usize).saturating_sub(at) as i32,
-                midi_data,
-                ..VstMidiEvent::default()
-            };
+            self.midi[count] = event((e.offset as usize).saturating_sub(at), midi_data);
             count += 1;
         }
         for (entry, event) in self.events.events.iter_mut().zip(self.midi.iter_mut()).take(count) {
@@ -266,7 +300,7 @@ impl SlotProcessor for Vst2Unit {
             // SAFETY: as above; the plugin reads it only from inside the calls below.
             unsafe { *self.time.get() = time_info(rate, self.position as f64) };
             if self.collect_notes(events, &mut next, at, len) > 0 {
-                let list: *mut VstEvents<MAX_SLOT_EVENTS> = &mut *self.events;
+                let list: *mut VstEvents<EVENT_ROOM> = &mut *self.events;
                 // SAFETY: the open effect's dispatcher; the list and the events it points at are
                 // the unit's own and stay as they are for the call (`num_events` of them are set).
                 unsafe { (self.dispatcher)(self.effect, EFF_PROCESS_EVENTS, 0, 0, list.cast(), 0.0) };
@@ -330,6 +364,9 @@ struct Vst2Plugin {
     effect: Vst2Effect,
     /// What the effect declared at its last activation (`resume`).
     info: EffectInfo,
+    /// A `resume` was refused since: `info` describes an activation that is over, and no parameter
+    /// is listed or read by its counts until the plugin resumes again.
+    stale: bool,
     /// Between `effMainsChanged(1)` + `effStartProcess` and their counterparts.
     running: bool,
     /// The open editor's host window.
@@ -376,24 +413,29 @@ impl Vst2Plugin {
     /// `effMainsChanged(1)` then `effStartProcess`, and what the effect declares once it runs. Its
     /// declaration is checked on both sides: before, so a layout this host refuses is never
     /// resumed, and after, because a plugin settles its pins and its latency inside these calls
-    /// (and says so with `audioMasterIOChanged`, which then describes the state just read and is
-    /// consumed). A refusal leaves the plugin suspended.
+    /// (and says so with `audioMasterIOChanged`). The ORDER after them is load-bearing: what the
+    /// plugin reported from inside the two calls is consumed FIRST, and the layout is read after,
+    /// so a report from another of its threads that lands after the read stays latched: the unit
+    /// is then installed halted, silent, and the owner cycles it on its next turn. Cleared after
+    /// the read, such a report would be lost with the rows built for the layout before it. A
+    /// refusal leaves the plugin suspended and its metadata stale.
     fn resume(&mut self) -> Result<EffectInfo, String> {
+        self.stale = true;
         // SAFETY: the open effect's own structure, read on its owner thread while it is suspended.
         unsafe { validate(self.effect.raw()) }?;
-        self.ctx.clear_halted();
         // SAFETY: neither opcode reads a pointer. Their returns carry no verdict.
         unsafe {
             self.call(EFF_MAINS_CHANGED, 0, 1, 0.0);
             self.call(EFF_START_PROCESS, 0, 0, 0.0);
         }
         self.running = true;
+        let _ = self.ctx.take_restart();
+        self.ctx.clear_halted();
         // SAFETY: as above; nothing processes the effect yet (its unit is out of the engine).
         match unsafe { validate(self.effect.raw()) } {
             Ok(info) => {
-                let _ = self.ctx.take_restart();
-                self.ctx.clear_halted();
                 self.info = info;
+                self.stale = false;
                 Ok(info)
             }
             Err(e) => {
@@ -415,10 +457,16 @@ impl Vst2Plugin {
         }
     }
 
+    /// `info` may not describe the plugin as it is: a resume was refused, or the plugin has reported a
+    /// layout change the owner has not cycled yet. No parameter is listed or read by its counts then.
+    fn unsettled(&self) -> bool {
+        self.stale || self.ctx.halted()
+    }
+
     /// The plugin's parameters: ids are indices, values normalised 0..1. VST2 names no default, so
-    /// the live value stands in for it.
+    /// the live value stands in for it. None while the metadata is unsettled (`unsettled`).
     fn list_params(&self) -> Vec<ParamDesc> {
-        let Some(get_parameter) = self.info.get_parameter else { return Vec::new() };
+        let Some(get_parameter) = self.info.get_parameter.filter(|_| !self.unsettled()) else { return Vec::new() };
         (0..self.info.params)
             .map(|index| {
                 // SAFETY: owner thread; an index the effect declared. The name is read through a
@@ -450,10 +498,15 @@ impl Vst2Plugin {
     /// (`effFlagsProgramChunks`), else every parameter's value. The chunk is the plugin's own
     /// memory, returned with a signed length: both are checked before a slice is made of them, the
     /// bytes are copied at once, with no call into the plugin in between, and never freed. A length
-    /// of 0 or less is a plugin with nothing to save. The unit keeps processing meanwhile.
+    /// of 0 or less is a plugin with nothing to save. The unit keeps processing meanwhile. While the
+    /// metadata is unsettled a parameter-kind save makes no plugin call and is an error: the stored
+    /// tone stays as it is, and a session export warns of the slot instead of leaving it out.
     fn save_state(&self) -> Result<Option<Vec<u8>>, String> {
-        let program = self.program();
         if !self.info.program_chunks() {
+            if self.unsettled() {
+                return Err("the plugin is between two layouts: its parameters cannot be read".to_string());
+            }
+            let program = self.program();
             let values = match self.info.get_parameter {
                 // SAFETY: owner thread; indices the effect declared.
                 Some(get_parameter) => {
@@ -463,6 +516,7 @@ impl Vst2Plugin {
             };
             return Ok(Some(tone::encode_vst2(&Vst2State::Params { program, values })));
         }
+        let program = self.program();
         let mut data: *mut c_void = std::ptr::null_mut();
         // SAFETY: owner thread; `effGetChunk` (index 0: the bank) writes one pointer through `ptr`.
         let len = unsafe { self.effect.dispatch(EFF_GET_CHUNK, 0, 0, (&raw mut data).cast(), 0.0) };
@@ -500,6 +554,9 @@ impl Vst2Plugin {
                 unsafe { self.effect.dispatch(EFF_SET_CHUNK, 0, chunk.len() as isize, chunk.as_ptr() as *mut c_void, 0.0) };
             }
             Vst2State::Params { program, values } => {
+                if self.info.program_chunks() {
+                    return Err("the tone holds parameters and the plugin keeps a chunk".to_string());
+                }
                 let (params, programs) = (self.info.params, self.info.programs);
                 if values.len() != params {
                     return Err(format!("the tone holds {} parameters and the plugin has {params}", values.len()));
@@ -512,11 +569,17 @@ impl Vst2Plugin {
                     // SAFETY: the opcode reads no pointer; the index is one the effect declared.
                     unsafe { self.call(EFF_SET_PROGRAM, 0, program as isize, 0.0) };
                 }
-                if let Some(set_parameter) = self.info.set_parameter {
-                    for (index, value) in values.into_iter().enumerate().filter(|(_, v)| v.is_finite()) {
-                        // SAFETY: owner thread, before the plugin processes; a declared index.
-                        unsafe { set_parameter(self.effect.raw(), index as i32, value.clamp(0.0, 1.0)) };
+                for (index, value) in values.iter().enumerate().filter(|(_, v)| v.is_finite()) {
+                    // Selecting the program, or the parameter before this one, may have changed what
+                    // the plugin declares: each value goes to the plugin as it is now, or not at all.
+                    // SAFETY: the open effect's own structure, read on its owner thread, suspended.
+                    let now = unsafe { validate(self.effect.raw()) }?;
+                    if now.params != values.len() {
+                        return Err(format!("the plugin went from {} parameters to {} while its tone was restored", values.len(), now.params));
                     }
+                    let Some(set_parameter) = now.set_parameter else { break };
+                    // SAFETY: owner thread, before the plugin processes; an index it declares now.
+                    unsafe { set_parameter(self.effect.raw(), index as i32, value.clamp(0.0, 1.0)) };
                 }
             }
         }
@@ -587,6 +650,14 @@ impl Vst2Plugin {
     }
 }
 
+/// Show an editor's host window, in front. A test's window stays hidden: nothing appears or takes
+/// the focus on the machine that runs it.
+fn show_editor(hwnd: HWND) {
+    if cfg!(not(test)) {
+        show_host_window_front(hwnd);
+    }
+}
+
 /// Re-activate the plugin at the engine's current terms and install its unit, rows rebuilt. On
 /// failure the unit comes back to the caller and the plugin is left suspended.
 fn reinstall(plugin: &mut Vst2Plugin, mut unit: Box<Vst2Unit>, slot: &SlotHost) -> Result<(), (Box<Vst2Unit>, String)> {
@@ -595,7 +666,11 @@ fn reinstall(plugin: &mut Vst2Plugin, mut unit: Box<Vst2Unit>, slot: &SlotHost) 
     match activated {
         Ok((info, (rate, block))) => {
             unit.rearm(&info, block);
-            slot.install(unit, rate).map_err(|(unit, e)| (own(unit), e))
+            slot.install(unit, rate).map_err(|(unit, e)| {
+                // Resumed for an engine that did not take the unit: suspended, as every failed cycle ends.
+                plugin.suspend();
+                (own(unit), e)
+            })
         }
         Err(e) => Err((unit, e)),
     }
@@ -634,6 +709,14 @@ fn cycle(
     }
 }
 
+/// Owner loop: cycle the plugin now if it has reported a layout change, so what comes next (a
+/// listing, a save) reads the plugin by the counts it has, not the ones before the report.
+fn settle(plugin: &mut Vst2Plugin, slot: &SlotHost, parked: &mut Option<Box<Vst2Unit>>) {
+    if plugin.ctx.take_restart() {
+        cycle(plugin, slot, parked, None, "audioMasterIOChanged");
+    }
+}
+
 /// What an owner loads from: the module (`None` for an in-process plugin), its entry, and the
 /// name a plugin that names nothing gets (the scan's: the file's stem).
 pub(super) struct Opened {
@@ -659,7 +742,8 @@ type Loaded = (Vst2Plugin, Box<Vst2Unit>, String, u32, Option<ToneRestore>);
 
 /// Create the instance for `id` (the effect's unique id as 8 hex digits) on a context of its own,
 /// bound to this thread as its owner. An instance this host refuses was never called, so it cannot
-/// be closed: its module and its context stay loaded for the rest of the process.
+/// be closed: its module and its context stay loaded for the rest of the process. A shell (several
+/// plugins in one file) is refused here as the scan refuses it, and closed like any open instance.
 fn create(module: Option<Vst2Module>, entry: EntryFn, id: &str, slot: &SlotHost) -> Result<Vst2Plugin, String> {
     let rate = slot.rate().ok_or_else(|| "no audio device is open".to_string())?;
     let ctx = HostContext::new(f64::from(rate), slot.max_block().max(1) as i32)?;
@@ -679,10 +763,14 @@ fn create(module: Option<Vst2Module>, entry: EntryFn, id: &str, slot: &SlotHost)
     };
     let info = *effect.info();
     // From here every early return drops `plugin`, which closes the effect before its module goes.
-    let plugin = Vst2Plugin { effect, info, running: false, editor: None, ctx, _module: module };
+    let plugin = Vst2Plugin { effect, info, stale: false, running: false, editor: None, ctx, _module: module };
     let found = format!("{:08x}", info.unique_id as u32);
     if found != id {
         return Err(format!("the file holds VST2 plugin {found}, not {id}"));
+    }
+    // SAFETY: the opcode reads no pointer.
+    if unsafe { plugin.call(EFF_GET_PLUG_CATEGORY, 0, 0, 0.0) } == PLUG_CATEGORY_SHELL {
+        return Err("a VST2 shell plugin is not supported".to_string());
     }
     Ok(plugin)
 }
@@ -703,6 +791,10 @@ fn load(
     // SAFETY: the thread that opened the effect.
     let name = unsafe { plugin.effect.name() }.unwrap_or(file_stem);
     let (rate, block) = plugin.configure(slot)?;
+    // `effOpen` and the two calls above may have changed what the effect declares (`create` read it
+    // before any of them): the tone is checked against the counts, flags and calls it has now.
+    // SAFETY: the open effect's own structure, read on its owner thread while it is suspended.
+    plugin.info = unsafe { validate(plugin.effect.raw()) }?;
     // The stored tone goes in before the plugin resumes: nothing processes it yet.
     let restored = restore_tone(tone, slot.slot(), &name, |state| plugin.restore_state(state));
     let info = plugin.resume()?;
@@ -710,7 +802,7 @@ fn load(
     // loaded: the parameters are listed after the load anyway.
     let _ = plugin.ctx.take_relist();
     if let Some(automation) = plugin.ctx.automation() {
-        automation.drain(|_, _| {});
+        automation.drain(usize::MAX, |_, _| {});
     }
     // SAFETY: the open effect `info` was just validated from, bound to this context; the plugin
     // closes it only with the unit back in hand.
@@ -763,14 +855,13 @@ pub(super) fn run_with(ctx: OwnerCtx, id: &str, open: impl FnOnce() -> Result<Op
         while running.load(Acquire) {
             // audioMasterIOChanged only raised latches (on any thread, the audio thread included)
             // and silenced the unit; the cycle runs here.
-            if plugin.ctx.take_restart() {
-                cycle(&mut plugin, &slot, &mut parked, None, "audioMasterIOChanged");
-            }
+            settle(&mut plugin, &slot, &mut parked);
             // What the plugin's own editor moved, with the value the plugin reported: told to the
             // caller, kept for the tone, never read back from the plugin or sent to it again.
-            let mut moved = false;
+            // Nothing is told by a count the plugin no longer answers to.
+            let (mut moved, declared) = (false, if plugin.unsettled() { 0 } else { plugin.info.params });
             if let Some(automation) = plugin.ctx.automation() {
-                automation.drain(|param, value| {
+                automation.drain(declared, |param, value| {
                     moved = true;
                     sink(EngineSlotEvent::ParamChanged { id: param as u32, value: f64::from(value) });
                 });
@@ -805,6 +896,8 @@ pub(super) fn run_with(ctx: OwnerCtx, id: &str, open: impl FnOnce() -> Result<Op
             if let (Some((width, height)), Some(window)) = (plugin.ctx.take_resize(), &plugin.editor) {
                 let _ = set_client_size(window.hwnd, width as u32, height as u32);
             }
+            // The pump ran the plugin's own code, and a request may have waited through a report.
+            settle(&mut plugin, &slot, &mut parked);
             if plugin.editor.as_ref().is_some_and(HostWindow::close_requested) {
                 plugin.close_editor();
                 sink(EngineSlotEvent::EditorClosed);
@@ -822,10 +915,11 @@ pub(super) fn run_with(ctx: OwnerCtx, id: &str, open: impl FnOnce() -> Result<Op
                 }
             };
             if let Some(request) = request.and_then(|r| take_uncancelled(r, index as u8)) {
+                settle(&mut plugin, &slot, &mut parked);
                 match request {
                     OwnerRequest::OpenEditor(cancelled, reply) => {
                         let was_closed = plugin.editor.is_none();
-                        let res = if was_closed { plugin.embed_editor(editor_parent).map(show_host_window_front) } else { Ok(()) };
+                        let res = if was_closed { plugin.embed_editor(editor_parent).map(show_editor) } else { Ok(()) };
                         // Opened after the caller's 5 s: it reported failure, so close what this opened.
                         if was_closed && res.is_ok() && cancelled.load(Relaxed) {
                             plugin.close_editor();
@@ -861,8 +955,19 @@ pub(super) fn run_with(ctx: OwnerCtx, id: &str, open: impl FnOnce() -> Result<Op
     if served.is_err() {
         log::error!("[plugin_host] engine slot {index}: the VST2 owner panicked; tearing the plugin down");
     }
-    // A change not saved yet, and what an open editor may have changed unseen. Not after a panic,
-    // which may have left the plugin half way through something.
+    // A change not saved yet, and what an open editor may have changed unseen. What the plugin
+    // latched since the loop's last turn counts as a change too: it is taken here, for the tone
+    // alone (no caller is told any more). Not after a panic, which may have left the plugin half way
+    // through something.
+    if served.is_ok() {
+        let mut latched = plugin.ctx.take_relist();
+        if let Some(automation) = plugin.ctx.automation() {
+            automation.drain(if plugin.unsettled() { 0 } else { plugin.info.params }, |_, _| latched = true);
+        }
+        if latched {
+            tone.note_change(Instant::now());
+        }
+    }
     let save = served.is_ok() && (plugin.editor.is_some() || tone.dirty());
     let result = teardown(&slot, plugin, parked, save.then_some((&mut tone, name.as_str())));
     report_faults(&faults, index, &mut reported);

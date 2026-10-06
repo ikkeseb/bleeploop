@@ -2,7 +2,7 @@
 
 BleepLoop is a local desktop app with no accounts and no server. Its one network use is the update
 check: the installed app asks GitHub whether a newer release exists and downloads it when you update
-from Help. What can hurt you is what it loads. Third-party CLAP/VST3 plugins are native code that
+from Help. What can hurt you is what it loads. Third-party CLAP, VST3 and VST2 plugins are native code that
 runs with your privileges, so only install plugins you trust. Imported session archives are the
 other input.
 

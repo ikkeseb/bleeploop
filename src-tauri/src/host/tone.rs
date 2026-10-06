@@ -601,7 +601,8 @@ impl ToneKeeper {
         self.keep_stored = false;
     }
 
-    /// An owner-thread change (a CLAP `mark_dirty` or params rescan, a VST3 re-list).
+    /// An owner-thread change (a CLAP `mark_dirty` or params rescan, a VST3 re-list, what a VST2
+    /// plugin latched for its owner).
     pub(crate) fn note_change(&mut self, now: Instant) {
         self.changed(now);
     }

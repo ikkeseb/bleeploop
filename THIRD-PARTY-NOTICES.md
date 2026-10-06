@@ -77,6 +77,12 @@ hosts VST3 through the `vst3` crate (coupler-rs, MIT OR Apache-2.0), which since
 pre-generated bindings and needs no SDK at build time. Which SDK version those bindings were
 generated from is not stated by the crate: unknown here. BleepLoop uses no VST logo.
 
+### VST2 hosting
+
+BleepLoop hosts 64-bit VST2 plugins through its own declarations of the plugin interface
+(`src-tauri/src/host/vst2_abi.rs`). No Steinberg SDK source or header is used or distributed. VST is
+a trademark of Steinberg Media Technologies GmbH.
+
 ### Ported code in `lf-engine`: Chromium (BSD-3-Clause) and fdlibm
 
 The native engine crate (`src-tauri/crates/lf-engine`, the app's default audio engine) holds

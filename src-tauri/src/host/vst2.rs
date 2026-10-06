@@ -29,7 +29,7 @@ use windows::Win32::Foundation::{FreeLibrary, HMODULE, HWND};
 use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 use windows::Win32::System::Threading::GetCurrentThreadId;
 
-use super::clap::{checked_plugin_channels, checked_plugin_params};
+use super::clap::{checked_plugin_channels, checked_plugin_params, MAX_PLUGIN_PARAMS};
 use super::editor_window::{client_size, pump_thread_messages, set_client_size};
 use super::vst2_abi::*;
 
@@ -59,6 +59,10 @@ const HOST_CAN_DO: [&[u8]; 4] = [b"sendVstEvents", b"sendVstMidiEvent", b"sizeWi
 /// The largest latency a plugin may report, in frames (87 s at 192 kHz): past any real plugin's,
 /// and far below what a garbage field holds.
 const MAX_INITIAL_DELAY: i32 = 1 << 24;
+
+/// The largest editor side `audioMasterSizeWindow` may ask for, in pixels: past any screen, and far
+/// below what overflows a window's frame arithmetic.
+const MAX_EDITOR_SIDE: i32 = 16_384;
 
 /// The rate a time info carries when its context holds none that is usable.
 const FALLBACK_RATE: f64 = 44_100.0;
@@ -116,7 +120,10 @@ impl Drop for Vst2Module {
 /// Parameter automation a plugin reports (`audioMasterAutomate`), kept without a lock and without
 /// loss between any number of reporting threads: the value per parameter and a bit per parameter
 /// that says it moved. A report stores the value, THEN sets the bit; the drain clears a word's bits,
-/// THEN reads the values, so a value stored after its bit was taken sets the bit again.
+/// THEN reads the values, so a value stored after its bit was taken sets the bit again. It holds
+/// every index `validate` accepts (`MAX_PLUGIN_PARAMS`: 264 KiB an instance), so a parameter the
+/// plugin adds in `effOpen` or in a restart is latched like any other; the drain filters against
+/// the count the plugin declares now.
 pub(crate) struct AutomationLatch {
     /// Each parameter's last reported value (`f32` bits).
     values: Box<[AtomicU32]>,
@@ -124,14 +131,15 @@ pub(crate) struct AutomationLatch {
 }
 
 impl AutomationLatch {
-    fn new(params: usize) -> Self {
+    fn new() -> Self {
+        let params = MAX_PLUGIN_PARAMS as usize;
         Self {
             values: (0..params).map(|_| AtomicU32::new(0)).collect(),
             dirty: (0..params.div_ceil(64)).map(|_| AtomicU64::new(0)).collect(),
         }
     }
 
-    /// Any thread, the audio thread included. An index the plugin never declared is ignored.
+    /// Any thread, the audio thread included. An index past the bound is ignored.
     fn record(&self, index: i32, value: f32) {
         let Some(slot) = usize::try_from(index).ok().and_then(|i| self.values.get(i).map(|v| (i, v))) else {
             return;
@@ -140,15 +148,22 @@ impl AutomationLatch {
         self.dirty[slot.0 / 64].fetch_or(1 << (slot.0 % 64), AcqRel);
     }
 
-    /// Owner thread: hand every parameter reported since the last drain to `each`, with its latest
-    /// value. A value is never echoed back to the plugin and never fetched with `getParameter`.
-    pub(crate) fn drain(&self, mut each: impl FnMut(usize, f32)) {
+    /// Owner thread: hand every parameter below `params` (the count the plugin declares now)
+    /// reported since the last drain to `each`, with its latest value; a report for an index the
+    /// plugin does not declare is dropped. A value is never echoed back to the plugin and never
+    /// fetched with `getParameter`.
+    pub(crate) fn drain(&self, params: usize, mut each: impl FnMut(usize, f32)) {
         for (word, bits) in self.dirty.iter().enumerate() {
+            if bits.load(Acquire) == 0 {
+                continue;
+            }
             let mut set = bits.swap(0, AcqRel);
             while set != 0 {
                 let index = word * 64 + set.trailing_zeros() as usize;
                 set &= set - 1;
-                each(index, f32::from_bits(self.values[index].load(Acquire)));
+                if index < params {
+                    each(index, f32::from_bits(self.values[index].load(Acquire)));
+                }
             }
         }
     }
@@ -430,11 +445,13 @@ fn owner_idle(ctx: &HostContext, in_process: bool) -> isize {
 /// to the screen; one it clamped goes back to the size it had, so a refusal changes nothing); a size
 /// queued earlier is dropped. From any other thread, and from the
 /// processing thread, the size is latched for the owner (`HostContext::take_resize`) and the answer
-/// is 0, "not resized yet": no window function is called there.
+/// is 0, "not resized yet": no window function is called there. A side that is not positive, or
+/// past `MAX_EDITOR_SIDE`, answers 0 on every thread and neither latches nor touches anything.
 fn owner_size_window(ctx: &HostContext, width: i32, height: isize, in_process: bool) -> isize {
-    let (Ok(width @ 1..), Ok(height @ 1..)) = (u32::try_from(width), i32::try_from(height)) else {
+    let (width @ 1..=MAX_EDITOR_SIDE, Ok(height @ 1..=MAX_EDITOR_SIDE)) = (width, i32::try_from(height)) else {
         return 0;
     };
+    let width = width as u32;
     let window = ctx.editor_window.load(Acquire);
     if in_process || window == 0 || !ctx.on_owner_thread() {
         ctx.resize.store(u64::from(width) << 32 | u64::from(height as u32), Release);
@@ -611,7 +628,7 @@ pub(crate) unsafe fn validate(effect: *const AEffect) -> Result<EffectInfo, Stri
     if params > 0 && (e.set_parameter.is_none() || e.get_parameter.is_none()) {
         return Err(format!("the effect declares {params} parameters and lacks setParameter or getParameter"));
     }
-    Ok(EffectInfo {
+    let info = EffectInfo {
         inputs,
         outputs,
         params,
@@ -624,7 +641,11 @@ pub(crate) unsafe fn validate(effect: *const AEffect) -> Result<EffectInfo, Stri
         replacing,
         set_parameter: e.set_parameter,
         get_parameter: e.get_parameter,
-    })
+    };
+    // Test-only: the fixture acts as a plugin thread that moves right after this read.
+    #[cfg(test)]
+    fixture::validated(effect);
+    Ok(info)
 }
 
 /// One open VST2 instance, as `open_effect` accepted it. Not `Send`: it stays on the thread that
@@ -710,8 +731,8 @@ pub(crate) unsafe fn open_effect(entry: EntryFn, ctx: &Arc<HostContext>) -> Resu
     let raw = NonNull::new(raw).ok_or_else(|| OpenError::NoInstance("the plugin's entry returned no effect".to_string()))?;
     // SAFETY: a non-null entry result is the plugin's `AEffect`.
     let info = unsafe { validate(raw.as_ptr()) }.map_err(OpenError::Refused)?;
-    // Sized from the checked count; a callback that arrived before this found no latch and was dropped.
-    let _ = ctx.automation.set(AutomationLatch::new(info.params));
+    // A callback that arrived before this found no latch and was dropped.
+    let _ = ctx.automation.set(AutomationLatch::new());
     // SAFETY: the field is written as the atomic the callback reads it as (`context_of`).
     unsafe { AtomicIsize::from_ptr(&raw mut (*raw.as_ptr()).resvd1) }.store(Arc::as_ptr(ctx) as isize, Release);
     let effect = Vst2Effect { raw, info };
@@ -902,20 +923,24 @@ mod tests {
             // The owner drains while they report.
             let latch = ctx.automation().unwrap();
             while producers.iter().any(|p| !p.is_finished()) {
-                latch.drain(|index, value| seen[index] = value);
+                latch.drain(PARAMS, |index, value| seen[index] = value);
             }
         });
-        ctx.automation().unwrap().drain(|index, value| seen[index] = value);
+        ctx.automation().unwrap().drain(PARAMS, |index, value| seen[index] = value);
         for (param, value) in seen.iter().enumerate() {
             assert_eq!(*value, last(param % THREADS, param), "parameter {param}");
         }
         // Nothing is pending, and an index the plugin never declared is ignored.
         let mut pending = 0;
-        ctx.automation().unwrap().drain(|_, _| pending += 1);
+        ctx.automation().unwrap().drain(PARAMS, |_, _| pending += 1);
         assert_eq!(call(&effect, AUDIO_MASTER_AUTOMATE, PARAMS as i32, 0, 1.0), 0);
         assert_eq!(call(&effect, AUDIO_MASTER_AUTOMATE, -1, 0, 1.0), 0);
         assert_eq!(call(&effect, AUDIO_MASTER_AUTOMATE, i32::MAX, 0, 1.0), 0);
-        ctx.automation().unwrap().drain(|_, _| pending += 1);
+        ctx.automation().unwrap().drain(PARAMS, |_, _| pending += 1);
+        assert_eq!(pending, 0);
+        // The report for the index just past the count was latched and dropped by that drain: it
+        // does not come back once the plugin declares more.
+        ctx.automation().unwrap().drain(PARAMS + 1, |_, _| pending += 1);
         assert_eq!(pending, 0);
         // The plugin was never called for any of it: no echo, no getParameter.
         assert_eq!(fixture::take_calls(), vec![(EFF_OPEN, true)]);
@@ -967,7 +992,7 @@ mod tests {
                 .collect();
             let latch = ctx.automation().unwrap();
             let drain = |seen: &mut Vec<f32>, deliveries: &mut usize| {
-                latch.drain(|index, value| {
+                latch.drain(PARAMS, |index, value| {
                     let (param, reporter) = (value as usize / 8, value as usize % 8);
                     assert!(param == index && (reporter < THREADS || reporter == 7), "parameter {index} was handed {value}");
                     seen[index] = value;
@@ -984,7 +1009,7 @@ mod tests {
         }
         assert!(deliveries >= PARAMS);
         let mut pending = 0;
-        ctx.automation().unwrap().drain(|_, _| pending += 1);
+        ctx.automation().unwrap().drain(PARAMS, |_, _| pending += 1);
         assert_eq!(pending, 0, "nothing is delivered twice");
         // SAFETY: the opening thread; the producers have joined.
         unsafe { effect.close() };

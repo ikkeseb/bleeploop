@@ -99,7 +99,10 @@ each probe's header lists its knobs), and the full log lands in `logs/native-<pr
 blocks until the verdict, so an agent harness should run it in the background.
 
 - **No Playwright into WebView2,** `release:smoke`'s CDP attach to the release exe excepted (the table
-  above). For Tauri/native verification: grep `tauri dev` stdout for
+  above). A standalone debug build with the frontend built into it (`tauri build --debug --no-bundle`; a
+  plain `cargo build` loads the dev server instead), started with WebView2's remote-debugging port,
+  may be driven over CDP the same way, for a check that must run without `tauri dev` (it does not
+  watch the tree, so it can run while the tree is being edited). For Tauri/native verification: grep `tauri dev` stdout for
   `[diag]`. **What reaches that stdout: only Rust `invoke('diag')`/`log::info!` lines + the
   frontend's `console.error`, forwarded through `frontend_log` as `[webview][ERROR]`
   (`src/platform/logging.ts`); plain `console.log` from WebView2 does NOT.**

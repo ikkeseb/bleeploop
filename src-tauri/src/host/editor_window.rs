@@ -1,8 +1,8 @@
 //! P10.0 plugin editor: a host-owned top-level Win32 window that an embedded (non-floating) plugin
-//! GUI parents into. Format-agnostic — shared by both the CLAP (`clap.rs`) and VST3 (`clap::vst3_host`)
-//! editor paths.
+//! GUI parents into. Format-agnostic — shared by the CLAP (`clap.rs`), VST3 (`clap::vst3_host`) and
+//! VST2 (`vst2_engine.rs`) editor paths.
 //!
-//! The host window is OUR OWN top-level (owned by the main window for z-order), NOT reparented into
+//! The host window is OUR OWN top-level, owner-less (why: `create_host_window`), NOT reparented into
 //! the WebView2 surface — so no airspace z-fight.
 
 use std::sync::atomic::{AtomicBool, Ordering::Acquire, Ordering::Release};
@@ -175,13 +175,16 @@ pub(super) fn client_size(hwnd: HWND) -> (u32, u32) {
 /// Resize the host window so its CLIENT area is `width`×`height`, keeping its position and z-order.
 /// The non-client frame is MEASURED (window rect minus client rect), not recomputed from styles, so
 /// the result is correct at the window's actual DPI. This is the one place a plugin-initiated editor
-/// resize lands for both formats: VST3 `IPlugFrame::resizeView` and the hosted-CLAP `request_resize`
-/// call it, then the caller tells the plugin the size it GOT — which Windows may clamp below the
+/// resize lands for every format: VST3 `IPlugFrame::resizeView`, the hosted-CLAP `request_resize` and
+/// VST2 `audioMasterSizeWindow` call it. A CLAP or VST3 caller then tells the plugin the size it GOT
+/// (VST2 answers yes only for the exact size, and puts a clamped window back) — which Windows may clamp below the
 /// request (a captioned top-level window cannot outgrow the virtual screen: the default
 /// `WM_GETMINMAXINFO` track size applies to `SetWindowPos` too). Returns the achieved client size,
-/// or `None` when the Win32 calls failed (dead handle) and the window is as it was.
+/// or `None` when the Win32 calls failed (dead handle) and the window is as it was. No size a caller
+/// passes overflows the frame arithmetic: both sums saturate.
 pub(super) fn set_client_size(hwnd: HWND, width: u32, height: u32) -> Option<(u32, u32)> {
-    let (w, h) = (width.max(1) as i32, height.max(1) as i32);
+    let side = |pixels: u32| i32::try_from(pixels.max(1)).unwrap_or(i32::MAX);
+    let (w, h) = (side(width), side(height));
     let mut win_rect = RECT::default();
     let mut client = RECT::default();
     // SAFETY: queries + one move-less SetWindowPos on a handle we own. Any thread may call
@@ -198,8 +201,8 @@ pub(super) fn set_client_size(hwnd: HWND, width: u32, height: u32) -> Option<(u3
             None,
             0,
             0,
-            w + frame_w,
-            h + frame_h,
+            w.saturating_add(frame_w),
+            h.saturating_add(frame_h),
             SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
         )
         .is_err()
@@ -320,6 +323,18 @@ mod tests {
         assert_eq!(set_client_size(win.hwnd, 300, 200), Some((300, 200)), "shrink");
         assert_eq!(client_size(win.hwnd), (300, 200), "client area after shrink");
         assert!(!win.close_requested());
+    }
+
+    /// A size no window can have saturates in the frame arithmetic instead of overflowing it (a
+    /// panic there would cross a plugin's callback): Windows clamps it or refuses it.
+    #[test]
+    fn a_size_past_any_window_does_not_overflow_the_frame_arithmetic() {
+        let win = create_host_window(640, 480, None).expect("create host window");
+        for (width, height) in [(u32::MAX, 480), (640, u32::MAX), (i32::MAX as u32, i32::MAX as u32)] {
+            let got = set_client_size(win.hwnd, width, height);
+            assert!(got.is_none_or(|(w, h)| w < 1 << 20 && h < 1 << 20), "{width}×{height} became {got:?}");
+        }
+        assert_eq!(set_client_size(win.hwnd, 640, 480), Some((640, 480)), "and the window still takes a real size");
     }
 
     /// The drain pumps for its whole window, dispatching what the plugin posts late in it, and the

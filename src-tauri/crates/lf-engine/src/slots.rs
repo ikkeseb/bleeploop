@@ -1,7 +1,7 @@
 //! OWNS: the plugin slots inside the callback: the units the host installs and takes back through each
 //! slot's [`SlotPort`], their bypass crossfades, the notes a slot holds, the live flag and gain, and
 //! where a slot's output goes. The processors themselves are the host's (`src-tauri/src/host`, which
-//! implements [`SlotProcessor`] for CLAP and VST3).
+//! implements [`SlotProcessor`] for CLAP, VST3 and VST2).
 //!
 //! Each slot has its own input (the device side picks its capture channel). A slot holding an effect
 //! (or nothing) passes its input on while it is live and gets silence otherwise, through its live gate:
