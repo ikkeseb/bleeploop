@@ -9,7 +9,7 @@ and their baselines: `docs/VERIFY.md` § When to run the plugin probes. Where th
 probe passed on the engine-only app between 2026-09-29 and 10-05 (`native:engine`'s counter check
 forgives the join's trims and starves in a WASAPI open's first 3 s: D25); `native:engine-loopback
 --rate=48000` last passed 21/21 at 64, 128 and 256 on 2026-10-03. `release:smoke` last passed 7/7 on
-2026-10-05 on v0.7.0's runner build, its input take through the loopback cable into In 2. Driver latency
+2026-10-06 on v0.8.0's runner build, its input take through the loopback cable into In 2. Driver latency
 reports are not guitar latency; after a relevant change, rerun only the affected check.
 
 **Last play: 2026-09-28** (engine, a local release build, ASIO; a second player on a WASAPI build
