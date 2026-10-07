@@ -6,12 +6,16 @@
 //   pnpm native:engine [--backend=asio] [--buffer=128] [--seconds=600] [--switches=20] [--swaps=4]
 //                      [--in=0] [--device=Focusrite] [--amp=<vst3>] [--proq=<vst3>] [--mute=1]
 //                      [--cycle=wasapi] [--hold=2] [--pause=<ms>] [--share=<endpoint id>] [--log=native-engine]
-//                      [--scene=heavy] [--profile=rig]
+//                      [--scene=heavy] [--profile=rig] [--tone=1 --mute=1 [--out=1]]
 //   pnpm native:engine --lag=1 --in=1 [--out=1] [--seconds=10] [--preopen=0]
 //
-// Needs no running `app` and no cable; `--amp=` or `--proq=` (empty) leaves that slot empty. The take
+// Needs no running `app`, and no cable but for `--tone=` and `--lag=1`; `--amp=` or `--proq=` (empty)
+// leaves that slot empty. The take
 // records input `--in` (0-based) through the amp while it records: keep that input off a loopback cable.
-// `--mute=1` plays silence. `--lag=1` runs only the lag phase instead: a chirp out `--out` through the
+// `--mute=1` plays silence. `--tone=N` (ASIO, with `--mute=1`, not with `--lag=1`) needs the loopback cable
+// from output `--out` (0 or 1) into input N (0-based; not `--in`), which slot 1 reads for the run: a steady sine plays through the soak
+// and its return is watched for loopback discontinuities, each tied to the nearest callback that ran long
+// or entered late (the probe's header says how the `tone` check ends). `--lag=1` runs only the lag phase instead: a chirp out `--out` through the
 // loopback cable into `--in`, judged against the driver's reported latency (the Stage 1 A2 bar on the
 // engine's open path; audible); `--preopen=0` opens ASIO without its preopen, for a before-and-after.
 // `--cycle=` names the switches' round (`asio64`, `asio128`, `asio256`, `wasapi`, comma-separated;
@@ -44,6 +48,7 @@ const opt = {
   amp: join(vst3, 'Neural DSP', 'Archetype Petrucci X.vst3'),
   proq: join(vst3, 'FabFilter', 'FabFilter Pro-Q 3.vst3'),
   mute: '',
+  tone: '',
   lag: '',
   out: '1',
   preopen: '',
@@ -66,6 +71,11 @@ for (const arg of process.argv.slice(2)) {
 
 if (opt.profile && opt.profile !== 'rig') {
   console.error(`--profile=${opt.profile}: expected rig (or none: the debug build)`);
+  process.exit(1);
+}
+
+if (opt.lag && opt.tone) {
+  console.error('--tone runs in the soak: not with --lag=1 (the lag phase runs alone)');
   process.exit(1);
 }
 
@@ -97,6 +107,7 @@ const args = opt.lag
       ...(opt.mute ? ['--mute'] : []),
       ...(opt.share ? ['--share', opt.share] : []),
       ...(opt.scene ? ['--scene', opt.scene] : []),
+      ...(opt.tone ? ['--tone', opt.tone, '--out', opt.out] : []),
     ];
 // The soak, ~15 s a switch, ~30 s a swap, and room for loads and the teardown.
 const timeoutS = Number(opt.seconds) + (15 + Number(opt.hold || 0) + Number(opt.pause || 0) / 1000) * Number(opt.switches) + 30 * Number(opt.swaps) + 300;

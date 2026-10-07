@@ -31,6 +31,7 @@
 //! | `share` | Share output: the post-limiter master mirrored to a WASAPI endpoint while ASIO plays |
 //! | `midi` | native MIDI (built, never started by the app): ports, hot-plug, parse, the MIDI-learn bindings, notes and pedal actions |
 //! | `probe` | DEV: `app.exe --probe-engine`, the device side on real hardware (soak, switches, plugin swaps) |
+//! | `tone` | DEV: the probe's loopback tone (`--tone`): its hook in the output callback, the detector, the long and late callbacks' log |
 //! | `wire` | the JSON wire to the UI: the serde mirror of the engine's commands and events, the feed frame |
 //!
 //! # Rules
@@ -121,6 +122,8 @@ mod session;
 mod settings;
 pub mod share;
 pub mod slot_host;
+#[cfg(debug_assertions)]
+pub(crate) mod tone;
 #[cfg(test)]
 pub(crate) mod test_rig;
 #[cfg(test)]
@@ -499,6 +502,9 @@ pub(crate) struct Rt {
     /// DEV: the probe's lag phase (`probe::LagRig`), set while no device runs.
     #[cfg(debug_assertions)]
     pub(crate) lag: Option<Box<probe::LagRig>>,
+    /// DEV: the probe's loopback tone (`tone::ToneRig`), set while no device runs.
+    #[cfg(debug_assertions)]
+    pub(crate) tone: Option<Box<tone::ToneRig>>,
 }
 
 /// The engine's non-RT ends, replaced with the engine (a sample-rate change builds a new one).
@@ -566,6 +572,10 @@ pub(crate) struct Core {
     pub(crate) device_events: Mutex<Vec<DeviceEvent>>,
     /// The device owner (`None` for a core without one: the test device).
     pub(crate) owner: Mutex<Option<OwnerLink>>,
+    /// DEV: the probe's tone run, once it set one. The output callback logs its long and late callbacks
+    /// there outside the engine lock (`tone::SlowLog`: atomics, no lock).
+    #[cfg(debug_assertions)]
+    pub(crate) tone: std::sync::OnceLock<Arc<tone::Shared>>,
 }
 
 /// Pop the event ring of the engine of generation `gen` into `each`. A lane's `Mix` is also the settings
@@ -594,6 +604,8 @@ impl Core {
                 taps: None,
                 #[cfg(debug_assertions)]
                 lag: None,
+                #[cfg(debug_assertions)]
+                tone: None,
             }),
             ends: Mutex::new(None),
             settings: Mutex::new(settings::Settings::default()),
@@ -620,6 +632,8 @@ impl Core {
             device: Mutex::new(None),
             device_events: Mutex::new(Vec::new()),
             owner: Mutex::new(None),
+            #[cfg(debug_assertions)]
+            tone: std::sync::OnceLock::new(),
         }
     }
 

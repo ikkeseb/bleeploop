@@ -14,7 +14,7 @@
 //! `app.exe --probe-engine <asio|wasapi> <64|128|256|default> [--plugin <slot>=<file.vst3|.clap|.dll>]...
 //! [--seconds N] [--switches N] [--swaps N] [--cycle <asio64|asio128|asio256|wasapi>,...] [--hold S]
 //! [--pause MS] [--in N] [--device <WASAPI name substring>] [--mute] [--share <endpoint id>]
-//! [--scene <default|heavy>] [--lag [--out N] [--no-preopen] [--split <out|in>]]`
+//! [--scene <default|heavy>] [--tone N [--out N]] [--lag [--out N] [--no-preopen] [--split <out|in>]]`
 //!
 //! `--scene heavy` loads the engine for the soak, set up once the loop plays and held through the soak
 //! and every phase after it (`HEAVY_FX`, `HEAVY_SENDS`, `CHORD`): lane 0's loop copied to all five lanes,
@@ -40,6 +40,21 @@
 //! preopen (`cpal_driver`), for a before-and-after comparison. A WASAPI lag run first prints what
 //! WASAPI's own clocks report (`wasapi_clocks`).
 //!
+//! `--tone N` (ASIO, with `--mute`) plays a steady sine on output `--out` (0 or 1, default 1) through the
+//! soak and reads it back through a loopback cable on input N, which slot 1 reads for the whole run
+//! (slot 0 keeps `--in`, and N is not `--in`): does a callback that runs long or enters late leave a
+//! discontinuity in it. The hook, the detector and what they cannot see: `tone.rs`. The tone is added
+//! after the master fade, so the mute leaves it alone. It is calibrated before the soak, and two planted
+//! controls (64 frames of silence in the output tone, one before the soak and one after it) must each
+//! come back on the alignment. The closing block lists every event with the nearest long or late
+//! callback, and the `tone` check ends one of three ways. `tone: clean` (PASS): both controls found, full
+//! coverage, no event; it names the long callbacks and late entries the run had, since a clean tone over
+//! none of them says nothing about them. `tone: discontinuities` (FAIL): the tone broke, with how many
+//! events fall at a long or late callback. `tone: not measured` (FAIL): no tone, a clipped or unsteady
+//! input, a control not found, a coverage gap, a full table, a device interrupted under the tone or a
+//! callback log that did not record. Its limit: the cable returns through the
+//! same driver's input, so an event is a loopback discontinuity, and may be the input's.
+//!
 //! `--split out|in` (ASIO, with `--device`) splits the WASAPI round trip by its sides, against ASIO's
 //! (whose report A2 holds) on QPC: `out` plays the chirps from a WASAPI render client of the `--device`
 //! endpoint and ASIO records them; `in` plays them from ASIO and a WASAPI capture client records them.
@@ -62,6 +77,7 @@ use lf_engine::dsp::fx::{FxKind, FxParam};
 use lf_engine::grid::Frame;
 use lf_engine::{Command, Event, InputSend, InputSendParam, Instrument, LaneInfo, LaneState, NoteTarget, TimedCommand, SLOT_COUNT, TRACK_COUNT};
 
+use super::tone::{Facts, Shared, ToneRig};
 use super::{BlockLoad, DeviceRequest, DeviceStatus, EngineHost, HostConfig, IoDiag};
 use crate::chirp_lag::{chirp, find_arrivals, median, slope, spread, CHIRP_LEN};
 use crate::audio_output::AudioBackend;
@@ -107,7 +123,7 @@ const HEAVY_SENDS: [(InputSendParam, f64); 6] = [
 const CHORD: [u8; 4] = [48, 52, 55, 59];
 
 /// Every check, in report order, with its bar.
-const CHECKS: [(&str, &str); 8] = [
+const CHECKS: [(&str, &str); 9] = [
     ("run", "the device opens and a loop records"),
     ("switch", "every backend and buffer switch starts"),
     ("slots", "every plugin loads, is back in its slot after each switch, reloads on a swap and unloads"),
@@ -116,6 +132,7 @@ const CHECKS: [(&str, &str); 8] = [
     ("counters", "every fault counter (IoDiag::faults) stays 0 (a WASAPI open's first 3 s may trim or starve the join)"),
     ("load", "soak: block time p99.9 < 50 % (not judged for the heavy scene), max < 90 % of the period"),
     ("log", "no error logged"),
+    ("tone", "--tone: both controls come back on the alignment, full coverage, no loopback discontinuity in the returning tone (the cable returns through the same driver's input)"),
 ];
 
 fn say(line: impl AsRef<str>) {
@@ -165,6 +182,8 @@ struct Args {
     share: Option<String>,
     /// `--scene heavy`.
     heavy: bool,
+    /// `--tone`: the input the loopback tone returns on.
+    tone: Option<u32>,
     lag: bool,
     out: usize,
     preopen: bool,
@@ -181,7 +200,7 @@ enum Split {
 fn parse_args(args: &[String]) -> Result<Args, String> {
     const USAGE: &str = "usage: --probe-engine <asio|wasapi> <64|128|256|default> [--plugin <slot>=<file.vst3|.clap|.dll>]... \
         [--seconds N] [--switches N] [--swaps N] [--cycle <asio64|asio128|asio256|wasapi>,...] [--hold S] [--pause MS] [--in N] [--device <WASAPI name substring>] [--mute] [--share <endpoint id>] \
-        [--scene <default|heavy>] [--lag [--out N] [--no-preopen] [--split <out|in>]]";
+        [--scene <default|heavy>] [--tone N [--out N]] [--lag [--out N] [--no-preopen] [--split <out|in>]]";
     let backend = match args.first().map(String::as_str) {
         Some("asio") => AudioBackend::Asio,
         Some("wasapi") => AudioBackend::Wasapi,
@@ -210,6 +229,7 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
         mute: false,
         share: None,
         heavy: false,
+        tone: None,
         lag: false,
         out: 1,
         preopen: true,
@@ -256,6 +276,7 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
                     other => return Err(format!("--scene {other}: expected default or heavy")),
                 }
             }
+            "--tone" => parsed.tone = Some(number(value()?)? as u32),
             "--lag" => parsed.lag = true,
             "--out" => parsed.out = number(value()?)? as usize,
             "--no-preopen" => parsed.preopen = false,
@@ -277,6 +298,23 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
     }
     if parsed.split.is_some() && !(parsed.lag && backend.is_asio() && parsed.device.is_some()) {
         return Err("--split needs --lag on asio and a --device for the WASAPI side".into());
+    }
+    if let Some(tone) = parsed.tone {
+        if parsed.lag {
+            return Err("--tone runs in the soak: not with --lag".into());
+        }
+        if !backend.is_asio() {
+            return Err("--tone needs asio: WASAPI's join resamples the input, so the returning tone's phase is no constant".into());
+        }
+        if !parsed.mute {
+            return Err("--tone needs --mute: the cable would feed a live slot back through the master".into());
+        }
+        if parsed.out > 1 {
+            return Err("--tone plays on --out 0 or 1".into());
+        }
+        if tone == parsed.input {
+            return Err("--tone and --in name the same input: the take records --in, the cable returns on --tone".into());
+        }
     }
     Ok(parsed)
 }
@@ -305,24 +343,26 @@ struct Slot {
     handle: Option<EngineSlotHandle>,
 }
 
-/// The requests the probe opens: WASAPI endpoints picked once by name, the capture channel fixed.
+/// The requests the probe opens: WASAPI endpoints picked once by name, the capture channel fixed
+/// (`--tone`: slot 1 reads the cable's input instead).
 struct Devices {
     wasapi_in: Option<String>,
     wasapi_out: Option<String>,
     channel: u32,
+    tone: Option<u32>,
 }
 
 impl Devices {
-    fn new(channel: u32, name: Option<&str>) -> Result<Devices, String> {
+    fn new(channel: u32, tone: Option<u32>, name: Option<&str>) -> Result<Devices, String> {
         let Some(name) = name.map(str::to_lowercase) else {
-            return Ok(Devices { wasapi_in: None, wasapi_out: None, channel });
+            return Ok(Devices { wasapi_in: None, wasapi_out: None, channel, tone });
         };
         let input = crate::audio_input::list_input_devices()?.into_iter().find(|d| d.name.to_lowercase().contains(&name));
         let output = crate::audio_output::list_output_devices()?.into_iter().find(|d| d.name.to_lowercase().contains(&name));
         match (input, output) {
             (Some(i), Some(o)) => {
                 say(format!("wasapi endpoints: in '{}', out '{}'", i.name, o.name));
-                Ok(Devices { wasapi_in: Some(i.id), wasapi_out: Some(o.id), channel })
+                Ok(Devices { wasapi_in: Some(i.id), wasapi_out: Some(o.id), channel, tone })
             }
             _ => Err(format!("--device {name}: no WASAPI input and output with that in the name")),
         }
@@ -334,7 +374,8 @@ impl Devices {
             AudioBackend::Wasapi => (self.wasapi_in.clone(), self.wasapi_out.clone()),
         };
         let buffer = buffer.filter(|_| backend.is_asio());
-        DeviceRequest { backend, input, output, input_channels: [Some(self.channel); SLOT_COUNT], buffer, sample_rate: None }
+        let input_channels = std::array::from_fn(|slot| Some(self.tone.filter(|_| slot == 1).unwrap_or(self.channel)));
+        DeviceRequest { backend, input, output, input_channels, buffer, sample_rate: None }
     }
 
     /// The switches' round: every other ASIO buffer and WASAPI, then back to `start`.
@@ -419,6 +460,13 @@ struct Probe {
     grace: Option<(IoDiag, Instant)>,
     /// What the grace windows forgave.
     forgiven: IoDiag,
+    /// `--tone`: the tone run's shared state, whether the tone plays, and the run's facts for its report.
+    tone: Option<Arc<Shared>>,
+    tone_plays: bool,
+    tone_facts: Option<Facts>,
+    /// The device the tone started on (backend, block, rate), and what interrupted it since.
+    tone_device: Option<(AudioBackend, u32, u32)>,
+    tone_interrupted: Option<String>,
     fails: Vec<(&'static str, String)>,
 }
 
@@ -465,6 +513,9 @@ impl Probe {
         }
         self.events = events;
         for event in self.host.take_device_events() {
+            if self.tone_plays && self.tone_interrupted.is_none() {
+                self.tone_interrupted = Some(format!("{event:?}"));
+            }
             self.fail("events", format!("{event:?}"));
         }
         self.settle();
@@ -640,18 +691,68 @@ impl Probe {
         Ok(())
     }
 
+    /// `--tone`: start the tone, and wait for its calibration and for the first control to come back.
+    fn tone_start(&mut self) -> Result<(), String> {
+        let Some(shared) = self.tone.clone() else { return Ok(()) };
+        shared.begin(self.rate);
+        self.tone_plays = true;
+        self.wait("the tone calibrates", WAIT, |_| shared.cal() != super::tone::Cal::Pending)?;
+        if let Some(fault) = shared.cal().fault() {
+            return Err(format!("tone: {fault}"));
+        }
+        self.wait("the tone's first control comes back", WAIT, |_| shared.counts().0 > 0)?;
+        // The control's event closes before the soak counts.
+        self.hold(Duration::from_millis(300));
+        let status = self.host.status().ok_or("tone: no device runs")?;
+        self.tone_device = Some((status.backend, status.block, status.sample_rate));
+        self.tone_facts = Some(Facts { align: status.align_frames, block: status.block, soak_from: self.host.core.frame.load(Relaxed), interrupted: None });
+        say("tone: calibrated, and the first control came back");
+        Ok(())
+    }
+
+    /// `--tone`: plant the second control and fade the tone out, before anything stops the device.
+    fn tone_stop(&mut self) {
+        let Some(shared) = self.tone.clone() else { return };
+        if !std::mem::take(&mut self.tone_plays) {
+            return;
+        }
+        shared.end();
+        if let Err(e) = self.wait("the tone fades out", SLOT_WAIT, |_| shared.done()) {
+            say(format!("tone: {e}"));
+        }
+        // A device event since the tone began, or another device now than the one it began on.
+        let now = self.host.status();
+        if self.tone_device.is_some() && now.as_ref().map(|s| (s.backend, s.block, s.sample_rate)) != self.tone_device {
+            let text = now.map_or("no device runs".to_string(), |s| describe(&s));
+            self.tone_interrupted.get_or_insert(format!("the device changed under the tone: {text}"));
+        }
+        if let Some(facts) = &mut self.tone_facts {
+            facts.interrupted = self.tone_interrupted.take();
+        }
+    }
+
     fn soak(&mut self, seconds: f64) {
         let began = Instant::now();
         let end = began + Duration::from_secs_f64(seconds);
         let (start, mut note) = (self.host.diag(), began + Duration::from_secs(60));
         // Each minute's own block time and diagnostics, so a spike in a long soak has a time.
         let (mut minute, mut load) = (start, self.host.block_load());
+        let mut toned = self.tone.as_ref().map(|t| t.counts());
         while Instant::now() < end {
             self.pump();
             if Instant::now() >= note {
                 let (diag, now) = (self.host.diag(), self.host.block_load());
+                let tone = match (&self.tone, &mut toned) {
+                    (Some(shared), Some(before)) => {
+                        let counts = shared.counts();
+                        let text = format!("; tone this minute: events {}, coverage gaps {}", counts.0 - before.0, counts.1 - before.1);
+                        *before = counts;
+                        text
+                    }
+                    _ => String::new(),
+                };
                 say(format!(
-                    "soak {:.0} s: callbacks {}, counters {}; this minute: block {}, asio_phase_slips {}, clipped_blocks {}; asio_late_max so far {}",
+                    "soak {:.0} s: callbacks {}, counters {}; this minute: block {}, asio_phase_slips {}, clipped_blocks {}; asio_late_max so far {}{tone}",
                     began.elapsed().as_secs_f64(),
                     diag.callbacks - start.callbacks,
                     moved(&diag, &start),
@@ -744,6 +845,9 @@ impl Probe {
         self.silence()?;
         self.rate = status.sample_rate;
         say(format!("open {}: {}", label(start), describe(&status)));
+        if let Some(tone) = a.tone.filter(|&tone| status.input_channels[1] != tone) {
+            return Err(format!("--tone {tone}: the device has no such input (slot 1 reads input {})", status.input_channels[1]));
+        }
         if let Some(endpoint) = &a.share {
             self.host.set_share(Some(endpoint.clone()))?;
             say(format!("share: the master is mirrored to {endpoint}"));
@@ -763,8 +867,10 @@ impl Probe {
             self.phase("heavy scene", &mark);
         }
 
+        self.tone_start()?;
         let mark = self.mark();
         self.soak(a.seconds);
+        self.tone_stop();
         let load = self.phase("soak", &mark);
         match (load.quantile(0.999), load.max()) {
             (Some(p999), Some(max)) if (self.heavy || p999 < P999_BAR) && max < MAX_BAR => {}
@@ -1380,7 +1486,7 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
         plugins.push(spec);
     }
     let slots = a.plugins.iter().enumerate().map(|(k, (slot, _))| Slot { slot: *slot, plugin: k, handle: None }).collect();
-    let devices = Devices::new(a.input, a.device.as_deref())?;
+    let devices = Devices::new(a.input, a.tone, a.device.as_deref())?;
     let start = devices.request(a.backend, a.buffer);
     #[cfg(feature = "asio")]
     if start.backend.is_asio() || (a.switches > 0 && (a.cycle.is_empty() || a.cycle.iter().any(|(backend, _)| backend.is_asio()))) {
@@ -1394,6 +1500,12 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
     }
 
     let host = EngineHost::new(HostConfig::default());
+    // `--tone`: the rig goes into the callback's state while no device runs, as the lag rig does.
+    let tone = a.tone.map(|_| Shared::new());
+    if let Some(shared) = &tone {
+        let _ = host.core.tone.set(shared.clone());
+        host.core.rt.lock().map_err(|_| "engine lock poisoned")?.tone = Some(Box::new(ToneRig::new(shared.clone(), a.out == 1)));
+    }
     let mut p = Probe {
         host: host.clone(),
         plugins,
@@ -1410,6 +1522,11 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
         cycled: !a.cycle.is_empty(),
         grace: None,
         forgiven: IoDiag::default(),
+        tone,
+        tone_plays: false,
+        tone_facts: None,
+        tone_device: None,
+        tone_interrupted: None,
         fails: Vec::new(),
     };
     if let Err(e) = p.drive(&a, &devices, &start) {
@@ -1423,6 +1540,8 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
         // The chord's release; a device that is gone drops it.
         let _ = p.send(Command::AllNotesOff);
     }
+    // A run that stopped early still fades its tone out.
+    p.tone_stop();
     p.finish_grace();
     // The plugins leave the engine while the device still plays (crossfaded out), then it closes.
     for k in 0..p.slots.len() {
@@ -1431,6 +1550,7 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
     if let Err(e) = host.close() {
         p.fail("run", format!("close: {e}"));
     }
+    let tone_rig = p.tone.as_ref().and_then(|_| host.core.rt.lock().ok()?.tone.take());
     p.pump();
     host.shutdown();
 
@@ -1450,8 +1570,26 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
     if errors > 0 {
         p.fails.push(("log", format!("{errors} error(s) logged")));
     }
+    // `--tone`: its closing block, and its check's outcome in words.
+    let tone_check = p.tone.as_ref().map(|_| match &tone_rig {
+        Some(rig) => {
+            let report = rig.report(p.tone_facts.clone());
+            for line in &report.lines {
+                say(line);
+            }
+            (report.pass, report.verdict)
+        }
+        None => (false, "tone: not measured: the rig is gone".to_string()),
+    });
     let mut failed = 0;
     for (check, bar) in CHECKS {
+        if check == "tone" {
+            if let Some((pass, verdict)) = &tone_check {
+                failed += usize::from(!pass);
+                say(format!("{} {verdict} | {bar}", if *pass { "PASS" } else { "FAIL" }));
+            }
+            continue;
+        }
         let found: Vec<&str> = p.fails.iter().filter(|(c, _)| *c == check).map(|(_, m)| m.as_str()).collect();
         if found.is_empty() {
             say(format!("PASS {check} | {bar}"));
@@ -1485,6 +1623,33 @@ mod tests {
         );
         // A window that moved nothing forgives nothing.
         assert_eq!(forgivable(&now, &now), IoDiag::default());
+    }
+
+    fn args(line: &str) -> Result<Args, String> {
+        parse_args(&line.split(' ').map(String::from).collect::<Vec<_>>())
+    }
+
+    #[test]
+    fn the_tone_needs_asio_the_mute_and_an_input_of_its_own() {
+        let a = args("asio 64 --mute --tone 1").ok().expect("the rig's run parses");
+        assert_eq!((a.tone, a.input, a.out), (Some(1), 0, 1));
+        assert_eq!(args("asio 64 --mute --in 1 --tone 0 --out 0").ok().map(|a| (a.tone, a.out)), Some((Some(0), 0)));
+        // Slot 0 keeps `--in`, slot 1 reads the cable.
+        let request = Devices::new(a.input, a.tone, None).ok().unwrap().request(a.backend, a.buffer);
+        assert_eq!(request.input_channels, [Some(0), Some(1)]);
+        assert_eq!(Devices::new(0, None, None).ok().unwrap().request(a.backend, a.buffer).input_channels, [Some(0), Some(0)]);
+        for (line, want) in [
+            ("asio 64 --tone 1", "--mute"),
+            ("asio 64 --mute --tone 0", "same input"),
+            ("asio 64 --mute --in 1 --tone 1", "same input"),
+            ("asio 64 --mute --tone 1 --lag", "--lag"),
+            ("asio 64 --mute --tone 1 --out 2", "--out 0 or 1"),
+            ("wasapi default --mute --tone 1", "asio"),
+            ("asio 64 --mute --tone", "needs a value"),
+        ] {
+            let error = args(line).err().unwrap_or_else(|| panic!("`{line}` parsed"));
+            assert!(error.contains(want), "`{line}`: {error}");
+        }
     }
 
     /// A rig whose input holds each chirp `lag` frames after it left.

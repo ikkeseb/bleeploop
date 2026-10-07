@@ -576,9 +576,16 @@ impl Render {
             (Some((before, _)), Source::Join { .. }) => dry_frames(entry.saturating_duration_since(before), self.rate, n, self.cap),
             _ => 0,
         };
+        // DEV: how far behind the wakes' best phase this one entered, for the tone run's log below.
+        #[cfg(debug_assertions)]
+        let mut entered_late = 0;
         if let (Source::Duplex, Some((late, slipped))) = (&self.source, self.slips.wake(entry, n, self.rate)) {
             counters.asio_phase_slips.fetch_add(u64::from(slipped), Relaxed);
             counters.asio_late_max.fetch_max(late, Relaxed);
+            #[cfg(debug_assertions)]
+            {
+                entered_late = late;
+            }
         }
         if lost > 0 {
             counters.gaps.fetch_add(1, Relaxed);
@@ -654,7 +661,12 @@ impl Render {
             }
         }
         core.frame.store(frame + n as Frame, Relaxed);
-        counters.block_load.record(began.elapsed(), n, self.rate);
+        let elapsed = began.elapsed();
+        counters.block_load.record(elapsed, n, self.rate);
+        #[cfg(debug_assertions)]
+        if let Some(tone) = core.tone.get() {
+            tone.slow.record(frame, n, elapsed, entered_late, self.rate);
+        }
     }
 
     /// A block the engine did not render plays silence; a fade-out in progress has reached it.
@@ -695,6 +707,8 @@ impl Render {
             tap,
             #[cfg(debug_assertions)]
             lag,
+            #[cfg(debug_assertions)]
+            tone,
             ..
         } = rt;
         let inputs: [&[f32]; SLOT_COUNT] = match &self.source {
@@ -726,6 +740,12 @@ impl Render {
             #[cfg(debug_assertions)]
             if let Some(lag) = lag.as_mut() {
                 lag.block(ctx.frame + off as Frame, x[0], left, right);
+            }
+            // The tone reads slot 1's input: valid only when this slice's input reached the callback
+            // (the same test that picks the zero fill above).
+            #[cfg(debug_assertions)]
+            if let Some(tone) = tone.as_mut() {
+                tone.block(ctx.frame + off as Frame, x[1], off + m <= avail, left, right);
             }
             if let Some(tap) = tap.as_mut() {
                 tap.push(left, right, counters);
