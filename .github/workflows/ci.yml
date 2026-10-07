@@ -15,11 +15,11 @@ permissions:
 # `github.workflow` is the CALLER's name under workflow_call, so a build-exe run never cancels, or
 # deadlocks on, a plain push run of the same ref.
 #
-# A push to main gets a group of its own (its sha), so the next push never cancels it: a docs-only
-# push right after a code push used to cancel the code's run, and its own run skips the heavy jobs.
-# A pull request still cancels its older runs.
+# A push gets a group of its own (its run), so the next push never cancels it: a docs-only push right
+# after a code push used to cancel the code's run, and its own run skips the heavy jobs. A pull
+# request still cancels its older runs.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}-${{ github.event_name == 'push' && github.sha || '' }}
+  group: ci-${{ github.workflow }}-${{ github.ref }}-${{ github.event_name == 'push' && github.run_id || '' }}
   cancel-in-progress: true
 
 # The docs guard classifies the diff and always runs the deterministic verifiers. For a docs-only
@@ -43,7 +43,8 @@ jobs:
       # yields an empty list, which classifies as NOT docs-only, so the heavy gates run. `--no-renames`
       # lists both sides of a move, so a file moved into `docs/` still counts as a source change.
       # `native` fails open the same way: false only for a readable diff with no file the `rust` and
-      # `engine` jobs read (src-tauri/, the two scripts the engine job runs, this workflow).
+      # `engine` jobs read (src-tauri/, a cargo config or toolchain file above it, the two scripts the
+      # engine job runs, this workflow), and never on a tag: a release's call runs every job.
       - name: Classify changed paths
         id: changes
         shell: bash
@@ -68,11 +69,12 @@ jobs:
             while IFS= read -r file; do
               case "$file" in
                 *.md|*.MD|docs/*) ;;
-                src-tauri/*|scripts/engine-deny.mjs|scripts/cargo-test.mjs|.github/workflows/ci.yml) docs_only=false; native=true ;;
+                src-tauri/*|.cargo/*|rust-toolchain*|scripts/engine-deny.mjs|scripts/cargo-test.mjs|.github/workflows/ci.yml) docs_only=false; native=true ;;
                 *) docs_only=false ;;
               esac
             done <<< "$files"
           fi
+          if [ "${{ github.ref_type }}" = tag ]; then native=true; fi
           echo "docs_only=$docs_only" >> "$GITHUB_OUTPUT"
           echo "native=$native" >> "$GITHUB_OUTPUT"
           echo "base=$base docs_only=$docs_only native=$native"

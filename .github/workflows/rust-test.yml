@@ -22,9 +22,9 @@ on:
 permissions:
   contents: read
 
-# A push to main gets a group of its own (its sha), so the next push never cancels its tests (ci.yml).
+# A push gets a group of its own (its run), so the next push never cancels its tests (ci.yml).
 concurrency:
-  group: rust-test-${{ github.workflow }}-${{ github.ref }}-${{ github.event_name == 'push' && github.sha || '' }}
+  group: rust-test-${{ github.workflow }}-${{ github.ref }}-${{ github.event_name == 'push' && github.run_id || '' }}
   cancel-in-progress: true
 
 jobs:

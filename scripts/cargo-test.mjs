@@ -1,8 +1,11 @@
 // scripts/cargo-test.mjs — `cargo test`, its test binaries run side by side. Cargo runs them one after
 // another, and most of the wall time is a few binaries with one long test each: the same binaries in a
 // pool finish in about the longest one's time. Built by cargo (`--no-run`), each binary is then run as
-// cargo runs it (its package's directory, `CARGO_MANIFEST_DIR`, the target's `deps` on PATH), and the
-// doc-tests go through `cargo test --doc`. A binary's own tests keep libtest's threads.
+// cargo runs it (its package's directory, `CARGO_MANIFEST_DIR`, the target's `deps` on the library
+// path), and the doc-tests go through `cargo test --doc`. A binary's own tests keep libtest's threads.
+// Not carried over from cargo: its other `CARGO_*` variables and the toolchain's own library directory
+// (no test here reads the first or links the second; a binary that needed either would fail to start,
+// which fails the run).
 //
 //   node scripts/cargo-test.mjs [--jobs N] <cargo test's package and feature arguments>
 //   node scripts/cargo-test.mjs --workspace --no-default-features
@@ -42,6 +45,7 @@ function run(command, args, options, onChunk) {
  * @returns {Promise<{ code: number, out: string, binaries: number, passed: number }>} `out`: the failed steps' output
  */
 export async function cargoTest(args, { jobs = availableParallelism(), log = () => {} } = {}) {
+  if (!(Number.isInteger(jobs) && jobs > 0)) throw new Error(`cargoTest: jobs ${jobs}: expected a whole number above 0`);
   // The build: cargo's messages name each test binary and its package's manifest.
   const build = await run('cargo', ['test', ...args, '--no-run', '--message-format=json-render-diagnostics'], { cwd }, (chunk, stream) => {
     if (stream === 'stderr') log(String(chunk));
@@ -62,7 +66,9 @@ export async function cargoTest(args, { jobs = availableParallelism(), log = () 
   const worker = async () => {
     while (next < binaries.length) {
       const { exe, manifest, name } = binaries[next++];
-      const env = { ...process.env, CARGO_MANIFEST_DIR: dirname(manifest), PATH: `${dirname(exe)}${delimiter}${process.env.PATH ?? ''}` };
+      // Where the dynamic loader looks, by platform (cargo's own rule).
+      const libs = process.platform === 'win32' ? 'PATH' : process.platform === 'darwin' ? 'DYLD_FALLBACK_LIBRARY_PATH' : 'LD_LIBRARY_PATH';
+      const env = { ...process.env, CARGO_MANIFEST_DIR: dirname(manifest), [libs]: [dirname(exe), process.env[libs]].filter(Boolean).join(delimiter) };
       const started = Date.now();
       const result = await run(exe, [], { cwd: dirname(manifest), env });
       const text = `\n     Running ${name} (${exe}) ${((Date.now() - started) / 1000).toFixed(1)} s\n${result.stdout}${result.stderr}`;
@@ -84,7 +90,7 @@ if (import.meta.url === pathToFileURL(process.argv[1]).href) {
   const at = args.indexOf('--jobs');
   const jobs = at < 0 ? undefined : Number(args.splice(at, 2)[1]);
   if (jobs !== undefined && !(Number.isInteger(jobs) && jobs > 0)) {
-    console.error('--jobs: expected a whole number above 0');
+    console.error('--jobs N: expected a whole number above 0');
     process.exit(1);
   }
   const started = Date.now();
