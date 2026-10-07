@@ -30,7 +30,7 @@ use lf_engine::grid::Frame;
 ///   for one frame, and never less than 1/89 of a turn (0.071 rad, 2.3 times [`PHASE_MIN`]) otherwise.
 pub(crate) const PERIOD: usize = 89;
 const CYCLES: usize = 2;
-/// The tone's amplitude on the output side (-12 dBFS).
+/// The tone's amplitude on the output side (-12 dBFS), unless the probe's `--tone-level` says.
 pub(crate) const LEVEL: f32 = 0.25;
 /// The fit window, in frames: [`PERIOD`] (whole cycles, above). 1.9 ms at 48 kHz: short enough to place
 /// an event within a period of a 128-frame buffer, long enough that -60 dBFS of noise moves a window's
@@ -73,6 +73,12 @@ const EVENT_CAP: usize = 256;
 const GAP_CAP: usize = 64;
 const SNIPPETS: usize = 8;
 const SNIP_HALF: usize = 256;
+/// The windows' trace around an event that opened on the phase or the level, with no residual spike (the
+/// slow disturbance's mark, the crackle thread): how many such events, and the windows before its onset and from it on (0.26 s and
+/// 1.03 s at 44.1 kHz).
+const TRACES: usize = 4;
+const TRACE_BEFORE: usize = 128;
+const TRACE_AFTER: usize = 512;
 
 /// The rig: the tone's ramp in and out, from the calibration to the first control, from the second
 /// control to the ramp out (seconds), and a control's hole (frames of silence in the output tone).
@@ -82,9 +88,10 @@ const TAIL_SECONDS: f64 = 0.5;
 const HOLE: Frame = 64;
 
 /// [`SlowLog`]: its rows, the rows only a long callback may take, and how many periods behind the best
-/// phase an entry is recorded as late. `callback::PhaseSlips` reports a wake more than one period behind;
-/// the rig's USB driver does that ~180 times a second at 64 frames with nothing wrong (92 to 109 frames
-/// behind), so one period would flood the table. Two periods is past that jitter.
+/// phase an entry is recorded as late. The rig's USB driver wakes more than one period behind ~180 times
+/// a second at 64 frames with nothing wrong (92 to 109 frames behind), so one period would flood the
+/// table. Two periods is past that jitter. A callback that finished late by `asio_late_finishes`' rule
+/// (`callback::finishes_late`) is recorded too, so a count can be tied to an event.
 const SLOW_CAP: usize = 16_384;
 const LONG_RESERVE: usize = 1024;
 const LATE_PERIODS: u64 = 2;
@@ -233,6 +240,19 @@ struct Snippet {
     data: [f32; 2 * SNIP_HALF],
 }
 
+/// Each window's phase (rad, against the generated tone) and amplitude against the learned one around
+/// an event: `data[..len]`, the first `before` of them before its onset. The report takes the phase
+/// against the reference the event opened on: the detector's own follows a lasting drift. The sine is fitted out of each
+/// window, so what is left is the disturbance: a clock or gain change moves them the same at any tone
+/// level, something added to the signal moves them in inverse proportion to it.
+#[derive(Clone)]
+struct Trace {
+    event: usize,
+    before: usize,
+    len: usize,
+    data: [(f32, f32); TRACE_BEFORE + TRACE_AFTER],
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Mode {
     Off,
@@ -309,6 +329,12 @@ pub(crate) struct Detector {
     snippets: Vec<Snippet>,
     n_snippets: usize,
     filling: bool,
+    /// The last [`TRACE_BEFORE`] windows, and the traces, the last one taking windows while `tracing`.
+    trace_ring: [(f32, f32); TRACE_BEFORE],
+    trace_ring_n: usize,
+    traces: Vec<Trace>,
+    n_traces: usize,
+    tracing: bool,
     /// The watched span, the frames the hook ran for in it and those that carried valid input.
     watch_from: Frame,
     watch_to: Frame,
@@ -369,6 +395,11 @@ impl Detector {
             snippets: vec![Snippet { event: 0, first: 0, len: 0, data: [0.0; 2 * SNIP_HALF] }; SNIPPETS],
             n_snippets: 0,
             filling: false,
+            trace_ring: [(0.0, 0.0); TRACE_BEFORE],
+            trace_ring_n: 0,
+            traces: vec![Trace { event: 0, before: 0, len: 0, data: [(0.0, 0.0); TRACE_BEFORE + TRACE_AFTER] }; TRACES],
+            n_traces: 0,
+            tracing: false,
             watch_from: 0,
             watch_to: 0,
             pushed: 0,
@@ -471,6 +502,9 @@ impl Detector {
         self.acc_cos = 0.0;
         self.win_peak = 0.0;
         self.prev = None;
+        // A trace holds whole windows in a row: one that fills ends at the gap, and the ring starts over.
+        self.tracing = false;
+        self.trace_ring_n = 0;
     }
 
     fn gap(&mut self, frame: Frame, frames: Frame, jump: bool) {
@@ -573,6 +607,7 @@ impl Detector {
                 self.claim = self.mark;
                 let l = self.learned;
                 let ratio = amp / l.amp;
+                let point = (phase as f32, ratio as f32);
                 let level_ok = (ratio - 1.0).abs() <= l.amp_bar;
                 let judged = ratio >= PHASE_AMP_FLOOR;
                 let stepped = judged && wrap(phase - self.ref_phase).abs() > l.phase_bar;
@@ -597,6 +632,7 @@ impl Detector {
                     }
                 }
                 self.prev = Some((phase, level_ok && judged));
+                self.trace(point);
             }
             _ => {}
         }
@@ -653,6 +689,9 @@ impl Detector {
                 self.cur = Some(self.n_events);
                 self.n_events += 1;
                 self.snip(to);
+                if cues & CUE_RESIDUAL == 0 {
+                    self.trace_from_ring();
+                }
             } else {
                 self.events_over += 1;
                 self.cur = None;
@@ -694,7 +733,67 @@ impl Detector {
         self.n_snippets += 1;
         self.filling = true;
     }
+
+    /// Start the new event's trace from the windows before it, unless one still fills or none is left.
+    fn trace_from_ring(&mut self) {
+        if self.tracing || self.n_traces == TRACES {
+            return;
+        }
+        let k = self.trace_ring_n.min(TRACE_BEFORE);
+        let t = &mut self.traces[self.n_traces];
+        for (i, y) in t.data[..k].iter_mut().enumerate() {
+            *y = self.trace_ring[(self.trace_ring_n - k + i) % TRACE_BEFORE];
+        }
+        (t.event, t.before, t.len) = (self.n_events - 1, k, k);
+        self.n_traces += 1;
+        self.tracing = true;
+    }
+
+    /// One watched window's phase and amplitude against the learned one.
+    fn trace(&mut self, point: (f32, f32)) {
+        if self.tracing {
+            let t = &mut self.traces[self.n_traces - 1];
+            t.data[t.len] = point;
+            t.len += 1;
+            self.tracing = t.len < t.data.len();
+        }
+        self.trace_ring[self.trace_ring_n % TRACE_BEFORE] = point;
+        self.trace_ring_n += 1;
+    }
 }
+
+/// The calling thread's CPU cycles so far, user and kernel mode (`QueryThreadCycleTime`), and the
+/// processor's time-stamp counter read beside them; `None` when the query fails, off Windows or off
+/// x86_64. On this hardware the thread's cycles tick with the time-stamp counter (the report checks it
+/// per run: [`CYCLES_IN_STEP`]), so a callback's share of one in the other says whether Windows took its
+/// thread off the CPU, with no rate to calibrate. Near 100 % is not proof it ran its own code: whether
+/// Windows charges ISR and DPC time to the thread is unverified, and SMI and hypervisor time and a slower
+/// clock are invisible to it. A syscall and an instruction: no allocation, lock or wait.
+pub(crate) fn cycle_stamp() -> Option<(u64, u64)> {
+    #[cfg(all(windows, target_arch = "x86_64"))]
+    {
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GetCurrentThread() -> *mut std::ffi::c_void;
+            fn QueryThreadCycleTime(thread: *mut std::ffi::c_void, cycles: *mut u64) -> i32;
+        }
+        let mut cycles = 0;
+        // SAFETY: the current thread's pseudo-handle needs no closing, and `cycles` outlives the call.
+        let ok = unsafe { QueryThreadCycleTime(GetCurrentThread(), &mut cycles) } != 0;
+        // SAFETY: RDTSC needs no target feature on x86_64 (an unsafe fn on older toolchains).
+        #[allow(unused_unsafe)]
+        let tsc = unsafe { std::arch::x86_64::_rdtsc() };
+        ok.then_some((cycles, tsc))
+    }
+    #[cfg(not(all(windows, target_arch = "x86_64")))]
+    None
+}
+
+/// A run's callbacks together must show their thread's cycles within this share of the time-stamp
+/// counter's ticks (in %), or the two do not tick together and no row is classified.
+const CYCLES_IN_STEP: (f64, f64) = (90.0, 101.0);
+/// A row over this share (in %) is suspect: the thread cannot run longer than the time that passed.
+const CYCLES_OVER: f64 = 102.0;
 
 /// One output callback that ran long or entered late.
 #[derive(Clone, Copy, Debug)]
@@ -703,7 +802,12 @@ pub(crate) struct Slow {
     pub(crate) frame: Frame,
     pub(crate) frames: u32,
     pub(crate) nanos: u64,
-    /// Frames behind the wakes' best phase at entry, when more than a period (`callback::PhaseSlips`).
+    /// Its thread's cycles and the time-stamp counter's ticks over it ([`cycle_stamp`]; ticks 0 when
+    /// unread).
+    pub(crate) cycles: u64,
+    pub(crate) ticks: u64,
+    /// Frames behind the wakes' best phase at entry (`callback::PhaseSlips`; 0 off ASIO and through
+    /// its start).
     pub(crate) late: u32,
     /// It took its whole period or more (`BlockLoad::over_budget`'s rule).
     pub(crate) long: bool,
@@ -713,6 +817,8 @@ struct SlowRow {
     frame: AtomicI64,
     frames: AtomicU32,
     nanos: AtomicU64,
+    cycles: AtomicU64,
+    ticks: AtomicU64,
     late: AtomicU32,
     long: AtomicBool,
 }
@@ -723,12 +829,19 @@ struct SlowRow {
 /// [`LONG_RESERVE`] rows to the long callbacks.
 pub(crate) struct SlowLog {
     on: AtomicBool,
-    /// Every callback it saw while on: the proof that it recorded.
+    /// Every callback it saw while on: the proof that it recorded; those whose cycles were unread; and
+    /// over the read ones, their wall time, their thread's cycles and the time-stamp ticks, summed.
     seen: AtomicU64,
+    unread: AtomicU64,
+    read_nanos: AtomicU64,
+    read_cycles: AtomicU64,
+    read_ticks: AtomicU64,
     len: AtomicUsize,
-    /// Every long callback and late entry while on, those past the table included, and those past it.
+    /// Every long callback, late entry and late finish while on, those past the table included, and the
+    /// long ones and the others past it.
     long: AtomicU64,
     late: AtomicU64,
+    late_finish: AtomicU64,
     long_over: AtomicU64,
     late_over: AtomicU64,
     rows: Box<[SlowRow]>,
@@ -736,33 +849,57 @@ pub(crate) struct SlowLog {
 
 impl SlowLog {
     fn new() -> SlowLog {
-        let row = |_| SlowRow { frame: AtomicI64::new(0), frames: AtomicU32::new(0), nanos: AtomicU64::new(0), late: AtomicU32::new(0), long: AtomicBool::new(false) };
+        let row = |_| SlowRow {
+            frame: AtomicI64::new(0),
+            frames: AtomicU32::new(0),
+            nanos: AtomicU64::new(0),
+            cycles: AtomicU64::new(0),
+            ticks: AtomicU64::new(0),
+            late: AtomicU32::new(0),
+            long: AtomicBool::new(false),
+        };
         SlowLog {
             on: AtomicBool::new(false),
             seen: AtomicU64::new(0),
+            unread: AtomicU64::new(0),
+            read_nanos: AtomicU64::new(0),
+            read_cycles: AtomicU64::new(0),
+            read_ticks: AtomicU64::new(0),
             len: AtomicUsize::new(0),
             long: AtomicU64::new(0),
             late: AtomicU64::new(0),
+            late_finish: AtomicU64::new(0),
             long_over: AtomicU64::new(0),
             late_over: AtomicU64::new(0),
             rows: (0..SLOW_CAP).map(row).collect(),
         }
     }
 
-    /// One output callback: `frames` from device frame `frame`, `elapsed` long, entered `late` frames
-    /// behind the best phase (0 within a period). Never allocates or waits.
-    pub(crate) fn record(&self, frame: Frame, frames: usize, elapsed: Duration, late: u64, rate: u32) {
+    /// One output callback: `frames` from device frame `frame`, `elapsed` long, its thread's cycles and
+    /// the time-stamp ticks over it (`None`: unread), entered `late` frames behind the best phase. Never
+    /// allocates or waits.
+    pub(crate) fn record(&self, frame: Frame, frames: usize, elapsed: Duration, cycles: Option<(u64, u64)>, late: u64, rate: u32) {
         if frames == 0 || !self.on.load(Relaxed) {
             return;
         }
         self.seen.fetch_add(1, Relaxed);
+        let (cycles, ticks) = cycles.unwrap_or((0, 0));
+        if ticks == 0 {
+            self.unread.fetch_add(1, Relaxed);
+        } else {
+            self.read_nanos.fetch_add(elapsed.as_nanos() as u64, Relaxed);
+            self.read_cycles.fetch_add(cycles, Relaxed);
+            self.read_ticks.fetch_add(ticks, Relaxed);
+        }
         let long = elapsed.as_secs_f64() * rate as f64 >= frames as f64;
         let late_entry = late >= LATE_PERIODS * frames as u64;
-        if !long && !late_entry {
+        let late_finish = super::callback::finishes_late(late as f64, elapsed.as_secs_f64() * rate as f64, frames);
+        if !long && !late_entry && !late_finish {
             return;
         }
         self.long.fetch_add(u64::from(long), Relaxed);
         self.late.fetch_add(u64::from(late_entry), Relaxed);
+        self.late_finish.fetch_add(u64::from(late_finish), Relaxed);
         let len = self.len.load(Relaxed);
         if len >= if long { SLOW_CAP } else { SLOW_CAP - LONG_RESERVE } {
             let over = if long { &self.long_over } else { &self.late_over };
@@ -773,6 +910,8 @@ impl SlowLog {
         row.frame.store(frame, Relaxed);
         row.frames.store(frames as u32, Relaxed);
         row.nanos.store(elapsed.as_nanos() as u64, Relaxed);
+        row.cycles.store(cycles, Relaxed);
+        row.ticks.store(ticks, Relaxed);
         row.late.store(late.min(u32::MAX as u64) as u32, Relaxed);
         row.long.store(long, Relaxed);
         self.len.store(len + 1, Relaxed);
@@ -781,7 +920,15 @@ impl SlowLog {
     fn rows(&self) -> Vec<Slow> {
         self.rows[..self.len.load(Relaxed)]
             .iter()
-            .map(|r| Slow { frame: r.frame.load(Relaxed), frames: r.frames.load(Relaxed), nanos: r.nanos.load(Relaxed), late: r.late.load(Relaxed), long: r.long.load(Relaxed) })
+            .map(|r| Slow {
+                frame: r.frame.load(Relaxed),
+                frames: r.frames.load(Relaxed),
+                nanos: r.nanos.load(Relaxed),
+                cycles: r.cycles.load(Relaxed),
+                ticks: r.ticks.load(Relaxed),
+                late: r.late.load(Relaxed),
+                long: r.long.load(Relaxed),
+            })
             .collect()
     }
 }
@@ -853,6 +1000,7 @@ impl Shared {
 pub(crate) struct ToneRig {
     shared: Arc<Shared>,
     right: bool,
+    level: f32,
     wave: Wave,
     det: Detector,
     state: u8,
@@ -866,9 +1014,10 @@ pub(crate) struct ToneRig {
 }
 
 impl ToneRig {
-    /// Allocates: build it off the audio thread. `right`: the output side the cable leaves from.
-    pub(crate) fn new(shared: Arc<Shared>, right: bool) -> ToneRig {
-        ToneRig { shared, right, wave: Wave::new(), det: Detector::new(), state: IDLE, rate: 0, from: 0, ramp: 1, out_from: None, holes: [None; 2] }
+    /// Allocates: build it off the audio thread. `right`: the output side the cable leaves from; `level`
+    /// the tone's amplitude ([`LEVEL`] unless the probe's `--tone-level` says).
+    pub(crate) fn new(shared: Arc<Shared>, right: bool, level: f32) -> ToneRig {
+        ToneRig { shared, right, level, wave: Wave::new(), det: Detector::new(), state: IDLE, rate: 0, from: 0, ramp: 1, out_from: None, holes: [None; 2] }
     }
 
     fn frames(&self, seconds: f64) -> Frame {
@@ -916,7 +1065,7 @@ impl ToneRig {
         let out = if self.right { right } else { left };
         for (k, y) in out.iter_mut().enumerate() {
             let f = frame + k as Frame;
-            *y += LEVEL * self.gain(f) * self.wave.at(f).0 as f32;
+            *y += self.level * self.gain(f) * self.wave.at(f).0 as f32;
         }
         let watched = self.det.watching();
         self.det.push(frame, input, valid);
@@ -1033,10 +1182,11 @@ impl ToneRig {
         let l = det.learned();
         let mut lines = Vec::new();
         lines.push(format!(
-            "tone: {} Hz, {:.1} Hz ({CYCLES} cycles in {PERIOD} frames), out {LEVEL:.3} ({:.1} dBFS), in {:.4} ({:.1} dBFS); noise: residual rms {:.5} of the level, a window's phase sd {:.5} rad, level sd {:.5}",
+            "tone: {} Hz, {:.1} Hz ({CYCLES} cycles in {PERIOD} frames), out {:.3} ({:.1} dBFS), in {:.4} ({:.1} dBFS); noise: residual rms {:.5} of the level, a window's phase sd {:.5} rad, level sd {:.5}",
             self.rate,
             rate * CYCLES as f64 / PERIOD as f64,
-            db(LEVEL as f64),
+            self.level,
+            db(self.level as f64),
             l.amp,
             db(l.amp),
             l.residual_rms,
@@ -1088,31 +1238,67 @@ impl ToneRig {
         let mixed = controls.iter().filter(|c| c.mixed).count();
         let spontaneous = own.len() + mixed;
         let coincide = own.iter().filter(|&&i| nearest(events[i].onset, round_trip, &rows, window).is_some_and(|n| n.inside)).count();
-        let (long, late) = (slow.long.load(Relaxed), slow.late.load(Relaxed));
+        let (long, late, late_finish) = (slow.long.load(Relaxed), slow.late.load(Relaxed), slow.late_finish.load(Relaxed));
         let (long_over, late_over) = (slow.long_over.load(Relaxed), slow.late_over.load(Relaxed));
         let seen = slow.seen.load(Relaxed);
         let seen_floor = (LOG_SHARE * span as f64 / facts.block.max(1) as f64) as u64;
         lines.push(format!(
-            "tone: {spontaneous} loopback discontinuities beside the controls, {seen} callbacks logged, {long} long (a period or more), {late} late entries ({LATE_PERIODS} periods or more behind); past the tables: events {}, gaps {}, long callbacks {long_over}, late entries {late_over}; round trip {round_trip} frames, coincidence window ±{:.2} ms",
+            "tone: {spontaneous} loopback discontinuities beside the controls, {seen} callbacks logged, {long} long (a period or more), {late} late entries ({LATE_PERIODS} periods or more behind), {late_finish} late finishes ({} periods or more after the best phase); past the tables: events {}, gaps {}, long callbacks {long_over}, late entries and finishes {late_over}; round trip {round_trip} frames, coincidence window ±{:.2} ms",
+            super::callback::LATE_FINISH_PERIODS,
             det.events_over,
             det.gaps_over,
             ms(window)
         ));
 
-        let slow_text = |s: &Slow| {
+        // The callback thread's cycles against the time-stamp ticks over each callback (`cycle_stamp`):
+        // judged only when the run's read callbacks together keep the two in step.
+        let (unread, read_nanos) = (slow.unread.load(Relaxed), slow.read_nanos.load(Relaxed));
+        let (read_cycles, read_ticks) = (slow.read_cycles.load(Relaxed), slow.read_ticks.load(Relaxed));
+        let share = |cycles: u64, ticks: u64| cycles as f64 * 100.0 / ticks.max(1) as f64;
+        let in_step = read_ticks > 0 && (CYCLES_IN_STEP.0..=CYCLES_IN_STEP.1).contains(&share(read_cycles, read_ticks));
+        lines.push(if read_ticks == 0 {
+            format!("tone: thread cycles: unread in all {} callbacks: not classified", slow.seen.load(Relaxed))
+        } else {
             format!(
-                "{} at frame {} ({:+.3} s), {} frames, {:.3} ms ({:.0} %), entered {} frames behind the best phase",
+                "tone: thread cycles: {} callbacks read, {unread} unread; together their thread ran {:.1} % of the time-stamp counter's ticks ({:.3} GHz over their wall time): {}",
+                slow.seen.load(Relaxed) - unread,
+                share(read_cycles, read_ticks),
+                read_ticks as f64 / read_nanos.max(1) as f64,
+                if in_step {
+                    "a long callback near 100 % was not taken off the CPU (it ran, or ISR, DPC, SMI or hypervisor time or a slower clock was charged to it: unverified which), one well under it was"
+                } else {
+                    "the two do not tick together: not classified"
+                }
+            )
+        });
+        let cpu = |s: &Slow| match (s.ticks, in_step) {
+            (0, _) => ", cycles unread".to_string(),
+            (_, false) => String::new(),
+            (ticks, true) => {
+                let x = share(s.cycles, ticks);
+                format!(", its thread {x:.0} % of the ticks{}", if x > CYCLES_OVER { " (over 100 %: suspect)" } else { "" })
+            }
+        };
+        let slow_text = |s: &Slow| {
+            // From the entry's lag and the callback's own clock (cpal stamps the entry just before it).
+            let finished = s.late as f64 + s.nanos as f64 * rate / 1e9;
+            format!(
+                "{} at frame {} ({:+.3} s), {} frames, {:.3} ms ({:.0} %), entered {} frames behind the best phase, finished {:.0} after it ({:.2} periods){}",
                 match (s.long, s.late as u64 >= LATE_PERIODS * s.frames as u64) {
                     (true, true) => "long and late",
                     (true, false) => "long",
-                    _ => "late",
+                    (false, true) => "late",
+                    (false, false) => "finished late",
                 },
                 s.frame,
                 (s.frame - facts.soak_from) as f64 / rate,
                 s.frames,
                 s.nanos as f64 / 1e6,
                 s.nanos as f64 * rate / 1e7 / s.frames.max(1) as f64,
-                s.late
+                s.late,
+                finished,
+                finished / s.frames.max(1) as f64,
+                cpu(s)
             )
         };
         for (i, e) in events.iter().enumerate() {
@@ -1162,7 +1348,7 @@ impl ToneRig {
             lines.push(format!("tone callback: {}: {}", slow_text(s), event.map_or("no event".to_string(), |i| format!("event {}", i + 1))));
         }
         if late_more > 0 {
-            lines.push(format!("tone callback: {late_more} more late entries, {late_more_matched} at an event"));
+            lines.push(format!("tone callback: {late_more} more late entries and finishes, {late_more_matched} at an event"));
         }
         for g in det.gaps() {
             lines.push(format!(
@@ -1183,6 +1369,18 @@ impl ToneRig {
                 s.first + from as Frame,
                 onset,
                 shown.iter().map(|&x| format!("{:.0}", x as f64 / l.amp.max(1e-9) * 100.0)).collect::<Vec<_>>().join(" ")
+            ));
+        }
+        for t in &det.traces[..det.n_traces] {
+            let (data, from) = (&t.data[..t.len], events[t.event].from_phase);
+            lines.push(format!(
+                "tone trace, event {}: {} windows of {PERIOD} frames ({:.2} ms), {} of them before its onset; phase against the reference it opened on, in mrad: {}; level against the learned one in per mille off it: {}",
+                t.event + 1,
+                t.len,
+                ms(PERIOD as Frame),
+                t.before,
+                data.iter().map(|&(ph, _)| format!("{:.0}", wrap(ph as f64 - from) * 1e3)).collect::<Vec<_>>().join(" "),
+                data.iter().map(|&(_, lv)| format!("{:.0}", (lv - 1.0) * 1e3)).collect::<Vec<_>>().join(" ")
             ));
         }
 
@@ -1352,6 +1550,45 @@ mod tests {
             assert!(l.det.watching());
             l
         }
+    }
+
+    #[cfg(all(windows, target_arch = "x86_64"))]
+    #[test]
+    fn a_spinning_threads_cycles_and_the_time_stamp_counter_both_run() {
+        // That they tick together is the hardware's: each run checks it (`CYCLES_IN_STEP`).
+        let (c0, t0) = cycle_stamp().expect("read");
+        let at = std::time::Instant::now();
+        while at.elapsed() < Duration::from_millis(20) {
+            std::hint::spin_loop();
+        }
+        let (c1, t1) = cycle_stamp().expect("read");
+        assert!(c1 > c0 && t1 > t0, "cycles {c0}..{c1}, ticks {t0}..{t1}");
+    }
+
+    #[test]
+    fn an_event_that_opens_on_the_phase_alone_is_traced_from_before_its_onset() {
+        let mut l = Loop::watching(48_000, dbfs(-90.0));
+        let at = l.next;
+        l.run(at + 24_000);
+        // A slow phase bump, 0.1 rad: steps of 1 mrad a callback, too small for the residual.
+        for k in 0..300 {
+            l.extra = 0.1 * (k.min(299 - k) as f64 / 100.0).min(1.0);
+            let next = l.next;
+            l.run(next + 1);
+        }
+        let next = l.next;
+        l.run(next + 48_000);
+        let d = &l.det;
+        assert_eq!(d.n_traces, 1, "{:?}", d.events());
+        let t = &d.traces[0];
+        assert_eq!(d.events()[t.event].cues, CUE_PHASE, "{:?}", d.events());
+        assert_eq!((t.before, t.len), (TRACE_BEFORE, TRACE_BEFORE + TRACE_AFTER));
+        let from = d.events()[t.event].from_phase;
+        let peak = |w: &[(f32, f32)]| w.iter().map(|p| wrap(p.0 as f64 - from).abs()).fold(0.0, f64::max);
+        // Quiet before the bump, which then rises toward the threshold before the onset.
+        assert!(peak(&t.data[..64]) < 0.005, "before: {}", peak(&t.data[..64]));
+        assert!(peak(&t.data[64..t.before]) > 0.01, "the lead-in: {}", peak(&t.data[64..t.before]));
+        assert!((peak(&t.data[t.before..]) - 0.1).abs() < 0.01, "after: {}", peak(&t.data[t.before..]));
     }
 
     #[test]
@@ -1533,7 +1770,7 @@ mod tests {
 
     #[test]
     fn an_event_coincides_with_a_callback_a_round_trip_before_it_or_at_it() {
-        let slow = |frame| Slow { frame, frames: 64, nanos: 2_000_000, late: 0, long: true };
+        let slow = |frame| Slow { frame, frames: 64, nanos: 2_000_000, cycles: 0, ticks: 0, late: 0, long: true };
         let rows = [slow(10_000), slow(200_000)];
         let window = COINCIDENCE_PERIODS * 64 + WINDOW as Frame;
         // The output's side: the defect comes back a round trip after the callback.
@@ -1552,38 +1789,44 @@ mod tests {
     }
 
     #[test]
-    fn the_log_takes_long_callbacks_and_entries_two_periods_late() {
+    fn the_log_takes_long_callbacks_entries_two_periods_late_and_late_finishes() {
         let log = SlowLog::new();
         let ms = Duration::from_millis(1);
         // 48 frames at 48 kHz: a period of exactly 1 ms.
-        log.record(0, 48, 3 * ms, 500, 48_000);
+        log.record(0, 48, 3 * ms, None, 500, 48_000);
         assert!(log.rows().is_empty() && log.seen.load(Relaxed) == 0, "off: nothing");
         log.on.store(true, Relaxed);
         // The whole period is long; a nanosecond under it is not.
-        log.record(48, 48, ms - Duration::from_nanos(1), 0, 48_000);
-        log.record(96, 48, ms, 0, 48_000);
-        // Late from two periods behind; a frame under is not.
-        log.record(144, 48, ms / 2, 95, 48_000);
-        log.record(192, 48, ms / 2, 96, 48_000);
-        log.record(240, 48, 2 * ms, 300, 48_000);
-        log.record(288, 0, 2 * ms, 300, 48_000);
+        log.record(48, 48, ms - Duration::from_nanos(1), None, 0, 48_000);
+        log.record(96, 48, ms, None, 0, 48_000);
+        // Late from two periods behind; a frame under is not (a ten-microsecond callback: half a frame).
+        let tiny = ms / 100;
+        log.record(144, 48, tiny, None, 95, 48_000);
+        log.record(192, 48, tiny, None, 96, 48_000);
+        log.record(240, 48, 2 * ms, None, 300, 48_000);
+        log.record(288, 0, 2 * ms, None, 300, 48_000);
+        // Finished 2.4 periods after the best phase (115.2 frames: 92 behind, 24 long); a frame under is not.
+        log.record(336, 48, ms / 2, None, 91, 48_000);
+        log.record(384, 48, ms / 2, None, 92, 48_000);
         let rows: Vec<(Frame, u32, u32, u64, bool)> = log.rows().iter().map(|s| (s.frame, s.frames, s.late, s.nanos, s.long)).collect();
-        assert_eq!(rows, [(96, 48, 0, 1_000_000, true), (192, 48, 96, 500_000, false), (240, 48, 300, 2_000_000, true)]);
-        assert_eq!((log.seen.load(Relaxed), log.long.load(Relaxed), log.late.load(Relaxed)), (5, 2, 2));
+        assert_eq!(rows, [(96, 48, 0, 1_000_000, true), (192, 48, 96, 10_000, false), (240, 48, 300, 2_000_000, true), (384, 48, 92, 500_000, false)]);
+        let counts = (log.seen.load(Relaxed), log.long.load(Relaxed), log.late.load(Relaxed), log.late_finish.load(Relaxed));
+        // The long one at 300 behind finishes late too.
+        assert_eq!(counts, (7, 2, 2, 2));
         // Late entries stop short of the table's end, long callbacks fill it, and both say what they lost.
         for k in 0..SLOW_CAP as Frame {
-            log.record(1000 + k, 48, ms / 2, 200, 48_000);
+            log.record(1000 + k, 48, ms / 2, None, 200, 48_000);
         }
-        assert_eq!((log.rows().len(), log.late_over.load(Relaxed), log.long_over.load(Relaxed)), (SLOW_CAP - LONG_RESERVE, 3 + LONG_RESERVE as u64, 0));
+        assert_eq!((log.rows().len(), log.late_over.load(Relaxed), log.long_over.load(Relaxed)), (SLOW_CAP - LONG_RESERVE, 4 + LONG_RESERVE as u64, 0));
         for k in 0..LONG_RESERVE as Frame + 5 {
-            log.record(90_000 + k, 48, ms, 0, 48_000);
+            log.record(90_000 + k, 48, ms, None, 0, 48_000);
         }
         assert_eq!((log.rows().len(), log.long_over.load(Relaxed)), (SLOW_CAP, 5));
         assert!(log.rows()[SLOW_CAP - 1].long && log.rows()[SLOW_CAP - 1].frame == 90_000 + LONG_RESERVE as Frame - 1);
         assert_eq!((log.long.load(Relaxed), log.late.load(Relaxed)), (2 + LONG_RESERVE as u64 + 5, 2 + SLOW_CAP as u64));
         log.on.store(false, Relaxed);
-        log.record(0, 48, 3 * ms, 500, 48_000);
-        assert_eq!(log.seen.load(Relaxed), 5 + SLOW_CAP as u64 + LONG_RESERVE as u64 + 5);
+        log.record(0, 48, 3 * ms, None, 500, 48_000);
+        assert_eq!(log.seen.load(Relaxed), 7 + SLOW_CAP as u64 + LONG_RESERVE as u64 + 5);
     }
 
     #[test]
@@ -1652,7 +1895,7 @@ mod tests {
     impl Device {
         fn new() -> Device {
             let shared = Shared::new();
-            Device { rig: ToneRig::new(shared.clone(), true), shared, played: Vec::new(), frame: T0, logged: true }
+            Device { rig: ToneRig::new(shared.clone(), true, LEVEL), shared, played: Vec::new(), frame: T0, logged: true }
         }
 
         fn callback(&mut self, spoil: &impl Fn(Frame, f32) -> f32) {
@@ -1666,7 +1909,7 @@ mod tests {
             assert!(left.iter().all(|&x| x == 0.0), "the tone leaves on one side");
             self.played.extend(right);
             if self.logged {
-                self.shared.slow.record(self.frame, BLOCK, Duration::from_micros(100), 0, 48_000);
+                self.shared.slow.record(self.frame, BLOCK, Duration::from_micros(100), None, 0, 48_000);
             }
             self.frame += BLOCK as Frame;
         }
@@ -1748,7 +1991,7 @@ mod tests {
         let mut device = Device::new();
         let (first, second) = (T0 + 150_000, T0 + 200_000);
         device.shared.slow.on.store(true, Relaxed);
-        device.shared.slow.record(first - LAG, BLOCK, Duration::from_millis(2), 0, 48_000);
+        device.shared.slow.record(first - LAG, BLOCK, Duration::from_millis(2), None, 0, 48_000);
         device.shared.slow.on.store(false, Relaxed);
         let hole = |f: Frame, x: f32| if (first..first + 32).contains(&f) || (second..second + 32).contains(&f) { 0.0 } else { x };
         let report = device.run(2.0, hole);

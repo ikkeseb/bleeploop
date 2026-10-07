@@ -14,7 +14,7 @@
 //! `app.exe --probe-engine <asio|wasapi> <64|128|256|default> [--plugin <slot>=<file.vst3|.clap|.dll>]...
 //! [--seconds N] [--switches N] [--swaps N] [--cycle <asio64|asio128|asio256|wasapi>,...] [--hold S]
 //! [--pause MS] [--in N] [--device <WASAPI name substring>] [--mute] [--share <endpoint id>]
-//! [--scene <default|heavy>] [--tone N [--out N]] [--lag [--out N] [--no-preopen] [--split <out|in>]]`
+//! [--scene <default|heavy>] [--tone N [--out N] [--tone-from S] [--tone-level X]] [--lag [--out N] [--no-preopen] [--split <out|in>]]`
 //!
 //! `--scene heavy` loads the engine for the soak, set up once the loop plays and held through the soak
 //! and every phase after it (`HEAVY_FX`, `HEAVY_SENDS`, `CHORD`): lane 0's loop copied to all five lanes,
@@ -52,8 +52,13 @@
 //! none of them says nothing about them. `tone: discontinuities` (FAIL): the tone broke, with how many
 //! events fall at a long or late callback. `tone: not measured` (FAIL): no tone, a clipped or unsteady
 //! input, a control not found, a coverage gap, a full table, a device interrupted under the tone or a
-//! callback log that did not record. Its limit: the cable returns through the
-//! same driver's input, so an event is a loopback discontinuity, and may be the input's.
+//! callback log that did not record. Its limit: the cable returns through the same driver's input, so an
+//! event is a loopback discontinuity, and may be the input's. The tone starts 10 s into the stream
+//! (`TONE_FROM`), after the setup; `--tone-from S` starts it S seconds in, right after the open and so
+//! before the plugins, the take and the scene, to watch the stream's first seconds, and `--tone-level X`
+//! plays it at amplitude X (default 0.25). An event that opens with no residual spike gets a trace of its
+//! windows, whose size against the level tells a gain or clock change from something added to the signal
+//! (`tone.rs`, `Trace`).
 //!
 //! `--split out|in` (ASIO, with `--device`) splits the WASAPI round trip by its sides, against ASIO's
 //! (whose report A2 holds) on QPC: `out` plays the chirps from a WASAPI render client of the `--device`
@@ -188,8 +193,11 @@ struct Args {
     share: Option<String>,
     /// `--scene heavy`.
     heavy: bool,
-    /// `--tone`: the input the loopback tone returns on.
+    /// `--tone`: the input the loopback tone returns on; `--tone-from`, when it starts in the stream;
+    /// `--tone-level`, its amplitude.
     tone: Option<u32>,
+    tone_from: Option<Duration>,
+    tone_level: f32,
     lag: bool,
     out: usize,
     preopen: bool,
@@ -206,7 +214,7 @@ enum Split {
 fn parse_args(args: &[String]) -> Result<Args, String> {
     const USAGE: &str = "usage: --probe-engine <asio|wasapi> <64|128|256|default> [--plugin <slot>=<file.vst3|.clap|.dll>]... \
         [--seconds N] [--switches N] [--swaps N] [--cycle <asio64|asio128|asio256|wasapi>,...] [--hold S] [--pause MS] [--in N] [--device <WASAPI name substring>] [--mute] [--share <endpoint id>] \
-        [--scene <default|heavy>] [--tone N [--out N]] [--lag [--out N] [--no-preopen] [--split <out|in>]]";
+        [--scene <default|heavy>] [--tone N [--out N] [--tone-from S] [--tone-level X]] [--lag [--out N] [--no-preopen] [--split <out|in>]]";
     let backend = match args.first().map(String::as_str) {
         Some("asio") => AudioBackend::Asio,
         Some("wasapi") => AudioBackend::Wasapi,
@@ -236,6 +244,8 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
         share: None,
         heavy: false,
         tone: None,
+        tone_from: None,
+        tone_level: super::tone::LEVEL,
         lag: false,
         out: 1,
         preopen: true,
@@ -283,6 +293,19 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
                 }
             }
             "--tone" => parsed.tone = Some(number(value()?)? as u32),
+            "--tone-from" => {
+                let seconds = number(value()?)?;
+                if !(0.0..=60.0).contains(&seconds) {
+                    return Err("--tone-from: expected 0 .. 60 s".into());
+                }
+                parsed.tone_from = Some(Duration::from_secs_f64(seconds));
+            }
+            "--tone-level" => {
+                parsed.tone_level = number(value()?)? as f32;
+                if !(0.01..=0.5).contains(&parsed.tone_level) {
+                    return Err("--tone-level: expected 0.01 .. 0.5".into());
+                }
+            }
             "--lag" => parsed.lag = true,
             "--out" => parsed.out = number(value()?)? as usize,
             "--no-preopen" => parsed.preopen = false,
@@ -468,6 +491,8 @@ struct Probe {
     forgiven: IoDiag,
     /// `--tone`: the tone run's shared state, whether the tone plays, and the run's facts for its report.
     tone: Option<Arc<Shared>>,
+    /// `--tone-from`: the tone starts then, before the plugins, the take and the scene.
+    tone_from: Option<Duration>,
     tone_plays: bool,
     tone_facts: Option<Facts>,
     /// The device the tone started on (backend, block, rate), and what interrupted it since.
@@ -699,10 +724,13 @@ impl Probe {
 
     /// `--tone`: start the tone, and wait for its calibration and for the first control to come back.
     fn tone_start(&mut self) -> Result<(), String> {
-        let Some(shared) = self.tone.clone() else { return Ok(()) };
-        // Past the stream's first seconds (`TONE_FROM`).
-        let from = (TONE_FROM.as_secs_f64() * self.rate as f64) as Frame;
-        self.wait("the stream has run its first seconds", TONE_FROM + WAIT, |p| p.host.core.frame.load(Relaxed) >= from)?;
+        let Some(shared) = self.tone.clone().filter(|_| !self.tone_plays) else { return Ok(()) };
+        // Past the stream's first seconds (`TONE_FROM`, or `--tone-from`).
+        let after = self.tone_from.unwrap_or(TONE_FROM);
+        let from = (after.as_secs_f64() * self.rate as f64) as Frame;
+        self.wait("the stream has run its first seconds", after + WAIT, |p| p.host.core.frame.load(Relaxed) >= from)?;
+        let now = self.host.core.frame.load(Relaxed);
+        say(format!("tone: starts {:.2} s into the stream (asked for {:.2} s)", now as f64 / self.rate as f64, after.as_secs_f64()));
         shared.begin(self.rate);
         self.tone_plays = true;
         self.wait("the tone calibrates", WAIT, |_| shared.cal() != super::tone::Cal::Pending)?;
@@ -764,12 +792,13 @@ impl Probe {
                     _ => String::new(),
                 };
                 say(format!(
-                    "soak {:.0} s: callbacks {}, counters {}; this minute: block {}, asio_phase_slips {}, clipped_blocks {}; asio_late_max so far {}{tone}",
+                    "soak {:.0} s: callbacks {}, counters {}; this minute: block {}, asio_phase_slips {}, asio_late_finishes {}, clipped_blocks {}; asio_late_max so far {}{tone}",
                     began.elapsed().as_secs_f64(),
                     diag.callbacks - start.callbacks,
                     moved(&diag, &start),
                     now.since(&load).text(),
                     diag.asio_phase_slips - minute.asio_phase_slips,
+                    diag.asio_late_finishes - minute.asio_late_finishes,
                     diag.clipped_blocks - minute.clipped_blocks,
                     diag.asio_late_max
                 ));
@@ -859,6 +888,10 @@ impl Probe {
         say(format!("open {}: {}", label(start), describe(&status)));
         if let Some(tone) = a.tone.filter(|&tone| status.input_channels[1] != tone) {
             return Err(format!("--tone {tone}: the device has no such input (slot 1 reads input {})", status.input_channels[1]));
+        }
+        // `--tone-from`: the tone watches the stream's first seconds, through the setup below.
+        if self.tone_from.is_some() {
+            self.tone_start()?;
         }
         if let Some(endpoint) = &a.share {
             self.host.set_share(Some(endpoint.clone()))?;
@@ -1516,7 +1549,7 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
     let tone = a.tone.map(|_| Shared::new());
     if let Some(shared) = &tone {
         let _ = host.core.tone.set(shared.clone());
-        host.core.rt.lock().map_err(|_| "engine lock poisoned")?.tone = Some(Box::new(ToneRig::new(shared.clone(), a.out == 1)));
+        host.core.rt.lock().map_err(|_| "engine lock poisoned")?.tone = Some(Box::new(ToneRig::new(shared.clone(), a.out == 1, a.tone_level)));
     }
     let mut p = Probe {
         host: host.clone(),
@@ -1535,6 +1568,7 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
         grace: None,
         forgiven: IoDiag::default(),
         tone,
+        tone_from: a.tone_from,
         tone_plays: false,
         tone_facts: None,
         tone_device: None,

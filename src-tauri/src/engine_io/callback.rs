@@ -41,6 +41,18 @@ const SCRATCH_FRAMES: usize = 1024;
 /// ASIO phase slips ([`PhaseSlips`]): the span of each window, and of a run's start that is no
 /// baseline, in seconds of delivered frames.
 const SLIP_WINDOW_SECONDS: f64 = 0.5;
+/// ASIO output callbacks that finish this many periods or more after the wakes' best phase (their
+/// entry's lag plus their own duration) count in `asio_late_finishes` ([`finishes_late`]), once per
+/// episode: a new one needs [`LATE_FINISH_QUIET`] callbacks under it first. An empirical indicator from
+/// the rig's loopback tone (src-tauri/AGENTS.md, the crackle thread), not proof: at 64 frames every break
+/// had one at 2.52 or more and none away from a break passed 2.47, so near misses count too (4 in a
+/// 10-minute soak beside a build that broke nothing); one break at 256 finished at 2.36 and would not
+/// count. A count is not a heard break, and none is not a clean sound.
+pub(crate) const LATE_FINISH_PERIODS: f64 = 2.4;
+/// Callbacks under [`LATE_FINISH_PERIODS`] that end an episode: 46 ms at 64 frames and 44.1 kHz, longer
+/// than the clusters a break came with, so a stall or a lasting slip whose callbacks hover at the edge
+/// counts once.
+const LATE_FINISH_QUIET: u32 = 32;
 
 /// Share output's end in the callback (`share::ShareTap`; a fake in tests): fed the rendered stereo
 /// master every block. Never blocks or allocates.
@@ -263,10 +275,9 @@ impl PhaseSlips {
     }
 
     /// One output callback of `n` frames entered at `entry`: how far behind the floor it came, in
-    /// frames, when that is more than a period (else 0: the rig's jitter alone reaches 92 to 109 frames
-    /// at 64, so `asio_late_max` logs a rise past that), and whether it closed a window that started a
-    /// slip. `None` through the start.
-    fn wake(&mut self, entry: Instant, n: usize, rate: u32) -> Option<(u64, bool)> {
+    /// frames (0 or more; [`late_past_period`] keeps what is past a period), and whether it closed a
+    /// window that started a slip. `None` through the start.
+    fn wake(&mut self, entry: Instant, n: usize, rate: u32) -> Option<(f64, bool)> {
         if n == 0 || rate == 0 {
             return None;
         }
@@ -293,9 +304,21 @@ impl PhaseSlips {
             self.window = 0;
             self.windows += 1;
         }
-        let late = if behind > n as f64 { behind.round() as u64 } else { 0 };
-        started.then_some((late, slipped))
+        started.then_some((behind, slipped))
     }
+}
+
+/// An entry `behind` frames behind the floor, in whole frames when that is more than a period of `n`
+/// (else 0: the rig's jitter alone reaches 92 to 109 frames at 64, so `asio_late_max` logs a rise past
+/// that).
+fn late_past_period(behind: f64, n: usize) -> u64 {
+    if behind > n as f64 { behind.round() as u64 } else { 0 }
+}
+
+/// A callback of `n` frames that entered `behind` frames behind the best phase and took `took` frames
+/// finished [`LATE_FINISH_PERIODS`] periods or more after it.
+pub(crate) fn finishes_late(behind: f64, took: f64, n: usize) -> bool {
+    behind + took >= LATE_FINISH_PERIODS * n as f64
 }
 
 thread_local! {
@@ -497,6 +520,8 @@ pub(crate) struct Render {
     last: Option<(Instant, usize)>,
     /// ASIO: lasting slips of the wakes' phase (a diagnostic; the frame counter ignores them).
     slips: PhaseSlips,
+    /// Callbacks in a row that did not finish late (`finishes_late`): an episode counts once.
+    on_time: u32,
     /// WASAPI: the endpoint buffer, the largest callback this run (the first finds it empty).
     cap: usize,
     /// The previous block never reached the engine (a lock miss): this one follows an input gap.
@@ -539,6 +564,7 @@ impl Render {
             zeros: vec![0.0; max_block],
             last: None,
             slips: PhaseSlips::new(),
+            on_time: LATE_FINISH_QUIET,
             cap: 0,
             missed: false,
             spliced: false,
@@ -554,6 +580,9 @@ impl Render {
     pub(crate) fn render<T: SizedSample + FromSample<f32>>(&mut self, data: &mut [T], entry: Instant, latency: Option<Duration>) {
         // Its own clock, not `entry`: the fake driver's entries are synthetic.
         let began = Instant::now();
+        // DEV: the thread's cycles at entry, read only in a tone run (`tone::cycle_stamp`).
+        #[cfg(debug_assertions)]
+        let began_cycles = self.core.tone.get().and_then(|_| super::tone::cycle_stamp());
         promote_once();
         let _ftz = DenormalsOff::new();
         let core = Arc::clone(&self.core);
@@ -576,16 +605,13 @@ impl Render {
             (Some((before, _)), Source::Join { .. }) => dry_frames(entry.saturating_duration_since(before), self.rate, n, self.cap),
             _ => 0,
         };
-        // DEV: how far behind the wakes' best phase this one entered, for the tone run's log below.
-        #[cfg(debug_assertions)]
-        let mut entered_late = 0;
-        if let (Source::Duplex, Some((late, slipped))) = (&self.source, self.slips.wake(entry, n, self.rate)) {
+        // How far behind the wakes' best phase this one entered (ASIO, past the start), for its finish
+        // below and the tone run's log.
+        let mut entered_behind = None;
+        if let (Source::Duplex, Some((behind, slipped))) = (&self.source, self.slips.wake(entry, n, self.rate)) {
             counters.asio_phase_slips.fetch_add(u64::from(slipped), Relaxed);
-            counters.asio_late_max.fetch_max(late, Relaxed);
-            #[cfg(debug_assertions)]
-            {
-                entered_late = late;
-            }
+            counters.asio_late_max.fetch_max(late_past_period(behind, n), Relaxed);
+            entered_behind = Some(behind);
         }
         if lost > 0 {
             counters.gaps.fetch_add(1, Relaxed);
@@ -662,10 +688,22 @@ impl Render {
         }
         core.frame.store(frame + n as Frame, Relaxed);
         let elapsed = began.elapsed();
+        #[cfg(debug_assertions)]
+        let end_cycles = began_cycles.and_then(|_| super::tone::cycle_stamp());
         counters.block_load.record(elapsed, n, self.rate);
+        // Its entry's lag plus its own duration (cpal stamps the entry just before it), once an episode.
+        if entered_behind.is_some_and(|behind| finishes_late(behind, elapsed.as_secs_f64() * self.rate as f64, n)) {
+            if self.on_time >= LATE_FINISH_QUIET {
+                counters.asio_late_finishes.fetch_add(1, Relaxed);
+            }
+            self.on_time = 0;
+        } else {
+            self.on_time = self.on_time.saturating_add(1);
+        }
         #[cfg(debug_assertions)]
         if let Some(tone) = core.tone.get() {
-            tone.slow.record(frame, n, elapsed, entered_late, self.rate);
+            let cycles = began_cycles.zip(end_cycles).and_then(|((c0, t0), (c1, t1))| c1.checked_sub(c0).zip(t1.checked_sub(t0))).filter(|&(_, ticks)| ticks > 0);
+            tone.slow.record(frame, n, elapsed, cycles, entered_behind.map_or(0, |b| b.round() as u64), self.rate);
         }
     }
 
@@ -1071,6 +1109,7 @@ mod tests {
             // A second's lead, so an early first wake stays after `BASE`.
             let entry = base + Duration::from_secs_f64((RATE as f64 + *at + offset) * (1.0 + ppm / 1e6) / RATE as f64);
             if let Some((behind, slipped)) = slips.wake(entry, n, RATE) {
+                let behind = late_past_period(behind, n);
                 count += u64::from(slipped);
                 max = max.max(behind);
                 late_runs += u64::from(behind > 0 && !late);
@@ -1079,6 +1118,15 @@ mod tests {
             *at += n as f64;
         }
         (count, max, late_runs)
+    }
+
+    #[test]
+    fn a_callback_finishes_late_from_2_4_periods_after_the_best_phase() {
+        // 2.4 periods of 64 frames: 153.6.
+        assert!(!finishes_late(100.0, 53.5, 64), "just inside");
+        assert!(finishes_late(100.0, 53.6, 64), "at it");
+        assert!(finishes_late(0.0, 153.6, 64), "a duration alone");
+        assert!(!finishes_late(512.0, 100.0, 256), "two periods behind and quick");
     }
 
     static BASE: std::sync::LazyLock<Instant> = std::sync::LazyLock::new(Instant::now);

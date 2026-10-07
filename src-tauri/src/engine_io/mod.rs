@@ -327,6 +327,10 @@ pub struct IoCounters {
     /// rig's USB driver spreads its wakes over more than a period at 64 frames).
     pub asio_phase_slips: AtomicU64,
     pub asio_late_max: AtomicU64,
+    /// ASIO: episodes of output callbacks that finished 2.4 periods or more after that floor, their
+    /// entry's lag plus their own duration (`callback::LATE_FINISH_PERIODS`, an empirical indicator of
+    /// a break, not proof either way); blind through a run's first half second.
+    pub asio_late_finishes: AtomicU64,
     /// Output callbacks that handed the device a sample past full scale.
     pub clipped_blocks: AtomicU64,
 }
@@ -432,6 +436,7 @@ pub struct IoDiag {
     pub engine: lf_engine::Diag,
     pub asio_phase_slips: u64,
     pub asio_late_max: u64,
+    pub asio_late_finishes: u64,
     pub clipped_blocks: u64,
 }
 
@@ -462,8 +467,8 @@ impl IoDiag {
 
     /// The glitch diagnostics that count, by name: not faults (no probe fails on them), but the release
     /// log and the probe show them beside the faults.
-    fn diagnostics(&self) -> [(&'static str, u64); 2] {
-        [("asio_phase_slips", self.asio_phase_slips), ("clipped_blocks", self.clipped_blocks)]
+    fn diagnostics(&self) -> [(&'static str, u64); 3] {
+        [("asio_phase_slips", self.asio_phase_slips), ("asio_late_finishes", self.asio_late_finishes), ("clipped_blocks", self.clipped_blocks)]
     }
 
     /// The fault counters, then the diagnostics, that moved since `before`, as `name=delta`, with
@@ -676,6 +681,7 @@ impl Core {
             engine: self.engine_diag.load(),
             asio_phase_slips: c.asio_phase_slips.load(Relaxed),
             asio_late_max: c.asio_late_max.load(Relaxed),
+            asio_late_finishes: c.asio_late_finishes.load(Relaxed),
             clipped_blocks: c.clipped_blocks.load(Relaxed),
         }
     }

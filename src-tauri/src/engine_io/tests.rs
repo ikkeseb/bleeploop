@@ -921,6 +921,29 @@ fn an_asio_wake_late_by_more_than_a_period_and_made_up_is_no_phase_slip() {
 }
 
 #[test]
+fn an_asio_callback_that_finishes_late_counts_and_logs_its_span() {
+    // At least: the renders' real time, which a test machine's load can stretch, may add a count (the
+    // rule itself: `callback::tests`, `finishes_late`).
+    let h = Harness::new();
+    h.open(asio(Some(256)));
+    h.play(RATE);
+    let before = h.host.diag();
+    // The entry's lag alone puts its finish past 2.4 periods (614 frames).
+    h.fake.wake_late.store(640, SeqCst);
+    h.play(RATE / 2);
+    let diag = h.host.diag();
+    assert!(diag.asio_late_finishes >= 1 && (diag.asio_phase_slips, diag.engine.xruns) == (0, 0), "{diag:?}");
+    let moved = diag.moved_since(&before).expect("a diagnostic moved");
+    assert!(moved.contains("asio_late_finishes="), "{moved}");
+    // A lasting slip of three periods: every callback finishes late until the floor moves up.
+    let before = diag;
+    h.fake.gap.store(3, SeqCst);
+    h.play(2 * RATE);
+    let diag = h.host.diag();
+    assert!(diag.asio_late_finishes > before.asio_late_finishes && diag.asio_phase_slips == 1, "{diag:?}");
+}
+
+#[test]
 fn a_late_wasapi_callback_that_finds_frames_still_queued_loses_nothing() {
     let h = Harness::new();
     h.open(wasapi(None, None));
@@ -1354,7 +1377,8 @@ fn a_clean_run_through_switches_and_a_plugin_swap_counts_nothing_and_allocates_n
     h.host.close().unwrap();
     let diag = h.host.diag();
     assert!(diag.callbacks > 0);
-    let quiet = super::IoDiag { callbacks: diag.callbacks, ..Default::default() };
+    // `asio_late_finishes` reads the render's real time, which a test machine's load can stretch.
+    let quiet = super::IoDiag { callbacks: diag.callbacks, asio_late_finishes: diag.asio_late_finishes, ..Default::default() };
     assert_eq!(diag, quiet, "every counter but the callbacks stays 0");
 }
 

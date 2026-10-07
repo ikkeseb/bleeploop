@@ -86,7 +86,7 @@ export async function cargoTest(args, { jobs = availableParallelism(), log = () 
   return { code: failed.length ? 1 : 0, out: failed.join('\n'), binaries: binaries.length, passed };
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const args = process.argv.slice(2);
   const at = args.indexOf('--jobs');
   const jobs = at < 0 ? undefined : Number(args.splice(at, 2)[1]);
