@@ -14,12 +14,17 @@ permissions:
 
 # `github.workflow` is the CALLER's name under workflow_call, so a build-exe run never cancels, or
 # deadlocks on, a plain push run of the same ref.
+#
+# A push to main gets a group of its own (its sha), so the next push never cancels it: a docs-only
+# push right after a code push used to cancel the code's run, and its own run skips the heavy jobs.
+# A pull request still cancels its older runs.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.ref }}-${{ github.event_name == 'push' && github.sha || '' }}
   cancel-in-progress: true
 
 # The docs guard classifies the diff and always runs the deterministic verifiers. For a docs-only
-# change it is the whole workflow; otherwise the JS/TS and Rust jobs run in parallel afterward.
+# change it is the whole workflow; otherwise the JS/TS and Rust jobs run in parallel afterward, the
+# two Rust jobs only when the diff touches what they read (`native`).
 jobs:
   docs_guard:
     name: docs-guard
@@ -27,6 +32,7 @@ jobs:
     timeout-minutes: 15
     outputs:
       docs_only: ${{ steps.changes.outputs.docs_only }}
+      native: ${{ steps.changes.outputs.native }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -36,6 +42,8 @@ jobs:
       # Fails OPEN: an unusable base (first push, force-push, all-zero `event.before`) or a git error
       # yields an empty list, which classifies as NOT docs-only, so the heavy gates run. `--no-renames`
       # lists both sides of a move, so a file moved into `docs/` still counts as a source change.
+      # `native` fails open the same way: false only for a readable diff with no file the `rust` and
+      # `engine` jobs read (src-tauri/, the two scripts the engine job runs, this workflow).
       - name: Classify changed paths
         id: changes
         shell: bash
@@ -53,17 +61,21 @@ jobs:
                fi ;;
           esac
           docs_only=false
+          native=true
           if [ -n "$files" ]; then
             docs_only=true
+            native=false
             while IFS= read -r file; do
               case "$file" in
                 *.md|*.MD|docs/*) ;;
-                *) docs_only=false; break ;;
+                src-tauri/*|scripts/engine-deny.mjs|scripts/cargo-test.mjs|.github/workflows/ci.yml) docs_only=false; native=true ;;
+                *) docs_only=false ;;
               esac
             done <<< "$files"
           fi
           echo "docs_only=$docs_only" >> "$GITHUB_OUTPUT"
-          echo "base=$base docs_only=$docs_only"
+          echo "native=$native" >> "$GITHUB_OUTPUT"
+          echo "base=$base docs_only=$docs_only native=$native"
 
       # no version input — pnpm/action-setup@v6 reads the packageManager pin in package.json.
       - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
@@ -114,7 +126,7 @@ jobs:
 
   rust:
     needs: docs_guard
-    if: needs.docs_guard.outputs.docs_only != 'true'
+    if: needs.docs_guard.outputs.docs_only != 'true' && needs.docs_guard.outputs.native != 'false'
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
@@ -134,14 +146,14 @@ jobs:
       - run: cargo check --workspace
         working-directory: src-tauri
 
-      # `cargo test` is NOT here: it builds the full debug profile (~15 min on the Windows runner,
-      # cached or not, vs ~2 min for the two checks) — it runs in rust-test.yml on src-tauri/ changes.
+      # `cargo test` is NOT here: it builds the workspace's test binaries (the cache holds dependencies
+      # only) and runs them, minutes against ~2 for this check — rust-test.yml, on src-tauri/ changes.
 
   # lf-engine, the pure engine crate (briefing: its src/lib.rs): its tests build nothing of
   # the app, so they run on every push, on Linux. rust-test.yml runs them again on Windows.
   engine:
     needs: docs_guard
-    if: needs.docs_guard.outputs.docs_only != 'true'
+    if: needs.docs_guard.outputs.docs_only != 'true' && needs.docs_guard.outputs.native != 'false'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -154,5 +166,5 @@ jobs:
           workspaces: src-tauri
 
       - run: node scripts/engine-deny.mjs
-      - run: cargo test -p lf-engine
-        working-directory: src-tauri
+      # The test binaries side by side (scripts/cargo-test.mjs): cargo runs its 44 one after another.
+      - run: node scripts/cargo-test.mjs -p lf-engine

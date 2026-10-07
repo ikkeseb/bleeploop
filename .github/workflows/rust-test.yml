@@ -2,17 +2,18 @@ name: rust-test
 
 # The Rust unit tests (transport / clap / native_io / scan — pure logic, no device, no ASIO SDK), and
 # the lf-engine crate's tests on Windows (ci.yml runs them on Linux on every push).
-# Separate from `ci` because `cargo test` builds the full debug profile: ~15 min on the Windows runner
-# whether or not the cache is warm, against ~2 min for the two `cargo check`s. So it runs only when the
-# Rust tree changes (plus on demand), and never delays a TS-only push.
+# Separate from `ci` because it builds every test binary of the workspace (the cache holds dependencies
+# only: ~6 min) and runs them, against ~2 min for `cargo check`. So it runs only when the Rust tree
+# changes (plus on demand; a change to its markdown alone does not count), and never delays a TS-only
+# push. The binaries run side by side (scripts/cargo-test.mjs): one after another they took ~14 min.
 
 on:
   push:
     branches: [main]
-    paths: ['src-tauri/**', '.github/workflows/rust-test.yml']
+    paths: ['src-tauri/**', '!src-tauri/**/*.md', 'scripts/cargo-test.mjs', '.github/workflows/rust-test.yml']
   pull_request:
     branches: [main]
-    paths: ['src-tauri/**', '.github/workflows/rust-test.yml']
+    paths: ['src-tauri/**', '!src-tauri/**/*.md', 'scripts/cargo-test.mjs', '.github/workflows/rust-test.yml']
   workflow_dispatch: {}
   # build-exe.yml calls this for the exact commit it builds; the release waits for it.
   workflow_call: {}
@@ -21,8 +22,9 @@ on:
 permissions:
   contents: read
 
+# A push to main gets a group of its own (its sha), so the next push never cancels its tests (ci.yml).
 concurrency:
-  group: rust-test-${{ github.workflow }}-${{ github.ref }}
+  group: rust-test-${{ github.workflow }}-${{ github.ref }}-${{ github.event_name == 'push' && github.sha || '' }}
   cancel-in-progress: true
 
 jobs:
@@ -39,5 +41,4 @@ jobs:
         with:
           workspaces: src-tauri
 
-      - run: cargo test --workspace --no-default-features
-        working-directory: src-tauri
+      - run: node scripts/cargo-test.mjs --workspace --no-default-features

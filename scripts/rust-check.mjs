@@ -1,5 +1,6 @@
 // scripts/rust-check.mjs — the local Rust gate: `cargo check` without and with `asio`, then
-// `cargo test`, all `--no-default-features`, from src-tauri/, then the lf-engine deny check. The
+// `cargo test` (its binaries side by side: scripts/cargo-test.mjs), all `--no-default-features`, from
+// src-tauri/, then the lf-engine deny check. The
 // `--workspace` steps include lf-engine; `asio` is a feature of the app alone. CI runs only the no-asio
 // check (and `cargo test` on native-code changes), so the asio half is proven here.
 //
@@ -12,6 +13,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { createWriteStream, existsSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { cargoTest } from './cargo-test.mjs';
 import { assertWindows } from './native-kill.mjs';
 
 assertWindows('rust:check');
@@ -62,10 +64,17 @@ for (const args of STEPS) {
     continue;
   }
   const started = Date.now();
-  const { code, out } = await cargo(args);
+  let result;
+  if (args[0] === 'test') {
+    log.write(`\n$ cargo ${args.join(' ')} (scripts/cargo-test.mjs)\n`);
+    const test = await cargoTest(args.slice(1), { log: (text) => log.write(text) });
+    result = { code: test.code, out: test.out, passed: test.passed };
+  } else {
+    result = await cargo(args);
+  }
+  const { code, out } = result;
   const seconds = ((Date.now() - started) / 1000).toFixed(0);
-  const tests = args[0] === 'test' ? [...out.matchAll(/test result: \w+\. (\d+) passed; (\d+) failed/g)] : [];
-  const counts = tests.length ? `, ${tests.reduce((s, m) => s + Number(m[1]), 0)} tests passed` : '';
+  const counts = result.passed === undefined ? '' : `, ${result.passed} tests passed`;
   console.log(`  ${code === 0 ? 'PASS' : 'FAIL'}  ${label}  ${seconds} s${counts}`);
   if (code !== 0) {
     failed.push(label);
