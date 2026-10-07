@@ -11,7 +11,8 @@
 //   node scripts/cargo-test.mjs --workspace --no-default-features
 //
 // `--jobs` is how many binaries run at once (default: one per logical processor, so the long ones start
-// at once; on the dev PC's 16 that ran the workspace's 47 binaries in 143 s against cargo's 443);
+// at once; on the dev PC's 16 that ran the workspace's 47 binaries in 143 s against cargo's 443; on a
+// 4-core CI runner the gain is small, the long binaries' own threads already fill it);
 // `--jobs 1` is cargo's own order. Exit 0 = every binary and the doc-tests passed.
 
 import { spawn } from 'node:child_process';

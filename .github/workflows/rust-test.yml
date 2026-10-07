@@ -5,7 +5,9 @@ name: rust-test
 # Separate from `ci` because it builds every test binary of the workspace (the cache holds dependencies
 # only: ~6 min) and runs them, against ~2 min for `cargo check`. So it runs only when the Rust tree
 # changes (plus on demand; a change to its markdown alone does not count), and never delays a TS-only
-# push. The binaries run side by side (scripts/cargo-test.mjs): one after another they took ~14 min.
+# push. The binaries run side by side (scripts/cargo-test.mjs), as the local gate runs them: on the
+# runner's four cores that took 5.5 and 10.5 min in two runs against ~14 one after another (on the dev
+# PC's sixteen, 145 s against 443).
 
 on:
   push:

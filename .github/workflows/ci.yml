@@ -43,8 +43,8 @@ jobs:
       # yields an empty list, which classifies as NOT docs-only, so the heavy gates run. `--no-renames`
       # lists both sides of a move, so a file moved into `docs/` still counts as a source change.
       # `native` fails open the same way: false only for a readable diff with no file the `rust` and
-      # `engine` jobs read (src-tauri/, a cargo config or toolchain file above it, the two scripts the
-      # engine job runs, this workflow), and never on a tag: a release's call runs every job.
+      # `engine` jobs read (src-tauri/, a cargo config or toolchain file above it, the engine job's
+      # deny script, this workflow), and never on a tag: a release's call runs every job.
       - name: Classify changed paths
         id: changes
         shell: bash
@@ -69,7 +69,7 @@ jobs:
             while IFS= read -r file; do
               case "$file" in
                 *.md|*.MD|docs/*) ;;
-                src-tauri/*|.cargo/*|rust-toolchain*|scripts/engine-deny.mjs|scripts/cargo-test.mjs|.github/workflows/ci.yml) docs_only=false; native=true ;;
+                src-tauri/*|.cargo/*|rust-toolchain*|scripts/engine-deny.mjs|.github/workflows/ci.yml) docs_only=false; native=true ;;
                 *) docs_only=false ;;
               esac
             done <<< "$files"
@@ -168,5 +168,7 @@ jobs:
           workspaces: src-tauri
 
       - run: node scripts/engine-deny.mjs
-      # The test binaries side by side (scripts/cargo-test.mjs): cargo runs its 44 one after another.
-      - run: node scripts/cargo-test.mjs -p lf-engine
+      # Plain cargo: side by side (scripts/cargo-test.mjs) the binaries took as long here, 7.5 min
+      # against 5.4 to 7.4, since the long ones already fill the runner's four cores with their threads.
+      - run: cargo test -p lf-engine
+        working-directory: src-tauri
