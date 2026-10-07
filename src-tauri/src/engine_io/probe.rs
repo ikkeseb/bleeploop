@@ -14,7 +14,13 @@
 //! `app.exe --probe-engine <asio|wasapi> <64|128|256|default> [--plugin <slot>=<file.vst3|.clap|.dll>]...
 //! [--seconds N] [--switches N] [--swaps N] [--cycle <asio64|asio128|asio256|wasapi>,...] [--hold S]
 //! [--pause MS] [--in N] [--device <WASAPI name substring>] [--mute] [--share <endpoint id>]
-//! [--lag [--out N] [--no-preopen] [--split <out|in>]]`
+//! [--scene <default|heavy>] [--lag [--out N] [--no-preopen] [--split <out|in>]]`
+//!
+//! `--scene heavy` loads the engine for the soak, set up once the loop plays and held through the soak
+//! and every phase after it (`HEAVY_FX`, `HEAVY_SENDS`, `CHORD`): lane 0's loop copied to all five lanes,
+//! every lane's five effects on, the three input sends on, every loaded slot live on input `--in`, a
+//! four-note chord held on the Pad and the click on. The soak's load bar judges it as it judges the
+//! default scene.
 //!
 //! `--cycle` names the switches' round instead of the default one (every other ASIO buffer and WASAPI,
 //! then back to the start): `--cycle wasapi` on a WASAPI run closes and reopens WASAPI at every switch
@@ -36,8 +42,9 @@
 //! endpoint and ASIO records them; `in` plays them from ASIO and a WASAPI capture client records them.
 //! Each arrival is compared with the instant WASAPI's own stamps put it at.
 //!
-//! The take records input channel `--in` (0-based, default 0) through slot 0, live for the take only:
-//! keep that channel off a loopback cable, or the take's monitor feeds back through it. A swap puts the
+//! The take records input channel `--in` (0-based, default 0) through slot 0, live for the take only
+//! (the heavy scene keeps every loaded slot live): keep that channel off a loopback cable, or the
+//! monitor feeds back through it. A swap puts the
 //! next plugin of the `--plugin` list into a slot (with one, the same plugin again). `--mute` mutes the
 //! master, the monitored input included: the device plays silence, so a WASAPI run can share the
 //! interface with other apps. `--share` turns Share output on after the open, mirroring the master to
@@ -48,8 +55,9 @@ use std::sync::atomic::{AtomicU64, Ordering::{Acquire, Relaxed}};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use lf_engine::dsp::fx::{FxKind, FxParam};
 use lf_engine::grid::Frame;
-use lf_engine::{Command, Event, LaneInfo, LaneState, TimedCommand, SLOT_COUNT};
+use lf_engine::{Command, Event, InputSend, InputSendParam, Instrument, LaneInfo, LaneState, NoteTarget, TimedCommand, SLOT_COUNT, TRACK_COUNT};
 
 use super::{BlockLoad, DeviceRequest, DeviceStatus, EngineHost, HostConfig, IoDiag};
 use crate::chirp_lag::{chirp, find_arrivals, median, slope, spread, CHIRP_LEN};
@@ -67,6 +75,33 @@ const MAX_BAR: usize = 90;
 /// How long from a WASAPI open's start the counter check forgives the join's trims and starves (D25:
 /// the endpoints' start, `src-tauri/AGENTS.md` § Open threads).
 const GRACE: Duration = Duration::from_secs(3);
+
+/// The heavy scene's lane effects, the same on every lane: each processes (a nonzero mix, send, shift).
+const HEAVY_FX: [(FxParam, f64); 8] = [
+    (FxParam::Cutoff, 2000.0),
+    (FxParam::Q, 4.0),
+    (FxParam::Semitones, 7.0),
+    // 1/16.
+    (FxParam::Rate, 3.0),
+    // 1/8 dotted.
+    (FxParam::Time, 2.0),
+    (FxParam::Feedback, 0.5),
+    (FxParam::Mix, 0.4),
+    (FxParam::Amount, 0.5),
+];
+/// The heavy scene's input sends.
+const HEAVY_SENDS: [(InputSendParam, f64); 6] = [
+    // 1/8.
+    (InputSendParam::EchoTime, 1.0),
+    (InputSendParam::EchoFeedback, 0.5),
+    (InputSendParam::EchoLevel, 0.5),
+    (InputSendParam::ReverbLevel, 0.5),
+    (InputSendParam::RingFreq, 440.0),
+    (InputSendParam::RingLevel, 0.3),
+];
+/// The heavy scene's chord on the Pad (C3 E3 G3 B3), the built-in synth with the most work a voice: an
+/// FM pair whose carrier runs at an audio-rate frequency, with two envelopes, sustaining at 0.9.
+const CHORD: [u8; 4] = [48, 52, 55, 59];
 
 /// Every check, in report order, with its bar.
 const CHECKS: [(&str, &str); 8] = [
@@ -125,6 +160,8 @@ struct Args {
     mute: bool,
     /// `--share`: Share output's endpoint, switched on after the open.
     share: Option<String>,
+    /// `--scene heavy`.
+    heavy: bool,
     lag: bool,
     out: usize,
     preopen: bool,
@@ -141,7 +178,7 @@ enum Split {
 fn parse_args(args: &[String]) -> Result<Args, String> {
     const USAGE: &str = "usage: --probe-engine <asio|wasapi> <64|128|256|default> [--plugin <slot>=<file.vst3|.clap|.dll>]... \
         [--seconds N] [--switches N] [--swaps N] [--cycle <asio64|asio128|asio256|wasapi>,...] [--hold S] [--pause MS] [--in N] [--device <WASAPI name substring>] [--mute] [--share <endpoint id>] \
-        [--lag [--out N] [--no-preopen] [--split <out|in>]]";
+        [--scene <default|heavy>] [--lag [--out N] [--no-preopen] [--split <out|in>]]";
     let backend = match args.first().map(String::as_str) {
         Some("asio") => AudioBackend::Asio,
         Some("wasapi") => AudioBackend::Wasapi,
@@ -169,6 +206,7 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
         device: None,
         mute: false,
         share: None,
+        heavy: false,
         lag: false,
         out: 1,
         preopen: true,
@@ -208,6 +246,13 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
             "--device" => parsed.device = Some(value()?),
             "--mute" => parsed.mute = true,
             "--share" => parsed.share = Some(value()?),
+            "--scene" => {
+                parsed.heavy = match value()?.as_str() {
+                    "default" => false,
+                    "heavy" => true,
+                    other => return Err(format!("--scene {other}: expected default or heavy")),
+                }
+            }
             "--lag" => parsed.lag = true,
             "--out" => parsed.out = number(value()?)? as usize,
             "--no-preopen" => parsed.preopen = false,
@@ -354,12 +399,14 @@ struct Probe {
     plugins: Vec<PluginSpec>,
     slots: Vec<Slot>,
     events: Vec<Event>,
-    /// Lane 0 as the engine last reported it (`None`: a new engine that has reported nothing yet).
-    lane: Option<LaneInfo>,
+    /// Each lane as the engine last reported it (`None`: a new engine that has reported nothing yet).
+    lanes: [Option<LaneInfo>; TRACK_COUNT],
     length: Frame,
     beats: u64,
     rate: u32,
     mute: bool,
+    /// `--scene heavy`.
+    heavy: bool,
     /// `--hold` and `--pause`, and whether `--cycle` named the round.
     hold: Duration,
     pause: Option<Duration>,
@@ -387,8 +434,14 @@ impl Probe {
         if self.mute { self.send(Command::SetMasterMute(true)) } else { Ok(()) }
     }
 
+    /// Lane 0 is as `want` says.
     fn lane_is(&self, want: impl Fn(&LaneInfo) -> bool) -> bool {
-        self.lane.as_ref().is_some_and(want)
+        self.lanes[0].as_ref().is_some_and(want)
+    }
+
+    /// Every lane plays a loop of `length` frames.
+    fn all_play(&self, length: Frame) -> bool {
+        self.lanes.iter().all(|l| l.is_some_and(|i| i.state == LaneState::Playing && i.length == length))
     }
 
     /// Read the engine's events and the device's.
@@ -397,7 +450,7 @@ impl Probe {
         self.host.drain_events(&mut events);
         for event in events.drain(..) {
             match event {
-                Event::Lane { lane: 0, info, .. } => self.lane = Some(info),
+                Event::Lane { lane, info, .. } if (lane as usize) < TRACK_COUNT => self.lanes[lane as usize] = Some(info),
                 Event::Beat { .. } => self.beats += 1,
                 Event::TakeRejected { lane, overdub, .. } => {
                     self.fail("loop", format!("lane {lane}: the {} saw an input gap and was discarded", if overdub { "overdub" } else { "take" }))
@@ -522,7 +575,7 @@ impl Probe {
         }
         let length = self.length;
         if !self.lane_is(|i| i.state == LaneState::Playing && i.length == length) {
-            self.fail("loop", format!("after {after}: lane 0 is {:?}, not playing its {length} frames", self.lane));
+            self.fail("loop", format!("after {after}: lane 0 is {:?}, not playing its {length} frames", self.lanes[0]));
         }
     }
 
@@ -537,8 +590,50 @@ impl Probe {
         self.send(Command::RecDub(0))?;
         self.wait("the loop plays", WAIT, |p| p.lane_is(|i| i.state == LaneState::Playing && i.length > 0))?;
         self.send(Command::SetSlotLive(0, false))?;
-        self.length = self.lane.map_or(0, |i| i.length);
+        self.length = self.lanes[0].map_or(0, |i| i.length);
         say(format!("loop on lane 0: {} frames ({:.2} s)", self.length, self.length as f64 / self.rate.max(1) as f64));
+        Ok(())
+    }
+
+    /// `--scene heavy` (the header), once lane 0's loop plays: each copy lands in the first empty lane.
+    fn heavy_scene(&mut self) -> Result<(), String> {
+        for _ in 1..TRACK_COUNT {
+            self.send(Command::Copy(0))?;
+        }
+        let length = self.length;
+        self.wait("every lane plays the loop", WAIT, |p| p.all_play(length))?;
+        for lane in 0..TRACK_COUNT as u8 {
+            for (param, value) in HEAVY_FX {
+                self.send(Command::SetFxParam(lane, param, value))?;
+            }
+            for kind in FxKind::ALL {
+                self.send(Command::SetFxBypass(lane, kind, false))?;
+            }
+        }
+        for send in InputSend::ALL {
+            self.send(Command::SetInputSend(send, true))?;
+        }
+        for (param, value) in HEAVY_SENDS {
+            self.send(Command::SetInputSendParam(param, value))?;
+        }
+        let mut live = Vec::new();
+        for k in 0..SLOT_COUNT {
+            let loaded = self.slots.iter().any(|s| s.slot == k && s.handle.is_some());
+            self.send(Command::SetSlotLive(k as u8, loaded))?;
+            if loaded {
+                live.push(k.to_string());
+            }
+        }
+        self.send(Command::SelectInstrument(NoteTarget::Builtin(Instrument::Pad)))?;
+        for note in CHORD {
+            self.send(Command::NoteOn(note, 0.6))?;
+        }
+        self.send(Command::SetMetronome(true))?;
+        self.hold(HOLD);
+        say(format!(
+            "heavy scene: {TRACK_COUNT} lanes playing, every effect on each, 3 input sends, slots live [{}], Pad chord {CHORD:?}, click on",
+            live.join(", ")
+        ));
         Ok(())
     }
 
@@ -608,9 +703,12 @@ impl Probe {
                 self.rate = status.sample_rate;
                 self.expect_slots(&format!("the switch to {}", label(next)));
                 if rebuilt {
-                    self.lane = None;
+                    self.lanes = [None; TRACK_COUNT];
                     self.silence()?;
                     self.record_loop()?;
+                    if self.heavy {
+                        self.heavy_scene()?;
+                    }
                 }
             }
             Err(e) => self.fail("switch", format!("to {}: {e}", label(next))),
@@ -656,6 +754,11 @@ impl Probe {
         let mark = self.mark();
         self.record_loop()?;
         self.phase("record", &mark);
+        if a.heavy {
+            let mark = self.mark();
+            self.heavy_scene()?;
+            self.phase("heavy scene", &mark);
+        }
 
         let mark = self.mark();
         self.soak(a.seconds);
@@ -666,6 +769,9 @@ impl Probe {
             _ => self.fail("load", "no callback in the soak".to_string()),
         }
         self.expect_loop("the soak", HOLD);
+        if self.heavy && !self.all_play(self.length) {
+            self.fail("loop", format!("after the soak: not every lane plays its {} frames: {:?}", self.length, self.lanes));
+        }
         if !start.backend.is_asio() {
             join_trace("soak");
         }
@@ -1290,11 +1396,12 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
         plugins,
         slots,
         events: Vec::new(),
-        lane: None,
+        lanes: [None; TRACK_COUNT],
         length: 0,
         beats: 0,
         rate: 0,
         mute: a.mute,
+        heavy: a.heavy,
         hold: a.hold,
         pause: a.pause,
         cycled: !a.cycle.is_empty(),
@@ -1308,6 +1415,10 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
             join_trace("failed run");
         }
         p.fail("run", e);
+    }
+    if a.heavy {
+        // The chord's release; a device that is gone drops it.
+        let _ = p.send(Command::AllNotesOff);
     }
     p.finish_grace();
     // The plugins leave the engine while the device still plays (crossfaded out), then it closes.

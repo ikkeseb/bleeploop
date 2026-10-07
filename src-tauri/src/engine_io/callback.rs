@@ -1191,6 +1191,24 @@ mod tests {
     }
 
     #[test]
+    fn a_callback_at_or_over_its_period_counts_as_over_budget() {
+        use super::super::LoadHistogram;
+        let load = LoadHistogram::default();
+        let period = Duration::from_secs_f64(64.0 / 48_000.0);
+        for share in [0.5, 0.995, 1.0005, 1.5, 3.0] {
+            load.record(period.mul_f64(share), 64, 48_000);
+        }
+        let all = load.snapshot();
+        assert_eq!(all.over_budget(), 3, "99 % is inside the period; 100 %, 150 % and the last bin are past it");
+        assert_eq!(all.text(), "p50<101% p99.9>=199% max>=199% over_budget=3");
+        assert_eq!(all.since(&all).over_budget(), 0);
+        // Inside the period the line stays as it was.
+        let calm = LoadHistogram::default();
+        calm.record(period.mul_f64(0.375), 64, 48_000);
+        assert_eq!(calm.snapshot().text(), "p50<38% p99.9<38% max<38%");
+    }
+
+    #[test]
     fn every_slots_pick_travels_in_one_word() {
         let run = Run::new([3, u32::MAX]);
         assert_eq!(run.slot_channels(), [3, u32::MAX]);

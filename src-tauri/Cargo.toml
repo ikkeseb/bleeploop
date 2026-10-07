@@ -167,3 +167,12 @@ overflow-checks = false
 
 [profile.release.package.cpal]
 overflow-checks = false
+
+# The rig probe's optimized build (`pnpm native:engine --profile=rig`, target/rig/app.exe): the release
+# build players run, its per-package settings above included, with debug assertions on, since
+# `--probe-engine` and the other DEV probes exist only under `debug_assertions`. What that still adds
+# over release: the RT-allocation counter (`host/rt_alloc.rs`), the WASAPI join trace (`engine_io/callback.rs`)
+# and every crate's `debug_assert!`s.
+[profile.rig]
+inherits = "release"
+debug-assertions = true

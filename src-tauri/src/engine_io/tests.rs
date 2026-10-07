@@ -1923,7 +1923,7 @@ fn a_master_that_fails_to_render_still_answers_the_stems_with_its_error() {
 }
 
 #[test]
-fn the_glitch_watch_logs_a_span_only_when_a_fault_counter_moved_in_it() {
+fn the_glitch_watch_logs_a_span_in_which_a_fault_counter_moved() {
     use super::owner::{GlitchWatch, GLITCH_EVERY};
     use super::{IoDiag, LoadHistogram};
 
@@ -1947,6 +1947,30 @@ fn the_glitch_watch_logs_a_span_only_when_a_fault_counter_moved_in_it() {
     assert_eq!(quiet, None);
     let again = IoDiag { xruns: 3, ..glitch };
     assert_eq!(watch.tick(t0 + 4 * GLITCH_EVERY, || (again, histogram.snapshot())).as_deref(), Some("xruns=1 (block time none)"));
+}
+
+#[test]
+fn a_span_with_an_over_budget_callback_is_logged_with_no_counter_moved() {
+    use super::owner::{GlitchWatch, GLITCH_EVERY};
+    use super::{IoDiag, LoadHistogram};
+
+    let t0 = Instant::now();
+    let histogram = LoadHistogram::default();
+    let mut watch = GlitchWatch::new(t0, IoDiag::default(), histogram.snapshot());
+    // 64 frames at 48 kHz is 1.33 ms: 0.5 ms is 37.5 % of the period, 2 ms 150 %.
+    histogram.record(Duration::from_micros(500), 64, 48_000);
+    let calm = IoDiag { callbacks: 1, ..IoDiag::default() };
+    assert_eq!(watch.tick(t0 + GLITCH_EVERY, || (calm, histogram.snapshot())), None, "a clean span logs nothing");
+
+    histogram.record(Duration::from_micros(2_000), 64, 48_000);
+    let late = IoDiag { callbacks: 2, ..IoDiag::default() };
+    let line = watch.tick(t0 + 2 * GLITCH_EVERY, || (late, histogram.snapshot()));
+    assert_eq!(line.as_deref(), Some("no counter moved (block time p50<151% p99.9<151% max<151% over_budget=1)"));
+
+    // The next span holds only its own callbacks: one inside its period is clean again.
+    histogram.record(Duration::from_micros(500), 64, 48_000);
+    let again = IoDiag { callbacks: 3, ..IoDiag::default() };
+    assert_eq!(watch.tick(t0 + 3 * GLITCH_EVERY, || (again, histogram.snapshot())), None);
 }
 
 // ── D21: the races the UI's and the settings mirror's copies of the lane mix leave open ─────────────

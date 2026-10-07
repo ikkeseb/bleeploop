@@ -5,7 +5,8 @@
 //! The owner takes the engine lock only while no stream runs, and builds engines here, never on a
 //! callback (`Engine::new` allocates every buffer: ~130 MB and ~100 ms at 60-second lanes). Between
 //! requests it polls every `POLL` for what the callbacks latched: a dead stream, a dead Share mirror;
-//! and once a `GLITCH_EVERY` it logs the fault counters and glitch diagnostics that moved ([`GlitchWatch`]).
+//! and once a `GLITCH_EVERY` it logs the fault counters and glitch diagnostics that moved, or a callback
+//! that ran past its period ([`GlitchWatch`]).
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, Ordering::{AcqRel, Acquire, Relaxed, Release}};
@@ -203,9 +204,11 @@ struct Active {
 
 /// The release log's view of the callbacks, which cannot log: once a `GLITCH_EVERY`, the fault counters
 /// and glitch diagnostics that moved in that span (`IoDiag::moved_since`), with the output callbacks'
-/// block times over the same span.
-/// A crackle heard at a time then has a line to match. An xrun while every block stayed well inside its
-/// period points away from the engine (the driver, USB, the system); blocks near 100 % point at it.
+/// block times over the same span. A span in which a callback ran past its period
+/// (`BlockLoad::over_budget`) gets a line too when no counter moved ("no counter moved", the count in
+/// its block time). A crackle heard at a time then has a line to match. An xrun while every block stayed
+/// well inside its period points away from the engine (the driver, USB, the system); blocks near or past
+/// 100 % point at it.
 pub(crate) struct GlitchWatch {
     at: Instant,
     diag: IoDiag,
@@ -218,14 +221,14 @@ impl GlitchWatch {
     }
 
     /// At `now`: once a span has passed, read the counters (`read`) and start the next span; the line to
-    /// log when a fault counter moved in the one that ended.
+    /// log when a fault counter moved in the one that ended or a callback in it ran past its period.
     pub(crate) fn tick(&mut self, now: Instant, read: impl FnOnce() -> (IoDiag, BlockLoad)) -> Option<String> {
         if now.saturating_duration_since(self.at) < GLITCH_EVERY {
             return None;
         }
         let (diag, load) = read();
-        let moved = diag.moved_since(&self.diag);
         let span = load.since(&self.load);
+        let moved = diag.moved_since(&self.diag).or_else(|| (span.over_budget() > 0).then(|| "no counter moved".to_string()));
         *self = GlitchWatch { at: now, diag, load };
         moved.map(|moved| format!("{moved} (block time {})", span.text()))
     }

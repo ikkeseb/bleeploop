@@ -333,7 +333,7 @@ pub struct IoCounters {
 pub const LOAD_BINS: usize = 200;
 
 /// The output callbacks' durations as a share of their block's period (the Stage 4 soak's bar: p99.9
-/// under 50 %, max under 90 %).
+/// under 50 %, max under 90 %). A callback at or over 100 % ran past its deadline: [`BlockLoad::over_budget`].
 pub struct LoadHistogram {
     bins: [AtomicU64; LOAD_BINS],
 }
@@ -389,11 +389,21 @@ impl BlockLoad {
         self.bins.iter().rposition(|&c| c > 0)
     }
 
-    /// p50, p99.9 and max as the bins' bounds in whole percent of the period, or "none".
+    /// The callbacks that took 100 % of their period or more: each ran past its deadline.
+    pub fn over_budget(&self) -> u64 {
+        self.bins[100..].iter().sum()
+    }
+
+    /// p50, p99.9 and max as the bins' bounds in whole percent of the period, then `over_budget=N` when
+    /// any callback ran past its period; or "none".
     pub(crate) fn text(&self) -> String {
         let bound = |k: usize| if k == LOAD_BINS - 1 { format!(">={k}%") } else { format!("<{}%", k + 1) };
+        let over = match self.over_budget() {
+            0 => String::new(),
+            n => format!(" over_budget={n}"),
+        };
         match (self.quantile(0.5), self.quantile(0.999), self.max()) {
-            (Some(p50), Some(p999), Some(max)) => format!("p50{} p99.9{} max{}", bound(p50), bound(p999), bound(max)),
+            (Some(p50), Some(p999), Some(max)) => format!("p50{} p99.9{} max{}{over}", bound(p50), bound(p999), bound(max)),
             _ => "none".to_string(),
         }
     }
