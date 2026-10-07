@@ -722,13 +722,16 @@ impl Probe {
     /// `--tone`: plant the second control and fade the tone out, before anything stops the device.
     fn tone_stop(&mut self) {
         let Some(shared) = self.tone.clone() else { return };
-        if !std::mem::take(&mut self.tone_plays) {
+        if !self.tone_plays {
             return;
         }
         shared.end();
         if let Err(e) = self.wait("the tone fades out", SLOT_WAIT, |_| shared.done()) {
             say(format!("tone: {e}"));
         }
+        // Only now: a device event in the tone's tail still counts against it.
+        self.pump();
+        self.tone_plays = false;
         // A device event since the tone began, or another device now than the one it began on.
         let now = self.host.status();
         if self.tone_device.is_some() && now.as_ref().map(|s| (s.backend, s.block, s.sample_rate)) != self.tone_device {

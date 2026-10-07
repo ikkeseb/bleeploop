@@ -376,29 +376,37 @@ plugin-GUI work.
   normal-priority build stretched the audio callback past its period, more often with the heavy
   scene; the release log writes such a span (`over_budget=N`). A loopback tone says what such
   callbacks do (`native:engine --tone=1`, line out R cabled into input 2; the same day, scene and
-  build, 10-minute soaks). Idle: a clean tone, no callback past its period. One run with six lone
-  ones (100 to 122 %, a load not of the session's making): a clean tone. Beside the build: 27
-  callbacks past their period (up to < 155 %) and two breaks in the tone, 10 and 17 ms long, with
-  silence in them and the phase back where it was after. Each break fell at a run of six to nine
-  callbacks in a row that ran long, their entries up to 104 and 132 frames behind the wakes' best
-  phase; the long ones that came alone or two or three together (up to 128 %, at most 76 behind)
-  left the tone whole. So the driver covers a lone long callback and not a run of them, and a
-  normal-priority build makes such runs at 64 frames. Every fault counter stayed 0 through both
-  breaks: beyond `over_budget=N`, nothing in the app or its log says the sound broke. The cable
-  returns through the same driver's input, so which side broke is not settled (a guitar through the
-  app passes both). The tone also carries a slow disturbance with no edge (about 0.65 s, the level
-  within 5 %, no residual spike, the phase back within a tenth of a frame): about 6.8 s after the
-  stream starts in five runs of five (any scene, with and without plugins, no callback long or late;
-  the tone run starts at 10 s for it), twice beside the build (208 s and 341 s in, neither at a long
-  callback) and never in the idle soak; cause unknown. Not measured: memory pressure, and why a
-  normal-priority build delays an MMCSS thread (a shared core, DPCs). Next checks: the same tone run
-  beside the build at 128 and 256 frames (does a larger buffer cover the runs); a count of long
-  callbacks in a row in the release log, which would name a break where the fault counters do not;
-  the slow disturbance captured whole (a snippet holds 512 frames); and the owner's ear on music
-  through the interface, then on a full scene at ASIO 64, during a `pnpm rust:check` from a
-  normal-priority shell, then from the tmux session. A tester hears crackle at times too, less
-  marked with a gate on their interface, which puts some of it on the input side there; on WASAPI
-  the join's bursts (below) would sound like that (his backend is unknown).
+  build, 10-minute soaks, each watched from about 11.5 s after the stream starts). Idle: a clean
+  tone, no callback past its period. One run with six lone long callbacks, seconds apart (100 to 122
+  %, a load not of the session's making): a clean tone. Beside the build: 27 callbacks past their
+  period (up to < 155 %) and two breaks in the returning tone (cue spans of 10.3 and 17.1 ms,
+  samples near zero inside, the phase back within the threshold after). Each break fell at a cluster
+  of long callbacks: six within nine callbacks in a row, and eight within thirteen (two of the rest
+  entered two periods late), their entries up to 104 and 132 frames behind the wakes' best phase. No
+  discontinuity was detected at the other 13 long callbacks of that run, which came alone or in twos
+  and threes (up to 128 %, at most 76 frames behind), nor at the six of the run before: 19 in all,
+  which bounds how often such a callback breaks the tone, not that it never does, and a defect under
+  about 1 % of the level for one sample, or a slip of a whole 89 frames, is not seen at all. Such
+  clusters came only in the run beside the normal-priority build (one run). Every fault counter
+  stayed 0 through both breaks: beyond `over_budget=N`, nothing in the app or its log says the sound
+  broke. The cable returns through the same driver's input, and silence inside a break fits either
+  side: which side broke, and how, is unknown (a guitar through the app passes both). The tone also
+  carries a slow disturbance with no edge (about 0.65 s, the fitted level within 5 % while the
+  waveform's peaks move by more, no residual spike, the phase back within the threshold): about 6.8
+  s after the stream starts in five runs of five (any scene, with and without plugins, no callback
+  long or late), twice beside the build (208 s and 341 s in, neither at a long callback) and never
+  in the idle soak. It looks like something added to the signal rather than a break in it; its
+  source is unknown. The tone run starts at 10 s for it, so these runs say nothing about a stream's
+  first seconds. Not measured: memory pressure, and why a normal-priority build delays an MMCSS
+  thread (a shared core, DPCs). Next checks: the same tone run beside the build again (do the breaks
+  repeat, and only at clusters), then at 128 and 256 frames (does a larger buffer cover them); a
+  count of long callbacks close together in the release log, which would name a break where the
+  fault counters do not; the slow disturbance captured whole and with the sine subtracted, at half
+  the tone's level and with no tone (added to the signal, or a change in gain or clock); and the
+  owner's ear on music through the interface, then on a full scene at ASIO 64, during a `pnpm
+  rust:check` from a normal-priority shell, then from the tmux session. A tester hears crackle at
+  times too, less marked with a gate on their interface, which puts some of it on the input side
+  there; on WASAPI the join's bursts (below) would sound like that (his backend is unknown).
 - Plugin-host gaps a source review found (2026-10-02; read from source, none reproduced), ranked by
   exposure on the owner's plugins. First: VST3 omits trailing inactive aux buses (the SDK's
   `activateBus` rule permits it) and passes short `setBusArrangements` arrays whose result is read

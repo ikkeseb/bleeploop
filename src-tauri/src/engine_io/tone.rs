@@ -1141,10 +1141,11 @@ impl ToneRig {
                 e.min_amp
             ));
         }
+        // A callback is at an event when it falls within the window of the event's span, on either side.
         let matched = |s: &Slow| {
             own.iter().find(|&&i| {
-                let (out, input) = distances(events[i].onset, round_trip, s.frame);
-                out.abs().min(input.abs()) <= window
+                let e = &events[i];
+                [0, round_trip].iter().any(|shift| (e.onset - window..=e.end + window).contains(&(s.frame + shift)))
             })
         };
         let (mut late_lines, mut late_more, mut late_more_matched) = (0, 0, 0);
