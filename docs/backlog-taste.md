@@ -78,6 +78,9 @@ added a line.
   plugins); a recent-jams shelf (keep the last N recovery archives on ✕ ALL and close, offered in
   IMPORT, M); resampling on import or recovery (S); one `.pill` primitive with type tokens; a rhythm
   guide, three GM-kit grooves on the master pulse instead of the click (M, ear-gated).
+- **Dropped by the owner (2026-10-07):** a tester's "open device settings" button that opens the ASIO
+  driver's own panel for rate and buffer: asio-sys 0.3.0 does not expose the call, and a change made
+  there mid-run is the open thread in `src-tauri/AGENTS.md` (a panel change while the app runs).
 - Looper aesthetic forks: ring/state colour = state vs track identity; Day/Night.
 - Undo as visible history (layer count on ↶ UNDO); scenes/snapshots switched on the loop boundary;
   songs as chained scenes; click "01" to name a track; piano hidden by default; synth pills gone once a

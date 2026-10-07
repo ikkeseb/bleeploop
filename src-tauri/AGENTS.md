@@ -327,8 +327,7 @@ plugin-GUI work.
   shows what runs, rather than adopting the driver's settings blindly. Next check, on the rig: change
   the buffer in the driver's panel, then the rate, each while loops play, and record a take after
   each: the log, the block size the callbacks get (the status reads it only at the open), and whether
-  the take lands on the click. A tester's ask for an "open device settings" button waits on this
-  (asio-sys 0.3.0 does not expose `ASIOControlPanel`). Under WASAPI the buffer select lists every
+  the take lands on the click. Under WASAPI the buffer select lists every
   size and the run ignores it (`cpal_driver::resolve_wasapi`).
 - `engine_io::tests::a_reopen_keeps_each_slots_channel_and_one_input_channel_sets_both` failed once on
   the CI runner (2026-10-07, v0.8.1's prep commit, "inputs 1 and 3": its first check, before any
