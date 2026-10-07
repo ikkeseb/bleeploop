@@ -315,6 +315,26 @@ plugin-GUI work.
   the driver's sample position; `callback::PhaseSlips`). A single late wake is no signal: on the rig's
   USB driver at 64 frames, wakes more than a period behind the best phase came ~180 times a second
   with every fault counter 0 (2026-10-07).
+- A rate or buffer change made in the ASIO driver's own control panel while the app runs (read from
+  source 2026-10-07, never run on a device; Audio Settings sends a fixed-size driver's users there): a
+  reset, resync or rate change reaches the run as cpal's `StreamInvalidated`, which the owner handles
+  as a lost device, without the fade-out an in-app switch gets, and the recovery reopens the saved
+  request (`transition::fallbacks`), likely putting the app's rate and buffer back over the panel's. A
+  `kAsioBufferSizeChange`, which cpal 0.18.1 accepts with no error, would leave the run on the new
+  block size with its latency alignment frozen at the old one (`callback::LATENCY_SAMPLES`), a take
+  possibly off the click, and the buffer select stale. Which messages the Focusrite driver sends is
+  unknown. A fix keeps the loops (a rate the owner did not confirm discards them: `Owner::open`) and
+  shows what runs, rather than adopting the driver's settings blindly. Next check, on the rig: change
+  the buffer in the driver's panel, then the rate, each while loops play, and record a take after
+  each: the log, the block size the callbacks get (the status reads it only at the open), and whether
+  the take lands on the click. A tester's ask for an "open device settings" button waits on this
+  (asio-sys 0.3.0 does not expose `ASIOControlPanel`). Under WASAPI the buffer select lists every
+  size and the run ignores it (`cpal_driver::resolve_wasapi`).
+- `engine_io::tests::a_reopen_keeps_each_slots_channel_and_one_input_channel_sets_both` failed once on
+  the CI runner (2026-10-07, v0.8.1's prep commit, "inputs 1 and 3": its first check, before any
+  reopen) and passed on the rerun, on the tag's run of the same commit and locally; the one red
+  `rust-test` in 40 runs. Cause unknown. Next check: the assertion prints the heard samples, so the
+  next failure says whether the block was silent, one slot short or ramping.
 - A punch-out inside a take's last quarter-beat commits the whole bars before it, where a stop there
   rounds up (owner's call).
 - The feed's reset mirror carries no count: a WebView reload during a count-in shows no numeral until
