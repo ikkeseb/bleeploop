@@ -19,7 +19,8 @@ name: build-exe
 # then `git tag -a vX.Y.Z -F <notes>` on that commit and push the tag.
 # The notes file is `BleepLoop vX.Y.Z`, a blank line, then one bullet per player-visible change since
 # the previous release; it becomes the release's "What's new". No line may start with `#`: git
-# strips those as comments. A failed run publishes nothing: fix, move the tag, push it again.
+# strips those as comments. A failed build or gate publishes nothing: fix, move the tag, push it again (a
+# `verdict` job that itself fails only makes the tag's run verify afresh).
 #
 # Built with `--features asio`: ASIO is the low-latency tier, WASAPI stays selectable in the app. The
 # Steinberg ASIO SDK is dual-licensed (proprietary or GPLv3 - its own LICENSE.txt); this build takes
