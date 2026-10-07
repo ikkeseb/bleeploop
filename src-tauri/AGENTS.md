@@ -354,8 +354,8 @@ plugin-GUI work.
   has no starve in a three-hour session. The three or four at some mirror opens were cpal's empty
   start: the endpoint's first pull asks for its whole buffer, which ran the ring short; that first
   pull now plays silence (`share.rs`, a test pins it; not yet soaked on the rig).
-  **While agents build** (heavy, twice, once with BleepLoop closed): not reproduced, no ear was at
-  the PC, but narrowed. ASIO 64 counted nothing in 20 minutes of soaks under 16 and 32 busy threads
+  **While agents build** (heavy, twice, once with BleepLoop closed): not heard, no ear was at
+  the PC, but measured. ASIO 64 counted nothing in 20 minutes of soaks under 16 and 32 busy threads
   at normal priority, clean `cargo check`s at below-normal priority and a WSL-side load, nor in 70
   minutes without a load of this session's making: a build moved no fault counter on the engine's or
   the driver's ASIO side. What a build does to another app follows its priority: a normal-priority thread doing
@@ -374,14 +374,31 @@ plugin-GUI work.
   the driver reported nothing. The debug build (`pnpm dev:asio`'s) is a little slower (heavy, idle:
   p99.9 < 60 % against < 53 %, one callback past its period in 5 minutes). In these runs a
   normal-priority build stretched the audio callback past its period, more often with the heavy
-  scene; whether such a callback is heard on the Scarlett is unknown (the USB driver may buffer over
-  it). The release log writes such a span (`over_budget=N`). Not measured: memory pressure, and why
-  a normal-priority build delays an MMCSS thread (a shared core, DPCs). Next checks: a loopback
-  recording of a steady tone during a build, whether a late callback leaves a gap in it; and the
-  owner's ear on music through the interface, then on a full scene at ASIO 64, during a `pnpm
-  rust:check` from a normal-priority shell, then from the tmux session. A tester hears crackle at times too, less marked with a gate on their
-  interface, which puts some of it on the input side there; on WASAPI the join's bursts (below)
-  would sound like that (his backend is unknown).
+  scene; the release log writes such a span (`over_budget=N`). A loopback tone says what such
+  callbacks do (`native:engine --tone=1`, line out R cabled into input 2; the same day, scene and
+  build, 10-minute soaks). Idle: a clean tone, no callback past its period. One run with six lone
+  ones (100 to 122 %, a load not of the session's making): a clean tone. Beside the build: 27
+  callbacks past their period (up to < 155 %) and two breaks in the tone, 10 and 17 ms long, with
+  silence in them and the phase back where it was after. Each break fell at a run of six to nine
+  callbacks in a row that ran long, their entries up to 104 and 132 frames behind the wakes' best
+  phase; the long ones that came alone or two or three together (up to 128 %, at most 76 behind)
+  left the tone whole. So the driver covers a lone long callback and not a run of them, and a
+  normal-priority build makes such runs at 64 frames. Every fault counter stayed 0 through both
+  breaks: beyond `over_budget=N`, nothing in the app or its log says the sound broke. The cable
+  returns through the same driver's input, so which side broke is not settled (a guitar through the
+  app passes both). The tone also carries a slow disturbance with no edge (about 0.65 s, the level
+  within 5 %, no residual spike, the phase back within a tenth of a frame): about 6.8 s after the
+  stream starts in five runs of five (any scene, with and without plugins, no callback long or late;
+  the tone run starts at 10 s for it), twice beside the build (208 s and 341 s in, neither at a long
+  callback) and never in the idle soak; cause unknown. Not measured: memory pressure, and why a
+  normal-priority build delays an MMCSS thread (a shared core, DPCs). Next checks: the same tone run
+  beside the build at 128 and 256 frames (does a larger buffer cover the runs); a count of long
+  callbacks in a row in the release log, which would name a break where the fault counters do not;
+  the slow disturbance captured whole (a snippet holds 512 frames); and the owner's ear on music
+  through the interface, then on a full scene at ASIO 64, during a `pnpm rust:check` from a
+  normal-priority shell, then from the tmux session. A tester hears crackle at times too, less
+  marked with a gate on their interface, which puts some of it on the input side there; on WASAPI
+  the join's bursts (below) would sound like that (his backend is unknown).
 - Plugin-host gaps a source review found (2026-10-02; read from source, none reproduced), ranked by
   exposure on the owner's plugins. First: VST3 omits trailing inactive aux buses (the SDK's
   `activateBus` rule permits it) and passes short `setBusArrangements` arrays whose result is read

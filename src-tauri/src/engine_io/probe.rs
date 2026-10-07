@@ -88,6 +88,12 @@ const HOLD: Duration = Duration::from_secs(2);
 /// How long a plugin may take to come back into its slot after a switch.
 const SLOT_WAIT: Duration = Duration::from_secs(5);
 const WAIT: Duration = Duration::from_secs(10);
+/// `--tone` starts once the device frame counter has run this long. On the rig's interface (ASIO 64,
+/// 44.1 kHz) a slow disturbance crosses the returning tone about 6.8 s in, in every run: some 0.65 s
+/// with no residual spike, the level within 5 %, the phase left under a tenth of a frame from where it
+/// was, with any scene, with and without plugins, no callback long or late. Its cause is unknown
+/// (`src-tauri/AGENTS.md` § Open threads, the crackle thread); the tone run is about what comes later.
+const TONE_FROM: Duration = Duration::from_secs(10);
 /// The soak's block-load bar, in whole percent of the period.
 const P999_BAR: usize = 50;
 const MAX_BAR: usize = 90;
@@ -694,6 +700,9 @@ impl Probe {
     /// `--tone`: start the tone, and wait for its calibration and for the first control to come back.
     fn tone_start(&mut self) -> Result<(), String> {
         let Some(shared) = self.tone.clone() else { return Ok(()) };
+        // Past the stream's first seconds (`TONE_FROM`).
+        let from = (TONE_FROM.as_secs_f64() * self.rate as f64) as Frame;
+        self.wait("the stream has run its first seconds", TONE_FROM + WAIT, |p| p.host.core.frame.load(Relaxed) >= from)?;
         shared.begin(self.rate);
         self.tone_plays = true;
         self.wait("the tone calibrates", WAIT, |_| shared.cal() != super::tone::Cal::Pending)?;

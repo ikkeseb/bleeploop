@@ -95,12 +95,14 @@ const COINCIDENCE_PERIODS: Frame = 4;
 /// A control is looked for this long after it left, and found within this of the alignment plus a window.
 const CONTROL_SEARCH_SECONDS: f64 = 0.25;
 const CONTROL_TOLERANCE_MS: f64 = 1.0;
-/// A control came back as its hole alone when its residual cues span [`HOLE`] frames within this: the
-/// residual names the hole's first frame or the one after, and the first frame back or the one after
-/// (63 to 65 frames); the rest is for a converter's filter ringing past the residual threshold, unknown
-/// on hardware (the control's line prints the span). A dropout that lengthens the hole by this or less
-/// is hidden in it.
-const CONTROL_SPAN_TOLERANCE: Frame = 8;
+/// A control came back as its hole alone when its residual cues span [`HOLE`] frames, at most
+/// `CONTROL_SPAN_UNDER` short or `CONTROL_SPAN_OVER` long: the residual names the hole's first frame or
+/// the one after, and the first frame back or the one after (63 to 65 frames), and the converters ring
+/// past the residual threshold once the tone is back (on the rig's interface at 44.1 kHz the two
+/// controls spanned 90 and 110 frames; the control's line prints the span). A dropout that lengthens the
+/// hole by `CONTROL_SPAN_OVER` or less is hidden in it.
+const CONTROL_SPAN_UNDER: Frame = 2;
+const CONTROL_SPAN_OVER: Frame = 64;
 /// The callbacks' log saw the run when it counted at least this share of the callbacks the watched span
 /// holds at the status' block size: the callbacks at the span's edges fall outside it, and a log that
 /// was on for half the span or less is no record of it.
@@ -1012,7 +1014,7 @@ impl ToneRig {
                 c.found = (e.onset - p - align).abs() <= tolerance;
                 // The hole itself: both its edges fire the residual, `HOLE` frames apart.
                 c.span = if e.cues & CUE_RESIDUAL != 0 { e.residual_to - e.residual_from } else { 0 };
-                let hole_alone = (c.span - HOLE).abs() <= CONTROL_SPAN_TOLERANCE;
+                let hole_alone = (HOLE - CONTROL_SPAN_UNDER..=HOLE + CONTROL_SPAN_OVER).contains(&c.span);
                 c.mixed = !hole_alone || e.phase_step != 0.0 || e.end - e.onset > HOLE + 3 * WINDOW as Frame;
             }
             c
@@ -1065,7 +1067,7 @@ impl ToneRig {
                 (None, _) => "not planted".to_string(),
                 (Some(p), None) => format!("planted at frame {p}, NOT FOUND"),
                 (Some(p), Some(e)) => format!(
-                    "planted at frame {p}, found at {}, offset {} frames ({:.2} ms), alignment {} frames, its residual cues span {} frames (the hole's {HOLE} within {CONTROL_SPAN_TOLERANCE}): {}{}",
+                    "planted at frame {p}, found at {}, offset {} frames ({:.2} ms), alignment {} frames, its residual cues span {} frames (the hole's {HOLE}, to {CONTROL_SPAN_OVER} more): {}{}",
                     e.onset,
                     e.onset - p,
                     ms(e.onset - p),
@@ -1724,16 +1726,16 @@ mod tests {
     fn a_control_whose_hole_came_back_longer_is_a_discontinuity() {
         let mut plain = Device::new();
         assert!(plain.run(2.0, |_, x| x).pass);
-        // A dropout of 32 frames right behind the first control's hole: one event, no phase step, short.
+        // A dropout of 96 frames right behind the first control's hole: one event, no phase step, short.
         let back = plain.rig.holes[0].unwrap() + LAG + HOLE;
         let mut device = Device::new();
-        let report = device.run(2.0, move |f, x| if (back..back + 32).contains(&f) { 0.0 } else { x });
+        let report = device.run(2.0, move |f, x| if (back..back + 96).contains(&f) { 0.0 } else { x });
         let text = report.lines.join("\n");
         assert_eq!(device.rig.det.events().len(), 2, "{text}");
         let e = device.rig.det.events()[0];
         assert!(e.phase_step == 0.0 && e.end - e.onset <= HOLE + 3 * WINDOW as Frame, "{e:?}");
         assert!(!report.pass && report.verdict.starts_with("tone: discontinuities: 1 loopback discontinuities, 0 within") && report.verdict.contains("1 merged into a control"), "{}\n{text}", report.verdict);
-        assert!(text.contains("its residual cues span 97 frames") && text.contains("and its event holds more than the hole"), "{text}");
+        assert!(text.contains("its residual cues span 161 frames") && text.contains("and its event holds more than the hole"), "{text}");
         // The plain controls' spans are the hole's.
         let spans: Vec<Frame> = plain.rig.det.events().iter().map(|e| e.residual_to - e.residual_from).collect();
         assert!(spans.iter().all(|s| (HOLE - 1..=HOLE + 1).contains(s)), "{spans:?}");
