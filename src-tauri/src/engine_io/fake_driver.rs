@@ -375,9 +375,13 @@ impl Play {
                 queued = (!asio).then_some(buffer);
                 let wake_late = if asio { self.fake.wake_late.swap(0, Relaxed) as u64 } else { 0 };
                 let entry = begun + Duration::from_secs_f64((t + wake_late) as f64 / rate as f64);
+                // The tape is held from before the render, which advances the frame clock, until its
+                // frames are kept: a test that reads the clock and then the tape finds them there.
+                let mut tape = self.fake.tape.lock().unwrap();
                 self.render.render(&mut data_out[..n * out_ch], entry, out_latency);
                 let frame = self.core.frame.load(Relaxed) - n as Frame;
-                self.keep(frame, &data_out[..n * out_ch], out_ch);
+                self.keep(&mut tape, frame, &data_out[..n * out_ch], out_ch);
+                drop(tape);
                 t += block as u64;
                 burst += 1;
             }
@@ -404,12 +408,11 @@ impl Play {
         *in_frame += k as Frame;
     }
 
-    fn keep<T: Sample>(&self, frame: Frame, data: &[T], channels: usize)
+    fn keep<T: Sample>(&self, tape: &mut Vec<f32>, frame: Frame, data: &[T], channels: usize)
     where
         f32: FromSample<T>,
     {
         self.fake.starts.lock().unwrap().last_mut().expect("a run's list").push(frame);
-        let mut tape = self.fake.tape.lock().unwrap();
         let end = (frame as usize + data.len() / channels).min(TAPE_FRAMES);
         if tape.len() < end {
             tape.resize(end, f32::NAN);

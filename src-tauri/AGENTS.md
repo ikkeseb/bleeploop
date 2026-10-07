@@ -329,11 +329,6 @@ plugin-GUI work.
   each: the log, the block size the callbacks get (the status reads it only at the open), and whether
   the take lands on the click. Under WASAPI the buffer select lists every
   size and the run ignores it (`cpal_driver::resolve_wasapi`).
-- `engine_io::tests::a_reopen_keeps_each_slots_channel_and_one_input_channel_sets_both` failed once on
-  the CI runner (2026-10-07, v0.8.1's prep commit, "inputs 1 and 3": its first check, before any
-  reopen) and passed on the rerun, on the tag's run of the same commit and locally; the one red
-  `rust-test` in 40 runs. Cause unknown. Next check: have the assertion print the heard samples, so
-  the next failure says whether the block was silent, one slot short or ramping.
 - A punch-out inside a take's last quarter-beat commits the whole bars before it, where a stop there
   rounds up (owner's call).
 - The feed's reset mirror carries no count: a WebView reload during a count-in shows no numeral until

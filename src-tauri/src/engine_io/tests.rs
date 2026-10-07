@@ -1003,7 +1003,7 @@ fn an_output_past_full_scale_counts_clipped_blocks_and_a_normal_one_none() {
     h.open(asio(Some(256)));
     h.send(Command::SetSlotLive(0, true));
     h.send(Command::SetSlotLive(1, true));
-    assert!(all_near(&heard_after(&h, 0.5), 0.8), "the monitor is heard");
+    assert_heard(&h, 0.5, 0.8, "the monitor is heard");
     assert_eq!(h.host.diag().clipped_blocks, 0);
     h.fake.set_input(|_| 0.3);
     h.play(RATE / 2);
@@ -1132,15 +1132,25 @@ fn the_capture_channel_changes_without_a_new_stream() {
     assert_eq!(h.fake.started.load(SeqCst), 1, "one stream pair throughout");
 }
 
-/// What the device plays after another `seconds`: the left channel's last 64 frames.
-fn heard_after(h: &Harness, seconds: f64) -> Vec<f32> {
+/// After another `seconds`, the device's last 64 frames (left) play `want`, each within 1e-3. A
+/// failure says what played there, as runs of one value (NaN: nothing played), and the counters.
+#[track_caller]
+fn assert_heard(h: &Harness, seconds: f64, want: f32, what: &str) {
     h.play((RATE as f64 * seconds) as Frame);
     let at = h.frame();
-    h.fake.heard(at - 64..at)
-}
-
-fn all_near(heard: &[f32], want: f32) -> bool {
-    heard.iter().all(|s| (s - want).abs() < 1e-3)
+    let heard = h.fake.heard(at - 64..at);
+    if heard.iter().all(|s| (s - want).abs() < 1e-3) {
+        return;
+    }
+    let mut runs: Vec<(f32, usize)> = Vec::new();
+    for s in heard {
+        match runs.last_mut() {
+            Some((v, n)) if *v == s || v.is_nan() && s.is_nan() => *n += 1,
+            _ => runs.push((s, 1)),
+        }
+    }
+    let runs: Vec<String> = runs.iter().map(|(v, n)| format!("{v} x{n}")).collect();
+    panic!("{what}: frames {}..{at} played [{}], not {want}; {:?}", at - 64, runs.join(", "), h.host.diag());
 }
 
 /// Four inputs, the fake's channel c carrying (c + 1) × the input, so every channel sounds apart: two
@@ -1156,12 +1166,12 @@ fn each_slot_reads_its_own_capture_channel_on_asio_and_wasapi() {
         h.open(DeviceRequest { input_channels: [Some(0), Some(3)], ..request });
         h.send(Command::SetSlotLive(0, true));
         h.send(Command::SetSlotLive(1, true));
-        assert!(all_near(&heard_after(&h, 0.2), 0.0625 + 0.25), "{backend:?}: input 1 on slot 0 plus input 4 on slot 1");
+        assert_heard(&h, 0.2, 0.0625 + 0.25, &format!("{backend:?}: input 1 on slot 0 plus input 4 on slot 1"));
         h.send(Command::SetSlotLive(0, false));
-        assert!(all_near(&heard_after(&h, 0.1), 0.25), "{backend:?}: slot 1 alone reads input 4");
+        assert_heard(&h, 0.1, 0.25, &format!("{backend:?}: slot 1 alone reads input 4"));
         h.send(Command::SetSlotLive(0, true));
         h.send(Command::SetSlotLive(1, false));
-        assert!(all_near(&heard_after(&h, 0.1), 0.0625), "{backend:?}: slot 0 alone reads input 1");
+        assert_heard(&h, 0.1, 0.0625, &format!("{backend:?}: slot 0 alone reads input 1"));
     }
     let diag = h.host.diag();
     assert_eq!((diag.rt_allocs, diag.join_starves, diag.join_overruns), (0, 0, 0), "{diag:?}");
@@ -1174,17 +1184,17 @@ fn auto_is_input_two_for_each_slot_an_open_takes_auto_for_a_missing_channel_and_
     assert_eq!(h.open(asio(Some(256))).input_channels, [1, 1]);
     h.send(Command::SetSlotLive(0, true));
     h.send(Command::SetSlotLive(1, true));
-    assert!(all_near(&heard_after(&h, 0.1), 0.25 + 0.25), "auto: input 2 for each slot");
+    assert_heard(&h, 0.1, 0.25 + 0.25, "auto: input 2 for each slot");
     h.host.set_slot_input_channel(1, Some(0)).unwrap();
-    assert!(all_near(&heard_after(&h, 0.1), 0.25 + 0.125), "slot 1 moves to input 1, slot 0 stays on auto");
+    assert_heard(&h, 0.1, 0.25 + 0.125, "slot 1 moves to input 1, slot 0 stays on auto");
     assert!(h.host.set_slot_input_channel(0, Some(2)).is_err(), "the fake has two inputs");
     assert!(h.host.set_slot_input_channel(2, Some(0)).is_err(), "and there are two slots");
-    assert!(all_near(&heard_after(&h, 0.1), 0.375), "a refused change moves neither slot");
+    assert_heard(&h, 0.1, 0.375, "a refused change moves neither slot");
     assert_eq!(h.host.status().map(|s| s.input_channels), Some([1, 0]), "the status says what each slot reads");
     // A pick saved on a driver with more inputs: the open goes ahead, that slot on auto.
     let stale = DeviceRequest { input_channels: [Some(0), Some(2)], ..asio(Some(256)) };
     assert_eq!(h.open(stale).input_channels, [0, 1]);
-    assert!(all_near(&heard_after(&h, 0.1), 0.125 + 0.25), "slot 0 on input 1, slot 1 on auto");
+    assert_heard(&h, 0.1, 0.125 + 0.25, "slot 0 on input 1, slot 1 on auto");
     assert_eq!(h.fake.started.load(SeqCst), 1, "one stream pair throughout");
 }
 
@@ -1221,16 +1231,16 @@ fn a_reopen_keeps_each_slots_channel_and_one_input_channel_sets_both() {
     h.host.set_slot_input_channel(1, Some(2)).unwrap();
     h.send(Command::SetSlotLive(0, true));
     h.send(Command::SetSlotLive(1, true));
-    assert!(all_near(&heard_after(&h, 0.1), 0.0625 + 0.1875), "inputs 1 and 3");
+    assert_heard(&h, 0.1, 0.0625 + 0.1875, "inputs 1 and 3");
     // A loss: the owner reopens the request that ran, both picks in it.
     h.fake.fatal.store(Side::Output as u8, SeqCst);
     let events = h.device_events(2);
     assert!(matches!(events[1], DeviceEvent::Recovered(_)), "{events:?}");
-    assert!(all_near(&heard_after(&h, 0.1), 0.0625 + 0.1875), "both picks survive the reopen");
+    assert_heard(&h, 0.1, 0.0625 + 0.1875, "both picks survive the reopen");
     // A request with one channel (the Audio Settings pick) sets both slots.
     let one: DeviceRequest = serde_json::from_value(serde_json::json!({ "backend": "Asio", "input": null, "output": null, "inputChannel": 3, "buffer": 128 })).unwrap();
     h.open(one);
-    assert!(all_near(&heard_after(&h, 0.1), 0.25 + 0.25), "input 4 on both slots");
+    assert_heard(&h, 0.1, 0.25 + 0.25, "input 4 on both slots");
 }
 
 #[test]
