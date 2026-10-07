@@ -357,19 +357,29 @@ plugin-GUI work.
   **While agents build** (heavy, twice, once with BleepLoop closed): not reproduced, no ear was at
   the PC, but narrowed. ASIO 64 counted nothing in 20 minutes of soaks under 16 and 32 busy threads
   at normal priority, clean `cargo check`s at below-normal priority and a WSL-side load, nor in 70
-  minutes without a load of this session's making: a build breaks neither the engine nor the driver's
-  ASIO side. What a build does to another app follows its priority: a normal-priority thread doing
+  minutes without a load of this session's making: a build moved no fault counter on the engine's or
+  the driver's ASIO side. What a build does to another app follows its priority: a normal-priority thread doing
   1 ms of work every 10 ms lost a third of its turns to 16 busy normal-priority threads and ran up
   to 29 ms late beside a normal-priority `cargo check`; beside the same check at below-normal
   priority and beside a WSL load it ran at most 6 ms late and lost none. Windows processes started
   from the rig PC's logon tmux session run at below-normal priority (its scheduled task's), builds
   included; a WSL session opened from a terminal window has a normal-priority host (its children
-  were not sampled). Which kind built when it crackled, and what was playing, is unknown. Next check:
-  the owner's ear on music through the interface during a `pnpm rust:check` from a normal-priority
-  shell, then from the tmux session. A full `pnpm rust:check` at normal priority beside a silent
-  ASIO 64 soak (2026-10-07, 15 min, `cargo test` 479 s of it): no counter moved, but one block took
-  151 % of its period, where idle soaks peak at 27–74 %; when is unknown (the probe's soak lines now
-  carry each minute's block time). Not measured: memory pressure. A tester hears crackle at times too, less marked with a gate on his
+  were not sampled). Which kind built when it crackled, and what was playing, is unknown. A loaded
+  engine beside a build (2026-10-07, ASIO 64, `native:engine --scene=heavy --profile=rig`, both plugins
+  live, `--mute`, 10-minute soaks, the build a normal-priority `pnpm rust:check`, mostly its `cargo
+  test`): idle, the heavy scene's worst callback took < 76 % of its period and none ran past it;
+  beside the build, 32 did, up to < 196 %, in four of the ten minutes, and the default scene's 3, up
+  to < 103 % (an earlier 15-minute run, debug build, default scene, had one at 151 %). Every fault
+  counter stayed 0 and no phase slip came in any run (`asio_late_max` rose: 232 beside the build):
+  the driver reported nothing. The debug build (`pnpm dev:asio`'s) is a little slower (heavy, idle:
+  p99.9 < 60 % against < 53 %, one callback past its period in 5 minutes). In these runs a
+  normal-priority build stretched the audio callback past its period, more often with the heavy
+  scene; whether such a callback is heard on the Scarlett is unknown (the USB driver may buffer over
+  it). The release log writes such a span (`over_budget=N`). Not measured: memory pressure, and why
+  a normal-priority build delays an MMCSS thread (a shared core, DPCs). Next checks: a loopback
+  recording of a steady tone during a build, whether a late callback leaves a gap in it; and the
+  owner's ear on music through the interface, then on a full scene at ASIO 64, during a `pnpm
+  rust:check` from a normal-priority shell, then from the tmux session. A tester hears crackle at times too, less marked with a gate on their
   interface, which puts some of it on the input side there; on WASAPI the join's bursts (below)
   would sound like that (his backend is unknown).
 - Plugin-host gaps a source review found (2026-10-02; read from source, none reproduced), ranked by
