@@ -3,7 +3,9 @@ name: build-exe
 # The shippable Windows build, made on a clean runner: the NSIS installer plus the bare exe, kept as a
 # run artifact. On demand (Actions tab: build only) and on a `v*` tag push; never on a plain main push
 # (a release build is ~15-20 min of Windows runner). A tag push also PUBLISHES the GitHub Release once
-# the exe and this commit's `ci` and `rust-test` are green; a red gate publishes nothing. Run by hand
+# the exe and this commit's `ci` and `rust-test` are green; a red gate publishes nothing. The two
+# count as green from main's own push of the tagged commit (the release prep commit starts both; the
+# run waits for one still going), and the tag's run runs whichever it cannot read as green. Run by hand
 # with `smoke`, it builds the exe `pnpm release:smoke` drives instead: bare, unsigned, in the smoke's
 # own profile (`scripts/release-smoke.tauri.json`), with this job's toolchain and ASIO SDK, so the
 # release's gate needs no build on the PC.
@@ -59,16 +61,41 @@ env:
   SMOKE: ${{ github.event_name == 'workflow_dispatch' && inputs.smoke && 'yes' || '' }}
 
 jobs:
-  # The push gates, rerun on this exact commit: a green run on another commit does not cover the
-  # download. `ci` is `pnpm check` + the vite build + the no-ASIO `cargo check`; `rust-test` is
-  # `cargo test`. They run beside `exe`, and only the release waits for them. A smoke build skips
-  # them: nothing is published from it, and the tag's run reruns both on the commit it ships.
+  # A tag push: did main's own push of this exact commit already pass `ci` and `rust-test`, every
+  # job run and green (scripts/release-verdict.mjs; it waits for a run still going)? Anything else,
+  # an unreadable answer included, leaves the output empty and the two jobs below run.
+  verdict:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      ci: ${{ steps.verdict.outputs.ci }}
+      rust_test: ${{ steps.verdict.outputs.rust_test }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - id: verdict
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: node scripts/release-verdict.mjs "${{ github.sha }}"
+
+  # The push gates on this exact commit: a green run on another commit does not cover the download.
+  # `ci` is `pnpm check` + the vite build + the no-ASIO `cargo check`; `rust-test` is `cargo test`.
+  # They run beside `exe`, and only the release waits for them. On a tag push each runs here unless
+  # `verdict` read it green on this commit. A smoke build skips them: nothing is published from it.
   ci:
-    if: ${{ github.event_name != 'workflow_dispatch' || !inputs.smoke }}
+    needs: verdict
+    if: ${{ !cancelled() && (github.event_name == 'push' && needs.verdict.outputs.ci != 'green' || github.event_name == 'workflow_dispatch' && !inputs.smoke) }}
     uses: ./.github/workflows/ci.yml
 
   rust-test:
-    if: ${{ github.event_name != 'workflow_dispatch' || !inputs.smoke }}
+    needs: verdict
+    if: ${{ !cancelled() && (github.event_name == 'push' && needs.verdict.outputs.rust_test != 'green' || github.event_name == 'workflow_dispatch' && !inputs.smoke) }}
     uses: ./.github/workflows/rust-test.yml
 
   exe:
@@ -174,9 +201,13 @@ jobs:
 
   # The only job with write access, and it runs no repo code: it publishes the files built above as
   # the tag's release through the runner's preinstalled `gh`, with the annotated tag's notes.
+  # Each gate is green when it ran here and passed, or was skipped because `verdict` read it green.
   release:
-    needs: [ci, rust-test, exe]
-    if: github.event_name == 'push'
+    needs: [verdict, ci, rust-test, exe]
+    if: >-
+      ${{ !cancelled() && github.event_name == 'push' && needs.exe.result == 'success'
+      && (needs.ci.result == 'success' || needs.ci.result == 'skipped' && needs.verdict.outputs.ci == 'green')
+      && (needs.rust-test.result == 'success' || needs.rust-test.result == 'skipped' && needs.verdict.outputs.rust_test == 'green') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
