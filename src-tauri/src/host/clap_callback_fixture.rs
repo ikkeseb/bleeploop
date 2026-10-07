@@ -192,7 +192,7 @@ fn init_reentrant_and_background_requests_reach_the_owner_once_per_turn() {
     let host = unsafe { *s.host };
     std::thread::spawn(move || {
         #[cfg(debug_assertions)]
-        let allocations_before = super::super::rt_alloc::RT_ALLOCS.load(Relaxed);
+        let allocations_before = super::super::rt_alloc::allocations();
         {
             #[cfg(debug_assertions)]
             let _guard = super::super::rt_alloc::guard();
@@ -202,7 +202,7 @@ fn init_reentrant_and_background_requests_reach_the_owner_once_per_turn() {
         }
         #[cfg(debug_assertions)]
         assert_eq!(
-            super::super::rt_alloc::RT_ALLOCS.load(Relaxed),
+            super::super::rt_alloc::allocations(),
             allocations_before,
             "request_callback through the real host ABI must allocate nothing"
         );

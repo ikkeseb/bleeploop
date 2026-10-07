@@ -481,20 +481,14 @@ pub(super) fn one_engine_test_at_a_time() -> std::sync::MutexGuard<'static, ()> 
     LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// Test-only: the allocations `f` makes on this thread under the RT alloc guard. The counter is
-/// process-wide; a window it went backwards in (a reset) is measured again.
+/// Test-only: the allocations `f` makes on this thread under the RT alloc guard.
 #[cfg(all(test, debug_assertions))]
 pub(super) fn rt_allocations(mut f: impl FnMut()) -> u64 {
-    use super::super::rt_alloc::{guard, RT_ALLOCS};
-    loop {
-        let before = RT_ALLOCS.load(Relaxed);
-        {
-            let _guard = guard();
-            f();
-        }
-        let after = RT_ALLOCS.load(Relaxed);
-        if after >= before {
-            return after - before;
-        }
+    use super::super::rt_alloc::{allocations, guard};
+    let before = allocations();
+    {
+        let _guard = guard();
+        f();
     }
+    allocations() - before
 }

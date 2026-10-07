@@ -351,18 +351,17 @@ fn try_rt(core: &Core) -> Option<MutexGuard<'_, Rt>> {
 }
 
 /// Run `body` as a callback's guarded section: a panic is caught and counted (false), and in DEV builds
-/// the allocations inside it are counted (`host::rt_alloc`; the counter is process-wide, so another
-/// thread's guarded allocation at the same moment would count here too).
+/// the allocations inside it are counted (`host::rt_alloc`, this thread's).
 pub(crate) fn guarded(counters: &IoCounters, body: impl FnOnce()) -> bool {
     #[cfg(debug_assertions)]
-    let before = crate::host::rt_alloc::RT_ALLOCS.load(Relaxed);
+    let before = crate::host::rt_alloc::allocations();
     #[cfg(debug_assertions)]
     let alloc_guard = crate::host::rt_alloc::guard();
     let ok = catch_unwind(AssertUnwindSafe(body)).is_ok();
     #[cfg(debug_assertions)]
     {
         drop(alloc_guard);
-        let after = crate::host::rt_alloc::RT_ALLOCS.load(Relaxed);
+        let after = crate::host::rt_alloc::allocations();
         if after > before {
             counters.rt_allocs.fetch_add(after - before, Relaxed);
         }

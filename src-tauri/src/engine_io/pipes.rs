@@ -723,8 +723,7 @@ pub(crate) mod tests {
     #[test]
     fn push_and_pull_never_allocate() {
         use crate::host::rt_alloc;
-        use std::sync::atomic::Ordering::Relaxed;
-        let counted = || rt_alloc::RT_ALLOCS.load(Relaxed);
+        let counted = rt_alloc::allocations;
         // The probe sees an allocation (else a zero below proves nothing).
         let before = counted();
         {
