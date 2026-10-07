@@ -93,11 +93,12 @@ const HOLD: Duration = Duration::from_secs(2);
 /// How long a plugin may take to come back into its slot after a switch.
 const SLOT_WAIT: Duration = Duration::from_secs(5);
 const WAIT: Duration = Duration::from_secs(10);
-/// `--tone` starts once the device frame counter has run this long. On the rig's interface (ASIO 64,
-/// 44.1 kHz) a slow disturbance crosses the returning tone about 6.8 s in, in every run: some 0.65 s
-/// with no residual spike, the level within 5 %, the phase left under a tenth of a frame from where it
-/// was, with any scene, with and without plugins, no callback long or late. Its cause is unknown
-/// (`src-tauri/AGENTS.md` § Open threads, the crackle thread); the tone run is about what comes later.
+/// `--tone` starts once the device frame counter has run this long (`--tone-from` moves it). On the
+/// rig's interface (ASIO 64, 44.1 kHz) a signal added near the tone's frequency beats with the returning
+/// tone about 6.8 s in, fading over some 0.6 s, with any scene, with and without plugins, no callback
+/// long or late; past the thresholds in most runs that watched it, always at half level. Its source is
+/// unknown (`src-tauri/AGENTS.md` § Open threads, the crackle thread); the tone run is about what comes
+/// later.
 const TONE_FROM: Duration = Duration::from_secs(10);
 /// The soak's block-load bar, in whole percent of the period.
 const P999_BAR: usize = 50;

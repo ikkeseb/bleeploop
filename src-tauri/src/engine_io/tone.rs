@@ -74,8 +74,8 @@ const GAP_CAP: usize = 64;
 const SNIPPETS: usize = 8;
 const SNIP_HALF: usize = 256;
 /// The windows' trace around an event that opened on the phase or the level, with no residual spike (the
-/// slow disturbance's mark, the crackle thread): how many such events, and the windows before its onset and from it on (0.26 s and
-/// 1.03 s at 44.1 kHz).
+/// mark of a signal added near the tone's frequency, the crackle thread): how many such events, and the
+/// windows before its onset and from it on (0.26 s and 1.03 s at 44.1 kHz).
 const TRACES: usize = 4;
 const TRACE_BEFORE: usize = 128;
 const TRACE_AFTER: usize = 512;

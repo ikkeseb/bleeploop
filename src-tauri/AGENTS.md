@@ -341,82 +341,27 @@ plugin-GUI work.
 - Archetype Plini (VST3) once stalled 4–14 s in 5 of 20 unloads, editor closed, and has not repeated
   since (cause unknown). The VST3 teardown and the unload log per-step timing in release too, so the
   next occurrence names its step.
-- Crackle, the owner's two reports, measured on the rig 2026-10-06 with silent `--probe-engine`
-  soaks (`docs/VERIFY.md`, `native:engine`). **In a call** (ASIO 64, a call on the same interface
-  through Windows audio, every 5–10 minutes, heard by the far end too; reportedly at 256 as well):
-  the release log of that day shows Share output mirroring into the Scarlett's own Windows endpoint.
-  Soaked that way on an idle machine, the mirror ran short in two bursts 10 min 48 s apart (15 events
-  of two or three short 10 ms callbacks each: 37 `share_starves`, 2 trims in 25 minutes), a gap each
-  for whoever hears the mirror, while the ASIO callbacks counted nothing. The mirror's setpoint went
-  from 20 to 40 ms (`engine_io/share.rs`), and the same soak then counted nothing in 26 minutes (one
-  run, other work on the machine at times). Whether this was the crackle the owner heard is the
-  owner's ear's to say (`STATUS.md` § Not heard yet). Into the virtual cable at 256 the owner's log
-  has no starve in a three-hour session. The three or four at some mirror opens were cpal's empty
-  start: the endpoint's first pull asks for its whole buffer, which ran the ring short; that first
-  pull now plays silence (`share.rs`, a test pins it; not yet soaked on the rig).
-  **While agents build** (heavy, twice, once with BleepLoop closed): not heard, no ear was at
-  the PC, but measured. ASIO 64 counted nothing in 20 minutes of soaks under 16 and 32 busy threads
-  at normal priority, clean `cargo check`s at below-normal priority and a WSL-side load, nor in 70
-  minutes without a load of this session's making: a build moved no fault counter on the engine's or
-  the driver's ASIO side. What a build does to another app follows its priority: a normal-priority thread doing
-  1 ms of work every 10 ms lost a third of its turns to 16 busy normal-priority threads and ran up
-  to 29 ms late beside a normal-priority `cargo check`; beside the same check at below-normal
-  priority and beside a WSL load it ran at most 6 ms late and lost none. Windows processes started
-  from the rig PC's logon tmux session run at below-normal priority (its scheduled task's), builds
-  included; a WSL session opened from a terminal window has a normal-priority host (its children
-  were not sampled). Which kind built when it crackled, and what was playing, is unknown. A loaded
-  engine beside a build (2026-10-07, ASIO 64, `native:engine --scene=heavy --profile=rig`, both plugins
-  live, `--mute`, 10-minute soaks, the build a normal-priority `pnpm rust:check`, mostly its `cargo
-  test`): idle, the heavy scene's worst callback took < 76 % of its period and none ran past it;
-  beside the build, 32 did, up to < 196 %, in four of the ten minutes, and the default scene's 3, up
-  to < 103 % (an earlier 15-minute run, debug build, default scene, had one at 151 %). Every fault
-  counter stayed 0 and no phase slip came in any run (`asio_late_max` rose: 232 beside the build):
-  the driver reported nothing. The debug build (`pnpm dev:asio`'s) is a little slower (heavy, idle:
-  p99.9 < 60 % against < 53 %, one callback past its period in 5 minutes). In these runs a
-  normal-priority build stretched the audio callback past its period, more often with the heavy
-  scene; the release log writes such a span (`over_budget=N`). A loopback tone says what such
-  callbacks do (`native:engine --tone=1`, line out R cabled into input 2; heavy scene, rig build,
-  10-minute soaks, 2026-10-07; the build `--load=test`, the workspace's `cargo test` in cargo's order at
-  normal priority, pass after pass). Idle, two runs: a clean tone, no callback past its period. Beside
-  the build: at 64 frames, five runs, 22 to 54 callbacks past their period each and 13 breaks in all
-  (0 to 8 a run), every one at long callbacks; at 128, one run, 5 (up to < 106 %) and none; at 256, two
-  runs, 25 and 9, five breaks and none; at 64 with both slots empty, 17 (the median < 15 %) and none. A
-  break goes silent for 6 to 48 samples (under a period even at 256), the phase back after; one at 256
-  jumped without a silence. Neither how many long callbacks came together nor their duration told a
-  break apart, but how late the worst one finished: its entry behind the wakes' best phase plus its
-  duration. At 64 every break had one finishing 2.52 periods or more after it (2.58 and up in the three
-  runs that resolve entries within a period) and nothing away from a break passed 2.47; at 256 one break
-  of five finished at 2.36, the rest 2.52 to 2.98; at 128 the worst finished at 2.04. A larger buffer
-  does not cover the stalls, which grow with it (the worst callback 2.2 ms at 64, 9.6 ms at 256, four to
-  eight times the median at every size, with and without plugins). The app's one busy thread is the
-  audio callback, at priority 25 (MMCSS Pro Audio; the rig's `SystemResponsiveness` is 0), idle and
-  through the build, and in three runs every long callback's thread ran 97 to 100 % of the time-stamp
-  counter's ticks: Windows did not take it off the CPU; it ran slow, or ISR, DPC, SMI or hypervisor time
-  was charged to it (`tone::cycle_stamp`). With the load kept to cores 4 to 7 (`--load-affinity=FF00`)
-  in two runs (435 s and 603 s loaded) no callback ran past its period (the worst < 69 % and < 93 %)
-  and no break came: the stall comes from the build on the audio thread's own core (its SMT sibling or
-  its caches, not told apart), not from the shared cache, memory or the whole system. Every fault
-  counter stayed 0 through every break. The release log now names such a moment: `asio_late_finishes`
-  counts episodes of callbacks finishing 2.4 periods or more after the best phase
-  (`callback::LATE_FINISH_PERIODS`, a span line when it moves). Over these runs it would have counted every break at 64, four near misses in a
-  loaded run that broke nothing and none idle, and not the 2.36 break at 256: an indicator, not proof.
-  The cable returns through the same driver's input, so which side broke is unknown (a guitar through
-  the app passes both). Three times in about seventeen runs the tone stepped back exactly one frame
-  with no silence and no late callback near (at 128 once, at 64 twice, idle and beside the load): a
-  frame lost or repeated on the loopback, its side and cause unknown. The tone also carries something
-  added near its frequency: started 1 s into the stream at half level (`--tone-from=1
-  --tone-level=0.125`), a beat in phase (±0.1 rad) and level (±25 %) that fades over about 0.6 s came
-  at 6.75 and 6.82 s in both runs (heavy and default scene: about -32 dBFS at the input), and smaller
-  ones (±5 %, 0.1 to 0.2 s, about -46 dBFS) came 8 times in one run and as 11 pairs 1.7 s apart every
-  35 to 65 s in the other; at full level, with the same timing, none passed the thresholds (one run).
-  It is the earlier runs' slow disturbance at about 6.8 s; its source is unknown. Not measured: memory
-  pressure. Next checks: whether keeping builds off one core, by affinity or fewer jobs, keeps a jam at
-  ASIO 64 clean by ear, and which of the core's sibling and caches matters (the load on one logical
-  processor per core, `--load-affinity=AAAA`); the one-frame steps' side; the added signal with no tone
-  at all; and the owner's ear on music through the interface, then on a full scene at ASIO 64, during a
-  `pnpm rust:check` from a normal-priority shell, then from the tmux session. A tester hears crackle at
-  times too, less marked with a gate on their interface, which puts some of it on the input side there;
-  on WASAPI the join's bursts (below) would sound like that (their backend is unknown).
+- Crackle, the owner's two reports, measured on the rig with silent soaks (`native:engine`; every run's
+  numbers: this thread's git history). **In a call:** Share output mirroring into the interface's own
+  Windows endpoint ran short in bursts at a 20 ms setpoint; at 40 ms (`engine_io/share.rs`) a 26-minute
+  soak counted nothing, and the mirror's first pull now plays silence (unsoaked). **While agents
+  build** (ASIO 64, `--tone=1 --load=test`): a normal-priority build on the audio thread's own core
+  stretches the callback four to eight times its median, its thread on the CPU throughout
+  (`tone::cycle_stamp`; MMCSS priority 25, with or without plugins). The loopback tone breaks (6 to 48
+  silent samples) where a callback finishes about 2.5 periods or more after the wakes' best phase, and
+  no fault counter moves. A larger buffer does not help (256 broke too); with the load kept off cores 0
+  to 3 (`--load-affinity=FF00`) nothing ran long in two runs. The release log names such moments with
+  `asio_late_finishes` (`callback::LATE_FINISH_PERIODS`): an indicator that counts near misses too and
+  missed one 256 break; `over_budget=N` marks every long callback. The cable returns through the same
+  driver, so a break's side is unknown. Open, with the next check: by ear, whether keeping builds off
+  the audio core (affinity or fewer jobs) keeps a jam at ASIO 64 clean, and whether the call's crackle
+  is gone (`STATUS.md` § Not heard yet); whether a below-normal build (the rig's tmux session starts
+  them so) stalls it too, and which of the core's SMT sibling and caches matters
+  (`--load-affinity=AAAA`); one-frame steps in the tone (3 in about 17 runs, no late callback near;
+  side unknown); something added near the tone's frequency (a beat fading over 0.6 s about 6.8 s into
+  the stream, smaller ones minutes apart, seen at `--tone-level=0.125`; next: the input with no tone). A
+  tester hears crackle too, less with a gate on their interface (their input side; on WASAPI the join's
+  bursts below would sound like that; their backend unknown).
 - Plugin-host gaps a source review found (2026-10-02; read from source, none reproduced), ranked by
   exposure on the owner's plugins. First: VST3 omits trailing inactive aux buses (the SDK's
   `activateBus` rule permits it) and passes short `setBusArrangements` arrays whose result is read
@@ -429,33 +374,15 @@ plugin-GUI work.
   its timeout stays open; CLAP visibility and connection-loss callbacks do nothing; the scanner caches
   factories that forbid it.
 - After a WASAPI open the join can trim or starve within ~2.5 s, and a take that overlaps it is
-  rejected: 9 of 85 opens after ASIO had run in the process, 1 of 43 without (`docs/VERIFY.md`,
-  `native:engine`'s baseline). Traced (the join trace in `engine_io/callback.rs`): once the pipe has
-  primed, the capture side delivers one packet more than its time (about three opens in four, 0.2–1.1 s
-  in) and a render callback comes a period late without asking for more (four opens in five after ASIO,
-  one in ten without), so pulls find the ring up to two 10 ms periods over its 25 ms setpoint, just
-  under the trim line at twice the setpoint, for the ~10 s the controller takes to drain it. From there
-  a trim takes only a push and a pull swapping order on one tick, a render callback 20–30 ms late that
-  asks for two periods (the trim is judged on the fill before the pull: the ring is cut to the setpoint
-  and the pull leaves it a period short), or one more late render callback; a starve follows a trim
-  when a capture wake is late, or comes at the start when capture delivers its packets two at a time.
-  Empty plugin slots, `--mute` and a 3 s pause after the ASIO close do not remove it. Why the endpoints
-  start this way is unknown (the callbacks' timing was measured, not the device); Signal Desktop and
-  Focusrite Notifier ran throughout. By the pipe's own sizing rule (`PipeConfig::setpoint`) these pushes
-  and pulls ask for 33–43 ms. The trims stay (D25): a trim rule that tolerated these bursts, replayed
-  through the pipe against nine traced opens, removed all 8 trims and 2 of 9 starves but kept 27 to
-  29 ms more input queued for up to 3.5 s after each burst, so it did not land. `native:engine`'s
-  counter check forgives the join's trims and starves in a WASAPI open's first 3 s (`probe.rs`
-  `GRACE`); a take that overlaps one is still rejected.
-  Past the open too (2026-10-06, 44.1 kHz, no plugins, `--mute`): the join starves in bursts minutes
-  into a run. Beside an ASIO 64 engine in a second process, on an idle machine: a starve about every
-  8 s for two minutes, twice, 10 min 28 s apart (62 `join_starves` in 20 minutes; the ASIO process
-  counted nothing), and after each burst two to three minutes with up to 16 % fewer render callbacks
-  and no counter moving. Alone: 18 starves 55–134 s after the open in one run (under CPU load, the
-  app at below-normal priority class), 2 at 129 s in a second, none in a third of 190 s at normal
-  class. Neighbour, load and class are not separated (four runs). Share output showed the same
-  rhythm into the same interface (the crackle thread above); the join's setpoint is monitoring
-  latency, so widening it is the owner's call (D25).
+  rejected (9 of 85 opens after ASIO had run in the process, 1 of 43 without). Traced (the join trace in
+  `engine_io/callback.rs`): once primed, capture delivers a packet early and a render callback comes a
+  period late, so the ring sits up to two periods over its 25 ms setpoint, under the trim line, for the
+  ~10 s the controller takes to drain it, and one more late callback trims. Why the endpoints start
+  this way is unknown. The trims stay (D25): a rule that tolerated the bursts, replayed on nine traced
+  opens, removed the trims but kept 27 to 29 ms more input queued for up to 3.5 s. `native:engine`
+  forgives a WASAPI open's first 3 s (`probe.rs` `GRACE`). Past the open the join also starves in
+  bursts minutes in, beside an ASIO process and alone under load; neighbour, load and priority class
+  are not separated (four runs). Widening the setpoint is monitoring latency: the owner's call (D25).
 - The release profile warns of four unused items in `app` (`Duration` in `host/vst3.rs`,
   `promote_pro_audio` in `host/clap.rs`, `teardown` in `host/vst3.rs`, `asio_available` in
   `audio_output.rs`); since when is unknown.
