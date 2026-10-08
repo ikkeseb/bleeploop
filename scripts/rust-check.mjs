@@ -23,6 +23,10 @@ const logPath = join(root, 'logs', 'rust-check.log');
 mkdirSync(dirname(logPath), { recursive: true });
 const log = createWriteStream(logPath);
 
+// Test binaries at once: under the dev PC's 16 logical processors, so the owner's other builds and a
+// jam keep some of the machine while the gate runs (cargo-test.mjs's default is one per processor).
+const TEST_JOBS = 10;
+
 const STEPS = [
   ['check', '--workspace', '--no-default-features'],
   ['check', '--no-default-features', '--features', 'asio'],
@@ -67,7 +71,7 @@ for (const args of STEPS) {
   let result;
   if (args[0] === 'test') {
     log.write(`\n$ cargo ${args.join(' ')} (scripts/cargo-test.mjs)\n`);
-    const test = await cargoTest(args.slice(1), { log: (text) => log.write(text) });
+    const test = await cargoTest(args.slice(1), { jobs: TEST_JOBS, log: (text) => log.write(text) });
     result = { code: test.code, out: test.out, passed: test.passed };
   } else {
     result = await cargo(args);

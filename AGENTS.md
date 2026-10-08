@@ -44,6 +44,9 @@ Harness auto-load of nested files is not reliable: open the briefing yourself.
   it can (`STATUS.md` § Not heard yet), and a later "this is off" reopens it. Prefer work a machine
   gate or a probe can settle. Rank unbuilt work by provenance: the owner's ear > the owner's stated
   roadmap > an agent's tier list.
+- **Propose bold changes.** The owner wants the best product it can be: suggest replacing or ripping
+  out a working part when its successor is better in latency, stability, UX or function, however
+  large the change. The owner decides; the change is measured as any other.
 - **The play path is guitar → amp-sim plugin (native monitor) → play/loop/dub at low latency.** The
   looper is the instrument. MIDI controller → synth/plugin is the second path, for the other layers;
   its MIDI arrives through the WebView (Web MIDI); PC-keyboard→MIDI is its fallback. By-ear sessions happen on
