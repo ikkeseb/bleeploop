@@ -53,6 +53,32 @@ next block start (`src/ui/state/midi.ts`, `src/platform/index.ts` `sendEngine`, 
   WinMM goes through `wdmaud2.drv`; loopback and virtual transports registered). No loopMIDI. midir
   cannot create virtual ports on Windows.
 
+## Step 0 findings (2026-10-09, no device plugged in, nothing installed)
+
+- **No measurement port without an install.** Enumerating WinMM starts `midisrv` (demand-start; it
+  was stopped, it runs after a `midiInGetNumDevs`). WinMM then lists 0 inputs and 1 output (Microsoft
+  GS Wavetable Synth). The service's own loopbacks (`SWD\MIDISRV\MIDIU_DIAG_LOOPBACK_A`/`_B`, "Service
+  Test Loopback A/B") come up with the service but expose only the MIDI 2.0 endpoint interface class
+  `{e7cce071-3c03-423f-88d3-f1045d02552b}`, no WinMM port. Creating a loop endpoint (the
+  `MIDIU_LOOP_TRANSPORT` transport is present) needs the Windows MIDI Services SDK runtime or tools, an
+  install; the session runs at medium integrity. So the measurement port is loopMIDI or the MIDI
+  Services tools, both the owner's to approve at the PC: step 6 is built but cannot merge until then.
+- **Web MIDI ids carry no device identity** (Chromium source on `main`, 2026-10-09, read, not run):
+  WebView2's Chromium uses the WinMM backend unless the `MidiManagerWinrt` feature is on (off by
+  default; whether WebView2 turns it on is unknown). An input's `MIDIInput.id` is `"input-<N>"`, N
+  the order in which that run's MIDI manager first saw the port (`midi_manager_win.cc` `set_index`,
+  "TODO: Use hashed ID"); Blink passes it through unchanged. A replug inside one run matches the port
+  back by `wMid`, `wPid`, `vDriverVersion` and `szPname`; a restart renumbers from the WinMM order, so
+  `input-2` can name another device on the next run. Two devices with identical caps show as one.
+  The stored `portName` is therefore the strongest identity a legacy binding holds (that it equals
+  WinMM's `szPname` is inferred, to confirm with a device).
+- **midir's port id** is the WinMM device-interface path (`DRV_QUERYDEVICEINTERFACE`, midir 0.11
+  `backend/winmm`); several ports of one device share it, so a binding needs a discriminator beside it.
+  Its stability across restart and replug, the interface class a WinMM port arrives on under
+  `wdmaud2`, and whether WinMM input is multi-client there are unknown: no input port exists to test
+  (the owner's check with a controller, `STATUS.md` when the switch ships).
+- **Not run:** the DEV app's `[diag]` Web MIDI list (WinMM has no input to show).
+
 ## Decided
 
 1. **One router, in Rust, for every note source.** Moving only MIDI would leave two routers sending
@@ -116,13 +142,15 @@ next block start (`src/ui/state/midi.ts`, `src/platform/index.ts` `sendEngine`, 
    discriminator, and keeps the name for display. Ambiguous identity leaves a binding unresolved; it
    never fires another controller's action. Writes happen off the router's lock.
 9. **Migration never guesses.** At first start, `lf.midiLearn` imports idempotently, keeping each
-   record's legacy port id. A record activates only through a Web-MIDI-to-native identity mapping step
-   0 proves, or when the player assigns it to a present controller in Audio Settings (the name is a
-   suggestion); the rest stay inactive and listed. The legacy key is removed one release later, after
+   record's legacy port id. Step 0 found that id a per-run ordinal, so the record's port name is its
+   identity: a record activates on the one present port with that name, and stays inactive and listed
+   while no port or more than one carries it, until a matching port appears alone or the player
+   assigns it to a present controller in Audio Settings. The legacy key is removed one release later, after
    the native store has acknowledged a durable write. Bindings load before input executes actions.
-10. **Port liveness:** `CM_Register_Notification` (no window pump) on the MIDI input interface class
-    the active backend exposes (`DEVINTERFACE_MIDI_INPUT` under `wdmaud2`, as Windows MIDI Services'
-    own WinMM client registers; step 0 confirms it), registered before the first enumeration.
+10. **Port liveness:** `CM_Register_Notification` (no window pump) on both MIDI interface classes a
+    WinMM port may arrive on under `wdmaud2` (the WinMM MIDI input class, and the MIDI 2.0 endpoint
+    class step 0 saw the service's endpoints on; which one a controller uses is the owner's device
+    check), registered before the first enumeration.
     A notification invalidates the connection generation and wakes the port thread; a removal releases
     that port's notes and HOLD; an arrival reopens after enumeration confirms the port, retried a
     bounded number of times; duplicate notifications are harmless; callbacks from an old generation
