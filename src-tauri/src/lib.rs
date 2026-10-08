@@ -348,6 +348,12 @@ pub fn run() {
             engine_io::mode::engine_snapshot,
             #[cfg(windows)]
             engine_io::mode::engine_load_session,
+            // DEV: the MIDI benchmark's UI stalls (`engine_io/midi_bench.rs`; the frontend's side is
+            // `src/platform/host.tauri.ts`, DEV only).
+            #[cfg(all(windows, debug_assertions))]
+            engine_io::midi_bench::midi_bench_stall_plan,
+            #[cfg(all(windows, debug_assertions))]
+            engine_io::midi_bench::midi_bench_stall,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

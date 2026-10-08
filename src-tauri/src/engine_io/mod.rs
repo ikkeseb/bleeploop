@@ -21,7 +21,7 @@
 //! | `driver` | the seam the owner opens streams through; `cpal_driver` is the real one, `fake_driver` (tests) the hardware-free one |
 //! | `slot_host` | [`SlotHost`]: a plugin owner's install/remove/eviction handshake with the engine |
 //! | `fpu` | the float mode every audio callback runs in: flush-to-zero and denormals-are-zero |
-//! | `frame_clock` | [`FrameClock`]: the callback's (time, frame) stamp and a press's frame |
+//! | `frame_clock` | [`FrameClock`]: the callback's (time, frame) stamp and a press's frame; DEV, the stamps' history a frame turns into time through |
 //! | `pipes` | [`pipes::PullPipe`]: frames pushed on one clock, pulled resampled on another (the WASAPI join, Share output) |
 //! | `feed` | the feed: what the UI reads back (events, device, status, anchor, meter, waveforms), on its own thread |
 //! | `mode` | engine mode: the managed host, the tone store's folder, the `engine_*` Tauri commands, shutdown on exit |
@@ -30,6 +30,7 @@
 //! | `settings` | the last value of every setting, replayed into each new engine; a lane's mix as the engine applied it (its `Event::Mix`) |
 //! | `share` | Share output: the post-limiter master mirrored to a WASAPI endpoint while ASIO plays |
 //! | `midi` | native MIDI (built, never started by the app): ports, hot-plug, parse, the MIDI-learn bindings, notes and pedal actions |
+//! | `midi_bench` | DEV: the MIDI latency benchmark (a loopback sender, arrival stamps, the applied-note record's report) and the `settings`/`ends` lock waits, each run only when an environment variable asks |
 //! | `probe` | DEV: `app.exe --probe-engine`, the device side on real hardware (soak, switches, plugin swaps) |
 //! | `tone` | DEV: the probe's loopback tone (`--tone`): its hook in the output callback, the detector, the long and late callbacks' log |
 //! | `wire` | the JSON wire to the UI: the serde mirror of the engine's commands and events, the feed frame |
@@ -112,6 +113,8 @@ mod feed;
 mod fpu;
 pub mod frame_clock;
 pub mod midi;
+#[cfg(debug_assertions)]
+pub mod midi_bench;
 pub mod mode;
 mod owner;
 pub(crate) mod pipes;
@@ -133,7 +136,7 @@ pub mod wire;
 
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering::{AcqRel, Acquire, Relaxed}};
 use std::sync::mpsc::{sync_channel, RecvTimeoutError, SyncSender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LockResult, Mutex, MutexGuard};
 use std::time::Duration;
 
 use lf_engine::grid::Frame;
@@ -521,6 +524,30 @@ pub(crate) struct Ends {
     pub(crate) session: Option<SessionPort>,
 }
 
+/// Who takes `settings` or `ends` (`lock_at`): the input path (`EngineHost::send_all`), the feed
+/// (`drain_feed`), or another reader.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum LockSite {
+    SettingsSend,
+    EndsSend,
+    SettingsFeed,
+    EndsFeed,
+    Settings,
+    Ends,
+}
+
+/// Take `mutex` for `site`: DEV builds time the wait (`midi_bench`'s lock waits); release builds lock.
+fn lock_at<T>(mutex: &Mutex<T>, site: LockSite) -> LockResult<MutexGuard<'_, T>> {
+    #[cfg(debug_assertions)]
+    let began = std::time::Instant::now();
+    let guard = mutex.lock();
+    #[cfg(debug_assertions)]
+    midi_bench::LOCK_WAITS.record(site, began.elapsed());
+    #[cfg(not(debug_assertions))]
+    let _ = site;
+    guard
+}
+
 /// State shared by the device owner, the callbacks, the slot hosts and the command threads.
 pub(crate) struct Core {
     /// The callback only `try_lock`s it.
@@ -650,7 +677,7 @@ impl Core {
     /// armed, a kept RETAKE pass). Read from its overview's lane states, without the engine lock: a
     /// lane's frames read 0 across a RETAKE pass boundary and through a count-in.
     pub(crate) fn holds_audio(&self) -> bool {
-        let ends = self.ends.lock().unwrap_or_else(|e| e.into_inner());
+        let ends = lock_at(&self.ends, LockSite::Ends).unwrap_or_else(|e| e.into_inner());
         ends.as_ref().is_some_and(|e| (0..TRACK_COUNT).any(|i| e.overview.lane(i).state != LaneState::Empty))
     }
 
@@ -861,8 +888,8 @@ impl EngineHost {
     /// release and a `Press` are dropped (nothing can be held, no CLEAR armed), and any other action
     /// makes it an error.
     pub fn send_all(&self, commands: impl IntoIterator<Item = TimedCommand>) -> Result<(), String> {
-        let mut settings = self.core.settings.lock().map_err(|_| "engine settings poisoned".to_string())?;
-        let mut ends = self.core.ends.lock().map_err(|_| "engine ends poisoned".to_string())?;
+        let mut settings = lock_at(&self.core.settings, LockSite::SettingsSend).map_err(|_| "engine settings poisoned".to_string())?;
+        let mut ends = lock_at(&self.core.ends, LockSite::EndsSend).map_err(|_| "engine ends poisoned".to_string())?;
         let mut refused = false;
         for command in commands {
             match ends.as_mut() {
@@ -883,19 +910,19 @@ impl EngineHost {
 
     /// The kept settings, in replay order (a reset frame hands them to the UI).
     pub(crate) fn settings(&self) -> Vec<lf_engine::Command> {
-        self.core.settings.lock().map(|s| s.replay().collect()).unwrap_or_default()
+        lock_at(&self.core.settings, LockSite::Settings).map(|s| s.replay().collect()).unwrap_or_default()
     }
 
     /// Each lane's mix as the engine last reported it (`Event::Mix`), for the lanes it has reported.
     pub(crate) fn mixes(&self) -> Vec<Event> {
-        self.core.settings.lock().map(|s| s.mixes().collect()).unwrap_or_default()
+        lock_at(&self.core.settings, LockSite::Settings).map(|s| s.mixes().collect()).unwrap_or_default()
     }
 
     /// Move the engine's events into `out`, as `drain_events`; with the generation of the engine they
     /// came from and its overview (`None` while no engine exists), read under the same lock.
     pub(crate) fn drain_feed(&self, out: &mut Vec<Event>) -> (u64, Option<Arc<Overview>>) {
-        let mut settings = self.core.settings.lock().unwrap_or_else(|e| e.into_inner());
-        let Ok(mut ends) = self.core.ends.lock() else { return (self.core.engine_gen.load(Acquire), None) };
+        let mut settings = lock_at(&self.core.settings, LockSite::SettingsFeed).unwrap_or_else(|e| e.into_inner());
+        let Ok(mut ends) = lock_at(&self.core.ends, LockSite::EndsFeed) else { return (self.core.engine_gen.load(Acquire), None) };
         let gen = self.core.engine_gen.load(Acquire);
         let Some(ends) = ends.as_mut() else { return (gen, None) };
         drain(&mut settings, &mut ends.events, gen, |e| out.push(e));

@@ -264,8 +264,39 @@ export async function reportTauriDiagnostics(): Promise<void> {
     secureContext: self.isSecureContext === true,
     userAgent: navigator.userAgent,
   };
+  void runBenchStalls();
   report.midi = await probeMidi();
   await emitDiag(report);
+}
+
+/**
+ * DEV: the MIDI latency benchmark's UI stalls (`src-tauri/src/engine_io/midi_bench.rs`; how to run it:
+ * `docs/VERIFY.md` § MIDI latency benchmark). When the benchmark asks for them, the main thread is kept
+ * busy for `ms` every `everyMs`, and each window goes back to Rust, so the report can split the notes
+ * sent inside one. Stops once the benchmark has ended. Nothing runs when no benchmark asked.
+ */
+async function runBenchStalls(): Promise<void> {
+  if (!import.meta.env.DEV) return;
+  let plan: { everyMs: number; ms: number } | null;
+  try {
+    plan = await invoke<{ everyMs: number; ms: number } | null>('midi_bench_stall_plan');
+  } catch {
+    return;
+  }
+  if (!plan) return;
+  const { everyMs, ms } = plan;
+  const timer = setInterval(() => {
+    const start = performance.now();
+    while (performance.now() - start < ms) {
+      // A long main-thread task, on purpose: what a Web MIDI message waits behind.
+    }
+    const end = performance.now();
+    invoke<boolean>('midi_bench_stall', { agoMs: performance.now() - end, ms: end - start })
+      .then((more) => {
+        if (!more) clearInterval(timer);
+      })
+      .catch(() => clearInterval(timer));
+  }, everyMs);
 }
 
 async function emitDiag(report: Record<string, unknown>): Promise<void> {

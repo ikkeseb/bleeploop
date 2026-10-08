@@ -76,6 +76,9 @@ impl EngineApp {
         let engine = match FeedThread::spawn(host.clone()) {
             Ok(feed) => {
                 log::info!("[engine_io] engine mode: the native engine owns the audio device");
+                // DEV: the MIDI latency benchmark and the lock-wait log, when an environment variable asks.
+                #[cfg(debug_assertions)]
+                super::midi_bench::start_from_env(&host);
                 Some((host, feed))
             }
             Err(e) => {
@@ -169,6 +172,9 @@ pub async fn engine_set_slot_input_channel(slot: u8, channel: Option<u32>) -> Re
 /// cannot swap (an async command runs on the runtime's pool); it only takes two brief locks.
 #[tauri::command]
 pub fn engine_send(commands: Vec<WireCommand>) -> Result<(), String> {
+    // DEV: where a Web MIDI note reaches native code, for the MIDI benchmark (one atomic load unless it runs).
+    #[cfg(debug_assertions)]
+    super::midi_bench::arrived(commands.iter().map(|c| &c.0), std::time::Instant::now());
     let host = app()?.host()?;
     host.send_all(commands.into_iter().map(|c| TimedCommand { frame: None, command: c.0 }))
 }
