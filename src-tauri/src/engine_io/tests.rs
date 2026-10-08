@@ -2299,3 +2299,97 @@ fn d21_a_setting_sent_just_after_a_clear_is_what_the_lane_plays_and_exports() {
     println!("the new take against the first: heard {heard}, exported {exported}; kept {:?}", h.host.settings());
     assert!((exported / heard - 1.0).abs() < 0.1, "the export renders the lane at the level it plays: heard {heard}, exported {exported}");
 }
+
+/// A toggle (`Action::Toggle`, the native MIDI plan's decision 11) reaches the settings memory as the
+/// engine applied it: presses from alternating producers (a pedal, the UI, the pedal) each switch it
+/// once, and the memory follows each `Toggled`; a refused one changes neither the engine nor the memory.
+#[test]
+fn a_toggle_is_kept_as_applied_each_press_switches_it_once_and_a_refusal_keeps_nothing() {
+    use lf_engine::{Action, Refusal, Toggle};
+    let mut h = Harness::new();
+    h.open(asio(Some(256)));
+    for on in [true, false, true] {
+        h.send(Command::Action(Action::Toggle(Toggle::Fixed)));
+        let got = h.wait_event("FIXED switched", |e| match *e {
+            Event::Toggled { toggle: Toggle::Fixed, on, .. } => Some(on),
+            _ => None,
+        });
+        assert_eq!(got, on, "each press switches it from the value the engine has");
+        assert!(h.host.settings().contains(&Command::SetFixedLength(on)), "kept as applied: {:?}", h.host.settings());
+    }
+    // A reloaded page learns it from its first frame, a reset carrying the remembered settings.
+    let reset = super::feed::Feed::new(h.host.clone()).tick(true).expect("a reset frame");
+    assert!(reset.settings.expect("its settings").iter().any(|c| c.0 == Command::SetFixedLength(true)), "the reset frame carries FIXED on");
+    h.send(Command::RecDub(0));
+    h.wait_lane("the first take counts in", 0, |i| i.state == LaneState::Recording);
+    let before = h.host.settings();
+    h.send(Command::Action(Action::Toggle(Toggle::Retake)));
+    let reason = h.wait_event("RETAKE refused", |e| match *e {
+        Event::Refused { reason, .. } => Some(reason),
+        _ => None,
+    });
+    assert_eq!(reason, Refusal::RetakeCapturing);
+    h.play(RATE / 10);
+    h.host.drain_events(&mut h.events);
+    assert!(!h.events.iter().any(|e| matches!(e, Event::Toggled { toggle: Toggle::Retake, .. })), "nothing switched");
+    assert_eq!(h.host.settings(), before, "the remembered settings are unchanged");
+}
+
+/// A toggle the engine applied just before a rebuild, its `Toggled` still in the old engine's event ring:
+/// the rebuild drains it into the memory, and the replay carries it into the new engine.
+#[test]
+fn a_rebuild_right_after_an_accepted_toggle_keeps_it() {
+    use lf_engine::{Action, Toggle};
+    let mut h = Harness::new();
+    h.open(asio(Some(256)));
+    h.wait_mix("the engine reports lane 2", 2, |_| true);
+    h.send(Command::Action(Action::Toggle(Toggle::EndStop)));
+    h.play(RATE / 10);
+    h.fake.asio.lock().unwrap().as_mut().unwrap().rate = 44_100;
+    h.open(asio(Some(128)));
+    assert!(h.host.settings().contains(&Command::SetLoopEndStop(true)), "{:?}", h.host.settings());
+    h.send(Command::Action(Action::Toggle(Toggle::EndStop)));
+    // The new engine had it on, so the press switches it off.
+    h.wait_event("END STOP switched off in the new engine", |e| match *e {
+        Event::Toggled { toggle: Toggle::EndStop, on: false, .. } => Some(()),
+        _ => None,
+    });
+}
+
+/// A toggle whose `Toggled` the full event ring refused, then a rebuild before the ring drains: the
+/// memory reads the toggle from the old engine (`Engine::unsent_toggles`), and the new engine gets it.
+#[test]
+fn a_rebuild_keeps_a_toggle_the_full_event_ring_refused() {
+    use lf_engine::{Action, InputSend, Toggle};
+    let mut h = Harness::new();
+    h.open(asio(Some(256)));
+    h.wait_mix("the engine reports lane 2", 2, |_| true);
+    // Nobody reads the event ring from here: a SELECT is one event each, and they fill it.
+    let select = |i: usize| TimedCommand { frame: None, command: Command::SelectTrack((i % 5) as u8) };
+    for _ in 0..40 {
+        if h.host.diag().engine.events_dropped > 0 {
+            break;
+        }
+        h.host.send_all((0..400).map(select)).expect("the command ring takes them");
+        h.play(RATE / 10);
+    }
+    let refused = h.host.diag().engine.events_dropped;
+    assert!(refused > 0, "the event ring is full");
+    h.send(Command::Action(Action::Toggle(Toggle::Send(InputSend::Echo))));
+    h.send(Command::Action(Action::Toggle(Toggle::Click)));
+    h.play(RATE / 10);
+    assert!(h.host.diag().engine.events_dropped > refused, "and refuses what comes next");
+    let kept = h.host.settings();
+    assert!(!kept.contains(&Command::SetInputSend(InputSend::Echo, true)) && !kept.contains(&Command::SetMetronome(true)), "no Toggled reached the memory: {kept:?}");
+    h.fake.asio.lock().unwrap().as_mut().unwrap().rate = 44_100;
+    h.open(asio(Some(128)));
+    for command in [Command::SetInputSend(InputSend::Echo, true), Command::SetMetronome(true)] {
+        assert!(h.host.settings().contains(&command), "{command:?} read from the old engine: {:?}", h.host.settings());
+    }
+    h.send(Command::Action(Action::Toggle(Toggle::Click)));
+    h.wait_event("the click switched off in the new engine", |e| match *e {
+        Event::Toggled { toggle: Toggle::Click, on: false, .. } => Some(()),
+        _ => None,
+    });
+    assert!(h.host.settings().contains(&Command::SetMetronome(false)));
+}

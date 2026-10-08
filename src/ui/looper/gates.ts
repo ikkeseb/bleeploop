@@ -84,6 +84,16 @@ export function refusalText(reason: Refusal): string {
       return REFUSAL.fading.reason;
     case 'NoFade':
       return REFUSAL.noFade.reason;
+    case 'FixedCapturing':
+      return REFUSAL.fixedCapturing.reason;
+    case 'FixedRetake':
+      return REFUSAL.fixedRetake.reason;
+    case 'RetakeCapturing':
+      return REFUSAL.retakeCapturing.reason;
+    case 'AutoRecCapturing':
+      return REFUSAL.autoRecCapturing.reason;
+    case 'AutoRecLocked':
+      return REFUSAL.autoRecLocked.reason;
   }
 }
 
@@ -184,7 +194,8 @@ export function tapGate(): Gate {
 }
 
 /** May FIXED be switched? Not while a capture reads it, nor while RETAKE (whose passes roll at the
- * loop's length) overrides it over a loop. */
+ * loop's length) overrides it over a loop. The engine's own check of its toggle (`Looper::toggle_gate`);
+ * this one disables the control and titles it. */
 export function fixedGate(): Gate {
   if (otherCapturing()) return REFUSAL.fixedCapturing;
   if (looper.retakeEnabled() && looper.masterLengthFrames() > 0) return REFUSAL.fixedRetake;

@@ -122,7 +122,7 @@ function InputFxControl(props: { returnFocus?: (el: HTMLElement | undefined) => 
                         classList={{ 'fxp-mod__toggle--on': sends.on(send.id) }}
                         aria-pressed={sends.on(send.id)}
                         aria-label={`Input ${send.label.toLowerCase()}`}
-                        onClick={() => sends.setOn(send.id, !sends.on(send.id))}
+                        onClick={() => sends.toggle(send.id)}
                       >
                         {send.label}
                       </button>

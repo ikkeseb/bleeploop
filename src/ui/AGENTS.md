@@ -31,6 +31,8 @@ is a one-line adapter). UI-only edits are safe while the dev app runs,
   command and the feed shows the outcome (invariant 3). A lane mix control (volume, pan, DUB FEEDBACK, FX)
   shows its gesture's value until the feed's `Mix` has it, and MUTE sends the engine's toggle; the rule
   lives in `state/engine-store.ts` (the lane mix section), the controls' side in `looper/mix-gesture.ts`.
+  CLICK, END STOP, FIXED, RETAKE, AUTO REC and the IN FX sends send the engine's toggle too, and show
+  the feed's `Toggled`, never their own flip (`state/engine-store.ts` `toggleSetting`).
 - **One lane derivation:** a lane's display state, word, well message and count-in come from
   `looper/lane-state.ts`; the looper lanes and the stage view (`src/ui/stage/`) both read it, so a new
   state lands there once.

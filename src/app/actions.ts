@@ -1,24 +1,21 @@
 import { activeSlot, slotOff, slotPlugins } from '../ui/state/instrument';
 import { liveInPlay } from '../ui/state/native-io';
-import { sendEngine, type EngineAction, type InputSendId } from '../platform';
+import { sendEngine, type EngineAction } from '../platform';
 import { pressGoLive } from '../ui/instrument/live';
 import { nextStageView, toggleStage } from '../ui/stage/stage-store';
 import { clock, looper } from '../ui/state/audio';
-import { engineFade, engineInputSends } from '../ui/state/engine-store';
+import { engineFade, toggleSetting } from '../ui/state/engine-store';
 import { CONFIRM_WINDOW_MS } from '../ui/looper/shared';
 import {
   CONFIRM_CLEAR_TEXT,
-  autoRecGate,
   clearGate,
   copyGate,
   dismissLaneCue,
   fadeGate,
-  fixedGate,
   muteGate,
   playStopGate,
   recDubGate,
   refuseOnLane,
-  retakeGate,
   reverseGate,
   tapGate,
   trimGate,
@@ -37,12 +34,14 @@ import {
  * track leaves the selection alone, except REC/DUB, which selects its track so the transport keys
  * follow the take. A refused press says why on its lane (gates.ts `refuseOnLane`) instead of doing
  * nothing; a refused global one says it on the selected lane, where the player is looking. In engine
- * mode every lane row, NEXT/PREV TRACK, ▶/■ ALL and FADE go to the engine as its `Action`: on the lane the
- * engine has selected when the press lands (never the UI's copy of the selection, which a feed frame
- * may not have refreshed yet), or `ActionOn` a named track. The engine gates them, confirms CLEAR per
- * lane, resolves HOLD's lane and names a refusal on the feed (`src/app/boot.ts` puts it on the lane).
- * The other global rows run their control's facade call, which sends the control's own command, after
- * a `Press` that tells the engine a looper press came (a pending pedal CLEAR is not confirmed past it).
+ * mode every lane row, NEXT/PREV TRACK, ▶/■ ALL, FADE and the toggles (CLICK, END STOP, FIXED, RETAKE,
+ * AUTO REC, the three sends) go to the engine as its `Action`: on the lane the engine has selected when
+ * the press lands (never the UI's copy of the selection, which a feed frame may not have refreshed yet),
+ * or `ActionOn` a named track. The engine gates them, confirms CLEAR per lane, resolves HOLD's lane,
+ * switches a toggle from the value it has then (so a pedal and a click never undo each other) and names
+ * a refusal on the feed (`src/app/boot.ts` puts it on the lane). The other global rows run their
+ * control's facade call, which sends the control's own command, after a `Press` that tells the engine a
+ * looper press came (a pending pedal CLEAR is not confirmed past it).
  */
 type LaneActionId = 'recDub' | 'playStop' | 'undo' | 'clear' | 'mute' | 'reverse' | 'copy' | 'halveTrack';
 type GlobalActionId =
@@ -169,8 +168,6 @@ const gated =
     else refuseOnLane(looper.selectedTrack(), g.reason);
   };
 
-const toggleSend = (id: InputSendId) => (): void => engineInputSends.setOn(id, !engineInputSends.on(id));
-
 const GLOBAL: Readonly<Record<GlobalActionId, () => void>> = {
   nextTrack: step(1),
   prevTrack: step(-1),
@@ -183,14 +180,15 @@ const GLOBAL: Readonly<Record<GlobalActionId, () => void>> = {
   // Steps the stage view's look; does nothing while that view is closed (stage-store.ts).
   stageNextView: nextStageView,
   tapTempo: gated(tapGate, () => clock.tap()),
-  clickToggle: () => clock.setMetronome(!clock.metronomeOn()),
-  endStopToggle: () => looper.setLoopEndStopEnabled(!looper.loopEndStopEnabled()),
-  fixedToggle: gated(fixedGate, () => looper.setFixedLengthEnabled(!looper.fixedLengthEnabled())),
-  retakeToggle: gated(retakeGate, () => looper.setRetakeEnabled(!looper.retakeEnabled())),
-  autoRecToggle: gated(autoRecGate, () => looper.setAutoRecordEnabled(!looper.autoRecordEnabled())),
-  inFxEcho: toggleSend('echo'),
-  inFxReverb: toggleSend('reverb'),
-  inFxRing: toggleSend('ring'),
+  // The toggles are the engine's (ENGINE_GLOBAL); these rows are their controls' path, the same toggle.
+  clickToggle: () => toggleSetting('Click'),
+  endStopToggle: () => toggleSetting('EndStop'),
+  fixedToggle: () => toggleSetting('Fixed'),
+  retakeToggle: () => toggleSetting('Retake'),
+  autoRecToggle: () => toggleSetting('AutoRec'),
+  inFxEcho: () => toggleSetting({ Send: 'echo' }),
+  inFxReverb: () => toggleSetting({ Send: 'reverb' }),
+  inFxRing: () => toggleSetting({ Send: 'ring' }),
 };
 
 /** The global rows the engine runs as its own hands-free actions. */
@@ -200,6 +198,14 @@ const ENGINE_GLOBAL: Readonly<Partial<Record<GlobalActionId, EngineAction>>> = {
   playAll: 'PlayAll',
   stopAll: 'StopAll',
   fadeAll: 'FadeAll',
+  clickToggle: { Toggle: 'Click' },
+  endStopToggle: { Toggle: 'EndStop' },
+  fixedToggle: { Toggle: 'Fixed' },
+  retakeToggle: { Toggle: 'Retake' },
+  autoRecToggle: { Toggle: 'AutoRec' },
+  inFxEcho: { Toggle: { Send: 'echo' } },
+  inFxReverb: { Toggle: { Send: 'reverb' } },
+  inFxRing: { Toggle: { Send: 'ring' } },
 };
 
 /** The stage view's own controls. Not looper presses: the engine never hears them, and a pending CLEAR

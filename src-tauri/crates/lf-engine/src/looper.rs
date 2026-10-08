@@ -38,7 +38,7 @@
 
 use std::sync::Arc;
 
-use crate::api::{Action, Command, CompactMix, Event, LaneInfo, LaneMix, LaneState, Refusal, HOLD_CONTROLS, TRACK_COUNT};
+use crate::api::{Action, Command, CompactMix, Event, LaneInfo, LaneMix, LaneState, Refusal, Toggle, HOLD_CONTROLS, TRACK_COUNT};
 use crate::autorec::{self, Detector};
 use crate::clock::Clock;
 use crate::effects::LaneFx;
@@ -656,6 +656,39 @@ impl Looper {
         self.loop_end_stop = on;
     }
 
+    pub fn loop_end_stop(&self) -> bool {
+        self.loop_end_stop
+    }
+
+    pub fn fixed_length(&self) -> bool {
+        self.fixed_length
+    }
+
+    pub fn retake(&self) -> bool {
+        self.retake
+    }
+
+    pub fn auto_record(&self) -> bool {
+        self.auto_record
+    }
+
+    /// May the take modes be switched now (gates.ts `fixedGate`, `retakeGate`, `autoRecGate`)? FIXED,
+    /// RETAKE and AUTO REC not while a take reads them (any lane recording, armed or listening, or
+    /// overdubbing), FIXED not while RETAKE overrides it over a loop, AUTO REC not once a loop locked the
+    /// tempo (`tempo_locked`: it only starts a first take). The click, END STOP and the input sends always
+    /// switch. The setters stay ungated: they are initialization and replay.
+    pub fn toggle_gate(&self, toggle: Toggle, tempo_locked: bool) -> Result<(), Refusal> {
+        let capturing = (0..TRACK_COUNT).any(|i| self.capturing(i));
+        match toggle {
+            Toggle::Fixed if capturing => Err(Refusal::FixedCapturing),
+            Toggle::Fixed if self.retake && self.master > 0 => Err(Refusal::FixedRetake),
+            Toggle::Retake if capturing => Err(Refusal::RetakeCapturing),
+            Toggle::AutoRec if capturing => Err(Refusal::AutoRecCapturing),
+            Toggle::AutoRec if tempo_locked => Err(Refusal::AutoRecLocked),
+            _ => Ok(()),
+        }
+    }
+
     pub fn set_fixed_length(&mut self, on: bool) {
         self.fixed_length = on;
     }
@@ -1228,6 +1261,9 @@ impl Looper {
                 }
             }
             Action::FadeAll => return self.fade_all(cx, i),
+            // The engine runs a toggle itself (`engine.rs` `toggle`): it reaches the click and the input
+            // sends too. Nothing sends it here.
+            Action::Toggle(_) => {}
         }
         Applied::Done
     }

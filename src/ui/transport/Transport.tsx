@@ -264,7 +264,7 @@ export function Transport(props: { returnFocus?: (el: HTMLElement | undefined) =
             classList={{ 'is-on': clock.metronomeOn() }}
             aria-label="Metronome click"
             aria-pressed={clock.metronomeOn()}
-            onClick={() => clock.setMetronome(!clock.metronomeOn())}
+            onClick={() => clock.toggleMetronome()}
             title="Metronome click"
           >
             CLICK
@@ -298,7 +298,7 @@ export function Transport(props: { returnFocus?: (el: HTMLElement | undefined) =
             aria-label="Fixed take length"
             aria-pressed={looper.fixedLengthEnabled()}
             disabled={fixedDisabled()}
-            onClick={() => looper.setFixedLengthEnabled(!looper.fixedLengthEnabled())}
+            onClick={() => looper.toggleFixedLength()}
             title={fixedTitle()}
           >
             FIXED {effectiveFixedBars()}
@@ -338,7 +338,7 @@ export function Transport(props: { returnFocus?: (el: HTMLElement | undefined) =
           aria-label="Retake"
           aria-pressed={looper.retakeEnabled()}
           disabled={retakeDisabled()}
-          onClick={() => looper.setRetakeEnabled(!looper.retakeEnabled())}
+          onClick={() => looper.toggleRetake()}
           title="Keep recording round the loop until you stop. STOP, REC/DUB or REC on another track keeps the last complete pass. First track needs FIXED."
         >
           RETAKE
@@ -355,7 +355,7 @@ export function Transport(props: { returnFocus?: (el: HTMLElement | undefined) =
             aria-label="Auto record"
             aria-pressed={looper.autoRecordEnabled()}
             disabled={autoRecDisabled()}
-            onClick={() => looper.setAutoRecordEnabled(!looper.autoRecordEnabled())}
+            onClick={() => looper.toggleAutoRecord()}
             title="Start recording when you start playing, instead of counting in (first track). SENS is how quiet a sound may be and still start it: higher = more sensitive."
           >
             AUTO REC · SENS <span class="transport__auto-value">{looper.autoRecordSensitivity()}</span>
@@ -418,7 +418,7 @@ export function Transport(props: { returnFocus?: (el: HTMLElement | undefined) =
         classList={{ 'is-on': looper.loopEndStopEnabled() }}
         aria-label="Stop playing loops at loop end"
         aria-pressed={looper.loopEndStopEnabled()}
-        onClick={() => looper.setLoopEndStopEnabled(!looper.loopEndStopEnabled())}
+        onClick={() => looper.toggleLoopEndStop()}
         title="Stop playback at loop end. Press STOP again for immediate stop. Recording and overdub still commit and stop immediately."
       >
         END STOP

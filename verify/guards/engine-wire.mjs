@@ -58,13 +58,15 @@ const COMMANDS = [
 ];
 const ACTIONS = [
   'RecDub', 'PlayStop', 'Undo', 'Clear', 'NextTrack', 'PrevTrack', 'PlayAll', 'StopAll', 'Mute', 'Reverse', 'Copy', 'Halve',
-  'Hold', 'Release', 'FadeAll',
+  'Hold', 'Release', 'FadeAll', 'Toggle',
 ];
+const TOGGLES = ['Click', 'EndStop', 'Fixed', 'Retake', 'AutoRec', 'Send:echo', 'Send:reverb', 'Send:ring'];
 const REFUSALS = [
   'Stopping', 'PlayFirst', 'Reversed', 'OtherRecording', 'Empty', 'NoUndo', 'NoClear', 'ConfirmClear', 'Capturing', 'NoTrim',
-  'NoMute', 'NoReverse', 'NoCopy', 'NoFreeLane', 'Fading', 'NoFade',
+  'NoMute', 'NoReverse', 'NoCopy', 'NoFreeLane', 'Fading', 'NoFade', 'FixedCapturing', 'FixedRetake', 'RetakeCapturing',
+  'AutoRecCapturing', 'AutoRecLocked',
 ];
-const EVENTS = ['Lane', 'Transport', 'Beat', 'Selected', 'Refused', 'TakeRejected', 'PassDropped', 'Copied', 'Cleared', 'Muted', 'Mix'];
+const EVENTS = ['Lane', 'Transport', 'Beat', 'Selected', 'Refused', 'TakeRejected', 'PassDropped', 'Copied', 'Cleared', 'Muted', 'Mix', 'Toggled'];
 const DEVICE_EVENTS = ['Lost', 'Recovered', 'Fallback', 'ShareLost', 'EngineFaulted', 'LoopsDropped'];
 
 // ── Commands: the TS side sends these; each fixture example is one the TS types accept as is ────────
@@ -81,6 +83,13 @@ check('the fixture sends every note target', () => {
 check('the fixture sends every hands-free action', () => {
   const actions = fixture.commands.map((c) => c.Action ?? c.ActionOn?.[1]).filter((a) => a !== undefined).map((a) => tag(a)[0]);
   assert.deepEqual([...new Set(actions)].sort(), [...ACTIONS].sort());
+});
+check('the fixture toggles every toggled setting', () => {
+  const toggles = fixture.commands
+    .map((c) => c.Action ?? c.ActionOn?.[1])
+    .filter((a) => a?.Toggle !== undefined)
+    .map((a) => (typeof a.Toggle === 'string' ? a.Toggle : `Send:${a.Toggle.Send}`));
+  assert.deepEqual([...new Set(toggles)].sort(), [...TOGGLES].sort());
 });
 
 // ── Events: every field the Rust side writes is read ────────────────────────────────────────────────
@@ -194,6 +203,9 @@ const refused = {
   'a PascalCase FX param': () => decodeCommand({ SetFxParam: [0, 'Cutoff', 1] }),
   'an instrument by its Rust name': () => decodeCommand({ SelectInstrument: { Builtin: 'drums' } }),
   'an input send by its Rust name': () => decodeCommand({ SetInputSend: ['Echo', true] }),
+  'a toggled send by its Rust name': () => decodeCommand({ Action: { Toggle: { Send: 'Echo' } } }),
+  'an unknown toggle': () => decodeCommand({ Action: { Toggle: 'Metronome' } }),
+  'a toggled event with an unknown toggle': () => decodeEvent({ Toggled: { frame: 0, toggle: 'Click ', on: true } }),
   'a snake_case input send param': () => decodeCommand({ SetInputSendParam: ['echo_level', 0.5] }),
   'a lane past the fifth': () => decodeCommand({ RecDub: 5 }),
   'a trim of no bars': () => decodeCommand({ Trim: [0, 0] }),
