@@ -655,9 +655,12 @@ mod tests {
 
         // The same list keeps its holds; a changed binding and a dropped one release theirs.
         assert_eq!(l.set_bindings(list[1..].to_vec()), []);
-        let changed = Binding { action: ActionId::Undo, ..list[1].clone() };
+        // Replaced by a latching binding, which would run on the release were it not spent.
+        let changed = Binding { action: ActionId::Undo, momentary: false, ..list[1].clone() };
         assert_eq!(l.set_bindings(vec![changed, list[2].clone()]), [Fire::HoldRelease { control: 1 }, Fire::HoldRelease { control: 3 }]);
-        assert!(send(&mut l, A, cc(0, 21, 0), t).fire.is_empty(), "the changed binding's release is spent");
+        let ms = Duration::from_millis(1);
+        assert_eq!(send(&mut l, A, cc(0, 21, 0), t + ms), Outcome { consumed: true, ..Outcome::default() }, "the changed binding's release is spent");
+        assert_eq!(send(&mut l, A, cc(0, 21, 127), t + 2 * ms).fire, [run(ActionId::Undo)], "the next message runs the new action");
 
         assert_eq!(l.port_gone(A), []);
         assert_eq!(l.port_gone(B), [Fire::HoldRelease { control: 2 }]);
@@ -676,7 +679,21 @@ mod tests {
         let t = Instant::now();
         learn(&mut l, ActionId::Undo, &[cc(0, 20, 127)], t);
         learn(&mut l, ActionId::Mute, &[cc(0, 21, 127)], t);
-        learn(&mut l, ActionId::PlayAll, &[cc(0, 20, 127)], t + RELEASE_WAIT);
+        l.learn(ActionId::PlayAll, None);
+        let out = send(&mut l, A, cc(0, 20, 127), t + RELEASE_WAIT);
+        let moved = Binding {
+            port_id: A.into(),
+            port_name: "Pedal".into(),
+            channel: 0,
+            kind: Kind::Cc,
+            number: 20,
+            action: ActionId::PlayAll,
+            target: None,
+            press_high: true,
+            momentary: false,
+            hold: false,
+        };
+        assert_eq!((out.consumed, out.learned, out.fire), (true, Some(moved), vec![]), "the capture runs neither action");
         let got: Vec<(u8, ActionId)> = l.bindings().iter().map(|b| (b.number, b.action)).collect();
         assert_eq!(got, [(21, ActionId::Mute), (20, ActionId::PlayAll)]);
 
