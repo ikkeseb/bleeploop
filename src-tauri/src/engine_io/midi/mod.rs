@@ -11,7 +11,8 @@
 //! |---|---|---|
 //! | this file | [`MidiHost`], the state the port callbacks share ([`Core`]), the UI events | `src/ui/state/midi.ts` (glue) |
 //! | `parse` | bytes to `parse::Message`, and what is ignored | `midi.ts` `parseMidiMessage` |
-//! | `bindings` | [`Binding`], learn capture, matching, momentary vs latching, consume-first | `src/app/midi-actions.ts`, `src/app/actions.ts` |
+//! | `bindings` | [`Binding`], the 25 actions and their targets, the persisted list's fallible parse | `src/app/midi-actions.ts`, `src/app/actions.ts` |
+//! | `learn` | learn capture, matching, consume-first, momentary vs latching, HOLD's control numbers | `src/app/midi-actions.ts` |
 //! | `router` | per-owner note ownership, sustain, the wheels | `src/ui/state/input-router.ts` |
 //! | `ports` | midir connections, the hot-plug poll and its diff, the port keys | `midi.ts` `attachInputs` |
 //!
@@ -40,6 +41,7 @@
 //!   disconnect does; the UI hears of it in [`MidiEvent::Ports`].
 
 pub mod bindings;
+pub mod learn;
 mod parse;
 mod ports;
 mod router;
@@ -52,13 +54,13 @@ use std::thread::JoinHandle;
 use std::time::Instant;
 
 use lf_engine::grid::Frame;
-use lf_engine::{Command, NoteTarget, TimedCommand};
+use lf_engine::{Action, Command, NoteTarget, TimedCommand};
 use serde::Serialize;
 
-pub use bindings::{ActionId, Binding, Kind, PortKey};
+pub use bindings::{ActionId, Binding, PortKey};
 
 use super::FrameClock;
-use bindings::Learn;
+use learn::{Fire, Learn};
 use parse::parse;
 use router::Router;
 
@@ -167,24 +169,28 @@ impl Core {
         let stamp = self.clock.press_frame(at);
         let mut out = |command| self.send(None, command);
         router.hold_wheels(stamp.is_none(), &mut out);
-        let outcome = learn.consume(&port.key, &message, at);
+        let outcome = learn.consume(&port.key.id(), &port.key.name, &message, at);
+        if let Some(controller) = outcome.release_controller {
+            router.release_controller(owner, controller, &mut out);
+        }
         if let Some(b) = outcome.learned {
-            if b.kind == Kind::Cc {
-                router.release_controller(owner, b.number, &mut out);
-            }
             self.emit(MidiEvent::Learned(b));
         }
         if outcome.changed {
-            self.emit(MidiEvent::Bindings(learn.bindings.clone()));
+            self.emit(MidiEvent::Bindings(learn.bindings().to_vec()));
         }
-        match outcome.fire.map(ActionId::engine_action) {
-            Some(Some(action)) => {
-                if stamp.is_some() {
-                    self.send(stamp, Command::Action(action));
+        for fire in outcome.fire {
+            match fire {
+                Fire::Run { action: ActionId::GoLive, .. } => self.emit(MidiEvent::GoLive),
+                Fire::Run { action, target: None } => {
+                    if let (Some(action), Some(_)) = (engine_action(action), stamp) {
+                        self.send(stamp, Command::Action(action));
+                    }
                 }
+                // Interim, until the switch maps every `Fire` to the engine: a named track, HOLD and every
+                // action `engine_action` does not list run nothing here yet.
+                _ => {}
             }
-            Some(None) => self.emit(MidiEvent::GoLive),
-            None => {}
         }
         let starts = matches!(message, parse::Message::NoteOn { .. });
         if !outcome.consumed && (stamp.is_some() || !starts) {
@@ -220,6 +226,21 @@ impl Core {
     }
 }
 
+/// Interim: the engine action of the actions this host ran before learn grew to 25 (GO LIVE is the UI's).
+fn engine_action(action: ActionId) -> Option<Action> {
+    Some(match action {
+        ActionId::RecDub => Action::RecDub,
+        ActionId::PlayStop => Action::PlayStop,
+        ActionId::Undo => Action::Undo,
+        ActionId::Clear => Action::Clear,
+        ActionId::NextTrack => Action::NextTrack,
+        ActionId::PrevTrack => Action::PrevTrack,
+        ActionId::PlayAll => Action::PlayAll,
+        ActionId::StopAll => Action::StopAll,
+        _ => return None,
+    })
+}
+
 fn port_infos(ports: &[PortEntry]) -> Vec<PortInfo> {
     ports.iter().map(|p| PortInfo { name: p.key.name.clone(), occurrence: p.key.occurrence, open: p.conn.is_some() }).collect()
 }
@@ -252,25 +273,27 @@ impl MidiHost {
 
     /// Replace the bindings (the settings handed over, or one forgotten).
     pub fn set_bindings(&self, bindings: Vec<Binding>) {
-        self.core.lock().learn.set_bindings(bindings);
+        // Interim: the HOLD releases this returns reach the engine once the switch maps `Fire`.
+        let _ = self.core.lock().learn.set_bindings(bindings);
     }
 
     pub fn bindings(&self) -> Vec<Binding> {
-        self.core.lock().learn.bindings.clone()
+        self.core.lock().learn.bindings().to_vec()
     }
 
-    /// Learn the next CC or note-on, from any port, onto `action` (answered by [`MidiEvent::Learned`]).
+    /// Learn the next CC or note-on, from any port, onto `action` on the selected track (answered by
+    /// [`MidiEvent::Learned`]).
     pub fn learn(&self, action: ActionId) {
-        self.core.lock().learn.learning = Some(action);
+        self.core.lock().learn.learn(action, None);
     }
 
     /// Stop listening. True when a learn was pending.
     pub fn cancel_learn(&self) -> bool {
-        self.core.lock().learn.learning.take().is_some()
+        self.core.lock().learn.cancel_learn()
     }
 
     pub fn learning(&self) -> Option<ActionId> {
-        self.core.lock().learn.learning
+        self.core.lock().learn.learning().map(|(action, _)| action)
     }
 
     /// The present input ports, in the system's order.
@@ -319,7 +342,8 @@ mod tests {
 
     use lf_engine::{Action, Instrument};
 
-    use super::bindings::RELEASE;
+    use super::bindings::Kind;
+    use super::learn::RELEASE_WAIT as RELEASE;
 
     const A: u32 = 1;
     const B: u32 = 2;
@@ -397,7 +421,7 @@ mod tests {
     }
 
     // probe midi-learn "a learning tap binds the CC as momentary, ends the learn and runs nothing";
-    // midi-actions.ts consume (learn capture, then the tail inside RELEASE_MS).
+    // midi-actions.ts consume (learn capture, then the release inside RELEASE_WAIT_MS).
     #[test]
     fn a_learning_tap_binds_the_cc_as_momentary_ends_the_learn_and_runs_nothing() {
         let r = Rig::new();
@@ -405,14 +429,16 @@ mod tests {
         assert_eq!(r.take(), []);
         assert_eq!(r.host.learning(), None);
         let b = Binding {
+            port_id: "Probe a\n0".into(),
             port_name: "Probe a".into(),
-            occurrence: 0,
             channel: 0,
             kind: Kind::Cc,
             number: 20,
             action: ActionId::RecDub,
+            target: None,
             press_high: true,
             momentary: true,
+            hold: false,
         };
         assert_eq!(r.host.bindings(), [b.clone()]);
         let learned = Binding { momentary: false, ..b.clone() };
@@ -501,9 +527,9 @@ mod tests {
         }
         assert_eq!(fired, [1, 0, 1, 0, 1, 0]);
 
-        // Latching: the learning press sends 127 and nothing follows it inside the window.
+        // Latching: the learning press sends 127 and nothing follows it inside the wait.
         r.learn(ActionId::NextTrack, A, &[[0xb0, 22, 127]]);
-        r.wait(Duration::from_millis(1300));
+        r.wait(RELEASE);
         let mut fired = Vec::new();
         for m in [[0xb0, 22, 0], [0xb0, 22, 127], [0xb0, 22, 0], [0xb0, 22, 127]] {
             r.send(A, &[m]);
@@ -522,7 +548,7 @@ mod tests {
         assert_eq!(fired, [1, 0, 1, 0]);
     }
 
-    // midi-actions.ts consume: the release must come inside RELEASE_MS of the learning press; later, the
+    // midi-actions.ts consume: the release must come inside RELEASE_WAIT_MS of the learning press; later, the
     // pedal reads as latching and its release fires too.
     #[test]
     fn a_release_after_the_learn_window_reads_as_latching() {
