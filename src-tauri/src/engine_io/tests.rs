@@ -13,7 +13,7 @@ use lf_engine::{Command, CompactMix, Event, LaneInfo, LaneState, ProcessContext,
 use super::callback::Side;
 use super::fake_driver::{Fake, FakeDevice, FakeDriver};
 use super::owner::Request;
-use super::{DeviceEvent, DeviceRequest, DeviceStatus, EngineHost, HostConfig, OpenError};
+use super::{DeviceEvent, DeviceRequest, DeviceStatus, EngineHost, HostConfig, OpenError, LOAD_BINS};
 use crate::asio_startup::{AsioStartupStatus, AsioStatusReport};
 use crate::audio_output::AudioBackend;
 
@@ -922,8 +922,20 @@ fn an_asio_wake_late_by_more_than_a_period_and_made_up_is_no_phase_slip() {
 
 #[test]
 fn an_asio_callback_that_finishes_late_counts_and_logs_its_span() {
-    // At least: the renders' real time, which a test machine's load can stretch, may add a count (the
-    // rule itself: `callback::tests`, `finishes_late`).
+    // The renders take real time (the rule itself: `callback::tests`, `finishes_late`): a callback the
+    // test machine's load stretches past 2.4 periods counts on its own and opens an episode that can
+    // swallow the count asserted here (`LATE_FINISH_QUIET`; CI met both). Such an attempt shows one
+    // callback at 199 % of its period or more, which the fake's late entries never cause, and runs again.
+    for _ in 0..5 {
+        if late_finish_attempt() {
+            return;
+        }
+    }
+    panic!("every attempt had a callback at two periods or more: the machine is too loaded to judge");
+}
+
+/// One run of the test above; false when the load stretched a callback to two periods or more.
+fn late_finish_attempt() -> bool {
     let h = Harness::new();
     h.open(asio(Some(256)));
     h.play(RATE);
@@ -931,16 +943,19 @@ fn an_asio_callback_that_finishes_late_counts_and_logs_its_span() {
     // The entry's lag alone puts its finish past 2.4 periods (614 frames).
     h.fake.wake_late.store(640, SeqCst);
     h.play(RATE / 2);
-    let diag = h.host.diag();
-    assert!(diag.asio_late_finishes >= 1 && (diag.asio_phase_slips, diag.engine.xruns) == (0, 0), "{diag:?}");
-    let moved = diag.moved_since(&before).expect("a diagnostic moved");
-    assert!(moved.contains("asio_late_finishes="), "{moved}");
+    let first = h.host.diag();
     // A lasting slip of three periods: every callback finishes late until the floor moves up.
-    let before = diag;
     h.fake.gap.store(3, SeqCst);
     h.play(2 * RATE);
     let diag = h.host.diag();
-    assert!(diag.asio_late_finishes > before.asio_late_finishes && diag.asio_phase_slips == 1, "{diag:?}");
+    if h.host.block_load().bins[LOAD_BINS - 1] > 0 {
+        return false;
+    }
+    assert!(first.asio_late_finishes >= 1 && (first.asio_phase_slips, first.engine.xruns) == (0, 0), "{first:?}");
+    let moved = first.moved_since(&before).expect("a diagnostic moved");
+    assert!(moved.contains("asio_late_finishes="), "{moved}");
+    assert!(diag.asio_late_finishes > first.asio_late_finishes && diag.asio_phase_slips == 1, "{diag:?}");
+    true
 }
 
 #[test]
