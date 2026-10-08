@@ -138,14 +138,19 @@ next block start (`src/ui/state/midi.ts`, `src/platform/index.ts` `sendEngine`, 
 8. **Bindings live native,** in a versioned JSON store beside `plugin-folders.json` with explicit
    missing, invalid and unsupported-version results (an unreadable file is reported and never
    overwritten, as the folder store). A binding persists the strongest endpoint identity midir gives
-   (the device-interface path, if step 0 shows it stable across restart and replug) plus a port
-   discriminator, and keeps the name for display. Ambiguous identity leaves a binding unresolved; it
-   never fires another controller's action. Writes happen off the router's lock.
+   (the device-interface path, whose stability across restart and replug is the owner's device check)
+   plus a port discriminator, and keeps the name. Resolution runs on one enumeration snapshot: exact
+   identities first, and the ports they match are claimed; a stored identity that is absent moves to
+   an unclaimed port only when that port is the one unclaimed port with its name and no other absent
+   identity carries the name (a pedal moved to another USB port keeps working, as under Web MIDI), and
+   the move is persisted. Ambiguous identity leaves a binding unresolved; it never fires another
+   controller's action. Writes happen off the router's lock.
 9. **Migration never guesses.** At first start, `lf.midiLearn` imports idempotently, keeping each
    record's legacy port id. Step 0 found that id a per-run ordinal, so the record's port name is its
    identity: a record activates on the one present port with that name, and stays inactive and listed
    while no port or more than one carries it, until a matching port appears alone or the player
-   assigns it to a present controller in Audio Settings. The legacy key is removed one release later, after
+   assigns it to a present controller in Audio Settings. Records of one name from several legacy ids
+   that bind the same message stay inactive too (a renumbered run may have relearned it). The legacy key is removed one release later, after
    the native store has acknowledged a durable write. Bindings load before input executes actions.
 10. **Port liveness:** `CM_Register_Notification` (no window pump) on both MIDI interface classes a
     WinMM port may arrive on under `wdmaud2` (the WinMM MIDI input class, and the MIDI 2.0 endpoint
@@ -163,8 +168,10 @@ next block start (`src/ui/state/midi.ts`, `src/platform/index.ts` `sendEngine`, 
     alike, so a pedal and a click never cancel each other. Absolute setters stay for initialization and
     replay. The engine publishes each applied toggle as an event; the native settings memory takes the
     applied value from it (and reads the engine's applied values before a rebuild, events drained or
-    not), and the UI's mirrors follow the event instead of flipping their own signal. Native sends `Press` before every facade action that has one today and `SelectTrack` before
-    a named REC/DUB or HOLD. The stage view and GO LIVE stay UI actions, run on the native event. Tap
+    not), and the UI's mirrors follow the event instead of flipping their own signal. A toggle action is itself a looper press (it disarms a pending CLEAR before
+    any refusal), and the input-send toggles keep `SetInputSend`'s scheduling (never behind a looper
+    command held for a block job). Native sends `Press` before every other facade action that has one
+    today and `SelectTrack` before a named REC/DUB or HOLD. The stage view and GO LIVE stay UI actions, run on the native event. Tap
     tempo keeps one history owner in the UI, fed at event receipt (no worse than today).
 
 ## Parity: what must not get lost
