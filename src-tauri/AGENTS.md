@@ -336,8 +336,13 @@ plugin-GUI work.
   its take starts.
 - The no-device removal path (a 1-frame process and `stop` on the plugin owner's thread) has no test
   with a real unit, and the CLAP restart fixture's thread check would flag it.
-- Native MIDI (never started): a pedal binding's port occurrence is recounted on every hot-plug, so two
-  same-named controllers can swap bindings; a port back within one 1 s poll keeps a dead connection.
+- Native MIDI is to replace Web MIDI (the owner's call, D22): MIDI is the one timing-critical input
+  still crossing the WebView's JavaScript, and the native path stamps each press's frame. The order:
+  measure press → engine on today's Web MIDI path under a jam-like load (ASIO 128, the stage view
+  open), switch, measure again (the rig has no virtual MIDI port yet; loopMIDI would give one, its
+  install the owner's to approve at the PC). Two known holes to close before the switch: a pedal
+  binding's port occurrence is recounted on every hot-plug, so two same-named controllers can swap
+  bindings; a port back within one 1 s poll keeps a dead connection.
 - Archetype Plini (VST3) once stalled 4–14 s in 5 of 20 unloads, editor closed, and has not repeated
   since (cause unknown). The VST3 teardown and the unload log per-step timing in release too, so the
   next occurrence names its step.

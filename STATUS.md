@@ -114,4 +114,3 @@ nothing is said.
 
 | # | Question | Default |
 |---|---|---|
-| D22 | Remove the native MIDI stack (`src-tauri/src/engine_io/midi/`, about 1.8k lines with tests, and `midir`)? It is built and tested but never started; MIDI arrives through Web MIDI. | Keep it. |
