@@ -54,7 +54,7 @@ it.
 - The count-in (1 bar, accent on 1, no dead air; the tempo locks mid-count-in); FIXED 2 stops on the
   downbeat after exactly 2 bars (an over-long FIXED pick records the largest whole-bar fit in 60 s); a
   free record stopped near the downbeat after N bars keeps N, an early or a mid-bar stop behaves, and a
-  PLAY/STOP press while the take's tail is in flight commits it stopped (a REC/DUB press there: D24).
+  PLAY/STOP press while the take's tail is in flight commits it stopped (a REC/DUB press there counts as a stop too).
 - The click: silent when idle, stops with STOP ALL, and the count-in still clicks with CLICK off.
 - A later track starts at master phase with no seam; reverse's flip adds no step (machine:
   `tests/seam_continuity.rs`), but does its turn of direction click?
@@ -114,8 +114,4 @@ nothing is said.
 
 | # | Question | Default |
 |---|---|---|
-| D19 | A DUB pressed while a playing lane's UNDO, REVERSE or TRIM swap waits for its loop boundary makes the swap heard at once, mid-loop. Hold the DUB to the boundary (a held looper command also holds a STOP or punch-out behind it for up to a loop), keep it and write the exception into the engine briefing, or refuse the DUB with a reason (a wire change)? Red tests, ignored: `tests/overdub_undo_reverse.rs`, `tests/trim.rs`. | Keep it, as an exception. |
-| D20 | A plugin call that outputs NaN or an infinity is silenced. Should it also damage the running take or layer, as an input gap does (the layer is dropped)? Today a bad stretch leaves silence in it; with DUB FEEDBACK 0 that replaces the loop there. | No. |
 | D22 | Remove the native MIDI stack (`src-tauri/src/engine_io/midi/`, about 1.8k lines with tests, and `midir`)? It is built and tested but never started; MIDI arrives through Web MIDI. | Keep it. |
-| D24 | A REC/DUB press while a first take's aligned tail is in flight is swallowed: it counts as a repeated stop, which cannot lengthen the take (`tests/first_take.rs` free_d encodes this). Start one overdub on the commit frame instead, as REC to DUB does mid-take? The engine's held commands make it small (a recorder flag and a wait until the window's end). Red test, ignored: free_i in `tests/first_take.rs`. | Keep it a stop. |
-| D29 | COPY with a delay offset (the owner's idea, 2026-09-18): is it a copy that plays shifted in time behind its source, an echo or a canon of it? Which offsets? | Shifted copies at 1/16, 1/8, 1/4 and 1/2 bar. |

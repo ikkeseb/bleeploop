@@ -68,8 +68,10 @@ added a line.
 ## Parked ideas (for the long run)
 
 - **The owner's own ideas, not scheduled:** full panel drag, with plugin editors inline, each filling
-  its panel (the layout vision of 2026-06-17; the movable, hideable keyboard is built). COPY with a
-  delay offset (2026-09-18) waits on STATUS D29. A time signature the player picks (3/4, 6/8 and so
+  its panel (the layout vision of 2026-06-17; the movable, hideable keyboard is built). COPY with an
+  offset for width (2026-09-18): a lane copied, the copy a little behind its source, the two panned
+  apart so the part sounds wider. Today's nearest: COPY, pan, and the copy's DELAY at 1/16, Fbk 0, Mix
+  100 %; the width wants offsets shorter than the delay's shortest, 1/16. A time signature the player picks (3/4, 6/8 and so
   on; 2026-10-06): `beatsPerBar = 4` runs through the grid math, the click and the count-in, which is
   gate-adjacent timing code.
 - **Not built on purpose** (no owner or tester ask; each would add its own lap): a FREE tempo-setting
