@@ -1,6 +1,7 @@
 //! OWNS: native MIDI for the engine, built and tested but never started by the app (MIDI arrives
 //! through the WebView's Web MIDI, and WinMM input ports are exclusive): the input ports (midir,
-//! one connection per port, hot-plug polling), message parsing, the MIDI-learn bindings mirrored
+//! one connection per port, each with a lasting identity; hot-plug by Windows' interface
+//! notifications with a 1 s poll as backstop), message parsing, the MIDI-learn bindings mirrored
 //! from settings (`src/app/midi-actions.ts`), and what a message becomes: a note for the engine
 //! (next block start) or a looper action stamped with its press frame (`super::FrameClock`). This doc
 //! is the module's briefing.
@@ -13,7 +14,8 @@
 //! | `parse` | bytes to `parse::Message`, and what is ignored | `midi.ts` `parseMidiMessage` |
 //! | `bindings` | [`Binding`], learn capture, matching, momentary vs latching, consume-first | `src/app/midi-actions.ts`, `src/app/actions.ts` |
 //! | `router` | per-owner note ownership, sustain, the wheels | `src/ui/state/input-router.ts` |
-//! | `ports` | midir connections, the hot-plug poll and its diff, the port keys | `midi.ts` `attachInputs` |
+//! | `ports` | midir connections, port identities, which port a stored binding answers to, the poll and its diff | `midi.ts` `attachInputs` |
+//! | `liveness` | interface arrival and removal notifications, connection generations, the arrival retry schedule | (none: Web MIDI's `statechange`) |
 //!
 //! # Rules
 //!
@@ -40,6 +42,7 @@
 //!   disconnect does; the UI hears of it in [`MidiEvent::Ports`].
 
 pub mod bindings;
+mod liveness;
 mod parse;
 mod ports;
 mod router;
@@ -100,8 +103,15 @@ pub struct MidiDiag {
 
 /// A present port and its connection (`None` while it is not open).
 pub(crate) struct PortEntry {
-    pub(crate) key: PortKey,
+    pub(crate) identity: ports::PortIdentity,
     pub(crate) conn: Option<u32>,
+}
+
+/// The key bindings still match on: the port's name and its occurrence among the present ports with
+/// that name. Transitional, until bindings name a port by its identity (`ports::resolve`).
+fn legacy_key(ports: &[PortEntry], i: usize) -> PortKey {
+    let name = &ports[i].identity.name;
+    PortKey { name: name.clone(), occurrence: ports[..i].iter().filter(|p| p.identity.name == *name).count() as u32 }
 }
 
 struct State {
@@ -161,13 +171,14 @@ impl Core {
         let mut state = self.lock();
         let State { router, learn, ports, .. } = &mut *state;
         // A connection already released (its port went away) has no owner left.
-        let Some(port) = ports.iter().find(|p| p.conn == Some(conn)) else { return };
+        let Some(port) = ports.iter().position(|p| p.conn == Some(conn)) else { return };
+        let key = legacy_key(ports, port);
         let owner = (conn, message.channel());
         // `None` while no device runs: only releases go through (the rules above).
         let stamp = self.clock.press_frame(at);
         let mut out = |command| self.send(None, command);
         router.hold_wheels(stamp.is_none(), &mut out);
-        let outcome = learn.consume(&port.key, &message, at);
+        let outcome = learn.consume(&key, &message, at);
         if let Some(b) = outcome.learned {
             if b.kind == Kind::Cc {
                 router.release_controller(owner, b.number, &mut out);
@@ -202,7 +213,7 @@ impl Core {
         router.release_port(conn, &mut out);
         let entry = ports.iter_mut().find(|p| p.conn == Some(conn))?;
         entry.conn = None;
-        Some(entry.key.name.clone())
+        Some(entry.identity.name.clone())
     }
 
     pub(crate) fn set_ports(&self, ports: Vec<PortEntry>) {
@@ -221,29 +232,36 @@ impl Core {
 }
 
 fn port_infos(ports: &[PortEntry]) -> Vec<PortInfo> {
-    ports.iter().map(|p| PortInfo { name: p.key.name.clone(), occurrence: p.key.occurrence, open: p.conn.is_some() }).collect()
+    (0..ports.len())
+        .map(|i| {
+            let PortKey { name, occurrence } = legacy_key(ports, i);
+            PortInfo { name, occurrence, open: ports[i].conn.is_some() }
+        })
+        .collect()
 }
 
 /// Native MIDI input for the engine. Dropping it closes every port (their notes released) and joins the
 /// poller.
 pub struct MidiHost {
     core: Arc<Core>,
-    /// Hanging up stops the poller.
-    stop: Option<Sender<()>>,
+    /// [`liveness::Wake::Stop`] stops the port thread.
+    stop: Option<Sender<liveness::Wake>>,
     poller: Option<JoinHandle<()>>,
 }
 
 impl MidiHost {
     /// Start listening: every present input port opens now, and ports that come and go are followed
-    /// every second (`ports::POLL`). Commands go to `sink`; actions are stamped on `clock`.
+    /// by Windows' interface notifications, and every second (`ports::POLL`) as a backstop. Commands go
+    /// to `sink`; actions are stamped on `clock`.
     pub fn start(sink: Sink, clock: FrameClock) -> MidiHost {
         let core = Arc::new(Core::new(sink, clock));
-        let (stop, stopped) = mpsc::channel();
+        let (stop, woken) = mpsc::channel();
         let poller = {
             let core = core.clone();
+            let wake = stop.clone();
             std::thread::Builder::new()
                 .name("lf-midi-ports".into())
-                .spawn(move || ports::run(core, stopped))
+                .spawn(move || ports::run(core, wake, woken))
                 .map_err(|e| log::error!("[midi] could not start the port poller: {e}"))
                 .ok()
         };
@@ -305,7 +323,9 @@ impl MidiHost {
 
 impl Drop for MidiHost {
     fn drop(&mut self) {
-        drop(self.stop.take());
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(liveness::Wake::Stop);
+        }
         if let Some(poller) = self.poller.take() {
             let _ = poller.join();
         }
@@ -323,6 +343,10 @@ mod tests {
 
     const A: u32 = 1;
     const B: u32 = 2;
+
+    fn entry(name: &str, conn: u32) -> PortEntry {
+        PortEntry { identity: ports::PortIdentity { path: format!(r"\\?\probe#{name}"), index: 0, name: name.into() }, conn: Some(conn) }
+    }
 
     /// A host with no poller and two ports, "Probe a" and "Probe b" on connections [`A`] and [`B`], as
     /// the browser probes' two virtual Web MIDI inputs, and a device running (its clock stamped).
@@ -353,8 +377,8 @@ mod tests {
             let clock = FrameClock::new();
             let core = Arc::new(Core::new(sink, clock.clone()));
             core.set_ports(vec![
-                PortEntry { key: PortKey { name: "Probe a".into(), occurrence: 0 }, conn: Some(A) },
-                PortEntry { key: PortKey { name: "Probe b".into(), occurrence: 0 }, conn: Some(B) },
+                entry("Probe a", A),
+                entry("Probe b", B),
             ]);
             Rig { host: MidiHost { core, stop: None, poller: None }, sent, clock, t: Instant::now() }
         }
@@ -657,7 +681,7 @@ mod tests {
         let ports = vec![PortInfo { name: "Probe a".into(), occurrence: 0, open: true }, PortInfo { name: "Probe b".into(), occurrence: 0, open: true }];
         assert_eq!(r.events(), [MidiEvent::Ports { ports: ports.clone(), gone: vec![] }]);
         r.host.core.port_gone(B);
-        r.host.core.set_ports(vec![PortEntry { key: PortKey { name: "Probe a".into(), occurrence: 0 }, conn: Some(A) }]);
+        r.host.core.set_ports(vec![entry("Probe a", A)]);
         r.host.core.publish_ports(vec!["Probe b".into()]);
         assert_eq!(r.events(), [MidiEvent::Ports { ports: ports[..1].to_vec(), gone: vec!["Probe b".into()] }]);
     }
@@ -703,7 +727,7 @@ mod tests {
         let clock = FrameClock::new();
         clock.publish(Instant::now(), 0, 256, 48_000);
         let core = Arc::new(Core::new(sink, clock));
-        core.set_ports(vec![PortEntry { key: PortKey { name: "Probe a".into(), occurrence: 0 }, conn: Some(A) }]);
+        core.set_ports(vec![entry("Probe a", A)]);
         let host = MidiHost { core, stop: None, poller: None };
         host.core.message(A, Instant::now(), &[0x90, 60, 100]);
         host.core.message(A, Instant::now(), &[0x80, 60, 0]);
