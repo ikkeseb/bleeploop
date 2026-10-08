@@ -5,8 +5,10 @@
 //! only code here that touches midir, and only real hardware runs it.
 //!
 //! A port is its [`PortIdentity`]: midir's id (WinMM's device-interface path, which the ports of one
-//! multi-port device share), the port's position among the present ports sharing that path, and its
-//! name. It is computed when a connection opens and kept for the connection's lifetime, never recounted
+//! multi-port device share), its name, and its position among the present ports sharing that path and
+//! name (0 but for two same-named ports of one device). The name is part of the identity so the ports of
+//! one device that WinMM lists in another order after a restart or a replug keep their own identities.
+//! It is computed when a connection opens and kept for the connection's lifetime, never recounted
 //! for it later. A port whose path is empty gets a weak identity, which never matches a stored id
 //! exactly. WinMM input ports are exclusive on the classic driver (under `wdmaud2`, unknown): a port
 //! another program holds fails to open, and is retried by the arrival schedule and then every poll.
@@ -28,7 +30,7 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use super::liveness::{same_path, Generation, Registration, Wake, Watch};
+use super::liveness::{batch, same_path, Generation, Registration, Wake, Watch};
 use super::{Core, PortEntry};
 
 /// How often the port list is read when no notification wakes the port thread.
@@ -39,8 +41,8 @@ pub(crate) const POLL: Duration = Duration::from_secs(1);
 pub(crate) struct PortIdentity {
     /// midir's id: the WinMM device-interface path; empty when the driver gave none (weak).
     pub(crate) path: String,
-    /// Among the present ports sharing this path (a weak one: among the weak ports with this name),
-    /// which one, in WinMM's order, from 0.
+    /// Among the present ports sharing this path and this name (a weak one: among the weak ports with
+    /// this name), which one, in WinMM's order, from 0.
     pub(crate) index: u32,
     pub(crate) name: String,
 }
@@ -52,20 +54,21 @@ impl PortIdentity {
         self.path.is_empty()
     }
 
-    /// The canonical id a binding stores as its `port_id`. Never `input-<N>` (a legacy Web MIDI id);
-    /// the path is lowercased, as Windows compares paths without case.
+    /// The canonical id a binding stores as its `port_id`: index, path, name. Never `input-<N>` (a legacy
+    /// Web MIDI id); the path is lowercased, as Windows compares paths without case. Unambiguous while a
+    /// device-interface path holds no `:` (inferred: none seen does).
     pub(crate) fn id(&self) -> String {
         if self.weak() {
             format!("winmm-weak:{}:{}", self.index, self.name)
         } else {
-            format!("winmm:{}:{}", self.index, self.path.to_ascii_lowercase())
+            format!("winmm:{}:{}:{}", self.index, self.path.to_ascii_lowercase(), self.name)
         }
     }
 }
 
 /// Each listed port's identity, from `(path, name)` in WinMM's order.
 pub(crate) fn identities(listed: &[(&str, &str)]) -> Vec<PortIdentity> {
-    let shares = |(path, name): (&str, &str), (p, n): (&str, &str)| if path.is_empty() { p.is_empty() && n == name } else { same_path(p, path) };
+    let shares = |(path, name): (&str, &str), (p, n): (&str, &str)| n == name && if path.is_empty() { p.is_empty() } else { same_path(p, path) };
     listed
         .iter()
         .enumerate()
@@ -244,8 +247,12 @@ pub(crate) fn run(core: Arc<Core>, wake: Sender<Wake>, woken: Receiver<Wake>) {
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) | Ok(Wake::Stop) => break 'run,
             Ok(first) => {
-                // Every notice queued so far, then one enumeration.
-                for w in std::iter::once(first).chain(woken.try_iter().collect::<Vec<_>>()) {
+                // The notices queued so far, at most `MAX_BATCH`, then one enumeration.
+                let (notices, stop) = batch(first, &woken);
+                if stop {
+                    break 'run;
+                }
+                for w in notices {
                     let path = match &w {
                         Wake::Stop => break 'run,
                         Wake::Arrived(path) | Wake::Removed(path) => path,
@@ -368,16 +375,18 @@ mod tests {
         assert_eq!(diff(&before, &[port("usb#1", 0, "Pedal")]), Diff { open: vec![], close: vec![] });
     }
 
-    // Index assignment: the position among the ports sharing a path (case-insensitive), in WinMM's
-    // order; two identical controllers have two paths, so both are index 0; a path-less port counts
-    // among the path-less ports with its name.
+    // Index assignment: the position among the ports sharing a path (case-insensitive) and a name, in
+    // WinMM's order; two identical controllers have two paths, so both are index 0; the two ports of a
+    // multi-port device have two names, so both are index 0; a path-less port counts among the
+    // path-less ports with its name.
     #[test]
-    fn the_index_counts_the_ports_sharing_a_path() {
-        let ids = identities(&[("USB#a", "X"), ("usb#b", "X"), ("usb#A", "MIDIIN2 (X)"), ("", "Y"), ("", "Z"), ("", "Y")]);
+    fn the_index_counts_the_ports_sharing_a_path_and_a_name() {
+        let ids = identities(&[("USB#a", "X"), ("usb#b", "X"), ("usb#A", "MIDIIN2 (X)"), ("usb#a", "X"), ("", "Y"), ("", "Z"), ("", "Y")]);
         let got: Vec<(u32, bool)> = ids.iter().map(|p| (p.index, p.weak())).collect();
-        assert_eq!(got, [(0, false), (0, false), (1, false), (0, true), (0, true), (1, true)]);
-        assert_eq!(ids[2].id(), "winmm:1:usb#a");
-        assert_eq!(ids[5].id(), "winmm-weak:1:Y");
+        assert_eq!(got, [(0, false), (0, false), (0, false), (1, false), (0, true), (0, true), (1, true)]);
+        assert_eq!(ids[2].id(), "winmm:0:usb#a:MIDIIN2 (X)");
+        assert_eq!(ids[3].id(), "winmm:1:usb#a:X");
+        assert_eq!(ids[6].id(), "winmm-weak:1:Y");
         assert!(ids.iter().all(|p| !p.id().starts_with("input-")));
     }
 
@@ -389,7 +398,7 @@ mod tests {
         let c = port(r"\\?\usb#c", 0, "Pedal");
         let (ida, idb, idc) = (a.id(), b.id(), c.id());
         let keys = port(r"\\?\usb#k", 0, "Keys");
-        let multi = [port(r"\\?\usb#m", 0, "MIDI X"), port(r"\\?\usb#m", 1, "MIDIIN2 (MIDI X)")];
+        let multi = identities(&[(r"\\?\usb#m", "MIDI X"), (r"\\?\usb#m", "MIDIIN2 (MIDI X)")]);
         let weak = port("", 0, "Old box");
         let (idk, idw, m0, m1) = (keys.id(), weak.id(), multi[0].id(), multi[1].id());
 
@@ -437,7 +446,7 @@ mod tests {
                 expect: vec![Un(SeveralPorts)],
             },
             Row {
-                case: "a multi-port device: each port by its index, then moved, each by its own unique name",
+                case: "a multi-port device: each port by its own id",
                 stored: vec![(&m1, "MIDIIN2 (MIDI X)"), (&m0, "MIDI X")],
                 present: multi.to_vec(),
                 expect: vec![Port { port: 1, reanchor: false }, Port { port: 0, reanchor: false }],
@@ -486,12 +495,20 @@ mod tests {
             },
         ];
         // The multi-port device moved: both ports re-anchor by name.
-        let moved = [port(r"\\?\usb#m2", 0, "MIDI X"), port(r"\\?\usb#m2", 1, "MIDIIN2 (MIDI X)")];
+        let moved = identities(&[(r"\\?\usb#m2", "MIDI X"), (r"\\?\usb#m2", "MIDIIN2 (MIDI X)")]);
         rows.push(Row {
             case: "a multi-port device moved to another socket",
             stored: vec![(&m0, "MIDI X"), (&m1, "MIDIIN2 (MIDI X)")],
             present: moved.to_vec(),
             expect: vec![Port { port: 0, reanchor: true }, Port { port: 1, reanchor: true }],
+        });
+        // The same device after a restart, WinMM listing its ports the other way round: each keeps its
+        // own exact identity, so neither fires the other's bindings.
+        rows.push(Row {
+            case: "a multi-port device enumerated in swapped order",
+            stored: vec![(&m0, "MIDI X"), (&m1, "MIDIIN2 (MIDI X)")],
+            present: identities(&[(r"\\?\usb#m", "MIDIIN2 (MIDI X)"), (r"\\?\usb#m", "MIDI X")]),
+            expect: vec![Port { port: 1, reanchor: false }, Port { port: 0, reanchor: false }],
         });
         for row in rows {
             assert_eq!(resolve(&row.stored, &row.present), row.expect, "{}", row.case);

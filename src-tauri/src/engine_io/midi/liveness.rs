@@ -32,7 +32,7 @@
 use std::ffi::c_void;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::mpsc::Sender;
+use std::sync::mpsc::{Receiver, Sender};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -40,7 +40,7 @@ use windows::core::GUID;
 use windows::Win32::Devices::DeviceAndDriverInstallation::{
     CM_Register_Notification, CM_Unregister_Notification, CM_NOTIFY_ACTION, CM_NOTIFY_ACTION_DEVICEINTERFACEARRIVAL,
     CM_NOTIFY_ACTION_DEVICEINTERFACEREMOVAL, CM_NOTIFY_EVENT_DATA, CM_NOTIFY_FILTER, CM_NOTIFY_FILTER_0_0, CM_NOTIFY_FILTER_TYPE_DEVICEINTERFACE,
-    CR_SUCCESS, HCMNOTIFICATION,
+    CONFIGRET, CR_SUCCESS, HCMNOTIFICATION,
 };
 use windows::Win32::Media::Audio::DEVINTERFACE_MIDI_INPUT;
 
@@ -132,6 +132,27 @@ impl Watch {
     }
 }
 
+/// The most notices one pass takes before it enumerates. A notification storm is handled in passes of
+/// this size, in arrival order, so a [`Wake::Stop`] queued behind it is reached after a bounded number of
+/// passes and never waits on an unbounded drain.
+pub(crate) const MAX_BATCH: usize = 64;
+
+/// The notices one pass handles: `first`, then what is already queued, at most [`MAX_BATCH`], in order
+/// (never deduplicated: a removal, an arrival and a removal of one path mean the last). True when a
+/// [`Wake::Stop`] was taken: the port thread stops, and the notices before it no longer matter.
+pub(crate) fn batch(first: Wake, woken: &Receiver<Wake>) -> (Vec<Wake>, bool) {
+    let mut notices = Vec::new();
+    let mut next = Some(first);
+    while let Some(wake) = next {
+        if wake == Wake::Stop {
+            return (notices, true);
+        }
+        notices.push(wake);
+        next = if notices.len() < MAX_BATCH { woken.try_recv().ok() } else { None };
+    }
+    (notices, false)
+}
+
 /// One connection's generation. Its midir callback captures the generation it was opened in and drops
 /// every message once that is no longer current, so a connection the port thread has invalidated runs
 /// nothing more, whatever WinMM still delivers before the close completes.
@@ -154,7 +175,9 @@ impl Generation {
 }
 
 /// The live notification registrations. Dropping it unregisters them (Windows waits for a callback
-/// in flight to return) and only then frees the channel the callbacks send on.
+/// in flight to return) and only then frees the channel the callbacks send on. If any unregistration
+/// fails, that registration may still call back, so the channel is leaked on purpose (logged once, on
+/// the dropping thread) rather than freed under it.
 pub(crate) struct Registration {
     handles: Vec<HCMNOTIFICATION>,
     context: *mut Sender<Wake>,
@@ -197,13 +220,24 @@ impl Registration {
 
 impl Drop for Registration {
     fn drop(&mut self) {
-        for handle in self.handles.drain(..) {
+        let results: Vec<CONFIGRET> = self
+            .handles
+            .drain(..)
             // SAFETY: registered by `new`, unregistered once, never from a callback.
-            unsafe { CM_Unregister_Notification(handle) };
+            .map(|handle| unsafe { CM_Unregister_Notification(handle) })
+            .collect();
+        if context_may_be_freed(&results) {
+            // SAFETY: every registration is gone, so no callback can still read it.
+            drop(unsafe { Box::from_raw(self.context) });
+        } else {
+            log::error!("[midi] could not unregister interface notifications ({results:?}): their channel is leaked");
         }
-        // SAFETY: every registration is gone, so no callback can still read it.
-        drop(unsafe { Box::from_raw(self.context) });
     }
+}
+
+/// The callbacks' context may be freed only when every unregistration succeeded.
+fn context_may_be_freed(results: &[CONFIGRET]) -> bool {
+    results.iter().all(|&r| r == CR_SUCCESS)
 }
 
 /// The notification callback, on a system thread-pool thread: copy the path, wake the port thread.
@@ -301,6 +335,57 @@ mod tests {
         let mut w = Watch::default();
         assert_eq!(w.notice(&Wake::Removed(String::new()), &[""]), Vec::<usize>::new());
         assert!(!same_path("", ""));
+    }
+
+    // A Stop queued behind a notification storm ends the port thread after a bounded number of
+    // passes, each pass taking at most MAX_BATCH notices in order.
+    #[test]
+    fn a_stop_behind_many_notices_ends_the_loop_in_bounded_passes() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let storm = 1000;
+        for i in 0..storm {
+            tx.send(if i % 2 == 0 { Wake::Arrived(PEDAL.into()) } else { Wake::Removed(PEDAL.into()) }).unwrap();
+        }
+        tx.send(Wake::Stop).unwrap();
+        // Still storming after the Stop: it must not delay it.
+        for _ in 0..storm {
+            tx.send(Wake::Arrived(PEDAL.into())).unwrap();
+        }
+        let mut passes = 0;
+        let mut taken = 0;
+        loop {
+            let first = rx.recv().unwrap();
+            passes += 1;
+            let (notices, stop) = batch(first, &rx);
+            assert!(notices.len() <= MAX_BATCH);
+            taken += notices.len();
+            if stop {
+                break;
+            }
+        }
+        assert_eq!(taken, storm, "every notice before the Stop, none after");
+        assert_eq!(passes, storm.div_ceil(MAX_BATCH));
+        assert_eq!(batch(Wake::Stop, &rx), (vec![], true));
+    }
+
+    // A pass keeps the notices' order: removal, arrival, removal of one path ends removed.
+    #[test]
+    fn a_batch_keeps_order_and_repeats() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(Wake::Arrived(PEDAL.into())).unwrap();
+        tx.send(Wake::Removed(PEDAL.into())).unwrap();
+        let (notices, stop) = batch(Wake::Removed(PEDAL.into()), &rx);
+        assert!(!stop);
+        assert_eq!(notices, [Wake::Removed(PEDAL.into()), Wake::Arrived(PEDAL.into()), Wake::Removed(PEDAL.into())]);
+    }
+
+    // The callbacks' channel is freed only when every registration is gone; one failed unregistration
+    // leaks it rather than leave a live callback reading freed memory.
+    #[test]
+    fn the_context_is_freed_only_when_every_unregistration_succeeded() {
+        assert!(context_may_be_freed(&[CR_SUCCESS, CR_SUCCESS]));
+        assert!(!context_may_be_freed(&[CR_SUCCESS, CONFIGRET(1)]));
+        assert!(!context_may_be_freed(&[CONFIGRET(1), CR_SUCCESS]));
     }
 
     // Decision 10: a callback from an old connection generation is ignored.
