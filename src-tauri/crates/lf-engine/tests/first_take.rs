@@ -9,8 +9,8 @@
 //! not zeroed, since the next take writes over it and a commit pads what it did not reach.
 //!
 //! Beyond the ports, two STATUS § Not heard yet claims: a press while the aligned tail is in flight
-//! (`free_h`: PLAY/STOP commits the take STOPPED; `free_i`, ignored red: REC/DUB is swallowed as a
-//! repeated stop, no overdub follows the commit) and where a free take held past the buffer closes
+//! (`free_h`: PLAY/STOP commits the take STOPPED; `free_d`: a second REC/DUB counts as a repeated stop,
+//! which cannot lengthen the take, D24) and where a free take held past the buffer closes
 //! (`cap_b`: on the capacity, a quarter bar past a bar line at 137 bpm).
 
 mod common;
@@ -322,35 +322,6 @@ fn free_h_a_play_stop_in_the_tail_commits_the_take_stopped() {
         rig.advance(rig.seconds(1.0));
         assert_eq!(rig.state(0), LaneState::Stopped, "and stays STOPPED");
     }
-}
-
-#[test]
-#[ignore = "red, STATUS D24: a REC/DUB press in the tail is swallowed: the take commits PLAYING and no overdub begins in the 2 s after"]
-fn free_i_a_rec_dub_in_the_tail_starts_one_overdub_at_the_commit() {
-    let mut wrong = Vec::new();
-    for second in [Command::RecDub(0), Command::Action(lf_engine::Action::RecDub)] {
-        let (mut rig, _, end, _) = second_press_in_the_tail(second);
-        let first = (rig.state(0), rig.window());
-        let mut dubs = Vec::new();
-        let mut was = first.0;
-        if was == LaneState::Overdubbing {
-            dubs.push(end);
-        }
-        for _ in 0..rig.seconds(2.0) {
-            let f = rig.frame;
-            rig.advance(1);
-            if rig.state(0) == LaneState::Overdubbing && was != LaneState::Overdubbing {
-                dubs.push(f);
-            }
-            was = rig.state(0);
-        }
-        println!("{second:?}: at the commit {end}: {:?}, recorder {:?}; overdubs begun in the 2 s after at {dubs:?}", first.0, first.1);
-        // Exactly one overdub, begun on the commit frame, recording from the commit plus the alignment.
-        if dubs != vec![end] || first.1 != Some((0, Some(end + rig.align), None)) {
-            wrong.push(format!("{second:?}: {:?} at the commit, overdubs begun at {dubs:?}", first.0));
-        }
-    }
-    assert!(wrong.is_empty(), "{}", wrong.join("; "));
 }
 
 /// STATUS § Not heard yet: "a free record past 60 s auto-closes on a bar (fine?)". It closes on the

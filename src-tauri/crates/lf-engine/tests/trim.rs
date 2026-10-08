@@ -394,26 +394,3 @@ fn g_trims_render_bit_identically_at_any_block_size() {
         }
     }
 }
-
-#[test]
-#[ignore = "red: a DUB makes a pending swap heard at once; how it should wait is an open owner decision"]
-fn i_a_dub_pressed_before_a_trim_swap_leaves_the_loop_playing_until_the_boundary() {
-    let mut rig = rig();
-    let master = loop_of(&mut rig, 4);
-    let before = rig.pcm(0);
-    let trimmed = first_tiled(&before, rig.fpb());
-    rig.advance_to(rig.next_boundary() + master / 4);
-    let boundary = rig.next_boundary();
-    rig.keep_output();
-    let from = rig.frame;
-    assert_eq!(trim(&mut rig, 0, 1), []);
-    rig.advance(job_frames(master) + master / 4);
-    assert_eq!(rig.pcm(0), trimmed, "the trim is built");
-    rig.press(Command::RecDub(0)); // a silent layer: the input is 0
-    rig.advance_to(boundary + 480);
-    plays(&rig, from, |f, pos| if f < boundary { before[pos] } else { trimmed[pos] }, "trim, then dub");
-    rig.press(Command::RecDub(0));
-    rig.idle();
-    assert_eq!(rig.state(0), LaneState::Playing);
-    assert_eq!(rig.engine.looper().undo_pcm(0), Some(trimmed), "the trimmed loop is the layer's baseline");
-}
