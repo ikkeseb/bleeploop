@@ -12,6 +12,8 @@
 //     (src/debug/tone-recall.ts): one launch per phase, on WASAPI
 //   pnpm native:export-master  the export's wet master rendered by the engine, beside its stem
 //     (src/debug/export-master.ts): one launch, on WASAPI
+//   pnpm native:midi  the UI's note sources through native MIDI's router, a WebView reload included
+//     (src/debug/midi-switch.ts): one launch, on WASAPI, the master muted
 //
 // Options: `--asio` launches `pnpm dev:asio` instead of `pnpm dev:wasapi`; `--<knob>=<value>` becomes
 // `VITE_LF_PROBE_<KNOB>` (`--filter=Pro-Q,Saturn`, `--hold=`, `--settle=`, `--params=`, `--plugins=`:
@@ -87,6 +89,19 @@ const PROBES = {
     config: 'scripts/export-probe.tauri.json',
     cleanLog: true,
     phases: [{ name: 'export', end: /^(complete: .*|FAIL.*)$/, pass: /^complete: /, exit: 'os-close' }],
+  },
+  // A profile of its own; one launch (the probe reloads the WebView inside it), closed through its
+  // window. `rustErrors`: a Rust ERROR line fails it too; `needs`: lines the launch's log must hold.
+  'midi-switch': {
+    tag: 'midi-switch',
+    config: 'scripts/midi-probe.tauri.json',
+    cleanLog: true,
+    rustErrors: true,
+    // The reloaded document's own epoch (the launch's first is 1), which ends the old one's holds. Not
+    // the permission deny's line (`lib.rs`): WebView2 keeps the denial in the profile, so only a profile's
+    // first request logs it; the probe's refused request is the proof.
+    needs: [{ what: "the reloaded document's epoch 2", re: /host_init: .*frontend_epoch=2\b/ }],
+    phases: [{ name: 'switch', end: /^(complete: .*|FAIL.*)$/, pass: /^complete: /, exit: 'os-close' }],
   },
   // `recallLines`: how many `[rig-recall]` log lines the phase must print.
   'recall-restart': {
@@ -171,6 +186,8 @@ function launch(phase, phaseEnv) {
     let partial = '';
     let recallLines = 0;
     const webviewErrors = [];
+    const rustErrors = [];
+    const found = new Set();
     let verdict;
     let settled = false;
 
@@ -178,7 +195,7 @@ function launch(phase, phaseEnv) {
       if (settled) return;
       settled = true;
       clearInterval(watchdog);
-      resolve({ line, reason, recallLines, webviewErrors, stopped: stopRun(child) });
+      resolve({ line, reason, recallLines, webviewErrors, rustErrors, found, stopped: stopRun(child) });
     };
     // After the verdict line: `close` waits for the app to quit by itself, `os-close` closes its window
     // first, `crash` kills app.exe alone at once (no tree kill: the WebView2 processes are left to
@@ -219,6 +236,8 @@ function launch(phase, phaseEnv) {
         const clean = raw.replace(/\x1b\[[0-9;]*m/g, '');
         if (clean.includes('[rig-recall]')) recallLines++;
         if (spec.cleanLog && clean.includes('[webview][ERROR]') && !clean.includes(`[${spec.tag}]`)) webviewErrors.push(clean);
+        if (spec.rustErrors && /\]\[ERROR\]/.test(clean) && !clean.includes('[webview]')) rustErrors.push(clean);
+        for (const need of spec.needs ?? []) if (need.re.test(clean)) found.add(need.what);
         const msg = clean.match(tagged)?.[1]?.trimEnd();
         if (msg === undefined) continue;
         seen = true;
@@ -258,6 +277,21 @@ for (const phase of phases) {
     for (const line of result.webviewErrors) console.log(`  ${line}`);
     result.reason = `${result.webviewErrors.length} frontend console.error line(s) besides the probe's own`;
     result.line = null;
+  }
+  if (ok && spec.rustErrors && result.rustErrors.length) {
+    ok = false;
+    for (const line of result.rustErrors) console.log(`  ${line}`);
+    result.reason = `${result.rustErrors.length} Rust ERROR line(s)`;
+    result.line = null;
+  }
+  const missing = (spec.needs ?? []).filter((n) => !result.found.has(n.what)).map((n) => n.what);
+  if (ok && missing.length) {
+    ok = false;
+    result.reason = `the log lacks: ${missing.join('; ')}`;
+    result.line = null;
+  }
+  if (ok && (spec.rustErrors || spec.needs)) {
+    console.log(`  [${spec.tag}] log: no Rust ERROR line${spec.needs ? `; found ${spec.needs.map((n) => n.what).join('; ')}` : ''}`);
   }
   if (ok && phase.recallLines !== undefined && result.recallLines !== phase.recallLines) {
     ok = false;
