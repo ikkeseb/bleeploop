@@ -1,21 +1,23 @@
 //! OWNS: engine mode: the process's [`EngineApp`] with its
-//! one [`EngineHost`], its feed and its plugin slots (`plugins`), the `engine_*` Tauri commands, and
-//! the shutdown on exit.
+//! one [`EngineHost`], its feed, its native MIDI ([`MidiHost`]) and its plugin slots (`plugins`), the
+//! `engine_*` Tauri commands, and the shutdown on exit.
 //!
 //! The app always runs on the engine: setup starts the host (its device owner; no device opens until
-//! the UI asks) and the feed once per launch. If either does not start, the launch has no audio: every
-//! `engine_*` command but `engine_status` answers an error, and so do the `plugin_*` commands that
-//! route to the engine's slots (`engine()`). Blocking work (an open waits up to 15 s) runs off the
-//! IPC thread.
+//! the UI asks), the feed and native MIDI (its ports open at once) once per launch. If the host or the
+//! feed does not start, the launch has no audio and no MIDI: every `engine_*` command but
+//! `engine_status` answers an error, and so do the `midi_*` commands, `input_send` (`midi_mode`) and
+//! the `plugin_*` commands that route to the engine's slots (`engine()`). Blocking work (an open waits
+//! up to 15 s) runs off the IPC thread.
 
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
-use lf_engine::{TimedCommand, SLOT_COUNT};
+use lf_engine::SLOT_COUNT;
 use tauri::ipc::Channel;
 use tauri::{AppHandle, Manager};
 
 use super::feed::{FeedHold, FeedThread};
+use super::midi::MidiHost;
 use super::plugins::EngineSlot;
 use crate::host::tone::{ToneHandoff, ToneStore};
 use super::wire::{FeedFrame, WireCommand};
@@ -44,10 +46,14 @@ pub fn switch_asio(
     engine()?.host()?.switch_asio(switch)
 }
 
-/// Engine mode's state: the host, its feed, its plugin slots and the tone store.
+/// Engine mode's state: the host, its feed, native MIDI, its plugin slots and the tone store.
 pub struct EngineApp {
     /// `None` when the engine did not start this launch.
     engine: Option<(EngineHost, FeedThread)>,
+    /// Native MIDI on the host; `None` when the engine did not start, and from the shutdown on. Its lock
+    /// is held across every call into it ([`EngineApp::with_midi`]), so the shutdown's take waits for a
+    /// call in flight and drops it before the host shuts down.
+    midi: Mutex<Option<MidiHost>>,
     pub(super) slots: Mutex<[EngineSlot; SLOT_COUNT]>,
     /// `None` without an app-local data folder: plugins then load at their defaults and keep nothing.
     pub(super) tones: Option<ToneStore>,
@@ -65,30 +71,35 @@ impl EngineApp {
     }
 
     fn start(app: &AppHandle) -> EngineApp {
-        let tones = match app.path().app_local_data_dir() {
-            Ok(dir) => Some(ToneStore::new(dir.join(TONES_DIR))),
+        let data_dir = match app.path().app_local_data_dir() {
+            Ok(dir) => Some(dir),
             Err(e) => {
-                log::warn!("[engine_io] no app-local data dir ({e}); no tone is kept");
+                log::warn!("[engine_io] no app-local data dir ({e}); no tone is kept, and the MIDI bindings live in memory only");
                 None
             }
         };
+        let tones = data_dir.as_ref().map(|dir| ToneStore::new(dir.join(TONES_DIR)));
         let host = EngineHost::new(HostConfig::default());
-        let engine = match FeedThread::spawn(host.clone()) {
+        let (engine, midi) = match FeedThread::spawn(host.clone()) {
             Ok(feed) => {
                 log::info!("[engine_io] engine mode: the native engine owns the audio device");
                 // DEV: the MIDI latency benchmark and the lock-wait log, when an environment variable asks.
                 #[cfg(debug_assertions)]
                 super::midi_bench::start_from_env(&host);
-                Some((host, feed))
+                // Its bindings beside `plugin-folders.json` (`host/folders.rs`); it registers its rebuild
+                // handshake on the host.
+                let midi = MidiHost::start(Arc::new(host.clone()), data_dir);
+                (Some((host, feed)), Some(midi))
             }
             Err(e) => {
                 log::error!("[engine_io] the feed thread did not start ({e}); this launch has no audio engine");
                 host.shutdown();
-                None
+                (None, None)
             }
         };
         EngineApp {
             engine,
+            midi: Mutex::new(midi),
             slots: Mutex::new(std::array::from_fn(|_| EngineSlot::Empty)),
             tones,
             reload_tones: Mutex::default(),
@@ -105,15 +116,28 @@ impl EngineApp {
         self.engine.as_ref().map(|(host, _)| host.clone()).ok_or_else(|| "the native engine is not running".to_string())
     }
 
-    /// On exit: stop the feed, save every slot's tone (`save_tones_on_exit`, bounded on its own), unload
-    /// the plugins while the device still plays (each crossfades out), then close the device and drop
-    /// the engine on its owner thread. Waits at most `SHUTDOWN_WAIT`: a plugin that hangs in its save or
-    /// its teardown is left to the process's exit rather than holding the app open.
+    /// Run `f` on native MIDI, under its lock; an error when it does not run (the engine did not start,
+    /// or it is shutting down).
+    pub(super) fn with_midi<R>(&self, f: impl FnOnce(&MidiHost) -> R) -> Result<R, String> {
+        let midi = self.midi.lock().unwrap_or_else(|e| e.into_inner());
+        midi.as_ref().map(f).ok_or_else(|| "native MIDI is not running".to_string())
+    }
+
+    /// On exit and before the updater's installer (`update.rs`): stop native MIDI (its ports close, what
+    /// they and the UI held is released while the device still plays, a bindings write still due is
+    /// made, and its rebuild hook leaves the host), stop the feed, save every slot's tone
+    /// (`save_tones_on_exit`, bounded on its own), unload the plugins while the device still plays (each
+    /// crossfades out), then close the device and drop the engine on its owner thread. Waits at most
+    /// `SHUTDOWN_WAIT`: a plugin that hangs in its save or its teardown, or a MIDI driver that hangs in
+    /// its close, is left to the process's exit rather than holding the app open.
     pub fn shutdown() {
         let Ok(app) = engine() else { return };
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         let spawned = std::thread::Builder::new().name("lf-engine-shutdown".into()).spawn(move || {
             if let Some((host, feed)) = &app.engine {
+                // Taken out under its lock (a call in flight finishes first), dropped after it.
+                let midi = app.midi.lock().unwrap_or_else(|e| e.into_inner()).take();
+                drop(midi);
                 feed.stop();
                 app.save_tones_on_exit();
                 app.unload_all();
@@ -165,18 +189,18 @@ pub async fn engine_set_slot_input_channel(slot: u8, channel: Option<u32>) -> Re
         .map_err(|e| format!("engine_set_slot_input_channel: {e}"))?
 }
 
-/// A batch of commands, in order, at the next block. Fire-and-forget: what the engine refuses comes
-/// back on the feed; an error means the rest of the batch did not reach it. Each slot reads its own
-/// input, so several may be live at once: which are is the UI's call (`src/ui/state/native-io.ts`).
-/// Synchronous: it runs on the main thread, where the IPC hands requests over in order, so two batches
-/// cannot swap (an async command runs on the runtime's pool); it only takes two brief locks.
+/// A batch of commands, in order, at the next block, through native MIDI's routing
+/// (`midi_mode::engine_send_to`): input commands (looper presses, `Press`, `SelectTrack`, toggles)
+/// join its one ordered queue, behind a pedal's; settings go to the engine. A note, a wheel, the note
+/// target or a panic is refused: those go through `input_send`. Fire-and-forget: what the engine
+/// refuses comes back on the feed; an error means the rest of the batch did not reach it. Each slot
+/// reads its own input, so several may be live at once: which are is the UI's call
+/// (`src/ui/state/native-io.ts`). Synchronous: it runs on the main thread, where the IPC hands requests
+/// over in order, so two batches (and an `input_send` between them) cannot swap (an async command runs
+/// on the runtime's pool); it only takes brief locks.
 #[tauri::command]
 pub fn engine_send(commands: Vec<WireCommand>) -> Result<(), String> {
-    // DEV: where a Web MIDI note reaches native code, for the MIDI benchmark (one atomic load unless it runs).
-    #[cfg(debug_assertions)]
-    super::midi_bench::arrived(commands.iter().map(|c| &c.0), std::time::Instant::now());
-    let host = app()?.host()?;
-    host.send_all(commands.into_iter().map(|c| TimedCommand { frame: None, command: c.0 }))
+    engine()?.with_midi(|midi| super::midi_mode::engine_send_to(midi, commands))?
 }
 
 /// Share output's WASAPI render endpoint, or `null` for off.

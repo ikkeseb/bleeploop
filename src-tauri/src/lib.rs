@@ -112,19 +112,18 @@ fn app_open_log_dir(app: tauri::AppHandle) -> Result<(), String> {
     })
 }
 
-/// Windows: auto-grant the WebView2 permission request the app itself makes (Web MIDI) so
-/// navigator.requestMIDIAccess resolves without a prompt — the desktop-app-native behaviour (P8).
-/// WebView2 v149 supports Web MIDI natively, and engine mode's MIDI still arrives through it (the
-/// native MidiHost stays off: WinMM ports are exclusive); only the permission needs granting.
-/// Non-sysex Web MIDI surfaces as UNKNOWN_PERMISSION and sysex as MIDI_SYSTEM_EXCLUSIVE_MESSAGES, and
-/// the exact kind varies by runtime, so both are granted.
+/// Windows: DENY the WebView2 Web MIDI permission to the app's own pages, without a prompt. One MIDI
+/// path per run: native MIDI (`engine_io/midi`, started with the engine) owns the input ports, and a
+/// WinMM input port may be exclusive, so a Web MIDI open beside it could take a controller from it or
+/// fail on it. Non-sysex Web MIDI surfaces as UNKNOWN_PERMISSION and sysex as
+/// MIDI_SYSTEM_EXCLUSIVE_MESSAGES, and the exact kind varies by runtime, so both are denied.
 /// Anything else (camera, geolocation, notifications, …) and any request from a foreign origin keeps
 /// WebView2's default handling.
 #[cfg(windows)]
-fn register_permission_autogrant(window: &tauri::WebviewWindow) {
+fn register_midi_permission_deny(window: &tauri::WebviewWindow) {
     use webview2_com::Microsoft::Web::WebView2::Win32::{
         COREWEBVIEW2_PERMISSION_KIND, COREWEBVIEW2_PERMISSION_KIND_MIDI_SYSTEM_EXCLUSIVE_MESSAGES,
-        COREWEBVIEW2_PERMISSION_KIND_UNKNOWN_PERMISSION, COREWEBVIEW2_PERMISSION_STATE_ALLOW,
+        COREWEBVIEW2_PERMISSION_KIND_UNKNOWN_PERMISSION, COREWEBVIEW2_PERMISSION_STATE_DENY,
     };
     use webview2_com::PermissionRequestedEventHandler;
 
@@ -148,13 +147,13 @@ fn register_permission_autogrant(window: &tauri::WebviewWindow) {
                     let own_origin = ["http://tauri.localhost", "http://localhost:1420"]
                         .iter()
                         .any(|o| uri == *o || uri.starts_with(&format!("{o}/")));
-                    let wanted = kind == COREWEBVIEW2_PERMISSION_KIND_UNKNOWN_PERMISSION
+                    let midi = kind == COREWEBVIEW2_PERMISSION_KIND_UNKNOWN_PERMISSION
                         || kind == COREWEBVIEW2_PERMISSION_KIND_MIDI_SYSTEM_EXCLUSIVE_MESSAGES;
-                    if own_origin && wanted {
-                        args.SetState(COREWEBVIEW2_PERMISSION_STATE_ALLOW)?;
-                        log::info!("webview permission auto-granted: kind {}", kind.0);
+                    if own_origin && midi {
+                        args.SetState(COREWEBVIEW2_PERMISSION_STATE_DENY)?;
+                        log::warn!("webview MIDI permission denied (native MIDI owns the ports): kind {}", kind.0);
                     } else {
-                        log::warn!("webview permission not auto-granted: kind {} from {uri}", kind.0);
+                        log::warn!("webview permission left to WebView2: kind {} from {uri}", kind.0);
                     }
                 }
                 Ok(())
@@ -278,9 +277,9 @@ pub fn run() {
             {
                 use tauri::Manager;
                 if let Some(window) = app.get_webview_window("main") {
-                    register_permission_autogrant(&window);
+                    register_midi_permission_deny(&window);
                 }
-                // The native engine: its device owner and feed, once per launch.
+                // The native engine: its device owner, feed and native MIDI, once per launch.
                 engine_io::mode::EngineApp::setup(app.handle());
             }
             Ok(())
@@ -348,6 +347,26 @@ pub fn run() {
             engine_io::mode::engine_snapshot,
             #[cfg(windows)]
             engine_io::mode::engine_load_session,
+            // Native MIDI (`engine_io/midi_mode.rs`): the UI's note input, synchronous as
+            // `engine_send`, and the learn UI's calls and event channel.
+            #[cfg(windows)]
+            engine_io::midi_mode::input_send,
+            #[cfg(windows)]
+            engine_io::midi_mode::midi_subscribe,
+            #[cfg(windows)]
+            engine_io::midi_mode::midi_learn,
+            #[cfg(windows)]
+            engine_io::midi_mode::midi_cancel_learn,
+            #[cfg(windows)]
+            engine_io::midi_mode::midi_forget,
+            #[cfg(windows)]
+            engine_io::midi_mode::midi_set_momentary,
+            #[cfg(windows)]
+            engine_io::midi_mode::midi_set_hold,
+            #[cfg(windows)]
+            engine_io::midi_mode::midi_assign,
+            #[cfg(windows)]
+            engine_io::midi_mode::midi_import_legacy,
             // DEV: the MIDI benchmark's UI stalls (`engine_io/midi_bench.rs`; the frontend's side is
             // `src/platform/host.tauri.ts`, DEV only).
             #[cfg(all(windows, debug_assertions))]

@@ -24,12 +24,13 @@
 //! | `frame_clock` | [`FrameClock`]: the callback's (time, frame) stamp, whether a device runs, the feed's anchor; DEV, the stamps' history a frame turns into time through |
 //! | `pipes` | [`pipes::PullPipe`]: frames pushed on one clock, pulled resampled on another (the WASAPI join, Share output) |
 //! | `feed` | the feed: what the UI reads back (events, device, status, anchor, meter, waveforms), on its own thread |
-//! | `mode` | engine mode: the managed host, the tone store's folder, the `engine_*` Tauri commands, shutdown on exit |
+//! | `mode` | engine mode: the managed host, the tone store's folder, native MIDI's start and stop, the `engine_*` Tauri commands (`engine_send` through native MIDI's routing), shutdown on exit |
+//! | `midi_mode` | native MIDI's Tauri commands: the UI's note input (`input_send`), `engine_send`'s routing, the frontend epoch's hand-over, the learn UI's `midi_*` calls and its event channel |
 //! | `plugins` | engine mode's plugin slots: the `plugin_*` commands routed to the engine slot owners, and tone recall's (`host/tone.rs`) |
 //! | `session` | a session's bytes to and from the engine: the snapshot the UI saves (an export's with the wet master, rendered offline from the snapshot, its lanes' mix and the kept master volume and mute), the load it imports (each lane with its mix) |
 //! | `settings` | the last value of every setting, replayed into each new engine; a lane's mix as the engine applied it (its `Event::Mix`) |
 //! | `share` | Share output: the post-limiter master mirrored to a WASAPI endpoint while ASIO plays |
-//! | `midi` | native MIDI (built, never started by the app): ports and hot-plug, parse, MIDI learn and its stored bindings, the one note router for every note source, the ordered input queue into [`EngineHost::send`] and its part in a rebuild ([`RebuildHook`]) |
+//! | `midi` | native MIDI, the app's only MIDI path: ports and hot-plug, parse, MIDI learn and its stored bindings, the one note router for every note source, the ordered input queue into [`EngineHost::send`] and its part in a rebuild ([`RebuildHook`]) |
 //! | `midi_bench` | DEV: the MIDI latency benchmark (a loopback sender, arrival stamps, the applied-note record's report) and the `settings`/`ends` lock waits, each run only when an environment variable asks |
 //! | `probe` | DEV: `app.exe --probe-engine`, the device side on real hardware (soak, switches, plugin swaps) |
 //! | `tone` | DEV: the probe's loopback tone (`--tone`): its hook in the output callback, the detector, the long and late callbacks' log |
@@ -100,8 +101,8 @@
 //! Everything here runs without hardware in `cargo test`: the transition kernel's tables, the device
 //! owner and the callbacks on the fake driver (`tests.rs`), the install/remove/restart handshake with
 //! the fixture plugins in a rendering engine (`host/`'s restart fixtures), the pipe matrix at ±400 ppm
-//! (`pipes.rs`), native MIDI on a recording engine and through a real rebuild (`midi`), the wire
-//! fixture (`wire.rs`). Code only a device or a real plugin can run is compile-checked (`--features
+//! (`pipes.rs`), native MIDI on a recording engine and through a real rebuild (`midi`), its commands'
+//! routing with no port open (`midi_mode`), the wire fixtures (`wire.rs`: the engine's and MIDI's). Code only a device or a real plugin can run is compile-checked (`--features
 //! asio` too); on the rig, `pnpm native:engine` runs `probe.rs`'s bar.
 
 mod callback;
@@ -113,6 +114,7 @@ mod feed;
 mod fpu;
 pub mod frame_clock;
 pub mod midi;
+pub mod midi_mode;
 #[cfg(debug_assertions)]
 pub mod midi_bench;
 pub mod mode;

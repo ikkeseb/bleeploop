@@ -1,0 +1,116 @@
+{
+  "inputEvents": [
+    { "note": { "owner": "pointer:3", "note": 60, "velocity": 100, "on": true } },
+    { "note": { "owner": "key:KeyA", "note": 60, "velocity": 0, "on": false } },
+    "blur",
+    { "selectTarget": { "slot": 0, "target": { "Slot": 0 } } },
+    { "selectTarget": { "slot": null, "target": { "Builtin": "lead" } } },
+    { "selectTarget": { "slot": null, "target": "Off" } },
+    "allNotesOff"
+  ],
+  "inputEventsAccepted": [
+    { "sent": { "blur": null }, "reads": "blur" },
+    { "sent": { "allNotesOff": null }, "reads": "allNotesOff" }
+  ],
+  "midiEvents": [
+    {
+      "ports": {
+        "ports": [
+          { "id": "winmm:0:\\\\?\\usb#vid_0763&pid_2012#1:FS-1", "name": "FS-1", "state": "open" },
+          { "id": "winmm-weak:0:nanoPAD", "name": "nanoPAD", "state": "busy" },
+          { "id": "winmm:1:\\\\?\\usb#vid_0763&pid_2012#2:FS-1", "name": "FS-1", "state": "closed" }
+        ]
+      }
+    },
+    { "gone": { "names": ["FS-1"] } },
+    {
+      "bindings": {
+        "bindings": [
+          {
+            "binding": {
+              "portId": "winmm:0:\\\\?\\usb#vid_0763&pid_2012#1:FS-1", "portName": "FS-1", "channel": 0, "kind": "cc",
+              "number": 64, "action": "recDub", "target": null, "pressHigh": true, "momentary": true, "hold": true
+            },
+            "origin": "native", "ordinal": false, "blocked": null, "displayName": "FS-1", "state": "live"
+          },
+          {
+            "binding": {
+              "portId": "input-1", "portName": "nanoPAD", "channel": 9, "kind": "note",
+              "number": 36, "action": "clear", "target": 2, "pressHigh": true, "momentary": false, "hold": false
+            },
+            "origin": "legacy", "ordinal": true, "blocked": "another record of this port binds the same message",
+            "displayName": "nanoPAD", "state": "blocked"
+          },
+          {
+            "binding": {
+              "portId": "winmm:0:\\\\?\\usb#vid_0763&pid_2012#1:FS-1", "portName": "FS-1", "channel": 0, "kind": "cc",
+              "number": 20, "action": "clickToggle", "target": null, "pressHigh": false, "momentary": false, "hold": false
+            },
+            "origin": "native", "ordinal": false, "blocked": null, "displayName": "FS-1", "state": "noPort"
+          },
+          {
+            "binding": {
+              "portId": "input-1", "portName": "nanoPAD", "channel": 9, "kind": "note",
+              "number": 37, "action": "clear", "target": 2, "pressHigh": true, "momentary": false, "hold": false
+            },
+            "origin": "legacy", "ordinal": true, "blocked": null, "displayName": "nanoPAD", "state": "severalPorts"
+          },
+          {
+            "binding": {
+              "portId": "input-1", "portName": "nanoPAD", "channel": 9, "kind": "note",
+              "number": 38, "action": "clear", "target": 2, "pressHigh": true, "momentary": false, "hold": false
+            },
+            "origin": "legacy", "ordinal": true, "blocked": null, "displayName": "nanoPAD", "state": "severalAbsent"
+          }
+        ]
+      }
+    },
+    { "learning": { "learning": { "action": "undo", "target": 1 } } },
+    { "learning": { "learning": null } },
+    {
+      "awaitingRelease": {
+        "binding": {
+          "portId": "winmm:0:\\\\?\\usb#vid_0763&pid_2012#1:FS-1", "portName": "FS-1", "channel": 0, "kind": "cc",
+          "number": 64, "action": "recDub", "target": null, "pressHigh": true, "momentary": true, "hold": true
+        }
+      }
+    },
+    { "awaitingRelease": { "binding": null } },
+    {
+      "learned": {
+        "binding": {
+          "portId": "input-1", "portName": "nanoPAD", "channel": 9, "kind": "note",
+          "number": 36, "action": "clear", "target": 2, "pressHigh": true, "momentary": false, "hold": false
+        }
+      }
+    },
+    { "refused": { "reason": "holdControlsTaken" } },
+    { "run": { "action": "goLive" } },
+    { "run": { "action": "stageView" } },
+    { "run": { "action": "stageNextView" } },
+    { "run": { "action": "tapTempo" } },
+    "pressed",
+    { "store": { "problem": { "readOnly": { "why": "a newer build wrote it (version 2)" } } } },
+    { "store": { "problem": { "conflict": { "why": "the file changed since it was read" } } } },
+    { "store": { "problem": { "failed": { "why": "access denied" } } } },
+    { "store": { "problem": { "rejected": { "count": 2 } } } },
+    { "held": { "notes": [60, 64], "changes": 3 } }
+  ],
+  "importReports": [
+    {
+      "already": false,
+      "unreadable": null,
+      "imported": [0, 2],
+      "blocked": [{ "index": 1, "why": "another record of this port binds the same message" }],
+      "rejected": [{ "index": 3, "reason": "missing field `action`" }],
+      "skipped": [4]
+    },
+    { "already": false, "unreadable": "expected value at line 1 column 1", "imported": [], "blocked": [], "rejected": [], "skipped": [] },
+    { "already": true, "unreadable": null, "imported": [], "blocked": [], "rejected": [], "skipped": [] }
+  ],
+  "actionIds": [
+    "recDub", "playStop", "undo", "clear", "mute", "reverse", "copy", "halveTrack", "nextTrack", "prevTrack",
+    "playAll", "stopAll", "fadeAll", "goLive", "stageView", "stageNextView", "tapTempo", "clickToggle",
+    "endStopToggle", "fixedToggle", "retakeToggle", "autoRecToggle", "inFxEcho", "inFxReverb", "inFxRing"
+  ]
+}

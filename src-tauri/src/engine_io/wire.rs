@@ -26,6 +26,12 @@
 //! The commands that carry it are `mode.rs`'s `engine_*`: `engine_send` is a synchronous batch (IPC
 //! order holds); `engine_feed` subscribes a Tauri `Channel`, one subscriber at a time (a new one
 //! replaces it), and its first frame is a `reset`.
+//!
+//! Native MIDI's wire (`midi_mode.rs`'s commands) is camelCase throughout: an [`InputEvent`] crosses
+//! `input_send` (`{"note":{…}}`, `"blur"` or `{"blur":null}`, `{"selectTarget":{"slot":0,"target":…}}`
+//! with the target as `SelectInstrument` carries it, `"allNotesOff"`), and `midi::MidiEvent` and
+//! `midi::ImportReport` keep the serde they derive where they are defined.
+//! `verify/fixtures/midi-wire.json` holds both sides to that JSON as `engine-wire.json` does to this.
 
 use std::collections::BTreeMap;
 
@@ -45,6 +51,26 @@ pub struct WireCommand(#[serde(with = "CommandDef")] pub Command);
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct WireEvent(#[serde(with = "EventDef")] pub Event);
+
+/// One note-source event of the UI as it crosses `input_send`, for native MIDI's router
+/// (`midi::MidiHost`'s `ui_*` calls). The document's epoch travels once per batch, beside the events.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum InputEvent {
+    /// A pointer or a key (`owner`: `pointer:<id>` or `key:<code>`) pressed (`on`) or let go of `note`
+    /// (velocity 0..127; 0 is a release).
+    Note { owner: String, note: u8, velocity: u8, on: bool },
+    /// The window lost focus: the document's keys and pointers are up.
+    Blur,
+    /// Move the notes to `target`, picked on `slot` (`None`: no slot).
+    SelectTarget {
+        slot: Option<u8>,
+        #[serde(with = "NoteTargetDef")]
+        target: NoteTarget,
+    },
+    /// Panic: every note that sounds is released, then `AllNotesOff`.
+    AllNotesOff,
+}
 
 #[derive(Serialize, Deserialize)]
 #[serde(remote = "Command")]
@@ -827,5 +853,258 @@ mod tests {
                 assert_eq!(json["SetFxParam"][1], Value::from(def.key));
             }
         }
+    }
+
+    // Native MIDI's wire: `verify/fixtures/midi-wire.json`.
+
+    use super::super::midi::bindings::{Kind, Rejected};
+    use super::super::midi::{
+        ActionId, Binding, BindingState, Blocked, ImportReport, LearnPick, LearnRefusal, Listed, ListedBinding, MidiEvent, Origin, PortInfo,
+        PortState, StoreProblem, UiAction,
+    };
+
+    const MIDI_FIXTURE: &str = include_str!("../../../verify/fixtures/midi-wire.json");
+
+    fn midi_fixture(section: &str) -> Vec<Value> {
+        let fixture: Value = serde_json::from_str(MIDI_FIXTURE).expect("the MIDI fixture is JSON");
+        fixture[section].as_array().unwrap_or_else(|| panic!("midi-wire.{section} is an array")).clone()
+    }
+
+    /// Every variant, by position: a new one fails to compile here until it has a number (bump the
+    /// count) and an example in the fixture.
+    const INPUT_EVENTS: usize = 4;
+    fn input_event_index(e: &InputEvent) -> usize {
+        match e {
+            InputEvent::Note { .. } => 0,
+            InputEvent::Blur => 1,
+            InputEvent::SelectTarget { .. } => 2,
+            InputEvent::AllNotesOff => 3,
+        }
+    }
+
+    const MIDI_EVENTS: usize = 11;
+    fn midi_event_index(e: &MidiEvent) -> usize {
+        match e {
+            MidiEvent::Ports { .. } => 0,
+            MidiEvent::Gone { .. } => 1,
+            MidiEvent::Bindings { .. } => 2,
+            MidiEvent::Learning { .. } => 3,
+            MidiEvent::AwaitingRelease { .. } => 4,
+            MidiEvent::Learned { .. } => 5,
+            MidiEvent::Refused { .. } => 6,
+            MidiEvent::Run { .. } => 7,
+            MidiEvent::Pressed => 8,
+            MidiEvent::Store { .. } => 9,
+            MidiEvent::Held { .. } => 10,
+        }
+    }
+
+    fn port_state_index(s: PortState) -> usize {
+        match s {
+            PortState::Open => 0,
+            PortState::Busy => 1,
+            PortState::Closed => 2,
+        }
+    }
+
+    fn binding_state_index(s: BindingState) -> usize {
+        match s {
+            BindingState::Live => 0,
+            BindingState::Blocked => 1,
+            BindingState::NoPort => 2,
+            BindingState::SeveralPorts => 3,
+            BindingState::SeveralAbsent => 4,
+        }
+    }
+
+    fn store_problem_index(p: &StoreProblem) -> usize {
+        match p {
+            StoreProblem::ReadOnly { .. } => 0,
+            StoreProblem::Conflict { .. } => 1,
+            StoreProblem::Failed { .. } => 2,
+            StoreProblem::Rejected { .. } => 3,
+        }
+    }
+
+    fn ui_action_index(a: UiAction) -> usize {
+        match a {
+            UiAction::GoLive => 0,
+            UiAction::StageView => 1,
+            UiAction::StageNextView => 2,
+            UiAction::TapTempo => 3,
+        }
+    }
+
+    const PEDAL: &str = r"winmm:0:\\?\usb#vid_0763&pid_2012#1:FS-1";
+
+    /// A momentary HOLD pedal on REC/DUB, a note on a lane's CLEAR, and a latching CC on the click.
+    fn pedal() -> Binding {
+        Binding {
+            port_id: PEDAL.into(),
+            port_name: "FS-1".into(),
+            channel: 0,
+            kind: Kind::Cc,
+            number: 64,
+            action: ActionId::RecDub,
+            target: None,
+            press_high: true,
+            momentary: true,
+            hold: true,
+        }
+    }
+
+    fn pad() -> Binding {
+        Binding {
+            port_id: "input-1".into(),
+            port_name: "nanoPAD".into(),
+            channel: 9,
+            kind: Kind::Note,
+            number: 36,
+            action: ActionId::Clear,
+            target: Some(2),
+            press_high: true,
+            momentary: false,
+            hold: false,
+        }
+    }
+
+    fn listed(binding: Binding, origin: Origin, blocked: Option<&str>, state: BindingState) -> ListedBinding {
+        let display_name = binding.port_name.clone();
+        let ordinal = origin == Origin::Legacy;
+        ListedBinding { listed: Listed { binding, origin, ordinal, blocked: blocked.map(String::from), display_name }, state }
+    }
+
+    /// The fixture's `midiEvents`, in its order, as the core makes them.
+    fn midi_events() -> Vec<MidiEvent> {
+        let port = |id: &str, name: &str, state| PortInfo { id: id.into(), name: name.into(), state };
+        let click = Binding { kind: Kind::Cc, number: 20, action: ActionId::ClickToggle, momentary: false, hold: false, press_high: false, ..pedal() };
+        vec![
+            MidiEvent::Ports {
+                ports: vec![
+                    port(PEDAL, "FS-1", PortState::Open),
+                    port("winmm-weak:0:nanoPAD", "nanoPAD", PortState::Busy),
+                    port(r"winmm:1:\\?\usb#vid_0763&pid_2012#2:FS-1", "FS-1", PortState::Closed),
+                ],
+            },
+            MidiEvent::Gone { names: vec!["FS-1".into()] },
+            MidiEvent::Bindings {
+                bindings: vec![
+                    listed(pedal(), Origin::Native, None, BindingState::Live),
+                    listed(pad(), Origin::Legacy, Some("another record of this port binds the same message"), BindingState::Blocked),
+                    listed(click, Origin::Native, None, BindingState::NoPort),
+                    listed(Binding { number: 37, ..pad() }, Origin::Legacy, None, BindingState::SeveralPorts),
+                    listed(Binding { number: 38, ..pad() }, Origin::Legacy, None, BindingState::SeveralAbsent),
+                ],
+            },
+            MidiEvent::Learning { learning: Some(LearnPick { action: ActionId::Undo, target: Some(1) }) },
+            MidiEvent::Learning { learning: None },
+            MidiEvent::AwaitingRelease { binding: Some(pedal()) },
+            MidiEvent::AwaitingRelease { binding: None },
+            MidiEvent::Learned { binding: pad() },
+            MidiEvent::Refused { reason: LearnRefusal::HoldControlsTaken },
+            MidiEvent::Run { action: UiAction::GoLive },
+            MidiEvent::Run { action: UiAction::StageView },
+            MidiEvent::Run { action: UiAction::StageNextView },
+            MidiEvent::Run { action: UiAction::TapTempo },
+            MidiEvent::Pressed,
+            MidiEvent::Store { problem: StoreProblem::ReadOnly { why: "a newer build wrote it (version 2)".into() } },
+            MidiEvent::Store { problem: StoreProblem::Conflict { why: "the file changed since it was read".into() } },
+            MidiEvent::Store { problem: StoreProblem::Failed { why: "access denied".into() } },
+            MidiEvent::Store { problem: StoreProblem::Rejected { count: 2 } },
+            MidiEvent::Held { notes: vec![60, 64], changes: 3 },
+        ]
+    }
+
+    #[test]
+    fn every_input_event_round_trips_through_the_midi_fixture() {
+        let entries = midi_fixture("inputEvents");
+        let events: Vec<InputEvent> = entries
+            .iter()
+            .map(|entry| {
+                let parsed: InputEvent = serde_json::from_value(entry.clone()).unwrap_or_else(|e| panic!("midi-wire.inputEvents: {entry}: {e}"));
+                let back: Value = serde_json::from_str(&serde_json::to_string(&parsed).unwrap()).unwrap();
+                assert!(same(&back, entry), "midi-wire.inputEvents: {entry} writes back as {back}");
+                parsed
+            })
+            .collect();
+        covers("inputEvents", events.iter().map(input_event_index), INPUT_EVENTS);
+        let targets = events.iter().filter_map(|e| match e {
+            InputEvent::SelectTarget { target: NoteTarget::Builtin(_), .. } => Some(0),
+            InputEvent::SelectTarget { target: NoteTarget::Slot(_), .. } => Some(1),
+            InputEvent::SelectTarget { target: NoteTarget::Off, .. } => Some(2),
+            _ => None,
+        });
+        covers("inputEvents (their note targets)", targets, 3);
+        assert_eq!(
+            events[0],
+            InputEvent::Note { owner: "pointer:3".into(), note: 60, velocity: 100, on: true },
+            "the fields by their names"
+        );
+        // What the IPC may also send, read as its canonical entry.
+        for entry in midi_fixture("inputEventsAccepted") {
+            let parsed: InputEvent = serde_json::from_value(entry["sent"].clone()).unwrap_or_else(|e| panic!("midi-wire.inputEventsAccepted: {entry}: {e}"));
+            let read: InputEvent = serde_json::from_value(entry["reads"].clone()).unwrap();
+            assert_eq!(parsed, read, "midi-wire.inputEventsAccepted: {entry}");
+        }
+        let refused = |json: Value| serde_json::from_value::<InputEvent>(json).is_err();
+        assert!(refused(serde_json::json!({"Note":{"owner":"key:KeyA","note":60,"velocity":1,"on":true}})), "variants are camelCase");
+        assert!(refused(serde_json::json!({"selectTarget":{"slot":0,"target":{"Builtin":"Lead"}}})), "an instrument is its id");
+        assert!(refused(serde_json::json!({"note":{"owner":"key:KeyA","note":300,"velocity":1,"on":true}})), "a note is a byte");
+    }
+
+    #[test]
+    fn every_midi_event_writes_as_the_midi_fixture() {
+        let events = midi_events();
+        let entries = midi_fixture("midiEvents");
+        assert_eq!(events.len(), entries.len(), "one fixture entry per event");
+        for (event, entry) in events.iter().zip(&entries) {
+            let written: Value = serde_json::from_str(&serde_json::to_string(event).unwrap()).unwrap();
+            assert!(same(&written, entry), "{event:?} writes as {written}, the fixture holds {entry}");
+        }
+        covers("midiEvents", events.iter().map(midi_event_index), MIDI_EVENTS);
+        let ports = events.iter().filter_map(|e| match e {
+            MidiEvent::Ports { ports } => Some(ports.iter().map(|p| port_state_index(p.state))),
+            _ => None,
+        });
+        covers("midiEvents (their port states)", ports.flatten(), 3);
+        let states = events.iter().filter_map(|e| match e {
+            MidiEvent::Bindings { bindings } => Some(bindings.iter().map(|b| binding_state_index(b.state))),
+            _ => None,
+        });
+        covers("midiEvents (their binding states)", states.flatten(), 5);
+        let problems = events.iter().filter_map(|e| match e {
+            MidiEvent::Store { problem } => Some(store_problem_index(problem)),
+            _ => None,
+        });
+        covers("midiEvents (their store problems)", problems, 4);
+        let actions = events.iter().filter_map(|e| match e {
+            MidiEvent::Run { action } => Some(ui_action_index(*action)),
+            _ => None,
+        });
+        covers("midiEvents (their UI actions)", actions, 4);
+        // Every action id a binding can name, as the learn picker sends it.
+        let ids: Vec<Value> = ActionId::ALL.iter().map(|a| serde_json::to_value(a).unwrap()).collect();
+        assert_eq!(ids, midi_fixture("actionIds"), "the fixture's actionIds are ActionId::ALL, in order");
+        for id in midi_fixture("actionIds") {
+            serde_json::from_value::<ActionId>(id.clone()).unwrap_or_else(|e| panic!("midi_learn's action {id}: {e}"));
+        }
+    }
+
+    #[test]
+    fn an_import_report_writes_as_the_midi_fixture() {
+        let report = ImportReport {
+            already: false,
+            unreadable: None,
+            imported: vec![0, 2],
+            blocked: vec![Blocked { index: 1, why: "another record of this port binds the same message".into() }],
+            rejected: vec![Rejected { index: 3, reason: "missing field `action`".into() }],
+            skipped: vec![4],
+        };
+        let entries = midi_fixture("importReports");
+        let written: Value = serde_json::to_value(&report).unwrap();
+        assert!(same(&written, &entries[0]), "the import report writes as {written}");
+        let unreadable = ImportReport { unreadable: Some("expected value at line 1 column 1".into()), ..ImportReport::default() };
+        assert!(same(&serde_json::to_value(&unreadable).unwrap(), &entries[1]));
+        assert!(same(&serde_json::to_value(ImportReport { already: true, ..ImportReport::default() }).unwrap(), &entries[2]));
     }
 }
