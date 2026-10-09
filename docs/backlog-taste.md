@@ -16,30 +16,10 @@ added a line.
   deciding on wording or behaviour.
 - **Is the amp-sim live, from 1.5 m?** Only the slot's pill says so; the 4×22 px record meter is the
   only clipping cue.
-- **Stage view (B), unseen on the rig:** a visualizer in two looks, Orbit and Strata (V switches).
-  One answer per line:
-  - Which look opens first on a new install: Orbit (built) or Strata, the closest to the looper's
-    waveforms? After that the last chosen look is the one that opens.
-  - Orbit's ring order: track 1 outermost (built: the most circumference) or innermost, by the input?
-  - How much light: a wake behind the playhead plus a glow that breathes with each track's level
-    (built); only the wake, or a wake a bar long instead of a beat?
-  - The count-in numeral: warm white (built) or the armed track's amber?
-  - Strata: what just played scrolls on dimmed, left of the now line (built), or the now line at the
-    left edge with only what comes next?
-  - No persistent state label is left (the message line still says a wait, TAKE n, FADING OUT and
-    STOPPING AT LOOP END): MUTED is dim grey with a faint wake, STOPPED a still, slightly brighter grey.
-    Distinct enough from where you stand, with the chips as the second cue?
-  - The selected track: a 2 px warm-white circle outside its ring in Orbit, a row floor and an edge bar
-    in Strata, and the warm chip. Readable from where you stand, or heavier?
-  - An overdub in Strata keeps the loop's green waveform; the now-light, the head and the chip turn
-    amber. Does it read as overdubbing from where you stand, or should the row take an amber wash?
-  - The chips, the bar and the beat sit small at the edges at 0.7 opacity: readable with the guitar on?
-  - The view switch is a learnable pedal action ("Stage view: next look"): worth a pedal, or V and the
-    button only?
-  - The PC keyboard's note keys are silent inside it (so drum-mode 1–4 select lanes and V switches the
-    look): right, or should notes play?
-  - The looper lanes keep drawing under the stage: stop them while it is open?
-  - The pointer hides with the two buttons after 3 s: right for a stage, or keep it?
+- **Stage view (B): a rethink and redesign.** The owner finds both looks (Orbit, Strata) primitive and
+  unimpressive. Its own session: directions proposed with mockups, the owner picks; the earlier
+  per-look questions are superseded (git history holds them). A hitch the owner saw was under the
+  MIDI benchmark's deliberate 250 ms UI stalls, not seen in an ordinary run yet.
 - **IN FX defaults (unheard, an agent's pick):** echo 1/8, feedback 0.4, level 0.5; reverb 0.5. The
   echo's level is scaled so its repeats carry the input's energy (at feedback 0.95 the first echo is
   about ⅓ of the level): does high feedback still feel right? The reverb is summed to mono.
