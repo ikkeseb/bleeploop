@@ -5,9 +5,9 @@
 //! The app always runs on the engine: setup starts the host (its device owner; no device opens until
 //! the UI asks), the feed and native MIDI (its ports open at once) once per launch. If the host or the
 //! feed does not start, the launch has no audio and no MIDI: every `engine_*` command but
-//! `engine_status` answers an error, and so do the `midi_*` commands, `input_send` (`midi_mode`) and
-//! the `plugin_*` commands that route to the engine's slots (`engine()`). Blocking work (an open waits
-//! up to 15 s) runs off the IPC thread.
+//! `engine_status` answers an error, and so do the `midi_*` commands, `input_send` (`midi_mode`, which
+//! carries the UI's engine commands too) and the `plugin_*` commands that route to the engine's slots
+//! (`engine()`). Blocking work (an open waits up to 15 s) runs off the IPC thread.
 
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
@@ -20,7 +20,7 @@ use super::feed::{FeedHold, FeedThread};
 use super::midi::MidiHost;
 use super::plugins::EngineSlot;
 use crate::host::tone::{ToneHandoff, ToneStore};
-use super::wire::{FeedFrame, WireCommand};
+use super::wire::FeedFrame;
 use super::{DeviceRequest, DeviceStatus, EngineHost, HostConfig, OpenError};
 
 /// The tone store's folder in the app-local data folder (`host/tone.rs`).
@@ -187,20 +187,6 @@ pub async fn engine_set_slot_input_channel(slot: u8, channel: Option<u32>) -> Re
     tauri::async_runtime::spawn_blocking(move || host.set_slot_input_channel(slot as usize, channel))
         .await
         .map_err(|e| format!("engine_set_slot_input_channel: {e}"))?
-}
-
-/// A batch of commands, in order, at the next block, through native MIDI's routing
-/// (`midi_mode::engine_send_to`): input commands (looper presses, `Press`, `SelectTrack`, toggles)
-/// join its one ordered queue, behind a pedal's; settings go to the engine. A note, a wheel, the note
-/// target or a panic is refused: those go through `input_send`. Fire-and-forget: what the engine
-/// refuses comes back on the feed; an error means the rest of the batch did not reach it. Each slot
-/// reads its own input, so several may be live at once: which are is the UI's call
-/// (`src/ui/state/native-io.ts`). Synchronous: it runs on the main thread, where the IPC hands requests
-/// over in order, so two batches (and an `input_send` between them) cannot swap (an async command runs
-/// on the runtime's pool); it only takes brief locks.
-#[tauri::command]
-pub fn engine_send(commands: Vec<WireCommand>) -> Result<(), String> {
-    engine()?.with_midi(|midi| super::midi_mode::engine_send_to(midi, commands))?
 }
 
 /// Share output's WASAPI render endpoint, or `null` for off.

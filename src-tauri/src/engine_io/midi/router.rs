@@ -34,9 +34,9 @@
 //!   later release is harmless (nothing is sent for a note the new engine never sounded) and a fresh
 //!   press attacks again; the target and wheels the router last sent reach the new engine through the
 //!   settings replay alone.
-//! - **A WebView document's owners live as long as its epoch** (`frontendEpoch`, never 0): a new
-//!   document ([`Router::ui_epoch`]) releases the older documents' holds and refuses their late events;
-//!   a window blur releases the document's holds.
+//! - **A WebView document's owners live as long as its epoch** (its subscribe's input epoch, never 0):
+//!   a new document ([`Router::ui_epoch`]) releases the older documents' holds and refuses their late
+//!   events; a window blur releases the document's holds.
 //! - **[`HeldNotes`] is what is physically held, not sustained,** published without the router's lock.
 //!
 //! Collections keep insertion order, as the TS `Map`s and `Set`s do, so a release sweeps its notes in
@@ -58,7 +58,7 @@ const PITCH_BEND_RANGE_SEMITONES: f64 = 2.0;
 pub enum Owner {
     /// A connection (one open port) and a channel (`midi.ts` `midiOwner(port, channel)`).
     Midi { conn: u32, channel: u8 },
-    /// A pointer or a key of the WebView document of `epoch` (`frontendEpoch`); `id` is the UI's own,
+    /// A pointer or a key of the WebView document of input epoch `epoch`; `id` is the UI's own,
     /// `pointer:<pointerId>` or `key:<KeyboardEvent.code>` (`Keyboard.tsx`).
     Ui { epoch: u64, id: String },
 }
@@ -91,7 +91,7 @@ pub struct Router {
     target: Option<(Option<u8>, NoteTarget)>,
     /// Notes this engine was told to sound and not yet to release, bit n for note n.
     sounding: u128,
-    /// The current document's `frontendEpoch` (0: none yet, so no UI event is taken).
+    /// The current document's input epoch (0: none yet, so no UI event is taken).
     ui_epoch: u64,
     undo: Option<Undo>,
     published: HeldNotes,
@@ -399,7 +399,12 @@ impl Router {
         owners
     }
 
-    /// A new WebView document (`host_init`'s `frontendEpoch`): the older documents' owners let go, as
+    /// The current WebView document's input epoch (0: none yet).
+    pub fn epoch(&self) -> u64 {
+        self.ui_epoch
+    }
+
+    /// A new WebView document (its subscribe's input epoch): the older documents' owners let go, as
     /// unplugged, and their later events are refused. An epoch not newer than the current does nothing.
     pub fn ui_epoch(&mut self, epoch: u64, out: &mut Vec<Out>) {
         self.undo = None;

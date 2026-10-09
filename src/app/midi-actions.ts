@@ -1,7 +1,8 @@
 import { looper } from '../ui/state/audio';
-import { setMidiActionHandler, startMidi } from '../ui/state/midi';
+import { importLegacyBindings, setMidiActionHandler, startMidi } from '../ui/state/midi';
 import { refuseOnLane } from '../ui/looper/gates';
-import { platform, type MidiActionId } from '../platform';
+import type { ImportReport, MidiActionId } from '../platform';
+import { notifyError } from '../notify';
 import { nativePressed, runNativeAction, type ActionId } from './actions';
 
 /**
@@ -14,7 +15,9 @@ import { nativePressed, runNativeAction, type ActionId } from './actions';
  *
  * At every start the bindings the web build kept (`lf.midiLearn`) go to native MIDI, which imports them
  * once and answers `already` after (the plan's decision 9); the key stays until a later release removes
- * it, once the native store has written them.
+ * it, once the native store has written them. A launch that cannot read the key hands nothing over (an
+ * empty list would mark the import done for good), and the import's one answer is told: what waits for a
+ * port picked in Audio Settings, and what could not be read.
  */
 
 // The two action tables are one: native MIDI's ids are `actions.ts`'s (a drift fails the typecheck here).
@@ -23,21 +26,34 @@ void sameIds;
 
 const LEGACY_KEY = 'lf.midiLearn';
 
+const plural = (n: number, one: string, many: string): string => `${n} ${n === 1 ? one : many}`;
+
+/** The import's answer, told once: it runs once, and answers `already` after. */
+function tellImport(report: ImportReport): void {
+  if (report.already) return;
+  if (report.unreadable !== null) console.error(`[midi] the stored web bindings were unreadable: ${report.unreadable}`);
+  for (const r of report.rejected) console.error(`[midi] stored web binding ${r.index} not imported: ${r.reason}`);
+  if (report.blocked.length > 0) {
+    const waiting = `${plural(report.blocked.length, 'MIDI binding', 'MIDI bindings')} from the previous version need a port picked in Audio Settings`;
+    console.error(`[midi] ${waiting}`);
+    notifyError(waiting, 'Until then they run nothing.');
+  }
+  if (report.unreadable !== null || report.rejected.length > 0) {
+    const what = report.unreadable !== null ? 'The MIDI bindings' : plural(report.rejected.length, 'MIDI binding', 'MIDI bindings');
+    notifyError(`${what} from the previous version could not be read`, 'Learn them again in Audio Settings.');
+  }
+}
+
 function importLegacy(): void {
-  let json = '[]';
+  let json: string;
   try {
     json = localStorage.getItem(LEGACY_KEY) ?? '[]';
-  } catch {
-    /* unreadable storage: nothing to import */
+  } catch (err) {
+    // Not an empty list: importing one would mark the import done for good. The next launch tries again.
+    console.error('[midi] the stored web bindings could not be read; none handed over this launch', err);
+    return;
   }
-  platform.midi.importLegacy(json).then(
-    (report) => {
-      if (report.already) return;
-      if (report.unreadable !== null) console.error(`[midi] the stored web bindings were unreadable: ${report.unreadable}`);
-      for (const r of report.rejected) console.error(`[midi] stored web binding ${r.index} not imported: ${r.reason}`);
-    },
-    (err: unknown) => console.error('[midi] importing the stored web bindings failed', err),
-  );
+  importLegacyBindings(json).then(tellImport, (err: unknown) => console.error('[midi] importing the stored web bindings failed', err));
 }
 
 /** Listen to native MIDI, run what its bindings fire, and hand it the web's bindings once. Returns the

@@ -13,15 +13,16 @@
  *                    bindings, and what it tells the UI. The app never opens Web MIDI (the WebView's
  *                    permission is denied, and `verify/guards/web-midi.mjs` keeps the Web MIDI API out
  *                    of `src/`): WinMM input ports are exclusive, and native MIDI keeps them.
- *   - InputHost    — every UI note source's way into native MIDI's one note router (`input_send`).
+ *   - InputHost    — the UI's one ordered path to the engine's commands and native MIDI's one note
+ *                    router (`input_send`), which `index.ts`'s outbox alone calls.
  *   - LogFolder    — the release log's folder, for Help's diagnostics (web: none).
  *   - AppUpdates   — the app updater, release builds only (web: none, or a probe's script).
  *
  * Live audio NEVER crosses this boundary as PCM; a session save's snapshot does, once, off the RT path
  * (`EngineHost.snapshot` / `loadSession`).
  */
-import type { DeviceRequest, DeviceStatus, EngineCommand, FeedFrame } from './engine-wire';
-import type { ImportReport, InputEvent, MidiActionId, MidiEvent } from './midi-wire';
+import type { DeviceRequest, DeviceStatus, FeedFrame } from './engine-wire';
+import type { Dropped, ImportReport, InputItem, MidiActionId, MidiEvent } from './midi-wire';
 
 export type PluginSlot = 0 | 1;
 export type PluginFormat = 'clap' | 'vst3' | 'vst2';
@@ -266,42 +267,54 @@ export interface AsioDeviceInfo {
  * native error (an index no binding has, a refused edit, no engine this launch).
  */
 export interface MidiHost {
-  /** Subscribe to native MIDI's events; the first ones are the resync. One subscriber at a time: a new
-   * one (a WebView reload) replaces the last. Returns the unsubscribe. */
-  subscribe(onEvent: (event: MidiEvent) => void): () => void;
+  /** Subscribe to native MIDI's events, first thing in the document's boot; the first events are the
+   * resync. `epoch` resolves with this document's input epoch, which every `InputHost.send` presents:
+   * natively the subscribe released the older documents' holds, cancelled a pending learn and replaced the
+   * last subscriber (one at a time). It rejects when native MIDI does not run. */
+  subscribe(onEvent: (event: MidiEvent) => void): MidiSubscription;
   /** Learn the next CC or note-on, from any port, onto `action` (a lane action on track `target`, null the
    * selected track). Answered by `learning` and, once it captures, `learned`. */
   learn(action: MidiActionId, target: number | null): Promise<void>;
   /** Stop listening (a learned pedal's wait for its release goes on). True when a learn was pending. */
   cancelLearn(): Promise<boolean>;
-  /** Drop listed binding `index` (the `bindings` event's order). */
-  forget(index: number): Promise<void>;
+  /** Drop listed binding `index` of the list that came with store revision `revision` (a `bindings`
+   * event's). False, and nothing done, when the list changed since: the fresh list is on its way (the same
+   * for every edit below). */
+  forget(revision: number, index: number): Promise<boolean>;
   /** Read listed binding `index`'s pedal as momentary (true) or latching. */
-  setMomentary(index: number, momentary: boolean): Promise<void>;
+  setMomentary(revision: number, index: number, momentary: boolean): Promise<boolean>;
   /** HOLD on or off for listed binding `index` (a momentary REC/DUB pedal only). */
-  setHold(index: number, hold: boolean): Promise<void>;
+  setHold(revision: number, index: number, hold: boolean): Promise<boolean>;
   /** Assign listed binding `index` to the present port `portId` (`MidiPort.id`). */
-  assign(index: number, portId: string): Promise<void>;
+  assign(revision: number, index: number, portId: string): Promise<boolean>;
   /** Import the web's bindings once (`lf.midiLearn` verbatim, `"[]"` when absent); later calls change
    * nothing and answer `already`. */
   importLegacy(json: string): Promise<ImportReport>;
 }
 
+/** A subscription to native MIDI's events: the document's input epoch, and the stop. */
+export interface MidiSubscription {
+  epoch: Promise<number>;
+  stop(): void;
+}
+
 /**
- * The UI's note sources into native MIDI's one router (`input_send`): the on-screen and PC keyboard's
- * notes by their physical owner, the window's blur, the note target and the panic. The host adds this
- * document's epoch (`host_init`'s `frontendEpoch`), so a reloaded document's holds end natively. Send
- * through `index.ts`'s `input`, which keeps one order with `sendEngine`.
+ * The UI's one ordered path into native code (`input_send`): the engine's commands and the note sources'
+ * input events (the on-screen and PC keyboard's notes by their physical owner, the window's blur, the note
+ * target, the panic), in the order they were queued, for the document of `epoch` (its subscribe's: an
+ * input event of a replaced document is refused natively). Send through `index.ts` (`sendEngine`, `input`),
+ * whose outbox sends one batch at a time, the next once this one settled, so the order holds.
  */
 export interface InputHost {
-  /** A batch of input events, applied in order. Fire-and-forget; a rejection means it never arrived. */
-  send(events: readonly InputEvent[]): Promise<void>;
+  /** One batch, run in order. Resolves with what native MIDI dropped of it (no device, a rebuild, no room;
+   * the rest ran), or null. A rejection means none of it ran. */
+  send(epoch: number, items: readonly InputItem[]): Promise<Dropped | null>;
 }
 
 /**
  * The native audio engine (`src-tauri/src/engine_io`): one device, the looper, synths, FX, mixer and
- * plugin slots in the audio callback. The UI sends commands and reads the feed; no PCM crosses. The
- * payloads are `engine-wire.ts`.
+ * plugin slots in the audio callback. The UI sends commands (through `InputHost`, in one order with its
+ * notes) and reads the feed; no PCM crosses. The payloads are `engine-wire.ts`.
  */
 export interface EngineHost {
   /** False in the browser build (unless a DEV probe forces the web fake on, `host.web.ts`). */
@@ -317,9 +330,6 @@ export interface EngineHost {
    * switched without reopening the device; the running device keeps it for its own reopens. Rejects for
    * a channel the device lacks (nothing changes) and while no device runs. */
   setSlotInputChannel(slot: number, channel: number | null): Promise<void>;
-  /** A batch of commands, applied in order at the next block. Fire-and-forget: engine refusals come
-   * back on the feed; a rejection means the batch never reached the engine. */
-  send(commands: readonly EngineCommand[]): Promise<void>;
   /** Share output's endpoint (a WASAPI render id, as `listOutputDevices` lists them), or null for off.
    * The mirror runs while the device is ASIO. */
   setShare(endpoint: string | null): Promise<void>;

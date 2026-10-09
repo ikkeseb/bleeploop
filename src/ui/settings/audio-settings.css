@@ -187,9 +187,10 @@
 }
 
 /* The learned MIDI bindings: one line each in the value column (action · message · the pedal-kind switch
-   · HOLD on a REC/DUB pedal), with a ✕ that forgets it. The port name is the line's title. A binding that
-   does not run now dims its action and wraps a second line: why (in the folders' amber note), and a port
-   select with ASSIGN when a port is here. */
+   · HOLD on a REC/DUB pedal), with a ✕ that forgets it. The port name is the line's title. One from the
+   previous version wraps a second line saying so (in the legend's --dim); one that does not run now dims
+   its action and says why on that line (in the folders' amber note), with a port select and ASSIGN when
+   the player must pick its port. */
 .audio-settings__bindings {
   margin: -4px 0 0;
   padding: 0 0 0 83px;
@@ -216,6 +217,11 @@
   gap: 6px;
   min-width: 0;
   padding-bottom: 2px;
+}
+.audio-settings__binding-origin {
+  flex: 0 0 auto;
+  font-size: 10px;
+  color: var(--dim);
 }
 .audio-settings__binding-idle {
   flex: 0 1 auto;

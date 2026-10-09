@@ -10,7 +10,7 @@ WebView2 frontend for the UI.
 Every sample is the engine's: the click, the looper, the synths, the FX, the mixer, the limiter and
 the two plugin slots run in ONE device callback, clocked by the audio interface
 (`src-tauri/crates/lf-engine`, pure; its device side `src-tauri/src/engine_io`). The WebView is the
-UI: it sends commands (a batch per gesture, `engine_send`) and reads a feed (~60 frames/s: transport,
+UI: it sends commands (in its one ordered `input_send` path, below) and reads a feed (~60 frames/s: transport,
 lanes, the grid anchor, the meter, waveform peaks; never PCM). The wire is
 `src-tauri/src/engine_io/wire.rs`, mirrored in `src/platform/engine-wire.ts`. Settings and rig
 recall stay in the WebView's storage and are mirrored to native at boot (MIDI-learn bindings are
@@ -26,7 +26,7 @@ its interfaces, never the reverse (`src/platform/host.ts`):
 | `EngineHost` | a scriptable fake: records every send, emits the frames a probe scripts; not a second looper | `invoke()` + a Tauri Channel → the engine host |
 | `PluginHost` | stub: `available=false` | `invoke()`/`listen()` → the CLAP, VST3 and VST2 hosts |
 | `MidiHost` | a scriptable fake: records every call, emits the events a probe scripts | `invoke()` + a Tauri Channel → native MIDI (`midi_*`) |
-| `InputHost` | the same fake: records every input event | `invoke('input_send')` → native MIDI's note router |
+| `InputHost` | the same fake: records every batch, its commands and input events | `invoke('input_send')` → native MIDI: the commands to its queue, the notes to its router |
 | `LogFolder` | none | the release log's folder (Help's diagnostics) |
 | `AppUpdates` | none, or a probe's script | the updater (`src-tauri/src/update.rs`), release builds only |
 
@@ -40,10 +40,22 @@ permission is denied (`src-tauri/src/lib.rs`) and `verify/guards/web-midi.mjs` k
 - **One note router for every source** (`engine_io/midi/router.rs`): MIDI ports and the UI's pointer
   and computer-keyboard owners share note ownership, sustain, the wheels and the note target. The UI
   forwards gestures (`InputHost`) and keeps only a highlight overlay of its own holds.
+- **One ordered path from the UI** (`src/platform/index.ts`'s outbox, `engine_io/midi_mode.rs`): its
+  engine commands and its note sources' events leave in one `input_send` batch at a time, the next
+  once that one settled, since Tauri's IPC does not keep two calls in order. A batch native code
+  refused ran nothing and is sent once more; one lost twice is told, and a blur follows it when it held
+  a release. What native MIDI dropped of a batch (a press with no device running) is its answer, told
+  to the player once.
+- **A document is its subscription:** `midi_subscribe`, first thing in the page's boot, answers the
+  input epoch every batch carries (the outbox sends nothing before it) and, in one step, releases the
+  older documents' holds, cancels a pending learn and replaces the event channel unless a newer page
+  subscribed already. An input event of any other epoch is refused. The learn UI's calls go one at a
+  time, in call order, and an edit by list index names the store revision its list came with: one made
+  against an older list is refused.
 - **One ordered path into the engine** (`engine_io/midi/queue.rs`): the router's output, learned
-  actions and the UI's input commands (`engine_send`'s looper presses, `Press`, toggles) join one
-  bounded FIFO into `EngineHost::send`, so a pedal and a click keep their order and the settings memory
-  sees every target change. No second command ring.
+  actions and the UI's input commands (looper presses, `Press`, toggles) join one bounded FIFO into
+  `EngineHost::send`, so a pedal and a click keep their order and the settings memory sees every target
+  change. No second command ring.
 - **Nothing is stamped:** notes, wheels and bound actions land at the next block start, as a UI gesture
   does, so the ring's admission order is the order the engine applies them in. Stamping comes back
   only with one execution-order contract for every kind of input, and only if a measurement shows it
@@ -54,7 +66,9 @@ permission is denied (`src-tauri/src/lib.rs`) and `verify/guards/web-midi.mjs` k
 - **Bindings live native,** in midi-bindings.json beside plugin-folders.json
   (`engine_io/midi/store.rs`): an unreadable file is reported, never overwritten. The one-time import
   of the web build's list never guesses: a binding whose port identity is ambiguous stays inactive and
-  listed until a matching port appears alone or the player assigns it (`engine_io/midi/ports.rs`).
+  listed until a matching port appears alone or the player assigns it (`engine_io/midi/ports.rs`), and
+  its control, on a port of its name, runs nothing meanwhile. Without the app's data folder the
+  bindings live in memory, and the UI says so.
 - **Every toggle has one owner, the engine:** CLICK, END STOP, FIXED, RETAKE, AUTO REC and the input
   sends are engine actions every producer sends as intent (the lf-engine briefing), so a pedal and a
   click never cancel each other.

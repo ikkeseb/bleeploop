@@ -23,7 +23,7 @@ import {
   type SnapshotHeader,
   type SnapshotTrack,
 } from './engine-wire.ts'; // explicit .ts: Node guards import this file
-import { decodeInputEvent, decodeMidiEvent, type InputEvent, type MidiEvent } from './midi-wire.ts';
+import { decodeInputItem, decodeMidiEvent, type Dropped, type ImportReport, type InputEvent, type InputItem, type MidiEvent } from './midi-wire.ts';
 
 const NO_NATIVE_HOST =
   'Native VST host is unavailable in the browser build — use the built-in synths.';
@@ -156,7 +156,7 @@ const webUpdates: AppUpdates = {
 
 /** The web engine fake (below) plus what a probe reads and scripts through `__lf.native`. */
 export interface EngineFake extends EngineHost {
-  /** Every command sent, in order (batches flattened). */
+  /** Every engine command sent (`InputHost.send`'s engine items), in order, batches flattened. */
   readonly sent: EngineCommand[];
   /** Every request `open()` received, and whether it was forced. */
   readonly opened: DeviceRequest[];
@@ -195,8 +195,8 @@ export interface EngineFake extends EngineHost {
   /** Probe seam, the engine's application: while set, the commands a batch carries wait unapplied (and
    * unreported); cleared, they apply in order and their `Mix` follows. */
   holdApply: boolean;
-  /** Probe seam: while set, a batch that carries a mix command is refused (`send` rejects, as a host
-   * that could not take it): nothing in it applies. */
+  /** Probe seam: while set, a batch that carries a mix command is refused (`InputHost.send` rejects, as a
+   * host that could not take it): its commands are recorded in `sent`, and nothing in it applies. */
   refuseMix: boolean;
   /**
    * Decode `raw` as a feed frame (the real decoder) and hand it to the subscribers, as the native feed
@@ -204,12 +204,30 @@ export interface EngineFake extends EngineHost {
    * @public
    */
   emit(raw: unknown): void;
-  /** Every input event the UI sent (`InputHost.send`: notes by owner, blurs, note targets, panics), in
-   * order, batches flattened. Recorded only while the fake engine is on, as `sent`. */
+  /** Every input event the UI sent (`InputHost.send`'s input items: notes by owner, blurs, note targets,
+   * panics), in order, batches flattened. Recorded only while the fake engine is on, as `sent`. */
   readonly inputSent: InputEvent[];
+  /** Every `InputHost.send` call as it came (a refused one too): its epoch and its items, in order. */
+  readonly batches: { epoch: number; items: InputItem[] }[];
+  /** Probe seam: the next this many `InputHost.send` calls reject, as a batch lost on its way (only
+   * `batches` has it; nothing in it applies). */
+  failSends: number;
+  /** Probe seam: while set, a batch `InputHost.send` takes is recorded and applied at once and answered
+   * once this settles, as a call whose answer is still on its way (the outbox sends nothing else
+   * meanwhile). */
+  sendHold: Promise<void> | null;
+  /** Probe seam: while set, every batch `InputHost.send` takes answers it, as native MIDI does when it
+   * dropped some of the batch (a press with no device running); the batch is recorded and applied. */
+  dropped: Dropped | null;
   /** Every native MIDI call (`MidiHost`), in order: its method's name and arguments, e.g.
-   * `['learn', 'recDub', null]`. */
+   * `['learn', 'recDub', null]` or `['forget', revision, index]`. */
   readonly midiCalls: [string, ...unknown[]][];
+  /** Probe seam: while set, every native MIDI call but `subscribe` is recorded at once and answers once
+   * this settles, as a call still on its way. */
+  midiHold: Promise<void> | null;
+  /** Probe seam: what an edit by index (`forget`, `setMomentary`, `setHold`, `assign`) answers: false
+   * stands for native MIDI refusing an edit made against an older list. */
+  editAnswer: boolean;
   /**
    * Decode `raw` as a native MIDI event (its Rust serde JSON, the real decoder) and hand it to the
    * subscriber, as the native channel would. The fake answers `learn` and `cancelLearn` with a
@@ -579,7 +597,10 @@ const fakeRate = () => (globalThis as { __lfEngineFakeRate?: number }).__lfEngin
 
 const midiCalls: [string, ...unknown[]][] = [];
 const inputSent: InputEvent[] = [];
+const batches: { epoch: number; items: InputItem[] }[] = [];
 let midiSubscriber: ((event: MidiEvent) => void) | null = null;
+/** The last input epoch the fake's subscribe answered. */
+let fakeEpoch = 0;
 /** The learn the fake was asked for, for its `learning` answers and `cancelLearn`'s. */
 let fakeLearning: { action: string; target: number | null } | null = null;
 
@@ -589,50 +610,102 @@ function emitMidi(raw: unknown): void {
   queueMicrotask(() => midiSubscriber?.(event));
 }
 
+/**
+ * Pre-boot probe seams, read when the boot reaches them (an init script sets them before the app loads):
+ * `__lfMidiSubscribeHold`, a promise the subscribe's epoch waits for (input queued meanwhile waits with it),
+ * and `__lfMidiImportAnswer`, what the boot's `importLegacy` answers.
+ */
+const preBoot = () =>
+  globalThis as { __lfMidiSubscribeHold?: Promise<void>; __lfMidiImportAnswer?: ImportReport };
+
+/** Record a native MIDI call at once; its answer waits for `midiHold` while a probe holds it. */
+async function midiCall<T>(call: [string, ...unknown[]], answer: () => T): Promise<T> {
+  midiCalls.push(call);
+  const hold = webEngineFake.midiHold;
+  if (hold) await hold;
+  return answer();
+}
+
 const webMidi: MidiHost = {
   subscribe(onEvent) {
     midiCalls.push(['subscribe']);
     midiSubscriber = onEvent;
-    return () => {
-      if (midiSubscriber === onEvent) midiSubscriber = null;
+    const epoch = ++fakeEpoch;
+    const hold = preBoot().__lfMidiSubscribeHold;
+    return {
+      epoch: hold ? hold.then(() => epoch) : Promise.resolve(epoch),
+      stop() {
+        if (midiSubscriber === onEvent) midiSubscriber = null;
+      },
     };
   },
-  async learn(action, target) {
-    midiCalls.push(['learn', action, target]);
-    fakeLearning = { action, target };
-    emitMidi({ learning: { learning: fakeLearning } });
+  learn(action, target) {
+    return midiCall(['learn', action, target], () => {
+      fakeLearning = { action, target };
+      emitMidi({ learning: { learning: fakeLearning } });
+    });
   },
-  async cancelLearn() {
-    midiCalls.push(['cancelLearn']);
-    const was = fakeLearning !== null;
-    fakeLearning = null;
-    emitMidi({ learning: { learning: null } });
-    return was;
+  cancelLearn() {
+    return midiCall(['cancelLearn'], () => {
+      const was = fakeLearning !== null;
+      fakeLearning = null;
+      emitMidi({ learning: { learning: null } });
+      return was;
+    });
   },
-  async forget(index) {
-    midiCalls.push(['forget', index]);
+  forget(revision, index) {
+    return midiCall(['forget', revision, index], () => webEngineFake.editAnswer);
   },
-  async setMomentary(index, momentary) {
-    midiCalls.push(['setMomentary', index, momentary]);
+  setMomentary(revision, index, momentary) {
+    return midiCall(['setMomentary', revision, index, momentary], () => webEngineFake.editAnswer);
   },
-  async setHold(index, hold) {
-    midiCalls.push(['setHold', index, hold]);
+  setHold(revision, index, hold) {
+    return midiCall(['setHold', revision, index, hold], () => webEngineFake.editAnswer);
   },
-  async assign(index, portId) {
-    midiCalls.push(['assign', index, portId]);
+  assign(revision, index, portId) {
+    return midiCall(['assign', revision, index, portId], () => webEngineFake.editAnswer);
   },
-  async importLegacy(json) {
-    midiCalls.push(['importLegacy', json]);
-    return { already: false, unreadable: null, imported: [], blocked: [], rejected: [], skipped: [] };
+  importLegacy(json) {
+    return midiCall(
+      ['importLegacy', json],
+      () => preBoot().__lfMidiImportAnswer ?? { already: false, unreadable: null, imported: [], blocked: [], rejected: [], skipped: [] },
+    );
   },
 };
 
 const webInput: InputHost = {
-  async send(events) {
+  async send(epoch, items) {
     if (!engineForced()) throw new Error(NO_ENGINE);
-    inputSent.push(...events.map(decodeInputEvent));
+    const read = items.map(decodeInputItem);
+    batches.push({ epoch, items: read });
+    if (webEngineFake.failSends > 0) {
+      webEngineFake.failSends--;
+      throw new Error('The fake lost the batch (failSends)');
+    }
+    const commands = read.flatMap((item) => ('engine' in item ? [item.engine] : []));
+    if (webEngineFake.refuseMix && commands.some(isMixCommand)) {
+      // It reached the host, which ran none of it.
+      webEngineFake.sent.push(...commands);
+      throw new Error('The fake engine refused the batch (refuseMix)');
+    }
+    for (const item of read) {
+      if ('engine' in item) runCommand(item.engine);
+      else inputSent.push(item.input);
+    }
+    echoChanges();
+    const answer = webEngineFake.dropped;
+    const hold = webEngineFake.sendHold;
+    if (hold) await hold;
+    return answer;
   },
 };
+
+/** One engine command, as the fake takes it: recorded, then applied, or held while `holdApply` is set. */
+function runCommand(command: EngineCommand): void {
+  webEngineFake.sent.push(command);
+  if (applyHeld) heldCommands.push(command);
+  else applyCommand(command);
+}
 
 /**
  * The engine host's browser stand-in: the browser build has no engine (`available` false) unless a DEV
@@ -705,14 +778,6 @@ export const webEngineFake: EngineFake = {
     if (!engineForced()) throw new Error(NO_ENGINE);
     webEngineFake.slotInputChannels.push([slot, channel]);
   },
-  async send(commands) {
-    if (!engineForced()) throw new Error(NO_ENGINE);
-    webEngineFake.sent.push(...commands);
-    if (webEngineFake.refuseMix && commands.some(isMixCommand)) throw new Error('The fake engine refused the batch (refuseMix)');
-    if (applyHeld) heldCommands.push(...commands);
-    else commands.forEach(applyCommand);
-    echoChanges();
-  },
   async setShare(endpoint) {
     if (!engineForced()) throw new Error(NO_ENGINE);
     webEngineFake.shares.push(endpoint);
@@ -737,7 +802,13 @@ export const webEngineFake: EngineFake = {
     return () => engineSubscribers.delete(onFrame);
   },
   inputSent,
+  batches,
+  failSends: 0,
+  sendHold: null,
+  dropped: null,
   midiCalls,
+  midiHold: null,
+  editAnswer: true,
   midiEmit: emitMidi,
   emit(raw) {
     const frame = decodeFeedFrame(raw);

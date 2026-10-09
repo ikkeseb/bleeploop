@@ -24,8 +24,8 @@
 //! | `frame_clock` | [`FrameClock`]: the callback's (time, frame) stamp, whether a device runs, the feed's anchor; DEV, the stamps' history a frame turns into time through |
 //! | `pipes` | [`pipes::PullPipe`]: frames pushed on one clock, pulled resampled on another (the WASAPI join, Share output) |
 //! | `feed` | the feed: what the UI reads back (events, device, status, anchor, meter, waveforms), on its own thread |
-//! | `mode` | engine mode: the managed host, the tone store's folder, native MIDI's start and stop, the `engine_*` Tauri commands (`engine_send` through native MIDI's routing), shutdown on exit |
-//! | `midi_mode` | native MIDI's Tauri commands: the UI's note input (`input_send`), `engine_send`'s routing, the frontend epoch's hand-over, the learn UI's `midi_*` calls and its event channel |
+//! | `mode` | engine mode: the managed host, the tone store's folder, native MIDI's start and stop, the `engine_*` Tauri commands, shutdown on exit |
+//! | `midi_mode` | native MIDI's Tauri commands: the UI's one ordered input path (`input_send`: its engine commands, through native MIDI's routing, and its note input), the document's subscription and input epoch (`midi_subscribe`), the learn UI's `midi_*` calls |
 //! | `plugins` | engine mode's plugin slots: the `plugin_*` commands routed to the engine slot owners, and tone recall's (`host/tone.rs`) |
 //! | `session` | a session's bytes to and from the engine: the snapshot the UI saves (an export's with the wet master, rendered offline from the snapshot, its lanes' mix and the kept master volume and mute), the load it imports (each lane with its mix) |
 //! | `settings` | the last value of every setting, replayed into each new engine; a lane's mix as the engine applied it (its `Event::Mix`) |

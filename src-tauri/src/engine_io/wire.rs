@@ -23,14 +23,16 @@
 //! device's own rate; an `OpenError` is its text, or
 //! `{"RateChange":{…}}` for a refusal).
 //!
-//! The commands that carry it are `mode.rs`'s `engine_*`: `engine_send` is a synchronous batch (IPC
-//! order holds); `engine_feed` subscribes a Tauri `Channel`, one subscriber at a time (a new one
-//! replaces it), and its first frame is a `reset`.
+//! The commands that carry it are `mode.rs`'s `engine_*` and `midi_mode.rs`'s `input_send`, the UI's one
+//! ordered batch of engine commands and input events (an [`InputItem`] each); `engine_feed` subscribes
+//! a Tauri `Channel`, one subscriber at a time (a new one replaces it), and its first frame is a `reset`.
 //!
-//! Native MIDI's wire (`midi_mode.rs`'s commands) is camelCase throughout: an [`InputEvent`] crosses
-//! `input_send` (`{"note":{…}}`, `"blur"` or `{"blur":null}`, `{"selectTarget":{"slot":0,"target":…}}`
-//! with the target as `SelectInstrument` carries it, `"allNotesOff"`), and `midi::MidiEvent` and
-//! `midi::ImportReport` keep the serde they derive where they are defined.
+//! Native MIDI's wire (`midi_mode.rs`'s commands) is camelCase throughout: `input_send`'s items are
+//! `{"engine":<a command as above>}` and `{"input":<an InputEvent>}`, an [`InputEvent`] being
+//! `{"note":{…}}`, `"blur"` or `{"blur":null}`, `{"selectTarget":{"slot":0,"target":…}}` with the target
+//! as `SelectInstrument` carries it, or `"allNotesOff"`; its answer is `null` or a `midi::Dropped`
+//! (`"noDevice"`, `"rebuilding"`, `"full"`); `midi_subscribe` answers the document's input epoch, a
+//! number; `midi::MidiEvent` and `midi::ImportReport` keep the serde they derive where they are defined.
 //! `verify/fixtures/midi-wire.json` holds both sides to that JSON as `engine-wire.json` does to this.
 
 use std::collections::BTreeMap;
@@ -42,7 +44,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::{DeviceEvent, DeviceStatus};
 
-/// A command as it crosses `engine_send`.
+/// A command as it crosses `input_send` (an [`InputItem::Engine`]).
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct WireCommand(#[serde(with = "CommandDef")] pub Command);
@@ -52,8 +54,17 @@ pub struct WireCommand(#[serde(with = "CommandDef")] pub Command);
 #[serde(transparent)]
 pub struct WireEvent(#[serde(with = "EventDef")] pub Event);
 
+/// One item of the UI's outbox as it crosses `input_send`, in the order the outbox queued it: an engine
+/// command (`midi::MidiHost::ui_commands`) or a note-source event for the router.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum InputItem {
+    Engine(WireCommand),
+    Input(InputEvent),
+}
+
 /// One note-source event of the UI as it crosses `input_send`, for native MIDI's router
-/// (`midi::MidiHost`'s `ui_*` calls). The document's epoch travels once per batch, beside the events.
+/// (`midi::MidiHost`'s `ui_*` calls). The document's epoch travels once per batch, beside the items.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum InputEvent {
@@ -859,8 +870,8 @@ mod tests {
 
     use super::super::midi::bindings::{Kind, Rejected};
     use super::super::midi::{
-        ActionId, Binding, BindingState, Blocked, ImportReport, LearnPick, LearnRefusal, Listed, ListedBinding, MidiEvent, Origin, PortInfo,
-        PortState, StoreProblem, UiAction,
+        ActionId, Binding, BindingState, Blocked, Dropped, ImportReport, LearnPick, LearnRefusal, Listed, ListedBinding, MidiEvent, Origin,
+        PortInfo, PortState, StoreProblem, UiAction,
     };
 
     const MIDI_FIXTURE: &str = include_str!("../../../verify/fixtures/midi-wire.json");
@@ -879,6 +890,25 @@ mod tests {
             InputEvent::Blur => 1,
             InputEvent::SelectTarget { .. } => 2,
             InputEvent::AllNotesOff => 3,
+        }
+    }
+
+    const INPUT_ITEMS: usize = 2;
+    fn input_item_index(i: &InputItem) -> usize {
+        match i {
+            InputItem::Engine(_) => 0,
+            InputItem::Input(_) => 1,
+        }
+    }
+
+    /// `input_send`'s answers, `null` first.
+    const INPUT_ANSWERS: usize = 4;
+    fn input_answer_index(a: Option<Dropped>) -> usize {
+        match a {
+            None => 0,
+            Some(Dropped::NoDevice) => 1,
+            Some(Dropped::Rebuilding) => 2,
+            Some(Dropped::Full) => 3,
         }
     }
 
@@ -988,6 +1018,7 @@ mod tests {
             },
             MidiEvent::Gone { names: vec!["FS-1".into()] },
             MidiEvent::Bindings {
+                revision: 7,
                 bindings: vec![
                     listed(pedal(), Origin::Native, None, BindingState::Live),
                     listed(pad(), Origin::Legacy, Some("another record of this port binds the same message"), BindingState::Blocked),
@@ -1053,6 +1084,41 @@ mod tests {
     }
 
     #[test]
+    fn every_input_item_answer_and_epoch_round_trips_through_the_midi_fixture() {
+        let items: Vec<InputItem> = midi_fixture("inputItems")
+            .iter()
+            .map(|entry| {
+                let parsed: InputItem = serde_json::from_value(entry.clone()).unwrap_or_else(|e| panic!("midi-wire.inputItems: {entry}: {e}"));
+                let back: Value = serde_json::from_str(&serde_json::to_string(&parsed).unwrap()).unwrap();
+                assert!(same(&back, entry), "midi-wire.inputItems: {entry} writes back as {back}");
+                parsed
+            })
+            .collect();
+        covers("inputItems", items.iter().map(input_item_index), INPUT_ITEMS);
+        assert_eq!(items[0], InputItem::Engine(WireCommand(Command::SetBpm(90.0))), "an engine item is the command as engine-wire.json has it");
+
+        let answers = [None, Some(Dropped::NoDevice), Some(Dropped::Rebuilding), Some(Dropped::Full)];
+        let entries = midi_fixture("inputAnswers");
+        assert_eq!(answers.len(), entries.len(), "one fixture entry per answer");
+        for (answer, entry) in answers.iter().zip(&entries) {
+            assert_eq!(serde_json::to_value(answer).unwrap(), *entry, "input_send's answer {answer:?}");
+        }
+        covers("inputAnswers", answers.iter().map(|a| input_answer_index(*a)), INPUT_ANSWERS);
+
+        // midi_subscribe's answer: the document's input epoch, a plain number, never 0.
+        for entry in midi_fixture("epochs") {
+            let epoch: u64 = serde_json::from_value(entry.clone()).unwrap_or_else(|e| panic!("midi-wire.epochs: {entry}: {e}"));
+            assert!(epoch >= 1, "an epoch is never 0");
+            assert_eq!(serde_json::to_value(epoch).unwrap(), entry);
+        }
+
+        let refused = |json: Value| serde_json::from_value::<InputItem>(json).is_err();
+        assert!(refused(serde_json::json!({"Engine":{"SetBpm":90}})), "item variants are camelCase");
+        assert!(refused(serde_json::json!({"input":{"Note":{"owner":"key:KeyA","note":60,"velocity":1,"on":true}}})));
+        assert!(refused(serde_json::json!({"engine":{"setBpm":90}})), "a command keeps engine-wire's names");
+    }
+
+    #[test]
     fn every_midi_event_writes_as_the_midi_fixture() {
         let events = midi_events();
         let entries = midi_fixture("midiEvents");
@@ -1068,7 +1134,7 @@ mod tests {
         });
         covers("midiEvents (their port states)", ports.flatten(), 3);
         let states = events.iter().filter_map(|e| match e {
-            MidiEvent::Bindings { bindings } => Some(bindings.iter().map(|b| binding_state_index(b.state))),
+            MidiEvent::Bindings { bindings, .. } => Some(bindings.iter().map(|b| binding_state_index(b.state))),
             _ => None,
         });
         covers("midiEvents (their binding states)", states.flatten(), 5);

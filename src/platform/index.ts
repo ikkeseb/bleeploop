@@ -4,9 +4,9 @@
  * it returns true and we hand back `tauriPlatform`; nothing else in the app changes.
  */
 import { isTauri } from '@tauri-apps/api/core';
-import type { Platform } from './host';
+import type { MidiSubscription, Platform } from './host';
 import type { EngineCommand, NoteTarget } from './engine-wire';
-import { encodeInput, type InputEvent } from './midi-wire';
+import { encodeInput, encodeItem, type Dropped, type InputItem, type MidiEvent } from './midi-wire';
 import { tauriInstallFrontendLogPipe } from './logging';
 import { webEngineFake, webPlatform, type EngineFake } from './host.web';
 import { notifyError } from '../notify';
@@ -51,99 +51,168 @@ export const confirmNativeClose: () => Promise<void> = underTauri
 
 // ── The outbox: the engine's commands and the UI's input events, in one order ───────────────────────
 
-/** A run of one kind in the outbox, and the promise its callers hold. */
-type Batch =
-  | { kind: 'engine'; items: EngineCommand[]; settle: (ok: boolean) => void; submitted: Promise<boolean> }
-  | { kind: 'input'; items: InputEvent[]; settle: (ok: boolean) => void; submitted: Promise<boolean> };
+/** What waits for the next send, and the promise its callers hold. */
+interface Batch {
+  items: InputItem[];
+  settle: (took: boolean) => void;
+  submitted: Promise<boolean>;
+}
 
-let outbox: Batch[] = [];
+/** The items queued since the last send left. */
+let waiting: Batch | null = null;
+/** A send is in flight, or about to start: the next one waits for it. */
+let sending = false;
+
+/** This document's input epoch (`subscribeMidi`): the outbox sends nothing before the subscribe answered,
+ * so no input of this document reaches native code under an epoch it was not given. 0 when the subscribe
+ * failed (native MIDI does not run: every send then fails as it would anyway). */
+let resolveFirstEpoch: ((epoch: Promise<number>) => void) | null = null;
+let inputEpoch: Promise<number> = new Promise((resolve) => (resolveFirstEpoch = resolve));
 
 /**
- * Queue `items` behind everything this task queued before. The outbox leaves a microtask later as one
- * `engine_send` or `input_send` call per run of one kind, issued back to back in the order they were
- * queued, so a slot pick and the note after it, or a looper press and a note, reach native code in the
- * order they happened (both calls run on the main thread natively, in arrival order). Nothing is sent
- * while the platform has no engine (the browser build without the DEV fake).
+ * Subscribe to native MIDI's events (`MidiHost.subscribe`), first thing in the document's boot: its answer
+ * is the input epoch every outbox batch presents, so nothing queued before it leaves until it answered. A
+ * later subscribe (a remount) gives the next batches its own epoch.
  */
-function enqueue(kind: 'engine', items: EngineCommand[]): Promise<boolean>;
-function enqueue(kind: 'input', items: InputEvent[]): Promise<boolean>;
-function enqueue(kind: Batch['kind'], items: (EngineCommand | InputEvent)[]): Promise<boolean> {
+export function subscribeMidi(onEvent: (event: MidiEvent) => void): MidiSubscription {
+  const subscription = platform.midi.subscribe(onEvent);
+  const epoch = subscription.epoch.catch(() => 0);
+  resolveFirstEpoch?.(epoch);
+  resolveFirstEpoch = null;
+  inputEpoch = epoch;
+  return subscription;
+}
+
+/**
+ * Queue `items` behind everything queued before. The outbox sends one `input_send` batch at a time,
+ * carrying every item queued since the last one left, in order, and starts the next only once that one
+ * settled: Tauri's IPC does not keep two calls in the order they were made, so a slot pick and the note
+ * after it, or a looper press and a note, reach native code in the order they happened only this way.
+ * Nothing is sent while the platform has no engine (the browser build without the DEV fake).
+ */
+function enqueue(items: InputItem[]): Promise<boolean> {
   if (!platform.engine.available) return Promise.resolve(false);
   if (items.length === 0) return Promise.resolve(true);
-  if (outbox.length === 0) queueMicrotask(flush);
-  let last = outbox.at(-1);
-  if (last?.kind !== kind) {
-    let settle!: (ok: boolean) => void;
+  if (!waiting) {
+    let settle!: (took: boolean) => void;
     const submitted = new Promise<boolean>((resolve) => (settle = resolve));
-    last = { kind, items: [], settle, submitted } as Batch;
-    outbox.push(last);
+    waiting = { items: [], settle, submitted };
+    if (!sending) {
+      sending = true;
+      queueMicrotask(() => void drain());
+    }
   }
-  (last.items as (EngineCommand | InputEvent)[]).push(...items);
-  return last.submitted;
+  waiting.items.push(...items);
+  return waiting.submitted;
 }
 
-function flush(): void {
-  const batches = outbox;
-  outbox = [];
-  for (const batch of batches) {
-    const call = batch.kind === 'engine' ? platform.engine.send(batch.items) : platform.input.send(batch.items);
-    call.then(
-      () => batch.settle(true),
-      (err: unknown) => {
-        if (batch.kind === 'engine') {
-          console.error('[platform] engine command batch failed', err);
-          notifyError('The audio engine did not take a command', err);
-        } else {
-          console.error('[platform] input batch failed', err);
-          notifyError('The audio engine did not take a note', err);
-        }
-        batch.settle(false);
-      },
-    );
+/** Send what waits, one batch at a time, until nothing does. */
+async function drain(): Promise<void> {
+  try {
+    while (waiting) {
+      const epoch = await inputEpoch;
+      const batch = waiting;
+      waiting = null;
+      batch.settle(await submit(epoch, batch.items));
+    }
+  } finally {
+    sending = false;
   }
+}
+
+/** A note's press or release in a batch, or null. */
+const noteOf = (item: InputItem): { on: boolean } | null =>
+  'input' in item && typeof item.input === 'object' && 'note' in item.input ? item.input.note : null;
+
+/** A release in a batch: what a lost batch must not leave holding. */
+const releases = (item: InputItem): boolean =>
+  'input' in item && (item.input === 'blur' || item.input === 'allNotesOff' || noteOf(item)?.on === false);
+
+/** What native MIDI may drop: a note's press, or an engine command (a looper press with no device running,
+ * a setting only when the engine had no room). */
+const fresh = (item: InputItem): boolean => 'engine' in item || noteOf(item)?.on === true;
+
+/** The reason the player was last told about a dropped input: told once, until a batch with something
+ * native MIDI could have dropped goes through whole (a device runs again). */
+let toldDropped: Dropped | null = null;
+
+const DROPPED_DETAIL: Record<Dropped, string> = {
+  noDevice: 'No audio device is running.',
+  rebuilding: 'The audio device is restarting.',
+  full: 'The engine had no room for it.',
+};
+
+/**
+ * Send one batch. A rejection means none of it ran (native refuses a batch whole or runs it), so it is sent
+ * once more; failing again, it is lost: logged and toasted, and when it held a release, a blur follows, which
+ * releases every hold of this document natively (a note must not stick). What native MIDI dropped of a batch
+ * that ran (a press with no device running) is logged and toasted once (`toldDropped`). True when the batch
+ * ran and nothing of it was dropped.
+ */
+async function submit(epoch: number, items: InputItem[]): Promise<boolean> {
+  let dropped: Dropped | null;
+  try {
+    dropped = await platform.input.send(epoch, items).catch(() => platform.input.send(epoch, items));
+  } catch (err) {
+    console.error('[platform] input batch failed', err);
+    notifyError('The audio engine did not take a command', err);
+    if (items.some(releases)) {
+      await platform.input.send(epoch, [encodeItem.input(encodeInput.blur())]).catch((blurErr: unknown) => {
+        console.error('[platform] the blur after a lost release failed', blurErr);
+      });
+    }
+    return false;
+  }
+  if (dropped !== null && dropped !== toldDropped) {
+    console.error(`[platform] native MIDI dropped input: ${dropped}`);
+    notifyError('The audio engine did not take a command', DROPPED_DETAIL[dropped]);
+    toldDropped = dropped;
+  } else if (dropped === null && items.some(fresh)) {
+    toldDropped = null;
+  }
+  return dropped === null;
 }
 
 /**
- * Queue commands for the engine. What one task sends leaves a microtask later, in one ordered `engine_send`
- * batch per run between input events (`enqueue`), so a gesture's commands reach the same block together. A
- * batch the host could not take is logged and toasted. Notes, wheels, the note target and the panic go
- * through `input`, never here: native MIDI's router refuses them on `engine_send`.
+ * Queue commands for the engine. What one task sends leaves with the next outbox batch (`enqueue`), so a
+ * gesture's commands reach the same block together, in order with the notes around them. A batch the host
+ * could not take is logged and toasted. Notes, wheels, the note target and the panic go through `input`,
+ * never here: native MIDI refuses them as engine commands.
  *
- * Resolves with the SUBMISSION of the batch these commands left in: true once the host took all of it,
- * false when it did not wholly take it (or there is no engine). False is no per-command answer: the
- * native host pushes a batch command by command and stops at the first it refuses, keeping the prefix it
- * took, so a command of a failed batch may still reach the engine. Never an acknowledgement either: the
- * engine applies a command later, and its outcome arrives on the feed. Most callers ignore it; a mix
- * gesture drops its overlay on false, and a command the engine did take brings the value back through
- * its lane's `Mix` (`engine-store.ts`).
+ * Resolves with the SUBMISSION of the batch these commands left in: true once the host ran all of it, false
+ * when it did not (it was lost, or native MIDI dropped some of it: a press with no device running), or there
+ * is no engine. False is no per-command answer: a command of a batch native MIDI partly dropped did reach
+ * the engine (a setting always does). Never an acknowledgement either: the engine applies a command later,
+ * and its outcome arrives on the feed. Most callers ignore it; a mix gesture drops its overlay on false, and
+ * a command the engine did take brings the value back through its lane's `Mix` (`engine-store.ts`).
  */
 export function sendEngine(...commands: EngineCommand[]): Promise<boolean> {
-  return enqueue('engine', commands);
+  return enqueue(commands.map(encodeItem.engine));
 }
 
 /**
- * The UI's note sources into native MIDI's one router (`InputHost`), queued in one order with
- * `sendEngine`. What sounds, sustain, the wheels and which owner holds a note are the router's
+ * The UI's note sources into native MIDI's one router, queued in one order with `sendEngine`. What
+ * sounds, sustain, the wheels and which owner holds a note are the router's
  * (`src-tauri/src/engine_io/midi/router.rs`); the UI says what its pointers and keys did.
  */
 export const input = {
   /** Pointer or key `owner` (`pointer:<id>`, `key:<code>`) pressed (`on`) or let go of `note`, at MIDI
    * velocity 0..127. */
   note(owner: string, note: number, velocity: number, on: boolean): void {
-    void enqueue('input', [encodeInput.note(owner, note, velocity, on)]);
+    void enqueue([encodeItem.input(encodeInput.note(owner, note, velocity, on))]);
   },
   /** The window lost focus: this document's pointers and keys are up. */
   blur(): void {
-    void enqueue('input', [encodeInput.blur()]);
+    void enqueue([encodeItem.input(encodeInput.blur())]);
   },
   /** Route the notes to `target`, picked on `slot` (null: none). What sounds is released first; the same
    * slot and target again change nothing (natively), so a call per press is cheap. */
   selectTarget(slot: 0 | 1 | null, target: NoteTarget): void {
-    void enqueue('input', [encodeInput.selectTarget(slot, target)]);
+    void enqueue([encodeItem.input(encodeInput.selectTarget(slot, target))]);
   },
   /** Panic: every note that sounds is released and forgotten. */
   allNotesOff(): void {
-    void enqueue('input', [encodeInput.allNotesOff()]);
+    void enqueue([encodeItem.input(encodeInput.allNotesOff())]);
   },
 };
 

@@ -68,13 +68,16 @@ interface Expect {
 const calls: string[] = [];
 function spy(): void {
   const host = platform.pluginHost;
-  const engine = platform.engine;
+  const input = platform.input;
   const openEditor = host.openEditor.bind(host);
-  const send = engine.send.bind(engine);
+  const send = input.send.bind(input);
   host.openEditor = (slot, mode) => (calls.push(`openEditor ${slot}`), openEditor(slot, mode));
-  engine.send = (commands) => {
-    for (const c of commands) if (typeof c === 'object' && 'SetSlotLive' in c && c.SetSlotLive[1]) calls.push(`SetSlotLive ${c.SetSlotLive[0]}`);
-    return send(commands);
+  input.send = (epoch, items) => {
+    for (const item of items) {
+      const c = 'engine' in item ? item.engine : null;
+      if (typeof c === 'object' && c !== null && 'SetSlotLive' in c && c.SetSlotLive[1]) calls.push(`SetSlotLive ${c.SetSlotLive[0]}`);
+    }
+    return send(epoch, items);
   };
 }
 

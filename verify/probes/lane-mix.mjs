@@ -125,7 +125,7 @@ await probe(async ({ open }) => {
   await faderShows(0, 100);
   const refused = { sent: await sent(), shown: await shown(0), applied: await applied(0) };
   console.log('(a) refused fader', JSON.stringify(refused));
-  assert.deepEqual(refused.sent, [{ SetVolume: [0, 0.6] }], 'the gesture sent its value');
+  assert.deepEqual(refused.sent, [{ SetVolume: [0, 0.6] }, { SetVolume: [0, 0.6] }], 'the gesture sent its value, once more after the refusal (a refused batch ran nothing)');
   assert.equal(refused.shown, 100, 'the refused gesture returns to the applied value');
   assert.equal(refused.applied, 1, 'the engine never had it');
   // A select changes its own value before the engine has it: a refused change sets it back.
@@ -147,7 +147,7 @@ await probe(async ({ open }) => {
   console.log('(a) refused select', JSON.stringify({ before, after: selectBack }));
   assert.equal(selectBack, before, 'a refused division goes back to the applied one');
   await seam('refuseMix', false);
-  assert.ok(consoleErrors.some((e) => e.includes('engine command batch failed')), 'a refused batch reaches the release log');
+  assert.ok(consoleErrors.some((e) => e.includes('input batch failed')), 'a refused batch reaches the release log');
   consoleErrors.length = 0;
   await fxDrawer(false);
   await blur();

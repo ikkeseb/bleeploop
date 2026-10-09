@@ -7,7 +7,7 @@
 //! saving, and the reload of the slot that held it is handed the imported bytes under a reload token),
 //! and the app's exit saves them all before the unloads. A plugin loads into an engine that exists:
 //! open the device first. GO LIVE is the engine's `SetSlotLive` and the plugin's gain `SetSlotGain` (sent
-//! with `engine_send`), notes go through `engine_send`.
+//! in `input_send`'s batch); notes go through native MIDI's router (`midi_mode`).
 //!
 //! A slot is reserved while it loads, for the WebView document that asked (its `frontendEpoch`): a
 //! reload's unload cancels the reservation, and a load that finishes for a replaced document unloads

@@ -12,6 +12,16 @@
     { "sent": { "blur": null }, "reads": "blur" },
     { "sent": { "allNotesOff": null }, "reads": "allNotesOff" }
   ],
+  "inputItems": [
+    { "engine": { "SetBpm": 90 } },
+    { "input": { "note": { "owner": "pointer:3", "note": 60, "velocity": 100, "on": true } } },
+    { "engine": "Press" },
+    { "input": "blur" },
+    { "input": { "selectTarget": { "slot": 1, "target": { "Slot": 1 } } } },
+    { "input": "allNotesOff" }
+  ],
+  "inputAnswers": [null, "noDevice", "rebuilding", "full"],
+  "epochs": [1, 42],
   "midiEvents": [
     {
       "ports": {
@@ -25,6 +35,7 @@
     { "gone": { "names": ["FS-1"] } },
     {
       "bindings": {
+        "revision": 7,
         "bindings": [
           {
             "binding": {

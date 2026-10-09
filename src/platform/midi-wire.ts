@@ -1,16 +1,18 @@
 /**
  * OWNS: the JSON between the UI and native MIDI (`src-tauri/src/engine_io/midi/mod.rs`, `MidiHost`):
- * the events it tells the UI on the `midi_subscribe` channel (`MidiEvent`), the input events every UI
- * note source sends through `input_send` (`InputEvent`) and what `midi_import_legacy` answers
- * (`ImportReport`). The Rust shapes are the module's serde types (`MidiEvent`, `ListedBinding`,
- * `PortInfo`, `Binding`, `store.rs` `ImportReport`): camelCase names, externally tagged enums. One
- * fixture, `verify/fixtures/midi-wire.json`, pins this side (`verify/guards/midi-wire.mjs`).
+ * the events it tells the UI on the `midi_subscribe` channel (`MidiEvent`) and the input epoch that
+ * subscribe answers, the outbox's items `input_send` carries (`InputItem`: an engine command or an
+ * `InputEvent` of a UI note source) and what it answers (`Dropped`), and what `midi_import_legacy`
+ * answers (`ImportReport`). The Rust shapes are the module's serde types (`MidiEvent`, `ListedBinding`,
+ * `PortInfo`, `Binding`, `Dropped`, `store.rs` `ImportReport`, `wire.rs` `InputItem`): camelCase names,
+ * externally tagged enums. One fixture, `verify/fixtures/midi-wire.json`, pins this side
+ * (`verify/guards/midi-wire.mjs`).
  *
  * As `engine-wire.ts`: what comes back passes a decoder that throws on a variant or a field it cannot
  * read, so a drift fails at the first event; unknown extra fields are ignored. Pure: a Node guard
  * imports this file directly.
  */
-import { decodeNoteTarget, type NoteTarget } from './engine-wire.ts'; // explicit .ts: Node guards import this file
+import { decodeCommand, decodeNoteTarget, type EngineCommand, type NoteTarget } from './engine-wire.ts'; // explicit .ts: Node guards import this file
 import { array, bool, fail, int, nullable, obj, oneOf, str, tagged } from './wire-read.ts';
 
 /** The named actions a binding runs, as `src/app/actions.ts` names them (Rust `ActionId`), in the learn
@@ -122,7 +124,8 @@ export type MidiEvent =
   | { type: 'ports'; ports: MidiPort[] }
   /** Ports that went away; their notes and HOLD presses were released. */
   | { type: 'gone'; names: string[] }
-  | { type: 'bindings'; bindings: ListedBinding[] }
+  /** `revision` is the store's: an edit by index names the one its list came with (`MidiHost.forget`…). */
+  | { type: 'bindings'; bindings: ListedBinding[]; revision: number }
   /** Null once a learn captured or was cancelled. */
   | { type: 'learning'; learning: LearnPick | null }
   /** The latest learned binding still waiting for its release; null once the wait ended. */
@@ -144,6 +147,15 @@ export type InputEvent =
   | 'blur'
   | { selectTarget: { slot: number | null; target: NoteTarget } }
   | 'allNotesOff';
+
+/** One item of the UI's outbox (`input_send`, Rust `wire.rs` `InputItem`), in the order it was queued: an
+ * engine command, or a note source's input event for the router. */
+export type InputItem = { engine: EngineCommand } | { input: InputEvent };
+
+/** Why native MIDI dropped some of an `input_send` batch (Rust `Dropped`): no device runs, the engine is
+ * being rebuilt, or there was no room. The rest of the batch ran; `null` when nothing was dropped. */
+export type Dropped = 'noDevice' | 'rebuilding' | 'full';
+const DROPPED: readonly Dropped[] = ['noDevice', 'rebuilding', 'full'];
 
 /** What the one-time import of the web's `lf.midiLearn` did, by each record's position in that list. */
 export interface ImportReport {
@@ -239,6 +251,7 @@ export function decodeMidiEvent(raw: unknown): MidiEvent {
       return {
         type: 'bindings',
         bindings: array(o.bindings, `${what}.bindings`).map((b, i) => decodeListed(b, `${what}.bindings[${i}]`)),
+        revision: int(o.revision, `${what}.revision`),
       };
     case 'learning':
       return { type: 'learning', learning: nullable(o.learning, (p) => decodePick(p, `${what}.learning`)) };
@@ -273,6 +286,30 @@ export const encodeInput = {
   selectTarget: (slot: number | null, target: NoteTarget): InputEvent => ({ selectTarget: { slot, target } }),
   allNotesOff: (): InputEvent => 'allNotesOff',
 };
+
+/** The outbox's items as the UI queues them (`index.ts`). */
+export const encodeItem = {
+  engine: (command: EngineCommand): InputItem => ({ engine: command }),
+  input: (event: InputEvent): InputItem => ({ input: event }),
+};
+
+/** Read one outbox item as the Rust side reads it (the browser fake records only what passes). */
+export function decodeInputItem(raw: unknown): InputItem {
+  const [name, payload] = tagged(raw, 'InputItem');
+  if (name === 'engine') return { engine: decodeCommand(payload) };
+  if (name === 'input') return { input: decodeInputEvent(payload) };
+  fail('unknown InputItem variant', raw);
+}
+
+/** Read `input_send`'s answer: what native MIDI dropped of the batch, or null. */
+export function decodeDropped(raw: unknown): Dropped | null {
+  return raw === null ? null : oneOf(raw, DROPPED, 'input_send answer');
+}
+
+/** Read `midi_subscribe`'s answer: the document's input epoch, never 0. */
+export function decodeEpoch(raw: unknown): number {
+  return int(raw, 'midi_subscribe epoch', 1);
+}
 
 /** Read one input event as the Rust side reads it: a unit variant also as `{"blur": null}`, read as its
  * name (the browser fake records only what passes). */

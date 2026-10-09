@@ -338,8 +338,6 @@ pub fn run() {
             #[cfg(windows)]
             engine_io::mode::engine_set_slot_input_channel,
             #[cfg(windows)]
-            engine_io::mode::engine_send,
-            #[cfg(windows)]
             engine_io::mode::engine_set_share,
             #[cfg(windows)]
             engine_io::mode::engine_feed,
@@ -347,8 +345,8 @@ pub fn run() {
             engine_io::mode::engine_snapshot,
             #[cfg(windows)]
             engine_io::mode::engine_load_session,
-            // Native MIDI (`engine_io/midi_mode.rs`): the UI's note input, synchronous as
-            // `engine_send`, and the learn UI's calls and event channel.
+            // Native MIDI (`engine_io/midi_mode.rs`): the UI's one ordered input path (its engine
+            // commands and note input, synchronous), its subscription, and the learn UI's calls.
             #[cfg(windows)]
             engine_io::midi_mode::input_send,
             #[cfg(windows)]

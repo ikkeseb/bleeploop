@@ -29,8 +29,8 @@ use crate::engine_io::mode::engine;
 
 /// One call per WebView document: begins its session and answers its `frontendEpoch`, which every
 /// `plugin_load` presents so a load from a replaced document cannot park a slot
-/// (`engine_io::plugins`), and every `input_send` so a replaced document's holds end
-/// (`engine_io::midi_mode`). `sample_rate` is the document's `AudioContext` rate, logged only.
+/// (`engine_io::plugins`). (Native MIDI's input epoch is another, its subscribe's:
+/// `engine_io::midi_mode`.) `sample_rate` is the document's `AudioContext` rate, logged only.
 #[tauri::command]
 pub async fn host_init(
     sample_rate: f64,
@@ -38,9 +38,6 @@ pub async fn host_init(
 ) -> Result<u32, String> {
     let frontend_epoch = state.begin_frontend_session();
     log::info!("[plugin_host] host_init: sample_rate={sample_rate} frontend_epoch={frontend_epoch}");
-    // Native MIDI's router hears the new document before it can send input under this epoch.
-    #[cfg(windows)]
-    crate::engine_io::midi_mode::ui_epoch(frontend_epoch);
     Ok(frontend_epoch)
 }
 /// P9.1: hand-rolled out-of-process `walkdir` scan of the CLAP, VST3 and VST2 search paths and the

@@ -78,6 +78,11 @@ export function App() {
     // First: pipe console.error + uncaught errors into the native log, so even a plugin-host init
     // failure below is captured in a release build (no visible WebView2 console otherwise).
     installFrontendLogPipe();
+    // Native MIDI next, before anything sends: its subscribe answers the input epoch every command and
+    // note of this page carries (the outbox holds them until then), and natively releases what an earlier
+    // page held. Its events, what its bindings fire in the UI, the web's bindings handed over once
+    // (`src/app/midi-actions.ts`).
+    onCleanup(installMidiActions());
     // Keyboard transport (the named actions of `src/app/actions.ts`, plus 1–5) + the Escape popover
     // close + the pointer-blur discipline: `src/app/transport-keys.ts`. Window-level, so it never
     // depends on what is focused or mounted.
@@ -95,9 +100,6 @@ export function App() {
     onCleanup(installCloseGuard());
     // Send the persisted master volume to the engine (restores a saved level on reload).
     master.init();
-    // Native MIDI: its events, what its bindings fire in the UI, the web's bindings handed over once
-    // (`src/app/midi-actions.ts`).
-    onCleanup(installMidiActions());
     // The engine's boot chain — its device, local recovery of the jam, the plugin host (a no-op in the
     // browser build, which has no engine): `src/app/boot.ts`.
     onCleanup(bootEngine());

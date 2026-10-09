@@ -1,6 +1,8 @@
 import { createSignal } from 'solid-js';
 import {
   platform,
+  subscribeMidi,
+  type ImportReport,
   type LearnPick,
   type LearnRefusal,
   type ListedBinding,
@@ -31,6 +33,9 @@ export { ports };
 const [bindings, setBindings] = createSignal<readonly ListedBinding[]>([]);
 /** Every stored binding, in list order (the index the edits below take), and how it stands. */
 export { bindings };
+/** The store revision the list came with: every edit by index names it, and native MIDI refuses one
+ * made against a list that changed since (its index may name another binding now). */
+let revision = 0;
 
 const [learning, setLearning] = createSignal<LearnPick | null>(null);
 /** What the next CC or note-on will be learned onto, or null. Set at once by `learn` and `cancelLearn`
@@ -94,6 +99,7 @@ function onEvent(ev: MidiEvent): void {
       }
       break;
     case 'bindings':
+      revision = ev.revision;
       setBindings(ev.bindings);
       break;
     case 'learning':
@@ -126,9 +132,24 @@ function onEvent(ev: MidiEvent): void {
   }
 }
 
-/** Listen to native MIDI; its first events bring the state. Returns the stop. */
+/**
+ * Every native MIDI command, one at a time in call order: each waits for the one before it to settle, the
+ * first for the subscribe. A cancel sent after a learn then reaches native MIDI after it (a learn that
+ * arrived late would listen unseen), and an edit after the one before it.
+ */
+let chain: Promise<unknown> = Promise.resolve();
+
+function queued<T>(call: () => Promise<T>): Promise<T> {
+  const next = chain.then(call);
+  chain = next.catch(() => {});
+  return next;
+}
+
+/** Listen to native MIDI, first thing in the boot; its first events bring the state. Returns the stop. */
 export function startMidi(): () => void {
-  return platform.midi.subscribe(onEvent);
+  const subscription = subscribeMidi(onEvent);
+  chain = subscription.epoch.catch(() => {});
+  return () => subscription.stop();
 }
 
 function failed(what: string, err: unknown): void {
@@ -140,37 +161,49 @@ function failed(what: string, err: unknown): void {
  * selected track; a global action takes none). */
 export function learn(action: MidiActionId, target: number | null): void {
   setLearning({ action, target });
-  platform.midi.learn(action, target).catch((err: unknown) => {
+  queued(() => platform.midi.learn(action, target)).catch((err: unknown) => {
     setLearning(null);
     failed('learn', err);
   });
 }
 
 /** Stop listening. True when a learn was pending (Esc spends itself on it); the UI stops listening at once,
- * native MIDI a call later. A learned pedal's wait for its release goes on. */
+ * native MIDI after the learn it cancels. A learned pedal's wait for its release goes on. */
 export function cancelLearn(): boolean {
   if (learning() === null) return false;
   setLearning(null);
-  platform.midi.cancelLearn().catch((err: unknown) => failed('cancel learn', err));
+  queued(() => platform.midi.cancelLearn()).catch((err: unknown) => failed('cancel learn', err));
   return true;
+}
+
+/** An edit by index of the list shown now. Refused because the list changed since, it does nothing: the
+ * fresh list is shown, or about to be. */
+function edit(what: string, call: (revision: number) => Promise<boolean>): void {
+  const seen = revision;
+  queued(() => call(seen)).catch((err: unknown) => failed(what, err));
 }
 
 /** Drop listed binding `index`: its messages reach the play path again. */
 export function forget(index: number): void {
-  platform.midi.forget(index).catch((err: unknown) => failed('forget', err));
+  edit('forget', (seen) => platform.midi.forget(seen, index));
 }
 
 /** Read listed binding `index`'s pedal as momentary or latching (the list's switch). */
 export function setMomentary(index: number, momentary: boolean): void {
-  platform.midi.setMomentary(index, momentary).catch((err: unknown) => failed('pedal switch', err));
+  edit('pedal switch', (seen) => platform.midi.setMomentary(seen, index, momentary));
 }
 
 /** HOLD on or off for listed binding `index`. */
 export function setHold(index: number, hold: boolean): void {
-  platform.midi.setHold(index, hold).catch((err: unknown) => failed('HOLD switch', err));
+  edit('HOLD switch', (seen) => platform.midi.setHold(seen, index, hold));
 }
 
 /** Run listed binding `index` on the present port `portId` from now on. */
 export function assign(index: number, portId: string): void {
-  platform.midi.assign(index, portId).catch((err: unknown) => failed('assign', err));
+  edit('assign', (seen) => platform.midi.assign(seen, index, portId));
+}
+
+/** Hand native MIDI the web build's bindings (`lf.midiLearn` verbatim) to import once, in turn. */
+export function importLegacyBindings(json: string): Promise<ImportReport> {
+  return queued(() => platform.midi.importLegacy(json));
 }

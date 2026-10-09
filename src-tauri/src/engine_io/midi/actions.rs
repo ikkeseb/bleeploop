@@ -128,7 +128,7 @@ pub(crate) fn run(fire: Fire) -> Run {
     Run { out: commands.into_iter().map(Out::new).collect(), events }
 }
 
-/// Where one of the UI's commands (`engine_send`'s) goes.
+/// Where one of the UI's engine commands (`input_send`'s) goes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum UiRoute {
     /// An input command (a looper press, `Press`, `SelectTrack`, a toggle): the one queue, in order
@@ -274,7 +274,7 @@ mod tests {
         assert_eq!(classes(Fire::Run { action: ActionId::ClickToggle, target: None }), [Class::Action]);
     }
 
-    // engine_send's input commands join the queue; the router's commands are refused there; a setting
+    // The UI's input commands join the queue; the router's commands are refused there; a setting
     // goes straight to the engine.
     #[test]
     fn the_uis_commands_split_into_input_router_and_settings() {

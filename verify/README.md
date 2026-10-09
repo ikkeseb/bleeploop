@@ -63,10 +63,13 @@ and a toggle (CLICK, END STOP, FIXED, RETAKE, AUTO REC, a send), which it switch
 engine's gate would on the scripted looper and answers with `Toggled` or `Refused`,
 so a probe proves gesture → command and frame → screen, never the engine
 (`verify/probes/engine-seam.mjs` is the pattern). Native MIDI is faked the same way: the fake records the
-UI's input events (`__lf.native.inputSent`: notes by owner, blurs, note targets) and native MIDI calls
-(`__lf.native.midiCalls`), answers a learn or its cancel with a `learning` event and nothing else, and hands
-the UI the native MIDI events a probe scripts (`__lf.native.midiEmit`): the router and learn are Rust's
-tests. What still runs for real in the page: the recovery worker and IndexedDB, the export's archive. A snapshot's track carries the lane's mix as the fake's commands and events left it
+outbox's batches (`__lf.native.batches`, each with its epoch; their input events flattened in
+`__lf.native.inputSent`: notes by owner, blurs, note targets) and native MIDI calls (`__lf.native.midiCalls`),
+answers a learn or its cancel with a `learning` event and nothing else, and hands the UI the native MIDI
+events a probe scripts (`__lf.native.midiEmit`): the router and learn are Rust's tests. Its seams lose a
+batch (`failSends`), answer what native MIDI dropped (`dropped`), hold a batch's answer (`sendHold`) or a
+MIDI call's (`midiHold`), refuse an edit (`editAnswer`), and, set by an init script, hold the subscribe's
+epoch (`window.__lfMidiSubscribeHold`) or script the boot's import answer (`window.__lfMidiImportAnswer`). What still runs for real in the page: the recovery worker and IndexedDB, the export's archive. A snapshot's track carries the lane's mix as the fake's commands and events left it
 (or the one a probe scripts). The export's master is the engine's; asked with the master, the fake
 answers a dry sum under those tracks' volume and mute and the master's the UI sent (NOT the engine's
 sound: no probe tests the master's sound).

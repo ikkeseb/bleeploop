@@ -105,11 +105,15 @@ function bindingAction(b: MidiBinding): string {
   return b.target === null ? ACTION_LABELS[b.action] : `${ACTION_LABELS[b.action]} · Track ${b.target + 1}`;
 }
 
-/** Why a stored binding does not run now, or null when it does (native MIDI's `BindingState`). */
+/** Why a stored binding does not run now, or null when it does (native MIDI's `BindingState`; a live one
+ * whose port is here but not open runs nothing either). */
 function notLive(l: ListedBinding): string | null {
   switch (l.state) {
-    case 'live':
-      return null;
+    case 'live': {
+      const port = ports().find((p) => p.id === l.binding.portId);
+      if (!port || port.state === 'open') return null;
+      return port.state === 'busy' ? `${l.displayName} is held by another program` : `${l.displayName} is not open`;
+    }
     case 'blocked':
       return l.blocked ?? `waits for ${l.displayName}`;
     case 'noPort':
@@ -119,6 +123,17 @@ function notLive(l: ListedBinding): string | null {
     case 'severalAbsent':
       return `another missing port is named ${l.displayName}`;
   }
+}
+
+/** The player picks the port for a binding no port can be found for alone: one waiting for the player
+ * (blocked), or one whose name several ports carry. One that only waits for its port runs once the port is
+ * here, with no pick. */
+const ASSIGNABLE: readonly ListedBinding['state'][] = ['blocked', 'severalPorts', 'severalAbsent'];
+
+/** Why LEARN cannot listen, or null when it can (a port is open). */
+function learnBlocked(): string | null {
+  if (anyPortOpen()) return null;
+  return ports().some((p) => p.state === 'busy') ? 'The MIDI input is held by another program' : 'No MIDI input is open';
 }
 
 export function AudioSettings() {
@@ -458,10 +473,11 @@ export function AudioSettings() {
       </Show>
 
       {/* MIDI learn: pick an action (a track action also its track), LEARN, and the next CC or note-on from
-          any port runs it from then on (a second click or Esc cancels). A learned message never reaches
-          the play path. Learn, the bindings, their store and the momentary/latching read are native MIDI's
-          (`state/midi.ts` asks it); each line can switch the kind, a momentary REC/DUB pedal can HOLD, and
-          a line that does not run says why and can be assigned to a port that is here. */}
+          any port runs it from then on (a second click or Esc cancels; with no open port LEARN says why
+          it waits). A learned message never reaches the play path. Learn, the bindings, their store and
+          the momentary/latching read are native MIDI's (`state/midi.ts` asks it); each line can switch the
+          kind, a momentary REC/DUB pedal can HOLD, one from the previous version says so, and a line that
+          does not run says why; one no port can be found for alone is assigned to a port picked here. */}
       <div class="audio-settings__row" title="A MIDI footswitch or key runs this action">
         <span class="audio-settings__label">midi learn</span>
         <select
@@ -483,7 +499,8 @@ export function AudioSettings() {
           class="audio-settings__btn"
           classList={{ 'audio-settings__btn--listening': learning() !== null }}
           aria-pressed={learning() !== null}
-          disabled={learning() === null && !anyPortOpen()}
+          disabled={learning() === null && learnBlocked() !== null}
+          title={learning() === null ? (learnBlocked() ?? undefined) : undefined}
           onClick={() =>
             learning() === null ? learn(learnPick(), isLaneAction(learnPick()) ? learnTarget() : null) : cancelLearn()
           }
@@ -522,9 +539,10 @@ export function AudioSettings() {
           <For each={bindings()}>
             {(l, index) => {
               const b = () => l.binding;
-              // The port an assignment would move this binding to: the player's pick, else the first.
+              // The port an assignment would move this binding to: none until the player picks one (a pedal
+              // is never moved onto another controller by a default).
               const [assignTo, setAssignTo] = createSignal('');
-              const assignPort = () => (ports().some((p) => p.id === assignTo()) ? assignTo() : (ports()[0]?.id ?? ''));
+              const picked = () => (ports().some((p) => p.id === assignTo()) ? assignTo() : '');
               return (
                 <li class="audio-settings__binding" classList={{ 'is-idle': notLive(l) !== null }} title={l.displayName}>
                   <span class="audio-settings__binding-action">{bindingAction(b())}</span>
@@ -560,32 +578,37 @@ export function AudioSettings() {
                   >
                     ✕
                   </button>
-                  {/* Not live: why, and a way to run it on a port that is here now. */}
-                  <Show when={notLive(l)}>
-                    {(why) => (
-                      <div class="audio-settings__binding-why">
-                        <span class="audio-settings__binding-idle">{why()}</span>
-                        <Show when={ports().length > 0}>
-                          <select
-                            class="audio-settings__select audio-settings__select--assign"
-                            value={assignPort()}
-                            onChange={(e) => setAssignTo(e.currentTarget.value)}
-                            aria-label={`Port for ${bindingAction(b())} on ${midiSource(b())}`}
-                          >
-                            <For each={ports()}>{(p) => <option value={p.id}>{p.name}</option>}</For>
-                          </select>
-                          <button
-                            type="button"
-                            class="audio-settings__chip"
-                            onClick={() => assign(index(), assignPort())}
-                            aria-label={`Assign ${bindingAction(b())} on ${midiSource(b())} to this port`}
-                            title="Run this binding on the port picked here from now on"
-                          >
-                            ASSIGN
-                          </button>
-                        </Show>
-                      </div>
-                    )}
+                  {/* Second line: where it came from, why it does not run, and a port to run it on. */}
+                  <Show when={l.origin === 'legacy' || notLive(l) !== null}>
+                    <div class="audio-settings__binding-why">
+                      <Show when={l.origin === 'legacy'}>
+                        <span class="audio-settings__binding-origin">from the previous version</span>
+                      </Show>
+                      <Show when={notLive(l)}>{(why) => <span class="audio-settings__binding-idle">{why()}</span>}</Show>
+                      <Show when={ASSIGNABLE.includes(l.state) && ports().length > 0}>
+                        <select
+                          class="audio-settings__select audio-settings__select--assign"
+                          value={picked()}
+                          onChange={(e) => setAssignTo(e.currentTarget.value)}
+                          aria-label={`Port for ${bindingAction(b())} on ${midiSource(b())}`}
+                        >
+                          <option value="" disabled>
+                            pick a port
+                          </option>
+                          <For each={ports()}>{(p) => <option value={p.id}>{p.name}</option>}</For>
+                        </select>
+                        <button
+                          type="button"
+                          class="audio-settings__chip"
+                          disabled={picked() === ''}
+                          onClick={() => assign(index(), picked())}
+                          aria-label={`Assign ${bindingAction(b())} on ${midiSource(b())} to this port`}
+                          title={picked() === '' ? 'Pick the port this binding runs on first' : 'Run this binding on the port picked here from now on'}
+                        >
+                          ASSIGN
+                        </button>
+                      </Show>
+                    </div>
                   </Show>
                 </li>
               );

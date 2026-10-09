@@ -3,17 +3,29 @@
 //
 // `verify/fixtures/midi-wire.json` holds native MIDI's 25 action ids (`ActionId::ALL`), one example of
 // every `MidiEvent` (every port state, binding state and origin, store problem, UI action and learn
-// refusal), every `InputEvent` the UI sends and import reports, written from the Rust serde shapes. This
+// refusal; the list with its store revision), every `InputEvent` the UI sends, the outbox's `input_send`
+// items (an engine command or an input event) and that command's answers (nothing dropped, or why), the
+// input epochs `midi_subscribe` answers, and import reports, written from the Rust serde shapes. This
 // guard runs the REAL TS decoders over it: every event parses, every field the Rust side writes is one the
 // TS side reads (a field TS would ignore fails here), every variant is covered, each action id reads
 // (`src/app/midi-actions.ts`'s typecheck holds them equal to `src/app/actions.ts`'s), the UI's input
-// events are what the TS types produce, and a drifted name (a snake_case field, an unknown variant) is
-// refused. It cannot see Tauri's IPC or serde itself: a Rust test over the same JSON holds the Rust half.
-// Run: node verify/guards/midi-wire.mjs
+// events and items are what the TS encoders produce, and a drifted name (a snake_case field, an unknown
+// variant) is refused. It cannot see Tauri's IPC or serde itself: a Rust test over the same JSON holds
+// the Rust half. Run: node verify/guards/midi-wire.mjs
 
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { decodeImportReport, decodeInputEvent, decodeMidiEvent, encodeInput, MIDI_ACTION_IDS } from '../../src/platform/midi-wire.ts';
+import {
+  decodeDropped,
+  decodeEpoch,
+  decodeImportReport,
+  decodeInputEvent,
+  decodeInputItem,
+  decodeMidiEvent,
+  encodeInput,
+  encodeItem,
+  MIDI_ACTION_IDS,
+} from '../../src/platform/midi-wire.ts';
 
 const fixture = JSON.parse(readFileSync(new URL('../fixtures/midi-wire.json', import.meta.url), 'utf8'));
 
@@ -51,6 +63,11 @@ const listed = fixture.midiEvents.flatMap((e) => e.bindings?.bindings ?? []);
 check('the fixture lists every binding state', () =>
   assert.deepEqual(sorted(listed.map((l) => l.state)), sorted(['live', 'blocked', 'noPort', 'severalPorts', 'severalAbsent'])),
 );
+check('the list comes with its store revision', () => {
+  const event = fixture.midiEvents.find((e) => e.bindings);
+  assert.ok(Number.isInteger(event.bindings.revision), 'the fixture names one');
+  assert.equal(decodeMidiEvent(structuredClone(event)).revision, event.bindings.revision);
+});
 check('the fixture lists both origins, both kinds and a HOLD', () => {
   assert.deepEqual(sorted(listed.map((l) => l.origin)), ['legacy', 'native']);
   assert.deepEqual(sorted(listed.map((l) => l.binding.kind)), ['cc', 'note']);
@@ -107,6 +124,22 @@ check('the fixture selects every note target, and no slot', () => {
   assert.ok(picks.some((p) => p.slot === null));
 });
 
+// ── The outbox's items, input_send's answers, the subscribe's epochs ──────────────────────────────────
+for (const item of fixture.inputItems) {
+  const [kind, payload] = tag(item);
+  check(`input item ${JSON.stringify(item)} is what the outbox queues`, () =>
+    assert.deepEqual(kind === 'engine' ? encodeItem.engine(payload) : encodeItem.input(encodeLike(payload)), item),
+  );
+  check(`input item ${JSON.stringify(item)} reads as sent`, () => assert.deepEqual(decodeInputItem(structuredClone(item)), item));
+}
+check('the fixture has both kinds of item', () => assert.deepEqual(sorted(fixture.inputItems.map((i) => tag(i)[0])), ['engine', 'input']));
+check('every input_send answer reads, nothing dropped first', () => {
+  assert.deepEqual(fixture.inputAnswers.map(decodeDropped), fixture.inputAnswers);
+  assert.equal(fixture.inputAnswers[0], null);
+  assert.deepEqual(sorted(fixture.inputAnswers.slice(1)), ['full', 'noDevice', 'rebuilding']);
+});
+check('every epoch the subscribe answers reads', () => assert.deepEqual(fixture.epochs.map(decodeEpoch), fixture.epochs));
+
 // ── Import reports ──────────────────────────────────────────────────────────────────────────────────
 for (const r of fixture.importReports) {
   check(`import report ${JSON.stringify(r).slice(0, 60)}`, () => assert.deepEqual(decodeImportReport(structuredClone(r)), r));
@@ -148,6 +181,17 @@ const refused = {
   'a fractional velocity': () => decodeInputEvent({ note: { owner: 'key:KeyA', note: 60, velocity: 0.8, on: true } }),
   'a note target in another case': () => decodeInputEvent({ selectTarget: { slot: 0, target: 'off' } }),
   'an import report in snake_case': () => decodeImportReport({ ...fixture.importReports[0], already: undefined, already_done: true }),
+  'a list without its revision': () => {
+    const e = structuredClone(bindings);
+    delete e.bindings.revision;
+    decodeMidiEvent(e);
+  },
+  'an item in PascalCase': () => decodeInputItem({ Engine: { SetBpm: 90 } }),
+  'an input item in PascalCase': () => decodeInputItem({ input: { Note: { owner: 'key:KeyA', note: 60, velocity: 1, on: true } } }),
+  'an engine item the engine cannot read': () => decodeInputItem({ engine: { setBpm: 90 } }),
+  'an answer in snake_case': () => decodeDropped('no_device'),
+  'epoch 0': () => decodeEpoch(0),
+  'a fractional epoch': () => decodeEpoch(1.5),
 };
 for (const [name, fn] of Object.entries(refused)) check(`refuses ${name}`, () => assert.throws(fn));
 

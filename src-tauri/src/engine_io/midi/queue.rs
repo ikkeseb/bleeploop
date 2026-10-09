@@ -1,6 +1,6 @@
 //! OWNS: the one ordered path from every input to the engine's command ring (plan decision 5): a
 //! bounded FIFO that the router's batches (notes, wheels, the note target), the MIDI-learn actions and
-//! the UI's input commands (`engine_send`'s looper presses, `Press`, the toggles) all join, in the
+//! the UI's input commands (`input_send`'s looper presses, `Press`, the toggles) all join, in the
 //! order they happened, so a pedal and a click keep their order. Its owner drains it into
 //! `EngineHost::send`, which keeps the settings memory; the router and the queue sit under one lock.
 //!
@@ -394,7 +394,7 @@ impl Queue {
         Ok(())
     }
 
-    /// One of the UI's input commands (`engine_send`'s looper presses, `Press`, the toggles), in the
+    /// One of the UI's input commands (`input_send`'s looper presses, `Press`, the toggles), in the
     /// same FIFO as everything else. Notes, wheels and the note target go through the router. A setting
     /// (an absolute setter) goes straight to `EngineHost::send`: a rebuild would discard it here.
     pub fn admit_ui(&mut self, command: Command, generation: u64, device_running: bool) -> Result<(), Refused> {

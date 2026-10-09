@@ -21,7 +21,7 @@ import type {
   ToneImport,
 } from './host';
 import { decodeDeviceStatus, decodeFeedFrame } from './engine-wire';
-import { decodeImportReport, decodeMidiEvent } from './midi-wire';
+import { decodeDropped, decodeEpoch, decodeImportReport, decodeMidiEvent } from './midi-wire';
 // notify.ts is a ROOT-level module (src/notify.ts), not an app layer, so importing it from a platform/
 // file is boundary-clean: check-boundary.mjs's leak regex flags only the app layers above platform/. It's the one user-visible error surface, imported here so a native transport failure below
 // reaches the user (not just console.error → the release log).
@@ -159,9 +159,6 @@ const tauriEngineHost: EngineHost = {
   async setSlotInputChannel(slot, channel) {
     await invoke('engine_set_slot_input_channel', { slot, channel });
   },
-  async send(commands) {
-    await invoke('engine_send', { commands });
-  },
   async setShare(endpoint) {
     await invoke('engine_set_share', { endpoint });
   },
@@ -221,12 +218,16 @@ const tauriMidi: MidiHost = {
         notifyError('Native MIDI sent something the app cannot read', err);
       }
     };
-    invoke('midi_subscribe', { channel }).catch((err: unknown) => {
+    const epoch = invoke<unknown>('midi_subscribe', { channel }).then(decodeEpoch);
+    epoch.catch((err: unknown) => {
       console.error('[host.tauri] MIDI subscribe failed', err);
       notifyError('The app lost contact with MIDI', err);
     });
-    return () => {
-      live = false;
+    return {
+      epoch,
+      stop() {
+        live = false;
+      },
     };
   },
   async learn(action, target) {
@@ -235,33 +236,27 @@ const tauriMidi: MidiHost = {
   cancelLearn() {
     return invoke<boolean>('midi_cancel_learn');
   },
-  async forget(index) {
-    await invoke('midi_forget', { index });
+  forget(revision, index) {
+    return invoke<boolean>('midi_forget', { revision, index });
   },
-  async setMomentary(index, on) {
-    await invoke('midi_set_momentary', { index, on });
+  setMomentary(revision, index, on) {
+    return invoke<boolean>('midi_set_momentary', { revision, index, on });
   },
-  async setHold(index, on) {
-    await invoke('midi_set_hold', { index, on });
+  setHold(revision, index, on) {
+    return invoke<boolean>('midi_set_hold', { revision, index, on });
   },
-  async assign(index, portId) {
-    await invoke('midi_assign', { index, portId });
+  assign(revision, index, portId) {
+    return invoke<boolean>('midi_assign', { revision, index, portId });
   },
   async importLegacy(json) {
     return decodeImportReport(await invoke<unknown>('midi_import_legacy', { json }));
   },
 };
 
-/**
- * The UI's input events over Tauri IPC (`input_send`, synchronous on the main thread natively, as
- * `engine_send`, so the outbox's calls keep their order). Until `host_init` answered this document's epoch
- * (0), its notes and blurs go nowhere: no device ran yet, and the native router refuses an epoch it was
- * not told; the note target and the panic carry no epoch and go at once.
- */
+/** The outbox's batches over Tauri IPC (`input_send`, synchronous on the main thread natively). */
 const tauriInput: InputHost = {
-  async send(events) {
-    const batch = frontendEpoch === 0 ? events.filter((e) => e !== 'blur' && !(typeof e === 'object' && 'note' in e)) : events;
-    if (batch.length > 0) await invoke('input_send', { epoch: frontendEpoch, events: batch });
+  async send(epoch, items) {
+    return decodeDropped(await invoke<unknown>('input_send', { epoch, items }));
   },
 };
 
