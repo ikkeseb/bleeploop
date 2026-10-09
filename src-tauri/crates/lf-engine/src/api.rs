@@ -52,9 +52,9 @@ pub enum Command {
     /// A hands-free press bound to its lane: a press aimed at a named lane, and what a press held for a
     /// block job re-enters as, so a selection change meanwhile cannot move it.
     ActionOn(u8, Action),
-    /// A hands-free press the engine does not run as an [`Action`] (TAP, a CLICK, END STOP or FIXED
-    /// toggle, an input send, GO LIVE), sent just before the setting it changes: a looper press all the
-    /// same, so it disarms a pending pedal CLEAR. The setting alone does not (a slider, a settings replay).
+    /// A hands-free press the engine does not run as an [`Action`] (TAP, GO LIVE), sent just before the
+    /// setting it changes: a looper press all the same, so it disarms a pending pedal CLEAR. The setting
+    /// alone does not (a slider, a settings replay).
     Press,
     SelectTrack(u8),
     SetBpm(f64),
@@ -146,10 +146,18 @@ impl Command {
         )
     }
 
-    /// A command for the input sends. It never waits behind the looper either: it touches only the
-    /// sends, which no block job moves, and the player hears the echo come on as they switch it.
+    /// A command for the input sends, an input send's toggle included. It never waits behind the looper
+    /// either: it touches only the sends, which no block job moves, and the player hears the echo come on
+    /// as they switch it. (A toggle that passes a held command disarms a pending CLEAR in its own turn:
+    /// `engine.rs` `apply_due`.)
     pub fn is_input_send(&self) -> bool {
-        matches!(self, Command::SetInputSend(..) | Command::SetInputSendParam(..))
+        matches!(
+            self,
+            Command::SetInputSend(..)
+                | Command::SetInputSendParam(..)
+                | Command::Action(Action::Toggle(Toggle::Send(_)))
+                | Command::ActionOn(_, Action::Toggle(Toggle::Send(_)))
+        )
     }
 }
 
@@ -173,6 +181,59 @@ impl InputSend {
 
     pub fn from_key(key: &str) -> Option<InputSend> {
         InputSend::ALL.into_iter().find(|s| s.key() == key)
+    }
+}
+
+/// A setting a hands-free press switches ([`Action::Toggle`]): the click, END STOP, FIXED, RETAKE, AUTO REC
+/// and each input send. The engine owns each one's value; a press says "switch it" and the engine reads
+/// the value it switches when the press applies, so two producers (a pedal, a click on screen) never undo
+/// each other by sending what each last saw.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Toggle {
+    Click,
+    EndStop,
+    Fixed,
+    Retake,
+    AutoRec,
+    Send(InputSend),
+}
+
+impl Toggle {
+    pub const COUNT: usize = 8;
+    pub const ALL: [Toggle; Toggle::COUNT] = [
+        Toggle::Click,
+        Toggle::EndStop,
+        Toggle::Fixed,
+        Toggle::Retake,
+        Toggle::AutoRec,
+        Toggle::Send(InputSend::Echo),
+        Toggle::Send(InputSend::Reverb),
+        Toggle::Send(InputSend::Ring),
+    ];
+
+    /// Its position in [`Toggle::ALL`].
+    pub fn index(self) -> usize {
+        match self {
+            Toggle::Click => 0,
+            Toggle::EndStop => 1,
+            Toggle::Fixed => 2,
+            Toggle::Retake => 3,
+            Toggle::AutoRec => 4,
+            Toggle::Send(send) => 5 + send as usize,
+        }
+    }
+
+    /// The setter that sets it to `on` outright: what initialization and a settings replay send, and
+    /// what the host's settings memory keeps for it.
+    pub fn setter(self, on: bool) -> Command {
+        match self {
+            Toggle::Click => Command::SetMetronome(on),
+            Toggle::EndStop => Command::SetLoopEndStop(on),
+            Toggle::Fixed => Command::SetFixedLength(on),
+            Toggle::Retake => Command::SetRetake(on),
+            Toggle::AutoRec => Command::SetAutoRecord(on),
+            Toggle::Send(send) => Command::SetInputSend(send, on),
+        }
     }
 }
 
@@ -302,6 +363,13 @@ pub enum Action {
     /// FADE (all): every playing lane fades to silence over the fade's bars and stops on the bar line;
     /// a second press while they fade stops them at once.
     FadeAll,
+    /// Switch a setting from the value it has when the press applies, answered by [`Event::Toggled`], or
+    /// refused with a reason (FIXED, RETAKE and AUTO REC while a take records; FIXED while RETAKE rolls over
+    /// a loop; AUTO REC once a loop has locked the tempo: `Looper::toggle_gate`), the refusal on the
+    /// selected lane and nothing switched. A looper press: it disarms a pending pedal CLEAR, refused or
+    /// not. No lane: as `Command::ActionOn` it acts as `Command::Action` does, its lane ignored. The
+    /// setters (`Command::SetMetronome` and the rest) stay for initialization and a settings replay.
+    Toggle(Toggle),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -432,6 +500,16 @@ pub enum Refusal {
     Fading,
     /// FADE with no lane playing.
     NoFade,
+    /// FIXED switched while a take records or overdubs.
+    FixedCapturing,
+    /// FIXED switched while RETAKE, whose passes roll at the loop's length, overrides it over a loop.
+    FixedRetake,
+    /// RETAKE switched while a take records or overdubs (it is read at arm).
+    RetakeCapturing,
+    /// AUTO REC switched while a take records or overdubs.
+    AutoRecCapturing,
+    /// AUTO REC switched once a loop has locked the tempo (it only starts a first take).
+    AutoRecLocked,
 }
 
 impl Refusal {
@@ -453,6 +531,11 @@ impl Refusal {
             Refusal::NoFreeLane => "no empty track to copy to",
             Refusal::Fading => "fading out, wait or stop now",
             Refusal::NoFade => "nothing is playing to fade",
+            Refusal::FixedCapturing => "a take is recording, FIXED changes after it",
+            Refusal::FixedRetake => "RETAKE is on, so FIXED is ignored",
+            Refusal::RetakeCapturing => "a take is recording, RETAKE changes after it",
+            Refusal::AutoRecCapturing => "a take is recording, AUTO REC changes after it",
+            Refusal::AutoRecLocked => "AUTO REC starts a first take, clear all to use it",
         }
     }
 }
@@ -486,6 +569,11 @@ pub enum Event {
     /// CLEAR, a pedal's MUTE and a load all reach the feed this way; a pan's glide sends one, its target.
     /// The host's settings memory keeps the last one per lane as the mix it replays into a new engine.
     Mix { frame: Frame, lane: u8, mix: CompactMix },
+    /// A toggled setting's value as the engine applies it: sent by an accepted [`Action::Toggle`] with the
+    /// value it left, and whenever the value differs from the last one the event ring took for it (a
+    /// setter changed it, or the full ring refused the toggle's event: offered again at the next publish).
+    /// The UI shows the setting from it, and the host's settings memory keeps it as the value it replays.
+    Toggled { frame: Frame, toggle: Toggle, on: bool },
 }
 
 /// The callback's view of the device.

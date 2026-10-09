@@ -66,6 +66,7 @@ pub(crate) fn swap_engine(core: &Core, engine: Engine, handle: EngineHandle, con
     core.rt.clear_poison();
     // Read before `evict`, which leaks the engine when a unit panics on its way out.
     let applied = old.as_ref().and_then(Engine::applied_mixes);
+    let unsent: Vec<_> = old.as_ref().map(|e| e.unsent_toggles().collect()).unwrap_or_default();
     let old = old.and_then(|old| evict(core, &mut ports, old));
     for (port, new) in ports.iter_mut().zip(slots) {
         **port = Some(new);
@@ -88,6 +89,10 @@ pub(crate) fn swap_engine(core: &Core, engine: Engine, handle: EngineHandle, con
             for (lane, mix) in mixes.iter().enumerate() {
                 settings.mixed(gen, frame, lane as u8, mix);
             }
+        }
+        // The toggles it applied whose `Toggled` its full ring refused: newer than any it drained.
+        for (toggle, on) in unsent {
+            settings.toggled(gen, toggle, on);
         }
         let ends = ends.insert(Ends { commands, events, overview, session: Some(session) });
         for command in settings.replay() {

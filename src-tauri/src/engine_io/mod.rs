@@ -610,13 +610,15 @@ pub(crate) struct Core {
     pub(crate) tone: std::sync::OnceLock<Arc<tone::Shared>>,
 }
 
-/// Pop the event ring of the engine of generation `gen` into `each`. A lane's `Mix` is also the settings
-/// memory's projection of it: drained under `settings`, then `ends` (the order every taker keeps), so no
-/// rebuild's replay lands between the pop and the projection.
+/// Pop the event ring of the engine of generation `gen` into `each`. A lane's `Mix` and a `Toggled` are
+/// also the settings memory's projection of them: drained under `settings`, then `ends` (the order every
+/// taker keeps), so no rebuild's replay lands between the pop and the projection.
 pub(crate) fn drain(settings: &mut settings::Settings, events: &mut Consumer<Event>, gen: u64, mut each: impl FnMut(Event)) {
     while let Ok(event) = events.pop() {
-        if let Event::Mix { frame, lane, mix } = event {
-            settings.mixed(gen, frame, lane, &mix);
+        match event {
+            Event::Mix { frame, lane, mix } => _ = settings.mixed(gen, frame, lane, &mix),
+            Event::Toggled { toggle, on, .. } => _ = settings.toggled(gen, toggle, on),
+            _ => {}
         }
         each(event);
     }

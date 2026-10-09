@@ -11,6 +11,7 @@ import {
   type DeviceStatus,
   type EngineCommand,
   type EngineEvent,
+  type EngineToggle,
   type FeedFrame,
   type FxParamId,
   type InputSendId,
@@ -51,10 +52,14 @@ import { notifyError, notifyInfo } from '../../notify';
  * The engine owns the musical state: lanes, the transport (master, BPM and its lock), the beat and the
  * selection arrive on the feed, and nothing here predicts them. Each lane's mix (volume, MUTE, DUB
  * FEEDBACK, pan, FX) arrives too, as the engine applied it (`Mix`); a mix control shows its gesture's value
- * until the engine has it (the lane mix section below). The other settings the engine does not echo, so
- * this store keeps them (the take modes and FADE's bars, click, master, the input sends; FADE's bars,
- * click, master and the sends across a restart too): it sends each change, and on a `reset` frame takes
- * the settings the engine remembers, so the screen shows what the engine plays. `engineSession` is the
+ * until the engine has it (the lane mix section below). The toggled settings (CLICK, END STOP, FIXED,
+ * RETAKE, AUTO REC, each input send on or off) arrive as the engine applied them (`Toggled`): a button,
+ * a key or a pedal sends the engine's toggle (`toggleSetting`), which the engine judges against its own
+ * value, and the signal follows the event, never the press. The other settings the engine does not echo,
+ * so this store keeps them (FIXED's bars, AUTO REC's sensitivity, FADE's bars, the click and master
+ * levels, the sends' values; FADE's bars, the levels and the sends across a restart too): it sends each
+ * change. On a `reset` frame it takes the settings the engine remembers, toggled ones included, so the
+ * screen shows what the engine plays. `engineSession` is the
  * engine as export, recovery and import see it: the engine's PCM with each lane's mix as the engine
  * applied it (the snapshot's; an import's load carries its saved mix, which the engine applies with the
  * loops and reports as each lane's `Mix`), and the token of
@@ -240,6 +245,9 @@ function adoptInputSendParam(key: InputSendParamId, value: number): void {
 export const engineInputSends = {
   params: INPUT_SEND_PARAMS,
   on: (id: InputSendId): boolean => inputSendOn[id][0](),
+  /** The send's switch, as a press: the engine's toggle (`toggleSetting`). */
+  toggle: (id: InputSendId): void => toggleSetting({ Send: id }),
+  /** On or off outright: initialization and scripts, not a control. */
   setOn: (id: InputSendId, on: boolean): void => {
     adoptInputSend(id, on);
     sendEngine({ SetInputSend: [id, on] });
@@ -520,7 +528,27 @@ function applyEvent(ev: EngineEvent): void {
     case 'Mix':
       applyMix(ev.lane, ev.mix);
       break;
+    case 'Toggled':
+      applyToggle(ev.toggle, ev.on);
+      break;
   }
+}
+
+/** A toggled setting as the engine applied it (`Toggled`): its signal, and an input send's saved value. */
+function applyToggle(toggle: EngineToggle, on: boolean): void {
+  if (typeof toggle === 'object') adoptInputSend(toggle.Send, on);
+  else if (toggle === 'Click') setMetronomeSignal(on);
+  else if (toggle === 'EndStop') setLoopEndStopSignal(on);
+  else if (toggle === 'Fixed') setFixedLengthSignal(on);
+  else if (toggle === 'Retake') setRetakeSignal(on);
+  else setAutoRecordSignal(on);
+}
+
+/** Switch a toggled setting: the engine's toggle, which flips the value it has when the press lands (or
+ * names a refusal on the selected lane, which `boot.ts` shows), so a pedal and a click never undo each
+ * other. The setting's signal follows the engine's `Toggled`. */
+export function toggleSetting(toggle: EngineToggle): void {
+  void sendEngine({ Action: { Toggle: toggle } });
 }
 
 function applyDeviceEvent(ev: DeviceEvent): void {
@@ -1072,11 +1100,15 @@ export const engineLooper = {
   playAll: (): void => void sendEngine('PlayAll'),
   clearAll: (): void => void sendEngine('ClearAll'),
   loopEndStopEnabled: loopEndStop,
+  /** END STOP's press: the engine's toggle (`toggleSetting`). The setters below are for scripts. */
+  toggleLoopEndStop: (): void => toggleSetting('EndStop'),
   setLoopEndStopEnabled: (on: boolean): void => {
     setLoopEndStopSignal(on);
     sendEngine({ SetLoopEndStop: on });
   },
   retakeEnabled: retake,
+  /** RETAKE's press: the engine's toggle, refused while a take records. */
+  toggleRetake: (): void => toggleSetting('Retake'),
   setRetakeEnabled: (on: boolean): void => {
     setRetakeSignal(on);
     sendEngine({ SetRetake: on });
@@ -1126,6 +1158,8 @@ export const engineLooper = {
   holdMix,
   dropMix,
   fixedLengthEnabled: fixedLength,
+  /** FIXED's press: the engine's toggle, refused while a take records or RETAKE overrides it. */
+  toggleFixedLength: (): void => toggleSetting('Fixed'),
   setFixedLengthEnabled: (on: boolean): void => {
     setFixedLengthSignal(on);
     sendEngine({ SetFixedLength: on });
@@ -1138,6 +1172,8 @@ export const engineLooper = {
     sendEngine({ SetFixedBars: bars });
   },
   autoRecordEnabled: autoRecord,
+  /** AUTO REC's press: the engine's toggle, refused while a take records or once a loop locked the tempo. */
+  toggleAutoRecord: (): void => toggleSetting('AutoRec'),
   setAutoRecordEnabled: (on: boolean): void => {
     setAutoRecordSignal(on);
     sendEngine({ SetAutoRecord: on });
@@ -1288,6 +1324,8 @@ export const engineClock = {
   beat,
   countLeft,
   metronomeOn: metronome,
+  /** CLICK's press: the engine's toggle (`toggleSetting`). `setMetronome` is for scripts. */
+  toggleMetronome: (): void => toggleSetting('Click'),
   setMetronome: (on: boolean): void => {
     setMetronomeSignal(on);
     sendEngine({ SetMetronome: on });

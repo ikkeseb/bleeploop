@@ -19,12 +19,24 @@
 //! A rebuild projects the replaced engine's last mixes before its replay (`owner.rs` `swap_engine`):
 //! what its event ring still holds, then each lane's mix read from the engine itself
 //! (`Engine::applied_mixes`), so a mix the full ring refused is not lost.
+//!
+//! A toggled setting (the click, END STOP, FIXED, RETAKE, AUTO REC, each input send: `lf_engine::Toggle`)
+//! is switched by an action (`Action::Toggle`), which the engine judges and applies against its own
+//! value, so the memory takes its value from what the engine applied: each `Event::Toggled` the feed
+//! drains from the engine generation it follows (`toggled`), kept as the setter that sets it. Its setter
+//! is still kept as sent too (initialization, a replay, a script): no engine-made change competes with
+//! it, and the engine reports the value the setter leaves, so the two converge on the applied value.
+//! A rebuild drains the replaced engine's event ring, then reads the toggles it applied whose event the
+//! full ring refused (`Engine::unsent_toggles`), so an accepted toggle survives the rebuild whether or not
+//! the feed saw it. Not kept: a setter still queued in a replaced engine with no device behind it, when
+//! that engine also holds an unsent toggle of the same setting (the unsent value wins); and a toggle
+//! still queued there, as every queued action.
 
 use std::collections::BTreeMap;
 
 use lf_engine::dsp::fx::{FxKind, FxParam, MAX_PARAMS};
 use lf_engine::grid::Frame;
-use lf_engine::{Command, CompactMix, Event, LaneMix, SLOT_COUNT, TRACK_COUNT};
+use lf_engine::{Command, CompactMix, Event, LaneMix, Toggle, SLOT_COUNT, TRACK_COUNT};
 
 /// What a setting sets; replayed in this order (the note target before the wheels it hands over).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -186,6 +198,17 @@ impl Settings {
         true
     }
 
+    /// The engine of generation `gen` applied toggled setting `toggle` as `on` (its `Event::Toggled`, or
+    /// its unsent value read at a rebuild): kept as the setter that sets it. False, and nothing kept, for
+    /// an engine this memory no longer follows.
+    pub(crate) fn toggled(&mut self, gen: u64, toggle: Toggle, on: bool) -> bool {
+        if gen != self.gen {
+            return false;
+        }
+        self.insert(toggle.setter(on));
+        true
+    }
+
     fn insert(&mut self, command: Command) {
         if let Some(key) = key(&command) {
             self.last.insert(key, command);
@@ -295,6 +318,28 @@ mod tests {
         let mixes: Vec<Event> = s.mixes().collect();
         assert_eq!(mixes.len(), 2, "the two lanes the engine reported: {mixes:?}");
         assert!(matches!(mixes[0], Event::Mix { frame: 200, lane: 0, mix } if mix.muted));
+    }
+
+    #[test]
+    fn a_toggled_setting_is_kept_as_its_setter_at_the_value_the_engine_applied() {
+        let mut s = Settings::default();
+        s.follow(1);
+        assert!(!s.record(&Command::Action(lf_engine::Action::Toggle(Toggle::Click))), "a toggle is an action, kept nowhere");
+        assert!(s.toggled(1, Toggle::Click, true));
+        assert!(s.toggled(1, Toggle::Send(InputSend::Reverb), true));
+        assert!(s.toggled(1, Toggle::Send(InputSend::Reverb), false));
+        assert_eq!(replay(&s), [Command::SetMetronome(true), Command::SetInputSend(InputSend::Reverb, false)], "an off kept too: the UI pushes a send the memory lacks");
+        assert!(s.record(&Command::SetMetronome(false)), "a setter is still kept as sent");
+        assert_eq!(replay(&s)[0], Command::SetMetronome(false));
+        assert!(s.toggled(1, Toggle::Click, true), "then the engine's next value");
+        assert_eq!(replay(&s)[0], Command::SetMetronome(true));
+        s.follow(2);
+        assert!(!s.toggled(1, Toggle::Retake, true), "a replaced engine's late Toggled");
+        assert!(!replay(&s).contains(&Command::SetRetake(true)));
+        for t in Toggle::ALL {
+            assert_eq!(key(&t.setter(true)), key(&t.setter(false)), "{t:?}: one key per setting");
+            assert!(key(&t.setter(true)).is_some());
+        }
     }
 
     #[test]
