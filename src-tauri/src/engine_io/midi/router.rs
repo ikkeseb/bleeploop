@@ -22,11 +22,14 @@
 //! - **A target switch releases what sounds, then switches** (`routeEngine`), in one batch: every note
 //!   held or sustained gets its `NoteOff` before `SelectInstrument`, and is forgotten (a key down across
 //!   the switch releases nothing); pedals and wheels stay. `NoteTarget::Off` routes nowhere (a plugin
-//!   swap while it unloads). The caller switches on a slot pick or a slot's new source, never per note.
-//! - **A refused attack records no owner.** The queue decides after the router; when it refuses a
-//!   `note_on`'s batch, [`Router::attack_refused`] undoes what that call recorded. Every other batch
-//!   the router makes (releases, wheels, the target) is one the queue always takes (its reservations),
-//!   so nothing else is ever undone.
+//!   swap while it unloads). The same slot and target again changes nothing (`routeEngine`'s
+//!   `${slot}:${target}` key), so a click on the active slot cuts no chord; another slot holding the
+//!   same synth is a switch.
+//! - **A refused attack records no owner.** The queue decides after the router; when it refuses the
+//!   batch a `note_on` made, [`Router::attack_refused`] undoes what that call recorded, and nothing for
+//!   any other batch. Every other batch the router makes (releases, wheels, the target, a panic) is one
+//!   the queue always takes (its reservations) unless it was made for another engine generation, which
+//!   sounds none of the router's notes; so the router may forget a note as it releases it.
 //! - **A rebuilt engine sounds nothing** ([`Router::engine_rebuilt`]): the owners and pedals stay, so a
 //!   later release is harmless (nothing is sent for a note the new engine never sounded) and a fresh
 //!   press attacks again; the target and wheels the router last sent reach the new engine through the
@@ -84,7 +87,8 @@ pub struct Router {
     /// What the router last sent: the engine keeps it, and the settings memory replays it.
     pitch_bend: f64,
     mod_depth: f64,
-    target: Option<NoteTarget>,
+    /// The slot and target last selected (`routeEngine`'s key).
+    target: Option<(Option<u8>, NoteTarget)>,
     /// Notes this engine was told to sound and not yet to release, bit n for note n.
     sounding: u128,
     /// The current document's `frontendEpoch` (0: none yet, so no UI event is taken).
@@ -191,10 +195,14 @@ impl Router {
         self.publish();
     }
 
-    /// The queue refused the batch the last [`Router::note_on`] made: forget the owner it recorded and
-    /// put the note back as it was. Nothing after any other call.
-    pub fn attack_refused(&mut self) {
+    /// The queue refused `batch`. When it is the batch the last [`Router::note_on`] made (it carries that
+    /// call's attack), forget the owner the call recorded and put the note back as it was; any other
+    /// batch undoes nothing.
+    pub fn attack_refused(&mut self, batch: &[Out]) {
         let Some(Undo { owner, note, added, sounding }) = self.undo.take() else { return };
+        if !batch.iter().any(|o| matches!(o.command, Command::NoteOn(n, _) if n == note)) {
+            return;
+        }
         if added {
             remove(&mut self.held, note, &owner);
         }
@@ -345,14 +353,17 @@ impl Router {
         }
     }
 
-    /// Move the notes to `target` (`routeEngine`): release every note held or sustained (`allNotesOff`),
-    /// then `SelectInstrument`. The held notes are forgotten; the pedals and the wheels stay.
-    pub fn select_target(&mut self, target: NoteTarget, out: &mut Vec<Out>) {
+    /// Move the notes to `target`, picked on `slot` (`routeEngine`; `None` for a caller with no slot):
+    /// release every note held or sustained (`allNotesOff`), then `SelectInstrument`. The held notes are
+    /// forgotten; the pedals and the wheels stay. The slot and target already selected change nothing.
+    pub fn select_target(&mut self, slot: Option<u8>, target: NoteTarget, out: &mut Vec<Out>) {
         self.undo = None;
+        if self.target == Some((slot, target)) {
+            return;
+        }
         self.release_all(out);
         out.push(Out::new(Command::SelectInstrument(target)));
-        self.target = Some(target);
-        self.publish();
+        self.target = Some((slot, target));
     }
 
     /// `allNotesOff`: a `NoteOff` for every note that sounds, held ones first, and forget them.
@@ -365,11 +376,13 @@ impl Router {
         self.held.clear();
         self.sustained.clear();
         self.sounding = 0;
+        self.undo = None;
+        self.publish();
     }
 
     /// The note target last selected.
     pub fn target(&self) -> Option<NoteTarget> {
-        self.target
+        self.target.map(|(_, target)| target)
     }
 
     /// Every UI owner the router knows (holding a note, a pedal or a wheel) whose epoch `pick` takes,
@@ -498,7 +511,7 @@ impl HeldNotes {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lf_engine::Instrument;
+    use lf_engine::{Action, Instrument};
 
     fn midi(conn: u32, channel: u8) -> Owner {
         Owner::Midi { conn, channel }
@@ -526,9 +539,17 @@ mod tests {
 
     /// Runs `f` and returns what it sent.
     fn sent(r: &mut Router, f: impl FnOnce(&mut Router, &mut Vec<Out>)) -> Vec<Command> {
+        sent_outs(r, f).into_iter().map(|o| o.command).collect()
+    }
+
+    fn sent_outs(r: &mut Router, f: impl FnOnce(&mut Router, &mut Vec<Out>)) -> Vec<Out> {
         let mut out = Vec::new();
         f(r, &mut out);
-        out.into_iter().map(|o| o.command).collect()
+        out
+    }
+
+    fn outs(commands: &[Command]) -> Vec<Out> {
+        commands.iter().copied().map(Out::new).collect()
     }
 
     fn msg(r: &mut Router, owner: &Owner, bytes: [u8; 3]) -> Vec<Command> {
@@ -732,7 +753,7 @@ mod tests {
         msg(&mut r, &a0(), [0x90, 60, 100]);
         msg(&mut r, &b0(), [0x90, 61, 100]);
         assert_eq!(
-            sent(&mut r, |r, out| r.select_target(pad, out)),
+            sent(&mut r, |r, out| r.select_target(Some(0), pad, out)),
             [Command::NoteOff(60), Command::NoteOff(61), Command::NoteOff(64), Command::SelectInstrument(pad)]
         );
         assert_eq!(r.target(), Some(pad));
@@ -741,7 +762,7 @@ mod tests {
         assert_eq!(msg(&mut r, &a0(), [0x80, 60, 0]), [], "a key down across the switch releases nothing");
         assert_eq!(msg(&mut r, &b0(), [0x90, 61, 100]), [on(61)], "a note held across the switch strikes again");
         msg(&mut r, &a0(), [0xb0, 64, 127]);
-        assert_eq!(sent(&mut r, |r, out| r.select_target(NoteTarget::Off, out)), [Command::NoteOff(61), Command::SelectInstrument(NoteTarget::Off)]);
+        assert_eq!(sent(&mut r, |r, out| r.select_target(Some(0), NoteTarget::Off, out)), [Command::NoteOff(61), Command::SelectInstrument(NoteTarget::Off)]);
         msg(&mut r, &a0(), [0x90, 63, 100]);
         assert_eq!(msg(&mut r, &a0(), [0x80, 63, 0]), [], "the pedal survived the switch");
         assert_eq!(msg(&mut r, &a0(), [0xe0, 0x00, 0x60]), [], "and the wheel");
@@ -752,26 +773,53 @@ mod tests {
     #[test]
     fn a_refused_attack_records_no_owner() {
         let mut r = Router::default();
-        sent(&mut r, |r, out| r.note_on(&a0(), 60, 100, out));
-        r.attack_refused();
+        let batch = sent_outs(&mut r, |r, out| r.note_on(&a0(), 60, 100, out));
+        r.attack_refused(&batch);
         assert!(held(&r).is_empty());
         assert_eq!(msg(&mut r, &a0(), [0x80, 60, 0]), [], "its release ends nothing");
         assert_eq!(msg(&mut r, &a0(), [0x90, 60, 100]), [on(60)], "the next strike is a first strike");
 
         msg(&mut r, &a0(), [0xb0, 64, 127]);
         msg(&mut r, &a0(), [0x80, 60, 0]);
-        assert_eq!(msg(&mut r, &b0(), [0x90, 60, 90]), [Command::NoteOff(60), Command::NoteOn(60, 90.0 / 127.0)]);
-        r.attack_refused();
+        let batch = sent_outs(&mut r, |r, out| r.note_on(&b0(), 60, 90, out));
+        assert_eq!(batch, outs(&[Command::NoteOff(60), Command::NoteOn(60, 90.0 / 127.0)]));
+        r.attack_refused(&batch);
         assert!(held(&r).is_empty());
         assert_eq!(msg(&mut r, &b0(), [0x80, 60, 0]), [], "b holds nothing");
         assert_eq!(msg(&mut r, &a0(), [0xb0, 64, 0]), [Command::NoteOff(60)], "the pedal's voice still sounds");
 
         // A refusal reported after another call undoes nothing.
-        msg(&mut r, &a0(), [0x90, 62, 100]);
+        let first = sent_outs(&mut r, |r, out| r.note_on(&a0(), 62, 100, out));
         msg(&mut r, &a0(), [0x90, 63, 100]);
         msg(&mut r, &a0(), [0x80, 63, 0]);
-        r.attack_refused();
+        r.attack_refused(&first);
         assert_eq!(held(&r), [62]);
+    }
+
+    // Review fix: a note-on whose batch the queue took, then a refused batch with no attack of it (a
+    // bound action with no device): the note keeps its owner, and its release still goes out.
+    #[test]
+    fn a_refused_batch_without_the_attack_undoes_nothing() {
+        let mut r = Router::default();
+        sent(&mut r, |r, out| r.note_on(&a0(), 60, 100, out));
+        r.attack_refused(&outs(&[Command::Action(Action::RecDub)]));
+        assert_eq!(held(&r), [60]);
+        assert_eq!(msg(&mut r, &a0(), [0x80, 60, 0]), [Command::NoteOff(60)]);
+    }
+
+    // Review fix (instrument.ts routeEngine's `${slot}:${target}` key): the active slot picked again
+    // changes nothing, so a held chord rings on; another slot holding the same synth is a switch
+    // (Keyboard.tsx forgets its holds on one).
+    #[test]
+    fn the_same_slot_and_target_again_change_nothing_and_another_slot_is_a_switch() {
+        let mut r = Router::default();
+        let lead = NoteTarget::Builtin(Instrument::Lead);
+        assert_eq!(sent(&mut r, |r, out| r.select_target(Some(0), lead, out)), [Command::SelectInstrument(lead)]);
+        msg(&mut r, &a0(), [0x90, 60, 100]);
+        assert_eq!(sent(&mut r, |r, out| r.select_target(Some(0), lead, out)), []);
+        assert_eq!(held(&r), [60]);
+        assert_eq!(sent(&mut r, |r, out| r.select_target(Some(1), lead, out)), [Command::NoteOff(60), Command::SelectInstrument(lead)]);
+        assert_eq!(sent(&mut r, |r, out| r.select_target(Some(1), NoteTarget::Slot(1), out)), [Command::SelectInstrument(NoteTarget::Slot(1))]);
     }
 
     // Plan decision 6: a rebuilt engine sounds nothing; owners stay (a release is harmless), a fresh
@@ -779,7 +827,7 @@ mod tests {
     #[test]
     fn after_a_rebuild_a_release_is_harmless_a_press_attacks_again_and_nothing_is_resent() {
         let mut r = Router::default();
-        sent(&mut r, |r, out| r.select_target(NoteTarget::Builtin(Instrument::Lead), out));
+        sent(&mut r, |r, out| r.select_target(Some(0), NoteTarget::Builtin(Instrument::Lead), out));
         msg(&mut r, &a0(), [0xe0, 0x00, 0x60]);
         msg(&mut r, &a0(), [0x90, 60, 100]);
         msg(&mut r, &a0(), [0xb0, 64, 127]);

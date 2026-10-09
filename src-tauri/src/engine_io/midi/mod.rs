@@ -163,7 +163,7 @@ impl Core {
     /// Hand one input's batch to the queue, whole; a refused attack records no owner.
     fn admit(router: &mut Router, queue: &mut Queue, out: &mut Vec<Out>, running: bool) {
         if queue.admit(out, GENERATION, running).is_err() {
-            router.attack_refused();
+            router.attack_refused(out);
         }
         out.clear();
     }
@@ -327,9 +327,9 @@ impl MidiHost {
     }
 
     /// Move the notes to `target`: the router releases what sounds, then sends `Command::SelectInstrument`,
-    /// in one batch, and forgets the held notes.
+    /// in one batch, and forgets the held notes (nothing when `target` is already selected).
     pub fn select_instrument(&self, target: NoteTarget) -> Result<(), String> {
-        self.core.input(|router, out| router.select_target(target, out))
+        self.core.input(|router, out| router.select_target(None, target, out))
     }
 
     /// Panic: the router releases what sounds and forgets it, then `Command::AllNotesOff`.
@@ -637,6 +637,23 @@ mod tests {
         r.take();
         r.learn(ActionId::StopAll, A, &[[0xb5, 1, 90]]);
         assert_eq!(r.take(), [Command::Modulation(50.0 / 127.0)]);
+    }
+
+    // Review fix: a bound press refused with no device must not undo the note-on accepted before it;
+    // that note's release still reaches the engine.
+    #[test]
+    fn a_refused_bound_press_leaves_an_earlier_note_held() {
+        let mut r = Rig::new();
+        r.learn(ActionId::RecDub, A, &[[0xb0, 20, 127], [0xb0, 20, 0]]);
+        r.wait(RELEASE * 2);
+        r.send(A, &[[0x90, 60, 100]]);
+        assert_eq!(r.take(), [on(60, 100)]);
+        r.clock.clear();
+        r.send(A, &[[0xb0, 20, 127], [0xb0, 20, 0]]);
+        assert_eq!(held(&r), [60]);
+        r.clock.publish(r.t, 0, 256, 48_000);
+        r.send(A, &[[0x80, 60, 0]]);
+        assert_eq!(r.take(), [Command::NoteOff(60)]);
     }
 
     // probe midi-learn "a learned note must not sound", "a learned note is never held", "neither the
