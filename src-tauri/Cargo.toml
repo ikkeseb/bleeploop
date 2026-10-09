@@ -76,6 +76,9 @@ windows = { version = "0.61", features = [
     "Win32_UI_Shell_Common",
     # The VST2 scan root an installer registered (host/scan.rs): HKLM\SOFTWARE\VST, VSTPluginsPath.
     "Win32_System_Registry",
+    # Native MIDI port liveness (engine_io/midi/liveness.rs): CM_Register_Notification for MIDI
+    # interface arrival and removal, with no window pump.
+    "Win32_Devices_DeviceAndDriverInstallation",
 ] }
 # Pin windows-core to 0.61 to unify the graph. cpal 0.18.1 accepts windows + windows-core in the
 # range ">=0.61,<=0.62"; left alone, cargo greedily picks windows-core 0.62 for cpal's *direct* dep
