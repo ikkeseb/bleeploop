@@ -60,19 +60,22 @@
 //!   is about to get, the list as it is), since its index may name another binding by now.
 //! - **A record learn does not run still owns its control on a port of its name** (a blocked one, or
 //!   one on its legacy ordinal id): that message is consumed and runs nothing, so a pedal waiting for
-//!   the player's assignment never plays the synth.
+//!   the player's assignment never plays the synth. A release the router still owes its owner passes (a
+//!   note-off of a held note, a pedal-up of a pedal down): the record may have arrived while it was held.
 //! - **The store is written on the port thread** (`Core::tick`), from a snapshot taken under the lock,
 //!   after it is released. A write refused or failed is a [`MidiEvent::Store`] and a release-log line,
 //!   never a panic. Without the app's data folder nothing is written, and the UI hears it as read-only.
 //! - **A port that goes away releases what it held:** its notes, its pedal, its wheels and its HOLD
 //!   presses; the UI hears [`MidiEvent::Gone`] (the toast).
 //! - **A WebView document is its subscription** ([`MidiHost::subscribe`], first thing in its boot): it
-//!   gets a fresh input epoch, and in the same locked step the older documents' holds are released, a
-//!   pending learn is cancelled (an unloaded page ran no cleanup of its own) and the event sink is
-//!   replaced, only when that epoch is the newest (a late subscribe of an older document changes
-//!   nothing). Every input event of the UI (a note, a blur, a slot pick, a panic) presents its epoch
-//!   and is refused under any other; its engine commands carry none. A blur releases the document's
-//!   holds; MIDI holds stay through both.
+//!   names its own age (`performance.timeOrigin`, so a late subscribe of an older page is told apart
+//!   from a newer page's), and in one locked step a page no older than every page before it gets a
+//!   fresh input epoch, the older pages' holds are released, a pending learn is cancelled (an unloaded
+//!   page ran no cleanup of its own) and the event sink is replaced. An older page's subscribe changes
+//!   nothing and gets an epoch that is never current. Every input event of the UI (a note, a blur, a
+//!   slot pick, a panic) and every learn call presents its epoch and is refused under any other (an
+//!   input event's refusal is answered, [`Dropped::Stale`]); its engine commands carry none. A blur
+//!   releases the page's holds; MIDI holds stay through both.
 
 mod actions;
 pub mod bindings;
@@ -274,6 +277,9 @@ pub enum Dropped {
     Rebuilding,
     /// No room: the queue's unreserved room was gone, or the engine's ring refused a setting.
     Full,
+    /// The batch's epoch is not the current page's: its input events were refused (a newer page
+    /// subscribed, or this one's subscribe was refused as older).
+    Stale,
 }
 
 impl Dropped {
@@ -445,6 +451,10 @@ struct State {
     logged: (Refusals, u64, Option<Instant>),
     /// The store's last problem, for a subscriber that comes later.
     problem: Option<StoreProblem>,
+    /// The age (`performance.timeOrigin`) of the newest page that subscribed, and the last input epoch
+    /// handed out (0: none yet).
+    origin: Option<f64>,
+    epochs: u64,
 }
 
 type Sink = Arc<dyn Fn(MidiEvent) + Send + Sync>;
@@ -474,8 +484,6 @@ pub(crate) struct Core {
     wake: Option<Sender<Wake>>,
     held: HeldNotes,
     events: Events,
-    /// The last input epoch handed out (`MidiHost::subscribe`); 0: none yet.
-    epochs: AtomicU64,
     failed_sends: AtomicU64,
     panics: AtomicU64,
 }
@@ -511,13 +519,14 @@ impl Core {
                 refused: Refusals::default(),
                 logged: (Refusals::default(), 0, None),
                 problem,
+                origin: None,
+                epochs: 0,
             }),
             engine,
             dir,
             wake,
             held,
             events: Events::default(),
-            epochs: AtomicU64::new(0),
             failed_sends: AtomicU64::new(0),
             panics: AtomicU64::new(0),
         };
@@ -538,24 +547,23 @@ impl Core {
         }
     }
 
-    /// A fresh input epoch, newer than every one before it.
-    fn next_epoch(&self) -> u64 {
-        self.epochs.fetch_add(1, Relaxed) + 1
-    }
-
-    /// The WebView document of input epoch `epoch` listens (`MidiHost::subscribe`). In one step under
-    /// the lock, and only when `epoch` is newer than the current document's (an older document's late
-    /// subscribe changes nothing): the older documents' holds are released and their later input
-    /// refused (`Router::ui_epoch`), a pending learn is cancelled, and `sink` replaces the listener. It
-    /// hears first what it needs to draw, queued with the sink in that step, so no thread handing
-    /// events over can come between them; the held set goes out after them, whatever its count. True
-    /// when `sink` is the listener now.
-    fn subscribe(&self, epoch: u64, sink: Sink) -> bool {
-        let newest = {
+    /// The WebView page of age `origin` (its `performance.timeOrigin`) listens (`MidiHost::subscribe`).
+    /// In one step under the lock: it gets a fresh input epoch, and when no page newer than it subscribed
+    /// before (a late subscribe of an older page changes nothing more), the older pages' holds are
+    /// released and their later input refused (`Router::ui_epoch`), a pending learn is cancelled, and
+    /// `sink` replaces the listener. It hears first what it needs to draw, queued with the sink in that
+    /// step, so no thread handing events over can come between them; the held set goes out after them,
+    /// whatever its count. The epoch, and whether `sink` is the listener now.
+    fn subscribe(&self, origin: f64, sink: Sink) -> (u64, bool) {
+        let answer = {
             let mut guard = self.lock();
             let st = &mut *guard;
-            let newest = epoch > st.router.epoch();
+            st.epochs += 1;
+            let epoch = st.epochs;
+            // The same page again (a remount) is no older than itself.
+            let newest = origin.is_finite() && st.origin.is_none_or(|o| origin >= o);
             if newest {
+                st.origin = Some(origin);
                 let mut out = Vec::new();
                 st.router.ui_epoch(epoch, &mut out);
                 let _ = self.admit(st, &mut out);
@@ -578,10 +586,10 @@ impl Core {
                 pending.extend(first.into_iter().map(|event| (generation, event)));
                 *lock(&self.events.held) = (generation, u64::MAX);
             }
-            newest
+            (epoch, newest)
         };
         self.flush();
-        newest
+        answer
     }
 
     /// What to hand over next, and the sink it was made for: the oldest queued event for the sink of
@@ -718,15 +726,24 @@ impl Core {
         result
     }
 
-    /// An input of the WebView document of `epoch`, run only while that is the current document (a
-    /// replaced one's late input is refused, every kind of it); what the queue dropped of its batch.
+    /// An input of the WebView page of `epoch`, run only while that is the current page (a replaced
+    /// one's late input is refused, every kind of it: [`Dropped::Stale`]); what the queue dropped of its
+    /// batch.
     fn ui(&self, epoch: u64, f: impl FnOnce(&mut State, &mut Vec<Out>)) -> Option<Dropped> {
-        let ((), admitted) = self.input_admitted(|_, st, out| {
-            if st.router.epoch() == epoch {
+        let (current, admitted) = self.input_admitted(|_, st, out| {
+            let current = st.router.epoch() == epoch;
+            if current {
                 f(st, out);
             }
+            current
         });
-        Dropped::of(admitted)
+        if current { Dropped::of(admitted) } else { Some(Dropped::Stale) }
+    }
+
+    /// A learn call of the page of `epoch` (`MidiHost::learn` and the edits), run only while that is the
+    /// current page, so an older page's call that arrives late changes nothing; `None` when refused.
+    fn current<R>(&self, epoch: u64, f: impl FnOnce(&Core, &mut State) -> R) -> Option<R> {
+        self.input(|core, st, _| (st.router.epoch() == epoch).then(|| f(core, st)))
     }
 
     /// A port callback: `bytes` arrived on connection `conn` at `at`.
@@ -746,9 +763,12 @@ impl Core {
         // A connection already released (its port went away) has no owner left.
         let Some(port) = st.ports.iter().find(|p| p.conn == Some(conn)) else { return };
         let outcome = st.learn.consume(&port.id, &port.identity.name, &message, at);
-        // Not learn's: a record waiting for the player may still own it on this port.
-        let unrun = !outcome.consumed && st.unrun.iter().any(|u| u.hears(&port.identity.name, &message));
         let owner = Owner::Midi { conn, channel: message.channel() };
+        // Not learn's: a record waiting for the player may still own it on this port, but for a release
+        // the router owes (its note or pedal was held before the record arrived).
+        let unrun = !outcome.consumed
+            && st.unrun.iter().any(|u| u.hears(&port.identity.name, &message))
+            && !st.router.owes_release(&owner, &message);
         if let Some(controller) = outcome.release_controller {
             st.router.release_controller(&owner, controller, out);
             let _ = self.admit(st, out);
@@ -1029,15 +1049,14 @@ impl MidiHost {
         MidiHost { core, wake: Some(wake), port_thread }
     }
 
-    /// A WebView document subscribes (`midi_subscribe`, first thing in its boot): its input epoch,
-    /// which every input of it presents. The older documents' holds are released, a pending learn is
+    /// A WebView page subscribes (`midi_subscribe`, first thing in its boot), naming its age `origin`
+    /// (`performance.timeOrigin`): its input epoch, which every input and learn call of it presents. When
+    /// no newer page subscribed before, the older pages' holds are released, a pending learn is
     /// cancelled, and `sink` gets the events from now on (on their own channel), its first ones what a
     /// new listener needs: the ports, the bindings, the learn's state, the store's last problem and the
-    /// held notes. An older document's subscribe that runs after a newer one's changes nothing.
-    pub fn subscribe(&self, sink: Box<dyn Fn(MidiEvent) + Send + Sync>) -> u64 {
-        let epoch = self.core.next_epoch();
-        self.core.subscribe(epoch, Arc::from(sink));
-        epoch
+    /// held notes. An older page's subscribe changes nothing, and its epoch is never current.
+    pub fn subscribe(&self, origin: f64, sink: Box<dyn Fn(MidiEvent) + Send + Sync>) -> u64 {
+        self.core.subscribe(origin, Arc::from(sink)).0
     }
 
     /// A pointer or key of document `epoch` (`owner`: `pointer:<id>` or `key:<code>`) pressed or let go
@@ -1110,33 +1129,34 @@ impl MidiHost {
         Dropped::of(admitted)
     }
 
-    /// Learn the next CC or note-on, from any port, onto `action` (on `target` for a lane action; a
-    /// global one takes none). Answered by [`MidiEvent::Learned`].
-    pub fn learn(&self, action: ActionId, target: Target) {
-        self.core.input(|_, st, _| st.learn.learn(action, target));
+    /// The page of `epoch` learns the next CC or note-on, from any port, onto `action` (on `target` for a
+    /// lane action; a global one takes none). Answered by [`MidiEvent::Learned`]. False, and nothing
+    /// done, when `epoch` is not the current page's; the same for every call below.
+    pub fn learn(&self, epoch: u64, action: ActionId, target: Target) -> bool {
+        self.core.current(epoch, |_, st| st.learn.learn(action, target)).is_some()
     }
 
     /// Stop listening (a learned pedal's wait for its release goes on). True when a learn was pending.
-    pub fn cancel_learn(&self) -> bool {
-        self.core.input(|_, st, _| st.learn.cancel_learn())
+    pub fn cancel_learn(&self, epoch: u64) -> bool {
+        self.core.current(epoch, |_, st| st.learn.cancel_learn()).unwrap_or(false)
     }
 
     /// Drop listed binding `index` of the list at `revision` (the `bindings` event's): its messages
     /// reach the play path again, and a HOLD it held is released. False, and nothing done, when the list
     /// changed since; the same for every edit below.
-    pub fn forget(&self, revision: u64, index: usize) -> Result<bool, String> {
-        self.listed_edit(revision, |st| st.store.forget(index))
+    pub fn forget(&self, epoch: u64, revision: u64, index: usize) -> Result<bool, String> {
+        self.listed_edit(epoch, revision, |st| st.store.forget(index))
     }
 
     /// Read listed binding `index`'s pedal as momentary or latching; a latching pedal has no HOLD. A
     /// HOLD it held is released, and its pedal's release spent.
-    pub fn set_momentary(&self, revision: u64, index: usize, momentary: bool) -> Result<bool, String> {
-        self.edit(revision, index, |b| Ok(Binding { momentary, hold: b.hold && momentary, ..b }))
+    pub fn set_momentary(&self, epoch: u64, revision: u64, index: usize, momentary: bool) -> Result<bool, String> {
+        self.edit(epoch, revision, index, |b| Ok(Binding { momentary, hold: b.hold && momentary, ..b }))
     }
 
     /// HOLD on or off for listed binding `index`: on for a momentary REC/DUB pedal only.
-    pub fn set_hold(&self, revision: u64, index: usize, hold: bool) -> Result<bool, String> {
-        self.edit(revision, index, |b| {
+    pub fn set_hold(&self, epoch: u64, revision: u64, index: usize, hold: bool) -> Result<bool, String> {
+        self.edit(epoch, revision, index, |b| {
             if hold && !(b.momentary && b.action == ActionId::RecDub) {
                 return Err("HOLD is for a momentary REC/DUB pedal".to_string());
             }
@@ -1144,8 +1164,8 @@ impl MidiHost {
         })
     }
 
-    fn edit(&self, revision: u64, index: usize, f: impl FnOnce(Binding) -> Result<Binding, String>) -> Result<bool, String> {
-        self.listed_edit(revision, |st| {
+    fn edit(&self, epoch: u64, revision: u64, index: usize, f: impl FnOnce(Binding) -> Result<Binding, String>) -> Result<bool, String> {
+        self.listed_edit(epoch, revision, |st| {
             let b = st.store.listed().into_iter().nth(index).ok_or_else(|| format!("no binding {index}"))?.binding;
             st.store.edit(index, f(b)?)
         })
@@ -1154,8 +1174,8 @@ impl MidiHost {
     /// The player assigns listed binding `index` to the present port `port_id` ([`PortInfo::id`]): a
     /// blocked or unresolved record runs there from now on. Refused when that port already binds its
     /// message.
-    pub fn assign(&self, revision: u64, index: usize, port_id: &str) -> Result<bool, String> {
-        self.listed_edit(revision, |st| {
+    pub fn assign(&self, epoch: u64, revision: u64, index: usize, port_id: &str) -> Result<bool, String> {
+        self.listed_edit(epoch, revision, |st| {
             let name = st.ports.iter().find(|p| p.id == port_id).map(|p| p.identity.name.clone()).ok_or_else(|| format!("no port {port_id}"))?;
             st.store.assign(index, port_id, &name)
         })
@@ -1164,20 +1184,22 @@ impl MidiHost {
     /// One of the player's edits by listed index, made against the list of store revision `revision`:
     /// refused (false) when the store changed since, as the index may name another binding by now. The
     /// UI has the list as it is, or is about to: each change of it went out with its revision.
-    fn listed_edit(&self, revision: u64, f: impl FnOnce(&mut State) -> Result<(), String>) -> Result<bool, String> {
-        self.core.input(|core, st, _| {
+    fn listed_edit(&self, epoch: u64, revision: u64, f: impl FnOnce(&mut State) -> Result<(), String>) -> Result<bool, String> {
+        let edited = self.core.current(epoch, |core, st| {
             if st.store.revision() != revision {
                 return Ok(false);
             }
             f(st)?;
             core.refresh(st);
             Ok(true)
-        })
+        });
+        edited.unwrap_or(Ok(false))
     }
 
-    /// Import the web's list (`lf.midiLearn` verbatim; `"[]"` when it has none), once.
-    pub fn import_legacy(&self, json: &str) -> ImportReport {
-        self.core.input(|core, st, _| {
+    /// Import the web's list (`lf.midiLearn` verbatim; `"[]"` when it has none), once; `None` from a page
+    /// that is not the current one.
+    pub fn import_legacy(&self, epoch: u64, json: &str) -> Option<ImportReport> {
+        self.core.current(epoch, |core, st| {
             let report = st.store.import_legacy(json);
             core.refresh(st);
             report
@@ -1236,6 +1258,7 @@ impl Drop for MidiHost {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
     use std::sync::atomic::AtomicBool;
 
     use lf_engine::{Action, Instrument, Toggle};
@@ -1362,8 +1385,10 @@ mod tests {
         engine: Arc<TestEngine>,
         events: Arc<Mutex<Vec<MidiEvent>>>,
         t: Instant,
-        /// The input epoch of the document the rig's listener stands for (its first subscribe's).
-        epoch: u64,
+        /// The input epoch of the page the rig's listener stands for (its last subscribe's), and the age
+        /// the next page subscribes with.
+        epoch: Cell<u64>,
+        origin: Cell<f64>,
     }
 
     impl Rig {
@@ -1378,16 +1403,31 @@ mod tests {
             engine.running.store(true, Relaxed);
             let core = hosted(engine.clone(), store, problem, dir, None);
             core.set_ports(ports);
-            let mut rig = Rig { host: MidiHost { core, wake: None, port_thread: None }, engine, events: Arc::default(), t: Instant::now(), epoch: 0 };
-            rig.epoch = rig.subscribe();
+            let rig = Rig {
+                host: MidiHost { core, wake: None, port_thread: None },
+                engine,
+                events: Arc::default(),
+                t: Instant::now(),
+                epoch: Cell::new(0),
+                origin: Cell::new(1_000.0),
+            };
+            rig.subscribe();
             rig.events();
             rig
         }
 
-        /// A new listener (a document's subscribe): it hears what it needs to draw first. Its epoch.
+        /// A new page, younger than every one before it, subscribes: its listener hears what it needs to
+        /// draw first. Its epoch, the rig's from now on.
         fn subscribe(&self) -> u64 {
+            self.origin.set(self.origin.get() + 1.0);
             let events = self.events.clone();
-            self.host.subscribe(Box::new(move |e| events.lock().unwrap().push(e)))
+            let epoch = self.host.subscribe(self.origin.get(), Box::new(move |e| events.lock().unwrap().push(e)));
+            self.epoch.set(epoch);
+            epoch
+        }
+
+        fn epoch(&self) -> u64 {
+            self.epoch.get()
         }
 
         /// The store revision the UI last heard with the list (what an edit names).
@@ -1397,7 +1437,7 @@ mod tests {
 
         /// A note of the rig's document.
         fn key(&self, owner: &str, note: u8, on: bool) -> Option<Dropped> {
-            self.host.ui_note(self.epoch, owner.into(), note, if on { 100 } else { 0 }, on)
+            self.host.ui_note(self.epoch(), owner.into(), note, if on { 100 } else { 0 }, on)
         }
 
         /// Messages arriving in one burst, at the rig's current time.
@@ -1427,7 +1467,7 @@ mod tests {
 
         /// Learn `messages` (one burst from `conn`) onto `action`.
         fn learn(&self, action: ActionId, target: Target, conn: u32, messages: &[[u8; 3]]) {
-            self.host.learn(action, target);
+            self.host.learn(self.epoch(), action, target);
             self.send(conn, messages);
         }
 
@@ -1474,7 +1514,7 @@ mod tests {
     #[test]
     fn a_learn_is_heard_and_its_release_wait_ends_by_the_timer() {
         let mut r = Rig::new();
-        r.host.learn(ActionId::PlayAll, Some(3));
+        r.host.learn(r.epoch(), ActionId::PlayAll, Some(3));
         assert_eq!(r.events(), [MidiEvent::Learning { learning: Some(LearnPick { action: ActionId::PlayAll, target: None }) }]);
         r.send(A, &[[0xb0, 20, 127]]);
         let b = Binding {
@@ -1550,11 +1590,11 @@ mod tests {
     #[test]
     fn a_target_switch_then_a_note_on_land_in_that_order() {
         let mut r = Rig::new();
-        r.host.select_target(r.epoch, Some(0), LEAD);
+        r.host.select_target(r.epoch(), Some(0), LEAD);
         r.send(A, &[[0x90, 60, 100]]);
         assert_eq!(r.take(), [Command::SelectInstrument(LEAD), on(60, 100)]);
         r.engine.full.store(true, Relaxed);
-        r.host.select_target(r.epoch, Some(1), PAD);
+        r.host.select_target(r.epoch(), Some(1), PAD);
         r.send(B, &[[0x90, 64, 100]]);
         assert_eq!(r.take(), []);
         let now = r.t;
@@ -1603,7 +1643,7 @@ mod tests {
     fn a_legacy_record_runs_on_the_one_port_with_its_name_and_the_move_is_saved() {
         let dir = Scratch::new("follow");
         let mut r = Rig::with(dir.load(), Some(dir.0.clone()), vec![port("Keys", Some(B)), port("Pedal", Some(A))]);
-        let report = r.host.import_legacy(&legacy_list(&[legacy("input-3", "Pedal", 20, "recDub")]));
+        let report = r.host.import_legacy(r.epoch(), &legacy_list(&[legacy("input-3", "Pedal", 20, "recDub")])).unwrap();
         assert_eq!(report.imported, [0]);
         let listed = &r.host.listed()[0];
         assert_eq!((listed.state, listed.listed.ordinal, listed.listed.origin), (BindingState::Live, false, Origin::Legacy));
@@ -1623,7 +1663,7 @@ mod tests {
     #[test]
     fn two_ports_with_its_name_leave_a_legacy_record_unrun() {
         let r = Rig::with((store::empty(), None), None, vec![port_at(r"\\?\usb#1", "Pedal", Some(A)), port_at(r"\\?\usb#2", "Pedal", Some(B))]);
-        r.host.import_legacy(&legacy_list(&[legacy("input-3", "Pedal", 20, "recDub")]));
+        r.host.import_legacy(r.epoch(), &legacy_list(&[legacy("input-3", "Pedal", 20, "recDub")]));
         assert_eq!(r.states(), [("Pedal".into(), true, BindingState::SeveralPorts)]);
         r.send(A, &[[0xb0, 20, 127]]);
         r.send(B, &[[0xb0, 20, 127]]);
@@ -1640,7 +1680,7 @@ mod tests {
     #[test]
     fn an_ordinal_pair_with_one_id_never_reaches_learn() {
         let r = Rig::with((store::empty(), None), None, vec![port("Keys", Some(B))]);
-        r.host.import_legacy(&legacy_list(&[legacy("input-1", "Pedal", 20, "playAll"), legacy("input-1", "Keys", 20, "stopAll")]));
+        r.host.import_legacy(r.epoch(), &legacy_list(&[legacy("input-1", "Pedal", 20, "playAll"), legacy("input-1", "Keys", 20, "stopAll")]));
         assert_eq!(r.states(), [("Pedal".into(), true, BindingState::NoPort), ("Keys".into(), false, BindingState::Live)]);
         assert_eq!(r.live().iter().map(|b| b.port_id.clone()).collect::<Vec<_>>(), [id("Keys")]);
         r.send(B, &[[0xb0, 20, 127]]);
@@ -1702,23 +1742,23 @@ mod tests {
         let r = Rig::with((holding(vec![hold_pedal("Probe a", 20)]), None), None, vec![port("Probe a", Some(A)), port("Probe b", Some(B))]);
         r.send(A, &[[0xb0, 20, 127]]);
         assert_eq!(r.take(), [Command::Action(Action::Hold(0))]);
-        assert_eq!(r.host.set_momentary(r.revision(), 0, false), Ok(true));
+        assert_eq!(r.host.set_momentary(r.epoch(), r.revision(), 0, false), Ok(true));
         assert_eq!(r.take(), [Command::Action(Action::Release(0))]);
         assert_eq!((r.host.listed()[0].listed.binding.momentary, r.host.listed()[0].listed.binding.hold), (false, false));
         r.send(A, &[[0xb0, 20, 0]]);
         assert_eq!(r.take(), [], "the pedal's own release is spent");
         r.send(A, &[[0xb0, 20, 0]]);
         assert_eq!(r.take(), [Command::Action(Action::RecDub)], "latching now");
-        assert!(r.host.set_hold(r.revision(), 0, true).is_err(), "a latching pedal has no HOLD");
-        assert_eq!(r.host.forget(r.revision(), 0), Ok(true));
+        assert!(r.host.set_hold(r.epoch(), r.revision(), 0, true).is_err(), "a latching pedal has no HOLD");
+        assert_eq!(r.host.forget(r.epoch(), r.revision(), 0), Ok(true));
         assert_eq!(r.host.listed(), []);
         r.send(A, &[[0xb0, 20, 127]]);
         assert_eq!(r.take(), [], "the message reaches the play path again, where CC20 does nothing");
 
-        r.host.import_legacy(&legacy_list(&[legacy("input-1", "Pedal", 20, "undo"), legacy("input-3", "Pedal", 20, "undo")]));
+        r.host.import_legacy(r.epoch(), &legacy_list(&[legacy("input-1", "Pedal", 20, "undo"), legacy("input-3", "Pedal", 20, "undo")]));
         assert!(r.states().iter().all(|s| s.2 == BindingState::Blocked));
-        assert!(r.host.assign(r.revision(), 0, "winmm:0:nowhere:Pedal").is_err(), "no such port");
-        assert_eq!(r.host.assign(r.revision(), 0, &id("Probe b")), Ok(true));
+        assert!(r.host.assign(r.epoch(), r.revision(), 0, "winmm:0:nowhere:Pedal").is_err(), "no such port");
+        assert_eq!(r.host.assign(r.epoch(), r.revision(), 0, &id("Probe b")), Ok(true));
         assert_eq!(r.states()[0], ("Probe b".into(), false, BindingState::Live));
         r.send(B, &[[0xb0, 20, 127]]);
         assert_eq!(r.take(), [Command::Action(Action::Undo)]);
@@ -1813,11 +1853,11 @@ mod tests {
     #[test]
     fn a_frontend_reload_releases_the_ui_holds_only_and_refuses_the_old_documents_input() {
         let r = Rig::new();
-        let old = r.epoch;
+        let old = r.epoch();
         r.key("pointer:1", 60, true);
         r.key("key:KeyA", 62, true);
         r.send(A, &[[0x90, 64, 100]]);
-        r.host.learn(ActionId::Undo, None);
+        r.host.learn(r.epoch(), ActionId::Undo, None);
         r.take();
         r.events();
         let new = r.subscribe();
@@ -1830,11 +1870,14 @@ mod tests {
         r.send(A, &[[0xb0, 30, 127]]);
         assert!(r.live().is_empty(), "nothing is learned unseen");
 
-        r.host.ui_note(old, "key:KeyB".into(), 65, 100, true);
-        r.host.select_target(old, Some(1), PAD);
-        r.host.all_notes_off(old);
-        r.host.ui_blur(old);
+        let late = [
+            r.host.ui_note(old, "key:KeyB".into(), 65, 100, true),
+            r.host.select_target(old, Some(1), PAD),
+            r.host.all_notes_off(old),
+            r.host.ui_blur(old),
+        ];
         assert_eq!(r.take(), [], "a late input of the old document, whatever its kind");
+        assert_eq!(late, [Some(Dropped::Stale); 4], "and each is answered as stale");
         assert_eq!(r.held(), [64]);
         r.host.ui_note(new, "key:KeyA".into(), 67, 100, true);
         r.host.ui_blur(new);
@@ -1844,26 +1887,86 @@ mod tests {
         assert_eq!(r.take(), [Command::NoteOff(64), Command::SelectInstrument(PAD)], "the new document's slot pick runs");
     }
 
-    // A subscribe of an older document that runs after a newer one's (its call was late) changes nothing:
-    // the newer page keeps the events, its holds and its learn.
+    // A subscribe of an older page that reaches native code after a newer page's (its call was late)
+    // changes nothing: the newer page keeps the events, its holds and its learn, and the older page's
+    // epoch is never current. Its age is the page's own (`performance.timeOrigin`), not the call's
+    // arrival.
     #[test]
-    fn an_older_documents_late_subscribe_changes_nothing() {
+    fn an_older_pages_late_subscribe_changes_nothing() {
         let r = Rig::new();
-        let older = r.host.core.next_epoch();
+        let older_page = r.origin.get() + 1.0;
+        r.origin.set(older_page + 1.0);
         let newer = r.subscribe();
         r.host.ui_note(newer, "pointer:1".into(), 60, 100, true);
-        r.host.learn(ActionId::Undo, None);
+        r.host.learn(newer, ActionId::Undo, None);
         r.take();
         r.events();
         let late: Arc<Mutex<Vec<MidiEvent>>> = Arc::default();
         let sink = late.clone();
-        assert!(!r.host.core.subscribe(older, Arc::new(move |e| sink.lock().unwrap().push(e))));
+        let older = r.host.subscribe(older_page, Box::new(move |e| sink.lock().unwrap().push(e)));
+        assert!(older > newer, "its call came later");
         assert_eq!(r.take(), [], "the newer page's note holds");
-        r.host.ui_note(older, "pointer:1".into(), 61, 100, true);
-        assert_eq!(r.take(), [], "the older document's input stays refused");
-        r.host.cancel_learn();
+        assert_eq!(r.host.ui_note(older, "pointer:1".into(), 61, 100, true), Some(Dropped::Stale), "the older page's input is refused");
+        assert!(!r.host.learn(older, ActionId::PlayAll, None), "and its learn");
+        assert_eq!(r.take(), []);
+        assert!(r.host.cancel_learn(newer));
         assert_eq!(*late.lock().unwrap(), [], "the late subscriber hears nothing");
         assert_eq!(r.events(), [MidiEvent::Learning { learning: None }], "the newer page still does, and its learn ran until it cancelled it");
+        // The same page subscribing again (a remount) is no older than itself.
+        let again = r.host.subscribe(r.origin.get(), Box::new(|_| {}));
+        assert_eq!(r.host.ui_note(again, "pointer:2".into(), 62, 100, true), None);
+        assert_eq!(r.take(), [Command::NoteOff(60), on(62, 100)], "its remount releases the subscription before it, and plays");
+    }
+
+    // A learn call of a replaced page (its learn or cancel or edit arrived after the new page's subscribe)
+    // changes nothing: a learn the new page's subscribe cancelled stays cancelled.
+    #[test]
+    fn a_replaced_pages_learn_calls_change_nothing() {
+        let r = Rig::with((holding(vec![hold_pedal("Probe a", 20)]), None), None, vec![port("Probe a", Some(A))]);
+        let old = r.epoch();
+        let revision = r.revision();
+        let new = r.subscribe();
+        r.events();
+        assert!(!r.host.learn(old, ActionId::Undo, None), "an old page's late learn");
+        assert_eq!(r.host.forget(old, revision, 0), Ok(false));
+        assert_eq!(r.host.set_momentary(old, revision, 0, false), Ok(false));
+        assert_eq!(r.host.set_hold(old, revision, 0, false), Ok(false));
+        assert_eq!(r.host.assign(old, revision, 0, &id("Probe a")), Ok(false));
+        assert_eq!(r.host.import_legacy(old, &legacy_list(&[legacy("input-1", "Pedal", 30, "undo")])), None);
+        assert_eq!(r.events(), [], "nothing listens, nothing changed");
+        assert_eq!(r.host.listed().len(), 1);
+        r.send(A, &[[0xb0, 31, 127]]);
+        assert!(r.live().iter().all(|b| b.number == 20), "nothing is learned unseen");
+        assert!(r.host.learn(new, ActionId::Undo, None));
+        assert!(!r.host.cancel_learn(old), "an old page's cancel ends no learn of the new page");
+        assert_eq!(r.events(), [MidiEvent::Learning { learning: Some(LearnPick { action: ActionId::Undo, target: None }) }]);
+        assert!(r.host.import_legacy(new, "[]").is_some());
+    }
+
+    // A record learn does not run, arriving while its control is held (the import landed after the port
+    // played): the release the router owes passes, a note-off and a pedal-up alike; the next press is
+    // consumed.
+    #[test]
+    fn an_unrun_record_arriving_mid_hold_lets_its_release_pass() {
+        let r = Rig::with((store::empty(), None), None, vec![port("Pedal", Some(A))]);
+        // Channel 2's key holds 36; channel 1's pedal sustains 40.
+        r.send(A, &[[0x91, 36, 100], [0xb0, 64, 127], [0x90, 40, 100], [0x80, 40, 0]]);
+        assert_eq!(r.take(), [on(36, 100), on(40, 100)], "36 held, 40 under the pedal");
+        let note = |port: &str| {
+            let mut record = legacy(port, "Pedal", 36, "playAll");
+            record["kind"] = "note".into();
+            record["channel"] = 1.into();
+            record
+        };
+        let records = [note("input-1"), note("input-3"), legacy("input-1", "Pedal", 64, "undo"), legacy("input-3", "Pedal", 64, "undo")];
+        r.host.import_legacy(r.epoch(), &legacy_list(&records));
+        assert!(r.host.listed().iter().all(|l| l.state == BindingState::Blocked));
+        r.send(A, &[[0x81, 36, 0]]);
+        assert_eq!(r.take(), [Command::NoteOff(36)], "the held note's release passes");
+        r.send(A, &[[0xb0, 64, 0]]);
+        assert_eq!(r.take(), [Command::NoteOff(40)], "the pedal's release lets go of what it sustained");
+        r.send(A, &[[0x91, 36, 100], [0x81, 36, 0], [0xb0, 64, 127], [0x90, 41, 100], [0x80, 41, 0], [0xb0, 64, 0]]);
+        assert_eq!(r.take(), [on(41, 100), Command::NoteOff(41)], "the next press is consumed: no note, no sustain");
     }
 
     // The UI hears why its input did nothing: a fresh note or press while no device runs or the engine
@@ -1892,19 +1995,19 @@ mod tests {
     fn an_edit_made_against_an_older_list_is_refused() {
         let r = Rig::with((holding(vec![hold_pedal("Probe a", 20), hold_pedal("Probe a", 21), hold_pedal("Probe a", 22)]), None), None, vec![port("Probe a", Some(A))]);
         let seen = r.revision();
-        assert_eq!(r.host.forget(seen, 0), Ok(true));
+        assert_eq!(r.host.forget(r.epoch(), seen, 0), Ok(true));
         let revision = r.revision();
         assert!(revision > seen);
         let heard: Vec<u64> = r.events().into_iter().filter_map(|e| if let MidiEvent::Bindings { revision, .. } = e { Some(revision) } else { None }).collect();
         assert_eq!(heard, [revision], "the new list went out with its revision");
         let numbers = |r: &Rig| r.host.listed().iter().map(|l| (l.listed.binding.number, l.listed.binding.momentary)).collect::<Vec<_>>();
-        assert_eq!(r.host.set_momentary(seen, 1, false), Ok(false), "made against the list before the forget");
-        assert_eq!(r.host.forget(seen, 1), Ok(false));
-        assert_eq!(r.host.assign(seen, 0, &id("Probe a")), Ok(false));
-        assert_eq!(r.host.set_hold(seen, 0, false), Ok(false));
+        assert_eq!(r.host.set_momentary(r.epoch(), seen, 1, false), Ok(false), "made against the list before the forget");
+        assert_eq!(r.host.forget(r.epoch(), seen, 1), Ok(false));
+        assert_eq!(r.host.assign(r.epoch(), seen, 0, &id("Probe a")), Ok(false));
+        assert_eq!(r.host.set_hold(r.epoch(), seen, 0, false), Ok(false));
         assert_eq!(numbers(&r), [(21, true), (22, true)], "nothing changed");
         assert_eq!(r.revision(), revision);
-        assert_eq!(r.host.set_momentary(revision, 1, false), Ok(true), "made against the list as it is");
+        assert_eq!(r.host.set_momentary(r.epoch(), revision, 1, false), Ok(true), "made against the list as it is");
         assert_eq!(numbers(&r), [(21, true), (22, false)]);
     }
 
@@ -1935,7 +2038,7 @@ mod tests {
         let records = [both(20), legacy("input-3", "Pedal", 20, "undo"), note("input-1", 36, "playAll"), note("input-3", 36, "playAll"), note("input-1", 40, "stopAll")];
         let ports = vec![port_at(r"\\?\usb#1", "Pedal", Some(A)), port_at(r"\\?\usb#2", "Pedal", Some(B)), port_at(r"\\?\usb#3", "Keys", Some(3))];
         let r = Rig::with((store::empty(), None), None, ports);
-        r.host.import_legacy(&legacy_list(&records));
+        r.host.import_legacy(r.epoch(), &legacy_list(&records));
         let states: Vec<BindingState> = r.host.listed().iter().map(|l| l.state).collect();
         assert_eq!(states, [BindingState::Blocked, BindingState::Blocked, BindingState::Blocked, BindingState::Blocked, BindingState::SeveralPorts]);
         r.send(A, &[[0xb0, 20, 127], [0x90, 36, 100], [0x80, 36, 0], [0x90, 40, 100]]);
@@ -1946,7 +2049,7 @@ mod tests {
         r.send(3, &[[0x90, 36, 100]]);
         assert_eq!(r.take(), [on(41, 100), on(36, 100), Command::NoteOff(36), on(36, 100)], "another note, another channel, another port's name: played");
         // Assigned, a record runs on its port; the other still owns its control on the rest.
-        assert_eq!(r.host.assign(r.revision(), 2, &port_at(r"\\?\usb#1", "Pedal", None).id), Ok(true));
+        assert_eq!(r.host.assign(r.epoch(), r.revision(), 2, &port_at(r"\\?\usb#1", "Pedal", None).id), Ok(true));
         r.send(A, &[[0x90, 36, 100]]);
         assert_eq!(r.take(), [Command::Action(Action::PlayAll)]);
         r.send(B, &[[0x90, 36, 100]]);
@@ -1975,8 +2078,8 @@ mod tests {
         let (a, b) = (port_at(r"\\?\usb#1", "Pedal", Some(A)), port_at(r"\\?\usb#2", "Pedal", Some(B)));
         let a_id = a.id.clone();
         let r = Rig::with((store::empty(), None), None, vec![a, b]);
-        r.host.import_legacy(&legacy_list(&[legacy("input-1", "Pedal", 20, "playAll"), legacy("input-1", "Pedal", 21, "stopAll")]));
-        assert_eq!(r.host.assign(r.revision(), 0, &a_id), Ok(true));
+        r.host.import_legacy(r.epoch(), &legacy_list(&[legacy("input-1", "Pedal", 20, "playAll"), legacy("input-1", "Pedal", 21, "stopAll")]));
+        assert_eq!(r.host.assign(r.epoch(), r.revision(), 0, &a_id), Ok(true));
         assert_eq!(r.states(), [("Pedal".into(), false, BindingState::Live), ("Pedal".into(), true, BindingState::SeveralPorts)]);
         r.send(B, &[[0xb0, 21, 127]]);
         assert_eq!(r.take(), [], "port b does not run it");
@@ -1992,11 +2095,11 @@ mod tests {
         {
             let (old, new, core) = (old.clone(), new.clone(), Arc::downgrade(&r.host.core));
             let replaced = AtomicBool::new(false);
-            r.host.subscribe(Box::new(move |e| {
+            r.host.subscribe(5_000.0, Box::new(move |e| {
                 old.lock().unwrap().push(e);
                 if !replaced.swap(true, Relaxed) {
                     let (new, core) = (new.clone(), core.upgrade().unwrap());
-                    assert!(core.subscribe(core.next_epoch(), Arc::new(move |e| new.lock().unwrap().push(e))));
+                    assert!(core.subscribe(f64::MAX, Arc::new(move |e| new.lock().unwrap().push(e))).1);
                 }
             }));
         }
@@ -2009,7 +2112,8 @@ mod tests {
             ),
             "{first:?}"
         );
-        r.host.learn(ActionId::Undo, None);
+        let current = r.host.core.lock().router.epoch();
+        r.host.learn(current, ActionId::Undo, None);
         assert_eq!(old.lock().unwrap().len(), 1);
         assert!(matches!(new.lock().unwrap()[..], [MidiEvent::Learning { .. }]));
     }
@@ -2060,7 +2164,7 @@ mod tests {
         let calls: Arc<Mutex<Vec<bool>>> = Arc::default();
         {
             let (calls, io) = (calls.clone(), io.clone());
-            midi.subscribe(Box::new(move |_| calls.lock().unwrap().push(io.ports[0].try_lock().is_ok())));
+            midi.subscribe(1.0, Box::new(move |_| calls.lock().unwrap().push(io.ports[0].try_lock().is_ok())));
         }
         calls.lock().unwrap().clear();
         // An event a flush on another thread has not handed over yet.
@@ -2089,7 +2193,7 @@ mod tests {
         let send = |conn: u32, m: [u8; 3]| midi.core.message(conn, t, &m);
         let take = || std::mem::take(&mut *engine.sent.lock().unwrap());
 
-        let epoch = midi.subscribe(Box::new(|_| {}));
+        let epoch = midi.subscribe(1.0, Box::new(|_| {}));
         midi.select_target(epoch, Some(0), LEAD);
         send(A, [0x90, 60, 100]);
         send(A, [0xb0, 20, 127]);

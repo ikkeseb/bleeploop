@@ -1,7 +1,10 @@
 import { createSignal } from 'solid-js';
 import {
+  NATIVE_WAIT_MS,
+  pageEpoch,
   platform,
   subscribeMidi,
+  within,
   type ImportReport,
   type LearnPick,
   type LearnRefusal,
@@ -142,14 +145,17 @@ function onEvent(ev: MidiEvent): void {
 }
 
 /**
- * Every native MIDI command, one at a time in call order: each waits for the one before it to settle, the
- * first for the subscribe. A cancel sent after a learn then reaches native MIDI after it (a learn that
- * arrived late would listen unseen), and an edit after the one before it.
+ * Every native MIDI command, one at a time in call order: each waits for the one before it to settle (or to
+ * go unanswered for `NATIVE_WAIT_MS`: it then fails, and the next goes), the first for the subscribe. A
+ * cancel sent after a learn then reaches native MIDI after it (a learn that arrived late would listen
+ * unseen), and an edit after the one before it. Each presents the page's input epoch: native MIDI refuses
+ * one of a page it no longer counts as current (it answers false), so a replaced page's late call never
+ * acts.
  */
 let chain: Promise<unknown> = Promise.resolve();
 
-function queued<T>(call: () => Promise<T>): Promise<T> {
-  const next = chain.then(call);
+function queued<T>(what: string, call: (epoch: number) => Promise<T>): Promise<T> {
+  const next = chain.then(async () => within(call(await pageEpoch()), NATIVE_WAIT_MS, `MIDI ${what}`));
   chain = next.catch(() => {});
   return next;
 }
@@ -157,7 +163,7 @@ function queued<T>(call: () => Promise<T>): Promise<T> {
 /** Listen to native MIDI, first thing in the boot; its first events bring the state. Returns the stop. */
 export function startMidi(): () => void {
   const subscription = subscribeMidi(onEvent);
-  chain = subscription.epoch.catch(() => {});
+  chain = pageEpoch();
   if (import.meta.env.DEV) void subscription.epoch.then((epoch) => (devMidi.epoch = epoch), () => {});
   return () => subscription.stop();
 }
@@ -171,10 +177,15 @@ function failed(what: string, err: unknown): void {
  * selected track; a global action takes none). */
 export function learn(action: MidiActionId, target: number | null): void {
   setLearning({ action, target });
-  queued(() => platform.midi.learn(action, target)).catch((err: unknown) => {
-    setLearning(null);
-    failed('learn', err);
-  });
+  queued('learn', (epoch) => platform.midi.learn(epoch, action, target)).then(
+    (listening) => {
+      if (!listening) setLearning(null);
+    },
+    (err: unknown) => {
+      setLearning(null);
+      failed('learn', err);
+    },
+  );
 }
 
 /** Stop listening. True when a learn was pending (Esc spends itself on it); the UI stops listening at once,
@@ -182,38 +193,39 @@ export function learn(action: MidiActionId, target: number | null): void {
 export function cancelLearn(): boolean {
   if (learning() === null) return false;
   setLearning(null);
-  queued(() => platform.midi.cancelLearn()).catch((err: unknown) => failed('cancel learn', err));
+  queued('cancel learn', (epoch) => platform.midi.cancelLearn(epoch)).catch((err: unknown) => failed('cancel learn', err));
   return true;
 }
 
 /** An edit by index of the list shown now. Refused because the list changed since, it does nothing: the
  * fresh list is shown, or about to be. */
-function edit(what: string, call: (revision: number) => Promise<boolean>): void {
+function edit(what: string, call: (epoch: number, revision: number) => Promise<boolean>): void {
   const seen = revision;
-  queued(() => call(seen)).catch((err: unknown) => failed(what, err));
+  queued(what, (epoch) => call(epoch, seen)).catch((err: unknown) => failed(what, err));
 }
 
 /** Drop listed binding `index`: its messages reach the play path again. */
 export function forget(index: number): void {
-  edit('forget', (seen) => platform.midi.forget(seen, index));
+  edit('forget', (epoch, seen) => platform.midi.forget(epoch, seen, index));
 }
 
 /** Read listed binding `index`'s pedal as momentary or latching (the list's switch). */
 export function setMomentary(index: number, momentary: boolean): void {
-  edit('pedal switch', (seen) => platform.midi.setMomentary(seen, index, momentary));
+  edit('pedal switch', (epoch, seen) => platform.midi.setMomentary(epoch, seen, index, momentary));
 }
 
 /** HOLD on or off for listed binding `index`. */
 export function setHold(index: number, hold: boolean): void {
-  edit('HOLD switch', (seen) => platform.midi.setHold(seen, index, hold));
+  edit('HOLD switch', (epoch, seen) => platform.midi.setHold(epoch, seen, index, hold));
 }
 
 /** Run listed binding `index` on the present port `portId` from now on. */
 export function assign(index: number, portId: string): void {
-  edit('assign', (seen) => platform.midi.assign(seen, index, portId));
+  edit('assign', (epoch, seen) => platform.midi.assign(epoch, seen, index, portId));
 }
 
-/** Hand native MIDI the web build's bindings (`lf.midiLearn` verbatim) to import once, in turn. */
-export function importLegacyBindings(json: string): Promise<ImportReport> {
-  return queued(() => platform.midi.importLegacy(json));
+/** Hand native MIDI the web build's bindings (`lf.midiLearn` verbatim) to import once, in turn; null when
+ * native MIDI no longer counts this page as current. */
+export function importLegacyBindings(json: string): Promise<ImportReport | null> {
+  return queued('import', (epoch) => platform.midi.importLegacy(epoch, json));
 }

@@ -28,9 +28,10 @@ const LEGACY_KEY = 'lf.midiLearn';
 
 const plural = (n: number, one: string, many: string): string => `${n} ${n === 1 ? one : many}`;
 
-/** The import's answer, told once: it runs once, and answers `already` after. */
-function tellImport(report: ImportReport): void {
-  if (report.already) return;
+/** The import's answer, told once: it runs once, and answers `already` after (null: this page is no
+ * longer the current one, nothing ran). */
+function tellImport(report: ImportReport | null): void {
+  if (report === null || report.already) return;
   if (report.unreadable !== null) console.error(`[midi] the stored web bindings were unreadable: ${report.unreadable}`);
   for (const r of report.rejected) console.error(`[midi] stored web binding ${r.index} not imported: ${r.reason}`);
   if (report.blocked.length > 0) {
@@ -44,16 +45,22 @@ function tellImport(report: ImportReport): void {
   }
 }
 
+/** The previous version's bindings did not reach native MIDI this launch (the next one tries again). */
+function importFailed(log: string, err: unknown): void {
+  console.error(log, err);
+  notifyError('Could not read the MIDI bindings from the previous version', err);
+}
+
 function importLegacy(): void {
   let json: string;
   try {
     json = localStorage.getItem(LEGACY_KEY) ?? '[]';
   } catch (err) {
     // Not an empty list: importing one would mark the import done for good. The next launch tries again.
-    console.error('[midi] the stored web bindings could not be read; none handed over this launch', err);
+    importFailed('[midi] the stored web bindings could not be read; none handed over this launch', err);
     return;
   }
-  importLegacyBindings(json).then(tellImport, (err: unknown) => console.error('[midi] importing the stored web bindings failed', err));
+  importLegacyBindings(json).then(tellImport, (err: unknown) => importFailed('[midi] importing the stored web bindings failed', err));
 }
 
 /** Listen to native MIDI, run what its bindings fire, and hand it the web's bindings once. Returns the

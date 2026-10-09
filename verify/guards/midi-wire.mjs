@@ -5,7 +5,7 @@
 // every `MidiEvent` (every port state, binding state and origin, store problem, UI action and learn
 // refusal; the list with its store revision), every `InputEvent` the UI sends, the outbox's `input_send`
 // items (an engine command or an input event) and that command's answers (nothing dropped, or why), the
-// input epochs `midi_subscribe` answers, and import reports, written from the Rust serde shapes. This
+// input epochs `midi_subscribe` answers and the page ages it takes, and import reports, written from the Rust serde shapes. This
 // guard runs the REAL TS decoders over it: every event parses, every field the Rust side writes is one the
 // TS side reads (a field TS would ignore fails here), every variant is covered, each action id reads
 // (`src/app/midi-actions.ts`'s typecheck holds them equal to `src/app/actions.ts`'s), the UI's input
@@ -136,9 +136,13 @@ check('the fixture has both kinds of item', () => assert.deepEqual(sorted(fixtur
 check('every input_send answer reads, nothing dropped first', () => {
   assert.deepEqual(fixture.inputAnswers.map(decodeDropped), fixture.inputAnswers);
   assert.equal(fixture.inputAnswers[0], null);
-  assert.deepEqual(sorted(fixture.inputAnswers.slice(1)), ['full', 'noDevice', 'rebuilding']);
+  assert.deepEqual(sorted(fixture.inputAnswers.slice(1)), ['full', 'noDevice', 'rebuilding', 'stale']);
 });
 check('every epoch the subscribe answers reads', () => assert.deepEqual(fixture.epochs.map(decodeEpoch), fixture.epochs));
+check("the subscribe's origin is a page's performance.timeOrigin: a finite number, its fraction kept", () => {
+  assert.ok(fixture.origins.length > 0 && fixture.origins.every((o) => Number.isFinite(o) && !Number.isInteger(o)));
+  assert.ok(Number.isFinite(performance.timeOrigin), 'what the page sends');
+});
 
 // ── Import reports ──────────────────────────────────────────────────────────────────────────────────
 for (const r of fixture.importReports) {

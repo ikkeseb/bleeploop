@@ -404,6 +404,16 @@ impl Router {
         self.ui_epoch
     }
 
+    /// `message` from `owner` ends something the router holds for it: the note-off of a note it holds, or
+    /// the pedal-up of its pedal while it is down.
+    pub(crate) fn owes_release(&self, owner: &Owner, message: &Message) -> bool {
+        match *message {
+            Message::NoteOff { note, .. } => self.held.iter().any(|(n, o)| *n == note && o.contains(owner)),
+            Message::Cc { controller: 64, value, .. } => value < 64 && self.pedals.contains(owner),
+            _ => false,
+        }
+    }
+
     /// A new WebView document (its subscribe's input epoch): the older documents' owners let go, as
     /// unplugged, and their later events are refused. An epoch not newer than the current does nothing.
     pub fn ui_epoch(&mut self, epoch: u64, out: &mut Vec<Out>) {

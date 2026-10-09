@@ -219,11 +219,11 @@ export interface EngineFake extends EngineHost {
   /** Probe seam: while set, every batch `InputHost.send` takes answers it, as native MIDI does when it
    * dropped some of the batch (a press with no device running); the batch is recorded and applied. */
   dropped: Dropped | null;
-  /** Every native MIDI call (`MidiHost`), in order: its method's name and arguments, e.g.
-   * `['learn', 'recDub', null]` or `['forget', revision, index]`. */
+  /** Every native MIDI call (`MidiHost`), in order: its method's name and arguments, the page's epoch
+   * first, e.g. `['learn', 1, 'recDub', null]` or `['forget', 1, revision, index]`; `['subscribe']`. */
   readonly midiCalls: [string, ...unknown[]][];
   /** Probe seam: while set, every native MIDI call but `subscribe` is recorded at once and answers once
-   * this settles, as a call still on its way. */
+   * this settles, as a call still on its way (one that never settles: the UI gives up on it in time). */
   midiHold: Promise<void> | null;
   /** Probe seam: what an edit by index (`forget`, `setMomentary`, `setHold`, `assign`) answers: false
    * stands for native MIDI refusing an edit made against an older list. */
@@ -613,10 +613,10 @@ function emitMidi(raw: unknown): void {
 /**
  * Pre-boot probe seams, read when the boot reaches them (an init script sets them before the app loads):
  * `__lfMidiSubscribeHold`, a promise the subscribe's epoch waits for (input queued meanwhile waits with it),
- * and `__lfMidiImportAnswer`, what the boot's `importLegacy` answers.
+ * and `__lfMidiImportAnswer`, what the boot's `importLegacy` answers (`'fail'`: it rejects).
  */
 const preBoot = () =>
-  globalThis as { __lfMidiSubscribeHold?: Promise<void>; __lfMidiImportAnswer?: ImportReport };
+  globalThis as { __lfMidiSubscribeHold?: Promise<void>; __lfMidiImportAnswer?: ImportReport | 'fail' };
 
 /** Record a native MIDI call at once; its answer waits for `midiHold` while a probe holds it. */
 async function midiCall<T>(call: [string, ...unknown[]], answer: () => T): Promise<T> {
@@ -639,37 +639,39 @@ const webMidi: MidiHost = {
       },
     };
   },
-  learn(action, target) {
-    return midiCall(['learn', action, target], () => {
+  learn(epoch, action, target) {
+    return midiCall(['learn', epoch, action, target], () => {
       fakeLearning = { action, target };
       emitMidi({ learning: { learning: fakeLearning } });
+      return true;
     });
   },
-  cancelLearn() {
-    return midiCall(['cancelLearn'], () => {
+  cancelLearn(epoch) {
+    return midiCall(['cancelLearn', epoch], () => {
       const was = fakeLearning !== null;
       fakeLearning = null;
       emitMidi({ learning: { learning: null } });
       return was;
     });
   },
-  forget(revision, index) {
-    return midiCall(['forget', revision, index], () => webEngineFake.editAnswer);
+  forget(epoch, revision, index) {
+    return midiCall(['forget', epoch, revision, index], () => webEngineFake.editAnswer);
   },
-  setMomentary(revision, index, momentary) {
-    return midiCall(['setMomentary', revision, index, momentary], () => webEngineFake.editAnswer);
+  setMomentary(epoch, revision, index, momentary) {
+    return midiCall(['setMomentary', epoch, revision, index, momentary], () => webEngineFake.editAnswer);
   },
-  setHold(revision, index, hold) {
-    return midiCall(['setHold', revision, index, hold], () => webEngineFake.editAnswer);
+  setHold(epoch, revision, index, hold) {
+    return midiCall(['setHold', epoch, revision, index, hold], () => webEngineFake.editAnswer);
   },
-  assign(revision, index, portId) {
-    return midiCall(['assign', revision, index, portId], () => webEngineFake.editAnswer);
+  assign(epoch, revision, index, portId) {
+    return midiCall(['assign', epoch, revision, index, portId], () => webEngineFake.editAnswer);
   },
-  importLegacy(json) {
-    return midiCall(
-      ['importLegacy', json],
-      () => preBoot().__lfMidiImportAnswer ?? { already: false, unreadable: null, imported: [], blocked: [], rejected: [], skipped: [] },
-    );
+  importLegacy(epoch, json) {
+    return midiCall(['importLegacy', epoch, json], () => {
+      const scripted = preBoot().__lfMidiImportAnswer;
+      if (scripted === 'fail') throw new Error('The fake refused the import (__lfMidiImportAnswer)');
+      return scripted ?? { already: false, unreadable: null, imported: [], blocked: [], rejected: [], skipped: [] };
+    });
   },
 };
 

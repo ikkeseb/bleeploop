@@ -220,6 +220,10 @@ await probe(async ({ open }) => {
       release();
     }
     const kept = { volume: meta.tracks[0].volume, level: meta.master.level };
+    // The lane shows what the engine applied: wait for its report of the moved fader.
+    for (const until = performance.now() + 2000; session.trackVolume(0) === volume && performance.now() < until; ) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
     const moved = { volume: session.trackVolume(0), level: session.masterLevel() };
     return { name: 'A fader moved while the master renders stays out of session.json', before: { volume, level }, kept, moved,
       pass: kept.volume === volume && kept.level === level && moved.volume !== volume && moved.level !== level };

@@ -264,32 +264,35 @@ export interface AsioDeviceInfo {
  * Native MIDI (`src-tauri/src/engine_io/midi/mod.rs`, `MidiHost`): the input ports, MIDI learn, the stored
  * bindings and the note router for every source. The UI keeps the learn row, the device list and the toasts,
  * driven by the events (`midi-wire.ts`) on their own channel, never the feed. Each call rejects with the
- * native error (an index no binding has, a refused edit, no engine this launch).
+ * native error (an index no binding has, a refused edit, no engine this launch). Every call but the
+ * subscribe presents the page's input epoch: one of a page that is not the current one changes nothing and
+ * answers false (null for the import), so a replaced page's late call never acts.
  */
 export interface MidiHost {
   /** Subscribe to native MIDI's events, first thing in the document's boot; the first events are the
-   * resync. `epoch` resolves with this document's input epoch, which every `InputHost.send` presents:
-   * natively the subscribe released the older documents' holds, cancelled a pending learn and replaced the
-   * last subscriber (one at a time). It rejects when native MIDI does not run. */
+   * resync. The page names its age (`performance.timeOrigin`, the Tauri side reads it), so natively a
+   * newer page's subscribe always wins over an older page's late one. `epoch` resolves with this page's
+   * input epoch: natively the subscribe released the older pages' holds, cancelled a pending learn and
+   * replaced the last subscriber (one at a time). It rejects when native MIDI does not run. */
   subscribe(onEvent: (event: MidiEvent) => void): MidiSubscription;
   /** Learn the next CC or note-on, from any port, onto `action` (a lane action on track `target`, null the
    * selected track). Answered by `learning` and, once it captures, `learned`. */
-  learn(action: MidiActionId, target: number | null): Promise<void>;
+  learn(epoch: number, action: MidiActionId, target: number | null): Promise<boolean>;
   /** Stop listening (a learned pedal's wait for its release goes on). True when a learn was pending. */
-  cancelLearn(): Promise<boolean>;
+  cancelLearn(epoch: number): Promise<boolean>;
   /** Drop listed binding `index` of the list that came with store revision `revision` (a `bindings`
    * event's). False, and nothing done, when the list changed since: the fresh list is on its way (the same
    * for every edit below). */
-  forget(revision: number, index: number): Promise<boolean>;
+  forget(epoch: number, revision: number, index: number): Promise<boolean>;
   /** Read listed binding `index`'s pedal as momentary (true) or latching. */
-  setMomentary(revision: number, index: number, momentary: boolean): Promise<boolean>;
+  setMomentary(epoch: number, revision: number, index: number, momentary: boolean): Promise<boolean>;
   /** HOLD on or off for listed binding `index` (a momentary REC/DUB pedal only). */
-  setHold(revision: number, index: number, hold: boolean): Promise<boolean>;
+  setHold(epoch: number, revision: number, index: number, hold: boolean): Promise<boolean>;
   /** Assign listed binding `index` to the present port `portId` (`MidiPort.id`). */
-  assign(revision: number, index: number, portId: string): Promise<boolean>;
+  assign(epoch: number, revision: number, index: number, portId: string): Promise<boolean>;
   /** Import the web's bindings once (`lf.midiLearn` verbatim, `"[]"` when absent); later calls change
    * nothing and answer `already`. */
-  importLegacy(json: string): Promise<ImportReport>;
+  importLegacy(epoch: number, json: string): Promise<ImportReport | null>;
 }
 
 /** A subscription to native MIDI's events: the document's input epoch, and the stop. */

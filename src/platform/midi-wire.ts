@@ -153,9 +153,10 @@ export type InputEvent =
 export type InputItem = { engine: EngineCommand } | { input: InputEvent };
 
 /** Why native MIDI dropped some of an `input_send` batch (Rust `Dropped`): no device runs, the engine is
- * being rebuilt, or there was no room. The rest of the batch ran; `null` when nothing was dropped. */
-export type Dropped = 'noDevice' | 'rebuilding' | 'full';
-const DROPPED: readonly Dropped[] = ['noDevice', 'rebuilding', 'full'];
+ * being rebuilt, there was no room, or the batch's epoch is not the current page's (its input events were
+ * refused). The rest of the batch ran; `null` when nothing was dropped. */
+export type Dropped = 'noDevice' | 'rebuilding' | 'full' | 'stale';
+const DROPPED: readonly Dropped[] = ['noDevice', 'rebuilding', 'full', 'stale'];
 
 /** What the one-time import of the web's `lf.midiLearn` did, by each record's position in that list. */
 export interface ImportReport {

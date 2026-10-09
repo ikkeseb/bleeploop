@@ -42,16 +42,20 @@ permission is denied (`src-tauri/src/lib.rs`) and `verify/guards/web-midi.mjs` k
   forwards gestures (`InputHost`) and keeps only a highlight overlay of its own holds.
 - **One ordered path from the UI** (`src/platform/index.ts`'s outbox, `engine_io/midi_mode.rs`): its
   engine commands and its note sources' events leave in one `input_send` batch at a time, the next
-  once that one settled, since Tauri's IPC does not keep two calls in order. A batch native code
-  refused ran nothing and is sent once more; one lost twice is told, and a blur follows it when it held
-  a release. What native MIDI dropped of a batch (a press with no device running) is its answer, told
-  to the player once.
-- **A document is its subscription:** `midi_subscribe`, first thing in the page's boot, answers the
-  input epoch every batch carries (the outbox sends nothing before it) and, in one step, releases the
-  older documents' holds, cancels a pending learn and replaces the event channel unless a newer page
-  subscribed already. An input event of any other epoch is refused. The learn UI's calls go one at a
-  time, in call order, and an edit by list index names the store revision its list came with: one made
-  against an older list is refused.
+  once that one settled, since Tauri's IPC does not keep two calls in order. No native call stalls the
+  UI: one unanswered for 2 s is given up (never sent twice, as it may still run), and while one is out
+  the waiting batch holds at most 256 items (past them presses are dropped, never a release). A batch
+  native code refused ran nothing and is sent once more; one lost twice is told, and a blur follows it
+  when it held a release (a blur lost too rides at the head of the next batch). What native MIDI dropped
+  of a batch (a press with no device running) is its answer, told to the player once until a press goes
+  through.
+- **A page is its subscription:** `midi_subscribe`, first thing in the page's boot, names the page's age
+  (`performance.timeOrigin`) and answers the input epoch every batch and learn call carries (the outbox
+  sends nothing before it). Natively, in one step and only for a page no older than every page before
+  it, it releases the older pages' holds, cancels a pending learn and replaces the event channel; an
+  older page's late subscribe changes nothing. An input event or a learn call of any other epoch is
+  refused. The learn UI's calls go one at a time, in call order, and an edit by list index names the
+  store revision its list came with: one made against an older list is refused.
 - **One ordered path into the engine** (`engine_io/midi/queue.rs`): the router's output, learned
   actions and the UI's input commands (looper presses, `Press`, toggles) join one bounded FIFO into
   `EngineHost::send`, so a pedal and a click keep their order and the settings memory sees every target

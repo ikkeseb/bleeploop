@@ -134,7 +134,7 @@ const BACKENDS: readonly AudioBackend[] = ['Wasapi', 'Asio'];
 export const ENGINE_LANES = 5;
 export const ENGINE_SLOTS = 2;
 
-/** Rust `lf_engine::Command`, as it crosses `engine_send`. */
+/** Rust `lf_engine::Command`, as it crosses `input_send` (an engine item, `midi-wire.ts` `InputItem`). */
 export type EngineCommand =
   | 'PlayAll'
   | 'StopAll'

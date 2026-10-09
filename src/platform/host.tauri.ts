@@ -218,7 +218,9 @@ const tauriMidi: MidiHost = {
         notifyError('Native MIDI sent something the app cannot read', err);
       }
     };
-    const epoch = invoke<unknown>('midi_subscribe', { channel }).then(decodeEpoch);
+    // The page's age: a newer page's subscribe wins over an older page's late one, whatever the order
+    // the two calls reach native code in.
+    const epoch = invoke<unknown>('midi_subscribe', { channel, origin: performance.timeOrigin }).then(decodeEpoch);
     epoch.catch((err: unknown) => {
       console.error('[host.tauri] MIDI subscribe failed', err);
       notifyError('The app lost contact with MIDI', err);
@@ -230,26 +232,27 @@ const tauriMidi: MidiHost = {
       },
     };
   },
-  async learn(action, target) {
-    await invoke('midi_learn', { action, target });
+  learn(epoch, action, target) {
+    return invoke<boolean>('midi_learn', { epoch, action, target });
   },
-  cancelLearn() {
-    return invoke<boolean>('midi_cancel_learn');
+  cancelLearn(epoch) {
+    return invoke<boolean>('midi_cancel_learn', { epoch });
   },
-  forget(revision, index) {
-    return invoke<boolean>('midi_forget', { revision, index });
+  forget(epoch, revision, index) {
+    return invoke<boolean>('midi_forget', { epoch, revision, index });
   },
-  setMomentary(revision, index, on) {
-    return invoke<boolean>('midi_set_momentary', { revision, index, on });
+  setMomentary(epoch, revision, index, on) {
+    return invoke<boolean>('midi_set_momentary', { epoch, revision, index, on });
   },
-  setHold(revision, index, on) {
-    return invoke<boolean>('midi_set_hold', { revision, index, on });
+  setHold(epoch, revision, index, on) {
+    return invoke<boolean>('midi_set_hold', { epoch, revision, index, on });
   },
-  assign(revision, index, portId) {
-    return invoke<boolean>('midi_assign', { revision, index, portId });
+  assign(epoch, revision, index, portId) {
+    return invoke<boolean>('midi_assign', { epoch, revision, index, portId });
   },
-  async importLegacy(json) {
-    return decodeImportReport(await invoke<unknown>('midi_import_legacy', { json }));
+  async importLegacy(epoch, json) {
+    const report = await invoke<unknown>('midi_import_legacy', { epoch, json });
+    return report === null ? null : decodeImportReport(report);
   },
 };
 

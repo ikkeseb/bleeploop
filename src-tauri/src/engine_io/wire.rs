@@ -31,8 +31,8 @@
 //! `{"engine":<a command as above>}` and `{"input":<an InputEvent>}`, an [`InputEvent`] being
 //! `{"note":{…}}`, `"blur"` or `{"blur":null}`, `{"selectTarget":{"slot":0,"target":…}}` with the target
 //! as `SelectInstrument` carries it, or `"allNotesOff"`; its answer is `null` or a `midi::Dropped`
-//! (`"noDevice"`, `"rebuilding"`, `"full"`); `midi_subscribe` answers the document's input epoch, a
-//! number; `midi::MidiEvent` and `midi::ImportReport` keep the serde they derive where they are defined.
+//! (`"noDevice"`, `"rebuilding"`, `"full"`, `"stale"`); `midi_subscribe` takes the page's age (`origin`,
+//! its `performance.timeOrigin`) and answers its input epoch, a number; `midi::MidiEvent` and `midi::ImportReport` keep the serde they derive where they are defined.
 //! `verify/fixtures/midi-wire.json` holds both sides to that JSON as `engine-wire.json` does to this.
 
 use std::collections::BTreeMap;
@@ -902,13 +902,14 @@ mod tests {
     }
 
     /// `input_send`'s answers, `null` first.
-    const INPUT_ANSWERS: usize = 4;
+    const INPUT_ANSWERS: usize = 5;
     fn input_answer_index(a: Option<Dropped>) -> usize {
         match a {
             None => 0,
             Some(Dropped::NoDevice) => 1,
             Some(Dropped::Rebuilding) => 2,
             Some(Dropped::Full) => 3,
+            Some(Dropped::Stale) => 4,
         }
     }
 
@@ -1097,7 +1098,7 @@ mod tests {
         covers("inputItems", items.iter().map(input_item_index), INPUT_ITEMS);
         assert_eq!(items[0], InputItem::Engine(WireCommand(Command::SetBpm(90.0))), "an engine item is the command as engine-wire.json has it");
 
-        let answers = [None, Some(Dropped::NoDevice), Some(Dropped::Rebuilding), Some(Dropped::Full)];
+        let answers = [None, Some(Dropped::NoDevice), Some(Dropped::Rebuilding), Some(Dropped::Full), Some(Dropped::Stale)];
         let entries = midi_fixture("inputAnswers");
         assert_eq!(answers.len(), entries.len(), "one fixture entry per answer");
         for (answer, entry) in answers.iter().zip(&entries) {
@@ -1105,11 +1106,17 @@ mod tests {
         }
         covers("inputAnswers", answers.iter().map(|a| input_answer_index(*a)), INPUT_ANSWERS);
 
-        // midi_subscribe's answer: the document's input epoch, a plain number, never 0.
+        // midi_subscribe's answer: the page's input epoch, a plain number, never 0; its argument `origin`,
+        // the page's `performance.timeOrigin` (milliseconds, a fraction kept).
         for entry in midi_fixture("epochs") {
             let epoch: u64 = serde_json::from_value(entry.clone()).unwrap_or_else(|e| panic!("midi-wire.epochs: {entry}: {e}"));
             assert!(epoch >= 1, "an epoch is never 0");
             assert_eq!(serde_json::to_value(epoch).unwrap(), entry);
+        }
+        for entry in midi_fixture("origins") {
+            let origin: f64 = serde_json::from_value(entry.clone()).unwrap_or_else(|e| panic!("midi-wire.origins: {entry}: {e}"));
+            assert!(origin.is_finite(), "midi-wire.origins: {entry}");
+            assert_eq!(serde_json::to_value(origin).unwrap(), entry, "read whole, the fraction kept");
         }
 
         let refused = |json: Value| serde_json::from_value::<InputItem>(json).is_err();

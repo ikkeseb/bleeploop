@@ -16,7 +16,7 @@ Who runs where and what each thread owns. The rules are in bold below the table.
 
 | Thread | Owns | Talks to others through |
 |---|---|---|
-| **UI (WebView2 / main)** | The Tauri window, every WebView2 COM call (`with_webview`: the Web MIDI permission deny, `lib.rs`), the plugin folder dialog (modal over the main window, `src/host/folders.rs`), the close guard (`lf://close-requested`), and the synchronous commands: `input_send` (the UI's one ordered batch of engine commands and note input, one in flight at a time), `midi_subscribe` (so documents' subscribes run in arrival order), `plugin_asio_status`, `plugin_asio_device_info`, `lib.rs`'s own | IPC in; window events out (`plugin:param-changed`, `plugin:params-changed`, `plugin:editor-closed`) |
+| **UI (WebView2 / main)** | The Tauri window, every WebView2 COM call (`with_webview`: the Web MIDI permission deny, `lib.rs`), the plugin folder dialog (modal over the main window, `src/host/folders.rs`), the close guard (`lf://close-requested`), and the synchronous commands: `input_send` (the UI's one ordered batch of engine commands and note input, one in flight at a time), `midi_subscribe`, `plugin_asio_status`, `plugin_asio_device_info`, `lib.rs`'s own | IPC in; window events out (`plugin:param-changed`, `plugin:params-changed`, `plugin:editor-closed`) |
 | **Command threads** (Tauri async runtime) | Nothing long-lived. Every other command in `host/commands.rs`, `engine_io/mode.rs` and `engine_io/midi_mode.rs` is `async fn`; blocking engine work (an open waits up to 15 s) goes to `spawn_blocking` | Device requests to the device owner; plugin requests to a slot owner (`owner_request_5s`, ≤5 s); a load spawns the owner and waits ≤15 s on its rendezvous (a result that arrives later is the owner's to undo); device lists enumerate cpal directly (no stream opens) |
 | **Device owner** (`lf-engine-owner`, `engine_io/owner.rs`) | Every device transition, one at a time; the cpal streams (Send: ownership is for ordering); building engines; the engine lock, only while no stream runs | A request channel with one-shot replies; polls what the callbacks latched and logs the glitch counters |
 | **Device callbacks** (cpal driver threads) | Nothing: ASIO runs input then output in one bufferSwitch; WASAPI's output callback is the clock and its input callback feeds the join pipe. Each promotes itself to MMCSS Pro Audio on first entry and runs with flush-to-zero on (`engine_io/fpu.rs`) | `try_lock` on the engine (a miss plays silence and counts); atomics and rings; faults latch for the owner |
@@ -94,10 +94,11 @@ Who runs where and what each thread owns. The rules are in bold below the table.
   `plugin_folder_add` takes its path from the native dialog alone; `plugin_folder_remove` takes one
   only to match a stored entry. Native MIDI's commands (`engine_io/midi_mode.rs`) ship in release and
   take only what they need: `input_send` an epoch and the batch's engine commands and note events,
-  `midi_subscribe` a channel, `midi_learn` an action id and a track, `midi_cancel_learn` nothing,
-  `midi_forget` / `midi_set_momentary` / `midi_set_hold` a list revision and a listed index (and a
-  flag), `midi_assign` those and a present port's id (no path is opened from it), `midi_import_legacy`
-  the old list's text, parsed and never run as anything else.
+  `midi_subscribe` a channel and the page's age (`performance.timeOrigin`), and the page's epoch to every
+  other: `midi_learn` an action id and a track, `midi_cancel_learn` nothing more, `midi_forget` /
+  `midi_set_momentary` / `midi_set_hold` a list revision and a listed index (and a flag), `midi_assign`
+  those and a present port's id (no path is opened from it), `midi_import_legacy` the old list's text,
+  parsed and never run as anything else.
 - **Sample-rate pick:** 44.1/48 kHz or the device's own (Audio Settings); the rules,
   and why WASAPI keeps its endpoint's rate on cpal 0.18.1, live in the engine_io briefing
   (`src/engine_io/mod.rs` § Rules).

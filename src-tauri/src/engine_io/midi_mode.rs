@@ -1,6 +1,7 @@
 //! OWNS: native MIDI's Tauri commands: the UI's one ordered input path (`input_send`: its engine
-//! commands and its note-source events, in the order the outbox queued them), the document's
-//! subscription and input epoch (`midi_subscribe`), and the learn UI's calls (`midi_*`). The host is
+//! commands and its note-source events, in the order the outbox queued them), the page's subscription
+//! and input epoch (`midi_subscribe`), and the learn UI's calls (`midi_*`, each under the page's epoch:
+//! a replaced page's late call changes nothing). The host is
 //! [`MidiHost`] (briefing: `midi/mod.rs`), which engine mode starts with the engine host and drops first
 //! at shutdown (`mode.rs`); without it every command here answers an error.
 //!
@@ -8,11 +9,13 @@
 //! (`src/platform/index.ts`) sends one batch at a time, the next once this one settled, so the order it
 //! queued a note, a slot pick and a looper press in is the order they run in here. An error means none
 //! of the batch ran (the outbox may send it again); what native MIDI dropped of a batch that ran is the
-//! answer ([`Dropped`]). `midi_subscribe` is synchronous too, so a document's subscribe runs in the order
-//! the documents made them. The other `midi_*` commands are async (on the runtime's pool); the UI sends
-//! them one at a time, in call order, and each only takes the MIDI lock briefly (the bindings are
-//! written on the port thread). Every argument is the least the call needs: an epoch and items, an
-//! action id and a track, a list revision and an index, a present port's id, the legacy list's text.
+//! answer ([`Dropped`]; `stale` when the batch's epoch is not the current page's). `midi_subscribe` names
+//! the page's age (`performance.timeOrigin`), so an older page's late subscribe is told from a newer
+//! page's whatever order the two calls arrive in. The other `midi_*` commands are async (on the
+//! runtime's pool); the UI sends them one at a time, in call order, and each only takes the MIDI lock
+//! briefly (the bindings are written on the port thread). Every argument is the least the call needs: an
+//! epoch and items, a page's age, an action id and a track, a list revision and an index, a present
+//! port's id, the legacy list's text.
 
 use tauri::ipc::Channel;
 
@@ -25,12 +28,12 @@ fn midi<R>(f: impl FnOnce(&MidiHost) -> R) -> Result<R, String> {
     engine()?.with_midi(f)
 }
 
-/// `input_send`'s batch, in order, for the document of `epoch`: a run of engine commands through
+/// `input_send`'s batch, in order, for the page of `epoch`: a run of engine commands through
 /// [`MidiHost::ui_commands`] (input commands join the one ordered queue, settings go straight to the
 /// engine), each input event through the router's own call. A note, a wheel, the note target or a panic
 /// sent as an engine command refuses the whole batch before any of it runs. An input event of a
-/// replaced document is refused there; its engine commands run, as they always did. The answer is the
-/// first reason anything was dropped.
+/// replaced page is refused there (`stale`); its engine commands run, as they always did. The answer is
+/// the first reason anything was dropped.
 fn input_to(midi: &MidiHost, epoch: u64, items: Vec<InputItem>) -> Result<Option<Dropped>, String> {
     if let Some(command) = items.iter().find_map(|i| match i {
         InputItem::Engine(WireCommand(c)) if router_command(c) => Some(c),
@@ -69,16 +72,16 @@ pub fn input_send(epoch: u64, items: Vec<InputItem>) -> Result<Option<Dropped>, 
     midi(|midi| input_to(midi, epoch, items))?
 }
 
-/// A WebView document subscribes `channel` to native MIDI's events, first thing in its boot, and gets
-/// its input epoch. In the same step the older documents' holds are released, a pending learn is
-/// cancelled, and `channel` replaces the last subscriber, unless a newer document subscribed already.
-/// The first events are what a new listener draws from: the ports, the bindings, the learn's state, the
-/// store's last problem, the held notes. Synchronous, so the documents' subscribes run in the order they
-/// reached the app.
+/// A WebView page of age `origin` (its `performance.timeOrigin`) subscribes `channel` to native MIDI's
+/// events, first thing in its boot, and gets its input epoch. In the same step the older pages' holds
+/// are released, a pending learn is cancelled, and `channel` replaces the last subscriber, unless a newer
+/// page subscribed already: then nothing changes and the epoch is never current. The first events are
+/// what a new listener draws from: the ports, the bindings, the learn's state, the store's last problem,
+/// the held notes. Synchronous, as `input_send`.
 #[tauri::command]
-pub fn midi_subscribe(channel: Channel<MidiEvent>) -> Result<u64, String> {
+pub fn midi_subscribe(channel: Channel<MidiEvent>, origin: f64) -> Result<u64, String> {
     midi(|midi| {
-        midi.subscribe(Box::new(move |event| {
+        midi.subscribe(origin, Box::new(move |event| {
             // A closed page's channel fails until the next subscriber replaces it.
             let _ = channel.send(event);
         }))
@@ -86,47 +89,49 @@ pub fn midi_subscribe(channel: Channel<MidiEvent>) -> Result<u64, String> {
 }
 
 /// Learn the next CC or note-on onto `action` (on track `target` for a lane action; `null`: the
-/// selected track). Answered by a `learning` event, then a `learned` one.
+/// selected track) for the page of `epoch`. Answered by a `learning` event, then a `learned` one. False,
+/// and nothing done, from a page that is not the current one (the same for every command below).
 #[tauri::command]
-pub async fn midi_learn(action: ActionId, target: Option<u8>) -> Result<(), String> {
-    midi(|midi| midi.learn(action, target))
+pub async fn midi_learn(epoch: u64, action: ActionId, target: Option<u8>) -> Result<bool, String> {
+    midi(|midi| midi.learn(epoch, action, target))
 }
 
 /// Stop listening; true when a learn was pending.
 #[tauri::command]
-pub async fn midi_cancel_learn() -> Result<bool, String> {
-    midi(|midi| midi.cancel_learn())
+pub async fn midi_cancel_learn(epoch: u64) -> Result<bool, String> {
+    midi(|midi| midi.cancel_learn(epoch))
 }
 
 /// Drop listed binding `index` of the list at `revision` (a `bindings` event's). False: the list changed
 /// since, nothing was done (the same for every edit below).
 #[tauri::command]
-pub async fn midi_forget(revision: u64, index: usize) -> Result<bool, String> {
-    midi(|midi| midi.forget(revision, index))?
+pub async fn midi_forget(epoch: u64, revision: u64, index: usize) -> Result<bool, String> {
+    midi(|midi| midi.forget(epoch, revision, index))?
 }
 
 /// Read listed binding `index`'s pedal as momentary (`on`) or latching.
 #[tauri::command]
-pub async fn midi_set_momentary(revision: u64, index: usize, on: bool) -> Result<bool, String> {
-    midi(|midi| midi.set_momentary(revision, index, on))?
+pub async fn midi_set_momentary(epoch: u64, revision: u64, index: usize, on: bool) -> Result<bool, String> {
+    midi(|midi| midi.set_momentary(epoch, revision, index, on))?
 }
 
 /// HOLD on or off for listed binding `index` (a momentary REC/DUB pedal only).
 #[tauri::command]
-pub async fn midi_set_hold(revision: u64, index: usize, on: bool) -> Result<bool, String> {
-    midi(|midi| midi.set_hold(revision, index, on))?
+pub async fn midi_set_hold(epoch: u64, revision: u64, index: usize, on: bool) -> Result<bool, String> {
+    midi(|midi| midi.set_hold(epoch, revision, index, on))?
 }
 
 /// The player assigns listed binding `index` to the present port `port_id` (a `ports` event's id).
 #[tauri::command]
-pub async fn midi_assign(revision: u64, index: usize, port_id: String) -> Result<bool, String> {
-    midi(|midi| midi.assign(revision, index, &port_id))?
+pub async fn midi_assign(epoch: u64, revision: u64, index: usize, port_id: String) -> Result<bool, String> {
+    midi(|midi| midi.assign(epoch, revision, index, &port_id))?
 }
 
-/// Import the web's list once (`lf.midiLearn` as stored; `"[]"` when it has none).
+/// Import the web's list once (`lf.midiLearn` as stored; `"[]"` when it has none); `null` from a page that
+/// is not the current one.
 #[tauri::command]
-pub async fn midi_import_legacy(json: String) -> Result<ImportReport, String> {
-    midi(|midi| midi.import_legacy(&json))
+pub async fn midi_import_legacy(epoch: u64, json: String) -> Result<Option<ImportReport>, String> {
+    midi(|midi| midi.import_legacy(epoch, &json))
 }
 
 #[cfg(test)]
@@ -164,7 +169,7 @@ mod tests {
     fn rig() -> (MidiHost, Arc<Recorder>, u64) {
         let engine = Arc::new(Recorder::default());
         let midi = MidiHost::detached(engine.clone());
-        let epoch = midi.subscribe(Box::new(|_| {}));
+        let epoch = midi.subscribe(1.0, Box::new(|_| {}));
         (midi, engine, epoch)
     }
 
@@ -210,15 +215,15 @@ mod tests {
                 Command::AllNotesOff,
             ]
         );
-        let newer = midi.subscribe(Box::new(|_| {}));
+        let newer = midi.subscribe(2.0, Box::new(|_| {}));
         let late = items(json!([
             { "input": { "note": { "owner": "key:KeyA", "note": 62, "velocity": 127, "on": true } } },
             { "input": { "selectTarget": { "slot": 1, "target": { "Slot": 1 } } } },
             { "input": "allNotesOff" },
             { "engine": { "SetBpm": 100 } },
         ]));
-        assert_eq!(input_to(&midi, epoch, late), Ok(None));
-        assert_eq!(take(&engine), [Command::SetBpm(100.0)], "a replaced document's input events are dropped");
+        assert_eq!(input_to(&midi, epoch, late), Ok(Some(Dropped::Stale)), "the replaced page hears its input was refused");
+        assert_eq!(take(&engine), [Command::SetBpm(100.0)], "a replaced page's input events are dropped, its engine commands run");
         assert!(newer > epoch);
     }
 

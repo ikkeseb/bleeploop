@@ -20,8 +20,9 @@
     { "input": { "selectTarget": { "slot": 1, "target": { "Slot": 1 } } } },
     { "input": "allNotesOff" }
   ],
-  "inputAnswers": [null, "noDevice", "rebuilding", "full"],
+  "inputAnswers": [null, "noDevice", "rebuilding", "full", "stale"],
   "epochs": [1, 42],
+  "origins": [1781234567890.125, 1781234569001.5],
   "midiEvents": [
     {
       "ports": {
