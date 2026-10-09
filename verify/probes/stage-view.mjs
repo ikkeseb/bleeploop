@@ -182,7 +182,7 @@ await probe(async ({ browser, open }) => {
       meter: { peak: 0, clip: false },
     });
   };
-  const VIEWS = await page.evaluate(() => import('/src/ui/stage/views.ts').then((m) => m.STAGE_VIEWS.map((v) => ({ id: v.id, name: v.name }))));
+  const VIEWS = await page.evaluate(() => import('/src/ui/stage/views.ts').then((m) => m.STAGE_VIEWS.map((v) => ({ id: v.id, name: v.name, wantsScope: v.wantsScope === true }))));
   const view = () => page.evaluate(() => document.querySelector('.sv')?.dataset.view ?? null);
   const isOpen = () => page.evaluate(() => {
     const sv = document.querySelector('.sv');
@@ -429,7 +429,7 @@ await probe(async ({ browser, open }) => {
     await boot(page);
     await setOpen(true);
     assert.equal(await view(), VIEWS[0].id, `a first open shows the default look, ${VIEWS[0].id}`);
-    assert.equal(VIEWS[0].id, 'orbit', 'the default look is orbit');
+    assert.equal(VIEWS[0].id, 'scope', 'the default look is scope, the one that draws the engine\'s live columns');
     await pressSends('3', { SelectTrack: 2 }, 'a digit inside the view sends SelectTrack');
     await emit({ events: [{ Selected: { frame: 0, lane: 2 } }] });
     const seen = [];
@@ -446,7 +446,15 @@ await probe(async ({ browser, open }) => {
         await page.locator('.sv-btn--view').click();
       }
       await settle(120);
-      assert.deepEqual(await sent(), [], 'switching the look sends the engine nothing');
+      // A look switch touches the transport with nothing, as it always did. The one command it may
+      // send is the live scope columns being asked for or let go of, and only where `wantsScope`
+      // actually changes between the two looks: pin that exactly, so a switch that sends a command
+      // it should not, or drops one it should, still fails here.
+      const from = VIEWS[k];
+      const to = VIEWS[(k + 1) % VIEWS.length];
+      const wantsColumns = (d) => d.wantsScope === true;
+      const owed = wantsColumns(from) === wantsColumns(to) ? [] : [{ SetScope: wantsColumns(to) }];
+      assert.deepEqual(await sent(), owed, `switching ${from.id} to ${to.id} sends the engine only what the columns need`);
     }
     console.log(JSON.stringify({ cycle: seen, wrapsTo: await view() }));
     assert.deepEqual(seen, VIEWS.map((v) => v.id), 'V and the view switch step the looks in order');
@@ -853,12 +861,29 @@ await probe(async ({ browser, open }) => {
       await page.mouse.move(900, 500);
       await settle(3200); // the two buttons gone
       // The JIT's warm-up: the frame run by hand until its code is optimised (unoptimised code boxes
-      // every fractional intermediate, which says nothing about the steady state).
+      // every fractional intermediate, which says nothing about the steady state). A FIXED count
+      // measured the tier instead of the code: 6000 iterations optimised strata and scope but not
+      // orbit, whose draw is the largest, and an unoptimised orbit reported ~1 kB a frame of boxed
+      // doubles against a 32-byte bar, red on CI and on the dev box while the same source read clean
+      // (2026-10-09). So run bursts until the hand-run frame stops getting faster, which is what
+      // "optimised" looks like from here, and cap the wait. A look that never settles fails the bar
+      // below, as it should.
       await page.evaluate(() => {
         const s = window.__raf;
         s.manual = true;
-        const t0 = performance.now();
-        for (let k = 0; k < 6000 && performance.now() - t0 < 3000; k++) s.stage(performance.now());
+        const until = performance.now() + 20000;
+        const burst = () => {
+          const t0 = performance.now();
+          for (let k = 0; k < 4000; k++) s.stage(performance.now());
+          return (performance.now() - t0) / 4000;
+        };
+        let best = Infinity;
+        for (let pass = 0; pass < 12; pass++) {
+          const ms = burst();
+          const better = ms < best * 0.85;
+          best = Math.min(best, ms);
+          if (pass >= 1 && (!better || performance.now() > until)) break;
+        }
         s.manual = false;
       });
       await settle(400);
@@ -1054,7 +1079,14 @@ await probe(async ({ browser, open }) => {
     const insideV = await hold('v', '.kb__pad--down');
     console.log(JSON.stringify({ v: { outside: outsideV.played, inside: insideV.commands, look: [look, await view()] } }));
     assert.equal(insideV.lit, false, 'inside the view, V plays no pad');
-    assert.deepEqual(insideV.commands, [], 'inside the view, V sends the engine nothing (no Press)');
+    // V inside the view steps the look and is never read as a note key: no `Press`, whatever else it
+    // does. The one command it may send is the live scope columns being asked for or let go of, and
+    // only where `wantsScope` differs between the look it leaves and the one it steps to (the `views`
+    // group pins that mapping look by look).
+    const def = (id) => VIEWS.find((d) => d.id === id);
+    const steppedTo = def(await view());
+    const owedV = def(look).wantsScope === steppedTo.wantsScope ? [] : [{ SetScope: steppedTo.wantsScope }];
+    assert.deepEqual(insideV.commands, owedV, `inside the view, V sends the engine nothing but what the columns need (${JSON.stringify(insideV.commands)})`);
     assert.deepEqual(insideV.played, [], 'inside the view, V plays no note');
     assert.notEqual(await view(), look, 'inside the view, V steps the look');
     const picker = await page.evaluate(() => import('/src/app/actions.ts').then((m) => m.ACTION_LABELS.stageNextView));
