@@ -13,6 +13,8 @@
 //!   beside it (no bar of their own; the Stage 3 bar carries them).
 //! - A lane's pan: the Stage 2 engine with every lane centred, then every lane panned and resting, then
 //!   every lane's pan always moving, printed side by side (no bar of its own).
+//! - The live scope taps: the Stage 2 engine with them off, then on with a reader keeping up, printed
+//!   side by side (no bar of its own).
 //! - A multiply burst (F14): the eight extension jobs of the worst multiply add under 10 % to the blocks
 //!   they run in.
 //! - A TRIM (F16) of the longest loop (32 bars, the whole 60 s buffer): its job adds under 10 % to the
@@ -248,6 +250,41 @@ fn the_input_sends_cost() {
         on * 100.0,
         p999 * 100.0,
         worst * 100.0,
+        (on - off) * period * 1e6,
+        (on - off) * 100.0
+    );
+}
+
+/// What the live scope taps cost (`lf_engine::scope`): the Stage 2 engine timed with them off, then
+/// with them on and a reader keeping up (the feed drains about 60 times a second, so the ring never
+/// fills), 20 s each, in one run. No bar of its own: the two numbers print side by side so a later
+/// change to the fold or the column size can see what it did.
+#[test]
+#[ignore]
+fn the_scope_taps_cost() {
+    let (mut rig, _) = five_lanes_one_overdubbing();
+    let blocks = 48000 * 20 / BLOCK;
+    let period = BLOCK as f64 / 48000.0;
+    let (off, ..) = time_blocks(&mut rig, blocks);
+    rig.set(Command::SetScope(true));
+    // In rounds, drained between them as the feed drains: a ring left to fill would stop counting the
+    // push, which is the part the scope adds beside the fold.
+    const ROUND: usize = 256;
+    let rounds = blocks / ROUND;
+    let mut on = 0.0;
+    let mut columns = 0;
+    for _ in 0..rounds {
+        let (mean, ..) = time_blocks(&mut rig, ROUND);
+        on += mean / rounds as f64;
+        columns += rig.drop_scope();
+    }
+    assert_eq!(rig.engine.diag().scope_dropped, 0, "the reader kept up");
+    println!(
+        "stage 2 engine, {blocks} blocks of {BLOCK} at 48 k: scope off mean {:.1} µs ({:.2} %); on mean {:.1} µs ({:.2} %), {columns} columns; the taps add {:.1} µs ({:.2} %)",
+        off * period * 1e6,
+        off * 100.0,
+        on * period * 1e6,
+        on * 100.0,
         (on - off) * period * 1e6,
         (on - off) * 100.0
     );

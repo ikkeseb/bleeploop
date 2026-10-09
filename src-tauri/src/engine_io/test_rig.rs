@@ -37,7 +37,9 @@ impl TestDevice {
         let [p0, p1] = handle.slots;
         *core.ports[0].lock().unwrap() = Some(p0);
         *core.ports[1].lock().unwrap() = Some(p1);
-        *core.ends.lock().unwrap() = Some(Ends { commands: handle.commands, events: handle.events, overview: handle.overview, session: Some(handle.session) });
+        let scope_bin = lf_engine::scope::scope_bin_frames(rate) as u32;
+        *core.ends.lock().unwrap() =
+            Some(Ends { commands: handle.commands, events: handle.events, overview: handle.overview, session: Some(handle.session), scope: handle.scope, scope_bin });
         core.rt.lock().unwrap().engine = Some(engine);
         core.rate.store(rate, Relaxed);
         core.max_block.store(config.max_block as u32, Relaxed);

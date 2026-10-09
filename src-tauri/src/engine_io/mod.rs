@@ -23,7 +23,7 @@
 //! | `fpu` | the float mode every audio callback runs in: flush-to-zero and denormals-are-zero |
 //! | `frame_clock` | [`FrameClock`]: the callback's (time, frame) stamp, whether a device runs, the feed's anchor; DEV, the stamps' history a frame turns into time through |
 //! | `pipes` | [`pipes::PullPipe`]: frames pushed on one clock, pulled resampled on another (the WASAPI join, Share output) |
-//! | `feed` | the feed: what the UI reads back (events, device, status, anchor, meter, waveforms), on its own thread |
+//! | `feed` | the feed: what the UI reads back (events, device, status, anchor, meter, waveforms, the scope's columns), on its own thread |
 //! | `mode` | engine mode: the managed host, the tone store's folder, native MIDI's start and stop, the `engine_*` Tauri commands, shutdown on exit |
 //! | `midi_mode` | native MIDI's Tauri commands: the UI's one ordered input path (`input_send`: its engine commands, through native MIDI's routing, and its note input), the document's subscription and input epoch (`midi_subscribe`), the learn UI's `midi_*` calls |
 //! | `plugins` | engine mode's plugin slots: the `plugin_*` commands routed to the engine slot owners, and tone recall's (`host/tone.rs`) |
@@ -93,6 +93,9 @@
 //!   owners (`DeviceEvent::EngineFaulted`). A second fault within `FAULT_HOLDOFF` stays silent.
 //! - **The callback never allocates, logs, locks (beyond its `try_lock`) or waits.** Counters are
 //!   atomics the owner reads; the owner logs.
+//! - **The scope's ring is drained every feed tick, whatever the feed sends** (`lf_engine::scope`,
+//!   `feed.rs`): held, unsubscribed or on a reset frame the columns are dropped and the UI is told its
+//!   trace broke. A ring left to fill would make the next batch a replay of seconds of old sound.
 //! - **cpal is pinned at `=0.18.1`:** the callback order the Stage 1 A1 run proved is read from
 //!   asio-sys 0.3.0; 0.18.2 moves to asio-sys 0.4.0 and windows 0.62 and needs its own A1 rerun.
 //!
@@ -142,6 +145,7 @@ use std::sync::{Arc, LockResult, Mutex, MutexGuard};
 use std::time::Duration;
 
 use lf_engine::grid::Frame;
+use lf_engine::scope::ScopeBin;
 use lf_engine::{Command, Engine, Event, LaneState, Overview, SessionPort, SlotPort, SlotProcessor, TimedCommand, SLOT_COUNT, TRACK_COUNT};
 use rtrb::{Consumer, Producer};
 use serde::{Deserialize, Serialize};
@@ -472,8 +476,15 @@ impl IoDiag {
 
     /// The glitch diagnostics that count, by name: not faults (no probe fails on them), but the release
     /// log and the probe show them beside the faults.
-    fn diagnostics(&self) -> [(&'static str, u64); 3] {
-        [("asio_phase_slips", self.asio_phase_slips), ("asio_late_finishes", self.asio_late_finishes), ("clipped_blocks", self.clipped_blocks)]
+    fn diagnostics(&self) -> [(&'static str, u64); 4] {
+        [
+            ("asio_phase_slips", self.asio_phase_slips),
+            ("asio_late_finishes", self.asio_late_finishes),
+            ("clipped_blocks", self.clipped_blocks),
+            // Scope columns the audio thread could not publish (a reader that stopped reading, a
+            // device-frame skip): the UI redraws from the gap, so it is no fault.
+            ("engine.scope_dropped", self.engine.scope_dropped),
+        ]
     }
 
     /// The fault counters, then the diagnostics, that moved since `before`, as `name=delta`, with
@@ -524,6 +535,10 @@ pub(crate) struct Ends {
     pub(crate) overview: Arc<Overview>,
     /// The session port (`session.rs`), out while a snapshot or load uses it.
     pub(crate) session: Option<SessionPort>,
+    /// The scope taps' columns (`lf_engine::scope`), drained by the feed every tick, and the frames one
+    /// column of this engine covers.
+    pub(crate) scope: Consumer<ScopeBin>,
+    pub(crate) scope_bin: u32,
 }
 
 /// Who takes `settings` or `ends` (`lock_at`): the input path (`EngineHost::send_all`), the feed
@@ -751,6 +766,7 @@ pub(crate) struct EngineDiag {
     xruns: AtomicU64,
     slot_events_dropped: AtomicU64,
     slot_protocol_errors: AtomicU64,
+    scope_dropped: AtomicU64,
 }
 
 impl EngineDiag {
@@ -760,6 +776,7 @@ impl EngineDiag {
         self.xruns.store(d.xruns, Relaxed);
         self.slot_events_dropped.store(d.slot_events_dropped, Relaxed);
         self.slot_protocol_errors.store(d.slot_protocol_errors, Relaxed);
+        self.scope_dropped.store(d.scope_dropped, Relaxed);
     }
 
     fn load(&self) -> lf_engine::Diag {
@@ -769,6 +786,7 @@ impl EngineDiag {
             xruns: self.xruns.load(Relaxed),
             slot_events_dropped: self.slot_events_dropped.load(Relaxed),
             slot_protocol_errors: self.slot_protocol_errors.load(Relaxed),
+            scope_dropped: self.scope_dropped.load(Relaxed),
         }
     }
 }
@@ -951,12 +969,30 @@ impl EngineHost {
     /// Move the engine's events into `out`, as `drain_events`; with the generation of the engine they
     /// came from and its overview (`None` while no engine exists), read under the same lock.
     pub(crate) fn drain_feed(&self, out: &mut Vec<Event>) -> (u64, Option<Arc<Overview>>) {
+        let (gen, overview, _) = self.drain_feed_scope(out, None);
+        (gen, overview)
+    }
+
+    /// [`EngineHost::drain_feed`] and, with `columns`, the engine's finished scope columns, oldest
+    /// first, and the frames one of them covers. One acquisition of `settings` and `ends` for both:
+    /// `ends` is the lock the player's own `input_send` batch takes, so the feed takes it once a tick,
+    /// and a second acquisition could straddle a rebuild and mix one engine's events with another's
+    /// columns. The feed drains the columns every tick, whatever it sends: a ring left to fill would
+    /// make the next batch a replay of seconds of old sound.
+    pub(crate) fn drain_feed_scope(&self, out: &mut Vec<Event>, columns: Option<&mut Vec<ScopeBin>>) -> (u64, Option<Arc<Overview>>, u32) {
         let mut settings = lock_at(&self.core.settings, LockSite::SettingsFeed).unwrap_or_else(|e| e.into_inner());
-        let Ok(mut ends) = lock_at(&self.core.ends, LockSite::EndsFeed) else { return (self.core.engine_gen.load(Acquire), None) };
+        let Ok(mut ends) = lock_at(&self.core.ends, LockSite::EndsFeed) else { return (self.core.engine_gen.load(Acquire), None, 0) };
         let gen = self.core.engine_gen.load(Acquire);
-        let Some(ends) = ends.as_mut() else { return (gen, None) };
+        let Some(ends) = ends.as_mut() else { return (gen, None, 0) };
         drain(&mut settings, &mut ends.events, gen, |e| out.push(e));
-        (gen, Some(ends.overview.clone()))
+        let mut bin = 0;
+        if let Some(columns) = columns {
+            while let Ok(column) = ends.scope.pop() {
+                columns.push(column);
+            }
+            bin = ends.scope_bin;
+        }
+        (gen, Some(ends.overview.clone()), bin)
     }
 
     /// Move the engine's events into `out` (a lane's `Mix` reaches the settings memory on the way).

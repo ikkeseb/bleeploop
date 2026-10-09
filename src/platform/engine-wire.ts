@@ -133,6 +133,10 @@ const BACKENDS: readonly AudioBackend[] = ['Wasapi', 'Asio'];
 /** Lanes and plugin slots (`lf_engine::TRACK_COUNT`, `SLOT_COUNT`). */
 export const ENGINE_LANES = 5;
 export const ENGINE_SLOTS = 2;
+/** Sources a scope batch carries (`lf_engine::scope::SCOPE_SOURCES`), in order: the five lanes after
+ * their FX, then the monitor (the live wet signal and the input sends), then the master: the engine's
+ * output as the device takes it, through the limiter and with the monitor summed in. */
+export const SCOPE_SOURCES = ENGINE_LANES + 2;
 
 /** Rust `lf_engine::Command`, as it crosses `input_send` (an engine item, `midi-wire.ts` `InputItem`). */
 export type EngineCommand =
@@ -190,7 +194,10 @@ export type EngineCommand =
    * or not it is the note target. */
   | { SetInstrumentGain: [InstrumentId, number] }
   | { SetInputSend: [InputSendId, boolean] }
-  | { SetInputSendParam: [InputSendParamId, number] };
+  | { SetInputSendParam: [InputSendParamId, number] }
+  /** The live scope taps on or off: the UI asks for columns while the stage view is open
+   * (`ScopeUpdate`). Off (the default) the engine folds and sends nothing. */
+  | { SetScope: boolean };
 
 /** Rust `engine_io::DeviceRequest`: what `engine_open` opens (or switches to). The capture channels are
  * each plugin slot's (`inputChannels`), or one for both (`inputChannel`); 0-based, null = auto (input 2
@@ -321,6 +328,23 @@ export interface PeakUpdate {
   max: number[];
 }
 
+/**
+ * Live scope columns since the last frame, sent only while the UI asked for them (`SetScope`). A
+ * column is `bin` frames of sound: `min[s][k]` and `max[s][k]` are column `k` of source `s`, in
+ * `SCOPE_SOURCES` order. `frame` is the device frame the first column covers and each later column
+ * starts `bin` frames after the one before it, so the draw places a column by its own frame. Every
+ * array holds the same number of columns.
+ */
+export interface ScopeUpdate {
+  frame: Frame;
+  bin: number;
+  /** Columns were lost before this batch (a full ring, a device-frame skip, a held feed, a new
+   * engine): the UI drops the trace it holds instead of splicing this batch onto it. */
+  gap: boolean;
+  min: number[][];
+  max: number[][];
+}
+
 /** One `engine_feed` message. */
 export interface FeedFrame {
   seq: number;
@@ -337,6 +361,9 @@ export interface FeedFrame {
   anchor: ClockAnchor | null;
   meter: Meter | null;
   peaks: PeakUpdate[];
+  /** null: this frame carries no scope columns (the stage view is closed, or none finished since the
+   * last frame). The wire leaves the field out then; a decoded frame always has it. */
+  scope: ScopeUpdate | null;
 }
 
 // ── Decoders ───────────────────────────────────────────────────────────────────────────────────────
@@ -515,6 +542,28 @@ function decodePeaks(raw: unknown): PeakUpdate {
   return update;
 }
 
+/** One scope batch: one array per source, every array the same number of columns. */
+function decodeScope(raw: unknown): ScopeUpdate {
+  const o = obj(raw, 'feed.scope');
+  const outer = (v: unknown, what: string) => array(v, what, SCOPE_SOURCES);
+  // Every array holds the same columns as the first source's: a batch that disagrees is refused, not
+  // drawn short.
+  const columns = array(outer(o.min, 'scope.min')[0], 'scope.min[0]').length;
+  // One label per source, never one per sample: a batch carries up to 7 × 2 × 64 values, and this
+  // decode runs on the thread that draws (as `decodePeaks`, which labels with a constant).
+  const source = (v: unknown, what: string) => {
+    const sample = `${what}[]`;
+    return array(v, what, columns).map((x) => num(x, sample));
+  };
+  return {
+    frame: frame(o.frame, 'scope.frame'),
+    bin: int(o.bin, 'scope.bin', 1),
+    gap: bool(o.gap, 'scope.gap'),
+    min: outer(o.min, 'scope.min').map((v, s) => source(v, `scope.min[${s}]`)),
+    max: outer(o.max, 'scope.max').map((v, s) => source(v, `scope.max[${s}]`)),
+  };
+}
+
 export function decodeFeedFrame(raw: unknown): FeedFrame {
   const o = obj(raw, 'feed frame');
   const device = o.device === undefined || o.device === null ? [] : Array.isArray(o.device) ? o.device : [o.device];
@@ -537,6 +586,8 @@ export function decodeFeedFrame(raw: unknown): FeedFrame {
       return { peak: num(m.peak, 'meter.peak'), clip: bool(m.clip, 'meter.clip') };
     }),
     peaks: o.peaks === undefined || o.peaks === null ? [] : array(o.peaks, 'feed.peaks').map(decodePeaks),
+    // Absent on the wire unless the stage view asked for columns and some finished.
+    scope: o.scope === undefined || o.scope === null ? null : decodeScope(o.scope),
   };
   if ('status' in o) out.status = o.status === null ? null : decodeDeviceStatus(o.status);
   if (o.settings !== undefined) out.settings = array(o.settings, 'feed.settings').map(decodeCommand);
@@ -547,7 +598,7 @@ export function decodeFeedFrame(raw: unknown): FeedFrame {
 
 const UNIT_COMMANDS = ['PlayAll', 'StopAll', 'ClearAll', 'AllNotesOff', 'Press'] as const;
 const LANE_COMMANDS = ['RecDub', 'PlayStop', 'Stop', 'Undo', 'Reverse', 'Copy', 'Clear', 'SelectTrack'] as const;
-const BOOL_COMMANDS = ['SetMetronome', 'SetMasterMute', 'SetLoopEndStop', 'SetFixedLength', 'SetRetake', 'SetAutoRecord'] as const;
+const BOOL_COMMANDS = ['SetMetronome', 'SetMasterMute', 'SetLoopEndStop', 'SetFixedLength', 'SetRetake', 'SetAutoRecord', 'SetScope'] as const;
 const NUMBER_COMMANDS = [
   'SetBpm',
   'SetClickVolume',

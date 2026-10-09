@@ -22,7 +22,7 @@ import { fileURLToPath } from 'node:url';
 const stageDir = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'src', 'ui', 'stage');
 const ROOTS = ['stage-loop', 'views'];
 /** The looper's non-reactive getters (`engineLooper` in src/ui/state/engine-store.ts). */
-const PLAIN = new Set(['peaksInto', 'phaseValue', 'levelValue', 'stateOf', 'mutedOf', 'waitingOf', 'recHeadFrac', 'recSpanFrames', 'masterFramesValue', 'trackCount']);
+const PLAIN = new Set(['peaksInto', 'scopeInto', 'phaseValue', 'levelValue', 'stateOf', 'mutedOf', 'waitingOf', 'recHeadFrac', 'recSpanFrames', 'masterFramesValue', 'trackCount']);
 /** What a draw module may take from `../state/audio`. */
 const AUDIO = new Set(['looper', 'PEAK_FRAMES', 'PeakView', 'TrackState']);
 

@@ -4,6 +4,11 @@
 //! and the lanes' waveforms; a frame goes out when any of them changed, and at least every `REFRESH`
 //! while a device runs (the UI extrapolates its playhead from the anchor between frames). Never PCM.
 //!
+//! The scope taps (`lf_engine::scope`) are drained every tick whatever the frame carries, held or not:
+//! their ring left to fill would make the next batch a replay of seconds of old sound as a fast light
+//! show. A batch the UI cannot splice onto what it holds (columns the engine or a held tick lost, the
+//! cap, a new engine, a reset frame) carries `gap`, and the UI drops its trace instead.
+//!
 //! The feed is the only reader of the engine's event ring and of the device events, but for a rebuild,
 //! which drains the replaced engine's ring into the settings memory (`owner.rs` `swap_engine`). So it
 //! keeps a mirror of the lanes, the transport and the selection: a new subscriber (a WebView reload) and
@@ -30,13 +35,20 @@ use std::time::{Duration, Instant};
 
 use lf_engine::grid::Frame;
 use lf_engine::overview::PEAK_FRAMES;
+use lf_engine::scope::{ScopeBin, SCOPE_SOURCES};
 use lf_engine::{Event, LaneInfo, LaneState, Overview, TRACK_COUNT};
 
-use super::wire::{ClockAnchor, FeedFrame, Meter, PeakUpdate, WireCommand, WireEvent};
+use super::wire::{ClockAnchor, FeedFrame, Meter, PeakUpdate, ScopeUpdate, WireCommand, WireEvent};
 use super::{DeviceEvent, DeviceStatus, EngineHost};
 
 /// The device events a held feed keeps for its reset frame; older ones go first.
 const HELD_DEVICE_EVENTS: usize = 64;
+
+/// The most scope columns one frame carries: a tick is about four 4 ms columns, so this is a quarter
+/// second of them — slack for a tick that ran late or a device that woke in bursts. Past it the oldest
+/// go and the UI is told its trace broke (`gap`): a batch the size of the whole ring would play seconds
+/// of old sound as a fast light show.
+const SCOPE_BATCH: usize = 64;
 
 /// The feed's period: about 60 frames a second.
 const TICK: Duration = Duration::from_micros(16_667);
@@ -85,6 +97,16 @@ pub(crate) struct Feed {
     bins: Vec<u32>,
     /// The device events taken while the feed was held: the next frame carries them first.
     held_device: Vec<DeviceEvent>,
+    /// This tick's scope columns, reused between ticks, and the frames one column of the engine they
+    /// came from covers (0: no engine, so no columns).
+    columns: Vec<ScopeBin>,
+    scope_bin: u32,
+    /// The device frame the next column must start at to splice onto the last batch sent; `None`
+    /// before the first batch.
+    scope_next: Option<Frame>,
+    /// Columns were lost since the last batch went out (a full ring, a skip, a held feed, the cap, a new
+    /// engine): the next batch says so and the UI drops the trace it holds.
+    scope_gap: bool,
 }
 
 impl Feed {
@@ -104,6 +126,10 @@ impl Feed {
             drawn: [None; TRACK_COUNT],
             bins: Vec::new(),
             held_device: Vec::new(),
+            columns: Vec::with_capacity(lf_engine::scope::SCOPE_CAPACITY),
+            scope_bin: 0,
+            scope_next: None,
+            scope_gap: false,
         }
     }
 
@@ -112,7 +138,11 @@ impl Feed {
     fn drain(&mut self) -> bool {
         let mut replaced = false;
         self.drained.clear();
-        let (gen, overview) = self.host.drain_feed(&mut self.drained);
+        self.columns.clear();
+        // The events and the columns in one acquisition, so this tick's columns are the engine whose
+        // events it took: a second drain could straddle a rebuild and mix the two.
+        let (gen, overview, bin) = self.host.drain_feed_scope(&mut self.drained, Some(&mut self.columns));
+        self.scope_bin = bin;
         if self.gen != Some(gen) {
             // A new engine (or none): what it reports starts from EMPTY lanes and no transport.
             replaced = self.gen.is_some();
@@ -138,6 +168,7 @@ impl Feed {
     /// reads the status, the meter and the waveforms afresh.
     pub(crate) fn tick_held(&mut self) {
         self.drain();
+        self.scope(false);
         self.held_device.extend(self.host.take_device_events());
         // A device that keeps failing behind a dialog left open: the latest are what the page needs.
         let over = self.held_device.len().saturating_sub(HELD_DEVICE_EVENTS);
@@ -162,15 +193,57 @@ impl Feed {
         let metered = meter != self.meter;
         self.meter = meter;
         let peaks = self.peaks(reset);
+        // A reset carries no scope: the UI replaces its view with this frame, so the trace starts over.
+        let scope = self.scope(!reset);
         let due = running && self.sent.is_none_or(|at| at.elapsed() >= REFRESH);
-        if !(reset || due || metered || status.is_some() || !self.drained.is_empty() || !device.is_empty() || !peaks.is_empty()) {
+        // A batch of columns is itself a reason to send: a tick that built one never drops it.
+        if !(reset || due || metered || status.is_some() || !self.drained.is_empty() || !device.is_empty() || !peaks.is_empty() || scope.is_some()) {
             return None;
         }
         let events = if reset { self.state_events() } else { self.drained.iter().copied().map(WireEvent).collect() };
         let settings = reset.then(|| self.host.settings().into_iter().map(WireCommand).collect());
         self.sent = Some(Instant::now());
         self.seq += 1;
-        Some(FeedFrame { seq: self.seq - 1, reset, events, device, status, anchor, meter, peaks, settings })
+        Some(FeedFrame { seq: self.seq - 1, reset, events, device, status, anchor, meter, peaks, scope, settings })
+    }
+
+    /// Build this frame's batch from the columns `drain` took. `send` false — held, nobody subscribed,
+    /// or a reset frame — drops them and leaves the UI's trace broken (`gap`). What goes out is one
+    /// contiguous run: a hole inside the drain (a device-frame skip, a ring the engine overran, the
+    /// taps switched off and on between two ticks) cannot be sent as one batch, so only the newest run
+    /// is, and the batch is capped at `SCOPE_BATCH`, past which the oldest of that run go. `None`: no
+    /// columns, so the frame carries no scope.
+    fn scope(&mut self, send: bool) -> Option<ScopeUpdate> {
+        let bin = self.scope_bin as Frame;
+        if !send || bin == 0 {
+            self.scope_gap |= !self.columns.is_empty();
+            self.scope_next = None;
+            return None;
+        }
+        // The last run whose columns follow each other, then the cap: everything before it is lost
+        // work the UI must not splice over.
+        let mut from = 0;
+        for k in 1..self.columns.len() {
+            if self.columns[k].frame != self.columns[k - 1].frame + bin {
+                from = k;
+            }
+        }
+        let over = (self.columns.len() - from).saturating_sub(SCOPE_BATCH);
+        let lost = from + over > 0;
+        self.columns.drain(..from + over);
+        let first = *self.columns.first()?;
+        // A batch that does not follow the last one sent: the engine lost columns, this drain had a
+        // hole, or the cap took some, so the UI starts its trace over here.
+        let gap = std::mem::take(&mut self.scope_gap) || lost || self.scope_next != Some(first.frame);
+        self.scope_next = Some(first.frame + self.columns.len() as Frame * bin);
+        let columns = self.columns.len();
+        let (mut min, mut max) = (Vec::with_capacity(SCOPE_SOURCES), Vec::with_capacity(SCOPE_SOURCES));
+        for source in 0..SCOPE_SOURCES {
+            min.push(self.columns.iter().map(|c| round(c.lo[source])).collect::<Vec<f32>>());
+            max.push(self.columns.iter().map(|c| round(c.hi[source])).collect::<Vec<f32>>());
+        }
+        debug_assert!(min.iter().chain(&max).all(|c| c.len() == columns));
+        Some(ScopeUpdate { frame: first.frame, bin: self.scope_bin, gap, min, max })
     }
 
     /// The lanes' waveform bins that changed, in play order: every bin of a lane that shows another
@@ -521,6 +594,78 @@ mod tests {
         drop(second);
         turn(&mut feed, &mut sub, &hold);
         assert_eq!(counts(&sent), (3, 3));
+    }
+
+    /// The scope taps on the feed (`lf_engine::scope`): nothing until the UI asks for them, then
+    /// batches that splice onto each other by frame, a `gap` wherever the trace broke (the first batch,
+    /// the columns a held tick dropped), and no columns on a reset frame.
+    #[test]
+    fn the_feed_carries_scope_columns_and_says_where_the_trace_broke() {
+        // A slow device: a column (192 frames at 48 kHz) takes three blocks, so a tick's batch stays
+        // far under the cap however the test machine schedules this thread.
+        let device = TestDevice::start(48_000, 64, Duration::from_millis(10), |_| 0.0);
+        assert!(device.wait_blocks(4, Duration::from_secs(5)), "the engine renders");
+        let mut feed = Feed::new(device.host().clone());
+        let hold = Arc::new(Hold::default());
+        let (mut sub, sent) = subscriber();
+        let batches = |sent: &Sent| sent.lock().unwrap().iter().filter_map(|f| f.scope.clone()).collect::<Vec<_>>();
+        let columns = |batch: &ScopeUpdate| batch.min[0].len();
+        turn(&mut feed, &mut sub, &hold);
+        assert!(device.wait_blocks(12, Duration::from_secs(5)));
+        turn(&mut feed, &mut sub, &hold);
+        assert!(batches(&sent).is_empty(), "nobody asked for the scope");
+
+        device.host().send(TimedCommand { frame: None, command: Command::SetScope(true) }).unwrap();
+        assert!(device.wait_blocks(12, Duration::from_secs(5)));
+        turn(&mut feed, &mut sub, &hold);
+        let first = batches(&sent).pop().expect("the columns reach the feed");
+        assert_eq!((first.bin, first.min.len(), first.max.len()), (192, SCOPE_SOURCES, SCOPE_SOURCES));
+        assert!(first.min.iter().chain(&first.max).all(|c| c.len() == columns(&first)), "every array holds the same columns");
+        assert!(first.gap, "the first batch has nothing to splice onto");
+
+        assert!(device.wait_blocks(9, Duration::from_secs(5)));
+        turn(&mut feed, &mut sub, &hold);
+        let next = batches(&sent).pop().expect("a second batch");
+        assert!(!next.gap, "it splices onto the one before it");
+        assert_eq!(next.frame, first.frame + columns(&first) as Frame * first.bin as Frame, "no hole and no overlap between batches");
+
+        // A hole inside one drain (the taps switched off and on between two ticks): only the newest run
+        // goes out, and it says the trace broke. Were the whole drain sent, its `frame` would be where
+        // the batch above ended and its `bin` would claim the hole never happened.
+        let spliced = next.frame + columns(&next) as Frame * next.bin as Frame;
+        assert!(device.wait_blocks(12, Duration::from_secs(5)), "columns before the switch");
+        device.host().send(TimedCommand { frame: None, command: Command::SetScope(false) }).unwrap();
+        assert!(device.wait_blocks(30, Duration::from_secs(5)), "the hole: frames no column covers");
+        device.host().send(TimedCommand { frame: None, command: Command::SetScope(true) }).unwrap();
+        assert!(device.wait_blocks(12, Duration::from_secs(5)), "columns after it");
+        turn(&mut feed, &mut sub, &hold);
+        let run = batches(&sent).pop().expect("a batch after the hole");
+        assert!(run.gap, "a batch that cannot be spliced says so");
+        assert!(run.frame > spliced, "it is the run after the hole, not the one before it ({} against {spliced})", run.frame);
+        assert!(columns(&run) < 6, "the run before the hole is not in it ({} columns)", columns(&run));
+
+        // Held, the columns are drained and dropped: the hold's reset carries none, and the batch after
+        // it says the trace broke.
+        let guard = FeedHold::take(&hold);
+        assert!(device.wait_blocks(12, Duration::from_secs(5)));
+        for _ in 0..4 {
+            turn(&mut feed, &mut sub, &hold);
+        }
+        let sent_while_held = batches(&sent).len();
+        drop(guard);
+        // Columns waiting when the hold ends: the resync frame still carries none.
+        assert!(device.wait_blocks(9, Duration::from_secs(5)));
+        turn(&mut feed, &mut sub, &hold);
+        {
+            let frames = sent.lock().unwrap();
+            let resync = frames.iter().rposition(|f| f.reset).expect("the hold ends with a reset");
+            assert!(frames[resync].scope.is_none(), "a reset frame carries no columns");
+        }
+        assert!(device.wait_blocks(9, Duration::from_secs(5)));
+        turn(&mut feed, &mut sub, &hold);
+        let after = batches(&sent);
+        assert_eq!(after.len(), sent_while_held + 1, "the held ticks sent none, and one batch came after");
+        assert!(after[after.len() - 1].gap, "the columns the hold dropped broke the trace");
     }
 
     /// The thread itself: held, it sends nothing while the engine reports; released, its next frame

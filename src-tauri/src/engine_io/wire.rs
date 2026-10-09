@@ -130,6 +130,7 @@ enum CommandDef {
     SetInstrumentGain(#[serde(with = "instrument")] Instrument, f32),
     SetInputSend(#[serde(with = "input_send")] InputSend, bool),
     SetInputSendParam(#[serde(with = "input_send_param")] InputSendParam, f64),
+    SetScope(bool),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -390,6 +391,25 @@ pub struct PeakUpdate {
     pub max: Vec<f32>,
 }
 
+/// Live scope columns since the last frame, sent only while the UI asked for them
+/// (`Command::SetScope`). A column is `bin` frames of sound: `min[s][k]` and `max[s][k]` are column
+/// `k` of source `s`, the five lanes after their FX, then the monitor, then the master — the engine's
+/// output as the device takes it, through the limiter and with the monitor in it. Every array holds the
+/// same number of columns.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScopeUpdate {
+    /// The device frame the first column covers; each later column starts `bin` frames after the one
+    /// before it.
+    pub frame: Frame,
+    pub bin: u32,
+    /// Columns were lost before this batch (a full ring, a device-frame skip, a held feed): the UI
+    /// drops the trace it holds instead of splicing this batch onto it.
+    pub gap: bool,
+    pub min: Vec<Vec<f32>>,
+    pub max: Vec<Vec<f32>>,
+}
+
 /// One `engine_feed` message.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct FeedFrame {
@@ -408,6 +428,9 @@ pub struct FeedFrame {
     /// `null` while no device runs.
     pub meter: Option<Meter>,
     pub peaks: Vec<PeakUpdate>,
+    /// Absent unless the stage view asked for the scope and this frame carries columns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<ScopeUpdate>,
     /// Reset frames only (absent otherwise): the settings the host keeps and replays into every new
     /// engine (`settings.rs`), in replay order and as the UI sends them; a lane's mix as the engine last
     /// applied it, where it differs from a fresh lane's. A setting missing from it is at the engine's
@@ -517,7 +540,7 @@ mod tests {
 
     /// Every `Command` variant, by position: a new variant fails to compile here until it has a
     /// number (bump `COMMANDS`) and an example in the fixture.
-    const COMMANDS: usize = 44;
+    const COMMANDS: usize = 45;
     fn command_index(c: &Command) -> usize {
         use Command::*;
         match c {
@@ -565,6 +588,7 @@ mod tests {
             SetFadeBars(_) => 41,
             SetInstrumentGain(..) => 42,
             SetPan(..) => 43,
+            SetScope(_) => 44,
         }
     }
 
@@ -756,6 +780,10 @@ mod tests {
         assert!(frames.iter().any(|f| f.status == Some(None)), "a frame whose device stopped (status null)");
         assert!(frames.iter().any(|f| f.status.is_none()), "a frame with no status change (status absent)");
         assert!(frames.iter().all(|f| f.settings.is_some() == f.reset), "settings on the reset frames only");
+        let scope = frames.iter().find_map(|f| f.scope.clone()).expect("a frame carrying scope columns");
+        assert_eq!((scope.min.len(), scope.max.len()), (lf_engine::scope::SCOPE_SOURCES, lf_engine::scope::SCOPE_SOURCES), "one array per source");
+        assert!(scope.min.iter().chain(&scope.max).all(|c| c.len() == scope.min[0].len()), "every array holds the same columns");
+        assert!(frames.iter().any(|f| f.scope.is_none()), "and one without them (the field is absent then)");
     }
 
     #[test]

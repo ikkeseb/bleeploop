@@ -108,6 +108,12 @@ pub struct LaneFx {
     timing: Option<(Frame, u32)>,
     pans: [Pan; TRACK_COUNT],
     pan_coef: f64,
+    /// Per lane, its chain's output over the chunk [`LaneFx::render`] last rendered: `[min, max]`,
+    /// spanning zero; what the engine folds into the scope's columns ([`crate::scope`]). Written only
+    /// while the taps are on ([`LaneFx::set_env`]), so a closed stage view renders exactly what it
+    /// rendered before the taps existed.
+    env: [[f32; 2]; TRACK_COUNT],
+    env_on: bool,
     out: [f32; QUANTUM],
     send: [f32; QUANTUM],
     sends: [f32; QUANTUM],
@@ -135,6 +141,8 @@ impl LaneFx {
             timing: None,
             pans: [Pan::seeded(0.0); TRACK_COUNT],
             pan_coef: (-1.0 / (PAN_TAU_SECONDS * sample_rate as f64)).exp(),
+            env: [[0.0; 2]; TRACK_COUNT],
+            env_on: false,
             out: [0.0; QUANTUM],
             send: [0.0; QUANTUM],
             sends: [0.0; QUANTUM],
@@ -199,6 +207,18 @@ impl LaneFx {
     /// Lane `lane`'s pan target (`Command::SetPan`): what its mix reports, not where a glide has got to.
     pub fn pan(&self, lane: usize) -> f32 {
         self.pans[lane].target
+    }
+
+    /// Each lane's min and max over the chunk [`LaneFx::render`] last rendered, after its FX and its
+    /// fade and before its pan: what the scope folds into its columns ([`crate::scope`]). Stale while
+    /// the taps are off.
+    pub fn envelope(&self) -> &[[f32; 2]; TRACK_COUNT] {
+        &self.env
+    }
+
+    /// `Command::SetScope`: take each lane's envelope every render, or stop taking it.
+    pub(crate) fn set_env(&mut self, on: bool) {
+        self.env_on = on;
     }
 
     /// Where lane `lane`'s pan has got to on its glide toward [`LaneFx::pan`].
@@ -266,6 +286,17 @@ impl LaneFx {
         for (i, (chain, lane)) in self.chains.iter_mut().zip(lanes).enumerate() {
             let (out, send) = (&mut self.out[..n], &mut self.send[..n]);
             chain.process_fading(f, &lane[..n], fading[i].then(|| &fades[i][..n]), out, send);
+            if self.env_on {
+                // The lane as the player hears it before the master: after its FX and its fade, before
+                // its pan (`env`, for the scope's columns). `out` is read once more here, so the fold
+                // rides the cache line the chain just wrote.
+                let mut env = [0.0f32; 2];
+                for &x in out.iter() {
+                    env[0] = env[0].min(x);
+                    env[1] = env[1].max(x);
+                }
+                self.env[i] = env;
+            }
             any_send |= !chain.send_silent();
             for (s, &x) in sends.iter_mut().zip(send.iter()) {
                 *s += x;

@@ -187,7 +187,8 @@ pub(crate) fn ui_route(command: &Command) -> UiRoute {
         | Command::SetSlotGain(..)
         | Command::SetInstrumentGain(..)
         | Command::SetInputSend(..)
-        | Command::SetInputSendParam(..) => UiRoute::Direct,
+        | Command::SetInputSendParam(..)
+        | Command::SetScope(_) => UiRoute::Direct,
     }
 }
 

@@ -1345,7 +1345,13 @@ mod pipeline {
         engine: RealEngine,
         ring: rtrb::Producer<TimedCommand>,
         /// The rest of the handle, kept as the device side keeps it.
-        _handle: (rtrb::Consumer<lf_engine::Event>, [lf_engine::SlotPort; lf_engine::SLOT_COUNT], std::sync::Arc<lf_engine::Overview>, lf_engine::SessionPort),
+        _handle: (
+            rtrb::Consumer<lf_engine::Event>,
+            [lf_engine::SlotPort; lf_engine::SLOT_COUNT],
+            std::sync::Arc<lf_engine::Overview>,
+            lf_engine::SessionPort,
+            rtrb::Consumer<lf_engine::scope::ScopeBin>,
+        ),
         frame: Frame,
     }
 
@@ -1354,8 +1360,8 @@ mod pipeline {
 
         fn new() -> Real {
             let (engine, handle) = RealEngine::new(EngineConfig { max_loop_seconds: 2.0, ..EngineConfig::new(48_000) });
-            let EngineHandle { commands, events, slots, overview, session } = handle;
-            Real { engine, ring: commands, _handle: (events, slots, overview, session), frame: 0 }
+            let EngineHandle { commands, events, slots, overview, session, scope } = handle;
+            Real { engine, ring: commands, _handle: (events, slots, overview, session, scope), frame: 0 }
         }
 
         fn drain(&mut self, queue: &mut Queue) -> Drained {

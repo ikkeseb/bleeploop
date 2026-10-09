@@ -20,6 +20,8 @@ import {
   type LaneInfo,
   type LaneMix,
   type LaneState,
+  type ScopeUpdate,
+  SCOPE_SOURCES,
 } from '../../platform';
 import { firstTakeSpan, openingSpan, type LoadSessionPayload, type PeakView, type TrackState } from './looper-types';
 import { FX_META, FX_PARAM_DEFS, validateFxStates, type FxParamDef, type FxState } from './fx-metadata';
@@ -68,7 +70,9 @@ import { notifyError, notifyInfo } from '../../notify';
  * the player's confirm.
  *
  * Invariant 6: a frame writes a Solid signal only when its value changed; the waveform rAF reads the
- * plain mirror (`plain`) and extrapolates the playhead from the feed's clock anchor.
+ * plain mirror (`plain`) and extrapolates the playhead from the feed's clock anchor. The live scope
+ * taps land in that mirror too and nowhere else (`applyScope`, read through `scopeInto`): a frame of
+ * them writes no signal, and a draw loop reading them subscribes to nothing.
  */
 
 /** A lane's public shape, filled from the feed's `LaneInfo`. */
@@ -277,6 +281,29 @@ interface LanePeaks {
   version: number;
 }
 
+/** Columns the scope mirror holds: about four seconds of 4 ms columns, a ring per source. */
+const SCOPE_COLUMNS = 1024;
+
+/**
+ * A non-reactive view of the scope's columns, filled into a caller-owned object by `scopeInto` so the
+ * rAF draw loop reads them with no allocation and no Solid subscription (invariant 6). `lo`/`hi` are
+ * refs into the store's own arrays, one per source in `SCOPE_SOURCES` order (the five lanes after
+ * their FX, the monitor, the master output); each is a ring of `SCOPE_COLUMNS` columns whose newest column
+ * sits at `at - 1` and whose valid columns are the `count` before it. The newest column covers `bin`
+ * frames from `frame`, and each older one `bin` frames earlier. `epoch` bumps whenever the trace
+ * broke (a `gap`, a reset): a draw that holds state across frames starts over.
+ * @public (the look that draws it is not built yet; `verify/guards/stage-draw.mjs` allows `scopeInto`)
+ */
+export interface ScopeView {
+  lo: readonly Float32Array[] | null;
+  hi: readonly Float32Array[] | null;
+  at: number;
+  count: number;
+  frame: number;
+  bin: number;
+  epoch: number;
+}
+
 const plain = {
   state: Array.from({ length: ENGINE_LANES }, (): TrackState => 'EMPTY'),
   waiting: Array.from({ length: ENGINE_LANES }, () => false),
@@ -308,6 +335,20 @@ const plain = {
     count: 0,
     version: 0,
   })),
+  /** The live scope taps' columns (`ScopeView`), per source a ring of lows and one of highs: written
+   * only by `applyScope`, read only by `scopeInto`. Preallocated, so a frame of columns allocates
+   * nothing. */
+  scope: {
+    lo: Array.from({ length: SCOPE_SOURCES }, () => new Float32Array(SCOPE_COLUMNS)),
+    hi: Array.from({ length: SCOPE_SOURCES }, () => new Float32Array(SCOPE_COLUMNS)),
+    /** Where the next column lands. */
+    at: 0,
+    count: 0,
+    /** The device frame the newest column covers, and the frames one column covers. */
+    frame: 0,
+    bin: 0,
+    epoch: 0,
+  },
   /** Per lane, bumped when its committed loop may have changed: a waveform update while it neither
    * records nor overdubs, and the end of a take or layer. Still while a layer sums, whose snapshot is
    * the loop before it (`engineSession.revision`). */
@@ -428,6 +469,18 @@ function peaksInto(i: number, out: PeakView): PeakView {
   out.max = p.max;
   out.count = p.count;
   out.version = p.version;
+  return out;
+}
+
+function scopeInto(out: ScopeView): ScopeView {
+  const s = plain.scope;
+  out.lo = s.lo;
+  out.hi = s.hi;
+  out.at = s.at;
+  out.count = s.count;
+  out.frame = s.frame;
+  out.bin = s.bin;
+  out.epoch = s.epoch;
   return out;
 }
 
@@ -631,6 +684,37 @@ function applyPeaks(lane: number, start: number, count: number, min: readonly nu
 }
 
 /**
+ * One frame's scope columns into the mirror, oldest first. A batch the engine says it cannot splice
+ * onto the trace (`gap`: a full ring, a device-frame skip, a held feed, a new engine) drops what the
+ * mirror holds and bumps the epoch, so no draw joins two moments that never followed each other.
+ */
+function applyScope(u: ScopeUpdate): void {
+  const s = plain.scope;
+  if (u.gap) {
+    s.count = 0;
+    s.epoch++;
+  }
+  const columns = u.min[0]?.length ?? 0;
+  for (let k = 0; k < columns; k++) {
+    for (let src = 0; src < SCOPE_SOURCES; src++) {
+      s.lo[src][s.at] = u.min[src][k];
+      s.hi[src][s.at] = u.max[src][k];
+    }
+    s.at = (s.at + 1) % SCOPE_COLUMNS;
+    if (s.count < SCOPE_COLUMNS) s.count++;
+  }
+  if (columns === 0) return;
+  s.frame = u.frame + (columns - 1) * u.bin;
+  s.bin = u.bin;
+}
+
+/** The trace the mirror holds is void: the engine this view follows changed, or it was replaced. */
+function dropScope(): void {
+  plain.scope.count = 0;
+  plain.scope.epoch++;
+}
+
+/**
  * After a frame's events: a clear that took a loop and left no lane holding one hands the recovery its
  * token, bound to this engine; any loop still or again held cancels it (a partial clear, a commit). A
  * lane whose `Cleared` came without its own event yet counts as empty.
@@ -657,6 +741,7 @@ function applyFrameNow(f: FeedFrame): void {
       p.version++;
     }
     for (let i = 0; i < ENGINE_LANES; i++) plain.revision[i]++;
+    dropScope();
     plain.resets++;
     plain.clearing.fill(false);
     for (const timer of beatTimers) clearTimeout(timer);
@@ -699,6 +784,7 @@ function applyFrameNow(f: FeedFrame): void {
   plain.level = f.meter?.peak ?? 0;
   plain.clip = f.meter?.clip ?? false;
   for (const p of f.peaks) applyPeaks(p.lane, p.start, p.count, p.min, p.max);
+  if (f.scope) applyScope(f.scope);
 }
 
 // ── The mix and the modes this store keeps ────────────────────────────────────────────────────────
@@ -1126,6 +1212,7 @@ export const engineLooper = {
   toggleInput: async (): Promise<boolean> => toggleEngineInput(),
   inputArmRequested: (): boolean => false,
   peaksInto,
+  scopeInto,
   phaseValue,
   levelValue: (): number => (plain.clip ? Math.max(1, plain.level) : plain.level),
   stateOf: (i: number): TrackState => plain.state[i] ?? 'EMPTY',

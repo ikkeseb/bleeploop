@@ -14,6 +14,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import {
+  SCOPE_SOURCES,
   decodeCommand,
   decodeDeviceEvent,
   decodeDeviceRequest,
@@ -54,7 +55,7 @@ const COMMANDS = [
   'ActionOn', 'SelectTrack', 'SetBpm', 'SetMetronome', 'SetClickVolume', 'SetMasterVolume', 'SetMasterMute',
   'SetLoopEndStop', 'SetFadeBars', 'SetFixedLength', 'SetFixedBars', 'SetRetake', 'SetAutoRecord', 'SetAutoSensitivity',
   'SetVolume', 'SetMute', 'SetDubFeedback', 'SetPan', 'SetFxParam', 'SetFxBypass', 'SelectInstrument', 'NoteOn', 'NoteOff', 'PitchBend', 'Modulation',
-  'AllNotesOff', 'SetSlotLive', 'SetSlotGain', 'SetInstrumentGain', 'SetInputSend', 'SetInputSendParam', 'Press',
+  'AllNotesOff', 'SetSlotLive', 'SetSlotGain', 'SetInstrumentGain', 'SetInputSend', 'SetInputSendParam', 'Press', 'SetScope',
 ];
 const ACTIONS = [
   'RecDub', 'PlayStop', 'Undo', 'Clear', 'NextTrack', 'PrevTrack', 'PlayAll', 'StopAll', 'Mute', 'Reverse', 'Copy', 'Halve',
@@ -157,7 +158,9 @@ for (const s of fixture.deviceStatuses) {
 for (const f of fixture.feed) {
   check(`feed frame ${f.seq}`, () => {
     const decoded = decodeFeedFrame(structuredClone(f));
-    assert.deepEqual(keys(decoded), keys(f), 'the same top-level fields');
+    // `scope` is absent on the wire when the stage view sent no columns and always present decoded
+    // (null then), as `status` mirrors its own absence.
+    assert.deepEqual(keys(decoded), keys('scope' in f ? f : { ...f, scope: null }), 'the same top-level fields');
     assert.equal(decoded.seq, f.seq);
     assert.equal(decoded.reset, f.reset);
     assert.deepEqual(decoded.events.map(rewire), f.events);
@@ -167,8 +170,17 @@ for (const f of fixture.feed) {
     assert.deepEqual(decoded.anchor, f.anchor);
     assert.deepEqual(decoded.meter, f.meter);
     assert.deepEqual(decoded.peaks, f.peaks);
+    assert.deepEqual(decoded.scope, f.scope ?? null);
   });
 }
+check('the fixture has a frame carrying scope columns and frames carrying none', () => {
+  const carried = fixture.feed.filter((f) => f.scope !== undefined);
+  assert.equal(carried.length, 1);
+  const { min, max } = carried[0].scope;
+  assert.equal(min.length, SCOPE_SOURCES, 'one array per source');
+  assert.ok([...min, ...max].every((c) => c.length === min[0].length), 'every array holds the same columns');
+  assert.ok(fixture.feed.some((f) => f.scope === undefined), 'and a frame with the field absent');
+});
 check('the fixture has a reset frame with remembered settings', () =>
   assert.ok(fixture.feed.some((f) => f.reset && Array.isArray(f.settings) && f.settings.length > 0)),
 );
@@ -241,6 +253,27 @@ const refused = {
     const s = structuredClone(fixture.deviceStatuses[0]);
     s.inputChannels = [0, 1, 2];
     decodeDeviceStatus(s);
+  },
+  'a scope batch of six sources': () => {
+    const f = structuredClone(fixture.feed.find((x) => x.scope));
+    f.scope.min.pop();
+    f.scope.max.pop();
+    decodeFeedFrame(f);
+  },
+  'a scope batch whose arrays differ in length': () => {
+    const f = structuredClone(fixture.feed.find((x) => x.scope));
+    f.scope.max[3].pop();
+    decodeFeedFrame(f);
+  },
+  'a scope batch without its gap': () => {
+    const f = structuredClone(fixture.feed.find((x) => x.scope));
+    delete f.scope.gap;
+    decodeFeedFrame(f);
+  },
+  'a scope batch with a bin of no frames': () => {
+    const f = structuredClone(fixture.feed.find((x) => x.scope));
+    f.scope.bin = 0;
+    decodeFeedFrame(f);
   },
   'an anchor without its grid': () => {
     const f = structuredClone(fixture.feed.find((x) => x.anchor));

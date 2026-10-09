@@ -80,6 +80,9 @@ enum Key {
     Modulation,
     SlotLive(u8),
     SlotGain(u8),
+    /// The live scope taps (`lf_engine::scope`): kept so a device rebuild under an open stage view
+    /// keeps sending columns.
+    Scope,
 }
 
 impl Key {
@@ -123,6 +126,7 @@ fn key(command: &Command) -> Option<Key> {
         Command::Modulation(_) => Key::Modulation,
         Command::SetSlotLive(i, _) => Key::SlotLive(slot(i)?),
         Command::SetSlotGain(i, _) => Key::SlotGain(slot(i)?),
+        Command::SetScope(_) => Key::Scope,
         Command::RecDub(_)
         | Command::PlayStop(_)
         | Command::Stop(_)

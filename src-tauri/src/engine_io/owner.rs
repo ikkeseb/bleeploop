@@ -59,7 +59,7 @@ pub(crate) fn swap_engine(core: &Core, engine: Engine, handle: EngineHandle, con
     if let Some(hook) = &hook {
         hook.pause();
     }
-    let EngineHandle { commands, events, slots, overview, session } = handle;
+    let EngineHandle { commands, events, slots, overview, session, scope } = handle;
     let mut ports = core.ports.each_ref().map(|p| p.lock().unwrap_or_else(|e| e.into_inner()));
     core.rate.store(config.sample_rate, Relaxed);
     core.max_block.store(config.max_block as u32, Relaxed);
@@ -108,7 +108,8 @@ pub(crate) fn swap_engine(core: &Core, engine: Engine, handle: EngineHandle, con
         for command in &unsent_input {
             settings.record(command);
         }
-        let ends = ends.insert(Ends { commands, events, overview, session: Some(session) });
+        let scope_bin = lf_engine::scope::scope_bin_frames(config.sample_rate) as u32;
+        let ends = ends.insert(Ends { commands, events, overview, session: Some(session), scope, scope_bin });
         let replay: Vec<_> = settings.replay().collect();
         let made = core.engine_gen.fetch_add(1, Release) + 1;
         debug_assert_eq!(made, generation, "another thread raised the engine generation mid-swap");

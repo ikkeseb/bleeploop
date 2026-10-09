@@ -28,6 +28,7 @@
 //! | [`input_fx`] | the input sends: ECHO, REVERB and RING MOD on the wet signal, wet only, into the record tap and the monitor | — (engine only) |
 //! | [`instruments`] | the six built-in instruments, the selected one (or none), each one's level, the wheels, their record path | `synths/index.ts`, `input-router.ts` (its sustain and note ownership went to the app's `engine_io::midi::router`) |
 //! | [`overview`] | what the UI draws, for a reader off the audio thread: the grid anchor, each lane's state, buffer, orientation and frames, each buffer's waveform peaks | `looper/peaks.ts` |
+//! | [`scope`] | the live scope taps, while the UI asks for them ([`Command::SetScope`]): per lane after its FX, per monitor and per master, a min/max envelope in 4 ms columns on its own ring | — (engine only) |
 //! | `note_record` | DEV builds only: each applied `NoteOn` and `NoteOff` and its frame, for the MIDI latency benchmark off the audio thread (`src-tauri/src/engine_io/midi_bench.rs`) | — |
 //! | [`session`] | saving and loading a session: a snapshot copied out a budget per frame, each lane with its mix at the pin, a load swapped into an empty looper with each lane's mix, both after the commands due on their block's first frame, the host's port | `looper/session.ts`, `export/*` |
 //! | [`render`] | the export's wet master, offline: a fresh engine the session's size, every lane playing at its snapshot's mix, the master's settings, the warm-up passes, the kept pass lined up with the stems | `session/render.ts`, `session/render-plan.ts` (Tone, removed) |
@@ -151,7 +152,8 @@
 //! `tests/trim.rs` the TRIM, `tests/dub_feedback.rs` DUB FEEDBACK, `tests/punch_ramps.rs` an overdub's punch
 //! ramps (its reference: `tests/common/dub.rs`), `tests/playback_edges.rs` the undo, PLAY and STOP edges
 //! (its reference: `tests/common/edges.rs`), `tests/fade.rs` FADE, `tests/input_fx.rs`
-//! the input sends, `tests/toggles.rs` the toggles, `tests/mix_feed.rs` a lane's mix on the feed and the event ring's delivery, `tests/pan.rs`
+//! the input sends, `tests/scope.rs` the live scope taps (their columns, and that the sound does not
+//! change with them on), `tests/toggles.rs` the toggles, `tests/mix_feed.rs` a lane's mix on the feed and the event ring's delivery, `tests/pan.rs`
 //! a lane's pan (the centre's bits against the render before pan: `effects`' unit test). `tests/perf.rs`
 //! holds the ignored cost bars (Stage 2 and 3, the input sends, the lanes' pan, a multiply's burst, a
 //! TRIM's) and the Stage 3 load's alloc check. `tests/golden_jam.rs` runs the golden jam at 44.1 and 48 kHz, bit-identical across block
@@ -206,6 +208,7 @@ pub mod looper;
 pub mod note_record;
 pub mod overview;
 pub mod render;
+pub mod scope;
 pub mod session;
 pub mod slots;
 

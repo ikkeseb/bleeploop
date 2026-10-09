@@ -200,7 +200,9 @@ export interface EngineFake extends EngineHost {
   refuseMix: boolean;
   /**
    * Decode `raw` as a feed frame (the real decoder) and hand it to the subscribers, as the native feed
-   * would. Only probes call it, through `__lf.native`.
+   * would. Only probes call it, through `__lf.native`. A frame's waveform `peaks` and its `scope`
+   * columns pass straight through, so a probe scripts what the looper and the stage view draw; the
+   * frames the fake makes itself (a lane's `Mix`, a toggle's answer) carry neither.
    * @public
    */
   emit(raw: unknown): void;
@@ -414,6 +416,7 @@ function flushEchoes(): void {
       anchor: null,
       meter: lastMeter,
       peaks: [],
+      scope: null,
     };
     for (const onFrame of engineSubscribers) onFrame(frame);
   }
@@ -489,7 +492,7 @@ function flushToggles(): void {
   togglesScheduled = false;
   const events = toggleAnswers.splice(0);
   if (events.length === 0) return;
-  const frame: FeedFrame = { seq: 0, reset: false, events, device: [], anchor: null, meter: lastMeter, peaks: [] };
+  const frame: FeedFrame = { seq: 0, reset: false, events, device: [], anchor: null, meter: lastMeter, peaks: [], scope: null };
   for (const onFrame of engineSubscribers) onFrame(frame);
 }
 

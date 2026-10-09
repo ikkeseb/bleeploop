@@ -39,6 +39,7 @@ use crate::input_fx::InputFx;
 use crate::instruments::Instruments;
 use crate::looper::{Applied, Cx, Looper};
 use crate::overview::Overview;
+use crate::scope::{Scope, ScopeBin, SCOPE_MASTER, SCOPE_MONITOR, SCOPE_SOURCES};
 use crate::session::{SessionEnd, SessionPort};
 use crate::slots::{Rack, SlotPort};
 
@@ -75,6 +76,10 @@ pub struct EngineHandle {
     pub slots: [SlotPort; SLOT_COUNT],
     pub overview: Arc<Overview>,
     pub session: SessionPort,
+    /// The scope taps' finished columns, oldest first, while the UI asks for them
+    /// ([`Command::SetScope`]): its own ring, so a visual never pushes an event out of `events`
+    /// (invariant 2).
+    pub scope: Consumer<ScopeBin>,
 }
 
 /// The event ring's producer. A full ring refuses the event and counts it: the audio never waits.
@@ -123,6 +128,42 @@ pub struct Diag {
     /// Units installed into an occupied slot (handed back) or leaked because nothing read the port, and
     /// plugin calls the rack's render silenced because their output held a non-finite sample.
     pub slot_protocol_errors: u64,
+    /// Scope columns lost on the audio thread ([`crate::scope::Scope::dropped`]): a full ring, or an
+    /// open column a device-frame skip discarded. No fault: a reader that stops reading makes them, and
+    /// the `frame` sequence tells the UI what it lost.
+    pub scope_dropped: u64,
+}
+
+/// One chunk the scope still owes its master column: the frames it covered, and every source's
+/// envelope but the master's. The master is the engine's output, which is only final once the block's
+/// limiter has run and the monitor has joined it — both outside the chunk loop — so the chunks wait
+/// here and are folded in order after that ([`Engine::process`]).
+#[derive(Clone, Copy)]
+struct ScopeChunk {
+    frame: Frame,
+    /// The chunk's frames in the block: `k0..k1`.
+    k0: usize,
+    k1: usize,
+    lo: [f32; SCOPE_SOURCES - 1],
+    hi: [f32; SCOPE_SOURCES - 1],
+}
+
+/// Chunks of one block that list holds. A block splits at every quantum end (`max_block / QUANTUM`),
+/// at every frame the pending table has a command stamped for (`MAX_PENDING`), and at each looper
+/// event, beat and AUTO trigger — those last three fall on far fewer frames than the first two at any
+/// tempo the clock takes, and 32 more are slack. Past the bound a chunk's columns are dropped and
+/// counted, so the UI reads a gap rather than silence; nothing here ever grows (invariant 5).
+fn scope_chunk_bound(max_block: usize) -> usize {
+    max_block / QUANTUM + MAX_PENDING + 32
+}
+
+/// The staging list, its pages touched here and not in the callback (as every buffer is).
+fn scope_chunks(max_block: usize) -> Vec<ScopeChunk> {
+    let empty = ScopeChunk { frame: 0, k0: 0, k1: 0, lo: [0.0; SCOPE_SOURCES - 1], hi: [0.0; SCOPE_SOURCES - 1] };
+    let mut list = Vec::with_capacity(scope_chunk_bound(max_block));
+    list.resize(list.capacity(), empty);
+    list.clear();
+    list
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -177,6 +218,11 @@ pub struct Engine {
     monitor: Vec<f32>,
     /// The looper's own mix under the master volume: the lanes before their FX, and the click.
     looper_mix: Vec<f32>,
+    /// The live scope taps: off until the UI asks for them ([`Command::SetScope`]).
+    scope: Scope,
+    /// This block's chunks waiting for their master column ([`ScopeChunk`]); never longer than the
+    /// capacity it was built with.
+    scope_chunks: Vec<ScopeChunk>,
     /// The frames `process` rendered last: the length of the taps.
     rendered: usize,
     limiter: Compressor,
@@ -217,6 +263,7 @@ impl Engine {
         let looper = Looper::new(config.sample_rate, capacity);
         let overview = looper.overview().clone();
         let (session_port, session) = crate::session::channel();
+        let (scope, scope_rx) = Scope::new(config.sample_rate);
         let engine = Engine {
             config,
             clock: Clock::new(config.sample_rate),
@@ -251,6 +298,8 @@ impl Engine {
             mix: [vec![0.0; config.max_block], vec![0.0; config.max_block]],
             monitor: vec![0.0; config.max_block],
             looper_mix: vec![0.0; config.max_block],
+            scope,
+            scope_chunks: scope_chunks(config.max_block),
             rendered: 0,
             // Built here, so its start-up gain dip passes on the first frames the device renders.
             limiter: Compressor::master_limiter(config.sample_rate as f32),
@@ -266,7 +315,7 @@ impl Engine {
             commands_dropped: 0,
             xruns: 0,
         };
-        (engine, EngineHandle { commands: cmd_tx, events: evt_rx, slots, overview, session: session_port })
+        (engine, EngineHandle { commands: cmd_tx, events: evt_rx, slots, overview, session: session_port, scope: scope_rx })
     }
 
     pub fn config(&self) -> &EngineConfig {
@@ -316,6 +365,7 @@ impl Engine {
             xruns: self.xruns,
             slot_events_dropped: self.rack.events_dropped,
             slot_protocol_errors: self.rack.protocol_errors,
+            scope_dropped: self.scope.dropped(),
         }
     }
 
@@ -390,6 +440,7 @@ impl Engine {
             master_volume: &mut self.master_volume,
             master_muted: &mut self.master_muted,
             toggles_owed: &mut self.toggles_owed,
+            scope: &mut self.scope,
         };
         apply(&mut self.looper, &mut cx, &mut at, command) == Applied::Done
     }
@@ -462,6 +513,9 @@ impl Engine {
         let align = ctx.align_frames + live_latency + self.limiter.latency() as Frame;
         let record_delay = ctx.input_frames + live_latency;
         self.rendered = n;
+        // A block always folds and clears its own chunks; a block the host's `catch_unwind` cut short
+        // left its own behind, and they name frames this one does not render.
+        self.scope_chunks.clear();
         self.slots_done = 0;
         self.instruments_done = 0;
         self.sends_done = 0;
@@ -480,6 +534,7 @@ impl Engine {
                 master_volume: &mut self.master_volume,
                 master_muted: &mut self.master_muted,
                 toggles_owed: &mut self.toggles_owed,
+                scope: &mut self.scope,
             };
             apply_due(&mut self.pending, &mut self.commands_dropped, &mut self.looper, &mut cx, &mut at);
             if f == start {
@@ -585,6 +640,26 @@ impl Engine {
                 *m = (g * *m as f64) as f32;
                 self.master_gain = crate::glide(self.master_gain, target, self.master_coef);
             }
+            // The scope taps, at the gains this chunk played at (`crate::scope`): the lanes as their
+            // FX left them and the monitor are final here, the master is not (the limiter and the
+            // monitor sum run per block, below), so the chunk waits in the staging list and its master
+            // column is folded there. No allocation (invariant 5): a list that is full drops the chunk
+            // and counts it, and the next column's frame shows the UI the break. Off, none of it runs.
+            if self.scope.on() {
+                let mut chunk = ScopeChunk { frame: f, k0, k1, lo: [0.0; SCOPE_SOURCES - 1], hi: [0.0; SCOPE_SOURCES - 1] };
+                for (i, &[min, max]) in self.fx.envelope().iter().enumerate() {
+                    (chunk.lo[i], chunk.hi[i]) = (min, max);
+                }
+                for &x in &self.monitor[k0..k1] {
+                    chunk.lo[SCOPE_MONITOR] = chunk.lo[SCOPE_MONITOR].min(x);
+                    chunk.hi[SCOPE_MONITOR] = chunk.hi[SCOPE_MONITOR].max(x);
+                }
+                if self.scope_chunks.len() < self.scope_chunks.capacity() {
+                    self.scope_chunks.push(chunk);
+                } else {
+                    self.scope.lost();
+                }
+            }
             f = next;
         }
         self.session.advance(&self.looper, n as Frame);
@@ -595,6 +670,22 @@ impl Engine {
             *l += m;
             *r += m;
         }
+        // The scope's master column: what the device takes, now that it is final. Each chunk in the
+        // order it played, so the columns stay one sequence (`crate::scope`).
+        for chunk in &self.scope_chunks {
+            let (mut lo, mut hi) = ([0.0f32; SCOPE_SOURCES], [0.0f32; SCOPE_SOURCES]);
+            lo[..SCOPE_SOURCES - 1].copy_from_slice(&chunk.lo);
+            hi[..SCOPE_SOURCES - 1].copy_from_slice(&chunk.hi);
+            // The wider of the two sides per sample, never their mean: two lanes panned hard apart or
+            // an antiphase pair would cancel in `(l + r) / 2` and the master would read silent while
+            // the room is loud.
+            for (&a, &b) in left[chunk.k0..chunk.k1].iter().zip(&right[chunk.k0..chunk.k1]) {
+                lo[SCOPE_MASTER] = lo[SCOPE_MASTER].min(a.min(b));
+                hi[SCOPE_MASTER] = hi[SCOPE_MASTER].max(a.max(b));
+            }
+            self.scope.chunk(chunk.frame, chunk.k1 - chunk.k0, &lo, &hi);
+        }
+        self.scope_chunks.clear();
     }
 
     /// Move the ring's commands into the table, an unstamped or late one due at `now`. Take no more than
@@ -745,6 +836,7 @@ struct Apply<'a> {
     master_muted: &'a mut bool,
     /// The engine's `toggles_owed`.
     toggles_owed: &'a mut [u32; Toggle::COUNT],
+    scope: &'a mut Scope,
 }
 
 fn apply(looper: &mut Looper, cx: &mut Cx, at: &mut Apply, command: Command) -> Applied {
@@ -956,6 +1048,12 @@ fn apply(looper: &mut Looper, cx: &mut Cx, at: &mut Apply, command: Command) -> 
         }
         Command::SetInputSendParam(param, value) => {
             at.input_fx.set_param(param, value, now);
+            Applied::Done
+        }
+        Command::SetScope(on) => {
+            at.scope.set_on(on);
+            // The lanes' envelope is taken in the FX render itself, so the chains hear the switch too.
+            cx.fx.set_env(on);
             Applied::Done
         }
     }

@@ -115,6 +115,11 @@ pub enum Command {
     SetInputSend(InputSend, bool),
     /// An input send's parameter, clamped to its range ([`InputSendParam::range`]).
     SetInputSendParam(InputSendParam, f64),
+    /// The live scope taps on or off ([`crate::scope`]): the UI asks for columns while the stage view
+    /// is open and drops them when it closes. Off (the default) the engine folds nothing and pushes
+    /// nothing. No [`Toggle`]: no pedal switches it and it answers with no [`Event::Toggled`] — it is a
+    /// reader's subscription, not a setting the player plays with.
+    SetScope(bool),
 }
 
 impl Command {

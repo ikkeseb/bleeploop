@@ -11,6 +11,7 @@ pub mod refs;
 
 use assert_no_alloc::assert_no_alloc;
 use lf_engine::grid::{frames_per_bar, Frame};
+use lf_engine::scope::ScopeBin;
 use lf_engine::{Command, Engine, EngineConfig, EngineHandle, Event, LaneInfo, LaneState, ProcessContext, SlotEvent, SlotKind, SlotProcessor, TimedCommand};
 
 // Every `process` call in every scenario runs under assert_no_alloc: the audio path never allocates.
@@ -243,6 +244,20 @@ impl Rig {
     /// The host's end of the session port (`lf_engine::session`).
     pub fn session(&mut self) -> &mut lf_engine::SessionPort {
         &mut self.handle.session
+    }
+
+    /// Take the scope columns the engine has pushed, oldest first (the feed's `drain_scope`).
+    pub fn read_scope(&mut self) -> Vec<ScopeBin> {
+        let mut out = Vec::new();
+        while let Ok(column) = self.handle.scope.pop() {
+            out.push(column);
+        }
+        out
+    }
+
+    /// Columns the ring holds, taken and thrown away (a reader that keeps up).
+    pub fn drop_scope(&mut self) -> usize {
+        self.read_scope().len()
     }
 
     /// The device stops, as its owner then does: `Engine::punch_out` (STATUS E3), its events read. The
