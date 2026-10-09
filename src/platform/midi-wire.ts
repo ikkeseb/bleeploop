@@ -41,7 +41,7 @@ export type MidiActionId =
   | 'inFxEcho'
   | 'inFxReverb'
   | 'inFxRing';
-const ACTION_IDS: readonly MidiActionId[] = [
+export const MIDI_ACTION_IDS: readonly MidiActionId[] = [
   'recDub', 'playStop', 'undo', 'clear', 'mute', 'reverse', 'copy', 'halveTrack', 'nextTrack', 'prevTrack', 'playAll',
   'stopAll', 'fadeAll', 'goLive', 'stageView', 'stageNextView', 'tapTempo', 'clickToggle', 'endStopToggle', 'fixedToggle',
   'retakeToggle', 'autoRecToggle', 'inFxEcho', 'inFxReverb', 'inFxRing',
@@ -172,7 +172,7 @@ function decodeBinding(v: unknown, what: string): MidiBinding {
     channel: u8(o.channel, `${what}.channel`, 15),
     kind: oneOf(o.kind, ['cc', 'note'] as const, `${what}.kind`),
     number: u8(o.number, `${what}.number`, 127),
-    action: oneOf(o.action, ACTION_IDS, `${what}.action`),
+    action: oneOf(o.action, MIDI_ACTION_IDS, `${what}.action`),
     target: nullable(o.target, (t) => u8(t, `${what}.target`)),
     pressHigh: bool(o.pressHigh, `${what}.pressHigh`),
     momentary: bool(o.momentary, `${what}.momentary`),
@@ -203,7 +203,7 @@ function decodePort(v: unknown, what: string): MidiPort {
 
 function decodePick(v: unknown, what: string): LearnPick {
   const o = obj(v, what);
-  return { action: oneOf(o.action, ACTION_IDS, `${what}.action`), target: nullable(o.target, (t) => u8(t, `${what}.target`)) };
+  return { action: oneOf(o.action, MIDI_ACTION_IDS, `${what}.action`), target: nullable(o.target, (t) => u8(t, `${what}.target`)) };
 }
 
 function decodeStoreProblem(v: unknown, what: string): StoreProblem {
@@ -263,7 +263,19 @@ export function decodeMidiEvent(raw: unknown): MidiEvent {
   }
 }
 
-/** Check one input event as the Rust side reads it (the browser fake records only what passes). */
+/** The input events as the UI sends them (`index.ts` `input` queues these). Velocity is clamped and rounded
+ * to MIDI's 0..127, as the Rust side reads a `u8`. */
+export const encodeInput = {
+  note: (owner: string, note: number, velocity: number, on: boolean): InputEvent => ({
+    note: { owner, note, velocity: Math.max(0, Math.min(127, Math.round(velocity))), on },
+  }),
+  blur: (): InputEvent => 'blur',
+  selectTarget: (slot: number | null, target: NoteTarget): InputEvent => ({ selectTarget: { slot, target } }),
+  allNotesOff: (): InputEvent => 'allNotesOff',
+};
+
+/** Read one input event as the Rust side reads it: a unit variant also as `{"blur": null}`, read as its
+ * name (the browser fake records only what passes). */
 export function decodeInputEvent(raw: unknown): InputEvent {
   const [name, payload] = tagged(raw, 'InputEvent');
   switch (name) {
@@ -284,7 +296,7 @@ export function decodeInputEvent(raw: unknown): InputEvent {
     case 'blur':
     case 'allNotesOff':
       if (payload !== undefined && payload !== null) fail(`InputEvent ${name} is a unit variant`, raw);
-      break;
+      return name;
     default:
       fail('unknown InputEvent variant', raw);
   }

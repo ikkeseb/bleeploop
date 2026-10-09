@@ -13,7 +13,7 @@
 
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { decodeImportReport, decodeInputEvent, decodeMidiEvent } from '../../src/platform/midi-wire.ts';
+import { decodeImportReport, decodeInputEvent, decodeMidiEvent, encodeInput, MIDI_ACTION_IDS } from '../../src/platform/midi-wire.ts';
 
 const fixture = JSON.parse(readFileSync(new URL('../fixtures/midi-wire.json', import.meta.url), 'utf8'));
 
@@ -43,11 +43,11 @@ function rewire(ev) {
 }
 
 // ── Events: every field the Rust side writes is read ────────────────────────────────────────────────
-for (const e of fixture.events) {
+for (const e of fixture.midiEvents) {
   check(`event ${tag(e)[0]} reads every field`, () => assert.deepEqual(rewire(decodeMidiEvent(structuredClone(e))), e));
 }
-check('the fixture covers every event', () => assert.deepEqual(sorted(fixture.events.map((e) => tag(e)[0])), sorted(EVENTS)));
-const listed = fixture.events.flatMap((e) => e.bindings?.bindings ?? []);
+check('the fixture covers every event', () => assert.deepEqual(sorted(fixture.midiEvents.map((e) => tag(e)[0])), sorted(EVENTS)));
+const listed = fixture.midiEvents.flatMap((e) => e.bindings?.bindings ?? []);
 check('the fixture lists every binding state', () =>
   assert.deepEqual(sorted(listed.map((l) => l.state)), sorted(['live', 'blocked', 'noPort', 'severalPorts', 'severalAbsent'])),
 );
@@ -57,30 +57,47 @@ check('the fixture lists both origins, both kinds and a HOLD', () => {
   assert.ok(listed.some((l) => l.binding.hold));
 });
 check('the fixture has every port state', () =>
-  assert.deepEqual(sorted(fixture.events.flatMap((e) => e.ports?.ports ?? []).map((p) => p.state)), ['busy', 'closed', 'open']),
+  assert.deepEqual(sorted(fixture.midiEvents.flatMap((e) => e.ports?.ports ?? []).map((p) => p.state)), ['busy', 'closed', 'open']),
 );
 check('the fixture has every store problem', () =>
-  assert.deepEqual(sorted(fixture.events.filter((e) => e.store).map((e) => tag(e.store.problem)[0])), sorted(['readOnly', 'conflict', 'failed', 'rejected'])),
+  assert.deepEqual(sorted(fixture.midiEvents.filter((e) => e.store).map((e) => tag(e.store.problem)[0])), sorted(['readOnly', 'conflict', 'failed', 'rejected'])),
 );
 check('the fixture runs every UI action', () =>
-  assert.deepEqual(sorted(fixture.events.filter((e) => e.run).map((e) => e.run.action)), sorted(['goLive', 'stageView', 'stageNextView', 'tapTempo'])),
+  assert.deepEqual(sorted(fixture.midiEvents.filter((e) => e.run).map((e) => e.run.action)), sorted(['goLive', 'stageView', 'stageNextView', 'tapTempo'])),
 );
 check('learning and awaitingRelease come set and null', () => {
-  assert.ok(fixture.events.some((e) => e.learning?.learning === null) && fixture.events.some((e) => e.learning?.learning));
-  assert.ok(fixture.events.some((e) => e.awaitingRelease?.binding === null) && fixture.events.some((e) => e.awaitingRelease?.binding));
+  assert.ok(fixture.midiEvents.some((e) => e.learning?.learning === null) && fixture.midiEvents.some((e) => e.learning?.learning));
+  assert.ok(fixture.midiEvents.some((e) => e.awaitingRelease?.binding === null) && fixture.midiEvents.some((e) => e.awaitingRelease?.binding));
 });
 
-// ── The action ids: native MIDI's `ActionId::ALL`, in order, each one a learn can name ───────────────
+// ── The action ids: native MIDI's `ActionId::ALL`, in order: the UI's (`decodeMidiEvent`'s list, which
+// `src/app/midi-actions.ts`'s typecheck holds equal to `src/app/actions.ts`'s) ──────────────────────────
 check('every native action id reads, in the picker\'s order', () => {
   const read = fixture.actionIds.map((action) => decodeMidiEvent({ learning: { learning: { action, target: null } } }).learning.action);
   assert.deepEqual(read, fixture.actionIds);
+  assert.deepEqual([...MIDI_ACTION_IDS], fixture.actionIds, "the UI's ids, in its order");
   assert.equal(new Set(read).size, 25);
 });
 
 // ── Input events: the UI sends these; each reads as sent ────────────────────────────────────────────
-for (const e of fixture.inputEvents) {
-  check(`input event ${JSON.stringify(e)}`, () => assert.deepEqual(decodeInputEvent(structuredClone(e)), e));
+/** What the UI's encoder (`index.ts` `input` calls it) makes for the event `e` names. */
+function encodeLike(e) {
+  const [name, p] = tag(e);
+  if (name === 'note') return encodeInput.note(p.owner, p.note, p.velocity, p.on);
+  if (name === 'selectTarget') return encodeInput.selectTarget(p.slot, p.target);
+  return encodeInput[name]();
 }
+for (const e of fixture.inputEvents) {
+  check(`input event ${JSON.stringify(e)} is what the UI sends`, () => assert.deepEqual(encodeLike(e), e));
+  check(`input event ${JSON.stringify(e)} reads as sent`, () => assert.deepEqual(decodeInputEvent(structuredClone(e)), e));
+}
+for (const { sent, reads } of fixture.inputEventsAccepted) {
+  check(`input event ${JSON.stringify(sent)} reads as ${JSON.stringify(reads)}`, () => assert.deepEqual(decodeInputEvent(structuredClone(sent)), reads));
+}
+check('the UI rounds and clamps a velocity to MIDI', () => {
+  assert.equal(encodeInput.note('key:KeyA', 60, 99.6, true).note.velocity, 100);
+  assert.equal(encodeInput.note('key:KeyA', 60, 140, true).note.velocity, 127);
+});
 check('the fixture covers every input event', () =>
   assert.deepEqual(sorted(fixture.inputEvents.map((e) => tag(e)[0])), sorted(INPUT_EVENTS)),
 );
@@ -101,7 +118,7 @@ check('the fixture has an import that ran, one already done and an unreadable on
 });
 
 // ── A drifted name is refused, not silently read ─────────────────────────────────────────────────────
-const bindings = fixture.events.find((e) => e.bindings);
+const bindings = fixture.midiEvents.find((e) => e.bindings);
 const refused = {
   'a snake_case binding field': () => {
     const e = structuredClone(bindings);

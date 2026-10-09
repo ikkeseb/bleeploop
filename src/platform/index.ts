@@ -6,7 +6,7 @@
 import { isTauri } from '@tauri-apps/api/core';
 import type { Platform } from './host';
 import type { EngineCommand, NoteTarget } from './engine-wire';
-import type { InputEvent } from './midi-wire';
+import { encodeInput, type InputEvent } from './midi-wire';
 import { tauriInstallFrontendLogPipe } from './logging';
 import { webEngineFake, webPlatform, type EngineFake } from './host.web';
 import { notifyError } from '../notify';
@@ -130,21 +130,20 @@ export const input = {
   /** Pointer or key `owner` (`pointer:<id>`, `key:<code>`) pressed (`on`) or let go of `note`, at MIDI
    * velocity 0..127. */
   note(owner: string, note: number, velocity: number, on: boolean): void {
-    velocity = Math.max(0, Math.min(127, Math.round(velocity)));
-    void enqueue('input', [{ note: { owner, note, velocity, on } }]);
+    void enqueue('input', [encodeInput.note(owner, note, velocity, on)]);
   },
   /** The window lost focus: this document's pointers and keys are up. */
   blur(): void {
-    void enqueue('input', ['blur']);
+    void enqueue('input', [encodeInput.blur()]);
   },
   /** Route the notes to `target`, picked on `slot` (null: none). What sounds is released first; the same
    * slot and target again change nothing (natively), so a call per press is cheap. */
   selectTarget(slot: 0 | 1 | null, target: NoteTarget): void {
-    void enqueue('input', [{ selectTarget: { slot, target } }]);
+    void enqueue('input', [encodeInput.selectTarget(slot, target)]);
   },
   /** Panic: every note that sounds is released and forgotten. */
   allNotesOff(): void {
-    void enqueue('input', ['allNotesOff']);
+    void enqueue('input', [encodeInput.allNotesOff()]);
   },
 };
 
