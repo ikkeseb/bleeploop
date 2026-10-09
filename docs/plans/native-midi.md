@@ -59,13 +59,15 @@ next block start (`src/ui/state/midi.ts`, `src/platform/index.ts` `sendEngine`, 
   native MIDI and the UI's notes through the Rust router, Web MIDI is denied. `pnpm native:midi`
   drives the running app (WASAPI, master muted): the resync, the denied Web MIDI, a PC-key note held
   natively, two owners on one note, blur, a slot switch, a reload releasing at the new page's
-  subscribe and cancelling a pending learn. It sees no MIDI port: none exists on the dev PC.
-- **Waits on the owner:** the measurement port (loopMIDI or the MIDI Services tools, an install), so
-  step 1's baseline and the ship rule's comparison can run (`docs/VERIFY.md` § MIDI latency
-  benchmark; a before run builds the commit before the switch); the lock-wait measurement under jam
-  load (`LF_LOCK_WAITS`); and a controller: whether the stored Web MIDI name equals WinMM's
-  `szPname`, the path's stability across restart and replug, the interface class a port arrives on,
-  WinMM multi-client, the 20 replugs, a jam, and the old pedals firing without relearn.
+  subscribe and cancelling a pending learn. It drives no MIDI port.
+- **The ship rule is met** (2026-10-09, loopMIDI, the jam load held unattended by `bench-load`;
+  numbers: `docs/VERIFY.md` § MIDI latency benchmark): no note lost or stuck either side, sender to
+  applied p99 226–227 ms before and 3.1 ms after, 251–252 ms against 3.1 ms inside UI stalls.
+- **Waits on the owner:** the lock-wait measurement under jam load (`LF_LOCK_WAITS`); and a
+  controller: whether the stored Web MIDI name equals WinMM's `szPname` (where it differs, an
+  imported binding waits with no port and the player assigns it in Audio Settings), the path's
+  stability across restart and replug, the interface class a port arrives on, WinMM multi-client,
+  the 20 replugs, a jam, and the old pedals firing without relearn.
 - **Behaviour changes the reviews accepted:** a plugin swap routes nowhere while it unloads (the
   shipped app played the slot's built-in synth then); the UI's input goes one IPC batch at a time
   (one round trip per batch, unmeasured; native MIDI does not take this path); a press during a
@@ -291,8 +293,7 @@ that varies, and how it behaves while the UI is busy.
   interval independent of the UI, sends to a loopback port and stamps the send `Instant`; before and
   after use the same sender, so one QPC clock spans the whole path. The port is a Windows MIDI Services
   loopback if step 0 finds one, else loopMIDI (its install is the owner's to approve at the PC).
-  The ship rule needs this comparison: without a working port, step 6 waits for one (the owner's
-  loopMIDI approval) rather than merging on internal numbers.
+  The ship rule needs this comparison, never internal numbers alone; it ran on loopMIDI (§ Progress).
 - **Diagnostic only, labelled as such:** injection at the JS handler seam (before) and at
   `Core::message` (after) measures internal dispatch; it starts after the UI thread's queue, the very
   delay the move removes, so it is no before/after comparison.
