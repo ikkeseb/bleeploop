@@ -3,6 +3,9 @@
 // would take a controller from it (or wait on a permission the WebView denies). No file under `src/` may
 // name the Web MIDI API: `requestMIDIAccess`, `MIDIAccess`, `MIDIInput`, `onmidimessage`, `MIDIMessageEvent`,
 // comments included (a comment that names it is how a revival starts; describe it in other words).
+// One exception (`EXCEPTION`): the native probe `src/debug/midi-switch.ts` (DEV only, `pnpm native:midi`)
+// asks for Web MIDI to prove the WebView refuses it; it may name the request and nothing else. Named here,
+// in plain sight, rather than reached by a computed name, which this guard cannot see and so would teach.
 //
 // `webMidiUses` is first run on planted sources (each must be flagged, a clean one must pass), then on
 // every file under `src/`. It cannot see an API reached by a computed name. Run: node verify/guards/web-midi.mjs
@@ -15,6 +18,8 @@ import { fileURLToPath } from 'node:url';
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const SRC = join(root, 'src');
 const API = /\b(?:requestMIDIAccess|MIDIAccess|MIDIInput|MIDIInputMap|MIDIMessageEvent|onmidimessage)\b/g;
+/** The one file allowed a Web MIDI name, and the one name it may use (the header says why). */
+const EXCEPTION = { file: 'src/debug/midi-switch.ts', name: 'requestMIDIAccess' };
 
 let passed = 0;
 let failed = 0;
@@ -64,11 +69,19 @@ check('passes native MIDI', () =>
 
 // ── The source ──────────────────────────────────────────────────────────────────────────────────────
 let scanned = 0;
+let excepted = 0;
 for (const path of files(SRC)) {
   scanned++;
-  const uses = webMidiUses(readFileSync(path, 'utf8'));
-  check(`${relative(root, path)} names no Web MIDI API`, () => assert.deepEqual(uses, []));
+  const file = relative(root, path).replace(/\\/g, '/');
+  let uses = webMidiUses(readFileSync(path, 'utf8'));
+  if (file === EXCEPTION.file) {
+    excepted = uses.length;
+    uses = uses.filter((u) => !u.endsWith(`: ${EXCEPTION.name}`));
+  }
+  check(`${file} names no Web MIDI API`, () => assert.deepEqual(uses, []));
 }
+// An exception nothing uses any more is removed, not kept.
+check(`the exception ${EXCEPTION.file} still asks for Web MIDI`, () => assert.ok(excepted > 0, `${EXCEPTION.file} names no request: drop the exception`));
 check('the scan reached the source', () => assert.ok(scanned > 50, `only ${scanned} files under src/`));
 
 console.log(`\n=== RESULT: ${passed}/${passed + failed} checks passed, ${failed} failed ===`);
