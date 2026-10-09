@@ -1,9 +1,8 @@
 //! OWNS: native MIDI for the engine, built and tested but never started by the app (MIDI arrives
 //! through the WebView's Web MIDI, and WinMM input ports are exclusive): the input ports (midir,
 //! one connection per port, hot-plug polling), message parsing, the MIDI-learn bindings mirrored
-//! from settings (`src/app/midi-actions.ts`), and what a message becomes: a note for the engine
-//! (next block start) or a looper action stamped with its press frame (`super::FrameClock`). This doc
-//! is the module's briefing.
+//! from settings (`src/app/midi-actions.ts`), the note router for every note source, and the one
+//! ordered queue input commands reach the engine through. This doc is the module's briefing.
 //!
 //! # Module map
 //!
@@ -12,36 +11,37 @@
 //! | this file | [`MidiHost`], the state the port callbacks share ([`Core`]), the UI events | `src/ui/state/midi.ts` (glue) |
 //! | `parse` | bytes to `parse::Message`, and what is ignored | `midi.ts` `parseMidiMessage` |
 //! | `bindings` | [`Binding`], learn capture, matching, momentary vs latching, consume-first | `src/app/midi-actions.ts`, `src/app/actions.ts` |
-//! | `router` | per-owner note ownership, sustain, the wheels | `src/ui/state/input-router.ts` |
+//! | `router` | note ownership for MIDI and UI owners, sustain, the wheels, the note target, the held-note set | `src/ui/state/input-router.ts`, `instrument.ts` `routeEngine` |
+//! | `queue` | the one bounded FIFO into the engine's ring: reserved releases, whole batches, coalesced wheels, no-device admission, the engine generation | plan `docs/plans/native-midi.md`, decisions 4 to 7 |
 //! | `ports` | midir connections, the hot-plug poll and its diff, the port keys | `midi.ts` `attachInputs` |
 //!
 //! # Rules
 //!
 //! - **A message passes MIDI learn first.** A learned or bound message is consumed there and never
 //!   reaches the router; only what learn leaves is played.
-//! - **Notes go unstamped, actions stamped.** A note, a pedal and a wheel land at the next block start
-//!   (`TimedCommand::frame` `None`), as the UI's gestures do; a bound action carries the frame its
-//!   arrival maps to ([`FrameClock::press_frame`], the arrival taken on the callback's entry).
-//! - **While no device runs, only releases reach the engine.** Its command ring drains only in the
-//!   callback, so a bound action or a note-on sent then would fire at the next open (the looper
-//!   recording by itself; note-ons piling up until a note-off no longer fits). Both are dropped while
-//!   the clock has no stamp; a note-on before it reaches the router, so no note is held. The wheels
-//!   wait in the router, and the engine hears where they ended with the first message once a device
-//!   runs, so a sweep cannot fill the ring ahead of a note-off. Releases go through, so a note held
-//!   before the stop still gets its note-off.
-//! - **One lock orders everything.** The router, MIDI learn and the port table sit in one `Mutex` the
-//!   port callbacks and the poller take; commands go to the sink under it, so the engine sees them in
-//!   the order the router decided them. None of these threads is an audio thread.
-//! - **The router follows the note target.** A target switch or a panic goes through
-//!   [`MidiHost::select_instrument`] / [`MidiHost::all_notes_off`], which forget the held notes as the
-//!   web's `allNotesOff` did. Sent past them, a key held across the switch would keep another port's
-//!   strike of that note silent.
+//! - **Nothing is stamped.** A note, a pedal, a wheel and a bound action all land at the next block
+//!   start (`TimedCommand::frame` `None`), as the UI's gestures do, so the ring's admission order is
+//!   the order the engine applies them in.
+//! - **While no device runs, only releases and controller state go in.** The queue refuses a note-on
+//!   (the router then records no owner) and a bound action, which would fire at the next open; the
+//!   releases, the pedals and the wheels are kept, and nothing drains until a device runs (`queue`'s
+//!   rules). [`Core`] reads "a device runs" off the clock's stamp and follows no engine generation
+//!   yet.
+//! - **One lock orders everything.** The router, the queue, MIDI learn and the port table sit in one
+//!   `Mutex` the port callbacks and the poller take; the queue drains into the sink under it, so the
+//!   engine sees the commands in the order they were decided. None of these threads is an audio
+//!   thread.
+//! - **The router owns the note target.** A target switch or a panic goes through
+//!   [`MidiHost::select_instrument`] / [`MidiHost::all_notes_off`], which release the notes that sound
+//!   first and forget the held ones, as the web's `allNotesOff` did. Sent past them, a key held across
+//!   the switch would keep another port's strike of that note silent.
 //! - **A port that goes away releases what it held**, its pedal and its wheels, as a Web MIDI
 //!   disconnect does; the UI hears of it in [`MidiEvent::Ports`].
 
 pub mod bindings;
 mod parse;
 mod ports;
+mod queue;
 mod router;
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -51,7 +51,6 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 use std::time::Instant;
 
-use lf_engine::grid::Frame;
 use lf_engine::{Command, NoteTarget, TimedCommand};
 use serde::Serialize;
 
@@ -60,10 +59,15 @@ pub use bindings::{ActionId, Binding, Kind, PortKey};
 use super::FrameClock;
 use bindings::Learn;
 use parse::parse;
-use router::Router;
+use queue::{Out, Queue};
+use router::{Owner, Router};
 
 /// Where commands go: `EngineHost::send` in the app, a recorder in tests.
 pub type Sink = Arc<dyn Fn(TimedCommand) -> Result<(), String> + Send + Sync>;
+
+/// The engine generation [`Core`]'s queue feeds: it follows none yet (`owner.rs`'s rebuild is not
+/// wired to it).
+const GENERATION: u64 = 0;
 
 /// What the UI hears from native MIDI.
 #[derive(Clone, Debug, PartialEq)]
@@ -91,7 +95,8 @@ pub struct PortInfo {
 /// Counters for the DEV probe; both stay 0 in a clean run with a device open.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct MidiDiag {
-    /// Commands the sink refused (no device open, or the engine's ring full).
+    /// Drains the sink refused (no device open, or the engine's ring full); the refused command stays
+    /// at the queue's head.
     pub failed_sends: u64,
     /// Panics caught in a port callback (the message is dropped; midir calls it from an
     /// `extern "system"` WinMM callback, where an unwind would abort the process).
@@ -106,6 +111,7 @@ pub(crate) struct PortEntry {
 
 struct State {
     router: Router,
+    queue: Queue,
     learn: Learn,
     ports: Vec<PortEntry>,
     /// The port list the UI last heard.
@@ -125,7 +131,13 @@ pub(crate) struct Core {
 impl Core {
     fn new(sink: Sink, clock: FrameClock) -> Core {
         Core {
-            state: Mutex::new(State { router: Router::default(), learn: Learn::default(), ports: Vec::new(), published: Vec::new() }),
+            state: Mutex::new(State {
+                router: Router::default(),
+                queue: Queue::new(GENERATION),
+                learn: Learn::default(),
+                ports: Vec::new(),
+                published: Vec::new(),
+            }),
             events: Mutex::new(Vec::new()),
             sink,
             clock,
@@ -143,10 +155,26 @@ impl Core {
         self.events.lock().unwrap_or_else(|e| e.into_inner()).push(event);
     }
 
-    fn send(&self, frame: Option<Frame>, command: Command) {
-        if (self.sink)(TimedCommand { frame, command }).is_err() {
-            self.failed_sends.fetch_add(1, Relaxed);
+    /// A device runs while the clock has a stamp.
+    fn running(&self, at: Instant) -> bool {
+        self.clock.press_frame(at).is_some()
+    }
+
+    /// Hand one input's batch to the queue, whole; a refused attack records no owner.
+    fn admit(router: &mut Router, queue: &mut Queue, out: &mut Vec<Out>, running: bool) {
+        if queue.admit(out, GENERATION, running).is_err() {
+            router.attack_refused(out);
         }
+        out.clear();
+    }
+
+    /// What the sink takes, in order; a refusal stays at the head for the next drain.
+    fn drain(&self, queue: &mut Queue) {
+        queue.drain(&mut |command| {
+            (self.sink)(command).map_err(|_| {
+                self.failed_sends.fetch_add(1, Relaxed);
+            })
+        });
     }
 
     /// A port callback: `bytes` arrived on connection `conn` at `at`.
@@ -159,18 +187,17 @@ impl Core {
 
     fn route(&self, conn: u32, at: Instant, message: parse::Message) {
         let mut state = self.lock();
-        let State { router, learn, ports, .. } = &mut *state;
+        let State { router, queue, learn, ports, .. } = &mut *state;
         // A connection already released (its port went away) has no owner left.
         let Some(port) = ports.iter().find(|p| p.conn == Some(conn)) else { return };
-        let owner = (conn, message.channel());
-        // `None` while no device runs: only releases go through (the rules above).
-        let stamp = self.clock.press_frame(at);
-        let mut out = |command| self.send(None, command);
-        router.hold_wheels(stamp.is_none(), &mut out);
+        let owner = Owner::Midi { conn, channel: message.channel() };
+        let running = self.running(at);
+        let mut out = Vec::new();
         let outcome = learn.consume(&port.key, &message, at);
         if let Some(b) = outcome.learned {
             if b.kind == Kind::Cc {
-                router.release_controller(owner, b.number, &mut out);
+                router.release_controller(&owner, b.number, &mut out);
+                Core::admit(router, queue, &mut out, running);
             }
             self.emit(MidiEvent::Learned(b));
         }
@@ -179,16 +206,18 @@ impl Core {
         }
         match outcome.fire.map(ActionId::engine_action) {
             Some(Some(action)) => {
-                if stamp.is_some() {
-                    self.send(stamp, Command::Action(action));
-                }
+                out.push(Out::new(Command::Action(action)));
+                Core::admit(router, queue, &mut out, running);
             }
             Some(None) => self.emit(MidiEvent::GoLive),
             None => {}
         }
-        let starts = matches!(message, parse::Message::NoteOn { .. });
-        if !outcome.consumed && (stamp.is_some() || !starts) {
-            router.message(owner, message, &mut out);
+        if !outcome.consumed {
+            router.message(&owner, message, &mut out);
+            Core::admit(router, queue, &mut out, running);
+        }
+        if running {
+            self.drain(queue);
         }
     }
 
@@ -196,13 +225,32 @@ impl Core {
     /// port's name when it was in the table.
     pub(crate) fn port_gone(&self, conn: u32) -> Option<String> {
         let mut state = self.lock();
-        let State { router, ports, .. } = &mut *state;
-        let mut out = |command| self.send(None, command);
-        router.hold_wheels(self.clock.press_frame(Instant::now()).is_none(), &mut out);
-        router.release_port(conn, &mut out);
+        let State { router, queue, ports, .. } = &mut *state;
+        let running = self.running(Instant::now());
+        let mut out = Vec::new();
+        router.release_conn(conn, &mut out);
+        Core::admit(router, queue, &mut out, running);
+        if running {
+            self.drain(queue);
+        }
         let entry = ports.iter_mut().find(|p| p.conn == Some(conn))?;
         entry.conn = None;
         Some(entry.key.name.clone())
+    }
+
+    /// One input from outside the port callbacks (a target switch, a panic), admitted and drained as a
+    /// message is.
+    fn input(&self, f: impl FnOnce(&mut Router, &mut Vec<Out>)) -> Result<(), String> {
+        let mut state = self.lock();
+        let State { router, queue, .. } = &mut *state;
+        let running = self.running(Instant::now());
+        let mut out = Vec::new();
+        f(router, &mut out);
+        let admitted = queue.admit(&out, GENERATION, running).map_err(|why| format!("the MIDI queue refused it: {why:?}"));
+        if running {
+            self.drain(queue);
+        }
+        admitted
     }
 
     pub(crate) fn set_ports(&self, ports: Vec<PortEntry>) {
@@ -235,7 +283,7 @@ pub struct MidiHost {
 
 impl MidiHost {
     /// Start listening: every present input port opens now, and ports that come and go are followed
-    /// every second (`ports::POLL`). Commands go to `sink`; actions are stamped on `clock`.
+    /// every second (`ports::POLL`). Commands go to `sink`; `clock` says whether a device runs.
     pub fn start(sink: Sink, clock: FrameClock) -> MidiHost {
         let core = Arc::new(Core::new(sink, clock));
         let (stop, stopped) = mpsc::channel();
@@ -278,19 +326,18 @@ impl MidiHost {
         port_infos(&self.core.lock().ports)
     }
 
-    /// Move the notes to `target` (`Command::SelectInstrument`); the router forgets the notes held on the
-    /// target it leaves, which the engine releases.
+    /// Move the notes to `target`: the router releases what sounds, then sends `Command::SelectInstrument`,
+    /// in one batch, and forgets the held notes (nothing when `target` is already selected).
     pub fn select_instrument(&self, target: NoteTarget) -> Result<(), String> {
-        let mut state = self.core.lock();
-        state.router.all_notes_off();
-        (self.core.sink)(TimedCommand { frame: None, command: Command::SelectInstrument(target) })
+        self.core.input(|router, out| router.select_target(None, target, out))
     }
 
-    /// Panic: every note off (`Command::AllNotesOff`), and the router forgets them.
+    /// Panic: the router releases what sounds and forgets it, then `Command::AllNotesOff`.
     pub fn all_notes_off(&self) -> Result<(), String> {
-        let mut state = self.core.lock();
-        state.router.all_notes_off();
-        (self.core.sink)(TimedCommand { frame: None, command: Command::AllNotesOff })
+        self.core.input(|router, out| {
+            router.release_all(out);
+            out.push(Out::new(Command::AllNotesOff));
+        })
     }
 
     /// Move the pending UI events into `out`.
@@ -396,6 +443,12 @@ mod tests {
         Command::NoteOn(note, f32::from(velocity) / 127.0)
     }
 
+    /// The notes the router holds down.
+    fn held(r: &Rig) -> Vec<u8> {
+        let held = r.host.core.lock().router.held().read();
+        (0..128).filter(|n| held.contains(*n)).collect()
+    }
+
     // probe midi-learn "a learning tap binds the CC as momentary, ends the learn and runs nothing";
     // midi-actions.ts consume (learn capture, then the tail inside RELEASE_MS).
     #[test]
@@ -420,19 +473,15 @@ mod tests {
     }
 
     // probe midi-learn "after a reload the learned CC records the selected track, and its release runs
-    // nothing": a bound press is Command::Action on the selected lane, stamped with the frame its arrival
-    // maps to (frame_clock.rs press_frame).
+    // nothing": a bound press is Command::Action on the selected lane, unstamped (plan decision 4: it
+    // lands at the next block start, as a UI press does).
     #[test]
-    fn a_bound_press_sends_its_action_stamped_with_the_press_frame_and_its_release_nothing() {
+    fn a_bound_press_sends_its_action_unstamped_and_its_release_nothing() {
         let mut r = Rig::new();
         r.learn(ActionId::RecDub, A, &[[0xb0, 20, 127], [0xb0, 20, 0]]);
         r.wait(RELEASE * 2);
-        r.clock.publish(r.t, 48_000, 256, 48_000);
-        r.wait(Duration::from_millis(1));
         r.send(A, &[[0xb0, 20, 127]]);
-        let frame = r.clock.press_frame(r.t);
-        assert_eq!(frame, Some(48_000 + 48 + 256));
-        assert_eq!(*r.sent.lock().unwrap(), [TimedCommand { frame, command: Command::Action(Action::RecDub) }]);
+        assert_eq!(*r.sent.lock().unwrap(), [TimedCommand { frame: None, command: Command::Action(Action::RecDub) }]);
         r.take();
         r.send(A, &[[0xb0, 20, 0]]);
         assert_eq!(r.take(), []);
@@ -440,9 +489,9 @@ mod tests {
 
     // While no device runs nothing drains the engine's ring: a bound press and a note-on sent then would
     // fire at the next open. Both are dropped (the note-on never held); a note held from before the
-    // stop still gets its note-off, and learn still captures.
+    // stop still gets its note-off, queued until a device runs, and learn still captures.
     #[test]
-    fn with_no_device_running_actions_and_note_ons_are_dropped_and_note_offs_pass() {
+    fn with_no_device_running_actions_and_note_ons_are_dropped_and_note_offs_wait_for_it() {
         let mut r = Rig::new();
         r.learn(ActionId::RecDub, A, &[[0xb0, 20, 127], [0xb0, 20, 0]]);
         r.wait(RELEASE * 2);
@@ -452,25 +501,25 @@ mod tests {
         r.clock.clear();
         r.send(A, &[[0xb0, 20, 127], [0xb0, 20, 0], [0x90, 64, 100], [0x90, 60, 90]]);
         assert_eq!(r.take(), [], "the bound press and the note-ons are dropped");
-        assert_eq!(r.host.core.lock().router.held(), [60], "the dropped note-ons hold nothing");
+        assert_eq!(held(&r), [60], "the dropped note-ons hold nothing");
         r.send(A, &[[0x80, 64, 0], [0x80, 60, 0], [0xb0, 64, 0]]);
-        assert_eq!(r.take(), [Command::NoteOff(62), Command::NoteOff(60)], "the held and sustained notes let go");
+        assert_eq!(r.take(), [], "the releases wait in the queue: nothing drains into a stopped engine");
         r.host.learn(ActionId::Undo);
         r.send(A, &[[0xb0, 30, 127]]);
         assert_eq!(r.host.learning(), None, "learn captured");
         assert!(r.host.bindings().iter().any(|b| b.number == 30));
 
-        // A device again: as before.
+        // A device again: the held and sustained notes let go first, then as before.
         r.clock.publish(r.t, 0, 256, 48_000);
         r.wait(RELEASE * 2);
         r.send(A, &[[0xb0, 20, 127], [0x90, 64, 100]]);
-        assert_eq!(r.take(), [Command::Action(Action::RecDub), on(64, 100)]);
+        assert_eq!(r.take(), [Command::NoteOff(62), Command::NoteOff(60), Command::Action(Action::RecDub), on(64, 100)]);
 
         // A rig that never had a device: nothing sent, nothing held.
         let r = Rig::stopped();
         r.send(A, &[[0x90, 60, 100], [0x80, 60, 0]]);
         assert_eq!(r.take(), []);
-        assert!(r.host.core.lock().router.held().is_empty());
+        assert!(held(&r).is_empty());
     }
 
     // probe midi-learn "Esc cancels a learn", "a CC after a cancelled learn binds nothing"
@@ -590,6 +639,23 @@ mod tests {
         assert_eq!(r.take(), [Command::Modulation(50.0 / 127.0)]);
     }
 
+    // Review fix: a bound press refused with no device must not undo the note-on accepted before it;
+    // that note's release still reaches the engine.
+    #[test]
+    fn a_refused_bound_press_leaves_an_earlier_note_held() {
+        let mut r = Rig::new();
+        r.learn(ActionId::RecDub, A, &[[0xb0, 20, 127], [0xb0, 20, 0]]);
+        r.wait(RELEASE * 2);
+        r.send(A, &[[0x90, 60, 100]]);
+        assert_eq!(r.take(), [on(60, 100)]);
+        r.clock.clear();
+        r.send(A, &[[0xb0, 20, 127], [0xb0, 20, 0]]);
+        assert_eq!(held(&r), [60]);
+        r.clock.publish(r.t, 0, 256, 48_000);
+        r.send(A, &[[0x80, 60, 0]]);
+        assert_eq!(r.take(), [Command::NoteOff(60)]);
+    }
+
     // probe midi-learn "a learned note must not sound", "a learned note is never held", "neither the
     // learned note-on nor its note-off reaches the router", "two presses of the learned note stepped back
     // twice, each on its note-on", "an unlearned note on the same channel sounds".
@@ -603,7 +669,7 @@ mod tests {
         assert_eq!(r.take(), [Command::Action(Action::PrevTrack)]);
         r.send(B, &[[0x81, 60, 0], [0x91, 60, 100], [0x91, 60, 0]]);
         assert_eq!(r.take(), [Command::Action(Action::PrevTrack)]);
-        assert!(r.host.core.lock().router.held().is_empty());
+        assert!(held(&r).is_empty());
         r.send(B, &[[0x91, 62, 100]]);
         assert_eq!(r.take(), [on(62, 100)]);
     }
@@ -644,7 +710,7 @@ mod tests {
         assert_eq!(r.take(), [Command::NoteOff(67), Command::NoteOff(60)]);
         r.send(A, &[[0x90, 61, 100]]);
         assert_eq!(r.take(), []);
-        assert_eq!(r.host.core.lock().router.held(), [62]);
+        assert_eq!(held(&r), [62]);
         assert_eq!(r.host.ports()[0], PortInfo { name: "Probe a".into(), occurrence: 0, open: false });
     }
 
@@ -662,25 +728,27 @@ mod tests {
         assert_eq!(r.events(), [MidiEvent::Ports { ports: ports[..1].to_vec(), gone: vec!["Probe b".into()] }]);
     }
 
-    // probe instrument-routing "switching slots releases the sustained note exactly once": the engine
-    // releases it on SelectInstrument (input-router.ts allNotesOff on the swap), so pedal-up adds nothing.
+    // probe instrument-routing "switching slots releases the sustained note exactly once": the router
+    // releases it before SelectInstrument (input-router.ts allNotesOff, then instrument.ts routeEngine's
+    // switch) and forgets it, so pedal-up adds nothing.
     #[test]
     fn a_target_switch_through_the_host_is_sent_and_the_router_forgets_its_notes() {
         let r = Rig::new();
         r.send(A, &[[0xb0, 64, 127], [0x90, 64, 100], [0x80, 64, 0]]);
         r.take();
         r.host.select_instrument(NoteTarget::Builtin(Instrument::Pad)).unwrap();
-        assert_eq!(r.take(), [Command::SelectInstrument(NoteTarget::Builtin(Instrument::Pad))]);
+        assert_eq!(r.take(), [Command::NoteOff(64), Command::SelectInstrument(NoteTarget::Builtin(Instrument::Pad))]);
         r.send(A, &[[0xb0, 64, 0]]);
         assert_eq!(r.take(), []);
         r.host.all_notes_off().unwrap();
         assert_eq!(r.take(), [Command::AllNotesOff]);
     }
 
-    // A wheel sweep while no device runs would fill the engine's ring ahead of the note-off: only the
-    // release goes out, and the wheels catch up with the first message once a device runs.
+    // A wheel sweep while no device runs would fill the engine's ring ahead of the note-off: it coalesces
+    // in the queue, which drains nothing until a device runs; then the engine gets where the wheels
+    // ended, then the release, in the order they came.
     #[test]
-    fn with_no_device_a_wheel_sweep_holds_nothing_up_and_the_wheels_catch_up_after() {
+    fn with_no_device_a_wheel_sweep_coalesces_in_the_queue_and_reaches_the_engine_after() {
         let r = Rig::new();
         r.send(A, &[[0x90, 60, 100]]);
         assert_eq!(r.take(), [on(60, 100)]);
@@ -689,14 +757,15 @@ mod tests {
             r.send(A, &[[0xb0, 1, v], [0xe0, 0, v]]);
         }
         r.send(A, &[[0xe0, 0x00, 0x50], [0xb0, 1, 90], [0x80, 60, 0]]);
-        assert_eq!(r.take(), [Command::NoteOff(60)], "only the release");
+        assert_eq!(r.take(), [], "nothing drains into a stopped engine");
+        assert_eq!(r.host.core.lock().queue.len(), 3, "the sweep coalesced");
         r.clock.publish(r.t, 0, 256, 48_000);
         r.send(A, &[[0x90, 62, 100]]);
         let bend = (f64::from(0x50u16 << 7) - 8192.0) / 8192.0 * 2.0;
-        assert_eq!(r.take(), [Command::PitchBend(bend), Command::Modulation(90.0 / 127.0), on(62, 100)]);
+        assert_eq!(r.take(), [Command::PitchBend(bend), Command::Modulation(90.0 / 127.0), Command::NoteOff(60), on(62, 100)]);
     }
 
-    // The sink refuses (no device open): the router carries on and each refusal is counted.
+    // The sink refuses (no device open): the refused head stays queued and each refused drain is counted.
     #[test]
     fn a_refused_command_is_counted() {
         let sink: Sink = Arc::new(|_| Err("no audio device is open".into()));
