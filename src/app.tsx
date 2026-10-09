@@ -15,7 +15,7 @@ import { currentStageView, setStageOpen, stageOpen, toggleStage } from './ui/sta
 import * as layoutStore from './ui/layout/layout-store';
 import { installFrontendLogPipe, platform } from './platform';
 import { looper, master } from './ui/state/audio';
-import { engineDevice, engineOpenFailure } from './ui/state/engine-store';
+import { engineDevice, engineOpenFailure, engineResets } from './ui/state/engine-store';
 import { bootEngine } from './app/boot';
 import { installCloseGuard } from './app/close-guard';
 import { checkForUpdate, updateOffered } from './app/update';
@@ -79,13 +79,16 @@ export function App() {
   // engine replays, `adoptSettings` ignores it, and the stage view mounts only while open, so a page
   // that reloads with the view open would otherwise never mount the thing that turns them off again.
   // The first run therefore sends whatever this page wants, `false` included, instead of trusting the
-  // engine's. Repeats are dropped; an off and an on inside one audio block are not (the engine's one
-  // accepted residual there is a single 4 ms column covering both sides of the switch, which needs a
-  // close and a reopen faster than a hand can press).
+  // engine's. It waits for the feed's first reset frame to send it: the UI sends nothing before the
+  // feed has said what the engine has (`verify/probes/engine-seam.mjs`), and that frame is the event
+  // that says an engine exists at all. The wait costs the reload-with-the-view-open case a few 4 ms
+  // columns folded for nobody. Repeats are dropped; an off and an on inside one audio block are not
+  // (the engine's one accepted residual there is a single 4 ms column covering both sides of the
+  // switch, which needs a close and a reopen faster than a hand can press).
   let scopeAsked: boolean | null = null;
   createEffect(() => {
     const want = stageOpen() && currentStageView().wantsScope === true;
-    if (want === scopeAsked) return;
+    if (engineResets() === 0 || want === scopeAsked) return;
     scopeAsked = want;
     looper.setScope(want);
   });

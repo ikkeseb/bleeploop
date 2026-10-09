@@ -151,6 +151,7 @@ const [selectedTrack, setSelectedTrack] = createSignal(0);
 const [beat, setBeat] = createSignal(0);
 const [countLeft, setCountLeft] = createSignal(0);
 const [device, setDeviceSignal] = createSignal<DeviceStatus | null>(null);
+const [feedResets, setFeedResets] = createSignal(0);
 /** The engine's rate: its device's, kept while no device runs (a stopped device leaves the engine). Taken
  * from an open's answer, and from a feed frame's status after the frame's events, which are still the
  * engine's that ran before it (a new engine's come with its reset). */
@@ -743,6 +744,7 @@ function applyFrameNow(f: FeedFrame): void {
     for (let i = 0; i < ENGINE_LANES; i++) plain.revision[i]++;
     dropScope();
     plain.resets++;
+    setFeedResets(plain.resets);
     plain.clearing.fill(false);
     for (const timer of beatTimers) clearTimeout(timer);
     beatTimers.clear();
@@ -1457,6 +1459,12 @@ export const engineMaster = {
 
 /** The device that runs, or null. */
 export const engineDevice = device;
+
+/** Reset frames the feed has delivered, 0 before its first. An owner whose command must not reach the
+ * engine before the feed has said what the engine has waits for this: `adoptSettings` takes the
+ * engine's remembered settings on that frame, and `verify/probes/engine-seam.mjs` holds the UI to
+ * sending nothing ahead of it. `SetScope` is the one such owner (`src/app.tsx`). */
+export const engineResets = feedResets;
 
 // Why no device runs: the last failed open's error text, or the lost device's reason (the feed's
 // `Lost`), until an open succeeds. While no device runs, the command-bar lamp, Audio Settings, the

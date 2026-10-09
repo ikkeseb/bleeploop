@@ -86,9 +86,9 @@ export interface StageViewDef {
   id: string;
   /** The name on the view switch. */
   name: string;
-  /** This look draws the live scope columns, so the view asks the engine to fold and send them while
-   * the look shows, and turns them off when it does not (`StageView.tsx`: nothing else sends
-   * `SetScope`, and the engine sends nothing until something asks). */
+  /** This look draws the live scope columns, so the app asks the engine to fold and send them while
+   * the look shows, and turns them off when it does not (`src/app.tsx`, the always mounted owner:
+   * nothing else sends `SetScope`, and the engine sends nothing until something asks). */
   wantsScope?: boolean;
   create(): ViewDraw;
 }

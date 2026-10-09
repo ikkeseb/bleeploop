@@ -279,11 +279,18 @@ await probe(async ({ open }) => {
   await infx.click();
   await dialog.waitFor();
   await page.evaluate(() => /** @type {HTMLElement | null} */ (document.activeElement)?.blur());
+  await clearSent();
   await page.keyboard.press('b');
   await page.locator('.sv').waitFor();
   await dialog.waitFor({ state: 'detached' });
+  // The stage opens on SCOPE, the look that draws the engine's live columns, so the view asks for the
+  // taps as it opens and lets them go as it closes. Nothing else in the app sends that command, and
+  // the ask waits for the feed (the pre-feed assertion at the top of this probe is its other half).
+  assert.deepEqual(await sentAtLeast(1), [{ SetScope: true }], 'the stage view opening on SCOPE asks the engine to fold the columns');
+  await clearSent();
   await page.keyboard.press('b');
   await page.locator('.sv').waitFor({ state: 'detached' });
+  assert.deepEqual(await sentAtLeast(1), [{ SetScope: false }], 'closing the stage view lets the taps go');
 
   // ── A WebView reload: the reset frame carries what the engine remembers, and the UI adopts it ─────
   await clearSent();
