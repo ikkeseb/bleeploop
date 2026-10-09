@@ -215,3 +215,51 @@ blocks until the verdict, so an agent harness should run it in the background.
     100–180 ms after the marker's line, and the next launch still found the marker. A run that fails
     midway can leave the probe's record behind: the next run's save phase unloads it and fails once
     ("run again").
+
+## MIDI latency benchmark (DEV, PC only)
+
+The measurement of `docs/plans/native-midi.md` § Measurement, in the DEV app
+(`src-tauri/src/engine_io/midi_bench.rs`). It needs a loopback MIDI port that WinMM lists (loopMIDI,
+or a Windows MIDI Services loopback); without one it waits 60 s and logs the output ports it sees.
+Baseline: none yet (no loopback port on the rig). Run from PowerShell at the PC, in the repo root,
+with no dev app running:
+
+```powershell
+$env:LF_MIDI_BENCH = "loopMIDI;count=2000;stall_every_ms=3000;stall_ms=250;label=before"
+pnpm dev:asio
+```
+
+Set up the jam load (the plan's: an amp-sim or Pro-Q live in slot 1, three lanes looping, the stage
+view open). No other controller, and no on-screen or PC keyboard, may play during a run: a note of
+the benchmark's played by hand can stand in for a lost one. The run waits for the device, warms up, sends `count` note-ons, writes
+`logs/midi-bench-<label>-<unix s>.json`, appends its summary line to `logs/midi-bench.log` and logs it
+(`[midi-bench]`). Stop with `pnpm native:kill`; `Remove-Item Env:LF_MIDI_BENCH` before an ordinary
+run. Keys (`;`-separated, defaults in brackets): the port name's part first, `interval_ms` [25],
+`burst` [1] note-ons per interval, `base` [0] and `notes` [24] (notes 0 to 23, which no player
+uses), `count` [2000], `warmup_s` [5], `timeout_ms` [1000], `stall_every_ms` [no stalls] and
+`stall_ms` [250], `label` [run], `out` [`logs/`]. A run whose (note, velocity) ids would come back
+sooner than twice `timeout_ms` is refused (logged).
+
+- **sent, applied, lost, stuck, dup, stray:** a send no applied `NoteOn` matched within `timeout_ms`
+  is lost; a matched note whose next applied record of that note is not a `NoteOff` is stuck (the JSON
+  adds `offs_sent` and `offs_applied`); an applied note of the benchmark's no send waited for is a
+  duplicate; any other note is a stray, left out.
+- **sender->applied** (the ship rule's number), p50, p99, max in ms: from the sender's `Instant` to the
+  entry of the callback whose block applied the note (its frame turned into time through the
+  callbacks' own stamps): the port, Web MIDI or the native input, the IPC and the wait for a block.
+  Output latency is not in it (a constant).
+- **arrival->applied (diag):** from where the note reached native code (`engine_send` before the
+  switch, the native input after): a diagnostic, never a before/after comparison.
+- **in stalls / outside:** split by whether the send fell inside one of the frontend's stalls. The
+  page measures its clock's offset to Rust's over 20 round trips first; the JSON gives the offset's
+  uncertainty (`stalls.clock_uncertainty_ms`, half the shortest round trip), which the windows'
+  edges carry.
+- **late, max_blocks:** notes the first callback after their arrival did not apply (a full command
+  table, a lock wait).
+- **callbacks, xruns, engine_xruns, gaps, lock_misses, discontinuities:** the device during the run; a
+  discontinuity is a block that did not start where the last ended, or the device stopping. The JSON
+  adds `stamps_lost`, `record_refused` and `engine_rebuilds`: any of them above 0 makes the run's
+  numbers incomplete. Taking the engine's note record can cost one `lock_misses` in the warm-up.
+- **Lock waits** (`settings` and `ends`, by taker: `send` the input path, `feed`, `other`): count,
+  total, max and a histogram, in the JSON and the log. `$env:LF_LOCK_WAITS = "60"` alone logs them every
+  60 s (`[lock-waits]`, totals since the start), for the plan's 10 minutes under the jam load.

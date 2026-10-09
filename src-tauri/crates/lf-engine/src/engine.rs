@@ -81,6 +81,9 @@ pub struct EngineHandle {
 pub struct Feed {
     tx: Producer<Event>,
     dropped: u64,
+    /// DEV: each `NoteOn` and `NoteOff` as applied, for the MIDI benchmark ([`crate::note_record`]).
+    #[cfg(debug_assertions)]
+    notes: crate::note_record::NoteRecord,
 }
 
 impl Feed {
@@ -213,7 +216,12 @@ impl Engine {
             config,
             clock: Clock::new(config.sample_rate),
             looper,
-            feed: Feed { tx: evt_tx, dropped: 0 },
+            feed: Feed {
+                tx: evt_tx,
+                dropped: 0,
+                #[cfg(debug_assertions)]
+                notes: crate::note_record::NoteRecord::new(),
+            },
             commands: cmd_rx,
             pending: [None; MAX_PENDING],
             seq: 0,
@@ -303,6 +311,12 @@ impl Engine {
             slot_events_dropped: self.rack.events_dropped,
             slot_protocol_errors: self.rack.protocol_errors,
         }
+    }
+
+    /// DEV: the reader of the applied-note record ([`crate::note_record`]), once; `None` after.
+    #[cfg(debug_assertions)]
+    pub fn take_applied_notes(&mut self) -> Option<crate::note_record::AppliedNotes> {
+        self.feed.notes.take_reader()
     }
 
     /// A plugin slot's unit: its kind and latency, `None` while the slot is empty.
@@ -790,11 +804,15 @@ fn apply(looper: &mut Looper, cx: &mut Cx, at: &mut Apply, command: Command) -> 
             Applied::Done
         }
         Command::NoteOn(note, velocity) => {
+            #[cfg(debug_assertions)]
+            cx.feed.notes.record(note, velocity, now);
             at.instruments.note_on(note, velocity, now);
             at.rack.note_on(note, velocity, now);
             Applied::Done
         }
         Command::NoteOff(note) => {
+            #[cfg(debug_assertions)]
+            cx.feed.notes.record_off(note, now);
             at.instruments.note_off(note, now);
             at.rack.note_off(note, now);
             Applied::Done
