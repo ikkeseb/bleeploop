@@ -1,6 +1,6 @@
 [package]
 name = "app"
-version = "0.8.3"
+version = "0.8.4"
 description = "BleepLoop — instrument host (native CLAP/VST3/VST2 + built-in synths) over an RC-505-style 5-track looper"
 authors = ["ikkeseb"]
 license = "MIT"
