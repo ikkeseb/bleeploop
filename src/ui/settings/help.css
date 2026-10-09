@@ -40,11 +40,6 @@
   flex-direction: column;
   gap: 6px;
 }
-/* An update the updater found sits above the reference, set off by one hairline. */
-.help__update {
-  padding-bottom: 12px;
-  border-bottom: 1px solid var(--edge);
-}
 .help__h {
   margin: 0;
   font-size: 11.5px;

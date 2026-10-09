@@ -19,6 +19,7 @@ import type {
   PluginParamDesc,
   PluginSlot,
   ToneImport,
+  UpdateProgress,
 } from './host';
 import { decodeDeviceStatus, decodeFeedFrame } from './engine-wire';
 import { decodeDropped, decodeEpoch, decodeImportReport, decodeMidiEvent } from './midi-wire';
@@ -283,6 +284,10 @@ const tauriUpdates: AppUpdates = {
   },
   async install() {
     await invoke('app_update_install');
+  },
+  onProgress(cb) {
+    // `update.rs` serializes its `Progress` enum with `tag = "stage"`, so the payload IS the union.
+    void listen<UpdateProgress>('lf://update-progress', (event) => cb(event.payload));
   },
 };
 

@@ -51,14 +51,23 @@ added a line.
   instead? Keep the − 2 BARS + stepper visible beside ■ ALL?
 - **Command bar under 1100 px:** still three rows in the app (its extra tool icons): CLICK on at
   ≤ 1000 px, CLICK + FIXED at ≤ 1100 px. Two rows there need about 150 px less on row 2: the tool
-  icons behind one menu?
+  icons behind one menu? Measured 2026-10-10: the UPDATE pill costs the bar nothing from 1000 px up
+  (same height with and without an offer), and adds a row at 900 px (108 → 146 px) while an offer
+  stands.
 - **Failed plugin bundles:** a bundle whose scan failed is simply missing from the picker; only the
   log says why. Show it greyed with the reason, or keep the picker clean?
 - **Tone recall toasts:** a refused tone toasts at every load until the plugin is changed once (the
   saved settings are kept): say that they are kept? An import whose slot holds another plugin toasts
   "This session used X in slot B": enough, or offer to load it?
-- **Update ready (unseen):** a warm-white dot on the Help cap, one toast and an "Update ready" section
-  in Help. Visible enough, or a cap of its own?
+- **Help is five screenfuls of 10.5 px (the owner's read, 2026-10-10):** measured in the browser rig,
+  the popover is 2793 px of content in a 558 px window: 13 sections, 42 bullets, 1240 words, in a
+  330 px column, body text at 10.5 px in `--dim`, longest bullet 75 words and 116 px tall. The owner
+  reads it as far too long, too small and too dense. The diagnosis is three documents in one scroll:
+  reference to scan mid-jam (looper keys, pedals, play keys, drum pads), a manual read once (what every
+  control does), and About (build label, the ASIO logo and licence, diagnostics). The update offer, the
+  fourth, has left (its own pill). Open: split the reference from the manual, and raise the body size.
+  The ASIO logo and its trademark line cannot move out of an "About box equivalent" (Steinberg ASIO
+  Usage Guidelines 1e/1f, cited at the section in `Help.tsx`), so About moves whole or not at all.
 - **MIDI learn row:** is "latching" clear to a guitarist? A long binding list makes the popover tall.
 
 ## By ear, when convenient

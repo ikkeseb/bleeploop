@@ -147,6 +147,14 @@ it.
   fire after the app restarts and after the controller moves to another USB socket.
 - RETAKE and AUTO REC from a learned pedal: one press, one toggle; mid-take (and AUTO REC once a loop
   locks the tempo) the press is refused with its reason on the lane, as the greyed button is.
+- The update affordance, rebuilt after the owner could not find the old one: an offer now raises an
+  UPDATE pill in the command bar's tool cluster (present ONLY while there is an offer) over its own
+  panel, and the install reports its three waits: the download in MB with a determinate bar, the
+  signature check, the installer. The offer is gone from Help. Proven on a scripted updater
+  (`verify/probes/app-update.mjs`, five pages); what no probe reaches is the real install: whether the
+  numbers climb at a watchable rate over a real GitHub download, whether the pill is findable without
+  being told where it is, and whether the app's last frame before it quits reads as progress rather
+  than a freeze. Only the next real release answers that, from the installed app.
 
 ## Decisions
 

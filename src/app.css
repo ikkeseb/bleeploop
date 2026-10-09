@@ -298,19 +298,36 @@ option {
 .tool--gear:hover svg {
   transform: rotate(35deg);
 }
-/* something waits inside (Help: an update is ready) = a warm-white dot on the cap's corner */
-.tool--badge {
-  position: relative;
+/* A word among the tool icons, for the one thing that must not be missed and has no icon that could
+   say it: UPDATE (`src/ui/settings/UpdatePanel.tsx`). It is mounted only while there is something to
+   press, so it costs nothing the rest of the time — the warm-white legend is the "something waits
+   here" signal the Help cap's corner dot used to carry. */
+.tool-pill {
+  height: 34px;
+  padding: 0 11px;
+  border: 1px solid var(--line-2);
+  border-radius: 10px;
+  display: grid;
+  place-items: center;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--engaged);
+  background: var(--surf-2);
+  box-shadow: inset 0 1px 0 var(--hair);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.15s, transform 0.08s;
 }
-.tool--badge::after {
-  content: '';
-  position: absolute;
-  top: 6px;
-  right: 6px;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--engaged);
+.tool-pill:hover {
+  background: var(--surf-3);
+}
+.tool-pill:active {
+  transform: translateY(1px);
+}
+.tool-pill--on {
+  background: var(--surf-3);
 }
 /* tool engaged (e.g. the keyboard toggle while the keyboard is shown) = lit legend + a face */
 .tool--on {

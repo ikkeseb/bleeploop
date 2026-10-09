@@ -8,6 +8,7 @@ import { SessionTools } from './ui/transport/SessionTools';
 import { InstrumentSlot } from './ui/instrument/InstrumentSlot';
 import { AudioSettings } from './ui/settings/AudioSettings';
 import { Help } from './ui/settings/Help';
+import { UpdatePanel } from './ui/settings/UpdatePanel';
 import { SplitStack, type StackPanel } from './ui/layout/SplitStack';
 import { Toasts } from './ui/toast/Toasts';
 import { StageView } from './ui/stage/StageView';
@@ -27,15 +28,23 @@ import { installLfDebug } from './debug/lf';
 export function App() {
   const [settingsOpen, setSettingsOpen] = createSignal(false);
   const [helpOpen, setHelpOpen] = createSignal(false);
-  // The two command-bar popovers share one anchor (top-right), so opening one closes the other — they can
+  const [updateOpen, setUpdateOpen] = createSignal(false);
+  // The command-bar popovers share one anchor (top-right), so opening one closes the others — they can
   // never overlap, and the open caps stay mutually exclusive.
   const openSettings = () => {
     setHelpOpen(false);
+    setUpdateOpen(false);
     setSettingsOpen((v) => !v);
   };
   const openHelp = () => {
     setSettingsOpen(false);
+    setUpdateOpen(false);
     setHelpOpen((v) => !v);
+  };
+  const openUpdate = () => {
+    setSettingsOpen(false);
+    setHelpOpen(false);
+    setUpdateOpen((v) => !v);
   };
 
   // A11y: manage focus for the two command-bar popovers. On open, focus moves into the panel (so a
@@ -47,6 +56,7 @@ export function App() {
   let helpBtn: HTMLButtonElement | undefined;
   let gearBtn: HTMLButtonElement | undefined;
   let stageBtn: HTMLButtonElement | undefined;
+  let updateBtn: HTMLButtonElement | undefined;
   // Pointer-vs-keyboard provenance of the last input lives in the transport-keys handler (installed
   // in onMount): a pointer-driven close must not return focus to the trigger (see TransportKeys).
   // Read (never written) here, so no signal churn.
@@ -63,6 +73,11 @@ export function App() {
     if (prevOpen && !open && !lastInputWasPointer()) transportKeys?.returnFocus(gearBtn);
     return open;
   }, false);
+  createEffect<boolean>((prevOpen) => {
+    const open = updateOpen();
+    if (prevOpen && !open && !lastInputWasPointer()) transportKeys?.returnFocus(updateBtn);
+    return open;
+  }, false);
   // The stage view (`src/ui/stage/`) hides the popovers with the rest of the normal UI, so opening it
   // closes them; a keyboard close returns focus to its command-bar cap, as the popovers do.
   createEffect<boolean>((prevOpen) => {
@@ -70,6 +85,7 @@ export function App() {
     if (open) {
       setSettingsOpen(false);
       setHelpOpen(false);
+      setUpdateOpen(false);
     } else if (prevOpen && !lastInputWasPointer()) transportKeys?.returnFocus(stageBtn);
     return open;
   }, false);
@@ -122,6 +138,7 @@ export function App() {
         if (cancelLearn()) return;
         if (settingsOpen()) setSettingsOpen(false);
         if (helpOpen()) setHelpOpen(false);
+        if (updateOpen()) setUpdateOpen(false);
         if (stageOpen()) setStageOpen(false);
       },
     });
@@ -301,6 +318,25 @@ export function App() {
         <Transport returnFocus={(el) => transportKeys?.returnFocus(el)} />
 
         <div class="tools">
+          {/* UPDATE — present ONLY while the updater has an offer, so it is invisible almost always and
+              unmissable when it is not. It used to be a dot on the Help cap over a section inside
+              "Quick reference", which the owner could not find; an available update is a state the app
+              is in, so it says so in words, in the bar. */}
+          <Show when={updateOffered()}>
+            <button
+              type="button"
+              class="tool-pill"
+              classList={{ 'tool-pill--on': updateOpen() }}
+              aria-label={`Update ready, version ${updateOffered()?.version}`}
+              aria-expanded={updateOpen()}
+              aria-controls="lf-update-popover"
+              ref={updateBtn}
+              title={`BleepLoop v${updateOffered()?.version} is ready to install`}
+              onClick={openUpdate}
+            >
+              Update
+            </button>
+          </Show>
           <SessionTools />
           {/* Keyboard show/hide — always available (the keyboard exists in every build), so this is the
               restore affordance when the on-screen keyboard is hidden. Engaged = visible. One accessible
@@ -368,12 +404,12 @@ export function App() {
           <button
             type="button"
             class="tool tool--help"
-            classList={{ 'tool--on': helpOpen(), 'tool--badge': updateOffered() !== null }}
-            aria-label={updateOffered() ? 'Help, update ready' : 'Help'}
+            classList={{ 'tool--on': helpOpen() }}
+            aria-label="Help"
             aria-expanded={helpOpen()}
             aria-controls="lf-help-popover"
             ref={helpBtn}
-            title={updateOffered() ? 'Help: an update is ready' : 'Help'}
+            title="Help"
             onClick={openHelp}
           >
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
@@ -419,6 +455,23 @@ export function App() {
             onClick={(e) => e.stopPropagation()}
           >
             <AudioSettings />
+          </div>
+        </div>
+      </Show>
+
+      {/* Update popover — same shell + anchor as the other two (one is open at a time). */}
+      <Show when={updateOpen()}>
+        <div class="settings-popover__backdrop" onClick={() => setUpdateOpen(false)}>
+          <div
+            class="settings-popover"
+            id="lf-update-popover"
+            role="dialog"
+            aria-label="Update"
+            tabindex={-1}
+            ref={focusPanel}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <UpdatePanel />
           </div>
         </div>
       </Show>

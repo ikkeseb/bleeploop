@@ -1,0 +1,133 @@
+/* The update panel — "Instrument" surface, same floating panel as AudioSettings and Help, anchored
+   top-right under the command bar's UPDATE pill (see .settings-popover in app.css). It holds ONE
+   thing, so it is set at a size meant to be read rather than scanned: 12px body in --text, not the
+   10.5px dim that made Help unreadable. Chrome stays monochrome — the progress fill is --engaged
+   (warm white), never a lane colour, since colour is spent only on sound. */
+.update {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 300px;
+  padding: 15px;
+  border-radius: 14px;
+  background: var(--panel);
+  border: 1px solid var(--edge);
+  box-shadow: inset 0 1px 0 var(--hair), var(--panel-drop);
+}
+
+.update__title {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+.update__ver {
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--dim);
+}
+
+/* The release notes: one line per bullet. Full text colour — this is the thing the panel exists to
+   show, not a footnote. */
+.update__list {
+  margin: 0;
+  padding-left: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.update__list li {
+  font-size: 12px;
+  color: var(--text);
+  line-height: 1.45;
+}
+
+.update__sub {
+  margin: 0;
+  font-size: 11px;
+  color: var(--dim);
+  line-height: 1.45;
+}
+
+/* ---- the install read-out: a bar and the stage it is in ---- */
+.update__progress {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.update__bar {
+  height: 4px;
+  border-radius: 999px;
+  background: var(--sunk);
+  box-shadow: var(--pressed);
+  overflow: hidden;
+}
+.update__fill {
+  height: 100%;
+  width: 0;
+  border-radius: 999px;
+  background: var(--engaged);
+  transition: width 0.2s linear;
+}
+/* No Content-Length, so no percentage: a travelling sliver says "running" without claiming a figure. */
+.update__fill--unknown {
+  width: 35%;
+  animation: lf-update-slide 1.1s ease-in-out infinite;
+}
+@keyframes lf-update-slide {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(286%);
+  }
+}
+.update__stage {
+  font-size: 11px;
+  color: var(--dim);
+  font-variant-numeric: tabular-nums; /* the megabytes climb: the line must not jitter */
+}
+@media (prefers-reduced-motion: reduce) {
+  .update__fill {
+    transition: none;
+  }
+  .update__fill--unknown {
+    animation: none;
+  }
+}
+
+/* UPDATE AND RESTART: the same matte key face as Help's diagnostics buttons and Audio Settings'
+   RETRY ASIO, one size up — it is the panel's only action. */
+.update__actions {
+  display: flex;
+  margin-top: 2px;
+}
+.update__btn {
+  padding: 6px 12px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: var(--surf-2);
+  box-shadow: inset 0 1px 0 var(--hair);
+  color: var(--text);
+  font: inherit;
+  font-size: 10.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  cursor: pointer;
+  transition: background-color 0.15s;
+}
+.update__btn:hover:not(:disabled) {
+  background: var(--surf-3);
+}
+.update__btn:active:not(:disabled) {
+  background: var(--sunk);
+  box-shadow: var(--pressed);
+}
+.update__btn:disabled {
+  cursor: default;
+  color: var(--dim);
+}

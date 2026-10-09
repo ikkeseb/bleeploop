@@ -368,6 +368,16 @@ export interface AppUpdate {
 }
 
 /**
+ * How far an install has got (`src-tauri/src/update.rs`'s `Progress`, over `lf://update-progress`).
+ * The three stages are the three waits a player sits through; only the download carries a number,
+ * and only when the server declared the package's size.
+ */
+export type UpdateProgress =
+  | { stage: 'downloading'; downloaded: number; total: number | null }
+  | { stage: 'verifying' }
+  | { stage: 'installing' };
+
+/**
  * The app updater (`src-tauri/src/update.rs`): the signed installer and `latest.json` the release
  * workflow publishes on GitHub Releases.
  */
@@ -382,6 +392,11 @@ export interface AppUpdates {
    * rejects when a step fails.
    */
   install(): Promise<void>;
+  /**
+   * Watch an install's stages. Registered once for the app's lifetime (`src/app/update.ts`): the
+   * install ends in the installer quitting the app, so nothing ever unsubscribes.
+   */
+  onProgress(cb: (progress: UpdateProgress) => void): void;
 }
 
 export type PlatformKind = 'web' | 'tauri';

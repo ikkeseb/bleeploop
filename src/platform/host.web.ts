@@ -2,7 +2,7 @@
  * Browser implementation of the capability boundary. Zero Tauri/Rust dependency.
  * This is what `pnpm dev` runs against.
  */
-import type { AppUpdate, AppUpdates, EngineHost, InputHost, LogFolder, MidiHost, Platform, PluginHost } from './host';
+import type { AppUpdate, AppUpdates, EngineHost, InputHost, LogFolder, MidiHost, Platform, PluginHost, UpdateProgress } from './host';
 import {
   ENGINE_LANES,
   decodeFeedFrame,
@@ -130,6 +130,13 @@ interface UpdateScript {
   installs: number;
   /** Set: `install()` rejects with it. */
   fail?: string;
+  /**
+   * Set: `install()` never settles, as the native one does not once the installer runs. The probe
+   * drives the read-out through `report` meanwhile.
+   */
+  hold?: boolean;
+  /** Set by the fake once the app subscribes: the probe calls it to play a stage. */
+  report?: (progress: UpdateProgress) => void;
 }
 
 /** Read when asked, never at module load: Node guards import this file without Vite's env. */
@@ -151,6 +158,13 @@ const webUpdates: AppUpdates = {
     if (!script) throw new Error('The browser build has no updater.');
     script.installs++;
     if (script.fail) throw new Error(script.fail);
+    // The native install returns only on failure: the installer quits the app. A scripted hold lets a
+    // probe watch the read-out instead of racing the resolve.
+    if (script.hold) await new Promise<never>(() => {});
+  },
+  onProgress(cb) {
+    const script = updateScript();
+    if (script) script.report = cb;
   },
 };
 
