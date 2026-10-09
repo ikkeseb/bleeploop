@@ -7,40 +7,43 @@
  *   silence  the master muted and at volume 0, the click off, before any note; the probe reads the mute
  *            back from the feed's reset frame (the settings the engine host keeps) and plays nothing
  *            unless it is there. No plugin loads, no GO LIVE, no take.
- *   1 resync native MIDI answers a new listener with its resync: the ports (none on a PC without an
- *            input), the bindings, learning null, the held set
+ *   1 resync the document's own subscribe answered an epoch and native MIDI's resync: the ports (none on
+ *            a PC without an input), the bindings, learning null, the held set
  *   2 deny   the WebView's own MIDI API is refused to the page (`src-tauri/src/lib.rs` denies the
  *            permission), so native MIDI keeps the ports
- *   3 note   a PC key's keydown (Keyboard.tsx's handler) reaches the router: native MIDI's held set and
- *            the key light the note. The router records a hold only for an attack its queue admitted
- *            with a device running; the feed carries no instrument level, so the engine's render of the
- *            note is not observed (muted, it would read silence anyway)
+ *   3 note   a PC key's keydown (Keyboard.tsx's handler) reaches the router in a batch of the document's
+ *            epoch: native MIDI's held set and the key light the note. The router records a hold only for
+ *            an attack its queue admitted with a device running; the feed carries no instrument level, so
+ *            the engine's render of the note is not observed (muted, it would read silence anyway)
  *   4 owners keyup clears the held set; two keys on one note (an octave shift between them) keep it held
  *            until the last lets go
  *   5 blur   the window's blur releases a held key; its later keyup sends no note
  *   7 slot   switching the active slot to the other built-in synth releases a held key; its keyup sends
  *            no note; then back
- *   6 reload a key held across a WebView reload (the old document sends nothing more) is released
- *            natively by the new document's epoch: the new listener's resync holds no note, and a key in
- *            the new document sounds (its epoch is the current one)
+ *   6 reload a key held across a WebView reload (the old document sends nothing more) is released at the
+ *            new document's subscribe: its epoch is newer, the resync that answers the subscribe (the
+ *            boot's first step, before the device opens and host_init) already holds no note, and no
+ *            event of the new document ever holds it; a key of the new document lands under its epoch
+ *   8 learn  a learn started (native answered `learning`) and the page reloaded: the new document's
+ *            resync says learning null. LEARN is disabled with no input port open, so the probe calls
+ *            what the button calls (`learn`)
  *
- * The probe takes native MIDI's event channel and the feed for a moment to read their resyncs (each has one
- * subscriber), then hands both back to the UI (`startMidi`, `startEngineStore`), which gets a resync of its
- * own. It watches `platform.input.send` to see what the keyboard sent. Check 8 (no Rust ERROR line,
- * host_init's `frontend_epoch=2` for the reloaded document: the page cannot read its epoch) is the
- * runner's, on its log (`scripts/native-probe.mjs`). Native MIDI logs nothing at its start with no input
- * port and a clean store, and the permission deny's warning comes only at a profile's first request
- * (WebView2 keeps the denial), so neither line is required.
+ * It reads the document's own MIDI events and epoch from `devMidi` (`src/ui/state/midi.ts`): a subscribe
+ * of its own would take the document's epoch. It takes the feed for a moment to read its reset frame (one
+ * subscriber), then hands it back (`startEngineStore`), and watches `platform.input.send` to see what the
+ * outbox sent. The runner fails the run on a Rust ERROR line (`scripts/native-probe.mjs`). Native MIDI logs
+ * nothing at its start with no input port and a clean store, and the permission deny's warning comes only
+ * at a profile's first request (WebView2 keeps the denial), so neither line is required.
  * `[midi-switch]` lines go through `console.error`; the runner fails the run on any other.
  *
  * Trigger: `VITE_LF_PROBE=midi-switch` at Vite start (DEV only). No knobs.
  */
-import { platform, input, type EngineCommand, type FeedFrame, type InputEvent, type MidiEvent } from '../platform';
+import { platform, input, type EngineCommand, type FeedFrame, type InputItem, type MidiEvent } from '../platform';
 import { engineDevice, startEngineStore } from '../ui/state/engine-store';
 import { clock, looper, master } from '../ui/state/audio';
 import { activeSlot, selectSynth, setActiveSlot, slotIds, slotPlugins } from '../ui/state/instrument';
 import { nativeHostReady } from '../ui/state/instrument-slots';
-import { bindings, heldNotes, learning, ports, startMidi } from '../ui/state/midi';
+import { bindings, devMidi, heldNotes, learn, learning, ports } from '../ui/state/midi';
 import { keyboardOctave } from '../ui/keyboard/Keyboard';
 
 const TAG = '[midi-switch]';
@@ -65,22 +68,24 @@ function expect(ok: boolean, what: string): asserts ok {
   if (!ok) throw Error(what);
 }
 
-// ── What the keyboard sends ────────────────────────────────────────────────────────────────────────
-// Every `input_send` batch, in order; `frozen` drops them (the reloading document's last words).
-const sent: { events: readonly InputEvent[]; done: Promise<void> }[] = [];
+// ── What the outbox sends ──────────────────────────────────────────────────────────────────────────
+// Every `input_send` batch, in order, with its epoch; `frozen` drops them (the reloading document's last
+// words).
+const sent: { epoch: number; items: readonly InputItem[]; done: Promise<unknown> }[] = [];
 let frozen = false;
 function watchInput(): void {
   const real = platform.input.send.bind(platform.input);
-  platform.input.send = (events) => {
-    if (frozen) return Promise.resolve();
-    const done = real(events);
-    sent.push({ events, done });
+  platform.input.send = (epoch, items) => {
+    if (frozen) return Promise.resolve(null);
+    const done = real(epoch, items);
+    sent.push({ epoch, items, done });
     return done;
   };
 }
-type NoteEvent = Extract<InputEvent, { note: unknown }>['note'];
-const notesFrom = (from: number): NoteEvent[] =>
-  sent.slice(from).flatMap((s) => s.events.flatMap((e) => (typeof e === 'object' && 'note' in e ? [e.note] : [])));
+type NoteEvent = { owner: string; note: number; velocity: number; on: boolean };
+const inputsFrom = (from: number) => sent.slice(from).flatMap((s) => s.items.flatMap((i) => ('input' in i ? [{ epoch: s.epoch, event: i.input }] : [])));
+const notesFrom = (from: number): (NoteEvent & { epoch: number })[] =>
+  inputsFrom(from).flatMap(({ epoch, event }) => (typeof event === 'object' && 'note' in event ? [{ ...event.note, epoch }] : []));
 /** The outbox's batches have left and native MIDI has had time to answer. */
 async function settle(): Promise<void> {
   await sleep(30);
@@ -101,25 +106,36 @@ function letGo(): void {
   input.allNotesOff();
 }
 
-// ── Resyncs ────────────────────────────────────────────────────────────────────────────────────────
-/** Take native MIDI's channel for its resync, then hand it back to the UI (which gets its own). */
-async function midiResync(): Promise<MidiEvent[]> {
-  const got: MidiEvent[] = [];
-  platform.midi.subscribe((ev) => got.push(ev));
-  await until('native MIDI resync', () => got.some((e) => e.type === 'held'), 10);
-  startMidi();
-  return got;
+// ── The document's MIDI events (`devMidi`) ──────────────────────────────────────────────────────────
+type Of<T extends MidiEvent['type']> = Extract<MidiEvent, { type: T }>;
+const events = (): MidiEvent[] => devMidi.events.map((e) => e.event);
+function first<T extends MidiEvent['type']>(list: MidiEvent[], type: T): Of<T> | undefined {
+  return list.find((e): e is Of<T> => e.type === type);
+}
+/** The document's subscribe answered and its resync (which ends with the held set) arrived. */
+async function resync(): Promise<MidiEvent[]> {
+  await until('the document subscribe epoch and its resync', () => devMidi.epoch !== null && events().some((e) => e.type === 'held'), 30);
+  const list = events();
+  return list.slice(0, list.findIndex((e) => e.type === 'held') + 1);
+}
+function resyncText(list: MidiEvent[]): string {
+  const p = first(list, 'ports');
+  const b = first(list, 'bindings');
+  const l = first(list, 'learning');
+  const h = first(list, 'held');
+  expect(p !== undefined && b !== undefined && l !== undefined && h !== undefined, `the resync lacks a part: ${list.map((e) => e.type).join(', ')}`);
+  return `epoch ${devMidi.epoch}, resync ${list.map((e) => e.type).join(', ')}: ${p.ports.length} port(s)${p.ports.length ? ` (${p.ports.map((x) => `${x.name} ${x.state}`).join(', ')})` : ''}, ${b.bindings.length} binding(s), learning ${JSON.stringify(l.learning)}, held [${h.notes.join(',')}]`;
 }
 
 /** Take the feed for its reset frame's settings (what the engine host keeps), then hand it back. */
 async function feedSettings(): Promise<EngineCommand[]> {
-  const first: { frame: FeedFrame | null } = { frame: null };
+  const got: { frame: FeedFrame | null } = { frame: null };
   platform.engine.subscribe((f) => {
-    if (f.reset && first.frame === null) first.frame = f;
+    if (f.reset && got.frame === null) got.frame = f;
   });
-  await until('a reset frame', () => first.frame !== null, 10);
+  await until('a reset frame', () => got.frame !== null, 10);
   startEngineStore();
-  return first.frame!.settings ?? [];
+  return got.frame!.settings ?? [];
 }
 
 /** Mute and silence the master, and prove it from the feed before any note. */
@@ -143,44 +159,31 @@ async function silence(): Promise<string> {
 interface Saved {
   lines: string[];
   failed: number;
+  epoch: number | null;
 }
-const results: Saved = { lines: [], failed: 0 };
+const results: Saved = { lines: [], failed: 0, epoch: null };
 
-async function check(n: number, run: () => Promise<string>): Promise<void> {
-  let line: string;
-  try {
-    line = `check ${n} PASS: ${await run()}`;
-  } catch (e) {
-    results.failed++;
-    line = `check ${n} FAIL: ${e instanceof Error ? e.message : String(e)}`;
-    letGo();
-    await settle();
-  }
+function record(line: string, failed: boolean): void {
+  if (failed) results.failed++;
   results.lines.push(line);
   log(line);
 }
 
-/** The first event of `type` among `events`. */
-function first<T extends MidiEvent['type']>(events: MidiEvent[], type: T): Extract<MidiEvent, { type: T }> | undefined {
-  return events.find((e): e is Extract<MidiEvent, { type: T }> => e.type === type);
-}
-
-function resyncText(events: MidiEvent[]): string {
-  const p = first(events, 'ports');
-  const b = first(events, 'bindings');
-  const l = first(events, 'learning');
-  const h = first(events, 'held');
-  expect(p !== undefined && b !== undefined && l !== undefined && h !== undefined, `the resync lacks a part: ${events.map((e) => e.type).join(', ')}`);
-  expect(l.learning === null, `learning is ${JSON.stringify(l.learning)}`);
-  return `resync ${events.map((e) => e.type).join(', ')}: ${p.ports.length} port(s)${p.ports.length ? ` (${p.ports.map((x) => `${x.name} ${x.state}`).join(', ')})` : ''}, ${b.bindings.length} binding(s), learning null, held [${h.notes.join(',')}]`;
+async function check(n: number, run: () => Promise<string>): Promise<void> {
+  try {
+    record(`check ${n} PASS: ${await run()}`, false);
+  } catch (e) {
+    record(`check ${n} FAIL: ${e instanceof Error ? e.message : String(e)}`, true);
+    letGo();
+    await settle();
+  }
 }
 
 async function checkResync(): Promise<string> {
-  const events = await midiResync();
-  const text = resyncText(events);
-  const portCount = first(events, 'ports')?.ports.length;
-  const bindingCount = first(events, 'bindings')?.bindings.length;
-  await until('the UI state to follow its own resync', () => ports().length === portCount && bindings().length === bindingCount, 5);
+  const list = await resync();
+  const text = resyncText(list);
+  expect(first(list, 'learning')?.learning === null, 'the resync says MIDI learn is listening');
+  expect(ports().length === first(list, 'ports')?.ports.length && bindings().length === first(list, 'bindings')?.bindings.length, 'the UI state differs from its resync');
   expect(learning() === null, 'the UI says MIDI learn is listening');
   return text;
 }
@@ -206,10 +209,11 @@ async function checkNote(): Promise<string> {
   await until('native MIDI to hold note 60', () => heldNotes().has(60), 5);
   const ons = notesFrom(from);
   expect(ons.length === 1 && ons[0].owner === 'key:KeyA' && ons[0].note === 60 && ons[0].on && ons[0].velocity === 100, `the keydown sent ${JSON.stringify(ons)}`);
+  expect(ons[0].epoch === devMidi.epoch, `the note went under epoch ${ons[0].epoch}, the document's is ${devMidi.epoch}`);
   await settle();
   expect(lit(60), 'the key of note 60 is not lit');
   expect(held().join() === '60', `held ${heldText()}`);
-  return `keydown a → input_send note 60 on (key:KeyA, velocity 100) → native held [60], key lit; the router admitted the attack with a device running (the feed shows no instrument level)`;
+  return `keydown a → input_send (epoch ${ons[0].epoch}) note 60 on (key:KeyA, velocity 100) → native held [60], key lit; the router admitted the attack with a device running (the feed shows no instrument level)`;
 }
 
 async function checkOwners(): Promise<string> {
@@ -252,8 +256,7 @@ async function checkBlur(): Promise<string> {
   window.dispatchEvent(new FocusEvent('blur'));
   await until('the blur to clear the held set', () => heldNotes().size === 0, 5);
   await settle();
-  const blurSent = sent.slice(from).some((s) => s.events.includes('blur'));
-  expect(blurSent, 'the blur sent no blur event');
+  expect(inputsFrom(from).some((i) => i.event === 'blur'), 'the blur sent no blur event');
   expect(!lit(62), 'note 62 stays lit after the blur');
   const after = sent.length;
   key('keyup', 's');
@@ -274,7 +277,7 @@ async function checkSlotSwitch(): Promise<string> {
   setActiveSlot(1);
   await until('the slot switch to clear the held set', () => heldNotes().size === 0, 5);
   await settle();
-  const targets = sent.slice(from).flatMap((s) => s.events.filter((e) => typeof e === 'object' && 'selectTarget' in e));
+  const targets = inputsFrom(from).filter((i) => typeof i.event === 'object' && 'selectTarget' in i.event);
   expect(targets.length > 0, 'the switch sent no note target');
   expect(!lit(64), 'note 64 stays lit after the switch');
   const after = sent.length;
@@ -286,13 +289,12 @@ async function checkSlotSwitch(): Promise<string> {
   setActiveSlot(0);
   await settle();
   expect(activeSlot() === 0 && heldNotes().size === 0, `back on slot ${activeSlot() + 1}, held ${heldText()}`);
-  return `keydown d → held [64] on slot A (${a}); slot B (${b}) active → ${JSON.stringify(targets[0])} → held [], key dark; the keyup sent nothing; back to slot A, held []`;
+  return `keydown d → held [64] on slot A (${a}); slot B (${b}) active → ${JSON.stringify(targets[0].event)} → held [], key dark; the keyup sent nothing; back to slot A, held []`;
 }
 
 /** The first document: everything but the reload's second half. */
 async function firstDocument(): Promise<void> {
   await until('the engine device', () => engineDevice() !== null, 90);
-  // host_init has given this document its epoch, without which the native router takes no note.
   await until('the plugin host', () => nativeHostReady(), 90);
   const device = engineDevice()!;
   if (device.backend !== 'Wasapi') return log(`FAIL the device is ${device.backend}: this probe runs on WASAPI only`);
@@ -318,38 +320,55 @@ async function firstDocument(): Promise<void> {
   await check(5, checkBlur);
   await check(7, checkSlotSwitch);
 
-  // Check 6, first half: a key down, then this document goes quiet and reloads.
+  // Checks 6 and 8, first half: a key down and a learn listening, then this document goes quiet and reloads.
   try {
     key('keydown', 'f');
     await until('note 65 held before the reload', () => heldNotes().has(65), 5);
+    const from = devMidi.events.length;
+    learn('recDub', null);
+    await until("native MIDI's answer to the learn", () => devMidi.events.slice(from).some((e) => e.event.type === 'learning' && e.event.learning !== null), 5);
     await settle();
+    expect(held().join() === '65', `held ${heldText()} before the reload`);
   } catch (e) {
-    results.failed++;
-    results.lines.push(`check 6 FAIL: ${e instanceof Error ? e.message : String(e)}`);
-    log(results.lines.at(-1));
+    record(`check 6 FAIL: ${e instanceof Error ? e.message : String(e)}`, true);
     letGo();
     await settle();
     return verdict();
   }
   frozen = true;
+  results.epoch = devMidi.epoch;
   sessionStorage.setItem(STATE_KEY, JSON.stringify(results));
-  log('reloading the WebView with note 65 held (key:KeyF); this document sends nothing more');
+  log(`reloading the WebView (epoch ${devMidi.epoch}) with note 65 held (key:KeyF) and a learn of recDub listening; this document sends nothing more`);
   location.reload();
 }
 
-/** The reloaded document: check 6's second half, then the verdict. */
+/** The reloaded document: checks 6 and 8, then the verdict. */
 async function secondDocument(saved: Saved): Promise<void> {
   sessionStorage.removeItem(STATE_KEY);
-  results.lines = saved.lines;
-  results.failed = saved.failed;
+  Object.assign(results, saved);
+  // Its resync first, before anything of this document is sent: the subscribe is the boot's first step.
+  let list: MidiEvent[];
+  try {
+    list = await resync();
+  } catch (e) {
+    record(`check 6 FAIL: ${e instanceof Error ? e.message : String(e)}`, true);
+    return verdict();
+  }
+  await check(8, async () => {
+    const l = first(list, 'learning');
+    expect(l !== undefined && l.learning === null, `the new document's resync says learning ${JSON.stringify(l?.learning)}`);
+    expect(learning() === null, 'the UI says MIDI learn is listening');
+    return `after the reload the resync says learning null (the old document's learn of recDub was listening); UI learning null`;
+  });
   await check(6, async () => {
+    const text = resyncText(list);
+    expect(devMidi.epoch !== null && saved.epoch !== null && devMidi.epoch > saved.epoch, `the new document's epoch ${devMidi.epoch} is not newer than ${saved.epoch}`);
+    const heldEvents = events().filter((e): e is Of<'held'> => e.type === 'held');
+    expect(heldEvents[0].notes.length === 0, `the subscribe's resync holds [${heldEvents[0].notes.join(',')}]: the old document's note 65 was not released at the subscribe`);
+    expect(!heldEvents.some((e) => e.notes.includes(65)), 'an event of the new document holds note 65');
     await until('the engine device after the reload', () => engineDevice() !== null, 60);
-    await until('the plugin host after the reload (host_init: the new epoch)', () => nativeHostReady(), 60);
+    await until('the plugin host after the reload', () => nativeHostReady(), 60);
     const safe = await silence();
-    const events = await midiResync();
-    const text = resyncText(events);
-    const notes = first(events, 'held')?.notes ?? [];
-    expect(notes.length === 0, `the new listener's resync holds [${notes.join(',')}]: the old document's note 65 was not released`);
     await settle();
     expect(heldNotes().size === 0 && !lit(65), `held ${heldText()}, note 65 ${lit(65) ? 'lit' : 'dark'}`);
     const from = sent.length;
@@ -357,15 +376,15 @@ async function secondDocument(saved: Saved): Promise<void> {
     await until('note 60 held in the new document', () => heldNotes().has(60), 5);
     key('keyup', 'a');
     await until('note 60 released in the new document', () => heldNotes().size === 0, 5);
-    const ons = notesFrom(from);
-    expect(ons.length === 2, `the new document's key sent ${JSON.stringify(ons)}`);
-    return `after the reload (${safe}): new listener's ${text}; note 65 dark; a key in the new document holds [60] and lets go (its epoch is the router's current one)`;
+    const notes = notesFrom(from);
+    expect(notes.length === 2 && notes.every((n) => n.epoch === devMidi.epoch), `the new document's key sent ${JSON.stringify(notes)}`);
+    return `epoch ${saved.epoch} → ${devMidi.epoch}; the subscribe's ${text} (before host_init), and no event of the new document held 65; then (${safe}) a key of the new document holds [60] under epoch ${devMidi.epoch} and lets go`;
   });
   verdict();
 }
 
 function verdict(): void {
-  if (results.failed === 0) log(`complete: ${results.lines.length} checks passed (1-7; check 8 is the runner's log check)`);
+  if (results.failed === 0) log(`complete: ${results.lines.length} checks passed (1-8; the runner checks the log)`);
   else log(`FAIL ${results.failed} of ${results.lines.length} check(s) failed: ${results.lines.filter((l) => l.includes(' FAIL: ')).map((l) => l.replace(/:.*/, '')).join(', ')}`);
 }
 

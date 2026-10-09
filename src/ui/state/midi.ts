@@ -86,7 +86,16 @@ function storeProblemText(problem: StoreProblem): [string, string] {
   return [`${n} stored MIDI binding${n === 1 ? '' : 's'} could not be read`, 'They stay in the file, unused.'];
 }
 
+/**
+ * DEV: this document's subscribe epoch and every native MIDI event it heard, in order, from its first
+ * resync on (capped). The native:midi probe (`src/debug/midi-switch.ts`) reads them: it loads after the
+ * boot's subscribe, and a second subscribe of its own would take the document's epoch.
+ */
+export const devMidi: { epoch: number | null; events: { at: number; event: MidiEvent }[] } = { epoch: null, events: [] };
+const DEV_EVENTS_MAX = 2000;
+
 function onEvent(ev: MidiEvent): void {
+  if (import.meta.env.DEV && devMidi.events.length < DEV_EVENTS_MAX) devMidi.events.push({ at: performance.now(), event: ev });
   switch (ev.type) {
     case 'ports':
       setPorts(ev.ports);
@@ -149,6 +158,7 @@ function queued<T>(call: () => Promise<T>): Promise<T> {
 export function startMidi(): () => void {
   const subscription = subscribeMidi(onEvent);
   chain = subscription.epoch.catch(() => {});
+  if (import.meta.env.DEV) void subscription.epoch.then((epoch) => (devMidi.epoch = epoch), () => {});
   return () => subscription.stop();
 }
 
