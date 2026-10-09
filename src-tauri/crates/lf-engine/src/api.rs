@@ -88,9 +88,10 @@ pub enum Command {
     /// synth, as two web synths).
     SelectInstrument(NoteTarget),
     /// A note (0..127) on the selected target; velocity 0..1. Sustain and the owner of a held note stay
-    /// with the sender (`src/ui/state/input-router.ts`). The instrument commands never wait behind a
-    /// looper command that waits for a block job. On a built-in instrument a note on or off sounds
-    /// `instruments::LEAD` frames after it is applied; a plugin slot gets it at the frame it is applied.
+    /// with the sender, native MIDI's one note router (the app's `engine_io::midi::router`). The
+    /// instrument commands never wait behind a looper command that waits for a block job. On a built-in
+    /// instrument a note on or off sounds `instruments::LEAD` frames after it is applied; a plugin slot
+    /// gets it at the frame it is applied.
     NoteOn(u8, f32),
     NoteOff(u8),
     /// The pitch wheel, in semitones (built-in instruments only; a plugin slot gets no wheels yet, D12).

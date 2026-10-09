@@ -12,9 +12,10 @@ the two plugin slots run in ONE device callback, clocked by the audio interface
 (`src-tauri/crates/lf-engine`, pure; its device side `src-tauri/src/engine_io`). The WebView is the
 UI: it sends commands (a batch per gesture, `engine_send`) and reads a feed (~60 frames/s: transport,
 lanes, the grid anchor, the meter, waveform peaks; never PCM). The wire is
-`src-tauri/src/engine_io/wire.rs`, mirrored in `src/platform/engine-wire.ts`. Settings, rig recall
-and MIDI-learn bindings stay in the WebView's storage and are mirrored to native at boot; the engine
-host replays every remembered setting into each new engine (`engine_io/settings.rs`).
+`src-tauri/src/engine_io/wire.rs`, mirrored in `src/platform/engine-wire.ts`. Settings and rig
+recall stay in the WebView's storage and are mirrored to native at boot (MIDI-learn bindings are
+native's, below); the engine host replays every remembered setting into each new engine
+(`engine_io/settings.rs`).
 
 `src/platform/` is the **only** place allowed to import `@tauri-apps/*` (enforced by
 `scripts/check-boundary.mjs`, run via `pnpm check:boundary`). `ui/`, `session/` and `app/` depend on
@@ -24,13 +25,39 @@ its interfaces, never the reverse (`src/platform/host.ts`):
 |---|---|---|
 | `EngineHost` | a scriptable fake: records every send, emits the frames a probe scripts; not a second looper | `invoke()` + a Tauri Channel → the engine host |
 | `PluginHost` | stub: `available=false` | `invoke()`/`listen()` → the CLAP, VST3 and VST2 hosts |
-| `MidiBackend` | `navigator.requestMIDIAccess` | **the same web impl, reused verbatim** |
+| `MidiHost` | a scriptable fake: records every call, emits the events a probe scripts | `invoke()` + a Tauri Channel → native MIDI (`midi_*`) |
+| `InputHost` | the same fake: records every input event | `invoke('input_send')` → native MIDI's note router |
 | `LogFolder` | none | the release log's folder (Help's diagnostics) |
 | `AppUpdates` | none, or a probe's script | the updater (`src-tauri/src/update.rs`), release builds only |
 
-MIDI arrives through Web MIDI: WebView2 has it natively (`lib.rs` auto-grants the MIDI permission to
-the app's own origin). The engine's native MIDI (midir, `engine_io/midi`) is built and off: WinMM
-input ports are exclusive, so Web MIDI and native MIDI cannot hold one controller at once.
+**MIDI is native end to end** (D22; briefing: `src-tauri/src/engine_io/midi/mod.rs`): ports, parse,
+learn, the bindings, the routing and the note target. The WebView keeps the learn row, the device list
+and the toasts, driven by native events on their own channel (never the feed) and the `MidiHost` calls.
+One MIDI path per run, no fallback, since a WinMM input port may be exclusive: the WebView's Web MIDI
+permission is denied (`src-tauri/src/lib.rs`) and `verify/guards/web-midi.mjs` keeps the API out of
+`src/`. Decided:
+
+- **One note router for every source** (`engine_io/midi/router.rs`): MIDI ports and the UI's pointer
+  and computer-keyboard owners share note ownership, sustain, the wheels and the note target. The UI
+  forwards gestures (`InputHost`) and keeps only a highlight overlay of its own holds.
+- **One ordered path into the engine** (`engine_io/midi/queue.rs`): the router's output, learned
+  actions and the UI's input commands (`engine_send`'s looper presses, `Press`, toggles) join one
+  bounded FIFO into `EngineHost::send`, so a pedal and a click keep their order and the settings memory
+  sees every target change. No second command ring.
+- **Nothing is stamped:** notes, wheels and bound actions land at the next block start, as a UI gesture
+  does, so the ring's admission order is the order the engine applies them in. Stamping comes back
+  only with one execution-order contract for every kind of input, and only if a measurement shows it
+  pays.
+- **One no-device rule for every source:** while no device runs, or during an engine rebuild, fresh
+  note-ons, actions and HOLD presses are refused and every release passes; controller state is kept.
+  A rebuild needs no WebView (`EngineHost::set_rebuild_hook`).
+- **Bindings live native,** in midi-bindings.json beside plugin-folders.json
+  (`engine_io/midi/store.rs`): an unreadable file is reported, never overwritten. The one-time import
+  of the web build's list never guesses: a binding whose port identity is ambiguous stays inactive and
+  listed until a matching port appears alone or the player assigns it (`engine_io/midi/ports.rs`).
+- **Every toggle has one owner, the engine:** CLICK, END STOP, FIXED, RETAKE, AUTO REC and the input
+  sends are engine actions every producer sends as intent (the lf-engine briefing), so a pedal and a
+  click never cancel each other.
 
 The browser build (`pnpm dev`) renders the whole UI and is silent: no engine is behind it, and nothing
 in the app builds an AudioContext. The DEV engine fake (`window.__lfEngineFake`) is the seam every

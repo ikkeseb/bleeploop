@@ -341,8 +341,11 @@ plugin-GUI work.
   its take starts.
 - The no-device removal path (a 1-frame process and `stop` on the plugin owner's thread) has no test
   with a real unit, and the CLAP restart fixture's thread check would flag it.
-- Native MIDI is to replace Web MIDI (the owner's call, D22): the plan, its two known port holes and
-  its measurement live in `docs/plans/native-midi.md`.
+- Native MIDI replaces Web MIDI (the owner's call, D22) and is built on branch `native-midi`. It
+  merges after the latency comparison, which waits on a loopback MIDI port (the owner approves its
+  install), and the owner's controller checks: a controller and a footswitch in a jam, sub-second
+  replugs, pedals learned before the update still firing. The plan and its measurement:
+  `docs/plans/native-midi.md`.
 - Archetype Plini (VST3) once stalled 4–14 s in 5 of 20 unloads, editor closed, and has not repeated
   since (cause unknown). The VST3 teardown and the unload log per-step timing in release too, so the
   next occurrence names its step.

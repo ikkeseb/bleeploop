@@ -1,7 +1,7 @@
 //! OWNS: the six built-in instruments, which one plays (or none), each one's level, the performance
 //! wheels, and the instruments' record path. Ported from `synths/index.ts` and the synth side of
-//! `input-router.ts`; the router's sustain and its per-source note ownership stay with the
-//! sender.
+//! `input-router.ts`; sustain and per-source note ownership stay with the sender, native MIDI's one
+//! note router (`engine_io::midi::router` in the app crate).
 //!
 //! All six are built in [`Instruments::new`] and render every block, so a switch never allocates and a
 //! released note rings out after one, as each slot's synth does in the web app when the player

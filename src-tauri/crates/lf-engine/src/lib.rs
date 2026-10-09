@@ -26,7 +26,7 @@
 //! | [`engine`] | the callback: rings, the block split, the bus topology, master volume | `engine.ts`, `master.ts` |
 //! | [`effects`] | each lane's FX chain and its pan, the shared reverb bus, their grid, CLEAR and COPY on a lane's FX and pan | `fx/fx.ts`, `looper/{playback,machine}.ts` (the pan: the engine's own) |
 //! | [`input_fx`] | the input sends: ECHO, REVERB and RING MOD on the wet signal, wet only, into the record tap and the monitor | — (engine only) |
-//! | [`instruments`] | the six built-in instruments, the selected one (or none), each one's level, the wheels, their record path | `synths/index.ts`, `input-router.ts` |
+//! | [`instruments`] | the six built-in instruments, the selected one (or none), each one's level, the wheels, their record path | `synths/index.ts`, `input-router.ts` (its sustain and note ownership went to the app's `engine_io::midi::router`) |
 //! | [`overview`] | what the UI draws, for a reader off the audio thread: the grid anchor, each lane's state, buffer, orientation and frames, each buffer's waveform peaks | `looper/peaks.ts` |
 //! | `note_record` | DEV builds only: each applied `NoteOn` and `NoteOff` and its frame, for the MIDI latency benchmark off the audio thread (`src-tauri/src/engine_io/midi_bench.rs`) | — |
 //! | [`session`] | saving and loading a session: a snapshot copied out a budget per frame, each lane with its mix at the pin, a load swapped into an empty looper with each lane's mix, both after the commands due on their block's first frame, the host's port | `looper/session.ts`, `export/*` |
@@ -87,9 +87,8 @@
 //!   boundary, as a live Web Audio call with no look-ahead does. Every control-rate step (the 128-frame
 //!   k-rate quanta, the compressor's 32-frame divisions, LFO and envelope ticks) is anchored to the frame
 //!   count, never to a block start. A UI gesture lands at the next block start (jitter: IPC plus one
-//!   block, inside the quarter-beat free-stop grace); a MIDI pedal lands there too, Web MIDI's and the
-//!   dormant native path's alike (D22: it stamps nothing, so the ring's order is the order things apply
-//!   in). No audio FIFO.
+//!   block, inside the quarter-beat free-stop grace); a MIDI note or pedal lands there too (D22: native
+//!   MIDI stamps nothing, so the ring's order is the order things apply in). No audio FIFO.
 //! - **Decided while porting** (each test file's header names what it changes): the count-in and an
 //!   idle PLAY start on the press frame, with no scheduling lead; a later take armed on an idle transport
 //!   counts in as the first did, restarts every loop from the top on the count's downbeat, and refuses

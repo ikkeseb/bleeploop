@@ -6,8 +6,9 @@
 //!
 //! - **The sender:** a midir output on this module's own thread sends note-ons to a loopback port at a
 //!   fixed interval, independent of the UI, each with its note-off half an interval later, and stamps
-//!   each send's `Instant`. The app receives them as it receives any controller (Web MIDI today, native
-//!   input after the switch), so one sender and one clock serve before and after.
+//!   each send's `Instant`. The app receives them as it receives any controller, through native MIDI.
+//!   The before run (the Web MIDI path) builds the last commit before the switch (f2b632c4), whose
+//!   sender is this one, so one sender and one clock serve before and after.
 //! - **The sequence id is the (note, velocity) pair:** send `i` plays note `base + i % notes` at
 //!   velocity `1 + (i / notes) % 127` ([`key_of`]), a pair that comes back only `notes × 127` sends
 //!   later; a configuration whose pairs come back sooner than twice the timeout is refused. A record of
@@ -20,8 +21,8 @@
 //!   (`lf_engine::note_record`), and FrameClock's stamp history turns the frame into an instant
 //!   (`frame_clock::frame_instant`). A matched note-on whose note's next applied record is not a
 //!   note-off is stuck. **Arrival** (a diagnostic): [`arrived`], stamped where a note
-//!   reaches native code: `engine_send` for Web MIDI's notes (after the WebView's handler and the IPC),
-//!   the native input's handler after the switch.
+//!   reaches native code: native MIDI's port callback (`midi::Core::message`), before learn and the
+//!   router. The before run's build stamped it in `engine_send`, after the WebView's handler and the IPC.
 //! - **UI stalls:** the DEV frontend runs a long main-thread task every few seconds when the benchmark
 //!   asks (`src/platform/host.tauri.ts`, [`midi_bench_stall_plan`]) and reports each one's window
 //!   ([`midi_bench_stall`]) on its own `performance.now()` clock; a note sent inside a window counts as
@@ -501,7 +502,7 @@ static STALLS: Mutex<Vec<(u64, u64)>> = Mutex::new(Vec::new());
 static PLAN: OnceLock<StallPlan> = OnceLock::new();
 static STALLING: AtomicBool = AtomicBool::new(false);
 
-/// A batch of commands reached native code at `at` (`engine_send`; the native input after the switch):
+/// A batch of commands reached native code at `at` (native MIDI's port callback):
 /// each `NoteOn`'s arrival, while a benchmark measures. One atomic load otherwise.
 pub fn arrived<'a>(commands: impl IntoIterator<Item = &'a Command>, at: Instant) {
     if !ARMED.load(Relaxed) {
@@ -996,7 +997,7 @@ mod tests {
         assert_eq!(key_of(cycle, SPACE), key_of(0, SPACE));
         assert!(keys.iter().all(|&(n, v)| (48..72).contains(&n) && (1..=127).contains(&v)), "never a velocity 0 (a note-off)");
         for &(note, v) in &keys {
-            // The engine gets `v / 127` as f32, from Web MIDI's JSON or the native parse.
+            // The engine gets `v / 127` as f32, as native MIDI's router sends it.
             assert_eq!(bench_key(note, v as f32 / 127.0, SPACE), Some((note, v)));
         }
         assert_eq!(bench_key(47, 0.5, SPACE), None, "below the notes: a stray");

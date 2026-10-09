@@ -1,6 +1,6 @@
 //! OWNS: the player's MIDI-learn bindings on disk, `midi-bindings.json` beside `plugin-folders.json`, and
 //! the one-time import of the WebView's `localStorage` list (`lf.midiLearn`, `src/app/midi-actions.ts`):
-//! the plan's decisions 8 and 9. Native MIDI's host keeps one (`super::Core`, dormant with it), which
+//! the plan's decisions 8 and 9. Native MIDI's host keeps one (`super::Core`), which
 //! decides which records the learn model runs: the port resolution is its, never this file's.
 //!
 //! This file is USER DATA, as the folder list is (`host/folders.rs`): only a MISSING file is an empty

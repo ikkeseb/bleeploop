@@ -49,11 +49,11 @@ Harness auto-load of nested files is not reliable: open the briefing yourself.
   large the change. The owner decides; the change is measured as any other.
 - **The play path is guitar → amp-sim plugin (native monitor) → play/loop/dub at low latency.** The
   looper is the instrument. MIDI controller → synth/plugin is the second path, for the other layers;
-  its MIDI arrives through the WebView (Web MIDI); PC-keyboard→MIDI is its fallback. By-ear sessions happen on
+  its MIDI input is native; PC-keyboard→MIDI is its fallback. By-ear sessions happen on
   guitar. The on-screen keyboard stays available, but it is not the first-screen hero. The promise
   heads `README.md`; what is not built on purpose: `docs/backlog-taste.md` § Parked ideas.
-- **One native audio engine; there is no Web Audio path.** Audio behaviour is built in lf-engine; the
-  WebView is UI, settings, MIDI input and session files.
+- **One native audio engine; there is no Web Audio path.** Audio behaviour is built in lf-engine and
+  MIDI input in native MIDI; the WebView is UI, settings and session files.
 - **The browser tier is a VERIFICATION RIG, not a product:** the browser build is silent, its UI
   driven by a scriptable engine fake. BleepLoop ships as a standalone Windows app with native drivers
   and native monitoring.
@@ -104,10 +104,12 @@ and reads a JSON feed (the wire: `src-tauri/src/engine_io/wire.rs`, mirrored in
 `src/platform/engine-wire.ts`). `src/platform/` is the ONLY place allowed to import `@tauri-apps/*`;
 `session/` and `ui/` depend on its interfaces, never the reverse; UI components reach the engine
 through `src/ui/state/audio.ts`. Live audio never crosses that boundary as PCM; a session save's
-snapshot does, once, off the RT path. Export, import, recovery and autosave live in `src/session/`;
-MIDI arrives through Web MIDI (`src/ui/state/midi.ts`). Frontend `console.error` + uncaught errors
-feed the release log (`src/platform/logging.ts`): keep every `console.error` site. Stack: SolidJS +
-TypeScript + Vite 8 (rolldown/oxc; esbuild is gone), Rust + cpal + the CLAP, VST3 and VST2 hosts.
+snapshot does, once, off the RT path. Export, import, recovery and autosave live in `src/session/`.
+MIDI is native, the app's only MIDI path: `src-tauri/src/engine_io/midi/` (briefing in its `mod.rs`),
+one note router for every note source; the UI shows its state through `src/ui/state/midi.ts`.
+Frontend `console.error` + uncaught errors feed the release log (`src/platform/logging.ts`): keep
+every `console.error` site. Stack: SolidJS + TypeScript + Vite 8 (rolldown/oxc; esbuild is gone),
+Rust + cpal + the CLAP, VST3 and VST2 hosts.
 
 ## Invariants: titles only, `docs/ARCHITECTURE.md` owns the text
 
