@@ -64,7 +64,7 @@
 //!   note-off of a held note, a pedal-up of a pedal down): the record may have arrived while it was held.
 //! - **The store is written on the port thread** (`Core::tick`), from a snapshot taken under the lock,
 //!   after it is released. A write refused or failed is a [`MidiEvent::Store`] and a release-log line,
-//!   never a panic. Without the app's data folder nothing is written, and the UI hears it as read-only.
+//!   never a panic; a failed one is tried again on a bounded backoff, and a later success clears it. Without the app's data folder nothing is written, and the UI hears it as read-only.
 //! - **A port that goes away releases what it held:** its notes, its pedal, its wheels and its HOLD
 //!   presses; the UI hears [`MidiEvent::Gone`] (the toast).
 //! - **A WebView document is its subscription** ([`MidiHost::subscribe`], first thing in its boot): it
@@ -125,6 +125,10 @@ const RETRY: Duration = Duration::from_millis(2);
 const IDLE_RETRY: Duration = Duration::from_millis(20);
 /// The most often the engine's refused sends and the queue's refusals for room reach the release log.
 const LOG_EVERY: Duration = Duration::from_secs(1);
+/// The wait before a failed store write is tried again; it doubles with each failure, up to
+/// [`WRITE_RETRY_MAX`].
+const WRITE_RETRY_FIRST: Duration = Duration::from_secs(1);
+const WRITE_RETRY_MAX: Duration = Duration::from_secs(60);
 /// The stored id an ordinal (legacy) record resolves under: no port's id, one for every such record,
 /// and of the legacy form, so its port name alone is its identity and every present port with that
 /// name counts (decision 9, `ports::resolve`).
@@ -231,7 +235,8 @@ pub enum StoreProblem {
     /// Another instance of the app wrote the file since this one read it: this session's changes are
     /// not saved over it.
     Conflict { why: String },
-    /// A write failed; the next change tries again.
+    /// A write failed; it is tried again on a backoff ([`WRITE_RETRY_FIRST`] doubling up to
+    /// [`WRITE_RETRY_MAX`]) and at the next change. A later success clears it.
     Failed { why: String },
     /// Stored records this build cannot read: kept in the file, not run.
     Rejected { count: usize },
@@ -442,6 +447,8 @@ struct State {
     heard_awaiting: Option<Binding>,
     /// The store's revision last handed to a write.
     written: u64,
+    /// After a failed write: when the port thread tries again, and the wait that led there.
+    write_retry: Option<(Instant, Duration)>,
     /// The port thread knows something is due (the queue holds input, or a write waits).
     armed: bool,
     /// The last drain stopped at a head the engine's ring refused.
@@ -514,6 +521,7 @@ impl Core {
                 heard_learning: None,
                 heard_awaiting: None,
                 written,
+                write_retry: None,
                 armed: false,
                 blocked: false,
                 refused: Refusals::default(),
@@ -908,17 +916,22 @@ impl Core {
         });
     }
 
-    /// The port thread's timers, at `now`: learn's release waits, the queue's retry, a store write and
-    /// the refusals' log line. Returns when it next has work.
+    /// The port thread's timers, at `now`: learn's release waits, the queue's retry, a store write (a
+    /// change, or a failed write's retry once due) and the refusals' log line. Returns when it next has
+    /// work.
     pub(crate) fn tick(&self, now: Instant) -> Option<Instant> {
         let (write, line, next) = {
             let mut guard = self.lock();
             let st = &mut *guard;
             st.learn.tick(now);
-            let write = (self.dir.is_some() && st.store.revision() > st.written).then(|| {
+            let changed = st.store.revision() > st.written;
+            let retry_due = st.write_retry.is_some_and(|(at, _)| now >= at);
+            let write = (self.dir.is_some() && (changed || retry_due)).then(|| {
                 st.written = st.store.revision();
-                st.store.snapshot()
+                (st.store.snapshot(), !changed)
             });
+            // A retry not yet due keeps its deadline; one written now gets its next from the write.
+            let write_at = st.write_retry.filter(|_| write.is_none()).map(|(at, _)| at);
             // This is the port thread: nothing to wake.
             st.armed = true;
             self.settle(st);
@@ -937,33 +950,61 @@ impl Core {
                     st.queue.counters()
                 )
             });
-            (write, line, [st.learn.next_deadline(), retry].into_iter().flatten().min())
+            (write, line, [st.learn.next_deadline(), retry, write_at].into_iter().flatten().min())
         };
         if let Some(line) = line {
             log::warn!("[midi] {line}");
         }
-        if let Some(snapshot) = write {
-            self.write(snapshot);
-        }
+        let retry_at = write.and_then(|(snapshot, retry)| self.write(snapshot, retry, now));
         self.flush();
-        next
+        [next, retry_at].into_iter().flatten().min()
     }
 
-    /// Write `snapshot` (off the lock); a refusal or a failure is the UI's to show and the release log's.
-    fn write(&self, snapshot: Snapshot) {
-        let Some(dir) = &self.dir else { return };
-        let problem = match snapshot.write(dir) {
-            Ok(_) => return,
-            Err(WriteError::ReadOnly(why)) => StoreProblem::ReadOnly { why },
-            Err(WriteError::Conflict(why)) => StoreProblem::Conflict { why },
-            Err(WriteError::Failed(why)) => StoreProblem::Failed { why },
-        };
+    /// Write `snapshot` (off the lock); `retry`: no change came since the failed write it repeats.
+    /// Returns when a failed write is tried again. A refusal or a failure is the UI's to show and the
+    /// release log's; a retry that fails as the last write did is neither, as they already have it.
+    ///
+    /// Only [`WriteError::Failed`] is retried: a read-only store refuses every write this session, and a
+    /// conflict stands until another instance's file changes back, which it does not; each such write
+    /// re-reads the file first, so even a retry could never save over another instance's file. Both wait
+    /// for the next change.
+    fn write(&self, snapshot: Snapshot, retry: bool, now: Instant) -> Option<Instant> {
+        let dir = self.dir.as_ref()?;
+        let result = snapshot.write(dir);
         let mut st = self.lock();
-        if st.problem.as_ref() != Some(&problem) {
+        let problem = match result {
+            Ok(_) => {
+                st.write_retry = None;
+                if matches!(st.problem, Some(StoreProblem::Failed { .. })) {
+                    log::info!("[midi] the MIDI bindings are saved");
+                    st.problem = None;
+                }
+                return None;
+            }
+            Err(WriteError::Failed(why)) => {
+                let wait = st.write_retry.map_or(WRITE_RETRY_FIRST, |(_, wait)| (wait * 2).min(WRITE_RETRY_MAX));
+                st.write_retry = Some((now + wait, wait));
+                StoreProblem::Failed { why }
+            }
+            Err(WriteError::ReadOnly(why)) => {
+                st.write_retry = None;
+                StoreProblem::ReadOnly { why }
+            }
+            Err(WriteError::Conflict(why)) => {
+                st.write_retry = None;
+                StoreProblem::Conflict { why }
+            }
+        };
+        let retry_at = st.write_retry.map(|(at, _)| at);
+        let known = st.problem.as_ref() == Some(&problem);
+        if !known {
             log::error!("[midi] the MIDI bindings were not saved: {problem:?}");
         }
-        st.problem = Some(problem.clone());
-        self.emit(MidiEvent::Store { problem });
+        if !(retry && known) {
+            self.emit(MidiEvent::Store { problem: problem.clone() });
+        }
+        st.problem = Some(problem);
+        retry_at
     }
 
     /// The rebuild handshake ([`RebuildHook`]).
@@ -1732,6 +1773,70 @@ mod tests {
         assert_eq!(std::fs::read(dir.0.join(FILE_NAME)).unwrap(), b"{ torn");
         r.send(A, &[[0xb0, 20, 127]]);
         assert_eq!(r.take(), [Command::Action(Action::Undo)], "the binding works in memory");
+    }
+
+    // A failed write (the file held open without delete sharing, so the rename over it fails) is tried
+    // again with no change to start it, on a backoff that doubles up to its bound, told once; the write
+    // that lands clears the problem, so a later listener hears none.
+    #[test]
+    fn a_failed_store_write_is_retried_on_a_bounded_backoff_until_it_lands() {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_SHARE_READ: u32 = 1;
+        let dir = Scratch::new("retry");
+        let mut r = Rig::with(dir.load(), Some(dir.0.clone()), vec![port("Probe a", Some(A))]);
+        r.host.import_legacy(r.epoch(), &legacy_list(&[legacy("input-1", "Probe a", 20, "undo")]));
+        assert_eq!(r.wait(Duration::ZERO), None, "written");
+        let store_events = |r: &Rig| r.events().into_iter().filter(|e| matches!(e, MidiEvent::Store { .. })).count();
+        store_events(&r);
+
+        let held = std::fs::OpenOptions::new().read(true).share_mode(FILE_SHARE_READ).open(dir.0.join(FILE_NAME)).unwrap();
+        assert_eq!(r.host.set_momentary(r.epoch(), r.revision(), 0, false), Ok(true));
+        assert_eq!(r.wait(Duration::ZERO), Some(r.t + WRITE_RETRY_FIRST), "the failed write comes back");
+        assert_eq!(store_events(&r), 1, "told once");
+        assert!(matches!(r.host.core.lock().problem, Some(StoreProblem::Failed { .. })));
+        assert_eq!(r.wait(WRITE_RETRY_FIRST / 2), Some(r.t + WRITE_RETRY_FIRST / 2), "not before it is due");
+        let mut waited = WRITE_RETRY_FIRST / 2;
+        let mut gaps = Vec::new();
+        for _ in 0..8 {
+            let next = r.wait(waited).expect("a retry is due again");
+            waited = next - r.t;
+            gaps.push(waited.as_secs());
+        }
+        assert_eq!(gaps, [2, 4, 8, 16, 32, 60, 60, 60], "doubling, bounded");
+        assert_eq!(store_events(&r), 0, "a retry failing as before tells nothing new");
+
+        drop(held);
+        assert_eq!(r.wait(waited), None, "the retry lands");
+        assert_eq!(r.host.core.lock().problem, None);
+        assert!(!dir.load().0.listed()[0].binding.momentary, "the edit is on disk");
+        r.subscribe();
+        assert_eq!(store_events(&r), 0, "a later listener hears no problem");
+    }
+
+    // The port's name under WinMM may not be the one Web MIDI stored: a legacy record no present port
+    // answers to is assigned by the player like any unresolved one; it runs there, and the port's id
+    // and name are saved, so the next start resolves it by its own rules.
+    #[test]
+    fn a_record_no_port_answers_to_is_assigned_to_a_present_port() {
+        let dir = Scratch::new("assign-noport");
+        let mut r = Rig::with(dir.load(), Some(dir.0.clone()), vec![port("Pedal", Some(A))]);
+        r.host.import_legacy(r.epoch(), &legacy_list(&[legacy("input-1", "Pedal (USB MIDI)", 20, "undo")]));
+        assert_eq!(r.states(), [("Pedal (USB MIDI)".into(), true, BindingState::NoPort)]);
+        r.send(A, &[[0xb0, 20, 127]]);
+        assert_eq!(r.take(), [], "nothing runs it");
+
+        assert_eq!(r.host.assign(r.epoch(), r.revision(), 0, &id("Pedal")), Ok(true));
+        assert_eq!(r.states(), [("Pedal".into(), false, BindingState::Live)]);
+        assert_eq!(r.host.listed()[0].listed.origin, Origin::Legacy, "the origin stays");
+        r.send(A, &[[0xb0, 20, 127]]);
+        assert_eq!(r.take(), [Command::Action(Action::Undo)]);
+        assert_eq!(r.wait(Duration::ZERO), None);
+
+        let saved = dir.load().0.listed().remove(0);
+        assert_eq!((saved.binding.port_id.as_str(), saved.binding.port_name.as_str(), saved.ordinal), (id("Pedal").as_str(), "Pedal", false));
+        assert_eq!((saved.blocked.as_deref(), saved.origin), (None, Origin::Legacy));
+        let next = Rig::with(dir.load(), Some(dir.0.clone()), vec![port("Pedal", Some(A))]);
+        assert_eq!(next.states(), [("Pedal".into(), false, BindingState::Live)], "the next start runs it");
     }
 
     // The player's edits go to the store by listed index and reach MIDI learn through its hand-off: a

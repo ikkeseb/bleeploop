@@ -21,9 +21,9 @@
  *   and `forget` by its index and the store revision its list came with, and a refused edit (the list
  *   changed since) toasts nothing; a line that does not run says why (blocked with native MIDI's reason,
  *   not connected, several ports or another missing port of its name, its port held by another program);
- *   one no port can be found for alone (blocked, several ports, another missing port) offers a port
- *   select that starts on no port, with ASSIGN off until a port is picked (`assign(revision, index,
- *   portId)`); one that only waits for its port offers none;
+ *   one no port can be found for alone (blocked, no port of its name, several ports, another missing
+ *   port) offers a port select that starts on no port, with ASSIGN off until a port is picked
+ *   (`assign(revision, index, portId)`); a live one offers none;
  * - a binding's `run` runs the UI's action with no second `Press` (native MIDI sent it): the stage view
  *   opens, steps its look and closes; two TAPs send the tapped `SetBpm`; GO LIVE sends no `Press`;
  *   `pressed` takes the lane cue down; `refused` (every HOLD control down) puts its cue on the selected
@@ -280,11 +280,11 @@ await probe(async ({ open }) => {
   assert.deepEqual(lines, [
     { text: 'Record / overdub | CC 64 · ch 1 | momentary', origin: null, why: null, idle: false, assign: false },
     { text: 'Play / stop · Track 3 | note 36 · ch 10 | latching', origin: PREVIOUS, why: 'learned again in another run', idle: true, assign: true },
-    { text: 'Click on / off | CC 21 · ch 1 | latching', origin: null, why: 'Launchkey is not connected', idle: true, assign: false },
+    { text: 'Click on / off | CC 21 · ch 1 | latching', origin: null, why: 'Launchkey is not connected', idle: true, assign: true },
     { text: 'Undo / redo | CC 22 · ch 1 | momentary', origin: PREVIOUS, why: 'several connected ports are named Twin', idle: true, assign: true },
     { text: 'Mute / unmute · Track 5 | CC 23 · ch 1 | latching', origin: PREVIOUS, why: 'another missing port is named Twin', idle: true, assign: true },
     { text: 'Stop all | CC 24 · ch 1 | latching', origin: PREVIOUS, why: 'Keystation 49 is held by another program', idle: true, assign: false },
-  ], 'each line shows its binding and where it came from; one that does not run says why; only one no port is found for alone offers an assignment');
+  ], 'each line shows its binding and where it came from; one that does not run says why; only one no port is found for alone offers an assignment, one no present port answers to included');
   const row = (i) => page.locator('.audio-settings__binding').nth(i);
   await row(0).getByRole('button', { name: /momentary pedal, switch to latching/ }).click();
   await page.waitForTimeout(30);
@@ -304,6 +304,10 @@ await probe(async ({ open }) => {
   await assignButton(1).click();
   await page.waitForTimeout(30);
   assert.deepEqual(await lastCall(), ['assign', 7, 1, 'keys'], 'ASSIGN moves the binding to the picked port');
+  await row(2).locator('select').selectOption('keys');
+  await assignButton(2).click();
+  await page.waitForTimeout(30);
+  assert.deepEqual(await lastCall(), ['assign', 7, 2, 'keys'], 'a binding no present port answers to moves the same way');
   await mkdir('logs/midi-learn', { recursive: true });
   await page.locator('.audio-settings').screenshot({ path: 'logs/midi-learn/bindings.png' });
   await row(4).getByRole('button', { name: /^Forget/ }).click();
@@ -358,11 +362,11 @@ await probe(async ({ open }) => {
   const toasts = await toastsOf(page);
   console.log('toasts', JSON.stringify(toasts));
   assert.ok(toasts.some(([m, d]) => m === 'MIDI device disconnected — FS-6 Pedal' && d === 'Held notes were released.'), 'an unplugged port toasts');
-  assert.ok(toasts.some(([m, d]) => m === 'MIDI bindings could not be saved; the next change tries again' && d === 'Access is denied. (os error 5)'), 'a store problem toasts');
+  assert.ok(toasts.some(([m, d]) => m === 'MIDI bindings could not be saved; BleepLoop keeps trying' && d === 'Access is denied. (os error 5)'), 'a store problem toasts');
   const epochs = await page.evaluate(() => [...new Set(window.__lf.native.midiCalls.filter((c) => c[0] !== 'subscribe').map((c) => c[1]))]);
   assert.deepEqual(epochs, [1], 'every native MIDI call carries the page\'s epoch');
   assert.deepEqual(consoleErrors, [
     '[midi] input disconnected: FS-6 Pedal',
-    '[midi] bindings store: MIDI bindings could not be saved; the next change tries again: Access is denied. (os error 5)',
+    '[midi] bindings store: MIDI bindings could not be saved; BleepLoop keeps trying: Access is denied. (os error 5)',
   ], 'each reaches the release log, and nothing else does');
 });

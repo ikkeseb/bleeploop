@@ -84,7 +84,7 @@ export function setMidiActionHandler(h: MidiActionHandler | null): void {
 function storeProblemText(problem: StoreProblem): [string, string] {
   if ('readOnly' in problem) return ['MIDI bindings cannot be saved this session', problem.readOnly.why];
   if ('conflict' in problem) return ['MIDI bindings were changed by another BleepLoop; this session does not save over them', problem.conflict.why];
-  if ('failed' in problem) return ['MIDI bindings could not be saved; the next change tries again', problem.failed.why];
+  if ('failed' in problem) return ['MIDI bindings could not be saved; BleepLoop keeps trying', problem.failed.why];
   const n = problem.rejected.count;
   return [`${n} stored MIDI binding${n === 1 ? '' : 's'} could not be read`, 'They stay in the file, unused.'];
 }

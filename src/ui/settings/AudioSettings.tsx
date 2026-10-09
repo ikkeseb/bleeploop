@@ -126,9 +126,10 @@ function notLive(l: ListedBinding): string | null {
 }
 
 /** The player picks the port for a binding no port can be found for alone: one waiting for the player
- * (blocked), or one whose name several ports carry. One that only waits for its port runs once the port is
- * here, with no pick. */
-const ASSIGNABLE: readonly ListedBinding['state'][] = ['blocked', 'severalPorts', 'severalAbsent'];
+ * (blocked), one whose name several ports carry, or one no present port answers to (its port may be away,
+ * or carry another name than the one stored: a Web MIDI name WinMM spells otherwise). Unassigned, the last
+ * runs once a port of its name is here, with no pick. */
+const ASSIGNABLE: readonly ListedBinding['state'][] = ['blocked', 'noPort', 'severalPorts', 'severalAbsent'];
 
 /** Why LEARN cannot listen, or null when it can (a port is open). */
 function learnBlocked(): string | null {
