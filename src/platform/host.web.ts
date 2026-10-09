@@ -2,7 +2,7 @@
  * Browser implementation of the capability boundary. Zero Tauri/Rust dependency.
  * This is what `pnpm dev` runs against.
  */
-import type { AppUpdate, AppUpdates, EngineHost, LogFolder, MidiBackend, Platform, PluginHost } from './host';
+import type { AppUpdate, AppUpdates, EngineHost, InputHost, LogFolder, MidiHost, Platform, PluginHost } from './host';
 import {
   ENGINE_LANES,
   decodeFeedFrame,
@@ -23,6 +23,7 @@ import {
   type SnapshotHeader,
   type SnapshotTrack,
 } from './engine-wire.ts'; // explicit .ts: Node guards import this file
+import { decodeInputEvent, decodeMidiEvent, type InputEvent, type MidiEvent } from './midi-wire.ts';
 
 const NO_NATIVE_HOST =
   'Native VST host is unavailable in the browser build — use the built-in synths.';
@@ -103,13 +104,6 @@ const webPluginHost: PluginHost = {
   },
   async asioDeviceInfo() {
     return null;
-  },
-};
-
-const webMidi: MidiBackend = {
-  async requestAccess() {
-    if (!navigator.requestMIDIAccess) return null;
-    return navigator.requestMIDIAccess({ sysex: false });
   },
 };
 
@@ -210,6 +204,20 @@ export interface EngineFake extends EngineHost {
    * @public
    */
   emit(raw: unknown): void;
+  /** Every input event the UI sent (`InputHost.send`: notes by owner, blurs, note targets, panics), in
+   * order, batches flattened. Recorded only while the fake engine is on, as `sent`. */
+  readonly inputSent: InputEvent[];
+  /** Every native MIDI call (`MidiHost`), in order: its method's name and arguments, e.g.
+   * `['learn', 'recDub', null]`. */
+  readonly midiCalls: [string, ...unknown[]][];
+  /**
+   * Decode `raw` as a native MIDI event (its Rust serde JSON, the real decoder) and hand it to the
+   * subscriber, as the native channel would. The fake answers `learn` and `cancelLearn` with a
+   * `learning` event and nothing else on its own: no router, no learn (native MIDI's are Rust-tested).
+   * Only probes call it, through `__lf.native`.
+   * @public
+   */
+  midiEmit(raw: unknown): void;
 }
 
 const NO_ENGINE = 'The native engine is unavailable in the browser build.';
@@ -567,6 +575,65 @@ const engineSubscribers = new Set<(frame: FeedFrame) => void>();
 let fakeStatus: DeviceStatus | null = null;
 const fakeRate = () => (globalThis as { __lfEngineFakeRate?: number }).__lfEngineFakeRate ?? 48000;
 
+// ── The fake's native MIDI and input: recorded, never run ───────────────────────────────────────────
+
+const midiCalls: [string, ...unknown[]][] = [];
+const inputSent: InputEvent[] = [];
+let midiSubscriber: ((event: MidiEvent) => void) | null = null;
+/** The learn the fake was asked for, for its `learning` answers and `cancelLearn`'s. */
+let fakeLearning: { action: string; target: number | null } | null = null;
+
+/** Hand `raw` (the Rust serde JSON) to the subscriber a microtask later, as the native channel would. */
+function emitMidi(raw: unknown): void {
+  const event = decodeMidiEvent(raw);
+  queueMicrotask(() => midiSubscriber?.(event));
+}
+
+const webMidi: MidiHost = {
+  subscribe(onEvent) {
+    midiCalls.push(['subscribe']);
+    midiSubscriber = onEvent;
+    return () => {
+      if (midiSubscriber === onEvent) midiSubscriber = null;
+    };
+  },
+  async learn(action, target) {
+    midiCalls.push(['learn', action, target]);
+    fakeLearning = { action, target };
+    emitMidi({ learning: { learning: fakeLearning } });
+  },
+  async cancelLearn() {
+    midiCalls.push(['cancelLearn']);
+    const was = fakeLearning !== null;
+    fakeLearning = null;
+    emitMidi({ learning: { learning: null } });
+    return was;
+  },
+  async forget(index) {
+    midiCalls.push(['forget', index]);
+  },
+  async setMomentary(index, momentary) {
+    midiCalls.push(['setMomentary', index, momentary]);
+  },
+  async setHold(index, hold) {
+    midiCalls.push(['setHold', index, hold]);
+  },
+  async assign(index, portId) {
+    midiCalls.push(['assign', index, portId]);
+  },
+  async importLegacy(json) {
+    midiCalls.push(['importLegacy', json]);
+    return { already: false, unreadable: null, imported: [], blocked: [], rejected: [], skipped: [] };
+  },
+};
+
+const webInput: InputHost = {
+  async send(events) {
+    if (!engineForced()) throw new Error(NO_ENGINE);
+    inputSent.push(...events.map(decodeInputEvent));
+  },
+};
+
 /**
  * The engine host's browser stand-in: the browser build has no engine (`available` false) unless a DEV
  * probe forces this fake on. Forced on, it answers `open()` with a canned device, records every batch in `sent` and hands a
@@ -669,6 +736,9 @@ export const webEngineFake: EngineFake = {
     engineSubscribers.add(onFrame);
     return () => engineSubscribers.delete(onFrame);
   },
+  inputSent,
+  midiCalls,
+  midiEmit: emitMidi,
   emit(raw) {
     const frame = decodeFeedFrame(raw);
     applyMixFrame(frame);
@@ -687,4 +757,5 @@ export const webPlatform: Platform = {
   logs: webLogFolder,
   updates: webUpdates,
   midi: webMidi,
+  input: webInput,
 };

@@ -62,9 +62,11 @@ the engine's `Mix` once it changes (its seams `holdEcho`, `holdApply` and `refus
 and a toggle (CLICK, END STOP, FIXED, RETAKE, AUTO REC, a send), which it switches or refuses as the
 engine's gate would on the scripted looper and answers with `Toggled` or `Refused`,
 so a probe proves gesture → command and frame → screen, never the engine
-(`verify/probes/engine-seam.mjs` is the pattern). What still runs for
-real in the page: the input router, Web MIDI parsing and learn, the recovery worker and IndexedDB, the
-export's archive. A snapshot's track carries the lane's mix as the fake's commands and events left it
+(`verify/probes/engine-seam.mjs` is the pattern). Native MIDI is faked the same way: the fake records the
+UI's input events (`__lf.native.inputSent`: notes by owner, blurs, note targets) and native MIDI calls
+(`__lf.native.midiCalls`), answers a learn or its cancel with a `learning` event and nothing else, and hands
+the UI the native MIDI events a probe scripts (`__lf.native.midiEmit`): the router and learn are Rust's
+tests. What still runs for real in the page: the recovery worker and IndexedDB, the export's archive. A snapshot's track carries the lane's mix as the fake's commands and events left it
 (or the one a probe scripts). The export's master is the engine's; asked with the master, the fake
 answers a dry sum under those tracks' volume and mute and the master's the UI sent (NOT the engine's
 sound: no probe tests the master's sound).

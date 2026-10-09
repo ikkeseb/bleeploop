@@ -7,7 +7,8 @@
  * - an empty looper: Export is disabled, Import is enabled, Help names the Session tools;
  * - the first take through real controls: FIXED (aria-pressed off, then on, from the `Toggled` the fake
  *   answers) and its Fewer bars stepper send the engine's FIXED toggle / `SetFixedBars`; the lane's record core sends `SelectTrack` + `RecDub`; a PC
- *   key sends `NoteOn` / `NoteOff`; the take the feed then reports makes Import disabled;
+ *   key's press and release reach native MIDI's router (`__lf.native.inputSent`); the take the feed then
+ *   reports makes Import disabled;
  * - Export's download: a .zip whose stem is the snapshot's PCM, exactly;
  * - recovery: autosave saves the jam without an explicit flush; a closed and reopened page (a fresh
  *   engine) loads that session back into the engine, header and PCM;
@@ -133,11 +134,11 @@ await probe(async ({ open, browser }) => {
   await page.keyboard.down('a');
   await page.waitForTimeout(200);
   await page.keyboard.up('a');
-  await page.waitForFunction(() => window.__lf.native.sent.some((c) => c.NoteOff !== undefined), undefined, { timeout: 5000 });
-  const played = await sent(page);
-  const on = played.find((c) => c.NoteOn);
-  assert.ok(on, 'a PC key sends NoteOn');
-  assert.deepEqual(played.find((c) => c.NoteOff !== undefined), { NoteOff: on.NoteOn[0] }, 'its release sends NoteOff');
+  await page.waitForFunction(() => window.__lf.native.inputSent.some((e) => e.note && !e.note.on), undefined, { timeout: 5000 });
+  const played = await page.evaluate(() => window.__lf.native.inputSent.filter((e) => e.note).map((e) => e.note));
+  const on = played.find((n) => n.on);
+  assert.ok(on, 'a PC key plays its note');
+  assert.deepEqual(played.find((n) => !n.on), { ...on, velocity: 0, on: false }, 'its release lets go of it');
   // The FIXED bar commits: the lane plays, and the engine's snapshot holds the take.
   const take = await page.evaluate(async (bar) => {
     const { encodeSessionBytes } = await import('/src/platform/engine-wire.ts');

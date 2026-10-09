@@ -8,7 +8,9 @@ import type {
   AudioInputDevice,
   AudioOutputDevice,
   EngineHost,
+  InputHost,
   LogFolder,
+  MidiHost,
   Platform,
   PluginDescriptor,
   PluginFolders,
@@ -18,8 +20,8 @@ import type {
   PluginSlot,
   ToneImport,
 } from './host';
-import { webPlatform } from './host.web';
 import { decodeDeviceStatus, decodeFeedFrame } from './engine-wire';
+import { decodeImportReport, decodeMidiEvent } from './midi-wire';
 // notify.ts is a ROOT-level module (src/notify.ts), not an app layer, so importing it from a platform/
 // file is boundary-clean: check-boundary.mjs's leak regex flags only the app layers above platform/. It's the one user-visible error surface, imported here so a native transport failure below
 // reaches the user (not just console.error → the release log).
@@ -197,6 +199,72 @@ const tauriEngineHost: EngineHost = {
   },
 };
 
+/**
+ * Native MIDI over Tauri IPC: each method maps to a `midi_*` command in Rust (`src-tauri/src/engine_io`);
+ * the events arrive on a Tauri Channel, which a reload's subscription replaces natively. Payloads:
+ * `midi-wire.ts`.
+ */
+const tauriMidi: MidiHost = {
+  subscribe(onEvent) {
+    const channel = new Channel<unknown>();
+    let live = true;
+    let reported = false;
+    channel.onmessage = (raw) => {
+      if (!live) return;
+      try {
+        onEvent(decodeMidiEvent(raw));
+      } catch (err) {
+        // One report per subscription, as the feed's.
+        if (reported) return;
+        reported = true;
+        console.error('[host.tauri] MIDI event rejected', err);
+        notifyError('Native MIDI sent something the app cannot read', err);
+      }
+    };
+    invoke('midi_subscribe', { channel }).catch((err: unknown) => {
+      console.error('[host.tauri] MIDI subscribe failed', err);
+      notifyError('The app lost contact with MIDI', err);
+    });
+    return () => {
+      live = false;
+    };
+  },
+  async learn(action, target) {
+    await invoke('midi_learn', { action, target });
+  },
+  cancelLearn() {
+    return invoke<boolean>('midi_cancel_learn');
+  },
+  async forget(index) {
+    await invoke('midi_forget', { index });
+  },
+  async setMomentary(index, on) {
+    await invoke('midi_set_momentary', { index, on });
+  },
+  async setHold(index, on) {
+    await invoke('midi_set_hold', { index, on });
+  },
+  async assign(index, portId) {
+    await invoke('midi_assign', { index, portId });
+  },
+  async importLegacy(json) {
+    return decodeImportReport(await invoke<unknown>('midi_import_legacy', { json }));
+  },
+};
+
+/**
+ * The UI's input events over Tauri IPC (`input_send`, synchronous on the main thread natively, as
+ * `engine_send`, so the outbox's calls keep their order). Until `host_init` answered this document's epoch
+ * (0), its notes and blurs go nowhere: no device ran yet, and the native router refuses an epoch it was
+ * not told; the note target and the panic carry no epoch and go at once.
+ */
+const tauriInput: InputHost = {
+  async send(events) {
+    const batch = frontendEpoch === 0 ? events.filter((e) => e !== 'blur' && !(typeof e === 'object' && 'note' in e)) : events;
+    if (batch.length > 0) await invoke('input_send', { epoch: frontendEpoch, events: batch });
+  },
+};
+
 /** The release log's folder over Tauri IPC: `app_log_dir` / `app_open_log_dir` in `lib.rs`. */
 const tauriLogFolder: LogFolder = {
   available: true,
@@ -221,15 +289,15 @@ const tauriUpdates: AppUpdates = {
 };
 
 /**
- * Tauri platform. Reuses the web Web-MIDI capability (it works inside WebView2 v149) and swaps in the
- * native CLAP/VST3/VST2 `pluginHost`, the native `engine`, the release log's folder (`logs`) and the
- * updater (`updates`).
+ * Tauri platform: the native CLAP/VST3/VST2 `pluginHost`, the native `engine`, native `midi` and `input`,
+ * the release log's folder (`logs`) and the updater (`updates`).
  */
 export const tauriPlatform: Platform = {
-  ...webPlatform,
   kind: 'tauri',
   pluginHost: tauriPluginHost,
   engine: tauriEngineHost,
+  midi: tauriMidi,
+  input: tauriInput,
   logs: tauriLogFolder,
   updates: tauriUpdates,
 };
@@ -265,7 +333,6 @@ export async function reportTauriDiagnostics(): Promise<void> {
     userAgent: navigator.userAgent,
   };
   void runBenchStalls();
-  report.midi = await probeMidi();
   await emitDiag(report);
 }
 
@@ -297,7 +364,7 @@ async function runBenchStalls(): Promise<void> {
   const timer = setInterval(() => {
     const start = performance.now();
     while (performance.now() - start < ms) {
-      // A long main-thread task, on purpose: what a Web MIDI message waits behind.
+      // A long main-thread task, on purpose: what a UI event waits behind.
     }
     invoke<boolean>('midi_bench_stall', { startMs: start, endMs: performance.now() })
       .then((more) => {
@@ -312,27 +379,5 @@ async function emitDiag(report: Record<string, unknown>): Promise<void> {
     await invoke('diag', { report: JSON.stringify(report) });
   } catch {
     /* diag is best-effort — never block startup */
-  }
-}
-
-/**
- * Probe WebView2's native Web MIDI: does navigator.requestMIDIAccess resolve (and enumerate),
- * or is it absent / blocked behind the permission prompt? 5s timeout so an unanswered permission
- * prompt reports `pending`.
- */
-async function probeMidi(): Promise<unknown> {
-  const nav = navigator as Navigator & {
-    requestMIDIAccess?: (opts?: { sysex?: boolean }) => Promise<MIDIAccess>;
-  };
-  if (!nav.requestMIDIAccess) return { supported: false };
-  try {
-    const access = await Promise.race([
-      nav.requestMIDIAccess({ sysex: false }),
-      new Promise<never>((_, rej) => setTimeout(() => rej(new Error('pending')), 5000)),
-    ]);
-    const inputs = [...access.inputs.values()].map((i) => i.name ?? '(unnamed)');
-    return { supported: true, resolved: true, inputCount: inputs.length, inputs };
-  } catch (e) {
-    return { supported: true, resolved: false, reason: String((e as Error)?.message ?? e) };
   }
 }

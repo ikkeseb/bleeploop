@@ -21,7 +21,20 @@ import {
   setBufferSize,
   setSampleRatePick,
 } from '../state/audio-devices';
-import { midiDevices, midiStatus } from '../state/midi';
+import {
+  anyPortOpen,
+  assign,
+  awaitingRelease,
+  bindings,
+  cancelLearn,
+  forget,
+  learn,
+  learning,
+  ports,
+  portsSummary,
+  setHold,
+  setMomentary,
+} from '../state/midi';
 import {
   addPluginFolder,
   pluginFolders,
@@ -30,18 +43,7 @@ import {
   removePluginFolder,
 } from '../state/plugin-folders';
 import { ACTION_LABELS, isLaneAction, type ActionId, type Target } from '../../app/actions';
-import {
-  awaitingRelease,
-  bindings,
-  cancelLearn,
-  forget,
-  learn,
-  learning,
-  setHold,
-  setMomentary,
-  type MidiBinding,
-} from '../../app/midi-actions';
-import { platform } from '../../platform';
+import { platform, type ListedBinding, type MidiBinding } from '../../platform';
 import {
   BUFFER_FRAMES_OPTIONS,
   asioBufferChoice,
@@ -101,6 +103,22 @@ function midiSource(b: MidiBinding): string {
 /** A binding's action as the list names it: "Play / stop · Track 2" for a lane action on a named track. */
 function bindingAction(b: MidiBinding): string {
   return b.target === null ? ACTION_LABELS[b.action] : `${ACTION_LABELS[b.action]} · Track ${b.target + 1}`;
+}
+
+/** Why a stored binding does not run now, or null when it does (native MIDI's `BindingState`). */
+function notLive(l: ListedBinding): string | null {
+  switch (l.state) {
+    case 'live':
+      return null;
+    case 'blocked':
+      return l.blocked ?? `waits for ${l.displayName}`;
+    case 'noPort':
+      return `${l.displayName} is not connected`;
+    case 'severalPorts':
+      return `several connected ports are named ${l.displayName}`;
+    case 'severalAbsent':
+      return `another missing port is named ${l.displayName}`;
+  }
 }
 
 export function AudioSettings() {
@@ -441,8 +459,9 @@ export function AudioSettings() {
 
       {/* MIDI learn: pick an action (a track action also its track), LEARN, and the next CC or note-on from
           any port runs it from then on (a second click or Esc cancels). A learned message never reaches
-          the play path. The bindings, their persistence and the momentary/latching read live in
-          `src/app/midi-actions.ts`; each line can switch the kind, and a momentary REC/DUB pedal can HOLD. */}
+          the play path. Learn, the bindings, their store and the momentary/latching read are native MIDI's
+          (`state/midi.ts` asks it); each line can switch the kind, a momentary REC/DUB pedal can HOLD, and
+          a line that does not run says why and can be assigned to a port that is here. */}
       <div class="audio-settings__row" title="A MIDI footswitch or key runs this action">
         <span class="audio-settings__label">midi learn</span>
         <select
@@ -464,8 +483,10 @@ export function AudioSettings() {
           class="audio-settings__btn"
           classList={{ 'audio-settings__btn--listening': learning() !== null }}
           aria-pressed={learning() !== null}
-          disabled={learning() === null && midiStatus() !== 'connected'}
-          onClick={() => (learning() === null ? learn(learnPick(), learnTarget()) : cancelLearn())}
+          disabled={learning() === null && !anyPortOpen()}
+          onClick={() =>
+            learning() === null ? learn(learnPick(), isLaneAction(learnPick()) ? learnTarget() : null) : cancelLearn()
+          }
           aria-label="Learn a MIDI control for this action"
         >
           {learning() === null ? 'LEARN' : 'LISTENING'}
@@ -499,43 +520,76 @@ export function AudioSettings() {
       <Show when={bindings().length > 0}>
         <ul class="audio-settings__bindings" aria-label="MIDI bindings">
           <For each={bindings()}>
-            {(b) => (
-              <li class="audio-settings__binding" title={b.portName}>
-                <span class="audio-settings__binding-action">{bindingAction(b)}</span>
-                <span class="audio-settings__binding-src">{midiSource(b)}</span>
-                <button
-                  type="button"
-                  class="audio-settings__chip"
-                  onClick={() => setMomentary(b, !b.momentary)}
-                  aria-label={`${bindingAction(b)} on ${midiSource(b)}: ${b.momentary ? 'momentary' : 'latching'} pedal, switch to ${b.momentary ? 'latching' : 'momentary'}`}
-                  title="How the pedal was read. Switch it if a press runs twice, or every other press runs nothing"
-                >
-                  {b.momentary ? 'momentary' : 'latching'}
-                </button>
-                <Show when={b.action === 'recDub'}>
+            {(l, index) => {
+              const b = () => l.binding;
+              // The port an assignment would move this binding to: the player's pick, else the first.
+              const [assignTo, setAssignTo] = createSignal('');
+              const assignPort = () => (ports().some((p) => p.id === assignTo()) ? assignTo() : (ports()[0]?.id ?? ''));
+              return (
+                <li class="audio-settings__binding" classList={{ 'is-idle': notLive(l) !== null }} title={l.displayName}>
+                  <span class="audio-settings__binding-action">{bindingAction(b())}</span>
+                  <span class="audio-settings__binding-src">{midiSource(b())}</span>
                   <button
                     type="button"
                     class="audio-settings__chip"
-                    classList={{ 'is-on': b.hold }}
-                    disabled={!b.momentary}
-                    aria-pressed={b.hold}
-                    onClick={() => setHold(b, !b.hold)}
-                    aria-label={`Hold to record on ${midiSource(b)}`}
-                    title={b.momentary ? 'Hold the pedal to record or overdub, let go to stop' : 'HOLD needs a momentary pedal'}
+                    onClick={() => setMomentary(index(), !b().momentary)}
+                    aria-label={`${bindingAction(b())} on ${midiSource(b())}: ${b().momentary ? 'momentary' : 'latching'} pedal, switch to ${b().momentary ? 'latching' : 'momentary'}`}
+                    title="How the pedal was read. Switch it if a press runs twice, or every other press runs nothing"
                   >
-                    HOLD
+                    {b().momentary ? 'momentary' : 'latching'}
                   </button>
-                </Show>
-                <button
-                  type="button"
-                  class="audio-settings__binding-clear"
-                  onClick={() => forget(b)}
-                  aria-label={`Forget ${bindingAction(b)} on ${midiSource(b)}, ${b.portName}`}
-                >
-                  ✕
-                </button>
-              </li>
-            )}
+                  <Show when={b().action === 'recDub'}>
+                    <button
+                      type="button"
+                      class="audio-settings__chip"
+                      classList={{ 'is-on': b().hold }}
+                      disabled={!b().momentary}
+                      aria-pressed={b().hold}
+                      onClick={() => setHold(index(), !b().hold)}
+                      aria-label={`Hold to record on ${midiSource(b())}`}
+                      title={b().momentary ? 'Hold the pedal to record or overdub, let go to stop' : 'HOLD needs a momentary pedal'}
+                    >
+                      HOLD
+                    </button>
+                  </Show>
+                  <button
+                    type="button"
+                    class="audio-settings__binding-clear"
+                    onClick={() => forget(index())}
+                    aria-label={`Forget ${bindingAction(b())} on ${midiSource(b())}, ${l.displayName}`}
+                  >
+                    ✕
+                  </button>
+                  {/* Not live: why, and a way to run it on a port that is here now. */}
+                  <Show when={notLive(l)}>
+                    {(why) => (
+                      <div class="audio-settings__binding-why">
+                        <span class="audio-settings__binding-idle">{why()}</span>
+                        <Show when={ports().length > 0}>
+                          <select
+                            class="audio-settings__select audio-settings__select--assign"
+                            value={assignPort()}
+                            onChange={(e) => setAssignTo(e.currentTarget.value)}
+                            aria-label={`Port for ${bindingAction(b())} on ${midiSource(b())}`}
+                          >
+                            <For each={ports()}>{(p) => <option value={p.id}>{p.name}</option>}</For>
+                          </select>
+                          <button
+                            type="button"
+                            class="audio-settings__chip"
+                            onClick={() => assign(index(), assignPort())}
+                            aria-label={`Assign ${bindingAction(b())} on ${midiSource(b())} to this port`}
+                            title="Run this binding on the port picked here from now on"
+                          >
+                            ASSIGN
+                          </button>
+                        </Show>
+                      </div>
+                    )}
+                  </Show>
+                </li>
+              );
+            }}
           </For>
         </ul>
       </Show>
@@ -635,7 +689,7 @@ export function AudioSettings() {
         </div>
         <div class="audio-settings__diag-row">
           <span>midi</span>
-          <b>{midiStatus() === 'connected' ? midiDevices().join(', ') : midiStatus()}</b>
+          <b>{portsSummary()}</b>
         </div>
       </div>
     </div>

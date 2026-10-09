@@ -1,22 +1,22 @@
 /**
- * The instrument routing seam (`src/ui/state/instrument.ts` over `input-router.ts` and the real MIDI
- * parser), on the web engine fake (`src/platform/host.web.ts`, the engine-seam pattern) with the plugin
- * host on (host.web.ts served with `available: true`), its load and unload instrumented, and a virtual
- * Web MIDI port. What the router plays reaches the engine as commands, read from `__lf.native.sent`:
+ * The instrument routing seam (`src/ui/state/instrument.ts`): which note target the UI hands native
+ * MIDI's router, on the web engine fake (`src/platform/host.web.ts`, the engine-seam pattern) with the
+ * plugin host on (host.web.ts served with `available: true`) and its load and unload instrumented. The
+ * targets are `input.selectTarget(slot, target)` events, read from `__lf.native.inputSent`:
  *
- * - picking a source moves the MIDI/keys slot: a synth pick in the inactive slot sends its
- *   `SelectInstrument` and a MIDI note then goes there; an effect load leaves routing alone, an
- *   instrument load moves it;
- * - a failed unload aborts a swap (the old plugin kept, no load, the toast naming the way out); the retry
- *   completes; while a swap's unload runs the router has no sink, and neither swap selects a built-in;
- * - host-side sustain on a plugin target: pedal down defers the `NoteOff`, pedal up sends it once, a
- *   sustained re-strike sends `NoteOff` before `NoteOn`; a pedal-held note is released exactly once, before
- *   the new target, when MIDI moves to the other slot;
+ * - picking a source moves the MIDI/keys slot: a synth pick in the inactive slot routes to its
+ *   instrument; an effect load leaves routing alone, an instrument load moves it;
+ * - a failed unload aborts a swap (the old plugin kept, no load, the toast naming the way out); while a
+ *   swap's unload runs the notes go nowhere (`Off`) and neither swap selects a built-in; the failed one
+ *   routes back to the plugin, the retry completes and routes to the new one;
  * - a failed CLEAR keeps the plugin: the slot's built-in is selected while the unload runs, the plugin
- *   target again once it failed; a synth pick whose unload fails does not move the MIDI slot.
+ *   target again once it failed; a synth pick whose unload fails does not move the MIDI slot;
+ * - a slot switch routes to the other slot's source.
  *
- * Cannot see the native plugin host (load, unload), the engine (what a target plays: lf-engine
- * `tests/slots.rs`) or Tauri IPC.
+ * What moved to Rust with the router (`src-tauri/src/engine_io/midi/router.rs` tests): the release of
+ * held and sustained notes before a new target, the same slot and target changing nothing, host-side
+ * sustain on a plugin target and a sustained re-strike. Cannot see the native plugin host (load, unload),
+ * the engine (what a target plays: lf-engine `tests/slots.rs`) or Tauri IPC.
  * Run: pnpm probe instrument-routing
  */
 import assert from 'node:assert/strict';
@@ -30,16 +30,10 @@ await probe(async ({ open }) => {
         const body = (await response.text()).replace('available: false', 'available: true');
         await route.fulfill({ response, body });
       });
-      await p.addInitScript(() => {
-        window.__lfEngineFake = true;
-        const inputs = new Map([['a', { id: 'a', name: 'Probe a', state: 'connected', onmidimessage: null }]]);
-        const access = { inputs, onstatechange: null };
-        window.__probeMidi = access;
-        Object.defineProperty(navigator, 'requestMIDIAccess', { configurable: true, value: async () => access });
-      });
+      await p.addInitScript(() => void (window.__lfEngineFake = true));
     },
   });
-  await page.waitForFunction(() => window.__lf.native.opened.length === 1 && !!window.__probeMidi.inputs.get('a').onmidimessage);
+  await page.waitForFunction(() => window.__lf.native.opened.length === 1);
 
   const result = await page.evaluate(async () => {
     const { platform } = await import('/src/platform/index.ts');
@@ -64,20 +58,17 @@ await probe(async ({ open }) => {
       meter: { peak: 0, clip: false },
     });
     const idle = async () => { while (slots.slotPendingCounts().some((n) => n > 0)) await pause(10); };
-    const send = (bytes) => window.__probeMidi.inputs.get('a').onmidimessage({ data: Uint8Array.from(bytes) });
     const desc = (id, isEffect) => ({ id, name: `Probe ${id}`, path: `C:\\probe\\${id}.vst3`, format: 'vst3', isEffect });
     const [instA, instB, fx] = [desc('a', false), desc('b', false), desc('fx', true)];
 
-    /** What the engine received since the last call, each command as JSON. */
+    /** The note targets the UI sent since the last call, each as 'slot:target'. */
     let seen = 0;
-    const sent = async () => {
-      await pause(10); // the outbox flushes on a microtask, the fake records on its async send
-      const all = lf.native.sent.slice(seen);
-      seen = lf.native.sent.length;
-      return all.map((c) => JSON.stringify(c));
+    const targets = async () => {
+      await pause(10); // the outbox flushes on a microtask
+      const all = lf.native.inputSent.slice(seen);
+      seen = lf.native.inputSent.length;
+      return all.filter((e) => e.selectTarget).map((e) => `${e.selectTarget.slot}:${JSON.stringify(e.selectTarget.target)}`);
     };
-    const notes = (commands) => commands.filter((c) => c.startsWith('{"NoteO'));
-    const targets = (commands) => commands.filter((c) => c.startsWith('{"SelectInstrument'));
 
     const calls = [];
     let unloadFailures = 0;
@@ -86,29 +77,24 @@ await probe(async ({ open }) => {
     platform.pluginHost.loadPlugin = async (slot, path, id) => { calls.push(['load', slot, id]); return { slot, descriptor: [instA, instB, fx].find((d) => d.id === id) }; };
     platform.pluginHost.unloadPlugin = async (slot) => {
       calls.push(['unload', slot]);
-      // The router's sink while the unload runs (a TS-private field, read for the probe), and what the
-      // engine was told meanwhile.
-      routedDuringUnload = { sink: lf.inputRouter.sink === null ? null : 'engine', targets: targets(await sent()) };
+      // Where the notes were routed while the unload runs.
+      routedDuringUnload = await targets();
       if (unloadFailures > 0) { unloadFailures--; throw new Error('injected unload failure'); }
     };
     const out = {};
 
-    // D13: a synth pick in the inactive slot makes it the MIDI slot, and a MIDI note goes there.
+    // D13: a synth pick in the inactive slot makes it the MIDI slot, routed to its instrument.
     instrument.selectSynth(0, 'organ'); instrument.setActiveSlot(0); await idle();
-    await sent();
+    await targets();
     instrument.selectSynth(1, 'bass'); await idle();
-    send([0x90, 45, 110]);
-    send([0x80, 45, 0]);
-    const picked = await sent();
-    out.synthPick = { active: instrument.activeSlot(), targets: targets(picked), notes: notes(picked) };
+    out.synthPick = { active: instrument.activeSlot(), targets: await targets() };
 
     // D13: an effect load keeps routing; an instrument load moves it.
-    instrument.setActiveSlot(0);
+    instrument.setActiveSlot(0); await targets();
     await instrument.selectPlugin(1, fx);
-    out.afterEffect = { active: instrument.activeSlot(), slot1: instrument.slotPlugins()[1]?.id };
+    out.afterEffect = { active: instrument.activeSlot(), slot1: instrument.slotPlugins()[1]?.id, targets: await targets() };
     await instrument.selectPlugin(1, instA);
-    out.afterInstrument = { active: instrument.activeSlot(), slot1: instrument.slotPlugins()[1]?.id };
-    await sent();
+    out.afterInstrument = { active: instrument.activeSlot(), slot1: instrument.slotPlugins()[1]?.id, targets: await targets() };
 
     // A6: a rejected unload aborts the swap (old plugin kept, no load, toast); a retry completes.
     // An active-slot swap routes nowhere while the unload runs and never selects a built-in.
@@ -119,79 +105,48 @@ await probe(async ({ open }) => {
       calls: calls.map((c) => c.join(':')),
       toast: toasts().find((t) => t.message === 'Plugin unload failed')?.detail,
       routed: routedDuringUnload,
-      targets: targets(await sent()),
+      after: await targets(),
     };
     calls.length = 0;
     await instrument.selectPlugin(1, instB);
-    out.retrySwap = {
-      slot1: instrument.slotPlugins()[1]?.id,
-      calls: calls.map((c) => c.join(':')),
-      routed: routedDuringUnload,
-      targets: targets(await sent()),
-    };
+    out.retrySwap = { slot1: instrument.slotPlugins()[1]?.id, calls: calls.map((c) => c.join(':')), routed: routedDuringUnload, after: await targets() };
 
-    // D12-S: host-side sustain defers the plugin target's note-off until pedal-up.
-    instrument.setActiveSlot(1); await sent();
-    send([0xb0, 64, 127]); send([0x90, 60, 100]); send([0x80, 60, 0]);
-    out.pedalHeld = notes(await sent());
-    send([0xb0, 64, 0]);
-    out.pedalUp = notes(await sent());
-    send([0xb0, 64, 127]); send([0x90, 62, 100]); send([0x80, 62, 0]); send([0x90, 62, 90]);
-    out.restrike = notes(await sent());
-    send([0x80, 62, 0]); send([0xb0, 64, 0]);
-    out.restrikeRelease = notes(await sent());
-
-    // A pedal-held plugin note is released exactly once, before the new target, when MIDI moves to the
-    // other slot.
-    send([0xb0, 64, 127]); send([0x90, 64, 100]); send([0x80, 64, 0]);
-    out.switchHeld = notes(await sent());
+    // A slot switch routes to the other slot's source.
     instrument.setActiveSlot(0);
-    send([0xb0, 64, 0]);
-    out.switchReleased = (await sent()).filter((c) => c.startsWith('{"NoteO') || c.startsWith('{"SelectInstrument'));
+    out.slotSwitch = await targets();
 
     // A failed unload on CLEAR keeps the plugin: the slot's built-in while the unload runs, the plugin
     // target again once it failed ...
-    instrument.setActiveSlot(1); await sent();
+    instrument.setActiveSlot(1); await targets();
     calls.length = 0; unloadFailures = 1;
     await instrument.clearPlugin(1);
-    out.failedClear = {
-      slot1: instrument.slotPlugins()[1]?.id,
-      calls: calls.map((c) => c.join(':')),
-      routed: routedDuringUnload,
-      after: targets(await sent()),
-    };
+    out.failedClear = { slot1: instrument.slotPlugins()[1]?.id, calls: calls.map((c) => c.join(':')), routed: routedDuringUnload, after: await targets() };
     // ... and a synth pick whose unload fails leaves the MIDI slot where it was.
     instrument.setActiveSlot(0);
     unloadFailures = 1;
     instrument.selectSynth(1, 'lead'); await idle();
     out.failedPick = { slot1: instrument.slotPlugins()[1]?.id, active: instrument.activeSlot() };
+    out.engineNotes = lf.native.sent.filter((c) => c.SelectInstrument || c.NoteOn || c.NoteOff !== undefined).length;
     return out;
   });
   console.log(JSON.stringify(result));
-  const on = (n) => JSON.stringify({ NoteOn: [n, 110 / 127] });
+  const builtin = (slot, id) => `${slot}:${JSON.stringify({ Builtin: id })}`;
+  const plugin = (slot) => `${slot}:${JSON.stringify({ Slot: slot })}`;
+  const off = (slot) => `${slot}:"Off"`;
   assert.equal(result.synthPick.active, 1, 'a synth pick makes its slot the MIDI slot');
-  assert.deepEqual(result.synthPick.targets, [JSON.stringify({ SelectInstrument: { Builtin: 'bass' } })], 'MIDI routes to the picked slot\'s instrument');
-  assert.deepEqual(result.synthPick.notes, [on(45), JSON.stringify({ NoteOff: 45 })], 'a MIDI note goes to the picked slot\'s instrument');
-  assert.deepEqual(result.afterEffect, { active: 0, slot1: 'fx' }, 'an effect load leaves routing alone');
-  assert.deepEqual(result.afterInstrument, { active: 1, slot1: 'a' }, 'an instrument load moves routing');
+  assert.deepEqual(result.synthPick.targets, [builtin(1, 'bass')], "the notes route to the picked slot's instrument");
+  assert.deepEqual({ ...result.afterEffect, targets: [...new Set(result.afterEffect.targets)] }, { active: 0, slot1: 'fx', targets: [] }, 'an effect load leaves routing alone');
+  assert.deepEqual({ active: result.afterInstrument.active, slot1: result.afterInstrument.slot1 }, { active: 1, slot1: 'a' }, 'an instrument load moves routing');
+  assert.equal(result.afterInstrument.targets.at(-1), plugin(1), 'to the plugin');
   assert.deepEqual(result.failedSwap, {
-    slot1: 'a', calls: ['unload:1'], routed: { sink: null, targets: [] }, targets: [],
+    slot1: 'a', calls: ['unload:1'], routed: [off(1)], after: [plugin(1)],
     toast: 'The plugin stays in the slot but is silent. Choose none or another plugin to retry.',
-  }, 'a failed unload keeps the old plugin, makes no load call and raises the toast naming the way out');
-  assert.deepEqual(result.retrySwap, { slot1: 'b', calls: ['unload:1', 'load:1:b'], routed: { sink: null, targets: [] }, targets: [] },
-    'the retry swap completes; neither swap routes anywhere meanwhile or selects a built-in');
-  const n = (list) => list.map((c) => (typeof c === 'number' ? JSON.stringify({ NoteOff: c }) : JSON.stringify({ NoteOn: c })));
-  assert.deepEqual(result.pedalHeld, n([[60, 100 / 127]]), 'pedal down defers the plugin note-off');
-  assert.deepEqual(result.pedalUp, n([60]), 'pedal up releases exactly once');
-  assert.deepEqual(result.restrike, n([[62, 100 / 127], 62, [62, 90 / 127]]), 'a sustained re-strike sends NoteOff before NoteOn');
-  assert.deepEqual(result.restrikeRelease, n([62]), 'the re-struck note releases on pedal up');
-  assert.deepEqual(result.switchHeld, n([[64, 100 / 127]]), 'pedal down defers the plugin note-off before the switch');
-  assert.deepEqual(result.switchReleased, [JSON.stringify({ NoteOff: 64 }), JSON.stringify({ SelectInstrument: { Builtin: 'organ' } })],
-    'switching slots releases the sustained note exactly once, before the new target');
-  assert.deepEqual(result.failedClear, {
-    slot1: 'b', calls: ['unload:1'],
-    routed: { sink: 'engine', targets: [JSON.stringify({ SelectInstrument: { Builtin: 'bass' } })] },
-    after: [JSON.stringify({ SelectInstrument: { Slot: 1 } })],
-  }, 'a failed clear keeps the plugin: its built-in while the unload runs, the plugin target again after');
+  }, 'a failed unload keeps the old plugin, makes no load call, raises the toast naming the way out, routes nowhere while it runs and back to the plugin after');
+  assert.deepEqual(result.retrySwap, { slot1: 'b', calls: ['unload:1', 'load:1:b'], routed: [off(1)], after: [plugin(1)] },
+    'the retry swap completes; neither swap selects a built-in');
+  assert.deepEqual(result.slotSwitch, [builtin(0, 'organ')], "a slot switch routes to the other slot's source");
+  assert.deepEqual(result.failedClear, { slot1: 'b', calls: ['unload:1'], routed: [builtin(1, 'bass')], after: [plugin(1)] },
+    'a failed clear keeps the plugin: its built-in while the unload runs, the plugin target again after');
   assert.deepEqual(result.failedPick, { slot1: 'b', active: 0 }, 'a synth pick whose unload fails does not move the MIDI slot');
+  assert.equal(result.engineNotes, 0, 'no note or target goes past the router (engine_send)');
 });

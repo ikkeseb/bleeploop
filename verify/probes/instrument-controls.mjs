@@ -1,31 +1,21 @@
 /**
- * Rendered regression coverage for keyboard state, plugin controls and MIDI startup status, on the web
+ * Rendered regression coverage for keyboard state, plugin controls and the MIDI device list, on the web
  * engine fake (`src/platform/host.web.ts`, the engine-seam pattern) with the native slot chrome on
- * (host.web.ts served with `available: true`): a denied Web MIDI request logs and lands in `denied`,
- * concurrent retries share one request, both empty native slots show the install hint, the keyboard
- * octave survives a placement remount, and the slot volume (a plugin's output gain) honors the unity
- * detent under keyboard steps and slider input. The plugin host and MIDI access are simulated in the
- * page; no native or hardware claim. Run: pnpm probe instrument-controls
+ * (host.web.ts served with `available: true`): native MIDI's port list (scripted with
+ * `__lf.native.midiEmit`) reads in the Audio Settings diagnostics and the command bar's status lamp, a port
+ * another program holds says so, and LEARN is enabled only while a port is open; both empty native slots
+ * show the install hint, the keyboard octave survives a placement remount, and the slot volume (a
+ * plugin's output gain) honors the unity detent under keyboard steps and slider input. The plugin host and
+ * native MIDI are simulated in the page; no native or hardware claim (which port Windows lets the app open
+ * is native MIDI's, `src-tauri/src/engine_io/midi/ports.rs`). Run: pnpm probe instrument-controls
  */
 import assert from 'node:assert/strict';
 import { probe } from '../harness/probe.ts';
 
 await probe(async ({ open }) => {
-  // The harness's own consoleErrors only keeps `console.error` text; the denied-MIDI notice logs
-  // through `console.warn`, so this probe keeps its own listener across both types.
-  const consoleMessages = [];
-  const { page } = await open({
+  const { page, consoleErrors } = await open({
     viewport: { width: 1280, height: 820 },
     init: async (p) => {
-      p.on('console', (message) => {
-        if (message.type() === 'error' || message.type() === 'warning') consoleMessages.push(message.text());
-      });
-      await p.addInitScript(() => {
-        Object.defineProperty(navigator, 'requestMIDIAccess', {
-          configurable: true,
-          value: () => Promise.reject(new DOMException('nope', 'SecurityError')),
-        });
-      });
       await p.addInitScript(() => void (window.__lfEngineFake = true));
       await p.route('**/src/platform/host.web.ts*', async (route) => {
         const response = await route.fetch();
@@ -36,30 +26,29 @@ await probe(async ({ open }) => {
     },
   });
 
-  await page.waitForFunction(() => window.__lf.midi.midiStatus() === 'denied');
   await page.waitForFunction(
     () => document.querySelector('[aria-label="Rescan plugins"]')?.disabled === false,
   );
 
-  assert.equal(await page.evaluate(() => window.__lf.midi.midiStatus()), 'denied');
-  assert.ok(
-    consoleMessages.some((message) => message.includes('[midi] requestMIDIAccess denied')),
-    'a denied Web MIDI request must reach the console (warn)',
-  );
-  const midiRetry = await page.evaluate(async () => {
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    let calls = 0;
-    Object.defineProperty(navigator, 'requestMIDIAccess', {
-      configurable: true,
-      value: async () => {
-        calls++;
-        return { inputs: new Map(), onstatechange: null };
-      },
-    });
-    await Promise.all([window.__lf.midi.retry(), window.__lf.midi.retry()]);
-    return { calls, status: window.__lf.midi.midiStatus() };
-  });
-  assert.deepEqual(midiRetry, { calls: 1, status: 'no-devices' }, 'concurrent MIDI retries must share one request');
+  // The MIDI device list: what native MIDI's ports event says, a held port named as such.
+  await page.evaluate(() => window.__lf.ui.openSettings());
+  const LEARN = page.locator('[aria-label="Learn a MIDI control for this action"]');
+  const midiRow = page.locator('.audio-settings__diag-row', { hasText: /^midi/ }).locator('b');
+  await LEARN.waitFor();
+  assert.equal(await midiRow.textContent(), 'no devices', 'no port: no devices');
+  assert.equal(await LEARN.isDisabled(), true, 'LEARN waits for an open port');
+  const ports = (list) => page.evaluate((p) => window.__lf.native.midiEmit({ ports: { ports: p } }), list);
+  await ports([{ id: 'busy', name: 'Keystation 49', state: 'busy' }]);
+  await page.waitForFunction(() => document.querySelector('.audio-settings__diag')?.textContent.includes('Keystation'));
+  assert.equal(await midiRow.textContent(), 'Keystation 49 (held by another program)', 'a port another program holds says so');
+  assert.equal(await LEARN.isDisabled(), true, 'a held port cannot learn');
+  await ports([{ id: 'pedal', name: 'FS-6 Pedal', state: 'open' }, { id: 'busy', name: 'Keystation 49', state: 'busy' }, { id: 'gone', name: 'Launchkey', state: 'closed' }]);
+  await page.waitForFunction(() => document.querySelector('.audio-settings__diag')?.textContent.includes('FS-6'));
+  assert.equal(await midiRow.textContent(), 'FS-6 Pedal, Keystation 49 (held by another program), Launchkey (closed)');
+  assert.equal(await LEARN.isDisabled(), false, 'an open port can learn');
+  const lamp = await page.locator('[title^="host:"]').first().getAttribute('title');
+  assert.ok(lamp?.includes('midi: FS-6 Pedal, Keystation 49 (held by another program)'), `the status lamp lists the ports: ${lamp}`);
+  await page.evaluate(() => window.__lf.ui.closeSettings());
 
   const emptyPluginCopy =
     'No plugins found · the standard CLAP, VST3 and VST2 folders are scanned · add your own in Audio Settings · rescan ⟳ in the command bar';
@@ -126,4 +115,5 @@ await probe(async ({ open }) => {
     1,
     'approaching unity must retain the soft detent',
   );
+  assert.deepEqual(consoleErrors, [], 'no console errors');
 });

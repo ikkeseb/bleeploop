@@ -9,7 +9,8 @@
  * - there is no MIC button and no input channel select in Audio Settings (the input device select
  *   stays);
  * - the source picker lists Off, then the Built-in synths, then the Plugins; Off on the active slot sends
- *   `SelectInstrument "Off"` and a later note goes to that target (the engine plays nothing there);
+ *   the note target `Off` to native MIDI's router (`input.selectTarget`, `__lf.native.inputSent`) and a
+ *   later note goes to that target (the engine plays nothing there);
  * - both slots Off and live at once on different inputs: each input pick switches its slot's channel, and
  *   going live on one never takes the other off;
  * - the slot volume sends what its source needs: an Off slot's input level (`SetSlotGain`), a synth's
@@ -95,7 +96,9 @@ await probe(async ({ browser, open }) => {
   });
   await boot(page);
   const sent = () => page.evaluate(() => window.__lf.native.sent.map((c) => JSON.stringify(c)));
-  const clearSent = () => page.evaluate(() => void (window.__lf.native.sent.length = 0));
+  const clearSent = () => page.evaluate(() => void (window.__lf.native.sent.length = window.__lf.native.inputSent.length = 0));
+  /** What the UI sent native MIDI's router (note targets, notes), each as JSON. */
+  const inputSent = () => page.evaluate(() => window.__lf.native.inputSent.map((c) => JSON.stringify(c)));
   const settle = () => page.waitForTimeout(60);
   const picker = (slot) => page.getByRole('combobox', { name: `Source for slot ${slot}`, exact: true });
   const input = (slot) => page.getByRole('combobox', { name: `Input for slot ${slot}`, exact: true });
@@ -132,17 +135,17 @@ await probe(async ({ browser, open }) => {
   await clearSent();
   await picker(1).selectOption('off');
   await settle();
-  const offSent = await sent();
-  assert.ok(offSent.includes(JSON.stringify({ SelectInstrument: 'Off' })), `Off sends SelectInstrument "Off": ${offSent}`);
+  const offSent = await inputSent();
+  assert.ok(offSent.includes(JSON.stringify({ selectTarget: { slot: 0, target: 'Off' } })), `Off routes the notes to "Off": ${offSent}`);
   assert.equal(await input(1).inputValue(), '1', "the migrated channel is the Off slot's input (In 2)");
   await page.evaluate(() => document.activeElement?.blur());
   await page.keyboard.down('a');
   await page.keyboard.up('a');
   await settle();
-  const noteSent = await sent();
-  const onAt = noteSent.findIndex((c) => c.startsWith('{"NoteOn"'));
-  const lastTarget = noteSent.slice(0, onAt).filter((c) => c.startsWith('{"SelectInstrument"')).at(-1);
-  assert.ok(onAt > 0 && lastTarget === JSON.stringify({ SelectInstrument: 'Off' }), `a note on an Off slot reaches only the Off target: ${noteSent}`);
+  const noteSent = await inputSent();
+  const onAt = noteSent.findIndex((c) => c.startsWith('{"note"'));
+  const lastTarget = noteSent.slice(0, onAt).filter((c) => c.startsWith('{"selectTarget"')).at(-1);
+  assert.ok(onAt > 0 && lastTarget === JSON.stringify({ selectTarget: { slot: 0, target: 'Off' } }), `a note on an Off slot reaches only the Off target: ${noteSent}`);
 
   // Both slots Off and live, each on its own input.
   await input(1).selectOption('0');
@@ -193,8 +196,8 @@ await probe(async ({ browser, open }) => {
   assert.equal(await input(1).inputValue(), '0');
   assert.equal(Number(await volume(1).inputValue()), 0.5, "slot A's input level is kept");
   assert.equal(Number(await volume(2).inputValue()), 0.7, "the pad's level is kept");
-  const resent = await sent();
-  for (const c of [{ SetSlotGain: [0, 0.5] }, { SetInstrumentGain: ['pad', 0.7] }, { SelectInstrument: 'Off' }]) {
+  const resent = [...(await sent()), ...(await inputSent())];
+  for (const c of [{ SetSlotGain: [0, 0.5] }, { SetInstrumentGain: ['pad', 0.7] }, { selectTarget: { slot: 0, target: 'Off' } }]) {
     assert.ok(resent.includes(JSON.stringify(c)), `the reset sends ${JSON.stringify(c)}: ${resent}`);
   }
   assert.deepEqual(consoleErrors, [], 'no console errors');

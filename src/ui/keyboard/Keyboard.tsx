@@ -1,5 +1,6 @@
 import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount } from 'solid-js';
-import { inputRouter } from '../state/input-router';
+import { input } from '../../platform';
+import { heldNotes } from '../state/midi';
 import { activeIsDrum, activeSlot, ensureActive, slotIds, slotPlugins } from '../state/instrument';
 import { DRUM_KIT } from '../state/drum-kit';
 import type { KeyboardPlacement } from '../layout/layout-store';
@@ -31,7 +32,7 @@ export const COMPUTER_MAP: Readonly<Record<string, number>> = {
  * useless — the drum voices only the GM percussion notes, which the default keyboard octave
  * (MIDI 60+) never reaches. So we swap in a 4×4 grid of labelled pads instead. The kit is defined
  * once in DRUM_KIT (state/drum-kit.ts) — note, label, and pad key — so the pads, the PC keys and Help
- * can't drift. The pads emit the exact same GM NoteEvents
+ * can't drift. The pads send the exact same GM notes
  * an external MIDI controller would, so the MIDI path is unchanged — pads are a second producer.
  */
 const PAD_VELOCITY = 110;
@@ -43,18 +44,30 @@ interface KeyLayout {
   widthPct: number;
 }
 
-type KeyboardSource = 'pointer' | 'computer';
-
+/** One physical hold: `owner` is the pointer (`pointer:<id>`) or the key (`key:<code>`) that native MIDI's
+ * router knows it by, so two owners on one note keep it sounding until the last lets go. */
 interface Hold {
   note: number;
-  source: KeyboardSource;
-  owner?: string;
+  owner: string;
   active: boolean;
   sounding: boolean;
 }
 
 export function Keyboard(props: KeyboardProps = {}) {
-  const [downNotes, setDownNotes] = createSignal<ReadonlySet<number>>(inputRouter.held);
+  // The down keys: this keyboard's own holds (lit at the press, before native MIDI answers) united with
+  // native MIDI's held set, every source's (a MIDI controller lights the same keys and GM pads), which
+  // also corrects them once it answers. A note outside the visible octaves has no key to light.
+  const [ownDown, setOwnDown] = createSignal<ReadonlyMap<number, number>>(new Map());
+  const downNotes = createMemo<ReadonlySet<number>>(() => new Set([...ownDown().keys(), ...heldNotes()]));
+  function own(note: number, delta: 1 | -1) {
+    setOwnDown((prev) => {
+      const next = new Map(prev);
+      const n = (next.get(note) ?? 0) + delta;
+      if (n > 0) next.set(note, n);
+      else next.delete(note);
+      return next;
+    });
+  }
 
   // The active slot's synth — drum gets the pad layout, everything else the piano. A slot in plugin
   // mode is always played chromatically (piano), never the GM pad grid, even if its underlying synth
@@ -80,23 +93,20 @@ export function Keyboard(props: KeyboardProps = {}) {
     });
   });
 
-  // The down keys mirror the ROUTER's held set, not this component's own presses, so a MIDI controller
-  // lights the same keys (and GM pads) as the pointer and computer keyboard. A note outside the visible
-  // octaves simply has no key to light.
-  onCleanup(inputRouter.onHeldChange(setDownNotes));
-
-  // --- shared press/release ---
+  // --- shared press/release: native MIDI's router decides what sounds ---
   function startHold(hold: Hold, velocity: number) {
     if (!hold.active) return;
     ensureActive();
     hold.sounding = true;
-    inputRouter.handle({ type: 'on', note: hold.note, velocity, source: hold.source, owner: hold.owner });
+    own(hold.note, 1);
+    input.note(hold.owner, hold.note, velocity, true);
   }
   function endHold(hold: Hold) {
     hold.active = false;
     if (!hold.sounding) return;
     hold.sounding = false;
-    inputRouter.handle({ type: 'off', note: hold.note, velocity: 0, source: hold.source, owner: hold.owner });
+    own(hold.note, -1);
+    input.note(hold.owner, hold.note, 0, false);
   }
 
   // --- pointer (mouse / touch / pen) ---
@@ -109,7 +119,7 @@ export function Keyboard(props: KeyboardProps = {}) {
   function onPointerDown(e: PointerEvent, note: number) {
     const el = e.currentTarget as HTMLElement;
     el.setPointerCapture(e.pointerId);
-    const hold: Hold = { note, source: 'pointer', owner: `pointer:${e.pointerId}`, active: true, sounding: false };
+    const hold: Hold = { note, owner: `pointer:${e.pointerId}`, active: true, sounding: false };
     pointerNotes.set(e.pointerId, hold);
     startHold(hold, velocityFromPointer(e, el));
   }
@@ -117,7 +127,7 @@ export function Keyboard(props: KeyboardProps = {}) {
   function onPadPointerDown(e: PointerEvent, note: number) {
     const el = e.currentTarget as HTMLElement;
     el.setPointerCapture(e.pointerId);
-    const hold: Hold = { note, source: 'pointer', owner: `pointer:${e.pointerId}`, active: true, sounding: false };
+    const hold: Hold = { note, owner: `pointer:${e.pointerId}`, active: true, sounding: false };
     pointerNotes.set(e.pointerId, hold);
     startHold(hold, PAD_VELOCITY);
   }
@@ -166,7 +176,7 @@ export function Keyboard(props: KeyboardProps = {}) {
       const pad = DRUM_KIT.find((p) => p.key === k);
       if (pad === undefined || heldKeyNote.has(e.code)) return;
       e.preventDefault();
-      const hold: Hold = { note: pad.note, source: 'computer', owner: `key:${e.code}`, active: true, sounding: false };
+      const hold: Hold = { note: pad.note, owner: `key:${e.code}`, active: true, sounding: false };
       heldKeyNote.set(e.code, hold);
       startHold(hold, PAD_VELOCITY);
       return;
@@ -183,9 +193,9 @@ export function Keyboard(props: KeyboardProps = {}) {
     if (offset === undefined || heldKeyNote.has(e.code)) return;
     e.preventDefault();
     const note = octaveBase(keyboardOctave()) + offset;
-    // Owner per physical key: after an octave shift two held keys can land on the SAME note, and the
-    // router must keep it sounding (and lit) until the last of them lifts.
-    const hold: Hold = { note, source: 'computer', owner: `key:${e.code}`, active: true, sounding: false };
+    // Owner per physical key: after an octave shift two held keys can land on the SAME note, and native
+    // MIDI's router must keep it sounding (and lit) until the last of them lifts.
+    const hold: Hold = { note, owner: `key:${e.code}`, active: true, sounding: false };
     heldKeyNote.set(e.code, hold);
     startHold(hold, 100);
   }
@@ -198,27 +208,33 @@ export function Keyboard(props: KeyboardProps = {}) {
       endHold(hold);
     }
   }
-  /** Drop this keyboard's own held-note bookkeeping. No router traffic (the router owns the down-set). */
+  /** Drop this keyboard's own held-note bookkeeping and its lit keys. No input traffic. */
   function clearLocalHeld() {
     for (const hold of heldKeyNote.values()) hold.active = false;
     for (const hold of pointerNotes.values()) hold.active = false;
     pointerNotes.clear();
     heldKeyNote.clear();
+    setOwnDown(new Map());
   }
-  function panic() {
-    // Release with each note's ACTUAL source so the (source-aware) router only drops notes this
-    // keyboard owns — a MIDI-held note must survive a window-blur panic from the on-screen keys.
+  /** Unmount: release each hold by its own owner, so a MIDI-held note survives the keyboard hiding. */
+  function releaseAll() {
     for (const hold of heldKeyNote.values()) endHold(hold);
     for (const hold of pointerNotes.values()) endHold(hold);
     clearLocalHeld();
   }
+  /** The window lost focus, so no key-up or pointer-up will come: native MIDI releases this document's
+   * pointers and keys (never a MIDI controller's notes). */
+  function onBlur() {
+    input.blur();
+    clearLocalHeld();
+  }
 
   // Flush local held state whenever the active instrument changes — a slot switch or the active
-  // slot's synth changing (e.g. pad <-> piano). The swap already flushes the audio voices
-  // (instrument.ts -> inputRouter.setActiveEngine -> allNotesOff), so we only need to drop this
+  // slot's synth changing (e.g. pad <-> piano). The target switch already released the notes
+  // natively (the router forgets their owners), so we only need to drop this
   // keyboard's stale bookkeeping: otherwise heldKeyNote keeps the old mapping, leaving the still-held
   // computer key dead (guarded by `heldKeyNote.has(e.code)`, the physical key) and the on-screen key visually stuck until
-  // it's physically released. No router traffic here — the audio side is already clean.
+  // it's physically released. No input traffic here — the audio side is already clean.
   const activeInstrumentKey = createMemo(
     () => `${activeSlot()}:${slotPlugins()[activeSlot()]?.id ?? slotIds()[activeSlot()]}`,
   );
@@ -234,13 +250,13 @@ export function Keyboard(props: KeyboardProps = {}) {
   onMount(() => {
     window.addEventListener('keydown', onKeyDown);
     window.addEventListener('keyup', onKeyUp);
-    window.addEventListener('blur', panic);
+    window.addEventListener('blur', onBlur);
   });
   onCleanup(() => {
     window.removeEventListener('keydown', onKeyDown);
     window.removeEventListener('keyup', onKeyUp);
-    window.removeEventListener('blur', panic);
-    panic();
+    window.removeEventListener('blur', onBlur);
+    releaseAll();
   });
 
   return (

@@ -1,17 +1,21 @@
 /**
  * Real pointer/key gestures against the rendered app, in engine mode on the web engine fake
  * (`src/platform/host.web.ts`, the `engine-seam` pattern: `window.__lfEngineFake` set before the app
- * loads, a reset frame, the commands the UI sends read from `__lf.native.sent`):
+ * loads, a reset frame, the commands the UI sends read from `__lf.native.sent` and the notes it sends
+ * native MIDI's router from `__lf.native.inputSent`):
  *
  * - the BPM field's commit rules: Escape cancels (nothing sent), Enter commits (`SetBpm`), a blur commits;
  * - pointer capture across octave changes: a held on-screen key released off the keyboard after an
- *   octave shift ends its note (`NoteOff` for the pitch it started);
- * - independent note ownership (`src/ui/state/input-router.ts`): another owner's held pitch survives a
- *   pointer's own release of it;
+ *   octave shift lets go of the pitch it started, under its own owner (`pointer:<id>`);
+ * - the highlight is this keyboard's own holds united with native MIDI's held set: a pitch native MIDI
+ *   reports held (another owner's) stays lit after the pointer's own release, until native MIDI says it
+ *   is up;
  * - the playable upper note range: four octaves up the keyboard ends at 127 and every key is 0..127.
  *
- * Cannot see the native engine (the notes it plays: lf-engine `tests/synth.rs`), hardware or MIDI
- * devices: the fake answers no command by itself. Run: pnpm probe input-controls
+ * Note ownership itself (two owners on one pitch, which release sends `NoteOff`) is native MIDI's router,
+ * proven in Rust (`src-tauri/src/engine_io/midi/router.rs` tests). Cannot see the native engine (the notes
+ * it plays: lf-engine `tests/synth.rs`), hardware or MIDI devices: the fake answers no command by itself.
+ * Run: pnpm probe input-controls
  */
 import assert from 'node:assert/strict';
 import { probe } from '../harness/probe.ts';
@@ -62,43 +66,52 @@ await probe(async ({ open }) => {
   assert.deepEqual(await bpmSent(), [97], 'Blur commits BPM');
   await page.getByRole('button', { name: 'Octave down', exact: true }).click();
 
+  /** What the keyboard sent native MIDI's router since `from`: its notes, as `{ owner, note, velocity, on }`. */
+  const notesSince = (from) => page.evaluate((m) => window.__lf.native.inputSent.slice(m).filter((e) => e.note).map((e) => e.note), from);
+  const inputMark = () => page.evaluate(() => window.__lf.native.inputSent.length);
+  const lit = (note) => page.evaluate((n) => !!document.querySelector(`.kb__key[data-note="${n}"].kb__key--down`), note);
   const pointerDown = async note => {
     const box = await page.locator(`.kb__key[data-note="${note}"]`).boundingBox();
     await page.mouse.move(box.x + box.width / 2, box.y + box.height - 8);
     await page.mouse.down();
-    await page.waitForFunction(n => window.__lf.inputRouter.held.has(n), note);
+    await page.waitForFunction(n => !!document.querySelector(`.kb__key[data-note="${n}"].kb__key--down`), note);
   };
-  await clearSent();
+  /** Wait until the keyboard sent a release of `note` since `from`. */
+  const released = (from, note) =>
+    page.waitForFunction(([m, n]) => window.__lf.native.inputSent.slice(m).some((e) => e.note?.note === n && !e.note.on), [from, note]);
+
+  let from = await inputMark();
   await pointerDown(60);
   await page.keyboard.press('x');
   await page.mouse.move(30, 30);
   await page.mouse.up();
-  await page.waitForFunction(() => window.__lf.inputRouter.held.size === 0);
-  const held60 = await sent();
-  console.log('pointer hold across an octave shift', JSON.stringify(held60.filter((c) => c.NoteOn || c.NoteOff !== undefined)));
-  assert.ok(held60.some((c) => c.NoteOn?.[0] === 60), 'the pointer press plays its note');
-  assert.deepEqual(held60.filter((c) => c.NoteOff !== undefined).at(-1), { NoteOff: 60 }, 'its release ends the note it started');
+  await released(from, 60);
+  const held60 = await notesSince(from);
+  console.log('pointer hold across an octave shift', JSON.stringify(held60));
+  const press = held60.find((n) => n.on);
+  assert.ok(press && press.note === 60 && /^pointer:\d+$/.test(press.owner), 'the pointer press plays its note under its pointer');
+  assert.deepEqual(held60.filter((n) => !n.on), [{ owner: press.owner, note: 60, velocity: 0, on: false }], 'its release lets go of the note it started');
 
-  // Ending a pointer hold must not end another producer's ownership of the same pitch.
-  await page.evaluate(() => window.__lf.inputRouter.handle({
-    type: 'on', note: 72, velocity: 100, source: 'midi', owner: 'probe-controller',
-  }));
+  // The keys light this keyboard's holds and every note native MIDI reports held: another owner's pitch
+  // stays lit after the pointer's own release.
+  await page.evaluate(() => window.__lf.native.midiEmit({ held: { notes: [72], changes: 1 } }));
+  await page.waitForFunction(() => !!document.querySelector('.kb__key[data-note="72"].kb__key--down'));
+  from = await inputMark();
   await pointerDown(72);
-  await page.keyboard.press('x');
-  await page.mouse.move(30, 30);
   await page.mouse.up();
-  assert.deepEqual(await page.evaluate(() => [...window.__lf.inputRouter.held]), [72]);
-  await page.evaluate(() => window.__lf.inputRouter.handle({
-    type: 'off', note: 72, velocity: 0, source: 'midi', owner: 'probe-controller',
-  }));
-  await page.waitForFunction(() => window.__lf.inputRouter.held.size === 0);
+  await released(from, 72);
+  assert.equal(await lit(72), true, 'a note native MIDI holds stays lit after the pointer lets go');
+  await page.evaluate(() => window.__lf.native.midiEmit({ held: { notes: [], changes: 2 } }));
+  await page.waitForFunction(() => !document.querySelector('.kb__key--down'));
 
   for (let i = 0; i < 4; i++) await page.getByRole('button', { name: 'Octave up', exact: true }).click();
   const notes = await page.locator('.kb__key').evaluateAll(keys => keys.map(k => Number(k.dataset.note)));
   assert.equal(notes.at(-1), 127);
   assert.ok(notes.every(note => note >= 0 && note <= 127));
+  from = await inputMark();
   await pointerDown(127);
   await page.mouse.up();
-  await page.waitForFunction(() => window.__lf.inputRouter.held.size === 0);
+  await released(from, 127);
+  assert.equal(await lit(127), false, 'the top key goes dark on release');
   assert.deepEqual(consoleErrors, [], 'no console errors');
 });

@@ -1,205 +1,176 @@
 import { createSignal } from 'solid-js';
-import { inputRouter } from './input-router';
-import { ensureActive } from './instrument';
-import { platform } from '../../platform';
+import {
+  platform,
+  type LearnPick,
+  type LearnRefusal,
+  type ListedBinding,
+  type MidiActionId,
+  type MidiBinding,
+  type MidiEvent,
+  type MidiPort,
+  type MidiUiAction,
+  type StoreProblem,
+} from '../../platform';
 import { notifyError } from '../../notify';
 
 /**
- * Web MIDI manager. Calls platform.midi.requestAccess() (goes through the capability
- * boundary — never touches navigator.requestMIDIAccess directly here). Hardware MIDI
- * absent or unsupported must NOT affect the on-screen keyboard or computer keyboard input.
+ * OWNS: native MIDI as the UI shows it, built from native MIDI's events (`platform.midi`): the input
+ * ports, the stored bindings and how each stands, MIDI learn's state, the latest learned binding waiting
+ * for its release, the notes held down from every source (the on-screen keyboard lights them), and the
+ * toasts for an unplugged port and a store that cannot save. MIDI itself, ports, parse, learn, the
+ * bindings and the one note router, is native (`src-tauri/src/engine_io/midi/mod.rs`); the calls below
+ * only ask it. A binding's press that the UI runs (GO LIVE, TAP, the stage view) and the press's
+ * bookkeeping reach `src/app/midi-actions.ts` through `setMidiActionHandler` (`src/ui/state/` never
+ * imports `src/app/`).
  */
 
-export type MidiStatus = 'idle' | 'unsupported' | 'denied' | 'error' | 'no-devices' | 'connected';
+const [ports, setPorts] = createSignal<readonly MidiPort[]>([]);
+/** The input ports present now, in the system's order. */
+export { ports };
 
-const [midiStatus, setMidiStatus] = createSignal<MidiStatus>('idle');
-const [midiDevices, setMidiDevices] = createSignal<string[]>([]);
+const [bindings, setBindings] = createSignal<readonly ListedBinding[]>([]);
+/** Every stored binding, in list order (the index the edits below take), and how it stands. */
+export { bindings };
 
-/** Reactive MIDI status, including unsupported, permission-denied and request-error states. */
-export { midiStatus };
+const [learning, setLearning] = createSignal<LearnPick | null>(null);
+/** What the next CC or note-on will be learned onto, or null. Set at once by `learn` and `cancelLearn`
+ * (so Esc ends LISTENING without a round trip), then by native MIDI's `learning` events. */
+export { learning };
 
-/** Reactive list of connected MIDI input device names. */
-export { midiDevices };
+const [awaitingRelease, setAwaitingRelease] = createSignal<MidiBinding | null>(null);
+/** The latest learned binding still waiting for its learning press's release, or null (the learn row's
+ * hint; native MIDI's timer ends the wait). */
+export { awaitingRelease };
 
-let _access: MIDIAccess | null = null;
-let startInFlight: Promise<void> | null = null;
+const [heldNotes, setHeldNotes] = createSignal<ReadonlySet<number>>(new Set());
+/** The notes held down now, by any source (not the ones a pedal sustains): native MIDI's held set. */
+export { heldNotes };
 
-/** Standard pitch-bend range: the wheel's full throw = ±2 semitones. */
-const PITCH_BEND_RANGE_SEMITONES = 2;
+/** A port can learn: at least one is open. */
+export const anyPortOpen = (): boolean => ports().some((p) => p.state === 'open');
 
-function midiOwner(port: string, channel: number): string { return JSON.stringify([port, channel]); }
-
-/**
- * `message` sees every 3-byte channel message before the play path and returns true to claim it; a claimed
- * message reaches nothing below (no note, no CC64/1/123 branch, no bend). `port` is the input's id,
- * `portName` its display name. `portGone` hears that an input disconnected, so what its claimed messages
- * hold down is let go there too. MIDI learn installs it from the app layer (`src/app/midi-actions.ts`):
- * `src/ui/state/` never imports `src/app/`, so the action table stays out of this file.
- */
-interface MidiConsumer {
-  message: (port: string, portName: string, status: number, data1: number, data2: number) => boolean;
-  portGone: (port: string) => void;
+/** The device list as the diagnostics name it: each port, and when it is not open, why. */
+export function portsSummary(): string {
+  const list = ports();
+  if (list.length === 0) return 'no devices';
+  return list
+    .map((p) => (p.state === 'open' ? p.name : p.state === 'busy' ? `${p.name} (held by another program)` : `${p.name} (closed)`))
+    .join(', ');
 }
 
-let consumer: MidiConsumer | null = null;
-
-/** Install the consume-first hook (`null` removes it). One at a time: MIDI learn is its only user. */
-export function setMidiConsumer(fn: MidiConsumer | null): void {
-  consumer = fn;
+/** What the app layer does with a binding's press: `run` an action the UI owns, `pressed` for every
+ * looper press (before its `run`), `refused` when MIDI learn consumed a press and ran nothing. */
+export interface MidiActionHandler {
+  run(action: MidiUiAction): void;
+  pressed(): void;
+  refused(reason: LearnRefusal): void;
 }
 
-/**
- * The consume-first hook takes `controller` on this port and channel over, so its next values never
- * reach the branch below: let go of what it last set there, as an unplug does. A pedal held down while it
- * was learned would otherwise sustain that channel for good, and a learned mod wheel would keep its
- * vibrato on (a wheel set to 0 instead would override another port's wheel as the last one moved).
- */
-export function releaseController(port: string, channel: number, controller: number): void {
-  const owner = midiOwner(port, channel);
-  if (controller === 64) inputRouter.setSustain(false, owner);
-  else if (controller === 1) inputRouter.dropModulation(owner);
+let handler: MidiActionHandler | null = null;
+
+/** Install the app layer's handler (`null` removes it). One at a time: `src/app/midi-actions.ts`. */
+export function setMidiActionHandler(h: MidiActionHandler | null): void {
+  handler = h;
 }
 
-function parseMidiMessage(ev: Event, port: string, portName: string): void {
-  const msg = ev as MIDIMessageEvent;
-  const data = msg.data;
-  if (!data || data.length === 0) return;
+function storeProblemText(problem: StoreProblem): [string, string] {
+  if ('readOnly' in problem) return ['MIDI bindings cannot be saved this session', problem.readOnly.why];
+  if ('conflict' in problem) return ['MIDI bindings were changed by another BleepLoop; this session does not save over them', problem.conflict.why];
+  if ('failed' in problem) return ['MIDI bindings could not be saved; the next change tries again', problem.failed.why];
+  const n = problem.rejected.count;
+  return [`${n} stored MIDI binding${n === 1 ? '' : 's'} could not be read`, 'They stay in the file, unused.'];
+}
 
-  // Single-byte realtime messages (0xF8 timing clock, start/stop/sensing) fall out here: the engine
-  // keeps the tempo, so external MIDI clock is not tracked.
-  if (data.length < 3) return;
-
-  if (consumer?.message(port, portName, data[0], data[1], data[2])) return;
-
-  const status = data[0];
-  const note   = data[1];
-  const vel    = data[2];
-
-  const type = status & 0xf0;
-  const owner = midiOwner(port, status & 0x0f);
-
-  if (type === 0x90) {
-    // Note-on; velocity 0 is treated as note-off per MIDI spec
-    if (vel === 0) {
-      inputRouter.handle({ type: 'off', note, velocity: 0, source: 'midi', owner });
-    } else {
-      // Mirror the keyboard play path (Keyboard.tsx press(): `ensureActive()`): route the active slot
-      // BEFORE dispatch. A MIDI note played before any on-screen/slot interaction would otherwise hit a
-      // null sink → silent first notes, plus a phantom held-note entry if a slot is picked mid-hold.
-      // ensureActive is idempotent + cheap (a stable sink → no held-note flush on repeat).
-      ensureActive();
-      inputRouter.handle({ type: 'on', note, velocity: vel, source: 'midi', owner });
+function onEvent(ev: MidiEvent): void {
+  switch (ev.type) {
+    case 'ports':
+      setPorts(ev.ports);
+      break;
+    case 'gone':
+      // Native MIDI released what the port held; the player should know why the notes stopped.
+      for (const name of ev.names) {
+        console.error(`[midi] input disconnected: ${name}`);
+        notifyError(`MIDI device disconnected — ${name}`, 'Held notes were released.');
+      }
+      break;
+    case 'bindings':
+      setBindings(ev.bindings);
+      break;
+    case 'learning':
+      setLearning(ev.learning);
+      break;
+    case 'awaitingRelease':
+      setAwaitingRelease(ev.binding);
+      break;
+    case 'learned':
+      // The `bindings` and `awaitingRelease` events that follow show it.
+      break;
+    case 'refused':
+      handler?.refused(ev.reason);
+      break;
+    case 'run':
+      handler?.run(ev.action);
+      break;
+    case 'pressed':
+      handler?.pressed();
+      break;
+    case 'store': {
+      const [message, detail] = storeProblemText(ev.problem);
+      console.error(`[midi] bindings store: ${message}: ${detail}`);
+      notifyError(message, detail);
+      break;
     }
-  } else if (type === 0x80) {
-    // Note-off
-    inputRouter.handle({ type: 'off', note, velocity: 0, source: 'midi', owner });
-  } else if (type === 0xb0) {
-    // Sustain and the mod wheel go through the router; CC123 releases this port/channel's held keys.
-    const controller = data[1];
-    const value = data[2];
-    if (controller === 64) {
-      // Sustain pedal: value >= 64 = down. The deferred note-offs live in input-router.
-      inputRouter.setSustain(value >= 64, owner);
-    } else if (controller === 1) {
-      // Mod wheel → vibrato depth (0..1).
-      inputRouter.setModulation(value / 127, owner);
-    } else if (controller === 123) {
-      inputRouter.releaseSource(owner);
-    }
-  } else if (type === 0xe0) {
-    // Pitch bend: 14-bit little-endian (LSB then MSB), center 8192. Scale to ±range semitones.
-    const raw = ((data[2] << 7) | data[1]) - 8192;
-    inputRouter.setPitchBend((raw / 8192) * PITCH_BEND_RANGE_SEMITONES, owner);
+    case 'held':
+      setHeldNotes(new Set(ev.notes));
+      break;
   }
 }
 
-/**
- * The input ports we currently listen on, port id → display name. A device unplugged mid-note sends no
- * note-offs, so its voices ring forever; comparing this map against the live port list on every
- * statechange releases that port's notes/controllers (and, through the consumer, its HOLD presses) and
- * shows a named toast. A disconnected port may either vanish from `access.inputs` or linger there with
- * `state === 'disconnected'` (the spec allows both): both count as gone.
- */
-const attachedInputs = new Map<string, string>();
+/** Listen to native MIDI; its first events bring the state. Returns the stop. */
+export function startMidi(): () => void {
+  return platform.midi.subscribe(onEvent);
+}
 
-function attachInputs(access: MIDIAccess): void {
-  const names: string[] = [];
-  const present = new Set<string>();
-  access.inputs.forEach((input) => {
-    if (input.state === 'disconnected') return;
-    const name = input.name ?? '(unknown)';
-    input.onmidimessage = (event) => {
-      if (input.state !== 'disconnected') parseMidiMessage(event, input.id, name);
-    };
-    present.add(input.id);
-    attachedInputs.set(input.id, name);
-    names.push(name);
+function failed(what: string, err: unknown): void {
+  console.error(`[midi] ${what} failed`, err);
+  notifyError(`MIDI ${what} failed`, err);
+}
+
+/** Learn the next CC or note-on, from any port, onto `action` (a lane action on track `target`, null the
+ * selected track; a global action takes none). */
+export function learn(action: MidiActionId, target: number | null): void {
+  setLearning({ action, target });
+  platform.midi.learn(action, target).catch((err: unknown) => {
+    setLearning(null);
+    failed('learn', err);
   });
-
-  const gone: string[] = [];
-  for (const [id, name] of attachedInputs) {
-    if (present.has(id)) continue;
-    attachedInputs.delete(id);
-    for (let channel = 0; channel < 16; channel++) inputRouter.releaseSource(midiOwner(id, channel), true);
-    consumer?.portGone(id);
-    gone.push(name);
-  }
-  if (gone.length > 0) {
-    // Whatever was held on the vanished controller can only be released from this side.
-    for (const name of gone) {
-      console.error(`[midi] input disconnected: ${name}`);
-      notifyError(`MIDI device disconnected — ${name}`, 'Held notes were released.');
-    }
-  }
-
-  setMidiDevices(names);
-  setMidiStatus(names.length > 0 ? 'connected' : 'no-devices');
 }
 
-/**
- * Request Web MIDI access and start listening. Safe to call multiple times (idempotent).
- * Errors and lack of hardware are handled gracefully.
- */
-async function requestAccess(): Promise<void> {
-  try {
-    const access = await platform.midi.requestAccess();
-    if (!access) {
-      setMidiStatus('unsupported');
-      return;
-    }
-    _access = access;
-    attachInputs(access);
-
-    // Hot-plug: re-enumerate whenever a device connects/disconnects.
-    access.onstatechange = () => attachInputs(access);
-  } catch (e) {
-    const name = e instanceof DOMException ? e.name : '';
-    const denied = name === 'SecurityError' || name === 'NotAllowedError';
-    // A permission denial is the environment's answer (a headless rig, a locked-down WebView), not a
-    // fault: it warns. Anything else is an error and reaches the release log.
-    if (denied) console.warn('[midi] requestMIDIAccess denied', e);
-    else console.error('[midi] requestMIDIAccess failed', e);
-    setMidiStatus(denied ? 'denied' : 'error');
-  }
+/** Stop listening. True when a learn was pending (Esc spends itself on it); the UI stops listening at once,
+ * native MIDI a call later. A learned pedal's wait for its release goes on. */
+export function cancelLearn(): boolean {
+  if (learning() === null) return false;
+  setLearning(null);
+  platform.midi.cancelLearn().catch((err: unknown) => failed('cancel learn', err));
+  return true;
 }
 
-export function start(): Promise<void> {
-  if (_access) return Promise.resolve(); // already started
-  if (startInFlight) return startInFlight;
-  startInFlight = requestAccess();
-  const pending = startInFlight;
-  void pending.finally(() => {
-    if (startInFlight === pending) startInFlight = null;
-  });
-  return pending;
+/** Drop listed binding `index`: its messages reach the play path again. */
+export function forget(index: number): void {
+  platform.midi.forget(index).catch((err: unknown) => failed('forget', err));
 }
 
-/**
- * Retry a failed permission/request attempt. Concurrent retries share the same request. Only
- * `verify/probes/instrument-controls.mjs` calls it, hence `@public` for knip.
- * @public
- */
-export function retry(): Promise<void> {
-  const status = midiStatus();
-  return status === 'denied' || status === 'error' ? start() : Promise.resolve();
+/** Read listed binding `index`'s pedal as momentary or latching (the list's switch). */
+export function setMomentary(index: number, momentary: boolean): void {
+  platform.midi.setMomentary(index, momentary).catch((err: unknown) => failed('pedal switch', err));
+}
+
+/** HOLD on or off for listed binding `index`. */
+export function setHold(index: number, hold: boolean): void {
+  platform.midi.setHold(index, hold).catch((err: unknown) => failed('HOLD switch', err));
+}
+
+/** Run listed binding `index` on the present port `portId` from now on. */
+export function assign(index: number, portId: string): void {
+  platform.midi.assign(index, portId).catch((err: unknown) => failed('assign', err));
 }

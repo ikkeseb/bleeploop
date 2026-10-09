@@ -7,9 +7,9 @@
  * `instrument-slots.ts`; tones in a session: `slot-tones.ts`.
  */
 import { createSignal } from 'solid-js';
-import { inputRouter, type NoteSink } from './input-router';
 import { SYNTHS } from './instruments';
 import {
+  input,
   platform,
   sendEngine,
   type InstrumentId,
@@ -41,7 +41,7 @@ import { pluginDescriptorKey, reconcilePluginDescriptors, samePluginDescriptor }
  * Two-slot instrument host. Each slot holds EITHER a built-in instrument (a selectable id the engine
  * plays), Off (nothing plays, GO LIVE passes the slot's input dry) OR a native plugin (a loaded
  * CLAP/VST3/VST2 descriptor). Only one slot is "active" at a time; keyboard/MIDI input routes to that slot
- * through `inputRouter` and the engine's note target (`routeEngine`).
+ * through native MIDI's router, which this module tells the note target (`routeEngine`).
  */
 
 // Scanned native plugins available to the picker (empty in the browser build).
@@ -116,35 +116,16 @@ const [synthGains, setSynthGains] = createSignal<Readonly<Record<string, number>
   Object.fromEntries(SYNTHS.map((s) => [s.id, readStoredNumber(synthGainKey(s.id), 1, 0, SLOT_GAIN_MAX)])),
 );
 
-/**
- * The one note sink: the router's notes and wheels become engine commands for the target the last
- * `SelectInstrument` named (a built-in instrument or a plugin slot). Sustain and a held note's owner
- * stay in the router, as the engine expects (`lf_engine::Command::NoteOn`).
- */
-const ENGINE_SINK: NoteSink = {
-  noteOn: (note, velocity) => sendEngine({ NoteOn: [note, velocity] }),
-  noteOff: (note) => sendEngine({ NoteOff: note }),
-  setPitchBend: (semitones) => sendEngine({ PitchBend: semitones }),
-  setModulation: (depth) => sendEngine({ Modulation: depth }),
-};
-
-/** The note target last sent with its slot: a slot switch sends it again, even to the same synth. */
-let engineTarget = '';
-
+/** Route the notes to slot `i`'s source: its plugin, its instrument or nowhere (Off). Native MIDI's
+ * router releases what sounds on the target it leaves, then selects (a target switch), and changes nothing
+ * for the same slot and target again, so a click on the active slot cuts no chord. */
 function routeEngine(i: 0 | 1): void {
   const target: NoteTarget = slotPlugins()[i]
     ? { Slot: i }
     : slotOff()[i]
       ? 'Off'
       : { Builtin: slotIds()[i] as InstrumentId };
-  const key = `${i}:${JSON.stringify(target)}`;
-  if (key !== engineTarget) {
-    engineTarget = key;
-    // Release what the router holds on the target it leaves, then move (the engine releases too).
-    inputRouter.allNotesOff();
-    sendEngine({ SelectInstrument: target });
-  }
-  inputRouter.setSink(ENGINE_SINK);
+  input.selectTarget(i, target);
 }
 
 // Per-slot plugin gain; null = no plugin.
@@ -161,26 +142,24 @@ function setEngineGain(slot: 0 | 1, gain: number | null, send = true): void {
 
 /**
  * Send what this module and `native-io.ts` keep to an engine that may not have it (a new engine, a
- * WebView reload): the note target, the slot gains, the instrument levels and the live slots. Held
- * notes are released and the wheels seeded again.
+ * WebView reload): the note target, the slot gains, the instrument levels and the live slots. A reload's
+ * held notes are native MIDI's to release (the document's epoch), and a new engine gets the target and
+ * wheels from the settings replay.
  */
 export function engineResync(): void {
-  engineTarget = '';
-  inputRouter.setSink(null);
   applyActiveRouting();
   for (const slot of [0, 1] as const) sendEngine({ SetSlotGain: [slot, slotEngineGain(slot)] });
   for (const { id } of SYNTHS) sendEngine({ SetInstrumentGain: [id as InstrumentId, synthGains()[id]] });
   resendEngineLive();
 }
 
-/** Point the input router and the engine's note target at the ACTIVE slot. Idempotent (a stable sink,
- * and the target is sent only when it changes), so repeated calls — every keypress, via `ensureActive` —
- * don't flush held notes. */
+/** Point the note target at the ACTIVE slot. Idempotent (native MIDI ignores the same slot and target),
+ * so repeated calls — every keypress, via `ensureActive` — don't flush held notes. */
 function applyActiveRouting(): void {
   routeEngine(activeSlot());
 }
 
-/** Ensure the active slot is routed. Called on every keypress and MIDI note. */
+/** Ensure the active slot is routed. Called on every on-screen and PC keypress. */
 export function ensureActive(): void {
   applyActiveRouting();
 }
@@ -398,10 +377,10 @@ async function unloadSlotPlugin(slot: 0 | 1, outgoing: PluginDescriptor, path: '
   const outgoingGain = engineGains()[slot];
   setEngineGain(slot, null, false);
   setSlotPlugins((prev) => withAt(prev, slot, null));
-  // A swap routes nowhere until the next plugin lands (releasing held notes: the same slot target
-  // comes back, so a later applyActiveRouting would not release a note held across the swap).
+  // A swap routes nowhere (Off) until the next plugin lands, which releases held notes: the same slot
+  // target comes back, so routing there again would not release a note held across the swap.
   if (activeSlot() === slot) {
-    if (path === 'swap') inputRouter.setSink(null);
+    if (path === 'swap') input.selectTarget(slot, 'Off');
     else applyActiveRouting(); // back to the slot's instrument immediately
   }
   try {
