@@ -231,8 +231,11 @@ Baseline (2026-10-09, loopMIDI, Focusrite ASIO 128 at 44.1 kHz, the load set up 
 note every 25 ms, a 250 ms UI stall every 3 s, 120 s warm-up, two runs of 2500 notes a side): no note
 lost, stuck or duplicated, no xrun or discontinuity in any run. Web MIDI (f2b632c4): sender->applied
 p99 226–227 ms, 251–252 ms in stalls, 4.0–4.2 ms outside. Native MIDI (30376341): p99 3.1 ms, in
-stalls and outside alike; one run had 6 notes one block late. Run from PowerShell at the PC, in the repo root, with no dev
-app running:
+stalls and outside alike; one run had 6 notes one block late. Lock waits (d33f93af, the same load,
+24000 notes over 10 minutes, p99 3.1 ms, no xrun, 73 notes one block late): no `settings` or `ends`
+wait reached 1 ms, a third of a 128-frame block (max 15 µs on the input path, 42 µs on the feed; the
+callback takes neither); a second command ring is reconsidered only if one does. Run from PowerShell
+at the PC, in the repo root, with no dev app running:
 
 ```powershell
 $env:LF_MIDI_BENCH = "loopMIDI;count=2000;stall_every_ms=3000;stall_ms=250;label=before"
@@ -273,5 +276,4 @@ sooner than twice `timeout_ms` is refused (logged).
   numbers incomplete. Taking the engine's note record can cost one `lock_misses` in the warm-up.
 - **Lock waits** (`settings` and `ends`, by taker: `send` the input path, `feed`, `other`): count,
   total, max and a histogram, in the JSON and the log. `$env:LF_LOCK_WAITS = "60"` alone logs them every
-  60 s (`[lock-waits]`, totals since the start): 10 minutes under the jam load is the check
-  `src-tauri/AGENTS.md` § Open threads owes.
+  60 s (`[lock-waits]`, totals since the start).

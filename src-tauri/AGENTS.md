@@ -348,9 +348,7 @@ plugin-GUI work.
   switch or a panic; a blur owed after a failure, answered late, can release a hold made after it; a
   page whose `performance.timeOrigin` reads older than its predecessor's (the wall clock moved back
   and the WebView restarted) is refused until the app restarts. Next check: log `input_send` round
-  trips over a jam: does a 2 s stall ever happen? Unmeasured: the `settings` and `ends` lock waits
-  under the jam load (10 minutes of `LF_LOCK_WAITS`, `docs/VERIFY.md` § MIDI latency benchmark); a
-  second command ring is reconsidered only on those numbers. Only a hardware controller can settle
+  trips over a jam: does a 2 s stall ever happen? Only a hardware controller can settle
   (none has reached native MIDI yet): whether the port name Web MIDI stored equals WinMM's `szPname`
   (where it differs, an imported binding waits until the player assigns it), whether midir's id (the
   device-interface path) is stable across a restart and a replug, which interface class a port
