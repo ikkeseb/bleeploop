@@ -16,16 +16,31 @@ added a line.
   deciding on wording or behaviour.
 - **Is the amp-sim live, from 1.5 m?** Only the slot's pill says so; the 4×22 px record meter is the
   only clipping cue.
-- **Stage view (B): the new look is built, unheard.** The owner found both older looks (Orbit,
-  Strata) primitive; the diagnosis was that each drew the same recorded overview plus a playhead, so
-  nothing on screen knew what was sounding. SCOPE draws the engine's live columns instead, additively,
-  so a pass that lands on the pass before it accumulates light: a locked loop glows, a one-off peaks
-  and dies. It is the default look. What the owner judges, on real sound with a guitar in: is it «helt
-  rått å se på», does a locked loop read as locked against anything live, and does the hero bay read as
-  the output? Mockups on the old data were tried and rejected, so a new visual proposal waits for his
-  eye on this one. The earlier per-look questions are superseded (git history holds them). A hitch the
-  owner saw was under the MIDI benchmark's deliberate 250 ms UI stalls, not seen in an ordinary run
-  yet.
+- **Stage view (B): SCOPE is built and machine verified, and a taste review says it misses the bar.**
+  The owner found both older looks (Orbit, Strata) primitive; the diagnosis was that each drew the same
+  recorded overview plus a playhead, so nothing on screen knew what was sounding. SCOPE draws the
+  engine's live columns instead, additively, so a pass that lands on the pass before it accumulates
+  light: a locked loop glows, a one-off peaks and dies. That part works, and it is the thing to build
+  the next design around: in `logs/stage-view/1920x1080-scope-rich-b.png` lane 1 has a white-hot core
+  where the loop has landed while lane 2 right under it is a dim grey contour, and which is which reads
+  at any distance with no label.
+  The rest misses. A taste read against the owner's own bar («helt rått å se på, imponerende, men
+  gjennomtenkt og polert», a visual show with less information and more mood, read from across the
+  room) says: polished and legible, but it reads as a dark-mode DAW arrangement view, which is the
+  instrument panel he said he does not want. Named costs, in order: a gutter of OUT/IN/1 to 5 labels,
+  eight vertical gridlines, an inset frame and a 132 px empty band under lane 5 (12 % of the screen);
+  the HERO bay is the largest region and the dimmest, with the guitar a cyan hairline inside a grey
+  shape, and empty in five of eight scenes; and a lane carrying an overdub shows three hues at once
+  rather than one hue at three intensities. Worst of all for the brief: side by side on the contact
+  sheets it is recognisably STRATA with an inset frame, a gutter and an OUT/IN bay added, so whatever
+  the owner disliked about STRATA is still in frame. The reviewer's one change: make the top bay carry
+  the show, the room's output as a full-height additive field with the guitar wide and bright through
+  it, so the largest region on screen is also the brightest.
+  That is a reviewer's read of stills from a scripted engine, not the owner's, and the glow building
+  pass by pass is motion no still shows. His eye settles it (`STATUS.md` next jam, 4). Mockups on the
+  old data were tried and rejected, so a new visual proposal waits for that. The earlier per-look
+  questions are superseded (git history holds them). A hitch the owner saw was under the MIDI
+  benchmark's deliberate 250 ms UI stalls, not seen in an ordinary run yet.
 - **IN FX defaults (unheard, an agent's pick):** echo 1/8, feedback 0.4, level 0.5; reverb 0.5. The
   echo's level is scaled so its repeats carry the input's energy (at feedback 0.95 the first echo is
   about ⅓ of the level): does high feedback still feel right? The reverb is summed to mono.

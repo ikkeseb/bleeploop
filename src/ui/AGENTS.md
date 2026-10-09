@@ -61,3 +61,16 @@ is a one-line adapter). UI-only edits are safe while the dev app runs,
   other than half, and the continuous settings (volumes, pan, FX).
 - **Error toasts** (`toast/Toasts.tsx` renders `src/notify.ts`) sit ADDITIVELY beside the
   `console.error` sites, which feed the release log. Keep both.
+
+## Open threads (non-gate)
+
+- **The stage beam and the HUD disagree where no scope column has arrived.** In
+  `logs/stage-view/1920x1080-scope-later-take.png` the HUD reads bar 3 of 8 and lane 2's take in
+  flight ends at 0.32 of the sweep, which agrees with it, while the beam stands at 0.75. With no
+  column the beam is the DRAWN playhead (`scope.ts`: `beam[0] = -2`, then `light.phase`), so the two
+  readings come from different places and one of them is wrong in that picture. Likely confined to the
+  browser rig, where the look runs with no columns at all; on a device the taps are on whenever SCOPE
+  shows, so the drawn playhead carries the beam only for the first few frames. Unknown whether the
+  scripted scene's anchor simply disagrees with its own events. Next diagnostic check, cheap: a probe
+  case that reads the HUD's bar and the beam's x in one no-column scene and asserts they agree, before
+  anyone reads the beam as a defect on a device.
