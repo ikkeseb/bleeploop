@@ -19,7 +19,10 @@
 //                device. The device a launch opens by itself is printed, not judged (a `--fresh` run
 //                shows a new user's first launch)
 //   device       ASIO on and buffer `--buffer=` (default 128) picked in Audio Settings as a user would;
-//                the engine row shows ASIO at that buffer and the log shows the reopen
+//                the engine row shows ASIO at that buffer and the log shows the reopen. The driver that
+//                answered is named in the PASS line, not judged: the PC's interface changes, and a
+//                baseline belongs to the interface that made it (docs/VERIFY.md). `--driver=<substring>`
+//                pins it when a run must prove one particular interface.
 //   take         with CLICK on, FIXED 1 bar and slot 1 set to Off on input `--channel=` (0-based, default
 //                1 = input 2) and live, as a user takes the input dry in the slot header, a press on
 //                lane 1's record core takes the lane armed → rec → play, and its waveform canvas is not
@@ -88,7 +91,7 @@ const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ── Arguments ─────────────────────────────────────────────────────────────────────────────────────
-const opts = { exe: join(root, 'src-tauri', 'target', 'release', 'app.exe'), port: 9333, buffer: 128, channel: 1, cdpWait: 60 };
+const opts = { exe: join(root, 'src-tauri', 'target', 'release', 'app.exe'), port: 9333, buffer: 128, channel: 1, cdpWait: 60, driver: null };
 const flags = new Set();
 for (const arg of process.argv.slice(2)) {
   const m = arg.match(/^--([\w-]+)(?:=(.*))?$/);
@@ -99,11 +102,12 @@ for (const arg of process.argv.slice(2)) {
   else if (key === 'buffer' && value) opts.buffer = Number(value);
   else if (key === 'channel' && value !== undefined) opts.channel = Number(value);
   else if (key === 'cdp-wait' && value !== undefined) opts.cdpWait = Number(value);
+  else if (key === 'driver' && value) opts.driver = value;
   else if ((key === 'fresh' || key === 'owner-profile') && value === undefined) flags.add(key);
   else usage(`unknown argument ${arg}`);
 }
 function usage(why) {
-  console.error(`${why}\nusage: node scripts/release-smoke.mjs [--exe=<path>] [--fresh] [--port=9333] [--buffer=128] [--channel=1] [--cdp-wait=60] [--owner-profile]`);
+  console.error(`${why}\nusage: node scripts/release-smoke.mjs [--exe=<path>] [--fresh] [--port=9333] [--buffer=128] [--channel=1] [--cdp-wait=60] [--driver=<substring>] [--owner-profile]`);
   process.exit(1);
 }
 assertWindows('release smoke');
@@ -442,8 +446,15 @@ try {
     const asioWasOn = await asioBox.isChecked();
     if (!asioWasOn) await asioBox.check();
     await page.waitForFunction(() => document.querySelector('input[aria-label="Use ASIO low-latency audio"]')?.closest('label')?.textContent?.includes('low-latency'), undefined, { timeout: 20_000 });
-    const driver = await page.locator('select[aria-label="Audio input device"] option').first().textContent();
-    must(/focusrite/i.test(driver ?? ''), `the ASIO driver is "${driver}", not the Focusrite (Audio Settings offers no driver pick)`);
+    const driver = (await page.locator('select[aria-label="Audio input device"] option').first().textContent()) ?? '';
+    // WHICH driver answered is not this probe's business (the interface on the PC changes; a baseline
+    // names its own, docs/VERIFY.md). THAT one answered is: an empty pick means Audio Settings found no
+    // ASIO driver at all. `--driver=` pins it when a run must prove a particular interface.
+    must(driver.trim() !== '', 'Audio Settings offers no ASIO driver to pick');
+    must(
+      !opts.driver || driver.toLowerCase().includes(opts.driver.toLowerCase()),
+      `the ASIO driver is "${driver}", not the "${opts.driver}" this run pinned with --driver=`,
+    );
     const bufferSel = page.locator('select[aria-label="Buffer size in frames"]');
     const bufferWas = await bufferSel.inputValue();
     await bufferSel.selectOption(String(opts.buffer));
@@ -460,7 +471,11 @@ try {
     const readout = await engineRow();
     const reopen = await waitLog(new RegExp(`\\[engine_io\\] Asio running: .*${opts.buffer}-frame blocks`), 10);
     const request = runLog().filter((e) => /\[engine_io\] open requested: /.test(e.line)).pop();
-    must(/focusrite/i.test(readout ?? ''), `the engine row names no Focusrite device: "${readout}"`);
+    must((readout ?? '').trim() !== '', 'the engine row names no device');
+    must(
+      !opts.driver || (readout ?? '').toLowerCase().includes(opts.driver.toLowerCase()),
+      `the engine row does not name the "${opts.driver}" this run pinned: "${readout}"`,
+    );
     must(reopen !== null, `the release log shows no ASIO reopen at ${opts.buffer} frames`);
     await closeSettings();
     return [

@@ -4,15 +4,28 @@ The owner's ear, eye or decision on the PC: the next jam's checks, what no jam h
 decisions that block work. Taste: `docs/backlog-taste.md` (not a gate). Non-gate threads: `AGENTS.md`
 § Open threads.
 
-**The rig's interfaces:** every baseline in this repo was measured on a **Scarlett 2i2 3rd gen** (ASIO,
-44.1 kHz, a cable from line out R into input 2). A second interface, an **Audient EVO 4**, arrived
-2026-10-09 and has never been run: its ASIO driver is unmeasured here, nothing in the tree mentions it,
-and the device side's driver-specific workarounds were written for the Focusrite driver alone
-(`src-tauri/AGENTS.md`, the preopen at another block size). So a result on the EVO 4 answers none of the
-baselines below until they are measured again on it, and an oddity seen there is the new driver's until
-shown otherwise. It also opens a check no device has ever run: a rate or buffer changed in the driver's
-own control panel while the app plays (`src-tauri/AGENTS.md` § Open threads). It has two inputs, so the
-loopback cable the rig protocol needs still fits.
+**The rig's interface:** every baseline in this repo was measured on a **Scarlett 2i2 3rd gen** (ASIO,
+44.1 kHz, a cable from line out R into input 2). It was replaced by an **Audient EVO 4** on 2026-10-09
+and the Focusrite ASIO driver was uninstalled the same day, so no Scarlett baseline here can be measured
+again without installing that driver back. The EVO 4 has never been run by the app: its ASIO driver
+(`Audient USB Audio ASIO Driver`) is unmeasured here, and the device side's driver-specific workarounds
+were written for the Focusrite driver alone, the preopen at another block size for its two-period
+lateness (`src-tauri/AGENTS.md`), so that workaround now runs against a driver it has never been measured
+on. A result on the EVO 4 therefore answers none of the baselines below until they are measured again on
+it, and an oddity seen there is the new driver's until shown otherwise.
+
+**What the EVO 4 changes for the rig,** read from its manual (User Manual 5.0) and confirmed on the PC:
+the guitar goes in the front instrument jack, which is channel 1 and overrides the rear Mic/Line 1; the
+mic is on channel 2, which the loopback cable the rig protocol needs also wants, so the two now compete
+for one input. Monitors sit on the rear L/R and headphones on the front jack, and SmartMuting mutes the
+monitor outputs whenever a headphone jack is in, by design and with no setting to turn it off. Its own
+Loop-back channels are a digital send inside the driver, so they do NOT stand in for the rig's cable:
+they skip the converters the round trip is there to measure. The saved ASIO pick is still the
+Focusrite's, which no longer exists, so the first launch falls back to automatic and will likely open an
+unrelated driver until `Audient USB Audio ASIO Driver` is picked once in Audio Settings
+(`src-tauri/AGENTS.md` § Open threads). Its EVO Control app sets the ASIO buffer size and the sample rate
+from the system tray, which is the handle for a check no device has ever run: a rate or buffer changed in
+the driver's own panel while the app plays.
 
 **Machine verification (Windows):** the push gates are `AGENTS.md`'s; the rig probes, when to run each,
 and their baselines: `docs/VERIFY.md` § When to run the plugin probes. Where the rig stands: every rig

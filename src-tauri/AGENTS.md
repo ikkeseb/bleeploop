@@ -328,13 +328,20 @@ plugin-GUI work.
   request (`transition::fallbacks`), likely putting the app's rate and buffer back over the panel's. A
   `kAsioBufferSizeChange`, which cpal 0.18.1 accepts with no error, would leave the run on the new
   block size with its latency alignment frozen at the old one (`callback::LATENCY_SAMPLES`), a take
-  possibly off the click, and the buffer select stale. Which messages the Focusrite driver sends is
-  unknown. A fix keeps the loops (a rate the owner did not confirm discards them: `Owner::open`) and
+  possibly off the click, and the buffer select stale. Which messages a driver sends is unknown; the
+  Focusrite driver this was written against is uninstalled, and the rig's driver is now the EVO 4's,
+  whose EVO Control tray app is where the buffer size and the rate are set (`STATUS.md`). A fix keeps the loops (a rate the owner did not confirm discards them: `Owner::open`) and
   shows what runs, rather than adopting the driver's settings blindly. Next check, on the rig: change
   the buffer in the driver's panel, then the rate, each while loops play, and record a take after
   each: the log, the block size the callbacks get (the status reads it only at the open), and whether
   the take lands on the click. Under WASAPI the buffer select lists every
   size and the run ignores it (`cpal_driver::resolve_wasapi`).
+- A saved ASIO pick whose driver is no longer installed falls back without telling anyone:
+  `resolve_asio_cache` (`src/audio_output.rs:219`) logs a warning and takes the automatic choice, which
+  is the ASIO host's default output device, else its default input, else the first driver enumerated.
+  So an interface swap can leave the app opening an unrelated driver (a controller's, say) while the
+  player hears nothing and Audio Settings shows a device that runs. Read from source 2026-10-09, not
+  reproduced. A fix would surface the dropped pick where the lamp and Audio Settings can say it.
 - A punch-out inside a take's last quarter-beat commits the whole bars before it, where a stop there
   rounds up (owner's call).
 - The feed's reset mirror carries no count: a WebView reload during a count-in shows no numeral until
