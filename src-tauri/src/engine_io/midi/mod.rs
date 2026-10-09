@@ -42,7 +42,8 @@
 //! - **An engine rebuild needs no WebView** ([`super::RebuildHook`], registered at start): the queue
 //!   pauses, folds its target and wheels into the settings memory before the replay and drops the old
 //!   engine's one-shots and their releases; the router forgets what the old engine sounded, learn its
-//!   HOLD presses; the queue resumes after the replay.
+//!   HOLD presses; the queue resumes after the replay. The handshake itself sends nothing and calls no
+//!   UI sink (its caller holds every slot port): the port thread, woken, does both afterwards.
 //! - **Which stored bindings are live** is decided on one port snapshot (`ports::resolve`) at every
 //!   change of the port list or the bindings: exact ids first, by name only where it is unambiguous,
 //!   every ordinal (legacy) record of one name counting as one identity (decision 9). A move is saved
@@ -103,8 +104,9 @@ const RETRY: Duration = Duration::from_millis(2);
 const IDLE_RETRY: Duration = Duration::from_millis(20);
 /// The most often the engine's refused sends and the queue's refusals for room reach the release log.
 const LOG_EVERY: Duration = Duration::from_secs(1);
-/// The stored id an ordinal (legacy) record resolves under: no port's id, and one for every such
-/// record, so its port name alone is its identity (decision 9).
+/// The stored id an ordinal (legacy) record resolves under: no port's id, one for every such record,
+/// and of the legacy form, so its port name alone is its identity and every present port with that
+/// name counts (decision 9, `ports::resolve`).
 const ORDINAL: &str = "input-*";
 
 /// What native MIDI needs of the engine host: [`EngineHost`] in the app, a recorder in tests.
@@ -354,16 +356,19 @@ struct State {
 
 type Sink = Arc<dyn Fn(MidiEvent) + Send + Sync>;
 
-/// The UI events on their way out.
+/// The UI events on their way out. Each sink has a generation (raised by every `subscribe`), each
+/// event the generation of the sink it was made for, so a sink replaced while another thread hands
+/// events over (a reload) never gets the new listener's events, and the new one never misses them.
 #[derive(Default)]
 struct Events {
-    sink: Mutex<Option<Sink>>,
+    /// The current sink and its generation. Taken before `pending` and `held`.
+    sink: Mutex<Option<(u64, Sink)>>,
     /// Queued under the state lock, so they keep the order of what they report.
-    pending: Mutex<VecDeque<MidiEvent>>,
-    /// One thread at a time hands them to the sink.
+    pending: Mutex<VecDeque<(u64, MidiEvent)>>,
+    /// One thread at a time hands them over.
     flushing: Mutex<()>,
-    /// The held set's change count the UI last heard.
-    held: AtomicU64,
+    /// The held set's change count the sink of a generation last heard: (generation, count).
+    held: Mutex<(u64, u64)>,
 }
 
 /// What the port callbacks, the port thread and [`MidiHost`] share.
@@ -426,15 +431,62 @@ impl Core {
         lock(&self.state)
     }
 
-    /// Queue an event for the UI, under the state lock; dropped while no one listens.
+    /// Queue an event for the UI, under the state lock, for the sink of now; dropped while no one
+    /// listens.
     fn emit(&self, event: MidiEvent) {
-        if lock(&self.events.sink).is_some() {
-            lock(&self.events.pending).push_back(event);
+        let sink = lock(&self.events.sink);
+        if let Some((generation, _)) = &*sink {
+            lock(&self.events.pending).push_back((*generation, event));
         }
     }
 
-    /// Hand the queued events to the sink, in order, and the held set when it changed. Outside the
-    /// state lock; a thread that finds another handing them over leaves its events to that one.
+    /// A new listener (`MidiHost::set_events`): it hears first what it needs to draw, queued with the
+    /// sink in one step, so no thread handing events over can come between them; the held set goes
+    /// out after them, whatever its count.
+    fn subscribe(&self, sink: Sink) {
+        {
+            let st = self.lock();
+            let mut current = lock(&self.events.sink);
+            let generation = current.as_ref().map_or(1, |(g, _)| g + 1);
+            *current = Some((generation, sink));
+            let mut first = vec![
+                MidiEvent::Ports { ports: port_infos(&st.ports) },
+                MidiEvent::Bindings { bindings: st.bindings.clone() },
+                MidiEvent::Learning { learning: st.heard_learning },
+                MidiEvent::AwaitingRelease { binding: st.heard_awaiting.clone() },
+            ];
+            first.extend(st.problem.clone().map(|problem| MidiEvent::Store { problem }));
+            let mut pending = lock(&self.events.pending);
+            pending.clear();
+            pending.extend(first.into_iter().map(|event| (generation, event)));
+            *lock(&self.events.held) = (generation, u64::MAX);
+        }
+        self.flush();
+    }
+
+    /// What to hand over next, and the sink it was made for: the oldest queued event for the sink of
+    /// now (one made for a replaced sink is dropped: its successor got a fresh start), else the held
+    /// set, once that sink has not heard its count.
+    fn next(&self) -> Option<(Sink, MidiEvent)> {
+        let current = lock(&self.events.sink);
+        let (generation, sink) = current.as_ref()?;
+        let mut pending = lock(&self.events.pending);
+        while let Some((made_for, event)) = pending.pop_front() {
+            if made_for == *generation {
+                return Some((sink.clone(), event));
+            }
+        }
+        let held = self.held.read();
+        let mut heard = lock(&self.events.held);
+        (*heard != (*generation, held.changes)).then(|| {
+            *heard = (*generation, held.changes);
+            (sink.clone(), MidiEvent::Held { notes: (0..128).filter(|&n| held.contains(n)).collect(), changes: held.changes })
+        })
+    }
+
+    /// Hand the queued events over, in order, each to the sink it was made for, and the held set when
+    /// it changed. Never under the state lock nor an engine lock; a thread that finds another handing
+    /// events over leaves its own to that one.
     fn flush(&self) {
         loop {
             let turn = match self.events.flushing.try_lock() {
@@ -442,20 +494,15 @@ impl Core {
                 Err(TryLockError::Poisoned(e)) => e.into_inner(),
                 Err(TryLockError::WouldBlock) => return,
             };
-            let Some(sink) = lock(&self.events.sink).clone() else { return };
-            loop {
-                let next = lock(&self.events.pending).pop_front();
-                match next {
-                    Some(event) => sink(event),
-                    None => break,
-                }
-            }
-            let held = self.held.read();
-            if self.events.held.swap(held.changes, Relaxed) != held.changes {
-                sink(MidiEvent::Held { notes: (0..128).filter(|&n| held.contains(n)).collect(), changes: held.changes });
+            while let Some((sink, event)) = self.next() {
+                sink(event);
             }
             drop(turn);
-            if lock(&self.events.pending).is_empty() && self.held.read().changes == self.events.held.load(Relaxed) {
+            // Something queued while this thread held the turn, by a thread that left it here.
+            let current = lock(&self.events.sink);
+            let Some((generation, _)) = current.as_ref() else { return };
+            let waiting = !lock(&self.events.pending).is_empty() || *lock(&self.events.held) != (*generation, self.held.read().changes);
+            if !waiting {
                 return;
             }
         }
@@ -775,8 +822,15 @@ impl Core {
         fold.commands().collect()
     }
 
+    /// The replay is queued. Like `pause` and `rebuild`, this changes the core's own state and
+    /// nothing else: its caller holds every slot port, so it neither sends nor tells the UI (a sink that
+    /// reached `SlotHost::remove` would wait on a lock its own thread holds). The port thread, woken,
+    /// drains what waited and hands the events over (`tick`).
     fn resume(&self) {
-        self.input(|_, st, _| st.queue.resume());
+        let mut st = self.lock();
+        st.queue.resume();
+        st.armed = true;
+        self.wake();
     }
 }
 
@@ -846,22 +900,7 @@ impl MidiHost {
     /// Where the UI events go (on their own channel). The first ones are what a new listener needs: the
     /// ports, the bindings, the learn's state, the store's last problem and the held notes.
     pub fn set_events(&self, sink: Box<dyn Fn(MidiEvent) + Send + Sync>) {
-        let core = &self.core;
-        {
-            let st = core.lock();
-            *lock(&core.events.sink) = Some(Arc::from(sink));
-            lock(&core.events.pending).clear();
-            core.emit(MidiEvent::Ports { ports: port_infos(&st.ports) });
-            core.emit(MidiEvent::Bindings { bindings: st.bindings.clone() });
-            core.emit(MidiEvent::Learning { learning: st.heard_learning });
-            core.emit(MidiEvent::AwaitingRelease { binding: st.heard_awaiting.clone() });
-            if let Some(problem) = &st.problem {
-                core.emit(MidiEvent::Store { problem: problem.clone() });
-            }
-            // The held set goes out with them, whatever its count.
-            core.events.held.store(u64::MAX, Relaxed);
-        }
-        core.flush();
+        self.core.subscribe(Arc::from(sink));
     }
 
     /// A new WebView document (`host_init`'s `frontendEpoch`): the older documents' holds are released
@@ -1614,6 +1653,67 @@ mod tests {
         assert_eq!(r.held(), [64]);
     }
 
+    // Review fix: a HOLD pedal's press-side message repeated while it holds (a lost release) keeps its
+    // number; refused (no device), it leaves the hold its first press made, so the release still ends
+    // the capture.
+    #[test]
+    fn a_refused_repeat_of_a_held_hold_press_still_gets_its_release() {
+        let mut r = Rig::with((holding(vec![hold_pedal("Probe a", 20)]), None), None, vec![port("Probe a", Some(A))]);
+        r.send(A, &[[0xb0, 20, 127]]);
+        assert_eq!(r.take(), [Command::Action(Action::Hold(0))]);
+        r.running(false);
+        r.send(A, &[[0xb0, 20, 127], [0xb0, 20, 0]]);
+        r.running(true);
+        r.wait(IDLE_RETRY);
+        assert_eq!(r.take(), [Command::Action(Action::Release(0))]);
+    }
+
+    // Review fix (decision 9): two present controllers named Pedal, one legacy binding assigned to the
+    // first. The other stays unresolved: two present ports carry its name, whichever is claimed.
+    #[test]
+    fn a_legacy_record_never_follows_a_name_two_present_ports_carry() {
+        let (a, b) = (port_at(r"\\?\usb#1", "Pedal", Some(A)), port_at(r"\\?\usb#2", "Pedal", Some(B)));
+        let a_id = a.id.clone();
+        let r = Rig::with((store::empty(), None), None, vec![a, b]);
+        r.host.import_legacy(&legacy_list(&[legacy("input-1", "Pedal", 20, "playAll"), legacy("input-1", "Pedal", 21, "stopAll")]));
+        r.host.assign(0, &a_id).unwrap();
+        assert_eq!(r.states(), [("Pedal".into(), false, BindingState::Live), ("Pedal".into(), true, BindingState::SeveralPorts)]);
+        r.send(B, &[[0xb0, 21, 127]]);
+        assert_eq!(r.take(), [], "port b does not run it");
+    }
+
+    // Review fix: a listener replaced while events are being handed to the old one (a reload whose
+    // `set_events` lands inside the old sink's callback) gets its first events and the held set; the old
+    // one gets none of them.
+    #[test]
+    fn a_new_listener_gets_its_first_events_even_mid_flush() {
+        let r = Rig::new();
+        let (old, new): (Arc<Mutex<Vec<MidiEvent>>>, Arc<Mutex<Vec<MidiEvent>>>) = Default::default();
+        {
+            let (old, new, core) = (old.clone(), new.clone(), Arc::downgrade(&r.host.core));
+            let replaced = AtomicBool::new(false);
+            r.host.set_events(Box::new(move |e| {
+                old.lock().unwrap().push(e);
+                if !replaced.swap(true, Relaxed) {
+                    let new = new.clone();
+                    core.upgrade().unwrap().subscribe(Arc::new(move |e| new.lock().unwrap().push(e)));
+                }
+            }));
+        }
+        assert!(matches!(old.lock().unwrap()[..], [MidiEvent::Ports { .. }]), "only what came before the reload");
+        let first = std::mem::take(&mut *new.lock().unwrap());
+        assert!(
+            matches!(
+                first[..],
+                [MidiEvent::Ports { .. }, MidiEvent::Bindings { .. }, MidiEvent::Learning { .. }, MidiEvent::AwaitingRelease { .. }, MidiEvent::Held { .. }]
+            ),
+            "{first:?}"
+        );
+        r.host.learn(ActionId::Undo, None);
+        assert_eq!(old.lock().unwrap().len(), 1);
+        assert!(matches!(new.lock().unwrap()[..], [MidiEvent::Learning { .. }]));
+    }
+
     /// The engine host as the app has it, its sends recorded: every command reaches the real
     /// `EngineHost::send` (its ring and its settings memory) unless the ring is made to refuse.
     struct Recorded {
@@ -1645,6 +1745,30 @@ mod tests {
         let config = lf_engine::EngineConfig { max_loop_seconds: 1.0, ..lf_engine::EngineConfig::new(48_000) };
         let (engine, handle) = lf_engine::Engine::new(config);
         drop(super::super::owner::swap_engine(io, engine, handle, config));
+    }
+
+    // Review fix: the rebuild's handshake runs while its caller holds every slot port, so it hands the UI
+    // nothing (a sink that reached `SlotHost::remove` would wait on that thread's own lock); an event
+    // still waiting at the rebuild goes out from the port thread, with no slot port held.
+    #[test]
+    fn a_rebuild_hands_the_ui_nothing_under_the_slot_ports() {
+        let io = Arc::new(super::super::Core::new());
+        rebuild(&io);
+        let engine = Arc::new(Recorded { host: EngineHost { core: io.clone() }, sent: Mutex::default(), full: AtomicBool::new(false) });
+        let midi = MidiHost { core: hosted(engine, store::empty(), None, None, None), wake: None, port_thread: None };
+        // For each event handed over: whether the sink could take a slot port then.
+        let calls: Arc<Mutex<Vec<bool>>> = Arc::default();
+        {
+            let (calls, io) = (calls.clone(), io.clone());
+            midi.set_events(Box::new(move |_| calls.lock().unwrap().push(io.ports[0].try_lock().is_ok())));
+        }
+        calls.lock().unwrap().clear();
+        // An event a flush on another thread has not handed over yet.
+        midi.core.emit(MidiEvent::Pressed);
+        rebuild(&io);
+        assert_eq!(*calls.lock().unwrap(), [] as [bool; 0], "nothing during the swap");
+        midi.core.tick(Instant::now());
+        assert_eq!(*calls.lock().unwrap(), [true], "the port thread hands it over afterwards");
     }
 
     // Step 4 and decision 6: "an engine rebuild with notes and HOLD held, a refused attack, a HOLD and a

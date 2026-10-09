@@ -108,7 +108,10 @@ pub(crate) enum Unresolved {
 /// 1. A stored id equal to a present port's strong id answers to it, and claims that port.
 /// 2. Otherwise the name decides, only when exactly one UNCLAIMED present port carries it and exactly
 ///    one stored id with no present port carries it (this one). A legacy Web MIDI id (`input-<N>`) and
-///    a weak id never match exactly, so they always take this rule.
+///    a weak id never match exactly, so they always take this rule. A legacy id named no port at all
+///    (a per-run ordinal: its name is its identity), so for it every present port with the name counts,
+///    claimed or not: of two same-named controllers, the one another binding claims could be the one
+///    it was learned on.
 /// 3. Everything else stays unresolved: an ambiguous identity never fires another controller's action.
 pub(crate) fn resolve(stored: &[(&str, &str)], present: &[PortIdentity]) -> Vec<Resolution> {
     let ids: Vec<String> = present.iter().map(PortIdentity::id).collect();
@@ -122,7 +125,11 @@ pub(crate) fn resolve(stored: &[(&str, &str)], present: &[PortIdentity]) -> Vec<
             if let Some(port) = hit {
                 return Resolution::Port { port, reanchor: false };
             }
-            let ports: Vec<usize> = (0..present.len()).filter(|&i| !claimed(i) && present[i].name == name).collect();
+            let named: Vec<usize> = (0..present.len()).filter(|&i| present[i].name == name).collect();
+            if legacy(id) && named.len() > 1 {
+                return Resolution::Unresolved(Unresolved::SeveralPorts);
+            }
+            let ports: Vec<usize> = named.into_iter().filter(|&i| !claimed(i)).collect();
             let mut absent: Vec<&str> =
                 stored.iter().zip(&exact).filter(|((_, n), e)| e.is_none() && *n == name).map(|((i, _), _)| *i).collect();
             absent.sort_unstable();
@@ -135,6 +142,11 @@ pub(crate) fn resolve(stored: &[(&str, &str)], present: &[PortIdentity]) -> Vec<
             }
         })
         .collect()
+}
+
+/// A legacy Web MIDI id (`input-<N>`, or the one the glue passes for every ordinal record of a name).
+fn legacy(id: &str) -> bool {
+    id.starts_with("input-")
 }
 
 /// A poll's changes: indices into the present list to open, and into the open list to close.
@@ -480,6 +492,12 @@ mod tests {
                 stored: vec![(&ida, "Pedal"), ("input-0", "Pedal")],
                 present: vec![a.clone()],
                 expect: vec![Port { port: 0, reanchor: false }, Un(NoPort)],
+            },
+            Row {
+                case: "a legacy id whose name two present ports carry, one claimed by id: unresolved (review fix)",
+                stored: vec![(&ida, "Pedal"), ("input-0", "Pedal")],
+                present: vec![a.clone(), b.clone()],
+                expect: vec![Port { port: 0, reanchor: false }, Un(SeveralPorts)],
             },
             Row {
                 case: "two legacy ids with one name: neither",

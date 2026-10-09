@@ -105,11 +105,15 @@ pub struct Learn {
     /// Controls whose HOLD press an edit released while the pedal was down: the pedal's own release still
     /// comes, and is spent on nothing (as latching it would run the action again).
     spent: HashSet<Control>,
+    /// The number the last message's HOLD press took fresh (no press held it before), the one
+    /// [`Learn::hold_refused`] may undo; `None` after any other message, or a press its pedal repeated.
+    fresh_hold: Option<u8>,
 }
 
 impl Learn {
     /// `consume`: a learned pedal's release first, then learn capture, then the bound message.
     pub fn consume(&mut self, port_id: &str, port_name: &str, msg: &Message, now: Instant) -> Outcome {
+        self.fresh_hold = None;
         let (kind, number, high) = match *msg {
             Message::Cc { controller, value, .. } => (Kind::Cc, controller, value >= 64),
             Message::NoteOn { note, .. } => (Kind::Note, note, true),
@@ -183,7 +187,9 @@ impl Learn {
             if b.hold {
                 match self.hold_control(&control) {
                     Some(n) => {
-                        self.held.insert(control, n);
+                        if self.held.insert(control, n).is_none() {
+                            self.fresh_hold = Some(n);
+                        }
                         out.fire.push(Fire::HoldPress { target, control: n });
                     }
                     None => out.refused = Some(LearnRefusal::HoldControlsTaken),
@@ -317,10 +323,14 @@ impl Learn {
         self.held.clear();
     }
 
-    /// HOLD's press under `control` never reached the engine (no device ran, or no room): as for a
-    /// refused attack, nothing is held, so its pedal's release runs nothing.
+    /// HOLD's press under `control`, the last message's, never reached the engine (no device ran, or no
+    /// room). A press that took its number fresh holds nothing, as a refused attack records no owner,
+    /// so its pedal's release runs nothing. A press its pedal repeated (its release was lost, so it kept
+    /// its number) undoes nothing: the capture its first press started still ends on the release.
     pub fn hold_refused(&mut self, control: u8) {
-        self.held.retain(|_, n| *n != control);
+        if self.fresh_hold.take() == Some(control) {
+            self.held.retain(|_, n| *n != control);
+        }
     }
 
     fn position(&self, c: &Control) -> Option<usize> {
@@ -724,5 +734,24 @@ mod tests {
         l.hold_refused(0);
         assert_eq!(send(&mut l, A, cc(0, 20, 0), t), Outcome { consumed: true, ..Outcome::default() });
         assert_eq!(send(&mut l, A, cc(0, 21, 127), t).fire, [Fire::HoldPress { target: None, control: 0 }]);
+    }
+
+    // Review fix: a press-side message repeated while its pedal holds (a lost release) keeps the pedal's
+    // number; refused, it undoes nothing, so the capture the first press started still gets its release.
+    // A refusal reported for an older message undoes nothing either.
+    #[test]
+    fn a_refused_repeat_of_a_held_hold_press_keeps_the_hold() {
+        let mut l = Learn::default();
+        let t = Instant::now();
+        l.set_bindings(vec![hold_pedal(A, 20), hold_pedal(A, 21)]);
+        assert_eq!(send(&mut l, A, cc(0, 20, 127), t).fire, [Fire::HoldPress { target: None, control: 0 }]);
+        assert_eq!(send(&mut l, A, cc(0, 20, 127), t).fire, [Fire::HoldPress { target: None, control: 0 }]);
+        l.hold_refused(0);
+        assert_eq!(send(&mut l, A, cc(0, 20, 0), t).fire, [Fire::HoldRelease { control: 0 }]);
+
+        assert_eq!(send(&mut l, A, cc(0, 21, 127), t).fire, [Fire::HoldPress { target: None, control: 0 }]);
+        send(&mut l, A, cc(0, 5, 127), t);
+        l.hold_refused(0);
+        assert_eq!(send(&mut l, A, cc(0, 21, 0), t).fire, [Fire::HoldRelease { control: 0 }]);
     }
 }
