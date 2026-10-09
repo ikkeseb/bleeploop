@@ -1,11 +1,11 @@
-//! OWNS: the one note router for every note source (plan decision 1), ported from
-//! `src/ui/state/input-router.ts`, the play-path branch of `src/ui/state/midi.ts` and the order of
-//! `src/ui/state/instrument.ts` `routeEngine`: which owner holds each note (a MIDI port's channel, or
-//! a pointer or key of a WebView document), each owner's sustain pedal and the releases it defers, the
-//! wheels with the last moved one winning, the note target, which notes the current engine was told
-//! to sound, and the held-note set the on-screen keyboard lights. The engine plays what it is told
-//! (`lf_engine::Command::NoteOn`); the router decides when to tell it. Each call hands its commands
-//! out as one batch, in order, for `super::queue` to take whole.
+//! OWNS: the one note router for every note source, ported from `src/ui/state/input-router.ts`, the
+//! play-path branch of `src/ui/state/midi.ts` and the order of `src/ui/state/instrument.ts`
+//! `routeEngine`: which owner holds each note (a MIDI port's channel, or a pointer or key of a WebView
+//! document), each owner's sustain pedal and the releases it defers, the wheels with the last moved one
+//! winning, the note target, which notes the current engine was told to sound, and the held-note set
+//! the on-screen keyboard lights. The engine plays what it is told (`lf_engine::Command::NoteOn`); the
+//! router decides when to tell it. Each call hands its commands out as one batch, in order, for
+//! `super::queue` to take whole.
 //!
 //! # Rules
 //!
@@ -724,7 +724,7 @@ mod tests {
 
     // input-router.ts setPitchBend/setModulation and applyControllers: the last moved wheel wins across
     // owners; unplugging it restores the surviving owner's setting (releaseSource with disconnected).
-    // Plan § Parity: unchanged values are suppressed.
+    // Unchanged values are suppressed.
     #[test]
     fn the_last_moved_wheel_wins_an_unplug_hands_back_the_survivor_and_repeats_are_not_sent() {
         let mut r = Router::default();
@@ -783,7 +783,7 @@ mod tests {
         assert_eq!(msg(&mut r, &a0(), [0xe0, 0x00, 0x60]), [], "and the wheel");
     }
 
-    // Plan decision 5: "a refused attack records no owner": undone, a fresh strike or a re-strike under
+    // A refused attack records no owner: undone, a fresh strike or a re-strike under
     // the pedal leaves the router as it was.
     #[test]
     fn a_refused_attack_records_no_owner() {
@@ -837,8 +837,8 @@ mod tests {
         assert_eq!(sent(&mut r, |r, out| r.select_target(Some(1), NoteTarget::Slot(1), out)), [Command::SelectInstrument(NoteTarget::Slot(1))]);
     }
 
-    // Plan decision 6: a rebuilt engine sounds nothing; owners stay (a release is harmless), a fresh
-    // press attacks again, and neither the target nor the wheels are sent again.
+    // A rebuild needs no WebView: a rebuilt engine sounds nothing; owners stay (a release is harmless),
+    // a fresh press attacks again, and neither the target nor the wheels are sent again.
     #[test]
     fn after_a_rebuild_a_release_is_harmless_a_press_attacks_again_and_nothing_is_resent() {
         let mut r = Router::default();
@@ -857,8 +857,8 @@ mod tests {
         assert_eq!(msg(&mut r, &b0(), [0x80, 60, 0]), [Command::NoteOff(60)]);
     }
 
-    // Plan decision 7: a UI hold is released when its document is replaced and on blur; a replaced
-    // document's event is refused; MIDI holds are untouched.
+    // A page is its subscription: a UI hold is released when its document is replaced and on blur; a
+    // replaced document's event is refused; MIDI holds are untouched.
     #[test]
     fn a_document_s_holds_end_with_its_epoch_and_on_blur() {
         let mut r = Router::default();
@@ -880,7 +880,7 @@ mod tests {
         assert_eq!(sent(&mut r, |r, out| r.note_on(&new, 65, 100, out)), [on(65)], "the document plays on after a blur");
     }
 
-    // Plan decision 1: the held set is published without the router's lock, physical holds only, with
+    // The held set is published without the router's lock, physical holds only, with
     // a change counter that moves only when the set does.
     #[test]
     fn the_held_set_is_published_on_change_and_read_from_another_thread() {

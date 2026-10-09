@@ -615,14 +615,15 @@ pub(crate) struct Core {
 }
 
 /// What an engine rebuild tells the input path: native MIDI's one queue (`midi`), whose commands were
-/// made for the engine being replaced (plan decision 6). `owner.rs` `swap_engine` calls it on whatever
-/// thread swaps (the device owner), never on the audio thread and never under `settings` or `ends`
-/// (the input path sends under its own lock, which comes before them): [`RebuildHook::pause`] before
-/// the swap, [`RebuildHook::rebuild`] once the new engine is in, [`RebuildHook::resume`] once its
-/// settings replay is queued. It needs nothing of the WebView, so a stalled UI cannot hold a recovery up.
-/// Its methods change the input path's own state and nothing else: the caller holds every slot port,
-/// so they send nothing and call no UI sink (one that reached `SlotHost::remove` would wait on a lock
-/// its own thread holds); the input path's own thread does both afterwards.
+/// made for the engine being replaced (`docs/ARCHITECTURE.md` § Decided: native MIDI, a rebuild needs
+/// no WebView). `owner.rs` `swap_engine` calls it on whatever thread swaps (the device owner), never on
+/// the audio thread and never under `settings` or `ends` (the input path sends under its own lock,
+/// which comes before them): [`RebuildHook::pause`] before the swap, [`RebuildHook::rebuild`] once the
+/// new engine is in, [`RebuildHook::resume`] once its settings replay is queued. It needs nothing of
+/// the WebView, so a stalled UI cannot hold a recovery up. Its methods change the input path's own
+/// state and nothing else: the caller holds every slot port, so they send nothing and call no UI sink
+/// (one that reached `SlotHost::remove` would wait on a lock its own thread holds); the input path's
+/// own thread does both afterwards.
 pub trait RebuildHook: Send + Sync {
     /// Hold back fresh input and stop sending.
     fn pause(&self);

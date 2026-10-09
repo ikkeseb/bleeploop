@@ -38,7 +38,7 @@ use super::{Core, PortEntry};
 /// How often the port list is read when no notification wakes the port thread.
 pub(crate) const POLL: Duration = Duration::from_secs(1);
 
-/// A present port, as a binding names it (`docs/plans/native-midi.md` decision 8).
+/// A present port, as a binding names it (port identity: `docs/ARCHITECTURE.md` § Decided: native MIDI).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PortIdentity {
     /// midir's id: the WinMM device-interface path; empty when the driver gave none (weak).
@@ -103,7 +103,8 @@ pub(crate) enum Unresolved {
 }
 
 /// Resolve stored bindings' `(port_id, port_name)` (repeats allowed) against one enumeration snapshot,
-/// one result per entry, all at once: the caller persists the whole result together (decisions 8, 9).
+/// one result per entry, all at once: the caller persists the whole result together (port identity,
+/// the import never guesses).
 ///
 /// 1. A stored id equal to a present port's strong id answers to it, and claims that port.
 /// 2. Otherwise the name decides, only when exactly one UNCLAIMED present port carries it and exactly
@@ -420,7 +421,7 @@ mod tests {
         assert!(ids.iter().all(|p| !p.id().starts_with("input-")));
     }
 
-    // The resolution table (decisions 8 and 9, the seat's rule): one row per case.
+    // The resolution table (port identity, the import never guesses, the seat's rule): one row per case.
     #[test]
     fn resolution_table() {
         let a = port(r"\\?\usb#a", 0, "Pedal");

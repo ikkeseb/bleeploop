@@ -5,8 +5,8 @@
 //!
 //! A binding names its port by `port_id`, an opaque identity string matched by equality, and keeps the
 //! port's name for display only. Which identity a port gets (the device-interface path plus a
-//! discriminator, or a legacy record's name) is the store's and the port table's (the plan's decisions 8
-//! and 9), never this file's.
+//! discriminator, or a legacy record's name) is the store's and the port table's (port identity, the
+//! import never guesses: `docs/ARCHITECTURE.md` § Decided: native MIDI), never this file's.
 
 use lf_engine::TRACK_COUNT;
 use serde::{Deserialize, Serialize};
@@ -176,8 +176,8 @@ pub fn parse_binding(value: serde_json::Value) -> Result<Binding, String> {
     Ok(b.normalized())
 }
 
-/// The persisted bindings (a JSON array, as `load()` reads localStorage). The plan's decision 8: the
-/// store reports, never silently empties, so a document that is not an array is an error and each
+/// The persisted bindings (a JSON array, as `load()` reads localStorage). As the store does, this
+/// reports, never silently empties, so a document that is not an array is an error and each
 /// unreadable record is reported in [`Parsed::rejected`] beside the ones that read.
 pub fn parse_bindings(json: &str) -> Result<Parsed, String> {
     let list: Vec<serde_json::Value> = serde_json::from_str(json).map_err(|e| e.to_string())?;
@@ -250,7 +250,7 @@ mod tests {
         assert_eq!(parse_bindings(&format!("[{back}]")).unwrap().bindings, [p.bindings[1].clone()]);
     }
 
-    // The plan's decision 8: a record fromStored would drop is reported by its index, beside the records
+    // A record fromStored would drop is reported by its index, beside the records
     // that read; a document that is not an array is an error, never an empty list.
     #[test]
     fn an_unreadable_record_is_reported_by_index_and_an_unreadable_document_is_an_error() {

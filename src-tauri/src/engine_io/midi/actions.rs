@@ -8,9 +8,9 @@
 //!   transport keys follow the take; another named action leaves the selection alone. HALVE is `Halve`.
 //! - **NEXT/PREV TRACK, PLAY ALL, STOP ALL, FADE and the eight toggles are the engine's own actions.**
 //!   A toggle is a looper press itself (it disarms a pending CLEAR), so it goes with no `Press`.
-//! - **GO LIVE and TAP stay the UI's** (decision 11): a `Press` tells the engine a looper press came,
-//!   and the UI runs the action on its event. The stage view and its next look are no looper presses:
-//!   an event only, nothing for the engine, so a pending CLEAR and a lane cue outlive them.
+//! - **GO LIVE and TAP stay the UI's:** a `Press` tells the engine a looper press came, and the UI runs
+//!   the action on its event. The stage view and its next look are no looper presses: an event only,
+//!   nothing for the engine, so a pending CLEAR and a lane cue outlive them.
 //! - **HOLD's press is REC/DUB's `Hold` by its control**, a named lane selected first; its release is
 //!   `Release` by the same control and no looper press (`releaseHold`).
 //! - **Every looper press is also a [`MidiEvent::Pressed`]** (`onPress`: the UI takes its lane cue
@@ -134,8 +134,8 @@ pub(crate) enum UiRoute {
     /// An input command (a looper press, `Press`, `SelectTrack`, a toggle): the one queue, in order
     /// with the pedals, under the same no-device rule.
     Queue,
-    /// A note, a wheel, the note target or a panic: the router's alone (decision 3). Refused here: sent
-    /// past the router it would break note ownership.
+    /// A note, a wheel, the note target or a panic: the router's alone (one ordered path into the
+    /// engine). Refused here: sent past the router it would break note ownership.
     Router,
     /// A setting: straight to `EngineHost::send`, which keeps it (a rebuild would discard it queued).
     Direct,

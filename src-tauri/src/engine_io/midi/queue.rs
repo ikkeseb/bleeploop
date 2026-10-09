@@ -1,4 +1,4 @@
-//! OWNS: the one ordered path from every input to the engine's command ring (plan decision 5): a
+//! OWNS: the one ordered path from every input to the engine's command ring: a
 //! bounded FIFO that the router's batches (notes, wheels, the note target), the MIDI-learn actions and
 //! the UI's input commands (`input_send`'s looper presses, `Press`, the toggles) all join, in the
 //! order they happened, so a pedal and a click keep their order. Its owner drains it into
@@ -8,8 +8,8 @@
 //!
 //! - **One FIFO, head of line.** A command the ring refuses stays at the head, and nothing behind it
 //!   overtakes it: the next drain (after the next input, or the owner's short timer) retries it.
-//!   Nothing is stamped (`TimedCommand::frame` `None`, decision 4), so the ring's admission order is
-//!   also the order the engine applies them in.
+//!   Nothing is stamped (`TimedCommand::frame` `None`), so the ring's admission order is also the
+//!   order the engine applies them in.
 //! - **Drained only while a device runs.** A stopped engine's ring is drained by nothing, so what
 //!   waits for the device waits here, where wheel updates still coalesce and every release has its
 //!   slot; the engine (retained, or rebuilt) gets it all, in order, once a device runs.
@@ -22,24 +22,24 @@
 //! - **A batch goes in whole or not at all** (one input's commands: a re-strike's `NoteOff` and
 //!   `NoteOn`, a switch's releases and the switch); a refused batch leaves nothing queued, and the
 //!   router undoes the attack that batch carried (`Router::attack_refused`).
-//! - **Routing stays chronological** (decision 3). A target change replaces the last one still queued
-//!   only while nothing fresh (an attack, an action, a HOLD press) was admitted after it, so no note is
-//!   moved onto a target it was not played on; otherwise it goes in at the tail. The first fresh entry
-//!   after the last queued change takes the slot the next change will need.
+//! - **Routing stays chronological** (one ordered path into the engine). A target change replaces the
+//!   last one still queued only while nothing fresh (an attack, an action, a HOLD press) was admitted
+//!   after it, so no note is moved onto a target it was not played on; otherwise it goes in at the
+//!   tail. The first fresh entry after the last queued change takes the slot the next change will need.
 //! - **A panic goes in at the tail, and one still queued leaves its place:** silencing later ends
 //!   everything the earlier one would have (a target switch on the way releases what it leaves).
 //! - **Wheel updates coalesce:** a new value replaces the queued value of the same wheel when only wheel
 //!   updates follow it, never across a note, an action or a target change. One that finds no room is
 //!   not queued at its place: its value waits outside the FIFO (the latest wins, counted) and goes in
 //!   at the tail as soon as there is room, so the wheel still ends where the player left it.
-//! - **Fresh one-shots need a running device** (decision 7): while no device runs, or while paused for
-//!   a rebuild, attacks, actions and HOLD presses are refused (the router records no owner); releases,
-//!   the target and the wheels still go in (every release passes, controller state is kept).
-//! - **One engine generation at a time** (decision 6). A batch made for another generation than the one
-//!   the queue feeds is refused whole, and nothing queued for another drains: an old release would end
-//!   the new engine's note and spend its reservation. The batch's target and wheels are the player's
-//!   latest choice (the router made them last), so they wait outside the FIFO like a wheel without
-//!   room: into the next fold, or in at the tail.
+//! - **Fresh one-shots need a running device** (the no-device rule): while no device runs, or while
+//!   paused for a rebuild, attacks, actions and HOLD presses are refused (the router records no owner);
+//!   releases, the target and the wheels still go in (every release passes, controller state is kept).
+//! - **One engine generation at a time** (a rebuild needs no WebView). A batch made for another
+//!   generation than the one the queue feeds is refused whole, and nothing queued for another drains:
+//!   an old release would end the new engine's note and spend its reservation. The batch's target and
+//!   wheels are the player's latest choice (the router made them last), so they wait outside the FIFO
+//!   like a wheel without room: into the next fold, or in at the tail.
 //! - **A rebuild** (`pause`, `rebuild`, then `resume` once the settings replay has run) empties the
 //!   FIFO: the old engine's attacks, actions, HOLD presses and their releases are discarded (the new
 //!   engine has no voice or capture for them to end), and the latest target and wheels, queued or
@@ -632,7 +632,7 @@ mod tests {
         }
     }
 
-    // Plan decision 5: a command the ring refuses stays at the head and nothing behind it overtakes it.
+    // A command the ring refuses stays at the head and nothing behind it overtakes it.
     #[test]
     fn a_refused_head_stays_at_the_head_and_nothing_overtakes_it() {
         let mut q = Queue::default();
@@ -650,7 +650,7 @@ mod tests {
         assert!(q.is_empty());
     }
 
-    // Plan decision 5: a batch (a re-strike's NoteOff and NoteOn) is accepted whole or not at all.
+    // A batch (a re-strike's NoteOff and NoteOn) is accepted whole or not at all.
     #[test]
     fn a_batch_goes_in_whole_or_not_at_all() {
         let mut q = Queue::default();
@@ -666,7 +666,7 @@ mod tests {
         admit(&mut q, &[Command::NoteOff(62)]).unwrap();
     }
 
-    // Plan decision 5: "accepting an attack or a HOLD reserves the slot its release will need".
+    // Accepting an attack or a HOLD reserves the slot its release will need.
     #[test]
     fn an_attack_and_a_hold_press_reserve_their_release() {
         let mut q = Queue::default();
@@ -691,9 +691,9 @@ mod tests {
         assert_eq!((c.attacks_refused, c.holds_refused, c.actions_refused, c.releases_refused), (1, 1, 1, 1));
     }
 
-    // Plan decision 5's "a target change replaces a target change still queued", bounded by decision 3
-    // (review fix): only while nothing fresh was admitted after it, so a note played on one target never
-    // moves onto the next. Either way a switch always goes in.
+    // A target change replaces a target change still queued, bounded by routing staying chronological:
+    // only while nothing fresh was admitted after it, so a note played on one target never moves onto
+    // the next. Either way a switch always goes in.
     #[test]
     fn a_target_change_replaces_one_still_queued_only_while_nothing_fresh_follows() {
         let mut q = Queue::default();
@@ -737,7 +737,7 @@ mod tests {
         assert_eq!(&all[..3], [Command::NoteOn(60, 0.5), Command::NoteOff(60), Command::NoteOn(61, 0.5)]);
     }
 
-    // Plan decision 5: "wheel updates coalesce, never across a note or an action".
+    // Wheel updates coalesce, never across a note or an action.
     #[test]
     fn wheel_updates_coalesce_but_never_across_a_note_or_an_action() {
         let mut q = Queue::default();
@@ -764,8 +764,8 @@ mod tests {
         assert_eq!(q.counters().coalesced, 3);
     }
 
-    // Plan decision 5: with the unreserved room gone a wheel update is refused its place; its value
-    // waits and goes in at the tail once there is room, so the wheel ends where it was left.
+    // With the unreserved room gone a wheel update is refused its place; its value waits and goes in at
+    // the tail once there is room, so the wheel ends where it was left.
     #[test]
     fn a_wheel_update_with_no_room_waits_and_goes_in_when_room_frees() {
         let mut q = Queue::default();
@@ -782,7 +782,7 @@ mod tests {
         assert_eq!(rest.iter().filter(|c| matches!(c, Command::PitchBend(_))).count(), 1);
     }
 
-    // Plan decision 7: with no device running, fresh note-ons, actions and HOLD presses are dropped,
+    // The no-device rule: with no device running, fresh note-ons, actions and HOLD presses are dropped,
     // controller state is kept, and every release passes.
     #[test]
     fn with_no_device_fresh_one_shots_are_refused_and_releases_and_controller_state_pass() {
@@ -802,8 +802,9 @@ mod tests {
         assert_eq!(q.len(), 6);
     }
 
-    // Plan decision 6: pause stops admission of one-shots and draining; a rebuild empties the queue,
-    // discarding the old engine's one-shots and their releases and folding the latest target and wheels.
+    // A rebuild needs no WebView: pause stops admission of one-shots and draining; a rebuild empties
+    // the queue, discarding the old engine's one-shots and their releases and folding the latest target
+    // and wheels.
     #[test]
     fn a_rebuild_discards_the_old_one_shots_and_folds_the_target_and_wheels() {
         let mut q = Queue::new(4);
@@ -832,10 +833,10 @@ mod tests {
         assert_eq!(fill(&mut q), CAPACITY - 3);
     }
 
-    // Review fix (decision 6): a batch made for another generation is refused whole and never reaches
-    // the engine the queue feeds: an old release would end the new engine's note and spend its slot.
-    // Its target and wheels are the player's latest and wait; anything queued for another generation is
-    // dropped at the drain.
+    // One engine generation at a time: a batch made for another generation is refused whole and never
+    // reaches the engine the queue feeds: an old release would end the new engine's note and spend its
+    // slot. Its target and wheels are the player's latest and wait; anything queued for another
+    // generation is dropped at the drain.
     #[test]
     fn a_batch_for_another_generation_never_reaches_the_engine() {
         let mut q = Queue::new(5);
@@ -869,7 +870,7 @@ mod tests {
     }
 }
 
-/// The ordering and overload cases of the plan's step 4, router and queue together, against a model
+/// The ordering and overload cases, router and queue together, against a model
 /// of what the engine does with what it is sent.
 #[cfg(test)]
 mod pipeline {
@@ -972,7 +973,7 @@ mod pipeline {
             let (engine, room) = (&mut self.engine, self.room);
             let mut taken = 0;
             let d = self.queue.drain(&mut |c| {
-                assert_eq!(c.frame, None, "nothing is stamped (decision 4)");
+                assert_eq!(c.frame, None, "nothing is stamped");
                 if taken == room {
                     return Err(());
                 }
@@ -998,7 +999,7 @@ mod pipeline {
         }
     }
 
-    // Step 4: "a target switch then a note-on back to back sounds on the new target", also when both
+    // A target switch then a note-on back to back sounds on the new target, also when both
     // wait in the queue behind a stalled ring.
     #[test]
     fn a_switch_then_a_note_on_back_to_back_sounds_on_the_new_target() {
@@ -1022,7 +1023,7 @@ mod pipeline {
         }
     }
 
-    // Step 4: "mixed MIDI and UI owners on one note": one strike, one release when the last lets go.
+    // Mixed MIDI and UI owners on one note: one strike, one release when the last lets go.
     #[test]
     fn a_midi_and_a_ui_owner_share_one_note() {
         let mut rig = Rig::new();
@@ -1040,8 +1041,8 @@ mod pipeline {
         assert_eq!(rig.held(), [] as [u8; 0]);
     }
 
-    // Step 4: "a dense multi-port CC stream with a release burst against the 64-entry table (a release
-    // the engine did not accept is retried, wheel updates coalesce, never across a note or an action)".
+    // A dense multi-port CC stream with a release burst against the 64-entry table (a release
+    // the engine did not accept is retried, wheel updates coalesce, never across a note or an action).
     #[test]
     fn a_dense_cc_stream_and_a_release_burst_reach_the_engine_in_order_64_a_drain() {
         let mut rig = Rig::new();
@@ -1116,8 +1117,8 @@ mod pipeline {
         assert_eq!(rig.queue.counters().wheels_deferred, 0);
     }
 
-    // Step 4: "a FIFO filled with reserved entries, then a pedal-up, a disconnect's releases and a target
-    // switch": all three go in, and once the ring takes them nothing is left sounding.
+    // A FIFO filled with reserved entries, then a pedal-up, a disconnect's releases and a target
+    // switch: all three go in, and once the ring takes them nothing is left sounding.
     #[test]
     fn with_the_fifo_full_a_pedal_up_a_disconnect_and_a_switch_still_go_in() {
         let mut rig = Rig::new();
@@ -1192,7 +1193,7 @@ mod pipeline {
         assert_eq!(rig.engine.log.iter().filter(|c| matches!(c, Command::NoteOff(_))).count(), usize::from(n));
     }
 
-    // Step 4: "a refused attack, switch or release followed by a re-strike".
+    // A refused attack, switch or release followed by a re-strike.
     #[test]
     fn a_refused_attack_switch_or_release_then_a_restrike_sounds_once_and_ends() {
         let a = midi(1, 0);
@@ -1238,8 +1239,8 @@ mod pipeline {
         assert_eq!(rig.engine.notes(), [(Some(PAD), 62)]);
     }
 
-    // Step 4: "an engine rebuild with notes and HOLD held, a refused attack, a HOLD and a wheel update
-    // queued" (decision 6). The WebView plays no part: nothing here waits on it.
+    // An engine rebuild with notes and HOLD held, a refused attack, a HOLD and a wheel update
+    // queued (a rebuild needs no WebView). The WebView plays no part: nothing here waits on it.
     #[test]
     fn a_rebuild_with_notes_and_hold_held_and_commands_queued() {
         let mut rig = Rig::new();
@@ -1286,7 +1287,7 @@ mod pipeline {
         assert_eq!(rig.queue.reserved(), 4);
     }
 
-    // Step 4: "a retained-engine device gap with a HOLD press and its release" (decision 7): the release
+    // A retained-engine device gap with a HOLD press and its release (the no-device rule): the release
     // of a HOLD pressed before the gap passes and reaches the engine when it runs again; a HOLD pressed
     // in the gap is dropped, as a note-on is; controller state is kept.
     #[test]
@@ -1383,7 +1384,7 @@ mod pipeline {
         x.iter().fold(0.0, |m, v| m.max(v.abs()))
     }
 
-    // Review fix (step 4 on the real engine): bursts of 120 attacks and 120 releases, each more than the
+    // On the real engine: bursts of 120 attacks and 120 releases, each more than the
     // engine's 64-entry table takes a block, lose no release; and the pitch wheel set on Lead reaches Pad
     // through the switch alone (`Instruments::select` hands it over; the router sends none).
     #[test]

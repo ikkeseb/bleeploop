@@ -1,11 +1,13 @@
-//! The toggled settings (CLICK, END STOP, FIXED, RETAKE, AUTO REC, the three input sends) as engine actions
-//! (`Action::Toggle`, the native MIDI plan's decision 11): the engine switches a setting from the value it
-//! has when the press applies, so presses from two producers (a pedal, a click on screen) each switch it
-//! once; FIXED, RETAKE and AUTO REC are refused where `src/ui/looper/gates.ts` refuses them, with nothing
-//! switched; a toggle is a looper press (it disarms a pending pedal CLEAR, refused or not); an input
-//! send's toggle never waits behind a looper command held for a block job, as its setter did, while the
-//! others wait in order, as theirs did; and every applied command of a toggled setting is answered once,
-//! `Event::Toggled` at the value it left, whatever the event ring dropped. A new guard, not a port: the web looper flipped its own copy of each setting.
+//! The toggled settings (CLICK, END STOP, FIXED, RETAKE, AUTO REC, the three input sends) as engine
+//! actions (`Action::Toggle`; `docs/ARCHITECTURE.md` § Decided: native MIDI, every toggle has one
+//! owner): the engine switches a setting from the value it has when the press applies, so presses from
+//! two producers (a pedal, a click on screen) each switch it once; FIXED, RETAKE and AUTO REC are
+//! refused where `src/ui/looper/gates.ts` refuses them, with nothing switched; a toggle is a looper
+//! press (it disarms a pending pedal CLEAR, refused or not); an input send's toggle never waits behind
+//! a looper command held for a block job, as its setter did, while the others wait in order, as theirs
+//! did; and every applied command of a toggled setting is answered once, `Event::Toggled` at the value
+//! it left, whatever the event ring dropped. A new guard, not a port: the web looper flipped its own
+//! copy of each setting.
 
 mod common;
 

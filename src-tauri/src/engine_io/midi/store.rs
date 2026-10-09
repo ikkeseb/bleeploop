@@ -1,6 +1,7 @@
-//! OWNS: the player's MIDI-learn bindings on disk, `midi-bindings.json` beside `plugin-folders.json`, and
-//! the one-time import of the WebView's `localStorage` list (`lf.midiLearn`, `src/app/midi-actions.ts`):
-//! the plan's decisions 8 and 9. Native MIDI's host keeps one (`super::Core`), which
+//! OWNS: the player's MIDI-learn bindings on disk, `midi-bindings.json` beside `plugin-folders.json`,
+//! and the one-time import of the WebView's `localStorage` list (`lf.midiLearn`,
+//! `src/app/midi-actions.ts`): bindings live native and the import never guesses
+//! (`docs/ARCHITECTURE.md` § Decided: native MIDI). Native MIDI's host keeps one (`super::Core`), which
 //! decides which records the learn model runs: the port resolution is its, never this file's.
 //!
 //! This file is USER DATA, as the folder list is (`host/folders.rs`): only a MISSING file is an empty
@@ -26,7 +27,8 @@
 //!
 //! # The legacy import
 //!
-//! A web record's port id (`input-<N>`) is a per-run ordinal (the plan's § Step 0 findings), so a legacy
+//! A web record's port id (`input-<N>`) is a per-run ordinal (Chromium's WinMM backend numbers inputs
+//! in the order a run first saw them, `midi_manager_win.cc`, and a restart renumbers), so a legacy
 //! record keeps it as its `port_id`, marked `ordinal`, and its port NAME is its identity: two records on
 //! `input-1` with different names are two controllers. Whether a record activates is decided at
 //! resolution by the name rule, elsewhere; resolution persists the port it chose with

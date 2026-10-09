@@ -50,7 +50,7 @@ tauri-plugin-updater = { version = "~2.12", default-features = false, features =
 # device side and plugin host (clack/cpal/rubato/rtrb/walkdir) live here too — they're cross-platform
 # crates but we only ever compile + use them on Windows, alongside the WebView2 COM bindings.
 [target.'cfg(windows)'.dependencies]
-# auto-grant WebView2 permissions (Web MIDI) — already transitive via tauri; pinned to the resolved
+# deny the WebView2 Web MIDI permission (`lib.rs`) — already transitive via tauri; pinned to the resolved
 # versions so the ICoreWebView2 types unify with Tauri's.
 webview2-com = "0.38.2"
 # Win32_System_Com + Win32_Media_Audio: the DEV engine and share probes' raw WASAPI endpoint queries;

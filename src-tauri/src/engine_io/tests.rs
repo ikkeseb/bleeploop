@@ -2300,9 +2300,10 @@ fn d21_a_setting_sent_just_after_a_clear_is_what_the_lane_plays_and_exports() {
     assert!((exported / heard - 1.0).abs() < 0.1, "the export renders the lane at the level it plays: heard {heard}, exported {exported}");
 }
 
-/// A toggle (`Action::Toggle`, the native MIDI plan's decision 11) reaches the settings memory as the
-/// engine applied it: presses from alternating producers (a pedal, the UI, the pedal) each switch it
-/// once, and the memory follows each `Toggled`; a refused one changes neither the engine nor the memory.
+/// A toggle (`Action::Toggle`; `docs/ARCHITECTURE.md` § Decided: native MIDI, every toggle has one
+/// owner) reaches the settings memory as the engine applied it: presses from alternating producers (a
+/// pedal, the UI, the pedal) each switch it once, and the memory follows each `Toggled`; a refused one
+/// changes neither the engine nor the memory.
 #[test]
 fn a_toggle_is_kept_as_applied_each_press_switches_it_once_and_a_refusal_keeps_nothing() {
     use lf_engine::{Action, Refusal, Toggle};

@@ -14,10 +14,11 @@ import { nativePressed, runNativeAction, type ActionId } from './actions';
  * sent their `Press`), and a refused HOLD press's cue on the selected lane.
  *
  * At every start the bindings the web build kept (`lf.midiLearn`) go to native MIDI, which imports them
- * once and answers `already` after (the plan's decision 9); the key stays until a later release removes
- * it, once the native store has written them. A launch that cannot read the key hands nothing over (an
- * empty list would mark the import done for good), and the import's one answer is told: what waits for a
- * port picked in Audio Settings, and what could not be read.
+ * once and answers `already` after (`docs/ARCHITECTURE.md` § Decided: native MIDI, the import never
+ * guesses); the key stays until a later release removes it, once the native store has written them. A
+ * launch that cannot read the key hands nothing over (an empty list would mark the import done for
+ * good), and the import's one answer is told: what waits for a port picked in Audio Settings, and what
+ * could not be read.
  */
 
 // The two action tables are one: native MIDI's ids are `actions.ts`'s (a drift fails the typecheck here).

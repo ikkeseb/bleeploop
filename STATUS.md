@@ -28,9 +28,11 @@ list from § Not heard yet: at most five, and the docs guard counts them.
    click; the master fader scales the wet, not the recorded level. Then the 5 ms edges (D23, landed
    unheard): press GO LIVE once mid-note, punch a DUB in and out over a held note, and UNDO, STOP and
    PLAY a lane mid-note: is every click gone, and does an attack right on the punch-in still sound whole?
-2. **A MIDI footswitch, if one is plugged.** Learn REC/DUB onto it (Audio Settings → MIDI learn, one
-   tap) and take the jam's records with the foot: one press, one action? Still learned after a
-   restart? Then switch it to HOLD and hold it through one overdub.
+2. **A MIDI footswitch, if one is plugged** (MIDI now runs natively, outside the WebView). Does the
+   pedal learned before the update fire with no relearn? One listed as "not connected" in Audio
+   Settings → MIDI learn: ASSIGN it to the pedal. Learn REC/DUB onto it (one tap) and take the jam's
+   records with the foot: one press, one action? Still learned after a restart? Then switch it to
+   HOLD and hold it through one overdub.
 3. **A later take from stopped loops.** Stop every loop (■ ALL), then REC on an empty track: one bar of
    count-in clicks (4-3-2-1), then every track starts from the top on the downbeat after it and the
    take records from there. Does it feel like the first take's count-in, and do the old loops and the
@@ -102,8 +104,12 @@ it.
   26-minute `native:engine --share` soak; the mirror's buffer went from 20 to 40 ms after it ran
   short in bursts about every 10.5 minutes there).
 - The six synths and the lane FX by ear.
-- A MIDI controller: unplugged mid-note gives a toast and releases the note; mod-wheel vibrato,
-  pitch-bend and CC64 sustain feel.
+- Native MIDI, a controller and a footswitch through a jam: mod-wheel vibrato, pitch-bend and CC64
+  sustain on a built-in synth; unplugged mid-note, a toast and the note released; 20 quick replugs
+  (under a second each) with notes held: each releases them, and the bindings fire after each.
+- The MIDI bindings across the update, a restart and a replug: the pedals learned before the update
+  fire with no relearn (ASSIGN in the learn row fixes one listed as "not connected"), and they still
+  fire after the app restarts and after the controller moves to another USB socket.
 - RETAKE and AUTO REC from a learned pedal: one press, one toggle; mid-take (and AUTO REC once a loop
   locks the tempo) the press is refused with its reason on the lane, as the greyed button is.
 

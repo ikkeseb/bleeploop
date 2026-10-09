@@ -4,7 +4,8 @@
 //! the input ports, MIDI learn and its stored bindings, the one note router for every note source and
 //! the one ordered queue into the engine ([`Core`]), what the host offers the UI ([`MidiHost`]) and
 //! what it tells it ([`MidiEvent`]). This doc is the module's briefing; the decisions it carries out are
-//! `docs/plans/native-midi.md`'s (§ Decided).
+//! `docs/ARCHITECTURE.md` § Decided: native MIDI's, which comments here cite by their bold titles
+//! (the open threads, and what only a device can settle: `src-tauri/AGENTS.md` § Open threads).
 //!
 //! # Module map
 //!
@@ -16,8 +17,8 @@
 //! | `learn` | learn capture, matching, consume-first, momentary vs latching, HOLD's control numbers, the release waits | `src/app/midi-actions.ts` |
 //! | `actions` | what a binding runs, as engine commands and UI events; which of the UI's commands join the queue | `src/app/actions.ts` |
 //! | `router` | note ownership for MIDI and UI owners, sustain, the wheels, the note target, the held-note set | `src/ui/state/input-router.ts`, `instrument.ts` `routeEngine` |
-//! | `queue` | the one bounded FIFO into the engine's ring: reserved releases, whole batches, coalesced wheels, no-device admission, the engine generation | plan decisions 4 to 7 |
-//! | `store` | `midi-bindings.json` and the one-time import of the web's list | plan decisions 8, 9 |
+//! | `queue` | the one bounded FIFO into the engine's ring: reserved releases, whole batches, coalesced wheels, no-device admission, the engine generation | (new: nothing is stamped, the no-device rule, a rebuild needs no WebView) |
+//! | `store` | `midi-bindings.json` and the one-time import of the web's list | (new: bindings live native, the import never guesses) |
 //! | `ports` | midir connections, port identities, which port a stored binding answers to, the port thread | `midi.ts` `attachInputs` |
 //! | `liveness` | interface arrival and removal notifications, connection generations, the arrival retry | (Web MIDI's `statechange`) |
 //!
@@ -36,7 +37,7 @@
 //!   the UI's looper presses, `Press`, `SelectTrack` and toggles ([`MidiHost::ui_commands`]). A setting
 //!   goes straight to `EngineHost::send`; a note, a wheel, the note target or a panic from the UI goes
 //!   through the router's own calls, never past it (a UI batch that holds one is refused whole, before
-//!   any of it runs). Nothing is stamped (decision 4).
+//!   any of it runs). Nothing is stamped.
 //! - **While no device runs** (`EngineSide::running`), fresh one-shots are refused: the router records
 //!   no owner for a refused attack, learn no HOLD for a refused press. Releases, pedals, wheels and the
 //!   target wait in the queue until a device runs; the port thread looks again every `IDLE_RETRY`, and
@@ -49,12 +50,12 @@
 //!   UI sink (its caller holds every slot port): the port thread, woken, does both afterwards.
 //! - **Which stored bindings are live** is decided on one port snapshot (`ports::resolve`) at every
 //!   change of the port list or the bindings: exact ids first, by name only where it is unambiguous,
-//!   every ordinal (legacy) record of one name counting as one identity (decision 9). A move is saved
-//!   (`Store::reanchor`) before learn is handed anything; learn runs only records that are neither
-//!   blocked nor ordinal and whose id a present port has. An edit of learn's own (a learn, a pedal read
-//!   as momentary) goes back to the store (`Store::replace`), which keeps the records learn does not
-//!   run; the player's edits go to the store by listed index and reach learn through the same hand-off,
-//!   which releases a HOLD the edit ends.
+//!   every ordinal (legacy) record of one name counting as one identity (the import never guesses). A
+//!   move is saved (`Store::reanchor`) before learn is handed anything; learn runs only records that
+//!   are neither blocked nor ordinal and whose id a present port has. An edit of learn's own (a learn,
+//!   a pedal read as momentary) goes back to the store (`Store::replace`), which keeps the records
+//!   learn does not run; the player's edits go to the store by listed index and reach learn through the
+//!   same hand-off, which releases a HOLD the edit ends.
 //! - **An edit by index names the list it was made against:** the `bindings` event carries the store's
 //!   revision, and an edit made against another one is refused (nothing changes; the UI already has, or
 //!   is about to get, the list as it is), since its index may name another binding by now.
@@ -131,7 +132,7 @@ const WRITE_RETRY_FIRST: Duration = Duration::from_secs(1);
 const WRITE_RETRY_MAX: Duration = Duration::from_secs(60);
 /// The stored id an ordinal (legacy) record resolves under: no port's id, one for every such record,
 /// and of the legacy form, so its port name alone is its identity and every present port with that
-/// name counts (decision 9, `ports::resolve`).
+/// name counts (the import never guesses, `ports::resolve`).
 const ORDINAL: &str = "input-*";
 /// Why the bindings are not written without the app's data folder ([`StoreProblem::ReadOnly`]).
 const NO_FOLDER: &str = "no folder to keep MIDI bindings in";
@@ -215,7 +216,8 @@ pub struct LearnPick {
     pub target: Target,
 }
 
-/// An action a binding fired that the UI runs (decision 11), by its `actions.ts` id.
+/// An action a binding fired that the UI runs (GO LIVE, TAP, the stage view: `actions`), by its
+/// `actions.ts` id.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum UiAction {
@@ -276,7 +278,7 @@ pub enum MidiEvent {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Dropped {
-    /// No device runs: a fresh note-on or press would have fired at the next open (decision 7).
+    /// No device runs: a fresh note-on or press would have fired at the next open (the no-device rule).
     NoDevice,
     /// The engine is being rebuilt (a device change or a recovery).
     Rebuilding,
@@ -334,7 +336,7 @@ impl Unrun {
 /// The queue's refused batches, by why (`queue::Refused`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Refusals {
-    /// Fresh input while no device ran (decision 7): by design, counted only.
+    /// Fresh input while no device ran (the no-device rule): by design, counted only.
     pub no_device: u64,
     /// Fresh input during an engine rebuild: counted only.
     pub paused: u64,
@@ -1074,7 +1076,8 @@ impl MidiHost {
     /// Load the bindings from `data_dir` (`None`: they live in memory only), register the rebuild
     /// handshake on `engine` and start the port thread: every present input port opens now, and ports
     /// that come and go are followed by Windows' interface notifications, with a poll every second
-    /// (`ports::POLL`) as the backstop. The bindings load before any input can run them (decision 9).
+    /// (`ports::POLL`) as the backstop. The bindings load before any input can run them (the import
+    /// never guesses).
     pub fn start(engine: Arc<dyn EngineSide>, data_dir: Option<PathBuf>) -> MidiHost {
         let (store, problem) = open_store(data_dir.as_deref());
         let (wake, woken) = mpsc::channel();
@@ -1607,8 +1610,8 @@ mod tests {
         assert_eq!(r.take(), [on(67, 100)], "port a's unlearned CC64 still sustains");
     }
 
-    // Plan decision 1: one router for every note source. A pointer, a key and a port on one note: one
-    // strike, one release when the last lets go; the held set reaches the UI once per change.
+    // One note router for every source: a pointer, a key and a port on one note: one strike, one
+    // release when the last lets go; the held set reaches the UI once per change.
     #[test]
     fn ui_and_midi_owners_share_one_note() {
         let r = Rig::new();
@@ -1626,7 +1629,7 @@ mod tests {
         assert_eq!(held, [vec![60], vec![]]);
     }
 
-    // Step 4: "a target switch then a note-on back to back sounds on the new target", also when both
+    // A target switch then a note-on back to back sounds on the new target, also when both
     // wait behind a ring that refused, which the port thread retries soon.
     #[test]
     fn a_target_switch_then_a_note_on_land_in_that_order() {
@@ -1646,10 +1649,10 @@ mod tests {
         assert!(r.host.diag().failed_sends > 0);
     }
 
-    // Plan decision 5: the UI's input commands join the one queue, so a pedal and a click keep their
-    // order and fall under the same no-device rule (the UI hears why its press did nothing); a setting
-    // goes straight to the engine; a note goes through the router only, and a batch holding one is
-    // refused before any of it runs.
+    // One ordered path into the engine: the UI's input commands join the one queue, so a pedal and a
+    // click keep their order and fall under the same no-device rule (the UI hears why its press did
+    // nothing); a setting goes straight to the engine; a note goes through the router only, and a batch
+    // holding one is refused before any of it runs.
     #[test]
     fn the_uis_commands_join_the_queue_and_its_settings_go_straight_to_the_engine() {
         let mut r = Rig::new();
@@ -1930,7 +1933,7 @@ mod tests {
         assert_eq!(r.take(), [Command::NoteOff(60)]);
     }
 
-    // Step 4: "a retained-engine device gap with a HOLD press and its release" (decision 7). The release
+    // A retained-engine device gap with a HOLD press and its release (the no-device rule). The release
     // of a HOLD pressed before the gap waits and reaches the engine once it runs again; a HOLD pressed in
     // the gap is dropped and holds nothing, so its release runs nothing and its number is free.
     #[test]
@@ -2176,7 +2179,7 @@ mod tests {
         assert_eq!(r.take(), [Command::Action(Action::Release(0))]);
     }
 
-    // Review fix (decision 9): two present controllers named Pedal, one legacy binding assigned to the
+    // The import never guesses: two present controllers named Pedal, one legacy binding assigned to the
     // first. The other stays unresolved: two present ports carry its name, whichever is claimed.
     #[test]
     fn a_legacy_record_never_follows_a_name_two_present_ports_carry() {
@@ -2280,10 +2283,10 @@ mod tests {
         assert_eq!(*calls.lock().unwrap(), [true], "the port thread hands it over afterwards");
     }
 
-    // Step 4 and decision 6: "an engine rebuild with notes and HOLD held, a refused attack, a HOLD and a
-    // wheel update queued, and the WebView stalled" (nothing here calls the UI's API). The new engine
-    // gets the target and the wheel once, through the settings replay; no stale one-shot reaches it; a
-    // later release is harmless and a fresh press attacks again.
+    // A rebuild needs no WebView: an engine rebuild with notes and HOLD held, a refused attack, a HOLD
+    // and a wheel update queued, and the WebView stalled (nothing here calls the UI's API). The new
+    // engine gets the target and the wheel once, through the settings replay; no stale one-shot reaches
+    // it; a later release is harmless and a fresh press attacks again.
     #[test]
     fn an_engine_rebuild_needs_no_webview() {
         let io = Arc::new(super::super::Core::new());

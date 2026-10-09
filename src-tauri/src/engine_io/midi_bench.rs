@@ -1,5 +1,5 @@
 //! OWNS (DEV builds only): the MIDI latency benchmark and the `settings`/`ends` lock waits, the
-//! measurement of `docs/plans/native-midi.md` § Measurement. How to run it and what each number means:
+//! measurement that held the switch to native MIDI. How to run it and what each number means:
 //! `docs/VERIFY.md` § MIDI latency benchmark. Nothing here runs unless an environment variable read at
 //! startup asks (`LF_MIDI_BENCH`, `LF_LOCK_WAITS`: [`start_from_env`]); a release build compiles none
 //! of it (`mod.rs` declares the module under `debug_assertions`).

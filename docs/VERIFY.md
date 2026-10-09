@@ -220,9 +220,13 @@ blocks until the verdict, so an agent harness should run it in the background.
 
 ## MIDI latency benchmark (DEV, PC only)
 
-The measurement of `docs/plans/native-midi.md` § Measurement, in the DEV app
-(`src-tauri/src/engine_io/midi_bench.rs`). It needs a loopback MIDI port that WinMM lists (loopMIDI,
-or a Windows MIDI Services loopback); without one it waits 60 s and logs the output ports it sees.
+How long a MIDI note takes from the sender to the engine applying it, also while the UI stalls, in
+the DEV app (`src-tauri/src/engine_io/midi_bench.rs`). A change to the MIDI input path runs it before
+and after; it passes when no note is lost or stuck and the p99 from sender to applied is no worse than
+before, inside the stalls too. Every number is frame-based, so none sees the callback's wake jitter:
+the onsets of notes recorded back through the loopback cable would (not built). It needs a loopback
+MIDI port that WinMM lists (loopMIDI; Windows MIDI Services' own loopbacks expose no WinMM port, and
+making one needs its SDK runtime); without one it waits 60 s and logs the output ports it sees.
 Baseline (2026-10-09, loopMIDI, Focusrite ASIO 128 at 44.1 kHz, the load set up by `bench-load`, a
 note every 25 ms, a 250 ms UI stall every 3 s, 120 s warm-up, two runs of 2500 notes a side): no note
 lost, stuck or duplicated, no xrun or discontinuity in any run. Web MIDI (f2b632c4): sender->applied
@@ -236,7 +240,7 @@ node scripts/native-probe.mjs bench-load --asio
 ```
 
 `bench-load` sets up the jam load unattended and holds it until the benchmark ends (§ Native / Tauri
-verification); with `pnpm dev:asio` instead, set it up by hand (the plan's: an amp-sim or Pro-Q live
+verification); with `pnpm dev:asio` instead, set it up by hand (an amp-sim or Pro-Q live
 in slot 1, three lanes looping, the stage view open). No other controller, and no on-screen or PC keyboard, may play during a run: a note of
 the benchmark's played by hand can stand in for a lost one. The run waits for the device, warms up, sends `count` note-ons, writes
 `logs/midi-bench-<label>-<unix s>.json`, appends its summary line to `logs/midi-bench.log` and logs it
@@ -269,4 +273,5 @@ sooner than twice `timeout_ms` is refused (logged).
   numbers incomplete. Taking the engine's note record can cost one `lock_misses` in the warm-up.
 - **Lock waits** (`settings` and `ends`, by taker: `send` the input path, `feed`, `other`): count,
   total, max and a histogram, in the JSON and the log. `$env:LF_LOCK_WAITS = "60"` alone logs them every
-  60 s (`[lock-waits]`, totals since the start), for the plan's 10 minutes under the jam load.
+  60 s (`[lock-waits]`, totals since the start): 10 minutes under the jam load is the check
+  `src-tauri/AGENTS.md` § Open threads owes.

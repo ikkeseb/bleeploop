@@ -20,6 +20,11 @@ is a one-line adapter). UI-only edits are safe while the dev app runs,
   53-tab-stop tab trap); the computer-keyboard mapping is the pointer-free *fallback* play path
   (hiding the keyboard pauses it). Not built: free-form panel drag/move + inline VSTs that FILL a
   panel; `SplitStack` + `layout-store` is the seam.
+- **Notes are native MIDI's:** `keyboard/Keyboard.tsx` keeps the gestures (pointer capture, key repeat,
+  the note picked at press time, blur and unmount cleanup) and hands each hold and release to
+  `platform.input` under its physical owner (`pointer:<id>`, `key:<code>`); ownership, sustain, the
+  wheels and the note target are the native router's (`docs/ARCHITECTURE.md` § Decided: native MIDI).
+  A key lights from its own press and from `state/midi.ts`'s held notes.
 - **Invariant 6 lives here:** the 60 fps canvas draw loop reads a plain mutable object, never a
   signal (`looper/waveform.ts` reads non-reactive looper getters). One exception: the bar grid reads
   the BPM and sample-rate signals only when the master loop's length changes, and caches the bar

@@ -1,6 +1,6 @@
 /**
- * DEV probe: the MIDI latency benchmark's jam load, set up unattended (`docs/plans/native-midi.md`
- * § Measurement; the benchmark: `src-tauri/src/engine_io/midi_bench.rs`). `node scripts/native-probe.mjs
+ * DEV probe: the MIDI latency benchmark's jam load, set up unattended (`docs/VERIFY.md` § MIDI latency
+ * benchmark; the benchmark: `src-tauri/src/engine_io/midi_bench.rs`). `node scripts/native-probe.mjs
  * bench-load --asio` with `LF_MIDI_BENCH` set launches the ASIO dev app in engine-smoke's profile, and
  * this page sets the load, then holds it while the benchmark sends:
  *

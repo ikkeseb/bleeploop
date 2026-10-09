@@ -1,6 +1,6 @@
 //! OWNS (DEV builds only): the applied-note record: each `NoteOn` and `NoteOff` the engine applies, with
 //! the frame it applied it on, for a reader off the audio thread. The MIDI latency benchmark reads it
-//! (`src-tauri/src/engine_io/midi_bench.rs`; the plan: `docs/plans/native-midi.md` § Measurement).
+//! (`src-tauri/src/engine_io/midi_bench.rs`; how to run it: `docs/VERIFY.md` § MIDI latency benchmark).
 //!
 //! A preallocated ring (invariant 5: recording never allocates, locks or logs): the engine holds the
 //! producer, [`crate::Engine::take_applied_notes`] hands the reader out once. Nobody reads it unless a

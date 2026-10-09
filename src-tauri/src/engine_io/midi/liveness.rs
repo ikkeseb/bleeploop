@@ -1,7 +1,7 @@
-//! OWNS: port liveness (`docs/plans/native-midi.md` decision 10): the Windows notifications that a MIDI
-//! interface arrived or went away, and what the port thread does about them. midir has no liveness
-//! signal on WinMM, so without these a port unplugged and replugged inside one poll keeps its dead
-//! connection.
+//! OWNS: port liveness (`docs/ARCHITECTURE.md` § Decided: native MIDI): the Windows notifications that
+//! a MIDI interface arrived or went away, and what the port thread does about them. midir has no
+//! liveness signal on WinMM, so without these a port unplugged and replugged inside one poll keeps its
+//! dead connection.
 //!
 //! - **Registered before the first enumeration** (`CM_Register_Notification`, no window pump), on both
 //!   classes a WinMM port may arrive on under `wdmaud2`: [`DEVINTERFACE_MIDI_INPUT`] and the MIDI 2.0
@@ -16,7 +16,7 @@
 //!   enumeration confirms and retrying a failed open. Duplicate notifications are harmless. The 1 s
 //!   poll (`ports::POLL`) stays as the backstop.
 //!
-//! Unknown, and untested on hardware (this machine has no MIDI input port, step 0): which class a
+//! Unknown, and untested on hardware (no hardware MIDI input has reached it yet): which class a
 //! controller's arrival comes on, and whether the notification's path equals midir's id (the WinMM
 //! device-interface path; compared ignoring ASCII case). **Next check, with a real controller** in the
 //! running app: plug, unplug and replug it, and read the `[midi]` lines. `interface arrived/removed:
@@ -27,7 +27,7 @@
 //! removal with another path than the open port's means the paths differ: matching needs the device
 //! instance (`CM_Get_Device_Interface_Property`, `DEVPKEY_Device_InstanceId`) on both sides. Also log
 //! the id across an app restart and a replug into another USB socket: whether it is stable decides
-//! how far a binding's stored id can be trusted (decision 8).
+//! how far a binding's stored id can be trusted (port identity).
 
 use std::ffi::c_void;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -47,7 +47,7 @@ use windows::Win32::Media::Audio::DEVINTERFACE_MIDI_INPUT;
 use super::ports::POLL;
 
 /// The Windows MIDI Services endpoint interface class: the service's own endpoints came up on it with no
-/// WinMM port (step 0, observed 2026-10-09). Not in the windows crate.
+/// WinMM port (observed 2026-10-09). Not in the windows crate.
 pub(crate) const MIDI_ENDPOINT_CLASS: GUID = GUID::from_u128(0xe7cce071_3c03_423f_88d3_f1045d02552b);
 
 /// What wakes the port thread.

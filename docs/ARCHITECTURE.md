@@ -10,11 +10,11 @@ WebView2 frontend for the UI.
 Every sample is the engine's: the click, the looper, the synths, the FX, the mixer, the limiter and
 the two plugin slots run in ONE device callback, clocked by the audio interface
 (`src-tauri/crates/lf-engine`, pure; its device side `src-tauri/src/engine_io`). The WebView is the
-UI: it sends commands (in its one ordered `input_send` path, below) and reads a feed (~60 frames/s: transport,
+UI: it sends commands (in its one ordered `input_send` path, § Decided: native MIDI) and reads a feed (~60 frames/s: transport,
 lanes, the grid anchor, the meter, waveform peaks; never PCM). The wire is
 `src-tauri/src/engine_io/wire.rs`, mirrored in `src/platform/engine-wire.ts`. Settings and rig
 recall stay in the WebView's storage and are mirrored to native at boot (MIDI-learn bindings are
-native's, below); the engine host replays every remembered setting into each new engine
+native's); the engine host replays every remembered setting into each new engine
 (`engine_io/settings.rs`).
 
 `src/platform/` is the **only** place allowed to import `@tauri-apps/*` (enforced by
@@ -30,52 +30,9 @@ its interfaces, never the reverse (`src/platform/host.ts`):
 | `LogFolder` | none | the release log's folder (Help's diagnostics) |
 | `AppUpdates` | none, or a probe's script | the updater (`src-tauri/src/update.rs`), release builds only |
 
-**MIDI is native end to end** (D22; briefing: `src-tauri/src/engine_io/midi/mod.rs`): ports, parse,
-learn, the bindings, the routing and the note target. The WebView keeps the learn row, the device list
-and the toasts, driven by native events on their own channel (never the feed) and the `MidiHost` calls.
-One MIDI path per run, no fallback, since a WinMM input port may be exclusive: the WebView's Web MIDI
-permission is denied (`src-tauri/src/lib.rs`) and `verify/guards/web-midi.mjs` keeps the API out of
-`src/`. Decided:
-
-- **One note router for every source** (`engine_io/midi/router.rs`): MIDI ports and the UI's pointer
-  and computer-keyboard owners share note ownership, sustain, the wheels and the note target. The UI
-  forwards gestures (`InputHost`) and keeps only a highlight overlay of its own holds.
-- **One ordered path from the UI** (`src/platform/index.ts`'s outbox, `engine_io/midi_mode.rs`): its
-  engine commands and its note sources' events leave in one `input_send` batch at a time, the next
-  once that one settled, since Tauri's IPC does not keep two calls in order. No native call stalls the
-  UI: one unanswered for 2 s is given up (never sent twice, as it may still run), and while one is out
-  the waiting batch holds at most 256 items (past them presses are dropped, never a release). A batch
-  native code refused ran nothing and is sent once more; one lost twice is told, and a blur follows it
-  when it held a release (a blur lost too rides at the head of the next batch). What native MIDI dropped
-  of a batch (a press with no device running) is its answer, told to the player once until a press goes
-  through.
-- **A page is its subscription:** `midi_subscribe`, first thing in the page's boot, names the page's age
-  (`performance.timeOrigin`) and answers the input epoch every batch and learn call carries (the outbox
-  sends nothing before it). Natively, in one step and only for a page no older than every page before
-  it, it releases the older pages' holds, cancels a pending learn and replaces the event channel; an
-  older page's late subscribe changes nothing. An input event or a learn call of any other epoch is
-  refused. The learn UI's calls go one at a time, in call order, and an edit by list index names the
-  store revision its list came with: one made against an older list is refused.
-- **One ordered path into the engine** (`engine_io/midi/queue.rs`): the router's output, learned
-  actions and the UI's input commands (looper presses, `Press`, toggles) join one bounded FIFO into
-  `EngineHost::send`, so a pedal and a click keep their order and the settings memory sees every target
-  change. No second command ring.
-- **Nothing is stamped:** notes, wheels and bound actions land at the next block start, as a UI gesture
-  does, so the ring's admission order is the order the engine applies them in. Stamping comes back
-  only with one execution-order contract for every kind of input, and only if a measurement shows it
-  pays.
-- **One no-device rule for every source:** while no device runs, or during an engine rebuild, fresh
-  note-ons, actions and HOLD presses are refused and every release passes; controller state is kept.
-  A rebuild needs no WebView (`EngineHost::set_rebuild_hook`).
-- **Bindings live native,** in midi-bindings.json beside plugin-folders.json
-  (`engine_io/midi/store.rs`): an unreadable file is reported, never overwritten. The one-time import
-  of the web build's list never guesses: a binding whose port identity is ambiguous stays inactive and
-  listed until a matching port appears alone or the player assigns it (`engine_io/midi/ports.rs`), and
-  its control, on a port of its name, runs nothing meanwhile. Without the app's data folder the
-  bindings live in memory, and the UI says so.
-- **Every toggle has one owner, the engine:** CLICK, END STOP, FIXED, RETAKE, AUTO REC and the input
-  sends are engine actions every producer sends as intent (the lf-engine briefing), so a pedal and a
-  click never cancel each other.
+**MIDI is native end to end**: ports, learn, the bindings and the note routing for every note
+source run in Rust beside the engine; the WebView shows them and forwards its gestures (§ Decided:
+native MIDI).
 
 The browser build (`pnpm dev`) renders the whole UI and is silent: no engine is behind it, and nothing
 in the app builds an AudioContext. The DEV engine fake (`window.__lfEngineFake`) is the seam every
@@ -258,6 +215,83 @@ both, before and after the change:
 - **L2, a physical loopback measurement:** play the click out, capture it through the working
   guitar input, cross-correlate scheduled against heard: the premise spike, and `pnpm
   native:engine-loopback` for a take in the running app (baseline: `docs/VERIFY.md`).
+
+## Decided: native MIDI (D22)
+
+Replaced Web MIDI in the WebView. MIDI was the one timing-critical input that crossed the WebView's
+JavaScript: a message waited for the UI thread, which also draws the stage view and the waveforms,
+then for an IPC call. Measured before and after with one loopback sender under the jam load, and held
+to that measurement since: `docs/VERIFY.md` § MIDI latency benchmark.
+
+Native owns MIDI end to end (briefing: `src-tauri/src/engine_io/midi/mod.rs`): ports, parse, learn,
+the bindings, the routing and the note target. The WebView keeps the learn row, the device list and
+the toasts, driven by native events on their own channel (never the feed, which is held while
+the folder dialog is open) and the `MidiHost` calls. One MIDI path per run, no fallback, since a WinMM
+input port may be exclusive: the WebView's Web MIDI permission is denied (`src-tauri/src/lib.rs`) and
+`verify/guards/web-midi.mjs` keeps the API out of `src/`. Code cites these rules by their bold titles:
+
+- **One note router for every source** (`engine_io/midi/router.rs`): MIDI ports and the UI's pointer
+  and computer-keyboard owners share note ownership, sustain, the wheels and the note target. The UI
+  forwards gestures (`InputHost`) and keeps only a highlight overlay of its own holds; MIDI holds reach
+  it through the router's held-note set (physically held, not sustained). A slot pick is a router
+  command: what sounds is released, then the target switches. While a plugin swap unloads the old
+  plugin, notes go nowhere (not to the slot's built-in synth).
+- **One ordered path from the UI** (`src/platform/index.ts`'s outbox, `engine_io/midi_mode.rs`): its
+  engine commands and its note sources' events leave in one `input_send` batch at a time, the next
+  once that one settled, since Tauri's IPC does not keep two calls in order (a round trip per batch,
+  unmeasured; MIDI ports do not take this path). No native call stalls the UI: one unanswered for 2 s
+  is given up (never sent twice, as it may still run), and while one is out the waiting batch holds at
+  most 256 items (past them presses are dropped, never a release). A batch native code refused ran
+  nothing and is sent once more; one lost twice is told, and a blur follows it when it held a release
+  (a blur lost too rides at the head of the next batch). What native MIDI dropped of a batch (a press
+  with no device running) is its answer, told to the player once until a press goes through.
+- **A page is its subscription:** `midi_subscribe`, first thing in the page's boot, names the page's age
+  (`performance.timeOrigin`) and answers the input epoch every batch and learn call carries (the outbox
+  sends nothing before it). Natively, in one step and only for a page no older than every page before
+  it, it releases the older pages' holds, cancels a pending learn and replaces the event channel; an
+  older page's late subscribe changes nothing. An input event or a learn call of any other epoch is
+  refused. A blur releases the page's holds. The learn UI's calls go one at a time, in call order, and
+  an edit by list index names the store revision its list came with: one made against an older list is
+  refused.
+- **One ordered path into the engine** (`engine_io/midi/queue.rs`): the router's output, learned
+  actions and the UI's input commands (looper presses, `Press`, toggles) join one bounded FIFO into
+  `EngineHost::send`, so a pedal and a click keep their order and the settings memory sees every target
+  change. No second command ring: it would break that order, and it comes back only if the measured
+  lock waits on `settings` and `ends` call for it.
+- **Nothing is stamped:** notes, wheels and bound actions land at the next block start, as a UI gesture
+  does, so the ring's admission order is the order the engine applies them in. Stamping comes back
+  only with one execution-order contract for every kind of input, and only if a measurement shows it
+  pays.
+- **The no-device rule** (one for every source): while no device runs, or during an engine rebuild,
+  fresh note-ons, actions and HOLD presses are refused, never queued for the device's return; every
+  release passes and controller state is kept. A refused UI press is told to the player.
+- **A rebuild needs no WebView** (`EngineHost::set_rebuild_hook`): the queue follows the engine
+  generation. It drops the old engine's one-shots and their releases, the router forgets what the old
+  engine sounded, and the target and wheels reach the new engine through the settings replay alone.
+- **Bindings live native,** in midi-bindings.json beside plugin-folders.json
+  (`engine_io/midi/store.rs`): an unreadable file is reported, never overwritten. Without the app's
+  data folder the bindings live in memory, and the UI says so.
+- **Port identity** (the owner's call; `engine_io/midi/ports.rs`): a binding keeps the strongest
+  identity midir gives (the WinMM device-interface path, with a discriminator between the ports of one
+  device) and the port's name. Which bindings are live is decided on one port snapshot: exact
+  identities first; then a binding whose port is absent follows the one unclaimed port with its name,
+  when no other absent binding carries that name (a pedal moved to another USB port), and the move is
+  saved. An ambiguous binding stays inactive and listed until a matching port appears alone or the
+  player assigns it (ASSIGN in the learn row); it never fires another controller's action, and its
+  control, on a port of its name, runs nothing meanwhile.
+- **The import never guesses** (the owner's call): at start, before input runs any action, the web
+  build's list (`lf.midiLearn`) is imported once. Its port ids were per-run ordinals, so a record's
+  port name is its identity: it activates on the one present port with that name. Records of one name
+  from several legacy ids that bind the same message stay inactive (a renumbered run may have relearned
+  it). The key is removed one release later, once the native store has written the import.
+- **Port liveness** (`engine_io/midi/liveness.rs`): Windows' interface notifications, registered
+  before the first enumeration on both classes a WinMM port may arrive on, end a connection on removal
+  (its notes, pedal and HOLD are released, the UI shows a toast) and reopen a port on arrival once the
+  enumeration confirms it; the 1 s poll is the backstop.
+- **Every toggle has one owner, the engine:** CLICK, END STOP, FIXED, RETAKE, AUTO REC and the input
+  sends are engine actions every producer sends as intent (the lf-engine briefing), so a pedal and a
+  click never cancel each other. GO LIVE, TAP and the stage view stay the UI's, run on native MIDI's
+  event (`engine_io/midi/actions.rs`).
 
 ## Known fragile piece: plugin editors
 

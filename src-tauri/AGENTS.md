@@ -342,11 +342,21 @@ plugin-GUI work.
   its take starts.
 - The no-device removal path (a 1-frame process and `stop` on the plugin owner's thread) has no test
   with a real unit, and the CLAP restart fixture's thread check would flag it.
-- Native MIDI replaces Web MIDI (the owner's call, D22) and is built on branch `native-midi`. It
-  merges after the latency comparison, which waits on a loopback MIDI port (the owner approves its
-  install), and the owner's controller checks: a controller and a footswitch in a jam, sub-second
-  replugs, pedals learned before the update still firing. The plan and its measurement:
-  `docs/plans/native-midi.md`.
+- Native MIDI (rules: `docs/ARCHITECTURE.md` § Decided: native MIDI; the by-ear checks: `STATUS.md`
+  § Not heard yet). Residuals, each needing an IPC call stalled past its 2 s bound or a clock moved
+  back: a note-on whose batch timed out can land after its release and stick until a blur, a slot
+  switch or a panic; a blur owed after a failure, answered late, can release a hold made after it; a
+  page whose `performance.timeOrigin` reads older than its predecessor's (the wall clock moved back
+  and the WebView restarted) is refused until the app restarts. Next check: log `input_send` round
+  trips over a jam: does a 2 s stall ever happen? Unmeasured: the `settings` and `ends` lock waits
+  under the jam load (10 minutes of `LF_LOCK_WAITS`, `docs/VERIFY.md` § MIDI latency benchmark); a
+  second command ring is reconsidered only on those numbers. Only a hardware controller can settle
+  (none has reached native MIDI yet): whether the port name Web MIDI stored equals WinMM's `szPname`
+  (where it differs, an imported binding waits until the player assigns it), whether midir's id (the
+  device-interface path) is stable across a restart and a replug, which interface class a port
+  arrives on (the next check: `src/engine_io/midi/liveness.rs`'s header), and whether WinMM input is
+  multi-client under `wdmaud2`. Owed: the release after the first with native MIDI removes the web
+  build's `lf.midiLearn` key (`src/app/midi-actions.ts`).
 - Archetype Plini (VST3) once stalled 4–14 s in 5 of 20 unloads, editor closed, and has not repeated
   since (cause unknown). The VST3 teardown and the unload log per-step timing in release too, so the
   next occurrence names its step.
