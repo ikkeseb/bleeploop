@@ -403,15 +403,15 @@ const toggleKey = (t: EngineToggle): string => (typeof t === 'string' ? t : `Sen
  * a `SelectTrack` the UI sent, which the fake does not answer). */
 const gateView = { states: Array.from({ length: ENGINE_LANES }, (): LaneState => 'Empty'), master: 0, locked: false, selected: 0 };
 
-/** The setters that set a toggled setting outright, by the key they set. */
-function setterToggle(c: EngineCommand): [string, boolean] | null {
+/** The setters that set a toggled setting outright: the setting and the value. */
+function setterToggle(c: EngineCommand): [EngineToggle, boolean] | null {
   if (typeof c !== 'object') return null;
   if ('SetMetronome' in c) return ['Click', c.SetMetronome];
   if ('SetLoopEndStop' in c) return ['EndStop', c.SetLoopEndStop];
   if ('SetFixedLength' in c) return ['Fixed', c.SetFixedLength];
   if ('SetRetake' in c) return ['Retake', c.SetRetake];
   if ('SetAutoRecord' in c) return ['AutoRec', c.SetAutoRecord];
-  if ('SetInputSend' in c) return [`Send:${c.SetInputSend[0]}`, c.SetInputSend[1]];
+  if ('SetInputSend' in c) return [{ Send: c.SetInputSend[0] }, c.SetInputSend[1]];
   return null;
 }
 
@@ -431,25 +431,27 @@ function toggleRefusal(key: string): Refusal | null {
 const toggleAnswers: EngineEvent[] = [];
 let togglesScheduled = false;
 
-/** Apply `c` to the fake's toggles: a setter sets one (the engine reports it, but the UI showed it
- * already, so the fake stays quiet); a toggle (`{Action:{Toggle}}`, or `ActionOn` with its lane ignored)
- * is judged and switched as the engine does, answered by `Toggled` or by `Refused` on the selected lane. */
+/** Apply `c` to the fake's toggles as the engine does, each applied command answered once: a setter
+ * sets one and is answered by `Toggled` (changed or not); a toggle (`{Action:{Toggle}}`, or `ActionOn`
+ * with its lane ignored) is judged and switched, answered by `Toggled` or by `Refused` on the selected
+ * lane. */
 function applyToggleCommand(c: EngineCommand): void {
   const set = setterToggle(c);
+  const action = set || typeof c !== 'object' ? null : 'Action' in c ? c.Action : 'ActionOn' in c ? c.ActionOn[1] : null;
   if (set) {
-    fakeToggles.set(set[0], set[1]);
+    fakeToggles.set(toggleKey(set[0]), set[1]);
+    toggleAnswers.push({ type: 'Toggled', frame: 0, toggle: set[0], on: set[1] });
+  } else if (action === null || typeof action !== 'object' || !('Toggle' in action)) {
     return;
-  }
-  if (typeof c !== 'object') return;
-  const action = 'Action' in c ? c.Action : 'ActionOn' in c ? c.ActionOn[1] : null;
-  if (action === null || typeof action !== 'object' || !('Toggle' in action)) return;
-  const key = toggleKey(action.Toggle);
-  const reason = toggleRefusal(key);
-  if (reason) toggleAnswers.push({ type: 'Refused', frame: 0, lane: gateView.selected, reason });
-  else {
-    const on = !(fakeToggles.get(key) ?? false);
-    fakeToggles.set(key, on);
-    toggleAnswers.push({ type: 'Toggled', frame: 0, toggle: action.Toggle, on });
+  } else {
+    const key = toggleKey(action.Toggle);
+    const reason = toggleRefusal(key);
+    if (reason) toggleAnswers.push({ type: 'Refused', frame: 0, lane: gateView.selected, reason });
+    else {
+      const on = !(fakeToggles.get(key) ?? false);
+      fakeToggles.set(key, on);
+      toggleAnswers.push({ type: 'Toggled', frame: 0, toggle: action.Toggle, on });
+    }
   }
   if (togglesScheduled) return;
   togglesScheduled = true;
