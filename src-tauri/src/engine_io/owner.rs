@@ -50,9 +50,15 @@ const STACK: usize = 4 << 20;
 /// units go to their plugin owners: pending installs land first, then every unit is evicted into
 /// `Core::evicted` (`SlotHost::take_evicted`). Every port is held across the swap, so a plugin owner
 /// cannot slip an install into the old engine, and the new terms are published before any unit is
-/// handed back, so its owner re-activates it at them. The device owner's rebuild, and the test
-/// device's.
+/// handed back, so its owner re-activates it at them. The input path's handshake brackets it
+/// ([`super::RebuildHook`]: paused first, told the new generation before the replay, resumed after it).
+/// The device owner's rebuild, and the test device's.
 pub(crate) fn swap_engine(core: &Core, engine: Engine, handle: EngineHandle, config: EngineConfig) -> Option<Engine> {
+    // Before any lock here: the hook takes its own, which comes before `settings`.
+    let hook = core.rebuild_hook.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    if let Some(hook) = &hook {
+        hook.pause();
+    }
     let EngineHandle { commands, events, slots, overview, session } = handle;
     let mut ports = core.ports.each_ref().map(|p| p.lock().unwrap_or_else(|e| e.into_inner()));
     core.rate.store(config.sample_rate, Relaxed);
@@ -71,6 +77,10 @@ pub(crate) fn swap_engine(core: &Core, engine: Engine, handle: EngineHandle, con
     for (port, new) in ports.iter_mut().zip(slots) {
         **port = Some(new);
     }
+    // The generation this swap makes (only the swapping thread raises it). What the input path still
+    // meant to send (the note target, the wheels) joins the memory before its replay.
+    let generation = core.engine_gen.load(Acquire) + 1;
+    let unsent_input = hook.as_ref().map(|hook| hook.rebuild(generation)).unwrap_or_default();
     {
         // The kept settings go in first, in order: they apply at the new engine's first block. Taken
         // before `ends`, as a sender takes them, so no batch splits around the replay. The old engine's
@@ -94,13 +104,21 @@ pub(crate) fn swap_engine(core: &Core, engine: Engine, handle: EngineHandle, con
         for (toggle, on) in unsent {
             settings.toggled(gen, toggle, on);
         }
+        for command in &unsent_input {
+            settings.record(command);
+        }
         let ends = ends.insert(Ends { commands, events, overview, session: Some(session) });
         for command in settings.replay() {
             if ends.commands.push(TimedCommand { frame: None, command }).is_err() {
                 core.counters.commands_full.fetch_add(1, Relaxed);
             }
         }
-        settings.follow(core.engine_gen.fetch_add(1, Release) + 1);
+        let made = core.engine_gen.fetch_add(1, Release) + 1;
+        debug_assert_eq!(made, generation, "another thread raised the engine generation mid-swap");
+        settings.follow(made);
+    }
+    if let Some(hook) = hook {
+        hook.resume();
     }
     old
 }
@@ -558,7 +576,8 @@ impl<D: Driver> Owner<D> {
         Ok(self.status().ok_or_else(|| "the device stopped".to_string())?)
     }
 
-    /// No stream runs any more: slot hosts service their ports themselves, presses land unstamped.
+    /// No stream runs any more: slot hosts service their ports themselves, and the clock reads no device
+    /// (native MIDI admits no fresh input).
     fn halted(&self) {
         self.core.running.store(false, Release);
         self.core.clock.clear();

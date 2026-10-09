@@ -55,6 +55,9 @@ pub(crate) const MIDI_ENDPOINT_CLASS: GUID = GUID::from_u128(0xe7cce071_3c03_423
 pub(crate) enum Wake {
     /// The host stops: close every port and return.
     Stop,
+    /// A timer of the host's is due sooner than the thread's wait (the queue's retry, a store write):
+    /// no notice, nothing to enumerate.
+    Tick,
     /// A MIDI interface arrived at this path.
     Arrived(String),
     /// A MIDI interface at this path went away.
@@ -103,7 +106,7 @@ impl Watch {
                 self.retry = Some(0);
                 Vec::new()
             }
-            Wake::Stop => Vec::new(),
+            Wake::Stop | Wake::Tick => Vec::new(),
         }
     }
 
@@ -138,7 +141,8 @@ impl Watch {
 pub(crate) const MAX_BATCH: usize = 64;
 
 /// The notices one pass handles: `first`, then what is already queued, at most [`MAX_BATCH`], in order
-/// (never deduplicated: a removal, an arrival and a removal of one path mean the last). True when a
+/// (never deduplicated: a removal, an arrival and a removal of one path mean the last). A
+/// [`Wake::Tick`] among them is no notice and is dropped (the pass ticks the timers anyway). True when a
 /// [`Wake::Stop`] was taken: the port thread stops, and the notices before it no longer matter.
 pub(crate) fn batch(first: Wake, woken: &Receiver<Wake>) -> (Vec<Wake>, bool) {
     let mut notices = Vec::new();
@@ -147,7 +151,9 @@ pub(crate) fn batch(first: Wake, woken: &Receiver<Wake>) -> (Vec<Wake>, bool) {
         if wake == Wake::Stop {
             return (notices, true);
         }
-        notices.push(wake);
+        if wake != Wake::Tick {
+            notices.push(wake);
+        }
         next = if notices.len() < MAX_BATCH { woken.try_recv().ok() } else { None };
     }
     (notices, false)
@@ -368,11 +374,13 @@ mod tests {
         assert_eq!(batch(Wake::Stop, &rx), (vec![], true));
     }
 
-    // A pass keeps the notices' order: removal, arrival, removal of one path ends removed.
+    // A pass keeps the notices' order: removal, arrival, removal of one path ends removed. A timer's
+    // wake among them is no notice.
     #[test]
     fn a_batch_keeps_order_and_repeats() {
         let (tx, rx) = std::sync::mpsc::channel();
         tx.send(Wake::Arrived(PEDAL.into())).unwrap();
+        tx.send(Wake::Tick).unwrap();
         tx.send(Wake::Removed(PEDAL.into())).unwrap();
         let (notices, stop) = batch(Wake::Removed(PEDAL.into()), &rx);
         assert!(!stop);

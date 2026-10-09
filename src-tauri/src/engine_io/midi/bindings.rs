@@ -106,24 +106,6 @@ pub enum Kind {
     Note,
 }
 
-/// A port as the port table names it (`super::ports`): its name and which of the present ports with that
-/// name it is. Not a binding's identity: [`PortKey::id`] stands in for one until the store (the plan's
-/// decision 8) gives ports a durable identity.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PortKey {
-    pub name: String,
-    /// Among the present ports with this name, which one (0 = the first in the system's port list).
-    pub occurrence: u32,
-}
-
-impl PortKey {
-    /// The interim `port_id` a binding learned on this port carries.
-    pub fn id(&self) -> String {
-        format!("{}\n{}", self.name, self.occurrence)
-    }
-}
-
 /// One learned message (`MidiBinding`). `press_high`: the learning press sent a CC value ≥ 64, or a
 /// note-on.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -162,7 +144,7 @@ impl Binding {
 }
 
 /// A persisted record [`parse_bindings`] could not read, and why.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Rejected {
     /// Its position in the persisted array.
     pub index: usize,

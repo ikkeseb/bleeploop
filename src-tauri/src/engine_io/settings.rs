@@ -31,6 +31,10 @@
 //! the feed saw it. Not kept: a setter still queued in a replaced engine with no device behind it, when
 //! that engine also holds an unsent toggle of the same setting (the unsent value wins); and a toggle
 //! still queued there, as every queued action.
+//!
+//! The note target and the wheels native MIDI's queue still held at a rebuild, sent to no engine yet,
+//! are kept before the replay too (`super::RebuildHook::rebuild`), so the new engine gets the player's
+//! latest through the replay alone.
 
 use std::collections::BTreeMap;
 

@@ -15,8 +15,8 @@ pub const HOLD_CONTROLS: usize = 16;
 /// The plugin slots (`src/ui/state/instrument-slots.ts`: two instrument slots).
 pub const SLOT_COUNT: usize = 2;
 
-/// A command, applied at `frame` (a device frame, e.g. a MIDI pedal's press) or, with `None`, at the
-/// start of the next block the engine renders.
+/// A command, applied at `frame` (a device frame: a test's or a probe's; the app's senders, native MIDI
+/// included, stamp none) or, with `None`, at the start of the next block the engine renders.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TimedCommand {
     pub frame: Option<Frame>,

@@ -1,8 +1,10 @@
 //! OWNS: the input ports: one midir connection per present port, each port's [`PortIdentity`], which
 //! port a stored binding answers to ([`resolve`]), and hot-plug: Windows' interface notifications wake
-//! the port thread (`liveness`), and a poll of the port list every [`POLL`] is the backstop. The
-//! identities, the diff and the resolution are pure functions; the port thread that applies them is the
-//! only code here that touches midir, and only real hardware runs it.
+//! the port thread (`liveness`), and a poll of the port list every [`POLL`] is the backstop. Between
+//! enumerations the same thread runs the host's timers (`Core::tick`: learn's release waits, the
+//! queue's retry, the binding store's writes). The identities, the diff and the resolution are pure
+//! functions; the port thread that applies them is the only code here that touches midir, and only real
+//! hardware runs it.
 //!
 //! A port is its [`PortIdentity`]: midir's id (WinMM's device-interface path, which the ports of one
 //! multi-port device share), its name, and its position among the present ports sharing that path and
@@ -21,10 +23,10 @@
 //!
 //! Allocation per message: midir's WinMM handler copies each message into a `Vec` it clears and
 //! reuses, so a short message allocates only while that buffer first grows (SysEx, which could grow it
-//! again, is ignored here). This side allocates a note's owner list on each note-on, the sweep list on a
-//! pedal-up or a release, a UI event on a learn, and (until bindings match a port by its identity)
-//! a copy of the port's name per message (`legacy_key`); the sink (`EngineHost::send`) pushes into the
-//! engine's ring without allocating. None of these threads is an audio thread.
+//! again, is ignored here). This side allocates MIDI learn's key for the message (a copy of the port's
+//! id), a note's owner list on each note-on, the sweep list on a pedal-up or a release, and UI events on
+//! a learn; `EngineHost::send` pushes into the engine's ring without allocating. None of these threads
+//! is an audio thread.
 
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::sync::Arc;
@@ -108,7 +110,6 @@ pub(crate) enum Unresolved {
 ///    one stored id with no present port carries it (this one). A legacy Web MIDI id (`input-<N>`) and
 ///    a weak id never match exactly, so they always take this rule.
 /// 3. Everything else stays unresolved: an ambiguous identity never fires another controller's action.
-#[cfg_attr(not(test), allow(dead_code))] // dormant: the binding store calls it at the switch
 pub(crate) fn resolve(stored: &[(&str, &str)], present: &[PortIdentity]) -> Vec<Resolution> {
     let ids: Vec<String> = present.iter().map(PortIdentity::id).collect();
     let exact: Vec<Option<usize>> =
@@ -192,9 +193,11 @@ fn disconnect(core: &Core, c: Connection, gone: &mut Vec<String>) {
 }
 
 /// The port thread: register for interface notifications, then list, diff, close what went away, open
-/// what arrived, publish the table, and wait for a notification, the arrival schedule or the poll, until
-/// [`Wake::Stop`]. `wake` is the sender the notification callbacks use. On the way out the
-/// notifications are unregistered and every port is released and closed.
+/// what arrived, publish the table, and until the next enumeration run the host's timers
+/// (`Core::tick`), waking for the earliest of them, a notification, the arrival schedule or the poll,
+/// until [`Wake::Stop`]. `wake` is the sender the notification callbacks use. On the way out the
+/// notifications are unregistered, every port is released and closed, and the timers run once more (a
+/// store write still due).
 pub(crate) fn run(core: Arc<Core>, wake: Sender<Wake>, woken: Receiver<Wake>) {
     // Before the first enumeration, so a port arriving between the two is not missed.
     let registration = Registration::new(wake);
@@ -219,7 +222,11 @@ pub(crate) fn run(core: Arc<Core>, wake: Sender<Wake>, woken: Receiver<Wake>) {
             let open_conns: Vec<(&PortIdentity, u32)> = open.iter().map(|c| (&c.identity, c.conn)).collect();
             conns(&open_conns, &present.iter().collect::<Vec<_>>(), &opening, &mut next_conn)
         };
-        let entries: Vec<PortEntry> = present.iter().cloned().zip(port_conns).map(|(identity, conn)| PortEntry { identity, conn }).collect();
+        let entries: Vec<PortEntry> = present
+            .iter()
+            .zip(port_conns)
+            .map(|(identity, conn)| PortEntry::new(identity.clone(), conn, conn.is_none() && failed.contains(identity)))
+            .collect();
         // Registered before it connects, so the first message finds its port.
         core.set_ports(entries);
 
@@ -233,7 +240,7 @@ pub(crate) fn run(core: Arc<Core>, wake: Sender<Wake>, woken: Receiver<Wake>) {
                     open.push(Connection { identity: identity.clone(), conn, generation, input });
                 }
                 Err(e) => {
-                    core.port_gone(conn);
+                    core.open_failed(conn);
                     if !failed.contains(identity) {
                         log::warn!("[midi] could not open input {}: {e}", identity.name);
                         failed.push(identity.clone());
@@ -243,25 +250,35 @@ pub(crate) fn run(core: Arc<Core>, wake: Sender<Wake>, woken: Receiver<Wake>) {
         }
         core.publish_ports(std::mem::take(&mut gone));
 
-        match woken.recv_timeout(watch.next_wait()) {
-            Err(RecvTimeoutError::Timeout) => {}
-            Err(RecvTimeoutError::Disconnected) | Ok(Wake::Stop) => break 'run,
-            Ok(first) => {
-                // The notices queued so far, at most `MAX_BATCH`, then one enumeration.
-                let (notices, stop) = batch(first, &woken);
-                if stop {
-                    break 'run;
-                }
-                for w in notices {
-                    let path = match &w {
-                        Wake::Stop => break 'run,
-                        Wake::Arrived(path) | Wake::Removed(path) => path,
-                    };
-                    log::info!("[midi] interface {}: {path}", if matches!(w, Wake::Removed(_)) { "removed" } else { "arrived" });
-                    let hit = watch.notice(&w, &open.iter().map(|c| c.identity.path.as_str()).collect::<Vec<_>>());
-                    for &i in hit.iter().rev() {
-                        disconnect(&core, open.remove(i), &mut gone);
+        let enumerate = Instant::now() + watch.next_wait();
+        loop {
+            let now = Instant::now();
+            let timer = core.tick(now);
+            if now >= enumerate {
+                break;
+            }
+            let until = timer.map_or(enumerate, |t| t.min(enumerate));
+            match woken.recv_timeout(until.saturating_duration_since(now)) {
+                Err(RecvTimeoutError::Timeout) | Ok(Wake::Tick) => {}
+                Err(RecvTimeoutError::Disconnected) | Ok(Wake::Stop) => break 'run,
+                Ok(first) => {
+                    // The notices queued so far, at most `MAX_BATCH`, then one enumeration.
+                    let (notices, stop) = batch(first, &woken);
+                    if stop {
+                        break 'run;
                     }
+                    for w in notices {
+                        let path = match &w {
+                            Wake::Stop | Wake::Tick => continue,
+                            Wake::Arrived(path) | Wake::Removed(path) => path,
+                        };
+                        log::info!("[midi] interface {}: {path}", if matches!(w, Wake::Removed(_)) { "removed" } else { "arrived" });
+                        let hit = watch.notice(&w, &open.iter().map(|c| c.identity.path.as_str()).collect::<Vec<_>>());
+                        for &i in hit.iter().rev() {
+                            disconnect(&core, open.remove(i), &mut gone);
+                        }
+                    }
+                    break;
                 }
             }
         }
@@ -274,6 +291,7 @@ pub(crate) fn run(core: Arc<Core>, wake: Sender<Wake>, woken: Receiver<Wake>) {
         c.input.close();
     }
     core.set_ports(Vec::new());
+    core.tick(Instant::now());
 }
 
 /// The present input ports in the system's order, as `(id, name, port)` (empty when midir cannot

@@ -1,11 +1,12 @@
-//! OWNS: the callback's stamp of where the device clock is, and the frame a press lands on.
+//! OWNS: the callback's stamp of where the device clock is: whether a device runs, and the feed's
+//! anchor.
 //!
 //! Each output callback publishes the instant it entered and the device frame of its first sample
-//! (a seqlock over atomics: the callback never waits, a reader retries). A press (a MIDI pedal) maps
-//! its arrival instant to the frame the engine was rendering then, plus one block: always the next
-//! block or later, so the engine applies it on that exact frame, jitter-free, instead of at whichever
-//! block start comes first. The UI's gestures land at the next block start instead (Stage 2); both are
-//! judged on the render clock, so they sit the same output latency ahead of what the player heard.
+//! (a seqlock over atomics: the callback never waits, a reader retries); the owner clears it once the
+//! streams have dropped. The feed turns the last stamp into the UI's anchor ([`FrameClock::anchor`]);
+//! native MIDI admits fresh input only while a device runs ([`FrameClock::running`]). Nothing stamps a
+//! command with this clock: the UI's gestures and native MIDI's notes and pedals all land at the next
+//! block start, so the command ring's order is the order they apply in (`super::midi`'s rules).
 //!
 //! DEV builds also keep the last [`HISTORY`] stamps (each slot a seqlock of its own; the writer claims
 //! a slot with one atomic add and never waits): a frame the engine applied a note on converts to an
@@ -195,7 +196,7 @@ impl FrameClock {
         lost
     }
 
-    /// No callback runs (the owner, before it drops the streams): presses find no stamp.
+    /// No callback runs (the owner, once the streams have dropped): [`FrameClock::running`] reads false.
     pub fn clear(&self) {
         self.publish(epoch(), 0, 0, 0);
     }
@@ -227,36 +228,30 @@ impl FrameClock {
         Some((frame, now.as_secs_f64() * 1e3 - ago_ns as f64 / 1e6, rate))
     }
 
-    /// The frame a press that arrived at `at` lands on: the render position then, plus one block.
-    /// `None` while no callback runs (native MIDI then drops the press: `super::midi`'s rules).
-    pub fn press_frame(&self, at: Instant) -> Option<Frame> {
-        let (entry_ns, frame, block, rate) = self.read()?;
-        let since = stamp(at).saturating_sub(entry_ns) as f64 / 1e9;
-        // A press stamped long after the last callback (the device stalled) still lands one block on.
-        let ahead = ((since * rate as f64).round() as Frame).min(block as Frame);
-        Some(frame + ahead + block as Frame)
+    /// A device runs: a callback has stamped the clock since the owner last cleared it. One field
+    /// decides (a cleared stamp's rate is 0), so no write in progress can make it read false.
+    pub fn running(&self) -> bool {
+        self.0.rate.load(Acquire) != 0
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(debug_assertions)]
     use std::time::Duration;
 
     #[test]
-    fn a_press_lands_one_block_after_the_render_position() {
+    fn a_device_runs_from_its_first_stamp_until_the_clear() {
         let clock = FrameClock::new();
-        assert_eq!(clock.press_frame(Instant::now()), None, "no callback yet");
-        let entry = Instant::now();
-        clock.publish(entry, 48_000, 256, 48_000);
-        // 1 ms after the callback entered: 48 frames into its block, then one block on.
-        assert_eq!(clock.press_frame(entry + Duration::from_millis(1)), Some(48_000 + 48 + 256));
-        // Before it entered (a press stamped earlier than the callback): the block start plus a block.
-        assert_eq!(clock.press_frame(entry - Duration::from_millis(1)), Some(48_000 + 256));
-        // Long after (a stalled device): capped at one block into it.
-        assert_eq!(clock.press_frame(entry + Duration::from_secs(1)), Some(48_000 + 256 + 256));
+        assert!(!clock.running(), "no callback yet");
+        assert_eq!(clock.anchor(), None);
+        clock.publish(Instant::now(), 48_000, 256, 48_000);
+        assert!(clock.running());
+        assert_eq!(clock.anchor().map(|(frame, _, rate)| (frame, rate)), Some((48_000, 48_000)));
         clock.clear();
-        assert_eq!(clock.press_frame(Instant::now()), None);
+        assert!(!clock.running());
+        assert_eq!(clock.anchor(), None);
     }
 
     /// The benchmark's frame-to-time conversion: through the recorded (entry, frame) pairs, never a

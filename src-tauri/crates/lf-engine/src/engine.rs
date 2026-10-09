@@ -42,7 +42,7 @@ use crate::overview::Overview;
 use crate::session::{SessionEnd, SessionPort};
 use crate::slots::{Rack, SlotPort};
 
-/// Commands the engine holds for a future frame (MIDI press frames, a wait for a block job).
+/// Commands the engine holds for a future frame (a stamped command's, a wait for a block job).
 const MAX_PENDING: usize = 64;
 /// The seed of Tone's noise tables (a `Math.random` stand-in): fixed, so a render repeats.
 const NOISE_SEED: u32 = 7;

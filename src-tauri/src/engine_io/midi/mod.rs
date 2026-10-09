@@ -1,325 +1,1001 @@
 //! OWNS: native MIDI for the engine, built and tested but never started by the app (MIDI arrives
-//! through the WebView's Web MIDI, and WinMM input ports are exclusive): the input ports (midir,
-//! one connection per port, hot-plug polling), message parsing, the MIDI-learn bindings mirrored
-//! from settings (`src/app/midi-actions.ts`), the note router for every note source, and the one
-//! ordered queue input commands reach the engine through. This doc is the module's briefing.
+//! through the WebView's Web MIDI, and WinMM input ports are exclusive): the glue that joins the input
+//! ports, MIDI learn and its stored bindings, the one note router for every note source and the one
+//! ordered queue into the engine ([`Core`]), what the host offers the UI ([`MidiHost`]) and what it
+//! tells it ([`MidiEvent`]). This doc is the module's briefing; the decisions it carries out are
+//! `docs/plans/native-midi.md`'s (§ Decided).
 //!
 //! # Module map
 //!
 //! | Module | Owns | Ported from |
 //! |---|---|---|
-//! | this file | [`MidiHost`], the state the port callbacks share ([`Core`]), the UI events | `src/ui/state/midi.ts` (glue) |
+//! | this file | [`MidiHost`] and its UI calls, [`Core`] (the state every thread shares, under one lock), which stored bindings are live, the timers, the UI events | `src/ui/state/midi.ts` (glue) |
 //! | `parse` | bytes to `parse::Message`, and what is ignored | `midi.ts` `parseMidiMessage` |
-//! | `bindings` | [`Binding`], learn capture, matching, momentary vs latching, consume-first | `src/app/midi-actions.ts`, `src/app/actions.ts` |
+//! | `bindings` | [`Binding`], the 25 actions and their targets, the persisted list's fallible parse | `src/app/midi-actions.ts`, `src/app/actions.ts` |
+//! | `learn` | learn capture, matching, consume-first, momentary vs latching, HOLD's control numbers, the release waits | `src/app/midi-actions.ts` |
+//! | `actions` | what a binding runs, as engine commands and UI events; which of the UI's commands join the queue | `src/app/actions.ts` |
 //! | `router` | note ownership for MIDI and UI owners, sustain, the wheels, the note target, the held-note set | `src/ui/state/input-router.ts`, `instrument.ts` `routeEngine` |
-//! | `queue` | the one bounded FIFO into the engine's ring: reserved releases, whole batches, coalesced wheels, no-device admission, the engine generation | plan `docs/plans/native-midi.md`, decisions 4 to 7 |
-//! | `ports` | midir connections, the hot-plug poll and its diff, the port keys | `midi.ts` `attachInputs` |
+//! | `queue` | the one bounded FIFO into the engine's ring: reserved releases, whole batches, coalesced wheels, no-device admission, the engine generation | plan decisions 4 to 7 |
+//! | `store` | `midi-bindings.json` and the one-time import of the web's list | plan decisions 8, 9 |
+//! | `ports` | midir connections, port identities, which port a stored binding answers to, the port thread | `midi.ts` `attachInputs` |
+//! | `liveness` | interface arrival and removal notifications, connection generations, the arrival retry | (Web MIDI's `statechange`) |
 //!
 //! # Rules
 //!
+//! - **One lock orders everything.** The router, the queue, MIDI learn, the store and the port table
+//!   sit in one `Mutex` that the midir callbacks, the port thread and the UI's calls take; each decides
+//!   and drains the queue into `EngineHost::send` under it, so the engine gets the commands in the order
+//!   they were decided. It comes before the engine host's `settings` and `ends`, and nothing holding
+//!   those calls in here. UI events are queued under it and handed to the sink once it is released, in
+//!   that order. None of these threads is an audio thread (invariant 5).
 //! - **A message passes MIDI learn first.** A learned or bound message is consumed there and never
-//!   reaches the router; only what learn leaves is played.
-//! - **Nothing is stamped.** A note, a pedal, a wheel and a bound action all land at the next block
-//!   start (`TimedCommand::frame` `None`), as the UI's gestures do, so the ring's admission order is
-//!   the order the engine applies them in.
-//! - **While no device runs, only releases and controller state go in.** The queue refuses a note-on
-//!   (the router then records no owner) and a bound action, which would fire at the next open; the
-//!   releases, the pedals and the wheels are kept, and nothing drains until a device runs (`queue`'s
-//!   rules). [`Core`] reads "a device runs" off the clock's stamp and follows no engine generation
-//!   yet.
-//! - **One lock orders everything.** The router, the queue, MIDI learn and the port table sit in one
-//!   `Mutex` the port callbacks and the poller take; the queue drains into the sink under it, so the
-//!   engine sees the commands in the order they were decided. None of these threads is an audio
-//!   thread.
-//! - **The router owns the note target.** A target switch or a panic goes through
-//!   [`MidiHost::select_instrument`] / [`MidiHost::all_notes_off`], which release the notes that sound
-//!   first and forget the held ones, as the web's `allNotesOff` did. Sent past them, a key held across
-//!   the switch would keep another port's strike of that note silent.
-//! - **A port that goes away releases what it held**, its pedal and its wheels, as a Web MIDI
-//!   disconnect does; the UI hears of it in [`MidiEvent::Ports`].
+//!   reaches the router (a learned CC64 never sustains); learning a CC lets go of what that owner's
+//!   controller set; what a binding fires goes through `actions`; only what learn leaves is played.
+//! - **Every input command goes through the queue:** the router's batches, what a binding fires, and
+//!   the UI's looper presses, `Press`, `SelectTrack` and toggles ([`MidiHost::ui_commands`]). A setting
+//!   goes straight to `EngineHost::send`; a note, a wheel, the note target or a panic from the UI goes
+//!   through the router's own calls, never past it. Nothing is stamped (decision 4).
+//! - **While no device runs** (`EngineSide::running`), fresh one-shots are refused: the router records
+//!   no owner for a refused attack, learn no HOLD for a refused press. Releases, pedals, wheels and the
+//!   target wait in the queue until a device runs; the port thread looks again every `IDLE_RETRY`, and
+//!   every `RETRY` after a drain the engine's full ring refused.
+//! - **An engine rebuild needs no WebView** ([`super::RebuildHook`], registered at start): the queue
+//!   pauses, folds its target and wheels into the settings memory before the replay and drops the old
+//!   engine's one-shots and their releases; the router forgets what the old engine sounded, learn its
+//!   HOLD presses; the queue resumes after the replay.
+//! - **Which stored bindings are live** is decided on one port snapshot (`ports::resolve`) at every
+//!   change of the port list or the bindings: exact ids first, by name only where it is unambiguous,
+//!   every ordinal (legacy) record of one name counting as one identity (decision 9). A move is saved
+//!   (`Store::reanchor`) before learn is handed anything; learn runs only records that are neither
+//!   blocked nor ordinal and whose id a present port has. An edit of learn's own (a learn, a pedal read
+//!   as momentary) goes back to the store (`Store::replace`), which keeps the records learn does not
+//!   run; the player's edits go to the store by listed index and reach learn through the same hand-off,
+//!   which releases a HOLD the edit ends.
+//! - **The store is written on the port thread** (`Core::tick`), from a snapshot taken under the lock,
+//!   after it is released. A write refused or failed is a [`MidiEvent::Store`] and a release-log line,
+//!   never a panic.
+//! - **A port that goes away releases what it held:** its notes, its pedal, its wheels and its HOLD
+//!   presses; the UI hears [`MidiEvent::Gone`] (the toast).
+//! - **A WebView document's holds end with its epoch** ([`MidiHost::ui_epoch`]: a reload, a recovery)
+//!   and on a blur; MIDI holds stay.
 
+mod actions;
 pub mod bindings;
+mod learn;
+mod liveness;
 mod parse;
 mod ports;
 mod queue;
 mod router;
 mod store;
 
+use std::collections::VecDeque;
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use std::sync::mpsc::{self, Sender};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, TryLockError, Weak};
 use std::thread::JoinHandle;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use lf_engine::{Command, NoteTarget, TimedCommand};
 use serde::Serialize;
 
-pub use bindings::{ActionId, Binding, Kind, PortKey};
+pub use bindings::{ActionId, Binding, Target};
+pub use learn::LearnRefusal;
+pub use queue::QueueCounters;
+pub use router::Held;
+pub use store::{ImportReport, Listed};
 
-use super::FrameClock;
-use bindings::Learn;
-use parse::parse;
-use queue::{Out, Queue};
-use router::{Owner, Router};
+use super::{EngineHost, RebuildHook};
+use actions::UiRoute;
+use learn::{Fire, Learn};
+use liveness::Wake;
+use parse::{parse, Message};
+use ports::{PortIdentity, Resolution, Unresolved};
+use queue::{Out, Queue, Refused};
+use router::{HeldNotes, Owner, Router};
+use store::{LoadResult, Snapshot, Store, WriteError};
 
-/// Where commands go: `EngineHost::send` in the app, a recorder in tests.
-pub type Sink = Arc<dyn Fn(TimedCommand) -> Result<(), String> + Send + Sync>;
+/// How soon the port thread tries again a drain the engine's ring refused (it was full).
+const RETRY: Duration = Duration::from_millis(2);
+/// How often it looks again while input waits in the queue for a device (or a rebuild) to run it.
+const IDLE_RETRY: Duration = Duration::from_millis(20);
+/// The most often the engine's refused sends and the queue's refusals for room reach the release log.
+const LOG_EVERY: Duration = Duration::from_secs(1);
+/// The stored id an ordinal (legacy) record resolves under: no port's id, and one for every such
+/// record, so its port name alone is its identity (decision 9).
+const ORDINAL: &str = "input-*";
 
-/// The engine generation [`Core`]'s queue feeds: it follows none yet (`owner.rs`'s rebuild is not
-/// wired to it).
-const GENERATION: u64 = 0;
-
-/// What the UI hears from native MIDI.
-#[derive(Clone, Debug, PartialEq)]
-pub enum MidiEvent {
-    /// A learn captured this binding (the learn is over).
-    Learned(Binding),
-    /// The bindings changed here (a learn, or a pedal read as momentary): the list to persist.
-    Bindings(Vec<Binding>),
-    /// A GO LIVE binding fired: the plugin host's to run.
-    GoLive,
-    /// The port list changed; `gone` names the ports that went away (their held notes were released).
-    Ports { ports: Vec<PortInfo>, gone: Vec<String> },
+/// What native MIDI needs of the engine host: [`EngineHost`] in the app, a recorder in tests.
+pub trait EngineSide: Send + Sync {
+    /// Queue one command (`EngineHost::send`, which keeps a setting for the replay); Err when the ring
+    /// is full.
+    fn send(&self, command: TimedCommand) -> Result<(), String>;
+    /// A device runs ([`super::FrameClock::running`]).
+    fn running(&self) -> bool;
+    /// Register what an engine rebuild tells native MIDI; `None` removes it.
+    fn set_rebuild_hook(&self, hook: Option<Arc<dyn RebuildHook>>);
 }
 
-/// A present input port.
+impl EngineSide for EngineHost {
+    fn send(&self, command: TimedCommand) -> Result<(), String> {
+        EngineHost::send(self, command)
+    }
+
+    fn running(&self) -> bool {
+        self.core.clock.running()
+    }
+
+    fn set_rebuild_hook(&self, hook: Option<Arc<dyn RebuildHook>>) {
+        EngineHost::set_rebuild_hook(self, hook);
+    }
+}
+
+/// A present input port, as the device list shows it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PortInfo {
+    /// What a binding learned on it stores, and what [`MidiHost::assign`] takes.
+    pub id: String,
     pub name: String,
-    pub occurrence: u32,
-    /// False while it could not be opened (another program holds it); retried every poll.
-    pub open: bool,
+    pub state: PortState,
 }
 
-/// Counters for the DEV probe; both stay 0 in a clean run with a device open.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PortState {
+    Open,
+    /// Its last open failed: most likely another program holds it (WinMM input is exclusive). Tried
+    /// again every poll.
+    Busy,
+    /// Not open: a removal notice closed it while Windows still lists it, or it has not opened yet.
+    Closed,
+}
+
+/// How a stored binding stands on the present ports.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum BindingState {
+    /// MIDI learn runs it: a present port has its id.
+    Live,
+    /// It waits for the player's assignment ([`Listed::blocked`] says why).
+    Blocked,
+    /// No present port answers to it.
+    NoPort,
+    /// Several present ports carry its name: none is guessed.
+    SeveralPorts,
+    /// Another stored port with no present port carries its name too: none is guessed.
+    SeveralAbsent,
+}
+
+/// A stored binding as the UI lists it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListedBinding {
+    #[serde(flatten)]
+    pub listed: Listed,
+    pub state: BindingState,
+}
+
+/// What the next CC or note-on will be learned onto.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LearnPick {
+    pub action: ActionId,
+    pub target: Target,
+}
+
+/// An action a binding fired that the UI runs (decision 11), by its `actions.ts` id.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum UiAction {
+    GoLive,
+    StageView,
+    StageNextView,
+    TapTempo,
+}
+
+/// Why the bindings are not, or not all, on disk.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum StoreProblem {
+    /// The file cannot be read or a newer build wrote it: it is kept as it is, and nothing is written
+    /// this session (the bindings work in memory).
+    ReadOnly { why: String },
+    /// Another instance of the app wrote the file since this one read it: this session's changes are
+    /// not saved over it.
+    Conflict { why: String },
+    /// A write failed; the next change tries again.
+    Failed { why: String },
+    /// Stored records this build cannot read: kept in the file, not run.
+    Rejected { count: usize },
+}
+
+/// What native MIDI tells the UI, on its own channel (never the feed's).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum MidiEvent {
+    /// The input ports, as they are now.
+    Ports { ports: Vec<PortInfo> },
+    /// Ports that went away; their notes and HOLD presses were released (the toast).
+    Gone { names: Vec<String> },
+    /// Every stored binding, in list order, and how it stands.
+    Bindings { bindings: Vec<ListedBinding> },
+    /// What a learn listens for, or `None` once it captured or was cancelled.
+    Learning { learning: Option<LearnPick> },
+    /// The latest learned binding still waiting for its release (the learn row's hint), or `None` once
+    /// its wait ended (a native timer, not the next message).
+    AwaitingRelease { binding: Option<Binding> },
+    /// A learn captured this binding.
+    Learned { binding: Binding },
+    /// MIDI learn consumed a press and ran nothing.
+    Refused { reason: LearnRefusal },
+    /// A binding fired an action the UI runs.
+    Run { action: UiAction },
+    /// A binding fired a looper press (`onPress`: the lane cue goes).
+    Pressed,
+    Store { problem: StoreProblem },
+    /// The notes held down now (not the sustained ones), at most one event per change.
+    Held { notes: Vec<u8>, changes: u64 },
+}
+
+/// The queue's refused batches, by why (`queue::Refused`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Refusals {
+    /// Fresh input while no device ran (decision 7): by design, counted only.
+    pub no_device: u64,
+    /// Fresh input during an engine rebuild: counted only.
+    pub paused: u64,
+    /// The unreserved room was gone: in the release log, at most a line a second.
+    pub full: u64,
+    /// Made for another engine generation: logged as `full` is.
+    pub stale: u64,
+}
+
+impl Refusals {
+    fn count(&mut self, why: Refused) {
+        match why {
+            Refused::NoDevice => self.no_device += 1,
+            Refused::Paused => self.paused += 1,
+            Refused::Full => self.full += 1,
+            Refused::Stale => self.stale += 1,
+        }
+    }
+}
+
+/// Counters for the DEV probe and the release log.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct MidiDiag {
-    /// Drains the sink refused (no device open, or the engine's ring full); the refused command stays
-    /// at the queue's head.
+    /// Drains the engine refused (its ring was full): the refused command stayed at the queue's head.
+    /// In the release log, at most a line a second.
     pub failed_sends: u64,
     /// Panics caught in a port callback (the message is dropped; midir calls it from an
     /// `extern "system"` WinMM callback, where an unwind would abort the process).
     pub panics: u64,
+    pub refused: Refusals,
+    pub queue: QueueCounters,
 }
 
 /// A present port and its connection (`None` while it is not open).
 pub(crate) struct PortEntry {
-    pub(crate) key: PortKey,
+    pub(crate) identity: PortIdentity,
+    /// `identity.id()`, made once.
+    id: String,
     pub(crate) conn: Option<u32>,
+    /// Its last open failed.
+    busy: bool,
+}
+
+impl PortEntry {
+    pub(crate) fn new(identity: PortIdentity, conn: Option<u32>, busy: bool) -> PortEntry {
+        PortEntry { id: identity.id(), identity, conn, busy }
+    }
+}
+
+fn port_infos(ports: &[PortEntry]) -> Vec<PortInfo> {
+    let state = |p: &PortEntry| match (p.conn, p.busy) {
+        (Some(_), _) => PortState::Open,
+        (None, true) => PortState::Busy,
+        (None, false) => PortState::Closed,
+    };
+    ports.iter().map(|p| PortInfo { id: p.id.clone(), name: p.identity.name.clone(), state: state(p) }).collect()
+}
+
+/// The store's load as the UI hears it, said once in the release log.
+fn loaded(result: LoadResult) -> Option<StoreProblem> {
+    match result {
+        LoadResult::Missing => None,
+        LoadResult::Loaded { rejected } if rejected.is_empty() => None,
+        LoadResult::Loaded { rejected } => {
+            log::warn!("[midi] {} stored binding(s) could not be read; the file keeps them", rejected.len());
+            Some(StoreProblem::Rejected { count: rejected.len() })
+        }
+        LoadResult::Invalid(why) => {
+            log::error!("[midi] the MIDI bindings cannot be read; nothing is written this session: {why}");
+            Some(StoreProblem::ReadOnly { why })
+        }
+        LoadResult::UnsupportedVersion(version) => {
+            let why = format!("a newer build wrote it (version {version})");
+            log::error!("[midi] the MIDI bindings file is kept as it is: {why}");
+            Some(StoreProblem::ReadOnly { why })
+        }
+    }
 }
 
 struct State {
     router: Router,
     queue: Queue,
     learn: Learn,
+    store: Store,
+    /// The engine generation the queue feeds, and every batch is made for.
+    generation: u64,
     ports: Vec<PortEntry>,
-    /// The port list the UI last heard.
-    published: Vec<PortInfo>,
+    /// The listed bindings MIDI learn runs, in the order it was handed them.
+    live: Vec<usize>,
+    /// Every stored binding and how it stands, as the UI last heard it.
+    bindings: Vec<ListedBinding>,
+    /// What else the UI last heard.
+    heard_ports: Vec<PortInfo>,
+    heard_learning: Option<LearnPick>,
+    heard_awaiting: Option<Binding>,
+    /// The store's revision last handed to a write.
+    written: u64,
+    /// The port thread knows something is due (the queue holds input, or a write waits).
+    armed: bool,
+    /// The last drain stopped at a head the engine's ring refused.
+    blocked: bool,
+    refused: Refusals,
+    /// The refusals and failed sends the release log last named, and when.
+    logged: (Refusals, u64, Option<Instant>),
+    /// The store's last problem, for a subscriber that comes later.
+    problem: Option<StoreProblem>,
 }
 
-/// What the port callbacks, the poller and [`MidiHost`] share.
+type Sink = Arc<dyn Fn(MidiEvent) + Send + Sync>;
+
+/// The UI events on their way out.
+#[derive(Default)]
+struct Events {
+    sink: Mutex<Option<Sink>>,
+    /// Queued under the state lock, so they keep the order of what they report.
+    pending: Mutex<VecDeque<MidiEvent>>,
+    /// One thread at a time hands them to the sink.
+    flushing: Mutex<()>,
+    /// The held set's change count the UI last heard.
+    held: AtomicU64,
+}
+
+/// What the port callbacks, the port thread and [`MidiHost`] share.
 pub(crate) struct Core {
     state: Mutex<State>,
-    events: Mutex<Vec<MidiEvent>>,
-    sink: Sink,
-    clock: FrameClock,
+    engine: Arc<dyn EngineSide>,
+    /// The store's folder; `None`: nothing is written.
+    dir: Option<PathBuf>,
+    /// Wakes the port thread; `None` without one (the tests run its timers by hand).
+    wake: Option<Sender<Wake>>,
+    held: HeldNotes,
+    events: Events,
     failed_sends: AtomicU64,
     panics: AtomicU64,
 }
 
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    // A panic on a port callback is caught, so a lock may be poisoned: the state stays usable.
+    mutex.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 impl Core {
-    fn new(sink: Sink, clock: FrameClock) -> Core {
-        Core {
+    fn new(engine: Arc<dyn EngineSide>, store: Store, problem: Option<StoreProblem>, dir: Option<PathBuf>, wake: Option<Sender<Wake>>) -> Core {
+        let router = Router::default();
+        let held = router.held().clone();
+        let written = store.revision();
+        let core = Core {
             state: Mutex::new(State {
-                router: Router::default(),
-                queue: Queue::new(GENERATION),
+                router,
+                queue: Queue::new(0),
                 learn: Learn::default(),
+                store,
+                generation: 0,
                 ports: Vec::new(),
-                published: Vec::new(),
+                live: Vec::new(),
+                bindings: Vec::new(),
+                heard_ports: Vec::new(),
+                heard_learning: None,
+                heard_awaiting: None,
+                written,
+                armed: false,
+                blocked: false,
+                refused: Refusals::default(),
+                logged: (Refusals::default(), 0, None),
+                problem,
             }),
-            events: Mutex::new(Vec::new()),
-            sink,
-            clock,
+            engine,
+            dir,
+            wake,
+            held,
+            events: Events::default(),
             failed_sends: AtomicU64::new(0),
             panics: AtomicU64::new(0),
-        }
+        };
+        core.refresh(&mut lock(&core.state));
+        core
     }
 
-    /// A panic on a port callback is caught, so the lock may be poisoned: the state stays usable.
     fn lock(&self) -> MutexGuard<'_, State> {
-        self.state.lock().unwrap_or_else(|e| e.into_inner())
+        lock(&self.state)
     }
 
+    /// Queue an event for the UI, under the state lock; dropped while no one listens.
     fn emit(&self, event: MidiEvent) {
-        self.events.lock().unwrap_or_else(|e| e.into_inner()).push(event);
-    }
-
-    /// A device runs while the clock has a stamp.
-    fn running(&self, at: Instant) -> bool {
-        self.clock.press_frame(at).is_some()
-    }
-
-    /// Hand one input's batch to the queue, whole; a refused attack records no owner.
-    fn admit(router: &mut Router, queue: &mut Queue, out: &mut Vec<Out>, running: bool) {
-        if queue.admit(out, GENERATION, running).is_err() {
-            router.attack_refused(out);
+        if lock(&self.events.sink).is_some() {
+            lock(&self.events.pending).push_back(event);
         }
-        out.clear();
     }
 
-    /// What the sink takes, in order; a refusal stays at the head for the next drain.
-    fn drain(&self, queue: &mut Queue) {
-        queue.drain(&mut |command| {
-            (self.sink)(command).map_err(|_| {
-                self.failed_sends.fetch_add(1, Relaxed);
+    /// Hand the queued events to the sink, in order, and the held set when it changed. Outside the
+    /// state lock; a thread that finds another handing them over leaves its events to that one.
+    fn flush(&self) {
+        loop {
+            let turn = match self.events.flushing.try_lock() {
+                Ok(turn) => turn,
+                Err(TryLockError::Poisoned(e)) => e.into_inner(),
+                Err(TryLockError::WouldBlock) => return,
+            };
+            let Some(sink) = lock(&self.events.sink).clone() else { return };
+            loop {
+                let next = lock(&self.events.pending).pop_front();
+                match next {
+                    Some(event) => sink(event),
+                    None => break,
+                }
+            }
+            let held = self.held.read();
+            if self.events.held.swap(held.changes, Relaxed) != held.changes {
+                sink(MidiEvent::Held { notes: (0..128).filter(|&n| held.contains(n)).collect(), changes: held.changes });
+            }
+            drop(turn);
+            if lock(&self.events.pending).is_empty() && self.held.read().changes == self.events.held.load(Relaxed) {
+                return;
+            }
+        }
+    }
+
+    fn wake(&self) {
+        if let Some(wake) = &self.wake {
+            let _ = wake.send(Wake::Tick);
+        }
+    }
+
+    /// One input's batch into the queue, whole; a refused attack is undone in the router and the
+    /// refusal counted. True when it went in.
+    fn admit(&self, st: &mut State, out: &mut Vec<Out>) -> bool {
+        if out.is_empty() {
+            return true;
+        }
+        let admitted = match st.queue.admit(out, st.generation, self.engine.running()) {
+            Ok(()) => true,
+            Err(why) => {
+                st.router.attack_refused(out);
+                st.refused.count(why);
+                false
+            }
+        };
+        out.clear();
+        admitted
+    }
+
+    /// What a binding fired: its batch, then its UI events. A refused HOLD press holds nothing.
+    fn fire(&self, st: &mut State, fire: Fire) {
+        let run = actions::run(fire);
+        let mut out = run.out;
+        if !self.admit(st, &mut out) {
+            if let Fire::HoldPress { control, .. } = fire {
+                st.learn.hold_refused(control);
+            }
+        }
+        for event in run.events {
+            self.emit(event);
+        }
+    }
+
+    /// Send what the engine's ring takes, in order, while a device runs.
+    fn drain(&self, st: &mut State) {
+        st.blocked = false;
+        if st.queue.is_empty() || !self.engine.running() {
+            return;
+        }
+        let (engine, failed) = (&self.engine, &self.failed_sends);
+        let drained = st.queue.drain(&mut |command| {
+            engine.send(command).map_err(|_| {
+                failed.fetch_add(1, Relaxed);
             })
         });
+        st.blocked = drained.blocked;
+    }
+
+    /// The end of every locked call: drain, arm the port thread's timers, tell the UI what learn shows.
+    fn settle(&self, st: &mut State) {
+        self.drain(st);
+        let write_due = self.dir.is_some() && st.store.revision() > st.written;
+        if (write_due || !st.queue.is_empty()) && !st.armed {
+            st.armed = true;
+            self.wake();
+        }
+        let learning = st.learn.learning().map(|(action, target)| LearnPick { action, target });
+        if learning != st.heard_learning {
+            st.heard_learning = learning;
+            self.emit(MidiEvent::Learning { learning });
+        }
+        let awaiting = st.learn.awaiting_release().cloned();
+        if awaiting != st.heard_awaiting {
+            st.heard_awaiting = awaiting.clone();
+            self.emit(MidiEvent::AwaitingRelease { binding: awaiting });
+        }
+    }
+
+    /// Run `f` under the lock with a batch for the queue, then settle and hand the events over.
+    fn input<R>(&self, f: impl FnOnce(&Core, &mut State, &mut Vec<Out>) -> R) -> R {
+        let result = {
+            let mut guard = self.lock();
+            let st = &mut *guard;
+            let mut out = Vec::new();
+            let result = f(self, st, &mut out);
+            self.admit(st, &mut out);
+            self.settle(st);
+            result
+        };
+        self.flush();
+        result
     }
 
     /// A port callback: `bytes` arrived on connection `conn` at `at`.
     pub(crate) fn message(&self, conn: u32, at: Instant, bytes: &[u8]) {
         let Some(message) = parse(bytes) else { return };
-        if catch_unwind(AssertUnwindSafe(|| self.route(conn, at, message))).is_err() {
+        // DEV: where a note reaches native code, for the MIDI benchmark (one atomic load unless it runs).
+        #[cfg(debug_assertions)]
+        if let Message::NoteOn { note, velocity, .. } = message {
+            super::midi_bench::arrived(&[Command::NoteOn(note, f32::from(velocity) / 127.0)], at);
+        }
+        if catch_unwind(AssertUnwindSafe(|| self.input(|core, st, out| core.route(st, out, conn, at, message)))).is_err() {
             self.panics.fetch_add(1, Relaxed);
         }
     }
 
-    fn route(&self, conn: u32, at: Instant, message: parse::Message) {
-        let mut state = self.lock();
-        let State { router, queue, learn, ports, .. } = &mut *state;
+    fn route(&self, st: &mut State, out: &mut Vec<Out>, conn: u32, at: Instant, message: Message) {
         // A connection already released (its port went away) has no owner left.
-        let Some(port) = ports.iter().find(|p| p.conn == Some(conn)) else { return };
+        let Some(port) = st.ports.iter().find(|p| p.conn == Some(conn)) else { return };
+        let outcome = st.learn.consume(&port.id, &port.identity.name, &message, at);
         let owner = Owner::Midi { conn, channel: message.channel() };
-        let running = self.running(at);
-        let mut out = Vec::new();
-        let outcome = learn.consume(&port.key, &message, at);
-        if let Some(b) = outcome.learned {
-            if b.kind == Kind::Cc {
-                router.release_controller(&owner, b.number, &mut out);
-                Core::admit(router, queue, &mut out, running);
-            }
-            self.emit(MidiEvent::Learned(b));
+        if let Some(controller) = outcome.release_controller {
+            st.router.release_controller(&owner, controller, out);
+            self.admit(st, out);
+        }
+        for fire in outcome.fire {
+            self.fire(st, fire);
+        }
+        if let Some(reason) = outcome.refused {
+            self.emit(MidiEvent::Refused { reason });
+        }
+        if let Some(binding) = outcome.learned {
+            self.emit(MidiEvent::Learned { binding });
         }
         if outcome.changed {
-            self.emit(MidiEvent::Bindings(learn.bindings.clone()));
-        }
-        match outcome.fire.map(ActionId::engine_action) {
-            Some(Some(action)) => {
-                out.push(Out::new(Command::Action(action)));
-                Core::admit(router, queue, &mut out, running);
-            }
-            Some(None) => self.emit(MidiEvent::GoLive),
-            None => {}
+            st.store.replace(&st.live, st.learn.bindings().to_vec());
+            self.refresh(st);
         }
         if !outcome.consumed {
-            router.message(&owner, message, &mut out);
-            Core::admit(router, queue, &mut out, running);
-        }
-        if running {
-            self.drain(queue);
+            st.router.message(&owner, message, out);
         }
     }
 
-    /// Connection `conn` is closing: release what it held and stop taking its messages. Returns the
-    /// port's name when it was in the table.
-    pub(crate) fn port_gone(&self, conn: u32) -> Option<String> {
-        let mut state = self.lock();
-        let State { router, queue, ports, .. } = &mut *state;
-        let running = self.running(Instant::now());
-        let mut out = Vec::new();
-        router.release_conn(conn, &mut out);
-        Core::admit(router, queue, &mut out, running);
-        if running {
-            self.drain(queue);
+    /// Which stored bindings are live on the present ports (one snapshot): save the moves resolution
+    /// makes, hand MIDI learn the live ones (a HOLD whose binding left or changed is released), and
+    /// tell the UI when the list changed.
+    fn refresh(&self, st: &mut State) {
+        let present: Vec<PortIdentity> = st.ports.iter().map(|p| p.identity.clone()).collect();
+        let listed = st.store.listed();
+        // A blocked record names no identity anyone can trust: it takes no part.
+        let candidates: Vec<usize> = (0..listed.len()).filter(|&i| listed[i].blocked.is_none()).collect();
+        let stored: Vec<(&str, &str)> = candidates
+            .iter()
+            .map(|&i| {
+                let l = &listed[i];
+                (if l.ordinal { ORDINAL } else { l.binding.port_id.as_str() }, l.binding.port_name.as_str())
+            })
+            .collect();
+        let mut resolved: Vec<Option<Resolution>> = vec![None; listed.len()];
+        let mut moves: Vec<(String, String, usize)> = Vec::new();
+        for (&i, r) in candidates.iter().zip(ports::resolve(&stored, &present)) {
+            resolved[i] = Some(r);
+            if let Resolution::Port { port, reanchor: true } = r {
+                let found = (listed[i].binding.port_id.clone(), listed[i].binding.port_name.clone(), port);
+                if !moves.contains(&found) {
+                    moves.push(found);
+                }
+            }
         }
-        let entry = ports.iter_mut().find(|p| p.conn == Some(conn))?;
-        entry.conn = None;
-        Some(entry.key.name.clone())
+        for (old_id, old_name, port) in moves {
+            let (new_id, new_name) = (&st.ports[port].id, &st.ports[port].identity.name);
+            let moved = st.store.reanchor(&old_id, &old_name, new_id, new_name);
+            if !moved.moved.is_empty() {
+                log::info!("[midi] {} binding(s) of {old_name:?} follow it to {new_id}", moved.moved.len());
+            }
+            if !moved.blocked.is_empty() {
+                log::warn!("[midi] {} binding(s) of {old_name:?} wait for the player: {new_id} binds their messages already", moved.blocked.len());
+            }
+        }
+
+        let listed = st.store.listed();
+        let mut live = Vec::new();
+        let mut states = Vec::with_capacity(listed.len());
+        for (i, l) in listed.iter().enumerate() {
+            states.push(match resolved[i] {
+                _ if l.blocked.is_some() => BindingState::Blocked,
+                None => BindingState::Blocked,
+                Some(Resolution::Port { port, .. }) if !l.ordinal && l.binding.port_id == st.ports[port].id => {
+                    live.push(i);
+                    BindingState::Live
+                }
+                Some(Resolution::Port { .. }) | Some(Resolution::Unresolved(Unresolved::NoPort)) => BindingState::NoPort,
+                Some(Resolution::Unresolved(Unresolved::SeveralPorts)) => BindingState::SeveralPorts,
+                Some(Resolution::Unresolved(Unresolved::SeveralAbsent)) => BindingState::SeveralAbsent,
+            });
+        }
+        let fires = st.learn.set_bindings(live.iter().map(|&i| listed[i].binding.clone()).collect());
+        st.live = live;
+        for fire in fires {
+            self.fire(st, fire);
+        }
+        let bindings: Vec<ListedBinding> = listed.into_iter().zip(states).map(|(listed, state)| ListedBinding { listed, state }).collect();
+        if bindings != st.bindings {
+            st.bindings = bindings.clone();
+            self.emit(MidiEvent::Bindings { bindings });
+        }
     }
 
-    /// One input from outside the port callbacks (a target switch, a panic), admitted and drained as a
-    /// message is.
-    fn input(&self, f: impl FnOnce(&mut Router, &mut Vec<Out>)) -> Result<(), String> {
-        let mut state = self.lock();
-        let State { router, queue, .. } = &mut *state;
-        let running = self.running(Instant::now());
-        let mut out = Vec::new();
-        f(router, &mut out);
-        let admitted = queue.admit(&out, GENERATION, running).map_err(|why| format!("the MIDI queue refused it: {why:?}"));
-        if running {
-            self.drain(queue);
-        }
-        admitted
-    }
-
+    /// The port thread's table, after each enumeration (each port registered before it connects).
     pub(crate) fn set_ports(&self, ports: Vec<PortEntry>) {
-        self.lock().ports = ports;
+        self.input(|core, st, _| {
+            let same = st.ports.len() == ports.len() && st.ports.iter().zip(&ports).all(|(a, b)| a.identity == b.identity);
+            st.ports = ports;
+            if !same {
+                core.refresh(st);
+            }
+        });
     }
 
-    /// Tell the UI when the port list changed, or a port went away.
+    /// Connection `conn` did not open.
+    pub(crate) fn open_failed(&self, conn: u32) {
+        if let Some(port) = self.lock().ports.iter_mut().find(|p| p.conn == Some(conn)) {
+            port.conn = None;
+            port.busy = true;
+        }
+    }
+
+    /// Connection `conn` is closing: release what it held (its notes, pedal and wheels, its HOLD
+    /// presses) and stop taking its messages. Returns the port's name when it was in the table.
+    pub(crate) fn port_gone(&self, conn: u32) -> Option<String> {
+        self.input(|core, st, out| {
+            st.router.release_conn(conn, out);
+            core.admit(st, out);
+            let port = st.ports.iter_mut().find(|p| p.conn == Some(conn))?;
+            port.conn = None;
+            let (id, name) = (port.id.clone(), port.identity.name.clone());
+            for fire in st.learn.port_gone(&id) {
+                core.fire(st, fire);
+            }
+            Some(name)
+        })
+    }
+
+    /// Tell the UI when the port list changed, and which ports went away.
     pub(crate) fn publish_ports(&self, gone: Vec<String>) {
-        let mut state = self.lock();
-        let now = port_infos(&state.ports);
-        if now != state.published || !gone.is_empty() {
-            state.published = now.clone();
-            self.emit(MidiEvent::Ports { ports: now, gone });
+        self.input(|core, st, _| {
+            let now = port_infos(&st.ports);
+            if now != st.heard_ports {
+                st.heard_ports = now.clone();
+                core.emit(MidiEvent::Ports { ports: now });
+            }
+            if !gone.is_empty() {
+                core.emit(MidiEvent::Gone { names: gone });
+            }
+        });
+    }
+
+    /// The port thread's timers, at `now`: learn's release waits, the queue's retry, a store write and
+    /// the refusals' log line. Returns when it next has work.
+    pub(crate) fn tick(&self, now: Instant) -> Option<Instant> {
+        let (write, line, next) = {
+            let mut guard = self.lock();
+            let st = &mut *guard;
+            st.learn.tick(now);
+            let write = (self.dir.is_some() && st.store.revision() > st.written).then(|| {
+                st.written = st.store.revision();
+                st.store.snapshot()
+            });
+            // This is the port thread: nothing to wake.
+            st.armed = true;
+            self.settle(st);
+            st.armed = !st.queue.is_empty();
+            let retry = st.armed.then(|| now + if st.blocked { RETRY } else { IDLE_RETRY });
+            let (logged, logged_sends, at) = st.logged;
+            let sends = self.failed_sends.load(Relaxed);
+            let moved = (st.refused.full, st.refused.stale, sends) != (logged.full, logged.stale, logged_sends);
+            let line = (moved && at.is_none_or(|at| now.saturating_duration_since(at) >= LOG_EVERY)).then(|| {
+                st.logged = (st.refused, sends, Some(now));
+                format!(
+                    "since the last line: {} send(s) the engine's full ring refused (each retried), {} batch(es) refused for room, {} made for another engine; queue {:?}",
+                    sends - logged_sends,
+                    st.refused.full - logged.full,
+                    st.refused.stale - logged.stale,
+                    st.queue.counters()
+                )
+            });
+            (write, line, [st.learn.next_deadline(), retry].into_iter().flatten().min())
+        };
+        if let Some(line) = line {
+            log::warn!("[midi] {line}");
+        }
+        if let Some(snapshot) = write {
+            self.write(snapshot);
+        }
+        self.flush();
+        next
+    }
+
+    /// Write `snapshot` (off the lock); a refusal or a failure is the UI's to show and the release log's.
+    fn write(&self, snapshot: Snapshot) {
+        let Some(dir) = &self.dir else { return };
+        let problem = match snapshot.write(dir) {
+            Ok(_) => return,
+            Err(WriteError::ReadOnly(why)) => StoreProblem::ReadOnly { why },
+            Err(WriteError::Conflict(why)) => StoreProblem::Conflict { why },
+            Err(WriteError::Failed(why)) => StoreProblem::Failed { why },
+        };
+        let mut st = self.lock();
+        if st.problem.as_ref() != Some(&problem) {
+            log::error!("[midi] the MIDI bindings were not saved: {problem:?}");
+        }
+        st.problem = Some(problem.clone());
+        self.emit(MidiEvent::Store { problem });
+    }
+
+    /// The rebuild handshake ([`RebuildHook`]).
+    fn pause(&self) {
+        self.lock().queue.pause();
+    }
+
+    fn rebuild(&self, generation: u64) -> Vec<Command> {
+        let mut st = self.lock();
+        let fold = st.queue.rebuild(generation);
+        st.generation = generation;
+        st.router.engine_rebuilt();
+        st.learn.clear_holds();
+        fold.commands().collect()
+    }
+
+    fn resume(&self) {
+        self.input(|_, st, _| st.queue.resume());
+    }
+}
+
+/// The engine host's way into [`Core`]'s rebuild handshake; it keeps no host alive.
+struct Rebuild(Weak<Core>);
+
+impl RebuildHook for Rebuild {
+    fn pause(&self) {
+        if let Some(core) = self.0.upgrade() {
+            core.pause();
+        }
+    }
+
+    fn rebuild(&self, generation: u64) -> Vec<Command> {
+        self.0.upgrade().map(|core| core.rebuild(generation)).unwrap_or_default()
+    }
+
+    fn resume(&self) {
+        if let Some(core) = self.0.upgrade() {
+            core.resume();
         }
     }
 }
 
-fn port_infos(ports: &[PortEntry]) -> Vec<PortInfo> {
-    ports.iter().map(|p| PortInfo { name: p.key.name.clone(), occurrence: p.key.occurrence, open: p.conn.is_some() }).collect()
+/// A core on `engine`, its rebuild hook registered.
+fn hosted(engine: Arc<dyn EngineSide>, store: Store, problem: Option<StoreProblem>, dir: Option<PathBuf>, wake: Option<Sender<Wake>>) -> Arc<Core> {
+    let core = Arc::new(Core::new(engine.clone(), store, problem, dir, wake));
+    engine.set_rebuild_hook(Some(Arc::new(Rebuild(Arc::downgrade(&core)))));
+    core
 }
 
-/// Native MIDI input for the engine. Dropping it closes every port (their notes released) and joins the
-/// poller.
+/// Native MIDI input for the engine. Dropping it stops the port thread, which closes every port (their
+/// notes and HOLD presses released) and saves what is due, then lets go of what the UI still holds.
 pub struct MidiHost {
     core: Arc<Core>,
-    /// Hanging up stops the poller.
-    stop: Option<Sender<()>>,
-    poller: Option<JoinHandle<()>>,
+    /// [`Wake::Stop`] stops the port thread.
+    wake: Option<Sender<Wake>>,
+    port_thread: Option<JoinHandle<()>>,
 }
 
 impl MidiHost {
-    /// Start listening: every present input port opens now, and ports that come and go are followed
-    /// every second (`ports::POLL`). Commands go to `sink`; `clock` says whether a device runs.
-    pub fn start(sink: Sink, clock: FrameClock) -> MidiHost {
-        let core = Arc::new(Core::new(sink, clock));
-        let (stop, stopped) = mpsc::channel();
-        let poller = {
-            let core = core.clone();
+    /// Load the bindings from `data_dir` (`None`: they live in memory only), register the rebuild
+    /// handshake on `engine` and start the port thread: every present input port opens now, and ports
+    /// that come and go are followed by Windows' interface notifications, with a poll every second
+    /// (`ports::POLL`) as the backstop. The bindings load before any input can run them (decision 9).
+    pub fn start(engine: Arc<dyn EngineSide>, data_dir: Option<PathBuf>) -> MidiHost {
+        let (store, problem) = match &data_dir {
+            Some(dir) => {
+                let (store, result) = store::load(dir);
+                (store, loaded(result))
+            }
+            None => (store::empty(), None),
+        };
+        let (wake, woken) = mpsc::channel();
+        let core = hosted(engine, store, problem, data_dir, Some(wake.clone()));
+        let port_thread = {
+            let (core, wake) = (core.clone(), wake.clone());
             std::thread::Builder::new()
                 .name("lf-midi-ports".into())
-                .spawn(move || ports::run(core, stopped))
-                .map_err(|e| log::error!("[midi] could not start the port poller: {e}"))
+                .spawn(move || ports::run(core, wake, woken))
+                .map_err(|e| log::error!("[midi] could not start the port thread: {e}"))
                 .ok()
         };
-        MidiHost { core, stop: Some(stop), poller }
+        MidiHost { core, wake: Some(wake), port_thread }
     }
 
-    /// Replace the bindings (the settings handed over, or one forgotten).
-    pub fn set_bindings(&self, bindings: Vec<Binding>) {
-        self.core.lock().learn.set_bindings(bindings);
+    /// Where the UI events go (on their own channel). The first ones are what a new listener needs: the
+    /// ports, the bindings, the learn's state, the store's last problem and the held notes.
+    pub fn set_events(&self, sink: Box<dyn Fn(MidiEvent) + Send + Sync>) {
+        let core = &self.core;
+        {
+            let st = core.lock();
+            *lock(&core.events.sink) = Some(Arc::from(sink));
+            lock(&core.events.pending).clear();
+            core.emit(MidiEvent::Ports { ports: port_infos(&st.ports) });
+            core.emit(MidiEvent::Bindings { bindings: st.bindings.clone() });
+            core.emit(MidiEvent::Learning { learning: st.heard_learning });
+            core.emit(MidiEvent::AwaitingRelease { binding: st.heard_awaiting.clone() });
+            if let Some(problem) = &st.problem {
+                core.emit(MidiEvent::Store { problem: problem.clone() });
+            }
+            // The held set goes out with them, whatever its count.
+            core.events.held.store(u64::MAX, Relaxed);
+        }
+        core.flush();
     }
 
-    pub fn bindings(&self) -> Vec<Binding> {
-        self.core.lock().learn.bindings.clone()
+    /// A new WebView document (`host_init`'s `frontendEpoch`): the older documents' holds are released
+    /// and their late events refused.
+    pub fn ui_epoch(&self, epoch: u64) {
+        self.core.input(|_, st, out| st.router.ui_epoch(epoch, out));
     }
 
-    /// Learn the next CC or note-on, from any port, onto `action` (answered by [`MidiEvent::Learned`]).
-    pub fn learn(&self, action: ActionId) {
-        self.core.lock().learn.learning = Some(action);
+    /// A pointer or key of document `epoch` (`owner`: `pointer:<id>` or `key:<code>`) pressed or let go
+    /// of `note` (velocity 0..127; 0 is a release).
+    pub fn ui_note(&self, epoch: u64, owner: String, note: u8, velocity: u8, on: bool) {
+        let owner = Owner::Ui { epoch, id: owner };
+        self.core.input(|_, st, out| {
+            if on {
+                st.router.note_on(&owner, note, velocity, out);
+            } else {
+                st.router.note_off(&owner, note, out);
+            }
+        });
     }
 
-    /// Stop listening. True when a learn was pending.
+    /// The window lost focus: document `epoch`'s keys and pointers are up.
+    pub fn ui_blur(&self, epoch: u64) {
+        self.core.input(|_, st, out| st.router.ui_blur(epoch, out));
+    }
+
+    /// Move the notes to `target`, picked on `slot` (`None`: no slot): what sounds is released first.
+    /// The same slot and target again change nothing.
+    pub fn select_target(&self, slot: Option<u8>, target: NoteTarget) {
+        self.core.input(|_, st, out| st.router.select_target(slot, target, out));
+    }
+
+    /// Panic: every note that sounds is released and forgotten, then `Command::AllNotesOff`.
+    pub fn all_notes_off(&self) {
+        self.core.input(|_, st, out| {
+            st.router.release_all(out);
+            out.push(Out::new(Command::AllNotesOff));
+        });
+    }
+
+    /// A batch of the UI's commands (`engine_send`'s), in order. Its input commands (looper presses,
+    /// `Press`, `SelectTrack`, toggles) join the one queue, a run of them as one batch, and while no
+    /// device runs they are dropped (counted), as a pedal's are; a setting goes straight to the engine,
+    /// and may overtake input still queued behind a full ring. A note, a wheel, the note target or a
+    /// panic is refused: it goes through [`MidiHost::ui_note`], [`MidiHost::select_target`] or
+    /// [`MidiHost::all_notes_off`]. An error means the rest of the batch did not go.
+    pub fn ui_commands(&self, commands: Vec<Command>) -> Result<(), String> {
+        let mut run: Vec<Out> = Vec::new();
+        for command in commands {
+            match actions::ui_route(&command) {
+                UiRoute::Queue => run.push(Out::new(command)),
+                route => {
+                    self.core.input(|_, _, out| out.append(&mut run));
+                    if route == UiRoute::Router {
+                        return Err(format!("{command:?} goes through the note router, not engine_send"));
+                    }
+                    self.core.engine.send(TimedCommand { frame: None, command })?;
+                }
+            }
+        }
+        self.core.input(|_, _, out| out.append(&mut run));
+        Ok(())
+    }
+
+    /// Learn the next CC or note-on, from any port, onto `action` (on `target` for a lane action; a
+    /// global one takes none). Answered by [`MidiEvent::Learned`].
+    pub fn learn(&self, action: ActionId, target: Target) {
+        self.core.input(|_, st, _| st.learn.learn(action, target));
+    }
+
+    /// Stop listening (a learned pedal's wait for its release goes on). True when a learn was pending.
     pub fn cancel_learn(&self) -> bool {
-        self.core.lock().learn.learning.take().is_some()
+        self.core.input(|_, st, _| st.learn.cancel_learn())
     }
 
-    pub fn learning(&self) -> Option<ActionId> {
-        self.core.lock().learn.learning
+    /// Drop listed binding `index`: its messages reach the play path again, and a HOLD it held is
+    /// released.
+    pub fn forget(&self, index: usize) -> Result<(), String> {
+        self.core.input(|core, st, _| {
+            st.store.forget(index)?;
+            core.refresh(st);
+            Ok(())
+        })
+    }
+
+    /// Read listed binding `index`'s pedal as momentary or latching; a latching pedal has no HOLD. A
+    /// HOLD it held is released, and its pedal's release spent.
+    pub fn set_momentary(&self, index: usize, momentary: bool) -> Result<(), String> {
+        self.edit(index, |b| Ok(Binding { momentary, hold: b.hold && momentary, ..b }))
+    }
+
+    /// HOLD on or off for listed binding `index`: on for a momentary REC/DUB pedal only.
+    pub fn set_hold(&self, index: usize, hold: bool) -> Result<(), String> {
+        self.edit(index, |b| {
+            if hold && !(b.momentary && b.action == ActionId::RecDub) {
+                return Err("HOLD is for a momentary REC/DUB pedal".to_string());
+            }
+            Ok(Binding { hold, ..b })
+        })
+    }
+
+    fn edit(&self, index: usize, f: impl FnOnce(Binding) -> Result<Binding, String>) -> Result<(), String> {
+        self.core.input(|core, st, _| {
+            let b = st.store.listed().into_iter().nth(index).ok_or_else(|| format!("no binding {index}"))?.binding;
+            st.store.edit(index, f(b)?)?;
+            core.refresh(st);
+            Ok(())
+        })
+    }
+
+    /// The player assigns listed binding `index` to the present port `port_id` ([`PortInfo::id`]): a
+    /// blocked or unresolved record runs there from now on. Refused when that port already binds its
+    /// message.
+    pub fn assign(&self, index: usize, port_id: &str) -> Result<(), String> {
+        self.core.input(|core, st, _| {
+            let name = st.ports.iter().find(|p| p.id == port_id).map(|p| p.identity.name.clone()).ok_or_else(|| format!("no port {port_id}"))?;
+            st.store.assign(index, port_id, &name)?;
+            core.refresh(st);
+            Ok(())
+        })
+    }
+
+    /// Import the web's list (`lf.midiLearn` verbatim; `"[]"` when it has none), once.
+    pub fn import_legacy(&self, json: &str) -> ImportReport {
+        self.core.input(|core, st, _| {
+            let report = st.store.import_legacy(json);
+            core.refresh(st);
+            report
+        })
+    }
+
+    /// Every stored binding, in list order, and how it stands.
+    pub fn listed(&self) -> Vec<ListedBinding> {
+        self.core.lock().bindings.clone()
     }
 
     /// The present input ports, in the system's order.
@@ -327,84 +1003,189 @@ impl MidiHost {
         port_infos(&self.core.lock().ports)
     }
 
-    /// Move the notes to `target`: the router releases what sounds, then sends `Command::SelectInstrument`,
-    /// in one batch, and forgets the held notes (nothing when `target` is already selected).
-    pub fn select_instrument(&self, target: NoteTarget) -> Result<(), String> {
-        self.core.input(|router, out| router.select_target(None, target, out))
-    }
-
-    /// Panic: the router releases what sounds and forgets it, then `Command::AllNotesOff`.
-    pub fn all_notes_off(&self) -> Result<(), String> {
-        self.core.input(|router, out| {
-            router.release_all(out);
-            out.push(Out::new(Command::AllNotesOff));
-        })
-    }
-
-    /// Move the pending UI events into `out`.
-    pub fn drain_events(&self, out: &mut Vec<MidiEvent>) {
-        out.append(&mut self.core.events.lock().unwrap_or_else(|e| e.into_inner()));
+    /// The notes held down now, read without the lock.
+    pub fn held(&self) -> Held {
+        self.core.held.read()
     }
 
     pub fn diag(&self) -> MidiDiag {
-        MidiDiag { failed_sends: self.core.failed_sends.load(Relaxed), panics: self.core.panics.load(Relaxed) }
+        let st = self.core.lock();
+        MidiDiag {
+            failed_sends: self.core.failed_sends.load(Relaxed),
+            panics: self.core.panics.load(Relaxed),
+            refused: st.refused,
+            queue: st.queue.counters(),
+        }
     }
 }
 
 impl Drop for MidiHost {
     fn drop(&mut self) {
-        drop(self.stop.take());
-        if let Some(poller) = self.poller.take() {
-            let _ = poller.join();
+        self.core.engine.set_rebuild_hook(None);
+        if let Some(wake) = self.wake.take() {
+            let _ = wake.send(Wake::Stop);
         }
+        if let Some(port_thread) = self.port_thread.take() {
+            let _ = port_thread.join();
+        }
+        self.core.input(|_, st, out| st.router.release_all(out));
+        self.core.tick(Instant::now());
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
+    use std::sync::atomic::AtomicBool;
 
-    use lf_engine::{Action, Instrument};
+    use lf_engine::{Action, Instrument, Toggle};
 
-    use super::bindings::RELEASE;
+    use super::bindings::Kind;
+    use super::learn::RELEASE_WAIT;
+    use super::store::{Origin, FILE_NAME};
 
     const A: u32 = 1;
     const B: u32 = 2;
+    const LEAD: NoteTarget = NoteTarget::Builtin(Instrument::Lead);
+    const PAD: NoteTarget = NoteTarget::Builtin(Instrument::Pad);
+    const MS: Duration = Duration::from_millis(1);
 
-    /// A host with no poller and two ports, "Probe a" and "Probe b" on connections [`A`] and [`B`], as
-    /// the browser probes' two virtual Web MIDI inputs, and a device running (its clock stamped).
+    /// The engine host as these tests need it: what it was sent, whether a device runs, a ring that
+    /// can be made to refuse, and the rebuild hook registered on it.
+    #[derive(Default)]
+    struct TestEngine {
+        sent: Mutex<Vec<Command>>,
+        running: AtomicBool,
+        full: AtomicBool,
+        hook: Mutex<Option<Arc<dyn RebuildHook>>>,
+    }
+
+    impl EngineSide for TestEngine {
+        fn send(&self, command: TimedCommand) -> Result<(), String> {
+            assert_eq!(command.frame, None, "nothing is stamped");
+            if self.full.load(Relaxed) {
+                return Err("the engine's command ring is full".into());
+            }
+            self.sent.lock().unwrap().push(command.command);
+            Ok(())
+        }
+
+        fn running(&self) -> bool {
+            self.running.load(Relaxed)
+        }
+
+        fn set_rebuild_hook(&self, hook: Option<Arc<dyn RebuildHook>>) {
+            *self.hook.lock().unwrap() = hook;
+        }
+    }
+
+    /// A port named `name` on its own device path.
+    fn port(name: &str, conn: Option<u32>) -> PortEntry {
+        port_at(&format!(r"\\?\usb#{name}"), name, conn)
+    }
+
+    fn port_at(path: &str, name: &str, conn: Option<u32>) -> PortEntry {
+        PortEntry::new(PortIdentity { path: path.into(), index: 0, name: name.into() }, conn, false)
+    }
+
+    fn id(name: &str) -> String {
+        port(name, None).id
+    }
+
+    fn on(note: u8, velocity: u8) -> Command {
+        Command::NoteOn(note, f32::from(velocity) / 127.0)
+    }
+
+    fn hold_pedal(port_name: &str, number: u8) -> Binding {
+        Binding {
+            port_id: id(port_name),
+            port_name: port_name.into(),
+            channel: 0,
+            kind: Kind::Cc,
+            number,
+            action: ActionId::RecDub,
+            target: None,
+            press_high: true,
+            momentary: true,
+            hold: true,
+        }
+    }
+
+    /// A store holding `list`, learned natively.
+    fn holding(list: Vec<Binding>) -> Store {
+        let mut store = store::empty();
+        store.replace(&[], list);
+        store
+    }
+
+    /// A web record (`port`, as `midi-actions.ts` saves it): a momentary pedal on CC `number`.
+    fn legacy(port: &str, port_name: &str, number: u8, action: &str) -> serde_json::Value {
+        serde_json::json!({
+            "port": port, "portName": port_name, "channel": 0, "kind": "cc", "number": number,
+            "action": action, "pressHigh": true, "momentary": true, "target": null, "hold": false,
+        })
+    }
+
+    fn legacy_list(records: &[serde_json::Value]) -> String {
+        serde_json::to_string(records).unwrap()
+    }
+
+    /// A scratch folder for `midi-bindings.json`, removed on drop.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(tag: &str) -> Scratch {
+            static N: AtomicU64 = AtomicU64::new(0);
+            let dir = std::env::temp_dir().join(format!("lf-midi-glue-{tag}-{}-{}", std::process::id(), N.fetch_add(1, Relaxed)));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            Scratch(dir)
+        }
+
+        /// The store as `MidiHost::start` loads it.
+        fn load(&self) -> (Store, Option<StoreProblem>) {
+            let (store, result) = store::load(&self.0);
+            (store, loaded(result))
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// A host with no port thread (the tests run its timers: [`Rig::wait`]), a device running, and its
+    /// UI events recorded.
     struct Rig {
         host: MidiHost,
-        sent: Arc<Mutex<Vec<TimedCommand>>>,
-        clock: FrameClock,
+        engine: Arc<TestEngine>,
+        events: Arc<Mutex<Vec<MidiEvent>>>,
         t: Instant,
     }
 
     impl Rig {
+        /// Two ports, "Probe a" and "Probe b" on connections [`A`] and [`B`], as the browser probes'
+        /// two virtual Web MIDI inputs.
         fn new() -> Rig {
-            let r = Rig::stopped();
-            r.clock.publish(r.t, 0, 256, 48_000);
-            r
+            Rig::with((store::empty(), None), None, vec![port("Probe a", Some(A)), port("Probe b", Some(B))])
         }
 
-        /// No device runs: the clock has no stamp.
-        fn stopped() -> Rig {
-            let sent = Arc::new(Mutex::new(Vec::new()));
-            let sink: Sink = {
-                let sent = sent.clone();
-                Arc::new(move |c| {
-                    sent.lock().unwrap().push(c);
-                    Ok(())
-                })
-            };
-            let clock = FrameClock::new();
-            let core = Arc::new(Core::new(sink, clock.clone()));
-            core.set_ports(vec![
-                PortEntry { key: PortKey { name: "Probe a".into(), occurrence: 0 }, conn: Some(A) },
-                PortEntry { key: PortKey { name: "Probe b".into(), occurrence: 0 }, conn: Some(B) },
-            ]);
-            Rig { host: MidiHost { core, stop: None, poller: None }, sent, clock, t: Instant::now() }
+        fn with((store, problem): (Store, Option<StoreProblem>), dir: Option<PathBuf>, ports: Vec<PortEntry>) -> Rig {
+            let engine = Arc::new(TestEngine::default());
+            engine.running.store(true, Relaxed);
+            let core = hosted(engine.clone(), store, problem, dir, None);
+            core.set_ports(ports);
+            let rig = Rig { host: MidiHost { core, wake: None, port_thread: None }, engine, events: Arc::default(), t: Instant::now() };
+            rig.subscribe();
+            rig.events();
+            rig
+        }
+
+        /// A new listener: it hears what it needs to draw first.
+        fn subscribe(&self) {
+            let events = self.events.clone();
+            self.host.set_events(Box::new(move |e| events.lock().unwrap().push(e)));
         }
 
         /// Messages arriving in one burst, at the rig's current time.
@@ -414,369 +1195,511 @@ mod tests {
             }
         }
 
-        fn wait(&mut self, d: Duration) {
-            self.t += d;
-        }
-
         fn take(&self) -> Vec<Command> {
-            self.sent.lock().unwrap().drain(..).map(|c| c.command).collect()
-        }
-
-        /// The actions sent since the last take (everything else sent is dropped).
-        fn actions(&self) -> Vec<Action> {
-            self.take().into_iter().filter_map(|c| if let Command::Action(a) = c { Some(a) } else { None }).collect()
+            std::mem::take(&mut *self.engine.sent.lock().unwrap())
         }
 
         fn events(&self) -> Vec<MidiEvent> {
-            let mut out = Vec::new();
-            self.host.drain_events(&mut out);
-            out
+            std::mem::take(&mut *self.events.lock().unwrap())
+        }
+
+        /// `d` later, the port thread runs the timers; when they next have work.
+        fn wait(&mut self, d: Duration) -> Option<Instant> {
+            self.t += d;
+            self.host.core.tick(self.t)
+        }
+
+        fn running(&self, on: bool) {
+            self.engine.running.store(on, Relaxed);
         }
 
         /// Learn `messages` (one burst from `conn`) onto `action`.
-        fn learn(&self, action: ActionId, conn: u32, messages: &[[u8; 3]]) {
-            self.host.learn(action);
+        fn learn(&self, action: ActionId, target: Target, conn: u32, messages: &[[u8; 3]]) {
+            self.host.learn(action, target);
             self.send(conn, messages);
+        }
+
+        /// What MIDI learn runs.
+        fn live(&self) -> Vec<Binding> {
+            self.host.core.lock().learn.bindings().to_vec()
+        }
+
+        fn held(&self) -> Vec<u8> {
+            let held = self.host.held();
+            (0..128).filter(|&n| held.contains(n)).collect()
+        }
+
+        fn states(&self) -> Vec<(String, bool, BindingState)> {
+            self.host.listed().into_iter().map(|l| (l.listed.binding.port_name, l.listed.ordinal, l.state)).collect()
         }
     }
 
-    fn on(note: u8, velocity: u8) -> Command {
-        Command::NoteOn(note, f32::from(velocity) / 127.0)
-    }
-
-    /// The notes the router holds down.
-    fn held(r: &Rig) -> Vec<u8> {
-        let held = r.host.core.lock().router.held().read();
-        (0..128).filter(|n| held.contains(*n)).collect()
-    }
-
-    // probe midi-learn "a learning tap binds the CC as momentary, ends the learn and runs nothing";
-    // midi-actions.ts consume (learn capture, then the tail inside RELEASE_MS).
+    // actions.ts runAction through a bound pedal: a named REC/DUB selects its lane, then runs there; a
+    // UI action is a `Press` and the UI's event; the stage view is an event only. Every looper press is
+    // also `Pressed` (onPress). A learn itself runs nothing.
     #[test]
-    fn a_learning_tap_binds_the_cc_as_momentary_ends_the_learn_and_runs_nothing() {
+    fn a_binding_runs_its_action_and_tells_the_ui() {
         let r = Rig::new();
-        r.learn(ActionId::RecDub, A, &[[0xb0, 20, 127], [0xb0, 20, 0]]);
+        r.learn(ActionId::RecDub, Some(2), A, &[[0xb0, 20, 127], [0xb0, 20, 0]]);
+        r.learn(ActionId::GoLive, None, A, &[[0xb0, 21, 127], [0xb0, 21, 0]]);
+        r.learn(ActionId::StageView, None, B, &[[0x91, 36, 100], [0x81, 36, 0]]);
         assert_eq!(r.take(), []);
-        assert_eq!(r.host.learning(), None);
+        r.events();
+        r.send(A, &[[0xb0, 20, 127], [0xb0, 20, 0]]);
+        assert_eq!(r.take(), [Command::SelectTrack(2), Command::ActionOn(2, Action::RecDub)]);
+        assert_eq!(r.events(), [MidiEvent::Pressed]);
+        r.send(A, &[[0xb0, 21, 127]]);
+        assert_eq!(r.take(), [Command::Press]);
+        assert_eq!(r.events(), [MidiEvent::Pressed, MidiEvent::Run { action: UiAction::GoLive }]);
+        r.send(B, &[[0x91, 36, 100]]);
+        assert_eq!(r.take(), []);
+        assert_eq!(r.events(), [MidiEvent::Run { action: UiAction::StageView }]);
+    }
+
+    // midi-actions.ts and the learn UI: `learning` (a global action takes no target) and
+    // `awaitingRelease` as events, the list with its learned binding, and the wait ended by the port
+    // thread's timer, not by the next message.
+    #[test]
+    fn a_learn_is_heard_and_its_release_wait_ends_by_the_timer() {
+        let mut r = Rig::new();
+        r.host.learn(ActionId::PlayAll, Some(3));
+        assert_eq!(r.events(), [MidiEvent::Learning { learning: Some(LearnPick { action: ActionId::PlayAll, target: None }) }]);
+        r.send(A, &[[0xb0, 20, 127]]);
         let b = Binding {
+            port_id: id("Probe a"),
             port_name: "Probe a".into(),
-            occurrence: 0,
             channel: 0,
             kind: Kind::Cc,
             number: 20,
-            action: ActionId::RecDub,
+            action: ActionId::PlayAll,
+            target: None,
             press_high: true,
-            momentary: true,
+            momentary: false,
+            hold: false,
         };
-        assert_eq!(r.host.bindings(), [b.clone()]);
-        let learned = Binding { momentary: false, ..b.clone() };
-        assert_eq!(r.events(), [MidiEvent::Learned(learned.clone()), MidiEvent::Bindings(vec![learned]), MidiEvent::Bindings(vec![b])]);
-    }
-
-    // probe midi-learn "after a reload the learned CC records the selected track, and its release runs
-    // nothing": a bound press is Command::Action on the selected lane, unstamped (plan decision 4: it
-    // lands at the next block start, as a UI press does).
-    #[test]
-    fn a_bound_press_sends_its_action_unstamped_and_its_release_nothing() {
-        let mut r = Rig::new();
-        r.learn(ActionId::RecDub, A, &[[0xb0, 20, 127], [0xb0, 20, 0]]);
-        r.wait(RELEASE * 2);
-        r.send(A, &[[0xb0, 20, 127]]);
-        assert_eq!(*r.sent.lock().unwrap(), [TimedCommand { frame: None, command: Command::Action(Action::RecDub) }]);
-        r.take();
-        r.send(A, &[[0xb0, 20, 0]]);
-        assert_eq!(r.take(), []);
-    }
-
-    // While no device runs nothing drains the engine's ring: a bound press and a note-on sent then would
-    // fire at the next open. Both are dropped (the note-on never held); a note held from before the
-    // stop still gets its note-off, queued until a device runs, and learn still captures.
-    #[test]
-    fn with_no_device_running_actions_and_note_ons_are_dropped_and_note_offs_wait_for_it() {
-        let mut r = Rig::new();
-        r.learn(ActionId::RecDub, A, &[[0xb0, 20, 127], [0xb0, 20, 0]]);
-        r.wait(RELEASE * 2);
-        r.send(A, &[[0x90, 60, 100], [0xb0, 64, 127], [0x90, 62, 100], [0x80, 62, 0]]);
-        assert_eq!(r.take(), [on(60, 100), on(62, 100)], "the pedal holds 62");
-
-        r.clock.clear();
-        r.send(A, &[[0xb0, 20, 127], [0xb0, 20, 0], [0x90, 64, 100], [0x90, 60, 90]]);
-        assert_eq!(r.take(), [], "the bound press and the note-ons are dropped");
-        assert_eq!(held(&r), [60], "the dropped note-ons hold nothing");
-        r.send(A, &[[0x80, 64, 0], [0x80, 60, 0], [0xb0, 64, 0]]);
-        assert_eq!(r.take(), [], "the releases wait in the queue: nothing drains into a stopped engine");
-        r.host.learn(ActionId::Undo);
-        r.send(A, &[[0xb0, 30, 127]]);
-        assert_eq!(r.host.learning(), None, "learn captured");
-        assert!(r.host.bindings().iter().any(|b| b.number == 30));
-
-        // A device again: the held and sustained notes let go first, then as before.
-        r.clock.publish(r.t, 0, 256, 48_000);
-        r.wait(RELEASE * 2);
-        r.send(A, &[[0xb0, 20, 127], [0x90, 64, 100]]);
-        assert_eq!(r.take(), [Command::NoteOff(62), Command::NoteOff(60), Command::Action(Action::RecDub), on(64, 100)]);
-
-        // A rig that never had a device: nothing sent, nothing held.
-        let r = Rig::stopped();
-        r.send(A, &[[0x90, 60, 100], [0x80, 60, 0]]);
-        assert_eq!(r.take(), []);
-        assert!(held(&r).is_empty());
-    }
-
-    // probe midi-learn "Esc cancels a learn", "a CC after a cancelled learn binds nothing"
-    // (midi-actions.ts cancelLearn: true when a learn was pending).
-    #[test]
-    fn a_cancelled_learn_binds_nothing() {
-        let r = Rig::new();
-        r.host.learn(ActionId::Undo);
-        assert!(r.host.cancel_learn());
-        assert!(!r.host.cancel_learn(), "nothing pending the second time");
-        r.send(A, &[[0xb0, 30, 127], [0xb0, 30, 0]]);
-        assert!(r.host.bindings().is_empty());
+        let listed = Listed { binding: b.clone(), origin: Origin::Native, ordinal: false, blocked: None, display_name: "Probe a".into() };
+        assert_eq!(
+            r.events(),
+            [
+                MidiEvent::Learned { binding: b.clone() },
+                MidiEvent::Bindings { bindings: vec![ListedBinding { listed, state: BindingState::Live }] },
+                MidiEvent::Learning { learning: None },
+                MidiEvent::AwaitingRelease { binding: Some(b) },
+            ]
+        );
+        let learned_at = r.t;
+        assert_eq!(r.wait(RELEASE_WAIT - MS), Some(learned_at + RELEASE_WAIT), "the port thread wakes for the deadline");
         assert_eq!(r.events(), []);
-    }
-
-    // probe midi-learn "each momentary press fires once, on the press; the learning tap none", "each
-    // latching press fires once, the learning press none", "a reversed-polarity pedal fires once per
-    // press, on the press (0)" (midi-actions.ts consume: the footswitch rule).
-    #[test]
-    fn momentary_latching_and_reversed_footswitches_each_fire_once_per_press() {
-        let mut r = Rig::new();
-        // Momentary: the learning tap sends both sides.
-        r.learn(ActionId::NextTrack, A, &[[0xb0, 21, 127], [0xb0, 21, 0]]);
-        let mut fired = Vec::new();
-        for m in [[0xb0, 21, 127], [0xb0, 21, 0], [0xb0, 21, 127], [0xb0, 21, 0], [0xb0, 21, 127], [0xb0, 21, 0]] {
-            r.send(A, &[m]);
-            fired.push(r.actions().len());
-        }
-        assert_eq!(fired, [1, 0, 1, 0, 1, 0]);
-
-        // Latching: the learning press sends 127 and nothing follows it inside the window.
-        r.learn(ActionId::NextTrack, A, &[[0xb0, 22, 127]]);
-        r.wait(Duration::from_millis(1300));
-        let mut fired = Vec::new();
-        for m in [[0xb0, 22, 0], [0xb0, 22, 127], [0xb0, 22, 0], [0xb0, 22, 127]] {
-            r.send(A, &[m]);
-            fired.push(r.actions().len());
-        }
-        assert_eq!(fired, [1, 1, 1, 1]);
-        assert!(!r.host.bindings().iter().find(|b| b.number == 22).unwrap().momentary);
-
-        // Reversed polarity (0 on press, 127 on release), on port b, channel 3.
-        r.learn(ActionId::NextTrack, B, &[[0xb2, 23, 0], [0xb2, 23, 127]]);
-        let mut fired = Vec::new();
-        for m in [[0xb2, 23, 0], [0xb2, 23, 127], [0xb2, 23, 0], [0xb2, 23, 127]] {
-            r.send(B, &[m]);
-            fired.push(r.actions().len());
-        }
-        assert_eq!(fired, [1, 0, 1, 0]);
-    }
-
-    // midi-actions.ts consume: the release must come inside RELEASE_MS of the learning press; later, the
-    // pedal reads as latching and its release fires too.
-    #[test]
-    fn a_release_after_the_learn_window_reads_as_latching() {
-        let mut r = Rig::new();
-        r.learn(ActionId::PlayAll, A, &[[0xb0, 25, 127]]);
-        r.wait(RELEASE);
-        r.send(A, &[[0xb0, 25, 0]]);
-        assert_eq!(r.actions(), [Action::PlayAll]);
-        assert!(!r.host.bindings()[0].momentary);
-    }
-
-    // probe midi-learn "unlearned CC64/1/123 reach the router as before" (midi.ts parseMidiMessage).
-    #[test]
-    fn unlearned_pedal_wheel_and_all_notes_off_reach_the_router() {
-        let r = Rig::new();
-        r.send(A, &[[0x90, 60, 100], [0xb0, 64, 127], [0x80, 60, 0], [0xb0, 1, 64], [0xb0, 123, 0], [0xb0, 64, 0]]);
-        assert_eq!(r.take(), [on(60, 100), Command::Modulation(64.0 / 127.0), Command::NoteOff(60)]);
-    }
-
-    // probe midi-learn "CC 120/123 are never learned: they reach the router and the learn keeps
-    // listening" and "a note-off (0x80 or velocity 0) is never learned: it reaches the router and the
-    // learn keeps listening" (midi-actions.ts consume's learn guard).
-    #[test]
-    fn channel_mode_ccs_and_note_offs_never_start_a_learn() {
-        let r = Rig::new();
-        r.send(A, &[[0x90, 61, 100], [0x90, 62, 100], [0x90, 65, 100]]);
-        r.take();
-        r.host.learn(ActionId::StopAll);
-        r.send(A, &[[0xb0, 120, 0], [0x80, 61, 0], [0x90, 62, 0], [0xb0, 123, 0]]);
-        assert_eq!(r.take(), [Command::NoteOff(61), Command::NoteOff(62), Command::NoteOff(65)]);
-        assert_eq!(r.host.learning(), Some(ActionId::StopAll), "the learn is still listening");
-        assert!(r.host.bindings().is_empty());
+        assert_eq!(r.wait(MS), None);
+        assert_eq!(r.events(), [MidiEvent::AwaitingRelease { binding: None }]);
+        // Its wait over, the pedal reads latching: its release runs the action too.
+        r.send(A, &[[0xb0, 20, 0]]);
+        assert_eq!(r.take(), [Command::Action(Action::PlayAll)]);
     }
 
     // probe midi-learn "learning CC64 lets go of the pedal held down on its port", "a CC learned onto 64
-    // must not sustain", "the learned CC64 press ran its action once, on the press (0)", "the other port's
-    // unlearned CC64 still sustains" (midi.ts releaseController).
+    // must not sustain", "the other port's unlearned CC64 still sustains" (consume-first).
     #[test]
-    fn a_pedal_learned_while_down_lets_go_and_never_sustains_again() {
+    fn a_learned_cc64_never_sustains() {
         let r = Rig::new();
         r.send(B, &[[0xb0, 64, 127], [0x90, 50, 100], [0x80, 50, 0]]);
         assert_eq!(r.take(), [on(50, 100)], "port b's pedal holds its note");
-        r.learn(ActionId::NextTrack, B, &[[0xb0, 64, 0], [0xb0, 64, 127]]);
-        assert_eq!(r.take(), [Command::NoteOff(50)], "the learn lets the held pedal go");
-
+        r.learn(ActionId::NextTrack, None, B, &[[0xb0, 64, 0], [0xb0, 64, 127]]);
+        assert_eq!(r.take(), [Command::NoteOff(50)], "learning the pedal lets go of it");
         r.send(B, &[[0x90, 67, 100], [0x80, 67, 0]]);
         assert_eq!(r.take(), [on(67, 100), Command::NoteOff(67)], "a learned CC64 never sustains");
         r.send(B, &[[0xb0, 64, 0]]);
-        assert_eq!(r.actions(), [Action::NextTrack]);
-        r.send(B, &[[0xb0, 64, 127]]);
-        assert_eq!(r.actions(), [], "it reads as reversed: its release fires nothing");
-
+        assert_eq!(r.take(), [Command::Action(Action::NextTrack)], "a reversed pedal presses on 0");
         r.send(A, &[[0xb0, 64, 127], [0x90, 67, 100], [0x80, 67, 0]]);
         assert_eq!(r.take(), [on(67, 100)], "port a's unlearned CC64 still sustains");
     }
 
-    // probe midi-learn "learning CC1 hands the vibrato back to the wheel moved before it".
+    // Plan decision 1: one router for every note source. A pointer, a key and a port on one note: one
+    // strike, one release when the last lets go; the held set reaches the UI once per change.
     #[test]
-    fn a_learned_mod_wheel_hands_the_vibrato_back() {
+    fn ui_and_midi_owners_share_one_note() {
         let r = Rig::new();
-        r.send(B, &[[0xb0, 1, 50]]);
-        r.send(A, &[[0xb5, 1, 100]]);
-        r.take();
-        r.learn(ActionId::StopAll, A, &[[0xb5, 1, 90]]);
-        assert_eq!(r.take(), [Command::Modulation(50.0 / 127.0)]);
-    }
-
-    // Review fix: a bound press refused with no device must not undo the note-on accepted before it;
-    // that note's release still reaches the engine.
-    #[test]
-    fn a_refused_bound_press_leaves_an_earlier_note_held() {
-        let mut r = Rig::new();
-        r.learn(ActionId::RecDub, A, &[[0xb0, 20, 127], [0xb0, 20, 0]]);
-        r.wait(RELEASE * 2);
-        r.send(A, &[[0x90, 60, 100]]);
+        r.host.ui_epoch(1);
+        r.host.ui_note(1, "pointer:1".into(), 60, 100, true);
         assert_eq!(r.take(), [on(60, 100)]);
-        r.clock.clear();
-        r.send(A, &[[0xb0, 20, 127], [0xb0, 20, 0]]);
-        assert_eq!(held(&r), [60]);
-        r.clock.publish(r.t, 0, 256, 48_000);
+        r.send(A, &[[0x90, 60, 90]]);
+        r.host.ui_note(1, "key:KeyA".into(), 60, 100, true);
+        r.host.ui_note(1, "pointer:1".into(), 60, 0, false);
+        r.host.ui_note(1, "key:KeyA".into(), 60, 0, false);
+        assert_eq!(r.take(), [], "the port still holds it");
+        assert_eq!(r.held(), [60]);
         r.send(A, &[[0x80, 60, 0]]);
         assert_eq!(r.take(), [Command::NoteOff(60)]);
+        let held: Vec<Vec<u8>> = r.events().into_iter().filter_map(|e| if let MidiEvent::Held { notes, .. } = e { Some(notes) } else { None }).collect();
+        assert_eq!(held, [vec![60], vec![]]);
     }
 
-    // probe midi-learn "a learned note must not sound", "a learned note is never held", "neither the
-    // learned note-on nor its note-off reaches the router", "two presses of the learned note stepped back
-    // twice, each on its note-on", "an unlearned note on the same channel sounds".
+    // Step 4: "a target switch then a note-on back to back sounds on the new target", also when both
+    // wait behind a ring that refused, which the port thread retries soon.
     #[test]
-    fn a_learned_note_runs_its_action_and_never_sounds() {
+    fn a_target_switch_then_a_note_on_land_in_that_order() {
         let mut r = Rig::new();
-        r.learn(ActionId::PrevTrack, B, &[[0x91, 60, 100], [0x81, 60, 0]]);
+        r.host.select_target(Some(0), LEAD);
+        r.send(A, &[[0x90, 60, 100]]);
+        assert_eq!(r.take(), [Command::SelectInstrument(LEAD), on(60, 100)]);
+        r.engine.full.store(true, Relaxed);
+        r.host.select_target(Some(1), PAD);
+        r.send(B, &[[0x90, 64, 100]]);
         assert_eq!(r.take(), []);
-        r.wait(RELEASE * 2);
-        r.send(B, &[[0x91, 60, 100]]);
-        assert_eq!(r.take(), [Command::Action(Action::PrevTrack)]);
-        r.send(B, &[[0x81, 60, 0], [0x91, 60, 100], [0x91, 60, 0]]);
-        assert_eq!(r.take(), [Command::Action(Action::PrevTrack)]);
-        assert!(held(&r).is_empty());
-        r.send(B, &[[0x91, 62, 100]]);
-        assert_eq!(r.take(), [on(62, 100)]);
+        let now = r.t;
+        assert_eq!(r.wait(Duration::ZERO), Some(now + RETRY), "a refused drain is retried soon");
+        r.engine.full.store(false, Relaxed);
+        assert_eq!(r.wait(RETRY), None, "nothing left to retry");
+        assert_eq!(r.take(), [Command::NoteOff(60), Command::SelectInstrument(PAD), on(64, 100)]);
+        assert!(r.host.diag().failed_sends > 0);
     }
 
-    // probe midi-learn "a forgotten CC64 leaves the list and sustains again" (midi-actions.ts forget).
+    // Plan decision 5: the UI's input commands join the one queue, so a pedal and a click keep their
+    // order and fall under the same no-device rule; a setting goes straight to the engine; a note goes
+    // through the router only.
     #[test]
-    fn a_forgotten_binding_hands_its_message_back_to_the_play_path() {
-        let r = Rig::new();
-        r.learn(ActionId::NextTrack, B, &[[0xb0, 64, 127]]);
-        r.host.set_bindings(Vec::new());
-        r.send(B, &[[0xb0, 64, 127], [0x90, 60, 100], [0x80, 60, 0]]);
-        assert_eq!(r.take(), [on(60, 100)], "sustained");
-        r.send(B, &[[0xb0, 64, 0]]);
+    fn the_uis_commands_join_the_queue_and_its_settings_go_straight_to_the_engine() {
+        let mut r = Rig::new();
+        let batch = vec![Command::Press, Command::SetBpm(100.0), Command::SelectTrack(1), Command::ActionOn(1, Action::RecDub)];
+        r.host.ui_commands(batch.clone()).unwrap();
+        assert_eq!(r.take(), batch);
+
+        r.running(false);
+        r.host.ui_commands(vec![Command::Action(Action::Toggle(Toggle::Click)), Command::SetBpm(90.0)]).unwrap();
+        assert_eq!(r.take(), [Command::SetBpm(90.0)], "the toggle is dropped as a pedal's would be; the setting is kept");
+        assert_eq!(r.host.diag().refused.no_device, 1);
+        r.running(true);
+
+        assert!(r.host.ui_commands(vec![Command::Press, Command::NoteOn(60, 0.5), Command::Press]).is_err());
+        assert_eq!(r.take(), [Command::Press], "what came before it went; the rest did not");
+
+        r.learn(ActionId::PlayAll, None, A, &[[0xb0, 20, 127], [0xb0, 20, 0]]);
+        r.engine.full.store(true, Relaxed);
+        r.send(A, &[[0xb0, 20, 127]]);
+        r.host.ui_commands(vec![Command::Action(Action::StopAll)]).unwrap();
+        r.send(A, &[[0xb0, 20, 0], [0xb0, 20, 127]]);
+        r.engine.full.store(false, Relaxed);
+        r.wait(RETRY);
+        let all = [Command::Action(Action::PlayAll), Command::Action(Action::StopAll), Command::Action(Action::PlayAll)];
+        assert_eq!(r.take(), all, "pedal, click, pedal");
+    }
+
+    // Decisions 8 and 9: a legacy record activates on the one present port with its name, and the move
+    // is saved (its real id replaces the ordinal one).
+    #[test]
+    fn a_legacy_record_runs_on_the_one_port_with_its_name_and_the_move_is_saved() {
+        let dir = Scratch::new("follow");
+        let mut r = Rig::with(dir.load(), Some(dir.0.clone()), vec![port("Keys", Some(B)), port("Pedal", Some(A))]);
+        let report = r.host.import_legacy(&legacy_list(&[legacy("input-3", "Pedal", 20, "recDub")]));
+        assert_eq!(report.imported, [0]);
+        let listed = &r.host.listed()[0];
+        assert_eq!((listed.state, listed.listed.ordinal, listed.listed.origin), (BindingState::Live, false, Origin::Legacy));
+        assert_eq!(listed.listed.binding.port_id, id("Pedal"));
+        r.send(A, &[[0xb0, 20, 127]]);
+        assert_eq!(r.take(), [Command::Action(Action::RecDub)]);
+        assert_eq!(r.wait(Duration::ZERO), None);
+        let (saved, problem) = dir.load();
+        assert_eq!(problem, None);
+        let saved = &saved.listed()[0];
+        assert_eq!((saved.binding.port_id.as_str(), saved.ordinal), (id("Pedal").as_str(), false), "the move is on disk");
+        assert!(!r.events().iter().any(|e| matches!(e, MidiEvent::Store { .. })));
+    }
+
+    // Decision 9: two present ports with its name leave a legacy record unrun and unmoved; once one of
+    // them goes, the other is the one port with the name.
+    #[test]
+    fn two_ports_with_its_name_leave_a_legacy_record_unrun() {
+        let r = Rig::with((store::empty(), None), None, vec![port_at(r"\\?\usb#1", "Pedal", Some(A)), port_at(r"\\?\usb#2", "Pedal", Some(B))]);
+        r.host.import_legacy(&legacy_list(&[legacy("input-3", "Pedal", 20, "recDub")]));
+        assert_eq!(r.states(), [("Pedal".into(), true, BindingState::SeveralPorts)]);
+        r.send(A, &[[0xb0, 20, 127]]);
+        r.send(B, &[[0xb0, 20, 127]]);
+        assert_eq!(r.take(), [], "neither port runs it");
+        r.host.core.set_ports(vec![port_at(r"\\?\usb#2", "Pedal", Some(B))]);
+        assert_eq!(r.states(), [("Pedal".into(), false, BindingState::Live)]);
+        r.send(B, &[[0xb0, 20, 127]]);
+        assert_eq!(r.take(), [Command::Action(Action::RecDub)]);
+    }
+
+    // Two legacy records on one ordinal id under two names are two controllers: neither reaches MIDI
+    // learn on that id (it would read them as one control); each runs once resolution gives it its
+    // port's real id.
+    #[test]
+    fn an_ordinal_pair_with_one_id_never_reaches_learn() {
+        let r = Rig::with((store::empty(), None), None, vec![port("Keys", Some(B))]);
+        r.host.import_legacy(&legacy_list(&[legacy("input-1", "Pedal", 20, "playAll"), legacy("input-1", "Keys", 20, "stopAll")]));
+        assert_eq!(r.states(), [("Pedal".into(), true, BindingState::NoPort), ("Keys".into(), false, BindingState::Live)]);
+        assert_eq!(r.live().iter().map(|b| b.port_id.clone()).collect::<Vec<_>>(), [id("Keys")]);
+        r.send(B, &[[0xb0, 20, 127]]);
+        assert_eq!(r.take(), [Command::Action(Action::StopAll)]);
+
+        r.host.core.set_ports(vec![port("Keys", Some(B)), port("Pedal", Some(A))]);
+        assert!(r.live().iter().all(|b| !b.port_id.starts_with("input-")));
+        assert_eq!(r.live().len(), 2);
+        r.send(A, &[[0xb0, 20, 127]]);
+        r.send(B, &[[0xb0, 20, 127]]);
+        assert_eq!(r.take(), [Command::Action(Action::PlayAll), Command::Action(Action::StopAll)]);
+
+        r.host.core.set_ports(Vec::new());
+        assert!(r.live().is_empty(), "no port, nothing runs");
+    }
+
+    // Decision 8: the store is written on the port thread, off the lock; a file another instance wrote
+    // since is a conflict, told to the UI (and the release log), never a panic. The bindings run on.
+    #[test]
+    fn a_store_conflict_becomes_an_event() {
+        let dir = Scratch::new("conflict");
+        let mut r = Rig::with(dir.load(), Some(dir.0.clone()), vec![port("Probe a", Some(A))]);
+        let (mut other, _) = store::load(&dir.0);
+        other.import_legacy("[]");
+        other.snapshot().write(&dir.0).unwrap();
+        r.learn(ActionId::Undo, None, A, &[[0xb0, 20, 127], [0xb0, 20, 0]]);
+        r.events();
+        r.wait(Duration::ZERO);
+        let problems: Vec<StoreProblem> = r.events().into_iter().filter_map(|e| if let MidiEvent::Store { problem } = e { Some(problem) } else { None }).collect();
+        assert!(matches!(problems[..], [StoreProblem::Conflict { .. }]), "{problems:?}");
+        r.send(A, &[[0xb0, 20, 127]]);
+        assert_eq!(r.take(), [Command::Action(Action::Undo)]);
+        // A listener that comes later hears it too.
+        r.subscribe();
+        assert!(r.events().iter().any(|e| matches!(e, MidiEvent::Store { problem: StoreProblem::Conflict { .. } })));
+    }
+
+    // Decision 8: a file this build cannot read is reported at once and never written over.
+    #[test]
+    fn an_unreadable_store_is_reported_and_left_as_it_is() {
+        let dir = Scratch::new("torn");
+        std::fs::write(dir.0.join(FILE_NAME), b"{ torn").unwrap();
+        let mut r = Rig::with(dir.load(), Some(dir.0.clone()), vec![port("Probe a", Some(A))]);
+        r.subscribe();
+        assert!(r.events().iter().any(|e| matches!(e, MidiEvent::Store { problem: StoreProblem::ReadOnly { .. } })));
+        r.learn(ActionId::Undo, None, A, &[[0xb0, 20, 127], [0xb0, 20, 0]]);
+        r.wait(Duration::ZERO);
+        assert!(r.events().iter().any(|e| matches!(e, MidiEvent::Store { problem: StoreProblem::ReadOnly { .. } })));
+        assert_eq!(std::fs::read(dir.0.join(FILE_NAME)).unwrap(), b"{ torn");
+        r.send(A, &[[0xb0, 20, 127]]);
+        assert_eq!(r.take(), [Command::Action(Action::Undo)], "the binding works in memory");
+    }
+
+    // The player's edits go to the store by listed index and reach MIDI learn through its hand-off: a
+    // HOLD an edit ends is released and its pedal's release spent (midi-actions.ts update); a forgotten
+    // binding hands its message back; an assignment runs a blocked record on the port picked.
+    #[test]
+    fn the_players_edits_reach_learn_and_release_what_they_end() {
+        let r = Rig::with((holding(vec![hold_pedal("Probe a", 20)]), None), None, vec![port("Probe a", Some(A)), port("Probe b", Some(B))]);
+        r.send(A, &[[0xb0, 20, 127]]);
+        assert_eq!(r.take(), [Command::Action(Action::Hold(0))]);
+        r.host.set_momentary(0, false).unwrap();
+        assert_eq!(r.take(), [Command::Action(Action::Release(0))]);
+        assert_eq!((r.host.listed()[0].listed.binding.momentary, r.host.listed()[0].listed.binding.hold), (false, false));
+        r.send(A, &[[0xb0, 20, 0]]);
+        assert_eq!(r.take(), [], "the pedal's own release is spent");
+        r.send(A, &[[0xb0, 20, 0]]);
+        assert_eq!(r.take(), [Command::Action(Action::RecDub)], "latching now");
+        assert!(r.host.set_hold(0, true).is_err(), "a latching pedal has no HOLD");
+        r.host.forget(0).unwrap();
+        assert_eq!(r.host.listed(), []);
+        r.send(A, &[[0xb0, 20, 127]]);
+        assert_eq!(r.take(), [], "the message reaches the play path again, where CC20 does nothing");
+
+        r.host.import_legacy(&legacy_list(&[legacy("input-1", "Pedal", 20, "undo"), legacy("input-3", "Pedal", 20, "undo")]));
+        assert!(r.states().iter().all(|s| s.2 == BindingState::Blocked));
+        assert!(r.host.assign(0, "winmm:0:nowhere:Pedal").is_err(), "no such port");
+        r.host.assign(0, &id("Probe b")).unwrap();
+        assert_eq!(r.states()[0], ("Probe b".into(), false, BindingState::Live));
+        r.send(B, &[[0xb0, 20, 127]]);
+        assert_eq!(r.take(), [Command::Action(Action::Undo)]);
+    }
+
+    // The engine's 16 HOLD controls held at once: a 17th HOLD press is consumed, runs nothing and is told
+    // to the UI.
+    #[test]
+    fn a_hold_press_past_the_engines_controls_is_refused_and_heard() {
+        let r = Rig::with((holding((0..=16).map(|n| hold_pedal("Probe a", n)).collect()), None), None, vec![port("Probe a", Some(A))]);
+        for n in 0..16 {
+            r.send(A, &[[0xb0, n, 127]]);
+        }
+        assert_eq!(r.take().len(), 16);
+        r.events();
+        r.send(A, &[[0xb0, 16, 127]]);
+        assert_eq!(r.take(), []);
+        assert_eq!(r.events(), [MidiEvent::Refused { reason: LearnRefusal::HoldControlsTaken }]);
+    }
+
+    // A port that goes away releases its notes and pedal and its HOLD press; its late message finds no
+    // owner; the UI hears the list and the departure (midi.ts attachInputs, midi-actions.ts portGone).
+    #[test]
+    fn a_port_that_goes_away_releases_what_it_held_and_the_ui_hears_it() {
+        let r = Rig::with((holding(vec![hold_pedal("Probe a", 20)]), None), None, vec![port("Probe a", Some(A)), port("Probe b", Some(B))]);
+        r.host.core.publish_ports(Vec::new());
+        r.send(A, &[[0xb0, 64, 127], [0x90, 60, 100], [0x80, 60, 0], [0xb0, 20, 127]]);
+        r.send(B, &[[0x90, 62, 100]]);
+        r.take();
+        r.events();
+        assert_eq!(r.host.core.port_gone(A), Some("Probe a".into()));
+        assert_eq!(r.take(), [Command::NoteOff(60), Command::Action(Action::Release(0))]);
+        r.send(A, &[[0x90, 61, 100]]);
+        assert_eq!(r.take(), []);
+        assert_eq!(r.held(), [62]);
+        r.host.core.publish_ports(vec!["Probe a".into()]);
+        let ports = vec![
+            PortInfo { id: id("Probe a"), name: "Probe a".into(), state: PortState::Closed },
+            PortInfo { id: id("Probe b"), name: "Probe b".into(), state: PortState::Open },
+        ];
+        let events: Vec<MidiEvent> = r.events().into_iter().filter(|e| !matches!(e, MidiEvent::Held { .. })).collect();
+        assert_eq!(events, [MidiEvent::Ports { ports }, MidiEvent::Gone { names: vec!["Probe a".into()] }]);
+    }
+
+    // Decision 7, with no device: a bound press and a note-on are dropped (the note-on holds nothing);
+    // a note held from before gets its release once a device runs again, before what comes after it;
+    // learn still captures.
+    #[test]
+    fn with_no_device_fresh_input_is_dropped_and_releases_wait_for_it() {
+        let mut r = Rig::new();
+        r.learn(ActionId::RecDub, None, A, &[[0xb0, 20, 127], [0xb0, 20, 0]]);
+        r.send(A, &[[0x90, 60, 100]]);
+        assert_eq!(r.take(), [on(60, 100)]);
+        r.running(false);
+        r.send(A, &[[0xb0, 20, 127], [0xb0, 20, 0], [0x90, 64, 100], [0x80, 60, 0]]);
+        assert_eq!(r.take(), []);
+        assert_eq!(r.held(), [] as [u8; 0], "the dropped note-on holds nothing");
+        r.learn(ActionId::Undo, None, A, &[[0xb0, 30, 127]]);
+        assert!(r.live().iter().any(|b| b.number == 30), "learn captured");
+        let now = r.t;
+        assert_eq!(r.wait(Duration::ZERO), Some(now + IDLE_RETRY), "the port thread looks again for a device");
+        r.running(true);
+        r.wait(IDLE_RETRY);
         assert_eq!(r.take(), [Command::NoteOff(60)]);
     }
 
-    // actions.ts goLive: GO LIVE stays with the plugin host, so its binding reaches the UI, not the engine.
+    // Step 4: "a retained-engine device gap with a HOLD press and its release" (decision 7). The release
+    // of a HOLD pressed before the gap waits and reaches the engine once it runs again; a HOLD pressed in
+    // the gap is dropped and holds nothing, so its release runs nothing and its number is free.
     #[test]
-    fn a_go_live_binding_reaches_the_ui_not_the_engine() {
-        let mut r = Rig::new();
-        r.learn(ActionId::GoLive, A, &[[0x90, 36, 100]]);
-        r.events();
-        r.wait(RELEASE * 2);
-        r.send(A, &[[0x90, 36, 100]]);
+    fn in_a_device_gap_a_hold_release_passes_and_a_hold_press_is_dropped() {
+        let mut r = Rig::with((holding(vec![hold_pedal("Probe a", 20), hold_pedal("Probe a", 21)]), None), None, vec![port("Probe a", Some(A))]);
+        r.send(A, &[[0xb0, 20, 127]]);
+        assert_eq!(r.take(), [Command::Action(Action::Hold(0))]);
+        r.running(false);
+        r.send(A, &[[0xb0, 21, 127], [0xb0, 20, 0], [0xb0, 21, 0]]);
+        assert_eq!(r.take(), [], "nothing reaches a stopped engine");
+        assert_eq!(r.host.diag().refused.no_device, 1);
+        r.wait(IDLE_RETRY);
         assert_eq!(r.take(), []);
-        assert_eq!(r.events(), [MidiEvent::GoLive]);
+        r.running(true);
+        r.wait(IDLE_RETRY);
+        assert_eq!(r.take(), [Command::Action(Action::Release(0))]);
+        r.send(A, &[[0xb0, 21, 127]]);
+        assert_eq!(r.take(), [Command::Action(Action::Hold(0))]);
     }
 
-    // probe midi-note-ownership "unplugging one port must preserve the other port"; midi.ts attachInputs
-    // releases a vanished port's notes and pedal, and a closed port's late message finds no owner.
+    // Decision 7: a new document (a reload, a recovery) releases the old one's holds and refuses its late
+    // events; a blur releases the document's holds; MIDI holds stay through both.
     #[test]
-    fn a_port_that_goes_away_releases_its_notes_and_its_late_messages_do_nothing() {
+    fn a_frontend_reload_releases_the_ui_holds_only() {
         let r = Rig::new();
-        r.send(A, &[[0xb0, 64, 127], [0x90, 67, 100], [0x80, 67, 0], [0x90, 60, 100]]);
-        r.send(B, &[[0x90, 62, 100]]);
+        r.host.ui_epoch(1);
+        r.host.ui_note(1, "pointer:1".into(), 60, 100, true);
+        r.host.ui_note(1, "key:KeyA".into(), 62, 100, true);
+        r.send(A, &[[0x90, 64, 100]]);
         r.take();
-        assert_eq!(r.host.core.port_gone(A), Some("Probe a".into()));
-        assert_eq!(r.take(), [Command::NoteOff(67), Command::NoteOff(60)]);
-        r.send(A, &[[0x90, 61, 100]]);
-        assert_eq!(r.take(), []);
-        assert_eq!(held(&r), [62]);
-        assert_eq!(r.host.ports()[0], PortInfo { name: "Probe a".into(), occurrence: 0, open: false });
+        r.host.ui_epoch(2);
+        assert_eq!(r.take(), [Command::NoteOff(60), Command::NoteOff(62)]);
+        r.host.ui_note(1, "key:KeyB".into(), 65, 100, true);
+        assert_eq!(r.take(), [], "a late event of the old document");
+        assert_eq!(r.held(), [64]);
+        r.host.ui_note(2, "key:KeyA".into(), 67, 100, true);
+        r.host.ui_blur(2);
+        assert_eq!(r.take(), [on(67, 100), Command::NoteOff(67)]);
+        assert_eq!(r.held(), [64]);
     }
 
-    // midi.ts attachInputs names each vanished port (its toast); natively the UI hears Ports with `gone`.
-    #[test]
-    fn the_ui_hears_a_port_list_change_once_and_every_departure() {
-        let r = Rig::new();
-        r.host.core.publish_ports(Vec::new());
-        r.host.core.publish_ports(Vec::new());
-        let ports = vec![PortInfo { name: "Probe a".into(), occurrence: 0, open: true }, PortInfo { name: "Probe b".into(), occurrence: 0, open: true }];
-        assert_eq!(r.events(), [MidiEvent::Ports { ports: ports.clone(), gone: vec![] }]);
-        r.host.core.port_gone(B);
-        r.host.core.set_ports(vec![PortEntry { key: PortKey { name: "Probe a".into(), occurrence: 0 }, conn: Some(A) }]);
-        r.host.core.publish_ports(vec!["Probe b".into()]);
-        assert_eq!(r.events(), [MidiEvent::Ports { ports: ports[..1].to_vec(), gone: vec!["Probe b".into()] }]);
+    /// The engine host as the app has it, its sends recorded: every command reaches the real
+    /// `EngineHost::send` (its ring and its settings memory) unless the ring is made to refuse.
+    struct Recorded {
+        host: EngineHost,
+        sent: Mutex<Vec<Command>>,
+        full: AtomicBool,
     }
 
-    // probe instrument-routing "switching slots releases the sustained note exactly once": the router
-    // releases it before SelectInstrument (input-router.ts allNotesOff, then instrument.ts routeEngine's
-    // switch) and forgets it, so pedal-up adds nothing.
-    #[test]
-    fn a_target_switch_through_the_host_is_sent_and_the_router_forgets_its_notes() {
-        let r = Rig::new();
-        r.send(A, &[[0xb0, 64, 127], [0x90, 64, 100], [0x80, 64, 0]]);
-        r.take();
-        r.host.select_instrument(NoteTarget::Builtin(Instrument::Pad)).unwrap();
-        assert_eq!(r.take(), [Command::NoteOff(64), Command::SelectInstrument(NoteTarget::Builtin(Instrument::Pad))]);
-        r.send(A, &[[0xb0, 64, 0]]);
-        assert_eq!(r.take(), []);
-        r.host.all_notes_off().unwrap();
-        assert_eq!(r.take(), [Command::AllNotesOff]);
-    }
-
-    // A wheel sweep while no device runs would fill the engine's ring ahead of the note-off: it coalesces
-    // in the queue, which drains nothing until a device runs; then the engine gets where the wheels
-    // ended, then the release, in the order they came.
-    #[test]
-    fn with_no_device_a_wheel_sweep_coalesces_in_the_queue_and_reaches_the_engine_after() {
-        let r = Rig::new();
-        r.send(A, &[[0x90, 60, 100]]);
-        assert_eq!(r.take(), [on(60, 100)]);
-        r.clock.clear();
-        for v in 0..=127u8 {
-            r.send(A, &[[0xb0, 1, v], [0xe0, 0, v]]);
+    impl EngineSide for Recorded {
+        fn send(&self, command: TimedCommand) -> Result<(), String> {
+            if self.full.load(Relaxed) {
+                return Err("the engine's command ring is full".into());
+            }
+            self.sent.lock().unwrap().push(command.command);
+            self.host.send(command)
         }
-        r.send(A, &[[0xe0, 0x00, 0x50], [0xb0, 1, 90], [0x80, 60, 0]]);
-        assert_eq!(r.take(), [], "nothing drains into a stopped engine");
-        assert_eq!(r.host.core.lock().queue.len(), 3, "the sweep coalesced");
-        r.clock.publish(r.t, 0, 256, 48_000);
-        r.send(A, &[[0x90, 62, 100]]);
-        let bend = (f64::from(0x50u16 << 7) - 8192.0) / 8192.0 * 2.0;
-        assert_eq!(r.take(), [Command::PitchBend(bend), Command::Modulation(90.0 / 127.0), Command::NoteOff(60), on(62, 100)]);
+
+        fn running(&self) -> bool {
+            EngineSide::running(&self.host)
+        }
+
+        fn set_rebuild_hook(&self, hook: Option<Arc<dyn RebuildHook>>) {
+            self.host.set_rebuild_hook(hook);
+        }
     }
 
-    // The sink refuses (no device open): the refused head stays queued and each refused drain is counted.
+    /// The device owner's rebuild: a new engine in place of the old, through `swap_engine`.
+    fn rebuild(io: &super::super::Core) {
+        let config = lf_engine::EngineConfig { max_loop_seconds: 1.0, ..lf_engine::EngineConfig::new(48_000) };
+        let (engine, handle) = lf_engine::Engine::new(config);
+        drop(super::super::owner::swap_engine(io, engine, handle, config));
+    }
+
+    // Step 4 and decision 6: "an engine rebuild with notes and HOLD held, a refused attack, a HOLD and a
+    // wheel update queued, and the WebView stalled" (nothing here calls the UI's API). The new engine
+    // gets the target and the wheel once, through the settings replay; no stale one-shot reaches it; a
+    // later release is harmless and a fresh press attacks again.
     #[test]
-    fn a_refused_command_is_counted() {
-        let sink: Sink = Arc::new(|_| Err("no audio device is open".into()));
-        let clock = FrameClock::new();
-        clock.publish(Instant::now(), 0, 256, 48_000);
-        let core = Arc::new(Core::new(sink, clock));
-        core.set_ports(vec![PortEntry { key: PortKey { name: "Probe a".into(), occurrence: 0 }, conn: Some(A) }]);
-        let host = MidiHost { core, stop: None, poller: None };
-        host.core.message(A, Instant::now(), &[0x90, 60, 100]);
-        host.core.message(A, Instant::now(), &[0x80, 60, 0]);
-        assert_eq!(host.diag(), MidiDiag { failed_sends: 2, panics: 0 });
+    fn an_engine_rebuild_needs_no_webview() {
+        let io = Arc::new(super::super::Core::new());
+        let host = EngineHost { core: io.clone() };
+        rebuild(&io);
+        io.clock.publish(Instant::now(), 0, 128, 48_000);
+        let engine = Arc::new(Recorded { host: host.clone(), sent: Mutex::default(), full: AtomicBool::new(false) });
+        let core = hosted(engine.clone(), holding(vec![hold_pedal("Probe a", 20), hold_pedal("Probe a", 21)]), None, None, None);
+        core.set_ports(vec![port("Probe a", Some(A)), port("Probe b", Some(B))]);
+        let midi = MidiHost { core, wake: None, port_thread: None };
+        let t = Instant::now();
+        let send = |conn: u32, m: [u8; 3]| midi.core.message(conn, t, &m);
+        let take = || std::mem::take(&mut *engine.sent.lock().unwrap());
+
+        midi.select_target(Some(0), LEAD);
+        send(A, [0x90, 60, 100]);
+        send(A, [0xb0, 20, 127]);
+        assert_eq!(take(), [Command::SelectInstrument(LEAD), on(60, 100), Command::Action(Action::Hold(0))]);
+
+        // The ring stalls: an attack, a HOLD press and a wheel update wait in the queue.
+        engine.full.store(true, Relaxed);
+        send(B, [0x90, 64, 100]);
+        send(A, [0xb0, 21, 127]);
+        send(A, [0xe0, 0x00, 0x60]);
+        // The rebuild begins: an attack now is refused, and no owner recorded.
+        let hook = io.rebuild_hook.lock().unwrap().clone().expect("registered at start");
+        hook.pause();
+        send(B, [0x90, 65, 100]);
+        rebuild(&io);
+        engine.full.store(false, Relaxed);
+        midi.core.tick(t);
+        assert_eq!(take(), [], "no stale one-shot, and nothing a second time");
+        let bend = (f64::from(0x60u16 << 7) - 8192.0) / 8192.0 * 2.0;
+        let replay = host.settings();
+        let picked: Vec<&Command> = replay.iter().filter(|c| matches!(c, Command::SelectInstrument(_) | Command::PitchBend(_))).collect();
+        assert_eq!(picked, [&Command::SelectInstrument(LEAD), &Command::PitchBend(bend)], "the replay hands them over");
+
+        // Releases of what the old engine held are harmless; the wheel left where it is sends nothing.
+        send(A, [0x80, 60, 0]);
+        send(B, [0x80, 64, 0]);
+        send(A, [0xb0, 20, 0]);
+        send(A, [0xb0, 21, 0]);
+        send(A, [0xe0, 0x00, 0x60]);
+        assert_eq!(take(), []);
+        // A fresh press attacks again; HOLD starts from its first control.
+        send(B, [0x90, 60, 100]);
+        send(A, [0xb0, 20, 127]);
+        assert_eq!(take(), [on(60, 100), Command::Action(Action::Hold(0))]);
+        assert_eq!(midi.diag().refused.paused, 1);
+        assert_eq!(midi.diag().queue.discarded, 2, "the queued attack and HOLD press");
     }
 }

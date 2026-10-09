@@ -87,8 +87,9 @@
 //!   boundary, as a live Web Audio call with no look-ahead does. Every control-rate step (the 128-frame
 //!   k-rate quanta, the compressor's 32-frame divisions, LFO and envelope ticks) is anchored to the frame
 //!   count, never to a block start. A UI gesture lands at the next block start (jitter: IPC plus one
-//!   block, inside the quarter-beat free-stop grace); a Web MIDI pedal lands there too (only the dormant
-//!   native MIDI path, D22, stamps its press frame). No audio FIFO.
+//!   block, inside the quarter-beat free-stop grace); a MIDI pedal lands there too, Web MIDI's and the
+//!   dormant native path's alike (D22: it stamps nothing, so the ring's order is the order things apply
+//!   in). No audio FIFO.
 //! - **Decided while porting** (each test file's header names what it changes): the count-in and an
 //!   idle PLAY start on the press frame, with no scheduling lead; a later take armed on an idle transport
 //!   counts in as the first did, restarts every loop from the top on the count's downbeat, and refuses

@@ -25,6 +25,7 @@ use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use lf_engine::HOLD_CONTROLS;
+use serde::Serialize;
 
 use super::bindings::{target_for, ActionId, Binding, Kind, Target};
 use super::parse::Message;
@@ -45,7 +46,8 @@ pub enum Fire {
 }
 
 /// Why learn consumed a message and ran nothing.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub enum LearnRefusal {
     /// A HOLD press while every one of the engine's `HOLD_CONTROLS` numbers is held: the engine would
     /// remember it nowhere, so its release could not end the capture. Its release runs nothing.
@@ -313,6 +315,12 @@ impl Learn {
     /// A pedal still down then releases nothing.
     pub fn clear_holds(&mut self) {
         self.held.clear();
+    }
+
+    /// HOLD's press under `control` never reached the engine (no device ran, or no room): as for a
+    /// refused attack, nothing is held, so its pedal's release runs nothing.
+    pub fn hold_refused(&mut self, control: u8) {
+        self.held.retain(|_, n| *n != control);
     }
 
     fn position(&self, c: &Control) -> Option<usize> {
@@ -703,5 +711,18 @@ mod tests {
         let out = send(&mut l, A, cc(0, 30, 127), t);
         assert_eq!(out.fire, [Fire::HoldRelease { control: 0 }]);
         assert_eq!((l.bindings().len(), l.bindings()[0].action, l.bindings()[0].hold), (1, ActionId::Undo, false));
+    }
+
+    // A HOLD press the engine never got (the queue refused it) holds nothing: its release runs nothing,
+    // and its number is free for the next press.
+    #[test]
+    fn a_refused_hold_press_holds_nothing() {
+        let mut l = Learn::default();
+        let t = Instant::now();
+        l.set_bindings(vec![hold_pedal(A, 20), hold_pedal(A, 21)]);
+        assert_eq!(send(&mut l, A, cc(0, 20, 127), t).fire, [Fire::HoldPress { target: None, control: 0 }]);
+        l.hold_refused(0);
+        assert_eq!(send(&mut l, A, cc(0, 20, 0), t), Outcome { consumed: true, ..Outcome::default() });
+        assert_eq!(send(&mut l, A, cc(0, 21, 127), t).fire, [Fire::HoldPress { target: None, control: 0 }]);
     }
 }

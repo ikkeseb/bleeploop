@@ -21,7 +21,7 @@
 //! | `driver` | the seam the owner opens streams through; `cpal_driver` is the real one, `fake_driver` (tests) the hardware-free one |
 //! | `slot_host` | [`SlotHost`]: a plugin owner's install/remove/eviction handshake with the engine |
 //! | `fpu` | the float mode every audio callback runs in: flush-to-zero and denormals-are-zero |
-//! | `frame_clock` | [`FrameClock`]: the callback's (time, frame) stamp and a press's frame; DEV, the stamps' history a frame turns into time through |
+//! | `frame_clock` | [`FrameClock`]: the callback's (time, frame) stamp, whether a device runs, the feed's anchor; DEV, the stamps' history a frame turns into time through |
 //! | `pipes` | [`pipes::PullPipe`]: frames pushed on one clock, pulled resampled on another (the WASAPI join, Share output) |
 //! | `feed` | the feed: what the UI reads back (events, device, status, anchor, meter, waveforms), on its own thread |
 //! | `mode` | engine mode: the managed host, the tone store's folder, the `engine_*` Tauri commands, shutdown on exit |
@@ -29,7 +29,7 @@
 //! | `session` | a session's bytes to and from the engine: the snapshot the UI saves (an export's with the wet master, rendered offline from the snapshot, its lanes' mix and the kept master volume and mute), the load it imports (each lane with its mix) |
 //! | `settings` | the last value of every setting, replayed into each new engine; a lane's mix as the engine applied it (its `Event::Mix`) |
 //! | `share` | Share output: the post-limiter master mirrored to a WASAPI endpoint while ASIO plays |
-//! | `midi` | native MIDI (built, never started by the app): ports, hot-plug, parse, the MIDI-learn bindings, notes and pedal actions |
+//! | `midi` | native MIDI (built, never started by the app): ports and hot-plug, parse, MIDI learn and its stored bindings, the one note router for every note source, the ordered input queue into [`EngineHost::send`] and its part in a rebuild ([`RebuildHook`]) |
 //! | `midi_bench` | DEV: the MIDI latency benchmark (a loopback sender, arrival stamps, the applied-note record's report) and the `settings`/`ends` lock waits, each run only when an environment variable asks |
 //! | `probe` | DEV: `app.exe --probe-engine`, the device side on real hardware (soak, switches, plugin swaps) |
 //! | `tone` | DEV: the probe's loopback tone (`--tone`): its hook in the output callback, the detector, the long and late callbacks' log |
@@ -100,9 +100,9 @@
 //! Everything here runs without hardware in `cargo test`: the transition kernel's tables, the device
 //! owner and the callbacks on the fake driver (`tests.rs`), the install/remove/restart handshake with
 //! the fixture plugins in a rendering engine (`host/`'s restart fixtures), the pipe matrix at ±400 ppm
-//! (`pipes.rs`), MIDI parse and bindings (`midi`), the wire fixture (`wire.rs`). Code only a device or
-//! a real plugin can run is compile-checked (`--features asio` too); on the rig, `pnpm native:engine`
-//! runs `probe.rs`'s bar.
+//! (`pipes.rs`), native MIDI on a recording engine and through a real rebuild (`midi`), the wire
+//! fixture (`wire.rs`). Code only a device or a real plugin can run is compile-checked (`--features
+//! asio` too); on the rig, `pnpm native:engine` runs `probe.rs`'s bar.
 
 mod callback;
 mod cpal_driver;
@@ -604,10 +604,29 @@ pub(crate) struct Core {
     pub(crate) device_events: Mutex<Vec<DeviceEvent>>,
     /// The device owner (`None` for a core without one: the test device).
     pub(crate) owner: Mutex<Option<OwnerLink>>,
+    /// The input path's part in an engine rebuild (`EngineHost::set_rebuild_hook`).
+    pub(crate) rebuild_hook: Mutex<Option<Arc<dyn RebuildHook>>>,
     /// DEV: the probe's tone run, once it set one. The output callback logs its long and late callbacks
     /// there outside the engine lock (`tone::SlowLog`: atomics, no lock).
     #[cfg(debug_assertions)]
     pub(crate) tone: std::sync::OnceLock<Arc<tone::Shared>>,
+}
+
+/// What an engine rebuild tells the input path: native MIDI's one queue (`midi`), whose commands were
+/// made for the engine being replaced (plan decision 6). `owner.rs` `swap_engine` calls it on whatever
+/// thread swaps (the device owner), never on the audio thread and never under `settings` or `ends`
+/// (the input path sends under its own lock, which comes before them): [`RebuildHook::pause`] before
+/// the swap, [`RebuildHook::rebuild`] once the new engine is in, [`RebuildHook::resume`] once its
+/// settings replay is queued. It needs nothing of the WebView, so a stalled UI cannot hold a recovery up.
+pub trait RebuildHook: Send + Sync {
+    /// Hold back fresh input and stop sending.
+    fn pause(&self);
+    /// The engine of generation `generation` replaced the old one. Returns what the input path meant to
+    /// send and never did that the settings memory keeps (the latest note target and wheels): recorded
+    /// before the replay, so the new engine gets them through the replay alone.
+    fn rebuild(&self, generation: u64) -> Vec<Command>;
+    /// The replay is queued: input flows again.
+    fn resume(&self);
 }
 
 /// Pop the event ring of the engine of generation `gen` into `each`. A lane's `Mix` and a `Toggled` are
@@ -666,6 +685,7 @@ impl Core {
             device: Mutex::new(None),
             device_events: Mutex::new(Vec::new()),
             owner: Mutex::new(None),
+            rebuild_hook: Mutex::new(None),
             #[cfg(debug_assertions)]
             tone: std::sync::OnceLock::new(),
         }
@@ -957,6 +977,11 @@ impl EngineHost {
 
     pub fn frame_clock(&self) -> FrameClock {
         self.core.clock.clone()
+    }
+
+    /// Register what an engine rebuild tells the input path ([`RebuildHook`]); `None` removes it.
+    pub fn set_rebuild_hook(&self, hook: Option<Arc<dyn RebuildHook>>) {
+        *self.core.rebuild_hook.lock().unwrap_or_else(|e| e.into_inner()) = hook;
     }
 
     pub fn diag(&self) -> IoDiag {

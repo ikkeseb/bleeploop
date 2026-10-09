@@ -1,6 +1,7 @@
 //! OWNS: the player's MIDI-learn bindings on disk, `midi-bindings.json` beside `plugin-folders.json`, and
 //! the one-time import of the WebView's `localStorage` list (`lf.midiLearn`, `src/app/midi-actions.ts`):
-//! the plan's decisions 8 and 9. Dormant: nothing builds a [`Store`] yet.
+//! the plan's decisions 8 and 9. Native MIDI's host keeps one (`super::Core`, dormant with it), which
+//! decides which records the learn model runs: the port resolution is its, never this file's.
 //!
 //! This file is USER DATA, as the folder list is (`host/folders.rs`): only a MISSING file is an empty
 //! store. One that cannot be read or parsed, or that a newer build wrote, is reported to the caller
@@ -161,6 +162,9 @@ pub enum LoadResult {
 pub struct Listed {
     pub binding: Binding,
     pub origin: Origin,
+    /// Its port id is a legacy run's ordinal: the port name is its identity until resolution or the
+    /// player gives it a real one.
+    pub ordinal: bool,
     /// Why it waits for the player's assignment ([`Store::assign`]), when it does.
     pub blocked: Option<String>,
     /// The port as the player knows it: the stored port name (the port id when the name is empty).
@@ -168,7 +172,7 @@ pub struct Listed {
 }
 
 /// A legacy record the import blocked, and why.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Blocked {
     /// Its position in the legacy list.
     pub index: usize,
@@ -176,7 +180,8 @@ pub struct Blocked {
 }
 
 /// What [`Store::import_legacy`] did, by each record's position in the legacy list.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ImportReport {
     /// The import had already run: nothing changed.
     pub already: bool,
@@ -298,17 +303,15 @@ fn refusal(file: &Path, result: LoadResult) -> String {
     }
 }
 
+/// An empty store with no file behind it (no data folder): it works in memory, and nothing writes it.
+pub fn empty() -> Store {
+    Store { records: Arc::default(), rejected: Arc::default(), imported: false, import_revision: None, revision: 0, slot: Arc::default() }
+}
+
 /// Read the store in `dir`. The store is always usable; [`LoadResult`] says whether it can be written.
 pub fn load(dir: &Path) -> (Store, LoadResult) {
     let file = dir.join(FILE_NAME);
-    let mut store = Store {
-        records: Arc::default(),
-        rejected: Arc::default(),
-        imported: false,
-        import_revision: None,
-        revision: 0,
-        slot: Arc::default(),
-    };
+    let mut store = empty();
     let result = match std::fs::read(&file) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => LoadResult::Missing,
         Err(e) => LoadResult::Invalid(format!("{}: {e}", file.display())),
@@ -334,6 +337,11 @@ impl Store {
         self.revision += 1;
     }
 
+    /// Raised by every change (0: the file as loaded); a [`Snapshot`] carries the one it was taken at.
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
     /// False once the file proved unreadable or of another version: every write is refused this session.
     pub fn writable(&self) -> bool {
         self.slot.read_only.get().is_none()
@@ -345,7 +353,9 @@ impl Store {
         self.imported && self.import_revision.is_none_or(|r| self.slot.written.load(Ordering::Acquire) >= r)
     }
 
-    /// The bindings the learn model runs, in list order: every one not blocked.
+    /// Every binding not blocked, in list order. Which of them the learn model runs is the port
+    /// resolution's (`super::Core`): never an ordinal one, nor one no present port answers to.
+    #[cfg(test)]
     pub fn bindings(&self) -> Vec<Binding> {
         self.records.iter().filter(|r| r.active()).map(|r| r.binding.clone()).collect()
     }
@@ -357,6 +367,7 @@ impl Store {
             .map(|r| Listed {
                 binding: r.binding.clone(),
                 origin: r.origin,
+                ordinal: r.ordinal,
                 blocked: r.blocked.clone(),
                 display_name: if r.binding.port_name.is_empty() { &r.binding.port_id } else { &r.binding.port_name }
                     .clone(),
@@ -375,23 +386,60 @@ impl Store {
         }
     }
 
-    /// The learn model's list after an edit ([`Store::bindings`] changed). A binding keeps the origin of
-    /// the active record on its control, else it is native; blocked records stay, after the list.
-    pub fn replace(&mut self, list: Vec<Binding>) {
-        let mut next: Vec<Record> = list
-            .into_iter()
-            .map(Binding::normalized)
-            .map(|binding| {
-                let same = self.records.iter().find(|r| r.active() && r.on_control(&binding, r.ordinal));
-                let (origin, ordinal) = same.map_or((Origin::Native, false), |r| (r.origin, r.ordinal));
-                Record { origin, ordinal, blocked: None, binding }
-            })
-            .collect();
-        next.extend(self.records.iter().filter(|r| !r.active()).cloned());
+    /// The learn model's list after an edit of its own (a learn, a pedal read as momentary). `live` names
+    /// the records the learn model was handed ([`Store::listed`] indices); `list` is its list now. A
+    /// binding on the control of one of them takes that record's place, keeping its origin; one on
+    /// another control is added at the end, native. A live record whose control `list` no longer binds is
+    /// gone. Every other record (blocked, ordinal, on a port no present port answers to) stays as it is,
+    /// but for an active one on a real port id whose control `list` now binds: one action per message.
+    pub fn replace(&mut self, live: &[usize], list: Vec<Binding>) {
+        let list: Vec<Binding> = list.into_iter().map(Binding::normalized).collect();
+        let mut placed = vec![false; list.len()];
+        let mut next: Vec<Record> = Vec::with_capacity(self.records.len() + list.len());
+        for (i, r) in self.records.iter().enumerate() {
+            if live.contains(&i) {
+                let on = (0..list.len()).find(|&k| !placed[k] && control(&list[k]) == control(&r.binding));
+                if let Some(k) = on {
+                    placed[k] = true;
+                    next.push(Record { binding: list[k].clone(), ..r.clone() });
+                }
+                continue;
+            }
+            if !(r.active() && !r.ordinal && list.iter().any(|b| control(b) == control(&r.binding))) {
+                next.push(r.clone());
+            }
+        }
+        let added = list.into_iter().zip(placed).filter(|(_, placed)| !placed);
+        next.extend(added.map(|(binding, _)| Record { origin: Origin::Native, ordinal: false, blocked: None, binding }));
         if next != *self.records {
             self.records = Arc::new(next);
             self.bump();
         }
+    }
+
+    /// The player drops listed binding `index`.
+    pub fn forget(&mut self, index: usize) -> Result<(), String> {
+        if index >= self.records.len() {
+            return Err(format!("no binding {index}"));
+        }
+        Arc::make_mut(&mut self.records).remove(index);
+        self.bump();
+        Ok(())
+    }
+
+    /// The player edits listed binding `index` (its kind, its HOLD): `binding`, on the same control,
+    /// takes its place with its invariants kept; its origin, ordinal and blocked state stay.
+    pub fn edit(&mut self, index: usize, binding: Binding) -> Result<(), String> {
+        let record = self.records.get(index).ok_or_else(|| format!("no binding {index}"))?;
+        if control(&record.binding) != control(&binding) || record.binding.port_name != binding.port_name {
+            return Err(format!("binding {index} listens to another message"));
+        }
+        let binding = binding.normalized();
+        if record.binding != binding {
+            Arc::make_mut(&mut self.records)[index].binding = binding;
+            self.bump();
+        }
+        Ok(())
     }
 
     /// The player assigns listed binding `index` to a present port: its id and name become that port's,
@@ -634,6 +682,14 @@ mod tests {
         serde_json::to_string(records).unwrap()
     }
 
+    impl Store {
+        /// `list` as the learn model's whole list: every active record was handed to it.
+        fn set(&mut self, list: Vec<Binding>) {
+            let live: Vec<usize> = (0..self.records.len()).filter(|&i| self.records[i].active()).collect();
+            self.replace(&live, list);
+        }
+    }
+
     fn blocked(store: &Store) -> Vec<bool> {
         store.listed().iter().map(|l| l.blocked.is_some()).collect()
     }
@@ -658,7 +714,7 @@ mod tests {
         assert_eq!(scratch.files(), Vec::<String>::new());
 
         let pedal = binding("native-1", "Pedal", 20);
-        store.replace(vec![pedal.clone()]);
+        store.set(vec![pedal.clone()]);
         assert_eq!(store.snapshot().write(&scratch.0), Ok(Written::Wrote));
         assert_eq!(
             scratch.json(),
@@ -701,7 +757,7 @@ mod tests {
             assert!(!store.writable());
             // The session still works in memory: an import and an edit.
             store.import_legacy(&legacy_list(&[legacy("input-1", "Pedal", 20)]));
-            store.replace(vec![binding("native-1", "Pedal", 21)]);
+            store.set(vec![binding("native-1", "Pedal", 21)]);
             assert_eq!(store.bindings().len(), 1);
             let refused = store.snapshot().write(&scratch.0);
             assert!(matches!(refused, Err(WriteError::ReadOnly(_))), "{refused:?}");
@@ -732,7 +788,7 @@ mod tests {
         assert!(rejected[0].reason.contains("selfDestruct"), "{}", rejected[0].reason);
         assert_eq!(store.bindings().len(), 1);
 
-        store.replace(vec![binding("native-2", "Keys", 64)]);
+        store.set(vec![binding("native-2", "Keys", 64)]);
         assert_eq!(store.snapshot().write(&scratch.0), Ok(Written::Wrote));
         let written = scratch.json();
         assert_eq!(written["revision"], 5);
@@ -743,7 +799,7 @@ mod tests {
         assert_eq!(written["bindings"][0]["binding"]["portName"], "Keys");
         // Read again, the set-aside record stays set aside: nothing is lost on a second round either.
         let (mut store, _) = load(&scratch.0);
-        store.replace(vec![]);
+        store.set(vec![]);
         store.snapshot().write(&scratch.0).unwrap();
         assert_eq!(scratch.json()["rejected"], written["rejected"]);
     }
@@ -768,7 +824,7 @@ mod tests {
         let (mut store, _) = load(&scratch.0);
         let before = std::fs::read(scratch.file()).unwrap();
         Arc::make_mut(&mut store.rejected).push(nested(130));
-        store.replace(vec![]);
+        store.set(vec![]);
         let refused = store.snapshot().write(&scratch.0);
         assert!(matches!(refused, Err(WriteError::Failed(_))), "{refused:?}");
         assert_eq!(std::fs::read(scratch.file()).unwrap(), before);
@@ -854,7 +910,7 @@ mod tests {
         const FILE_SHARE_READ: u32 = 1;
         let scratch = Scratch::new("durable");
         let (mut store, _) = load(&scratch.0);
-        store.replace(vec![binding("native-1", "Pedal", 1)]);
+        store.set(vec![binding("native-1", "Pedal", 1)]);
         let before_import = store.snapshot();
         store.import_legacy(&legacy_list(&[legacy("input-1", "Pedal", 20)]));
         assert!(!store.legacy_durable());
@@ -876,9 +932,9 @@ mod tests {
     fn snapshots_written_out_of_order_leave_the_newer_on_disk() {
         let scratch = Scratch::new("order");
         let (mut store, _) = load(&scratch.0);
-        store.replace(vec![binding("native-1", "Old", 1)]);
+        store.set(vec![binding("native-1", "Old", 1)]);
         let older = store.snapshot();
-        store.replace(vec![binding("native-1", "New", 2)]);
+        store.set(vec![binding("native-1", "New", 2)]);
         let newer = store.snapshot();
         assert!(older.revision() < newer.revision());
         assert_eq!(newer.write(&scratch.0), Ok(Written::Wrote));
@@ -888,9 +944,9 @@ mod tests {
 
         // Two threads, each with its own snapshot, in either order: the newer always wins.
         for flip in [false, true] {
-            store.replace(vec![binding("native-1", "A", 3 + u8::from(flip))]);
+            store.set(vec![binding("native-1", "A", 3 + u8::from(flip))]);
             let a = store.snapshot();
-            store.replace(vec![binding("native-1", "B", 5 + u8::from(flip))]);
+            store.set(vec![binding("native-1", "B", 5 + u8::from(flip))]);
             let b = store.snapshot();
             let (first, second) = if flip { (a, b) } else { (b, a) };
             let dir = scratch.0.clone();
@@ -908,14 +964,14 @@ mod tests {
         let scratch = Scratch::new("instances");
         let (mut a, _) = load(&scratch.0);
         let (mut b, _) = load(&scratch.0);
-        a.replace(vec![binding("native-1", "A", 1)]);
+        a.set(vec![binding("native-1", "A", 1)]);
         assert_eq!(a.snapshot().write(&scratch.0), Ok(Written::Wrote));
-        b.replace(vec![binding("native-1", "B", 1)]);
+        b.set(vec![binding("native-1", "B", 1)]);
         assert!(matches!(b.snapshot().write(&scratch.0), Err(WriteError::Conflict(_))), "B never saw A's file");
         let (mut b, _) = load(&scratch.0);
-        a.replace(vec![binding("native-1", "A", 2)]);
+        a.set(vec![binding("native-1", "A", 2)]);
         assert_eq!(a.snapshot().write(&scratch.0), Ok(Written::Wrote));
-        b.replace(vec![binding("native-1", "B", 2)]);
+        b.set(vec![binding("native-1", "B", 2)]);
         assert!(matches!(b.snapshot().write(&scratch.0), Err(WriteError::Conflict(_))), "B loaded an older revision");
         assert_eq!(scratch.json()["bindings"][0]["binding"]["portName"], "A");
         assert!(b.writable(), "a conflict is no reason to stop writing after a reload");
@@ -925,21 +981,21 @@ mod tests {
         for bytes in [newer, b"{ torn".to_vec()] {
             let (mut c, _) = load(&scratch.0);
             std::fs::write(scratch.file(), &bytes).unwrap();
-            c.replace(vec![binding("native-1", "C", 3)]);
+            c.set(vec![binding("native-1", "C", 3)]);
             assert!(matches!(c.snapshot().write(&scratch.0), Err(WriteError::ReadOnly(_))));
             assert!(!c.writable());
             assert_eq!(std::fs::read(scratch.file()).unwrap(), bytes, "the file is left as it was");
             // Put back a file this build reads, for the next case.
             std::fs::remove_file(scratch.file()).unwrap();
             let (mut d, _) = load(&scratch.0);
-            d.replace(vec![binding("native-1", "D", 4)]);
+            d.set(vec![binding("native-1", "D", 4)]);
             d.snapshot().write(&scratch.0).unwrap();
         }
         assert_eq!(scratch.files(), vec![FILE_NAME]);
     }
 
     #[test]
-    fn replace_keeps_each_controls_origin_and_the_blocked_records() {
+    fn replace_keeps_each_controls_origin_and_place_and_the_blocked_records() {
         let (mut store, _) = load(&Scratch::new("replace").0);
         store.import_legacy(&legacy_list(&[
             legacy("input-1", "Pedal", 20),
@@ -950,21 +1006,22 @@ mod tests {
         assert_eq!(list.len(), 1);
         list[0].momentary = false;
         list.push(binding("native-1", "Keys", 64));
-        store.replace(list);
+        store.set(list);
         let listed: Vec<(String, Origin, bool)> =
             store.listed().into_iter().map(|l| (l.binding.port_id, l.origin, l.blocked.is_some())).collect();
         assert_eq!(
             listed,
             [
                 ("input-1".into(), Origin::Legacy, false),
-                ("native-1".into(), Origin::Native, false),
                 ("input-2".into(), Origin::Legacy, true),
                 ("input-4".into(), Origin::Legacy, true),
-            ]
+                ("native-1".into(), Origin::Native, false),
+            ],
+            "an edited record keeps its place; a new one goes last"
         );
         assert!(store.records[0].ordinal, "the edited legacy record is still on its ordinal id");
         let revision = store.snapshot().revision();
-        store.replace(store.bindings());
+        store.set(store.bindings());
         assert_eq!(store.snapshot().revision(), revision, "an unchanged list is no change");
     }
 
@@ -1022,7 +1079,7 @@ mod tests {
     #[test]
     fn reanchor_blocks_a_record_whose_message_the_new_port_already_binds() {
         let (mut store, _) = load(&Scratch::new("reanchor-clash").0);
-        store.replace(vec![binding("dev-A#0", "Pedal", 20)]);
+        store.set(vec![binding("dev-A#0", "Pedal", 20)]);
         store.import_legacy(&legacy_list(&[legacy("input-1", "Pedal", 20), legacy("input-1", "Pedal", 21)]));
         let out = store.reanchor("input-1", "Pedal", "dev-A#0", "Pedal");
         assert_eq!((out.moved, out.blocked), (vec![2], vec![1]));
@@ -1030,5 +1087,58 @@ mod tests {
         assert!(store.listed()[1].blocked.as_ref().unwrap().contains("already has a binding"));
         let on_20 = store.bindings().iter().filter(|b| b.port_id == "dev-A#0" && b.number == 20).count();
         assert_eq!(on_20, 1, "one active binding per control");
+    }
+
+    // The learn model runs only the records the port resolution hands it: an edit of its own leaves the
+    // others as they are (an ordinal record, one on a port no present port answers to), but for an
+    // active one on a real id that its list now binds the message of (one action per message).
+    #[test]
+    fn replace_leaves_the_records_the_learn_model_does_not_run() {
+        let (mut store, _) = load(&Scratch::new("replace-live").0);
+        store.import_legacy(&legacy_list(&[legacy("input-1", "Pedal", 20)]));
+        store.set(vec![binding("input-1", "Pedal", 20), binding("dev-A#0", "Keys", 1), binding("dev-B#0", "Gone", 2)]);
+        assert_eq!(store.records.len(), 3);
+        // Handed to the learn model: Keys alone (Pedal is ordinal, Gone's port is absent).
+        let mut list = vec![Binding { momentary: false, ..binding("dev-A#0", "Keys", 1) }];
+        list.push(binding("dev-B#0", "Pedal", 9));
+        store.replace(&[1], list.clone());
+        let got: Vec<(String, u8, bool)> = store.listed().into_iter().map(|l| (l.binding.port_id, l.binding.number, l.binding.momentary)).collect();
+        assert_eq!(
+            got,
+            [("input-1".into(), 20, true), ("dev-A#0".into(), 1, false), ("dev-B#0".into(), 2, true), ("dev-B#0".into(), 9, true)],
+            "the others stay; Keys is edited in place; the learn is added"
+        );
+        assert!(store.listed()[0].ordinal);
+        // A learn on the message an unrun record on a real id binds takes it over; an ordinal one stays.
+        store.replace(&[1, 3], [list, vec![binding("dev-B#0", "Gone", 2), binding("input-1", "Pedal", 20)]].concat());
+        let got: Vec<(String, u8)> = store.listed().into_iter().map(|l| (l.binding.port_id, l.binding.number)).collect();
+        assert_eq!(
+            got,
+            [("input-1".into(), 20), ("dev-A#0".into(), 1), ("dev-B#0".into(), 9), ("dev-B#0".into(), 2), ("input-1".into(), 20)]
+        );
+        // A live record its list dropped is forgotten.
+        let revision = store.snapshot().revision();
+        store.replace(&[1, 2, 3, 4], vec![binding("dev-B#0", "Gone", 2)]);
+        assert_eq!(store.listed().iter().map(|l| l.binding.number).collect::<Vec<_>>(), [20, 2]);
+        assert!(store.snapshot().revision() > revision);
+    }
+
+    #[test]
+    fn forget_and_edit_act_on_any_listed_record() {
+        let (mut store, _) = load(&Scratch::new("edit").0);
+        store.import_legacy(&legacy_list(&[legacy("input-1", "Pedal", 20), legacy("input-3", "Pedal", 20), legacy("input-1", "Pedal", 21)]));
+        assert_eq!(blocked(&store), [true, true, false]);
+        let b = store.listed()[1].binding.clone();
+        store.edit(1, Binding { momentary: false, hold: true, ..b.clone() }).unwrap();
+        let edited = &store.listed()[1];
+        assert_eq!((edited.binding.momentary, edited.binding.hold, edited.blocked.is_some(), edited.ordinal), (false, false, true, true), "a latching pedal has no HOLD; it stays blocked");
+        assert!(store.edit(1, Binding { number: 30, ..b.clone() }).is_err(), "another message");
+        assert!(store.edit(1, Binding { port_name: "Keys".into(), ..b }).is_err(), "another port");
+        let revision = store.snapshot().revision();
+        store.forget(0).unwrap();
+        assert_eq!(blocked(&store), [true, false]);
+        assert!(store.snapshot().revision() > revision);
+        assert!(store.forget(5).is_err());
+        assert!(empty().writable());
     }
 }
