@@ -59,6 +59,8 @@ on when an init script sets `window.__lfEngineFake = true` before the app loads:
 command the UI sends (`__lf.native.sent`) and hands the feed frames the probe scripts
 (`__lf.native.emit`) to the UI. Nothing answers a command but a lane's mix, which the fake reports as
 the engine's `Mix` once it changes (its seams `holdEcho`, `holdApply` and `refuseMix` hold or refuse that),
+and a toggle (CLICK, END STOP, FIXED, RETAKE, AUTO REC, a send), which it switches or refuses as the
+engine's gate would on the scripted looper and answers with `Toggled` or `Refused`,
 so a probe proves gesture → command and frame → screen, never the engine
 (`verify/probes/engine-seam.mjs` is the pattern). What still runs for
 real in the page: the input router, Web MIDI parsing and learn, the recovery worker and IndexedDB, the

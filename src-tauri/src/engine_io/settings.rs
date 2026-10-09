@@ -19,12 +19,26 @@
 //! A rebuild projects the replaced engine's last mixes before its replay (`owner.rs` `swap_engine`):
 //! what its event ring still holds, then each lane's mix read from the engine itself
 //! (`Engine::applied_mixes`), so a mix the full ring refused is not lost.
+//!
+//! A toggled setting (the click, END STOP, FIXED, RETAKE, AUTO REC, each input send: `lf_engine::Toggle`)
+//! is switched by an action (`Action::Toggle`), which the engine judges and applies against its own
+//! value, so the memory takes its value from what the engine applied. Its setter is kept as sent
+//! (initialization, a replay, a script), and the engine answers every applied command of the setting,
+//! setter or toggle, with exactly one event of it (`Event::Toggled` with the value it left, or a refused
+//! toggle's `Event::Refused`; an answer the full ring refused is owed and comes later, or is read at a
+//! rebuild: `Engine::unsent_toggles`). The memory counts the commands of each setting the engine's ring
+//! took (`pushed`) against those answers, which arrive in the order the commands applied, and keeps an
+//! answer's value (as the setter that sets it) only when no setter pushed after its command is still
+//! unanswered (`toggled`): an answer older than a setter in flight never overwrites that setter, and the
+//! setter's own answer brings the applied value. A rebuild drains the replaced engine's ring and its owed
+//! answers, so a toggle accepted just before it survives whether or not the feed saw it, and a setter
+//! still queued there stays kept as sent; a toggle still queued there is lost, as every queued action.
 
 use std::collections::BTreeMap;
 
 use lf_engine::dsp::fx::{FxKind, FxParam, MAX_PARAMS};
 use lf_engine::grid::Frame;
-use lf_engine::{Command, CompactMix, Event, LaneMix, SLOT_COUNT, TRACK_COUNT};
+use lf_engine::{Action, Command, CompactMix, Event, LaneMix, Refusal, Toggle, SLOT_COUNT, TRACK_COUNT};
 
 /// What a setting sets; replayed in this order (the note target before the wheels it hands over).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -125,6 +139,20 @@ fn key(command: &Command) -> Option<Key> {
     })
 }
 
+/// The toggled setting `command` sets (a setter: true) or switches (its toggle: false).
+fn toggled_by(command: &Command) -> Option<(Toggle, bool)> {
+    Some(match *command {
+        Command::SetMetronome(_) => (Toggle::Click, true),
+        Command::SetLoopEndStop(_) => (Toggle::EndStop, true),
+        Command::SetFixedLength(_) => (Toggle::Fixed, true),
+        Command::SetRetake(_) => (Toggle::Retake, true),
+        Command::SetAutoRecord(_) => (Toggle::AutoRec, true),
+        Command::SetInputSend(send, _) => (Toggle::Send(send), true),
+        Command::Action(Action::Toggle(t)) | Command::ActionOn(_, Action::Toggle(t)) => (t, false),
+        _ => return None,
+    })
+}
+
 pub(crate) struct Settings {
     last: BTreeMap<Key, Command>,
     /// Each lane's last `Mix` and its frame; `None` until one arrives (the lane's entries in `last` are
@@ -132,11 +160,16 @@ pub(crate) struct Settings {
     applied: [Option<(Frame, CompactMix)>; TRACK_COUNT],
     /// The engine generation (`Core::engine_gen`) whose `Mix` events the projection takes.
     gen: u64,
+    /// Per toggled setting (`Toggle::index`): its commands the followed engine's ring took that it has not
+    /// answered yet, and how many of them, counted from the oldest, reach the last setter among them (0:
+    /// no setter in flight).
+    in_flight: [u32; Toggle::COUNT],
+    setter_at: [u32; Toggle::COUNT],
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { last: BTreeMap::new(), applied: [None; TRACK_COUNT], gen: 0 }
+        Settings { last: BTreeMap::new(), applied: [None; TRACK_COUNT], gen: 0, in_flight: [0; Toggle::COUNT], setter_at: [0; Toggle::COUNT] }
     }
 }
 
@@ -186,16 +219,66 @@ impl Settings {
         true
     }
 
+    /// The followed engine's command ring took `command`: a command of a toggled setting is now in flight
+    /// until the engine answers it (`toggled`, `refused`).
+    pub(crate) fn pushed(&mut self, command: &Command) {
+        let Some((toggle, setter)) = toggled_by(command) else { return };
+        let k = toggle.index();
+        self.in_flight[k] += 1;
+        if setter {
+            self.setter_at[k] = self.in_flight[k];
+        }
+    }
+
+    /// The engine of generation `gen` answered the oldest command of `toggle` in flight with `on` (its
+    /// `Event::Toggled`, or an owed one read at a rebuild): kept as the setter that sets it, unless a
+    /// setter pushed after that command is still unanswered (its value, kept as sent, is newer). False,
+    /// and nothing kept, for an engine this memory no longer follows.
+    pub(crate) fn toggled(&mut self, gen: u64, toggle: Toggle, on: bool) -> bool {
+        if gen != self.gen {
+            return false;
+        }
+        if self.answered(toggle) {
+            self.insert(toggle.setter(on));
+        }
+        true
+    }
+
+    /// The engine of generation `gen` refused a toggle (`Event::Refused`): the answer to its command, which
+    /// changed nothing. Any other refusal is no toggle's.
+    pub(crate) fn refused(&mut self, gen: u64, reason: Refusal) {
+        let toggle = match reason {
+            Refusal::FixedCapturing | Refusal::FixedRetake => Toggle::Fixed,
+            Refusal::RetakeCapturing => Toggle::Retake,
+            Refusal::AutoRecCapturing | Refusal::AutoRecLocked => Toggle::AutoRec,
+            _ => return,
+        };
+        if gen == self.gen {
+            self.answered(toggle);
+        }
+    }
+
+    /// One answer for `toggle`: its oldest command in flight is done. True when no setter is left in flight.
+    fn answered(&mut self, toggle: Toggle) -> bool {
+        let k = toggle.index();
+        self.in_flight[k] = self.in_flight[k].saturating_sub(1);
+        self.setter_at[k] = self.setter_at[k].saturating_sub(1);
+        self.setter_at[k] == 0
+    }
+
     fn insert(&mut self, command: Command) {
         if let Some(key) = key(&command) {
             self.last.insert(key, command);
         }
     }
 
-    /// A new engine of generation `gen` was replayed this memory: only its `Mix` events count from here
-    /// on, each lane keeping the mix it has until the new engine's first `Mix` for it.
+    /// A new engine of generation `gen` is to be replayed this memory: only its events count from here
+    /// on, each lane keeping the mix it has until the new engine's first `Mix` for it, and no command of a
+    /// toggled setting is in flight in it until the replay is `pushed`.
     pub(crate) fn follow(&mut self, gen: u64) {
         self.gen = gen;
+        self.in_flight = [0; Toggle::COUNT];
+        self.setter_at = [0; Toggle::COUNT];
     }
 
     /// Every kept setting, in replay order.
@@ -295,6 +378,60 @@ mod tests {
         let mixes: Vec<Event> = s.mixes().collect();
         assert_eq!(mixes.len(), 2, "the two lanes the engine reported: {mixes:?}");
         assert!(matches!(mixes[0], Event::Mix { frame: 200, lane: 0, mix } if mix.muted));
+    }
+
+    #[test]
+    fn a_toggled_setting_is_kept_as_its_setter_at_the_value_the_engine_applied() {
+        let mut s = Settings::default();
+        s.follow(1);
+        assert!(!s.record(&Command::Action(lf_engine::Action::Toggle(Toggle::Click))), "a toggle is an action, kept nowhere");
+        assert!(s.toggled(1, Toggle::Click, true));
+        assert!(s.toggled(1, Toggle::Send(InputSend::Reverb), true));
+        assert!(s.toggled(1, Toggle::Send(InputSend::Reverb), false));
+        assert_eq!(replay(&s), [Command::SetMetronome(true), Command::SetInputSend(InputSend::Reverb, false)], "an off kept too: the UI pushes a send the memory lacks");
+        assert!(s.record(&Command::SetMetronome(false)), "a setter is still kept as sent");
+        assert_eq!(replay(&s)[0], Command::SetMetronome(false));
+        assert!(s.toggled(1, Toggle::Click, true), "then the engine's next value");
+        assert_eq!(replay(&s)[0], Command::SetMetronome(true));
+        s.follow(2);
+        assert!(!s.toggled(1, Toggle::Retake, true), "a replaced engine's late Toggled");
+        assert!(!replay(&s).contains(&Command::SetRetake(true)));
+        for t in Toggle::ALL {
+            assert_eq!(key(&t.setter(true)), key(&t.setter(false)), "{t:?}: one key per setting");
+            assert!(key(&t.setter(true)).is_some());
+        }
+    }
+
+    #[test]
+    fn an_answer_older_than_a_setter_in_flight_never_overwrites_it() {
+        let mut s = Settings::default();
+        s.follow(1);
+        let toggle = Command::Action(lf_engine::Action::Toggle(Toggle::Click));
+        s.pushed(&toggle);
+        assert!(s.record(&Command::SetMetronome(false)));
+        s.pushed(&Command::SetMetronome(false));
+        s.pushed(&toggle);
+        assert!(s.toggled(1, Toggle::Click, true), "the first toggle's answer");
+        assert_eq!(replay(&s), [Command::SetMetronome(false)], "older than the setter in flight: the setter stays");
+        assert!(s.toggled(1, Toggle::Click, false), "the setter's own answer");
+        assert_eq!(replay(&s), [Command::SetMetronome(false)]);
+        assert!(s.toggled(1, Toggle::Click, true), "the last toggle's");
+        assert_eq!(replay(&s), [Command::SetMetronome(true)], "no setter in flight: the applied value");
+        // A refused toggle answers with its Refused, and a refusal that is no toggle's answers nothing.
+        s.pushed(&Command::SetRetake(true));
+        s.record(&Command::SetRetake(true));
+        s.pushed(&Command::Action(lf_engine::Action::Toggle(Toggle::Fixed)));
+        s.pushed(&Command::SetFixedLength(false));
+        s.record(&Command::SetFixedLength(false));
+        s.refused(1, Refusal::NoFade);
+        s.refused(1, Refusal::FixedRetake);
+        assert!(s.toggled(1, Toggle::Fixed, false), "the setter's answer, its refused toggle's counted");
+        assert!(replay(&s).contains(&Command::SetFixedLength(false)));
+        assert!(s.toggled(1, Toggle::Retake, true));
+        s.follow(2);
+        s.pushed(&toggle);
+        assert!(s.toggled(2, Toggle::Click, false), "a new engine counts from nothing");
+        assert!(replay(&s).contains(&Command::SetMetronome(false)));
     }
 
     #[test]

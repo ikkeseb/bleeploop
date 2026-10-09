@@ -20,13 +20,14 @@
  * binding saved before targets loads as the selected track's (the engine's `Action`), and the engine's
  * refusal of it shows on its lane. On a second page, a track action sends the engine's action (`Action`
  * on the engine's own selection, `ActionOn` a named track: MUTE, REV, COPY and HALVE too; only REC/DUB
- * selects its track), a global toggle sends `Press` then its control's command, and HOLD's press and
+ * selects its track), a global toggle sends the engine's toggle, and HOLD's press and
  * release send the engine's `Hold` (`ActionOn` a named track) and `Release` whatever the feed shows, two
  * HOLD pedals down at once by two control numbers; a port unplugged with a HOLD pedal down releases that
  * press and no other port's, and a HOLD binding switched off, to latching, relearned or forgotten while
  * down releases its press once (its pedal's own release then runs nothing, and a latching pedal's next
- * press runs the action); AUTO REC on the locked tempo and RETAKE while a lane records are refused with
- * their cue and send only the `Press`, as their buttons are disabled; an engine refusal (NO MUTE) lands
+ * press runs the action); AUTO REC on the locked tempo and RETAKE while a lane records send the engine's
+ * toggle, which the engine (here the fake's copy of its gate) refuses with their cue, as their buttons
+ * are disabled; an engine refusal (NO MUTE) lands
  * on its lane.
  * logs/midi-learn/bindings.png shows the row and a long list for the eye. It cannot see a real
  * controller, whether WebView2 keeps a port's id across a restart or replug, a real foot against the
@@ -802,10 +803,10 @@ await probe(async ({ open }) => {
       'Auto record': ['false', 'true', 'false'],
     },
     sent: {
-      Retake: ['Press', { SetRetake: true }, 'Press', { SetRetake: false }],
-      'Auto record': ['Press', { SetAutoRecord: true }, 'Press', { SetAutoRecord: false }],
+      Retake: [{ Action: { Toggle: 'Retake' } }, { Action: { Toggle: 'Retake' } }],
+      'Auto record': [{ Action: { Toggle: 'AutoRec' } }, { Action: { Toggle: 'AutoRec' } }],
     },
-  }, 'tap tempo sends the tapped BPM, CLICK / END STOP / FIXED / RETAKE / AUTO REC toggle their controls, RETAKE and AUTO REC after a Press'));
+  }, "tap tempo sends the tapped BPM, CLICK / END STOP / FIXED / RETAKE / AUTO REC toggle their controls through the engine's toggle"));
   check(() => assert.deepEqual(out.targets, {
     lines: [
       'Record / overdub · Track 3 | CC 70 · ch 1 | momentary',
@@ -868,11 +869,11 @@ await probe(async ({ open }) => {
       13: [{ ActionOn: [1, 'Reverse'] }],
       14: [{ ActionOn: [0, 'Copy'] }],
       15: [{ Action: 'PlayStop' }],
-      16: ['Press', { SetMetronome: true }],
-      17: ['Press', { SetLoopEndStop: true }],
-      18: ['Press', { SetFixedLength: true }],
-      19: ['Press', { SetInputSend: ['echo', true] }],
-      20: ['Press', { SetInputSend: ['reverb', true] }],
+      16: [{ Action: { Toggle: 'Click' } }],
+      17: [{ Action: { Toggle: 'EndStop' } }],
+      18: [{ Action: { Toggle: 'Fixed' } }],
+      19: [{ Action: { Toggle: { Send: 'echo' } } }],
+      20: [{ Action: { Toggle: { Send: 'reverb' } } }],
       21: [{ ActionOn: [3, 'Mute'] }],
       23: [{ Action: 'Mute' }],
       24: [{ Action: 'Reverse' }],
@@ -880,15 +881,15 @@ await probe(async ({ open }) => {
       26: [{ Action: 'Halve' }],
       27: [{ ActionOn: [2, 'Halve'] }],
       28: ['Press'],
-      31: ['Press', { SetInputSend: ['ring', true] }],
+      31: [{ Action: { Toggle: { Send: 'ring' } } }],
     },
     refusedPress: {
-      autoRec: { sent: ['Press'], cue: 'AUTO REC starts a first take, clear all to use it' },
-      retake: { sent: ['Press'], cue: 'a take is recording, RETAKE changes after it' },
+      autoRec: { sent: [{ Action: { Toggle: 'AutoRec' } }], cue: 'AUTO REC starts a first take, clear all to use it' },
+      retake: { sent: [{ Action: { Toggle: 'Retake' } }], cue: 'a take is recording, RETAKE changes after it' },
     },
     controls: { click: 'true', endStop: 'true', fixed: 'true', inFx: true },
     cue4: 'nothing to mute, record first',
-  }, "engine mode: a track press sends the engine's action for the engine's selection or its named track, a global toggle Press then its control's command, HOLD the engine's press and release; AUTO REC on a locked tempo and RETAKE during a take are refused on the selected lane as their buttons are; an engine refusal says why on its lane"));
+  }, "engine mode: a track press sends the engine's action for the engine's selection or its named track, a global toggle the engine's toggle, HOLD the engine's press and release; AUTO REC on a locked tempo and RETAKE during a take are refused by the engine on the selected lane as their buttons are; an engine refusal says why on its lane"));
   for (const failure of failures) console.log(`FAIL ${failure}`);
   assert.equal(failures.length, 0, `${failures.length} of ${checks} checks failed`);
 });

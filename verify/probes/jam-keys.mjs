@@ -14,7 +14,7 @@
  *   cue down at once; a Delete past the window finds no cue, and the engine's answer shows it again; the
  *   engine's `Cleared` empties the lane with no cue left.
  * - FEED → DOM: an AUTO REC arm reads LISTENING, "WAITING FOR INPUT", beside its sensitivity slider (AUTO
- *   sends `SetAutoRecord`); a rolling RETAKE first take reads TAKE 3, and an EMPTY lane's core stays
+ *   sends the engine's AUTO REC toggle, and the button shows the `Toggled` the fake answers); a rolling RETAKE first take reads TAKE 3, and an EMPTY lane's core stays
  *   pressable as the approve gesture (while a plain take records, it is refused); `TakeRejected` and
  *   `PassDropped` each reach the player (a toast naming the lane) and the release log (one console.error);
  *   a `Copied` and a `Cleared` reach the store as the lane's `Mix`, which the fake reports as the engine
@@ -24,7 +24,7 @@
  *   refuses ("Finish the active recording"), while a recovery snapshot (`includeMaster: false`) still builds.
  *
  * Cannot see the native engine, Tauri IPC or any timing: the fake answers no command by itself but a
- * lane's mix, so every state, selection, refusal and rejection the DOM shows was scripted; whether the engine wraps, confirms,
+ * lane's mix and a toggle, so every state, selection, refusal and rejection the DOM shows was scripted; whether the engine wraps, confirms,
  * clears or rejects as scripted is lf-engine's (`tests/golden_jam.rs`, `tests/actions.rs`).
  * Run: pnpm probe jam-keys
  */
@@ -110,7 +110,8 @@ await probe(async ({ open }) => {
   // ── FEED → DOM: AUTO REC listening, then a rolling RETAKE ────────────────────────────────────────
   await clearSent();
   await page.getByRole('button', { name: 'Auto record', exact: true }).click();
-  assert.deepEqual(await sentAtLeast(1), [{ SetAutoRecord: true }], 'AUTO sends SetAutoRecord');
+  assert.deepEqual(await sentAtLeast(1), [{ Action: { Toggle: 'AutoRec' } }], "AUTO sends the engine's toggle");
+  assert.equal(await page.getByRole('button', { name: 'Auto record', exact: true }).getAttribute('aria-pressed'), 'true', "AUTO shows the engine's Toggled");
   await emit({ events: [laneEvent(0, lane('Recording', { autoArmed: true }))] });
   const listening = await page.evaluate(() => {
     const l = document.querySelector('.lp-lane');
@@ -125,7 +126,8 @@ await probe(async ({ open }) => {
   await emit({ events: [laneEvent(0, lane('Empty'))] });
   await clearSent();
   await page.getByRole('button', { name: 'Auto record', exact: true }).click();
-  assert.deepEqual(await sentAtLeast(1), [{ SetAutoRecord: false }]);
+  assert.deepEqual(await sentAtLeast(1), [{ Action: { Toggle: 'AutoRec' } }]);
+  assert.equal(await page.getByRole('button', { name: 'Auto record', exact: true }).getAttribute('aria-pressed'), 'false');
 
   const core = (i) => lanes.nth(i).locator('.lp-core');
   await emit({ events: [laneEvent(0, lane('Recording'))] });

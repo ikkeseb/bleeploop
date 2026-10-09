@@ -35,10 +35,20 @@ export type Refusal =
   | 'NoCopy'
   | 'NoFreeLane'
   | 'Fading'
-  | 'NoFade';
+  | 'NoFade'
+  | 'FixedCapturing'
+  | 'FixedRetake'
+  | 'RetakeCapturing'
+  | 'AutoRecCapturing'
+  | 'AutoRecLocked';
+/** A setting a press switches (Rust `lf_engine::Toggle`): the click, END STOP, FIXED, RETAKE, AUTO REC or an
+ * input send. The engine switches it from the value it has when the press lands and reports the value as
+ * `Toggled`. */
+export type EngineToggle = 'Click' | 'EndStop' | 'Fixed' | 'Retake' | 'AutoRec' | { Send: InputSendId };
 /** The hands-free actions (`src/app/actions.ts`; GO LIVE stays with the plugin host). `Halve` is TRIM to
  * the first half of the loop's bars; `Hold` and `Release` are HOLD's press and release, by the number of
- * the control (0..255) whose press the release ends; `FadeAll` is FADE. */
+ * the control (0..255) whose press the release ends; `FadeAll` is FADE; `Toggle` switches a setting (as
+ * `ActionOn` its lane is ignored). */
 export type EngineAction =
   | 'RecDub'
   | 'PlayStop'
@@ -54,7 +64,8 @@ export type EngineAction =
   | 'Halve'
   | { Hold: number }
   | { Release: number }
-  | 'FadeAll';
+  | 'FadeAll'
+  | { Toggle: EngineToggle };
 /** The built-in instruments by id (`src/ui/state/instruments.ts`). */
 export type InstrumentId = 'lead' | 'pad' | 'piano' | 'organ' | 'bass' | 'drum';
 export type FxKindId = 'filter' | 'pitch' | 'stutter' | 'delay' | 'reverb';
@@ -86,7 +97,13 @@ const REFUSALS: readonly Refusal[] = [
   'NoFreeLane',
   'Fading',
   'NoFade',
+  'FixedCapturing',
+  'FixedRetake',
+  'RetakeCapturing',
+  'AutoRecCapturing',
+  'AutoRecLocked',
 ];
+const UNIT_TOGGLES: readonly Extract<EngineToggle, string>[] = ['Click', 'EndStop', 'Fixed', 'Retake', 'AutoRec'];
 /** The unit actions; `Hold` and `Release` carry their control (`decodeAction`). */
 const ACTIONS: readonly Extract<EngineAction, string>[] = [
   'RecDub',
@@ -122,8 +139,8 @@ export type EngineCommand =
   | 'StopAll'
   | 'ClearAll'
   | 'AllNotesOff'
-  /** A hands-free press the engine does not run as an action (TAP, a toggle, an input send, GO LIVE), sent
-   * before the setting it changes: it disarms a pending pedal CLEAR, which the setting alone does not. */
+  /** A hands-free press the engine does not run as an action (TAP, GO LIVE), sent before the setting it
+   * changes: it disarms a pending pedal CLEAR, which the setting alone does not. */
   | 'Press'
   | { RecDub: number }
   | { PlayStop: number }
@@ -246,7 +263,11 @@ export type EngineEvent =
   /** The lane's mix as the engine applied it, sent when it differs from the last one delivered (each
    * lane once from a new engine); a reset frame carries the last one the host read, per lane. The FX params
    * crossed as f32, so a value sent with more than seven significant digits comes back rounded. */
-  | { type: 'Mix'; frame: Frame; lane: number; mix: LaneMix };
+  | { type: 'Mix'; frame: Frame; lane: number; mix: LaneMix }
+  /** A toggled setting's value as the engine applies it: after an accepted `Toggle`, and whenever it differs
+   * from the last one delivered (a setter changed it; a full ring delayed it). The UI shows the setting from
+   * it; a reset frame's settings carry the value the host last read. */
+  | { type: 'Toggled'; frame: Frame; toggle: EngineToggle; on: boolean };
 
 /** Rust `engine_io::DeviceEvent`, decoded to a `type`-tagged union. */
 export type DeviceEvent =
@@ -375,10 +396,21 @@ function tagged(v: unknown, what: string): [string, unknown] {
 
 const lane = (v: unknown, what: string) => int(v, what, 0, ENGINE_LANES - 1);
 
-/** An `Action`: a unit action's name, or `{"Hold": control}` / `{"Release": control}` (a u8). */
+/** A `Toggle`: a unit toggle's name, or `{"Send": key}`. */
+function decodeToggle(v: unknown, what: string): EngineToggle {
+  const [name, send] = tagged(v, what);
+  if (name === 'Send') oneOf(send, INPUT_SENDS, `${what}.Send`);
+  else if (send !== undefined) fail(`${what} ${name} is a unit variant`, v);
+  else oneOf(name, UNIT_TOGGLES, what);
+  return v as EngineToggle;
+}
+
+/** An `Action`: a unit action's name, `{"Hold": control}` / `{"Release": control}` (a u8), or
+ * `{"Toggle": toggle}`. */
 function decodeAction(v: unknown, what: string): EngineAction {
   const [name, control] = tagged(v, what);
   if (name === 'Hold' || name === 'Release') int(control, `${what}.${name}`, 0, 255);
+  else if (name === 'Toggle') decodeToggle(control, `${what}.Toggle`);
   else if (control !== undefined) fail(`${what} ${name} is a unit variant`, v);
   else oneOf(name, ACTIONS, what);
   return v as EngineAction;
@@ -448,6 +480,8 @@ export function decodeEvent(raw: unknown): EngineEvent {
       return { type: 'Muted', frame: at, lane: lane(o.lane, 'Muted.lane'), on: bool(o.on, 'Muted.on') };
     case 'Mix':
       return { type: 'Mix', frame: at, lane: lane(o.lane, 'Mix.lane'), mix: decodeLaneMix(o.mix, 'Mix.mix') };
+    case 'Toggled':
+      return { type: 'Toggled', frame: at, toggle: decodeToggle(o.toggle, 'Toggled.toggle'), on: bool(o.on, 'Toggled.on') };
     default:
       return fail('unknown Event variant', raw);
   }

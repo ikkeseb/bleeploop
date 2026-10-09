@@ -31,7 +31,7 @@ use std::collections::BTreeMap;
 
 use lf_engine::dsp::fx::{FxKind, FxParam, FxState, MAX_PARAMS};
 use lf_engine::grid::Frame;
-use lf_engine::{Action, Command, CompactMix, Event, InputSend, InputSendParam, Instrument, LaneInfo, LaneMix, LaneState, NoteTarget, Refusal};
+use lf_engine::{Action, Command, CompactMix, Event, InputSend, InputSendParam, Instrument, LaneInfo, LaneMix, LaneState, NoteTarget, Refusal, Toggle};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::{DeviceEvent, DeviceStatus};
@@ -113,6 +113,20 @@ enum ActionDef {
     Hold(u8),
     Release(u8),
     FadeAll,
+    Toggle(#[serde(with = "ToggleDef")] Toggle),
+}
+
+/// A `Toggle`: `"Click"`, `"EndStop"`, `"Fixed"`, `"Retake"`, `"AutoRec"`, or `{"Send":"echo"}` (a send
+/// as its key).
+#[derive(Serialize, Deserialize)]
+#[serde(remote = "Toggle")]
+enum ToggleDef {
+    Click,
+    EndStop,
+    Fixed,
+    Retake,
+    AutoRec,
+    Send(#[serde(with = "input_send")] InputSend),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -151,6 +165,12 @@ enum EventDef {
         lane: u8,
         #[serde(with = "compact_mix")]
         mix: CompactMix,
+    },
+    Toggled {
+        frame: Frame,
+        #[serde(with = "ToggleDef")]
+        toggle: Toggle,
+        on: bool,
     },
 }
 
@@ -212,6 +232,11 @@ enum RefusalDef {
     NoFreeLane,
     Fading,
     NoFade,
+    FixedCapturing,
+    FixedRetake,
+    RetakeCapturing,
+    AutoRecCapturing,
+    AutoRecLocked,
 }
 
 /// An `Instrument` as its id (`Instrument::id`).
@@ -508,7 +533,7 @@ mod tests {
 
     /// Every `Action` and `Refusal` variant, by position: a new one fails to compile here until the
     /// fixture sends (or answers) it.
-    const ACTIONS: usize = 15;
+    const ACTIONS: usize = 16;
     fn action_index(a: &Action) -> usize {
         match a {
             Action::RecDub => 0,
@@ -526,10 +551,11 @@ mod tests {
             Action::Hold(_) => 12,
             Action::Release(_) => 13,
             Action::FadeAll => 14,
+            Action::Toggle(_) => 15,
         }
     }
 
-    const REFUSALS: usize = 16;
+    const REFUSALS: usize = 21;
     fn refusal_index(r: &Refusal) -> usize {
         match r {
             Refusal::Stopping => 0,
@@ -548,10 +574,15 @@ mod tests {
             Refusal::NoFreeLane => 13,
             Refusal::Fading => 14,
             Refusal::NoFade => 15,
+            Refusal::FixedCapturing => 16,
+            Refusal::FixedRetake => 17,
+            Refusal::RetakeCapturing => 18,
+            Refusal::AutoRecCapturing => 19,
+            Refusal::AutoRecLocked => 20,
         }
     }
 
-    const EVENTS: usize = 11;
+    const EVENTS: usize = 12;
     fn event_index(e: &Event) -> usize {
         match e {
             Event::Lane { .. } => 0,
@@ -565,6 +596,7 @@ mod tests {
             Event::Cleared { .. } => 8,
             Event::Muted { .. } => 9,
             Event::Mix { .. } => 10,
+            Event::Toggled { .. } => 11,
         }
     }
 
@@ -628,6 +660,11 @@ mod tests {
             _ => None,
         });
         covers("commands (their actions)", actions, ACTIONS);
+        let toggles = commands.iter().filter_map(|c| match c.0 {
+            Command::Action(Action::Toggle(t)) | Command::ActionOn(_, Action::Toggle(t)) => Some(t.index()),
+            _ => None,
+        });
+        covers("commands (their toggles)", toggles, Toggle::COUNT);
         let targets = commands.iter().filter_map(|c| match c.0 {
             Command::SelectInstrument(NoteTarget::Builtin(_)) => Some(0),
             Command::SelectInstrument(NoteTarget::Slot(_)) => Some(1),
@@ -766,6 +803,11 @@ mod tests {
         assert_eq!(command(r#"{"SetFadeBars":4}"#).unwrap(), Command::SetFadeBars(4));
         assert!(command(r#"{"SetFadeBars":2.5}"#).is_err(), "a fade's bars are a whole number");
         assert_eq!(command(r#"{"Action":"FadeAll"}"#).unwrap(), Command::Action(Action::FadeAll));
+        assert_eq!(command(r#"{"Action":{"Toggle":"AutoRec"}}"#).unwrap(), Command::Action(Action::Toggle(Toggle::AutoRec)));
+        assert_eq!(command(r#"{"Action":{"Toggle":{"Send":"ring"}}}"#).unwrap(), Command::Action(Action::Toggle(Toggle::Send(InputSend::Ring))));
+        assert!(command(r#"{"Action":{"Toggle":{"Send":"Ring"}}}"#).is_err(), "a toggled send is its key");
+        let toggled = serde_json::to_value(WireEvent(Event::Toggled { frame: 7, toggle: Toggle::Send(InputSend::Echo), on: true })).unwrap();
+        assert_eq!(toggled, serde_json::json!({"Toggled":{"frame":7,"toggle":{"Send":"echo"},"on":true}}));
         assert_eq!(command(r#"{"SetDubFeedback":[2,0.5]}"#).unwrap(), Command::SetDubFeedback(2, 0.5));
         assert_eq!(command(r#"{"SetPan":[3,-0.5]}"#).unwrap(), Command::SetPan(3, -0.5));
         assert!(command(r#"{"SetPan":[3,"left"]}"#).is_err(), "a pan is a number");

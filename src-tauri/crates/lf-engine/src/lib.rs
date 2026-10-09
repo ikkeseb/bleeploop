@@ -100,8 +100,10 @@
 //!   a jump in the device frame drops the beats it skipped, and count-in beats fire late as one click.
 //! - **`process` never allocates, locks or waits.** Buffers are allocated (and their pages touched) in
 //!   `Engine::new`; commands and events cross on rtrb rings; a full event ring refuses and counts. A
-//!   one-off event is lost there; each lane's state and mix ([`Event::Mix`], on change only) and the
-//!   transport are marked delivered only once the ring takes them, so the next publish offers them again.
+//!   one-off event is lost there; each lane's state and mix ([`Event::Mix`], on change only), the
+//!   transport are marked delivered only once the ring takes them, so the next publish offers them
+//!   again; a toggled setting's answer ([`Event::Toggled`], one per applied command of it) is owed until
+//!   the ring takes one at its current value ([`Engine::unsent_toggles`] reads what is still owed).
 //!   An engine sends no lane's mix until the commands queued ahead of its first block (a new engine's
 //!   settings replay, which can outrun one block's take) are all taken: an idle session job before
 //!   then reports the lanes' infos only.
@@ -120,9 +122,12 @@
 //! - **A command is judged when it is pressed**: one that would do nothing then is dropped, never held.
 //!   A hands-free press ([`Action`]) acts on the lane the engine has selected when it lands, or a named
 //!   one, never on what the UI last saw on the feed: HALVE's bars, HOLD's lane (per pedal: an accepted
-//!   press's, for that pedal's release) and a pedal MUTE's state are the engine's. Every looper press
-//!   but CLEAR's confirming one disarms a pending pedal CLEAR (a pedal's setting toggle says it is one
-//!   with [`Command::Press`]); a setting alone does not.
+//!   press's, for that pedal's release) and a pedal MUTE's state are the engine's, and so is the value
+//!   a toggle ([`Action::Toggle`]: CLICK, END STOP, FIXED, RETAKE, AUTO REC, an input send) switches, so
+//!   a pedal and a click never undo each other. Every looper press but CLEAR's confirming one disarms a
+//!   pending pedal CLEAR, a toggle too, refused or not (TAP and GO LIVE say they are one with
+//!   [`Command::Press`]); a setting alone does not. An input send's toggle passes a command held for a
+//!   block job, as its setter does; its disarm keeps its place behind it.
 //! - **The engine never drops a plugin unit** (a drop frees memory and calls into the plugin's DLL).
 //!   Units enter and leave through their slot's [`SlotPort`], at a block start (at once while no device
 //!   runs: [`Engine::service_slots_idle`]); a removal releases the slot's notes,
@@ -146,7 +151,7 @@
 //! `tests/trim.rs` the TRIM, `tests/dub_feedback.rs` DUB FEEDBACK, `tests/punch_ramps.rs` an overdub's punch
 //! ramps (its reference: `tests/common/dub.rs`), `tests/playback_edges.rs` the undo, PLAY and STOP edges
 //! (its reference: `tests/common/edges.rs`), `tests/fade.rs` FADE, `tests/input_fx.rs`
-//! the input sends, `tests/mix_feed.rs` a lane's mix on the feed and the event ring's delivery, `tests/pan.rs`
+//! the input sends, `tests/toggles.rs` the toggles, `tests/mix_feed.rs` a lane's mix on the feed and the event ring's delivery, `tests/pan.rs`
 //! a lane's pan (the centre's bits against the render before pan: `effects`' unit test). `tests/perf.rs`
 //! holds the ignored cost bars (Stage 2 and 3, the input sends, the lanes' pan, a multiply's burst, a
 //! TRIM's) and the Stage 3 load's alloc check. `tests/golden_jam.rs` runs the golden jam at 44.1 and 48 kHz, bit-identical across block

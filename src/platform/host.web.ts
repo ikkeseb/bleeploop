@@ -12,10 +12,14 @@ import {
   type DeviceRequest,
   type DeviceStatus,
   type EngineCommand,
+  type EngineEvent,
+  type EngineToggle,
   type FeedFrame,
   type FxParamId,
   type LaneMix,
+  type LaneState,
   type LoadHeader,
+  type Refusal,
   type SnapshotHeader,
   type SnapshotTrack,
 } from './engine-wire.ts'; // explicit .ts: Node guards import this file
@@ -389,6 +393,107 @@ function flushEchoes(): void {
   }
 }
 
+// ── The fake's toggles: CLICK, END STOP, FIXED, RETAKE, AUTO REC and each input send, as the engine owns them ──
+
+/** Each toggled setting as the fake holds it, by `toggleKey`: a setter sets it, a toggle switches it. */
+const fakeToggles = new Map<string, boolean>();
+const toggleKey = (t: EngineToggle): string => (typeof t === 'string' ? t : `Send:${t.Send}`);
+/** What the fake knows of the looper for the toggles' gate, as the scripted frames left it: each lane's
+ * state, the master, the tempo's lock, the selected lane (a refusal's lane: the scripted `Selected`, not
+ * a `SelectTrack` the UI sent, which the fake does not answer). */
+const gateView = { states: Array.from({ length: ENGINE_LANES }, (): LaneState => 'Empty'), master: 0, locked: false, selected: 0 };
+
+/** The setters that set a toggled setting outright: the setting and the value. */
+function setterToggle(c: EngineCommand): [EngineToggle, boolean] | null {
+  if (typeof c !== 'object') return null;
+  if ('SetMetronome' in c) return ['Click', c.SetMetronome];
+  if ('SetLoopEndStop' in c) return ['EndStop', c.SetLoopEndStop];
+  if ('SetFixedLength' in c) return ['Fixed', c.SetFixedLength];
+  if ('SetRetake' in c) return ['Retake', c.SetRetake];
+  if ('SetAutoRecord' in c) return ['AutoRec', c.SetAutoRecord];
+  if ('SetInputSend' in c) return [{ Send: c.SetInputSend[0] }, c.SetInputSend[1]];
+  return null;
+}
+
+/** The engine's `Looper::toggle_gate`: FIXED, RETAKE and AUTO REC not while a lane records or overdubs,
+ * FIXED not under RETAKE over a loop, AUTO REC not once the tempo is locked. */
+function toggleRefusal(key: string): Refusal | null {
+  const capturing = gateView.states.some((s) => s === 'Recording' || s === 'Overdubbing');
+  if (key === 'Fixed' && capturing) return 'FixedCapturing';
+  if (key === 'Fixed' && fakeToggles.get('Retake') === true && gateView.master > 0) return 'FixedRetake';
+  if (key === 'Retake' && capturing) return 'RetakeCapturing';
+  if (key === 'AutoRec' && capturing) return 'AutoRecCapturing';
+  if (key === 'AutoRec' && gateView.locked) return 'AutoRecLocked';
+  return null;
+}
+
+/** What the fake answers on the feed for the toggles it applied, a microtask later (`flushToggles`). */
+const toggleAnswers: EngineEvent[] = [];
+let togglesScheduled = false;
+
+/** Apply `c` to the fake's toggles as the engine does, each applied command answered once: a setter
+ * sets one and is answered by `Toggled` (changed or not); a toggle (`{Action:{Toggle}}`, or `ActionOn`
+ * with its lane ignored) is judged and switched, answered by `Toggled` or by `Refused` on the selected
+ * lane. */
+function applyToggleCommand(c: EngineCommand): void {
+  const set = setterToggle(c);
+  const action = set || typeof c !== 'object' ? null : 'Action' in c ? c.Action : 'ActionOn' in c ? c.ActionOn[1] : null;
+  if (set) {
+    fakeToggles.set(toggleKey(set[0]), set[1]);
+    toggleAnswers.push({ type: 'Toggled', frame: 0, toggle: set[0], on: set[1] });
+  } else if (action === null || typeof action !== 'object' || !('Toggle' in action)) {
+    return;
+  } else {
+    const key = toggleKey(action.Toggle);
+    const reason = toggleRefusal(key);
+    if (reason) toggleAnswers.push({ type: 'Refused', frame: 0, lane: gateView.selected, reason });
+    else {
+      const on = !(fakeToggles.get(key) ?? false);
+      fakeToggles.set(key, on);
+      toggleAnswers.push({ type: 'Toggled', frame: 0, toggle: action.Toggle, on });
+    }
+  }
+  if (togglesScheduled) return;
+  togglesScheduled = true;
+  queueMicrotask(flushToggles);
+}
+
+/** Hand the toggles' answers to the UI, one frame: never inside the call that sent the toggle. */
+function flushToggles(): void {
+  togglesScheduled = false;
+  const events = toggleAnswers.splice(0);
+  if (events.length === 0) return;
+  const frame: FeedFrame = { seq: 0, reset: false, events, device: [], anchor: null, meter: lastMeter, peaks: [] };
+  for (const onFrame of engineSubscribers) onFrame(frame);
+}
+
+/** A scripted frame's looper state and toggles, for the gate: a reset starts from an empty looper and
+ * the settings it carries. */
+function applyToggleFrame(frame: Pick<FeedFrame, 'reset' | 'settings' | 'events'>): void {
+  if (frame.reset) {
+    gateView.states.fill('Empty');
+    gateView.master = 0;
+    gateView.locked = false;
+    gateView.selected = 0;
+    fakeToggles.clear();
+    frame.settings?.forEach(applyToggleCommand);
+  }
+  for (const ev of frame.events) {
+    if (ev.type === 'Lane') gateView.states[ev.lane] = ev.info.state;
+    else if (ev.type === 'Transport') {
+      gateView.master = ev.master;
+      gateView.locked = ev.locked;
+    } else if (ev.type === 'Selected') gateView.selected = ev.lane;
+    else if (ev.type === 'Toggled') fakeToggles.set(toggleKey(ev.toggle), ev.on);
+  }
+}
+
+/** A command as the fake applies it: a lane's mix, and the toggles. */
+function applyCommand(c: EngineCommand): void {
+  applyMixCommand(c);
+  applyToggleCommand(c);
+}
+
 /** A load sets each loaded lane's mix whole, as the engine clamps it (over a mix sent to the EMPTY
  * lane before). */
 function applyMixLoad(header: LoadHeader): void {
@@ -465,9 +570,11 @@ const fakeRate = () => (globalThis as { __lfEngineFakeRate?: number }).__lfEngin
 /**
  * The engine host's browser stand-in: the browser build has no engine (`available` false) unless a DEV
  * probe forces this fake on. Forced on, it answers `open()` with a canned device, records every batch in `sent` and hands a
- * probe-scripted frame from `emit()` to the subscribers. Not a second looper: the one thing it answers
- * by itself is a lane's mix, reported as the engine's `Mix` once it changes (a mix command, a scripted
- * COPY, CLEAR or MUTE, a load); every other state a probe asserts on is scripted.
+ * probe-scripted frame from `emit()` to the subscribers. Not a second looper: what it answers by itself is
+ * a lane's mix, reported as the engine's `Mix` once it changes (a mix command, a scripted COPY, CLEAR or
+ * MUTE, a load), and a toggle (`{Action:{Toggle}}`), switched or refused as the engine's gate would on the
+ * looper the scripted frames show, answered by `Toggled` or `Refused`; every other state a probe asserts
+ * on is scripted.
  */
 export const webEngineFake: EngineFake = {
   get available() {
@@ -497,7 +604,7 @@ export const webEngineFake: EngineFake = {
   set holdApply(on: boolean) {
     applyHeld = on;
     if (on) return;
-    heldCommands.splice(0).forEach(applyMixCommand);
+    heldCommands.splice(0).forEach(applyCommand);
     echoChanges();
   },
   refuseMix: false,
@@ -536,7 +643,7 @@ export const webEngineFake: EngineFake = {
     webEngineFake.sent.push(...commands);
     if (webEngineFake.refuseMix && commands.some(isMixCommand)) throw new Error('The fake engine refused the batch (refuseMix)');
     if (applyHeld) heldCommands.push(...commands);
-    else commands.forEach(applyMixCommand);
+    else commands.forEach(applyCommand);
     echoChanges();
   },
   async setShare(endpoint) {
@@ -565,6 +672,7 @@ export const webEngineFake: EngineFake = {
   emit(raw) {
     const frame = decodeFeedFrame(raw);
     applyMixFrame(frame);
+    applyToggleFrame(frame);
     if (frame.meter) lastMeter = frame.meter;
     for (const onFrame of engineSubscribers) onFrame(frame);
     // A scripted COPY, CLEAR or pedal MUTE changed a lane's mix: its report follows, as the engine's.
