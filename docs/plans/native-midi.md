@@ -13,12 +13,12 @@ the UI thread (which also draws the stage view and the waveforms), then an IPC c
 next block start (`src/ui/state/midi.ts`, `src/platform/index.ts` `sendEngine`, `engine_io/mode.rs`
 `engine_send`: every command `frame: None`). Native input takes the UI thread off that path entirely.
 
-## What exists (verified 2026-10-08)
+## What existed before the work (verified 2026-10-08)
 
 - **Web MIDI path (shipped).** `midi.ts` listens on every input (no device picker), parses 3-byte
   channel messages only (note on/off, velocity 0 = off, CC1 mod, CC64 sustain, CC123, pitch bend
   ±2 semitones; everything else dropped), runs MIDI learn's consume-first hook
-  (`src/app/midi-actions.ts`), then `inputRouter` (`src/ui/state/input-router.ts`), which owns note
+  (`src/app/midi-actions.ts`), then the TS input router (`inputRouter`, removed at the switch), which owned note
   ownership, per-owner sustain and last-moved-wins wheels for **all** note sources and feeds the
   on-screen keyboard's highlights synchronously. Owners are physical: `pointer:<pointerId>`,
   `key:<KeyboardEvent.code>` (`Keyboard.tsx`; two held keys can reach one note after an octave shift),
