@@ -7,10 +7,11 @@
  *
  * - enter: B (either case), the `stageView` action, the command-bar cap, the exit button and Escape open
  *   and close it; the normal UI is inert while open and its lane canvas is the same element after.
- * - views: it opens on the first look; V and the view switch cycle the looks in order and wrap; the
- *   choice survives close and reopen and a page reload; the lane selection carries across looks; one
- *   canvas, its backing store at the device-pixel ratio capped at 1.5 (checked at a ratio of 2), sized
- *   on resize.
+ * - views: it opens on the first look; V and the view switch cycle the looks in order and wrap; a look
+ *   switch sends the engine only the one `SetScope` the looks' own `wantsScope` owes and never touches
+ *   the transport; the choice survives close and reopen and a page reload; the lane selection carries
+ *   across looks; one canvas, its backing store at the device-pixel ratio capped at 1.5 (checked at a
+ *   ratio of 2), sized on resize.
  * - chips: for EMPTY, ARMED (count-in), LISTENING, REC, PLAY, STOP, MUTED, DUB and an ARMED later take,
  *   each chip's data-state and number colour follow the lane the feed reports and its accessible name
  *   says the state; the selected chip carries aria-current and the warm face; chips never move; no
@@ -19,6 +20,18 @@
  *   grey with no play colour, EMPTY near nothing, REC in rec-red, an overdub adds amber; the warm-white
  *   selection mark moves when a digit selects another lane; at rest the loop is cued at its start (no
  *   playhead moves) while the engine's phase runs on.
+ * - scope: the engine's live scope columns, which only the SCOPE look draws and no other group emits.
+ *   Opening the view on SCOPE sends `{SetScope: true}` and nothing else; stepping to a look that does
+ *   not draw them sends `false`; stepping back asks again; closing lets them go; none of it touches the
+ *   transport. One pass of columns puts light in the lane bays and a body in the hero bay that neither
+ *   holds without them. Then the look's central claim, at BOTH column densities (the 8-bar loop, whose
+ *   4000 raw columns a pass share the 1204 device px of a 1280-wide window; a half-second loop, whose
+ *   125 are 10 px wide each) and with the batch boundaries moved across the pulse, since a fold that
+ *   only holds inside one batch fails exactly where a pulse straddles two: a pass repeated is over
+ *   twice as bright as one pass (the look's ADD / FADE converges on 2.44x at ten), a one-off then
+ *   silence falls to a fifth of its own single pass, and once the stream stops the trace fades out and
+ *   then holds still. A batch the engine could not splice (`gap`) leaves the bay's light where it was:
+ *   an xrun costs one 4 ms window, not the picture.
  * - count: a first take's count-in (no master, `Beat`s with countLeft 4..1) shows each numeral in the
  *   overlay, inside the window at three sizes, with the message line empty, and nothing at 0; an armed
  *   later take beside a PLAYING lane (countLeft 0) reads WAITING FOR DOWNBEAT and shows no numeral.
@@ -31,7 +44,8 @@
  * - pointer (per look): a press on lane 4's form sends `SelectTrack` 3; a press in Orbit's centre
  *   sends nothing.
  * - reduced: with prefers-reduced-motion the chips' animations are off and the canvas holds still
- *   across a scripted beat (it moves without it: the control).
+ *   across a scripted beat (it moves without it: the control). On the FIRST look only, and the comment
+ *   at the group says what a per-look run needs first.
  * - legibility (per look, 1000x700, 1280x820, 1920x1080): chips, tempo, message line, buttons and the
  *   numeral do not overlap and stay inside the window; a chip number's cap height is at least 14 px.
  * - budget (per look, 1920x1080): five lanes PLAYING on an 8-bar loop, the frame's code warmed up by
@@ -44,17 +58,22 @@
  *   the view (it does outside); drum mode's 3
  *   plays no pad inside it but selects lane 3; V plays the Hi Tom pad outside the view and leaves the
  *   look alone (as the `stageNextView` action does there, a pedal's path), and inside it steps the look
- *   and sends the engine nothing; a pad key released with
+ *   and sends the engine nothing but the `SetScope` that step owes; a pad key released with
  *   Shift down still releases its pad.
  * - shots: for the eye, per look and size: a rich scene (four lanes with different loops: playing,
- *   muted, overdubbing, stopped, and one empty) at three loop phases, a later take recording, an armed
+ *   muted, overdubbing, stopped, and one empty), with the engine's live scope columns fed in over the
+ *   whole loop and the newest one at the playhead, at three loop phases, a later take recording, an armed
  *   wait, a first take, LISTENING, the count-in and the rest state, in logs/stage-view/, plus tiled
  *   sheets (sheet-<look>-<a|b>.png).
  *
  * Cannot see the native engine (the looper state machine, count-in, takes, overdubs and refusals are
  * lf-engine's tests), Tauri IPC, WebView2, the GPU the owner's machine draws with, or the distance the
  * view is read from: the fake answers no command by itself, so every state on screen was scripted, and
- * the frame time is headless Chromium's script time, not a frame on the rig. Run: pnpm probe stage-view
+ * the frame time is headless Chromium's script time, not a frame on the rig. The scope columns are
+ * scripted too: nothing here says the engine folds what it claims to fold (`lf-engine`'s scope tests
+ * and `verify/probes/scope-mirror.mjs` own that), and the `budget` case still runs the look with no
+ * column at all, so what the fold and the per-column strips cost a frame is unmeasured.
+ * Run: pnpm probe stage-view
  */
 import assert from 'node:assert/strict';
 import { mkdir, readFile } from 'node:fs/promises';
@@ -69,6 +88,162 @@ const PEAK_FRAMES = 1024; // the engine's waveform bin (`lf-engine/src/overview.
 const BAR = 2 * RATE; // one 4/4 bar at 120 BPM
 const LOOP = 8 * BAR;
 const only = arg('case')?.split(',');
+
+// ── The live scope taps ───────────────────────────────────────────────────────────────────────────
+/** `lf_engine::scope::scope_bin_frames(48_000)`: a 4 ms column. */
+const BIN = 192;
+/** `lf_engine::scope::SCOPE_SOURCES`: the five lanes after their FX, the monitor, the master output. */
+const SCOPE_SOURCES = 7;
+const LOOP_COLUMNS = LOOP / BIN; // 4000 columns a pass on the 8-bar loop: about 3.3 to a device px
+const SHORT = RATE / 2; // a half-second master loop: 125 columns, each about 10 device px wide
+const SHORT_COLUMNS = SHORT / BIN;
+/**
+ * Columns a batch carries at most. The look folds at most `gx.length` (1024) new columns a frame and
+ * the store's ring holds 1024, so a bigger batch would lose columns the engine never loses: the probe
+ * would be measuring its own emit, not the fold.
+ */
+const CHUNK = 800;
+/** Batch boundaries every `step` columns of a `cols`-column pass. */
+const cutsEvery = (cols, step) => {
+  const out = [];
+  for (let c = 0; c < cols; c += step) out.push(c);
+  out.push(cols);
+  return out;
+};
+/** A loop's worth of column amplitudes: a pulse on every beat under a swell across the loop, so a
+ * screenshot shows light shaped like a part rather than a band of noise. */
+const columnAmp = (cols, beats) => Array.from({ length: cols }, (_, j) => {
+  const t = (j / cols) * beats;
+  const hit = 0.18 + 0.62 * Math.exp(-(t % 1) * 5) * (Math.floor(t) % 4 === 0 ? 1 : 0.72);
+  return Math.min(1, hit * (0.5 + 0.5 * Math.sin(Math.PI * (j / cols)) ** 2));
+});
+/** A pass of silence with a loud pulse over columns [from, to): the accumulation cases' pattern, read
+ * back at [from / cols, to / cols] of the bay's width. */
+const pulseAmp = (cols, from, to) => Array.from({ length: cols }, (_, j) => (j >= from && j < to ? 1 : 0));
+/** What each source carries in the rich scene: the five lanes (4 is EMPTY), the monitor under its own
+ * line, the master output. */
+const RICH_GAIN = { 0: 0.92, 1: 0.7, 2: 0.8, 3: 0.6, 4: 0, 5: 0.4, 6: 0.85 };
+const RICH_CUTS = cutsEvery(LOOP_COLUMNS, CHUNK);
+const RICH_AMP = columnAmp(LOOP_COLUMNS, 32);
+/** Lane 1 alone, at the level the accumulation cases measure. */
+const LANE1_ONLY = { 0: 0.8 };
+
+/**
+ * The page side of the live scope taps, installed by the probe's init script (so it survives the
+ * reloads the `views` group does) as `window.__sc`. It builds a batch of columns the way the feed
+ * carries one, pushes it through the engine fake and lets a stage frame draw it, and reads the scope
+ * look's bays back off the canvas. `k` carries the engine's constants.
+ */
+function scopeRig(k) {
+  const el = () => document.querySelector('.sv-canvas');
+  /** The scope look's own layout (`src/ui/stage/scope.ts` `layout`): the HUD's band and side padding,
+   * the gutter that carries the bay names, and the hero bay two lane-heights tall. */
+  const geom = () => {
+    const c = el();
+    const dpr = c.width / c.clientWidth;
+    const pad = Math.round(Math.min(24, Math.max(12, 0.02 * c.clientHeight)) * dpr);
+    const x0 = pad + Math.round(44 * dpr);
+    return {
+      dw: c.width,
+      dh: c.height,
+      dpr,
+      top: Math.round(0.1 * c.height),
+      unit: Math.max(6, Math.floor((0.78 * c.height) / 7)),
+      x0,
+      tw: Math.max(8, c.width - pad - x0),
+      cw: (span) => Math.max(1, Math.ceil(((Math.max(8, c.width - pad - x0)) * k.bin) / span)),
+    };
+  };
+  /** Bay `b`'s rectangle of the trace (0 the hero, then one per lane) over the trace's x fraction
+   * [from, to). A fraction of the trace's width IS a loop phase, so columns [a, b) of a pass read back
+   * at [a / cols, b / cols] of their bay. */
+  const rect = (g, b, from, to) => {
+    const x = g.x0 + Math.round(from * g.tw);
+    return {
+      x,
+      y: g.top + (b === 0 ? 0 : 2 * g.unit + (b - 1) * g.unit),
+      w: g.x0 + Math.round(to * g.tw) - x,
+      h: b === 0 ? 2 * g.unit : g.unit,
+    };
+  };
+  const twoFrames = () => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+  /** Columns [from, to) of a pass that starts at device frame `base`, each source scaled by its own
+   * `gain` and rounded to three decimals, as the feed rounds a column (`engine_io/feed.rs`). */
+  const batch = (base, amp, gain, from, to, quiet, gap) => {
+    const min = [];
+    const max = [];
+    for (let s = 0; s < k.sources; s++) {
+      const mul = quiet ? 0 : (gain[s] ?? 0);
+      const lo = [];
+      const hi = [];
+      for (let j = from; j < to; j++) {
+        const v = Math.round(amp[j] * mul * 1000) / 1000;
+        lo.push(-v);
+        hi.push(v);
+      }
+      min.push(lo);
+      max.push(hi);
+    }
+    return { frame: base + from * k.bin, bin: k.bin, gap, min, max };
+  };
+  window.__sc = {
+    geom,
+    batch,
+    /** Each bay in `bays` (`[bay, from, to]`): the channel sums over its rectangle and how many of its
+     * pixels are above the census's floor. A sum, not a count: the light a pass adds to a pixel is
+     * what accumulation moves, and a count saturates as soon as the pixel is lit at all. */
+    read: (bays) => {
+      const g = geom();
+      const d = el().getContext('2d').getImageData(0, 0, g.dw, g.dh).data;
+      return bays.map(([b, from, to]) => {
+        const box = rect(g, b, from, to);
+        let r = 0;
+        let gr = 0;
+        let bl = 0;
+        let lit = 0;
+        for (let y = box.y; y < box.y + box.h; y++) {
+          for (let x = box.x; x < box.x + box.w; x++) {
+            const p = 4 * (y * g.dw + x);
+            r += d[p];
+            gr += d[p + 1];
+            bl += d[p + 2];
+            if (Math.max(d[p], d[p + 1], d[p + 2]) >= 40) lit++;
+          }
+        }
+        return { bay: b, box: [box.x, box.y, box.w, box.h], r, g: gr, b: bl, lit, px: box.w * box.h };
+      });
+    },
+    /**
+     * `passes` passes of one column pattern over a master loop of `span` frames, cut into batches at
+     * `cuts` with a stage frame drawn before the next goes in, then a partial pass of `tail` columns
+     * (so the newest column can be left at the loop phase the scene's anchor shows). `silentAfter`
+     * sends the pattern that many passes and silence after them. Returns the feed sequence it reached.
+     *
+     * The sweep opens with a one-column batch the engine could not splice (`gap`): the look resyncs on
+     * a new epoch and draws nothing that frame, and this is also what parks the beam off the right
+     * edge, so a baseline read taken after it holds no wandering playhead.
+     */
+    sweep: async (o) => {
+      let seq = o.seq;
+      const send = (base, from, to, quiet, gap) =>
+        window.__lf.native.emit({ seq: ++seq, reset: false, events: [], scope: batch(base, o.amp, o.gain, from, to, quiet, gap) });
+      send(o.pass0 * o.span - k.bin, 0, 1, true, true);
+      await twoFrames();
+      for (let p = 0; p <= o.passes; p++) {
+        const base = (o.pass0 + p) * o.span;
+        const end = p === o.passes ? o.tail : o.cuts[o.cuts.length - 1];
+        const quiet = o.silentAfter > 0 && p >= o.silentAfter;
+        for (let c = 0; c + 1 < o.cuts.length; c++) {
+          const to = Math.min(o.cuts[c + 1], end);
+          if (to <= o.cuts[c]) break;
+          send(base, o.cuts[c], to, quiet, false);
+          await twoFrames();
+        }
+      }
+      return seq;
+    },
+  };
+}
 
 const lane = (state, extra = {}) => ({
   state,
@@ -153,6 +328,7 @@ await probe(async ({ browser, open }) => {
         return real(t);
       };
     });
+    await p.addInitScript(scopeRig, { bin: BIN, sources: SCOPE_SOURCES });
   };
   const { page, consoleErrors } = await open({ viewport: { width: 1280, height: 820 }, init });
   let seq = 0;
@@ -226,10 +402,23 @@ await probe(async ({ browser, open }) => {
     }
   };
 
+  // ── the live scope taps ───────────────────────────────────────────────────────────────────────────
+  /** Drive the engine fake's scope columns (`scopeRig`'s `sweep`) and keep `seq` in step. */
+  const sweep = async (o) => {
+    seq = await page.evaluate((s) => window.__sc.sweep(s), { tail: 0, silentAfter: 0, pass0: 1, ...o, seq });
+  };
+  /** Each `[bay, from, to]` of the scope look's bays, read off the canvas (`scopeRig`'s `read`). */
+  const readBays = (bays) => page.evaluate((b) => window.__sc.read(b), bays);
+
   // ── scenes ────────────────────────────────────────────────────────────────────────────────────────
   /** Four lanes with different loops over 8 bars (playing, muted, overdubbing, stopped) and one empty,
-   * lane 3 selected, the input at a working level, `at` frames into the loop. */
-  const rich = async (at) => {
+   * lane 3 selected, the input at a working level, `at` frames into the loop, and the engine's live
+   * scope columns over the whole loop with the newest one at the drawn playhead (the scope look places
+   * a column by its own device frame, so the partial last pass is what puts it there). The columns go
+   * in LAST, after `settleMs` has let the lane light rise, because they are the one thing on the
+   * screenshot sheets with a clock on it: the look fades a stale stream out 250 ms after the last
+   * batch, so a scene that emitted them first would be photographed half faded. */
+  const rich = async (at, settleMs = 0) => {
     await emit({
       events: [
         transport(LOOP, true, 120),
@@ -246,6 +435,8 @@ await probe(async ({ browser, open }) => {
       meter: { peak: 0.32, clip: false },
     });
     await page.evaluate(() => window.__lf.looper.setMute(1, true));
+    if (settleMs > 0) await settle(settleMs);
+    await sweep({ span: LOOP, amp: RICH_AMP, gain: RICH_GAIN, cuts: RICH_CUTS, passes: 3, tail: Math.round(at / BIN) });
   };
   /** `count` lanes with loops over 8 bars, all PLAYING or all STOPPED. */
   const loops = (count, state, at = RATE) => emit({
@@ -598,6 +789,182 @@ await probe(async ({ browser, open }) => {
     });
   }
 
+  await group('scope', async () => {
+    // The engine's live scope columns, which only the SCOPE look draws: the taps being asked for and
+    // let go, the columns reaching the bays, the accumulation the look's whole claim rests on, and an
+    // xrun costing one 4 ms window rather than the trace. Nothing but this group emits a batch, so
+    // every other group still runs the look with no column at all, as the browser rig did before them.
+    await setOpen(true);
+    await showView('scope');
+    await setOpen(false);
+    await settle(150);
+
+    // ── 1. the taps are asked for, and let go ──────────────────────────────────────────────────────
+    // `src/app.tsx` owns the one `SetScope`, and waits for the feed's FIRST reset frame before it
+    // sends anything; `fresh` sent that frame, so the ask is owed from here on.
+    const other = VIEWS.find((d) => !d.wantsScope);
+    assert.ok(VIEWS[0].id === 'scope' && VIEWS[0].wantsScope === true, 'SCOPE is the default look and the one that wants the columns');
+    assert.ok(other, 'another look does not want them (the control for letting them go)');
+    const asked = [];
+    const step = async (what, act) => {
+      await clearSent();
+      await act();
+      await settle(150);
+      const got = await sent();
+      asked.push([what, got]);
+      return got;
+    };
+    const opened = await step('open on SCOPE', () => setOpen(true));
+    const away = await step(`step to ${VIEWS[1].id}`, () => page.keyboard.press('v'));
+    const back = await step('step back to SCOPE', () => showView('scope'));
+    const closed = await step('close while SCOPE shows', () => setOpen(false));
+    console.log(JSON.stringify({ taps: asked }));
+    assert.deepEqual(opened, [{ SetScope: true }], 'opening the view on SCOPE asks the engine for the taps, and sends nothing else');
+    // Which step owes which command is the `views` group's assertion, computed from the looks' own
+    // `wantsScope`; this one owes the OPEN and the CLOSE, and that a step back asks again.
+    assert.deepEqual(away, VIEWS[1].wantsScope ? [] : [{ SetScope: false }], `stepping to ${VIEWS[1].id} lets the taps go, and sends nothing else`);
+    assert.deepEqual(back.at(-1), { SetScope: true }, `stepping back to SCOPE asks for them again (${JSON.stringify(back)})`);
+    assert.deepEqual(closed, [{ SetScope: false }], 'closing the view while SCOPE shows lets the taps go');
+    assert.deepEqual(asked.flatMap(([, cs]) => cs).filter((c) => !('SetScope' in c)), [], 'none of those steps touches the transport');
+
+    // ── 2. the columns draw ────────────────────────────────────────────────────────────────────────
+    /** `count` lanes PLAYING over a master loop of `span` frames and NO recorded take: the still
+     * bitmap holds no contour, so everything lit inside a bay is the live light or the beam.
+     *
+     * The wait is long on purpose, and twice over. A bay whose lane does not sound CLEARS its live
+     * layer instead of fading it, so each lane's light has to be up (150 ms) before any column lands.
+     * And a reset frame empties the MIRROR but not the look's trace canvas: what the scene before left
+     * there is carried away by the stale-stream fade, which needs 250 ms of silence and then 400 ms.
+     * Measured: at a 300 ms wait the previous case's light was still 87 % standing, the next batch
+     * froze the fade where it stood, and a baseline read there made a dim case measure NEGATIVE
+     * light (2026-10-09). */
+    const liveLanes = async (span, count) => {
+      await boot(page);
+      await emit({
+        events: [transport(span, true, 120), ...[0, 1, 2, 3, 4].map((i) => laneEvent(i, i < count ? playing(span) : lane('Empty'))), { Selected: { frame: 0, lane: 0 } }],
+        anchor: anchorAt(0),
+      });
+      await settle(900);
+    };
+    await setOpen(true);
+    assert.equal(await view(), 'scope', 'the SCOPE look shows');
+    const HERO = [0, 0.04, 0.9];
+    const LANE1 = [1, 0.04, 0.9];
+    await liveLanes(LOOP, 5);
+    const darkBays = await readBays([HERO, LANE1]);
+    const dark = await census();
+    await sweep({ span: LOOP, amp: RICH_AMP, gain: RICH_GAIN, cuts: RICH_CUTS, passes: 3 });
+    const litBays = await readBays([HERO, LANE1]);
+    const lit = await census();
+    console.log(JSON.stringify({ columnsDraw: { census: { noColumns: dark, columns: lit }, hero: [darkBays[0], litBays[0]], lane1: [darkBays[1], litBays[1]] } }));
+    assert.ok(lit.play > dark.play + 20_000, `the lane bays carry live light that was not there before the columns (${lit.play} play-green px against ${dark.play}, whose only green is the beam)`);
+    assert.ok(litBays[1].lit > darkBays[1].lit + 8000, `lane 1's bay: the live light is new (${litBays[1].lit} lit px against ${darkBays[1].lit}, whose only light is the beam)`);
+    assert.ok(litBays[1].g > darkBays[1].g * 1.4, `lane 1's bay: and it is the lane's own green (${litBays[1].g} green over its rectangle against ${darkBays[1].g})`);
+    assert.ok(litBays[0].lit > darkBays[0].lit + 10_000, `the hero bay carries the engine's output as a body (${litBays[0].lit} lit px against ${darkBays[0].lit}, which is the beam alone)`);
+    assert.ok(litBays[0].r > darkBays[0].r * 1.4, `and that body is the warm white of the master (${litBays[0].r} red over its rectangle against ${darkBays[0].r})`);
+
+    // ── 3. a locked pass accumulates, a one-off decays ─────────────────────────────────────────────
+    // The look dims each new column's own pixel column by FADE and adds the light at ADD over it, so a
+    // pass landing on the pass before it converges on ADD / FADE while a one-off tops out at ADD and
+    // the next passes of silence carry it away. That is the look's whole claim and the only thing that
+    // says a locked loop from a one-off without anything moving.
+    //
+    // Run at BOTH densities, because the fold is where this can go wrong: on a long loop many raw
+    // columns share one device pixel, and a look that dimmed and drew such a pixel once per COLUMN
+    // instead of once per PASS would measure how many columns landed there, which repeating a pass
+    // does not change. The batch boundaries are moved across the pulse for the same reason: a fold
+    // that only holds inside one batch fails exactly where a pulse straddles two.
+    const densities = [
+      { name: 'short loop: one column over several device px', span: SHORT, cols: SHORT_COLUMNS, pulse: [40, 50], split: [0, 45, SHORT_COLUMNS], passes: 10, silence: 4 },
+      { name: 'long loop: several columns to a device px', span: LOOP, cols: LOOP_COLUMNS, pulse: [1200, 1340], split: [0, 700, 1270, 2000, 2700, 3400, LOOP_COLUMNS], passes: 8, silence: 3 },
+    ];
+    for (const d of densities) {
+      const amp = pulseAmp(d.cols, d.pulse[0], d.pulse[1]);
+      const whole = cutsEvery(d.cols, CHUNK);
+      // The pulse's own stretch of the bay, with a 2 % margin for the width of one column.
+      const win = [[1, Math.max(0, d.pulse[0] / d.cols - 0.02), Math.min(1, d.pulse[1] / d.cols + 0.02)]];
+      /** One scene's worth: the bay's green with the trace clear, then after `passes` passes. The
+       * baseline is read AFTER a primer-only sweep, which parks the beam off the right edge: read
+       * before any column the beam stands wherever the loop phase is, which can be inside the window. */
+      const run = async (cuts, passes, silentAfter) => {
+        await liveLanes(d.span, 1);
+        await sweep({ span: d.span, amp, gain: LANE1_ONLY, cuts, passes: 0 });
+        const base = (await readBays(win))[0];
+        await sweep({ span: d.span, amp, gain: LANE1_ONLY, cuts, passes, silentAfter });
+        const after = (await readBays(win))[0];
+        return { light: after.g - base.g, base: base.g, raw: after.g, box: after.box };
+      };
+      const single = await run(whole, 1, 0);
+      const locked = await run(whole, d.passes, 0);
+      // The stream stops here. The per-column dim only erases where a new column lands, so the trace
+      // would otherwise freeze with light on it: the look fades it out over a bounded time and then
+      // holds still. Read the bay once the fade is over, and then that nothing moves at all.
+      await settle(1200);
+      const faded = (await readBays(win))[0];
+      const stillPx = await moved(300);
+      const oneOff = await run(whole, 1 + d.silence, 1);
+      const singleCut = await run(d.split, 1, 0);
+      const lockedCut = await run(d.split, d.passes, 0);
+      const oneOffCut = await run(d.split, 1 + d.silence, 1);
+      const geom = await page.evaluate((span) => ({ ...window.__sc.geom(), cw: window.__sc.geom().cw(span) }), d.span);
+      console.log(JSON.stringify({
+        accumulation: d.name,
+        columnsPerPass: d.cols,
+        columnWidthPx: geom.cw,
+        tracePx: geom.tw,
+        window: single.box,
+        passes: d.passes,
+        // Green summed over the window, the same scene's still picture subtracted: what the live
+        // columns alone put there.
+        greenOverTheStillPicture: {
+          onePass: single.light,
+          passRepeated: locked.light,
+          onePassThenSilence: oneOff.light,
+          onePassSplitBatch: singleCut.light,
+          passRepeatedSplitBatch: lockedCut.light,
+          onePassThenSilenceSplitBatch: oneOffCut.light,
+        },
+        streamStopped: { greenLeft: faded.g - locked.base, movedPx: stillPx },
+      }));
+      assert.ok(single.light > 20_000, `${d.name}: one pass of columns lights the bay (${single.light} green over the still picture)`);
+      assert.ok(locked.light > single.light * 1.8, `${d.name}: the same pass repeated ${d.passes} times is brighter than one (${locked.light} against ${single.light})`);
+      assert.ok(oneOff.light < single.light * 0.5, `${d.name}: one pass then ${d.silence} of silence falls below its own single pass (${oneOff.light} against ${single.light})`);
+      assert.ok(singleCut.light > 20_000, `${d.name}: one pass split across two batches lights the bay (${singleCut.light})`);
+      assert.ok(lockedCut.light > singleCut.light * 1.8, `${d.name}: a pass split across two batches still accumulates (${lockedCut.light} against ${singleCut.light})`);
+      assert.ok(oneOffCut.light < singleCut.light * 0.5, `${d.name}: and split, a one-off still decays (${oneOffCut.light} against ${singleCut.light})`);
+      assert.ok(Math.abs(lockedCut.light - locked.light) < locked.light * 0.25, `${d.name}: where the batch boundary falls does not change what a locked pass leaves (${lockedCut.light} split against ${locked.light} whole)`);
+      assert.ok(faded.g - locked.base < single.light * 0.05, `${d.name}: the stale stream fades out, not freezes mid-light (${faded.g - locked.base} green left of ${locked.light})`);
+      assert.ok(stillPx < 20, `${d.name}: and then the drawing holds still (${stillPx} px moved in 300 ms)`);
+    }
+
+    // ── 4. a gap does not wipe the trace ───────────────────────────────────────────────────────────
+    // An xrun, a ring overrun, a held feed: the engine says it cannot splice this batch onto the one
+    // before it. That costs one 4 ms window; a full-screen clear mid-jam would read as a bug. (The one
+    // case the look IS allowed to clear on is the sweep's SPAN changing, which means every old
+    // column's x now means something else.) The read sits in the same evaluate as the emit, so the
+    // stale-stream fade 250 ms later cannot be mistaken for the gap's doing.
+    const amp = pulseAmp(SHORT_COLUMNS, 40, 50);
+    const win = [[1, 0.28, 0.42]];
+    const cuts = cutsEvery(SHORT_COLUMNS, CHUNK);
+    await liveLanes(SHORT, 1);
+    await sweep({ span: SHORT, amp, gain: LANE1_ONLY, cuts, passes: 0 });
+    const gapBase = (await readBays(win))[0].g;
+    await sweep({ span: SHORT, amp, gain: LANE1_ONLY, cuts, passes: 6 });
+    const gap = await page.evaluate(async (o) => {
+      const before = window.__sc.read(o.bays)[0];
+      window.__lf.native.emit({ seq: o.seq, reset: false, events: [], scope: window.__sc.batch(o.base, o.amp, o.gain, 0, 4, false, true) });
+      await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+      return { before, after: window.__sc.read(o.bays)[0] };
+    }, { bays: win, seq: ++seq, base: 9 * SHORT, amp, gain: LANE1_ONLY });
+    const held = [gap.before.g - gapBase, gap.after.g - gapBase];
+    console.log(JSON.stringify({ gap: { greenOverTheStillPicture: { beforeTheGap: held[0], afterIt: held[1] }, still: gap.after.g } }));
+    assert.ok(held[0] > 20_000, `control: the bay holds live light before the gap (${held[0]} green over the still picture)`);
+    assert.ok(held[1] > held[0] * 0.8, `a gap costs one 4 ms window, not the trace (${held[1]} green left of ${held[0]})`);
+    // Leave the look as the groups after this one expect it: no columns, and the trace faded out.
+    await boot(page);
+    await settle(900);
+  });
+
   await group('count', async () => {
     await setOpen(true);
     for (const v of VIEWS) {
@@ -807,6 +1174,15 @@ await probe(async ({ browser, open }) => {
     });
   }
 
+  // Still on `VIEWS[0]` alone, and that is a measured hole, not a preference: the other two looks'
+  // reduced-motion behaviour is checked by nobody, and the CONTROL below (the drawing MUST move while
+  // motion is allowed) changes meaning whenever the look order moves. Running it per look, as `pixels`
+  // and `budget` do, costs about 8 s and cannot be done on THIS scene: measured 2026-10-09, a beat in
+  // a first take's count-in moves scope 2408 px and orbit 1580, and strata 0 — strata draws no beat
+  // ripple at rest, so its control would be vacuous and `still < 20` would pass however strata read
+  // the preference. Per look needs a scene that moves all three AND still holds still under the
+  // preference, which the count-in is the only scene the group has: a playing loop's playhead moves
+  // under reduced motion too. That scene is the open question, not the loop over VIEWS.
   await group('reduced', async () => {
     await setOpen(true);
     await showView(VIEWS[0].id);
@@ -825,7 +1201,7 @@ await probe(async ({ browser, open }) => {
     await firstTake(1);
     await settle(150);
     const rec = (await chips())[0];
-    console.log(JSON.stringify({ movedAcrossBeat: { control, reduced: still }, recChipAnimation: rec.animation }));
+    console.log(JSON.stringify({ look: VIEWS[0].id, movedAcrossBeat: { control, reduced: still }, recChipAnimation: rec.animation }));
     assert.ok(control > 300, `control: a beat moves the drawing (${control} px)`);
     assert.ok(still < 20, `reduced motion: the drawing holds still across a beat (${still} px)`);
     assert.equal(rec.animation, 'none', 'reduced motion: the recording chip does not pulse');
@@ -1103,8 +1479,9 @@ await probe(async ({ browser, open }) => {
         await page.setViewportSize({ width, height });
         await page.mouse.move(width / 2, height / 2);
         for (const [name, at] of [['rich-a', 0.6 * BAR], ['rich-b', 2.9 * BAR], ['rich-c', 6.02 * BAR]]) {
-          await rich(at);
-          await settle(450);
+          // The settle is inside the scene, before its columns: the shot must catch the live trace
+          // while the stream still counts as alive (the look fades a stale one out after 250 ms).
+          await rich(at, 450);
           await shoot(name);
         }
         await page.evaluate(() => window.__lf.looper.setMute(1, false));
@@ -1134,8 +1511,7 @@ await probe(async ({ browser, open }) => {
       vp = '960x600';
       await page.setViewportSize({ width: 960, height: 600 });
       await page.mouse.move(480, 300);
-      await rich(2.9 * BAR);
-      await settle(450);
+      await rich(2.9 * BAR, 450);
       await shoot('rich-b');
       await boot(page);
     }
