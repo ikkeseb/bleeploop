@@ -118,7 +118,8 @@ export function App() {
       // Env-triggered native probes (DEV, PC only): `src/debug/restart-survey.ts`,
       // `src/debug/editor-smoke.ts`, `src/debug/swap-stress.ts`, `src/debug/recall-restart.ts`,
       // `src/debug/engine-smoke.ts`, `src/debug/engine-recovery.ts`, `src/debug/engine-loopback.ts`,
-      // `src/debug/tone-recall.ts`, `src/debug/export-master.ts`, `src/debug/midi-switch.ts`.
+      // `src/debug/tone-recall.ts`, `src/debug/export-master.ts`, `src/debug/midi-switch.ts`,
+      // `src/debug/bench-load.ts`.
       if (import.meta.env.VITE_LF_PROBE === 'restart-survey') {
         void import('./debug/restart-survey').then((m) => m.runRestartSurvey());
       } else if (import.meta.env.VITE_LF_PROBE === 'editor-smoke') {
@@ -139,6 +140,8 @@ export function App() {
         void import('./debug/export-master').then((m) => m.runExportMaster());
       } else if (import.meta.env.VITE_LF_PROBE === 'midi-switch') {
         void import('./debug/midi-switch').then((m) => m.runMidiSwitch());
+      } else if (import.meta.env.VITE_LF_PROBE === 'bench-load') {
+        void import('./debug/bench-load').then((m) => m.runBenchLoad());
       }
     }
   });

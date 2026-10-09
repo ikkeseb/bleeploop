@@ -14,6 +14,8 @@
 //     (src/debug/export-master.ts): one launch, on WASAPI
 //   pnpm native:midi  the UI's note sources through native MIDI's router, a WebView reload included
 //     (src/debug/midi-switch.ts): one launch, on WASAPI, the master muted
+//   node scripts/native-probe.mjs bench-load --asio  the MIDI benchmark's jam load, held while
+//     `LF_MIDI_BENCH` sends (src/debug/bench-load.ts): one launch, on ASIO 128, the master at 0
 //
 // Options: `--asio` launches `pnpm dev:asio` instead of `pnpm dev:wasapi`; `--<knob>=<value>` becomes
 // `VITE_LF_PROBE_<KNOB>` (`--filter=Pro-Q,Saturn`, `--hold=`, `--settle=`, `--params=`, `--plugins=`:
@@ -99,6 +101,15 @@ const PROBES = {
     rustErrors: true,
     phases: [{ name: 'switch', end: /^(complete: .*|FAIL.*)$/, pass: /^complete: /, exit: 'os-close' }],
   },
+  // The MIDI benchmark's jam load (run with `LF_MIDI_BENCH` set); engine-smoke's profile, one launch,
+  // closed through its window. `requireLine`: the log must carry it, the benchmark's report.
+  'bench-load': {
+    tag: 'bench-load',
+    config: 'scripts/engine-probe.tauri.json',
+    cleanLog: true,
+    requireLine: /\[midi-bench\] report: /,
+    phases: [{ name: 'load', end: /^(complete: .*|FAIL.*)$/, pass: /^complete: /, exit: 'os-close' }],
+  },
   // `recallLines`: how many `[rig-recall]` log lines the phase must print.
   'recall-restart': {
     tag: 'recall',
@@ -181,6 +192,7 @@ function launch(phase, phaseEnv) {
     let seen = false;
     let partial = '';
     let recallLines = 0;
+    let requiredSeen = false;
     const webviewErrors = [];
     const rustErrors = [];
     let verdict;
@@ -190,7 +202,7 @@ function launch(phase, phaseEnv) {
       if (settled) return;
       settled = true;
       clearInterval(watchdog);
-      resolve({ line, reason, recallLines, webviewErrors, rustErrors, stopped: stopRun(child) });
+      resolve({ line, reason, recallLines, requiredSeen, webviewErrors, rustErrors, stopped: stopRun(child) });
     };
     // After the verdict line: `close` waits for the app to quit by itself, `os-close` closes its window
     // first, `crash` kills app.exe alone at once (no tree kill: the WebView2 processes are left to
@@ -230,6 +242,7 @@ function launch(phase, phaseEnv) {
         // eslint-disable-next-line no-control-regex
         const clean = raw.replace(/\x1b\[[0-9;]*m/g, '');
         if (clean.includes('[rig-recall]')) recallLines++;
+        if (spec.requireLine?.test(clean)) requiredSeen = true;
         if (spec.cleanLog && clean.includes('[webview][ERROR]') && !clean.includes(`[${spec.tag}]`)) webviewErrors.push(clean);
         if (spec.rustErrors && /\]\[ERROR\]/.test(clean) && !clean.includes('[webview]')) rustErrors.push(clean);
         const msg = clean.match(tagged)?.[1]?.trimEnd();
@@ -279,6 +292,11 @@ for (const phase of phases) {
     result.line = null;
   }
   if (ok && spec.rustErrors) console.log(`  [${spec.tag}] log: no Rust ERROR line`);
+  if (ok && spec.requireLine && !result.requiredSeen) {
+    ok = false;
+    result.reason = `the log has no line matching ${spec.requireLine}`;
+    result.line = null;
+  }
   if (ok && phase.recallLines !== undefined && result.recallLines !== phase.recallLines) {
     ok = false;
     result.reason = `${phase.name}: ${result.recallLines} [rig-recall] line(s), expected ${phase.recallLines}`;
