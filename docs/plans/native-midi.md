@@ -84,7 +84,8 @@ next block start (`src/ui/state/midi.ts`, `src/platform/index.ts` `sendEngine`, 
 1. **One router, in Rust, for every note source.** Moving only MIDI would leave two routers sending
    `NoteOn`/`NoteOff`/wheels to one engine with no shared ownership. The Rust router's owner widens to
    `Midi(conn, channel) | Ui(epoch, owner)`, where `owner` is the physical id the UI uses today and
-   `epoch` the document's `frontendEpoch`. `Keyboard.tsx` keeps its gesture handling (pointer capture,
+   `epoch` the document's input epoch (answered by its `midi_subscribe`, first thing in boot; the
+   switch's review moved it off `host_init`'s `frontendEpoch`, which comes late). `Keyboard.tsx` keeps its gesture handling (pointer capture,
    repeat suppression, press-time note mapping, text-entry guards, blur and unmount cleanup) and forwards
    key events through a thin adapter in place of `input-router.ts`'s musical logic. The on-screen
    keyboard keeps a local overlay for pointer and PC holds (highlight on press, as today); MIDI holds
@@ -134,7 +135,8 @@ next block start (`src/ui/state/midi.ts`, `src/platform/index.ts` `sendEngine`, 
    retained engine, or a rebuild), fresh note-ons and actions are dropped, controller state is kept,
    and every release passes: note-offs, pedal-ups and HOLD `Release` (a dropped HOLD release would
    leave a lane recording). A UI-owned hold is released when its epoch is replaced (a reload or
-   recovery, `host_init`) and on window blur; a UI event from a replaced epoch is refused.
+   recovery subscribes again) and on window blur; every UI input event from a replaced epoch is
+   refused, a target change and a panic included.
 8. **Bindings live native,** in a versioned JSON store beside `plugin-folders.json` with explicit
    missing, invalid and unsupported-version results (an unreadable file is reported and never
    overwritten, as the folder store). A binding persists the strongest endpoint identity midir gives
