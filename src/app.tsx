@@ -11,10 +11,10 @@ import { Help } from './ui/settings/Help';
 import { SplitStack, type StackPanel } from './ui/layout/SplitStack';
 import { Toasts } from './ui/toast/Toasts';
 import { StageView } from './ui/stage/StageView';
-import { setStageOpen, stageOpen, toggleStage } from './ui/stage/stage-store';
+import { currentStageView, setStageOpen, stageOpen, toggleStage } from './ui/stage/stage-store';
 import * as layoutStore from './ui/layout/layout-store';
 import { installFrontendLogPipe, platform } from './platform';
-import { master } from './ui/state/audio';
+import { looper, master } from './ui/state/audio';
 import { engineDevice, engineOpenFailure } from './ui/state/engine-store';
 import { bootEngine } from './app/boot';
 import { installCloseGuard } from './app/close-guard';
@@ -73,6 +73,22 @@ export function App() {
     } else if (prevOpen && !lastInputWasPointer()) transportKeys?.returnFocus(stageBtn);
     return open;
   }, false);
+  // The live scope taps (`SetScope`): the engine folds and sends columns only while a look that draws
+  // them shows, and nothing else in the app sends that command. The ask lives HERE, in the always
+  // mounted owner, not in `StageView.tsx`: `Key::Scope` is a remembered host setting that a rebuilt
+  // engine replays, `adoptSettings` ignores it, and the stage view mounts only while open, so a page
+  // that reloads with the view open would otherwise never mount the thing that turns them off again.
+  // The first run therefore sends whatever this page wants, `false` included, instead of trusting the
+  // engine's. Repeats are dropped; an off and an on inside one audio block are not (the engine's one
+  // accepted residual there is a single 4 ms column covering both sides of the switch, which needs a
+  // close and a reopen faster than a hand can press).
+  let scopeAsked: boolean | null = null;
+  createEffect(() => {
+    const want = stageOpen() && currentStageView().wantsScope === true;
+    if (want === scopeAsked) return;
+    scopeAsked = want;
+    looper.setScope(want);
+  });
 
   onMount(() => {
     // First: pipe console.error + uncaught errors into the native log, so even a plugin-host init

@@ -7,6 +7,10 @@ import { engineClock, engineLooper, engineMaster, engineSampleRate, engineSessio
 
 export type { PeakView, TrackState } from './looper-types';
 export { PEAK_FRAMES } from './looper-types';
+/** The live scope taps' view (`looper.scopeInto`) and the two non-lane sources a batch carries, for
+ * the stage look that draws them (`src/ui/stage/scope.ts`); the lanes are 0..4 of the same order. */
+export type { ScopeView } from './engine-store';
+export { SCOPE_MASTER, SCOPE_MONITOR } from '../../platform';
 
 export const looper = engineLooper;
 export const clock = engineClock;

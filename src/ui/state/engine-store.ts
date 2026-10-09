@@ -1213,6 +1213,11 @@ export const engineLooper = {
   inputArmRequested: (): boolean => false,
   peaksInto,
   scopeInto,
+  /** The live scope taps on or off (`SetScope`): the look that draws the columns asks for them and
+   * owns turning them off (`stage/StageView.tsx`). A remembered host setting, so a rebuilt engine
+   * gets it back, while `adoptSettings` ignores it: the view sends the state it wants on mount
+   * instead of trusting the engine's. */
+  setScope: (on: boolean): void => void sendEngine({ SetScope: on }),
   phaseValue,
   levelValue: (): number => (plain.clip ? Math.max(1, plain.level) : plain.level),
   stateOf: (i: number): TrackState => plain.state[i] ?? 'EMPTY',
@@ -1223,6 +1228,10 @@ export const engineLooper = {
   recHeadFrac,
   recSpanFrames,
   masterFramesValue: (): number => plain.master,
+  /** The master grid's anchor (`lf_engine::Overview::grid`): loop position 0 plays at
+   * `gridValue() + k * masterFramesValue()`. The draw loop places a frame-stamped scope column on the
+   * loop with it, the way `phaseValue` places the playhead; no signal read. */
+  gridValue: (): number => plain.clock.grid,
   /** Lane `i`'s effects as the engine applied them. */
   fxState: (i: number): readonly FxState[] => mixes[i][0]().fx,
   setFxBypass,

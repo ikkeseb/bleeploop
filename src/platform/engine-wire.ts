@@ -137,6 +137,10 @@ export const ENGINE_SLOTS = 2;
  * their FX, then the monitor (the live wet signal and the input sends), then the master: the engine's
  * output as the device takes it, through the limiter and with the monitor summed in. */
 export const SCOPE_SOURCES = ENGINE_LANES + 2;
+/** The monitor's place in a scope batch: the live wet signal with the input sends, before the limiter. */
+export const SCOPE_MONITOR = ENGINE_LANES;
+/** The master's place in a scope batch: the engine's whole output, limiter and monitor included. */
+export const SCOPE_MASTER = ENGINE_LANES + 1;
 
 /** Rust `lf_engine::Command`, as it crosses `input_send` (an engine item, `midi-wire.ts` `InputItem`). */
 export type EngineCommand =
