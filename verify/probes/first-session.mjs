@@ -5,8 +5,8 @@
  * would answer through `__lf.native.snapshotBytes`, and reads the sessions loaded into it):
  *
  * - an empty looper: Export is disabled, Import is enabled, Help names the Session tools;
- * - the first take through real controls: FIXED (aria-pressed off, then on) and its Fewer bars stepper
- *   send `SetFixedLength` / `SetFixedBars`; the lane's record core sends `SelectTrack` + `RecDub`; a PC
+ * - the first take through real controls: FIXED (aria-pressed off, then on, from the `Toggled` the fake
+ *   answers) and its Fewer bars stepper send the engine's FIXED toggle / `SetFixedBars`; the lane's record core sends `SelectTrack` + `RecDub`; a PC
  *   key sends `NoteOn` / `NoteOff`; the take the feed then reports makes Import disabled;
  * - Export's download: a .zip whose stem is the snapshot's PCM, exactly;
  * - recovery: autosave saves the jam without an explicit flush; a closed and reopened page (a fresh
@@ -118,7 +118,7 @@ await probe(async ({ open, browser }) => {
   for (let i = 0; i < 3; i++) await page.getByRole('button', { name: 'Fewer bars', exact: true }).click();
   const fixedSent = await sent(page);
   console.log('FIXED sent', JSON.stringify(fixedSent));
-  assert.deepEqual(fixedSent[0], { SetFixedLength: true }, 'FIXED sends SetFixedLength');
+  assert.deepEqual(fixedSent[0], { Action: { Toggle: 'Fixed' } }, "FIXED sends the engine's toggle");
   assert.deepEqual(fixedSent.at(-1), { SetFixedBars: 1 }, 'Fewer bars steps down to one bar');
   assert.equal((await fixed.textContent()).trim(), 'FIXED 1');
   await clearSent(page);

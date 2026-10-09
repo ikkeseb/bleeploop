@@ -4,8 +4,8 @@
 //! once; FIXED, RETAKE and AUTO REC are refused where `src/ui/looper/gates.ts` refuses them, with nothing
 //! switched; a toggle is a looper press (it disarms a pending pedal CLEAR, refused or not); an input
 //! send's toggle never waits behind a looper command held for a block job, as its setter did, while the
-//! others wait in order, as theirs did; and `Event::Toggled` reaches the feed whatever the event ring
-//! dropped. A new guard, not a port: the web looper flipped its own copy of each setting.
+//! others wait in order, as theirs did; and every applied command of a toggled setting is answered once,
+//! `Event::Toggled` at the value it left, whatever the event ring dropped. A new guard, not a port: the web looper flipped its own copy of each setting.
 
 mod common;
 
@@ -75,7 +75,7 @@ fn alternating_producers_each_switch_a_setting_once() {
 }
 
 #[test]
-fn a_setter_still_sets_outright_and_its_change_is_reported_once() {
+fn a_setter_still_sets_outright_and_every_applied_one_is_answered() {
     let mut rig = Rig::new();
     rig.advance(256);
     let mark = rig.events.len();
@@ -84,7 +84,11 @@ fn a_setter_still_sets_outright_and_its_change_is_reported_once() {
     rig.press(Command::SetInputSend(InputSend::Ring, true));
     rig.advance(4800);
     assert!(rig.engine.clock().metronome() && rig.engine.input_fx().is_on(InputSend::Ring));
-    assert_eq!(toggled_since(&rig, mark), [(Toggle::Click, true), (Toggle::Send(InputSend::Ring), true)], "a change, once each");
+    assert_eq!(
+        toggled_since(&rig, mark),
+        [(Toggle::Click, true), (Toggle::Click, true), (Toggle::Send(InputSend::Ring), true)],
+        "one answer per setter, the one that changed nothing included: the host counts them"
+    );
     // A toggle after a setter switches from the setter's value.
     rig.press(press(Toggle::Click));
     assert!(!rig.engine.clock().metronome());
@@ -244,4 +248,26 @@ fn a_toggle_the_full_ring_refused_reaches_the_feed_later_and_until_then_reads_as
     assert_eq!(toggled_since(&rig, 0), [(Toggle::Fixed, true), (Toggle::Send(InputSend::Ring), true)], "each once, at its value");
     assert_eq!(rig.engine.unsent_toggles().count(), 0, "nothing left unsent");
     assert!(rig.engine.diag().events_dropped > 0);
+}
+
+#[test]
+fn a_setter_and_a_toggle_in_one_block_under_a_full_ring_still_reach_the_feed_at_the_applied_value() {
+    // CLICK off, the ring full: the setter turns it on, the toggle back off in the same block. The value
+    // ends where it started, but the feed (which may have heard the setter's value elsewhere: the UI shows
+    // it, the host sent it) must still hear the applied one.
+    let mut rig = Rig::with_event_capacity(Opts::default(), 4);
+    rig.hold_events = true;
+    rig.advance(128);
+    rig.send_at(rig.frame, Command::SetMetronome(true));
+    rig.send_at(rig.frame, press(Toggle::Click));
+    rig.advance(128);
+    assert!(!rig.engine.clock().metronome());
+    assert_eq!(rig.engine.unsent_toggles().collect::<Vec<_>>(), [(Toggle::Click, false), (Toggle::Click, false)], "both answers owed, at the applied value");
+    for _ in 0..16 {
+        rig.read_events();
+        rig.advance(128);
+    }
+    rig.read_events();
+    assert_eq!(toggled_since(&rig, 0), [(Toggle::Click, false), (Toggle::Click, false)], "both arrive, at the applied value");
+    assert_eq!(rig.engine.unsent_toggles().count(), 0);
 }

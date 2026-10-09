@@ -569,10 +569,12 @@ pub enum Event {
     /// CLEAR, a pedal's MUTE and a load all reach the feed this way; a pan's glide sends one, its target.
     /// The host's settings memory keeps the last one per lane as the mix it replays into a new engine.
     Mix { frame: Frame, lane: u8, mix: CompactMix },
-    /// A toggled setting's value as the engine applies it: sent by an accepted [`Action::Toggle`] with the
-    /// value it left, and whenever the value differs from the last one the event ring took for it (a
-    /// setter changed it, or the full ring refused the toggle's event: offered again at the next publish).
-    /// The UI shows the setting from it, and the host's settings memory keeps it as the value it replays.
+    /// A toggled setting's value as the engine applies it: the answer to every applied command of that
+    /// setting, one each, with the value it left (an accepted [`Action::Toggle`], and its setter, even
+    /// one that changed nothing; a refused toggle answers with its `Refused`). An answer the full ring
+    /// refuses is owed and offered again at the next publish, at the setting's value then. The UI shows
+    /// the setting from it; the host's settings memory counts the answers against what it sent, so an
+    /// answer older than a setter still in flight never overwrites it (`engine_io/settings.rs`).
     Toggled { frame: Frame, toggle: Toggle, on: bool },
 }
 

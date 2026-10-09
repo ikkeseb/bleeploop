@@ -182,9 +182,11 @@ pub struct Engine {
     master_gain: f64,
     master_coef: f64,
     started: bool,
-    /// Each toggled setting's value as the event ring last took it (`Event::Toggled`), in [`Toggle::ALL`]
-    /// order; at first a new engine's start values, which no event announces.
-    toggles_sent: [bool; Toggle::COUNT],
+    /// Per toggled setting, in [`Toggle::ALL`] order: the events the full ring refused, each owed as a
+    /// `Toggled` of the current value (`offer_toggles`). Every applied command of a toggled setting (its
+    /// setter, its toggle, a refused toggle) answers with exactly one event of that setting, so the host
+    /// can match the answers to what it sent (`engine_io/settings.rs`).
+    toggles_owed: [u32; Toggle::COUNT],
     /// The commands queued ahead of the first block (a new engine's settings replay) are all taken: the
     /// ring was empty after a block's take ([`Engine::take_commands`] takes at most `MAX_PENDING`). Until
     /// then no lane's mix is published ([`Looper::publish`]) or read ([`Engine::applied_mixes`]): the
@@ -249,7 +251,7 @@ impl Engine {
             master_gain: 1.0,
             master_coef: (-1.0 / (MASTER_TAU_SECONDS * config.sample_rate as f64)).exp(),
             started: false,
-            toggles_sent: [false; Toggle::COUNT],
+            toggles_owed: [0; Toggle::COUNT],
             replayed: false,
             next_frame: 0,
             skipped: 0,
@@ -346,14 +348,14 @@ impl Engine {
         self.replayed.then(|| (self.next_frame, std::array::from_fn(|i| CompactMix::from(&self.looper.mix(i, &self.fx)))))
     }
 
-    /// Each toggled setting the engine applied whose value the event ring has not taken (its
-    /// `Event::Toggled` refused by a full ring and not yet offered again). The host reads it from an
-    /// engine it replaced, after draining its event ring (`owner.rs` `swap_engine`), so a toggle accepted
-    /// just before a rebuild survives it however full the ring was. Not for the audio thread.
+    /// The `Toggled` events the engine still owes, one per answer the full ring refused, each at the
+    /// setting's current value. The host reads it from an engine it replaced, after draining its event
+    /// ring (`owner.rs` `swap_engine`), so a toggle accepted just before a rebuild survives it however
+    /// full the ring was. Not for the audio thread.
     pub fn unsent_toggles(&self) -> impl Iterator<Item = (Toggle, bool)> + '_ {
-        Toggle::ALL.into_iter().filter_map(|t| {
+        Toggle::ALL.into_iter().flat_map(|t| {
             let on = toggle_value(&self.clock, &self.looper, &self.input_fx, t);
-            (on != self.toggles_sent[t.index()]).then_some((t, on))
+            std::iter::repeat_n((t, on), self.toggles_owed[t.index()] as usize)
         })
     }
 
@@ -373,7 +375,7 @@ impl Engine {
             input_fx: &mut self.input_fx,
             master_volume: &mut self.master_volume,
             master_muted: &mut self.master_muted,
-            toggles_sent: &mut self.toggles_sent,
+            toggles_owed: &mut self.toggles_owed,
         };
         apply(&mut self.looper, &mut cx, &mut at, command) == Applied::Done
     }
@@ -463,7 +465,7 @@ impl Engine {
                 input_fx: &mut self.input_fx,
                 master_volume: &mut self.master_volume,
                 master_muted: &mut self.master_muted,
-                toggles_sent: &mut self.toggles_sent,
+                toggles_owed: &mut self.toggles_owed,
             };
             apply_due(&mut self.pending, &mut self.commands_dropped, &mut self.looper, &mut cx, &mut at);
             if f == start {
@@ -476,7 +478,7 @@ impl Engine {
                 cx.feed.push(Event::Beat { frame: f, beat_in_bar: beat.beat_in_bar, count_left: beat.count_left, clicked: beat.clicked });
             }
             self.looper.publish(&mut cx, self.replayed);
-            offer_toggles(cx.feed, f, &mut self.toggles_sent, cx.clock, &self.looper, &self.input_fx);
+            offer_toggles(cx.feed, f, &mut self.toggles_owed, cx.clock, &self.looper, &self.input_fx);
             self.fx.follow_grid(self.looper.grid_origin(), self.looper.master(), self.clock.bpm(), f);
             self.input_fx.follow_tempo(self.clock.bpm(), f);
 
@@ -682,7 +684,9 @@ fn toggle_value(clock: &Clock, looper: &Looper, input_fx: &InputFx, t: Toggle) -
 fn toggle(looper: &mut Looper, cx: &mut Cx, at: &mut Apply, t: Toggle) {
     let now = cx.now;
     if let Err(reason) = looper.toggle_gate(t, cx.clock.locked()) {
-        cx.feed.push(Event::Refused { frame: now, lane: looper.selected() as u8, reason });
+        if !cx.feed.push(Event::Refused { frame: now, lane: looper.selected() as u8, reason }) {
+            at.toggles_owed[t.index()] += 1;
+        }
         return;
     }
     let on = !toggle_value(cx.clock, looper, at.input_fx, t);
@@ -694,20 +698,26 @@ fn toggle(looper: &mut Looper, cx: &mut Cx, at: &mut Apply, t: Toggle) {
         Toggle::AutoRec => looper.set_auto_record(on),
         Toggle::Send(send) => at.input_fx.set_on(send, on, now),
     }
-    if cx.feed.push(Event::Toggled { frame: now, toggle: t, on }) {
-        at.toggles_sent[t.index()] = on;
+    toggled(cx.feed, now, at.toggles_owed, t, on);
+}
+
+/// Answer an applied command of toggled setting `t` (its setter, even one that changed nothing, or its
+/// toggle) with `Event::Toggled` at `on`, the value it left; owed when the full ring refuses it.
+fn toggled(feed: &mut Feed, now: Frame, owed: &mut [u32; Toggle::COUNT], t: Toggle, on: bool) {
+    if !feed.push(Event::Toggled { frame: now, toggle: t, on }) {
+        owed[t.index()] += 1;
     }
 }
 
-/// Offer `Event::Toggled` for each toggled setting whose applied value differs from the one the ring last
-/// took: a setter's change, or a toggle whose event a full ring refused. Marked delivered only once the
-/// ring takes it, as a lane's mix is (`Looper::publish`), so the feed and the host's settings memory
-/// converge on the applied values whatever the ring dropped.
-fn offer_toggles(feed: &mut Feed, now: Frame, sent: &mut [bool; Toggle::COUNT], clock: &Clock, looper: &Looper, input_fx: &InputFx) {
+/// Offer the owed answers (`toggles_owed`), each as a `Toggled` of the setting's current value, until the
+/// ring refuses one: as a lane's mix is offered again (`Looper::publish`), so the feed and the host's
+/// settings memory hear one answer per command and converge on the applied value whatever the ring
+/// dropped (a refused toggle's `Refused` comes back as its setting's value, the reason lost).
+fn offer_toggles(feed: &mut Feed, now: Frame, owed: &mut [u32; Toggle::COUNT], clock: &Clock, looper: &Looper, input_fx: &InputFx) {
     for t in Toggle::ALL {
         let on = toggle_value(clock, looper, input_fx, t);
-        if on != sent[t.index()] && feed.push(Event::Toggled { frame: now, toggle: t, on }) {
-            sent[t.index()] = on;
+        while owed[t.index()] > 0 && feed.push(Event::Toggled { frame: now, toggle: t, on }) {
+            owed[t.index()] -= 1;
         }
     }
 }
@@ -719,8 +729,8 @@ struct Apply<'a> {
     input_fx: &'a mut InputFx,
     master_volume: &'a mut f32,
     master_muted: &'a mut bool,
-    /// The engine's `toggles_sent`: a toggle's event the ring took is delivered.
-    toggles_sent: &'a mut [bool; Toggle::COUNT],
+    /// The engine's `toggles_owed`.
+    toggles_owed: &'a mut [u32; Toggle::COUNT],
 }
 
 fn apply(looper: &mut Looper, cx: &mut Cx, at: &mut Apply, command: Command) -> Applied {
@@ -793,6 +803,7 @@ fn apply(looper: &mut Looper, cx: &mut Cx, at: &mut Apply, command: Command) -> 
         }
         Command::SetMetronome(on) => {
             cx.clock.set_metronome(on);
+            toggled(cx.feed, now, at.toggles_owed, Toggle::Click, on);
             Applied::Done
         }
         Command::SetClickVolume(v) => {
@@ -809,6 +820,7 @@ fn apply(looper: &mut Looper, cx: &mut Cx, at: &mut Apply, command: Command) -> 
         }
         Command::SetLoopEndStop(on) => {
             looper.set_loop_end_stop(on);
+            toggled(cx.feed, now, at.toggles_owed, Toggle::EndStop, on);
             Applied::Done
         }
         Command::SetFadeBars(bars) => {
@@ -817,6 +829,7 @@ fn apply(looper: &mut Looper, cx: &mut Cx, at: &mut Apply, command: Command) -> 
         }
         Command::SetFixedLength(on) => {
             looper.set_fixed_length(on);
+            toggled(cx.feed, now, at.toggles_owed, Toggle::Fixed, on);
             Applied::Done
         }
         Command::SetFixedBars(bars) => {
@@ -825,10 +838,12 @@ fn apply(looper: &mut Looper, cx: &mut Cx, at: &mut Apply, command: Command) -> 
         }
         Command::SetRetake(on) => {
             looper.set_retake(on);
+            toggled(cx.feed, now, at.toggles_owed, Toggle::Retake, on);
             Applied::Done
         }
         Command::SetAutoRecord(on) => {
             looper.set_auto_record(on);
+            toggled(cx.feed, now, at.toggles_owed, Toggle::AutoRec, on);
             Applied::Done
         }
         Command::SetAutoSensitivity(s) => {
@@ -918,6 +933,7 @@ fn apply(looper: &mut Looper, cx: &mut Cx, at: &mut Apply, command: Command) -> 
         }
         Command::SetInputSend(send, on) => {
             at.input_fx.set_on(send, on, now);
+            toggled(cx.feed, now, at.toggles_owed, Toggle::Send(send), on);
             Applied::Done
         }
         Command::SetInputSendParam(param, value) => {

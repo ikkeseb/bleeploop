@@ -90,17 +90,21 @@ pub(crate) fn swap_engine(core: &Core, engine: Engine, handle: EngineHandle, con
                 settings.mixed(gen, frame, lane as u8, mix);
             }
         }
-        // The toggles it applied whose `Toggled` its full ring refused: newer than any it drained.
+        // The answers its full ring refused, owed at each setting's applied value: newer than any it
+        // drained.
         for (toggle, on) in unsent {
             settings.toggled(gen, toggle, on);
         }
         let ends = ends.insert(Ends { commands, events, overview, session: Some(session) });
-        for command in settings.replay() {
+        let replay: Vec<_> = settings.replay().collect();
+        settings.follow(core.engine_gen.fetch_add(1, Release) + 1);
+        for command in replay {
             if ends.commands.push(TimedCommand { frame: None, command }).is_err() {
                 core.counters.commands_full.fetch_add(1, Relaxed);
+            } else {
+                settings.pushed(&command);
             }
         }
-        settings.follow(core.engine_gen.fetch_add(1, Release) + 1);
     }
     old
 }

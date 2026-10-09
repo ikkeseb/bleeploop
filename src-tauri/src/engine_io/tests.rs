@@ -2393,3 +2393,55 @@ fn a_rebuild_keeps_a_toggle_the_full_event_ring_refused() {
     });
     assert!(h.host.settings().contains(&Command::SetMetronome(false)));
 }
+
+/// CLICK off and the event ring full: `SetMetronome(true)` then CLICK's toggle in one batch leave the
+/// engine off, its `Toggled(false)` refused. A rebuild must replay off, not the setter's on.
+#[test]
+fn a_rebuild_after_a_setter_and_a_toggle_under_a_full_ring_keeps_the_applied_value() {
+    use lf_engine::{Action, Toggle};
+    let mut h = Harness::new();
+    h.open(asio(Some(256)));
+    h.wait_mix("the engine reports lane 2", 2, |_| true);
+    let select = |i: usize| TimedCommand { frame: None, command: Command::SelectTrack((i % 5) as u8) };
+    for _ in 0..40 {
+        if h.host.diag().engine.events_dropped > 0 {
+            break;
+        }
+        h.host.send_all((0..400).map(select)).expect("the command ring takes them");
+        h.play(RATE / 10);
+    }
+    assert!(h.host.diag().engine.events_dropped > 0, "the event ring is full");
+    let at_once = |command| TimedCommand { frame: None, command };
+    h.host.send_all([at_once(Command::SetMetronome(true)), at_once(Command::Action(Action::Toggle(Toggle::Click)))]).unwrap();
+    h.play(RATE / 10);
+    h.fake.asio.lock().unwrap().as_mut().unwrap().rate = 44_100;
+    h.open(asio(Some(128)));
+    let kept = h.host.settings();
+    assert!(kept.contains(&Command::SetMetronome(false)) && !kept.contains(&Command::SetMetronome(true)), "the applied value: {kept:?}");
+}
+
+/// An older `Toggled(true)` still in the event ring when a newer `SetMetronome(false)` is accepted while
+/// the device is stopped (so not yet applied): draining the event must not undo the setter, and a rebuild
+/// replays off.
+#[test]
+fn an_older_toggled_drained_after_a_newer_setter_does_not_overwrite_it() {
+    use lf_engine::{Action, Toggle};
+    let mut h = Harness::new();
+    h.open(asio(Some(256)));
+    h.wait_mix("the engine reports lane 2", 2, |_| true);
+    h.send(Command::Action(Action::Toggle(Toggle::Click)));
+    h.play(RATE / 10); // applied, its Toggled(true) left in the ring
+    h.host.close().unwrap();
+    h.send(Command::SetMetronome(false)); // the stopped engine's ring takes it, unapplied
+    h.host.drain_events(&mut h.events);
+    assert!(h.events.iter().any(|e| matches!(e, Event::Toggled { toggle: Toggle::Click, on: true, .. })), "the older event drained after the setter");
+    assert!(!h.host.settings().contains(&Command::SetMetronome(true)), "it does not overwrite the newer setter: {:?}", h.host.settings());
+    h.fake.asio.lock().unwrap().as_mut().unwrap().rate = 44_100;
+    h.open(asio(Some(128)));
+    assert!(h.host.settings().contains(&Command::SetMetronome(false)), "a rebuild replays off: {:?}", h.host.settings());
+    h.send(Command::Action(Action::Toggle(Toggle::Click)));
+    h.wait_event("the new engine had it off, so the press turns it on", |e| match *e {
+        Event::Toggled { toggle: Toggle::Click, on: true, .. } => Some(()),
+        _ => None,
+    });
+}
