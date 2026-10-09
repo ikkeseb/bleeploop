@@ -131,6 +131,13 @@ blocks until the verdict, so an agent harness should run it in the background.
   not settled (`src-tauri/AGENTS.md` § Open threads, the join).
 - The plugin scan works WITHOUT the full app (`--scan-one`): see `src-tauri/AGENTS.md`
   "Native-host verify ops".
+- **Every rig baseline is bound to the interface that produced it.** The numbers below were measured on
+  one audio interface and one ASIO driver, and a different interface invalidates them until they are
+  measured again on it: the latency figures, the block-size behaviour, the join's timing under WASAPI,
+  and the driver-specific workarounds the device side carries (`src-tauri/AGENTS.md`, the preopen at
+  another block size). Name the interface beside any baseline you add, as the ones below do, and never
+  compare a result on one against a baseline from another. Which interfaces the owner has:
+  `STATUS.md` header.
 - **When to run the plugin probes, and their baselines** (the verdict alone doesn't say this). Narrow
   `smoke`, `survey` and `swap` to `--filter="Surge XT Effects,Pro-Q,Gojira"` (CLAP and VST3, a
   separated controller, FabFilter's latency restarts, Neural DSP's slow teardown) unless the change

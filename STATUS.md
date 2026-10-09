@@ -4,6 +4,16 @@ The owner's ear, eye or decision on the PC: the next jam's checks, what no jam h
 decisions that block work. Taste: `docs/backlog-taste.md` (not a gate). Non-gate threads: `AGENTS.md`
 § Open threads.
 
+**The rig's interfaces:** every baseline in this repo was measured on a **Scarlett 2i2 3rd gen** (ASIO,
+44.1 kHz, a cable from line out R into input 2). A second interface, an **Audient EVO 4**, arrived
+2026-10-09 and has never been run: its ASIO driver is unmeasured here, nothing in the tree mentions it,
+and the device side's driver-specific workarounds were written for the Focusrite driver alone
+(`src-tauri/AGENTS.md`, the preopen at another block size). So a result on the EVO 4 answers none of the
+baselines below until they are measured again on it, and an oddity seen there is the new driver's until
+shown otherwise. It also opens a check no device has ever run: a rate or buffer changed in the driver's
+own control panel while the app plays (`src-tauri/AGENTS.md` § Open threads). It has two inputs, so the
+loopback cable the rig protocol needs still fits.
+
 **Machine verification (Windows):** the push gates are `AGENTS.md`'s; the rig probes, when to run each,
 and their baselines: `docs/VERIFY.md` § When to run the plugin probes. Where the rig stands: every rig
 probe passed on the engine-only app between 2026-09-29 and 10-05 (`native:engine`'s counter check
