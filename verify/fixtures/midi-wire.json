@@ -1,0 +1,53 @@
+{
+  "actionIds": ["recDub", "playStop", "undo", "clear", "mute", "reverse", "copy", "halveTrack", "nextTrack", "prevTrack", "playAll", "stopAll", "fadeAll", "goLive", "stageView", "stageNextView", "tapTempo", "clickToggle", "endStopToggle", "fixedToggle", "retakeToggle", "autoRecToggle", "inFxEcho", "inFxReverb", "inFxRing"],
+  "events": [
+    { "ports": { "ports": [
+      { "id": "\\\\?\\swd#midisrv#port-a", "name": "FS-6 Pedal", "state": "open" },
+      { "id": "\\\\?\\swd#midisrv#port-b", "name": "Keystation 49", "state": "busy" },
+      { "id": "\\\\?\\swd#midisrv#port-c", "name": "Launchkey", "state": "closed" }
+    ] } },
+    { "ports": { "ports": [] } },
+    { "gone": { "names": ["FS-6 Pedal"] } },
+    { "bindings": { "bindings": [
+      { "binding": { "portId": "\\\\?\\swd#midisrv#port-a", "portName": "FS-6 Pedal", "channel": 0, "kind": "cc", "number": 64, "action": "recDub", "target": null, "pressHigh": true, "momentary": true, "hold": true }, "origin": "native", "ordinal": false, "blocked": null, "displayName": "FS-6 Pedal", "state": "live" },
+      { "binding": { "portId": "input-3", "portName": "Keystation 49", "channel": 9, "kind": "note", "number": 36, "action": "playStop", "target": 2, "pressHigh": true, "momentary": false, "hold": false }, "origin": "legacy", "ordinal": true, "blocked": "learned again in another run", "displayName": "Keystation 49", "state": "blocked" },
+      { "binding": { "portId": "\\\\?\\swd#midisrv#port-z", "portName": "", "channel": 15, "kind": "cc", "number": 119, "action": "inFxRing", "target": null, "pressHigh": false, "momentary": false, "hold": false }, "origin": "native", "ordinal": false, "blocked": null, "displayName": "\\\\?\\swd#midisrv#port-z", "state": "noPort" },
+      { "binding": { "portId": "input-0", "portName": "Launchkey", "channel": 1, "kind": "cc", "number": 20, "action": "tapTempo", "target": null, "pressHigh": true, "momentary": true, "hold": false }, "origin": "legacy", "ordinal": true, "blocked": null, "displayName": "Launchkey", "state": "severalPorts" },
+      { "binding": { "portId": "input-1", "portName": "Launchkey", "channel": 1, "kind": "cc", "number": 21, "action": "halveTrack", "target": 4, "pressHigh": true, "momentary": true, "hold": false }, "origin": "legacy", "ordinal": true, "blocked": null, "displayName": "Launchkey", "state": "severalAbsent" }
+    ] } },
+    { "learning": { "learning": { "action": "clear", "target": 1 } } },
+    { "learning": { "learning": { "action": "stageNextView", "target": null } } },
+    { "learning": { "learning": null } },
+    { "awaitingRelease": { "binding": { "portId": "\\\\?\\swd#midisrv#port-a", "portName": "FS-6 Pedal", "channel": 0, "kind": "cc", "number": 80, "action": "autoRecToggle", "target": null, "pressHigh": true, "momentary": false, "hold": false } } },
+    { "awaitingRelease": { "binding": null } },
+    { "learned": { "binding": { "portId": "\\\\?\\swd#midisrv#port-a", "portName": "FS-6 Pedal", "channel": 0, "kind": "cc", "number": 80, "action": "autoRecToggle", "target": null, "pressHigh": true, "momentary": false, "hold": false } } },
+    { "refused": { "reason": "holdControlsTaken" } },
+    { "run": { "action": "goLive" } },
+    { "run": { "action": "stageView" } },
+    { "run": { "action": "stageNextView" } },
+    { "run": { "action": "tapTempo" } },
+    "pressed",
+    { "store": { "problem": { "readOnly": { "why": "midi-bindings.json was written by a newer build (version 3)" } } } },
+    { "store": { "problem": { "conflict": { "why": "the file changed since it was read" } } } },
+    { "store": { "problem": { "failed": { "why": "Access is denied. (os error 5)" } } } },
+    { "store": { "problem": { "rejected": { "count": 2 } } } },
+    { "held": { "notes": [36, 60, 127], "changes": 14 } },
+    { "held": { "notes": [], "changes": 15 } }
+  ],
+  "inputEvents": [
+    { "note": { "owner": "pointer:3", "note": 60, "velocity": 100, "on": true } },
+    { "note": { "owner": "key:KeyA", "note": 0, "velocity": 0, "on": false } },
+    { "note": { "owner": "key:Digit1", "note": 127, "velocity": 127, "on": true } },
+    "blur",
+    { "selectTarget": { "slot": 0, "target": { "Builtin": "lead" } } },
+    { "selectTarget": { "slot": 1, "target": { "Slot": 1 } } },
+    { "selectTarget": { "slot": 1, "target": "Off" } },
+    { "selectTarget": { "slot": null, "target": "Off" } },
+    "allNotesOff"
+  ],
+  "importReports": [
+    { "already": true, "unreadable": null, "imported": [], "blocked": [], "rejected": [], "skipped": [] },
+    { "already": false, "unreadable": null, "imported": [0, 2], "blocked": [{ "index": 3, "why": "learned again in another run" }], "rejected": [{ "index": 1, "reason": "unknown action \"loopAll\"" }], "skipped": [4] },
+    { "already": false, "unreadable": "expected value at line 1 column 1", "imported": [], "blocked": [], "rejected": [], "skipped": [] }
+  ]
+}

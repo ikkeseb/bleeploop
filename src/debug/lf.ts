@@ -3,7 +3,6 @@ import { asioStatus, probeAsio, setAsioEnabled, setBufferSize } from '../ui/stat
 import { autosave } from '../session/autosave';
 import { buildExportBundle } from '../session/export';
 import { importSession } from '../session/import';
-import { inputRouter } from '../ui/state/input-router';
 import {
   activeSlot,
   availablePlugins,
@@ -19,7 +18,7 @@ import {
 import * as midi from '../ui/state/midi';
 import { clock, looper, master } from '../ui/state/audio';
 import { dismissToast, notifyError, toasts } from '../notify';
-import { engineFake, platform, reportDiagnostics } from '../platform';
+import { engineFake, input, platform, reportDiagnostics } from '../platform';
 import * as layoutStore from '../ui/layout/layout-store';
 
 /**
@@ -29,7 +28,9 @@ import * as layoutStore from '../ui/layout/layout-store';
  * Installed only under `import.meta.env.DEV` (app.tsx); a release build never carries it.
  */
 export interface LfDebug {
-  inputRouter: typeof inputRouter;
+  /** The UI's note sources into native MIDI's router (`platform` `input`): `input.note(owner, note,
+   * velocity 0..127, on)` plays as a key does; on the browser fake it is recorded in `native.inputSent`. */
+  input: typeof input;
   ensureActive: typeof ensureActive;
   selectSynth: typeof selectSynth;
   selectPlugin: typeof selectPlugin;
@@ -50,11 +51,13 @@ export interface LfDebug {
   /** ASIO startup coordinator readout + explicit probe (the Audio Settings RETRY path). */
   asioStatus: typeof asioStatus;
   probeAsio: typeof probeAsio;
+  /** Native MIDI as the UI holds it (`src/ui/state/midi.ts`): ports, bindings, learn, the held set. */
   midi: typeof midi;
   platform: typeof platform;
-  /** The browser's engine fake (`src/platform/host.web.ts`): the commands the UI sent and `emit(frame)` to
-   * script the feed. The browser build has an engine only with `window.__lfEngineFake = true` set
-   * before the app loads (`verify/probes/engine-seam.mjs`). Null under Tauri. */
+  /** The browser's engine fake (`src/platform/host.web.ts`): the commands and input events the UI sent,
+   * the native MIDI calls, `emit(frame)` to script the feed and `midiEmit(event)` native MIDI's events.
+   * The browser build has an engine only with `window.__lfEngineFake = true` set before the app loads
+   * (`verify/probes/engine-seam.mjs`). Null under Tauri. */
   native: typeof engineFake;
   /** Mute the master (true) or unmute it; routes through `master` so the UI mute + slider stay
    * consistent. */
@@ -98,7 +101,7 @@ export function installLfDebug(ui: LfDebug['ui']): void {
   // Report WebView2-internal facts to `tauri dev` stdout (no Playwright into WebView2).
   if (platform.kind === 'tauri') void reportDiagnostics();
   window.__lf = {
-    inputRouter,
+    input,
     ensureActive,
     selectSynth,
     selectPlugin,
@@ -129,7 +132,7 @@ export function installLfDebug(ui: LfDebug['ui']): void {
     pluginListParams: (slot = 0) => platform.pluginHost.listParams(slot as 0 | 1),
     onPluginParam: (cb) => platform.pluginHost.onParamChanged(cb),
     onPluginEditorClosed: (cb) => platform.pluginHost.onEditorClosed(cb),
-    pluginPanic: () => inputRouter.allNotesOff(),
+    pluginPanic: () => input.allNotesOff(),
     importSession,
     buildExportBundle,
     autosave,

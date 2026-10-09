@@ -2,7 +2,7 @@
  * A drum voice's static descriptor — the single source of truth for the kit's note set, display
  * label, and PC-keyboard pad key. Consumed by the on-screen drum-pad UI (src/ui/keyboard/Keyboard.tsx),
  * the PC-keyboard map (src/app/transport-keys.ts) and Help. A MIDI controller plays the same `note`
- * numbers straight through the input router; the `key` is PC-keyboard-only.
+ * numbers straight through native MIDI's note router; the `key` is PC-keyboard-only.
  */
 export interface DrumVoice {
   readonly note: number; // GM percussion MIDI note

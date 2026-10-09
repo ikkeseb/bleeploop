@@ -1,6 +1,6 @@
 import { Show, createEffect, createSignal, onCleanup, onMount } from 'solid-js';
 import { activeIsDrum, availablePlugins, nativeHostReady, scanForPlugins, scanning } from './ui/state/instrument';
-import * as midi from './ui/state/midi';
+import { cancelLearn, portsSummary } from './ui/state/midi';
 import { Keyboard } from './ui/keyboard/Keyboard';
 import { Looper } from './ui/looper/Looper';
 import { Transport } from './ui/transport/Transport';
@@ -20,7 +20,7 @@ import { bootEngine } from './app/boot';
 import { installCloseGuard } from './app/close-guard';
 import { checkForUpdate, updateOffered } from './app/update';
 import { installCmdFit } from './app/cmd-fit';
-import { cancelLearn, installMidiActions } from './app/midi-actions';
+import { installMidiActions } from './app/midi-actions';
 import { installTransportKeys, type TransportKeys } from './app/transport-keys';
 import { installLfDebug } from './debug/lf';
 
@@ -95,10 +95,9 @@ export function App() {
     onCleanup(installCloseGuard());
     // Send the persisted master volume to the engine (restores a saved level on reload).
     master.init();
-    // MIDI learn claims learned messages before the play path: `src/app/midi-actions.ts`. Then attempt
-    // MIDI on mount — graceful if unavailable.
+    // Native MIDI: its events, what its bindings fire in the UI, the web's bindings handed over once
+    // (`src/app/midi-actions.ts`).
     onCleanup(installMidiActions());
-    void midi.start();
     // The engine's boot chain — its device, local recovery of the jam, the plugin host (a no-op in the
     // browser build, which has no engine): `src/app/boot.ts`.
     onCleanup(bootEngine());
@@ -224,12 +223,11 @@ export function App() {
         ? 'scanning…'
         : `${availablePlugins().length} found`
       : 'unavailable';
-    const midiStatus = midi.midiStatus() === 'connected' ? midi.midiDevices().join(', ') : midi.midiStatus();
     return [
       `host: ${platform.kind}`,
       `engine: ${engineState()}`,
       `plugin: ${pluginState}`,
-      `midi: ${midiStatus}`,
+      `midi: ${portsSummary()}`,
     ].join('\n');
   };
 

@@ -40,7 +40,8 @@
  *   boxed number a frame, about 16 to 22 bytes: the looper's `phaseValue` reads Date.now(). An array or
  *   an object a frame adds 32 bytes or more and fails. Closing the stage stops its rAF loop. Also prints
  *   the frame interval and the hidden looper lanes' cost.
- * - keys: a held A lights no key and sends no `NoteOn` inside the view (it does outside); drum mode's 3
+ * - keys: a held A lights no key and sends native MIDI's router no note (`__lf.native.inputSent`) inside
+ *   the view (it does outside); drum mode's 3
  *   plays no pad inside it but selects lane 3; V plays the Hi Tom pad outside the view and leaves the
  *   look alone (as the `stageNextView` action does there, a pedal's path), and inside it steps the look
  *   and sends the engine nothing; a pad key released with
@@ -158,7 +159,9 @@ await probe(async ({ browser, open }) => {
   const emitOn = (p, frame) => p.evaluate((f) => window.__lf.native.emit(f), { seq: ++seq, reset: false, events: [], ...frame });
   const emit = (frame) => emitOn(page, frame);
   const sent = () => page.evaluate(() => window.__lf.native.sent.slice());
-  const clearSent = () => page.evaluate(() => void (window.__lf.native.sent.length = 0));
+  const clearSent = () => page.evaluate(() => void (window.__lf.native.sent.length = window.__lf.native.inputSent.length = 0));
+  /** The notes the keyboard sent native MIDI's router (`input.note`), as `{ note, on }`. */
+  const notesSent = () => page.evaluate(() => window.__lf.native.inputSent.filter((e) => e.note).map((e) => e.note));
   const sentAtLeast = async (count) => {
     await page.waitForFunction((n) => window.__lf.native.sent.length >= n, count, { timeout: 5000 });
     return sent();
@@ -999,11 +1002,12 @@ await probe(async ({ browser, open }) => {
       await page.keyboard.up(key);
       await settle(150);
       const commands = await sent();
-      return { lit, notes: commands.filter((c) => c.NoteOn).length, commands };
+      const played = await notesSent();
+      return { lit, notes: played.filter((n) => n.on).length, played, commands };
     };
     const outsideA = await hold('a', '.kb__key--down');
     assert.equal(outsideA.lit, true, 'control: outside the view, A lights a key');
-    assert.ok(outsideA.notes > 0, 'control: outside the view, A sends NoteOn');
+    assert.ok(outsideA.notes > 0, 'control: outside the view, A sends its note');
     await setOpen(true);
     const insideA = await hold('a', '.kb__key--down');
     assert.equal(insideA.lit, false, 'inside the view, A lights no key');
@@ -1020,7 +1024,7 @@ await probe(async ({ browser, open }) => {
     const before = await stored();
     const outsideV = await hold('v', '.kb__pad--down');
     assert.equal(outsideV.lit, true, 'outside the view, drum mode V plays the Hi Tom pad');
-    assert.ok(outsideV.commands.some((c) => c.NoteOn?.[0] === 50), 'outside the view, V sends the Hi Tom note');
+    assert.ok(outsideV.played.some((n) => n.on && n.note === 50), 'outside the view, V sends the Hi Tom note');
     assert.equal(await stored(), before, 'outside the view, V leaves the look alone');
     // The same action from a pedal (no key involved) does nothing while the view is closed.
     await clearSent();
@@ -1036,11 +1040,11 @@ await probe(async ({ browser, open }) => {
     await page.keyboard.up('Digit1');
     await page.keyboard.up('Shift');
     await settle(150);
-    const shifted = await sent();
-    assert.ok(shifted.some((c) => c.NoteOff === 49), 'a pad key released with Shift held sends its NoteOff');
+    const shifted = await notesSent();
+    assert.ok(shifted.some((n) => !n.on && n.note === 49), 'a pad key released with Shift held sends its release');
     assert.equal(await page.evaluate(() => document.querySelector('.kb__pad--down') !== null), false, 'a pad key released with Shift held leaves its pad unlit');
     const again1 = await hold('1', '.kb__pad--down');
-    assert.ok(again1.commands.some((c) => c.NoteOn?.[0] === 49), 'the next 1 after a shifted release plays the Crash pad');
+    assert.ok(again1.played.some((n) => n.on && n.note === 49), 'the next 1 after a shifted release plays the Crash pad');
     await setOpen(true);
     const inside3 = await hold('3', '.kb__pad--down');
     assert.equal(inside3.lit, false, 'inside the view, drum mode 3 plays no pad');
@@ -1048,9 +1052,10 @@ await probe(async ({ browser, open }) => {
     assert.deepEqual(inside3.commands.filter((c) => c.SelectTrack !== undefined), [{ SelectTrack: 2 }], 'inside the view, drum mode 3 sends SelectTrack 2');
     const look = await view();
     const insideV = await hold('v', '.kb__pad--down');
-    console.log(JSON.stringify({ v: { outside: outsideV.commands, inside: insideV.commands, look: [look, await view()] } }));
+    console.log(JSON.stringify({ v: { outside: outsideV.played, inside: insideV.commands, look: [look, await view()] } }));
     assert.equal(insideV.lit, false, 'inside the view, V plays no pad');
-    assert.deepEqual(insideV.commands, [], 'inside the view, V sends the engine nothing (no note, no Press)');
+    assert.deepEqual(insideV.commands, [], 'inside the view, V sends the engine nothing (no Press)');
+    assert.deepEqual(insideV.played, [], 'inside the view, V plays no note');
     assert.notEqual(await view(), look, 'inside the view, V steps the look');
     const picker = await page.evaluate(() => import('/src/app/actions.ts').then((m) => m.ACTION_LABELS.stageNextView));
     assert.equal(picker, 'Stage view: next look', 'the look switch is a named action a pedal can learn');

@@ -187,7 +187,9 @@
 }
 
 /* The learned MIDI bindings: one line each in the value column (action · message · the pedal-kind switch
-   · HOLD on a REC/DUB pedal), with a ✕ that forgets it. The port name is the line's title. */
+   · HOLD on a REC/DUB pedal), with a ✕ that forgets it. The port name is the line's title. A binding that
+   does not run now dims its action and wraps a second line: why (in the folders' amber note), and a port
+   select with ASSIGN when a port is here. */
 .audio-settings__bindings {
   margin: -4px 0 0;
   padding: 0 0 0 83px;
@@ -199,9 +201,35 @@
 .audio-settings__binding {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
   min-width: 0;
   font-size: 10.5px;
+}
+.audio-settings__binding.is-idle .audio-settings__binding-action {
+  color: var(--dim);
+}
+.audio-settings__binding-why {
+  flex: 1 0 100%;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding-bottom: 2px;
+}
+.audio-settings__binding-idle {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 10px;
+  color: color-mix(in srgb, var(--dub) 55%, var(--dim));
+}
+.audio-settings__select--assign {
+  flex: 0 1 auto;
+  height: 22px;
+  font-size: 10px;
 }
 .audio-settings__binding-action {
   flex: 0 0 auto;

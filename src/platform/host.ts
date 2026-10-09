@@ -6,22 +6,22 @@
  * on these interfaces, never on Tauri directly — so the entire frontend builds and renders
  * standalone in a browser via `pnpm dev` (silent: the browser build has no engine).
  *
- * Five capabilities are DECLARED here, but only FOUR of them actually differ per platform:
- *   - PluginHost      — native CLAP, VST3 and VST2 hosting (web: stub; tauri: invoke/listen). The real seam.
- *   - EngineHost      — the native audio engine (`docs/ARCHITECTURE.md`; web: a scriptable fake
- *                        for probes).
- *   - LogFolder       — the release log's folder, for Help's diagnostics (web: none).
- *   - AppUpdates      — the app updater, release builds only (web: none, or a probe's script).
- *   - MidiBackend      — W3C Web MIDI. WebView2 v149 ships it natively and `lib.rs` auto-grants the
- *                        permission, so tauri reuses the web one verbatim (`tauriPlatform = { ...webPlatform,
- *                        kind, pluginHost, engine, logs }`). The engine's native MIDI (midir,
- *                        `src-tauri/src/engine_io/midi`) stays off: WinMM ports are exclusive, and Web MIDI
- *                        keeps the controller.
+ * Every capability differs per platform (web: a stub or a probe's scriptable fake; tauri: invoke/listen):
+ *   - PluginHost   — native CLAP, VST3 and VST2 hosting.
+ *   - EngineHost   — the native audio engine (`docs/ARCHITECTURE.md`).
+ *   - MidiHost     — native MIDI (`src-tauri/src/engine_io/midi`): its ports, MIDI learn and the stored
+ *                    bindings, and what it tells the UI. The app never opens Web MIDI (the WebView's
+ *                    permission is denied, and `verify/guards/web-midi.mjs` keeps the Web MIDI API out
+ *                    of `src/`): WinMM input ports are exclusive, and native MIDI keeps them.
+ *   - InputHost    — every UI note source's way into native MIDI's one note router (`input_send`).
+ *   - LogFolder    — the release log's folder, for Help's diagnostics (web: none).
+ *   - AppUpdates   — the app updater, release builds only (web: none, or a probe's script).
  *
  * Live audio NEVER crosses this boundary as PCM; a session save's snapshot does, once, off the RT path
  * (`EngineHost.snapshot` / `loadSession`).
  */
 import type { DeviceRequest, DeviceStatus, EngineCommand, FeedFrame } from './engine-wire';
+import type { ImportReport, InputEvent, MidiActionId, MidiEvent } from './midi-wire';
 
 export type PluginSlot = 0 | 1;
 export type PluginFormat = 'clap' | 'vst3' | 'vst2';
@@ -259,14 +259,43 @@ export interface AsioDeviceInfo {
   sampleRates?: number[];
 }
 
-export interface MidiBackend {
-  /**
-   * W3C Web MIDI via navigator.requestMIDIAccess — Chromium/Edge natively, and WebView2 v149
-   * natively too (lib.rs auto-grants the permission), so BOTH platforms use the same web
-   * implementation and there is no shim. Returns null if unsupported (the on-screen + computer
-   * keyboard remain fully playable).
-   */
-  requestAccess(): Promise<MIDIAccess | null>;
+/**
+ * Native MIDI (`src-tauri/src/engine_io/midi/mod.rs`, `MidiHost`): the input ports, MIDI learn, the stored
+ * bindings and the note router for every source. The UI keeps the learn row, the device list and the toasts,
+ * driven by the events (`midi-wire.ts`) on their own channel, never the feed. Each call rejects with the
+ * native error (an index no binding has, a refused edit, no engine this launch).
+ */
+export interface MidiHost {
+  /** Subscribe to native MIDI's events; the first ones are the resync. One subscriber at a time: a new
+   * one (a WebView reload) replaces the last. Returns the unsubscribe. */
+  subscribe(onEvent: (event: MidiEvent) => void): () => void;
+  /** Learn the next CC or note-on, from any port, onto `action` (a lane action on track `target`, null the
+   * selected track). Answered by `learning` and, once it captures, `learned`. */
+  learn(action: MidiActionId, target: number | null): Promise<void>;
+  /** Stop listening (a learned pedal's wait for its release goes on). True when a learn was pending. */
+  cancelLearn(): Promise<boolean>;
+  /** Drop listed binding `index` (the `bindings` event's order). */
+  forget(index: number): Promise<void>;
+  /** Read listed binding `index`'s pedal as momentary (true) or latching. */
+  setMomentary(index: number, momentary: boolean): Promise<void>;
+  /** HOLD on or off for listed binding `index` (a momentary REC/DUB pedal only). */
+  setHold(index: number, hold: boolean): Promise<void>;
+  /** Assign listed binding `index` to the present port `portId` (`MidiPort.id`). */
+  assign(index: number, portId: string): Promise<void>;
+  /** Import the web's bindings once (`lf.midiLearn` verbatim, `"[]"` when absent); later calls change
+   * nothing and answer `already`. */
+  importLegacy(json: string): Promise<ImportReport>;
+}
+
+/**
+ * The UI's note sources into native MIDI's one router (`input_send`): the on-screen and PC keyboard's
+ * notes by their physical owner, the window's blur, the note target and the panic. The host adds this
+ * document's epoch (`host_init`'s `frontendEpoch`), so a reloaded document's holds end natively. Send
+ * through `index.ts`'s `input`, which keeps one order with `sendEngine`.
+ */
+export interface InputHost {
+  /** A batch of input events, applied in order. Fire-and-forget; a rejection means it never arrived. */
+  send(events: readonly InputEvent[]): Promise<void>;
 }
 
 /**
@@ -350,5 +379,6 @@ export interface Platform {
   readonly engine: EngineHost;
   readonly logs: LogFolder;
   readonly updates: AppUpdates;
-  readonly midi: MidiBackend;
+  readonly midi: MidiHost;
+  readonly input: InputHost;
 }

@@ -7,8 +7,8 @@
  *           when there is one, so the room hears nothing; without one, the master volume goes to 0.1
  *           (the render keeps it: the master stays audible in the file, quietly in the room)
  *   take    the built-in Lead on slot A, a FIXED 1-bar first take at 120 BPM on lane 1, the click off;
- *           one note (MIDI velocity 100) played through the input router while the take records, so the
- *           record tap takes the synth
+ *           one note (MIDI velocity 100) played through native MIDI's router (`input`, as a PC key) while
+ *           the take records, so the record tap takes the synth
  *   export  `buildExportBundle` (the Export button's bundle): session.json's `master.kind` is
  *           'wet-engine', the master WAV is stereo and one loop long, not silent, and its onset (the
  *           first sample past a tenth of its peak) lies within 2 frames of the stem's
@@ -27,7 +27,8 @@ import { openEngineDevice, engineDevice } from '../ui/state/engine-store';
 import { outputDevices, refreshOutputDevices } from '../ui/state/audio-devices';
 import { writeAudioDeviceSettings } from '../ui/state/audio-settings';
 import { selectSynth } from '../ui/state/instrument';
-import { inputRouter } from '../ui/state/input-router';
+import { nativeHostReady } from '../ui/state/instrument-slots';
+import { input } from '../platform';
 import { clock, looper, master, session } from '../ui/state/audio';
 
 const TAG = '[export-master]';
@@ -71,6 +72,8 @@ export async function runExportMaster(): Promise<void> {
 async function run(): Promise<void> {
   // ── Output: the virtual cable when there is one ─────────────────────────────────────────────────
   await until('the engine device', () => engineDevice() !== null, 90);
+  // host_init has given this document its epoch, without which native MIDI's router takes no note.
+  await until('the plugin host', () => nativeHostReady(), 90);
   check(engineDevice()!.backend === 'Wasapi', `the device is ${engineDevice()!.backend}: this probe runs on WASAPI`);
   check(await refreshOutputDevices(), 'the outputs could not be listed');
   const cable = outputDevices().find((d) => /^CABLE Input\b/i.test(d.name));
@@ -100,9 +103,9 @@ async function run(): Promise<void> {
   void looper.recDub(0);
   await until('lane 1 recording', () => lane(0).state === 'RECORDING' && !lane(0).armed, 10);
   await sleep(400);
-  inputRouter.handle({ type: 'on', note: 57, velocity: 100, source: 'computer' });
+  input.note('key:ExportProbe', 57, 100, true);
   await sleep(250);
-  inputRouter.handle({ type: 'off', note: 57, velocity: 0, source: 'computer' });
+  input.note('key:ExportProbe', 57, 0, false);
   await until('lane 1 PLAYING', () => lane(0).state === 'PLAYING', 10);
   check(lane(0).lengthFrames === bar, `the loop is ${lane(0).lengthFrames} frames, one bar is ${bar}`);
 

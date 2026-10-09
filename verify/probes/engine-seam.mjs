@@ -4,12 +4,12 @@
  * probe then drives the real UI and scripts the feed through `__lf.native`:
  *
  * - boot: the saved device opens once (WASAPI in the browser, the saved buffer); the first reset frame
- *   gets what the UI persists and owns (master and click level, the note target), not defaults the
+ *   gets what the UI persists and owns (master and click level; the note target, through `input`), not defaults the
  *   engine has; no AudioContext is ever built (the app has no Web Audio path);
  * - gesture → command: BPM +, CLICK (the engine's toggle, shown from the `Toggled` the fake answers), the
  *   lane core (its pointerdown selects), Space (the engine's
  *   hands-free `Action`), a lane volume, no MIC (a slot set to Off goes live instead: `slot-sources.mjs`),
- *   a PC key (NoteOn, NoteOff), the
+ *   a PC key (its note to native MIDI's router, `__lf.native.inputSent`, by its owner `key:<code>`), the
  *   FIXED stepper over a committed loop (a bar at a time up to the loop, whole loops past it: F14), IN FX
  *   (the input sends: ECHO on, its level and division, kept in localStorage; the pill reads engaged);
  * - frame → DOM: a count-in (ARMED, the numeral, the beat LED, the BPM lock), a beat LED shown when the
@@ -77,7 +77,9 @@ await probe(async ({ open }) => {
   const emit = (frame) =>
     page.evaluate((f) => window.__lf.native.emit(f), { seq: ++seq, reset: false, events: [], ...frame });
   const sent = () => page.evaluate(() => window.__lf.native.sent.slice());
-  const clearSent = () => page.evaluate(() => void (window.__lf.native.sent.length = 0));
+  const clearSent = () => page.evaluate(() => void (window.__lf.native.sent.length = window.__lf.native.inputSent.length = 0));
+  /** What the UI sent native MIDI's router (`input`): notes, note targets. */
+  const inputSent = () => page.evaluate(() => window.__lf.native.inputSent.slice());
   /** Wait until the sent log holds `count` commands, then return them. */
   const sentAtLeast = async (count) => {
     await page.waitForFunction((n) => window.__lf.native.sent.length >= n, count, { timeout: 5000 });
@@ -106,9 +108,14 @@ await probe(async ({ open }) => {
   });
   const boot = await sentAtLeast(1);
   console.log('first reset sent', JSON.stringify(boot));
-  for (const expected of [{ SetMasterVolume: 1 }, { SetClickVolume: 0.7 }, { SelectInstrument: { Builtin: 'lead' } }]) {
+  for (const expected of [{ SetMasterVolume: 1 }, { SetClickVolume: 0.7 }]) {
     assert.ok(boot.some((c) => JSON.stringify(c) === JSON.stringify(expected)), `the first reset sends ${JSON.stringify(expected)}`);
   }
+  const bootInput = await inputSent();
+  assert.ok(
+    bootInput.some((e) => JSON.stringify(e) === JSON.stringify({ selectTarget: { slot: 0, target: { Builtin: 'lead' } } })),
+    `the first reset routes the notes to slot A's Lead: ${JSON.stringify(bootInput)}`,
+  );
   assert.ok(!boot.some((c) => c.SetVolume || c.SetMetronome !== undefined), 'defaults the engine already has are not pushed');
 
   // ── Gestures → commands ───────────────────────────────────────────────────────────────────────
@@ -216,14 +223,16 @@ await probe(async ({ open }) => {
   await blur();
   await clearSent();
   await page.keyboard.down('a');
-  const down = await sentAtLeast(1);
   await page.keyboard.up('a');
-  const played = await sentAtLeast(down.length + 1);
+  await page.waitForFunction(() => window.__lf.native.inputSent.some((e) => e.note && !e.note.on), undefined, { timeout: 5000 });
+  const played = (await inputSent()).filter((e) => e.note).map((e) => e.note);
   console.log('play path', JSON.stringify(played));
-  const on = played.find((c) => c.NoteOn);
-  assert.ok(on, 'a PC key sends NoteOn');
-  assert.ok(on.NoteOn[1] > 0 && on.NoteOn[1] <= 1, 'velocity is 0..1');
-  assert.deepEqual(played.at(-1), { NoteOff: on.NoteOn[0] }, 'its release sends NoteOff');
+  const on = played.find((n) => n.on);
+  assert.ok(on, 'a PC key sends its note to the router');
+  assert.equal(on.owner, 'key:KeyA', 'owned by its physical key');
+  assert.ok(Number.isInteger(on.velocity) && on.velocity > 0 && on.velocity <= 127, 'velocity is MIDI 1..127');
+  assert.deepEqual(played.at(-1), { owner: 'key:KeyA', note: on.note, velocity: 0, on: false }, 'its release lets go of it');
+  assert.ok(!(await sent()).some((c) => c.NoteOn || c.NoteOff !== undefined), 'no note goes past the router (engine_send)');
 
   // ── IN FX: the input sends, a rig setting the UI keeps ────────────────────────────────────────────
   const infx = page.getByRole('button', { name: 'Input effects' });

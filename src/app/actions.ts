@@ -25,7 +25,9 @@ import {
 
 /**
  * OWNS: the named actions a hands-free press can reach, in one table. The transport keys
- * (`transport-keys.ts`) and MIDI learn (`midi-actions.ts`) dispatch through it. Each row runs the path
+ * (`transport-keys.ts`) dispatch through it; learned MIDI runs natively from a port of this table
+ * (`src-tauri/src/engine_io/midi/actions.rs`), and the rows the UI owns reach it back through
+ * `midi-actions.ts` (`runNativeAction`, `nativePressed`). Each row runs the path
  * its on-screen control runs: the lane core, ▶/■, ↶ UNDO, CLR, MUTE, ↺ REV, ⧉ COPY and ✂ TRIM (halve:
  * the first half); the command bar's ▶/■ ALL, FADE, TAP, CLICK, END STOP, FIXED, RETAKE, AUTO REC and IN
  * FX's three sends; the slot's GO LIVE, the stage view's cap and its view switch.
@@ -136,11 +138,6 @@ const LANE: Readonly<Record<LaneActionId, LaneRow>> = {
 
 export function isLaneAction(id: ActionId): id is LaneActionId {
   return Object.hasOwn(LANE, id);
-}
-
-/** Is `v` a named track a lane action can aim at? */
-export function isTrack(v: unknown): v is number {
-  return Number.isInteger(v) && (v as number) >= 0 && (v as number) < looper.trackCount;
 }
 
 /** Step the selected track by `d`, wrapping at both ends. */
@@ -255,24 +252,16 @@ export function runAction(id: ActionId, target: Target = null): void {
   GLOBAL[id]();
 }
 
-/** HOLD's press (`midi-actions.ts`): REC/DUB on `target`, as the engine's `Hold` by `control`, the
- * pedal's number while it is down: the engine remembers the lane an accepted press acted on for that
- * control's release, and nothing for a refused one. A named track is selected, as REC/DUB selects it. */
-export function pressHold(target: Target, control: number): void {
-  onPress('recDub');
-  if (target === null) {
-    sendEngine({ Action: { Hold: control } });
-    return;
-  }
-  looper.selectTrack(target);
-  sendEngine({ ActionOn: [target, { Hold: control }] });
+/** A learned MIDI binding fired a looper press natively (native MIDI sent its `Press` or action): the
+ * press's bookkeeping here, as a click's (`onPress`). Native MIDI judges CLEAR's confirmation itself. */
+export function nativePressed(): void {
+  onPress();
 }
 
-/** HOLD's release: end the capture its press started, while that lane still captures. A take that closed
- * itself meanwhile (FIXED) stays closed instead of starting an overdub. The engine judges it on its own
- * state, on the lane its `Hold` by `control` acted on (none after a refused press). */
-export function releaseHold(control: number): void {
-  sendEngine({ Action: { Release: control } });
+/** A learned MIDI binding fired an action the UI owns (GO LIVE, TAP, the stage view and its next look):
+ * its row, with no second `Press` (native MIDI sent it, and `nativePressed` ran first). */
+export function runNativeAction(id: 'goLive' | 'tapTempo' | 'stageView' | 'stageNextView'): void {
+  GLOBAL[id]();
 }
 
 /** Select track `i` outright (the digit keys). Not a table row, since it names its track, but a looper
