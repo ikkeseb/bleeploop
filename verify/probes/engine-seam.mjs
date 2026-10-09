@@ -6,7 +6,8 @@
  * - boot: the saved device opens once (WASAPI in the browser, the saved buffer); the first reset frame
  *   gets what the UI persists and owns (master and click level, the note target), not defaults the
  *   engine has; no AudioContext is ever built (the app has no Web Audio path);
- * - gesture → command: BPM +, CLICK, the lane core (its pointerdown selects), Space (the engine's
+ * - gesture → command: BPM +, CLICK (the engine's toggle, shown from the `Toggled` the fake answers), the
+ *   lane core (its pointerdown selects), Space (the engine's
  *   hands-free `Action`), a lane volume, no MIC (a slot set to Off goes live instead: `slot-sources.mjs`),
  *   a PC key (NoteOn, NoteOff), the
  *   FIXED stepper over a committed loop (a bar at a time up to the loop, whole loops past it: F14), IN FX
@@ -27,7 +28,8 @@
  *   from what the UI kept).
  *
  * Cannot see the native engine, the Rust mirror of the wire, Tauri IPC or any timing: the fake answers
- * no command by itself but a lane's mix (its `Mix`), so every other state the DOM shows here was scripted.
+ * no command by itself but a lane's mix (its `Mix`) and a toggle (its `Toggled`), so every other state the
+ * DOM shows here was scripted.
  * Run: pnpm probe engine-seam
  */
 import assert from 'node:assert/strict';
@@ -120,7 +122,8 @@ await probe(async ({ open }) => {
 
   await clearSent();
   await page.getByRole('button', { name: 'Metronome click' }).click();
-  assert.deepEqual(await sentAtLeast(1), [{ SetMetronome: true }], 'CLICK sends SetMetronome');
+  assert.deepEqual(await sentAtLeast(1), [{ Action: { Toggle: 'Click' } }], "CLICK sends the engine's toggle");
+  assert.equal(await page.getByRole('button', { name: 'Metronome click' }).getAttribute('aria-pressed'), 'true', "CLICK shows the engine's Toggled");
 
   await clearSent();
   await lanes.nth(0).locator('.lp-core').click();
@@ -231,7 +234,7 @@ await probe(async ({ open }) => {
   await dialog.waitFor();
   await clearSent();
   await page.getByRole('button', { name: 'Input echo' }).click();
-  assert.deepEqual(await sentAtLeast(1), [{ SetInputSend: ['echo', true] }], 'ECHO sends SetInputSend');
+  assert.deepEqual(await sentAtLeast(1), [{ Action: { Toggle: { Send: 'echo' } } }], "ECHO sends the engine's toggle");
   assert.equal(await engaged(), true, 'IN FX reads engaged while a send is on');
   await clearSent();
   await page.getByRole('slider', { name: 'Echo level' }).fill('0.8');
@@ -245,7 +248,8 @@ await probe(async ({ open }) => {
   const ringToggle = page.getByRole('button', { name: 'Input ring mod' });
   await clearSent();
   await ringToggle.click();
-  assert.deepEqual(await sentAtLeast(1), [{ SetInputSend: ['ring', true] }], 'RING MOD sends SetInputSend');
+  assert.deepEqual(await sentAtLeast(1), [{ Action: { Toggle: { Send: 'ring' } } }], "RING MOD sends the engine's toggle");
+  assert.equal(await ringToggle.getAttribute('aria-pressed'), 'true', "RING MOD shows the engine's Toggled");
   await clearSent();
   const ringFreq = page.getByRole('slider', { name: 'Ring mod freq' });
   await ringFreq.fill('900');
@@ -256,7 +260,8 @@ await probe(async ({ open }) => {
   assert.deepEqual(keptRing, ['1', '900'], 'the ring is kept for the next launch');
   await clearSent();
   await ringToggle.click();
-  assert.deepEqual(await sentAtLeast(1), [{ SetInputSend: ['ring', false] }], 'RING MOD switches off');
+  assert.deepEqual(await sentAtLeast(1), [{ Action: { Toggle: { Send: 'ring' } } }], 'RING MOD switches off');
+  assert.equal(await ringToggle.getAttribute('aria-pressed'), 'false', "and shows the engine's off");
   await page.keyboard.press('Escape');
   await dialog.waitFor({ state: 'detached' });
   assert.equal(await page.evaluate(() => document.activeElement?.getAttribute('aria-label')), 'Input effects', 'Escape returns focus to IN FX');
@@ -303,7 +308,8 @@ await probe(async ({ open }) => {
   await clearSent();
   const fixedToggle = page.getByRole('button', { name: 'Fixed take length', exact: true });
   await fixedToggle.click();
-  assert.deepEqual(await sentAtLeast(1), [{ SetFixedLength: true }]);
+  assert.deepEqual(await sentAtLeast(1), [{ Action: { Toggle: 'Fixed' } }]);
+  assert.equal(await fixedToggle.getAttribute('aria-pressed'), 'true', "FIXED shows the engine's Toggled");
   assert.equal((await fixedToggle.textContent()).trim(), 'FIXED 4', 'FIXED 4 over a 2-bar loop: two loops');
   assert.match(await fixedToggle.getAttribute('title'), /Longer: the loop grows to it in whole loops/);
   const more = page.getByRole('button', { name: 'More bars', exact: true });
@@ -320,13 +326,13 @@ await probe(async ({ open }) => {
   await emit({ events: [laneEvent(0, committed), transport(BAR, true, 120)] });
   assert.equal((await fixedToggle.textContent()).trim(), 'FIXED 6', 'over a 1-bar loop every bar is a whole loop');
   await fixedToggle.click();
-  assert.deepEqual(await sentAtLeast(2), [{ SetFixedBars: 6 }, { SetFixedLength: false }]);
+  assert.deepEqual(await sentAtLeast(2), [{ SetFixedBars: 6 }, { Action: { Toggle: 'Fixed' } }]);
 
   // A multiply take's record head sweeps its window, not the old loop: FIXED 6 over the 1-bar loop,
   // three bars into the take, the head (the rec-red column on the canvas's top row) is halfway across.
   await clearSent();
   await fixedToggle.click();
-  assert.deepEqual(await sentAtLeast(1), [{ SetFixedLength: true }]);
+  assert.deepEqual(await sentAtLeast(1), [{ Action: { Toggle: 'Fixed' } }]);
   await emit({ events: [laneEvent(1, lane('Recording'), 0)], anchor: anchorAt(3 * BAR) });
   const recHeadAt = () =>
     lanes.nth(1).locator('canvas').evaluate((c) => {
@@ -348,7 +354,8 @@ await probe(async ({ open }) => {
   await emit({ events: [laneEvent(1, lane('Empty'))] });
   await clearSent();
   await fixedToggle.click();
-  assert.deepEqual(await sentAtLeast(1), [{ SetFixedLength: false }]);
+  assert.deepEqual(await sentAtLeast(1), [{ Action: { Toggle: 'Fixed' } }]);
+  assert.equal(await fixedToggle.getAttribute('aria-pressed'), 'false', "FIXED shows the engine's off");
 
   // ── A later take's wait: counted in or not is the engine's to say (its beats' `countLeft`) ─────────
   const count = (i) => lanes.nth(i).locator('.lp-lane__count');

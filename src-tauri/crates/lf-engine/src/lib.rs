@@ -102,9 +102,9 @@
 //! - **`process` never allocates, locks or waits.** Buffers are allocated (and their pages touched) in
 //!   `Engine::new`; commands and events cross on rtrb rings; a full event ring refuses and counts. A
 //!   one-off event is lost there; each lane's state and mix ([`Event::Mix`], on change only), the
-//!   transport and each toggled setting's value ([`Event::Toggled`]) are marked delivered only once the
-//!   ring takes them, so the next publish offers them again ([`Engine::unsent_toggles`] reads what is
-//!   still owed).
+//!   transport are marked delivered only once the ring takes them, so the next publish offers them
+//!   again; a toggled setting's answer ([`Event::Toggled`], one per applied command of it) is owed until
+//!   the ring takes one at its current value ([`Engine::unsent_toggles`] reads what is still owed).
 //!   An engine sends no lane's mix until the commands queued ahead of its first block (a new engine's
 //!   settings replay, which can outrun one block's take) are all taken: an idle session job before
 //!   then reports the lanes' infos only.

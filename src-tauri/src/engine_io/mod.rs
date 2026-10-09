@@ -629,14 +629,15 @@ pub trait RebuildHook: Send + Sync {
     fn resume(&self);
 }
 
-/// Pop the event ring of the engine of generation `gen` into `each`. A lane's `Mix` and a `Toggled` are
-/// also the settings memory's projection of them: drained under `settings`, then `ends` (the order every
+/// Pop the event ring of the engine of generation `gen` into `each`. A lane's `Mix`, a `Toggled` and a
+/// toggle's `Refused` are also the settings memory's projection of them: drained under `settings`, then `ends` (the order every
 /// taker keeps), so no rebuild's replay lands between the pop and the projection.
 pub(crate) fn drain(settings: &mut settings::Settings, events: &mut Consumer<Event>, gen: u64, mut each: impl FnMut(Event)) {
     while let Ok(event) = events.pop() {
         match event {
             Event::Mix { frame, lane, mix } => _ = settings.mixed(gen, frame, lane, &mix),
             Event::Toggled { toggle, on, .. } => _ = settings.toggled(gen, toggle, on),
+            Event::Refused { reason, .. } => settings.refused(gen, reason),
             _ => {}
         }
         each(event);
@@ -923,6 +924,7 @@ impl EngineHost {
                         "the engine's command ring is full".to_string()
                     })?;
                     settings.record(&command.command);
+                    settings.pushed(&command.command);
                 }
                 None => refused |= !settings.record(&command.command) && !matches!(command.command, Command::NoteOff(_) | Command::AllNotesOff | Command::Press),
             }
