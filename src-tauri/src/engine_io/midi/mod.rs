@@ -1,8 +1,9 @@
-//! OWNS: native MIDI for the engine, built and tested but never started by the app (MIDI arrives
-//! through the WebView's Web MIDI, and WinMM input ports are exclusive): the glue that joins the input
-//! ports, MIDI learn and its stored bindings, the one note router for every note source and the one
-//! ordered queue into the engine ([`Core`]), what the host offers the UI ([`MidiHost`]) and what it
-//! tells it ([`MidiEvent`]). This doc is the module's briefing; the decisions it carries out are
+//! OWNS: native MIDI for the engine, the app's only MIDI path (the WebView's Web MIDI is denied: WinMM
+//! input ports may be exclusive, so one path owns them), started and dropped by engine mode
+//! (`super::mode`) and driven by the UI through `super::midi_mode`'s commands: the glue that joins
+//! the input ports, MIDI learn and its stored bindings, the one note router for every note source and
+//! the one ordered queue into the engine ([`Core`]), what the host offers the UI ([`MidiHost`]) and
+//! what it tells it ([`MidiEvent`]). This doc is the module's briefing; the decisions it carries out are
 //! `docs/plans/native-midi.md`'s (§ Decided).
 //!
 //! # Module map
@@ -86,6 +87,9 @@ pub use learn::LearnRefusal;
 pub use queue::QueueCounters;
 pub use router::Held;
 pub use store::{ImportReport, Listed};
+/// For the wire fixture's test (`super::wire`), which builds a listed binding and an import report.
+#[cfg(test)]
+pub(crate) use store::{Blocked, Origin};
 
 use super::{EngineHost, RebuildHook};
 use actions::UiRoute;
@@ -1016,6 +1020,15 @@ impl MidiHost {
             refused: st.refused,
             queue: st.queue.counters(),
         }
+    }
+}
+
+#[cfg(test)]
+impl MidiHost {
+    /// A host on `engine` with no port thread (no port opens) and nothing stored: the command layer's
+    /// tests (`super::midi_mode`).
+    pub(crate) fn detached(engine: Arc<dyn EngineSide>) -> MidiHost {
+        MidiHost { core: hosted(engine, store::empty(), None, None, None), wake: None, port_thread: None }
     }
 }
 

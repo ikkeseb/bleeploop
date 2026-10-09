@@ -41,9 +41,9 @@ pub async fn app_update_check(app: tauri::AppHandle) -> Result<Option<UpdateInfo
 }
 
 /// Download the offered update and check its signature, then shut the engine down as an exit does
-/// (tones saved, plugins unloaded, the device closed) and start the installer, which quits the app
-/// and opens the new version (Windows: the plugin exits the process once the installer runs). Returns
-/// only on failure.
+/// (native MIDI's ports closed, tones saved, plugins unloaded, the device closed) and start the
+/// installer, which quits the app and opens the new version (Windows: the plugin exits the process
+/// once the installer runs). Returns only on failure.
 #[tauri::command]
 pub async fn app_update_install(app: tauri::AppHandle) -> Result<(), String> {
     // The plugin's own hook runs `cleanup_before_exit`; this one replaces it and shuts the engine down
