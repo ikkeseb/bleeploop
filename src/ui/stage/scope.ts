@@ -115,6 +115,14 @@ function createScope(): ViewDraw {
   // One frame's new columns, folded onto device-pixel columns: the x, and per source the lowest low
   // and the highest high that landed there. A frame holds a handful; a stall is capped at the ring.
   const gx = new Int32Array(1024);
+  // Each folded column's own width, so the strips TILE the trace instead of overlapping. `cw` is the
+  // nominal width rounded up while an x is rounded down, so two neighbours overlap by a pixel whenever
+  // the sweep does not divide the trace evenly (any master loop under about 7 s at 1080p). An
+  // overlapped pixel took its dim and its light twice a pass, which lifts its converged brightness
+  // above `added alpha / fade` and lets the hero bay climb toward the warm white that means SELECTED
+  // here. Brightness would then measure column geometry as well as repetition, which is the one thing
+  // this look claims to show.
+  const gw = new Int32Array(1024);
   const glo = new Float32Array(1024 * SOURCES);
   const ghi = new Float32Array(1024 * SOURCES);
   // Device px, whole numbers, laid out once (`layout`).
@@ -339,7 +347,7 @@ function createScope(): ViewDraw {
       if (yb <= ya) yb = ya + 1; // a column that holds sound draws at least a hairline
       if (ya < y) ya = y;
       if (yb > lim) yb = lim;
-      if (yb > ya) t.fillRect(gx[g], ya, cw, yb - ya);
+      if (yb > ya) t.fillRect(gx[g], ya, gw[g], yb - ya);
     }
   }
 
@@ -374,10 +382,10 @@ function createScope(): ViewDraw {
       }
       if (a0 < y) a0 = y;
       if (a1 > lim) a1 = lim;
-      if (a1 > a0) t.fillRect(gx[g], a0, cw, a1 - a0);
+      if (a1 > a0) t.fillRect(gx[g], a0, gw[g], a1 - a0);
       if (b0 < y) b0 = y;
       if (b1 > lim) b1 = lim;
-      if (b1 > b0) t.fillRect(gx[g], b0, cw, b1 - b0);
+      if (b1 > b0) t.fillRect(gx[g], b0, gw[g], b1 - b0);
     }
   }
 
@@ -440,10 +448,13 @@ function createScope(): ViewDraw {
     mem[DRAWN] = view.frame;
     if (n <= 0) return;
     beam[ALIVE] = 1; // the stream is alive, whatever this frame's columns fold into
-    if (n > view.count) n = view.count;
-    const perSweep = Math.ceil(span / bin); // after a stall, one sweep is all the x there are
-    if (n > perSweep) n = perSweep;
-    if (n > gx.length) n = gx.length;
+    const most = Math.min(view.count, Math.ceil(span / bin), gx.length); // after a stall, one sweep is all the x there are
+    if (n > most) {
+      // Columns are being discarded, so the pending one is no longer the neighbour of the first kept
+      // one: folding them together would mix audio from both sides of a gap nothing marked.
+      n = most;
+      pendX = -1;
+    }
 
     // Fold the new columns, oldest first: the columns that land on one device-pixel column become the
     // lowest low and the highest high there, so a long loop stays as cheap as a short one. A column
@@ -473,6 +484,9 @@ function createScope(): ViewDraw {
           ghi[o + s] = pendHi[s];
         }
         gx[ng] = pendX;
+        let w = (x - pendX + tw) % tw; // forward to the next column's own x: disjoint by construction
+        if (w > cw) w = cw; // columns were dropped (a stall): leave the gap rather than paint a slab
+        gw[ng] = w;
         ng++;
       }
       pendX = x;
@@ -494,7 +508,7 @@ function createScope(): ViewDraw {
       t.globalAlpha = quiet || !live ? 1 : A[(FADE * 255) | 0];
       const y = bayY[b];
       const h = bayH[b];
-      for (let g = 0; g < ng; g++) t.fillRect(gx[g], y, cw, h);
+      for (let g = 0; g < ng; g++) t.fillRect(gx[g], y, gw[g], h);
     }
 
     // The light: what accumulates first (the master's body, the monitor's glow beside it inside the

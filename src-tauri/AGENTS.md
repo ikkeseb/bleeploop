@@ -336,6 +336,16 @@ plugin-GUI work.
   each: the log, the block size the callbacks get (the status reads it only at the open), and whether
   the take lands on the click. Under WASAPI the buffer select lists every
   size and the run ignores it (`cpal_driver::resolve_wasapi`).
+- The feed builds a whole frame for a subscriber that is gone. `turn` evaluates `feed.tick(...)` before
+  it knows whether anyone is listening, so with no subscriber it still folds the scope (seven sources,
+  two allocations a tick) and then throws the frame away, and the device events in it are lost where
+  `tick_held` would have kept them. `scope()`'s own docstring says `send` is false when nobody
+  subscribed; the code never passes that. A page that dies for good (a WebView crash, a shutdown) also
+  leaves `Key::Scope` true, so the engine keeps folding. The fix is a guard in `turn`:
+  `if subscriber.is_none() { feed.tick_held(); return; }`, three lines, which drains, keeps the mirror
+  and the events and makes the docstring true. Read from source 2026-10-09, not reproduced, nothing
+  audible. Not landed because a change under `engine_io/` makes the next release owe a real cabled
+  input take (`scripts/release-input-rule.mjs`), which is the owner's to do.
 - A saved ASIO pick whose driver is no longer installed falls back without telling anyone:
   `resolve_asio_cache` (`src/audio_output.rs:219`) logs a warning and takes the automatic choice, which
   is the ASIO host's default output device, else its default input, else the first driver enumerated.

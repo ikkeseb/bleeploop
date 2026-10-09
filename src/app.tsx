@@ -90,7 +90,18 @@ export function App() {
     const want = stageOpen() && currentStageView().wantsScope === true;
     if (engineResets() === 0 || want === scopeAsked) return;
     scopeAsked = want;
-    looper.setScope(want);
+    void looper.setScope(want).then((took) => {
+      // A batch the host never took must not be remembered as asked, or the taps stay as they were
+      // with nothing ever asking again: the look would draw an empty trace, or the engine would fold
+      // for a closed view. Forgetting it lets the next reset frame or look switch ask once more. A
+      // false here is often a false negative (another item in the same batch earned it), which costs
+      // nothing: the engine's own `Scope::set_on` returns early on a value that did not change. The
+      // retry is NOT gated: every way to make a send answer false (`failSends`, `dropped` on the
+      // engine fake) also writes a `console.error`, and the probe that would host the case,
+      // `verify/probes/engine-seam.mjs`, asserts there are none. A gate here wants a seam that loses
+      // a batch quietly.
+      if (!took && scopeAsked === want) scopeAsked = null;
+    });
   });
 
   onMount(() => {

@@ -1244,23 +1244,33 @@ await probe(async ({ browser, open }) => {
       // (2026-10-09). So run bursts until the hand-run frame stops getting faster, which is what
       // "optimised" looks like from here, and cap the wait. A look that never settles fails the bar
       // below, as it should.
-      await page.evaluate(() => {
+      const warm = await page.evaluate(() => {
         const s = window.__raf;
         s.manual = true;
         const until = performance.now() + 20000;
+        // One burst is bounded in BOTH frames and wall time, so a slow look cannot run past the
+        // deadline inside a burst the loop only checks between them.
         const burst = () => {
           const t0 = performance.now();
-          for (let k = 0; k < 4000; k++) s.stage(performance.now());
-          return (performance.now() - t0) / 4000;
+          let k = 0;
+          for (; k < 4000 && performance.now() - t0 < 2000; k++) s.stage(performance.now());
+          return (performance.now() - t0) / Math.max(1, k);
         };
+        // TWO consecutive bursts without a real improvement, not one: a single flat burst is as likely
+        // to be timing noise before the tier changes as it is to be the tier having changed.
         let best = Infinity;
-        for (let pass = 0; pass < 12; pass++) {
+        let flat = 0;
+        let passes = 0;
+        while (passes < 16 && performance.now() < until) {
           const ms = burst();
-          const better = ms < best * 0.85;
-          best = Math.min(best, ms);
-          if (pass >= 1 && (!better || performance.now() > until)) break;
+          passes++;
+          if (ms < best * 0.85) flat = 0;
+          else flat++;
+          if (ms < best) best = ms;
+          if (flat >= 2) break;
         }
         s.manual = false;
+        return { passes, bestMs: +best.toFixed(4), settled: flat >= 2 };
       });
       await settle(400);
       const cdp = await page.context().newCDPSession(page);
@@ -1295,10 +1305,14 @@ await probe(async ({ browser, open }) => {
       };
       walk(profile.head, false);
       const mean = stats.stage.ms / stats.stage.n;
-      console.log(JSON.stringify({ view: v.id, frames: stats.stage.n, meanMs: +mean.toFixed(3), maxMs: +stats.stage.max.toFixed(2), canvas: stats.canvas,
+      console.log(JSON.stringify({ view: v.id, warm, frames: stats.stage.n, meanMs: +mean.toFixed(3), maxMs: +stats.stage.max.toFixed(2), canvas: stats.canvas,
         frameIntervalMs: +((stats.stage.last - stats.stage.first) / (stats.stage.n - 1)).toFixed(2),
         bytesPerFrame: +(bytes / stats.stage.n).toFixed(1), allocatedBy: by,
         hiddenLooperLanes: { meanMs: +(stats.lanes.ms / Math.max(1, stats.lanes.n)).toFixed(3), clientWidth: stats.hiddenLaneWidth } }));
+      // Without this the warm-up can run out of bursts or clock having never settled, and the heap bar
+      // below would then be read off a frame still climbing down the tiers, which is the exact failure
+      // the fixed warm-up had: it went red on code with no allocation site in it.
+      assert.ok(warm.settled, `${v.id}: the frame's cost settled before the heap window was sampled (${warm.passes} warm-up bursts, best ${warm.bestMs} ms)`);
       assert.ok(stats.stage.n >= 240, `${v.id}: the stage frame ran 240 times within 20 s (${stats.stage.n})`);
       assert.ok(mean < 6, `${v.id}: mean frame script time under 6 ms (${mean.toFixed(3)} ms)`);
       assert.ok(bytes / stats.stage.n < 32, `${v.id}: the frame allocates no object in the steady state (${(bytes / stats.stage.n).toFixed(1)} bytes a frame, the floor is one boxed number: ${JSON.stringify(by)})`);

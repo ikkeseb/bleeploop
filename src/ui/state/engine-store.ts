@@ -1219,7 +1219,7 @@ export const engineLooper = {
    * owns turning them off (`stage/StageView.tsx`). A remembered host setting, so a rebuilt engine
    * gets it back, while `adoptSettings` ignores it: the view sends the state it wants on mount
    * instead of trusting the engine's. */
-  setScope: (on: boolean): void => void sendEngine({ SetScope: on }),
+  setScope: (on: boolean): Promise<boolean> => sendEngine({ SetScope: on }),
   phaseValue,
   levelValue: (): number => (plain.clip ? Math.max(1, plain.level) : plain.level),
   stateOf: (i: number): TrackState => plain.state[i] ?? 'EMPTY',
