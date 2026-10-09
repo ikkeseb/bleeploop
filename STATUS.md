@@ -61,11 +61,13 @@ list from § Not heard yet: at most five, and the docs guard counts them.
    take records from there. Does it feel like the first take's count-in, and do the old loops and the
    new take sit together? A press that cancels the count leaves the loops stopped and silent (machine:
    `tests/later_arm.rs`; no rig probe arms it, so this is its first run on a real device).
-4. **The stage view over the jam, before its new look lands.** B opens it, V switches Orbit and Strata
-   (seen only on the engine fake). Only two things are still worth the jam, since both looks are already
-   settled as needing the redesign (`docs/backlog-taste.md`): does the app stay tight with it open on
-   ASIO 128, and does the learned pedal action "Stage view: next look" feel right? Also: does the
-   count-in read from where you stand?
+4. **The stage view's new look, SCOPE, over the jam.** B opens it and SCOPE is what it opens on (V
+   still reaches Orbit and Strata). Each bay is a live scope: the top one is what the speaker plays
+   with the guitar as a cyan line over it, then one per lane after its FX. Does it say what is locked
+   and what is alive, from where you stand, and is it worth leaving open while you play? Then what
+   only a device answers: with the columns flowing (they flow only while this look shows), does the
+   app stay tight on ASIO 128, does the guitar still feel immediate, and does the pedal action
+   "Stage view: next look" still feel right? Also: does the count-in read from where you stand?
 5. **End with FADE, then reopen.** FADE (2 bars) while three lanes play: the level falls smoothly to
    the bar line and the lanes stop there. Close and reopen the app: the loops and the plugin come back
    (not live), the amp-sim's knobs where you left them, and one GO LIVE re-arms.
@@ -127,13 +129,15 @@ it.
   call of 20 minutes or more hears no dropout in it, also with the interface's own Windows output as the Share device (machine: a
   26-minute `native:engine --share` soak; the mirror's buffer went from 20 to 40 ms after it ran
   short in bursts about every 10.5 minutes there).
-- The live scope taps (`lf_engine::scope`): per lane after its FX, the live monitor, and the engine's
-  output, a min/max envelope in 4 ms columns over the feed, off until the UI asks. Proven offline
-  (`src-tauri/crates/lf-engine/tests/scope.rs`, `verify/probes/scope-mirror.mjs`) and costed at under a
-  few tenths of a percent of
-  a 64-frame block, but NOTHING sends the command and no look draws it, so there is nothing to hear or
-  see yet. Its real check arrives with the look (`docs/stage-scope-look.md`): whether the app stays
-  tight on ASIO 128 with the columns flowing, and whether the picture is worth leaving open.
+- The live scope taps (`lf_engine::scope`) and SCOPE, the look that draws them: per lane after its FX,
+  the live monitor, and the engine's output, a min/max envelope in 4 ms columns over the feed, off
+  until a look asks. Proven offline (`src-tauri/crates/lf-engine/tests/scope.rs`,
+  `verify/probes/scope-mirror.mjs`), costed at under a few tenths of a percent of a 64-frame block, and
+  the look is machine verified on real batches now: the stage-view probe's `scope` group measures that
+  a repeated pass accumulates and a one-off decays, at both column densities and across batch
+  boundaries, within a few percent of what the look's own constants predict. No eye has seen it draw a
+  live pixel on a device, and the frame cost WITH columns flowing is still unmeasured (the budget case
+  runs the look with none). That check is next jam's 4.
 - The six synths and the lane FX by ear.
 - Native MIDI, a controller and a footswitch through a jam: mod-wheel vibrato, pitch-bend and CC64
   sustain on a built-in synth; unplugged mid-note, a toast and the note released; 20 quick replugs

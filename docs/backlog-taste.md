@@ -16,15 +16,16 @@ added a line.
   deciding on wording or behaviour.
 - **Is the amp-sim live, from 1.5 m?** Only the slot's pill says so; the 4×22 px record meter is the
   only clipping cue.
-- **Stage view (B): the redesign's direction is chosen, the look is not built.** The owner found both
-  looks (Orbit, Strata) primitive; the diagnosis was that each drew the same recorded overview plus a
-  playhead, so nothing on screen knew what was sounding. The live scope taps are built and off by
-  default; the look that draws them is specified in `docs/stage-scope-look.md`. What the owner judges
-  once it is built, on real sound with a guitar in: is it «helt rått å se på», does a locked loop read
-  as locked against anything live, and does the hero bay read as the output? Mockups on the old data
-  were tried and rejected, so a new visual proposal waits for the look on real columns. The earlier
-  per-look questions are superseded (git history holds them). A hitch the owner saw was under the MIDI
-  benchmark's deliberate 250 ms UI stalls, not seen in an ordinary run yet.
+- **Stage view (B): the new look is built, unheard.** The owner found both older looks (Orbit,
+  Strata) primitive; the diagnosis was that each drew the same recorded overview plus a playhead, so
+  nothing on screen knew what was sounding. SCOPE draws the engine's live columns instead, additively,
+  so a pass that lands on the pass before it accumulates light: a locked loop glows, a one-off peaks
+  and dies. It is the default look. What the owner judges, on real sound with a guitar in: is it «helt
+  rått å se på», does a locked loop read as locked against anything live, and does the hero bay read as
+  the output? Mockups on the old data were tried and rejected, so a new visual proposal waits for his
+  eye on this one. The earlier per-look questions are superseded (git history holds them). A hitch the
+  owner saw was under the MIDI benchmark's deliberate 250 ms UI stalls, not seen in an ordinary run
+  yet.
 - **IN FX defaults (unheard, an agent's pick):** echo 1/8, feedback 0.4, level 0.5; reverb 0.5. The
   echo's level is scaled so its repeats carry the input's energy (at feedback 0.95 the first echo is
   about ⅓ of the level): does high feedback still feel right? The reverb is summed to mono.
@@ -75,6 +76,6 @@ added a line.
 - Stage looks beyond Orbit and Strata: Horizon (designed, not built: five lanes of road in perspective
   rolling toward a near edge where now is, the input glowing in the sky; a look is one module and one
   line in `src/ui/stage/views.ts`). Orbit and Strata read each lane's waveform bins, its volume and the
-  input meter, so they see neither lane FX nor a fade's level; the per-lane live output is now in the
-  feed (`lf_engine::scope`) and could make them honest, and band levels, which a spectrum look would
-  want, are not built.
+  input meter, so they see neither lane FX nor a fade's level; SCOPE is the look that reads the live
+  columns (`lf_engine::scope`), and the same tap would make the two older looks honest. Band levels,
+  which a spectrum look would want, are not built.

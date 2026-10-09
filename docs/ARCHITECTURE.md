@@ -11,8 +11,8 @@ Every sample is the engine's: the click, the looper, the synths, the FX, the mix
 the two plugin slots run in ONE device callback, clocked by the audio interface
 (`src-tauri/crates/lf-engine`, pure; its device side `src-tauri/src/engine_io`). The WebView is the
 UI: it sends commands (in its one ordered `input_send` path, § Decided: native MIDI) and reads a feed (~60 frames/s: transport,
-lanes, the grid anchor, the meter, waveform peaks, and the live scope columns while the stage view
-asks for them; never PCM). The wire is
+lanes, the grid anchor, the meter, waveform peaks, and the live scope columns while a look that draws
+them shows; never PCM). The wire is
 `src-tauri/src/engine_io/wire.rs`, mirrored in `src/platform/engine-wire.ts`. Settings and rig
 recall stay in the WebView's storage and are mirrored to native at boot (MIDI-learn bindings are
 native's); the engine host replays every remembered setting into each new engine

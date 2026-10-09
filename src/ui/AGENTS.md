@@ -31,6 +31,17 @@ is a one-line adapter). UI-only edits are safe while the dev app runs,
   count (`waveform.ts` `rasterise`). The stage view's own loop (`stage/stage-loop.ts`) holds the same
   line through a plain feed that Solid effects write, checked by `verify/guards/stage-draw.mjs`.
   Measured cost + the fix pattern: `docs/ARCHITECTURE.md` invariant 6.
+- **A stage look draws two layers** (`src/ui/stage/`): the lane's recorded contour, dim and static,
+  from `stage/visual.ts`'s shared helpers, and over it, where the look has them, the engine's live
+  scope columns. The contour is not decoration: the stage-view probe's `pixels` group asserts per look
+  that a MUTED lane draws its loop in grey, a STOPPED one brighter than muted and a take in flight in
+  rec-red, and a live-only look has nothing to draw in those states. The columns cost engine work and
+  are off until a look asks: the look carries `wantsScope` and `src/app.tsx` owns the ask, since
+  `StageView.tsx` and the look mount only while the view is open and a page reloaded with it open
+  would leave the taps folding for nobody. Additive light settles at `alpha / fade` per pass, which is
+  also its ceiling, so keep the sum of every additive pass on one pixel below warm white, which means
+  SELECTED here, and make the per-column strips TILE the trace: a strip that overlaps its neighbour
+  takes its dim and its light twice and breaks that arithmetic.
 - **The engine's names:** components take `looper`, `clock`, `master`, `session` and `sampleRate`
   from `state/audio.ts` (the engine store behind them: `state/engine-store.ts`). A gesture sends a
   command and the feed shows the outcome (invariant 3). A lane mix control (volume, pan, DUB FEEDBACK, FX)

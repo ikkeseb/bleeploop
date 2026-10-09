@@ -293,7 +293,7 @@ const SCOPE_COLUMNS = 1024;
  * sits at `at - 1` and whose valid columns are the `count` before it. The newest column covers `bin`
  * frames from `frame`, and each older one `bin` frames earlier. `epoch` bumps whenever the trace
  * broke (a `gap`, a reset): a draw that holds state across frames starts over.
- * @public (the look that draws it is not built yet; `verify/guards/stage-draw.mjs` allows `scopeInto`)
+ * @public (`src/ui/stage/scope.ts` draws it; `verify/guards/stage-draw.mjs` allows `scopeInto`)
  */
 export interface ScopeView {
   lo: readonly Float32Array[] | null;
