@@ -271,27 +271,35 @@ export async function reportTauriDiagnostics(): Promise<void> {
 
 /**
  * DEV: the MIDI latency benchmark's UI stalls (`src-tauri/src/engine_io/midi_bench.rs`; how to run it:
- * `docs/VERIFY.md` § MIDI latency benchmark). When the benchmark asks for them, the main thread is kept
- * busy for `ms` every `everyMs`, and each window goes back to Rust, so the report can split the notes
- * sent inside one. Stops once the benchmark has ended. Nothing runs when no benchmark asked.
+ * `docs/VERIFY.md` § MIDI latency benchmark). When the benchmark asks for them, the page first measures
+ * its clock's offset to the Rust side over a few round trips, then keeps the main thread busy for `ms`
+ * every `everyMs` and reports each window in `performance.now()` time, which Rust places through that
+ * offset (no IPC delay moves a window). Stops once the benchmark has ended. Nothing runs when no
+ * benchmark asked.
  */
 async function runBenchStalls(): Promise<void> {
   if (!import.meta.env.DEV) return;
   let plan: { everyMs: number; ms: number } | null;
   try {
     plan = await invoke<{ everyMs: number; ms: number } | null>('midi_bench_stall_plan');
+    if (!plan) return;
+    const samples: [number, number, number][] = [];
+    for (let i = 0; i < 20; i++) {
+      const sent = performance.now();
+      const rust = await invoke<number>('midi_bench_clock');
+      samples.push([sent, rust, performance.now()]);
+    }
+    if (!(await invoke<unknown>('midi_bench_clock_sync', { samples }))) return;
   } catch {
     return;
   }
-  if (!plan) return;
   const { everyMs, ms } = plan;
   const timer = setInterval(() => {
     const start = performance.now();
     while (performance.now() - start < ms) {
       // A long main-thread task, on purpose: what a Web MIDI message waits behind.
     }
-    const end = performance.now();
-    invoke<boolean>('midi_bench_stall', { agoMs: performance.now() - end, ms: end - start })
+    invoke<boolean>('midi_bench_stall', { startMs: start, endMs: performance.now() })
       .then((more) => {
         if (!more) clearInterval(timer);
       })

@@ -354,6 +354,10 @@ pub fn run() {
             engine_io::midi_bench::midi_bench_stall_plan,
             #[cfg(all(windows, debug_assertions))]
             engine_io::midi_bench::midi_bench_stall,
+            #[cfg(all(windows, debug_assertions))]
+            engine_io::midi_bench::midi_bench_clock,
+            #[cfg(all(windows, debug_assertions))]
+            engine_io::midi_bench::midi_bench_clock_sync,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

@@ -81,7 +81,7 @@ pub struct EngineHandle {
 pub struct Feed {
     tx: Producer<Event>,
     dropped: u64,
-    /// DEV: each `NoteOn` as applied, for the MIDI benchmark ([`crate::note_record`]).
+    /// DEV: each `NoteOn` and `NoteOff` as applied, for the MIDI benchmark ([`crate::note_record`]).
     #[cfg(debug_assertions)]
     notes: crate::note_record::NoteRecord,
 }
@@ -811,6 +811,8 @@ fn apply(looper: &mut Looper, cx: &mut Cx, at: &mut Apply, command: Command) -> 
             Applied::Done
         }
         Command::NoteOff(note) => {
+            #[cfg(debug_assertions)]
+            cx.feed.notes.record_off(note, now);
             at.instruments.note_off(note, now);
             at.rack.note_off(note, now);
             Applied::Done

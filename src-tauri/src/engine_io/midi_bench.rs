@@ -10,17 +10,24 @@
 //!   input after the switch), so one sender and one clock serve before and after.
 //! - **The sequence id is the (note, velocity) pair:** send `i` plays note `base + i % notes` at
 //!   velocity `1 + (i / notes) % 127` ([`key_of`]), a pair that comes back only `notes × 127` sends
-//!   later. A record of that pair matches the oldest send of it still waiting; a send not matched
-//!   within the timeout is lost, and a record with no send waiting is a duplicate ([`match_seen`]).
-//!   Notes outside the benchmark's pairs (the player's own) are strays, left out.
-//! - **Applied:** the engine records each `NoteOn` it applies with its frame
+//!   later; a configuration whose pairs come back sooner than twice the timeout is refused. A record of
+//!   that pair matches the oldest send of it still waiting; a send not matched within the timeout is
+//!   lost, and a record with no send waiting is a duplicate ([`match_seen`]). A record may precede its
+//!   send by at most its block's length (plus [`MARGIN`]): the applied instant is the block's entry,
+//!   before the engine took the command. Notes outside the benchmark's pairs are strays, left out: the
+//!   default notes (0 to 23) are ones no player uses, and no other controller may play during a run.
+//! - **Applied:** the engine records each `NoteOn` and `NoteOff` it applies with its frame
 //!   (`lf_engine::note_record`), and FrameClock's stamp history turns the frame into an instant
-//!   (`frame_clock::frame_instant`). **Arrival** (a diagnostic): [`arrived`], stamped where a note
+//!   (`frame_clock::frame_instant`). A matched note-on whose note's next applied record is not a
+//!   note-off is stuck. **Arrival** (a diagnostic): [`arrived`], stamped where a note
 //!   reaches native code: `engine_send` for Web MIDI's notes (after the WebView's handler and the IPC),
 //!   the native input's handler after the switch.
 //! - **UI stalls:** the DEV frontend runs a long main-thread task every few seconds when the benchmark
 //!   asks (`src/platform/host.tauri.ts`, [`midi_bench_stall_plan`]) and reports each one's window
-//!   ([`midi_bench_stall`]); a note sent inside a window counts as inside a stall.
+//!   ([`midi_bench_stall`]) on its own `performance.now()` clock; a note sent inside a window counts as
+//!   inside a stall. The page first measures its clock's offset to this one over a few round trips
+//!   ([`midi_bench_clock`], [`clock_offset`]: the sample with the shortest round trip), so no IPC delay
+//!   moves a window; the report gives the offset's uncertainty (half that round trip).
 //! - **Lock waits:** how long `settings` and `ends` takers waited to get them (`mod.rs` `lock_at`), per
 //!   lock and taker: the input path (`EngineHost::send_all`), the feed (`drain_feed`), the rest. Counted
 //!   in every DEV run; `LF_LOCK_WAITS=<seconds>` logs the totals that often.
@@ -79,14 +86,14 @@ pub(crate) struct Config {
 
 impl Config {
     /// `;`-separated: a part without `=` is the port, then `port=`, `interval_ms=` (25), `burst=` (1),
-    /// `base=` (48), `notes=` (24), `count=` (2000), `warmup_s=` (5), `timeout_ms=` (1000),
+    /// `base=` (0), `notes=` (24), `count=` (2000), `warmup_s=` (5), `timeout_ms=` (1000),
     /// `stall_every_ms=` (none: no stalls), `stall_ms=` (250), `label=` (`run`), `out=`.
     pub(crate) fn parse(spec: &str) -> Result<Config, String> {
         let mut c = Config {
             port: String::new(),
             interval: Duration::from_millis(25),
             burst: 1,
-            base: 48,
+            base: 0,
             notes: 24,
             count: 2000,
             warmup: Duration::from_secs(5),
@@ -134,6 +141,14 @@ impl Config {
         if c.count == 0 {
             return Err("count=0".into());
         }
+        let reuse = c.interval * (c.notes as u32 * 127 / c.burst);
+        if reuse < c.timeout * 2 {
+            return Err(format!(
+                "the (note, velocity) ids repeat every {} ms, under twice timeout_ms={}: raise notes or interval_ms, or lower burst or timeout_ms",
+                reuse.as_millis(),
+                c.timeout.as_millis()
+            ));
+        }
         if let Some(every_ms) = stall_every {
             if stall_ms == 0 || stall_ms >= every_ms {
                 return Err(format!("stall_ms={stall_ms} must be 1..stall_every_ms={every_ms}"));
@@ -146,7 +161,7 @@ impl Config {
         Ok(c)
     }
 
-    fn space(&self) -> Space {
+    pub(crate) fn space(&self) -> Space {
         Space { base: self.base, notes: self.notes }
     }
 }
@@ -163,6 +178,12 @@ pub(crate) struct Space {
     pub notes: u8,
 }
 
+impl Space {
+    fn holds(self, note: u8) -> bool {
+        note >= self.base && (note as u16) < self.base as u16 + self.notes as u16
+    }
+}
+
 /// Send `seq`'s pair. Velocity is never 0 (a note-off).
 pub(crate) fn key_of(seq: u64, space: Space) -> Key {
     let notes = space.notes as u64;
@@ -173,15 +194,17 @@ pub(crate) fn key_of(seq: u64, space: Space) -> Key {
 /// benchmark's.
 pub(crate) fn bench_key(note: u8, velocity: f32, space: Space) -> Option<Key> {
     let v = (velocity * 127.0).round();
-    let ours = note >= space.base && (note as u16) < space.base as u16 + space.notes as u16 && (1.0..=127.0).contains(&v);
+    let ours = space.holds(note) && (1.0..=127.0).contains(&v);
     ours.then_some((note, v as u8))
 }
 
-/// One send, or one record of a note (applied or arrived): its pair and instant (ns, `frame_clock::stamp`).
+/// One send, or one record of a note (applied or arrived): its pair and instant (ns, `frame_clock::stamp`),
+/// and for a record, how much earlier than its send it may be and still match it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Seen {
     pub key: Key,
     pub at: u64,
+    pub early: u64,
 }
 
 /// Which record each send matched (an index into `seen`), and the records no send was waiting for.
@@ -191,9 +214,9 @@ pub(crate) struct Matching {
     pub duplicates: usize,
 }
 
-/// How much earlier than its send a record may be and still match it: the applied instant is the
-/// rendering block's entry, which can precede the engine's take of a command pushed just after it.
-const EARLY: u64 = 5_000_000;
+/// What a record may precede its send by beyond its own allowance (an arrival: this alone; an applied
+/// note: its block's length too, as its instant is the block's entry, before the engine took it).
+pub(crate) const MARGIN: u64 = 1_000_000;
 
 /// Match `seen` (any order) to `sent` (in send order): each record takes the oldest send of its pair
 /// still waiting; a send older than `timeout` when a record of its pair comes is lost, and a record no
@@ -217,7 +240,7 @@ pub(crate) fn match_seen(sent: &[Seen], seen: &[Seen], timeout: u64) -> Matching
             queue.pop_front();
         }
         match queue.front() {
-            Some(&i) if sent[i].at <= r.at + EARLY => {
+            Some(&i) if sent[i].at <= r.at + r.early => {
                 by_send[i] = Some(j);
                 queue.pop_front();
             }
@@ -270,6 +293,8 @@ pub(crate) fn discontinuities(stamps: &[Stamp]) -> u64 {
 pub(crate) struct Collected {
     pub sent: Vec<Seen>,
     pub applied: Vec<AppliedNote>,
+    /// Note-offs the sender sent.
+    pub offs_sent: usize,
     /// (note, velocity 0..1, instant)
     pub arrivals: Vec<(u8, f32, u64)>,
     /// Every stamp, `clear` markers included.
@@ -291,6 +316,9 @@ pub(crate) struct Outcome {
     pub lost: usize,
     pub duplicates: usize,
     pub strays: usize,
+    /// Matched note-ons whose note's next applied record is not a note-off (none, or another note-on).
+    pub stuck: usize,
+    pub offs_applied: usize,
     /// Applied notes whose frame no stamp's block holds.
     pub unconverted: usize,
     pub arrived: usize,
@@ -302,21 +330,29 @@ pub(crate) struct Outcome {
 
 pub(crate) fn evaluate(c: &Collected, space: Space, timeout: Duration) -> Outcome {
     let running: Vec<Stamp> = c.stamps.iter().copied().filter(|s| s.rate != 0).collect();
-    let (mut strays, mut unconverted) = (0, 0);
-    let mut applied: Vec<(Seen, Frame)> = Vec::new();
-    for a in &c.applied {
+    let (mut strays, mut unconverted, mut offs_applied) = (0, 0, 0);
+    // (record, frame, index in `c.applied`)
+    let mut applied: Vec<(Seen, Frame, usize)> = Vec::new();
+    for (ix, a) in c.applied.iter().enumerate() {
+        if !a.on {
+            if space.holds(a.note) { offs_applied += 1 } else { strays += 1 }
+            continue;
+        }
         let Some(key) = bench_key(a.note, a.velocity, space) else {
             strays += 1;
             continue;
         };
-        match frame_instant(&running, a.frame) {
-            Some(at) => applied.push((Seen { key, at }, a.frame)),
-            None => unconverted += 1,
+        match (block_of(&running, a.frame), frame_instant(&running, a.frame)) {
+            (Some(k), Some(at)) => {
+                let block = (running[k].block as f64 * 1e9 / running[k].rate as f64).round() as u64;
+                applied.push((Seen { key, at, early: block + MARGIN }, a.frame, ix));
+            }
+            _ => unconverted += 1,
         }
     }
-    let arrivals: Vec<Seen> = c.arrivals.iter().filter_map(|&(note, v, at)| bench_key(note, v, space).map(|key| Seen { key, at })).collect();
+    let arrivals: Vec<Seen> = c.arrivals.iter().filter_map(|&(note, v, at)| bench_key(note, v, space).map(|key| Seen { key, at, early: MARGIN })).collect();
     let timeout = timeout.as_nanos() as u64;
-    let seen: Vec<Seen> = applied.iter().map(|(s, _)| *s).collect();
+    let seen: Vec<Seen> = applied.iter().map(|(s, _, _)| *s).collect();
     let by_applied = match_seen(&c.sent, &seen, timeout);
     let by_arrival = match_seen(&c.sent, &arrivals, timeout);
     let mut o = Outcome {
@@ -324,6 +360,8 @@ pub(crate) fn evaluate(c: &Collected, space: Space, timeout: Duration) -> Outcom
         lost: 0,
         duplicates: by_applied.duplicates,
         strays,
+        stuck: 0,
+        offs_applied,
         unconverted,
         arrived: by_arrival.by_send.iter().flatten().count(),
         inside: Side::default(),
@@ -338,7 +376,11 @@ pub(crate) fn evaluate(c: &Collected, space: Space, timeout: Duration) -> Outcom
             continue;
         };
         o.applied += 1;
-        let (at, frame) = (applied[j].0.at, applied[j].1);
+        let (at, frame, ix) = (applied[j].0.at, applied[j].1, applied[j].2);
+        let note = c.applied[ix].note;
+        if c.applied[ix + 1..].iter().find(|a| a.note == note).is_none_or(|a| a.on) {
+            o.stuck += 1;
+        }
         side.sender_to_applied.push(at as i64 - send.at as i64);
         if let Some(a) = by_arrival.by_send[i] {
             side.arrival_to_applied.push(at as i64 - arrivals[a].at as i64);
@@ -484,17 +526,69 @@ pub fn midi_bench_stall_plan() -> Option<StallPlan> {
     STALLING.load(Acquire).then(|| PLAN.get().copied()).flatten()
 }
 
-/// DEV: the frontend's main thread was busy for `ms`, ending `ago_ms` before this call (both from
-/// `performance.now()`; the window's edges carry the IPC's delay). False once the benchmark ended:
-/// the frontend stops stalling.
+/// The page clock's offset to this one (`performance.now()` ms + `offset_ms` = [`stamp`] ms), within
+/// ± `uncertainty_ms`.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+pub struct ClockSync {
+    pub offset_ms: f64,
+    pub uncertainty_ms: f64,
+}
+
+/// The page's latest clock offset (a reload measures again).
+static CLOCK: Mutex<Option<ClockSync>> = Mutex::new(None);
+/// The largest uncertainty of an offset a window was placed with, in ns; windows reported before any.
+static STALL_UNCERTAINTY: AtomicU64 = AtomicU64::new(0);
+static STALLS_UNSYNCED: AtomicU64 = AtomicU64::new(0);
+
+/// From round trips `[page sent, this clock, page received]` (ms): the offset of the one with the
+/// shortest round trip, assuming its two legs equal; its uncertainty is half that round trip.
+pub(crate) fn clock_offset(samples: &[[f64; 3]]) -> Option<ClockSync> {
+    samples
+        .iter()
+        .filter(|s| s.iter().all(|v| v.is_finite()) && s[2] >= s[0])
+        .min_by(|a, b| (a[2] - a[0]).total_cmp(&(b[2] - b[0])))
+        .map(|s| ClockSync { offset_ms: s[1] - (s[0] + s[2]) / 2.0, uncertainty_ms: (s[2] - s[0]) / 2.0 })
+}
+
+/// A window on the page's clock (ms), placed on this one (ns).
+pub(crate) fn place_window(start_ms: f64, end_ms: f64, sync: ClockSync) -> Option<(u64, u64)> {
+    let ns = |ms: f64| ((ms + sync.offset_ms) * 1e6).max(0.0) as u64;
+    (start_ms.is_finite() && end_ms.is_finite() && end_ms >= start_ms).then(|| (ns(start_ms), ns(end_ms)))
+}
+
+/// DEV: this clock now, in ms ([`stamp`]), for the page's round trips.
 #[tauri::command]
-pub fn midi_bench_stall(ago_ms: f64, ms: f64) -> bool {
-    let now = stamp(Instant::now());
-    if ago_ms.is_finite() && ms.is_finite() && ago_ms >= 0.0 && ms >= 0.0 {
-        let start = now.saturating_sub(((ago_ms + ms) * 1e6) as u64);
-        let mut stalls = STALLS.lock().unwrap_or_else(|e| e.into_inner());
-        if stalls.len() < MAX_ARRIVALS {
-            stalls.push((start, start + (ms * 1e6) as u64));
+pub fn midi_bench_clock() -> f64 {
+    stamp(Instant::now()) as f64 / 1e6
+}
+
+/// DEV: the page's round trips to [`midi_bench_clock`]; keeps and answers the offset they give.
+#[tauri::command]
+pub fn midi_bench_clock_sync(samples: Vec<[f64; 3]>) -> Option<ClockSync> {
+    let sync = clock_offset(&samples);
+    *CLOCK.lock().unwrap_or_else(|e| e.into_inner()) = sync;
+    if let Some(s) = sync {
+        log::info!("[midi-bench] page clock offset {:.3} ms ± {:.3} ms ({} round trips)", s.offset_ms, s.uncertainty_ms, samples.len());
+    }
+    sync
+}
+
+/// DEV: the page's main thread was busy from `start_ms` to `end_ms` (`performance.now()`), placed
+/// through the page's clock offset; a window reported before any offset is dropped (counted). False
+/// once the benchmark ended: the frontend stops stalling.
+#[tauri::command]
+pub fn midi_bench_stall(start_ms: f64, end_ms: f64) -> bool {
+    let sync = *CLOCK.lock().unwrap_or_else(|e| e.into_inner());
+    match sync.and_then(|sync| place_window(start_ms, end_ms, sync).map(|w| (w, sync))) {
+        Some((window, sync)) => {
+            STALL_UNCERTAINTY.fetch_max((sync.uncertainty_ms * 1e6) as u64, Relaxed);
+            let mut stalls = STALLS.lock().unwrap_or_else(|e| e.into_inner());
+            if stalls.len() < MAX_ARRIVALS {
+                stalls.push(window);
+            }
+        }
+        None => {
+            STALLS_UNSYNCED.fetch_add(1, Relaxed);
         }
     }
     STALLING.load(Acquire)
@@ -687,7 +781,7 @@ impl Sender {
                 seq += 1;
                 let sent = stamp(Instant::now());
                 if self.out.send(&[0x90, key.0, key.1]).is_ok() {
-                    into.sent.push(Seen { key, at: sent });
+                    into.sent.push(Seen { key, at: sent, early: 0 });
                     keys.push(key);
                 } else {
                     self.failed += 1;
@@ -696,7 +790,9 @@ impl Sender {
             tap.drain(into);
             tap.wait_until(at + config.interval / 2, into);
             for key in keys {
-                if self.out.send(&[0x80, key.0, 0]).is_err() {
+                if self.out.send(&[0x80, key.0, 0]).is_ok() {
+                    into.offs_sent += 1;
+                } else {
                     self.failed += 1;
                 }
             }
@@ -823,24 +919,33 @@ fn report(host: &EngineHost, config: &Config, started_unix_s: u64, run: &Collect
         "lost": o.lost,
         "duplicates": o.duplicates,
         "strays": o.strays,
+        "stuck": o.stuck,
+        "offs_sent": run.offs_sent,
+        "offs_applied": o.offs_applied,
         "unconverted": o.unconverted,
         "arrived": o.arrived,
         "sender_to_applied": sender_to_applied,
         "arrival_to_applied_diagnostic": arrival_to_applied,
         "inside_stalls": side(&o.inside),
         "outside_stalls": side(&o.outside),
-        "stalls": { "count": run.stalls.len(), "total_ms": stall_ms },
+        "stalls": {
+            "count": run.stalls.len(),
+            "total_ms": stall_ms,
+            "clock_uncertainty_ms": STALL_UNCERTAINTY.load(Relaxed) as f64 / 1e6,
+            "dropped_before_clock_sync": STALLS_UNSYNCED.load(Relaxed),
+        },
         "queue": { "judged": o.late.len(), "late_notes": late_notes, "max_blocks_late": o.late.iter().max() },
         "counters": counters,
         "lock_waits": waits_json(waits),
     });
     let fmt = |s: Option<Spread>| s.map_or("none".into(), |s| format!("p50={} p99={} max={} ms", s.p50_ms, s.p99_ms, s.max_ms));
     let summary = format!(
-        "[midi-bench] {} sent={} applied={} lost={} dup={} stray={} | sender->applied {} | arrival->applied (diag) {} | in stalls n={} {} | outside {} | late={} max_blocks={} | callbacks={} xruns={} engine_xruns={} gaps={} lock_misses={} discontinuities={}",
+        "[midi-bench] {} sent={} applied={} lost={} stuck={} dup={} stray={} | sender->applied {} | arrival->applied (diag) {} | in stalls n={} {} | outside {} | late={} max_blocks={} | callbacks={} xruns={} engine_xruns={} gaps={} lock_misses={} discontinuities={}",
         config.label,
         run.sent.len(),
         o.applied,
         o.lost,
+        o.stuck,
         o.duplicates,
         o.strays,
         fmt(sender_to_applied),
@@ -900,7 +1005,7 @@ mod tests {
     }
 
     fn s(key: Key, at_ms: u64) -> Seen {
-        Seen { key, at: at_ms * 1_000_000 }
+        Seen { key, at: at_ms * 1_000_000, early: MARGIN }
     }
 
     #[test]
@@ -954,23 +1059,69 @@ mod tests {
         // One block per ms (48 frames at 48 kHz) from frame 0 at t = 100 ms.
         let stamps: Vec<Stamp> = (0..400).map(|k| Stamp { entry_ns: (100 + k) * 1_000_000, frame: 48 * k as Frame, block: 48, rate: 48_000 }).collect();
         let frame_at = |ms: u64| 48 * (ms as Frame - 100);
-        let note = |key: Key, applied_ms: u64| AppliedNote { note: key.0, velocity: key.1 as f32 / 127.0, frame: frame_at(applied_ms) };
+        let note = |key: Key, applied_ms: u64| AppliedNote { note: key.0, velocity: key.1 as f32 / 127.0, frame: frame_at(applied_ms), on: true };
+        let off = |key: Key, applied_ms: u64| AppliedNote { note: key.0, velocity: 0.0, frame: frame_at(applied_ms), on: false };
         let keys: Vec<Key> = (0..4).map(|i| key_of(i, SPACE)).collect();
         let c = Collected {
             sent: vec![s(keys[0], 110), s(keys[1], 150), s(keys[2], 200), s(keys[3], 300)],
             // The second send fell in the stall (140..240 ms) and waited for its end; the third was
-            // applied on a frame no block holds (lost); a stray from the player's keyboard (note 30).
-            applied: vec![note(keys[0], 113), note(keys[1], 241), AppliedNote { note: 30, velocity: 0.5, frame: frame_at(250) }, note(keys[3], 304), AppliedNote { frame: 48 * 1000, ..note(keys[2], 100) }],
+            // applied on a frame no block holds (lost); a stray from the player's keyboard (note 30,
+            // and its note-off); the fourth's note-off never applied (stuck). In applied order.
+            applied: vec![
+                note(keys[0], 113),
+                off(keys[0], 120),
+                note(keys[1], 241),
+                AppliedNote { note: 30, velocity: 0.5, frame: frame_at(250), on: true },
+                off(keys[1], 252),
+                off((30, 0), 255),
+                note(keys[3], 304),
+                AppliedNote { frame: 48 * 1000, ..note(keys[2], 100) },
+            ],
+            offs_sent: 4,
             arrivals: vec![(keys[0].0, keys[0].1 as f32 / 127.0, 112_000_000), (keys[1].0, keys[1].1 as f32 / 127.0, 240_500_000), (keys[3].0, keys[3].1 as f32 / 127.0, 301_200_000)],
             stamps,
             stalls: vec![(140_000_000, 240_000_000)],
         };
         let o = evaluate(&c, SPACE, Duration::from_secs(1));
-        assert_eq!((o.applied, o.lost, o.duplicates, o.strays, o.unconverted, o.arrived), (3, 1, 0, 1, 1, 3));
+        assert_eq!((o.applied, o.lost, o.duplicates, o.strays, o.unconverted, o.arrived), (3, 1, 0, 2, 1, 3));
+        assert_eq!((o.stuck, o.offs_applied), (1, 2), "the fourth's note-off never applied");
         assert_eq!(o.inside, Side { sent: 2, sender_to_applied: vec![91_000_000], arrival_to_applied: vec![500_000] }, "the lost third counts as sent inside");
         assert_eq!(o.outside, Side { sent: 2, sender_to_applied: vec![3_000_000, 4_000_000], arrival_to_applied: vec![1_000_000, 2_800_000] });
         // Arrived at 301.2 ms, applied in the block that entered at 304: the blocks at 302 and 303 passed it.
         assert_eq!(o.late, vec![0, 0, 2]);
+    }
+
+    /// The applied instant is its block's entry, which can precede the engine's take of the command:
+    /// a note sent 7 ms into a 10 ms block (480 frames at 48 kHz) and applied in it still matches,
+    /// one sent past the block (plus the margin) does not.
+    #[test]
+    fn a_record_may_precede_its_send_by_its_block_s_length_and_no_more() {
+        let stamps: Vec<Stamp> = (0..20).map(|k| Stamp { entry_ns: (100 + 10 * k) * 1_000_000, frame: 480 * k as Frame, block: 480, rate: 48_000 }).collect();
+        let (a, b) = (key_of(0, SPACE), key_of(1, SPACE));
+        let rec = |key: Key, frame: Frame, on: bool| AppliedNote { note: key.0, velocity: if on { key.1 as f32 / 127.0 } else { 0.0 }, frame, on };
+        let c = Collected {
+            sent: vec![s(a, 107), s(b, 112)],
+            applied: vec![rec(a, 0, true), rec(b, 0, true), rec(a, 480, false), rec(b, 480, false)],
+            stamps,
+            ..Collected::default()
+        };
+        let o = evaluate(&c, SPACE, Duration::from_secs(1));
+        assert_eq!((o.applied, o.lost, o.duplicates, o.stuck), (1, 1, 1, 0));
+        assert_eq!(o.outside.sender_to_applied, vec![-7_000_000], "applied at the entry of the block it was sent into");
+    }
+
+    #[test]
+    fn a_stall_window_lands_on_this_clock_through_the_shortest_round_trip_whatever_its_report_s_delay() {
+        // The page's clock runs 5000 ms behind this one. Three round trips with uneven legs (sent, this
+        // clock, received; ms): the shortest one (0.4 ms) wins.
+        let samples = [[10.0, 5010.3, 12.0], [20.0, 5020.1, 20.4], [30.0, 5031.0, 31.2]];
+        let sync = clock_offset(&samples).unwrap();
+        assert!((sync.offset_ms - 4999.9).abs() < 1e-9 && (sync.uncertainty_ms - 0.2).abs() < 1e-9, "{sync:?}");
+        assert!((sync.offset_ms - 5000.0).abs() <= sync.uncertainty_ms, "the true offset lies within the uncertainty");
+        // The window is placed from its own page times: when (or how late) the report arrives moves nothing.
+        assert_eq!(place_window(100.0, 350.0, ClockSync { offset_ms: 5000.0, uncertainty_ms: 0.2 }), Some((5_100_000_000, 5_350_000_000)));
+        assert_eq!(place_window(350.0, 100.0, sync), None);
+        assert_eq!(clock_offset(&[[1.0, 2.0, 0.5], [f64::NAN, 1.0, 2.0]]), None, "no usable round trip");
     }
 
     #[test]
@@ -979,8 +1130,11 @@ mod tests {
         assert_eq!((c.port.as_str(), c.interval, c.notes, c.burst, c.count, c.warmup), ("loopMIDI Port", Duration::from_millis(20), 12, 3, 500, Duration::from_secs(2)));
         assert_eq!(c.stalls, Some(StallPlan { every_ms: 3000, ms: 300 }));
         assert_eq!(c.label, "before");
+        // 24 notes, a burst of 24 every 2 ms: each id comes back after 254 ms, under twice the 1 s timeout.
+        let reuse = Config::parse("x;notes=24;burst=24;interval_ms=2").unwrap_err();
+        assert!(reuse.contains("repeat every 254 ms"), "{reuse}");
         let d = Config::parse("port=bench").unwrap();
-        assert_eq!((d.interval, d.notes, d.base, d.burst, d.count, d.stalls), (Duration::from_millis(25), 24, 48, 1, 2000, None));
+        assert_eq!((d.interval, d.notes, d.base, d.burst, d.count, d.stalls), (Duration::from_millis(25), 24, 0, 1, 2000, None));
         for bad in ["", "interval_ms=20", "x;interval_ms=1", "x;notes=0", "x;base=120;notes=24", "x;burst=25", "x;count=0", "x;stall_every_ms=100;stall_ms=100", "x;speed=3", "x;count=many"] {
             assert!(Config::parse(bad).is_err(), "{bad:?} parsed");
         }
@@ -1020,7 +1174,14 @@ mod tests {
         block(&mut engine, &mut frame);
         assert_eq!(rt_alloc::allocations(), allocated, "the apply path allocated");
         let notes: Vec<AppliedNote> = std::iter::from_fn(|| reader.rx.pop().ok()).collect();
-        assert_eq!(notes, vec![AppliedNote { note: 60, velocity: 0.5, frame: 128 }, AppliedNote { note: 61, velocity: 1.0, frame: 128 }]);
+        assert_eq!(
+            notes,
+            vec![
+                AppliedNote { note: 60, velocity: 0.5, frame: 128, on: true },
+                AppliedNote { note: 60, velocity: 0.0, frame: 128, on: false },
+                AppliedNote { note: 61, velocity: 1.0, frame: 128, on: true },
+            ]
+        );
 
         // Fill it past its capacity, 60 notes a block (under the engine's 64-command table), undrained.
         let blocks = lf_engine::note_record::CAPACITY / 60 + 2;

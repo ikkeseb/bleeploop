@@ -1,5 +1,5 @@
-//! OWNS (DEV builds only): the applied-note record: each `NoteOn` the engine applies, with the frame it
-//! applied it on, for a reader off the audio thread. The MIDI latency benchmark reads it
+//! OWNS (DEV builds only): the applied-note record: each `NoteOn` and `NoteOff` the engine applies, with
+//! the frame it applied it on, for a reader off the audio thread. The MIDI latency benchmark reads it
 //! (`src-tauri/src/engine_io/midi_bench.rs`; the plan: `docs/plans/native-midi.md` § Measurement).
 //!
 //! A preallocated ring (invariant 5: recording never allocates, locks or logs): the engine holds the
@@ -17,13 +17,14 @@ use crate::grid::Frame;
 /// Notes the ring holds before it refuses: a benchmark drains it every few milliseconds.
 pub const CAPACITY: usize = 4096;
 
-/// One `NoteOn` as the engine applied it: the command's note and velocity (0..1), and the device frame
-/// it applied on.
+/// One `NoteOn` (`on`, with its velocity 0..1) or `NoteOff` (velocity 0) as the engine applied it, and
+/// the device frame it applied on.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AppliedNote {
     pub note: u8,
     pub velocity: f32,
     pub frame: Frame,
+    pub on: bool,
 }
 
 /// The engine's end: it records, the reader is handed out once.
@@ -54,10 +55,21 @@ impl NoteRecord {
         NoteRecord { tx, reader: Some(AppliedNotes { rx, refused: refused.clone() }), refused }
     }
 
-    /// The audio thread: `note` applied at `frame`. Never allocates or waits.
+    /// The audio thread: a `NoteOn` of `note` applied at `frame`. Never allocates or waits.
     #[inline]
     pub fn record(&mut self, note: u8, velocity: f32, frame: Frame) {
-        if self.tx.push(AppliedNote { note, velocity, frame }).is_err() {
+        self.push(AppliedNote { note, velocity, frame, on: true });
+    }
+
+    /// The audio thread: a `NoteOff` of `note` applied at `frame`.
+    #[inline]
+    pub fn record_off(&mut self, note: u8, frame: Frame) {
+        self.push(AppliedNote { note, velocity: 0.0, frame, on: false });
+    }
+
+    #[inline]
+    fn push(&mut self, note: AppliedNote) {
+        if self.tx.push(note).is_err() {
             self.refused.fetch_add(1, Relaxed);
         }
     }
@@ -84,9 +96,11 @@ mod tests {
         let mut reader = record.take_reader().expect("the first take hands the reader out");
         assert!(record.take_reader().is_none(), "the reader is handed out once");
         record.record(60, 0.5, 128);
+        record.record_off(60, 200);
         record.record(61, 1.0, 256);
-        assert_eq!(reader.rx.pop(), Ok(AppliedNote { note: 60, velocity: 0.5, frame: 128 }));
-        assert_eq!(reader.rx.pop(), Ok(AppliedNote { note: 61, velocity: 1.0, frame: 256 }));
+        assert_eq!(reader.rx.pop(), Ok(AppliedNote { note: 60, velocity: 0.5, frame: 128, on: true }));
+        assert_eq!(reader.rx.pop(), Ok(AppliedNote { note: 60, velocity: 0.0, frame: 200, on: false }));
+        assert_eq!(reader.rx.pop(), Ok(AppliedNote { note: 61, velocity: 1.0, frame: 256, on: true }));
         assert!(reader.rx.pop().is_err());
         for k in 0..CAPACITY + 3 {
             record.record(48, 0.25, k as Frame);
