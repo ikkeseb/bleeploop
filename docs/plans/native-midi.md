@@ -53,6 +53,30 @@ next block start (`src/ui/state/midi.ts`, `src/platform/index.ts` `sendEngine`, 
   WinMM goes through `wdmaud2.drv`; loopback and virtual transports registered). No loopMIDI. midir
   cannot create virtual ports on Windows.
 
+## Progress (branch `native-midi`, not merged)
+
+- **Steps 1 to 5 are built and tested on the branch;** step 6, the switch, is built too: the app runs
+  native MIDI and the UI's notes through the Rust router, Web MIDI is denied. `pnpm native:midi`
+  drives the running app (WASAPI, master muted): the resync, the denied Web MIDI, a PC-key note held
+  natively, two owners on one note, blur, a slot switch, a reload releasing at the new page's
+  subscribe and cancelling a pending learn. It sees no MIDI port: none exists on the dev PC.
+- **Waits on the owner:** the measurement port (loopMIDI or the MIDI Services tools, an install), so
+  step 1's baseline and the ship rule's comparison can run (`docs/VERIFY.md` § MIDI latency
+  benchmark; a before run builds the commit before the switch); the lock-wait measurement under jam
+  load (`LF_LOCK_WAITS`); and a controller: whether the stored Web MIDI name equals WinMM's
+  `szPname`, the path's stability across restart and replug, the interface class a port arrives on,
+  WinMM multi-client, the 20 replugs, a jam, and the old pedals firing without relearn.
+- **Behaviour changes the reviews accepted:** a plugin swap routes nowhere while it unloads (the
+  shipped app played the slot's built-in synth then); the UI's input goes one IPC batch at a time
+  (one round trip per batch, unmeasured; native MIDI does not take this path); a press during a
+  device gap is refused and told, not queued; the learn row's ASSIGN control is new (taste).
+- **Known residuals (no fix yet; each needs an IPC call stalled past its 2 s bound, or a clock):** a
+  note-on whose batch timed out can land after its release and stick until a blur, a slot switch or
+  a panic; a blur owed after a failure, answered late, can release a hold made after it; a page whose
+  `performance.timeOrigin` reads older than its predecessor's (the wall clock moved back and the
+  WebView restarted) is refused until the app restarts. Next check: log `input_send` round trips over
+  a jam to see whether a 2 s stall ever happens.
+
 ## Step 0 findings (2026-10-09, no device plugged in, nothing installed)
 
 - **No measurement port without an install.** Enumerating WinMM starts `midisrv` (demand-start; it
