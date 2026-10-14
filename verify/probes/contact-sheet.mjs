@@ -6,7 +6,10 @@
  * one second in), 3-armed-waiting (a two-bar loop at 60 BPM playing, lane 2 an ARMED later take waiting
  * for the boundary), 5-fx-five-lanes (five stopped one-bar lanes, lane 1's FX drawer open), 6-help,
  * 7-audio-settings, 12-stage-<look> (the stage view opened by its command-bar cap over five lanes, three
- * playing and one muted, once per look of `src/ui/stage/views.ts`, stepped with V) and 11-engine-in-fx (a reset frame with every input send on, the IN FX popover open). Scenes 8-10 are
+ * playing and one muted, once per look of `src/ui/stage/views.ts`, stepped with V), the PROTOTYPE scene
+ * strip's 13-scenes-a / -b-armed / -c-switched / -stage (four lanes in scene A, scene B armed for the bar
+ * line, after the switch with lanes 3-4 muted, the stage view's echo; the scene table and the switch run
+ * in the engine fake) and 11-engine-in-fx (a reset frame with every input send on, the IN FX popover open). Scenes 8-10 are
  * the Windows app's guitar-first screen, in a second fresh context whose plugin host is served with
  * `available: true` (host.web.ts routed, the slot-sources pattern) and stubbed: a scan that finds one
  * amp-sim (an effect), stubbed load/editor replies. 8-native-first-launch = the host booted, nothing
@@ -28,7 +31,8 @@ const outDir = 'logs/contact-sheet';
 const viewports = [[1280, 820], [1920, 1080], [1000, 700]];
 const placements = ['bottom', 'hidden'];
 const scenes = ['1-empty', '2-first-take-recording', '3-armed-waiting', '4-count-in', '5-fx-five-lanes', '6-help', '7-audio-settings',
-  '8-native-first-launch', '9-amp-sim-live', '10-amp-sim-idle', '11-engine-in-fx'];
+  '8-native-first-launch', '9-amp-sim-live', '10-amp-sim-idle', '11-engine-in-fx',
+  '13-scenes-a', '13-scenes-b-armed', '13-scenes-c-switched', '13-scenes-stage'];
 const REC_PIXEL_LIMIT = 20; // anti-aliasing slack; a red playhead or tape is hundreds of pixels
 const RATE = 48000;
 const PEAK_FRAMES = 1024; // the engine's waveform bin (`lf-engine/src/overview.rs`)
@@ -236,6 +240,53 @@ await probe(async ({ browser, open }) => {
         await shoot(scene);
         await page.keyboard.press('v');
       }
+      await page.keyboard.press('Escape');
+      await page.getByRole('dialog', { name: 'Stage view', exact: true }).waitFor({ state: 'detached' });
+
+      // PROTOTYPE (scenes): four lanes playing a one-bar loop at 60 BPM (lane 5 EMPTY, its old waveform
+      // dropped). Scene B is saved with lanes 3-4 muted, then scene A with all four playing (13-scenes-a);
+      // B pressed waits for the bar line (13-scenes-b-armed), then applies on it: lanes 3-4 muted
+      // (13-scenes-c-switched), and the stage view echoes the scene (13-scenes-stage).
+      scene = '13-scenes-a';
+      const muted = (lanes) => page.waitForFunction((ls) => ls.every(([i, m]) => window.__lf.looper.trackMuted(i) === m), lanes, { timeout: 3000 });
+      const setMutes = async (lanes) => {
+        await page.evaluate((ls) => ls.forEach(([i, m]) => window.__lf.looper.setMute(i, m)), lanes);
+        await muted(lanes);
+      };
+      const chip = (letter) => page.getByRole('button', { name: new RegExp(`^Scene ${letter},`) });
+      const sceneIs = (state, letter) => page.locator(`.lp-scene[data-state="${state}"]`, { hasText: letter }).waitFor({ timeout: 8000 });
+      await setMutes([[3, false]]);
+      await emit({ ...loopFrame({ count: 4, playing: [0, 1, 2, 3], bpm: 60 }), peaks: [...loopFrame({ count: 4, playing: [], bpm: 60 }).peaks, { lane: 4, start: 0, count: 0, min: [], max: [] }] });
+      await setMutes([[2, true], [3, true]]);
+      await chip('B').click();
+      await sceneIs('current', 'B');
+      await setMutes([[2, false], [3, false]]);
+      await chip('A').click();
+      await sceneIs('current', 'A');
+      await page.waitForTimeout(700); // the save's flash fades
+      await shoot(scene);
+
+      // A fresh anchor half a second into the bar: the bar line is 3.5 s away when B is pressed.
+      scene = '13-scenes-b-armed';
+      await emit({ anchor: anchorAt(RATE / 2) });
+      await chip('B').click();
+      await sceneIs('armed', 'B');
+      await page.waitForTimeout(250);
+      await shoot(scene);
+      const waiting = await page.evaluate(() => [2, 3].map((i) => window.__lf.looper.trackMuted(i)));
+      if (waiting.some(Boolean)) fail(`${tag} ${scene}: lanes 3-4 muted before the bar line (${waiting})`);
+
+      scene = '13-scenes-c-switched';
+      await sceneIs('current', 'B');
+      await muted([[0, false], [1, false], [2, true], [3, true]]).catch(() => fail(`${tag} ${scene}: lanes 3-4 not muted after the switch`));
+      await page.waitForTimeout(400);
+      await shoot(scene);
+
+      scene = '13-scenes-stage';
+      await page.getByRole('button', { name: 'Stage view', exact: true }).click();
+      await page.getByRole('dialog', { name: 'Stage view', exact: true }).waitFor();
+      await page.waitForTimeout(400);
+      await shoot(scene);
       await page.keyboard.press('Escape');
       await page.getByRole('dialog', { name: 'Stage view', exact: true }).waitFor({ state: 'detached' });
 

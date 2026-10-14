@@ -21,6 +21,8 @@ import {
   type LaneMix,
   type LaneState,
   type ScopeUpdate,
+  type SceneLane,
+  SCENE_COUNT,
   SCOPE_SOURCES,
 } from '../../platform';
 import { firstTakeSpan, openingSpan, type LoadSessionPayload, type PeakView, type TrackState } from './looper-types';
@@ -487,6 +489,33 @@ function scopeInto(out: ScopeView): ScopeView {
 
 // ── The feed reducer ──────────────────────────────────────────────────────────────────────────────
 
+// ── PROTOTYPE (scenes): the scene table as the engine reports it ─────────────────────────────────────
+
+/** The scene table the feed last carried (`Scenes`): the UI predicts nothing, a press sends the engine's
+ * `{ Scene }` and the chips follow the answer. */
+export interface ScenesView {
+  readonly current: number | null;
+  readonly armed: number | null;
+  /** Each scene's lanes (null: empty; a null lane: not in the scene). */
+  readonly table: readonly (readonly (SceneLane | null)[] | null)[];
+}
+const NO_SCENES: ScenesView = { current: null, armed: null, table: Array.from({ length: SCENE_COUNT }, () => null) };
+const [scenes, setScenes] = createSignal<ScenesView>(NO_SCENES, { equals: (a, b) => JSON.stringify(a) === JSON.stringify(b) });
+/** The last save the engine reported, with a count so a re-save of the same scene is a new value. */
+const [sceneSaved, setSceneSaved] = createSignal<{ scene: number; n: number } | null>(null);
+let sceneSaves = 0;
+
+/** PROTOTYPE (scenes): the scene strip's view and its one gesture. */
+export const engineScenes = {
+  count: SCENE_COUNT,
+  view: scenes as Accessor<ScenesView>,
+  saved: sceneSaved as Accessor<{ scene: number; n: number } | null>,
+  /** A scene press (a chip, a key): the engine judges it (save, arm, disarm), `Scenes` shows it. */
+  press(i: number): void {
+    void sendEngine({ Scene: i });
+  },
+};
+
 type EventListener = (ev: EngineEvent) => void;
 const eventListeners = new Set<EventListener>();
 
@@ -584,6 +613,13 @@ function applyEvent(ev: EngineEvent): void {
       break;
     case 'Toggled':
       applyToggle(ev.toggle, ev.on);
+      break;
+    // PROTOTYPE (scenes).
+    case 'Scenes':
+      setScenes({ current: ev.current, armed: ev.armed, table: ev.table });
+      break;
+    case 'SceneSaved':
+      setSceneSaved({ scene: ev.scene, n: ++sceneSaves });
       break;
   }
 }
@@ -778,6 +814,8 @@ function applyFrameNow(f: FeedFrame): void {
       applyEvent({ type: 'Transport', frame: 0, master: 0, bpm: bpm(), locked: false });
     }
     if (!f.events.some((ev) => ev.type === 'Selected')) setSelectedTrack(0);
+    // PROTOTYPE (scenes): a new engine without a table holds no scene.
+    if (!f.events.some((ev) => ev.type === 'Scenes')) setScenes(NO_SCENES);
   }
   noteClear();
   if (f.status) setEngineRate(f.status.sampleRate);

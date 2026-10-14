@@ -7,6 +7,7 @@ import { DATA_STATE, createLaneView, type LaneWord } from './lane-state';
 import { FxPanel } from './FxPanel';
 import { mixGesture } from './mix-gesture';
 import { Trim } from './Trim';
+import { Scenes } from './Scenes';
 import './looper.css';
 
 /**
@@ -609,6 +610,9 @@ export function Looper(props: { returnFocus?: (el: HTMLElement | undefined) => v
       <div class="lp__sr-status" role="status" aria-live="polite">
         {liveMsg()}
       </div>
+
+      {/* PROTOTYPE (scenes): the scene strip, above the lanes it switches. */}
+      <Scenes />
 
       {/* The five lanes. Each item renders its lane plus — when its FX is selected — an FX drawer
           docked directly under it (the lane's own drawer). The drawer is a SIBLING of the lane, so

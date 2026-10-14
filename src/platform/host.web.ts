@@ -5,6 +5,7 @@
 import type { AppUpdate, AppUpdates, EngineHost, InputHost, LogFolder, MidiHost, Platform, PluginHost, UpdateProgress } from './host';
 import {
   ENGINE_LANES,
+  SCENE_COUNT,
   decodeFeedFrame,
   decodeLoadSession,
   encodeSessionBytes,
@@ -18,8 +19,10 @@ import {
   type FxParamId,
   type LaneMix,
   type LaneState,
+  type ClockAnchor,
   type LoadHeader,
   type Refusal,
+  type SceneLane,
   type SnapshotHeader,
   type SnapshotTrack,
 } from './engine-wire.ts'; // explicit .ts: Node guards import this file
@@ -531,10 +534,139 @@ function applyToggleFrame(frame: Pick<FeedFrame, 'reset' | 'settings' | 'events'
   }
 }
 
-/** A command as the fake applies it: a lane's mix, and the toggles. */
+// ── PROTOTYPE (scenes): the scene table and its bar-line switch, as the engine would own them ─────────
+//
+// No Rust side yet: this is where the prototype's engine behaviour lives, behind the command and the
+// events a real engine would carry (`{ Scene }`, `Scenes`, `SceneSaved` in `engine-wire.ts`). A scene is
+// each lane's mute and volume; a lane that held no loop when the scene was saved is not in it, and a
+// switch leaves it alone. The bar line is the clock the scripted frames left (their anchor, the
+// transport's BPM): the fake has no device clock, so it times the switch with a wall-clock timer off the
+// last anchor, as the UI's playhead does. With no loop (master 0) a switch applies at once.
+
+/** Each scene's lanes (null: empty). */
+const sceneTable: ((SceneLane | null)[] | null)[] = Array.from({ length: SCENE_COUNT }, () => null);
+let sceneCurrent: number | null = null;
+let sceneArmed: number | null = null;
+let sceneSwitchAt: number | null = null;
+let sceneTimer: ReturnType<typeof setTimeout> | null = null;
+/** The clock the scripted frames left: their last anchor and the transport's BPM. */
+const sceneClock: { anchor: ClockAnchor | null; bpm: number } = { anchor: null, bpm: 120 };
+/** The scene answers owed, given a microtask after the press (never inside the call that sent it). */
+const sceneAnswers: EngineEvent[] = [];
+let scenesScheduled = false;
+
+const holdsLoop = (s: LaneState) => s === 'Playing' || s === 'Stopped' || s === 'Overdubbing';
+
+function scenesEvent(frame: number): EngineEvent {
+  return {
+    type: 'Scenes',
+    frame,
+    current: sceneCurrent,
+    armed: sceneArmed,
+    switchAt: sceneSwitchAt,
+    table: sceneTable.map((t) => (t ? t.map((l) => (l ? { ...l } : null)) : null)),
+  };
+}
+
+/** The device frame rendering now, from the last anchor (0 without one). */
+function sceneNow(): number {
+  const a = sceneClock.anchor;
+  return a ? a.frame + ((Date.now() - a.atMs) * a.rate) / 1000 : 0;
+}
+
+/** The next bar line after now, or null when no loop runs (a switch then applies at once). */
+function nextBarLine(): number | null {
+  const a = sceneClock.anchor;
+  if (!a || gateView.master <= 0 || sceneClock.bpm <= 0) return null;
+  const bar = (a.rate * 240) / sceneClock.bpm;
+  const now = sceneNow();
+  return Math.round(a.grid + (Math.floor((now - a.grid) / bar) + 1) * bar);
+}
+
+function saveScene(i: number): void {
+  sceneTable[i] = fakeMixes.map((m, lane) =>
+    holdsLoop(gateView.states[lane]) ? { volume: m.volume, muted: m.muted } : null,
+  );
+  sceneCurrent = i;
+  sceneAnswers.push({ type: 'SceneSaved', frame: Math.round(sceneNow()), scene: i });
+}
+
+function disarmScene(): void {
+  if (sceneTimer !== null) clearTimeout(sceneTimer);
+  sceneTimer = null;
+  sceneArmed = null;
+  sceneSwitchAt = null;
+}
+
+/** Scene `i` applies: each lane it holds that holds a loop now takes its mute and volume. */
+function applyScene(i: number): void {
+  const lanes = sceneTable[i];
+  lanes?.forEach((l, lane) => {
+    if (!l || !holdsLoop(gateView.states[lane])) return;
+    fakeMixes[lane].muted = l.muted;
+    fakeMixes[lane].volume = l.volume;
+  });
+  sceneCurrent = i;
+}
+
+function applySceneCommand(c: EngineCommand): void {
+  if (typeof c !== 'object' || !('Scene' in c)) return;
+  const i = c.Scene;
+  if (i < 0 || i >= SCENE_COUNT) return;
+  const table = sceneTable;
+  if (sceneArmed === i || (i === sceneCurrent && sceneArmed !== null)) disarmScene();
+  else if (table[i] === null || i === sceneCurrent) saveScene(i);
+  else {
+    disarmScene();
+    const at = nextBarLine();
+    if (at === null) applyScene(i);
+    else {
+      sceneArmed = i;
+      sceneSwitchAt = at;
+      const a = sceneClock.anchor as ClockAnchor;
+      const ms = Math.max(0, ((at - sceneNow()) * 1000) / a.rate);
+      sceneTimer = setTimeout(() => {
+        sceneTimer = null;
+        sceneArmed = null;
+        sceneSwitchAt = null;
+        applyScene(i);
+        emitFakeFrame([scenesEvent(at)]);
+        echoChanges();
+      }, ms);
+    }
+  }
+  sceneAnswers.push(scenesEvent(Math.round(sceneNow())));
+  if (scenesScheduled) return;
+  scenesScheduled = true;
+  queueMicrotask(() => {
+    scenesScheduled = false;
+    emitFakeFrame(sceneAnswers.splice(0));
+  });
+}
+
+/** A scripted frame's clock for the bar line; a reset frame is a new engine, with no scene stored. */
+function applySceneFrame(frame: Pick<FeedFrame, 'reset' | 'events' | 'anchor'>): void {
+  if (frame.reset) {
+    disarmScene();
+    sceneTable.fill(null);
+    sceneCurrent = null;
+  }
+  if (frame.anchor) sceneClock.anchor = frame.anchor;
+  for (const ev of frame.events) if (ev.type === 'Transport') sceneClock.bpm = ev.bpm;
+}
+
+/** Hand `events` to the UI as one frame of the fake's own (no clock, no peaks). */
+function emitFakeFrame(events: EngineEvent[]): void {
+  if (events.length === 0) return;
+  const frame: FeedFrame = { seq: 0, reset: false, events, device: [], anchor: null, meter: lastMeter, peaks: [], scope: null };
+  for (const onFrame of engineSubscribers) onFrame(frame);
+}
+
+/** A command as the fake applies it: a lane's mix, the toggles, and (prototype) the scenes. */
 function applyCommand(c: EngineCommand): void {
   applyMixCommand(c);
   applyToggleCommand(c);
+  applySceneCommand(c);
 }
 
 /** A load sets each loaded lane's mix whole, as the engine clamps it (over a mix sent to the EMPTY
@@ -833,6 +965,7 @@ export const webEngineFake: EngineFake = {
     const frame = decodeFeedFrame(raw);
     applyMixFrame(frame);
     applyToggleFrame(frame);
+    applySceneFrame(frame);
     if (frame.meter) lastMeter = frame.meter;
     for (const onFrame of engineSubscribers) onFrame(frame);
     // A scripted COPY, CLEAR or pedal MUTE changed a lane's mix: its report follows, as the engine's.

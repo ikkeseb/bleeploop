@@ -286,3 +286,41 @@
     transition: none;
   }
 }
+
+/* ---- PROTOTYPE (scenes): the scene that plays, after the lane chips; an armed one pulses amber ---- */
+.sv-scene {
+  position: absolute;
+  top: var(--sv-pad);
+  left: calc(var(--sv-pad) + 5 * var(--sv-chip) + 4 * clamp(5px, 0.8vh, 8px) + var(--sv-chip) * 0.5);
+  height: var(--sv-chip);
+  display: flex;
+  align-items: center;
+  gap: clamp(8px, 1.2vh, 14px);
+  opacity: 0.85;
+}
+.sv-scene__word {
+  font-size: calc(var(--sv-chip) * 0.24);
+  font-weight: 600;
+  letter-spacing: 0.16em;
+  color: var(--faint);
+}
+.sv-scene__now {
+  min-width: var(--sv-chip);
+  height: var(--sv-chip);
+  display: grid;
+  place-items: center;
+  padding: 0 calc(var(--sv-chip) * 0.2);
+  border-radius: 8px;
+  border: 1px solid var(--engaged);
+  color: var(--engaged);
+  font-size: calc(var(--sv-chip) * 0.62);
+  font-weight: 700;
+  line-height: 1;
+}
+.sv-scene__next {
+  font-size: calc(var(--sv-chip) * 0.62);
+  font-weight: 700;
+  line-height: 1;
+  color: var(--dub);
+  animation: sv-rec 0.7s ease-in-out infinite alternate;
+}

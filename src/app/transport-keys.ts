@@ -2,7 +2,7 @@ import { activeIsDrum } from '../ui/state/instrument';
 import { DRUM_KIT } from '../ui/state/drum-kit';
 import * as layoutStore from '../ui/layout/layout-store';
 import { stageOpen } from '../ui/stage/stage-store';
-import { runAction, selectTrack, type ActionId } from './actions';
+import { runAction, runScene, selectTrack, type ActionId } from './actions';
 
 export interface TransportKeysOptions {
   /** Escape was pressed — the app cancels a pending MIDI learn, else closes whichever popover is open.
@@ -49,6 +49,10 @@ export const KEY_ACTIONS: Readonly<Record<string, ActionId>> = {
   b: 'stageView',
   v: 'stageNextView',
 };
+
+/** PROTOTYPE (scenes): F1-F4 press scenes A-D (no note key, digit or drum pad; a keystroke footswitch can
+ * send them). */
+export const SCENE_KEYS: Readonly<Record<string, number>> = { F1: 0, F2: 1, F3: 2, F4: 3 };
 
 /**
  * Keyboard looper transport: an always-on WINDOW handler so transport survives with the keyboard pane
@@ -97,6 +101,13 @@ export function installTransportKeys(opts: TransportKeysOptions): TransportKeys 
     if (action && (action !== 'stageNextView' || stageOpen())) {
       e.preventDefault();
       runAction(action);
+      return;
+    }
+
+    const sceneKey = SCENE_KEYS[e.key];
+    if (sceneKey !== undefined) {
+      e.preventDefault(); // F1 and F3 are the browser's help and find
+      runScene(sceneKey);
       return;
     }
 

@@ -1,4 +1,4 @@
-import { engineClock, engineLooper, engineMaster, engineSampleRate, engineSession } from './engine-store';
+import { engineClock, engineLooper, engineMaster, engineSampleRate, engineScenes, engineSession } from './engine-store';
 
 /**
  * OWNS: the names the UI reads the audio side by: `looper`, `clock`, `master` and `sampleRate` are the
@@ -16,6 +16,9 @@ export const looper = engineLooper;
 export const clock = engineClock;
 export const master = engineMaster;
 export const session = engineSession;
+/** PROTOTYPE (scenes): the scene table the engine reports, and the scene press. */
+export const scenes = engineScenes;
+export type { ScenesView } from './engine-store';
 
 /** The audio clock's rate: the engine's device. */
 export function sampleRate(): number {

@@ -83,6 +83,8 @@ export function Help() {
         </div>
         <ul class="help__list">
           <li><kbd class="help__kbd">1</kbd>–<kbd class="help__kbd">5</kbd> select a track</li>
+          {/* PROTOTYPE (scenes) */}
+          <li><kbd class="help__kbd">F1</kbd>–<kbd class="help__kbd">F4</kbd> press scene A–D: an empty scene saves which tracks play and their volumes, another one switches on the next bar line, the lit one saves again</li>
           <li>In drum mode the pads take <kbd class="help__kbd">1</kbd>–<kbd class="help__kbd">4</kbd>, so only <kbd class="help__kbd">5</kbd> selects a track there</li>
         </ul>
       </section>

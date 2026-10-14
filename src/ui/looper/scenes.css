@@ -1,0 +1,181 @@
+/* PROTOTYPE (scenes): the scene strip over the lanes (Scenes.tsx). One thin row: a label, four chips, a
+   status line. The current scene is the one warm-white face in the looper (warm-white = engaged); an
+   armed scene borrows the ARMED lane's amber dashed pulse until the bar line; a stored one is a plain
+   control face; an empty one is an outline. No colour for sound here: the pips are the lane pattern in
+   tone (filled plays, hollow muted). */
+
+.lp-scenes {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: clamp(8px, 1vw, 14px);
+  height: clamp(26px, 3.6vh, 38px);
+  margin-bottom: clamp(5px, 0.8vh, 9px);
+  padding: 0 clamp(10px, 1vw, 14px);
+}
+/* An open FX drawer is the at-the-desk edit mode, and five lanes plus the drawer must still fit at
+   1280x820 with the keyboard shown (contact-sheet A4): the strip goes compact meanwhile. */
+.lp:has(.lp-drawer) .lp-scenes {
+  height: 22px;
+  margin-bottom: 4px;
+}
+.lp:has(.lp-drawer) .lp-scene__letter {
+  font-size: 13px;
+}
+.lp-scenes__label {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.16em;
+  color: var(--faint);
+}
+.lp-scenes__chips {
+  display: flex;
+  gap: 6px;
+  height: 100%;
+}
+
+:where(.lp-scenes button) {
+  appearance: none;
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+}
+.lp-scene {
+  position: relative;
+  height: 100%;
+  min-width: clamp(64px, 6.4vw, 84px);
+  padding: 0 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  border-radius: 8px;
+  border: 1px solid var(--edge);
+  background: var(--surf-2);
+  box-shadow: inset 0 1px 0 var(--hair);
+  color: var(--dim);
+  cursor: pointer;
+  overflow: hidden;
+  transition: color 0.12s, background-color 0.12s, border-color 0.12s;
+}
+.lp-scene:hover {
+  color: var(--text);
+  background: var(--surf-3);
+}
+.lp-scene:active {
+  background: var(--sunk);
+  box-shadow: var(--pressed);
+}
+.lp-scene__letter {
+  font-size: clamp(15px, 2.2vh, 20px);
+  font-weight: 700;
+  line-height: 1;
+}
+
+/* the lane pattern: five pips, one per lane */
+.lp-scene__pips {
+  display: flex;
+  gap: 3px;
+  align-items: center;
+}
+.lp-scene__pip {
+  width: 5px;
+  height: clamp(9px, 1.5vh, 13px);
+  border-radius: 1.5px;
+  background: currentColor;
+  opacity: 0.85;
+}
+.lp-scene__pip[data-pip='muted'] {
+  background: transparent;
+  box-shadow: inset 0 0 0 1px currentColor;
+  opacity: 0.45;
+}
+.lp-scene__pip[data-pip='none'] {
+  background: currentColor;
+  opacity: 0.12;
+}
+
+/* empty: an outline that invites the first save */
+.lp-scene[data-state='empty'] {
+  background: transparent;
+  box-shadow: none;
+  border-style: dashed;
+  border-color: rgba(255, 255, 255, 0.1);
+  color: var(--faint);
+}
+
+/* current: the warm-white face, switched with no transition so the bar-line change reads at once */
+.lp-scene[data-state='current'] {
+  background: var(--engaged);
+  border-color: var(--engaged);
+  color: var(--bg);
+  transition: none;
+}
+/* the lanes moved away from the current scene: the face dims to an outline-lit legend (press to save) */
+.lp-scene[data-state='current'].is-edited {
+  background: var(--surf-3);
+  color: var(--engaged);
+  border-color: rgba(244, 239, 230, 0.6);
+  border-style: dashed;
+}
+
+/* armed: the ARMED lane's amber dashed ring, pulsing, until the bar line */
+.lp-scene[data-state='armed'] {
+  color: var(--dub);
+  background: color-mix(in srgb, var(--dub) 10%, var(--surf-2));
+  border: 2px dashed var(--dub);
+  animation: lp-scene-armed 0.7s ease-in-out infinite;
+}
+@keyframes lp-scene-armed {
+  0%,
+  100% {
+    border-color: color-mix(in srgb, var(--dub) 35%, transparent);
+  }
+  50% {
+    border-color: var(--dub);
+  }
+}
+
+/* a save: one warm flash over the chip */
+.lp-scene__flash {
+  position: absolute;
+  inset: 0;
+  background: var(--engaged);
+  opacity: 0;
+  pointer-events: none;
+  animation: lp-scene-flash 0.6s ease-out;
+}
+@keyframes lp-scene-flash {
+  from {
+    opacity: 0.55;
+  }
+}
+
+.lp-scenes__status {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+.lp-scenes__status[data-tone='armed'] {
+  color: var(--dub);
+}
+.lp-scenes__status[data-tone='saved'] {
+  color: var(--engaged);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .lp-scene[data-state='armed'] {
+    animation: none;
+    border-color: var(--dub);
+  }
+  .lp-scene__flash {
+    animation: none;
+  }
+}

@@ -3,7 +3,7 @@ import { liveInPlay } from '../ui/state/native-io';
 import { sendEngine, type EngineAction } from '../platform';
 import { pressGoLive } from '../ui/instrument/live';
 import { nextStageView, toggleStage } from '../ui/stage/stage-store';
-import { clock, looper } from '../ui/state/audio';
+import { clock, looper, scenes } from '../ui/state/audio';
 import { engineFade, toggleSetting } from '../ui/state/engine-store';
 import { CONFIRM_WINDOW_MS } from '../ui/looper/shared';
 import {
@@ -262,6 +262,17 @@ export function nativePressed(): void {
  * its row, with no second `Press` (native MIDI sent it, and `nativePressed` ran first). */
 export function runNativeAction(id: 'goLive' | 'tapTempo' | 'stageView' | 'stageNextView'): void {
   GLOBAL[id]();
+}
+
+/**
+ * PROTOTYPE (scenes): press scene `i` (a chip, F1-F4). A looper press like any other (it breaks a pending
+ * CLEAR); the engine saves, arms or disarms (`{ Scene }`, `engine-wire.ts`). Not yet an `ActionId`: a
+ * learnable pedal action needs native MIDI's `ActionId` beside it (`src-tauri/`, out of the prototype),
+ * so for now a keystroke footswitch reaches it through F1-F4.
+ */
+export function runScene(i: number): void {
+  onPress();
+  scenes.press(i);
 }
 
 /** Select track `i` outright (the digit keys). Not a table row, since it names its track, but a looper

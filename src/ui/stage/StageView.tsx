@@ -1,5 +1,6 @@
 import { For, Show, createEffect, createMemo, createSignal, on, onCleanup, onMount, untrack } from 'solid-js';
-import { clock, looper, sampleRate } from '../state/audio';
+import { clock, looper, sampleRate, scenes } from '../state/audio';
+import { SCENE_LETTERS } from '../looper/Scenes';
 import { masterBars } from '../looper/shared';
 import { DATA_STATE, createLaneView, type LaneWord } from '../looper/lane-state';
 import { feed, type LaneKind } from './stage-feed';
@@ -245,6 +246,17 @@ export function StageView(props: { onExit: () => void }) {
             )}
           </For>
         </div>
+
+        {/* PROTOTYPE (scenes): the scene that plays, and the one armed for the bar line. */}
+        <Show when={scenes.view().current !== null || scenes.view().armed !== null}>
+          <div class="sv-scene" role="status" aria-label={`Scene ${SCENE_LETTERS[scenes.view().current ?? -1] ?? 'none'}`}>
+            <span class="sv-scene__word">SCENE</span>
+            <span class="sv-scene__now">{SCENE_LETTERS[scenes.view().current ?? -1] ?? '–'}</span>
+            <Show when={scenes.view().armed !== null}>
+              <span class="sv-scene__next">→ {SCENE_LETTERS[scenes.view().armed ?? -1]}</span>
+            </Show>
+          </div>
+        </Show>
 
         <div class="sv-tempo">
           <span class="sv-bpm" aria-label={`${Math.round(clock.bpm())} BPM`}>

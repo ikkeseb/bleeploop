@@ -201,7 +201,13 @@ export type EngineCommand =
   | { SetInputSendParam: [InputSendParamId, number] }
   /** The live scope taps on or off: the UI asks for columns while the stage view is open
    * (`ScopeUpdate`). Off (the default) the engine folds and sends nothing. */
-  | { SetScope: boolean };
+  | { SetScope: boolean }
+  /** PROTOTYPE (scenes; no Rust side yet, `src-tauri/` has no `Command::Scene`): a press on scene
+   * 0..`SCENE_COUNT - 1`. An empty scene takes the lanes' mute and volume now and becomes current; the
+   * current one, pressed with nothing armed, takes them again; another stored scene arms and applies on
+   * the next bar line of the engine's clock (invariant 1); a press on the armed scene, or on the current
+   * one while another is armed, disarms. Answered by `Scenes` (and `SceneSaved` for a save). */
+  | { Scene: number };
 
 /** Rust `engine_io::DeviceRequest`: what `engine_open` opens (or switches to). The capture channels are
  * each plugin slot's (`inputChannels`), or one for both (`inputChannel`); 0-based, null = auto (input 2
@@ -254,6 +260,16 @@ export interface LaneInfo {
   retakePass: number;
 }
 
+/** PROTOTYPE (scenes): how many scenes the table holds. */
+export const SCENE_COUNT = 4;
+
+/** PROTOTYPE (scenes): one lane as a scene holds it, or null for a lane that held no loop when the scene
+ * was saved (a switch leaves that lane alone). */
+export interface SceneLane {
+  volume: number;
+  muted: boolean;
+}
+
 /** Rust `lf_engine::Event`, decoded to a `type`-tagged union. */
 export type EngineEvent =
   | { type: 'Lane'; frame: Frame; lane: number; info: LaneInfo }
@@ -279,7 +295,20 @@ export type EngineEvent =
   /** A toggled setting's value as the engine applies it: after an accepted `Toggle`, and whenever it differs
    * from the last one delivered (a setter changed it; a full ring delayed it). The UI shows the setting from
    * it; a reset frame's settings carry the value the host last read. */
-  | { type: 'Toggled'; frame: Frame; toggle: EngineToggle; on: boolean };
+  | { type: 'Toggled'; frame: Frame; toggle: EngineToggle; on: boolean }
+  /** PROTOTYPE (scenes): the scene table as the engine holds it, after every change: the scene that
+   * applies now (null: none yet), the one armed for the bar line at `switchAt` (null: none), and each
+   * scene's lanes (null: an empty scene). A reset frame without it: no scene stored. */
+  | {
+      type: 'Scenes';
+      frame: Frame;
+      current: number | null;
+      armed: number | null;
+      switchAt: Frame | null;
+      table: ((SceneLane | null)[] | null)[];
+    }
+  /** PROTOTYPE (scenes): a press saved the lanes into scene `scene` (a first press or a re-save). */
+  | { type: 'SceneSaved'; frame: Frame; scene: number };
 
 /** Rust `engine_io::DeviceEvent`, decoded to a `type`-tagged union. */
 export type DeviceEvent =
@@ -468,6 +497,29 @@ export function decodeEvent(raw: unknown): EngineEvent {
       return { type: 'Mix', frame: at, lane: lane(o.lane, 'Mix.lane'), mix: decodeLaneMix(o.mix, 'Mix.mix') };
     case 'Toggled':
       return { type: 'Toggled', frame: at, toggle: decodeToggle(o.toggle, 'Toggled.toggle'), on: bool(o.on, 'Toggled.on') };
+    // PROTOTYPE (scenes): no Rust side yet.
+    case 'Scenes': {
+      const sceneNo = (v: unknown, what: string) => nullable(v, (n) => int(n, what, 0, SCENE_COUNT - 1));
+      return {
+        type: 'Scenes',
+        frame: at,
+        current: sceneNo(o.current, 'Scenes.current'),
+        armed: sceneNo(o.armed, 'Scenes.armed'),
+        switchAt: nullable(o.switchAt, (v) => frame(v, 'Scenes.switchAt')),
+        table: array(o.table, 'Scenes.table', SCENE_COUNT).map((scene, k) =>
+          nullable(scene, (lanes) =>
+            array(lanes, `Scenes.table[${k}]`, ENGINE_LANES).map((l, i) =>
+              nullable(l, (v) => {
+                const sl = obj(v, `Scenes.table[${k}][${i}]`);
+                return { volume: num(sl.volume, 'SceneLane.volume'), muted: bool(sl.muted, 'SceneLane.muted') };
+              }),
+            ),
+          ),
+        ),
+      };
+    }
+    case 'SceneSaved':
+      return { type: 'SceneSaved', frame: at, scene: int(o.scene, 'SceneSaved.scene', 0, SCENE_COUNT - 1) };
     default:
       return fail('unknown Event variant', raw);
   }
@@ -654,6 +706,10 @@ export function decodeCommand(raw: unknown): EngineCommand {
       }
       case 'SetFadeBars':
         int(p, 'SetFadeBars', 1);
+        break;
+      // PROTOTYPE (scenes): no Rust side yet.
+      case 'Scene':
+        int(p, 'Scene', 0, SCENE_COUNT - 1);
         break;
       case 'SetDubFeedback': {
         const [l, v] = pair('(lane, feedback)');
