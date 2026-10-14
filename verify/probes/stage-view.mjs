@@ -37,6 +37,9 @@
  *   later take beside a PLAYING lane (countLeft 0) reads WAITING FOR DOWNBEAT and shows no numeral.
  * - cue: an engine refusal (`Empty`) on lane 3 puts "3 · reason" in the message line, which clears
  *   when the cue ends.
+ * - cue-width: at 1000x700 with the buttons hidden, every engine refusal on lane 5: the message line
+ *   spans the window less its padding (no room kept for the hidden buttons) and RETAKE's reason reads
+ *   whole; the reasons still cut off are logged, and the longest one is shot (`1000x700-<look>-cue-idle.png`).
  * - bar: no bar read-out with no loop; on a 2- and a 4-bar loop at 240 BPM the bar steps one at a time
  *   across the loop boundary and the lit beat dot follows the scripted `Beat`; at rest it reads bar 1.
  * - controls: the two buttons hide after 3 s without the pointer and return on a pointer move and on a
@@ -64,7 +67,7 @@
  *   muted, overdubbing, stopped, and one empty), with the engine's live scope columns fed in over the
  *   whole loop and the newest one at the playhead, at three loop phases, a later take recording, an armed
  *   wait, a first take, LISTENING, the count-in and the rest state, in logs/stage-view/, plus tiled
- *   sheets (sheet-<look>-<a|b>.png).
+ *   sheets (sheet-<look>-<a|b>.png). The run first empties the folder's PNGs.
  *
  * Cannot see the native engine (the looper state machine, count-in, takes, overdubs and refusals are
  * lf-engine's tests), Tauri IPC, WebView2, the GPU the owner's machine draws with, or the distance the
@@ -76,7 +79,7 @@
  * Run: pnpm probe stage-view
  */
 import assert from 'node:assert/strict';
-import { mkdir, readFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, rm } from 'node:fs/promises';
 import { arg, probe } from '../harness/probe.ts';
 
 const outDir = 'logs/stage-view';
@@ -293,6 +296,8 @@ const stopped = (length) => lane('Stopped', { length, canReverse: true });
 
 await probe(async ({ browser, open }) => {
   await mkdir(outDir, { recursive: true });
+  // The probe writes over its own shots: a scene renamed or dropped leaves no stale PNG behind.
+  for (const f of await readdir(outDir)) if (f.endsWith('.png')) await rm(`${outDir}/${f}`);
   // Time the stage's frame from outside: its rAF callback (`stageFrame`, stage-loop.ts) and the looper
   // lanes' (`frame`, waveform.ts) run through one trampoline each, so the wrapper allocates nothing.
   const init = async (p) => {
@@ -1043,6 +1048,40 @@ await probe(async ({ browser, open }) => {
     await emit({ events: [laneEvent(0, lane('Playing', { length: LOOP, stopAt: LOOP }))] });
     await page.waitForFunction(() => document.querySelector('.sv-msg').textContent !== '');
     assert.deepEqual([(await hud()).msg, (await hud()).tone], ['1 · STOPPING AT LOOP END', 'stop']);
+  });
+
+  await group('cue-width', async () => {
+    await page.setViewportSize({ width: 1000, height: 700 });
+    await page.mouse.move(300, 300);
+    await setOpen(true);
+    await loops(2, 'Playing');
+    await page.waitForFunction(() => document.querySelector('.sv-ctl').classList.contains('is-idle'), undefined, { timeout: 6000 })
+      .catch(() => assert.fail('the buttons hide after 3 s without the pointer'));
+    // Every reason the engine names (`src/platform/engine-wire.ts` REFUSALS), on lane 5, each read
+    // whole or cut off by the ellipsis while the buttons are hidden.
+    const reasons = ['Stopping', 'PlayFirst', 'Reversed', 'OtherRecording', 'Empty', 'NoUndo', 'NoClear', 'ConfirmClear', 'Capturing', 'NoTrim',
+      'NoMute', 'NoReverse', 'NoCopy', 'NoFreeLane', 'Fading', 'NoFade', 'FixedCapturing', 'FixedRetake', 'RetakeCapturing', 'AutoRecCapturing', 'AutoRecLocked'];
+    const read = [];
+    for (const reason of reasons) {
+      const want = await page.evaluate((r) => import('/src/ui/looper/gates.ts').then((m) => `5 · ${m.refusalText(r)}`), reason);
+      await emit({ events: [{ Refused: { frame: 0, lane: 4, reason } }] });
+      await page.waitForFunction((w) => document.querySelector('.sv-msg').textContent === w, want);
+      read.push(await page.evaluate((r) => {
+        const el = document.querySelector('.sv-msg');
+        return { reason: r, chars: el.textContent.length, scroll: el.scrollWidth, client: el.clientWidth, fits: el.scrollWidth <= el.clientWidth };
+      }, reason));
+    }
+    const longest = read.reduce((a, b) => (b.chars > a.chars ? b : a));
+    await emit({ events: [{ Refused: { frame: 0, lane: 4, reason: longest.reason } }] });
+    await page.screenshot({ path: `${outDir}/1000x700-${await view()}-cue-idle.png` });
+    console.log(JSON.stringify({ cueWidth: read, cutOff: read.filter((x) => !x.fits).map((x) => x.reason) }));
+    assert.equal(await page.evaluate(() => document.querySelector('.sv-ctl').classList.contains('is-idle')), true, 'the buttons stayed hidden');
+    // The line may take the window less the HUD's padding, and no longer the buttons' room. Some
+    // reasons are wider than even that at 1000x700 (logged as cutOff above): their wording is the owner's.
+    const room = await page.evaluate(() => innerWidth - 2 * parseFloat(getComputedStyle(document.querySelector('.sv-msg')).bottom)); // bottom: var(--sv-pad)
+    assert.ok(longest.client >= room - 1, `the longest reason's line spans the window less its padding (${longest.client} of ${room} px)`);
+    const retake = read.find((x) => x.reason === 'RetakeCapturing');
+    assert.ok(retake.fits, `RETAKE's refusal reads whole (${retake.scroll} > ${retake.client} px)`);
   });
 
   await group('bar', async () => {

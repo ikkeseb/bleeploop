@@ -11,7 +11,7 @@
   min-width: 276px;
   padding: 15px;
   border-radius: 14px;
-  /* near-opaque panel: the popover floats over the busy lanes, so it needs a solid backdrop to stay
+  /* opaque panel: the popover floats over the busy lanes, so it needs a solid backdrop to stay
      legible without a blur. */
   background: var(--panel);
   border: 1px solid var(--edge);

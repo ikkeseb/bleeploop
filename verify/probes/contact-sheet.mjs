@@ -1,18 +1,19 @@
 /** Screenshot contact sheet: fixed looper scenes at three viewports (1280x820, 1920x1080, 1000x700),
  * keyboard bottom and hidden, in engine mode on the web engine fake (`src/platform/host.web.ts`, the
  * `engine-seam` pattern: `window.__lfEngineFake` set before the app loads, every lane, the clock and the
- * waveforms scripted on the feed through `__lf.native`). Scenes 1-7, 11 and 12 run in one fresh browser
+ * waveforms scripted on the feed through `__lf.native`). Scenes 1-7 and 11-13 run in one fresh browser
  * context: 1-empty, 4-count-in (lane 1 ARMED behind the count-in), 2-first-take-recording (a first take
  * one second in), 3-armed-waiting (a two-bar loop at 60 BPM playing, lane 2 an ARMED later take waiting
  * for the boundary), 5-fx-five-lanes (five stopped one-bar lanes, lane 1's FX drawer open), 6-help,
  * 7-audio-settings, 12-stage-<look> (the stage view opened by its command-bar cap over five lanes, three
- * playing and one muted, once per look of `src/ui/stage/views.ts`, stepped with V) and 11-engine-in-fx (a reset frame with every input send on, the IN FX popover open). Scenes 8-10 are
+ * playing and one muted, once per look of `src/ui/stage/views.ts`, stepped with V), 13-tight-lanes (lane 1
+ * dubbed with UNDO lit, lane 2 ENDING, lane 3 showing a refused UNDO's cue in its well, lanes 4-5 stopped) and 11-engine-in-fx (a reset frame with every input send on, the IN FX popover open). Scenes 8-10 are
  * the Windows app's guitar-first screen, in a second fresh context whose plugin host is served with
  * `available: true` (host.web.ts routed, the slot-sources pattern) and stubbed: a scan that finds one
  * amp-sim (an effect), stubbed load/editor replies. 8-native-first-launch = the host booted, nothing
  * loaded (slot A's source picker offers the amp-sim under Plugins); 9-amp-sim-live = the amp-sim picked in
  * slot A's picker, which auto-starts GO LIVE and the editor (INPUT LIVE); 10-amp-sim-idle = the same after
- * stopping live input. Writes logs/contact-sheet/<viewport>-<kbd>-<scene>.png plus a tiling index.html
+ * stopping live input. Empties its own PNGs, then writes logs/contact-sheet/<viewport>-<kbd>-<scene>.png plus a tiling index.html
  * unconditionally, before any FAIL is raised, so a red run still leaves the sheet for the eye lap.
  * Asserts: with FX open every lane's clear button is present, and fully visible wherever five lanes fit
  * (audit A4; at 1000x700 with the keyboard shown the lanes scroll by design); an ARMED later take draws
@@ -21,14 +22,14 @@
  * native engine, a real plugin host or WebView2; a human still judges the screenshots.
  * Run: pnpm probe contact-sheet
  */
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, rm, writeFile } from 'node:fs/promises';
 import { probe } from '../harness/probe.ts';
 
 const outDir = 'logs/contact-sheet';
 const viewports = [[1280, 820], [1920, 1080], [1000, 700]];
 const placements = ['bottom', 'hidden'];
 const scenes = ['1-empty', '2-first-take-recording', '3-armed-waiting', '4-count-in', '5-fx-five-lanes', '6-help', '7-audio-settings',
-  '8-native-first-launch', '9-amp-sim-live', '10-amp-sim-idle', '11-engine-in-fx'];
+  '13-tight-lanes', '8-native-first-launch', '9-amp-sim-live', '10-amp-sim-idle', '11-engine-in-fx'];
 const REC_PIXEL_LIMIT = 20; // anti-aliasing slack; a red playhead or tape is hundreds of pixels
 const RATE = 48000;
 const PEAK_FRAMES = 1024; // the engine's waveform bin (`lf-engine/src/overview.rs`)
@@ -73,6 +74,8 @@ const loopFrame = ({ count, playing, bpm = 120, bars = 1 }) => {
 
 await probe(async ({ browser, open }) => {
   await mkdir(outDir, { recursive: true });
+  // The probe writes over its own sheet: a scene renamed or dropped leaves no stale PNG behind.
+  for (const f of await readdir(outDir)) if (f.endsWith('.png')) await rm(`${outDir}/${f}`);
   const failures = [];
   const shots = [];
   const fail = (msg) => { failures.push(msg); console.log(`FAIL ${msg}`); };
@@ -221,6 +224,21 @@ await probe(async ({ browser, open }) => {
       await page.waitForTimeout(250);
       await shoot(scene);
       await page.evaluate(() => window.__lf.ui.closeSettings());
+
+      // The lanes' tightest states side by side: lane 1 dubbed (UNDO lit, so its right cluster shows
+      // every button), lane 2 ENDING (a stop pending at the loop end), lane 3 showing a refused UNDO's
+      // cue in its well (the cue lasts 1.6 s: gates.ts CUE_MS); lanes 4 and 5 stopped.
+      scene = '13-tight-lanes';
+      const tight = loopFrame({ count: 5, playing: [0, 1, 2] });
+      const tightMaster = tight.events[0].Transport.master;
+      await emit(tight);
+      await emit({ events: [
+        laneEvent(0, lane('Playing', { length: tightMaster, canReverse: true, canUndo: true })),
+        laneEvent(1, lane('Playing', { length: tightMaster, canReverse: true, stopAt: tightMaster })),
+        { Refused: { frame: 0, lane: 2, reason: 'NoUndo' } },
+      ] });
+      await page.waitForTimeout(300);
+      await shoot(scene);
 
       scene = '12-stage';
       await emit(loopFrame({ count: 5, playing: [0, 2, 3] }));
