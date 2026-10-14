@@ -29,15 +29,24 @@ let failedFiles = 0;
 const rows = [];
 
 for (const f of files) {
-  const res = spawnSync(process.execPath, [join(here, f)], { encoding: 'utf8', timeout: TIMEOUT_MS });
+  // SIGKILL: a guard cannot ignore it, so the timeout bounds the child's life.
+  const res = spawnSync(process.execPath, [join(here, f)], {
+    encoding: 'utf8',
+    timeout: TIMEOUT_MS,
+    killSignal: 'SIGKILL',
+  });
   const timedOut = res.error?.code === 'ETIMEDOUT';
   const out = `${res.stdout || ''}${res.stderr || ''}`;
-  const m = out.match(/(\d+)\/(\d+) checks passed/);
+  // Exactly one RESULT line, consistent with itself: a count printed elsewhere in the output, a second
+  // RESULT line or one that reports failures cannot pass.
+  const results = [...out.matchAll(/^=== RESULT: (\d+)\/(\d+) checks passed, (\d+) failed ===\r?$/gm)];
+  const m = results.length === 1 ? results[0] : null;
   const checks = m ? Number(m[2]) : 0;
   const failedInFile = m ? Number(m[2]) - Number(m[1]) : NaN;
   // checks > 0: a verifier reporting "0/0 checks passed" (a fully-rotted guard that asserts nothing)
   // must FAIL, not silently pad the green summary.
-  const ok = !timedOut && res.status === 0 && m && failedInFile === 0 && checks > 0;
+  const ok =
+    !timedOut && res.status === 0 && m && failedInFile === 0 && Number(m[3]) === 0 && checks > 0;
   totalChecks += checks;
   if (!ok) failedFiles += 1;
   rows.push({
@@ -49,7 +58,9 @@ for (const f of files) {
         ? checks > 0
           ? `${m[1]}/${m[2]}`
           : `${m[1]}/${m[2]} (0 checks ran)`
-        : '(no RESULT line)',
+        : results.length > 1
+          ? `(${results.length} RESULT lines)`
+          : '(no RESULT line)',
     status: res.status,
   });
   if (!ok) {
