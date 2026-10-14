@@ -97,9 +97,10 @@
 //!   switch on the next loop boundary (an undo's switch crossfades there, D23), and a DUB pressed before it
 //!   makes the switch heard at once (D19); STOP on an overdubbing
 //!   lane discards the whole layer (its tail plays the layer as heard); an input gap
-//!   damages only the capture windows (RETAKE passes) its frames reach on the record tap (a plugin's
-//!   latency later, a plugin off live still playing out what it held; from a jump on, every frame to
-//!   there), however far apart two gaps land, and resets AUTO's listening history;
+//!   damages only the capture windows (RETAKE passes) its frames reach on the record tap, through each
+//!   slot path the live gate opens to them (a bypass's dry side on its own frames, a unit its latency
+//!   later, each slot's wet line its delay later; from a jump on, every frame to the slowest's end),
+//!   however far apart two gaps land, and resets AUTO's listening history;
 //!   a jump in the device frame drops the beats it skipped, and count-in beats fire late as one click.
 //! - **`process` never allocates, locks or waits.** Buffers are allocated (and their pages touched) in
 //!   `Engine::new`; commands and events cross on rtrb rings; a full event ring refuses and counts. A

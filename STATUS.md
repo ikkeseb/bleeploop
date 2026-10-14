@@ -96,6 +96,8 @@ it.
 - TRIM: halve an 8-bar lane while it plays (its first 4 bars from the next loop start); ↶ UNDO brings
   the 8 back; no click at either swap.
 - DUB FEEDBACK 50 %, two passes: the old layers fade; 0 % replaces; ↶ UNDO brings the loop back.
+- A dropout through the amp-sim's latency: an xrun just before a DUB closes rejects the overdub layer
+  its silence lands in, and spares the one it misses (machine: `tests/overdub_undo_reverse.rs`).
 - 10+ minutes: loops and click stay tight, no LED hop at a commit, no flam on the commit beat's click.
   A free record past 60 s closes at the 60 s cap, not on a bar line (at 137 BPM a quarter bar past bar
   34's; the 34-bar loop comes in there, mid-bar): fine, or close on the last bar line?

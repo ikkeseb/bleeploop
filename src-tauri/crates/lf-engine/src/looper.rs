@@ -38,7 +38,7 @@
 
 use std::sync::Arc;
 
-use crate::api::{Action, Command, CompactMix, Event, LaneInfo, LaneMix, LaneState, Refusal, Toggle, HOLD_CONTROLS, TRACK_COUNT};
+use crate::api::{Action, Command, CompactMix, Event, LaneInfo, LaneMix, LaneState, Refusal, Toggle, HOLD_CONTROLS, SLOT_COUNT, TRACK_COUNT};
 use crate::autorec::{self, Detector};
 use crate::clock::Clock;
 use crate::effects::LaneFx;
@@ -63,7 +63,8 @@ const CONFIRM_WINDOW_MS: Frame = 2500;
 const MAX_JOBS: usize = 16;
 /// Input gaps kept for the windows still to open (`Looper::input_gap`), each only while one can reach it
 /// (a plugin's latency ahead, or behind a RETAKE roll a jump left catching up). Past that many, the two
-/// nearest each other join: overlapping ones first (a storm's adjacent blocks).
+/// on the same line nearest each other join: overlapping ones first (a storm's adjacent blocks). More
+/// than the lines (the tap's own and each slot's), so two always share one.
 const MAX_GAPS: usize = 16;
 /// Lane volume smoothing: the Web Audio setTargetAtTime time constant.
 const GAIN_TAU_SECONDS: f64 = 0.01;
@@ -237,11 +238,29 @@ struct Recorder {
     prev_spare_reversed: bool,
 }
 
+/// An input gap as the record tap carries it (`Looper::input_gap`): frames `[from, to)` of the tap, or
+/// (`line`) of a slot's wet line, which reach the tap that line's delay later, as the line is when the tap
+/// reads them (`Looper::set_line_delays`): a delay latched after the gap reads the line there too.
+#[derive(Clone, Copy)]
+pub(crate) struct Gap {
+    pub from: Frame,
+    pub to: Frame,
+    pub line: Option<usize>,
+}
+
+impl Gap {
+    fn on_tap(self, delays: &[Frame; SLOT_COUNT]) -> (Frame, Frame) {
+        let d = self.line.map_or(0, |s| delays[s]);
+        (self.from + d, self.to + d)
+    }
+}
+
 impl Recorder {
     /// The record tap lost frames `[from, to)` (`from == to`: a point xrun just before `to`): whether
-    /// they fall inside the window.
-    fn hit(&self, (from, to): (Frame, Frame)) -> bool {
-        self.start.is_some_and(|s| to > s) && self.end.is_none_or(|e| from < e)
+    /// they fall inside the window, one with no end yet judged up to `known` (the capture judges the rest
+    /// as it reaches them: a plugin's latency carries a gap ahead, past where a press may end it).
+    fn hit(&self, (from, to): (Frame, Frame), known: Frame) -> bool {
+        self.start.is_some_and(|s| to > s) && from < self.end.unwrap_or(known)
     }
 
     fn new(lane: usize, kind: Kind, align: Frame) -> Self {
@@ -454,8 +473,12 @@ pub struct Looper {
     job_step_max: Frame,
     /// Every buffer position the block jobs have moved.
     job_work: Frame,
-    /// The record tap's input gaps a window not yet opened may still reach (`Looper::input_gap`).
-    gaps: [Option<(Frame, Frame)>; MAX_GAPS],
+    /// The input gaps a window not yet opened may still reach (`Looper::input_gap`).
+    gaps: [Option<Gap>; MAX_GAPS],
+    /// Each slot's wet line delay to the record tap, and the longest one can latch
+    /// (`Looper::set_line_delays`).
+    line_delays: [Frame; SLOT_COUNT],
+    line_reach: Frame,
     detector: Detector,
     gain_coef: f64,
     loop_end_stop: bool,
@@ -512,6 +535,8 @@ impl Looper {
             job_step_max: 0,
             job_work: 0,
             gaps: [None; MAX_GAPS],
+            line_delays: [0; SLOT_COUNT],
+            line_reach: 0,
             detector: Detector::new(sample_rate),
             gain_coef: (-1.0 / (GAIN_TAU_SECONDS * sample_rate as f64)).exp(),
             loop_end_stop: false,
@@ -1345,7 +1370,7 @@ impl Looper {
         }
         self.rec = Some(rec);
         self.configure_end(cx);
-        self.damage_from_gaps();
+        self.damage_from_gaps(cx.now);
     }
 
     /// Bound the take at the FIXED bar count or the buffer; RETAKE rolls a known length (the master once
@@ -1590,7 +1615,7 @@ impl Looper {
         t.audible = t.logical();
         t.written = 0;
         self.rec = Some(rec);
-        self.damage_from_gaps();
+        self.damage_from_gaps(cx.now);
     }
 
     /// AUTO: the onset retained in `live[..copied]` began at input frame `onset`. The grid anchors where
@@ -1604,7 +1629,7 @@ impl Looper {
         self.lanes[rec.lane].auto_armed = false;
         cx.clock.set_locked(true);
         self.configure_end(cx);
-        self.damage_from_gaps();
+        self.damage_from_gaps(cx.now);
         cx.clock.start_auto_record(downbeat, cx.now);
     }
 
@@ -1689,7 +1714,7 @@ impl Looper {
         self.tail_next = 0;
         self.tail_len = 0;
         self.rec = Some(rec);
-        self.damage_from_gaps();
+        self.damage_from_gaps(cx.now);
         self.push_job(cx.now, cx.now, i, JobKind::Copy { src, dst }, Visit { lo: 0, span: master, off: first_pos, modulus: master });
     }
 
@@ -2235,50 +2260,64 @@ impl Looper {
 
     // ── Audio ──────────────────────────────────────────────────────────────────────────────────────
 
-    /// The record tap lost frames `[from, to)` (a point xrun: `from == to`, a gap just before `to`; the
-    /// engine maps the device's lost input frames there, through each slot's latency), told at the block
-    /// starting at `now`: a capture whose window they fall inside is damaged; AUTO drops the history it
-    /// can no longer join. Every window checks the gaps kept as it opens, so a gap past a window's end
-    /// damages the windows that follow too (a RETAKE pass, a handoff's take), and a press in a damaged
-    /// block damages the window it opens there. A gap is kept, apart from the others, while a window not
-    /// yet opened can reach it: a window opened from here starts at `now` or later, but a recorder behind
-    /// it (a jump skipped RETAKE passes, and `events` catches up four edges at a time, or a plugin's
-    /// latency carries the gap passes ahead) opens its next pass at its window's end, so a clean pass
-    /// between two gaps stays clean and a later xrun never makes a skipped pass clean. In a full table the
-    /// two gaps nearest each other join, the frames between them lost too: it rejects more, never less,
-    /// and the least more it can.
-    pub fn input_gap(&mut self, from: Frame, to: Frame, now: Frame) {
+    /// At a block start: each slot's wet line delay to the record tap as the rack latched it, and the
+    /// longest one can latch. They hold while a window is open (its alignment latches them).
+    pub(crate) fn set_line_delays(&mut self, delays: [Frame; SLOT_COUNT], reach: Frame) {
+        (self.line_delays, self.line_reach) = (delays, reach);
+    }
+
+    /// The device lost input, told at the block starting at `now`, as `gaps` on the record tap (the
+    /// engine maps the lost input frames there, a slot's paths apart: [`Gap`]; a point xrun: `from == to`,
+    /// a gap just before `to`): a capture whose window they fall inside is damaged; AUTO drops the
+    /// history it can no longer join. Every window checks the gaps kept as it opens, so a gap past a
+    /// window's end damages the windows that follow too (a RETAKE pass, a handoff's take), and a press in
+    /// a damaged block damages the window it opens there. A gap is kept, apart from the others, while a
+    /// window not yet opened can reach it: a window opened from here starts at `now` or later, but a
+    /// recorder behind it (a jump skipped RETAKE passes, and `events` catches up four edges at a time, or
+    /// a plugin's latency carries the gap passes ahead) opens its next pass at its window's end, so a
+    /// clean pass between two gaps stays clean and a later xrun never makes a skipped pass clean; a gap on
+    /// a line is kept the longest delay the line can latch longer. In a full table the two gaps on one
+    /// line nearest each other join, the frames between them lost too: it rejects more, never less, and
+    /// the least more it can.
+    pub(crate) fn input_gap(&mut self, gaps: &[Option<Gap>], now: Frame) {
         let reach = self.rec.and_then(|r| r.end).map_or(now, |e| e.min(now));
+        let line_reach = self.line_reach;
         for kept in &mut self.gaps {
-            if kept.is_some_and(|(_, b)| b <= reach) {
+            if kept.is_some_and(|g| g.to + if g.line.is_some() { line_reach } else { 0 } <= reach) {
                 *kept = None;
             }
         }
-        let gap = (from, to);
-        if let Some(free) = self.gaps.iter_mut().find(|kept| kept.is_none()) {
-            *free = Some(gap);
-        } else {
-            let all: [(Frame, Frame); MAX_GAPS + 1] = std::array::from_fn(|k| self.gaps.get(k).copied().flatten().unwrap_or(gap));
-            let apart = |(a, b): (Frame, Frame), (c, d): (Frame, Frame)| (c - b).max(a - d);
-            let pairs = (0..MAX_GAPS).flat_map(|i| (i + 1..=MAX_GAPS).map(move |j| (i, j)));
-            if let Some((i, j)) = pairs.min_by_key(|&(i, j)| apart(all[i], all[j])) {
-                self.gaps[i] = Some((all[i].0.min(all[j].0), all[i].1.max(all[j].1)));
-                if j < MAX_GAPS {
-                    self.gaps[j] = Some(gap);
-                }
-            }
+        for &gap in gaps.iter().flatten() {
+            self.keep_gap(gap);
         }
         let Some(rec) = self.rec else { return };
         if self.lanes[rec.lane].auto_armed {
             self.detector.reset();
         } else {
-            self.damage_from_gaps();
+            self.damage_from_gaps(now);
         }
     }
 
-    fn damage_from_gaps(&mut self) {
-        let gaps = &self.gaps;
-        if let Some(rec) = self.rec.as_mut().filter(|r| gaps.iter().flatten().any(|&gap| r.hit(gap))) {
+    fn keep_gap(&mut self, gap: Gap) {
+        if let Some(free) = self.gaps.iter_mut().find(|kept| kept.is_none()) {
+            *free = Some(gap);
+            return;
+        }
+        let all: [Gap; MAX_GAPS + 1] = std::array::from_fn(|k| self.gaps.get(k).copied().flatten().unwrap_or(gap));
+        let apart = |x: Gap, y: Gap| (y.from - x.to).max(x.from - y.to);
+        let pairs = (0..MAX_GAPS).flat_map(|i| (i + 1..=MAX_GAPS).map(move |j| (i, j))).filter(|&(i, j)| all[i].line == all[j].line);
+        if let Some((i, j)) = pairs.min_by_key(|&(i, j)| apart(all[i], all[j])) {
+            self.gaps[i] = Some(Gap { from: all[i].from.min(all[j].from), to: all[i].to.max(all[j].to), line: all[i].line });
+            if j < MAX_GAPS {
+                self.gaps[j] = Some(gap);
+            }
+        }
+    }
+
+    /// A window the kept gaps reach is damaged, one with no end yet as far as `known`.
+    fn damage_from_gaps(&mut self, known: Frame) {
+        let (gaps, delays) = (&self.gaps, &self.line_delays);
+        if let Some(rec) = self.rec.as_mut().filter(|r| gaps.iter().flatten().any(|&gap| r.hit(gap.on_tap(delays), known))) {
             rec.damaged = true;
         }
     }
@@ -2305,6 +2344,8 @@ impl Looper {
     /// could land where its undo copy has not been yet (a device jump carries the write head past the
     /// copy, `skip`), which the rejection would then restore as the loop before the layer.
     pub fn capture(&mut self, f0: Frame, input: &[f32]) {
+        let hi = f0 + input.len() as Frame;
+        self.damage_from_gaps(hi);
         let Some(rec) = self.rec.as_mut() else { return };
         let Some(start) = rec.start else { return };
         let lane = &mut self.lanes[rec.lane];
@@ -2312,7 +2353,7 @@ impl Looper {
             return;
         }
         let lo = f0.max(start);
-        let hi = (f0 + input.len() as Frame).min(rec.end.unwrap_or(Frame::MAX));
+        let hi = hi.min(rec.end.unwrap_or(Frame::MAX));
         if lo >= hi {
             return;
         }

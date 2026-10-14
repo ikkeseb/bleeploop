@@ -10,13 +10,15 @@
 
 mod common;
 
+use std::sync::{Arc, Mutex};
+
 use common::{code, Rig};
 use lf_engine::dsp::fx::{FxKind, FxParam, FxState, MAX_FEEDBACK};
 use lf_engine::grid::{frames_per_bar, Frame};
 use lf_engine::overview::PEAK_FRAMES;
 use lf_engine::render::wet_master;
 use lf_engine::session::SNAPSHOT_RATE;
-use lf_engine::{Command, LaneMix, LaneState, Load, LoadTrack, SessionError, SessionJob, Snapshot};
+use lf_engine::{Command, Engine, EngineConfig, EngineHandle, LaneMix, LaneState, Load, LoadTrack, SessionError, SessionJob, SlotEvent, SlotKind, SlotProcessor, Snapshot, TimedCommand};
 
 /// Hand `job` to the engine and render until it comes back.
 fn run(rig: &mut Rig, job: SessionJob) -> SessionJob {
@@ -776,4 +778,55 @@ fn with_no_device_a_snapshot_behind_a_take_waits_for_the_device() {
         }
     }
     panic!("the device's first blocks never served the snapshot");
+}
+
+/// An effect whose `latency`, read as the engine installs it (inside a block, after it has taken its
+/// commands), sends a setting and then a load on the ports it holds: the host racing the audio thread.
+struct Racer(Arc<Mutex<(Option<EngineHandle>, Option<Box<SessionJob>>)>>);
+
+impl SlotProcessor for Racer {
+    fn kind(&self) -> SlotKind {
+        SlotKind::Effect
+    }
+
+    fn latency(&self) -> Frame {
+        let mut race = self.0.lock().unwrap();
+        let (handle, job) = &mut *race;
+        if let (Some(handle), Some(job)) = (handle.as_mut(), job.take()) {
+            handle.commands.push(TimedCommand { frame: None, command: Command::SetVolume(0, 0.9) }).expect("command ring full");
+            assert!(handle.session.send(job).is_ok(), "the session port is free");
+        }
+        0
+    }
+
+    fn process(&mut self, _frame: Frame, input: &[f32], _events: &[SlotEvent], out: &mut [f32]) {
+        out.copy_from_slice(input);
+    }
+
+    fn stop(&mut self) {}
+
+    fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send> {
+        self
+    }
+}
+
+#[test]
+fn a_load_sent_after_a_setting_the_block_had_not_taken_yet_comes_after_it() {
+    // The setting reaches the ring just after the block took its commands, the load the port just after
+    // it: the load waits for the next block, which takes the setting first, and its mix holds.
+    let (s, _) = one_lane();
+    let mix = LaneMix { volume: 0.5, ..LaneMix::default() };
+    let (mut fresh, load) = fresh_load(&s, mix);
+    let (_spare, mut ports) = Engine::new(EngineConfig::new(48_000));
+    fresh.swap_ports(&mut ports);
+    let race = Arc::new(Mutex::new((Some(ports), Some(Box::new(SessionJob::Load(load))))));
+    fresh.install(1, Box::new(Racer(race.clone())));
+    fresh.advance(fresh.block as Frame);
+    let mut ports = race.lock().unwrap().0.take().expect("the ports");
+    fresh.swap_ports(&mut ports);
+    assert!(race.lock().unwrap().1.is_none(), "the racer sent the load");
+    fresh.advance(4800);
+    let Some(SessionJob::Load(load)) = fresh.session().returned().map(|job| *job) else { panic!("the load comes back") };
+    assert_eq!(load.result, Some(Ok(())));
+    assert_eq!(fresh.engine.looper().mix(0, fresh.engine.fx()), mix);
 }

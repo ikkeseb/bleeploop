@@ -184,18 +184,23 @@ pub(crate) fn channel() -> (SessionPort, SessionEnd) {
 }
 
 impl SessionEnd {
-    /// At a block start, after the commands due on its frame: take a job the host sent (only while the
-    /// return ring has room, so it can always go back), apply a load, begin a snapshot once no block job
-    /// runs. `idle`: no device runs, so a block job cannot finish either and a snapshot waiting for one
+    /// At a block start, before the engine takes its commands: take a job the host sent (only while the
+    /// return ring has room, so it can always go back). Every command sent before it is in the command
+    /// ring by then, so the job comes after them however the two rings race.
+    pub(crate) fn admit(&mut self) {
+        if self.job.is_none() && self.tx.slots() > 0 {
+            self.job = self.rx.pop().ok();
+        }
+    }
+
+    /// At a block start, after the commands due on its frame: apply a load the job admitted holds, begin a
+    /// snapshot once no block job runs. `idle`: no device runs, so a block job cannot finish either and a snapshot waiting for one
     /// answers `Changed`. `ahead`: commands queued ahead of the job have not all applied (a REC/DUB press
     /// waits for the device, or the full table left commands in the ring), so a job not begun yet waits
     /// for them. While no device runs a load cannot wait (the host gives up on it, and a later block would
     /// load it all the same): it answers `ahead`'s error, `NotEmpty` behind a press (it arms a take, or
     /// the looper is not empty anyway), `Queued` behind the ring.
     pub(crate) fn begin(&mut self, looper: &mut crate::looper::Looper, cx: &mut crate::looper::Cx, rate: u32, idle: bool, ahead: Option<SessionError>) {
-        if self.job.is_none() && self.tx.slots() > 0 {
-            self.job = self.rx.pop().ok();
-        }
         match self.job.as_deref_mut() {
             Some(SessionJob::Load(load)) if load.result.is_none() => match ahead {
                 None => load.result = Some(looper.load(cx, load)),

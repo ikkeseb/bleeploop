@@ -37,7 +37,7 @@ use crate::effects::{self, LaneFx};
 use crate::grid::Frame;
 use crate::input_fx::InputFx;
 use crate::instruments::Instruments;
-use crate::looper::{Applied, Cx, Looper};
+use crate::looper::{Applied, Cx, Gap, Looper};
 use crate::overview::Overview;
 use crate::scope::{Scope, ScopeBin, SCOPE_MASTER, SCOPE_MONITOR, SCOPE_SOURCES};
 use crate::session::{SessionEnd, SessionError, SessionPort};
@@ -406,6 +406,7 @@ impl Engine {
         let now = self.next_frame;
         let mut cx = Cx { now, align: 0, clock: &mut self.clock, feed: &mut self.feed, fx: &mut self.fx };
         self.looper.events(&mut cx);
+        self.session.admit();
         // The table empties as they apply: take the ring's next ones until it is empty, or until the
         // table is full of commands stamped for later and held ones (the rest wait, as at a block start).
         let ahead = loop {
@@ -527,6 +528,8 @@ impl Engine {
         self.fx.set_offset(self.skipped);
         self.input_fx.set_offset(self.skipped);
         self.instruments.set_offset(self.skipped);
+        // A session job is taken before the commands: every one sent before it is in the ring by then.
+        self.session.admit();
         self.take_commands(start);
         // Taken commands with no stamp are due at `start`, so all of them apply before this block's
         // first publish, and before a session job begins: it waits while the full table leaves commands
@@ -540,17 +543,28 @@ impl Engine {
         let open = self.looper.recorder().is_none_or(|(_, start, _)| start.is_none());
         self.rack.latch_record(open);
         let live_latency = self.rack.record_latency();
+        self.looper.set_line_delays(self.rack.line_delays(), self.rack.line_reach());
         if ctx.xrun || ctx.damaged {
             self.xruns += 1;
-            // The input frames lost (a damaged block's own too) reach the record tap `live_latency` later,
-            // and a plugin off live, or slower, carries them on to its own latency (`Rack::tap_lag`); the
-            // tap frames before them carry input from before the gap, clean. A jump also loses the tap
-            // frames it skipped (a window's closing tail never gets them), and a plugin plays what it held
-            // from before the jump into the frames after it, out of place: from a jump on, every tap frame
-            // to the lost ones' end is lost.
             let lost_to = if ctx.damaged { end } else { start };
-            let tap_from = if lost_from < start { lost_from } else { lost_from + live_latency };
-            self.looper.input_gap(tap_from, lost_to + self.rack.tap_lag(), start);
+            let mut gaps = [None; 2 * SLOT_COUNT];
+            if lost_from < start {
+                // A jump loses the tap frames it skipped (a window's closing tail never gets them), and a
+                // unit plays what it held from before the jump into the frames after it, out of place:
+                // from the jump on, every tap frame to the lost ones' end through the slowest is lost.
+                gaps[0] = Some(Gap { from: lost_from, to: lost_to + self.rack.tap_lag(), line: None });
+            } else {
+                // The input frames lost (a damaged block's own too) reach the record tap through each
+                // slot's paths that carry them, each its own delay later; the tap frames between carry
+                // input from before or after the gap, clean.
+                for slot in 0..SLOT_COUNT {
+                    let opens = goes_live(&self.pending, slot, lost_to);
+                    for (k, path) in self.rack.lost_on(slot, lost_from, lost_to, opens).into_iter().enumerate() {
+                        gaps[2 * slot + k] = path.map(|(from, to)| Gap { from, to, line: Some(slot) });
+                    }
+                }
+            }
+            self.looper.input_gap(&gaps, start);
         }
         let align = ctx.align_frames + live_latency + self.limiter.latency() as Frame;
         let record_delay = ctx.input_frames + live_latency;
@@ -777,6 +791,12 @@ fn apply_due(pending: &mut [Option<Pending>; MAX_PENDING], dropped: &mut u64, lo
         looper.events(cx);
     }
     false
+}
+
+/// A GO LIVE for `slot` waits in the table, due before `before`: it opens the slot's gate to input lost
+/// in the block.
+fn goes_live(pending: &[Option<Pending>; MAX_PENDING], slot: usize, before: Frame) -> bool {
+    pending.iter().flatten().any(|p| p.frame < before && matches!(p.command, Command::SetSlotLive(i, true) if i as usize == slot))
 }
 
 /// A REC/DUB press, a pedal's and HOLD's included: the one command that arms a capture, at the alignment

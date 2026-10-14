@@ -243,6 +243,13 @@ impl Rig {
         self.handle.slots[slot].returned()
     }
 
+    /// Trade the rig's command ring and session port for `other`'s: a scenario that sends on them from
+    /// inside a block (a unit's method) holds the rig's meanwhile.
+    pub fn swap_ports(&mut self, other: &mut EngineHandle) {
+        std::mem::swap(&mut self.handle.commands, &mut other.commands);
+        std::mem::swap(&mut self.handle.session, &mut other.session);
+    }
+
     /// The host's end of the session port (`lf_engine::session`).
     pub fn session(&mut self) -> &mut lf_engine::SessionPort {
         &mut self.handle.session

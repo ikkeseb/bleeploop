@@ -542,6 +542,72 @@ fn a_silent_block_in_a_go_live_off_ramp_damages_the_layer_the_plugin_plays_it_in
 }
 
 #[test]
+fn a_layer_a_go_live_off_ramps_silent_block_reaches_the_tap_just_after_commits_clean() {
+    // The live slot delays its input 1024 frames to the record tap. GO LIVE off on b ramps the slot's
+    // input out over 240 frames and drops the record latency to 0 from the next block; the silent block
+    // [b + 128, b + 256), in the ramp, reaches the tap over [b + 1152, b + 1280), just after a layer that
+    // opens on b + 640 (its press on b + 128) and closes on b + 1152: what the layer holds is clean.
+    const LATENCY: Frame = 1024;
+    let (mut rig, before, b) = through_a_plugin(LATENCY, &[128]);
+    let master = rig.master();
+    rig.send_at(b, Command::SetSlotLive(0, false));
+    rig.send_at(b + 128, Command::RecDub(0)); // the window opens on b + 640
+    rig.send_at(b + 640, Command::RecDub(0)); // and closes on b + 1152
+    rig.advance(128);
+    rig.damage();
+    rig.advance(640);
+    assert_eq!(rig.window(), Some((0, Some(b + 640), Some(b + 1152))));
+    rig.advance(2048);
+    rig.idle();
+    assert!(!rig.events.iter().any(|e| matches!(e, Event::TakeRejected { .. })), "the layer commits");
+    // The tap carries the input 1024 frames late, the ramp's frames as the live gate fades them.
+    let tap = move |f: Frame| {
+        let x = f - LATENCY;
+        let gate = if x < b { 1.0 } else { 1.0 + (0.0 - 1.0) * ((x - b) as f32 / 240.0) };
+        code(x) * gate
+    };
+    let mut want = before;
+    common::dub::dub(&mut want, (b + 640, b + 1152), ramp(rig.sr), 0.5, pos_fn(rig.anchor(), master, 512), tap);
+    assert_eq!(rig.pcm(0), want, "the layer as the tap carried it");
+}
+
+#[test]
+fn a_silent_block_a_removal_fades_in_on_its_own_frames_damages_the_layer_there() {
+    // The live slot delays its input 1024 frames to the record tap, latched for a layer that closes on
+    // b + 256. Its removal on b crossfades to the slot's dry side over 480 frames, which reaches the tap
+    // on its own frames: the silent block [b + 128, b + 256) is in the layer at once, not 1024 frames on.
+    const LATENCY: Frame = 1024;
+    let mut rig = Rig::new();
+    rig.install(0, Box::new(common::Delay::new(LATENCY)));
+    rig.set(Command::SetBpm(200.0));
+    rig.set_input(code);
+    let master = rig.record_first_take(0, 1, 2400);
+    rig.idle();
+    let before = rig.pcm(0);
+    rig.set(Command::SetDubFeedback(0, 0.5));
+    rig.align = 512; // with the plugin's latency: a window opens 1536 frames after its press
+    let b = rig.next_boundary() + master / 4;
+    rig.advance_to(b - 2048);
+    rig.send_at(b - 2048, Command::RecDub(0)); // the window opens on b - 512
+    rig.send_at(b - 1280, Command::RecDub(0)); // and closes on b + 256
+    rig.advance_to(b);
+    assert_eq!(rig.window(), Some((0, Some(b - 512), Some(b + 256))));
+    // As the device side renders the damaged block: silence in its place.
+    rig.set_input(move |f| if (b + 128..b + 256).contains(&f) { 0.0 } else { code(f) });
+    rig.remove(0);
+    rig.keep_output();
+    rig.advance(128);
+    rig.damage();
+    rig.advance(128);
+    assert!(rig.record[128..256].iter().zip(b + 128..).all(|(&x, f)| x != code(f - LATENCY)), "the dry side's silence is in the tap");
+    rig.advance(2048);
+    rig.idle();
+    assert!(rig.events.iter().any(|e| matches!(e, Event::TakeRejected { overdub: true, .. })), "the layer is rejected");
+    assert!(rig.state(0) == LaneState::Playing);
+    assert_eq!(rig.pcm(0), before, "the loop before the layer, bit for bit");
+}
+
+#[test]
 fn a_layer_with_an_input_gap_ended_by_play_stop_lands_stopped_and_silent() {
     // verify/probes/capture-loss.mjs's overdub row: the rejection keeps the press's STOP.
     for align in [0, 4800] {

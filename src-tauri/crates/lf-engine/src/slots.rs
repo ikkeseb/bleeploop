@@ -393,14 +393,40 @@ impl Rack {
         self.record_latency
     }
 
-    /// The most frames input lost now can take to reach the record tap: the latched record latency, or
-    /// an effect unit's own latency plus its wet line's delay where that is more, live or not: one off
-    /// live still plays out what it took in before (a jump puts that out of place), and a GO LIVE inside
-    /// the gap's block opens one to the lost input. (A path quicker than the record latency, a slot's dry
-    /// side mid-crossfade or a wet line clamped short, is not counted.)
+    /// The most frames input lost now can take to reach the record tap through any unit: the latched
+    /// record latency, or an effect unit's own latency plus its wet line's delay where that is more,
+    /// live or not. A jump bounds what it puts out of place with it: a unit plays what it held from
+    /// before the jump into the frames after it.
     pub(crate) fn tap_lag(&self) -> Frame {
         let units = self.slots.iter().filter(|s| s.unit.is_some() && s.kind == SlotKind::Effect);
         units.map(|s| s.latency + s.dw as Frame).fold(self.record_latency, Frame::max)
+    }
+
+    /// Where slot `slot`'s input lost over `[from, to)` (`from == to`: just before `to`) goes on its way to
+    /// the record tap: the frames of the slot's wet line it is written on, through the bypass's dry side
+    /// (on its own frames) and through an effect unit (its latency later), as far as each path carries
+    /// it in the block that starts now. Nothing while the live gate stays shut over those frames (`opens`:
+    /// a GO LIVE for the slot due before `to`); an instrument takes no input, save on the frames it has
+    /// left the slot. The line reaches the tap its delay later ([`Rack::line_delays`]).
+    pub(crate) fn lost_on(&self, slot: usize, from: Frame, to: Frame, opens: bool) -> [Option<(Frame, Frame)>; 2] {
+        let s = &self.slots[slot];
+        if !(s.live || s.live_end >= from || opens) {
+            return [None, None];
+        }
+        let effect = s.unit.is_some() && s.kind == SlotKind::Effect;
+        let dry = if effect { !s.engaged || s.fade < self.fade_frames } else { s.unit.is_none() || s.removing };
+        [dry.then_some((from, to)), effect.then_some((from + s.latency, to + s.latency))]
+    }
+
+    /// Each slot's wet line delay to the record tap as last latched: the frame written at `u` reaches the
+    /// tap at `u` plus the delay the line has when the tap reads it.
+    pub(crate) fn line_delays(&self) -> [Frame; SLOT_COUNT] {
+        std::array::from_fn(|i| self.slots[i].dw as Frame)
+    }
+
+    /// The longest delay a wet line can latch.
+    pub(crate) fn line_reach(&self) -> Frame {
+        (self.slots[0].wet_line.len() - 1) as Frame
     }
 
     pub(crate) fn installed(&self, slot: usize) -> Option<(SlotKind, Frame)> {
