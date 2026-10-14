@@ -1,5 +1,6 @@
 /** Screenshot contact sheet: fixed looper scenes at three viewports (1280x820, 1920x1080, 1000x700),
- * keyboard bottom and hidden, in engine mode on the web engine fake (`src/platform/host.web.ts`, the
+ * keyboard bottom and hidden, and `default` (the keyboard where the app puts it on a fresh install, never
+ * placed by the probe; only scenes 1 and 8-10, the first screens), in engine mode on the web engine fake (`src/platform/host.web.ts`, the
  * `engine-seam` pattern: `window.__lfEngineFake` set before the app loads, every lane, the clock and the
  * waveforms scripted on the feed through `__lf.native`). Scenes 1-7, 11 and 12 run in one fresh browser
  * context: 1-empty, 4-count-in (lane 1 ARMED behind the count-in), 2-first-take-recording (a first take
@@ -26,7 +27,7 @@ import { probe } from '../harness/probe.ts';
 
 const outDir = 'logs/contact-sheet';
 const viewports = [[1280, 820], [1920, 1080], [1000, 700]];
-const placements = ['bottom', 'hidden'];
+const placements = ['bottom', 'hidden', 'default'];
 const scenes = ['1-empty', '2-first-take-recording', '3-armed-waiting', '4-count-in', '5-fx-five-lanes', '6-help', '7-audio-settings',
   '8-native-first-launch', '9-amp-sim-live', '10-amp-sim-idle', '11-engine-in-fx'];
 const REC_PIXEL_LIMIT = 20; // anti-aliasing slack; a red playhead or tape is hundreds of pixels
@@ -98,7 +99,7 @@ await probe(async ({ browser, open }) => {
           await p.addInitScript(() => { window.__lfEngineFake = true; });
         } });
         await opened.page.waitForFunction(() => window.__lf.native.opened.length === 1, undefined, { timeout: 5000 });
-        await opened.page.evaluate((v) => window.__lf.layoutStore.setKeyboardPlacement(v), kbd);
+        if (kbd !== 'default') await opened.page.evaluate((v) => window.__lf.layoutStore.setKeyboardPlacement(v), kbd);
         return [ctx, opened.page];
       };
       let [context, page] = await openPage(false);
@@ -125,127 +126,130 @@ await probe(async ({ browser, open }) => {
       await page.waitForTimeout(200);
       await shoot(scene);
 
-      // The first take counts in one bar (4 beats), then records from the counted downbeat.
-      scene = '4-count-in';
-      await emit({
-        events: [laneEvent(0, lane('Recording', { armed: true })), transport(0, true, 120), { Beat: { frame: 0, beatInBar: 0, countLeft: 4, clicked: true } }],
-        anchor: anchorAt(0),
-      });
-      await page.waitForTimeout(400);
-      await shoot(scene);
-
-      // One second into the take (it started on the counted downbeat, a bar after the press).
-      scene = '2-first-take-recording';
-      const bar120 = 2 * RATE;
-      await emit({
-        events: [laneEvent(0, lane('Recording'), bar120), { Beat: { frame: bar120, beatInBar: 0, countLeft: 0, clicked: true } }],
-        anchor: anchorAt(bar120 + RATE),
-        peaks: [wave(0, Math.ceil(RATE / PEAK_FRAMES))],
-      });
-      await page.waitForTimeout(400);
-      await shoot(scene);
-
-      // Lane 1 plays a two-bar loop at 60 BPM (8 s), a second in; lane 2 is a later take ARMED for the next
-      // boundary, ~7 s away.
-      scene = '3-armed-waiting';
-      await emit(loopFrame({ count: 1, playing: [0], bpm: 60, bars: 2 }));
-      await emit({ events: [laneEvent(1, lane('Recording', { armed: true }))] });
-      await page.waitForTimeout(700);
-      await shoot(scene);
-      const red = await page.evaluate(() => {
-        // --rec read from the live stylesheet, so a palette retune never turns this check vacuous
-        const probe = document.createElement('i');
-        probe.style.color = 'var(--rec)';
-        document.body.append(probe);
-        const REC = getComputedStyle(probe).color.match(/\d+/g).slice(0, 3).map(Number);
-        probe.remove();
-        const near = (canvas) => {
-          const c = document.createElement('canvas');
-          c.width = canvas.width; c.height = canvas.height;
-          const g = c.getContext('2d');
-          g.drawImage(canvas, 0, 0);
-          const d = g.getImageData(0, 0, c.width, c.height).data;
-          let n = 0;
-          for (let p = 0; p < d.length; p += 4) {
-            if (d[p + 3] > 128 && Math.abs(d[p] - REC[0]) < 40 && Math.abs(d[p + 1] - REC[1]) < 50 && Math.abs(d[p + 2] - REC[2]) < 50) n++;
-          }
-          return n;
-        };
-        const canvases = document.querySelectorAll('.lp-lane canvas');
-        return { armed: window.__lf.looper.trackInfo(1).armed, rec: REC.join(','), lane2RecPixels: near(canvases[1]), lane3RecPixels: near(canvases[2]) };
-      });
-      console.log(JSON.stringify({ tag, scene, ...red }));
-      if (!red.armed) fail(`${tag} ${scene}: lane 2 was no longer armed at measurement`);
-      else if (red.lane2RecPixels > REC_PIXEL_LIMIT) fail(`${tag} ${scene}: A3 armed lane 2 canvas has ${red.lane2RecPixels} rec-red pixels while waiting (limit ${REC_PIXEL_LIMIT}; empty lane 3 has ${red.lane3RecPixels})`);
-      await emit({ events: [laneEvent(1, lane('Empty'))] });
-
-      scene = '5-fx-five-lanes';
-      await emit(loopFrame({ count: 5, playing: [] }));
-      await page.getByRole('button', { name: 'Track 1 FX', exact: true }).click();
-      await page.getByRole('group', { name: 'FX, Track 1', exact: true }).waitFor();
-      await page.waitForTimeout(250);
-      await shoot(scene);
-      const clr = await page.evaluate(() => [1, 2, 3, 4, 5].map((n) => {
-        const el = [...document.querySelectorAll('button')].find((b) => b.getAttribute('aria-label') === `Track ${n} clear`);
-        if (!el) return { lane: n, fraction: 0, missing: true };
-        const r = el.getBoundingClientRect();
-        let left = Math.max(0, r.left), right = Math.min(innerWidth, r.right);
-        let top = Math.max(0, r.top), bottom = Math.min(innerHeight, r.bottom);
-        for (let a = el.parentElement; a; a = a.parentElement) {
-          const s = getComputedStyle(a), b = a.getBoundingClientRect();
-          if (s.overflowX !== 'visible') { left = Math.max(left, b.left); right = Math.min(right, b.right); }
-          if (s.overflowY !== 'visible') { top = Math.max(top, b.top); bottom = Math.min(bottom, b.bottom); }
-        }
-        const fraction = Math.max(0, right - left) * Math.max(0, bottom - top) / (r.width * r.height);
-        return { lane: n, fraction: Math.round(fraction * 1000) / 1000, top: Math.round(r.top), bottom: Math.round(r.bottom), visibleBottom: Math.round(bottom) };
-      }));
-      console.log(JSON.stringify({ tag, scene, clr }));
-      // Five 57 px lanes plus the drawer do not fit a ~370 px container (1000x700 with the keyboard
-      // shown): that corner scrolls by design, so the five-full-lanes rule holds only above it.
-      const fiveLanesMustFit = height >= 820 || kbd === 'hidden';
-      for (const c of clr) {
-        if (c.missing) fail(`${tag} ${scene}: A4 Track ${c.lane} clear is missing`);
-        else if (fiveLanesMustFit && c.fraction < 0.999) fail(`${tag} ${scene}: A4 Track ${c.lane} clear is ${Math.round(c.fraction * 100)}% visible (button ${c.top}..${c.bottom}px, clipped at ${c.visibleBottom}px)`);
-      }
-      await page.getByRole('button', { name: 'Track 1 FX', exact: true }).click();
-
-      scene = '6-help';
-      await page.evaluate(() => window.__lf.ui.openHelp());
-      await page.waitForTimeout(250);
-      await shoot(scene);
-      await page.evaluate(() => window.__lf.ui.closeHelp());
-
-      scene = '7-audio-settings';
-      await page.evaluate(() => window.__lf.ui.openSettings());
-      await page.getByRole('group', { name: 'Audio settings', exact: true }).waitFor();
-      await page.waitForTimeout(250);
-      await shoot(scene);
-      await page.evaluate(() => window.__lf.ui.closeSettings());
-
-      scene = '12-stage';
-      await emit(loopFrame({ count: 5, playing: [0, 2, 3] }));
-      await page.evaluate(() => window.__lf.looper.setMute(3, true));
-      await page.getByRole('button', { name: 'Stage view', exact: true }).click();
-      await page.getByRole('dialog', { name: 'Stage view', exact: true }).waitFor();
-      // One scene per look, in the order V steps them (a fresh context opens on the first).
-      const looks = await page.evaluate(() => import('/src/ui/stage/views.ts').then((m) => m.STAGE_VIEWS.map((v) => v.id)));
-      for (const look of looks) {
-        scene = `12-stage-${look}`;
-        await page.locator(`.sv[data-view="${look}"]`).waitFor();
+      // The first screens alone without a placement: the rest are the forced placements' scenes.
+      if (kbd !== 'default') {
+        // The first take counts in one bar (4 beats), then records from the counted downbeat.
+        scene = '4-count-in';
+        await emit({
+          events: [laneEvent(0, lane('Recording', { armed: true })), transport(0, true, 120), { Beat: { frame: 0, beatInBar: 0, countLeft: 4, clicked: true } }],
+          anchor: anchorAt(0),
+        });
         await page.waitForTimeout(400);
         await shoot(scene);
-        await page.keyboard.press('v');
-      }
-      await page.keyboard.press('Escape');
-      await page.getByRole('dialog', { name: 'Stage view', exact: true }).waitFor({ state: 'detached' });
 
-      // A reload's reset frame from an engine that remembers every input send on.
-      scene = '11-engine-in-fx';
-      await reset([{ SetInputSend: ['echo', true] }, { SetInputSend: ['reverb', true] }, { SetInputSend: ['ring', true] }]);
-      await page.getByRole('button', { name: 'Input effects', exact: true }).click();
-      await page.getByRole('dialog', { name: 'Input effects', exact: true }).waitFor();
-      await page.waitForTimeout(250);
-      await shoot(scene);
+        // One second into the take (it started on the counted downbeat, a bar after the press).
+        scene = '2-first-take-recording';
+        const bar120 = 2 * RATE;
+        await emit({
+          events: [laneEvent(0, lane('Recording'), bar120), { Beat: { frame: bar120, beatInBar: 0, countLeft: 0, clicked: true } }],
+          anchor: anchorAt(bar120 + RATE),
+          peaks: [wave(0, Math.ceil(RATE / PEAK_FRAMES))],
+        });
+        await page.waitForTimeout(400);
+        await shoot(scene);
+
+        // Lane 1 plays a two-bar loop at 60 BPM (8 s), a second in; lane 2 is a later take ARMED for the next
+        // boundary, ~7 s away.
+        scene = '3-armed-waiting';
+        await emit(loopFrame({ count: 1, playing: [0], bpm: 60, bars: 2 }));
+        await emit({ events: [laneEvent(1, lane('Recording', { armed: true }))] });
+        await page.waitForTimeout(700);
+        await shoot(scene);
+        const red = await page.evaluate(() => {
+          // --rec read from the live stylesheet, so a palette retune never turns this check vacuous
+          const probe = document.createElement('i');
+          probe.style.color = 'var(--rec)';
+          document.body.append(probe);
+          const REC = getComputedStyle(probe).color.match(/\d+/g).slice(0, 3).map(Number);
+          probe.remove();
+          const near = (canvas) => {
+            const c = document.createElement('canvas');
+            c.width = canvas.width; c.height = canvas.height;
+            const g = c.getContext('2d');
+            g.drawImage(canvas, 0, 0);
+            const d = g.getImageData(0, 0, c.width, c.height).data;
+            let n = 0;
+            for (let p = 0; p < d.length; p += 4) {
+              if (d[p + 3] > 128 && Math.abs(d[p] - REC[0]) < 40 && Math.abs(d[p + 1] - REC[1]) < 50 && Math.abs(d[p + 2] - REC[2]) < 50) n++;
+            }
+            return n;
+          };
+          const canvases = document.querySelectorAll('.lp-lane canvas');
+          return { armed: window.__lf.looper.trackInfo(1).armed, rec: REC.join(','), lane2RecPixels: near(canvases[1]), lane3RecPixels: near(canvases[2]) };
+        });
+        console.log(JSON.stringify({ tag, scene, ...red }));
+        if (!red.armed) fail(`${tag} ${scene}: lane 2 was no longer armed at measurement`);
+        else if (red.lane2RecPixels > REC_PIXEL_LIMIT) fail(`${tag} ${scene}: A3 armed lane 2 canvas has ${red.lane2RecPixels} rec-red pixels while waiting (limit ${REC_PIXEL_LIMIT}; empty lane 3 has ${red.lane3RecPixels})`);
+        await emit({ events: [laneEvent(1, lane('Empty'))] });
+
+        scene = '5-fx-five-lanes';
+        await emit(loopFrame({ count: 5, playing: [] }));
+        await page.getByRole('button', { name: 'Track 1 FX', exact: true }).click();
+        await page.getByRole('group', { name: 'FX, Track 1', exact: true }).waitFor();
+        await page.waitForTimeout(250);
+        await shoot(scene);
+        const clr = await page.evaluate(() => [1, 2, 3, 4, 5].map((n) => {
+          const el = [...document.querySelectorAll('button')].find((b) => b.getAttribute('aria-label') === `Track ${n} clear`);
+          if (!el) return { lane: n, fraction: 0, missing: true };
+          const r = el.getBoundingClientRect();
+          let left = Math.max(0, r.left), right = Math.min(innerWidth, r.right);
+          let top = Math.max(0, r.top), bottom = Math.min(innerHeight, r.bottom);
+          for (let a = el.parentElement; a; a = a.parentElement) {
+            const s = getComputedStyle(a), b = a.getBoundingClientRect();
+            if (s.overflowX !== 'visible') { left = Math.max(left, b.left); right = Math.min(right, b.right); }
+            if (s.overflowY !== 'visible') { top = Math.max(top, b.top); bottom = Math.min(bottom, b.bottom); }
+          }
+          const fraction = Math.max(0, right - left) * Math.max(0, bottom - top) / (r.width * r.height);
+          return { lane: n, fraction: Math.round(fraction * 1000) / 1000, top: Math.round(r.top), bottom: Math.round(r.bottom), visibleBottom: Math.round(bottom) };
+        }));
+        console.log(JSON.stringify({ tag, scene, clr }));
+        // Five 57 px lanes plus the drawer do not fit a ~370 px container (1000x700 with the keyboard
+        // shown): that corner scrolls by design, so the five-full-lanes rule holds only above it.
+        const fiveLanesMustFit = height >= 820 || kbd === 'hidden';
+        for (const c of clr) {
+          if (c.missing) fail(`${tag} ${scene}: A4 Track ${c.lane} clear is missing`);
+          else if (fiveLanesMustFit && c.fraction < 0.999) fail(`${tag} ${scene}: A4 Track ${c.lane} clear is ${Math.round(c.fraction * 100)}% visible (button ${c.top}..${c.bottom}px, clipped at ${c.visibleBottom}px)`);
+        }
+        await page.getByRole('button', { name: 'Track 1 FX', exact: true }).click();
+
+        scene = '6-help';
+        await page.evaluate(() => window.__lf.ui.openHelp());
+        await page.waitForTimeout(250);
+        await shoot(scene);
+        await page.evaluate(() => window.__lf.ui.closeHelp());
+
+        scene = '7-audio-settings';
+        await page.evaluate(() => window.__lf.ui.openSettings());
+        await page.getByRole('group', { name: 'Audio settings', exact: true }).waitFor();
+        await page.waitForTimeout(250);
+        await shoot(scene);
+        await page.evaluate(() => window.__lf.ui.closeSettings());
+
+        scene = '12-stage';
+        await emit(loopFrame({ count: 5, playing: [0, 2, 3] }));
+        await page.evaluate(() => window.__lf.looper.setMute(3, true));
+        await page.getByRole('button', { name: 'Stage view', exact: true }).click();
+        await page.getByRole('dialog', { name: 'Stage view', exact: true }).waitFor();
+        // One scene per look, in the order V steps them (a fresh context opens on the first).
+        const looks = await page.evaluate(() => import('/src/ui/stage/views.ts').then((m) => m.STAGE_VIEWS.map((v) => v.id)));
+        for (const look of looks) {
+          scene = `12-stage-${look}`;
+          await page.locator(`.sv[data-view="${look}"]`).waitFor();
+          await page.waitForTimeout(400);
+          await shoot(scene);
+          await page.keyboard.press('v');
+        }
+        await page.keyboard.press('Escape');
+        await page.getByRole('dialog', { name: 'Stage view', exact: true }).waitFor({ state: 'detached' });
+
+        // A reload's reset frame from an engine that remembers every input send on.
+        scene = '11-engine-in-fx';
+        await reset([{ SetInputSend: ['echo', true] }, { SetInputSend: ['reverb', true] }, { SetInputSend: ['ring', true] }]);
+        await page.getByRole('button', { name: 'Input effects', exact: true }).click();
+        await page.getByRole('dialog', { name: 'Input effects', exact: true }).waitFor();
+        await page.waitForTimeout(250);
+        await shoot(scene);
+      }
       await context.close();
 
       scene = '8-native-first-launch';

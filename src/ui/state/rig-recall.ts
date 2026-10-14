@@ -77,6 +77,11 @@ export function rememberSlotPlugin(slot: 0 | 1, desc: PluginDescriptor): void {
   writeRig(withAt(readRig(), slot, { format, path, id, name }));
 }
 
+/** Whether the record remembers a plugin in either slot (a plugin has loaded here before). */
+export function rigRemembersPlugin(): boolean {
+  return readRig().some((p) => p !== null);
+}
+
 /** Forget slot `slot`'s plugin (it unloaded, a load into the slot failed, or a synth or Off was picked for it). */
 export function forgetSlotPlugin(slot: 0 | 1): void {
   const rig = readRig();

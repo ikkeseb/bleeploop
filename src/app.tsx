@@ -1,5 +1,5 @@
 import { Show, createEffect, createSignal, onCleanup, onMount } from 'solid-js';
-import { activeIsDrum, availablePlugins, nativeHostReady, scanForPlugins, scanning } from './ui/state/instrument';
+import { activeIsDrum, anySlotPlaysSynth, availablePlugins, nativeHostReady, scanForPlugins, scanning } from './ui/state/instrument';
 import { cancelLearn, portsSummary } from './ui/state/midi';
 import { Keyboard } from './ui/keyboard/Keyboard';
 import { Looper } from './ui/looper/Looper';
@@ -198,6 +198,9 @@ export function App() {
   // toggle + the keyboard pane label say "drums" instead of "keyboard". `activeIsDrum` is the ONE shared
   // predicate (ui/state/instrument.ts); Keyboard.tsx's drumActive memo reads the same accessor.
   const keyboardNoun = () => (activeIsDrum() ? 'drums' : 'keyboard');
+  // The on-screen keyboard is the fallback play path, not the first screen's hero: until the player
+  // places it, it shows only while a slot plays a built-in synth (a guitar-first launch starts with none).
+  layoutStore.followInstrument(anySlotPlaysSynth);
 
   // ----- stage regions -----
   // Stable descriptors created once: reordering the keyboard around the looper MOVES the DOM nodes

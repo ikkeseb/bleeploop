@@ -10,7 +10,8 @@ import { createSignal } from 'solid-js';
  *                     content (SplitStack `autoSize`) and takes no weight. A missing id defaults to
  *                     weight 1; a legacy 'instrument' key still parses but is ignored.
  *  - `keyboardPlacement` — where the on-screen keyboard sits: 'top' (between the slots and the looper),
- *                     'bottom' (below the looper — the DEFAULT), or 'hidden' (removed — restore from
+ *                     'bottom' (below the looper — the DEFAULT; until the player places it, it may
+ *                     follow the instrument instead: `followInstrument`), or 'hidden' (removed — restore from
  *                     the command bar's keyboard tool).
  *  - `lastVisiblePlacement` — where a hidden keyboard returns, including across reloads.
  *
@@ -102,9 +103,32 @@ function read(): LayoutState {
   }
 }
 
+// Whether a layout was stored when this module loaded: the player has arranged the stage before.
+let storedAtLoad = false;
+try {
+  storedAtLoad = localStorage.getItem(STORAGE_KEY) !== null;
+} catch {
+  /* unreadable: nothing stored */
+}
 const initial = read();
 const [stageSizes, setStageSizesSig] = createSignal<Record<string, number>>(initial.stageSizes);
-const [keyboardPlacement, setKeyboardPlacementSig] = createSignal<KeyboardPlacement>(initial.keyboardPlacement);
+const [chosenPlacement, setKeyboardPlacementSig] = createSignal<KeyboardPlacement>(initial.keyboardPlacement);
+// Until the player places the keyboard (any setter below, or a layout stored by an earlier launch), it may
+// follow the instrument: `followInstrument` hides it while `show` says it has nothing to play.
+const [follow, setFollow] = createSignal<(() => boolean) | null>(null);
+
+/** Where the keyboard is: the player's placement, or hidden while it follows an instrument with no use
+ * for it. */
+const keyboardPlacement = (): KeyboardPlacement => {
+  const show = follow();
+  return show && !show() ? 'hidden' : chosenPlacement();
+};
+
+/** Let the keyboard show only while `show()` holds, until the player places it. A no-op once a layout
+ * was stored: that player's keyboard stays where they left it. */
+export function followInstrument(show: () => boolean): void {
+  if (!storedAtLoad) setFollow(() => show);
+}
 
 // Where the keyboard goes back to when un-hidden (so the command-bar toggle restores its last visible spot).
 let lastVisiblePlacement: 'top' | 'bottom' = initial.lastVisiblePlacement;
@@ -115,7 +139,7 @@ function persist(): void {
       STORAGE_KEY,
       JSON.stringify({
         stageSizes: stageSizes(),
-        keyboardPlacement: keyboardPlacement(),
+        keyboardPlacement: chosenPlacement(),
         lastVisiblePlacement,
       } satisfies LayoutState),
     );
@@ -132,6 +156,7 @@ export function setStageSizes(next: Record<string, number>): void {
 }
 
 export function setKeyboardPlacement(p: KeyboardPlacement): void {
+  setFollow(null); // the player placed it
   if (p !== 'hidden') lastVisiblePlacement = p;
   setKeyboardPlacementSig(p);
   persist();

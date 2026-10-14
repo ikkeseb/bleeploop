@@ -676,6 +676,39 @@ option {
   color: #fff;
 }
 
+/* First run (`state/instrument.ts` firstRun): slot A's picker asks for the amp sim, a step brighter than
+   a named source (the one thing to do on a fresh launch), and slot B folds to one quiet line beside it. */
+.slot__source--ask {
+  color: var(--engaged);
+  border-color: var(--line-2);
+}
+.slot-fold {
+  flex: 0 0 auto;
+  align-self: flex-start;
+  height: 52px; /* the slot header's height, so the fold sits on A's line */
+  padding: 0 18px;
+  border-radius: 14px;
+  border: 1px solid var(--edge);
+  background: transparent;
+  color: var(--faint);
+  font: 600 12px var(--sans);
+  letter-spacing: 0.06em;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+.slot-fold b {
+  font-size: 15px;
+  font-weight: 700;
+}
+.slot-fold span {
+  margin-left: 6px;
+}
+.slot-fold:hover {
+  color: var(--dim);
+  border-color: var(--line-2);
+}
+
 /* the params drawer (accordion) — a sub-panel that expands the slot card downward. Rendered
    whenever a plugin is loaded (so its subscriptions stay live); open/close is CSS-only, no remount.
    The drawer is the card's scroll region: when it outgrows the instrument region it scrolls under the

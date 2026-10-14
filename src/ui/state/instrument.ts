@@ -34,7 +34,7 @@ import {
 } from './instrument-slots';
 import { disarmInputInternal, holdEngineLive, inputArmed, resendEngineLive, resumeEngineLive } from './native-io';
 import { readStoredNumber, writeStoredNumber } from './persist';
-import { forgetSlotPlugin, rememberSlotPlugin } from './rig-recall';
+import { forgetSlotPlugin, rememberSlotPlugin, rigRemembersPlugin } from './rig-recall';
 import { pluginDescriptorKey, reconcilePluginDescriptors, samePluginDescriptor } from './plugin-descriptor';
 
 /**
@@ -56,6 +56,12 @@ let scanAgain: { force: boolean } | null = null;
 // nothing is chosen, so a restore that lands mid-play overrides nothing the player set.
 const chosenSource: [boolean, boolean] = [false, false];
 let chosenActive = false;
+// A slot nobody has picked a source for, on this install: no saved source, nothing chosen this launch.
+const [untouched, setUntouched] = createSignal<[boolean, boolean]>([true, true]);
+function choose(slot: 0 | 1): void {
+  chosenSource[slot] = true;
+  setUntouched((prev) => withAt(prev, slot, false));
+}
 const nothingChosen = () => !chosenSource[0] && !chosenSource[1] && !chosenActive;
 
 // Every native load and unload a slot has begun, counted: one plugin instance per value. A tone reload
@@ -104,6 +110,63 @@ for (const slot of [0, 1] as const) {
   }
   if (saved === 'off') setSlotOff((prev) => withAt(prev, slot, true));
   else if (saved !== null && SYNTHS.some((s) => s.id === saved)) setSlotIds((prev) => withAt(prev, slot, saved));
+  if (saved !== null) setUntouched((prev) => withAt(prev, slot, false));
+}
+
+// ---------------------------------------------------------------------------
+// First run: no plugin has ever loaded on this install, so the first screen is a guitar screen. A slot
+// nobody picked a source for starts Off instead of on a synth: slot A asks for the amp sim with its input
+// pick and GO LIVE already out (Off passes the guitar dry until the amp sim lands), slot B folds to one
+// line (`InstrumentSlot.tsx`), and with no built-in synth in a slot the on-screen keyboard stays hidden
+// (`app.tsx`). The first plugin that loads ends it for good. Only where a plugin can load (the native
+// host), and never under a DEV native probe, which starts from the default synths.
+// ---------------------------------------------------------------------------
+const EVER_LOADED_KEY = 'lf.pluginEverLoaded';
+
+/** Whether a plugin has loaded on this install: the flag, else what older launches left behind (a rig
+ * record, a plugin's saved level). Unreadable storage counts as yes: today's screen. */
+function pluginLoadedBefore(): boolean {
+  try {
+    if (localStorage.getItem(EVER_LOADED_KEY) !== null) return true;
+    for (let i = 0; i < localStorage.length; i++) if (localStorage.key(i)?.startsWith('lf.pluginGain.')) return true;
+  } catch {
+    return true;
+  }
+  return rigRemembersPlugin();
+}
+
+const [firstRun, setFirstRun] = createSignal(
+  platform.pluginHost.available && !import.meta.env.VITE_LF_PROBE && !pluginLoadedBefore(),
+);
+if (firstRun()) setSlotOff((prev) => [prev[0] || untouched()[0], prev[1] || untouched()[1]]);
+
+/** The first plugin loaded: first run is over. A slot still on its first-run Off keeps it next launch. */
+function endFirstRun(): void {
+  setFirstRun(false);
+  try {
+    localStorage.setItem(EVER_LOADED_KEY, '1');
+  } catch {
+    /* persistence is best-effort */
+  }
+  for (const slot of [0, 1] as const) if (untouched()[slot] && slotOff()[slot]) writeSource(slot, 'off');
+}
+
+/** Whether no plugin has ever loaded here (the guitar-first screen; see above). */
+export { firstRun };
+
+/** Whether slot `slot`'s header asks for the amp sim: slot A on its first-run Off, nothing loaded. */
+export function awaitsAmpSim(slot: 0 | 1): boolean {
+  return slot === 0 && firstRun() && untouched()[0] && slotOff()[0] && !slotPlugins()[0];
+}
+
+/** Whether slot `slot` may fold to one line: slot B, first run, Off and empty. */
+export function foldable(slot: 0 | 1): boolean {
+  return slot === 1 && firstRun() && slotOff()[1] && !slotPlugins()[1];
+}
+
+/** Whether either slot plays a built-in synth (no plugin over it, not Off): the keyboard has a use. */
+export function anySlotPlaysSynth(): boolean {
+  return ([0, 1] as const).some((i) => !slotPlugins()[i] && !slotOff()[i]);
 }
 
 // Each slot's input level (what an Off slot's live input is heard and recorded at: the engine's slot
@@ -185,7 +248,7 @@ function activateSlot(i: 0 | 1): void {
  * it was. An instrument takes no input: a slot that was live stops (every source change ends GO LIVE).
  */
 export function selectSynth(slotIndex: 0 | 1, id: string): void {
-  chosenSource[slotIndex] = true;
+  choose(slotIndex);
   setSlotIds((prev) => withAt(prev, slotIndex, id)); // immediate UI highlight
   setSlotOff((prev) => withAt(prev, slotIndex, false));
   // Serialize the routing work on the SAME per-slot chain as selectPlugin/clearPlugin, so a synth
@@ -214,7 +277,7 @@ export function selectSynth(slotIndex: 0 | 1, id: string): void {
  * slot stays where it is: nothing plays here to move MIDI to (as an effect load leaves it).
  */
 export function selectOff(slotIndex: 0 | 1): void {
-  chosenSource[slotIndex] = true;
+  choose(slotIndex);
   setSlotOff((prev) => withAt(prev, slotIndex, true));
   void serializeSlot(slotIndex, async () => {
     if (slotPlugins()[slotIndex]) {
@@ -267,7 +330,7 @@ function releaseEditorAffinity(outgoingPath: string | undefined): void {
  */
 export function selectPlugin(slot: 0 | 1, desc: PluginDescriptor): Promise<void> {
   if (!nativeHostReady()) return Promise.resolve();
-  chosenSource[slot] = true;
+  choose(slot);
   return serializeSlot(slot, () => doSelectPlugin(slot, desc, () => true));
 }
 
@@ -315,6 +378,7 @@ async function doSelectPlugin(
   }
   setSlotPlugins((prev) => withAt(prev, slot, desc));
   rememberSlotPlugin(slot, desc);
+  if (firstRun()) endFirstRun();
   // The host restored the plugin's stored tone inside the load; one it could not restore (the host
   // logged why) leaves the plugin at its defaults, and the player should know.
   if (tone === 'failed') notifyError(`${desc.name}: saved settings could not be restored; it loaded with its defaults`);
@@ -405,7 +469,7 @@ async function unloadSlotPlugin(slot: 0 | 1, outgoing: PluginDescriptor, path: '
  * `unloadSlotPlugin`). No-op if the slot holds no plugin. Serialized per slot (see `serializeSlot`).
  */
 export function clearPlugin(slot: 0 | 1): Promise<void> {
-  chosenSource[slot] = true;
+  choose(slot);
   return serializeSlot(slot, () => doClearPlugin(slot));
 }
 
