@@ -17,7 +17,9 @@ it, and an oddity seen there is the new driver's until shown otherwise.
 **What the EVO 4 changes for the rig,** read from its manual (User Manual 5.0) and confirmed on the PC:
 the guitar goes in the front instrument jack, which is channel 1 and overrides the rear Mic/Line 1; the
 mic is on channel 2, which the loopback cable the rig protocol needs also wants, so the two now compete
-for one input. Monitors sit on the rear L/R and headphones on the front jack, and SmartMuting mutes the
+for one input; a slot's Auto input reads In 2 on a device with two or more inputs
+(`input_channel` in `src-tauri/src/engine_io/transition.rs`), so the guitar on channel 1 needs In 1
+picked in the slot. Monitors sit on the rear L/R and headphones on the front jack, and SmartMuting mutes the
 monitor outputs whenever a headphone jack is in, by design and with no setting to turn it off. Its own
 Loop-back channels are a digital send inside the driver, so they do NOT stand in for the rig's cable:
 they skip the converters the round trip is there to measure. The saved ASIO pick is still the
@@ -34,6 +36,11 @@ forgives the join's trims and starves in a WASAPI open's first 3 s: D25); `nativ
 --rate=48000` last passed 21/21 at 64, 128 and 256 on 2026-10-03. `release:smoke` last passed 7/7 on
 2026-10-07 on v0.8.2's runner build, its input take through the loopback cable into In 2. Driver latency
 reports are not guitar latency; after a relevant change, rerun only the affected check.
+**The untested input path:** the owner keeps the EVO 4's input 2 for a mic and runs no loopback cable
+(2026-10-14), so `release:smoke`'s input take and `native:engine-loopback` cannot run on this rig. The
+device side (`src-tauri/src/engine_io`, `src-tauri/src/host`) has changed since v0.8.4 with no input take
+through a real driver since: a defect there shows first in a jam or a tester's report. A check that
+needs the device free may run while the owner is away from the PC.
 
 **Last play: 2026-09-28** (engine, a local release build, ASIO; a second player on a WASAPI build
 of their own): worked well overall, no issue found; the WASAPI player heard delay on DI monitoring
@@ -41,9 +48,10 @@ of their own): worked well overall, no issue found; the WASAPI player heard dela
 
 ## Next jam
 
-Install the latest release (CI-built, ASIO SDK 2.3.4 where local builds use 2.3.3) or run
-`pnpm dev:asio`; Audio Settings: ASIO, buffer 128. Play a real jam with these in it and say what felt
-off. After the jam, agents note what it tried under "Last play", drop what it answered and refill this
+Run `pnpm dev:asio` from `main`: no release has SCOPE or the UPDATE pill yet (v0.8.4 predates both).
+Once a later release is cut, install it instead (CI-built, ASIO SDK 2.3.4 where local builds use
+2.3.3). Audio Settings: ASIO, buffer 128. Play a real jam with these in it and say what felt off.
+After the jam, agents note what it tried under "Last play", drop what it answered and refill this
 list from § Not heard yet: at most five, and the docs guard counts them.
 
 1. **The amp-sim live, and takes on the click.** GO LIVE (VST3, Petrucci): does the guitar through the
@@ -79,6 +87,9 @@ it.
 
 - Buffer 256 and 64: the take on the click at each size, a short switch gap, and a plugin loaded while
   loops play crossfades in without a click (machine: `tests/slots.rs`).
+- An instrument (a plugin or a built-in synth) entering or leaving a slot while GO LIVE is on: the dry
+  guitar fades across, each part on its own path, where it stepped by up to half full scale before
+  (machine: `tests/slots.rs`). Is the change inaudible mid-note?
 - The count-in (1 bar, accent on 1, no dead air; the tempo locks mid-count-in); FIXED 2 stops on the
   downbeat after exactly 2 bars (an over-long FIXED pick records the largest whole-bar fit in 60 s); a
   free record stopped near the downbeat after N bars keeps N, an early or a mid-bar stop behaves, and a
