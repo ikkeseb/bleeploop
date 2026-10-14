@@ -110,6 +110,10 @@ it.
   device comes back (or WASAPI takes over) and the loops play on (proven only on the fake driver). If
   the WASAPI default runs at another rate than ASIO, the loops come back from recovery after a
   relaunch. With no device running, the command bar's lamp reads amber: clear enough?
+- A headset plugged in mid-jam on WASAPI with System default picked: the sound moves to it by itself
+  (Windows moves the stream; nothing reopens, a take in flight keeps recording) and Audio Settings names
+  it (proven only on the fake driver). One at another rate plays converted; System default picked again
+  there sends nothing (a select fires no change on the pick it shows): fine, or reopen at its own rate?
 - The lane's mix follows the engine (D21): a volume fader, DUB FEEDBACK or FX knob dragged and let
   go stays where it was left, with no jump back; MUTE now toggles in the engine, so two quick presses
   are two toggles, and an on-screen MUTE cancels a pedal's armed CLEAR. An import or recovery plays

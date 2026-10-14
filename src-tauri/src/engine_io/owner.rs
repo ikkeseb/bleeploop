@@ -360,13 +360,17 @@ impl<D: Driver> Owner<D> {
         }
     }
 
-    /// What the callbacks latched: a faulted engine, a dead stream (a loss), a dead Share mirror.
+    /// What the callbacks latched: a faulted engine, a dead stream (a loss), Windows' default moved, a
+    /// dead Share mirror.
     fn poll(&mut self) {
         if self.core.fault.swap(false, AcqRel) {
             self.replace_faulted();
         }
         if let Some(bits) = self.active.as_ref().map(|a| a.run.fault.load(Acquire)).filter(|&b| b != 0) {
             self.lose(bits);
+        }
+        if self.active.as_ref().is_some_and(|a| a.run.default_moved.swap(false, AcqRel)) {
+            self.default_moved();
         }
         if self.mirror.as_ref().is_some_and(|m| m.faulted()) {
             log::warn!("[engine_io] Share output's endpoint stopped: the mirror is off");
@@ -383,22 +387,32 @@ impl<D: Driver> Owner<D> {
         }
     }
 
-    /// Open `request`, or switch to it. A request for the device that runs only changes its channels; a
-    /// request for a WASAPI default that Windows moved since is another device.
+    /// Open `request`, or switch to it. A request for the device that runs only changes its channels,
+    /// also where Windows moved a default side since at the format that runs (`transition::same_format`).
     /// A slot's pick the device lacks opens on auto (`transition::open_channels`). The player's open
     /// (`By::Player`) is refused, before anything stops, when it would build an engine at another rate
     /// while this one holds audio, unless forced; a switch of the player's that fails to start reopens the
     /// device it replaced. A size the ASIO driver refuses opens at its own (`start_at_own_size`).
     fn open(&mut self, request: DeviceRequest, by: By) -> Result<DeviceStatus, OpenError> {
         let driver = self.driver.asio_driver();
-        if let Some(active) = self.active.as_ref().filter(|a| !a.run.faulted()) {
-            let named = self.endpoints_named(&request);
-            if transition::same_device(&active.request, &request, (&active.spec.output_name, driver.as_deref()), (&active.spec.endpoints, &named)) {
+        let running = self.active.as_ref().filter(|a| !a.run.faulted());
+        let mut resolved = None;
+        if let Some(ran) = running.filter(|a| transition::same_device(&a.request, &request, (&a.spec.output_name, driver.as_deref()))).map(|a| a.spec.endpoints.clone()) {
+            if self.endpoints_named(&request) != ran {
+                let (spec, device) = self.driver.resolve(&request)?;
+                if !self.follow(&spec) {
+                    resolved = Some((spec, device));
+                }
+            }
+            if resolved.is_none() {
                 self.set_input_channels(request.input_channels)?;
                 return Ok(self.status().ok_or_else(|| "the device stopped".to_string())?);
             }
         }
-        let (spec, device) = self.driver.resolve(&request)?;
+        let (spec, device) = match resolved {
+            Some(resolved) => resolved,
+            None => self.driver.resolve(&request)?,
+        };
         let previous = self.active.as_ref().map(|a| a.request.clone());
         let healthy = self.active.as_ref().is_some_and(|a| !a.run.faulted());
         let steps = transition::steps(self.core.rate(), self.active.is_some(), healthy, Some(spec.rate));
@@ -442,6 +456,47 @@ impl<D: Driver> Owner<D> {
         }
         let defaults = if request.input.is_none() || request.output.is_none() { self.driver.default_endpoints() } else { Endpoints::default() };
         Endpoints { input: request.input.clone().or(defaults.input), output: request.output.clone().or(defaults.output) }
+    }
+
+    /// cpal reported that Windows moved its default endpoint, and the device that runs moved with it where
+    /// a side is left to the default: follow it there (`follow`), or say why it stays another device.
+    fn default_moved(&mut self) {
+        let Some((request, ran)) = self.active.as_ref().filter(|a| !a.run.faulted()).map(|a| (a.request.clone(), a.spec.endpoints.clone())) else { return };
+        if self.endpoints_named(&request) == ran {
+            return;
+        }
+        match self.driver.resolve(&request) {
+            Ok((spec, _)) if self.follow(&spec) => {}
+            Ok((spec, _)) => log::info!(
+                "[engine_io] Windows moved the default to \"{}\" at {} Hz: the stream plays on there at {} Hz, Windows converting; picking the default again reopens at its own rate",
+                spec.output_name,
+                spec.rate,
+                self.core.rate().unwrap_or(0)
+            ),
+            Err(error) => log::warn!("[engine_io] Windows moved the default, which does not resolve: {error}"),
+        }
+    }
+
+    /// The device that runs, with a side Windows moved to its default since, resolved again as `moved`:
+    /// the status names where it plays now. At the format that runs (`transition::same_format`) it is
+    /// the device `moved` is, and true: it follows, nothing restarts. Else it stays another device, so
+    /// an open of the same request reopens at the new endpoint's own format.
+    fn follow(&mut self, moved: &Spec) -> bool {
+        let Some(active) = self.active.as_mut() else { return false };
+        if let Some(status) = self.core.device.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+            if status.input_open {
+                status.input_name = moved.input_name.clone();
+            }
+            status.output_name = moved.output_name.clone();
+        }
+        if !transition::same_format(&active.spec, moved) {
+            return false;
+        }
+        log::info!("[engine_io] Windows moved the default: the stream plays on in \"{}\" → \"{}\"", moved.input_name, moved.output_name);
+        active.spec.endpoints = moved.endpoints.clone();
+        active.spec.input_name = moved.input_name.clone();
+        active.spec.output_name = moved.output_name.clone();
+        true
     }
 
     /// The ASIO driver refused the size `request` asked for (`refused`): a driver whose sizes come in

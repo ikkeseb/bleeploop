@@ -562,25 +562,47 @@ fn a_default_device_change_or_a_refused_priority_is_no_loss() {
     assert_eq!(h.fake.started.load(SeqCst), 1, "one stream pair throughout");
 }
 
-// A device running on Windows' default is not the one a request for the default names once Windows moved
-// it (a headset plugged in): picking the default again reopens there. While it stays, the same request
-// changes nothing.
+// Windows moves a stream on its default with the default (a headset plugged in): cpal opens a default
+// side as Windows' virtual default endpoint. Where the new endpoint runs the format the stream does, an
+// open that changes nothing else (the Buffer select, which WASAPI ignores, or the default picked again)
+// keeps the stream that already plays there: a take in flight keeps recording. The status names it.
 #[test]
-fn the_default_picked_again_after_windows_moved_it_opens_where_it_is_now() {
+fn a_default_windows_moved_at_the_same_format_plays_on_through_a_take() {
+    let mut h = Harness::new();
+    h.fake.set_input(tone);
+    h.open(wasapi(None, None));
+    h.send(Command::SetBpm(240.0));
+    h.send(Command::SetSlotLive(0, true));
+    h.send(Command::RecDub(0));
+    h.wait_lane("the take starts", 0, |i| i.state == LaneState::Recording && !i.armed);
+    h.fake.move_default("headset", FakeDevice::new("Headset", 48_000, 480));
+    let status = h.open(DeviceRequest { buffer: Some(128), ..wasapi(None, None) });
+    assert_eq!((status.input_name.as_str(), status.output_name.as_str()), ("Headset", "Headset"));
+    h.open(wasapi(None, None));
+    h.play(RATE / 10);
+    assert_eq!(h.fake.started.load(SeqCst), 1, "one stream pair throughout");
+    h.host.drain_events(&mut h.events);
+    let ended = h.events[h.cursor..].iter().find(|e| matches!(e, Event::Lane { lane: 0, info, .. } if info.state != LaneState::Recording));
+    assert!(ended.is_none(), "the take records on: {ended:?}");
+    assert_eq!(h.host.take_device_events(), [], "no loss, no fallback");
+}
+
+// A default Windows moved to an endpoint at another rate: the stream plays on (Windows converts it) and
+// the status names where; nothing restarts on its own. Picking the default again reopens there at the
+// endpoint's own rate, as a pick of another endpoint does.
+#[test]
+fn a_default_windows_moved_to_another_rate_reopens_when_picked_again() {
     let h = Harness::new();
     h.open(wasapi(None, None));
-    h.open(wasapi(None, None));
-    assert_eq!(h.fake.started.load(SeqCst), 1, "the default where it was: the device that runs");
-    h.fake.wasapi.lock().unwrap().insert(0, ("headset".into(), FakeDevice::new("Headset", 48_000, 480)));
+    h.fake.move_default("headset", FakeDevice::new("Headset", 44_100, 441));
+    until("the status names the new default", || h.host.status().is_some_and(|s| s.output_name == "Headset"));
+    h.play(RATE / 10);
+    assert_eq!((h.fake.started.load(SeqCst), h.host.core.rate()), (1, Some(48_000)), "nothing restarts on its own");
     let status = h.open(wasapi(None, None));
-    assert_eq!((status.input_name.as_str(), status.output_name.as_str()), ("Headset", "Headset"));
-    assert_eq!(h.fake.started.load(SeqCst), 2, "a new run on the new default");
-    // A side the request names keeps its endpoint; the side left to the default follows Windows.
-    h.open(wasapi(Some("default"), None));
-    h.fake.wasapi.lock().unwrap().remove(0);
-    let status = h.open(wasapi(Some("default"), None));
-    assert_eq!((status.input_name.as_str(), status.output_name.as_str()), ("Fake WASAPI", "Fake WASAPI"));
-    assert_eq!(h.fake.started.load(SeqCst), 4);
+    assert_eq!((status.sample_rate, status.output_name.as_str()), (44_100, "Headset"));
+    assert_eq!(h.fake.started.load(SeqCst), 2, "a new run at the new default's rate");
+    h.open(wasapi(None, None));
+    assert_eq!(h.fake.started.load(SeqCst), 2, "then the default where it is: the device that runs");
 }
 
 #[test]

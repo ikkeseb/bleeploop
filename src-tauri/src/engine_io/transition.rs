@@ -1,12 +1,13 @@
 //! OWNS: the device owner's decisions, as pure functions (the kernel): what reaching a device takes from where the owner stands
-//! ([`steps`]), when a request only changes the channel ([`same_device`]), where a lost device falls back
+//! ([`steps`]), when a request only changes the channel ([`same_device`]), when a WASAPI default Windows moved
+//! still runs the device a fresh open would ([`same_format`]), where a lost device falls back
 //! to ([`fallbacks`]), which capture channel a request selects for each slot ([`open_channels`]),
 //! which buffer an ASIO open and its preopen ask the driver for ([`asio_block`], [`preopen_block`]), and
 //! the rate it runs at ([`open_rate`]). `owner.rs` carries out the first four, `cpal_driver.rs` the rest.
 
 use lf_engine::SLOT_COUNT;
 
-use super::driver::Endpoints;
+use super::driver::Spec;
 use super::{DeviceRequest, SAMPLE_RATES};
 use crate::audio_output::AudioBackend;
 
@@ -78,16 +79,25 @@ pub(crate) fn open_rate(pick: Option<u32>, rate: u32, runs: &[u32]) -> u32 {
 /// channels in place instead (a rebuilt ASIO input would register after the output and add a block).
 /// ASIO ignores the WASAPI ids (one cached duplex driver) but not the driver: `drivers` is the one the
 /// device runs on and the one a resolve would take now, which a driver switch replaced. WASAPI ignores
-/// the buffer (the audio engine's period) and the rate pick (the endpoint's own runs: `open_rate`), but
-/// not where a default is now: `endpoints` is what the device runs on and what `next` names now
-/// (`Spec::endpoints`, a side left to the default read again), so picking the default again after
-/// Windows moved it reopens there.
-pub(crate) fn same_device(running: &DeviceRequest, next: &DeviceRequest, drivers: (&str, Option<&str>), endpoints: (&Endpoints, &Endpoints)) -> bool {
+/// the buffer (the audio engine's period) and the rate pick (the endpoint's own runs: `open_rate`). Where
+/// a default is now is [`same_format`]'s.
+pub(crate) fn same_device(running: &DeviceRequest, next: &DeviceRequest, drivers: (&str, Option<&str>)) -> bool {
     running.backend == next.backend
         && match next.backend {
             AudioBackend::Asio => running.buffer == next.buffer && running.sample_rate == next.sample_rate && Some(drivers.0) == drivers.1,
-            AudioBackend::Wasapi => running.input == next.input && running.output == next.output && endpoints.0 == endpoints.1,
+            AudioBackend::Wasapi => running.input == next.input && running.output == next.output,
         }
+}
+
+/// A side left to Windows' default that Windows moved since `running` opened (a headset plugged in),
+/// resolved again as `moved`. cpal 0.18.1 opens a default side as Windows' virtual default endpoint
+/// (`wasapi/device.rs`, `activate_audio_interface_sync`), whose stream Windows reroutes to the new default
+/// itself, converting to its format (`AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM`). At the format that runs, the
+/// stream already plays where `moved` names: it is the device that runs, and a restart would only end a
+/// take. At another, a fresh open runs the new endpoint's own (no conversion).
+pub(crate) fn same_format(running: &Spec, moved: &Spec) -> bool {
+    let format = |s: &Spec| (s.backend, s.rate, s.in_rate, s.in_channels, s.out_channels);
+    format(running) == format(moved)
 }
 
 /// Where a lost device falls back to, tried in order: ASIO rebuilds from the cache once, then falls back
@@ -182,39 +192,48 @@ mod tests {
         }
     }
 
-    /// [`same_device`] with the defaults where they were.
-    fn same(running: &DeviceRequest, next: &DeviceRequest, drivers: (&str, Option<&str>)) -> bool {
-        same_device(running, next, drivers, (&Endpoints::default(), &Endpoints::default()))
-    }
-
     #[test]
     fn a_channel_change_is_not_a_new_device() {
         let mut other_channel = wasapi(Some("in"), Some("out"));
         other_channel.input_channels = [Some(0), Some(1)];
         let a = ("A", Some("A"));
-        assert!(same(&wasapi(Some("in"), Some("out")), &other_channel, a));
-        assert!(!same(&wasapi(Some("in"), Some("out")), &wasapi(Some("in"), None), a), "another output");
-        assert!(!same(&wasapi(Some("in"), None), &wasapi(None, None), a), "another input");
-        assert!(!same(&wasapi(None, None), &asio(None), a), "another backend");
-        assert!(!same(&asio(Some(256)), &asio(Some(128)), a), "another buffer");
+        assert!(same_device(&wasapi(Some("in"), Some("out")), &other_channel, a));
+        assert!(!same_device(&wasapi(Some("in"), Some("out")), &wasapi(Some("in"), None), a), "another output");
+        assert!(!same_device(&wasapi(Some("in"), None), &wasapi(None, None), a), "another input");
+        assert!(!same_device(&wasapi(None, None), &asio(None), a), "another backend");
+        assert!(!same_device(&asio(Some(256)), &asio(Some(128)), a), "another buffer");
         let mut ids = asio(Some(256));
         ids.input = Some("ignored".into());
-        assert!(same(&asio(Some(256)), &ids, a), "ASIO ignores the WASAPI ids");
-        assert!(!same(&asio(Some(256)), &asio(Some(256)), ("A", Some("B"))), "another ASIO driver since");
-        assert!(!same(&asio(Some(256)), &asio(Some(256)), ("A", None)), "no ASIO driver cached any more");
-        assert!(same(&wasapi(None, None), &wasapi(None, None), ("Speakers", Some("B"))), "WASAPI ignores the ASIO driver");
+        assert!(same_device(&asio(Some(256)), &ids, a), "ASIO ignores the WASAPI ids");
+        assert!(!same_device(&asio(Some(256)), &asio(Some(256)), ("A", Some("B"))), "another ASIO driver since");
+        assert!(!same_device(&asio(Some(256)), &asio(Some(256)), ("A", None)), "no ASIO driver cached any more");
+        assert!(same_device(&wasapi(None, None), &wasapi(None, None), ("Speakers", Some("B"))), "WASAPI ignores the ASIO driver");
         let sized = DeviceRequest { buffer: Some(128), ..wasapi(Some("in"), Some("out")) };
-        assert!(same(&wasapi(Some("in"), Some("out")), &sized, a), "WASAPI ignores the buffer");
+        assert!(same_device(&wasapi(Some("in"), Some("out")), &sized, a), "WASAPI ignores the buffer");
         let rated = |rate| DeviceRequest { sample_rate: rate, ..asio(Some(256)) };
-        assert!(!same(&rated(None), &rated(Some(44_100)), a), "a rate pick on ASIO");
-        assert!(!same(&rated(Some(48_000)), &rated(Some(44_100)), a), "another rate pick on ASIO");
+        assert!(!same_device(&rated(None), &rated(Some(44_100)), a), "a rate pick on ASIO");
+        assert!(!same_device(&rated(Some(48_000)), &rated(Some(44_100)), a), "another rate pick on ASIO");
         let picked = DeviceRequest { sample_rate: Some(44_100), ..wasapi(Some("in"), Some("out")) };
-        assert!(same(&wasapi(Some("in"), Some("out")), &picked, a), "WASAPI ignores the rate pick");
-        let ran = |input: &str, output: &str| Endpoints { input: Some(input.into()), output: Some(output.into()) };
-        let speakers = ran("mic", "speakers");
-        assert!(same_device(&wasapi(None, None), &wasapi(None, None), a, (&speakers, &speakers)), "the defaults where they were");
-        assert!(!same_device(&wasapi(None, None), &wasapi(None, None), a, (&speakers, &ran("mic", "headset"))), "Windows moved the default output");
-        assert!(!same_device(&wasapi(None, Some("out")), &wasapi(None, Some("out")), a, (&ran("mic", "out"), &ran("headset", "out"))), "and the default input");
+        assert!(same_device(&wasapi(Some("in"), Some("out")), &picked, a), "WASAPI ignores the rate pick");
+    }
+
+    #[test]
+    fn a_default_windows_moved_runs_on_at_the_same_format() {
+        let spec = |rate, in_channels| Spec {
+            backend: AudioBackend::Wasapi,
+            rate,
+            in_rate: rate,
+            in_channels,
+            out_channels: 2,
+            block: 0,
+            input_name: "Mic".into(),
+            output_name: "Speakers".into(),
+            endpoints: Default::default(),
+        };
+        let headset = |rate, in_channels| Spec { input_name: "Headset".into(), output_name: "Headset".into(), ..spec(rate, in_channels) };
+        assert!(same_format(&spec(48_000, 2), &headset(48_000, 2)), "rerouted: the stream plays there already");
+        assert!(!same_format(&spec(48_000, 2), &headset(44_100, 2)), "another rate opens at the endpoint's own");
+        assert!(!same_format(&spec(48_000, 2), &headset(48_000, 1)), "another capture width too");
     }
 
     #[test]

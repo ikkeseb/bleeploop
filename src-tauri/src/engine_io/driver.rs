@@ -27,7 +27,7 @@ pub(crate) struct Spec {
     /// ASIO: the driver's name, as `Driver::asio_driver` gives it.
     pub(crate) output_name: String,
     /// WASAPI: the endpoints it opens, each the request's own id, or the default's for a side the
-    /// request left to the default; ASIO: none.
+    /// request left to the default (the owner moves it where Windows moved that stream); ASIO: none.
     pub(crate) endpoints: Endpoints,
 }
 
@@ -165,8 +165,8 @@ pub(crate) trait Driver: Send + 'static {
     fn asio_driver(&self) -> Option<String>;
 
     /// Windows' default WASAPI endpoints now, by id; opens nothing. Windows moves them on its own (a
-    /// headset plugged in), so a device running on a default is not the device a request for the default
-    /// names once they moved.
+    /// headset plugged in) and a stream on a default with them: the owner checks where a default side
+    /// is now against where it opened (`Spec::endpoints`, `transition::same_format`).
     fn default_endpoints(&self) -> Endpoints;
 
     /// Build and play the streams, the input first, then the output (ASIO runs its registered

@@ -77,6 +77,12 @@
 //!   streams: an ASIO driver rebuilds from its cache, else the owner falls back to the WASAPI default;
 //!   a lost WASAPI endpoint falls back to the default endpoint (`transition`'s fallbacks). cpal's
 //!   `DeviceChanged` and `RealtimeDenied` are not losses (cpal 0.18.1 documents both as non-fatal).
+//! - **A WASAPI default follows Windows without a restart.** cpal opens a side left to the default as
+//!   Windows' virtual default endpoint, which Windows reroutes itself when its default moves, converting
+//!   to the new endpoint's format. On cpal's `DeviceChanged` (and on an open of the same request) the
+//!   owner names the new endpoint in the status; at the format that runs it is the device that runs,
+//!   so nothing reopens and no take ends (`transition::same_format`). At another, the stream plays on
+//!   converted, and the default picked again reopens at the endpoint's own rate.
 //! - **Loops never leave on a player's switch unasked.** An open that would build an engine at another
 //!   rate while this one holds audio (any lane not EMPTY: a loop, a take in flight or armed, a kept
 //!   RETAKE pass) is refused with [`OpenError::RateChange`] (the rate is known from `Driver::resolve`,

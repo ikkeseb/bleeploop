@@ -158,6 +158,16 @@ impl Fake {
         *self.input.lock().unwrap() = Arc::new(input);
     }
 
+    /// Windows makes `id` its default endpoint, both sides (a headset plugged in). A stream on a default
+    /// side moves with it at the format it opened at, as Windows reroutes cpal's virtual default streams
+    /// (converting), so the fake's play on; their error callbacks hear it as cpal reports it (`notices`).
+    pub(crate) fn move_default(&self, id: &str, device: FakeDevice) {
+        let mut listed = self.wasapi.lock().unwrap();
+        listed.retain(|(e, _)| e != id);
+        listed.insert(0, (id.to_string(), device));
+        self.notices.store(true, Relaxed);
+    }
+
     /// The left channel played over `frames` (NaN where nothing played).
     pub(crate) fn heard(&self, frames: std::ops::Range<Frame>) -> Vec<f32> {
         let tape = self.tape.lock().unwrap();
