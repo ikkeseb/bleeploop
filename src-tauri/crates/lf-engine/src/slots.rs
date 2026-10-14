@@ -393,6 +393,16 @@ impl Rack {
         self.record_latency
     }
 
+    /// The most frames input lost now can take to reach the record tap: the latched record latency, or
+    /// an effect unit's own latency plus its wet line's delay where that is more, live or not: one off
+    /// live still plays out what it took in before (a jump puts that out of place), and a GO LIVE inside
+    /// the gap's block opens one to the lost input. (A path quicker than the record latency, a slot's dry
+    /// side mid-crossfade or a wet line clamped short, is not counted.)
+    pub(crate) fn tap_lag(&self) -> Frame {
+        let units = self.slots.iter().filter(|s| s.unit.is_some() && s.kind == SlotKind::Effect);
+        units.map(|s| s.latency + s.dw as Frame).fold(self.record_latency, Frame::max)
+    }
+
     pub(crate) fn installed(&self, slot: usize) -> Option<(SlotKind, Frame)> {
         self.slots.get(slot).and_then(|s| s.unit.as_ref().map(|_| (s.kind, s.latency)))
     }

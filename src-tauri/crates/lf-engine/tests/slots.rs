@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex};
 
 use common::{code, Delay, Opts, Rig};
 use lf_engine::grid::Frame;
-use lf_engine::{Command, InputSend, InputSendParam, Instrument, LaneState, NoteTarget, ProcessContext, SlotEvent, SlotEventKind, SlotKind, SlotProcessor};
+use lf_engine::{Command, Event, InputSend, InputSendParam, Instrument, LaneState, NoteTarget, ProcessContext, SlotEvent, SlotEventKind, SlotKind, SlotProcessor};
 
 /// Frames of the bypass crossfade at 48 kHz: 10 ms.
 const FADE: usize = 480;
@@ -1530,4 +1530,33 @@ fn the_slots_render_bit_identical_across_block_sizes() {
             assert_eq!(first, None, "block {block}: the {side} output differs from block 128");
         }
     }
+}
+
+#[test]
+fn an_instrument_plugins_latency_leaves_a_silent_block_on_its_own_frames_of_the_record_tap() {
+    // The input is dry through slot 0, and slot 1 holds an instrument with 2048 frames of latency. A
+    // silent block [b, b + 128) reaches the record tap on its own frames, as the instrument takes no
+    // input: a layer opening on b + 256 is clean.
+    let probe = Probe::new();
+    let mut rig = Rig::new();
+    rig.install(1, Fake::instrument(0.0, 2048, &probe));
+    rig.set(Command::SetBpm(200.0));
+    rig.set_input(code);
+    let master = rig.record_first_take(0, 1, 2400);
+    rig.idle();
+    rig.align = 512;
+    let b = rig.next_boundary() + master / 4;
+    rig.advance_to(b - 256);
+    rig.send_at(b - 256, Command::RecDub(0)); // the window opens on b + 256
+    rig.send_at(b + 256, Command::RecDub(0)); // and closes on b + 768
+    rig.advance(256);
+    assert_eq!(rig.window(), Some((0, Some(b + 256), None)));
+    // As the device side renders a damaged block: silence in its place.
+    rig.set_input(move |f| if (b..b + 128).contains(&f) { 0.0 } else { code(f) });
+    rig.damage();
+    rig.advance(2048);
+    rig.idle();
+    assert_eq!(rig.engine.diag().xruns, 1);
+    assert!(!rig.events.iter().any(|e| matches!(e, Event::TakeRejected { .. })), "the layer commits");
+    assert_eq!(rig.state(0), LaneState::Playing);
 }

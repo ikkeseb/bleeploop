@@ -218,6 +218,71 @@ fn f_silent_blocks_drop_the_passes_a_live_plugin_carries_them_into() {
     assert_eq!(mismatches(&rig.pcm(0), start + 2 * len - LATENCY), 0, "the clean pass 3 is kept, as the tap carried it");
 }
 
+#[test]
+fn f_silent_blocks_passes_apart_drop_only_the_passes_a_live_plugin_carries_each_into() {
+    // The live slot delays its input three passes to the record tap. Silent blocks in pass 1 and pass 3
+    // reach it in pass 4 and pass 6: the second arrives while the pass in flight (3) ends before the
+    // first's frames, and pass 5 between the two is clean.
+    const LATENCY: Frame = 115_200;
+    let mut rig = Rig::new();
+    rig.install(0, Box::new(common::Delay::new(LATENCY)));
+    rig.set(Command::SetBpm(300.0));
+    rig.set(Command::SetFixedLength(true));
+    rig.set(Command::SetFixedBars(1.0));
+    rig.set(Command::SetRetake(true));
+    rig.set_input(code);
+    let mark = rig.events.len();
+    rig.press(Command::RecDub(0));
+    let (start, len) = (rig.start_frame(), rig.fpb());
+    assert_eq!((len, start), (38_400, rig.count_one(mark) + 38_400 + LATENCY), "one-bar passes, the first the plugin's latency after the downbeat");
+    // As the device side renders a damaged block: silence in its place.
+    let silent = [start + 128, start + 2 * len + 128];
+    rig.set_input(move |f| if silent.iter().any(|&s| (s..s + 128).contains(&f)) { 0.0 } else { code(f) });
+    for s in silent {
+        rig.advance_to(s);
+        rig.damage();
+        rig.advance(128);
+    }
+    rig.advance_to(start + 6 * len + len / 4);
+    let dropped: Vec<u32> = rig.events.iter().filter_map(|e| if let Event::PassDropped { pass, .. } = *e { Some(pass) } else { None }).collect();
+    assert_eq!(dropped, [4, 6], "the two passes the silence reaches through the plugin, and only those");
+}
+
+#[test]
+fn f_a_dropout_storm_past_the_gaps_the_looper_keeps_still_spares_the_clean_passes() {
+    // The live slot delays its input five passes to the record tap. After sixteen xruns spread over the
+    // minutes before the take (each gone from the tap before the next), a silent block in pass 1, a storm
+    // of seventeen in pass 3 (the last nearer the one before it) and one in pass 5 reach passes 6, 8 and
+    // 10, more gaps at once than the looper keeps apart: the nearest join, the storm's own, so passes 7
+    // and 9 stay clean.
+    const LATENCY: Frame = 192_000;
+    let mut rig = Rig::new();
+    rig.install(0, Box::new(common::Delay::new(LATENCY)));
+    rig.set(Command::SetBpm(300.0));
+    rig.set(Command::SetFixedLength(true));
+    rig.set(Command::SetFixedBars(1.0));
+    rig.set(Command::SetRetake(true));
+    rig.set_input(code);
+    for _ in 0..16 {
+        rig.advance(240_000);
+        rig.gap();
+    }
+    rig.press(Command::RecDub(0));
+    let (start, len) = (rig.start_frame(), rig.fpb());
+    let storm = start + 2 * len + 128;
+    let silent: Vec<Frame> = [start + 128].into_iter().chain((0..16).map(|k| storm + 512 * k)).chain([storm + 512 * 15 + 256, start + 4 * len + 128]).collect();
+    let blocks = silent.clone();
+    rig.set_input(move |f| if blocks.iter().any(|&s| (s..s + 128).contains(&f)) { 0.0 } else { code(f) });
+    for s in silent {
+        rig.advance_to(s);
+        rig.damage();
+        rig.advance(128);
+    }
+    rig.advance_to(start + 10 * len + len / 4);
+    let dropped: Vec<u32> = rig.events.iter().filter_map(|e| if let Event::PassDropped { pass, .. } = *e { Some(pass) } else { None }).collect();
+    assert_eq!(dropped, [6, 8, 10], "the passes the silence reaches through the plugin, and only those");
+}
+
 /// A two-bar first take on lane 0, then a RETAKE rolling on lane 1 in pass 3.
 fn rolling_later_take(fixed: bool) -> (Rig, Frame, Frame) {
     let mut rig = Rig::new();

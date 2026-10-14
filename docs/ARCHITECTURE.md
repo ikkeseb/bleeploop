@@ -92,8 +92,9 @@ latency measurement. The live wet signal joins after the limiter and is not limi
 and goes back through `engine_load_session` (the bytes: `src/platform/engine-wire.ts`), each lane with
 its mix, which the engine sets on the frame the loop goes in (the first loaded sample plays at it) and
 the host keeps as its replayed settings; a session job runs after the commands due on its block's first
-frame, so a setting sent before it is ordered before it (with no device running too, up to a REC/DUB
-press, which waits for the device: a load behind one is refused, a snapshot waits). The wet master
+frame, so a setting sent before it is ordered before it (behind more commands than the engine's table
+holds, it waits for the rest; with no device running too, up to a REC/DUB press, which waits for the
+device: a load behind one, or behind a full table, is refused, a snapshot waits). The wet master
 is the engine's: an export's snapshot asks for it, and the host renders it right after the copy, off
 the audio thread, in a fresh engine the session's size (`src-tauri/crates/lf-engine/src/render.rs`)
 from those same loops, each with the mix the engine applied where the snapshot pinned it (lane volume,

@@ -465,6 +465,82 @@ fn a_short_jump_rejects_a_layer_in_the_frames_a_live_plugin_carries_out_of_place
     assert_eq!(rig.pcm(0), before, "the loop before the layer, bit for bit");
 }
 
+/// A committed one-bar loop at 200 bpm through a live slot that delays its input `latency` frames, the
+/// loop settled; the alignment 512 frames without the plugin's latency. From `b`, the block start that
+/// comes next, the input is the frame code but on each `silent` block (128 frames from `b` plus each).
+fn through_a_plugin(latency: Frame, silent: &[Frame]) -> (Rig, Vec<f32>, Frame) {
+    let mut rig = Rig::new();
+    rig.install(0, Box::new(common::Delay::new(latency)));
+    rig.set(Command::SetBpm(200.0));
+    rig.set_input(code);
+    let master = rig.record_first_take(0, 1, 2400);
+    rig.idle();
+    let before = rig.pcm(0);
+    rig.set(Command::SetDubFeedback(0, 0.5));
+    rig.align = 512;
+    let b = rig.next_boundary() + master / 4;
+    rig.advance_to(b);
+    // As the device side renders a damaged block: silence in its place.
+    let silent = silent.to_vec();
+    rig.set_input(move |f| if silent.iter().any(|&s| (b + s..b + s + 128).contains(&f)) { 0.0 } else { code(f) });
+    (rig, before, b)
+}
+
+#[test]
+fn a_silent_block_a_plugin_plays_out_after_go_live_off_damages_the_layer_it_reaches() {
+    // The live slot delays its input 1024 frames to the record tap. The silent block [b, b + 128) reaches
+    // it over [b + 1024, b + 1152); GO LIVE off on b + 128 drops the record latency to 0 from the next
+    // block, but the plugin still plays out what it held. A second silent block [b + 256, b + 384) comes
+    // before a layer opens on b + 896 (its press on b + 384) and closes on b + 1408, over the first.
+    const LATENCY: Frame = 1024;
+    let (mut rig, before, b) = through_a_plugin(LATENCY, &[0, 256]);
+    rig.send_at(b + 128, Command::SetSlotLive(0, false));
+    rig.send_at(b + 384, Command::RecDub(0)); // the window opens on b + 896
+    rig.send_at(b + 896, Command::RecDub(0)); // and closes on b + 1408
+    rig.keep_output();
+    rig.damage();
+    rig.advance(256);
+    rig.damage();
+    rig.advance(128);
+    assert_eq!(rig.engine.live_latency(), 0, "the record latency follows GO LIVE off");
+    rig.advance(896);
+    assert_eq!(rig.window(), Some((0, Some(b + 896), Some(b + 1408))));
+    let carried: Vec<f32> = (b + 896..b + 1024).map(|f| code(f - LATENCY)).collect();
+    assert_eq!(rig.record[896..1024], carried, "the plugin plays out what it held, into the window");
+    assert!(rig.record[1024..1152].iter().all(|&x| x == 0.0), "and the first silent block after it");
+    rig.advance(1024);
+    rig.idle();
+    assert!(rig.events.iter().any(|e| matches!(e, Event::TakeRejected { overdub: true, .. })), "the layer is rejected");
+    assert!(rig.state(0) == LaneState::Playing);
+    assert_eq!(rig.pcm(0), before, "the loop before the layer, bit for bit");
+}
+
+#[test]
+fn a_silent_block_in_a_go_live_off_ramp_damages_the_layer_the_plugin_plays_it_into() {
+    // The live slot delays its input 1024 frames to the record tap. GO LIVE off on b ramps the slot's
+    // input out over 240 frames and drops the record latency to 0 from the next block, but the plugin
+    // still plays the ramp out 1024 frames late: the silent block [b + 128, b + 256), in the ramp, reaches
+    // the tap over [b + 1152, b + 1264), inside a layer that opens on b + 768 (its press on b + 256) and
+    // closes on b + 1280.
+    const LATENCY: Frame = 1024;
+    let (mut rig, before, b) = through_a_plugin(LATENCY, &[128]);
+    rig.send_at(b, Command::SetSlotLive(0, false));
+    rig.send_at(b + 256, Command::RecDub(0)); // the window opens on b + 768
+    rig.send_at(b + 768, Command::RecDub(0)); // and closes on b + 1280
+    rig.keep_output();
+    rig.advance(128);
+    rig.damage();
+    rig.advance(1152);
+    assert_eq!(rig.window(), Some((0, Some(b + 768), Some(b + 1280))));
+    assert!(rig.record[1024..1152].iter().all(|&x| x != 0.0), "the ramp's first frames play out, faded");
+    assert!(rig.record[1152..1264].iter().all(|&x| x == 0.0), "and its silent block after them");
+    rig.advance(1024);
+    rig.idle();
+    assert!(rig.events.iter().any(|e| matches!(e, Event::TakeRejected { overdub: true, .. })), "the layer is rejected");
+    assert!(rig.state(0) == LaneState::Playing);
+    assert_eq!(rig.pcm(0), before, "the loop before the layer, bit for bit");
+}
+
 #[test]
 fn a_layer_with_an_input_gap_ended_by_play_stop_lands_stopped_and_silent() {
     // verify/probes/capture-loss.mjs's overdub row: the rejection keeps the press's STOP.

@@ -669,6 +669,46 @@ fn with_no_device_a_load_comes_after_more_queued_commands_than_one_take_holds() 
     assert_eq!(fresh.engine.looper().mix(0, fresh.engine.fx()), mix);
 }
 
+/// Queue 64 commands stamped 9600 frames on, as many as the engine's table holds: a command queued after
+/// them stays in the ring until they apply. The frame they are stamped for.
+fn behind_a_full_table(fresh: &mut Rig) -> Frame {
+    let later = fresh.frame + 9600;
+    for _ in 0..64 {
+        fresh.send_at(later, Command::SetVolume(1, 0.25));
+    }
+    later
+}
+
+#[test]
+fn a_load_waits_for_a_setting_a_full_table_left_in_the_ring() {
+    // The setting waits in the ring until the table empties on its stamped frame, and the load sent after
+    // it waits with it: the load's mix holds.
+    let (s, _) = one_lane();
+    let mix = LaneMix { volume: 0.5, ..LaneMix::default() };
+    let (mut fresh, load) = fresh_load(&s, mix);
+    let later = behind_a_full_table(&mut fresh);
+    fresh.queue(Command::SetVolume(0, 0.9));
+    let SessionJob::Load(load) = run(&mut fresh, SessionJob::Load(load)) else { panic!("a load comes back") };
+    assert_eq!(load.result, Some(Ok(())));
+    assert!(fresh.anchor() > later, "the load waited for the table to empty: {} after {later}", fresh.anchor());
+    fresh.advance(4800);
+    assert_eq!(fresh.engine.looper().mix(0, fresh.engine.fx()), mix);
+}
+
+#[test]
+fn with_no_device_a_load_behind_a_full_table_is_refused() {
+    // With no device running nothing makes room in the table, so the setting stays in the ring: the load
+    // cannot come after it, and it cannot wait for a device either (the host gives up on it). It is
+    // refused; the setting applies once the device resumes and the table empties.
+    let (s, _) = one_lane();
+    let (mut fresh, load) = fresh_load(&s, LaneMix { volume: 0.5, ..LaneMix::default() });
+    let later = behind_a_full_table(&mut fresh);
+    assert_eq!(load_idle(&mut fresh, &[Command::SetVolume(0, 0.9)], load), Some(Err(SessionError::Queued)));
+    fresh.advance_to(later + 256);
+    assert!(fresh.master() == 0 && fresh.state(0) == LaneState::Empty, "nothing loaded: {:?}", fresh.lane(0));
+    assert_eq!(fresh.engine.looper().mix(0, fresh.engine.fx()).volume, 0.9);
+}
+
 #[test]
 fn with_no_device_a_take_queued_before_a_load_arms_on_the_devices_alignment() {
     // A capture is aligned on the latency the device reports: queued while none runs, it arms on the

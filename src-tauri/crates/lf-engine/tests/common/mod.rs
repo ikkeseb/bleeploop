@@ -43,12 +43,14 @@ pub fn frame_of(sample: f32, near: Frame) -> Frame {
 /// A plugin stand-in: an effect whose output is its input `latency` frames late.
 pub struct Delay {
     pub latency: Frame,
+    /// A ring: the sample `latency` frames back is at `next`, which the new one replaces.
     line: Vec<f32>,
+    next: usize,
 }
 
 impl Delay {
     pub fn new(latency: Frame) -> Self {
-        Delay { latency, line: vec![0.0; latency as usize] }
+        Delay { latency, line: vec![0.0; latency as usize], next: 0 }
     }
 }
 
@@ -66,8 +68,8 @@ impl SlotProcessor for Delay {
             if self.line.is_empty() {
                 *w = x;
             } else {
-                *w = self.line.remove(0);
-                self.line.push(x);
+                *w = std::mem::replace(&mut self.line[self.next], x);
+                self.next = (self.next + 1) % self.line.len();
             }
         }
     }

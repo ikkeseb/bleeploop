@@ -97,8 +97,9 @@
 //!   switch on the next loop boundary (an undo's switch crossfades there, D23), and a DUB pressed before it
 //!   makes the switch heard at once (D19); STOP on an overdubbing
 //!   lane discards the whole layer (its tail plays the layer as heard); an input gap
-//!   damages only the capture windows (RETAKE passes) its frames reach on the record tap (a live
-//!   plugin's latency later; from a jump on, every frame to there), and resets AUTO's listening history;
+//!   damages only the capture windows (RETAKE passes) its frames reach on the record tap (a plugin's
+//!   latency later, a plugin off live still playing out what it held; from a jump on, every frame to
+//!   there), however far apart two gaps land, and resets AUTO's listening history;
 //!   a jump in the device frame drops the beats it skipped, and count-in beats fire late as one click.
 //! - **`process` never allocates, locks or waits.** Buffers are allocated (and their pages touched) in
 //!   `Engine::new`; commands and events cross on rtrb rings; a full event ring refuses and counts. A
@@ -117,10 +118,10 @@
 //!   needs a lane's job finished waits for it (on an exact frame), and every command sent after it waits
 //!   behind it, except the instruments', the plugin slots' and the input sends' (a note never waits on
 //!   the looper). A full command table leaves the rest in the ring for the next block: late, never
-//!   dropped. A jump in the device frame moves every job's schedule with it (`Looper::skip`): work is
-//!   owed for the frames rendered, never for the ones the device lost. An overdub an input gap damaged
-//!   (a jump's, an xrun's) writes nothing more, so its undo copy reads only the loop before it and the
-//!   rejection at its end restores that bit for bit.
+//!   dropped, and a session job waits behind them. A jump in the device frame moves every job's
+//!   schedule with it (`Looper::skip`): work is owed for the frames rendered, never for the ones the
+//!   device lost. An overdub an input gap damaged (a jump's, an xrun's) writes nothing more, so its undo
+//!   copy reads only the loop before it and the rejection at its end restores that bit for bit.
 //! - **A command is judged when it is pressed**: one that would do nothing then is dropped, never held.
 //!   A hands-free press ([`Action`]) acts on the lane the engine has selected when it lands, or a named
 //!   one, never on what the UI last saw on the feed: HALVE's bars, HOLD's lane (per pedal: an accepted

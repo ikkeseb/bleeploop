@@ -40,7 +40,7 @@ use crate::instruments::Instruments;
 use crate::looper::{Applied, Cx, Looper};
 use crate::overview::Overview;
 use crate::scope::{Scope, ScopeBin, SCOPE_MASTER, SCOPE_MONITOR, SCOPE_SOURCES};
-use crate::session::{SessionEnd, SessionPort};
+use crate::session::{SessionEnd, SessionError, SessionPort};
 use crate::slots::{Rack, SlotPort};
 
 /// Commands the engine holds for a future frame (a stamped command's, a wait for a block job).
@@ -398,15 +398,17 @@ impl Engine {
     /// of it, as a block start orders them. They apply first, at that frame, up to the first REC/DUB
     /// press: its capture's alignment is the device's, so it and every command after it wait in the
     /// table for the first block, and a load behind it is refused as `NotEmpty` (the press arms a take,
-    /// or the looper is not empty anyway) while a snapshot waits for that block too. It publishes no
-    /// lane's mix until the commands queued ahead of the first block are all taken (`replayed`).
+    /// or the looper is not empty anyway) while a snapshot waits for that block too. Behind commands the
+    /// full table leaves in the ring (it holds ones stamped for later, or behind one held for a block job)
+    /// a snapshot waits too, and a load is refused as `Queued`. It publishes no lane's mix until the
+    /// commands queued ahead of the first block are all taken (`replayed`).
     pub fn service_session_idle(&mut self) {
         let now = self.next_frame;
         let mut cx = Cx { now, align: 0, clock: &mut self.clock, feed: &mut self.feed, fx: &mut self.fx };
         self.looper.events(&mut cx);
         // The table empties as they apply: take the ring's next ones until it is empty, or until the
         // table is full of commands stamped for later and held ones (the rest wait, as at a block start).
-        let press = loop {
+        let ahead = loop {
             self.take_commands(now);
             let mut cx = Cx { now, align: 0, clock: &mut self.clock, feed: &mut self.feed, fx: &mut self.fx };
             let mut at = Apply {
@@ -419,14 +421,17 @@ impl Engine {
                 scope: &mut self.scope,
             };
             if apply_due(&mut self.pending, &mut self.commands_dropped, &mut self.looper, &mut cx, &mut at, true) {
-                break true;
+                break Some(SessionError::NotEmpty);
             }
-            if self.commands.is_empty() || self.pending.iter().all(Option::is_some) {
-                break false;
+            if self.commands.is_empty() {
+                break None;
+            }
+            if self.pending.iter().all(Option::is_some) {
+                break Some(SessionError::Queued);
             }
         };
         let mut cx = Cx { now, align: 0, clock: &mut self.clock, feed: &mut self.feed, fx: &mut self.fx };
-        self.session.begin(&mut self.looper, &mut cx, self.config.sample_rate, true, press);
+        self.session.begin(&mut self.looper, &mut cx, self.config.sample_rate, true, ahead);
         self.session.advance(&self.looper, Frame::MAX / crate::session::SNAPSHOT_RATE);
         let mut cx = Cx { now, align: 0, clock: &mut self.clock, feed: &mut self.feed, fx: &mut self.fx };
         self.looper.publish(&mut cx, self.replayed);
@@ -524,8 +529,10 @@ impl Engine {
         self.instruments.set_offset(self.skipped);
         self.take_commands(start);
         // Taken commands with no stamp are due at `start`, so all of them apply before this block's
-        // first publish. An atomic read.
-        self.replayed |= self.commands.is_empty();
+        // first publish, and before a session job begins: it waits while the full table leaves commands
+        // in the ring, which may be ones sent before it. An atomic read.
+        let queued = !self.commands.is_empty();
+        self.replayed |= !queued;
         self.rack.begin_block(start, first);
         // A capture's alignment is fixed from its arm (AUTO's, from its onset) to its end: the record
         // compensation holds with it, so no live flag or plugin latency changed meanwhile moves what it
@@ -535,14 +542,15 @@ impl Engine {
         let live_latency = self.rack.record_latency();
         if ctx.xrun || ctx.damaged {
             self.xruns += 1;
-            // The input frames lost (a damaged block's own too) reach the record tap `live_latency`
-            // later, where a capture window meets them; the tap frames before them carry input from
-            // before the gap, clean. A jump also loses the tap frames it skipped (a window's closing tail
-            // never gets them), and the plugin plays what it held from before the jump into the frames
-            // after it, out of place: from a jump on, every tap frame to the lost ones' end is lost.
+            // The input frames lost (a damaged block's own too) reach the record tap `live_latency` later,
+            // and a plugin off live, or slower, carries them on to its own latency (`Rack::tap_lag`); the
+            // tap frames before them carry input from before the gap, clean. A jump also loses the tap
+            // frames it skipped (a window's closing tail never gets them), and a plugin plays what it held
+            // from before the jump into the frames after it, out of place: from a jump on, every tap frame
+            // to the lost ones' end is lost.
             let lost_to = if ctx.damaged { end } else { start };
             let tap_from = if lost_from < start { lost_from } else { lost_from + live_latency };
-            self.looper.input_gap(tap_from, lost_to + live_latency);
+            self.looper.input_gap(tap_from, lost_to + self.rack.tap_lag(), start);
         }
         let align = ctx.align_frames + live_latency + self.limiter.latency() as Frame;
         let record_delay = ctx.input_frames + live_latency;
@@ -574,7 +582,7 @@ impl Engine {
             if f == start {
                 // The session job after the commands due on the block's first frame: a setting sent
                 // before a snapshot or a load is ordered before it (a load's mix overrides it).
-                self.session.begin(&mut self.looper, &mut cx, self.config.sample_rate, false, false);
+                self.session.begin(&mut self.looper, &mut cx, self.config.sample_rate, false, queued.then_some(SessionError::Queued));
                 self.looper.events(&mut cx);
             }
             while let Some(beat) = cx.clock.fire_due(f, self.looper.transport_until()) {

@@ -6,9 +6,11 @@
 //! buffers in them, to free it.
 //!
 //! A session job runs at a block start, after the commands due on that frame, so a setting sent before
-//! the job is ordered before it. With no device running it runs at once, after the commands queued ahead
-//! of it, up to a REC/DUB press among them, which waits for the device: a load behind one is refused
-//! as `NotEmpty`, a snapshot waits for the device too ([`crate::Engine::service_session_idle`]).
+//! the job is ordered before it; while the full command table leaves commands in the ring, it waits for
+//! them. With no device running it runs at once, after the commands queued ahead of it, up to a REC/DUB
+//! press among them, which waits for the device: a load behind one is refused as `NotEmpty`, a snapshot
+//! waits for the device too; behind commands the full table leaves in the ring, a load is refused as
+//! `Queued` ([`crate::Engine::service_session_idle`]).
 //!
 //! A snapshot is the committed loops as they stood on the frame it began (it waits for the looper's
 //! block jobs first), each with its lane's mix as the engine applied it on that frame: an OVERDUBBING
@@ -45,6 +47,9 @@ pub enum SessionError {
     Changed,
     /// A load that does not fit the engine (its text says why).
     Invalid(&'static str),
+    /// A load while no device runs, behind more commands than the engine's table holds: it cannot come
+    /// after them until a device runs again.
+    Queued,
 }
 
 impl SessionError {
@@ -54,6 +59,7 @@ impl SessionError {
             SessionError::TooSmall(need) => format!("the snapshot needs {need} samples"),
             SessionError::Changed => "the loops changed while the snapshot copied them".to_string(),
             SessionError::Invalid(why) => why.to_string(),
+            SessionError::Queued => "commands sent before the load still wait for the audio device: try again once it runs".to_string(),
         }
     }
 }
@@ -181,16 +187,22 @@ impl SessionEnd {
     /// At a block start, after the commands due on its frame: take a job the host sent (only while the
     /// return ring has room, so it can always go back), apply a load, begin a snapshot once no block job
     /// runs. `idle`: no device runs, so a block job cannot finish either and a snapshot waiting for one
-    /// answers `Changed`. `press`: a REC/DUB press ahead of the job waits for the device, so a load
-    /// answers `NotEmpty` (the press arms a take, or the looper is not empty anyway) and a snapshot not
-    /// begun yet waits with it.
-    pub(crate) fn begin(&mut self, looper: &mut crate::looper::Looper, cx: &mut crate::looper::Cx, rate: u32, idle: bool, press: bool) {
+    /// answers `Changed`. `ahead`: commands queued ahead of the job have not all applied (a REC/DUB press
+    /// waits for the device, or the full table left commands in the ring), so a job not begun yet waits
+    /// for them. While no device runs a load cannot wait (the host gives up on it, and a later block would
+    /// load it all the same): it answers `ahead`'s error, `NotEmpty` behind a press (it arms a take, or
+    /// the looper is not empty anyway), `Queued` behind the ring.
+    pub(crate) fn begin(&mut self, looper: &mut crate::looper::Looper, cx: &mut crate::looper::Cx, rate: u32, idle: bool, ahead: Option<SessionError>) {
         if self.job.is_none() && self.tx.slots() > 0 {
             self.job = self.rx.pop().ok();
         }
         match self.job.as_deref_mut() {
-            Some(SessionJob::Load(load)) if load.result.is_none() => load.result = Some(if press { Err(SessionError::NotEmpty) } else { looper.load(cx, load) }),
-            Some(SessionJob::Snapshot(s)) if !s.started && press => {}
+            Some(SessionJob::Load(load)) if load.result.is_none() => match ahead {
+                None => load.result = Some(looper.load(cx, load)),
+                Some(e) if idle => load.result = Some(Err(e)),
+                Some(_) => {}
+            },
+            Some(SessionJob::Snapshot(s)) if !s.started && ahead.is_some() => {}
             Some(SessionJob::Snapshot(s)) if !s.started && !looper.busy() => looper.snapshot_begin(s, cx.fx, cx.clock.bpm(), rate),
             Some(SessionJob::Snapshot(s)) if !s.started && idle => s.result = Some(Err(SessionError::Changed)),
             _ => {}
