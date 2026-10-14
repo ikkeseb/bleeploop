@@ -92,8 +92,8 @@ pub(crate) enum Side {
 }
 
 /// cpal 0.18.1's stream errors that end the stream: every one but an xrun, a default-device change (Windows
-/// moves a default stream to the new default itself: `transition::same_format`) and a refused thread
-/// priority, which it documents as non-fatal. The
+/// moved or removed its default; a stream on the default moves with it: `transition::follows`) and a
+/// refused thread priority, which it documents as non-fatal. The
 /// engine's streams (`Run::stream_error`) and Share output's mirror (`share.rs`) both go by it.
 pub(crate) fn ends_stream(error: &cpal::Error) -> bool {
     !matches!(error.kind(), cpal::ErrorKind::Xrun | cpal::ErrorKind::DeviceChanged | cpal::ErrorKind::RealtimeDenied)

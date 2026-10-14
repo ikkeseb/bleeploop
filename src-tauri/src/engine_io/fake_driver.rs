@@ -93,6 +93,9 @@ pub(crate) struct Fake {
     pub(crate) skew_ppm: Mutex<f64>,
     /// Starts that fail from now on.
     pub(crate) fail_starts: AtomicU32,
+    /// One-shot, taken by the next WASAPI start: its input does not open, and it plays output only, as
+    /// `cpal_driver` does (a microphone Windows' privacy settings block).
+    pub(crate) input_fails: AtomicBool,
     pub(crate) share_fails: AtomicBool,
     /// Streams started so far.
     pub(crate) started: AtomicU32,
@@ -135,6 +138,7 @@ impl Fake {
             wasapi: Mutex::new(vec![("default".to_string(), FakeDevice::new("Fake WASAPI", 48_000, 480))]),
             skew_ppm: Mutex::new(0.0),
             fail_starts: AtomicU32::new(0),
+            input_fails: AtomicBool::new(false),
             share_fails: AtomicBool::new(false),
             started: AtomicU32::new(0),
             gap: AtomicU32::new(0),
@@ -159,8 +163,8 @@ impl Fake {
     }
 
     /// Windows makes `id` its default endpoint, both sides (a headset plugged in). A stream on a default
-    /// side moves with it at the format it opened at, as Windows reroutes cpal's virtual default streams
-    /// (converting), so the fake's play on; their error callbacks hear it as cpal reports it (`notices`).
+    /// side moves with it at the format it opened at, as Windows reroutes cpal's virtual default streams,
+    /// so the fake's play on; their error callbacks hear it as cpal reports it (`notices`).
     pub(crate) fn move_default(&self, id: &str, device: FakeDevice) {
         let mut listed = self.wasapi.lock().unwrap();
         listed.retain(|(e, _)| e != id);
@@ -220,7 +224,8 @@ impl Driver for FakeDriver {
             in_channels: input.in_channels,
             out_channels: output.out_channels,
             block: asked.unwrap_or(output.block),
-            input_name: input.name.clone(),
+            // As `cpal_driver`: an endpoint with no capture names no input.
+            input_name: if input.in_channels > 0 { input.name.clone() } else { String::new() },
             output_name: output.name.clone(),
             endpoints,
         };
@@ -254,8 +259,11 @@ impl Driver for FakeDriver {
                 return Err(StartError::Buffer(format!("fake: Buffer size {} is not valid; sizes must start at {min} and increment by {step}", spec.block)));
             }
         }
-        // An endpoint with no input channels plays output only, as a PC with no capture device.
-        let capture = if spec.in_channels > 0 { Some(wiring.capture(spec)?) } else { None };
+        // An endpoint with no input channels plays output only, as a PC with no capture device, and so
+        // does a WASAPI input that does not open (`input_fails`).
+        let input_fails = !spec.backend.is_asio() && self.0.input_fails.swap(false, Relaxed);
+        let capture = if spec.in_channels > 0 && !input_fails { Some(wiring.capture(spec)?) } else { None };
+        let input_open = capture.is_some();
         let render = wiring.render(spec)?;
         let errors = (wiring.on_error(Side::Input), wiring.on_error(Side::Output));
         let stop = Arc::new(AtomicBool::new(false));
@@ -274,7 +282,6 @@ impl Driver for FakeDriver {
             })
             .map_err(|e| e.to_string())?;
         self.0.started.fetch_add(1, Relaxed);
-        let input_open = spec.in_channels > 0;
         Ok(Started { streams: Streams::new(input_open.then(|| Box::new(()) as Box<dyn Send>), Box::new(Running { fake: self.0.clone(), stop, join: Some(join) })), block: spec.block, input_open })
     }
 

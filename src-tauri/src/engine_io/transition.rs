@@ -1,9 +1,10 @@
 //! OWNS: the device owner's decisions, as pure functions (the kernel): what reaching a device takes from where the owner stands
-//! ([`steps`]), when a request only changes the channel ([`same_device`]), when a WASAPI default Windows moved
-//! still runs the device a fresh open would ([`same_format`]), where a lost device falls back
-//! to ([`fallbacks`]), which capture channel a request selects for each slot ([`open_channels`]),
-//! which buffer an ASIO open and its preopen ask the driver for ([`asio_block`], [`preopen_block`]), and
-//! the rate it runs at ([`open_rate`]). `owner.rs` carries out the first four, `cpal_driver.rs` the rest.
+//! ([`steps`]), when a request only changes the channel ([`same_device`]), when the device that runs
+//! follows a WASAPI default Windows moved rather than reopening there ([`follows`]), where a lost device
+//! falls back to ([`fallbacks`]), which capture channel a request selects for each slot
+//! ([`input_channel`], [`open_channels`]), which buffer an ASIO open and its preopen ask the driver for
+//! ([`asio_block`], [`preopen_block`]), and the rate it runs at ([`open_rate`]). `owner.rs` carries out
+//! the first five, `cpal_driver.rs` the rest.
 
 use lf_engine::SLOT_COUNT;
 
@@ -80,7 +81,7 @@ pub(crate) fn open_rate(pick: Option<u32>, rate: u32, runs: &[u32]) -> u32 {
 /// ASIO ignores the WASAPI ids (one cached duplex driver) but not the driver: `drivers` is the one the
 /// device runs on and the one a resolve would take now, which a driver switch replaced. WASAPI ignores
 /// the buffer (the audio engine's period) and the rate pick (the endpoint's own runs: `open_rate`). Where
-/// a default is now is [`same_format`]'s.
+/// a default is now is [`follows`]'s.
 pub(crate) fn same_device(running: &DeviceRequest, next: &DeviceRequest, drivers: (&str, Option<&str>)) -> bool {
     running.backend == next.backend
         && match next.backend {
@@ -90,14 +91,18 @@ pub(crate) fn same_device(running: &DeviceRequest, next: &DeviceRequest, drivers
 }
 
 /// A side left to Windows' default that Windows moved since `running` opened (a headset plugged in),
-/// resolved again as `moved`. cpal 0.18.1 opens a default side as Windows' virtual default endpoint
-/// (`wasapi/device.rs`, `activate_audio_interface_sync`), whose stream Windows reroutes to the new default
-/// itself, converting to its format (`AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM`). At the format that runs, the
-/// stream already plays where `moved` names: it is the device that runs, and a restart would only end a
-/// take. At another, a fresh open runs the new endpoint's own (no conversion).
-pub(crate) fn same_format(running: &Spec, moved: &Spec) -> bool {
-    let format = |s: &Spec| (s.backend, s.rate, s.in_rate, s.in_channels, s.out_channels);
-    format(running) == format(moved)
+/// resolved again as `moved`: true when the run follows it there rather than reopening. cpal 0.18.1 opens
+/// a default side as Windows' virtual default endpoint (`wasapi/device.rs`, `activate_audio_interface_sync`),
+/// whose stream Windows reroutes to the new default itself. The output converts to the new endpoint's
+/// format (cpal opens it with `AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM`); the capture, opened without that
+/// flag, keeps the width and rate it opened at, and whether Windows converts it across another format
+/// is unmeasured (a dead capture is a loss, as any). At the engine's rate the run already plays where
+/// `moved` names, and a restart would only end a take. It reopens only for what the running streams
+/// cannot give: another engine rate (a fresh open runs the endpoint's own), or a capture where the run
+/// has none (`input_open` false: none opened, or none to open) and Windows now offers another.
+pub(crate) fn follows(running: &Spec, input_open: bool, moved: &Spec) -> bool {
+    let capture_to_start = !input_open && moved.in_channels > 0 && moved.endpoints.input != running.endpoints.input;
+    running.backend == moved.backend && running.rate == moved.rate && !capture_to_start
 }
 
 /// Where a lost device falls back to, tried in order: ASIO rebuilds from the cache once, then falls back
@@ -152,6 +157,7 @@ pub(crate) fn open_channels(channels: usize, requested: [Option<u32>; SLOT_COUNT
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine_io::driver::Endpoints;
 
     fn wasapi(input: Option<&str>, output: Option<&str>) -> DeviceRequest {
         DeviceRequest {
@@ -218,22 +224,27 @@ mod tests {
     }
 
     #[test]
-    fn a_default_windows_moved_runs_on_at_the_same_format() {
-        let spec = |rate, in_channels| Spec {
+    fn a_default_windows_moved_is_followed_at_the_engines_rate() {
+        let spec = |name: &str, rate, in_rate, in_channels| Spec {
             backend: AudioBackend::Wasapi,
             rate,
-            in_rate: rate,
+            in_rate,
             in_channels,
             out_channels: 2,
             block: 0,
-            input_name: "Mic".into(),
-            output_name: "Speakers".into(),
-            endpoints: Default::default(),
+            input_name: name.into(),
+            output_name: name.into(),
+            endpoints: Endpoints { input: Some(name.into()), output: Some(name.into()) },
         };
-        let headset = |rate, in_channels| Spec { input_name: "Headset".into(), output_name: "Headset".into(), ..spec(rate, in_channels) };
-        assert!(same_format(&spec(48_000, 2), &headset(48_000, 2)), "rerouted: the stream plays there already");
-        assert!(!same_format(&spec(48_000, 2), &headset(44_100, 2)), "another rate opens at the endpoint's own");
-        assert!(!same_format(&spec(48_000, 2), &headset(48_000, 1)), "another capture width too");
+        let running = spec("Mic", 48_000, 48_000, 2);
+        assert!(follows(&running, true, &spec("Headset", 48_000, 48_000, 2)), "rerouted: the stream plays there already");
+        assert!(follows(&running, true, &spec("Headset", 48_000, 48_000, 1)), "a mono mic: the capture runs on at its width");
+        assert!(follows(&running, true, &spec("Headset", 48_000, 44_100, 2)), "a mic at another rate: the join resamples");
+        assert!(follows(&running, true, &spec("Speakers", 48_000, 48_000, 0)), "no capture default left: nothing to reopen for");
+        assert!(!follows(&running, true, &spec("Headset", 44_100, 44_100, 2)), "another engine rate opens at the endpoint's own");
+        assert!(!follows(&running, false, &spec("Headset", 48_000, 48_000, 2)), "a capture the run lacks starts there");
+        let output_moved = Spec { endpoints: Endpoints { input: Some("Mic".into()), output: Some("Headset".into()) }, ..spec("Headset", 48_000, 48_000, 2) };
+        assert!(follows(&running, false, &output_moved), "the capture that did not open is where it was");
     }
 
     #[test]

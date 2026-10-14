@@ -388,7 +388,7 @@ impl<D: Driver> Owner<D> {
     }
 
     /// Open `request`, or switch to it. A request for the device that runs only changes its channels,
-    /// also where Windows moved a default side since at the format that runs (`transition::same_format`).
+    /// also where Windows moved a default side since and the run follows it (`track_default`).
     /// A slot's pick the device lacks opens on auto (`transition::open_channels`). The player's open
     /// (`By::Player`) is refused, before anything stops, when it would build an engine at another rate
     /// while this one holds audio, unless forced; a switch of the player's that fails to start reopens the
@@ -397,12 +397,10 @@ impl<D: Driver> Owner<D> {
         let driver = self.driver.asio_driver();
         let running = self.active.as_ref().filter(|a| !a.run.faulted());
         let mut resolved = None;
-        if let Some(ran) = running.filter(|a| transition::same_device(&a.request, &request, (&a.spec.output_name, driver.as_deref()))).map(|a| a.spec.endpoints.clone()) {
-            if self.endpoints_named(&request) != ran {
-                let (spec, device) = self.driver.resolve(&request)?;
-                if !self.follow(&spec) {
-                    resolved = Some((spec, device));
-                }
+        if running.is_some_and(|a| transition::same_device(&a.request, &request, (&a.spec.output_name, driver.as_deref()))) {
+            match self.track_default(&request) {
+                Ok(reopen) => resolved = reopen,
+                Err(error) => log::warn!("[engine_io] Windows' default does not resolve ({error}): the device that runs plays on"),
             }
             if resolved.is_none() {
                 self.set_input_channels(request.input_channels)?;
@@ -458,45 +456,61 @@ impl<D: Driver> Owner<D> {
         Endpoints { input: request.input.clone().or(defaults.input), output: request.output.clone().or(defaults.output) }
     }
 
-    /// cpal reported that Windows moved its default endpoint, and the device that runs moved with it where
-    /// a side is left to the default: follow it there (`follow`), or say why it stays another device.
+    /// cpal reported that Windows' default endpoint changed: the device that runs follows it where a side
+    /// is left to the default (`track_default`), or says why an open of it would reopen there.
     fn default_moved(&mut self) {
-        let Some((request, ran)) = self.active.as_ref().filter(|a| !a.run.faulted()).map(|a| (a.request.clone(), a.spec.endpoints.clone())) else { return };
-        if self.endpoints_named(&request) == ran {
-            return;
-        }
-        match self.driver.resolve(&request) {
-            Ok((spec, _)) if self.follow(&spec) => {}
-            Ok((spec, _)) => log::info!(
-                "[engine_io] Windows moved the default to \"{}\" at {} Hz: the stream plays on there at {} Hz, Windows converting; picking the default again reopens at its own rate",
-                spec.output_name,
-                spec.rate,
+        let Some(request) = self.active.as_ref().filter(|a| !a.run.faulted()).map(|a| a.request.clone()) else { return };
+        match self.track_default(&request) {
+            Ok(None) => {}
+            Ok(Some((moved, _))) if Some(moved.rate) != self.core.rate() => log::info!(
+                "[engine_io] Windows moved the default to \"{}\" at {} Hz: the output plays on there converted from {} Hz; an open of the same device reopens at its own rate",
+                moved.output_name,
+                moved.rate,
                 self.core.rate().unwrap_or(0)
             ),
-            Err(error) => log::warn!("[engine_io] Windows moved the default, which does not resolve: {error}"),
+            Ok(Some((moved, _))) => log::info!(
+                "[engine_io] Windows moved the default input to \"{}\": the device that runs has no input; an open of the same device starts it there",
+                moved.input_name
+            ),
+            Err(error) => log::warn!("[engine_io] Windows' default changed and does not resolve: {error}"),
         }
     }
 
-    /// The device that runs, with a side Windows moved to its default since, resolved again as `moved`:
-    /// the status names where it plays now. At the format that runs (`transition::same_format`) it is
-    /// the device `moved` is, and true: it follows, nothing restarts. Else it stays another device, so
-    /// an open of the same request reopens at the new endpoint's own format.
-    fn follow(&mut self, moved: &Spec) -> bool {
-        let Some(active) = self.active.as_mut() else { return false };
-        if let Some(status) = self.core.device.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
-            if status.input_open {
-                status.input_name = moved.input_name.clone();
-            }
-            status.output_name = moved.output_name.clone();
+    /// Where Windows' default is now, for the device that runs on `request`: the status names it, and the
+    /// run follows it there (`transition::follows`: nothing restarts, no take ends), or stays the device
+    /// it opened as, returned resolved as an open there would run it.
+    fn track_default(&mut self, request: &DeviceRequest) -> Result<Option<(Spec, D::Device)>, String> {
+        let Some(ran) = self.active.as_ref().map(|a| a.spec.clone()) else { return Ok(None) };
+        if self.endpoints_named(request) == ran.endpoints {
+            // Back where it opened, after a move it did not follow: the status names it again.
+            self.name_status(&ran);
+            return Ok(None);
         }
-        if !transition::same_format(&active.spec, moved) {
-            return false;
+        let (moved, device) = self.driver.resolve(request)?;
+        let input_open = self.name_status(&moved);
+        let Some(active) = self.active.as_mut() else { return Ok(None) };
+        if !transition::follows(&active.spec, input_open, &moved) {
+            return Ok(Some((moved, device)));
         }
         log::info!("[engine_io] Windows moved the default: the stream plays on in \"{}\" → \"{}\"", moved.input_name, moved.output_name);
-        active.spec.endpoints = moved.endpoints.clone();
-        active.spec.input_name = moved.input_name.clone();
-        active.spec.output_name = moved.output_name.clone();
-        true
+        active.spec.endpoints = moved.endpoints;
+        active.spec.output_name = moved.output_name;
+        if moved.in_channels > 0 {
+            active.spec.input_name = moved.input_name;
+        }
+        Ok(None)
+    }
+
+    /// The status names `spec`'s endpoints, its input only where one is open and `spec` has one (a
+    /// capture default gone leaves the name of the one that runs). Whether an input is open.
+    fn name_status(&self, spec: &Spec) -> bool {
+        let mut device = self.core.device.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(status) = device.as_mut() else { return false };
+        if status.input_open && spec.in_channels > 0 {
+            status.input_name = spec.input_name.clone();
+        }
+        status.output_name = spec.output_name.clone();
+        status.input_open
     }
 
     /// The ASIO driver refused the size `request` asked for (`refused`): a driver whose sizes come in
