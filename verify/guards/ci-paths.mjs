@@ -33,7 +33,7 @@ function check(name, fn) {
   }
 }
 
-const INCLUDE = /\binclude_(?:str|bytes)!/g;
+const INCLUDE = /\binclude_(?:str|bytes)\s*!/g;
 const LITERAL = /\s*[([{]\s*(?:r#*)?"([^"]*)"/y;
 
 /** Each `include_str!`/`include_bytes!` in `source` outside a whole-line comment: its line and its
@@ -101,6 +101,11 @@ check('finds an include_bytes! raw-string path', () =>
   assert.deepStrictEqual(includesOf(`let b = include_bytes!(r#"../assets/a.wav"#);`), [{ line: 1, path: '../assets/a.wav' }]));
 check('flags a non-literal include', () =>
   assert.deepStrictEqual(includesOf(`include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/x"))`), [{ line: 1, path: null }]));
+check('finds an include with a space before the bang', () =>
+  assert.deepStrictEqual(includesOf(`include_str !("../a.json"); include_bytes !("../b.bin")`), [
+    { line: 1, path: '../a.json' },
+    { line: 1, path: '../b.bin' },
+  ]));
 check('skips a commented-out include', () => assert.deepStrictEqual(includesOf(`// include_str!("../../x")`), []));
 const PLANTED = ['src-tauri/**', '!src-tauri/**/*.md', 'verify/fixtures/**', '.github/workflows/rust-test.yml'];
 check('a fixture under a ** path is covered', () => assert.ok(covered('verify/fixtures/engine-wire.json', PLANTED)));
