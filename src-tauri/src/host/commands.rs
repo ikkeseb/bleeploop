@@ -38,12 +38,22 @@ async fn blocking<T: Send + 'static>(
     op: &'static str,
     work: impl FnOnce(&'static EngineApp, &PluginHostState) -> Result<T, String> + Send + 'static,
 ) -> Result<T, String> {
-    tauri::async_runtime::spawn_blocking(move || {
+    off_runtime(op, move || {
         use tauri::Manager;
         work(engine()?, &app.state::<PluginHostState>())
     })
     .await
-    .map_err(|e| format!("{op} task: {e}"))?
+}
+
+/// `blocking`'s dispatch: `work` on the runtime's blocking pool. A task that failed (it panicked) is
+/// the host's fault, never the plugin's: the frontend keeps rig recall for "{op} task"
+/// (`src/ui/state/instrument.ts`).
+#[cfg(windows)]
+async fn off_runtime<T: Send + 'static>(
+    op: &'static str,
+    work: impl FnOnce() -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    tauri::async_runtime::spawn_blocking(work).await.map_err(|e| format!("{op} task: {e}"))?
 }
 
 /// One call per WebView document: begins its session and answers its `frontendEpoch`, which every
@@ -631,5 +641,37 @@ mod tests {
             .collect();
         assert_eq!(direct, ["plugin_list_loaded", "plugin_tone_forget"]);
         assert_eq!(source.matches(concat!("work(", "engine()?")).count(), 1, "`blocking` reaches the engine");
+    }
+
+    /// `blocking`'s work runs off the async runtime's workers: more works than the runtime has workers
+    /// each wait, synchronously, until all of them run at once, which only the blocking pool allows.
+    /// On the workers (a plain `spawn`), the first ones fill every worker and the rest never start.
+    #[cfg(windows)]
+    #[test]
+    fn blocking_work_leaves_the_async_workers_free() {
+        use std::sync::{Arc, Condvar, Mutex};
+        use std::time::Duration;
+        // The runtime has one worker per core (tokio's default); more works than that can only all
+        // run at once off the workers.
+        let works = 4 * std::thread::available_parallelism().map_or(8, |n| n.get()) + 1;
+        let started = Arc::new((Mutex::new(0usize), Condvar::new()));
+        let tasks: Vec<_> = (0..works)
+            .map(|_| {
+                let started = started.clone();
+                tauri::async_runtime::spawn(super::off_runtime("probe", move || {
+                    let (count, all) = &*started;
+                    let mut count = count.lock().unwrap();
+                    *count += 1;
+                    all.notify_all();
+                    let (count, wait) = all.wait_timeout_while(count, Duration::from_secs(5), |n| *n < works).unwrap();
+                    if wait.timed_out() { Err(format!("{} of {works} works ran at once", *count)) } else { Ok(()) }
+                }))
+            })
+            .collect();
+        tauri::async_runtime::block_on(async {
+            for task in tasks {
+                task.await.expect("the probe task").expect("every work ran at once");
+            }
+        });
     }
 }

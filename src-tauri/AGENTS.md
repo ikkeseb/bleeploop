@@ -154,7 +154,7 @@ plugin-GUI work.
   setup, and only that load moves the slot on: one that finishes for a replaced document, or that an
   unload cancelled, unloads what it loaded, and the slot takes no load until the plugin's unit has
   left the engine (an unload holds it the same way); a load for the new document waits for it
-  (`engine_io/plugins.rs`). The `plugin_*` commands that can wait run on `spawn_blocking` and read the
+  (`engine_io/plugins.rs`). Two timeouts free the slot early (§ Open threads). The `plugin_*` commands that can wait run on `spawn_blocking` and read the
   shared `PluginHostState` there (`host/commands.rs`).
 - **The `!Send` instance (clack `PluginInstance`, the VST3 component, the VST2 effect) lives on its
   owner thread**, NOT `tauri::State`; only the `Send` unit (`ClapUnit`, `Vst3Unit`, `Vst2Unit`: the
@@ -303,6 +303,15 @@ plugin-GUI work.
   store worker doing the file I/O would remove the wait.
 - `clap_engine.rs`, `vst3_engine.rs` and `src/host/vst2_engine.rs` each carry the whole owner
   choreography (load, restart, eviction, teardown): one shared owner would keep B1/B11 from returning. Not built.
+- Two timeouts free a plugin slot before its unit has left the engine (read from source, never run):
+  a load whose setup outlasts its 15 s bound empties the slot at once, while its owner may still
+  install the unit and then undo it; an unload that gives up waiting (6 s) for a command still using
+  the handle empties the slot while that command's drop of the handle still tears the plugin down. A
+  load meanwhile fails on "already holds a unit" (rig recall keeps the plugin) or wins the slot
+  first; the late owner's unit may sound for its crossfade. Next check: a slot test in
+  `engine_io/plugins.rs` with a stand-in owner that outlasts the bound (injectable), and one that
+  holds a handle clone past the unload wait, each followed by a load. Holding the slot until the
+  owner thread ends belongs with the shared owner above.
 - VST2 host gaps (read from source, none reproduced; the only real plugins tried are ReaJS and
   ReaStream, which load, open their editors and swap, and whose `native:tone-recall` fails because
   neither has a parameter that holds a value):

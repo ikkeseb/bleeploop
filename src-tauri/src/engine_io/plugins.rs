@@ -13,6 +13,8 @@
 //! `frontendEpoch`); only that load moves the slot on. A load that finishes for a replaced document, or
 //! one an unload cancelled meanwhile, unloads what it loaded, and the slot stays out of reach until
 //! the plugin's unit has left the engine; a load for the new document waits for it (≤ `VACATE_WAIT`).
+//! Two timeouts free the slot early: a setup past its bound (`load`'s error branch) and an unload
+//! that gives up on a shared handle (`unload_handle`); `src-tauri/AGENTS.md` § Open threads.
 //! Every request that changes a slot (load, unload, a parameter, the editor) names its document and is
 //! refused from a replaced one, checked under the slots lock as it takes the slot. Commands clone a
 //! loaded slot's handle out of the lock, so a slow owner round trip on one slot holds up nobody else.
@@ -107,6 +109,8 @@ impl LoadTarget<'_> {
         let handle = match loaded {
             Ok(handle) => handle,
             Err(e) => {
+                // A setup that timed out leaves its owner running: it may still install its unit and
+                // undo it after this (`src-tauri/AGENTS.md` § Open threads).
                 slots[usize::from(slot)] = EngineSlot::Empty;
                 return Err(e);
             }
@@ -220,7 +224,8 @@ fn unload(slots: &Slots, slot: u8, document: Option<(&PluginHostState, u32)>) ->
 }
 
 /// A command may still hold the handle for an owner round trip: wait it out (≤ `UNLOAD_WAIT`), then
-/// unload here; past that, the last user unloads it.
+/// unload here; past that, the last user unloads it, after the caller has already vacated the slot
+/// (`src-tauri/AGENTS.md` § Open threads).
 fn unload_handle(slot: u8, mut handle: Arc<EngineSlotHandle>) -> Result<(), String> {
     let deadline = Instant::now() + UNLOAD_WAIT;
     loop {

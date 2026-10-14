@@ -284,13 +284,15 @@ export function restorePlugin(slot: 0 | 1, desc: PluginDescriptor): Promise<void
 
 /**
  * A load failure the plugin did not cause, in the native host's words: its setup ran past the host's
- * bound (`src-tauri/src/host/engine_slot.rs`), the slot was busy (a load or an unload still clearing
- * it, a page a reload replaced: `src-tauri/src/engine_io/plugins.rs`; a unit still in the engine:
- * `src-tauri/src/engine_io/slot_host.rs`) or no device was open. Any other failure is the plugin's
- * own (it is missing, or would not load, instantiate or activate).
+ * bound or its owner thread could not start (`src-tauri/src/host/engine_slot.rs`), the command's task
+ * failed (`src-tauri/src/host/commands.rs`), the slot was busy (a load or an unload still clearing it,
+ * a page a reload replaced, a poisoned slot lock: `src-tauri/src/engine_io/plugins.rs`; a unit still
+ * in the engine: `src-tauri/src/engine_io/slot_host.rs`), no device was open, or this page's host had
+ * not started (`src/platform/host.tauri.ts`). Any other failure is the plugin's own (it is missing,
+ * or would not load, instantiate or activate). Pinned by `pnpm probe rig-recall`.
  */
 const TRANSIENT_LOAD_ERROR =
-  /plugin setup timed out|already loading|already has a plugin loaded|still clearing|superseded|stale frontend epoch|already holds a unit|port is full|no audio device is open/;
+  /plugin setup timed out|spawn owner thread|plugin_load task|already loading|already has a plugin loaded|still clearing|superseded|stale frontend epoch|poisoned|already holds a unit|port is full|no audio device is open|plugin host not initialized/;
 
 /** `toneToken`: a session import's reload token when this load is that reload (`reloadPlugin`). */
 async function doSelectPlugin(
