@@ -184,6 +184,40 @@ fn f_a_jump_over_many_passes_then_another_gap_keeps_none_of_them() {
     assert_eq!(mismatches(&r.rig.pcm(0), r.pass_start(13)), 0, "the first clean pass after the jump is kept");
 }
 
+#[test]
+fn f_silent_blocks_drop_the_passes_a_live_plugin_carries_them_into() {
+    // The live slot delays its input 512 frames to the record tap. Two silent blocks end 128 frames before
+    // pass 2's edge, so the tap carries them over [edge - 128, edge + 384), into pass 2: the second
+    // arrives while pass 1 has yet to reach the first's frames, and pass 2 opens after both.
+    const LATENCY: Frame = 512;
+    let mut rig = Rig::new();
+    rig.install(0, Box::new(common::Delay::new(LATENCY)));
+    rig.set(Command::SetBpm(120.0));
+    rig.set(Command::SetFixedLength(true));
+    rig.set(Command::SetFixedBars(1.0));
+    rig.set(Command::SetRetake(true));
+    rig.set_input(code);
+    let mark = rig.events.len();
+    rig.press(Command::RecDub(0));
+    let start = rig.start_frame();
+    assert_eq!(start, rig.count_one(mark) + 96_000 + LATENCY, "pass 1 opens the plugin's latency after the downbeat");
+    let len = rig.fpb();
+    let edge = start + len;
+    rig.advance_to(edge - 640);
+    rig.block = 256;
+    rig.damage(); // [edge - 640, edge - 384)
+    rig.advance(256);
+    rig.damage(); // [edge - 384, edge - 128)
+    rig.advance(256);
+    rig.block = 128;
+    rig.advance_to(start + 3 * len + len / 4);
+    let dropped: Vec<u32> = rig.events.iter().filter_map(|e| if let Event::PassDropped { pass, .. } = *e { Some(pass) } else { None }).collect();
+    assert_eq!(dropped, [1, 2], "both passes the silence reaches through the plugin, and only those");
+    rig.press(Command::RecDub(0));
+    assert!(rig.master() == len && rig.rejected() == 0);
+    assert_eq!(mismatches(&rig.pcm(0), start + 2 * len - LATENCY), 0, "the clean pass 3 is kept, as the tap carried it");
+}
+
 /// A two-bar first take on lane 0, then a RETAKE rolling on lane 1 in pass 3.
 fn rolling_later_take(fixed: bool) -> (Rig, Frame, Frame) {
     let mut rig = Rig::new();

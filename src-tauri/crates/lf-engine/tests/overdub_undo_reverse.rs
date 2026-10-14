@@ -329,7 +329,6 @@ fn a_layer_opened_and_closed_inside_a_silent_block_is_rejected() {
 }
 
 #[test]
-#[ignore = "red: damage through a live plugin's latency, open thread (lf-engine briefing)"]
 fn a_silent_block_damages_the_layer_its_frames_reach_through_a_live_plugin() {
     // The live slot delays its input 512 frames to the record tap: the silent block [b, b + 512) is
     // what the tap carries over [b + 512, b + 1024), the layer's whole window.
@@ -385,6 +384,81 @@ fn a_jump_in_a_layers_closing_tail_rejects_it_through_a_live_plugin() {
     assert_eq!(rig.window(), Some((0, Some(b + LATENCY), Some(e))));
     rig.skip(256);
     rig.advance(1024);
+    rig.idle();
+    assert!(rig.events.iter().any(|e| matches!(e, Event::TakeRejected { overdub: true, .. })), "the layer is rejected");
+    assert!(rig.state(0) == LaneState::Playing);
+    assert_eq!(rig.pcm(0), before, "the loop before the layer, bit for bit");
+}
+
+#[test]
+fn a_silent_block_leaves_clean_a_layer_over_its_own_frames_through_a_live_plugin() {
+    // The live slot delays its input 512 frames to the record tap. Over the silent block [b, b + 512) the
+    // tap still carries the input from before it (the silence reaches it over [b + 512, b + 1024)), and
+    // the layer's window is exactly [b, b + 512): with no jump in the device frame it lost nothing.
+    const LATENCY: Frame = 512;
+    let mut rig = Rig::new();
+    rig.install(0, Box::new(common::Delay::new(LATENCY)));
+    rig.set(Command::SetBpm(200.0));
+    rig.set_input(code);
+    let master = rig.record_first_take(0, 1, 2400);
+    rig.idle();
+    let before = rig.pcm(0);
+    rig.set(Command::SetDubFeedback(0, 0.5));
+    rig.align = 64; // with the plugin's latency: a window opens 576 frames after its press
+    let b = rig.next_boundary() + master / 4;
+    // As the device side renders the damaged block: silence in its place.
+    rig.set_input(move |f| if (b..b + 512).contains(&f) { 0.0 } else { code(f) });
+    rig.advance_to(b - 1024);
+    rig.block = 512;
+    rig.send_at(b - 576, Command::RecDub(0)); // the window opens on b
+    rig.send_at(b - 64, Command::RecDub(0)); // and closes on b + 512
+    rig.advance(1024);
+    assert_eq!(rig.window(), Some((0, Some(b), Some(b + 512))));
+    rig.damage();
+    rig.keep_output();
+    rig.advance(512);
+    let carried: Vec<f32> = (b..b + 512).map(|f| code(f - LATENCY)).collect();
+    assert_eq!(rig.record, carried, "the tap over the silent block carries the input from before it");
+    assert_eq!(rig.engine.diag().xruns, 1, "the damaged block counts as one xrun");
+    rig.advance(1024);
+    rig.idle();
+    assert!(!rig.events.iter().any(|e| matches!(e, Event::TakeRejected { .. })), "the layer commits");
+    let mut want = before;
+    common::dub::dub(&mut want, (b, b + 512), ramp(rig.sr), 0.5, pos_fn(rig.anchor(), master, 64 + LATENCY), |f| code(f - LATENCY));
+    assert_eq!(rig.pcm(0), want, "the layer as the tap carried it");
+}
+
+#[test]
+fn a_short_jump_rejects_a_layer_in_the_frames_a_live_plugin_carries_out_of_place() {
+    // The live slot delays its input 1024 frames to the record tap, and the device skips 256 frames at j.
+    // From s = j + 256 the tap plays out the input the plugin still held from before the jump, 256
+    // frames late, until the input from after it arrives on s + 1024. The layer's window [s, s + 512)
+    // lies wholly there: it misses no frame the device skipped, but holds none at its own frame.
+    const LATENCY: Frame = 1024;
+    const JUMP: Frame = 256;
+    let mut rig = Rig::new();
+    rig.install(0, Box::new(common::Delay::new(LATENCY)));
+    rig.set(Command::SetBpm(200.0));
+    rig.set_input(code);
+    let master = rig.record_first_take(0, 1, 2400);
+    rig.idle();
+    let before = rig.pcm(0);
+    rig.set(Command::SetDubFeedback(0, 0.5));
+    rig.align = 64; // with the plugin's latency: a window opens 1088 frames after its press
+    let j = rig.next_boundary() + master / 4;
+    let s = j + JUMP;
+    rig.advance_to(j - 1536);
+    rig.block = 256;
+    rig.send_at(s - 1088, Command::RecDub(0)); // the window opens on s
+    rig.send_at(s - 576, Command::RecDub(0)); // and closes on s + 512
+    rig.advance_to(j);
+    assert_eq!(rig.window(), Some((0, Some(s), Some(s + 512))));
+    rig.skip(JUMP);
+    rig.keep_output();
+    rig.advance(512);
+    let late: Vec<f32> = (s..s + 512).map(|f| code(f - LATENCY - JUMP)).collect();
+    assert_eq!(rig.record, late, "the tap carries the input from before the jump, out of place");
+    rig.advance(2048);
     rig.idle();
     assert!(rig.events.iter().any(|e| matches!(e, Event::TakeRejected { overdub: true, .. })), "the layer is rejected");
     assert!(rig.state(0) == LaneState::Playing);

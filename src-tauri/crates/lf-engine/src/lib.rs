@@ -97,7 +97,8 @@
 //!   switch on the next loop boundary (an undo's switch crossfades there, D23), and a DUB pressed before it
 //!   makes the switch heard at once (D19); STOP on an overdubbing
 //!   lane discards the whole layer (its tail plays the layer as heard); an input gap
-//!   damages only the capture windows (RETAKE passes) it overlaps, and resets AUTO's listening history;
+//!   damages only the capture windows (RETAKE passes) its frames reach on the record tap (a live
+//!   plugin's latency later; from a jump on, every frame to there), and resets AUTO's listening history;
 //!   a jump in the device frame drops the beats it skipped, and count-in beats fire late as one click.
 //! - **`process` never allocates, locks or waits.** Buffers are allocated (and their pages touched) in
 //!   `Engine::new`; commands and events cross on rtrb rings; a full event ring refuses and counts. A
@@ -169,21 +170,6 @@
 //! exactly the span's end, `plan_later_stop`'s bar clamp (the window end bounds it), `pair`'s
 //! ordering (guarded by `assert_ne`), and `idle`'s `master > 0` as `>=` (with no master no lane is
 //! STOPPED, and `start_recording` tests `master == 0` first).
-//!
-//! # Open threads
-//!
-//! - **A gap the live plugin's latency carries into a window is missed.** The tap carries input frame
-//!   `x` at `x + live latency`, but `input_gap` gets the device frames, which must stay (a jump in a
-//!   window's closing tail loses those tap frames): a silent block just before a layer commits it clean.
-//!   Next check: pass the looper both intervals, then un-ignore
-//!   `a_silent_block_damages_the_layer_its_frames_reach_through_a_live_plugin` beside
-//!   `a_jump_in_a_layers_closing_tail_rejects_it_through_a_live_plugin` (`tests/overdub_undo_reverse.rs`).
-//! - **With no device running, a session job is served before the commands queued ahead of it.**
-//!   `service_session_idle` runs the job at once, so a setting or a take sent before a load applies after
-//!   it on resume. Applying them in idle is wrong: a capture latches alignment 0, and the 64-entry pending
-//!   table can fill while earlier commands still wait in the ring. Next check: a fix that orders them
-//!   without applying captures in idle, made green by the two ignored `with_no_device_*` tests
-//!   (`tests/session.rs`).
 //!
 //! # Beside this crate
 //!

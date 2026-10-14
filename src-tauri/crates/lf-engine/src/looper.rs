@@ -234,7 +234,7 @@ struct Recorder {
 }
 
 impl Recorder {
-    /// The device lost input frames `[from, to)` (`from == to`: a point xrun just before `to`): whether
+    /// The record tap lost frames `[from, to)` (`from == to`: a point xrun just before `to`): whether
     /// they fall inside the window.
     fn hit(&self, (from, to): (Frame, Frame)) -> bool {
         self.start.is_some_and(|s| to > s) && self.end.is_none_or(|e| from < e)
@@ -2232,8 +2232,9 @@ impl Looper {
 
     // ── Audio ──────────────────────────────────────────────────────────────────────────────────────
 
-    /// The device lost input frames `[from, to)` (a point xrun: `from == to`, a gap just before `to`):
-    /// a capture whose window they fall inside is damaged; AUTO drops the history it can no longer join.
+    /// The record tap lost frames `[from, to)` (a point xrun: `from == to`, a gap just before `to`; the
+    /// engine maps the device's lost input frames there, through the live latency): a capture whose
+    /// window they fall inside is damaged; AUTO drops the history it can no longer join.
     /// Every window checks the last gap as it opens, so a gap past a window's end damages the windows
     /// that follow too (a RETAKE pass, a handoff's take), and a press in a damaged block damages the
     /// window it opens there. A recorder still behind the last gap (a jump skipped RETAKE passes,

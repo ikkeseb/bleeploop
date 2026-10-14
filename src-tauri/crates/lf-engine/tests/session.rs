@@ -613,7 +613,7 @@ fn a_delay_loaded_after_a_clear_echoes_its_own_loop_as_a_new_one_does() {
     assert!((bus[24_128] / bus[12_000] - MAX_FEEDBACK as f32).abs() < 1e-2, "the second echo ({})", bus[24_128]);
 }
 
-// ── With no device running, a session job should come after the commands queued before it ────────
+// ── With no device running, a session job comes after the commands queued before it ─────────────
 
 /// The device stops after `fresh_load`'s first frames; `queue` reaches the ring, then `load` the port,
 /// and the host services the engine idle (`Engine::service_session_idle`). The load's result.
@@ -631,7 +631,6 @@ fn load_idle(rig: &mut Rig, queue: &[Command], load: Load) -> Option<Result<(), 
 }
 
 #[test]
-#[ignore = "red: with no device running, a session job is served before the commands queued ahead of it, open thread (lf-engine briefing)"]
 fn with_no_device_a_load_takes_its_mix_over_a_setting_queued_before_it() {
     let (s, _) = one_lane();
     let mix = LaneMix { volume: 0.5, muted: true, ..LaneMix::default() };
@@ -648,11 +647,93 @@ fn with_no_device_a_load_takes_its_mix_over_a_setting_queued_before_it() {
 }
 
 #[test]
-#[ignore = "red: with no device running, a session job is served before the commands queued ahead of it, open thread (lf-engine briefing)"]
 fn with_no_device_a_take_queued_before_a_load_refuses_it() {
     let (s, _) = one_lane();
     let (mut fresh, load) = fresh_load(&s, LaneMix::default());
     assert_eq!(load_idle(&mut fresh, &[Command::RecDub(0)], load), Some(Err(SessionError::NotEmpty)));
     fresh.advance(4800);
     assert!(fresh.master() == 0 && fresh.state(0) != LaneState::Playing, "nothing loaded: {:?}", fresh.lane(0));
+}
+
+#[test]
+fn with_no_device_a_load_comes_after_more_queued_commands_than_one_take_holds() {
+    // A new engine's settings replay runs to about a hundred commands, more than the engine takes from
+    // the ring at once: every one applies before the load.
+    let (s, _) = one_lane();
+    let mix = LaneMix { volume: 0.5, ..LaneMix::default() };
+    let (mut fresh, load) = fresh_load(&s, mix);
+    let mut queued = vec![Command::SetVolume(1, 0.25); 99];
+    queued.push(Command::SetVolume(0, 0.9));
+    assert_eq!(load_idle(&mut fresh, &queued, load), Some(Ok(())));
+    fresh.advance(4800);
+    assert_eq!(fresh.engine.looper().mix(0, fresh.engine.fx()), mix);
+}
+
+#[test]
+fn with_no_device_a_take_queued_before_a_load_arms_on_the_devices_alignment() {
+    // A capture is aligned on the latency the device reports: queued while none runs, it arms on the
+    // device's first block, at that block's alignment.
+    let (s, _) = one_lane();
+    let (mut fresh, load) = fresh_load(&s, LaneMix::default());
+    let mark = fresh.events.len();
+    assert_eq!(load_idle(&mut fresh, &[Command::RecDub(0)], load), Some(Err(SessionError::NotEmpty)));
+    assert_eq!(fresh.window(), None, "nothing armed with no device running");
+    fresh.align = 4800;
+    fresh.advance(fresh.block as Frame);
+    let beat = 60.0 / fresh.bpm() as f64 * fresh.sr as f64;
+    let downbeat = fresh.count_one(mark) + (4.0 * beat).round() as Frame;
+    assert_eq!(fresh.start_frame(), downbeat + 4800, "the take starts the device's alignment after its downbeat");
+}
+
+/// A committed one-bar lane 0 at 120 BPM, playing; then the device stops.
+fn stopped_with_a_lane() -> Rig {
+    let mut rig = Rig::new();
+    rig.set(Command::SetBpm(120.0));
+    rig.set_input(code);
+    rig.record_first_take(0, 1, 2400);
+    rig.set_level(0.0);
+    rig.idle();
+    rig.punch_out();
+    rig
+}
+
+fn send_snapshot(rig: &mut Rig) {
+    let mut pcm = Vec::with_capacity(rig.master() as usize);
+    pcm.resize(rig.master() as usize, 0.0f32);
+    assert!(rig.session().send(Box::new(SessionJob::Snapshot(Snapshot::new(pcm)))).is_ok());
+}
+
+#[test]
+fn with_no_device_a_snapshot_holds_a_setting_queued_before_it() {
+    let mut rig = stopped_with_a_lane();
+    rig.queue(Command::SetMute(0, true));
+    send_snapshot(&mut rig);
+    rig.engine.service_session_idle();
+    let Some(SessionJob::Snapshot(s)) = rig.session().returned().map(|job| *job) else { panic!("the idle engine serves the snapshot") };
+    assert_eq!(s.result, Some(Ok(())));
+    assert!(s.tracks[0].is_some_and(|t| t.mix.muted), "the mute queued before it is in it: {:?}", s.tracks[0]);
+}
+
+#[test]
+fn with_no_device_a_snapshot_behind_a_take_waits_for_the_device() {
+    // REC/DUB arms a capture on the device's alignment, so it waits for the first block with every
+    // command after it, and so does the snapshot: that block applies them first, as it would have.
+    let mut rig = stopped_with_a_lane();
+    rig.queue(Command::RecDub(0)); // an overdub on the playing lane
+    rig.queue(Command::SetMute(0, true));
+    send_snapshot(&mut rig);
+    rig.engine.service_session_idle();
+    assert!(rig.session().returned().is_none(), "the snapshot waits behind the press");
+    assert!(rig.state(0) == LaneState::Playing && !rig.engine.looper().mix(0, rig.engine.fx()).muted, "nothing from the press on applied");
+    for _ in 0..1000 {
+        rig.advance(rig.block as Frame);
+        if let Some(job) = rig.session().returned() {
+            let SessionJob::Snapshot(s) = *job else { unreachable!() };
+            assert_eq!(s.result, Some(Ok(())));
+            let track = s.tracks[0].expect("lane 0 in the snapshot");
+            assert!(track.state == LaneState::Overdubbing && track.mix.muted, "after the press and the mute: {track:?}");
+            return;
+        }
+    }
+    panic!("the device's first blocks never served the snapshot");
 }

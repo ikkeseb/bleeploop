@@ -594,7 +594,8 @@ pub struct ProcessContext {
     pub xrun: bool,
     /// This block's input never wholly reached the engine (the device side rendered silence or a splice
     /// in its place): the gap spans every frame of the block, so it damages every capture window the
-    /// block overlaps, one that matches the block exactly included.
+    /// block overlaps, one that matches the block exactly included. Both gaps are judged on the record
+    /// tap, which a live plugin delays ([`crate::Engine::live_latency`]).
     pub damaged: bool,
     /// Input plus output latency the driver reports, in frames. A take starts this much (plus the
     /// plugin's latency and the master limiter's pre-delay) after its downbeat, so what the player heard

@@ -394,13 +394,41 @@ impl Engine {
     }
 
     /// While no device runs and the host holds the engine: run a session job on the port at once (a load
-    /// at the frame the next block would start, a snapshot copied whole). It publishes no lane's mix
-    /// until the commands queued ahead of the first block are all taken (`replayed`).
+    /// at the frame the next block would start, a snapshot copied whole), after the commands queued ahead
+    /// of it, as a block start orders them. They apply first, at that frame, up to the first REC/DUB
+    /// press: its capture's alignment is the device's, so it and every command after it wait in the
+    /// table for the first block, and a load behind it is refused as `NotEmpty` (the press arms a take,
+    /// or the looper is not empty anyway) while a snapshot waits for that block too. It publishes no
+    /// lane's mix until the commands queued ahead of the first block are all taken (`replayed`).
     pub fn service_session_idle(&mut self) {
-        let mut cx = Cx { now: self.next_frame, align: 0, clock: &mut self.clock, feed: &mut self.feed, fx: &mut self.fx };
-        self.session.begin(&mut self.looper, &mut cx, self.config.sample_rate, true);
+        let now = self.next_frame;
+        let mut cx = Cx { now, align: 0, clock: &mut self.clock, feed: &mut self.feed, fx: &mut self.fx };
+        self.looper.events(&mut cx);
+        // The table empties as they apply: take the ring's next ones until it is empty, or until the
+        // table is full of commands stamped for later and held ones (the rest wait, as at a block start).
+        let press = loop {
+            self.take_commands(now);
+            let mut cx = Cx { now, align: 0, clock: &mut self.clock, feed: &mut self.feed, fx: &mut self.fx };
+            let mut at = Apply {
+                instruments: &mut self.instruments,
+                rack: &mut self.rack,
+                input_fx: &mut self.input_fx,
+                master_volume: &mut self.master_volume,
+                master_muted: &mut self.master_muted,
+                toggles_owed: &mut self.toggles_owed,
+                scope: &mut self.scope,
+            };
+            if apply_due(&mut self.pending, &mut self.commands_dropped, &mut self.looper, &mut cx, &mut at, true) {
+                break true;
+            }
+            if self.commands.is_empty() || self.pending.iter().all(Option::is_some) {
+                break false;
+            }
+        };
+        let mut cx = Cx { now, align: 0, clock: &mut self.clock, feed: &mut self.feed, fx: &mut self.fx };
+        self.session.begin(&mut self.looper, &mut cx, self.config.sample_rate, true, press);
         self.session.advance(&self.looper, Frame::MAX / crate::session::SNAPSHOT_RATE);
-        let mut cx = Cx { now: self.next_frame, align: 0, clock: &mut self.clock, feed: &mut self.feed, fx: &mut self.fx };
+        let mut cx = Cx { now, align: 0, clock: &mut self.clock, feed: &mut self.feed, fx: &mut self.fx };
         self.looper.publish(&mut cx, self.replayed);
     }
 
@@ -494,11 +522,6 @@ impl Engine {
         self.fx.set_offset(self.skipped);
         self.input_fx.set_offset(self.skipped);
         self.instruments.set_offset(self.skipped);
-        if ctx.xrun || ctx.damaged {
-            self.xruns += 1;
-            // A damaged block's own input frames are lost too.
-            self.looper.input_gap(lost_from, if ctx.damaged { end } else { start });
-        }
         self.take_commands(start);
         // Taken commands with no stamp are due at `start`, so all of them apply before this block's
         // first publish. An atomic read.
@@ -510,6 +533,17 @@ impl Engine {
         let open = self.looper.recorder().is_none_or(|(_, start, _)| start.is_none());
         self.rack.latch_record(open);
         let live_latency = self.rack.record_latency();
+        if ctx.xrun || ctx.damaged {
+            self.xruns += 1;
+            // The input frames lost (a damaged block's own too) reach the record tap `live_latency`
+            // later, where a capture window meets them; the tap frames before them carry input from
+            // before the gap, clean. A jump also loses the tap frames it skipped (a window's closing tail
+            // never gets them), and the plugin plays what it held from before the jump into the frames
+            // after it, out of place: from a jump on, every tap frame to the lost ones' end is lost.
+            let lost_to = if ctx.damaged { end } else { start };
+            let tap_from = if lost_from < start { lost_from } else { lost_from + live_latency };
+            self.looper.input_gap(tap_from, lost_to + live_latency);
+        }
         let align = ctx.align_frames + live_latency + self.limiter.latency() as Frame;
         let record_delay = ctx.input_frames + live_latency;
         self.rendered = n;
@@ -536,11 +570,11 @@ impl Engine {
                 toggles_owed: &mut self.toggles_owed,
                 scope: &mut self.scope,
             };
-            apply_due(&mut self.pending, &mut self.commands_dropped, &mut self.looper, &mut cx, &mut at);
+            apply_due(&mut self.pending, &mut self.commands_dropped, &mut self.looper, &mut cx, &mut at, false);
             if f == start {
                 // The session job after the commands due on the block's first frame: a setting sent
                 // before a snapshot or a load is ordered before it (a load's mix overrides it).
-                self.session.begin(&mut self.looper, &mut cx, self.config.sample_rate, false);
+                self.session.begin(&mut self.looper, &mut cx, self.config.sample_rate, false, false);
                 self.looper.events(&mut cx);
             }
             while let Some(beat) = cx.clock.fire_due(f, self.looper.transport_until()) {
@@ -705,10 +739,15 @@ impl Engine {
 }
 
 /// Apply the commands due at `cx.now` in [`due`]'s order, the looper's events after each; one that waits
-/// for a block job goes back in, held from the next frame on.
-fn apply_due(pending: &mut [Option<Pending>; MAX_PENDING], dropped: &mut u64, looper: &mut Looper, cx: &mut Cx, at: &mut Apply) {
+/// for a block job goes back in, held from the next frame on. `idle` (no device runs,
+/// [`Engine::service_session_idle`]): stop at a REC/DUB press, left due with every command after it, and
+/// say so.
+fn apply_due(pending: &mut [Option<Pending>; MAX_PENDING], dropped: &mut u64, looper: &mut Looper, cx: &mut Cx, at: &mut Apply, idle: bool) -> bool {
     let f = cx.now;
     while let Some(k) = due(pending, f) {
+        if idle && pending[k].is_some_and(|p| arms_capture(p.command)) {
+            return true;
+        }
         let p = pending[k].take().unwrap();
         if let Command::Action(Action::Toggle(t @ Toggle::Send(_))) | Command::ActionOn(_, Action::Toggle(t @ Toggle::Send(_))) = p.command {
             if pending.iter().flatten().any(|q| q.held && q.seq < p.seq) {
@@ -729,6 +768,13 @@ fn apply_due(pending: &mut [Option<Pending>; MAX_PENDING], dropped: &mut u64, lo
         }
         looper.events(cx);
     }
+    false
+}
+
+/// A REC/DUB press, a pedal's and HOLD's included: the one command that arms a capture, at the alignment
+/// the device reports (`Cx::align`).
+fn arms_capture(command: Command) -> bool {
+    matches!(command, Command::RecDub(_) | Command::Action(Action::RecDub | Action::Hold(_)) | Command::ActionOn(_, Action::RecDub | Action::Hold(_)))
 }
 
 fn insert(pending: &mut [Option<Pending>; MAX_PENDING], dropped: &mut u64, p: Pending) {
