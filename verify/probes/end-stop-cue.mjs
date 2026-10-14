@@ -71,7 +71,7 @@ await probe(async ({ open }) => {
       { Selected: { frame: 0, lane: 0 } },
     ],
     anchor: anchorAt(0),
-    meter: { peak: 0, clip: false },
+    meter: { peak: [0, 0], clip: [false, false] },
   });
 
   // Playing, nothing pending: the core overdubs, the cap stops, the transforms are live.

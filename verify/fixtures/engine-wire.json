@@ -374,7 +374,7 @@
         "inputFrames": 305
       },
       "anchor": { "frame": 1234560, "atMs": 1790000000123.25, "rate": 44100, "grid": 96666 },
-      "meter": { "peak": 0.125, "clip": false },
+      "meter": { "peak": [0.125, 0.0625], "clip": [false, false] },
       "peaks": [{ "lane": 0, "start": 0, "count": 3, "min": [-0.5, -0.25, -0.125], "max": [0.5, 0.25, 0.123] }],
       "settings": [
         { "SetBpm": 96 },
@@ -394,7 +394,7 @@
       "events": [{ "Beat": { "frame": 1234688, "beatInBar": 2, "countLeft": 0, "clicked": true } }],
       "device": [],
       "anchor": { "frame": 1235456, "atMs": 1790000000143.5, "rate": 44100, "grid": 96666 },
-      "meter": { "peak": 1, "clip": true },
+      "meter": { "peak": [0.5, 1], "clip": [false, true] },
       "peaks": [{ "lane": 1, "start": 4, "count": 6, "min": [-0.012, -0.3], "max": [0.02, 0.31] }]
     },
     {
@@ -413,7 +413,7 @@
       "events": [],
       "device": [],
       "anchor": { "frame": 1240000, "atMs": 1790000000243.5, "rate": 48000, "grid": 96666 },
-      "meter": { "peak": 0.25, "clip": false },
+      "meter": { "peak": [0.25, 0], "clip": [false, false] },
       "peaks": [],
       "scope": {
         "frame": 1239616,

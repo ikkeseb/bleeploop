@@ -168,7 +168,7 @@ const emptyEngine = (page, rate, status) =>
     settings: [],
     events: [{ Transport: { frame: 0, master: 0, bpm: 120, locked: false } }, ...emptyLanes(), { Selected: { frame: 0, lane: 0 } }],
     anchor: { frame: 0, atMs: Date.now(), rate, grid: 0 },
-    meter: { peak: 0, clip: false },
+    meter: { peak: [0, 0], clip: [false, false] },
     ...(status ? { status } : {}),
   });
 

@@ -60,7 +60,7 @@ await probe(async ({ open }) => {
     settings: [],
     events: [...[0, 1, 2, 3, 4].map((i) => laneEvent(i, lane('Empty'))), transport(0, false), { Selected: { frame: 0, lane: 0 } }],
     anchor: { frame: 0, atMs: Date.now(), rate: RATE, grid: 0 },
-    meter: { peak: 0, clip: false },
+    meter: { peak: [0, 0], clip: [false, false] },
   });
 
   /** The burst's left edge on lane `i`'s canvas in the next drawn frame, and the span it was drawn over. */

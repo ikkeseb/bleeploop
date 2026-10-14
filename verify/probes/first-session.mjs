@@ -66,7 +66,7 @@ await probe(async ({ open, browser }) => {
       settings: [],
       events: [{ Transport: { frame: 0, master: 0, bpm: 120, locked: false } }, ...[0, 1, 2, 3, 4].map((i) => laneEvent(i, lane('Empty'))), { Selected: { frame: 0, lane: 0 } }],
       anchor: { frame: 0, atMs: Date.now(), rate: RATE, grid: 0 },
-      meter: { peak: 0, clip: false },
+      meter: { peak: [0, 0], clip: [false, false] },
     });
   /** Open the app in `context` on the engine fake, once its device runs and recovery has started. */
   const openSession = async (context) => {

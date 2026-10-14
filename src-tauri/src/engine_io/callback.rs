@@ -752,8 +752,8 @@ impl Render {
             Source::Duplex => handoff.each_ref().map(|h| &h[..]),
             Source::Join { xs, .. } => xs.each_ref().map(|x| &x[..]),
         };
-        for input in inputs {
-            meter(&self.core, &input[..avail.min(input.len())]);
+        for (slot, input) in inputs.iter().enumerate() {
+            meter(&self.core, slot, &input[..avail.min(input.len())]);
         }
         let mut engine = engine.as_mut().filter(|_| !*faulted);
         let max_block = self.left.len();
@@ -810,15 +810,15 @@ impl Render {
     }
 }
 
-/// Fold a block of input into the meter the feed takes: its peak, and a clip.
-fn meter(core: &Core, input: &[f32]) {
+/// Fold a block of a slot's input into the meter the feed takes: its peak, and a clip.
+fn meter(core: &Core, slot: usize, input: &[f32]) {
     let peak = input.iter().fold(0.0f32, |m, x| m.max(x.abs()));
     if peak > 0.0 {
         // A non-negative f32's bits order as the value does.
-        core.meter_peak.fetch_max(peak.to_bits(), Relaxed);
+        core.meter_peak[slot].fetch_max(peak.to_bits(), Relaxed);
     }
     if peak >= CLIP_LEVEL {
-        core.meter_clip.store(true, Relaxed);
+        core.meter_clip[slot].store(true, Relaxed);
     }
 }
 

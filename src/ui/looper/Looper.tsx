@@ -7,6 +7,7 @@ import { DATA_STATE, createLaneView, type LaneWord } from './lane-state';
 import { FxPanel } from './FxPanel';
 import { mixGesture } from './mix-gesture';
 import { Trim } from './Trim';
+import { inputArmed } from '../state/native-io';
 import './looper.css';
 
 /**
@@ -267,6 +268,13 @@ function TrackLane(props: {
     const w = word();
     return w === 'TAKE' ? `TAKE ${track().retakePass}` : STATE_WORD[w];
   };
+  // What a take on this lane would hear: the live slots (GO LIVE), named on the selected lane only, the
+  // one a press or a pedal records onto. Nothing live: no source.
+  const source = () => {
+    if (looper.selectedTrack() !== props.index) return '';
+    const [a, b] = inputArmed();
+    return a && b ? 'A+B LIVE' : a ? 'A LIVE' : b ? 'B LIVE' : '';
+  };
 
   // The core IS the REC/DUB capture gesture. Its glyph reflects the ACTION reached by pressing it now
   // (● start-record on empty/armed, ⊕ start-overdub on a playing/stopped take, ■ end the live capture);
@@ -377,7 +385,14 @@ function TrackLane(props: {
       {/* left cluster: identity · core gesture · play-stop/clear pair */}
       <div class="lp-lane__left">
         <div class="lp-lane__idbox">
-          <span class="lp-lane__num">{String(props.index + 1).padStart(2, '0')}</span>
+          <span class="lp-lane__head">
+            <span class="lp-lane__num">{String(props.index + 1).padStart(2, '0')}</span>
+            <Show when={source()}>
+              <span class="lp-lane__src" title="What a take on this lane hears: the slots with live input">
+                {source()}
+              </span>
+            </Show>
+          </span>
           <span class="lp-lane__state">{stateWord()}</span>
         </div>
 

@@ -90,6 +90,10 @@ it.
 - An instrument (a plugin or a built-in synth) entering or leaving a slot while GO LIVE is on: the dry
   guitar fades across, each part on its own path, where it stepped by up to half full scale before
   (machine: `tests/slots.rs`). Is the change inaudible mid-note?
+- The input meter on each live slot's card (its own input, a held peak, CLIP), INPUT LIVE and the
+  selected lane's "A LIVE" badge (machine: `live-meter` probe, `the_meter_reads_each_slots_own_capture_channel`).
+  From where you stand with the guitar, does the meter read, and does CLIP light when the interface
+  clips and never when it does not?
 - The count-in (1 bar, accent on 1, no dead air; the tempo locks mid-count-in); FIXED 2 stops on the
   downbeat after exactly 2 bars (an over-long FIXED pick records the largest whole-bar fit in 60 s); a
   free record stopped near the downbeat after N bars keeps N, an early or a mid-bar stop behaves, and a

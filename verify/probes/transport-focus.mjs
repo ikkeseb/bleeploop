@@ -63,7 +63,7 @@ await probe(async ({ open }) => {
       { Selected: { frame: 0, lane: 0 } },
     ],
     anchor: { frame: 0, atMs: Date.now(), rate: RATE, grid: 0 },
-    meter: { peak: 0, clip: false },
+    meter: { peak: [0, 0], clip: [false, false] },
   });
 
   const sent = () => page.evaluate(() => window.__lf.native.sent.slice());

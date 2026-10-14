@@ -108,6 +108,8 @@ function drawDial(): void {
 let meter: { el: HTMLElement; last: number; hot: boolean; ariaTick: number } | null = null;
 
 const METER_FLOOR_DB = -60;
+/** A level at or above this (linear; −1 dBFS) reads hot: the command bar's meter turns red. */
+const HOT = 0.89;
 
 /** Linear amplitude → 0..1 across the meter's span (−60..0 dBFS); 0 and below → 0. */
 export function meterFrac(linear: number): number {
@@ -124,7 +126,7 @@ function drawMeter(): void {
     meter.last = lvl;
     meter.el.style.setProperty('--lvl', lvl.toFixed(2));
   }
-  const hot = raw >= 0.89;
+  const hot = raw >= HOT;
   if (hot !== meter.hot) {
     meter.hot = hot;
     meter.el.classList.toggle('is-hot', hot);
@@ -135,6 +137,80 @@ function drawMeter(): void {
     const db = Math.round(METER_FLOOR_DB + -METER_FLOOR_DB * lvl);
     meter.el.setAttribute('aria-valuetext', `${db} dBFS${hot ? ', clipping' : ''}`);
   }
+}
+
+/** How long a slot card's meter holds its peak, and its CLIP lamp after a clip (ms). */
+const HOLD_MS = 1500;
+/** How fast a held peak falls once its hold ends (meter fraction per ms: the whole span in 2 s). */
+const PEAK_FALL = 1 / 2000;
+
+/**
+ * A live slot's input meter (`SlotControls.tsx` `SlotMeter`): that slot's own input, full-width at the
+ * foot of its card, readable from where the guitarist stands. It writes `--lvl` (the level), `--pk` (a
+ * peak held HOLD_MS, then falling) and `is-clip` (lit HOLD_MS after the engine reported a sample at full
+ * scale, never for a level merely near it), all as style writes from this loop, never a signal
+ * (invariant 6). A clip is read off the store's counter, so one that arrived between two frames still
+ * lights the lamp, and holds the peak at full scale.
+ */
+interface CardMeter {
+  el: HTMLElement;
+  slot: 0 | 1;
+  /** The `--lvl` and `--pk` last written. */
+  lvl: number;
+  pk: number;
+  /** The held peak and when it was taken: it falls from there once HOLD_MS has passed. */
+  held: number;
+  heldAt: number;
+  /** The store's clip count last seen, and until when the lamp stays lit. */
+  clips: number;
+  clipUntil: number;
+  clip: boolean;
+}
+const cardMeters: [CardMeter | null, CardMeter | null] = [null, null];
+
+function drawCardMeter(m: CardMeter, now: number): void {
+  const lvl = meterFrac(looper.levelValue(m.slot));
+  if (Math.abs(lvl - m.lvl) >= 0.005) {
+    m.lvl = lvl;
+    m.el.style.setProperty('--lvl', lvl.toFixed(3));
+  }
+  const clips = looper.clipCount(m.slot);
+  if (clips !== m.clips) {
+    m.clips = clips;
+    m.clipUntil = now + HOLD_MS;
+    m.held = 1;
+    m.heldAt = now;
+  }
+  let pk = m.held - Math.max(0, now - m.heldAt - HOLD_MS) * PEAK_FALL;
+  if (lvl >= pk) {
+    m.held = pk = lvl;
+    m.heldAt = now;
+  }
+  if (Math.abs(pk - m.pk) >= 0.003) {
+    m.pk = pk;
+    m.el.style.setProperty('--pk', pk.toFixed(3));
+  }
+  const clip = now < m.clipUntil;
+  if (clip !== m.clip) {
+    m.clip = clip;
+    m.el.classList.toggle('is-clip', clip);
+  }
+}
+
+/** Register slot `slot`'s card meter (it went live). Starts the shared rAF loop if nothing else has. */
+export function registerCardMeter(slot: 0 | 1, el: HTMLElement): void {
+  // A clip from before the slot went live is not this meter's.
+  cardMeters[slot] = { el, slot, lvl: -1, pk: -1, held: 0, heldAt: 0, clips: looper.clipCount(slot), clipUntil: 0, clip: false };
+  if (rafId === 0) rafId = requestAnimationFrame(frame);
+}
+
+/** Unregister slot `slot`'s card meter and leave it dark; stops the loop when nothing else is registered. */
+export function unregisterCardMeter(slot: 0 | 1, el: HTMLElement): void {
+  if (cardMeters[slot]?.el === el) cardMeters[slot] = null;
+  el.style.setProperty('--lvl', '0');
+  el.style.setProperty('--pk', '0');
+  el.classList.remove('is-clip');
+  stopIfIdle();
 }
 
 /** Register the record-level meter element (Transport.tsx). */
@@ -162,7 +238,7 @@ export function unregisterPhaseDial(): void {
 }
 
 function stopIfIdle(): void {
-  if (lanes.size === 0 && dial === null && meter === null && rafId !== 0) {
+  if (lanes.size === 0 && dial === null && meter === null && !cardMeters[0] && !cardMeters[1] && rafId !== 0) {
     cancelAnimationFrame(rafId);
     rafId = 0;
   }
@@ -393,7 +469,7 @@ function drawPlayhead(lane: Lane, state: TrackState, waiting: boolean): void {
 }
 
 /** The single rAF loop: draw every registered lane, then schedule the next frame. */
-function frame(): void {
+function frame(now: number): void {
   for (const lane of lanes.values()) {
     const sizeChanged = syncSize(lane);
     const state = looper.stateOf(lane.index);
@@ -439,6 +515,7 @@ function frame(): void {
   }
   drawDial();
   drawMeter();
+  for (const m of cardMeters) if (m) drawCardMeter(m, now);
   rafId = requestAnimationFrame(frame);
 }
 

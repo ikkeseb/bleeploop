@@ -104,7 +104,7 @@ await probe(async ({ open }) => {
     settings: [],
     events: [...[0, 1, 2, 3, 4].map((i) => laneEvent(i, lane('Empty'))), transport(0, false), { Selected: { frame: 0, lane: 0 } }],
     anchor: { frame: 0, atMs: Date.now(), rate: RATE, grid: 0 },
-    meter: { peak: 0, clip: false },
+    meter: { peak: [0, 0], clip: [false, false] },
   });
   const boot = await sentAtLeast(1);
   console.log('first reset sent', JSON.stringify(boot));
@@ -166,7 +166,7 @@ await probe(async ({ open }) => {
     events: [laneEvent(0, committed), transport(BAR, true, 120)],
     anchor: { frame: 0, atMs: Date.now(), rate: RATE, grid: 0 },
     peaks: [{ lane: 0, start: 0, count: 3, min: [-0.5, -0.2, -0.1], max: [0.5, 0.2, 0.1] }],
-    meter: { peak: 0.5, clip: false },
+    meter: { peak: [0.5, 0], clip: [false, false] },
   });
   assert.equal(await lanes.nth(0).getAttribute('data-state'), 'play');
   assert.equal(await lanes.nth(0).locator('.lp-lane__state').textContent(), 'PLAYING');
@@ -305,7 +305,7 @@ await probe(async ({ open }) => {
     ],
     events: [laneEvent(0, committed), transport(BAR, true, 120), { Selected: { frame: BAR, lane: 0 } }],
     anchor: { frame: BAR, atMs: Date.now(), rate: RATE, grid: 0 },
-    meter: { peak: 0, clip: false },
+    meter: { peak: [0, 0], clip: [false, false] },
   });
   const adopted = await sentAtLeast(1);
   console.log('second reset sent', JSON.stringify(adopted));
@@ -528,7 +528,7 @@ await probe(async ({ open }) => {
     settings: [],
     events: [laneEvent(1, lane('Recording'), at), laneEvent(0, committed, at), transport(BAR, true, 120), beat(at - BAR / 4, 1), beat(at, 0)],
     anchor: anchorAt(at),
-    meter: { peak: 0, clip: false },
+    meter: { peak: [0, 0], clip: [false, false] },
   });
   assert.equal(await lanes.nth(1).getAttribute('data-state'), 'rec');
   await emit({ events: [laneEvent(2, armed, at + 4800)], anchor: anchorAt(at + 4800) });

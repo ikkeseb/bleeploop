@@ -389,7 +389,8 @@ let echoHeld = false;
 let applyHeld = false;
 /** The commands `holdApply` keeps unapplied, in order. */
 const heldCommands: EngineCommand[] = [];
-/** The last meter a frame carried: a report repeats it (a frame without one reads the input silent). */
+/** The last meter a frame carried: a report repeats its level (a frame without one reads the input
+ * silent), never its clip, which the engine's feed reports once, in the frame after it happened. */
 let lastMeter: FeedFrame['meter'] = null;
 
 const sameLaneMix = (a: LaneMix, b: LaneMix): boolean => JSON.stringify(a) === JSON.stringify(b);
@@ -833,7 +834,7 @@ export const webEngineFake: EngineFake = {
     const frame = decodeFeedFrame(raw);
     applyMixFrame(frame);
     applyToggleFrame(frame);
-    if (frame.meter) lastMeter = frame.meter;
+    if (frame.meter) lastMeter = { peak: [frame.meter.peak[0], frame.meter.peak[1]], clip: [false, false] };
     for (const onFrame of engineSubscribers) onFrame(frame);
     // A scripted COPY, CLEAR or pedal MUTE changed a lane's mix: its report follows, as the engine's.
     echoChanges();

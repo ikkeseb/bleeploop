@@ -85,7 +85,7 @@ await probe(async ({ browser, open }) => {
       { Selected: { frame: 0, lane: 0 } },
     ],
     anchor: anchorAt(0),
-    meter: { peak: 0, clip: false },
+    meter: { peak: [0, 0], clip: [false, false] },
   });
 
   // ── FADE: the pill and its bars ────────────────────────────────────────────────────────────────────
@@ -203,7 +203,7 @@ await probe(async ({ browser, open }) => {
     settings: [{ SetFadeBars: 8 }, { SetDubFeedback: [2, 0.25] }],
     events: [transport(2 * BAR), laneEvent(0, playing()), laneEvent(1, playing()), laneEvent(2, playing()), { Selected: { frame: 0, lane: 0 } }],
     anchor: anchorAt(0),
-    meter: { peak: 0, clip: false },
+    meter: { peak: [0, 0], clip: [false, false] },
   });
   assert.equal(await fadeBars(), '8 bars', "the engine's fade bars are adopted");
   assert.equal(await dub(2).inputValue(), '25', "the engine's DUB FEEDBACK is adopted");
@@ -224,7 +224,7 @@ await probe(async ({ browser, open }) => {
       settings,
       events: [transport(2 * BAR), laneEvent(0, playing()), { Selected: { frame: 0, lane: 0 } }],
       anchor: anchorAt(0),
-      meter: { peak: 0, clip: false },
+      meter: { peak: [0, 0], clip: [false, false] },
     });
     const bars = () => app.page.locator('.transport__fade .transport__bars-val').innerText().then((t) => t.replace(/\s+/g, ' ').trim().toLowerCase());
     const sentFade = () => app.page.evaluate(() => window.__lf.native.sent.filter((c) => c.SetFadeBars !== undefined));

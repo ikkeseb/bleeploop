@@ -71,7 +71,7 @@ await probe(async ({ open }) => {
     settings: [],
     events: [...[0, 1, 2, 3, 4].map((i) => laneEvent(i, lane('Empty'))), transport(0, false), { Selected: { frame: 0, lane: 0 } }],
     anchor: anchorAt(0),
-    meter: { peak: 0, clip: false },
+    meter: { peak: [0, 0], clip: [false, false] },
   });
 
   // ── Where the pill shows ─────────────────────────────────────────────────────────────────────────

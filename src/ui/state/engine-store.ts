@@ -1,6 +1,7 @@
 import { batch, createSignal, type Accessor } from 'solid-js';
 import {
   ENGINE_LANES,
+  ENGINE_SLOTS,
   decodeOpenError,
   decodeSnapshot,
   encodeSessionBytes,
@@ -328,8 +329,11 @@ const plain = {
   clock: { frame: 0, atMs: 0, rate: 0, grid: 0 },
   /** Frames between a rendered frame and the moment it is heard (the output latency). */
   heardLag: 0,
-  level: 0,
-  clip: false,
+  /** Each slot's input peak in the last frame (linear), and the frames that carried a clip on it since
+   * the store loaded: a counter, so a draw loop that missed the frame still sees one arrived. */
+  level: [0, 0] as [number, number],
+  clip: [false, false] as [boolean, boolean],
+  clips: [0, 0] as [number, number],
   peaks: Array.from({ length: ENGINE_LANES }, (): LanePeaks => ({
     min: new Float32Array(0),
     max: new Float32Array(0),
@@ -783,10 +787,18 @@ function applyFrameNow(f: FeedFrame): void {
   if (f.status) setEngineRate(f.status.sampleRate);
   for (const d of f.device) applyDeviceEvent(d);
   // No meter: no device runs, so the input reads silent.
-  plain.level = f.meter?.peak ?? 0;
-  plain.clip = f.meter?.clip ?? false;
+  for (let s = 0; s < ENGINE_SLOTS; s++) {
+    plain.level[s] = f.meter?.peak[s] ?? 0;
+    plain.clip[s] = f.meter?.clip[s] ?? false;
+    if (plain.clip[s]) plain.clips[s]++;
+  }
   for (const p of f.peaks) applyPeaks(p.lane, p.start, p.count, p.min, p.max);
   if (f.scope) applyScope(f.scope);
+}
+
+/** Slot `slot`'s input level in the last frame (linear), at least 1 if it carried a clip. */
+function inputLevel(slot: number): number {
+  return plain.clip[slot] ? Math.max(1, plain.level[slot]) : plain.level[slot];
 }
 
 // ── The mix and the modes this store keeps ────────────────────────────────────────────────────────
@@ -1212,7 +1224,11 @@ export const engineLooper = {
    * instead of trusting the engine's. */
   setScope: (on: boolean): Promise<boolean> => sendEngine({ SetScope: on }),
   phaseValue,
-  levelValue: (): number => (plain.clip ? Math.max(1, plain.level) : plain.level),
+  /** The input level (linear; at least 1 while the last frame carried a clip): slot `slot`'s, else the
+   * louder slot's (the command bar's meter). */
+  levelValue: (slot?: 0 | 1): number => (slot === undefined ? Math.max(inputLevel(0), inputLevel(1)) : inputLevel(slot)),
+  /** The frames that carried a clip on slot `slot`'s input so far: a change since the last read is a clip. */
+  clipCount: (slot: 0 | 1): number => plain.clips[slot],
   stateOf: (i: number): TrackState => plain.state[i] ?? 'EMPTY',
   mutedOf: (i: number): boolean => plain.muted[i] ?? false,
   waitingOf: (i: number): boolean => plain.waiting[i] ?? false,

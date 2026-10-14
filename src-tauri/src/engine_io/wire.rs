@@ -39,7 +39,7 @@ use std::collections::BTreeMap;
 
 use lf_engine::dsp::fx::{FxKind, FxParam, FxState, MAX_PARAMS};
 use lf_engine::grid::Frame;
-use lf_engine::{Action, Command, CompactMix, Event, InputSend, InputSendParam, Instrument, LaneInfo, LaneMix, LaneState, NoteTarget, Refusal, Toggle};
+use lf_engine::{Action, Command, CompactMix, Event, InputSend, InputSendParam, Instrument, LaneInfo, LaneMix, LaneState, NoteTarget, Refusal, Toggle, SLOT_COUNT};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::{DeviceEvent, DeviceStatus};
@@ -368,12 +368,12 @@ pub struct ClockAnchor {
     pub grid: Frame,
 }
 
-/// The device input (the capture channels the slots take, before any plugin) since the last frame: the
-/// louder one's linear peak, and whether a sample reached full scale.
+/// The device input since the last frame, per plugin slot (its capture channel, before any plugin):
+/// the linear peak, and whether a sample reached full scale. The command bar's meter shows the louder.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Meter {
-    pub peak: f32,
-    pub clip: bool,
+    pub peak: [f32; SLOT_COUNT],
+    pub clip: [bool; SLOT_COUNT],
 }
 
 /// Frames per waveform bin (the web looper's `PEAK_FRAMES`).
@@ -784,6 +784,7 @@ mod tests {
         assert_eq!((scope.min.len(), scope.max.len()), (lf_engine::scope::SCOPE_SOURCES, lf_engine::scope::SCOPE_SOURCES), "one array per source");
         assert!(scope.min.iter().chain(&scope.max).all(|c| c.len() == scope.min[0].len()), "every array holds the same columns");
         assert!(frames.iter().any(|f| f.scope.is_none()), "and one without them (the field is absent then)");
+        assert!(frames.iter().filter_map(|f| f.meter).any(|m| m.peak[0] != m.peak[1] && m.clip[0] != m.clip[1]), "a meter per slot");
     }
 
     #[test]

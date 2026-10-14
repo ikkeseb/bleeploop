@@ -51,7 +51,7 @@
 //!   slot reads; only a change on the running device refuses one. The input callback publishes one
 //!   mono stream per slot, from the picks in `Run` (atomics, changed in place): ASIO copies each slot's channel into its own handoff,
 //!   WASAPI pushes them interleaved through the one join pipe. The engine hands each slot its own
-//!   (`Engine::process_inputs`); the meter takes the louder.
+//!   (`Engine::process_inputs`); the meter reads each slot's channel apart.
 //! - **The rate pick (`DeviceRequest::sample_rate`, one of [`SAMPLE_RATES`]; `None` = the device's
 //!   own) never fails an open either.** ASIO runs it when the driver can (`AsioCache::sample_rates`, read
 //!   by the startup probe; cpal sets the driver's rate at the stream build), else the driver's own,
@@ -603,10 +603,10 @@ pub(crate) struct Core {
     /// The alignment the output callback last rendered with (`DeviceStatus`).
     pub(crate) align_frames: AtomicI64,
     pub(crate) input_frames: AtomicI64,
-    /// The input meter since the feed last took it: the slots' capture channels' peak (f32 bits) and
+    /// The input meter since the feed last took it, per slot: its capture channel's peak (f32 bits) and
     /// whether a sample reached full scale.
-    pub(crate) meter_peak: AtomicU32,
-    pub(crate) meter_clip: AtomicBool,
+    pub(crate) meter_peak: [AtomicU32; SLOT_COUNT],
+    pub(crate) meter_clip: [AtomicBool; SLOT_COUNT],
     /// One session job at a time (`session.rs`), and the jobs an earlier call gave up on that are still
     /// in the engine of that generation: (generation, count).
     pub(crate) session_busy: Mutex<(u64, usize)>,
@@ -698,8 +698,8 @@ impl Core {
             frame: AtomicI64::new(0),
             align_frames: AtomicI64::new(0),
             input_frames: AtomicI64::new(0),
-            meter_peak: AtomicU32::new(0),
-            meter_clip: AtomicBool::new(false),
+            meter_peak: [const { AtomicU32::new(0) }; SLOT_COUNT],
+            meter_clip: [const { AtomicBool::new(false) }; SLOT_COUNT],
             session_busy: Mutex::new((0, 0)),
             #[cfg(test)]
             session_sent: AtomicU64::new(0),
@@ -1000,11 +1000,11 @@ impl EngineHost {
         self.drain_feed(out);
     }
 
-    /// The input meter since the last call: the louder slot input's linear peak, and whether a sample
-    /// reached full scale.
-    pub fn take_meter(&self) -> (f32, bool) {
-        let peak = f32::from_bits(self.core.meter_peak.swap(0, Relaxed));
-        (peak, self.core.meter_clip.swap(false, Relaxed))
+    /// The input meter since the last call, per slot: its capture channel's linear peak, and whether a
+    /// sample reached full scale.
+    pub fn take_meter(&self) -> ([f32; SLOT_COUNT], [bool; SLOT_COUNT]) {
+        let peak = self.core.meter_peak.each_ref().map(|p| f32::from_bits(p.swap(0, Relaxed)));
+        (peak, self.core.meter_clip.each_ref().map(|c| c.swap(false, Relaxed)))
     }
 
     /// The engine's sample rate, once a device opened.
