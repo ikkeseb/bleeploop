@@ -17,7 +17,7 @@ use cpal::{FromSample, Sample, SizedSample};
 use lf_engine::grid::Frame;
 
 use super::callback::{Capture, Render, Side, Tap};
-use super::driver::{Driver, Mirror, Share, Spec, StartError, Started, Streams, Wiring};
+use super::driver::{Driver, Endpoints, Mirror, Share, Spec, StartError, Started, Streams, Wiring};
 use super::{Core, DeviceRequest, IoCounters};
 use crate::audio_output::AudioBackend;
 
@@ -87,7 +87,7 @@ pub(crate) struct FakeShare {
 pub(crate) struct Fake {
     /// The ASIO duplex driver (`None` = none cached).
     pub(crate) asio: Mutex<Option<FakeDevice>>,
-    /// WASAPI endpoints by id; the first answers a `None` pick (the default).
+    /// WASAPI endpoints by id; the first answers a `None` pick (the default, for both sides).
     pub(crate) wasapi: Mutex<Vec<(String, FakeDevice)>>,
     /// WASAPI: the input clock's drift against the output's, in ppm.
     pub(crate) skew_ppm: Mutex<f64>,
@@ -106,6 +106,9 @@ pub(crate) struct Fake {
     pub(crate) xrun_dropped: AtomicU8,
     pub(crate) skip_input: AtomicBool,
     pub(crate) fatal: AtomicU8,
+    /// One-shot: cpal's non-fatal reports, a default-device change and a refused thread priority, to
+    /// both streams' error callbacks.
+    pub(crate) notices: AtomicBool,
     /// One-shot, ASIO: frames the next wake enters late, made up by the one after (it enters on time).
     pub(crate) wake_late: AtomicU32,
     /// One-shot, taken by the next ASIO start: input cycles before the output's first.
@@ -140,6 +143,7 @@ impl Fake {
             wake_late: AtomicU32::new(0),
             skip_input: AtomicBool::new(false),
             fatal: AtomicU8::new(0),
+            notices: AtomicBool::new(false),
             lead_in: AtomicU32::new(0),
             on_start: Mutex::new(None),
             on_stop: Mutex::new(None),
@@ -176,6 +180,7 @@ impl Driver for FakeDriver {
         // ASIO, as `cpal_driver`: a request's buffer fitted into the range, none asked = 0 (the driver's
         // own size, which only its callbacks tell); the pick's rate where the driver runs it.
         let mut asked = None;
+        let mut endpoints = Endpoints::default();
         let (input, output) = match request.backend {
             AudioBackend::Asio => {
                 let mut device = self.0.asio.lock().unwrap().clone().ok_or("fake: no ASIO driver")?;
@@ -184,16 +189,18 @@ impl Driver for FakeDriver {
                 (device.clone(), device)
             }
             AudioBackend::Wasapi => {
-                let endpoints = self.0.wasapi.lock().unwrap();
+                let listed = self.0.wasapi.lock().unwrap();
                 let pick = |id: &Option<String>| {
                     match id {
-                        None => endpoints.first(),
-                        Some(id) => endpoints.iter().find(|(e, _)| e == id),
+                        None => listed.first(),
+                        Some(id) => listed.iter().find(|(e, _)| e == id),
                     }
-                    .map(|(_, d)| d.clone())
+                    .cloned()
                     .ok_or_else(|| format!("fake: no WASAPI endpoint {id:?}"))
                 };
-                (pick(&request.input)?, pick(&request.output)?)
+                let ((input_id, input), (output_id, output)) = (pick(&request.input)?, pick(&request.output)?);
+                endpoints = Endpoints { input: Some(input_id), output: Some(output_id) };
+                (input, output)
             }
         };
         let spec = Spec {
@@ -205,12 +212,18 @@ impl Driver for FakeDriver {
             block: asked.unwrap_or(output.block),
             input_name: input.name.clone(),
             output_name: output.name.clone(),
+            endpoints,
         };
         Ok((spec, FakePair { input, output }))
     }
 
     fn asio_driver(&self) -> Option<String> {
         self.0.asio.lock().unwrap().as_ref().map(|d| d.name.clone())
+    }
+
+    fn default_endpoints(&self) -> Endpoints {
+        let default = self.0.wasapi.lock().unwrap().first().map(|(id, _)| id.clone());
+        Endpoints { input: default.clone(), output: default }
     }
 
     fn start(&mut self, device: FakePair, spec: &Spec, mut wiring: Wiring) -> Result<Started, StartError> {
@@ -339,6 +352,12 @@ impl Play {
                     }
                     dead = true;
                     break;
+                }
+                if self.fake.notices.swap(false, Relaxed) {
+                    for kind in [cpal::ErrorKind::DeviceChanged, cpal::ErrorKind::RealtimeDenied] {
+                        input_error(cpal::Error::new(kind));
+                        output_error(cpal::Error::new(kind));
+                    }
                 }
                 if self.fake.xrun.swap(false, Relaxed) {
                     let dropped = self.fake.xrun_dropped.swap(0, Relaxed);

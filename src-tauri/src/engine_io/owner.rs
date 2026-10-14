@@ -19,7 +19,7 @@ use lf_engine::{Engine, EngineConfig, EngineHandle, SlotPort, SlotProcessor, Tim
 use rtrb::{Consumer, Producer, RingBuffer};
 
 use super::callback::{Run, Tap, TapEnd, LATENCY_SAMPLES, MAX_DEVICE_BLOCK};
-use super::driver::{Driver, Mirror, Spec, StartError, Streams, Wiring};
+use super::driver::{Driver, Endpoints, Mirror, Spec, StartError, Streams, Wiring};
 use super::pipes::{self, PipeConfig};
 use super::slot_host::ORPHAN;
 use super::{transition, BlockLoad, Core, DeviceEvent, DeviceRequest, DeviceStatus, Ends, HostConfig, IoDiag, OpenError, Rt};
@@ -383,7 +383,8 @@ impl<D: Driver> Owner<D> {
         }
     }
 
-    /// Open `request`, or switch to it. A request for the device that runs only changes its channels.
+    /// Open `request`, or switch to it. A request for the device that runs only changes its channels; a
+    /// request for a WASAPI default that Windows moved since is another device.
     /// A slot's pick the device lacks opens on auto (`transition::open_channels`). The player's open
     /// (`By::Player`) is refused, before anything stops, when it would build an engine at another rate
     /// while this one holds audio, unless forced; a switch of the player's that fails to start reopens the
@@ -391,7 +392,8 @@ impl<D: Driver> Owner<D> {
     fn open(&mut self, request: DeviceRequest, by: By) -> Result<DeviceStatus, OpenError> {
         let driver = self.driver.asio_driver();
         if let Some(active) = self.active.as_ref().filter(|a| !a.run.faulted()) {
-            if transition::same_device(&active.request, &request, (&active.spec.output_name, driver.as_deref())) {
+            let named = self.endpoints_named(&request);
+            if transition::same_device(&active.request, &request, (&active.spec.output_name, driver.as_deref()), (&active.spec.endpoints, &named)) {
                 self.set_input_channels(request.input_channels)?;
                 return Ok(self.status().ok_or_else(|| "the device stopped".to_string())?);
             }
@@ -430,6 +432,16 @@ impl<D: Driver> Owner<D> {
                 Err(error.into())
             }
         }
+    }
+
+    /// The WASAPI endpoints `request` names now, as `Spec::endpoints` holds them: its own ids, and
+    /// Windows' default now for a side it leaves to the default; ASIO, none.
+    fn endpoints_named(&self, request: &DeviceRequest) -> Endpoints {
+        if request.backend.is_asio() {
+            return Endpoints::default();
+        }
+        let defaults = if request.input.is_none() || request.output.is_none() { self.driver.default_endpoints() } else { Endpoints::default() };
+        Endpoints { input: request.input.clone().or(defaults.input), output: request.output.clone().or(defaults.output) }
     }
 
     /// The ASIO driver refused the size `request` asked for (`refused`): a driver whose sizes come in

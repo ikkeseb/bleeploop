@@ -192,7 +192,9 @@ pub struct DeviceRequest {
     pub sample_rate: Option<u32>,
 }
 
-/// The rates a player can pick (`DeviceRequest::sample_rate`).
+/// The rates a player can pick (`DeviceRequest::sample_rate`). Read by the ASIO open alone (WASAPI runs
+/// its endpoint's rate).
+#[cfg_attr(not(feature = "asio"), allow(dead_code))]
 pub const SAMPLE_RATES: [u32; 2] = [44_100, 48_000];
 
 /// A [`DeviceRequest`] as it arrives: each slot's channel, or one channel for both.
@@ -825,17 +827,18 @@ pub struct EngineHost {
 
 impl EngineHost {
     /// Spawn the device owner thread. No device opens and no engine exists until [`EngineHost::open`].
-    /// The owner runs until [`EngineHost::shutdown`].
-    pub fn new(config: HostConfig) -> EngineHost {
+    /// The owner runs until [`EngineHost::shutdown`]. Err when the thread does not start (engine mode
+    /// then runs the launch without an engine).
+    pub fn new(config: HostConfig) -> std::io::Result<EngineHost> {
         EngineHost::with_driver(config, cpal_driver::CpalDriver { preopen: true })
     }
 
     /// A host whose owner opens devices through `driver` (the tests' fake).
-    pub(crate) fn with_driver<D: Driver>(config: HostConfig, driver: D) -> EngineHost {
+    pub(crate) fn with_driver<D: Driver>(config: HostConfig, driver: D) -> std::io::Result<EngineHost> {
         let core = Arc::new(Core::new());
-        let link = owner::spawn(core.clone(), config, driver).expect("spawn the device owner thread");
+        let link = owner::spawn(core.clone(), config, driver)?;
         *core.owner.lock().unwrap_or_else(|e| e.into_inner()) = Some(link);
-        EngineHost { core }
+        Ok(EngineHost { core })
     }
 
     fn owner_tx(&self) -> Result<std::sync::mpsc::Sender<Request>, String> {
@@ -968,6 +971,7 @@ impl EngineHost {
 
     /// Move the engine's events into `out`, as `drain_events`; with the generation of the engine they
     /// came from and its overview (`None` while no engine exists), read under the same lock.
+    #[cfg(any(debug_assertions, test))]
     pub(crate) fn drain_feed(&self, out: &mut Vec<Event>) -> (u64, Option<Arc<Overview>>) {
         let (gen, overview, _) = self.drain_feed_scope(out, None);
         (gen, overview)
@@ -995,7 +999,9 @@ impl EngineHost {
         (gen, Some(ends.overview.clone()), bin)
     }
 
-    /// Move the engine's events into `out` (a lane's `Mix` reaches the settings memory on the way).
+    /// Move the engine's events into `out` (a lane's `Mix` reaches the settings memory on the way). The
+    /// DEV probe's and the tests' (the app's feed drains with the scope: `drain_feed_scope`).
+    #[cfg(any(debug_assertions, test))]
     pub fn drain_events(&self, out: &mut Vec<Event>) {
         self.drain_feed(out);
     }
@@ -1008,6 +1014,7 @@ impl EngineHost {
     }
 
     /// The engine's sample rate, once a device opened.
+    #[cfg(test)]
     pub fn rate(&self) -> Option<u32> {
         self.core.rate()
     }
@@ -1019,20 +1026,19 @@ impl EngineHost {
         SlotHost::new(self.core.clone(), slot)
     }
 
-    pub fn frame_clock(&self) -> FrameClock {
-        self.core.clock.clone()
-    }
-
     /// Register what an engine rebuild tells the input path ([`RebuildHook`]); `None` removes it.
     pub fn set_rebuild_hook(&self, hook: Option<Arc<dyn RebuildHook>>) {
         *self.core.rebuild_hook.lock().unwrap_or_else(|e| e.into_inner()) = hook;
     }
 
+    /// The counters, for the DEV probe and the tests (the owner's glitch watch reads `Core::diag`).
+    #[cfg(any(debug_assertions, test))]
     pub fn diag(&self) -> IoDiag {
         self.core.diag()
     }
 
-    /// The output callbacks' durations so far (`LoadHistogram`).
+    /// The output callbacks' durations so far (`LoadHistogram`), for the DEV probe and the tests.
+    #[cfg(any(debug_assertions, test))]
     pub fn block_load(&self) -> BlockLoad {
         self.core.counters.block_load.snapshot()
     }

@@ -1059,7 +1059,7 @@ fn lag_run(a: &Args, devices: &Devices, request: DeviceRequest) -> Result<(), St
             Err(e) => say(format!("wasapi clocks: {e}")),
         }
     }
-    let host = EngineHost::with_driver(HostConfig::default(), super::cpal_driver::CpalDriver { preopen: a.preopen });
+    let host = EngineHost::with_driver(HostConfig::default(), super::cpal_driver::CpalDriver { preopen: a.preopen }).map_err(|e| format!("the device owner did not start: {e}"))?;
     host.core.rt.lock().map_err(|_| "engine lock poisoned")?.lag = Some(Box::new(LagRig::new(rate, a.seconds, a.out == 1, period, a.split)));
     let t0 = Instant::now();
     let began = Instant::now();
@@ -1545,7 +1545,7 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
         return lag_run(&a, &devices, start);
     }
 
-    let host = EngineHost::new(HostConfig::default());
+    let host = EngineHost::new(HostConfig::default()).map_err(|e| format!("the device owner did not start: {e}"))?;
     // `--tone`: the rig goes into the callback's state while no device runs, as the lag rig does.
     let tone = a.tone.map(|_| Shared::new());
     if let Some(shared) = &tone {

@@ -26,6 +26,16 @@ pub(crate) struct Spec {
     pub(crate) input_name: String,
     /// ASIO: the driver's name, as `Driver::asio_driver` gives it.
     pub(crate) output_name: String,
+    /// WASAPI: the endpoints it opens, each the request's own id, or the default's for a side the
+    /// request left to the default; ASIO: none.
+    pub(crate) endpoints: Endpoints,
+}
+
+/// WASAPI endpoints by id (`None`: none, or none known).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Endpoints {
+    pub(crate) input: Option<String>,
+    pub(crate) output: Option<String>,
 }
 
 /// Running streams. Dropping them stops the device: the output first, then the input.
@@ -153,6 +163,11 @@ pub(crate) trait Driver: Send + 'static {
     /// The ASIO driver a resolve would take now (its name; `None`: none is cached). A driver switch
     /// replaces it, so a device running on another one is not the device an ASIO request names.
     fn asio_driver(&self) -> Option<String>;
+
+    /// Windows' default WASAPI endpoints now, by id; opens nothing. Windows moves them on its own (a
+    /// headset plugged in), so a device running on a default is not the device a request for the default
+    /// names once they moved.
+    fn default_endpoints(&self) -> Endpoints;
 
     /// Build and play the streams, the input first, then the output (ASIO runs its registered
     /// callbacks in that order in one bufferSwitch), each running `wiring`'s bodies.

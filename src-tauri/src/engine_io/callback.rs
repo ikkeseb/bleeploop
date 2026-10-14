@@ -27,7 +27,7 @@ use super::{Core, IoCounters, Rt};
 /// The largest device callback the bodies take whole, in frames (the ASIO handoff, the join's pull
 /// buffer). The excess of a larger one renders from silence: an input gap, never out of bounds.
 pub(crate) const MAX_DEVICE_BLOCK: usize = 8192;
-/// The fade on a switch, out and in: the web monitor's declick (`audio_output.rs`).
+/// The fade on a switch, out and in: a declick ramp on the output.
 const FADE_SECONDS: f64 = 0.010;
 /// Silent callbacks after a fade-out before the owner may drop the streams: a dropped ASIO stream only
 /// loses its callback, and the driver keeps playing its two buffer halves.
@@ -89,6 +89,13 @@ impl Rt {
 pub(crate) enum Side {
     Input = 1,
     Output = 2,
+}
+
+/// cpal 0.18.1's stream errors that end the stream: every one but an xrun, a default-device change (the
+/// stream stays on its device) and a refused thread priority, which it documents as non-fatal. The
+/// engine's streams (`Run::stream_error`) and Share output's mirror (`share.rs`) both go by it.
+pub(crate) fn ends_stream(error: &cpal::Error) -> bool {
+    !matches!(error.kind(), cpal::ErrorKind::Xrun | cpal::ErrorKind::DeviceChanged | cpal::ErrorKind::RealtimeDenied)
 }
 
 /// What one run's callbacks share with the owner.
@@ -165,7 +172,7 @@ impl Run {
                 }
                 self.xrun.store(true, Release);
             }
-            cpal::ErrorKind::DeviceChanged | cpal::ErrorKind::RealtimeDenied => {}
+            _ if !ends_stream(&error) => {}
             _ => {
                 if let Ok(mut first) = self.error.try_lock() {
                     if first.is_none() {

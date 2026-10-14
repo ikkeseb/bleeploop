@@ -376,10 +376,7 @@ pub struct Meter {
     pub clip: bool,
 }
 
-/// Frames per waveform bin (the web looper's `PEAK_FRAMES`).
-pub const PEAK_BIN_FRAMES: usize = lf_engine::overview::PEAK_FRAMES;
-
-/// Changed waveform bins of one lane: bins `start..start + min.len()` of `PEAK_BIN_FRAMES` frames, in
+/// Changed waveform bins of one lane: bins `start..start + min.len()` of `lf_engine::overview::PEAK_FRAMES` frames, in
 /// the order the lane plays them (a reversed lane's bins reversed, to within one bin). `count` is the
 /// lane's bin total after this update: the frames it recorded so far, or its loop (0: empty).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

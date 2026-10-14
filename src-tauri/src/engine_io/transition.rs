@@ -6,6 +6,7 @@
 
 use lf_engine::SLOT_COUNT;
 
+use super::driver::Endpoints;
 use super::{DeviceRequest, SAMPLE_RATES};
 use crate::audio_output::AudioBackend;
 
@@ -44,6 +45,7 @@ pub(crate) fn steps(engine: Option<u32>, running: bool, healthy: bool, target: O
 /// the power of two inside the range nearest to it, else `min` (a driver fixed at, say, 480 frames).
 /// cpal refuses a fixed size outside the range, and a driver whose buffer is set in its own control
 /// panel offers exactly one size. `src/ui/state/audio-settings.ts` mirrors it for the Buffer select.
+#[cfg_attr(not(feature = "asio"), allow(dead_code))]
 pub(crate) fn asio_block(requested: u32, min: u32, max: u32) -> u32 {
     if (min..=max).contains(&requested) {
         return requested;
@@ -58,6 +60,7 @@ pub(crate) fn asio_block(requested: u32, min: u32, max: u32) -> u32 {
 /// The block the ASIO preopen runs the driver at before an open at `block` (`cpal_driver`): another size
 /// the driver takes (`range`; `None` = not known, any), or none when it takes only `block`: the preopen
 /// is then skipped rather than asked for a size the driver refuses.
+#[cfg_attr(not(feature = "asio"), allow(dead_code))]
 pub(crate) fn preopen_block(block: u32, range: Option<(u32, u32)>) -> Option<u32> {
     let (min, max) = range.unwrap_or((1, u32::MAX));
     [256, 128, 512, 64, 1024, min, max].into_iter().find(|&b| b != block && b > 0 && (min..=max).contains(&b))
@@ -66,6 +69,7 @@ pub(crate) fn preopen_block(block: u32, range: Option<(u32, u32)>) -> Option<u32
 /// The rate an ASIO open runs the driver at: the pick when it is one of [`SAMPLE_RATES`] and the driver
 /// runs it (`runs`, the probe's `AsioCache::sample_rates`), else the driver's own `rate` (`None` = no
 /// pick). Never an error: a pick the driver cannot take opens at its own rate (the caller logs why).
+#[cfg_attr(not(feature = "asio"), allow(dead_code))]
 pub(crate) fn open_rate(pick: Option<u32>, rate: u32, runs: &[u32]) -> u32 {
     pick.filter(|r| SAMPLE_RATES.contains(r) && runs.contains(r)).unwrap_or(rate)
 }
@@ -74,12 +78,15 @@ pub(crate) fn open_rate(pick: Option<u32>, rate: u32, runs: &[u32]) -> u32 {
 /// channels in place instead (a rebuilt ASIO input would register after the output and add a block).
 /// ASIO ignores the WASAPI ids (one cached duplex driver) but not the driver: `drivers` is the one the
 /// device runs on and the one a resolve would take now, which a driver switch replaced. WASAPI ignores
-/// the buffer (the audio engine's period) and the rate pick (the endpoint's own runs: `open_rate`).
-pub(crate) fn same_device(running: &DeviceRequest, next: &DeviceRequest, drivers: (&str, Option<&str>)) -> bool {
+/// the buffer (the audio engine's period) and the rate pick (the endpoint's own runs: `open_rate`), but
+/// not where a default is now: `endpoints` is what the device runs on and what `next` names now
+/// (`Spec::endpoints`, a side left to the default read again), so picking the default again after
+/// Windows moved it reopens there.
+pub(crate) fn same_device(running: &DeviceRequest, next: &DeviceRequest, drivers: (&str, Option<&str>), endpoints: (&Endpoints, &Endpoints)) -> bool {
     running.backend == next.backend
         && match next.backend {
             AudioBackend::Asio => running.buffer == next.buffer && running.sample_rate == next.sample_rate && Some(drivers.0) == drivers.1,
-            AudioBackend::Wasapi => running.input == next.input && running.output == next.output,
+            AudioBackend::Wasapi => running.input == next.input && running.output == next.output && endpoints.0 == endpoints.1,
         }
 }
 
@@ -175,29 +182,39 @@ mod tests {
         }
     }
 
+    /// [`same_device`] with the defaults where they were.
+    fn same(running: &DeviceRequest, next: &DeviceRequest, drivers: (&str, Option<&str>)) -> bool {
+        same_device(running, next, drivers, (&Endpoints::default(), &Endpoints::default()))
+    }
+
     #[test]
     fn a_channel_change_is_not_a_new_device() {
         let mut other_channel = wasapi(Some("in"), Some("out"));
         other_channel.input_channels = [Some(0), Some(1)];
         let a = ("A", Some("A"));
-        assert!(same_device(&wasapi(Some("in"), Some("out")), &other_channel, a));
-        assert!(!same_device(&wasapi(Some("in"), Some("out")), &wasapi(Some("in"), None), a), "another output");
-        assert!(!same_device(&wasapi(Some("in"), None), &wasapi(None, None), a), "another input");
-        assert!(!same_device(&wasapi(None, None), &asio(None), a), "another backend");
-        assert!(!same_device(&asio(Some(256)), &asio(Some(128)), a), "another buffer");
+        assert!(same(&wasapi(Some("in"), Some("out")), &other_channel, a));
+        assert!(!same(&wasapi(Some("in"), Some("out")), &wasapi(Some("in"), None), a), "another output");
+        assert!(!same(&wasapi(Some("in"), None), &wasapi(None, None), a), "another input");
+        assert!(!same(&wasapi(None, None), &asio(None), a), "another backend");
+        assert!(!same(&asio(Some(256)), &asio(Some(128)), a), "another buffer");
         let mut ids = asio(Some(256));
         ids.input = Some("ignored".into());
-        assert!(same_device(&asio(Some(256)), &ids, a), "ASIO ignores the WASAPI ids");
-        assert!(!same_device(&asio(Some(256)), &asio(Some(256)), ("A", Some("B"))), "another ASIO driver since");
-        assert!(!same_device(&asio(Some(256)), &asio(Some(256)), ("A", None)), "no ASIO driver cached any more");
-        assert!(same_device(&wasapi(None, None), &wasapi(None, None), ("Speakers", Some("B"))), "WASAPI ignores the ASIO driver");
+        assert!(same(&asio(Some(256)), &ids, a), "ASIO ignores the WASAPI ids");
+        assert!(!same(&asio(Some(256)), &asio(Some(256)), ("A", Some("B"))), "another ASIO driver since");
+        assert!(!same(&asio(Some(256)), &asio(Some(256)), ("A", None)), "no ASIO driver cached any more");
+        assert!(same(&wasapi(None, None), &wasapi(None, None), ("Speakers", Some("B"))), "WASAPI ignores the ASIO driver");
         let sized = DeviceRequest { buffer: Some(128), ..wasapi(Some("in"), Some("out")) };
-        assert!(same_device(&wasapi(Some("in"), Some("out")), &sized, a), "WASAPI ignores the buffer");
+        assert!(same(&wasapi(Some("in"), Some("out")), &sized, a), "WASAPI ignores the buffer");
         let rated = |rate| DeviceRequest { sample_rate: rate, ..asio(Some(256)) };
-        assert!(!same_device(&rated(None), &rated(Some(44_100)), a), "a rate pick on ASIO");
-        assert!(!same_device(&rated(Some(48_000)), &rated(Some(44_100)), a), "another rate pick on ASIO");
+        assert!(!same(&rated(None), &rated(Some(44_100)), a), "a rate pick on ASIO");
+        assert!(!same(&rated(Some(48_000)), &rated(Some(44_100)), a), "another rate pick on ASIO");
         let picked = DeviceRequest { sample_rate: Some(44_100), ..wasapi(Some("in"), Some("out")) };
-        assert!(same_device(&wasapi(Some("in"), Some("out")), &picked, a), "WASAPI ignores the rate pick");
+        assert!(same(&wasapi(Some("in"), Some("out")), &picked, a), "WASAPI ignores the rate pick");
+        let ran = |input: &str, output: &str| Endpoints { input: Some(input.into()), output: Some(output.into()) };
+        let speakers = ran("mic", "speakers");
+        assert!(same_device(&wasapi(None, None), &wasapi(None, None), a, (&speakers, &speakers)), "the defaults where they were");
+        assert!(!same_device(&wasapi(None, None), &wasapi(None, None), a, (&speakers, &ran("mic", "headset"))), "Windows moved the default output");
+        assert!(!same_device(&wasapi(None, Some("out")), &wasapi(None, Some("out")), a, (&ran("mic", "out"), &ran("headset", "out"))), "and the default input");
     }
 
     #[test]

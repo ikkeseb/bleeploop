@@ -61,7 +61,7 @@ impl Harness {
     fn new() -> Harness {
         let serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let fake = Fake::new();
-        let host = EngineHost::with_driver(HostConfig { max_loop_seconds: 8.0 }, FakeDriver(fake.clone()));
+        let host = EngineHost::with_driver(HostConfig { max_loop_seconds: 8.0 }, FakeDriver(fake.clone())).expect("the device owner starts");
         Harness { host, fake, events: Vec::new(), cursor: 0, _serial: serial }
     }
 
@@ -546,6 +546,41 @@ fn a_lost_wasapi_endpoint_falls_back_to_the_default_endpoint() {
         DeviceEvent::Fallback(status) => assert_eq!(status.output_name, "Fake WASAPI"),
         other => panic!("expected a fallback, got {other:?}: {events:?}"),
     }
+}
+
+// cpal's non-fatal reports, a default-device change (the stream stays on its endpoint) and a refused
+// thread priority, are no loss: the device plays on, nothing reopens.
+#[test]
+fn a_default_device_change_or_a_refused_priority_is_no_loss() {
+    let h = Harness::new();
+    h.open(wasapi(None, None));
+    h.play(RATE / 10);
+    h.fake.notices.store(true, SeqCst);
+    h.play(RATE / 5);
+    assert_eq!(h.host.take_device_events(), [], "no loss, no fallback");
+    assert_eq!(h.host.status().map(|s| s.output_name), Some("Fake WASAPI".to_string()));
+    assert_eq!(h.fake.started.load(SeqCst), 1, "one stream pair throughout");
+}
+
+// A device running on Windows' default is not the one a request for the default names once Windows moved
+// it (a headset plugged in): picking the default again reopens there. While it stays, the same request
+// changes nothing.
+#[test]
+fn the_default_picked_again_after_windows_moved_it_opens_where_it_is_now() {
+    let h = Harness::new();
+    h.open(wasapi(None, None));
+    h.open(wasapi(None, None));
+    assert_eq!(h.fake.started.load(SeqCst), 1, "the default where it was: the device that runs");
+    h.fake.wasapi.lock().unwrap().insert(0, ("headset".into(), FakeDevice::new("Headset", 48_000, 480)));
+    let status = h.open(wasapi(None, None));
+    assert_eq!((status.input_name.as_str(), status.output_name.as_str()), ("Headset", "Headset"));
+    assert_eq!(h.fake.started.load(SeqCst), 2, "a new run on the new default");
+    // A side the request names keeps its endpoint; the side left to the default follows Windows.
+    h.open(wasapi(Some("default"), None));
+    h.fake.wasapi.lock().unwrap().remove(0);
+    let status = h.open(wasapi(Some("default"), None));
+    assert_eq!((status.input_name.as_str(), status.output_name.as_str()), ("Fake WASAPI", "Fake WASAPI"));
+    assert_eq!(h.fake.started.load(SeqCst), 4);
 }
 
 #[test]
@@ -1878,6 +1913,19 @@ fn a_session_saves_and_loads_back_through_its_bytes_with_a_device_running_or_not
     assert!(h.host.load_session(&session_bytes(&wrong, &pcm)).is_err(), "a tempo that disagrees with the length");
     let diag = h.host.diag();
     assert_eq!((diag.rt_allocs, diag.lock_misses, diag.panics), (0, 0, 0), "the engine side allocated nothing and the callback never missed");
+}
+
+// A load's header comes from outside (an imported file, a recovery): a bar count whose length in frames
+// overflows is refused as any other that disagrees with the length, before anything reaches the engine.
+#[test]
+fn a_session_whose_bars_overflow_is_refused() {
+    let h = Harness::new();
+    h.open(asio(Some(256)));
+    for bars in [i64::MAX / 2, i64::MAX] {
+        let load = serde_json::json!({ "bpm": 240, "bars": bars, "masterLengthFrames": RATE, "tracks": [{ "index": 0, "frames": RATE, "reversed": false, "state": "Playing", "mix": unity_mix() }] });
+        let err = h.host.load_session(&session_bytes(&load, &vec![0.0; RATE as usize])).expect_err("a bar count no length has");
+        assert!(err.contains("bars"), "{err}");
+    }
 }
 
 /// A snapshot with its master: the header, the stems' PCM and the master's two channels.

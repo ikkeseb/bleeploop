@@ -43,7 +43,8 @@ pub(crate) struct PipeConfig {
     /// The pushing side's rate and the pulling side's, Hz.
     pub(crate) in_rate: u32,
     pub(crate) out_rate: u32,
-    /// Interleaved channels per frame (1 for the join, 2 for Share output).
+    /// Interleaved channels per frame (one per plugin slot for the join, `SLOT_COUNT`; 2 for Share
+    /// output).
     pub(crate) channels: usize,
     /// Ring capacity, in frames at `in_rate`.
     pub(crate) capacity: usize,
@@ -336,6 +337,7 @@ impl PullPipe {
 
     /// The clock drift the controller has learned, in ppm (diagnostics): + = the pusher's clock runs
     /// fast against the puller's.
+    #[cfg(test)]
     pub(crate) fn drift_ppm(&self) -> f64 {
         self.ctrl.integ * 1.0e6
     }

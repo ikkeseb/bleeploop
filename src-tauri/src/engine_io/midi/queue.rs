@@ -35,16 +35,12 @@
 //! - **Fresh one-shots need a running device** (the no-device rule): while no device runs, or while
 //!   paused for a rebuild, attacks, actions and HOLD presses are refused (the router records no owner);
 //!   releases, the target and the wheels still go in (every release passes, controller state is kept).
-//! - **One engine generation at a time** (a rebuild needs no WebView). A batch made for another
-//!   generation than the one the queue feeds is refused whole, and nothing queued for another drains:
-//!   an old release would end the new engine's note and spend its reservation. The batch's target and
-//!   wheels are the player's latest choice (the router made them last), so they wait outside the FIFO
-//!   like a wheel without room: into the next fold, or in at the tail.
-//! - **A rebuild** (`pause`, `rebuild`, then `resume` once the settings replay has run) empties the
-//!   FIFO: the old engine's attacks, actions, HOLD presses and their releases are discarded (the new
-//!   engine has no voice or capture for them to end), and the latest target and wheels, queued or
-//!   waiting, come back as a [`Fold`] for the settings memory, so they reach the new engine through its
-//!   replay alone.
+//! - **A rebuild empties the queue** (a rebuild needs no WebView: `pause`, `rebuild`, then `resume` once
+//!   the settings replay has run): the old engine's attacks, actions, HOLD presses and their releases
+//!   are discarded (the new engine has no voice or capture for them to end; an old release would end
+//!   the new engine's note), and the latest target and wheels, queued or waiting, come back as a
+//!   [`Fold`] for the settings memory, so they reach the new engine through its replay alone. Batches
+//!   are built and admitted under the lock the rebuild takes, so none spans two engines.
 
 use std::collections::VecDeque;
 
@@ -119,8 +115,6 @@ pub enum Refused {
     NoDevice,
     /// A rebuild is under way.
     Paused,
-    /// Made for another engine generation than the one the queue feeds.
-    Stale,
     /// The unreserved room is gone.
     Full,
 }
@@ -160,8 +154,6 @@ pub struct QueueCounters {
     pub actions_refused: u64,
     /// Releases no attack or HOLD press reserved a slot for, refused for room.
     pub releases_refused: u64,
-    /// Batches made for another engine generation.
-    pub stale: u64,
     /// Wheel updates that found no room: their value waited outside the FIFO.
     pub wheels_deferred: u64,
     /// Wheel updates merged into a value still queued or waiting.
@@ -177,7 +169,6 @@ pub struct QueueCounters {
 struct Entry {
     command: Command,
     class: Class,
-    generation: u64,
 }
 
 /// A set of 0..=255 (notes, HOLD controls): the ones holding a reserved slot.
@@ -279,41 +270,36 @@ fn wheel_command(wheel: usize, value: f64) -> Command {
 
 pub struct Queue {
     entries: VecDeque<Entry>,
-    /// The engine generation it feeds.
-    generation: u64,
     paused: bool,
     /// Notes whose attack went in and whose release has not: each holds a reserved slot.
     notes: Reserved,
     /// HOLD controls likewise.
     holds: Reserved,
-    /// A target change of a batch made for another generation: the player's latest, waiting.
-    waiting_target: Option<NoteTarget>,
-    /// A wheel value that found no room or came in a batch for another generation, by wheel.
+    /// A wheel value that found no room, by wheel.
     waiting: [Option<f64>; 2],
     counters: QueueCounters,
 }
 
 impl Default for Queue {
     fn default() -> Self {
-        Queue::new(0)
+        Queue::new()
     }
 }
 
 impl Queue {
-    /// An empty queue feeding engine generation `generation`.
-    pub fn new(generation: u64) -> Queue {
+    /// An empty queue.
+    pub fn new() -> Queue {
         Queue {
             entries: VecDeque::with_capacity(CAPACITY),
-            generation,
             paused: false,
             notes: Reserved::default(),
             holds: Reserved::default(),
-            waiting_target: None,
             waiting: [None; 2],
             counters: QueueCounters::default(),
         }
     }
 
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.entries.len()
     }
@@ -357,16 +343,10 @@ impl Queue {
         Ledger { notes: self.notes, holds: self.holds, target_open: self.target_open() }
     }
 
-    /// One input's commands, made for engine generation `generation`: queued whole, or refused whole.
-    pub fn admit(&mut self, batch: &[Out], generation: u64, device_running: bool) -> Result<(), Refused> {
+    /// One input's commands: queued whole, or refused whole.
+    pub fn admit(&mut self, batch: &[Out], device_running: bool) -> Result<(), Refused> {
         if batch.is_empty() {
             return Ok(());
-        }
-        if generation != self.generation {
-            self.keep_desired(batch);
-            self.counters.stale += 1;
-            self.count_refused(batch);
-            return Err(Refused::Stale);
         }
         if batch.iter().any(|o| o.class.fresh()) && (self.paused || !device_running) {
             self.count_refused(batch);
@@ -394,13 +374,6 @@ impl Queue {
         Ok(())
     }
 
-    /// One of the UI's input commands (`input_send`'s looper presses, `Press`, the toggles), in the
-    /// same FIFO as everything else. Notes, wheels and the note target go through the router. A setting
-    /// (an absolute setter) goes straight to `EngineHost::send`: a rebuild would discard it here.
-    pub fn admit_ui(&mut self, command: Command, generation: u64, device_running: bool) -> Result<(), Refused> {
-        self.admit(&[Out::new(command)], generation, device_running)
-    }
-
     /// Queue `out` (its room already counted): a target change replaces the last one queued while
     /// nothing fresh follows it; a panic moves one still queued to the tail.
     fn push(&mut self, out: &Out) {
@@ -420,7 +393,7 @@ impl Queue {
             }
             _ => {}
         }
-        self.entries.push_back(Entry { command: out.command, class: out.class, generation: self.generation });
+        self.entries.push_back(Entry { command: out.command, class: out.class });
     }
 
     /// A wheel update: merged into the same wheel's value still waiting or queued behind nothing but
@@ -435,7 +408,7 @@ impl Queue {
             self.entries[k].command = command;
             self.counters.coalesced += 1;
         } else if self.free() > owed {
-            self.entries.push_back(Entry { command, class: Class::Wheel, generation: self.generation });
+            self.entries.push_back(Entry { command, class: Class::Wheel });
         } else {
             self.waiting[wheel] = Some(value);
             self.counters.wheels_deferred += 1;
@@ -455,33 +428,16 @@ impl Queue {
         None
     }
 
-    /// The target change and wheel values of `batch`, which cannot go in where they were made: they
-    /// wait, the latest winning.
-    fn keep_desired(&mut self, batch: &[Out]) {
-        for out in batch {
-            if let Command::SelectInstrument(target) = out.command {
-                self.waiting_target = Some(target);
-            } else if let Some((wheel, value)) = wheel(&out.command) {
-                self.waiting[wheel] = Some(value);
-            }
-        }
-    }
-
-    /// Queue what waits, as room allows: the target change (its slot is kept), then the wheels. True
-    /// when something went in.
+    /// Queue the wheel values that wait, as room allows. True when something went in.
     fn place_waiting(&mut self) -> bool {
         let mut placed = false;
-        if let Some(target) = self.waiting_target.take() {
-            self.push(&Out::new(Command::SelectInstrument(target)));
-            placed = true;
-        }
         for wheel in 0..2 {
             let Some(value) = self.waiting[wheel] else { continue };
             let command = wheel_command(wheel, value);
             if let Some(k) = self.coalescible(wheel) {
                 self.entries[k].command = command;
             } else if self.free() > 0 {
-                self.entries.push_back(Entry { command, class: Class::Wheel, generation: self.generation });
+                self.entries.push_back(Entry { command, class: Class::Wheel });
             } else {
                 continue;
             }
@@ -506,20 +462,13 @@ impl Queue {
         }
     }
 
-    /// Send what the ring takes, in order, stopping at the first refusal (the head stays); a command
-    /// queued for another generation is dropped, never sent. Then what waited goes in, if the sent ones
-    /// made room. Nothing while paused.
+    /// Send what the ring takes, in order, stopping at the first refusal (the head stays). Then what
+    /// waited goes in, if the sent ones made room. Nothing while paused.
     pub fn drain(&mut self, send: &mut dyn FnMut(TimedCommand) -> Result<(), ()>) -> Drained {
         let mut drained = Drained::default();
         while !self.paused {
             while let Some(e) = self.entries.front() {
-                let (command, class) = (e.command, e.class);
-                if e.generation != self.generation {
-                    self.entries.pop_front();
-                    self.keep_desired(&[Out { command, class }]);
-                    self.counters.discarded += 1;
-                    continue;
-                }
+                let command = e.command;
                 if send(TimedCommand { frame: None, command }).is_err() {
                     drained.blocked = true;
                     break;
@@ -540,10 +489,9 @@ impl Queue {
         self.paused = true;
     }
 
-    /// The engine was replaced by generation `new_generation`: empty the queue, discarding the old
-    /// engine's one-shots and their releases, and hand back the latest target and wheels, queued or
-    /// waiting, for the settings memory.
-    pub fn rebuild(&mut self, new_generation: u64) -> Fold {
+    /// The engine was replaced: empty the queue, discarding the old engine's one-shots and their
+    /// releases, and hand back the latest target and wheels, queued or waiting, for the settings memory.
+    pub fn rebuild(&mut self) -> Fold {
         let mut fold = Fold::default();
         let mut discarded = 0;
         for e in self.entries.drain(..) {
@@ -555,12 +503,10 @@ impl Queue {
             }
         }
         // What waits is newer than anything queued: each admission and drain places it first.
-        fold.target = self.waiting_target.take().or(fold.target);
         fold.pitch_bend = self.waiting[0].take().or(fold.pitch_bend);
         fold.modulation = self.waiting[1].take().or(fold.modulation);
         self.notes = Reserved::default();
         self.holds = Reserved::default();
-        self.generation = new_generation;
         self.counters.discarded += discarded;
         fold
     }
@@ -584,7 +530,7 @@ mod tests {
     }
 
     fn admit(q: &mut Queue, commands: &[Command]) -> Result<(), Refused> {
-        q.admit(&outs(commands), 0, true)
+        q.admit(&outs(commands), true)
     }
 
     /// Drain into a ring that takes `room` commands, returning what it took.
@@ -604,7 +550,7 @@ mod tests {
     /// Admit one-shot actions until the room is gone; how many went in.
     fn fill(q: &mut Queue) -> usize {
         let mut n = 0;
-        while q.admit(&outs(&[Command::Action(Action::Undo)]), q.generation, true).is_ok() {
+        while q.admit(&outs(&[Command::Action(Action::Undo)]), true).is_ok() {
             n += 1;
         }
         n
@@ -789,7 +735,7 @@ mod tests {
         let mut q = Queue::default();
         admit(&mut q, &[Command::NoteOn(60, 0.5)]).unwrap();
         admit(&mut q, &[Command::Action(Action::Hold(2))]).unwrap();
-        let gap = |q: &mut Queue, c: &[Command]| q.admit(&outs(c), 0, false);
+        let gap = |q: &mut Queue, c: &[Command]| q.admit(&outs(c), false);
         assert_eq!(gap(&mut q, &[Command::NoteOn(61, 0.5)]), Err(Refused::NoDevice));
         assert_eq!(gap(&mut q, &[Command::Action(Action::RecDub)]), Err(Refused::NoDevice));
         assert_eq!(gap(&mut q, &[Command::Action(Action::Hold(3))]), Err(Refused::NoDevice));
@@ -807,53 +753,29 @@ mod tests {
     // and wheels.
     #[test]
     fn a_rebuild_discards_the_old_one_shots_and_folds_the_target_and_wheels() {
-        let mut q = Queue::new(4);
-        let at = |q: &mut Queue, g: u64, c: &[Command]| q.admit(&outs(c), g, true);
-        at(&mut q, 4, &[Command::SelectInstrument(LEAD)]).unwrap();
-        at(&mut q, 4, &[Command::NoteOn(60, 0.5)]).unwrap();
-        at(&mut q, 4, &[Command::Action(Action::Hold(0))]).unwrap();
-        at(&mut q, 4, &[Command::PitchBend(0.5)]).unwrap();
-        at(&mut q, 4, &[Command::NoteOff(60), Command::SelectInstrument(PAD)]).unwrap();
-        at(&mut q, 4, &[Command::Modulation(0.25)]).unwrap();
+        let mut q = Queue::new();
+        admit(&mut q, &[Command::SelectInstrument(LEAD)]).unwrap();
+        admit(&mut q, &[Command::NoteOn(60, 0.5)]).unwrap();
+        admit(&mut q, &[Command::Action(Action::Hold(0))]).unwrap();
+        admit(&mut q, &[Command::PitchBend(0.5)]).unwrap();
+        admit(&mut q, &[Command::NoteOff(60), Command::SelectInstrument(PAD)]).unwrap();
+        admit(&mut q, &[Command::Modulation(0.25)]).unwrap();
         q.pause();
-        assert_eq!(at(&mut q, 4, &[Command::NoteOn(61, 0.5)]), Err(Refused::Paused));
-        assert_eq!(at(&mut q, 4, &[Command::Action(Action::Release(0))]), Ok(()), "a release passes");
+        assert_eq!(admit(&mut q, &[Command::NoteOn(61, 0.5)]), Err(Refused::Paused));
+        assert_eq!(admit(&mut q, &[Command::Action(Action::Release(0))]), Ok(()), "a release passes");
         assert_eq!(q.drain(&mut |_| panic!("nothing drains while paused")), Drained { sent: 0, left: 8, blocked: false });
-        let fold = q.rebuild(5);
+        let fold = q.rebuild();
         assert_eq!(fold, Fold { target: Some(PAD), pitch_bend: Some(0.5), modulation: Some(0.25) });
         assert_eq!(fold.commands().collect::<Vec<_>>(), [Command::SelectInstrument(PAD), Command::PitchBend(0.5), Command::Modulation(0.25)]);
         assert_eq!(q.counters().discarded, 4, "NoteOn, Hold, NoteOff, Release");
         assert!(q.is_empty());
-        assert_eq!(at(&mut q, 5, &[Command::NoteOn(62, 0.5)]), Err(Refused::Paused));
+        assert_eq!(admit(&mut q, &[Command::NoteOn(62, 0.5)]), Err(Refused::Paused));
         q.resume();
-        assert_eq!(at(&mut q, 5, &[Command::NoteOn(62, 0.5)]), Ok(()));
+        assert_eq!(admit(&mut q, &[Command::NoteOn(62, 0.5)]), Ok(()));
         assert_eq!(take(&mut q, 8), [Command::NoteOn(62, 0.5)]);
         // The old engine's reservations went with it: the room is whole again but for 62's release, the
         // next target change and a panic.
         assert_eq!(fill(&mut q), CAPACITY - 3);
-    }
-
-    // One engine generation at a time: a batch made for another generation is refused whole and never
-    // reaches the engine the queue feeds: an old release would end the new engine's note and spend its
-    // slot. Its target and wheels are the player's latest and wait; anything queued for another
-    // generation is dropped at the drain.
-    #[test]
-    fn a_batch_for_another_generation_never_reaches_the_engine() {
-        let mut q = Queue::new(5);
-        let at = |q: &mut Queue, g: u64, c: &[Command]| q.admit(&outs(c), g, true);
-        at(&mut q, 5, &[Command::NoteOn(60, 0.5)]).unwrap();
-        let reserved = q.reserved();
-        assert_eq!(at(&mut q, 4, &[Command::NoteOff(60)]), Err(Refused::Stale));
-        assert_eq!(at(&mut q, 6, &[Command::Action(Action::Release(0))]), Err(Refused::Stale));
-        assert_eq!(at(&mut q, 4, &[Command::PitchBend(0.7)]), Err(Refused::Stale));
-        assert_eq!(at(&mut q, 4, &[Command::SelectInstrument(PAD)]), Err(Refused::Stale));
-        assert_eq!((q.len(), q.reserved(), q.counters().stale), (1, reserved, 4), "60 keeps its slot");
-        // A command queued for another generation (left by a rebuild that never ran) is never sent.
-        q.entries.push_back(Entry { command: Command::NoteOff(60), class: Class::Release, generation: 4 });
-        assert_eq!(take(&mut q, 8), [Command::NoteOn(60, 0.5), Command::SelectInstrument(PAD), Command::PitchBend(0.7)]);
-        assert_eq!(q.counters().discarded, 1);
-        // The note's own release, made for its engine, goes in.
-        assert_eq!(at(&mut q, 5, &[Command::NoteOff(60)]), Ok(()));
     }
 
     // A wheel value waiting for room when the engine is rebuilt is the newest: it is the one folded.
@@ -865,7 +787,7 @@ mod tests {
         fill(&mut q);
         admit(&mut q, &[Command::PitchBend(0.9)]).unwrap();
         q.pause();
-        assert_eq!(q.rebuild(1).pitch_bend, Some(0.9));
+        assert_eq!(q.rebuild().pitch_bend, Some(0.9));
         assert!(q.is_empty());
     }
 }
@@ -937,15 +859,13 @@ mod pipeline {
         queue: Queue,
         engine: Engine,
         running: bool,
-        generation: u64,
         room: usize,
         blocked_drains: usize,
     }
 
     impl Rig {
         fn new() -> Rig {
-            let mut rig =
-                Rig { router: Router::default(), queue: Queue::new(1), engine: Engine::default(), running: true, generation: 1, room: usize::MAX, blocked_drains: 0 };
+            let mut rig = Rig { router: Router::default(), queue: Queue::new(), engine: Engine::default(), running: true, room: usize::MAX, blocked_drains: 0 };
             rig.router.ui_epoch(1, &mut Vec::new());
             rig
         }
@@ -953,7 +873,7 @@ mod pipeline {
         fn input(&mut self, f: impl FnOnce(&mut Router, &mut Vec<Out>)) -> Result<Vec<Command>, Refused> {
             let mut out = Vec::new();
             f(&mut self.router, &mut out);
-            match self.queue.admit(&out, self.generation, self.running) {
+            match self.queue.admit(&out, self.running) {
                 Ok(()) => Ok(out.iter().map(|o| o.command).collect()),
                 Err(why) => {
                     self.router.attack_refused(&out);
@@ -963,7 +883,7 @@ mod pipeline {
         }
 
         fn action(&mut self, command: Command) -> Result<(), Refused> {
-            self.queue.admit_ui(command, self.generation, self.running)
+            self.queue.admit(&[Out::new(command)], self.running)
         }
 
         fn drain(&mut self) -> Drained {
@@ -1260,8 +1180,7 @@ mod pipeline {
         // The rebuild begins: an attack now is refused and recorded nowhere.
         rig.queue.pause();
         assert_eq!(rig.input(|r, o| r.note_on(&b, 65, 100, o)), Err(Refused::Paused));
-        let fold = rig.queue.rebuild(2);
-        rig.generation = 2;
+        let fold = rig.queue.rebuild();
         assert_eq!(fold, Fold { target: None, pitch_bend: Some(0.5), modulation: None });
         assert_eq!(rig.queue.counters().discarded, 2, "the queued attack and HOLD press");
         // The settings replay hands the new engine the remembered target and the folded wheel, once.
@@ -1396,12 +1315,12 @@ mod pipeline {
     #[test]
     fn into_the_real_engine_no_release_is_lost_past_its_table_and_the_wheel_reaches_a_new_instrument() {
         let run = |bend: f64| -> Vec<f32> {
-            let (mut real, mut router, mut queue) = (Real::new(), Router::default(), Queue::new(0));
+            let (mut real, mut router, mut queue) = (Real::new(), Router::default(), Queue::new());
             let owners: Vec<Owner> = (0..4).map(|conn| midi(conn, 0)).collect();
             let input = |router: &mut Router, queue: &mut Queue, f: &dyn Fn(&mut Router, &mut Vec<Out>)| {
                 let mut out = Vec::new();
                 f(router, &mut out);
-                queue.admit(&out, 0, true).unwrap();
+                queue.admit(&out, true).unwrap();
                 out.into_iter().map(|o| o.command).collect::<Vec<_>>()
             };
             input(&mut router, &mut queue, &|r, o| r.select_target(Some(0), LEAD, o));

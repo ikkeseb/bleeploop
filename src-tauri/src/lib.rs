@@ -10,7 +10,6 @@ mod audio_output;
 // The native engine's device side (briefing: `engine_io/mod.rs`): engine mode
 // (`engine_io::mode`) runs it; a DEV probe drives it too.
 #[cfg(windows)]
-#[allow(dead_code)]
 mod engine_io;
 // DEV: the loopback chirp analysis the spike and the engine probe share.
 #[cfg(all(windows, debug_assertions))]
