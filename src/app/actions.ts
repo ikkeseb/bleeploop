@@ -4,58 +4,38 @@ import { sendEngine, type EngineAction } from '../platform';
 import { pressGoLive } from '../ui/instrument/live';
 import { nextStageView, toggleStage } from '../ui/stage/stage-store';
 import { clock, looper } from '../ui/state/audio';
-import { engineFade, toggleSetting } from '../ui/state/engine-store';
-import { CONFIRM_WINDOW_MS } from '../ui/looper/shared';
-import {
-  CONFIRM_CLEAR_TEXT,
-  clearGate,
-  copyGate,
-  dismissLaneCue,
-  fadeGate,
-  muteGate,
-  playStopGate,
-  recDubGate,
-  refuseOnLane,
-  reverseGate,
-  tapGate,
-  trimGate,
-  undoGate,
-  type Gate,
-} from '../ui/looper/gates';
+import { dismissLaneCue, refuseOnLane, tapGate } from '../ui/looper/gates';
 
 /**
  * OWNS: the named actions a hands-free press can reach, in one table. The transport keys
  * (`transport-keys.ts`) dispatch through it; learned MIDI runs natively from a port of this table
  * (`src-tauri/src/engine_io/midi/actions.rs`), and the rows the UI owns reach it back through
- * `midi-actions.ts` (`runNativeAction`, `nativePressed`). Each row runs the path
- * its on-screen control runs: the lane core, ▶/■, ↶ UNDO, CLR, MUTE, ↺ REV, ⧉ COPY and ✂ TRIM (halve:
- * the first half); the command bar's ▶/■ ALL, FADE, TAP, CLICK, END STOP, FIXED, RETAKE, AUTO REC and IN
- * FX's three sends; the slot's GO LIVE, the stage view's cap and its view switch.
+ * `midi-actions.ts` (`runNativeAction`, `nativePressed`). Each action is an on-screen control's: the lane
+ * core, ▶/■, ↶ UNDO, CLR, MUTE, ↺ REV, ⧉ COPY and ✂ TRIM (halve: the first half); the command bar's ▶/■
+ * ALL, FADE, TAP, CLICK, END STOP, FIXED, RETAKE, AUTO REC and IN FX's three sends; the slot's GO LIVE,
+ * the stage view's cap and its view switch.
  *
  * A lane action (`LANE`) acts on a `Target`: the SELECTED track, or a named one. A press on a named
  * track leaves the selection alone, except REC/DUB, which selects its track so the transport keys
- * follow the take. A refused press says why on its lane (gates.ts `refuseOnLane`) instead of doing
- * nothing; a refused global one says it on the selected lane, where the player is looking. In engine
- * mode every lane row, NEXT/PREV TRACK, ▶/■ ALL, FADE and the toggles (CLICK, END STOP, FIXED, RETAKE,
- * AUTO REC, the three sends) go to the engine as its `Action`: on the lane the engine has selected when
- * the press lands (never the UI's copy of the selection, which a feed frame may not have refreshed yet),
- * or `ActionOn` a named track. The engine gates them, confirms CLEAR per lane, resolves HOLD's lane,
- * switches a toggle from the value it has then (so a pedal and a click never undo each other) and names
- * a refusal on the feed (`src/app/boot.ts` puts it on the lane). The other global rows run their
- * control's facade call, which sends the control's own command, after a `Press` that tells the engine a
- * looper press came (a pending pedal CLEAR is not confirmed past it).
+ * follow the take. Every lane action and the engine's global ones (`ENGINE_GLOBAL`: NEXT/PREV TRACK,
+ * ▶/■ ALL, FADE and the toggles CLICK, END STOP, FIXED, RETAKE, AUTO REC and the three sends) go to the
+ * engine as its `Action`: on the lane the engine has selected when the press lands (never the UI's copy
+ * of the selection, which a feed frame may not have refreshed yet), or `ActionOn` a named track. The
+ * engine gates them, confirms CLEAR per lane, resolves HOLD's lane, switches a toggle from the value it
+ * has then (so a pedal and a click never undo each other) and names a refusal on the feed
+ * (`src/app/boot.ts` puts it on the lane). The rows the UI owns (`GLOBAL`) run their control's facade
+ * call, which sends the control's own command, after a `Press` that tells the engine a looper press came
+ * (a pending pedal CLEAR is not confirmed past it); a refused TAP says why on the selected lane, where
+ * the player is looking (gates.ts `refuseOnLane`).
  */
 type LaneActionId = 'recDub' | 'playStop' | 'undo' | 'clear' | 'mute' | 'reverse' | 'copy' | 'halveTrack';
-type GlobalActionId =
+/** The global actions the engine runs as its own. */
+type EngineGlobalId =
   | 'nextTrack'
   | 'prevTrack'
   | 'playAll'
   | 'stopAll'
   | 'fadeAll'
-  | 'goLive'
-  | 'stageView'
-  | 'stageNextView'
-  | 'tapTempo'
   | 'clickToggle'
   | 'endStopToggle'
   | 'fixedToggle'
@@ -64,7 +44,9 @@ type GlobalActionId =
   | 'inFxEcho'
   | 'inFxReverb'
   | 'inFxRing';
-export type ActionId = LaneActionId | GlobalActionId;
+/** The global actions the UI owns: native MIDI hands them back (`runNativeAction`). */
+type UiActionId = 'goLive' | 'stageView' | 'stageNextView' | 'tapTempo';
+export type ActionId = LaneActionId | EngineGlobalId | UiActionId;
 
 /** A lane action's track: 0-based, or null for the selected track. */
 export type Target = number | null;
@@ -99,50 +81,24 @@ export const ACTION_LABELS: Readonly<Record<ActionId, string>> = {
   inFxRing: 'Input ring mod on / off',
 };
 
-// CLEAR's guard. A take is irreversible, so the first press only arms and says so on the lane; the
-// confirming press must be the very next looper press (a named action or a digit select, see `onPress`),
-// on the same track, inside the window the lane's CLR latch uses. A double press, not a hold: the keys
-// drop e.repeat, and a footswitch may send no repeat.
-let clearArmed: { track: number; at: number } | null = null;
-
-function clearTrack(i: number): void {
-  if (clearArmed?.track === i && performance.now() - clearArmed.at < CONFIRM_WINDOW_MS) {
-    clearArmed = null;
-    looper.clear(i);
-    return;
-  }
-  clearArmed = { track: i, at: performance.now() };
-  refuseOnLane(i, CONFIRM_CLEAR_TEXT, CONFIRM_WINDOW_MS);
-}
-
-/** A lane action: its control's gate and call on lane `i`, and the engine's action when it has one. */
-interface LaneRow {
-  gate: (i: number) => Gate;
-  act: (i: number) => void;
-  engine?: EngineAction;
-}
-
-/** The lane actions. A row added here is a lane action everywhere: it takes a target in the learn row. */
-const LANE: Readonly<Record<LaneActionId, LaneRow>> = {
-  recDub: { gate: recDubGate, act: (i) => void looper.recDub(i), engine: 'RecDub' },
-  playStop: { gate: playStopGate, act: (i) => looper.playStop(i), engine: 'PlayStop' },
-  undo: { gate: undoGate, act: (i) => looper.undoLastOverdub(i), engine: 'Undo' }, // a second press redoes, as ↶ UNDO does
-  clear: { gate: clearGate, act: clearTrack, engine: 'Clear' },
-  mute: { gate: muteGate, act: (i) => looper.toggleMute(i), engine: 'Mute' },
-  reverse: { gate: reverseGate, act: (i) => looper.reverse(i), engine: 'Reverse' },
-  copy: { gate: copyGate, act: (i) => void looper.copy(i), engine: 'Copy' },
+/** The lane actions, as the engine's. A row added here is a lane action everywhere: it takes a target in
+ * the learn row. */
+const LANE: Readonly<Record<LaneActionId, EngineAction>> = {
+  recDub: 'RecDub',
+  playStop: 'PlayStop',
+  undo: 'Undo', // a second press redoes, as ↶ UNDO does
+  clear: 'Clear',
+  mute: 'Mute',
+  reverse: 'Reverse',
+  copy: 'Copy',
   // TRIM to the first half of the loop's bars, rounded down (one UNDO away): the engine's `Halve` judges
   // the bars as the loop stands when the press lands.
-  halveTrack: { gate: trimGate, act: () => {}, engine: 'Halve' },
+  halveTrack: 'Halve',
 };
 
 export function isLaneAction(id: ActionId): id is LaneActionId {
   return Object.hasOwn(LANE, id);
 }
-
-/** Step the selected track by `d`, wrapping at both ends. */
-const step = (d: number) => (): void =>
-  looper.selectTrack((looper.selectedTrack() + d + looper.trackCount) % looper.trackCount);
 
 /** GO LIVE's slot: the active one, unless only the other slot has GO LIVE in play (`liveInPlay`: a tone
  * reload holds it live while its plugin is briefly gone, or a press waits for its op) or a source made
@@ -156,40 +112,23 @@ function goLiveSlot(): 0 | 1 {
   return !takesInput(active) && takesInput(other) ? other : active;
 }
 
-/** Run `act` when `gate` lets a global press through, else say why on the selected lane. */
-const gated =
-  (gate: () => Gate, act: () => void) =>
-  (): void => {
-    const g = gate();
-    if (g.ok) act();
-    else refuseOnLane(looper.selectedTrack(), g.reason);
-  };
-
-const GLOBAL: Readonly<Record<GlobalActionId, () => void>> = {
-  nextTrack: step(1),
-  prevTrack: step(-1),
-  playAll: () => looper.playAll(),
-  stopAll: () => looper.stopAll(),
-  // The engine runs FADE as its own action (ENGINE_GLOBAL); this row is its UI path.
-  fadeAll: gated(fadeGate, () => engineFade.fadeAll()),
+/** The global rows the UI owns: their control's facade call. */
+const GLOBAL: Readonly<Record<UiActionId, () => void>> = {
   goLive: () => void pressGoLive(goLiveSlot()),
   stageView: toggleStage,
   // Steps the stage view's look; does nothing while that view is closed (stage-store.ts).
   stageNextView: nextStageView,
-  tapTempo: gated(tapGate, () => clock.tap()),
-  // The toggles are the engine's (ENGINE_GLOBAL); these rows are their controls' path, the same toggle.
-  clickToggle: () => toggleSetting('Click'),
-  endStopToggle: () => toggleSetting('EndStop'),
-  fixedToggle: () => toggleSetting('Fixed'),
-  retakeToggle: () => toggleSetting('Retake'),
-  autoRecToggle: () => toggleSetting('AutoRec'),
-  inFxEcho: () => toggleSetting({ Send: 'echo' }),
-  inFxReverb: () => toggleSetting({ Send: 'reverb' }),
-  inFxRing: () => toggleSetting({ Send: 'ring' }),
+  tapTempo: () => {
+    const g = tapGate();
+    if (g.ok) clock.tap();
+    else refuseOnLane(looper.selectedTrack(), g.reason);
+  },
 };
 
-/** The global rows the engine runs as its own hands-free actions. */
-const ENGINE_GLOBAL: Readonly<Partial<Record<GlobalActionId, EngineAction>>> = {
+const isUiAction = (id: ActionId): id is UiActionId => Object.hasOwn(GLOBAL, id);
+
+/** The global actions the engine runs as its own hands-free actions. */
+const ENGINE_GLOBAL: Readonly<Record<EngineGlobalId, EngineAction>> = {
   nextTrack: 'NextTrack',
   prevTrack: 'PrevTrack',
   playAll: 'PlayAll',
@@ -209,47 +148,32 @@ const ENGINE_GLOBAL: Readonly<Partial<Record<GlobalActionId, EngineAction>>> = {
  * and a lane cue outlive them. */
 const STAGE_ACTIONS: ReadonlySet<ActionId> = new Set<ActionId>(['stageView', 'stageNextView']);
 
-/** Every looper press passes here first: any press but CLEAR disarms a pending CLEAR, and every press
- * takes the last lane cue down (a newer press makes its reason stale). */
-function onPress(id?: ActionId): void {
-  if (id !== 'clear') clearArmed = null;
+/** Every looper press passes here first: it takes the last lane cue down (a newer press makes its reason
+ * stale). */
+function onPress(): void {
   dismissLaneCue();
-}
-
-/** Lane action `id` on lane `i`. `named`: the press named its track, so the engine is told the lane
- * rather than reading its own selection. */
-function runOnLane(id: LaneActionId, i: number, named: boolean): void {
-  const row = LANE[id];
-  if (row.engine) {
-    sendEngine(named ? { ActionOn: [i, row.engine] } : { Action: row.engine });
-    return;
-  }
-  const g = row.gate(i);
-  if (g.ok) row.act(i);
-  else refuseOnLane(i, g.reason);
 }
 
 /** Run action `id`, a lane action on `target`. The stage view's own actions (`STAGE_ACTIONS`) are not
  * looper presses. */
 export function runAction(id: ActionId, target: Target = null): void {
   const press = !STAGE_ACTIONS.has(id);
-  if (press) onPress(id);
+  if (press) onPress();
   if (isLaneAction(id)) {
     if (target === null) {
-      runOnLane(id, looper.selectedTrack(), false);
+      sendEngine({ Action: LANE[id] });
       return;
     }
     if (id === 'recDub') looper.selectTrack(target);
-    runOnLane(id, target, true);
+    sendEngine({ ActionOn: [target, LANE[id]] });
     return;
   }
-  const action = ENGINE_GLOBAL[id];
-  if (action) {
-    sendEngine({ Action: action });
+  if (isUiAction(id)) {
+    if (press) sendEngine('Press');
+    GLOBAL[id]();
     return;
   }
-  if (press) sendEngine('Press');
-  GLOBAL[id]();
+  sendEngine({ Action: ENGINE_GLOBAL[id] });
 }
 
 /** A learned MIDI binding fired a looper press natively (native MIDI sent its `Press` or action): the
@@ -260,7 +184,7 @@ export function nativePressed(): void {
 
 /** A learned MIDI binding fired an action the UI owns (GO LIVE, TAP, the stage view and its next look):
  * its row, with no second `Press` (native MIDI sent it, and `nativePressed` ran first). */
-export function runNativeAction(id: 'goLive' | 'tapTempo' | 'stageView' | 'stageNextView'): void {
+export function runNativeAction(id: UiActionId): void {
   GLOBAL[id]();
 }
 

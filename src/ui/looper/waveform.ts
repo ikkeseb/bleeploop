@@ -23,6 +23,7 @@ import { masterBars } from './shared';
  * master-length change (a rare structural event; BPM is locked for the life of a committed master)
  * inside the cached-bitmap path — never in the per-frame steady state. (A first take's opening span
  * reads the tempo once per take: the engine store takes it as the take starts, off the draw loop.)
+ * `verify/guards/stage-draw.mjs` holds this module to that, the exception allowed by name.
  *
  * Solid only ever creates/destroys the <canvas> elements (the Looper component) and calls
  * `registerLane` / `unregisterLane`; all drawing lives here in plain TS.

@@ -9,9 +9,9 @@ import { nativePressed, runNativeAction, type ActionId } from './actions';
  * OWNS: the bridge between native MIDI learn and the UI's actions. Learned MIDI runs natively
  * (`src-tauri/src/engine_io/midi/`: ports, learn, the bindings and their store, the router, what a
  * binding fires); the learn row and the list call it through `src/ui/state/midi.ts`. What a binding fires
- * comes back here: a looper press's bookkeeping (`nativePressed`: the lane cue goes, the UI's CLEAR guard
- * disarms), the actions the UI owns (`runNativeAction`: GO LIVE, TAP, the stage view; native MIDI already
- * sent their `Press`), and a refused HOLD press's cue on the selected lane.
+ * comes back here: a looper press's bookkeeping (`nativePressed`: the lane cue goes), the actions the UI
+ * owns (`runNativeAction`: GO LIVE, TAP, the stage view; native MIDI already sent their `Press`), and a
+ * refused HOLD press's cue on the selected lane.
  *
  * At every start the bindings the web build kept (`lf.midiLearn`) go to native MIDI, which imports them
  * once and answers `already` after (`docs/ARCHITECTURE.md` § Decided: native MIDI, the import never

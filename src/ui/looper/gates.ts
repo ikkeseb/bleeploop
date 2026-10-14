@@ -5,11 +5,12 @@ import type { Refusal } from '../../platform';
 
 /**
  * OWNS: the looper UI's refusal gates, its screen-reader announcement line and the sighted lane cue.
- * One predicate per lane gesture (and per command-bar toggle a pedal reaches), returning WHY a press is
- * refused, so the control's disabled state, its title, its ARIA label and a key's or pedal's refusal
- * (`src/app/actions.ts`) all speak one vocabulary. The engine
+ * One predicate per control the UI disables and titles (the lane core, ▶/■, ✂ TRIM; the command bar's
+ * TAP, FADE, FIXED, RETAKE and AUTO REC), returning WHY a press is refused, so the control's disabled
+ * state, its title and its ARIA label speak the vocabulary a refused key or pedal press speaks. The engine
  * keeps its own self-protection; these mirror it for the UI, they do not replace it. A hands-free press is
- * gated by the engine, which names its reason by the same vocabulary (`refusalText`, `lf_engine::Refusal::text`).
+ * gated by the engine, which names its reason by the same vocabulary (`refusalText`, `lf_engine::Refusal::text`);
+ * TAP, which the UI owns, is gated here (`src/app/actions.ts`).
  *
  * Reactive: the gates read the looper's public track signals, so call them from JSX, memos or an event
  * handler — never from the 60 fps draw loop (invariant 6).
@@ -46,8 +47,8 @@ const REFUSAL = {
   noFade: refuse('nothing is playing to fade'),
 } as const;
 
-/** CLEAR's first press, by key or pedal: the second one clears (`src/app/actions.ts`). */
-export const CONFIRM_CLEAR_TEXT = 'press again to clear';
+/** CLEAR's first press, by key or pedal: the engine clears on the second (its `ConfirmClear`). */
+const CONFIRM_CLEAR_TEXT = 'press again to clear';
 
 /** The words for an engine refusal: the vocabulary above. */
 export function refusalText(reason: Refusal): string {
@@ -138,14 +139,6 @@ export function playStopGate(i: number): Gate {
   return looper.track(i)().state === 'EMPTY' ? REFUSAL.empty : OK;
 }
 
-/** May UNDO (the lane's ↶ UNDO) act on lane `i`? Only with an overdub or a trim to swap, and not while
- * ending. */
-export function undoGate(i: number): Gate {
-  const t = looper.track(i)();
-  if (!t.canUndo) return REFUSAL.noUndo;
-  return stopping(t) ?? OK;
-}
-
 /** The whole bars of the master loop, or 0 when there is none or it is no whole number of bars (a
  * foreign import): what TRIM can keep a part of. */
 export function loopWholeBars(): number {
@@ -162,30 +155,6 @@ export function trimGate(i: number): Gate {
   if (t.state === 'RECORDING' || t.state === 'OVERDUBBING') return REFUSAL.capturing;
   if (t.state === 'EMPTY' || loopWholeBars() < 2) return REFUSAL.noTrim;
   return stopping(t) ?? OK;
-}
-
-/** May CLEAR act on lane `i`? Only an EMPTY lane has nothing to clear; the confirm is the caller's. */
-export function clearGate(i: number): Gate {
-  return looper.track(i)().state === 'EMPTY' ? REFUSAL.noClear : OK;
-}
-
-/** May MUTE (the lane's MUTE cap) act on lane `i`? An EMPTY lane's cap is disabled. */
-export function muteGate(i: number): Gate {
-  return looper.track(i)().state === 'EMPTY' ? REFUSAL.noMute : OK;
-}
-
-/** May REV act on lane `i`? The cap shows once the lane has a loop and is disabled while it ends. */
-export function reverseGate(i: number): Gate {
-  const t = looper.track(i)();
-  if (!t.canReverse) return REFUSAL.noReverse;
-  return stopping(t) ?? OK;
-}
-
-/** May COPY act on lane `i`? The cap shows once the lane has a loop and another lane is EMPTY. */
-export function copyGate(i: number): Gate {
-  if (!looper.track(i)().canReverse) return REFUSAL.noCopy;
-  for (let j = 0; j < looper.trackCount; j++) if (looper.track(j)().state === 'EMPTY') return OK;
-  return REFUSAL.noFreeLane;
 }
 
 /** May TAP set the tempo? Not once a loop has fixed it. */

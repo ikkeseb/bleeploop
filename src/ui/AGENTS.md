@@ -29,7 +29,8 @@ is a one-line adapter). UI-only edits are safe while the dev app runs,
   signal (`looper/waveform.ts` reads non-reactive looper getters). One exception: the bar grid reads
   the BPM and sample-rate signals only when the master loop's length changes, and caches the bar
   count (`waveform.ts` `rasterise`). The stage view's own loop (`stage/stage-loop.ts`) holds the same
-  line through a plain feed that Solid effects write, checked by `verify/guards/stage-draw.mjs`.
+  line through a plain feed that Solid effects write. `verify/guards/stage-draw.mjs` checks both loops,
+  the grid's exception by name and only inside its master-length gate.
   Measured cost + the fix pattern: `docs/ARCHITECTURE.md` invariant 6.
 - **A stage look draws two layers** (`src/ui/stage/`): the lane's recorded contour, dim and static,
   from `stage/visual.ts`'s shared helpers, and over it, where the look has them, the engine's live

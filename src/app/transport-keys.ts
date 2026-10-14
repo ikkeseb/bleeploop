@@ -54,8 +54,8 @@ export const KEY_ACTIONS: Readonly<Record<string, ActionId>> = {
  * Keyboard looper transport: an always-on WINDOW handler so transport survives with the keyboard pane
  * hidden (the footswitch/numpad-as-looper-pedal case). Disjoint from the note-play keys (a–l, w–p,
  * z/x) and from drum pads (see the drumActive gate) — the note path is untouched. Also owns the
- * capture-phase click handler that blurs pointer-activated controls so the transport keys never get
- * hijacked by a focused button.
+ * capture-phase click handler that blurs pointer-activated controls (and the key handler that
+ * releases a pointer-focused select) so the transport keys never get hijacked by a focused control.
  */
 export function installTransportKeys(opts: TransportKeysOptions): TransportKeys {
   let lastInputWasPointer = false;
@@ -72,7 +72,8 @@ export function installTransportKeys(opts: TransportKeysOptions): TransportKeys 
     if (e.repeat || e.metaKey || e.ctrlKey || e.altKey) return;
 
     // Yield rule — the transport gives the key up only to a control the USER is operating:
-    // - editable fields (input/select/textarea/contenteditable) always keep their keys;
+    // - editable fields (input/select/textarea/contenteditable) always keep their keys (a select the
+    //   pointer focused is no longer focused here: the capture handler below released it);
     // - buttons and tabindex>=0 widgets (SplitStack divider = role=separator, which binds
     //   Enter/Arrows/Home) keep them, unless the app put focus there itself (returnFocus: the
     //   popover trigger after Escape), so Space after Escape arms REC instead of re-opening;
@@ -149,6 +150,29 @@ export function installTransportKeys(opts: TransportKeysOptions): TransportKeys 
   };
   window.addEventListener('click', onClick, { capture: true });
 
+  // A <select> the pointer focused (the slot's source and input, the FX drawer's divisions) keeps focus
+  // the same way, and the yield above hands it every arrow, PageUp/PageDown and letter. It cannot be
+  // blurred on its click, which would close the list it opens, and a pick is not the only way out: a
+  // pick of the value it had and a list dismissed with Escape fire no `change`. So the key decides:
+  // while its list is open the keys go to the list, not the page (measured in Chromium by
+  // `verify/probes/transport-focus.mjs`; WebView2 is the same engine, unmeasured), and the first key
+  // the page sees with that select still focused blurs it in the CAPTURE phase, before this file's
+  // handler and the note keys (Keyboard.tsx) read the focus. Tab keeps its own move. A select reached
+  // from the keyboard keeps its keys: only a pointerdown on it marks it, and its blur clears the mark.
+  let pointerSelect: HTMLSelectElement | null = null;
+  const onPointerDown = (e: PointerEvent) => {
+    pointerSelect = e.target instanceof HTMLSelectElement ? e.target : null;
+  };
+  window.addEventListener('pointerdown', onPointerDown, { capture: true });
+  const onKeyDownCapture = (e: KeyboardEvent) => {
+    if (e.key !== 'Tab' && pointerSelect && document.activeElement === pointerSelect) pointerSelect.blur();
+  };
+  window.addEventListener('keydown', onKeyDownCapture, { capture: true });
+  const onFocusOut = (e: FocusEvent) => {
+    if (e.target === pointerSelect) pointerSelect = null;
+  };
+  window.addEventListener('focusout', onFocusOut, { capture: true });
+
   const onFocusIn = (e: FocusEvent) => {
     if (e.target !== appFocused) appFocused = null;
   };
@@ -158,6 +182,9 @@ export function installTransportKeys(opts: TransportKeysOptions): TransportKeys 
     dispose: () => {
       window.removeEventListener('keydown', onKeyDown);
       window.removeEventListener('click', onClick, { capture: true });
+      window.removeEventListener('pointerdown', onPointerDown, { capture: true });
+      window.removeEventListener('keydown', onKeyDownCapture, { capture: true });
+      window.removeEventListener('focusout', onFocusOut, { capture: true });
       window.removeEventListener('focusin', onFocusIn, { capture: true });
     },
     lastInputWasPointer: () => lastInputWasPointer,

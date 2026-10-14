@@ -15,7 +15,7 @@ import { StageView } from './ui/stage/StageView';
 import { currentStageView, setStageOpen, stageOpen, toggleStage } from './ui/stage/stage-store';
 import * as layoutStore from './ui/layout/layout-store';
 import { installFrontendLogPipe, platform } from './platform';
-import { looper, master } from './ui/state/audio';
+import { looper } from './ui/state/audio';
 import { engineDevice, engineOpenFailure, engineResets } from './ui/state/engine-store';
 import { bootEngine } from './app/boot';
 import { installCloseGuard } from './app/close-guard';
@@ -145,8 +145,8 @@ export function App() {
     onCleanup(transportKeys.dispose);
     // Close guard + local recovery (native confirm / web beforeunload): `src/app/close-guard.ts`.
     onCleanup(installCloseGuard());
-    // Send the persisted master volume to the engine (restores a saved level on reload).
-    master.init();
+    // No master volume to send here: the feed's first (reset) frame sends the persisted one when the
+    // engine has none (`adoptSettings`, `src/ui/state/engine-store.ts`).
     // The engine's boot chain — its device, local recovery of the jam, the plugin host (a no-op in the
     // browser build, which has no engine): `src/app/boot.ts`.
     onCleanup(bootEngine());

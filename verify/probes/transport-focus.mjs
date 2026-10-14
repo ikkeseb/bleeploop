@@ -16,10 +16,15 @@
  *   though the field unmounts under the key;
  * - a held Enter on a lane's CLR and on ✕ ALL sends no clear (a key repeat is not the second press), and a
  *   held Tab still moves on past them; a fresh Enter after the release sends it once;
- * - Enter on a Tab-focused lane core sends `SelectTrack` before its `RecDub`, as a pointer press does.
+ * - Enter on a Tab-focused lane core sends `SelectTrack` before its `RecDub`, as a pointer press does;
+ * - a select the pointer opened (the slot's input, the FX drawer's division) gives the keys back however
+ *   its list closed (a new value, the same value, dismissed): Space and ArrowDown send REC/DUB and NEXT
+ *   TRACK and leave the value alone, and a letter is no type-ahead in it; one reached by key keeps its
+ *   focus.
  *
  * Cannot see the native engine (what it does with the press: lf-engine `tests/actions.rs`), MIDI or
- * hardware-key input: the fake answers no command by itself.
+ * hardware-key input: the fake answers no command by itself. The list a select opens is Chromium's: the
+ * probe works it by key, as no pointer can reach it from here, and WebView2's is unmeasured.
  * Run: pnpm probe transport-focus [--shots=<dir>]
  */
 import assert from 'node:assert/strict';
@@ -178,5 +183,74 @@ await probe(async ({ open }) => {
   const coreSent = await sent();
   console.log('sent after Enter on the Track 2 core', JSON.stringify(coreSent));
   assert.deepEqual(coreSent, [{ SelectTrack: 1 }, { RecDub: 1 }], 'a keyboard-activated core did not select its lane, then REC/DUB');
+
+  // 7. A select the pointer opened gives the keys back however its list closed: Space and ArrowDown reach
+  //    the looper and leave the value alone. The slot's input select (slot 1 Off, on a four-input device),
+  //    then the FX drawer's division select (Stutter's rate on track 1, which holds a loop since case 5).
+  await page.evaluate(async () => {
+    const { platform } = await import('/src/platform/index.ts');
+    const devices = await import('/src/ui/state/audio-devices.ts');
+    // The browser build lists no inputs (its plugin host is not there): list four, for this read only.
+    const host = platform.pluginHost;
+    host.listInputDevices = async () => [{ id: 'fake-in', name: 'Fake input', channels: 4 }];
+    host.available = true;
+    await devices.refreshInputDevices();
+    host.available = false;
+  });
+  await page.getByRole('combobox', { name: 'Source for slot 1', exact: true }).selectOption('off');
+  const inputPick = page.getByRole('combobox', { name: 'Input for slot 1', exact: true });
+  const divisionPick = page.locator('.lp-drawer .fxp-param__select').first();
+  const revealDivision = async () => {
+    await page.getByRole('button', { name: 'Track 1 FX', exact: true }).click();
+    await page.getByRole('button', { name: 'Stutter, track 1', exact: true }).click();
+  };
+  // The pointer opens the list (a click); the keys then go to the list, not the page: ArrowDown + Enter
+  // picks the next value, Enter alone the value it had, Escape dismisses it.
+  for (const [name, select, listKeys, reveal] of [
+    ['a pointer pick of a new value in the slot input select', inputPick, ['ArrowDown', 'Enter'], async () => {}],
+    ['a pointer pick of the same value in the slot input select', inputPick, ['Enter'], async () => {}],
+    ['a dismissed slot input list', inputPick, ['Escape'], async () => {}],
+    ['a pointer pick of a new value in the FX division select', divisionPick, ['ArrowDown', 'Enter'], revealDivision],
+  ]) {
+    await reveal();
+    await select.waitFor();
+    await page.evaluate(() => document.activeElement?.blur());
+    const before = await select.inputValue();
+    await select.click();
+    await page.waitForTimeout(150);
+    for (const key of listKeys) await page.keyboard.press(key);
+    await page.waitForTimeout(100);
+    const picked = await select.inputValue();
+    await clearSent();
+    await page.keyboard.press('Space');
+    await page.keyboard.press('ArrowDown');
+    await page.waitForTimeout(150);
+    const afterPick = await sent();
+    const focused = await page.evaluate(() => document.activeElement?.tagName);
+    console.log(`after ${name}: ${before} -> ${picked}; Space + ArrowDown sent (focus on ${focused})`, JSON.stringify(afterPick));
+    if (listKeys.length === 2) assert.notEqual(picked, before, `${name} picked nothing`);
+    else assert.equal(picked, before, `${name} changed the value`);
+    assert.ok(afterPick.some((c) => c.Action === 'RecDub'), `Space after ${name} did not send REC/DUB`);
+    assert.ok(afterPick.some((c) => c.Action === 'NextTrack'), `ArrowDown after ${name} did not send NEXT TRACK`);
+    assert.equal(await select.inputValue(), picked, `the keys after ${name} changed the select`);
+  }
+  // A letter after a dismissed list is no type-ahead in it ('a' would pick Auto over In 2).
+  await inputPick.selectOption('1');
+  await page.evaluate(() => document.activeElement?.blur());
+  await inputPick.click();
+  await page.waitForTimeout(150);
+  await page.keyboard.press('Escape');
+  const beforeLetter = await inputPick.inputValue();
+  await page.keyboard.press('a');
+  await page.waitForTimeout(100);
+  console.log(`a letter after a dismissed list: ${beforeLetter} -> ${await inputPick.inputValue()}`);
+  assert.equal(await inputPick.inputValue(), beforeLetter, 'a letter after a dismissed list picked in it');
+  // A keyboard user keeps the select: an arrow there picks, and the focus stays for the next.
+  await inputPick.focus();
+  await page.keyboard.press('ArrowDown');
+  await page.waitForTimeout(100);
+  const kept = await inputPick.evaluate((el) => [document.activeElement === el, el.value]);
+  console.log('focus and value after ArrowDown in the focused slot input select', JSON.stringify(kept));
+  assert.ok(kept[0], 'a keyboard pick in the slot input select lost its focus');
   assert.deepEqual(consoleErrors, [], 'no console errors');
 });

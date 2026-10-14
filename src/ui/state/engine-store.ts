@@ -601,7 +601,7 @@ function applyToggle(toggle: EngineToggle, on: boolean): void {
 /** Switch a toggled setting: the engine's toggle, which flips the value it has when the press lands (or
  * names a refusal on the selected lane, which `boot.ts` shows), so a pedal and a click never undo each
  * other. The setting's signal follows the engine's `Toggled`. */
-export function toggleSetting(toggle: EngineToggle): void {
+function toggleSetting(toggle: EngineToggle): void {
   void sendEngine({ Action: { Toggle: toggle } });
 }
 
@@ -1166,11 +1166,6 @@ export const engineDubFeedback = {
   set: setDubFeedback,
 };
 
-/** The first EMPTY lane (where COPY lands), or -1. */
-function firstEmptyLane(): number {
-  return plain.state.findIndex((s) => s === 'EMPTY');
-}
-
 /** The `looper` the UI reads (`audio.ts`). */
 export const engineLooper = {
   trackCount: ENGINE_LANES as typeof ENGINE_LANES,
@@ -1179,10 +1174,7 @@ export const engineLooper = {
   stop: (i: number): void => void sendEngine({ Stop: i }),
   undoLastOverdub: (i: number): void => void sendEngine({ Undo: i }),
   reverse: (i: number): void => void sendEngine({ Reverse: i }),
-  copy: (i: number): number => {
-    sendEngine({ Copy: i });
-    return firstEmptyLane();
-  },
+  copy: (i: number): void => void sendEngine({ Copy: i }),
   clear: (i: number): void => void sendEngine({ Clear: i }),
   stopAll: (): void => void sendEngine('StopAll'),
   playAll: (): void => void sendEngine('PlayAll'),
@@ -1212,7 +1204,6 @@ export const engineLooper = {
    * device input dry through a slot without a plugin (`toggleEngineInput`). */
   inputArmed: engineInputLive,
   toggleInput: async (): Promise<boolean> => toggleEngineInput(),
-  inputArmRequested: (): boolean => false,
   peaksInto,
   scopeInto,
   /** The live scope taps on or off (`SetScope`): the look that draws the columns asks for them and
@@ -1451,8 +1442,6 @@ export const engineMaster = {
     setMasterMutedSignal(on);
     sendEngine({ SetMasterMute: on });
   },
-  /** Nothing to do at mount: the feed's first (reset) frame settles the level with the engine. */
-  init: (): void => {},
 };
 
 // ── The device ────────────────────────────────────────────────────────────────────────────────────
