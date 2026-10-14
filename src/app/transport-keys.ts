@@ -77,10 +77,11 @@ export function installTransportKeys(opts: TransportKeysOptions): TransportKeys 
     // - buttons and tabindex>=0 widgets (SplitStack divider = role=separator, which binds
     //   Enter/Arrows/Home) keep them, unless the app put focus there itself (returnFocus: the
     //   popover trigger after Escape), so Space after Escape arms REC instead of re-opening;
-    // - tabindex=-1 elements (the Help/Settings panels, focused on open for screen readers) are
-    //   focus targets, not controls, so the play path stays live behind an open popover.
+    // - tabindex=-1 elements (the Help/Settings popovers, focused on open for screen readers) are
+    //   focus targets, not controls, so the play path stays live behind an open popover. Help's tab
+    //   panels are tabindex=0: one reached by Tab keeps the keys to scroll, a clicked one is blurred.
     // The arrows and PageUp/PageDown lose nothing to this: every widget that binds them (sliders, the
-    // divider) keeps them above, and a focused panel never scrolled by key (its scroller is a child).
+    // divider) keeps them above, and a focused popover never scrolled by key (its scroller is a child).
     const el = document.activeElement as HTMLElement | null;
     if (el && el !== document.body) {
       const tag = el.tagName;
@@ -137,7 +138,9 @@ export function installTransportKeys(opts: TransportKeysOptions): TransportKeys 
   // volume, plugin params) keeps focus with no visible ring (:focus-visible is pointer-suppressed),
   // so transport keys die silently. A drag ending off the thumb still lands here — a range takes
   // implicit pointer capture, so mouseup retargets to it and the click fires on the slider. Sliders
-  // reached by Tab are untouched — no click, so their arrow-key control survives. The capture phase
+  // reached by Tab are untouched — no click, so their arrow-key control survives. Help's tab panels
+  // (role=tabpanel) are Tab stops a reader scrolls by key, and a click on their text focuses them the
+  // same way, so the transport would go dead behind an open Help: they blur too. The capture phase
   // also makes this the one place that records whether the last input was a pointer, for the popover
   // focus return.
   const onClick = (e: MouseEvent) => {
@@ -145,7 +148,7 @@ export function installTransportKeys(opts: TransportKeysOptions): TransportKeys 
     // Explicit type arg: the compound selector misses TS's tag-name overload, which would infer a
     // bare Element (no .blur()).
     if (e.detail > 0) {
-      (e.target as HTMLElement | null)?.closest<HTMLElement>('button, input[type="range"]')?.blur();
+      (e.target as HTMLElement | null)?.closest<HTMLElement>('button, input[type="range"], [role="tabpanel"]')?.blur();
     }
   };
   window.addEventListener('click', onClick, { capture: true });

@@ -13,13 +13,13 @@ import './help.css';
  * Help popover, two tabs (an offered update is NOT here: it has its own command-bar pill and panel,
  * `src/ui/settings/UpdatePanel.tsx`). `?` always opens on REFERENCE, what a player scans mid-jam and
  * sized to fit every window from the 960x600 minimum unscrolled (contact-sheet and layout-reachability
- * hold it): the looper keys and the keystroke pedals beside the play keys, the octave and the drum pads. MANUAL is the rest, read once, ordered by the promise: guitar,
- * MIDI pedals, the looper, the song-level controls (▶/■ ALL, END STOP, FADE, ✕ ALL), the transport,
- * the other layers, the layout move/hide/resize affordances (the stage view among them), the session,
- * and About this build last, whole (the ASIO lines below). Same popover pattern as AudioSettings (a
- * command-bar `.tool` cap → a `<Show>`-mounted panel). The drum-pad grid reads from DRUM_KIT, the play
- * keys from COMPUTER_MAP and the looper keys from KEY_ACTIONS, so none can drift from the real
- * controls. The looper/transport copy mirrors the controls in Looper.tsx, Transport.tsx, InputFx.tsx
+ * hold it): the looper keys and the pedals beside the play keys, the octave and the drum pads. MANUAL
+ * is the rest, read once, ordered by the promise: guitar, MIDI pedals (HOLD among them), the looper,
+ * the song-level controls (▶/■ ALL, END STOP, FADE, ✕ ALL), the transport, the other layers, the
+ * layout move/hide/resize affordances (the stage view among them), the session, and About this build
+ * last, whole (the ASIO lines below). Same popover pattern as AudioSettings (a command-bar `.tool` cap
+ * → a `<Show>`-mounted panel). The drum-pad grid reads from DRUM_KIT, the play keys from COMPUTER_MAP
+ * and the looper keys from KEY_ACTIONS, so none can drift from the real controls. The looper/transport copy mirrors the controls in Looper.tsx, Transport.tsx, InputFx.tsx
  * and FxPanel.tsx: a control's behaviour changes there first, then here.
  */
 
@@ -103,7 +103,10 @@ export function Help() {
         </For>
       </div>
       {/* Both panels stay mounted, the other one hidden, so each tab's aria-controls names a live panel
-          and About's build line is in the DOM whichever tab shows (scripts/release-smoke.mjs reads it). */}
+          and About's build line is in the DOM whichever tab shows (scripts/release-smoke.mjs reads it).
+          Each panel is a Tab stop (the reference holds no control, the manual's first is at its foot), so
+          the keys read and scroll it there; a pointer click into one gives the keys back to the
+          transport (transport-keys.ts). */}
       <Reference hidden={tab() !== 'reference'} />
       <Manual hidden={tab() !== 'manual'} />
     </div>
@@ -118,6 +121,7 @@ function Reference(props: { hidden: boolean }) {
       id="lf-help-reference"
       role="tabpanel"
       aria-labelledby="lf-help-tab-reference"
+      tabindex={0}
       hidden={props.hidden}
     >
       <div class="help__col">
@@ -147,7 +151,7 @@ function Reference(props: { hidden: boolean }) {
           <h3 class="help__h">Pedals <span class="help__tag">hands stay on the guitar</span></h3>
           <ul class="help__list">
             <li>A keystroke footswitch or page turner sends keys: set each pedal to one of the looper keys above</li>
-            <li><span class="help__note">HOLD</span> on a momentary record pedal: hold it to record or overdub, let go to stop</li>
+            <li>A MIDI pedal: learn its action in Audio Settings → <span class="help__note">MIDI LEARN</span> (Manual → Pedals)</li>
           </ul>
         </section>
       </div>
@@ -210,6 +214,7 @@ function Manual(props: { hidden: boolean }) {
       id="lf-help-manual"
       role="tabpanel"
       aria-labelledby="lf-help-tab-manual"
+      tabindex={0}
       hidden={props.hidden}
     >
       <section class="help__sec">
@@ -227,6 +232,7 @@ function Manual(props: { hidden: boolean }) {
         <ul class="help__list">
           <li>A MIDI footswitch or controller: Audio Settings → <span class="help__note">MIDI LEARN</span>. Pick an action, press <span class="help__note">LEARN</span>, then tap the pedal once. Momentary and latching pedals both run it once per press; if a press runs twice or not at all, switch its kind in the list</li>
           <li>Every looper control can be learned. A track action (record, play, undo, clear, mute, reverse, copy) acts on the selected track or on the track you pick; tap tempo, click, end stop, fixed and the input echo, reverb and ring mod switch as their buttons do</li>
+          <li><span class="help__note">HOLD</span>, beside a REC/DUB learned on a momentary pedal: hold the pedal to record or overdub, let go to stop</li>
           <li>A learned pedal or key only runs its action: it plays no note and holds no sustain. <span class="help__note">✕</span> in the list forgets it</li>
           <li><span class="help__note">Halve track</span> (MIDI learn only) keeps the selected track's first half, as <span class="help__note">✂ TRIM</span> does; undo gives the whole loop back</li>
         </ul>

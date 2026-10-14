@@ -218,7 +218,11 @@ await probe(async ({ browser, open }) => {
         const h = document.querySelector('#lf-help-popover .help');
         const shown = [...h.querySelectorAll('[role="tabpanel"]')].filter((p) => p.checkVisibility()).map((p) => p.id);
         const about = [...h.querySelectorAll('.help__h')].some((el) => el.textContent === 'About this build' && el.checkVisibility());
-        return { shown, about, content: h.scrollHeight, view: h.clientHeight, scroll: h.scrollHeight - h.clientHeight };
+        // HOLD is a learned MIDI REC/DUB's option: it reads only beside MIDI LEARN, never beside the
+        // keystroke pedals, whose release stops nothing.
+        const hold = [...h.querySelectorAll('.help__note')].filter((el) => el.textContent === 'HOLD')
+          .map((el) => `${el.closest('[role="tabpanel"]')?.id}${el.closest('.help__sec')?.textContent.includes('MIDI LEARN') ? '' : ' (no MIDI LEARN)'}`);
+        return { shown, about, hold, content: h.scrollHeight, view: h.clientHeight, scroll: h.scrollHeight - h.clientHeight };
       });
       scene = '6-help';
       await page.evaluate(() => window.__lf.ui.openHelp());
@@ -235,6 +239,7 @@ await probe(async ({ browser, open }) => {
       const manual = await helpState();
       console.log(JSON.stringify({ tag, scene, ...manual }));
       if (manual.shown.join() !== 'lf-help-manual' || !manual.about) fail(`${tag} ${scene}: the Manual tab shows ${manual.shown.join() || 'no panel'}${manual.about ? '' : ', without About this build'}`);
+      if (manual.hold.join() !== 'lf-help-manual') fail(`${tag} ${scene}: HOLD reads in ${manual.hold.join(', ') || 'no panel'}, not once in the manual beside MIDI LEARN`);
       await page.evaluate(() => window.__lf.ui.closeHelp());
 
       scene = '7-audio-settings';

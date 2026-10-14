@@ -103,7 +103,9 @@ await probe(async ({ open }) => {
 
   // 2b. Help's tabs by keyboard: Tab from the panel lands on the selected tab (Reference, which `?` opens
   //     on); the arrows (wrapping), Home and End pick and focus a tab and show only its panel, and none of
-  //     them reaches the transport; Tab from a tab skips the other one. A pointer pick gives the keys back.
+  //     them reaches the transport; Tab from a tab skips the other one and lands on its own panel, before
+  //     any control in it, and the arrows there scroll it, not the looper. A pointer pick of a tab, or a
+  //     click on a panel's text, gives the keys back.
   const tabState = () => page.evaluate(() => {
     const tabs = [...document.querySelectorAll('#lf-help-popover [role="tab"]')];
     return {
@@ -133,12 +135,26 @@ await probe(async ({ open }) => {
   assert.equal((await tabState()).focused, 'lf-help-tab-manual', 'Shift+Tab then Tab did not come back to the selected tab');
   await page.keyboard.press('Home');
   await page.keyboard.press('Tab');
-  assert.notEqual((await tabState()).focused, 'lf-help-tab-manual', 'Tab from the selected tab stopped on the other one');
+  assert.equal((await tabState()).focused, 'lf-help-reference', 'Tab from the Reference tab did not land on its panel');
+  await page.keyboard.press('Shift+Tab');
+  await page.keyboard.press('End');
+  await page.keyboard.press('Tab');
+  assert.equal((await tabState()).focused, 'lf-help-manual', 'Tab from the Manual tab did not land on its panel');
+  const helpScroll = () => page.evaluate(() => document.querySelector('#lf-help-popover .help').scrollTop);
+  await page.keyboard.press('PageDown');
+  await page.waitForTimeout(250);
+  assert.ok((await helpScroll()) > 0, 'PageDown on the Manual panel did not scroll it');
+  await page.waitForTimeout(100);
+  assert.deepEqual(await sent(), [], 'a key on a Help panel reached the transport');
   await page.getByRole('tab', { name: 'Manual', exact: true }).click();
   assert.deepEqual((await tabState()).selected, ['lf-help-tab-manual'], 'a click on Manual did not pick it');
   await page.keyboard.press('Space');
   await page.waitForTimeout(100);
   assert.equal(await recDubs(), 1, 'Space after a pointer pick of a Help tab did not send REC/DUB');
+  await page.locator('#lf-help-manual .help__h').first().click();
+  await page.keyboard.press('Space');
+  await page.waitForTimeout(100);
+  assert.equal(await recDubs(), 2, 'Space after a click on Help\'s text did not send REC/DUB');
 
   await page.keyboard.press('Escape');
   await helpPanel.waitFor({ state: 'detached' });
