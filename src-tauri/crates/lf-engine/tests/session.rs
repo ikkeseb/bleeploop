@@ -201,6 +201,25 @@ fn a_load_needs_an_empty_engine_and_a_session_that_fits_it() {
     assert!(matches!(load.result, Some(Err(SessionError::Invalid(_)))), "a buffer that is not the engine's capacity");
 }
 
+#[test]
+fn a_load_outside_the_tempo_range_is_refused_before_it_changes_anything() {
+    let mut rig = three_lanes();
+    let master = rig.master();
+    let s = snapshot(&mut rig, 5 * master as usize);
+    let capacity = rig.engine.looper().capacity() as usize;
+    // 0 BPM makes a bar `Frame::MAX` frames, which two bars overflow; 360 BPM puts three bars exactly on
+    // the one-bar master at 120; at 120 BPM, bars past `Frame::MAX` frames overflow on their own.
+    for (bpm, bars) in [(0, 2), (360, 3), (120, Frame::MAX / 2)] {
+        let mut fresh = Rig::new();
+        let SessionJob::Load(load) = run(&mut fresh, SessionJob::Load(Load { bpm, ..load_of(&s, capacity, bars) })) else { unreachable!() };
+        assert!(matches!(load.result, Some(Err(SessionError::Invalid(_)))), "{bpm} BPM over {bars} bars");
+        assert_eq!(fresh.master(), 0, "{bpm} BPM");
+        assert!(!fresh.locked(), "{bpm} BPM");
+        assert!((0..3).all(|i| fresh.state(i) == LaneState::Empty && fresh.pcm(i).is_empty()), "{bpm} BPM");
+        assert_eq!(load.tracks[0].buf[..master as usize], s.pcm[..master as usize], "{bpm} BPM: the load's buffers come back unswapped");
+    }
+}
+
 /// Five lanes of one eight-bar loop at 120 BPM (768000 frames each): lane 0 the frame code with its
 /// DELAY on, lanes 1 to 4 its copies, lane 1 reversed and lane 2 stopped; the click on.
 fn five_long_lanes() -> Rig {

@@ -79,10 +79,6 @@ impl Clock {
         self.metronome
     }
 
-    pub fn click_volume(&self) -> f32 {
-        self.click_volume
-    }
-
     /// The frame the pulse fires its next beat on; `None` before the transport runs.
     pub fn next_beat_frame(&self) -> Option<Frame> {
         self.pulse.map(|p| p.grid.beat_frame(p.next))

@@ -1,8 +1,9 @@
 //! Property tests over gesture scripts (the lf-engine briefing, # Tests): any sequence of presses, settings and
 //! input gaps keeps one recorder, a whole-bar master, every committed lane at the master length (a
-//! multiply grows them all; until F16 lifts that), finite output and no panic; UNDO twice is the
-//! identity; UNDO after an N-cycle overdub gives back the pre-dub loop bit for bit. Rendered at 8 kHz so
-//! a case stays cheap; the engine is rate-agnostic.
+//! multiply grows them all, a TRIM keeps it), finite output and no panic; UNDO twice is the identity;
+//! UNDO after an N-cycle overdub gives back the pre-dub loop bit for bit. The presses include TRIM and
+//! HALVE, FADE, HOLD and its release, DUB FEEDBACK and a punch-out (a stopped device). Rendered at
+//! 8 kHz so a case stays cheap; the engine is rate-agnostic.
 
 mod common;
 
@@ -22,6 +23,10 @@ enum Op {
     Later(Frame, Command),
     Wait(Frame),
     Gap,
+    /// HOLD on a pedal (this control): pressed on the selected lane, held this many frames, released.
+    Hold(u8, Frame),
+    /// The device stops and resumes on the next frame (`Engine::punch_out`).
+    PunchOut,
     /// On the first lane that can undo.
     UndoTwice,
     /// On the first lane that plays forward, for this many loops.
@@ -40,6 +45,9 @@ fn op() -> impl Strategy<Value = Op> {
         2 => lane().prop_map(|i| Op::Press(Command::Undo(i))),
         2 => lane().prop_map(|i| Op::Press(Command::Reverse(i))),
         1 => lane().prop_map(|i| Op::Press(Command::Copy(i))),
+        3 => (lane(), 1u32..5).prop_map(|(i, b)| Op::Press(Command::Trim(i, b))),
+        2 => Just(Op::Press(Command::Action(Action::Halve))),
+        2 => Just(Op::Press(Command::Action(Action::FadeAll))),
         1 => lane().prop_map(|i| Op::Press(Command::Clear(i))),
         1 => Just(Op::Press(Command::PlayAll)),
         1 => Just(Op::Press(Command::StopAll)),
@@ -51,11 +59,22 @@ fn op() -> impl Strategy<Value = Op> {
         1 => any::<bool>().prop_map(|b| Op::Press(Command::SetAutoRecord(b))),
         1 => (lane(), 0u8..16).prop_map(|(i, v)| Op::Press(Command::SetVolume(i, v as f32 / 10.0))),
         1 => (lane(), any::<bool>()).prop_map(|(i, b)| Op::Press(Command::SetMute(i, b))),
+        1 => (lane(), 0u8..11).prop_map(|(i, v)| Op::Press(Command::SetDubFeedback(i, v as f32 / 10.0))),
+        1 => (0u32..10).prop_map(|b| Op::Press(Command::SetFadeBars(b))),
         1 => (0u8..11).prop_map(|v| Op::Press(Command::SetMasterVolume(v as f32 / 10.0))),
         1 => any::<bool>().prop_map(|b| Op::Press(Command::SetMasterMute(b))),
         1 => (1u8..4).prop_map(|b| Op::Press(Command::SetMetronome(b != 2))),
-        1 => prop_oneof![Just(Action::RecDub), Just(Action::PlayStop), Just(Action::Undo), Just(Action::Clear), Just(Action::NextTrack)]
-            .prop_map(|a| Op::Press(Command::Action(a))),
+        2 => prop_oneof![
+            Just(Action::RecDub),
+            Just(Action::PlayStop),
+            Just(Action::Undo),
+            Just(Action::Clear),
+            Just(Action::NextTrack),
+            (0u8..3).prop_map(Action::Hold),
+            (0u8..3).prop_map(Action::Release),
+        ]
+        .prop_map(|a| Op::Press(Command::Action(a))),
+        1 => (lane(), 0u8..3).prop_map(|(i, c)| Op::Press(Command::ActionOn(i, Action::Hold(c)))),
         8 => (1i64..24_000).prop_map(Op::Wait),
         4 => (1i64..400, prop_oneof![
             lane().prop_map(Command::RecDub),
@@ -63,8 +82,12 @@ fn op() -> impl Strategy<Value = Op> {
             (0u8..11).prop_map(|v| Command::SetMasterVolume(v as f32 / 10.0)),
             (lane(), 0u8..16).prop_map(|(i, v)| Command::SetVolume(i, v as f32 / 10.0)),
             lane().prop_map(Command::Reverse),
+            (0u8..3).prop_map(|c| Command::Action(Action::Release(c))),
+            Just(Command::Action(Action::FadeAll)),
         ]).prop_map(|(d, c)| Op::Later(d, c)),
         1 => Just(Op::Gap),
+        3 => (0u8..3, 1i64..24_000).prop_map(|(c, d)| Op::Hold(c, d)),
+        1 => Just(Op::PunchOut),
         2 => Just(Op::UndoTwice),
         2 => (1u8..4).prop_map(Op::DubCycles),
     ]
@@ -110,6 +133,12 @@ fn run(ops: &[Op], block: usize) -> u64 {
             }
             Op::Wait(frames) => rig.advance(frames),
             Op::Gap => rig.gap(),
+            Op::Hold(control, frames) => {
+                rig.press(Command::Action(Action::Hold(control)));
+                rig.advance(frames);
+                rig.press(Command::Action(Action::Release(control)));
+            }
+            Op::PunchOut => rig.punch_out(),
             Op::UndoTwice => {
                 rig.advance_to(stamped + 1); // what the script stamped lands first
                 rig.idle();

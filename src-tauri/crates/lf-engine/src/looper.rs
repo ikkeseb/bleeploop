@@ -45,7 +45,8 @@ use crate::effects::LaneFx;
 use crate::engine::Feed;
 use crate::grid::{
     clamp_bars, commit_anchor, frames_per_bar, later_take_bars, loop_pos, max_whole_bars, next_boundary, plan_commit,
-    plan_free_stop, plan_later_stop, plan_retake_stop, Frame, Grid, RetakeStop, TakeFill, COUNT_IN_BEATS,
+    plan_free_stop, plan_later_stop, plan_retake_stop, Frame, Grid, RetakeStop, TakeFill, COUNT_IN_BEATS, MAX_BPM,
+    MIN_BPM,
 };
 use crate::overview::{LaneView, Overview};
 use crate::session::{Load, Pin, SessionError, Snapshot, SnapshotTrack};
@@ -2499,7 +2500,10 @@ impl Looper {
         if master <= 0 || master > self.capacity || load.bars < 1 {
             return Err(SessionError::Invalid("the session's loop does not fit this engine"));
         }
-        if load.bars * frames_per_bar(load.bpm as f64, self.sample_rate) != master {
+        if !(MIN_BPM..=MAX_BPM).contains(&load.bpm) {
+            return Err(SessionError::Invalid("the session's tempo is out of range"));
+        }
+        if load.bars.checked_mul(frames_per_bar(load.bpm as f64, self.sample_rate)) != Some(master) {
             return Err(SessionError::Invalid("the session's tempo, bars and loop length disagree"));
         }
         let mut seen = [false; TRACK_COUNT];

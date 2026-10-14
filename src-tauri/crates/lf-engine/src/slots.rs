@@ -18,9 +18,11 @@
 //! plugin's own latency (`instruments`). Outputs are mono, as today's bridge is.
 //!
 //! Lifecycle never stops the audio. The host builds and activates a unit off the audio thread and
-//! installs it: the unit crossfades in from bypass (an effect's bypass is its dry input, an
-//! instrument's is silence) over the frames of `FADE_SECONDS`, counted, so both ends land on an exact
-//! frame and are bit-exact. A removal first releases the notes the slot holds and crossfades to bypass;
+//! installs it: the unit crossfades in from bypass (its slot's gated input, what an empty slot passes)
+//! over the frames of `FADE_SECONDS`, counted, so both ends land on an exact frame and are bit-exact. An
+//! instrument's output joins the bus, not the wet, so there it fades in from silence while the gated
+//! input fades out of the wet over the same frames (and back at its removal): a live slot's dry signal
+//! never steps. A removal first releases the notes the slot holds and crossfades to bypass;
 //! the slot is empty from the frame the fade ends. The release reaches the unit in the fade's first
 //! `process`, [`SlotProcessor::stop`] follows its last, and the unit goes back on the port's return
 //! ring (a full ring parks it until there is room). With no device running the ports are serviced at
@@ -151,6 +153,18 @@ fn live_gate(live: bool, end: Frame, from: f32, f: Frame, n: Frame) -> f32 {
     }
     let u = (f - (end - n)).max(0) as f32 / n as f32;
     from + (to - from) * u
+}
+
+/// The bypass crossfade `fade` frames of `n` from `from` (the bypass) towards `to` (the unit): exactly
+/// either at its ends.
+fn crossfade(from: f32, to: f32, fade: u32, n: u32) -> f32 {
+    if fade == n {
+        to
+    } else if fade == 0 {
+        from
+    } else {
+        from + (fade as f32 / n as f32) * (to - from)
+    }
 }
 
 impl Slot {
@@ -525,15 +539,15 @@ impl Rack {
                 // A removal completes on the frame its fade reaches bypass, whatever the call's bounds:
                 // from there the slot is empty and passes what an empty slot does.
                 let gone = s.removing && s.fade == 0;
-                let b = if gone { gated[k] } else { x[k] };
+                // The bypass is the gated input, an instrument's too. An instrument's output and its
+                // bypass go different ways (the bus, the wet), so each fades against silence there.
+                let b = gated[k];
                 // Read only mid-fade, which a gone slot never is.
                 let o = if has { s.out[k] } else { b };
-                let y = if s.fade == fade_frames {
-                    o
-                } else if s.fade == 0 {
-                    b
+                let (y, dry) = if instrument && !gone {
+                    (crossfade(0.0, o, s.fade, fade_frames), crossfade(b, 0.0, s.fade, fade_frames))
                 } else {
-                    b + (s.fade as f32 / fade_frames as f32) * (o - b)
+                    (crossfade(b, o, s.fade, fade_frames), 0.0)
                 };
                 if s.engaged && s.fade < fade_frames {
                     s.fade += 1;
@@ -541,11 +555,12 @@ impl Rack {
                     s.fade -= 1;
                 }
                 s.gain = crate::glide(s.gain, s.gain_target, self.gain_coef);
-                let y = if s.gain == 1.0 { y } else { (s.gain * y as f64) as f32 };
+                let (y, dry) = if s.gain == 1.0 { (y, dry) } else { ((s.gain * y as f64) as f32, (s.gain * dry as f64) as f32) };
                 if instrument && !gone {
                     bus[k] += y;
+                    wet[k] += dry;
                     s.line[s.write] = y;
-                    s.wet_line[s.write] = 0.0;
+                    s.wet_line[s.write] = dry;
                 } else {
                     wet[k] += y;
                     s.line[s.write] = 0.0;

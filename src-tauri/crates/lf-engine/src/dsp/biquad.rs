@@ -219,15 +219,6 @@ impl BiquadFilterNode {
         self.biquad.reset();
     }
 
-    /// The `type` setter: a new type clears the filter memory and snaps the coefficients.
-    pub fn set_kind(&mut self, kind: FilterType) {
-        if kind != self.kind {
-            self.kind = kind;
-            self.biquad.reset();
-            self.has_just_reset = true;
-        }
-    }
-
     /// Blink's `NormalizeFrequency`: hertz to 0..1 of Nyquist, times 2^(detune/1200). The detune
     /// factor is the platform's float `exp2`, as Blink calls it (no production path detunes a filter).
     fn normalize_frequency(&self, frequency: f32, detune: f32) -> f64 {

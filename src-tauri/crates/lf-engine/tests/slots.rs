@@ -670,15 +670,16 @@ fn a_live_flag_reaches_the_alignment_from_the_next_block() {
 }
 
 #[test]
-fn an_instrument_installed_into_a_live_slot_silences_its_dry_signal_from_the_install() {
+fn an_instrument_installed_into_a_live_slot_fades_its_dry_signal_out_over_the_install() {
     let probe = Probe::new();
     let mut rig = Rig::new();
     rig.set_level(1.0);
     rig.advance(256);
     rig.install(0, Fake::instrument(0.0, 0, &probe));
     rig.keep_output();
-    rig.advance(256);
-    assert!(rig.monitor.iter().all(|&x| x == 0.0), "no dry frame once the instrument is in");
+    rig.advance(1024);
+    assert_bits(&rig.monitor, |k| faded(1.0, 0.0, k.min(FADE)), "the dry signal fading out, then none");
+    assert!(rig.bus.iter().all(|&x| x == 0.0), "the dry signal never reaches the bus");
 }
 
 #[test]
@@ -1114,6 +1115,38 @@ fn an_effect_installed_and_removed_mid_tone_crossfades_click_free() {
         assert!((heard(f) - 0.5 * tone(f)).abs() < 1e-6, "the effect is heard at {f}: {} for {}", heard(f), 0.5 * tone(f));
     }
     for f in removed + fade + 1..rig.frame {
+        assert!((heard(f) - tone(f)).abs() < 1e-6, "the dry tone again at {f}: {} for {}", heard(f), tone(f));
+    }
+}
+
+/// An instrument installed into a live slot while the tone sustains: the slot's dry signal crossfades
+/// out over `FADE` as the instrument fades in on the bus, and back in over `FADE` at its removal, never
+/// stepping in or out on one frame. The instrument is silent, so what is heard is the dry side alone.
+#[test]
+fn an_instrument_installed_and_removed_in_a_live_slot_crossfades_the_dry_signal_click_free() {
+    let probe = Probe::new();
+    let mut rig = Rig::new();
+    rig.set_input(tone);
+    rig.advance(1024);
+    rig.keep_output();
+    let installed = crest(rig.frame + 2 * SEAM_WINDOW);
+    rig.advance_to(installed);
+    rig.install(0, Fake::instrument(0.0, 0, &probe));
+    let removed = crest(installed + 4800);
+    rig.advance_to(removed);
+    rig.remove(0);
+    rig.advance_to(removed + FADE as Frame + 2 * SEAM_WINDOW);
+    assert!(rig.returned(0).is_some(), "the unit came back");
+    assert_eq!(probe.calls().first().map(|c| c.0), Some(installed), "the install lands on the crest");
+    let fade = FADE as Frame;
+    // Each window spans its whole fade: half of it is the tone, the other half silence.
+    assert_seamless(&rig, &[("install", installed), ("removal done", removed + fade)]);
+    let start = rig.output.as_ref().expect("keep_output first").0;
+    let heard = |f: Frame| rig.heard[(f - start) as usize];
+    for f in installed + fade..=removed {
+        assert_eq!(heard(f), 0.0, "no dry frame once the instrument is in, at {f}");
+    }
+    for f in removed + fade..rig.frame {
         assert!((heard(f) - tone(f)).abs() < 1e-6, "the dry tone again at {f}: {} for {}", heard(f), tone(f));
     }
 }

@@ -13,7 +13,7 @@
 //! block jobs first), each with its lane's mix as the engine applied it on that frame: an OVERDUBBING
 //! lane gives its loop as committed before the layer in flight (its undo buffer), and every loop comes
 //! out in play order (a reversed lane's buffer read backwards). It copies `SNAPSHOT_RATE` positions per
-//! rendered frame, about 1.4 s of copying for five 60-second lanes at 48 kHz, so a write to a buffer it
+//! rendered frame, about 0.3 s of copying for five 60-second lanes at 48 kHz, so a write to a buffer it
 //! copies from (a new overdub, a clear and a new take) can land meanwhile: it then answers
 //! [`SessionError::Changed`] and the host tries again. While no device runs the host services the port
 //! itself, all at once ([`crate::Engine::service_session_idle`]).

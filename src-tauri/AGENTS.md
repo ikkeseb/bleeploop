@@ -313,7 +313,6 @@ plugin-GUI work.
 - An output callback that misses the engine lock reads as a duplex fault. Two ASIO overloads each
   reported to a different stream alone count once in `xruns` (`callback::Run::stream_error`).
 - The panic hook (`lib.rs`) allocates and logs on whatever thread panicked, the audio thread included.
-- The dry signal steps without a ramp on an instrument installed into a live slot.
 - Two live slots on the same capture channel sum it (+6 dB).
 - An ASIO period the driver drops without its overload report is not flagged as damage (input and
   output stay in step; the take is spliced there). `asio_phase_slips` counts it in the log only (after a run's first

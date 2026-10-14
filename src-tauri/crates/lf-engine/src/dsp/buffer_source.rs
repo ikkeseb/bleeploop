@@ -183,11 +183,6 @@ impl BufferSource {
         self.update_effective_loop_points();
     }
 
-    pub fn set_loop_start(&mut self, seconds: f64) {
-        self.loop_start = seconds;
-        self.update_effective_loop_points();
-    }
-
     pub fn set_loop_end(&mut self, seconds: f64) {
         self.loop_end = seconds;
         self.update_effective_loop_points();
