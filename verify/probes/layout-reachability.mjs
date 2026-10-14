@@ -12,7 +12,8 @@
  * - at 960x600, 1000x700 and 1280x820 (the Tauri default; the bar stacks into two rows at all three) the
  *   open Help and Audio Settings popovers do not overlap the command bar's rendered box and stay inside
  *   the window, also with a spacer one window tall planted in the panel body (native-only rows this
- *   tier never renders), whose last row must then scroll into reach;
+ *   tier never renders), whose lowest row (stepping into a block taller than the panel) must then
+ *   scroll into reach;
  * - at 960x600 (reduced motion) and 1000x700 with lane 1's FX drawer open, so the lane stack scrolls:
  *   each ArrowDown and digit sends its command, and the engine's `Selected` brings the selected lane
  *   wholly into the stack's view from the nearer edge and leaves a lane already in view unscrolled
@@ -221,7 +222,11 @@ await probe(async ({ open }) => {
           const bar = document.querySelector('.cmd'), dialog = document.getElementById(id), body = dialog.firstElementChild;
           // Under the title, above every real row.
           if (tall) body.firstElementChild.after(Object.assign(document.createElement('div'), { id: 'layout-spacer', style: `height: ${innerHeight}px; flex: none` }));
-          const last = body.lastElementChild;
+          // The lowest row: from the body's lowest child, step into a block taller than the scroller (a
+          // tab panel, a column of Help's two-column reference) until a row fits it.
+          const lowest = el => [...el.children].reduce((a, b) => (b.getBoundingClientRect().bottom >= a.getBoundingClientRect().bottom ? b : a));
+          let last = lowest(body);
+          while (last.getBoundingClientRect().height > body.clientHeight && last.firstElementChild) last = lowest(last);
           last.scrollIntoView({ block: 'nearest' });
           const r = box(last);
           const hit = document.elementFromPoint((r.left + r.right) / 2, (r.top + r.bottom) / 2);

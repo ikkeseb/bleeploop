@@ -31,9 +31,10 @@ const LOG_DIR = '%LOCALAPPDATA%\\com.bleeploop.app\\logs';
 await probe(async ({ browser, open }) => {
   const context = await browser.newContext({ permissions: ['clipboard-read', 'clipboard-write'] });
 
-  /** Open Help, bring About this build into view and return its section. */
+  /** Open Help on its Manual tab, bring About this build into view and return its section. */
   const openAbout = async (page) => {
     await page.getByRole('button', { name: 'Help', exact: true }).click();
+    await page.getByRole('tab', { name: 'Manual', exact: true }).click();
     const about = page.locator('#lf-help-popover .help__sec', { has: page.getByRole('heading', { name: 'About this build' }) });
     await about.scrollIntoViewIfNeeded();
     return about;

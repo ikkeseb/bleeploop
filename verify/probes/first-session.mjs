@@ -4,7 +4,7 @@
  * `window.__lfEngineFake`, the probe scripts the feed through `__lf.native` and the snapshot the engine
  * would answer through `__lf.native.snapshotBytes`, and reads the sessions loaded into it):
  *
- * - an empty looper: Export is disabled, Import is enabled, Help names the Session tools;
+ * - an empty looper: Export is disabled, Import is enabled, Help's Manual tab names the Session tools;
  * - the first take through real controls: FIXED (aria-pressed off, then on, from the `Toggled` the fake
  *   answers) and its Fewer bars stepper send the engine's FIXED toggle / `SetFixedBars`; the lane's record core sends `SelectTrack` + `RecDub`; a PC
  *   key's press and release reach native MIDI's router (`__lf.native.inputSent`); the take the feed then
@@ -107,6 +107,7 @@ await probe(async ({ open, browser }) => {
   assert.equal(await page.getByRole('button', { name: 'Export loops as a zip of WAV files' }).isDisabled(), true, 'nothing to export');
   assert.equal(await page.getByRole('button', { name: 'Import a session zip' }).isEnabled(), true, 'an empty looper imports');
   await page.getByRole('button', { name: 'Help', exact: true }).click();
+  await page.getByRole('tab', { name: 'Manual', exact: true }).click();
   assert.match(await page.locator('#lf-help-popover').innerText(), /Session/);
   await page.keyboard.press('Escape');
 

@@ -122,7 +122,7 @@ await probe(async ({ open }) => {
         retry: !!q('[aria-label="Retry starting the ASIO driver"]'),
         inputDisabled: q('[aria-label="Audio input device"]').disabled,
         inputName: q('[aria-label="Audio input device"]').selectedOptions[0].textContent,
-        aboutBuild: (() => { window.__lf.ui.openHelp(); const has = !!document.querySelector('.help__asio'); window.__lf.ui.closeHelp(); window.__lf.ui.openSettings(); return has; })(),
+        aboutBuild: (() => { window.__lf.ui.openHelp(); document.getElementById('lf-help-tab-manual').click(); const has = !!document.querySelector('.help__asio'); window.__lf.ui.closeHelp(); window.__lf.ui.openSettings(); return has; })(),
       });
       ${body}
     })()`);

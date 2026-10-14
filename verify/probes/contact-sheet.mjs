@@ -4,7 +4,8 @@
  * waveforms scripted on the feed through `__lf.native`). Scenes 1-7, 11 and 12 run in one fresh browser
  * context: 1-empty, 4-count-in (lane 1 ARMED behind the count-in), 2-first-take-recording (a first take
  * one second in), 3-armed-waiting (a two-bar loop at 60 BPM playing, lane 2 an ARMED later take waiting
- * for the boundary), 5-fx-five-lanes (five stopped one-bar lanes, lane 1's FX drawer open), 6-help,
+ * for the boundary), 5-fx-five-lanes (five stopped one-bar lanes, lane 1's FX drawer open), 6-help (Help's
+ * reference, as `?` opens it), 6-help-manual (its Manual tab, About included),
  * 7-audio-settings, 12-stage-<look> (the stage view opened by its command-bar cap over five lanes, three
  * playing and one muted, once per look of `src/ui/stage/views.ts`, stepped with V) and 11-engine-in-fx (a reset frame with every input send on, the IN FX popover open). Scenes 8-10 are
  * the Windows app's guitar-first screen, in a second fresh context whose plugin host is served with
@@ -15,7 +16,8 @@
  * stopping live input. Writes logs/contact-sheet/<viewport>-<kbd>-<scene>.png plus a tiling index.html
  * unconditionally, before any FAIL is raised, so a red run still leaves the sheet for the eye lap.
  * Asserts: with FX open every lane's clear button is present, and fully visible wherever five lanes fit
- * (audit A4; at 1000x700 with the keyboard shown the lanes scroll by design); an ARMED later take draws
+ * (audit A4; at 1000x700 with the keyboard shown the lanes scroll by design); Help's reference fits
+ * unscrolled from 1280x820 up (1000x700 logs its scroll); an ARMED later take draws
  * no rec-red in its canvas while waiting (audit A3); no scene logs console.error or an uncaught page error
  * (tagged with the scene it happened in). Sees only the rendered DOM/canvas of scripted states: never the
  * native engine, a real plugin host or WebView2; a human still judges the screenshots.
@@ -27,7 +29,7 @@ import { probe } from '../harness/probe.ts';
 const outDir = 'logs/contact-sheet';
 const viewports = [[1280, 820], [1920, 1080], [1000, 700]];
 const placements = ['bottom', 'hidden'];
-const scenes = ['1-empty', '2-first-take-recording', '3-armed-waiting', '4-count-in', '5-fx-five-lanes', '6-help', '7-audio-settings',
+const scenes = ['1-empty', '2-first-take-recording', '3-armed-waiting', '4-count-in', '5-fx-five-lanes', '6-help', '6-help-manual', '7-audio-settings',
   '8-native-first-launch', '9-amp-sim-live', '10-amp-sim-idle', '11-engine-in-fx'];
 const REC_PIXEL_LIMIT = 20; // anti-aliasing slack; a red playhead or tape is hundreds of pixels
 const RATE = 48000;
@@ -209,10 +211,24 @@ await probe(async ({ browser, open }) => {
       }
       await page.getByRole('button', { name: 'Track 1 FX', exact: true }).click();
 
+      // Help opens on its reference; its manual (and About) is a tab away. Each logs how far it scrolls.
+      const helpScroll = () => page.evaluate(() => {
+        const h = document.querySelector('#lf-help-popover .help');
+        return { content: h.scrollHeight, shown: h.clientHeight, scroll: h.scrollHeight - h.clientHeight };
+      });
       scene = '6-help';
       await page.evaluate(() => window.__lf.ui.openHelp());
       await page.waitForTimeout(250);
       await shoot(scene);
+      const ref = await helpScroll();
+      console.log(JSON.stringify({ tag, scene, ...ref }));
+      if (height >= 820 && ref.scroll > 0) fail(`${tag} ${scene}: the reference scrolls ${ref.scroll} px (it must fit unscrolled from 1280x820 up)`);
+      scene = '6-help-manual';
+      const manualTab = page.getByRole('tab', { name: 'Manual', exact: true });
+      if (await manualTab.count()) await manualTab.click();
+      await page.waitForTimeout(150);
+      await shoot(scene);
+      console.log(JSON.stringify({ tag, scene, ...(await helpScroll()) }));
       await page.evaluate(() => window.__lf.ui.closeHelp());
 
       scene = '7-audio-settings';
