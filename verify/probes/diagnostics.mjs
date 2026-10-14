@@ -3,8 +3,10 @@
  * diagnostics and Open log folder, driven through the rendered popover with clipboard permissions
  * granted. Three pages, each a fresh app:
  *
- * - browser build (no engine: `pnpm dev` without the fake): the line reads package.json's version and
- *   the commit Vite built from (GITHUB_SHA in CI, else git); Open log folder is absent; Copy diagnostics
+ * - browser build (no engine: `pnpm dev` without the fake): About sits on Help's Manual tab, and its line,
+ *   also in the DOM while Help shows its reference (where the release smoke reads it), reads
+ *   package.json's version and the commit Vite built from (GITHUB_SHA in CI, else git); Open log folder
+ *   is absent; Copy diagnostics
  *   puts the build, "no engine", both slots' synths and the user agent on the clipboard, no sample rate
  *   (no device runs) and no log line, and toasts "Diagnostics copied";
  * - a log folder, an ASIO build and a plugin standing in for the Windows app (engine mode on the web
@@ -31,9 +33,10 @@ const LOG_DIR = '%LOCALAPPDATA%\\com.bleeploop.app\\logs';
 await probe(async ({ browser, open }) => {
   const context = await browser.newContext({ permissions: ['clipboard-read', 'clipboard-write'] });
 
-  /** Open Help, bring About this build into view and return its section. */
+  /** Open Help on its Manual tab, bring About this build into view and return its section. */
   const openAbout = async (page) => {
     await page.getByRole('button', { name: 'Help', exact: true }).click();
+    await page.getByRole('tab', { name: 'Manual', exact: true }).click();
     const about = page.locator('#lf-help-popover .help__sec', { has: page.getByRole('heading', { name: 'About this build' }) });
     await about.scrollIntoViewIfNeeded();
     return about;
@@ -52,8 +55,14 @@ await probe(async ({ browser, open }) => {
   // 1. The browser build.
   {
     const { page, consoleErrors } = await open({ context, viewport: { width: 1280, height: 820 } });
+    // scripts/release-smoke.mjs reads the build line as `?` opens Help, on the reference tab: the
+    // manual's About must be in the DOM there too.
+    await page.getByRole('button', { name: 'Help', exact: true }).click();
+    const smokeRead = await page.evaluate(() => document.querySelector('#lf-help-popover .help__about')?.textContent?.trim() ?? null);
+    await page.keyboard.press('Escape');
     const about = await openAbout(page);
     const label = (await about.locator('.help__about').first().textContent())?.trim() ?? '';
+    assert.equal(smokeRead, label, "the release smoke's read of the build line on Help's reference tab");
     assert.match(label, new RegExp(`^BleepLoop ${version.replaceAll('.', '\\.')} · ${commit}(-dirty)?$`), 'the version line');
     assert.equal(await about.getByRole('button', { name: 'Open log folder' }).count(), 0, 'Open log folder in the browser build');
     if (shots) await page.screenshot({ path: `${shots}/diagnostics-about-web.png` });

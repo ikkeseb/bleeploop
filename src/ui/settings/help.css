@@ -1,15 +1,17 @@
-/* Help / shortcuts popover — "Instrument". Same floating panel as AudioSettings, anchored top-right
-   under the command-bar help cap (see .settings-popover in app.css). Keys render as matte key-face
-   chips (sharps sunk a tone, like black keys); the drum pads as a 4-column grid of sunk wells mirroring
-   the on-screen 4×4. Colour is spent only on sound — chrome stays monochrome. */
+/* Help popover — "Instrument". Same floating panel as AudioSettings, anchored top-right under the
+   command-bar help cap (see .settings-popover in app.css, whose `max-height: stretch` is the only height
+   cap: the reference fits whole from the 960x600 minimum up, the manual scrolls to the window's foot). Two tabs:
+   REFERENCE in two columns (looper keys + pedals | play keys + octave + drum pads), MANUAL one column.
+   Body 12.5 px, the key labels in --text, prose in --dim. Keys render as matte key-face chips (sharps
+   sunk a tone, like black keys); the play keys as a small keyboard; the drum pads as a 4-column grid of
+   sunk wells mirroring the on-screen 4×4. Colour is spent only on sound — chrome stays monochrome. */
 .help {
   display: flex;
   flex-direction: column;
   gap: 12px;
-  width: 332px;
-  max-height: min(72vh, 560px);
+  width: min(600px, calc(100vw - 32px));
   overflow-y: auto;
-  padding: 15px;
+  padding: 14px 18px 16px;
   border-radius: 14px;
   /* near-opaque panel (the popover floats over the busy lanes — see audio-settings.css) */
   background: var(--panel);
@@ -26,13 +28,53 @@
   border-radius: 999px;
 }
 
-/* panel title — caps eyebrow */
-.help__title {
-  font-size: 10.5px;
+/* the tabs — caps eyebrows; the selected one lit warm-white over a hairline underline */
+.help__tabs {
+  display: flex;
+  gap: 18px;
+  border-bottom: 1px solid var(--edge);
+}
+.help__tab {
+  padding: 2px 0 8px;
+  margin-bottom: -1px;
+  border: none;
+  border-bottom: 2px solid transparent;
+  background: none;
+  color: var(--faint);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.08em;
+  cursor: pointer;
+}
+.help__tab:hover {
   color: var(--dim);
-  font-weight: 600;
+}
+.help__tab[aria-selected='true'] {
+  color: var(--engaged);
+  border-bottom-color: var(--engaged);
+}
+
+.help__panel {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.help__panel[hidden] {
+  display: none; /* the other tab's panel stays mounted (Help.tsx); `hidden` alone loses to the display above */
+}
+.help__panel--ref {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 24px;
+  align-items: start;
+}
+.help__col {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
 }
 
 .help__sec {
@@ -42,15 +84,16 @@
 }
 .help__h {
   margin: 0;
-  font-size: 11.5px;
+  font-size: 13px;
   font-weight: 600;
   color: var(--text);
   display: flex;
+  flex-wrap: wrap; /* a long tag drops under its heading, never squeezes it */
   align-items: baseline;
-  gap: 7px;
+  gap: 2px 7px;
 }
 .help__tag {
-  font-size: 9.5px;
+  font-size: 10px;
   font-weight: 500;
   text-transform: uppercase;
   letter-spacing: 0.06em;
@@ -59,12 +102,12 @@
 
 /* ---- a matte key-face cap (the legend is a key name, so Geist, not mono) ---- */
 .help__kbd {
-  font-size: 11px;
+  font-size: 11.5px;
   font-weight: 600;
   text-transform: uppercase;
   color: var(--text);
-  min-width: 18px;
-  height: 20px;
+  min-width: 22px;
+  height: 22px;
   padding: 0 6px;
   display: inline-grid;
   place-items: center;
@@ -74,27 +117,55 @@
   box-shadow: inset 0 1px 0 var(--hair);
 }
 
-/* ---- play-key rows: key cap + its note ---- */
-.help__keyrow {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 5px;
+/* ---- the looper keys: caps | what they run, one row per action ---- */
+.help__keys {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 4px 10px;
+  align-items: center;
 }
-.help__chip {
+.help__caps {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 3px;
+  color: var(--faint);
 }
-.help__chip--sharp .help__kbd {
+.help__label {
+  font-size: 12.5px;
+  color: var(--text);
+}
+
+/* ---- the play keys as a small keyboard: naturals below, sharps straddling the seams above (columns
+   from Help.tsx's PLAY_KEYS); each cap over its note ---- */
+.help__piano {
+  display: grid;
+  gap: 4px 0;
+}
+.help__pkey {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
+.help__pkey .help__kbd {
+  min-width: 0;
+  width: 24px;
+  padding: 0;
+}
+.help__pkey--sharp .help__kbd {
   /* sharps sink a tone, like the black keys */
   background: var(--sunk);
   box-shadow: var(--pressed);
   color: var(--dim);
 }
 .help__note {
-  font-size: 10px;
+  font-size: 11px;
   font-variant-numeric: tabular-nums;
   color: var(--dim);
+}
+/* a control's name inside prose: a step under the body, never the play-key legend's size */
+.help__list .help__note {
+  font-size: 0.94em;
 }
 
 .help__inline {
@@ -104,7 +175,7 @@
 }
 .help__sub {
   margin: 0;
-  font-size: 10.5px;
+  font-size: 12px;
   color: var(--dim);
   line-height: 1.45;
 }
@@ -116,17 +187,20 @@
   gap: 5px;
 }
 .help__pad {
+  /* the cap over its voice, so a voice's name fits a quarter of the column */
   display: flex;
+  flex-direction: column;
   align-items: center;
-  gap: 5px;
+  gap: 3px;
   min-width: 0;
-  padding: 4px 5px;
+  padding: 5px 4px 4px;
   border-radius: 7px;
   background: var(--sunk);
   box-shadow: inset 0 2px 5px rgba(0, 0, 0, 0.55);
 }
 .help__padname {
-  font-size: 9.5px;
+  max-width: 100%;
+  font-size: 11.5px;
   color: var(--dim);
   white-space: nowrap;
   overflow: hidden;
@@ -141,16 +215,54 @@
   gap: 4px;
 }
 .help__list li {
-  font-size: 10.5px;
+  font-size: 12.5px;
   color: var(--dim);
-  line-height: 1.45;
+  line-height: 1.5;
+}
+
+/* A short window (the 960x600 minimum, a 1000x700 laptop): the reference tightens its rhythm, never its
+   type, so it still fits unscrolled under the command bar's two rows. The manual scrolls anyway. */
+@media (max-height: 719px) {
+  .help {
+    gap: 8px;
+    padding-top: 8px;
+    padding-bottom: 10px;
+  }
+  .help__tab {
+    padding-bottom: 6px;
+  }
+  .help__panel--ref .help__col {
+    gap: 10px;
+  }
+  .help__panel--ref .help__sec {
+    gap: 4px;
+  }
+  .help__panel--ref .help__h {
+    row-gap: 0;
+  }
+  .help__panel--ref .help__list {
+    gap: 2px;
+  }
+  .help__panel--ref .help__kbd {
+    height: 18px;
+  }
+  .help__panel--ref .help__keys {
+    row-gap: 2px;
+  }
+  .help__panel--ref .help__sub,
+  .help__panel--ref .help__list li {
+    line-height: 1.35;
+  }
+  .help__panel--ref .help__pad {
+    padding: 3px 4px;
+  }
 }
 
 /* "About this build": the version line, the ASIO lines (ASIO builds only) and the diagnostics actions.
    The logo is Steinberg artwork: sized, never restyled. */
 .help__about {
   margin: 0;
-  font-size: 10.5px;
+  font-size: 12.5px;
   color: var(--dim);
   line-height: 1.45;
 }
@@ -159,7 +271,7 @@
   align-items: center;
   gap: 8px;
   margin-top: 2px;
-  font-size: 9.5px;
+  font-size: 11px;
   color: var(--dim);
   line-height: 1.4;
 }

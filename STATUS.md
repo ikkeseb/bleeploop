@@ -166,6 +166,9 @@ it.
   numbers climb at a watchable rate over a real GitHub download, whether the pill is findable without
   being told where it is, and whether the app's last frame before it quits reads as progress rather
   than a freeze. Only the next real release answers that, from the installed app.
+- Help in two tabs: `?` opens Reference (the looper keys, the keystroke pedals, the play keys, the
+  octave and the drum pads, unscrolled at every window size, tighter below 720 px tall) and Manual holds
+  the rest, About this build at its foot. Can it be read at a glance mid-jam, from playing distance?
 
 ## Decisions
 

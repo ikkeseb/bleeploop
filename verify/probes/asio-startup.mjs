@@ -16,7 +16,7 @@
  * - failed offers RETRY; turning the toggle off saves "off" and never probes, on again saves "on" and
  *   then probes explicitly;
  * - not-compiled / disabled-by-flag hide the toggle (an explanatory word instead) and never probe;
- *   About this build shows the ASIO lines for every build that links the SDK.
+ *   About this build (Help's Manual tab) shows the ASIO lines for every build that links the SDK.
  *
  * The native state machine is `cargo test` in `src-tauri/src/asio_startup.rs`; this probe drives no
  * driver and makes no hardware claim: the fake engine opens whatever is asked.
@@ -122,7 +122,7 @@ await probe(async ({ open }) => {
         retry: !!q('[aria-label="Retry starting the ASIO driver"]'),
         inputDisabled: q('[aria-label="Audio input device"]').disabled,
         inputName: q('[aria-label="Audio input device"]').selectedOptions[0].textContent,
-        aboutBuild: (() => { window.__lf.ui.openHelp(); const has = !!document.querySelector('.help__asio'); window.__lf.ui.closeHelp(); window.__lf.ui.openSettings(); return has; })(),
+        aboutBuild: (() => { window.__lf.ui.openHelp(); document.getElementById('lf-help-tab-manual').click(); const has = !!document.querySelector('.help__asio')?.checkVisibility(); window.__lf.ui.closeHelp(); window.__lf.ui.openSettings(); return has; })(),
       });
       ${body}
     })()`);
