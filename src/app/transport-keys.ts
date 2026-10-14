@@ -158,10 +158,12 @@ export function installTransportKeys(opts: TransportKeysOptions): TransportKeys 
   // `verify/probes/transport-focus.mjs`; WebView2 is the same engine, unmeasured), and the first key
   // the page sees with that select still focused blurs it in the CAPTURE phase, before this file's
   // handler and the note keys (Keyboard.tsx) read the focus. Tab keeps its own move. A select reached
-  // from the keyboard keeps its keys: only a pointerdown on it marks it, and its blur clears the mark.
+  // from the keyboard keeps its keys: only a pointerdown on it, or on the <label> that focuses it (the FX
+  // drawer wraps its division select in one), marks it, and its blur clears the mark.
   let pointerSelect: HTMLSelectElement | null = null;
   const onPointerDown = (e: PointerEvent) => {
-    pointerSelect = e.target instanceof HTMLSelectElement ? e.target : null;
+    const control = e.target instanceof Element ? (e.target.closest('label')?.control ?? e.target) : null;
+    pointerSelect = control instanceof HTMLSelectElement ? control : null;
   };
   window.addEventListener('pointerdown', onPointerDown, { capture: true });
   const onKeyDownCapture = (e: KeyboardEvent) => {

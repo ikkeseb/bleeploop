@@ -19,8 +19,9 @@
  * - Enter on a Tab-focused lane core sends `SelectTrack` before its `RecDub`, as a pointer press does;
  * - a select the pointer opened (the slot's input, the FX drawer's division) gives the keys back however
  *   its list closed (a new value, the same value, dismissed): Space and ArrowDown send REC/DUB and NEXT
- *   TRACK and leave the value alone, and a letter is no type-ahead in it; one reached by key keeps its
- *   focus.
+ *   TRACK and leave the value alone, and a letter is no type-ahead in it; so does one a click on its
+ *   <label> text focused. One reached by Tab keeps its keys: ArrowDown picks the next value, sends no
+ *   NEXT TRACK.
  *
  * Cannot see the native engine (what it does with the press: lf-engine `tests/actions.rs`), MIDI or
  * hardware-key input: the fake answers no command by itself. The list a select opens is Chromium's: the
@@ -245,12 +246,34 @@ await probe(async ({ open }) => {
   await page.waitForTimeout(100);
   console.log(`a letter after a dismissed list: ${beforeLetter} -> ${await inputPick.inputValue()}`);
   assert.equal(await inputPick.inputValue(), beforeLetter, 'a letter after a dismissed list picked in it');
-  // A keyboard user keeps the select: an arrow there picks, and the focus stays for the next.
-  await inputPick.focus();
+  // A keyboard user keeps the select: from a known value, Tab onto it and an arrow there picks the next
+  // one, no NEXT TRACK goes out, and the focus stays for the next.
+  await inputPick.selectOption('0');
+  await page.getByRole('combobox', { name: 'Source for slot 1', exact: true }).focus();
+  for (let i = 0; i < 6 && !(await inputPick.evaluate((el) => document.activeElement === el)); i++) await page.keyboard.press('Tab');
+  assert.ok(await inputPick.evaluate((el) => document.activeElement === el), 'Tab from the slot source did not reach the slot input select');
+  await clearSent();
   await page.keyboard.press('ArrowDown');
   await page.waitForTimeout(100);
   const kept = await inputPick.evaluate((el) => [document.activeElement === el, el.value]);
-  console.log('focus and value after ArrowDown in the focused slot input select', JSON.stringify(kept));
-  assert.ok(kept[0], 'a keyboard pick in the slot input select lost its focus');
+  console.log('focus and value after ArrowDown in the Tab-focused slot input select', JSON.stringify(kept), JSON.stringify(await sent()));
+  assert.deepEqual(kept, [true, '1'], 'a keyboard pick in the slot input select lost its focus or did not pick');
+  assert.ok(!(await sent()).some((c) => c.Action === 'NextTrack'), 'ArrowDown in a keyboard-focused select went to the transport');
+  // A select a click on its <label> text focused is a pointer's too: the FX drawer wraps the division
+  // select in a label, and that click focuses the select without a pointerdown on it.
+  if (!(await divisionPick.isVisible())) await revealDivision();
+  await page.evaluate(() => document.activeElement?.blur());
+  const labelBefore = await divisionPick.inputValue();
+  await page.locator('.lp-drawer label.fxp-param').filter({ has: page.locator('select.fxp-param__select') }).locator('.fxp-param__label').click();
+  assert.ok(await divisionPick.evaluate((el) => document.activeElement === el), 'a click on the division label did not focus its select');
+  await clearSent();
+  await page.keyboard.press('Space');
+  await page.keyboard.press('ArrowDown');
+  await page.waitForTimeout(150);
+  const labelSent = await sent();
+  console.log(`after a click on the division label: ${labelBefore} -> ${await divisionPick.inputValue()}; Space + ArrowDown sent`, JSON.stringify(labelSent));
+  assert.ok(labelSent.some((c) => c.Action === 'RecDub'), 'Space after a label click did not send REC/DUB');
+  assert.ok(labelSent.some((c) => c.Action === 'NextTrack'), 'ArrowDown after a label click did not send NEXT TRACK');
+  assert.equal(await divisionPick.inputValue(), labelBefore, 'the keys after a label click changed the division');
   assert.deepEqual(consoleErrors, [], 'no console errors');
 });
