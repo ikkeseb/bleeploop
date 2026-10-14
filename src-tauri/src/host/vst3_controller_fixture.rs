@@ -210,7 +210,7 @@ fn a_malformed_parameter_count_is_an_error_not_an_abort() {
 fn an_editor_open_leaves_the_load_time_component_handler_in_place() {
     let (obj, ctl) = controller(3);
     let load_handler = ComWrapper::new(LfComponentHandler {
-        event_tx: Arc::new(Mutex::new(rtrb::RingBuffer::<PluginEvent>::new(4).0)),
+        event_tx: Arc::new(Mutex::new(rtrb::RingBuffer::<ParamEvent>::new(4).0)),
         param_changed: Box::new(|_, _| {}),
         restart: Arc::new(RestartFlags::default()),
     });
@@ -221,7 +221,7 @@ fn an_editor_open_leaves_the_load_time_component_handler_in_place() {
     }
     assert_eq!(obj.held_handler(), Some(hp.as_ptr() as usize));
 
-    let err = vst3_editor_open(&ctl, 0, 0).err().expect("the fixture view refuses to attach");
+    let err = vst3_editor_open(&ctl, 0).err().expect("the fixture view refuses to attach");
     assert!(err.contains("attached"), "failed at the attach step, not before it: {err}");
     assert_eq!(obj.handler_sets.load(Relaxed), 1, "only the load set a component handler");
     assert_eq!(

@@ -1,6 +1,6 @@
 use super::{
     checked_plugin_channels, checked_plugin_params, publish_param_ids, sum_to_mono, OwnerRequest,
-    PluginEvent, MAX_EVENTS_PER_BLOCK,
+    ParamEvent, MAX_EVENTS_PER_BLOCK,
 };
 use super::super::editor_window::{
     client_size, create_host_window, drain_after_editor_teardown, pump_thread_messages,
@@ -18,8 +18,9 @@ use std::sync::atomic::{
     Ordering::{Acquire, Relaxed, Release},
 };
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
+use lf_engine::SlotEventKind;
 use rtrb::{Consumer, Producer};
 
 use vst3::Steinberg::Vst::IAttributeList_::AttrID;
@@ -474,7 +475,7 @@ impl RestartFlags {
 
 /// Host `IComponentHandler` — the plugin's edit-controller calls these as its GUI moves a knob.
 /// P10.3: `performEdit` forwards `(id, value)` onto BOTH (a) the main→audio ring as a
-/// `PluginEvent::Param` (drained next block into the real `RtParamChanges` → the processor's
+/// `ParamEvent` (drained next block into the real `RtParamChanges` → the processor's
 /// sound changes — required because Surge is separated-component, so `setParamNormalized` on the
 /// controller alone never reaches the processor), and (b) the web UI via `plugin:param-changed`.
 /// Runs on the OWNER/UI-pump thread (NEVER the audio thread), so the `Mutex` lock + `emit` are off
@@ -484,7 +485,7 @@ impl RestartFlags {
 /// editor session uses it too and never sets its own, so closing an editor has nothing to restore
 /// and a plugin that keeps a raw pointer never holds a dropped one.
 struct LfComponentHandler {
-    event_tx: Arc<Mutex<Producer<PluginEvent>>>,
+    event_tx: Arc<Mutex<Producer<ParamEvent>>>,
     /// Tells the web UI a knob moved (`plugin:param-changed`, `id`, `value`). A closure rather
     /// than the window, so the handler is testable without one.
     param_changed: Box<dyn Fn(u32, f64) + Send + Sync>,
@@ -502,7 +503,7 @@ impl IComponentHandlerTrait for LfComponentHandler {
         // SPSC Producer stays single-logical). A full ring (unreachable at human knob rates,
         // 1024-deep / 256-drained-per-block) drops last-wins — inaudible.
         if let Ok(mut prod) = self.event_tx.lock() {
-            let _ = prod.push(PluginEvent::Param {
+            let _ = prod.push(ParamEvent {
                 id: id as u32,
                 value: value_normalized,
             });
@@ -720,15 +721,12 @@ impl ParamChangesInner {
 /// Nothing is dropped: a param whose id is new once the pool is full stays at the ring's head, and
 /// the drain stops there, so it and every change behind it go out from the next block on, in order (a
 /// change ahead of it to an id already queued coalesces; one behind it waits, even to such an id,
-/// or it would overtake the waiting one). Notes do not ride this ring (`process` takes them from
-/// its `events`); any that did are popped and ignored, as before.
-fn drain_params(ring: &mut Consumer<PluginEvent>, changes: &ParamChangesInner, cap: usize) {
+/// or it would overtake the waiting one).
+fn drain_params(ring: &mut Consumer<ParamEvent>, changes: &ParamChangesInner, cap: usize) {
     for _ in 0..cap {
-        let Ok(&event) = ring.peek() else { break };
-        if let PluginEvent::Param { id, value } = event {
-            if !changes.push_param(id as ParamID, value) {
-                break;
-            }
+        let Ok(&ParamEvent { id, value }) = ring.peek() else { break };
+        if !changes.push_param(id as ParamID, value) {
+            break;
         }
         let _ = ring.pop();
     }
@@ -762,31 +760,30 @@ impl IParameterChangesTrait for RtParamChanges {
     }
 }
 
-/// Translate a `PluginEvent` (from the main→audio ring) into a VST3 `Event`. Params ride
-/// `IParameterChanges` (P10.3), not the event list, so `Param` is dropped here.
-fn plugin_event_to_vst3(ev: PluginEvent) -> Option<Event> {
+/// The engine's note at `offset` frames into the slice as a VST3 `Event` on bus 0, channel 0 (no
+/// note id). Params ride `IParameterChanges` (P10.3), not the event list.
+fn note_to_vst3(kind: SlotEventKind, offset: i32) -> Event {
     // SAFETY: a zeroed Event is a valid POD base we then fill.
     let mut e: Event = unsafe { std::mem::zeroed() };
     e.busIndex = 0;
-    e.sampleOffset = 0;
+    e.sampleOffset = offset;
     e.ppqPosition = 0.0;
     e.flags = 0;
-    match ev {
-        PluginEvent::NoteOn { key, velocity } => {
+    match kind {
+        SlotEventKind::NoteOn { key, velocity } => {
             e.r#type = vst3::Steinberg::Vst::Event_::EventTypes_::kNoteOnEvent as u16;
             e.__field0 = Event__type0 {
                 noteOn: NoteOnEvent {
                     channel: 0,
                     pitch: key as i16,
                     tuning: 0.0,
-                    velocity: velocity as f32,
+                    velocity,
                     length: 0,
                     noteId: -1,
                 },
             };
-            Some(e)
         }
-        PluginEvent::NoteOff { key } => {
+        SlotEventKind::NoteOff { key } => {
             e.r#type = vst3::Steinberg::Vst::Event_::EventTypes_::kNoteOffEvent as u16;
             e.__field0 = Event__type0 {
                 noteOff: NoteOffEvent {
@@ -797,10 +794,9 @@ fn plugin_event_to_vst3(ev: PluginEvent) -> Option<Event> {
                     tuning: 0.0,
                 },
             };
-            Some(e)
         }
-        PluginEvent::Param { .. } => None,
     }
+    e
 }
 
 type Vst3ModuleEntry = unsafe extern "system" fn() -> bool;
@@ -869,20 +865,14 @@ enum Vst3Editor {
     },
 }
 
-/// Open the VST3 editor on the owner thread. `host_hwnd` (0 = unknown) is the main window, used
-/// as the host editor window's owner. Requires a single-component controller (Surge); None →
-/// clear Err (separated-component editor is deferred to P10.3). Mirrors the CLAP `editor_open`
-/// embedded path: createView → isPlatformTypeSupported(HWND) → setFrame → getSize → host window →
+/// Open the VST3 editor on the owner thread, in an owner-less host window (`create_host_window`).
+/// `controller` is the edit controller the load set up: the component itself, or a separated one
+/// (`obtain_controller`, Surge's case); a plugin with neither has no editor. Mirrors the CLAP
+/// `editor_open` embedded path: createView → isPlatformTypeSupported(HWND) → setFrame → getSize → host window →
 /// attached → onSize → show. The controller keeps the load-time component handler
 /// (`LfComponentHandler`); an editor never replaces it. `kResultTrue == 0`, so compare with `==`.
-fn vst3_editor_open(
-    controller: &Option<ComPtr<IEditController>>,
-    host_hwnd: usize,
-    slot: u8,
-) -> Result<Vst3Editor, String> {
-    let ctl = controller.as_ref().ok_or_else(|| {
-        "VST3 plugin exposes no IEditController (separated-component → P10.3)".to_string()
-    })?;
+fn vst3_editor_open(controller: &Option<ComPtr<IEditController>>, slot: u8) -> Result<Vst3Editor, String> {
+    let ctl = controller.as_ref().ok_or_else(|| "the VST3 plugin has no edit controller".to_string())?;
     // SAFETY: every call runs on the owner thread; `ctl` is a live IEditController for the
     // loaded plugin, and all raw pointers handed across the FFI are valid for their call.
     unsafe {
@@ -914,12 +904,7 @@ fn vst3_editor_open(
             (900, 600) // mirror the CLAP editor_open fallback
         };
         // 6. Host window (reused rt_host helper; sizes the CLIENT area via AdjustWindowRectEx).
-        let owner = if host_hwnd != 0 {
-            Some(HWND(host_hwnd as *mut c_void))
-        } else {
-            None
-        };
-        let win = create_host_window(w, h, owner)?;
+        let win = create_host_window(w, h)?;
         // From here a plugin-initiated `resizeView` has a window to resize.
         frame.hwnd.store(win.hwnd.0 as isize, Release);
         // 7. Attach the plugin view into our window. windows-crate HWND.0 is already *mut c_void.
@@ -1155,42 +1140,6 @@ unsafe fn activate_component(
     })
 }
 
-/// Deactivate + terminate the component, release every module COM object in order, then
-/// drop the module LAST (after all vtbl-bearing objects are dropped, so we never unmap live code).
-/// Returns the ms spent in `setActive(0)`, `terminate`, the COM releases and the module drop.
-/// ASSUMES the plugin tears down its own threads/timers in `terminate()` (Surge does). A
-/// plugin that leaves a worker thread or OS timer running past `terminate` could fire into
-/// unmapped code after FreeLibrary — if a future plugin proves flaky here, skip/defer the
-/// FreeLibrary (many hosts never unload) rather than risk the crash. (P10.1 review 🟡-3.)
-fn teardown(
-    component: ComPtr<IComponent>,
-    host_ctx: ComPtr<FUnknown>,
-    hostapp: ComWrapper<LfHostApp>,
-    factory: ComPtr<IPluginFactory>,
-    module: Vst3Module,
-) -> [u128; 4] {
-    // SAFETY: the caller has stopped processing; deactivate + terminate on the owner thread.
-    let t = Instant::now();
-    unsafe {
-        let _ = component.setActive(0);
-    }
-    let deactivate_ms = t.elapsed().as_millis();
-    let t = Instant::now();
-    unsafe {
-        let _ = component.terminate();
-    }
-    let terminate_ms = t.elapsed().as_millis();
-    let t = Instant::now();
-    drop(component);
-    drop(host_ctx);
-    drop(hostapp);
-    drop(factory);
-    let release_ms = t.elapsed().as_millis();
-    let t = Instant::now();
-    drop(module);
-    [deactivate_ms, terminate_ms, release_ms, t.elapsed().as_millis()]
-}
-
 /// Decode a VST3 `String128` (`[i16; 128]` UTF-16, NUL-terminated) into a Rust `String`.
 fn string128_to_string(s: &String128) -> String {
     let units: Vec<u16> = s.iter().take_while(|&&c| c != 0).map(|&c| c as u16).collect();
@@ -1248,7 +1197,6 @@ mod resize_tests;
 mod controller_tests;
 
 // Engine mode: this format's unit and owner (`engine_slot.rs`).
-#[allow(dead_code)]
 #[path = "vst3_engine.rs"]
 pub(super) mod engine;
 
@@ -1320,7 +1268,7 @@ mod restart_flag_tests {
 
         // The production handler, reached the way a plugin reaches it: through its vtable.
         let restart = Arc::new(RestartFlags::default());
-        let (event_tx, mut event_rx) = RingBuffer::<PluginEvent>::new(4);
+        let (event_tx, mut event_rx) = RingBuffer::<ParamEvent>::new(4);
         let emitted = Arc::new(AtomicUsize::new(0));
         let emits = emitted.clone();
         let handler = ComWrapper::new(LfComponentHandler {
@@ -1374,7 +1322,7 @@ mod param_drain_tests {
     use rtrb::RingBuffer;
 
     /// One block's `IParameterChanges` as the plugin reads it: each queue's (id, value).
-    fn block(ring: &mut Consumer<PluginEvent>, changes: &Rc<ParamChangesInner>) -> Vec<(ParamID, ParamValue)> {
+    fn block(ring: &mut Consumer<ParamEvent>, changes: &Rc<ParamChangesInner>) -> Vec<(ParamID, ParamValue)> {
         let com = ComWrapper::new(RtParamChanges { inner: changes.clone() });
         let list = com.to_com_ptr::<IParameterChanges>().expect("the changes list");
         changes.clear();
@@ -1394,10 +1342,10 @@ mod param_drain_tests {
         }
     }
 
-    fn setup(events: &[(u32, f64)]) -> (Consumer<PluginEvent>, Rc<ParamChangesInner>) {
+    fn setup(events: &[(u32, f64)]) -> (Consumer<ParamEvent>, Rc<ParamChangesInner>) {
         let (mut tx, rx) = RingBuffer::new(1024);
         for &(id, value) in events {
-            tx.push(PluginEvent::Param { id, value }).unwrap();
+            tx.push(ParamEvent { id, value }).unwrap();
         }
         (rx, Rc::new(ParamChangesInner::new(MAX_PARAM_QUEUES).expect("the queue pool")))
     }

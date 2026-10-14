@@ -282,6 +282,16 @@ export function restorePlugin(slot: 0 | 1, desc: PluginDescriptor): Promise<void
   return serializeSlot(slot, () => doSelectPlugin(slot, desc, nothingChosen));
 }
 
+/**
+ * A load failure the plugin did not cause, in the native host's words: its setup ran past the host's
+ * bound (`src-tauri/src/host/engine_slot.rs`), the slot was busy (a load or an unload still clearing
+ * it, a page a reload replaced: `src-tauri/src/engine_io/plugins.rs`; a unit still in the engine:
+ * `src-tauri/src/engine_io/slot_host.rs`) or no device was open. Any other failure is the plugin's
+ * own (it is missing, or would not load, instantiate or activate).
+ */
+const TRANSIENT_LOAD_ERROR =
+  /plugin setup timed out|already loading|already has a plugin loaded|still clearing|superseded|stale frontend epoch|already holds a unit|port is full|no audio device is open/;
+
 /** `toneToken`: a session import's reload token when this load is that reload (`reloadPlugin`). */
 async function doSelectPlugin(
   slot: 0 | 1,
@@ -306,10 +316,10 @@ async function doSelectPlugin(
     console.error('[instrument] plugin load failed', e);
     notifyError('Plugin load failed', e);
     // The slot holds nothing now, so the next launch must not retry this load (`rig-recall.ts`) —
-    // unless the load failed only because the engine has no device (a load goes into a running engine):
-    // the plugin is not at fault, and the rig must come back once a device runs.
+    // unless the plugin is not at fault: the engine has no device (a load goes into a running engine),
+    // or the host was busy with the slot. The rig must come back then.
     const engineDown = (await platform.engine.status().catch(() => null)) === null;
-    if (!engineDown) forgetSlotPlugin(slot);
+    if (!engineDown && !TRANSIENT_LOAD_ERROR.test(String(e))) forgetSlotPlugin(slot);
     if (activeSlot() === slot) applyActiveRouting(); // ensure we're back on the instrument
     return;
   }

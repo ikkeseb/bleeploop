@@ -19,7 +19,7 @@ use super::*;
 use vst3::Steinberg::kNotImplemented;
 
 use lf_engine::grid::Frame;
-use lf_engine::{SlotEvent, SlotEventKind, SlotKind, SlotProcessor};
+use lf_engine::{SlotEvent, SlotKind, SlotProcessor};
 
 use crate::engine_io::SlotHost;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -31,7 +31,7 @@ pub(super) struct Vst3Unit {
     kind: SlotKind,
     latency: Frame,
     max_frames: usize,
-    params: Consumer<PluginEvent>,
+    params: Consumer<ParamEvent>,
     events: Rc<EventListInner>,
     _event_list: ComWrapper<RtEventList>,
     event_list_ptr: ComPtr<IEventList>,
@@ -62,7 +62,7 @@ impl Vst3Unit {
         processor: ComPtr<IAudioProcessor>,
         activation: Activation,
         max_frames: u32,
-        params: Consumer<PluginEvent>,
+        params: Consumer<ParamEvent>,
         faults: Arc<AtomicU32>,
     ) -> Result<Box<Vst3Unit>, String> {
         let events = Rc::new(EventListInner::new());
@@ -151,16 +151,7 @@ impl SlotProcessor for Vst3Unit {
                 drain_params(&mut self.params, &self.changes, MAX_EVENTS_PER_BLOCK);
             }
             while let Some(e) = events.get(next).filter(|e| (e.offset as usize) < at + len) {
-                let note = match e.kind {
-                    SlotEventKind::NoteOn { key, velocity } => {
-                        PluginEvent::NoteOn { key: key as u16, velocity: velocity as f64 }
-                    }
-                    SlotEventKind::NoteOff { key } => PluginEvent::NoteOff { key: key as u16 },
-                };
-                if let Some(mut event) = plugin_event_to_vst3(note) {
-                    event.sampleOffset = (e.offset as usize - at) as i32;
-                    self.events.push(event);
-                }
+                self.events.push(note_to_vst3(e.kind, (e.offset as usize - at) as i32));
                 next += 1;
             }
             for ch in self.in_bufs.iter_mut() {
@@ -545,7 +536,7 @@ fn load(
     id: &str,
     open: impl FnOnce() -> Result<Opened, String>,
     slot: &SlotHost,
-    params: Consumer<PluginEvent>,
+    params: Consumer<ParamEvent>,
     faults: Arc<AtomicU32>,
     handler: &ComWrapper<LfComponentHandler>,
     restart: &RestartFlags,
@@ -580,7 +571,7 @@ pub(super) fn run_with(
     id: &str,
     open: impl FnOnce() -> Result<Opened, String>,
 ) -> Result<(), String> {
-    let OwnerCtx { slot, running, requests, params, params_tx, param_ids, sink, editor_parent, ready, mut tone } = ctx;
+    let OwnerCtx { slot, running, requests, params, params_tx, param_ids, sink, editor_parent: _, ready, mut tone } = ctx;
     let index = slot.slot();
     let faults = Arc::new(AtomicU32::new(0));
     // The load's component handler: an editor's `performEdit` reaches the processor, the caller and
@@ -676,7 +667,7 @@ pub(super) fn run_with(
                 OwnerRequest::OpenEditor(cancelled, reply) => {
                     let was_closed = matches!(editor, Vst3Editor::Closed);
                     let res = if was_closed {
-                        vst3_editor_open(&plugin.controller, editor_parent, index as u8).map(|opened| editor = opened)
+                        vst3_editor_open(&plugin.controller, index as u8).map(|opened| editor = opened)
                     } else {
                         Ok(())
                     };

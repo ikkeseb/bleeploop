@@ -25,7 +25,26 @@ fn validate_slot(slot: u8) -> Result<(), String> {
 
 /// The native engine's slots (`engine_io::plugins`); an error when the engine did not start.
 #[cfg(windows)]
-use crate::engine_io::mode::engine;
+use crate::engine_io::mode::{engine, EngineApp};
+
+/// A plugin command's engine work, on a blocking thread, never on the async runtime's: a load waits up
+/// to 15 s for its owner (and longer for a slot that is still clearing), an unload joins its owner, an
+/// owner round trip waits up to 5 s, a tone import writes the store, and whichever command drops a
+/// slot's last handle joins that owner (`EngineSlotHandle`'s drop). The work reads the one shared
+/// `PluginHostState`, so a document replaced while it runs is seen at once (`engine_io::plugins`).
+#[cfg(windows)]
+async fn blocking<T: Send + 'static>(
+    app: tauri::AppHandle,
+    op: &'static str,
+    work: impl FnOnce(&'static EngineApp, &PluginHostState) -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        use tauri::Manager;
+        work(engine()?, &app.state::<PluginHostState>())
+    })
+    .await
+    .map_err(|e| format!("{op} task: {e}"))?
+}
 
 /// One call per WebView document: begins its session and answers its `frontendEpoch`, which every
 /// `plugin_load` presents so a load from a replaced document cannot park a slot
@@ -196,29 +215,35 @@ pub async fn plugin_load(
     frontend_epoch: u32,
     tone_token: Option<u32>,
     window: tauri::WebviewWindow,
-    state: tauri::State<'_, PluginHostState>,
 ) -> Result<PluginInfo, String> {
     validate_slot(slot)?;
     #[cfg(windows)]
     {
-        engine()?.plugin_load(&state, &window, slot, path, id, frontend_epoch, tone_token)
+        use tauri::Manager;
+        let app = window.app_handle().clone();
+        blocking(app, "plugin_load", move |engine, state| {
+            engine.plugin_load(state, &window, slot, path, id, frontend_epoch, tone_token)
+        })
+        .await
     }
     #[cfg(not(windows))]
     {
-        let _ = (&state, &window, &path, &id, frontend_epoch, tone_token);
+        let _ = (&window, &path, &id, frontend_epoch, tone_token);
         Err(format!("plugin_load is Windows-only (slot={slot})"))
     }
 }
-/// Unload the slot's plugin: it crossfades out of the engine, then its owner tears it down.
+/// Unload the slot's plugin, for the document with `frontend_epoch`: it crossfades out of the engine,
+/// then its owner tears it down.
 #[tauri::command]
-pub async fn plugin_unload(slot: u8) -> Result<(), String> {
+pub async fn plugin_unload(slot: u8, frontend_epoch: u32, app: tauri::AppHandle) -> Result<(), String> {
     validate_slot(slot)?;
     #[cfg(windows)]
     {
-        engine()?.plugin_unload(slot)
+        blocking(app, "plugin_unload", move |engine, state| engine.plugin_unload(state, slot, frontend_epoch)).await
     }
     #[cfg(not(windows))]
     {
+        let _ = (frontend_epoch, app);
         Ok(())
     }
 }
@@ -237,18 +262,28 @@ pub async fn plugin_list_loaded() -> Result<Vec<PluginInfo>, String> {
         Ok(Vec::new())
     }
 }
-/// P9.5: set a parameter. `param_id` must be one the plugin listed (`listParams`) — an unknown id is
-/// an `Err` here and never reaches the plugin, because a plugin may crash on it.
+/// P9.5: set a parameter, for the document with `frontend_epoch`. `param_id` must be one the plugin
+/// listed (`listParams`) — an unknown id is an `Err` here and never reaches the plugin, because a
+/// plugin may crash on it.
 #[tauri::command]
-pub async fn plugin_set_param(slot: u8, param_id: u32, value: f64) -> Result<(), String> {
+pub async fn plugin_set_param(
+    slot: u8,
+    param_id: u32,
+    value: f64,
+    frontend_epoch: u32,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
     validate_slot(slot)?;
     #[cfg(windows)]
     {
-        engine()?.plugin_set_param(slot, param_id, value)
+        blocking(app, "plugin_set_param", move |engine, state| {
+            engine.plugin_set_param(state, frontend_epoch, slot, param_id, value)
+        })
+        .await
     }
     #[cfg(not(windows))]
     {
-        let _ = (param_id, value);
+        let _ = (param_id, value, frontend_epoch, app);
         Ok(())
     }
 }
@@ -256,14 +291,16 @@ pub async fn plugin_set_param(slot: u8, param_id: u32, value: f64) -> Result<(),
 /// and answer the tone file's bytes as the raw response (empty: the plugin keeps no state). A session
 /// export takes each loaded slot's tone this way.
 #[tauri::command]
-pub async fn plugin_tone_take(slot: u8) -> Result<tauri::ipc::Response, String> {
+pub async fn plugin_tone_take(slot: u8, app: tauri::AppHandle) -> Result<tauri::ipc::Response, String> {
     validate_slot(slot)?;
     #[cfg(windows)]
     {
-        Ok(tauri::ipc::Response::new(engine()?.plugin_tone_take(slot)?))
+        let bytes = blocking(app, "plugin_tone_take", move |engine, _| engine.plugin_tone_take(slot)).await?;
+        Ok(tauri::ipc::Response::new(bytes))
     }
     #[cfg(not(windows))]
     {
+        let _ = app;
         Err(format!("plugin_tone_take is Windows-only (slot={slot})"))
     }
 }
@@ -273,7 +310,7 @@ pub async fn plugin_tone_take(slot: u8) -> Result<tauri::ipc::Response, String> 
 /// refused). The answer names the plugin the tone belongs to and, when the slot holds it now, the token
 /// of the reload that hears it; nothing is loaded or swapped here (`EngineApp::plugin_tone_import`).
 #[tauri::command]
-pub async fn plugin_tone_import(request: tauri::ipc::Request<'_>) -> Result<ToneImport, String> {
+pub async fn plugin_tone_import(request: tauri::ipc::Request<'_>, app: tauri::AppHandle) -> Result<ToneImport, String> {
     let slot: u8 = request
         .headers()
         .get("slot")
@@ -292,11 +329,13 @@ pub async fn plugin_tone_import(request: tauri::ipc::Request<'_>) -> Result<Tone
             .and_then(|v| v.to_str().ok())
             .and_then(|v| serde_json::from_str(v).ok())
             .ok_or("plugin_tone_import needs the plugin the session names (a plugin header)")?;
-        engine()?.plugin_tone_import(slot, bytes, &expected)
+        // The store's write is disk work: off the async runtime, with the bytes copied out of the request.
+        let bytes = bytes.clone();
+        blocking(app, "plugin_tone_import", move |engine, _| engine.plugin_tone_import(slot, &bytes, &expected)).await
     }
     #[cfg(not(windows))]
     {
-        let _ = bytes;
+        let _ = (bytes, app);
         Err(format!("plugin_tone_import is Windows-only (slot={slot})"))
     }
 }
@@ -318,45 +357,48 @@ pub async fn plugin_tone_forget(slot: u8, token: u32) -> Result<(), String> {
 /// P9.5: enumerate the loaded plugin's parameters (stable ids + ranges + live values), so a caller
 /// can set a real param id (an owner-thread query).
 #[tauri::command]
-pub async fn plugin_list_params(slot: u8) -> Result<Vec<ParamDesc>, String> {
+pub async fn plugin_list_params(slot: u8, app: tauri::AppHandle) -> Result<Vec<ParamDesc>, String> {
     validate_slot(slot)?;
     #[cfg(windows)]
     {
-        engine()?.plugin_list_params(slot)
+        blocking(app, "plugin_list_params", move |engine, _| engine.plugin_list_params(slot)).await
     }
     #[cfg(not(windows))]
     {
+        let _ = app;
         Ok(Vec::new())
     }
 }
 /// P10.0: open the slot's plugin editor, on its owner thread: a plugin-owned floating window, else
 /// one embedded in a host window (`clap::editor_open`, `vst3_host::vst3_editor_open`, the VST2
-/// owner's `embed_editor`). `mode` is
+/// owner's `embed_editor`), for the document with `frontend_epoch`. `mode` is
 /// accepted for forward-compat and ignored.
 #[tauri::command]
-pub async fn plugin_open_editor(slot: u8, mode: String) -> Result<(), String> {
+pub async fn plugin_open_editor(slot: u8, mode: String, frontend_epoch: u32, app: tauri::AppHandle) -> Result<(), String> {
     validate_slot(slot)?;
     let _ = mode;
     #[cfg(windows)]
     {
-        engine()?.plugin_open_editor(slot)
+        blocking(app, "plugin_open_editor", move |engine, state| engine.plugin_open_editor(state, frontend_epoch, slot)).await
     }
     #[cfg(not(windows))]
     {
+        let _ = (frontend_epoch, app);
         Err(format!("plugin_open_editor is Windows-only (slot={slot})"))
     }
 }
-/// P10.0: hide + destroy the slot's plugin editor (owner thread). Idempotent — closing a
-/// non-open editor is a harmless no-op.
+/// P10.0: hide + destroy the slot's plugin editor (owner thread), for the document with
+/// `frontend_epoch`. Idempotent — closing a non-open editor is a harmless no-op.
 #[tauri::command]
-pub async fn plugin_close_editor(slot: u8) -> Result<(), String> {
+pub async fn plugin_close_editor(slot: u8, frontend_epoch: u32, app: tauri::AppHandle) -> Result<(), String> {
     validate_slot(slot)?;
     #[cfg(windows)]
     {
-        engine()?.plugin_close_editor(slot)
+        blocking(app, "plugin_close_editor", move |engine, state| engine.plugin_close_editor(state, frontend_epoch, slot)).await
     }
     #[cfg(not(windows))]
     {
+        let _ = (frontend_epoch, app);
         Ok(())
     }
 }
@@ -568,5 +610,26 @@ pub fn scan_one_main(path: &str) -> i32 {
             eprintln!("scan_one error: {e}");
             2
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// A plugin command whose engine work can wait (a load, an unload's join, an owner round trip, the
+    /// store's disk write, dropping a slot's last handle) runs it through `blocking`, off the async
+    /// runtime's threads. Only the two that take the slots lock alone call the engine directly.
+    #[test]
+    fn only_the_plugin_commands_that_never_wait_call_the_engine_on_the_async_runtime() {
+        let source = include_str!("commands.rs");
+        let needle = concat!("engine", "()?.");
+        let direct: Vec<&str> = source
+            .match_indices(needle)
+            .map(|(at, _)| {
+                let rest = &source[at + needle.len()..];
+                &rest[..rest.find(|c: char| !(c.is_alphanumeric() || c == '_')).unwrap_or(rest.len())]
+            })
+            .collect();
+        assert_eq!(direct, ["plugin_list_loaded", "plugin_tone_forget"]);
+        assert_eq!(source.matches(concat!("work(", "engine()?")).count(), 1, "`blocking` reaches the engine");
     }
 }

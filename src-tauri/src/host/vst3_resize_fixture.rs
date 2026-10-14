@@ -103,7 +103,7 @@ fn resize_before_the_window_exists_is_refused_without_on_size() {
 #[test]
 fn resize_view_resizes_the_client_area_then_reports_it_with_on_size() {
     let (view, frame) = fixture();
-    let win = create_host_window(400, 300, None).expect("host window");
+    let win = create_host_window(400, 300).expect("host window");
     frame.hwnd.store(win.hwnd.0 as isize, Release);
     let frame_ptr = frame.to_com_ptr::<IPlugFrame>().expect("IPlugFrame");
     let view_ptr = view.to_com_ptr::<IPlugView>().expect("IPlugView");
@@ -127,7 +127,7 @@ fn resize_view_resizes_the_client_area_then_reports_it_with_on_size() {
 #[test]
 fn oversize_request_is_clamped_and_the_view_is_told_the_real_size() {
     let (view, frame) = fixture();
-    let win = create_host_window(400, 300, None).expect("host window");
+    let win = create_host_window(400, 300).expect("host window");
     frame.hwnd.store(win.hwnd.0 as isize, Release);
     let frame_ptr = frame.to_com_ptr::<IPlugFrame>().expect("IPlugFrame");
     let view_ptr = view.to_com_ptr::<IPlugView>().expect("IPlugView");
@@ -157,7 +157,7 @@ fn oversize_request_is_clamped_and_the_view_is_told_the_real_size() {
 #[test]
 fn null_view_or_rect_is_refused() {
     let (view, frame) = fixture();
-    let win = create_host_window(400, 300, None).expect("host window");
+    let win = create_host_window(400, 300).expect("host window");
     frame.hwnd.store(win.hwnd.0 as isize, Release);
     let frame_ptr = frame.to_com_ptr::<IPlugFrame>().expect("IPlugFrame");
     let view_ptr = view.to_com_ptr::<IPlugView>().expect("IPlugView");

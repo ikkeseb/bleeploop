@@ -148,9 +148,14 @@ A dev start that names a build path from an old checkout location (a moved or re
 
 All in `src-tauri/src/host/`. The known-fragile area: read this whole section before any plugin or
 plugin-GUI work.
-- **Every WebView document gets a `frontendEpoch` from `host_init`** (one atomic step, never 0). A
-  slot is reserved for the document that asked before foreign setup; a reload cancels the
-  reservation, and a load that finishes for a replaced document unloads again (`engine_io/plugins.rs`).
+- **Every WebView document gets a `frontendEpoch` from `host_init`** (one atomic step, never 0), and
+  every request that changes a slot (load, unload, a parameter, the editor) carries it: one from a
+  replaced document is refused, checked as it takes the slot. A load reserves its slot before foreign
+  setup, and only that load moves the slot on: one that finishes for a replaced document, or that an
+  unload cancelled, unloads what it loaded, and the slot takes no load until the plugin's unit has
+  left the engine (an unload holds it the same way); a load for the new document waits for it
+  (`engine_io/plugins.rs`). The `plugin_*` commands that can wait run on `spawn_blocking` and read the
+  shared `PluginHostState` there (`host/commands.rs`).
 - **The `!Send` instance (clack `PluginInstance`, the VST3 component, the VST2 effect) lives on its
   owner thread**, NOT `tauri::State`; only the `Send` unit (`ClapUnit`, `Vst3Unit`, `Vst2Unit`: the
   processor with its buffers and lists) enters the engine, which never drops one (a drop frees memory and calls into the DLL).
@@ -417,6 +422,6 @@ plugin-GUI work.
   forgives a WASAPI open's first 3 s (`probe.rs` `GRACE`). Past the open the join also starves in
   bursts minutes in, beside an ASIO process and alone under load; neighbour, load and priority class
   are not separated (four runs). Widening the setpoint is monitoring latency: the owner's call (D25).
-- The release profile warns of four unused items in `app` (`Duration` in `host/vst3.rs`,
-  `promote_pro_audio` in `host/clap.rs`, `teardown` in `host/vst3.rs`, `asio_available` in
-  `audio_output.rs`); since when is unknown.
+- The release profile warns of one unused item in `app`, `asio_available` in `audio_output.rs`
+  (with ASIO and without; the no-ASIO build warns of the unused ASIO startup items too); since when is
+  unknown.

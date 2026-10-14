@@ -33,7 +33,7 @@ use super::super::vst2::{
     open_effect, time_info, validate, EffectInfo, HostContext, OpenError, ProcessingScope, Vst2Effect, Vst2Module,
 };
 use super::super::vst2_abi::*;
-use super::{publish_param_ids, take_uncancelled, OwnerRequest, PluginEvent, MAX_EVENTS_PER_BLOCK, MAX_PLUGIN_CHANNELS};
+use super::{publish_param_ids, take_uncancelled, OwnerRequest, ParamEvent, MAX_EVENTS_PER_BLOCK, MAX_PLUGIN_CHANNELS};
 
 use std::cell::UnsafeCell;
 use std::ffi::c_void;
@@ -77,7 +77,7 @@ pub(super) struct Vst2Unit {
     kind: SlotKind,
     latency: Frame,
     max_frames: usize,
-    params: Consumer<PluginEvent>,
+    params: Consumer<ParamEvent>,
     /// One `max_frames` row per declared input and output.
     in_rows: Vec<Vec<f32>>,
     out_rows: Vec<Vec<f32>>,
@@ -119,7 +119,7 @@ impl Vst2Unit {
         ctx: Arc<HostContext>,
         info: &EffectInfo,
         max_frames: usize,
-        params: Consumer<PluginEvent>,
+        params: Consumer<ParamEvent>,
         faults: Arc<AtomicU32>,
     ) -> Box<Vst2Unit> {
         let mut unit = Box::new(Vst2Unit {
@@ -196,8 +196,7 @@ impl Vst2Unit {
                 return;
             }
             let Ok(event) = self.params.pop() else { return };
-            // Only params ride this ring in engine mode: the engine routes the notes.
-            let PluginEvent::Param { id, value } = event else { continue };
+            let ParamEvent { id, value } = event;
             let value = value as f32;
             match self.set_parameter.filter(|_| (id as usize) < self.param_count && value.is_finite()) {
                 // SAFETY: the open effect's own `setParameter`, with an index it declared, on the
@@ -608,7 +607,7 @@ impl Vst2Plugin {
     /// `effEditOpen`, so a plugin that asks for a size from inside it is answered at once; the size
     /// it reports once it is open (many know it only then) replaces the one it gave before. A
     /// plugin that refuses (`effEditOpen` answers 0) is told to close and its window is destroyed.
-    fn embed_editor(&mut self, parent: usize) -> Result<HWND, String> {
+    fn embed_editor(&mut self) -> Result<HWND, String> {
         if let Some(open) = &self.editor {
             return Ok(open.hwnd);
         }
@@ -616,8 +615,7 @@ impl Vst2Plugin {
             return Err("plugin has no editor".to_string());
         }
         let (width, height) = self.editor_rect().unwrap_or(PROVISIONAL_EDITOR);
-        let parent = (parent != 0).then_some(HWND(parent as *mut c_void));
-        let window = create_host_window(width, height, parent)?;
+        let window = create_host_window(width, height)?;
         let hwnd = window.hwnd;
         self.ctx.set_editor_window(hwnd.0 as isize);
         self.editor = Some(window);
@@ -782,7 +780,7 @@ fn load(
     id: &str,
     open: impl FnOnce() -> Result<Opened, String>,
     slot: &SlotHost,
-    params: Consumer<PluginEvent>,
+    params: Consumer<ParamEvent>,
     faults: Arc<AtomicU32>,
     tone: &mut ToneKeeper,
 ) -> Result<Loaded, String> {
@@ -813,7 +811,7 @@ fn load(
 /// The engine-mode VST2 owner. `open` yields the module and its entry (a DLL in production, an
 /// in-process entry in the tests); returns the teardown's result.
 pub(super) fn run_with(ctx: OwnerCtx, id: &str, open: impl FnOnce() -> Result<Opened, String>) -> Result<(), String> {
-    let OwnerCtx { slot, running, requests, params, params_tx: _, param_ids, sink, editor_parent, ready, mut tone } = ctx;
+    let OwnerCtx { slot, running, requests, params, params_tx: _, param_ids, sink, editor_parent: _, ready, mut tone } = ctx;
     let index = slot.slot();
     let faults = Arc::new(AtomicU32::new(0));
     let loaded = load(id, open, &slot, params, faults.clone(), &mut tone);
@@ -919,7 +917,7 @@ pub(super) fn run_with(ctx: OwnerCtx, id: &str, open: impl FnOnce() -> Result<Op
                 match request {
                     OwnerRequest::OpenEditor(cancelled, reply) => {
                         let was_closed = plugin.editor.is_none();
-                        let res = if was_closed { plugin.embed_editor(editor_parent).map(show_editor) } else { Ok(()) };
+                        let res = if was_closed { plugin.embed_editor().map(show_editor) } else { Ok(()) };
                         // Opened after the caller's 5 s: it reported failure, so close what this opened.
                         if was_closed && res.is_ok() && cancelled.load(Relaxed) {
                             plugin.close_editor();

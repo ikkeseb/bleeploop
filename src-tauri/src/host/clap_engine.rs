@@ -38,7 +38,7 @@ pub(super) struct ClapUnit {
     kind: SlotKind,
     latency: Frame,
     max_frames: usize,
-    params: Consumer<PluginEvent>,
+    params: Consumer<ParamEvent>,
     events: EventBuffer,
     /// One buffer set per declared port, in port order (port → channel → frames): input port 0
     /// carries the live input and the others stay silent; output port 0 is the slot's wet signal and
@@ -87,7 +87,7 @@ impl ClapUnit {
     pub(super) fn new(
         stopped: StoppedPluginAudioProcessor<LfHost>,
         terms: &Terms,
-        params: Consumer<PluginEvent>,
+        params: Consumer<ParamEvent>,
         faults: Arc<AtomicU32>,
         edited: Arc<AtomicBool>,
     ) -> Box<ClapUnit> {
@@ -206,8 +206,7 @@ impl SlotProcessor for ClapUnit {
                 // more than the cap wait in the ring for the next call.
                 for _ in 0..MAX_EVENTS_PER_BLOCK {
                     let Ok(event) = params.pop() else { break };
-                    // Only params ride this ring in engine mode: the engine routes the notes.
-                    let PluginEvent::Param { id, value } = event else { continue };
+                    let ParamEvent { id, value } = event;
                     match ClapId::from_raw(id) {
                         Some(id) => {
                             buf.push(&ParamValueEvent::new(0, id, Pckn::match_all(), value, Cookie::empty()))
