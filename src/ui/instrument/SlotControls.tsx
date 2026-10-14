@@ -1,4 +1,4 @@
-import { For, Show, createMemo, onCleanup } from 'solid-js';
+import { For, Show, createEffect, createMemo, onCleanup } from 'solid-js';
 import {
   SLOT_GAIN_MAX,
   setSlotLevel,
@@ -12,6 +12,7 @@ import { inputArmed } from '../state/native-io';
 import { asioDeviceInfo, inputDevices, usingAsio } from '../state/audio-devices';
 import { SYNTHS } from '../state/instruments';
 import { volumeDb } from '../looper/shared';
+import { registerCardMeter, unregisterCardMeter } from '../looper/waveform';
 import { engineDevice, engineSlotInputChannels, setEngineSlotInputChannel } from '../state/engine-store';
 import { clearLiveError, liveBusy, liveError, toggleLive } from './live';
 
@@ -91,6 +92,37 @@ export function LiveButton(props: { slot: 0 | 1 }) {
         <span class="pc__err">{liveError(slot)}</span>
       </Show>
     </>
+  );
+}
+
+/**
+ * The input meter along the foot of a slot whose source takes input: dark until the slot goes live,
+ * then the record level (the command bar's meter, full-width here so it reads from where the guitarist
+ * stands), its held peak and a CLIP lamp that stays lit ~1.5 s after a clip. Drawn by the waveform rAF
+ * loop through style writes (`registerCardMeter`); Solid only mounts it and (un)registers it as the slot
+ * goes live. It repeats the command bar's meter, so assistive tech hears that one only.
+ */
+export function SlotMeter(props: { slot: 0 | 1 }) {
+  const live = () => inputArmed()[props.slot];
+  return (
+    <div
+      class="slot__meter"
+      classList={{ 'is-live': live() }}
+      aria-hidden="true"
+      ref={(el) => {
+        createEffect(() => {
+          if (live()) registerCardMeter(el);
+          else unregisterCardMeter(el);
+        });
+        onCleanup(() => unregisterCardMeter(el));
+      }}
+    >
+      <div class="slot__meter-track">
+        <i class="slot__meter-fill" />
+        <i class="slot__meter-pk" />
+      </div>
+      <span class="slot__meter-clip">CLIP</span>
+    </div>
   );
 }
 

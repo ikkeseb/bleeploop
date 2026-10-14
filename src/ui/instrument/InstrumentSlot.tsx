@@ -23,7 +23,7 @@ import { SYNTHS } from '../state/instruments';
 import { platform } from '../../platform';
 import { engineDevice, engineOpenFailure } from '../state/engine-store';
 import { PluginBar, PluginParams } from './PluginControls';
-import { InputPick, LiveButton, SlotVolume } from './SlotControls';
+import { InputPick, LiveButton, SlotMeter, SlotVolume } from './SlotControls';
 import { liveShown } from './live';
 
 /**
@@ -188,6 +188,10 @@ export function InstrumentSlot(props: { slot: 0 | 1 }) {
             <PluginParams slot={slotIdx} />
           </div>
         )}
+      </Show>
+      {/* The input meter along the card's foot (dark until the slot goes live), under an open drawer too. */}
+      <Show when={liveShown(slotIdx)}>
+        <SlotMeter slot={slotIdx} />
       </Show>
     </div>
   );

@@ -170,3 +170,95 @@
     grid-template-columns: 1fr;
   }
 }
+
+/* ---- live and hot, readable from where the guitarist stands ----
+   INPUT LIVE is the brightest object in a live slot's card: the play colour as a filled face with a dark
+   legend (the lane's REC badge idiom), a size up from the row's other caps. */
+.tgl.live.on-green {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  line-height: 14px;
+  letter-spacing: 0.06em;
+  font-weight: 700;
+  padding: 8px 13px;
+  color: #0b0b0d;
+  background: var(--play);
+  border-color: var(--play);
+  text-shadow: none;
+  box-shadow: 0 0 18px -2px color-mix(in srgb, var(--play) 60%, transparent);
+}
+.tgl.live.on-green:hover:not(:disabled) {
+  color: #0b0b0d;
+  background: color-mix(in srgb, var(--play) 88%, #fff);
+}
+.tgl.live.on-green .tgl__dot {
+  background: #0b0b0d;
+  box-shadow: none;
+}
+
+/* The input meter along a live slot's foot (`SlotMeter`; the waveform rAF loop writes --lvl, --pk and
+   is-clip). The level over −60..0 dBFS, as the command bar's meter: --play, --dub from −6 dB, --rec from
+   −1 dB (where that meter turns red); a held peak tick; a CLIP lamp lit ~1.5 s after a clip. Dark while
+   the slot is not live. */
+.slot__meter {
+  --lvl: 0;
+  --pk: 0;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 18px 10px;
+}
+/* the meter takes the header's bottom padding */
+.slot:has(> .slot__meter) > .slot__row {
+  padding-bottom: 6px;
+}
+.slot__meter-track {
+  position: relative;
+  flex: 1 1 auto;
+  height: 8px;
+  border-radius: 3px;
+  background: var(--sunk);
+  box-shadow: inset 0 1px 1px rgba(0, 0, 0, 0.7), 0 1px 0 var(--hair);
+  overflow: hidden;
+}
+.slot__meter-fill {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(to right, var(--play) 0 90%, var(--dub) 90% 98.3%, var(--rec) 98.3%);
+  clip-path: inset(0 calc((1 - var(--lvl)) * 100%) 0 0);
+}
+.slot__meter-pk {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  left: calc(var(--pk) * 100% - 3px);
+  background: var(--text);
+}
+.slot__meter.is-clip .slot__meter-pk {
+  background: var(--rec);
+  box-shadow: 0 0 6px var(--rec);
+}
+.slot__meter-clip {
+  flex: 0 0 auto;
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  line-height: 1;
+  padding: 2px 5px;
+  border-radius: 4px;
+  color: var(--faint);
+  background: var(--surf-2);
+}
+.slot__meter.is-clip .slot__meter-clip {
+  color: #0b0b0d;
+  background: var(--rec);
+  box-shadow: 0 0 12px color-mix(in srgb, var(--rec) 70%, transparent);
+}
+.slot__meter:not(.is-live) .slot__meter-track,
+.slot__meter:not(.is-live) .slot__meter-clip {
+  opacity: 0.45;
+}

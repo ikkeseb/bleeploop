@@ -12,8 +12,9 @@
  * amp-sim (an effect), stubbed load/editor replies. 8-native-first-launch = the host booted, nothing
  * loaded (slot A's source picker offers the amp-sim under Plugins); 9-amp-sim-live = the amp-sim picked in
  * slot A's picker, which auto-starts GO LIVE and the editor (INPUT LIVE); 10-amp-sim-idle = the same after
- * stopping live input. Writes logs/contact-sheet/<viewport>-<kbd>-<scene>.png plus a tiling index.html
- * unconditionally, before any FAIL is raised, so a red run still leaves the sheet for the eye lap.
+ * stopping live input; 9b-live-take-hot (shot after 10) = live again, a first take one second in, the
+ * input clipped a moment ago and now near -3 dBFS (scene 9 plays it at about -12 dBFS). Writes
+ * logs/contact-sheet/<viewport>-<kbd>-<scene>.png plus a tiling index.html unconditionally, before any FAIL is raised, so a red run still leaves the sheet for the eye lap.
  * Asserts: with FX open every lane's clear button is present, and fully visible wherever five lanes fit
  * (audit A4; at 1000x700 with the keyboard shown the lanes scroll by design); an ARMED later take draws
  * no rec-red in its canvas while waiting (audit A3); no scene logs console.error or an uncaught page error
@@ -28,7 +29,7 @@ const outDir = 'logs/contact-sheet';
 const viewports = [[1280, 820], [1920, 1080], [1000, 700]];
 const placements = ['bottom', 'hidden'];
 const scenes = ['1-empty', '2-first-take-recording', '3-armed-waiting', '4-count-in', '5-fx-five-lanes', '6-help', '7-audio-settings',
-  '8-native-first-launch', '9-amp-sim-live', '10-amp-sim-idle', '11-engine-in-fx'];
+  '8-native-first-launch', '9-amp-sim-live', '9b-live-take-hot', '10-amp-sim-idle', '11-engine-in-fx'];
 const REC_PIXEL_LIMIT = 20; // anti-aliasing slack; a red playhead or tape is hundreds of pixels
 const RATE = 48000;
 const PEAK_FRAMES = 1024; // the engine's waveform bin (`lf-engine/src/overview.rs`)
@@ -277,6 +278,8 @@ await probe(async ({ browser, open }) => {
       await page.getByRole('combobox', { name: 'Source for slot 1', exact: true }).selectOption({ label: 'Probe Amp Sim (vst3)' });
       await page.getByRole('button', { name: 'Live input for slot 1', exact: true, pressed: true }).waitFor();
       await page.getByRole('button', { name: 'Editor for slot 1', exact: true, pressed: true }).waitFor();
+      // A guitar played at a working level (about -12 dBFS): the input meters have something to show.
+      await emit({ meter: { peak: 0.25, clip: false } });
       await page.waitForTimeout(250);
       await shoot(scene);
 
@@ -284,6 +287,22 @@ await probe(async ({ browser, open }) => {
       await page.getByRole('button', { name: 'Live input for slot 1', exact: true, pressed: true }).click();
       await page.getByRole('button', { name: 'Live input for slot 1', exact: true, pressed: false }).waitFor();
       await page.waitForTimeout(250);
+      await shoot(scene);
+
+      // Live again, and a first take one second in while the guitar runs hot: one block clipped a moment
+      // ago, the input now near -3 dBFS, so the input meters show the level and any clip hold.
+      scene = '9b-live-take-hot';
+      await page.getByRole('button', { name: 'Live input for slot 1', exact: true, pressed: false }).click();
+      await page.getByRole('button', { name: 'Live input for slot 1', exact: true, pressed: true }).waitFor();
+      await emit({
+        events: [transport(0, true, 120), laneEvent(0, lane('Recording'), 2 * RATE), { Beat: { frame: 2 * RATE, beatInBar: 0, countLeft: 0, clicked: true } }],
+        anchor: anchorAt(3 * RATE),
+        peaks: [wave(0, Math.ceil(RATE / PEAK_FRAMES))],
+        meter: { peak: 1.02, clip: true },
+      });
+      await page.waitForTimeout(150);
+      await emit({ meter: { peak: 0.7, clip: false } });
+      await page.waitForTimeout(300);
       await shoot(scene);
 
       for (const e of errors) fail(`${tag} ${e.scene}: console error: ${e.text.slice(0, 300)}`);
