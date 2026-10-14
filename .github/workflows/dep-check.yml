@@ -1,6 +1,6 @@
 name: dep-check
 
-# Weekly DRIFT VISIBILITY for a deliberately bleeding-edge stack (TS 6, Vite 8/rolldown, Node-25 types,
+# Weekly DRIFT VISIBILITY for a deliberately bleeding-edge stack (TS 7, Vite 8/rolldown, Node-25 types,
 # clack-host =0.1.0 single-maintainer, …). The goal is to SEE drift, not auto-bump it — so this is a
 # fail-never report: it lists outdated JS + Rust deps in the run summary and never blocks anything. No
 # renovate/dependabot (too noisy for a single-dev repo). Bumps stay a manual, by-ear call.

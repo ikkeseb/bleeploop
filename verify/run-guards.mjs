@@ -12,6 +12,8 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
 const here = join(dirname(fileURLToPath(import.meta.url)), 'guards');
+// A guard takes seconds; one that hangs would hang the pre-push hook, so it is killed and fails by name.
+const TIMEOUT_MS = 60_000;
 
 const files = readdirSync(here)
   .filter((f) => f.endsWith('.mjs'))
@@ -27,25 +29,33 @@ let failedFiles = 0;
 const rows = [];
 
 for (const f of files) {
-  const res = spawnSync(process.execPath, [join(here, f)], { encoding: 'utf8' });
+  const res = spawnSync(process.execPath, [join(here, f)], { encoding: 'utf8', timeout: TIMEOUT_MS });
+  const timedOut = res.error?.code === 'ETIMEDOUT';
   const out = `${res.stdout || ''}${res.stderr || ''}`;
   const m = out.match(/(\d+)\/(\d+) checks passed/);
   const checks = m ? Number(m[2]) : 0;
   const failedInFile = m ? Number(m[2]) - Number(m[1]) : NaN;
   // checks > 0: a verifier reporting "0/0 checks passed" (a fully-rotted guard that asserts nothing)
   // must FAIL, not silently pad the green summary.
-  const ok = res.status === 0 && m && failedInFile === 0 && checks > 0;
+  const ok = !timedOut && res.status === 0 && m && failedInFile === 0 && checks > 0;
   totalChecks += checks;
   if (!ok) failedFiles += 1;
   rows.push({
     f,
     ok,
-    summary: m ? (checks > 0 ? `${m[1]}/${m[2]}` : `${m[1]}/${m[2]} (0 checks ran)`) : '(no RESULT line)',
+    summary: timedOut
+      ? `(timed out after ${TIMEOUT_MS / 1000} s)`
+      : m
+        ? checks > 0
+          ? `${m[1]}/${m[2]}`
+          : `${m[1]}/${m[2]} (0 checks ran)`
+        : '(no RESULT line)',
     status: res.status,
   });
   if (!ok) {
     // surface the failing detail so a regression is immediately actionable
-    process.stderr.write(`\n----- FAIL: ${f} (exit ${res.status}) -----\n${out.trim()}\n`);
+    const why = timedOut ? `timed out after ${TIMEOUT_MS / 1000} s` : `exit ${res.status}`;
+    process.stderr.write(`\n----- FAIL: ${f} (${why}) -----\n${out.trim()}\n`);
   }
 }
 

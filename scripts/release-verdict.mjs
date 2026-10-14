@@ -1,12 +1,13 @@
-// scripts/release-verdict.mjs — has this commit's own push to main already passed `ci` and `rust-test`?
-// build-exe.yml asks before a release: a green verdict on the very commit lets the tag's run skip the
-// same two workflows (about 20 min of the wait). It waits for a run that is still going, and anything it
-// cannot read as green (no run, a failed or cancelled one, a job that was skipped, an API error, the
-// deadline) answers "no", so the tag's run then runs that workflow itself.
+// scripts/release-verdict.mjs — has this commit's own push to main already passed `ci`, `rust-test` and
+// `browser-lifecycle`? build-exe.yml asks before a release: a green verdict on the very commit lets the
+// tag's run skip the same workflows (about 20 min of the wait). It waits for a run that is still going,
+// and anything it cannot read as green (no run, a failed or cancelled one, a job that was skipped, an API
+// error, the deadline) answers "no", so the tag's run then runs that workflow itself.
 //
 //   GH_TOKEN=… GH_REPO=owner/repo node scripts/release-verdict.mjs <sha> [--wait-min=35]
 //
-// Prints `ci=green|` and `rust_test=green|` (and appends them to $GITHUB_OUTPUT when set). Exit 0 always.
+// Prints `ci=green|`, `rust_test=green|` and `browser_lifecycle=green|` (and appends them to
+// $GITHUB_OUTPUT when set). Exit 0 always.
 
 import { execFileSync } from 'node:child_process';
 import { appendFileSync } from 'node:fs';
@@ -15,6 +16,7 @@ import { appendFileSync } from 'node:fs';
 const WORKFLOWS = [
   { key: 'ci', file: 'ci.yml', jobs: ['docs-guard', 'js', 'rust', 'engine'] },
   { key: 'rust_test', file: 'rust-test.yml', jobs: ['test'] },
+  { key: 'browser_lifecycle', file: 'browser-lifecycle.yml', jobs: ['lifecycle'] },
 ];
 const POLL_MS = 30_000;
 

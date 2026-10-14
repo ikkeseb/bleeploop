@@ -19,7 +19,7 @@ native's); the engine host replays every remembered setting into each new engine
 (`engine_io/settings.rs`).
 
 `src/platform/` is the **only** place allowed to import `@tauri-apps/*` (enforced by
-`scripts/check-boundary.mjs`, run via `pnpm check:boundary`). `ui/`, `session/` and `app/` depend on
+`verify/guards/boundary.mjs`, part of `pnpm check`). `ui/`, `session/` and `app/` depend on
 its interfaces, never the reverse (`src/platform/host.ts`):
 
 | Interface | Web impl | Tauri impl |

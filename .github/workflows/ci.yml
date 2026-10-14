@@ -117,7 +117,6 @@ jobs:
       # The docs guard already ran the deterministic verifiers for this exact commit.
       - run: pnpm typecheck
       - run: pnpm lint
-      - run: pnpm check:boundary
 
       # The vite bundle gate (the Tauri bundle input). `pnpm build` is `tsc --noEmit && vite build`,
       # but the typecheck half already ran via `pnpm typecheck` above — so run only `vite build` here to
@@ -151,8 +150,8 @@ jobs:
       # `cargo test` is NOT here: it builds the workspace's test binaries (the cache holds dependencies
       # only) and runs them, minutes against ~2 for this check — rust-test.yml, on src-tauri/ changes.
 
-  # lf-engine, the pure engine crate (briefing: its src/lib.rs): its tests build nothing of
-  # the app, so they run on every push, on Linux. rust-test.yml runs them again on Windows.
+  # lf-engine, the pure engine crate (briefing: its src/lib.rs): its tests build nothing of the app, so
+  # they run on Linux, on the same `native` diffs as `rust`. rust-test.yml runs them again on Windows.
   engine:
     needs: docs_guard
     if: needs.docs_guard.outputs.docs_only != 'true' && needs.docs_guard.outputs.native != 'false'

@@ -1,21 +1,27 @@
 name: browser-lifecycle
 
 # Every browser probe in verify/probes/ except those whose header says `@no-ci` (verify/README.md).
-# No audio hardware; the separately dispatched golden jam keeps its own policy.
+# No audio hardware; the separately dispatched golden jam keeps its own policy. The paths are what the
+# page and the install read: the app's document (index.html), Vite's config and what it imports
+# (scripts/build-commit.mjs), the tsconfig its transform follows, and the install's lockfile and overrides.
 on:
   push:
     branches: [main]
-    paths: ['src/**', 'verify/**', 'package.json', 'pnpm-lock.yaml', 'vite.config.ts', '.github/workflows/browser-lifecycle.yml']
+    paths: ['src/**', 'verify/**', 'index.html', 'package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'tsconfig.json', 'vite.config.ts', 'scripts/build-commit.mjs', '.github/workflows/browser-lifecycle.yml']
   pull_request:
     branches: [main]
-    paths: ['src/**', 'verify/**', 'package.json', 'pnpm-lock.yaml', 'vite.config.ts', '.github/workflows/browser-lifecycle.yml']
+    paths: ['src/**', 'verify/**', 'index.html', 'package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'tsconfig.json', 'vite.config.ts', 'scripts/build-commit.mjs', '.github/workflows/browser-lifecycle.yml']
   workflow_dispatch: {}
+  # build-exe.yml calls this for the exact commit it builds; the release waits for it.
+  workflow_call: {}
 
+# Least privilege: nothing here writes to the repo.
 permissions:
   contents: read
 
+# A push gets a group of its own (its run), so the next push never cancels its probes (ci.yml).
 concurrency:
-  group: browser-lifecycle-${{ github.ref }}
+  group: browser-lifecycle-${{ github.workflow }}-${{ github.ref }}-${{ github.event_name == 'push' && github.run_id || '' }}
   cancel-in-progress: true
 
 jobs:

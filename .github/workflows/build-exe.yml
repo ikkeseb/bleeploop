@@ -3,20 +3,22 @@ name: build-exe
 # The shippable Windows build, made on a clean runner: the NSIS installer plus the bare exe, kept as a
 # run artifact. On demand (Actions tab: build only) and on a `v*` tag push; never on a plain main push
 # (a release build is ~15-20 min of Windows runner). A tag push also PUBLISHES the GitHub Release once
-# the exe and this commit's `ci` and `rust-test` are green; a red gate publishes nothing. The two
-# count as green from main's own push of the tagged commit (the release prep commit starts both; the
-# run waits for one still going), and the tag's run runs whichever it cannot read as green. Run by hand
+# the exe and this commit's `ci`, `rust-test` and `browser-lifecycle` are green; a red gate publishes
+# nothing. The three count as green from main's own push of the tagged commit (the release prep commit
+# starts all three: its version bump touches package.json and src-tauri/; the run waits for one still
+# going), and the tag's run runs whichever it cannot read as green. Run by hand
 # with `smoke`, it builds the exe `pnpm release:smoke` drives instead: bare, unsigned, in the smoke's
 # own profile (`scripts/release-smoke.tauri.json`), with this job's toolchain and ASIO SDK, so the
 # release's gate needs no build on the PC.
 #
 # To release (agents, end to end): on a main whose CI is green, bump the version in package.json,
-# src-tauri/tauri.conf.json and src-tauri/Cargo.toml (and its Cargo.lock entry), commit
-# "Release prep: vX.Y.Z", push, run `pnpm release:smoke` on a release build of main's head in the
-# smoke's profile (`gh workflow run build-exe.yml --ref main -f smoke=true`, then that run's
-# `BleepLoop-smoke-<sha>` artifact through `--exe=`: docs/VERIFY.md; a red run is fixed first: a flat
-# input take's FAIL says when the loopback cable must be in, and a PASS names the take that passed),
-# then `git tag -a vX.Y.Z -F <notes>` on that commit and push the tag.
+# src-tauri/tauri.conf.json and src-tauri/Cargo.toml (and its Cargo.lock entry;
+# verify/guards/version-sync.mjs holds the four equal), commit "Release prep: vX.Y.Z", push, run
+# `pnpm release:smoke` on a release build of main's head in the smoke's profile
+# (`gh workflow run build-exe.yml --ref main -f smoke=true`, then that run's `BleepLoop-smoke-<sha>`
+# artifact through `--exe=`: docs/VERIFY.md; a red run is fixed first: a flat input take's FAIL says
+# when the loopback cable must be in, and a PASS names the take that passed), then
+# `git tag -a vX.Y.Z -F <notes>` on that commit and push the tag.
 # The notes file is `BleepLoop vX.Y.Z`, a blank line, then one bullet per player-visible change since
 # the previous release; it becomes the release's "What's new". No line may start with `#`: git
 # strips those as comments. A failed build or gate publishes nothing: fix, move the tag, push it again (a
@@ -62,9 +64,9 @@ env:
   SMOKE: ${{ github.event_name == 'workflow_dispatch' && inputs.smoke && 'yes' || '' }}
 
 jobs:
-  # A tag push: did main's own push of this exact commit already pass `ci` and `rust-test`, every
-  # job run and green (scripts/release-verdict.mjs; it waits for a run still going)? Anything else,
-  # an unreadable answer included, leaves the output empty and the two jobs below run.
+  # A tag push: did main's own push of this exact commit already pass `ci`, `rust-test` and
+  # `browser-lifecycle`, every job run and green (scripts/release-verdict.mjs; it waits for a run still
+  # going)? Anything else, an unreadable answer included, leaves that output empty and its job below runs.
   verdict:
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
@@ -75,6 +77,7 @@ jobs:
     outputs:
       ci: ${{ steps.verdict.outputs.ci }}
       rust_test: ${{ steps.verdict.outputs.rust_test }}
+      browser_lifecycle: ${{ steps.verdict.outputs.browser_lifecycle }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -86,7 +89,8 @@ jobs:
         run: node scripts/release-verdict.mjs "${{ github.sha }}"
 
   # The push gates on this exact commit: a green run on another commit does not cover the download.
-  # `ci` is `pnpm check` + the vite build + the no-ASIO `cargo check`; `rust-test` is `cargo test`.
+  # `ci` is `pnpm check` + the vite build + the no-ASIO `cargo check` + lf-engine's tests and deny check
+  # on Linux (its `engine` job); `rust-test` is `cargo test`; `browser-lifecycle` is `pnpm probe --ci`.
   # They run beside `exe`, and only the release waits for them. On a tag push each runs here unless
   # `verdict` read it green on this commit. A smoke build skips them: nothing is published from it.
   ci:
@@ -98,6 +102,11 @@ jobs:
     needs: verdict
     if: ${{ !cancelled() && (github.event_name == 'push' && needs.verdict.outputs.rust_test != 'green' || github.event_name == 'workflow_dispatch' && !inputs.smoke) }}
     uses: ./.github/workflows/rust-test.yml
+
+  browser-lifecycle:
+    needs: verdict
+    if: ${{ !cancelled() && (github.event_name == 'push' && needs.verdict.outputs.browser_lifecycle != 'green' || github.event_name == 'workflow_dispatch' && !inputs.smoke) }}
+    uses: ./.github/workflows/browser-lifecycle.yml
 
   exe:
     runs-on: windows-latest
@@ -204,11 +213,12 @@ jobs:
   # the tag's release through the runner's preinstalled `gh`, with the annotated tag's notes.
   # Each gate is green when it ran here and passed, or was skipped because `verdict` read it green.
   release:
-    needs: [verdict, ci, rust-test, exe]
+    needs: [verdict, ci, rust-test, browser-lifecycle, exe]
     if: >-
       ${{ !cancelled() && github.event_name == 'push' && needs.exe.result == 'success'
       && (needs.ci.result == 'success' || needs.ci.result == 'skipped' && needs.verdict.outputs.ci == 'green')
-      && (needs.rust-test.result == 'success' || needs.rust-test.result == 'skipped' && needs.verdict.outputs.rust_test == 'green') }}
+      && (needs.rust-test.result == 'success' || needs.rust-test.result == 'skipped' && needs.verdict.outputs.rust_test == 'green')
+      && (needs.browser-lifecycle.result == 'success' || needs.browser-lifecycle.result == 'skipped' && needs.verdict.outputs.browser_lifecycle == 'green') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:

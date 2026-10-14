@@ -7,7 +7,7 @@
  *
  * BOUNDARY: this file lives at `src/` ROOT — deliberately NOT under an app layer (`src/ui/`,
  * `src/session/`, …) nor `src/platform/` — so every layer, `src/platform/` too, may import it without
- * tripping the capability-boundary guard (`scripts/check-boundary.mjs`): platform/ may not import the
+ * tripping the capability-boundary guard (`verify/guards/boundary.mjs`): platform/ may not import the
  * app layers, and this module is none. It imports ONLY `solid-js` — no ui/session/platform deps — so it
  * stays a leaf every layer can safely depend on. `<Toasts>` (in `src/ui/`) renders the signal.
  */

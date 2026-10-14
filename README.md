@@ -176,8 +176,8 @@ That binary is GPLv3, see the third-party notices.
 One native audio engine, clocked by the audio device, owns the sound: looper, click, synths, FX,
 limiter and the plugin slots run in the driver's callback (`src-tauri/crates/lf-engine`, the device
 side in `src-tauri/src/engine_io`). The WebView is the UI: it sends commands and draws a state feed.
-`src/platform/` is the only directory allowed to import `@tauri-apps/*`, and `pnpm check:boundary`
-enforces that. The browser build renders the UI and is silent.
+`src/platform/` is the only directory allowed to import `@tauri-apps/*`, and `pnpm check` enforces
+that (`verify/guards/boundary.mjs`). The browser build renders the UI and is silent.
 
 Full design decisions and invariants: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 Live project state and open threads: [`STATUS.md`](STATUS.md).

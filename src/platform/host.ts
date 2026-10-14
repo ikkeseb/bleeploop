@@ -2,7 +2,7 @@
  * THE CAPABILITY BOUNDARY.
  *
  * `src/platform/` is the ONLY place in the app permitted to import `@tauri-apps/*`
- * (enforced by `scripts/check-boundary.mjs`). Everything in `ui/`, `session/` and `app/` depends
+ * (enforced by `verify/guards/boundary.mjs`). Everything in `ui/`, `session/` and `app/` depends
  * on these interfaces, never on Tauri directly — so the entire frontend builds and renders
  * standalone in a browser via `pnpm dev` (silent: the browser build has no engine).
  *

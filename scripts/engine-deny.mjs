@@ -9,9 +9,10 @@ import { execFileSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-// Whole families by prefix (tauri-*, clack-*), single crates by name.
-const DENIED_PREFIXES = ['tauri', 'clack'];
-const DENIED = ['cpal', 'windows', 'windows-core', 'clap-sys', 'vst3'];
+// Whole families by prefix (tauri-*, clack-*, webview2-com*), single crates by name: the audio device
+// (cpal, asio-sys), native MIDI's ports (midir), the OS bindings and the plugin ABIs.
+const DENIED_PREFIXES = ['tauri', 'clack', 'webview2'];
+const DENIED = ['cpal', 'asio-sys', 'midir', 'windows', 'windows-core', 'clap-sys', 'vst3'];
 
 const cwd = join(dirname(fileURLToPath(import.meta.url)), '..', 'src-tauri');
 const tree = execFileSync(
