@@ -17,10 +17,10 @@
 //! | `learn` | learn capture, matching, consume-first, momentary vs latching, HOLD's control numbers, the release waits | `src/app/midi-actions.ts` |
 //! | `actions` | what a binding runs, as engine commands and UI events; which of the UI's commands join the queue | `src/app/actions.ts` |
 //! | `router` | note ownership for MIDI and UI owners, sustain, the wheels, the note target, the held-note set | `src/ui/state/input-router.ts`, `instrument.ts` `routeEngine` |
-//! | `queue` | the one bounded FIFO into the engine's ring: reserved releases, whole batches, coalesced wheels, no-device admission, the engine generation | (new: nothing is stamped, the no-device rule, a rebuild needs no WebView) |
+//! | `queue` | the one bounded FIFO into the engine's ring: reserved releases, whole batches, coalesced wheels, no-device admission, what a rebuild empties and folds | (new: nothing is stamped, the no-device rule, a rebuild needs no WebView) |
 //! | `store` | `midi-bindings.json` and the one-time import of the web's list | (new: bindings live native, the import never guesses) |
 //! | `ports` | midir connections, port identities, which port a stored binding answers to, the port thread | `midi.ts` `attachInputs` |
-//! | `liveness` | interface arrival and removal notifications, connection generations, the arrival retry | (Web MIDI's `statechange`) |
+//! | `liveness` | interface arrival and removal notifications, which open connections a removal ends, the arrival retry | (Web MIDI's `statechange`) |
 //!
 //! # Rules
 //!
@@ -59,9 +59,9 @@
 //! - **An edit by index names the list it was made against:** the `bindings` event carries the store's
 //!   revision, and an edit made against another one is refused (nothing changes; the UI already has, or
 //!   is about to get, the list as it is), since its index may name another binding by now.
-//! - **A record learn does not run still owns its control on a port of its name** (a blocked one, or
-//!   one on its legacy ordinal id): that message is consumed and runs nothing, so a pedal waiting for
-//!   the player's assignment never plays the synth. A release the router still owes its owner passes (a
+//! - **A record learn does not run still owns its control on a port of its name** (a blocked one, one
+//!   on its legacy ordinal id, or an ambiguous one: several ports carry its name): that message is
+//!   consumed and runs nothing, so a pedal waiting for the player's assignment never plays the synth. A release the router still owes its owner passes (a
 //!   note-off of a held note, a pedal-up of a pedal down): the record may have arrived while it was held.
 //! - **The store is written on the port thread** (`Core::tick`), from a snapshot taken under the lock,
 //!   after it is released. A write refused or failed is a [`MidiEvent::Store`] and a release-log line,
@@ -102,7 +102,7 @@ use serde::Serialize;
 
 pub use bindings::{ActionId, Binding, Target};
 pub use learn::LearnRefusal;
-pub use queue::QueueCounters;
+#[cfg(test)]
 pub use router::Held;
 pub use store::{ImportReport, Listed};
 /// For the wire fixture's test (`super::wire`), which builds a listed binding and an import report.
@@ -290,11 +290,10 @@ pub enum Dropped {
 }
 
 impl Dropped {
-    /// What the queue's answer to one batch tells the player. A batch made for another engine generation
-    /// is none of the UI's (the UI's are made for the current one).
+    /// What the queue's answer to one batch tells the player.
     fn of(admitted: Result<(), Refused>) -> Option<Dropped> {
         match admitted {
-            Ok(()) | Err(Refused::Stale) => None,
+            Ok(()) => None,
             Err(Refused::NoDevice) => Some(Dropped::NoDevice),
             Err(Refused::Paused) => Some(Dropped::Rebuilding),
             Err(Refused::Full) => Some(Dropped::Full),
@@ -308,8 +307,9 @@ pub fn router_command(command: &Command) -> bool {
     actions::ui_route(command) == UiRoute::Router
 }
 
-/// A stored record MIDI learn does not run (blocked, or still on its legacy ordinal id), by the control it
-/// names: on a port of its name, that message runs nothing.
+/// A stored record MIDI learn does not run (blocked, still on its legacy ordinal id, or ambiguous:
+/// [`BindingState::SeveralPorts`], [`BindingState::SeveralAbsent`]), by the control it names: on a port
+/// of its name, that message runs nothing.
 struct Unrun {
     port_name: String,
     channel: u8,
@@ -342,8 +342,6 @@ pub struct Refusals {
     pub paused: u64,
     /// The unreserved room was gone: in the release log, at most a line a second.
     pub full: u64,
-    /// Made for another engine generation: logged as `full` is.
-    pub stale: u64,
 }
 
 impl Refusals {
@@ -352,22 +350,18 @@ impl Refusals {
             Refused::NoDevice => self.no_device += 1,
             Refused::Paused => self.paused += 1,
             Refused::Full => self.full += 1,
-            Refused::Stale => self.stale += 1,
         }
     }
 }
 
-/// Counters for the DEV probe and the release log.
+/// The counters the tests read (the release log names them: `Core::tick`).
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct MidiDiag {
     /// Drains the engine refused (its ring was full): the refused command stayed at the queue's head.
-    /// In the release log, at most a line a second.
     pub failed_sends: u64,
-    /// Panics caught in a port callback (the message is dropped; midir calls it from an
-    /// `extern "system"` WinMM callback, where an unwind would abort the process).
-    pub panics: u64,
     pub refused: Refusals,
-    pub queue: QueueCounters,
+    pub queue: queue::QueueCounters,
 }
 
 /// A present port and its connection (`None` while it is not open).
@@ -433,8 +427,6 @@ struct State {
     queue: Queue,
     learn: Learn,
     store: Store,
-    /// The engine generation the queue feeds, and every batch is made for.
-    generation: u64,
     ports: Vec<PortEntry>,
     /// The listed bindings MIDI learn runs, in the order it was handed them.
     live: Vec<usize>,
@@ -493,8 +485,8 @@ pub(crate) struct Core {
     wake: Option<Sender<Wake>>,
     held: HeldNotes,
     events: Events,
+    /// Drains the engine refused (its ring was full): in the release log, at most a line a second.
     failed_sends: AtomicU64,
-    panics: AtomicU64,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -510,10 +502,9 @@ impl Core {
         let core = Core {
             state: Mutex::new(State {
                 router,
-                queue: Queue::new(0),
+                queue: Queue::new(),
                 learn: Learn::default(),
                 store,
-                generation: 0,
                 ports: Vec::new(),
                 live: Vec::new(),
                 bindings: Vec::new(),
@@ -538,7 +529,6 @@ impl Core {
             held,
             events: Events::default(),
             failed_sends: AtomicU64::new(0),
-            panics: AtomicU64::new(0),
         };
         core.refresh(&mut lock(&core.state));
         core
@@ -658,7 +648,7 @@ impl Core {
         if out.is_empty() {
             return Ok(());
         }
-        let admitted = st.queue.admit(out, st.generation, self.engine.running());
+        let admitted = st.queue.admit(out, self.engine.running());
         if let Err(why) = admitted {
             st.router.attack_refused(out);
             st.refused.count(why);
@@ -764,9 +754,9 @@ impl Core {
         if let Message::NoteOn { note, velocity, .. } = message {
             super::midi_bench::arrived(&[Command::NoteOn(note, f32::from(velocity) / 127.0)], at);
         }
-        if catch_unwind(AssertUnwindSafe(|| self.input(|core, st, out| core.route(st, out, conn, at, message)))).is_err() {
-            self.panics.fetch_add(1, Relaxed);
-        }
+        // midir calls this from an `extern "system"` WinMM callback, where an unwind would abort the
+        // process: a panic drops the message (the panic hook logs it).
+        let _ = catch_unwind(AssertUnwindSafe(|| self.input(|core, st, out| core.route(st, out, conn, at, message))));
     }
 
     fn route(&self, st: &mut State, out: &mut Vec<Out>, conn: u32, at: Instant, message: Message) {
@@ -860,7 +850,10 @@ impl Core {
             self.fire(st, fire);
         }
         let bindings: Vec<ListedBinding> = listed.into_iter().zip(states).map(|(listed, state)| ListedBinding { listed, state }).collect();
-        st.unrun = bindings.iter().filter(|l| l.listed.blocked.is_some() || l.listed.ordinal).map(|l| Unrun::of(&l.listed.binding)).collect();
+        let unrun = |l: &ListedBinding| {
+            l.listed.blocked.is_some() || l.listed.ordinal || matches!(l.state, BindingState::SeveralPorts | BindingState::SeveralAbsent)
+        };
+        st.unrun = bindings.iter().filter(|l| unrun(l)).map(|l| Unrun::of(&l.listed.binding)).collect();
         let revision = st.store.revision();
         if bindings != st.bindings || revision != st.heard_revision {
             st.bindings = bindings.clone();
@@ -941,14 +934,13 @@ impl Core {
             let retry = st.armed.then(|| now + if st.blocked { RETRY } else { IDLE_RETRY });
             let (logged, logged_sends, at) = st.logged;
             let sends = self.failed_sends.load(Relaxed);
-            let moved = (st.refused.full, st.refused.stale, sends) != (logged.full, logged.stale, logged_sends);
+            let moved = (st.refused.full, sends) != (logged.full, logged_sends);
             let line = (moved && at.is_none_or(|at| now.saturating_duration_since(at) >= LOG_EVERY)).then(|| {
                 st.logged = (st.refused, sends, Some(now));
                 format!(
-                    "since the last line: {} send(s) the engine's full ring refused (each retried), {} batch(es) refused for room, {} made for another engine; queue {:?}",
+                    "since the last line: {} send(s) the engine's full ring refused (each retried), {} batch(es) refused for room; queue {:?}",
                     sends - logged_sends,
                     st.refused.full - logged.full,
-                    st.refused.stale - logged.stale,
                     st.queue.counters()
                 )
             });
@@ -1014,10 +1006,11 @@ impl Core {
         self.lock().queue.pause();
     }
 
-    fn rebuild(&self, generation: u64) -> Vec<Command> {
+    /// The engine was replaced: the queue empties (no batch spans the two engines: each is built and
+    /// admitted under this lock), and what the old engine sounded or held is forgotten.
+    fn rebuild(&self) -> Vec<Command> {
         let mut st = self.lock();
-        let fold = st.queue.rebuild(generation);
-        st.generation = generation;
+        let fold = st.queue.rebuild();
         st.router.engine_rebuilt();
         st.learn.clear_holds();
         fold.commands().collect()
@@ -1045,8 +1038,8 @@ impl RebuildHook for Rebuild {
         }
     }
 
-    fn rebuild(&self, generation: u64) -> Vec<Command> {
-        self.0.upgrade().map(|core| core.rebuild(generation)).unwrap_or_default()
+    fn rebuild(&self, _generation: u64) -> Vec<Command> {
+        self.0.upgrade().map(|core| core.rebuild()).unwrap_or_default()
     }
 
     fn resume(&self) {
@@ -1249,15 +1242,13 @@ impl MidiHost {
             report
         })
     }
+}
 
-    /// Every stored binding, in list order, and how it stands.
+#[cfg(test)]
+impl MidiHost {
+    /// Every stored binding, in list order, and how it stands (the UI hears it as `MidiEvent::Bindings`).
     pub fn listed(&self) -> Vec<ListedBinding> {
         self.core.lock().bindings.clone()
-    }
-
-    /// The present input ports, in the system's order.
-    pub fn ports(&self) -> Vec<PortInfo> {
-        port_infos(&self.core.lock().ports)
     }
 
     /// The notes held down now, read without the lock.
@@ -1267,17 +1258,9 @@ impl MidiHost {
 
     pub fn diag(&self) -> MidiDiag {
         let st = self.core.lock();
-        MidiDiag {
-            failed_sends: self.core.failed_sends.load(Relaxed),
-            panics: self.core.panics.load(Relaxed),
-            refused: st.refused,
-            queue: st.queue.counters(),
-        }
+        MidiDiag { failed_sends: self.core.failed_sends.load(Relaxed), refused: st.refused, queue: st.queue.counters() }
     }
-}
 
-#[cfg(test)]
-impl MidiHost {
     /// A host on `engine` with no port thread (no port opens) and nothing stored: the command layer's
     /// tests (`super::midi_mode`).
     pub(crate) fn detached(engine: Arc<dyn EngineSide>) -> MidiHost {
@@ -2162,6 +2145,58 @@ mod tests {
         assert_eq!(r.take(), [Command::Action(Action::PlayAll)]);
         r.send(B, &[[0x90, 36, 100]]);
         assert_eq!(r.take(), [], "the blocked record still owns it there");
+    }
+
+    // An ambiguous record (its port absent, and several present ports, or several stored ports, carry
+    // its name) runs nothing, and neither does its control on a port of its name: a note and a CC64
+    // learned on one of two identical pedals never play the synth once both come back on new paths.
+    // A note or a pedal held before the record turned ambiguous still gets its release.
+    #[test]
+    fn an_ambiguous_records_control_runs_nothing_on_a_port_of_its_name() {
+        let on_pedal = |path: &str, channel: u8, kind: Kind, number: u8, action: ActionId| Binding {
+            port_id: port_at(path, "Pedal", None).id,
+            port_name: "Pedal".into(),
+            channel,
+            kind,
+            number,
+            action,
+            target: None,
+            press_high: true,
+            momentary: false,
+            hold: false,
+        };
+        let usb = |n: u32| format!(r"\\?\usb#{n}");
+        // The claimed port 1 binds CC 20 exactly; port 0, where channel 2's note 36 and channel 1's CC64
+        // were learned, is gone.
+        let store = holding(vec![
+            on_pedal(&usb(1), 0, Kind::Cc, 20, ActionId::Undo),
+            on_pedal(&usb(0), 1, Kind::Note, 36, ActionId::PlayAll),
+            on_pedal(&usb(0), 0, Kind::Cc, 64, ActionId::StopAll),
+        ]);
+        let r = Rig::with((store, None), None, vec![port_at(&usb(1), "Pedal", Some(A))]);
+        let states = |r: &Rig| r.host.listed().iter().map(|l| l.state).collect::<Vec<_>>();
+        assert_eq!(states(&r), [BindingState::Live, BindingState::NoPort, BindingState::NoPort]);
+        r.send(A, &[[0x91, 36, 100], [0xb0, 64, 127], [0x90, 40, 100], [0x80, 40, 0]]);
+        assert_eq!(r.take(), [on(36, 100), on(40, 100)], "36 held, 40 under the pedal");
+
+        r.host.core.set_ports(vec![port_at(&usb(1), "Pedal", Some(A)), port_at(&usb(2), "Pedal", Some(B)), port_at(&usb(3), "Pedal", Some(3))]);
+        assert_eq!(states(&r), [BindingState::Live, BindingState::SeveralPorts, BindingState::SeveralPorts]);
+        r.send(A, &[[0x81, 36, 0]]);
+        assert_eq!(r.take(), [Command::NoteOff(36)], "the held note's release passes");
+        r.send(A, &[[0xb0, 64, 0]]);
+        assert_eq!(r.take(), [Command::NoteOff(40)], "the pedal's release lets go of what it sustained");
+        for conn in [A, B, 3] {
+            r.send(conn, &[[0x91, 36, 100], [0x81, 36, 0], [0xb0, 64, 127], [0x90, 41, 100], [0x80, 41, 0], [0xb0, 64, 0]]);
+            assert_eq!(r.take(), [on(41, 100), Command::NoteOff(41)], "port {conn}: no action, no note 36, no sustain");
+        }
+        assert_eq!(r.held(), [] as [u8; 0]);
+
+        // One present port, two stored ports of its name, neither present: none is guessed.
+        let store = holding(vec![on_pedal(&usb(0), 0, Kind::Note, 36, ActionId::PlayAll), on_pedal(&usb(9), 0, Kind::Note, 37, ActionId::StopAll)]);
+        let r = Rig::with((store, None), None, vec![port_at(&usb(1), "Pedal", Some(A))]);
+        assert_eq!(states(&r), [BindingState::SeveralAbsent, BindingState::SeveralAbsent]);
+        r.send(A, &[[0x90, 36, 100], [0x90, 37, 100], [0x90, 41, 100]]);
+        assert_eq!(r.take(), [on(41, 100)]);
     }
 
     // Review fix: a HOLD pedal's press-side message repeated while it holds (a lost release) keeps its

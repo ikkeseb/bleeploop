@@ -28,8 +28,7 @@
 //! - **A refused attack records no owner.** The queue decides after the router; when it refuses the
 //!   batch a `note_on` made, [`Router::attack_refused`] undoes what that call recorded, and nothing for
 //!   any other batch. Every other batch the router makes (releases, wheels, the target, a panic) is one
-//!   the queue always takes (its reservations) unless it was made for another engine generation, which
-//!   sounds none of the router's notes; so the router may forget a note as it releases it.
+//!   the queue always takes (its reservations), so the router may forget a note as it releases it.
 //! - **A rebuilt engine sounds nothing** ([`Router::engine_rebuilt`]): the owners and pedals stay, so a
 //!   later release is harmless (nothing is sent for a note the new engine never sounded) and a fresh
 //!   press attacks again; the target and wheels the router last sent reach the new engine through the
@@ -381,6 +380,7 @@ impl Router {
     }
 
     /// The note target last selected.
+    #[cfg(test)]
     pub fn target(&self) -> Option<NoteTarget> {
         self.target.map(|(_, target)| target)
     }

@@ -14,7 +14,9 @@
 //! keeps a mirror of the lanes, the transport and the selection: a new subscriber (a WebView reload) and
 //! a new engine (another sample rate, a fault) get a `reset` frame that carries all of it, with the
 //! settings the host keeps and each lane's last `Mix` (`settings.rs`, which every drain feeds), so the
-//! UI adopts them. The thread drains while nobody subscribes, so the event ring never fills.
+//! UI adopts them. The thread drains while nobody subscribes, so the event ring never fills; it then
+//! ticks as a held feed does (below): no frame is built, and the device events wait for the next
+//! subscriber's reset.
 //!
 //! The feed can be HELD (`FeedThread::hold`): while the UI thread cannot read (the native folder
 //! dialog is modal on it), every frame sent would wait in the channel, with no bound, and arrive in
@@ -163,9 +165,10 @@ impl Feed {
         replaced
     }
 
-    /// A tick of a held feed: the ring is drained and the mirror follows it, the device events are
-    /// kept for the next frame (the latest `HELD_DEVICE_EVENTS`), and no frame is built (`seq` stays). The reset that ends the hold
-    /// reads the status, the meter and the waveforms afresh.
+    /// A tick of a held feed, or of one nobody subscribed to: the ring is drained and the mirror follows
+    /// it, the device events are kept for the next frame (the latest `HELD_DEVICE_EVENTS`), and no frame
+    /// is built (`seq` stays). The reset that ends the hold, or a new subscriber's, reads the status, the
+    /// meter and the waveforms afresh.
     pub(crate) fn tick_held(&mut self) {
         self.drain();
         self.scope(false);
@@ -376,11 +379,12 @@ impl Drop for FeedHold {
     }
 }
 
-/// One tick of the feed thread, under the subscriber's lock. Held: the feed ticks and nothing is
-/// sent, to a subscriber that came meanwhile neither (its reset waits for the hold's end). Else one
-/// frame at most goes out, a reset when the subscriber is new or a hold has ended since the last tick.
+/// One tick of the feed thread, under the subscriber's lock. Held, or with nobody subscribed: the feed
+/// ticks as a held one and builds nothing (a subscriber that came while held gets nothing either: its
+/// reset waits for the hold's end). Else one frame at most goes out, a reset when the subscriber is new
+/// or a hold has ended since the last tick.
 fn turn(feed: &mut Feed, subscriber: &mut Option<Subscriber>, hold: &Hold) {
-    if hold.holders.load(Acquire) > 0 {
+    if hold.holders.load(Acquire) > 0 || subscriber.is_none() {
         feed.tick_held();
         return;
     }
@@ -546,6 +550,34 @@ mod tests {
         let sent = sent.lock().unwrap();
         assert_eq!((sent.len(), sent.iter().filter(|f| f.reset).count()), (2, 1), "then ordinary frames again, and no second reset");
         assert_eq!((sent[1].seq, tempo(&sent[1])), (3, Some(120)));
+    }
+
+    // Nobody subscribed (before the first page, or after a page died): the feed ticks as a held one
+    // does. The ring is drained into the mirror, no frame is built, and a device event waits for the
+    // next subscriber's reset instead of going out to nobody.
+    #[test]
+    fn with_no_subscriber_the_feed_builds_nothing_and_keeps_the_device_events() {
+        let device = engine();
+        let mut feed = Feed::new(device.host().clone());
+        let hold = Arc::new(Hold::default());
+        let mut nobody = None;
+        set_bpm(&device, 240.0);
+        device.host().core.device_events.lock().unwrap().push(DeviceEvent::EngineFaulted);
+        for _ in 0..10 {
+            turn(&mut feed, &mut nobody, &hold);
+        }
+        let mut left = Vec::new();
+        device.host().drain_feed(&mut left);
+        assert!(left.is_empty(), "the ticks drained the ring: {} events were still in it", left.len());
+
+        let (mut sub, sent) = subscriber();
+        turn(&mut feed, &mut sub, &hold);
+        let sent = sent.lock().unwrap();
+        assert_eq!(sent.len(), 1);
+        let frame = &sent[0];
+        assert_eq!((frame.seq, frame.reset), (0, true), "no frame was built for nobody");
+        assert_eq!(frame.device, [DeviceEvent::EngineFaulted], "the device event waited for a subscriber");
+        assert_eq!(tempo(frame), Some(240), "the mirror followed the ring");
     }
 
     #[test]

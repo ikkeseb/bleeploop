@@ -248,8 +248,9 @@ impl Learn {
 
     /// Replace the list (a store load). Each binding keeps its invariants (`Binding`'s target and HOLD
     /// rules). A control whose binding is gone or changed loses its release wait and its HOLD press,
-    /// which is released (and, while the control is still bound, its pedal's release is spent, as
-    /// [`Learn::set_momentary`]'s); an unchanged binding keeps both.
+    /// which is released (and, while the control is still bound, its pedal's release is spent); an
+    /// unchanged binding keeps both. The player's edits arrive here too, through the store
+    /// (`MidiHost::forget`, `set_momentary`, `set_hold`).
     pub fn set_bindings(&mut self, list: Vec<Binding>) -> Vec<Fire> {
         let old = std::mem::replace(&mut self.bindings, list.into_iter().map(Binding::normalized).collect());
         let first = |list: &[Binding], c: &Control| list.iter().find(|b| Control::of(b) == *c).cloned();
@@ -272,38 +273,6 @@ impl Learn {
         let bindings = &self.bindings;
         self.spent.retain(|c| bindings.iter().any(|b| Control::of(b) == *c));
         fire
-    }
-
-    /// Drop binding `index` (`forget`): its messages reach the play path again, and a HOLD it held is
-    /// released.
-    pub fn forget(&mut self, index: usize) -> Vec<Fire> {
-        if index >= self.bindings.len() {
-            return Vec::new();
-        }
-        let c = Control::of(&self.bindings.remove(index));
-        self.end_wait(&c);
-        let fire = self.release_held(&c).into_iter().collect();
-        if self.position(&c).is_none() {
-            self.spent.remove(&c);
-        }
-        fire
-    }
-
-    /// Read binding `index`'s pedal as momentary or latching (the list's switch). A latching pedal has no
-    /// HOLD.
-    pub fn set_momentary(&mut self, index: usize, momentary: bool) -> Vec<Fire> {
-        let Some(b) = self.bindings.get(index).cloned() else { return Vec::new() };
-        self.update(index, Binding { momentary, hold: b.hold && momentary, ..b })
-    }
-
-    /// HOLD on or off for binding `index`: on for a momentary REC/DUB pedal only (refused otherwise,
-    /// nothing changed).
-    pub fn set_hold(&mut self, index: usize, hold: bool) -> Vec<Fire> {
-        let Some(b) = self.bindings.get(index).cloned() else { return Vec::new() };
-        if hold && !(b.momentary && b.action == ActionId::RecDub) {
-            return Vec::new();
-        }
-        self.update(index, Binding { hold, ..b })
     }
 
     /// Port `port_id` is gone: release each HOLD press on it, as its pedal's release never comes. A spent
@@ -416,6 +385,30 @@ mod tests {
     }
 
     /// A momentary REC/DUB pedal with HOLD on CC `number`, port `port`, channel 0.
+    /// The player's edits as production makes them: the list with binding `index` changed (or gone),
+    /// handed over whole (`MidiHost`'s edits go through the store, then `set_bindings`).
+    fn edit(l: &mut Learn, index: usize, f: impl FnOnce(Binding) -> Option<Binding>) -> Vec<Fire> {
+        let mut list = l.bindings().to_vec();
+        match f(list[index].clone()) {
+            Some(b) => list[index] = b,
+            None => _ = list.remove(index),
+        }
+        l.set_bindings(list)
+    }
+
+    fn forget(l: &mut Learn, index: usize) -> Vec<Fire> {
+        edit(l, index, |_| None)
+    }
+
+    fn set_momentary(l: &mut Learn, index: usize, momentary: bool) -> Vec<Fire> {
+        edit(l, index, |b| Some(Binding { momentary, hold: b.hold && momentary, ..b }))
+    }
+
+    /// HOLD where it can apply (`Binding::normalized` drops it elsewhere).
+    fn set_hold(l: &mut Learn, index: usize, hold: bool) -> Vec<Fire> {
+        edit(l, index, |b| Some(Binding { hold, ..b }))
+    }
+
     fn hold_pedal(port: &str, number: u8) -> Binding {
         Binding {
             port_id: port.into(),
@@ -587,14 +580,14 @@ mod tests {
         let t = Instant::now();
         l.set_bindings(vec![hold_pedal(A, 20), hold_pedal(A, 21)]);
         assert_eq!(send(&mut l, A, cc(0, 20, 127), t).fire, [Fire::HoldPress { target: None, control: 0 }]);
-        assert_eq!(l.set_momentary(0, false), [Fire::HoldRelease { control: 0 }]);
+        assert_eq!(set_momentary(&mut l, 0, false), [Fire::HoldRelease { control: 0 }]);
         assert_eq!((l.bindings()[0].momentary, l.bindings()[0].hold), (false, false));
         let out = send(&mut l, A, cc(0, 20, 0), t);
         assert!(out.consumed && out.fire.is_empty(), "the release is spent");
         assert_eq!(send(&mut l, A, cc(0, 20, 0), t).fire, [Fire::Run { action: ActionId::RecDub, target: None }]);
 
         assert_eq!(send(&mut l, A, cc(0, 21, 127), t).fire, [Fire::HoldPress { target: None, control: 0 }]);
-        assert_eq!(l.set_hold(1, false), [Fire::HoldRelease { control: 0 }]);
+        assert_eq!(set_hold(&mut l, 1, false), [Fire::HoldRelease { control: 0 }]);
         assert!(send(&mut l, A, cc(0, 21, 0), t).fire.is_empty());
         assert_eq!(send(&mut l, A, cc(0, 21, 127), t).fire, [Fire::Run { action: ActionId::RecDub, target: None }]);
     }
@@ -616,16 +609,16 @@ mod tests {
         assert_eq!(l.learning(), Some((ActionId::Undo, None)));
         l.cancel_learn();
 
-        assert!(l.set_hold(0, true).is_empty());
+        assert!(set_hold(&mut l, 0, true).is_empty());
         assert!(!l.bindings()[0].hold, "a latching recDub has no HOLD");
-        l.set_momentary(0, true);
-        l.set_momentary(1, true);
-        l.set_hold(1, true);
+        set_momentary(&mut l, 0, true);
+        set_momentary(&mut l, 1, true);
+        set_hold(&mut l, 1, true);
         assert!(!l.bindings()[1].hold, "playStop has no HOLD");
-        l.set_hold(0, true);
+        set_hold(&mut l, 0, true);
         assert!(l.bindings()[0].hold);
         assert_eq!(send(&mut l, A, cc(0, 0, 127), t + RELEASE_WAIT).fire, [Fire::HoldPress { target: Some(3), control: 0 }]);
-        l.set_momentary(0, false);
+        set_momentary(&mut l, 0, false);
         assert!(!l.bindings()[0].hold);
     }
 
@@ -668,7 +661,7 @@ mod tests {
         for (port, n) in [(A, 20), (A, 21), (B, 20), (A, 22)] {
             send(&mut l, port, cc(0, n, 127), t);
         }
-        assert_eq!(l.forget(0), [Fire::HoldRelease { control: 0 }]);
+        assert_eq!(forget(&mut l, 0), [Fire::HoldRelease { control: 0 }]);
         assert!(!send(&mut l, A, cc(0, 20, 0), t).consumed, "forgotten: the release reaches the play path");
 
         // The same list keeps its holds; a changed binding and a dropped one release theirs.

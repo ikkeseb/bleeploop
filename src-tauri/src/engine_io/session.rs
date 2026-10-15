@@ -176,7 +176,8 @@ impl EngineHost {
         if !(40..=300).contains(&header.bpm) || header.bars < 1 {
             return Err(format!("session: bpm {} or bars {} out of range", header.bpm, header.bars));
         }
-        if master != header.bars * frames_per_bar(header.bpm as f64, rate) {
+        // The header comes from outside: a bar count whose length overflows has no length at all.
+        if header.bars.checked_mul(frames_per_bar(header.bpm as f64, rate)) != Some(master) {
             return Err(format!("session: {} bars at {} BPM are not {master} frames at {rate} Hz", header.bars, header.bpm));
         }
         if master <= 0 || master as usize > capacity {

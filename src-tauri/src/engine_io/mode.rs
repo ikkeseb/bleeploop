@@ -79,9 +79,17 @@ impl EngineApp {
             }
         };
         let tones = data_dir.as_ref().map(|dir| ToneStore::new(dir.join(TONES_DIR)));
-        let host = EngineHost::new(HostConfig::default());
-        let (engine, midi) = match FeedThread::spawn(host.clone()) {
-            Ok(feed) => {
+        let started = EngineHost::new(HostConfig::default()).map_err(|e| format!("the device owner thread did not start ({e})")).and_then(|host| {
+            match FeedThread::spawn(host.clone()) {
+                Ok(feed) => Ok((host, feed)),
+                Err(e) => {
+                    host.shutdown();
+                    Err(format!("the feed thread did not start ({e})"))
+                }
+            }
+        });
+        let (engine, midi) = match started {
+            Ok((host, feed)) => {
                 log::info!("[engine_io] engine mode: the native engine owns the audio device");
                 // DEV: the MIDI latency benchmark and the lock-wait log, when an environment variable asks.
                 #[cfg(debug_assertions)]
@@ -91,9 +99,8 @@ impl EngineApp {
                 let midi = MidiHost::start(Arc::new(host.clone()), data_dir);
                 (Some((host, feed)), Some(midi))
             }
-            Err(e) => {
-                log::error!("[engine_io] the feed thread did not start ({e}); this launch has no audio engine");
-                host.shutdown();
+            Err(why) => {
+                log::error!("[engine_io] {why}; this launch has no audio engine");
                 (None, None)
             }
         };

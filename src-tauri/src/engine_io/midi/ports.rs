@@ -24,15 +24,17 @@
 //! Allocation per message: midir's WinMM handler copies each message into a `Vec` it clears and
 //! reuses, so a short message allocates only while that buffer first grows (SysEx, which could grow it
 //! again, is ignored here). This side allocates MIDI learn's key for the message (a copy of the port's
-//! id), a note's owner list on each note-on, the sweep list on a pedal-up or a release, and UI events on
-//! a learn; `EngineHost::send` pushes into the engine's ring without allocating. None of these threads
-//! is an audio thread.
+//! id), a note's owner list on each note-on, the sweep list on a pedal-up or a release, UI events on a
+//! learn, and for each message that changes the held notes a `MidiEvent::Held` with its list of notes,
+//! built and handed to the UI's sink on this callback thread (`Core::flush`; one already handing events
+//! over takes it instead); `EngineHost::send` pushes into the engine's ring without allocating. None of
+//! these threads is an audio thread.
 
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use super::liveness::{batch, same_path, Generation, Registration, Wake, Watch};
+use super::liveness::{batch, same_path, Registration, Wake, Watch};
 use super::{Core, PortEntry};
 
 /// How often the port list is read when no notification wakes the port thread.
@@ -190,14 +192,12 @@ struct Connection {
     /// Fixed when it opened (hole 1).
     identity: PortIdentity,
     conn: u32,
-    generation: Generation,
     input: midir::MidiInputConnection<()>,
 }
 
-/// A connection whose port went away: its callbacks stop, then its notes and HOLD are released, then
-/// WinMM closes it.
+/// A connection whose port went away: its notes and HOLD are released and its number leaves the port
+/// table (a late callback finds no port and runs nothing), then WinMM closes it.
 fn disconnect(core: &Core, c: Connection, gone: &mut Vec<String>) {
-    c.generation.invalidate();
     if let Some(name) = core.port_gone(c.conn) {
         log::error!("[midi] input disconnected: {name}");
         gone.push(name);
@@ -245,12 +245,11 @@ pub(crate) fn run(core: Arc<Core>, wake: Sender<Wake>, woken: Receiver<Wake>) {
 
         for (i, conn) in fresh {
             let identity = &present[i];
-            let generation = Generation::default();
-            match connect(&core, &listed[i].2, conn, &generation) {
+            match connect(&core, &listed[i].2, conn) {
                 Ok(input) => {
                     log::info!("[midi] opened input {} as {}", identity.name, identity.id());
                     failed.retain(|f| f != identity);
-                    open.push(Connection { identity: identity.clone(), conn, generation, input });
+                    open.push(Connection { identity: identity.clone(), conn, input });
                 }
                 Err(e) => {
                     core.open_failed(conn);
@@ -299,7 +298,6 @@ pub(crate) fn run(core: Arc<Core>, wake: Sender<Wake>, woken: Receiver<Wake>) {
     // No callback runs past this, so none can wake a thread that is gone.
     drop(registration);
     for c in open {
-        c.generation.invalidate();
         core.port_gone(c.conn);
         c.input.close();
     }
@@ -327,24 +325,20 @@ fn list() -> Vec<(String, String, midir::MidiInputPort)> {
         .collect()
 }
 
-/// Open `port` in `generation`'s current generation; its callback stamps each message's arrival before
-/// anything else runs, and drops it once the generation moved on.
-fn connect(core: &Arc<Core>, port: &midir::MidiInputPort, conn: u32, generation: &Generation) -> Result<midir::MidiInputConnection<()>, String> {
+/// Open `port` as connection `conn`; its callback stamps each message's arrival before anything else
+/// runs. A message of a connection `Core::port_gone` ended finds no port there and runs nothing.
+fn connect(core: &Arc<Core>, port: &midir::MidiInputPort, conn: u32) -> Result<midir::MidiInputConnection<()>, String> {
     let mut input = midir::MidiInput::new("BleepLoop").map_err(|e| e.to_string())?;
     // SysEx, clock and active sensing never reach the play path (`parse`): let midir drop them first.
     input.ignore(midir::Ignore::All);
     let core = core.clone();
-    let generation = generation.clone();
-    let ticket = generation.current();
     input
         .connect(
             port,
             "BleepLoop in",
             move |_, bytes, _| {
                 let at = Instant::now();
-                if generation.admits(ticket) {
-                    core.message(conn, at, bytes);
-                }
+                core.message(conn, at, bytes);
             },
             (),
         )

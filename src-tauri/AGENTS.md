@@ -349,16 +349,9 @@ plugin-GUI work.
   each: the log, the block size the callbacks get (the status reads it only at the open), and whether
   the take lands on the click. Under WASAPI the buffer select lists every
   size and the run ignores it (`cpal_driver::resolve_wasapi`).
-- The feed builds a whole frame for a subscriber that is gone. `turn` evaluates `feed.tick(...)` before
-  it knows whether anyone is listening, so with no subscriber it still folds the scope (seven sources,
-  two allocations a tick) and then throws the frame away, and the device events in it are lost where
-  `tick_held` would have kept them. `scope()`'s own docstring says `send` is false when nobody
-  subscribed; the code never passes that. A page that dies for good (a WebView crash, a shutdown) also
-  leaves `Key::Scope` true, so the engine keeps folding. The fix is a guard in `turn`:
-  `if subscriber.is_none() { feed.tick_held(); return; }`, three lines, which drains, keeps the mirror
-  and the events and makes the docstring true. Read from source 2026-10-09, not reproduced, nothing
-  audible. Not landed because a change under `engine_io/` makes the next release owe a real cabled
-  input take (`scripts/release-input-rule.mjs`), which is the owner's to do.
+- A page that dies for good (a WebView crash, a shutdown) leaves the scope taps on (`Key::Scope`), so
+  the engine keeps folding columns the feed drains and drops for nobody. Read from source, not
+  reproduced, nothing audible.
 - A saved ASIO pick whose driver is no longer installed falls back without telling anyone:
   `resolve_asio_cache` (`src/audio_output.rs:219`) logs a warning and takes the automatic choice, which
   is the ASIO host's default output device, else its default input, else the first driver enumerated.
@@ -430,6 +423,7 @@ plugin-GUI work.
   forgives a WASAPI open's first 3 s (`probe.rs` `GRACE`). Past the open the join also starves in
   bursts minutes in, beside an ASIO process and alone under load; neighbour, load and priority class
   are not separated (four runs). Widening the setpoint is monitoring latency: the owner's call (D25).
-- The release profile warns of one unused item in `app`, `asio_available` in `audio_output.rs`
-  (with ASIO and without; the no-ASIO build warns of the unused ASIO startup items too); since when is
-  unknown.
+- Unused items `app` still warns of (`engine_io` has no blanket `allow(dead_code)` any more): in every
+  build `asio_available` (`audio_output.rs`; `engine_io/probe.rs` keeps its own copy) and `plugin_gain`
+  (`engine_io/plugins.rs`, no caller); without `asio` also `asio_startup.rs`'s unbuilt states and
+  coordinator methods and `ASIO_PROBE_TIMEOUT` (`audio_output.rs`). Since when is unknown.

@@ -179,12 +179,20 @@ fn build<T: SizedSample + FromSample<f32>>(
                 let _ftz = super::fpu::DenormalsOff::new();
                 mirror.render(data, &core.counters);
             },
-            // Terminal by cpal's contract (the endpoint went away): latch it for the owner, who drops
-            // the mirror and reports it. Nothing logs here: this runs on the stream's thread.
-            move |_| fault.store(true, Relaxed),
+            move |error| latch(&fault, &error),
             None,
         )
         .map_err(|e| format!("share output: build_output_stream: {e}"))
+}
+
+/// The mirror's error callback: an error that ends its stream (the endpoint went away) is latched for
+/// the owner, who drops the mirror and reports it; the rest leave it playing, as they leave the engine's
+/// streams (`callback::ends_stream`): an xrun is the mirror's own glitch, uncounted. Nothing logs here:
+/// this runs on the stream's thread.
+fn latch(fault: &AtomicBool, error: &cpal::Error) {
+    if super::callback::ends_stream(error) {
+        fault.store(true, Relaxed);
+    }
 }
 
 #[cfg(test)]
@@ -387,5 +395,18 @@ mod tests {
         mirror.render(&mut data, &counters);
         assert_eq!(counts(&counters).0, 1);
         assert!(data[2 * 1024..].iter().all(|&s| s == 0.0));
+    }
+
+    // The mirror's stream ends as the engine's do: a default-device change, a refused priority and an
+    // xrun leave it playing; only an error that ends the stream turns Share output off.
+    #[test]
+    fn only_an_error_that_ends_the_stream_turns_the_mirror_off() {
+        let fault = AtomicBool::new(false);
+        for kind in [cpal::ErrorKind::DeviceChanged, cpal::ErrorKind::RealtimeDenied, cpal::ErrorKind::Xrun] {
+            latch(&fault, &cpal::Error::new(kind));
+        }
+        assert!(!fault.load(Relaxed), "the mirror plays on");
+        latch(&fault, &cpal::Error::new(cpal::ErrorKind::DeviceNotAvailable));
+        assert!(fault.load(Relaxed), "the endpoint went away");
     }
 }

@@ -45,6 +45,7 @@ pub enum ActionId {
 
 impl ActionId {
     /// Every action, in `ACTION_LABELS` order.
+    #[cfg(test)]
     pub const ALL: [ActionId; 25] = [
         ActionId::RecDub,
         ActionId::PlayStop,
@@ -143,7 +144,7 @@ impl Binding {
     }
 }
 
-/// A persisted record [`parse_bindings`] could not read, and why.
+/// A persisted record that could not be read, and why.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Rejected {
     /// Its position in the persisted array.
@@ -152,6 +153,7 @@ pub struct Rejected {
 }
 
 /// What [`parse_bindings`] read: the bindings, in their persisted order, and every record it refused.
+#[cfg(test)]
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Parsed {
     pub bindings: Vec<Binding>,
@@ -178,7 +180,9 @@ pub fn parse_binding(value: serde_json::Value) -> Result<Binding, String> {
 
 /// The persisted bindings (a JSON array, as `load()` reads localStorage). As the store does, this
 /// reports, never silently empties, so a document that is not an array is an error and each
-/// unreadable record is reported in [`Parsed::rejected`] beside the ones that read.
+/// unreadable record is reported in [`Parsed::rejected`] beside the ones that read. The tests' way to
+/// read a list record by record; the store reads its own document (`super::store`).
+#[cfg(test)]
 pub fn parse_bindings(json: &str) -> Result<Parsed, String> {
     let list: Vec<serde_json::Value> = serde_json::from_str(json).map_err(|e| e.to_string())?;
     let mut parsed = Parsed::default();

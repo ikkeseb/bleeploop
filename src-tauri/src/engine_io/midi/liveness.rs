@@ -9,9 +9,9 @@
 //! - **The callback only records and wakes.** It runs on a system thread-pool thread: it copies the
 //!   interface path, sends one [`Wake`] down the port thread's channel and returns. It never calls
 //!   WinMM, never takes [`super::Core`]'s lock, never unregisters (that would deadlock).
-//! - **On wake** ([`Watch`]): a removal whose path is an open connection's invalidates that connection
-//!   (its [`Generation`] bumps, so its late callbacks are ignored; `Core::port_gone` releases its notes
-//!   and HOLD) and keeps the port closed until WinMM stops listing it or an arrival names it again; an
+//! - **On wake** ([`Watch`]): a removal whose path is an open connection's ends that connection
+//!   (`Core::port_gone` releases its notes and HOLD and takes its number out of the port table, so its
+//!   late callbacks find no port and run nothing) and keeps the port closed until WinMM stops listing it or an arrival names it again; an
 //!   arrival re-enumerates on a short backoff schedule ([`retry_wait`]), each pass opening what the
 //!   enumeration confirms and retrying a failed open. Duplicate notifications are harmless. The 1 s
 //!   poll (`ports::POLL`) stays as the backstop.
@@ -31,9 +31,7 @@
 
 use std::ffi::c_void;
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
-use std::sync::Arc;
 use std::time::Duration;
 
 use windows::core::GUID;
@@ -157,27 +155,6 @@ pub(crate) fn batch(first: Wake, woken: &Receiver<Wake>) -> (Vec<Wake>, bool) {
         next = if notices.len() < MAX_BATCH { woken.try_recv().ok() } else { None };
     }
     (notices, false)
-}
-
-/// One connection's generation. Its midir callback captures the generation it was opened in and drops
-/// every message once that is no longer current, so a connection the port thread has invalidated runs
-/// nothing more, whatever WinMM still delivers before the close completes.
-#[derive(Clone, Debug, Default)]
-pub(crate) struct Generation(Arc<AtomicU32>);
-
-impl Generation {
-    pub(crate) fn current(&self) -> u32 {
-        self.0.load(Ordering::Acquire)
-    }
-
-    /// Whether a callback opened in generation `ticket` may still deliver.
-    pub(crate) fn admits(&self, ticket: u32) -> bool {
-        self.current() == ticket
-    }
-
-    pub(crate) fn invalidate(&self) {
-        self.0.fetch_add(1, Ordering::AcqRel);
-    }
 }
 
 /// The live notification registrations. Dropping it unregisters them (Windows waits for a callback
@@ -394,18 +371,5 @@ mod tests {
         assert!(context_may_be_freed(&[CR_SUCCESS, CR_SUCCESS]));
         assert!(!context_may_be_freed(&[CR_SUCCESS, CONFIGRET(1)]));
         assert!(!context_may_be_freed(&[CONFIGRET(1), CR_SUCCESS]));
-    }
-
-    // Decision 10: a callback from an old connection generation is ignored.
-    #[test]
-    fn a_callback_from_an_invalidated_generation_is_dropped() {
-        let g = Generation::default();
-        let ticket = g.current();
-        let callback = g.clone();
-        assert!(callback.admits(ticket));
-        g.invalidate();
-        assert!(!callback.admits(ticket));
-        g.invalidate();
-        assert!(!callback.admits(ticket), "a duplicate invalidation keeps it dropped");
     }
 }

@@ -266,8 +266,8 @@ input port may be exclusive: the WebView's Web MIDI permission is denied (`src-t
 - **The no-device rule** (one for every source): while no device runs, or during an engine rebuild,
   fresh note-ons, actions and HOLD presses are refused, never queued for the device's return; every
   release passes and controller state is kept. A refused UI press is told to the player.
-- **A rebuild needs no WebView** (`EngineHost::set_rebuild_hook`): the queue follows the engine
-  generation. It drops the old engine's one-shots and their releases, the router forgets what the old
+- **A rebuild needs no WebView** (`EngineHost::set_rebuild_hook`): a rebuild empties the queue. It
+  drops the old engine's one-shots and their releases, the router forgets what the old
   engine sounded, and the target and wheels reach the new engine through the settings replay alone.
 - **Bindings live native,** in midi-bindings.json beside plugin-folders.json
   (`engine_io/midi/store.rs`): an unreadable file is reported, never overwritten. Without the app's

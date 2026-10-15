@@ -24,11 +24,11 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use cpal::traits::{DeviceTrait, StreamTrait};
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleFormat, StreamConfig};
 
 use super::callback::{Side, Tap};
-use super::driver::{Driver, Mirror, Share, Spec, StartError, Started, Streams, Wiring};
+use super::driver::{Driver, Endpoints, Mirror, Share, Spec, StartError, Started, Streams, Wiring};
 use super::share::{ShareOutput, ShareTap};
 #[cfg(feature = "asio")]
 use super::transition;
@@ -42,6 +42,7 @@ pub(crate) struct CpalDriver {
 }
 
 /// How long the preopen runs the driver at the other block size (the Stage 1 fix measured with this).
+#[cfg_attr(not(feature = "asio"), allow(dead_code))]
 const PREOPEN_RUN: Duration = Duration::from_millis(300);
 
 /// A resolved pair: the input and output devices with their stream configs. No input: WASAPI output
@@ -54,6 +55,7 @@ pub(crate) struct CpalDevice {
     out_config: StreamConfig,
     out_format: SampleFormat,
     /// ASIO: the buffer sizes the driver takes (the probe's `AsioCache::buffer_range`); WASAPI: `None`.
+    #[cfg_attr(not(feature = "asio"), allow(dead_code))]
     buffer_range: Option<(u32, u32)>,
 }
 
@@ -76,6 +78,11 @@ impl Driver for CpalDriver {
         {
             None
         }
+    }
+
+    fn default_endpoints(&self) -> Endpoints {
+        let host = cpal::default_host();
+        Endpoints { input: host.default_input_device().as_ref().and_then(device_id), output: host.default_output_device().as_ref().and_then(device_id) }
     }
 
     /// Both builds before either plays. A cpal ASIO build starts the driver and a playing stream's
@@ -259,6 +266,7 @@ fn resolve_asio(request: &DeviceRequest) -> Result<(Spec, CpalDevice), String> {
         block: block.unwrap_or(0),
         input_name: cache.name.clone(),
         output_name: cache.name.clone(),
+        endpoints: Endpoints::default(),
     };
     let device = CpalDevice {
         input: Some(cache.device.clone()),
@@ -348,7 +356,14 @@ fn preopen_asio(device: &CpalDevice, spec: &Spec, other: u32) -> Result<(), Stri
 fn resolve_wasapi(request: &DeviceRequest) -> Result<(Spec, CpalDevice), String> {
     let output = crate::audio_output::pick_output_device(request.output.as_deref())?;
     let (out_config, out_format) = crate::audio_output::output_config(&output)?;
-    let input = crate::audio_input::pick_input_device(request.input.as_deref()).and_then(|input| {
+    let input = crate::audio_input::pick_input_device(request.input.as_deref());
+    // The ids `default_endpoints` reads, for a side left to the default: one whose capture format does
+    // not read still names the endpoint the default was.
+    let endpoints = Endpoints {
+        input: request.input.clone().or_else(|| input.as_ref().ok().and_then(device_id)),
+        output: request.output.clone().or_else(|| device_id(&output)),
+    };
+    let input = input.and_then(|input| {
         let supported = input.default_input_config().map_err(|e| format!("cpal default_input_config: {e}"))?;
         Ok((input, supported))
     });
@@ -384,7 +399,13 @@ fn resolve_wasapi(request: &DeviceRequest) -> Result<(Spec, CpalDevice), String>
         block: 0,
         input_name: input.as_ref().map_or_else(String::new, |(d, _)| name(d, "Unknown input")),
         output_name: name(&output, "Unknown output"),
+        endpoints,
     };
     let in_format = input.as_ref().map_or(out_format, |(_, supported)| supported.sample_format());
     Ok((spec, CpalDevice { input: input.map(|(d, _)| d), in_config, in_format, output, out_config, out_format, buffer_range: None }))
+}
+
+/// A WASAPI endpoint's id, as Audio Settings lists it (`audio_output::list_output_devices`).
+fn device_id(device: &cpal::Device) -> Option<String> {
+    device.id().ok().map(|id| id.to_string())
 }

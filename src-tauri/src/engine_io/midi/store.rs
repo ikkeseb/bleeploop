@@ -22,8 +22,9 @@
 //! The app is not single-instance, and an older build may run beside a newer one, so a write first reads
 //! the file again. One this build cannot read, or of another version, makes the store read-only (the
 //! file is kept); one whose document `revision` is not the one this store last loaded or wrote is a
-//! conflict: another instance wrote it, and the caller reloads rather than write over it. (Between that
-//! read and the rename another process can still write: no lock spans the two.)
+//! conflict: another instance wrote it, and nothing is written over it (the caller reports it; this
+//! session's later changes stay in memory, unsaved). (Between that read and the rename another process
+//! can still write: no lock spans the two.)
 //!
 //! # The legacy import
 //!
@@ -222,7 +223,7 @@ pub enum WriteError {
     /// The store is read-only for the session: the load, or this write's reread, found a file this build
     /// cannot read or of another version.
     ReadOnly(String),
-    /// Another instance wrote the file since this store loaded or wrote it: reload before editing again.
+    /// Another instance wrote the file since this store loaded or wrote it: nothing is written over it.
     Conflict(String),
     /// The write itself failed (or its document would not read back); a later write may succeed.
     Failed(String),
@@ -345,12 +346,14 @@ impl Store {
     }
 
     /// False once the file proved unreadable or of another version: every write is refused this session.
+    #[cfg(test)]
     pub fn writable(&self) -> bool {
         self.slot.read_only.get().is_none()
     }
 
     /// The legacy import ran and a write holding it has completed (or the loaded file already held it):
-    /// `lf.midiLearn` may go.
+    /// `lf.midiLearn` may go. Nothing hands it to the UI yet.
+    #[cfg(test)]
     pub fn legacy_durable(&self) -> bool {
         self.imported && self.import_revision.is_none_or(|r| self.slot.written.load(Ordering::Acquire) >= r)
     }
@@ -566,6 +569,7 @@ pub struct Snapshot {
 }
 
 impl Snapshot {
+    #[cfg(test)]
     pub fn revision(&self) -> u64 {
         self.revision
     }
