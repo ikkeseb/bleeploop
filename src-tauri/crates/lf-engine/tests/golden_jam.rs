@@ -1,6 +1,7 @@
 //! Ports verify/probes/golden-jam.mjs: the golden jam, end to end on the engine, at 44.1 and 48 kHz and at
 //! every block size of the plan (1, 32, 64, 127, 128, 480, 1024). Its assertions 1–6, 8 and 9 are here;
-//! 7 (injected plugin-bridge loss) becomes an injected input gap; 10 (real key presses, the lane cue)
+//! 7 (injected plugin-bridge loss) becomes an injected input gap, which keeps what it lands in as
+//! recorded and marks it (UNDO drops a layer, CLEAR a take); 10 (real key presses, the lane cue)
 //! stays a UI probe, while the engine half it relied on, the gates, the refusals and the CLEAR double
 //! press, is asserted here. The session import, local recovery, FX and export blocking of the browser
 //! jam belong to later stages.
@@ -39,8 +40,8 @@ fn tiles(pcm: &[f32], bar: usize) -> bool {
     (bar..pcm.len()).all(|k| pcm[k] == pcm[k % bar])
 }
 
-fn rejected(rig: &Rig, mark: usize) -> usize {
-    rig.events[mark..].iter().filter(|e| matches!(e, Event::TakeRejected { .. })).count()
+fn dropouts(rig: &Rig, mark: usize) -> usize {
+    rig.events[mark..].iter().filter(|e| matches!(e, Event::Dropout { .. })).count()
 }
 
 fn refused(rig: &Rig, mark: usize, reason: Refusal) -> bool {
@@ -155,20 +156,19 @@ fn jam(sr: u32, block: usize) -> [Vec<f32>; 2] {
     rig.advance_to(edge + 1);
     let take_c = rig.pcm(2);
     assert!(rig.state(2) == LaneState::Stopped && unbroken(&take_c) && frame_of(take_c[0]) == edge - bar);
-    // A gap in pass 1 drops it; the clean pass 2 is what an approval later keeps.
+    // A gap in pass 1 keeps it, marked; the clean pass 2 replaces it, and is what an approval keeps.
     let mark = rig.events.len();
     rig.press(Command::RecDub(3));
     let d_start = rig.start_frame();
     rig.advance_to(d_start + bar / 2);
     rig.gap();
     rig.advance_to(d_start + bar + bar / 2);
-    rig.press(Command::RecDub(4));
-    assert!(rig.state(3) == LaneState::Recording && rig.state(4) == LaneState::Empty, "nothing clean kept: REC elsewhere ignored");
+    assert_eq!(dropouts(&rig, mark), 1, "pass 1 is kept, marked, and says so at its edge");
     rig.advance_to(d_start + 2 * bar + s(0.5));
     rig.press(Command::RecDub(3));
     let take_d = rig.pcm(3);
     assert!(rig.state(3) == LaneState::Playing && unbroken(&take_d) && frame_of(take_d[0]) == d_start + bar);
-    assert_eq!(rig.events[mark..].iter().filter(|e| matches!(e, Event::PassDropped { .. })).count(), 1);
+    assert!(rig.marks(3).is_empty() && dropouts(&rig, mark) == 1, "the clean pass kept, unmarked");
     rig.set_level(0.0);
     rig.press(Command::ClearAll);
     rig.set(Command::SetRetake(false));
@@ -203,7 +203,7 @@ fn jam(sr: u32, block: usize) -> [Vec<f32>; 2] {
         }
     }
     assert_eq!(hits(&rig.pcm(0)), hits(&rig.pcm(1)), "3: track 2 is frame-identical to track 1");
-    assert!(rejected(&rig, mark) == 0 && rig.engine.diag().xruns == xruns, "5: nothing lost");
+    assert!(dropouts(&rig, mark) == 0 && rig.engine.diag().xruns == xruns, "5: nothing lost");
     let from = rig.frame;
     rig.advance(expected_master / 2);
     output_on_grid(&rig, from, &[0, 1], &train);
@@ -258,7 +258,7 @@ fn jam(sr: u32, block: usize) -> [Vec<f32>; 2] {
     rig.press(Command::Undo(0));
     assert!(rig.pcm(0) == dubbed, "redo restored the dub");
 
-    // ── 7: an input gap rejects an overdub (restoring PCM and undo) and a later take ─────────────
+    // ── 7: an input gap keeps an overdub as recorded and marks it, UNDO drops both; a later take too ──
     let mark = rig.events.len();
     rig.advance(expected_master / JOB_RATE + 2);
     rig.press(Command::RecDub(0));
@@ -267,19 +267,27 @@ fn jam(sr: u32, block: usize) -> [Vec<f32>; 2] {
     rig.advance(s(0.3));
     rig.press(Command::RecDub(0));
     rig.advance(expected_master / JOB_RATE + 2);
-    assert!(rig.state(0) == LaneState::Playing && rig.pcm(0) == dubbed, "the exact pre-layer PCM");
-    assert!(rig.lane(0).can_undo && rejected(&rig, mark) == 1);
+    let layered = rig.pcm(0);
+    assert!(rig.state(0) == LaneState::Playing && layered != dubbed && rig.marks(0).len() == 1, "kept, one bin marked");
+    assert!(rig.lane(0).can_undo && dropouts(&rig, mark) == 1);
     rig.press(Command::Undo(0));
-    assert!(peak(&rig.pcm(0)) < 1.5, "undo still reaches the take before the earlier overdub");
+    assert!(rig.pcm(0) == dubbed && rig.marks(0).is_empty(), "UNDO drops the layer and its mark in one press");
     rig.advance(expected_master / JOB_RATE + 2);
-    rig.press(Command::Undo(0));
     rig.press(Command::RecDub(2));
     rig.advance_to(rig.start_frame() + s(0.1));
     rig.gap();
     rig.press(Command::PlayStop(2));
     rig.advance_to(rig.end_frame() + 1);
-    assert!(rig.state(2) == LaneState::Empty && rig.lane(2).length == 0 && rig.master() == expected_master);
-    assert_eq!(rejected(&rig, mark), 2);
+    assert!(rig.state(2) == LaneState::Stopped && rig.lane(2).length == expected_master && rig.master() == expected_master);
+    // The gap's bin, and in bar 2 the bins its frames' image reaches (a bin's precision, never a miss).
+    let (bin, fpb) = (s(0.1) / 1024, rig.fpb());
+    let mut want: Vec<usize> = [bin, (fpb + bin * 1024) / 1024, (fpb + bin * 1024 + 1023) / 1024].map(|b| b as usize).to_vec();
+    want.dedup();
+    assert_eq!(rig.marks(2), want, "the take kept, its bar tiled with its mark");
+    assert_eq!(dropouts(&rig, mark), 2);
+    rig.press(Command::Clear(2));
+    rig.idle();
+    assert_eq!(rig.state(2), LaneState::Empty);
 
     // ── the engine half of the key section: gates, refusals, selection, the CLEAR double press ──
     rig.press(Command::PlayStop(0));
@@ -289,7 +297,7 @@ fn jam(sr: u32, block: usize) -> [Vec<f32>; 2] {
     rig.press(Command::Action(Action::RecDub));
     assert!(refused(&rig, mark, Refusal::PlayFirst) && rig.state(0) == LaneState::Stopped, "a refused REC/DUB says why");
     rig.press(Command::Action(Action::Undo));
-    assert!(peak(&rig.pcm(0)) < 1.5, "UNDO on the selected lane");
+    assert!(rig.pcm(0) == layered && rig.marks(0).len() == 1, "UNDO on the selected lane: REDO brings the layer and its mark back");
     rig.advance(expected_master / JOB_RATE + 2);
     rig.press(Command::Action(Action::Undo));
     assert_eq!(rig.pcm(0), dubbed);
@@ -368,7 +376,7 @@ fn jam(sr: u32, block: usize) -> [Vec<f32>; 2] {
     rig.press(Command::RecDub(0));
     assert!(rig.master() == 0 && !rig.locked() && (0..5).all(|i| rig.state(i) == LaneState::Empty));
 
-    // ── 7: a gap in the discarded count-in costs nothing; one in a first take rejects it ─────────
+    // ── 7: a gap in the discarded count-in costs nothing; one in a first take keeps it, marked ─────
     rig.set(Command::SetFixedLength(false));
     let mark = rig.events.len();
     rig.press(Command::RecDub(0));
@@ -377,15 +385,20 @@ fn jam(sr: u32, block: usize) -> [Vec<f32>; 2] {
     rig.advance_to(rig.start_frame() + s(0.3));
     rig.press(Command::PlayStop(0));
     settle(&mut rig);
-    assert!(rig.state(0) == LaneState::Stopped && rig.master() > 0 && rejected(&rig, mark) == 0);
+    assert!(rig.state(0) == LaneState::Stopped && rig.master() > 0 && dropouts(&rig, mark) == 0 && rig.marks(0).is_empty());
     rig.press(Command::ClearAll);
     rig.press(Command::RecDub(0));
     rig.idle();
     rig.advance_to(rig.start_frame() + s(0.3));
     rig.gap();
+    rig.advance(10); // a gap on the press frame would lie on the window's end: it marks nothing
     rig.press(Command::PlayStop(0));
     settle(&mut rig);
-    assert!(rig.state(0) == LaneState::Empty && rig.master() == 0 && !rig.locked() && rejected(&rig, mark) == 1);
+    assert!(rig.state(0) == LaneState::Stopped && rig.master() > 0);
+    assert_eq!((rig.marks(0), dropouts(&rig, mark)), (vec![(s(0.3) / 1024) as usize], 1), "the take kept, marked");
+    rig.press(Command::ClearAll);
+    rig.idle(); // CLEAR ALL waits for the take's padding
+    assert!(rig.state(0) == LaneState::Empty && rig.master() == 0 && !rig.locked());
 
     // ── 6: STOP on an armed lane resets the blank session ───────────────────────────────────────
     rig.set(Command::SetFixedLength(true));

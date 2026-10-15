@@ -10,6 +10,12 @@
 //! `PEAK_FRAMES`), recomputed wherever a buffer is written (a take's capture, an overdub's sum, AUTO's
 //! onset, the block jobs) and marked dirty for the reader. An undo, a kept RETAKE pass or a reverse
 //! writes nothing: the lane shows another buffer, or the same one backwards ([`LaneView`]).
+//!
+//! So do the dropout marks: one bit per bin, set where a capture kept a frame the damage lane marked
+//! (`api::damage`), copied and cleared by the looper with the audio they describe. Every store to a
+//! mark dirties the bins it changed, after the data, as a peak's does, so a cleared or replaced mark
+//! reaches the reader as a changed bin. A lane's frames are stored with Release and read with Acquire:
+//! a reader that sees a longer view sees the marks set before it.
 
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, AtomicU8, Ordering::{Acquire, Relaxed, Release}};
 
@@ -35,12 +41,14 @@ struct LaneCell {
     state: AtomicU8,
 }
 
-/// One buffer's bins: min and max as f32 bits, a dirty bit per bin since the reader last took it, and
-/// how many writes the buffer has seen (a session snapshot checks it did not change under the copy).
+/// One buffer's bins: min and max as f32 bits, a dirty bit per bin since the reader last took it, a
+/// dropout mark per bin, and how many writes the buffer has seen (a session snapshot checks it did not
+/// change under the copy).
 struct Peaks {
     min: Box<[AtomicU32]>,
     max: Box<[AtomicU32]>,
     dirty: Box<[AtomicU64]>,
+    marks: Box<[AtomicU64]>,
     writes: AtomicU64,
 }
 
@@ -48,7 +56,20 @@ impl Peaks {
     fn new(bins: usize) -> Peaks {
         // Built by writing every element: the pages are touched here, not in the callback.
         let words = |n: usize| (0..n).map(|_| AtomicU32::new(0)).collect::<Box<[AtomicU32]>>();
-        Peaks { min: words(bins), max: words(bins), dirty: (0..bins.div_ceil(64)).map(|_| AtomicU64::new(0)).collect(), writes: AtomicU64::new(0) }
+        let bits = || (0..bins.div_ceil(64)).map(|_| AtomicU64::new(0)).collect::<Box<[AtomicU64]>>();
+        Peaks { min: words(bins), max: words(bins), dirty: bits(), marks: bits(), writes: AtomicU64::new(0) }
+    }
+}
+
+/// The mark words covering bins `[lo, hi)`: `(word, mask)` per word they touch.
+fn bin_words(lo: usize, hi: usize, mut each: impl FnMut(usize, u64)) {
+    let mut bin = lo;
+    while bin < hi {
+        let (w, b) = (bin / 64, bin % 64);
+        let n = (hi - bin).min(64 - b);
+        let mask = if n == 64 { u64::MAX } else { ((1u64 << n) - 1) << b };
+        each(w, mask);
+        bin += n;
     }
 }
 
@@ -89,7 +110,7 @@ impl Overview {
         LaneView {
             state: state_of(c.state.load(Relaxed)),
             buf: c.buf.load(Relaxed) as usize,
-            frames: c.frames.load(Relaxed),
+            frames: c.frames.load(Acquire),
             reversed: c.reversed.load(Relaxed),
         }
     }
@@ -125,7 +146,7 @@ impl Overview {
         let c = &self.lanes[i];
         c.state.store(state_code(view.state), Relaxed);
         c.buf.store(view.buf as u32, Relaxed);
-        c.frames.store(view.frames, Relaxed);
+        c.frames.store(view.frames, Release);
         c.reversed.store(view.reversed, Relaxed);
     }
 
@@ -148,8 +169,29 @@ impl Overview {
         }
     }
 
-    /// Buffer `buf`'s bins set whole, from `bins` ((min, max) from bin 0; the rest cleared), and
-    /// marked for the reader: a session load, whose host computed them.
+    /// `data` (buffer `buf`) was zeroed at positions `lo..hi`: the bins wholly inside are 0 with no read,
+    /// the ones at its edges recomputed as [`Overview::touch`] does, and all of them marked for the reader.
+    pub(crate) fn touch_zeroed(&self, buf: usize, data: &[f32], lo: usize, hi: usize, valid: usize) {
+        let p = &self.buffers[buf];
+        let (a, b) = (lo.div_ceil(PEAK_FRAMES), (hi / PEAK_FRAMES).min(p.min.len()));
+        if a >= b {
+            self.touch(buf, data, lo, hi, valid);
+            return;
+        }
+        self.touch(buf, data, lo, a * PEAK_FRAMES, valid);
+        for bin in a..b {
+            p.min[bin].store(0f32.to_bits(), Relaxed);
+            p.max[bin].store(0f32.to_bits(), Relaxed);
+        }
+        bin_words(a, b, |w, mask| {
+            p.dirty[w].fetch_or(mask, Release);
+        });
+        self.touch(buf, data, b * PEAK_FRAMES, hi, valid);
+    }
+
+    /// Buffer `buf`'s bins set whole, from `bins` ((min, max) from bin 0; the rest cleared), its marks
+    /// cleared (a loaded session holds none), and all dirtied for the reader: a session load, whose host
+    /// computed them.
     pub(crate) fn set_bins(&self, buf: usize, bins: &[(f32, f32)]) {
         let p = &self.buffers[buf];
         p.writes.fetch_add(1, Relaxed);
@@ -158,9 +200,95 @@ impl Overview {
             min.store(lo.to_bits(), Relaxed);
             max.store(hi.to_bits(), Relaxed);
         }
+        for mark in p.marks.iter() {
+            mark.store(0, Relaxed);
+        }
         for word in p.dirty.iter() {
             word.store(u64::MAX, Release);
         }
+    }
+
+    /// Buffer `buf`'s bins `[lo, hi)` (clamped to the buffer) take a dropout mark.
+    pub(crate) fn mark_bins(&self, buf: usize, lo: usize, hi: usize) {
+        let p = &self.buffers[buf];
+        let hi = hi.min(p.min.len());
+        bin_words(lo, hi, |w, mask| {
+            let old = p.marks[w].fetch_or(mask, Relaxed);
+            if old & mask != mask {
+                p.dirty[w].fetch_or(mask & !old, Release);
+            }
+        });
+    }
+
+    /// Buffer `buf`'s positions `[lo, hi)` hold a frame the damage lane marked: their bins take a mark.
+    pub(crate) fn mark(&self, buf: usize, lo: usize, hi: usize) {
+        if lo < hi {
+            self.mark_bins(buf, lo / PEAK_FRAMES, (hi - 1) / PEAK_FRAMES + 1);
+        }
+    }
+
+    /// Whether buffer `buf`'s bin `bin` holds a dropout mark.
+    pub fn marked(&self, buf: usize, bin: usize) -> bool {
+        self.buffers[buf].marks.get(bin / 64).is_some_and(|w| w.load(Relaxed) & (1 << (bin % 64)) != 0)
+    }
+
+    /// Whether heard bin `h` of a lane that shows buffer `buf`, `frames` long, holds a mark. Forward, the
+    /// buffer's bin `h`. Reversed, the marks map through frames, not through the bin count: the OR of the
+    /// buffer bins (at most two) holding the frames it plays, `[frames - (h + 1)·PEAK_FRAMES, frames -
+    /// h·PEAK_FRAMES)`, so a mark sits where it is heard on a loop that is not whole bins.
+    pub fn heard_marked(&self, buf: usize, frames: usize, reversed: bool, h: usize) -> bool {
+        if !reversed {
+            return self.marked(buf, h);
+        }
+        let hi = frames.saturating_sub(h * PEAK_FRAMES);
+        let lo = frames.saturating_sub((h + 1) * PEAK_FRAMES);
+        hi > lo && (lo / PEAK_FRAMES..=(hi - 1) / PEAK_FRAMES).any(|b| self.marked(buf, b))
+    }
+
+    /// The heard bins buffer bin `b` reaches on a lane `frames` long ([`Overview::heard_marked`]): `[b, b]`
+    /// forward, the bins of the frames it holds played backwards reversed (at most two). `None` past the
+    /// lane's frames.
+    pub fn heard_bins(frames: usize, reversed: bool, b: usize) -> Option<(usize, usize)> {
+        let lo = b * PEAK_FRAMES;
+        if lo >= frames {
+            return None;
+        }
+        if !reversed {
+            return Some((b, b));
+        }
+        let hi = (lo + PEAK_FRAMES).min(frames);
+        // Heard position of buffer position p: frames - 1 - p.
+        Some(((frames - hi) / PEAK_FRAMES, (frames - 1 - lo) / PEAK_FRAMES))
+    }
+
+    /// Buffer `buf`'s mark words, one per 64 bins.
+    pub(crate) fn mark_words(&self, buf: usize) -> impl Iterator<Item = u64> + '_ {
+        self.buffers[buf].marks.iter().map(|w| w.load(Relaxed))
+    }
+
+    /// Buffer `buf`'s marks set whole from `words`: every bin that changes is dirtied, a cleared one too.
+    pub(crate) fn set_marks(&self, buf: usize, words: impl IntoIterator<Item = u64>) {
+        let p = &self.buffers[buf];
+        let mut words = words.into_iter();
+        for (mark, dirty) in p.marks.iter().zip(p.dirty.iter()) {
+            let new = words.next().unwrap_or(0);
+            let old = mark.swap(new, Relaxed);
+            if old != new {
+                dirty.fetch_or(old ^ new, Release);
+            }
+        }
+    }
+
+    /// Buffer `dst`'s marks become `src`'s (the audio copied whole).
+    pub(crate) fn copy_marks(&self, src: usize, dst: usize) {
+        if src != dst {
+            self.set_marks(dst, self.buffers[src].marks.iter().map(|w| w.load(Relaxed)));
+        }
+    }
+
+    /// Buffer `buf` takes new audio from position 0: no mark is left.
+    pub(crate) fn clear_marks(&self, buf: usize) {
+        self.set_marks(buf, std::iter::empty());
     }
 
     /// How many writes buffer `buf` has seen.

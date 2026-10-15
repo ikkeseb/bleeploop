@@ -30,10 +30,14 @@
 //!
 //! The capture is mono: the stereo instruments are summed at half level (a Web Audio speakers downmix
 //! into the one-channel capture).
+//!
+//! A jump in the device frame leaves the record path holding the sum from before it, and the synths
+//! rendering the notes applied before it in their first [`LEAD`] frames after it: both come out of
+//! place, and the damage lane ([`crate::api::damage`]) marks them `LOST` where they carry sound.
 
 use std::sync::Arc;
 
-use crate::api::Instrument;
+use crate::api::{damage, Instrument};
 use crate::dsp::buffer_source::AudioBuffer;
 use crate::dsp::param::QUANTUM;
 use crate::dsp::rng::Mulberry32;
@@ -107,6 +111,10 @@ pub struct Instruments {
     /// The record path's delay line: the instruments' mono sum, `delay` frames late.
     line: Vec<f32>,
     write: usize,
+    /// The line's damage, written and read at its indices.
+    line_damage: Vec<u8>,
+    /// Frames rendered since the last jump in the device frame (`Frame::MAX`: none).
+    since_jump: Frame,
 }
 
 impl Instruments {
@@ -128,6 +136,13 @@ impl Instruments {
             mono: vec![0.0; max_block],
             line: vec![0.0; sample_rate as usize * MAX_RECORD_DELAY_SECONDS + max_block],
             write: 0,
+            line_damage: {
+                // Written, so its pages are touched here and not in the callback.
+                let mut v = Vec::with_capacity(sample_rate as usize * MAX_RECORD_DELAY_SECONDS + max_block);
+                v.resize(v.capacity(), 0);
+                v
+            },
+            since_jump: Frame::MAX,
         }
     }
 
@@ -138,6 +153,11 @@ impl Instruments {
     /// `instrument`'s level (linear, 0..): it glides there from the frame it is set.
     pub fn set_gain(&mut self, instrument: Instrument, gain: f32) {
         self.levels[instrument as usize].target = if gain.is_finite() { gain.max(0.0) as f64 } else { 0.0 };
+    }
+
+    /// The device frame jumped before the block about to render (the module doc).
+    pub fn jump(&mut self) {
+        self.since_jump = 0;
     }
 
     pub fn set_offset(&mut self, offset: Frame) {
@@ -232,8 +252,8 @@ impl Instruments {
 
     /// Render frames `frame..frame + left.len()` of all six, each at its level, into `left`/`right`
     /// (overwritten), and the record path's frames into `record` (added): the mono sum `delay` less
-    /// [`LEAD`] frames late.
-    pub fn render(&mut self, frame: Frame, delay: Frame, left: &mut [f32], right: &mut [f32], record: &mut [f32]) {
+    /// [`LEAD`] frames late, its damage OR'd into `record_damage`.
+    pub fn render(&mut self, frame: Frame, delay: Frame, left: &mut [f32], right: &mut [f32], record: &mut [f32], record_damage: &mut [u8]) {
         let n = left.len();
         let f = self.at(frame).1;
         let coef = self.gain_coef;
@@ -257,10 +277,21 @@ impl Instruments {
         }
         let len = self.line.len();
         let delay = (delay - LEAD).clamp(0, (len - 1) as Frame) as usize;
-        for ((&l, &r), rec) in left.iter().zip(right.iter()).zip(record.iter_mut()) {
-            self.line[self.write] = 0.5 * (l + r);
-            *rec += self.line[(self.write + len - delay) % len];
+        for (((&l, &r), rec), dmg) in left.iter().zip(right.iter()).zip(record.iter_mut()).zip(record_damage.iter_mut()) {
+            let x = 0.5 * (l + r);
+            let j = self.since_jump;
+            self.line[self.write] = x;
+            self.line_damage[self.write] = if j < LEAD && x != 0.0 { damage::LOST } else { 0 };
+            let read = (self.write + len - delay) % len;
+            let y = self.line[read];
+            *rec += y;
+            let mut d = self.line_damage[read];
+            if j < delay as Frame && (y != 0.0 || d != 0) {
+                d |= damage::LOST;
+            }
+            *dmg |= d;
             self.write = (self.write + 1) % len;
+            self.since_jump = j.saturating_add(1);
         }
     }
 }

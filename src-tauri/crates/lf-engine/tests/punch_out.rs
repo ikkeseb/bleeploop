@@ -119,7 +119,7 @@ fn a_rolling_first_take_ends_at_the_punch_out_and_commits_to_whole_bars() {
     assert_eq!(rig.master(), 2 * fpb, "plan_commit floors to the completed bars");
     assert_eq!(mismatches(&rig.pcm(0), downbeat), 0, "the take from its downbeat");
     assert_eq!((rig.anchor() - downbeat) % rig.master(), 0, "on the count-in's grid");
-    assert_eq!(rig.rejected(), 0);
+    assert!(rig.dropouts().is_empty());
     let (frame, info) = lane_event(&rig, mark, 0).expect("a Lane event");
     assert_eq!((frame, info.state, info.length), (now, LaneState::Playing, 2 * fpb));
     assert_eq!(transport_event(&rig, mark), Some((now, 2 * fpb)));
@@ -160,15 +160,17 @@ fn a_later_take_ends_at_the_punch_out_and_tiles_its_whole_bars() {
 }
 
 #[test]
-fn a_take_damaged_by_an_earlier_gap_is_still_rejected() {
+fn a_take_with_an_earlier_gap_is_kept_and_marked_at_the_punch_out() {
     let mut rig = Rig::new();
     let downbeat = first_take_rolling(&mut rig);
     rig.advance_to(downbeat + 10_000);
     rig.gap();
     rig.advance(rig.fpb());
     rig.punch_out();
-    assert_eq!(rig.rejected(), 1);
-    assert!(rig.state(0) == LaneState::Empty && rig.master() == 0);
+    assert_eq!(rig.dropouts().len(), 1);
+    assert!(rig.state(0) == LaneState::Playing && rig.master() == rig.fpb());
+    assert_eq!(mismatches(&rig.pcm(0), downbeat), 0, "the take as recorded");
+    assert_eq!(rig.marks(0), [10_000 / 1024]);
 }
 
 /// FIXED one bar + RETAKE on lane 0: the pass length and pass 1's first frame.
@@ -261,7 +263,7 @@ fn a_retake_stopped_in_its_grace_keeps_the_last_complete_pass_on_a_punch_out() {
 }
 
 /// The last rendered block ends exactly on pass 2's edge, whose event runs only in the next block: pass
-/// 2 is complete. Clean, it is the take; damaged, the kept pass 1 is.
+/// 2 is complete, and it is the take, marked when a gap reached it.
 #[test]
 fn a_retake_roll_stopped_on_its_pass_edge_commits_the_pass_it_completed() {
     for damaged in [false, true] {
@@ -276,9 +278,10 @@ fn a_retake_roll_stopped_on_its_pass_edge_commits_the_pass_it_completed() {
         rig.punch_out();
         assert!(rig.state(0) == LaneState::Playing && rig.window().is_none());
         assert_eq!(rig.master(), len);
-        let pass = if damaged { start } else { start + len };
+        let pass = start + len;
         assert_eq!(mismatches(&rig.pcm(0), pass), 0, "damaged {damaged}: the pass from {pass}");
-        assert_eq!(rig.rejected(), 0);
+        let marks = if damaged { vec![(len / 2 / 1024) as usize] } else { vec![] };
+        assert_eq!((rig.marks(0), rig.dropouts().len()), (marks, damaged as usize), "damaged {damaged}");
     }
 }
 

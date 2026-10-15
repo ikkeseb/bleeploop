@@ -1564,3 +1564,35 @@ fn the_slots_render_bit_identical_across_block_sizes() {
         }
     }
 }
+
+/// The input is dry through slot 0, and slot 1 holds an instrument with 2048 frames of latency. A silent
+/// block [b, b + 128) reaches the record tap on its own frames, as the instrument takes no input: a layer
+/// opening on b + 256 holds none of it (ported from the engine-red fix branch).
+#[test]
+fn an_instrument_plugins_latency_leaves_a_silent_block_on_its_own_frames_of_the_record_tap() {
+    let probe = Probe::new();
+    let mut rig = Rig::new();
+    rig.install(1, Fake::instrument(0.0, 2048, &probe));
+    rig.set(Command::SetBpm(200.0));
+    rig.set_input(code);
+    let master = rig.record_first_take(0, 1, 2400);
+    rig.idle();
+    rig.align = 512;
+    let b = rig.next_boundary() + master / 4;
+    rig.advance_to(b - 256);
+    rig.send_at(b - 256, Command::RecDub(0)); // the window opens on b + 256
+    rig.send_at(b + 256, Command::RecDub(0)); // and closes on b + 768
+    rig.advance(256);
+    assert_eq!(rig.window(), Some((0, Some(b + 256), None)));
+    // As the device side renders a damaged block: silence in its place.
+    rig.set_input(move |f| if (b..b + 128).contains(&f) { 0.0 } else { code(f) });
+    rig.damage();
+    rig.keep_output();
+    rig.advance(2048);
+    rig.idle();
+    assert_eq!(rig.engine.diag().xruns, 1);
+    let lost: Vec<usize> = rig.record_damage.iter().enumerate().filter(|(_, &d)| d != 0).map(|(k, _)| k).collect();
+    assert_eq!(lost, (0..128).collect::<Vec<_>>(), "the block's damage on its own frames only");
+    assert!(rig.dropouts().is_empty() && rig.marks(0).is_empty(), "the layer holds none of it");
+    assert_eq!(rig.state(0), LaneState::Playing);
+}

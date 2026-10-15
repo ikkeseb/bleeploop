@@ -2,7 +2,8 @@
 //! ahead of every head that reads or writes what they touch (checked on the rendered output from the
 //! very frame they start), only the commands that would collide with a job wait for it, and a jump in the
 //! device frame counter moves their schedule instead of making the work it skipped fall due at once (an
-//! overdub the jump's gap damaged stops writing, so its delayed undo copy still restores it exactly).
+//! overdub's write head the jump carries past its delayed undo copy writes nothing there until the copy
+//! has passed, so UNDO and a discard still give back the loop before the layer exactly).
 
 mod common;
 
@@ -71,70 +72,88 @@ fn tiled_ahead(bars: Frame) {
 }
 
 #[test]
-fn a_discarded_layer_is_restored_ahead_of_playback() {
+fn a_discarded_layer_is_restored_before_a_resume_plays_it() {
     let mut rig = looping(1);
     let master = rig.master();
     let pre = rig.pcm(0);
     rig.set_level(0.125);
     rig.press(Command::RecDub(0));
-    rig.advance(master / 3);
-    rig.gap();
-    rig.advance(master + master / 2); // the layer covers every position: playback is inside it
+    rig.advance(master + master / 2); // the layer covers every position
     rig.set_level(0.0);
+    rig.press(Command::Stop(0));
+    rig.press(Command::PlayStop(0)); // waits for the restore
+    rig.idle();
+    rig.advance(256); // past PLAY's fade-in
     rig.keep_output();
     let from = rig.frame;
-    rig.press(Command::RecDub(0));
     rig.advance(master / 2);
     assert_eq!(rig.pcm(0), pre);
+    assert_eq!(rig.state(0), LaneState::Playing);
     plays(&rig, from, &[0]);
 }
 
 #[test]
-fn a_layer_rejected_before_its_undo_copy_finished_restores_exactly() {
+fn a_layer_discarded_before_its_undo_copy_finished_restores_exactly() {
     let mut rig = looping(4); // the undo copy takes 375 frames
     let pre = rig.pcm(0);
     rig.set_level(0.125);
     rig.press(Command::RecDub(0));
-    rig.advance(40);
-    rig.gap();
-    rig.advance(40);
-    rig.press(Command::RecDub(0));
+    rig.advance(80);
+    rig.press(Command::Stop(0));
     rig.set_level(0.0);
     rig.idle();
     assert_eq!(rig.pcm(0), pre);
 }
 
 #[test]
-fn a_jump_while_a_long_loops_undo_copy_runs_rejects_the_layer_and_restores_the_loop_bit_for_bit() {
+fn a_jump_past_a_long_loops_undo_copy_keeps_the_layer_and_undo_and_a_discard_give_the_loop_back_bit_for_bit() {
     // A 16-bar loop at 8 kHz: 256000 positions, an undo copy of 250 frames. The jump carries the write
-    // head far past the copy, which the jump delays (`Looper::skip`); the dub goes on for a whole loop.
-    let mut rig = Rig::with(Opts { sr: 8000, start: 8000, loop_seconds: 40.0, ..Default::default() });
-    rig.set_input(code);
-    let master = rig.record_first_take(0, 16, 240);
-    rig.set_level(0.0);
-    rig.idle();
-    let pre = rig.pcm(0);
-    assert!(job_frames(master) > 200, "the undo copy outlasts the frames before the jump");
-    let rejected = rig.rejected();
-    rig.set_input(|f| code(f) / 4.0);
-    rig.press(Command::RecDub(0));
-    rig.advance(20);
-    assert!(rig.engine.looper().busy(), "the undo copy still runs");
-    rig.skip(master / 2);
-    rig.advance(master + 1000);
-    rig.press(Command::RecDub(0));
-    rig.set_level(0.0);
-    rig.idle();
-    assert_eq!(rig.rejected(), rejected + 1, "the jump's gap rejects the layer");
-    assert_eq!(rig.state(0), LaneState::Playing);
-    let got = rig.pcm(0);
-    let wrong: Vec<usize> = (0..pre.len()).filter(|&p| got[p].to_bits() != pre[p].to_bits()).collect();
-    assert!(wrong.is_empty(), "{} positions kept the rejected layer, from {:?}", wrong.len(), wrong.first());
-    assert!(!rig.lane(0).can_undo, "no undo target: the loop never had one");
+    // head far past the copy, which the jump delays (`Looper::skip`): no write lands where the copy has
+    // not been, those positions keep the old loop, marked, until it passes. Kept, UNDO gives the loop
+    // back; discarded (STOP right after the jump, the copy still behind), its restore does.
+    for discard in [false, true] {
+        let mut rig = Rig::with(Opts { sr: 8000, start: 8000, loop_seconds: 40.0, ..Default::default() });
+        rig.set_input(code);
+        let master = rig.record_first_take(0, 16, 240);
+        rig.set_level(0.0);
+        rig.idle();
+        let pre = rig.pcm(0);
+        assert!(job_frames(master) > 200, "the undo copy outlasts the frames before the jump");
+        rig.set_input(|f| code(f) / 4.0);
+        rig.press(Command::RecDub(0));
+        rig.advance(20);
+        assert!(rig.engine.looper().busy(), "the undo copy still runs");
+        rig.skip(master / 2);
+        if discard {
+            rig.advance(20);
+            assert!(rig.engine.looper().busy(), "the undo copy is still behind the write head");
+            rig.press(Command::Stop(0));
+        } else {
+            rig.advance(master + 1000);
+            rig.press(Command::RecDub(0));
+        }
+        rig.set_level(0.0);
+        rig.idle();
+        let got = if discard {
+            assert_eq!(rig.state(0), LaneState::Stopped);
+            assert!(rig.dropouts().is_empty(), "a discard sends no Dropout");
+            rig.pcm(0)
+        } else {
+            assert_eq!(rig.state(0), LaneState::Playing);
+            assert_eq!(rig.dropouts().len(), 1, "the jump's hole marks the kept layer");
+            assert!(!rig.marks(0).is_empty() && rig.lane(0).can_undo);
+            rig.press(Command::Undo(0));
+            rig.idle();
+            assert!(rig.marks(0).is_empty());
+            rig.pcm(0)
+        };
+        let wrong: Vec<usize> = (0..pre.len()).filter(|&p| got[p].to_bits() != pre[p].to_bits()).collect();
+        assert!(wrong.is_empty(), "discard={discard}: {} positions kept the layer, from {:?}", wrong.len(), wrong.first());
+    }
 }
 
 #[test]
-fn another_lanes_copy_survives_a_rejected_layer() {
+fn another_lanes_copy_survives_a_discarded_layer() {
     let mut rig = looping(1);
     rig.press(Command::Copy(0)); // lane 1
     rig.idle();
@@ -142,10 +161,9 @@ fn another_lanes_copy_survives_a_rejected_layer() {
     rig.set_level(0.125);
     rig.press(Command::RecDub(0));
     rig.advance(master / 4);
-    rig.gap();
     rig.advance(100);
-    rig.press(Command::Copy(1)); // lane 2, still copying when the layer is rejected
-    rig.press(Command::RecDub(0));
+    rig.press(Command::Copy(1)); // lane 2, still copying when the layer is discarded
+    rig.press(Command::Stop(0));
     rig.set_level(0.0);
     rig.idle();
     assert!(rig.events.iter().any(|e| matches!(e, Event::Copied { from: 1, to: 2, .. })));

@@ -374,6 +374,9 @@ pub fn run() {
             engine_io::midi_bench::midi_bench_clock,
             #[cfg(all(windows, debug_assertions))]
             engine_io::midi_bench::midi_bench_clock_sync,
+            // DEV: the native smoke's planted dropout (`engine_io/mode.rs`; `src/debug/engine-smoke.ts`).
+            #[cfg(all(windows, debug_assertions))]
+            engine_io::mode::engine_hold_lock,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

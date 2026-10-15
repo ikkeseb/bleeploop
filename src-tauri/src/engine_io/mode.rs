@@ -187,6 +187,17 @@ pub async fn engine_status() -> Result<Option<DeviceStatus>, String> {
     Ok(app().ok().and_then(|app| app.host().ok()).and_then(|host| host.status()))
 }
 
+/// DEV: hold the engine lock `ms` (at most a second) while a device runs: its callbacks miss their
+/// blocks, a dropout the native smoke plants mid-overdub to see its mark (`src/debug/engine-smoke.ts`).
+/// False when no device runs.
+#[cfg(debug_assertions)]
+#[tauri::command]
+pub async fn engine_hold_lock(ms: u32) -> Result<bool, String> {
+    let host = app()?.host()?;
+    let hold = Duration::from_millis(u64::from(ms.min(1000)));
+    tauri::async_runtime::spawn_blocking(move || host.hold_lock(hold)).await.map_err(|e| format!("engine_hold_lock: {e}"))
+}
+
 /// A plugin slot's capture channel (0-based; `null` = auto), switched without rebuilding a stream.
 #[tauri::command]
 pub async fn engine_set_slot_input_channel(slot: u8, channel: Option<u32>) -> Result<(), String> {

@@ -15,8 +15,8 @@
  *   engine's `Cleared` empties the lane with no cue left.
  * - FEED → DOM: an AUTO REC arm reads LISTENING, "WAITING FOR INPUT", beside its sensitivity slider (AUTO
  *   sends the engine's AUTO REC toggle, and the button shows the `Toggled` the fake answers); a rolling RETAKE first take reads TAKE 3, and an EMPTY lane's core stays
- *   pressable as the approve gesture (while a plain take records, it is refused); `TakeRejected` and
- *   `PassDropped` each reach the player (a toast naming the lane) and the release log (one console.error);
+ *   pressable as the approve gesture (while a plain take records, it is refused); a `Dropout` reaches the
+ *   release log (one console.error per event) and raises no toast: the lane's mark shows it (`lane-marks`);
  *   a `Copied` and a `Cleared` reach the store as the lane's `Mix`, which the fake reports as the engine
  *   does (the copy gets the source's volume, mute and FX, sharing no FX object; CLEAR puts volume, mute
  *   and every FX entry back to their defaults, on that lane only).
@@ -24,8 +24,8 @@
  *   refuses ("Finish the active recording"), while a recovery snapshot (`includeMaster: false`) still builds.
  *
  * Cannot see the native engine, Tauri IPC or any timing: the fake answers no command by itself but a
- * lane's mix and a toggle, so every state, selection, refusal and rejection the DOM shows was scripted; whether the engine wraps, confirms,
- * clears or rejects as scripted is lf-engine's (`tests/golden_jam.rs`, `tests/actions.rs`).
+ * lane's mix and a toggle, so every state, selection, refusal and dropout the DOM shows was scripted; whether the engine wraps, confirms,
+ * clears or keeps as scripted is lf-engine's (`tests/golden_jam.rs`, `tests/actions.rs`, `tests/dropout_marks.rs`).
  * Run: pnpm probe jam-keys
  */
 import assert from 'node:assert/strict';
@@ -136,27 +136,20 @@ await probe(async ({ open }) => {
   assert.equal((await lanes.nth(0).locator('.lp-lane__state').textContent()).trim(), 'TAKE 3', 'a rolling first take shows its pass');
   assert.equal(await core(1).isDisabled(), false, 'an EMPTY lane offers REC as the approve gesture while a take rolls');
 
-  // ── FEED → DOM: a rejected take and a dropped pass reach the player and the release log ────────────
+  // ── FEED → DOM: a kept dropout reaches the release log, never a toast ──────────────────────────────
+  const toastsBefore = await page.evaluate(() => window.__lf.notify.toasts().length);
   await emit({
     events: [
-      { TakeRejected: { frame: BAR, lane: 0, overdub: true } },
-      { TakeRejected: { frame: BAR, lane: 2, overdub: false } },
-      { PassDropped: { frame: BAR, lane: 3, pass: 1 } },
+      { Dropout: { frame: BAR, lane: 0, overdub: true } },
+      { Dropout: { frame: BAR, lane: 2, overdub: false } },
     ],
   });
   const toasts = await page.evaluate(() => window.__lf.notify.toasts().map((t) => t.message));
   console.log('toasts', JSON.stringify(toasts));
-  for (const message of ['Track 1: overdub layer discarded', 'Track 3: take discarded', 'Track 4: take 1 dropped']) {
-    assert.ok(toasts.includes(message), `the player hears "${message}"`);
-  }
-  const rejected = consumeConsoleErrors('rejected: input gap');
-  const dropped = consumeConsoleErrors('dropped: input gap');
-  console.log('release log', JSON.stringify([...rejected, ...dropped]));
-  assert.equal(rejected.length, 2, 'each rejected take reaches the release log once');
-  assert.equal(dropped.length, 1, 'the dropped pass reaches the release log once');
-  await page.evaluate(() => {
-    for (const t of window.__lf.notify.toasts()) window.__lf.notify.dismissToast(t.id);
-  });
+  assert.equal(toasts.length, toastsBefore, 'a dropout raises no toast: the lane shows its mark');
+  const kept = consumeConsoleErrors('kept a dropout');
+  console.log('release log', JSON.stringify(kept));
+  assert.equal(kept.length, 2, 'each dropout reaches the release log once');
 
   // ── EXPORT: blocked while a lane overdubs, recovery still builds ───────────────────────────────────
   await page.evaluate(async (master) => {

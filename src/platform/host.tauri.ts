@@ -173,6 +173,7 @@ const tauriEngineHost: EngineHost = {
   async loadSession(bytes) {
     await invoke('engine_load_session', bytes);
   },
+  ...(import.meta.env.DEV ? { holdLock: (ms: number) => invoke<boolean>('engine_hold_lock', { ms }) } : {}),
   subscribe(onFrame) {
     const channel = new Channel<unknown>();
     let live = true;

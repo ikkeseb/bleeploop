@@ -29,6 +29,9 @@ export type TrackState = 'EMPTY' | 'RECORDING' | 'OVERDUBBING' | 'PLAYING' | 'ST
 export interface PeakView {
   min: Float32Array | null;
   max: Float32Array | null;
+  /** 1 where the bin holds a dropout mark, in play order like the peaks (the looper lanes draw them; the
+   * stage view does not yet). */
+  marks?: Uint8Array | null;
   count: number;
   version: number;
 }

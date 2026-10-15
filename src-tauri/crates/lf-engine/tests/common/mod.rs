@@ -40,15 +40,18 @@ pub fn frame_of(sample: f32, near: Frame) -> Frame {
     f + ((near - f) as f64 / (1 << 22) as f64).round() as Frame * (1 << 22)
 }
 
-/// A plugin stand-in: an effect whose output is its input `latency` frames late.
+/// A plugin stand-in: an effect whose output is its input `latency` frames late. No memory past it: its
+/// tail is 0.
 pub struct Delay {
     pub latency: Frame,
+    /// A ring: the sample `latency` frames back is at `next`, which the new one replaces.
     line: Vec<f32>,
+    next: usize,
 }
 
 impl Delay {
     pub fn new(latency: Frame) -> Self {
-        Delay { latency, line: vec![0.0; latency as usize] }
+        Delay { latency, line: vec![0.0; latency as usize], next: 0 }
     }
 }
 
@@ -66,8 +69,8 @@ impl SlotProcessor for Delay {
             if self.line.is_empty() {
                 *w = x;
             } else {
-                *w = self.line.remove(0);
-                self.line.push(x);
+                *w = std::mem::replace(&mut self.line[self.next], x);
+                self.next = (self.next + 1) % self.line.len();
             }
         }
     }
@@ -109,8 +112,9 @@ pub struct Rig {
     pub bus: Vec<f32>,
     pub bus_right: Vec<f32>,
     pub monitor: Vec<f32>,
-    /// The record tap over the same frames (`Taps::record`).
+    /// The record tap over the same frames (`Taps::record`), and its damage lane (`Taps::record_damage`).
     pub record: Vec<f32>,
+    pub record_damage: Vec<u8>,
     /// The Share mix's two sides over the same frames (`Engine::share`).
     pub share: Vec<f32>,
     pub share_right: Vec<f32>,
@@ -175,6 +179,7 @@ impl Rig {
             bus_right: Vec::new(),
             monitor: Vec::new(),
             record: Vec::new(),
+            record_damage: Vec::new(),
             share: Vec::new(),
             share_right: Vec::new(),
             gap_next: false,
@@ -210,6 +215,7 @@ impl Rig {
         self.bus_right.clear();
         self.monitor.clear();
         self.record.clear();
+        self.record_damage.clear();
         self.share.clear();
         self.share_right.clear();
     }
@@ -347,6 +353,7 @@ impl Rig {
             self.bus_right.extend_from_slice(taps.bus[1]);
             self.monitor.extend_from_slice(taps.monitor);
             self.record.extend_from_slice(taps.record);
+            self.record_damage.extend_from_slice(taps.record_damage);
             let [share, share_right] = self.engine.share();
             self.share.extend_from_slice(share);
             self.share_right.extend_from_slice(share_right);
@@ -457,7 +464,29 @@ impl Rig {
         a + ((self.frame - a).div_euclid(m) + 1) * m
     }
 
-    pub fn rejected(&self) -> usize {
-        self.events.iter().filter(|e| matches!(e, Event::TakeRejected { .. })).count()
+    /// The `Dropout` events so far: (frame, lane, overdub).
+    pub fn dropouts(&self) -> Vec<(Frame, u8, bool)> {
+        self.events
+            .iter()
+            .filter_map(|e| match *e {
+                Event::Dropout { frame, lane, overdub } => Some((frame, lane, overdub)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The bins lane `i` shows marked, in play order (`Overview::heard_marked`, as the feed sends them).
+    pub fn marks(&self, i: usize) -> Vec<usize> {
+        let o = self.engine.looper().overview();
+        let view = o.lane(i);
+        let frames = view.frames.max(0) as usize;
+        let count = frames.div_ceil(lf_engine::overview::PEAK_FRAMES).min(o.bins());
+        (0..count).filter(|&h| o.heard_marked(view.buf, frames, view.reversed, h)).collect()
+    }
+
+    /// Buffer `buf`'s marked bins, in buffer order.
+    pub fn buffer_marks(&self, buf: usize) -> Vec<usize> {
+        let o = self.engine.looper().overview();
+        (0..o.bins()).filter(|&b| o.marked(buf, b)).collect()
     }
 }

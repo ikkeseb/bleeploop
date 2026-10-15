@@ -292,6 +292,8 @@ function defaultFx(): FxState[] {
 interface LanePeaks {
   min: Float32Array;
   max: Float32Array;
+  /** 1 where the bin holds a dropout mark (`PeakUpdate.marked`), in play order like the peaks. */
+  marks: Uint8Array;
   count: number;
   version: number;
 }
@@ -352,6 +354,7 @@ const plain = {
   peaks: Array.from({ length: ENGINE_LANES }, (): LanePeaks => ({
     min: new Float32Array(0),
     max: new Float32Array(0),
+    marks: new Uint8Array(0),
     count: 0,
     version: 0,
   })),
@@ -487,6 +490,7 @@ function peaksInto(i: number, out: PeakView): PeakView {
   const p = plain.peaks[i];
   out.min = p.min;
   out.max = p.max;
+  out.marks = p.marks;
   out.count = p.count;
   out.version = p.version;
   return out;
@@ -574,19 +578,10 @@ function applyEvent(ev: EngineEvent): void {
     case 'Selected':
       setSelectedTrack(ev.lane);
       break;
-    case 'TakeRejected':
-      console.error(`[engine] track ${ev.lane}'s ${ev.overdub ? 'overdub layer' : 'take'} rejected: input gap`);
-      notifyError(
-        `Track ${ev.lane + 1}: ${ev.overdub ? 'overdub layer' : 'take'} discarded`,
-        'The audio input dropped out while it recorded. No damaged audio was kept; try again.',
-      );
-      break;
-    case 'PassDropped':
-      console.error(`[engine] track ${ev.lane}'s retake pass ${ev.pass} dropped: input gap`);
-      notifyError(
-        `Track ${ev.lane + 1}: take ${ev.pass} dropped`,
-        'The audio input dropped out during it, so it was not kept, nor the take before it.',
-      );
+    case 'Dropout':
+      // Kept as recorded: the lane shows the bar it reached (the peaks' marks), so no toast; the release
+      // log keeps one line.
+      console.error(`[engine] track ${ev.lane}'s ${ev.overdub ? 'overdub layer' : 'take'} kept a dropout: input gap, marked on the lane`);
       break;
     // COPY, CLEAR and a pedal's MUTE reach the lane's mix as its next `Mix`; a pending gesture on the lane
     // they replace is over.
@@ -687,20 +682,33 @@ export function whenDevice(): Promise<DeviceStatus> {
   return running ? Promise.resolve(running) : new Promise((resolve) => deviceWaiters.push(resolve));
 }
 
-function applyPeaks(lane: number, start: number, count: number, min: readonly number[], max: readonly number[]): void {
+function applyPeaks(
+  lane: number,
+  start: number,
+  count: number,
+  min: readonly number[],
+  max: readonly number[],
+  marked: readonly number[],
+): void {
   const p = plain.peaks[lane];
   const need = Math.max(count, start + min.length);
   if (p.min.length < need) {
     const size = Math.max(need, p.min.length * 2, 256);
     const grownMin = new Float32Array(size);
     const grownMax = new Float32Array(size);
+    const grownMarks = new Uint8Array(size);
     grownMin.set(p.min.subarray(0, p.count));
     grownMax.set(p.max.subarray(0, p.count));
+    grownMarks.set(p.marks.subarray(0, p.count));
     p.min = grownMin;
     p.max = grownMax;
+    p.marks = grownMarks;
   }
   p.min.set(min, start);
   p.max.set(max, start);
+  // The run's marks are exactly the listed ones: a mark the engine cleared goes with its run.
+  p.marks.fill(0, start, start + min.length);
+  for (const b of marked) p.marks[b] = 1;
   p.count = count;
   p.version++;
   if (!capturing(plain.state[lane])) plain.revision[lane]++;
@@ -812,7 +820,7 @@ function applyFrameNow(f: FeedFrame): void {
     plain.clip[s] = f.meter?.clip[s] ?? false;
     if (plain.clip[s]) plain.clips[s]++;
   }
-  for (const p of f.peaks) applyPeaks(p.lane, p.start, p.count, p.min, p.max);
+  for (const p of f.peaks) applyPeaks(p.lane, p.start, p.count, p.min, p.max, p.marked);
   if (f.scope) applyScope(f.scope);
 }
 

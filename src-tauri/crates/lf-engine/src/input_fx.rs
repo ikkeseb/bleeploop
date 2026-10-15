@@ -62,8 +62,30 @@
 //! While all three are silent [`InputFx::render`] says so and the engine adds nothing: the record tap
 //! and the monitor are then bit-identical to never having had a send on. Everything is allocated in
 //! [`InputFx::new`]; rendering and the controls never allocate.
+//!
+//! # The damage lane
+//!
+//! A dropout that enters ECHO or REVERB through an open gate rings on in its memory, so the send's
+//! output carries `TAIL` ([`crate::api::damage`]) from that frame until `until`, on the DSP clock the
+//! sends render on, whatever the gate does meanwhile:
+//!
+//! - REVERB: the impulse response's length after the last damaged frame, exact (a convolution's
+//!   support is finite and the convolver has no latency).
+//! - ECHO: `K` repeats of its delay `D` after it, `K` the repeats down to −60 dB of the first
+//!   (`⌊ln 0.001 / ln fb⌋ + 1`: 1 at no feedback, 8 at the default 0.4, 135 at 0.95). Each quantum takes
+//!   the larger of each control's target and its value there, and `until` never moves back: a feedback
+//!   or a delay turned down leaves the repeats already in the line marked until the bound they started
+//!   under, and one turned up extends it. The gaps between repeats are marked too (a false mark),
+//!   never a repeat above −60 dB.
+//! - RING MOD has no memory: its output's damage is its input's, on the same frame.
+//!
+//! A jump in the device frame pauses the sends' clock, so what either still holds comes out displaced:
+//! [`InputFx::jump`] starts the same countdown from the jump for a send that is not silent, its gate
+//! open or not. The sends read their input's damage from the record tap's lane as the slots and the
+//! instruments left it, so an instrument's mark can start a countdown the echo never heard (a false
+//! mark).
 
-use crate::api::{InputSend, InputSendParam};
+use crate::api::{damage, InputSend, InputSendParam};
 use crate::dsp::convolver::Convolver;
 use crate::dsp::delay::DelayNode;
 use crate::dsp::fdlibm;
@@ -120,6 +142,11 @@ struct Echo {
     span: usize,
     /// The quantum being rendered renders nothing.
     idle: bool,
+    /// The damage lane (module doc): the last DSP frame a dropout entered (or a jump displaced the line),
+    /// the frame its `TAIL` runs to, and the quantum's `K·D + 1`.
+    last: Option<u64>,
+    until: u64,
+    reach: u64,
 }
 
 impl Echo {
@@ -146,7 +173,26 @@ impl Echo {
             quiet: span,
             span,
             idle: true,
+            last: None,
+            until: 0,
+            reach: 1,
         }
+    }
+
+    /// `K·D + 1` (module doc) from the larger of each control's target and its value in the quantum
+    /// begun, `D` rounded up a quantum more.
+    fn reach(&self) -> u64 {
+        let fb = self.feedbacks.iter().fold(self.feedback as f32, |a, &b| a.max(b)) as f64;
+        let repeats = if fb <= 0.0 {
+            1
+        } else if fb >= 1.0 {
+            return u64::MAX;
+        } else {
+            (0.001f64.ln() / fb.ln()).floor() as u64 + 1
+        };
+        let seconds = self.delay_seconds().max(self.delay.delay_time.native.intrinsic_value() as f64);
+        let d = (seconds * self.sample_rate as f64).ceil() as u64 + QUANTUM as u64;
+        repeats.saturating_mul(d).saturating_add(1)
     }
 
     fn set_on(&mut self, on: bool, ctl: Ctl) {
@@ -194,11 +240,33 @@ impl Echo {
                 *level *= (1.0 - fb * fb).sqrt();
             }
             self.delay.begin_quantum(q, None);
+            if self.until > q {
+                // A countdown runs: the controls of this quantum may extend it, never shorten it.
+                self.reach = self.reach();
+                if let Some(last) = self.last {
+                    self.until = self.until.max(last.saturating_add(self.reach));
+                }
+            }
         }
     }
 
-    /// Frames `at..at + input.len()` of the quantum begun into `out`; false (and zeros) while idle.
-    fn process(&mut self, at: usize, input: &[f32], out: &mut [f32]) -> bool {
+    /// Frames `at..at + input.len()` of the quantum begun (DSP frame `frame` on) into `out`, its `TAIL`
+    /// into `damage`, which holds the input's; false (and zeros) while idle.
+    fn process(&mut self, frame: u64, at: usize, input: &[f32], out: &mut [f32], damage: &mut [u8]) -> bool {
+        // The countdown first, silent or not: a dropout's echo missing is a change too.
+        for (i, dmg) in damage.iter_mut().enumerate() {
+            let f = frame + i as u64;
+            if *dmg != 0 && self.gates[at + i] != 0.0 {
+                if self.until <= f {
+                    self.reach = self.reach();
+                }
+                self.last = Some(f);
+                self.until = self.until.max(f.saturating_add(self.reach));
+            }
+            if f < self.until {
+                *dmg |= damage::TAIL;
+            }
+        }
         if self.idle {
             out.fill(0.0);
             return false;
@@ -236,6 +304,10 @@ struct Reverb {
     used: bool,
     /// The last frames rendered were silent.
     silent: bool,
+    /// The damage lane (module doc): the impulse response's length, and the DSP frame the `TAIL` of
+    /// the last dropout it took runs to.
+    ir_frames: u64,
+    until: u64,
 }
 
 impl Reverb {
@@ -254,6 +326,8 @@ impl Reverb {
             shut: true,
             used: false,
             silent: true,
+            ir_frames: ir[0].len() as u64,
+            until: 0,
         }
     }
 
@@ -275,10 +349,20 @@ impl Reverb {
         }
     }
 
-    /// Frames `frame..frame + input.len()` (DSP clock; `at` into the quantum begun) into `out`; false
-    /// (and zeros) while silent.
-    fn process(&mut self, frame: u64, at: usize, input: &[f32], out: &mut [f32]) -> bool {
+    /// Frames `frame..frame + input.len()` (DSP clock; `at` into the quantum begun) into `out`, its `TAIL`
+    /// into `damage` (which holds the input's); false (and zeros) while silent.
+    fn process(&mut self, frame: u64, at: usize, input: &[f32], out: &mut [f32], damage: &mut [u8]) -> bool {
         let n = input.len();
+        // The countdown first, silent or not: a dropout's reverb missing is a change too.
+        for (i, d) in damage.iter_mut().enumerate() {
+            let f = frame + i as u64;
+            if *d != 0 && !self.shut && self.gates[at + i] != 0.0 {
+                self.until = self.until.max(f + self.ir_frames);
+            }
+            if f < self.until {
+                *d |= damage::TAIL;
+            }
+        }
         self.silent = !self.used;
         if self.used {
             let source = if self.shut {
@@ -401,6 +485,8 @@ pub struct InputFx {
     /// The quantum whose control values are computed.
     prepared: Option<u64>,
     mono: [f32; QUANTUM],
+    /// The reverb's view of a quantum's damage: the input's, before the echo adds its own.
+    marks: [u8; QUANTUM],
 }
 
 impl InputFx {
@@ -418,11 +504,29 @@ impl InputFx {
             ring: Ring::new(sr, start),
             prepared: None,
             mono: [0.0; QUANTUM],
+            marks: [0; QUANTUM],
         }
     }
 
     pub fn set_offset(&mut self, offset: Frame) {
         self.offset = offset;
+    }
+
+    /// The device frame jumped to `frame` (after [`InputFx::set_offset`]): what ECHO and REVERB still
+    /// hold comes out displaced, so a send that is not silent starts its countdown here, its gate open
+    /// or not (the module doc).
+    pub fn jump(&mut self, frame: Frame) {
+        let at = self.dsp(frame);
+        let echo = &mut self.echo;
+        if echo.quiet < echo.span {
+            echo.reach = echo.reach();
+            echo.last = Some(at);
+            echo.until = echo.until.max(at.saturating_add(echo.reach));
+        }
+        let reverb = &mut self.reverb;
+        if reverb.used && !reverb.silent {
+            reverb.until = reverb.until.max(at + reverb.ir_frames);
+        }
     }
 
     fn dsp(&self, frame: Frame) -> u64 {
@@ -502,9 +606,10 @@ impl InputFx {
     }
 
     /// Render frames `frame..frame + input.len()` of the wet signal `input` into `out`, the three sends'
-    /// mono sum. Returns false when nothing sounded (then `out` is all zeros and the engine adds
-    /// nothing). Blocks follow each other on the DSP clock.
-    pub fn render(&mut self, frame: Frame, input: &[f32], out: &mut [f32]) -> bool {
+    /// mono sum, and OR the sends' `TAIL` into `damage`, which holds the input's (the module doc).
+    /// Returns false when nothing sounded (then `out` is all zeros and the engine adds nothing). Blocks
+    /// follow each other on the DSP clock.
+    pub fn render(&mut self, frame: Frame, input: &[f32], out: &mut [f32], damage: &mut [u8]) -> bool {
         debug_assert_eq!(input.len(), out.len());
         let q = QUANTUM as u64;
         let start = self.dsp(frame);
@@ -522,13 +627,19 @@ impl InputFx {
             let at = (f - quantum_start) as usize;
             let n = (QUANTUM - at).min(input.len() - done);
             let span = done..done + n;
-            let echo = self.echo.process(at, &input[span.clone()], &mut out[span.clone()]);
+            // Each send reads the input's damage, not what the other added.
+            let marks = &mut self.marks[..n];
+            marks.copy_from_slice(&damage[span.clone()]);
+            let echo = self.echo.process(f, at, &input[span.clone()], &mut out[span.clone()], &mut damage[span.clone()]);
             let mono = &mut self.mono[..n];
-            if self.reverb.process(f, at, &input[span.clone()], mono) {
+            if self.reverb.process(f, at, &input[span.clone()], mono, marks) {
                 for (o, &r) in out[span.clone()].iter_mut().zip(mono.iter()) {
                     *o += r;
                 }
                 sounded = true;
+            }
+            for (d, &m) in damage[span.clone()].iter_mut().zip(marks.iter()) {
+                *d |= m;
             }
             if self.ring.process(at, &input[span.clone()], mono) {
                 for (o, &r) in out[span].iter_mut().zip(mono.iter()) {

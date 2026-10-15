@@ -344,6 +344,10 @@ export interface EngineHost {
   /** Subscribe to the feed (~60 frames/s while something changes); the first frame has `reset`.
    * Returns the unsubscribe. */
   subscribe(onFrame: (frame: FeedFrame) => void): () => void;
+  /** DEV, Tauri only (`window.__lf.platform.engine`): hold the engine lock `ms` (at most 1000) while a
+   * device runs, so its callbacks miss their blocks: a planted dropout, which a take or a layer it lands in
+   * keeps and marks. Resolves false when no device runs. */
+  holdLock?(ms: number): Promise<boolean>;
 }
 
 /**

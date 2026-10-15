@@ -252,7 +252,9 @@ impl Feed {
     /// The lanes' waveform bins that changed, in play order: every bin of a lane that shows another
     /// buffer or orientation, holds less than before, grows while reversed (a multiply: its play order
     /// counts back from the new end) or is new to the UI (a reset), else the bins its buffer changed plus
-    /// the ones it grew by.
+    /// the ones it grew by. Each run lists its marked bins (`Overview::heard_marked`): the peaks keep
+    /// their bin reversal, the marks map through frames, so a changed buffer bin on a reversed lane also
+    /// re-sends the heard bins its frames reach (at most two).
     fn peaks(&mut self, reset: bool) -> Vec<PeakUpdate> {
         let mut out = Vec::new();
         let Some(overview) = self.overview.clone() else {
@@ -269,10 +271,16 @@ impl Feed {
             self.bins.clear();
             match last {
                 Some(d) if d.buf == now.buf && d.reversed == now.reversed && (count == d.count || (count > d.count && !now.reversed)) => {
-                    let bins = &mut self.bins;
+                    let (bins, frames) = (&mut self.bins, view.frames.max(0) as usize);
                     overview.take_dirty(view.buf, |b| {
                         if (b as u32) < count {
                             bins.push(b as u32);
+                            if now.reversed {
+                                // Pushed in buffer order, reversed below: the heard bins, reversed back.
+                                if let Some((lo, hi)) = Overview::heard_bins(frames, true, b) {
+                                    bins.extend((lo..=hi).filter(|&h| (h as u32) < count).map(|h| count - 1 - h as u32));
+                                }
+                            }
                         }
                     });
                     bins.extend(d.count..count);
@@ -282,7 +290,7 @@ impl Feed {
                     if count == 0 {
                         // Cleared (or a pass starting over): one empty update, none for a lane never drawn.
                         if last.is_some_and(|d| d.count > 0) {
-                            out.push(PeakUpdate { lane: lane as u8, start: 0, count: 0, min: Vec::new(), max: Vec::new() });
+                            out.push(PeakUpdate { lane: lane as u8, start: 0, count: 0, min: Vec::new(), max: Vec::new(), marked: Vec::new() });
                         }
                         continue;
                     }
@@ -304,14 +312,18 @@ impl Feed {
                 while end < self.bins.len() && self.bins[end] == self.bins[end - 1] + 1 {
                     end += 1;
                 }
-                let (mut min, mut max) = (Vec::with_capacity(end - k), Vec::with_capacity(end - k));
+                let (mut min, mut max, mut marked) = (Vec::with_capacity(end - k), Vec::with_capacity(end - k), Vec::new());
+                let frames = view.frames.max(0) as usize;
                 for &play in &self.bins[k..end] {
                     let bin = if now.reversed { count - 1 - play } else { play };
                     let (lo, hi) = overview.bin(view.buf, bin as usize);
                     min.push(round(lo));
                     max.push(round(hi));
+                    if overview.heard_marked(view.buf, frames, now.reversed, play as usize) {
+                        marked.push(play);
+                    }
                 }
-                out.push(PeakUpdate { lane: lane as u8, start, count, min, max });
+                out.push(PeakUpdate { lane: lane as u8, start, count, min, max, marked });
                 k = end;
             }
         }
@@ -460,7 +472,7 @@ impl FeedThread {
 mod tests {
     use super::*;
     use crate::engine_io::test_rig::TestDevice;
-    use lf_engine::{Command, TimedCommand};
+    use lf_engine::{Command, LaneState, ProcessContext, TimedCommand};
 
     type Sent = Arc<Mutex<Vec<FeedFrame>>>;
 
@@ -500,6 +512,251 @@ mod tests {
     fn counts(sent: &Sent) -> (usize, usize) {
         let sent = sent.lock().unwrap();
         (sent.len(), sent.iter().filter(|frame| frame.reset).count())
+    }
+
+    /// An engine rendered here, block by block on the test's thread: the frames, the device's flags
+    /// and the input are the test's own, so a dropout lands where the test puts it.
+    struct Manual {
+        host: EngineHost,
+        frame: Frame,
+        input: fn(Frame) -> f32,
+    }
+
+    impl Manual {
+        /// 4-second lanes at 48 kHz, the event ring `events` long.
+        fn new(events: usize) -> Manual {
+            use lf_engine::{Engine, EngineConfig};
+            let core = Arc::new(super::super::Core::new());
+            let config = EngineConfig { max_loop_seconds: 4.0, event_capacity: events, ..EngineConfig::new(48_000) };
+            let (engine, handle) = Engine::new(config);
+            let [p0, p1] = handle.slots;
+            *core.ports[0].lock().unwrap() = Some(p0);
+            *core.ports[1].lock().unwrap() = Some(p1);
+            let scope_bin = lf_engine::scope::scope_bin_frames(48_000) as u32;
+            *core.ends.lock().unwrap() = Some(super::super::Ends {
+                commands: handle.commands,
+                events: handle.events,
+                overview: handle.overview,
+                session: Some(handle.session),
+                scope: handle.scope,
+                scope_bin,
+            });
+            core.rt.lock().unwrap().engine = Some(engine);
+            core.rate.store(48_000, Relaxed);
+            core.max_block.store(config.max_block as u32, Relaxed);
+            core.running.store(true, Release);
+            let manual = Manual { host: EngineHost { core }, frame: 0, input: |f| ((f % 977) as f32 / 977.0) * 0.5 + 0.1 };
+            manual.send(Command::SetSlotLive(0, true));
+            manual
+        }
+
+        fn send(&self, command: Command) {
+            self.host.send(TimedCommand { frame: None, command }).unwrap();
+        }
+
+        /// Render `frames` in 128-frame blocks, the first flagged as `xrun` and every one as `damaged`.
+        fn render(&mut self, frames: Frame, xrun: bool, damaged: bool) {
+            let mut rt = self.host.core.rt.lock().unwrap();
+            let engine = rt.engine.as_mut().unwrap();
+            let (mut x, mut l, mut r) = ([0.0f32; 128], [0.0f32; 128], [0.0f32; 128]);
+            let end = self.frame + frames;
+            let mut first = true;
+            while self.frame < end {
+                let n = (end - self.frame).min(128) as usize;
+                for (k, s) in x[..n].iter_mut().enumerate() {
+                    *s = if damaged { 0.0 } else { (self.input)(self.frame + k as Frame) };
+                }
+                let ctx = ProcessContext { frame: self.frame, xrun: xrun && first, damaged, align_frames: 0, input_frames: 0 };
+                engine.process(&ctx, &x[..n], &mut l[..n], &mut r[..n]);
+                self.frame += n as Frame;
+                first = false;
+            }
+        }
+
+        /// The device skips `frames`: the next block follows a gap.
+        fn jump(&mut self, frames: Frame) {
+            self.frame += frames;
+            self.render(128, true, false);
+        }
+
+        /// Lane `lane`'s view as the overview holds it.
+        fn view(&self, lane: usize) -> lf_engine::LaneView {
+            self.host.core.ends.lock().unwrap().as_ref().unwrap().overview.lane(lane)
+        }
+    }
+
+    /// The marked play bins of lane `lane` that `frames` sent, last update per bin winning; `None` for a
+    /// bin no update named.
+    fn sent_marks(frames: &[FeedFrame], lane: u8) -> std::collections::BTreeMap<u32, bool> {
+        let mut out = std::collections::BTreeMap::new();
+        for f in frames {
+            if f.reset {
+                out.clear();
+            }
+            for p in f.peaks.iter().filter(|p| p.lane == lane) {
+                for b in p.start..p.start + p.min.len() as u32 {
+                    out.insert(b, p.marked.contains(&b));
+                }
+            }
+        }
+        out
+    }
+
+    fn marked(frames: &[FeedFrame], lane: u8) -> Vec<u32> {
+        sent_marks(frames, lane).into_iter().filter(|&(_, m)| m).map(|(b, _)| b).collect()
+    }
+
+    /// A 2-bar FIXED take at 240 BPM on lane 0 (96,000 frames: 93.75 bins), a damaged block over frames
+    /// [48_000, 48_128) of it: buffer bin 46.
+    fn take_with_a_dropout(m: &mut Manual) {
+        for c in [Command::SetBpm(240.0), Command::SetFixedLength(true), Command::SetFixedBars(2.0), Command::RecDub(0)] {
+            m.send(c);
+        }
+        m.render(128, false, false);
+        let window = m.host.core.rt.lock().unwrap().engine.as_ref().unwrap().looper().recorder();
+        let Some((0, Some(s), Some(e))) = window else { panic!("no window: {window:?}") };
+        m.render(s + 48_000 - m.frame, false, false);
+        m.render(128, false, true);
+        m.render(e + 512 - m.frame, false, false);
+        assert_eq!(m.view(0).state, LaneState::Playing, "the take committed");
+    }
+
+    #[test]
+    fn a_mark_reaches_the_feed_through_a_full_event_ring_and_a_reset() {
+        let mut m = Manual::new(8);
+        let mut feed = Feed::new(m.host.clone());
+        let hold = Arc::new(Hold::default());
+        let (mut sub, sent) = subscriber();
+        turn(&mut feed, &mut sub, &hold);
+        // The whole take renders with no tick: the ring of 8 overflows and the Dropout is lost.
+        take_with_a_dropout(&mut m);
+        turn(&mut feed, &mut sub, &hold);
+        {
+            let sent = sent.lock().unwrap();
+            let last = sent.last().unwrap();
+            assert!(!last.reset, "an ordinary frame");
+            assert!(!last.events.iter().any(|e| matches!(e.0, Event::Dropout { .. })), "the full ring lost the Dropout");
+            assert_eq!(marked(&sent, 0), [46], "the mark arrives with the peaks all the same");
+        }
+        // A reset (a reload's resubscribe) sends it again.
+        let (mut sub, sent) = subscriber();
+        turn(&mut feed, &mut sub, &hold);
+        assert_eq!(marked(&sent.lock().unwrap(), 0), [46], "a resubscribe re-sends the mark");
+        // A held feed resumes with one reset that carries it.
+        let guard = FeedHold::take(&hold);
+        m.render(1024, false, false);
+        turn(&mut feed, &mut sub, &hold);
+        drop(guard);
+        turn(&mut feed, &mut sub, &hold);
+        {
+            let sent = sent.lock().unwrap();
+            assert!(sent.last().unwrap().reset);
+            assert_eq!(marked(&sent, 0), [46], "the hold's end re-sends it");
+        }
+        // REVERSE: the marks map through frames on a loop that is not whole bins. Buffer bin 46 holds
+        // frames [47_104, 48_128), heard backwards at [47_872, 48_896): heard bins 46 and 47 (the bin
+        // count's reversal would send bin 47 alone, which holds none of the dropout's heard frames).
+        m.send(Command::Reverse(0));
+        m.render(256, false, false);
+        turn(&mut feed, &mut sub, &hold);
+        assert!(m.view(0).reversed);
+        assert_eq!(marked(&sent.lock().unwrap(), 0), [46, 47], "reversed, through frames");
+    }
+
+    #[test]
+    fn a_stops_restore_and_a_new_pass_resend_the_bins_they_clear() {
+        // An overdub with a jump in it marks its hole; a tick sends that; STOP discards the layer, and its
+        // restore takes the marks with the audio: the next tick re-sends those bins unmarked.
+        let mut m = Manual::new(4096);
+        let mut feed = Feed::new(m.host.clone());
+        let hold = Arc::new(Hold::default());
+        let (mut sub, sent) = subscriber();
+        turn(&mut feed, &mut sub, &hold);
+        for c in [Command::SetBpm(240.0), Command::SetFixedLength(true), Command::SetFixedBars(2.0), Command::RecDub(0)] {
+            m.send(c);
+        }
+        m.render(2 * 48_000 + 48_000 + 256, false, false);
+        m.send(Command::SetFixedLength(false));
+        m.render(4096, false, false);
+        turn(&mut feed, &mut sub, &hold);
+        m.send(Command::RecDub(0));
+        m.render(10_000, false, false);
+        m.jump(3000);
+        m.render(2000, false, false);
+        turn(&mut feed, &mut sub, &hold);
+        let held = marked(&sent.lock().unwrap(), 0);
+        assert!(!held.is_empty(), "the hole is marked on the feed");
+        m.send(Command::Stop(0));
+        m.render(4096, false, false);
+        turn(&mut feed, &mut sub, &hold);
+        {
+            let sent = sent.lock().unwrap();
+            let marks = sent_marks(&sent, 0);
+            assert!(held.iter().all(|b| marks.get(b) == Some(&false)), "the cleared bins re-sent unmarked");
+        }
+
+        // A RETAKE roll: a dropout in pass 1, kept marked in the free buffer; pass 3 records into that
+        // buffer again, cleared at its edge: none of its bins goes out marked.
+        m.send(Command::ClearAll);
+        m.render(4096, false, false);
+        for c in [Command::SetFixedLength(true), Command::SetFixedBars(1.0), Command::SetRetake(true), Command::RecDub(1)] {
+            m.send(c);
+        }
+        m.render(128, false, false);
+        let start = m.frame + 48_000 - 128;
+        m.render(start - m.frame + 10_000, false, false);
+        m.render(128, false, true); // pass 1
+        m.render(start + 2 * 48_000 + 1000 - m.frame, false, false); // into pass 3
+        turn(&mut feed, &mut sub, &hold);
+        let before = sent.lock().unwrap().len();
+        for _ in 0..20 {
+            m.render(2048, false, false);
+            turn(&mut feed, &mut sub, &hold);
+        }
+        let sent = sent.lock().unwrap();
+        assert_eq!(m.view(1).state, LaneState::Recording);
+        let late: Vec<&PeakUpdate> = sent[before..].iter().flat_map(|f| f.peaks.iter()).filter(|p| p.lane == 1).collect();
+        assert!(!late.is_empty() && late.iter().all(|p| p.marked.is_empty()), "pass 3's bins carry no mark of pass 1's");
+    }
+
+    #[test]
+    fn a_multiply_over_a_buffer_that_held_marks_sends_none_of_them() {
+        // Lane 0 held a 4-bar take marked in bar 4; CLEAR ALL leaves the mark in its buffer, unseen. A
+        // 2-bar take there, then a multiply to 4 bars from lane 1: bars 3 and 4 tile the new loop, and no
+        // stale mark goes out.
+        let mut m = Manual::new(4096);
+        let mut feed = Feed::new(m.host.clone());
+        let hold = Arc::new(Hold::default());
+        let (mut sub, sent) = subscriber();
+        turn(&mut feed, &mut sub, &hold);
+        for c in [Command::SetBpm(240.0), Command::SetFixedLength(true), Command::SetFixedBars(4.0), Command::RecDub(0)] {
+            m.send(c);
+        }
+        m.render(128, false, false);
+        m.render(48_000 - 128 + 3 * 48_000 + 1000, false, false);
+        m.render(128, false, true);
+        m.render(48_000, false, false);
+        turn(&mut feed, &mut sub, &hold);
+        assert!(!marked(&sent.lock().unwrap(), 0).is_empty(), "the 4-bar take is marked in bar 4");
+        m.send(Command::ClearAll);
+        m.render(8192, false, false);
+        for c in [Command::SetFixedBars(2.0), Command::RecDub(0)] {
+            m.send(c);
+        }
+        m.render(48_000 + 2 * 48_000 + 256, false, false);
+        m.render(8192, false, false);
+        for c in [Command::SetFixedBars(4.0), Command::RecDub(1)] {
+            m.send(c);
+        }
+        let before = sent.lock().unwrap().len();
+        m.render(2 * 96_000 + 96_000, false, false);
+        for _ in 0..10 {
+            m.render(4096, false, false);
+            turn(&mut feed, &mut sub, &hold);
+        }
+        assert_eq!(m.view(0).frames, 192_000, "lane 0 multiplied to 4 bars");
+        let sent = sent.lock().unwrap();
+        assert!(sent[before..].iter().flat_map(|f| f.peaks.iter()).all(|p| p.marked.is_empty()), "no stale mark is sent");
     }
 
     #[test]

@@ -38,7 +38,7 @@
 
 use std::sync::Arc;
 
-use crate::api::{Action, Command, CompactMix, Event, LaneInfo, LaneMix, LaneState, Refusal, Toggle, HOLD_CONTROLS, TRACK_COUNT};
+use crate::api::{damage, Action, Command, CompactMix, Event, LaneInfo, LaneMix, LaneState, Refusal, Toggle, HOLD_CONTROLS, TRACK_COUNT};
 use crate::autorec::{self, Detector};
 use crate::clock::Clock;
 use crate::effects::LaneFx;
@@ -48,7 +48,7 @@ use crate::grid::{
     plan_free_stop, plan_later_stop, plan_retake_stop, Frame, Meter, RetakeStop, TakeFill, MAX_BPM,
     MIN_BPM,
 };
-use crate::overview::{LaneView, Overview};
+use crate::overview::{LaneView, Overview, PEAK_FRAMES};
 use crate::session::{Load, Pin, SessionError, Snapshot, SnapshotTrack};
 
 pub const MAX_FIXED_BARS: Frame = 32;
@@ -220,27 +220,25 @@ struct Recorder {
     restart: Option<Frame>,
     roll: Option<Roll>,
     /// RETAKE: a stop in the grace ended the roll to let the pass in flight finish, while the last
-    /// complete clean pass still sits in the free buffer (a punch-out before the edge commits it).
+    /// complete pass still sits in the free buffer (a punch-out before the edge commits it).
     finishing_kept: bool,
-    /// An input gap fell inside the window (inside the pass in flight, for a roll).
-    damaged: bool,
     /// RETAKE: the lane whose REC approved the roll records next, from its pass edge.
     handoff: Option<usize>,
-    /// Overdub: the loop position of its first input frame, frames summed so far, and the undo state
-    /// before it (restored if the layer is discarded).
+    /// The first window frame not captured yet: a capture call that starts past it, or a window edge
+    /// it has not reached, finds the frames a jump skipped (a hole).
+    next: Frame,
+    /// The window (the pass in flight, for a roll) marked a frame: its close or pass edge sends
+    /// [`Event::Dropout`].
+    marked: bool,
+    /// Overdub: the loop position of its first input frame, the frames of the window it reached (holes
+    /// included), and the undo state before it (restored if the layer is discarded).
     first_pos: Frame,
-    summed: Frame,
+    extent: Frame,
     prev_undo_valid: bool,
     prev_spare_reversed: bool,
 }
 
 impl Recorder {
-    /// The device lost input frames `[from, to)` (`from == to`: a point xrun just before `to`): whether
-    /// they fall inside the window.
-    fn hit(&self, (from, to): (Frame, Frame)) -> bool {
-        self.start.is_some_and(|s| to > s) && self.end.is_none_or(|e| from < e)
-    }
-
     fn new(lane: usize, kind: Kind, align: Frame) -> Self {
         Recorder {
             lane,
@@ -253,10 +251,11 @@ impl Recorder {
             restart: None,
             roll: None,
             finishing_kept: false,
-            damaged: false,
             handoff: None,
+            next: 0,
+            marked: false,
             first_pos: 0,
-            summed: 0,
+            extent: 0,
             prev_undo_valid: false,
             prev_spare_reversed: false,
         }
@@ -451,9 +450,16 @@ pub struct Looper {
     job_step_max: Frame,
     /// Every buffer position the block jobs have moved.
     job_work: Frame,
-    /// The input gaps a window not yet checked may still overlap (`Looper::input_gap`): a window whose
-    /// edge runs after them may lie in them.
-    gap: (Frame, Frame),
+    /// The most buffer positions one jump's holes zeroed: what "no loop-sized work in one callback"'s one
+    /// exception is checked against (`fill_hole`), and the count since the last jump.
+    zeroed_max: Frame,
+    zeroed: Frame,
+    /// AUTO listening: the last tap frame that carried `TAIL` (`scan_auto`).
+    auto_mark: Option<Frame>,
+    /// A job's marks are computed at its push from its source's words frozen here, into the
+    /// destination's words (`job_marks`).
+    mark_src: Vec<u64>,
+    mark_dst: Vec<u64>,
     detector: Detector,
     gain_coef: f64,
     loop_end_stop: bool,
@@ -509,7 +515,11 @@ impl Looper {
             jobs: [None; MAX_JOBS],
             job_step_max: 0,
             job_work: 0,
-            gap: (Frame::MIN, Frame::MIN),
+            zeroed_max: 0,
+            zeroed: 0,
+            auto_mark: None,
+            mark_src: vec![0; (capacity as usize).div_ceil(PEAK_FRAMES).div_ceil(64)],
+            mark_dst: vec![0; (capacity as usize).div_ceil(PEAK_FRAMES).div_ceil(64)],
             detector: Detector::new(sample_rate),
             gain_coef: (-1.0 / (GAIN_TAU_SECONDS * sample_rate as f64)).exp(),
             loop_end_stop: false,
@@ -636,6 +646,11 @@ impl Looper {
     }
 
     /// The most buffer positions one block job moved in a single step since the engine started.
+    /// The most buffer positions one jump's holes zeroed (the tests check it against two windows).
+    pub fn zeroed_max(&self) -> Frame {
+        self.zeroed_max
+    }
+
     pub fn job_step_max(&self) -> Frame {
         self.job_step_max
     }
@@ -1310,11 +1325,14 @@ impl Looper {
         t.auto_armed = false;
         let mut rec = Recorder::new(i, Kind::Take, cx.align);
         t.state = LaneState::Recording;
+        // The buffer takes new audio from position 0: no mark of what it held is left.
+        self.overview.clear_marks(t.live);
         if self.master == 0 {
             if self.auto_record {
                 // AUTO replaces only the first-track count-in: no click, no tempo lock, no length until
                 // the input triggers.
                 self.detector.reset();
+                self.auto_mark = None;
                 t.auto_armed = true;
                 self.rec = Some(rec);
                 return;
@@ -1339,9 +1357,9 @@ impl Looper {
             let boundary = next_boundary(self.anchor, self.master, cx.now);
             rec.start = Some(seam.unwrap_or(boundary + rec.align));
         }
+        rec.next = rec.start.unwrap();
         self.rec = Some(rec);
         self.configure_end(cx);
-        self.damage_from_gap();
     }
 
     /// Bound the take at the FIXED bar count or the buffer; RETAKE rolls a known length (the master once
@@ -1425,18 +1443,23 @@ impl Looper {
         }
     }
 
-    /// The capture window closed: commit (or reject a damaged one), release the recorder, and hand it
-    /// on to a lane that approved a RETAKE.
+    /// The capture window closed: commit it as recorded (a hole a jump left before its end zeroed in a
+    /// take, the old loop in a layer, and marked), say so when it holds a dropout, release the recorder,
+    /// and hand it on to a lane that approved a RETAKE.
     fn finish_capture(&mut self, cx: &mut Cx, i: usize) {
-        let Some(rec) = self.rec.filter(|r| r.lane == i) else { return };
+        let Some(mut rec) = self.rec.filter(|r| r.lane == i) else { return };
         let seam = rec.end;
-        if rec.damaged {
-            self.reject(cx, i, &rec);
-        } else if rec.kind == Kind::Overdub {
+        let end = rec.end.unwrap();
+        self.fill_hole(&mut rec, end);
+        let overdub = rec.kind == Kind::Overdub;
+        if overdub {
             self.fade_tail(i, rec.end.unwrap());
             self.lanes[i].state = if rec.stop_playback { LaneState::Stopped } else { LaneState::Playing };
         } else {
             self.commit_take(cx, i, &rec);
+        }
+        if rec.marked {
+            cx.feed.push(Event::Dropout { frame: cx.now, lane: i as u8, overdub });
         }
         self.release_recorder(cx, i);
         self.reset_master_if_blank(cx);
@@ -1540,42 +1563,33 @@ impl Looper {
         }
     }
 
-    /// A take or layer whose window saw an input gap: discard it, keep what was there before.
-    fn reject(&mut self, cx: &mut Cx, i: usize, rec: &Recorder) {
-        let overdub = rec.kind == Kind::Overdub;
-        cx.feed.push(Event::TakeRejected { frame: cx.now, lane: i as u8, overdub });
-        if overdub {
-            self.discard_layer(cx, i, rec);
-            self.lanes[i].state = if rec.stop_playback { LaneState::Stopped } else { LaneState::Playing };
-            return;
-        }
-        let t = &mut self.lanes[i];
-        t.armed = false;
-        t.written = 0;
-        t.length = 0;
-        t.state = LaneState::Empty; // a first take leaves a blank session: finish_capture resets it
-    }
-
-    /// RETAKE: the rolling take reached its window end. Set the pass aside when it is clean (a damaged
-    /// pass drops the older kept pass too: approving must never hand back a pass the player did not just
-    /// play) and slide the whole take one pass forward.
+    /// RETAKE: the rolling take reached its window end. Set the pass aside as recorded (a hole a jump
+    /// left before its end zeroed and marked, and said so) and slide the whole take one pass forward,
+    /// past every pass a jump skipped whole at once: those captured nothing, the pass kept before them
+    /// stays, and the pass the jump landed in captures from the frame it renders.
     fn complete_pass(&mut self, cx: &mut Cx) {
         let mut rec = self.rec.unwrap();
         let i = rec.lane;
         let frames = rec.end.unwrap() - rec.start.unwrap();
         let mut roll = rec.roll.unwrap();
-        roll.kept = !rec.damaged;
-        if roll.kept {
+        if rec.next > rec.start.unwrap() {
+            let end = rec.end.unwrap();
+            self.fill_hole(&mut rec, end);
             std::mem::swap(&mut self.lanes[i].live, &mut self.free);
-        } else {
-            cx.feed.push(Event::PassDropped { frame: cx.now, lane: i as u8, pass: roll.pass });
+            roll.kept = true;
+            if rec.marked {
+                cx.feed.push(Event::Dropout { frame: cx.now, lane: i as u8, overdub: false });
+            }
         }
-        roll.pass += 1;
+        // The passes that ended before this frame (a jump skipped them whole), and this one.
+        let slide = 1 + if frames > 0 { (cx.now - rec.end.unwrap()).max(0) / frames } else { 0 };
+        roll.pass += slide as u32;
         rec.roll = Some(roll);
-        rec.damaged = false;
-        rec.start = rec.end;
+        rec.marked = false;
+        rec.start = rec.end.map(|e| e + (slide - 1) * frames);
+        rec.next = rec.start.unwrap();
         rec.end = Some(rec.start.unwrap() + frames);
-        rec.downbeat = rec.downbeat.map(|d| d + frames);
+        rec.downbeat = rec.downbeat.map(|d| d + slide * frames);
         if let Some(downbeat) = rec.downbeat {
             // A first take's pass is whole rounded bars, the tempo grid's bar the exact `60 * sr / bpm`
             // beats: the click follows the roll as it follows a commit, re-anchored on the new pass's
@@ -1585,22 +1599,23 @@ impl Looper {
         let t = &mut self.lanes[i];
         t.audible = t.logical();
         t.written = 0;
+        self.overview.clear_marks(t.live);
         self.rec = Some(rec);
-        self.damage_from_gap();
     }
 
     /// AUTO: the onset retained in `live[..copied]` began at input frame `onset`. The grid anchors where
     /// it was performed: `align` frames earlier.
-    fn begin_auto(&mut self, cx: &mut Cx, onset: Frame) {
+    fn begin_auto(&mut self, cx: &mut Cx, onset: Frame, copied: Frame) {
         let rec = self.rec.as_mut().unwrap();
         rec.align = cx.align;
         rec.start = Some(onset);
+        // The detector's history wrote the onset's frames.
+        rec.next = onset + copied;
         let downbeat = onset - rec.align;
         rec.downbeat = Some(downbeat);
         self.lanes[rec.lane].auto_armed = false;
         cx.clock.set_locked(true);
         self.configure_end(cx);
-        self.damage_from_gap();
         cx.clock.start_auto_record(downbeat, cx.now);
     }
 
@@ -1608,11 +1623,10 @@ impl Looper {
     /// at `cx.now` when a device runs again. A capture that has retained nothing (a count-in, a
     /// boundary arm, AUTO listening, an overdub inside the `align` frames before its window opens) is
     /// cancelled as Stop does, an overdub's lane playing on. Anything else ends at `cx.now` and
-    /// commits through the usual path, where only an earlier input gap rejects it: a take, an overdub
-    /// layer, a RETAKE roll with no pass kept yet. A RETAKE roll with a kept pass commits that pass,
-    /// even inside the grace where a stop would let the pass in flight finish (and after such a stop),
-    /// unless the pass in flight is complete and clean: its edge ends the last rendered block, so it
-    /// commits as that edge would have kept it. A RETAKE approval's next take is not armed. Loop-end
+    /// commits through the usual path, kept as recorded: a take, an overdub layer, a RETAKE roll with
+    /// no pass kept yet. A RETAKE roll with a kept pass commits that pass, even inside the grace where a
+    /// stop would let the pass in flight finish (and after such a stop), unless the pass in flight is
+    /// complete: its edge ends the last rendered block, so it commits as that edge would have kept it. A RETAKE approval's next take is not armed. Loop-end
     /// stops and block jobs carry on when rendering resumes.
     pub fn punch_out(&mut self, cx: &mut Cx) {
         let Some(mut rec) = self.rec else { return };
@@ -1632,7 +1646,7 @@ impl Looper {
         let kept = rec.roll.is_some_and(|r| r.kept) || rec.finishing_kept;
         // Events at a window edge run in the block after it: one ending the last rendered block has
         // not run yet.
-        let complete = rec.end.is_some_and(|e| e <= cx.now) && !rec.damaged;
+        let complete = rec.end.is_some_and(|e| e <= cx.now);
         rec.roll = None;
         if kept && !complete {
             // A kept complete pass wins over the pass in flight, even inside its grace: a stop there
@@ -1647,13 +1661,15 @@ impl Looper {
         self.finish_capture(cx, i);
     }
 
-    /// RETAKE: the kept pass replaces the one in flight, whose damage dies with it, and commits.
+    /// RETAKE: the kept pass replaces the one in flight, whose marks die with it, and commits. Its own
+    /// holes were filled at its pass edge, which also said so: its commit sends no second `Dropout`.
     fn keep_last_pass(&mut self, cx: &mut Cx, i: usize, mut rec: Recorder) {
         let t = &mut self.lanes[i];
         std::mem::swap(&mut t.live, &mut self.free);
         t.audible = t.logical();
         t.written = rec.end.unwrap() - rec.start.unwrap();
-        rec.damaged = false;
+        rec.next = rec.end.unwrap();
+        rec.marked = false;
         self.rec = Some(rec);
         self.finish_capture(cx, i);
     }
@@ -1681,11 +1697,11 @@ impl Looper {
         t.state = LaneState::Overdubbing;
         let (src, dst) = (t.live, t.spare);
         rec.start = Some(cx.now + rec.align);
+        rec.next = cx.now + rec.align;
         rec.first_pos = first_pos;
         self.tail_next = 0;
         self.tail_len = 0;
         self.rec = Some(rec);
-        self.damage_from_gap();
         self.push_job(cx.now, cx.now, i, JobKind::Copy { src, dst }, Visit { lo: 0, span: master, off: first_pos, modulus: master });
     }
 
@@ -1733,13 +1749,17 @@ impl Looper {
         }
     }
 
-    /// Put the loop back as it was before the overdub, and the undo target from before it.
+    /// Put the loop back as it was before the overdub, its marks with it, and the undo target from
+    /// before it. Only the positions the undo copy passed are restored: the layer wrote no other
+    /// (`capture`), so they hold the loop before it already.
     fn discard_layer(&mut self, cx: &mut Cx, i: usize, rec: &Recorder) {
+        let copied = self.copy_progress(i);
         self.jobs.iter_mut().filter(|j| j.is_some_and(|j| j.lane == i)).for_each(|j| *j = None);
         let master = self.master;
-        let span = rec.summed.min(master);
+        let span = rec.extent.min(copied).min(master);
         let t = self.lanes[i];
         if span == 0 {
+            self.overview.copy_marks(t.spare, t.live);
             self.restore_undo(i, rec.prev_undo_valid, rec.prev_spare_reversed);
             return;
         }
@@ -2026,13 +2046,15 @@ impl Looper {
     /// audio: a head it carried past a job's reads what the job has not written yet (a commit's padding
     /// and tiling, a TRIM, a discarded layer's restore) until the job overtakes it again, at most
     /// `frames / JOB_RATE` frames later. An overdub's write head, which the jump carries past its undo
-    /// copy, writes nothing more: the jump's input gap damaged that layer (`capture`), so the copy reads
-    /// only the loop before it and the rejection restores that exactly. A lane a multiply extends reads
-    /// through its old loop as ever.
+    /// copy, writes no position the copy has not passed (`capture`): the old loop stays there, marked,
+    /// until the copy overtakes it, so UNDO and STOP's discard still give back the loop before the layer
+    /// exactly. A capture window's skipped frames are a hole, filled in the callback that finds it
+    /// (`fill_hole`). A lane a multiply extends reads through its old loop as ever.
     pub fn skip(&mut self, frames: Frame) {
         for job in self.jobs.iter_mut().flatten() {
             job.start += frames;
         }
+        self.zeroed = 0;
     }
 
     /// A job on `lane` pushed at frame `now`, from frame `start` (now, or where a job it depends on is
@@ -2040,8 +2062,72 @@ impl Looper {
     fn push_job(&mut self, now: Frame, start: Frame, lane: usize, kind: JobKind, visit: Visit) {
         let job = Job { kind, lane, visit, start, progress: 0 };
         self.protect(now, job.writes());
+        self.job_marks(kind, visit);
         let slot = self.jobs.iter_mut().find(|j| j.is_none()).expect("block job slots exhausted");
         *slot = Some(job);
+    }
+
+    /// A job's destination marks, set whole at its push: its sources are final while it runs (`Job::
+    /// ahead`), so the marks now are the marks when it is done, and a reader that sees what it writes
+    /// sees them already. A copy takes its source's whole; a fill or a TRIM maps each marked source bin
+    /// through the job's position map, read from the source's words frozen in a scratch (an in-place
+    /// fill never reads a mark it set), into the destination's words, whose rewritten range (and
+    /// anything past the loop) is cleared first; a bin straddling a fill's low end keeps its own mark.
+    /// Tiles repeat a mark, padding and cut bars drop it. One copy of the words, then at most two bins
+    /// per tile of each marked source bin.
+    fn job_marks(&mut self, kind: JobKind, visit: Visit) {
+        let (src, dst) = match kind {
+            JobKind::Copy { src, dst } | JobKind::Restore { src, dst, .. } | JobKind::LaneCopy { src, dst, .. } => {
+                self.overview.copy_marks(src, dst);
+                return;
+            }
+            JobKind::Fill { buf, .. } => (buf, buf),
+            JobKind::Trim { src, dst, .. } => (src, dst),
+        };
+        for (w, word) in self.mark_src.iter_mut().zip(self.overview.mark_words(src)) {
+            *w = word;
+        }
+        for (w, word) in self.mark_dst.iter_mut().zip(self.overview.mark_words(dst)) {
+            *w = word;
+        }
+        let (pf, m) = (PEAK_FRAMES as Frame, visit.modulus);
+        let dst_words = &mut self.mark_dst;
+        match kind {
+            JobKind::Fill { fill, .. } => {
+                // The rewritten range and past it, from the first bin wholly at or past the low end.
+                clear_from(dst_words, (visit.lo + pf - 1) / pf);
+                let kept = fill.untouched();
+                for_marked(&self.mark_src, |bin| {
+                    let (q0, q1) = (bin * pf, ((bin + 1) * pf).min(kept));
+                    let mut t = fill.period;
+                    while q0 < q1 && t < m {
+                        mark_range(dst_words, (t + q0).max(visit.lo), (t + q1).min(m));
+                        t += fill.period;
+                    }
+                });
+            }
+            JobKind::Trim { fill, reversed, .. } => {
+                dst_words.fill(0);
+                for_marked(&self.mark_src, |bin| {
+                    let (b0, b1) = (bin * pf, ((bin + 1) * pf).min(m));
+                    if b0 >= b1 {
+                        return;
+                    }
+                    // The bin's heard positions inside the kept bars, then each tile's, back in buffer order.
+                    let (h0, h1) = if reversed { (m - b1, m - b0) } else { (b0, b1) };
+                    let h1 = h1.min(fill.period);
+                    let mut t = 0;
+                    while h0 < h1 && t < m {
+                        let (a, b) = (t + h0, (t + h1).min(m));
+                        let (a, b) = if reversed { (m - b, m - a) } else { (a, b) };
+                        mark_range(dst_words, a, b);
+                        t += fill.period;
+                    }
+                });
+            }
+            _ => unreachable!(),
+        }
+        self.overview.set_marks(dst, self.mark_dst.iter().copied());
     }
 
     /// D23: a job about to write buffer `buf` from `now`. A tail still reading it (an immediate STOP's,
@@ -2231,58 +2317,112 @@ impl Looper {
 
     // ── Audio ──────────────────────────────────────────────────────────────────────────────────────
 
-    /// The device lost input frames `[from, to)` (a point xrun: `from == to`, a gap just before `to`):
-    /// a capture whose window they fall inside is damaged; AUTO drops the history it can no longer join.
-    /// Every window checks the last gap as it opens, so a gap past a window's end damages the windows
-    /// that follow too (a RETAKE pass, a handoff's take), and a press in a damaged block damages the
-    /// window it opens there. A recorder still behind the last gap (a jump skipped RETAKE passes,
-    /// and `events` catches up four edges at a time) has windows left to check against it: the new gap
-    /// joins it, so a later xrun never makes a skipped pass clean. The frames between the two count as
-    /// lost too, which only matters to a window wholly between them that the recorder has not reached.
-    pub fn input_gap(&mut self, from: Frame, to: Frame) {
-        let behind = self.rec.is_some_and(|r| r.end.is_some_and(|e| e < self.gap.1));
-        self.gap = (if behind { self.gap.0 } else { from }, to);
-        let Some(rec) = self.rec else { return };
-        if self.lanes[rec.lane].auto_armed {
-            self.detector.reset();
-        } else {
-            self.damage_from_gap();
-        }
-    }
-
-    fn damage_from_gap(&mut self) {
-        let gap = self.gap;
-        if let Some(rec) = self.rec.as_mut().filter(|r| r.hit(gap)) {
-            rec.damaged = true;
-        }
-    }
-
-    /// AUTO listening: scan `input` (from frame `f0`). On a trigger, the take begins and the frames
-    /// before the returned index are the last ones rendered under the listening state.
-    pub fn scan_auto(&mut self, cx: &mut Cx, f0: Frame, input: &[f32]) -> Option<usize> {
+    /// AUTO listening: scan the record tap `input` (from frame `f0`) with its damage lane. A `LOST` frame
+    /// resets the detector and is not fed to it, and a `BREAK` resets it before its frame, so a dropout
+    /// never triggers a take and the retained onset is one contiguous run of input (a reset only
+    /// shortens the pre-roll). A `TAIL` frame is fed like any other: a trigger whose pre-roll reaches
+    /// the last one marks the take up to it. On a trigger, the take begins and the frames before the
+    /// returned index are the last ones rendered under the listening state.
+    pub fn scan_auto(&mut self, cx: &mut Cx, f0: Frame, input: &[f32], damage: &[u8]) -> Option<usize> {
         let rec = self.rec?;
         if !self.lanes[rec.lane].auto_armed {
             return None;
         }
-        let live = self.lanes[rec.lane].live;
-        let at = self.detector.scan(input, autorec::threshold(self.auto_sensitivity), &mut self.bufs[live])?;
-        let copied = self.detector.copied();
-        let onset = f0 + at as Frame - copied as Frame;
-        self.lanes[rec.lane].written = copied as Frame;
-        self.overview.touch(live, &self.bufs[live], 0, copied, copied);
-        self.begin_auto(cx, onset);
-        Some(at)
+        let (live, threshold) = (self.lanes[rec.lane].live, autorec::threshold(self.auto_sensitivity));
+        let (gap, n) = (damage::LOST | damage::BREAK, input.len());
+        let mut k = 0;
+        while k < n {
+            if damage[k] & gap != 0 {
+                self.detector.reset();
+                if damage[k] & damage::LOST != 0 {
+                    k += 1;
+                    continue;
+                }
+            }
+            let run = k + 1 + damage[k + 1..n].iter().position(|&d| d & gap != 0).unwrap_or(n - k - 1);
+            let hit = self.detector.scan(&input[k..run], threshold, &mut self.bufs[live]);
+            let fed = hit.map_or(run, |at| k + at);
+            if let Some(t) = damage[k..fed].iter().rposition(|&d| d & damage::TAIL != 0) {
+                self.auto_mark = Some(f0 + (k + t) as Frame);
+            }
+            if let Some(at) = hit {
+                let copied = self.detector.copied();
+                let onset = f0 + (k + at) as Frame - copied as Frame;
+                self.lanes[rec.lane].written = copied as Frame;
+                self.overview.touch(live, &self.bufs[live], 0, copied, copied);
+                if let Some(mark) = self.auto_mark.filter(|&m| m >= onset) {
+                    self.overview.mark(live, 0, (mark - onset) as usize + 1);
+                    self.rec.as_mut().unwrap().marked = true;
+                }
+                self.begin_auto(cx, onset, copied as Frame);
+                return Some(k + at);
+            }
+            k = run;
+        }
+        None
     }
 
-    /// Write the record tap for frames `[f0, f0 + input.len())` into the recorder's window. An overdub
-    /// an input gap damaged writes nothing more: it is rejected at its end, and a write after the gap
-    /// could land where its undo copy has not been yet (a device jump carries the write head past the
-    /// copy, `skip`), which the rejection would then restore as the loop before the layer.
-    pub fn capture(&mut self, f0: Frame, input: &[f32]) {
-        let Some(rec) = self.rec.as_mut() else { return };
+    /// The undo copy's progress on lane `i`'s overdub, in steps: positions `first_pos + [0, progress)`
+    /// (mod the master) hold the loop before the layer in the spare. `Frame::MAX` once it is done.
+    fn copy_progress(&self, i: usize) -> Frame {
+        self.jobs.iter().flatten().find(|j| j.lane == i && matches!(j.kind, JobKind::Copy { .. })).map_or(Frame::MAX, |j| j.progress)
+    }
+
+    /// The window's frames `[rec.next, to)` were never captured (a jump skipped them): a take zeroes
+    /// them in its buffer (which may hold an earlier take there) and marks them; a layer keeps the old
+    /// loop there and marks it. Done in the call that finds the hole, before the commit's fill is pushed
+    /// and before anything reads the buffer, so no reader sees a stale position and nothing waits for
+    /// it. One store per frame the device never delivered, at most two windows a jump (the pass it cut
+    /// and the one it lands in; a pass it skipped whole is not kept, `complete_pass`): the one exception
+    /// to "no loop-sized work in one callback", which scales with audio the device already lost.
+    fn fill_hole(&mut self, rec: &mut Recorder, to: Frame) {
         let Some(start) = rec.start else { return };
-        let lane = &mut self.lanes[rec.lane];
-        if lane.auto_armed || (rec.damaged && rec.kind == Kind::Overdub) {
+        let (from, to) = (rec.next.max(start), to.min(rec.end.unwrap_or(Frame::MAX)));
+        if from >= to {
+            return;
+        }
+        rec.next = to;
+        rec.marked = true;
+        let t = &mut self.lanes[rec.lane];
+        let buf = t.live;
+        match rec.kind {
+            Kind::Take => {
+                let (a, b) = ((from - start) as usize, (to - start) as usize);
+                self.bufs[buf][a..b].fill(0.0);
+                t.written = t.written.max(to - start);
+                self.zeroed += (b - a) as Frame;
+                self.zeroed_max = self.zeroed_max.max(self.zeroed);
+                self.overview.touch_zeroed(buf, &self.bufs[buf], a, b, t.written as usize);
+                self.overview.mark(buf, a, b);
+            }
+            Kind::Overdub => {
+                rec.extent = rec.extent.max(to - start);
+                let first = loop_pos(from - rec.align, self.anchor, self.master);
+                self.mark_positions(buf, first, (to - from).min(self.master));
+            }
+        }
+    }
+
+    /// Buffer `buf`'s `n` loop positions from `first`, wrapping at the master, take a mark.
+    fn mark_positions(&self, buf: usize, first: Frame, n: Frame) {
+        let (first, n, master) = (first as usize, n as usize, self.master as usize);
+        self.overview.mark(buf, first, (first + n).min(master));
+        if first + n > master {
+            self.overview.mark(buf, 0, first + n - master);
+        }
+    }
+
+    /// Write the record tap for frames `[f0, f0 + input.len())` into the recorder's window as recorded,
+    /// and mark the bins of the frames its damage lane counts there (`api::damage`): a frame of window
+    /// `[s, e)` counts when it carries `LOST` or `TAIL`, or `BREAK` strictly inside (a break on `s` lies
+    /// before the window). A take lands frame `f` at `f - s`, an overdub at the loop position it writes.
+    /// Frames the call starts past are a hole (`fill_hole`). An overdub writes no position its undo copy
+    /// has not passed (only a jump carries the write head past it, `skip`): the old loop stays there,
+    /// marked, so UNDO and STOP's discard give back the loop before the layer exactly.
+    pub fn capture(&mut self, f0: Frame, input: &[f32], damage: &[u8]) {
+        let Some(mut rec) = self.rec else { return };
+        let Some(start) = rec.start else { return };
+        if self.lanes[rec.lane].auto_armed {
             return;
         }
         let lo = f0.max(start);
@@ -2290,14 +2430,42 @@ impl Looper {
         if lo >= hi {
             return;
         }
+        if lo > rec.next {
+            self.fill_hole(&mut rec, lo);
+        }
+        let (input, damage) = (&input[(lo - f0) as usize..(hi - f0) as usize], &damage[(lo - f0) as usize..(hi - f0) as usize]);
+        let counts = |f: Frame, d: u8| d & (damage::LOST | damage::TAIL) != 0 || (d & damage::BREAK != 0 && f > start);
+        let clean = damage.iter().all(|&d| d == 0);
+        let copied = if rec.kind == Kind::Overdub { self.copy_progress(rec.lane) } else { Frame::MAX };
+        let lane = &mut self.lanes[rec.lane];
         let (buf, data) = (lane.live, &mut self.bufs[lane.live]);
+        // Runs of marked positions, one store per run.
+        let mut run: Option<(usize, usize)> = None;
+        let overview = &self.overview;
+        let mut mark = |p: usize| {
+            run = match run {
+                Some((a, b)) if b == p => Some((a, p + 1)),
+                Some((a, b)) => {
+                    overview.mark(buf, a, b);
+                    Some((p, p + 1))
+                }
+                None => Some((p, p + 1)),
+            };
+        };
         match rec.kind {
             Kind::Take => {
                 // A take's window never outgrows the buffer (configure_end), so neither does this write.
                 let (a, b) = ((lo - start) as usize, (hi - start) as usize);
-                data[a..b].copy_from_slice(&input[(lo - f0) as usize..(hi - f0) as usize]);
+                data[a..b].copy_from_slice(input);
                 lane.written = lane.written.max(hi - start);
-                self.overview.touch(buf, data, a, b, lane.written as usize);
+                overview.touch(buf, data, a, b, lane.written as usize);
+                if !clean {
+                    for (k, &d) in damage.iter().enumerate() {
+                        if counts(lo + k as Frame, d) {
+                            mark(a + k);
+                        }
+                    }
+                }
             }
             Kind::Overdub => {
                 let master = self.master;
@@ -2308,26 +2476,40 @@ impl Looper {
                 // start, whatever the block or the pass (`punch_in`); every write is kept for the
                 // punch-out (`fade_tail`).
                 let (fb, n, cap) = (lane.feedback, self.punch, self.tail.len());
-                for (f, &x) in (lo..hi).zip(&input[(lo - f0) as usize..(hi - f0) as usize]) {
-                    let old = data[pos as usize];
-                    let new = punch_in(old, x, fb, f - start, n);
-                    data[pos as usize] = new;
-                    self.tail[self.tail_next] = DubWrite { frame: f, pos: pos as usize, old, new };
-                    self.tail_next = (self.tail_next + 1) % cap;
-                    self.tail_len = (self.tail_len + 1).min(cap);
+                for (k, (f, &x)) in (lo..hi).zip(input).enumerate() {
+                    if copied < master && (pos - rec.first_pos).rem_euclid(master) >= copied {
+                        // Ahead of the undo copy: the old loop stays.
+                        mark(pos as usize);
+                    } else {
+                        let old = data[pos as usize];
+                        let new = punch_in(old, x, fb, f - start, n);
+                        data[pos as usize] = new;
+                        self.tail[self.tail_next] = DubWrite { frame: f, pos: pos as usize, old, new };
+                        self.tail_next = (self.tail_next + 1) % cap;
+                        self.tail_len = (self.tail_len + 1).min(cap);
+                        if !clean && counts(f, damage[k]) {
+                            mark(pos as usize);
+                        }
+                    }
                     pos += 1;
                     if pos == master {
                         pos = 0;
                     }
                 }
-                rec.summed += hi - lo;
+                rec.extent = rec.extent.max(hi - start);
                 let (first, n, master) = (first as usize, (hi - lo) as usize, master as usize);
-                self.overview.touch(buf, data, first, (first + n).min(master), master);
+                overview.touch(buf, data, first, (first + n).min(master), master);
                 if first + n > master {
-                    self.overview.touch(buf, data, 0, first + n - master, master);
+                    overview.touch(buf, data, 0, first + n - master, master);
                 }
             }
         }
+        if let Some((a, b)) = run {
+            overview.mark(buf, a, b);
+            rec.marked = true;
+        }
+        rec.next = rec.next.max(hi);
+        self.rec = Some(rec);
     }
 
     /// Write every lane for frames `[f0, f0 + n)` into `out[i][..n]`, under its volume (silence when
@@ -2589,6 +2771,38 @@ impl Looper {
 }
 
 /// Two distinct buffers of the pool, one to read and one to write.
+/// Clear every bin of `words` from `bin` on.
+fn clear_from(words: &mut [u64], bin: Frame) {
+    let (w, b) = ((bin / 64) as usize, (bin % 64) as u32);
+    if let Some(word) = words.get_mut(w) {
+        *word &= (1u64 << b) - 1;
+    }
+    for word in words.iter_mut().skip(w + 1) {
+        *word = 0;
+    }
+}
+
+/// Mark the bins of buffer positions `[a, b)` in `words` (nothing when empty).
+fn mark_range(words: &mut [u64], a: Frame, b: Frame) {
+    let (pf, bins) = (PEAK_FRAMES as Frame, words.len() as Frame * 64);
+    if a < b {
+        for bin in a / pf..=((b - 1) / pf).min(bins - 1) {
+            words[(bin / 64) as usize] |= 1 << (bin % 64);
+        }
+    }
+}
+
+/// Each bin set in `words`, in order.
+fn for_marked(words: &[u64], mut each: impl FnMut(Frame)) {
+    for (w, &word) in words.iter().enumerate() {
+        let mut bits = word;
+        while bits != 0 {
+            each(w as Frame * 64 + bits.trailing_zeros() as Frame);
+            bits &= bits - 1;
+        }
+    }
+}
+
 fn pair(bufs: &mut [Vec<f32>], src: usize, dst: usize) -> (&[f32], &mut [f32]) {
     assert_ne!(src, dst);
     if src < dst {

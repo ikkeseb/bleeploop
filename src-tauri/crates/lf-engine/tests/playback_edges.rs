@@ -558,9 +558,10 @@ fn at(rig: &mut Rig, frame: Frame, commands: &[Command]) {
 // from the job's source, at any block size.
 
 #[test]
-fn a_tail_cached_as_a_restore_starts_plays_the_restored_loop() {
-    // Lane 0's layer, over a pass and damaged by a gap, is rejected at its close; the restore copies the
-    // loop before it back from the read head on. Lane 0 STOPs on that frame.
+fn a_tail_cached_as_a_discards_restore_starts_plays_the_layer_as_heard() {
+    // Lane 0's layer, over a pass and marked by a gap, is discarded by STOP: the restore copies the loop
+    // before it back from the read head on, and the tail, cached at the press, plays the layer as heard.
+    // A discard sends no Dropout.
     at_every_block_size("restore", |block| {
         let (mut rig, master) = code_loop(block, 1);
         let n = ramp(rig.sr);
@@ -574,14 +575,14 @@ fn a_tail_cached_as_a_restore_starts_plays_the_restored_loop() {
         rig.advance(1000);
         rig.set_level(0.0);
         let e = rig.frame + 1000;
-        at(&mut rig, e, &[Command::RecDub(0), Command::Stop(0), Command::PlayStop(1)]);
-        let live = rig.engine.looper().live_buffer(0);
+        at(&mut rig, e, &[Command::Stop(0), Command::PlayStop(1)]);
+        let live = rig.engine.looper().live_buffer(0).to_vec();
         assert!((e..e + n).all(|f| live[pos_at(anchor, master, f)] != pre[pos_at(anchor, master, f)]), "the layer lies ahead of the read head");
         rig.keep_output();
         rig.advance_to(e + n + 100);
-        assert_eq!(rig.rejected(), 1);
+        assert!(rig.dropouts().is_empty(), "a discard sends no Dropout");
         assert_eq!(rig.anchor(), e, "the idle PLAY restarts the grid");
-        heard(&rig, e, rig.frame, |f| sample(1.0, 0.0, 0.0, if f < e + n { tail(f - e, n) * pre[pos_at(anchor, master, f)] as f64 } else { 0.0 }) + 0.25, "the tail is the restored loop");
+        heard(&rig, e, rig.frame, |f| sample(1.0, 0.0, 0.0, if f < e + n { tail(f - e, n) * live[pos_at(anchor, master, f)] as f64 } else { 0.0 }) + 0.25, "the tail is the layer as heard");
         rig.idle();
         assert_eq!(rig.pcm(0), pre);
         rig.output.take().unwrap().1
@@ -718,7 +719,7 @@ fn every_edge_renders_bit_identical_at_any_block_size() {
             rig.send_at(f, c);
         }
         rig.advance_to(t + 5 * master);
-        assert!(rig.rejected() == 0 && (0..3).all(|i| rig.state(i) == LaneState::Playing), "the script ends with three lanes playing");
+        assert!(rig.dropouts().is_empty() && (0..3).all(|i| rig.state(i) == LaneState::Playing), "the script ends with three lanes playing");
         [rig.output.take().unwrap().1, std::mem::take(&mut rig.heard)].concat()
     };
     at_every_block_size("the script", script);

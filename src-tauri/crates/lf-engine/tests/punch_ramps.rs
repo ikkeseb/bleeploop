@@ -194,9 +194,10 @@ fn a_stopped_devices_punch_out_finishes_the_ramp_on_the_frames_it_retained() {
 }
 
 #[test]
-fn a_damaged_dub_restores_the_loop_and_the_previous_undo_target_bit_for_bit() {
+fn a_dub_with_a_gap_in_a_ramp_keeps_its_ramps_as_recorded_marks_the_bin_and_undo_gives_the_loop_back() {
     let n = ramp(48000);
-    // An input gap inside the punch-in ramp, and one inside the punch-out ramp.
+    // An input gap inside the punch-in ramp, and one inside the punch-out ramp: nothing is smoothed
+    // around it, the layer is the clean reference bit for bit.
     for gap_at in [n / 2, 3 * n - n / 2] {
         let mut rig = looping(48000, 200.0, 0);
         rig.set(Command::SetDubFeedback(0, 0.5));
@@ -216,13 +217,17 @@ fn a_damaged_dub_restores_the_loop_and_the_previous_undo_target_bit_for_bit() {
         rig.advance_to(start + 3 * n + 1);
         rig.set_level(0.0);
         rig.idle();
-        assert_eq!(rig.rejected(), 1, "gap at {gap_at}");
+        assert_eq!(rig.dropouts().len(), 1, "gap at {gap_at}");
         assert_eq!(rig.state(0), LaneState::Playing);
-        assert_eq!(off(&rig.pcm(0), &layered), Vec::<usize>::new(), "gap at {gap_at}: the loop before the layer");
-        assert_eq!(rig.engine.looper().undo_pcm(0).unwrap(), take, "gap at {gap_at}: and the undo target before it");
+        let pos = pos_fn(rig.anchor(), master, 0);
+        let mut want = layered.clone();
+        common::dub::dub(&mut want, (start, start + 3 * n), n, 0.5, &pos, input);
+        assert_eq!(off(&rig.pcm(0), &want), Vec::<usize>::new(), "gap at {gap_at}: the layer as recorded");
+        assert_eq!(rig.marks(0), [pos(start + gap_at) / PEAK_FRAMES], "gap at {gap_at}: its bin marked");
+        assert_eq!(rig.engine.looper().undo_pcm(0).unwrap(), layered, "gap at {gap_at}: the undo target is the loop before it");
         rig.press(Command::Undo(0));
         rig.idle();
-        assert_eq!(rig.pcm(0), take);
+        assert!(rig.pcm(0) == layered && rig.marks(0).is_empty());
     }
 }
 

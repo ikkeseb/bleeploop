@@ -294,8 +294,9 @@ export type EngineEvent =
   | { type: 'Beat'; frame: Frame; beatInBar: number; countLeft: number; clicked: boolean }
   | { type: 'Selected'; frame: Frame; lane: number }
   | { type: 'Refused'; frame: Frame; lane: number; reason: Refusal }
-  | { type: 'TakeRejected'; frame: Frame; lane: number; overdub: boolean }
-  | { type: 'PassDropped'; frame: Frame; lane: number; pass: number }
+  /** A take, an overdub layer or a RETAKE pass closed with a dropout in it: kept as recorded, the bins it
+   * reached marked (`PeakUpdate.marked`). Once per window, per pass for a roll. */
+  | { type: 'Dropout'; frame: Frame; lane: number; overdub: boolean }
   /** COPY into `to` is done; `feedback` is the DUB FEEDBACK the engine copied (the source's may have moved
    * since). */
   | { type: 'Copied'; frame: Frame; from: number; to: number; feedback: number }
@@ -356,7 +357,8 @@ export interface Meter {
  * Changed waveform bins of one lane: bins `[start, start + min.length)` of 1024 frames each (the web
  * looper's `PEAK_FRAMES`), from loop position 0 (a take's first frame while it records), in the order
  * they play (a reversed lane reversed). `count` is the lane's valid bin total after this update
- * (0 = cleared).
+ * (0 = cleared). `marked`: the bins of the run that hold a dropout mark, in the same play order (absent
+ * on the wire when none); every other bin of the run holds none.
  */
 export interface PeakUpdate {
   lane: number;
@@ -364,6 +366,7 @@ export interface PeakUpdate {
   count: number;
   min: number[];
   max: number[];
+  marked: number[];
 }
 
 /**
@@ -503,10 +506,8 @@ export function decodeEvent(raw: unknown): EngineEvent {
       return { type: 'Selected', frame: at, lane: lane(o.lane, 'Selected.lane') };
     case 'Refused':
       return { type: 'Refused', frame: at, lane: lane(o.lane, 'Refused.lane'), reason: oneOf(o.reason, REFUSALS, 'Refused.reason') };
-    case 'TakeRejected':
-      return { type: 'TakeRejected', frame: at, lane: lane(o.lane, 'TakeRejected.lane'), overdub: bool(o.overdub, 'TakeRejected.overdub') };
-    case 'PassDropped':
-      return { type: 'PassDropped', frame: at, lane: lane(o.lane, 'PassDropped.lane'), pass: int(o.pass, 'PassDropped.pass') };
+    case 'Dropout':
+      return { type: 'Dropout', frame: at, lane: lane(o.lane, 'Dropout.lane'), overdub: bool(o.overdub, 'Dropout.overdub') };
     case 'Copied':
       return {
         type: 'Copied',
@@ -590,14 +591,17 @@ function decodePeaks(raw: unknown): PeakUpdate {
   const o = obj(raw, 'peaks[]');
   const min = array(o.min, 'peaks.min').map((v) => num(v, 'peaks.min[]'));
   const max = array(o.max, 'peaks.max', min.length).map((v) => num(v, 'peaks.max[]'));
+  const marked = o.marked === undefined || o.marked === null ? [] : array(o.marked, 'peaks.marked').map((v) => int(v, 'peaks.marked[]'));
   const update: PeakUpdate = {
     lane: lane(o.lane, 'peaks.lane'),
     start: int(o.start, 'peaks.start'),
     count: int(o.count, 'peaks.count'),
     min,
     max,
+    marked,
   };
   if (update.start + min.length > update.count) fail('peaks bins must end within count', raw);
+  if (marked.some((b) => b < update.start || b >= update.start + min.length)) fail('peaks marks must lie inside their run', raw);
   return update;
 }
 

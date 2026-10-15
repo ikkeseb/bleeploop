@@ -3,12 +3,12 @@
 //! is an ordinary stop with nothing kept. The pure stop rule (section A) is tested with the grid
 //! (`src/grid.rs`).
 //!
-//! One rule changes with the engine: an input gap lands on exact frames, so it damages only the passes
-//! it overlaps. A point xrun falls in one pass; a jump or a damaged block can span a pass edge and drop
-//! both passes it cut. The Web Audio looper sampled losses per drain and could not place one on either
-//! side of a pass edge, so it also tainted the next pass; a stop in that tainted pass rejected the take.
-//! Here a pass the gap does not reach is clean: it is kept, or an ordinary stop commits it. The product
-//! rule stays: a damaged pass drops the older kept pass too.
+//! One rule changes with the engine: an input gap lands on exact frames, so it marks only the passes it
+//! reaches. A point xrun falls in one pass; a jump or a damaged block can span a pass edge and mark both
+//! passes it cut. The Web Audio looper sampled losses per drain and could not place one on either side
+//! of a pass edge, so it also tainted the next pass; a stop in that tainted pass rejected the take. Here
+//! no pass is dropped for a dropout: a marked pass is kept as recorded, and the next complete pass
+//! replaces it as ever. A pass a jump skipped whole captured nothing, and the pass kept before stays.
 //!
 //! The engine's own: a FIXED first take's click follows the roll, re-anchored on each pass's downbeat,
 //! so a pass played to the click commits on its own bar lines however many passes came before (`h_`).
@@ -19,7 +19,7 @@ mod common;
 
 use common::{code, Rig};
 use lf_engine::grid::Frame;
-use lf_engine::{Command, Event, LaneState};
+use lf_engine::{Command, LaneState};
 
 const MARKER: f32 = 0.75;
 
@@ -120,68 +120,70 @@ fn e_a_stop_in_pass_1_is_an_ordinary_free_stop() {
 }
 
 #[test]
-fn f_a_damaged_pass_is_dropped_with_the_kept_pass_and_only_that_pass() {
+fn f_a_damaged_pass_is_kept_marked_and_the_clean_pass_after_it_replaces_it() {
+    // KeepLast during pass 3 commits pass 2 as recorded, with its mark and no second Dropout.
     let mut r = rolling_first_take(48000, 120, 1.0, 0);
     r.rig.advance_to(r.pass_start(2) + r.len / 2);
     r.rig.gap();
     r.rig.advance_to(r.pass_start(3) + r.len / 4);
-    assert!(r.rig.events.iter().any(|e| matches!(e, Event::PassDropped { pass: 2, .. })));
-    // Pass 1 was kept until pass 2 dropped it: nothing is kept now, so REC on another lane is ignored.
-    r.rig.press(Command::RecDub(1));
-    assert!(r.rig.state(1) == LaneState::Empty && r.rig.state(0) == LaneState::Recording);
-    r.rig.advance_to(r.pass_start(4) + r.len / 4);
+    assert_eq!(r.rig.dropouts(), [(r.pass_start(3), 0, false)], "pass 2 kept, said at its edge");
     r.rig.press(Command::RecDub(0));
     assert_eq!(r.rig.master(), r.len);
-    assert_eq!(mismatches(&r.rig.pcm(0), r.pass_start(3)), 0, "the clean pass after the gap is kept");
+    assert_eq!(mismatches(&r.rig.pcm(0), r.pass_start(2)), 0, "pass 2 as recorded");
+    assert_eq!(r.rig.marks(0), [(r.len / 2 / 1024) as usize]);
+    assert_eq!(r.rig.dropouts().len(), 1, "KeepLast's commit says nothing more");
 
-    // A stop mid pass 3 with nothing kept is an ordinary stop of that clean pass.
+    // The clean pass 3 replaces it: KeepLast during pass 4 commits pass 3, unmarked.
     let mut r = rolling_first_take(48000, 120, 1.0, 0);
     r.rig.advance_to(r.pass_start(2) + r.len / 2);
     r.rig.gap();
-    r.rig.advance_to(r.pass_start(3) + r.len / 2);
-    r.rig.press(Command::RecDub(0));
-    r.rig.advance(4800);
-    assert!(r.rig.state(0) == LaneState::Playing && r.rig.rejected() == 0);
-    let pcm = r.rig.pcm(0);
-    let kept = (r.len / 2) as usize; // the press frame ends the window, exclusive
-    assert_eq!(mismatches(&pcm[..kept], r.pass_start(3)), 0);
-    assert!(pcm[kept..].iter().all(|&x| x == 0.0), "padded to one bar");
-}
-
-#[test]
-fn f_a_jump_across_a_pass_edge_drops_both_passes_it_cut() {
-    let mut r = rolling_first_take(48000, 120, 1.0, 0);
-    r.rig.advance_to(r.pass_start(3) - 64);
-    r.rig.skip(128); // pass 2 loses its last 64 frames, pass 3 its first 64
     r.rig.advance_to(r.pass_start(4) + r.len / 4);
-    let dropped: Vec<u32> = r.rig.events.iter().filter_map(|e| if let Event::PassDropped { pass, .. } = *e { Some(pass) } else { None }).collect();
-    assert_eq!(dropped, [2, 3], "both passes the jump cut are dropped");
-    // Nothing is kept now, so REC on another lane is ignored.
-    r.rig.press(Command::RecDub(1));
-    assert!(r.rig.state(1) == LaneState::Empty && r.rig.state(0) == LaneState::Recording);
-    r.rig.advance_to(r.pass_start(5) + r.len / 4);
     r.rig.press(Command::RecDub(0));
-    assert!(r.rig.master() == r.len && r.rig.rejected() == 0);
-    assert_eq!(mismatches(&r.rig.pcm(0), r.pass_start(4)), 0, "the clean pass after the jump is kept");
+    assert!(r.rig.state(0) == LaneState::Playing && r.rig.master() == r.len);
+    assert_eq!(mismatches(&r.rig.pcm(0), r.pass_start(3)), 0, "the clean pass after the gap");
+    assert!(r.rig.marks(0).is_empty() && r.rig.dropouts().len() == 1);
 }
 
 #[test]
-fn f_a_jump_over_many_passes_then_another_gap_keeps_none_of_them() {
+fn f_a_jump_across_a_pass_edge_keeps_both_passes_it_cut_zeroed_and_marked() {
+    // Pass 2 loses its last 64 frames, pass 3 its first 64: each is kept at its edge with the hole
+    // silent and marked, so KeepLast in pass 3 commits pass 2, and in pass 4 pass 3.
+    for keep in [2, 3] {
+        let mut r = rolling_first_take(48000, 120, 1.0, 0);
+        r.rig.advance_to(r.pass_start(3) - 64);
+        r.rig.skip(128);
+        r.rig.advance_to(r.pass_start(keep + 1) + r.len / 4);
+        assert_eq!(r.rig.dropouts().len() as Frame, keep - 1, "keep {keep}: each cut pass said at its edge");
+        r.rig.press(Command::RecDub(0));
+        assert!(r.rig.state(0) == LaneState::Playing && r.rig.master() == r.len);
+        let pcm = r.rig.pcm(0);
+        let hole = if keep == 2 { r.len - 64..r.len } else { 0..64 };
+        for (k, &x) in pcm.iter().enumerate() {
+            let want = if hole.contains(&(k as Frame)) { 0.0 } else { code(r.pass_start(keep) + k as Frame) };
+            assert_eq!(x, want, "keep {keep}: position {k}");
+        }
+        assert_eq!(r.rig.marks(0), [(hole.start / 1024) as usize], "keep {keep}");
+    }
+}
+
+#[test]
+fn f_a_jump_over_many_passes_keeps_the_pass_it_cut_and_the_one_it_lands_in() {
     let mut r = rolling_first_take(48000, 120, 1.0, 0);
     r.rig.advance_to(r.pass_start(3) - 64);
     r.rig.skip(r.pass_start(12) + 64 - r.rig.frame); // passes 3 to 11 never arrive, nor pass 12's first 64 frames
     r.rig.advance(64);
-    r.rig.gap(); // another xrun while the roll still catches up on the passes the jump skipped
+    r.rig.gap(); // another xrun in the pass the jump landed in
     r.rig.advance(r.len / 4);
-    let dropped: Vec<u32> = r.rig.events.iter().filter_map(|e| if let Event::PassDropped { pass, .. } = *e { Some(pass) } else { None }).collect();
-    assert_eq!(dropped, (2..=11).collect::<Vec<u32>>(), "every pass the jump cut is dropped");
-    // Nothing is kept, so REC on another lane is ignored and the roll goes on.
-    r.rig.press(Command::RecDub(1));
-    assert!(r.rig.state(1) == LaneState::Empty && r.rig.state(0) == LaneState::Recording && r.rig.master() == 0);
-    r.rig.advance_to(r.pass_start(14) + r.len / 4);
+    assert_eq!(r.rig.lane(0).retake_pass, 12, "the roll slid past the passes skipped whole");
+    assert_eq!(r.rig.dropouts().len(), 1, "pass 2, cut, kept at its edge; the skipped ones captured nothing");
+    assert!(r.rig.engine.looper().zeroed_max() <= 128, "only the frames the device never delivered");
+    r.rig.advance_to(r.pass_start(13) + r.len / 4);
     r.rig.press(Command::RecDub(0));
-    assert!(r.rig.master() == r.len && r.rig.rejected() == 0);
-    assert_eq!(mismatches(&r.rig.pcm(0), r.pass_start(13)), 0, "the first clean pass after the jump is kept");
+    assert!(r.rig.master() == r.len && r.rig.dropouts().len() == 2);
+    let pcm = r.rig.pcm(0);
+    assert!(pcm[..64].iter().all(|&x| x == 0.0), "pass 12's hole silent");
+    assert_eq!(mismatches(&pcm[64..], r.pass_start(12) + 64), 0, "pass 12 as recorded from the frame it arrived");
+    assert_eq!(r.rig.marks(0), [0], "its hole and its break, both in the first bin");
 }
 
 /// A two-bar first take on lane 0, then a RETAKE rolling on lane 1 in pass 3.
@@ -230,7 +232,7 @@ fn g_rec_on_another_lane_approves_a_later_roll_and_records_next() {
 }
 
 #[test]
-fn h_a_jump_from_the_handoff_seam_damages_the_take_that_starts_there() {
+fn h_a_jump_from_the_handoff_seam_marks_the_take_that_starts_there() {
     let (mut rig, master, s1) = rolling_later_take(false);
     let edge = s1 + 3 * master;
     rig.advance_to(edge - rig.fpb() / 32);
@@ -238,9 +240,9 @@ fn h_a_jump_from_the_handoff_seam_damages_the_take_that_starts_there() {
     rig.advance_to(edge);
     rig.skip(128); // pass 3 is whole; lane 2's first 128 frames never arrive
     rig.advance_to(edge + master + master / 2);
-    assert!(rig.state(1) == LaneState::Playing && rig.rejected() == 0);
+    assert!(rig.state(1) == LaneState::Playing && rig.marks(1).is_empty());
     assert_eq!(mismatches(&rig.pcm(1), s1 + 2 * master), 0, "lane 1 holds the whole pass 3");
-    assert!(rig.events.iter().any(|e| matches!(e, Event::PassDropped { lane: 2, pass: 1, .. })), "lane 2's cut first pass is dropped");
+    assert_eq!(rig.dropouts(), [(edge + master, 2, false)], "lane 2's cut first pass is kept, marked, said at its edge");
 }
 
 #[test]
@@ -306,4 +308,104 @@ fn h_an_approved_pass_commits_on_the_click_however_many_passes_rolled() {
         assert_eq!(offsets.len(), BARS_137 as usize, "one mark per bar");
         assert!(offsets.iter().all(|o| o.abs() <= 1), "align {align}: the marks sit off the loop's bar lines: {offsets:?}");
     }
+}
+
+// ── Through a live plugin (ported from the engine-red fix branch, R0.1): a dropout marks the passes the
+// plugin carries it into, each kept and said at its edge, and only those ─────────────────────────────
+
+/// The passes whose edge sent a `Dropout`, counted from the roll's first window `start`.
+fn said(rig: &Rig, start: Frame, len: Frame) -> Vec<Frame> {
+    rig.dropouts().iter().map(|d| (d.0 - start) / len).collect()
+}
+
+#[test]
+fn f_silent_blocks_mark_the_passes_a_live_plugin_carries_them_into() {
+    // The live slot delays its input 512 frames to the record tap. Two silent blocks end 128 frames before
+    // pass 2's edge, so the tap carries them over [edge - 128, edge + 384), into passes 1 and 2.
+    const LATENCY: Frame = 512;
+    let mut rig = Rig::new();
+    rig.install(0, Box::new(common::Delay::new(LATENCY)));
+    rig.set(Command::SetBpm(120.0));
+    rig.set(Command::SetFixedLength(true));
+    rig.set(Command::SetFixedBars(1.0));
+    rig.set(Command::SetRetake(true));
+    rig.set_input(code);
+    let mark = rig.events.len();
+    rig.press(Command::RecDub(0));
+    let start = rig.start_frame();
+    assert_eq!(start, rig.count_one(mark) + 96_000 + LATENCY, "pass 1 opens the plugin's latency after the downbeat");
+    let len = rig.fpb();
+    let edge = start + len;
+    rig.advance_to(edge - 640);
+    rig.block = 256;
+    rig.damage(); // [edge - 640, edge - 384)
+    rig.advance(256);
+    rig.damage(); // [edge - 384, edge - 128)
+    rig.advance(256);
+    rig.block = 128;
+    rig.advance_to(start + 3 * len + len / 4);
+    assert_eq!(said(&rig, start, len), [1, 2], "both passes the silence reaches through the plugin, and only those");
+    rig.press(Command::RecDub(0));
+    assert!(rig.master() == len && rig.marks(0).is_empty(), "KeepLast in pass 4 commits pass 3, unmarked");
+    assert_eq!(mismatches(&rig.pcm(0), start + 2 * len - LATENCY), 0, "the clean pass 3, as the tap carried it");
+}
+
+#[test]
+fn f_silent_blocks_passes_apart_mark_only_the_passes_a_live_plugin_carries_each_into() {
+    // The live slot delays its input three passes to the record tap. Silent blocks in pass 1 and pass 3
+    // reach it in pass 4 and pass 6; pass 5 between the two is clean.
+    const LATENCY: Frame = 115_200;
+    let mut rig = Rig::new();
+    rig.install(0, Box::new(common::Delay::new(LATENCY)));
+    rig.set(Command::SetBpm(300.0));
+    rig.set(Command::SetFixedLength(true));
+    rig.set(Command::SetFixedBars(1.0));
+    rig.set(Command::SetRetake(true));
+    rig.set_input(code);
+    let mark = rig.events.len();
+    rig.press(Command::RecDub(0));
+    let (start, len) = (rig.start_frame(), rig.fpb());
+    assert_eq!((len, start), (38_400, rig.count_one(mark) + 38_400 + LATENCY), "one-bar passes, the first the plugin's latency after the downbeat");
+    // As the device side renders a damaged block: silence in its place.
+    let silent = [start + 128, start + 2 * len + 128];
+    rig.set_input(move |f| if silent.iter().any(|&s| (s..s + 128).contains(&f)) { 0.0 } else { code(f) });
+    for s in silent {
+        rig.advance_to(s);
+        rig.damage();
+        rig.advance(128);
+    }
+    rig.advance_to(start + 6 * len + len / 4);
+    assert_eq!(said(&rig, start, len), [4, 6], "the two passes the silence reaches through the plugin, and only those");
+}
+
+#[test]
+fn f_a_dropout_storm_marks_only_the_passes_it_reaches() {
+    // The live slot delays its input five passes to the record tap. After sixteen xruns spread over the
+    // minutes before the take (each gone from the tap before the next), a silent block in pass 1, a storm
+    // of seventeen in pass 3 and one in pass 5 reach passes 6, 8 and 10; passes 7 and 9 stay clean.
+    const LATENCY: Frame = 192_000;
+    let mut rig = Rig::new();
+    rig.install(0, Box::new(common::Delay::new(LATENCY)));
+    rig.set(Command::SetBpm(300.0));
+    rig.set(Command::SetFixedLength(true));
+    rig.set(Command::SetFixedBars(1.0));
+    rig.set(Command::SetRetake(true));
+    rig.set_input(code);
+    for _ in 0..16 {
+        rig.advance(240_000);
+        rig.gap();
+    }
+    rig.press(Command::RecDub(0));
+    let (start, len) = (rig.start_frame(), rig.fpb());
+    let storm = start + 2 * len + 128;
+    let silent: Vec<Frame> = [start + 128].into_iter().chain((0..16).map(|k| storm + 512 * k)).chain([storm + 512 * 15 + 256, start + 4 * len + 128]).collect();
+    let blocks = silent.clone();
+    rig.set_input(move |f| if blocks.iter().any(|&s| (s..s + 128).contains(&f)) { 0.0 } else { code(f) });
+    for s in silent {
+        rig.advance_to(s);
+        rig.damage();
+        rig.advance(128);
+    }
+    rig.advance_to(start + 10 * len + len / 4);
+    assert_eq!(said(&rig, start, len), [6, 8, 10], "the passes the silence reaches through the plugin, and only those");
 }

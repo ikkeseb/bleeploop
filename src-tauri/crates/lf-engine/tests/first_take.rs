@@ -362,3 +362,34 @@ fn cap_b_a_free_take_held_past_the_buffer_closes_a_quarter_bar_past_a_bar_line()
     assert_eq!(pos, align + cap - master, "it enters mid-loop, a quarter bar (plus the alignment) in");
     assert_eq!(rig.pcm(0)[pos as usize], code(start + pos), "the take's first pass is stored there");
 }
+
+/// A free take through a live slot that delays its input 1024 frames to the record tap (the alignment 1536
+/// with it): a silent block [B + 640, B + 768) just past the first bar line B reaches the tap over
+/// [B + 1664, B + 1792), and the stop on B + 768 closes the take on that bar, on B + 1536, before it: no
+/// mark, no Dropout, the take exact (ported from the engine-red fix branch, R2.3).
+#[test]
+fn free_i_a_silent_block_a_plugin_carries_past_where_the_stop_closes_leaves_the_take_unmarked() {
+    const LATENCY: Frame = 1024;
+    let mut rig = Rig::with(Opts { align: 512, ..Default::default() });
+    rig.install(0, Box::new(common::Delay::new(LATENCY)));
+    rig.set(Command::SetBpm(200.0));
+    let mark = rig.events.len();
+    rig.press(Command::RecDub(0));
+    let fpb = rig.fpb();
+    let downbeat = rig.count_one(mark) + fpb;
+    let start = rig.start_frame();
+    assert_eq!(start, downbeat + 512 + LATENCY);
+    let bar = downbeat + fpb;
+    // As the device side renders the damaged block: silence in its place.
+    rig.set_input(move |f| if (bar + 640..bar + 768).contains(&f) { 0.0 } else { code(f) });
+    rig.advance_to(bar + 640);
+    rig.damage();
+    rig.advance(128);
+    rig.press(Command::RecDub(0));
+    assert_eq!(rig.end_frame(), bar + 1536, "the stop closes the take on its bar");
+    until_committed(&mut rig, 48000);
+    assert_eq!(rig.master(), fpb, "the take commits");
+    assert!(rig.dropouts().is_empty() && rig.marks(0).is_empty(), "no mark, no Dropout");
+    let pcm = rig.pcm(0);
+    assert_eq!(pcm.iter().zip(start..).filter(|&(&x, f)| x != code(f - LATENCY)).count(), 0, "the take as the tap carried it");
+}

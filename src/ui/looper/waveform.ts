@@ -263,7 +263,7 @@ function stopIfIdle(): void {
 }
 let rafId = 0;
 /** Reused across all peak reads each frame so the loop allocates nothing. */
-const peakScratch: PeakView = { min: null, max: null, count: 0, version: 0 };
+const peakScratch: PeakView = { min: null, max: null, marks: null, count: 0, version: 0 };
 
 /** Read the theme colours off an element's computed style once (they don't change at runtime). */
 function readColors(el: HTMLElement): LaneColors {
@@ -337,6 +337,44 @@ function drawGrid(lane: Lane, bars: number): void {
 }
 
 /**
+ * The dropout marks (`PeakView.marks`), over the wave: each marked bin a thin rec-red notch at the top
+ * edge where its frames sit (`h·PEAK_FRAMES / frames` of the width, `frames` the loop or a recording
+ * take's span), and a faint rec-red wash over every bar its frames reach, its engraved number in red.
+ * Bars come from the master's bar length (`gridBars` over `frames`), never from the bin count, so a mark
+ * lands on the bar where it is heard on a loop that is not whole bins. Cached-bitmap path only.
+ */
+function drawMarks(lane: Lane, count: number, marks: Uint8Array, frames: number): void {
+  if (frames <= 0) return;
+  const { wctx, dw, dh, dpr } = lane;
+  // The master's bar length: a multiply window's or a later take's span holds whole bars of it too.
+  const barFrames = lane.gridBars > 0 ? lane.gridMaster / lane.gridBars : 0;
+  const notchW = Math.max(1, Math.round(2 * dpr));
+  const notchH = Math.max(2, Math.round(4 * dpr));
+  let lastBar = -1;
+  wctx.fillStyle = lane.colors.rec;
+  for (let h = 0; h < count; h++) {
+    if (!marks[h]) continue;
+    const from = h * PEAK_FRAMES;
+    wctx.globalAlpha = 0.9;
+    wctx.fillRect(Math.min(dw - notchW, Math.floor((from / frames) * dw)), 0, notchW, notchH);
+    if (barFrames <= 0) continue;
+    const last = Math.floor((Math.min(from + PEAK_FRAMES, frames) - 1) / barFrames);
+    for (let b = Math.max(lastBar + 1, Math.floor(from / barFrames)); b <= last; b++) {
+      const x0 = Math.round(((b * barFrames) / frames) * dw);
+      const x1 = Math.min(dw, Math.round((((b + 1) * barFrames) / frames) * dw));
+      wctx.globalAlpha = 0.12;
+      wctx.fillRect(x0, 0, x1 - x0, dh);
+      wctx.globalAlpha = 0.9;
+      wctx.font = lane.gridFont;
+      wctx.textBaseline = 'top';
+      wctx.fillText(String(b + 1), x0 + Math.round(5 * dpr), Math.round(3 * dpr));
+      lastBar = b;
+    }
+  }
+  wctx.globalAlpha = 1;
+}
+
+/**
  * Rasterise the bar grid + two-layer waveform envelope into the off-screen bitmap. All of this is the
  * CACHED-BITMAP path — it runs only on a dirty frame, never in the per-frame steady state.
  *
@@ -352,6 +390,7 @@ function rasterise(
   count: number,
   min: Float32Array | null,
   max: Float32Array | null,
+  marks: Uint8Array | null,
   state: TrackState,
   masterFrames: number,
   muted: boolean,
@@ -433,6 +472,8 @@ function rasterise(
     wctx.globalAlpha = 1;
   }
 
+  if (marks && count > 0) drawMarks(lane, count, marks, span > 0 ? span : masterFrames);
+
   // Dotted rec-red "tape to fill" over the remainder to the right of the recorded region.
   if (hasTape) {
     wctx.fillStyle = lane.colors.rec;
@@ -508,7 +549,7 @@ function frame(now: number): void {
       master !== lane.lastMasterFrames ||
       span !== lane.lastSpan;
     if (dirty) {
-      rasterise(lane, peakScratch.count, peakScratch.min, peakScratch.max, state, master, muted, span);
+      rasterise(lane, peakScratch.count, peakScratch.min, peakScratch.max, peakScratch.marks ?? null, state, master, muted, span);
       lane.lastVersion = peakScratch.version;
       lane.lastWaiting = waiting;
       lane.lastState = state;

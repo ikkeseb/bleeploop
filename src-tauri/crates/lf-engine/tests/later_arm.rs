@@ -3,7 +3,7 @@
 //!
 //! later-arm's main-thread stall (the capture ring filling while the drain is blocked) has no engine
 //! counterpart; what it guarded maps onto an input gap: before the window it costs nothing, inside it
-//! the take is rejected, never committed shifted. looper-arm's "STOP keeps the committed PCM" on an
+//! the take is kept as recorded and marked where it landed, never committed shifted. looper-arm's "STOP keeps the committed PCM" on an
 //! overdubbing lane: the engine's Stop discards the whole layer (the Web Audio looper dropped only the
 //! pass since its last boundary swap), so the committed loop is the pre-dub loop.
 //!
@@ -58,7 +58,7 @@ fn a_later_takes_land_frame_exact_on_the_master_grid() {
 }
 
 #[test]
-fn b_a_gap_before_the_window_costs_nothing_inside_it_rejects_the_take() {
+fn b_a_gap_before_the_window_costs_nothing_inside_it_marks_the_take() {
     for inside in [false, true] {
         let mut rig = Rig::new();
         rig.set_level(0.5);
@@ -75,14 +75,15 @@ fn b_a_gap_before_the_window_costs_nothing_inside_it_rejects_the_take() {
         rig.advance_to(boundary + master * 13 / 10);
         rig.press(Command::RecDub(1));
         rig.advance(rig.seconds(4.5));
+        let pcm = rig.pcm(1);
+        assert!(rig.state(1) == LaneState::Playing && frame_of(pcm[0], boundary) == boundary, "committed on the grid");
+        assert!(pcm.iter().enumerate().all(|(k, &x)| x == code(boundary + k as Frame)), "kept as recorded");
+        assert!(rig.state(0) == LaneState::Playing && rig.master() == master);
         if inside {
-            assert!(rig.state(1) == LaneState::Empty && rig.lane(1).length == 0, "a damaged take is never committed");
-            assert_eq!(rig.rejected(), 1, "reported once");
-            assert!(rig.state(0) == LaneState::Playing && rig.master() == master);
+            assert_eq!(rig.dropouts().len(), 1, "reported once");
+            assert_eq!(rig.marks(1), [(rig.seconds(0.3) / 1024) as usize], "the bin the gap landed in");
         } else {
-            let pcm = rig.pcm(1);
-            assert_eq!(rig.state(1), LaneState::Playing);
-            assert_eq!((frame_of(pcm[0], boundary), rig.rejected()), (boundary, 0));
+            assert!(rig.dropouts().is_empty() && rig.marks(1).is_empty());
         }
     }
 }
@@ -186,21 +187,21 @@ fn beats_on_master_grid(rig: &Rig, mark: usize, bars: Frame) -> usize {
 }
 
 #[test]
-fn an_aborted_or_rejected_later_take_keeps_the_master_pulse() {
+fn an_aborted_or_marked_later_take_keeps_the_master_pulse() {
     // 137 bpm at 44.1 kHz: a master beat (19313.75 frames) and a tempo beat (19313.87) part within a few beats.
-    for reject in [false, true] {
+    for marked in [false, true] {
         let mut rig = Rig::at(44100);
         rig.set(Command::SetBpm(137.0));
         rig.set_level(0.5);
         rig.record_first_take(0, 2, 1000);
         rig.press(Command::RecDub(1));
-        if reject {
+        if marked {
             rig.advance_to(rig.start_frame() + 1000);
             rig.gap();
             rig.advance(10);
             rig.press(Command::PlayStop(1));
             rig.advance_to(rig.end_frame() + 1);
-            assert_eq!(rig.state(1), LaneState::Empty);
+            assert!(rig.state(1) == LaneState::Stopped && rig.dropouts().len() == 1, "kept, marked");
         } else {
             rig.press(Command::Stop(1));
         }
@@ -226,13 +227,15 @@ fn a_gap_on_a_window_edge_damages_nothing() {
         rig.advance_to(if at_end { end } else { start });
         rig.gap(); // the block starting on the edge follows the gap
         rig.advance(master + 4800);
-        assert!(rig.state(1) == LaneState::Playing && rig.rejected() == 0, "a gap on the {} edge", if at_end { "end" } else { "start" });
+        let side = if at_end { "end" } else { "start" };
+        assert!(rig.state(1) == LaneState::Playing && rig.dropouts().is_empty() && rig.marks(1).is_empty(), "a gap on the {side} edge");
     }
 }
 
 #[test]
-fn a_jump_across_a_window_edge_rejects_the_take() {
-    // The frames the device skipped overlap the window although the block after them starts outside it.
+fn a_jump_across_a_window_edge_keeps_the_take_with_the_hole_zeroed_and_marked() {
+    // The frames the device skipped overlap the window although the block after them starts outside it:
+    // the window's part of them is a hole, silence in the take, marked; the take keeps its planned bars.
     for at_end in [false, true] {
         let mut rig = Rig::new();
         rig.set_level(0.5);
@@ -246,16 +249,24 @@ fn a_jump_across_a_window_edge_rejects_the_take() {
         rig.skip(128);
         rig.advance(master + 4800);
         let side = if at_end { "end" } else { "start" };
-        assert!(rig.state(1) == LaneState::Empty && rig.lane(1).length == 0, "a jump across the {side}: never committed");
-        assert_eq!(rig.rejected(), 1, "a jump across the {side}: rejected once");
+        assert!(rig.state(1) == LaneState::Playing && rig.lane(1).length == master, "a jump across the {side}: kept whole");
+        assert_eq!(rig.dropouts().len(), 1, "a jump across the {side}: said once");
+        let hole = if at_end { master - 64..master } else { 0..64 };
+        let start = edge - if at_end { master } else { 0 };
+        let pcm = rig.pcm(1);
+        for (k, &x) in pcm.iter().enumerate() {
+            let want = if hole.contains(&(k as Frame)) { 0.0 } else { code(start + k as Frame) };
+            assert_eq!(x, want, "a jump across the {side}: position {k}");
+        }
+        assert_eq!(rig.marks(1), [(hole.start / 1024) as usize], "a jump across the {side}: the hole's bin");
         assert!(rig.state(0) == LaneState::Playing && rig.master() == master);
     }
 }
 
 #[test]
-fn a_take_armed_inside_a_damaged_block_whose_window_opens_there_is_rejected() {
-    // The block's damage reaches the looper before the press in it does: the window it opens there must
-    // still see it.
+fn a_take_armed_inside_a_damaged_block_whose_window_opens_there_is_kept_and_marked() {
+    // The block's damage reaches the looper with its frames: the window the press in it opens there is
+    // marked over the frames it shares with the block.
     let mut rig = Rig::new();
     rig.set_level(0.5);
     let master = rig.record_first_take(0, 2, 2400);
@@ -271,8 +282,10 @@ fn a_take_armed_inside_a_damaged_block_whose_window_opens_there_is_rejected() {
     assert_eq!(rig.start_frame(), boundary);
     rig.block = 128;
     rig.advance(master + 4800);
-    assert!(rig.state(1) == LaneState::Empty && rig.lane(1).length == 0, "never committed");
-    assert_eq!(rig.rejected(), 1);
+    assert!(rig.state(1) == LaneState::Playing && rig.lane(1).length == master, "kept");
+    assert!(rig.pcm(1).iter().enumerate().all(|(k, &x)| x == code(boundary + k as Frame)), "as recorded");
+    assert_eq!(rig.dropouts().len(), 1);
+    assert_eq!(rig.marks(1), [0], "[boundary, boundary + 924): the first bin");
     assert!(rig.state(0) == LaneState::Playing && rig.master() == master);
 }
 
@@ -411,7 +424,7 @@ fn idle_2_the_pulse_takes_the_restarted_grid_and_a_cancelled_count_gives_back_th
         assert!(b.2 == 0 && !b.3, "beat at {}: no count beat and no click after the cancel", b.0);
     }
 
-    // Rejected for an input gap inside its window: the loops play on, on the new grid.
+    // Kept and marked for an input gap inside its window: the loops play on, on the new grid.
     let (mut rig, master, _) = idle_master(opts(), 137);
     let (_, _, downbeat) = arm_idle(&mut rig, 1);
     rig.advance_to(downbeat + 1000);
@@ -419,7 +432,8 @@ fn idle_2_the_pulse_takes_the_restarted_grid_and_a_cancelled_count_gives_back_th
     rig.advance(10);
     rig.press(Command::PlayStop(1));
     rig.advance_to(rig.end_frame() + 1);
-    assert!(rig.state(1) == LaneState::Empty && rig.rejected() == 1);
+    assert!(rig.state(1) == LaneState::Stopped && rig.dropouts().len() == 1, "kept, said once");
+    assert_eq!(rig.buffer_marks(rig.engine.looper().overview().lane(1).buf).first(), Some(&0), "the gap's bin, 1000 frames in");
     assert!(rig.state(0) == LaneState::Playing && rig.master() == master && rig.anchor() == downbeat);
     let mark = rig.events.len();
     rig.advance(rig.seconds(15.0));
@@ -591,15 +605,18 @@ fn idle_7_a_jump_across_the_downbeat_restarts_on_the_scheduled_downbeat_and_comp
     let count: Vec<_> = beats.iter().map(|b| (b.0, b.1, b.2)).collect();
     assert_eq!(count, [(landed, 2, 2), (landed, 3, 1)], "the count's last two beats fire late, and no tempo-grid beat after them");
     assert_eq!(beats.iter().filter(|b| b.3).count(), 1, "as one click");
-    // The jump's gap lies inside the take's window: the existing rule rejects it, the loops play on.
+    // The jump's frames lie inside the take's window: a hole, zeroed and marked, the loops play on.
     rig.advance(master / 2);
     rig.press(Command::RecDub(1));
     rig.advance(master);
-    assert!(rig.state(1) == LaneState::Empty && rig.rejected() == 1, "the take the jump cut is rejected");
+    assert!(rig.state(1) == LaneState::Playing && rig.dropouts().len() == 1, "the take the jump cut is kept");
+    assert!(rig.pcm(1)[..5000].iter().all(|&x| x == 0.0), "its hole silent");
+    assert_eq!(rig.marks(1)[..5], [0, 1, 2, 3, 4], "and marked");
     assert!(rig.state(0) == LaneState::Playing && rig.anchor() == downbeat && rig.master() == master);
     let at = rig.frame;
     rig.advance(1);
-    assert_eq!(looper_tap(&rig), loop0[(at - downbeat).rem_euclid(master) as usize]);
+    let pos = (at - downbeat).rem_euclid(master) as usize;
+    assert_eq!(looper_tap(&rig), loop0[pos] + rig.pcm(1)[pos], "both loops play on the grid");
 }
 
 #[test]

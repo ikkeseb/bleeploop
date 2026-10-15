@@ -202,8 +202,7 @@ enum EventDef {
         #[serde(with = "RefusalDef")]
         reason: Refusal,
     },
-    TakeRejected { frame: Frame, lane: u8, overdub: bool },
-    PassDropped { frame: Frame, lane: u8, pass: u32 },
+    Dropout { frame: Frame, lane: u8, overdub: bool },
     Copied { frame: Frame, from: u8, to: u8, feedback: f32 },
     Cleared { frame: Frame, lane: u8 },
     Muted { frame: Frame, lane: u8, on: bool },
@@ -429,7 +428,10 @@ pub struct Meter {
 
 /// Changed waveform bins of one lane: bins `start..start + min.len()` of `lf_engine::overview::PEAK_FRAMES` frames, in
 /// the order the lane plays them (a reversed lane's bins reversed, to within one bin). `count` is the
-/// lane's bin total after this update: the frames it recorded so far, or its loop (0: empty).
+/// lane's bin total after this update: the frames it recorded so far, or its loop (0: empty). `marked`
+/// lists the bins of the run that hold a dropout mark, in the same play order (a reversed lane's mapped
+/// through frames, so a mark sits where it is heard: `Overview::heard_marked`); every other bin of the
+/// run holds none. Left out when empty.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PeakUpdate {
     pub lane: u8,
@@ -437,6 +439,8 @@ pub struct PeakUpdate {
     pub count: u32,
     pub min: Vec<f32>,
     pub max: Vec<f32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub marked: Vec<u32>,
 }
 
 /// Live scope columns since the last frame, sent only while the UI asked for them
@@ -692,7 +696,7 @@ mod tests {
         }
     }
 
-    const EVENTS: usize = 12;
+    const EVENTS: usize = 11;
     fn event_index(e: &Event) -> usize {
         match e {
             Event::Lane { .. } => 0,
@@ -700,13 +704,12 @@ mod tests {
             Event::Beat { .. } => 2,
             Event::Selected { .. } => 3,
             Event::Refused { .. } => 4,
-            Event::TakeRejected { .. } => 5,
-            Event::PassDropped { .. } => 6,
-            Event::Copied { .. } => 7,
-            Event::Cleared { .. } => 8,
-            Event::Muted { .. } => 9,
-            Event::Mix { .. } => 10,
-            Event::Toggled { .. } => 11,
+            Event::Dropout { .. } => 5,
+            Event::Copied { .. } => 6,
+            Event::Cleared { .. } => 7,
+            Event::Muted { .. } => 8,
+            Event::Mix { .. } => 9,
+            Event::Toggled { .. } => 10,
         }
     }
 

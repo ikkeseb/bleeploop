@@ -64,6 +64,11 @@ added a line.
 ## By ear, when convenient
 
 - Should the click be ON by default while recording?
+- Dropout marks: keep them in the session file, so an export or a recovery brings the bar's mark back
+  (today a load clears them: it brings back no undo target to act on them)?
+- Dropout marks in the stage view too (today only the looper lanes draw them)?
+- A fainter look for a mark only memory carries (a plugin's reported tail, the echo, the reverb), apart
+  from a dropout's own frames?
 - Levels: the click volume, the drum kit's pad balance, the plugin output-gain default.
 
 ## Parked ideas (for the long run)

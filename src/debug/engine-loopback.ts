@@ -638,9 +638,9 @@ async function run(): Promise<void> {
   const pick = probeRate();
   const pluginKnob = String(import.meta.env.VITE_LF_PROBE_PLUGIN ?? 'Pro-Q:vst3').trim().toLowerCase();
   const [want, format] = pluginKnob === 'none' ? [''] : pluginKnob.split(':');
-  const rejected: string[] = [];
+  const dropouts: string[] = [];
   onEngineEvent((ev) => {
-    if (ev.type === 'TakeRejected') rejected.push(`lane ${ev.lane + 1}${ev.overdub ? ' overdub' : ''}`);
+    if (ev.type === 'Dropout') dropouts.push(`lane ${ev.lane + 1}${ev.overdub ? ' overdub' : ''}`);
   });
 
   // ── The device and the input ────────────────────────────────────────────────────────────────────────
@@ -684,7 +684,7 @@ async function run(): Promise<void> {
 
   const results: BufferResult[] = [];
   const withEcho = !['', '0'].includes(String(import.meta.env.VITE_LF_PROBE_ECHO ?? '').trim());
-  for (const buffer of buffers) results.push(await runBuffer(buffer as BufferFrames, pick, bars, channel, rejected, withEcho));
+  for (const buffer of buffers) results.push(await runBuffer(buffer as BufferFrames, pick, bars, channel, dropouts, withEcho));
 
   if (liveSlot !== null) await stopLive(liveSlot);
   liveSlot = null;
@@ -704,7 +704,7 @@ async function run(): Promise<void> {
     log(`FAIL ${failed.length} bar(s): ${failed.join('; ')} | ${summary}`);
     return;
   }
-  log(`complete: input ${channel + 1}, ${short}, ${bars} bars, ms net, rejected ${rejected.length}; ${summary}`);
+  log(`complete: input ${channel + 1}, ${short}, ${bars} bars, ms net, dropouts ${dropouts.length}; ${summary}`);
 }
 
 /**
@@ -785,7 +785,7 @@ async function fadePhase(grown: number, rate: number): Promise<{ fade: FadeStats
   }
 }
 
-async function runBuffer(buffer: BufferFrames, pick: SampleRate | null, bars: number, channel: number, rejected: string[], withEcho: boolean): Promise<BufferResult> {
+async function runBuffer(buffer: BufferFrames, pick: SampleRate | null, bars: number, channel: number, dropouts: string[], withEcho: boolean): Promise<BufferResult> {
   // ── Switch the device, as Audio Settings' buffer and rate pickers do ───────────────────────────────
   const t0 = performance.now();
   if (await pickDevice(buffer, pick)) {
@@ -810,7 +810,7 @@ async function runBuffer(buffer: BufferFrames, pick: SampleRate | null, bars: nu
   looper.setFixedLengthBars(bars);
   const masterFrames = bars * framesPerBar(BPM, rate);
   const takeSeconds = (masterFrames / rate) * 2 + 15; // a boundary wait plus the take, with room
-  const rejectedBefore = rejected.length;
+  const dropoutsBefore = dropouts.length;
   watchInput();
   try {
     // ── A: the click, a FIXED first take ─────────────────────────────────────────────────────────────
@@ -936,8 +936,8 @@ async function runBuffer(buffer: BufferFrames, pick: SampleRate | null, bars: nu
 
     looper.clearAll();
     await until('an empty looper after the takes', () => allEmpty() && looper.masterLengthFrames() === 0, 5);
-    check(rejected.length === rejectedBefore, `take rejected: ${rejected.slice(rejectedBefore).join(', ')}`);
-    log(`  b${buffer} takes: A ${msA} ms, B ${msB} ms, C ${msC} ms, D ${msD} ms, E ${msE} ms, F ${msF} ms, A2 ${msA2} ms, G ${msG} ms, H ${msH} ms, I ${msI} ms; input peak ${inputPeakA.toFixed(3)} (A), ${inputPeak.toFixed(3)} (all), ${rejected.length - rejectedBefore} rejected`);
+    check(dropouts.length === dropoutsBefore, `take kept a dropout: ${dropouts.slice(dropoutsBefore).join(', ')}`);
+    log(`  b${buffer} takes: A ${msA} ms, B ${msB} ms, C ${msC} ms, D ${msD} ms, E ${msE} ms, F ${msF} ms, A2 ${msA2} ms, G ${msG} ms, H ${msH} ms, I ${msI} ms; input peak ${inputPeakA.toFixed(3)} (A), ${inputPeak.toFixed(3)} (all), ${dropouts.length - dropoutsBefore} dropouts`);
 
     // ── The bars ─────────────────────────────────────────────────────────────────────────────────────
     const takes = [a, b, c, d, e, f, g, h];

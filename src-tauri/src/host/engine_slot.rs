@@ -114,6 +114,25 @@ pub(super) const OWNER_POLL: Duration = Duration::from_millis(20);
 /// How long `load` waits for the owner's report.
 const LOAD_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// The least memory a unit is taken to have past its latency: 100 ms, a floor, not measured. A plugin
+/// that reports a shorter tail gets this, and so does one that reports none (0 means "unknown" in every
+/// format: CLAP `tail`, VST3 `getTailSamples`, VST2 `effGetTailSize`).
+pub(super) const UNIT_TAIL_SECONDS: f64 = 0.1;
+
+/// A unit's tail for the engine's damage lane (`SlotProcessor::tail`): the plugin's report in frames
+/// at `rate` (`None`: infinite, `Frame::MAX`), at least `UNIT_TAIL_SECONDS`. Owner thread, once per
+/// activation, logged beside the latency so a flood of marks after a dropout reads as the plugin's own
+/// claim.
+pub(super) fn unit_tail(slot: usize, format: &str, rate: u32, latency: lf_engine::grid::Frame, report: Option<u64>) -> lf_engine::grid::Frame {
+    use lf_engine::grid::Frame;
+    let floor = (UNIT_TAIL_SECONDS * rate as f64).ceil() as Frame;
+    let tail = report.map_or(Frame::MAX, |r| Frame::try_from(r).unwrap_or(Frame::MAX).max(floor));
+    let said = report.map_or_else(|| "infinite".to_string(), |r| format!("{r} frames"));
+    let held = if tail == Frame::MAX { "until it is reinstalled".to_string() } else { format!("{tail} frames") };
+    log::info!("[plugin_host] engine slot {slot} {format}: latency {latency} frames, tail {said} reported, a dropout marks {held} after it");
+    tail
+}
+
 /// The fault bits a unit latches on the audio thread; the owner reports each once per load.
 pub(super) const FAULT_START: u32 = 1 << 0;
 pub(super) const FAULT_PROCESS: u32 = 1 << 1;

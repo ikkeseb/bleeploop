@@ -1517,7 +1517,7 @@ mod tests {
     }
 
     #[test]
-    fn a_join_overrun_rejects_the_take_its_seam_falls_in() {
+    fn a_join_overrun_keeps_and_marks_the_take_its_seam_falls_in() {
         use lf_engine::{Command, Event};
         let mut j = Join::new();
         for _ in 0..20 {
@@ -1542,11 +1542,17 @@ mod tests {
         while j.frame() < start + 96_000 + 4 * N as Frame {
             j.cycle(1);
         }
-        assert!(j.events.iter().any(|e| matches!(e, Event::TakeRejected { lane: 0, overdub: false, .. })), "the spliced take is rejected");
+        let said = j.events.iter().filter(|e| matches!(e, Event::Dropout { lane: 0, overdub: false, .. })).count();
+        assert_eq!(said, 1, "the spliced take says so once");
+        let marked = j.engine(|e| {
+            let o = e.looper().overview();
+            (e.looper().master(), (0..o.bins()).filter(|&b| o.marked(o.lane(0).buf, b)).count())
+        });
+        assert!(marked.0 == 96_000 && marked.1 > 0, "kept, its splice marked: {marked:?}");
     }
 
     #[test]
-    fn a_join_overrun_rejects_the_layer_its_seam_falls_in_and_keeps_the_loop() {
+    fn a_join_overrun_keeps_and_marks_the_layer_its_seam_falls_in_and_undo_gives_the_loop_back() {
         use lf_engine::{Command, Event};
         let mut j = Join::new();
         for _ in 0..20 {
@@ -1584,8 +1590,14 @@ mod tests {
         while j.engine(|e| e.looper().recorder().is_some() || e.looper().busy()) {
             j.cycle(1);
         }
-        assert!(j.events.iter().any(|e| matches!(e, Event::TakeRejected { lane: 0, overdub: true, .. })), "the spliced layer is rejected");
-        assert!(j.engine(|e| e.looper().loop_pcm(0)) == before, "the loop before the layer, bit for bit");
+        let said = j.events.iter().filter(|e| matches!(e, Event::Dropout { lane: 0, overdub: true, .. })).count();
+        assert_eq!(said, 1, "the spliced layer says so once");
+        let marked = j.engine(|e| {
+            let o = e.looper().overview();
+            (0..o.bins()).filter(|&b| o.marked(o.lane(0).buf, b)).count()
+        });
+        assert!(marked > 0 && j.engine(|e| e.looper().loop_pcm(0)) != before, "kept, its splice marked");
+        assert!(j.engine(|e| e.looper().undo_pcm(0)) == Some(before), "UNDO gives the loop before the layer, bit for bit");
     }
 
     /// CLIP lights at full scale in the device's own sample format, either rail, and never one step
@@ -1683,6 +1695,72 @@ mod tests {
             let xruns = core.rt.lock().unwrap().engine.as_ref().unwrap().diag().xruns;
             assert_eq!(xruns, 1, "{case}: one input gap");
         }
+    }
+
+    #[test]
+    fn a_lock_held_mid_take_leaves_holes_zeroed_and_marked_and_keeps_the_take() {
+        // ASIO by hand at 64 frames: the engine lock held over one cycle, later over five, inside a
+        // FIXED one-bar take. The engine sees its frame jump by the blocks it never rendered: holes of 64
+        // and 320 frames, silence in the take and marked; the take is kept with its planned bar.
+        use lf_engine::{Command, Event, TimedCommand};
+        const B: usize = 64;
+        let (core, mut handle) = engine_core();
+        let run = Arc::new(Run::new([0, 0]));
+        let mut input = DuplexInput::new(core.clone(), run.clone(), 1, RATE);
+        let mut render = Render::duplex(core.clone(), run, 2, RATE);
+        let x = [0.25f32; B];
+        let mut out = [0.0f32; 2 * B];
+        let mut cycle = |input: &mut DuplexInput, render: &mut Render| {
+            input.capture(&x, None);
+            render.render(&mut out, Instant::now(), None);
+        };
+        for command in [Command::SetSlotLive(0, true), Command::SetBpm(120.0), Command::SetFixedLength(true), Command::SetFixedBars(1.0), Command::RecDub(0)] {
+            handle.commands.push(TimedCommand { frame: None, command }).unwrap();
+        }
+        cycle(&mut input, &mut render);
+        let window = core.rt.lock().unwrap().engine.as_ref().unwrap().looper().recorder();
+        let Some((0, Some(s), Some(e))) = window else { panic!("no window: {window:?}") };
+        let mut holes = Vec::new();
+        for (at, cycles) in [(s + 10_000, 1), (s + 40_000, 5)] {
+            while core.frame.load(Relaxed) < at {
+                cycle(&mut input, &mut render);
+            }
+            let from = core.frame.load(Relaxed);
+            let held = core.rt.lock().unwrap();
+            for _ in 0..cycles {
+                cycle(&mut input, &mut render);
+            }
+            drop(held);
+            holes.push((from - s, from - s + (cycles * B) as Frame));
+        }
+        while core.frame.load(Relaxed) < e + 4096 {
+            cycle(&mut input, &mut render);
+        }
+        let (pcm, marks, master) = {
+            let rt = core.rt.lock().unwrap();
+            let looper = rt.engine.as_ref().unwrap().looper();
+            let o = looper.overview();
+            let buf = o.lane(0).buf;
+            (looper.loop_pcm(0), (0..o.bins()).filter(|&b| o.marked(buf, b)).collect::<Vec<_>>(), looper.master())
+        };
+        assert_eq!(master, e - s, "the take kept its planned bar");
+        assert_eq!(holes.iter().map(|h| h.1 - h.0).collect::<Vec<_>>(), [64, 320]);
+        let mut want = Vec::new();
+        for (k, &v) in pcm.iter().enumerate() {
+            let k = k as Frame;
+            let hole = holes.iter().any(|&(a, b)| (a..b).contains(&k));
+            assert_eq!(v, if hole { 0.0 } else { 0.25 }, "take frame {k}");
+            if hole {
+                want.push((k / lf_engine::overview::PEAK_FRAMES as Frame) as usize);
+            }
+        }
+        want.dedup();
+        assert_eq!(marks, want, "each hole marked, nothing else");
+        let mut said = 0;
+        while let Ok(e) = handle.events.pop() {
+            said += matches!(e, Event::Dropout { lane: 0, overdub: false, .. }) as usize;
+        }
+        assert_eq!(said, 1, "one Dropout for the take");
     }
 
     #[test]

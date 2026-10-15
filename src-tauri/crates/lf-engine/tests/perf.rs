@@ -22,6 +22,15 @@
 //!   they run in.
 //! - A TRIM (F16) of the longest loop (32 bars, the whole 60 s buffer): its job adds under 10 % to the
 //!   blocks it runs in, and no step of it moves more than `JOB_RATE` positions a frame.
+//! - The damage lane (`api::damage`): the Stage 2 engine with slot 0 a live Delay(1024) and slot 1 an
+//!   instrument, so both crossfade branches run, at 64 and 128 frames, with no dropout and with a damaged
+//!   block every 1,024 frames, beside the audio's hash. Its bar: no dropout adds at most 0.5 % of a
+//!   64-frame block over the engine before the lane (`origin/dev`, the same test compiled there).
+//! - A hole (`Looper::fill_hole`): the whole callback that zeroes a 59 s hole closing a 60 s take, less
+//!   the same callback without it, at 48 and 192 kHz, and a one-block lock miss's hole at 64 frames. Its
+//!   bars: at most 1 ns per lost frame, the one-block hole at most 1 % of its block.
+//! - A multiply's push with every source bin marked, over four lanes with undo targets (eight fills'
+//!   marks at once): at most 5 % of a 64-frame block more than the same push unmarked.
 //!
 //! lf-engine builds at opt-level 3 in the dev profile too, but the Stage 3 load mixes in this file,
 //! which the dev profile leaves unoptimized: take the numbers from `--release`. The one test that is
@@ -44,6 +53,9 @@
 mod common;
 
 use std::time::Instant;
+
+use common::refs::sha256_f32;
+use lf_engine::{SlotEvent, SlotKind, SlotProcessor};
 
 use assert_no_alloc::assert_no_alloc;
 use common::{code, violation_count, Opts, Rig};
@@ -633,4 +645,273 @@ fn stage3_full_load_renders_without_allocating() {
     });
     assert_eq!(violation_count(), before, "the Stage 3 load allocated while rendering");
     assert!(load.mix.iter().flatten().all(|x| x.is_finite()));
+}
+
+
+// ── The damage lane, a hole, and a marked multiply ───────────────────────────────────────────────────
+
+/// A pure delay of `latency` frames on a ring (no allocation, constant work per frame).
+struct RingDelay {
+    line: Vec<f32>,
+    next: usize,
+}
+
+impl SlotProcessor for RingDelay {
+    fn kind(&self) -> SlotKind {
+        SlotKind::Effect
+    }
+    fn latency(&self) -> Frame {
+        self.line.len() as Frame
+    }
+    fn process(&mut self, _frame: Frame, input: &[f32], _events: &[SlotEvent], out: &mut [f32]) {
+        for (w, &x) in out.iter_mut().zip(input) {
+            *w = std::mem::replace(&mut self.line[self.next], x);
+            self.next = (self.next + 1) % self.line.len();
+        }
+    }
+    fn stop(&mut self) {}
+    fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send> {
+        self
+    }
+}
+
+/// An instrument plugin stand-in: a quiet hum, notes or not.
+struct Hum;
+
+impl SlotProcessor for Hum {
+    fn kind(&self) -> SlotKind {
+        SlotKind::Instrument
+    }
+    fn latency(&self) -> Frame {
+        256
+    }
+    fn process(&mut self, frame: Frame, _input: &[f32], _events: &[SlotEvent], out: &mut [f32]) {
+        for (k, o) in out.iter_mut().enumerate() {
+            *o = 0.01 * ((frame + k as Frame) % 89) as f32 / 89.0;
+        }
+    }
+    fn stop(&mut self) {}
+    fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send> {
+        self
+    }
+}
+
+/// The damage lane's scenario at `block` frames: the Stage 2 engine (five lanes, lane 0 overdubbing, the
+/// click), slot 0 a live Delay(1024), slot 1 the instrument; 30 s timed, a damaged block every 1,024
+/// frames when `damage`. Returns the mean, p99.9 and worst block as a fraction of its period, and the
+/// hash of the record tap, the looper's mix and every lane after.
+fn damage_lane_run(block: usize, damage: bool) -> (f64, f64, f64, String) {
+    let mut rig = Rig::with(Opts { loop_seconds: 60.0, block, ..Default::default() });
+    rig.install(0, Box::new(RingDelay { line: vec![0.0; 1024], next: 0 }));
+    rig.install(1, Box::new(Hum));
+    rig.set(Command::SetMetronome(true));
+    rig.set_input(code);
+    let master = rig.record_first_take(0, 4, 2400);
+    for _ in 1..5 {
+        rig.press(Command::Copy(0));
+        rig.idle();
+    }
+    rig.press(Command::RecDub(0));
+    assert!(master > 0 && rig.state(0) == LaneState::Overdubbing);
+    let input: Vec<f32> = (0..block).map(|k| code(k as Frame) - 0.25).collect();
+    let (mut left, mut right) = (vec![0.0f32; block], vec![0.0f32; block]);
+    let (mut record, mut looper) = (Vec::new(), Vec::new());
+    let blocks = 48_000 * 30 / block;
+    let mut times = Vec::with_capacity(blocks);
+    let mut frame = rig.frame;
+    for k in 0..blocks {
+        let damaged = damage && (k * block) % 1024 < block;
+        let ctx = ProcessContext { frame, xrun: false, damaged, align_frames: 0, input_frames: 0 };
+        let t = Instant::now();
+        rig.engine.process(&ctx, &input, &mut left, &mut right);
+        times.push(t.elapsed().as_secs_f64());
+        let taps = rig.engine.taps();
+        record.extend_from_slice(taps.record);
+        looper.extend_from_slice(taps.looper);
+        frame += block as Frame;
+    }
+    rig.frame = frame;
+    let lanes: Vec<Vec<f32>> = (0..5).map(|i| rig.pcm(i)).collect();
+    let hash = sha256_f32(&[&record, &looper, &lanes[0], &lanes[1], &lanes[2], &lanes[3], &lanes[4]]);
+    let period = block as f64 / 48_000.0;
+    let mean = times.iter().sum::<f64>() / blocks as f64 / period;
+    times.sort_by(f64::total_cmp);
+    (mean, times[blocks * 999 / 1000] / period, times[blocks - 1] / period, hash)
+}
+
+/// The damage lane's cost (run 2 against `origin/dev`'s run 1: the same test there, `cargo test -p
+/// lf-engine --release --test perf -- --ignored --nocapture --test-threads=1 the_damage_lane_cost`) and
+/// with dropouts in flight (run 3). The hash of run 2 must equal run 1's: undamaged audio is
+/// bit-identical with the lane in.
+#[test]
+#[ignore]
+fn the_damage_lane_cost() {
+    for block in [64usize, 128] {
+        for damage in [false, true] {
+            let (mean, p999, worst, hash) = damage_lane_run(block, damage);
+            let period = block as f64 / 48_000.0 * 1e6;
+            println!(
+                "damage lane, {block}-frame blocks, {}: mean {:.2} µs ({:.2} %), p99.9 {:.2} %, worst {:.1} %; hash {hash}",
+                if damage { "a damaged block every 1,024 frames" } else { "no dropout" },
+                mean * period,
+                mean * 100.0,
+                p999 * 100.0,
+                worst * 100.0
+            );
+        }
+    }
+}
+
+/// The callback that finds a `hole`-frame hole at the end of a take of `seconds` at `rate` (a FIXED take
+/// the length of the buffer; the device skips `hole` frames from the window's last `hole` on, `block`
+/// frames a callback), and the same callback with no hole: seconds each, the best of `tries`. With
+/// `retake` the take rolls two passes of half the buffer, and the jump cuts the first a second in and
+/// lands a second before the second's end: an overdue pass edge, two windows' holes in one callback.
+/// With `pair` each time is that callback and the one after it: two 64-frame blocks hold one 128-frame
+/// quantum of the synths' and FX's work whatever its phase, which one 64-frame block holds every other
+/// time (a block of whole quanta holds it every time).
+fn hole_callback(rate: u32, seconds: f64, hole: Frame, block: usize, tries: usize, retake: bool, pair: bool) -> (f64, f64) {
+    let mut best = (f64::MAX, f64::MAX);
+    for _ in 0..tries {
+        for skip in [true, false] {
+            let mut rig = Rig::with(Opts { sr: rate, start: rate as Frame, loop_seconds: seconds, block, ..Default::default() });
+            rig.set(Command::SetBpm(120.0));
+            let bars = (seconds / 2.0).floor() / if retake { 2.0 } else { 1.0 };
+            rig.set(Command::SetFixedLength(true));
+            rig.set(Command::SetFixedBars(bars));
+            rig.set(Command::SetRetake(retake));
+            rig.set_input(code);
+            rig.press(Command::RecDub(0));
+            let (s, e) = (rig.start_frame(), rig.end_frame());
+            let len = e - s;
+            // Where the jump starts and the frame the timed callback renders.
+            let (from, to) = if retake { (s + rate as Frame, e + len - rate as Frame) } else { ((e - hole).max(s + block as Frame), e) };
+            rig.advance_to(from);
+            let mut frame = rig.frame + if skip { to - from } else { 0 };
+            let input: Vec<f32> = (0..block).map(|k| code(k as Frame)).collect();
+            let (mut left, mut right) = (vec![0.0f32; block], vec![0.0f32; block]);
+            if !skip {
+                // Render up to it as delivered: the timed callback has nothing to zero.
+                while frame < to {
+                    let ctx = ProcessContext { frame, xrun: false, damaged: false, align_frames: 0, input_frames: 0 };
+                    rig.engine.process(&ctx, &input, &mut left, &mut right);
+                    frame += block as Frame;
+                }
+            }
+            let ctx = ProcessContext { frame, xrun: skip, damaged: false, align_frames: 0, input_frames: 0 };
+            let next = ProcessContext { frame: frame + block as Frame, xrun: false, ..ctx };
+            let t = Instant::now();
+            rig.engine.process(&ctx, &input, &mut left, &mut right);
+            if pair {
+                rig.engine.process(&next, &input, &mut left, &mut right);
+            }
+            let dt = t.elapsed().as_secs_f64();
+            if !retake {
+                assert_eq!(rig.master(), len, "the take committed its planned bars");
+            }
+            if skip {
+                let want = if retake { to - from - 2 * block as Frame } else { to - from - block as Frame };
+                assert!(rig.engine.looper().zeroed_max() >= want, "the holes were zeroed in that callback");
+                best.0 = best.0.min(dt);
+            } else {
+                best.1 = best.1.min(dt);
+            }
+        }
+    }
+    best
+}
+
+#[test]
+#[ignore]
+fn a_holes_cost_per_lost_frame() {
+    // Long holes come from WASAPI's dry frames (a lock miss loses one block, either backend): the
+    // whole callback that fills one is held against a WASAPI period (10 ms) as well as per lost frame.
+    for (rate, block) in [(48_000u32, 480usize), (192_000, 1920)] {
+        let period = block as f64 / rate as f64;
+        for retake in [false, true] {
+            let hole = if retake { 58 * rate as Frame } else { (59.0 * rate as f64) as Frame };
+            let (with, without) = hole_callback(rate, 60.0, hole, block, 3, retake, false);
+            let per = (with - without) / hole as f64 * 1e9;
+            println!(
+                "{} at {rate} Hz: the callback {:.2} ms ({:.2} ms without it), {per:.3} ns per lost frame, {:.0} % of its {block}-frame period ({:.2} ms)",
+                if retake { "an overdue RETAKE edge, two passes' holes (58 s)" } else { "a 59 s hole closing a 60 s take" },
+                with * 1e3,
+                without * 1e3,
+                with / period * 100.0,
+                period * 1e3
+            );
+            assert!(per <= 1.0, "a hole costs {per:.3} ns per lost frame");
+            assert!(with <= 0.5 * period, "the callback that fills it takes {:.0} % of its period", with / period * 100.0);
+        }
+    }
+    let (with, without) = hole_callback(48_000, 4.0, 64, 64, 50, false, true);
+    let period = 64.0 / 48_000.0;
+    println!("a one-block lock miss's hole at 64 frames: {:.2} µs more over the callback and the next ({:.3} % of a block)", (with - without) * 1e6, (with - without) / period * 100.0);
+    assert!((with - without) / period <= 0.01, "the one-block hole costs {:.3} % of its block", (with - without) / period * 100.0);
+}
+
+/// The multiply's push (F14) with every bin of four one-bar loops and their undo targets marked: the
+/// commit callback, which sets eight fills' marks at once, against the same callback unmarked.
+#[test]
+#[ignore]
+fn a_marked_multiplys_push_costs_under_a_twentieth_of_the_block_more() {
+    let push = |marked: bool| -> f64 {
+        let mut best = f64::MAX;
+        for _ in 0..5 {
+            let mut rig = Rig::with(Opts { loop_seconds: 60.0, block: BLOCK, ..Default::default() });
+            rig.set_input(code);
+            let damaged = |rig: &mut Rig, frames: Frame| {
+                let end = rig.frame + frames;
+                while rig.frame < end {
+                    if marked {
+                        rig.damage();
+                    }
+                    rig.advance(BLOCK as Frame);
+                }
+            };
+            rig.press(Command::RecDub(0));
+            while rig.lane(0).armed || rig.window().is_some_and(|w| w.1.is_none()) {
+                rig.advance(BLOCK as Frame);
+            }
+            let fpb = rig.fpb();
+            damaged(&mut rig, fpb + 2400);
+            rig.press(Command::RecDub(0));
+            rig.advance(4800);
+            rig.idle();
+            let master = rig.master();
+            assert_eq!(master, fpb);
+            for _ in 1..4 {
+                rig.press(Command::Copy(0));
+                rig.idle();
+            }
+            for lane in 0..4 {
+                rig.press(Command::RecDub(lane));
+                damaged(&mut rig, master);
+                rig.press(Command::RecDub(lane));
+                rig.idle();
+            }
+            if marked {
+                assert!((0..4).all(|i| rig.marks(i).len() as Frame == (master + 1023) / 1024), "every bin marked");
+            }
+            rig.set(Command::SetFixedLength(true));
+            rig.set(Command::SetFixedBars(30.0));
+            rig.press(Command::RecDub(4));
+            let end = rig.end_frame();
+            rig.advance_to(end - BLOCK as Frame);
+            rig.advance(BLOCK as Frame); // the take's last block
+            let input: Vec<f32> = (0..BLOCK).map(|k| code(k as Frame) - 0.25).collect();
+            let (mut left, mut right) = (vec![0.0f32; BLOCK], vec![0.0f32; BLOCK]);
+            let ctx = ProcessContext { frame: rig.frame, xrun: false, damaged: false, align_frames: 0, input_frames: 0 };
+            let t = Instant::now();
+            rig.engine.process(&ctx, &input, &mut left, &mut right);
+            best = best.min(t.elapsed().as_secs_f64());
+            rig.frame += BLOCK as Frame;
+            assert_eq!(rig.master(), 30 * master, "the multiply committed in the timed callback");
+        }
+        best
+    };
+    let (marked, clean) = (push(true), push(false));
+    let period = BLOCK as f64 / 48_000.0;
+    println!("a multiply's push over four lanes with undo targets, every bin marked: {:.2} µs, unmarked {:.2} µs: {:.2} % of the block more", marked * 1e6, clean * 1e6, (marked - clean) / period * 100.0);
+    assert!((marked - clean) / period <= 0.05, "the marked push costs {:.2} % of the block more", (marked - clean) / period * 100.0);
 }

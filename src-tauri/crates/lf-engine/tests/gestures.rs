@@ -1,5 +1,5 @@
-//! Property tests over gesture scripts (the lf-engine briefing, # Tests): any sequence of presses, settings and
-//! input gaps keeps one recorder, a whole-bar master, every committed lane at the master length (a
+//! Property tests over gesture scripts (the lf-engine briefing, # Tests): any sequence of presses, settings,
+//! input gaps, damaged blocks and jumps in the device frame keeps one recorder, a whole-bar master, every committed lane at the master length (a
 //! multiply grows them all, a TRIM keeps it), finite output and no panic; UNDO twice is the identity;
 //! UNDO after an N-cycle overdub gives back the pre-dub loop bit for bit. The presses include TRIM and
 //! HALVE, FADE, HOLD and its release, DUB FEEDBACK, a meter change and a punch-out (a stopped device);
@@ -24,6 +24,10 @@ enum Op {
     Later(Frame, Command),
     Wait(Frame),
     Gap,
+    /// The next block's input never wholly arrived (`ProcessContext::damaged`): marked, never discarded.
+    Damage,
+    /// The device skips this many frames (a jump: a hole in what captures, the old loop under a layer).
+    Jump(Frame),
     /// HOLD on a pedal (this control): pressed on the selected lane, held this many frames, released.
     Hold(u8, Frame),
     /// The device stops and resumes on the next frame (`Engine::punch_out`).
@@ -92,6 +96,8 @@ fn op() -> impl Strategy<Value = Op> {
             Just(Command::Action(Action::FadeAll)),
         ]).prop_map(|(d, c)| Op::Later(d, c)),
         1 => Just(Op::Gap),
+        1 => Just(Op::Damage),
+        1 => (1i64..30_000).prop_map(Op::Jump),
         3 => (0u8..3, 1i64..24_000).prop_map(|(c, d)| Op::Hold(c, d)),
         1 => Just(Op::PunchOut),
         2 => Just(Op::UndoTwice),
@@ -140,6 +146,8 @@ fn run(ops: &[Op], meter: Meter, block: usize) -> u64 {
             }
             Op::Wait(frames) => rig.advance(frames),
             Op::Gap => rig.gap(),
+            Op::Damage => rig.damage(),
+            Op::Jump(frames) => rig.skip(frames),
             Op::Hold(control, frames) => {
                 rig.press(Command::Action(Action::Hold(control)));
                 rig.advance(frames);

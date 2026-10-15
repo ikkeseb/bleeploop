@@ -160,8 +160,7 @@
     { "Refused": { "frame": 99238, "lane": 4, "reason": "AutoRecLocked" } },
     { "Toggled": { "frame": 99240, "toggle": "Fixed", "on": true } },
     { "Toggled": { "frame": 99241, "toggle": { "Send": "ring" }, "on": false } },
-    { "TakeRejected": { "frame": 99300, "lane": 1, "overdub": true } },
-    { "PassDropped": { "frame": 99400, "lane": 1, "pass": 3 } },
+    { "Dropout": { "frame": 99300, "lane": 1, "overdub": true } },
     { "Copied": { "frame": 99500, "from": 0, "to": 3, "feedback": 0.25 } },
     { "Cleared": { "frame": 99600, "lane": 4 } },
     { "Muted": { "frame": 99700, "lane": 2, "on": true } },
@@ -397,7 +396,7 @@
       "device": [],
       "anchor": { "frame": 1235456, "atMs": 1790000000143.5, "rate": 44100, "grid": 96666 },
       "meter": { "peak": [0.5, 1], "clip": [false, true] },
-      "peaks": [{ "lane": 1, "start": 4, "count": 6, "min": [-0.012, -0.3], "max": [0.02, 0.31] }]
+      "peaks": [{ "lane": 1, "start": 4, "count": 6, "min": [-0.012, -0.3], "max": [0.02, 0.31], "marked": [5] }]
     },
     {
       "seq": 2,

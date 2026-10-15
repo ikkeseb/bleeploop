@@ -15,6 +15,21 @@ pub const HOLD_CONTROLS: usize = 16;
 /// The plugin slots (`src/ui/state/instrument-slots.ts`: two instrument slots).
 pub const SLOT_COUNT: usize = 2;
 
+/// The damage lane: one byte per frame that travels with the audio from the input through each slot,
+/// the instruments' record path and the input sends to the record tap ([`crate::Taps::record_damage`]),
+/// where a capture marks the bins it lands in ([`crate::Overview::marked`]). A mark is a routing claim,
+/// never a repair: no sample changes because of it.
+pub mod damage {
+    /// This frame's sample is not what was played: a block the device side rendered silence or a splice
+    /// into ([`super::ProcessContext::damaged`]), or content a jump put out of place.
+    pub const LOST: u8 = 1;
+    /// This frame does not follow the one before it: the first frame after an xrun or a jump.
+    pub const BREAK: u8 = 2;
+    /// Memory may carry a dropout into this frame: a unit's reported tail, the echo's repeats, the
+    /// reverb's impulse response.
+    pub const TAIL: u8 = 4;
+}
+
 /// A command, applied at `frame` (a device frame: a test's or a probe's; the app's senders, native MIDI
 /// included, stamp none) or, with `None`, at the start of the next block the engine renders.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -558,10 +573,10 @@ pub enum Event {
     Beat { frame: Frame, beat_in_bar: u8, count_left: u8, clicked: bool },
     Selected { frame: Frame, lane: u8 },
     Refused { frame: Frame, lane: u8, reason: Refusal },
-    /// A take or overdub layer whose window saw an input gap was discarded.
-    TakeRejected { frame: Frame, lane: u8, overdub: bool },
-    /// A RETAKE pass saw an input gap: it is dropped, and the kept pass before it with it.
-    PassDropped { frame: Frame, lane: u8, pass: u32 },
+    /// A take, an overdub layer or a RETAKE pass closed with a dropout in it: it is kept as recorded and
+    /// the bins it reached are marked ([`crate::Overview::marked`]). Once per window (per pass for a
+    /// roll) at its close or pass edge; a discarded layer and KeepLast's commit send none.
+    Dropout { frame: Frame, lane: u8, overdub: bool },
     /// COPY into lane `to` is done. `feedback` is the DUB FEEDBACK it copied, the source's when COPY
     /// applied (the source's may have moved since). The destination's whole mix follows as its
     /// `Mix`, which the UI and the host's settings memory read.
@@ -593,11 +608,17 @@ pub struct ProcessContext {
     /// Device frame of the block's first sample.
     pub frame: Frame,
     /// The device lost audio just before this block (an xrun): its first frame follows a gap, which
-    /// spans the frames a jump in `frame` skipped. A point gap on a capture window's edge damages nothing.
+    /// spans the frames a jump in `frame` skipped. The first frame carries [`damage::BREAK`], which marks
+    /// a capture window it lands strictly inside; on a window's first frame the break lies before the
+    /// window, so on a path without memory (dry, the instruments, a unit whose tail is 0) a point gap on
+    /// a window's edge marks nothing. Through memory (a unit's tail, ECHO, REVERB) the splice rings on
+    /// inside the window, and the [`damage::TAIL`] it starts marks the window's first frames. Nothing is
+    /// discarded either way: a mark changes no sample.
     pub xrun: bool,
     /// This block's input never wholly reached the engine (the device side rendered silence or a splice
-    /// in its place): the gap spans every frame of the block, so it damages every capture window the
-    /// block overlaps, one that matches the block exactly included.
+    /// in its place): every frame carries [`damage::LOST`], so it marks every capture window the block
+    /// reaches at the record tap, one that matches the block exactly included. The take keeps it as
+    /// recorded.
     pub damaged: bool,
     /// Input plus output latency the driver reports, in frames. A take starts this much (plus the
     /// plugin's latency and the master limiter's pre-delay) after its downbeat, so what the player heard
@@ -647,6 +668,13 @@ pub trait SlotProcessor: Send {
     /// when it was activated. Read once, at install: a plugin whose latency changes is restarted, which
     /// removes and reinstalls it.
     fn latency(&self) -> Frame;
+    /// Frames the output may still carry an input frame after its latency (a reverb's or a delay's
+    /// memory), as the plugin reported it when it was activated: `Frame::MAX` for an infinite tail. Read
+    /// once, at install, beside the latency; the damage lane carries [`damage::TAIL`] that long after a
+    /// dropout leaves the unit. 0 (the default): no memory, a pure delay.
+    fn tail(&self) -> Frame {
+        0
+    }
     /// Render `out.len()` frames (= `input.len()`, at most the engine's `max_block`) from device frame
     /// `frame`. `input` is the slot's mono input while the slot is live and silence otherwise (always
     /// silence for an instrument); `events` are sorted by offset, every offset `< out.len()`. `out` is

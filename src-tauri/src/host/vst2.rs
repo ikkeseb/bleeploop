@@ -561,6 +561,10 @@ impl std::fmt::Display for OpenError {
     }
 }
 
+/// `effGetTailSize`: the samples the plugin rings on after its input stops (a reverb's time); 0 is the
+/// default ("unknown"), 1 "no tail". Asked on the owner thread once the plugin runs.
+pub(crate) const EFF_GET_TAIL_SIZE: i32 = 52;
+
 /// What an accepted effect declared, checked: every count here is safe to size a buffer from, and
 /// every function pointer the host will call is there.
 #[derive(Clone, Copy, Debug)]

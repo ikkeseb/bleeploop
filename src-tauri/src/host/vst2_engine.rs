@@ -31,6 +31,7 @@ use super::super::state::ParamDesc;
 use super::super::tone::{self, Vst2State, VST2_MAX_CHUNK};
 use super::super::vst2::{
     open_effect, time_info, validate, EffectInfo, HostContext, OpenError, ProcessingScope, Vst2Effect, Vst2Module,
+    EFF_GET_TAIL_SIZE,
 };
 use super::super::vst2_abi::*;
 use super::{ParamEvent, MAX_EVENTS_PER_BLOCK, MAX_PLUGIN_CHANNELS};
@@ -74,6 +75,8 @@ pub(super) struct Vst2Unit {
     param_count: usize,
     kind: SlotKind,
     latency: Frame,
+    /// The reported tail, at least `engine_slot::UNIT_TAIL_SECONDS` (`engine_slot::unit_tail`).
+    tail: Frame,
     max_frames: usize,
     params: Consumer<ParamEvent>,
     /// One `max_frames` row per declared input and output.
@@ -130,6 +133,7 @@ impl Vst2Unit {
             param_count: info.params,
             kind: SlotKind::Instrument,
             latency: 0,
+            tail: 0,
             max_frames: 0,
             params,
             in_rows: Vec::new(),
@@ -269,6 +273,10 @@ impl SlotProcessor for Vst2Unit {
 
     fn latency(&self) -> Frame {
         self.latency
+    }
+
+    fn tail(&self) -> Frame {
+        self.tail
     }
 
     fn process(&mut self, _frame: Frame, input: &[f32], events: &[SlotEvent], out: &mut [f32]) {
@@ -433,6 +441,14 @@ impl Vst2Plugin {
                 Err(e)
             }
         }
+    }
+
+    /// The unit's tail for the engine (`engine_slot::unit_tail`), from `effGetTailSize` on the running
+    /// plugin: 0 there is "unknown" and 1 "no tail", both under the floor.
+    fn tail(&self, slot: usize, rate: u32) -> Frame {
+        // SAFETY: the opcode reads no pointer; owner thread.
+        let report = unsafe { self.call(EFF_GET_TAIL_SIZE, 0, 0, 0.0) };
+        super::engine_slot::unit_tail(slot, "VST2", rate, Frame::from(self.info.initial_delay), Some(report.max(0) as u64))
     }
 
     /// `effStopProcess` then `effMainsChanged(0)`, on a running plugin only. The unit is out of the
@@ -729,7 +745,8 @@ fn load(
     }
     // SAFETY: the open effect `info` was just validated from, bound to this context; the plugin
     // closes it only with the unit back in hand.
-    let unit = unsafe { Vst2Unit::new(plugin.effect.raw(), plugin.ctx.clone(), &info, block, params, faults) };
+    let mut unit = unsafe { Vst2Unit::new(plugin.effect.raw(), plugin.ctx.clone(), &info, block, params, faults) };
+    unit.tail = plugin.tail(slot.slot(), rate);
     Ok(Loaded { plugin, unit, name, rate, tone: restored.report() })
 }
 
@@ -757,6 +774,7 @@ impl OwnedPlugin for Vst2Plugin {
         match activated {
             Ok((info, (rate, block))) => {
                 unit.rearm(&info, block);
+                unit.tail = self.tail(slot.slot(), rate);
                 slot.install(unit, rate).map_err(|(unit, e)| {
                     // Resumed for an engine that did not take the unit: suspended, as every failed cycle ends.
                     self.suspend();

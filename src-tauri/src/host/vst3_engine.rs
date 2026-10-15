@@ -28,6 +28,8 @@ pub(super) struct Vst3Unit {
     processor: ComPtr<IAudioProcessor>,
     kind: SlotKind,
     latency: Frame,
+    /// The reported tail, at least `engine_slot::UNIT_TAIL_SECONDS` (`engine_slot::unit_tail`).
+    tail: Frame,
     max_frames: usize,
     params: Consumer<ParamEvent>,
     events: Rc<EventListInner>,
@@ -75,6 +77,7 @@ impl Vst3Unit {
             processor,
             kind: SlotKind::Instrument,
             latency: 0,
+            tail: 0,
             max_frames: 0,
             params,
             events,
@@ -100,6 +103,7 @@ impl Vst3Unit {
     fn rearm(&mut self, activation: Activation, max_frames: u32) {
         self.kind = if activation.in_channels > 0 { SlotKind::Effect } else { SlotKind::Instrument };
         self.latency = activation.latency_frames as Frame;
+        self.tail = activation.tail;
         self.max_frames = (max_frames as usize).max(1);
         self.in_bufs = vec![vec![0.0; self.max_frames]; activation.in_channels as usize];
         self.out_bufs = vec![vec![0.0; self.max_frames]; activation.out_channels.max(1) as usize];
@@ -116,6 +120,10 @@ impl SlotProcessor for Vst3Unit {
 
     fn latency(&self) -> Frame {
         self.latency
+    }
+
+    fn tail(&self) -> Frame {
+        self.tail
     }
 
     fn process(&mut self, _frame: Frame, input: &[f32], events: &[SlotEvent], out: &mut [f32]) {
@@ -271,8 +279,9 @@ impl Vst3Plugin {
         let rate = slot.rate().ok_or_else(|| "no audio device is open".to_string())?;
         let max_frames = slot.max_block().max(1) as u32;
         // SAFETY: owner thread; the component is initialised and inactive, and nothing processes.
-        let activation = unsafe { activate_component(&self.component, processor, rate as f64, max_frames) }?;
+        let mut activation = unsafe { activate_component(&self.component, processor, rate as f64, max_frames) }?;
         self.active = true;
+        activation.tail = super::super::engine_slot::unit_tail(slot.slot(), "VST3", rate, Frame::from(activation.latency_frames), activation.tail_frames);
         Ok((activation, max_frames, rate))
     }
 }

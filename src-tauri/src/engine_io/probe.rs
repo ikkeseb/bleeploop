@@ -535,10 +535,9 @@ impl Probe {
             match event {
                 Event::Lane { lane, info, .. } if (lane as usize) < TRACK_COUNT => self.lanes[lane as usize] = Some(info),
                 Event::Beat { .. } => self.beats += 1,
-                Event::TakeRejected { lane, overdub, .. } => {
-                    self.fail("loop", format!("lane {lane}: the {} saw an input gap and was discarded", if overdub { "overdub" } else { "take" }))
+                Event::Dropout { lane, overdub, .. } => {
+                    self.fail("loop", format!("lane {lane}: the {} kept a dropout (marked on its lane)", if overdub { "overdub" } else { "take" }))
                 }
-                Event::PassDropped { lane, pass, .. } => self.fail("loop", format!("lane {lane}: RETAKE pass {pass} saw an input gap")),
                 Event::Refused { lane, reason, .. } => say(format!("lane {lane} refused a press: {reason:?}")),
                 _ => {}
             }

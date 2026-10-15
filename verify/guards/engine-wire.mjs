@@ -68,7 +68,7 @@ const REFUSALS = [
   'NoMute', 'NoReverse', 'NoCopy', 'NoFreeLane', 'Fading', 'NoFade', 'FixedCapturing', 'FixedRetake', 'RetakeCapturing',
   'AutoRecCapturing', 'AutoRecLocked',
 ];
-const EVENTS = ['Lane', 'Transport', 'Beat', 'Selected', 'Refused', 'TakeRejected', 'PassDropped', 'Copied', 'Cleared', 'Muted', 'Mix', 'Toggled'];
+const EVENTS = ['Lane', 'Transport', 'Beat', 'Selected', 'Refused', 'Dropout', 'Copied', 'Cleared', 'Muted', 'Mix', 'Toggled'];
 const DEVICE_EVENTS = ['Lost', 'Recovered', 'Fallback', 'ShareLost', 'EngineFaulted', 'LoopsDropped'];
 
 // ── Commands: the TS side sends these; each fixture example is one the TS types accept as is ────────
@@ -170,10 +170,21 @@ for (const f of fixture.feed) {
     if ('settings' in f) assert.deepEqual(decoded.settings, f.settings);
     assert.deepEqual(decoded.anchor, f.anchor);
     assert.deepEqual(decoded.meter, f.meter);
-    assert.deepEqual(decoded.peaks, f.peaks);
+    // `marked` is absent on the wire when a run holds no mark and always present decoded (empty then).
+    assert.deepEqual(decoded.peaks, f.peaks.map((p) => ({ ...p, marked: p.marked ?? [] })));
     assert.deepEqual(decoded.scope, f.scope ?? null);
   });
 }
+check('the fixture has a peak run carrying marks and runs carrying none', () => {
+  const runs = fixture.feed.flatMap((f) => f.peaks);
+  assert.ok(runs.some((p) => p.marked?.length > 0) && runs.some((p) => p.marked === undefined));
+});
+check('a mark outside its run is refused', () => {
+  const frame = structuredClone(fixture.feed.find((f) => f.peaks.some((p) => p.marked?.length > 0)));
+  const run = frame.peaks.find((p) => p.marked?.length > 0);
+  run.marked = [run.start + run.min.length];
+  assert.throws(() => decodeFeedFrame(frame), /marks must lie inside their run/);
+});
 check('the fixture has a frame carrying scope columns and frames carrying none', () => {
   const carried = fixture.feed.filter((f) => f.scope !== undefined);
   assert.equal(carried.length, 1);

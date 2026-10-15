@@ -37,6 +37,8 @@ pub(super) struct ClapUnit {
     refused: bool,
     kind: SlotKind,
     latency: Frame,
+    /// The reported tail, at least `engine_slot::UNIT_TAIL_SECONDS` (`engine_slot::unit_tail`).
+    tail: Frame,
     max_frames: usize,
     params: Consumer<ParamEvent>,
     events: EventBuffer,
@@ -96,6 +98,7 @@ impl ClapUnit {
             refused: false,
             kind: SlotKind::Instrument,
             latency: 0,
+            tail: 0,
             max_frames: 0,
             params,
             // Ring params and engine notes share one buffer; neither side ever exceeds its cap, so
@@ -172,6 +175,10 @@ impl SlotProcessor for ClapUnit {
 
     fn latency(&self) -> Frame {
         self.latency
+    }
+
+    fn tail(&self) -> Frame {
+        self.tail
     }
 
     fn process(&mut self, _frame: Frame, input: &[f32], events: &[SlotEvent], out: &mut [f32]) {
@@ -306,12 +313,38 @@ fn reported_latency(instance: &PluginInstance<LfHost>) -> u32 {
     }
 }
 
+/// The tail the active plugin reports (CLAP `tail` extension), in frames: `None` for an infinite one
+/// (`i32::MAX` or more), 0 without the extension. Read through the raw ABI on the main thread, as the
+/// latency is.
+fn reported_tail(instance: &PluginInstance<LfHost>) -> Option<u64> {
+    /// `clap_plugin_tail`: one function taking the plugin pointer.
+    #[repr(C)]
+    struct RawTail {
+        get: Option<unsafe extern "C" fn(*const std::ffi::c_void) -> u32>,
+    }
+    let plugin = instance.raw_instance();
+    let Some(get_extension) = plugin.get_extension else {
+        return Some(0);
+    };
+    // SAFETY: as `reported_latency`: a non-null "clap.tail" extension is a `clap_plugin_tail`, whose one
+    // field `RawTail` mirrors, called on the main thread with the same plugin pointer.
+    let tail = unsafe {
+        let ext = get_extension(plugin, c"clap.tail".as_ptr()).cast::<RawTail>();
+        match ext.as_ref().and_then(|ext| ext.get) {
+            Some(get) => get(std::ptr::from_ref(plugin).cast()),
+            None => 0,
+        }
+    };
+    (tail < i32::MAX as u32).then_some(u64::from(tail))
+}
+
 /// Owner thread, instance inactive: query the ports, activate at the engine's current rate with its
-/// largest block as the max frame count, and read the latency the plugin now reports.
+/// largest block as the max frame count, and read the latency and the tail the plugin now reports
+/// (the tail as `engine_slot::unit_tail` takes it).
 fn activate(
     instance: &mut PluginInstance<LfHost>,
     slot: &SlotHost,
-) -> Result<(StoppedPluginAudioProcessor<LfHost>, Terms), String> {
+) -> Result<(StoppedPluginAudioProcessor<LfHost>, Terms, Frame), String> {
     let rate = slot.rate().ok_or_else(|| "no audio device is open".to_string())?;
     let max_frames = slot.max_block().max(1) as u32;
     let outputs = query_ports(instance, false)?;
@@ -320,7 +353,8 @@ fn activate(
         PluginAudioConfiguration { sample_rate: rate as f64, min_frames_count: 1, max_frames_count: max_frames };
     let stopped = instance.activate(|_, _| (), config).map_err(|e| format!("activate failed: {e}"))?;
     let latency = reported_latency(instance);
-    Ok((stopped, Terms { rate, max_frames, inputs, outputs, latency }))
+    let tail = super::engine_slot::unit_tail(slot.slot(), "CLAP", rate, Frame::from(latency), reported_tail(instance));
+    Ok((stopped, Terms { rate, max_frames, inputs, outputs, latency }, tail))
 }
 
 /// Instantiate `id` from `entry` with the production host handlers.
@@ -441,8 +475,9 @@ fn load(
     instance.access_shared_handler(|s| s.restart_requested.store(false, Release));
     let _ = take_params_rescan(&mut instance);
     instance.access_handler_mut(|m| m.state_dirty = false);
-    let (stopped, terms) = activate(&mut instance, slot)?;
-    let unit = ClapUnit::new(stopped, &terms, params, faults, tone.edited());
+    let (stopped, terms, tail) = activate(&mut instance, slot)?;
+    let mut unit = ClapUnit::new(stopped, &terms, params, faults, tone.edited());
+    unit.tail = tail;
     let plugin = Clap { instance, entry, editor: EditorSlot::Closed, editor_closed, hosted_hwnd, editor_parent };
     Ok(Loaded { plugin, unit, name, rate: terms.rate, tone: restored.report() })
 }
@@ -474,11 +509,12 @@ impl OwnedPlugin for Clap {
         if let Some(stopped) = unit.take_stopped() {
             instance.deactivate(stopped);
         }
-        let (stopped, terms) = match activate(instance, slot) {
+        let (stopped, terms, tail) = match activate(instance, slot) {
             Ok(activated) => activated,
             Err(e) => return Err((unit, e)),
         };
         unit.rearm(stopped, &terms);
+        unit.tail = tail;
         slot.install(unit, terms.rate).map_err(|(unit, e)| {
             let mut unit = own::<ClapUnit>(unit);
             if let Some(stopped) = unit.take_stopped() {

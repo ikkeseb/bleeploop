@@ -463,7 +463,9 @@ fn the_ring_adds_its_output_to_the_dry_bits_and_changes_none_of_them() {
     }
     let wet: Vec<f32> = (0..off.record.len()).map(|k| busy(start + k as Frame)).collect();
     let mut ring_out = vec![0.0f32; wet.len()];
-    assert!(alone.render(start, &wet, &mut ring_out), "the ring sounds");
+    let mut damage = vec![0u8; wet.len()];
+    assert!(alone.render(start, &wet, &mut ring_out, &mut damage), "the ring sounds");
+    assert!(damage.iter().all(|&d| d == 0), "no damage in, none out");
     assert_eq!(bits(&off.record), bits(&wet), "off, the record tap is the wet signal");
     assert_eq!(bits(&off.monitor), bits(&wet), "off, the monitor is the wet signal");
     let plus = |dry: &[f32]| -> Vec<f32> { dry.iter().zip(&ring_out).map(|(&d, &y)| d + y).collect() };

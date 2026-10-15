@@ -196,6 +196,11 @@ it.
 - Help in two tabs: `?` opens Reference (the looper keys, the keystroke pedals, the play keys, the
   octave and the drum pads, unscrolled at every window size, tighter below 720 px tall) and Manual holds
   the rest, About this build at its foot. Can it be read at a glance mid-jam, from playing distance?
+- A dropout inside a take or an overdub, dry or through the amp-sim: the audio stays as recorded and its
+  bar shows a red notch and wash on the lane; ↶ UNDO takes the layer and the mark away, and REDO brings
+  both back (machine: `tests/dropout_marks.rs`, `tests/dropout_tap.rs`, the `lane-marks` probe). Does the
+  mark read from where you stand, on the bar where you heard it? Through the amp-sim a mark runs on for
+  the tail the plugin reports, logged at its load (`tail … reported`): a long one marks that long.
 
 ## Decisions
 

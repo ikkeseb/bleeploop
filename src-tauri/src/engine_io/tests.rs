@@ -1215,7 +1215,8 @@ fn an_input_missing_from_its_cycle_is_one_duplex_fault() {
     assert_eq!(diag.engine.xruns, 1, "its silent block is one input gap");
 }
 
-/// A first take on lane 0 that `glitch` runs into midway, then a stop: whether the engine rejected it.
+/// A first take on lane 0 that `glitch` runs into midway, then a stop: it commits (a dropout never
+/// discards), and whether a `Dropout` said it kept one.
 fn a_take_through(h: &mut Harness, glitch: impl FnOnce(&Harness)) -> bool {
     h.send(Command::SetBpm(240.0));
     h.send(Command::SetSlotLive(0, true));
@@ -1225,9 +1226,13 @@ fn a_take_through(h: &mut Harness, glitch: impl FnOnce(&Harness)) -> bool {
     glitch(h);
     h.play(RATE / 2);
     h.send(Command::RecDub(0));
-    h.wait_event("the take ends", |e| match e {
-        Event::TakeRejected { lane: 0, overdub: false, .. } => Some(true),
-        Event::Lane { lane: 0, info, .. } if info.state == LaneState::Playing => Some(false),
+    let mut said = false;
+    h.wait_event("the take commits", |e| match e {
+        Event::Dropout { lane: 0, overdub: false, .. } => {
+            said = true;
+            None
+        }
+        Event::Lane { lane: 0, info, .. } if info.state == LaneState::Playing => Some(said),
         _ => None,
     })
 }
@@ -1239,11 +1244,11 @@ fn miss_an_input_cycle(h: &Harness) {
 }
 
 #[test]
-fn an_input_missing_from_its_cycle_rejects_the_take_or_layer_it_falls_in() {
+fn an_input_missing_from_its_cycle_marks_the_take_or_layer_it_falls_in() {
     let mut h = Harness::new();
     h.fake.set_input(tone);
     h.open(asio(Some(256)));
-    assert!(a_take_through(&mut h, miss_an_input_cycle), "a take with a cycle of silence is rejected");
+    assert!(a_take_through(&mut h, miss_an_input_cycle), "a take with a cycle of silence is kept and says so");
     assert_eq!(h.host.diag().duplex_faults, 1);
     drop(h); // one fake device at a time (`SERIAL`)
 
@@ -1259,15 +1264,19 @@ fn an_input_missing_from_its_cycle_rejects_the_take_or_layer_it_falls_in() {
     miss_an_input_cycle(&h);
     h.play(length / 3);
     h.send(Command::RecDub(0));
-    h.wait_event("the layer is rejected", |e| matches!(e, Event::TakeRejected { lane: 0, overdub: true, .. }).then_some(()));
+    h.wait_event("the layer is kept and says so", |e| matches!(e, Event::Dropout { lane: 0, overdub: true, .. }).then_some(()));
     h.wait_lane("the loop plays on", 0, |i| i.state == LaneState::Playing);
     h.play(RATE / 4);
-    let (_, after) = session_parts(&h.host.snapshot(false).expect("a snapshot after the rejection"));
-    assert!(after == before, "the loop before the layer, bit for bit");
+    let (_, kept) = session_parts(&h.host.snapshot(false).expect("a snapshot of the kept layer"));
+    assert!(kept != before, "the layer is kept as recorded");
+    h.send(Command::Undo(0));
+    h.play(RATE / 4);
+    let (_, after) = session_parts(&h.host.snapshot(false).expect("a snapshot after the undo"));
+    assert!(after == before, "UNDO gives the loop before the layer, bit for bit");
 }
 
 #[test]
-fn a_wasapi_join_that_starves_or_trims_rejects_the_take() {
+fn a_wasapi_join_that_starves_or_trims_marks_the_take() {
     // Past the drift controller's ±1 % either way: the join runs short (a starve) or over (a trim)
     // every second or so, after the startup priming.
     for (skew, trims) in [(-30_000.0, false), (30_000.0, true)] {
@@ -1279,11 +1288,11 @@ fn a_wasapi_join_that_starves_or_trims_rejects_the_take() {
             let diag = h.host.diag();
             if trims { diag.join_trims } else { diag.join_starves }
         };
-        let rejected = a_take_through(&mut h, |h| {
+        let said = a_take_through(&mut h, |h| {
             let before = count(h);
             until("the join glitches", || count(h) > before);
         });
-        assert!(rejected, "a take the join {} is rejected", if trims { "trimmed" } else { "starved" });
+        assert!(said, "a take the join {} is kept and says so", if trims { "trimmed" } else { "starved" });
     }
 }
 

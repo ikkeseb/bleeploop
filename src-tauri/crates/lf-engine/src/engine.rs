@@ -33,7 +33,7 @@ use std::sync::Arc;
 
 use rtrb::{Consumer, Producer, RingBuffer};
 
-use crate::api::{Action, Command, CompactMix, Event, NoteTarget, ProcessContext, SlotKind, TimedCommand, Toggle, SLOT_COUNT, TRACK_COUNT};
+use crate::api::{damage, Action, Command, CompactMix, Event, NoteTarget, ProcessContext, SlotKind, TimedCommand, Toggle, SLOT_COUNT, TRACK_COUNT};
 use crate::clock::Clock;
 use crate::dsp::buffer_source::AudioBuffer;
 use crate::dsp::compressor::Compressor;
@@ -119,6 +119,8 @@ pub struct Taps<'a> {
     /// The record tap: what a capture writes (the wet signal, the input sends, the instruments' record
     /// path).
     pub record: &'a [f32],
+    /// The record tap's damage lane, frame by frame ([`crate::api::damage`]): what a capture marks.
+    pub record_damage: &'a [u8],
     /// The lanes before their FX plus the click, under the master volume: what the looper plays,
     /// without the FX's colour (a bypassed chain is not bit-transparent, as in Tone).
     pub looper: &'a [f32],
@@ -210,6 +212,12 @@ pub struct Engine {
     sends_sounded: bool,
     /// The record tap: the wet signal plus the input sends and the instruments' record path.
     record: Vec<f32>,
+    /// The block's input damage ([`damage`]): `LOST` on every frame of a damaged block, `BREAK` on the
+    /// first frame after an xrun or a jump. Every slot reads it.
+    in_damage: Vec<u8>,
+    /// The record tap's damage lane: the input's damage as the rack, the instruments' record path and
+    /// the input sends carry it to the tap, frame by frame with `record`.
+    record_damage: Vec<u8>,
     /// The instruments' frames rendered so far in this block (they render ahead of an AUTO scan).
     instruments_done: usize,
     instrument: [Vec<f32>; 2],
@@ -271,7 +279,7 @@ impl Engine {
         let table = |[l, r]: [Vec<f32>; 2]| Arc::new(AudioBuffer::new(config.sample_rate as f32, vec![l, r]));
         let (white, pink) = (table(white), table(pink));
         let ir = effects::reverb_ir(config.sample_rate, &white);
-        let (rack, slots) = Rack::new(config.sample_rate, config.max_block);
+        let (rack, slots) = Rack::new(config.sample_rate, config.max_block, capacity);
         let looper = Looper::new(config.sample_rate, capacity);
         let overview = looper.overview().clone();
         let (session_port, session) = crate::session::channel();
@@ -302,6 +310,8 @@ impl Engine {
             sends_done: 0,
             sends_sounded: false,
             record: vec![0.0; config.max_block],
+            in_damage: vec![0; config.max_block],
+            record_damage: vec![0; config.max_block],
             instruments_done: 0,
             instrument: [vec![0.0; config.max_block], vec![0.0; config.max_block]],
             lanes: [[0.0; QUANTUM]; TRACK_COUNT],
@@ -369,7 +379,7 @@ impl Engine {
     /// The last block before the limiter. The output is `limiter(bus) + monitor` on each side.
     pub fn taps(&self) -> Taps<'_> {
         let n = self.rendered;
-        Taps { bus: [&self.mix[0][..n], &self.mix[1][..n]], monitor: &self.monitor[..n], looper: &self.looper_mix[..n], record: &self.record[..n] }
+        Taps { bus: [&self.mix[0][..n], &self.mix[1][..n]], monitor: &self.monitor[..n], looper: &self.looper_mix[..n], record: &self.record[..n], record_damage: &self.record_damage[..n] }
     }
 
     /// The last block's Share mix (the header): the device output without the click.
@@ -505,13 +515,12 @@ impl Engine {
         let start = ctx.frame;
         let end = start + n as Frame;
         let first = !self.started;
-        // The input frames an xrun lost before this block: the ones a jump skipped, else a point gap.
-        let lost_from = if first { start } else { self.next_frame.min(start) };
+        let jumped = !first && start != self.next_frame;
         if !self.started {
             self.started = true;
             self.clock.ensure_running(start);
             self.skipped = start;
-        } else if start != self.next_frame {
+        } else if jumped {
             // A jump: the DSP clock and the block jobs pace by the frames rendered, not by the ones lost.
             self.skipped += start - self.next_frame;
             self.looper.skip(start - self.next_frame);
@@ -520,10 +529,21 @@ impl Engine {
         self.fx.set_offset(self.skipped);
         self.input_fx.set_offset(self.skipped);
         self.instruments.set_offset(self.skipped);
+        // The input's damage (`api::damage`): a damaged block is lost on every frame, and the first frame
+        // after an xrun or a jump breaks from the one before it. A jump also leaves every record line
+        // holding content from before it, which comes out of place: each line marks what it carries.
+        let in_damage = &mut self.in_damage[..n];
+        in_damage.fill(if ctx.damaged { damage::LOST } else { 0 });
         if ctx.xrun || ctx.damaged {
             self.xruns += 1;
-            // A damaged block's own input frames are lost too.
-            self.looper.input_gap(lost_from, if ctx.damaged { end } else { start });
+        }
+        if n > 0 && (ctx.xrun || jumped) {
+            in_damage[0] |= damage::BREAK;
+        }
+        if jumped {
+            self.rack.jump();
+            self.instruments.jump();
+            self.input_fx.jump(start);
         }
         self.take_commands(start);
         // Taken commands with no stamp are due at `start`, so all of them apply before this block's
@@ -596,10 +616,12 @@ impl Engine {
                 let (a, b) = (self.slots_done, ((until - start) as usize).max(k_next));
                 self.rack.render(
                     inputs.map(|x| &x[a..b]),
+                    &self.in_damage[a..b],
                     &mut self.wet[a..b],
                     &mut self.aligned[a..b],
                     &mut self.slot_bus[a..b],
                     &mut self.record[a..b],
+                    &mut self.record_damage[a..b],
                     record_delay,
                 );
                 self.slots_done = b;
@@ -607,7 +629,7 @@ impl Engine {
             if self.instruments_done < k_next {
                 let (from, [il, ir]) = (self.instruments_done, &mut self.instrument);
                 let at = start + from as Frame;
-                self.instruments.render(at, record_delay, &mut il[from..k_next], &mut ir[from..k_next], &mut self.record[from..k_next]);
+                self.instruments.render(at, record_delay, &mut il[from..k_next], &mut ir[from..k_next], &mut self.record[from..k_next], &mut self.record_damage[from..k_next]);
                 self.instruments_done = k_next;
             }
             if self.sends_done < k_next {
@@ -615,7 +637,7 @@ impl Engine {
                 // it aligned, so what they record lands with the take; a live slot quicker than the
                 // latched latency hears its own echo that difference late.
                 let (a, b) = (self.sends_done, k_next);
-                if self.input_fx.render(start + a as Frame, &self.aligned[a..b], &mut self.sends[a..b]) {
+                if self.input_fx.render(start + a as Frame, &self.aligned[a..b], &mut self.sends[a..b], &mut self.record_damage[a..b]) {
                     self.sends_sounded = true;
                     for (r, &y) in self.record[a..b].iter_mut().zip(&self.sends[a..b]) {
                         *r += y;
@@ -624,7 +646,7 @@ impl Engine {
                 self.sends_done = b;
             }
             let mut cx = Cx { now: f, align, clock: &mut self.clock, feed: &mut self.feed, fx: &mut self.fx };
-            if let Some(at) = self.looper.scan_auto(&mut cx, f, &self.record[k0..k_next]) {
+            if let Some(at) = self.looper.scan_auto(&mut cx, f, &self.record[k0..k_next], &self.record_damage[k0..k_next]) {
                 next = f + at as Frame;
             }
             let k1 = (next - start) as usize;
@@ -662,7 +684,7 @@ impl Engine {
                 *l += c;
                 *r += c;
             }
-            self.looper.capture(f, &self.record[k0..k1]);
+            self.looper.capture(f, &self.record[k0..k1], &self.record_damage[k0..k1]);
             let (wet, sends, sounded) = (&self.wet[k0..k1], &self.sends[k0..k1], self.sends_sounded);
             for ((((l, r), o), m), (&w, &y)) in l.iter_mut().zip(r.iter_mut()).zip(&mut self.monitor[k0..k1]).zip(looper_mix.iter_mut()).zip(wet.iter().zip(sends)) {
                 let g = self.master_gain;

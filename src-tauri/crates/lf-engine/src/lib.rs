@@ -27,7 +27,7 @@
 //! | [`effects`] | each lane's FX chain and its pan, the shared reverb bus, their grid, CLEAR and COPY on a lane's FX and pan | `fx/fx.ts`, `looper/{playback,machine}.ts` (the pan: the engine's own) |
 //! | [`input_fx`] | the input sends: ECHO, REVERB and RING MOD on the wet signal, wet only, into the record tap and the monitor | — (engine only) |
 //! | [`instruments`] | the six built-in instruments, the selected one (or none), each one's level, the wheels, their record path | `synths/index.ts`, `input-router.ts` (its sustain and note ownership went to the app's `engine_io::midi::router`) |
-//! | [`overview`] | what the UI draws, for a reader off the audio thread: the grid anchor, each lane's state, buffer, orientation and frames, each buffer's waveform peaks | `looper/peaks.ts` |
+//! | [`overview`] | what the UI draws, for a reader off the audio thread: the grid anchor, each lane's state, buffer, orientation and frames, each buffer's waveform peaks and dropout marks | `looper/peaks.ts` |
 //! | [`scope`] | the live scope taps, while the UI asks for them ([`Command::SetScope`]): per lane after its FX, per monitor and per master, a min/max envelope in 4 ms columns on its own ring | — (engine only) |
 //! | `note_record` | DEV builds only: each applied `NoteOn` and `NoteOff` and its frame, for the MIDI latency benchmark off the audio thread (`src-tauri/src/engine_io/midi_bench.rs`) | — |
 //! | [`session`] | saving and loading a session: a snapshot copied out a budget per frame, each lane with its mix at the pin, a load swapped into an empty looper with each lane's mix, both after the commands due on their block's first frame, the host's port | `looper/session.ts`, `export/*` |
@@ -48,8 +48,8 @@
 //! - **An overdub writes `input + feedback * old`** (DUB FEEDBACK, a lane setting beside its volume: 1 is
 //!   the plain sum, bit for bit; 0 replaces) past its first and before its last 5 ms, which are linear
 //!   ramps stored in the loop (D23, `looper`'s `punch_in` and `fade_tail`): the layer fades in from its
-//!   window start, and a clean end fades its last writes back toward what each overwrote (a rejected or
-//!   discarded layer is restored as it was). The undo target is still the loop at dub start.
+//!   window start, and a clean end fades its last writes back toward what each overwrote (a discarded
+//!   layer is restored as it was). The undo target is still the loop at dub start.
 //! - **Undo, PLAY and an immediate STOP are edged in playback only** (D23, `looper`'s `Voice`), over the
 //!   same 5 ms: an undo's audible switch (on its boundary, or where a DUB forces it) crossfades the loop
 //!   heard into the one it gives back, in heard order; a lane PLAYed into a running loop fades in at its
@@ -96,9 +96,20 @@
 //!   COPY and TRIM meanwhile; undo and reverse on a playing lane
 //!   switch on the next loop boundary (an undo's switch crossfades there, D23), and a DUB pressed before it
 //!   makes the switch heard at once (D19); STOP on an overdubbing
-//!   lane discards the whole layer (its tail plays the layer as heard); an input gap
-//!   damages only the capture windows (RETAKE passes) it overlaps, and resets AUTO's listening history;
+//!   lane discards the whole layer (its tail plays the layer as heard);
 //!   a jump in the device frame drops the beats it skipped, and count-in beats fire late as one click.
+//! - **A dropout keeps the audio as recorded and marks the bar** (the owner's policy). A starved or
+//!   spliced input block, a point xrun or a jump in the device frame never changes or discards a sample of
+//!   a take, an overdub layer or a RETAKE pass, dry or through a unit's latency to the record tap. The
+//!   damage lane ([`api::damage`]) carries it with the audio through the slots, the instruments' record
+//!   path and the input sends to the tap, and a capture marks the bins its frames land in
+//!   ([`Overview::marked`]); the marks travel with the audio and go with it, and one
+//!   [`Event::Dropout`] per window says so. A span the device never delivered is a hole: silence in a
+//!   take, the old loop in a layer, marked. The player decides by ear: UNDO drops a layer and its marks in
+//!   one press (REDO brings both back), CLEAR drops a take, a RETAKE roll plays another pass. A mark is a
+//!   routing claim, exact on the engine's paths and taken at a plugin's word (its latency, then its tail):
+//!   a false mark costs a look, a miss leaves a dropout unmarked, neither changes a sample. AUTO hears no
+//!   frame the device marked `LOST` and resets at a `BREAK`, so a dropout never triggers a take.
 //! - **`process` never allocates, locks or waits.** Buffers are allocated (and their pages touched) in
 //!   `Engine::new`; commands and events cross on rtrb rings; a full event ring refuses and counts. A
 //!   one-off event is lost there; each lane's state and mix ([`Event::Mix`], on change only), the
@@ -117,9 +128,15 @@
 //!   behind it, except the instruments', the plugin slots' and the input sends' (a note never waits on
 //!   the looper). A full command table leaves the rest in the ring for the next block: late, never
 //!   dropped. A jump in the device frame moves every job's schedule with it (`Looper::skip`): work is
-//!   owed for the frames rendered, never for the ones the device lost. An overdub an input gap damaged
-//!   (a jump's, an xrun's) writes nothing more, so its undo copy reads only the loop before it and the
-//!   rejection at its end restores that bit for bit.
+//!   owed for the frames rendered, never for the ones the device lost. An overdub writes no position its
+//!   undo copy has not passed (a jump can carry the write head ahead of it): the old loop stays there,
+//!   marked, so UNDO's target and STOP's discard are the loop before the layer bit for bit, whatever is
+//!   marked. The one exception to this rule is a hole: the frames a jump skipped inside a take's window
+//!   are zeroed in the callback that finds them, before anything reads the buffer (`Looper::fill_hole`).
+//!   That work scales with audio the device already lost, never with the loop: at most the two windows a
+//!   jump cuts and lands in, measured at under 0.11 ns a lost frame, and the whole callback that fills a
+//!   59 s hole at a quarter of a 10 ms WASAPI period at 192 kHz (`tests/perf.rs`; only WASAPI's dry frames
+//!   make a long one, a lock miss one block).
 //! - **A command is judged when it is pressed**: one that would do nothing then is dropped, never held.
 //!   A hands-free press ([`Action`]) acts on the lane the engine has selected when it lands, or a named
 //!   one, never on what the UI last saw on the feed: HALVE's bars, HOLD's lane (per pedal: an accepted
@@ -149,6 +166,8 @@
 //! wired sound. `tests/slots.rs` holds the plugin slots, with fake units that record what they saw in
 //! preallocated buffers (never allocating in `process`) and are handed back to the test to drop;
 //! `tests/punch_out.rs` holds the punch-out, `tests/render_master.rs` the export's wet master, `tests/multiply.rs` the multiply (a free take's too),
+//! `tests/dropout_marks.rs` a dropout kept and marked (holes, tails, the sends, AUTO, the marks following the audio), `tests/dropout_tap.rs` the
+//! damage lane's routing proof (proptest: the tap's damage `LOST` exactly where a silenced run differs, the marks an oracle's),
 //! `tests/trim.rs` the TRIM, `tests/meter.rs` every offered meter (and the click WAV per meter, ignored), `tests/dub_feedback.rs` DUB FEEDBACK, `tests/punch_ramps.rs` an overdub's punch
 //! ramps (its reference: `tests/common/dub.rs`), `tests/playback_edges.rs` the undo, PLAY and STOP edges
 //! (its reference: `tests/common/edges.rs`), `tests/fade.rs` FADE, `tests/input_fx.rs`
@@ -174,12 +193,17 @@
 //!
 //! # Open threads
 //!
-//! - **A gap the live plugin's latency carries into a window is missed.** The tap carries input frame
-//!   `x` at `x + live latency`, but `input_gap` gets the device frames, which must stay (a jump in a
-//!   window's closing tail loses those tap frames): a silent block just before a layer commits it clean.
-//!   Next check: pass the looper both intervals, then un-ignore
-//!   `a_silent_block_damages_the_layer_its_frames_reach_through_a_live_plugin` beside
-//!   `a_jump_in_a_layers_closing_tail_rejects_it_through_a_live_plugin` (`tests/overdub_undo_reverse.rs`).
+//! - **A plugin's memory past what it reports goes unmarked.** The lane takes a unit as a pure delay of
+//!   its reported latency, then its reported tail (at least `UNIT_TAIL`, 100 ms, a floor not measured):
+//!   a delay or reverb inside it that outlasts the report carries a dropout into a later take with no
+//!   mark, and a wrong latency report puts the mark off the dropout by the error (an over-report leaves
+//!   the dropout unmarked before it). Next check: render the owner's amp-sim through the host with a
+//!   128-frame dropout and measure how long its output differs from the clean run past its reported
+//!   latency, against its reported tail (the host logs both per activation).
+//! - **A layer at DUB FEEDBACK 0 keeps the marks of the bars it replaces.** The marks of a buffer only
+//!   grow under an overdub, so a bar a feedback-0 layer rewrote clean still shows the old dropout (a false
+//!   mark). Next check: whether the owner ever dubs at 0 over a marked bar; clearing would need the
+//!   layer's whole bins, written and unmarked.
 //! - **With no device running, a session job is served before the commands queued ahead of it.**
 //!   `service_session_idle` runs the job at once, so a setting or a take sent before a load applies after
 //!   it on resume. Applying them in idle is wrong: a capture latches alignment 0, and the 64-entry pending

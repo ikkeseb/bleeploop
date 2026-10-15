@@ -1033,6 +1033,10 @@ struct Activation {
     out_channels: u32,
     in_channels: u32, // P11.2: 0 = no audio-input bus (synth) — keeps the numInputs=0 layout
     latency_frames: u32,
+    /// `getTailSamples`: `None` for `kInfiniteTail`; 0 also for `kNoTail` and a plugin that says nothing.
+    tail_frames: Option<u64>,
+    /// The unit's tail as the owner takes it (`engine_slot::unit_tail`); 0 until it does.
+    tail: lf_engine::grid::Frame,
 }
 
 /// The one VST3 activation sequence, run at load and again after every plugin-requested restart:
@@ -1132,10 +1136,14 @@ unsafe fn activate_component(
     }
     // Valid once active. Logged only — see `Activation`.
     let latency_frames = processor.getLatencySamples();
+    let tail = processor.getTailSamples();
+    let tail_frames = (tail != vst3::Steinberg::Vst::kInfiniteTail).then_some(u64::from(tail));
     Ok(Activation {
         out_channels,
         in_channels,
         latency_frames,
+        tail_frames,
+        tail: 0,
     })
 }
 

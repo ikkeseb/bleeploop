@@ -39,10 +39,24 @@
 //! one call per device block unless a stamped slot command splits it. Those commands therefore apply
 //! at the start of a render call (every event offset is 0 in practice); an install or removal applies
 //! at the next block start. A live ramp's end splits nothing: the gate is evaluated per frame.
+//!
+//! The damage lane ([`crate::api::damage`]) runs beside the audio, in the same frame loop, with the
+//! same gate, crossfade weights, gain and line indices: a frame's damage goes where its sample goes, and
+//! a path whose weight is 0 carries none. It is a routing model, exact on the engine's own paths (the
+//! gate, the crossfades, the lines) and taken at the plugin's word inside a unit: a pure delay of its
+//! reported latency through a ring of `capacity + 1` entries (a longer latency marks a conservative
+//! hull: from that latency after the first lost input to that latency after the last), then its
+//! reported tail ([`SlotProcessor::tail`]) as `TAIL` after a dropout leaves it, never clamped (an
+//! infinite one holds until the unit is installed again). A new unit's first `latency` frames came
+//! from input it never got and are unmarked. A jump in the device frame leaves every line and unit
+//! holding content from before it, which comes out displaced: what a line reads from before the jump,
+//! and a unit's latency of output after it, is `LOST` where it carries sound or a mark, and a unit's
+//! tail after that is `TAIL` where it carries sound. A wrong report moves or misses a mark; it never
+//! changes a sample.
 
 use rtrb::{Consumer, Producer, PushError, RingBuffer};
 
-use crate::api::{SlotEvent, SlotEventKind, SlotKind, SlotProcessor, SLOT_COUNT};
+use crate::api::{damage, SlotEvent, SlotEventKind, SlotKind, SlotProcessor, SLOT_COUNT};
 use crate::grid::Frame;
 
 /// The crossfade into and out of bypass: 10 ms, the web monitor's declick (`audio_output.rs`).
@@ -141,6 +155,23 @@ struct Slot {
     wet_line: Vec<f32>,
     dw: usize,
     write: usize,
+    /// The damage on `line` and `wet_line`, written and read at their indices.
+    line_damage: Vec<u8>,
+    wet_damage: Vec<u8>,
+    /// The unit's reported tail, read at install with its latency (`Frame::MAX`: infinite).
+    tail: Frame,
+    /// The unit's damage ring, `capacity + 1` entries: written at `unit_write` with the damage its input
+    /// carries, read its latency back.
+    unit_ring: Vec<u8>,
+    unit_write: usize,
+    /// A latency past the ring: the unit's output frames (counted from its install) in `[from, to]` are
+    /// lost.
+    hull: Option<(Frame, Frame)>,
+    /// Frames the unit's output still carries `TAIL` after a dropout left it (`Frame::MAX`: for good).
+    tail_left: Frame,
+    /// Frames the slot rendered since its unit's install, and since the last jump (`Frame::MAX`: none).
+    since_install: Frame,
+    since_jump: Frame,
 }
 
 /// The live gate at frame `f` heading for `live` (1 or 0), its ramp of `n` frames ending at `end` from
@@ -214,6 +245,13 @@ impl Slot {
     }
 }
 
+/// `n` zero bytes, written here (not calloc'ed): the pages are touched off the audio thread.
+fn touched(n: usize) -> Vec<u8> {
+    let mut v = Vec::with_capacity(n);
+    v.resize(n, 0);
+    v
+}
+
 /// The two slots, as the engine holds them.
 pub(crate) struct Rack {
     slots: [Slot; SLOT_COUNT],
@@ -235,8 +273,9 @@ pub(crate) struct Rack {
 }
 
 impl Rack {
-    /// Allocates: build it off the audio thread.
-    pub(crate) fn new(sample_rate: u32, max_block: usize) -> (Rack, [SlotPort; SLOT_COUNT]) {
+    /// Allocates: build it off the audio thread. `capacity`: the longest take, which bounds the latency
+    /// the damage lane follows exactly.
+    pub(crate) fn new(sample_rate: u32, max_block: usize, capacity: Frame) -> (Rack, [SlotPort; SLOT_COUNT]) {
         let line = sample_rate as usize * MAX_RECORD_DELAY_SECONDS + max_block;
         let mut ports = Vec::with_capacity(SLOT_COUNT);
         let slots = std::array::from_fn(|_| {
@@ -264,6 +303,15 @@ impl Rack {
                 wet_line: vec![0.0; line],
                 dw: 0,
                 write: 0,
+                line_damage: touched(line),
+                wet_damage: touched(line),
+                tail: 0,
+                unit_ring: touched(capacity.max(0) as usize + 1),
+                unit_write: 0,
+                hull: None,
+                tail_left: 0,
+                since_install: 0,
+                since_jump: Frame::MAX,
             }
         });
         let ports: [SlotPort; SLOT_COUNT] = match ports.try_into() {
@@ -310,6 +358,8 @@ impl Rack {
                         let unit = s.unit.insert(unit);
                         s.kind = unit.kind();
                         s.latency = unit.latency().max(0);
+                        s.tail = unit.tail().max(0);
+                        (s.since_install, s.tail_left, s.hull) = (0, 0, None);
                     }
                     SlotMsg::Remove => {
                         if s.unit.is_none() {
@@ -328,6 +378,14 @@ impl Rack {
                 Self::flush(s, self.cursor, &self.zeros);
                 Self::finish_removal(s, &mut self.protocol_errors);
             }
+        }
+    }
+
+    /// The device frame jumped before the block about to render: every line and unit holds content from
+    /// before it, which the next frames carry out of place (the module doc).
+    pub(crate) fn jump(&mut self) {
+        for s in self.slots.iter_mut() {
+            s.since_jump = 0;
         }
     }
 
@@ -480,13 +538,16 @@ impl Rack {
     /// `aligned` and `bus` are overwritten (the effects' outputs as heard and at the take's alignment,
     /// and the instruments'), `record` gets `aligned` plus the instruments' record path, `delay` frames
     /// late less each one's latency (`delay` = the input side plus the latched record latency, as the
-    /// built-in instruments' record path).
-    pub(crate) fn render(&mut self, inputs: [&[f32]; SLOT_COUNT], wet: &mut [f32], aligned: &mut [f32], bus: &mut [f32], record: &mut [f32], delay: Frame) {
+    /// built-in instruments' record path). `record_damage` is overwritten with the damage `record`
+    /// carries: `in_damage` (the input's, every slot's) through each slot's paths (the module doc).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn render(&mut self, inputs: [&[f32]; SLOT_COUNT], in_damage: &[u8], wet: &mut [f32], aligned: &mut [f32], bus: &mut [f32], record: &mut [f32], record_damage: &mut [u8], delay: Frame) {
         let m = wet.len();
         wet.fill(0.0);
         aligned.fill(0.0);
         bus.fill(0.0);
         record.fill(0.0);
+        record_damage.fill(0);
         let (frame, fade_frames, n) = (self.cursor, self.fade_frames, self.live_frames);
         self.rendered |= m > 0;
         for (s, input) in self.slots.iter_mut().zip(inputs) {
@@ -535,7 +596,51 @@ impl Rack {
             let instrument = s.instrument();
             let len = s.line.len();
             let (d, dw) = ((delay - s.latency).clamp(0, (len - 1) as Frame) as usize, s.dw);
+            let (l, ring) = (s.latency, s.unit_ring.len());
             for k in 0..m {
+                // The damage the gated input carries: the gate's own value at the frame, as `gated`.
+                let f = frame + k as Frame;
+                let open = if f < end { live_gate(live, end, from, f, n) != 0.0 } else { live };
+                let din = if open { in_damage[k] } else { 0 };
+                // An effect unit's output damage: its input's, its latency late (a hull past the ring),
+                // then what a jump displaced, then its tail's countdown.
+                let mut dout = 0;
+                if has && !instrument {
+                    let t = s.since_install;
+                    if (l as usize) < ring {
+                        s.unit_ring[s.unit_write] = din;
+                        if t >= l {
+                            let r = if s.unit_write >= l as usize { s.unit_write - l as usize } else { s.unit_write + ring - l as usize };
+                            dout = s.unit_ring[r];
+                        }
+                        s.unit_write = if s.unit_write + 1 == ring { 0 } else { s.unit_write + 1 };
+                    } else {
+                        if din != 0 {
+                            let at = t.saturating_add(l);
+                            s.hull = Some(match s.hull {
+                                Some((a, b)) if b >= t => (a, at),
+                                _ => (at, at),
+                            });
+                        }
+                        if s.hull.is_some_and(|(a, b)| a <= t && t <= b) {
+                            dout = damage::LOST;
+                        }
+                    }
+                    let j = s.since_jump;
+                    if j < l && t >= l && (s.out[k] != 0.0 || dout != 0) {
+                        dout |= damage::LOST;
+                    } else if j >= l && j - l < s.tail && t > j && s.out[k] != 0.0 {
+                        dout |= damage::TAIL;
+                    }
+                    if dout & (damage::LOST | damage::BREAK) != 0 {
+                        s.tail_left = s.tail;
+                    } else if s.tail_left > 0 {
+                        dout |= damage::TAIL;
+                        if s.tail_left != Frame::MAX {
+                            s.tail_left -= 1;
+                        }
+                    }
+                }
                 // A removal completes on the frame its fade reaches bypass, whatever the call's bounds:
                 // from there the slot is empty and passes what an empty slot does.
                 let gone = s.removing && s.fade == 0;
@@ -544,10 +649,14 @@ impl Rack {
                 let b = gated[k];
                 // Read only mid-fade, which a gone slot never is.
                 let o = if has { s.out[k] } else { b };
-                let (y, dry) = if instrument && !gone {
-                    (crossfade(0.0, o, s.fade, fade_frames), crossfade(b, 0.0, s.fade, fade_frames))
+                // Each side's damage passes where its crossfade weight is not 0.
+                let (y, dry, mut yd, mut dryd) = if instrument && !gone {
+                    let dryd = if s.fade < fade_frames { din } else { 0 };
+                    (crossfade(0.0, o, s.fade, fade_frames), crossfade(b, 0.0, s.fade, fade_frames), 0, dryd)
                 } else {
-                    (crossfade(b, o, s.fade, fade_frames), 0.0)
+                    let bypass = if s.fade < fade_frames || !has { din } else { 0 };
+                    let unit = if s.fade > 0 && has { dout } else { 0 };
+                    (crossfade(b, o, s.fade, fade_frames), 0.0, bypass | unit, 0)
                 };
                 if s.engaged && s.fade < fade_frames {
                     s.fade += 1;
@@ -556,19 +665,41 @@ impl Rack {
                 }
                 s.gain = crate::glide(s.gain, s.gain_target, self.gain_coef);
                 let (y, dry) = if s.gain == 1.0 { (y, dry) } else { ((s.gain * y as f64) as f32, (s.gain * dry as f64) as f32) };
+                if s.gain == 0.0 {
+                    (yd, dryd) = (0, 0);
+                }
                 if instrument && !gone {
                     bus[k] += y;
                     wet[k] += dry;
                     s.line[s.write] = y;
                     s.wet_line[s.write] = dry;
+                    // An instrument unit's output within its latency after a jump: notes from before it.
+                    let j = s.since_jump;
+                    s.line_damage[s.write] = if j < l && s.since_install > j && y != 0.0 { damage::LOST } else { 0 };
+                    s.wet_damage[s.write] = dryd;
                 } else {
                     wet[k] += y;
                     s.line[s.write] = 0.0;
                     s.wet_line[s.write] = y;
+                    s.line_damage[s.write] = 0;
+                    s.wet_damage[s.write] = yd;
                 }
-                record[k] += s.line[(s.write + len - d) % len];
-                aligned[k] += s.wet_line[(s.write + len - dw) % len];
+                let (rl, rw) = ((s.write + len - d) % len, (s.write + len - dw) % len);
+                let (xl, xw) = (s.line[rl], s.wet_line[rw]);
+                record[k] += xl;
+                aligned[k] += xw;
+                // A line read from before the jump plays its content out of place.
+                let (mut dl, mut dwd) = (s.line_damage[rl], s.wet_damage[rw]);
+                if s.since_jump < d as Frame && (xl != 0.0 || dl != 0) {
+                    dl |= damage::LOST;
+                }
+                if s.since_jump < dw as Frame && (xw != 0.0 || dwd != 0) {
+                    dwd |= damage::LOST;
+                }
+                record_damage[k] |= dl | dwd;
                 s.write = (s.write + 1) % len;
+                s.since_install = s.since_install.saturating_add(1);
+                s.since_jump = s.since_jump.saturating_add(1);
             }
             if s.removing && s.fade == 0 {
                 Self::finish_removal(s, &mut self.protocol_errors);
@@ -612,7 +743,7 @@ mod tests {
     /// dropped and counted rather than allocating.
     #[test]
     fn notes_past_the_event_queue_are_dropped_and_counted() {
-        let (mut rack, mut ports) = Rack::new(48000, 64);
+        let (mut rack, mut ports) = Rack::new(48000, 64, 48000);
         assert!(ports[0].install(Box::new(Sink)).is_ok());
         rack.service_idle();
         rack.select(Some(0), 0);
