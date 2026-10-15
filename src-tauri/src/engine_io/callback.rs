@@ -36,7 +36,9 @@ const SILENT_BLOCKS: u32 = 2;
 pub(crate) const LATENCY_SAMPLES: usize = 16;
 /// An input sample format the callbacks take, and its full scale (the meter's clip): either rail of the
 /// device's own format, so a sample one step under one is no clip. The input callbacks read it before
-/// the conversion, which rounds an I32's top codes to 1.0 (and the join's resampler moves a float).
+/// the conversion, which rounds an I32's top codes to 1.0 (and the join's resampler moves a float). A
+/// converter narrower than its container (24 bits in an I32, any in an F32) tops out a step under the
+/// positive rail, so it lights CLIP on the negative one alone, which every two's-complement one reaches.
 pub(crate) trait Rail: SizedSample {
     fn full_scale(self) -> bool;
 }
