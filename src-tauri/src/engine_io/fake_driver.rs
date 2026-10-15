@@ -13,10 +13,10 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use cpal::{FromSample, Sample, SizedSample};
+use cpal::{FromSample, Sample};
 use lf_engine::grid::Frame;
 
-use super::callback::{Capture, Render, Side, Tap};
+use super::callback::{Capture, Rail, Render, Side, Tap};
 use super::driver::{Driver, Endpoints, Mirror, Share, Spec, StartError, Started, Streams, Wiring};
 use super::{Core, DeviceRequest, IoCounters};
 use crate::audio_output::AudioBackend;
@@ -348,7 +348,7 @@ struct Play {
 impl Play {
     fn run<T, EI, EO>(mut self, (mut input_error, mut output_error): (EI, EO))
     where
-        T: SizedSample + FromSample<f32>,
+        T: Rail + FromSample<f32>,
         f32: FromSample<T>,
         EI: FnMut(cpal::Error),
         EO: FnMut(cpal::Error),
@@ -448,7 +448,7 @@ impl Play {
     /// One input callback of `k` frames from the device input, from `in_frame` on.
     fn capture_period<T>(&mut self, data_in: &mut [T], in_frame: &mut Frame, k: usize, in_ch: usize, latency: Option<Duration>)
     where
-        T: SizedSample + FromSample<f32>,
+        T: Rail + FromSample<f32>,
         f32: FromSample<T>,
     {
         let input = self.fake.input.lock().unwrap().clone();

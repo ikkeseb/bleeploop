@@ -542,8 +542,10 @@ impl Detector {
             self.mode = Mode::Calibrate;
             self.restart();
         }
-        // The meter's rule: a sample at full scale clipped.
-        if super::callback::full_scale(input) {
+        // The input reaches the tone converted (on WASAPI resampled), its format gone: a sample within
+        // a 16-bit step of full scale counts, the coarsest format's top code (the lamp reads each
+        // format's own rail: `callback::Rail`).
+        if input >= 1.0 - 1.0 / 32768.0 || input <= -1.0 {
             self.clipped += 1;
         }
         let x = input as f64;
