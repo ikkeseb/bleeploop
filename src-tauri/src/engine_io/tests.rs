@@ -2015,9 +2015,10 @@ fn a_span_with_an_over_budget_callback_is_logged_with_no_counter_moved() {
 }
 
 // ── D21: the races the UI's and the settings mirror's copies of the lane mix leave open ─────────────
-// Each test below reproduces a review finding; an ignored one is still red and stays ignored until its
-// part of D21 lands (`STATUS.md` § Decisions); `cargo test --no-default-features -p app d21 -- --ignored`
-// runs them.
+// Each test below reproduces a review finding. D21 (the engine's applied state as the one authority, an
+// owner decision; its text: `git log -S D21`) landed in slices, and two of these races stayed open: the
+// ignored tests are red on the current code and their reason names the defect.
+// `cargo test --no-default-features -p app d21 -- --ignored` runs them.
 
 /// A session's load bytes for the loop on lane 0, with lane 0 then cleared: the engine is all EMPTY and
 /// silent.
@@ -2205,7 +2206,7 @@ fn a_lanes_pan_reaches_the_export_and_a_load_and_a_mix_without_it_is_centred() {
 }
 
 #[test]
-#[ignore = "red: D21, an owner decision (STATUS.md)"]
+#[ignore = "red: a load the host gave up on (did not finish within 10 s) stays in the session port and plays once the callbacks resume"]
 fn d21_a_load_that_timed_out_never_applies_later() {
     let mut h = Harness::new();
     h.fake.set_input(tone);
@@ -2223,7 +2224,7 @@ fn d21_a_load_that_timed_out_never_applies_later() {
 }
 
 #[test]
-#[ignore = "red: D21, an owner decision (STATUS.md)"]
+#[ignore = "red: an unforced rate switch reads holds_audio before its stop, so a load that lands in the fade-out is dropped without LoopsDropped"]
 fn d21_a_load_that_lands_while_an_unforced_rate_switch_stops_is_not_dropped_unasked() {
     let mut h = Harness::new();
     h.fake.set_input(tone);

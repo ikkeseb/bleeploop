@@ -1,0 +1,15 @@
+{
+  "laneSeconds": 60,
+  "rows": [
+    {"rate": 48000, "bpm": 120, "bars": 1, "master": 96000, "requested": 4, "maxBars": 30, "takeBars": 4, "takeFrames": 384000},
+    {"rate": 48000, "bpm": 120, "bars": 3, "master": 288000, "requested": 8, "maxBars": 30, "takeBars": 6, "takeFrames": 576000},
+    {"rate": 48000, "bpm": 120, "bars": 4, "master": 384000, "requested": 2, "maxBars": 28, "takeBars": 2, "takeFrames": 192000},
+    {"rate": 48000, "bpm": 120, "bars": 8, "master": 768000, "requested": 32, "maxBars": 24, "takeBars": 24, "takeFrames": 2304000},
+    {"rate": 44100, "bpm": 90, "bars": 5, "master": 588000, "requested": 32, "maxBars": 20, "takeBars": 20, "takeFrames": 2352000},
+    {"rate": 96000, "bpm": 200, "bars": 7, "master": 806400, "requested": 15, "maxBars": 28, "takeBars": 14, "takeFrames": 1612800},
+    {"rate": 48000, "bpm": 40, "bars": 6, "master": 1728000, "requested": 12, "maxBars": 6, "takeBars": 6, "takeFrames": 1728000},
+    {"rate": 48000, "bpm": 300, "bars": 32, "master": 1228800, "requested": 16, "maxBars": 32, "takeBars": 16, "takeFrames": 614400},
+    {"rate": 48000, "bpm": 300, "bars": 40, "master": 1536000, "requested": 20, "maxBars": 32, "takeBars": 20, "takeFrames": 768000},
+    {"rate": 44100, "bpm": 133, "bars": 2, "master": 159158, "requested": 5, "maxBars": 32, "takeBars": 4, "takeFrames": 318316}
+  ]
+}
