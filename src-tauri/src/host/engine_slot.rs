@@ -35,7 +35,7 @@ use rtrb::{Consumer, Producer, RingBuffer};
 use super::super::state::{ParamDesc, ToneRestore};
 use super::super::tone::{Saved, ToneBinding, ToneKeeper};
 use super::{
-    load_ready_channel, owner_request_5s, OwnerRequest, ParamIds, PluginEvent, EVENT_RING_CAP,
+    load_ready_channel, owner_request_5s, OwnerRequest, ParamEvent, ParamIds, EVENT_RING_CAP,
 };
 use crate::engine_io::SlotHost;
 
@@ -143,9 +143,9 @@ pub(super) struct OwnerCtx {
     pub(super) running: Arc<AtomicBool>,
     pub(super) requests: Receiver<OwnerRequest>,
     /// The unit's end of the slot's event ring (`EngineSlotHandle::set_param` pushes params).
-    pub(super) params: Consumer<PluginEvent>,
+    pub(super) params: Consumer<ParamEvent>,
     /// The ring's producer, for a VST3 editor's `performEdit` (the handle holds the same one).
-    pub(super) params_tx: Arc<Mutex<Producer<PluginEvent>>>,
+    pub(super) params_tx: Arc<Mutex<Producer<ParamEvent>>>,
     pub(super) param_ids: ParamIds,
     pub(super) sink: EventSink,
     /// The main window's HWND (0 = none): a floating CLAP editor's transient parent.
@@ -293,7 +293,7 @@ pub(super) fn spawn(
     let index = slot.slot();
     let running = Arc::new(AtomicBool::new(true));
     let edited = Arc::new(AtomicBool::new(false));
-    let (params_tx, params) = RingBuffer::<PluginEvent>::new(EVENT_RING_CAP);
+    let (params_tx, params) = RingBuffer::<ParamEvent>::new(EVENT_RING_CAP);
     let params_tx = Arc::new(Mutex::new(params_tx));
     let (request_tx, requests) = std::sync::mpsc::channel();
     let (ready, ready_rx) = load_ready_channel();
@@ -353,7 +353,7 @@ pub(crate) struct EngineSlotHandle {
     running: Arc<AtomicBool>,
     owner: Option<JoinHandle<Result<(), String>>>,
     requests: Sender<OwnerRequest>,
-    params_tx: Arc<Mutex<Producer<PluginEvent>>>,
+    params_tx: Arc<Mutex<Producer<ParamEvent>>>,
     param_ids: ParamIds,
     /// The owner's `ToneKeeper` flag: a host parameter set is a change to save.
     edited: Arc<AtomicBool>,
@@ -389,7 +389,7 @@ impl EngineSlotHandle {
             .params_tx
             .lock()
             .map_err(|_| format!("slot {slot} event queue is unavailable (lock poisoned)"))?
-            .push(PluginEvent::Param { id, value })
+            .push(ParamEvent { id, value })
             .is_ok();
         if !pushed {
             return Err(format!("slot {slot} event queue is full; parameter {id} change was dropped"));
@@ -472,11 +472,42 @@ impl Drop for EngineSlotHandle {
     }
 }
 
+/// Test-only: an owner with no plugin behind it, whose unit is `unit` (`engine_io/plugins.rs`'s slot
+/// tests). `in_engine` runs once the unit is installed, before the owner reports the load; `leaving`
+/// once an unload has asked, before the unit leaves the engine.
+#[cfg(test)]
+pub(crate) fn stand_in(
+    slot: SlotHost,
+    unit: Box<dyn lf_engine::SlotProcessor>,
+    in_engine: impl FnOnce() + Send + 'static,
+    leaving: impl FnOnce() + Send + 'static,
+) -> Result<EngineSlotHandle, String> {
+    spawn(PluginFormat::Clap, slot, 0, Arc::new(|_| {}), None, move |ctx| {
+        let kind = unit.kind();
+        let installed = match ctx.slot.rate() {
+            Some(rate) => ctx.slot.install(unit, rate).map_err(|(_, e)| e),
+            None => Err("no audio device is open".to_string()),
+        };
+        if let Err(e) = installed {
+            let _ = ctx.ready.send(Err(e));
+            return Ok(());
+        }
+        in_engine();
+        if ctx.ready.send(Ok(Ready { name: "Stand-in".to_string(), kind, tone: None })).is_ok() {
+            while ctx.running.load(std::sync::atomic::Ordering::Acquire) {
+                let _ = ctx.requests.recv_timeout(OWNER_POLL);
+            }
+            leaving();
+        }
+        ctx.slot.remove(REMOVE_TIMEOUT).map(drop)
+    })
+}
+
 /// Test-only: the engine-mode tests run one at a time. Each builds whole engines (every page
 /// touched) and a device thread; many at once starved the (since deleted) restart tests' reader
 /// threads on a loaded machine.
 #[cfg(test)]
-pub(super) fn one_engine_test_at_a_time() -> std::sync::MutexGuard<'static, ()> {
+pub(crate) fn one_engine_test_at_a_time() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: Mutex<()> = Mutex::new(());
     LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }

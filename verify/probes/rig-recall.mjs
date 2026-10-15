@@ -9,8 +9,9 @@
  * then slot 1, without GO LIVE or an editor call and with GO LIVE unpressed, the restored instrument
  * taking the MIDI slot; an unloaded slot stays empty; a slot whose plugin is missing from the scan is
  * skipped with one `[rig-recall]` log line and no toast, and returns once the plugin is back; a load
- * that fails at recall shows one toast and is not retried; a pick made while slot 0 restores wins slot
- * 1; a launch stopped during a hanging load (a close through the close button included), or after the
+ * that fails at recall shows one toast and is not retried, unless the host failed it, not the plugin
+ * (the slot still clearing, the setup timed out, no owner thread, the command's task failed): then the
+ * next launch retries it; a pick made while slot 0 restores wins slot 1; a launch stopped during a hanging load (a close through the close button included), or after the
  * loads but inside the settle window, makes the next launch skip the recall with one log line and one
  * toast and forget the record, so the launch after that is clean; a close through the close button once
  * the loads are back keeps the rig for the next launch; a synth picked, or a slot activated, while the
@@ -32,13 +33,21 @@ const keyOf = (d) => JSON.stringify([d.format, d.path, d.id]);
 /**
  * Runs before the app on every load: this launch's substituted host, configured by the `recallProbe`
  * sessionStorage entry `launch()` writes. `loads` maps a slot to how its native load answers:
- * 'resolve' (default), 'reject', 'hang' (never answers) or 'defer' (answers on `release()`);
+ * 'resolve' (default), 'reject' (the plugin failed), a key of `hostErrors` (the host failed, in the
+ * native host's words, as Tauri rejects: a string), 'hang' (never answers) or 'defer' (answers on
+ * `release()`);
  * `holdScan` keeps the scan running until `releaseScan()`.
  */
 function installFakeHost() {
   const { scan = [], loads = {}, holdScan = false } = JSON.parse(sessionStorage.getItem('recallProbe') ?? '{}');
   const calls = { load: [], editor: [] };
   const pending = [];
+  const hostErrors = {
+    busy: (slot) => `slot ${slot} is still clearing the plugin before it`,
+    timeout: () => 'plugin setup timed out: timed out waiting on channel',
+    'no-thread': () => 'spawn owner thread: The paging file is too small for this operation to complete. (os error 1455)',
+    task: () => 'plugin_load task: task 41 panicked',
+  };
   let releaseScan = () => {};
   const scanned = holdScan ? new Promise((resolve) => (releaseScan = () => resolve(scan))) : Promise.resolve(scan);
   window.__recallProbe = { calls, release: () => pending.shift()?.(), releaseScan: () => releaseScan() };
@@ -50,6 +59,7 @@ function installFakeHost() {
       const reply = { slot, descriptor: scan.find((d) => d.path === path && d.id === id) };
       const how = loads[slot] ?? 'resolve';
       if (how === 'reject') return Promise.reject(new Error('injected load failure'));
+      if (how in hostErrors) return Promise.reject(hostErrors[how](slot));
       if (how === 'hang') return new Promise(() => {});
       if (how === 'defer') return new Promise((resolve) => pending.push(() => resolve(reply)));
       return Promise.resolve(reply);
@@ -206,7 +216,20 @@ await probe(async ({ open }) => {
   assert.deepEqual(s.loads, [loadOf(0, FX), loadOf(1, ALT)], 'the recall does not load over the pick');
   assert.deepEqual(s.slots, [keyOf(FX), keyOf(ALT)]);
 
-  // 7. A launch that dies inside a hanging load, closed through the close button: the marker stays, so
+  // 7. Loads the host failed, not the plugin (the slot still clearing, the setup timed out, no owner
+  // thread, the command's task failed): a toast each, the rig is kept, and the next launch retries it.
+  s = await settle(await launch({ scan: ALL, loads: { 0: 'busy', 1: 'timeout' } }));
+  assert.deepEqual(s.loads, [loadOf(0, FX), loadOf(1, ALT)]);
+  assert.deepEqual({ slots: s.slots, failed: s.loadFailedLogs, toasts: s.toasts }, { slots: [null, null], failed: 2, toasts: ['Plugin load failed x2'] });
+  s = await settle(await launch({ scan: ALL, loads: { 0: 'no-thread', 1: 'task' } }));
+  assert.deepEqual(s.loads, [loadOf(0, FX), loadOf(1, ALT)], 'a busy slot and a timed-out setup are retried at the next launch');
+  assert.deepEqual({ slots: s.slots, failed: s.loadFailedLogs, toasts: s.toasts }, { slots: [null, null], failed: 2, toasts: ['Plugin load failed x2'] });
+  s = await settle(await launch({ scan: ALL }));
+  assert.deepEqual(s.loads, [loadOf(0, FX), loadOf(1, ALT)], 'a missing owner thread and a failed task are retried at the next launch');
+  assert.deepEqual(s.slots, [keyOf(FX), keyOf(ALT)]);
+  expectIdle(s, 'retried after host failures');
+
+  // 8. A launch that dies inside a hanging load, closed through the close button: the marker stays, so
   // the next launch restores nothing, says so once and forgets the rig; the launch after that is clean.
   await launch({ scan: ALL, loads: { 0: 'hang' } });
   await page.waitForFunction(() => window.__recallProbe.calls.load.length === 1 && window.__recallProbe.recall.recallInFlight());
@@ -221,7 +244,7 @@ await probe(async ({ open }) => {
   assert.deepEqual({ loads: s.loads, toasts: s.toasts, recallLogs: s.recallLogs }, { loads: [], toasts: [], recallLogs: [] },
     'the launch after a skipped recall is clean');
 
-  // 8. The same when the loads finished but the launch died inside the settle window.
+  // 9. The same when the loads finished but the launch died inside the settle window.
   await pick(0, FX);
   await pick(1, SYN);
   await launch({ scan: ALL });
@@ -235,7 +258,7 @@ await probe(async ({ open }) => {
   s = await settle(await launch({ scan: ALL }));
   assert.deepEqual({ loads: s.loads, toasts: s.toasts }, { loads: [], toasts: [] });
 
-  // 9. A close through the close button once the loads are back, inside the settle window: the marker
+  // 10. A close through the close button once the loads are back, inside the settle window: the marker
   // goes with the close, and the next launch restores the rig without a toast.
   await pick(0, FX);
   await pick(1, SYN);
@@ -249,7 +272,7 @@ await probe(async ({ open }) => {
   assert.deepEqual(s.loads, [loadOf(0, FX), loadOf(1, SYN)], 'a close right after a restore keeps the rig');
   assert.deepEqual({ toasts: s.toasts, recallLogs: s.recallLogs }, { toasts: [], recallLogs: [] });
 
-  // 10. A synth picked while the scan still runs: its slot keeps the synth and the MIDI slot stays with
+  // 11. A synth picked while the scan still runs: its slot keeps the synth and the MIDI slot stays with
   // it; the other slot's instrument is restored without taking MIDI. The next launch restores only
   // that instrument, which then takes MIDI again.
   const held = await launch({ scan: ALL, holdScan: true });
@@ -265,7 +288,7 @@ await probe(async ({ open }) => {
   assert.deepEqual({ loads: s.loads, active: s.active }, { loads: [loadOf(1, SYN)], active: 1 },
     'a slot the player turned into a synth stays one at the next launch');
 
-  // 11. A slot activated while the scan still runs keeps the MIDI slot over a restored instrument.
+  // 12. A slot activated while the scan still runs keeps the MIDI slot over a restored instrument.
   const activated = await launch({ scan: ALL, holdScan: true });
   await page.getByRole('button', { name: 'Activate slot 1' }).click();
   await page.evaluate(() => window.__recallProbe.releaseScan());

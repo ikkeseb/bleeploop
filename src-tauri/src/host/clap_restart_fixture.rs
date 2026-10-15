@@ -1209,7 +1209,7 @@ fn a_unit_slices_a_long_call_places_each_event_and_allocates_nothing() {
     );
     let config = PluginAudioConfiguration { sample_rate: 48_000.0, min_frames_count: 1, max_frames_count: 64 };
     let stopped = instance.activate(|_, _| (), config).unwrap();
-    let (mut params, ring) = RingBuffer::<PluginEvent>::new(8);
+    let (mut params, ring) = RingBuffer::<ParamEvent>::new(8);
     let faults = Arc::new(AtomicU32::new(0));
     let terms = Terms { rate: 48_000, max_frames: 64, inputs: vec![], outputs: vec![2], latency: 0 };
     let unit = ClapUnit::new(stopped, &terms, ring, faults.clone(), Arc::new(AtomicBool::new(false)));
@@ -1217,7 +1217,7 @@ fn a_unit_slices_a_long_call_places_each_event_and_allocates_nothing() {
         let mut unit = unit;
         let (input, mut out) = ([0.0f32; 200], [0.0f32; 200]);
         unit.process(0, &input[..64], &[], &mut out[..64]); // starts processing: one call
-        params.push(PluginEvent::Param { id: 100, value: 0.5 }).unwrap();
+        params.push(ParamEvent { id: 100, value: 0.5 }).unwrap();
         let notes = [
             SlotEvent { offset: 10, kind: SlotEventKind::NoteOn { key: 60, velocity: 1.0 } },
             SlotEvent { offset: 150, kind: SlotEventKind::NoteOn { key: 64, velocity: 1.0 } },
@@ -1257,7 +1257,7 @@ fn bare_unit(instance: &mut PluginInstance<LfHost>, faults: &Arc<AtomicU32>) -> 
     let stopped = instance.activate(|_, _| (), config).unwrap();
     let terms = Terms { rate: 48_000, max_frames: 64, inputs, outputs, latency: 0 };
     // No params in these tests: the ring's producer is dropped at once.
-    let (_, ring) = RingBuffer::<PluginEvent>::new(8);
+    let (_, ring) = RingBuffer::<ParamEvent>::new(8);
     ClapUnit::new(stopped, &terms, ring, faults.clone(), Arc::new(AtomicBool::new(false)))
 }
 

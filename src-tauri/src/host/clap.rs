@@ -37,28 +37,28 @@ use clack_host::utils::{ClapId, Cookie};
 
 use rtrb::Consumer;
 
-use windows::core::w;
-use windows::Win32::Foundation::{HANDLE, HWND};
-use windows::Win32::System::Threading::{AvSetMmThreadCharacteristicsW, GetCurrentThreadId};
+use windows::Win32::Foundation::HWND;
+use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
 
 // ---- P9.5 control plane: main→audio event ring + main→owner state requests -----------------
 
-/// One control event crossing the main→audio rtrb ring. `Copy` POD (the param id stays a raw
-/// `u32`; the RT side validates it with `ClapId::from_raw` so an invalid id can never panic the
-/// audio thread). Notes carry the MIDI key (0..127) and CLAP 0..1 velocity.
+/// One parameter change crossing the command→audio rtrb ring: `EngineSlotHandle::set_param` and a
+/// VST3 editor's `performEdit` push it, the unit applies it at its next block start. `Copy` POD (the
+/// id stays a raw `u32`; the RT side validates it, CLAP with `ClapId::from_raw`, so an invalid id can
+/// never panic the audio thread). Notes never ride this ring: the engine hands them to `process`.
 #[derive(Clone, Copy)]
-pub enum PluginEvent {
-    NoteOn { key: u16, velocity: f64 },
-    NoteOff { key: u16 },
-    Param { id: u32, value: f64 },
+pub struct ParamEvent {
+    pub id: u32,
+    pub value: f64,
 }
 
 /// rtrb depth (events buffered between a command push and the next RT drain). Generous: at the
 /// ~10 ms WASAPI block the audio thread drains up to `MAX_EVENTS_PER_BLOCK` each block (≫ any human
-/// or single-knob input rate), so overflow is unreachable in practice — it's counted, not
-/// coalesced (`events_dropped` in the gate). True per-paramId coalescing is deferred until a
-/// param/automation UI can actually outrun this (post-P9.5); the deep ring makes it moot now.
+/// or single-knob input rate), so overflow is unreachable in practice; a set that finds the ring full
+/// is refused (`EngineSlotHandle::set_param` answers an error), nothing is coalesced. True
+/// per-paramId coalescing is deferred until a param/automation UI can actually outrun this (post-P9.5);
+/// the deep ring makes it moot now.
 const EVENT_RING_CAP: usize = 1024;
 /// Hard cap on events drained per block. Bounds the pre-grown `EventBuffer` so its push path stays
 /// alloc-free (never exceed the reserved capacity — invariant #5). 256 @ 10 ms = 25 600 ev/s.
@@ -234,8 +234,9 @@ fn take_uncancelled(req: OwnerRequest, slot: u8) -> Option<OwnerRequest> {
 }
 
 // ── P10.0 plugin editor: a plugin-owned FLOATING window first; else EMBEDDED into a host-owned
-//    top-level window the owner thread pumps. The host window is OUR OWN top-level (owned by the
-//    main window for z-order), NOT reparented into the WebView2 surface — so no airspace z-fight.
+//    top-level window the owner thread pumps. The host window is OUR OWN owner-less top-level
+//    (`editor_window::create_host_window`), NOT reparented into the WebView2 surface — so no airspace
+//    z-fight.
 
 /// What's currently open for the slot's editor (owner-thread-local; never crosses threads).
 enum EditorSlot {
@@ -251,7 +252,8 @@ enum EditorSlot {
 /// P10.0 owner-thread: open the slot's plugin editor. Tries a plugin-owned FLOATING window first
 /// (no host window / pump needed — the plugin self-manages it); if the plugin doesn't support a
 /// WIN32 floating GUI (e.g. JUCE plugins like Surge XT), falls back to EMBEDDED into a host-owned
-/// top-level window. `host_hwnd` (0 = unknown) is the main window, used as transient parent / owner.
+/// top-level window. `host_hwnd` (0 = unknown) is the main window: a floating editor's transient
+/// parent (the hosted path's window is owner-less).
 fn editor_open(
     instance: &mut PluginInstance<LfHost>,
     host_hwnd: usize,
@@ -309,12 +311,7 @@ fn editor_open(
         width: 900,
         height: 600,
     });
-    let owner = if host_hwnd != 0 {
-        Some(HWND(host_hwnd as *mut core::ffi::c_void))
-    } else {
-        None
-    };
-    let host_win = match create_host_window(size.width, size.height, owner) {
+    let host_win = match create_host_window(size.width, size.height) {
         Ok(w) => w,
         Err(e) => {
             let _ = gui.hide(&mut handle);
@@ -384,7 +381,6 @@ fn editor_destroy_gui(instance: &mut PluginInstance<LfHost>) {
 #[derive(Default)]
 struct EditorClosed {
     fired: AtomicBool,
-    was_destroyed: AtomicBool,
 }
 
 struct LfShared {
@@ -546,7 +542,7 @@ mod resize_tests {
         };
         assert!(shared.request_resize(size(640, 480)).is_err(), "no hosted editor → refused");
 
-        let win = create_host_window(400, 300, None).expect("host window");
+        let win = create_host_window(400, 300).expect("host window");
         hosted_hwnd.store(win.hwnd.0 as isize, Release);
         assert!(shared.request_resize(size(640, 480)).is_ok());
         assert_eq!(client_size(win.hwnd), (640, 480));
@@ -564,7 +560,7 @@ mod resize_tests {
     fn a_request_from_another_thread_never_waits_for_the_owner() {
         let hosted_hwnd = Arc::new(AtomicIsize::new(0));
         let shared = Arc::new(shared(&hosted_hwnd));
-        let win = create_host_window(400, 300, None).expect("host window");
+        let win = create_host_window(400, 300).expect("host window");
         hosted_hwnd.store(win.hwnd.0 as isize, Release);
         let ask = |width, height| {
             let shared = shared.clone();
@@ -641,8 +637,7 @@ impl HostGuiImpl for LfShared {
     fn request_hide(&self) -> Result<(), HostError> {
         Ok(())
     }
-    fn closed(&self, was_destroyed: bool) {
-        self.editor_closed.was_destroyed.store(was_destroyed, Relaxed);
+    fn closed(&self, _was_destroyed: bool) {
         self.editor_closed.fired.store(true, Release);
     }
 }
@@ -664,15 +659,6 @@ impl HostHandlers for LfHost {
             builder.register::<HostState>();
         }
     }
-}
-
-// ---- MMCSS promotion (windows 0.61.3) -------------------------------------------------------
-
-/// Promote the CALLING thread to the MMCSS "Pro Audio" class (the DEV spike's device callbacks).
-fn promote_pro_audio() -> Option<HANDLE> {
-    let mut task_index: u32 = 0;
-    // SAFETY: FFI into avrt.dll; `w!` is a 'static NUL-terminated wide literal.
-    unsafe { AvSetMmThreadCharacteristicsW(w!("Pro Audio"), &mut task_index).ok() }
 }
 
 /// The owner → load command channel of an engine slot's load (`engine_slot::load`). Rendezvous
@@ -791,7 +777,7 @@ fn sum_to_mono(out_bufs: &[Vec<f32>], mono: &mut [f32], block: usize, chans: usi
 
 /// P10.1 — native VST3 host (second format): the COM host objects, module loader, activation,
 /// editor and parameter listing its engine unit (`vst3_engine.rs`) runs on, sharing this file's
-/// `PluginEvent` ring and request types. Lives in a child module so its `vst3::Steinberg` imports
+/// `ParamEvent` ring and request types. Lives in a child module so its `vst3::Steinberg` imports
 /// don't collide with clap's clack imports (both define `NoteOnEvent`/`Event`). VST3 "COM" is
 /// Steinberg's FUnknown ABI (no apartments) — `ComPtr<I>` is `Send` for VST3 interfaces (com-scrape
 /// emits explicit `unsafe impl Send`), so the processor handle crosses owner→RT directly, no wrapper.
@@ -801,10 +787,8 @@ mod vst3_host;
 
 // Engine mode (briefing: `src-tauri/AGENTS.md` § Plugin hosting): the same plugins as units inside the native
 // engine's callback, each with its own owner thread (`engine_io/plugins.rs` routes to them).
-#[allow(dead_code)]
 #[path = "engine_slot.rs"]
 pub(crate) mod engine_slot;
-#[allow(dead_code)]
 #[path = "clap_engine.rs"]
 mod clap_engine;
 #[path = "vst2_engine.rs"]

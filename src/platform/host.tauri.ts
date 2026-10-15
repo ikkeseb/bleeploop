@@ -49,8 +49,10 @@ function subscribe<T>(event: string, handler: (payload: T) => void): () => void 
 
 /**
  * Native CLAP, VST3 and VST2 host over Tauri IPC. Each method maps to a `plugin_*` command in Rust.
- * `window`/`state` command args are injected by Tauri — JS passes only the domain args. Audio never
- * crosses as PCM here: a plugin plays inside the engine's callback.
+ * `window`/`app` command args are injected by Tauri — JS passes only the domain args. Audio never
+ * crosses as PCM here: a plugin plays inside the engine's callback. Every request that changes a slot
+ * (load, unload, a parameter, the editor) carries this document's `frontendEpoch` (`host_init`), so the
+ * host refuses one this page sent before a reload replaced it (`src-tauri/src/engine_io/plugins.rs`).
  */
 let frontendEpoch = 0;
 
@@ -76,19 +78,19 @@ const tauriPluginHost: PluginHost = {
     return invoke<PluginInfo>('plugin_load', { slot, path, id, frontendEpoch, toneToken: toneToken ?? null });
   },
   async unloadPlugin(slot) {
-    await invoke('plugin_unload', { slot });
+    await invoke('plugin_unload', { slot, frontendEpoch });
   },
   listLoaded() {
     return invoke<PluginInfo[]>('plugin_list_loaded');
   },
   async openEditor(slot, mode) {
-    await invoke('plugin_open_editor', { slot, mode });
+    await invoke('plugin_open_editor', { slot, mode, frontendEpoch });
   },
   async closeEditor(slot) {
-    await invoke('plugin_close_editor', { slot });
+    await invoke('plugin_close_editor', { slot, frontendEpoch });
   },
   async setParameter(slot, paramId, value) {
-    await invoke('plugin_set_param', { slot, paramId, value });
+    await invoke('plugin_set_param', { slot, paramId, value, frontendEpoch });
   },
   listParams(slot) {
     return invoke<PluginParamDesc[]>('plugin_list_params', { slot });

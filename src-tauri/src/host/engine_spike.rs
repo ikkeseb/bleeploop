@@ -31,6 +31,12 @@ use cpal::{FromSample, SizedSample};
 
 use crate::chirp_lag::{chirp, find_arrivals, median, slope, spread, CHIRP_AMP, CHIRP_LEN};
 
+use std::time::Duration;
+
+use windows::core::w;
+use windows::Win32::Foundation::HANDLE;
+use windows::Win32::System::Threading::AvSetMmThreadCharacteristicsW;
+
 /// The device's own rate, read once before any stream opens. The spike never changes it: the
 /// device stays at whatever rate its owner set.
 static RATE_HZ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
@@ -644,7 +650,7 @@ where
         let s = &mut *guard;
         if !s.mmcss {
             s.mmcss = true;
-            let _ = super::super::promote_pro_audio();
+            let _ = promote_pro_audio();
         }
         let settled = entry.duration_since(started).as_secs_f64() >= SETTLE_SECONDS;
         let _alloc_guard = settled.then(crate::host::rt_alloc::guard);
@@ -696,7 +702,7 @@ where
         let e = &mut *guard;
         if !e.mmcss_out {
             e.mmcss_out = true;
-            let _ = super::super::promote_pro_audio();
+            let _ = promote_pro_audio();
         }
         let settled = e.settled(entry);
         let _alloc_guard = settled.then(crate::host::rt_alloc::guard);
@@ -1257,4 +1263,47 @@ fn report_wasapi(a: &Args, e: &Engine, s: &InSide, counters: &Counters, in_name:
         println!("[engine-spike] INFO W2 RT={:.1}ms = inputAge {in_age_ms:.1} + ring {ring_ms:.1} + outputLatency {out_lat_ms:.1} (sum {parts:.1}), remainder {explained}", ms(rt));
     }
     Ok(())
+}
+
+/// Deactivate + terminate the component, release every module COM object in order, then
+/// drop the module LAST (after all vtbl-bearing objects are dropped, so we never unmap live code).
+/// Returns the ms spent in `setActive(0)`, `terminate`, the COM releases and the module drop.
+/// ASSUMES the plugin tears down its own threads/timers in `terminate()` (Surge does). A
+/// plugin that leaves a worker thread or OS timer running past `terminate` could fire into
+/// unmapped code after FreeLibrary — if a future plugin proves flaky here, skip/defer the
+/// FreeLibrary (many hosts never unload) rather than risk the crash. (P10.1 review 🟡-3.)
+fn teardown(
+    component: ComPtr<IComponent>,
+    host_ctx: ComPtr<FUnknown>,
+    hostapp: ComWrapper<LfHostApp>,
+    factory: ComPtr<IPluginFactory>,
+    module: Vst3Module,
+) -> [u128; 4] {
+    // SAFETY: the caller has stopped processing; deactivate + terminate on the owner thread.
+    let t = Instant::now();
+    unsafe {
+        let _ = component.setActive(0);
+    }
+    let deactivate_ms = t.elapsed().as_millis();
+    let t = Instant::now();
+    unsafe {
+        let _ = component.terminate();
+    }
+    let terminate_ms = t.elapsed().as_millis();
+    let t = Instant::now();
+    drop(component);
+    drop(host_ctx);
+    drop(hostapp);
+    drop(factory);
+    let release_ms = t.elapsed().as_millis();
+    let t = Instant::now();
+    drop(module);
+    [deactivate_ms, terminate_ms, release_ms, t.elapsed().as_millis()]
+}
+
+/// Promote the CALLING thread to the MMCSS "Pro Audio" class (the spike's device callbacks).
+fn promote_pro_audio() -> Option<HANDLE> {
+    let mut task_index: u32 = 0;
+    // SAFETY: FFI into avrt.dll; `w!` is a 'static NUL-terminated wide literal.
+    unsafe { AvSetMmThreadCharacteristicsW(w!("Pro Audio"), &mut task_index).ok() }
 }

@@ -98,7 +98,7 @@ impl Drop for HostWindow {
 /// Create the host-owned editor window sized so its CLIENT area is `width`×`height` (the plugin's
 /// reported size).
 ///
-/// `owner` (the main window, if known) is DELIBERATELY NOT passed as the Win32 owner anymore. This
+/// The window has DELIBERATELY NO Win32 owner (the main window was one once). This
 /// window is created + pumped on the per-slot OWNER thread, but the main app window lives on the UI
 /// (WebView2) thread — making it a cross-thread OWNED window. Hiding/destroying a cross-thread-owned
 /// top-level window forces Windows to re-home activation to the owner via SYNCHRONOUS cross-thread
@@ -106,14 +106,9 @@ impl Drop for HostWindow {
 /// the instant the editor closes, a JUCE plugin's teardown traffic deadlocked the owner↔UI pair and
 /// froze the renderer (the close→reopen→disarm hang). Creating it OWNER-LESS removes that edge; the
 /// only cost is the editor no longer pins above the app (it can fall behind). `drain_after_editor_
-/// teardown` is the paired belt-and-suspenders. The param is kept for API stability / future pinning
-/// via a non-owning SetWindowPos.
-pub(super) fn create_host_window(
-    width: u32,
-    height: u32,
-    owner: Option<HWND>,
-) -> Result<HostWindow, String> {
-    let _ = owner; // intentionally not the Win32 owner — see the doc note above
+/// teardown` is the paired belt-and-suspenders. Pinning it above the app again would take a
+/// non-owning `SetWindowPos`.
+pub(super) fn create_host_window(width: u32, height: u32) -> Result<HostWindow, String> {
     register_host_window_class();
     let style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU; // titlebar + close box, fixed size
     let ex = WINDOW_EX_STYLE(0);
@@ -316,7 +311,7 @@ mod tests {
     /// resize, whatever the non-client frame measures at this DPI.
     #[test]
     fn host_window_client_area_is_exact_at_creation_and_after_resize() {
-        let win = create_host_window(640, 480, None).expect("create host window");
+        let win = create_host_window(640, 480).expect("create host window");
         assert_eq!(client_size(win.hwnd), (640, 480), "client area at creation");
         assert_eq!(set_client_size(win.hwnd, 800, 600), Some((800, 600)), "resize");
         assert_eq!(client_size(win.hwnd), (800, 600), "client area after resize");
@@ -329,7 +324,7 @@ mod tests {
     /// panic there would cross a plugin's callback): Windows clamps it or refuses it.
     #[test]
     fn a_size_past_any_window_does_not_overflow_the_frame_arithmetic() {
-        let win = create_host_window(640, 480, None).expect("create host window");
+        let win = create_host_window(640, 480).expect("create host window");
         for (width, height) in [(u32::MAX, 480), (640, u32::MAX), (i32::MAX as u32, i32::MAX as u32)] {
             let got = set_client_size(win.hwnd, width, height);
             assert!(got.is_none_or(|(w, h)| w < 1 << 20 && h < 1 << 20), "{width}×{height} became {got:?}");
@@ -353,7 +348,7 @@ mod tests {
 
     /// One run of the test above; false when the post came past mid-window.
     fn teardown_drain_attempt() -> bool {
-        let win = create_host_window(200, 100, None).expect("create host window");
+        let win = create_host_window(200, 100).expect("create host window");
         let hwnd = win.hwnd.0 as isize;
         let poster = std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(40));
@@ -378,7 +373,7 @@ mod tests {
     /// A dead handle fails cleanly instead of resizing something else or panicking.
     #[test]
     fn set_client_size_on_a_destroyed_window_is_false() {
-        let win = create_host_window(200, 100, None).expect("create host window");
+        let win = create_host_window(200, 100).expect("create host window");
         let hwnd = win.hwnd;
         drop(win);
         assert_eq!(set_client_size(hwnd, 400, 300), None);

@@ -778,7 +778,7 @@ fn the_editor_opens_resizes_on_request_closes_and_reopens() {
 
     let bare = Probe::new();
     let mut plugin = plugin_here(&slot, instrument(bare));
-    assert_eq!(plugin.embed_editor(0).unwrap_err(), "plugin has no editor");
+    assert_eq!(plugin.embed_editor().unwrap_err(), "plugin has no editor");
     assert_eq!(bare.opcodes(), [(EFF_OPEN, 0), (EFF_GET_PLUG_CATEGORY, 0)], "a plugin without the flag is not asked");
     drop(plugin);
 
@@ -786,12 +786,12 @@ fn the_editor_opens_resizes_on_request_closes_and_reopens() {
     *probe.rect_open.lock().unwrap() = (640, 480);
     *probe.size_in_open.lock().unwrap() = Some((500, 350));
     let mut plugin = plugin_here(&slot, Shape { flags: SYNTH | EFF_FLAGS_HAS_EDITOR, ..instrument(probe) });
-    let hwnd = plugin.embed_editor(0).expect("the editor opens");
+    let hwnd = plugin.embed_editor().expect("the editor opens");
     assert_eq!(probe.editor_parent.load(Relaxed), hwnd.0 as isize, "the plugin got the host window");
     assert_eq!(*probe.size_answers.lock().unwrap(), [1], "a size asked from inside effEditOpen is granted there");
     assert_eq!(client_size(hwnd), (640, 480), "then the size the plugin reports once it is open: not 400×300");
     assert_eq!(probe.opcodes()[2..], [(EFF_EDIT_GET_RECT, 0), (EFF_EDIT_OPEN, 0), (EFF_EDIT_GET_RECT, 0)]);
-    assert_eq!(plugin.embed_editor(0).map(|again| again == hwnd), Ok(true), "an open editor is not opened twice");
+    assert_eq!(plugin.embed_editor().map(|again| again == hwnd), Ok(true), "an open editor is not opened twice");
     assert_eq!(probe.edit_opens.load(Relaxed), 1);
 
     let ask = |width: i32, height: isize| plugin_calls_host(probe, AUDIO_MASTER_SIZE_WINDOW, width, height, 0.0);
@@ -834,12 +834,12 @@ fn the_editor_opens_resizes_on_request_closes_and_reopens() {
     assert_eq!(ask(640, 480), 0, "with no editor open there is no window to size");
     assert_eq!(plugin.ctx.take_resize(), Some((640, 480)));
 
-    let again = plugin.embed_editor(0).expect("it opens again");
+    let again = plugin.embed_editor().expect("it opens again");
     assert_eq!((probe.edit_opens.load(Relaxed), client_size(again)), (2, (640, 480)));
     assert!(plugin.close_editor());
 
     probe.refuse_open.store(true, Relaxed);
-    let err = plugin.embed_editor(0).unwrap_err();
+    let err = plugin.embed_editor().unwrap_err();
     assert!(err.contains("refused"), "{err}");
     assert!(plugin.editor.is_none());
     assert_eq!((probe.edit_opens.load(Relaxed), probe.edit_closes.load(Relaxed)), (2, 3), "told to close what it refused");
@@ -847,7 +847,7 @@ fn the_editor_opens_resizes_on_request_closes_and_reopens() {
     probe.refuse_open.store(false, Relaxed);
     probe.no_rect.store(true, Relaxed);
     *probe.size_in_open.lock().unwrap() = None;
-    let provisional = plugin.embed_editor(0).expect("a plugin that reports no size still opens");
+    let provisional = plugin.embed_editor().expect("a plugin that reports no size still opens");
     assert_eq!(client_size(provisional), (900, 600));
 
     drop(plugin);
@@ -858,10 +858,10 @@ fn the_editor_opens_resizes_on_request_closes_and_reopens() {
 
 /// A resumed plugin on this thread and its unit with a block of `max_frames`, the ring's producer
 /// and the fault latch.
-fn unit_here(plugin: &mut Vst2Plugin, slot: &SlotHost, max_frames: usize) -> (Box<Vst2Unit>, Producer<PluginEvent>, Arc<AtomicU32>) {
+fn unit_here(plugin: &mut Vst2Plugin, slot: &SlotHost, max_frames: usize) -> (Box<Vst2Unit>, Producer<ParamEvent>, Arc<AtomicU32>) {
     plugin.configure(slot).unwrap();
     let info = plugin.resume().unwrap();
-    let (params, ring) = RingBuffer::<PluginEvent>::new(8);
+    let (params, ring) = RingBuffer::<ParamEvent>::new(8);
     let faults = Arc::new(AtomicU32::new(0));
     // SAFETY: the open effect `info` was validated from; the plugin outlives the unit in each test.
     let unit = unsafe { Vst2Unit::new(plugin.effect.raw(), plugin.ctx.clone(), &info, max_frames, ring, faults.clone()) };
@@ -888,7 +888,7 @@ fn a_unit_slices_a_long_call_places_each_note_and_allocates_nothing() {
         let mut unit = unit;
         let (input, mut out) = ([0.0f32; 200], [0.0f32; 200]);
         unit.process(0, &input[..64], &[], &mut out[..64]);
-        params.push(PluginEvent::Param { id: 1, value: 0.5 }).unwrap();
+        params.push(ParamEvent { id: 1, value: 0.5 }).unwrap();
         let notes = [
             SlotEvent { offset: 10, kind: SlotEventKind::NoteOn { key: 60, velocity: 1.0 } },
             SlotEvent { offset: 64, kind: SlotEventKind::NoteOff { key: 60 } },
@@ -967,7 +967,7 @@ fn an_io_change_mid_call_stops_every_later_plugin_call_until_the_rows_are_rebuil
         unit.process(0, &input, &note, &mut out);
         assert!(out[..64].iter().all(|&x| x == 0.5), "the slice the plugin rendered is kept");
         assert!(out[64..].iter().all(|&x| x == 0.0), "the rest of the call is silent");
-        params.push(PluginEvent::Param { id: 0, value: 0.5 }).unwrap();
+        params.push(ParamEvent { id: 0, value: 0.5 }).unwrap();
         out.fill(1.0);
         unit.process(200, &input, &note, &mut out);
         assert!(out.iter().all(|&x| x == 0.0), "and so is every later call");
@@ -997,8 +997,8 @@ fn an_io_change_mid_call_stops_every_later_plugin_call_until_the_rows_are_rebuil
     .unwrap();
     assert_eq!((probe.distinct_outputs.load(Relaxed), probe.rows_missing.load(Relaxed)), (4, false));
     assert_eq!(probe.sets.load(Relaxed), 1, "the edit that waited in the ring arrives now");
-    params.push(PluginEvent::Param { id: 3, value: 0.5 }).unwrap();
-    params.push(PluginEvent::Param { id: 0, value: f64::NAN }).unwrap();
+    params.push(ParamEvent { id: 3, value: 0.5 }).unwrap();
+    params.push(ParamEvent { id: 0, value: f64::NAN }).unwrap();
     let unit = std::thread::spawn(move || {
         let mut unit = unit;
         let (input, mut out) = ([0.0f32; 64], [0.0f32; 64]);
@@ -1254,7 +1254,7 @@ fn drive(device: &TestDevice, slot: usize, shape: Shape, tone: Option<ToneBindin
     let seen = Seen::default();
     let sink_seen = seen.clone();
     let running = Arc::new(AtomicBool::new(true));
-    let (params_tx, params) = RingBuffer::<PluginEvent>::new(8);
+    let (params_tx, params) = RingBuffer::<ParamEvent>::new(8);
     let (requests, owner_requests) = channel();
     let (ready, loaded) = super::super::load_ready_channel();
     let ctx = OwnerCtx {

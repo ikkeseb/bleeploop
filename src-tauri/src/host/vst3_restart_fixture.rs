@@ -7,6 +7,7 @@ use super::*;
 use rtrb::RingBuffer;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize};
 use std::thread::ThreadId;
+use std::time::Duration;
 use vst3::Steinberg::Vst::{IoMode, MediaType, RoutingInfo, SpeakerArrangement};
 use vst3::Steinberg::{kNotImplemented, IBStream, TBool};
 
@@ -1185,7 +1186,7 @@ fn a_unit_whose_plugin_refuses_to_start_latches_the_fault_and_stays_silent() {
     let component = fixture.to_com_ptr::<IComponent>().unwrap();
     let processor = component.cast::<IAudioProcessor>().unwrap();
     let activation = unsafe { activate_component(&component, &processor, 48_000.0, 64) }.unwrap();
-    let (_params, ring) = RingBuffer::<PluginEvent>::new(8);
+    let (_params, ring) = RingBuffer::<ParamEvent>::new(8);
     let faults = Arc::new(AtomicU32::new(0));
     let unit = Vst3Unit::new(processor, activation, 64, ring, faults.clone()).unwrap();
     let unit = std::thread::spawn(move || {
@@ -1226,7 +1227,7 @@ fn a_unit_whose_plugin_does_not_implement_set_processing_plays() {
     let component = fixture.to_com_ptr::<IComponent>().unwrap();
     let processor = component.cast::<IAudioProcessor>().unwrap();
     let activation = unsafe { activate_component(&component, &processor, 48_000.0, 64) }.unwrap();
-    let (_params, ring) = RingBuffer::<PluginEvent>::new(8);
+    let (_params, ring) = RingBuffer::<ParamEvent>::new(8);
     let faults = Arc::new(AtomicU32::new(0));
     let unit = Vst3Unit::new(processor, activation, 64, ring, faults.clone()).unwrap();
     let unit = std::thread::spawn(move || {
@@ -1265,14 +1266,14 @@ fn a_unit_slices_a_long_call_places_each_event_and_allocates_nothing() {
     let component = fixture.to_com_ptr::<IComponent>().unwrap();
     let processor = component.cast::<IAudioProcessor>().unwrap();
     let activation = unsafe { activate_component(&component, &processor, 48_000.0, 64) }.unwrap();
-    let (mut params, ring) = RingBuffer::<PluginEvent>::new(8);
+    let (mut params, ring) = RingBuffer::<ParamEvent>::new(8);
     let faults = Arc::new(AtomicU32::new(0));
     let unit = Vst3Unit::new(processor, activation, 64, ring, faults.clone()).unwrap();
     let (unit, runs) = std::thread::spawn(move || {
         let mut unit = unit;
         let (input, mut out) = ([0.0f32; 200], [0.0f32; 200]);
         unit.process(0, &input[..64], &[], &mut out[..64]); // starts processing: one call
-        params.push(PluginEvent::Param { id: 100, value: 0.5 }).unwrap();
+        params.push(ParamEvent { id: 100, value: 0.5 }).unwrap();
         let notes = [
             SlotEvent { offset: 10, kind: SlotEventKind::NoteOn { key: 60, velocity: 1.0 } },
             SlotEvent { offset: 150, kind: SlotEventKind::NoteOn { key: 64, velocity: 1.0 } },
