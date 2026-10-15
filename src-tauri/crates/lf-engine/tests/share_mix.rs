@@ -91,10 +91,12 @@ fn sha256(channels: &[&[f32]]) -> String {
     hash.finalize().iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// The device output before the Share mix existed: the jam's at 128 frames, hashed on its parent commit
-/// (Windows: the synths, the click and the limiter call the platform's maths library, so Linux renders
-/// other last bits). The same bits are the same timing: the play path's latency did not move.
-const DEVICE_BEFORE: &str = "221f8992bf5fc5bae9ef8c7598b51b300ebb1b4a08522743bfd372a79b111720";
+/// The device output before the Share mix existed: the jam's at 128 frames, hashed on the engine the
+/// Share mix merged into (dev at 3fdca97f, after the lane delay's feedback moved to the frame it is read;
+/// the jam's lane 1 runs that delay). Windows: the synths, the click and the limiter call the platform's
+/// maths library, so Linux renders other last bits. The same bits are the same timing: the play path's
+/// latency did not move. A later change to what the jam renders re-pins this, hashed on its own parent.
+const DEVICE_BEFORE: &str = "5399c2e097eb89dee38746ab5274ca407bd02423a1582bb4cf8fca118100fa5a";
 
 #[test]
 #[cfg_attr(not(windows), ignore = "the pinned hash is the Windows render's")]
