@@ -13,7 +13,10 @@
  *   it; a wide range offers the sizes inside it;
  * - a switch the host refuses: a toast, the device reopens and the pick stays the driver that runs;
  * - a switch to a driver at another rate while the engine holds loops, confirmed, whose recovery save
- *   fails: the driver that ran comes back before the device reopens, so it runs there, not silent.
+ *   fails: the driver that ran comes back before the device reopens, so it runs there, not silent;
+ * - a saved driver no longer installed (the host takes the automatic choice): one toast names it and the
+ *   driver that runs, the pick stays saved and the Driver row marks it not installed; an installed pick,
+ *   Automatic, or a probe that found no driver says nothing of the kind.
  *
  * The native half (the owner-run switch, the range clamp, a stepped driver's fallback) is `cargo test`
  * (`asio_startup.rs`, `engine_io/transition.rs`, `engine_io/tests.rs`); this probe sees neither a driver
@@ -87,12 +90,17 @@ await probe(async ({ open }) => {
     const { asioBlock } = await import('/src/ui/state/audio-settings.ts');
     const host = platform.pluginHost;
     const engine = platform.engine;
-    const asio = { cached: null, refuseNext: false };
+    const asio = { cached: null, refuseNext: false, failNext: false };
     const calls = (window.__asioCalls = []);
     const report = () => ({ status: asio.cached ? 'ready' : 'failed', detail: asio.cached ? '' : 'no usable ASIO driver found' });
     const pick = (driver) => (driver && drivers[driver] ? driver : Object.keys(drivers)[0]);
     host.asioStatus = async () => report();
-    host.asioProbe = async (explicit, driver) => { calls.push(`probe:${driver}`); asio.cached = pick(driver); return report(); };
+    host.asioProbe = async (explicit, driver) => {
+      calls.push(`probe:${driver}`);
+      asio.cached = asio.failNext ? null : pick(driver);
+      asio.failNext = false;
+      return report();
+    };
     host.asioDrivers = async () => Object.keys(drivers);
     host.asioDeviceInfo = async () => {
       if (!asio.cached) return null;
@@ -254,4 +262,49 @@ await probe(async ({ open }) => {
 
   // 7. The device runs: the slot note is the plugin scan's again.
   await page.waitForFunction(() => !document.querySelector('.slot__plugin-note')?.textContent?.includes('No audio device open'));
+
+  // 8. A boot probe with the saved driver gone (uninstalled since it was picked): the scripted host, as
+  // the native one, takes the first driver; the player hears it from a toast, not only from the log.
+  const bootProbe = (asioDriver, fail = false) =>
+    page.evaluate(
+      async ({ asioDriver, fail }) => {
+        const settings = await import('/src/ui/state/audio-devices.ts');
+        const saved = JSON.parse(localStorage.getItem('lf.audioDevices'));
+        localStorage.setItem('lf.audioDevices', JSON.stringify({ ...saved, asioDriver }));
+        for (const t of window.__lf.notify.toasts()) window.__lf.notify.dismissToast(t.id);
+        window.__asioFake.failNext = fail;
+        const report = await settings.probeAsio(false);
+        return {
+          status: report.status,
+          toasts: window.__lf.notify.toasts().map((t) => ({ message: t.message, detail: t.detail ?? '', count: t.count })),
+        };
+      },
+      { asioDriver, fail },
+    );
+  const missing = (r) => r.toasts.filter((t) => /not installed/.test(t.message));
+  const installed = await bootProbe('Yamaha Steinberg USB ASIO');
+  console.log('installed pick', JSON.stringify(installed));
+  assert.equal(installed.status, 'ready');
+  assert.deepEqual(missing(installed), [], 'an installed pick says nothing');
+  const automatic = await bootProbe('');
+  assert.deepEqual(missing(automatic), [], 'Automatic says nothing');
+  const failedGone = await bootProbe('Old Interface ASIO', true);
+  console.log('gone, no driver', JSON.stringify(failedGone));
+  assert.equal(failedGone.status, 'failed');
+  assert.deepEqual(missing(failedGone), [], 'nothing replaced a pick when no driver started');
+  const gone = await bootProbe('Old Interface ASIO');
+  console.log('gone', JSON.stringify(gone));
+  assert.equal(gone.status, 'ready');
+  assert.deepEqual(missing(gone), [
+    {
+      message: 'ASIO driver Old Interface ASIO is not installed',
+      detail: 'Playing through Focusrite USB ASIO instead. Pick a driver in Audio Settings.',
+      count: 1,
+    },
+  ]);
+  const goneRow = await readSettings();
+  console.log('gone row', JSON.stringify(goneRow.driver));
+  assert.equal(goneRow.saved.asioDriver, 'Old Interface ASIO', 'the pick stays saved');
+  assert.equal(goneRow.driver.value, 'Old Interface ASIO');
+  assert.ok(goneRow.driver.options.includes('Old Interface ASIO (not installed)'), 'the Driver row says so');
 });

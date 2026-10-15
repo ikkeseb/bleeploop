@@ -131,6 +131,10 @@ it.
   device comes back (or WASAPI takes over) and the loops play on (proven only on the fake driver). If
   the WASAPI default runs at another rate than ASIO, the loops come back from recovery after a
   relaunch. With no device running, the command bar's lamp reads amber: clear enough?
+- A saved ASIO driver uninstalled since it was picked: the app starts on the automatic driver, a
+  toast names both, and Audio Settings keeps the pick, marked not installed (machine: the
+  `asio-driver` probe). On a rig whose old interface's driver is gone, does the toast show at launch
+  and say what to pick? (A driver still installed whose device is gone fails to start instead.)
 - A headset plugged in mid-jam on WASAPI with System default picked: the sound moves to it by itself
   (Windows moves the stream; at the same rate nothing reopens and a take in flight keeps recording, a
   mono mic too) and Audio Settings names it (proven only on the fake driver; whether the input follows

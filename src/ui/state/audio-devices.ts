@@ -7,7 +7,7 @@ import {
   type AudioOutputDevice,
 } from '../../platform';
 import { readAudioDeviceSettings, writeAudioDeviceSettings, type BufferFrames, type SampleRate } from './audio-settings';
-import { notifyError } from '../../notify';
+import { notifyError, notifyInfo } from '../../notify';
 
 /**
  * OWNS: the process-wide native audio configuration the Audio Settings panel edits — the enumerated
@@ -175,10 +175,13 @@ async function applyAsioReport(report: AsioStatusReport): Promise<void> {
  */
 export async function probeAsio(explicit: boolean): Promise<AsioStatusReport> {
   let report = asioStatus();
+  let pick = '';
   try {
     await configure(async () => {
       setAsioStatus({ status: 'probing', detail: '' });
-      report = await platform.pluginHost.asioProbe(explicit, readAudioDeviceSettings().asioDriver);
+      // Read in the queue: a driver switch queued ahead of this probe may change it.
+      pick = readAudioDeviceSettings().asioDriver;
+      report = await platform.pluginHost.asioProbe(explicit, pick);
       await applyAsioReport(report);
     });
   } catch (e) {
@@ -187,7 +190,22 @@ export async function probeAsio(explicit: boolean): Promise<AsioStatusReport> {
     report = { status: 'failed', detail: e instanceof Error ? e.message : String(e) };
     setAsioStatus(report);
   }
+  if (report.status === 'ready') await noteMissingDriver(pick);
   return report;
+}
+
+/**
+ * A saved driver the registry no longer lists (uninstalled since it was picked): the host took the
+ * automatic choice (`src-tauri/src/audio_output.rs`), which may be another interface's driver, so say
+ * which one runs. The pick stays saved; picking a driver in Audio Settings replaces it.
+ */
+async function noteMissingDriver(pick: string): Promise<void> {
+  if (!pick || !(await refreshAsioDrivers()) || asioDrivers().includes(pick)) return;
+  const running = asioDeviceInfo()?.name;
+  notifyInfo(
+    `ASIO driver ${pick} is not installed`,
+    `${running ? `Playing through ${running} instead. ` : ''}Pick a driver in Audio Settings.`,
+  );
 }
 
 /**
@@ -214,13 +232,16 @@ export async function switchAsioDriver(driver: string): Promise<AsioStatusReport
   return report;
 }
 
-/** Refresh the installed ASIO drivers' names (the driver picker, when Audio Settings opens). */
-export async function refreshAsioDrivers(): Promise<void> {
+/** Refresh the installed ASIO drivers' names (the driver picker, when Audio Settings opens); false when
+ * the list could not be read. */
+export async function refreshAsioDrivers(): Promise<boolean> {
   try {
     setAsioDrivers(await platform.pluginHost.asioDrivers());
+    return true;
   } catch (e) {
     console.error('[instrument] list ASIO drivers failed', e);
     notifyError('Could not list the ASIO drivers', e);
+    return false;
   }
 }
 
