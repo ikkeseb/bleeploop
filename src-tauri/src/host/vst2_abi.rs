@@ -140,6 +140,9 @@ pub(crate) const EFF_GET_EFFECT_NAME: i32 = 45;
 pub(crate) const EFF_GET_VENDOR_STRING: i32 = 47;
 pub(crate) const EFF_GET_PRODUCT_STRING: i32 = 48;
 pub(crate) const EFF_CAN_DO: i32 = 51;
+/// The samples the plugin rings on after its input stops (a reverb's time): 0 is the default
+/// ("unknown"), 1 "no tail".
+pub(crate) const EFF_GET_TAIL_SIZE: i32 = 52;
 pub(crate) const EFF_IDLE: i32 = 53;
 pub(crate) const EFF_SHELL_GET_NEXT_PLUGIN: i32 = 70;
 pub(crate) const EFF_START_PROCESS: i32 = 71;
@@ -313,6 +316,7 @@ mod tests {
             (EFF_GET_VENDOR_STRING, 47),
             (EFF_GET_PRODUCT_STRING, 48),
             (EFF_CAN_DO, 51),
+            (EFF_GET_TAIL_SIZE, 52),
             (EFF_IDLE, 53),
             (EFF_SHELL_GET_NEXT_PLUGIN, 70),
             (EFF_START_PROCESS, 71),

@@ -17,7 +17,7 @@ use lf_engine::api::damage;
 use lf_engine::grid::{frames_per_bar, Frame, Meter};
 use lf_engine::looper::JOB_RATE;
 use lf_engine::overview::PEAK_FRAMES;
-use lf_engine::{Command, InputSend, InputSendParam, Instrument, LaneState, Load, LoadTrack, NoteTarget, SessionJob, SlotEvent, SlotKind, SlotProcessor};
+use lf_engine::{Command, InputSend, InputSendParam, Instrument, LaneState, Load, LoadTrack, NoteTarget, SessionError, SessionJob, SlotEvent, SlotKind, SlotProcessor, Snapshot};
 
 const PF: Frame = PEAK_FRAMES as Frame;
 
@@ -155,6 +155,19 @@ fn a_dropout_in_a_layer_stays_as_recorded_and_marks_its_bin() {
     rig.advance(master / JOB_RATE + 2);
     rig.press(Command::Undo(0));
     assert!(rig.pcm(0) == want && rig.marks(0) == marked, "REDO brings both back");
+    // A clean layer over the marked loop: its undo target is the loop at its start, marks included.
+    rig.advance(master / JOB_RATE + 2);
+    let again = rig.next_boundary() + master / 4;
+    rig.set_input(|f| code(f) / 8.0);
+    rig.send_at(again, Command::RecDub(0));
+    rig.send_at(again + master / 2, Command::RecDub(0));
+    rig.advance_to(again + master / 2 + 1);
+    rig.set_level(0.0);
+    rig.idle();
+    assert!(rig.pcm(0) != want && rig.marks(0) == marked, "the clean layer keeps the bar's mark");
+    assert_eq!(rig.dropouts().len(), 1, "and says nothing");
+    rig.press(Command::Undo(0));
+    assert!(rig.pcm(0) == want && rig.marks(0) == marked, "UNDO: the marked layer, its mark with it");
 }
 
 // ── 3. A dropout the latency carries past a window's end leaves it unmarked ─────────────────────────
@@ -572,6 +585,42 @@ fn every_hole_in_a_take_reads_silence_and_is_marked_on_a_buffer_an_earlier_take_
 }
 
 #[test]
+fn a_hole_of_whole_bins_in_a_buffer_a_snapshot_pinned_says_the_loops_changed() {
+    // A snapshot pins lane 0's loop; CLEAR and REC reuse its buffer before the copy is done, and a jump
+    // skips the new take's whole window: its hole, four bars at 120 BPM from position 0 (375 whole
+    // bins), is zeroed in the pinned buffer. The snapshot says the loops changed, never hands back the
+    // old loop with silence in it.
+    let mut rig = Rig::new();
+    rig.set(Command::SetBpm(120.0));
+    rig.set_input(code);
+    let master = rig.record_first_take(0, 4, 2400);
+    assert_eq!(master % PF, 0, "the hole is whole bins");
+    rig.press(Command::Copy(0)); // lane 1 keeps the master when lane 0 is cleared
+    rig.idle();
+    let pcm = vec![0.0f32; 2 * master as usize];
+    assert!(rig.session().send(Box::new(SessionJob::Snapshot(Snapshot::new(pcm)))).is_ok());
+    rig.advance(1); // it begins: lanes 0 and 1 pinned
+    rig.set(Command::SetFixedLength(true));
+    rig.set(Command::SetFixedBars(4.0));
+    rig.press(Command::Clear(0));
+    rig.press(Command::RecDub(0));
+    let (s, e) = (rig.start_frame(), rig.end_frame());
+    assert_eq!(e - s, master);
+    rig.skip(e + 64 - rig.frame);
+    let mut back = None;
+    for _ in 0..10_000 {
+        rig.advance(rig.block as Frame);
+        if let Some(job) = rig.session().returned() {
+            back = Some(job);
+            break;
+        }
+    }
+    assert!(rig.pcm(0).iter().all(|&x| x == 0.0) && rig.state(0) == LaneState::Playing, "the take is its hole: silence, kept");
+    let Some(SessionJob::Snapshot(s)) = back.map(|b| *b) else { panic!("no snapshot came back") };
+    assert_eq!(s.result, Some(Err(SessionError::Changed)), "the hole wrote the loop it copied");
+}
+
+#[test]
 fn a_jump_from_inside_a_layer_past_its_end_keeps_the_old_loop_there_marked_to_the_end() {
     // An alignment of 4,800: the stop press closes the window 4,800 frames later, and the jump starts
     // inside that tail and lands past it.
@@ -856,6 +905,23 @@ fn every_echo_repeat_above_minus_60_db_is_marked_when_the_controls_turn_down_mid
         let after = change_at as usize + 2400;
         assert!(diff[after..].iter().any(|&x| x > first * 0.001), "{name}: a repeat already in the line differs after the change");
     }
+}
+
+#[test]
+fn an_echo_delay_turned_up_after_the_countdown_ends_marks_the_dropout_it_plays_again() {
+    // The critique's case: no feedback, 8n at 120 BPM (0.25 s): the countdown ends a repeat after the
+    // dropout. At 0.375 s the delay goes to 4n (0.5 s): the read head moves back over what the line
+    // still holds and plays the dropout again, during the ramp and at 0.5 s. Every frame that differs
+    // from the clean run's is marked.
+    let change = Command::SetInputSendParam(InputSendParam::EchoTime, 0.0);
+    let (clean, _) = echo_run(false, 0.0, 18_000, change, 48_000);
+    let (hit, marks) = echo_run(true, 0.0, 18_000, change, 48_000);
+    let diff: Vec<f32> = clean.iter().zip(&hit).map(|(a, b)| (a - b).abs()).collect();
+    let first = diff[12_000..12_000 + 256].iter().fold(0.0f32, |m, &x| m.max(x));
+    assert!(first > 0.01, "the first repeat differs ({first})");
+    assert!(diff[18_000..].iter().any(|&x| x > first * 0.001), "the dropout plays again after the change");
+    let missed: Vec<usize> = (128..diff.len()).filter(|&k| diff[k] > first * 0.001 && marks[k] == 0).collect();
+    assert!(missed.is_empty(), "{} affected frames unmarked, from {:?} (last {:?})", missed.len(), missed.first(), missed.last());
 }
 
 #[test]

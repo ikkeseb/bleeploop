@@ -178,6 +178,8 @@ impl Overview {
             self.touch(buf, data, lo, hi, valid);
             return;
         }
+        // A write whatever its edges: a snapshot reads the count, and whole bins touch no edge.
+        p.writes.fetch_add(1, Relaxed);
         self.touch(buf, data, lo, a * PEAK_FRAMES, valid);
         for bin in a..b {
             p.min[bin].store(0f32.to_bits(), Relaxed);

@@ -6,3 +6,6 @@
 # everyone who runs the test benefits from these saved cases.
 cc f5dddb91d37cb7e85175d67fff4b8df0fa1479c04f0b3b45248b34a359dc46a6 # shrinks to start_looping = false, ops = [Later(1, SetMasterVolume(0.0)), Wait(66)]
 cc c89f661f7d50c41ef239dc6ffd460156ed209bf52d8c2bc907cbaef515222364 # shrinks to start_looping = true, ops = [Later(1, RecDub(0)), DubCycles(1)]
+cc de2cd840f7d10fc02e4d3a19834589672c7418d2afd6c8cd00b57a900946e579 # shrinks to start_looping = true, meter = Meter { num: 3, den: 4 }, ops = [Wait(1), Wait(1), Press(Action(Halve)), Press(SetFixedLength(true)), Press(Action(Halve)), Press(RecDub(1)), UndoTwice, Hold(0, 4882), Wait(22574), Jump(20551), UndoTwice]
+cc 811776d6bb6ae6c23e9df23ad8ed685daf1b05f66e8e673e18a0e9b2048d2882 # shrinks to start_looping = false, meter = Meter { num: 4, den: 4 }, ops = [Press(RecDub(2)), Press(Stop(2)), Press(SetAutoRecord(true)), Press(RecDub(0)), Press(RecDub(0)), Press(RecDub(0)), Press(SetMetronome(true)), Damage, Wait(4029)]
+cc e5f92d9106ac10c8b46cc98c33349514f8b6f14b4c0826a550f8084111f7d788 # shrinks to start_looping = true, meter = Meter { num: 4, den: 4 }, ops = [Wait(1), Press(SetFixedLength(false)), DubCycles(1), Later(1, Reverse(0)), Jump(2), UndoTwice]

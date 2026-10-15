@@ -1046,6 +1046,16 @@ mod tests {
         .expect("the fake loads")
     }
 
+    /// A unit's tail for the damage lane: the format's report in frames at the engine's rate, at least
+    /// the floor; an infinite report (`None`), or one past what a frame count holds, is `Frame::MAX`.
+    #[test]
+    fn a_unit_tail_is_its_report_at_least_the_floor_and_an_infinite_one_holds() {
+        for (report, tail) in [(Some(0), 4800), (Some(4801), 4801), (Some(u64::MAX), Frame::MAX), (None, Frame::MAX)] {
+            assert_eq!(unit_tail(0, "test", 48_000, 0, report), tail, "{report:?}");
+        }
+        assert_eq!(unit_tail(0, "test", 192_000, 0, Some(1)), 19_200, "the floor at the engine's rate");
+    }
+
     /// A close request that waited through a restart whose cycle outlasted its caller's 5 s: the
     /// caller reported the close as failed and the UI still shows the editor open, so the owner
     /// must not close it after the cycle. The request's cancel is read after the cycle, for every

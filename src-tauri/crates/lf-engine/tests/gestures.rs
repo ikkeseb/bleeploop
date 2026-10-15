@@ -24,9 +24,11 @@ enum Op {
     Later(Frame, Command),
     Wait(Frame),
     Gap,
-    /// The next block's input never wholly arrived (`ProcessContext::damaged`): marked, never discarded.
+    /// The next 64 frames' input never wholly arrived (`ProcessContext::damaged`): marked, never
+    /// discarded. One 64-frame block at either block size, so both runs lose the same frames.
     Damage,
-    /// The device skips this many frames (a jump: a hole in what captures, the old loop under a layer).
+    /// The device skips this many frames (a jump: a hole in what captures, the old loop under a layer),
+    /// then delivers one: the callback that finds the jump, where what was stamped inside it lands.
     Jump(Frame),
     /// HOLD on a pedal (this control): pressed on the selected lane, held this many frames, released.
     Hold(u8, Frame),
@@ -146,8 +148,16 @@ fn run(ops: &[Op], meter: Meter, block: usize) -> u64 {
             }
             Op::Wait(frames) => rig.advance(frames),
             Op::Gap => rig.gap(),
-            Op::Damage => rig.damage(),
-            Op::Jump(frames) => rig.skip(frames),
+            Op::Damage => {
+                let block = std::mem::replace(&mut rig.block, 64);
+                rig.damage();
+                rig.advance(64);
+                rig.block = block;
+            }
+            Op::Jump(frames) => {
+                rig.skip(frames);
+                rig.advance(1);
+            }
             Op::Hold(control, frames) => {
                 rig.press(Command::Action(Action::Hold(control)));
                 rig.advance(frames);
@@ -163,7 +173,13 @@ fn run(ops: &[Op], meter: Meter, block: usize) -> u64 {
                     rig.idle();
                     rig.press(Command::Undo(i as u8));
                     rig.idle();
-                    assert_eq!(rig.pcm(i), before, "undo twice is the identity");
+                    // A take whose window closed meanwhile (a jump can land just before its end, and a
+                    // dropout keeps the take) may have multiplied the master: the loop tiled out to it,
+                    // whole loops, the same either way round.
+                    let after = rig.pcm(i);
+                    assert_eq!(after.len() % before.len(), 0, "the loop kept its length or grew by whole loops");
+                    let tiled: Vec<f32> = before.iter().copied().cycle().take(after.len()).collect();
+                    assert_eq!(after, tiled, "undo twice is the identity");
                     DEEP_CHECKS.with(|c| c.set(c.get() + 1));
                 }
             }

@@ -144,6 +144,8 @@ pub(crate) struct Probe {
     /// `effSetProgram` resets every parameter to 0 and clears the chunk, as selecting a program
     /// replaces a plugin's whole state.
     pub(crate) program_resets: AtomicBool,
+    /// What `effGetTailSize` answers (0, the default: "unknown").
+    pub(crate) tail_size: AtomicIsize,
     /// The editor's size before `effEditOpen` and once it is open (width, height); `no_rect`:
     /// `effEditGetRect` answers no rectangle at all.
     pub(crate) rect: Mutex<(i16, i16)>,
@@ -624,6 +626,7 @@ unsafe fn probed(probe: &Probe, effect: *mut AEffect, opcode: i32, index: i32, v
             Some(0)
         }
         EFF_GET_PROGRAM => Some(probe.program.load(Relaxed) as isize),
+        EFF_GET_TAIL_SIZE => Some(probe.tail_size.load(Relaxed)),
         EFF_GET_PARAM_NAME => {
             // Longer than the 8 bytes the format promises, as real plugins write.
             let name = format!("Fixture parameter {index}\0");

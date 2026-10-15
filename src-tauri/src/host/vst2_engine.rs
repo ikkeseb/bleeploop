@@ -31,7 +31,6 @@ use super::super::state::ParamDesc;
 use super::super::tone::{self, Vst2State, VST2_MAX_CHUNK};
 use super::super::vst2::{
     open_effect, time_info, validate, EffectInfo, HostContext, OpenError, ProcessingScope, Vst2Effect, Vst2Module,
-    EFF_GET_TAIL_SIZE,
 };
 use super::super::vst2_abi::*;
 use super::{ParamEvent, MAX_EVENTS_PER_BLOCK, MAX_PLUGIN_CHANNELS};

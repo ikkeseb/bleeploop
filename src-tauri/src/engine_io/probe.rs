@@ -139,7 +139,7 @@ const CHECKS: [(&str, &str); 9] = [
     ("run", "the device opens and a loop records"),
     ("switch", "every backend and buffer switch starts"),
     ("slots", "every plugin loads, is back in its slot after each switch, reloads on a swap and unloads"),
-    ("loop", "the loop plays through every phase at an unchanged rate; no take or pass rejected"),
+    ("loop", "the loop plays through every phase at an unchanged rate; no take or pass kept a dropout"),
     ("events", "no device event (loss, fallback, engine fault)"),
     ("counters", "every fault counter (IoDiag::faults) stays 0 (a WASAPI open's first 3 s may trim or starve the join)"),
     ("load", "soak: block time p99.9 < 50 % (not judged for the heavy scene), max < 90 % of the period"),

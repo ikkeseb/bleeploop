@@ -240,9 +240,17 @@ fn a_jump_across_a_window_edge_keeps_the_take_with_the_hole_zeroed_and_marked() 
         let mut rig = Rig::new();
         rig.set_level(0.5);
         let master = rig.record_first_take(0, 2, 2400);
-        rig.set_input(code);
         rig.set(Command::SetFixedLength(true));
         rig.set(Command::SetFixedBars(2.0));
+        // An earlier take on lane 1, cleared: its buffer still holds it where the hole lands, so only
+        // the zeroing reads silence there.
+        rig.set_level(-0.25);
+        rig.press(Command::RecDub(1));
+        rig.advance_to(rig.end_frame() + 1);
+        rig.idle();
+        rig.press(Command::Clear(1));
+        rig.idle();
+        rig.set_input(code);
         rig.press(Command::RecDub(1));
         let edge = if at_end { rig.end_frame() } else { rig.start_frame() };
         rig.advance_to(edge - 64);

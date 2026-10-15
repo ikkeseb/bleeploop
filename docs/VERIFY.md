@@ -170,13 +170,13 @@ blocks until the verdict, so an agent harness should run it in the background.
     snapshot. Baseline (2026-09-26, Scarlett 2i2 3rd gen, 44.1 kHz, a cable from line out R into
     input 2; six launches, Pro-Q 3 and MIC): A −0.11..+0.09 ms at ASIO 64, 128 and 256, spread
     0.001 ms, drift ≤ 0.001 ms/min, B − 2·A ≤ 0.002 ms, C − A and D − B 0.000, the accent on beat 1;
-    no take rejected. Each device open lands a whole number of frames off (−5..+4), the same for every
+    no dropout. Each device open lands a whole number of frames off (−5..+4), the same for every
     take inside it (cause unknown). With the multiply phases (2026-09-26, Pro-Q, three launches): E − A
     and F − A 0.000 and lane 1 bit-exact twice at 64, 128 and 256, except once at 128, where the 32 s E
     take stepped one frame late between its beats 24 and 32 and F kept that frame; two relaunches at
     128 did not repeat it (a one-frame slip inside an open; cause unknown). With the free-take and TRIM
     phases (2026-09-27, Pro-Q, one launch): G − A and H − B 0.000 at 64, 128 and 256, H 32/32 beats,
-    lane 1 bit-exact twice after G, the trimmed lane and its UNDO bit-exact; no take rejected. With the
+    lane 1 bit-exact twice after G, the trimmed lane and its UNDO bit-exact; no dropout. With the
     FADE phase (2026-09-27, Pro-Q, two launches): at 64, 128 and 256 the fading lanes stopped on the
     downbeat two bars on, the beats of I read 1.000 0.756 0.556 0.386 0.250 0.139 0.062 0.016 against
     ((8 − k)/8)² 1 0.766 0.563 0.391 0.250 0.141 0.063 0.016, past the bar line a quarter of the floor
@@ -199,8 +199,8 @@ blocks until the verdict, so an agent harness should run it in the background.
     reading is likely the same (not re-observed). At 256 every bar passed; at 64 and 128 every bar but
     those the sound moved (spread, drift, once the accent), |A| at most 0.125 ms. Silence other apps'
     sound on the interface before a loopback run. With the stray bar and the input-gap rejection
-    (2026-10-03, 48 kHz, Pro-Q, one launch): 21/21 bars at 64, 128 and 256, no stray sound, no take
-    rejected, A +0.08 ms and B +0.17 ms at every size, spread at most 0.003 ms.
+    (2026-10-03, 48 kHz, Pro-Q, one launch): 21/21 bars at 64, 128 and 256, no stray sound, no
+    dropout, A +0.08 ms and B +0.17 ms at every size, spread at most 0.003 ms.
   - `native:smoke` after any change to `editor_window.rs` or either host's editor open/close path.
     Baseline (2026-09-23, WASAPI, the app mostly on the default ~15 ms timer tick): `complete: 30
     opened, 0 failed, of 30`, each close 110–250 ms. Windows grants the app a 1 ms tick only some of

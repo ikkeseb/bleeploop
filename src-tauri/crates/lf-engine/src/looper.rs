@@ -645,12 +645,12 @@ impl Looper {
         if reversed { data.iter().rev().copied().collect() } else { data.to_vec() }
     }
 
-    /// The most buffer positions one block job moved in a single step since the engine started.
     /// The most buffer positions one jump's holes zeroed (the tests check it against two windows).
     pub fn zeroed_max(&self) -> Frame {
         self.zeroed_max
     }
 
+    /// The most buffer positions one block job moved in a single step since the engine started.
     pub fn job_step_max(&self) -> Frame {
         self.job_step_max
     }
@@ -2069,12 +2069,12 @@ impl Looper {
 
     /// A job's destination marks, set whole at its push: its sources are final while it runs (`Job::
     /// ahead`), so the marks now are the marks when it is done, and a reader that sees what it writes
-    /// sees them already. A copy takes its source's whole; a fill or a TRIM maps each marked source bin
-    /// through the job's position map, read from the source's words frozen in a scratch (an in-place
-    /// fill never reads a mark it set), into the destination's words, whose rewritten range (and
-    /// anything past the loop) is cleared first; a bin straddling a fill's low end keeps its own mark.
-    /// Tiles repeat a mark, padding and cut bars drop it. One copy of the words, then at most two bins
-    /// per tile of each marked source bin.
+    /// sees them already. A copy takes its source's whole; a fill or a TRIM maps each run of marked
+    /// source bins through the job's position map, read from the source's words frozen in a scratch (an
+    /// in-place fill never reads a mark it set), into the destination's words, whose rewritten range
+    /// (and anything past the loop) is cleared first; a bin straddling a fill's low end keeps its own
+    /// mark. Tiles repeat a mark, padding and cut bars drop it. One copy of the words, then one range
+    /// per tile of each run, set a word at a time.
     fn job_marks(&mut self, kind: JobKind, visit: Visit) {
         let (src, dst) = match kind {
             JobKind::Copy { src, dst } | JobKind::Restore { src, dst, .. } | JobKind::LaneCopy { src, dst, .. } => {
@@ -2097,8 +2097,8 @@ impl Looper {
                 // The rewritten range and past it, from the first bin wholly at or past the low end.
                 clear_from(dst_words, (visit.lo + pf - 1) / pf);
                 let kept = fill.untouched();
-                for_marked(&self.mark_src, |bin| {
-                    let (q0, q1) = (bin * pf, ((bin + 1) * pf).min(kept));
+                for_runs(&self.mark_src, |from, to| {
+                    let (q0, q1) = (from * pf, (to * pf).min(kept));
                     let mut t = fill.period;
                     while q0 < q1 && t < m {
                         mark_range(dst_words, (t + q0).max(visit.lo), (t + q1).min(m));
@@ -2108,12 +2108,12 @@ impl Looper {
             }
             JobKind::Trim { fill, reversed, .. } => {
                 dst_words.fill(0);
-                for_marked(&self.mark_src, |bin| {
-                    let (b0, b1) = (bin * pf, ((bin + 1) * pf).min(m));
+                for_runs(&self.mark_src, |from, to| {
+                    let (b0, b1) = (from * pf, (to * pf).min(m));
                     if b0 >= b1 {
                         return;
                     }
-                    // The bin's heard positions inside the kept bars, then each tile's, back in buffer order.
+                    // The run's heard positions inside the kept bars, then each tile's, back in buffer order.
                     let (h0, h1) = if reversed { (m - b1, m - b0) } else { (b0, b1) };
                     let h1 = h1.min(fill.period);
                     let mut t = 0;
@@ -2770,7 +2770,6 @@ impl Looper {
     }
 }
 
-/// Two distinct buffers of the pool, one to read and one to write.
 /// Clear every bin of `words` from `bin` on.
 fn clear_from(words: &mut [u64], bin: Frame) {
     let (w, b) = ((bin / 64) as usize, (bin % 64) as u32);
@@ -2782,27 +2781,45 @@ fn clear_from(words: &mut [u64], bin: Frame) {
     }
 }
 
-/// Mark the bins of buffer positions `[a, b)` in `words` (nothing when empty).
+/// Mark the bins of buffer positions `[a, b)` in `words` (nothing when empty), a word at a time.
 fn mark_range(words: &mut [u64], a: Frame, b: Frame) {
     let (pf, bins) = (PEAK_FRAMES as Frame, words.len() as Frame * 64);
-    if a < b {
-        for bin in a / pf..=((b - 1) / pf).min(bins - 1) {
-            words[(bin / 64) as usize] |= 1 << (bin % 64);
-        }
+    if a >= b {
+        return;
+    }
+    let (mut bin, end) = (a / pf, ((b - 1) / pf + 1).min(bins));
+    while bin < end {
+        let (w, at) = ((bin / 64) as usize, bin % 64);
+        let n = (end - bin).min(64 - at);
+        words[w] |= if n == 64 { u64::MAX } else { ((1u64 << n) - 1) << at };
+        bin += n;
     }
 }
 
-/// Each bin set in `words`, in order.
-fn for_marked(words: &[u64], mut each: impl FnMut(Frame)) {
+/// Each run of bins set in `words`, `[from, to)`, in order.
+fn for_runs(words: &[u64], mut each: impl FnMut(Frame, Frame)) {
+    let mut run: Option<(Frame, Frame)> = None;
     for (w, &word) in words.iter().enumerate() {
         let mut bits = word;
         while bits != 0 {
-            each(w as Frame * 64 + bits.trailing_zeros() as Frame);
+            let bin = w as Frame * 64 + bits.trailing_zeros() as Frame;
+            run = match run {
+                Some((from, to)) if to == bin => Some((from, bin + 1)),
+                Some((from, to)) => {
+                    each(from, to);
+                    Some((bin, bin + 1))
+                }
+                None => Some((bin, bin + 1)),
+            };
             bits &= bits - 1;
         }
     }
+    if let Some((from, to)) = run {
+        each(from, to);
+    }
 }
 
+/// Two distinct buffers of the pool, one to read and one to write.
 fn pair(bufs: &mut [Vec<f32>], src: usize, dst: usize) -> (&[f32], &mut [f32]) {
     assert_ne!(src, dst);
     if src < dst {

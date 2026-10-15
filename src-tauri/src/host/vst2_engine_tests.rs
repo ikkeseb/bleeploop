@@ -159,14 +159,15 @@ fn load_calls(block: isize) -> Vec<(i32, isize)> {
         (EFF_SET_BLOCK_SIZE, block),
         (EFF_MAINS_CHANGED, 1),
         (EFF_START_PROCESS, 0),
+        (EFF_GET_TAIL_SIZE, 0),
         (EFF_GET_PARAM_NAME, 0),
         (EFF_GET_PARAM_NAME, 0),
         (EFF_GET_PARAM_NAME, 0),
     ]
 }
 
-/// What one restart or re-activation sends, in order.
-fn cycle_calls(block: isize) -> Vec<(i32, isize)> {
+/// What one restart or re-activation sends up to the resume, in order.
+fn resume_calls(block: isize) -> Vec<(i32, isize)> {
     vec![
         (EFF_STOP_PROCESS, 0),
         (EFF_MAINS_CHANGED, 0),
@@ -175,6 +176,12 @@ fn cycle_calls(block: isize) -> Vec<(i32, isize)> {
         (EFF_MAINS_CHANGED, 1),
         (EFF_START_PROCESS, 0),
     ]
+}
+
+/// What one restart or re-activation that resumed the plugin sends, in order: the resume, then the
+/// tail asked of the running plugin for the unit it installs.
+fn cycle_calls(block: isize) -> Vec<(i32, isize)> {
+    [resume_calls(block), vec![(EFF_GET_TAIL_SIZE, 0)]].concat()
 }
 
 /// Every dispatcher call the fixture recorded came on one thread, which is neither this test's nor
@@ -913,6 +920,24 @@ fn unit_here(plugin: &mut Vst2Plugin, slot: &SlotHost, max_frames: usize) -> (Bo
     (unit, params, faults)
 }
 
+/// The tail the engine's damage lane takes from the running plugin (`effGetTailSize`): its report in
+/// frames, at least the 100 ms floor (4,800 frames at 48 kHz), so 0 ("unknown"), 1 ("no tail") and a
+/// negative answer take the floor.
+#[test]
+fn the_tail_is_the_plugins_report_at_least_the_floor() {
+    let _one = engine_slot::one_engine_test_at_a_time();
+    let device = device(48_000);
+    let slot = device.host().slot(0);
+    for (report, tail) in [(0, 4800), (1, 4800), (-1, 4800), (4799, 4800), (96_000, 96_000)] {
+        let probe = Probe::new();
+        probe.tail_size.store(report, Relaxed);
+        let mut plugin = plugin_here(&slot, instrument(probe));
+        let (_unit, _params, _) = unit_here(&mut plugin, &slot, 4096);
+        assert_eq!(plugin.tail(slot.slot(), 48_000), tail, "reported {report}");
+        assert_eq!(probe.opcodes().last(), Some(&(EFF_GET_TAIL_SIZE, 0)), "asked of the running plugin");
+    }
+}
+
 /// The unit on its own: a call longer than the plugin's block goes in slices, each note lands in
 /// its slice at its offset there (one on a slice's first frame belongs to that slice, at 0) and
 /// reaches the plugin before that slice's process call, ring params go to `setParameter` once, the
@@ -1108,7 +1133,7 @@ fn a_layout_the_host_refuses_settled_inside_the_resume_leaves_the_plugin_suspend
     *probe.layout_on_resume.lock().unwrap() = Some((0, 0, 0));
     assert_eq!(plugin_thread_calls_host(probe, AUDIO_MASTER_IO_CHANGED, 0, 0, 0.0), 1);
     assert!(wait_for(|| probe.count(EFF_MAINS_CHANGED, 0) == 2 && rendered_near(&device, 0.0)), "resumed, refused, suspended again");
-    let mut refused = cycle_calls(4096);
+    let mut refused = resume_calls(4096);
     refused.extend([(EFF_STOP_PROCESS, 0), (EFF_MAINS_CHANGED, 0)]);
     assert_eq!(probe.opcodes()[load_calls(4096).len()..], refused);
     let processed = probe.processes.load(Relaxed);

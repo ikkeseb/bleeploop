@@ -324,6 +324,11 @@ plugin-GUI work.
   answers nothing).
 - A unit whose restart failed stays parked, bypassed, until the plugin's next restart request; a device
   change does not retry it.
+- The dropout mark has no native check: the `lane-marks` probe draws it from a fake feed, and no run
+  has planted a real lock miss and read the mark in the WebView. Next check: a `native:engine-smoke`
+  step that calls `engine_hold_lock(10)` (DEV, `engine_io/mode.rs`; `holdLock` on the platform's
+  engine) mid-overdub, lets that one `Dropout` `console.error` through the runner's clean-log rule, and
+  reads the store's marks and the canvas through UNDO, REDO, REVERSE and a reload.
 - An output callback that misses the engine lock reads as a duplex fault. Two ASIO overloads each
   reported to a different stream alone count once in `xruns` (`callback::Run::stream_error`).
 - The panic hook (`lib.rs`) allocates and logs on whatever thread panicked, the audio thread included.
@@ -413,8 +418,8 @@ plugin-GUI work.
   note port gets CLAP notes; CLAP editor edits never reach the drawer; an editor open that succeeds at
   its timeout stays open; CLAP visibility and connection-loss callbacks do nothing; the scanner caches
   factories that forbid it.
-- After a WASAPI open the join can trim or starve within ~2.5 s, and a take that overlaps it is
-  rejected (9 of 85 opens after ASIO had run in the process, 1 of 43 without). Traced (the join trace in
+- After a WASAPI open the join can trim or starve within ~2.5 s, and a take that overlaps it keeps a
+  marked dropout (9 of 85 opens after ASIO had run in the process, 1 of 43 without). Traced (the join trace in
   `engine_io/callback.rs`): once primed, capture delivers a packet early and a render callback comes a
   period late, so the ring sits up to two periods over its 25 ms setpoint, under the trim line, for the
   ~10 s the controller takes to drain it, and one more late callback trims. Why the endpoints start
