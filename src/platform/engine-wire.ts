@@ -7,7 +7,9 @@
  * unit variant is its name (`"PlayAll"`), a newtype `{"RecDub":0}`, a tuple `{"SetVolume":[0,0.8]}`, a
  * struct variant an object with camelCase fields. `FxParam`/`FxKind` travel as the TS keys
  * (`src/ui/state/fx-metadata.ts`), an `InputSend`/`InputSendParam` as its key (`api.rs`), an `Instrument`
- * as its id, a `Frame` (i64) as a JSON number.
+ * as its id, a `Frame` (i64) as a JSON number. A meter (the time signature, Rust `grid::Meter`; here
+ * `TimeSignature`, as `Meter` is the input level) travels as `[num, den]` in `SetMeter` and as
+ * `{num, den, beats}` in `Transport` and a session header.
  *
  * Commands go out as the typed values below (Tauri serialises them). Everything that comes back passes
  * a decoder that throws on a variant or a field it does not know how to read, so a drift between the
@@ -79,6 +81,31 @@ export type NoteTarget = { Builtin: InstrumentId } | { Slot: number } | 'Off';
 export type InputSendId = 'echo' | 'reverb' | 'ring';
 export type InputSendParamId = 'echoTime' | 'echoFeedback' | 'echoLevel' | 'reverbLevel' | 'ringFreq' | 'ringLevel';
 export type AudioBackend = 'Wasapi' | 'Asio';
+
+/**
+ * A meter (time signature, Rust `lf_engine::grid::Meter`): `num/den`, and `beats`, the beats a bar that
+ * BPM, TAP, the count-in numerals and the beat dots count. The engine sends `beats`, so the UI never
+ * derives it: a compound meter counts the dotted quarter (6/8 has two beats, 12/8 four). Only one of
+ * `TIME_SIGNATURES` crosses the wire.
+ */
+export interface TimeSignature {
+  num: number;
+  den: number;
+  beats: number;
+}
+
+/** The meters the engine offers (`Meter::OFFERED`), in its order, 4/4 (the default) first; the fixture's
+ * `meters` table pins both sides to it. */
+export const TIME_SIGNATURES: readonly TimeSignature[] = [
+  { num: 4, den: 4, beats: 4 },
+  { num: 3, den: 4, beats: 3 },
+  { num: 6, den: 8, beats: 2 },
+  { num: 12, den: 8, beats: 4 },
+  { num: 5, den: 4, beats: 5 },
+];
+
+/** 4/4: the engine's default, and the meter of a session or a scripted frame that names none. */
+export const FOUR_FOUR: TimeSignature = TIME_SIGNATURES[0];
 
 const LANE_STATES: readonly LaneState[] = ['Empty', 'Recording', 'Overdubbing', 'Playing', 'Stopped'];
 const REFUSALS: readonly Refusal[] = [
@@ -164,6 +191,9 @@ export type EngineCommand =
   | { Action: EngineAction }
   | { ActionOn: [number, EngineAction] }
   | { SetBpm: number }
+  /** The meter, `[num, den]` of one of `TIME_SIGNATURES`; dropped while the tempo is locked (a loop
+   * exists), as `SetBpm` is. */
+  | { SetMeter: [number, number] }
   | { SetMetronome: boolean }
   | { SetClickVolume: number }
   | { SetMasterVolume: number }
@@ -257,7 +287,10 @@ export interface LaneInfo {
 /** Rust `lf_engine::Event`, decoded to a `type`-tagged union. */
 export type EngineEvent =
   | { type: 'Lane'; frame: Frame; lane: number; info: LaneInfo }
-  | { type: 'Transport'; frame: Frame; master: Frame; bpm: number; locked: boolean }
+  /** The master loop length (0 = none), the tempo, the meter and their lock (they lock together). */
+  | { type: 'Transport'; frame: Frame; master: Frame; bpm: number; meter: TimeSignature; locked: boolean }
+  /** A counted beat (`meter.beats` a bar; the pulses between a compound meter's beats click with no
+   * event): `beatInBar` counts beats from 0, `countLeft` the count-in's beats still to come. */
   | { type: 'Beat'; frame: Frame; beatInBar: number; countLeft: number; clicked: boolean }
   | { type: 'Selected'; frame: Frame; lane: number }
   | { type: 'Refused'; frame: Frame; lane: number; reason: Refusal }
@@ -375,6 +408,25 @@ export interface FeedFrame {
 
 const lane = (v: unknown, what: string) => int(v, what, 0, ENGINE_LANES - 1);
 
+/** The offered meter `num/den`, or a throw. */
+function offeredMeter(num: unknown, den: unknown, what: string): TimeSignature {
+  const n = int(num, `${what}.num`, 1, 255);
+  const d = int(den, `${what}.den`, 1, 255);
+  return TIME_SIGNATURES.find((m) => m.num === n && m.den === d) ?? fail(`${what} ${n}/${d} is not an offered meter`, { num, den });
+}
+
+/** A meter as `Transport` and a session header carry it: `{num, den, beats}`, `beats` as this build counts
+ * it (one counted otherwise is refused, never read another way). */
+function decodeTimeSignature(v: unknown, what: string): TimeSignature {
+  const o = obj(v, what);
+  const extra = Object.keys(o).filter((k) => !['num', 'den', 'beats'].includes(k));
+  if (extra.length > 0) fail(`${what} has unknown fields`, extra);
+  const meter = offeredMeter(o.num, o.den, what);
+  const beats = int(o.beats, `${what}.beats`);
+  if (beats !== meter.beats) fail(`${what} ${meter.num}/${meter.den} counted in ${beats} beats a bar: this build counts it in ${meter.beats}`, v);
+  return meter;
+}
+
 /** A `Toggle`: a unit toggle's name, or `{"Send": key}`. */
 function decodeToggle(v: unknown, what: string): EngineToggle {
   const [name, send] = tagged(v, what);
@@ -435,6 +487,8 @@ export function decodeEvent(raw: unknown): EngineEvent {
         frame: at,
         master: int(o.master, 'Transport.master'),
         bpm: int(o.bpm, 'Transport.bpm'),
+        // The engine always sends it; a scripted probe frame from before meters may leave it out.
+        meter: o.meter === undefined ? FOUR_FOUR : decodeTimeSignature(o.meter, 'Transport.meter'),
         locked: bool(o.locked, 'Transport.locked'),
       };
     case 'Beat':
@@ -661,6 +715,11 @@ export function decodeCommand(raw: unknown): EngineCommand {
       case 'SetFadeBars':
         int(p, 'SetFadeBars', 1);
         break;
+      case 'SetMeter': {
+        const [n, d] = pair('(num, den)');
+        offeredMeter(n, d, 'SetMeter');
+        break;
+      }
       case 'SetDubFeedback': {
         const [l, v] = pair('(lane, feedback)');
         lane(l, 'SetDubFeedback.lane');
@@ -806,6 +865,8 @@ export interface SnapshotHeader {
   rate: number;
   masterLengthFrames: number;
   bpm: number;
+  /** The master's meter: its bars are `masterLengthFrames / framesPerBar(bpm, rate, meter.beats)`. */
+  meter: TimeSignature;
   tracks: SnapshotTrack[];
   /** The wet master's two blocks follow the tracks' (a snapshot asked with the master). */
   master?: { frames: number };
@@ -826,6 +887,8 @@ export interface LoadTrack {
 /** `engine_load_session`'s header: into an all-empty engine at the device's rate. */
 export interface LoadHeader {
   bpm: number;
+  /** `bars` count in it; absent: 4/4 (a header from before meters). */
+  meter?: TimeSignature;
   bars: number;
   masterLengthFrames: number;
   tracks: LoadTrack[];
@@ -923,7 +986,7 @@ export function decodeLoadSession(buffer: ArrayBuffer): { header: LoadHeader; pc
   const { header, pcm, master } = splitSessionBytes(buffer);
   if (master) fail('a load carries no master', header);
   const o = obj(header, 'load header');
-  const extra = Object.keys(o).filter((k) => !['bpm', 'bars', 'masterLengthFrames', 'tracks'].includes(k));
+  const extra = Object.keys(o).filter((k) => !['bpm', 'meter', 'bars', 'masterLengthFrames', 'tracks'].includes(k));
   if (extra.length > 0) fail('load header has unknown fields', extra);
   const length = int(o.masterLengthFrames, 'load.masterLengthFrames', 1);
   const seen = new Set<number>();
@@ -943,7 +1006,8 @@ export function decodeLoadSession(buffer: ArrayBuffer): { header: LoadHeader; pc
     seen.add(track.index);
     return track;
   });
-  return { header: { bpm: int(o.bpm, 'load.bpm', 1), bars: int(o.bars, 'load.bars', 1), masterLengthFrames: length, tracks }, pcm };
+  const meter = o.meter === undefined ? {} : { meter: decodeTimeSignature(o.meter, 'load.meter') };
+  return { header: { bpm: int(o.bpm, 'load.bpm', 1), ...meter, bars: int(o.bars, 'load.bars', 1), masterLengthFrames: length, tracks }, pcm };
 }
 
 /** Read `engine_snapshot`'s bytes: the stems, and the wet master when the snapshot carries one. */
@@ -963,7 +1027,14 @@ export function decodeSnapshot(buffer: ArrayBuffer): { header: SnapshotHeader; p
     if (track.frames !== length) fail(`snapshot track ${track.index} is not one master long`, track.frames);
     return track;
   });
-  const decoded: SnapshotHeader = { rate: int(o.rate, 'snapshot.rate', 1), masterLengthFrames: length, bpm: int(o.bpm, 'snapshot.bpm', 1), tracks };
+  const decoded: SnapshotHeader = {
+    rate: int(o.rate, 'snapshot.rate', 1),
+    masterLengthFrames: length,
+    bpm: int(o.bpm, 'snapshot.bpm', 1),
+    // The engine always writes it; the browser fake's scripted snapshot may leave it out.
+    meter: o.meter === undefined ? FOUR_FOUR : decodeTimeSignature(o.meter, 'snapshot.meter'),
+    tracks,
+  };
   if (master) {
     if (master.left.length !== length) fail('the snapshot master is not one master long', master.left.length);
     decoded.master = { frames: length };

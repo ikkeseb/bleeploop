@@ -6,7 +6,8 @@
 //!
 //! Serde's external tagging with the Rust variant names: a unit variant is its name (`"PlayAll"`), a
 //! newtype `{"RecDub":0}`, a tuple `{"SetVolume":[0,0.8]}`, a struct variant an object with camelCase
-//! fields. `FxParam`/`FxKind` travel as the TS keys (`src/ui/state/fx-metadata.ts`), an `InputSend` and an
+//! fields. A meter (`lf_engine::grid::Meter`, the time signature) travels as `[num, den]` in `SetMeter`
+//! and as `{"num","den","beats"}` in `Transport` and a session header (`meter_obj`). `FxParam`/`FxKind` travel as the TS keys (`src/ui/state/fx-metadata.ts`), an `InputSend` and an
 //! `InputSendParam` as their `key()`, an `Instrument` as its id, a `NoteTarget` as `{"Builtin":"lead"}` /
 //! `{"Slot":0}` / `"Off"`, a `Frame` (i64) as a JSON number. The
 //! mirrors are serde `remote` derives: a variant or field lf-engine adds fails to compile here until it
@@ -38,7 +39,7 @@
 use std::collections::BTreeMap;
 
 use lf_engine::dsp::fx::{FxKind, FxParam, FxState, MAX_PARAMS};
-use lf_engine::grid::Frame;
+use lf_engine::grid::{self, Frame};
 use lf_engine::{Action, Command, CompactMix, Event, InputSend, InputSendParam, Instrument, LaneInfo, LaneMix, LaneState, NoteTarget, Refusal, Toggle, SLOT_COUNT};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -102,6 +103,7 @@ enum CommandDef {
     Press,
     SelectTrack(u8),
     SetBpm(f64),
+    SetMeter(#[serde(with = "meter_pair")] grid::Meter),
     SetMetronome(bool),
     SetClickVolume(f32),
     SetMasterVolume(f32),
@@ -184,7 +186,14 @@ enum EventDef {
         #[serde(with = "LaneInfoDef")]
         info: LaneInfo,
     },
-    Transport { frame: Frame, master: Frame, bpm: u32, locked: bool },
+    Transport {
+        frame: Frame,
+        master: Frame,
+        bpm: u32,
+        #[serde(with = "meter_obj")]
+        meter: grid::Meter,
+        locked: bool,
+    },
     Beat { frame: Frame, beat_in_bar: u8, count_left: u8, clicked: bool },
     Selected { frame: Frame, lane: u8 },
     Refused {
@@ -323,6 +332,48 @@ mod fx_param {
             .into_iter()
             .find_map(|kind| FxParam::from_key(kind, &key))
             .ok_or_else(|| serde::de::Error::custom(format!("unknown FX param \"{key}\"")))
+    }
+}
+
+/// A meter as `SetMeter` carries it: `[num, den]`. Only an offered meter (`Meter::OFFERED`) parses.
+mod meter_pair {
+    use super::*;
+
+    pub fn serialize<S: Serializer>(m: &grid::Meter, s: S) -> Result<S::Ok, S::Error> {
+        (m.num(), m.den()).serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<grid::Meter, D::Error> {
+        let (num, den) = <(u8, u8)>::deserialize(d)?;
+        grid::Meter::new(num, den).ok_or_else(|| serde::de::Error::custom(format!("{num}/{den} is not a meter this build offers")))
+    }
+}
+
+/// A meter as `Transport` and a session header carry it: `{"num","den","beats"}`, `beats` the counted
+/// beats a bar (BPM's unit, `Meter::beats_per_bar`), so the UI never derives it and a session file says
+/// how its BPM counted. One this build counts in other beats is refused, never read another way.
+pub(super) mod meter_obj {
+    use super::*;
+
+    #[derive(Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct MeterJson {
+        num: u8,
+        den: u8,
+        beats: u64,
+    }
+
+    pub fn serialize<S: Serializer>(m: &grid::Meter, s: S) -> Result<S::Ok, S::Error> {
+        MeterJson { num: m.num(), den: m.den(), beats: m.beats_per_bar() }.serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<grid::Meter, D::Error> {
+        let MeterJson { num, den, beats } = MeterJson::deserialize(d)?;
+        let meter = grid::Meter::new(num, den).ok_or_else(|| serde::de::Error::custom(format!("{num}/{den} is not a meter this build offers")))?;
+        if beats != meter.beats_per_bar() {
+            return Err(serde::de::Error::custom(format!("{num}/{den} counted in {beats} beats a bar: this build counts it in {}", meter.beats_per_bar())));
+        }
+        Ok(meter)
     }
 }
 
@@ -537,7 +588,7 @@ mod tests {
 
     /// Every `Command` variant, by position: a new variant fails to compile here until it has a
     /// number (bump `COMMANDS`) and an example in the fixture.
-    const COMMANDS: usize = 45;
+    const COMMANDS: usize = 46;
     fn command_index(c: &Command) -> usize {
         use Command::*;
         match c {
@@ -586,6 +637,7 @@ mod tests {
             SetInstrumentGain(..) => 42,
             SetPan(..) => 43,
             SetScope(_) => 44,
+            SetMeter(_) => 45,
         }
     }
 
@@ -747,6 +799,25 @@ mod tests {
     fn every_device_event_round_trips_through_the_fixture() {
         let events: Vec<DeviceEvent> = round_trip("deviceEvents");
         covers("deviceEvents", events.iter().map(device_event_index), DEVICE_EVENTS);
+    }
+
+    #[test]
+    fn the_meters_table_is_the_engines_offer_with_its_beats() {
+        let table: Vec<(u8, u8, u64)> = serde_json::from_value(fixture()["meters"].clone()).expect("fixture.meters is [num, den, beats] rows");
+        let offered: Vec<_> = grid::Meter::OFFERED.iter().map(|m| (m.num(), m.den(), m.beats_per_bar())).collect();
+        assert_eq!(table, offered, "the TS guard holds the UI's list to the same table");
+        for m in grid::Meter::OFFERED {
+            let command = WireCommand(Command::SetMeter(m));
+            assert_eq!(serde_json::to_value(command).unwrap(), serde_json::json!({ "SetMeter": [m.num(), m.den()] }));
+        }
+        let refused = |v: Value| serde_json::from_value::<WireCommand>(v).is_err();
+        assert!(refused(serde_json::json!({ "SetMeter": [7, 8] })), "a meter the engine does not offer");
+        assert!(refused(serde_json::json!({ "SetMeter": { "num": 3, "den": 4 } })), "a pair, not an object");
+        let transport = |meter: Value| serde_json::json!({ "Transport": { "frame": 0, "master": 0, "bpm": 120, "meter": meter, "locked": false } });
+        let event = |v: Value| serde_json::from_value::<WireEvent>(v).map(|e| e.0);
+        assert!(matches!(event(transport(serde_json::json!({ "num": 12, "den": 8, "beats": 4 }))), Ok(Event::Transport { meter, .. }) if meter == grid::Meter::new(12, 8).unwrap()));
+        assert!(event(transport(serde_json::json!({ "num": 12, "den": 8, "beats": 12 }))).is_err(), "counted in other beats: refused, never re-read");
+        assert!(event(transport(serde_json::json!({ "num": 6, "den": 8 }))).is_err(), "without its beats");
     }
 
     #[test]

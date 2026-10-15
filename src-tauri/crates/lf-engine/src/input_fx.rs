@@ -69,9 +69,10 @@ use crate::dsp::delay::DelayNode;
 use crate::dsp::fdlibm;
 use crate::dsp::fx::{clamp_index, division_beats, Ctl, DIVISIONS, MAX_FEEDBACK, RAMP};
 use crate::dsp::param::{AudioParam, Rate, ToneParam, Units, QUANTUM};
-use crate::grid::{frames_per_bar, Frame};
+use crate::grid::{frames_per_bar, Frame, Meter};
 
-/// The echo line's longest delay: a quarter note at 40 BPM, the slowest tempo, is 1.5 s.
+/// The echo line's longest delay: a quarter note at 40 BPM, the slowest tempo, is 1.5 s (a compound
+/// meter's quarter at a dotted 40 is 1 s).
 const MAX_DELAY: f64 = 2.0;
 /// The echo writes a sample below this (−120 dBFS) into its line as 0 (see the module doc).
 const FLUSH: f32 = 1e-6;
@@ -392,8 +393,8 @@ pub struct InputFx {
     sample_rate: u32,
     /// Device frames the DSP clock is behind (`effects`).
     offset: Frame,
-    /// The tempo the echo holds; 0 before the clock hands it one.
-    bpm: u32,
+    /// The echo's quarter-note period (as bits) the clock last handed it; `None` before the first.
+    beat_period: Option<u64>,
     echo: Echo,
     reverb: Reverb,
     ring: Ring,
@@ -411,7 +412,7 @@ impl InputFx {
         InputFx {
             sample_rate,
             offset: 0,
-            bpm: 0,
+            beat_period: None,
             echo: Echo::new(sr, start),
             reverb: Reverb::new(sr, ir, start),
             ring: Ring::new(sr, start),
@@ -484,15 +485,18 @@ impl InputFx {
         }
     }
 
-    /// The clock's tempo at `frame`: a new one re-times the echo from the next quantum boundary. The
-    /// beat is a quarter of the grid's bar, as the lane delays take it (`LaneFx::follow_grid`).
-    pub fn follow_tempo(&mut self, bpm: u32, frame: Frame) {
-        if bpm == self.bpm || bpm == 0 {
+    /// The clock's tempo and meter at `frame`: a new quarter note re-times the echo from the next quantum
+    /// boundary. The beat is the bar's quarter note, as the lane delays take it (`LaneFx::follow_grid`).
+    pub fn follow_tempo(&mut self, bpm: u32, meter: Meter, frame: Frame) {
+        if bpm == 0 {
             return;
         }
-        self.bpm = bpm;
         let sr = self.sample_rate as f64;
-        let beat_period = frames_per_bar(bpm as f64, self.sample_rate) as f64 / sr / 4.0;
+        let beat_period = frames_per_bar(bpm as f64, self.sample_rate, meter) as f64 / sr / meter.quarters_per_bar();
+        if self.beat_period == Some(beat_period.to_bits()) {
+            return;
+        }
+        self.beat_period = Some(beat_period.to_bits());
         let ctl = self.ctl(frame);
         self.echo.set_beat_period(beat_period, ctl);
     }

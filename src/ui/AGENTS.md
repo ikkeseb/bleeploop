@@ -28,7 +28,7 @@ is a one-line adapter). UI-only edits are safe while the dev app runs,
 - **Invariant 6 lives here:** the 60 fps canvas draw loop reads a plain mutable object, never a
   signal (`looper/waveform.ts` reads non-reactive looper getters). One exception: the bar grid reads
   the BPM and sample-rate signals only when the master loop's length changes, and caches the bar
-  count (`waveform.ts` `rasterise`). The stage view's own loop (`stage/stage-loop.ts`) holds the same
+  count (`waveform.ts` `rasterise`); the meter's beats a bar reach it plain (`setGridBeats`). The stage view's own loop (`stage/stage-loop.ts`) holds the same
   line through a plain feed that Solid effects write. `verify/guards/stage-draw.mjs` checks both loops,
   the grid's exception by name and only inside its master-length gate.
   Measured cost + the fix pattern: `docs/ARCHITECTURE.md` invariant 6.
@@ -59,7 +59,8 @@ is a one-line adapter). UI-only edits are safe while the dev app runs,
   actions the UI owns come back through `src/app/midi-actions.ts`) reach them only through it. A new
   looper control gets an action, and native MIDI's `ActionId` the same id (`midi-actions.ts`'s
   typecheck and `verify/fixtures/midi-wire.json` hold the lists equal), so a pedal can learn it. Not yet: CLEAR ALL, a TRIM
-  other than half, and the continuous settings (volumes, pan, FX).
+  other than half, the meter (a picker set before a loop, like the typed BPM), and the continuous
+  settings (volumes, pan, FX).
 - **Error toasts** (`toast/Toasts.tsx` renders `src/notify.ts`) sit ADDITIVELY beside the
   `console.error` sites, which feed the release log. Keep both.
 

@@ -2,6 +2,8 @@ import { batch, createSignal, type Accessor } from 'solid-js';
 import {
   ENGINE_LANES,
   ENGINE_SLOTS,
+  FOUR_FOUR,
+  TIME_SIGNATURES,
   decodeOpenError,
   decodeSnapshot,
   encodeSessionBytes,
@@ -22,6 +24,7 @@ import {
   type LaneMix,
   type LaneState,
   type ScopeUpdate,
+  type TimeSignature,
   SCOPE_SOURCES,
 } from '../../platform';
 import { firstTakeSpan, openingSpan, type LoadSessionPayload, type PeakView, type TrackState } from './looper-types';
@@ -52,8 +55,8 @@ import { notifyError, notifyInfo } from '../../notify';
  * runs, and the `looper` / `clock` / `master` shapes the UI reads (through `audio.ts` beside this
  * file), built on engine commands and the feed.
  *
- * The engine owns the musical state: lanes, the transport (master, BPM and its lock), the beat and the
- * selection arrive on the feed, and nothing here predicts them. Each lane's mix (volume, MUTE, DUB
+ * The engine owns the musical state: lanes, the transport (master, BPM, meter and their lock), the beat
+ * and the selection arrive on the feed, and nothing here predicts them. Each lane's mix (volume, MUTE, DUB
  * FEEDBACK, pan, FX) arrives too, as the engine applied it (`Mix`); a mix control shows its gesture's value
  * until the engine has it (the lane mix section below). The toggled settings (CLICK, END STOP, FIXED,
  * RETAKE, AUTO REC, each input send on or off) arrive as the engine applied them (`Toggled`): a button,
@@ -148,6 +151,8 @@ const lanes = Array.from({ length: ENGINE_LANES }, () => createSignal<TrackView>
 const [masterFrames, setMasterFrames] = createSignal(0);
 const [bpm, setBpmSignal] = createSignal(120);
 const [bpmLocked, setBpmLocked] = createSignal(false);
+/** The meter (time signature) the engine runs, from its `Transport`: it locks with the tempo. */
+const [meter, setMeterSignal] = createSignal<TimeSignature>(FOUR_FOUR, { equals: (a, b) => a.num === b.num && a.den === b.den });
 const [selectedTrack, setSelectedTrack] = createSignal(0);
 const [beat, setBeat] = createSignal(0);
 const [countLeft, setCountLeft] = createSignal(0);
@@ -190,6 +195,14 @@ function adoptFadeBars(n: number): void {
   setFadeBarsSignal(bars);
   writeStoredNumber(FADE_BARS_KEY, bars);
 }
+/** The meter outlives a restart as FADE's bars do, kept as its index in `TIME_SIGNATURES`: written from
+ * the meter the engine APPLIED (its `Transport`), so a request a loop locked out is never kept, and sent
+ * to an engine whose settings lack it (a fresh one runs 4/4). */
+const METER_KEY = 'lf.meter';
+const storedMeter = (): TimeSignature => TIME_SIGNATURES[readStoredNumber(METER_KEY, 0, 0, TIME_SIGNATURES.length - 1)] ?? FOUR_FOUR;
+/** A reset frame whose engine lacks the kept meter: its `Transport` still shows the engine's 4/4 until
+ * the `SetMeter` sent for it applies, so that one is not written over the kept meter. */
+let meterAsked = false;
 const [retake, setRetakeSignal] = createSignal(false);
 const [autoRecord, setAutoRecordSignal] = createSignal(false);
 const [autoSensitivity, setAutoSensitivitySignal] = createSignal(AUTO_RECORD_DEFAULT_SENSITIVITY);
@@ -510,7 +523,7 @@ function applyLane(lane: number, frame: number, info: LaneInfo): void {
   if (next === 'RECORDING' && !waiting && (prev !== 'RECORDING' || plain.waiting[lane] || info.retakePass !== plain.retakePass[lane])) {
     plain.takeStart[lane] = nearestBoundary(frame);
     plain.takeFrames[lane] = laterTakeFrames();
-    plain.opening[lane] = openingSpan(bpm(), engineSampleRate());
+    plain.opening[lane] = openingSpan(bpm(), engineSampleRate(), meter().beats);
     plain.span[lane] = 0;
   }
   if (capturing(prev) && !capturing(next)) plain.revision[lane]++;
@@ -535,6 +548,8 @@ function applyEvent(ev: EngineEvent): void {
       plain.master = ev.master;
       setMasterFrames(ev.master);
       setBpmSignal(ev.bpm);
+      setMeterSignal(ev.meter);
+      if (!meterAsked) writeStoredNumber(METER_KEY, TIME_SIGNATURES.indexOf(ev.meter));
       setBpmLocked(ev.locked);
       break;
     case 'Beat': {
@@ -550,7 +565,8 @@ function applyEvent(ev: EngineEvent): void {
       else if (plain.counting && !plain.waiting.some(Boolean)) plain.counting = false;
       const gen = countGen;
       whenHeard(ev.frame, () => {
-        setBeat(beatInBar % 4);
+        // The engine counts the beats (`meter.beats` a bar: a compound meter's dotted quarters).
+        setBeat(beatInBar);
         if (gen === countGen) setCountLeft(left);
       });
       break;
@@ -781,9 +797,10 @@ function applyFrameNow(f: FeedFrame): void {
       if (!f.events.some((ev) => ev.type === 'Lane' && ev.lane === i)) applyLane(i, 0, EMPTY_INFO);
     }
     if (!f.events.some((ev) => ev.type === 'Transport')) {
-      applyEvent({ type: 'Transport', frame: 0, master: 0, bpm: bpm(), locked: false });
+      applyEvent({ type: 'Transport', frame: 0, master: 0, bpm: bpm(), meter: FOUR_FOUR, locked: false });
     }
     if (!f.events.some((ev) => ev.type === 'Selected')) setSelectedTrack(0);
+    meterAsked = false;
   }
   noteClear();
   if (f.status) setEngineRate(f.status.sampleRate);
@@ -1022,6 +1039,9 @@ function adoptSettings(settings: readonly EngineCommand[]): void {
   let masterKnown = false;
   let clickKnown = false;
   let fadeKnown = false;
+  // The engine's memory keeps a meter other than 4/4 (`settings.rs`); the meter itself comes on the
+  // frame's `Transport`.
+  let meterKnown = false;
   const sendsKnown = new Set<string>();
   for (const c of settings) {
     if (typeof c === 'string') continue;
@@ -1044,6 +1064,7 @@ function adoptSettings(settings: readonly EngineCommand[]): void {
     else if ('SetLoopEndStop' in c) setLoopEndStopSignal(c.SetLoopEndStop);
     else if ('SetFixedLength' in c) setFixedLengthSignal(c.SetFixedLength);
     else if ('SetFixedBars' in c) setFixedBarsSignal(c.SetFixedBars);
+    else if ('SetMeter' in c) meterKnown = true;
     else if ('SetFadeBars' in c) {
       fadeKnown = true;
       adoptFadeBars(c.SetFadeBars);
@@ -1071,6 +1092,9 @@ function adoptSettings(settings: readonly EngineCommand[]): void {
   if (!masterKnown) lacking.push({ SetMasterVolume: masterVolume() });
   if (!clickKnown) lacking.push({ SetClickVolume: clickVolume() });
   if (!fadeKnown) lacking.push({ SetFadeBars: fadeBars() });
+  const kept = storedMeter();
+  meterAsked = !meterKnown && kept !== FOUR_FOUR;
+  if (meterAsked) lacking.push({ SetMeter: [kept.num, kept.den] });
   // The input sends the engine lacks: values first, so a send that comes on comes on with them.
   for (const d of INPUT_SEND_PARAMS) {
     if (!sendsKnown.has(d.key)) lacking.push({ SetInputSendParam: [d.key, inputSendValues[d.key][0]()] });
@@ -1135,7 +1159,7 @@ function nextTakeMaxBars(): number {
   const master = masterFrames();
   if (master <= 0) return MAX_FIXED_BARS;
   const rate = engineSampleRate();
-  const fpb = framesPerBar(bpm(), rate);
+  const fpb = framesPerBar(bpm(), rate, meter().beats);
   if (master % fpb !== 0) return Math.min(MAX_FIXED_BARS, maxWholeBars(master, fpb));
   const bufferBars = maxWholeBars(Math.ceil(LANE_BUFFER_SECONDS * rate), fpb);
   return laterTakeBars(MAX_FIXED_BARS, master / fpb, Math.min(MAX_FIXED_BARS, bufferBars));
@@ -1148,7 +1172,7 @@ function nextTakeMaxBars(): number {
 function laterTakeFrames(): number {
   const master = plain.master;
   if (master <= 0 || retake()) return master;
-  const fpb = framesPerBar(bpm(), engineSampleRate());
+  const fpb = framesPerBar(bpm(), engineSampleRate(), meter().beats);
   if (!fixedLength()) return master % fpb === 0 ? 0 : master;
   const max = nextTakeMaxBars();
   const bars = master % fpb === 0 ? laterTakeBars(fixedBars(), master / fpb, max) : clampBars(fixedBars(), max);
@@ -1320,6 +1344,7 @@ async function exportSnapshot(options: { master?: boolean } = {}): Promise<StemS
     sampleRate: header.rate,
     masterLengthFrames: header.masterLengthFrames,
     bpm: header.bpm,
+    meter: header.meter,
     tracks: header.tracks.map((t, k) => ({
       index: t.index,
       pcm: pcm[k],
@@ -1344,14 +1369,17 @@ async function loadSession(payload: LoadSessionPayload): Promise<void> {
   const rate = device()?.sampleRate;
   if (!rate) throw new Error('loadSession: no audio device is open');
   const { bpm, bars, masterLengthFrames: master, tracks } = payload;
+  const timeSig = payload.meter ?? FOUR_FOUR;
   if (!plain.state.every((s) => s === 'EMPTY')) {
     throw new Error('loadSession: import never overwrites a session; clear all tracks first');
   }
   if (!Array.isArray(tracks) || tracks.length < 1) throw new Error('loadSession: payload has no tracks');
   if (!Number.isInteger(bpm) || bpm < 40 || bpm > 300) throw new Error(`loadSession: bpm must be an integer in 40..300, got ${bpm}`);
   if (!Number.isInteger(bars) || bars < 1) throw new Error(`loadSession: bars must be a positive integer, got ${bars}`);
-  const expected = bars * framesPerBar(bpm, rate);
-  if (master !== expected) throw new Error(`loadSession: BPM, bars and masterLengthFrames disagree (expected ${expected}, got ${master})`);
+  const expected = bars * framesPerBar(bpm, rate, timeSig.beats);
+  if (master !== expected) {
+    throw new Error(`loadSession: BPM, ${timeSig.num}/${timeSig.den} bars and masterLengthFrames disagree (expected ${expected}, got ${master})`);
+  }
   const seen = new Set<number>();
   const loaded = tracks.map((t) => {
     if (!Number.isInteger(t.index) || t.index < 0 || t.index >= ENGINE_LANES) throw new Error(`loadSession: track index ${t.index} out of range`);
@@ -1368,6 +1396,8 @@ async function loadSession(payload: LoadSessionPayload): Promise<void> {
   });
   const header: LoadHeader = {
     bpm,
+    // A 4/4 header names no meter, as one from before meters.
+    ...(timeSig === FOUR_FOUR ? {} : { meter: timeSig }),
     bars,
     masterLengthFrames: master,
     tracks: loaded.map((t) => ({ index: t.index, frames: master, reversed: t.reversed, state: TO_LOAD[t.state], mix: t.mix })),
@@ -1412,6 +1442,13 @@ function setBpm(n: number): void {
   if (clamped !== bpm()) sendEngine({ SetBpm: clamped });
 }
 
+/** SetMeter, unless the tempo (and with it the meter) is locked. The feed's Transport echoes the meter
+ * the engine took. */
+function setMeter(m: TimeSignature): void {
+  if (bpmLocked() || !TIME_SIGNATURES.includes(m) || m === meter()) return;
+  sendEngine({ SetMeter: [m.num, m.den] });
+}
+
 // Tap tempo stays in the UI: it averages the taps and sends SetBpm.
 const TAP_RESET_MS = 2000;
 const TAP_MAX_HISTORY = 8;
@@ -1437,6 +1474,11 @@ export const engineClock = {
   /** The engine's pulse runs whenever a device does. */
   running: (): boolean => device() !== null,
   bpmLocked,
+  /** The meter and its picker: it locks with the tempo. TAP and BPM count its `beats`. */
+  meter,
+  setMeter,
+  meters: TIME_SIGNATURES,
+  /** The counted beat in the bar the engine last made heard (0 .. `meter().beats` - 1). */
   beat,
   countLeft,
   metronomeOn: metronome,

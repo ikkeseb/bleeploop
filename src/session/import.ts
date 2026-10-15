@@ -15,6 +15,7 @@
 // The session.json schema + validateSession live in the PURE session-schema.ts (no engine/looper/Web
 // Audio) so verify/guards/import.mjs can import the validator under Node. This coordinator is the
 // browser-only half.
+import { TIME_SIGNATURES } from '../platform';
 import { MAX_LOOP_SECONDS, TRACK_COUNT } from '../ui/state/looper-types';
 import type { SlotTone } from '../ui/state/slot-tones';
 import type { SessionSource } from './session-source';
@@ -79,7 +80,7 @@ export async function importSession(bytes: Uint8Array | ArrayBuffer, source: Ses
   } catch (err) {
     throw new Error(`could not parse ${sessions[0].name}: ${err instanceof Error ? err.message : String(err)}`);
   }
-  const session = validateSession(parsed);
+  const session = validateSession(parsed, TIME_SIGNATURES);
   const tones: SlotTone[] = validateSessionPlugins(parsed, session.tracks.map((t) => t.file)).map((p) => {
     const entry = byName.get(p.file);
     if (!entry) throw new Error(`session.json lists "${p.file}" but the archive has no entry with that name`);
@@ -129,6 +130,7 @@ export async function importSession(bytes: Uint8Array | ArrayBuffer, source: Ses
 
   await source.loadSession({
     bpm: session.bpm,
+    meter: session.meter,
     bars: session.bars,
     masterLengthFrames: session.masterLengthFrames,
     tracks,

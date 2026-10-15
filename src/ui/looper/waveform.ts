@@ -21,7 +21,9 @@ import { masterBars } from './shared';
  * never disagree with the spoken loop length. That is the ONLY place Solid signals are read
  * (`clock.bpm()`, and the device's rate behind `sampleRate()`), and it is gated to a
  * master-length change (a rare structural event; BPM is locked for the life of a committed master)
- * inside the cached-bitmap path — never in the per-frame steady state. (A first take's opening span
+ * inside the cached-bitmap path — never in the per-frame steady state. The meter's beats a bar arrive
+ * plain, through `setGridBeats` (an effect in `Looper.tsx`); a new meter re-reads every lane's grid, since
+ * two meters can share a master length (one 4/4 bar and two 6/8 bars at the same BPM). (A first take's opening span
  * reads the tempo once per take: the engine store takes it as the take starts, off the draw loop.)
  * `verify/guards/stage-draw.mjs` holds this module to that, the exception allowed by name.
  *
@@ -33,7 +35,8 @@ import { masterBars } from './shared';
 const GRID_BEAT = 'rgba(148,168,215,.085)'; // beat lines — a whisper (bumped from .055: the --well lift to .04 same-hue was swallowing them)
 const GRID_BAR = 'rgba(148,168,215,.13)'; //   bar lines — readable
 const GRID_NUM = 'rgba(148,168,215,.28)'; //   engraved bar numbers, top-left of each bar
-const BEATS_PER_BAR = 4;
+/** The meter's counted beats a bar (`setGridBeats`): the grid's beat lines, a bar line every `gridBeats`. */
+let gridBeats = 4;
 
 interface LaneColors {
   empty: string;
@@ -217,6 +220,17 @@ export function unregisterCardMeter(slot: 0 | 1, el: HTMLElement): void {
   stopIfIdle();
 }
 
+/** The meter's counted beats a bar, from the Solid side (`Looper.tsx`): every lane's grid is drawn again
+ * with them on its next frame. */
+export function setGridBeats(beats: number): void {
+  if (beats === gridBeats) return;
+  gridBeats = beats;
+  for (const lane of lanes.values()) {
+    lane.gridMaster = -1;
+    lane.lastMasterFrames = -1;
+  }
+}
+
 /** Register the record-level meter element (Transport.tsx). */
 export function registerInputMeter(el: HTMLElement): void {
   meter = { el, last: -1, hot: false, ariaTick: 0 };
@@ -306,10 +320,10 @@ function syncSize(lane: Lane): boolean {
 function drawGrid(lane: Lane, bars: number): void {
   if (bars <= 0) return;
   const { wctx, dw, dh, dpr } = lane;
-  const total = bars * BEATS_PER_BAR;
+  const total = bars * gridBeats;
   for (let i = 1; i < total; i++) {
     const gx = Math.round((i / total) * dw);
-    wctx.fillStyle = i % BEATS_PER_BAR === 0 ? GRID_BAR : GRID_BEAT;
+    wctx.fillStyle = i % gridBeats === 0 ? GRID_BAR : GRID_BEAT;
     wctx.fillRect(gx, 0, 1, dh);
   }
   wctx.fillStyle = GRID_NUM;
@@ -354,7 +368,7 @@ function rasterise(
   // bpm signal read) is cached and only recomputed when the master loop length changes.
   if (masterFrames !== lane.gridMaster) {
     lane.gridMaster = masterFrames;
-    lane.gridBars = masterFrames > 0 ? masterBars(masterFrames, clock.bpm(), sampleRate()) : 0;
+    lane.gridBars = masterFrames > 0 ? masterBars(masterFrames, clock.bpm(), sampleRate(), gridBeats) : 0;
   }
   drawGrid(lane, lane.gridBars);
 

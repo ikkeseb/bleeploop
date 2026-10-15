@@ -42,7 +42,7 @@ use crate::dsp::buffer_source::AudioBuffer;
 use crate::dsp::fx::{default_fx_states, Ctl, FxChain, FxKind, FxParam, FxParamDef, FxState, FxTiming, ReverbBus, REVERB_DECAY, REVERB_PRE_DELAY};
 use crate::dsp::param::QUANTUM;
 use crate::dsp::reverb_ir;
-use crate::grid::{frames_per_bar, Frame};
+use crate::grid::{frames_per_bar, Frame, Meter};
 
 /// `value` within `def`'s range, an integer param rounded half up first.
 fn clamped(def: &FxParamDef, value: f64) -> f64 {
@@ -104,8 +104,9 @@ pub struct LaneFx {
     bus: ReverbBus,
     /// Device frames the DSP clock is behind.
     offset: Frame,
-    /// The grid the chains hold: the origin on the DSP clock and the tempo.
-    timing: Option<(Frame, u32)>,
+    /// The grid the chains hold: its origin on the DSP clock and its quarter note's period (as bits). The
+    /// origin re-anchors a stutter's phase; the period changes with the tempo or the meter.
+    timing: Option<(Frame, u64)>,
     pans: [Pan; TRACK_COUNT],
     pan_coef: f64,
     /// Per lane, its chain's output over the chunk [`LaneFx::render`] last rendered: `[min, max]`,
@@ -255,15 +256,20 @@ impl LaneFx {
     }
 
     /// Hand every chain the looper's beat grid if it moved: its origin at `origin` (a device frame), a
-    /// beat a quarter of a bar at `bpm`. No grid (`master` 0) leaves the last one.
-    pub fn follow_grid(&mut self, origin: Frame, master: Frame, bpm: u32, frame: Frame) {
-        let anchor = origin - self.offset;
-        if master == 0 || self.timing == Some((anchor, bpm)) {
+    /// beat the quarter note of a bar of `meter` at `bpm` (the delay divisions are note values). No grid
+    /// (`master` 0) leaves the last one.
+    pub fn follow_grid(&mut self, origin: Frame, master: Frame, bpm: u32, meter: Meter, frame: Frame) {
+        if master == 0 {
             return;
         }
-        self.timing = Some((anchor, bpm));
+        let anchor = origin - self.offset;
         let sr = self.sample_rate as f64;
-        let timing = FxTiming { anchor: anchor as f64 / sr, beat_period: frames_per_bar(bpm as f64, self.sample_rate) as f64 / sr / 4.0 };
+        let beat_period = frames_per_bar(bpm as f64, self.sample_rate, meter) as f64 / sr / meter.quarters_per_bar();
+        if self.timing == Some((anchor, beat_period.to_bits())) {
+            return;
+        }
+        self.timing = Some((anchor, beat_period.to_bits()));
+        let timing = FxTiming { anchor: anchor as f64 / sr, beat_period };
         let ctl = self.ctl(frame);
         for chain in self.chains.iter_mut() {
             chain.set_timing(timing, ctl).expect("the looper's grid is finite with a positive beat");

@@ -3,13 +3,21 @@
 // Imports the REAL session validator from the PURE schema module (Node TS type-stripping — import.ts
 // itself statically imports engine/looper and is browser-only) so it cannot drift from the source.
 // Asserts the export.ts session.json schema gate: a golden session round-trips, the formatVersion gate
-// (missing = legacy v1, ===1 accepted, newer rejected), every malformed shape throws descriptively, and
+// (missing = legacy v1, ===1 accepted, newer rejected) and the meter it carries (v1 is 4/4, v2 names an
+// offered meter in this build's beats; an archive `prepareStemArchive` writes for each offered meter reads
+// back with its bars, as export and recovery write it), every malformed shape throws descriptively, and
 // volume clamp + legacy muted/state values normalize (a missing dubFeedback reads as 1, a missing pan as
 // the centre), while invalid shapes reject. This is what SESSION IMPORT relies on to never hand looper.loadSession a payload that
 // could corrupt the master grid.
 // Run: node verify/guards/import.mjs
-import { validateSession, validateSessionPlugins } from '../../src/session/session-schema.ts';
+import { validateSession as validateWith, validateSessionPlugins } from '../../src/session/session-schema.ts';
+import { prepareStemArchive, snapshotBars } from '../../src/session/stem-archive.ts';
+import { TIME_SIGNATURES } from '../../src/platform/engine-wire.ts';
+import { defaultFxStates } from '../../src/ui/state/fx-metadata.ts';
 import { framesPerBar } from '../../src/ui/state/quantize.ts';
+
+/** The validator as import.ts calls it, with the meters this build offers. */
+const validateSession = (json) => validateWith(json, TIME_SIGNATURES);
 
 let fails = 0,
   checks = 0;
@@ -126,8 +134,8 @@ for (const state of ['RECORDING', 'EMPTY', 'paused', 1, null]) {
   ok('A3.missing reversed defaults false', legacyOut.tracks.every((track) => track.reversed === false));
   ok('A3.formatVersion 1 accepts', validateSession({ ...golden(), formatVersion: 1 }).bpm === 120);
 }
-throws('A3.formatVersion 2 rejects with newer-version message',
-  () => validateSession({ ...golden(), formatVersion: 2 }), 'newer version of BleepLoop');
+throws('A3.formatVersion 3 rejects with newer-version message',
+  () => validateSession({ ...golden(), formatVersion: 3 }), 'newer version of BleepLoop');
 throws('A3.formatVersion 99 rejects with newer-version message',
   () => validateSession({ ...golden(), formatVersion: 99 }), 'newer version of BleepLoop');
 throws('A3.non-integer formatVersion rejected as invalid',
@@ -136,6 +144,81 @@ throws('A3.zero formatVersion rejected as invalid',
   () => validateSession({ ...golden(), formatVersion: 0 }), 'positive integer');
 throws('A3.string formatVersion rejected as invalid',
   () => validateSession({ ...golden(), formatVersion: 'one' }), 'positive integer');
+
+// ---- A4. the meter: v1 is 4/4, v2 names an offered meter in this build's beats, the bars count in it ----
+const meterOf = (num, den) => TIME_SIGNATURES.find((m) => m.num === num && m.den === den);
+/** `ok` on what `json` validates to, a refusal failing the check instead of the guard. */
+function reads(name, json, cond) {
+  let out;
+  try {
+    out = validateSession(json);
+  } catch (e) {
+    return ok(name, false, e instanceof Error ? e.message : String(e));
+  }
+  ok(name, cond(out), JSON.stringify([out.meter, out.bars, out.masterLengthFrames]));
+}
+/** A v2 session in `meter` (a wire `TimeSignature`), its grid `bars` of it at 120 BPM / 48 kHz. */
+function inMeter(meter, bars = 3) {
+  const s = golden();
+  s.formatVersion = 2;
+  s.meter = { ...meter };
+  s.bpm = 120;
+  s.bars = bars;
+  s.sampleRate = 48000;
+  s.masterLengthFrames = bars * framesPerBar(120, 48000, meter.beats);
+  for (const track of s.tracks) track.frames = s.masterLengthFrames;
+  return s;
+}
+reads('A4.v1 without a meter reads 4/4', golden(), (out) => out.meter === meterOf(4, 4));
+reads('A4.v1 naming 4/4 reads 4/4', { ...golden(), formatVersion: 1, meter: { num: 4, den: 4, beats: 4 } }, (out) => out.meter === meterOf(4, 4));
+for (const m of TIME_SIGNATURES) {
+  reads(`A4.v2 ${m.num}/${m.den} reads its meter and 3 bars of it`, inMeter(m), (out) => out.meter === m && out.bars === 3);
+}
+// 2 bars of 3/4 at 120 / 48 kHz are 144000 frames: not 2 bars of 4/4 (192000), and 6/8's 2 bars at a dotted
+// 120 are one 4/4 bar: the frames check reads the meter's bars.
+reads('A4.the frames check counts the meter (3/4)', inMeter(meterOf(3, 4), 2), (out) => out.masterLengthFrames === 144000);
+reads('A4.the frames check counts the meter (6/8)', inMeter(meterOf(6, 8), 2), (out) => out.masterLengthFrames === 96000);
+throws('A4.v2 without a meter rejects', () => {
+  const s = inMeter(meterOf(6, 8));
+  delete s.meter;
+  validateSession(s);
+}, 'has none');
+throws('A4.v1 carrying 3/4 rejects', () => validateSession({ ...inMeter(meterOf(3, 4)), formatVersion: 1 }), 'format v1 session is 4/4');
+throws('A4.missing formatVersion carrying 6/8 rejects', () => {
+  const s = inMeter(meterOf(6, 8));
+  delete s.formatVersion;
+  validateSession(s);
+}, 'format v1 session is 4/4');
+throws('A4.6/8 counted in another beat rejects, naming the reading', () => validateSession({ ...inMeter(meterOf(6, 8)), meter: { num: 6, den: 8, beats: 6 } }), 'counts 6/8 in 6 beats a bar');
+throws('A4.a meter with no beats rejects', () => validateSession({ ...inMeter(meterOf(3, 4)), meter: { num: 3, den: 4 } }), 'counts 3/4 in undefined');
+throws('A4.an unoffered meter rejects', () => validateSession({ ...inMeter(meterOf(4, 4)), meter: { num: 7, den: 8, beats: 7 } }), 'not a time signature this build offers');
+throws('A4.a meter that is not an object rejects', () => validateSession({ ...inMeter(meterOf(4, 4)), meter: '6/8' }), 'meter must be an object');
+throws('A4.v2 6/8 bars that are 4/4 bars reject', () => {
+  const s = inMeter(meterOf(6, 8), 2);
+  s.masterLengthFrames = 2 * framesPerBar(120, 48000);
+  for (const track of s.tracks) track.frames = s.masterLengthFrames;
+  validateSession(s);
+}, 'grid expects 96000 frames');
+
+// ---- A5. what export and recovery write reads back: every offered meter, odd bar counts ----
+// `prepareStemArchive` is the session.json both write (recovery in its worker); `snapshotBars` their bars.
+for (const meter of TIME_SIGNATURES) {
+  for (const bars of [1, 3, 5]) {
+    const rate = 48000;
+    const bpm = 97;
+    const frames = bars * framesPerBar(bpm, rate, meter.beats);
+    const snap = { sampleRate: rate, masterLengthFrames: frames, bpm, meter, tracks: [
+      { index: 0, pcm: new Float32Array(frames), volume: 1, muted: false, reversed: false, state: 'PLAYING', fx: defaultFxStates() },
+    ] };
+    const name = `A5.${meter.num}/${meter.den} x${bars}`;
+    ok(`${name} snapshotBars counts the meter`, snapshotBars(snap) === bars, String(snapshotBars(snap)));
+    const { session } = prepareStemArchive(snap, { bpm, bars: snapshotBars(snap) }, 'lf', 'float32');
+    const fourFour = meter.num === 4 && meter.den === 4;
+    ok(`${name} writes v${fourFour ? 1 : 2}`, session.formatVersion === (fourFour ? 1 : 2), String(session.formatVersion));
+    ok(`${name} names the meter only off 4/4`, fourFour ? !('meter' in session) : JSON.stringify(session.meter) === JSON.stringify({ num: meter.num, den: meter.den, beats: meter.beats }), JSON.stringify(session.meter));
+    reads(`${name} reads back`, JSON.parse(JSON.stringify(session)), (out) => out.meter === meter && out.bars === bars && out.masterLengthFrames === frames);
+  }
+}
 
 // ---- B. app tag gate ----
 throws('B.wrong app tag', () => validateSession({ ...golden(), app: 'NotBleepLoop' }), 'app tag');

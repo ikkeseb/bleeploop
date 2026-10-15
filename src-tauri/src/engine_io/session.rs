@@ -8,14 +8,17 @@
 //! Both directions: `[u32 LE header length][UTF-8 JSON header][f32 LE mono PCM]`, one block of
 //! `masterLengthFrames` samples per header track, in header order, in play order (a reversed lane's
 //! loop as it is heard; `reversed` is its flag). A snapshot's header:
-//! `{"rate","masterLengthFrames","bpm","tracks":[{"index","frames","reversed","state","mix"}]}`, the
+//! `{"rate","masterLengthFrames","bpm","meter","tracks":[{"index","frames","reversed","state","mix"}]}`,
+//! `meter` the master's (`{"num","den","beats"}`, `wire`'s `meter_obj`), the
 //! committed lanes ascending, `state` `"Playing"` | `"Stopped"` | `"Overdubbing"` (an overdubbing lane
 //! gives its loop as committed before the layer in flight), `mix` the lane's volume, mute, DUB FEEDBACK,
 //! pan and FX as the engine applied them on the frame the snapshot pinned the loops (`wire::WireLaneMix`;
 //! a load's `mix` may leave `pan` out: centred).
-//! A load's: `{"bpm","bars","masterLengthFrames","tracks"}` with `state` `"Playing"` | `"Stopped"` and
-//! every track's `mix` (refused without one), into an engine whose lanes are all EMPTY; `bpm` is an
-//! integer 40..300 and `masterLengthFrames` is `bars` bars of it at the engine's rate. The engine sets
+//! A load's: `{"bpm","meter","bars","masterLengthFrames","tracks"}` with `state` `"Playing"` | `"Stopped"`
+//! and every track's `mix` (refused without one), into an engine whose lanes are all EMPTY; `bpm` is an
+//! integer 40..300, `meter` is optional (4/4 without it: a header from before meters) and refused when
+//! this build counts its beats otherwise, and `masterLengthFrames` is `bars` bars of the meter at `bpm`
+//! at the engine's rate. The meter and the tempo lock together with the load. The engine sets
 //! each lane's mix on the frame its loop goes in, so the first loaded sample plays at it; the feed
 //! hears it as the lane's `Event::Mix`, which the settings memory keeps (`settings`).
 //!
@@ -34,12 +37,12 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::Ordering::{Acquire, Relaxed};
 use std::time::{Duration, Instant};
 
-use lf_engine::grid::{frames_per_bar, Frame};
+use lf_engine::grid::{frames_per_bar, Frame, Meter};
 use lf_engine::overview::PEAK_FRAMES;
 use lf_engine::{LaneMix, LaneState, Load, LoadTrack, SessionError, SessionJob, SessionPort, Snapshot, WetMaster, TRACK_COUNT};
 use serde::{Deserialize, Serialize};
 
-use super::wire::WireLaneMix;
+use super::wire::{meter_obj, WireLaneMix};
 use super::EngineHost;
 
 /// How long a snapshot or a load may take: a snapshot of five 60-second lanes copies for about 1.4 s
@@ -73,6 +76,8 @@ pub(super) struct SnapshotHeader {
     rate: u32,
     master_length_frames: Frame,
     bpm: u32,
+    #[serde(with = "meter_obj")]
+    meter: Meter,
     tracks: Vec<TrackHeader>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     master: Option<MasterHeader>,
@@ -90,9 +95,19 @@ struct MasterHeader {
 #[serde(rename_all = "camelCase")]
 pub(super) struct LoadHeader {
     bpm: u32,
+    #[serde(default = "four_four", skip_serializing_if = "is_four_four", with = "meter_obj")]
+    meter: Meter,
     bars: Frame,
     master_length_frames: Frame,
     tracks: Vec<TrackHeader>,
+}
+
+fn four_four() -> Meter {
+    Meter::FOUR_FOUR
+}
+
+fn is_four_four(meter: &Meter) -> bool {
+    *meter == Meter::FOUR_FOUR
 }
 
 impl EngineHost {
@@ -140,9 +155,9 @@ impl EngineHost {
         if s.count == 0 || samples == 0 {
             return Err("export render: no loop to render".to_string());
         }
-        let fpb = frames_per_bar(s.bpm as f64, s.rate);
+        let fpb = frames_per_bar(s.bpm as f64, s.rate, s.meter);
         if fpb <= 0 || s.master % fpb != 0 {
-            return Err(format!("export render: {} frames are not whole bars at {} BPM and {} Hz", s.master, s.bpm, s.rate));
+            return Err(format!("export render: {} frames are not whole bars of {}/{} at {} BPM and {} Hz", s.master, s.meter.num(), s.meter.den(), s.bpm, s.rate));
         }
         let tracks = s.tracks[..s.count]
             .iter()
@@ -151,7 +166,7 @@ impl EngineHost {
             .map(|(k, t)| load_track(t.index, s.pcm[k * samples..(k + 1) * samples].iter().copied(), samples, t.reversed, true, t.mix))
             .collect();
         let mixes: Vec<_> = s.tracks[..s.count].iter().flatten().map(|t| t.mix).collect();
-        let load = Load { bpm: s.bpm, bars: s.master / fpb, master: s.master, tracks, result: None };
+        let load = Load { bpm: s.bpm, meter: s.meter, bars: s.master / fpb, master: s.master, tracks, result: None };
         let started = Instant::now();
         let settings = self.settings();
         // A panic is a failed render too: the stems still go out.
@@ -177,8 +192,9 @@ impl EngineHost {
             return Err(format!("session: bpm {} or bars {} out of range", header.bpm, header.bars));
         }
         // The header comes from outside: a bar count whose length overflows has no length at all.
-        if header.bars.checked_mul(frames_per_bar(header.bpm as f64, rate)) != Some(master) {
-            return Err(format!("session: {} bars at {} BPM are not {master} frames at {rate} Hz", header.bars, header.bpm));
+        if header.bars.checked_mul(frames_per_bar(header.bpm as f64, rate, header.meter)) != Some(master) {
+            let (num, den) = (header.meter.num(), header.meter.den());
+            return Err(format!("session: {} bars of {num}/{den} at {} BPM are not {master} frames at {rate} Hz", header.bars, header.bpm));
         }
         if master <= 0 || master as usize > capacity {
             return Err(format!("session: {master} frames do not fit the engine's {capacity}"));
@@ -195,7 +211,7 @@ impl EngineHost {
             let play = pcm[k * samples * 4..(k + 1) * samples * 4].chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]));
             tracks.push(load_track(t.index, play, capacity, t.reversed, t.state == TrackState::Playing, t.mix.0));
         }
-        let load = Load { bpm: header.bpm, bars: header.bars, master, tracks, result: None };
+        let load = Load { bpm: header.bpm, meter: header.meter, bars: header.bars, master, tracks, result: None };
         let SessionJob::Load(load) = self.session_job(&mut stale, SessionJob::Load(load))? else {
             return Err("the engine answered a load with a snapshot".to_string());
         };
@@ -203,7 +219,8 @@ impl EngineHost {
         match load.result {
             Some(Ok(())) => {
                 // Each lane's mix reaches the kept settings as any applied mix does: its `Event::Mix`.
-                log::info!("[engine_io] session loaded: {} tracks, {master} frames at {} BPM", load.tracks.len(), header.bpm);
+                let (num, den) = (header.meter.num(), header.meter.den());
+                log::info!("[engine_io] session loaded: {} tracks, {master} frames at {} BPM in {num}/{den}", load.tracks.len(), header.bpm);
                 Ok(())
             }
             Some(Err(e)) => Err(e.text()),
@@ -357,6 +374,7 @@ fn snapshot_bytes(s: &Snapshot, wet: Option<Result<WetMaster, String>>) -> Vec<u
         rate: s.rate,
         master_length_frames: s.master,
         bpm: s.bpm,
+        meter: s.meter,
         tracks,
         master: wet.as_ref().map(|_| MasterHeader { frames: s.master }),
         master_error,

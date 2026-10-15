@@ -15,7 +15,7 @@ mod common;
 use common::dub::ramp;
 use common::edges::{join, level, out, sample, tail};
 use common::{code, Opts, Rig};
-use lf_engine::grid::{Frame, Grid};
+use lf_engine::grid::{Frame, Grid, Meter};
 use lf_engine::{Command, Event, LaneState};
 
 const DUB: f32 = 1.0 / 64.0;
@@ -319,7 +319,7 @@ fn a_stop_and_a_play_ramp_from_the_press_and_leave_the_grid_the_state_and_the_ev
     };
     heard(&rig, stop, rig.frame, |f| lane0(f) + OTHER, "lane 0's tail and its fade-in beside lane 1");
     // The beats stay on the master grid (one bar, four beats a loop).
-    let grid = Grid::master(anchor, master, 1);
+    let grid = Grid::master(anchor, master, 1, Meter::FOUR_FOUR);
     let beats = rig.beats_since(mark);
     assert!(beats.len() >= 2 && beats.iter().all(|b| (b.0 - grid.beat_frame(0)) % (master / 4) == 0), "{beats:?}");
 

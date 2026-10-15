@@ -1,7 +1,7 @@
 import { For, Show, createEffect, createMemo, createSignal, onCleanup } from 'solid-js';
 import { clock, looper, master, sampleRate } from '../state/audio';
 import { FADE_BARS, engineFade, laterTakeBars } from '../state/engine-store';
-import { anyTrackIn, createTwoStepConfirm, masterBars } from '../looper/shared';
+import { anyTrackIn, beatIndices, createTwoStepConfirm, masterBars } from '../looper/shared';
 import { autoRecGate, fadeGate, fixedGate, retakeGate, tapGate } from '../looper/gates';
 import { meterFrac, registerInputMeter, registerPhaseDial, unregisterInputMeter, unregisterPhaseDial } from '../looper/waveform';
 import { autoRecordThreshold } from '../state/auto-record';
@@ -11,7 +11,8 @@ import './transport.css';
 /**
  * Command-bar transport cluster. Renders as a Fragment so its children become direct
  * flex items of the `.cmd` header in app.tsx — the internal `.grow` spacer then pushes master + the
- * app.tsx tool icons to the far right. Left→right: BPM group (34px numeral + steppers + beat dots) · TAP ·
+ * app.tsx tool icons to the far right. Left→right: BPM group (34px numeral + steppers + the meter
+ * picker over the beat dots) · TAP ·
  * CLICK / FIXED-N / RETAKE / AUTO toggles · loop ring-dial readout · END STOP · ■/▶ ALL + FADE and its bars
  * + ✕ ALL (two-step) + the record level (raw input is a slot set to Off and live) · IN FX (`InputFx.tsx`) ·
  * spacer · master mute + slider + value. EXPORT / IMPORT are icon tools in app.tsx's `.tools`
@@ -87,7 +88,7 @@ export function Transport(props: { returnFocus?: (el: HTMLElement | undefined) =
   // ----- loop ring-dial readout (moved off Looper's lp__head; same bars/secs math) -----
   const masterFrames = () => looper.masterLengthFrames();
   const hasMaster = () => masterFrames() > 0;
-  const loopBars = () => masterBars(masterFrames(), clock.bpm(), sampleRate());
+  const loopBars = () => masterBars(masterFrames(), clock.bpm(), sampleRate(), clock.meter().beats);
   const loopSecs = () => masterFrames() / sampleRate();
   // r=16 ⇒ circumference 2π·16 ≈ 100.53; the progress arc fills as the loop phase goes 0→1. The arc is
   // driven by the waveform rAF loop (registerPhaseDial), not a signal — invariant 6.
@@ -156,10 +157,22 @@ export function Transport(props: { returnFocus?: (el: HTMLElement | undefined) =
 
   onCleanup(() => clearTimeout(pulseTimer));
 
+  // ----- the meter: picked before a loop, locked with the tempo (the engine drops a SetMeter while a
+  // loop exists). A compound meter (x/8) counts its dotted quarters: BPM, TAP, the count-in and the dots.
+  const meterName = (m: { num: number; den: number }) => `${m.num}/${m.den}`;
+  const compound = () => clock.meter().den === 8;
+  const meterTitle = () =>
+    clock.bpmLocked()
+      ? 'Meter locked to the loop. Clear all to change'
+      : compound()
+        ? `Time signature. BPM and TAP count dotted quarters, ${clock.meter().beats} a bar`
+        : 'Time signature';
+
   return (
     <>
-      {/* BPM group — big mono numeral, ± steppers, unit + beat dots. Read-only once a loop fixes the
-          tempo (lock glyph + disabled steppers + one-shot pulse make the freeze legible). */}
+      {/* BPM group — big mono numeral, ± steppers, unit + meter picker over the beat dots. Read-only once a
+          loop fixes the tempo and the meter (lock glyph + disabled steppers and picker + one-shot pulse
+          make the freeze legible). */}
       <div
         class="transport__bpm-group"
         classList={{
@@ -224,13 +237,32 @@ export function Transport(props: { returnFocus?: (el: HTMLElement | undefined) =
         </button>
 
         <div class="transport__bpm-meta">
-          <span class="transport__bpm-unit">BPM</span>
+          <div class="transport__bpm-line">
+            <span class="transport__bpm-unit">BPM</span>
+            {/* Controlled: the native select changes its own value before the engine has it, so it is
+                set back to the meter shown; the feed's Transport brings the one the engine took. A pick
+                with the mouse hands the transport keys back (`src/app/transport-keys.ts`). */}
+            <select
+              class="transport__meter"
+              aria-label="Time signature"
+              title={meterTitle()}
+              disabled={clock.bpmLocked()}
+              value={meterName(clock.meter())}
+              onChange={(e) => {
+                const picked = clock.meters.find((m) => meterName(m) === e.currentTarget.value);
+                if (picked) clock.setMeter(picked);
+                e.currentTarget.value = meterName(clock.meter());
+              }}
+            >
+              <For each={clock.meters}>{(m) => <option value={meterName(m)}>{meterName(m)}</option>}</For>
+            </select>
+          </div>
           <div
             class="transport__beats"
             role="img"
-            aria-label={clock.running() ? `Beat ${clock.beat() + 1}` : 'Transport idle'}
+            aria-label={clock.running() ? `Beat ${clock.beat() + 1} of ${clock.meter().beats}` : 'Transport idle'}
           >
-            <For each={[0, 1, 2, 3]}>
+            <For each={beatIndices(clock.meter().beats)}>
               {(b) => (
                 <i
                   class="transport__beat"
@@ -250,7 +282,9 @@ export function Transport(props: { returnFocus?: (el: HTMLElement | undefined) =
         aria-label="Tap tempo"
         disabled={!tapGate().ok}
         onClick={() => clock.tap()}
-        title={clock.bpmLocked() ? 'Tempo locked to the loop. Clear all to retap' : 'Tap a tempo'}
+        title={
+          clock.bpmLocked() ? 'Tempo locked to the loop. Clear all to retap' : compound() ? 'Tap a tempo in dotted quarters' : 'Tap a tempo'
+        }
       >
         TAP
       </button>

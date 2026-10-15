@@ -11,7 +11,7 @@ mod common;
 
 use lf_engine::dsp::compressor::Compressor;
 use lf_engine::dsp::fx::{FxKind, FxParam, MAX_FEEDBACK};
-use lf_engine::grid::{frames_per_bar, Frame};
+use lf_engine::grid::{frames_per_bar, Frame, Meter};
 use lf_engine::render::{wet_master, wet_master_with, RenderOptions, WetMaster, TAIL_THRESHOLD};
 use lf_engine::{Command, InputSend, Instrument, LaneMix, Load, LoadTrack, NoteTarget};
 
@@ -33,8 +33,8 @@ fn lane(index: u8, impulses: &[(usize, f32)]) -> LoadTrack {
 
 /// A one-bar session at 120 BPM.
 fn load(tracks: Vec<LoadTrack>) -> Load {
-    assert_eq!(frames_per_bar(BPM as f64, RATE), MASTER as Frame);
-    Load { bpm: BPM, bars: 1, master: MASTER as Frame, tracks, result: None }
+    assert_eq!(frames_per_bar(BPM as f64, RATE, Meter::FOUR_FOUR), MASTER as Frame);
+    Load { bpm: BPM, meter: Meter::FOUR_FOUR, bars: 1, master: MASTER as Frame, tracks, result: None }
 }
 
 /// Every track at the default mix but those in `mixes` (by load position).
@@ -133,7 +133,7 @@ fn busy_lane(index: u8) -> LoadTrack {
 fn the_master_is_exactly_the_loop_long_on_both_channels() {
     // 3 bars at 97 BPM and 44.1 kHz: a loop no power of two or block divides.
     let (rate, bpm, bars) = (44_100, 97, 3);
-    let master = bars * frames_per_bar(bpm as f64, rate);
+    let master = bars * frames_per_bar(bpm as f64, rate, Meter::FOUR_FOUR);
     let tracks = || {
         (0..2u8)
             .map(|i| {
@@ -142,7 +142,7 @@ fn the_master_is_exactly_the_loop_long_on_both_channels() {
             })
             .collect::<Vec<_>>()
     };
-    let session = |tracks| Load { bpm, bars: bars as Frame, master, tracks, result: None };
+    let session = |tracks| Load { bpm, meter: Meter::FOUR_FOUR, bars: bars as Frame, master, tracks, result: None };
     let plain = [LaneMix::default(); 2];
     let out = wet_master(rate, session(tracks()), &plain, &[]).unwrap();
     assert_eq!((out.left.len(), out.right.len()), (master as usize, master as usize));
@@ -246,12 +246,12 @@ fn a_delay_at_full_feedback_warms_for_every_echo_and_no_more() {
     // the kept pass by less than the threshold. A recurrence a 128-frame quantum longer (16 ms here,
     // where a port of Tone's cycle lands it) would make it 38.9 s and 3 passes.
     let (rate, bpm, bars) = (8_000, 300, 23);
-    let master = bars * frames_per_bar(bpm as f64, rate);
+    let master = bars * frames_per_bar(bpm as f64, rate, Meter::FOUR_FOUR);
     // One impulse at the loop's end: its echoes reach furthest into the passes after it.
     let session = || {
         let mut buf = vec![0.0f32; master as usize];
         buf[master as usize - 1] = A;
-        Load { bpm, bars, master, tracks: vec![LoadTrack { index: 0, buf, peaks: Vec::new(), reversed: false, playing: true, mix: LaneMix::default() }], result: None }
+        Load { bpm, meter: Meter::FOUR_FOUR, bars, master, tracks: vec![LoadTrack { index: 0, buf, peaks: Vec::new(), reversed: false, playing: true, mix: LaneMix::default() }], result: None }
     };
     let quarter = |feedback: f64| [delay(0.0, feedback, 1.0)];
     // The first echo's level in the master: the one the threshold is relative to.

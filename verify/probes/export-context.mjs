@@ -13,6 +13,7 @@
  *   128 times (entry cap 9).
  * - A lane's volume and the master's moved while the engine renders the master (the fake holds its
  *   snapshot answer) land in neither: session.json keeps the mix from when the export asked.
+ * - A 3/4 and a 6/8 snapshot export session.json v2 with the meter and its bars, and import in it.
  * - A 44.1 kHz engine's eight-bar loop reads eight bars and 16 s in the command bar, and still does after
  *   its device stops (a `status: null` frame: the engine stays at its rate).
  *
@@ -238,6 +239,7 @@ await probe(async ({ open }) => {
     const { session } = await import('/src/ui/state/audio.ts');
     const { parseZip } = await import('/src/session/unzip.ts');
     const { validateSession } = await import('/src/session/session-schema.ts');
+    const { TIME_SIGNATURES } = await import('/src/platform/engine-wire.ts');
     const blobs = [];
     const createObjectURL = URL.createObjectURL;
     URL.createObjectURL = (blob) => (blobs.push(blob), createObjectURL(blob));
@@ -251,7 +253,7 @@ await probe(async ({ open }) => {
     const zip = new Uint8Array(await blobs[0].arrayBuffer());
     const meta = JSON.parse(new TextDecoder().decode(parseZip(zip).find((entry) => entry.name.endsWith('-session.json')).data));
     let validation = 'ok';
-    try { validateSession(meta); } catch (error) { validation = String(error); }
+    try { validateSession(meta, TIME_SIGNATURES); } catch (error) { validation = String(error); }
     const grid = { bpm: meta.bpm, bars: meta.bars, masterLengthFrames: meta.masterLengthFrames, feedMaster: session.masterFramesValue() };
     return { name: "The Export button's archive declares the snapshot's grid", grid, validation, zip: Array.from(zip),
       pass: grid.bars === 1 && grid.bpm === 120 && grid.masterLengthFrames === 96000 && validation === 'ok' };
@@ -270,6 +272,43 @@ await probe(async ({ open }) => {
     return { name: 'That archive round-trips with the snapshot grid', imported, header: header && { bpm: header.bpm, bars: header.bars, master: header.masterLengthFrames },
       pass: imported === 'ok' && header?.bars === 1 && header?.masterLengthFrames === 96000 };
   }, gridZip));
+
+  // ── A meter other than 4/4 ────────────────────────────────────────────────────────────────────────
+  // The snapshot's meter writes session.json v2 with the meter and its bars (3 bars of 3/4 at 120 are
+  // 216000 frames, which 4/4 would call 2.25 bars), and the import hands the engine that meter back.
+  for (const [meter, bars] of [[{ num: 3, den: 4, beats: 3 }, 3], [{ num: 6, den: 8, beats: 2 }, 1]]) {
+    const frames = bars * Math.round((60 / 120) * meter.beats * RATE);
+    await page.evaluate(async ([meter, frames]) => {
+      const { encodeSessionBytes } = await import('/src/platform/engine-wire.ts');
+      window.__lf.native.snapshotBytes = encodeSessionBytes(
+        { rate: 48000, masterLengthFrames: frames, bpm: 120, meter, tracks: [{ index: 0, frames, reversed: false, state: 'Playing' }] },
+        [new Float32Array(frames).fill(0.25)],
+      ).buffer;
+    }, [meter, frames]);
+    await emit({ events: [transport(frames), laneEvent(0, lane('Playing', { length: frames }))] });
+    const written = await page.evaluate(async () => {
+      const lf = window.__lf;
+      const { session } = await import('/src/ui/state/audio.ts');
+      const { parseZip } = await import('/src/session/unzip.ts');
+      const bundle = await lf.buildExportBundle(session);
+      const meta = JSON.parse(new TextDecoder().decode(parseZip(bundle.zipBytes).find((entry) => entry.name.endsWith('-session.json')).data));
+      return { zip: Array.from(bundle.zipBytes), formatVersion: meta.formatVersion, meter: meta.meter, bars: meta.bars };
+    });
+    await emit({ events: [transport(0), laneEvent(0, lane('Empty'))] });
+    const loaded = await page.evaluate(async (zip) => {
+      const lf = window.__lf;
+      const { session } = await import('/src/ui/state/audio.ts');
+      const { splitSessionBytes } = await import('/src/platform/engine-wire.ts');
+      let imported = 'ok';
+      try { await lf.importSession(Uint8Array.from(zip), session); } catch (error) { imported = String(error); }
+      const header = imported === 'ok' ? splitSessionBytes(lf.native.loadedSessions.at(-1).slice().buffer).header : null;
+      return { imported, meter: header?.meter, bars: header?.bars, master: header?.masterLengthFrames };
+    }, written.zip);
+    delete written.zip;
+    results.push({ name: `A ${meter.num}/${meter.den} export writes its meter and bars, and imports in it`, written, loaded,
+      pass: written.formatVersion === 2 && JSON.stringify(written.meter) === JSON.stringify(meter) && written.bars === bars
+        && loaded.imported === 'ok' && JSON.stringify(loaded.meter) === JSON.stringify(meter) && loaded.bars === bars && loaded.master === frames });
+  }
 
   console.log(JSON.stringify(results, null, 2));
   assert.ok(results.every((result) => result.pass), JSON.stringify(results));

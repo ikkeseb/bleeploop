@@ -281,12 +281,16 @@ const heard = new Float32Array(LANES);
 const PEAK_FLOOR = 1 / 6; // the lift is capped at 6
 // The loop's own clock marks, in a typed array: a fractional number stored in a module variable is
 // boxed again on every store.
-const mem = new Float64Array(4);
+const mem = new Float64Array(5);
 const LAST = 0; // the last frame's timestamp
 const REST_FROM = 1; // the phase the loop last moved at
 const REST_AT = 2; // and when
 const CLIP_AT = 3; // the last input clip
+const BEAT_PHASE = 4; // the phase the beat check last read
+/** The beat a pulse last marked (-1: none yet; the next frame marks its beat unpulsed). */
 let beatIdx = -1;
+/** The beat the previous frame read. */
+let lineIdx = -1;
 let seenSeq = 0;
 
 /** Start from the feed as it stands: opening the stage fades nothing in. */
@@ -405,13 +409,26 @@ export function stepLight(now: number): void {
   // Beats: from the loop phase while a loop moves (no signal), else from the mirrored beat (a count-in,
   // a first take). At rest nothing pulses.
   if (master > 0 && feed.moving && feed.beatsPerLoop > 0) {
+    // A beat pulses when this frame steps forward over a beat line onto a beat other than the one last
+    // marked. A new clock anchor may step the phase back across a line: that is not a beat, and stepping
+    // forward over that line again marks nothing twice. The direction is read from the phase, the
+    // shorter way round the loop (more than half the loop back is the loop wrapping forward, more than
+    // half on is a correction back over the wrap), not from the indices: in a loop of two beats (one bar
+    // of 6/8) every forward step is also one beat back.
     const n = feed.beatsPerLoop;
     const idx = Math.floor(light.phase * n) % n;
-    // A new clock anchor may step the phase back across a beat line: that is not a beat.
-    if (idx !== beatIdx && (beatIdx - idx + n) % n !== 1) {
-      if (beatIdx >= 0) pulse(now, idx % 4 === 0);
+    // The shorter way round, branch-free: with a branch for a jump of more than half the loop, taken
+    // first mid-jam, `stage-view`'s allocation budget failed about half its runs (the frame allocated
+    // until this loop was optimized again).
+    const moved = light.phase - mem[BEAT_PHASE];
+    const step = moved - Math.round(moved);
+    if (beatIdx < 0) beatIdx = idx;
+    else if (idx !== lineIdx && idx !== beatIdx && step >= 0) {
+      pulse(now, idx % feed.beatsPerBar === 0);
       beatIdx = idx;
     }
+    lineIdx = idx;
+    mem[BEAT_PHASE] = light.phase;
     seenSeq = feed.beatSeq;
   } else {
     beatIdx = -1;

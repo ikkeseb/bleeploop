@@ -72,6 +72,7 @@ pub(crate) fn swap_engine(core: &Core, engine: Engine, handle: EngineHandle, con
     core.rt.clear_poison();
     // Read before `evict`, which leaks the engine when a unit panics on its way out.
     let applied = old.as_ref().and_then(Engine::applied_mixes);
+    let meter = old.as_ref().and_then(Engine::applied_meter);
     let unsent: Vec<_> = old.as_ref().map(|e| e.unsent_toggles().collect()).unwrap_or_default();
     let old = old.and_then(|old| evict(core, &mut ports, old));
     for (port, new) in ports.iter_mut().zip(slots) {
@@ -99,6 +100,10 @@ pub(crate) fn swap_engine(core: &Core, engine: Engine, handle: EngineHandle, con
             for (lane, mix) in mixes.iter().enumerate() {
                 settings.mixed(gen, frame, lane as u8, mix);
             }
+        }
+        // Its meter as applied, which a full ring may have kept from the feed too.
+        if let Some(meter) = meter {
+            settings.transported(gen, meter);
         }
         // The answers its full ring refused, owed at each setting's applied value: newer than any it
         // drained.

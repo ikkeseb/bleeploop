@@ -143,7 +143,7 @@ export function playStopGate(i: number): Gate {
  * foreign import): what TRIM can keep a part of. */
 export function loopWholeBars(): number {
   const master = looper.masterLengthFrames();
-  const fpb = framesPerBar(clock.bpm(), sampleRate());
+  const fpb = framesPerBar(clock.bpm(), sampleRate(), clock.meter().beats);
   return master > 0 && master % fpb === 0 ? master / fpb : 0;
 }
 

@@ -14,7 +14,7 @@ mod common;
 use common::dub::ramp;
 use common::edges::{self, sample};
 use common::{code, Rig};
-use lf_engine::grid::{commit_anchor, frames_per_bar, plan_commit, Frame, Grid};
+use lf_engine::grid::{commit_anchor, frames_per_bar, plan_commit, Frame, Grid, Meter};
 use lf_engine::{Command, LaneState};
 
 const CFG: [(u32, f64, Frame); 12] = [
@@ -35,7 +35,7 @@ const CFG: [(u32, f64, Frame); 12] = [
 #[test]
 fn a_c_d_the_grid_anchor_is_the_counted_downbeat_a_whole_number_of_loops_back() {
     for (sr, bpm, bars) in CFG {
-        let master = bars * frames_per_bar(bpm, sr);
+        let master = bars * frames_per_bar(bpm, sr, Meter::FOUR_FOUR);
         let downbeat = 59_259_259;
         for frac in [0.0001, 0.013, 0.25, 0.5, 0.731, 0.999, 1.0, 1.5, 2.34, 5.0] {
             let at = downbeat + (frac * master as f64) as Frame;
@@ -51,8 +51,8 @@ fn a_c_d_the_grid_anchor_is_the_counted_downbeat_a_whole_number_of_loops_back() 
 #[test]
 fn b_loop_wraps_and_click_downbeats_coincide_for_thirty_minutes() {
     for (sr, bpm, bars) in CFG {
-        let master = bars * frames_per_bar(bpm, sr);
-        let grid = Grid::master(7 * sr as Frame, master, bars);
+        let master = bars * frames_per_bar(bpm, sr, Meter::FOUR_FOUR);
+        let grid = Grid::master(7 * sr as Frame, master, bars, Meter::FOUR_FOUR);
         let loops = 30 * 60 * sr as Frame / master;
         for k in [0, 1, 2, loops / 2, loops] {
             assert_eq!(grid.beat_frame((4 * bars * k) as u64), 7 * sr as Frame + k * master);
@@ -64,11 +64,11 @@ fn b_loop_wraps_and_click_downbeats_coincide_for_thirty_minutes() {
 fn h_the_floor_keeps_the_completed_bars() {
     for sr in [48000, 44100] {
         for bpm in [120.0, 90.0, 137.0, 100.0, 73.5] {
-            let fpb = frames_per_bar(bpm, sr);
+            let fpb = frames_per_bar(bpm, sr, Meter::FOUR_FOUR);
             let mut played = 0.3;
             while played <= 5.71 {
                 let raw = (played * fpb as f64).round() as Frame;
-                let plan = plan_commit(raw, bpm, sr, 60 * sr as Frame);
+                let plan = plan_commit(raw, bpm, sr, 60 * sr as Frame, Meter::FOUR_FOUR);
                 if raw >= fpb {
                     assert!(plan.master <= raw, "played {played:.1} bars: no tail pad");
                 } else {
@@ -208,7 +208,7 @@ fn play_beside_an_armed_lane_joins_and_idle_play_beats_the_master_grid() {
     assert_eq!(rig.anchor(), press);
     rig.advance(master);
     let beats = rig.beats_since(mark);
-    let grid = Grid::master(press, master, 2);
+    let grid = Grid::master(press, master, 2, Meter::FOUR_FOUR);
     assert!(beats.len() >= 8 && beats.iter().enumerate().all(|(n, b)| b.0 == grid.beat_frame(n as u64)), "8 beats a loop");
 }
 

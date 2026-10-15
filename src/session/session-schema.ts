@@ -6,7 +6,7 @@
 import { validateFxStates, type FxState } from '../ui/state/fx-metadata.ts';
 import { framesPerBar } from '../ui/state/quantize.ts';
 import { isPluginFormat } from '../ui/state/plugin-format.ts';
-import type { PluginFormat } from '../platform';
+import type { PluginFormat, TimeSignature } from '../platform';
 
 export type ParsedSessionTrackState = 'PLAYING' | 'STOPPED';
 
@@ -35,6 +35,8 @@ export interface ParsedSessionTrack {
 }
 export interface ParsedSession {
   bpm: number;
+  /** The meter `bars` count in, one of the offered list `validateSession` was handed; 4/4 for v1. */
+  meter: TimeSignature;
   bars: number;
   masterLengthFrames: number;
   sampleRate: number;
@@ -108,11 +110,15 @@ export function validateSessionPlugins(json: unknown, trackFiles: readonly strin
 
 /**
  * Validate + normalize a parsed session.json (the schema export.ts writes). PURE — safe under Node.
+ * `meters` is the meters this build offers (`TIME_SIGNATURES`, handed in: the platform seam is not
+ * Node-importable). The meter: format v1 (or none) is 4/4 and names no other meter; v2 names one of
+ * `meters` with the `beats` this build counts it in (the BPM's unit: a file that read its tempo in
+ * another unit is refused, never re-read), and the bars count in it.
  * Throws a descriptive Error on: a non-BleepLoop app tag, a formatVersion newer than this build
- * understands (or a garbage formatVersion), missing/mis-typed fields, a non-positive/non-integer
- * masterLengthFrames, an empty or >5-track list, track numbers outside 1..5 or repeated, a per-track
- * frames that differs from masterLengthFrames, a repeated stem file, or an fx array that doesn't
- * exactly match the five-effect key/range contract. Two fields normalize instead of rejecting: volume
+ * understands (or a garbage formatVersion), a meter as above that does not hold, missing/mis-typed
+ * fields, a non-positive/non-integer masterLengthFrames, an empty or >5-track list, track numbers
+ * outside 1..5 or repeated, a per-track frames that differs from masterLengthFrames, a repeated stem
+ * file, or an fx array that doesn't exactly match the five-effect key/range contract. Two fields normalize instead of rejecting: volume
  * clamps into [0, 1.5]; muted accepts legacy 0/1 and missing-as-false; reversed is optional and
  * missing-as-false for legacy format-v1 exports; dubFeedback is optional, clamps into [0, 1] and reads
  * missing as 1; pan is optional, clamps into [-1, 1] and reads missing as 0 (the centre).
@@ -122,7 +128,7 @@ export function validateSessionPlugins(json: unknown, trackFiles: readonly strin
  * Other states are rejected rather than reviving an impossible capture state.
  * Returns a fresh normalized object (never the input aliased). Unknown keys are ignored.
  */
-export function validateSession(json: unknown): ParsedSession {
+export function validateSession(json: unknown, meters: readonly TimeSignature[]): ParsedSession {
   if (typeof json !== 'object' || json === null || Array.isArray(json)) {
     throw new Error('session.json: not a JSON object');
   }
@@ -132,17 +138,17 @@ export function validateSession(json: unknown): ParsedSession {
     throw new Error(`session.json: app tag is ${JSON.stringify(s.app)}, expected "BleepLoop" — not a BleepLoop session`);
   }
   // formatVersion gate: MISSING is treated as legacy v1 (every pre-versioning export still imports);
-  // ===1 is this build's format; an integer > 1 was written by a newer BleepLoop; anything else is
-  // garbage. A non-integer/<1 value is rejected as invalid rather than silently ignored.
-  const fv = s.formatVersion;
-  if (fv !== undefined) {
-    if (typeof fv !== 'number' || !Number.isInteger(fv) || fv < 1) {
-      throw new Error(`session.json: formatVersion must be a positive integer, got ${JSON.stringify(fv)}`);
-    }
-    if (fv > 1) {
-      throw new Error(`This session was exported by a newer version of BleepLoop (format v${fv}) — update BleepLoop to open it.`);
-    }
+  // 1 (4/4) and 2 (another meter) are this build's formats; an integer > 2 was written by a newer
+  // BleepLoop; anything else is garbage. A non-integer/<1 value is rejected as invalid rather than
+  // silently ignored.
+  const fv = s.formatVersion === undefined ? 1 : s.formatVersion;
+  if (typeof fv !== 'number' || !Number.isInteger(fv) || fv < 1) {
+    throw new Error(`session.json: formatVersion must be a positive integer, got ${JSON.stringify(fv)}`);
   }
+  if (fv > 2) {
+    throw new Error(`This session was exported by a newer version of BleepLoop (format v${fv}) — update BleepLoop to open it.`);
+  }
+  const meter = sessionMeter(s.meter, fv, meters);
   const num = (key: string): number => {
     const v = s[key];
     if (typeof v !== 'number' || !Number.isFinite(v)) {
@@ -169,9 +175,11 @@ export function validateSession(json: unknown): ParsedSession {
   if (!Number.isInteger(master) || master <= 0) {
     throw new Error(`session.json: masterLengthFrames must be a positive integer, got ${master}`);
   }
-  const expectedFrames = bars * framesPerBar(bpm, sampleRate);
+  const expectedFrames = bars * framesPerBar(bpm, sampleRate, meter.beats);
   if (!Number.isSafeInteger(expectedFrames) || expectedFrames !== master) {
-    throw new Error(`session.json: grid expects ${expectedFrames} frames from bpm/bars/sampleRate, got masterLengthFrames ${master}`);
+    throw new Error(
+      `session.json: grid expects ${expectedFrames} frames from bpm/bars/sampleRate in ${meter.num}/${meter.den}, got masterLengthFrames ${master}`,
+    );
   }
   const rawTracks = s.tracks;
   if (!Array.isArray(rawTracks)) throw new Error('session.json: tracks missing or not an array');
@@ -235,5 +243,29 @@ export function validateSession(json: unknown): ParsedSession {
     }
     return { track: trackNo, file: t.file, volume, muted, reversed, state, frames: master, fx, dubFeedback, pan };
   });
-  return { bpm, bars, masterLengthFrames: master, sampleRate, tracks };
+  return { bpm, meter, bars, masterLengthFrames: master, sampleRate, tracks };
+}
+
+/** session.json's `meter` in format `version` (validateSession's rules), as the entry of `meters`. */
+function sessionMeter(raw: unknown, version: number, meters: readonly TimeSignature[]): TimeSignature {
+  const four = meters.find((m) => m.num === 4 && m.den === 4);
+  if (!four) throw new Error('validateSession: the offered meters lack 4/4');
+  if (raw === undefined) {
+    if (version >= 2) throw new Error(`session.json: format v${version} names its meter, and this one has none`);
+    return four;
+  }
+  if (typeof raw !== 'object' || raw === null) throw new Error(`session.json: meter must be an object, got ${JSON.stringify(raw)}`);
+  const { num, den, beats } = raw as Record<string, unknown>;
+  const meter = meters.find((m) => m.num === num && m.den === den);
+  if (!meter) throw new Error(`session.json: meter ${JSON.stringify(num)}/${JSON.stringify(den)} is not a time signature this build offers`);
+  if (beats !== meter.beats) {
+    throw new Error(
+      `This session counts ${meter.num}/${meter.den} in ${JSON.stringify(beats)} beats a bar, and this build counts it in ` +
+        `${meter.beats}: its BPM would read in another unit, so it cannot open it.`,
+    );
+  }
+  if (version < 2 && meter !== four) {
+    throw new Error(`session.json: a format v1 session is 4/4, but this one names ${meter.num}/${meter.den}`);
+  }
+  return meter;
 }

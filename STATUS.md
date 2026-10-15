@@ -99,6 +99,12 @@ it.
   free record stopped near the downbeat after N bars keeps N, an early or a mid-bar stop behaves, and a
   PLAY/STOP press while the take's tail is in flight commits it stopped (a REC/DUB press there counts as a stop too).
 - The click: silent when idle, stops with STOP ALL, and the count-in still clicks with CLICK off.
+- Time signatures, picked beside BPM (machine: `tests/meter.rs`, the `meter-picker` probe): in 6/8
+  BPM and TAP count the dotted quarter, two beats a bar, so the count-in reads 2-1 with the eighths
+  clicking softer between. Play a 6/8 song and TAP along unprompted for a minute: did the taps land
+  on the dotted quarter or on every eighth? Counting eighths changes the BPM's unit: the engine, the
+  wire's meter table on both sides, and a rule for 6/8 sessions already saved (their file records the
+  dotted quarter, and no build re-reads it in another unit). Are the soft eighths heard, not busy?
 - A later track starts at master phase with no seam; reverse's flip adds no step (machine:
   `tests/seam_continuity.rs`), but does its turn of direction click?
 - 48 kHz: Sample rate → 48 kHz with loops playing: the confirm asks, the driver reopens at 48 kHz (the

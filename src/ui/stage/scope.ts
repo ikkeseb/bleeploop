@@ -152,6 +152,7 @@ function createScope(): ViewDraw {
   // What the still bitmap holds.
   let shownSel = -1;
   let shownBeats = -1;
+  let shownPerBar = -1;
   let resized = true;
   // The trace's own state. The newest column drawn and the sweep it was placed in are device frames:
   // they live in a typed array, not in a closure variable that would box on every store.
@@ -251,7 +252,7 @@ function createScope(): ViewDraw {
     c.fillRect(x, y, w, hair);
     c.globalAlpha = 1;
     // The grid still has to read inside a multi-bar sweep; a first take has no bars yet.
-    const bars = feed.beatsPerLoop >> 2;
+    const bars = feed.beatsPerLoop / feed.beatsPerBar;
     if (bars > 0) {
       c.fillStyle = TICK;
       for (let k = 0; k < bars; k++) {
@@ -284,6 +285,7 @@ function createScope(): ViewDraw {
     }
     shownSel = feed.selected;
     shownBeats = feed.beatsPerLoop;
+    shownPerBar = feed.beatsPerBar;
     resized = false;
     for (let i = 0; i < LANES; i++) stamp.version[i] = -2;
   }
@@ -529,7 +531,7 @@ function createScope(): ViewDraw {
     const c = s.ctx;
     const pal = s.pal;
     const quiet = feed.reduced;
-    if (resized || feed.selected !== shownSel || feed.beatsPerLoop !== shownBeats) redrawAll(pal);
+    if (resized || feed.selected !== shownSel || feed.beatsPerLoop !== shownBeats || feed.beatsPerBar !== shownPerBar) redrawAll(pal);
     for (let i = 0; i < LANES; i++) if (laneChanged(stamp, i)) rasterise(pal, i);
     pullColumns(pal, quiet);
     // The beam with no column to ride: the drawn playhead. The phase is read HERE, in the frame's own

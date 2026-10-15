@@ -1,6 +1,6 @@
 import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount, type JSX } from 'solid-js';
 import { clock, looper, sampleRate, type TrackState } from '../state/audio';
-import { registerLane, unregisterLane } from './waveform';
+import { registerLane, setGridBeats, unregisterLane } from './waveform';
 import { createTwoStepConfirm, masterBars, volumeDb } from './shared';
 import { announceLooper, liveMsg, playStopGate, recDubGate } from './gates';
 import { DATA_STATE, createLaneView, type LaneWord } from './lane-state';
@@ -548,13 +548,15 @@ function TrackLane(props: {
 export function Looper(props: { returnFocus?: (el: HTMLElement | undefined) => void }) {
   const master = () => looper.masterLengthFrames();
   const hasMaster = () => master() > 0;
+  // The lanes' bar grid counts the meter's beats; the draw loop reads them plain (invariant 6).
+  createEffect(() => setGridBeats(clock.meter().beats));
 
   // Master length as a musician-readable "N bar · S.S s" — used only by the SR live announcement now
   // (the visible loop readout lives in the command bar's ring-dial).
   const masterLabel = () => {
     const m = master();
     if (m <= 0) return '—';
-    const bars = masterBars(m, clock.bpm(), sampleRate());
+    const bars = masterBars(m, clock.bpm(), sampleRate(), clock.meter().beats);
     const secs = m / sampleRate();
     return `${bars} bar${bars > 1 ? 's' : ''} · ${secs.toFixed(1)} s`;
   };

@@ -2,11 +2,11 @@
 //! sample rate, one that replaced a faulted engine), so the settings survive a rebuild and a setting sent
 //! before the first open is kept; a reset frame hands them to the UI.
 //!
-//! A setting is a command that sets a value (the tempo, the click, the master, the input sends, the
+//! A setting is a command that sets a value (the tempo, the meter, the click, the master, the input sends, the
 //! looper's modes and FADE's length, a lane's volume, mute, DUB FEEDBACK, pan and FX, the note target, the
 //! wheels, a built-in instrument's level, a plugin slot's live flag and gain, the selected lane);
 //! everything else (the looper's gestures, notes) acts once and is not kept. Every setting but a lane's
-//! mix is kept as the command the engine's ring took (or the UI sent before the first open); one the
+//! mix and the meter is kept as the command the engine's ring took (or the UI sent before the first open); one the
 //! full ring refused is not kept (`EngineHost::send`).
 //!
 //! A lane's mix is a projection of what the engine applied: its last `Event::Mix` the feed drained
@@ -34,6 +34,13 @@
 //! answers, so a toggle accepted just before it survives whether or not the feed saw it, and a setter
 //! still queued there stays kept as sent; a toggle still queued there is lost, as every queued action.
 //!
+//! The meter is a projection of what the engine applied too, from its `Event::Transport`: it locks with
+//! the tempo, so the engine drops a `SetMeter` while a loop exists, and a session load sets it with no
+//! command at all. Until the followed engines have reported a transport, the `SetMeter` sent is kept, as
+//! bootstrap; from the first one, the transport's meter (`transported`), and a rebuild projects the
+//! replaced engine's meter (`Engine::applied_meter`) before its replay. So a request the engine refused
+//! never reaches a new engine, and an imported meter does.
+//!
 //! The note target and the wheels native MIDI's queue still held at a rebuild, sent to no engine yet,
 //! are kept before the replay too (`super::RebuildHook::rebuild`), so the new engine gets the player's
 //! latest through the replay alone.
@@ -41,13 +48,14 @@
 use std::collections::BTreeMap;
 
 use lf_engine::dsp::fx::{FxKind, FxParam, MAX_PARAMS};
-use lf_engine::grid::Frame;
+use lf_engine::grid::{Frame, Meter};
 use lf_engine::{Action, Command, CompactMix, Event, LaneMix, Refusal, Toggle, SLOT_COUNT, TRACK_COUNT};
 
 /// What a setting sets; replayed in this order (the note target before the wheels it hands over).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Key {
     Bpm,
+    Meter,
     Metronome,
     ClickVolume,
     MasterVolume,
@@ -100,6 +108,7 @@ fn key(command: &Command) -> Option<Key> {
     let slot = |i: u8| (usize::from(i) < SLOT_COUNT).then_some(i);
     Some(match *command {
         Command::SetBpm(_) => Key::Bpm,
+        Command::SetMeter(_) => Key::Meter,
         Command::SetMetronome(_) => Key::Metronome,
         Command::SetClickVolume(_) => Key::ClickVolume,
         Command::SetMasterVolume(_) => Key::MasterVolume,
@@ -173,20 +182,43 @@ pub(crate) struct Settings {
     /// no setter in flight).
     in_flight: [u32; Toggle::COUNT],
     setter_at: [u32; Toggle::COUNT],
+    /// An engine has reported its meter (`transported`): `last` holds the applied one from then on.
+    meter_applied: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { last: BTreeMap::new(), applied: [None; TRACK_COUNT], gen: 0, in_flight: [0; Toggle::COUNT], setter_at: [0; Toggle::COUNT] }
+        Settings { last: BTreeMap::new(), applied: [None; TRACK_COUNT], gen: 0, in_flight: [0; Toggle::COUNT], setter_at: [0; Toggle::COUNT], meter_applied: false }
     }
 }
 
 impl Settings {
-    /// Whether `command` is a setting; kept unless it sets the mix of a lane the engine has reported.
+    /// Whether `command` is a setting; kept unless it sets the mix of a lane the engine has reported, or
+    /// the meter once an engine has reported one.
     pub(crate) fn record(&mut self, command: &Command) -> bool {
         let Some(key) = key(command) else { return false };
-        if key.lane().is_none_or(|lane| self.applied[usize::from(lane)].is_none()) {
+        let applied = match key {
+            Key::Meter => self.meter_applied,
+            _ => key.lane().is_some_and(|lane| self.applied[usize::from(lane)].is_some()),
+        };
+        if !applied {
             self.last.insert(key, *command);
+        }
+        true
+    }
+
+    /// The engine of generation `gen` applies `meter` (its `Event::Transport`, or a replaced engine's
+    /// read at a rebuild): the kept meter is that one from here on, none at the default. False, and
+    /// nothing kept, for an engine this memory no longer follows.
+    pub(crate) fn transported(&mut self, gen: u64, meter: Meter) -> bool {
+        if gen != self.gen {
+            return false;
+        }
+        self.meter_applied = true;
+        if meter == Meter::FOUR_FOUR {
+            self.last.remove(&Key::Meter);
+        } else {
+            self.last.insert(Key::Meter, Command::SetMeter(meter));
         }
         true
     }
@@ -440,6 +472,29 @@ mod tests {
         s.pushed(&toggle);
         assert!(s.toggled(2, Toggle::Click, false), "a new engine counts from nothing");
         assert!(replay(&s).contains(&Command::SetMetronome(false)));
+    }
+
+    #[test]
+    fn the_meter_is_kept_as_sent_until_an_engine_reports_one_then_as_the_engine_applied_it() {
+        let (six, three) = (Meter::new(6, 8).unwrap(), Meter::new(3, 4).unwrap());
+        let mut s = Settings::default();
+        assert!(s.record(&Command::SetMeter(six)));
+        assert!(s.record(&Command::SetBpm(80.0)));
+        assert_eq!(replay(&s), [Command::SetBpm(80.0), Command::SetMeter(six)], "bootstrap, after the tempo");
+        s.follow(1);
+        assert!(s.transported(1, six));
+        assert!(s.record(&Command::SetMeter(three)), "still a setting");
+        assert_eq!(replay(&s)[1..], [Command::SetMeter(six)], "a request a loop may lock out is not kept: the engine's transport says");
+        assert!(s.transported(1, three), "a load's, or an accepted request's");
+        assert_eq!(replay(&s)[1..], [Command::SetMeter(three)]);
+        assert!(s.transported(1, Meter::FOUR_FOUR));
+        assert_eq!(replay(&s), [Command::SetBpm(80.0)], "4/4 is the default: no meter kept");
+        s.follow(2);
+        assert!(!s.transported(1, six), "a replaced engine's late Transport");
+        assert!(s.record(&Command::SetMeter(six)));
+        assert_eq!(replay(&s), [Command::SetBpm(80.0)], "the new engine's transport will say");
+        assert!(s.transported(2, six));
+        assert_eq!(replay(&s)[1..], [Command::SetMeter(six)]);
     }
 
     #[test]

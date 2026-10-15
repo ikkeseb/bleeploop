@@ -166,6 +166,7 @@ pub(crate) fn ui_route(command: &Command) -> UiRoute {
         | Command::SelectInstrument(_)
         | Command::AllNotesOff => UiRoute::Router,
         Command::SetBpm(_)
+        | Command::SetMeter(_)
         | Command::SetMetronome(_)
         | Command::SetClickVolume(_)
         | Command::SetMasterVolume(_)

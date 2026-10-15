@@ -28,7 +28,7 @@
 use rtrb::{Consumer, Producer, RingBuffer};
 
 use crate::api::{LaneMix, LaneState, TRACK_COUNT};
-use crate::grid::Frame;
+use crate::grid::{Frame, Meter};
 
 /// Loop positions a snapshot copies per rendered frame (as a block job moves).
 pub const SNAPSHOT_RATE: Frame = crate::looper::JOB_RATE;
@@ -87,6 +87,8 @@ pub struct Snapshot {
     pub rate: u32,
     pub master: Frame,
     pub bpm: u32,
+    /// The meter the master's bars count in.
+    pub meter: Meter,
     /// The committed lanes, ascending; `count` of them.
     pub tracks: [Option<SnapshotTrack>; TRACK_COUNT],
     pub count: usize,
@@ -101,7 +103,7 @@ pub struct Snapshot {
 impl Snapshot {
     /// A snapshot into `pcm` (the host's buffer, its pages touched).
     pub fn new(pcm: Vec<f32>) -> Snapshot {
-        Snapshot { pcm, rate: 0, master: 0, bpm: 0, tracks: [None; TRACK_COUNT], count: 0, result: None, started: false, pins: [None; TRACK_COUNT], done: 0 }
+        Snapshot { pcm, rate: 0, master: 0, bpm: 0, meter: Meter::FOUR_FOUR, tracks: [None; TRACK_COUNT], count: 0, result: None, started: false, pins: [None; TRACK_COUNT], done: 0 }
     }
 }
 
@@ -124,6 +126,8 @@ pub struct LoadTrack {
 
 pub struct Load {
     pub bpm: u32,
+    /// The meter `bars` count in: `bars` bars of it at `bpm` are `master` frames.
+    pub meter: Meter,
     pub bars: Frame,
     pub master: Frame,
     pub tracks: Vec<LoadTrack>,
@@ -187,7 +191,7 @@ impl SessionEnd {
         }
         match self.job.as_deref_mut() {
             Some(SessionJob::Load(load)) if load.result.is_none() => load.result = Some(looper.load(cx, load)),
-            Some(SessionJob::Snapshot(s)) if !s.started && !looper.busy() => looper.snapshot_begin(s, cx.fx, cx.clock.bpm(), rate),
+            Some(SessionJob::Snapshot(s)) if !s.started && !looper.busy() => looper.snapshot_begin(s, cx.fx, cx.clock.bpm(), cx.clock.meter(), rate),
             Some(SessionJob::Snapshot(s)) if !s.started && idle => s.result = Some(Err(SessionError::Changed)),
             _ => {}
         }

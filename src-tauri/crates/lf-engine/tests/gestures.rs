@@ -2,13 +2,14 @@
 //! input gaps keeps one recorder, a whole-bar master, every committed lane at the master length (a
 //! multiply grows them all, a TRIM keeps it), finite output and no panic; UNDO twice is the identity;
 //! UNDO after an N-cycle overdub gives back the pre-dub loop bit for bit. The presses include TRIM and
-//! HALVE, FADE, HOLD and its release, DUB FEEDBACK and a punch-out (a stopped device). Rendered at
-//! 8 kHz so a case stays cheap; the engine is rate-agnostic.
+//! HALVE, FADE, HOLD and its release, DUB FEEDBACK, a meter change and a punch-out (a stopped device);
+//! each script starts in a meter drawn from the offered ones, and the whole bars are that meter's.
+//! Rendered at 8 kHz so a case stays cheap; the engine is rate-agnostic.
 
 mod common;
 
 use common::{code, Opts, Rig};
-use lf_engine::grid::{frames_per_bar, Frame};
+use lf_engine::grid::{frames_per_bar, Frame, Meter};
 use lf_engine::{Action, Command, LaneState, TRACK_COUNT};
 use proptest::prelude::*;
 use proptest::strategy::ValueTree;
@@ -35,6 +36,10 @@ enum Op {
 
 fn lane() -> impl Strategy<Value = u8> {
     0u8..TRACK_COUNT as u8
+}
+
+fn meter() -> impl Strategy<Value = Meter> {
+    (0..Meter::OFFERED.len()).prop_map(|k| Meter::OFFERED[k])
 }
 
 fn op() -> impl Strategy<Value = Op> {
@@ -64,6 +69,7 @@ fn op() -> impl Strategy<Value = Op> {
         1 => (0u8..11).prop_map(|v| Op::Press(Command::SetMasterVolume(v as f32 / 10.0))),
         1 => any::<bool>().prop_map(|b| Op::Press(Command::SetMasterMute(b))),
         1 => (1u8..4).prop_map(|b| Op::Press(Command::SetMetronome(b != 2))),
+        1 => meter().prop_map(|m| Op::Press(Command::SetMeter(m))),
         2 => prop_oneof![
             Just(Action::RecDub),
             Just(Action::PlayStop),
@@ -102,7 +108,7 @@ fn check_invariants(rig: &Rig) {
     let master = rig.master();
     if master > 0 {
         assert!(rig.locked(), "a master locks the tempo");
-        assert_eq!(master % frames_per_bar(rig.bpm() as f64, SR), 0, "a whole-bar master");
+        assert_eq!(master % frames_per_bar(rig.bpm() as f64, SR, rig.meter()), 0, "a whole-bar master in the meter");
     }
     for i in 0..TRACK_COUNT {
         let info = rig.lane(i);
@@ -117,9 +123,10 @@ fn check_invariants(rig: &Rig) {
     }
 }
 
-/// Run a script at `block` frames per callback; returns a hash of every rendered sample.
-fn run(ops: &[Op], block: usize) -> u64 {
+/// Run a script in `meter` at `block` frames per callback; returns a hash of every rendered sample.
+fn run(ops: &[Op], meter: Meter, block: usize) -> u64 {
     let mut rig = Rig::with(Opts { sr: SR, start: SR as Frame, loop_seconds: 20.0, block, align: 37 });
+    rig.set(Command::SetMeter(meter));
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     let mut stamped: Frame = 0; // the latest frame a Later command lands on
     rig.set_input(|f| code(f) - 0.25);
@@ -186,9 +193,9 @@ fn run(ops: &[Op], block: usize) -> u64 {
     hash
 }
 
-/// A committed two-bar loop on lane 0 to start from, so most scripts reach overdub and undo.
-fn with_loop(ops: Vec<Op>) -> Vec<Op> {
-    let bar = frames_per_bar(120.0, SR);
+/// A committed two-bar loop of `meter` on lane 0 to start from, so most scripts reach overdub and undo.
+fn with_loop(ops: Vec<Op>, meter: Meter) -> Vec<Op> {
+    let bar = frames_per_bar(120.0, SR, meter);
     [Op::Press(Command::RecDub(0)), Op::Wait(3 * bar), Op::Press(Command::RecDub(0)), Op::Wait(bar)].into_iter().chain(ops).collect()
 }
 
@@ -200,9 +207,9 @@ proptest! {
     #![proptest_config(ProptestConfig { cases: 256, ..ProptestConfig::default() })]
 
     #[test]
-    fn gesture_scripts_keep_the_looper_invariants(start_looping in any::<bool>(), ops in proptest::collection::vec(op(), 1..60)) {
-        let ops = if start_looping { with_loop(ops) } else { ops };
-        prop_assert_eq!(run(&ops, 64), run(&ops, 127), "the same script renders bit-identically at another block size");
+    fn gesture_scripts_keep_the_looper_invariants(start_looping in any::<bool>(), meter in meter(), ops in proptest::collection::vec(op(), 1..60)) {
+        let ops = if start_looping { with_loop(ops, meter) } else { ops };
+        prop_assert_eq!(run(&ops, meter, 64), run(&ops, meter, 127), "the same script renders bit-identically at another block size");
     }
 }
 
@@ -211,7 +218,7 @@ fn the_deep_checks_are_reached() {
     let mut runner = proptest::test_runner::TestRunner::deterministic();
     for _ in 0..64 {
         let ops = proptest::collection::vec(op(), 20..40).new_tree(&mut runner).unwrap().current();
-        run(&with_loop(ops), 64);
+        run(&with_loop(ops, Meter::FOUR_FOUR), Meter::FOUR_FOUR, 64);
     }
     let ran = DEEP_CHECKS.with(Cell::get);
     assert!(ran >= 20, "undo and dub checks ran {ran} times");

@@ -1,4 +1,5 @@
 import type { FxState } from './fx-metadata';
+import type { TimeSignature } from '../../platform';
 import { framesPerBar } from './quantize';
 
 /**
@@ -52,15 +53,17 @@ export interface ExportSnapshot {
   masterLengthFrames: number;
   /** The tempo the engine held as it read the snapshot: the loops' grid, with the rate and the length. */
   bpm: number;
+  /** The loops' meter (the engine's snapshot header): its bars are `framesPerBar(bpm, rate, meter.beats)`. */
+  meter: TimeSignature;
   tracks: ExportTrack[];
 }
 
 /**
- * The span a first take (no loop yet) is drawn across: 4 bars at the tempo when it starts, or 8 s with
- * no tempo. Taken once per take, never per drawn frame (invariant 6).
+ * The span a first take (no loop yet) is drawn across: 4 bars of the meter (`beats` a bar) at the tempo
+ * when it starts, or 8 s with no tempo. Taken once per take, never per drawn frame (invariant 6).
  */
-export function openingSpan(bpm: number, sampleRate: number): number {
-  const frames = bpm > 0 && Number.isFinite(bpm) ? 4 * framesPerBar(bpm, sampleRate) : 8 * sampleRate;
+export function openingSpan(bpm: number, sampleRate: number, beats: number): number {
+  const frames = bpm > 0 && Number.isFinite(bpm) ? 4 * framesPerBar(bpm, sampleRate, beats) : 8 * sampleRate;
   return Math.max(1, frames);
 }
 
@@ -92,6 +95,8 @@ export interface LoadSessionTrack {
 }
 export interface LoadSessionPayload {
   bpm: number;
+  /** The meter `bars` count in; missing reads as 4/4. */
+  meter?: TimeSignature;
   bars: number;
   masterLengthFrames: number;
   tracks: LoadSessionTrack[];

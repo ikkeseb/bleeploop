@@ -10,7 +10,7 @@ pub mod fx;
 pub mod refs;
 
 use assert_no_alloc::assert_no_alloc;
-use lf_engine::grid::{frames_per_bar, Frame};
+use lf_engine::grid::{frames_per_bar, Frame, Meter};
 use lf_engine::scope::ScopeBin;
 use lf_engine::{Command, Engine, EngineConfig, EngineHandle, Event, LaneInfo, LaneState, ProcessContext, SlotEvent, SlotKind, SlotProcessor, TimedCommand};
 
@@ -388,8 +388,12 @@ impl Rig {
         self.engine.clock().locked()
     }
 
+    pub fn meter(&self) -> Meter {
+        self.engine.clock().meter()
+    }
+
     pub fn fpb(&self) -> Frame {
-        frames_per_bar(self.bpm() as f64, self.sr)
+        frames_per_bar(self.bpm() as f64, self.sr, self.meter())
     }
 
     /// The recorder's lane and window.

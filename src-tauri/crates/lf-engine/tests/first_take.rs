@@ -16,7 +16,7 @@
 mod common;
 
 use common::{code, Opts, Rig};
-use lf_engine::grid::{frames_per_bar, Frame};
+use lf_engine::grid::{frames_per_bar, Frame, Meter};
 use lf_engine::{Command, LaneState};
 
 fn committed(rig: &Rig) -> bool {
@@ -143,7 +143,7 @@ fn cap_a_free_take_held_past_the_buffer_commits_at_its_capacity() {
         rig.advance_to(end);
         assert_eq!(rig.state(0), LaneState::Recording, "not before the capacity");
         rig.advance(1);
-        let fpb = frames_per_bar(bpm as f64, sr);
+        let fpb = frames_per_bar(bpm as f64, sr, Meter::FOUR_FOUR);
         assert!(committed(&rig) && rig.window().is_none(), "commits on the capacity frame");
         assert_eq!(rig.master(), cap / fpb * fpb);
         if sr == 48000 && bpm == 120 {
@@ -178,7 +178,7 @@ fn fixed_a_the_window_is_whole_bars_that_fit() {
         for bpm in [120u32, 90, 137, 100, 73] {
             for bars in [1, 2, 4, 8, 16] {
                 let (rig, start, end) = fixed_take(sr, bpm, bars as f64, 0, 20.0);
-                let fpb = frames_per_bar(bpm as f64, sr);
+                let fpb = frames_per_bar(bpm as f64, sr, Meter::FOUR_FOUR);
                 let fit = (20 * sr as Frame / fpb).min(bars);
                 assert_eq!(end - start, fit * fpb, "bpm={bpm} sr={sr} bars={bars}");
                 assert!(rig.locked());

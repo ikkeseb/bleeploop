@@ -666,6 +666,7 @@ pub(crate) fn drain(settings: &mut settings::Settings, events: &mut Consumer<Eve
     while let Ok(event) = events.pop() {
         match event {
             Event::Mix { frame, lane, mix } => _ = settings.mixed(gen, frame, lane, &mix),
+            Event::Transport { meter, .. } => _ = settings.transported(gen, meter),
             Event::Toggled { toggle, on, .. } => _ = settings.toggled(gen, toggle, on),
             Event::Refused { reason, .. } => settings.refused(gen, reason),
             _ => {}

@@ -72,11 +72,10 @@ added a line.
   its panel (the layout vision of 2026-06-17; the movable, hideable keyboard is built). COPY with an
   offset for width (2026-09-18): a lane copied, the copy a little behind its source, the two panned
   apart so the part sounds wider. Today's nearest: COPY, pan, and the copy's DELAY at 1/16, Fbk 0, Mix
-  100 %; the width wants offsets shorter than the delay's shortest, 1/16. A time signature the player picks (3/4, 6/8 and so
-  on; 2026-10-06): `beatsPerBar = 4` runs through the grid math, the click and the count-in, which is
-  gate-adjacent timing code.
+  100 %; the width wants offsets shorter than the delay's shortest, 1/16. A meter per track (one lane
+  in 4/4 over another in 3/4; 2026-10-15): more than passing a lane its meter (`grid.rs` module doc).
 - **Not built on purpose** (no owner or tester ask; each would add its own lap): a FREE tempo-setting
-  first take (it meets the same `beatsPerBar = 4` code as the time signature above); more built-in
+  first take (it meets the bar math every meter shares, `grid.rs`); more built-in
   synths (they fill layers, they do not compete with
   plugins); a recent-jams shelf (keep the last N recovery archives on ✕ ALL and close, offered in
   IMPORT, M); resampling on import or recovery (S); one `.pill` primitive with type tokens; a rhythm

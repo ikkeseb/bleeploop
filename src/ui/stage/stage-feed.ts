@@ -22,7 +22,8 @@ export const feed = {
   /** When the lane's refusal cue began, on `performance.now()`'s clock; 0 before the first. */
   cueAt: each(0),
   selected: 0,
-  /** The beat the engine last made heard (0..3), and a count that steps with every one of them. */
+  /** The beat the engine last made heard (0 .. beatsPerBar - 1), and a count that steps with every one
+   * of them. */
   beat: 0,
   beatSeq: 0,
   /** A count-in numeral shows: the drawing dims under it. */
@@ -35,7 +36,10 @@ export const feed = {
   moving: false,
   /** A device runs. */
   running: false,
-  /** Beats in the master loop (bars x 4); 0 with no loop. */
+  /** The meter's counted beats a bar (a compound meter counts its dotted quarters). */
+  beatsPerBar: 4,
+  /** Beats in the master loop (bars x beatsPerBar); 0 with no loop. A view's cached grid is drawn
+   * again when either changes: two meters can share a beat count (one 4/4 bar, two 6/8 bars). */
   beatsPerLoop: 0,
   /** `prefers-reduced-motion`: contours, playhead and selection only. */
   reduced: false,

@@ -4,7 +4,7 @@
 //! without a zip crate: a store-only zip (EOCD, central directory, local headers, CRC-32), float32 mono
 //! stems, a PCM16 stereo master, and a session.json whose grid and track list agree with the stems.
 
-use lf_engine::grid::frames_per_bar;
+use lf_engine::grid::{frames_per_bar, Meter};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
@@ -112,7 +112,7 @@ fn v0_1_0_archives_match_their_manifest_and_read_without_a_zip_crate() {
         let bars = session["bars"].as_i64().unwrap();
         assert_eq!(session["app"], "BleepLoop");
         assert_eq!(session["formatVersion"], 1);
-        assert_eq!(frames, bars * frames_per_bar(session["bpm"].as_f64().unwrap(), rate), "{name}: grid");
+        assert_eq!(frames, bars * frames_per_bar(session["bpm"].as_f64().unwrap(), rate, Meter::FOUR_FOUR), "{name}: grid");
 
         let tracks = session["tracks"].as_array().unwrap();
         for track in tracks {
