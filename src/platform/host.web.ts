@@ -5,6 +5,7 @@
 import type { AppUpdate, AppUpdates, EngineHost, InputHost, LogFolder, MidiHost, Platform, PluginHost, UpdateProgress } from './host';
 import {
   ENGINE_LANES,
+  FOUR_FOUR,
   decodeFeedFrame,
   decodeLoadSession,
   encodeSessionBytes,
@@ -591,7 +592,7 @@ function fakeMaster(header: SnapshotHeader, pcm: readonly Float32Array[], sent: 
 /** What the fake's `snapshot(master)` answers, read from its state when asked: the probe's scripted
  * stems, each track with its mix. */
 function snapshotAnswer(master: boolean): ArrayBuffer {
-  if (!webEngineFake.snapshotBytes) return encodeSessionBytes({ rate: fakeRate(), masterLengthFrames: 0, bpm: 120, tracks: [] }, []).buffer;
+  if (!webEngineFake.snapshotBytes) return encodeSessionBytes({ rate: fakeRate(), masterLengthFrames: 0, bpm: 120, meter: FOUR_FOUR, tracks: [] }, []).buffer;
   const { header, pcm } = splitSessionBytes(webEngineFake.snapshotBytes.slice(0));
   const scripted = header as Omit<SnapshotHeader, 'tracks'> & { tracks: (Omit<SnapshotTrack, 'mix'> & { mix?: LaneMix })[] };
   const stems: SnapshotHeader = { ...scripted, tracks: scripted.tracks.map((t) => ({ ...t, mix: t.mix ?? copyMix(fakeMixes[t.index]) })) };

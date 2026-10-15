@@ -1598,6 +1598,55 @@ fn settings_sent_before_the_first_open_and_across_a_new_rate_reach_every_engine(
     assert_eq!(bpm, 100, "a new engine gets the last tempo sent, before its first publish");
 }
 
+/// The meter the next `Transport` reports.
+fn next_meter(h: &mut Harness, what: &str) -> lf_engine::grid::Meter {
+    h.wait_event(what, |e| match e {
+        Event::Transport { meter, .. } => Some(*meter),
+        _ => None,
+    })
+}
+
+#[test]
+fn the_kept_meter_is_the_one_the_engine_applied_through_a_rebuild_and_an_import() {
+    use lf_engine::grid::{frames_per_bar, Meter};
+    let (six, three, five) = (Meter::new(6, 8).unwrap(), Meter::new(3, 4).unwrap(), Meter::new(5, 4).unwrap());
+    let mut h = Harness::new();
+    h.fake.set_input(tone);
+    assert!(h.host.send(TimedCommand { frame: None, command: Command::SetMeter(six) }).is_ok(), "kept while no engine exists");
+    h.open(asio(Some(256)));
+    assert_eq!(next_meter(&mut h, "the first engine's transport"), six, "the first engine starts in the kept meter");
+    h.record_loop();
+    // The loop locks the meter: the engine drops this one, and a rebuild must not bring it in.
+    h.send(Command::SetMeter(three));
+    h.play(RATE / 10);
+    let kept = h.host.settings();
+    assert!(kept.contains(&Command::SetMeter(six)) && !kept.contains(&Command::SetMeter(three)), "{kept:?}");
+    h.fake.asio.lock().unwrap().as_mut().unwrap().rate = 44_100;
+    h.host.open(asio(Some(128)), true).expect("the player confirms dropping the loop");
+    let rebuilt = h.wait_event("the new engine's transport", |e| match e {
+        Event::Transport { meter, master: 0, .. } => Some(*meter),
+        _ => None,
+    });
+    assert_eq!(rebuilt, six, "the refused request never reached the new engine");
+
+    // An import sets the meter with no command: the kept one follows it, and so does the next engine.
+    let frames = frames_per_bar(240.0, 44_100, five);
+    let load = serde_json::json!({ "bpm": 240, "meter": { "num": 5, "den": 4, "beats": 5 }, "bars": 1, "masterLengthFrames": frames, "tracks": [{ "index": 0, "frames": frames, "reversed": false, "state": "Playing", "mix": unity_mix() }] });
+    h.host.load_session(&session_bytes(&load, &vec![0.0; frames as usize])).expect("a 5/4 load");
+    assert_eq!(next_meter(&mut h, "the load's transport"), five);
+    let (header, _) = session_parts(&h.host.snapshot(false).expect("a snapshot"));
+    assert_eq!(header["meter"], serde_json::json!({ "num": 5, "den": 4, "beats": 5 }), "the snapshot names the meter");
+    assert!(h.host.settings().contains(&Command::SetMeter(five)));
+    let wrong = serde_json::json!({ "bpm": 240, "meter": { "num": 3, "den": 4, "beats": 3 }, "bars": 1, "masterLengthFrames": frames, "tracks": load["tracks"] });
+    h.send(Command::ClearAll);
+    h.wait_lane("the lane clears", 0, |i| i.state == LaneState::Empty);
+    let err = h.host.load_session(&session_bytes(&wrong, &vec![0.0; frames as usize])).expect_err("frames that are no bar of 3/4");
+    assert!(err.contains("3/4"), "{err}");
+    h.fake.asio.lock().unwrap().as_mut().unwrap().rate = 48_000;
+    h.open(asio(Some(256)));
+    assert_eq!(next_meter(&mut h, "the third engine's transport"), five, "an imported meter reaches a new engine");
+}
+
 #[test]
 fn the_input_sends_are_kept_before_the_first_open_and_replayed_into_a_new_engine() {
     use lf_engine::{InputSend, InputSendParam};
@@ -2034,6 +2083,7 @@ fn a_session_saves_and_loads_back_through_its_bytes_with_a_device_running_or_not
     let (header, pcm) = session_parts(&h.host.snapshot(false).expect("a snapshot while the device plays"));
     assert_eq!(header["rate"], 48_000);
     assert_eq!(header["bpm"], 240);
+    assert_eq!(header["meter"], serde_json::json!({ "num": 4, "den": 4, "beats": 4 }), "the default meter, named");
     assert_eq!(header["masterLengthFrames"], length);
     let mix = unity_mix();
     assert_eq!(header["tracks"], serde_json::json!([{ "index": 0, "frames": length, "reversed": true, "state": "Playing", "mix": mix }]));

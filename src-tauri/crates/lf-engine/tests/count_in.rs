@@ -9,14 +9,14 @@
 mod common;
 
 use common::{code, Rig};
-use lf_engine::grid::{frames_per_bar, Frame, Grid, COUNT_IN_BEATS};
+use lf_engine::grid::{frames_per_bar, Frame, Grid, Meter};
 use lf_engine::{Command, LaneState};
 
 const MARKER: f32 = 0.5;
 const TAKE: f32 = 0.7;
 
 fn count_frames(bpm: u32, sr: u32) -> Frame {
-    Grid::tempo(0, 0, bpm, sr).beat_frame(COUNT_IN_BEATS)
+    Grid::tempo(0, 0, bpm, sr, Meter::FOUR_FOUR).beat_frame(Meter::FOUR_FOUR.pulses_per_bar())
 }
 
 /// Press REC on lane 0 with MARKER in the tap, then TAKE from the armed start frame.
@@ -57,7 +57,7 @@ fn b_the_count_is_discarded_and_the_take_starts_at_frame_0() {
         rig.press(Command::RecDub(0));
         rig.advance(rig.seconds(0.3));
         let master = rig.master();
-        let fpb = frames_per_bar(120.0, rig.sr);
+        let fpb = frames_per_bar(120.0, rig.sr, Meter::FOUR_FOUR);
         assert_eq!(master, 2 * fpb, "block={block}");
         let pcm = rig.pcm(0);
         assert!(!rig.lane(0).armed && rig.window().is_none());
@@ -177,8 +177,8 @@ fn count_grid_the_take_starts_on_the_frame_at_the_come_in_beat() {
                     let press = rig.frame;
                     let mark = rig.events.len();
                     rig.press(Command::RecDub(0));
-                    let grid = Grid::tempo(press, 0, bpm, sr);
-                    let start = grid.beat_frame(COUNT_IN_BEATS);
+                    let grid = Grid::tempo(press, 0, bpm, sr, Meter::FOUR_FOUR);
+                    let start = grid.beat_frame(Meter::FOUR_FOUR.pulses_per_bar());
                     assert_eq!(rig.start_frame(), start);
                     rig.advance_to(start + rig.seconds(4.0 * 60.0 / bpm as f64 + 0.05));
                     let count: Vec<_> = rig.beats_since(mark).into_iter().filter(|b| b.2 > 0).collect();
@@ -221,7 +221,7 @@ fn bpm_lock_b_a_mid_take_retune_is_a_no_op() {
     rig.advance(rig.seconds(3.05));
     rig.press(Command::RecDub(0));
     rig.advance(rig.seconds(0.3));
-    assert_eq!(rig.master(), 2 * frames_per_bar(120.0, rig.sr));
+    assert_eq!(rig.master(), 2 * frames_per_bar(120.0, rig.sr, Meter::FOUR_FOUR));
 }
 
 #[test]

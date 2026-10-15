@@ -10,7 +10,7 @@ mod common;
 
 use common::{Delay, Opts, Rig};
 use lf_engine::dsp::fx::{default_fx_states, division_beats, FxKind, FxParam};
-use lf_engine::grid::{frames_per_bar, Frame};
+use lf_engine::grid::{frames_per_bar, Frame, Meter};
 use lf_engine::{Command, Instrument, LaneState, NoteTarget};
 
 fn peak(x: &[f32]) -> f32 {
@@ -458,7 +458,7 @@ fn stutter_pair(bpm: u32, heard: usize) -> (Vec<(Frame, Vec<f32>)>, Frame) {
     rig.advance(rig.seconds(0.093));
     rig.set(Command::SetFxBypass(1, FxKind::Stutter, false));
     rig.advance(4800); // past the bypass crossfades
-    let beat = frames_per_bar(bpm as f64, rig.sr) as f64 / 4.0;
+    let beat = frames_per_bar(bpm as f64, rig.sr, Meter::FOUR_FOUR) as f64 / 4.0;
     let mut out = Vec::new();
     for division in 0..4 {
         rig.set(Command::SetFxParam(0, FxParam::Rate, division as f64));
@@ -480,7 +480,7 @@ fn two_lanes_stutters_on_one_division_open_and_close_on_the_same_frames() {
     for bpm in [120u32, 137] {
         let ((a, origin), (b, other)) = (stutter_pair(bpm, 0), stutter_pair(bpm, 1));
         assert_eq!(origin, other);
-        let beat = frames_per_bar(bpm as f64, 48_000) as f64 / 4.0;
+        let beat = frames_per_bar(bpm as f64, 48_000, Meter::FOUR_FOUR) as f64 / 4.0;
         let open = |v: &[f32]| v.iter().map(|&x| x > 0.1).collect::<Vec<bool>>();
         let edges = |v: &[bool]| (1..v.len()).filter(|&k| v[k] != v[k - 1]).collect::<Vec<usize>>();
         for (division, ((start, x), (_, y))) in a.iter().zip(&b).enumerate() {

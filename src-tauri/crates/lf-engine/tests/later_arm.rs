@@ -19,7 +19,7 @@
 mod common;
 
 use common::{code, frame_of, Opts, Rig};
-use lf_engine::grid::{frames_per_bar, Frame, Grid, COUNT_IN_BEATS};
+use lf_engine::grid::{frames_per_bar, Frame, Grid, Meter};
 use lf_engine::looper::job_frames;
 use lf_engine::{Action, Command, Event, LaneState, Refusal};
 
@@ -32,7 +32,7 @@ fn a_later_takes_land_frame_exact_on_the_master_grid() {
                 rig.set(Command::SetBpm(bpm as f64));
                 rig.set_level(0.5);
                 let master = rig.record_first_take(0, bars, 1000);
-                assert_eq!(master, bars * frames_per_bar(bpm as f64, sr));
+                assert_eq!(master, bars * frames_per_bar(bpm as f64, sr, Meter::FOUR_FOUR));
                 let track1_frame0 = rig.anchor();
                 rig.set_input(code);
                 for phase in [0.013, 0.37, 0.81] {
@@ -177,7 +177,7 @@ fn arm_5_only_the_recording_lane_releases_its_window() {
 
 /// Every beat since `mark` sits exactly on the master grid (4 * bars beats per master).
 fn beats_on_master_grid(rig: &Rig, mark: usize, bars: Frame) -> usize {
-    let grid = lf_engine::grid::Grid::master(rig.anchor(), rig.master(), bars);
+    let grid = lf_engine::grid::Grid::master(rig.anchor(), rig.master(), bars, Meter::FOUR_FOUR);
     let beats = rig.beats_since(mark);
     for b in &beats {
         assert_eq!(grid.beat_frame(grid.first_beat_at_or_after(b.0)), b.0, "beat at {} is off the master grid", b.0);
@@ -296,8 +296,8 @@ fn idle_master(opts: Opts, bpm: u32) -> (Rig, Frame, Vec<f32>) {
 
 /// The count-in a REC applied at `press` starts: its tempo grid, and the downbeat it counts to.
 fn count_grid(rig: &Rig, press: Frame) -> (Grid, Frame) {
-    let grid = Grid::tempo(press, 0, rig.bpm(), rig.sr);
-    (grid, grid.beat_frame(COUNT_IN_BEATS))
+    let grid = Grid::tempo(press, 0, rig.bpm(), rig.sr, Meter::FOUR_FOUR);
+    (grid, grid.beat_frame(Meter::FOUR_FOUR.pulses_per_bar()))
 }
 
 /// REC on the EMPTY `lane` at the current frame: the press frame, the event mark before it and the
@@ -397,7 +397,7 @@ fn idle_2_the_pulse_takes_the_restarted_grid_and_a_cancelled_count_gives_back_th
     // Cancelled between the count's 2 and 3: every later beat sits on the OLD master grid, none forced,
     // none clicked (the metronome is off).
     let (mut rig, master, _) = idle_master(opts(), 137);
-    let old = Grid::master(rig.anchor(), master, 2);
+    let old = Grid::master(rig.anchor(), master, 2, Meter::FOUR_FOUR);
     let (press, _, downbeat) = arm_idle(&mut rig, 1);
     rig.advance_to(press + (downbeat - press) * 3 / 8);
     let (mark, cancel) = (rig.events.len(), rig.frame);
@@ -559,7 +559,7 @@ fn later_take(idle: bool, settings: &[Command], stop: Option<Frame>, run: Frame)
 
 #[test]
 fn idle_6_fixed_a_multiply_a_free_take_and_a_retake_roll_from_idle_match_their_playing_twins() {
-    let m = 2 * frames_per_bar(120.0, 48000);
+    let m = 2 * frames_per_bar(120.0, 48000, Meter::FOUR_FOUR);
     let (on, playing) = (Command::SetFixedLength(true), LaneState::Playing);
     let cases: [(&str, Vec<Command>, Option<Frame>, Frame, (Frame, Frame, Frame, usize, LaneState, LaneState)); 4] = [
         ("FIXED, one loop", vec![on, Command::SetFixedBars(2.0)], None, m * 3 / 2, (0, m, 53, m as usize, playing, playing)),
@@ -638,7 +638,7 @@ fn idle_9_an_arm_beside_a_playing_loop_is_not_held_for_another_lanes_job() {
 fn idle_10_a_device_lost_during_the_count_leaves_the_loops_stopped_and_gives_back_the_old_pulse() {
     // 137 bpm at 44.1 kHz, as `idle_2`: the count's tempo grid and the old master grid part within a few beats.
     let (mut rig, master, loop0) = idle_master(Opts { sr: 44100, start: 44100, ..Default::default() }, 137);
-    let old = Grid::master(rig.anchor(), master, 2);
+    let old = Grid::master(rig.anchor(), master, 2, Meter::FOUR_FOUR);
     let (anchor, origin) = (rig.anchor(), rig.engine.looper().grid_origin());
     let (press, _, downbeat) = arm_idle(&mut rig, 1);
     rig.advance_to(press + (downbeat - press) * 3 / 8); // between the count's 2 and 3

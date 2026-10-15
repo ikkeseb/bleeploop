@@ -8,7 +8,7 @@
 mod common;
 
 use common::{code, Rig};
-use lf_engine::grid::{Frame, Grid};
+use lf_engine::grid::{Frame, Grid, Meter};
 use lf_engine::{Command, LaneState};
 
 /// Silence, then a soft 0.01 attack for 300 frames, then 0.2: the onset at `at`.
@@ -67,7 +67,7 @@ fn an_onset_starts_the_take_with_its_attack_and_anchors_the_grid() {
         // The pulse runs at the current tempo from where the player played the onset.
         let mark = rig.events.len();
         rig.advance(rig.seconds(1.1));
-        let grid = Grid::tempo(start - align, 0, 120, rig.sr);
+        let grid = Grid::tempo(start - align, 0, 120, rig.sr, Meter::FOUR_FOUR);
         let beats = rig.beats_since(mark);
         assert!(!beats.is_empty() && beats.iter().all(|b| grid.beat_frame(grid.first_beat_at_or_after(b.0)) == b.0 && b.3));
         // A stop after two bars commits two bars on that grid.

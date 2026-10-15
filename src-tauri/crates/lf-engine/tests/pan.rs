@@ -12,7 +12,7 @@ use std::f64::consts::{FRAC_PI_8, SQRT_2};
 use common::{code, Opts, Rig};
 use lf_engine::dsp::fx::{FxKind, FxParam};
 use lf_engine::effects::{pan_gains, PAN_TAU_SECONDS};
-use lf_engine::grid::{frames_per_bar, Frame};
+use lf_engine::grid::{frames_per_bar, Frame, Meter};
 use lf_engine::render::wet_master;
 use lf_engine::{Command, CompactMix, Event, LaneMix, LaneState, Load, LoadTrack, SessionJob, Snapshot};
 
@@ -236,11 +236,11 @@ fn the_feed_and_the_applied_mixes_carry_the_target_once_per_change_not_the_glide
 
 /// A one-bar session at 120 BPM: lane 0 a constant LEVEL loop, PLAYING, at `mix`.
 fn session(rig: &Rig, mix: LaneMix) -> Load {
-    let master = frames_per_bar(120.0, 48_000);
+    let master = frames_per_bar(120.0, 48_000, Meter::FOUR_FOUR);
     let mut buf = vec![0.0f32; rig.engine.looper().capacity() as usize];
     buf[..master as usize].fill(LEVEL);
     let track = LoadTrack { index: 0, buf, peaks: Vec::new(), reversed: false, playing: true, mix };
-    Load { bpm: 120, bars: 1, master, tracks: vec![track], result: None }
+    Load { bpm: 120, meter: Meter::FOUR_FOUR, bars: 1, master, tracks: vec![track], result: None }
 }
 
 /// Hand `job` to the engine and render until it comes back.
@@ -299,7 +299,7 @@ fn the_wet_master_renders_each_lanes_pan() {
         LoadTrack { index: 1, buf, peaks: Vec::new(), reversed: false, playing: true, mix }
     };
     let render = |track_mix: LaneMix, mix: LaneMix| {
-        let load = Load { bpm: 120, bars: 1, master: MASTER as Frame, tracks: vec![track(track_mix)], result: None };
+        let load = Load { bpm: 120, meter: Meter::FOUR_FOUR, bars: 1, master: MASTER as Frame, tracks: vec![track(track_mix)], result: None };
         wet_master(48_000, load, &[mix], &[]).expect("the render")
     };
     let centre = render(LaneMix::default(), LaneMix::default());

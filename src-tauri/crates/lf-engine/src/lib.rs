@@ -19,8 +19,8 @@
 //!
 //! | Module | Owns | Ported from |
 //! |---|---|---|
-//! | [`grid`] | frames per bar, whole-bar clamps, commit and stop plans, a later take's bars (the multiply), the beat [`grid::Grid`], take fill | `quantize.ts`, `looper/grid-math.ts` |
-//! | [`clock`] | tempo and its lock, the beat pulse (free-run, count-in, master), the click, the bar line a FADE ends on | `clock.ts` |
+//! | [`grid`] | the meter ([`grid::Meter`]: the offered time signatures, their pulses, beats and accents), frames per bar, whole-bar clamps, commit and stop plans, a later take's bars (the multiply), the pulse [`grid::Grid`], take fill | `quantize.ts`, `looper/grid-math.ts` |
+//! | [`clock`] | tempo, meter and their lock, the pulse (free-run, count-in, master), the click (accent, beat, a compound meter's softer pulses between), the bar line a FADE ends on | `clock.ts` |
 //! | [`looper`] | lanes and buffers, the recorder, every transition, the multiply, TRIM, DUB FEEDBACK, FADE, gates and refusals, block jobs | `looper/{machine,state,capture,playback,mixer}.ts`, `ui/looper/gates.ts` |
 //! | [`autorec`] | the AUTO REC onset detector | `looper/auto-record.ts` |
 //! | [`engine`] | the callback: rings, the block split, the bus topology, master volume | `engine.ts`, `master.ts` |
@@ -88,7 +88,7 @@
 //!   boundary, as a live Web Audio call with no look-ahead does. Every control-rate step (the 128-frame
 //!   k-rate quanta, the compressor's 32-frame divisions, LFO and envelope ticks) is anchored to the frame
 //!   count, never to a block start. A UI gesture lands at the next block start (jitter: IPC plus one
-//!   block, inside the quarter-beat free-stop grace); a MIDI note or pedal lands there too (D22: native
+//!   block, inside the free-stop grace: a quarter of a counted beat); a MIDI note or pedal lands there too (D22: native
 //!   MIDI stamps nothing, so the ring's order is the order things apply in). No audio FIFO.
 //! - **Decided while porting** (each test file's header names what it changes): the count-in and an
 //!   idle PLAY start on the press frame, with no scheduling lead; a later take armed on an idle transport
@@ -149,7 +149,7 @@
 //! wired sound. `tests/slots.rs` holds the plugin slots, with fake units that record what they saw in
 //! preallocated buffers (never allocating in `process`) and are handed back to the test to drop;
 //! `tests/punch_out.rs` holds the punch-out, `tests/render_master.rs` the export's wet master, `tests/multiply.rs` the multiply (a free take's too),
-//! `tests/trim.rs` the TRIM, `tests/dub_feedback.rs` DUB FEEDBACK, `tests/punch_ramps.rs` an overdub's punch
+//! `tests/trim.rs` the TRIM, `tests/meter.rs` every offered meter (and the click WAV per meter, ignored), `tests/dub_feedback.rs` DUB FEEDBACK, `tests/punch_ramps.rs` an overdub's punch
 //! ramps (its reference: `tests/common/dub.rs`), `tests/playback_edges.rs` the undo, PLAY and STOP edges
 //! (its reference: `tests/common/edges.rs`), `tests/fade.rs` FADE, `tests/input_fx.rs`
 //! the input sends, `tests/scope.rs` the live scope taps (their columns, and that the sound does not

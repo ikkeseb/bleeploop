@@ -428,6 +428,12 @@ impl Engine {
         Toggle::ALL.map(|t| toggle_value(&self.clock, &self.looper, &self.input_fx, t))
     }
 
+    /// The meter the engine applies, once it has taken the commands queued ahead of its first block (a
+    /// replay sets it): what a rebuild keeps (`engine_io`'s settings). Not for the audio thread.
+    pub fn applied_meter(&self) -> Option<crate::grid::Meter> {
+        self.replayed.then_some(self.clock.meter())
+    }
+
     /// While no device runs and the caller holds the engine: apply `command` at once, at the frame the
     /// next block would start, as `process` would there (the offline render's mix and click:
     /// [`crate::render`]). False when it would wait for a block job: nothing was applied.
@@ -548,8 +554,8 @@ impl Engine {
             }
             self.looper.publish(&mut cx, self.replayed);
             offer_toggles(cx.feed, f, &mut self.toggles_owed, cx.clock, &self.looper, &self.input_fx);
-            self.fx.follow_grid(self.looper.grid_origin(), self.looper.master(), self.clock.bpm(), f);
-            self.input_fx.follow_tempo(self.clock.bpm(), f);
+            self.fx.follow_grid(self.looper.grid_origin(), self.looper.master(), self.clock.bpm(), self.clock.meter(), f);
+            self.input_fx.follow_tempo(self.clock.bpm(), self.clock.meter(), f);
 
             let quantum_end = f - (f - self.skipped).rem_euclid(QUANTUM as Frame) + QUANTUM as Frame;
             let mut next = end.min(quantum_end);
@@ -907,6 +913,10 @@ fn apply(looper: &mut Looper, cx: &mut Cx, at: &mut Apply, command: Command) -> 
             cx.clock.set_bpm(bpm, now);
             Applied::Done
         }
+        Command::SetMeter(meter) => {
+            cx.clock.set_meter(meter);
+            Applied::Done
+        }
         Command::SetMetronome(on) => {
             cx.clock.set_metronome(on);
             toggled(cx.feed, now, at.toggles_owed, Toggle::Click, on);
@@ -1064,7 +1074,7 @@ mod tests {
     use super::*;
     use crate::api::LaneMix;
     use crate::dsp::fx::{FxKind, FxParam, FxState, MAX_FEEDBACK};
-    use crate::grid::frames_per_bar;
+    use crate::grid::{frames_per_bar, Meter};
     use crate::session::{Load, LoadTrack};
 
     /// The load's own `LaneFx::clear_history`, alone: every engine path that takes a lane that played
@@ -1099,11 +1109,11 @@ mod tests {
         }
         assert!(ringing > 0.1, "the delay rings before the load ({ringing})");
 
-        let master = frames_per_bar(120.0, 48_000);
+        let master = frames_per_bar(120.0, 48_000, Meter::FOUR_FOUR);
         let mut mix = LaneMix::default();
         mix.fx[FxKind::Delay.index()] = FxState { bypassed: false, params: [1.0, MAX_FEEDBACK, 1.0] };
         let track = LoadTrack { index: 0, buf: vec![0.0; e.looper.capacity() as usize], peaks: Vec::new(), reversed: false, playing: true, mix };
-        let mut load = Load { bpm: 120, bars: 1, master, tracks: vec![track], result: None };
+        let mut load = Load { bpm: 120, meter: Meter::FOUR_FOUR, bars: 1, master, tracks: vec![track], result: None };
         let mut cx = Cx { now: loaded, align: 0, clock: &mut e.clock, feed: &mut e.feed, fx: &mut e.fx };
         assert_eq!(e.looper.load(&mut cx, &mut load), Ok(()));
         for f in (loaded..loaded + 2 * master).step_by(QUANTUM) {

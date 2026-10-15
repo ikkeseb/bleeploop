@@ -17,7 +17,7 @@ mod common;
 
 use common::{code, Opts, Rig};
 use lf_engine::dsp::fx::{FxKind, FxParam};
-use lf_engine::grid::{Frame, Grid};
+use lf_engine::grid::{Frame, Grid, Meter};
 use lf_engine::looper::{job_frames, JOB_RATE};
 use lf_engine::overview::PEAK_FRAMES;
 use lf_engine::{Command, Event, LaneState, SessionJob, Snapshot};
@@ -217,7 +217,7 @@ fn c_the_beats_and_the_click_carry_on_across_the_commit() {
     let beats = with.beats_since(mark);
     assert_eq!(beats, without.beats_since(mark_without), "the same beats: frame, bar position, click");
     // One beat per grid step of the old loop, none doubled or missing, the accent on each bar's one.
-    let grid = Grid::master(without.anchor(), master, 1);
+    let grid = Grid::master(without.anchor(), master, 1, Meter::FOUR_FOUR);
     let first = grid.first_beat_at_or_after(beats[0].0);
     assert!(beats.len() >= 40, "{} beats", beats.len());
     for (k, &(frame, in_bar, count_left, clicked)) in beats.iter().enumerate() {
@@ -365,9 +365,9 @@ fn f_the_next_take_may_reach_the_longest_multiply_the_buffer_holds() {
         for (k, bars) in [1, 2, 3, 4].into_iter().enumerate() {
             let mut rig = Rig::with(Opts { sr, start: sr as Frame, loop_seconds: seconds, ..Default::default() });
             rig.set(Command::SetBpm(bpm));
-            assert_eq!(rig.engine.looper().next_take_max_bars(rig.bpm()), 32, "no master: 32");
+            assert_eq!(rig.engine.looper().next_take_max_bars(rig.bpm(), rig.meter()), 32, "no master: 32");
             master_of(&mut rig, bars, |_| 0.25);
-            let max = rig.engine.looper().next_take_max_bars(rig.bpm());
+            let max = rig.engine.looper().next_take_max_bars(rig.bpm(), rig.meter());
             assert_eq!(max, want[k], "sr={sr} bpm={bpm} {seconds} s, a {bars}-bar master");
             // FIXED at 32 records exactly that.
             let (start, end) = arm_fixed(&mut rig, 1, 32.0);
@@ -512,7 +512,7 @@ fn j_a_free_later_take_runs_to_the_longest_multiply_and_closes_there_by_itself()
         rig.set_input(|f| -code(f));
         rig.press(Command::RecDub(1));
         let (start, end) = (rig.start_frame(), rig.end_frame());
-        let max = rig.engine.looper().next_take_max_bars(rig.bpm());
+        let max = rig.engine.looper().next_take_max_bars(rig.bpm(), rig.meter());
         assert_eq!((max, end - start), (10, 10 * rig.fpb()), "the 20 s buffer holds five loops of two bars");
         rig.advance_to(end);
         assert_eq!((rig.state(1), rig.master()), (LaneState::Recording, master), "align={align}: it runs on past the loop");

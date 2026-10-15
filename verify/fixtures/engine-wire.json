@@ -40,6 +40,7 @@
     "Press",
     { "SelectTrack": 3 },
     { "SetBpm": 96.5 },
+    { "SetMeter": [6, 8] },
     { "SetMetronome": true },
     { "SetClickVolume": 0.8 },
     { "SetMasterVolume": 0.75 },
@@ -133,7 +134,7 @@
         }
       }
     },
-    { "Transport": { "frame": 96000, "master": 88200, "bpm": 120, "locked": true } },
+    { "Transport": { "frame": 96000, "master": 88200, "bpm": 120, "meter": { "num": 4, "den": 4, "beats": 4 }, "locked": true } },
     { "Beat": { "frame": 99000, "beatInBar": 1, "countLeft": 0, "clicked": true } },
     { "Selected": { "frame": 99100, "lane": 2 } },
     { "Refused": { "frame": 99200, "lane": 2, "reason": "PlayFirst" } },
@@ -249,7 +250,7 @@
       "seq": 0,
       "reset": true,
       "events": [
-        { "Transport": { "frame": 96000, "master": 88200, "bpm": 120, "locked": true } },
+        { "Transport": { "frame": 96000, "master": 88200, "bpm": 120, "meter": { "num": 6, "den": 8, "beats": 2 }, "locked": true } },
         {
           "Lane": {
             "frame": 96000,
@@ -378,6 +379,7 @@
       "peaks": [{ "lane": 0, "start": 0, "count": 3, "min": [-0.5, -0.25, -0.125], "max": [0.5, 0.25, 0.123] }],
       "settings": [
         { "SetBpm": 96 },
+        { "SetMeter": [3, 4] },
         { "SetMasterVolume": 0.8 },
         { "SetFixedBars": 2 },
         { "SetVolume": [0, 0.5] },
@@ -445,6 +447,7 @@
       "rate": 48000,
       "masterLengthFrames": 96000,
       "bpm": 120,
+      "meter": { "num": 4, "den": 4, "beats": 4 },
       "tracks": [
         {
           "index": 0,
@@ -490,6 +493,7 @@
       "rate": 44100,
       "masterLengthFrames": 88200,
       "bpm": 60,
+      "meter": { "num": 6, "den": 8, "beats": 2 },
       "tracks": [
         {
           "index": 4,
@@ -559,6 +563,7 @@
     },
     {
       "bpm": 90,
+      "meter": { "num": 12, "den": 8, "beats": 4 },
       "bars": 1,
       "masterLengthFrames": 128000,
       "tracks": [
@@ -583,5 +588,6 @@
         }
       ]
     }
-  ]
+  ],
+  "meters": [[4, 4, 4], [3, 4, 3], [6, 8, 2], [12, 8, 4], [5, 4, 5]]
 }

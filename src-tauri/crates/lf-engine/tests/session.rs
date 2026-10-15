@@ -12,7 +12,7 @@ mod common;
 
 use common::{code, Rig};
 use lf_engine::dsp::fx::{FxKind, FxParam, FxState, MAX_FEEDBACK};
-use lf_engine::grid::{frames_per_bar, Frame};
+use lf_engine::grid::{frames_per_bar, Frame, Meter};
 use lf_engine::overview::PEAK_FRAMES;
 use lf_engine::render::wet_master;
 use lf_engine::session::SNAPSHOT_RATE;
@@ -84,7 +84,7 @@ fn load_of(s: &Snapshot, capacity: usize, bars: Frame) -> Load {
             LoadTrack { index: t.index, buf, peaks, reversed: t.reversed, playing: t.state == LaneState::Playing, mix: t.mix }
         })
         .collect();
-    Load { bpm: s.bpm, bars, master: s.master, tracks, result: None }
+    Load { bpm: s.bpm, meter: s.meter, bars, master: s.master, tracks, result: None }
 }
 
 #[test]
@@ -103,7 +103,7 @@ fn a_snapshot_loads_back_sample_exact_on_a_fresh_grid() {
 
     let mut fresh = Rig::new();
     fresh.advance(4800);
-    let bars = master / frames_per_bar(120.0, 48_000);
+    let bars = master / frames_per_bar(120.0, 48_000, Meter::FOUR_FOUR);
     let capacity = fresh.engine.looper().capacity() as usize;
     let SessionJob::Load(load) = run(&mut fresh, SessionJob::Load(load_of(&s, capacity, bars))) else { unreachable!() };
     assert_eq!(load.result, Some(Ok(())));
@@ -281,7 +281,7 @@ fn a_later_take_armed_and_aborted_on_a_loaded_session_leaves_its_grid_and_lanes(
     let master = rig.master();
     let s = snapshot(&mut rig, 5 * master as usize);
     let capacity = rig.engine.looper().capacity() as usize;
-    let bars = master / frames_per_bar(120.0, 48_000);
+    let bars = master / frames_per_bar(120.0, 48_000, Meter::FOUR_FOUR);
     let loaded = |s: &Snapshot| {
         let mut fresh = Rig::new();
         fresh.advance(4800);
@@ -445,7 +445,7 @@ fn a_wet_master_rendered_from_a_snapshot_takes_the_snapshots_mix_not_the_setting
     rig.set_level(0.0);
     rig.idle();
     let capacity = rig.engine.looper().capacity() as usize;
-    let bars = master / frames_per_bar(120.0, 48_000);
+    let bars = master / frames_per_bar(120.0, 48_000, Meter::FOUR_FOUR);
     let peak = |x: &[f32]| x.iter().fold(0.0f32, |m, v| m.max(v.abs()));
     // The settings say the lane plays at unity: the snapshot muted it, so the master is silent.
     rig.set(Command::SetMute(0, true));
@@ -484,7 +484,7 @@ fn fresh_load(s: &Snapshot, mix: LaneMix) -> (Rig, Load) {
     fresh.set(Command::SetMetronome(false));
     fresh.advance(4800);
     let capacity = fresh.engine.looper().capacity() as usize;
-    let mut load = load_of(s, capacity, s.master / frames_per_bar(120.0, 48_000));
+    let mut load = load_of(s, capacity, s.master / frames_per_bar(120.0, 48_000, Meter::FOUR_FOUR));
     load.tracks[0].mix = mix;
     (fresh, load)
 }
@@ -593,7 +593,7 @@ fn hot_clear_then_load(s: &Snapshot, pcm: f32) -> (Rig, usize, usize) {
     assert_eq!(rig.state(0), LaneState::Empty);
     rig.advance(99);
     let capacity = rig.engine.looper().capacity() as usize;
-    let mut load = load_of(s, capacity, s.master / frames_per_bar(120.0, 48_000));
+    let mut load = load_of(s, capacity, s.master / frames_per_bar(120.0, 48_000, Meter::FOUR_FOUR));
     let track = &mut load.tracks[0];
     track.buf.fill(0.0);
     track.buf[0] = pcm;

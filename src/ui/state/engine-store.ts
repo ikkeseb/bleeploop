@@ -2,6 +2,7 @@ import { batch, createSignal, type Accessor } from 'solid-js';
 import {
   ENGINE_LANES,
   ENGINE_SLOTS,
+  FOUR_FOUR,
   decodeOpenError,
   decodeSnapshot,
   encodeSessionBytes,
@@ -781,7 +782,7 @@ function applyFrameNow(f: FeedFrame): void {
       if (!f.events.some((ev) => ev.type === 'Lane' && ev.lane === i)) applyLane(i, 0, EMPTY_INFO);
     }
     if (!f.events.some((ev) => ev.type === 'Transport')) {
-      applyEvent({ type: 'Transport', frame: 0, master: 0, bpm: bpm(), locked: false });
+      applyEvent({ type: 'Transport', frame: 0, master: 0, bpm: bpm(), meter: FOUR_FOUR, locked: false });
     }
     if (!f.events.some((ev) => ev.type === 'Selected')) setSelectedTrack(0);
   }

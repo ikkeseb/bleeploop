@@ -11,7 +11,7 @@ mod common;
 
 use common::{code, Rig};
 use lf_engine::clock::{Beat, Clock};
-use lf_engine::grid::{frames_per_bar, Frame, Grid, COUNT_IN_BEATS};
+use lf_engine::grid::{frames_per_bar, Frame, Grid, Meter};
 use lf_engine::{Command, LaneState};
 
 const SR: u32 = 48000;
@@ -34,7 +34,7 @@ const LIVE: Option<Frame> = Some(Frame::MAX);
 #[test]
 fn b_the_master_pulse_starts_on_its_anchor_or_the_next_beat() {
     for (bpm, bars) in [(120.0, 2), (137.0, 1), (90.0, 4), (200.0, 3)] {
-        let master = bars * frames_per_bar(bpm, SR);
+        let master = bars * frames_per_bar(bpm, SR, Meter::FOUR_FOUR);
         let mut clock = Clock::new(SR);
         clock.start_master(1000, master, bars, 1000);
         let b = clock.fire_due(1000, None).unwrap();
@@ -51,14 +51,14 @@ fn b_the_master_pulse_starts_on_its_anchor_or_the_next_beat() {
 #[test]
 fn c_twelve_minutes_without_phase_walk_every_boundary_an_accented_click() {
     for (bpm, sr, bars) in [(120.0, 48000, 2), (137.0, 44100, 1), (100.0, 48000, 4), (73.5, 44100, 3), (200.0, 48000, 8)] {
-        let master = bars * frames_per_bar(bpm, sr);
+        let master = bars * frames_per_bar(bpm, sr, Meter::FOUR_FOUR);
         let mut clock = Clock::new(sr);
         clicking(&mut clock);
         let anchor = 12_345;
         clock.start_master(anchor, master, bars, anchor);
         let end = anchor + 12 * 60 * sr as Frame;
         let beats = drive(&mut clock, end, LIVE);
-        let grid = Grid::master(anchor, master, bars);
+        let grid = Grid::master(anchor, master, bars, Meter::FOUR_FOUR);
         assert_eq!(beats.len() as u64, grid.first_beat_at_or_after(end), "every beat exactly once");
         for (n, b) in beats.iter().enumerate() {
             assert_eq!(b.frame, grid.beat_frame(n as u64));
@@ -128,7 +128,7 @@ fn accent_a_a_fresh_transport_beats_from_its_first_frame() {
         let mut rig = Rig::with(common::Opts { start: 100 * SR as Frame, ..Default::default() });
         let start = rig.frame;
         rig.set(Command::SetBpm(bpm as f64));
-        let grid = Grid::tempo(start, 0, bpm, SR);
+        let grid = Grid::tempo(start, 0, bpm, SR, Meter::FOUR_FOUR);
         rig.advance_to(grid.beat_frame(8) + 1);
         let beats = rig.beats();
         assert_eq!(beats.len(), 9, "bpm={bpm}");
@@ -141,7 +141,7 @@ fn accent_b_a_tempo_change_mid_free_run_carries_the_phase() {
     for (a, b) in [(120u32, 90u32), (90, 200), (200, 40), (120, 121)] {
         let mut rig = Rig::new();
         rig.set(Command::SetBpm(a as f64));
-        let before_grid = Grid::tempo(rig.frame - 1, 0, a, SR);
+        let before_grid = Grid::tempo(rig.frame - 1, 0, a, SR, Meter::FOUR_FOUR);
         rig.advance(before_grid.beat_frame(5) - rig.frame + 624);
         let before = rig.beats();
         let n = before.len() as u64;
@@ -152,7 +152,7 @@ fn accent_b_a_tempo_change_mid_free_run_carries_the_phase() {
         let after = rig.beats_since(0)[before.len()..].to_vec();
         assert_eq!(after[0].0, expected, "{a}->{b}: the next beat keeps the outgoing grid's frame");
         assert_eq!(after[0].1 as u64, n % 4, "{a}->{b}: bar index continuous");
-        let new = Grid::tempo(expected, n, b, SR);
+        let new = Grid::tempo(expected, n, b, SR, Meter::FOUR_FOUR);
         assert!(after.iter().enumerate().all(|(k, x)| x.0 == new.beat_frame(n + k as u64) && x.1 as u64 == (n + k as u64) % 4));
         assert!(after.iter().all(|x| x.0 >= change));
     }
@@ -166,7 +166,7 @@ fn accent_c_a_master_reset_carries_the_loop_grid_into_free_run() {
     let master = rig.record_first_take(0, 2, 1440);
     assert!(master > 0 && rig.state(0) == LaneState::Playing);
     rig.advance(rig.seconds(60.0));
-    let grid = Grid::master(rig.anchor(), master, 2);
+    let grid = Grid::master(rig.anchor(), master, 2, Meter::FOUR_FOUR);
     let before = rig.beats();
     let last = *before.last().unwrap();
     let n = grid.first_beat_at_or_after(last.0);
@@ -176,7 +176,7 @@ fn accent_c_a_master_reset_carries_the_loop_grid_into_free_run() {
     let after = rig.beats_since(0)[before.len()..].to_vec();
     assert_eq!(after[0].0, grid.beat_frame(n + 1), "first free-run beat where the master grid had it");
     assert_eq!(after[0].1 as u64, (n + 1) % 4);
-    let free = Grid::tempo(after[0].0, n + 1, 137, SR);
+    let free = Grid::tempo(after[0].0, n + 1, 137, SR, Meter::FOUR_FOUR);
     assert!(after.iter().enumerate().all(|(k, b)| b.0 == free.beat_frame(n + 1 + k as u64)));
     assert!(!rig.locked());
 }
@@ -185,8 +185,8 @@ fn accent_c_a_master_reset_carries_the_loop_grid_into_free_run() {
 fn accent_e_only_a_live_free_run_pulse_follows_the_tempo() {
     // A count-in pulse (unlocked here, to reach the pulse gate itself) keeps its grid.
     let mut clock = Clock::new(SR);
-    clock.start_count_in(1000, COUNT_IN_BEATS, 1000);
-    let grid = Grid::tempo(1000, 0, 120, SR);
+    clock.start_count_in(1000, 1000);
+    let grid = Grid::tempo(1000, 0, 120, SR, Meter::FOUR_FOUR);
     drive(&mut clock, 1000 + 14_400, None);
     clock.set_bpm(90.0, 1000 + 14_400);
     let beats: Vec<_> = drive(&mut clock, 1000 + 3 * SR as Frame, None);
@@ -243,7 +243,7 @@ fn forced_a_the_count_fires_every_beat_on_its_frame() {
 fn forced_c_a_jump_over_count_beats_fires_them_late_as_one_click() {
     let mut clock = Clock::new(SR);
     let anchor = 480_000;
-    clock.start_count_in(anchor, COUNT_IN_BEATS, anchor);
+    clock.start_count_in(anchor, anchor);
     assert!(clock.fire_due(anchor, None).unwrap().clicked);
     let wake = anchor + 76_800; // 1.6 s: beats 1, 2 and 3 were jumped over
     let mut late = Vec::new();
@@ -261,7 +261,7 @@ fn forced_d_f_the_beat_after_a_late_count_still_sounds() {
     // D: beat 3 on time, 0.2 s after the late beats 1 and 2.
     let mut clock = Clock::new(SR);
     let anchor = 480_000;
-    clock.start_count_in(anchor, COUNT_IN_BEATS, anchor);
+    clock.start_count_in(anchor, anchor);
     clock.fire_due(anchor, None);
     let wake = anchor + 62_400;
     while clock.fire_due(wake, None).is_some() {}
@@ -271,8 +271,8 @@ fn forced_d_f_the_beat_after_a_late_count_still_sounds() {
         let mut clock = Clock::new(SR);
         clock.set_bpm(bpm as f64, 0);
         clicking(&mut clock);
-        clock.start_count_in(anchor, COUNT_IN_BEATS, anchor);
-        let grid = Grid::tempo(anchor, 0, bpm, SR);
+        clock.start_count_in(anchor, anchor);
+        let grid = Grid::tempo(anchor, 0, bpm, SR, Meter::FOUR_FOUR);
         clock.fire_due(anchor, LIVE);
         let wake = grid.beat_frame(4) - 3840;
         let late: Vec<_> = std::iter::from_fn(|| clock.fire_due(wake, LIVE)).collect();
@@ -298,7 +298,7 @@ fn forced_g_a_metronome_on_first_take_never_double_strikes() {
         assert!(master > 0 && rig.state(0) == LaneState::Playing);
         let clicks = rig.clicks_since(0);
         assert!(clicks.windows(2).all(|w| w[1].0 - w[0].0 >= 5760), "no flam after {stop_after_beats} beats");
-        let grid = Grid::master(rig.anchor(), master, master / 96_000);
+        let grid = Grid::master(rig.anchor(), master, master / 96_000, Meter::FOUR_FOUR);
         let from = rig.frame - rig.seconds(6.0);
         let (lo, hi) = (grid.first_beat_at_or_after(from), grid.first_beat_at_or_after(rig.frame - SR as Frame));
         assert!(hi - lo >= 8 && (lo..hi).all(|n| clicks.iter().any(|c| c.0 == grid.beat_frame(n))));
@@ -333,7 +333,7 @@ fn forced_h_the_click_is_a_transport_mode() {
     assert_eq!(rig.state(0), LaneState::Stopped);
     // Count beats bypass the gate and a pending stop cutoff.
     let mut clock = Clock::new(SR);
-    clock.start_count_in(1000, 2, 1000);
+    clock.start_count_in(1000, 1000);
     let beats = drive(&mut clock, 1000 + SR as Frame, Some(1000 + 12_000));
     assert_eq!(beats.iter().filter(|b| b.clicked).map(|b| b.frame).collect::<Vec<_>>(), [1000, 25_000]);
 }

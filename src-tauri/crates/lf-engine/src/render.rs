@@ -100,8 +100,9 @@ pub fn wet_master_with(rate: u32, mut load: Load, mixes: &[LaneMix], settings: &
     if master <= 0 || master as f64 > MAX_LOOP_SECONDS * rate as f64 {
         return Err(format!("export render: a loop of {master} frames is not between 1 frame and {MAX_LOOP_SECONDS} seconds"));
     }
-    if load.bars.checked_mul(frames_per_bar(load.bpm as f64, rate)) != Some(master) {
-        return Err(format!("export render: {} bars at {} BPM are not {master} frames at {rate} Hz", load.bars, load.bpm));
+    if load.bars.checked_mul(frames_per_bar(load.bpm as f64, rate, load.meter)) != Some(master) {
+        let meter = load.meter;
+        return Err(format!("export render: {} bars of {}/{} at {} BPM are not {master} frames at {rate} Hz", load.bars, meter.num(), meter.den(), load.bpm));
     }
     if mixes.len() != load.tracks.len() {
         return Err(format!("export render: {} mixes for {} tracks", mixes.len(), load.tracks.len()));
@@ -152,8 +153,8 @@ pub fn wet_master_with(rate: u32, mut load: Load, mixes: &[LaneMix], settings: &
     }
 
     let states: Vec<[FxState; 5]> = lanes.iter().filter(|&&i| i < crate::api::TRACK_COUNT).map(|&i| engine.fx().chain(i).get_state()).collect();
-    let bpm = engine.clock().bpm();
-    let beat_seconds = frames_per_bar(bpm as f64, rate) as f64 / 4.0 / rate as f64;
+    let (bpm, meter) = (engine.clock().bpm(), engine.clock().meter());
+    let beat_seconds = frames_per_bar(bpm as f64, rate, meter) as f64 / meter.quarters_per_bar() / rate as f64;
     let warmup = warmup_passes(&states, beat_seconds, master as f64 / rate as f64)
         .checked_add(options.extra_warmup)
         .ok_or("export render: too many warm-up passes")?;

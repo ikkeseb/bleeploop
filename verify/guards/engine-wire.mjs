@@ -15,6 +15,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import {
   SCOPE_SOURCES,
+  TIME_SIGNATURES,
   decodeCommand,
   decodeDeviceEvent,
   decodeDeviceRequest,
@@ -52,7 +53,7 @@ const keys = (o) => Object.keys(o).sort();
 
 const COMMANDS = [
   'RecDub', 'PlayStop', 'Stop', 'Undo', 'Reverse', 'Copy', 'Trim', 'Clear', 'PlayAll', 'StopAll', 'ClearAll', 'Action',
-  'ActionOn', 'SelectTrack', 'SetBpm', 'SetMetronome', 'SetClickVolume', 'SetMasterVolume', 'SetMasterMute',
+  'ActionOn', 'SelectTrack', 'SetBpm', 'SetMeter', 'SetMetronome', 'SetClickVolume', 'SetMasterVolume', 'SetMasterMute',
   'SetLoopEndStop', 'SetFadeBars', 'SetFixedLength', 'SetFixedBars', 'SetRetake', 'SetAutoRecord', 'SetAutoSensitivity',
   'SetVolume', 'SetMute', 'SetDubFeedback', 'SetPan', 'SetFxParam', 'SetFxBypass', 'SelectInstrument', 'NoteOn', 'NoteOff', 'PitchBend', 'Modulation',
   'AllNotesOff', 'SetSlotLive', 'SetSlotGain', 'SetInstrumentGain', 'SetInputSend', 'SetInputSendParam', 'Press', 'SetScope',
@@ -223,6 +224,23 @@ const refused = {
   'a trim of no bars': () => decodeCommand({ Trim: [0, 0] }),
   'a trim of a fractional bar count': () => decodeCommand({ Trim: [0, 1.5] }),
   'a fade of a fractional bar count': () => decodeCommand({ SetFadeBars: 2.5 }),
+  'a meter the engine does not offer': () => decodeCommand({ SetMeter: [7, 8] }),
+  'a meter as an object': () => decodeCommand({ SetMeter: { num: 3, den: 4 } }),
+  'a transport meter counted in other beats': () => {
+    const e = structuredClone(fixture.events.find((x) => tag(x)[0] === 'Transport'));
+    e.Transport.meter = { num: 6, den: 8, beats: 6 };
+    decodeEvent(e);
+  },
+  'a transport meter the engine does not offer': () => {
+    const e = structuredClone(fixture.events.find((x) => tag(x)[0] === 'Transport'));
+    e.Transport.meter = { num: 7, den: 8, beats: 7 };
+    decodeEvent(e);
+  },
+  'a transport meter without its beats': () => {
+    const e = structuredClone(fixture.events.find((x) => tag(x)[0] === 'Transport'));
+    e.Transport.meter = { num: 3, den: 4 };
+    decodeEvent(e);
+  },
   'a lane info without fading': () => {
     const e = structuredClone(lane);
     delete e.Lane.info.fading;
@@ -282,6 +300,29 @@ const refused = {
   },
 };
 for (const [name, fn] of Object.entries(refused)) check(`refuses ${name}`, () => assert.throws(fn));
+
+// ── The meter: one offered list, its beats the engine's (`Meter::OFFERED`, `beats_per_bar`) ─────────
+check("the fixture's meters table is the TS offer, beats included (the cargo test holds it to the engine's)", () =>
+  assert.deepEqual(fixture.meters, TIME_SIGNATURES.map((m) => [m.num, m.den, m.beats])),
+);
+check('every offered meter is a command and a transport the TS side reads', () => {
+  for (const m of TIME_SIGNATURES) {
+    assert.deepEqual(decodeCommand({ SetMeter: [m.num, m.den] }), { SetMeter: [m.num, m.den] });
+    const e = structuredClone(fixture.events.find((x) => tag(x)[0] === 'Transport'));
+    e.Transport.meter = { ...m };
+    assert.deepEqual(decodeEvent(e).meter, m);
+  }
+});
+check('a scripted transport from before meters reads as 4/4', () => {
+  const e = structuredClone(fixture.events.find((x) => tag(x)[0] === 'Transport'));
+  delete e.Transport.meter;
+  assert.deepEqual(decodeEvent(e).meter, { num: 4, den: 4, beats: 4 });
+});
+check('the fixture has a 4/4 and a compound meter on the wire, and a load header with and without one', () => {
+  const metered = [...fixture.events, ...fixture.feed.flatMap((f) => f.events)].filter((e) => e.Transport).map((e) => e.Transport.meter.den);
+  assert.deepEqual([...new Set(metered)].sort(), [4, 8]);
+  assert.ok(fixture.loadHeaders.some((h) => h.meter === undefined) && fixture.loadHeaders.some((h) => h.meter?.den === 8));
+});
 
 // ── Session bytes: a snapshot's stems, an export's master after them, or the render's error ──────────
 // The fixture's snapshot headers: every field the Rust side writes is read, each track's mix included.
@@ -447,6 +488,8 @@ check("the browser fake's load sets each loaded lane's mix, clamped as the engin
     'a load track with an unknown field': track((t) => (t.gain = 1)),
     'a load track listed twice': track((t, h) => h.tracks.push(structuredClone(t))),
     'a load header with an unknown field': track((_, h) => (h.rate = 48000)),
+    'a load header with a meter the engine does not offer': track((_, h) => (h.meter = { num: 7, den: 8, beats: 7 })),
+    'a load header whose meter counts other beats': track((_, h) => (h.meter = { num: 12, den: 8, beats: 12 })),
   };
   for (const [name, fn] of Object.entries(refusedLoad)) check(`refuses ${name}`, () => assert.throws(fn));
 }
@@ -469,7 +512,8 @@ check("the browser fake's load sets each loaded lane's mix, clamped as the engin
     const s = decodeSnapshot(bytes(header()));
     assert.deepEqual(s.pcm.map((b) => Array.from(b)), stems.map((b) => Array.from(b)));
     assert.equal(s.master, null);
-    assert.deepEqual(Object.keys(s.header).sort(), ['bpm', 'masterLengthFrames', 'rate', 'tracks']);
+    assert.deepEqual(Object.keys(s.header).sort(), ['bpm', 'masterLengthFrames', 'meter', 'rate', 'tracks']);
+    assert.deepEqual(s.header.meter, { num: 4, den: 4, beats: 4 }, 'a scripted header without a meter reads as 4/4');
   });
   check("an export's snapshot carries its master after the stems, left then right", () => {
     const raw = bytes(header({ master: { frames: 4 } }), master);
@@ -504,6 +548,7 @@ check("the browser fake's load sets each loaded lane's mix, clamped as the engin
     'a master that is not one loop long': () => decodeSnapshot(encodeSessionBytes(header({ master: { frames: 3 } }), stems, { left: new Float32Array(3), right: new Float32Array(3) }).buffer),
     'a master and its error at once': () => decodeSnapshot(bytes(header({ master: { frames: 4 }, masterError: 'x' }), master)),
     'a non-string master error': () => decodeSnapshot(bytes(header({ masterError: 7 }))),
+    'a snapshot meter counted in other beats': () => decodeSnapshot(bytes(header({ meter: { num: 6, den: 8, beats: 6 } }))),
     'an encode with master PCM and no master in the header': () => encodeSessionBytes(header(), stems, master),
   };
   for (const [name, fn] of Object.entries(refusedSession)) check(`refuses ${name}`, () => assert.throws(fn));

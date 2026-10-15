@@ -7,7 +7,7 @@
 use std::any::Any;
 
 use crate::dsp::fx::{default_fx_states, FxKind, FxParam, FxState, MAX_PARAMS};
-use crate::grid::Frame;
+use crate::grid::{Frame, Meter};
 
 pub const TRACK_COUNT: usize = 5;
 /// The HOLD controls the engine tells apart ([`Action::Hold`]): pedals held down at once.
@@ -58,6 +58,8 @@ pub enum Command {
     Press,
     SelectTrack(u8),
     SetBpm(f64),
+    /// The meter the bars count in; dropped while the tempo is locked, as `SetBpm` is (they lock together).
+    SetMeter(Meter),
     SetMetronome(bool),
     SetClickVolume(f32),
     /// The master output level (0..1) and its mute (`master.ts`).
@@ -549,9 +551,10 @@ impl Refusal {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Event {
     Lane { frame: Frame, lane: u8, info: LaneInfo },
-    /// The master loop length (0 = none), the tempo and its lock.
-    Transport { frame: Frame, master: Frame, bpm: u32, locked: bool },
-    /// A beat of the pulse: the beat LED, the count-in numeral, and whether it clicked.
+    /// The master loop length (0 = none), the tempo, the meter and their lock.
+    Transport { frame: Frame, master: Frame, bpm: u32, meter: Meter, locked: bool },
+    /// A counted beat of the pulse (`Meter::pulses_per_beat` pulses; the pulses between click with no
+    /// event): the beat LED, the count-in numeral, and whether it clicked.
     Beat { frame: Frame, beat_in_bar: u8, count_left: u8, clicked: bool },
     Selected { frame: Frame, lane: u8 },
     Refused { frame: Frame, lane: u8, reason: Refusal },

@@ -222,7 +222,7 @@ fn jam(sr: u32, block: usize) -> [Vec<f32>; 2] {
     rig.set(Command::SetFixedBars(1.0));
     rig.set(Command::SetFixedLength(true));
     let buffer_bars = rig.engine.looper().capacity() / bar;
-    assert_eq!(rig.engine.looper().next_take_max_bars(rig.bpm()), buffer_bars / BARS * BARS, "FIXED reaches past the master in whole loops");
+    assert_eq!(rig.engine.looper().next_take_max_bars(rig.bpm(), rig.meter()), buffer_bars / BARS * BARS, "FIXED reaches past the master in whole loops");
     rig.press(Command::RecDub(2));
     rig.advance_to(rig.end_frame() + 1 + expected_master / JOB_RATE + 2);
     let fixed = rig.pcm(2);

@@ -45,7 +45,7 @@ use crate::effects::LaneFx;
 use crate::engine::Feed;
 use crate::grid::{
     clamp_bars, commit_anchor, frames_per_bar, later_take_bars, loop_pos, max_whole_bars, next_boundary, plan_commit,
-    plan_free_stop, plan_later_stop, plan_retake_stop, Frame, Grid, RetakeStop, TakeFill, COUNT_IN_BEATS, MAX_BPM,
+    plan_free_stop, plan_later_stop, plan_retake_stop, Frame, Meter, RetakeStop, TakeFill, MAX_BPM,
     MIN_BPM,
 };
 use crate::overview::{LaneView, Overview};
@@ -470,7 +470,7 @@ pub struct Looper {
     /// What the event ring last took ([`Looper::publish`]): each lane's info and mix, and the transport.
     published: [Option<LaneInfo>; TRACK_COUNT],
     published_mix: [Option<CompactMix>; TRACK_COUNT],
-    published_transport: Option<(Frame, u32, bool)>,
+    published_transport: Option<(Frame, u32, Meter, bool)>,
     overview: Arc<Overview>,
     /// D23's punch ramp (`punch_frames`): an overdub fades in over its first this many frames and out
     /// over its last.
@@ -726,9 +726,9 @@ impl Looper {
 
     /// The largest FIXED bar count the next take can use: 32 before a master; over one, the longest
     /// later take (a multiply of the master's bars as long as the lane buffer holds, at least the master).
-    pub fn next_take_max_bars(&self, bpm: u32) -> Frame {
+    pub fn next_take_max_bars(&self, bpm: u32, meter: Meter) -> Frame {
         if self.master > 0 {
-            self.later_bars(MAX_FIXED_BARS, frames_per_bar(bpm as f64, self.sample_rate))
+            self.later_bars(MAX_FIXED_BARS, frames_per_bar(bpm as f64, self.sample_rate, meter))
         } else {
             MAX_FIXED_BARS
         }
@@ -1295,7 +1295,7 @@ impl Looper {
     // ── Takes ──────────────────────────────────────────────────────────────────────────────────────
 
     fn fpb(&self, cx: &Cx) -> Frame {
-        frames_per_bar(cx.clock.bpm() as f64, self.sample_rate)
+        frames_per_bar(cx.clock.bpm() as f64, self.sample_rate, cx.clock.meter())
     }
 
     /// `seam`: a RETAKE handoff begins exactly where the approved take's pass ended.
@@ -1320,9 +1320,8 @@ impl Looper {
                 return;
             }
             // One bar of count-in from the press; the take starts on the downbeat after it.
-            cx.clock.start_count_in(cx.now, COUNT_IN_BEATS, cx.now);
+            let downbeat = cx.clock.start_count_in(cx.now, cx.now);
             cx.clock.set_locked(true);
-            let downbeat = Grid::tempo(cx.now, 0, cx.clock.bpm(), self.sample_rate).beat_frame(COUNT_IN_BEATS);
             t.armed = true;
             rec.downbeat = Some(downbeat);
             rec.start = Some(downbeat + rec.align);
@@ -1331,8 +1330,7 @@ impl Looper {
             // the press, and on its downbeat every stopped loop restarts from the top with the grid
             // (`restart_from_top`), the take recording from there. The anchor stays until then, so a
             // cancel leaves the grid where it was (`release_recorder`).
-            cx.clock.start_count_in(cx.now, COUNT_IN_BEATS, cx.now);
-            let downbeat = Grid::tempo(cx.now, 0, cx.clock.bpm(), self.sample_rate).beat_frame(COUNT_IN_BEATS);
+            let downbeat = cx.clock.start_count_in(cx.now, cx.now);
             t.armed = true;
             rec.restart = Some(downbeat);
             rec.start = Some(downbeat + rec.align);
@@ -1375,7 +1373,7 @@ impl Looper {
     }
 
     fn retake_plan(&self, cx: &Cx, rec: &Recorder) -> RetakeStop {
-        plan_retake_stop(cx.now + rec.align, rec.end.unwrap(), self.fpb(cx), rec.roll.is_some_and(|r| r.kept))
+        plan_retake_stop(cx.now + rec.align, rec.end.unwrap(), self.fpb(cx), rec.roll.is_some_and(|r| r.kept), cx.clock.meter())
     }
 
     /// A stop gesture on a capture: tighten the window end once (a repeated gesture cannot extend it).
@@ -1413,11 +1411,11 @@ impl Looper {
             let fpb = self.fpb(cx);
             if self.master == 0 {
                 let elapsed = rec.downbeat.map_or(0, |d| cx.now - d);
-                if let Some(target) = plan_free_stop(elapsed, fpb, self.capacity) {
+                if let Some(target) = plan_free_stop(elapsed, fpb, self.capacity, cx.clock.meter()) {
                     end = start + target;
                 }
             } else if self.master % fpb == 0 {
-                end = start + plan_later_stop(cx.now, start, rec.align, fpb, self.master / fpb, self.max_take_bars(fpb));
+                end = start + plan_later_stop(cx.now, start, rec.align, fpb, self.master / fpb, self.max_take_bars(fpb), cx.clock.meter());
             }
         }
         rec.end = Some(rec.end.map_or(end, |e| e.min(end)));
@@ -1453,7 +1451,7 @@ impl Looper {
         let raw = self.lanes[i].written.min(rec.end.unwrap() - rec.start.unwrap());
         let fpb = self.fpb(cx);
         let fill = if self.master == 0 {
-            let plan = plan_commit(raw, cx.clock.bpm() as f64, self.sample_rate, self.capacity);
+            let plan = plan_commit(raw, cx.clock.bpm() as f64, self.sample_rate, self.capacity, cx.clock.meter());
             self.master = plan.master;
             self.anchor = commit_anchor(rec.downbeat, plan.master, cx.now);
             self.origin = self.anchor;
@@ -1877,7 +1875,7 @@ impl Looper {
     /// a lane with none starts at once, with no ramp (`resume`).
     fn restart_from_top(&mut self, cx: &mut Cx, downbeat: Frame) {
         while cx.clock.counting() {
-            let Some(beat) = cx.clock.fire_due(cx.now, self.transport_until()) else { break };
+            let Some(beat) = cx.clock.fire_count(cx.now, self.transport_until()) else { break };
             cx.feed.push(Event::Beat { frame: cx.now, beat_in_bar: beat.beat_in_bar, count_left: beat.count_left, clicked: beat.clicked });
         }
         self.keep_tails(cx.now);
@@ -2439,9 +2437,9 @@ impl Looper {
     /// A snapshot begins (no block job runs): pin each committed lane's loop (an OVERDUBBING lane's
     /// undo buffer, its loop before the layer in flight) with its buffer's write count, and take its mix
     /// as applied now.
-    pub(crate) fn snapshot_begin(&self, s: &mut Snapshot, fx: &LaneFx, bpm: u32, rate: u32) {
+    pub(crate) fn snapshot_begin(&self, s: &mut Snapshot, fx: &LaneFx, bpm: u32, meter: Meter, rate: u32) {
         s.started = true;
-        (s.rate, s.master, s.bpm, s.count, s.done) = (rate, self.master, bpm, 0, 0);
+        (s.rate, s.master, s.bpm, s.meter, s.count, s.done) = (rate, self.master, bpm, meter, 0, 0);
         for (i, t) in self.lanes.iter().enumerate() {
             let pin = match t.state {
                 LaneState::Playing | LaneState::Stopped if t.length > 0 => Pin { buf: t.live, backwards: t.reversed, writes: 0 },
@@ -2489,7 +2487,7 @@ impl Looper {
     }
 
     /// Load a session at `cx.now` into an all-EMPTY looper with no take in flight: swap each lane's
-    /// buffer for the load's and set its mix, lock the tempo, anchor the master grid on `cx.now` and play
+    /// buffer for the load's and set its mix, lock the meter and the tempo, anchor the master grid on `cx.now` and play
     /// the PLAYING lanes from loop position 0 there (the web `loadSession`). The engine's old buffers go
     /// back in the load for the host to free. Checks everything before it changes anything.
     pub(crate) fn load(&mut self, cx: &mut Cx, load: &mut Load) -> Result<(), SessionError> {
@@ -2503,8 +2501,8 @@ impl Looper {
         if !(MIN_BPM..=MAX_BPM).contains(&load.bpm) {
             return Err(SessionError::Invalid("the session's tempo is out of range"));
         }
-        if load.bars.checked_mul(frames_per_bar(load.bpm as f64, self.sample_rate)) != Some(master) {
-            return Err(SessionError::Invalid("the session's tempo, bars and loop length disagree"));
+        if load.bars.checked_mul(frames_per_bar(load.bpm as f64, self.sample_rate, load.meter)) != Some(master) {
+            return Err(SessionError::Invalid("the session's tempo, meter, bars and loop length disagree"));
         }
         let mut seen = [false; TRACK_COUNT];
         for track in &load.tracks {
@@ -2548,6 +2546,7 @@ impl Looper {
         self.anchor = cx.now;
         self.origin = cx.now;
         cx.clock.set_locked(false);
+        cx.clock.set_meter(load.meter);
         cx.clock.set_bpm(load.bpm as f64, cx.now);
         cx.clock.set_locked(true);
         cx.clock.start_master(self.anchor, master, load.bars, cx.now);
@@ -2582,8 +2581,8 @@ impl Looper {
             self.overview.set_lane(i, LaneView { state: t.state, buf: t.live, frames, reversed: t.reversed });
         }
         self.overview.set_grid(self.anchor);
-        let transport = (self.master, cx.clock.bpm(), cx.clock.locked());
-        if self.published_transport != Some(transport) && cx.feed.push(Event::Transport { frame: cx.now, master: transport.0, bpm: transport.1, locked: transport.2 }) {
+        let transport = (self.master, cx.clock.bpm(), cx.clock.meter(), cx.clock.locked());
+        if self.published_transport != Some(transport) && cx.feed.push(Event::Transport { frame: cx.now, master: transport.0, bpm: transport.1, meter: transport.2, locked: transport.3 }) {
             self.published_transport = Some(transport);
         }
     }

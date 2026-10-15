@@ -9,7 +9,7 @@
 mod common;
 
 use common::{Opts, Rig};
-use lf_engine::grid::{frames_per_bar, Frame};
+use lf_engine::grid::{frames_per_bar, Frame, Meter};
 use lf_engine::{Command, EngineConfig, LaneMix, LoadTrack, Load, SessionJob};
 use serde::Deserialize;
 
@@ -41,7 +41,7 @@ fn loaded(row: &Row, lane_seconds: f64) -> Rig {
     let mut buf = Vec::with_capacity(rig.engine.looper().capacity() as usize);
     buf.resize(rig.engine.looper().capacity() as usize, 0.0f32);
     let track = LoadTrack { index: 0, buf, peaks: Vec::new(), reversed: false, playing: true, mix: LaneMix::default() };
-    let load = Load { bpm: row.bpm, bars: row.bars, master: row.master, tracks: vec![track], result: None };
+    let load = Load { bpm: row.bpm, meter: Meter::FOUR_FOUR, bars: row.bars, master: row.master, tracks: vec![track], result: None };
     assert!(rig.session().send(Box::new(SessionJob::Load(load))).is_ok(), "the port takes the load");
     for _ in 0..1000 {
         rig.advance(rig.block as Frame);
@@ -63,12 +63,12 @@ fn the_engine_answers_every_fixed_bars_row_the_ui_is_held_to() {
     assert_eq!(EngineConfig::new(48_000).max_loop_seconds, fixture.lane_seconds);
     for row in &fixture.rows {
         let tag = format!("{} Hz, {} BPM, a {}-bar master, FIXED {}", row.rate, row.bpm, row.bars, row.requested);
-        let fpb = frames_per_bar(row.bpm as f64, row.rate);
+        let fpb = frames_per_bar(row.bpm as f64, row.rate, Meter::FOUR_FOUR);
         assert_eq!(row.bars * fpb, row.master, "{tag}: the row's master is its bars");
         assert_eq!(row.take_bars * fpb, row.take_frames, "{tag}: the row's window is its bars");
         let mut rig = loaded(row, fixture.lane_seconds);
         assert_eq!((rig.master(), rig.bpm()), (row.master, row.bpm), "{tag}: the master the row names");
-        assert_eq!(rig.engine.looper().next_take_max_bars(rig.bpm()), row.max_bars, "{tag}: the selector's bound");
+        assert_eq!(rig.engine.looper().next_take_max_bars(rig.bpm(), rig.meter()), row.max_bars, "{tag}: the selector's bound");
         rig.set(Command::SetFixedLength(true));
         rig.set(Command::SetFixedBars(row.requested as f64));
         rig.press(Command::RecDub(1));
