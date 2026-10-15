@@ -72,7 +72,10 @@ Who runs where and what each thread owns. The rules are in bold below the table.
   already its own: never point two worktrees at one `CARGO_TARGET_DIR`. Sharing one, every worktree
   links the same `app_lib-<hash>` test binary and cargo judges path crates fresh by mtime, so one
   worktree can run another's build of `app` or `lf-engine`. From WSL, Windows cargo does not see a
-  `CARGO_TARGET_DIR` exported in bash (WSLENV does not pass it).
+  `CARGO_TARGET_DIR` exported in bash (WSLENV does not pass it). Each target grows to 12–16 GB, so
+  at most two worktrees hold a build at a time (`dev`'s integration tree and one feature tree), and
+  a feature tree is cleaned when its branch is merged: `cargo clean --manifest-path
+  <absolute path>/src-tauri/Cargo.toml`, an absolute path, never `cd` then delete.
 - **ASIO is a cargo OPT-IN feature** carried by the npm scripts (`pnpm dev:asio`, `pnpm build:app`);
   a plain `cargo build` must work without the LLVM/ASIO SDK, and `tauri dev` forces
   `--no-default-features` anyway. `[profile.dev.package."*"]` and lf-engine build at opt-level 3;
