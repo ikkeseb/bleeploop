@@ -329,9 +329,11 @@ const plain = {
   clock: { frame: 0, atMs: 0, rate: 0, grid: 0 },
   /** Frames between a rendered frame and the moment it is heard (the output latency). */
   heardLag: 0,
-  /** Each slot's input peak in the last frame (linear), and the frames that carried a clip on it since
-   * the store loaded: a counter, so a draw loop that missed the frame still sees one arrived. */
+  /** Each slot's input peak in the last frame (linear), its loudest since a draw last took it, and the
+   * frames that carried a clip on it since the store loaded: a counter. Both so a draw loop that missed
+   * a frame still sees what it carried. */
   level: [0, 0] as [number, number],
+  untaken: [0, 0] as [number, number],
   clip: [false, false] as [boolean, boolean],
   clips: [0, 0] as [number, number],
   peaks: Array.from({ length: ENGINE_LANES }, (): LanePeaks => ({
@@ -789,6 +791,7 @@ function applyFrameNow(f: FeedFrame): void {
   // No meter: no device runs, so the input reads silent.
   for (let s = 0; s < ENGINE_SLOTS; s++) {
     plain.level[s] = f.meter?.peak[s] ?? 0;
+    plain.untaken[s] = Math.max(plain.untaken[s], plain.level[s]);
     plain.clip[s] = f.meter?.clip[s] ?? false;
     if (plain.clip[s]) plain.clips[s]++;
   }
@@ -1227,6 +1230,13 @@ export const engineLooper = {
   /** The input level (linear; at least 1 while the last frame carried a clip): slot `slot`'s, else the
    * louder slot's (the command bar's meter). */
   levelValue: (slot?: 0 | 1): number => (slot === undefined ? Math.max(inputLevel(0), inputLevel(1)) : inputLevel(slot)),
+  /** Slot `slot`'s loudest input level (linear) since the last take, then 0 until a frame arrives: its
+   * one reader is the slot card's meter, whose held peak must not miss a frame between two draws. */
+  takePeak: (slot: 0 | 1): number => {
+    const peak = plain.untaken[slot];
+    plain.untaken[slot] = 0;
+    return peak;
+  },
   /** The frames that carried a clip on slot `slot`'s input so far: a change since the last read is a clip. */
   clipCount: (slot: 0 | 1): number => plain.clips[slot],
   stateOf: (i: number): TrackState => plain.state[i] ?? 'EMPTY',

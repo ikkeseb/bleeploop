@@ -30,7 +30,7 @@ import { fileURLToPath } from 'node:url';
 
 const uiDir = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'src', 'ui');
 /** The looper's non-reactive getters (`engineLooper` in src/ui/state/engine-store.ts). */
-const PLAIN = new Set(['peaksInto', 'scopeInto', 'phaseValue', 'levelValue', 'stateOf', 'mutedOf', 'waitingOf', 'countingValue', 'recHeadFrac', 'recSpanFrames', 'masterFramesValue', 'gridValue', 'trackCount', 'clipCount']);
+const PLAIN = new Set(['peaksInto', 'scopeInto', 'phaseValue', 'levelValue', 'stateOf', 'mutedOf', 'waitingOf', 'countingValue', 'recHeadFrac', 'recSpanFrames', 'masterFramesValue', 'gridValue', 'trackCount', 'clipCount', 'takePeak']);
 /** What a draw module may take from `../state/audio`. */
 const AUDIO = ['looper', 'PEAK_FRAMES', 'PeakView', 'TrackState', 'ScopeView', 'SCOPE_MASTER', 'SCOPE_MONITOR'];
 

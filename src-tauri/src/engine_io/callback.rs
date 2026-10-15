@@ -34,8 +34,12 @@ const FADE_SECONDS: f64 = 0.010;
 const SILENT_BLOCKS: u32 = 2;
 /// Latency reports whose median the alignment takes before it freezes for the run.
 pub(crate) const LATENCY_SAMPLES: usize = 16;
-/// An input sample at or past this reached full scale (the meter's clip).
-const CLIP_LEVEL: f32 = 0.999;
+/// Whether an input sample reached full scale (the meter's clip). Every input format's negative rail
+/// converts to exactly -1; its positive one to its top code, at least a 16-bit input's (`i16::MAX` /
+/// 32768, the coarsest format a device delivers). So a sample one step under either rail is no clip.
+pub(super) fn full_scale(x: f32) -> bool {
+    x >= 1.0 - 1.0 / 32768.0 || x <= -1.0
+}
 /// Frames the WASAPI input callback converts at a time.
 const SCRATCH_FRAMES: usize = 1024;
 /// ASIO phase slips ([`PhaseSlips`]): the span of each window, and of a run's start that is no
@@ -812,12 +816,12 @@ impl Render {
 
 /// Fold a block of a slot's input into the meter the feed takes: its peak, and a clip.
 fn meter(core: &Core, slot: usize, input: &[f32]) {
-    let peak = input.iter().fold(0.0f32, |m, x| m.max(x.abs()));
+    let (peak, clip) = input.iter().fold((0.0f32, false), |(m, c), &x| (m.max(x.abs()), c || full_scale(x)));
     if peak > 0.0 {
         // A non-negative f32's bits order as the value does.
         core.meter_peak[slot].fetch_max(peak.to_bits(), Relaxed);
     }
-    if peak >= CLIP_LEVEL {
+    if clip {
         core.meter_clip[slot].store(true, Relaxed);
     }
 }
@@ -1070,6 +1074,23 @@ fn silence<T: Sample>(data: &mut [T]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// CLIP is a sample at full scale in the input's own format, either rail, never one step under it.
+    #[test]
+    fn the_meter_clips_at_full_scale_in_any_input_format_and_not_just_under_it() {
+        let core = Core::new();
+        let clipped = |x: f32| {
+            meter(&core, 1, &[0.25, x]);
+            core.meter_clip.each_ref().map(|c| c.swap(false, Relaxed))
+        };
+        let rails = [1.0, -1.0, f32::from_sample(i16::MAX), f32::from_sample(i16::MIN), f32::from_sample(u16::MAX), f32::from_sample(u16::MIN), f32::from_sample(i32::MAX), f32::from_sample(i32::MIN)];
+        for x in rails {
+            assert_eq!(clipped(x), [false, true], "{x} is full scale: slot 1's clip alone");
+        }
+        for x in [0.9995, -0.9995, f32::from_sample(i16::MAX - 1), f32::from_sample(i16::MIN + 1)] {
+            assert_eq!(clipped(x), [false, false], "{x} is under full scale");
+        }
+    }
 
     #[test]
     fn stereo_lands_on_the_first_two_channels_and_a_mono_device_gets_the_mean() {

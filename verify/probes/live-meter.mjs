@@ -7,10 +7,11 @@
  * - each slot card meters its OWN input (the feed's `meter.peak[slot]`): GO LIVE lights the card's meter
  *   and the INPUT LIVE pill, the meter's `--lvl` follows the slot's level on the −60..0 dBFS span, and
  *   a slot not live stays dark whatever its input reads;
- * - the peak tick holds ~1.5 s after a peak, then falls toward the level, and lands on it;
+ * - the peak tick holds ~1.5 s after a peak, then falls toward the level, and lands on it; a peak whose
+ *   frame and the next quiet one land between two draws is held all the same;
  * - CLIP lights only on the engine's clip (a sample at full scale), never for a level near it, on that
  *   slot alone; it lights even when the clip's frame and the next one land between two draws (the
- *   store's clip counter), and goes out ~1.5 s later;
+ *   store's clip counter), and goes out ~1.5 s later, the other slot going live or not meanwhile;
  * - the selected lane names the live slots ("A LIVE", "A+B LIVE", "B LIVE"), the other lanes nothing,
  *   and the badge follows the selection and GO LIVE off;
  * - at 1000×700, 1280×820 and 1920×1080: the CLIP lamp, the badge and the pill are at least their
@@ -167,6 +168,17 @@ await probe(async ({ open }) => {
       assert.ok(held.length > 10 && held.every((s) => Math.abs(s.pk - hi) < 0.01 && Math.abs(s.lvl - lo) < 0.01), 'the peak holds at −6 dBFS for its hold, the level at −20');
       assert.ok(falling.some((s) => s.pk > lo + 0.02 && s.pk < hi - 0.02), 'then falls');
       assert.ok(landed.length > 0 && landed.every((s) => Math.abs(s.pk - lo) < 0.01), 'and lands on the level');
+      // A peak whose frame and the next quiet one land between two draws still holds the peak tick.
+      await page.evaluate(([p, q]) => {
+        window.__lf.native.emit(p);
+        window.__lf.native.emit(q);
+      }, [
+        { seq: ++seq, reset: false, events: [], device: [], peaks: [], anchor: null, ...meter(0.5, 0) },
+        { seq: ++seq, reset: false, events: [], device: [], peaks: [], anchor: null, ...meter(0.1, 0) },
+      ]);
+      await page.waitForTimeout(300);
+      const missed = await read(1);
+      assert.ok(Math.abs(missed.pk - hi) < 0.01 && Math.abs(missed.lvl - lo) < 0.01, `a peak between two draws is held: ${JSON.stringify(missed)}`);
 
       // Near full scale is no clip: −0.4 dBFS, the engine reports none.
       await emit(meter(0.95, 0));
@@ -183,8 +195,14 @@ await probe(async ({ open }) => {
       ]);
       await until(1, 'CLIP after a clip between two draws', (m) => m.clip && m.pk >= 0.999);
       assert.equal((await read(2)).clip, false, "A's clip does not light B's lamp");
-      await page.waitForTimeout(1000);
-      assert.equal((await read(1)).clip, true, 'CLIP holds');
+      // B off and on again during A's hold: A's lamp and held peak are A's alone, and the lamp goes out.
+      const toggledAt = Date.now();
+      for (const pressed of [false, true]) {
+        await live(2).click();
+        await page.getByRole('button', { name: 'Live input for slot 2', exact: true, pressed }).waitFor();
+      }
+      const kept = await read(1);
+      assert.ok(kept.clip && kept.pk >= 0.999, `B toggled ${Date.now() - toggledAt} ms into A's hold: A's CLIP and peak hold: ${JSON.stringify(kept)}`);
       await until(1, 'CLIP goes out after its hold', (m) => !m.clip);
 
       // GO LIVE off: the meter goes dark and the badge drops the slot.

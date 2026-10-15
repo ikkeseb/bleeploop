@@ -149,8 +149,8 @@ const PEAK_FALL = 1 / 2000;
  * foot of its card, readable from where the guitarist stands. It writes `--lvl` (the level), `--pk` (a
  * peak held HOLD_MS, then falling) and `is-clip` (lit HOLD_MS after the engine reported a sample at full
  * scale, never for a level merely near it), all as style writes from this loop, never a signal
- * (invariant 6). A clip is read off the store's counter, so one that arrived between two frames still
- * lights the lamp, and holds the peak at full scale.
+ * (invariant 6). A clip is read off the store's clip counter and a peak off its untaken peak, so one
+ * that arrived between two draws still lights the lamp or holds the peak (a clip's at full scale).
  */
 interface CardMeter {
   el: HTMLElement;
@@ -182,8 +182,9 @@ function drawCardMeter(m: CardMeter, now: number): void {
     m.heldAt = now;
   }
   let pk = m.held - Math.max(0, now - m.heldAt - HOLD_MS) * PEAK_FALL;
-  if (lvl >= pk) {
-    m.held = pk = lvl;
+  const peak = Math.max(lvl, meterFrac(looper.takePeak(m.slot)));
+  if (peak >= pk) {
+    m.held = pk = peak;
     m.heldAt = now;
   }
   if (Math.abs(pk - m.pk) >= 0.003) {
@@ -199,7 +200,10 @@ function drawCardMeter(m: CardMeter, now: number): void {
 
 /** Register slot `slot`'s card meter (it went live). Starts the shared rAF loop if nothing else has. */
 export function registerCardMeter(slot: 0 | 1, el: HTMLElement): void {
-  // A clip from before the slot went live is not this meter's.
+  // Already registered (an effect re-ran): keep its hold and its lamp.
+  if (cardMeters[slot]?.el === el) return;
+  // A clip or a peak from before the slot went live is not this meter's.
+  looper.takePeak(slot);
   cardMeters[slot] = { el, slot, lvl: -1, pk: -1, held: 0, heldAt: 0, clips: looper.clipCount(slot), clipUntil: 0, clip: false };
   if (rafId === 0) rafId = requestAnimationFrame(frame);
 }
