@@ -67,6 +67,7 @@ function createStrata(): ViewDraw {
   let numbersX = 16;
   let gridFont = '';
   let beats = -1;
+  let perBar = 4;
   let resized = true;
   // CSS px, for the hit test.
   let topCss = 0;
@@ -106,7 +107,7 @@ function createStrata(): ViewDraw {
 
   /** The strips span the loop: one window width up to 8 bars, two from 16 on. */
   function sizeStrips(): void {
-    const bars = beats / 4;
+    const bars = beats / perBar;
     stripW = Math.max(1, Math.round(W * clamp(bars / 8, 1, 2)));
     for (const strip of strips) {
       strip.width = stripW;
@@ -141,14 +142,14 @@ function createStrata(): ViewDraw {
     if (beats > 0 && master > 0) {
       const empty = kind === 'empty';
       for (let b = 0; b < beats; b++) {
-        c.fillStyle = b % 4 === 0 ? (empty ? GRID_BAR_EMPTY : GRID_BAR) : empty ? GRID_BEAT_EMPTY : GRID_BEAT;
+        c.fillStyle = b % perBar === 0 ? (empty ? GRID_BAR_EMPTY : GRID_BAR) : empty ? GRID_BEAT_EMPTY : GRID_BEAT;
         c.fillRect(Math.round((b / beats) * stripW), 0, line, rowH);
       }
       if (i === 0 && !empty) {
         c.fillStyle = GRID_NUM;
         c.font = gridFont;
         c.textBaseline = 'top';
-        for (let b = 0; b < beats; b += 4) c.fillText(BAR_LABELS[(b >> 2) % BAR_LABELS.length], Math.round((b / beats) * stripW) + 6 * dpr, 5 * dpr);
+        for (let b = 0; b < beats; b += perBar) c.fillText(BAR_LABELS[(b / perBar) % BAR_LABELS.length], Math.round((b / beats) * stripW) + 6 * dpr, 5 * dpr);
       }
     }
 
@@ -199,8 +200,9 @@ function createStrata(): ViewDraw {
     const c = s.ctx;
     const pal = s.pal;
     const master = looper.masterFramesValue();
-    if (feed.beatsPerLoop !== beats || resized) {
+    if (feed.beatsPerLoop !== beats || feed.beatsPerBar !== perBar || resized) {
       beats = feed.beatsPerLoop;
+      perBar = feed.beatsPerBar;
       sizeStrips();
       for (let i = 0; i < LANES; i++) stamp.version[i] = -2;
       resized = false;

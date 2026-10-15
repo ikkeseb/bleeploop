@@ -95,6 +95,7 @@ function createOrbit(): ViewDraw {
   let dirty = true;
   let full = true; // the whole bitmap is due, not only the lanes that changed
   let beats = -1;
+  let perBar = 4;
   let wakes: Wakes | null = null;
 
   function layout(s: Surface): void {
@@ -240,7 +241,7 @@ function createOrbit(): ViewDraw {
       c.fillStyle = pal.text;
       for (let b = 0; b < beats; b++) {
         const a = TOP + (TAU * b) / beats;
-        const bar = b % 4 === 0;
+        const bar = b % perBar === 0;
         c.setTransform(Math.cos(a), Math.sin(a), -Math.sin(a), Math.cos(a), mid, mid);
         c.globalAlpha = bar ? 0.3 : 0.14;
         c.fillRect(sel[0] + 5 * dpr, -dpr / 2, (bar ? 8 : 4) * dpr, dpr);
@@ -288,8 +289,9 @@ function createOrbit(): ViewDraw {
         dirty = true;
       }
     }
-    if (feed.beatsPerLoop !== beats) {
+    if (feed.beatsPerLoop !== beats || feed.beatsPerBar !== perBar) {
       beats = feed.beatsPerLoop;
+      perBar = feed.beatsPerBar;
       wakes = null;
       dirty = true;
       full = true;

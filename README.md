@@ -110,7 +110,8 @@ report, so WASAPI takes can land late (about 215 ms on the developer's Focusrite
 2. Load your amp-sim plugin (CLAP, VST3 or VST2) into a slot, pick the slot's input and press GO LIVE. For an
    instrument with its own sound, set the other slot to Off, pick its input and GO LIVE: it plays dry.
 3. Select a track with 1–5 and press Space to record. The first take gets a one-bar count-in, shown
-   4-3-2-1; come in on the downbeat after it.
+   4-3-2-1 in 4/4; come in on the downbeat after it. The time signature beside BPM (4/4, 3/4, 6/8,
+   12/8, 5/4) is picked before the first take; 6/8 and 12/8 count the dotted quarter.
 4. Space again closes the take; after that, Space overdubs the selected track and Enter plays or stops it.
 5. Help (the ? in the command bar) lists the rest.
 

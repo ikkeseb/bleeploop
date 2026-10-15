@@ -14,11 +14,18 @@ import { framesPerBar } from '../state/quantize';
  * spoken loop length (`Looper.tsx`), the command bar's loop readout and the waveform bar grid
  * (`waveform.ts`) all derive their bar count from this ONE function, so the spoken length and the drawn
  * grid can never disagree. Returns 0 when no master is defined yet (loop length still unknown → no
- * grid). BPM is locked once a master commits, so the caller can safely pass a snapshot of `clock.bpm()`.
+ * grid). BPM and the meter (`beats`, its counted beats a bar) lock once a master commits, so the caller
+ * can safely pass a snapshot of `clock.bpm()` and `clock.meter().beats`.
  */
-export function masterBars(masterFrames: number, bpm: number, sampleRate: number): number {
+export function masterBars(masterFrames: number, bpm: number, sampleRate: number, beats: number): number {
   if (masterFrames <= 0) return 0;
-  return Math.max(1, Math.round(masterFrames / framesPerBar(bpm, sampleRate)));
+  return Math.max(1, Math.round(masterFrames / framesPerBar(bpm, sampleRate, beats)));
+}
+
+/** The beat dots of a bar of `beats` counted beats: their indices, 0 first (the command bar's and the
+ * stage HUD's). */
+export function beatIndices(beats: number): number[] {
+  return Array.from({ length: beats }, (_, b) => b);
 }
 
 /**

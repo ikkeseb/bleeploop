@@ -1,6 +1,6 @@
 import { For, Show, createEffect, createMemo, createSignal, on, onCleanup, onMount, untrack } from 'solid-js';
 import { clock, looper, sampleRate } from '../state/audio';
-import { masterBars } from '../looper/shared';
+import { beatIndices, masterBars } from '../looper/shared';
 import { DATA_STATE, createLaneView, type LaneWord } from '../looper/lane-state';
 import { feed, type LaneKind } from './stage-feed';
 import { startStage, type StageHandle } from './stage-loop';
@@ -45,7 +45,8 @@ export function StageView(props: { onExit: () => void }) {
   const lanes = Array.from({ length: looper.trackCount }, (_, i) => ({ i, track: looper.track(i), ...createLaneView(i) }));
   type Lane = (typeof lanes)[number];
 
-  const bars = createMemo(() => masterBars(looper.masterLengthFrames(), clock.bpm(), sampleRate()));
+  const perBar = () => clock.meter().beats;
+  const bars = createMemo(() => masterBars(looper.masterLengthFrames(), clock.bpm(), sampleRate(), perBar()));
   /** The count-in numeral: whichever lane counts in (a first take, or any lane the engine counts in). */
   const count = createMemo(() => {
     for (const l of lanes) if (l.wellCount() > 0) return l.wellCount();
@@ -72,10 +73,10 @@ export function StageView(props: { onExit: () => void }) {
   // the bar before it. At rest the loop is cued at its start: bar 1.
   const loopBar = createMemo(() => {
     clock.beat();
-    const beats = bars() * 4;
+    const beats = bars() * perBar();
     if (beats === 0) return 0;
     if (!moving()) return 1;
-    return Math.floor((Math.round(looper.phaseValue() * beats) % beats) / 4) + 1;
+    return Math.floor((Math.round(looper.phaseValue() * beats) % beats) / perBar()) + 1;
   });
 
   const spoken = (l: Lane): string => {
@@ -135,7 +136,10 @@ export function StageView(props: { onExit: () => void }) {
     });
   }
   createEffect(() => void (feed.selected = looper.selectedTrack()));
-  createEffect(() => void (feed.beatsPerLoop = bars() * 4));
+  createEffect(() => {
+    feed.beatsPerBar = perBar();
+    feed.beatsPerLoop = bars() * perBar();
+  });
   createEffect(() => void (feed.running = clock.running()));
   createEffect(() => void (feed.counting = count() > 0));
   createEffect(() => void (feed.moving = moving()));
@@ -252,7 +256,7 @@ export function StageView(props: { onExit: () => void }) {
           </span>
           <Show when={live() || bars() > 0}>
             <span class="sv-dots" role="img" aria-label={live() ? `Beat ${clock.beat() + 1}` : 'Transport idle'}>
-              <For each={[0, 1, 2, 3]}>
+              <For each={beatIndices(perBar())}>
                 {(b) => <i class="sv-dot" classList={{ 'sv-dot--one': b === 0, 'is-on': live() && clock.beat() === b }} />}
               </For>
             </span>

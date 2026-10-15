@@ -105,11 +105,50 @@
   flex-direction: column;
   gap: 4px;
 }
+.transport__bpm-line {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
 .transport__bpm-unit {
   font-size: 9.5px;
   font-weight: 500;
   letter-spacing: 0.1em;
   color: var(--faint);
+}
+/* the meter picker — a small key face with the themed caret beside the unit; locked, it reads as a
+   plain label (no face, no caret) like the numeral beside it */
+.transport__meter {
+  appearance: none;
+  -webkit-appearance: none;
+  color-scheme: dark;
+  background-color: var(--surf-2);
+  background-image: var(--caret-svg);
+  background-repeat: no-repeat;
+  background-position: right 3px center;
+  background-size: 9px 9px;
+  border: 0;
+  border-radius: 5px;
+  color: var(--dim);
+  font-family: var(--mono);
+  font-size: 10px;
+  line-height: 1;
+  padding: 2px 14px 2px 5px;
+  cursor: pointer;
+  transition: color 0.12s, background-color 0.12s;
+}
+.transport__meter:hover:not(:disabled) {
+  color: var(--text);
+  background-color: var(--surf-3);
+}
+.transport__meter:disabled {
+  background: none;
+  padding: 2px 0;
+  cursor: default;
+}
+.transport__meter option {
+  background: var(--option);
+  color: var(--text);
 }
 .transport__beats {
   display: flex;
@@ -406,10 +445,12 @@
     display: none;
   }
 }
-/* Last rung (the Tauri minWidth is 960): drop the BPM meta, pin the master slider at its floor (in a
-   wrapping row, shrink never runs — the tools would wrap to a third row instead) and tighten the card. */
+/* Last rung (the Tauri minWidth is 960): drop the BPM unit and the beat dots (the meter picker stays),
+   pin the master slider at its floor (in a wrapping row, shrink never runs — the tools would wrap to a
+   third row instead) and tighten the card. */
 @media (max-width: 1040px) {
-  .transport__bpm-meta {
+  .transport__bpm-unit,
+  .transport__beats {
     display: none;
   }
   .transport__master .transport__volume {

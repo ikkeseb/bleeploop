@@ -287,6 +287,8 @@ const REST_FROM = 1; // the phase the loop last moved at
 const REST_AT = 2; // and when
 const CLIP_AT = 3; // the last input clip
 let beatIdx = -1;
+/** The shown phase the beat check last read: a beat line is crossed only going forward. */
+let beatPhase = 0;
 let seenSeq = 0;
 
 /** Start from the feed as it stands: opening the stage fades nothing in. */
@@ -296,6 +298,7 @@ export function resetLight(): void {
   mem[REST_AT] = -1e9;
   mem[CLIP_AT] = -1e9;
   beatIdx = -1;
+  beatPhase = 0;
   seenSeq = feed.beatSeq;
   level.fill(0);
   peak.fill(PEAK_FLOOR);
@@ -407,9 +410,14 @@ export function stepLight(now: number): void {
   if (master > 0 && feed.moving && feed.beatsPerLoop > 0) {
     const n = feed.beatsPerLoop;
     const idx = Math.floor(light.phase * n) % n;
-    // A new clock anchor may step the phase back across a beat line: that is not a beat.
-    if (idx !== beatIdx && (beatIdx - idx + n) % n !== 1) {
-      if (beatIdx >= 0) pulse(now, idx % 4 === 0);
+    // A new clock anchor may step the phase back across a beat line: that is not a beat. Read from the
+    // phase itself (a step of more than half the loop back is the loop wrapping forward), not from the
+    // beat indices: in a loop of two beats (one bar of 6/8) every forward step is also one beat back.
+    let step = light.phase - beatPhase;
+    if (step < -0.5) step += 1;
+    beatPhase = light.phase;
+    if (idx !== beatIdx && step >= 0) {
+      if (beatIdx >= 0) pulse(now, idx % feed.beatsPerBar === 0);
       beatIdx = idx;
     }
     seenSeq = feed.beatSeq;
