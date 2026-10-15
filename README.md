@@ -1,35 +1,69 @@
 # BleepLoop
 
-[![CI](https://github.com/ikkeseb/bleeploop/actions/workflows/ci.yml/badge.svg)](https://github.com/ikkeseb/bleeploop/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Platform: Windows](https://img.shields.io/badge/platform-Windows-0078D6.svg)](#play-it)
-
-BleepLoop is a Windows looper you play with a guitar. Load your own amp-sim plugin (CLAP, VST3 or VST2),
-hear it through ASIO, and loop and overdub on five RC-505 MK II–style tracks. One native audio
-engine runs the looper, click, synths, FX and your plugin inside the audio driver's callback, so
-every take lands on the grid by itself: there is no latency setting.
+A looper for Windows that you play with a guitar. Load your own amp-sim plugin, play through it live
+over ASIO, and build a song on five loop tracks, hands-free with a MIDI footswitch. Each take is placed
+from the latency the ASIO driver reports, so there is no latency setting to tune. That has been
+measured on one interface so far; see [Where it stands](#where-it-stands).
 
 [![Download for Windows](https://img.shields.io/github/v/release/ikkeseb/bleeploop?label=Download%20for%20Windows&logo=windows&style=for-the-badge&color=2ea043)](https://github.com/ikkeseb/bleeploop/releases/latest)
 
-![A jam clicked through track by track: three two-bar takes over each other, ECHO on the guitar in IN FX, DELAY on track 1, an amp-sim swap in slot A, then the stage view](docs/media/bleeploop-demo.webp)
+<!--
+  VIDEO SLOT (60 s, with sound). Not recorded yet. When it exists: drag the .mp4 into any GitHub
+  issue or comment box (no need to post it). GitHub uploads it and writes a
+  https://github.com/user-attachments/assets/... link, which a README renders as a player with sound.
+  Put that link on its own line here, delete this comment and keep the silent clip below as the fallback.
+-->
 
-## Highlights
+![The app walked through a jam: three two-bar takes stacked track by track, an echo on the guitar input, a delay on track 1, an amp-sim swap in slot A, then the full-window stage view](docs/media/bleeploop-demo.webp)
 
-- **Your amp sim, live.** Load your plugin, pick the guitar's input and press GO LIVE. The round trip
-  is 8 ms at ASIO 64 and 15 ms at 128, measured on a Focusrite Scarlett 2i2 (3rd gen).
-- **Takes land on the beat.** The engine places every take from the driver's reported latency, and
-  the click is locked to the loop grid, so the click and the loops cannot drift apart.
-- **Hands stay on the guitar.** Learn any looper control onto a MIDI footswitch. The stage view (B)
-  turns the window into a visualizer of your loops, with the selected track, the bar, the beat and the
-  count-in still readable from where you stand.
-- **Your loops come back.** They save once they have held still for two seconds and come back when
-  you reopen; a crash before that save loses the last change. Export a jam as
-  one zip: a WAV stem per track, a mix and each plugin's settings.
-- **More than guitar.** Six built-in synths, one of them a drum kit, and a MIDI keyboard fill the
-  other layers.
+*The clip above is silent. It is the app's interface clicked through a jam, with drawn waveforms.*
 
-The installed app tells you when a newer version is out: an UPDATE button appears in the command
-bar, and the app updates itself from there.
+Download `BleepLoop_<version>_x64-setup.exe` from the latest release and run it. The installer is not
+code-signed, so Windows SmartScreen warns on first run: choose "More info", then "Run anyway" (the
+release carries the installer's sha256). After that the app tells you when a new version is out and updates
+itself.
+
+## What it needs
+
+- Windows 10 or 11, 64-bit. The installer fetches the WebView2 runtime if the machine lacks it.
+- An audio interface with an ASIO driver. WASAPI works as a fallback, but Windows and some drivers add
+  latency they do not report, so WASAPI takes can land late (about 215 ms on the developer's
+  Focusrite).
+- Your own plugin for the guitar's sound: CLAP, VST3 or 64-bit VST2. BleepLoop hosts it; it is not an
+  amp sim itself.
+- Optional: a MIDI footswitch or keyboard. Without one, the computer keyboard runs the looper.
+
+## Play it
+
+1. Plug the guitar into your interface and start BleepLoop. In Audio Settings pick ASIO (and its
+   driver, if you have more than one), the buffer size and the sample rate: 44.1 kHz, 48 kHz or the
+   device's own. On WASAPI, Windows sets the rate.
+2. Load your amp-sim into a slot, pick the slot's input and press GO LIVE. For an instrument with its
+   own sound, set the other slot to Off, pick its input and GO LIVE: it plays dry.
+3. Select a track with 1–5 and press Space to record. The first take gets a one-bar count-in, shown
+   4-3-2-1 in 4/4; come in on the downbeat after it. The time signature beside BPM (4/4, 3/4, 6/8,
+   12/8, 5/4) is picked before the first take; 6/8 and 12/8 count the dotted quarter.
+4. Space again closes the take. After that, Space overdubs the selected track and Enter plays or stops
+   it.
+5. Help (the ? in the command bar) lists the rest.
+
+![BleepLoop with two tracks playing and a third recording](docs/media/bleeploop.png)
+
+## What is in it
+
+- Five loop tracks with overdub and one-level undo, per-track reverse, mute, volume and pan, a count-in
+  and fixed-length records. The click is locked to the loop grid, so it and the loops cannot drift apart.
+- Two plugin slots (CLAP, VST3, 64-bit VST2) with their own editor windows. Each slot comes back at
+  launch with the plugin and the settings you left it at.
+- Effects per track (filter, pitch shift, stutter, delay, a shared reverb) and on the live input (echo,
+  reverb, ring modulator).
+- Six built-in synths, one of them a drum kit, for the other layers from a MIDI keyboard.
+- Record, play, undo, mute, tap tempo, the click, FADE and the looper's other actions can be learned
+  onto a MIDI footswitch, key or CC. A full-window stage view keeps
+  the selected track, the bar, the beat and the count-in readable from where you stand.
+- Your loops are saved once they have held still for two seconds and come back when you reopen; a
+  crash before that save loses the last change. A jam exports as one zip: a WAV stem per track, a mix
+  and each plugin's settings.
 
 <details>
 <summary><b>Everything it does</b></summary>
@@ -52,32 +86,30 @@ bar, and the app updates itself from there.
   length. Keep playing past the loop, or set FIXED longer than it, and the take grows the loop in whole
   loops instead (multiply), and the other tracks repeat across it. TRIM keeps a track's first bars and
   repeats them across the loop; undo brings the whole take back.
-- Local recovery: committed loops are saved as you play and restored when you reopen, and closing
-  the app with a jam in progress asks first.
+- Local recovery: committed loops save once they have held still for two seconds and are restored when
+  you reopen; a crash before that save loses the last change. Closing the app with a jam in progress
+  asks first.
 - Per-track FX: filter, pitch shift, tempo-synced stutter, feedback delay and a shared reverb send.
   Each one bypasses without a click.
 - IN FX: a tempo-synced echo, a reverb and a ring modulator on the live input, heard and recorded,
   while the dry signal and a take's timing stay untouched.
-- Stage view (B, or a learned pedal): a visualizer of the loops in three looks, switched with V.
-  Scope, the first, draws what the engine plays: the whole output with the guitar over it, and under
-  it each track live after its FX, so a loop that repeats builds up light while a one-off fades. Orbit
-  wraps each track's loop into a ring around the live input; Strata scrolls five ribbons past a now
-  line; in those two a track's light follows its loop's waveform and volume (not its FX). Each track
-  takes its state's colour; the selected track, the bar, the beat and the count-in stay readable from
-  where you stand with the guitar.
+- Stage view (B, or a learned pedal): a full-window visualizer of the loops in three looks,
+  switched with V. Scope, the first, draws what the engine plays: the whole output with the guitar
+  over it and each track after its FX. Orbit wraps each track's loop into a ring around the live
+  input; Strata scrolls five ribbons past a now line. The selected track, the bar, the beat and the count-in stay readable from where you
+  stand with the guitar.
 - Six built-in synths, one of them a 16-voice GM drum kit.
 - Two native CLAP/VST3/VST2 plugin slots with floating plugin editors; each slot reloads its last
   plugin at launch with the settings you left it at, never armed, and an exported session carries each
   slot's settings.
 - Plugins are found in the standard CLAP, VST3 and VST2 folders and in any folder you add in Audio
   Settings. VST2 means 64-bit: a 32-bit one is recognised and listed there as not supported, not hosted.
-- Guitar or line input monitored through your plugin inside the engine's callback: an 8 ms round
-  trip at ASIO 64 and 15 ms at 128, measured on a Focusrite Scarlett 2i2 (3rd gen). Takes are placed
+- Guitar or line input monitored through your plugin inside the engine's callback. Takes are placed
   from the driver's reported latency.
 - Share output mirrors the master, without the click, to a second output device while ASIO runs, for
   OBS, a browser or a voice chat (on WASAPI, capture the app's own output: it carries the click).
 - MIDI controllers are read natively by the app, and a MIDI footswitch, key or CC can be
-  learned onto any looper control in Audio Settings: a track action on the selected track or a fixed
+  learned onto a looper action in Audio Settings: a track action on the selected track or a fixed
   one, tap tempo, the click, END STOP, FIXED, RETAKE, AUTO REC, FADE and the input effects, and HOLD to
   record while the pedal is down. Without one, the computer keyboard plays notes and
   runs the transport (1-5 or the arrow keys to select a track, Space to record, Enter to play and
@@ -89,72 +121,69 @@ bar, and the app updates itself from there.
 
 </details>
 
-**What BleepLoop is not**
+## Where it stands
+
+This is an early release from one maintainer, played by the maintainer and a few testers.
+
+What holds, measured on the developer's rig (a Focusrite Scarlett 2i2 3rd gen, ASIO, 44.1 kHz, a cable
+from the output back into the input):
+
+- The guitar's round trip through the app and the interface is 8.1 ms at a 64-sample buffer and
+  15.1 ms at 128.
+- A take lands within 0.1 ms of where the driver's own latency report says it should, with no trim
+  setting, and stays put over ten minutes.
+- An amp-sim plugin (Archetype Petrucci X) ran 120 s at buffer 128 and 256 with no dropouts.
+
+What is rough:
+
+- Only that one interface has been measured. Other ASIO drivers have not, and a report of how it runs
+  on yours (interface, buffer size, what you heard) is welcome as an issue.
+- Much of the feature list is proven by tests but has not yet been played by ear in a real jam.
+  `STATUS.md` lists what has and has not.
+- WASAPI takes land late on drivers that hide their latency (see above). ASIO is the path to use.
+- The installer is unsigned, so SmartScreen warns on first run.
+
+What it is not:
 
 - Not a DAW: no timeline or arrangement. The mix is per-track volume, pan, mute and FX.
 - Not an amp sim: bring your own plugin.
 - Not a full MIDI host: notes, CC and pitch bend come in; no MIDI out, MIDI clock or SysEx.
-- Not a web app: the browser build is a silent verification rig.
-- Not cross-platform: Windows only.
+- Not cross-platform: Windows only. The browser build is a silent test rig, not a web app.
 
-## Play it
+## How it is built
 
-This is an early release. Get the installer from
-[Releases](https://github.com/ikkeseb/bleeploop/releases/latest) and play through your interface's
-ASIO® driver. WASAPI works as a fallback, but Windows and some drivers add latency they do not
-report, so WASAPI takes can land late (about 215 ms on the developer's Focusrite).
+One native audio engine in Rust, clocked by the audio interface, makes every sound: the looper, click,
+synths, effects, limiter and both plugin slots run inside the driver's callback. The window is a
+Tauri app with a SolidJS interface that sends commands to the engine and draws what it reports back.
+Live audio never passes through the interface layer.
 
-1. Plug the guitar into your audio interface and start BleepLoop (the installed app, or
-   `pnpm dev:asio` from source). In Audio Settings pick ASIO (and its driver, if you have more than
-   one), the buffer size and the sample rate: 44.1 kHz, 48 kHz or the device's own. On WASAPI,
-   Windows sets the rate.
-2. Load your amp-sim plugin (CLAP, VST3 or VST2) into a slot, pick the slot's input and press GO LIVE. For an
-   instrument with its own sound, set the other slot to Off, pick its input and GO LIVE: it plays dry.
-3. Select a track with 1–5 and press Space to record. The first take gets a one-bar count-in, shown
-   4-3-2-1 in 4/4; come in on the downbeat after it. The time signature beside BPM (4/4, 3/4, 6/8,
-   12/8, 5/4) is picked before the first take; 6/8 and 12/8 count the dotted quarter.
-4. Space again closes the take; after that, Space overdubs the selected track and Enter plays or stops it.
-5. Help (the ? in the command bar) lists the rest.
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) holds the design decisions and the measurements behind
+them. [`docs/VERIFY.md`](docs/VERIFY.md) and [`verify/README.md`](verify/README.md) cover how it is
+tested: the engine's behaviour is rendered offline frame by frame in Rust tests, and the interface is
+driven in a headless browser against a scripted engine. None of those reaches a real device, so feel
+and latency are checked by playing and measuring the running app. The project is built with AI coding
+agents; `AGENTS.md` and `STATUS.md` are the working notes for them.
 
-![BleepLoop with two tracks playing and a third recording](docs/media/bleeploop.png)
+### Build from source
 
-## Build from source
-
-The frontend renders on its own in a browser with no native dependencies, silent: the sound, plugin
-hosting and audio I/O are the native engine's, in the Tauri shell around it.
-
-### Web frontend only
-
-- Node >= 22.18, pnpm 10
+Node >= 22.18 and pnpm 10 for the interface; for the full app also Rust (pinned in
+`src-tauri/rust-toolchain.toml`), MSVC Build Tools 2022 and WebView2.
 
 ```bash
 git clone https://github.com/ikkeseb/bleeploop.git
 cd bleeploop
 pnpm install
-pnpm dev          # http://localhost:1420, the UI only, silent
+pnpm dev          # the interface alone in a browser, http://localhost:1420, silent
+pnpm dev:wasapi   # the full app on WASAPI, no extra SDK needed
+pnpm dev:asio     # the full app on ASIO (needs the ASIO SDK, below)
 ```
 
-### Full native app
+The ASIO build needs `LIBCLANG_PATH` set (cpal's `asio-sys` runs bindgen) and `CPAL_ASIO_DIR`
+pointing at your own copy of the Steinberg ASIO SDK, which is not in this repo. A binary built with it
+is GPLv3, see [License](#license).
 
-- Everything above, plus:
-- Rust (pinned via `src-tauri/rust-toolchain.toml`), MSVC Build Tools 2022, WebView2
-
-```bash
-pnpm dev:wasapi                      # full app, WASAPI, no extra SDK needed
-pnpm exec tauri build --no-bundle    # standalone WASAPI exe in src-tauri/target/release/app.exe
-```
-
-### ASIO low-latency tier (optional)
-
-Set `LIBCLANG_PATH` (cpal's `asio-sys` runs bindgen) and point `CPAL_ASIO_DIR` at your own copy of
-the Steinberg ASIO SDK. The SDK is not in this repo. A binary built with it is GPLv3, see
-[Third-party notices](#license-and-third-party-notices).
-
-```bash
-pnpm dev:asio     # full app, ASIO + native sample rate
-```
-
-## Commands
+<details>
+<summary><b>All commands</b></summary>
 
 | Command | What it does |
 |---|---|
@@ -170,53 +199,23 @@ pnpm dev:asio     # full app, ASIO + native sample rate
 | `pnpm rust:check` | `cargo check` without and with ASIO, `cargo test`, then the check that keeps the engine crate free of host, device and plugin dependencies (Windows; the ASIO step needs the SDK) |
 | `pnpm native:smoke` · `native:survey` · `native:swap` · `native:recall` | Launch the full app with a DEV plugin probe, print its verdict and stop (Windows, installed plugins) |
 
-The `build-exe` workflow builds the ASIO installer and exe on a clean Windows runner and keeps them
-as a run artifact for 30 days. Run it from the Actions tab. A `v*` tag also publishes the GitHub
-Release with the installer, its sha256, the licence texts and the updater's manifest (latest.json) once the
+The `build-exe` workflow builds the ASIO installer on a clean Windows runner. A `v*` tag publishes the
+GitHub Release with the installer, its sha256, the licence texts and the updater's manifest once the
 build and its gates are green.
-That binary is GPLv3, see the third-party notices.
 
-## Architecture
-
-One native audio engine, clocked by the audio device, owns the sound: looper, click, synths, FX,
-limiter and the plugin slots run in the driver's callback (`src-tauri/crates/lf-engine`, the device
-side in `src-tauri/src/engine_io`). The WebView is the UI: it sends commands and draws a state feed.
-`src/platform/` is the only directory allowed to import `@tauri-apps/*`, and `pnpm check` enforces
-that (`verify/guards/boundary.mjs`). The browser build renders the UI and is silent.
-
-Full design decisions and invariants: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
-Live project state and open threads: [`STATUS.md`](STATUS.md).
-
-## Verification
-
-There is no JS unit-test runner. Three layers:
-
-- `cargo test -p lf-engine` (`pnpm test:engine`; CI runs it on every push that
-  changes native code, not on Markdown alone) renders the engine offline:
-  every looper transition, the click and grid, a golden-jam port and property tests, bit-identical
-  across block sizes, and the synths and FX null-tested against reference renders of the Tone code
-  they replaced.
-- `pnpm verify` (a few seconds, part of `pnpm check`) runs the frontend's real source in plain Node:
-  pure modules, file formats and the engine wire.
-- Browser probes (`pnpm probe`, in CI) drive the real UI in headless Chromium against a scripted
-  engine fake: a gesture sends the right command, a feed frame shows the right screen; they also
-  cover input ownership, session round trips and recovery. See [`verify/README.md`](verify/README.md).
-  None of these reaches a real device, WebView2 or anything audible.
-
-Feel, the native half and real rig latency are verified by running the app and measuring it, not by
-reading code or trusting a typecheck. [`docs/VERIFY.md`](docs/VERIFY.md) explains how: the browser
-harness, the `window.__lf` debug hook, audio measurement and the `tauri dev` routine on the PC.
+</details>
 
 ## Thanks
 
 To [@MARTINWOBBLE](https://github.com/MARTINWOBBLE), who has tested BleepLoop more than anyone and
 keeps sending bug reports, feedback and ideas.
 
-## License and third-party notices
+## License
 
-The source is MIT, see [`LICENSE`](LICENSE). A binary built with `--features asio` links the
-Steinberg ASIO SDK and is GPLv3 as a whole. [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md)
-lists the dependency licences, read from the installed packages and crates, and `licenses/` holds
+The source is MIT, see [`LICENSE`](LICENSE). The released installer is built with the Steinberg ASIO
+SDK under its GPLv3 option, so that binary is GPLv3 as a whole. That is why each release ships
+`GPL-3.0.txt` beside the installer.
+[`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md) lists the dependency licences, and `licenses/` holds
 the licence texts that ship with the installer.
 
 <img src="src/assets/third-party/ASIO-compatible-logo-Steinberg-TM-BW.jpg" alt="ASIO Compatible" width="72" />
