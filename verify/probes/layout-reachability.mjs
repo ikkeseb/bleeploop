@@ -9,11 +9,13 @@
  *   command-bar cap and the muted-lane readout with the loop present;
  * - the command bar with a playing loop, idle modes, from 960 to 1600 px wide: two rows at most, every
  *   control inside the bar and under its own centre point;
- * - at 960x600, 1000x700 and 1280x820 (the Tauri default; the bar stacks into two rows at all three) the
- *   open Help and Audio Settings popovers do not overlap the command bar's rendered box and stay inside
- *   the window, also with a spacer one window tall planted in the panel body (native-only rows this
- *   tier never renders), whose lowest row (stepping into a block taller than the panel) must then
- *   scroll into reach; without the spacer, Help's reference (the tab it opens on) scrolls not at all;
+ * - at 960x600, 1000x700, 1280x820 (the Tauri default; the bar stacks into two rows at these three) and
+ *   1920x1080 the open Help and Audio Settings popovers do not overlap the command bar's rendered box,
+ *   stay inside the window and keep at least the right edge's margin on their left (a hint's one-line
+ *   width once pushed Audio Settings to the window's left edge), also with a spacer one window tall
+ *   planted in the panel body (native-only rows this tier never renders), whose lowest row (stepping
+ *   into a block taller than the panel) must then scroll into reach; without the spacer, Help's
+ *   reference (the tab it opens on) scrolls not at all;
  * - at 960x600 (reduced motion) and 1000x700 with lane 1's FX drawer open, so the lane stack scrolls:
  *   each ArrowDown and digit sends its command, and the engine's `Selected` brings the selected lane
  *   wholly into the stack's view from the nearer edge and leaves a lane already in view unscrolled
@@ -209,7 +211,7 @@ await probe(async ({ open }) => {
   // Popovers hang under the command bar's real bottom edge (a fixed offset once covered the bar's
   // second row whenever it stacked) and never run past the window's: a live native slot adds rows to
   // Audio Settings that this tier cannot render, so a planted spacer stands in for them.
-  for (const [width, height] of [[960, 600], [1000, 700], [1280, 820]]) {
+  for (const [width, height] of [[960, 600], [1000, 700], [1280, 820], [1920, 1080]]) {
     const { page } = await open({ viewport: { width, height }, init });
     await boot(page, ['Empty', 'Empty', 'Empty', 'Empty', 'Empty']);
     for (const [id, show, hide] of [['lf-help-popover', 'openHelp', 'closeHelp'], ['lf-audio-popover', 'openSettings', 'closeSettings']]) {
@@ -241,10 +243,13 @@ await probe(async ({ open }) => {
         const overlaps = m.panel.top < m.bar.bottom && m.panel.bottom > m.bar.top && m.panel.left < m.bar.right && m.panel.right > m.bar.left;
         const inside = [m.dialog, m.panel, m.lastRow].every(b => b.top >= 0 && b.left >= 0 && b.bottom <= m.view.height + 0.5 && b.right <= m.view.width + 0.5);
         const fits = tall || id !== 'lf-help-popover' || m.scroll === 0;
-        const ok = !overlaps && inside && m.lastRowHit && fits;
-        console.log(JSON.stringify({ name, ok, overlaps, inside, fits, gap: m.panel.top - m.bar.bottom, ...m }));
+        // The panel hangs from the bar's right edge and sizes itself: its left margin is never thinner.
+        const margins = { left: m.panel.left, right: m.view.width - m.panel.right };
+        const anchored = margins.left >= margins.right - 0.5;
+        const ok = !overlaps && inside && anchored && m.lastRowHit && fits;
+        console.log(JSON.stringify({ name, ok, overlaps, inside, anchored, margins, fits, gap: m.panel.top - m.bar.bottom, ...m }));
         if (!ok) failures.push(name);
-        results.push({ name, ok, overlaps, inside, fits, ...m });
+        results.push({ name, ok, overlaps, inside, anchored, fits, ...m });
       }
       await page.evaluate(fn => window.__lf.ui[fn](), hide);
     }
