@@ -473,16 +473,24 @@ impl IAudioProcessorTrait for FixtureComponent {
     }
 }
 
-/// Spin until `pred` holds or `ms` elapse; returns whether it held.
-fn wait_for(ms: u64, pred: impl Fn() -> bool) -> bool {
-    let deadline = Instant::now() + Duration::from_millis(ms);
-    while Instant::now() < deadline {
-        if pred() {
-            return true;
+/// How long a test waits for what it expects before it fails. Far past a healthy run, since a wait
+/// ends the moment its condition holds: a loaded CI runner starves no test (a 2 s bound did). Still a
+/// bound, so a bug fails the test instead of hanging it.
+const PATIENCE: Duration = Duration::from_secs(30);
+
+/// Poll until `pred` holds or PATIENCE runs out; returns whether it held. A timeout names the
+/// waiting line on stderr, which a failed test prints beside its assertion.
+#[track_caller]
+fn wait_for(pred: impl Fn() -> bool) -> bool {
+    let deadline = Instant::now() + PATIENCE;
+    while !pred() {
+        if Instant::now() >= deadline {
+            eprintln!("{}: still waiting after {PATIENCE:?}, giving up", std::panic::Location::caller());
+            return false;
         }
         std::thread::sleep(Duration::from_millis(1));
     }
-    pred()
+    true
 }
 
 // ── engine mode: the same component as a unit inside a test device's engine (`engine_slot`) ─────
@@ -490,7 +498,7 @@ fn wait_for(ms: u64, pred: impl Fn() -> bool) -> bool {
 mod engine {
     use super::super::super::engine_slot::{self, EngineSlotEvent, EngineSlotHandle, GaveUp, PluginFormat};
     use super::super::super::super::state::ToneRestore;
-    use super::super::super::super::tone::{self, TempDir, ToneBinding, ToneIdentity, SAVE_QUIET};
+    use super::super::super::super::tone::{self, TempDir, ToneBinding, ToneIdentity};
     use super::super::controller_tests::FixtureController;
     use super::*;
     use crate::engine_io::test_rig::TestDevice;
@@ -745,9 +753,9 @@ mod engine {
         let s = made.component();
         assert_eq!(handle.kind(), SlotKind::Instrument, "no audio input: an instrument");
         assert_eq!(handle.name(), "Engine fixture");
-        assert!(wait_for(2000, || s.processes.load(Relaxed) > 8), "the engine processes the unit");
+        assert!(wait_for(|| s.processes.load(Relaxed) > 8), "the engine processes the unit");
         assert!(
-            wait_for(2000, || device.output.lock().unwrap().iter().rev().take(256).all(|&x| x > 0.2)),
+            wait_for(|| device.output.lock().unwrap().iter().rev().take(256).all(|&x| x > 0.2)),
             "its output reaches the device"
         );
         assert_eq!(installed(&device, 1), Some((SlotKind::Instrument, 32)), "installed with the latency it reported");
@@ -784,7 +792,7 @@ mod engine {
                 assert_eq!(report, Some(Err("plugin load cancelled".to_string())));
             }
             // A unit left in the engine would be engaged by now.
-            assert!(device.wait_blocks(4, Duration::from_secs(5)));
+            assert!(device.wait_blocks(4, PATIENCE));
             assert_eq!(installed(&device, 0), None, "{gave_up:?}: the slot is empty");
             let s = made.component();
             assert_eq!((s.activations.load(Relaxed), s.deactivations.load(Relaxed)), (1, 1), "{gave_up:?}");
@@ -805,11 +813,11 @@ mod engine {
         let (handle, made, _) = load_with_inputs(&device, 1, 0, 0.0, 2);
         let s = made.component();
         assert_eq!(handle.kind(), SlotKind::Effect, "an audio input bus: an effect");
-        assert!(wait_for(2000, || s.processes.load(Relaxed) > 8 && rendered_near(&device, 0.0)), "not live: silence");
+        assert!(wait_for(|| s.processes.load(Relaxed) > 8 && rendered_near(&device, 0.0)), "not live: silence");
         assert_eq!(installed(&device, 1), Some((SlotKind::Effect, 0)));
         send(&device, Command::SetSlotLive(1, true));
         assert!(
-            wait_for(2000, || rendered_near(&device, 0.1)),
+            wait_for(|| rendered_near(&device, 0.1)),
             "live: the device input, copied to both input channels and echoed, summed back to mono"
         );
         handle.unload().unwrap();
@@ -821,7 +829,7 @@ mod engine {
         let device = device(48_000);
         let (handle, made, _) = load(&device, 0, 0, 0.0);
         let s = made.component();
-        assert!(wait_for(2000, || s.processes.load(Relaxed) > 8));
+        assert!(wait_for(|| s.processes.load(Relaxed) > 8));
         s.latency.store(64, Relaxed);
         let blocks_before = device.blocks.load(Relaxed);
         let processed_before = s.processes.load(Relaxed);
@@ -835,7 +843,7 @@ mod engine {
         .join()
         .unwrap();
         assert!(
-            wait_for(2000, || s.activations.load(Relaxed) == 2
+            wait_for(|| s.activations.load(Relaxed) == 2
                 && s.starts.load(Relaxed) == 2
                 && s.processes.load(Relaxed) > processed_before + 8),
             "setActive(0) → setupProcessing → setActive(1) → reinstalled → processing again"
@@ -865,7 +873,7 @@ mod engine {
         let device = device(48_000);
         let (handle, made, _) = load(&device, 0, 0, 0.25);
         let s = made.component();
-        assert!(wait_for(2000, || s.processes.load(Relaxed) > 8 && !rendered_near(&device, 0.0)), "it plays");
+        assert!(wait_for(|| s.processes.load(Relaxed) > 8 && !rendered_near(&device, 0.0)), "it plays");
 
         s.out_channels.store(0, Relaxed);
         let reporter = plugin_side_handler(&made);
@@ -876,7 +884,7 @@ mod engine {
         .join()
         .unwrap();
         assert!(
-            wait_for(2000, || s.deactivations.load(Relaxed) == 1 && rendered_near(&device, 0.0)),
+            wait_for(|| s.deactivations.load(Relaxed) == 1 && rendered_near(&device, 0.0)),
             "the cycle ran setActive(0) and the slot went silent"
         );
         // The cycle runs on the owner in one turn; past it, a reactivation would have shown by now.
@@ -902,9 +910,9 @@ mod engine {
         let device = device(48_000);
         let (handle, made, _) = load_refusing_start(&device, 0);
         let s = made.component();
-        assert!(wait_for(2000, || s.starts.load(Relaxed) == 1), "the engine asks it to start");
+        assert!(wait_for(|| s.starts.load(Relaxed) == 1), "the engine asks it to start");
         let blocks = device.blocks.load(Relaxed);
-        assert!(wait_for(2000, || device.blocks.load(Relaxed) > blocks + 8), "the device keeps rendering");
+        assert!(wait_for(|| device.blocks.load(Relaxed) > blocks + 8), "the device keeps rendering");
         assert_eq!(s.starts.load(Relaxed), 1, "asked once, not every block");
         assert_eq!(s.processes.load(Relaxed), 0, "process never runs after the refusal");
         assert!(rendered_near(&device, 0.0), "the slot is silent");
@@ -924,7 +932,7 @@ mod engine {
         let device = device(48_000);
         let (handle, made, _) = load_refusing_start(&device, 0);
         let s = made.component();
-        assert!(wait_for(2000, || s.starts.load(Relaxed) == 1), "installed; the ring is never drained now");
+        assert!(wait_for(|| s.starts.load(Relaxed) == 1), "installed; the ring is never drained now");
         let capacity = super::super::super::EVENT_RING_CAP;
         for i in 0..capacity {
             handle.set_param(1001, i as f64 / capacity as f64).expect("the queue has room");
@@ -933,7 +941,7 @@ mod engine {
         assert!(err.contains("event queue is full"), "{err}");
         let controller = made.controller();
         assert!(
-            wait_for(5000, || controller.set_normalized.lock().unwrap().len() == capacity),
+            wait_for(|| controller.set_normalized.lock().unwrap().len() == capacity),
             "the controller hears every value the queue took"
         );
         std::thread::sleep(Duration::from_millis(100)); // a few more owner turns
@@ -976,7 +984,7 @@ mod engine {
         let (handle, made, _) =
             load_factory(&device, 0, None, |made| FixtureFactory { controller_init_fails: true, ..FixtureFactory::new(made) });
         let s = made.component();
-        assert!(wait_for(2000, || s.processes.load(Relaxed) > 4), "the component plays without a controller");
+        assert!(wait_for(|| s.processes.load(Relaxed) > 4), "the component plays without a controller");
         handle.unload().unwrap();
         assert_eq!(made.controller().terminates.load(Relaxed), 0, "the failed controller was never terminated");
         assert!(s.terminate_seq.load(Relaxed) > 0, "the component still terminates");
@@ -1008,13 +1016,13 @@ mod engine {
         let device = device(48_000);
         let (handle, made, _) = load(&device, 0, 0, 0.0);
         let s = made.component();
-        assert!(wait_for(2000, || s.processes.load(Relaxed) > 4));
+        assert!(wait_for(|| s.processes.load(Relaxed) > 4));
         send(&device, Command::SelectInstrument(NoteTarget::Slot(0)));
         send(&device, Command::NoteOn(62, 0.5));
-        assert!(wait_for(2000, || s.note_ons.load(Relaxed) == 1), "the note-on reaches the plugin");
+        assert!(wait_for(|| s.note_ons.load(Relaxed) == 1), "the note-on reaches the plugin");
         assert_eq!(s.last_pitch.load(Relaxed), 62);
         send(&device, Command::NoteOff(62));
-        assert!(wait_for(2000, || s.note_offs.load(Relaxed) == 1), "and its note-off");
+        assert!(wait_for(|| s.note_offs.load(Relaxed) == 1), "and its note-off");
         handle.unload().unwrap();
     }
 
@@ -1026,25 +1034,25 @@ mod engine {
         let s = made.component();
         assert!(handle.set_param(7, 0.1).is_err(), "an id the controller never listed");
         handle.set_param(1001, 0.3).unwrap();
-        assert!(wait_for(2000, || s.param_points.load(Relaxed) == 1), "the processor gets the value");
+        assert!(wait_for(|| s.param_points.load(Relaxed) == 1), "the processor gets the value");
         assert_eq!((s.last_param.load(Relaxed), f64::from_bits(s.last_param_value.load(Relaxed))), (1001, 0.3));
         let controller = made.controller();
         assert!(
-            wait_for(2000, || controller.set_normalized.lock().unwrap().as_slice() == [(1001, 0.3)]),
+            wait_for(|| controller.set_normalized.lock().unwrap().as_slice() == [(1001, 0.3)]),
             "and so does the edit controller"
         );
 
         // A knob moved in the plugin's editor: the processor hears it and the caller is told.
         // SAFETY: the handler is alive (held by the controller and this clone).
         assert_eq!(unsafe { plugin_side_handler(&made).performEdit(1000, 0.6) }, kResultOk);
-        assert!(wait_for(2000, || s.param_points.load(Relaxed) == 2 && s.last_param.load(Relaxed) == 1000));
+        assert!(wait_for(|| s.param_points.load(Relaxed) == 2 && s.last_param.load(Relaxed) == 1000));
         assert_eq!(seen.lock().unwrap().as_slice(), [EngineSlotEvent::ParamChanged { id: 1000, value: 0.6 }]);
 
         // A preset loaded inside the plugin: the caller is told to list the params again.
         // SAFETY: as above.
         let reported = unsafe { plugin_side_handler(&made).restartComponent(RestartFlags_::kParamValuesChanged) };
         assert_eq!(reported, kResultOk);
-        assert!(wait_for(2000, || seen.lock().unwrap().last() == Some(&EngineSlotEvent::ParamsChanged)));
+        assert!(wait_for(|| seen.lock().unwrap().last() == Some(&EngineSlotEvent::ParamsChanged)));
         assert_eq!(s.activations.load(Relaxed), 1, "a re-list is not a restart");
         handle.unload().unwrap();
     }
@@ -1086,7 +1094,7 @@ mod engine {
             [("setComponentState", b"\x0b\0\0\0component v".to_vec()), ("setState", b"controller v".to_vec())],
             "the controller hears the component's state from its start, then its own"
         );
-        assert!(wait_for(2000, || s.processes.load(Relaxed) > 4), "and the plugin runs");
+        assert!(wait_for(|| s.processes.load(Relaxed) > 4), "and the plugin runs");
 
         // An export takes the tone fresh, through a stream that had to seek and tell.
         *s.state.lock().unwrap() = b"component w".to_vec();
@@ -1100,9 +1108,8 @@ mod engine {
         // A host parameter set is a change: saved once it has been quiet for SAVE_QUIET.
         *s.state.lock().unwrap() = b"component x".to_vec();
         handle.set_param(1001, 0.3).unwrap();
-        let wait = (SAVE_QUIET.as_millis() * 2 + 1000) as u64;
         assert!(
-            wait_for(wait, || stored(&dir).is_some_and(|(c, _)| c.ends_with(b"component x"))),
+            wait_for(|| stored(&dir).is_some_and(|(c, _)| c.ends_with(b"component x"))),
             "debounced save after a host set"
         );
 
@@ -1125,7 +1132,7 @@ mod engine {
         let dir = TempDir::new("vst3-late-change");
         let (handle, made, seen) = load_with_tone(&device, 0, 0, 0.0, 0, Some(dir.binding(0, identity())), StateAnswer::Takes);
         let (s, controller) = (made.component(), made.controller());
-        assert!(wait_for(2000, || s.processes.load(Relaxed) > 4));
+        assert!(wait_for(|| s.processes.load(Relaxed) > 4));
         *s.state.lock().unwrap() = b"component v".to_vec();
 
         // Hold the owner inside an export's save, past this turn's drain of the restart flags.
@@ -1133,10 +1140,10 @@ mod engine {
         let (release, go) = std::sync::mpsc::channel::<()>();
         *s.on_get_state.lock().unwrap() = Some(Box::new(move || {
             inside.send(()).unwrap();
-            let _ = go.recv_timeout(Duration::from_secs(5));
+            let _ = go.recv_timeout(PATIENCE);
         }));
         let export = handle.start_tone_save().unwrap();
-        entered.recv_timeout(Duration::from_secs(5)).expect("the owner is inside the save");
+        entered.recv_timeout(PATIENCE).expect("the owner is inside the save");
         *s.state.lock().unwrap() = b"component w".to_vec();
         *controller.state.lock().unwrap() = b"controller w".to_vec();
         // SAFETY: the handler is alive (held by the controller and this clone).
@@ -1145,7 +1152,7 @@ mod engine {
         // The unload is asked for before the owner gets on: its loop ends without another turn.
         handle.stop_serving();
         release.send(()).unwrap();
-        let export = tone::decode(&export.recv_timeout(Duration::from_secs(2)).unwrap().unwrap()).unwrap();
+        let export = tone::decode(&export.recv_timeout(PATIENCE).unwrap().unwrap()).unwrap();
         let v = framed(b"component v");
         assert_eq!(tone::decode_vst3(&export.state).unwrap().0, &v[..], "the export took the state before the change");
         handle.unload().unwrap();
@@ -1165,10 +1172,10 @@ mod engine {
         let s = made.component();
         assert_eq!(handle.tone(), Some(ToneRestore::Failed), "refused, reported");
         assert!(s.state.lock().unwrap().is_empty(), "the component kept its defaults");
-        assert!(wait_for(2000, || s.processes.load(Relaxed) > 4), "and the load went on");
+        assert!(wait_for(|| s.processes.load(Relaxed) > 4), "and the load went on");
         // The app's exit: a save asked of every slot, then the unload. Neither writes the defaults over
         // the tone the plugin refused (a reinstalled version of it may take it again).
-        let exit = handle.start_tone_save().unwrap().recv_timeout(Duration::from_secs(2)).unwrap().unwrap();
+        let exit = handle.start_tone_save().unwrap().recv_timeout(PATIENCE).unwrap().unwrap();
         let exit = tone::decode(&exit).unwrap();
         let (component, _) = tone::decode_vst3(&exit.state).unwrap();
         assert_eq!(component, &framed(b"")[..], "the save still hands back what plays: the defaults");
@@ -1208,7 +1215,7 @@ mod engine {
             [("setComponentState", framed(b""))],
             "and its controller heard only those"
         );
-        assert!(wait_for(2000, || s.processes.load(Relaxed) > 4), "and it runs");
+        assert!(wait_for(|| s.processes.load(Relaxed) > 4), "and it runs");
         handle.unload().unwrap();
         assert_eq!(stored(&dir), Some((framed(b"component v"), b"controller v".to_vec())), "the stored tone stays");
         assert!(!s.contract_violation.load(Relaxed));
@@ -1237,18 +1244,18 @@ mod engine {
         let device = device(48_000);
         let (handle, made, _) = load(&device, 1, 0, 0.0);
         let s = made.component();
-        assert!(wait_for(2000, || s.processes.load(Relaxed) > 4));
+        assert!(wait_for(|| s.processes.load(Relaxed) > 4));
 
         device.rebuild_at(44_100, 1024);
         assert!(
-            wait_for(2000, || s.activations.load(Relaxed) == 2 && s.starts.load(Relaxed) == 2),
+            wait_for(|| s.activations.load(Relaxed) == 2 && s.starts.load(Relaxed) == 2),
             "the owner took the unit back and reinstalled it"
         );
         assert_eq!(f64::from_bits(s.setup_rate.load(Relaxed)), 44_100.0, "set up again at the new rate");
         assert_eq!(s.setup_max_frames.load(Relaxed), 1024, "and the new engine's block");
         assert_eq!((s.stops.load(Relaxed), s.deactivations.load(Relaxed)), (1, 1));
         let processed = s.processes.load(Relaxed);
-        assert!(wait_for(2000, || s.processes.load(Relaxed) > processed + 4), "the new engine processes it");
+        assert!(wait_for(|| s.processes.load(Relaxed) > processed + 4), "the new engine processes it");
         assert!(installed(&device, 1).is_some());
         assert!(!s.contract_violation.load(Relaxed));
         handle.unload().unwrap();

@@ -66,9 +66,11 @@ fn settled_level(device: &TestDevice) -> Option<f32> {
     (last > 0.0 && output.iter().rev().take(256).all(|&x| (x - last).abs() < 1e-5)).then_some(last)
 }
 
-/// Wait for the device to settle on one level above silence and return it.
+/// Wait for the device to settle on one level above silence and return it. A timeout names the
+/// test's line, not this one.
+#[track_caller]
 fn level_once_settled(device: &TestDevice) -> f32 {
-    assert!(wait_for(3000, || settled_level(device).is_some()), "the output settles");
+    assert!(wait_for(|| settled_level(device).is_some()), "the output settles");
     settled_level(device).unwrap()
 }
 
@@ -80,16 +82,24 @@ fn send(device: &TestDevice, command: Command) {
     device.host().send(TimedCommand { frame: None, command }).unwrap();
 }
 
-/// Spin until `pred` holds or `ms` elapse; returns whether it held.
-fn wait_for(ms: u64, pred: impl Fn() -> bool) -> bool {
-    let deadline = Instant::now() + Duration::from_millis(ms);
-    while Instant::now() < deadline {
-        if pred() {
-            return true;
+/// How long a test waits for what it expects before it fails. Far past a healthy run, since a wait
+/// ends the moment its condition holds: a loaded CI runner starves no test (a 2 s bound did). Still a
+/// bound, so a bug fails the test instead of hanging it.
+const PATIENCE: Duration = Duration::from_secs(30);
+
+/// Poll until `pred` holds or PATIENCE runs out; returns whether it held. A timeout names the
+/// waiting line on stderr, which a failed test prints beside its assertion.
+#[track_caller]
+fn wait_for(pred: impl Fn() -> bool) -> bool {
+    let deadline = Instant::now() + PATIENCE;
+    while !pred() {
+        if Instant::now() >= deadline {
+            eprintln!("{}: still waiting after {PATIENCE:?}, giving up", std::panic::Location::caller());
+            return false;
         }
         std::thread::sleep(Duration::from_millis(1));
     }
-    pred()
+    true
 }
 
 /// Load the fixture in `shape` as plugin `id` through the engine-mode owner: the entry runs on the
@@ -194,8 +204,8 @@ fn a_loaded_slot_renders_in_the_engine_and_unloads_in_order() {
     let (handle, _) = load(&device, 1, Shape { delay: 32, ..instrument(probe) });
     assert_eq!(handle.kind(), SlotKind::Instrument, "a synth: an instrument");
     assert_eq!(handle.name(), "Fixture");
-    assert!(wait_for(2000, || probe.processes.load(Relaxed) > 8), "the engine processes the unit");
-    assert!(wait_for(2000, || sounding(&device)), "its output reaches the device");
+    assert!(wait_for(|| probe.processes.load(Relaxed) > 8), "the engine processes the unit");
+    assert!(wait_for(|| sounding(&device)), "its output reaches the device");
     assert_eq!(installed(&device, 1), Some((SlotKind::Instrument, 32)), "installed with the latency it reported");
     assert_eq!(f32::from_bits(probe.rate.load(Relaxed)), 48_000.0, "told the engine's rate");
     assert_eq!(probe.block.load(Relaxed), 4096, "and its largest block");
@@ -207,7 +217,7 @@ fn a_loaded_slot_renders_in_the_engine_and_unloads_in_order() {
     assert_eq!((f64::from_bits(probe.time_tempo.load(Relaxed)), probe.time_flags.load(Relaxed)), (120.0, 0));
     assert_eq!(probe.process_level.load(Relaxed), PROCESS_LEVEL_REALTIME);
     let position = f64::from_bits(probe.time_pos.load(Relaxed));
-    assert!(wait_for(2000, || f64::from_bits(probe.time_pos.load(Relaxed)) > position), "the position runs");
+    assert!(wait_for(|| f64::from_bits(probe.time_pos.load(Relaxed)) > position), "the position runs");
     assert_eq!(f64::from_bits(probe.time_pos.load(Relaxed)) % 256.0, 0.0, "in frames processed");
 
     // The load, in order. Every one of these calls answered 0 (the fixture's dispatcher), which is
@@ -243,7 +253,7 @@ fn a_load_its_caller_gave_up_on_is_undone_and_frees_the_slot() {
             assert_eq!(report, Some(Err("plugin load cancelled".to_string())));
         }
         // A unit left in the engine would be engaged by now.
-        assert!(device.wait_blocks(4, Duration::from_secs(5)));
+        assert!(device.wait_blocks(4, PATIENCE));
         assert_eq!(installed(&device, 0), None, "{gave_up:?}: the slot is empty");
         let undone = [load_calls(4096), vec![(EFF_STOP_PROCESS, 0), (EFF_MAINS_CHANGED, 0), (EFF_CLOSE, 0)]].concat();
         assert_eq!(probe.opcodes(), undone, "{gave_up:?}: loaded, then stopped, suspended and closed");
@@ -262,12 +272,12 @@ fn an_effect_slot_takes_the_live_input_and_its_output_reaches_the_device() {
     let probe = Probe::new();
     let (handle, _) = load(&device, 1, Shape { probe: Some(probe), ..Shape::default() });
     assert_eq!(handle.kind(), SlotKind::Effect, "inputs and no synth flag: an effect");
-    assert!(wait_for(2000, || probe.processes.load(Relaxed) > 8 && rendered_near(&device, 0.0)), "not live: silence");
+    assert!(wait_for(|| probe.processes.load(Relaxed) > 8 && rendered_near(&device, 0.0)), "not live: silence");
     assert_eq!(installed(&device, 1), Some((SlotKind::Effect, 0)));
     assert_eq!(probe.distinct_inputs.load(Relaxed), 2, "each declared input has a row of its own");
     send(&device, Command::SetSlotLive(1, true));
     assert!(
-        wait_for(2000, || rendered_near(&device, 0.1)),
+        wait_for(|| rendered_near(&device, 0.1)),
         "live: the device input, copied to both inputs and echoed, the pair's mean back to mono"
     );
     handle.unload().unwrap();
@@ -280,14 +290,14 @@ fn a_note_and_a_host_parameter_edit_reach_the_plugin() {
     let device = device(48_000);
     let probe = Probe::new();
     let (handle, _) = load(&device, 0, instrument(probe));
-    assert!(wait_for(2000, || probe.processes.load(Relaxed) > 4));
+    assert!(wait_for(|| probe.processes.load(Relaxed) > 4));
     send(&device, Command::SelectInstrument(NoteTarget::Slot(0)));
     send(&device, Command::NoteOn(62, 0.5));
-    assert!(wait_for(2000, || probe.note_ons.load(Relaxed) == 1), "the note-on reaches the plugin");
+    assert!(wait_for(|| probe.note_ons.load(Relaxed) == 1), "the note-on reaches the plugin");
     assert_eq!((probe.last_key.load(Relaxed), probe.last_velocity.load(Relaxed)), (62, 64), "velocity 0.5 of 127");
     assert!((0..256).contains(&probe.last_delta.load(Relaxed)), "at an offset inside its block");
     send(&device, Command::NoteOff(62));
-    assert!(wait_for(2000, || probe.note_offs.load(Relaxed) == 1), "and its note-off");
+    assert!(wait_for(|| probe.note_offs.load(Relaxed) == 1), "and its note-off");
     assert_eq!(probe.bad_events.load(Relaxed), 0, "both as MIDI events on channel 0");
 
     // The plugin's parameters are its indices, listed with their names and live values.
@@ -302,7 +312,7 @@ fn a_note_and_a_host_parameter_edit_reach_the_plugin() {
     assert!(handle.set_param(3, 0.1).is_err(), "an index the plugin never declared");
     let before = probe.sets.load(Relaxed);
     handle.set_param(1, 0.3).unwrap();
-    assert!(wait_for(2000, || probe.sets.load(Relaxed) == before + 1), "the edit reaches setParameter");
+    assert!(wait_for(|| probe.sets.load(Relaxed) == before + 1), "the edit reaches setParameter");
     assert_eq!((probe.last_set_index.load(Relaxed), f32::from_bits(probe.last_set_value.load(Relaxed))), (1, 0.3));
     assert_eq!(probe.sets_on_device.load(Relaxed), 1, "on the thread that processes the plugin");
     handle.unload().unwrap();
@@ -320,11 +330,11 @@ fn plugin_automation_reaches_the_caller_with_its_value_and_is_never_echoed() {
     let device = device(48_000);
     let probe = Probe::new();
     let (handle, seen) = load(&device, 0, instrument(probe));
-    assert!(wait_for(2000, || probe.processes.load(Relaxed) > 4));
+    assert!(wait_for(|| probe.processes.load(Relaxed) > 4));
     let (sets, gets) = (probe.sets.load(Relaxed), probe.gets.load(Relaxed));
     let told = |id: u32, value: f32| {
         let event = EngineSlotEvent::ParamChanged { id, value: f64::from(value) };
-        wait_for(2000, || seen.lock().unwrap().contains(&event))
+        wait_for(|| seen.lock().unwrap().contains(&event))
     };
 
     assert_eq!(plugin_thread_calls_host(probe, AUDIO_MASTER_AUTOMATE, 2, 0, 0.7), 0);
@@ -357,18 +367,18 @@ fn an_io_change_inside_process_silences_the_unit_until_the_owner_has_cycled_it()
     let probe = Probe::new();
     probe.set_level(0.25);
     let (handle, _) = load(&device, 0, instrument(probe));
-    assert!(wait_for(2000, || probe.processes.load(Relaxed) > 8 && sounding(&device)), "it plays");
+    assert!(wait_for(|| probe.processes.load(Relaxed) > 8 && sounding(&device)), "it plays");
     let blocks = device.blocks.load(Relaxed);
 
     // The plugin grows to four outputs and says so from inside its process call.
     probe.grow_in_process.store(4, Relaxed);
     assert!(
-        wait_for(2000, || probe.count(EFF_START_PROCESS, 0) == 2 && probe.distinct_outputs.load(Relaxed) == 4),
+        wait_for(|| probe.count(EFF_START_PROCESS, 0) == 2 && probe.distinct_outputs.load(Relaxed) == 4),
         "stopped → suspended → resumed → reinstalled, with a row for each of the four outputs"
     );
     assert_eq!(probe.calls_while_halted.load(Relaxed), 0, "no plugin call between the report and the cycle");
     assert_eq!(probe.opcodes()[load_calls(4096).len()..], cycle_calls(4096));
-    assert!(wait_for(2000, || sounding(&device)), "and it plays again");
+    assert!(wait_for(|| sounding(&device)), "and it plays again");
     assert_eq!(installed(&device, 0), Some((SlotKind::Instrument, 0)));
     assert!(device.blocks.load(Relaxed) > blocks, "the device kept rendering through the restart");
     assert_eq!(device.host().core.counters.lock_misses.load(Relaxed), 0, "the owner never held the engine");
@@ -390,10 +400,10 @@ fn an_io_change_reported_while_resuming_describes_the_state_just_read() {
     probe.set_level(0.25);
     probe.io_changed_in_resume.store(true, Relaxed);
     let (handle, _) = load(&device, 0, instrument(probe));
-    assert!(wait_for(2000, || sounding(&device)), "it plays: the load's report halted nothing");
+    assert!(wait_for(|| sounding(&device)), "it plays: the load's report halted nothing");
     let processed = probe.processes.load(Relaxed);
     std::thread::sleep(Duration::from_millis(200)); // several owner turns
-    assert!(probe.processes.load(Relaxed) > processed, "and it is still processed");
+    assert!(wait_for(|| probe.processes.load(Relaxed) > processed), "and it is still processed");
     assert_eq!(probe.opcodes(), load_calls(4096), "and no cycle followed");
     handle.unload().unwrap();
     assert_rendered_only_while_started(probe);
@@ -409,12 +419,12 @@ fn a_refused_restart_leaves_the_slot_bypassed_through_a_device_change_until_a_go
     let probe = Probe::new();
     probe.set_level(0.25);
     let (handle, _) = load(&device, 0, instrument(probe));
-    assert!(wait_for(2000, || probe.processes.load(Relaxed) > 8 && sounding(&device)), "it plays");
+    assert!(wait_for(|| probe.processes.load(Relaxed) > 8 && sounding(&device)), "it plays");
 
     probe.outputs_on_suspend.store(0, Relaxed);
     assert_eq!(plugin_thread_calls_host(probe, AUDIO_MASTER_IO_CHANGED, 0, 0, 0.0), 1);
     assert!(
-        wait_for(2000, || probe.count(EFF_MAINS_CHANGED, 0) == 1 && rendered_near(&device, 0.0)),
+        wait_for(|| probe.count(EFF_MAINS_CHANGED, 0) == 1 && rendered_near(&device, 0.0)),
         "the cycle suspended it and the slot went silent"
     );
     std::thread::sleep(Duration::from_millis(200));
@@ -431,7 +441,7 @@ fn a_refused_restart_leaves_the_slot_bypassed_through_a_device_change_until_a_go
     // SAFETY: the unit is parked and the owner reads the effect only once the report below asks it to.
     unsafe { probe.set_outputs(2) };
     assert_eq!(plugin_thread_calls_host(probe, AUDIO_MASTER_IO_CHANGED, 0, 0, 0.0), 1);
-    assert!(wait_for(2000, || probe.count(EFF_START_PROCESS, 0) == 2 && sounding(&device)), "it plays again");
+    assert!(wait_for(|| probe.count(EFF_START_PROCESS, 0) == 2 && sounding(&device)), "it plays again");
     assert_eq!(f32::from_bits(probe.rate.load(Relaxed)), 44_100.0, "resumed at the rate the device has now");
     assert_eq!((probe.block.load(Relaxed), probe.host_rate_at_resume.load(Relaxed)), (1024, 44_100));
     assert_eq!(probe.count(EFF_STOP_PROCESS, 0), 1, "a plugin that was not running is not stopped again");
@@ -449,10 +459,10 @@ fn a_slot_left_bypassed_by_a_refused_restart_still_unloads_in_order() {
     let device = device(48_000);
     let probe = Probe::new();
     let (handle, _) = load(&device, 0, instrument(probe));
-    assert!(wait_for(2000, || probe.processes.load(Relaxed) > 8));
+    assert!(wait_for(|| probe.processes.load(Relaxed) > 8));
     probe.outputs_on_suspend.store(0, Relaxed);
     assert_eq!(plugin_thread_calls_host(probe, AUDIO_MASTER_IO_CHANGED, 0, 0, 0.0), 1);
-    assert!(wait_for(2000, || probe.count(EFF_SET_BLOCK_SIZE, 4096) == 2), "the cycle ran up to the refusal");
+    assert!(wait_for(|| probe.count(EFF_SET_BLOCK_SIZE, 4096) == 2), "the cycle ran up to the refusal");
     handle.unload().expect("a bypassed slot still unloads");
     assert_eq!(
         probe.opcodes()[load_calls(4096).len()..],
@@ -469,17 +479,17 @@ fn a_device_change_reactivates_the_plugin_at_the_new_rate() {
     let probe = Probe::new();
     probe.set_level(0.25);
     let (handle, _) = load(&device, 1, instrument(probe));
-    assert!(wait_for(2000, || probe.processes.load(Relaxed) > 4));
+    assert!(wait_for(|| probe.processes.load(Relaxed) > 4));
 
     device.rebuild_at(44_100, 1024);
-    assert!(wait_for(2000, || probe.count(EFF_START_PROCESS, 0) == 2), "the owner took the unit back and reinstalled it");
+    assert!(wait_for(|| probe.count(EFF_START_PROCESS, 0) == 2), "the owner took the unit back and reinstalled it");
     assert_eq!(probe.opcodes()[load_calls(4096).len()..], cycle_calls(1024), "stopped and suspended, then the new block");
     assert_eq!(f32::from_bits(probe.rate.load(Relaxed)), 44_100.0, "told the new rate");
     assert_eq!(probe.host_rate_at_resume.load(Relaxed), 44_100, "which the host answers from inside the resume");
     let processed = probe.processes.load(Relaxed);
-    assert!(wait_for(2000, || probe.processes.load(Relaxed) > processed + 4), "the new engine processes it");
+    assert!(wait_for(|| probe.processes.load(Relaxed) > processed + 4), "the new engine processes it");
     assert_eq!(f64::from_bits(probe.time_rate.load(Relaxed)), 44_100.0, "its time info runs at the new rate");
-    assert!(wait_for(2000, || sounding(&device)));
+    assert!(wait_for(|| sounding(&device)));
     assert!(installed(&device, 1).is_some());
     handle.unload().unwrap();
     assert_lifecycle_on_the_owner(probe);
@@ -499,14 +509,14 @@ fn a_multi_output_instrument_is_not_attenuated() {
     let (handle, _) = load(&device, 0, instrument(stereo));
     let reference = level_once_settled(&device);
     handle.unload().unwrap();
-    assert!(wait_for(2000, || rendered_near(&device, 0.0)));
+    assert!(wait_for(|| rendered_near(&device, 0.0)));
 
     let probe = Probe::new();
     probe.set_level(0.5);
     probe.spread.store(0.25f32.to_bits(), Relaxed); // 0.75 left, 0.25 right
     probe.signal_outputs.store(2, Relaxed);
     let (handle, _) = load(&device, 0, Shape { outputs: 16, ..instrument(probe) });
-    assert!(wait_for(2000, || probe.processes.load(Relaxed) > 8));
+    assert!(wait_for(|| probe.processes.load(Relaxed) > 8));
     let level = level_once_settled(&device);
     assert!((level - reference).abs() < 1e-3, "the pair's mean at full level: {level} beside {reference}");
     assert_eq!(probe.distinct_outputs.load(Relaxed), 16, "every declared output has a row of its own");
@@ -524,17 +534,17 @@ fn a_plugin_without_can_replacing_plays_through_process() {
     let (handle, _) = load(&device, 0, instrument(replacing));
     let reference = level_once_settled(&device);
     handle.unload().unwrap();
-    assert!(wait_for(2000, || rendered_near(&device, 0.0)));
+    assert!(wait_for(|| rendered_near(&device, 0.0)));
 
     let probe = Probe::new();
     probe.set_level(0.25);
     let old = Shape { flags: EFF_FLAGS_IS_SYNTH, process_replacing: false, ..instrument(probe) };
     let (handle, _) = load(&device, 0, old);
-    assert!(wait_for(2000, || probe.processes.load(Relaxed) > 8));
+    assert!(wait_for(|| probe.processes.load(Relaxed) > 8));
     let level = level_once_settled(&device);
     assert!((level - reference).abs() < 1e-3, "{level} beside {reference}");
     let processed = probe.processes.load(Relaxed);
-    assert!(wait_for(2000, || probe.processes.load(Relaxed) > processed + 32));
+    assert!(wait_for(|| probe.processes.load(Relaxed) > processed + 32));
     let later = level_once_settled(&device);
     assert!((later - reference).abs() < 1e-3, "nothing piles up across calls: {later} beside {reference}");
     handle.unload().unwrap();
@@ -568,7 +578,7 @@ fn a_failed_load_closes_what_it_opened_and_frees_the_slot() {
 
     let probe = Probe::new();
     let (handle, _) = load(&device, 0, instrument(probe));
-    assert!(wait_for(2000, || probe.processes.load(Relaxed) > 4), "the slot takes the next load");
+    assert!(wait_for(|| probe.processes.load(Relaxed) > 4), "the slot takes the next load");
     handle.unload().unwrap();
 }
 
@@ -609,7 +619,7 @@ fn a_parameter_tone_round_trips_with_its_program_selected_first() {
     for (index, value) in [(0, 0.2), (1, 0.4), (2, 0.6)] {
         handle.set_param(index, value).unwrap();
     }
-    assert!(wait_for(2000, || first_run.sets.load(Relaxed) == 3));
+    assert!(wait_for(|| first_run.sets.load(Relaxed) == 3));
     first_run.program.store(2, Relaxed);
     let file = tone::decode(&handle.take_tone().unwrap()).unwrap();
     assert_eq!(file.identity, identity());
@@ -664,7 +674,7 @@ fn a_chunk_tone_round_trips_and_no_program_is_selected_after_it() {
     assert_eq!(second_run.set_chunk_index.load(Relaxed), 0, "as a bank");
     assert_eq!(second_run.program.load(Relaxed), 1, "the bank restored its program: nothing selected one");
     assert!(first(second_run, EFF_SET_CHUNK, 7) < first(second_run, EFF_MAINS_CHANGED, 1), "restored before it resumes");
-    assert!(wait_for(2000, || second_run.processes.load(Relaxed) > 4), "and it plays");
+    assert!(wait_for(|| second_run.processes.load(Relaxed) > 4), "and it plays");
 
     // A change is saved by the unload, after the plugin stopped and before it closes.
     *second_run.chunk.lock().unwrap() = b"bank w".to_vec();
@@ -747,7 +757,7 @@ fn a_tone_that_does_not_match_or_does_not_parse_loads_at_the_defaults() {
             "{what}: the plugin was never called for it"
         );
         assert_eq!(probe.instances.load(Relaxed), 1, "{what}: the instance is untouched, so it is the one that runs");
-        assert!(wait_for(2000, || probe.processes.load(Relaxed) > 4), "{what}: the load went on");
+        assert!(wait_for(|| probe.processes.load(Relaxed) > 4), "{what}: the load went on");
         handle.unload().unwrap();
         let kept = dir.store().load(0, &identity()).unwrap().unwrap();
         assert_eq!(kept.state, state, "{what}: the stored tone stays");
@@ -762,7 +772,7 @@ fn a_tone_that_does_not_match_or_does_not_parse_loads_at_the_defaults() {
     assert_eq!(handle.tone(), Some(ToneRestore::Failed), "a truncated file");
     // A change the player makes is what the defaults replace it for.
     handle.set_param(0, 0.3).unwrap();
-    assert!(wait_for(2000, || probe.sets.load(Relaxed) == 1));
+    assert!(wait_for(|| probe.sets.load(Relaxed) == 1));
     handle.unload().unwrap();
     assert_eq!(stored(&dir), Some(Vst2State::Params { program: 0, values: vec![0.3, 0.0, 0.0] }));
 }
@@ -777,7 +787,7 @@ fn a_unit_the_engine_does_not_hand_back_leaves_the_plugin_loaded_and_uncalled() 
     let probe = Probe::new();
     probe.set_level(0.25);
     let (handle, _) = load(&device, 0, instrument(probe));
-    assert!(wait_for(2000, || probe.processes.load(Relaxed) > 8));
+    assert!(wait_for(|| probe.processes.load(Relaxed) > 8));
     let calls = probe.opcodes();
 
     let engine = device.host().core.rt.lock().unwrap();
@@ -790,7 +800,7 @@ fn a_unit_the_engine_does_not_hand_back_leaves_the_plugin_loaded_and_uncalled() 
     assert!(!probe.raw().is_null(), "the effect is still there");
     // The engine now finishes the removal it was asked for; the abandoned unit, when it comes back,
     // is leaked and makes no call. The context is still what the plugin's callbacks reach.
-    assert!(device.wait_blocks(40, Duration::from_secs(5)));
+    assert!(device.wait_blocks(40, PATIENCE));
     assert_eq!(plugin_calls_host(probe, AUDIO_MASTER_GET_SAMPLE_RATE, 0, 0, 0.0), 48_000);
     assert_eq!(probe.opcodes(), calls);
     assert_eq!(probe.rt_calls_off_device.load(Relaxed), 0);
@@ -1073,7 +1083,7 @@ fn a_layout_settled_inside_the_resume_is_the_one_installed() {
     *probe.layout_on_resume.lock().unwrap() = Some((0, 4, 48));
     let (handle, _) = load(&device, 0, Shape { probe: Some(probe), ..Shape::default() });
     assert_eq!(handle.kind(), SlotKind::Instrument, "no input any more: an instrument");
-    assert!(wait_for(2000, || probe.processes.load(Relaxed) > 8 && sounding(&device)), "it plays");
+    assert!(wait_for(|| probe.processes.load(Relaxed) > 8 && sounding(&device)), "it plays");
     assert_eq!(installed(&device, 0), Some((SlotKind::Instrument, 48)), "with the latency it settled on");
     assert_eq!((probe.distinct_outputs.load(Relaxed), probe.distinct_inputs.load(Relaxed)), (4, 0), "a row per output it has now");
     std::thread::sleep(Duration::from_millis(200)); // several owner turns
@@ -1093,11 +1103,11 @@ fn a_layout_the_host_refuses_settled_inside_the_resume_leaves_the_plugin_suspend
     let probe = Probe::new();
     probe.set_level(0.25);
     let (handle, _) = load(&device, 0, instrument(probe));
-    assert!(wait_for(2000, || probe.processes.load(Relaxed) > 8 && sounding(&device)), "it plays");
+    assert!(wait_for(|| probe.processes.load(Relaxed) > 8 && sounding(&device)), "it plays");
 
     *probe.layout_on_resume.lock().unwrap() = Some((0, 0, 0));
     assert_eq!(plugin_thread_calls_host(probe, AUDIO_MASTER_IO_CHANGED, 0, 0, 0.0), 1);
-    assert!(wait_for(2000, || probe.count(EFF_MAINS_CHANGED, 0) == 2 && rendered_near(&device, 0.0)), "resumed, refused, suspended again");
+    assert!(wait_for(|| probe.count(EFF_MAINS_CHANGED, 0) == 2 && rendered_near(&device, 0.0)), "resumed, refused, suspended again");
     let mut refused = cycle_calls(4096);
     refused.extend([(EFF_STOP_PROCESS, 0), (EFF_MAINS_CHANGED, 0)]);
     assert_eq!(probe.opcodes()[load_calls(4096).len()..], refused);
@@ -1124,20 +1134,20 @@ fn an_io_change_right_after_the_resume_read_the_layout_stays_latched_and_is_cycl
     let probe = Probe::new();
     probe.set_level(0.25);
     let (handle, _) = load(&device, 0, instrument(probe));
-    assert!(wait_for(2000, || probe.processes.load(Relaxed) > 8 && sounding(&device)), "it plays");
+    assert!(wait_for(|| probe.processes.load(Relaxed) > 8 && sounding(&device)), "it plays");
 
     // A cycle validates twice: before the resume and after it. The second read is the one.
     probe.io_change_after_validate(1, 4);
     assert_eq!(plugin_thread_calls_host(probe, AUDIO_MASTER_IO_CHANGED, 0, 0, 0.0), 1);
     assert!(
-        wait_for(2000, || probe.count(EFF_START_PROCESS, 0) == 3 && probe.distinct_outputs.load(Relaxed) == 4),
+        wait_for(|| probe.count(EFF_START_PROCESS, 0) == 3 && probe.distinct_outputs.load(Relaxed) == 4),
         "the late report was kept: a second cycle, and a row for each of the four outputs"
     );
     assert_eq!(probe.calls_while_halted.load(Relaxed), 0, "no plugin call between the late report and its cycle");
     let mut cycles = cycle_calls(4096);
     cycles.extend(cycle_calls(4096));
     assert_eq!(probe.opcodes()[load_calls(4096).len()..], cycles);
-    assert!(wait_for(2000, || sounding(&device)), "and it plays again");
+    assert!(wait_for(|| sounding(&device)), "and it plays again");
     assert!(!probe.rows_missing.load(Relaxed));
     handle.unload().unwrap();
     assert_rendered_only_while_started(probe);
@@ -1159,7 +1169,7 @@ fn a_tone_is_checked_against_what_the_plugin_declares_once_it_is_open() {
     assert_eq!(handle.tone(), Some(ToneRestore::Failed), "three parameters for a plugin that now has one");
     assert_eq!((probe.sets.load(Relaxed), probe.set_programs.load(Relaxed)), (0, 0), "refused before the plugin was called for it");
     assert_eq!(handle.list_params().unwrap().len(), 1, "the load went on with the parameter it has");
-    assert!(wait_for(2000, || probe.processes.load(Relaxed) > 4), "and it plays");
+    assert!(wait_for(|| probe.processes.load(Relaxed) > 4), "and it plays");
     handle.unload().unwrap();
     assert_eq!(dir.store().load(0, &identity()).unwrap().unwrap().state, state, "the stored tone stays");
 }
@@ -1175,14 +1185,14 @@ fn a_refused_restart_reads_no_parameter_and_keeps_the_stored_tone() {
     let probe = Probe::new();
     let (handle, _) = load_with_tone(&device, 0, instrument(probe), Some(dir.binding(0, identity())));
     handle.set_param(1, 0.4).unwrap();
-    assert!(wait_for(2000, || probe.sets.load(Relaxed) == 1));
+    assert!(wait_for(|| probe.sets.load(Relaxed) == 1));
     assert!(!handle.take_tone().unwrap().is_empty());
     let kept = dir.store().load(0, &identity()).unwrap().unwrap().state;
     assert_eq!(tone::decode_vst2(&kept).unwrap(), Vst2State::Params { program: 0, values: vec![0.0, 0.4, 0.0] });
 
     probe.outputs_on_suspend.store(0, Relaxed);
     assert_eq!(plugin_thread_calls_host(probe, AUDIO_MASTER_IO_CHANGED, 0, 0, 0.0), 1);
-    assert!(wait_for(2000, || probe.count(EFF_SET_BLOCK_SIZE, 4096) == 2), "the cycle ran up to the refusal");
+    assert!(wait_for(|| probe.count(EFF_SET_BLOCK_SIZE, 4096) == 2), "the cycle ran up to the refusal");
     probe.values[1].store(0.9f32.to_bits(), Relaxed);
     let (gets, calls) = (probe.gets.load(Relaxed), probe.opcodes().len());
     assert_eq!(handle.list_params().map(|listed| listed.len()), Ok(0), "nothing is listed by a past activation's count");
@@ -1195,7 +1205,7 @@ fn a_refused_restart_reads_no_parameter_and_keeps_the_stored_tone() {
     // SAFETY: the unit is parked and the owner reads the effect only once the report below asks it to.
     unsafe { probe.set_outputs(2) };
     assert_eq!(plugin_thread_calls_host(probe, AUDIO_MASTER_IO_CHANGED, 0, 0, 0.0), 1);
-    assert!(wait_for(2000, || probe.count(EFF_START_PROCESS, 0) == 2), "a good restart");
+    assert!(wait_for(|| probe.count(EFF_START_PROCESS, 0) == 2), "a good restart");
     assert_eq!(handle.list_params().unwrap().iter().map(|p| p.value).collect::<Vec<_>>(), [0.0, f64::from(0.9f32), 0.0]);
     handle.unload().unwrap();
 }
@@ -1209,7 +1219,7 @@ fn a_listing_asked_right_after_a_layout_report_reads_the_plugin_as_it_is_now() {
     let device = device(48_000);
     let probe = Probe::new();
     let (handle, _) = load(&device, 0, instrument(probe));
-    assert!(wait_for(2000, || probe.processes.load(Relaxed) > 4));
+    assert!(wait_for(|| probe.processes.load(Relaxed) > 4));
     for round in 0..20 {
         let params = if round % 2 == 0 { 1 } else { 3 };
         probe.params_on_suspend.store(params, Relaxed);
@@ -1244,15 +1254,15 @@ fn automation_for_a_parameter_added_in_a_restart_reaches_the_caller() {
     let device = device(48_000);
     let probe = Probe::new();
     let (handle, seen) = load(&device, 0, instrument(probe));
-    assert!(wait_for(2000, || probe.processes.load(Relaxed) > 4));
+    assert!(wait_for(|| probe.processes.load(Relaxed) > 4));
     probe.params_on_suspend.store(5, Relaxed);
     assert_eq!(plugin_thread_calls_host(probe, AUDIO_MASTER_IO_CHANGED, 0, 0, 0.0), 1);
-    assert!(wait_for(2000, || probe.count(EFF_START_PROCESS, 0) == 2), "restarted");
+    assert!(wait_for(|| probe.count(EFF_START_PROCESS, 0) == 2), "restarted");
 
     assert_eq!(plugin_thread_calls_host(probe, AUDIO_MASTER_AUTOMATE, 5, 0, 0.9), 0);
     assert_eq!(plugin_thread_calls_host(probe, AUDIO_MASTER_AUTOMATE, 4, 0, 0.6), 0);
     let told = EngineSlotEvent::ParamChanged { id: 4, value: f64::from(0.6f32) };
-    assert!(wait_for(2000, || seen.lock().unwrap().contains(&told)), "the new parameter's report arrives");
+    assert!(wait_for(|| seen.lock().unwrap().contains(&told)), "the new parameter's report arrives");
     std::thread::sleep(Duration::from_millis(100)); // a few more owner turns
     assert_eq!(*seen.lock().unwrap(), [told], "and nothing for index 5, which the plugin does not have");
     assert_eq!(handle.list_params().unwrap().len(), 5);
@@ -1273,7 +1283,7 @@ impl Driven {
     fn editor(&self, build: fn(Arc<AtomicBool>, SyncSender<Result<(), String>>) -> OwnerRequest) -> Result<(), String> {
         let (reply, answer) = std::sync::mpsc::sync_channel(1);
         self.requests.send(build(Arc::new(AtomicBool::new(false)), reply)).map_err(|_| "owner thread gone".to_string())?;
-        answer.recv_timeout(Duration::from_secs(5)).map_err(|e| format!("no reply: {e}"))?
+        answer.recv_timeout(PATIENCE).map_err(|e| format!("no reply: {e}"))?
     }
 
     /// As an unload: `running` down, the owner woken, then joined.
@@ -1306,7 +1316,7 @@ fn drive(device: &TestDevice, slot: usize, shape: Shape, tone: Option<ToneBindin
     };
     let run = owner(shape, ID);
     let owner = std::thread::spawn(move || run(ctx));
-    let report = loaded.recv_timeout(Duration::from_secs(5)).expect("the owner reports its load");
+    let report = loaded.recv_timeout(PATIENCE).expect("the owner reports its load");
     assert!(report.is_ok(), "the fixture loads: {:?}", report.err());
     Driven { running, requests, owner, seen }
 }
@@ -1321,17 +1331,17 @@ fn automation_reported_after_the_last_owner_turn_is_in_the_tone_the_unload_store
     let dir = TempDir::new("vst2-late-automation");
     let probe = Probe::new();
     let driven = drive(&device, 0, instrument(probe), Some(dir.binding(0, identity())));
-    assert!(wait_for(2000, || probe.processes.load(Relaxed) > 4));
+    assert!(wait_for(|| probe.processes.load(Relaxed) > 4));
 
     // Hold the owner inside `effIdle`, which it sends after this turn's drain of the latch.
     let (inside, entered) = channel();
     let (release, go) = channel::<()>();
     *probe.on_idle.lock().unwrap() = Some(Box::new(move |_| {
         inside.send(()).unwrap();
-        let _ = go.recv_timeout(Duration::from_secs(5));
+        let _ = go.recv_timeout(PATIENCE);
     }));
     assert_eq!(plugin_thread_calls_host(probe, AUDIO_MASTER_NEED_IDLE, 0, 0, 0.0), 1);
-    entered.recv_timeout(Duration::from_secs(5)).expect("the owner is inside effIdle");
+    entered.recv_timeout(PATIENCE).expect("the owner is inside effIdle");
     probe.values[1].store(0.6f32.to_bits(), Relaxed);
     assert_eq!(plugin_thread_calls_host(probe, AUDIO_MASTER_AUTOMATE, 1, 0, 0.6), 0);
     // The unload is asked for before the owner gets on: its loop ends without another drain.
@@ -1372,12 +1382,12 @@ fn the_owner_loop_serves_editor_requests_the_close_box_and_a_foreign_resize() {
     assert_eq!((probe.edit_opens.load(Relaxed), client_size(hwnd)), (1, (400, 300)), "open, at the plugin's size");
     assert!(!visible(hwnd), "a test's editor window is never shown");
     let idles = probe.edit_idles.load(Relaxed);
-    assert!(wait_for(2000, || probe.edit_idles.load(Relaxed) > idles + 3), "effEditIdle runs while the editor is open");
+    assert!(wait_for(|| probe.edit_idles.load(Relaxed) > idles + 3), "effEditIdle runs while the editor is open");
     assert_eq!(driven.editor(OwnerRequest::OpenEditor), Ok(()));
     assert_eq!(probe.edit_opens.load(Relaxed), 1, "an open editor is not opened twice");
 
     assert_eq!(plugin_thread_calls_host(probe, AUDIO_MASTER_SIZE_WINDOW, 520, 340, 0.0), 0, "another thread: latched");
-    assert!(wait_for(2000, || client_size(hwnd) == (520, 340)), "and applied by the owner's next turn");
+    assert!(wait_for(|| client_size(hwnd) == (520, 340)), "and applied by the owner's next turn");
     assert!(!visible(hwnd));
 
     probe.values[0].store(0.3f32.to_bits(), Relaxed);
@@ -1397,9 +1407,9 @@ fn the_owner_loop_serves_editor_requests_the_close_box_and_a_foreign_resize() {
     assert_eq!(*driven.seen.lock().unwrap(), [], "a request's close tells nobody: its caller knows");
     // SAFETY: a message posted to the owner thread's window, which that thread dispatches.
     unsafe { PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0)) }.expect("post WM_CLOSE");
-    assert!(wait_for(2000, || *driven.seen.lock().unwrap() == [EngineSlotEvent::EditorClosed]), "the caller is told");
+    assert!(wait_for(|| *driven.seen.lock().unwrap() == [EngineSlotEvent::EditorClosed]), "the caller is told");
     let saved = Vst2State::Params { program: 0, values: vec![0.7, 0.0, 0.0] };
-    assert!(wait_for(2000, || stored(&dir).as_ref() == Some(&saved)), "and the tone is saved");
+    assert!(wait_for(|| stored(&dir).as_ref() == Some(&saved)), "and the tone is saved");
     assert_eq!((probe.edit_closes.load(Relaxed), client_size(hwnd)), (2, (0, 0)));
     assert!(idles_stopped());
     assert_eq!(*driven.seen.lock().unwrap(), [EngineSlotEvent::EditorClosed], "once");
@@ -1428,14 +1438,14 @@ fn a_size_asked_for_inside_edit_idle_outlives_an_older_one_queued_from_another_t
     let (release, go) = channel::<()>();
     *probe.on_idle.lock().unwrap() = Some(Box::new(move |_| {
         inside.send(()).unwrap();
-        let _ = go.recv_timeout(Duration::from_secs(5));
+        let _ = go.recv_timeout(PATIENCE);
     }));
     assert_eq!(plugin_thread_calls_host(probe, AUDIO_MASTER_NEED_IDLE, 0, 0, 0.0), 1);
-    entered.recv_timeout(Duration::from_secs(5)).expect("the owner is inside effIdle");
+    entered.recv_timeout(PATIENCE).expect("the owner is inside effIdle");
     assert_eq!(plugin_thread_calls_host(probe, AUDIO_MASTER_SIZE_WINDOW, 320, 200, 0.0), 0, "another thread: latched");
     probe.size_in_edit_idle.store(800 << 32 | 600, Relaxed);
     release.send(()).unwrap();
-    assert!(wait_for(2000, || !probe.size_answers.lock().unwrap().is_empty()), "the plugin asks inside effEditIdle");
+    assert!(wait_for(|| !probe.size_answers.lock().unwrap().is_empty()), "the plugin asks inside effEditIdle");
     std::thread::sleep(Duration::from_millis(100)); // several owner turns
     assert_eq!(*probe.size_answers.lock().unwrap(), [1], "resized there and then");
     assert_eq!(client_size(hwnd), (800, 600), "and the older queued size never replaced it");
