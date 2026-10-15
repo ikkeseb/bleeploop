@@ -12,7 +12,8 @@
  * - at 960x600, 1000x700 and 1280x820 (the Tauri default; the bar stacks into two rows at all three) the
  *   open Help and Audio Settings popovers do not overlap the command bar's rendered box and stay inside
  *   the window, also with a spacer one window tall planted in the panel body (native-only rows this
- *   tier never renders), whose last row must then scroll into reach;
+ *   tier never renders), whose lowest row (stepping into a block taller than the panel) must then
+ *   scroll into reach; without the spacer, Help's reference (the tab it opens on) scrolls not at all;
  * - at 960x600 (reduced motion) and 1000x700 with lane 1's FX drawer open, so the lane stack scrolls:
  *   each ArrowDown and digit sends its command, and the engine's `Selected` brings the selected lane
  *   wholly into the stack's view from the nearer edge and leaves a lane already in view unscrolled
@@ -219,13 +220,19 @@ await probe(async ({ open }) => {
         const m = await page.evaluate(({ id, tall }) => {
           const box = el => { const r = el.getBoundingClientRect(); return { top: r.top, bottom: r.bottom, left: r.left, right: r.right }; };
           const bar = document.querySelector('.cmd'), dialog = document.getElementById(id), body = dialog.firstElementChild;
+          // How far the real rows scroll, before any spacer: Help's reference (what `?` opens on) must not.
+          const scroll = body.scrollHeight - body.clientHeight;
           // Under the title, above every real row.
           if (tall) body.firstElementChild.after(Object.assign(document.createElement('div'), { id: 'layout-spacer', style: `height: ${innerHeight}px; flex: none` }));
-          const last = body.lastElementChild;
+          // The lowest row: from the body's lowest child, step into a block taller than the scroller (a
+          // tab panel, a column of Help's two-column reference) until a row fits it.
+          const lowest = el => [...el.children].reduce((a, b) => (b.getBoundingClientRect().bottom >= a.getBoundingClientRect().bottom ? b : a));
+          let last = lowest(body);
+          while (last.getBoundingClientRect().height > body.clientHeight && last.firstElementChild) last = lowest(last);
           last.scrollIntoView({ block: 'nearest' });
           const r = box(last);
           const hit = document.elementFromPoint((r.left + r.right) / 2, (r.top + r.bottom) / 2);
-          return { stacked: bar.classList.contains('cmd--stack'), bar: box(bar), dialog: box(dialog), panel: box(body),
+          return { stacked: bar.classList.contains('cmd--stack'), scroll, bar: box(bar), dialog: box(dialog), panel: box(body),
             lastRow: r, lastRowHit: !!hit && last.contains(hit), view: { width: innerWidth, height: innerHeight } };
         }, { id, tall });
         const name = `${label}-${width}x${height}-${id}${tall ? '-tall-content' : ''}`;
@@ -233,10 +240,11 @@ await probe(async ({ open }) => {
         await page.evaluate(id => { document.getElementById('layout-spacer')?.remove(); document.getElementById(id).firstElementChild.scrollTop = 0; }, id);
         const overlaps = m.panel.top < m.bar.bottom && m.panel.bottom > m.bar.top && m.panel.left < m.bar.right && m.panel.right > m.bar.left;
         const inside = [m.dialog, m.panel, m.lastRow].every(b => b.top >= 0 && b.left >= 0 && b.bottom <= m.view.height + 0.5 && b.right <= m.view.width + 0.5);
-        const ok = !overlaps && inside && m.lastRowHit;
-        console.log(JSON.stringify({ name, ok, overlaps, inside, gap: m.panel.top - m.bar.bottom, ...m }));
+        const fits = tall || id !== 'lf-help-popover' || m.scroll === 0;
+        const ok = !overlaps && inside && m.lastRowHit && fits;
+        console.log(JSON.stringify({ name, ok, overlaps, inside, fits, gap: m.panel.top - m.bar.bottom, ...m }));
         if (!ok) failures.push(name);
-        results.push({ name, ok, overlaps, inside, ...m });
+        results.push({ name, ok, overlaps, inside, fits, ...m });
       }
       await page.evaluate(fn => window.__lf.ui[fn](), hide);
     }

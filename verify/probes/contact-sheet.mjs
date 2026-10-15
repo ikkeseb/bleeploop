@@ -4,7 +4,8 @@
  * waveforms scripted on the feed through `__lf.native`). Scenes 1-7, 11 and 12 run in one fresh browser
  * context: 1-empty, 4-count-in (lane 1 ARMED behind the count-in), 2-first-take-recording (a first take
  * one second in), 3-armed-waiting (a two-bar loop at 60 BPM playing, lane 2 an ARMED later take waiting
- * for the boundary), 5-fx-five-lanes (five stopped one-bar lanes, lane 1's FX drawer open), 6-help,
+ * for the boundary), 5-fx-five-lanes (five stopped one-bar lanes, lane 1's FX drawer open), 6-help (Help's
+ * reference, as `?` opens it), 6-help-manual (its Manual tab, About included),
  * 7-audio-settings, 12-stage-<look> (the stage view opened by its command-bar cap over five lanes, three
  * playing and one muted, once per look of `src/ui/stage/views.ts`, stepped with V) and 11-engine-in-fx (a reset frame with every input send on, the IN FX popover open). Scenes 8-10 are
  * the Windows app's guitar-first screen, in a second fresh context whose plugin host is served with
@@ -15,7 +16,9 @@
  * stopping live input. Writes logs/contact-sheet/<viewport>-<kbd>-<scene>.png plus a tiling index.html
  * unconditionally, before any FAIL is raised, so a red run still leaves the sheet for the eye lap.
  * Asserts: with FX open every lane's clear button is present, and fully visible wherever five lanes fit
- * (audit A4; at 1000x700 with the keyboard shown the lanes scroll by design); an ARMED later take draws
+ * (audit A4; at 1000x700 with the keyboard shown the lanes scroll by design); Help opens on its
+ * reference, which fits unscrolled at every size, and its Manual tab shows the manual with About this
+ * build (layout-reachability holds the reference at the 960x600 minimum); an ARMED later take draws
  * no rec-red in its canvas while waiting (audit A3); no scene logs console.error or an uncaught page error
  * (tagged with the scene it happened in). Sees only the rendered DOM/canvas of scripted states: never the
  * native engine, a real plugin host or WebView2; a human still judges the screenshots.
@@ -27,7 +30,7 @@ import { probe } from '../harness/probe.ts';
 const outDir = 'logs/contact-sheet';
 const viewports = [[1280, 820], [1920, 1080], [1000, 700]];
 const placements = ['bottom', 'hidden'];
-const scenes = ['1-empty', '2-first-take-recording', '3-armed-waiting', '4-count-in', '5-fx-five-lanes', '6-help', '7-audio-settings',
+const scenes = ['1-empty', '2-first-take-recording', '3-armed-waiting', '4-count-in', '5-fx-five-lanes', '6-help', '6-help-manual', '7-audio-settings',
   '8-native-first-launch', '9-amp-sim-live', '10-amp-sim-idle', '11-engine-in-fx'];
 const REC_PIXEL_LIMIT = 20; // anti-aliasing slack; a red playhead or tape is hundreds of pixels
 const RATE = 48000;
@@ -209,10 +212,34 @@ await probe(async ({ browser, open }) => {
       }
       await page.getByRole('button', { name: 'Track 1 FX', exact: true }).click();
 
+      // Help opens on its reference; its manual (and About) is a tab away. Each logs how far it scrolls
+      // and which panel shows.
+      const helpState = () => page.evaluate(() => {
+        const h = document.querySelector('#lf-help-popover .help');
+        const shown = [...h.querySelectorAll('[role="tabpanel"]')].filter((p) => p.checkVisibility()).map((p) => p.id);
+        const about = [...h.querySelectorAll('.help__h')].some((el) => el.textContent === 'About this build' && el.checkVisibility());
+        // HOLD is a learned MIDI REC/DUB's option: it reads only beside MIDI LEARN, never beside the
+        // keystroke pedals, whose release stops nothing.
+        const hold = [...h.querySelectorAll('.help__note')].filter((el) => el.textContent === 'HOLD')
+          .map((el) => `${el.closest('[role="tabpanel"]')?.id}${el.closest('.help__sec')?.textContent.includes('MIDI LEARN') ? '' : ' (no MIDI LEARN)'}`);
+        return { shown, about, hold, content: h.scrollHeight, view: h.clientHeight, scroll: h.scrollHeight - h.clientHeight };
+      });
       scene = '6-help';
       await page.evaluate(() => window.__lf.ui.openHelp());
       await page.waitForTimeout(250);
       await shoot(scene);
+      const ref = await helpState();
+      console.log(JSON.stringify({ tag, scene, ...ref }));
+      if (ref.shown.join() !== 'lf-help-reference') fail(`${tag} ${scene}: Help opened on ${ref.shown.join() || 'no panel'}, not the reference`);
+      else if (ref.scroll > 0) fail(`${tag} ${scene}: the reference scrolls ${ref.scroll} px (it must fit unscrolled at every size)`);
+      scene = '6-help-manual';
+      await page.getByRole('tab', { name: 'Manual', exact: true }).click();
+      await page.waitForTimeout(150);
+      await shoot(scene);
+      const manual = await helpState();
+      console.log(JSON.stringify({ tag, scene, ...manual }));
+      if (manual.shown.join() !== 'lf-help-manual' || !manual.about) fail(`${tag} ${scene}: the Manual tab shows ${manual.shown.join() || 'no panel'}${manual.about ? '' : ', without About this build'}`);
+      if (manual.hold.join() !== 'lf-help-manual') fail(`${tag} ${scene}: HOLD reads in ${manual.hold.join(', ') || 'no panel'}, not once in the manual beside MIDI LEARN`);
       await page.evaluate(() => window.__lf.ui.closeHelp());
 
       scene = '7-audio-settings';

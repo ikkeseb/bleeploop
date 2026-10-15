@@ -59,15 +59,6 @@ added a line.
 - **Tone recall toasts:** a refused tone toasts at every load until the plugin is changed once (the
   saved settings are kept): say that they are kept? An import whose slot holds another plugin toasts
   "This session used X in slot B": enough, or offer to load it?
-- **Help is five screenfuls of 10.5 px (the owner's read, 2026-10-10):** measured in the browser rig,
-  the popover is 2793 px of content in a 558 px window: 13 sections, 42 bullets, 1240 words, in a
-  330 px column, body text at 10.5 px in `--dim`, longest bullet 75 words and 116 px tall. The owner
-  reads it as far too long, too small and too dense. The diagnosis is three documents in one scroll:
-  reference to scan mid-jam (looper keys, pedals, play keys, drum pads), a manual read once (what every
-  control does), and About (build label, the ASIO logo and licence, diagnostics). The update offer, the
-  fourth, has left (its own pill). Open: split the reference from the manual, and raise the body size.
-  The ASIO logo and its trademark line cannot move out of an "About box equivalent" (Steinberg ASIO
-  Usage Guidelines 1e/1f, cited at the section in `Help.tsx`), so About moves whole or not at all.
 - **MIDI learn row:** is "latching" clear to a guitarist? A long binding list makes the popover tall.
 
 ## By ear, when convenient

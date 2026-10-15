@@ -80,8 +80,8 @@ The installed app tells you when a newer version is out and updates itself from 
   stop, Backspace to undo; Help lists every key).
 - Session export and import as one `.zip`: a WAV stem per track, a wet stereo master render and a
   `session.json`.
-- Help → About this build names the version and commit, copies a diagnostics block for a bug report
-  and opens the log folder.
+- Help → Manual → About this build names the version and commit, copies a diagnostics block for a bug
+  report and opens the log folder.
 
 </details>
 

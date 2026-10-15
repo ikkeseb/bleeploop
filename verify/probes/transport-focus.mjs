@@ -10,6 +10,9 @@
  *   does not re-open Help through the returned focus;
  * - Help open: Space still sends REC/DUB with Help left open; 2 selects lane 2 (`SelectTrack`), which the
  *   lane shows once the feed says so;
+ * - Help's tabs by keyboard: Tab lands on the selected one, the arrows, Home and End pick and focus a tab
+ *   and show its panel (each tab's aria-controls names a tabpanel) without reaching the transport; a
+ *   pointer pick of a tab gives Space back to REC/DUB;
  * - real controls keep the key: Space in the BPM field sends nothing; Tab to BPM plus and Enter steps
  *   the tempo (`SetBpm`), never a looper action;
  * - Enter commits a typed BPM (`SetBpm`) with an AUTO REC arm on the feed, and drives no looper action
@@ -97,6 +100,62 @@ await probe(async ({ open }) => {
   await page.evaluate(() => window.__lf.native.emit({ seq: 2, reset: false, events: [{ Selected: { frame: 0, lane: 1 } }] }));
   assert.equal(await page.locator('.lp-lane').nth(1).getAttribute('aria-current'), 'true', 'lane 2 shows the selection the feed reports');
   if (shots) await page.screenshot({ path: `${shots}/help-open-armed.png` });
+
+  // 2b. Help's tabs by keyboard: Tab from the panel lands on the selected tab (Reference, which `?` opens
+  //     on); the arrows (wrapping), Home and End pick and focus a tab and show only its panel, and none of
+  //     them reaches the transport; Tab from a tab skips the other one and lands on its own panel, before
+  //     any control in it, and the arrows there scroll it, not the looper. A pointer pick of a tab, or a
+  //     click on a panel's text, gives the keys back.
+  const tabState = () => page.evaluate(() => {
+    const tabs = [...document.querySelectorAll('#lf-help-popover [role="tab"]')];
+    return {
+      focused: document.activeElement?.id ?? null,
+      selected: tabs.filter((t) => t.getAttribute('aria-selected') === 'true').map((t) => t.id),
+      tabbable: tabs.filter((t) => t.tabIndex === 0).map((t) => t.id),
+      // Each tab's panel by its aria-controls, so a dangling id reads as no panel.
+      shown: tabs.filter((t) => document.getElementById(t.getAttribute('aria-controls'))?.checkVisibility()).map((t) => t.id),
+      panels: tabs.map((t) => document.getElementById(t.getAttribute('aria-controls'))?.getAttribute('role') ?? null),
+    };
+  });
+  const onTab = (id) => {
+    const tab = `lf-help-tab-${id}`;
+    return { focused: tab, selected: [tab], tabbable: [tab], shown: [tab], panels: ['tabpanel', 'tabpanel'] };
+  };
+  await clearSent();
+  await page.keyboard.press('Tab');
+  assert.deepEqual(await tabState(), onTab('reference'), 'Tab from the Help panel did not land on the Reference tab');
+  for (const [key, id] of [['ArrowRight', 'manual'], ['ArrowRight', 'reference'], ['ArrowLeft', 'manual'], ['Home', 'reference'], ['End', 'manual']]) {
+    await page.keyboard.press(key);
+    assert.deepEqual(await tabState(), onTab(id), `${key} on Help's tabs did not pick and focus ${id}`);
+  }
+  await page.waitForTimeout(100);
+  assert.deepEqual(await sent(), [], 'a key on Help\'s tabs reached the transport');
+  await page.keyboard.press('Shift+Tab');
+  await page.keyboard.press('Tab');
+  assert.equal((await tabState()).focused, 'lf-help-tab-manual', 'Shift+Tab then Tab did not come back to the selected tab');
+  await page.keyboard.press('Home');
+  await page.keyboard.press('Tab');
+  assert.equal((await tabState()).focused, 'lf-help-reference', 'Tab from the Reference tab did not land on its panel');
+  await page.keyboard.press('Shift+Tab');
+  await page.keyboard.press('End');
+  await page.keyboard.press('Tab');
+  assert.equal((await tabState()).focused, 'lf-help-manual', 'Tab from the Manual tab did not land on its panel');
+  const helpScroll = () => page.evaluate(() => document.querySelector('#lf-help-popover .help').scrollTop);
+  await page.keyboard.press('PageDown');
+  await page.waitForTimeout(250);
+  assert.ok((await helpScroll()) > 0, 'PageDown on the Manual panel did not scroll it');
+  await page.waitForTimeout(100);
+  assert.deepEqual(await sent(), [], 'a key on a Help panel reached the transport');
+  await page.getByRole('tab', { name: 'Manual', exact: true }).click();
+  assert.deepEqual((await tabState()).selected, ['lf-help-tab-manual'], 'a click on Manual did not pick it');
+  await page.keyboard.press('Space');
+  await page.waitForTimeout(100);
+  assert.equal(await recDubs(), 1, 'Space after a pointer pick of a Help tab did not send REC/DUB');
+  await page.locator('#lf-help-manual .help__h').first().click();
+  await page.keyboard.press('Space');
+  await page.waitForTimeout(100);
+  assert.equal(await recDubs(), 2, 'Space after a click on Help\'s text did not send REC/DUB');
+
   await page.keyboard.press('Escape');
   await helpPanel.waitFor({ state: 'detached' });
 
