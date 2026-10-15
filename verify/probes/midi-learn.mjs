@@ -25,7 +25,8 @@
  *   port) offers a port select that starts on no port, with ASSIGN off until a port is picked
  *   (`assign(revision, index, portId)`); a live one offers none;
  * - a binding's `run` runs the UI's action with no second `Press` (native MIDI sent it): the stage view
- *   opens, steps its look and closes; two TAPs send the tapped `SetBpm`; GO LIVE sends no `Press`;
+ *   opens, steps its look and closes; two TAPs about 500 ms apart send their tapped `SetBpm` (the
+ *   transport starts at a tempo they cannot round to); GO LIVE sends no `Press`;
  *   `pressed` takes the lane cue down; `refused` (every HOLD control down) puts its cue on the selected
  *   lane;
  * - `gone` toasts "MIDI device disconnected — <name>" ("Held notes were released.") with its release-log
@@ -122,8 +123,10 @@ await probe(async ({ open }) => {
     seq: 1,
     reset: true,
     settings: [],
+    // 200 BPM: a tempo two TAPs about 500 ms apart (120 BPM or slower) cannot round to. At 120, a gap
+    // under ~502 ms rounded to the tempo already set and `setBpm` rightly sent nothing.
     events: [...[0, 1, 2, 3, 4].map((i) => ({ Lane: { frame: 0, lane: i, info } })),
-      { Transport: { frame: 0, master: 0, bpm: 120, locked: false } }, { Selected: { frame: 0, lane: 0 } }],
+      { Transport: { frame: 0, master: 0, bpm: 200, locked: false } }, { Selected: { frame: 0, lane: 0 } }],
     anchor: { frame: 0, atMs: Date.now(), rate: 48000, grid: 0 },
     meter: { peak: [0, 0], clip: [false, false] },
   }), lane);
@@ -343,7 +346,9 @@ await probe(async ({ open }) => {
   await midi('pressed', { run: { action: 'tapTempo' } });
   await midi('pressed', { run: { action: 'goLive' } });
   const tapped = await until(() => sentSince(from), (sent) => sent.some((c) => c.SetBpm !== undefined));
-  assert.ok(tapped.some((c) => c.SetBpm !== undefined), 'two TAPs send the tapped tempo');
+  const sentBpm = tapped.find((c) => c.SetBpm !== undefined)?.SetBpm;
+  // 500 ms apart is 120 BPM; the slack covers the page's and the runner's clocks.
+  assert.ok(sentBpm >= 40 && sentBpm <= 125, `two TAPs send the tapped tempo (about 120 BPM or slower), sent ${sentBpm}`);
   await page.waitForTimeout(30); // a settle: no condition marks a Press that was never sent
   const ran = await sentSince(from);
   console.log('runs sent', JSON.stringify(ran));
