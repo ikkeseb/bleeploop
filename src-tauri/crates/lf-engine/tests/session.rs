@@ -625,11 +625,11 @@ fn a_delay_loaded_after_a_clear_echoes_its_own_loop_as_a_new_one_does() {
     let (s, _) = one_lane();
     let (rig, _, loaded) = hot_clear_then_load(&s, 0.5);
     let bus = &rig.bus[loaded..];
-    // The impulse on the load's frame, its echoes a 1/8 apart at 120 BPM (12 000 frames) at full mix, the
-    // feedback a quantum late: 0.95 of the one before. (The dry impulse itself is mostly gone: the mix
-    // ramps on from where the CLEAR's ramp down had got to.)
+    // The impulse on the load's frame, its echoes a 1/8 apart at 120 BPM (12 000 frames) at full mix,
+    // each 0.95 of the one before. (The dry impulse itself is mostly gone: the mix ramps on from where
+    // the CLEAR's ramp down had got to.)
     assert!((bus[12_000] / 0.5 - 1.0).abs() < 1e-2, "the first echo ({})", bus[12_000]);
-    assert!((bus[24_128] / bus[12_000] - MAX_FEEDBACK as f32).abs() < 1e-2, "the second echo ({})", bus[24_128]);
+    assert!((bus[24_000] / bus[12_000] - MAX_FEEDBACK as f32).abs() < 1e-2, "the second echo ({})", bus[24_000]);
 }
 
 // ── With no device running, a session job should come after the commands queued before it ────────

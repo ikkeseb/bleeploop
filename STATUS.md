@@ -150,6 +150,10 @@ it.
   live pixel on a device, and the frame cost WITH columns flowing is still unmeasured (the budget case
   runs the look with none). That check is next jam's 4.
 - The six synths and the lane FX by ear.
+- The lane delay's repeats now sit on the beat: each lands a whole division after the last, where each
+  used to fall another ~3 ms behind (about 19 ms by the 8th), as the input ECHO already does (machine:
+  the echo test in `src-tauri/crates/lf-engine/src/dsp/fx/delay.rs`). With a high feedback over a
+  loop, do the repeats sit on the click, and does the delay still sound right?
 - Native MIDI, a controller and a footswitch through a jam: mod-wheel vibrato, pitch-bend and CC64
   sustain on a built-in synth; unplugged mid-note, a toast and the note released; 20 quick replugs
   (under a second each) with notes held: each releases them, and the bindings fire after each.

@@ -3,7 +3,7 @@
 //! and every control runs under assert_no_alloc.
 
 use assert_no_alloc::assert_no_alloc;
-use lf_engine::dsp::fx::{Ctl, FxChain, FxKind, FxParam, FxState, FxTiming};
+use lf_engine::dsp::fx::{division_beats, Ctl, FxChain, FxKind, FxParam, FxState, FxTiming};
 use lf_engine::dsp::param::QUANTUM;
 
 use super::refs::{self, ScriptEvent};
@@ -27,6 +27,16 @@ pub fn states(s: &refs::Scenario) -> [FxState; 5] {
 pub fn timing(s: &refs::Scenario) -> FxTiming {
     let t = &s.setup["timing"];
     FxTiming { anchor: t["anchor"].as_f64().expect("anchor"), beat_period: t["beatPeriod"].as_f64().expect("beatPeriod") }
+}
+
+/// The frames before the scenario's delay can sound its second echo. Its echoes are in every chain's
+/// output, bypassed at −56 dB (`dsp::fx`), and from the second on Tone's land a quantum late
+/// (`dsp::fx::delay`): up to here a port that renders Blink's bits still matches the reference bit for
+/// bit, a frame of interpolation short of two delay times.
+pub fn before_second_echo(s: &refs::Scenario) -> usize {
+    let time = states(s)[FxKind::Delay.index()].params[0] as usize;
+    let delay = timing(s).beat_period * division_beats(time) * s.rate as f64;
+    ((2.0 * delay).floor() as usize - 1).min(s.frames)
 }
 
 /// Tone's offline clock at the tick on `frame` (a multiple of 128): 128 / rate added once per tick,
