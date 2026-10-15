@@ -239,7 +239,7 @@ mod tests {
         let running = spec("Mic", 48_000, 48_000, 2);
         assert!(follows(&running, true, &spec("Headset", 48_000, 48_000, 2)), "rerouted: the stream plays there already");
         assert!(follows(&running, true, &spec("Headset", 48_000, 48_000, 1)), "a mono mic: the capture runs on at its width");
-        assert!(follows(&running, true, &spec("Headset", 48_000, 44_100, 2)), "a mic at another rate: the join resamples");
+        assert!(follows(&running, true, &spec("Headset", 48_000, 44_100, 2)), "a mic at another rate: the capture runs on at the rate it opened at");
         assert!(follows(&running, true, &spec("Speakers", 48_000, 48_000, 0)), "no capture default left: nothing to reopen for");
         assert!(!follows(&running, true, &spec("Headset", 44_100, 44_100, 2)), "another engine rate opens at the endpoint's own");
         assert!(!follows(&running, false, &spec("Headset", 48_000, 48_000, 2)), "a capture the run lacks starts there");

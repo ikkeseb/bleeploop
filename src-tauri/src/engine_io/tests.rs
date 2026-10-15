@@ -598,7 +598,8 @@ fn a_default_windows_moved_at_the_engines_rate_plays_on_through_a_take() {
 }
 
 // A side the request names keeps its endpoint; the side left to the default follows Windows, also an
-// input moved to another rate (the join resamples it), through a take.
+// input moved to an endpoint at another rate: the running stream keeps the format it opened at and
+// nothing restarts, through a take (whether Windows converts that capture is unmeasured).
 #[test]
 fn only_the_side_left_to_the_default_follows_windows() {
     let mut h = Harness::new();
@@ -657,6 +658,24 @@ fn a_run_with_no_input_starts_one_where_windows_moved_the_default() {
     assert!(!status.input_open, "{status:?}");
     h.fake.move_default("headset", FakeDevice::new("Headset", 48_000, 480));
     until("the status names the new default", || h.host.status().is_some_and(|s| s.output_name == "Headset"));
+    let status = h.open(wasapi(None, None));
+    assert!(status.input_open && status.input_name == "Headset", "{status:?}");
+    assert_eq!(h.fake.started.load(SeqCst), 2);
+}
+
+// A run with no input, and a new default whose capture format does not read yet: the output follows
+// it, and the input waits there, so once the capture reads an open of the same request starts it.
+#[test]
+fn a_run_with_no_input_starts_one_once_the_moved_default_reads() {
+    let h = Harness::new();
+    h.fake.input_fails.store(true, SeqCst);
+    h.open(wasapi(None, None));
+    h.fake.move_default("headset", FakeDevice { in_channels: 0, ..FakeDevice::new("Headset", 48_000, 480) });
+    until("the status names the new default", || h.host.status().is_some_and(|s| s.output_name == "Headset"));
+    let status = h.open(wasapi(None, None));
+    assert!(!status.input_open, "{status:?}");
+    assert_eq!(h.fake.started.load(SeqCst), 1, "no capture to start yet");
+    h.fake.wasapi.lock().unwrap()[0].1.in_channels = 2;
     let status = h.open(wasapi(None, None));
     assert!(status.input_open && status.input_name == "Headset", "{status:?}");
     assert_eq!(h.fake.started.load(SeqCst), 2);

@@ -493,7 +493,12 @@ impl<D: Driver> Owner<D> {
             return Ok(Some((moved, device)));
         }
         log::info!("[engine_io] Windows moved the default: the stream plays on in \"{}\" → \"{}\"", moved.input_name, moved.output_name);
-        active.spec.endpoints = moved.endpoints;
+        // A run with no input keeps the input endpoint it ran with while the new one offers no capture
+        // (its format did not read yet): an open resolves it again, and starts one once it reads.
+        if input_open || moved.in_channels > 0 {
+            active.spec.endpoints.input = moved.endpoints.input;
+        }
+        active.spec.endpoints.output = moved.endpoints.output;
         active.spec.output_name = moved.output_name;
         if moved.in_channels > 0 {
             active.spec.input_name = moved.input_name;
