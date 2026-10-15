@@ -98,8 +98,9 @@
 //!   makes the switch heard at once (D19); STOP on an overdubbing
 //!   lane discards the whole layer (its tail plays the layer as heard); an input gap
 //!   damages only the capture windows (RETAKE passes) its frames reach on the record tap, through each
-//!   slot path the live gate opens to them (a bypass's dry side on its own frames, a unit its latency
-//!   later, each slot's wet line its delay later; from a jump on, every frame to the slowest's end),
+//!   slot path, the frames the live gate lets through (a bypass's dry side on its own frames, a unit its
+//!   latency later while it still plays, each slot's wet line its delay later; from a jump on, every
+//!   frame to the slowest's end), judged as the capture reaches them,
 //!   however far apart two gaps land, and resets AUTO's listening history;
 //!   a jump in the device frame drops the beats it skipped, and count-in beats fire late as one click.
 //! - **`process` never allocates, locks or waits.** Buffers are allocated (and their pages touched) in

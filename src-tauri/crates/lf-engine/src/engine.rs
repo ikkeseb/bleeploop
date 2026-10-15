@@ -544,6 +544,9 @@ impl Engine {
         self.rack.latch_record(open);
         let live_latency = self.rack.record_latency();
         self.looper.set_line_delays(self.rack.line_delays(), self.rack.line_reach());
+        for slot in 0..SLOT_COUNT {
+            self.looper.cut_line(slot, self.rack.wet_until(slot));
+        }
         if ctx.xrun || ctx.damaged {
             self.xruns += 1;
             let lost_to = if ctx.damaged { end } else { start };
@@ -558,8 +561,8 @@ impl Engine {
                 // slot's paths that carry them, each its own delay later; the tap frames between carry
                 // input from before or after the gap, clean.
                 for slot in 0..SLOT_COUNT {
-                    let opens = goes_live(&self.pending, slot, lost_to);
-                    for (k, path) in self.rack.lost_on(slot, lost_from, lost_to, opens).into_iter().enumerate() {
+                    let (on, off) = (goes_live(&self.pending, slot, true, start, lost_to), goes_live(&self.pending, slot, false, start, lost_to));
+                    for (k, path) in self.rack.lost_on(slot, lost_from, lost_to, on, off).into_iter().enumerate() {
                         gaps[2 * slot + k] = path.map(|(from, to)| Gap { from, to, line: Some(slot) });
                     }
                 }
@@ -793,10 +796,11 @@ fn apply_due(pending: &mut [Option<Pending>; MAX_PENDING], dropped: &mut u64, lo
     false
 }
 
-/// A GO LIVE for `slot` waits in the table, due before `before`: it opens the slot's gate to input lost
-/// in the block.
-fn goes_live(pending: &[Option<Pending>; MAX_PENDING], slot: usize, before: Frame) -> bool {
-    pending.iter().flatten().any(|p| p.frame < before && matches!(p.command, Command::SetSlotLive(i, true) if i as usize == slot))
+/// The frame the first GO LIVE `live` for `slot` the table holds due before `before` applies at (`start`
+/// at the earliest: it never waits): it opens or shuts the slot's gate to input lost in the block.
+fn goes_live(pending: &[Option<Pending>; MAX_PENDING], slot: usize, live: bool, start: Frame, before: Frame) -> Option<Frame> {
+    let this = |c: Command| matches!(c, Command::SetSlotLive(i, on) if i as usize == slot && on == live);
+    pending.iter().flatten().filter(|p| p.frame < before && this(p.command)).map(|p| p.frame.max(start)).min()
 }
 
 /// A REC/DUB press, a pedal's and HOLD's included: the one command that arms a capture, at the alignment

@@ -404,18 +404,38 @@ impl Rack {
 
     /// Where slot `slot`'s input lost over `[from, to)` (`from == to`: just before `to`) goes on its way to
     /// the record tap: the frames of the slot's wet line it is written on, through the bypass's dry side
-    /// (on its own frames) and through an effect unit (its latency later), as far as each path carries
-    /// it in the block that starts now. Nothing while the live gate stays shut over those frames (`opens`:
-    /// a GO LIVE for the slot due before `to`); an instrument takes no input, save on the frames it has
-    /// left the slot. The line reaches the tap its delay later ([`Rack::line_delays`]).
-    pub(crate) fn lost_on(&self, slot: usize, from: Frame, to: Frame, opens: bool) -> [Option<(Frame, Frame)>; 2] {
+    /// (on its own frames) and through an effect unit (its latency later, up to where the unit stops
+    /// playing into the line: [`Rack::wet_until`]), as far as each path carries it in the block that starts
+    /// now. Only the lost frames the live gate lets through count: `on` and `off` are the first GO LIVE on
+    /// and off for the slot that apply in the block, at their frames. An instrument takes no input, save
+    /// on the frames it has left the slot. The line reaches the tap its delay later ([`Rack::line_delays`]).
+    pub(crate) fn lost_on(&self, slot: usize, from: Frame, to: Frame, on: Option<Frame>, off: Option<Frame>) -> [Option<(Frame, Frame)>; 2] {
         let s = &self.slots[slot];
-        if !(s.live || s.live_end >= from || opens) {
-            return [None, None];
-        }
+        // The frames the gate lets through, as one span: live, all; going off, up to its ramp's end (a
+        // settled gate's lies in the past). A GO LIVE opens it from its frame on; with none, a GO LIVE off
+        // shuts it a ramp after its frame.
+        let (lo, hi) = match (s.live, on, off) {
+            (true, None, Some(at)) => (Frame::MIN, at + self.live_frames),
+            (true, ..) => (Frame::MIN, Frame::MAX),
+            (false, Some(at), _) => (if s.live_end > self.cursor { Frame::MIN } else { at }, Frame::MAX),
+            (false, None, _) => (Frame::MIN, s.live_end),
+        };
+        let Some((from, to)) = crate::looper::within((from, to), lo, hi) else { return [None, None] };
         let effect = s.unit.is_some() && s.kind == SlotKind::Effect;
         let dry = if effect { !s.engaged || s.fade < self.fade_frames } else { s.unit.is_none() || s.removing };
-        [dry.then_some((from, to)), effect.then_some((from + s.latency, to + s.latency))]
+        let wet = effect.then(|| crate::looper::within((from + s.latency, to + s.latency), Frame::MIN, self.wet_until(slot))).flatten();
+        [dry.then_some((from, to)), wet]
+    }
+
+    /// At a block start: the first frame of slot `slot`'s wet line its effect unit no longer plays into:
+    /// none while it holds one (`Frame::MAX`), where a removal's fade ends, else now.
+    pub(crate) fn wet_until(&self, slot: usize) -> Frame {
+        let s = &self.slots[slot];
+        match (s.unit.is_some() && s.kind == SlotKind::Effect, s.removing) {
+            (true, false) => Frame::MAX,
+            (true, true) => self.cursor + s.fade as Frame,
+            (false, _) => self.cursor,
+        }
     }
 
     /// Each slot's wet line delay to the record tap as last latched: the frame written at `u` reaches the

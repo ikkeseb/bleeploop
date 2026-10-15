@@ -382,7 +382,9 @@ fn jam(sr: u32, block: usize) -> [Vec<f32>; 2] {
     rig.press(Command::RecDub(0));
     rig.idle();
     rig.advance_to(rig.start_frame() + s(0.3));
+    // Inside the take: a point gap on the frame its press closes it on is on its edge, and damages nothing.
     rig.gap();
+    rig.advance(s(0.05));
     rig.press(Command::PlayStop(0));
     settle(&mut rig);
     assert!(rig.state(0) == LaneState::Empty && rig.master() == 0 && !rig.locked() && rejected(&rig, mark) == 1);

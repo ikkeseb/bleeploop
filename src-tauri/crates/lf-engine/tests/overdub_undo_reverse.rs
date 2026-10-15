@@ -571,6 +571,52 @@ fn a_layer_a_go_live_off_ramps_silent_block_reaches_the_tap_just_after_commits_c
     assert_eq!(rig.pcm(0), want, "the layer as the tap carried it");
 }
 
+/// Through `through_a_plugin` (1024 frames, `silent`, `block`-frame blocks from `b`): GO LIVE off on
+/// `b + off` ramps the slot's input out over 240 frames, and drops the record latency to 0 from the next
+/// block; the silent blocks are damaged. A layer opens on `b + open` and closes 512 frames on, after
+/// everything the ramp lets through has reached the tap: the plugin plays silence into it, and it commits.
+fn a_layer_after_a_go_live_off_ramp(off: Frame, silent: &[Frame], block: usize, open: Frame) {
+    let (mut rig, before, b) = through_a_plugin(1024, silent);
+    let master = rig.master();
+    rig.block = block;
+    rig.send_at(b + off, Command::SetSlotLive(0, false));
+    rig.send_at(b + open - 512, Command::RecDub(0));
+    rig.send_at(b + open, Command::RecDub(0));
+    let quiet = silent.iter().max().unwrap() + 128;
+    while rig.frame < b + quiet {
+        let at = rig.frame - b;
+        if silent.iter().any(|&s| (at..at + block as Frame).contains(&s)) {
+            rig.damage();
+        }
+        rig.advance(block as Frame);
+    }
+    rig.advance_to(b + open);
+    rig.keep_output();
+    rig.advance(512);
+    assert_eq!(rig.window(), Some((0, Some(b + open), Some(b + open + 512))));
+    assert!(rig.record.iter().all(|&x| x == 0.0), "the plugin plays silence into the layer");
+    rig.advance(2048);
+    rig.idle();
+    assert!(!rig.events.iter().any(|e| matches!(e, Event::TakeRejected { .. })), "the layer commits");
+    let mut want = before;
+    common::dub::dub(&mut want, (b + open, b + open + 512), ramp(rig.sr), 0.5, pos_fn(rig.anchor(), master, 512), |_| 0.0);
+    assert_eq!(rig.pcm(0), want, "the layer as the tap carried it");
+}
+
+#[test]
+fn a_layer_after_what_a_go_live_off_ramp_lets_through_of_a_silent_block_commits_clean() {
+    // GO LIVE off on b: the gate is shut from b + 240, so of the silent block [b + 128, b + 256) the
+    // plugin plays only [b + 1152, b + 1264) into the tap, and a layer from b + 1264 holds none of it.
+    a_layer_after_a_go_live_off_ramp(0, &[128], 128, 1264);
+}
+
+#[test]
+fn a_layer_after_what_a_go_live_off_in_a_silent_block_lets_through_commits_clean() {
+    // The silent block [b, b + 512) holds the GO LIVE off on b + 128: the gate is shut from b + 368, so the
+    // plugin plays only [b + 1024, b + 1392) of it into the tap, and a layer from b + 1392 holds none of it.
+    a_layer_after_a_go_live_off_ramp(128, &[0, 128, 256, 384], 512, 1392);
+}
+
 #[test]
 fn a_silent_block_a_removal_fades_in_on_its_own_frames_damages_the_layer_there() {
     // The live slot delays its input 1024 frames to the record tap, latched for a layer that closes on
@@ -605,6 +651,50 @@ fn a_silent_block_a_removal_fades_in_on_its_own_frames_damages_the_layer_there()
     assert!(rig.events.iter().any(|e| matches!(e, Event::TakeRejected { overdub: true, .. })), "the layer is rejected");
     assert!(rig.state(0) == LaneState::Playing);
     assert_eq!(rig.pcm(0), before, "the loop before the layer, bit for bit");
+}
+
+/// Through `through_a_plugin` (1024 frames, the silent block [b, b + 128) damaged): the plugin's removal
+/// asked on `b + removed` crossfades it out over 480 frames, before the silence it took in could come out
+/// 1024 frames on; with no capture running the record latency drops to 0 once it has left. A layer opens
+/// on `b + open` (alignment `align`) and closes 512 frames on, over where the plugin would have played the
+/// silence: the slot passes its clean input there, and the layer commits.
+fn a_layer_where_a_removed_plugin_would_have_played_a_silent_block(removed: Frame, align: Frame, open: Frame) {
+    let (mut rig, before, b) = through_a_plugin(1024, &[0]);
+    let master = rig.master();
+    rig.align = align;
+    rig.send_at(b + open - align, Command::RecDub(0));
+    rig.send_at(b + open + 512 - align, Command::RecDub(0));
+    if removed == 0 {
+        rig.remove(0);
+    }
+    rig.damage();
+    rig.advance(128);
+    if removed > 0 {
+        rig.advance_to(b + removed);
+        rig.remove(0);
+    }
+    rig.advance_to(b + open + 512);
+    assert_eq!(rig.window(), Some((0, Some(b + open), Some(b + open + 512))));
+    assert!(rig.returned(0).is_some(), "the plugin has left");
+    rig.advance(2048);
+    rig.idle();
+    assert!(!rig.events.iter().any(|e| matches!(e, Event::TakeRejected { .. })), "the layer commits");
+    let mut want = before;
+    common::dub::dub(&mut want, (b + open, b + open + 512), ramp(rig.sr), 0.5, pos_fn(rig.anchor(), master, align), code);
+    assert_eq!(rig.pcm(0), want, "the layer as the tap carried it");
+}
+
+#[test]
+fn a_layer_where_a_plugin_removed_in_a_silent_block_would_have_played_it_commits_clean() {
+    // Removed on b, gone on b + 480; the silence would have come out over [b + 1024, b + 1152).
+    a_layer_where_a_removed_plugin_would_have_played_a_silent_block(0, 512, 1024);
+}
+
+#[test]
+fn a_layer_where_a_plugin_removed_after_a_silent_block_would_have_played_it_commits_clean() {
+    // Removed on b + 128, gone on b + 608, the silence already inside it; it would have come out over
+    // [b + 1024, b + 1152), inside the layer [b + 768, b + 1280).
+    a_layer_where_a_removed_plugin_would_have_played_a_silent_block(128, 128, 768);
 }
 
 #[test]

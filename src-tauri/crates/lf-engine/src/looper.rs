@@ -255,12 +255,23 @@ impl Gap {
     }
 }
 
+/// Lost frames `[from, to)` within `[lo, hi)`; a point (`from == to`: the frame just before `to`) stays
+/// whole or goes.
+pub(crate) fn within((from, to): (Frame, Frame), lo: Frame, hi: Frame) -> Option<(Frame, Frame)> {
+    if from == to {
+        return (lo < to && to <= hi).then_some((from, to));
+    }
+    let (from, to) = (from.max(lo), to.min(hi));
+    (from < to).then_some((from, to))
+}
+
 impl Recorder {
     /// The record tap lost frames `[from, to)` (`from == to`: a point xrun just before `to`): whether
-    /// they fall inside the window, one with no end yet judged up to `known` (the capture judges the rest
-    /// as it reaches them: a plugin's latency carries a gap ahead, past where a press may end it).
+    /// they fall inside the window, judged up to `known` (the capture judges the rest as it reaches them:
+    /// a plugin's latency carries a gap ahead, past where a press may end the window or a stop's plan
+    /// pull its end in).
     fn hit(&self, (from, to): (Frame, Frame), known: Frame) -> bool {
-        self.start.is_some_and(|s| to > s) && from < self.end.unwrap_or(known)
+        self.start.is_some_and(|s| to > s) && from < self.end.map_or(known, |e| e.min(known))
     }
 
     fn new(lane: usize, kind: Kind, align: Frame) -> Self {
@@ -2266,6 +2277,17 @@ impl Looper {
         (self.line_delays, self.line_reach) = (delays, reach);
     }
 
+    /// At a block start: no unit plays into slot `slot`'s wet line from `until` on (it has left, or its
+    /// removal's fade ends there), so the gaps kept on the line past it, a unit's latency ahead, never
+    /// arrive. What is already on the line stays.
+    pub(crate) fn cut_line(&mut self, slot: usize, until: Frame) {
+        for kept in &mut self.gaps {
+            if let Some(g) = kept.filter(|g| g.line == Some(slot)) {
+                *kept = within((g.from, g.to), Frame::MIN, until).map(|(from, to)| Gap { from, to, ..g });
+            }
+        }
+    }
+
     /// The device lost input, told at the block starting at `now`, as `gaps` on the record tap (the
     /// engine maps the lost input frames there, a slot's paths apart: [`Gap`]; a point xrun: `from == to`,
     /// a gap just before `to`): a capture whose window they fall inside is damaged; AUTO drops the
@@ -2314,7 +2336,7 @@ impl Looper {
         }
     }
 
-    /// A window the kept gaps reach is damaged, one with no end yet as far as `known`.
+    /// A window the kept gaps reach is damaged, as far as `known`.
     fn damage_from_gaps(&mut self, known: Frame) {
         let (gaps, delays) = (&self.gaps, &self.line_delays);
         if let Some(rec) = self.rec.as_mut().filter(|r| gaps.iter().flatten().any(|&gap| r.hit(gap.on_tap(delays), known))) {
