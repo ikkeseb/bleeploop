@@ -5,6 +5,7 @@
 //! (deactivate → activate → processing resumed, on the right threads). No audio device or GUI
 //! required.
 use super::*;
+use std::time::Instant;
 use clap_sys::{
     entry::clap_plugin_entry,
     events::{
@@ -152,6 +153,9 @@ struct Observed {
     emit_edit: AtomicBool,
     /// The next main-thread callback calls the host's `clap_host_state.mark_dirty`.
     dirty_on_callback: AtomicBool,
+    /// Runs once at the end of the next `save`, its state written, on the thread that called it.
+    #[allow(clippy::type_complexity)]
+    on_save: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     marked_dirty: AtomicUsize,
 }
 
@@ -421,11 +425,16 @@ unsafe extern "C" fn state_save(plugin: *const clap_plugin, stream: *const clap_
     }
     let bytes = s.saved.lock().unwrap().clone();
     // SAFETY: the host's stream is valid for this call.
-    unsafe {
+    let written = unsafe {
         let stream = &*stream;
         let Some(write) = stream.write else { return false };
         bytes.is_empty() || write(stream, bytes.as_ptr().cast(), bytes.len() as u64) == bytes.len() as i64
+    };
+    let hook = s.on_save.lock().unwrap().take();
+    if let Some(hook) = hook {
+        hook();
     }
+    written
 }
 
 /// `clap.state` load: read to the end in small pieces, as a plugin reading field by field would.
@@ -736,7 +745,7 @@ fn a_malformed_param_count_is_an_error_not_an_abort() {
 // ── engine mode: the same plugin as a unit inside a test device's engine (`engine_slot`) ────────
 
 mod engine {
-    use super::super::engine_slot::{self, EngineSlotEvent, EngineSlotHandle, PluginFormat};
+    use super::super::engine_slot::{self, EngineSlotEvent, EngineSlotHandle, GaveUp, PluginFormat};
     use super::super::super::state::ToneRestore;
     use super::super::super::tone::{self, TempDir, ToneBinding, ToneIdentity, SAVE_QUIET};
     use super::*;
@@ -779,17 +788,22 @@ mod engine {
             0,
             Arc::new(move |e| sink_seen.lock().unwrap().push(e)),
             tone,
-            move |ctx| {
-                super::super::clap_engine::run(ctx, "bleeploop.restart-fixture", move || {
-                    OBSERVE.with(|o| *o.borrow_mut() = obs);
-                    // SAFETY: as `fixture_instance`: a static entry whose callbacks obey the ABI.
-                    unsafe { PluginEntry::load_from_raw(&ENTRY, c"bleeploop-restart-fixture.clap") }
-                        .map_err(|e| e.to_string())
-                })
-            },
+            owner(obs),
         )
         .expect("the fixture loads into the engine");
         (handle, seen)
+    }
+
+    /// The production owner over the fixture's entry, with a watcher for each instance it creates.
+    fn owner(obs: Vec<Arc<Observed>>) -> impl FnOnce(engine_slot::OwnerCtx) -> Result<(), String> + Send + 'static {
+        move |ctx| {
+            super::super::clap_engine::run(ctx, "bleeploop.restart-fixture", move || {
+                OBSERVE.with(|o| *o.borrow_mut() = obs);
+                // SAFETY: as `fixture_instance`: a static entry whose callbacks obey the ABI.
+                unsafe { PluginEntry::load_from_raw(&ENTRY, c"bleeploop-restart-fixture.clap") }
+                    .map_err(|e| e.to_string())
+            })
+        }
     }
 
     fn installed(device: &TestDevice, slot: usize) -> Option<(SlotKind, lf_engine::grid::Frame)> {
@@ -840,6 +854,33 @@ mod engine {
         );
         assert!(!obs.contract_violation.load(Relaxed));
         assert_eq!(obs.rt_calls_off_device.load(Relaxed), 0, "start, stop and process ran on the device thread");
+    }
+
+    /// A load its caller gave up on is undone by its owner: given up before the install, the unit
+    /// never enters the engine; given up after it, the report finds nobody and the unit leaves the
+    /// engine. Either way the plugin is deactivated and destroyed, and the slot takes the next load.
+    #[test]
+    fn a_load_its_caller_gave_up_on_is_undone_and_frees_the_slot() {
+        let _one = engine_slot::one_engine_test_at_a_time();
+        let device = device(48_000);
+        for gave_up in [GaveUp::Before, GaveUp::After] {
+            let obs = Arc::new(Observed::default());
+            let (ended, report) = engine_slot::spawn_given_up(device.host().slot(0), gave_up, owner(vec![obs.clone()]));
+            assert_eq!(ended, Ok(()), "{gave_up:?}: the owner ends");
+            if gave_up == GaveUp::Before {
+                assert_eq!(report, Some(Err("plugin load cancelled".to_string())));
+            }
+            // A unit left in the engine would be engaged by now.
+            assert!(device.wait_blocks(4, Duration::from_secs(5)));
+            assert_eq!(installed(&device, 0), None, "{gave_up:?}: the slot is empty");
+            assert_eq!((obs.activations.load(Relaxed), obs.deactivations.load(Relaxed)), (1, 1), "{gave_up:?}");
+            assert_eq!(obs.starts.load(Relaxed), obs.stops.load(Relaxed), "{gave_up:?}: stopped if it started");
+            let (deactivate, destroy) = (obs.deactivate_seq.load(Relaxed), obs.destroy_seq.load(Relaxed));
+            assert!(0 < deactivate && deactivate < destroy, "{gave_up:?}: deactivate {deactivate} → destroy {destroy}");
+            assert!(!obs.contract_violation.load(Relaxed), "{gave_up:?}");
+        }
+        let (handle, _) = load(&device, 0, &Arc::new(Observed::default()));
+        handle.unload().expect("the next load takes the slot");
     }
 
     #[test]
@@ -1020,6 +1061,44 @@ mod engine {
         assert!(wait_for(2000, || obs.marked_dirty.load(Relaxed) == 1), "the host declares clap.state");
         handle.unload().unwrap();
         assert_eq!(stored(&dir).as_deref(), Some(&b"state y"[..]), "saved before the teardown");
+        assert!(!obs.contract_violation.load(Relaxed), "state calls on the owner thread");
+    }
+
+    /// A change the plugin reports after the owner loop's last turn (a `mark_dirty` from a
+    /// main-thread callback it asked for once the unload had begun): the unload delivers the
+    /// callback, collects the change and stores the tone the plugin has then, its bytes exactly.
+    #[test]
+    fn a_change_reported_after_the_last_owner_turn_is_in_the_tone_the_unload_stores() {
+        let _one = engine_slot::one_engine_test_at_a_time();
+        let device = device(48_000);
+        let dir = TempDir::new("clap-late-change");
+        let obs = Arc::new(Observed::default());
+        let (handle, _) = load_with_tone(&device, 0, &obs, Some(dir.binding(0, identity())));
+        assert!(wait_for(2000, || obs.processes.load(Relaxed) > 4));
+        *obs.saved.lock().unwrap() = b"state v".to_vec();
+
+        // Hold the owner inside an export's save, past this turn's delivery of callbacks.
+        let (inside, entered) = std::sync::mpsc::channel();
+        let (release, go) = std::sync::mpsc::channel::<()>();
+        *obs.on_save.lock().unwrap() = Some(Box::new(move || {
+            inside.send(()).unwrap();
+            let _ = go.recv_timeout(Duration::from_secs(5));
+        }));
+        let export = handle.start_tone_save().unwrap();
+        entered.recv_timeout(Duration::from_secs(5)).expect("the owner is inside the save");
+        *obs.saved.lock().unwrap() = b"state w".to_vec();
+        obs.dirty_on_callback.store(true, Relaxed);
+        let host = obs.host.load(Relaxed);
+        // SAFETY: the host lives while the plugin is loaded; `request_callback` is thread-safe.
+        unsafe { ((*host).request_callback.unwrap())(host) };
+        // The unload is asked for before the owner gets on: its loop ends without another turn.
+        handle.stop_serving();
+        release.send(()).unwrap();
+        let export = tone::decode(&export.recv_timeout(Duration::from_secs(2)).unwrap().unwrap()).unwrap();
+        assert_eq!(export.state, b"state v", "the export took the state before the change");
+        handle.unload().unwrap();
+        assert_eq!(obs.marked_dirty.load(Relaxed), 1, "the teardown delivered the callback");
+        assert_eq!(stored(&dir).as_deref(), Some(&b"state w"[..]), "and the unload stored the changed tone");
         assert!(!obs.contract_violation.load(Relaxed), "state calls on the owner thread");
     }
 

@@ -1,13 +1,14 @@
 //! OWNS: a CLAP plugin in the engine: `ClapUnit` (its audio processor as an
-//! `lf_engine::SlotProcessor`) and the engine-mode owner thread that loads, activates, restarts,
-//! re-activates after an eviction and tears it down (`engine_slot` holds the API), keeping the
+//! `lf_engine::SlotProcessor`) and what its owner thread does with the plugin (`Clap`, which the
+//! shared owner loop `engine_slot::serve` drives): the load, activation, a restart and a
+//! re-activation after an eviction, and the teardown's order, keeping the
 //! plugin's tone as `engine_slot` describes (the `state` extension's blob, captured under the tone
 //! limit: `CappedState`). It followed the WebView bridge's CLAP owner (deleted in Stage 6) minus its RT
 //! thread, its hop-1 ring and the device.
 
 use super::engine_slot::{
-    keep_tone, report_faults, restore_tone, EngineSlotEvent, OwnerCtx, Ready, Restore, FAULT_PARAM,
-    FAULT_PROCESS, FAULT_START, OWNER_POLL, REMOVE_TIMEOUT,
+    own, restore_tone, serve, Editor, EventSink, Loaded, OwnedPlugin, OwnerCtx, Reported, Restore, Setup,
+    FAULT_PARAM, FAULT_PROCESS, FAULT_START,
 };
 use crate::host::tone::MAX_STATE_BYTES;
 use super::*;
@@ -20,7 +21,6 @@ use lf_engine::slots::MAX_SLOT_EVENTS;
 use lf_engine::{SlotEvent, SlotEventKind, SlotKind, SlotProcessor};
 
 use crate::engine_io::SlotHost;
-use std::panic::{catch_unwind, AssertUnwindSafe};
 
 enum Processor {
     Stopped(StoppedPluginAudioProcessor<LfHost>),
@@ -282,13 +282,6 @@ impl SlotProcessor for ClapUnit {
     }
 }
 
-/// A unit the engine handed back: a `SlotHost` hands back only what its own handle installed.
-fn own(unit: Box<dyn SlotProcessor>) -> Box<ClapUnit> {
-    unit.into_any()
-        .downcast::<ClapUnit>()
-        .unwrap_or_else(|_| panic!("an engine slot hands back the unit its owner installed"))
-}
-
 /// The latency the active plugin reports (CLAP `latency` extension, a main-thread call); 0 without
 /// one. Read through the raw ABI because clack-extensions' `latency` feature is off in Cargo.toml.
 fn reported_latency(instance: &PluginInstance<LfHost>) -> u32 {
@@ -328,66 +321,6 @@ fn activate(
     let stopped = instance.activate(|_, _| (), config).map_err(|e| format!("activate failed: {e}"))?;
     let latency = reported_latency(instance);
     Ok((stopped, Terms { rate, max_frames, inputs, outputs, latency }))
-}
-
-/// Deactivate what the unit holds, activate again at the engine's current terms and install it.
-/// On failure the unit comes back to the caller, deactivated: the slot stays bypassed.
-fn reinstall(
-    instance: &mut PluginInstance<LfHost>,
-    mut unit: Box<ClapUnit>,
-    slot: &SlotHost,
-) -> Result<(), (Box<ClapUnit>, String)> {
-    if let Some(stopped) = unit.take_stopped() {
-        instance.deactivate(stopped);
-    }
-    let (stopped, terms) = match activate(instance, slot) {
-        Ok(activated) => activated,
-        Err(e) => return Err((unit, e)),
-    };
-    unit.rearm(stopped, &terms);
-    match slot.install(unit, terms.rate) {
-        Ok(()) => Ok(()),
-        Err((unit, e)) => {
-            let mut unit = own(unit);
-            if let Some(stopped) = unit.take_stopped() {
-                instance.deactivate(stopped);
-            }
-            Err((unit, e))
-        }
-    }
-}
-
-/// A restart or an eviction: get the unit back (it came from the engine, the owner still holds it
-/// from a failed cycle, or the engine hands it back now) and reinstall it.
-fn cycle(
-    instance: &mut PluginInstance<LfHost>,
-    slot: &SlotHost,
-    parked: &mut Option<Box<ClapUnit>>,
-    back: Option<Box<ClapUnit>>,
-    why: &str,
-) {
-    let index = slot.slot();
-    let unit = match back.or_else(|| parked.take()) {
-        Some(unit) => unit,
-        None => match slot.remove(REMOVE_TIMEOUT) {
-            Ok(Some(unit)) => own(unit),
-            Ok(None) => {
-                log::error!("[plugin_host] engine slot {index} {why}: no unit to cycle");
-                return;
-            }
-            Err(e) => {
-                log::error!("[plugin_host] engine slot {index} {why}: {e}; it keeps playing un-restarted");
-                return;
-            }
-        },
-    };
-    match reinstall(instance, unit, slot) {
-        Ok(()) => log::info!("[plugin_host] engine slot {index} {why}: deactivate → activate → reinstalled"),
-        Err((unit, e)) => {
-            log::error!("[plugin_host] engine slot {index} {why} failed, the slot stays bypassed: {e}");
-            *parked = Some(unit);
-        }
-    }
 }
 
 /// Instantiate `id` from `entry` with the production host handlers.
@@ -471,216 +404,147 @@ fn load_state(instance: &mut PluginInstance<LfHost>, state: &[u8]) -> Result<(),
     ext.load(&mut handle, &mut std::io::Cursor::new(state)).map_err(|_| "the plugin refused its saved state".to_string())
 }
 
-/// The engine-mode CLAP owner: clack's main thread for this slot. `open` yields the entry (a
-/// bundle path in production, an in-process fixture in the tests); returns the teardown's result.
+/// The engine-mode CLAP owner (`engine_slot::serve`): clack's main thread for this slot. `open`
+/// yields the entry (a bundle path in production, an in-process fixture in the tests); returns the
+/// teardown's result.
 pub(super) fn run(
     ctx: OwnerCtx,
     id: &str,
     open: impl FnOnce() -> Result<PluginEntry, String>,
 ) -> Result<(), String> {
-    let OwnerCtx { slot, running, requests, params, param_ids, sink, editor_parent, ready, mut tone, .. } = ctx;
-    let index = slot.slot();
+    serve(ctx, |setup| load(id, open, setup))
+}
+
+/// Instantiate the plugin, restore the stored tone, activate it and build its unit.
+fn load(
+    id: &str,
+    open: impl FnOnce() -> Result<PluginEntry, String>,
+    Setup { slot, params, editor_parent, faults, tone, .. }: Setup<'_>,
+) -> Result<Loaded<Clap>, String> {
     let editor_closed = Arc::new(EditorClosed::default());
     let hosted_hwnd = Arc::new(AtomicIsize::new(0));
-    let faults = Arc::new(AtomicU32::new(0));
-    let setup = open().and_then(|entry| {
-        let (mut instance, name) = instantiate(&entry, id, &editor_closed, &hosted_hwnd)?;
-        // init() may request a callback, but only the fully initialized instance can receive it.
+    let entry = open()?;
+    let (mut instance, name) = instantiate(&entry, id, &editor_closed, &hosted_hwnd)?;
+    // init() may request a callback, but only the fully initialized instance can receive it.
+    deliver_plugin_callback(&mut instance);
+    // The stored tone goes in before the plugin activates: nothing processes it yet.
+    let restored = restore_tone(tone, slot.slot(), &name, |state| load_state(&mut instance, state));
+    if restored == Restore::Refused {
+        // The plugin may have taken part of the tone before it refused: a fresh instance is at the
+        // defaults the player is told it loaded with.
+        drop(instance);
+        instance = instantiate(&entry, id, &editor_closed, &hosted_hwnd)?.0;
         deliver_plugin_callback(&mut instance);
-        // The stored tone goes in before the plugin activates: nothing processes it yet.
-        let restored = restore_tone(&mut tone, index, &name, |state| load_state(&mut instance, state));
-        if restored == Restore::Refused {
-            // The plugin may have taken part of the tone before it refused: a fresh instance is at the
-            // defaults the player is told it loaded with.
-            drop(instance);
-            instance = instantiate(&entry, id, &editor_closed, &hosted_hwnd)?.0;
-            deliver_plugin_callback(&mut instance);
-        }
-        // What the restore raised (a restart, a rescan, `mark_dirty`) describes the state just loaded,
-        // which the activation and the param listing below read anyway.
-        instance.access_shared_handler(|s| s.restart_requested.store(false, Release));
-        let _ = take_params_rescan(&mut instance);
-        instance.access_handler_mut(|m| m.state_dirty = false);
-        let (stopped, terms) = activate(&mut instance, &slot)?;
-        let unit = ClapUnit::new(stopped, &terms, params, faults.clone(), tone.edited());
-        Ok((entry, instance, name, terms.rate, unit, restored.report()))
-    });
-    let (entry, mut instance, name, rate, mut unit, restored) = match setup {
-        Ok(loaded) => loaded,
-        Err(e) => {
-            let _ = ready.send(Err(e));
-            return Ok(());
-        }
-    };
-    // Before the load is reported, so the caller's first `set_param` finds its ids.
-    refresh_clap_param_ids(&mut instance, &param_ids);
-    let kind = unit.kind;
-    if !running.load(Acquire) {
+    }
+    // What the restore raised (a restart, a rescan, `mark_dirty`) describes the state just loaded,
+    // which the activation and the param listing after the load read anyway.
+    instance.access_shared_handler(|s| s.restart_requested.store(false, Release));
+    let _ = take_params_rescan(&mut instance);
+    instance.access_handler_mut(|m| m.state_dirty = false);
+    let (stopped, terms) = activate(&mut instance, slot)?;
+    let unit = ClapUnit::new(stopped, &terms, params, faults, tone.edited());
+    let plugin = Clap { instance, entry, editor: EditorSlot::Closed, editor_closed, hosted_hwnd, editor_parent };
+    Ok(Loaded { plugin, unit, name, rate: terms.rate, tone: restored.report() })
+}
+
+/// A loaded CLAP plugin as its owner holds it.
+struct Clap {
+    /// Before `entry`: the instance is destroyed before its entry unloads.
+    instance: PluginInstance<LfHost>,
+    entry: PluginEntry,
+    editor: EditorSlot,
+    /// Raised by a floating editor's own window thread when the player closes it.
+    editor_closed: Arc<EditorClosed>,
+    hosted_hwnd: Arc<AtomicIsize>,
+    /// The main window's HWND (0 = none): a floating editor's transient parent.
+    editor_parent: usize,
+}
+
+impl OwnedPlugin for Clap {
+    type Unit = ClapUnit;
+    const FORMAT: &'static str = "CLAP";
+
+    fn take_restart(&mut self) -> Option<String> {
+        let asked = self.instance.access_shared_handler(|s| s.restart_requested.swap(false, Acquire));
+        asked.then(|| "restart at the plugin's request".to_string())
+    }
+
+    fn reinstall(&mut self, mut unit: Box<ClapUnit>, slot: &SlotHost) -> Result<(), (Box<ClapUnit>, String)> {
+        let instance = &mut self.instance;
         if let Some(stopped) = unit.take_stopped() {
             instance.deactivate(stopped);
         }
-        let _ = ready.send(Err("plugin load cancelled".to_string()));
-        return Ok(());
-    }
-    if let Err((back, e)) = slot.install(unit, rate) {
-        if let Some(stopped) = own(back).take_stopped() {
-            instance.deactivate(stopped);
-        }
-        let _ = ready.send(Err(e));
-        return Ok(());
-    }
-    if ready.send(Ok(Ready { name: name.clone(), kind, tone: restored })).is_err() {
-        log::warn!("[plugin_host] engine slot {index}: the load finished after its caller gave up; undoing it");
-        return teardown(&slot, instance, entry, None);
-    }
-
-    // The unit while it is out of the engine (a failed restart); `None` while the engine holds it.
-    let mut parked: Option<Box<ClapUnit>> = None;
-    let mut editor = EditorSlot::Closed;
-    let mut reported = 0u32;
-    // A panic in the loop must not unwind past a unit the engine still runs: it is caught here, and the
-    // ordered teardown below takes the unit out of the engine first.
-    let served = catch_unwind(AssertUnwindSafe(|| {
-    while running.load(Acquire) {
-        deliver_plugin_callback(&mut instance);
-        if take_params_rescan(&mut instance) {
-            refresh_clap_param_ids(&mut instance, &param_ids);
-            sink(EngineSlotEvent::ParamsChanged);
-            tone.note_change(Instant::now());
-        }
-        if instance.access_handler_mut(|m| std::mem::take(&mut m.state_dirty)) {
-            tone.note_change(Instant::now());
-        }
-        if instance.access_shared_handler(|s| s.restart_requested.swap(false, Acquire)) {
-            cycle(&mut instance, &slot, &mut parked, None, "restart at the plugin's request");
-        }
-        // A new engine at another rate evicted the unit; it comes back stopped.
-        if let Some(unit) = slot.take_evicted() {
-            cycle(&mut instance, &slot, &mut parked, Some(own(unit)), "re-activation after a device change");
-        }
-        // A floating editor's `closed` came from the plugin's own window thread: ack it here.
-        if editor_closed.fired.swap(false, Acquire) && matches!(editor, EditorSlot::Floating) {
-            editor_teardown(&mut instance, &mut editor, &hosted_hwnd);
-            sink(EngineSlotEvent::EditorClosed);
-            let _ = keep_tone(&mut tone, index, "editor closed", &name, || save_state(&mut instance));
-        }
-        // Every turn, editor or not: a plugin's own messages on this thread (a JUCE plugin's timers and
-        // async updates) must not wait for the next editor, or its state lags what it plays and a tone
-        // saved meanwhile is stale. A hosted editor's window needs it too, and reports its close here.
-        pump_thread_messages();
-        if matches!(editor, EditorSlot::Hosted(_)) {
-            deliver_pending_resize(&mut instance);
-            if matches!(&editor, EditorSlot::Hosted(window) if window.close_requested()) {
-                editor_teardown(&mut instance, &mut editor, &hosted_hwnd);
-                sink(EngineSlotEvent::EditorClosed);
-                let _ = keep_tone(&mut tone, index, "editor closed", &name, || save_state(&mut instance));
-            }
-        }
-        let request = if matches!(editor, EditorSlot::Hosted(_)) {
-            wait_for_input(20);
-            requests.try_recv().ok()
-        } else {
-            match requests.recv_timeout(OWNER_POLL) {
-                Ok(request) => Some(request),
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => None,
-                // The handle is gone without an unload; `running` is false by then.
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
-            }
+        let (stopped, terms) = match activate(instance, slot) {
+            Ok(activated) => activated,
+            Err(e) => return Err((unit, e)),
         };
-        if let Some(request) = request.and_then(|r| take_uncancelled(r, index as u8)) {
-            match request {
-                OwnerRequest::OpenEditor(cancelled, reply) => {
-                    let was_closed = matches!(editor, EditorSlot::Closed);
-                    let res = if was_closed {
-                        editor_open(&mut instance, editor_parent, &hosted_hwnd).map(|opened| editor = opened)
-                    } else {
-                        Ok(())
-                    };
-                    // Opened after the caller's 5 s: it reported failure, so close what this opened.
-                    if was_closed && res.is_ok() && cancelled.load(Relaxed) {
-                        editor_teardown(&mut instance, &mut editor, &hosted_hwnd);
-                    }
-                    let _ = reply.send(res);
-                }
-                OwnerRequest::CloseEditor(_, reply) => {
-                    if !matches!(editor, EditorSlot::Closed) {
-                        editor_teardown(&mut instance, &mut editor, &hosted_hwnd);
-                        let _ = keep_tone(&mut tone, index, "editor closed", &name, || save_state(&mut instance));
-                    }
-                    let _ = reply.send(Ok(()));
-                }
-                OwnerRequest::SaveTone(reply) => {
-                    let _ = reply.send(keep_tone(&mut tone, index, "asked", &name, || save_state(&mut instance)));
-                }
-                // Params, the VST3-only mirror and a wake: the shared handler.
-                other => handle_owner_request(other, &mut instance, &param_ids),
+        unit.rearm(stopped, &terms);
+        slot.install(unit, terms.rate).map_err(|(unit, e)| {
+            let mut unit = own::<ClapUnit>(unit);
+            if let Some(stopped) = unit.take_stopped() {
+                instance.deactivate(stopped);
             }
-        }
-        if tone.poll(Instant::now()) {
-            let _ = keep_tone(&mut tone, index, "changes went quiet", &name, || save_state(&mut instance));
-        }
-        report_faults(&faults, index, &mut reported);
+            (unit, e)
+        })
     }
-    }));
-    if served.is_err() {
-        log::error!("[plugin_host] engine slot {index}: the CLAP owner panicked; tearing the plugin down");
-    }
-    let editor_open = !matches!(editor, EditorSlot::Closed);
-    if editor_open {
-        editor_teardown(&mut instance, &mut editor, &hosted_hwnd);
-    }
-    // Before the teardown: a change not saved yet, and what an open editor may have changed unseen. Not
-    // after a panic, which may have left the plugin half way through something.
-    if served.is_ok() && (editor_open || tone.dirty()) {
-        let _ = keep_tone(&mut tone, index, "unload", &name, || save_state(&mut instance));
-    }
-    let result = teardown(&slot, instance, entry, parked);
-    report_faults(&faults, index, &mut reported);
-    result
-}
 
-/// The ordered teardown: the unit leaves the engine (stopped on the audio thread) → deactivate →
-/// the instance is destroyed → the entry unloads last. A unit the engine does not hand back keeps
-/// the plugin loaded (leaked) rather than unloading code a processor still runs.
-fn teardown(
-    slot: &SlotHost,
-    mut instance: PluginInstance<LfHost>,
-    entry: PluginEntry,
-    parked: Option<Box<ClapUnit>>,
-) -> Result<(), String> {
-    let index = slot.slot();
-    let t = Instant::now();
-    let unit = match parked {
-        Some(unit) => Some(unit),
-        None => match slot.remove(REMOVE_TIMEOUT) {
-            Ok(unit) => unit.map(own),
-            Err(e) => {
-                log::error!("[plugin_host] engine slot {index} CLAP teardown: {e}; leaving the plugin loaded");
-                slot.abandon();
-                std::mem::forget(instance);
-                std::mem::forget(entry);
-                return Err(e);
-            }
-        },
-    };
-    let remove_ms = t.elapsed().as_millis();
-    let t = Instant::now();
-    match unit.and_then(|mut unit| unit.take_stopped()) {
-        Some(stopped) => instance.deactivate(stopped),
-        None if instance.is_active() => {
-            let _ = instance.try_deactivate();
-        }
-        None => {}
+    fn turn(&mut self, _sink: &EventSink) -> Reported {
+        deliver_plugin_callback(&mut self.instance);
+        let relist = take_params_rescan(&mut self.instance);
+        let changed = self.instance.access_handler_mut(|m| std::mem::take(&mut m.state_dirty));
+        Reported { relist, changed }
     }
-    let deactivate_ms = t.elapsed().as_millis();
-    let t = Instant::now();
-    drop(instance);
-    let destroy_ms = t.elapsed().as_millis();
-    let t = Instant::now();
-    drop(entry);
-    log::info!(
-        "[plugin_host] engine slot {index} CLAP teardown: remove={remove_ms} deactivate={deactivate_ms} destroy={destroy_ms} entry={} ms",
-        t.elapsed().as_millis()
-    );
-    Ok(())
+
+    fn idle(&mut self) -> bool {
+        // A floating editor's `closed` came from the plugin's own window thread: acked here.
+        let floating_closed = self.editor_closed.fired.swap(false, Acquire) && matches!(self.editor, EditorSlot::Floating);
+        if matches!(self.editor, EditorSlot::Hosted(_)) {
+            deliver_pending_resize(&mut self.instance);
+        }
+        let closed = floating_closed || matches!(&self.editor, EditorSlot::Hosted(window) if window.close_requested());
+        if closed {
+            self.editor_close();
+        }
+        closed
+    }
+
+    fn params(&mut self) -> Result<Vec<ParamDesc>, String> {
+        clap_param_descs(&mut self.instance)
+    }
+
+    fn state(&mut self) -> Result<Option<Vec<u8>>, String> {
+        save_state(&mut self.instance)
+    }
+
+    fn editor(&self) -> Editor {
+        match self.editor {
+            EditorSlot::Closed => Editor::Closed,
+            EditorSlot::Floating => Editor::Floating,
+            EditorSlot::Hosted(_) => Editor::Hosted,
+        }
+    }
+
+    fn editor_open(&mut self) -> Result<(), String> {
+        self.editor = editor_open(&mut self.instance, self.editor_parent, &self.hosted_hwnd)?;
+        Ok(())
+    }
+
+    fn editor_close(&mut self) {
+        editor_teardown(&mut self.instance, &mut self.editor, &self.hosted_hwnd);
+    }
+
+    /// Deactivate (with the stopped processor the unit holds), destroy the instance, unload the
+    /// entry last.
+    fn release(self, unit: Option<Box<ClapUnit>>) {
+        let Clap { mut instance, entry, .. } = self;
+        match unit.and_then(|mut unit| unit.take_stopped()) {
+            Some(stopped) => instance.deactivate(stopped),
+            None if instance.is_active() => {
+                let _ = instance.try_deactivate();
+            }
+            None => {}
+        }
+        drop(instance);
+        drop(entry);
+    }
 }

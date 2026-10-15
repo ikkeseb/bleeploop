@@ -3,11 +3,13 @@
 //! production `run_with` owns it. The editor and the unit are also driven directly, with the test
 //! thread standing in for the owner. No audio device and no visible window: the device renders to
 //! memory and an editor's host window is never shown.
-use super::super::engine_slot::{self, EngineSlotEvent, EngineSlotHandle, PluginFormat};
+use super::super::engine_slot::{self, EngineSlotEvent, EngineSlotHandle, GaveUp, PluginFormat, REMOVE_TIMEOUT};
 use super::super::super::editor_window::client_size;
-use super::super::super::tone::{self, TempDir, ToneBinding, ToneIdentity};
+use super::super::super::state::ToneRestore;
+use super::super::super::tone::{self, TempDir, ToneBinding, ToneIdentity, ToneKeeper};
 use super::super::super::vst2::fixture::{self, Probe, Shape, TracedEvent};
 use super::super::super::vst2::host_callback;
+use super::super::OwnerRequest;
 use super::*;
 use crate::engine_io::test_rig::TestDevice;
 use lf_engine::{Command, NoteTarget, TimedCommand};
@@ -15,7 +17,7 @@ use rtrb::{Producer, RingBuffer};
 use std::sync::atomic::{AtomicBool, Ordering::Release};
 use std::sync::mpsc::{channel, Sender, SyncSender};
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use windows::Win32::Foundation::{LPARAM, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{
     GetSystemMetrics, IsWindowVisible, PostMessageW, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, WM_CLOSE,
@@ -101,14 +103,20 @@ fn try_load(device: &TestDevice, slot: usize, shape: Shape, id: &'static str, to
         0,
         Arc::new(move |e| sink_seen.lock().unwrap().push(e)),
         tone,
-        move |ctx| {
-            run_with(ctx, id, move || {
-                fixture::arm(shape);
-                Ok(Opened { module: None, entry: fixture::entry, file_stem: "fixture-file".to_string() })
-            })
-        },
+        owner(shape, id),
     );
     (handle, seen)
+}
+
+/// The production owner over the fixture in `shape`, as plugin `id`: the entry runs on the owner
+/// thread.
+fn owner(shape: Shape, id: &'static str) -> impl FnOnce(OwnerCtx) -> Result<(), String> + Send + 'static {
+    move |ctx| {
+        run_with(ctx, id, move || {
+            fixture::arm(shape);
+            Ok(Opened { module: None, entry: fixture::entry, file_stem: "fixture-file".to_string() })
+        })
+    }
 }
 
 fn load(device: &TestDevice, slot: usize, shape: Shape) -> (EngineSlotHandle, Seen) {
@@ -218,6 +226,33 @@ fn a_loaded_slot_renders_in_the_engine_and_unloads_in_order() {
     assert_eq!(probe.rt_calls_off_device.load(Relaxed), 0, "every process call ran on the device thread");
     assert_eq!(probe.calls_while_halted.load(Relaxed), 0);
     assert_rendered_only_while_started(probe);
+}
+
+/// A load its caller gave up on is undone by its owner: given up before the install, the unit never
+/// enters the engine; given up after it, the report finds nobody and the unit leaves the engine.
+/// Either way the plugin is stopped, suspended and closed once, and the slot takes the next load.
+#[test]
+fn a_load_its_caller_gave_up_on_is_undone_and_frees_the_slot() {
+    let _one = engine_slot::one_engine_test_at_a_time();
+    let device = device(48_000);
+    for gave_up in [GaveUp::Before, GaveUp::After] {
+        let probe = Probe::new();
+        let (ended, report) = engine_slot::spawn_given_up(device.host().slot(0), gave_up, owner(instrument(probe), ID));
+        assert_eq!(ended, Ok(()), "{gave_up:?}: the owner ends");
+        if gave_up == GaveUp::Before {
+            assert_eq!(report, Some(Err("plugin load cancelled".to_string())));
+        }
+        // A unit left in the engine would be engaged by now.
+        assert!(device.wait_blocks(4, Duration::from_secs(5)));
+        assert_eq!(installed(&device, 0), None, "{gave_up:?}: the slot is empty");
+        let undone = [load_calls(4096), vec![(EFF_STOP_PROCESS, 0), (EFF_MAINS_CHANGED, 0), (EFF_CLOSE, 0)]].concat();
+        assert_eq!(probe.opcodes(), undone, "{gave_up:?}: loaded, then stopped, suspended and closed");
+        assert_eq!((probe.instances.load(Relaxed), probe.closes.load(Relaxed)), (1, 1), "{gave_up:?}");
+        assert_lifecycle_on_the_owner(probe);
+        assert_rendered_only_while_started(probe);
+    }
+    let (handle, _) = load(&device, 0, instrument(Probe::new()));
+    handle.unload().expect("the next load takes the slot");
 }
 
 #[test]
@@ -1269,12 +1304,8 @@ fn drive(device: &TestDevice, slot: usize, shape: Shape, tone: Option<ToneBindin
         ready,
         tone: ToneKeeper::new(tone, Arc::new(AtomicBool::new(false))),
     };
-    let owner = std::thread::spawn(move || {
-        run_with(ctx, ID, move || {
-            fixture::arm(shape);
-            Ok(Opened { module: None, entry: fixture::entry, file_stem: "fixture-file".to_string() })
-        })
-    });
+    let run = owner(shape, ID);
+    let owner = std::thread::spawn(move || run(ctx));
     let report = loaded.recv_timeout(Duration::from_secs(5)).expect("the owner reports its load");
     assert!(report.is_ok(), "the fixture loads: {:?}", report.err());
     Driven { running, requests, owner, seen }
@@ -1379,6 +1410,38 @@ fn the_owner_loop_serves_editor_requests_the_close_box_and_a_foreign_resize() {
     assert_rendered_only_while_started(probe);
 }
 
+/// A size the plugin asks for from inside `effEditIdle`, on the owner thread, is applied there and
+/// then, and drops an older one queued from another thread: the queued size never overwrites it.
+#[test]
+fn a_size_asked_for_inside_edit_idle_outlives_an_older_one_queued_from_another_thread() {
+    let _one = engine_slot::one_engine_test_at_a_time();
+    let device = device(48_000);
+    let probe = Probe::new();
+    let shape = Shape { flags: SYNTH | EFF_FLAGS_HAS_EDITOR, ..instrument(probe) };
+    let driven = drive(&device, 0, shape, None);
+    assert_eq!(driven.editor(OwnerRequest::OpenEditor), Ok(()));
+    let hwnd = HWND(probe.editor_parent.load(Relaxed) as *mut c_void);
+    assert_eq!(client_size(hwnd), (400, 300));
+
+    // Hold the owner inside `effIdle`, which it sends before this turn's `effEditIdle`.
+    let (inside, entered) = channel();
+    let (release, go) = channel::<()>();
+    *probe.on_idle.lock().unwrap() = Some(Box::new(move |_| {
+        inside.send(()).unwrap();
+        let _ = go.recv_timeout(Duration::from_secs(5));
+    }));
+    assert_eq!(plugin_thread_calls_host(probe, AUDIO_MASTER_NEED_IDLE, 0, 0, 0.0), 1);
+    entered.recv_timeout(Duration::from_secs(5)).expect("the owner is inside effIdle");
+    assert_eq!(plugin_thread_calls_host(probe, AUDIO_MASTER_SIZE_WINDOW, 320, 200, 0.0), 0, "another thread: latched");
+    probe.size_in_edit_idle.store(800 << 32 | 600, Relaxed);
+    release.send(()).unwrap();
+    assert!(wait_for(2000, || !probe.size_answers.lock().unwrap().is_empty()), "the plugin asks inside effEditIdle");
+    std::thread::sleep(Duration::from_millis(100)); // several owner turns
+    assert_eq!(*probe.size_answers.lock().unwrap(), [1], "resized there and then");
+    assert_eq!(client_size(hwnd), (800, 600), "and the older queued size never replaced it");
+    driven.unload().expect("it unloads");
+}
+
 /// A cycle whose unit the engine does not take (the slot holds another unit): the plugin, resumed
 /// for the install, is stopped and suspended again, as every other failed cycle leaves it.
 #[test]
@@ -1394,7 +1457,7 @@ fn a_cycle_whose_unit_the_engine_refuses_leaves_the_plugin_suspended() {
     let mut plugin = plugin_here(&slot, instrument(probe));
     let (unit, _params, _) = unit_here(&mut plugin, &slot, 4096);
     let before = probe.opcodes().len();
-    let (unit, err) = reinstall(&mut plugin, unit, &slot).expect_err("the slot is taken");
+    let (unit, err) = plugin.reinstall(unit, &slot).expect_err("the slot is taken");
     assert!(err.contains("already holds a unit"), "{err}");
     assert!(!plugin.running, "suspended");
     let mut refused = cycle_calls(4096);
@@ -1406,7 +1469,7 @@ fn a_cycle_whose_unit_the_engine_refuses_leaves_the_plugin_suspended() {
     assert_eq!(probe.opcodes().last(), Some(&(EFF_CLOSE, 0)));
     assert_eq!(probe.count(EFF_STOP_PROCESS, 0), 2, "the close did not stop it again");
 
-    let back = slot.remove(REMOVE_TIMEOUT).expect("the first unit comes back").map(own);
+    let back = slot.remove(REMOVE_TIMEOUT).expect("the first unit comes back").map(own::<Vst2Unit>);
     assert!(back.is_some());
     drop(back);
     drop(holding);

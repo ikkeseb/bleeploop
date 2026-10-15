@@ -1,10 +1,9 @@
 use super::{
-    checked_plugin_channels, checked_plugin_params, publish_param_ids, sum_to_mono, OwnerRequest,
-    ParamEvent, MAX_EVENTS_PER_BLOCK,
+    checked_plugin_channels, checked_plugin_params, sum_to_mono, ParamEvent, MAX_EVENTS_PER_BLOCK,
 };
 use super::super::editor_window::{
-    client_size, create_host_window, drain_after_editor_teardown, pump_thread_messages,
-    set_client_size, show_host_window_front, wait_for_input, HostWindow,
+    client_size, create_host_window, drain_after_editor_teardown, set_client_size, show_host_window_front,
+    HostWindow,
 };
 use super::super::state::ParamDesc;
 
@@ -802,7 +801,7 @@ fn note_to_vst3(kind: SlotEventKind, offset: i32) -> Event {
 type Vst3ModuleEntry = unsafe extern "system" fn() -> bool;
 
 /// Owns one loaded VST3 DLL. Successful `InitDll` is paired with `ExitDll`, and the module stays
-/// mapped until every vtbl-bearing COM object has been released by `teardown`.
+/// mapped until every vtbl-bearing COM object has been released (`vst3_engine`'s `Vst3::release`).
 struct Vst3Module {
     handle: HMODULE,
     exit_dll: Option<Vst3ModuleEntry>,
@@ -838,8 +837,8 @@ impl Vst3Module {
 
 impl Drop for Vst3Module {
     fn drop(&mut self) {
-        // SAFETY: ExitDll is called only when this guard's matching InitDll succeeded. `teardown`
-        // explicitly releases every module COM object before dropping the guard on successful loads.
+        // SAFETY: ExitDll is called only when this guard's matching InitDll succeeded. The owner's
+        // teardown releases every module COM object before dropping the guard on successful loads.
         unsafe {
             if self.init_succeeded {
                 if let Some(exit_dll) = self.exit_dll {

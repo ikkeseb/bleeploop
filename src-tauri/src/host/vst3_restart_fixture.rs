@@ -62,6 +62,9 @@ struct FixtureComponent {
     terminate_seq: AtomicUsize,
     /// The component's state: what `getState` writes and `setState` replaces (the tone tests).
     state: Mutex<Vec<u8>>,
+    /// Runs once at the end of the next `getState`, its state written, on the thread that called it.
+    #[allow(clippy::type_complexity)]
+    on_get_state: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     /// `setProcessing(1)` answers `kResultFalse` (a plugin that refuses to start processing).
     reject_processing_start: AtomicBool,
     /// `setState` refuses whatever it is given.
@@ -113,6 +116,7 @@ impl FixtureComponent {
             deactivate_seq: AtomicUsize::new(0),
             terminate_seq: AtomicUsize::new(0),
             state: Mutex::new(Vec::new()),
+            on_get_state: Mutex::new(None),
             reject_processing_start: AtomicBool::new(false),
             refuse_state: AtomicBool::new(false),
             half_apply_state: AtomicBool::new(false),
@@ -247,6 +251,10 @@ impl IComponentTrait for FixtureComponent {
             && stream.seek(0, IStreamSeekMode_::kIBSeekSet, std::ptr::null_mut()) == kResultOk
             && stream.write((body.len() as u32).to_le_bytes().as_ptr() as *mut c_void, 4, &mut n) == kResultOk
             && stream.seek(at, IStreamSeekMode_::kIBSeekSet, std::ptr::null_mut()) == kResultOk;
+        let hook = self.on_get_state.lock().unwrap().take();
+        if let Some(hook) = hook {
+            hook();
+        }
         if written { kResultOk } else { kResultFalse }
     }
 }
@@ -480,7 +488,7 @@ fn wait_for(ms: u64, pred: impl Fn() -> bool) -> bool {
 // ── engine mode: the same component as a unit inside a test device's engine (`engine_slot`) ─────
 
 mod engine {
-    use super::super::super::engine_slot::{self, EngineSlotEvent, EngineSlotHandle, PluginFormat};
+    use super::super::super::engine_slot::{self, EngineSlotEvent, EngineSlotHandle, GaveUp, PluginFormat};
     use super::super::super::super::state::ToneRestore;
     use super::super::super::super::tone::{self, TempDir, ToneBinding, ToneIdentity, SAVE_QUIET};
     use super::super::controller_tests::FixtureController;
@@ -690,22 +698,30 @@ mod engine {
     ) -> (Result<EngineSlotHandle, String>, Arc<Made>, Arc<Mutex<Vec<EngineSlotEvent>>>) {
         let made = Arc::new(Made::default());
         let seen = Arc::new(Mutex::new(Vec::new()));
-        let (factory_made, sink_seen) = (made.clone(), seen.clone());
+        let sink_seen = seen.clone();
         let handle = engine_slot::spawn(
             PluginFormat::Vst3,
             device.host().slot(slot),
             0,
             Arc::new(move |e| sink_seen.lock().unwrap().push(e)),
             tone,
-            move |ctx| {
-                let id = super::super::super::super::scan::tuid_to_hex(&COMPONENT_CID);
-                super::super::engine::run_with(ctx, &id, move || {
-                    let factory = ComWrapper::new(make(factory_made));
-                    Ok((None, factory.to_com_ptr::<IPluginFactory>().ok_or("factory COM failed")?))
-                })
-            },
+            owner(made.clone(), make),
         );
         (handle, made, seen)
+    }
+
+    /// The production owner over the factory `make` builds on the owner thread.
+    fn owner(
+        made: Arc<Made>,
+        make: impl FnOnce(Arc<Made>) -> FixtureFactory + Send + 'static,
+    ) -> impl FnOnce(engine_slot::OwnerCtx) -> Result<(), String> + Send + 'static {
+        move |ctx| {
+            let id = super::super::super::super::scan::tuid_to_hex(&COMPONENT_CID);
+            super::super::engine::run_with(ctx, &id, move || {
+                let factory = ComWrapper::new(make(made));
+                Ok((None, factory.to_com_ptr::<IPluginFactory>().ok_or("factory COM failed")?))
+            })
+        }
     }
 
     fn installed(device: &TestDevice, slot: usize) -> Option<(SlotKind, lf_engine::grid::Frame)> {
@@ -750,6 +766,36 @@ mod engine {
         );
         assert!(!s.contract_violation.load(Relaxed));
         assert_eq!(s.rt_calls_off_device.load(Relaxed), 0, "setProcessing and process ran on the device thread");
+    }
+
+    /// A load its caller gave up on is undone by its owner: given up before the install, the unit
+    /// never enters the engine; given up after it, the report finds nobody and the unit leaves the
+    /// engine. Either way both halves are torn down in order, and the slot takes the next load.
+    #[test]
+    fn a_load_its_caller_gave_up_on_is_undone_and_frees_the_slot() {
+        let _one = engine_slot::one_engine_test_at_a_time();
+        let device = device(48_000);
+        for gave_up in [GaveUp::Before, GaveUp::After] {
+            let made = Arc::new(Made::default());
+            let (ended, report) =
+                engine_slot::spawn_given_up(device.host().slot(0), gave_up, owner(made.clone(), FixtureFactory::new));
+            assert_eq!(ended, Ok(()), "{gave_up:?}: the owner ends");
+            if gave_up == GaveUp::Before {
+                assert_eq!(report, Some(Err("plugin load cancelled".to_string())));
+            }
+            // A unit left in the engine would be engaged by now.
+            assert!(device.wait_blocks(4, Duration::from_secs(5)));
+            assert_eq!(installed(&device, 0), None, "{gave_up:?}: the slot is empty");
+            let s = made.component();
+            assert_eq!((s.activations.load(Relaxed), s.deactivations.load(Relaxed)), (1, 1), "{gave_up:?}");
+            assert_eq!(s.starts.load(Relaxed), s.stops.load(Relaxed), "{gave_up:?}: stopped if it started");
+            let (deactivate, terminate) = (s.deactivate_seq.load(Relaxed), s.terminate_seq.load(Relaxed));
+            assert!(0 < deactivate && deactivate < terminate, "{gave_up:?}: setActive(0) {deactivate} → terminate {terminate}");
+            assert_eq!(made.controller().terminates.load(Relaxed), 1, "{gave_up:?}: the controller is terminated");
+            assert!(!s.contract_violation.load(Relaxed), "{gave_up:?}");
+        }
+        let (handle, _, _) = load(&device, 0, 0, 0.0);
+        handle.unload().expect("the next load takes the slot");
     }
 
     #[test]
@@ -1066,6 +1112,45 @@ mod engine {
         assert_eq!(unsafe { plugin_side_handler(&made).performEdit(1000, 0.6) }, kResultOk);
         handle.unload().unwrap();
         assert!(stored(&dir).is_some_and(|(c, _)| c.ends_with(b"component y")), "saved before the teardown");
+        assert!(!s.contract_violation.load(Relaxed), "state calls on the owner thread");
+    }
+
+    /// A change the plugin reports after the owner loop's last turn (a `restartComponent` with
+    /// `kParamValuesChanged`, a preset loaded inside it, once the unload had begun): the unload
+    /// collects it and stores the tone the plugin has then, its bytes exactly, and tells no caller.
+    #[test]
+    fn a_change_reported_after_the_last_owner_turn_is_in_the_tone_the_unload_stores() {
+        let _one = engine_slot::one_engine_test_at_a_time();
+        let device = device(48_000);
+        let dir = TempDir::new("vst3-late-change");
+        let (handle, made, seen) = load_with_tone(&device, 0, 0, 0.0, 0, Some(dir.binding(0, identity())), StateAnswer::Takes);
+        let (s, controller) = (made.component(), made.controller());
+        assert!(wait_for(2000, || s.processes.load(Relaxed) > 4));
+        *s.state.lock().unwrap() = b"component v".to_vec();
+
+        // Hold the owner inside an export's save, past this turn's drain of the restart flags.
+        let (inside, entered) = std::sync::mpsc::channel();
+        let (release, go) = std::sync::mpsc::channel::<()>();
+        *s.on_get_state.lock().unwrap() = Some(Box::new(move || {
+            inside.send(()).unwrap();
+            let _ = go.recv_timeout(Duration::from_secs(5));
+        }));
+        let export = handle.start_tone_save().unwrap();
+        entered.recv_timeout(Duration::from_secs(5)).expect("the owner is inside the save");
+        *s.state.lock().unwrap() = b"component w".to_vec();
+        *controller.state.lock().unwrap() = b"controller w".to_vec();
+        // SAFETY: the handler is alive (held by the controller and this clone).
+        let reported = unsafe { plugin_side_handler(&made).restartComponent(RestartFlags_::kParamValuesChanged) };
+        assert_eq!(reported, kResultOk);
+        // The unload is asked for before the owner gets on: its loop ends without another turn.
+        handle.stop_serving();
+        release.send(()).unwrap();
+        let export = tone::decode(&export.recv_timeout(Duration::from_secs(2)).unwrap().unwrap()).unwrap();
+        let v = framed(b"component v");
+        assert_eq!(tone::decode_vst3(&export.state).unwrap().0, &v[..], "the export took the state before the change");
+        handle.unload().unwrap();
+        assert_eq!(stored(&dir), Some((framed(b"component w"), b"controller w".to_vec())), "the unload stored the changed tone");
+        assert!(!seen.lock().unwrap().contains(&EngineSlotEvent::ParamsChanged), "and no caller is told from the teardown");
         assert!(!s.contract_violation.load(Relaxed), "state calls on the owner thread");
     }
 

@@ -152,6 +152,8 @@ pub(crate) struct Probe {
     pub(crate) refuse_open: AtomicBool,
     /// `effEditOpen` asks the host for this size (width, height) through `audioMasterSizeWindow`.
     pub(crate) size_in_open: Mutex<Option<(i32, isize)>>,
+    /// The next `effEditIdle` asks the host for this size, `width << 32 | height` (0: none), once.
+    pub(crate) size_in_edit_idle: AtomicU64,
     /// Runs once inside the next `effIdle`, on the thread that called it, with the effect.
     #[allow(clippy::type_complexity)]
     pub(crate) on_idle: Mutex<Option<Box<dyn FnOnce(*mut AEffect) + Send>>>,
@@ -570,6 +572,12 @@ unsafe fn probed(probe: &Probe, effect: *mut AEffect, opcode: i32, index: i32, v
     }
     if opcode == EFF_EDIT_IDLE {
         probe.edit_idles.fetch_add(1, Relaxed);
+        let size = probe.size_in_edit_idle.swap(0, Relaxed);
+        if size != 0 {
+            // SAFETY: this live instance; the opcode passes no pointer.
+            let answer = unsafe { call_host(effect, AUDIO_MASTER_SIZE_WINDOW, (size >> 32) as i32, size as u32 as isize, 0.0) };
+            probe.size_answers.lock().unwrap().push(answer);
+        }
         return Some(0);
     }
     probe.calls.lock().unwrap().push(Call { opcode, value, thread: std::thread::current().id(), on_device: Probe::on_device() });
