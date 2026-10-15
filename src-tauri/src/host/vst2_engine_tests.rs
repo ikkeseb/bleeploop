@@ -66,7 +66,9 @@ fn settled_level(device: &TestDevice) -> Option<f32> {
     (last > 0.0 && output.iter().rev().take(256).all(|&x| (x - last).abs() < 1e-5)).then_some(last)
 }
 
-/// Wait for the device to settle on one level above silence and return it.
+/// Wait for the device to settle on one level above silence and return it. A timeout names the
+/// test's line, not this one.
+#[track_caller]
 fn level_once_settled(device: &TestDevice) -> f32 {
     assert!(wait_for(|| settled_level(device).is_some()), "the output settles");
     settled_level(device).unwrap()
