@@ -636,13 +636,13 @@ pub(super) fn spawn(
     tone: Option<ToneBinding>,
     run: impl FnOnce(OwnerCtx) -> Result<(), String> + Send + 'static,
 ) -> Result<EngineSlotHandle, String> {
-    spawn_within(|ready| ready.recv_timeout(LOAD_TIMEOUT), format, slot, editor_parent, sink, tone, run)
+    spawn_within(Receiver::recv_timeout, format, slot, editor_parent, sink, tone, run)
 }
 
-/// `spawn`, its first wait for the owner's report `wait`: bounded at `LOAD_TIMEOUT`, or a test's
-/// that runs out on the test's cue.
+/// `spawn`, each wait for the owner's report `wait` given its bound (`LOAD_TIMEOUT`, then
+/// `REMOVE_TIMEOUT` for a claimed load's report): the bound itself, or a test's wait on its own cue.
 fn spawn_within(
-    wait: impl FnOnce(&Receiver<Result<Ready, String>>) -> Result<Result<Ready, String>, RecvTimeoutError>,
+    mut wait: impl FnMut(&Receiver<Result<Ready, String>>, Duration) -> Result<Result<Ready, String>, RecvTimeoutError>,
     format: PluginFormat,
     slot: SlotHost,
     editor_parent: usize,
@@ -676,13 +676,14 @@ fn spawn_within(
         .name(format!("lf-{}-engine-{index}", format.as_str()))
         .spawn(move || run(ctx))
         .map_err(|e| format!("spawn owner thread: {e}"))?;
-    let report = match wait(&ready_rx) {
+    let report = match wait(&ready_rx, LOAD_TIMEOUT) {
         // The bound ran out as the owner's unit went in: the load stands, its report a step away.
         Err(late) if !claim.abandon() => {
             log::warn!(
-                "[plugin_host] engine slot {index}: the plugin's setup outlasted its load bound as it went into the engine; the load stands"
+                "[plugin_host] engine slot {index}: the plugin's setup outlasted its {} ms bound as it went into the engine; the load stands",
+                LOAD_TIMEOUT.as_millis()
             );
-            ready_rx.recv_timeout(REMOVE_TIMEOUT).map_err(|_| late)
+            wait(&ready_rx, REMOVE_TIMEOUT).map_err(|_| late)
         }
         report => report,
     };
@@ -1149,13 +1150,19 @@ mod tests {
             in_engine_tx.send(()).unwrap();
             ran_out.recv_timeout(Duration::from_secs(5)).expect("the bound ran out");
         };
-        let bound = move |_: &Receiver<Result<Ready, String>>| {
-            in_engine.recv_timeout(Duration::from_secs(5)).expect("the unit goes in");
-            ran_out_tx.send(()).unwrap();
-            Err(RecvTimeoutError::Timeout)
+        let mut cue = Some((in_engine, ran_out_tx));
+        let wait = move |ready: &Receiver<Result<Ready, String>>, _bound| match cue.take() {
+            Some((in_engine, ran_out_tx)) => {
+                in_engine.recv_timeout(Duration::from_secs(5)).expect("the unit goes in");
+                ran_out_tx.send(()).unwrap();
+                Err(RecvTimeoutError::Timeout)
+            }
+            // The claimed load's report comes once the owner is scheduled again, however late: only
+            // a deadlock outlasts this.
+            None => ready.recv_timeout(Duration::from_secs(30)),
         };
         let owner = stand_in_owner(Box::new(Silent), report_late, || {});
-        let loaded = spawn_within(bound, PluginFormat::Clap, device.host().slot(0), 0, Arc::new(|_| {}), None, owner);
+        let loaded = spawn_within(wait, PluginFormat::Clap, device.host().slot(0), 0, Arc::new(|_| {}), None, owner);
         let handle = loaded.expect("the owner had its unit going in: the load stands");
         assert_eq!(handle.name(), "Stand-in");
         let next = stand_in(device.host().slot(0), Box::new(Silent), || {}, || {}).err().expect("the slot is taken");
@@ -1175,7 +1182,7 @@ mod tests {
         // The setup goes on only once its bound has run out and the load has failed.
         let (failed_tx, failed) = channel();
         let fake = shared.clone();
-        let bound = |_: &Receiver<Result<Ready, String>>| Err(RecvTimeoutError::Timeout);
+        let bound = |_: &Receiver<Result<Ready, String>>, _| Err(RecvTimeoutError::Timeout);
         let late = spawn_within(bound, PluginFormat::Clap, device.host().slot(0), 0, Arc::new(|_| {}), None, move |ctx| {
             let served = serve(ctx, move |setup| {
                 failed.recv_timeout(Duration::from_secs(5)).map_err(|e| format!("the load never failed: {e}"))?;
