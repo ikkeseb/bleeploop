@@ -1,5 +1,5 @@
-//! Ports verify/guards/grid.mjs, accent-grid.mjs and pulse-forced-clamp.mjs: the looper and the click
-//! on ONE grid, the free-run pulse and its hand-offs, and the click's gates.
+//! Ports the removed verify/guards/grid.mjs, accent-grid.mjs and pulse-forced-clamp.mjs: the looper and
+//! the click on ONE grid, the free-run pulse and its hand-offs, and the click's gates.
 //!
 //! The Web Audio waker (a 25 ms timer over a 100 ms lookahead) is gone: beats fire on their frame. Its
 //! "stalled waker" cases map onto a jump in the device frame counter, the one way the engine can find
@@ -375,7 +375,8 @@ fn plays_the_loop_alone(rig: &Rig) -> bool {
 
 #[test]
 fn with_the_click_off_playing_loops_render_no_click() {
-    // verify/probes/click-sync.mjs's calibration. The click is on first, so the output can show one.
+    // The removed verify/probes/click-sync.mjs's calibration. The click is on first, so the output can
+    // show one.
     let mut rig = Rig::new();
     rig.set(Command::SetMetronome(true));
     rig.set(Command::SetClickVolume(1.0));
@@ -448,10 +449,10 @@ fn onsets(x: &[f32], threshold: f32, gap: usize) -> Vec<usize> {
 
 #[test]
 fn the_click_onset_meets_the_rendered_loop_marker_on_every_downbeat() {
-    // verify/probes/click-sync.mjs's measurement, on the rendered output: the same session with the
-    // click on and off (the engine is deterministic), so the click alone is their difference and the
-    // loop marker is the second's onsets. Within the probe's 0.1 ms on every downbeat of the steady run
-    // and of each restart.
+    // The removed verify/probes/click-sync.mjs's measurement, on the rendered output: the same session
+    // with the click on and off (the engine is deterministic), so the click alone is their difference and
+    // the loop marker is the second's onsets. Within the probe's 0.1 ms on every downbeat of the steady
+    // run and of each restart.
     let (with, without) = (marker_session(true), marker_session(false));
     let lanes = &without.output.as_ref().unwrap().1;
     let click: Vec<f32> = with.output.as_ref().unwrap().1.iter().zip(lanes).map(|(y, l)| y - l).collect();

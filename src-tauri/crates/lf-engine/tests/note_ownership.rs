@@ -1,8 +1,8 @@
-//! What verify/probes/synth-note-ownership.mjs measured on the Web Audio synths, on the engine's
-//! instruments through its commands: the mono bass's held-note stack (release either of two held notes
-//! and the other one sounds, and the last release ends the note), and a poly synth's voice steal (with
-//! every voice busy a fresh note sounds, and the stolen note's late note-off leaves it be). Levels are
-//! read off the bus over the probe's analyser window. The probe's sustained lead run stays with the
+//! What the removed verify/probes/synth-note-ownership.mjs measured on the Web Audio synths, on the
+//! engine's instruments through its commands: the mono bass's held-note stack (release either of two held
+//! notes and the other one sounds, and the last release ends the note), and a poly synth's voice steal
+//! (with every voice busy a fresh note sounds, and the stolen note's late note-off leaves it be). Levels
+//! are read off the bus over the probe's analyser window. The probe's sustained lead run stays with the
 //! sender: sustain is the router's, not the engine's (`src/instruments.rs`).
 
 mod common;

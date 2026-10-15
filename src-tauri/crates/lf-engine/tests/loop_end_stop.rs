@@ -1,6 +1,6 @@
-//! What verify/probes/loop-end-stop.mjs measured on the Web Audio render, on the engine's output: END
-//! STOP (PLAY/STOP or STOP ALL with the loop-end stop on) sounds through the frame before the loop
-//! boundary and is silent from it, at any block size; a lane cleared and refilled while its stop is
+//! What the removed verify/probes/loop-end-stop.mjs measured on the Web Audio render, on the engine's
+//! output: END STOP (PLAY/STOP or STOP ALL with the loop-end stop on) sounds through the frame before the
+//! loop boundary and is silent from it, at any block size; a lane cleared and refilled while its stop is
 //! pending plays on past the old deadline; two lanes stopped together stop on one frame; STOP ALL over a
 //! playing lane and an overdub is one gesture, the dub punching out at once (aligned) while the playing
 //! lane waits for the boundary. D23's 5 ms edges (`common::edges`) are no END STOP's: an immediate stop

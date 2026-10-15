@@ -1,5 +1,5 @@
-//! OWNS: the one note router for every note source, ported from `src/ui/state/input-router.ts`, the
-//! play-path branch of `src/ui/state/midi.ts` and the order of `src/ui/state/instrument.ts`
+//! OWNS: the one note router for every note source, ported from `src/ui/state/input-router.ts` (removed),
+//! the play-path branch of `src/ui/state/midi.ts` and the order of `src/ui/state/instrument.ts`
 //! `routeEngine`: which owner holds each note (a MIDI port's channel, or a pointer or key of a WebView
 //! document), each owner's sustain pedal and the releases it defers, the wheels with the last moved one
 //! winning, the note target, which notes the current engine was told to sound, and the held-note set

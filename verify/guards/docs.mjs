@@ -308,39 +308,23 @@ function clause(text, at) {
   return [from, to];
 }
 
-// Dead citations in files other work owned when this scan landed (2026-10), one `file  path` each.
-// Each wants its reference marked removed, or pointed at the live file, and its entry deleted here.
+// Dead citations in engine tests other work was changing when this scan landed (2026-10), one
+// `file  path` each. Each wants its reference marked removed ("Ports the removed `…`", "the removed
+// `…`") and its entry deleted here.
 const LF = 'src-tauri/crates/lf-engine/';
-const DEAD_OK = new Set([
-  // The removed Web Audio guards and probes the engine's tests port: "Ports the removed `…`".
-  ...[
-    'tests/align.rs  verify/guards/record-compensation.mjs',
-    'tests/click_grid.rs  verify/guards/grid.mjs',
-    'tests/click_grid.rs  verify/probes/click-sync.mjs',
-    'tests/count_in.rs  verify/guards/count-in.mjs',
+const DEAD_OK = new Set(
+  [
+    // The removed Web Audio guards and probes the engine's tests port.
     'tests/first_take.rs  verify/guards/free-stop.mjs',
     'tests/golden_jam.rs  verify/probes/golden-jam.mjs',
-    'tests/later_arm.rs  verify/guards/later-arm.mjs',
-    'tests/loop_end_stop.rs  verify/probes/loop-end-stop.mjs',
-    'tests/note_ownership.rs  verify/probes/synth-note-ownership.mjs',
     'tests/overdub_undo_reverse.rs  verify/guards/overdub.mjs',
     'tests/overdub_undo_reverse.rs  verify/probes/capture-loss.mjs',
     'tests/overdub_undo_reverse.rs  verify/probes/overdub-window.mjs',
-    'tests/phase_preserve.rs  verify/guards/phase-preserve.mjs',
-    'tests/phase_preserve.rs  verify/probes/playback-restart.mjs',
     'tests/retake.rs  verify/guards/retake.mjs',
-    // The Web Audio sources removed in Stage 6.
-    'tests/mixer.rs  src/audio/looper/mixer.ts',
-    'tests/mixer.rs  src/audio/master.ts',
+    // The rig the Web Audio guards ran on, removed in Stage 6.
     'tests/common/mod.rs  verify/harness/rig.ts',
-    // The mark sits on the line before, or in the clause after.
-    'src/dsp/mod.rs  verify/probes/tone-refs.mjs',
-    'src/render.rs  src/session/render.ts',
   ].map((e) => LF + e),
-  // The note router's port source, removed when MIDI went native.
-  'src-tauri/src/engine_io/midi/mod.rs  src/ui/state/input-router.ts',
-  'src-tauri/src/engine_io/midi/router.rs  src/ui/state/input-router.ts',
-]);
+);
 const deadOkUsed = new Set();
 
 const CODE = /\.(rs|ts|tsx|mjs)$/;

@@ -12,14 +12,14 @@
 //! | Module | Owns | Ported from |
 //! |---|---|---|
 //! | this file | [`MidiHost`] and its UI calls, [`Core`] (the state every thread shares, under one lock), which stored bindings are live, the timers, the UI events | `src/ui/state/midi.ts` (glue) |
-//! | `parse` | bytes to `parse::Message`, and what is ignored | `midi.ts` `parseMidiMessage` |
+//! | `parse` | bytes to `parse::Message`, and what is ignored | `midi.ts` `parseMidiMessage` (removed) |
 //! | `bindings` | [`Binding`], the 25 actions and their targets, the persisted list's fallible parse | `src/app/midi-actions.ts`, `src/app/actions.ts` |
 //! | `learn` | learn capture, matching, consume-first, momentary vs latching, HOLD's control numbers, the release waits | `src/app/midi-actions.ts` |
 //! | `actions` | what a binding runs, as engine commands and UI events; which of the UI's commands join the queue | `src/app/actions.ts` |
-//! | `router` | note ownership for MIDI and UI owners, sustain, the wheels, the note target, the held-note set | `src/ui/state/input-router.ts`, `instrument.ts` `routeEngine` |
+//! | `router` | note ownership for MIDI and UI owners, sustain, the wheels, the note target, the held-note set | `src/ui/state/input-router.ts` (removed), `instrument.ts` `routeEngine` |
 //! | `queue` | the one bounded FIFO into the engine's ring: reserved releases, whole batches, coalesced wheels, no-device admission, what a rebuild empties and folds | (new: nothing is stamped, the no-device rule, a rebuild needs no WebView) |
 //! | `store` | `midi-bindings.json` and the one-time import of the web's list | (new: bindings live native, the import never guesses) |
-//! | `ports` | midir connections, port identities, which port a stored binding answers to, the port thread | `midi.ts` `attachInputs` |
+//! | `ports` | midir connections, port identities, which port a stored binding answers to, the port thread | `midi.ts` `attachInputs` (removed) |
 //! | `liveness` | interface arrival and removal notifications, which open connections a removal ends, the arrival retry | (Web MIDI's `statechange`) |
 //!
 //! # Rules

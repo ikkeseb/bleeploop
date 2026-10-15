@@ -1,5 +1,5 @@
-//! Ports verify/guards/count-in.mjs, count-grid.mjs and bpm-lock.mjs: the first-track COUNT-IN, its
-//! grid, and the tempo lock it takes.
+//! Ports the removed verify/guards/count-in.mjs, count-grid.mjs and bpm-lock.mjs: the first-track
+//! COUNT-IN, its grid, and the tempo lock it takes.
 //!
 //! The Web Audio anchor sat one scheduling lead (20 ms) after the press; the engine counts from the
 //! press frame itself, so "count 1 at now + HBL" becomes "count 1 on the press frame". The drain

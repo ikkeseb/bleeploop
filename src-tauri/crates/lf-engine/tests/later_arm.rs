@@ -1,5 +1,5 @@
-//! Ports verify/guards/later-arm.mjs and looper-arm.mjs: a later take lands frame-exact on the master
-//! grid; an armed lane aborts cleanly; the recorder slot belongs to its lane.
+//! Ports the removed verify/guards/later-arm.mjs and looper-arm.mjs: a later take lands frame-exact on
+//! the master grid; an armed lane aborts cleanly; the recorder slot belongs to its lane.
 //!
 //! later-arm's main-thread stall (the capture ring filling while the drain is blocked) has no engine
 //! counterpart; what it guarded maps onto an input gap: before the window it costs nothing, inside it
