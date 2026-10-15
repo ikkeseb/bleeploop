@@ -693,16 +693,24 @@ fn fixture_instance() -> PluginInstance<LfHost> {
     .unwrap()
 }
 
-/// Spin until `pred` holds or `ms` elapse; returns whether it held.
-fn wait_for(ms: u64, pred: impl Fn() -> bool) -> bool {
-    let deadline = Instant::now() + Duration::from_millis(ms);
-    while Instant::now() < deadline {
-        if pred() {
-            return true;
+/// How long a test waits for what it expects before it fails. Far past a healthy run, since a wait
+/// ends the moment its condition holds: a loaded CI runner starves no test (a 2 s bound did). Still a
+/// bound, so a bug fails the test instead of hanging it.
+const PATIENCE: Duration = Duration::from_secs(30);
+
+/// Poll until `pred` holds or PATIENCE runs out; returns whether it held. A timeout names the
+/// waiting line on stderr, which a failed test prints beside its assertion.
+#[track_caller]
+fn wait_for(pred: impl Fn() -> bool) -> bool {
+    let deadline = Instant::now() + PATIENCE;
+    while !pred() {
+        if Instant::now() >= deadline {
+            eprintln!("{}: still waiting after {PATIENCE:?}, giving up", std::panic::Location::caller());
+            return false;
         }
         std::thread::sleep(Duration::from_millis(1));
     }
-    pred()
+    true
 }
 
 #[test]
@@ -747,7 +755,7 @@ fn a_malformed_param_count_is_an_error_not_an_abort() {
 mod engine {
     use super::super::engine_slot::{self, EngineSlotEvent, EngineSlotHandle, GaveUp, PluginFormat};
     use super::super::super::state::ToneRestore;
-    use super::super::super::tone::{self, TempDir, ToneBinding, ToneIdentity, SAVE_QUIET};
+    use super::super::super::tone::{self, TempDir, ToneBinding, ToneIdentity};
     use super::*;
     use crate::engine_io::test_rig::TestDevice;
     use lf_engine::{Command, NoteTarget, SlotKind, TimedCommand};
@@ -832,8 +840,8 @@ mod engine {
         let (handle, _) = load(&device, 0, &obs);
         assert_eq!(handle.kind(), SlotKind::Instrument, "no audio input: an instrument");
         assert_eq!(handle.name(), "Restart fixture");
-        assert!(wait_for(2000, || obs.processes.load(Relaxed) > 8), "the engine processes the unit");
-        assert!(wait_for(2000, || rendered_above(&device, 0.2)), "its output reaches the device");
+        assert!(wait_for(|| obs.processes.load(Relaxed) > 8), "the engine processes the unit");
+        assert!(wait_for(|| rendered_above(&device, 0.2)), "its output reaches the device");
         assert_eq!(
             installed(&device, 0),
             Some((SlotKind::Instrument, 64)),
@@ -871,7 +879,7 @@ mod engine {
                 assert_eq!(report, Some(Err("plugin load cancelled".to_string())));
             }
             // A unit left in the engine would be engaged by now.
-            assert!(device.wait_blocks(4, Duration::from_secs(5)));
+            assert!(device.wait_blocks(4, PATIENCE));
             assert_eq!(installed(&device, 0), None, "{gave_up:?}: the slot is empty");
             assert_eq!((obs.activations.load(Relaxed), obs.deactivations.load(Relaxed)), (1, 1), "{gave_up:?}");
             assert_eq!(obs.starts.load(Relaxed), obs.stops.load(Relaxed), "{gave_up:?}: stopped if it started");
@@ -891,11 +899,11 @@ mod engine {
         obs.inputs.store(2, Relaxed);
         let (handle, _) = load(&device, 0, &obs);
         assert_eq!(handle.kind(), SlotKind::Effect, "an audio input: an effect");
-        assert!(wait_for(2000, || obs.processes.load(Relaxed) > 8 && rendered_near(&device, 0.0)), "not live: silence");
+        assert!(wait_for(|| obs.processes.load(Relaxed) > 8 && rendered_near(&device, 0.0)), "not live: silence");
         assert_eq!(installed(&device, 0), Some((SlotKind::Effect, 0)));
         send(&device, Command::SetSlotLive(0, true));
         assert!(
-            wait_for(2000, || rendered_near(&device, 0.1)),
+            wait_for(|| rendered_near(&device, 0.1)),
             "live: the device input, copied to both input channels and echoed, summed back to mono"
         );
         handle.unload().unwrap();
@@ -907,7 +915,7 @@ mod engine {
         let device = device(48_000);
         let obs = Arc::new(Observed::default());
         let (handle, _) = load(&device, 0, &obs);
-        assert!(wait_for(2000, || obs.processes.load(Relaxed) > 8));
+        assert!(wait_for(|| obs.processes.load(Relaxed) > 8));
         obs.latency.store(128, Relaxed);
         let blocks_before = device.blocks.load(Relaxed);
         let processed_before = obs.processes.load(Relaxed);
@@ -916,7 +924,7 @@ mod engine {
         let host = unsafe { *obs.host.load(Relaxed) };
         std::thread::spawn(move || unsafe { (host.request_restart.unwrap())(&host) }).join().unwrap();
         assert!(
-            wait_for(2000, || obs.activations.load(Relaxed) == 2
+            wait_for(|| obs.activations.load(Relaxed) == 2
                 && obs.starts.load(Relaxed) == 2
                 && obs.processes.load(Relaxed) > processed_before + 8),
             "deactivate → activate → reinstalled → processing again"
@@ -943,14 +951,14 @@ mod engine {
         let device = device(48_000);
         let obs = Arc::new(Observed::default());
         let (handle, _) = load(&device, 1, &obs);
-        assert!(wait_for(2000, || obs.processes.load(Relaxed) > 4));
+        assert!(wait_for(|| obs.processes.load(Relaxed) > 4));
         send(&device, Command::SelectInstrument(NoteTarget::Slot(1)));
         send(&device, Command::NoteOn(60, 0.5));
-        assert!(wait_for(2000, || obs.note_ons.load(Relaxed) == 1), "the note-on reaches the plugin");
+        assert!(wait_for(|| obs.note_ons.load(Relaxed) == 1), "the note-on reaches the plugin");
         assert_eq!(obs.last_key.load(Relaxed), 60);
         assert_eq!(f64::from_bits(obs.last_velocity.load(Relaxed)), 0.5);
         send(&device, Command::NoteOff(60));
-        assert!(wait_for(2000, || obs.note_offs.load(Relaxed) == 1), "and its note-off");
+        assert!(wait_for(|| obs.note_offs.load(Relaxed) == 1), "and its note-off");
         handle.unload().unwrap();
     }
 
@@ -965,7 +973,7 @@ mod engine {
         assert_eq!(listed, vec![100, 101]);
         assert!(handle.set_param(7, 0.1).is_err(), "an id the plugin never listed");
         handle.set_param(101, 0.75).unwrap();
-        assert!(wait_for(2000, || obs.param_values.load(Relaxed) == 1), "the param reaches the processor");
+        assert!(wait_for(|| obs.param_values.load(Relaxed) == 1), "the param reaches the processor");
         assert_eq!(obs.last_param.load(Relaxed), 101);
         assert_eq!(f64::from_bits(obs.last_param_value.load(Relaxed)), 0.75);
         handle.unload().unwrap();
@@ -981,7 +989,7 @@ mod engine {
         assert_eq!(handle.kind(), SlotKind::Effect, "a main input: an effect");
         send(&device, Command::SetSlotLive(0, true));
         assert!(
-            wait_for(2000, || obs.processes.load(Relaxed) > 8 && rendered_near(&device, 0.1)),
+            wait_for(|| obs.processes.load(Relaxed) > 8 && rendered_near(&device, 0.1)),
             "live: the main input echoed; the aux output's marker never plays"
         );
         assert_eq!(
@@ -1002,13 +1010,13 @@ mod engine {
         obs.output_level.store(0.25f32.to_bits(), Relaxed);
         obs.fail_process.store(true, Relaxed);
         let (handle, _) = load(&device, 0, &obs);
-        assert!(wait_for(2000, || obs.processes.load(Relaxed) > 8));
+        assert!(wait_for(|| obs.processes.load(Relaxed) > 8));
         assert!(
-            wait_for(2000, || rendered_near(&device, 0.0)),
+            wait_for(|| rendered_near(&device, 0.0)),
             "the output of a failed call is discarded, though the plugin wrote it"
         );
         obs.fail_process.store(false, Relaxed);
-        assert!(wait_for(2000, || rendered_above(&device, 0.2)), "the same output plays once the calls succeed");
+        assert!(wait_for(|| rendered_above(&device, 0.2)), "the same output plays once the calls succeed");
         handle.unload().unwrap();
     }
 
@@ -1037,7 +1045,7 @@ mod engine {
         assert_eq!(handle.tone(), Some(ToneRestore::Restored));
         assert_eq!(*obs.saved.lock().unwrap(), b"state v", "the plugin read the whole state");
         assert!(!obs.loaded_while_active.load(Relaxed), "the tone went in before activate");
-        assert!(wait_for(2000, || obs.processes.load(Relaxed) > 4), "and the plugin runs");
+        assert!(wait_for(|| obs.processes.load(Relaxed) > 4), "and the plugin runs");
 
         // An export takes the tone fresh; it lands in the store too.
         *obs.saved.lock().unwrap() = b"state w".to_vec();
@@ -1049,8 +1057,7 @@ mod engine {
         // it has been quiet for SAVE_QUIET.
         *obs.saved.lock().unwrap() = b"state x".to_vec();
         obs.emit_edit.store(true, Relaxed);
-        let wait = (SAVE_QUIET.as_millis() * 2 + 1000) as u64;
-        assert!(wait_for(wait, || stored(&dir).as_deref() == Some(&b"state x"[..])), "debounced save after an edit");
+        assert!(wait_for(|| stored(&dir).as_deref() == Some(&b"state x"[..])), "debounced save after an edit");
 
         // `mark_dirty` from the plugin's main thread; an unload saves it at once.
         *obs.saved.lock().unwrap() = b"state y".to_vec();
@@ -1058,7 +1065,7 @@ mod engine {
         let host = obs.host.load(Relaxed);
         // SAFETY: the host lives while the plugin is loaded; `request_callback` is thread-safe.
         unsafe { ((*host).request_callback.unwrap())(host) };
-        assert!(wait_for(2000, || obs.marked_dirty.load(Relaxed) == 1), "the host declares clap.state");
+        assert!(wait_for(|| obs.marked_dirty.load(Relaxed) == 1), "the host declares clap.state");
         handle.unload().unwrap();
         assert_eq!(stored(&dir).as_deref(), Some(&b"state y"[..]), "saved before the teardown");
         assert!(!obs.contract_violation.load(Relaxed), "state calls on the owner thread");
@@ -1074,7 +1081,7 @@ mod engine {
         let dir = TempDir::new("clap-late-change");
         let obs = Arc::new(Observed::default());
         let (handle, _) = load_with_tone(&device, 0, &obs, Some(dir.binding(0, identity())));
-        assert!(wait_for(2000, || obs.processes.load(Relaxed) > 4));
+        assert!(wait_for(|| obs.processes.load(Relaxed) > 4));
         *obs.saved.lock().unwrap() = b"state v".to_vec();
 
         // Hold the owner inside an export's save, past this turn's delivery of callbacks.
@@ -1082,10 +1089,10 @@ mod engine {
         let (release, go) = std::sync::mpsc::channel::<()>();
         *obs.on_save.lock().unwrap() = Some(Box::new(move || {
             inside.send(()).unwrap();
-            let _ = go.recv_timeout(Duration::from_secs(5));
+            let _ = go.recv_timeout(PATIENCE);
         }));
         let export = handle.start_tone_save().unwrap();
-        entered.recv_timeout(Duration::from_secs(5)).expect("the owner is inside the save");
+        entered.recv_timeout(PATIENCE).expect("the owner is inside the save");
         *obs.saved.lock().unwrap() = b"state w".to_vec();
         obs.dirty_on_callback.store(true, Relaxed);
         let host = obs.host.load(Relaxed);
@@ -1094,7 +1101,7 @@ mod engine {
         // The unload is asked for before the owner gets on: its loop ends without another turn.
         handle.stop_serving();
         release.send(()).unwrap();
-        let export = tone::decode(&export.recv_timeout(Duration::from_secs(2)).unwrap().unwrap()).unwrap();
+        let export = tone::decode(&export.recv_timeout(PATIENCE).unwrap().unwrap()).unwrap();
         assert_eq!(export.state, b"state v", "the export took the state before the change");
         handle.unload().unwrap();
         assert_eq!(obs.marked_dirty.load(Relaxed), 1, "the teardown delivered the callback");
@@ -1120,7 +1127,7 @@ mod engine {
         *b.saved.lock().unwrap() = b"slot b".to_vec();
         slot_a.set_param(101, 0.75).unwrap();
         slot_b.set_param(101, 0.25).unwrap();
-        let exit = slot_b.start_tone_save().unwrap().recv_timeout(Duration::from_secs(2)).unwrap().unwrap();
+        let exit = slot_b.start_tone_save().unwrap().recv_timeout(PATIENCE).unwrap().unwrap();
         assert_eq!(tone::decode(&exit).unwrap().state, b"slot b", "an export or the exit still gets what B plays");
         slot_a.unload().unwrap();
         assert_eq!(stored(&dir).as_deref(), Some(&b"imported"[..]), "the store keeps the import");
@@ -1166,10 +1173,10 @@ mod engine {
         let (first, second) = (refusing(|o| &o.refuse_state), fresh());
         let (handle, _) = load_observed(&device, 0, vec![first, second.clone()], Some(dir.binding(0, identity())));
         assert_eq!(handle.tone(), Some(ToneRestore::Failed), "refused, reported");
-        assert!(wait_for(2000, || second.processes.load(Relaxed) > 4), "and the load went on");
+        assert!(wait_for(|| second.processes.load(Relaxed) > 4), "and the load went on");
         // The app's exit: a save asked of every slot, then the unload. Neither writes the defaults over
         // the tone the plugin refused (a reinstalled version of it may take it again).
-        let exit = handle.start_tone_save().unwrap().recv_timeout(Duration::from_secs(2)).unwrap().unwrap();
+        let exit = handle.start_tone_save().unwrap().recv_timeout(PATIENCE).unwrap().unwrap();
         assert_eq!(tone::decode(&exit).unwrap().state, b"", "the save still hands back what plays: the defaults");
         assert_eq!(stored(&dir).as_deref(), Some(&b"state v"[..]), "the exit's save leaves the stored tone alone");
         handle.unload().unwrap();
@@ -1195,7 +1202,7 @@ mod engine {
         assert_eq!(first.activations.load(Relaxed), 0, "the instance that took part of the tone never ran");
         assert!(first.destroy_seq.load(Relaxed) > 0, "it was destroyed");
         assert_eq!(second.state_loads.load(Relaxed), 0, "a fresh instance never saw the tone");
-        assert!(wait_for(2000, || second.processes.load(Relaxed) > 4), "and it runs");
+        assert!(wait_for(|| second.processes.load(Relaxed) > 4), "and it runs");
         let taken = tone::decode(&handle.take_tone().unwrap()).unwrap();
         assert!(taken.state.is_empty(), "at its true defaults: {:?}", String::from_utf8_lossy(&taken.state));
         handle.unload().unwrap();
@@ -1233,14 +1240,14 @@ mod engine {
         // SAFETY: the host lives while the plugin is loaded; `request_callback` is thread-safe.
         unsafe { ((*host).request_callback.unwrap())(host) };
         let before = FLOODED.load(Relaxed);
-        assert!(wait_for(2000, || FLOODED.load(Relaxed) > before + 1000), "the flood runs on the owner thread");
+        assert!(wait_for(|| FLOODED.load(Relaxed) > before + 1000), "the flood runs on the owner thread");
         let listed = handle.list_params().map(|params| params.len());
         // Off this thread, so a stuck owner fails the test instead of hanging it.
         let (unloaded_tx, unloaded) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let _ = unloaded_tx.send(handle.unload());
         });
-        let unloaded = unloaded.recv_timeout(Duration::from_secs(10));
+        let unloaded = unloaded.recv_timeout(PATIENCE);
         assert_eq!(listed, Ok(2), "a request is still answered");
         assert!(matches!(unloaded, Ok(Ok(()))), "and the unload finishes: {unloaded:?}");
     }
@@ -1251,18 +1258,18 @@ mod engine {
         let device = device(48_000);
         let obs = Arc::new(Observed::default());
         let (handle, _) = load(&device, 0, &obs);
-        assert!(wait_for(2000, || obs.processes.load(Relaxed) > 4));
+        assert!(wait_for(|| obs.processes.load(Relaxed) > 4));
 
         device.rebuild_at(44_100, 1024);
         assert!(
-            wait_for(2000, || obs.activations.load(Relaxed) == 2 && obs.starts.load(Relaxed) == 2),
+            wait_for(|| obs.activations.load(Relaxed) == 2 && obs.starts.load(Relaxed) == 2),
             "the owner took the unit back and reinstalled it"
         );
         assert_eq!(f64::from_bits(obs.activated_rate.load(Relaxed)), 44_100.0, "re-activated at the new rate");
         assert_eq!(obs.activated_max_frames.load(Relaxed), 1024, "and the new engine's block");
         assert_eq!((obs.stops.load(Relaxed), obs.deactivations.load(Relaxed)), (1, 1));
         let processed = obs.processes.load(Relaxed);
-        assert!(wait_for(2000, || obs.processes.load(Relaxed) > processed + 4), "the new engine processes it");
+        assert!(wait_for(|| obs.processes.load(Relaxed) > processed + 4), "the new engine processes it");
         assert!(installed(&device, 0).is_some());
         assert!(!obs.contract_violation.load(Relaxed));
         handle.unload().unwrap();
