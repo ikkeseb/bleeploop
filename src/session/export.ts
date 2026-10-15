@@ -14,9 +14,8 @@ import type { SessionMasterKind } from './session-schema';
 import type { SessionSource } from './session-source';
 import { encodeWav, mixStereo } from './wav';
 import { makeZip } from './zip';
-import { prepareStemArchive, exportBase } from './stem-archive';
+import { prepareStemArchive, exportBase, snapshotBars } from './stem-archive';
 import { slotLetter, takeSlotTones } from '../ui/state/slot-tones';
-import { framesPerBar } from '../ui/state/quantize';
 
 function download(bytes: Uint8Array<ArrayBuffer> | string, filename: string, mime: string): void {
   const blob = new Blob([bytes], { type: mime });
@@ -82,7 +81,7 @@ export async function buildExportBundle(
   if (snap.masterLengthFrames <= 0 || snap.tracks.length === 0) return null; // button should already guard this
   const base = exportBase();
   const sr = snap.sampleRate;
-  const meta = { bpm: snap.bpm, bars: Math.max(1, Math.round(snap.masterLengthFrames / framesPerBar(snap.bpm, sr))) };
+  const meta = { bpm: snap.bpm, bars: Math.max(1, Math.round(snapshotBars(snap))) };
   const { entries, session } = prepareStemArchive(snap, meta, base, options.stemFormat ?? 'float32');
 
   if (withMaster) {

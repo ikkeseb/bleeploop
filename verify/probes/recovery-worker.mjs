@@ -26,7 +26,7 @@ await probe(async ({ open }) => {
     const { decodeWav } = await import('/src/session/wav.ts');
     const request = (sample) => ({
       snapshot: {
-        sampleRate: 48000, masterLengthFrames: 4,
+        sampleRate: 48000, masterLengthFrames: 4, bpm: 120, meter: { num: 4, den: 4, beats: 4 },
         tracks: [{ index: 0, pcm: new Float32Array([0, sample, -0.0000001, -1.75]),
           state: 'STOPPED', volume: 0.6, muted: true, reversed: true, fx: [] }],
       },

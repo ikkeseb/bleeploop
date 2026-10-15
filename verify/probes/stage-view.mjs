@@ -758,7 +758,12 @@ await probe(async ({ browser, open }) => {
       const playMoved = await moved(300);
       await emit({ events: [laneEvent(0, lane('Overdubbing', { length: LOOP }))] });
       await settle(400);
-      const dub = await census();
+      // A bar's flash (160 ms of a 2 s bar) widens the now line over the dub's amber head: of two
+      // censuses 200 ms apart, at least one falls outside it.
+      const dubs = [await census()];
+      await settle(200);
+      dubs.push(await census());
+      const dub = dubs[0].dub >= dubs[1].dub ? dubs[0] : dubs[1];
       await laterTake(true, 3 * BAR);
       await settle(300);
       const rec = await census();

@@ -14,6 +14,8 @@
  *   middle line turns into a bar line, read from the canvas pixels (the grid's cache must not keep 4/4).
  * - The stage view: a one-bar 6/8 loop (two beats) pulses on its beats and its downbeat (the beat check
  *   read a two-beat loop's every forward step as a step back), and the HUD shows two dots and bar 1 / 1.
+ *   The beat check alone (`stepLight` on a scripted phase), in loops of four and two beats: a wrap pulses the downbeat, and a
+ *   clock correction back over a beat line and on again pulses nothing early and nothing twice.
  * - The kept meter: the meter the engine applied is kept (`lf.meter`), a fresh engine that lacks it gets
  *   a `SetMeter`, its reset frame's 4/4 does not overwrite the kept one, and an engine that has it gets
  *   none.
@@ -22,7 +24,8 @@
  *   aria-label, so the label case of `transport-focus` does not arise here).
  *
  * Cannot see the native engine (lf-engine `tests/meter.rs` holds the click, the count-in and the bars),
- * the session file (a meter in session.json is not built), or a real device's timing. Screenshots of
+ * the session file (`verify/guards/import.mjs`, the `export-context` and `session-state-roundtrip`
+ * probes), or a real device's timing. Screenshots of
  * the command bar land in logs/meter-picker/ for the eye.
  * Run: pnpm probe meter-picker
  */
@@ -235,6 +238,49 @@ await probe(async ({ open }) => {
   assert.deepEqual(hud, { dots: 2, bar: '1 / 1' }, 'the stage HUD shows the 6/8 dots and bar');
   await page.keyboard.press('Escape');
   await page.waitForSelector('.sv', { state: 'detached', timeout: 3000 });
+
+  // The beat check itself, frame by frame (`stepLight`, the stage closed, the loop's phase scripted): a
+  // loop wrapping, and a clock correction that steps the phase back over a beat line, then on again,
+  // pulses nothing early and nothing twice. One loop is one bar, so beat 0 is the bar's pulse.
+  const sequences = [
+    { name: 'four beats, a wrap', n: 4, phases: [0.6, 0.74, 0.76, 0.99, 0.01, 0.2, 0.26], want: [3, 0, 1] },
+    { name: 'four beats, a correction back over beat 2 and on', n: 4, phases: [0.1, 0.26, 0.24, 0.245, 0.25, 0.3, 0.5], want: [1, 2] },
+    { name: 'four beats, a correction back over the downbeat', n: 4, phases: [0.9, 0.01, 0.99, 0.995, 0.005, 0.1, 0.25], want: [0, 1] },
+    { name: 'two beats, a wrap', n: 2, phases: [0.2, 0.49, 0.51, 0.99, 0.02, 0.4, 0.6], want: [1, 0, 1] },
+    { name: 'two beats, a correction back over beat 2 and on', n: 2, phases: [0.3, 0.51, 0.49, 0.495, 0.5, 0.9, 0.02], want: [1, 0] },
+    { name: 'two beats, a correction back over the downbeat', n: 2, phases: [0.9, 0.01, 0.99, 0.995, 0.005, 0.3, 0.55], want: [0, 1] },
+  ];
+  const crossed = await page.evaluate(async (sequences) => {
+    const { light, resetLight, stepLight } = await import('/src/ui/stage/visual.ts');
+    const { feed } = await import('/src/ui/stage/stage-feed.ts');
+    const { looper } = await import('/src/ui/state/audio.ts');
+    const kept = { phaseValue: looper.phaseValue, masterFramesValue: looper.masterFramesValue,
+      moving: feed.moving, beatsPerLoop: feed.beatsPerLoop, beatsPerBar: feed.beatsPerBar };
+    let phase = 0;
+    try {
+      looper.phaseValue = () => phase;
+      looper.masterFramesValue = () => 48000;
+      feed.moving = true;
+      return sequences.map(({ n, phases }) => {
+        feed.beatsPerLoop = n;
+        feed.beatsPerBar = n;
+        resetLight();
+        const out = [];
+        phases.forEach((p, k) => {
+          phase = p;
+          const now = 1e6 + 16 * k;
+          stepLight(now);
+          if (light.beatAt === now) out.push(light.beatBar ? 'bar' : 'beat');
+        });
+        return out;
+      });
+    } finally {
+      Object.assign(looper, { phaseValue: kept.phaseValue, masterFramesValue: kept.masterFramesValue });
+      Object.assign(feed, { moving: kept.moving, beatsPerLoop: kept.beatsPerLoop, beatsPerBar: kept.beatsPerBar });
+    }
+  }, sequences);
+  sequences.forEach((seq, i) => assert.deepEqual(crossed[i], seq.want.map((b) => (b === 0 ? 'bar' : 'beat')),
+    `the beat check, ${seq.name}: pulses ${JSON.stringify(crossed[i])}`));
 
   // ── The kept meter across engines ─────────────────────────────────────────────────────────────────
   // A fresh engine (no SetMeter in its settings, 4/4 on its Transport) gets the kept 6/8, and its 4/4

@@ -7,7 +7,8 @@
  * - a state-only change (a PLAYING lane the engine reports STOPPED, no PCM or mix edit) advances the
  *   recovery on the next normal autosave (no forced flush), where an unchanged jam saves nothing more;
  * - a reloaded page (a fresh engine) loads that jam back with both lanes STOPPED, the lane that played
- *   when it was first saved included.
+ *   when it was first saved included, in its meter and bars (the jam is three bars of 3/4, which 4/4
+ *   would call 2.25 bars: a recovery that counted 4/4 bars would not save at all).
  *
  * Cannot see the native engine (what a load or PLAY ALL does to the lanes: lf-engine `tests/session.rs`
  * and `tests/fade.rs`), Tauri IPC or the rig: the fake answers no command by itself.
@@ -17,7 +18,8 @@ import assert from 'node:assert/strict';
 import { probe } from '../harness/probe.ts';
 
 const RATE = 48000;
-const FRAMES = Math.round(RATE * 0.8); // one bar at 300 BPM
+const THREE = { num: 3, den: 4, beats: 3 };
+const FRAMES = 3 * Math.round(RATE * 0.6); // three bars of 3/4 at 300 BPM
 
 const lane = (state) => ({
   state,
@@ -49,12 +51,12 @@ await probe(async ({ browser, open }) => {
     await page.evaluate(async ([states, frames]) => {
       const { encodeSessionBytes } = await import('/src/platform/engine-wire.ts');
       window.__lf.native.snapshotBytes = encodeSessionBytes(
-        { rate: 48000, masterLengthFrames: frames, bpm: 300,
+        { rate: 48000, masterLengthFrames: frames, bpm: 300, meter: { num: 3, den: 4, beats: 3 },
           tracks: states.map((state, index) => ({ index, frames, reversed: false, state })) },
         states.map((_, index) => new Float32Array(frames).fill((index + 1) * 0.1)),
       ).buffer;
     }, [states, FRAMES]);
-    await emit({ events: [{ Transport: { frame: 0, master: FRAMES, bpm: 300, locked: true } }, ...states.map((s, i) => laneEvent(i, lane(s)))] });
+    await emit({ events: [{ Transport: { frame: 0, master: FRAMES, bpm: 300, meter: THREE, locked: true } }, ...states.map((s, i) => laneEvent(i, lane(s)))] });
   };
   await emit({
     reset: true,
@@ -68,7 +70,9 @@ await probe(async ({ browser, open }) => {
   await page.evaluate(async (frames) => {
     const { session } = await import('/src/ui/state/audio.ts');
     const { defaultFxStates } = await import('/src/ui/state/fx-metadata.ts');
-    await session.loadSession({ bpm: 300, bars: 1, masterLengthFrames: frames, tracks: [0, 1].map((index) => ({
+    const { TIME_SIGNATURES } = await import('/src/platform/engine-wire.ts');
+    const meter = TIME_SIGNATURES.find((m) => m.num === 3 && m.den === 4);
+    await session.loadSession({ bpm: 300, meter, bars: 3, masterLengthFrames: frames, tracks: [0, 1].map((index) => ({
       index, pcm: new Float32Array(frames).fill((index + 1) * 0.1), volume: 1, muted: false, reversed: false,
       state: index === 0 ? 'PLAYING' : 'STOPPED', fx: defaultFxStates() })) });
   }, FRAMES);
@@ -112,5 +116,6 @@ await probe(async ({ browser, open }) => {
   });
   console.log('restored', JSON.stringify(restored));
   assert.deepEqual(restored.tracks.map((t) => [t.index, t.state]), [[0, 'Stopped'], [1, 'Stopped']], 'the jam comes back with both lanes STOPPED');
+  assert.deepEqual([restored.meter, restored.bars], [THREE, 3], 'the jam comes back in its meter: three bars of 3/4');
   await context.close();
 });

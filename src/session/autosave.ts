@@ -16,12 +16,11 @@
  */
 import { notifyError, notifyInfo } from '../notify';
 import { encodeRecovery } from './recovery-encode';
-import { exportBase, type StemSnapshot } from './stem-archive';
+import { exportBase, snapshotBars, type StemSnapshot } from './stem-archive';
 import { importSession } from './import';
 import type { SessionSource } from './session-source';
 import type { FxState } from '../ui/state/fx-metadata';
 import { parseZip } from './unzip';
-import { framesPerBar } from '../ui/state/quantize';
 
 const DB_NAME = 'bleeploop';
 const DB_VERSION = 1;
@@ -323,10 +322,10 @@ async function persistCurrent(snapshot = inspectJam()): Promise<string> {
 async function saveSnapshot(committed: StemSnapshot): Promise<void> {
   const bpm = committed.bpm;
   const masterFrames = committed.masterLengthFrames;
-  const perBar = framesPerBar(bpm, committed.sampleRate);
-  const bars = masterFrames / perBar;
+  const bars = snapshotBars(committed);
   if (!Number.isInteger(bars) || bars < 1) {
-    throw new Error(`Current loop grid is not whole bars (${masterFrames} frames at ${bpm} BPM)`);
+    const { num, den } = committed.meter;
+    throw new Error(`Current loop grid is not whole bars (${masterFrames} frames at ${bpm} BPM in ${num}/${den})`);
   }
   // The snapshot holds copies of the PCM with each lane's state as it was read. The serialized save
   // queue keeps a slow encode/write from overtaking a newer save or CLEAR ALL.
