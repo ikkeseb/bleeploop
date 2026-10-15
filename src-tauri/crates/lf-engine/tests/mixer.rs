@@ -1,7 +1,8 @@
-//! The mix a lane and the master go through (`src/audio/looper/mixer.ts`, `src/audio/master.ts`): lane
-//! volume (0..1.5) and mute, master volume (0..1) and mute, each gliding to its target like Web Audio's
-//! setTargetAtTime (10 ms for a lane, 12 ms for the master) rather than stepping, and a lane that stays
-//! in sync while muted. The rig guards never heard the mix; the rendered output is checked here.
+//! The mix a lane and the master go through (the removed `src/audio/looper/mixer.ts` and
+//! `src/audio/master.ts`, deleted in Stage 6): lane volume (0..1.5) and mute, master volume (0..1) and
+//! mute, each gliding to its target like Web Audio's setTargetAtTime (10 ms for a lane, 12 ms for the
+//! master) rather than stepping, and a lane that stays in sync while muted. The rig guards never heard
+//! the mix; the rendered output is checked here.
 
 mod common;
 

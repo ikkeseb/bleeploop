@@ -1,8 +1,9 @@
 //! OWNS: the export's wet master, rendered offline by a fresh [`Engine`] the size of the session: the
 //! live path by construction (the lanes, their FX chains, the reverb bus, the master volume and the
 //! limiter), not a second mixer. The host renders it beside an export's snapshot
-//! (`src-tauri/src/engine_io/session.rs`). Ported from the Tone render it replaced (`src/session/render.ts`
-//! and `render-plan.ts` on Tone's OfflineContext, removed with Tone; git history keeps them at d53cd3d7).
+//! (`src-tauri/src/engine_io/session.rs`). Ported from the Tone render it replaced
+//! (`src/session/render.ts`, removed with Tone, and `render-plan.ts` on its OfflineContext; git history
+//! keeps them at d53cd3d7).
 //!
 //! [`wet_master`] loads the session through the engine's own session path while no device runs
 //! ([`Engine::service_session_idle`]) with every lane PLAYING (a lane saved STOPPED is in the master; a

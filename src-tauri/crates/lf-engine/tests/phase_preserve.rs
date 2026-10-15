@@ -1,6 +1,6 @@
-//! Ports verify/guards/phase-preserve.mjs: the PHASE-PRESERVING COMMIT. The grid a first take commits
-//! to is the counted downbeat, a whole number of loops back from the commit, never the commit instant;
-//! later takes and resumes join the running phase; an idle PLAY restarts from the top.
+//! Ports the removed verify/guards/phase-preserve.mjs: the PHASE-PRESERVING COMMIT. The grid a first take
+//! commits to is the counted downbeat, a whole number of loops back from the commit, never the commit
+//! instant; later takes and resumes join the running phase; an idle PLAY restarts from the top.
 //!
 //! Its section E (the Web Audio source's start offset, advanced by a late start) has no engine
 //! counterpart: a lane reads loop position `(frame - anchor) mod master` on every frame, so there is no
@@ -214,9 +214,9 @@ fn play_beside_an_armed_lane_joins_and_idle_play_beats_the_master_grid() {
 
 #[test]
 fn a_join_beside_a_muted_lane_stopping_at_the_loop_end_keeps_the_live_phase() {
-    // verify/probes/playback-restart.mjs's live join: a muted lane waiting for its loop-end stop still
-    // holds the transport, so a lane started beside it joins the running phase (no re-anchor, not from
-    // its top) and plays on past that lane's stop.
+    // The removed verify/probes/playback-restart.mjs's live join: a muted lane waiting for its loop-end
+    // stop still holds the transport, so a lane started beside it joins the running phase (no re-anchor,
+    // not from its top) and plays on past that lane's stop.
     let (mut rig, _, master) = committed_take(120, 48000, 2, 0.05);
     rig.press(Command::Copy(0));
     rig.idle();

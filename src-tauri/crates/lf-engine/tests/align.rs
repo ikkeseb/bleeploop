@@ -1,5 +1,5 @@
-//! The take alignment that replaces verify/guards/record-compensation.mjs. That guard proved the Web
-//! Audio compensation C (a formula over bridge queues, output latencies and a by-ear trim) and is
+//! The take alignment that replaces the removed verify/guards/record-compensation.mjs. That guard proved
+//! the Web Audio compensation C (a formula over bridge queues, output latencies and a by-ear trim) and is
 //! deleted, not ported: the engine has one clock, and a take starts exactly `align_frames` (the driver's
 //! input + output latency) plus the plugin's reported latency plus the master limiter's pre-delay after
 //! its downbeat. What the player played to the click then lands on the grid: the first take's frame 0, a
