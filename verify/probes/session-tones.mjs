@@ -21,7 +21,7 @@ const RATE = 48000;
 const MASTER = 2 * RATE; // one bar at 120 BPM
 
 await probe(async ({ open }) => {
-  const { page, consoleErrors } = await open({
+  const { page } = await open({
     init: async (p) => {
       // The stand-in native host must be available at boot, as the Tauri one is.
       await p.route('**/src/platform/host.web.ts', async (route) => {
@@ -392,5 +392,4 @@ await probe(async ({ open }) => {
   assert.match(out.tooBig.error ?? '', /tone/, `an oversized tone entry is refused: ${out.tooBig.error}`);
   assert.deepEqual(out.tooBig.calls, [], 'before anything reaches the host');
   assert.equal(out.loadedSessions, 6, 'the six imports that passed reached the engine');
-  assert.deepEqual(consoleErrors, [], 'no console errors');
 });

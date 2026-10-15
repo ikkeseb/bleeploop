@@ -46,7 +46,7 @@ const peaks = (i, bins, t) => ({
 
 await probe(async ({ browser, open }) => {
   const context = await browser.newContext({ viewport: { width: 1600, height: 900 } });
-  const { page, consoleErrors } = await open({
+  const { page } = await open({
     context,
     init: (p) =>
       p.addInitScript(() => {
@@ -150,6 +150,5 @@ await probe(async ({ browser, open }) => {
   await page.waitForTimeout(500);
   assert.deepEqual((await latestStems())[0].head, layered.map((x) => Math.fround(x)), 'the committed layer is in the save');
   assert.equal((await puts()).filter((at) => at > committedAt).length, 2, 'two commits, two saves');
-  assert.deepEqual(consoleErrors, [], 'no console errors');
   await context.close();
 });

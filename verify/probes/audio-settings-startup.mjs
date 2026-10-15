@@ -147,4 +147,5 @@ await probe(async ({ open }) => {
   });
   console.log(JSON.stringify({ blocked }));
   assert.deepEqual(blocked, { ready: false, init: true, scanned: false }, 'a failed startup blocks the native host and a following manual scan');
+  assert.equal(failed.consumeConsoleErrors('[app] engine boot failed Error: Injected failed startup').length, 1, 'the failed startup reaches the release log');
 }, { launch: {} });

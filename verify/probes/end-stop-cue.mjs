@@ -41,7 +41,7 @@ const laneEvent = (i, info, frame = 0) => ({ Lane: { frame, lane: i, info } });
 const anchorAt = (frame) => ({ frame, atMs: Date.now(), rate: RATE, grid: 0 });
 
 await probe(async ({ open }) => {
-  const { page, consoleErrors } = await open({
+  const { page } = await open({
     viewport: { width: 1280, height: 720 },
     init: (p) => p.addInitScript(() => void (window.__lfEngineFake = true)),
   });
@@ -110,5 +110,4 @@ await probe(async ({ open }) => {
   assert.equal(stopped.playStop.label, 'Track 1 play');
   assert.equal(await button('Track 1 stop now').count(), 0, 'no stop-now control once stopped');
   assert.ok(!(await button('Track 1 reverse').isDisabled()), 'a stopped lane reverses again');
-  assert.deepEqual(consoleErrors, [], 'no console errors');
 });

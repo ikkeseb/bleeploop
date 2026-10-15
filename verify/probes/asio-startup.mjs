@@ -37,7 +37,7 @@ await probe(async ({ open }) => {
   /** A fresh app whose saved device settings are `saved`, whose host reports `initial` before any probe
    * and answers each probe with the next status of `plan`; runs `body` in the page once boot scanned. */
   async function scenario(name, saved, initial, plan, body) {
-    const { page, consoleErrors } = await open({
+    const { page } = await open({
       viewport: { width: 1100, height: 760 },
       init: async (p) => {
         await p.route('**/src/platform/host.web.ts*', async (route) => {
@@ -128,7 +128,6 @@ await probe(async ({ open }) => {
     })()`);
     await page.screenshot({ path: `logs/layout/asio-startup-${name}.png` });
     console.log(name, JSON.stringify(result));
-    assert.deepEqual(consoleErrors, [], `${name}: no console errors`);
     await page.close();
     return result;
   }

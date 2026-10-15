@@ -23,7 +23,7 @@ import assert from 'node:assert/strict';
 import { probe } from '../harness/probe.ts';
 
 await probe(async ({ open }) => {
-  const { page, consoleErrors } = await open({
+  const { page } = await open({
     init: (p) => p.addInitScript(() => void (window.__lfEngineFake = true)),
   });
   await page.waitForFunction(() => window.__lf.native.opened.length === 1);
@@ -122,5 +122,4 @@ await probe(async ({ open }) => {
   assert.deepEqual(hidden.map((e) => e.note && { owner: e.note.owner, on: e.note.on }), [{ owner: 'key:KeyS', on: false }], 'hiding the keyboard releases its hold under its owner');
   await page.keyboard.up('s');
   await page.evaluate(() => window.__lf.layoutStore.setKeyboardPlacement('bottom'));
-  assert.deepEqual(consoleErrors, [], 'no console errors');
 });

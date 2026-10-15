@@ -76,7 +76,7 @@ await probe(async ({ open }) => {
     return app;
   };
 
-  const { page } = await openGuardedPage();
+  const { page, consumeConsoleErrors } = await openGuardedPage();
   const result = await page.evaluate(async () => {
     const lf = window.__lf;
     await lf.autosave.ready();
@@ -121,6 +121,7 @@ await probe(async ({ open }) => {
   });
   console.log(JSON.stringify(result, null, 2));
   assert.ok(result.pass, JSON.stringify(result));
+  assert.equal(consumeConsoleErrors('[app] autosave flush before close failed').length, 1, 'the aborted save reaches the release log');
 
   // ── Closing during the FIRST take ───────────────────────────────────────────────────────
   // RECORDING makes the jam non-blank while nothing is committed and the master grid is still 0

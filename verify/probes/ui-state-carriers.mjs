@@ -75,7 +75,7 @@ async function pressToggle(page, name, state, echo) {
 }
 
 await probe(async ({ open }) => {
-  const { page, consoleErrors } = await open({
+  const { page, consumeConsoleErrors } = await open({
     viewport: { width: 1280, height: 820 },
     init: (p) => p.addInitScript(() => void (window.__lfEngineFake = true)),
   });
@@ -131,9 +131,7 @@ await probe(async ({ open }) => {
   assert.deepEqual(await lampState(), { warn: false, engine: 'running' }, 'a running device: the lamp is neutral');
   await emit({ status: null, device: [{ Lost: { backend: 'Wasapi', reason: 'the device was unplugged' } }] });
   assert.deepEqual(await lampState(), { warn: true, engine: 'no device open' }, 'a lost device: the lamp is amber');
-  const lostLog = consoleErrors.findIndex((e) => e.includes('device lost'));
-  assert.ok(lostLog >= 0, 'the lost device is logged');
-  consoleErrors.splice(lostLog, 1);
+  assert.equal(consumeConsoleErrors('device lost').length, 1, 'the lost device is logged');
   await emit({ status: STATUS });
   assert.deepEqual(await lampState(), { warn: false, engine: 'running' }, 'the device back: the lamp is neutral again');
 
@@ -237,5 +235,4 @@ await probe(async ({ open }) => {
   assert.equal(laneSent.filter((c) => c.Reverse === 0 || c.ActionOn?.[1] === 'Reverse').length, 2, 'REV sends the reverse on each press');
   assert.deepEqual(unstable, [], 'these toggles change their name with their state or lose aria-pressed');
   assert.equal(recordingCorePressed, null, 'the lane core names its action; it must not also claim a pressed state');
-  assert.deepEqual(consoleErrors, [], 'no console errors');
 });

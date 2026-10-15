@@ -54,7 +54,7 @@ await probe(async ({ browser, open }) => {
 
   // 1. The browser build.
   {
-    const { page, consoleErrors } = await open({ context, viewport: { width: 1280, height: 820 } });
+    const { page } = await open({ context, viewport: { width: 1280, height: 820 } });
     // scripts/release-smoke.mjs reads the build line as `?` opens Help, on the reference tab: the
     // manual's About must be in the DOM there too.
     await page.getByRole('button', { name: 'Help', exact: true }).click();
@@ -74,13 +74,12 @@ await probe(async ({ browser, open }) => {
     }
     assert.ok(!lines.some((l) => l.startsWith('Sample rate')), 'a sample rate without a device');
     assert.ok(!lines.some((l) => l.startsWith('Log folder')), 'a log line without a log file');
-    assert.deepEqual(consoleErrors, [], 'console errors');
     await page.close();
   }
 
   // 2. A log folder and a loaded plugin, as the Windows app has them (engine mode, on the fake).
   {
-    const { page, consoleErrors } = await open({
+    const { page } = await open({
       context,
       viewport: { width: 1280, height: 820 },
       init: (p) => p.addInitScript(() => { window.__lfEngineFake = true; }),
@@ -107,13 +106,12 @@ await probe(async ({ browser, open }) => {
     assert.ok(lines.includes('Slot A: Probe Amp (VST3)'), 'the plugin line');
     assert.equal(lines.at(-1), `Log folder: ${LOG_DIR}`, 'the log line');
     assert.ok(!lines.some((l) => l.includes('amp.vst3')), 'a plugin path in the block');
-    assert.deepEqual(consoleErrors, [], 'console errors');
     await page.close();
   }
 
   // 3. Engine mode: the device that runs.
   {
-    const { page, consoleErrors } = await open({
+    const { page } = await open({
       context,
       viewport: { width: 1280, height: 820 },
       init: (p) => p.addInitScript(() => { window.__lfEngineFake = true; }),
@@ -125,7 +123,6 @@ await probe(async ({ browser, open }) => {
       assert.ok(lines.includes(line), `missing "${line}"`);
     }
     assert.ok(lines.some((l) => /^Buffer: \d+ frames$/.test(l)), 'the buffer');
-    assert.deepEqual(consoleErrors, [], 'console errors');
     await page.close();
   }
 

@@ -51,7 +51,7 @@ const playing = () => lane('Playing', { length: BAR, canReverse: true });
 const transport = (master) => ({ Transport: { frame: 0, master, bpm: 120, locked: master > 0 } });
 
 await probe(async ({ open }) => {
-  const { page, consoleErrors } = await open({
+  const { page, consumeConsoleErrors } = await open({
     viewport: { width: 1600, height: 900 },
     init: (p) => p.addInitScript(() => void (window.__lfEngineFake = true)),
   });
@@ -147,8 +147,7 @@ await probe(async ({ open }) => {
   console.log('(a) refused select', JSON.stringify({ before, after: selectBack }));
   assert.equal(selectBack, before, 'a refused division goes back to the applied one');
   await seam('refuseMix', false);
-  assert.ok(consoleErrors.some((e) => e.includes('input batch failed')), 'a refused batch reaches the release log');
-  consoleErrors.length = 0;
+  assert.ok(consumeConsoleErrors('input batch failed').length > 0, 'a refused batch reaches the release log');
   await fxDrawer(false);
   await blur();
   // A command the engine has not applied yet: the fader keeps the request until the engine reports it.
@@ -371,7 +370,6 @@ await probe(async ({ open }) => {
   console.log('(g)', JSON.stringify({ engineVolume: await applied(0), saves }));
   assert.equal(saves, 2, 'the save that pinned B leaves the jam dirty at A: one more save, then none');
 
-  assert.deepEqual(consoleErrors, [], 'no console errors');
 });
 
 /** The looper lanes. */

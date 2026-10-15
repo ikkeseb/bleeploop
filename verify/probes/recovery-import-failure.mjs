@@ -134,7 +134,7 @@ async function saveJam(browser, open, tracks) {
 await probe(async ({ open, browser }) => {
   const results = [];
   for (const scenario of scenarios) {
-    const { page, pageErrors: errors, consoleErrors: reportedFailures, context, prepared } = await saveJam(browser, open, [
+    const { page, pageErrors: errors, consumeConsoleErrors, context, prepared } = await saveJam(browser, open, [
       { base: 0.1, slope: 0.01, volume: 0.5, muted: false },
       { base: 0.2, slope: 0.01, volume: 0.75, muted: true },
     ]);
@@ -238,12 +238,13 @@ await probe(async ({ open, browser }) => {
         && result.finish.tracks[1].volume === 0.75
         && !result.finish.tracks[0].muted
         && result.finish.tracks[1].muted;
+    const reportedFailures = consumeConsoleErrors('Jam recovery could not be restored');
     results.push({
       ...scenario,
       pass: result.injectedCalls >= 1
         && blank && exact(result.afterAutomaticWait)
         && exact(result.afterCloseFlush) && finishPassed && errors.length === 0
-        && reportedFailures.some((message) => message.includes('Jam recovery could not be restored')),
+        && reportedFailures.length > 0,
       errors,
       reportedFailures,
       expected: prepared,

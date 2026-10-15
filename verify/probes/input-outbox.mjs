@@ -53,7 +53,7 @@ const notes = (items) => words(items).filter((w) => /^(on|off):/.test(w) || w ==
 
 /** The app on the fake, its subscribe held until the probe lets it answer; helpers on its page. */
 async function app(open) {
-  const { page, consoleErrors } = await open({
+  const { page, consumeConsoleErrors } = await open({
     init: async (p) => {
       await p.addInitScript(() => void (window.__lfEngineFake = true));
       await p.addInitScript(() => void (window.__lfMidiSubscribeHold = new Promise((r) => (window.__lfReleaseSubscribe = r))));
@@ -64,7 +64,6 @@ async function app(open) {
   await page.evaluate(() => (document.activeElement instanceof HTMLElement ? document.activeElement.blur() : undefined));
   return {
     page,
-    consoleErrors,
     batches: () => page.evaluate(() => window.__lf.native.batches.map((b) => ({ epoch: b.epoch, items: b.items }))),
     count: () => page.evaluate(() => window.__lf.native.batches.length),
     tap: async (key) => {
@@ -74,7 +73,8 @@ async function app(open) {
     toasts: () => page.evaluate(() => window.__lf.notify.toasts().map((t) => [t.message, t.detail, t.count])),
     clearToasts: () => page.evaluate(() => window.__lf.notify.toasts().forEach((t) => window.__lf.notify.dismissToast(t.id))),
     seam: (name, value) => page.evaluate(([n, v]) => void (window.__lf.native[n] = v), [name, value]),
-    lines: (prefix) => consoleErrors.filter((e) => e.startsWith(prefix)).length,
+    /** The release-log lines with this text logged since the last ask, taken (the harness fails on any left). */
+    lines: (text) => consumeConsoleErrors(text).length,
   };
 }
 
@@ -168,6 +168,7 @@ await probe(async ({ open }) => {
   await page.keyboard.up('g');
   await page.waitForFunction((m) => window.__lf.native.batches.length === m + 4, mark);
   assert.equal(lines('[platform] the blur after a lost release failed'), 1);
+  assert.equal(lines('[platform] input batch failed'), 1, 'the lost release, logged once');
   mark = await count();
   await tap('h');
   await page.waitForFunction((m) => window.__lf.native.batches.slice(m).some((b) => b.items.some((i) => i.input?.note?.note === 69 && !i.input.note.on)), mark);
@@ -199,6 +200,8 @@ await probe(async ({ open }) => {
   await page.keyboard.up('w');
   await page.waitForFunction((m) => window.__lf.native.batches.length === m + 4, mark, { timeout: 5000 });
   assert.deepEqual(notes((await batches())[mark + 3].items), ['blur', 'off:61'], 'the owed blur leads the next batch');
+  assert.equal(lines('[platform] input batch failed'), 2, 'each batch with no answer is logged');
+  assert.equal(lines('[platform] the blur after a lost release failed'), 1, 'and so is the blur with none');
   await clearToasts();
 
   // ── What native MIDI dropped: told once, until a press goes through (a setting is none) ─────────────
@@ -215,14 +218,14 @@ await probe(async ({ open }) => {
   await seam('dropped', 'noDevice');
   await tap('y');
   await page.waitForTimeout(100);
-  assert.equal(droppedLines(), 1, 'a setting that went through is no press: not told again');
+  assert.equal(droppedLines(), 0, 'a setting that went through is no press: not told again');
   await seam('dropped', null);
   await tap('j');
   await page.waitForTimeout(50);
   await seam('dropped', 'noDevice');
   await tap('k');
   await page.waitForTimeout(100);
-  assert.equal(droppedLines(), 2, 'told again once a press went through');
+  assert.equal(droppedLines(), 1, 'told again once a press went through');
 
   // ── A page native MIDI no longer counts as current: logged once ───────────────────────────────────
   await seam('dropped', 'stale');
@@ -230,6 +233,6 @@ await probe(async ({ open }) => {
   await tap('s');
   await page.waitForTimeout(100);
   assert.equal(lines("[platform] native MIDI refused this page's input: epoch 2"), 1, 'logged once for its epoch');
-  assert.equal(droppedLines(), 2, 'and not told as a dropped press');
+  assert.equal(droppedLines(), 0, 'and not told as a dropped press');
   await seam('dropped', null);
 });

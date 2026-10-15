@@ -49,7 +49,7 @@ await probe(async ({ open }) => {
   const results = [];
 
   // ── The engine fake: a device, and every lane EMPTY ───────────────────────────────────────────────
-  const { page, consoleErrors } = await open({ init: (p) => p.addInitScript(() => void (window.__lfEngineFake = true)) });
+  const { page, consumeConsoleErrors } = await open({ init: (p) => p.addInitScript(() => void (window.__lfEngineFake = true)) });
   await page.waitForFunction(() => window.__lf.native.opened.length === 1, undefined, { timeout: 10000 });
   let seq = 0;
   const emit = (frame) => page.evaluate((f) => window.__lf.native.emit(f), { seq: ++seq, reset: false, events: [], ...frame });
@@ -274,11 +274,9 @@ await probe(async ({ open }) => {
   console.log(JSON.stringify(results, null, 2));
   assert.ok(results.every((result) => result.pass), JSON.stringify(results));
   // The injected render failure's fallback logs the one error this page may show, naming the engine's.
-  const fallbackLogs = consoleErrors.filter((text) => text.includes('[export] the engine rendered no wet master'));
+  const fallbackLogs = consumeConsoleErrors('[export] the engine rendered no wet master');
   assert.equal(fallbackLogs.length, 1, 'the fallback logs once');
   assert.ok(fallbackLogs[0].includes('an injected failure'), `the log carries the engine's error: ${fallbackLogs[0]}`);
-  const unexpected = consoleErrors.filter((text) => !text.includes('[export] the engine rendered no wet master'));
-  assert.deepEqual(unexpected, [], 'no other console errors');
 
   // ── A 44.1 kHz engine whose device stopped keeps its rate ─────────────────────────────────────────
   // An eight-bar loop at 120 BPM and 44.1 kHz (705600 frames, 16 s): the loop readout reads it so while
@@ -307,5 +305,4 @@ await probe(async ({ open }) => {
   console.log(JSON.stringify({ scene: '44.1 kHz loop readout', running, stopped }));
   assert.match(running, /^8 BARS · 16\.0 s$/, 'a running 44.1 kHz device reads its eight-bar loop');
   assert.match(stopped, /^8 BARS · 16\.0 s$/, 'the stopped device leaves the engine at 44.1 kHz: the loop still reads eight bars');
-  assert.deepEqual(slow.consoleErrors, [], 'no console errors at 44.1 kHz');
 });

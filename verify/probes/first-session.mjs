@@ -17,7 +17,7 @@
  * - CLEAR ALL's two presses (the second names the confirm) send `ClearAll`; the engine's clear empties
  *   the recovery, and a reload restores nothing.
  *
- * One filtered console error (`[transport] import failed`) is expected from the malformed import.
+ * One console error (`[transport] import failed`) is expected from the malformed import.
  * Cannot see the native engine: the take, its PCM and every lane state are scripted (a synth reaching
  * the take is lf-engine `tests/sound.rs`), nor the Rust side of the bytes or Tauri IPC.
  * Run: pnpm probe first-session
@@ -50,14 +50,7 @@ const laneEvent = (i, info) => ({ Lane: { frame: 0, lane: i, info } });
 const hash = (values) => createHash('sha256').update(Buffer.from(Float32Array.from(values).buffer)).digest('hex');
 
 await probe(async ({ open, browser }) => {
-  const errors = [];
-  const attach = (page) => {
-    page.on('console', (message) => {
-      if (message.type() === 'error' && !message.text().startsWith('[transport] import failed')) errors.push(message.text());
-    });
-    page.on('pageerror', (error) => errors.push(String(error)));
-    page.on('dialog', (dialog) => dialog.accept());
-  };
+  const attach = (page) => page.on('dialog', (dialog) => dialog.accept());
   let seq = 0;
   const emit = (page, frame) => page.evaluate((f) => window.__lf.native.emit(f), { seq: ++seq, reset: false, events: [], ...frame });
   const emptyEngine = (page) =>
@@ -70,13 +63,14 @@ await probe(async ({ open, browser }) => {
     });
   /** Open the app in `context` on the engine fake, once its device runs and recovery has started. */
   const openSession = async (context) => {
-    const { page } = await open({ context, init: async (p) => { attach(p); await p.addInitScript(() => void (window.__lfEngineFake = true)); } });
+    const app = await open({ context, init: async (p) => { attach(p); await p.addInitScript(() => void (window.__lfEngineFake = true)); } });
+    const { page } = app;
     await page.waitForFunction(() => window.__lf.native.opened.length === 1, undefined, { timeout: 5000 });
     await page.evaluate(() => Promise.race([
       window.__lf.autosave.ready(),
       new Promise((_, reject) => setTimeout(() => reject(new Error('Recovery startup timed out')), 10000)),
     ]));
-    return page;
+    return app;
   };
   const sent = (page) => page.evaluate(() => window.__lf.native.sent.slice());
   const clearSent = (page) => page.evaluate(() => void (window.__lf.native.sent.length = 0));
@@ -96,13 +90,13 @@ await probe(async ({ open, browser }) => {
   const waitSaved = async (page, expected) => {
     const deadline = Date.now() + 15000;
     while (await page.evaluate(() => window.__lf.autosave.hasSaved()) !== expected) {
-      assert.ok(Date.now() < deadline, `Recovery did not become ${expected ? 'saved' : 'empty'} (errors: ${JSON.stringify(errors)})`);
+      assert.ok(Date.now() < deadline, `Recovery did not become ${expected ? 'saved' : 'empty'}`);
       await page.waitForTimeout(100);
     }
   };
 
   const context = await browser.newContext({ viewport: { width: 1280, height: 820 }, acceptDownloads: true });
-  let page = await openSession(context);
+  let { page } = await openSession(context);
   await emptyEngine(page);
   assert.equal(await page.getByRole('button', { name: 'Export loops as a zip of WAV files' }).isDisabled(), true, 'nothing to export');
   assert.equal(await page.getByRole('button', { name: 'Import a session zip' }).isEnabled(), true, 'an empty looper imports');
@@ -195,7 +189,7 @@ await probe(async ({ open, browser }) => {
   await page.close();
 
   // ── Recovery: a reopened page loads the jam back into a fresh engine ────────────────────────────
-  page = await openSession(context);
+  ({ page } = await openSession(context));
   await page.waitForFunction(() => window.__lf.native.loadedSessions.length === 1, undefined, { timeout: 15000 });
   const restored = await loaded(page);
   console.log('restored', JSON.stringify(restored.header));
@@ -204,11 +198,13 @@ await probe(async ({ open, browser }) => {
 
   // ── Import the file into another entirely empty profile, not the recovery that just restored ─────
   const importing = await browser.newContext({ viewport: { width: 1280, height: 820 } });
-  page = await openSession(importing);
+  const importer = await openSession(importing);
+  page = importer.page;
   await emptyEngine(page);
   await page.locator('input[type=file]').setInputFiles({ name: 'broken.zip', mimeType: 'application/zip', buffer: Buffer.from('not a zip') });
   await page.getByText(/Import failed:/).waitFor();
   assert.equal(await loaded(page), null, 'a malformed zip loads nothing');
+  assert.equal(importer.consumeConsoleErrors('[transport] import failed').length, 1, 'and reaches the release log');
   const pickerPromise = page.waitForEvent('filechooser');
   await page.getByRole('button', { name: 'Import a session zip' }).click();
   await (await pickerPromise).setFiles(archivePath);
@@ -238,7 +234,6 @@ await probe(async ({ open, browser }) => {
   await page.evaluate(() => window.__lf.autosave.ready());
   await page.waitForTimeout(500);
   assert.equal(await loaded(page), null, 'a cleared session is not restored after a reload');
-  assert.deepEqual(errors, []);
   console.log(JSON.stringify({ pass: true, recorded: recorded.hashes, archiveBytes: archive.length,
     recoveryExact: true, importIntoFreshProfileExact: true, malformedImportRetried: true, clearSurvivedReload: true }));
   await importing.close();

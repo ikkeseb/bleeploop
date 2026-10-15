@@ -54,7 +54,7 @@ const transport = (master, locked) => ({ Transport: { frame: 0, master, bpm: 120
 const anchorAt = (frame) => ({ frame, atMs: Date.now(), rate: RATE, grid: 0 });
 
 await probe(async ({ open }) => {
-  const { page, consoleErrors } = await open({
+  const { page, consumeConsoleErrors } = await open({
     viewport: { width: 1600, height: 900 },
     init: (p) => p.addInitScript(() => void (window.__lfEngineFake = true)),
   });
@@ -149,11 +149,11 @@ await probe(async ({ open }) => {
   for (const message of ['Track 1: overdub layer discarded', 'Track 3: take discarded', 'Track 4: take 1 dropped']) {
     assert.ok(toasts.includes(message), `the player hears "${message}"`);
   }
-  const logged = consoleErrors.splice(0);
-  console.log('release log', JSON.stringify(logged));
-  assert.equal(logged.filter((e) => e.includes('rejected: input gap')).length, 2, 'each rejected take reaches the release log once');
-  assert.equal(logged.filter((e) => e.includes('dropped: input gap')).length, 1, 'the dropped pass reaches the release log once');
-  assert.equal(logged.length, 3, 'and nothing else');
+  const rejected = consumeConsoleErrors('rejected: input gap');
+  const dropped = consumeConsoleErrors('dropped: input gap');
+  console.log('release log', JSON.stringify([...rejected, ...dropped]));
+  assert.equal(rejected.length, 2, 'each rejected take reaches the release log once');
+  assert.equal(dropped.length, 1, 'the dropped pass reaches the release log once');
   await page.evaluate(() => {
     for (const t of window.__lf.notify.toasts()) window.__lf.notify.dismissToast(t.id);
   });
@@ -301,5 +301,4 @@ await probe(async ({ open }) => {
   const doubleDelete = await laneNow();
   assert.deepEqual(doubleDelete, { state: 'empty', cue: '' }, 'two Deletes in a row clear the track, no cue left');
 
-  assert.deepEqual(consoleErrors, [], 'no console errors');
 });

@@ -50,7 +50,7 @@ const anchorAt = (frame) => ({ frame, atMs: Date.now(), rate: RATE, grid: 0 });
 
 await probe(async ({ open }) => {
   await mkdir(outDir, { recursive: true });
-  const { page, consoleErrors } = await open({
+  const { page } = await open({
     viewport: { width: 1600, height: 900 },
     init: (p) => p.addInitScript(() => void (window.__lfEngineFake = true)),
   });
@@ -226,5 +226,4 @@ await probe(async ({ open }) => {
   };
   assert.ok(await headAfter(1, 0.5, 1), 'half a loop in, the lane spans the loop');
   assert.ok(await headAfter(2, 1.5, 2), '1.5 loops in, the lane spans two loops: the take runs on');
-  assert.deepEqual(consoleErrors, [], 'no console errors');
 });

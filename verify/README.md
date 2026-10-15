@@ -97,7 +97,10 @@ prints the reasons.
 
 1. Create `verify/probes/<name>.mjs` and call `probe(async ({ open }) => { … })` from
    `verify/harness/probe.ts` once. `open()` returns the page with `__lf` ready plus its console errors; an
-   uncaught page error fails the probe unless the page opts out with `allowPageErrors`.
+   uncaught page error fails the probe unless the page opts out with `allowPageErrors`, and so does any
+   `console.error` line the probe did not take with `consumeConsoleErrors(pattern)`, which returns the
+   lines it took for the probe to assert on. Take only the lines the probe provokes, by their text.
+   Screenshots go in `logs/<name>/`, which the harness empties when the probe starts.
 2. Assert with `node:assert`; a throw is a failure. Print the measurements the assertions read, so a red
    run's log is evidence.
 3. Write the header: what it drives, what it proves, what it cannot see, how to run it.

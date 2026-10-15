@@ -18,7 +18,7 @@ import assert from 'node:assert/strict';
 import { probe } from '../harness/probe.ts';
 
 await probe(async ({ open }) => {
-  const { page, consoleErrors } = await open({
+  const { page } = await open({
     viewport: { width: 1280, height: 820 },
     init: async (p) => {
       await p.route('**/src/platform/host.web.ts', async (route) => {
@@ -125,5 +125,4 @@ await probe(async ({ open }) => {
   assert.deepEqual(failures, [], 'every case holds');
 
   // (3) nothing logged as an error (probe also fails on pageerror / unhandled rejection).
-  assert.deepEqual(consoleErrors, [], `no console error: ${JSON.stringify(consoleErrors)}`);
 }, { launch: {} });

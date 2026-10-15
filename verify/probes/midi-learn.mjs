@@ -40,6 +40,7 @@
  */
 import assert from 'node:assert/strict';
 import { mkdir } from 'node:fs/promises';
+import { isDeepStrictEqual } from 'node:util';
 import { probe } from '../harness/probe.ts';
 
 const LEARN = '[aria-label="Learn a MIDI control for this action"]';
@@ -68,7 +69,7 @@ await probe(async ({ open }) => {
       ['2 MIDI bindings from the previous version need a port picked in Audio Settings', 'Until then they run nothing.'],
       ['1 MIDI binding from the previous version could not be read', 'Learn them again in Audio Settings.'],
     ], 'the import tells what waits for a port and what it could not read');
-    assert.deepEqual(told.consoleErrors, [
+    assert.deepEqual(told.consumeConsoleErrors(/^\[midi\]/), [
       '[midi] stored web binding 3 not imported: missing field `action`',
       '[midi] 2 MIDI bindings from the previous version need a port picked in Audio Settings',
     ]);
@@ -90,8 +91,8 @@ await probe(async ({ open }) => {
     await unreadable.page.waitForTimeout(200);
     const calls = await unreadable.page.evaluate(() => window.__lf.native.midiCalls.map((c) => c[0]));
     assert.ok(!calls.includes('importLegacy'), `a key that cannot be read hands nothing over: ${calls}`);
-    assert.ok(
-      unreadable.consoleErrors.some((e) => e.startsWith('[midi] the stored web bindings could not be read; none handed over this launch')),
+    assert.equal(
+      unreadable.consumeConsoleErrors('[midi] the stored web bindings could not be read; none handed over this launch').length, 1,
       `and the release log says so: ${JSON.stringify(unreadable.consoleErrors)}`,
     );
     assert.deepEqual((await toastsOf(unreadable.page)).map(([m]) => m), ['Could not read the MIDI bindings from the previous version'], 'and the player hears it');
@@ -105,11 +106,11 @@ await probe(async ({ open }) => {
     });
     await refused.page.waitForFunction(() => window.__lf.notify.toasts().length >= 1, undefined, { timeout: 5000 });
     assert.deepEqual((await toastsOf(refused.page)).map(([m]) => m), ['Could not read the MIDI bindings from the previous version'], 'a refused import is told');
-    assert.ok(refused.consoleErrors.some((e) => e.startsWith('[midi] importing the stored web bindings failed')));
+    assert.equal(refused.consumeConsoleErrors('[midi] importing the stored web bindings failed').length, 1, 'with its release-log line');
     await refused.page.close();
   }
 
-  const { page, consoleErrors } = await open({
+  const { page, consumeConsoleErrors } = await open({
     init: async (p) => {
       await p.addInitScript(() => void (window.__lfEngineFake = true));
       await p.addInitScript((legacy) => localStorage.setItem('lf.midiLearn', legacy), LEGACY);
@@ -130,20 +131,28 @@ await probe(async ({ open }) => {
   /** The native MIDI calls, each without the page's epoch it carries (checked once, at the end: 1). */
   const calls = () => page.evaluate(() => window.__lf.native.midiCalls.map((c) => (c[0] === 'subscribe' ? c : [c[0], ...c.slice(2)])));
   const lastCall = async () => (await calls()).at(-1);
-  /** Hand native MIDI's events to the UI and let them land. */
+  /** Hand native MIDI's events to the UI (each lands a microtask later: what it changes is waited on). */
   const midi = async (...events) => {
     for (const e of events) await page.evaluate((ev) => window.__lf.native.midiEmit(ev), e);
-    await page.waitForTimeout(30);
   };
+  /** Reads `read` until `want` holds (a predicate, or a value it deep-equals) or 2 s pass; the last read. */
+  const until = async (read, want) => {
+    const holds = typeof want === 'function' ? want : (value) => isDeepStrictEqual(value, want);
+    const deadline = Date.now() + 2000;
+    for (;;) {
+      const value = await read();
+      if (holds(value) || Date.now() >= deadline) return value;
+      await new Promise((r) => setTimeout(r, 10));
+    }
+  };
+  /** Asserts that `read` comes to deep-equal `want` within `until`'s deadline. */
+  const settles = async (read, want, message) => assert.deepEqual(await until(read, want), want, message);
   const listening = () => page.evaluate((s) => document.querySelector(s)?.getAttribute('aria-pressed') ?? null, LEARN);
   const openSettings = async () => {
     await page.evaluate(() => window.__lf.ui.openSettings());
     await page.waitForSelector(LEARN);
   };
-  const sentSince = async (from) => {
-    await page.waitForTimeout(30);
-    return page.evaluate((m) => window.__lf.native.sent.slice(m), from);
-  };
+  const sentSince = (from) => page.evaluate((m) => window.__lf.native.sent.slice(m), from);
   const mark = () => page.evaluate(() => window.__lf.native.sent.length);
 
   // ── Boot: the subscription and the legacy hand-over ─────────────────────────────────────────────────
@@ -161,18 +170,17 @@ await probe(async ({ open }) => {
   assert.equal(await page.isDisabled(LEARN), true, 'LEARN waits for an open port');
   assert.equal(await learnTitle(), 'No MIDI input is open', 'and says why');
   await midi({ ports: { ports: [{ id: 'keys', name: 'Keystation 49', state: 'busy' }] } });
+  await settles(learnTitle, 'The MIDI input is held by another program', 'a port another program holds is no open port');
   assert.equal(await page.isDisabled(LEARN), true);
-  assert.equal(await learnTitle(), 'The MIDI input is held by another program', 'a port another program holds is no open port');
   await midi({ ports: { ports: [{ id: 'pedal', name: 'FS-6 Pedal', state: 'open' }, { id: 'keys', name: 'Keystation 49', state: 'busy' }] } });
-  assert.equal(await page.isDisabled(LEARN), false, 'an open port can learn');
+  await settles(() => page.isDisabled(LEARN), false, 'an open port can learn');
   assert.equal(await learnTitle(), null);
 
   await page.selectOption(PICK, 'clear');
   await page.selectOption(TRACK, '1');
   await page.click(LEARN);
   assert.equal(await listening(), 'true', 'LEARN listens at once');
-  await page.waitForTimeout(30);
-  assert.deepEqual(await lastCall(), ['learn', 'clear', 1], 'a lane action learns onto its named track');
+  await settles(lastCall, ['learn', 'clear', 1], 'a lane action learns onto its named track');
   assert.ok(await page.getByText('Tap a pedal or key on a MIDI device. Esc cancels.').isVisible());
   await page.waitForTimeout(30); // the fake's `learning` answer
   // Esc: LISTENING ends in the same task, before native MIDI answers.
@@ -181,15 +189,13 @@ await probe(async ({ open }) => {
     return document.querySelector(s)?.getAttribute('aria-pressed');
   }, LEARN);
   assert.equal(escaped, 'false', 'Esc ends LISTENING at once');
-  await page.waitForTimeout(30);
-  assert.deepEqual(await lastCall(), ['cancelLearn'], 'Esc cancels natively');
-  await page.waitForTimeout(30);
+  await settles(lastCall, ['cancelLearn'], 'Esc cancels natively');
+  await page.waitForTimeout(30); // a settle: the fake's `learning` answer must leave LISTENING off
   assert.equal(await listening(), 'false', 'Esc spends itself on the learn: the panel stays open');
 
   await page.click(LEARN);
   await page.click(LEARN);
-  await page.waitForTimeout(30);
-  assert.deepEqual((await calls()).slice(-2), [['learn', 'clear', 1], ['cancelLearn']], 'a second LEARN click cancels');
+  await settles(async () => (await calls()).slice(-2), [['learn', 'clear', 1], ['cancelLearn']], 'a second LEARN click cancels');
   assert.equal(await listening(), 'false');
 
   // A learn still on its way: the cancel waits for it, so native MIDI never listens unseen.
@@ -210,7 +216,7 @@ await probe(async ({ open }) => {
   });
   await page.waitForFunction((n) => window.__lf.native.midiCalls.length >= n + 2, before);
   assert.deepEqual((await calls()).slice(before), [['learn', 'clear', 1], ['cancelLearn']], 'and then reaches native MIDI after it');
-  await page.waitForTimeout(30);
+  await page.waitForTimeout(30); // a settle: nothing marks a change that must not come
   assert.equal(await listening(), 'false', 'the late learning event changes nothing the cancel ended');
 
   // A learn call that never settles: the UI gives it up in time, says so, and the next call goes.
@@ -223,7 +229,7 @@ await probe(async ({ open }) => {
   await page.waitForFunction(() => window.__lf.notify.toasts().some((t) => t.message === 'MIDI learn failed'), undefined, { timeout: 5000 });
   await page.waitForFunction((n) => window.__lf.native.midiCalls.length >= n + 2, stuck, { timeout: 5000 });
   assert.deepEqual((await calls()).slice(stuck), [['learn', 'clear', 1], ['cancelLearn']], 'given up after its wait, the learn lets the cancel go');
-  assert.ok(consoleErrors.some((e) => e.startsWith('[midi] learn failed')), 'with its release-log line');
+  assert.equal(consumeConsoleErrors('[midi] learn failed').length, 1, 'with its release-log line');
   // The cancel waits on the same hold, and is given up in its turn.
   await page.waitForFunction(() => window.__lf.notify.toasts().some((t) => t.message === 'MIDI cancel learn failed'), undefined, { timeout: 5000 });
   await page.evaluate(() => {
@@ -231,30 +237,28 @@ await probe(async ({ open }) => {
     window.__lf.notify.toasts().forEach((t) => window.__lf.notify.dismissToast(t.id));
   });
   await page.waitForFunction(() => window.__lf.notify.toasts().length === 0);
-  consoleErrors.length = 0;
+  assert.equal(consumeConsoleErrors('[midi] cancel learn failed').length, 1, 'with its release-log line');
 
   // A global action takes no track, whatever the track select held.
   await page.selectOption(PICK, 'tapTempo');
   await page.click(LEARN);
-  await page.waitForTimeout(30);
-  assert.deepEqual(await lastCall(), ['learn', 'tapTempo', null], 'a global action learns with no track');
+  await settles(lastCall, ['learn', 'tapTempo', null], 'a global action learns with no track');
   await page.evaluate(() => window.__lf.ui.closeSettings());
   await page.waitForSelector(LEARN, { state: 'detached' });
-  await page.waitForTimeout(30);
-  assert.deepEqual(await lastCall(), ['cancelLearn'], 'closing the panel cancels a learn');
+  await settles(lastCall, ['cancelLearn'], 'closing the panel cancels a learn');
 
   // Native MIDI captured: LISTENING ends on its event, the hint waits for the release.
   await openSettings();
   await page.selectOption(PICK, 'recDub');
   await page.click(LEARN);
-  await page.waitForTimeout(30);
+  await page.waitForTimeout(30); // the fake's `learning` answer, before native MIDI's capture
   const learned = binding({ number: 80 });
   await midi({ learning: { learning: null } }, { learned: { binding: learned } }, { awaitingRelease: { binding: learned } });
-  assert.equal(await listening(), 'false', 'a capture ends LISTENING');
+  await settles(listening, 'false', 'a capture ends LISTENING');
   const hint = page.getByText('Learned CC 80 · ch 1. Let go of the pedal, and try it once this line is gone.');
-  assert.ok(await hint.isVisible(), 'the learned message waits for its release');
+  await settles(() => hint.isVisible(), true, 'the learned message waits for its release');
   await midi({ awaitingRelease: { binding: null } });
-  assert.equal(await hint.count(), 0, 'the hint goes when native MIDI ends the wait');
+  await settles(() => hint.count(), 0, 'the hint goes when native MIDI ends the wait');
 
   // ── The bindings list ───────────────────────────────────────────────────────────────────────────────
   await midi({ bindings: { revision: 7, bindings: [
@@ -266,7 +270,7 @@ await probe(async ({ open }) => {
     listed(binding({ portId: 'input-1', portName: 'Twin', number: 23, action: 'mute', target: 4, momentary: false }), { origin: 'legacy', ordinal: true, state: 'severalAbsent' }),
     listed(binding({ portId: 'keys', portName: 'Keystation 49', number: 24, action: 'stopAll', momentary: false }), { origin: 'legacy' }),
   ] } });
-  const lines = await page.evaluate(() =>
+  const readLines = () => page.evaluate(() =>
     [...document.querySelectorAll('.audio-settings__binding')].map((li) => ({
       text: [...li.children].slice(0, 3).map((el) => el.textContent.trim()).join(' | '),
       origin: li.querySelector('.audio-settings__binding-origin')?.textContent ?? null,
@@ -275,23 +279,23 @@ await probe(async ({ open }) => {
       assign: li.querySelector('[aria-label^="Assign"]') !== null,
     })),
   );
-  console.log('bindings', JSON.stringify(lines));
   const PREVIOUS = 'from the previous version';
-  assert.deepEqual(lines, [
+  const want = [
     { text: 'Record / overdub | CC 64 · ch 1 | momentary', origin: null, why: null, idle: false, assign: false },
     { text: 'Play / stop · Track 3 | note 36 · ch 10 | latching', origin: PREVIOUS, why: 'learned again in another run', idle: true, assign: true },
     { text: 'Click on / off | CC 21 · ch 1 | latching', origin: null, why: 'Launchkey is not connected', idle: true, assign: true },
     { text: 'Undo / redo | CC 22 · ch 1 | momentary', origin: PREVIOUS, why: 'several connected ports are named Twin', idle: true, assign: true },
     { text: 'Mute / unmute · Track 5 | CC 23 · ch 1 | latching', origin: PREVIOUS, why: 'another missing port is named Twin', idle: true, assign: true },
     { text: 'Stop all | CC 24 · ch 1 | latching', origin: PREVIOUS, why: 'Keystation 49 is held by another program', idle: true, assign: false },
-  ], 'each line shows its binding and where it came from; one that does not run says why; only one no port is found for alone offers an assignment, one no present port answers to included');
+  ];
+  const lines = await until(readLines, want);
+  console.log('bindings', JSON.stringify(lines));
+  assert.deepEqual(lines, want, 'each line shows its binding and where it came from; one that does not run says why; only one no port is found for alone offers an assignment, one no present port answers to included');
   const row = (i) => page.locator('.audio-settings__binding').nth(i);
   await row(0).getByRole('button', { name: /momentary pedal, switch to latching/ }).click();
-  await page.waitForTimeout(30);
-  assert.deepEqual(await lastCall(), ['setMomentary', 7, 0, false], 'the kind switch reads the pedal the other way, on the list it was made against');
+  await settles(lastCall, ['setMomentary', 7, 0, false], 'the kind switch reads the pedal the other way, on the list it was made against');
   await row(0).getByRole('button', { name: 'Hold to record on CC 64 · ch 1' }).click();
-  await page.waitForTimeout(30);
-  assert.deepEqual(await lastCall(), ['setHold', 7, 0, false], 'HOLD switches off');
+  await settles(lastCall, ['setHold', 7, 0, false], 'HOLD switches off');
   assert.equal(await row(1).locator('[aria-label^="Hold to record"]').count(), 0, 'only REC/DUB can HOLD');
 
   // ASSIGN: no port until the player picks one.
@@ -302,50 +306,47 @@ await probe(async ({ open }) => {
   await row(1).locator('select').selectOption('keys');
   assert.equal(await assignButton(1).isDisabled(), false);
   await assignButton(1).click();
-  await page.waitForTimeout(30);
-  assert.deepEqual(await lastCall(), ['assign', 7, 1, 'keys'], 'ASSIGN moves the binding to the picked port');
+  await settles(lastCall, ['assign', 7, 1, 'keys'], 'ASSIGN moves the binding to the picked port');
   await row(2).locator('select').selectOption('keys');
   await assignButton(2).click();
-  await page.waitForTimeout(30);
-  assert.deepEqual(await lastCall(), ['assign', 7, 2, 'keys'], 'a binding no present port answers to moves the same way');
+  await settles(lastCall, ['assign', 7, 2, 'keys'], 'a binding no present port answers to moves the same way');
   await mkdir('logs/midi-learn', { recursive: true });
   await page.locator('.audio-settings').screenshot({ path: 'logs/midi-learn/bindings.png' });
   await row(4).getByRole('button', { name: /^Forget/ }).click();
-  await page.waitForTimeout(30);
-  assert.deepEqual(await lastCall(), ['forget', 7, 4], '✕ forgets by index');
+  await settles(lastCall, ['forget', 7, 4], '✕ forgets by index');
 
   // An edit native MIDI refuses (the list changed since it was made) says nothing: the new list shows.
-  const errorsBefore = consoleErrors.length;
   await page.evaluate(() => void (window.__lf.native.editAnswer = false));
   await row(2).getByRole('button', { name: /^Forget/ }).click();
-  await page.waitForTimeout(30);
-  assert.deepEqual(await lastCall(), ['forget', 7, 2]);
-  assert.deepEqual(await toastsOf(page), [], 'a refused edit toasts nothing');
-  assert.equal(consoleErrors.length, errorsBefore, 'nor logs');
+  await settles(lastCall, ['forget', 7, 2]);
+  await page.waitForTimeout(30); // a settle: the refusal's answer must toast and log nothing
+  assert.deepEqual(await toastsOf(page), [], 'a refused edit toasts nothing (and logs nothing: the harness fails on a log)');
   await page.evaluate(() => void (window.__lf.native.editAnswer = true));
   await midi({ bindings: { revision: 8, bindings: [listed(binding({ hold: true }))] } });
+  await settles(() => page.locator('.audio-settings__binding').count(), 1, 'the new list shows');
   await row(0).getByRole('button', { name: /^Forget/ }).click();
-  await page.waitForTimeout(30);
-  assert.deepEqual(await lastCall(), ['forget', 8, 0], 'the next edit names the new list');
+  await settles(lastCall, ['forget', 8, 0], 'the next edit names the new list');
   await page.evaluate(() => window.__lf.ui.closeSettings());
 
   // ── What a binding fires that the UI runs ───────────────────────────────────────────────────────────
   const stage = () => page.evaluate(() => import('/src/ui/stage/stage-store.ts').then((m) => ({ open: m.stageOpen(), look: m.currentStageView().id })));
   let from = await mark();
   await midi({ run: { action: 'stageView' } });
-  const opened = await stage();
+  const opened = await until(stage, (s) => s.open);
   assert.equal(opened.open, true, 'run stageView opens the stage view');
   await midi({ run: { action: 'stageNextView' } });
-  assert.notEqual((await stage()).look, opened.look, 'run stageNextView steps the look');
+  assert.notEqual((await until(stage, (s) => s.look !== opened.look)).look, opened.look, 'run stageNextView steps the look');
   await midi({ run: { action: 'stageView' } });
-  assert.equal((await stage()).open, false, 'and closes it');
+  assert.equal((await until(stage, (s) => !s.open)).open, false, 'and closes it');
   await midi('pressed', { run: { action: 'tapTempo' } });
   await page.waitForTimeout(500);
   await midi('pressed', { run: { action: 'tapTempo' } });
   await midi('pressed', { run: { action: 'goLive' } });
+  const tapped = await until(() => sentSince(from), (sent) => sent.some((c) => c.SetBpm !== undefined));
+  assert.ok(tapped.some((c) => c.SetBpm !== undefined), 'two TAPs send the tapped tempo');
+  await page.waitForTimeout(30); // a settle: no condition marks a Press that was never sent
   const ran = await sentSince(from);
   console.log('runs sent', JSON.stringify(ran));
-  assert.ok(ran.some((c) => c.SetBpm !== undefined), 'two TAPs send the tapped tempo');
   assert.ok(!ran.includes('Press'), 'no run sends a second Press (native MIDI sent it)');
 
   // `pressed` takes the lane cue down; `refused` puts its own up.
@@ -353,20 +354,20 @@ await probe(async ({ open }) => {
   await page.evaluate(() => import('/src/ui/looper/gates.ts').then((m) => m.refuseOnLane(2, 'probe cue')));
   assert.equal((await cue())?.text, 'probe cue');
   await midi('pressed');
-  assert.equal(await cue(), null, 'a native press takes the lane cue down');
+  await settles(cue, null, 'a native press takes the lane cue down');
   await midi({ refused: { reason: 'holdControlsTaken' } });
-  assert.deepEqual(await cue(), { track: 0, text: 'every HOLD control is down, let a HOLD pedal go first' }, 'a refused HOLD press says why on the selected lane');
+  await settles(cue, { track: 0, text: 'every HOLD control is down, let a HOLD pedal go first' }, 'a refused HOLD press says why on the selected lane');
 
   // ── Toasts ──────────────────────────────────────────────────────────────────────────────────────────
   await midi({ gone: { names: ['FS-6 Pedal'] } }, { store: { problem: { failed: { why: 'Access is denied. (os error 5)' } } } });
-  const toasts = await toastsOf(page);
+  const toasts = await until(() => toastsOf(page), (t) => t.length >= 2);
   console.log('toasts', JSON.stringify(toasts));
   assert.ok(toasts.some(([m, d]) => m === 'MIDI device disconnected — FS-6 Pedal' && d === 'Held notes were released.'), 'an unplugged port toasts');
   assert.ok(toasts.some(([m, d]) => m === 'MIDI bindings could not be saved; BleepLoop keeps trying' && d === 'Access is denied. (os error 5)'), 'a store problem toasts');
   const epochs = await page.evaluate(() => [...new Set(window.__lf.native.midiCalls.filter((c) => c[0] !== 'subscribe').map((c) => c[1]))]);
   assert.deepEqual(epochs, [1], 'every native MIDI call carries the page\'s epoch');
-  assert.deepEqual(consoleErrors, [
+  assert.deepEqual(consumeConsoleErrors(/^\[midi\]/), [
     '[midi] input disconnected: FS-6 Pedal',
     '[midi] bindings store: MIDI bindings could not be saved; BleepLoop keeps trying: Access is denied. (os error 5)',
-  ], 'each reaches the release log, and nothing else does');
+  ], 'each reaches the release log (and nothing else does: the harness fails on any other)');
 });

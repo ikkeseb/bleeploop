@@ -52,7 +52,7 @@ const batch = (frame, values, gap = false) => ({
 const round = (v) => Math.round(v * 1000) / 1000;
 
 await probe(async ({ open }) => {
-  const { page, consoleErrors } = await open({
+  const { page } = await open({
     init: (p) => p.addInitScript(() => void (window.__lfEngineFake = true)),
   });
   let seq = 0;
@@ -168,5 +168,4 @@ await probe(async ({ open }) => {
     'the refused batch changed nothing',
   );
 
-  assert.deepEqual(consoleErrors, [], 'no console errors');
 });

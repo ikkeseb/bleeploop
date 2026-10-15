@@ -17,7 +17,7 @@ await probe(async ({ open, browser }) => {
   for (let attempt = 0; attempt < 2; attempt++) {
     const context = await browser.newContext();
     try {
-      const { page } = await open({
+      const { page, consumeConsoleErrors } = await open({
         context,
         init: (page) => page.addInitScript(() => {
           window.__lfEngineFake = true;
@@ -75,6 +75,7 @@ await probe(async ({ open, browser }) => {
       });
       console.log(JSON.stringify({ attempt: attempt + 1, ...result }));
       assert.deepEqual(result, { saved: true, restored: true, exact: true, cleared: true, opens: 2 });
+      assert.equal(consumeConsoleErrors('[autosave] Jam recovery could not be restored VersionError').length, 1, 'the failed first open is logged');
     } finally {
       await context.close();
     }

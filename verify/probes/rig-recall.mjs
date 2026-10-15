@@ -100,7 +100,6 @@ await probe(async ({ open }) => {
 
   /** One app launch: reload with this launch's host answers; the app's mount runs the boot chain. */
   async function launch(cfg) {
-    const errorsBefore = app.consoleErrors.length;
     await page.evaluate((c) => sessionStorage.setItem('recallProbe', JSON.stringify(c)), cfg);
     await page.reload();
     await page.waitForFunction(() => '__lf' in window && !!window.__closeRequest);
@@ -111,11 +110,14 @@ await probe(async ({ open }) => {
         recall: await import('/src/ui/state/rig-recall.ts'),
       });
     });
-    return { errorsBefore };
   }
 
-  /** Wait for this launch's recall to finish, then read what it did. */
-  async function settle({ errorsBefore }) {
+  /**
+   * Wait for this launch's recall to finish, then read what it did. Its `[rig-recall]` lines must match
+   * `recall` one for one, in order, and exactly `loadFailed` plugin-load failure lines must be logged:
+   * any other line of either kind fails here, and a line of any other kind stays for the harness.
+   */
+  async function settle({ recall = [], loadFailed = 0 } = {}) {
     await page.waitForFunction(() => window.__recallProbe.recall.rigRecallDone(), undefined, { timeout: 20_000 });
     const state = await page.evaluate(async () => {
       const { calls, instrument, recall } = window.__recallProbe;
@@ -134,10 +136,12 @@ await probe(async ({ open }) => {
         toasts: window.__lf.notify.toasts().map((t) => `${t.message} x${t.count}`),
       };
     });
-    const logs = app.consoleErrors.slice(errorsBefore);
-    state.recallLogs = logs.filter((l) => l.startsWith('[rig-recall]'));
-    state.loadFailedLogs = logs.filter((l) => l.startsWith('[instrument] plugin load failed')).length;
-    console.log(JSON.stringify(state));
+    const recallLogs = app.consumeConsoleErrors(/^\[rig-recall\]/);
+    const loadFailedLogs = app.consumeConsoleErrors(/^\[instrument\] plugin load failed/);
+    console.log(JSON.stringify({ ...state, recallLogs, loadFailedLogs }));
+    assert.equal(recallLogs.length, recall.length, `[rig-recall] lines: ${JSON.stringify(recallLogs)}`);
+    recall.forEach((re, i) => assert.match(recallLogs[i], re));
+    assert.equal(loadFailedLogs.length, loadFailed, `plugin load failure lines: ${JSON.stringify(loadFailedLogs)}`);
     return state;
   }
 
@@ -160,7 +164,8 @@ await probe(async ({ open }) => {
 
   // 1. First launch: nothing remembered. The owner picks the amp (its automatic GO LIVE and editor
   // run, as on the rig) and a synth.
-  let s = await settle(await launch({ scan: ALL }));
+  await launch({ scan: ALL });
+  let s = await settle();
   assert.deepEqual(s.loads, [], 'a first launch restores nothing');
   await pick(0, FX);
   await pick(1, SYN);
@@ -169,62 +174,67 @@ await probe(async ({ open }) => {
   assert.deepEqual(picked, [{ SetSlotLive: [0, true] }], 'the dropdown pick of an effect goes live on its own (baseline)');
 
   // 2. Restart: both come back in slot order, nothing armed, GO LIVE unpressed.
-  s = await settle(await launch({ scan: ALL }));
+  await launch({ scan: ALL });
+  s = await settle();
   assert.deepEqual(s.loads, [loadOf(0, FX), loadOf(1, SYN)]);
   assert.deepEqual(s.slots, [keyOf(FX), keyOf(SYN)]);
   expectIdle(s, 'restored rig');
   // An instrument plugin takes no input, so slot 1 shows no GO LIVE cap at all (`slotTakesInput`).
   assert.deepEqual(s.live, ['GO LIVE', null], 'the restored effect\'s GO LIVE is unpressed');
   assert.deepEqual(s.toasts, []);
-  assert.deepEqual(s.recallLogs, []);
   assert.equal(s.active, 1, 'the restored instrument takes the MIDI slot when the player chose nothing');
 
   // 3. The owner unloads slot 1: the next launch restores slot 0 only.
   await pick(1, null);
-  s = await settle(await launch({ scan: ALL }));
+  await launch({ scan: ALL });
+  s = await settle();
   assert.deepEqual(s.loads, [loadOf(0, FX)], 'an unloaded slot is forgotten');
   assert.deepEqual(s.slots, [keyOf(FX), null]);
   expectIdle(s, 'after an unload');
 
   // 4. Swap slot 0 to another plugin, then launch with that plugin missing from the scan.
   await pick(0, ALT);
-  s = await settle(await launch({ scan: [FX, SYN] }));
+  await launch({ scan: [FX, SYN] });
+  // One log line for the missing plugin.
+  s = await settle({ recall: [/^\[rig-recall\] slot 1: Probe Drive \(vst3\) at C:\\probe\\drive\.vst3 is not in this launch's plugin scan/] });
   assert.deepEqual(s.loads, [], 'a plugin missing from the scan is not loaded');
-  assert.equal(s.recallLogs.length, 1, 'one log line for the missing plugin');
-  assert.match(s.recallLogs[0], /^\[rig-recall\] slot 1: Probe Drive \(vst3\) at C:\\probe\\drive\.vst3 is not in this launch's plugin scan/);
   assert.deepEqual(s.toasts, [], 'a missing plugin raises no toast');
   expectIdle(s, 'missing plugin');
 
   // 5. The plugin is back, but its load fails: one toast, and the next launch does not retry it.
-  s = await settle(await launch({ scan: ALL, loads: { 0: 'reject' } }));
+  await launch({ scan: ALL, loads: { 0: 'reject' } });
+  s = await settle({ loadFailed: 1 });
   assert.deepEqual(s.loads, [loadOf(0, ALT)], 'a skipped slot keeps its record for a launch where the plugin is back');
   assert.deepEqual(s.toasts, ['Plugin load failed x1']);
-  assert.equal(s.loadFailedLogs, 1);
   assert.deepEqual(s.slots, [null, null]);
-  s = await settle(await launch({ scan: ALL }));
+  await launch({ scan: ALL });
+  s = await settle();
   assert.deepEqual(s.loads, [], 'a load that failed at recall is not retried');
   assert.deepEqual(s.toasts, []);
 
   // 6. A pick made while slot 0 is still restoring wins slot 1.
   await pick(0, FX);
   await pick(1, SYN);
-  const deferred = await launch({ scan: ALL, loads: { 0: 'defer' } });
+  await launch({ scan: ALL, loads: { 0: 'defer' } });
   await page.waitForFunction(() => window.__recallProbe.calls.load.length === 1);
   await page.evaluate((alt) => window.__recallProbe.instrument.selectPlugin(1, alt), ALT);
   await page.evaluate(() => window.__recallProbe.release());
-  s = await settle(deferred);
+  s = await settle();
   assert.deepEqual(s.loads, [loadOf(0, FX), loadOf(1, ALT)], 'the recall does not load over the pick');
   assert.deepEqual(s.slots, [keyOf(FX), keyOf(ALT)]);
 
   // 7. Loads the host failed, not the plugin (the slot still clearing, the setup timed out, no owner
   // thread, the command's task failed): a toast each, the rig is kept, and the next launch retries it.
-  s = await settle(await launch({ scan: ALL, loads: { 0: 'busy', 1: 'timeout' } }));
+  await launch({ scan: ALL, loads: { 0: 'busy', 1: 'timeout' } });
+  s = await settle({ loadFailed: 2 });
   assert.deepEqual(s.loads, [loadOf(0, FX), loadOf(1, ALT)]);
-  assert.deepEqual({ slots: s.slots, failed: s.loadFailedLogs, toasts: s.toasts }, { slots: [null, null], failed: 2, toasts: ['Plugin load failed x2'] });
-  s = await settle(await launch({ scan: ALL, loads: { 0: 'no-thread', 1: 'task' } }));
+  assert.deepEqual({ slots: s.slots, toasts: s.toasts }, { slots: [null, null], toasts: ['Plugin load failed x2'] });
+  await launch({ scan: ALL, loads: { 0: 'no-thread', 1: 'task' } });
+  s = await settle({ loadFailed: 2 });
   assert.deepEqual(s.loads, [loadOf(0, FX), loadOf(1, ALT)], 'a busy slot and a timed-out setup are retried at the next launch');
-  assert.deepEqual({ slots: s.slots, failed: s.loadFailedLogs, toasts: s.toasts }, { slots: [null, null], failed: 2, toasts: ['Plugin load failed x2'] });
-  s = await settle(await launch({ scan: ALL }));
+  assert.deepEqual({ slots: s.slots, toasts: s.toasts }, { slots: [null, null], toasts: ['Plugin load failed x2'] });
+  await launch({ scan: ALL });
+  s = await settle();
   assert.deepEqual(s.loads, [loadOf(0, FX), loadOf(1, ALT)], 'a missing owner thread and a failed task are retried at the next launch');
   assert.deepEqual(s.slots, [keyOf(FX), keyOf(ALT)]);
   expectIdle(s, 'retried after host failures');
@@ -234,15 +244,14 @@ await probe(async ({ open }) => {
   await launch({ scan: ALL, loads: { 0: 'hang' } });
   await page.waitForFunction(() => window.__recallProbe.calls.load.length === 1 && window.__recallProbe.recall.recallInFlight());
   assert.deepEqual(await closeApp(), { inFlight: true, done: false }, 'a close while a recalled load hangs keeps the marker');
-  s = await settle(await launch({ scan: ALL }));
+  await launch({ scan: ALL });
+  s = await settle({ recall: [/^\[rig-recall\] the last launch stopped while restoring Probe Amp \(clap\), Probe Drive \(vst3\)/] });
   assert.deepEqual(s.loads, [], 'no recall after a launch died restoring');
   assert.deepEqual(s.toasts, ['Plugins not restored x1']);
-  assert.equal(s.recallLogs.length, 1);
-  assert.match(s.recallLogs[0], /^\[rig-recall\] the last launch stopped while restoring Probe Amp \(clap\), Probe Drive \(vst3\)/);
   expectIdle(s, 'skipped recall');
-  s = await settle(await launch({ scan: ALL }));
-  assert.deepEqual({ loads: s.loads, toasts: s.toasts, recallLogs: s.recallLogs }, { loads: [], toasts: [], recallLogs: [] },
-    'the launch after a skipped recall is clean');
+  await launch({ scan: ALL });
+  s = await settle();
+  assert.deepEqual({ loads: s.loads, toasts: s.toasts }, { loads: [], toasts: [] }, 'the launch after a skipped recall is clean');
 
   // 9. The same when the loads finished but the launch died inside the settle window.
   await pick(0, FX);
@@ -252,10 +261,12 @@ await probe(async ({ open }) => {
     const { instrument, recall } = window.__recallProbe;
     return instrument.slotPlugins().every(Boolean) && recall.recallInFlight() && !recall.rigRecallDone();
   });
-  s = await settle(await launch({ scan: ALL }));
+  await launch({ scan: ALL });
+  s = await settle({ recall: [/^\[rig-recall\] the last launch stopped while restoring Probe Amp \(clap\), Probe Synth \(vst3\)/] });
   assert.deepEqual(s.loads, [], 'a launch that died right after its loads also skips the next recall');
   assert.deepEqual(s.toasts, ['Plugins not restored x1']);
-  s = await settle(await launch({ scan: ALL }));
+  await launch({ scan: ALL });
+  s = await settle();
   assert.deepEqual({ loads: s.loads, toasts: s.toasts }, { loads: [], toasts: [] });
 
   // 10. A close through the close button once the loads are back, inside the settle window: the marker
@@ -268,31 +279,33 @@ await probe(async ({ open }) => {
     return instrument.slotPlugins().every(Boolean) && recall.recallInFlight() && !recall.rigRecallDone();
   });
   assert.deepEqual(await closeApp(), { inFlight: false, done: false }, 'a clean close inside the settle window clears the marker');
-  s = await settle(await launch({ scan: ALL }));
+  await launch({ scan: ALL });
+  s = await settle();
   assert.deepEqual(s.loads, [loadOf(0, FX), loadOf(1, SYN)], 'a close right after a restore keeps the rig');
-  assert.deepEqual({ toasts: s.toasts, recallLogs: s.recallLogs }, { toasts: [], recallLogs: [] });
+  assert.deepEqual(s.toasts, []);
 
   // 11. A synth picked while the scan still runs: its slot keeps the synth and the MIDI slot stays with
   // it; the other slot's instrument is restored without taking MIDI. The next launch restores only
   // that instrument, which then takes MIDI again.
-  const held = await launch({ scan: ALL, holdScan: true });
+  await launch({ scan: ALL, holdScan: true });
   await page.getByRole('combobox', { name: 'Source for slot 1', exact: true }).selectOption('pad');
   await page.waitForFunction(() => window.__recallProbe.slots.slotPendingCounts().every((n) => n === 0));
   await page.evaluate(() => window.__recallProbe.releaseScan());
-  s = await settle(held);
+  s = await settle();
   assert.deepEqual(s.loads, [loadOf(1, SYN)], 'the recall does not load over a synth picked during boot');
   assert.deepEqual({ slots: s.slots, synth: s.synths[0], active: s.active }, { slots: [null, keyOf(SYN)], synth: 'pad', active: 0 },
     'the picked synth keeps its slot and the MIDI slot');
   expectIdle(s, 'synth picked during boot');
-  s = await settle(await launch({ scan: ALL }));
+  await launch({ scan: ALL });
+  s = await settle();
   assert.deepEqual({ loads: s.loads, active: s.active }, { loads: [loadOf(1, SYN)], active: 1 },
     'a slot the player turned into a synth stays one at the next launch');
 
   // 12. A slot activated while the scan still runs keeps the MIDI slot over a restored instrument.
-  const activated = await launch({ scan: ALL, holdScan: true });
+  await launch({ scan: ALL, holdScan: true });
   await page.getByRole('button', { name: 'Activate slot 1' }).click();
   await page.evaluate(() => window.__recallProbe.releaseScan());
-  s = await settle(activated);
+  s = await settle();
   assert.deepEqual({ loads: s.loads, active: s.active }, { loads: [loadOf(1, SYN)], active: 0 },
     'a restored instrument does not move a MIDI slot the player chose');
 });

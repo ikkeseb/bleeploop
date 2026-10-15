@@ -20,7 +20,7 @@ import { probe, arg } from '../harness/probe.ts';
 const screenshot = arg('screenshot');
 
 await probe(async ({ open }) => {
-  const { page } = await open({
+  const { page, consumeConsoleErrors } = await open({
     viewport: { width: 1280, height: 820 },
     // Render the real native-only slot chrome in the browser tier, in engine mode. The host methods
     // themselves are replaced below before any operation is driven.
@@ -161,6 +161,7 @@ await probe(async ({ open }) => {
   await release('reject', 'injected load failure');
   await page.waitForFunction(() => window.__slotPendingProbe.slots.slotPendingCounts()[0] === 0);
   assert.equal((await slotUi(0)).pickerDisabled, false);
+  assert.equal(consumeConsoleErrors('[instrument] plugin load failed injected load failure').length, 1, 'the rejected load is logged');
 
   // Programmatic callers retain queue semantics. Counting at enqueue time prevents an enabled frame
   // between operations, and slot 1 remains independent.
@@ -181,6 +182,7 @@ await probe(async ({ open }) => {
     return { before, between, after: [...probe.slots.slotPendingCounts()] };
   });
   assert.deepEqual(queued, { before: [2, 0], between: [1, 0], after: [0, 0] });
+  assert.equal(consumeConsoleErrors('[instrument] plugin load failed Error: injected queued failure').length, 1, 'the queued failure is logged');
 
   // Errors that escape the operation itself must also release its pending count and leave the
   // next queued operation runnable (plugin-load errors above are caught by the instrument).
@@ -224,6 +226,7 @@ await probe(async ({ open }) => {
   });
   assert.deepEqual(loadStates, { afterFailedLoad: null, afterRetry: 'retry-b' },
     'a failed load leaves the slot empty, and a retry after it lands its own plugin');
+  assert.equal(consumeConsoleErrors('[instrument] plugin load failed Error: injected native load timeout').length, 1, 'the failed load is logged');
 
   // An effect's automatic GO LIVE is deliberately queued from PluginBar.onMount behind its source
   // load: it goes live only once the load is back, then the editor opens and the picker unlocks.
