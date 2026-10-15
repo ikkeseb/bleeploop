@@ -4,10 +4,12 @@
 //! The Rust twin of `verify/harness/rig.ts`.
 #![allow(dead_code)]
 
+pub mod amp;
 pub mod dub;
 pub mod edges;
 pub mod fx;
 pub mod refs;
+pub mod wav;
 
 use assert_no_alloc::assert_no_alloc;
 use lf_engine::grid::{frames_per_bar, Frame, Meter};
