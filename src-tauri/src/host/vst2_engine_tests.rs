@@ -17,7 +17,7 @@ use rtrb::{Producer, RingBuffer};
 use std::sync::atomic::{AtomicBool, Ordering::Release};
 use std::sync::mpsc::{channel, Sender, SyncSender};
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use windows::Win32::Foundation::{LPARAM, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{
     GetSystemMetrics, IsWindowVisible, PostMessageW, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, WM_CLOSE,

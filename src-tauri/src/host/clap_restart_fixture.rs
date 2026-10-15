@@ -5,6 +5,7 @@
 //! (deactivate → activate → processing resumed, on the right threads). No audio device or GUI
 //! required.
 use super::*;
+use std::time::Instant;
 use clap_sys::{
     entry::clap_plugin_entry,
     events::{

@@ -15,7 +15,7 @@ use std::sync::atomic::{
     Ordering::{Acquire, Relaxed, Release},
 };
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use clack_extensions::audio_ports::{AudioPortInfoBuffer, PluginAudioPorts};
 use clack_extensions::params::{

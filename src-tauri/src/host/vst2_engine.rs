@@ -42,7 +42,6 @@ use std::sync::atomic::{
     Ordering::Relaxed,
 };
 use std::sync::Arc;
-use std::time::Instant;
 
 use lf_engine::grid::Frame;
 use lf_engine::slots::MAX_SLOT_EVENTS;
