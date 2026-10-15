@@ -35,9 +35,8 @@ export function clampBars(bars: number, maxBars: number): number {
 }
 
 /**
- * Mean interval between consecutive timestamps (ms in, ms out). The shared core of tap tempo and
- * MIDI-clock BPM smoothing in clock.ts (both average a rolling timestamp window, then convert to
- * BPM). Requires >= 2 timestamps; callers guard.
+ * Mean interval between consecutive timestamps (ms in, ms out): tap tempo's rolling window
+ * (`engine-store.ts` converts it to BPM). Requires >= 2 timestamps; callers guard.
  */
 export function averageInterval(times: readonly number[]): number {
   let sum = 0;

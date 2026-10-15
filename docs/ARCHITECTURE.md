@@ -50,8 +50,8 @@ path (`EngineHost.snapshot` / `loadSession`).
   reserved for low-frequency chrome (transport mode, track LEDs, tempo, FX labels).
 - **Rust:** lf-engine (rtrb rings; the synths, FX, reverb and limiter ported from Tone 15.1.22 on
   Blink and null-tested against its renders, `src-tauri/crates/lf-engine/src/dsp/mod.rs`; RustFFT),
-  cpal 0.18.1 (pinned; ASIO a cargo opt-in feature), clack-host for CLAP, `vst3` for VST3 and the
-  project's own interface declarations for VST2.
+  cpal 0.18.1 (pinned; ASIO a cargo opt-in feature), clack-host for CLAP, `vst3` for VST3, the
+  project's own interface declarations for VST2, and midir for native MIDI input.
 
 ## Audio architecture
 

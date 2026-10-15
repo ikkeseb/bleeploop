@@ -163,8 +163,8 @@ const MAX_FIXED_BARS = 32; // the bar selector bound, the engine's `MAX_FIXED_BA
 /** The engine's lane buffer: the host builds every engine with `HostConfig { max_loop_seconds: 60.0 }`
  * (`src-tauri/src/engine_io/mod.rs`). It bounds a multiply (`nextTakeMaxBars`). */
 const LANE_BUFFER_SECONDS = 60;
-const MASTER_KEY = 'lf.masterVolume'; // shared with `master.ts`: one saved level for both paths
-const CLICK_KEY = 'lf.clickVolume'; // shared with `clock.ts`
+const MASTER_KEY = 'lf.masterVolume'; // the saved master level, sent to every engine the feed resets
+const CLICK_KEY = 'lf.clickVolume'; // the saved click level, the same way
 
 /** Per lane: it waits behind a count-in the engine runs (the reducer's, set as the events arrive:
  * `applyEvent`'s `Beat`, `applyLane`, `endCount`). */
@@ -1206,10 +1206,11 @@ export const engineLooper = {
   toggleInput: async (): Promise<boolean> => toggleEngineInput(),
   peaksInto,
   scopeInto,
-  /** The live scope taps on or off (`SetScope`): the look that draws the columns asks for them and
-   * owns turning them off (`stage/StageView.tsx`). A remembered host setting, so a rebuilt engine
-   * gets it back, while `adoptSettings` ignores it: the view sends the state it wants on mount
-   * instead of trusting the engine's. */
+  /** The live scope taps on or off (`SetScope`). Its one caller is `src/app.tsx`, the always mounted
+   * owner, which asks for them while a look that draws the columns shows and turns them off again
+   * (why there and not in the stage view: its comment). A remembered host setting, so a rebuilt
+   * engine gets it back, while `adoptSettings` ignores it: the owner sends the state it wants after
+   * the feed's first reset instead of trusting the engine's. */
   setScope: (on: boolean): Promise<boolean> => sendEngine({ SetScope: on }),
   phaseValue,
   levelValue: (): number => (plain.clip ? Math.max(1, plain.level) : plain.level),

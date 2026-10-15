@@ -7,10 +7,10 @@ import { jamInProgress, saveForQuit } from './close-guard';
 /**
  * The updater's UI half (the native half: `src-tauri/src/update.rs`). At launch a release build asks
  * for a newer version, quietly when offline; an offer raises the command bar's update pill
- * (`src/ui/UpdatePill.tsx`) and one toast. Nothing installs until the player presses it there: the
- * installer quits the app, so the jam is saved for recovery first, as a close saves it. An install is
- * three waits long (download, signature, installer), so each reports itself and the pill's panel
- * shows where it is — a press with no read-out reads as a hang.
+ * (`src/app.tsx`, its panel `src/ui/settings/UpdatePanel.tsx`) and one toast. Nothing installs until
+ * the player presses it there: the installer quits the app, so the jam is saved for recovery first,
+ * as a close saves it. An install is three waits long (download, signature, installer), so each
+ * reports itself and the pill's panel shows where it is: a press with no read-out reads as a hang.
  */
 const [offered, setOffered] = createSignal<AppUpdate | null>(null);
 const [installing, setInstalling] = createSignal(false);

@@ -36,9 +36,9 @@ check('framesPerBar 120bpm/44.1k/4 = 88200', () => assert.strictEqual(framesPerB
 check('framesPerBar rounds to integer frames', () =>
   assert.ok(Number.isInteger(framesPerBar(123.4, 44100, 4))));
 
-// maxWholeBars/clampBars — the buffer-fit bound machine.ts commits/arms against. The invariant:
-// clampBars(anything, maxWholeBars(buf, fpb)) * fpb <= buf for every buf >= fpb, so a committed
-// master length can never exceed the record buffer (a later track's consume() would RangeError).
+// maxWholeBars/clampBars: the buffer-fit bound the UI mirrors for a FIXED take's bars (engine-store.ts
+// `nextTakeMaxBars`, as the engine rules it). The invariant: clampBars(anything, maxWholeBars(buf, fpb))
+// * fpb <= buf for every buf >= fpb, so a predicted length never exceeds the lane buffer.
 check('maxWholeBars: exact fit', () => assert.strictEqual(maxWholeBars(96000 * 4, 96000), 4));
 check('maxWholeBars: floors a partial trailing bar', () => assert.strictEqual(maxWholeBars(96000 * 4 + 1, 96000), 4));
 check('maxWholeBars: never below 1 (buffer smaller than one bar)', () => assert.strictEqual(maxWholeBars(100, 96000), 1));
@@ -55,7 +55,7 @@ check('buffer-fit invariant: clamped bars * fpb <= buffer (60 s at 120bpm/48k)',
   }
 });
 
-// averageInterval — the shared core of tap tempo + MIDI-clock smoothing (clock.ts converts to BPM).
+// averageInterval: tap tempo's mean interval (engine-store.ts converts it to BPM).
 check('averageInterval: uniform 500 ms taps -> 500 (= 120 bpm via 60000/avg)', () => {
   assert.strictEqual(averageInterval([0, 500, 1000, 1500]), 500);
   assert.strictEqual(60000 / averageInterval([0, 500, 1000, 1500]), 120);

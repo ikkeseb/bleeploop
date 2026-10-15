@@ -41,7 +41,7 @@ function check(name, fn) {
 }
 
 /** True if `fullPath` lies inside `src/platform/`: the `platform/` segment must sit directly under
- * `src/`, so a nested `src/ui/platform/` or a `platform` ancestor of the repo does not count. */
+ * `src/`, so a nested one (e.g. `src/ui/platform/`) or a `platform` ancestor of the repo does not count. */
 function isInPlatform(fullPath) {
   return /[\\/]src[\\/]platform[\\/]/.test(fullPath);
 }

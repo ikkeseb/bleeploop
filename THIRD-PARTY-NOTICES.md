@@ -5,7 +5,8 @@ listed below. Every license string here was read directly from the locally insta
 (`node_modules/<pkg>/package.json` for JS dependencies, and the crate's own `Cargo.toml` under
 `~/.cargo/registry/src/index.crates.io-*/<crate>-<version>/` for Rust dependencies), not from
 memory or upstream docs. Versions are the ones actually resolved in this repo
-(`package.json`/`pnpm-lock.yaml`, `src-tauri/Cargo.lock`) at the time of writing.
+(`package.json`/`pnpm-lock.yaml`, `src-tauri/Cargo.lock`); `verify/guards/third-party.mjs` holds both
+tables to the direct runtime dependencies and their locked versions.
 
 ## JavaScript / frontend dependencies
 
@@ -41,6 +42,7 @@ All versions below are as pinned/resolved in `src-tauri/Cargo.lock`.
 | rtrb | 0.3.5 | MIT OR Apache-2.0 |
 | rubato | 3.0.0 | MIT |
 | rustfft | 6.4.1 | MIT OR Apache-2.0 |
+| midir | 0.11.0 | MIT; native MIDI input. Its copyright and permission notice is `licenses/MIT-midir.txt` |
 | walkdir | 2.5.0 | `Unlicense/MIT` (crate's own non-SPDX-normalized string; effectively dual Unlicense-or-MIT) |
 | vst3 | 0.3.0 | MIT OR Apache-2.0; see the separate VST3-hosting note below |
 | webview2-com | 0.38.2 | MIT |

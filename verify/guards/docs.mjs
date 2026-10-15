@@ -1,4 +1,5 @@
-// verify/guards/docs.mjs: docs drift guard. Every backtick path in a tracked .md exists, every cited
+// verify/guards/docs.mjs: docs drift guard. Every backtick path in a tracked .md exists, and so does
+// every repo path a code comment cites (the briefings in `//!` and the headers live there), every cited
 // 7-hex commit sha resolves, the invariant titles in AGENTS.md and docs/ARCHITECTURE.md match by number,
 // the STATUS next-jam list has not grown past its cap, and no tracked .md holds an em dash.
 //
@@ -7,9 +8,12 @@
 // repo root, the citing file's directory, and as a relative tail of any tracked file; a path that exists
 // nowhere AND is not a known runtime artifact (`logs/`, `dist/`, `session.json`, …) fails. Two tiers:
 // the OWNER tier (the docs agents route by) is checked for bare filenames too; every other tracked
-// .md only for slashed paths, since its bare names are often upstream crate files. A line
-// may keep a deliberately dead path by saying so (`(now \`…\`)`, "not yet built", "upstream", "e.g.",
-// … — see DELIBERATE). Shas: 7–10 hex WITH at least one letter (an all-digit run is a number, e.g. a
+// .md only for slashed paths, since its bare names are often upstream crate files. A citation
+// may keep a deliberately dead path by saying so in its own clause (the text between `;`, `:` or a
+// sentence end; `(now \`…\`)`, "(removed)", "not yet built", "upstream", "e.g.", … — see DELIBERATE),
+// so one historical reference does not hide a live one beside it. A code comment is read for paths
+// from a top-level directory (`src/…`, `verify/…`, `src-tauri/…`), bare or in backticks, and only real
+// comments are read (a lexer skips string, template, char and regex literals). Shas: 7–10 hex WITH at least one letter (an all-digit run is a number, e.g. a
 // VST3 param id). The cap keeps STATUS.md's next jam (the numbered items under "## Next jam") a list
 // one ordinary jam can cover; the rest waits under "## Not heard yet". Raising NEXT_JAM_CAP is the
 // owner's call.
@@ -52,10 +56,10 @@ const UNTRACKED_OK = [
 ];
 
 const PATH_EXT = /\.(ts|tsx|mjs|js|rs|md|css|json|html|yml|yaml|toml|ps1|sh|txt)$/;
-/** A line may cite a path that deliberately does not exist (renamed, never tracked, not built yet) —
- *  say so on the same line and the guard skips it. */
+/** A citation may name a path that deliberately does not exist (renamed, removed, never tracked, not
+ *  built yet): say so in its clause and the guard skips it. */
 const DELIBERATE =
-  /\b(now `|was `|untracked|never tracked|not yet built|not built|removed|gone|renamed|upstream|scratchpad|registry|e\.g\.)|\b[a-z][a-z-]*-\d+\.\d+\.\d+\b/i;
+  /\b(now `|was `|untracked|never tracked|not yet built|not built|removed|deleted|git history|gone|renamed|upstream|scratchpad|registry|e\.g\.)|\b[a-z][a-z-]*-\d+\.\d+\.\d+\b/i;
 /** The docs agents route by — checked for bare filenames as well as slashed paths. */
 const OWNER_TIER = new Set([
   'AGENTS.md',
@@ -109,6 +113,14 @@ function pathExists(p, fromDir) {
   return false;
 }
 
+/** A cited path that is no artifact, not under the root or the citing file's directory, and no relative
+ *  tail (`machine.ts`, `host/clap.rs`, `audio/plugin-bridge.ts`) of a tracked file. */
+function dead(p, fromDir) {
+  if (UNTRACKED_OK.some((re) => re.test(p))) return false;
+  if (pathExists(p, fromDir)) return false;
+  return ![...trackedSet].some((t) => t.endsWith('/' + p) || t === p);
+}
+
 const dangling = [];
 for (const md of mdFiles) {
   const text = readFileSync(resolve(ROOT, md), 'utf8');
@@ -119,17 +131,207 @@ for (const md of mdFiles) {
     if (!p || seen.has(p)) continue;
     if (!p.includes('/') && !OWNER_TIER.has(md)) continue;
     seen.add(p);
-    if (UNTRACKED_OK.some((re) => re.test(p))) continue;
-    if (pathExists(p, fromDir)) continue;
-    // A relative tail (`machine.ts`, `host/clap.rs`, `audio/plugin-bridge.ts`) is fine when a tracked
-    // file ends with it.
-    if ([...trackedSet].some((t) => t.endsWith('/' + p) || t === p)) continue;
+    if (!dead(p, fromDir)) continue;
     const lineNo = text.slice(0, m.index).split('\n').length;
     const lineText = text.split('\n')[lineNo - 1];
-    if (DELIBERATE.test(lineText)) continue;
+    if (markedDead(lineText, m.index - text.lastIndexOf('\n', m.index - 1) - 1, p)) continue;
     dangling.push(`${md}:${lineNo}  \`${p}\`   ← ${lineText.trim().slice(0, 110)}`);
   }
 }
+
+// ── 1b. paths in code comments ────────────────────────────────────────────────────────────────────
+/** The comment text of a JS/TS or Rust source, one `[line, text]` per source line a comment covers.
+ *  String, template, char and regex literals are skipped, so a path in a string (a fixture's file
+ *  name, a log line) is never read as a citation. */
+function comments(src, rust) {
+  const out = [];
+  const n = src.length;
+  let line = 1;
+  let prev = ''; // the last code character, to tell a regex literal from a division
+  const emit = (text) => {
+    for (const t of text.split('\n')) out.push([line++, t]);
+    line--;
+  };
+  /** Index past a quoted literal opened at `i`; JS quotes end at the line, as the language does. */
+  const quoted = (i, q) => {
+    let j = i + 1;
+    while (j < n && src[j] !== q) {
+      if (src[j] === '\\') j++;
+      else if (src[j] === '\n' && !rust && q !== '`') break;
+      j++;
+    }
+    return j + 1;
+  };
+  let i = 0;
+  while (i < n) {
+    const c = src[i];
+    const d = src[i + 1];
+    let end = -1;
+    if (c === '/' && d === '/') {
+      end = src.indexOf('\n', i);
+      if (end === -1) end = n;
+      emit(src.slice(i + 2, end));
+      i = end;
+      continue;
+    }
+    if (c === '/' && d === '*') {
+      let depth = 1; // Rust block comments nest
+      let j = i + 2;
+      while (j < n && depth > 0) {
+        if (src[j] === '*' && src[j + 1] === '/') depth--;
+        else if (rust && src[j] === '/' && src[j + 1] === '*') depth++;
+        else {
+          j++;
+          continue;
+        }
+        j += 2;
+      }
+      emit(src.slice(i + 2, Math.max(i + 2, j - 2)));
+      i = j;
+      continue;
+    }
+    if (rust && /[rbc]/.test(c) && !/[\w]/.test(src[i - 1] ?? '')) {
+      const raw = /^[bc]?r(#*)"/.exec(src.slice(i, i + 300));
+      if (raw) end = src.indexOf('"' + raw[1], i + raw[0].length) + 1 + raw[1].length;
+    }
+    if (end === -1 && (c === '"' || (!rust && (c === "'" || c === '`')))) end = quoted(i, c);
+    if (end === -1 && rust && c === "'") {
+      // A char literal ('x', '\n', '\u{2014}'), or a lifetime ('a), which has no closing quote.
+      const cp = src.codePointAt(i + 1) ?? 0;
+      if (src[i + 1] === '\\') end = src.indexOf("'", i + 3) + 1;
+      else if (src[i + 1 + (cp > 0xffff ? 2 : 1)] === "'") end = i + 2 + (cp > 0xffff ? 2 : 1);
+    }
+    if (end === -1 && !rust && c === '/' && !/[\w)\]$]/.test(prev)) {
+      let j = i + 1; // a regex literal: up to the closing slash outside a class
+      let cls = false;
+      while (j < n && src[j] !== '\n' && (cls || src[j] !== '/')) {
+        if (src[j] === '\\') j++;
+        else if (src[j] === '[') cls = true;
+        else if (src[j] === ']') cls = false;
+        j++;
+      }
+      end = j + 1;
+    }
+    if (end > i) {
+      for (let k = i; k < end && k < n; k++) if (src[k] === '\n') line++;
+      prev = 'x';
+      i = end;
+      continue;
+    }
+    if (c === '\n') line++;
+    else if (!/\s/.test(c)) prev = c;
+    i++;
+  }
+  return out;
+}
+
+/** The repo paths a comment line cites: a path from a top-level directory, bare or in backticks. A
+ *  relative path (`looper/machine.ts`, Tone's `effect/Reverb.js`) is a port's history or an upstream
+ *  file by the engine briefing's own convention (`src-tauri/crates/lf-engine/src/lib.rs`), so it is not
+ *  read. */
+function citedPaths(text) {
+  const found = new Map(); // path -> index in the text
+  const add = (raw, at) => {
+    const p = candidatePath(raw);
+    if (p && p.includes('/') && TOP_DIRS.has(p.split('/')[0]) && !found.has(p)) found.set(p, at);
+  };
+  for (const m of text.matchAll(/`([^`]+)`/g)) add(m[1], m.index);
+  const bare = text.replace(/`[^`]+`/g, (span) => ' '.repeat(span.length)); // a span is read above
+  for (const m of bare.matchAll(/(?<![\w./@-])[a-z][\w-]*\/[\w./@-]*\w/gi)) add(m[0], m.index);
+  return found;
+}
+
+/** Whether the clause of `text` around `at` marks `p` as deliberately dead: a mark counts for its own
+ *  clause only, and the path's own name (e.g. `src/gone.ts`) is no mark. */
+function markedDead(text, at, p) {
+  return DELIBERATE.test(clause(text, at).split(p).join(' '));
+}
+
+/** The clause of `text` around `at`. */
+function clause(text, at) {
+  const cut = /[;:]\s|(?<!\b(?:e\.g|i\.e))\.\s/g;
+  let from = 0;
+  let to = text.length;
+  for (const m of text.matchAll(cut)) {
+    if (m.index < at) from = m.index + 1;
+    else {
+      to = m.index;
+      break;
+    }
+  }
+  return text.slice(from, to);
+}
+
+// Dead citations in files other work owned when this scan landed (2026-10), one `file  path` each.
+// Each wants its reference marked removed, or pointed at the live file, and its entry deleted here.
+const LF = 'src-tauri/crates/lf-engine/';
+const DEAD_OK = new Set([
+  // The removed Web Audio guards and probes the engine's tests port: "Ports the removed `…`".
+  ...[
+    'tests/align.rs  verify/guards/record-compensation.mjs',
+    'tests/click_grid.rs  verify/guards/grid.mjs',
+    'tests/click_grid.rs  verify/probes/click-sync.mjs',
+    'tests/count_in.rs  verify/guards/count-in.mjs',
+    'tests/first_take.rs  verify/guards/free-stop.mjs',
+    'tests/golden_jam.rs  verify/probes/golden-jam.mjs',
+    'tests/later_arm.rs  verify/guards/later-arm.mjs',
+    'tests/loop_end_stop.rs  verify/probes/loop-end-stop.mjs',
+    'tests/note_ownership.rs  verify/probes/synth-note-ownership.mjs',
+    'tests/overdub_undo_reverse.rs  verify/guards/overdub.mjs',
+    'tests/overdub_undo_reverse.rs  verify/probes/capture-loss.mjs',
+    'tests/overdub_undo_reverse.rs  verify/probes/overdub-window.mjs',
+    'tests/phase_preserve.rs  verify/guards/phase-preserve.mjs',
+    'tests/phase_preserve.rs  verify/probes/playback-restart.mjs',
+    'tests/retake.rs  verify/guards/retake.mjs',
+    // The Web Audio sources removed in Stage 6.
+    'tests/mixer.rs  src/audio/looper/mixer.ts',
+    'tests/mixer.rs  src/audio/master.ts',
+    'tests/common/mod.rs  verify/harness/rig.ts',
+    // The mark sits on the line before, or in the clause after.
+    'src/dsp/mod.rs  verify/probes/tone-refs.mjs',
+    'src/render.rs  src/session/render.ts',
+  ].map((e) => LF + e),
+  // The note router's port source, removed when MIDI went native.
+  'src-tauri/src/engine_io/midi/mod.rs  src/ui/state/input-router.ts',
+  'src-tauri/src/engine_io/midi/router.rs  src/ui/state/input-router.ts',
+]);
+const deadOkUsed = new Set();
+
+const CODE = /\.(rs|ts|tsx|mjs)$/;
+const codeFiles = [...trackedSet].filter((f) => CODE.test(f) && !f.startsWith('node_modules/'));
+for (const file of codeFiles) {
+  const fromDir = dirname(resolve(ROOT, file));
+  for (const [lineNo, text] of comments(readFileSync(resolve(ROOT, file), 'utf8'), file.endsWith('.rs'))) {
+    for (const [p, at] of citedPaths(text)) {
+      if (!dead(p, fromDir)) continue;
+      if (markedDead(text, at, p)) continue;
+      if (DEAD_OK.has(`${file}  ${p}`)) {
+        deadOkUsed.add(`${file}  ${p}`);
+        continue;
+      }
+      dangling.push(`${file}:${lineNo}  \`${p}\`   ← ${text.trim().slice(0, 110)}`);
+    }
+  }
+}
+
+// The lexer and the clause rule, on planted text: a path in a string or regex is not a comment.
+const plantedTs = "const a = '// src/gone.ts'; // src/live.ts\nconst r = /\\/\\/ src\\/x.ts/; /* `src/b.ts` */\nconst t = `${x} // src/t.ts`;";
+check(
+  JSON.stringify(comments(plantedTs, false)) === JSON.stringify([[1, ' src/live.ts'], [2, ' `src/b.ts` ']]),
+  `the TS lexer read ${JSON.stringify(comments(plantedTs, false))}`,
+);
+const plantedRs = 'let s = r#"// src/raw.rs"#; let c = \'"\'; // src/live.rs\nfn f<\'a>() {} /* a /* nested */ src/n.rs */';
+check(
+  JSON.stringify(comments(plantedRs, true)) === JSON.stringify([[1, ' src/live.rs'], [2, ' a /* nested */ src/n.rs ']]),
+  `the Rust lexer read ${JSON.stringify(comments(plantedRs, true))}`,
+);
+const mixed = '`src/a.ts` (removed); `src/b.ts` holds it; e.g. `src/c.ts`';
+check(
+  markedDead(mixed, 0, 'src/a.ts') && !markedDead(mixed, 22, 'src/b.ts') && markedDead(mixed, 48, 'src/c.ts'),
+  'a deliberate mark reaches past its own clause, or stops at an "e.g."',
+);
+check(!markedDead('see `src/gone.ts`', 4, 'src/gone.ts'), "a path's own name counted as its mark");
+
 for (const d of dangling) check(false, `dangling path ref  ${d}`);
 check(true, 'path scan ran');
 
@@ -211,6 +413,8 @@ for (const md of mdFiles) {
   check(hits.length === 0, `${md}:${hits.join(',')} has an em dash: write a period, a comma or a colon`);
 }
 
-console.log(`docs: ${mdFiles.length} tracked .md, ${shaCites.size} shas, ${jam.length}/${NEXT_JAM_CAP} next-jam items`);
+console.log(`docs: ${mdFiles.length} tracked .md, ${codeFiles.length} code files, ${shaCites.size} shas, ${jam.length}/${NEXT_JAM_CAP} next-jam items`);
+const stale = [...DEAD_OK].filter((e) => !deadOkUsed.has(e));
+if (stale.length) console.log(`docs: DEAD_OK entries no longer needed (delete them):\n  ${stale.join('\n  ')}`);
 console.log(`\n=== RESULT: ${checks - fails}/${checks} checks passed, ${fails} failed ===`);
 process.exit(fails === 0 ? 0 : 1);

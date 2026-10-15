@@ -38,8 +38,10 @@ export function installCmdFit(bar: HTMLElement): () => void {
     const width = bar.clientWidth + 0.5;
     const stack = need > width;
     // Second rung: with the modes on row 2, can the REST still share row 1? If not, the tools cluster
-    // joins the modes on row 2 (right-aligned) instead of wrapping onto a third row of its own — the
-    // bar is never taller than two rows, so the stage below never jumps when a loop readout appears.
+    // joins the modes on row 2 (right-aligned) instead of wrapping onto a third row of its own, so the
+    // bar stays two rows while row 2 fits and the stage below does not jump when a loop readout
+    // appears. The stacked bar wraps (`.cmd--stack`, app.css), so a row 2 that does not fit breaks
+    // onto a third row: measured under 1100 px (`docs/backlog-taste.md`, Command bar under 1100 px).
     // Third rung: TAP and END STOP (`.transport__pair`) hold row 1 only while it still fits without the
     // tools; otherwise they join the modes. Last rung: if row 1 still overflows with all three on row 2
     // (FADE and IN FX at 960 and 1100 px), the brand folds to its dot (app.css). Every rung

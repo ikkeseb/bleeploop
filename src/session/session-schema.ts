@@ -151,8 +151,9 @@ export function validateSession(json: unknown): ParsedSession {
     return v;
   };
   const bpm = num('bpm');
-  // Mirror clock.ts's MIN/MAX_BPM instead of letting setBpm silently clamp+round a hand-edited
-  // value — a clamped bpm would recover the WRONG bar count from the frame math with no error.
+  // Mirror the engine's MIN/MAX_BPM (lf-engine `grid.rs`) instead of letting it silently clamp+round
+  // a hand-edited value — a clamped bpm would recover the WRONG bar count from the frame math with no
+  // error.
   if (!Number.isInteger(bpm) || bpm < 40 || bpm > 300) {
     throw new Error(`session.json: bpm must be an integer in 40..300 (the clock's range), got ${bpm}`);
   }

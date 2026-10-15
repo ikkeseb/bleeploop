@@ -126,5 +126,7 @@ together.
 
 ## Open threads (non-gate)
 
-Everything owed an ear/eye/rig check or an owner decision lives in `STATUS.md`. Native host
-residuals (no gate): `src-tauri/AGENTS.md` § Open threads.
+Everything owed an ear/eye/rig check or an owner decision lives in `STATUS.md`. A defect not yet
+understood is an open thread in its area briefing, with its next diagnostic check (no gate): the native
+host and device side, `src-tauri/AGENTS.md` § Open threads; the engine,
+`src-tauri/crates/lf-engine/src/lib.rs` § Open threads; the UI, `src/ui/AGENTS.md` § Open threads.
