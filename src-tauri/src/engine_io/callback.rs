@@ -34,11 +34,37 @@ const FADE_SECONDS: f64 = 0.010;
 const SILENT_BLOCKS: u32 = 2;
 /// Latency reports whose median the alignment takes before it freezes for the run.
 pub(crate) const LATENCY_SAMPLES: usize = 16;
-/// Whether an input sample reached full scale (the meter's clip). Every input format's negative rail
-/// converts to exactly -1; its positive one to its top code, at least a 16-bit input's (`i16::MAX` /
-/// 32768, the coarsest format a device delivers). So a sample one step under either rail is no clip.
-pub(super) fn full_scale(x: f32) -> bool {
-    x >= 1.0 - 1.0 / 32768.0 || x <= -1.0
+/// An input sample format the callbacks take, and its full scale (the meter's clip): either rail of the
+/// device's own format, so a sample one step under one is no clip. The input callbacks read it before
+/// the conversion, which rounds an I32's top codes to 1.0 (and the join's resampler moves a float).
+pub(crate) trait Rail: SizedSample {
+    fn full_scale(self) -> bool;
+}
+
+impl Rail for f32 {
+    fn full_scale(self) -> bool {
+        self >= 1.0 || self <= -1.0
+    }
+}
+
+macro_rules! integer_rails {
+    ($($T:ty),*) => {$(
+        impl Rail for $T {
+            fn full_scale(self) -> bool {
+                self == <$T>::MAX || self == <$T>::MIN
+            }
+        }
+    )*};
+}
+integer_rails!(i32, i16, u16);
+
+/// Light the clip of each slot whose input reached full scale in a callback.
+fn latch_clips(core: &Core, clips: [bool; SLOT_COUNT]) {
+    for (latch, clip) in core.meter_clip.iter().zip(clips) {
+        if clip {
+            latch.store(true, Relaxed);
+        }
+    }
 }
 /// Frames the WASAPI input callback converts at a time.
 const SCRATCH_FRAMES: usize = 1024;
@@ -396,7 +422,7 @@ pub(crate) enum Capture {
 }
 
 impl Capture {
-    pub(crate) fn capture<T: SizedSample>(&mut self, data: &[T], latency: Option<Duration>)
+    pub(crate) fn capture<T: Rail>(&mut self, data: &[T], latency: Option<Duration>)
     where
         f32: FromSample<T>,
     {
@@ -422,7 +448,7 @@ impl DuplexInput {
         DuplexInput { core, run, channels: channels.max(1), rate, probe: Probe::new() }
     }
 
-    fn capture<T: SizedSample>(&mut self, data: &[T], latency: Option<Duration>)
+    fn capture<T: Rail>(&mut self, data: &[T], latency: Option<Duration>)
     where
         f32: FromSample<T>,
     {
@@ -437,13 +463,17 @@ impl DuplexInput {
         };
         let (channels, picks) = (self.channels, self.run.picks(self.channels));
         let rt = &mut *rt;
-        let ok = guarded(&self.core.counters, || {
+        let core = &*self.core;
+        let ok = guarded(&core.counters, || {
             let n = data.len() / channels;
-            for (handoff, channel) in rt.handoff.iter_mut().zip(picks) {
+            let mut clips = [false; SLOT_COUNT];
+            for ((handoff, channel), clip) in rt.handoff.iter_mut().zip(picks).zip(&mut clips) {
                 for (h, frame) in handoff.iter_mut().zip(data.chunks_exact(channels)) {
+                    *clip |= frame[channel].full_scale();
                     *h = f32::from_sample(frame[channel]);
                 }
             }
+            latch_clips(core, clips);
             rt.handoff_len = n;
             rt.in_cycles += 1;
         });
@@ -475,7 +505,7 @@ impl JoinInput {
         JoinInput { core, run, channels: channels.max(1), rate, push, scratch: vec![0.0; SCRATCH_FRAMES * SLOT_COUNT], probe: Probe::new(), dead: false }
     }
 
-    fn capture<T: SizedSample>(&mut self, data: &[T], latency: Option<Duration>)
+    fn capture<T: Rail>(&mut self, data: &[T], latency: Option<Duration>)
     where
         f32: FromSample<T>,
     {
@@ -490,18 +520,21 @@ impl JoinInput {
             return;
         }
         let (channels, picks) = (self.channels, self.run.picks(self.channels));
-        let (push, scratch, counters) = (&mut self.push, &mut self.scratch, &self.core.counters);
+        let (push, scratch, core) = (&mut self.push, &mut self.scratch, &*self.core);
+        let counters = &core.counters;
         let ok = guarded(counters, || {
-            let mut dropped = 0;
+            let (mut dropped, mut clips) = (0, [false; SLOT_COUNT]);
             for chunk in data.chunks(channels * SCRATCH_FRAMES) {
                 let out = &mut scratch[..chunk.len() / channels * SLOT_COUNT];
                 for (o, frame) in out.chunks_exact_mut(SLOT_COUNT).zip(chunk.chunks_exact(channels)) {
-                    for (s, &channel) in o.iter_mut().zip(&picks) {
+                    for ((s, &channel), clip) in o.iter_mut().zip(&picks).zip(&mut clips) {
+                        *clip |= frame[channel].full_scale();
                         *s = f32::from_sample(frame[channel]);
                     }
                 }
                 dropped += push.push(out);
             }
+            latch_clips(core, clips);
             if dropped > 0 {
                 counters.join_overruns.fetch_add(1, Relaxed);
             }
@@ -848,15 +881,13 @@ impl Render {
     }
 }
 
-/// Fold a block of a slot's input into the meter the feed takes: its peak, and a clip.
+/// Fold a block of a slot's input into the meter's peak the feed takes. Its clip the input callbacks
+/// latch, in the device's own format ([`Rail`]).
 fn meter(core: &Core, slot: usize, input: &[f32]) {
-    let (peak, clip) = input.iter().fold((0.0f32, false), |(m, c), &x| (m.max(x.abs()), c || full_scale(x)));
+    let peak = input.iter().fold(0.0f32, |m, &x| m.max(x.abs()));
     if peak > 0.0 {
         // A non-negative f32's bits order as the value does.
         core.meter_peak[slot].fetch_max(peak.to_bits(), Relaxed);
-    }
-    if clip {
-        core.meter_clip[slot].store(true, Relaxed);
     }
 }
 
@@ -1108,23 +1139,6 @@ fn silence<T: Sample>(data: &mut [T]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// CLIP is a sample at full scale in the input's own format, either rail, never one step under it.
-    #[test]
-    fn the_meter_clips_at_full_scale_in_any_input_format_and_not_just_under_it() {
-        let core = Core::new();
-        let clipped = |x: f32| {
-            meter(&core, 1, &[0.25, x]);
-            core.meter_clip.each_ref().map(|c| c.swap(false, Relaxed))
-        };
-        let rails = [1.0, -1.0, f32::from_sample(i16::MAX), f32::from_sample(i16::MIN), f32::from_sample(u16::MAX), f32::from_sample(u16::MIN), f32::from_sample(i32::MAX), f32::from_sample(i32::MIN)];
-        for x in rails {
-            assert_eq!(clipped(x), [false, true], "{x} is full scale: slot 1's clip alone");
-        }
-        for x in [0.9995, -0.9995, f32::from_sample(i16::MAX - 1), f32::from_sample(i16::MIN + 1)] {
-            assert_eq!(clipped(x), [false, false], "{x} is under full scale");
-        }
-    }
 
     #[test]
     fn stereo_lands_on_the_first_two_channels_and_a_mono_device_gets_the_mean() {
@@ -1570,6 +1584,51 @@ mod tests {
         }
         assert!(j.events.iter().any(|e| matches!(e, Event::TakeRejected { lane: 0, overdub: true, .. })), "the spliced layer is rejected");
         assert!(j.engine(|e| e.looper().loop_pcm(0)) == before, "the loop before the layer, bit for bit");
+    }
+
+    /// CLIP lights at full scale in the device's own sample format, either rail, and never one step
+    /// under it, through both input callbacks: an I32's top step under converts to 1.0, and an F32's is
+    /// within a 16-bit step of it.
+    #[test]
+    fn clip_lights_at_each_input_formats_full_scale_and_never_one_step_under_it() {
+        // Whether `x`, every sample of a mono input, lights each slot's clip (both read the one channel):
+        // ASIO's cycle, then WASAPI's join until its pull comes back whole.
+        macro_rules! lit {
+            ($x:expr) => {{
+                let data = [$x; N];
+                let mut out = [0.0f32; 2 * N];
+                let (core, _handle) = engine_core();
+                let run = Arc::new(Run::new([0, 0]));
+                let mut input = DuplexInput::new(core.clone(), run.clone(), 1, RATE);
+                let mut render = Render::duplex(core.clone(), run, 2, RATE);
+                input.capture(&data, None);
+                render.render(&mut out, Instant::now(), None);
+                let duplex = core.meter_clip.each_ref().map(|c| c.swap(false, Relaxed));
+                let mut j = Join::new();
+                for _ in 0..8 {
+                    j.input.capture(&data, None);
+                    j.render.render(&mut out, j.entry, None);
+                    j.entry += Duration::from_millis(10);
+                }
+                let join = j.core.meter_clip.each_ref().map(|c| c.swap(false, Relaxed));
+                [duplex, join]
+            }};
+        }
+        macro_rules! check {
+            ($T:ty, rails: $rails:expr, under: $under:expr) => {
+                for x in $rails {
+                    assert_eq!(lit!(x), [[true; SLOT_COUNT]; 2], "{}: {x:?} is full scale", stringify!($T));
+                }
+                for x in $under {
+                    assert_eq!(lit!(x), [[false; SLOT_COUNT]; 2], "{}: {x:?} is one step under full scale", stringify!($T));
+                }
+            };
+        }
+        let below_one = f32::from_bits(1.0f32.to_bits() - 1);
+        check!(f32, rails: [1.0f32, -1.0, 1.5], under: [below_one, -below_one]);
+        check!(i32, rails: [i32::MAX, i32::MIN], under: [i32::MAX - 1, i32::MIN + 1]);
+        check!(i16, rails: [i16::MAX, i16::MIN], under: [i16::MAX - 1, i16::MIN + 1]);
+        check!(u16, rails: [u16::MAX, u16::MIN], under: [u16::MAX - 1, u16::MIN + 1]);
     }
 
     #[test]
