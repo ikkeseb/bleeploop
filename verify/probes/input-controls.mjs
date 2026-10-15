@@ -23,7 +23,7 @@ import { probe } from '../harness/probe.ts';
 const EMPTY = { state: 'Empty', length: 0, armed: false, autoArmed: false, canUndo: false, canReverse: false, reversed: false, stopAt: null, fading: false, retakePass: 0 };
 
 await probe(async ({ open }) => {
-  const { page, consoleErrors } = await open({
+  const { page } = await open({
     viewport: { width: 1280, height: 820 },
     init: (p) => p.addInitScript(() => void (window.__lfEngineFake = true)),
   });
@@ -113,5 +113,4 @@ await probe(async ({ open }) => {
   await page.mouse.up();
   await released(from, 127);
   assert.equal(await lit(127), false, 'the top key goes dark on release');
-  assert.deepEqual(consoleErrors, [], 'no console errors');
 });

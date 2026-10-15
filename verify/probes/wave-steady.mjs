@@ -47,7 +47,7 @@ let seed = 20260928;
 const rand = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
 
 await probe(async ({ open }) => {
-  const { page, consoleErrors } = await open({
+  const { page } = await open({
     viewport: { width: 1600, height: 900 },
     init: (p) => p.addInitScript(() => void (window.__lfEngineFake = true)),
   });
@@ -149,5 +149,4 @@ await probe(async ({ open }) => {
   const laterSpans = assertSteady('later take', later, 20);
   assert.deepEqual(laterSpans, [BAR, 2 * BAR, 3 * BAR], 'a free later take spans the loops it reached');
 
-  assert.deepEqual(consoleErrors, [], 'no console errors');
 });

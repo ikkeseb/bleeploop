@@ -14,7 +14,7 @@ import assert from 'node:assert/strict';
 import { probe } from '../harness/probe.ts';
 
 await probe(async ({ open }) => {
-  const { page } = await open({ init: (p) => p.addInitScript(() => void (window.__lfEngineFake = true)) });
+  const { page, consumeConsoleErrors } = await open({ init: (p) => p.addInitScript(() => void (window.__lfEngineFake = true)) });
   await page.waitForFunction(() => window.__lf.native.opened.length >= 1, undefined, { timeout: 10000 });
   const result = await page.evaluate(async () => {
     const lf = window.__lf;
@@ -163,4 +163,6 @@ await probe(async ({ open }) => {
   });
   console.log(JSON.stringify(result, null, 2));
   assert.ok(result.every((entry) => entry.pass), JSON.stringify(result));
+  // The timer's save the automatic case aborts is the one failure no caller sees: it reaches the release log.
+  assert.equal(consumeConsoleErrors('[autosave] Jam autosave failed Error: IndexedDB transaction failed').length, 1, 'the aborted automatic save is logged once');
 });

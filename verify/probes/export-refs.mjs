@@ -156,7 +156,7 @@ await probe(async ({ open, browser }) => {
   // A fresh profile: no earlier recovery record, and downloads land where the probe can read them.
   const context = await browser.newContext({ viewport: { width: 1280, height: 820 }, acceptDownloads: true });
   const init = (page) => page.addInitScript(() => void (window.__lfEngineFake = true));
-  const { page, consoleErrors } = await open({ context, init });
+  const { page } = await open({ context, init });
   await page.waitForFunction(() => window.__lf.native.opened.length === 1, undefined, { timeout: 10000 });
   let seq = 0;
   const emit = (frame) => page.evaluate((f) => window.__lf.native.emit(f), { seq: ++seq, reset: false, events: [], ...frame });
@@ -181,7 +181,6 @@ await probe(async ({ open, browser }) => {
   const exportBytes = readFileSync(await download.path());
   const record = await page.evaluate(readRecovery);
   const recoveryBytes = Buffer.from(record.bytes, 'base64');
-  assert.deepEqual(consoleErrors, []);
   await context.close();
 
   const exported = entriesOf(exportBytes);

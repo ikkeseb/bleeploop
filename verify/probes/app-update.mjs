@@ -76,20 +76,19 @@ await probe(async ({ open }) => {
 
   // 1. No updater.
   {
-    const { page, consoleErrors } = await openApp(null);
+    const { page } = await openApp(null);
     await page.waitForTimeout(500); // the launch check is async: give an offer the time to show
     assert.equal(await pill(page).count(), 0, 'an update pill without an updater');
     assert.equal(await page.locator('.toast', { hasText: 'is ready' }).count(), 0, 'an update toast without an updater');
     await page.locator('.tool--help').click();
     assert.equal(await page.getByRole('heading', { name: /Update ready/ }).count(), 0, 'Update ready in Help');
     assert.equal(await page.locator('#lf-help-popover').getByText(/update/i).count(), 0, 'Help still mentions updating');
-    assert.deepEqual(consoleErrors, [], 'console errors');
     await page.close();
   }
 
   // 2. An offer, the looper empty.
   {
-    const { page, consoleErrors } = await openApp({ update: OFFER });
+    const { page } = await openApp({ update: OFFER });
     await page.locator('.toast', { hasText: TOAST }).waitFor({ timeout: 5000 });
     await pill(page).waitFor({ timeout: 5000 });
     assert.equal(await pill(page).innerText(), 'UPDATE', 'the pill reads'); // innerText: the CSS uppercase
@@ -112,13 +111,12 @@ await probe(async ({ open }) => {
     await panel(page).getByRole('button', { name: 'Update and restart' }).click();
     await page.waitForFunction(() => window.__lfUpdateFake.installs === 1, undefined, { timeout: 5000 });
     assert.deepEqual(await page.evaluate(() => window.__confirms), [], 'an empty looper was asked');
-    assert.deepEqual(consoleErrors, [], 'console errors');
     await page.close();
   }
 
   // 3. An offer during a jam.
   {
-    const { page, consoleErrors } = await openApp({ update: OFFER });
+    const { page } = await openApp({ update: OFFER });
     await page.evaluate(async () => {
       await window.__lf.autosave.ready();
       await window.__engine.commit();
@@ -136,14 +134,13 @@ await probe(async ({ open }) => {
     await page.waitForFunction(() => window.__lfUpdateFake.installs === 1, undefined, { timeout: 10_000 });
     assert.equal(await page.evaluate(() => window.__confirms.length), 2, 'the second press was not asked');
     assert.equal(await page.evaluate(() => window.__lf.autosave.hasSaved()), true, 'the jam was not saved for recovery');
-    assert.deepEqual(consoleErrors, [], 'console errors');
     await page.close();
   }
 
   // 4. The install's read-out. `hold` keeps install() unsettled, as the native one is once the
   //    installer runs, so each reported stage can be read off the panel.
   {
-    const { page, consoleErrors } = await openApp({ update: OFFER, hold: true });
+    const { page } = await openApp({ update: OFFER, hold: true });
     await page.locator('.toast', { hasText: TOAST }).waitFor({ timeout: 5000 });
     await pill(page).click();
     const button = panel(page).getByRole('button', { name: /Update and restart|Updating/ });
@@ -180,13 +177,12 @@ await probe(async ({ open }) => {
     await page.waitForFunction(
       () => document.querySelector('.update__stage')?.textContent === 'Installing — BleepLoop closes now',
       undefined, { timeout: 5000 });
-    assert.deepEqual(consoleErrors, [], 'console errors');
     await page.close();
   }
 
   // 5. A failed install.
   {
-    const { page, consoleErrors } = await openApp({ update: OFFER, fail: 'probe: the installer did not start' });
+    const { page, consumeConsoleErrors } = await openApp({ update: OFFER, fail: 'probe: the installer did not start' });
     await page.locator('.toast', { hasText: TOAST }).waitFor({ timeout: 5000 });
     await pill(page).click();
     const button = panel(page).getByRole('button', { name: 'Update and restart' });
@@ -196,8 +192,7 @@ await probe(async ({ open }) => {
     assert.equal(await button.isEnabled(), true, 'the button stays disabled after a failure');
     // A stage left on screen under a pressable button would read as an install still running.
     assert.equal(await panel(page).locator('.update__progress').count(), 0, 'the read-out survived the failure');
-    assert.equal(consoleErrors.length, 1, `console errors: ${JSON.stringify(consoleErrors)}`);
-    assert.match(consoleErrors[0], /^\[app\] update failed/, 'the failure line');
+    assert.equal(consumeConsoleErrors(/^\[app\] update failed/).length, 1, 'the failure line, once');
     await page.close();
   }
 });

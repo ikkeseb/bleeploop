@@ -130,8 +130,12 @@ const readPick = (page, label, key) =>
     return out;
   }, [label, key]);
 
+/** The release-log lines of a failed pick: its open and the reopen of the picks that ran, both while the
+ * driver fails. */
+const FAILED_OPENS = 2;
+
 /** Pick `value` in `label` while the device fails to open: every pick that ran goes back. */
-async function failedPick(page, label, key, value, asked) {
+async function failedPick({ page, consumeConsoleErrors }, label, key, value, asked) {
   const before = await readPick(page, label, key);
   await page.evaluate(() => (window.__driver.fail = 'the device did not start'));
   const opens = await pick(page, label, value);
@@ -140,10 +144,11 @@ async function failedPick(page, label, key, value, asked) {
   console.log(`failed ${label}`, JSON.stringify({ before, opens, after }));
   assert.deepEqual(Object.fromEntries(Object.keys(asked).map((k) => [k, opens[0][k]])), asked, `the ${label} pick asks for ${value}`);
   assert.deepEqual(after, before, `a failed ${label} pick goes back, saved and shown`);
+  assert.equal(consumeConsoleErrors('[engine] device open failed the device did not start').length, FAILED_OPENS, `the failed ${label} pick is logged`);
 }
 
 await probe(async ({ open }) => {
-  const { page } = await open({
+  const app = await open({
     viewport: { width: 960, height: 820 },
     init: async (p) => {
       await serveHost(p);
@@ -154,6 +159,7 @@ await probe(async ({ open }) => {
       await p.addInitScript(installDriver);
     },
   });
+  const { page, consumeConsoleErrors } = app;
 
   // 1. Boot: the first open asks for the device's own rate, and the row says which it is.
   await page.waitForFunction(() => window.__lf.native.opened.length > 0, undefined, { timeout: 10000 });
@@ -222,9 +228,10 @@ await probe(async ({ open }) => {
   const restored = await readRow(page);
   console.log('failed open', JSON.stringify(restored));
   assert.deepEqual({ value: restored.value, saved: restored.saved, runs: restored.runs }, { value: '48000', saved: 48000, runs: 48000 }, 'the pick that ran goes back');
+  assert.equal(consumeConsoleErrors('[engine] device open failed the device did not start').length, FAILED_OPENS, 'the failed rate pick is logged');
   // The same for a buffer pick and ASIO off: the size and the toggle that ran go back.
-  await failedPick(page, 'Buffer size in frames', 'bufferFrames', '64', { buffer: 64, backend: 'Asio' });
-  await failedPick(page, 'Use ASIO low-latency audio', 'asioEnabled', false, { backend: 'Wasapi' });
+  await failedPick(app, 'Buffer size in frames', 'bufferFrames', '64', { buffer: 64, backend: 'Asio' });
+  await failedPick(app, 'Use ASIO low-latency audio', 'asioEnabled', false, { backend: 'Wasapi' });
 
   // 5. ASIO lost, the owner fell back to WASAPI at its endpoint's 44.1 kHz on its own (the feed's
   // status + Fallback): the row shows what runs, and the 48 kHz pick stays saved for the next ASIO open.
@@ -237,6 +244,7 @@ await probe(async ({ open }) => {
   assert.deepEqual(fellBack.options, [['', 'Device (44.1 kHz)']], 'WASAPI runs: its rate alone');
   assert.deepEqual({ value: fellBack.value, saved: fellBack.saved }, { value: '', saved: 48000 });
   assert.match(fellBack.hint ?? '', /^Set by Windows/);
+  assert.equal(consumeConsoleErrors('[engine] fell back to Fake input → Fake output').length, 1, 'the fallback is logged');
 
   // 6. A driver that runs only 44.1 kHz (probed again): no 48 kHz option; the device's rate runs and
   // shows, and the player's pick stays saved for a driver that runs it.
@@ -265,5 +273,5 @@ await probe(async ({ open }) => {
   assert.match(wasapi.hint ?? '', /^Set by Windows/);
 
   // 8. An output device pick whose open fails: the endpoint that ran goes back, saved and shown.
-  await failedPick(page, 'Output device', 'outputDeviceId', 'out-b', { output: 'out-b', backend: 'Wasapi' });
+  await failedPick(app, 'Output device', 'outputDeviceId', 'out-b', { output: 'out-b', backend: 'Wasapi' });
 });

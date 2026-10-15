@@ -116,7 +116,7 @@ async function boot(page, script) {
 }
 
 await probe(async ({ open }) => {
-  const { page, consoleErrors } = await open({ viewport: { width: 1280, height: 800 }, init: engineInit });
+  const { page, consumeConsoleErrors } = await open({ viewport: { width: 1280, height: 800 }, init: engineInit });
   await boot(page, { lists: { builtin: BUILTIN, user: [OWN, LONG], unsupported: [] }, plugins: [AMP] });
 
   const section = page.getByRole('group', { name: 'Plugin folders', exact: true });
@@ -208,16 +208,15 @@ await probe(async ({ open }) => {
 
   // ── A refused add: a toast beside the logged error ──────────────────────────────────────────────────
   await clearCalls();
-  assert.deepEqual(consoleErrors, [], 'no console errors so far');
   await page.evaluate(() => (window.__folders.nextAdd = 'plugin-folders.json: expected value at line 1'));
   await addButton.click();
   const toast = page.locator('.toast', { hasText: 'Could not add the plugin folder' });
   await toast.waitFor();
   await idle();
-  console.log('refused', JSON.stringify({ toast: await toast.locator('.toast__body').textContent(), consoleErrors }));
+  const refusal = consumeConsoleErrors('[plugin-folders] Could not add the plugin folder');
+  console.log('refused', JSON.stringify({ toast: await toast.locator('.toast__body').textContent(), refusal }));
   assert.match(await toast.textContent(), /plugin-folders\.json: expected value/, 'the toast carries the host\'s reason');
-  assert.equal(consoleErrors.length, 1, 'the refusal is logged once');
-  assert.match(consoleErrors[0], /\[plugin-folders\] Could not add the plugin folder/);
+  assert.equal(refusal.length, 1, 'the refusal is logged once');
   assert.deepEqual(await calls(), ['add(0)'], 'a refused add scans nothing');
   assert.deepEqual(await rows(), listed([OWN, LONG]), 'and the list stays');
 
@@ -354,6 +353,4 @@ await probe(async ({ open }) => {
   await unsupported.waitFor({ state: 'detached' });
   assert.ok(!(await section.textContent()).includes('not supported'), 'an empty answer removes the block');
   assert.deepEqual(await rows(), listed([OWN, LONG, LATE_FOLDER, STALE_FOLDER]), 'the folder rows are as they were');
-
-  assert.equal(consoleErrors.length, 1, 'no console errors beyond the refused add');
 });

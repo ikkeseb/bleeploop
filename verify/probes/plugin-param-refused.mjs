@@ -21,7 +21,7 @@ import assert from 'node:assert/strict';
 import { probe } from '../harness/probe.ts';
 
 await probe(async ({ open }) => {
-  const { page, consoleErrors } = await open({
+  const { page, consumeConsoleErrors } = await open({
     viewport: { width: 1280, height: 820 },
     init: async (p) => {
       await p.route('**/src/platform/host.web.ts', async (route) => {
@@ -91,7 +91,12 @@ await probe(async ({ open }) => {
   await alpha.waitFor();
   const shown = async (input) => Number(await input.inputValue());
   const probeState = (read) => page.evaluate(read);
-  const refusalLines = () => consoleErrors.filter((t) => t.includes('setParameter refused'));
+  const refusals = [];
+  /** Every refusal line so far, taken from the page's console errors as they come. */
+  const refusalLines = () => {
+    refusals.push(...consumeConsoleErrors('setParameter refused'));
+    return refusals;
+  };
   const releaseRefusal = () => page.evaluate(() => window.__paramProbe.state.pendingRefusals.shift()());
   const settle = () => page.evaluate(() => new Promise((r) => setTimeout(r, 50)));
   assert.equal(await shown(alpha), 0.25);
@@ -182,7 +187,6 @@ await probe(async ({ open }) => {
   await page.waitForFunction(() => document.querySelector('input[aria-label="Alpha"]').value === '0.3');
   assert.equal(refusalLines().length, 5);
 
-  // (4) the page saw only the refusal lines as errors: none unhandled (probe also fails on pageerror).
-  assert.equal(consoleErrors.length, 5, `no other console error: ${JSON.stringify(consoleErrors)}`);
+  // (4) the page saw only the refusal lines as errors (the harness fails on any other) and none unhandled.
   console.log(`refusals logged: ${JSON.stringify(refusalLines().map((t) => t.split("\n")[0]))}`);
 }, { launch: {} });

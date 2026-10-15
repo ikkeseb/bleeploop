@@ -23,7 +23,7 @@ import assert from 'node:assert/strict';
 import { probe } from '../harness/probe.ts';
 
 await probe(async ({ open }) => {
-  const { page } = await open({
+  const { page, consumeConsoleErrors } = await open({
     init: async (p) => {
       await p.route('**/src/platform/host.web.ts', async (route) => {
         const response = await route.fetch();
@@ -148,5 +148,7 @@ await probe(async ({ open }) => {
   assert.deepEqual(result.failedClear, { slot1: 'b', calls: ['unload:1'], routed: [builtin(1, 'bass')], after: [plugin(1)] },
     'a failed clear keeps the plugin: its built-in while the unload runs, the plugin target again after');
   assert.deepEqual(result.failedPick, { slot1: 'b', active: 0 }, 'a synth pick whose unload fails does not move the MIDI slot');
+  assert.equal(consumeConsoleErrors('[instrument] plugin unload (swap) failed').length, 1, 'the failed swap reaches the release log');
+  assert.equal(consumeConsoleErrors('[instrument] plugin unload failed').length, 2, 'and so do the failed clear and pick');
   assert.equal(result.engineNotes, 0, 'no note or target goes past the router (engine_send)');
 });

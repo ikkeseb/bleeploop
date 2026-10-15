@@ -13,7 +13,7 @@ import assert from 'node:assert/strict';
 import { probe } from '../harness/probe.ts';
 
 await probe(async ({ open }) => {
-  const { page, consoleErrors } = await open({
+  const { page } = await open({
     viewport: { width: 1280, height: 820 },
     init: async (p) => {
       await p.addInitScript(() => void (window.__lfEngineFake = true));
@@ -115,5 +115,4 @@ await probe(async ({ open }) => {
     1,
     'approaching unity must retain the soft detent',
   );
-  assert.deepEqual(consoleErrors, [], 'no console errors');
 });

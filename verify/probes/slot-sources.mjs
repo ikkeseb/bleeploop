@@ -90,7 +90,7 @@ async function boot(page) {
 
 await probe(async ({ browser, open }) => {
   // ── Engine mode, a saved global channel (input 2) from before the per-slot pick ─────────────────────
-  const { page, consoleErrors } = await open({
+  const { page } = await open({
     viewport: { width: 1280, height: 800 },
     init: (p) => engineInit(p, JSON.stringify({ inputChannel: '1' })),
   });
@@ -200,12 +200,11 @@ await probe(async ({ browser, open }) => {
   for (const c of [{ SetSlotGain: [0, 0.5] }, { SetInstrumentGain: ['pad', 0.7] }, { selectTarget: { slot: 0, target: 'Off' } }]) {
     assert.ok(resent.includes(JSON.stringify(c)), `the reset sends ${JSON.stringify(c)}: ${resent}`);
   }
-  assert.deepEqual(consoleErrors, [], 'no console errors');
 
   // ── Review fixes, in a fresh profile ───────────────────────────────────────────────────────────────
   {
     const context = await browser.newContext();
-    const { page: p, consoleErrors: errors } = await open({ context, viewport: { width: 1280, height: 800 }, init: (pg) => engineInit(pg) });
+    const { page: p, consumeConsoleErrors } = await open({ context, viewport: { width: 1280, height: 800 }, init: (pg) => engineInit(pg) });
     await boot(p);
     const pk = (slot) => p.getByRole('combobox', { name: `Source for slot ${slot}`, exact: true });
     const inp = (slot) => p.getByRole('combobox', { name: `Input for slot ${slot}`, exact: true });
@@ -344,6 +343,9 @@ await probe(async ({ browser, open }) => {
     console.log('pick over a failed unload', JSON.stringify(failedPick));
     assert.deepEqual(failedPick, { before: 'lead', after: 'lead', plugin: AMP.id, unloaded: 'off', pluginAfter: null },
       'Off and a synth are saved only once the plugin unloaded');
+    const unloadFailures = consumeConsoleErrors(/^\[instrument\] plugin unload failed/);
+    console.log('unload failures logged', JSON.stringify(unloadFailures));
+    assert.equal(unloadFailures.length, 2, 'each injected unload failure reaches the release log');
 
     // 5, at the next launch: the rig recall's load brings the plugin back at its level.
     await p.reload();
@@ -352,8 +354,6 @@ await probe(async ({ browser, open }) => {
     await clear();
     await p.evaluate(async (AMP) => (await import('/src/ui/state/instrument.ts')).restorePlugin(0, AMP), AMP);
     assert.ok((await sentNow()).includes('{"SetSlotGain":[0,0.8]}'), `the recalled plugin comes back at its level: ${await sentNow()}`);
-    const unexpected = errors.filter((e) => !e.startsWith('[instrument] plugin unload failed'));
-    assert.deepEqual(unexpected, [], 'no console errors beyond the injected unload failures');
     await context.close();
   }
 

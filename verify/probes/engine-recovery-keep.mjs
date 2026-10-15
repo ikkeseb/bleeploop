@@ -117,12 +117,10 @@ async function boot(browser, open, context = null) {
  * aside: the clear deletes only its own engine's jam. */
 async function clearAsTheDeviceMoves(browser, open, status, how) {
     const first = await boot(browser, open);
-    const errors = [first.consoleErrors];
     await emptyEngine(first.page, 48000);
     const jamA = await commitJam(first.page, 48000, 18);
     await saved(first.page, jamA, 'the 48 kHz jam');
     const second = await relaunch(browser, open, first, 44100);
-    errors.push(second.consoleErrors);
     await emptyEngine(second.page, 44100);
     const jamB = await commitJam(second.page, 44100, 19);
     await saved(second.page, jamB, 'the 44.1 kHz jam');
@@ -141,7 +139,6 @@ async function clearAsTheDeviceMoves(browser, open, status, how) {
     const held = await keys(second.page, ['latest', 'kept-48000', 'kept-44100']);
     console.log(`after the clear ${how}`, JSON.stringify(held));
     assert.deepEqual(held, { latest: null, 'kept-48000': jamA, 'kept-44100': null }, 'the clear deleted the 44.1 kHz jam, not the 48 kHz one');
-    assert.deepEqual(errors.flat(), [], 'no console errors');
     await second.context.close();
   }
 
@@ -245,7 +242,7 @@ async function settle(page) {
 
 const cases = {
   async reset({ browser, open }) {
-    const { page, consoleErrors, context } = await boot(browser, open);
+    const { page, context } = await boot(browser, open);
     await emptyEngine(page, 48000);
     const jam = await commitJam(page, 48000, 1);
     const before = await saved(page, jam, 'the jam');
@@ -261,12 +258,11 @@ const cases = {
     await emit(page, { events: [0, 1, 2, 3, 4].flatMap((i) => [{ Cleared: { frame: 0, lane: i } }, laneEvent(i, lane('Empty', 0))]) });
     await settle(page);
     assert.deepEqual(await slot(page, 'latest'), before, 'a CLEAR ALL of lanes that held no loop keeps it too');
-    assert.deepEqual(consoleErrors, []);
     await context.close();
   },
 
   async clear({ browser, open }) {
-    const { page, consoleErrors, context } = await boot(browser, open);
+    const { page, context } = await boot(browser, open);
     await emptyEngine(page, 48000);
     const jam = await commitJam(page, 48000, 2);
     await saved(page, jam, 'the jam');
@@ -281,12 +277,11 @@ const cases = {
     const latest = await slot(page, 'latest');
     console.log('after CLEAR ALL', JSON.stringify(latest));
     assert.equal(latest, null, "the player's CLEAR ALL deletes the recovery");
-    assert.deepEqual(consoleErrors, []);
     await context.close();
   },
 
   async partial({ browser, open }) {
-    const { page, consoleErrors, context } = await boot(browser, open);
+    const { page, context } = await boot(browser, open);
     await emptyEngine(page, 48000);
     const jam = await commitJam(page, 48000, 6);
     await saved(page, jam, 'the jam');
@@ -332,7 +327,6 @@ const cases = {
     await clearLanes(page, [1]);
     await settle(page);
     assert.equal(await slot(page, 'latest'), null, 'the CLEAR of the last loop deletes the recovery');
-    assert.deepEqual(consoleErrors, []);
     await context.close();
   },
 
@@ -377,27 +371,22 @@ const cases = {
     await saved(third.page, jamA, 'the slots swap');
     assert.deepEqual((await slot(third.page, 'kept-44100'))?.stems, jamB, 'the 44.1 kHz jam waits in its place');
     assert.equal(await slot(third.page, 'kept-48000'), null, 'the restored jam is the latest, not kept too');
-    const errors = [...first.consoleErrors, ...second.consoleErrors, ...third.consoleErrors];
-    assert.deepEqual(errors, [], 'no console errors');
     await context.close();
   },
 
   async rates({ browser, open }) {
     const first = await boot(browser, open);
-    const errors = [first.consoleErrors];
     await emptyEngine(first.page, 48000);
     const jamA = await commitJam(first.page, 48000, 10);
     await saved(first.page, jamA, 'the 48 kHz jam');
 
     const second = await relaunch(browser, open, first, 44100);
-    errors.push(second.consoleErrors);
     await emptyEngine(second.page, 44100);
     const jamB = await commitJam(second.page, 44100, 11);
     await saved(second.page, jamB, 'the 44.1 kHz jam');
 
     // A third rate: its jam must not push the first one out.
     const third = await relaunch(browser, open, second, 96000);
-    errors.push(third.consoleErrors);
     await third.page.getByText('Loops kept in recovery').waitFor({ timeout: 5000 });
     await emptyEngine(third.page, 96000);
     const jamC = await commitJam(third.page, 96000, 12);
@@ -405,32 +394,27 @@ const cases = {
 
     // Back at 48 kHz, then at 44.1 kHz: each launch restores its own rate's jam.
     const fourth = await relaunch(browser, open, third, 48000);
-    errors.push(fourth.consoleErrors);
     await fourth.page.waitForFunction(() => window.__lf.native.loadedSessions.length === 1, undefined, { timeout: 15000 }).catch(() => null);
     const at48 = await loaded(fourth.page);
     console.log('restored at 48 kHz', JSON.stringify(at48));
     assert.deepEqual(at48?.sigs, jamA, 'the 48 kHz jam survived two jams at other rates');
     await saved(fourth.page, jamA, 'the 48 kHz jam is the latest again');
     const fifth = await relaunch(browser, open, fourth, 44100);
-    errors.push(fifth.consoleErrors);
     await fifth.page.waitForFunction(() => window.__lf.native.loadedSessions.length === 1, undefined, { timeout: 15000 }).catch(() => null);
     assert.deepEqual((await loaded(fifth.page))?.sigs, jamB, 'and the 44.1 kHz one');
     await saved(fifth.page, jamB, 'the 44.1 kHz jam is the latest');
     const held = await keys(fifth.page, ['kept-48000', 'kept-44100', 'kept-96000']);
     console.log('kept', JSON.stringify(held));
     assert.deepEqual(held, { 'kept-48000': jamA, 'kept-44100': null, 'kept-96000': jamC }, 'one jam per rate, the latest not kept twice');
-    assert.deepEqual(errors.flat(), [], 'no console errors');
     await fifth.context.close();
   },
 
   async sweep({ browser, open }) {
     const first = await boot(browser, open);
-    const errors = [first.consoleErrors];
     await emptyEngine(first.page, 48000);
     const jamA = await commitJam(first.page, 48000, 13);
     await saved(first.page, jamA, 'the 48 kHz jam');
     const second = await relaunch(browser, open, first, 44100);
-    errors.push(second.consoleErrors);
     await emptyEngine(second.page, 44100);
     const jamB = await commitJam(second.page, 44100, 14);
     await saved(second.page, jamB, 'the 44.1 kHz jam');
@@ -448,12 +432,10 @@ const cases = {
     assert.deepEqual(held, { latest: jamB, 'kept-48000': null }, 'the clear at 48 kHz deleted the jam kept there, not the 44.1 kHz one');
 
     const third = await relaunch(browser, open, second, 48000);
-    errors.push(third.consoleErrors);
     const back = await loaded(third.page);
     console.log('restored at 48 kHz', JSON.stringify(back));
     assert.equal(back, null, 'the cleared 48 kHz jam does not come back');
     await third.page.getByText('Loops kept in recovery').waitFor({ timeout: 5000 });
-    assert.deepEqual(errors.flat(), [], 'no console errors');
     await third.context.close();
   },
 
@@ -461,7 +443,7 @@ const cases = {
   fallback: ({ browser, open }) => clearAsTheDeviceMoves(browser, open, fallback(48000), 'with a 48 kHz fallback in its frame'),
 
   async confirm({ browser, open }) {
-    const { page, consoleErrors, context } = await boot(browser, open);
+    const { page, context } = await boot(browser, open);
     await emptyEngine(page, 48000);
     const jam = await commitJam(page, 48000, 5);
     const before = await saved(page, jam, 'the jam');
@@ -508,12 +490,11 @@ const cases = {
     await emptyEngine(page, 44100);
     await settle(page);
     assert.deepEqual((await slot(page, 'latest'))?.stems, before.stems, 'the switch kept the jam in recovery');
-    assert.deepEqual(consoleErrors, []);
     await context.close();
   },
 
   async 'first-take'({ browser, open }) {
-    const { page, consoleErrors, context } = await boot(browser, open);
+    const { page, context } = await boot(browser, open);
     await emptyEngine(page, 48000);
     await page.evaluate(() => window.__lf.autosave.ready());
     // A first take records on lane 1: nothing is committed, the snapshot is empty.
@@ -555,12 +536,11 @@ const cases = {
     await emptyEngine(page, 44100);
     await settle(page);
     assert.deepEqual((await slot(page, 'latest'))?.stems, take, 'the switch kept the take in recovery');
-    assert.deepEqual(consoleErrors, []);
     await context.close();
   },
 
   async failed({ browser, open }) {
-    const { page, consoleErrors, context } = await boot(browser, open);
+    const { page, consumeConsoleErrors, context } = await boot(browser, open);
     await emptyEngine(page, 48000);
     const jam = await commitJam(page, 48000, 17);
     const before = await saved(page, jam, 'the jam');
@@ -609,8 +589,9 @@ const cases = {
       assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem('lf.audioDevices')).bufferFrames), running, 'its picks are back');
     }
     assert.deepEqual(await slot(page, 'latest'), before, 'the jam stays in recovery');
-    const expected = consoleErrors.filter((e) => !e.includes('the recovery save before a rate change failed'));
-    assert.deepEqual(expected, [], 'no other console errors');
+    const failures = consumeConsoleErrors('the recovery save before a rate change failed');
+    console.log('failed saves logged', failures.length);
+    assert.equal(failures.length, others.length, 'each failed save reaches the release log');
     await context.close();
   },
 };

@@ -33,7 +33,7 @@ const DRIVERS = {
 };
 
 await probe(async ({ open }) => {
-  const { page } = await open({
+  const { page, consumeConsoleErrors } = await open({
     viewport: { width: 1280, height: 820 },
     init: async (p) => {
       await p.addInitScript(() => {
@@ -77,6 +77,7 @@ await probe(async ({ open }) => {
   assert.match(failed.rescan.title, /no audio device is open/);
   assert.equal(failed.engine, 'no device open: fake: Buffer size 64 is not in the supported range 512..=512');
   assert.ok(failed.toasts.some((t) => t.startsWith("Couldn't open the audio device: fake: Buffer size 64")), 'the open keeps its toast');
+  assert.equal(consumeConsoleErrors('[engine] device open failed Error: fake: Buffer size 64').length, 1, 'and its release-log line');
 
   // 2. An ASIO host appears (scripted): the probe, then the saved device opens on it.
   const running = await page.evaluate(async (drivers) => {
@@ -207,6 +208,7 @@ await probe(async ({ open }) => {
   const after = await readSettings();
   const toasts = await page.evaluate(() => window.__lf.notify.toasts().map((t) => t.message));
   assert.ok(toasts.includes("Couldn't switch the ASIO driver"), 'the refusal toasts');
+  assert.equal(consumeConsoleErrors('[engine] ASIO driver switch failed').length, 1, 'and logs');
   assert.equal(after.driver.value, 'Yamaha Steinberg USB ASIO');
   assert.equal(after.saved.asioDriver, 'Yamaha Steinberg USB ASIO');
   assert.deepEqual(after.buffer, { value: '512', options: [512] });
@@ -244,6 +246,7 @@ await probe(async ({ open }) => {
     'the device runs on the driver that ran, and the pick says so',
   );
   assert.ok(afterSave.toasts.includes('The device did not switch'), 'the failed save toasts');
+  assert.equal(consumeConsoleErrors('[engine] the recovery save before a rate change failed').length, 1, 'and logs');
   await page.evaluate(async () => {
     const { autosave } = await import('/src/session/autosave.ts');
     autosave.saveNow = window.__saveNow;

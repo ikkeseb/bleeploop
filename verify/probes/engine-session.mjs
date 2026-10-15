@@ -64,7 +64,7 @@ await probe(async ({ browser, open }) => {
         localStorage.setItem('lf.audioDevices', JSON.stringify({ shareDeviceId: 'probe-endpoint' }));
       }
     });
-  const { page, consoleErrors } = await open({ context, init });
+  const { page, consumeConsoleErrors } = await open({ context, init });
   let seq = 0;
   const emit = (frame) => page.evaluate((f) => window.__lf.native.emit(f), { seq: ++seq, reset: false, events: [], ...frame });
   await page.waitForFunction(() => window.__lf.native.opened.length === 1, undefined, { timeout: 5000 });
@@ -218,7 +218,7 @@ await probe(async ({ browser, open }) => {
   assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem('lf.audioDevices')).shareDeviceId), '');
 
   assert.equal(await page.evaluate(() => window.__audioContexts), 0, 'no AudioContext was built (the engine plays everything)');
-  const expected = ['[engine] share output lost: the Share output endpoint stopped'];
-  assert.deepEqual(consoleErrors, expected, 'no other console errors');
+  assert.deepEqual(consumeConsoleErrors('[engine] share output lost'), ['[engine] share output lost: the Share output endpoint stopped'],
+    'the lost Share output reaches the release log once');
   await context.close();
 });
