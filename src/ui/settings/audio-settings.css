@@ -8,7 +8,10 @@
   display: flex;
   flex-direction: column;
   gap: 9px;
-  min-width: 276px;
+  /* A set width, so the hints wrap instead of setting it: as shrink-to-fit, the Share hint's one line
+     sized the panel and, once it outgrew the window, pushed it to the window's left edge. 1080px is the
+     width that line gave it; a narrower window keeps the bar's side margin on both sides. */
+  width: min(1080px, calc(100vw - 2 * clamp(16px, 2vw, 28px)));
   padding: 15px;
   border-radius: 14px;
   /* near-opaque panel: the popover floats over the busy lanes, so it needs a solid backdrop to stay
